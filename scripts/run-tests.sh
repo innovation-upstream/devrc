@@ -1704,20 +1704,20 @@ EXPECTED_SKIPS=(
   # Opt-in drift check against the LIVE homelab store — needs a kubeconfig and
   # network, neither of which a hermetic gate may have. Skips everywhere unless
   # REPO_COS_LIVE_DRIFT_CHECK=1.
+  # 🔴 STAYS A LEDGER PIN, deliberately. Its predicate is a VALUE test
+  # (`REPO_COS_LIVE_DRIFT_CHECK == "1"`), not an is-set test, so it does NOT fit
+  # `requires-env[VAR]` below: exporting the variable as `0` leaves it non-empty
+  # while the test still skips, which the self-pinning check would report as a
+  # false collapse. The mechanism deliberately covers only the is-set shape; a
+  # value predicate keeps its entry here.
   "scripts/repo-cos/tests|live-store drift check is opt-in"
-  # Needs a REAL Postgres (SIGNAL_PG_DSN). Unlike the skill_audit case below —
-  # which was correctly fixed by re-pointing at tracked fixtures so it RUNS —
-  # this one cannot be made hermetic: the test exists because SQLite does not
-  # reproduce Postgres static type checking, which is the exact defect #657
-  # fixed (a COALESCE over uuid/text that had never worked on real Postgres).
-  # gateTools carries psycopg2 (the client) but no Postgres SERVER, so nothing
-  # in the hermetic tier can satisfy it.
-  # 🔴 CONSEQUENCE, stated so it is not a surprise: this test is opt-in only and
-  # never runs in the gate. The regression it guards is caught only when someone
-  # runs with SIGNAL_PG_DSN set. Pinning unbreaks main; it does not restore the
-  # coverage.
-  "scripts/signal/tests|needs a real Postgres"
 )
+# 🔴 The Postgres skip that made main RED on 2026-08-21 (#657, pinned by #687) is
+# NO LONGER LISTED HERE — it now self-pins via `requires-env[SIGNAL_PG_DSN]` in
+# scripts/signal/tests/test_pg_type_compat.py. That is the point of the mechanism:
+# the condition lives with the test, so it cannot go stale against this file.
+# Its coverage caveat is unchanged and still true — the test is opt-in and does
+# not run in the gate — but it is now stated where the test is, not here.
 # ⚠ REMOVED, deliberately — do not re-add. `scripts/tests/test_skill_audit.py`
 # carried two regression pins against the LIVE datapacket-talos skill corpus, a
 # separate PRIVATE clone that cannot exist in the nix sandbox and may be absent
@@ -2018,9 +2018,48 @@ else
   for line in "${SKIP_LINES[@]}"; do echo "    $line"; done
 fi
 
+# --- SELF-PINNING ENV SKIPS (`requires-env[VAR]`) ------------------------------
+# 🔴 WHY THIS EXISTS. `EXPECTED_SKIPS` is a hand-maintained list in THIS file; the
+# skip it pins is declared in some other suite's test file. Keeping the two in
+# step is prose discipline, and prose discipline has failed TWICE and left main
+# RED both times: #332 (2026-08-04 -> 08-06, two days) and #657 (2026-08-21), each
+# a PR that added an environment-dependent test without the distant ledger entry.
+# The header above already states the right rule -- "its condition must be the
+# SAME predicate the test itself uses" -- and could not enforce it. This does.
+#
+# A test whose skip reason begins `requires-env[VAR]:` carries its own condition,
+# so no ledger entry is needed and none can go stale. It is STRICTER than a pin,
+# not looser: a pinned skip is forgiven unconditionally, everywhere, forever;
+# this one is forgiven ONLY where the variable is genuinely absent, and is a hard
+# FAILURE when the variable IS set, because then the test could have run and did
+# not -- the exact coverage collapse GUARD 2 exists to catch, which an
+# unconditional pin cannot see.
+#
+# Contract (no import, so every suite can adopt it immediately):
+#   @pytest.mark.skipif(not os.environ.get("SIGNAL_PG_DSN"),
+#                       reason="requires-env[SIGNAL_PG_DSN]: <why it cannot run>")
+# The VAR named in the reason MUST be the one the condition tests -- a mismatch
+# is invisible here by construction, which is why `tests/test_requires_env.py`
+# pins the two together.
+env_pinned=0
+env_collapsed=()
+_env_skip_var() { printf '%s\n' "$1" | sed -nE 's/.*requires-env\[([A-Za-z_][A-Za-z0-9_]*)\].*/\1/p'; }
+
 unexpected=()
 for line in "${SKIP_LINES[@]}"; do
   matched=0
+  evar="$(_env_skip_var "$line")"
+  if [ -n "$evar" ]; then
+    # `${!evar-}` is the INDIRECT expansion — the value of the variable NAMED by
+    # $evar, empty when unset. Never `$evar`, which is the name itself and always
+    # non-empty, i.e. would score every declared skip as a collapse.
+    if [ -n "${!evar-}" ]; then
+      env_collapsed+=("$line")
+    else
+      env_pinned=$(( env_pinned + 1 ))
+    fi
+    continue
+  fi
   for entry in "${EXPECTED_SKIPS[@]}"; do
     edir="${entry%%|*}"
     ere="${entry#*|}"
@@ -2043,13 +2082,31 @@ if [ "${#unexpected[@]}" -gt 0 ]; then
   fail=1
 fi
 
-if [ "$TOT_SKIPPED" -ne "${#EXPECTED_SKIPS[@]}" ]; then
-  echo "  ERROR: $TOT_SKIPPED test(s) skipped, but ${#EXPECTED_SKIPS[@]} are pinned in EXPECTED_SKIPS." >&2
-  if [ "$TOT_SKIPPED" -lt "${#EXPECTED_SKIPS[@]}" ]; then
-    echo "         FEWER than pinned: a pinned skip now RUNS (good) — delete its" >&2
+# A `requires-env[VAR]` skip whose VAR is SET is a coverage collapse, not a pin:
+# the environment could run it and the test declined. Reported separately from
+# the unpinned set because the remedy is the opposite — there is nothing to add
+# to a ledger; the test or its condition is wrong.
+if [ "${#env_collapsed[@]}" -gt 0 ]; then
+  echo "  ERROR: ${#env_collapsed[@]} declared-env skip(s) SKIPPED WITH THE VARIABLE SET:" >&2
+  for line in "${env_collapsed[@]}"; do echo "         $line" >&2; done
+  echo "         The environment can run these and they did not. Either the" >&2
+  echo "         skipif condition disagrees with the VAR named in its reason," >&2
+  echo "         or the test needs more than the variable it declares." >&2
+  fail=1
+fi
+
+# The equality now spans BOTH pin mechanisms. `env_pinned` is counted from the
+# run itself rather than declared anywhere, so this stays a real cross-check:
+# a self-pinned skip that stops skipping still moves the total.
+expected_total=$(( ${#EXPECTED_SKIPS[@]} + env_pinned ))
+if [ "$TOT_SKIPPED" -ne "$expected_total" ]; then
+  echo "  ERROR: $TOT_SKIPPED test(s) skipped, but $expected_total are accounted for" >&2
+  echo "         (${#EXPECTED_SKIPS[@]} pinned in EXPECTED_SKIPS + $env_pinned self-pinned via requires-env[VAR])." >&2
+  if [ "$TOT_SKIPPED" -lt "$expected_total" ]; then
+    echo "         FEWER than accounted: a pinned skip now RUNS (good) — delete its" >&2
     echo "         EXPECTED_SKIPS entry so the pin keeps meaning something." >&2
   else
-    echo "         MORE than pinned: tests stopped running. See the skip list above." >&2
+    echo "         MORE than accounted: tests stopped running. See the skip list above." >&2
   fi
   fail=1
 fi

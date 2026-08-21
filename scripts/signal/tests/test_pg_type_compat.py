@@ -88,9 +88,13 @@ def test_the_extractor_finds_the_real_query():
         f"more tightly. Got: {sql[:200]!r}")
 
 
+# SELF-PINNING (`requires-env[VAR]`, see scripts/run-tests.sh GUARD 2): the reason
+# carries the variable the condition tests, so run-tests.sh forgives this skip
+# where SIGNAL_PG_DSN is absent and FAILS if it skips while the DSN is set. No
+# EXPECTED_SKIPS entry — that ledger lives in another file and went stale twice.
 @pytest.mark.skipif(not os.environ.get("SIGNAL_PG_DSN"),
-                    reason="needs a real Postgres (SIGNAL_PG_DSN); SQLite cannot "
-                           "reproduce Postgres static type checking")
+                    reason="requires-env[SIGNAL_PG_DSN]: needs a real Postgres; "
+                           "SQLite cannot reproduce Postgres static type checking")
 def test_draft_query_runs_on_real_postgres():
     """The actual `_draft_or_raise` SQL — read from source — must plan on a real
     server.
