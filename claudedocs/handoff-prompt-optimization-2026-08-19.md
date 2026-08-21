@@ -126,14 +126,24 @@ fast-forwarded and switched both hosts.
   slot), #654 (doc correction), #664 (/proc race).
 - Both hosts were converged and verified at `2ae0d081` by `scripts/ship.sh` at
   18:47 — 499/460 managed artifacts, 0 dangling, 0 stale.
-- 🔴 **The workbench base clone has since been broken by an unrelated process —
-  see "Open investigations". `ship.sh` cannot run there until it is fixed.**
+- ⚠ The workbench base clone was briefly broken by an unrelated process
+  (`core.bare=true` + an un-pushed 947-file `seed` commit on `main`). **RESOLVED
+  by someone else while this handoff was being written** — see "Open
+  investigations" for the full diagnosis, kept because the failure mode recurs.
 - The browser validation contract is **verified by real use**, not just by its
   own tests: two live `browser agent` runs, ops read from `tool-audit.jsonl`.
 
 ## Open investigations — live diagnosis state
 
-### `~/workspace/devrc` base clone is `core.bare=true` with an un-pushed 947-file deletion on `main`
+### RESOLVED 2026-08-21 — base clone was `core.bare=true` with an un-pushed 947-file deletion on `main`
+
+🔴 **Already fixed — do NOT run the remedy below.** Re-verified at the moment of acting
+(`claude/RULES.md`: a fact measured an hour ago is a hypothesis about now): `core.bare`
+read EMPTY and `main` was already 0 ahead of `origin/main`. The reflog is the arbiter —
+`main@{2}: commit: seed` then a move back to `fc83693e` then `merge origin/main:
+Fast-forward` to `9667fb8b`. Someone else resolved it in the interim. The commit remains
+reachable as `preserve/seed-4b31471c-2026-08-21`. Kept in full because the SHAPE recurs
+and the diagnosis is the reusable part.
 
 - **Symptom + exact repro:** `git -C ~/workspace/devrc status -sb` →
   `fatal: this operation must be run in a work tree`, while `git -C … log`
