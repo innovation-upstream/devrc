@@ -18,7 +18,7 @@ explicit confirm, diff first … on decline, discard"). The gap was underneath:
 the handoff DOC's own write+push carried no equivalent gate, and a session
 running after a resume inherited no constraint at all.
 
-FIVE RULES, and this module is what makes four of them structural rather than
+SEVEN RULES, and this module is what makes six of them structural rather than
 prose an agent can read and then not follow:
 
 a. UPDATING IS NOT FORBIDDEN. The incident's update was correct and valuable;
@@ -70,6 +70,37 @@ e. A LOCAL COMMIT IS NOT A CHEAP LOCAL STATE, AND MUST NOT BE SILENT. `--confirm
    that it was unpushed. So that path now states the fact — without the alarm,
    because it is information, not a refusal. See `not_pushed_report`.
 
+f. A REPLACE THAT DROPS A DURABLE LINE SAYS SO — AND STILL DOES IT. Rule (c)'s
+   allowlist is three prefixes wide, so every OTHER heading replaces, "State
+   now" included — the heading an updating session is usually already editing.
+   Durable content written there is deleted on the next update, and the loss is
+   NOT the gap: the diff below already shows it. The gap is CLASSIFICATION. In a
+   large doc's diff a `-` line that is stale status and a `-` line that is a
+   measured finding look identical, so the reader must hand-classify every
+   deletion on every update — and a session that did exactly that caught a
+   completed arc, a survey's negative result and a closure on two CONSECUTIVE
+   updates, then recorded a prose gotcha about it. This is the structural form
+   of that gotcha: BEFORE the diff, every dropped line that looks durable is
+   named, with its base line number and why it was flagged.
+
+   🔴 IT WARNS AND NEVER REFUSES. No exit code, no block, no new failure path —
+   replacing genuinely stale status is the ORDINARY case, and a warning that
+   could stop the write would become a permanently-red gate everyone learns to
+   click through. For the same reason it must be SILENT on ordinary churn:
+   measured over the 44 real handoff docs in this repo, the predicate flags
+   58 of the 2,626 lines sitting under REPLACE headings (2.2%), so a typical
+   status replace prints nothing at all.
+
+   The "looks durable" question is answered in ONE place, `durable_reason`, and
+   its openness half is NOT re-implemented here — it is `subsystem_resolver`'s
+   `OPEN:` / `RESOLVED <sha>:` / near-miss vocabulary, imported. See there.
+
+g. A RUN STATES WHICH BUCKET EACH SECTION LANDED IN. Rule (c) lived only in this
+   docstring and in step 5 of the skill — neither of which is in front of an
+   author at the moment they choose a heading. So every run that prints a diff
+   also prints one line naming the bucket each touched section fell into, which
+   is the fact rule (f)'s warning is downstream of.
+
 EXIT CODES
   0  proposed (diff shown, nothing written) — or written/pushed under --confirm.
      `written` WITHOUT `--push` also reports the branch and that it is not pushed
@@ -88,6 +119,22 @@ import subprocess
 import sys
 import typing
 from pathlib import Path
+
+# 🔴 ONE RULE, ONE PLACE — rule (f)'s openness half. `subsystem_resolver` owns
+# the `OPEN:` / `RESOLVED <sha>:` grammar, the near-miss detector and the narrow
+# unmarked-action floor, each with a measured matrix behind it and a
+# `openness_population` property that is explicitly "the single source of the
+# precedence order". A second regex here would regenerate that module's bugs at
+# a second site and disagree with `subsystem_touch --validate` about the same
+# line. So it is imported, and `test_handoff_doc.py` pins that the two call
+# sites give the SAME verdict rather than trusting the import to stay one.
+#
+# Same `sys.path` idiom as `subsystem_recall` / `subsystem_touch`: these modules
+# are run as scripts and loaded by path in the tests, so there is no package to
+# import them relative to. Stdlib-only over there, so this costs a parse.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from subsystem_resolver import parse_journal_bullets  # noqa: E402
 
 EXIT_OK = 0
 EXIT_USAGE = 2
@@ -148,6 +195,123 @@ NO_ADVANCE_SENTINELS: frozenset[str] = frozenset(
 
 _H2 = re.compile(r"^##\s+\S")
 _FENCE = re.compile(r"^(`{3,}|~{3,})")
+
+# --- rule (f): does this line look DURABLE? -----------------------------------
+#
+# 🔴 A FLOOR, NOT A CLASSIFIER, and every renderer of it says "look(s) DURABLE"
+# rather than "is". Recall is unknown and unknowable — a durable finding can be
+# written in plain prose that no predicate can separate from status — so a
+# SILENT run is never evidence that a replace dropped nothing worth keeping. The
+# claim it makes is the narrow one: these lines carry a marker that ordinary
+# status churn does not.
+#
+# THREE SIGNALS, tried in that order. The first is imported (see the top of the
+# file); the other two exist because that vocabulary alone has almost no reach
+# over this corpus. MEASURED 2026-08-20 over the 44 real
+# `claudedocs/handoff-*.md` in this repo — 2,626 non-blank, non-fenced lines
+# sitting under REPLACE-bucket headings, counted with THIS function's precedence
+# (so a line carrying two signals is counted once, under the first):
+#
+#     openness (imported)      6 lines   0.23%
+#     dated claim             46 lines   1.75%
+#     evidence verb            6 lines   0.23%
+#     ---------------------------------------
+#     flagged                 58 lines   2.21%
+#
+# 🔴 SO THE IMPORTED SCHEMA FIRES ON 6 LINES IN 44 DOCUMENTS, and never once
+# through its own `OPEN:` / `RESOLVED <sha>:` markers — all six come from its
+# narrow unmarked-action floor. That grammar is the subsystem STORE's journal
+# convention, which handoff authors do not write. Importing it is still right (a
+# line that DOES declare `OPEN:` under "State now" is durable, and the question
+# must not be answered in two places), but shipping it ALONE would have been a
+# guard reading as coverage while providing almost none.
+#
+# Sensitivity is the design constraint, not an afterthought: at ~2% of lines a
+# typical "State now" replace of a dozen lines prints nothing. Per SECTION the
+# worst case is 38 of 230 (17%) — worst because that assumes a replace carrying
+# NOTHING forward; a real update that keeps a flagged line verbatim clears it.
+# Widening is not free — see the rejected signals below.
+
+# (i) A DATE THE LINE ASSERTS, not one that happens to sit inside a filename.
+# Handoff docs cite each other constantly (`handoff-browser-bridge-2026-08-01.md`,
+# `apply-nebula-443.sh.LOCAL-preserved-2026-08-02`, `…-eval-2026-07-24.md`), and
+# that reference is not a claim about anything. TWO independent nets, each
+# measured ALONE over the 67 raw date-bearing lines of the corpus, because they
+# overlap almost completely and either one on its own would look unnecessary:
+#
+#     code-span strip alone     suppresses 21/67
+#     leading boundary alone    suppresses 20/67
+#     both (shipped)            suppresses 21/67, leaving 46
+#
+# 🔴 THE BOUNDARY IS LEADING-ONLY, AND A SYMMETRIC ONE WAS MEASURED WRONG. The
+# first draft used `(?![\w/.-])` on the trailing side too, by symmetry rather
+# than by measurement, and it silently ate four GENUINELY durable lines in the
+# corpus — `**DONE 2026-08-20.**` (a `.`), `2026-08-19/20` (a `/`) and
+# `merged 2026-08-18T23:28:31Z` (a `\w`) — while suppressing nothing the leading
+# half had not already caught. A date's LEFT neighbour is what says it was
+# welded into a path token; its right neighbour is ordinary sentence punctuation.
+_CODE_SPAN = re.compile(r"`[^`]*`")
+_BARE_ISO_DATE = re.compile(r"(?<![\w/.-])\d{4}-\d{2}-\d{2}")
+
+# (ii) The evidence vocabulary — SHOUTED, and deliberately short.
+#
+# 🔴 `claude/RULES.md`: "a guard on WORDS is walkable by REWORDING". True, and
+# accepted here on purpose: this is an ADVISORY that costs a line of output when
+# it is wrong and blocks nothing when it is missed, exactly the shape
+# `subsystem_resolver._UNMARKED_ACTION` already documents as "a FLOOR, never a
+# list". The structural half of rule (f) is the bucket a heading falls in, which
+# no rewording touches.
+#
+# All-caps is load-bearing, not decoration. `decided`, `measured` and `ruled
+# out` are ordinary English that turns up in ordinary status prose: over the
+# same 2,626 lines this list matched CASE-INSENSITIVELY hits 58 (2.2%) against
+# 6 (0.23%) shouted — a 10x widening of the single noisiest axis, on top of the
+# dated-claim signal it would mostly duplicate. Two more REJECTED, each measured
+# there too:
+#
+#   VERIFIED / CLOSED / CONFIRMED   15 lines (0.6%) — ordinary status vocabulary
+#       ("Deploy/verify status: …"), and the genuinely durable ones carry a date
+#       anyway, so they cost precision and buy no recall.
+#   negative-result phrasing        99 lines (3.8%) — `does not`, `did not`,
+#       `never`, `no evidence`, `turned out`. Alone it is larger than the whole
+#       shipped predicate: a block on nearly every run, which is the failure
+#       mode rule (f) exists to avoid rather than a wider net.
+_EVIDENCE_VERB = re.compile(
+    r"(?:^|[^A-Za-z])"
+    r"(MEASURED|RETRACTED|SUPERSEDED|SUPERSEDES|DISPROVED|RULED OUT|WONTFIX"
+    r"|CORRECTION|DECIDED)"
+    r"(?![a-z])"
+)
+
+DURABLE_DATED = "dated claim"
+DURABLE_EVIDENCE = "evidence verb"
+
+
+def durable_reason(line: str) -> str | None:
+    """Why this ONE line looks durable, as a short reason, or None.
+
+    The single home of rule (f)'s question. Consumers branch on truthiness and
+    PRINT the reason, so a new signal becomes visible in the output rather than
+    silently widening a boolean nobody can attribute.
+
+    The openness reason is spelled `openness/<population>` and comes verbatim
+    from `subsystem_resolver`, which is what makes the two call sites' agreement
+    testable: anything that module calls other than `none` is durable here, so a
+    population added upstream is durable by default. That direction is
+    deliberate — a new population is a new kind of declared claim, and the
+    fail-safe for a warning that cannot refuse is to say more, not less.
+    """
+    bullets = parse_journal_bullets(line)
+    if bullets:
+        population = bullets[0].openness_population
+        if population != "none":
+            return f"openness/{population}"
+    prose = _CODE_SPAN.sub(" ", line)
+    if _BARE_ISO_DATE.search(prose):
+        return DURABLE_DATED
+    if _EVIDENCE_VERB.search(prose):
+        return DURABLE_EVIDENCE
+    return None
 
 
 def _fence_token(line: str) -> str | None:
@@ -211,8 +375,45 @@ def _norm_heading(heading_line: str) -> str:
     return " ".join(heading_text(heading_line).lower().split())
 
 
+BUCKET_APPEND = "APPEND"
+BUCKET_REPLACE = "REPLACE"
+BUCKET_NEW = "NEW"
+
+
+class DroppedDurable(typing.NamedTuple):
+    """One base line a REPLACE deletes that `durable_reason` flagged."""
+
+    heading: str
+    """The BASE heading's text — the one the line was written under."""
+    line_no: int
+    """1-based line number in the BASE doc, so it can be opened and moved."""
+    line: str
+    """The line, verbatim apart from trailing whitespace."""
+    reason: str
+
+
+class MergeReport(typing.NamedTuple):
+    text: str
+    dropped: tuple[DroppedDurable, ...]
+    buckets: tuple[tuple[str, str], ...]
+    """`(heading text, BUCKET_*)` for each section the update touched, in the
+    update's own order — rule (g)."""
+
+
 def merge(base_text: str, update_text: str) -> str:
-    """Rule (c): replace current-state sections, APPEND diagnosis-state ones.
+    """Rule (c): replace current-state sections, APPEND diagnosis-state ones."""
+    return merge_report(base_text, update_text).text
+
+
+def merge_report(base_text: str, update_text: str) -> MergeReport:
+    """`merge()`, plus what rules (f) and (g) need to say about it.
+
+    🔴 ONE MATCHER. The dropped-line classification and the bucket line are
+    computed HERE, inside the loop that decides each section's fate, rather than
+    by a second pass that re-derives which section matched which. A second pass
+    would be free to disagree with this one — and the disagreement would render
+    as a warning naming a section the merge did not touch, or silence about one
+    it did.
 
     A section present in the base and absent from the update is left ALONE —
     an update is a delta, not a replacement document, so omitting a section
@@ -232,21 +433,110 @@ def merge(base_text: str, update_text: str) -> str:
             by_bucket.setdefault(bucket, i)
         by_heading.setdefault(_norm_heading(h), i)
 
+    body_starts = _body_start_lines(base_pre, base_secs)
+    dropped: list[DroppedDurable] = []
+    buckets: list[tuple[str, str]] = []
+
     tail: list[list[str]] = []
     for h, b in upd_secs:
         bucket = append_bucket(h)
         if bucket is not None and bucket in by_bucket:
             i = by_bucket[bucket]
             out[i][1] = _append_body(out[i][1], b)
+            buckets.append((heading_text(out[i][0]), BUCKET_APPEND))
         elif bucket is None and _norm_heading(h) in by_heading:
             i = by_heading[_norm_heading(h)]
+            # 🔴 Classified BEFORE the body is overwritten — `out[i][1]` is the
+            # outgoing text only until the next statement runs.
+            dropped.extend(
+                _durable_dropped(
+                    heading_text(out[i][0]), out[i][1], b, body_starts[i]
+                )
+            )
             out[i][0] = h
             out[i][1] = _replace_body(out[i][1], b)
+            buckets.append((heading_text(h), BUCKET_REPLACE))
         else:
             tail.append([h, b])
+            buckets.append((heading_text(h), BUCKET_NEW))
 
     rendered = out_pre + "".join(h + b for h, b in out + tail)
-    return rendered.rstrip("\n") + "\n"
+    return MergeReport(
+        text=rendered.rstrip("\n") + "\n",
+        dropped=tuple(dropped),
+        buckets=tuple(buckets),
+    )
+
+
+def _body_start_lines(pre: str, sections: list[list[str]]) -> list[int]:
+    """1-based line number of each section BODY's first line in the base doc.
+
+    Derived from the same lossless split the merge walks, so a line number can
+    never name a line from a different section: `split_sections` guarantees
+    `pre + "".join(h + b)` reproduces the document byte-for-byte, which makes
+    counting newlines an exact address rather than an estimate.
+    """
+    starts: list[int] = []
+    cur = pre.count("\n") + 1  # the first heading's own line number
+    for _h, b in sections:
+        starts.append(cur + 1)
+        cur = cur + 1 + b.count("\n")
+    return starts
+
+
+def _unfenced(body: str) -> typing.Iterator[tuple[int, str]]:
+    """`(0-based index within body, line)` for lines OUTSIDE code fences.
+
+    Fence lines and their contents are skipped: a sample command or a pasted log
+    inside a fence routinely carries a date, and 610 of the corpus's
+    REPLACE-bucket lines sit inside one. Flagging those would put the block in
+    front of a reader on runs where nothing durable moved at all.
+    """
+    open_tok: str | None = None
+    for idx, line in enumerate(body.splitlines()):
+        tok = _fence_token(line)
+        if open_tok is None:
+            if tok:
+                open_tok = tok
+                continue
+            yield idx, line
+        elif (
+            tok
+            and tok[0] == open_tok[0]
+            and len(tok) >= len(open_tok)
+            and line.strip() == tok
+        ):
+            open_tok = None
+
+
+def _norm_line(line: str) -> str:
+    """Whitespace-collapsed, for the carried-forward comparison only."""
+    return " ".join(line.split())
+
+
+def _durable_dropped(
+    heading: str, old_body: str, new_body: str, first_line_no: int
+) -> list[DroppedDurable]:
+    """The durable-looking lines this replace deletes and does not carry forward.
+
+    🔴 CARRIED FORWARD IS AN EXACT (whitespace-collapsed) LINE MATCH, and the
+    looseness is deliberately in the LOUD direction: a durable line the author
+    reworded while carrying it counts as dropped and gets named. That is a line
+    of output on a line the author is already looking at. The other direction —
+    treating a near-match as carried — would silence the exact case this rule
+    exists for, since a status rewrite of a section naturally reuses much of its
+    wording.
+    """
+    carried = {_norm_line(ln) for ln in new_body.splitlines() if ln.strip()}
+    out: list[DroppedDurable] = []
+    for idx, line in _unfenced(old_body):
+        if not line.strip():
+            continue
+        reason = durable_reason(line)
+        if reason is None or _norm_line(line) in carried:
+            continue
+        out.append(DroppedDurable(heading, first_line_no + idx, line.rstrip(), reason))
+    return out
 
 
 def _spacing(body: str) -> str:
@@ -298,6 +588,60 @@ def unified(base_text: str, merged_text: str, relpath: str) -> str:
             n=3,
         )
     )
+
+
+# Rule (f), bounded. A doc can drop many lines and the block is printed ABOVE
+# the diff, where an unbounded list would push the thing it is annotating off
+# the top of the screen. Six is enough to see the shape; the count that follows
+# is what stops "…" from reading as "and nothing else worth mentioning".
+DROPPED_SHOWN_MAX = 6
+DROPPED_LINE_MAX = 140
+
+DROPPED_REMEDY = (
+    "  Move them under an APPEND heading (open investigations / findings / "
+    "gotchas) or carry them forward in this update.\n"
+    "  This is a WARNING, not a refusal — replacing stale status is the "
+    "ordinary case and nothing here blocks it. It is a FLOOR, so a silent run "
+    "is not evidence that nothing durable was dropped."
+)
+
+
+def buckets_line(buckets: typing.Sequence[tuple[str, str]]) -> str:
+    """Rule (g): which sections replaced, which appended, this run — one line."""
+    if not buckets:
+        return "buckets: (this update touched no section)"
+    shown = " · ".join(f"{_clip(h, 44)} → {bucket}" for h, bucket in buckets)
+    return f"buckets: {shown}"
+
+
+def dropped_durable_report(dropped: typing.Sequence[DroppedDurable]) -> str:
+    """Rule (f)'s block, or "" when nothing was flagged.
+
+    Empty on the ordinary run BY DESIGN — the caller prints nothing rather than
+    a reassuring "0 durable lines dropped", which would be a line on every run
+    saying the same thing and would be read as a guarantee the predicate cannot
+    make (see `durable_reason`: recall is unknown).
+    """
+    if not dropped:
+        return ""
+    head = (
+        f"🔴 This replace DROPS {len(dropped)} line(s) that look DURABLE "
+        f"(they sit under a REPLACE heading):"
+    )
+    rows = [
+        f"  {_clip(d.heading, 44)}:{d.line_no}: "
+        f"{_clip(d.line.strip(), DROPPED_LINE_MAX)}  [{d.reason}]"
+        for d in dropped[:DROPPED_SHOWN_MAX]
+    ]
+    elided = len(dropped) - len(rows)
+    if elided:
+        rows.append(f"  … and {elided} more not shown (read the diff below).")
+    return "\n".join([head, *rows, DROPPED_REMEDY])
+
+
+def _clip(text: str, limit: int) -> str:
+    text = " ".join(text.split())
+    return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
 def advance_is_real(advanced: str | None) -> bool:
@@ -638,9 +982,14 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_FAIL
 
     base_text = doc.read_text(encoding="utf-8") if doc.exists() else ""
-    merged_text = merge(base_text, update_text) if base_text else (
-        update_text.rstrip("\n") + "\n"
-    )
+    if base_text:
+        report = merge_report(base_text, update_text)
+    else:
+        # No base: the update simply becomes the doc. Nothing was replaced, so
+        # rule (f) has nothing to classify and rule (g) has no bucket to state —
+        # an empty report is the honest answer, not a missing one.
+        report = MergeReport(update_text.rstrip("\n") + "\n", (), ())
+    merged_text = report.text
 
     if _canon(merged_text) == _canon(base_text):
         print(
@@ -654,6 +1003,16 @@ def main(argv: list[str] | None = None) -> int:
     diff = unified(base_text, merged_text, relpath)
     print(f"doc: {relpath}")
     print(f"advanced: {args.advanced.strip()}")
+    # 🔴 BOTH BEFORE THE DIFF, and on the SAME stream. The diff is what the human
+    # is being asked to approve, so the classification of what it deletes has to
+    # arrive before it, not after several hundred lines of it. Neither line
+    # carries a `status=` token: `status=` is the machine-readable verdict and
+    # the skill's contract pins one per run.
+    if base_text:
+        print(buckets_line(report.buckets))
+    warning = dropped_durable_report(report.dropped)
+    if warning:
+        print(warning)
     print(diff, end="" if diff.endswith("\n") else "\n")
 
     if not args.confirm:

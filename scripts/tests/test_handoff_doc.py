@@ -604,6 +604,601 @@ class TestNoChangeIsNotAnEmptyCommit:
 
 
 # --------------------------------------------------------------------------
+# rule (f) — a REPLACE that drops durable-looking content says so, and still
+#            does it; and rule (g) — every run states the buckets
+# --------------------------------------------------------------------------
+#
+# 🔴 THE FIELD TRAP, REPRODUCED. A session hit this on two CONSECUTIVE handoff
+# updates: a completed arc, a survey's negative result and a closure were each
+# about to be deleted for sitting under "State now", which is a REPLACE heading.
+# It caught them by hand-reading the diff and then wrote a prose gotcha — which
+# is a prompt-tuning patch for something structural, hence rule (f).
+#
+# 🔴 THE THREE FIXTURE LINES CARRY EXACTLY ONE SIGNAL EACH, and that is a
+# MUTATION-ISOLATION requirement, not tidiness. A line reading
+# `- 🔴 MEASURED 2026-08-14 — …` carries BOTH a date and an evidence verb, so a
+# mutant that breaks the date regex is still caught by the verb branch and is
+# scored SURVIVED while the guard it targets is genuinely dead. Each line below
+# is therefore orthogonal, and `TestTheDurableSignalsAreEachReachable` pins that
+# orthogonality so a later edit cannot quietly reintroduce the overlap.
+DURABLE_DATED_LINE = (
+    "- 🔴 2026-08-14 — the coverage sweep's ledger exempts generated files, so "
+    "nothing will catch a regression in them."
+)
+DURABLE_VERB_LINE = (
+    "- RETRACTED — the capture survey came back empty: 0 of 48 captures showed "
+    "the banner, so the earlier sighting was a local cache."
+)
+DURABLE_OPEN_LINE = (
+    "- OPEN: the coverage sweep still exempts generated files."
+)
+
+# The base doc's "State now" carries all three, exactly as the field case did.
+DURABLE_BASE_DOC = f"""# Handoff: drop-topic — 2026-08-14
+
+## Goal
+Stop the coverage sweep from exempting generated files.
+
+## State now
+- Branch / PR: `feat/coverage-sweep` / none
+{DURABLE_DATED_LINE}
+{DURABLE_VERB_LINE}
+{DURABLE_OPEN_LINE}
+- Deploy/verify status: NOT deployed
+
+## Findings
+### the ledger is built from the wrong glob
+- **Observed (with values):** 0 generated paths in a ledger of 311 entries.
+- **Ruled out:** a stale manifest — re-derived it on 2026-08-13 and it matched.
+
+## Next steps (ranked)
+1. Re-derive the ledger from the build manifest.
+"""
+
+# …and the update rewrites the status without carrying any of them forward.
+DURABLE_UPDATE_DOC = """## State now
+- Branch / PR: `feat/coverage-sweep` / #412
+- Deploy/verify status: deployed, verified against the real path
+"""
+
+# Ordinary status churn: pairwise-distinct wording, no durable signal anywhere.
+# The dates here are the shape the predicate must NOT fire on — welded into a
+# path token, and inside a code span besides.
+CHURN_BASE_DOC = """# Handoff: churn-topic
+
+## State now
+- Branch / PR: `feat/churn` / none
+- What's DONE this session: the probe harness landed
+- Design spec: `claudedocs/churn-design-2026-08-02.md`
+- Deploy/verify status: NOT deployed
+"""
+CHURN_UPDATE_DOC = """## State now
+- Branch / PR: `feat/churn` / #77
+- What's DONE this session: the probe harness is wired to the runner
+- Design spec: `claudedocs/churn-design-2026-08-02.md`
+- Deploy/verify status: deployed
+"""
+
+WARNING_HEAD = "line(s) that look DURABLE"
+
+
+@pytest.fixture()
+def durable_repo(repo: Path) -> Path:
+    """`repo`, with the handoff doc replaced by the field-trap base."""
+    (repo / "claudedocs" / "handoff-sample-topic.md").write_text(
+        DURABLE_BASE_DOC, encoding="utf-8"
+    )
+    _sh("git", "add", "--", "claudedocs/handoff-sample-topic.md", cwd=repo)
+    _sh("git", "commit", "-q", "-m", "seed durable", cwd=repo)
+    return repo
+
+
+def write_update(tmp_path: Path, text: str, name: str = "durable-update.md") -> Path:
+    p = tmp_path / name
+    p.write_text(text, encoding="utf-8")
+    return p
+
+
+def warning_block(stdout: str) -> str:
+    """The rule (f) block only — from its headline to the line before the diff."""
+    if WARNING_HEAD not in stdout:
+        return ""
+    start = stdout.index("🔴 This replace DROPS")
+    rest = stdout[start:]
+    cut = rest.find("--- a/")
+    return rest if cut < 0 else rest[:cut]
+
+
+# 🔴 THE RED-AT-BASE MATRIX, and the honest split inside it. This whole file was
+# run against `d12f84c8` — the commit before rules (f) and (g) existed — by
+# extracting that revision's `handoff_doc.py` and `SKILL.md` into a scratch tree
+# and pointing this exact test file at them. Result: **28 failed, 97 passed at
+# d12f84c8; 126 passed at HEAD.**
+#
+# ⚠ EIGHT OF THE NEW TESTS PASS AT BASE, and they are NOT regression coverage —
+# they pin an invariant the bug never violated, and saying so is the difference
+# between coverage and the appearance of it:
+#
+#   the three SILENCE / exemption tests   base never warns at all, so their
+#   (churn, default fixture, carried-      green there is vacuous. They are
+#    forward, APPEND-exempt)               proven LIVE at HEAD by the mutation
+#                                          battery instead — `verb-list-widened-
+#                                          with-DONE` and `append-branch-also-
+#                                          classified` each kill one.
+#   the three EXIT-CODE invariants        4, 5 and the constants must not move;
+#                                          that they held before is the point.
+#   `test_the_module_spells_no_openness_   base has no openness regex either.
+#    grammar_of_its_own`                   It guards the FUTURE, not the past.
+#
+# MUTATION BATTERY (run under `PYTHONDONTWRITEBYTECODE=1`, the module restored
+# from a byte-copy and re-hashed after every mutant): **17 mutants, 17 killed by
+# the specifically expected test**, one no-op mutant kept as a negative control
+# and SURVIVED. Two rounds were needed — the first scored `POSITIVE-CONTROL-
+# bucket-label` and `code-span-strip-removed` as SURVIVED, and both were real
+# holes in these assertions rather than in the code (a substring `in` that a
+# longer label walks past, and a fixture both suppression nets could catch).
+
+
+class TestAReplaceThatDropsDurableContentSaysSo:
+    """The field trap, and both directions of the guard it produced."""
+
+    def test_the_field_trap_is_named(
+        self, durable_repo: Path, tmp_path: Path
+    ) -> None:
+        """The whole point: three durable lines are about to be deleted for
+        sitting under a REPLACE heading, and the run says which ones."""
+        upd = write_update(tmp_path, DURABLE_UPDATE_DOC)
+        res = run_tool(durable_repo, update=upd)
+        assert res.returncode == hd.EXIT_OK, res.stderr
+        block = warning_block(res.stdout)
+        assert block, f"no durable-drop warning was printed:\n{res.stdout}"
+        # 🔴 The whole normalised headline, not a keyword — a reworded headline
+        # is an output change a `in` assertion walks straight past.
+        assert block.splitlines()[0] == (
+            "🔴 This replace DROPS 3 line(s) that look DURABLE "
+            "(they sit under a REPLACE heading):"
+        ), block
+        for fragment in (
+            "the coverage sweep's ledger exempts generated files",
+            "the capture survey came back empty",
+            "the coverage sweep still exempts generated files",
+        ):
+            assert fragment in block, f"{fragment!r} was not named:\n{block}"
+
+    def test_it_names_the_heading_and_a_usable_base_line_number(
+        self, durable_repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 The address must resolve. A line number computed off the MERGED
+        doc, or off the section body rather than the file, would still print a
+        plausible integer — so this opens the base doc at every number it
+        printed and checks the line is the one that was flagged."""
+        upd = write_update(tmp_path, DURABLE_UPDATE_DOC)
+        res = run_tool(durable_repo, update=upd)
+        base_lines = DURABLE_BASE_DOC.splitlines()
+        found = re.findall(r"^  (.+?):(\d+): (.*?)  \[", warning_block(res.stdout),
+                           re.M)
+        assert len(found) == 3, res.stdout
+        for heading, line_no, quoted in found:
+            assert heading == "State now", heading
+            assert base_lines[int(line_no) - 1].strip().startswith(quoted[:40])
+
+    def test_the_warning_comes_BEFORE_the_diff(
+        self, durable_repo: Path, tmp_path: Path
+    ) -> None:
+        """It annotates the diff, so it must arrive before it — after several
+        hundred lines of hunks it is a footnote nobody reaches."""
+        upd = write_update(tmp_path, DURABLE_UPDATE_DOC)
+        out = run_tool(durable_repo, update=upd).stdout
+        assert out.index(WARNING_HEAD) < out.index("--- a/claudedocs/")
+
+    def test_it_WARNS_and_never_refuses(
+        self, durable_repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 The direction that makes this survivable. A gate that can block
+        the ordinary case is a permanently-red gate everyone clicks through: the
+        write must still land, exit 0, one commit, with the warning shown."""
+        upd = write_update(tmp_path, DURABLE_UPDATE_DOC)
+        before = commit_shas(durable_repo)
+        res = run_tool(durable_repo, "--confirm", update=upd)
+        assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
+        assert WARNING_HEAD in res.stdout
+        assert "status=written commit=" in res.stdout
+        assert len(commit_shas(durable_repo)) == len(before) + 1
+        after = (durable_repo / "claudedocs" / "handoff-sample-topic.md").read_text(
+            encoding="utf-8"
+        )
+        assert "Deploy/verify status: deployed" in after
+        assert DURABLE_DATED_LINE not in after, (
+            "the replace was BLOCKED. Rule (f) warns and never refuses — "
+            "replacing stale status is the ordinary case."
+        )
+
+    def test_ordinary_status_churn_is_SILENT(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 The other direction, and the failure mode being fixed. A warning
+        that fires on every run is noise, and noise is what gets ignored."""
+        (repo / "claudedocs" / "handoff-sample-topic.md").write_text(
+            CHURN_BASE_DOC, encoding="utf-8"
+        )
+        upd = write_update(tmp_path, CHURN_UPDATE_DOC, "churn.md")
+        res = run_tool(repo, update=upd)
+        assert res.returncode == hd.EXIT_OK, res.stderr
+        assert diff_body(res.stdout), "nothing changed — the silence is vacuous"
+        assert WARNING_HEAD not in res.stdout, (
+            "ordinary status churn produced a durable-drop warning:\n" + res.stdout
+        )
+
+    def test_the_suites_own_default_fixture_is_SILENT_too(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """A second, independent silence sample: the doc every other test in
+        this file runs against. One hand-built quiet fixture could be quiet by
+        construction; this one was written years of tests ago for other reasons."""
+        res = run_tool(repo, update=update_file)
+        assert WARNING_HEAD not in res.stdout, res.stdout
+
+    def test_a_durable_line_CARRIED_FORWARD_is_not_named(
+        self, durable_repo: Path, tmp_path: Path
+    ) -> None:
+        """Moving the line forward is one of the two remedies the block names,
+        so taking it must clear the warning for that line — otherwise the
+        remedy does not work and the block fires forever."""
+        upd = write_update(
+            tmp_path,
+            "## State now\n"
+            "- Branch / PR: `feat/coverage-sweep` / #412\n"
+            f"{DURABLE_DATED_LINE}\n"
+            f"{DURABLE_VERB_LINE}\n"
+            f"{DURABLE_OPEN_LINE}\n"
+            "- Deploy/verify status: deployed\n",
+        )
+        res = run_tool(durable_repo, update=upd)
+        assert res.returncode == hd.EXIT_OK, res.stderr
+        assert diff_body(res.stdout), "nothing changed — the silence is vacuous"
+        assert WARNING_HEAD not in res.stdout, res.stdout
+
+    def test_only_SOME_carried_forward_still_names_the_rest(
+        self, durable_repo: Path, tmp_path: Path
+    ) -> None:
+        """NEGATIVE CONTROL on the test above: carrying forward is not a blanket
+        mute. Two of three kept, one dropped, one named."""
+        upd = write_update(
+            tmp_path,
+            "## State now\n"
+            f"{DURABLE_DATED_LINE}\n"
+            f"{DURABLE_VERB_LINE}\n"
+            "- Deploy/verify status: deployed\n",
+        )
+        block = warning_block(run_tool(durable_repo, update=upd).stdout)
+        assert "DROPS 1 line(s)" in block, block
+        assert "the coverage sweep still exempts generated files" in block
+
+    def test_an_APPEND_section_is_never_warned_about(
+        self, durable_repo: Path, tmp_path: Path
+    ) -> None:
+        """Rule (c) already guarantees those survive verbatim, so a warning
+        there would be about a deletion that cannot happen.
+
+        🔴 DISCRIMINATING BY CONSTRUCTION: `## Findings` in the fixture carries a
+        dated line that `durable_reason` DOES flag, and the update below does not
+        repeat it. So a mutant that ran the classification over the append branch
+        too has something to report here and the test goes red — without that
+        line the assertion could not tell the branches apart."""
+        upd = write_update(
+            tmp_path,
+            "## Findings\n"
+            "### a second glob is applied after the ledger is built\n"
+            "- **Observed (with values):** 311 entries in, 311 out.\n",
+            "findings.md",
+        )
+        res = run_tool(durable_repo, update=upd)
+        assert res.returncode == hd.EXIT_OK, res.stderr
+        assert WARNING_HEAD not in res.stdout, res.stdout
+
+    def test_a_fenced_sample_is_not_scanned(self, tmp_path: Path) -> None:
+        """A pasted log or sample command inside a fence carries dates and says
+        nothing durable — 610 of the real corpus's REPLACE-bucket lines are
+        inside one."""
+        base = (
+            "## How to verify\n"
+            "```\n"
+            "$ probe --since 2026-08-14\n"
+            "ok 2026-08-14T09:00:00Z\n"
+            "```\n"
+        )
+        report = hd.merge_report(base, "## How to verify\n`probe --now`\n")
+        assert report.dropped == (), report.dropped
+
+    def test_a_date_welded_into_a_path_is_not_a_claim(self) -> None:
+        """Handoff docs cite each other constantly; a filename is a reference,
+        not a measurement. TWO nets, and each case below is chosen so that
+        exactly ONE of them can suppress it — a case both nets catch cannot tell
+        a live net from a dead one, which is how the first draft of this test
+        scored a `prose = line` mutant SURVIVED."""
+        # only the LEADING path boundary can suppress this (no code span).
+        assert hd.durable_reason(
+            "- Design spec: claudedocs/churn-design-2026-08-02.md and nothing else"
+        ) is None
+        # only the CODE-SPAN strip can suppress this: the date's left neighbour
+        # is a space, so the boundary lets it through.
+        assert hd.durable_reason(
+            "- Re-run it with `probe --since 2026-08-02` and compare"
+        ) is None
+        # and both together on the shape the corpus actually carries.
+        assert hd.durable_reason(
+            "- Design spec: `claudedocs/churn-design-2026-08-02.md`"
+        ) is None
+
+    def test_the_same_date_OUTSIDE_a_code_span_IS_a_claim(self) -> None:
+        """NEGATIVE CONTROL on the three suppressions above: they are not a
+        blanket mute on dates. Same date, free-standing, flagged."""
+        assert hd.durable_reason(
+            "- Re-ran it on 2026-08-02 and the ledger was still short"
+        ) == "dated claim"
+
+    def test_the_listing_is_BOUNDED_and_says_how_many_it_elided(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 An unbounded list printed ABOVE the diff pushes the diff off the
+        screen. The elision count is what stops `…` reading as `and nothing
+        else worth mentioning`."""
+        many = "\n".join(
+            f"- 🔴 2026-08-{day:02d} — measurement number {day} of the ledger sweep."
+            for day in range(1, 10)
+        )
+        (repo / "claudedocs" / "handoff-sample-topic.md").write_text(
+            f"## State now\n{many}\n", encoding="utf-8"
+        )
+        upd = write_update(tmp_path, "## State now\n- all of it is stale now\n", "b.md")
+        block = warning_block(run_tool(repo, update=upd).stdout)
+        assert "DROPS 9 line(s)" in block, block
+        rows = [ln for ln in block.splitlines() if re.match(r"^  \S.*:\d+: ", ln)]
+        assert len(rows) == hd.DROPPED_SHOWN_MAX, f"{len(rows)} rows printed:\n{block}"
+        assert "… and 3 more not shown" in block, block
+
+    def test_a_very_long_line_is_clipped(self) -> None:
+        """The second bound: one pathological line must not be the whole block."""
+        long = "- 2026-08-14 — " + ("x" * 4000)
+        row = hd.dropped_durable_report(
+            [hd.DroppedDurable("State now", 4, long, "dated claim")]
+        )
+        assert max(len(ln) for ln in row.splitlines()) < 300, row
+        assert "…" in row
+
+
+class TestTheDurableSignalsAreEachReachable:
+    """🔴 A guard that can never execute is not a guard, and a mutation sweep
+    over overlapping fixtures reports SURVIVED for a guard that is genuinely
+    dead. `durable_reason` tries three signals in precedence order, so each
+    fixture line must be reachable — matched by ITS signal and by no other."""
+
+    @pytest.mark.parametrize(
+        "line,expected",
+        [
+            (DURABLE_DATED_LINE, "dated claim"),
+            (DURABLE_VERB_LINE, "evidence verb"),
+            (DURABLE_OPEN_LINE, "openness/open"),
+        ],
+        ids=["dated", "verb", "openness"],
+    )
+    def test_each_fixture_line_is_flagged_by_exactly_its_own_signal(
+        self, line: str, expected: str
+    ) -> None:
+        """🔴 LITERAL expectations, never `hd.DURABLE_DATED`. Reading the
+        expected value out of the module under test makes the assertion true by
+        construction — a mutant that renamed the reason would pass. These
+        strings are printed to a human, so pinning them literally is also what
+        keeps the output stable."""
+        assert hd.durable_reason(line) == expected
+
+    def test_the_reason_constants_are_the_strings_that_get_printed(self) -> None:
+        """The other half: the module's constants must BE those literals, so a
+        rename is a visible test change rather than a silent output change."""
+        assert hd.DURABLE_DATED == "dated claim"
+        assert hd.DURABLE_EVIDENCE == "evidence verb"
+
+    def test_the_three_fixture_lines_do_not_overlap(self) -> None:
+        """🔴 THE ISOLATION PIN. If the dated line ever also carries an evidence
+        verb, breaking the date regex still leaves it flagged and the mutant is
+        scored SURVIVED while the guard is dead. Assert the orthogonality
+        directly rather than trusting the wording to stay put."""
+        assert hd._BARE_ISO_DATE.search(DURABLE_DATED_LINE)
+        assert not hd._EVIDENCE_VERB.search(DURABLE_DATED_LINE)
+        assert not hd._EVIDENCE_VERB.search(DURABLE_OPEN_LINE)
+        assert not hd._BARE_ISO_DATE.search(DURABLE_VERB_LINE)
+        assert not hd._BARE_ISO_DATE.search(DURABLE_OPEN_LINE)
+
+    def test_the_evidence_verb_is_case_sensitive(self) -> None:
+        """All-caps is the precision half — measured, the case-insensitive form
+        matches 10x as many corpus lines. A lowercase sentence must stay quiet."""
+        assert hd.durable_reason("- we retracted that and decided to move on") is None
+
+    def test_the_predicate_is_quiet_on_ordinary_status_lines(self) -> None:
+        for line in (
+            "- Branch / PR: `feat/coverage-sweep` / #412",
+            "- Deploy/verify status: deployed, verified against the real path",
+            "1. Re-derive the ledger from the build manifest.",
+            "`python3 tools/queue_probe.py --for 240`",
+        ):
+            assert hd.durable_reason(line) is None, line
+
+
+class TestTheOpennessPredicateIsSHAREDNotReimplemented:
+    """🔴 ONE RULE, ONE PLACE. `subsystem_resolver` owns the `OPEN:` /
+    `RESOLVED <sha>:` grammar and its near-miss detector, each backed by a
+    committed evaluation matrix. A second copy here would regenerate that
+    module's bugs at a second site and disagree with `subsystem_touch
+    --validate` about the same line."""
+
+    def test_it_is_the_SAME_function_object(self) -> None:
+        import subsystem_resolver  # the module handoff_doc's import registered
+
+        assert hd.parse_journal_bullets is subsystem_resolver.parse_journal_bullets
+
+    def test_the_two_call_sites_agree_over_the_COMMITTED_matrix(self) -> None:
+        """🔴 THE SEAM PIN, and it is two-way. Over every shape in
+        `fixtures/near_miss_shapes.json` — the matrix `test_subsystem_touch.py`
+        reads — a population the resolver calls anything but `none` must come
+        back from `durable_reason` spelled `openness/<that population>`, and a
+        population it calls `none` must NEVER come back as an openness reason.
+        A divergence in either direction fails here."""
+        import json
+
+        import subsystem_resolver
+
+        fixture = json.loads(
+            (REPO_ROOT / "scripts" / "tests" / "fixtures" / "near_miss_shapes.json")
+            .read_text(encoding="utf-8")
+        )
+        lines = [
+            ln
+            for key in ("attempts", "prose", "accepted_false_positives", "real")
+            for ln in fixture[key]
+        ]
+        assert len(lines) >= 40, f"the matrix shrank to {len(lines)} shapes"
+        seen: set[str] = set()
+        for line in lines:
+            bullets = subsystem_resolver.parse_journal_bullets(line)
+            population = bullets[0].openness_population if bullets else "none"
+            seen.add(population)
+            reason = hd.durable_reason(line)
+            if population == "none":
+                assert not (reason or "").startswith("openness/"), (
+                    f"handoff_doc invented an openness verdict the resolver does "
+                    f"not make, for {line!r}: {reason!r}"
+                )
+            else:
+                assert reason == f"openness/{population}", (
+                    f"the two call sites disagree about {line!r}: resolver says "
+                    f"{population!r}, handoff_doc says {reason!r}"
+                )
+        assert {"none"} < seen, (
+            f"POSITIVE CONTROL: the matrix produced only {seen} — an agreement "
+            f"test over one population cannot see a disagreement"
+        )
+
+    def test_the_module_spells_no_openness_grammar_of_its_own(self) -> None:
+        """The structural half. `test_it_is_the_SAME_function_object` proves the
+        import is wired today; this is what fails if someone later adds a
+        second, local regex beside it and the import quietly stops mattering."""
+        src = TOOL.read_text(encoding="utf-8")
+        code = "\n".join(
+            ln for ln in src.splitlines() if not ln.lstrip().startswith("#")
+        )
+        code = code[code.index("EXIT_OK = 0"):]  # past the module docstring
+        for token in ("OPEN|RESOLVED", "RESOLVED|OPEN", r"\bOPEN\b", "OPENNESS_"):
+            assert token not in code, (
+                f"scripts/lib/handoff_doc.py appears to spell the openness "
+                f"grammar itself ({token!r}). It belongs to subsystem_resolver — "
+                f"import it, do not copy it."
+            )
+
+
+class TestEveryRunStatesItsBuckets:
+    """Rule (g). The replace/append rule lived only in a module docstring and in
+    step 5 of the skill, neither of which is in front of an author choosing a
+    heading."""
+
+    def test_the_line_names_both_buckets(
+        self, durable_repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 THE WHOLE LINE, not `in`. MEASURED: the first draft asserted
+        `"State now → REPLACE" in line`, and a mutant renaming the label to
+        `REPLACED` SURVIVED the battery — the mutated line still contains the
+        substring. A guard on prose is walked by a longer word unless it pins
+        the normalised string."""
+        upd = write_update(
+            tmp_path,
+            DURABLE_UPDATE_DOC + "\n## Findings\n### a second glob\n- 311 in, 311 out.\n",
+        )
+        out = run_tool(durable_repo, update=upd).stdout
+        line = next(ln for ln in out.splitlines() if ln.startswith("buckets: "))
+        assert line == "buckets: State now → REPLACE · Findings → APPEND", line
+
+    def test_a_section_only_the_update_has_is_reported_as_NEW(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        upd = write_update(tmp_path, "## Rollback\n`git revert <sha>`\n", "new.md")
+        out = run_tool(repo, update=upd).stdout
+        line = next(ln for ln in out.splitlines() if ln.startswith("buckets: "))
+        assert line == "buckets: Rollback → NEW", line
+
+    def test_the_bucket_labels_are_the_words_that_get_printed(self) -> None:
+        """The constants themselves, for the same reason the reason-strings are
+        pinned: they are read by a human and a rename is an output change."""
+        assert (hd.BUCKET_REPLACE, hd.BUCKET_APPEND, hd.BUCKET_NEW) == (
+            "REPLACE",
+            "APPEND",
+            "NEW",
+        )
+
+    def test_it_is_printed_before_the_diff_and_carries_no_status_token(
+        self, durable_repo: Path, tmp_path: Path
+    ) -> None:
+        """`status=` is the machine-readable verdict and the skill's contract
+        pins one per run — a second one would be read as a second verdict."""
+        upd = write_update(tmp_path, DURABLE_UPDATE_DOC)
+        out = run_tool(durable_repo, update=upd).stdout
+        assert out.index("buckets: ") < out.index("--- a/claudedocs/")
+        buckets = next(ln for ln in out.splitlines() if ln.startswith("buckets: "))
+        assert "status=" not in buckets
+        assert "status=" not in warning_block(out)
+
+
+class TestRuleFDidNotMoveTheExitCodes:
+    """🔴 Rule (f) adds no exit code and must not reach one. `TestTheOtherExITSDidNotMove`
+    pins the four failure paths byte-for-byte on the SUITE's fixture; these
+    re-assert 4 and 5 with durable content actually present, which is the state
+    that would trip a guard written as a refusal."""
+
+    def test_no_advance_is_still_4_and_prints_nothing_at_all(
+        self, durable_repo: Path, tmp_path: Path
+    ) -> None:
+        upd = write_update(tmp_path, DURABLE_UPDATE_DOC)
+        before = tree_hash(durable_repo)
+        res = run_tool(durable_repo, "--confirm", update=upd, advanced=None)
+        assert res.returncode == hd.EXIT_NO_ADVANCE
+        both = res.stdout + res.stderr
+        assert WARNING_HEAD not in both, "rule (f) leaked past rule (d)'s refusal"
+        assert "buckets:" not in both
+        assert diff_body(both) == []
+        assert tree_hash(durable_repo) == before
+
+    def test_no_change_is_still_5_with_durable_content_in_the_doc(
+        self, durable_repo: Path, tmp_path: Path
+    ) -> None:
+        upd = write_update(
+            tmp_path,
+            "## State now\n"
+            "- Branch / PR: `feat/coverage-sweep` / none\n"
+            f"{DURABLE_DATED_LINE}\n"
+            f"{DURABLE_VERB_LINE}\n"
+            f"{DURABLE_OPEN_LINE}\n"
+            "- Deploy/verify status: NOT deployed\n",
+            "noop.md",
+        )
+        before = tree_hash(durable_repo)
+        res = run_tool(durable_repo, "--confirm", update=upd)
+        assert res.returncode == hd.EXIT_NO_CHANGE, res.stdout + res.stderr
+        assert "status=no-change" in res.stderr
+        assert WARNING_HEAD not in res.stdout + res.stderr
+        assert tree_hash(durable_repo) == before
+
+    def test_the_exit_code_constants_did_not_move(self) -> None:
+        """Their VALUES, not just their names — a caller reads the number."""
+        assert (hd.EXIT_OK, hd.EXIT_USAGE, hd.EXIT_FAIL) == (0, 2, 3)
+        assert (hd.EXIT_NO_ADVANCE, hd.EXIT_NO_CHANGE, hd.EXIT_BEHIND) == (4, 5, 6)
+
+    def test_merge_still_returns_a_plain_string(self) -> None:
+        """`merge()` is public and called directly by other tests in this file;
+        rule (f) moved its body into `merge_report` and it must stay a string."""
+        out = hd.merge(BASE_DOC, UPDATE_DOC)
+        assert isinstance(out, str)
+        assert out == hd.merge_report(BASE_DOC, UPDATE_DOC).text
+
+
+# --------------------------------------------------------------------------
 # the skill and the module must not drift apart
 # --------------------------------------------------------------------------
 
@@ -635,6 +1230,22 @@ SKILL_PINS: list[tuple[str, str]] = [
     (
         "Do NOT retry by re-running with `--push`",
         "🔴 …and that the obvious retry duplicates the findings instead",
+    ),
+    (
+        "line(s) that look DURABLE",
+        "rule (f): the executor is told what the drop warning IS when it fires",
+    ),
+    (
+        "a WARNING, never a refusal",
+        "🔴 rule (f): …and that it blocks nothing, so it is not clicked through",
+    ),
+    (
+        "a silent run is NOT evidence that nothing durable was dropped",
+        "🔴 rule (f) is a FLOOR — silence must not be read as a guarantee",
+    ),
+    (
+        "buckets:",
+        "rule (g): the executor is told the bucket line exists and to read it",
     ),
 ]
 
