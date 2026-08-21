@@ -14,8 +14,11 @@
 #   no arg      -> newest claudedocs/handoff-*.md in the repo of $PWD,
 #                  else newest claudedocs/*HANDOFF*.md (SESSION-HANDOFF.md &c.)
 #   slug        -> claudedocs/handoff-<slug>*.md in the repo of $PWD,
-#                  else the no-arg chain above
-#   handoff path-> that file; the target repo is derived FROM the path
+#                  else the no-arg chain above — REPORTED AS A GAP, because
+#                  "newest" is only the contract when nothing was asked for
+#   handoff path-> that file; the target repo is derived FROM the path. Also
+#                  matched when the path is quoted INSIDE a prose argument,
+#                  which is the form /resume passes through ("…; handoff: <p>")
 #
 # v1 workload/alerts target datapacket (prod-kubeconfig at <repo>/prod-kubeconfig);
 # everywhere else it degrades to the (always-run) GIT/PR block.
@@ -231,16 +234,70 @@ handoff_says_inflight(){ # $1=pr number  $2=handoff TEXT  $3=owner/repo (optiona
 # Resolve target repo + handoff doc.
 # ---------------------------------------------------------------------------
 REPO="" HANDOFF="" SLUG=""
+
+# A .md path EMBEDDED IN PROSE. Prints it, or nothing.
+#
+# The /resume skill passes its topic argument through VERBATIM, and that
+# argument's documented form is prose that carries the doc:
+#
+#   "continue the app-listing work; handoff: /abs/claudedocs/handoff-app-listing.md"
+#
+# `[ -f "$arg" ]` is false for that whole string, so resolve()'s explicit-path
+# branch never fired, the slug glob interpolated the entire sentence and matched
+# nothing, and the run silently reconciled the newest UNRELATED handoff instead
+# (#684). The caller named the file. Reading it out is not a heuristic about
+# what they meant — it is the thing they said.
+#
+# Deliberately narrow: a whitespace-separated token that ends `.md` AND is an
+# existing file. Both halves matter. Without `.md` this would claim any word
+# that happens to name a file; without the `-f` test a doc that was renamed or
+# lives in another checkout would resolve to a path that isn't there, which is a
+# worse failure than the slug miss it replaces. First match wins — a prose
+# argument naming two docs is not a case this can adjudicate, and taking the
+# first is at least the one the caller wrote first.
+#
+# One layer of surrounding punctuation is stripped so `(…/x.md)`, `` `…/x.md` ``
+# and `…/x.md,` resolve; a token that survives with anything else attached is
+# left alone rather than guessed at.
+embedded_md_path(){
+  local tok hit="" noglob=""
+  # ⚠ `for tok in $1` is UNQUOTED on purpose — that is the word split. It is also
+  # a PATHNAME EXPANSION, and the subject is arbitrary prose: an argument
+  # containing `*` would otherwise expand against the cwd and hand this loop a
+  # directory listing, out of which any stray .md would resolve as "the doc the
+  # caller named". Split, don't glob.
+  case $- in *f*) ;; *) noglob=1; set -f ;; esac
+  for tok in $1; do
+    tok=${tok#[\`\'\"\(\[\<]}
+    tok=${tok%[\`\'\"\)\]\>,\;]}
+    case "$tok" in
+      *.md) [ -f "$tok" ] && { hit="$tok"; break; } ;;
+    esac
+  done
+  [ -n "$noglob" ] && set +f
+  [ -n "$hit" ] || return 1
+  printf '%s\n' "$hit"
+}
+
 resolve(){
-  local arg="${1:-}"
-  if [ -n "$arg" ] && [ -f "$arg" ]; then          # explicit handoff path
-    HANDOFF=$(realpath "$arg")
+  local arg="${1:-}" path="" unresolved=""
+  if [ -n "$arg" ]; then
+    if [ -f "$arg" ]; then path="$arg"              # explicit handoff path
+    else path=$(embedded_md_path "$arg") || path="" # …or one quoted inside prose
+    fi
+  fi
+  if [ -n "$path" ]; then
+    HANDOFF=$(realpath "$path")
     REPO=$(git -C "$(dirname "$HANDOFF")" rev-parse --show-toplevel 2>/dev/null) \
       || REPO=$(dirname "$HANDOFF")
   else
     REPO=$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null) || REPO="$PWD"
     if [ -n "$arg" ]; then                          # topic slug
       HANDOFF=$(ls -t "$REPO"/claudedocs/handoff-"$arg"*.md 2>/dev/null | head -1)
+      # An argument was SUPPLIED and did not resolve. Everything below this point
+      # is a fallback, and a fallback is only silent-safe with NO argument, where
+      # "newest" IS the contract. Remember that here, before the fallbacks run.
+      [ -z "$HANDOFF" ] && unresolved=1
     fi
     [ -z "$HANDOFF" ] && HANDOFF=$(ls -t "$REPO"/claudedocs/handoff-*.md 2>/dev/null | head -1)
     # FALLBACK for repos that name their handoff in caps — civitai-manager uses
@@ -268,6 +325,34 @@ resolve(){
     # whose only handoff is SESSION-HANDOFF.md still finds it, and there is
     # nothing for a slug to disambiguate when the family holds one file.
     [ -z "$HANDOFF" ] && HANDOFF=$(ls -t "$REPO"/claudedocs/*HANDOFF*.md 2>/dev/null | head -1)
+    # 🔴 THE SAME RULE AS THE FALLBACK ABOVE, ONE LINE LOWER — and it was missing
+    # for a year. "A missed handoff is not a quiet failure" applies just as hard
+    # to reconciling the WRONG one: the digest prints the fallback's filename on
+    # the `handoff:` line as though that were the intent, and every block below
+    # is then correct about a document nobody asked for, DRIFT all-clear
+    # included. Measured 2026-08-21 (#684): a /resume naming
+    # handoff-app-listing-polish-and-coverage.md reconciled
+    # handoff-remote-write-duplicate-samples.md — a different initiative — and
+    # reported no drift. The requested doc was 67 lines stale vs origin/trunk,
+    # exactly what handoff_freshness exists to catch, and it was not caught,
+    # because freshness ran against the wrong file.
+    #
+    # Worse than a wrong filename: the target is whatever is NEWEST at that
+    # instant, so it MOVES as other sessions land handoff commits. Two runs
+    # minutes apart resolved two different unrelated docs, and a reader
+    # double-checking reads the change as real drift.
+    #
+    # Not a hard error, deliberately: the GIT/PR block is still true, and
+    # UNRECONCILED already downgrades the DRIFT all-clear (see main), so the
+    # false green is gone once this line exists. What was missing was never the
+    # digest — it was the caller being told which document it is about.
+    if [ -n "$unresolved" ]; then
+      if [ -n "$HANDOFF" ]; then
+        UNRECONCILED+=("requested \"$arg\" — no claudedocs/handoff-<that>*.md in $REPO, and no .md path was quoted in it either; FELL BACK to the newest handoff ($(basename "$HANDOFF")), which is a different initiative unless it happens not to be. Nothing below reconciles what was asked for. Re-run naming the doc's path, or with no argument to take newest deliberately.")
+      else
+        UNRECONCILED+=("requested \"$arg\" — no claudedocs/handoff-<that>*.md in $REPO, no .md path quoted in it, and no fallback handoff to degrade to. NOTHING was reconciled.")
+      fi
+    fi
   fi
   local url
   url=$(git -C "$REPO" remote get-url origin 2>/dev/null) \

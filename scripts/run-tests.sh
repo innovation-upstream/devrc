@@ -1956,8 +1956,18 @@ done
 # It is here so the guard above covers it too — the stub dir is on PATH for this
 # whole script, so a stub that stopped shadowing lands in the launch log instead
 # of on the operator's desktop.
+#
+# `test_resume_state.sh` is here for the SAME reason, found the same way: it too
+# said `run: bash scripts/tests/test_resume_state.sh` and nothing ever did, so
+# it went RED on main unnoticed when `handoff_says_inflight` changed from taking
+# a PATH to taking TEXT. Worse than merely red — a helper that returns false for
+# every input satisfies every negative assertion in the file, so two of its four
+# cases passed FOR THE WRONG REASON. It asserts the pure extraction helpers that
+# the DRIFT block's whole PR-reconciliation rests on; an unrun suite is a guard
+# that reports no failures.
 SHELL_TESTS=(
   "scripts/tests/test_release_wrapper.sh"
+  "scripts/tests/test_resume_state.sh"
 )
 for SHELL_TEST in "${SHELL_TESTS[@]}"; do
   if [ ! -f "$SHELL_TEST" ]; then

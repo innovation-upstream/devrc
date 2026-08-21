@@ -1749,8 +1749,13 @@ class TestSkillsAndCodeAgree:
             # resolves `rel` for the ref comparison
             "handoff_freshness": 1,
             # derives $REPO from the path when an explicit doc is passed (twice:
-            # `git -C $(dirname …)` and the plain-dirname fallback)
-            "resolve": 2,
+            # `git -C $(dirname …)` and the plain-dirname fallback), plus the
+            # `basename` naming the doc it FELL BACK to in the #684 gap line —
+            # a use of the name only, and it must stay one: that message is
+            # emitted from resolve(), before handoff_freshness has run, so
+            # $HANDOFF_TEXT does not exist yet and any CONTENT read here would
+            # necessarily be of the unchosen copy.
+            "resolve": 3,
         }, sorted(path_hits)
 
     def test_the_laundered_read_scan_can_actually_find_one(self):
