@@ -488,6 +488,14 @@ STATE_TTL_SECS = 14 * 24 * 3600
 # PermissionRequest hook reads; see the clawgate skill.
 CLAWGATE_ENV = "~/.claude/clawgate.env"
 
+# Where the ritual this hook enforces is written down. BOTH spellings are printed:
+# the deployed path is what the model can open right now, the repo path is what it
+# edits. Same idiom as clawgate-task-interview-guard.py's FLOW_DEPLOYED/FLOW_REPO —
+# a file under a skill's `flows/` dir does NOT auto-fire the way a skill DESCRIPTION
+# does, so the hook that enforces a flow is also its router.
+FLOW_DEPLOYED = "~/.claude/skills/clawgate/flows/task-pickup.md"
+FLOW_REPO = "devrc/claude/skills/clawgate/flows/task-pickup.md"
+
 
 # --------------------------------------------------------------------------- #
 # Triggers
@@ -1292,6 +1300,9 @@ def missing_text(task_id, first_read_ts, session_id=""):
         "Use `complete` instead of `ready_for_review` ONLY when the task body carried "
         "a `## Acceptance criteria` heading AND every criterion is validated — see the "
         "clawgate skill's status gate.\n"
+        "The full pickup ritual — the comment shapes, the criteria detector, the "
+        "ordering trap — is %(flow)s\n"
+        "  (repo: %(flow_repo)s)\n"
         "🔴 IF THIS SESSION'S WORK WAS NOT FOR TASK %(id)d — you only read the card, or "
         "the work belongs to a different task or repo — do NOT comment and do NOT flip "
         "the status: a junk comment permanently silences this guard for the card, and "
@@ -1300,7 +1311,8 @@ def missing_text(task_id, first_read_ts, session_id=""):
         "card again, and a new session starts fresh:\n"
         "  %(dismiss)s"
         % {"id": int(task_id), "ts": first_read_ts,
-           "dismiss": dismiss_cmd(task_id, session_id)}
+           "dismiss": dismiss_cmd(task_id, session_id),
+           "flow": FLOW_DEPLOYED, "flow_repo": FLOW_REPO}
     )
 
 
