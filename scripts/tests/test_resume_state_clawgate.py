@@ -423,11 +423,17 @@ def _git_env(repo: Path) -> dict:
 
 # The binaries resume-state.sh and its shell actually reach for. Used to build
 # a CURATED $PATH for the "clawgatectl is not installed" case — see below.
+# 🔴 ENUMERATED, and the enumeration is what justifies this test's PATH
+# replacement in test_no_real_launchers.py's PINNED_PATH_CLOBBERS. Nothing in
+# HAZARD_VOCABULARY is reachable from a directory holding only these: no
+# systemd-run, systemctl, notify-send, rofi, xdotool, i3-msg, openrgb, espanso,
+# home-manager or nixos-rebuild. `curl`/`gh`/`kubectl` are deliberately ABSENT
+# — the tripwire stubs supply those, and they sit ahead of this directory.
 _SANDBOX_TOOLS = (
     "bash", "sh", "git", "jq", "cat", "stat", "sed", "grep", "awk", "date",
     "ls", "head", "tail", "sort", "tr", "cut", "wc", "dirname", "basename",
     "realpath", "mktemp", "rm", "cp", "chmod", "env", "uname", "true", "false",
-    "sleep", "kill", "curl", "which",
+    "sleep",
 )
 
 
@@ -450,6 +456,10 @@ def _sandbox_bin(root: Path) -> Path:
         p = shutil.which(name)
         if p:
             (d / name).symlink_to(p)
+    # A LIVE invariant rather than prose: the directory's contents are asserted
+    # to be a subset of the enumerated list, and clawgatectl unreachable from
+    # it. This is the justification recorded in PINNED_PATH_CLOBBERS.
+    assert set(p.name for p in d.iterdir()) <= set(_SANDBOX_TOOLS)
     assert not shutil.which("clawgatectl", path=str(d)), "the sandbox bin leaked clawgatectl"
     return d
 
