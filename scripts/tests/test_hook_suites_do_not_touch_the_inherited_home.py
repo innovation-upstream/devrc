@@ -1,13 +1,13 @@
-"""A hook test suite must never write into the `$HOME` it inherits.
+"""A hook test suite must never touch the `$HOME` it inherits.
 
 THE DEFECT (measured on origin/main, 3c54918):
 
     scripts/claude-hooks/tests/test_search_tool_nudge.py computed
     `HOME = os.path.expanduser("~")` at import and derived
     `STATE_ROOT = $HOME/.cache/claude-search-tool-nudge/s` from it. It then
-    GLOBBED AND DELETED under that path, and drove the hook as a subprocess
-    ~130 times with the same real `$HOME` inherited, so the child resolved the
-    identical directory.
+    GLOBBED AND DELETED under that path, and drove the hook as a real
+    subprocess once per scenario in the file with that same real `$HOME`
+    inherited, so every child resolved the identical directory.
 
     Two consequences, both real:
 
@@ -22,8 +22,9 @@ THE DEFECT (measured on origin/main, 3c54918):
 
 WHAT EACH TEST HERE IS (labelled, because "it passes" is not a category):
 
-  * test_the_suite_writes_nothing_into_the_home_it_inherits
-        REGRESSION. Red at 3c54918, green at HEAD, for both suites.
+  * test_the_suite_does_not_touch_the_home_it_inherits
+        REGRESSION. Red at 3c54918, green at HEAD, for both suites — and red on
+        the DELETION, which is the half a create-only check cannot see.
   * test_the_suite_does_write_state_under_its_own_temp_home
         POSITIVE CONTROL for the test above. A suite that silently stopped
         driving the hook would ALSO leave the inherited home untouched — the
@@ -38,10 +39,10 @@ WHAT EACH TEST HERE IS (labelled, because "it passes" is not a category):
         This reads the suites' own source and fails when one appears.
 
 🔴 This file never touches the operator's real home. Each suite is run with
-`HOME` pointed at a fresh empty tmp_path, which stands in for the real one: the
-assertion is "the suite wrote nothing into the home it was GIVEN", which is the
-same property, measured somewhere harmless. Nothing here stats, creates or
-reads `~/.cache/*`.
+`HOME` pointed at a fresh tmp_path seeded with decoys, standing in for the real
+one: the assertion is "the suite left the home it was GIVEN exactly as it found
+it", which is the same property, measured somewhere harmless. Nothing here
+stats, creates or reads `~/.cache/*`.
 """
 import ast
 import json
@@ -160,7 +161,7 @@ def suite_runs(tmp_path_factory):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("suite", ISOLATED_SUITES)
-def test_the_suite_writes_nothing_into_the_home_it_inherits(suite, suite_runs):
+def test_the_suite_does_not_touch_the_home_it_inherits(suite, suite_runs):
     """RED at 3c54918, GREEN at HEAD.
 
     Asserted in BOTH directions — created AND removed — because the two suites
