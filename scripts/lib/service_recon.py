@@ -1391,13 +1391,27 @@ def render_brief(b: Brief, *, file_limit: int = DEFAULT_FILE_LIMIT) -> str:
             # correction, in the same words, as the notice in
             # `subsystem_recall.render_text`. "no `## What it is` content" reads
             # as "the entry has none"; what this branch actually knows is that
-            # the extractor found none, and a RENAMED heading (`## What It Is`,
-            # `## What it is:`, `### What it is`, an indented one) reaches here
-            # with the answer sitting on disk. `subsystem_touch.SHAPE_HEADINGS`
-            # excludes this heading, so `--validate` will not flag the rename
-            # either — naming it here is the only signal the reader gets.
-            L.append(f"  (no parsable `{WHAT_HEADING}` — absent, empty, or the heading "
-                     f"was renamed; re-derive what it is live)")
+            # the extractor found none, and a heading the parser does not match
+            # reaches here with the answer sitting on disk.
+            # `subsystem_touch.SHAPE_HEADINGS` excludes this heading, so
+            # `--validate` will not flag it either — naming the causes here is the
+            # only signal the reader gets.
+            #
+            # 🔴 THE CAUSE LIST IS EXPLICITLY NON-EXHAUSTIVE ("among others"), for
+            # the reason spelled out beside the twin notice in `subsystem_recall`:
+            # a RENAME (`## What It Is`, `## What it is:`, `### What it is`), an
+            # INDENTED heading and one inside a ``` FENCE all land in this branch,
+            # and only the first is literally a "rename".
+            #
+            # 🔴 THE PREFIX THIS SHARES WITH THE `subsystem_recall` notice IS
+            # QUOTED IN `claude/skills/analyze-service/SKILL.md` step 2, which
+            # tells the agent to relay it AS WRITTEN. That quotation is pinned to
+            # this string by `test_service_recon.py::
+            # TestTheSkillQuotesTheDegradeNotice` — reword either notice and the
+            # pin goes red naming the doc, so the two cannot drift apart.
+            L.append(f"  (no parsable `{WHAT_HEADING}` — absent, empty, or not parsed as a "
+                     f"heading [renamed, indented, fenced, among others]; "
+                     f"re-derive what it is live)")
         if not i.pointers and not i.nuance:
             L.append(f"  (entry exists but carries neither `{POINTERS_HEADING}` "
                      f"nor `{NUANCE_HEADING}`)")

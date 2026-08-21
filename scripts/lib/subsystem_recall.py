@@ -1943,17 +1943,33 @@ def render_text(report: RecallReport) -> str:
             #
             # 🔴 IT CLAIMS A PARSE, NEVER A FACT ABOUT THE ENTRY. The notice used
             # to read "this entry never says what the subsystem IS" — which the
-            # extractor cannot know. A RENAMED heading (`## What It Is`,
-            # `## What it is:`, `### What it is`, an indented one) parses to
+            # extractor cannot know. A heading the parser does not match parses to
             # nothing and produced that same sentence while the answer sat on
-            # disk one rename away, and `subsystem_touch.SHAPE_HEADINGS`
-            # deliberately excludes this heading so `--validate` says nothing
-            # either. The sibling `🔴 NO <heading>` badge draws exactly this line
-            # ("0 BY PARSE FAILURE and not by measurement"); this notice now
-            # draws it too, and names the rename as a cause the reader can act on.
+            # disk, and `subsystem_touch.SHAPE_HEADINGS` deliberately excludes
+            # this heading so `--validate` says nothing either. The sibling
+            # `🔴 NO <heading>` badge draws exactly this line ("0 BY PARSE FAILURE
+            # and not by measurement"); this notice now draws it too, and names
+            # causes the reader can act on.
+            #
+            # 🔴 THE CAUSE LIST IS EXPLICITLY NON-EXHAUSTIVE ("among others"), and
+            # it has to be: `_heading_blocks` matches at column 0 and skips fenced
+            # regions, so a RENAME (`## What It Is`, `## What it is:`,
+            # `### What it is`), an INDENTED heading and one inside a ``` FENCE all
+            # reach this same branch — and only the first is literally a "rename".
+            # An enumeration that reads as closed is a narrower claim than the
+            # branch, which is how the previous wording ("absent, empty, or the
+            # heading was renamed") left two real causes unnamed.
+            #
+            # 🔴 THE PREFIX THIS SHARES WITH `service_recon`'s TWIN NOTICE IS
+            # QUOTED IN `claude/skills/analyze-service/SKILL.md` step 2, which
+            # tells the agent to relay it AS WRITTEN. Pinned to this string by
+            # `test_service_recon.py::TestTheSkillQuotesTheDegradeNotice`, which
+            # DERIVES the expected text from both renderers — so rewording either
+            # notice goes red naming the doc.
             out.append(
-                f"    (no parsable `{WHAT_HEADING}` — absent, empty, or the heading was "
-                f"renamed, so this read cannot say what the subsystem IS; re-derive it live)"
+                f"    (no parsable `{WHAT_HEADING}` — absent, empty, or not parsed as a "
+                f"heading [renamed, indented, fenced, among others], so this read cannot "
+                f"say what the subsystem IS; re-derive it live)"
             )
         if e.is_bare:
             # 🔴 Said, not left blank. An entry that exists with nothing under

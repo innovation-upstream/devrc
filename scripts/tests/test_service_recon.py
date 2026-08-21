@@ -743,10 +743,31 @@ def _repo_carrying(tmp_path: Path, name: str, token: str, n: int) -> Path:
 
 #: Two distinct lines for the same reason `WHAT_LINES` has three: a ONE-line body
 #: cannot distinguish a full render from a first-line one. The `({service})` suffix
-#: lands on the LAST line, so a truncating render loses the service name too.
+#: `_entry` appends lands on the LAST line, so a truncating render loses the
+#: service name too.
+#:
+#: 🔴 BOTH SENTENCES ABOVE ARE MEASURED, not asserted in a comment. Until
+#: 2026-08-21 nothing in this file read `_entry`'s what-body at all: reverting this
+#: constant to one line left the suite green AND every mutant verdict identical,
+#: so the comment described coverage that did not exist — the worst state for a
+#: fixture, because it stops the next reader looking.
+#: `TestTheIndexBlockSaysWhatTheThingIS::
+#: test_the_helper_entrys_what_body_renders_WHOLE_with_the_service_name_last` is
+#: the assertion that makes it true.
 WHAT_LINE = (
     "the synthetic thing this fixture stands in for\n"
     "and a second line no truncating render would reach"
+)
+
+#: The `index:` block's `## What it is` degrade notice, pinned as the WHOLE
+#: normalised sentence rather than by a keyword — a guard on a word is walkable by
+#: rewording. `claude/skills/analyze-service/SKILL.md` quotes the prefix this
+#: shares with `subsystem_recall`'s twin notice; that quotation is pinned to the
+#: EMITTED string (never a second hand-typed copy) by
+#: `TestTheSkillQuotesTheDegradeNotice` below.
+DEGRADE_NOTICE = (
+    "  (no parsable `## What it is` — absent, empty, or not parsed as a heading "
+    "[renamed, indented, fenced, among others]; re-derive what it is live)"
 )
 
 
@@ -835,6 +856,43 @@ class TestTheIndexBlockSaysWhatTheThingIS:
         assert block.index("## What it is") < block.index("## Pointers")
         assert block.index("## Pointers") < block.index("## Nuance / work-history")
 
+    def test_the_helper_entrys_what_body_renders_WHOLE_with_the_service_name_last(
+        self, tmp_path: Path
+    ) -> None:
+        """🔴 THE CLAIM `WHAT_LINE`'s COMMENT MAKES, MEASURED.
+
+        `_entry` — the helper every scope-coverage test below builds its store
+        with — appends `({service})` to the LAST line of its what-body. That is
+        what makes a truncating render lose the SERVICE NAME as well as the rest
+        of the prose, which is the sentence the constant's comment asserts.
+        Nothing measured it: reverting `WHAT_LINE` to one line left the whole
+        suite green and every mutation verdict unchanged, i.e. the fixture's
+        second line was inert and its comment was describing coverage it did not
+        provide.
+
+        The two halves are asserted separately so a partial mutant cannot pass:
+        the body must render CONTIGUOUS (a mutant that keeps both lines but
+        reorders or interleaves them dies), and the service name must appear on
+        the last line and NOT on any earlier one (otherwise a first-line render
+        would keep it and the comment's consequence would be false).
+        """
+        store = _empty_store(tmp_path)
+        _entry(store, SCOPE, SERVICE)
+        repo = _repo_carrying(tmp_path, SCOPE, SERVICE, 2)
+        text = sr.render_brief(sr.recon(SERVICE, repos=[str(repo)], store_root=store))
+        block = text[text.index("index: "):]
+
+        lines = WHAT_LINE.splitlines()
+        assert len(lines) >= 2, "a one-line body cannot see a first-line truncation"
+        rendered = [f"  {ln}" for ln in lines]
+        rendered[-1] = f"{rendered[-1]} ({SERVICE})"
+        assert "\n".join(rendered) in block, "the render dropped or reordered a line"
+        # 🔴 The consequence the comment names: the name rides the LAST line only.
+        assert SERVICE not in "\n".join(rendered[:-1]), (
+            "the fixture no longer demonstrates its own claim — an earlier line "
+            "carries the service name, so a truncating render would keep it"
+        )
+
     def test_an_entry_with_NO_what_it_is_degrades_cleanly_and_SAYS_so(
         self, tmp_path: Path
     ) -> None:
@@ -871,28 +929,192 @@ class TestTheIndexBlockSaysWhatTheThingIS:
         the rename as a cause. Pinned as the WHOLE normalised sentence: a guard on
         one word is walkable by rewording.
         """
+        self._assert_degrade_notice(tmp_path, heading_block=heading)
+
+    def test_a_FENCED_heading_reaches_the_SAME_notice(self, tmp_path: Path) -> None:
+        """🔴 THE CAUSE THE OLD ENUMERATION LEFT UNNAMED — and why the list now
+        ends "among others". `_heading_blocks` skips fenced regions wholesale, so
+        a `## What it is` inside a ``` fence is not a heading at all: it lands in
+        this branch while being neither absent, nor empty, nor RENAMED. Nor is the
+        `indent` case above literally a rename. The headline (`no parsable`) was
+        always right; only the tail enumeration was narrower than its branch."""
+        self._assert_degrade_notice(
+            tmp_path, heading_block=f"```\n{rc.WHAT_HEADING}\n%s\n```"
+        )
+
+    def _assert_degrade_notice(self, tmp_path: Path, *, heading_block: str) -> None:
+        """`heading_block` is inserted ahead of `## Pointers`. It may carry one
+        `%s` for the marooned sentence; without one the sentence follows it."""
         store = _empty_store(tmp_path)
         (store / SCOPE).mkdir(parents=True)
         _entry(store, SCOPE, SERVICE, what=None)
         # The sentence IS on disk — under a heading the extractor does not match.
         p = store / SCOPE / f"{SERVICE}.md"
-        marooned = "This entry does say what it is, under a renamed heading."
+        marooned = "This entry does say what it is, out of the parser's reach."
+        block = (
+            heading_block % marooned
+            if "%s" in heading_block
+            else f"{heading_block}\n{marooned}"
+        )
         p.write_text(
             p.read_text(encoding="utf-8").replace(
-                "## Pointers", f"{heading}\n{marooned}\n\n## Pointers", 1
+                "## Pointers", f"{block}\n\n## Pointers", 1
             ),
             encoding="utf-8",
         )
         repo = _repo_carrying(tmp_path, SCOPE, SERVICE, 2)
         text = sr.render_brief(sr.recon(SERVICE, repos=[str(repo)], store_root=store))
-        assert marooned not in text, "fixture is inert — the extractor matched the rename"
-        assert (
-            "  (no parsable `## What it is` — absent, empty, or the heading "
-            "was renamed; re-derive what it is live)"
-        ) in text
+        assert marooned not in text, "fixture is inert — the extractor matched the heading"
+        assert DEGRADE_NOTICE in text
         # 🔴 …and it does NOT assert a fact about the entry it cannot know.
         assert "never says what" not in text
         assert "no `## What it is` content" not in text
+        # The rest of the block is untouched — a section-level degrade.
+        assert f"manage-{SERVICE}" in text
+
+
+#: The skill whose step 2 quotes the degrade notice and orders it relayed AS
+#: WRITTEN. Deployed to `~/.claude/skills/analyze-service/SKILL.md` by
+#: `nix/home.nix`; this is the source of record.
+ANALYZE_SERVICE_SKILL = ROOT / "claude" / "skills" / "analyze-service" / "SKILL.md"
+
+
+def _norm(text: str) -> str:
+    """Whitespace-collapsed and backtick-free.
+
+    Both normalisations are forced by the MEDIUM, not chosen for laxity. SKILL.md
+    wraps the quotation in a markdown code span, so the notice's own inner
+    backticks (around `## What it is`) cannot survive there; and the bullet is
+    hard-wrapped prose, so a line break may fall anywhere inside the quote. What
+    is left after normalising is still the whole sentence, word for word.
+    """
+    return " ".join(text.replace("`", "").split())
+
+
+class TestTheSkillQuotesTheDegradeNotice:
+    """🔴 THE PROPAGATION VECTOR, PINNED — the half of this fix that had no guard.
+
+    `claude/skills/analyze-service/SKILL.md` step 2 quotes the `## What it is`
+    degrade notice and instructs the agent to relay it **as written**. So a
+    reworded notice does not merely leave a doc stale: it makes the skill order a
+    quotation the tool no longer emits, and the agent relays the SKILL's older,
+    NARROWER wording into every brief. Both modules' strings were pinned by whole
+    sentence; the doc quoting them was pinned by nothing.
+
+    🔴 THE EXPECTED TEXT IS DERIVED FROM THE MODULES, never re-typed here. A
+    hand-typed copy would be a THIRD place for the sentence to drift, and it would
+    pass while doc and code disagreed. What this asserts is a RELATIONSHIP — the
+    doc contains the string the code emits — which is the only form that cannot
+    rot into agreement with itself.
+    """
+
+    @staticmethod
+    def _notice(text: str) -> str:
+        """The one rendered line carrying the notice, LOCATED BY A MODULE CONSTANT.
+
+        Exactly-one, not first-match: if a render stops emitting the notice, or
+        starts emitting two, this raises instead of quietly returning something
+        that matches nothing. An inert pin is the failure mode under guard here.
+        """
+        hits = [ln.strip() for ln in text.splitlines() if rc.WHAT_HEADING in ln]
+        assert len(hits) == 1, (
+            f"a degraded render must mention {rc.WHAT_HEADING!r} on exactly one "
+            f"line (the notice); got {hits!r}"
+        )
+        return hits[0]
+
+    @pytest.fixture
+    def emitted(self, tmp_path: Path) -> tuple[str, str]:
+        """`(subsystem_recall's notice, service_recon's notice)`, both RENDERED.
+
+        One store, one entry with no `## What it is`, read through both renderers
+        — so the strings compared below are the ones a real brief carries.
+        """
+        store = _empty_store(tmp_path)
+        _entry(store, SCOPE, SERVICE, what=None)
+        repo = _repo_carrying(tmp_path, SCOPE, SERVICE, 2)
+        recon = self._notice(
+            sr.render_brief(sr.recon(SERVICE, repos=[str(repo)], store_root=store))
+        )
+        recall = self._notice(rc.render_text(rc.recall(store, SCOPE)))
+        return recall, recon
+
+    @staticmethod
+    def _shared(emitted: tuple[str, str]) -> str:
+        """The prefix both notices share — the span a single doc quote can cover.
+
+        The two tails differ on purpose (`service_recon` says "re-derive what it
+        is live", `subsystem_recall` adds "so this read cannot say what the
+        subsystem IS"), so the doc quotes what they agree on.
+        """
+        recall, recon = emitted
+        shared = os.path.commonprefix([recall, recon])
+        # 🔴 A FLOOR, because a pin over a two-word prefix passes forever while
+        # asserting nothing. If the notices diverge early this fails LOUDLY rather
+        # than silently narrowing what the doc has to contain.
+        assert len(_norm(shared)) >= 80, (
+            "the two notices now diverge early, so a single SKILL.md quotation "
+            f"can no longer cover both and this pin would go vacuous.\n"
+            f"  shared prefix: {shared!r}"
+        )
+        return shared
+
+    @staticmethod
+    def _assert_quoted(doc: str, quote: str) -> None:
+        """The pin predicate, as ONE function, so the positive control below
+        exercises exactly the code the real assertion runs."""
+        assert _norm(quote) in _norm(doc), (
+            "claude/skills/analyze-service/SKILL.md step 2 no longer quotes the "
+            "degrade notice the modules emit — and it tells the agent to relay "
+            "that quotation AS WRITTEN, so the drift ships into every brief.\n"
+            f"  emitted: {_norm(quote)!r}\n"
+            "  Fix the DOC to match the code, or change both in one commit. Do "
+            "NOT re-type the string into this test: the point of the pin is that "
+            "the expected value is derived from the module."
+        )
+
+    def test_the_skill_quotes_the_notice_the_modules_actually_emit(
+        self, emitted: tuple[str, str]
+    ) -> None:
+        self._assert_quoted(
+            ANALYZE_SERVICE_SKILL.read_text(encoding="utf-8"), self._shared(emitted)
+        )
+
+    def test_the_two_notices_agree_on_the_quoted_span(
+        self, emitted: tuple[str, str]
+    ) -> None:
+        """The doc says "the block shows the … notice" without naming a renderer,
+        so the quoted span has to be true of BOTH. Asserted separately from the
+        doc check: "they diverged" and "the doc is stale" are different repairs."""
+        recall, recon = emitted
+        shared = self._shared(emitted)
+        assert recall.startswith(shared) and recon.startswith(shared)
+
+    def test_a_reworded_skill_quote_is_CAUGHT(self, emitted: tuple[str, str]) -> None:
+        """🔴 POSITIVE CONTROL. A pin that cannot go red is a claim about nothing.
+
+        The mutation is the drift that actually happens — someone "tightens" the
+        bullet's wording — not a deletion of the file.
+        """
+        doc = ANALYZE_SERVICE_SKILL.read_text(encoding="utf-8")
+        quote = self._shared(emitted)
+        self._assert_quoted(doc, quote)  # precondition: green on the real doc
+        reworded = doc.replace("no parsable", "no readable")
+        assert reworded != doc, "the rewrite was a no-op — the control is inert"
+        with pytest.raises(AssertionError) as caught:
+            self._assert_quoted(reworded, quote)
+        assert "SKILL.md" in str(caught.value), (
+            "the failure must name the doc, or a maintainer cannot tell which "
+            "side of the pin moved"
+        )
+
+    def test_the_pinned_doc_is_the_one_that_SHIPS(self) -> None:
+        """Negative control on the target: a check aimed at a file that happens to
+        contain everything is indistinguishable from one aimed at the wrong file."""
+        assert ANALYZE_SERVICE_SKILL.exists()
+        assert ANALYZE_SERVICE_SKILL.parent.parent.name == "skills"
+        doc = ANALYZE_SERVICE_SKILL.read_text(encoding="utf-8")
+        assert "a sentence deliberately absent from the analyze-service skill" not in doc
 
 
 class TestEveryScopeIsAsked:

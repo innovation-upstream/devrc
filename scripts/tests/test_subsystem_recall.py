@@ -537,8 +537,9 @@ class TestWhatItIsDegradesCleanly:
     #: A guard on a word is walkable by rewording, and this sentence is the whole
     #: claim — see `test_the_notice_claims_the_PARSE_not_the_ENTRY`.
     NOTICE = (
-        "(no parsable `## What it is` — absent, empty, or the heading was renamed, "
-        "so this read cannot say what the subsystem IS; re-derive it live)"
+        "(no parsable `## What it is` — absent, empty, or not parsed as a heading "
+        "[renamed, indented, fenced, among others], so this read cannot say what "
+        "the subsystem IS; re-derive it live)"
     )
 
     def test_both_states_are_NAMED_not_silently_dropped(self, tmp_path: Path) -> None:
@@ -584,6 +585,34 @@ class TestWhatItIsDegradesCleanly:
         # 🔴 …and it makes no claim about the entry that the parse cannot support.
         assert "never says what the subsystem IS" not in text
         assert "no `## What it is` content" not in text
+
+    def test_a_FENCED_heading_reaches_the_SAME_notice(self, tmp_path: Path) -> None:
+        """🔴 THE CAUSE THE OLD ENUMERATION LEFT UNNAMED, and why the list now
+        ends "among others".
+
+        `_heading_blocks` skips fenced regions wholesale, so a `## What it is`
+        inside a ``` fence is not a heading at all: it reaches this branch while
+        being neither absent, nor empty, nor RENAMED — the three words the notice
+        used to offer. An indented heading is not literally a rename either. The
+        headline (`no parsable`) was always right; only the tail enumeration was
+        narrower than its own branch, which reads as a closed list and sends the
+        reader looking for the two states it names.
+        """
+        store = tmp_path / "fenced"
+        (store / SCOPE).mkdir(parents=True)
+        marooned = "This entry DOES say what it is, inside a code fence."
+        fenced = f"```\n{rc.WHAT_HEADING}\n{marooned}\n```"
+        (store / SCOPE / "collector.md").write_text(
+            _entry("collector", SCOPE, what=None).replace(
+                "## Pointers", f"{fenced}\n\n## Pointers", 1
+            ),
+            encoding="utf-8",
+        )
+        text = rc.render_text(rc.recall(store, SCOPE))
+        assert marooned not in text, "fixture is inert — the extractor read into the fence"
+        assert self.NOTICE in text
+        # The rest of the entry is untouched: this is a section-level degrade.
+        assert POINTER_LINE in text and NUANCE_LINE in text
 
     def test_the_notice_does_NOT_reach_the_index_row(self, tmp_path: Path) -> None:
         """🔴 The body is where the reader is already looking; the index row is
