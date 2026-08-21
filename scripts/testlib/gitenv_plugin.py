@@ -10,7 +10,10 @@ Loaded two ways, exactly like `nolaunch_plugin` and `spool_plugin`:
 
 Two layers, and they answer different questions:
 
-  LAYER 1 — SANITISE (prevention). Strips `REPO_POINTER_VARS` from `os.environ`
+  LAYER 1 — SANITISE (prevention), a second time and deliberately so. The
+  shell side already cleared these at the top of whichever runner started this
+  process, before it resolved its ROOT; this repeats it for a BARE `pytest` that never
+  went through a runner. Strips `REPO_POINTER_VARS` from `os.environ`
   at IMPORT time, before pytest collects anything. Import time matters: several
   suites build real git repos at MODULE scope (`test_bash_guard.py::_mkrepo`,
   `test_guard_core.py`'s module-scoped cwd fixtures), which run during

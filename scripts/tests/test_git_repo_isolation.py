@@ -17,17 +17,19 @@ production GitHub remote. A gate run:
 🔴 AND NOT ONE FIXTURE WAS SLOPPY. Every git fixture in this repo passes
 `-C <tmp_path>/…`; several also pin `HOME`, `GIT_CONFIG_GLOBAL` and
 `GIT_CONFIG_SYSTEM`. `GIT_DIR` overrides `-C`, so one inherited environment
-variable defeats all of them simultaneously — which is why the fix is one
-`unset` and one plugin rather than a patch in fourteen test files. The tmpdir
+variable defeats all of them simultaneously — which is why the fix is an `unset`
+and a plugin rather than a patch in fourteen test files. The tmpdir
 paths written into the real config are the tell: the tests computed the RIGHT
 value and git wrote it into the WRONG repository.
 
 HOW THIS FILE IS BUILT, and why each layer is not redundant with the next:
 
-  1. LEDGERS. The variable list is spelled in Python (`testlib/gitenv.py`) and
-     in bash (`scripts/run-tests.sh`, because HOOK_TESTS and SHELL_TESTS never
-     load a pytest plugin). Pinned in BOTH directions — a set that only grows
-     on one side is a guard that protects twelve targets and not five.
+  1. LEDGERS. The variable list is owned once in Python (`testlib/gitenv.py`)
+     and re-spelled in each of the three shell runners — they need it because
+     HOOK_TESTS, SHELL_TESTS and the node tier never load a pytest plugin, and
+     because an inherited GIT_DIR breaks ROOT resolution before any Python runs.
+     Pinned in BOTH directions for every spelling: a set that only grows on one
+     side is a guard that protects twelve targets and not five.
   2. THE DETECTOR, as a unit. Does `snapshot` actually MOVE when a ref moves?
      Reported as a pair with a no-op control, never as a bare zero.
   3. 🔴 THE INCIDENT ITSELF, as a nested-pytest control pair. One run WITHOUT
@@ -54,6 +56,21 @@ ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = ROOT / "scripts"
 RUN_TESTS = SCRIPTS / "run-tests.sh"
 CONFTEST = SCRIPTS / "tests" / "conftest.py"
+
+# Every entry point that resolves a ROOT with `git rev-parse --show-toplevel`
+# and then runs tests. All three carry GUARD 9's `unset`, and all three must run
+# it BEFORE that line — see test_every_runner_clears_BEFORE_it_resolves_its_root.
+#
+# 🔴 THREE SPELLINGS RATHER THAN ONE SOURCED FILE, and the reason is measured,
+# not aesthetic: `testlib/runner_patch.py` writes a patched COPY of
+# `run-tests.sh` into a tmp dir and about fifteen tests drive that copy. A copy
+# cannot source a sibling `lib/` that was never copied with it — the first
+# version of this guard did exactly that and turned those fifteen red with
+# `run-tests: FATAL — cannot source lib/git-repo-pointers.sh`. So the SET is
+# owned once, in `testlib/gitenv.py`, and every spelling is pinned to it here.
+RUNNERS = (SCRIPTS / "run-tests.sh",
+           SCRIPTS / "run-node-tests.sh",
+           SCRIPTS / "gate.sh")
 
 sys.path.insert(0, str(SCRIPTS))
 
@@ -116,63 +133,126 @@ def _mkrepo(path: Path, branch: str = "main") -> Path:
 # --------------------------------------------------------------------------- #
 # 0. harness self-validation
 # --------------------------------------------------------------------------- #
-def test_the_runner_and_the_conftest_exist():
-    """Every ledger assertion below reads these two files. If either moved, the
-    assertions would parse an empty string and pass while measuring nothing."""
-    assert RUN_TESTS.is_file(), f"{RUN_TESTS} missing — the ledger tests are vacuous"
-    assert CONFTEST.is_file(), f"{CONFTEST} missing — the ledger tests are vacuous"
+def test_every_file_the_ledgers_read_exists():
+    """Every ledger assertion below reads one of these. If one moved, the
+    assertion would parse an empty string and pass while measuring nothing."""
+    for path in (RUN_TESTS, CONFTEST, *RUNNERS):
+        assert path.is_file(), f"{path} missing — the ledger tests are vacuous"
 
 
 # --------------------------------------------------------------------------- #
-# 1. THE LEDGERS — one rule, two spellings, pinned both ways
+# 1. THE LEDGERS — one owner (gitenv.py), four spellings, pinned both ways
 # --------------------------------------------------------------------------- #
-def _shell_unset_names() -> list[str]:
-    """The names GUARD 9's `unset` line in run-tests.sh actually clears.
+def _shell_unset_names(runner: Path) -> list[str]:
+    """The names `runner`'s GUARD 9 block actually clears.
 
-    Joins backslash continuations first: reading only the first physical line
-    would silently measure three names out of eleven and report agreement on a
-    ledger that is two thirds unimplemented.
+    Read out of the ARRAY LITERAL, comments stripped, and the array is then
+    required to be what the `unset` line expands — so a runner that keeps the
+    array for show and unsets something else cannot pass.
     """
-    text = RUN_TESTS.read_text(encoding="utf-8")
-    joined = re.sub(r"\\\n\s*", " ", text)
-    matches = re.findall(r"^\s*unset\s+(GIT_[A-Z_ ]+)$", joined, re.M)
-    assert matches, (
-        "no `unset GIT_…` line found in scripts/run-tests.sh. GUARD 9's shell "
-        "half is what protects the NON-pytest targets (HOOK_TESTS, SHELL_TESTS) "
-        "— they never load a plugin."
+    text = runner.read_text(encoding="utf-8")
+    m = re.search(r"^DEVRC_GIT_REPO_POINTERS=\(\n(.*?)^\)$", text, re.M | re.S)
+    assert m, (
+        f"no DEVRC_GIT_REPO_POINTERS array in {runner.name}. GUARD 9's shell half "
+        "is what protects the NON-pytest targets (HOOK_TESTS, SHELL_TESTS, the "
+        "node tier) and what keeps ROOT resolvable at all under an inherited "
+        "GIT_DIR."
+    )
+    assert 'unset "${DEVRC_GIT_REPO_POINTERS[@]}"' in text, (
+        f"{runner.name} declares the array but never unsets it. 🔴 A declaration "
+        "is not a code path (claude/RULES.md)."
     )
     names: list[str] = []
-    for m in matches:
-        names.extend(m.split())
+    for line in m.group(1).splitlines():
+        line = line.split("#", 1)[0].strip()
+        if line:
+            names.extend(line.split())
     return names
 
 
-def test_the_shell_and_python_pointer_ledgers_agree():
-    """🔴 BOTH DIRECTIONS. A name in Python and not in bash leaves the five
-    non-pytest targets exposed; a name in bash and not in Python leaves a bare
-    `pytest` exposed. Either way the guard's docstring claims coverage it does
-    not have."""
-    shell = _shell_unset_names()
+@pytest.mark.parametrize("runner", RUNNERS, ids=lambda p: p.name)
+def test_the_shell_and_python_pointer_ledgers_agree(runner):
+    """🔴 BOTH DIRECTIONS, for EVERY runner. A name in Python and not in a
+    runner leaves that runner's non-pytest targets exposed and its ROOT
+    resolvable only by luck; a name in a runner and not in Python leaves a bare
+    `pytest` exposed. Either way the guard claims coverage it does not have."""
+    shell = _shell_unset_names(runner)
     python = list(REPO_POINTER_VARS)
     assert sorted(shell) == sorted(python), (
-        "GUARD 9's two ledgers disagree.\n"
-        f"  only in run-tests.sh : {sorted(set(shell) - set(python))}\n"
+        f"GUARD 9's ledgers disagree between {runner.name} and gitenv.py.\n"
+        f"  only in {runner.name}: {sorted(set(shell) - set(python))}\n"
         f"  only in gitenv.py    : {sorted(set(python) - set(shell))}\n"
-        "Update both, in the same commit."
+        "Update every spelling, in the same commit."
     )
 
 
-def test_the_shell_ledger_has_no_duplicates():
+@pytest.mark.parametrize("runner", RUNNERS, ids=lambda p: p.name)
+def test_the_shell_ledger_has_no_duplicates(runner):
     """A duplicated name reads as a longer list than it is."""
-    shell = _shell_unset_names()
-    assert len(shell) == len(set(shell)), f"duplicate names in the unset line: {shell}"
+    shell = _shell_unset_names(runner)
+    assert len(shell) == len(set(shell)), f"duplicates in {runner.name}: {shell}"
 
 
-def test_GIT_DIR_is_on_the_ledger():
+def test_GIT_DIR_is_on_every_ledger():
     """The one that actually happened. Pinned by name so a future prune of the
     list cannot quietly drop the variable the incident was made of."""
     assert "GIT_DIR" in REPO_POINTER_VARS
-    assert "GIT_DIR" in _shell_unset_names()
+    for runner in RUNNERS:
+        assert "GIT_DIR" in _shell_unset_names(runner), runner.name
+
+
+def _root_line(text: str) -> int:
+    """The line that ASSIGNS ROOT from `rev-parse --show-toplevel`.
+
+    🔴 Comment lines are skipped, and `ROOT=` is required on the line. The first
+    version matched any mention of the phrase and therefore matched GUARD 9's
+    own explanatory COMMENT — which sits above the assignment, so all three
+    runners reported "clears AFTER ROOT" while being correctly ordered. A
+    parser that cannot tell code from prose is measuring the wrong thing.
+    """
+    for i, line in enumerate(text.splitlines(), 1):
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            continue
+        if "ROOT=" in line and "rev-parse" in line and "--show-toplevel" in line:
+            return i
+    return -1
+
+
+def _clear_line(text: str) -> int:
+    for i, line in enumerate(text.splitlines(), 1):
+        if line.strip() == 'unset "${DEVRC_GIT_REPO_POINTERS[@]}"':
+            return i
+    return -1
+
+
+@pytest.mark.parametrize("runner", RUNNERS, ids=lambda p: p.name)
+def test_every_runner_clears_BEFORE_it_resolves_its_root(runner):
+    """🔴 ORDER, not merely presence — and this is a MEASURED requirement, not a
+    tidiness preference.
+
+    All three runners resolve their root with
+    `git -C "$(dirname "$0")" rev-parse --show-toplevel`. With GIT_DIR set and
+    no GIT_WORK_TREE, git takes the CWD as the top of the work tree, so that
+    returns `<repo>/scripts`; the runner then looks for
+    `<repo>/scripts/scripts/run-tests.sh` and exits 127 having produced NO
+    verdict line. Found by running the gate end-to-end with a poisoned GIT_DIR —
+    the first placement of this guard was *after* the ROOT block and the whole
+    gate died before reaching it.
+
+    Same class as the `unset CDPATH` sitting a few lines under run-tests.sh's
+    ROOT block, and recorded in the same spirit.
+    """
+    text = runner.read_text(encoding="utf-8")
+    clear = _clear_line(text)
+    root = _root_line(text)
+    assert clear > 0, f"{runner.name} has no GUARD 9 `unset` line at all"
+    assert root > 0, f"{runner.name} has no `rev-parse --show-toplevel` line to order against"
+    assert clear < root, (
+        f"{runner.name} clears the git repo pointers at line {clear}, AFTER it "
+        f"resolves ROOT at line {root}. An inherited GIT_DIR then makes ROOT "
+        f"`<repo>/scripts` and the run dies exit 127 with no verdict."
+    )
 
 
 def test_every_pytest_target_gets_the_detector():

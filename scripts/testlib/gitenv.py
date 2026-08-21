@@ -34,9 +34,15 @@ merely being consistent with it: the tmpdir paths written into the clone's
 config are the tests' OWN correct values. The tests computed the right thing
 and git wrote it into the wrong repository.
 
-WHAT THIS MODULE OWNS (one rule, one place — it is spelled in bash in
-`scripts/run-tests.sh` and in Python here, and `scripts/tests/
-test_git_repo_isolation.py` pins the two lists against each other):
+WHAT THIS MODULE OWNS. `REPO_POINTER_VARS` below is the ONE owner of the set.
+It is re-spelled as a bash array at the top of `run-tests.sh`,
+`run-node-tests.sh` and `gate.sh` — each BEFORE that script resolves its own
+ROOT — and `scripts/tests/test_git_repo_isolation.py` pins every spelling
+against this tuple in both directions, plus the ordering. Three shell copies
+rather than one sourced file because `testlib/runner_patch.py` writes a patched
+COPY of `run-tests.sh` into a tmp dir that ~15 tests drive, and a copy cannot
+source a sibling `lib/` that was never copied with it (measured: the sourced
+version turned all fifteen into a FATAL):
 
   1. `REPO_POINTER_VARS` — the environment variables that decide WHICH
      repository a git command lands in. Stripping them is the FIX.
@@ -66,13 +72,15 @@ from pathlib import Path
 # --------------------------------------------------------------------------- #
 # 1. THE LEDGER: what redirects git at a repository
 # --------------------------------------------------------------------------- #
-# 🔴 ORDERED and EXACT. `scripts/run-tests.sh` spells the same names in its
-# GUARD 9 `unset` line — it has to, because the non-pytest targets (HOOK_TESTS,
-# SHELL_TESTS) never load a pytest plugin — and
-# `test_git_repo_isolation.py::test_the_shell_and_python_pointer_ledgers_agree`
-# fails if the two sets diverge in EITHER direction. Adding a name here without
-# adding it there would leave five targets unprotected while this file's
-# docstring claimed otherwise.
+# 🔴 ORDERED and EXACT. Each of the three shell runners spells the same names
+# in a `DEVRC_GIT_REPO_POINTERS` array — they have to, because the non-pytest
+# targets (HOOK_TESTS, SHELL_TESTS, the node tier) never load a pytest plugin,
+# and because an inherited GIT_DIR corrupts each runner's ROOT resolution before
+# any Python runs. `test_git_repo_isolation.py::
+# test_the_shell_and_python_pointer_ledgers_agree` is parametrised over all
+# three and fails if any diverges from this tuple in EITHER direction. Adding a
+# name here without adding it there would leave those targets unprotected while
+# this file's docstring claimed otherwise.
 REPO_POINTER_VARS: tuple[str, ...] = (
     "GIT_DIR",                            # the repository itself; beats -C
     "GIT_WORK_TREE",                      # the working tree

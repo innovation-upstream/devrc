@@ -117,6 +117,30 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# --- GUARD 9: NO TEST MAY OPERATE ON THE REPO THE SUITE RUNS FROM -------------
+# 🔴 BEFORE the ROOT block below, not after it: with GIT_DIR set and no
+# GIT_WORK_TREE, git takes the CWD as the work tree, so
+# `rev-parse --show-toplevel` returns `<repo>/scripts` and this script dies
+# `exit 127` with no verdict. The 2026-08-21 incident, the reproduction, and the
+# reason this block is spelled in three files rather than sourced from one are
+# in `scripts/run-tests.sh`'s copy of this header. The SET is owned by
+# `scripts/testlib/gitenv.py::REPO_POINTER_VARS`; every spelling is pinned
+# two-way by `scripts/tests/test_git_repo_isolation.py`.
+DEVRC_GIT_REPO_POINTERS=(
+  GIT_DIR                            # the repository itself; beats -C
+  GIT_WORK_TREE                      # the working tree
+  GIT_COMMON_DIR                     # where refs/config actually live
+  GIT_INDEX_FILE                     # the index a `git add` writes
+  GIT_OBJECT_DIRECTORY               # where new objects are written
+  GIT_ALTERNATE_OBJECT_DIRECTORIES   # extra object stores
+  GIT_NAMESPACE                      # the ref namespace refs land in
+  GIT_PREFIX                         # hook-injected pathspec prefix
+  GIT_GRAFT_FILE                     # repo-scoped grafts
+  GIT_SHALLOW_FILE                   # repo-scoped shallow list
+  GIT_CONFIG                         # legacy: the file `git config` WRITES
+)
+unset "${DEVRC_GIT_REPO_POINTERS[@]}"
+
 if [ -z "$ROOT" ]; then
   ROOT="$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel 2>/dev/null || true)"
   [ -n "$ROOT" ] || ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
