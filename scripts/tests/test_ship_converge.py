@@ -2418,11 +2418,25 @@ def test_the_sandbox_refuses_a_run_that_reaches_ssh(repo):
     reason the shim exists.
     """
     real_target = _host_role_constant("LAPTOP_SSH_DEFAULT")
-    # 🔴 POSITIVE CONTROL for the refusal itself: a real ssh IS on this host, so
-    # "ssh failed" below is the shim refusing, not `command not found`.
-    assert shutil.which("ssh"), (
-        "no ssh on this host at all, so the refusal this test reads could be an "
-        "ENOENT and the shim would be unproven"
+    # 🔴 POSITIVE CONTROL for the refusal itself — the failure below must be the
+    # shim refusing, not `ssh: command not found`.
+    #
+    # 🔴 IT PROBES THE RUN'S OWN PATH, NOT THE AMBIENT ONE, and that distinction
+    # is the whole fix. The first version asserted `shutil.which("ssh")`, which
+    # is wrong twice: it reads the PYTEST process's PATH when the run's PATH is
+    # composed by Repo.env, and it makes "a real ssh exists on this host" a
+    # precondition — a dimension the two tiers disagree about. Measured
+    # 2026-08-21: green on the dev host, FAILED in the nix build sandbox, where
+    # no `ssh` exists at all. A suite whose config pins a dimension is blind to
+    # it; this probe is hermetic, so both tiers exercise the same thing.
+    probe = subprocess.run(
+        ["ssh", "-probe-that-never-connects"],
+        capture_output=True, text=True, env=repo.env(), timeout=60,
+    )
+    assert probe.returncode == SANDBOX_REFUSAL_RC and SANDBOX_REFUSAL in probe.stderr, (
+        f"`ssh` under this run's own environment is not the refusing shim "
+        f"(rc={probe.returncode}), so a failure below could be an ENOENT and "
+        f"the shim would be unproven\n{probe.stdout}\n{probe.stderr}"
     )
 
     rc, out = repo.ship(no_remote=False)
