@@ -199,7 +199,7 @@ class Repo:
 
     def __init__(self, tmp_path, gitconfig_extra="", stale_managed=(), phantom_managed=False,
                  second_host=False, ship_in_repo=False, ship_changes=True,
-                 ship_pad_lines=0, ship_broken=False):
+                 ship_pad_lines=0, ship_broken=False, lib_broken=None):
         """`stale_managed` seeds those entries from the BASE commit's bytes.
 
         That is the real staleness shape, not a synthetic one: the deployed
@@ -221,8 +221,14 @@ class Repo:
         running script with a much SHORTER one and see whether the run survives.
         `ship_broken` makes the INCOMING copy fail to parse, which is the shape
         where `exec bash <new>` would hand back bash's own exit 2 from a run that
-        has already converged and switched the local host.
+        has already converged and switched the local host. `lib_broken`
+        ("top"/"end") does the same to the OTHER watched file — the SOURCED
+        `lib/host-role.sh`, whose failure mode is not exit 2 at all; see
+        break_lib_source.
         """
+        assert lib_broken in (None, "top", "end"), (
+            f"lib_broken must be None/'top'/'end', got {lib_broken!r}"
+        )
         self.root = tmp_path
         self.origin = tmp_path / "origin.git"
         self.work = tmp_path / "work"
@@ -298,7 +304,7 @@ class Repo:
             # OTHER writer to be the only thing superseding the script.
             self._write_ship_into(
                 builder, 2 if ship_changes else 1, pad_lines=ship_pad_lines,
-                broken=ship_broken,
+                broken=ship_broken, lib_broken=lib_broken,
             )
         self._git(builder, "add", "f", "added-upstream.txt", *self.SOURCE_PATHS, *extra)
         self._git(builder, "commit", "-q", "-m", "ahead")
@@ -386,7 +392,63 @@ class Repo:
             cls.SHIP_BODY_OPEN, f"{cls.SHIP_BODY_OPEN}{cls.SHIP_SYNTAX_ERROR}\n", 1
         )
 
-    def _write_ship_into(self, tree, version, pad_lines=0, broken=False):
+    # 🔴 THE LIB IS THE OTHER WATCHED FILE, AND IT BREAKS DIFFERENTLY.
+    #
+    # `SHIP_SELF_WATCH` holds ship.sh AND lib/host-role.sh, but only ship.sh is
+    # ever exec'd — the lib is SOURCED. A syntax error in a sourced file does not
+    # kill bash the way `exec bash <broken>` does: `source` reports the error,
+    # returns non-zero (ship.sh runs without `set -e`, so nothing notices), and
+    # execution continues with every function defined AFTER the error missing.
+    # WHERE the error sits therefore decides the whole outcome, so the two
+    # positions are separate cases and not one:
+    #
+    #   "top" — inside the FIRST function definition, after the IP constants.
+    #           resolve_local_role/local_ipv4s never get defined, ship.sh's
+    #           `SHIP_ROLE="$(resolve_local_role)"` yields "" and the run exits 6
+    #           ("could not identify this host") — on a re-exec, that is rc 6
+    #           returned by pass 2 after pass 1 already converged and switched
+    #           the local host. Measured 2026-08-21.
+    #
+    #           🔴 NOT placed above the constants, deliberately: ship.sh's own
+    #           rc-6 message interpolates $WORKBENCH_IP_PRIMARY, and under `set
+    #           -u` an unset one kills the shell with a DIFFERENT status. The
+    #           test would then be green about a hazard it never produced.
+    #
+    #   "end" — after every function definition, before the standalone-probe
+    #           block. The lib is fully usable, so the run completes and prints
+    #           `ship: converged + verified` at rc 0: a GREEN VERDICT OVER A
+    #           BROKEN DEPLOY, with bash's diagnosis only on stderr. Measured
+    #           2026-08-21.
+    #
+    # Unlike ship.sh (one `{ ... }` group ending in `exit`, so an error after the
+    # closing brace is never parsed — see break_ship_source), host-role.sh is a
+    # flat sequence of commands with no `exit` on the sourced path, so bash's
+    # reader really does reach both sites. That is asserted, not assumed: the
+    # tests below require bash's syntax-error message in the RUN's output.
+    LIB_SYNTAX_ERROR = "fi"
+    LIB_BREAK_SITES = {
+        "top": ("detect_role() {\n", "after"),
+        "end": ('if [ "${BASH_SOURCE[0]}" = "${0}" ]; then\n', "before"),
+    }
+
+    @classmethod
+    def break_lib_source(cls, text, where):
+        """Make `text` a copy of host-role.sh that bash refuses to PARSE."""
+        anchor, side = cls.LIB_BREAK_SITES[where]
+        n = text.count(anchor)
+        assert n == 1, (
+            f"expected exactly one {where!r} injection site ({anchor!r}) in "
+            f"{HOST_ROLE_LIB}, found {n}. The site moved; this fixture would "
+            f"break the lib somewhere other than the position it is named for, "
+            f"and the outcome that position exists to produce would not occur."
+        )
+        err = f"{cls.LIB_SYNTAX_ERROR}\n"
+        return text.replace(
+            anchor, anchor + err if side == "after" else err + anchor, 1
+        )
+
+    def _write_ship_into(self, tree, version, pad_lines=0, broken=False,
+                         lib_broken=None):
         """Commit the real ship.sh + its lib into the throwaway repo.
 
         Returns the pathspec list to `git add`. The lib is copied verbatim: it is
@@ -402,7 +464,10 @@ class Repo:
         s.chmod(0o755)
         lib = tree / "scripts" / "lib" / "host-role.sh"
         lib.parent.mkdir(parents=True, exist_ok=True)
-        lib.write_text(HOST_ROLE_LIB.read_text())
+        lib_text = HOST_ROLE_LIB.read_text()
+        if lib_broken:
+            lib_text = self.break_lib_source(lib_text, lib_broken)
+        lib.write_text(lib_text)
         return ["scripts/ship.sh", "scripts/lib/host-role.sh"]
 
     # -- fabricated home-manager generation --------------------------------- #
@@ -2558,6 +2623,124 @@ def test_a_syntactically_broken_new_copy_is_rc20_not_bash_2(tmp_path):
     assert "fleet state: local (workbench) WAS converged" in out, out
     # The file on disk really is the broken one, so this is not a mislabel.
     assert subprocess.run(["bash", "-n", str(ship)]).returncode != 0
+
+
+@pytest.mark.parametrize(
+    "where, hazard_rc, hazard_marker",
+    [
+        # The two positions produce two DIFFERENT wrong answers, so they are two
+        # cases and not one. Both measured 2026-08-21 against the pre-fix script.
+        ("end", 0, "ship: converged + verified"),
+        ("top", 6, "ship: could not identify this host"),
+    ],
+)
+def test_a_superseding_lib_that_does_not_parse_is_rc20_not_a_green_verdict(
+    tmp_path, where, hazard_rc, hazard_marker
+):
+    """🔴 The preflight has to cover the SOURCED half of SHIP_SELF_WATCH too.
+
+    `SHIP_SELF_WATCH` holds two files — this script and `lib/host-role.sh` — and
+    the preflight used to be `bash -n "$_ship_self"`, i.e. the exec'd half only.
+    The lib is the worse half to leave open, because a syntax error in a SOURCED
+    file does not abort anything: `source` reports it, returns non-zero (ship.sh
+    runs without `set -e`), and execution continues with every function defined
+    after the error MISSING. So the run does not die at bash's 2 the way
+    test_a_syntactically_broken_new_copy_is_rc20_not_bash_2 covers — it finishes
+    and publishes a wrong answer, which one depending on WHERE the error sits:
+
+      end -> rc 0 and `ship: converged + verified`, a green verdict over a deploy
+             whose host-identity lib is broken
+      top -> rc 6 `could not identify this host`, from pass 2 of a run whose pass
+             1 had already fast-forwarded and switched the local host
+
+    Same false-ledger-entry shape rc 20 exists to close, one code over. Both
+    outcomes are MEASURED below rather than asserted from the fix's own comment.
+    """
+    r = Repo(tmp_path, ship_in_repo=True, lib_broken=where)
+    ship = _repo_ship(r)
+    lib = r.work / "scripts" / "lib" / "host-role.sh"
+
+    # 🔴 INSTRUMENT VALIDATION, both directions and both files. The pair about to
+    # RUN must parse (or the run dies long before the guard) and the incoming LIB
+    # must not (or the fixture is inert and this passes vacuously) — while the
+    # incoming SCRIPT must still parse, because a broken one would fire the
+    # pre-existing exec'd-half guard and this test would be re-covering that.
+    for running in (ship, lib):
+        assert subprocess.run(["bash", "-n", str(running)]).returncode == 0, (
+            f"the RUNNING copy {running} does not parse; this test would fail "
+            f"before reaching the guard"
+        )
+    incoming_ship = tmp_path / "incoming-ship.sh"
+    incoming_ship.write_text(Repo.ship_source(2))
+    assert subprocess.run(["bash", "-n", str(incoming_ship)]).returncode == 0, (
+        "the incoming ship.sh does not parse, so the exec'd-half guard would "
+        "fire first and nothing here would be about the lib"
+    )
+    incoming_lib = tmp_path / "incoming-host-role.sh"
+    incoming_lib.write_text(Repo.break_lib_source(HOST_ROLE_LIB.read_text(), where))
+    assert subprocess.run(["bash", "-n", str(incoming_lib)]).returncode != 0, (
+        "the fixture's 'broken' lib parses fine, so nothing under test is "
+        "exercised and the guard is unreached"
+    )
+
+    rc, out = r.ship(script=ship)
+
+    assert rc == 20, (
+        f"a superseding LIB that does not parse handed back rc={rc}. The "
+        f"preflight covers only the file it execs, so the sourced half reaches "
+        f"the re-exec and pass 2 answers {hazard_rc} instead\n{out}"
+    )
+    assert "does not PARSE" in out, f"wrong guard fired\n{out}"
+    # ...and it names the LIB, not the script. Without this the assertion above
+    # is satisfied by the pre-existing exec'd-half guard firing for some other
+    # reason, which is the same message on a different file.
+    assert f"the new copy at {lib} does not PARSE" in out, (
+        f"the refusal did not name {lib}; it is not the lib that was refused\n{out}"
+    )
+    # 🔴 The SOURCED-vs-EXEC'D branch, pinned as whole sentences rather than as a
+    # word another branch can also spell. The two consequences differ (exit 2 on
+    # the exec'd half, a false green on this one), so an operator handed the
+    # wrong half's explanation is handed the wrong diagnosis.
+    assert (
+        "this file is SOURCED, not exec'd: a syntax error would NOT abort the run."
+        in out
+    ), f"the sourced-half explanation is missing\n{out}"
+    assert (
+        "exec'ing it would exit 2 (bash's syntax-error status)" not in out
+    ), f"the exec'd half's explanation was printed for a SOURCED file\n{out}"
+    assert "re-executing the NEW copy" not in out, (
+        f"the run re-exec'd anyway, so the refusal did not refuse\n{out}"
+    )
+    assert "converged + verified" not in out, out
+    # ...and it says what state the fleet is in, not just that it refused.
+    assert "fleet state: local (workbench) WAS converged" in out, out
+
+    # 🔴 THE BYTES ON DISK ARE THE ONES CLAIMED. A broken lib beside a ship.sh
+    # that still parses is what makes the rc 20 above attributable to the lib.
+    assert subprocess.run(["bash", "-n", str(lib)]).returncode != 0
+    assert subprocess.run(["bash", "-n", str(ship)]).returncode == 0
+
+    # 🔴 AND THE HAZARD ITSELF IS MEASURED, not assumed. `bash -n` rejecting a
+    # file does not mean RUNNING it misbehaves — that is exactly how the sibling
+    # fixture went inert once. This run is pass 2 verbatim: the same broken bytes
+    # the fast-forward just installed, sourced by the copy the guard refused to
+    # exec. Require the specific wrong answer before believing the guard above
+    # prevented anything.
+    hz_rc, hz_out = r.ship(script=ship)
+    assert "syntax error" in hz_out, (
+        f"bash never reported a syntax error, so its reader never reached the "
+        f"{where!r} injection site and this fixture is inert at RUNTIME however "
+        f"`bash -n` scores it\n{hz_out}"
+    )
+    assert hz_rc == hazard_rc, (
+        f"running with the broken lib exits {hz_rc}, not the {hazard_rc} this "
+        f"position is named for — the bytes this fixture installs cannot produce "
+        f"the outcome the guard exists to prevent, so the rc 20 above would be "
+        f"about nothing\n{hz_out}"
+    )
+    assert hazard_marker in hz_out, (
+        f"expected {hazard_marker!r} from the broken-lib run\n{hz_out}"
+    )
 
 
 def test_a_garbage_self_gen_is_normalised_not_trusted(self_shipping):
