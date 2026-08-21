@@ -1120,3 +1120,36 @@ def test_the_error_message_carries_the_timestamp_the_response_returned(db):
     assert "1787331796630" in str(exc.value), (
         "the server timestamp must appear in the error — it is what "
         "`reconcile --sent --timestamp` needs and it is otherwise lost")
+
+
+def test_send_approved_refuses_an_EMPTY_response_rather_than_indexing_it(db):
+    """A malformed reply must raise the NORMALISER's error, not an IndexError.
+
+    Kills the `bypass-normaliser` mutant: replacing the call with
+    `result if isinstance(result, list) else [result]` produces identical
+    entries for well-formed input, so it survives every happy-path test. It
+    diverges only here — and it diverges into `entries[0]` on an empty list.
+    """
+    draft = _pending(db)
+    db.approve_draft(draft["id"], approval_ref="cg-empty-response")
+    with pytest.raises(ValueError, match="EMPTY"):
+        db.send_approved(draft["id"], transmit=lambda a, **kw: [])
+    assert db.get_draft(draft["id"])["send_state"] == "sending"
+
+
+def test_send_approved_refuses_a_MULTI_ENTRY_response_instead_of_guessing(db):
+    """🔴 The dangerous half of the same mutant.
+
+    Bypassing the normaliser on a two-entry reply does NOT raise — it silently
+    takes `entries[0]`, stores that timestamp and marks the draft `sent`. The
+    stored timestamp may belong to the OTHER message, which breaks sync-echo
+    dedupe (🔧 #4) exactly the way a locally generated one would.
+    """
+    draft = _pending(db)
+    db.approve_draft(draft["id"], approval_ref="cg-multi-response")
+    with pytest.raises(ValueError, match="refusing to guess"):
+        db.send_approved(draft["id"], transmit=lambda a, **kw: [
+            {"timestamp": "1787331796630"}, {"timestamp": "1787331796999"}])
+    assert db.get_draft(draft["id"])["send_state"] == "sending", (
+        "a response we cannot interpret must leave the draft for manual "
+        "reconciliation, never be recorded as sent")
