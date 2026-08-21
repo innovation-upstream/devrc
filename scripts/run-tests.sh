@@ -1586,6 +1586,7 @@ export DEVRC_TEST_SPOOL_GUARD_DIR="$SPOOL_DIR"
 # how ten of this file's own regression tests work — would inherit the flag, and
 # every target inside it would be scored as a nested session with no marker.
 unset DEVRC_TEST_SPOOL_IN_SESSION
+unset DEVRC_TEST_GITGUARD_IN_SESSION
 SPOOL_SESSIONS_LOG="$SPOOL_DIR/sessions.log"
 SPOOL_ISOLATED_LOG="$SPOOL_ISOLATED/current.log"
 
@@ -1626,6 +1627,194 @@ esac
 echo "run-tests: activity telemetry isolated for this run (GUARD 8)"
 echo "  ACTIVITY_SPOOL_DIR=$ACTIVITY_SPOOL_DIR"
 echo "  fallback trap      =$SPOOL_TRAP_LOG"
+
+# --- GUARD 9: NO TEST MAY MUTATE A REAL REPOSITORY, IN ANY TARGET --------------
+# 🔴 THE THIRD ENFORCEMENT POINT, attached to the same line for the same reason.
+#
+# MEASURED 2026-08-21: running this tier set `core.bare = true` on the
+# operator's working clone, renamed its `main` to `trunk`, repointed its
+# `origin` at a pytest tmpdir, left ~50 fixture commits in it, and pushed ~40 of
+# them over `refs/heads/main` on the PUBLIC repo in 43 seconds. Three feature
+# branches were hit too. Nothing was lost only because another session still
+# had the good sha.
+#
+# 🔴 A CLEANUP STEP CANNOT FIX THIS, WHICH IS WHY THE GUARD IS HERE. Every
+# fixture that re-points a real repo restores it on TEARDOWN; a killed run, an
+# assertion that raises past the restore, or `pytest -x` leaves the operator's
+# clone pointed at a temp directory with no error anywhere. So the mutating
+# `git` process is prevented from starting, not undone afterwards.
+#
+# 🔴 AND IT IS NOT A `-C`-DISCIPLINE PROBLEM. Every fixture in this tree binds
+# `-C` or `cwd=` correctly — audited mechanically, twice. The route that
+# reproduces the damage byte-for-byte is a single ambient variable:
+#
+#     GIT_DIR OVERRIDES `git -C <path>`.
+#
+# MEASURED (git 2.55): with GIT_DIR naming repo V, replaying
+# `scripts/repo-cos/tests/test_prescan.py::_init_clone` verbatim against a
+# tmp_path fixture renamed V's branch to `trunk`, repointed V's HEAD, rewrote
+# V's `user.email` to the fixture's `t@t`, committed the fixture's `seed.py`
+# into V, and PUSHED it to V's own origin. No call site named V. So there are
+# two halves below, and they are different fixes:
+#
+#   * the RETARGETING VARIABLES are unset. That is the direct fix for the one
+#     mechanism the incident proved, and a run that never inherits them never
+#     generates the write at all.
+#   * a `git` shim goes first on PATH for the whole script. That is the
+#     structural fix, and it is here rather than in 17 conftests for the reason
+#     GUARD 7's header already argues: 24 targets, of which HOOK_TESTS and
+#     SHELL_TESTS can never have a conftest.
+#
+# 🔴 A WORKTREE IS NOT CONTAINMENT. `git rev-parse --git-common-dir` from a
+# linked worktree resolves to the REAL clone's `.git` — shared refs, remotes,
+# config, reflog — so the shim protects COMMON DIRS and every agent worktree
+# under a protected clone is protected with it. "Develop this in a worktree" is
+# the intuitive answer and it is wrong; a standalone clone with `origin`
+# removed is the correct one.
+unset GIT_DIR GIT_COMMON_DIR GIT_WORK_TREE GIT_INDEX_FILE \
+      GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES \
+      GIT_CONFIG_COUNT \
+      GIT_NAMESPACE GIT_CEILING_DIRECTORIES GIT_PREFIX
+# GIT_CONFIG_KEY_<n>/VALUE_<n> are indexed, so there is no fixed name to unset;
+# git ignores them entirely without GIT_CONFIG_COUNT, which is unset above. The
+# indexed pairs are cleared anyway so a later `GIT_CONFIG_COUNT=` set by a test
+# cannot pick up an inherited value.
+for _i in 0 1 2 3 4 5 6 7 8 9; do
+  unset "GIT_CONFIG_KEY_$_i" "GIT_CONFIG_VALUE_$_i"
+done
+unset _i
+
+GITGUARD_DIR="$(mktemp -d)"
+# 🔴 `--allow-no-repos` is NOT a fallback for "resolution failed" — it is the
+# nix build sandbox, where the source is a copy with no `.git` and there is
+# genuinely no real clone to protect. The NETWORK and CONFIG rules still apply
+# there, and the count is PRINTED either way, because "armed against 1 repo" and
+# "armed against 0" are different claims and a silent zero reads like the first.
+GITGUARD_OUT="$(PYTHONPATH="$ROOT/scripts${PYTHONPATH:+:$PYTHONPATH}" \
+  python -m testlib.norepo --allow-no-repos "$GITGUARD_DIR" \
+    "$ROOT" "$HOME/workspace/devrc" 2>&1)" || {
+  echo "run-tests: FATAL — could not install the no-real-repo git shim into" >&2
+  echo "  $GITGUARD_DIR. Refusing to run: without it a test can set core.bare" >&2
+  echo "  on the operator's clone, rename its branches and push fixture" >&2
+  echo "  commits over the public repo's default branch (MEASURED 2026-08-21)." >&2
+  echo "$GITGUARD_OUT" | sed 's/^/    /' >&2
+  exit 2
+}
+GITGUARD_LOG="$GITGUARD_DIR/git-ops.log"
+GITGUARD_REPOS="$(printf '%s\n' "$GITGUARD_OUT" | grep -c '^protected=' || true)"
+export PATH="$GITGUARD_DIR:$PATH"
+export DEVRC_TEST_GITGUARD_DIR="$GITGUARD_DIR"
+
+# 🔴 TWO LEVERS THAT DO NOT DEPEND ON THE SHIM BEING REACHED. The shim
+# intercepts by PATH, so an absolute `/usr/bin/git`, or a test that REPLACES
+# $PATH rather than prepending to it, walks past it. These two are enforced by
+# git itself, in-process, and cover exactly the two halves of the incident that
+# left the machine. Adapted from devrc-62's `testlib/nogit_plugin` (PR #673,
+# not merged) — their measurement, our runner.
+#
+# 1. GIT_ALLOW_PROTOCOL=file — no transport but the local filesystem.
+#
+# 🔴 MEASURED 2026-08-21 ON THIS BOX, and it is worse than "a fixture might
+# reach the network": WITHOUT this lever and with the shim off PATH,
+# `git push git@github.com:innovation-upstream/devrc.git HEAD:refs/heads/main`
+# from a throwaway fixture printed `To github.com:innovation-upstream/devrc.git`
+# — a push PROGRESS header. It authenticated and CONNECTED over ssh; it failed
+# only because the update was rejected. That is the second half of this
+# incident, and it is one non-fast-forward away from landing.
+#
+# 🔴 AND THE OBVIOUS TEST OF THIS LEVER PROVES NOTHING. Without it the same push
+# still exits non-zero — by REJECTION (rc 1) or a credential prompt (rc 128) —
+# so `assert rc != 0` is satisfied whether or not the lever is doing anything.
+# The refusal is attributable ONLY when the message names the transport
+# (`fatal: transport 'ssh' not allowed`). `test_no_real_repo_writes.py` pins
+# that distinction rather than the exit status.
+#
+# Verified not to cost the suite anything: with the lever on, push to a
+# plain-path bare, push to a `file://` bare, and `git clone` from a plain-path
+# bare are all rc 0. Nothing in this tree needs https or ssh.
+export GIT_ALLOW_PROTOCOL=file
+
+# 2. The git CONFIG files are REDIRECTED, not merely protected.
+#
+# The shim already REFUSES a write whose resolved `--global`/`--system` file is
+# the operator's — including the measured vector, `githooks/install.sh` running
+# `git config --global core.hooksPath` with no env var set at all (verified:
+# rc 99, guard-named). But that refusal depends on the shim reading argv. This
+# makes the write STRUCTURALLY unable to land regardless of how git is invoked.
+# Belt and braces, deliberately: refuse AND redirect.
+#
+# 🔴 ORDER IS LOAD-BEARING — the guard is installed ABOVE this block. Deriving
+# the protected config set AFTER the redirect would protect the throwaway file
+# and leave `~/.gitconfig` unprotected, i.e. point the guard at the decoy it
+# just created. `testlib.norepo.main()` also protects `Path.home()/.gitconfig`
+# unconditionally so the two cannot drift apart.
+#
+# The throwaway is SEEDED with an identity: fixtures that commit without setting
+# their own `user.email` would otherwise fail "Please tell me who you are",
+# which would be this guard breaking the suite rather than protecting it.
+GITCONFIG_TRAP="$GITGUARD_DIR/gitconfig-trap"
+{ printf '[user]\n\tname = devrc test runner\n\temail = tests@localhost\n'
+  printf '[init]\n\tdefaultBranch = main\n'; } > "$GITCONFIG_TRAP" 2>/dev/null || {
+  echo "run-tests: FATAL — could not seed the git-config trap at $GITCONFIG_TRAP" >&2
+  exit 2
+}
+export GIT_CONFIG_GLOBAL="$GITCONFIG_TRAP"
+export GIT_CONFIG_SYSTEM=/dev/null
+export GIT_CONFIG_NOSYSTEM=1
+
+echo "run-tests: real repositories protected from this run (GUARD 9)"
+printf '%s\n' "$GITGUARD_OUT" | sed 's/^/  /'
+echo "  GIT_ALLOW_PROTOCOL=$GIT_ALLOW_PROTOCOL (no ssh/https transport for this run)"
+echo "  GIT_CONFIG_GLOBAL=$GIT_CONFIG_GLOBAL (redirected; the real one is also refused)"
+if [ "$GITGUARD_REPOS" -eq 0 ]; then
+  echo "  ⚠ NO real repository resolved — \$ROOT is not a git checkout and there is"
+  echo "    no \$HOME/workspace/devrc. That is expected ONLY in the nix build"
+  echo "    sandbox. The NETWORK and CONFIG rules below are still armed, and the"
+  echo "    per-target table says 'repo-probe=n/a' rather than printing a zero"
+  echo "    that would read as protection."
+fi
+
+# 🔴 THE PER-TARGET POSITIVE CONTROL, and the reason this guard is readable.
+# "0 refusals" is the observable a working guard and a guard wired to nothing
+# SHARE. Before every target the runner drives a case that MUST be refused and
+# watches the counter move, so each row is a PAIR — "N controls fired, 0 real
+# refusals" — never a bare zero. `DEVRC_TEST_GITGUARD_PROBE=1` changes only
+# WHICH ledger line the shim writes; the refusal is identical.
+#
+# The NETWORK probe works in every environment; the REPO probe needs a protected
+# repo, so it is run only when there is one and the count says so.
+GITGUARD_TAB="$(printf '\t')"
+GITGUARD_PROBE_TARGET="$(cat "$GITGUARD_DIR/probe-target.txt" 2>/dev/null || true)"
+GITGUARD_PROBES=1
+[ -n "$GITGUARD_PROBE_TARGET" ] && GITGUARD_PROBES=2
+GITGUARD_SEEN=()
+GITGUARD_B=0
+
+_gitguard_lines() {
+  if [ -f "$GITGUARD_LOG" ]; then wc -l < "$GITGUARD_LOG" | tr -d ' '; else echo 0; fi
+}
+_gitguard_slice() { # $1 = first line (1-based), $2 = last line
+  [ -f "$GITGUARD_LOG" ] || return 0
+  [ "$2" -ge "$1" ] || return 0
+  sed -n "$1,$2p" "$GITGUARD_LOG"
+}
+_gitguard_probe() {
+  # A remote that cannot exist, so a shim that somehow forwarded this would fail
+  # on DNS rather than reach anything real.
+  DEVRC_TEST_GITGUARD_PROBE=1 DEVRC_TEST_GITGUARD_VIA=inherited git ls-remote \
+    https://guard9-probe.invalid/probe.git >/dev/null 2>&1 || true
+  if [ -n "$GITGUARD_PROBE_TARGET" ]; then
+    DEVRC_TEST_GITGUARD_PROBE=1 DEVRC_TEST_GITGUARD_VIA=inherited \
+      git -C "$GITGUARD_PROBE_TARGET" config --local \
+      devrc.guard9.probe x >/dev/null 2>&1 || true
+  fi
+}
+_gitguard_mark_before() { GITGUARD_B="$(_gitguard_lines)"; }
+# $1 = target name. Every call MUST be preceded by the before-mark, or the range
+# it records belongs to whatever ran previously.
+_gitguard_account() {
+  GITGUARD_SEEN+=("$1|$(( GITGUARD_B + 1 ))|$(_gitguard_lines)")
+}
 
 # "<target>|<sess-from>|<sess-to>|<trap-from>|<trap-to>|<iso-from>|<iso-to>" —
 # three line ranges per target, so every count below is attributed to the target
@@ -1813,15 +2002,18 @@ run_pytest() {
   log="$(mktemp)"
   nl_before="$(_nolaunch_lines)"
   _spool_mark_before
+  _gitguard_mark_before
+  _gitguard_probe
   # 🔴 `-p testlib.nolaunch_plugin` is GUARD 7 and `-p testlib.spool_plugin` is
   # GUARD 8 (see each header). Both are on THIS line — the one place every
   # target is invoked — and not in two dozen conftests.
   python -m pytest "$d" -q -p no:cacheprovider -p testlib.nolaunch_plugin -p testlib.spool_plugin \
-    --no-header -rs >"$log" 2>&1
+    -p testlib.norepo_plugin --no-header -rs >"$log" 2>&1
   rc=$?
   nl_after="$(_nolaunch_lines)"
   NOLAUNCH_SEEN+=("$d|$(( nl_before + 1 ))|$nl_after")
   _spool_account "$d"
+  _gitguard_account "$d"
   cat "$log"
 
   # GUARD 4: parse pytest's summary line. `-q` emits it undecorated, e.g.
@@ -1942,6 +2134,8 @@ for HOOK_TEST in "${HOOK_TESTS[@]}"; do
   echo "=== script $HOOK_TEST ==="
   nl_before="$(_nolaunch_lines)"
   _spool_mark_before
+  _gitguard_mark_before
+  _gitguard_probe
   if python "$HOOK_TEST"; then
     RESULTS+=("PASS  $HOOK_TEST (script)")
   else
@@ -1956,6 +2150,10 @@ for HOOK_TEST in "${HOOK_TESTS[@]}"; do
   # marker and no fallback control — their protection is the two env exports,
   # and what is checked is that they leaked nothing into the trap.
   _spool_account "$HOOK_TEST"
+  # GUARD 9 accounts them identically: the shim is on PATH for this whole
+  # script, so a non-pytest target is protected and MEASURED exactly like a
+  # pytest one. This is the half no conftest could ever have reached.
+  _gitguard_account "$HOOK_TEST"
   echo
 done
 
@@ -1981,6 +2179,8 @@ for SHELL_TEST in "${SHELL_TESTS[@]}"; do
   echo "=== script $SHELL_TEST ==="
   nl_before="$(_nolaunch_lines)"
   _spool_mark_before
+  _gitguard_mark_before
+  _gitguard_probe
   if bash "$SHELL_TEST"; then
     RESULTS+=("PASS  $SHELL_TEST (script)")
   else
@@ -1989,6 +2189,7 @@ for SHELL_TEST in "${SHELL_TESTS[@]}"; do
   fi
   NOLAUNCH_SEEN+=("$SHELL_TEST|$(( nl_before + 1 ))|$(_nolaunch_lines)")
   _spool_account "$SHELL_TEST"
+  _gitguard_account "$SHELL_TEST"
   echo
 done
 
@@ -2193,6 +2394,79 @@ if [ "${#spool_problems[@]}" -gt 0 ]; then
   fail=1
 fi
 rm -rf "$SPOOL_DIR"
+
+# --- GUARD 9 (evaluation): per-target real-repository accounting ---------------
+# One line per target, ALWAYS printed — including the zeros, and NEVER the zero
+# alone. `refused=0` on its own is exactly what a guard wired to nothing prints,
+# so every row carries `control=` beside it: the refusals this run DELIBERATELY
+# provoked before that target ran. The pair is the claim.
+echo "  ---- real-repository protection (GUARD 9) ----"
+echo "    protected repos=$GITGUARD_REPOS  probes/target=$GITGUARD_PROBES"
+gitguard_problems=()
+for t in "${TARGETS[@]}"; do
+  seen=0
+  for entry in "${GITGUARD_SEEN[@]}"; do
+    [ "${entry%%|*}" = "$t" ] && seen=1 && break
+  done
+  [ "$seen" -eq 1 ] || gitguard_problems+=("$t  — never accounted: run_pytest returned before GUARD 9 could measure it")
+done
+
+for entry in "${GITGUARD_SEEN[@]}"; do
+  gt="${entry%%|*}"
+  grest="${entry#*|}"
+  gfrom="${grest%%|*}"
+  gto="${grest#*|}"
+  gslice="$(_gitguard_slice "$gfrom" "$gto")"
+  # 🔴 A LITERAL TAB, via $(printf '\t'), never the two characters \t in a BRE.
+  # MEASURED: `grep -c '^git(control)\tvia=plugin'` warns "stray \ before t",
+  # matches NOTHING, and reported control=0 for EVERY target -- the accounting
+  # failing while the guard was perfectly healthy, which is indistinguishable
+  # from the guard being dead. claude/RULES.md: validate the instrument before
+  # reading its verdict.
+  gctl_plug=$(printf '%s\n' "$gslice" | grep -c "^git(control)${GITGUARD_TAB}via=plugin" || true)
+  gctl_inh=$(printf '%s\n' "$gslice" | grep -c "^git(control)${GITGUARD_TAB}via=inherited" || true)
+  ghits="$(printf '%s\n' "$gslice" | grep '^git(refused)' || true)"
+  gref=0
+  [ -n "$ghits" ] && gref=$(printf '%s\n' "$ghits" | grep -c . || true)
+
+  g_is_pytest=0
+  for t in "${TARGETS[@]}"; do [ "$t" = "$gt" ] && g_is_pytest=1 && break; done
+  if [ "$g_is_pytest" -eq 1 ]; then g_via="plugin+inherited"; else g_via="inherited (not pytest)"; fi
+  echo "    $gt  refused=$gref  control=plugin:$gctl_plug inherited:$gctl_inh  via=$g_via"
+
+  # 🔴 THE LEAK ITSELF. A refusal that is not one of this run's own probes is a
+  # test that tried to mutate a real repository, rewrite the operator's git
+  # config, or reach the network — and only this guard stopped it.
+  if [ "$gref" -gt 0 ]; then
+    gitguard_problems+=("$gt  — made $gref real-repository/network git call(s). They were REFUSED and did NOT run; a test in this target tried to write outside its own fixtures:"$'\n'"$(printf '%s\n' "$ghits" | sed 's/^/           /')")
+  fi
+  # 🔴 The REQUIRED direction, and the whole reason the probe exists: a target
+  # whose controls did not fire ran with the guard unarmed, so its refused=0
+  # above is not evidence of anything.
+  # 🔴 THE INHERITED CONTROL: the shim is armed in the RUNNER's environment.
+  if [ "$gctl_inh" -ne "$GITGUARD_PROBES" ]; then
+    gitguard_problems+=("$gt  — the INHERITED control fired $gctl_inh time(s), expected $GITGUARD_PROBES. The shim was not on PATH (or stopped refusing), so its refused=$gref means nothing. See scripts/testlib/norepo.py.")
+  fi
+  # 🔴 THE IN-PROCESS CONTROL, and it is a different claim. Without it,
+  # refused=0 is a statement about the runner rather than about this target —
+  # the whole table would read as rigorous while measuring one thing N times.
+  # Non-pytest targets can never load a plugin, so 0 is CORRECT for them and
+  # anything else means the slices are misattributed.
+  if [ "$g_is_pytest" -eq 1 ]; then
+    if [ "$gctl_plug" -ne "$GITGUARD_PROBES" ]; then
+      gitguard_problems+=("$gt  — the IN-PROCESS control fired $gctl_plug time(s), expected $GITGUARD_PROBES. testlib.norepo_plugin did not load (or the shim is not armed INSIDE this target's process), so refused=$gref describes the runner, not this target.")
+    fi
+  elif [ "$gctl_plug" -ne 0 ]; then
+    gitguard_problems+=("$gt  — a NON-pytest target recorded $gctl_plug in-process control(s); it can load no plugin, so the per-target slices are misattributed.")
+  fi
+done
+
+if [ "${#gitguard_problems[@]}" -gt 0 ]; then
+  echo "  ERROR: ${#gitguard_problems[@]} GUARD 9 problem(s):" >&2
+  for p in "${gitguard_problems[@]}"; do echo "         $p" >&2; done
+  fail=1
+fi
+rm -rf "$GITGUARD_DIR"
 
 # GUARD 6. One writer, fed the same value `exit` is about to take, so the
 # printed verdict and the process status cannot disagree — including through a
