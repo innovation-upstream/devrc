@@ -1700,6 +1700,20 @@ _nolaunch_ack_reason() {
 # Built AFTER $HOME is settled: an entry may be conditional, but its condition
 # must be the SAME predicate the test itself uses — never a blanket allowance,
 # or the pin degrades into the numeric ceiling it exists to beat.
+#
+# 🔴 A conditional entry must still live INSIDE the array literal below — never
+# as an `EXPECTED_SKIPS+=(…)` appended after the closing paren. `runner_patch.py`
+# neutralises this array for patched copies by regex on the LITERAL
+# (`^EXPECTED_SKIPS=\(.*?^\)` -> `EXPECTED_SKIPS=()`), because a copy driving a
+# throwaway target observes zero skips and would die "FEWER than pinned" for a
+# reason unrelated to the guard under test. An appended entry SURVIVES that
+# substitution and reintroduces exactly that failure.
+# Measured 2026-08-21: the `[ -n "$VAR" ] || EXPECTED_SKIPS+=(…)` form — which
+# the paragraph above reads as inviting — failed 8 tests across
+# test_activity_spool_isolation.py, test_gate_exit_truthfulness.py and
+# test_no_real_launchers_all_targets.py, none of which name this array.
+# The two-line control: after any edit here, `re.subn` the pattern above against
+# this file and assert both `n == 1` and that no `EXPECTED_SKIPS+=` survives.
 EXPECTED_SKIPS=(
   # Opt-in drift check against the LIVE homelab store — needs a kubeconfig and
   # network, neither of which a hermetic gate may have. Skips everywhere unless
