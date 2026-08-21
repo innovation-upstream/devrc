@@ -1,4 +1,0 @@
-git status
-ls -la
-nix-shell -p python3
-echo done
