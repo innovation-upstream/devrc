@@ -606,3 +606,85 @@ def test_the_activation_entry_runs_after_the_hook_files_land():
         "the registrar would run before ~/.claude/hooks/ is populated on a fresh "
         "host; declared dependencies: " + ", ".join(sorted(deps))
     )
+
+
+# --- the EVENT-MATCHER LEDGER, pinned against the tables that depend on it --- #
+def registrar_dict_keys(name):
+    """The KEYS of a module-level dict literal in the registrar.
+
+    `registrar_literal` cannot read SINGLE_EVENT_CMDS: its values are
+    `with_python(...)` CALLS, which `ast.literal_eval` refuses. The keys are
+    plain strings, and the keys are the whole question here.
+    """
+    tree = ast.parse(REGISTRAR.read_text(), filename=str(REGISTRAR))
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(isinstance(t, ast.Name) and t.id == name for t in node.targets):
+            continue
+        assert isinstance(node.value, ast.Dict), name
+        return [ast.literal_eval(k) for k in node.value.keys]
+    raise AssertionError("%s is not a module-level dict in %s" % (name, REGISTRAR))
+
+
+def registrar_events():
+    """Every event the registrar's own command tables register a hook on."""
+    events = set()
+    for name in ("NOTIFY_EVENTS", "LEDGER_EVENTS", "WRITEBACK_EVENTS"):
+        events |= set(registrar_literal(name))
+    events |= set(registrar_dict_keys("SINGLE_EVENT_CMDS"))
+    # POST_BASH_CMDS has no event table — its event is spelled in the loop that
+    # appends it — so it is named here rather than derived.
+    events.add("PostToolUse")
+    return events
+
+
+def test_every_event_the_registrar_writes_to_is_classified():
+    """🔴 THE DE-DUP IDENTITY DEPENDS ON THIS CLASSIFICATION, so an event the
+    registrar registers on must not fall through to the unknown-event default.
+
+    `matcher` is part of the de-dup identity only on an event that HAS matchers;
+    on `Stop` / `UserPromptSubmit` the event always fires on every occurrence, so
+    two entries for one script are a double-fire whatever their matchers say.
+    An unclassified event is treated as matcher-supporting — safe, because it can
+    only make the registrar DECLINE to remove something — but for an event it
+    registers on itself that silence is a decision nobody made.
+
+    ⚠ Labelled honestly: an INVARIANT GUARD, not regression coverage. It is green
+    for every event that exists in the tables today; it is here because the NEXT
+    event added to a table lands the same way. Mutation-checked reachable: adding
+    an event to a table without classifying it turns this red naming it.
+    """
+    no_matcher = set(registrar_literal("NO_MATCHER_EVENTS"))
+    with_matcher = set(registrar_literal("MATCHER_EVENTS"))
+
+    # Positive controls: a parser that found nothing would make this vacuous.
+    assert len(registrar_events()) >= 5, registrar_events()
+    assert "Stop" in registrar_events(), registrar_events()
+    assert len(no_matcher) >= 5 and len(with_matcher) >= 5
+
+    assert no_matcher & with_matcher == set(), (
+        "an event is claimed BOTH to have and not to have matcher support: %r"
+        % sorted(no_matcher & with_matcher))
+    unclassified = registrar_events() - (no_matcher | with_matcher)
+    assert unclassified == set(), (
+        "the registrar registers hooks on these events but classifies neither "
+        "way, so their de-dup identity falls through to the unknown-event "
+        "default: " + ", ".join(sorted(unclassified)))
+
+
+def test_the_documented_classification_of_the_events_that_drive_the_behaviour():
+    """The ledger's CONTENT, not just its shape — these six are what the de-dup
+    identity actually turns on, and a silent edit to either set would change how
+    real entries are deleted with no other test moving.
+
+    Values are from the Claude Code hooks documentation: the NO_MATCHER events
+    "always fire on every occurrence"; the others are narrowed by `matcher`
+    (SessionStart's selects the SOURCE — startup/resume/clear/compact/fork —
+    rather than a tool name, but it is a real scope either way).
+    """
+    no_matcher = set(registrar_literal("NO_MATCHER_EVENTS"))
+    with_matcher = set(registrar_literal("MATCHER_EVENTS"))
+    assert {"Stop", "UserPromptSubmit"} <= no_matcher, sorted(no_matcher)
+    assert {"PreToolUse", "PostToolUse", "SessionStart",
+            "SubagentStop"} <= with_matcher, sorted(with_matcher)
