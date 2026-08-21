@@ -2162,3 +2162,81 @@ class TestSkillAndModuleAgree:
             "omit it from the deploy and `home-manager switch` will succeed with "
             "the file simply absent."
         )
+
+
+class TestBlockedCommitLeavesNoTrace:
+    """A REFUSED commit must not leave the doc written and staged.
+
+    🔴 MEASURED 2026-08-21, and this is the failure the class exists for. A
+    PreToolUse hook enforcing "never commit in the primary clone" refused the
+    `git commit` — correct behaviour — but the tool had ALREADY written the
+    merged doc and `git add`ed it. The refusal therefore left a modified, STAGED
+    file in a checkout shared with other sessions, where the next person's
+    `git commit` sweeps it in. The caller then re-ran the tool to read the error
+    and the merge appended the same block a SECOND time.
+
+    A blocked commit is not a no-op, and the caller has no reason to expect it
+    left anything behind: `status=failed` reads as "nothing happened".
+    """
+
+    @staticmethod
+    def _block_commits(repo: Path) -> None:
+        """Refuse every commit, the way a real guard hook does."""
+        hook = repo / ".git" / "hooks" / "pre-commit"
+        hook.write_text("#!/bin/sh\necho 'blocked by guard' >&2\nexit 1\n",
+                        encoding="utf-8")
+        hook.chmod(0o755)
+
+    def test_the_hook_actually_blocks(self, repo: Path) -> None:
+        """POSITIVE CONTROL for the fixture itself.
+
+        Without this, a hook that silently failed to install would make every
+        assertion below pass for the wrong reason — the commit would simply
+        succeed and there would be nothing to roll back."""
+        self._block_commits(repo)
+        (repo / "canary.txt").write_text("x\n", encoding="utf-8")
+        _sh("git", "add", "--", "canary.txt", cwd=repo)
+        out = subprocess.run(
+            ["git", "-C", str(repo), "commit", "-m", "should be refused"],
+            capture_output=True, text=True, env=dict(os.environ, **GIT_ENV),
+        )
+        assert out.returncode != 0, "the pre-commit hook did not block — fixture is inert"
+
+    def test_doc_is_restored_and_nothing_is_staged(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        before = doc_of(repo)
+        shas_before = commit_shas(repo)
+        self._block_commits(repo)
+
+        res = run_tool(repo, "--confirm", update=update_file)
+
+        assert res.returncode == 3, f"expected EXIT_FAIL, got {res.returncode}"
+        assert "status=failed" in res.stderr
+        # 🔴 The two assertions this class exists for.
+        assert doc_of(repo) == before, (
+            "the doc was left MODIFIED after the commit was refused — in a shared "
+            "checkout that is another session's `git commit` away from being swept in"
+        )
+        staged = _sh("git", "diff", "--cached", "--name-only", cwd=repo).split()
+        assert staged == [], f"paths left STAGED after a refused commit: {staged}"
+        assert commit_shas(repo) == shas_before, "a commit was made despite the refusal"
+
+    def test_unrelated_staged_work_is_not_unstaged_by_the_rollback(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """The rollback must be PATH-LIMITED, like the commit it undoes.
+
+        A blanket `git reset` would unstage a co-worker's staged files as a side
+        effect of our own failure — trading one shared-checkout defect for a
+        worse one."""
+        (repo / "OTHER.md").write_text("someone else's staged work\n", encoding="utf-8")
+        _sh("git", "add", "--", "OTHER.md", cwd=repo)
+        self._block_commits(repo)
+
+        run_tool(repo, "--confirm", update=update_file)
+
+        staged = _sh("git", "diff", "--cached", "--name-only", cwd=repo).split()
+        assert staged == ["OTHER.md"], (
+            f"the rollback must leave unrelated staged work alone; staged={staged}"
+        )

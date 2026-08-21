@@ -968,6 +968,57 @@ def not_pushed_report(repo: Path, remote: str, branch: str | None) -> str:
     return f"{NOT_PUSHED_HEADLINE}\n{why}\n{topic}\n{NOT_PUSHED_RETRY_NOTE}"
 
 
+def _undo_write(
+    repo: Path, doc: Path, relpath: str, original: bytes | None
+) -> str:
+    """Undo the doc write + `git add` after a commit that never happened.
+
+    🔴 PATH-LIMITED, exactly like the commit it is undoing. A blanket
+    `git reset` would unstage a co-worker's staged files as a side effect of OUR
+    failure — trading one shared-checkout defect for a worse one. `git restore
+    --staged -- <path>` touches only the index entry for that path.
+
+    Best-effort and non-raising: this runs on an error path, and a rollback that
+    threw would replace the caller's real diagnosis with its own. Whatever it
+    could not undo is RETURNED as text so the caller prints it — silence here
+    would be the same defect one level down.
+    """
+    left: list[str] = []
+    try:
+        # Unstage first: if restoring the bytes fails we still want the index
+        # clean, because a staged path is the half that another session's
+        # `git commit` picks up.
+        git(repo, "restore", "--staged", "--", relpath)
+    except GitError:
+        # `git restore` predates nothing we support, but a very old git or a
+        # path git no longer knows about can still refuse.
+        try:
+            git(repo, "reset", "--quiet", "HEAD", "--", relpath)
+        except GitError:
+            left.append(f"still STAGED: {relpath}")
+    try:
+        if original is None:
+            doc.unlink(missing_ok=True)
+        else:
+            doc.write_bytes(original)
+    except OSError:
+        left.append(f"still MODIFIED: {relpath}")
+    if left:
+        return (
+            "\n🔴 ROLLBACK INCOMPLETE — the commit did not happen, but this tree "
+            "was left changed: " + "; ".join(left) + "\n"
+            "  Restore it before doing anything else; in a shared checkout a "
+            "staged path is one `git commit` away from being swept into "
+            "someone else's commit:\n"
+            f"    git -C {repo} restore --source=HEAD --staged --worktree -- {relpath}"
+        )
+    return (
+        "\n(no trace left: the doc was restored and unstaged, so this tree is "
+        "byte-identical to before the run — re-running is safe and will not "
+        "append the update twice.)"
+    )
+
+
 def uncommitted_paths(repo: Path) -> list[str]:
     """Paths with uncommitted changes in `repo`'s working tree, staged or not.
 
@@ -1305,6 +1356,16 @@ def main(argv: list[str] | None = None) -> int:
             )
             return EXIT_BEHIND
 
+    # 🔴 A BLOCKED COMMIT IS NOT A NO-OP — capture enough to undo the write.
+    # MEASURED 2026-08-21: a PreToolUse hook enforcing "never commit in the
+    # primary clone" refused the commit below — correct behaviour — but the doc
+    # had already been written AND `git add`ed, so `status=failed` left a
+    # modified, STAGED file in a checkout shared with other sessions, where the
+    # next person's `git commit` sweeps it in. The caller then re-ran the tool to
+    # read the error and the merge appended the same block a SECOND time.
+    # `status=failed` reads as "nothing happened"; it must therefore BE that.
+    original: bytes | None = doc.read_bytes() if doc.exists() else None
+    committed = False
     try:
         doc.parent.mkdir(parents=True, exist_ok=True)
         doc.write_text(merged_text, encoding="utf-8")
@@ -1313,9 +1374,14 @@ def main(argv: list[str] | None = None) -> int:
         # Path-limited on purpose: exactly one commit, carrying exactly the
         # diff that was shown, even if the caller had other work staged.
         git(repo, "commit", "-m", subject, "--", relpath)
+        committed = True
         sha = git(repo, "rev-parse", "HEAD").strip()
     except (GitError, OSError) as exc:
-        print(f"status=failed\n{exc}", file=sys.stderr)
+        # Only roll back what did NOT happen. If the commit landed and only
+        # `rev-parse` failed, the tree is already correct and restoring the file
+        # would DISCARD a committed change — the opposite of the fix.
+        note = "" if committed else _undo_write(repo, doc, relpath, original)
+        print(f"status=failed\n{exc}{note}", file=sys.stderr)
         return EXIT_FAIL
 
     if args.push:
