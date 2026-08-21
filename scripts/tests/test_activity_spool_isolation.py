@@ -37,6 +37,15 @@ WHAT IS REGRESSION COVERAGE HERE AND WHAT IS NOT (RULES.md asks for the label):
     loading in NO target, and the leak detector pointing at a directory nothing
     writes to. Each asserts THIS guard's own message, not merely that the run
     went red.
+  * `test_a_nested_pytest_session_does_not_write_into_the_targets_ledger` is
+    REGRESSION coverage for a defect this guard found in ITSELF on its first
+    full run: `scripts/tests` reported `plugin=3`, because
+    `test_no_real_launchers.py` copies `scripts/tests/conftest.py` into nested
+    control/mutant sessions. Its sibling
+    `test_the_positive_control_for_that_is_a_nested_session_that_DOES_count`
+    exists so the `plugin=1` it asserts is not satisfied by a nested session
+    that never loaded the plugin — it removes the nesting flag from the child
+    environment and watches the count move to 2.
   * `test_the_control_of_those_mutants_is_green` is the positive control for all
     four, and pins the accounting line the others read.
   * the two-way token pin, the single-invocation pin and the accounting-site
@@ -118,6 +127,34 @@ import invocation
 
 os.environ.pop("ACTIVITY_SPOOL_DIR", None)
 assert invocation.emit_invocation("spool-probe", "dropped") != ""
+'''
+
+
+# A target whose test STARTS ANOTHER PYTEST that loads this plugin — the shape
+# `test_no_real_launchers.py` uses for its control/mutant pairs, and the shape
+# that first made `scripts/tests` report three session markers. `{extra}` is
+# substituted with either "" (inherit the nesting flag) or the code that removes
+# it, which is the whole control pair.
+_NESTING_TEST = '''\
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+
+def test_starts_a_nested_pytest_session(tmp_path):
+    inner = tmp_path / "inner"
+    inner.mkdir()
+    (inner / "test_inner.py").write_text("def test_ok():\\n    assert True\\n")
+    env = dict(os.environ)
+    {extra}
+    proc = subprocess.run(
+        [sys.executable, "-m", "pytest", str(inner), "-q", "-p", "no:cacheprovider",
+         "-p", "testlib.spool_plugin", "--no-header"],
+        capture_output=True, text=True, env=env)
+    # The nested session must really have RUN and really have loaded the plugin,
+    # or "it wrote no marker" is satisfied by it never starting.
+    assert "1 passed" in proc.stdout, proc.stdout + proc.stderr
 '''
 
 
@@ -380,6 +417,53 @@ def test_an_unarmed_fallback_trap_is_named_and_red(tmp_path):
     assert not _home_spool(tmp_path).exists(), (
         "the withheld control was not actually withheld — the guard wrote a row "
         "down the very path it was reporting as uncontained")
+
+
+def _nesting_runner(tmp_path: Path, extra: str):
+    target = tmp_path / "nesting_tests"
+    write_pytest_suite(target, 1, prefix="test_filler")
+    (target / "test_nest.py").write_text(_NESTING_TEST.format(extra=extra),
+                                         encoding="utf-8")
+    runner = runner_with_targets(tmp_path, [str(target)], {str(target): 1},
+                                 hook_tests=[], shell_tests=[])
+    proc = _run([str(runner), str(REPO_ROOT)], env=_clean_home(tmp_path))
+    return target, proc.stdout + proc.stderr, proc.returncode
+
+
+def test_a_nested_pytest_session_does_not_write_into_the_targets_ledger(tmp_path):
+    """🔴 MEASURED DEFECT, closed: `scripts/tests` reported plugin=3.
+
+    `test_no_real_launchers.py` builds control/mutant pairs by copying
+    `scripts/tests/conftest.py` into a throwaway tree and running pytest there.
+    Those child sessions load this plugin and inherit the guard dir, so each one
+    appended a marker to the runner's ledger — and "3 markers, expected 1" reads
+    as "this target ran WITHOUT the guard", which is a false red on the one
+    check that exists to catch a true one.
+
+    A nested session is still ISOLATED; it is only silent in the ledger.
+    """
+    target, out, rc = _nesting_runner(tmp_path, extra="")
+    assert rc == 0, f"a target that starts a nested pytest went red:\n{out}"
+    assert f"{target}  spool-rows=0  fallback-leaked=0  control=1  plugin=1" in out, (
+        f"the nested session polluted the target's accounting:\n{out}")
+
+
+def test_the_positive_control_for_that_is_a_nested_session_that_DOES_count(tmp_path):
+    """The other half of the pair — without it, `plugin=1` above is satisfied by
+    a nested session that never loaded the plugin at all.
+
+    Same planted target, one difference: the child environment has the nesting
+    flag REMOVED, so that session believes it is a root. The marker count moves
+    to 2 and the runner goes red with its own message. That is the number moving
+    on a case that MUST produce it.
+    """
+    target, out, rc = _nesting_runner(
+        tmp_path, extra='env.pop("DEVRC_TEST_SPOOL_IN_SESSION", None)')
+    assert rc != 0, (
+        "a second session marker was accepted — the marker count cannot move, "
+        f"so plugin=1 in the sibling test proves nothing:\n{out}")
+    assert "emitted 2 session marker(s)" in out, (
+        f"the run went red, but not on the marker count:\n{out}")
 
 
 def test_the_control_of_those_mutants_is_green(tmp_path):

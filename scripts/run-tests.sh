@@ -1526,6 +1526,11 @@ fi
 export ACTIVITY_SPOOL_DIR="$SPOOL_ISOLATED"
 export XDG_STATE_HOME="$SPOOL_TRAP"
 export DEVRC_TEST_SPOOL_GUARD_DIR="$SPOOL_DIR"
+# A fresh RUN is the ROOT of the session-nesting chain (see spool_plugin's
+# NESTED_ENV). Without this, a runner copy driven FROM a pytest test — which is
+# how ten of this file's own regression tests work — would inherit the flag, and
+# every target inside it would be scored as a nested session with no marker.
+unset DEVRC_TEST_SPOOL_IN_SESSION
 SPOOL_SESSIONS_LOG="$SPOOL_DIR/sessions.log"
 SPOOL_ISOLATED_LOG="$SPOOL_ISOLATED/current.log"
 

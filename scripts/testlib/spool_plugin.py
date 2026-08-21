@@ -76,6 +76,25 @@ import pytest
 # attribution needs one log, not one per session.
 GUARD_DIR_ENV = "DEVRC_TEST_SPOOL_GUARD_DIR"
 
+# 🔴 THE NESTING FLAG, and it is load-bearing accounting, not tidiness.
+#
+# Some tests START ANOTHER PYTEST. `scripts/tests/test_no_real_launchers.py`
+# builds control/mutant pairs by copying `scripts/tests/conftest.py` into a
+# throwaway tree and running pytest there, so this plugin loads in those child
+# sessions too — and they inherit GUARD_DIR_ENV. Measured: `scripts/tests`
+# reported THREE session markers where the runner requires exactly one, which
+# read as "this target ran without the guard".
+#
+# A nested session is not a TARGET. It must still be ISOLATED — that is the half
+# that protects production — but it must not write into the runner's per-target
+# ledger, where an extra marker looks like a coverage failure and an extra
+# control row inflates a count the runner reads as evidence.
+#
+# `run-tests.sh` UNSETS this when it installs GUARD 8: a fresh run is the root of
+# the chain, so the runner-copy sessions that `test_activity_spool_isolation.py`
+# drives still record their own markers.
+NESTED_ENV = "DEVRC_TEST_SPOOL_IN_SESSION"
+
 # The two variables that decide where a spool write lands. BOTH are levers:
 # ACTIVITY_SPOOL_DIR is the direct one, XDG_STATE_HOME governs the FALLBACK that
 # a test taking the variable away (monkeypatch.delenv, a hand-built subprocess
@@ -211,6 +230,15 @@ def no_real_activity_spool(tmp_path_factory):
         # what the runner adds, not the isolation.
         guard_dir = Path(tmp_path_factory.mktemp("spool-guard"))
         install(guard_dir)
+
+    nested = os.environ.get(NESTED_ENV) == "1"
+    os.environ[NESTED_ENV] = "1"
+    if nested:
+        # Isolated, but silent — see NESTED_ENV. Yielding without writing is the
+        # whole difference; the marker and the control belong to the session the
+        # RUNNER started, and only to that one.
+        yield guard_dir
+        return
 
     note = " ".join(sys.argv[1:]) or "(no args)"
     se = load_spool_emit()
