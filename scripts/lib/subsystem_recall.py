@@ -372,10 +372,12 @@ RECALL_LABEL = "from index"
 #
 #   * it is not one line — 73 of 73 entries carry it, median 3 lines / 297 chars,
 #     p90 8 lines, max 12;
-#   * NOTHING printed it. Not `--ref`, not the digest, not `service_recon`'s
-#     `index:` block. An agent briefed only on an entry could not say what the
-#     service WAS, where it lived or what it owned, because the one section that
-#     answers that was parsed by no reader on any path.
+#   * NO BRIEFING PATH printed it. Not `--ref`, not the digest, not
+#     `service_recon`'s `index:` block. An agent briefed only on an entry could
+#     not say what the service WAS, where it lived or what it owned, because the
+#     one section that answers that was parsed by none of the three. `--search`
+#     is the exception and always was — it surfaces every section — but it only
+#     reaches an entry a query MATCHED, so nobody is briefed through it.
 #
 # The dump worry was real but aimed at the wrong surface: the multiplier lives on
 # the INDEX ROWS (one per entry, 37 in the largest scope), and those are untouched
@@ -1938,9 +1940,36 @@ def render_text(report: RecallReport) -> str:
             # `missing_sections` because that field drives the index-row badge
             # and the caveat clause explaining it, which are per-entry costs
             # this decision deliberately leaves at zero.
+            #
+            # 🔴 IT CLAIMS A PARSE, NEVER A FACT ABOUT THE ENTRY. The notice used
+            # to read "this entry never says what the subsystem IS" — which the
+            # extractor cannot know. A heading the parser does not match parses to
+            # nothing and produced that same sentence while the answer sat on
+            # disk, and `subsystem_touch.SHAPE_HEADINGS` deliberately excludes
+            # this heading so `--validate` says nothing either. The sibling
+            # `🔴 NO <heading>` badge draws exactly this line ("0 BY PARSE FAILURE
+            # and not by measurement"); this notice now draws it too, and names
+            # causes the reader can act on.
+            #
+            # 🔴 THE CAUSE LIST IS EXPLICITLY NON-EXHAUSTIVE ("among others"), and
+            # it has to be: `_heading_blocks` matches at column 0 and skips fenced
+            # regions, so a RENAME (`## What It Is`, `## What it is:`,
+            # `### What it is`), an INDENTED heading and one inside a ``` FENCE all
+            # reach this same branch — and only the first is literally a "rename".
+            # An enumeration that reads as closed is a narrower claim than the
+            # branch, which is how the previous wording ("absent, empty, or the
+            # heading was renamed") left two real causes unnamed.
+            #
+            # 🔴 THE PREFIX THIS SHARES WITH `service_recon`'s TWIN NOTICE IS
+            # QUOTED IN `claude/skills/analyze-service/SKILL.md` step 2, which
+            # tells the agent to relay it AS WRITTEN. Pinned to this string by
+            # `test_service_recon.py::TestTheSkillQuotesTheDegradeNotice`, which
+            # DERIVES the expected text from both renderers — so rewording either
+            # notice goes red naming the doc.
             out.append(
-                f"    (no `{WHAT_HEADING}` content — this entry never says what the "
-                f"subsystem IS; re-derive it live)"
+                f"    (no parsable `{WHAT_HEADING}` — absent, empty, or not parsed as a "
+                f"heading [renamed, indented, fenced, among others], so this read cannot "
+                f"say what the subsystem IS; re-derive it live)"
             )
         if e.is_bare:
             # 🔴 Said, not left blank. An entry that exists with nothing under

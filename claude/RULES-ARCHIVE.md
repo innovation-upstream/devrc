@@ -273,6 +273,31 @@ Ground case (2026-08-01): four consecutive "0 submits" results were treated as e
 held; they only became evidence once one clean run submitted **exactly 1** through the same
 counter.
 
+### The control that shared the untrusted step (2026-08-21)
+
+Probing a web UI's search through a browser tool, the step that TYPED the query intermittently
+no-opped. The page kept rendering the PREVIOUS query's results, so every read came back
+well-formed and plausible — there is no error state for "your keystrokes never landed".
+
+A positive control query was run to settle it, and it went through **the same untyped step**.
+When it too came back with the wrong results that was read as *"the site's search is broken"*
+rather than *"my input never landed"*. Three confident false conclusions followed, one of which
+was nearly filed upstream against a real issue.
+
+The control was not a control: it sampled the same unknown a second time. A RED result from it
+is consistent with both hypotheses, so it discriminates nothing — which is a different defect
+from the negative/positive controls above, where the question is whether the instrument can go
+red or observe the thing AT ALL.
+
+The cure is to make the control independent of the suspect step, or to verify that step in the
+same read as the result: read the input element's `value` back and assert it equals the query,
+in the same DOM read that harvests the results. Then a mismatch is attributed to the input, not
+to the system under test.
+
+Generalises past browsers: any control assembled out of the instrument under suspicion — the
+same wrapper, the same fixture loader, the same deploy step, the same shell — inherits its
+failure modes wholesale.
+
 ## parsing-tool-output
 *Supports: 🔴 "Validate the INSTRUMENT before you read its verdict." (parsing an output format you did not pin).*
 

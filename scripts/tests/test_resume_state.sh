@@ -20,9 +20,17 @@ eq(){ # name  actual  expected
   fi
 }
 # assert `$2` (multiline) contains a line exactly equal to `$3`
-has(){ grep -qxF "$3" <<<"$2" && pass "$1" || { fail "$1"; printf '     missing line: [%s] in\n[%s]\n' "$3" "$2"; }; }
+#
+# 🔴 `-e` IS LOAD-BEARING. Without it a pattern that STARTS WITH `-` — which is
+# exactly what an unattributed `-<TAB><num>` ref looks like — is parsed by grep
+# as an option: `grep: invalid option -- '\t'`, no match, exit 2. `has` then
+# fails a correct extraction, and far worse `lacks` PASSES, because "grep found
+# nothing" and "grep refused to run" are the same observable. Every `lacks`
+# assertion on a `-`-prefixed pattern was vacuous until this was fixed; the
+# instrument has to be able to go red before its verdict means anything.
+has(){ grep -qxF -e "$3" <<<"$2" && pass "$1" || { fail "$1"; printf '     missing line: [%s] in\n[%s]\n' "$3" "$2"; }; }
 # assert `$2` does NOT contain a line exactly equal to `$3`
-lacks(){ grep -qxF "$3" <<<"$2" && { fail "$1"; printf '     unexpected line: [%s]\n' "$3"; } || pass "$1"; }
+lacks(){ grep -qxF -e "$3" <<<"$2" && { fail "$1"; printf '     unexpected line: [%s]\n' "$3"; } || pass "$1"; }
 
 FIX='## Handoff
 Branch/PR: on feat/api-pool-hol-blocking. PRs #415 and #433 MERGED.
@@ -38,6 +46,35 @@ eq "prs (sorted, deduped, incl pull-url, excl 1-digit)" "$PRS" "$(printf '219\n4
 lacks "single-digit #5 not a PR" "$PRS" "5"
 lacks "single-digit #7 not a PR" "$PRS" "7"
 has  "pull/NNN url extracted"    "$PRS" "219"
+
+echo "== extract_pr_refs =="
+# 🔴 The qualifier must SURVIVE extraction. Stripping it is what made a
+# datapacket-talos resume emit 18 DRIFT lines about civitai/cli, civitai/civitai
+# and friends, every one resolved against talos-infra's own unrelated PRs.
+XR='civitai/cli#423 is open, civitai/civitai#4158 pending.
+Landed: https://github.com/acme/widget/pull/1141. Bare #4114 too.
+Anchor `claudedocs/notes.md#12` and a stray #5.'
+REFS=$(extract_pr_refs "$XR")
+has "qualified ref keeps its repo"      "$REFS" "$(printf 'civitai/cli\t423')"
+has "second qualified ref"              "$REFS" "$(printf 'civitai/civitai\t4158')"
+has "pull URL names its repo"           "$REFS" "$(printf 'acme/widget\t1141')"
+has "bare ref is UNATTRIBUTED"          "$REFS" "$(printf -- '-\t4114')"
+lacks "qualified num never leaks bare"  "$REFS" "$(printf -- '-\t423')"
+lacks "pull-url num never leaks bare"   "$REFS" "$(printf -- '-\t1141')"
+lacks "md line anchor is not a PR"      "$REFS" "$(printf 'claudedocs/notes.md\t12')"
+lacks "md anchor num not bare either"   "$REFS" "$(printf -- '-\t12')"
+lacks "single-digit stray still out"    "$REFS" "$(printf -- '-\t5')"
+
+echo "== handoff_says_inflight (repo-qualified) =="
+# Two repos, same PR number, opposite framing. Repo-blind matching sees both
+# lines and answers for whichever it likes — which is the cross-repo defect
+# reappearing inside the drift test.
+TMP2=$(mktemp)
+printf '%s\n' 'acme/widget#900 is OPEN and awaiting review.' \
+              'other/repo#900 MERGED and shipped last week.' > "$TMP2"
+if handoff_says_inflight 900 "$TMP2" "acme/widget"; then pass "qualified: acme/widget#900 in-flight"; else fail "qualified: acme/widget#900 in-flight"; fi
+if handoff_says_inflight 900 "$TMP2" "other/repo"; then fail "qualified: other/repo#900 should NOT be in-flight"; else pass "qualified: other/repo#900 not in-flight"; fi
+rm -f "$TMP2"
 
 echo "== extract_branches =="
 BR=$(extract_branches "$FIX")
