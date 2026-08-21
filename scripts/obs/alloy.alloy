@@ -91,9 +91,18 @@ loki.write "homelab" {
   // A roaming laptop disconnects constantly (sleep, WiFi drop, travel), and the
   // journal is the highest-value stream here. `queue_config` on the metrics
   // remote_write does NOT cover this: that buffering is per-pipeline.
+  // NOTE: only `enabled` is set. `max_segment_age` was tried and removed — I
+  // could not confirm from the shipped binary whether "1h" differs from the
+  // default, and an argument that merely restates a default is an inert line
+  // that reads as a tuning decision.
+  //
+  // Scope, measured: the WAL replays after a disconnection AND across a process
+  // restart. The one gap is a COLD start — before `wal/remote/segment_marker`
+  // exists, alloy logs "marker segment file does not exist" and begins at the
+  // newest segment, so entries written during the very first run are not
+  // replayed by the first restart. Every restart after that replays.
   wal {
-    enabled           = true
-    max_segment_age   = "1h"
+    enabled = true
   }
 
   external_labels = {
@@ -196,18 +205,37 @@ loki.process "scrub" {
   // Keeping the keyword outside the group is what preserves "password: " as
   // readable context — the point of shipping the journal is to debug with it.
 
-  // 2. Credential-shaped assignments. The optional non-capturing `bearer` keeps
-  //    `Authorization: Bearer <jwt>` from leaking the token: without it `(\S+)`
-  //    captures the word "Bearer" and the JWT survives in clear (measured).
+  // 2. Credential-shaped assignments.
+  //
+  //    Three parts of this are load-bearing, each measured end-to-end:
+  //
+  //    a. `(?:bearer\s+|basic\s+)` — WITHOUT it, `(\S+)` captures the scheme
+  //       word and the credential survives in clear. Both schemes are covered:
+  //       an earlier version handled only `bearer`, so
+  //       `Authorization: Basic dXNlcjpwdw==` shipped the base64 unredacted.
+  //    b. `["']?` on BOTH sides of the separator — a quoted JSON key put a `"`
+  //       between the keyword and the `:`, so `{"password": "hunter2xyz"}` did
+  //       not match AT ALL and shipped byte-identical.
+  //    c. The value class EXCLUDES quote, comma, semicolon and `&` rather than
+  //       being `\S+`. `\S+` swallowed the rest of a JSON object and the rest of
+  //       a URL query string: a request log became
+  //       `?token=[REDACTED] HTTP/1.1` with `&user=&page=` eaten. Now only the
+  //       value dies:  `?token=[REDACTED]&user=bob&page=2`.
+  //
+  //    KNOWN AND ACCEPTED OVER-REDACTION: a keyword followed by a separator
+  //    redacts the next token whatever it is, so prose like `the token: is
+  //    missing` becomes `the token: [REDACTED] missing`. That direction is the
+  //    safe one — a missed secret is unrecoverable, a mangled sentence is not —
+  //    and it is asserted in the tests so it stays a decision, not a surprise.
   stage.replace {
-    expression = "(?i)(?:access[_-]?key|secret[_-]?key|api[_-]?key|secret|token|password|passwd|authorization)\\s*[=:]\\s*(?:bearer\\s+)?(\\S+)"
+    expression = "(?i)(?:access[_-]?key|secret[_-]?key|api[_-]?key|secret|token|password|passwd|authorization)[\"']?\\s*[=:]\\s*[\"']?(?:bearer\\s+|basic\\s+)?([^\\s\"',;&]+)"
     replace    = "[REDACTED]"
   }
 
-  // 3. A bare `Bearer <token>` with no `:` or `=` separator, which rule 2
-  //    cannot match because it requires one.
+  // 3. A bare `Bearer <token>` / `Basic <creds>` with no `:` or `=` separator,
+  //    which rule 2 cannot match because it requires one.
   stage.replace {
-    expression = "(?i)\\bbearer\\s+(\\S+)"
+    expression = "(?i)\\b(?:bearer|basic)\\s+([^\\s\"',;&]+)"
     replace    = "[REDACTED]"
   }
 

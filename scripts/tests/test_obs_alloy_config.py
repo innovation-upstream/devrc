@@ -3,7 +3,8 @@
 An invalid Alloy config takes the whole agent down at startup, and the failure
 is silent from the consumer's side: Prometheus simply has no data for that host,
 which looks exactly like a host that froze — the signal this pipeline exists to
-make legible. So the config is validated in CI rather than at deploy time.
+make legible. So the config is validated at BUILD time (see below), which is stronger
+than a test: an invalid config cannot be deployed at all.
 
 🔴 `alloy fmt` is NOT sufficient and must not be substituted here. It checks
 SYNTAX only: it accepted `faster_drop_reason = "..."` (a real typo in this
@@ -42,8 +43,9 @@ CONFIG = REPO / "scripts" / "obs" / "alloy.alloy"
 #       error: Cannot build '...-alloy-config-validated.drv'
 #       > Error: ...alloy.alloy:145:5: unrecognized attribute name "faster_drop_reason"
 #
-# The tests below therefore guard the WIRING of that guarantee and the contracts
-# that are checkable without the binary. All of them always run.
+# The tests here therefore guard the WIRING of that guarantee, plus the
+# contracts checkable without the binary. NONE of them skip — a skipping test
+# would be zero coverage in the gate, which is where this has to hold.
 
 
 # --- public-repo safety --------------------------------------------------- #
@@ -136,11 +138,29 @@ def _apply(stages, line: str) -> str:
     return line
 
 
-def test_the_emulator_finds_the_configs_replace_stages():
-    """POSITIVE CONTROL. If the parser matched nothing, every redaction
-    assertion below would pass vacuously against an empty rule list."""
-    stages = _replace_stages(CONFIG.read_text())
-    assert len(stages) >= 3, f"expected the redaction rules, parsed {len(stages)}"
+def test_every_replace_stage_in_the_config_is_parsed():
+    """POSITIVE CONTROL, pinned TWO-WAY.
+
+    `>= 3` was not enough: the parser requires `expression` to be immediately
+    followed by `replace`, so a rule written with the attributes in the other
+    order is skipped silently. Measured — appending a valid 4th stage with
+    `replace` first left the parser returning 3 and the whole suite green, with
+    the new rule entirely unasserted. Counting the literal blocks makes an
+    unparsed rule fail here instead of passing invisibly.
+    """
+    text = CONFIG.read_text()
+    # Count LIVE blocks only: this config discusses `stage.replace` in its
+    # comments, and counting those too made the pin fail 3-vs-5 on its first
+    # run — the same read-the-prose-not-the-code hazard the nix guard hit.
+    live = "\n".join(
+        ln for ln in text.splitlines() if not ln.strip().startswith("//")
+    )
+    declared = live.count("stage.replace {")
+    stages = _replace_stages(text)
+    assert declared >= 3, f"expected the redaction rules, found {declared} live blocks"
+    assert len(stages) == declared, (
+        f"parsed {len(stages)} of {declared} live stage.replace blocks — "
+        "an unparsed rule is asserted by nothing")
     assert all(expr and repl for expr, repl in stages)
 
 
@@ -166,15 +186,34 @@ MEASURED_REDACTIONS = [
      "req: Authorization: Bearer [REDACTED] done"),
     ("req: authorization header bearer BAREJWTxxx.yyy.zzz done",
      "req: authorization header bearer [REDACTED] done"),
+    # `Basic` as well as `Bearer`: handling only bearer leaked the base64.
+    ("req: authorization: Basic dXNlcjpwdw== done",
+     "req: authorization: Basic [REDACTED] done"),
+    # A quoted JSON key put a `"` between keyword and `:`, so this once did not
+    # match AT ALL and shipped byte-identical.
+    ('app: {"password": "hunter2xyz", "user": "bob"}',
+     'app: {"password": "[REDACTED]", "user": "bob"}'),
     ("mc: The Access Key Id you provided: access_key=KEYVALUE99",
      "mc: The Access Key Id you provided: access_key=[REDACTED]"),
     ("mc: api_key: APIKEYVALUE123 rejected",
      "mc: api_key: [REDACTED] rejected"),
     ("mc: error key AKIAIOSFODNN7EXAMPLE not found",
      "mc: error key [REDACTED-KEYID] not found"),
-    # NEGATIVE CONTROL: no secret, so the line must be returned untouched.
+    # The value class stops at `&`, so the rest of the query string survives.
+    # With `\\S+` this became `?token=[REDACTED] HTTP/1.1`, eating user and page.
+    ("nginx: GET /v1/items?token=abc123&user=bob&page=2 HTTP/1.1 200 1234",
+     "nginx: GET /v1/items?token=[REDACTED]&user=bob&page=2 HTTP/1.1 200 1234"),
+    # NEGATIVE CONTROLS — these must pass through untouched.
     ("app: ordinary line about a password policy with no value",
      "app: ordinary line about a password policy with no value"),
+    ("systemd: Started foo.service key=value other=thing",
+     "systemd: Started foo.service key=value other=thing"),
+    ('app: {"password_reset": true, "user": "bob"}',
+     'app: {"password_reset": true, "user": "bob"}'),
+    # ACCEPTED OVER-REDACTION, asserted so it stays a decision rather than a
+    # surprise: a keyword plus separator redacts the next token whatever it is.
+    ("app: the token: is missing entirely",
+     "app: the token: [REDACTED] missing entirely"),
 ]
 
 
@@ -233,8 +272,8 @@ def test_metrics_scrape_interval_is_short_enough_to_see_a_freeze():
 # opencode and nodejs combined, which is not worth paying on every CI run to
 # check one file. So the AUTHORITATIVE validation happens at build time in
 # nix/observability.nix, where the hosts already need the binary because they
-# run the agent. The tests above therefore skip without alloy — and these two,
-# which never skip, pin that the guarantee stays wired.
+# run the agent. NOTHING in this file skips or invokes a binary; the tests below
+# pin that the build-time guarantee stays wired.
 
 MODULE = REPO / "nix" / "observability.nix"
 

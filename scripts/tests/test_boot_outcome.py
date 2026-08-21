@@ -26,10 +26,12 @@ sys.modules["boot_outcome"] = boot_outcome
 _spec.loader.exec_module(boot_outcome)
 
 
+# SYNTHETIC, like ABRUPT_TAIL below — regenerated rather than pasted from this
+# host's journal, for the same public-repo reason.
 CLEAN_TAIL = [
-    "Aug 07 17:29:05.017654 nixos systemd[1]: Shutting down.",
-    "Aug 07 17:29:05.062434 nixos systemd-journald[758]: Received SIGTERM from PID 1 (systemd-shutdow).",
-    "Aug 07 17:29:05.062497 nixos systemd-journald[758]: Journal stopped",
+    "Jan 01 00:00:01.000000 host systemd[1]: Shutting down.",
+    "Jan 01 00:00:02.000000 host systemd-journald[100]: Received SIGTERM from PID 1 (systemd-shutdow).",
+    "Jan 01 00:00:03.000000 host systemd-journald[100]: Journal stopped",
 ]
 
 # SYNTHETIC, matching the SHAPE of a real freeze tail: ordinary application
