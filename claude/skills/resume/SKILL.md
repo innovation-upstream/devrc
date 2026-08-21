@@ -15,7 +15,17 @@ Topic argument (optional): `$ARGUMENTS`.
 
 1. **Locate the handoff**: if a topic is given, read `claudedocs/handoff-<topic>.md`; otherwise find the most recently modified `claudedocs/handoff-*.md` in the active repo (`ls -t claudedocs/handoff-*.md | head`). **Not every repo uses that lowercase shape** — civitai-manager names its handoff `<civitai-manager>/claudedocs/SESSION-HANDOFF.md` — so if the glob comes back empty, fall back to `ls -t claudedocs/*HANDOFF*.md | head` before concluding there is no handoff (`resume-state.sh` resolves it in exactly that order). If BOTH come back empty, say so and offer to reconstruct state from git/PRs instead — and say plainly that nothing was reconciled, rather than reporting the absence of drift as a clean bill of health.
 
-2. **Read it fully.**
+2. **Read it fully — but treat its "Open investigations" section as RECALL, not live state.**
+
+   🔴 **A handoff's open-investigation block is exactly as stale-able as an index bullet, and nothing marks it.** The status header is obviously dated; a mid-diagnosis block reads as current forever, because it is written in the present tense by someone who was mid-diagnosis. MEASURED 2026-08-19: a doc's leading hypothesis for an intermittent CI failure was **superseded one day after the doc was written** — root-caused, with a classifier, tests and a PR-comment integration already shipped in the same repo — and a session re-derived the retracted hypothesis, refuted a variant of it, measured a failure rate, and was about to build a capture mechanism **that already existed**.
+
+   MEASURED AGAIN 2026-08-20, and the block was *well* written — values, eliminations, a named "Next probe": every ruled-out candidate was still true, yet the **framing** was wrong. It reported the unattributed rows as an unidentified live producer growing at ~21/h; they were the repo's own test suite, 100% synthetic. A session that trusted the framing would have hunted a caller that does not exist. 🔴 **Eliminations age well; the question they serve does not** — so re-ask what the block is trying to explain before adopting its hypothesis, and prefer the block's own *values* over its narrative.
+
+   **Before working any open item, check whether the repo moved under it:**
+   ```bash
+   git -C <repo> log --since=<doc-date> --oneline -- <the pipeline/script/dir the item is about>
+   ```
+   A hit means read those commits before re-deriving anything. The cost is one command; the cost of skipping it is a whole session.
 
 3. **Re-verify against live state — run the deterministic reconciler, don't hand-roll it:**
    ```bash
