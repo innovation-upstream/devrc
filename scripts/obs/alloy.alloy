@@ -1,0 +1,162 @@
+// Host telemetry -> homelab Prometheus + Loki.
+//
+// Runs as a USER service (see nix/observability.nix). That is deliberate: the
+// system-level alternative would live in /etc/nixos, which is per-host, not in
+// this repo, and needs sudo on every change. Everything here works unprivileged
+// because `zach` is in `wheel`, and systemd's journal ACLs grant `wheel` full
+// read of the system journal.
+//
+// 🔴 NO ENDPOINT, HOSTNAME OR CREDENTIAL MAY BE WRITTEN INTO THIS FILE.
+// devrc is a PUBLIC repo. Every site-specific value comes from the environment,
+// supplied by an EnvironmentFile outside the nix store:
+//     ~/.config/obs-ship/env      (gitignored, per-host, 0600)
+// Required: OBS_PROM_URL, OBS_LOKI_URL, OBS_USERNAME, OBS_PASSWORD, OBS_HOST
+//
+// Validated in CI by scripts/tests/test_obs_alloy_config.py, which parses this
+// file with `alloy fmt` — a config that does not parse takes the whole agent
+// down at start, and "the unit is running" is not evidence that it shipped
+// anything.
+
+logging {
+  level  = "warn"
+  format = "logfmt"
+}
+
+// ---------------------------------------------------------------- metrics --
+
+prometheus.remote_write "homelab" {
+  endpoint {
+    url = sys.env("OBS_PROM_URL")
+
+    basic_auth {
+      username = sys.env("OBS_USERNAME")
+      password = sys.env("OBS_PASSWORD")
+    }
+
+    // A laptop is off-network often (asleep, travelling, WiFi drop). Without a
+    // generous WAL the agent drops samples during every ordinary disconnection,
+    // and the gap looks identical to a host that froze — which is precisely the
+    // signal this whole pipeline exists to make legible.
+    queue_config {
+      capacity             = 10000
+      max_shards           = 4
+      min_backoff          = "1s"
+      max_backoff          = "5m"
+      retry_on_http_429    = true
+    }
+  }
+
+  external_labels = {
+    host   = sys.env("OBS_HOST"),
+    source = "devrc-host-telemetry",
+  }
+}
+
+prometheus.scrape "node" {
+  targets = [{
+    __address__ = "127.0.0.1:9101",
+    instance    = sys.env("OBS_HOST"),
+  }]
+
+  forward_to = [prometheus.remote_write.homelab.receiver]
+
+  // 15s, not the 60s default: the run-up to a freeze is minutes long at most.
+  // At 60s a thermal or IO cliff would be represented by one or two points.
+  scrape_interval = "15s"
+  scrape_timeout  = "10s"
+}
+
+// ------------------------------------------------------------------- logs --
+
+loki.write "homelab" {
+  endpoint {
+    url = sys.env("OBS_LOKI_URL")
+
+    basic_auth {
+      username = sys.env("OBS_USERNAME")
+      password = sys.env("OBS_PASSWORD")
+    }
+  }
+
+  external_labels = {
+    host = sys.env("OBS_HOST"),
+  }
+}
+
+// Journal -> Loki. This is the single highest-value part of the pipeline: the
+// local journal syncs to disk every 30s (and shipped as 5m before PR #616), so
+// the final minutes before every recorded freeze existed only in RAM and died
+// with the box. Shipped continuously, they survive the host.
+loki.source.journal "system" {
+  // Read the SYSTEM journal, not just this user's.
+  path = "/var/log/journal"
+
+  // On (re)start, replay recent history so a freeze that happened while the
+  // agent was down is not lost. Bounded so a long outage cannot flood Loki.
+  max_age = "12h"
+
+  labels = {
+    job = "systemd-journal",
+  }
+
+  relabel_rules = loki.relabel.journal.rules
+  forward_to    = [loki.process.scrub.receiver]
+}
+
+// Promote a small, FIXED set of journal fields to labels. Deliberately small:
+// every label is a Loki stream, and high-cardinality fields (PID, message hash,
+// boot id) multiply streams without making anything easier to find.
+loki.relabel "journal" {
+  forward_to = []
+
+  rule {
+    source_labels = ["__journal__systemd_unit"]
+    target_label  = "unit"
+  }
+
+  rule {
+    source_labels = ["__journal_syslog_identifier"]
+    target_label  = "identifier"
+  }
+
+  rule {
+    source_labels = ["__journal_priority_keyword"]
+    target_label  = "priority"
+  }
+
+  rule {
+    source_labels = ["__journal__transport"]
+    target_label  = "transport"
+  }
+}
+
+// Scrubbing. The journal on these hosts is NOT neutral telemetry: it carries
+// desktop-notification bodies, database errors that echo query values, and
+// object-store credential errors. Kernel and systemd lines are what this
+// pipeline is for; the rest is kept only after redaction.
+loki.process "scrub" {
+  forward_to = [loki.write.homelab.receiver]
+
+  // 1. Desktop notification BODIES are message content, not telemetry. Drop the
+  //    line entirely rather than trying to redact inside free text.
+  stage.drop {
+    source        = "identifier"
+    expression    = "^dunst$"
+    drop_counter_reason = "notification-body"
+  }
+
+  // 2. Redact credential-shaped assignments anywhere in the line. Case
+  //    insensitive, and deliberately greedy on the value side: a partially
+  //    redacted secret is a leaked secret.
+  stage.replace {
+    expression = "(?i)((?:access[_-]?key|secret[_-]?key|api[_-]?key|token|password|passwd|authorization|bearer)\\s*[=:]\\s*)(\\S+)"
+    replace    = "${1}[REDACTED]"
+  }
+
+  // 3. Redact bare AWS-style access key ids, which appear in MinIO errors
+  //    without an adjacent keyword.
+  stage.replace {
+    expression = "\\b(AKIA|ASIA)[0-9A-Z]{16}\\b"
+    replace    = "[REDACTED-KEYID]"
+  }
+}

@@ -130,7 +130,10 @@ in
 {
   # Graphical (i3 + i3status-rust bar) config lives in ./graphical.nix; isLaptop is
   # threaded to it as a module arg so it can branch battery/backlight vs rig/DDC.
-  imports = [ ./graphical.nix ];
+  # ./observability.nix ships host metrics + the journal to the homelab stack.
+  # BOTH hosts, deliberately: cross-host comparison is the point, and the
+  # workbench is where the ship.sh drift incidents happened.
+  imports = [ ./graphical.nix ./observability.nix ];
   _module.args.isLaptop = isLaptop;
 
   programs = programs;
