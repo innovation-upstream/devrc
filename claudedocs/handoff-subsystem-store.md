@@ -71,8 +71,10 @@ Read this before trusting the 2026-08-16 block above as coverage:
   exist at base, so "red at base" is a collection error and proves nothing. The evidence
   that they bite is the 22-mutant sweep, not the red-at-base matrix.
 - **`seed.sh --push` has no hermetic test** (needs a cluster); it was exercised live 3×.
-- **`--mode=full` / `--page` over HTTP** were never byte-compared against the pod; only the
-  default digest was.
+- **`--mode=full` / `--page` / `?mode=list` over HTTP** were never byte-compared against the pod;
+  only the default digest was. (`verify-byte-identity.sh` passes no `mode` param at all, so the
+  uncompared set is *every* mode but the default — `list` included, which the phase-2 manifest
+  would depend on.)
 
 ### `#505` in one paragraph
 An entry proposed a one-line remedy at **15:00:18** on 2026-07-24; the remedy landed at **15:02:21** — 2m03s later — and the entry served it as outstanding for **22 days**. `/handoff` step 4 runs MID-session, so the writer is gone by the time the work finishes. Openness is now a typed prefix, not prose, because a prose detector is walkable by rewording. Six populations, one precedence source (`JournalBullet.openness_population`); `--validate` reports four of them and its VERDICT is deliberately unchanged (an entry with unfinished business is well-formed; failing it would be a permanently-red gate). Index rows gain `🔴 N OPEN`, conditional so the common case is byte-identical.
@@ -508,10 +510,225 @@ looks — so it raises neither badge, and no surface today reads past a bullet's
 is a PAIR, not a bare zero: the pre-fix file was replayed through `--store <copy>` on the same
 command and printed `🔴 2 NEAR-MISS`, so the clean row is a measurement, not a wiring failure.
 
+### ✅ DECIDED 2026-08-20 — hosted is an ENTRY-LEVEL ADVISORY, never the primary read
+
+The open question was: read the hosted store outright, or fall back to it only when there is no
+local one? **Answer: neither. Local is authoritative and always rendered; hosted is consulted as a
+best-effort ADVISORY that names what it holds and local does not.** 🔴 **A first revision of this
+block chose a per-SCOPE fallback and an audit measured it at 9 of 70 entries — the correction is
+recorded below rather than overwritten, because the wrong trigger is the instructive half.**
+
+All three copies, re-derived twice, 2026-08-20:
+
+| copy | scopes | entries | written by |
+|---|---|---|---|
+| workbench local | 9 | 71 | `/handoff`, `/analyze-service` on that host |
+| laptop local | 11 | 21 | the same tools, on that host |
+| hosted (`store.zacx.dev`) | 9 | **70** | `seed.sh --push`, BY HAND — nothing syncs it |
+
+⚠ **`entry-files=75` in `X-Store-Snapshot` is NOT this column.** `seed.sh` and `server.py` both
+count every `*.md`, so the header includes the 5 scope `README.md`s; 70 + 5 = 75. Quoting the
+header here made hosted look like a SUPERSET of the workbench it mirrors. Hosted is behind by
+exactly **one** entry — `civitai` 10 against local 11, written ~1h after `seeded=19:07:26Z`, which
+is a sharper demonstration of the staleness than any total.
+
+🔴 **The two local stores are DISJOINT — overlap ZERO, checked over all 21 laptop entries, not a
+sample.** Not "the laptop is behind": every laptop entry file is absent from the workbench,
+*including inside the four scope names both hosts hold*. Seven laptop scopes exist on no other
+copy, and the laptop is a LIVE writer — newest entry **14:57 local, 2026-08-20**. (An earlier
+revision said "19 minutes before this commit", which was true of the first commit and false of the
+second: a duration anchored to a reference that moves inside its own PR expires while you write it.
+Anchor to an absolute time.)
+
+🔴 **Hosted mirrors the workbench pile only** — `hosted_only=0` in all nine scopes, and
+`scope-absent` for all seven laptop-only ones.
+
+- **Read hosted outright — REJECTED; a regression on BOTH hosts, not just the writer's.** On the
+  workbench hosted is a subset that goes stale at the next `/handoff` write with nothing syncing
+  it. On the laptop it trades 21 entries that exist NOWHERE ELSE for `scope-absent`.
+- **Fall back only when there is no local store — REJECTED as INERT.** Both hosts have one.
+- 🔴 **Fall back per SCOPE (`scope-absent`/`scope-empty`) — REJECTED, and this one had to be
+  MEASURED to be refused.** All 11 laptop scopes are non-empty, so all 11 return `recalled` and the
+  trigger never fires for them. It reaches only the 5 workbench-only scopes — `civitai-app-starters`
+  2, `cli` 4, `flipt-state` 1, `kubeclaw` 1, `storage-resolver` 1 = **9 of 70 entries (13%)** — while
+  the 61 entries in the four shared scopes stay invisible, which is exactly where the laptop holds
+  1-entry stubs against 6–36. On the workbench it is a strict **no-op**: that host holds precisely
+  the scopes hosted holds, so a scope it lacks, hosted lacks too. **The loss is at ENTRY
+  granularity; a scope-granular trigger cannot see it.**
+- **DECIDED: local renders unchanged, and hosted is consulted for a MANIFEST of what it holds.**
+  Refs hosted holds that the local answer does not are named in an advisory, with `--source hosted`
+  to read them. It does **not** merge, dedupe, or restate a completeness claim across two disks — it
+  COMMUNICATES the difference instead of resolving it, which is this week's lesson applied
+  (`§2026-08-19/20`).
+
+🔴 **THE MANIFEST DOES NOT EXIST YET, AND THIS IS THEREFORE NOT A CLIENT-ONLY PHASE 2.** An earlier
+revision of this block said "a cheap manifest (scope → entry names + mtimes)" as though it were
+consultation of existing behaviour. Measured against `server.py`:
+- **Two API routes exist**, `recall` and `search` (`server.py:1621-1626`). The listing route is one
+  round-trip **per scope** (`?mode=list`, ~60 B/line): sub-second for one, a few seconds for all
+  nine (22,153 B), warm from the workbench.
+- 🔴 **`?all_scopes=1` on `search` DOES enumerate the whole store in ONE round-trip — and THREE
+  successive revisions of this block were wrong about it, each under-crediting it further.** First
+  it was "no batch route"; then "a search, capped by `max_hits`, so it cannot be relied on to
+  enumerate". Both false. Measured with `threshold=0.0&max_hits=5000`: `search-hit`, ~426 KB,
+  **`872 of 872 hunks`, 0 omitted, all 9 scopes and 70 of the 70 refs hosted holds** — and two
+  controls: a **nonsense query** returns the same 70 (at `threshold=0.0` the query is irrelevant),
+  and a **non-existent scope in the path** still returns all 70 (it needs no prior scope
+  knowledge). `max_hits` has no server-side ceiling and the report self-declares truncation via
+  `omitted`, so it is a paging signal, not a barrier.
+- **So scope → ref names are ALREADY free in one round-trip, and the manifest endpoint is not
+  needed for them.** What it must add is (a) **per-entry mtimes, which are served nowhere** —
+  `listing_line` emits ref/count/sensitivity/badges only (`subsystem_recall.py:1560`), `mtime`
+  merely orders, and neither `render_search` nor `search_json` renders it, so the one time signal
+  is the store-wide `newest=`; and (b) **a proportionate payload** — enumerating this way costs
+  ~426 KB of hunk bodies to learn names that 22 KB of listings carry. That is the honest ground for
+  the directive. **Do not restate the enumeration claim without re-running the two controls above.**
+- **The local side is interpreter-startup-dominated**, so scope count barely moves it: reading the
+  whole store in one process is ~50 ms with the read work itself only a few ms.
+- ⚠ **Timings here are indicative, not pinned.** Re-measured across hosts and hours, the same
+  requests moved ~2–3× (one cross-scope call has been seen from ~0.5 s to ~1.4 s). Quote a shape,
+  never a point value, and re-run before relying on one.
+- 🔴 **A COLD manifest build cannot fit a short timeout.** First laptop run, cache expiry, or a new
+  scope pays the full multi-second build — and on the laptop, the host this whole advisory exists
+  for, *every* first run is cold. The warm read (one scope against a cache) fits any sane timeout;
+  the build behind it does not. **These are different events and item 4 must say which it bounds.**
+
+⚠ **The ratio archaeology that stood here has been CUT, deliberately.** Three revisions argued about
+a hosted-vs-local multiple (`~58×`, then `~6×`, then a three-row table) and each was an artifact of
+how the command was invoked — every audit round but the first found its new defect inside that
+paragraph, and each fix grew the surface for the next. The five facts above are what was ever
+load-bearing. **A number nobody needs is a place for the next error to live.**
+
+Two consequences, both binding. **Phase 2 needs a SERVER-side manifest endpoint**, not just the CLI
+wrapper the README names. And until per-entry mtimes are served, **identity is by REF NAME only**:
+the advisory may say *hosted holds refs local does not*, and may not say *hosted's copy is newer*.
+⚠ **The NEGATIVE direction is available and an earlier revision wrongly foreclosed it.** The
+store-wide `newest=` is a valid one-sided bound: when hosted's `newest=` predates a local entry's
+mtime, hosted's copy of that ref provably is **not** newer. Affirmative freshness needs per-entry
+mtimes; a staleness signal does not.
+🔴 **But the example first offered for it was VACUOUS, and the bound's reach is host-dependent.** It
+compared hosted's `newest=` against the laptop's newest entry — an entry in a scope hosted answers
+`scope-absent` for. "Hosted's copy is not newer" about a copy that does not exist is not a
+demonstration. Worse, hosted holds **zero** of the laptop's 21 refs (hosted ⊆ workbench, and the two
+local stores are disjoint), so **on the laptop the bound fires on nothing at all today** — it
+becomes reachable only after phase-3 write-back.
+✅ **Where it does fire is the WORKBENCH**, which shares 70 refs with hosted: measured against
+`newest=18:55:31Z`, **3 refs hosted holds** have a local copy modified after that stamp, so hosted's
+copies are provably stale. That is the non-vacuous instance; state the bound with the host it
+applies to.
+
+The shape it has to have — each item is a measured failure, not a preference:
+1. `--source local|hosted|auto`, default `auto`. Hosted is never primary and never merged in.
+2. A hosted answer is LABELLED and carries the server's `X-Store-Snapshot` — **with the
+   README-inclusive caveat travelling beside it**, never verbatim and bare. The server dates every
+   report because a stale copy could not otherwise be told from the source (it served 5 entries
+   against a source of 9 for four days, auth/reachability/firewall green), but `entry-files=` counts
+   scope READMEs, and quoting it bare is precisely what made hosted look like a superset two
+   paragraphs up. A counterweight belongs in the text the reader is looking at.
+3. 🔴 **Any response without an `X-Store-Status` header is a TRANSPORT failure, never an answer.**
+   Enumerating `401`/`503` is not enough: measured this session, the same valid token and URL with
+   `-A "Python-urllib/3.13"` returns **`403`, `error code: 1010`, no `X-Store-*` at all** — a
+   Cloudflare bot-signature block the origin never sees, i.e. the first failure a Python client
+   meets. The 10s WAF throttle presumably answers the same header-less way.
+4. Non-fatal, disk-cached manifest, and 🔴 **TWO timeouts, not one — the READ and the BUILD are
+   different events and a single short bound silently kills the feature.** The warm read (one scope
+   against a cache) gets the short timeout. The cold BUILD — first laptop run, cache expiry, a new
+   scope — takes seconds and must be given its own longer bound, run in the background, or be
+   allowed to complete across runs. **Bind both to the read's short timeout and the build never
+   completes on the laptop, where every first run is cold** — so the advisory never fires. That
+   reaches item 5's hazard by DESIGN rather than by network failure, which is the worse way to
+   reach it. `/resume` step 4's contract is "print the stderr line, note recall was unavailable,
+   and continue" — a network hop must not make that an exit 3, and a build that gave up must say
+   so out loud rather than resolve to a silent empty advisory.
+   ⚠ This **proposes** reading the README's phase-2 "read-through cache" as the manifest cache and
+   nothing more — a cached ENTRY would be a third copy nobody syncs.
+   `scripts/subsystem-store-api/README.md:18` still says "the CLI wrapper + read-through cache",
+   so **that file is the artifact to update in the phase-2 PR**; a handoff doc narrowing a scope the
+   README states differently is the two-artifacts-disagreeing shape this same file records above.
+   ⚠ And `?mode=list` sits in the bucket this doc already flags at the top: `--mode=full`/`--page`
+   over HTTP were **never byte-compared against the pod**; only the default digest was. The manifest
+   and `--source hosted` both live there, so byte-comparing them is part of building this.
+5. 🔴 **Hosted's silence is NOT evidence — it is not a union.** All 7 laptop-only scopes return a
+   healthy `200 scope-absent`, so on the workbench `auto` yields two independent-looking sources
+   agreeing "nothing recorded" about 21 entries that exist. The advisory must say hosted holds no
+   copy of scopes written on other hosts, in the text the reader is looking at.
+
+6. **Size it before calling it a line.** Hosted-not-on-laptop, per shared scope: `datapacket-talos`
+   **36**, `civitai` 10, `devrc` 9, `homelab-talos` 6 — so the advisory is a COUNT plus a bounded
+   sample plus how to read the rest, never "one line", which an earlier revision asserted against
+   its own numbers. ⚠ **The worst case is not reachable by a `/resume` today**: of the four shared
+   scopes, only `devrc` and `homelab-talos` have a checkout on the laptop — `datapacket-talos` and
+   `civitai` do not — so the sizes an ordinary run meets there are **9 and 6**. The 36 arrives via
+   an explicit `--scope`, or the day that repo is cloned. Design for 36; do not claim a run hits it.
+   (That host holds **dozens** of other repos — the exact count is not load-bearing and three
+   successive revisions got it wrong anyway: a guessed "~40", then a count of `ls` ENTRIES reported
+   as DIRECTORIES, then a repo count that two defensible commands disagree about by three because
+   worktree `.git` FILES are not `.git` directories. **A number that changes nothing should not be
+   in the record at all.** The claim is about these four scopes, not about that host.)
+
+**Prerequisites this decision creates, none of them optional.** (a) **No client credential exists on
+either host** — no `~/.config/subsystem-store*`, nothing in `.zshenv`; the only documented path is a
+`kubectl` read against homelab, and `$KC_HOMELAB` is unset on the laptop (the kubeconfig is there
+under another name). The gap is symmetric; what is laptop-specific is that the entire measured
+benefit is laptop-side, so distribution is on the critical path. (b) That turns a hand-run token
+into a **hot-path token on every host**, which next-step 1's "no write path yet, so no split"
+reasoning does not cover — re-read it as a read-token exposure question before building.
+
+🔴 **What this does NOT fix.** The advisory tells the laptop what the workbench holds; it moves
+nothing in the other direction — the laptop's 21 entries reach no other copy, because seeding is a
+manual push from the workbench and there is no write path until phase 3. **And merge is NOT
+deferred-because-hypothetical: it is already live.** In one client scope, a workbench entry carries
+in its `aliases:` the **exact filename of a laptop entry in that same scope**. (Named here as `W`
+and `L`; this repo is PUBLIC, and a rationale for redacting one entry filename does not survive
+naming others elsewhere in this file. ⚠ **That inconsistency is PRE-EXISTING, and this revision does
+NOT close it** — the previous revision claimed both halves and both were false: the file already
+carried a redaction rationale beside client entry names at the PR base, and more still stand further
+down. This paragraph redacts its OWN pair; the file-wide question is open.
+To reproduce the collision: list the laptop's entries per scope, then grep the workbench entries'
+`aliases:` lines for those names. `--validate` renders no alias information and cannot see the other
+host's store, so it will NOT show you this — a pointer an earlier revision offered without running.)
+Zero PATH overlap is not zero SUBJECT overlap.
+
+🔴 **But the mechanism is SILENT SHADOWING, not `ref-ambiguous` — an earlier revision of this block
+asserted the loud failure and the loud one is the one that cannot happen.** `resolve_ref_tiered`
+documents it in its own docstring: *an alias can never outrank a filename*, and the alias tier is
+consulted **only if the filename tier returned zero hits** (`subsystem_resolver.py:687-733`). So in
+a merged corpus that ref resolves to `L`, the laptop's FILE, `tier=filename`, `status=recalled` —
+and `W` becomes unreachable under that ref **with no signal of any kind**. A badge you never see
+beats a badge that fires.
+
+⚠ **And the advisory inherits this, so "needs none of the merge semantics" was an overclaim.** To
+say "hosted holds X that local does not" you must decide identity across two disks, and today's only
+available key is the ref NAME (no per-entry mtimes are served). A name-based diff reports `W` as
+hosted-only while the laptop already holds that subject as `L`. The advisory needs no MERGE, but it
+does need an identity rule, and the one rule available is already wrong in the one case measured.
+Say `refs`, not `entries`, until that is answered.
+
+⚠ **A defect found while measuring: `X-Store-Snapshot`'s `host=` cannot discriminate the two
+writers.** Both hosts' `hostname` is `nixos`, so the stamp reads `host=nixos` whichever seeded it.
+Harmless while only the workbench seeds; a confidently wrong answer the moment the laptop can.
+
+⚠ **And an instrument error of my own, caught by a control.** Summing hosted's
+`ALL N entries in <scope>/` lines silently skipped three single-entry scopes, whose render omits
+that phrase — a confident 67 that should have been 70. The `X-Store-Status: recalled` header
+disagreed with the zero, which is the only reason it surfaced. **Give every parsed count a second
+signal that fails differently.**
+
 ## Next steps (ranked)
 
+0. ~~Decide the hosted-vs-local read policy~~ — **DONE 2026-08-20**, see the DECIDED block directly
+   above; audited, and the first answer was refuted by measurement before it shipped. Building it
+   (the phase-2 CLI wrapper) is unstarted, and its two prerequisites are named there.
 0. ~~Verify the Cloudflare WAF rate rule exists~~ — **DONE 2026-08-19, answer was NO.** Layer 1 now
    exists as a 10s throttle, declared in no repo. See the RESOLVED block above.
+   ⚠ Both done items keep the `0.` slot ON PURPOSE: items 1–6 are cross-referenced BY SOURCE NUMBER
+   from two live places — `next-step 1` in the DECIDED block and `item 3's shape population` below —
+   so renumbering to satisfy CommonMark would silently break both. Read the raw file.
+   🔴 The revision that introduced this note cited **three** places, one of which (`the doc's item 5`)
+   the SAME commit had just deleted, while omitting `next-step 1`, which the same commit ADDED. A
+   note justifying a deliberate defect is a claim like any other, and this one was checkable in one
+   grep. (`next-step 3` at the doc-hook block is a record of what a past kickoff said, not a live
+   reference — it would not break.)
 1. 🔴 **DO NOT split read/write tokens yet — a TRIGGER, not a task.** Unchanged and still correct:
    the read-only posture is structural (`do_POST = do_PUT = do_PATCH = do_DELETE = _reject_write`),
    three tests pin it, and the split belongs in the phase-3 PR that adds a write route.
@@ -903,6 +1120,16 @@ devrc `main`**, all gate-green, plus homelab-infra `#354` applied and verified o
 
 - **devrc `main` at `fc1f581`**; full suite green (`13081 collected, 0 failed`), and the
   store-content gate green after **two separate live leaks were closed today**.
+  🔴 **That last clause is NO LONGER TRUE — re-measured 2026-08-20 later the same day: the live
+  store-content gate exits 1, naming one site: `scripts/tests/test_prune_skill_size.py`, against an
+  entry in the `datapacket-talos` scope** (the gate names which — this repo is public, so it is not
+  repeated here). A THIRD leak, on `main`, unrelated to and untouched by
+  the hosted-fallback PR; that test file was last written by `#595`. 🔴 **And it is invisible to
+  `pytest`**: the file's 6 collected tests are all `tmp_path` fixtures, so the repo-wide scan lives
+  in its `__main__` CLI — `python3 scripts/tests/test_prune_skill_size.py`-style invocation of
+  `scripts/tests/test_store_content_not_copied.py` is the only thing that runs it. A green pytest
+  line for that file is not a leak claim. Remedy is the gate's own: reword with INVENTED content
+  preserving only the shape, never an exclusion entry.
 - **The service itself:** pod `0.2.0`, ready, restarts 0; public authed GET returns 200; auth
   verified live (no token → 401, bad token → byte-identical 401, valid → 200, positive control
   passed). `SUBSYSTEM_STORE_TRUSTED_PROXIES` is set, so `#520`'s trusted-peer fix is executing.
