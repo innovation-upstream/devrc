@@ -44,21 +44,24 @@ nix-shell -p python3Packages.pyyaml --run \
    pre-ship command. Offline, no creds. It lints the candidate AND resolves a
    probe universe (single-token prefixes + within-snippet two-token queries)
    against the deployed config. **Two things FAIL it, both user-facing:**
-   - **snippets blinded** — a snippet that SURVIVES the edit but no query
-     reaches any more (its trigger aside). This is the 2026-08-19 regression.
+   - **snippets narrowed** — a snippet that SURVIVES the edit and strictly
+     loses ways of being found: reaching words go away and none arrive. This is
+     the 2026-08-19 shape, and it stays fatal even when the snippet keeps one
+     word — an earlier all-or-nothing rule passed exactly that case.
    - **expansion changed** — a query that resolved to one snippet now resolves
-     to another that types DIFFERENT text.
-   Everything else is **reported, never graded**: ambiguity costs telemetry,
-   not reach (espanso lists every match as a row), and pruning or renaming
-   drops words by design. Grading those would make it red on the skill's own
-   primary actions, and a permanently-red gate teaches you to ignore it.
-   🔴 **It models the picker with the KEYLOG matcher (`_term_matches`), not
-   espanso itself** — nothing in this repo checks that proxy against espanso, so
-   a `PASS` is "no regression under our model", not a guarantee. Multi-word
-   queries beyond within-snippet pairs, and non-prefix substrings, are outside
-   the universe. `--diff-config` is the diff without the lint;
-   `--replay --config <candidate>` still cross-checks against terms he really
-   typed — narrower, but real data rather than a model.
+     to another that types DIFFERENT text. A plain trigger rename is not this.
+   Everything else is **reported, never graded**: ambiguity costs telemetry, not
+   reach (espanso lists every match as a row), and pruning or rewording drops
+   words by design. Grading those made the gate red on this skill's own primary
+   actions, and a permanently-red gate teaches you to ignore it.
+   🔴 **Known limits — a PASS is "no regression under our model", not a
+   guarantee.** It models the picker with the KEYLOG matcher, not espanso, and
+   nothing in this repo checks that proxy. Multi-word queries beyond
+   within-snippet pairs, and non-prefix substrings, are outside the universe.
+   Correcting a typo whose right spelling was ALREADY reachable is flagged —
+   a real if trivial loss; the report names the queries, so a glance settles it.
+   `--diff-config` is the diff without the lint; `--replay --config <candidate>`
+   cross-checks against terms he really typed — narrower, but real data.
 5. Edit `services.espanso` in `nix/home.nix` on a branch → PR → merge →
    `scripts/ship.sh`.
 6. `--verify-deploy` → both hosts: deployed trigger set, `espanso` active, and

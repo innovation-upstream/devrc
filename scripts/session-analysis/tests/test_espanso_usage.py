@@ -759,30 +759,41 @@ def test_diff_identical_configs_reports_nothing():
     ts = _ts([_A, _B])
     d = M.diff_configs(ts, ts)
     assert d["probes"] > 20, f"only {d['probes']} probes — buckets would be vacuous"
-    for bucket in ("blinded", "rows_lost", "attr_lost", "attr_gained",
+    for bucket in ("narrowed", "rows_lost", "attr_lost", "attr_gained",
                    "attr_moved", "moved_expansion"):
         assert d[bucket] == [], f"{bucket} should be empty for an identical diff"
 
 
-def test_stripping_a_label_blinds_the_snippet():
+def test_stripping_a_label_narrows_the_snippet():
     """The 2026-08-19 regression: label+terms removed, snippet survives."""
     after = _mut([_A, _B], ":aa", label=None, search_terms=[])
     d = M.diff_configs(_ts([_A, _B]), _ts(after))
-    assert d["blinded"] == [":aa"], f"expected :aa blinded, got {d['blinded']}"
+    assert [r[0] for r in d["narrowed"]] == [":aa"], d["narrowed"]
 
 
 def test_pruning_a_snippet_is_NOT_a_failure():
     """`DEAD` is the skill's only prune verdict. A per-probe rule failed here,
     which would have made this a permanently-red gate."""
     d = M.diff_configs(_ts([_A, _B]), _ts([_B]))
-    assert d["blinded"] == [], "a pruned snippet cannot be 'blinded' — it is gone"
+    assert d["narrowed"] == [], "a pruned snippet is not judged — it is gone"
     assert d["rows_lost"], "its words DO stop reaching anything; that is reported"
 
 
 def test_fixing_a_typo_in_a_label_is_NOT_a_failure():
-    typo = _mut([_A, _B], ":aa", label="Alpah thing")
-    d = M.diff_configs(_ts(typo), _ts([_A, _B]))
-    assert d["blinded"] == [], f"a typo fix blinded something: {d['blinded']}"
+    """A typo fix EXCHANGES a word, so it is a gain-and-loss, not a strict loss.
+
+    RESIDUAL, deliberately not fixed: if the corrected spelling was ALREADY
+    reachable by another route (e.g. it duplicates an existing search_term),
+    the fix is a strict loss of the misspelling and IS flagged. That is a real
+    if trivial reduction in findability, and softening the rule to excuse it
+    would reopen the 2026-08-19 case — see
+    test_keeping_ONE_word_does_not_excuse_losing_the_rest. The report names the
+    lost queries, so a glance settles it.
+    """
+    only_typo = [dict(_A, label="Alpah thing", search_terms=["firstword"]), _B]
+    corrected = [dict(_A, label="Alpha thing", search_terms=["firstword"]), _B]
+    d = M.diff_configs(_ts(only_typo), _ts(corrected))
+    assert d["narrowed"] == [], f"a typo fix must not be graded: {d['narrowed']}"
 
 
 def test_renaming_a_trigger_keeping_the_expansion_is_NOT_a_failure():
@@ -809,7 +820,7 @@ def test_lost_attribution_is_reported_but_is_NOT_a_failure():
     after = [_A, dict(_B, label="Alpha other", search_terms=["alpha"])]
     d = M.diff_configs(_ts([_A, _B]), _ts(after))
     assert d["attr_lost"], "'alpha' should have become ambiguous"
-    assert d["blinded"] == [] and d["moved_expansion"] == [], (
+    assert d["narrowed"] == [] and d["moved_expansion"] == [], (
         "an ambiguous query still LISTS both rows — not a regression"
     )
 
@@ -825,13 +836,13 @@ def test_probe_universe_covers_prefixes_AND_multiword_queries():
     assert "alpha thing" in u or "alpha firstword" in u, sorted(multi)[:10]
 
 
-def test_render_diff_names_the_blinded_snippet_and_says_what_it_hid():
+def test_render_diff_names_the_narrowed_snippet_and_says_what_it_hid():
     after = _mut([_A, _B], ":aa", label=None, search_terms=[])
     text = "\n".join(M.render_diff(M.diff_configs(_ts([_A, _B]), _ts(after)), "a", "b"))
-    assert "SNIPPETS BLINDED" in text and ":aa" in text
+    assert "SNIPPETS NARROWED" in text and ":aa" in text
     clean = "\n".join(M.render_diff(M.diff_configs(_ts([_A, _B]), _ts([_A, _B])), "a", "b"))
-    assert "SNIPPETS BLINDED" not in clean
-    assert "no surviving snippet lost its findability" in clean
+    assert "SNIPPETS NARROWED" not in clean
+    assert "no surviving snippet lost findability" in clean
     # Truncation must SAY it truncated — a silently cut report hides findings.
     many = [dict(_A, trigger=f":t{i}", label=f"Label{i} word{i}",
                  search_terms=[f"term{i}"]) for i in range(40)]
@@ -851,17 +862,17 @@ def test_gate_exit_codes_and_that_it_actually_lints(tmp_path, capsys):
     yaml = pytest.importorskip("yaml")
     before = tmp_path / "before.yml"
     before.write_text(yaml.safe_dump({"matches": [_A, _B]}))
-    blinded = tmp_path / "blinded.yml"
-    blinded.write_text(yaml.safe_dump(
+    narrowed = tmp_path / "narrowed.yml"
+    narrowed.write_text(yaml.safe_dump(
         {"matches": _mut([_A, _B], ":aa", label=None, search_terms=[])}))
     pruned = tmp_path / "pruned.yml"
     pruned.write_text(yaml.safe_dump({"matches": [_B]}))
     empty = tmp_path / "empty.yml"
     empty.write_text("matches: []\n")
 
-    assert M.main(["--config", str(before), "--gate", str(blinded)]) == 1
+    assert M.main(["--config", str(before), "--gate", str(narrowed)]) == 1
     out = capsys.readouterr().out
-    assert "SNIPPETS BLINDED" in out
+    assert "SNIPPETS NARROWED" in out
     # --gate promises lint + diff in ONE verdict; prove the lint really ran.
     assert "LINT" in out, "--gate claims to lint the candidate but did not"
 
@@ -872,5 +883,106 @@ def test_gate_exit_codes_and_that_it_actually_lints(tmp_path, capsys):
     assert "UNMEASURED" in capsys.readouterr().out
 
     # --diff-config shares the engine but has its own CLI path.
-    assert M.main(["--config", str(before), "--diff-config", str(blinded)]) == 1
+    assert M.main(["--config", str(before), "--diff-config", str(narrowed)]) == 1
     assert "LINT" not in capsys.readouterr().out, "--diff-config must not lint"
+
+
+def test_keeping_ONE_word_does_not_excuse_losing_the_rest():
+    """🔴 The exact case a delta audit used to falsify an earlier fatal axis.
+
+    Following SKILL.md's own advice — "change which WORDS a snippet spells,
+    never remove its label" — relabelling two snippets to `SSH rig` /
+    `SSH portable` took 'nebula', 'mesh' and 'remote' from two picker rows to
+    ZERO. An all-or-nothing "reaches NOTHING" rule passed it, because each
+    snippet kept one word. LOST-WITH-NO-GAIN catches it.
+    """
+    before = [
+        {"trigger": ":wn", "replace": "ssh a", "label": "SSH rig via nebula mesh",
+         "search_terms": ["nebula", "mesh", "remote"]},
+        {"trigger": ":ln", "replace": "ssh b", "label": "SSH portable via nebula mesh",
+         "search_terms": ["nebula", "mesh", "remote"]},
+    ]
+    after = [
+        {"trigger": ":wn", "replace": "ssh a", "label": "SSH rig", "search_terms": ["rig"]},
+        {"trigger": ":ln", "replace": "ssh b", "label": "SSH portable",
+         "search_terms": ["portable"]},
+    ]
+    d = M.diff_configs(_ts(before), _ts(after))
+    narrowed = {r[0] for r in d["narrowed"]}
+    assert narrowed == {":wn", ":ln"}, (
+        "both snippets strictly lost 'nebula'/'mesh'/'remote' and gained "
+        f"nothing new, so both must be graded: {d['narrowed']}"
+    )
+
+
+def test_a_vocabulary_less_snippet_never_makes_the_gate_red():
+    """`dashbaord` has no label and no search_terms by design.
+
+    The survives-guard (`reach_b[trig] and ...`) is what stops it being graded;
+    dropping that guard made an IDENTICAL-config diff exit 1 on the real config.
+    No fixture covered it, so the suite was blind to the failure mode this
+    whole design exists to avoid.
+    """
+    cfg = [_A, {"trigger": "typotypo", "replace": "typo"}]
+    d = M.diff_configs(_ts(cfg), _ts(cfg))
+    assert d["narrowed"] == [], (
+        "a config diffed against ITSELF must never be graded: " f"{d['narrowed']}"
+    )
+    d2 = M.diff_configs(_ts(cfg), _ts([_A]))
+    assert d2["narrowed"] == [], "removing a vocabulary-less snippet is a prune"
+
+
+def test_reaching_requires_ALL_tokens_of_a_multiword_query():
+    """`_term_matches` ANDs whitespace-separated tokens — that is the entire
+    reason pair probes exist. `any` instead of `all` would make the fatal axis
+    far too lenient and no other test would notice."""
+    ts = _ts([_A])
+    det = M.EspansoDetector(ts)
+    reach = M._reaching(det, {"alpha", "bravo", "alpha bravo", "alpha thing"})
+    assert "alpha" in reach[":aa"]
+    assert "alpha thing" in reach[":aa"], "both tokens match :aa"
+    assert "alpha bravo" not in reach[":aa"], (
+        "'bravo' does not describe :aa, so the AND must reject the pair"
+    )
+    # The TRIGGER arm must stay off: typing a trigger verbatim is a different
+    # modality from finding a snippet by describing it, and the report says
+    # "trigger aside". Unpinned, a mutant re-enabling it survived the suite.
+    reach2 = M._reaching(det, {"aa", "a", "alpha"})
+    assert "aa" not in reach2[":aa"], (
+        "':aa' is the trigger — it must NOT count as a way of FINDING the "
+        "snippet, or a snippet stripped of its label reads as still reachable"
+    )
+    assert "alpha" in reach2[":aa"], "the label/search_terms arms must stay on"
+
+
+def test_attribution_gained_and_moved_have_positive_controls():
+    """This file's contract: every zero comes with an N that MUST count."""
+    before = [_A]
+    after = [_A, {"trigger": ":cc", "replace": "z", "label": "Quebec",
+                  "search_terms": ["quebec"]}]
+    d = M.diff_configs(_ts(before), _ts(after))
+    assert any(pr == "quebec" and tr == ":cc" for pr, tr in d["attr_gained"]), d["attr_gained"]
+    renamed = _mut([_A], ":aa", trigger=":dd")
+    dm = M.diff_configs(_ts([_A]), _ts(renamed))
+    assert any(pr == "alpha" and a == ":aa" and b == ":dd"
+               for pr, a, b in dm["attr_moved"]), dm["attr_moved"]
+
+
+def test_a_changed_expansion_alone_drives_the_exit_code(tmp_path, capsys):
+    """N3: `moved_expansion`'s contribution to rc was unpinned — a mutant
+    grading only `narrowed` kept the suite green while the report still
+    printed 🔴 EXPANSION CHANGED and exited 0."""
+    yaml = pytest.importorskip("yaml")
+    before = [_A, _B]
+    after = _mut(before, ":bb", label="Alpha thing", search_terms=["alpha", "firstword"])
+    after = _mut(after, ":aa", label="Unrelated wording", search_terms=["zzz", "yyy"])
+    b = tmp_path / "b.yml"; b.write_text(yaml.safe_dump({"matches": before}))
+    a = tmp_path / "a.yml"; a.write_text(yaml.safe_dump({"matches": after}))
+    d = M.diff_configs(_ts(before), _ts(after))
+    assert d["moved_expansion"], "fixture must produce an expansion move"
+    assert d["narrowed"] == [], (
+        "fixture must isolate the expansion axis — :aa gains zzz/yyy, so it is "
+        f"not narrowed: {d['narrowed']}"
+    )
+    assert M.main(["--config", str(b), "--gate", str(a)]) == 1
+    assert "EXPANSION CHANGED" in capsys.readouterr().out

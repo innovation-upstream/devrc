@@ -756,28 +756,34 @@ def declared_terms(ts, trig):
 # --------------------------------------------------------------------------- #
 # CONFIG DIFF — the two-axis check neither --lint nor --replay performs
 # --------------------------------------------------------------------------- #
-# 🔴 WHY THIS EXISTS, and why the two axes are graded DIFFERENTLY.
+# 🔴 WHY THIS EXISTS, and what is FATAL versus merely reported.
 #
 # --lint sees one config. --replay sees only terms he ACTUALLY TYPED in the
-# window, so a term he never happened to search is invisible to it. On
-# 2026-08-19 both called a change clean while it took 'nebula', 'mesh' and
-# 'remote' from TWO picker rows to ZERO — a real loss of discoverability,
-# introduced while chasing tidier telemetry.
+# window. On 2026-08-19 both called a change clean while it took 'nebula',
+# 'mesh' and 'remote' from TWO picker rows to ZERO.
 #
-# The two axes are not the same kind of fact:
-#   * PICKER ROWS — what the user can reach. espanso lists EVERY match as a row
-#     and the user arrows to one. Losing the last row for a query means that
-#     query now finds nothing. This is a REGRESSION and fails the gate.
-#   * ATTRIBUTION — whether `_attribute` can NAME one snippet. Ambiguity costs
-#     only telemetry: the fire still happens, it is logged with trigger=None.
-#     Adding any snippet adds vocabulary and so loses some attribution; grading
-#     that as failure would make this a permanently-red gate, which trains
-#     everyone to click through. It is REPORTED, never fatal.
+# FATAL (exit 1):
+#   NARROWED   a snippet that SURVIVES the edit and strictly loses ways of being
+#              found — reaching words go away and none arrive. That is the
+#              2026-08-19 shape, and it stays fatal even when the snippet keeps
+#              one word (an earlier all-or-nothing rule let exactly that pass).
+#   EXPANSION  a query that resolved to one snippet now resolves to another that
+#              types DIFFERENT text. `attr_moved` alone is NOT this: a plain
+#              trigger rename lands there and is harmless, so the discriminator
+#              is the `replace` text.
 #
-# Getting that backwards is the whole 2026-08-19 incident in one sentence.
+# REPORTED, never graded:
+#   queries reaching nothing, attribution lost/gained/moved. espanso lists EVERY
+#   match as a row, so ambiguity costs telemetry, not reach; and pruning or
+#   rewording drops words BY DESIGN. Grading those made this gate red on the
+#   skill's own primary actions — pruning a DEAD snippet, fixing a typo — and a
+#   permanently-red gate teaches everyone to click through.
+#
+# Both halves have been wrong in this file's history; neither is obvious. If you
+# change the grading, re-run the six-scenario matrix in
+# test_espanso_usage.py, which pins all of them.
 GATE_OK = 0
 GATE_FAIL = 1
-GATE_ROWS_LOST = GATE_FAIL  # back-compat alias
 
 
 def _probe_universe(ts) -> set:
@@ -847,20 +853,32 @@ def diff_configs(ts_before, ts_after) -> dict:
     probes = sorted(_probe_universe(ts_before) | _probe_universe(ts_after))
     reach_b, reach_a = _reaching(d_before, probes), _reaching(d_after, probes)
 
-    # THE FATAL AXIS: a snippet that SURVIVES the edit but can no longer be
-    # found by describing it. Deliberately per-SNIPPET, not per-probe:
-    #   * pruning a snippet drops its words too, and that is the skill's own
-    #     primary action — a per-probe rule made every prune a FAILURE, i.e.
-    #     the permanently-red gate this design exists to avoid;
-    #   * fixing a typo in a label loses the misspelt probe while the snippet
-    #     stays perfectly reachable — also not a regression;
-    #   * moving one snippet's vocabulary onto another leaves the first
-    #     unreachable while SOME row still answers the query, so a
-    #     "last row disappeared" rule misses it entirely.
-    blinded = sorted(
-        trig for trig in reach_b
-        if trig in reach_a and reach_b[trig] and not reach_a[trig]
-    )
+    # THE FATAL AXIS: a snippet that SURVIVES the edit and STRICTLY LOSES ways
+    # of being found — words go away and none arrive to replace them.
+    #
+    # Three earlier shapes of this rule were each wrong, and each was caught by
+    # measurement rather than reasoning:
+    #   * per-probe "a query reaches nothing" made every PRUNE fail, and pruning
+    #     is the skill's own primary action — a permanently-red gate;
+    #   * per-snippet "reaches NOTHING at all" (all-or-nothing) let the actual
+    #     2026-08-19 incident through: relabelling the two nebula snippets to
+    #     `SSH rig` / `SSH portable` — which is exactly what SKILL.md advises,
+    #     "change which WORDS it spells" — took 'nebula'/'mesh'/'remote' from
+    #     two picker rows to ZERO while each snippet kept one word, so nothing
+    #     was "blinded" and the gate passed the very case it was built for;
+    #   * grading any shrinkage would fail an honest reword.
+    # LOST-WITH-NO-GAIN separates them: the incident loses four words and gains
+    # none; a typo fix trades 'alpah' for 'alpha'; a reword exchanges words; a
+    # prune leaves no surviving snippet to judge.
+    narrowed = []
+    for trig in reach_b:
+        if trig not in reach_a:
+            continue                      # pruned or renamed away — not judged
+        lost = reach_b[trig] - reach_a[trig]
+        gained = reach_a[trig] - reach_b[trig]
+        if lost and not gained:
+            narrowed.append((trig, sorted(lost)[:8], len(lost)))
+    narrowed.sort()
 
     rows_lost, attr_lost, attr_gained, attr_moved, moved_expansion = [], [], [], [], []
     for probe in probes:
@@ -884,7 +902,7 @@ def diff_configs(ts_before, ts_after) -> dict:
                 moved_expansion.append((probe, att_b, att_a))
     return {
         "probes": len(probes),
-        "blinded": blinded,
+        "narrowed": narrowed,
         "rows_lost": rows_lost,
         "attr_lost": attr_lost,
         "attr_gained": attr_gained,
@@ -908,13 +926,16 @@ def render_diff(d, before_label, after_label) -> list:
            "   lists every match as a row, so ambiguity costs telemetry, not",
            "   reach — and a gate red on every prune teaches people to ignore it.",
            ""]
-    if d["blinded"]:
-        out.append(f"  🔴 SNIPPETS BLINDED — {len(d['blinded'])} still exist but no "
-                   "query reaches them (trigger aside):")
-        out.extend(_listing(d["blinded"], lambda x: x))
+    if d["narrowed"]:
+        out.append(f"  🔴 SNIPPETS NARROWED — {len(d['narrowed'])} survive the edit "
+                   "but strictly LOSE ways of being found (words gone, none added):")
+        out.extend(_listing(
+            d["narrowed"],
+            lambda r: f"{r[0]}: lost {r[2]} quer(y/ies) — {' '.join(r[1])}"
+                      + (" ..." if r[2] > len(r[1]) else "")))
         out.append("")
     else:
-        out.append("  ✅ no surviving snippet lost its findability")
+        out.append("  ✅ no surviving snippet lost findability without replacing it")
     if d["moved_expansion"]:
         out.append(f"  🔴 EXPANSION CHANGED — {len(d['moved_expansion'])} quer(y/ies) "
                    "now type DIFFERENT text:")
@@ -923,8 +944,8 @@ def render_diff(d, before_label, after_label) -> list:
         out.append("")
     out.append("")
     out.append(f"  queries reaching nothing : {len(d['rows_lost'])}  "
-               "(expected when a snippet is pruned; see BLINDED above for the "
-               "cases that matter)")
+               "(normal when a snippet is PRUNED; if a snippet survived, the "
+               "NARROWED section above is where it is graded)")
     out.extend(_listing(d["rows_lost"], lambda r: f"{r[0]!r} was {' '.join(r[1])} -> 0"))
     out.append(f"  attribution gained       : {len(d['attr_gained'])}")
     out.extend(_listing(d["attr_gained"], lambda r: f"{r[0]!r} -> {r[1]}"))
@@ -1197,14 +1218,16 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--replay", action="store_true",
                    help="resolve observed search terms through the real detector")
     p.add_argument("--diff-config", default=None, metavar="PATH",
-                   help="resolve the whole prefix universe against the deployed "
-                        "config (or --config) AND this candidate; report picker "
-                        "rows lost / attribution lost, gained, moved. Exits 1 "
-                        "if any query loses its last picker row.")
+                   help="resolve a probe universe against the deployed config "
+                        "(or --config) AND this candidate. Exits 1 if a "
+                        "SURVIVING snippet strictly loses ways of being found, "
+                        "or if a query now types DIFFERENT text; everything "
+                        "else is reported, not graded.")
     p.add_argument("--gate", default=None, metavar="PATH",
                    help="PRE-SHIP GATE, offline: --lint the candidate then diff "
                         "it against the deployed config, in one command with one "
-                        "verdict. Exits 1 on a lost picker row.")
+                        "verdict. Exits 1 on a narrowed snippet or a changed "
+                        "expansion.")
     p.add_argument("--lint", action="store_true",
                    help="offline discoverability/ambiguity check (no creds needed)")
     p.add_argument("--config", default=None, metavar="PATH",
@@ -1274,7 +1297,7 @@ def main(argv=None) -> int:
             out.extend(render_lint(lint(ts_after), candidate))
         d = diff_configs(ts_before, ts_after)
         out.extend(render_diff(d, before_path, candidate))
-        rc = GATE_FAIL if (d["blinded"] or d["moved_expansion"]) else GATE_OK
+        rc = GATE_FAIL if (d["narrowed"] or d["moved_expansion"]) else GATE_OK
         out.append("GATE: FAIL — see the 🔴 sections above"
                    if rc else "GATE: PASS — nothing lost its findability")
         print("\n".join(out))
