@@ -344,6 +344,48 @@ def is_clawgatectl_task_create(argv):
     return any(a == "task" and b == "create" for a, b in zip(ops, ops[1:]))
 
 
+HELP_FLAGS = ("--help", "-h")
+
+
+def is_help_invocation(argv):
+    """True for a create-shaped argv that only ASKS FOR HELP and cannot create.
+
+    🔴 This is a structural exemption, not a convenience one. cobra prints usage
+    and exits for any of these forms WITHOUT calling the command, so the argv
+    genuinely cannot reach `POST /api/tasks` — allowing it removes a false
+    positive rather than opening a hole. `--body` alongside `--help` changes
+    nothing: help still wins and nothing is created.
+
+    Both spellings cobra accepts are covered:
+      * a `--help`/`-h` FLAG anywhere (`clawgatectl task create --help`)
+      * the `help` SUBCOMMAND leading the operands (`clawgatectl help task create`)
+
+    The flag scan skips value-flag values with the same rule `_operands` uses, so
+    `--token --help` reads `--help` as the token's VALUE and does NOT exempt —
+    otherwise the exemption would be reachable by a token that merely looks like
+    a flag.
+
+    🔴 Scoped to `clawgatectl` BY NAME. `--help` is cobra's; it is not a curl flag
+    and curl posts the request anyway, so letting this predicate answer for a curl
+    create would hand every curl producer a one-word bypass. Caught by
+    `test_help_does_not_exempt_a_curl_create` — the first version of this function
+    had exactly that hole.
+    """
+    if not argv or os.path.basename(argv[0]) != "clawgatectl":
+        return False
+    skip = False
+    for tok in argv[1:]:
+        if skip:
+            skip = False
+            continue
+        if tok in CLAWGATECTL_VALUE_FLAGS:
+            skip = True
+            continue
+        if tok in HELP_FLAGS:
+            return True
+    return _operands(argv, CLAWGATECTL_VALUE_FLAGS)[:1] == ["help"]
+
+
 def _url_path(token):
     """The path component of a URL-ish token, or None."""
     if "://" not in token:
@@ -644,7 +686,8 @@ def evaluate(text, env, guard_core):
     if not PREFILTER.search(text):
         return None
     creates = [argv for argv in guard_core.commands(text)
-               if is_clawgatectl_task_create(argv) or is_curl_task_create(argv)]
+               if (is_clawgatectl_task_create(argv) or is_curl_task_create(argv))
+               and not is_help_invocation(argv)]
     if not creates:
         return None
     if override_requested(text, env):
