@@ -106,30 +106,40 @@ RULES.md's "Default to PROCEEDING" tree names four triggers, three of which can 
 question. Clawgate is the **transport** for those questions when Zach is not at the tmux
 window — it is **not** the gate. Verified 2026-08-22 against live `0.7.98`.
 
-**What it carries well.** `approve-with-comment` is exactly the tree's **Fork** branch —
-answer plus proceed in one tap — which is why a fork should become one card rather than a
-stalled window. Stranded windows are a measured problem here (`window-triage`,
-`session-manager` exist for it), so a rule that adds ask-branches without changing where the
-ask LANDS makes it worse, not better.
+🔴 **`approve-with-comment` is NOT the Fork branch, however much it looks like one.** The
+comment is **record-only** — `clawgate-hook.sh` logs it and emits a bare `allow`/`deny`
+(§"PermissionRequest hook semantics" above, and the script's own comment: *"No
+reason/additionalContext channel exists"*). An agent that turns a Fork into a card gets
+back **permission, never an answer**, and proceeds down whichever reading it had already
+picked — the exact ship-then-rework the Fork branch exists to prevent, while the operator
+believes they answered. A Fork must reach a human through a channel that can carry prose.
+
+That leaves clawgate carrying **less** of the tree than its shape suggests, which matters
+because stranded windows are a measured problem here (`window-triage`, `session-manager`
+exist for it): a rule that adds ask-branches without changing where the ask LANDS makes it
+worse, not better — and this hook is not that change.
 
 **What it structurally cannot carry.**
 
 | trigger | reaches the phone? |
 |---|---|
 | Out of scope | **No** — semantic, produces no `PermissionRequest`. File a task instead (`flows/task-authoring.md`; the hook denies a criteria-less create, and criteria you derived cap the result at `ready_for_review`). |
-| Fork | **Only** if it happens to surface as a tool permission prompt. A design fork does not. |
+| Fork | **No.** A design fork raises no `PermissionRequest` at all; and even when one does surface, the return channel is binary — see the 🔴 above. Never route a Fork here. |
 | Outward-facing / irreversible | **Partially** — an allowlisted command never prompts, so it never reaches the phone at all. |
-| Named hazard | **No, and must not** — the never-list's response is stage-it or hand-it-over, never solicit approval. |
+| Named hazard | **No, and must not** — a named hazard's response is stage-it or hand-it-over, never solicit approval. |
 
 Plus the defer paths in the section above: `bypassPermissions` / `plan` / `AskUserQuestion`
 never contact the server, and any outage or timeout defers to the terminal. The hook is
 **fail-safe toward proceeding**, so no rule may be gated on it.
 
-🔴 **Budget the asks — one per task, forks batched.** `requireSession` is a literal
-`return next` (`internal/api/auth.go`), and `POST /api/auto-approve-all` is registered behind
-it (`internal/api/server.go`), so the unauthenticated LAN NodePort can arm a **global**
-auto-approve window over every future request in every project. Notification fatigue is
+🔴 **Budget the asks — one per task.** `requireSession` is a literal `return next`
+(`internal/api/auth.go`), and `POST /api/auto-approve-all` is registered behind it
+(`internal/api/server.go`), so the LAN NodePort can arm a **global** auto-approve window over
+every future request in every project with no app-level auth. ⚠ That posture is **deliberate,
+not an oversight** — the same file states it: human auth was removed in favour of the Authelia
+forward-auth edge on the public path, and the LAN is treated as trusted-open. The hazard is
+therefore about BLAST RADIUS on a trusted LAN, not a missing gate. Notification fatigue is
 therefore not a comfort problem — it is the thing that arms that lever and kills every gate
 at once, silently. RULES.md's "a permanently-red gate trains everyone to click through" has
-this mirror image: **a too-noisy gate trains you to disable it globally.** The tree's "one
-question buys the whole run" clause is that budget; keep it.
+this mirror image: **a too-noisy gate trains you to disable it globally.** The tree's "an
+ANSWER buys the whole run" clause is that budget; keep it.

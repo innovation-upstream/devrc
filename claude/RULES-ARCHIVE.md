@@ -44,6 +44,7 @@ the last revision before the core/archive split.
 
 **Deterministic Over Prose**
 - [consolidation-finds-bugs](#consolidation-finds-bugs)
+- [proactivity-gate](#proactivity-gate)
 
 **Green Test Suite**
 - [merged-tree](#merged-tree)
@@ -1339,6 +1340,15 @@ against live `0.7.98` (deployment pin `harbor.homelab.lan/library/clawgate:0.7.9
 
 - It fires on **tool permission prompts only**, so it cannot carry a Fork or an Out-of-scope
   trigger — those are semantic, and produce no `PermissionRequest`.
+- 🔴 **And its return channel is BINARY, which kills the tempting design.** An earlier draft of
+  this entry claimed `approve-with-comment` *was* the Fork branch — "answer plus proceed in one
+  tap". It is not: `clawgate-hook.sh` logs the comment and emits a bare `allow`/`deny`, so the
+  agent receives permission and never the answer, then proceeds down whichever reading it had
+  already picked while the operator believes they replied. The claim was asserted from the
+  feature's NAME, was contradicted by the hook's own source comment ("No reason/additionalContext
+  channel exists"), and was contradicted by a pre-existing line in the very file it was written
+  into (*"Never design on feeding an approver's words back into the session through this hook"*)
+  — which is what a blind audit caught and three rounds of self-review did not.
 - **Allowlisted commands never prompt**, so they never reach the phone; `bypassPermissions`
   and `plan` mode, and `AskUserQuestion`, defer *without contacting the server*.
 - It is **fail-safe toward proceeding**: any outage or timeout defers to the terminal. A rule
@@ -1346,7 +1356,10 @@ against live `0.7.98` (deployment pin `harbor.homelab.lan/library/clawgate:0.7.9
 - 🔴 `internal/api/auth.go` defines `requireSession` as a literal `return next`, and
   `server.go:364` registers `POST /api/auto-approve-all` behind it — so the LAN NodePort can
   arm a **global** auto-approve window over every future request in every project, with no
-  auth. Pushing *more* decisions to the phone therefore raises the value of that lever and
+  app-level auth. ⚠ That posture is **deliberate, not an oversight** — `auth.go` says so: human
+  auth was removed in favour of the Authelia forward-auth edge on the public path, and the LAN is
+  treated as trusted-open. The hazard is blast radius on a trusted LAN, not a missing gate.
+  Pushing *more* decisions to the phone therefore raises the value of that lever and
   risks notification fatigue arming it. This is the "permanently-red gate trains you to click
   through" hazard in its mirror image: a too-noisy gate trains you to disable it globally.
-  The mitigation is the shipped rule's own budget — one ask per task, forks batched.
+  The mitigation is the shipped rule's own budget — one ask per task.

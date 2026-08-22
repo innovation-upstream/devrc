@@ -203,8 +203,10 @@ ARCHIVE_MD = REPO_ROOT / "claude" / "RULES-ARCHIVE.md"
 #
 # 🔴 THE COST IS REAL AND IS THE REASON THIS IS NOT GENEROUS. This file loads
 # EVERY session AND is concatenated into opencode's `AGENTS.md`, so every byte
-# is paid TWICE per session. At the new ceiling, full, that is roughly 9.6k
-# tokens per load and ~19k per session.
+# is paid TWICE per session. At the ceiling in force when this paragraph was
+# written that was roughly 9.6k tokens per load and ~19k per session; at the
+# current MAX_BYTES it is ~10.1k and ~20.2k. Recompute from MAX_BYTES rather
+# than trusting either figure -- both go stale on every bump.
 #
 # Sized in the same units as MIN_HEADROOM_BYTES rather than picked round: the
 # mean substantive bullet is ~500 B, so slack for SIX of them (3,000 B) plus the
@@ -286,11 +288,14 @@ ARCHIVE_MD = REPO_ROOT / "claude" / "RULES-ARCHIVE.md"
 # 2026-08-22: 39,200 -> 40,100 (+900). The rule that would not fit is the
 # proactivity gate -- "Default to PROCEEDING -- and never ask for what you can
 # measure yourself", a four-branch trigger tree in Push Back Before Acting,
-# 1,206 B. It is the largest single bullet in the file, above the ~900 B the
-# MIN_HEADROOM_BYTES comment calls the largest, and that is deliberate: it is
-# one decision tree with four branches, and splitting it into four bullets
-# costs MORE because each would restate the frame ("stop only on a named
-# trigger; each has its own response").
+# 1,336 B. That is the THIRD-largest bullet in the file -- "Validate the
+# INSTRUMENT" (2,183 B) and "Mutation-test a guard" (1,985 B) are bigger, and
+# an earlier draft of this entry called it the largest, which line 96 of this
+# same module already contradicted. Recompute; do not restate. It is over the
+# ~900 B the MIN_HEADROOM_BYTES comment calls a large rule, and that is
+# deliberate: it is one decision tree with four branches, and splitting it
+# into four bullets costs MORE because each would restate the frame ("stop
+# only on a named trigger; each has its own response").
 #
 # 🔴 EVICTION WAS NOT SKIPPED -- IT WAS PAID BY CONSOLIDATION, WHICH IS WHAT
 # THE 2026-08-11 ENTRY SAID THE ANSWER WOULD BE ("the answer is consolidation
@@ -300,18 +305,50 @@ ARCHIVE_MD = REPO_ROOT / "claude" / "RULES-ARCHIVE.md"
 # concrete blast radius, "your call to proceed", mass rollouts and prod
 # changes) and "User-facing micro-decisions" (its trigger list survives
 # verbatim as the Fork branch's parenthetical, and "don't ship-then-rework"
-# with it). That is 488 B absorbed, so the NET cost of a 1,206 B rule is 718 B.
+# with it). That is 487 B of bullet text absorbed -- 489 B counting their
+# newlines, which is the convention the net is computed in -- so the NET cost
+# of the 1,336 B rule is 848 B, and that figure equals the real `git` delta on
+# the file. An earlier draft wrote "488", which is neither convention.
 #
-# 🔴 A COLD READ CAUGHT A SCOPE LOSS NO TEST HERE PERFORMS, exactly as the
-# 2026-08-14 entry warned. The first draft's Fork branch read "two readings =>
-# materially different work" -- which silently dropped the deleted bullet's
-# "surface DISAGREEMENT, risk, or a SIMPLER PATH". Ambiguity about what was
-# asked and disagreement with what was asked are different triggers that happen
-# to share a response, and only the first survived. Restored as "or you
-# disagree / see a risk / see a simpler path", +81 B, and that is why the
-# bullet is 1,206 B rather than the 1,125 B an earlier version of this comment
-# recorded. Read a consolidation cold against every bullet it deletes; the
-# ceiling tests cannot see this class of loss.
+# 🔴 A COLD READ CAUGHT ONE SCOPE LOSS; A BLIND AUDIT THEN CAUGHT THREE MORE.
+# That ratio is the reusable part -- the cold read is necessary and was not
+# sufficient, and the author who just wrote the replacement is the worst
+# reader of it. What the cold read caught: the first draft's Fork branch read
+# "two readings => materially different work", silently dropping the deleted
+# bullet's "surface DISAGREEMENT, risk, or a SIMPLER PATH".
+#
+# What it MISSED, and an adversarial audit found by diffing clause-by-clause
+# against `git show origin/main:claude/RULES.md`:
+#   1. The RESPONSE imperatives moved. On main, "own your uncertainty, state
+#      the concrete blast radius, end with 'your call to proceed'" and "get
+#      direction" governed the WHOLE bullet -- both {disagreement, risk,
+#      simpler path} and {high-blast-radius actions}. The draft left them only
+#      on the outward-facing branch, so Fork kept the trigger and lost the
+#      response. The words survived verbatim while the COVERAGE halved, which
+#      is this file's own "a guard's DESCRIPTION claims COVERAGE" failure
+#      wearing a different hat. Fixed by hoisting them to govern both branches
+#      ("On BOTH of those: ..."), which also costs fewer bytes than stating
+#      them twice.
+#   2. The TRIGGER CATEGORY was swapped while its examples were kept. Main's
+#      category was "high-blast-radius autonomous actions", with mass rollouts
+#      and prod changes as EXAMPLES; the draft replaced the category with
+#      "leaves this machine or cannot be undone" and kept the examples, so a
+#      local, git-reversible, high-blast-radius action (a 200-file mechanical
+#      refactor) matched main and matched NO branch of the tree. Note the
+#      draft's own justification -- "a closed list is NARROWER than the shape
+#      it samples" -- argues against what it did: keeping the samples while
+#      replacing the shape is not scope-preserving. Both categories now ship.
+#   3. The micro-decisions trigger CONDITION vanished. Main fired on options
+#      "with several reasonable options"; only the parenthetical example list
+#      survived, and it had re-attached grammatically to "a simpler path".
+#      Restored, along with "present the choice" -- which is a different act
+#      from "one question with a recommendation" (show the options vs advocate
+#      one), so the shipped wording does both.
+#
+# Read a consolidation cold against every bullet it deletes, AND have someone
+# who did not write it diff the clauses. The ceiling tests cannot see this
+# class of loss -- a mutant that guts the rule to a 60 B stub while keeping
+# its `-> archive:` tag passes all five of them.
 #
 # The duplication sweep the 2026-08-20 entry asked for and the 2026-08-21 entry
 # ran to completion is NOT re-run here: it finished one day earlier, by two
@@ -328,15 +365,22 @@ ARCHIVE_MD = REPO_ROOT / "claude" / "RULES-ARCHIVE.md"
 # rollouts and prod changes included": the two instances that survive are the
 # two the deleted bullet named, so no scope was lost.
 #
-# 🔴 +900 LEAVES 186 B OF SLACK, WHICH IS LESS THAN ONE BULLET, AND SAYING SO
-# IS THE POINT. The formula in the MIN_HEADROOM_BYTES-sizing paragraph above
-# would give ~41,900 and make the gate decorative; the +400/+700 precedents
-# chose modesty. This splits them and does NOT pretend to buy a working margin:
-# the next real rule pays ceiling again. When it does, the answer is the
-# consolidation this entry just demonstrated, applied to the Verification
-# Honesty cluster -- the largest section in the file and the one with the most
-# sibling bullets sharing a frame -- not another bump.
-MAX_BYTES = 40_100
+# 🔴 THE BUMP WAS +900 AND HAD TO BECOME +1,100 WITHIN THE SAME PR, WHICH IS
+# ITSELF THE FINDING. +900 left 186 B of slack. A blind adversarial audit then
+# found three scope losses in the consolidation (below), and restoring them
+# cost 130 B -- taking slack to 56 B, i.e. the "34 B of slack" mistake this
+# module's 2026-08-21 entry diagnosed, reproduced by the very round that was
+# fixing a different narrowing. So: a ceiling sized to leave less than one
+# bullet is not merely tight, it cannot absorb its OWN review round. Size the
+# margin to survive the audit, not to clear the floor.
+#
+# +1,100 leaves 256 B. That is still under one bullet and the next real rule
+# still pays ceiling; when it does, the answer is the consolidation this entry
+# demonstrated, applied to the Verification Honesty cluster -- the largest
+# section in the file and the one with the most sibling bullets sharing a
+# frame -- not another bump. The formula in the MIN_HEADROOM_BYTES-sizing
+# paragraph above would give ~41,900 and make the gate decorative.
+MAX_BYTES = 40_300
 
 # Required working margin below the ceiling.
 #
