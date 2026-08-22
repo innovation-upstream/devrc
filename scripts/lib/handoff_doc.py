@@ -1027,6 +1027,13 @@ def _undo_write(
         # that loses the work.
         fixes: list[str] = []
         if any(s.startswith("still STAGED") for s in left):
+            # 🔴 CONTRACT: the index arm is ONE bare command line, no comment
+            # lines. The worktree arm is comment lines in every wording it has
+            # had, so "no comment lines present" is how the test proves the
+            # worktree half was NOT advised — a check that survives rewording
+            # AND reindenting. Adding a comment here will fail that test; that
+            # is deliberate (a loud false failure beats a silent false pass),
+            # so move any explanation into the message body above instead.
             fixes.append(f"    git -C {repo} restore --staged -- {relpath}")
         if any(s.startswith("still MODIFIED") for s in left):
             fixes.append(
@@ -1035,9 +1042,10 @@ def _undo_write(
                 if original is None
                 else
                 "    # its previous content is the bytes this process read, and "
-                "they are\n    # not necessarily in git — check `git status` "
-                "first, and only use\n    # `git restore -- <path>` if the doc "
-                "was clean at HEAD before the run."
+                "they are\n    # not necessarily in git. Run the unstage line "
+                "above FIRST — until you do,\n    # the index still holds THIS "
+                "run's merged text, so `git restore -- <path>`\n    # would "
+                "restore that and look like it worked. Only after unstaging,\n"                "    # and only if the doc was clean at HEAD, is it safe."
             )
         return (
             "\n🔴 ROLLBACK INCOMPLETE — the commit did not happen, but this tree "

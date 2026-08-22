@@ -2445,6 +2445,21 @@ class TestBlockedCommitLeavesNoTrace:
             f"{len(fix_lines)}:\n" + "\n".join(fix_lines)
         )
         assert "restore --staged" in fix_lines[0], fix_lines[0]
+        # 🔴 Indent-INDEPENDENT complement. The count above pins how many lines
+        # are indented, which a reword can walk in one direction (emit the
+        # worktree advice at a different indent) and break in the other (add an
+        # explanatory comment to the index arm). The worktree arm is comment
+        # lines in BOTH its old and new wording, so their absence is the claim
+        # that survives rewording AND reindenting.
+        # 🔴 The trade, stated: this ALSO fires if the index arm ever gains a
+        # comment line — a false FAILURE on a legitimate reword. That direction
+        # is chosen deliberately over a false PASS, and the invariant it depends
+        # on ("the index arm is one bare command line") is pinned as a contract
+        # beside that line in handoff_doc.py.
+        assert not any(ln.lstrip().startswith("#") for ln in block.splitlines()), (
+            "worktree advice (comment lines) printed although that half "
+            "succeeded:\n" + block
+        )
         assert doc_of(repo) == before, "the worktree half did not actually restore"
 
     def test_a_landed_commit_says_so_instead_of_a_bare_status_failed(
@@ -2484,3 +2499,34 @@ class TestBlockedCommitLeavesNoTrace:
             "a commit exists but status=failed said nothing about it:\n" + res.stderr
         )
         assert "un-pushed" in res.stderr, res.stderr
+
+    def test_worktree_only_failure_does_NOT_print_index_advice(
+        self, repo: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The MIRROR of the only-the-failed-half test, and it was unpinned.
+
+        Round 2 gated both halves but tested only one, so ungating the INDEX arm
+        survived the suite — a worktree-only failure would tell the operator to
+        `git restore --staged` an index that had already been cleaned. Behaviour
+        was correct; the coverage was not.
+
+        Driven directly because the worktree half only fails on a real `OSError`
+        from `write_bytes`, which no subprocess fixture can force.
+        """
+        doc = repo / "claudedocs" / "handoff-sample-topic.md"
+        original = doc.read_bytes()
+
+        def boom(self, data):  # noqa: ANN001, ANN202 - patched Path.write_bytes
+            raise OSError("disk full")
+
+        monkeypatch.setattr(Path, "write_bytes", boom)
+        note = hd._undo_write(repo, doc, "claudedocs/handoff-sample-topic.md",
+                              original)
+
+        assert "still MODIFIED" in note, note
+        assert "still STAGED" not in note, (
+            "claimed the index was left staged although that half succeeded:\n" + note
+        )
+        assert "restore --staged" not in note, (
+            "printed unstage advice although the index half succeeded:\n" + note
+        )
