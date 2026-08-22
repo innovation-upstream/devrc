@@ -302,10 +302,11 @@ if [ "$CHECK_TARGETS_ONLY" -eq 0 ] && [ "$CHECK_FLOORS_ONLY" -eq 0 ]; then
     exit 2
   fi
 
-  # --- GUARD 1c: the interpreter must not be a VIRTUALENV -----------------------
-  # 🔴 GUARD 1b asks "is pytest importable". That is necessary and NOT sufficient:
-  # a virtualenv can carry pytest and still be the wrong environment, and then the
-  # run fails in a way that reads as a BROKEN BRANCH rather than a broken caller.
+  # --- GUARD 1c: the interpreter must carry EVERY dep the suites import --------
+  # 🔴 GUARD 1b asks "is pytest importable". Necessary, NOT sufficient: an
+  # interpreter can have pytest and still lack the deps the suites import at
+  # COLLECTION time, and the run then fails in a shape that reads as a BROKEN
+  # BRANCH rather than a broken caller.
   #
   # MEASURED 2026-08-21, running this suite with a cwd inside an UNRELATED repo:
   # `python` resolved to that repo's `.venv`, pytest imported fine, and the run
@@ -313,48 +314,55 @@ if [ "$CHECK_TARGETS_ONLY" -eq 0 ] && [ "$CHECK_FLOORS_ONLY" -eq 0 ]; then
   #     FAIL scripts/mail-actions/tests   (collected 0 tests)
   #     FAIL scripts/signal/tests         (collected=2 below floor 553, errors=2)
   #     FAIL scripts/initiatives/tests    (collected=784 ... failed=9)
-  # — 13 failures, every one an artifact of the missing deps in that venv. The
-  # only tell was a traceback path naming the other repo's site-packages, and it
-  # took four attempts to find. A guard that already refuses the pytest-missing
-  # case had nothing to say about the pytest-present-but-wrong case.
+  # — 13 failures, every one an artifact of missing deps. The only tell was a
+  # traceback path naming the other repo's site-packages; it took four attempts to
+  # find, and the intermediate readings were confidently wrong.
   #
-  # 🔴 It also survives the obvious defences: `env -u VIRTUAL_ENV` with
-  # `/.venv/bin` stripped from PATH is NOT enough, because `nix-shell --run`
-  # executes the user's shell hooks, which re-activate the venv from cwd.
+  # 🔴 CHECK THE PROPERTY, NOT A PROXY FOR IT. The first version of this guard
+  # refused a VIRTUALENV (`sys.prefix != sys.base_prefix`), which is wrong in BOTH
+  # directions and was measured so: a nix `withPackages` env missing psycopg2 and
+  # minio — the exact shape above — PASSED it silently, while a
+  # `venv --system-site-packages` with every dep importable was REFUSED. Importing
+  # the deps costs the same, catches every wrong-interpreter shape, and needs no
+  # escape hatch: if they import, the run is sound by definition.
   #
-  # Every sanctioned path here is nix — `flake.nix checks.pytests` and the
-  # pre-push hook's `nix-shell` both yield a `/nix/store/...` interpreter, for
-  # which `sys.prefix == sys.base_prefix`. Nothing in flake.nix, githooks/,
-  # this runner or the README references a `.venv`. So "interpreter is a venv"
-  # is never the intended state, and refusing costs no legitimate workflow.
-  # `DEVRC_ALLOW_VENV=1` is the escape hatch for someone who genuinely means it.
-  _py_venv="$(python - <<'PY' 2>/dev/null
-import sys
-print("1" if sys.prefix != sys.base_prefix else "0")
-print(sys.executable)
-PY
-)"
-  _py_in_venv="$(printf '%s\n' "$_py_venv" | sed -n 1p)"
-  _py_exe="$(printf '%s\n' "$_py_venv" | sed -n 2p)"
+  # 🔴 FAIL CLOSED on an unreadable probe. Anything the interpreter prints ahead
+  # of this output (a `sitecustomize.py` on PYTHONPATH will do it) shifts the
+  # parse, and a guard that then passes silently is worse than none — GUARD 4
+  # already fails the run when pytest's summary is unparseable; this matches it.
+  _dep_probe="$(python -c '
+import importlib.util, sys
+need = ("pytest", "requests", "psycopg2", "minio", "yaml")
+missing = [m for m in need if importlib.util.find_spec(m) is None]
+print("DEPS:" + (",".join(missing) if missing else "OK"))
+print("EXE:" + sys.executable)
+' 2>/dev/null)"
+  _dep_line="$(printf '%s\n' "$_dep_probe" | grep -a '^DEPS:' | tail -1)"
+  _exe_line="$(printf '%s\n' "$_dep_probe" | grep -a '^EXE:' | tail -1)"
+  if [ -z "$_dep_line" ] || [ -z "$_exe_line" ]; then
+    echo "run-tests: FATAL — could not read the interpreter dependency probe." >&2
+    echo "  Expected a DEPS: and an EXE: line; got:" >&2
+    printf '%s\n' "$_dep_probe" | sed 's/^/    /' >&2
+    echo "  Refusing rather than guessing — an unreadable precondition is not a" >&2
+    echo "  satisfied one." >&2
+    exit 2
+  fi
   # 🔴 ALWAYS print the resolved interpreter, including on the happy path. A green
-  # whose environment you cannot see is the thing that made this expensive: the
-  # information that would have ended it in one step was never in the log.
-  echo "run-tests: interpreter $_py_exe" >&2
-  if [ "$_py_in_venv" = "1" ] && [ "${DEVRC_ALLOW_VENV:-0}" != "1" ]; then
-    echo "run-tests: FATAL — \`python\` is a VIRTUALENV, not the nix test env." >&2
-    echo "  resolved: $_py_exe" >&2
-    echo "  pytest imports from it, so GUARD 1b passed — but a venv that is not" >&2
-    echo "  this suite's nix env will be missing OTHER deps (psycopg2, minio,"  >&2
-    echo "  requests), and the run then reports collection errors and floor" >&2
+  # whose environment you cannot see is what made this expensive: the one fact
+  # that would have ended it in a single step was never in the log.
+  echo "run-tests: interpreter ${_exe_line#EXE:}" >&2
+  if [ "$_dep_line" != "DEPS:OK" ]; then
+    echo "run-tests: FATAL — the interpreter is missing suite dependencies." >&2
+    echo "  missing : ${_dep_line#DEPS:}" >&2
+    echo "  python  : ${_exe_line#EXE:}" >&2
+    echo "  pytest imports, so GUARD 1b passed — but the suites import these at" >&2
+    echo "  COLLECTION time, so the run would report collection errors and floor" >&2
     echo "  misses that read as a broken BRANCH rather than a broken CALLER." >&2
-    echo "  A .venv is re-created on \`cd\` into a worktree here, and a cwd in an" >&2
-    echo "  unrelated repo supplies ITS venv — \`env -u VIRTUAL_ENV\` is not enough," >&2
-    echo "  because nix-shell runs the shell hooks that re-activate it." >&2
-    echo "  Run from a NEUTRAL cwd with absolute paths:" >&2
-    echo "    cd /tmp && env -u VIRTUAL_ENV -u PYTHONHOME -u PYTHONPATH \\" >&2
-    echo "      nix-shell -p \"python312.withPackages(ps: with ps; [pytest requests psycopg2 minio pyyaml])\" -p logrotate \\" >&2
-    echo "      --run \"bash '<abs>/scripts/run-tests.sh' --set all '<abs>'\"" >&2
-    echo "  Override with DEVRC_ALLOW_VENV=1 if you know the venv is complete." >&2
+    echo "  A cwd inside another repo supplies ITS interpreter, and \`env -u" >&2
+    echo "  VIRTUAL_ENV\` is not enough — \`nix-shell --run\` executes the shell" >&2
+    echo "  hooks that re-activate it. Use the repo's own devShell, which is" >&2
+    echo "  immune (measured) and needs no hand-copied dependency list:" >&2
+    echo "    nix develop $ROOT --command bash $ROOT/scripts/run-tests.sh --set all $ROOT" >&2
     exit 2
   fi
 fi

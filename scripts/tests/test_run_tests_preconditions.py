@@ -276,6 +276,114 @@ def test_missing_pytest_module_is_named(tmp_path):
     )
 
 
+
+def test_missing_suite_dependencies_are_named(tmp_path):
+    """GUARD 1c. pytest importable is NECESSARY, not sufficient.
+
+    MEASURED 2026-08-21: running the suite with a cwd inside an UNRELATED repo
+    resolved `python` to that repo's `.venv`. pytest imported, so GUARD 1b passed,
+    and the run produced
+
+        FAIL scripts/mail-actions/tests   (collected 0 tests)
+        FAIL scripts/signal/tests         (collected=2 below floor 553, errors=2)
+        FAIL scripts/initiatives/tests    (collected=784 ... failed=9)
+
+    13 failures, every one an artifact of deps missing from that interpreter. The
+    only tell was a traceback path naming the other repo's site-packages.
+
+    🔴 THE PROPERTY, NOT A PROXY. The first version of this guard refused a
+    VIRTUALENV (`sys.prefix != sys.base_prefix`) and was wrong in BOTH directions,
+    measured: a nix `withPackages` env missing psycopg2+minio -- the exact shape
+    above -- PASSED it silently, while a complete `venv --system-site-packages`
+    was REFUSED. This shim reproduces the under-inclusive case: a `python` that
+    HAS pytest and lacks two suite deps, which the venv proxy could never see.
+    """
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    # pytest present (GUARD 1b passes) -- but the dependency probe reports two
+    # modules missing, which is the state the venv proxy scored as fine.
+    write_exec(
+        bindir / "python",
+        'if [ "$1" = "-m" ] && [ "$2" = "pytest" ]; then\n'
+        '  echo "pytest 8.0.0"; exit 0\n'
+        "fi\n"
+        'if [ "$1" = "-c" ]; then\n'
+        '  echo "DEPS:psycopg2,minio"\n'
+        '  echo "EXE:/tmp/shimmed/python"\n'
+        "  exit 0\n"
+        "fi\n"
+        "exit 0\n",
+    )
+
+    env = dict(os.environ)
+    env["PATH"] = f"{bindir}{os.pathsep}{env.get('PATH', '')}"
+
+    proc = _run([str(RUN_TESTS), str(REPO_ROOT)], env=env)
+    out = proc.stdout + proc.stderr
+
+    assert proc.returncode == 2, (
+        f"expected the precondition to abort with exit 2, got {proc.returncode}.\n{out}"
+    )
+    # THIS guard's own reason, and the NAMES -- "something is wrong with your
+    # environment" is the diagnosis that cost four attempts to refine.
+    assert "missing suite dependencies" in out, (
+        f"the failure did not name the dependency precondition.\n{out}"
+    )
+    assert "psycopg2" in out and "minio" in out, (
+        f"the failure did not name WHICH modules are missing.\n{out}"
+    )
+    # The interpreter must be reported -- a green whose environment you cannot
+    # see is what made the original failure expensive.
+    assert "run-tests: interpreter " in out, (
+        f"the resolved interpreter was not reported.\n{out}"
+    )
+    assert "=== pytest " not in proc.stdout, (
+        f"the runner started a suite despite the precondition failing.\n{proc.stdout}"
+    )
+
+
+def test_dependency_probe_fails_CLOSED_when_unreadable(tmp_path):
+    """An unreadable probe must REFUSE, never pass silently.
+
+    Anything the interpreter writes to stdout ahead of the probe (a
+    `sitecustomize.py` on PYTHONPATH will do it) can shift a positional parse.
+    The first version read lines 1 and 2 with `sed -n 1p/2p`; under stdout noise
+    it passed the guard AND printed a confidently wrong interpreter path. This
+    shim emits no probe lines at all, which is the same class.
+
+    GUARD 4 already fails the run when pytest's summary is unparseable; a
+    precondition that cannot be read is not a satisfied precondition.
+    """
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    write_exec(
+        bindir / "python",
+        'if [ "$1" = "-m" ] && [ "$2" = "pytest" ]; then\n'
+        '  echo "pytest 8.0.0"; exit 0\n'
+        "fi\n"
+        'if [ "$1" = "-c" ]; then\n'
+        '  echo "unrelated chatter on stdout"\n'
+        "  exit 0\n"
+        "fi\n"
+        "exit 0\n",
+    )
+
+    env = dict(os.environ)
+    env["PATH"] = f"{bindir}{os.pathsep}{env.get('PATH', '')}"
+
+    proc = _run([str(RUN_TESTS), str(REPO_ROOT)], env=env)
+    out = proc.stdout + proc.stderr
+
+    assert proc.returncode == 2, (
+        f"an unreadable probe must abort with exit 2, got {proc.returncode}.\n{out}"
+    )
+    assert "could not read the interpreter dependency probe" in out, (
+        f"the failure did not name the unreadable probe.\n{out}"
+    )
+    assert "=== pytest " not in proc.stdout, (
+        f"the runner started a suite despite an unreadable precondition.\n{proc.stdout}"
+    )
+
 # --------------------------------------------------------------------------
 # REGRESSION: hole 3 -- set -u vs. an empty array.
 # --------------------------------------------------------------------------
