@@ -86,6 +86,11 @@
 # converged.
 #
 # Exit codes:
+#   2  SHIP_REPO was SET but EMPTY — a caller bug, not a request for the
+#      default. `${SHIP_REPO:-…}` cannot tell "unset" from "set to the empty
+#      string", so an empty value would silently converge the operator's own
+#      $HOME/workspace/devrc. Refused instead. UNSET still defaults, which the
+#      remote leg relies on.
 #   3  repo missing on that host
 #   4  git fetch failed, or origin/main is missing / HEAD unborn
 #   5  SKIPPED — an unresolved merge/cherry-pick is in progress (conflicted
@@ -187,6 +192,20 @@ if [ "${1:-}" = "--detect-role" ]; then
   exit 0
 fi
 
+# 🔴 SET-BUT-EMPTY IS A BUG, NOT A REQUEST FOR THE DEFAULT. `${VAR:-default}`
+# cannot tell "unset" from "set to the empty string", so a caller that computed
+# a repo path and got `""` — a failed `git rev-parse`, an unexpanded template, a
+# `SHIP_REPO=$SOME_UNSET_VAR` — silently converges the OPERATOR'S OWN CLONE
+# instead of the one it meant. UNSET must keep defaulting (the remote leg
+# deliberately does not forward this variable, and the far host's repo is at its
+# own $HOME/workspace/devrc); EMPTY must stop the run.
+if [ "${SHIP_REPO+set}" = set ] && [ -z "$SHIP_REPO" ]; then
+  echo "ship: SHIP_REPO is SET but EMPTY." >&2
+  echo "  That is a caller bug, not a request for the default — an empty value" >&2
+  echo "  would silently resolve to \$HOME/workspace/devrc and converge the" >&2
+  echo "  operator's own clone. Unset it to get the default, or give it a path." >&2
+  exit 2
+fi
 SHIP_REPO="${SHIP_REPO:-$HOME/workspace/devrc}"
 SHIP_NO_SWITCH="${SHIP_NO_SWITCH:-0}"
 DO_LOCAL=1
@@ -232,6 +251,10 @@ fi
 # bash -c, remote via ssh). Single source of truth for the sequence.
 CONVERGE='
 set -uo pipefail
+if [ "${SHIP_REPO+set}" = set ] && [ -z "$SHIP_REPO" ]; then
+  echo "ship: SHIP_REPO is SET but EMPTY — refusing to fall back to \$HOME/workspace/devrc." >&2
+  exit 2
+fi
 repo="${SHIP_REPO:-$HOME/workspace/devrc}"
 no_switch="${SHIP_NO_SWITCH:-0}"
 host=$(hostname 2>/dev/null || echo local)
@@ -771,6 +794,7 @@ if [ "$rc" = 0 ]; then
   echo "ship: converged + verified at origin/main (local=$SHIP_ROLE remote=$REMOTE_ROLE)."
 else
   echo "ship: incomplete (rc=$rc) — see per-host lines above."
+  echo "  rc2=ship-repo-set-but-empty(caller bug — refused rather than defaulting to \$HOME/workspace/devrc)"
   echo "  rc3=no-repo  rc4=fetch/origin-main-unavailable  rc5=skipped:conflicted-tree(merge in progress)"
   echo "  rc6=host-unidentified"
   echo "  rc7=skipped:cannot-fast-forward(local changes in the way)  rc8=skipped:diverged(needs rebase)"

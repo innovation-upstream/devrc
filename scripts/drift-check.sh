@@ -441,6 +441,19 @@ if [ "${1:-}" = "--detect-role" ]; then
   exit 0
 fi
 
+# 🔴 SET-BUT-EMPTY IS A BUG, NOT A REQUEST FOR THE DEFAULT. `${VAR:-default}`
+# cannot tell "unset" from "set to the empty string", so a caller that computed
+# a repo path and got `""` silently checks — and `git fetch`es — the OPERATOR'S
+# OWN CLONE instead of the one it meant. UNSET must keep defaulting (this
+# variable is deliberately NOT forwarded over ssh, and the remote host's repo
+# lives at its own $HOME/workspace/devrc); EMPTY must stop the run.
+if [ "${DRIFT_REPO+set}" = set ] && [ -z "$DRIFT_REPO" ]; then
+  echo "drift-check: DRIFT_REPO is SET but EMPTY." >&2
+  echo "  That is a caller bug, not a request for the default — an empty value" >&2
+  echo "  would silently resolve to \$HOME/workspace/devrc and fetch into the" >&2
+  echo "  operator's own clone. Unset it to get the default, or give it a path." >&2
+  exit 2
+fi
 DRIFT_REPO="${DRIFT_REPO:-$HOME/workspace/devrc}"
 DRIFT_UNTRACKED_MAX="${DRIFT_UNTRACKED_MAX:-10}"
 DRIFT_DANGLING_MAX="${DRIFT_DANGLING_MAX:-10}"
@@ -589,6 +602,10 @@ severity() {
 # remote-tracking refs only.
 CHECK='
 set -uo pipefail
+if [ "${DRIFT_REPO+set}" = set ] && [ -z "$DRIFT_REPO" ]; then
+  echo "[${DRIFT_LABEL:-host}] DRIFT_REPO is SET but EMPTY — refusing to fall back to \$HOME/workspace/devrc." >&2
+  exit 2
+fi
 repo="${DRIFT_REPO:-$HOME/workspace/devrc}"
 label="${DRIFT_LABEL:-host}"
 maxu="${DRIFT_UNTRACKED_MAX:-10}"
@@ -970,6 +987,10 @@ echo "[$label] PARITY-RC=$p_rc"
 SRCREPO='
 set -uo pipefail
 label="${DRIFT_LABEL:-host}"
+if [ "${DRIFT_REPO+set}" = set ] && [ -z "$DRIFT_REPO" ]; then
+  echo "[$label] DRIFT_REPO is SET but EMPTY — refusing to fall back to \$HOME/workspace/devrc." >&2
+  exit 2
+fi
 repo="${DRIFT_REPO:-$HOME/workspace/devrc}"
 sfto="${DRIFT_SRC_FETCH_TIMEOUT:-30}"
 ssay() { echo "[$label] $*"; }

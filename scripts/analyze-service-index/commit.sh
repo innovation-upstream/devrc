@@ -168,6 +168,19 @@ if [ "${#POSITIONAL[@]}" -gt 1 ]; then
   usage: commit.sh [--print-plan] [STORE_DIR]"
 fi
 
+# 🔴 A GIVEN-BUT-EMPTY STORE IS A BUG, NOT A REQUEST FOR THE DEFAULT. `:-`
+# cannot tell "no argument" from "an argument that is the empty string", so
+# `commit.sh ""` — the shape a caller produces when its own path computation
+# fails — would silently `git init`, `git add` and `git commit` in the
+# OPERATOR'S REAL STORE instead of the directory it meant. This is the same
+# class as ship.sh's SHIP_REPO and drift-check.sh's DRIFT_REPO; see
+# scripts/tests/test_no_real_repo_writes.py, which pins all four sites.
+if [ "${#POSITIONAL[@]}" -eq 1 ] && [ -z "${POSITIONAL[0]}" ]; then
+  die "STORE argument was given but is EMPTY.
+  That is a caller bug, not a request for the default — an empty value would
+  silently resolve to \${HOME}/.claude/analyze-service-index and commit in the
+  operator's real store. Pass no argument for the default, or pass a path."
+fi
 STORE="${POSITIONAL[0]:-${HOME}/.claude/analyze-service-index}"
 
 ASI_GIT_NAME="${ASI_GIT_NAME:-analyze-service index}"
