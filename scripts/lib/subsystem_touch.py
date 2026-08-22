@@ -288,6 +288,14 @@ from subsystem_resolver import (  # noqa: E402
     scan_headings,
 )
 
+# 🔴 ONE RULE, ONE PLACE — "what is this repo's mainline?". Same `sys.path`
+# idiom as `subsystem_resolver` above. It lives in its own module because
+# `handoff_doc.py` needs the identical answer and must not re-derive it: two
+# derivations would disagree the first time a repo's `origin/HEAD` is dangling,
+# which is a state MEASURED in this very repo (see `git_mainline`'s docstring).
+from git_mainline import FALLBACK_BASE_REFS  # noqa: E402
+from git_mainline import resolve_base_ref as _resolve_mainline_ref  # noqa: E402
+
 __all__ = [
     "WRITER_ID",
     "DEFAULT_STORE_ROOT",
@@ -448,10 +456,21 @@ def governing_policy(store_root: str | Path, scope: str) -> tuple[str | None, st
 # nominations: a confirm gate a human stops reading is not a confirm gate.
 DEFAULT_NOMINATION_LIMIT = 5
 
-# Tried in order; the FIRST that exists wins. Remote-tracking refs come first so
-# that on a branch named `main` with unpushed local commits the window is those
-# commits (the diverged-host case CLAUDE.md describes), not empty.
-BASE_REF_CANDIDATES: tuple[str, ...] = ("origin/main", "origin/master", "main", "master")
+# 🔴 A FALLBACK, NOT THE ANSWER — and it is passed through `git_mainline`, which
+# puts the ref DERIVED from `refs/remotes/origin/HEAD` in front of it. This tuple
+# used to be the whole rule, and had already been extended reactively once (the
+# first repo that used `master`); on 2026-08-21 `homelab-infra`, whose mainline
+# is `trunk`, made every consumer return `no-base-ref` in exactly the repo the
+# escalation had been called for. Appending `"trunk"` buys until the next repo.
+# The derivation is where the rule lives now; this is what a clone with no
+# `origin/HEAD` falls back to, and the name is kept because it is exported and
+# it is what callers pass as `base_ref_candidates`.
+#
+# ⚠ The candidates are NOT the ladder any more. Anything rendering "we looked
+# for X" must print the ladder `_base_ref_of` returns, not this tuple — see
+# `commit_window_range`, which would otherwise name four refs it never tried
+# first.
+BASE_REF_CANDIDATES: tuple[str, ...] = FALLBACK_BASE_REFS
 
 # 🔴 THE LIVENESS BOUND ON A CALLER-SUPPLIED SESSION ID. There is no session-id
 # environment variable, so the id arrives as an argument and can be WRONG — a
@@ -1180,14 +1199,6 @@ def _git(repo: Path, args: Sequence[str]) -> str:
     return proc.stdout
 
 
-def _git_ok(repo: Path, args: Sequence[str]) -> bool:
-    try:
-        _git(repo, args)
-    except GitError:
-        return False
-    return True
-
-
 def _nul_list(out: str) -> list[str]:
     return [p for p in out.split("\0") if p]
 
@@ -1209,6 +1220,25 @@ def _toplevel(repo: str | Path) -> Path:
     different frames in one path set — components both manufactured and lost.
     """
     return Path(_git(Path(repo), ["rev-parse", "--show-toplevel"]).strip())
+
+
+def _base_ref_of(
+    top: Path, candidates: Sequence[str]
+) -> tuple[str | None, tuple[str, ...]]:
+    """`(this repo's base ref, the whole ladder that was tried)`. READ-ONLY.
+
+    🔴 ONE RULE, ONE PLACE. `collect_git_paths` and `commit_window_range` both
+    need this and each used to open-code the same rev-parse loop over
+    `BASE_REF_CANDIDATES`. `claude/RULES.md` → "One rule, one place": a predicate
+    open-coded at N sites is typically wrong at N−1 of them in the same
+    direction, and these two were — both blind to `trunk`, so the git source's
+    window and the escalation's agreed with each other while both were wrong.
+
+    The derivation itself is `git_mainline`'s, because `handoff_doc.py` needs the
+    same answer. The ladder comes back so a failure can NAME what it looked for:
+    the candidate tuple alone would describe refs that were never reached.
+    """
+    return _resolve_mainline_ref(top, fallback=candidates)
 
 
 def _filter_excluded(
@@ -1298,16 +1328,12 @@ def collect_git_paths(
     commands.append(("git", *untracked_args))
     add(_nul_list(_git(repo, untracked_args)))
 
-    base_ref: str | None = None
-    for cand in base_ref_candidates:
-        if _git_ok(repo, ["rev-parse", "--verify", "--quiet", f"{cand}^{{commit}}"]):
-            base_ref = cand
-            break
+    base_ref, tried = _base_ref_of(repo, base_ref_candidates)
 
     window = "worktree"
     if base_ref is None:
         notes.append(
-            f"no base ref among {', '.join(base_ref_candidates)}; committed work is not "
+            f"no base ref among {', '.join(tried)}; committed work is not "
             f"in the window"
         )
     else:
@@ -4006,10 +4032,12 @@ def commit_window_range(
 ) -> CommitRange:
     """The commits this checkout has that the base ref does not. READ-ONLY.
 
-    🔴 THE SAME `BASE_REF_CANDIDATES` LIST `collect_git_paths` USES, from the same
-    constant. Two answers to "what is this branch's base" would disagree the
-    first time a repo used `master`, and the git source's window and this one
-    would then describe different ranges under one report.
+    🔴 THE SAME `_base_ref_of` `collect_git_paths` USES, from the same function —
+    not merely the same constant, which is what it was and what let both sites
+    be blind to `trunk` together. Two answers to "what is this branch's base"
+    would disagree the first time a repo used a mainline neither had been taught,
+    and the git source's window and this one would then describe different ranges
+    under one report while agreeing they had looked.
 
     🔴 `--no-merges` IS NOT A PREFERENCE. `_resolve_commit` REFUSES a merge commit
     (`CommitIsMergeError`) because `git diff-tree` prints nothing for one at exit
@@ -4044,15 +4072,11 @@ def commit_window_range(
             "measured.",
         )
 
-    base_ref: str | None = None
-    for cand in base_ref_candidates:
-        if _git_ok(top, ["rev-parse", "--verify", "--quiet", f"{cand}^{{commit}}"]):
-            base_ref = cand
-            break
+    base_ref, tried = _base_ref_of(top, base_ref_candidates)
     if base_ref is None:
         return CommitRange(
             (), None, None, branch, ESCALATION_NO_BASE_REF,
-            f"none of {', '.join(base_ref_candidates)} exists in this repo, so "
+            f"none of {', '.join(tried)} exists in this repo, so "
             f"`merge-base ..HEAD` has no left-hand side. The commit window was NOT "
             f"read — this is not a claim that the branch landed nothing.",
         )
