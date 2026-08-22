@@ -82,3 +82,46 @@ from testlib.gitenv_plugin import (  # noqa: E402,F401
 # conftests: that is what #399 and #614 each did, leaving 1 target of 17 and 1
 # directory of 13 protected while reading as systemic.
 from testlib.nogit_plugin import no_real_git  # noqa: E402,F401
+
+# 🔴 GIT WRITES (GUARD 11) — and unlike the three above, this import is the
+# ONLY entry point.
+#
+# 🔴 RENAMED on the merged tree, 2026-08-22. This module was `testlib/nogit_
+# plugin.py` on its own branch; GUARD 10 (#673) landed first under that exact
+# name, so it is `gitwrite_plugin.py` (over `gitwrite.py`) here. Its
+# SESSION_MARKER moved with it — both files spelled `nogit(session)`, and GUARD
+# 10's per-target accounting fails a target that emits anything other than
+# exactly ONE marker, so leaving them identical would have made each guard read
+# as the other's double-registration.
+#
+# The runner does NOT load `testlib.gitwrite_plugin`, so this registration covers
+# `scripts/tests` and NOTHING ELSE. MEASURED, per target: `scripts/tests` -> rc
+# 99 (refused); `scripts/repo-cos/tests`, which contains the culprit
+# `test_prescan.py::_init_clone`, -> **rc 0, the write landed**;
+# `scripts/dl-router/tests` -> rc 0. 1 target of 25, and not the culprit's.
+#
+# That is stated rather than closed here on purpose: `scripts/run-tests.sh`
+# belongs to another change which registers ITS guard with `-p` on the single
+# pytest line, and `-p` reaches every target regardless of conftest
+# inheritance. A second registration — here, or via an auto-loaded
+# `scripts/conftest.py` — would put two plugins on the same class, which is the
+# collision already measured with `subprocess.Popen`. Read
+# `testlib/gitwrite_plugin.py`'s "REGISTRATION SCOPE" header before changing this.
+#
+# It exists because the suite drove `git commit`, `git branch -m`, `git config
+# core.bare true`, `remote set-url` and `git push` against the operator's REAL
+# clone — the local reflog puts the `main → trunk` rename at 19:21:35Z and the
+# ~40-push storm onto `refs/heads/main` at 19:28:14Z, seven minutes later. The
+# offending code RESTORED the URL it clobbered, so every after-the-fact check
+# reported a clean repo; the only way to see it was `git remote -v` in the real
+# clone WHILE the suite ran.
+#
+# The policy is therefore an invariant at the moment of the call, not a
+# cleanup: a shim that lets READS through anywhere and refuses WRITES to any
+# repo outside this session's tmp roots. It is reached through PATH **and**
+# through `GIT_EXEC_PATH` — PATH alone is not enough, because git prepends its
+# own `libexec/git-core` (which ships a real `git`) for every child it spawns,
+# so aliases, hooks and filters escaped a PATH-only shim entirely. Read
+# `testlib/gitwrite.py` before changing it — in particular the read-verb ledger,
+# which is an allowlist so an unknown verb fails CLOSED.
+from testlib.gitwrite_plugin import no_real_git_writes  # noqa: E402,F401
