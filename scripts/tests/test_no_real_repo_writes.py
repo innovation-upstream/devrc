@@ -53,6 +53,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -274,6 +275,143 @@ ARMED_VECTOR_IDS = (
     "GIT_CONFIG_COUNT",
 )
 
+#: 🔴 THE AXIS EACH VECTOR MUST MOVE — not merely "some axis".
+#: MEASURED: with only "something moved", a mutant that changed the
+#: GIT_CONFIG_SYSTEM vector's command to `--global` SURVIVED. Both arms still
+#: passed: the global file moved, and the guard still refused. The test proved
+#: a real thing about the WRONG variable, which is how a vector silently stops
+#: covering what its name says.
+ARMED_EXPECTED_AXIS = {
+    "GIT_DIR": "branches",
+    "GIT_COMMON_DIR": "HEAD",
+    "GIT_WORK_TREE": "worktree",
+    "GIT_INDEX_FILE": "index",
+    "GIT_OBJECT_DIRECTORY": "objects",
+    "GIT_CONFIG_GLOBAL": "global-config",
+    "GIT_CONFIG_SYSTEM": "system-config",
+    "GIT_CONFIG_COUNT": "worktree",
+}
+
+
+def _unguarded_env(*extra_guard_dirs) -> dict:
+    """An environment with EVERY GUARD 9 shim removed from PATH.
+
+    🔴 THE ISOLATION SEAM, MEASURED. An "unguarded" arm built from
+    `dict(os.environ)` is only unguarded when nothing else installed a shim.
+    Under `run-tests.sh` the RUNNER has already put its own guard dir first on
+    PATH and exported it as `DEVRC_TEST_GITGUARD_DIR`, so five arms that had
+    passed standalone were REFUSED by the outer guard the moment they ran in
+    the real gate — the live-axis assertion then failed with "this vector is
+    harmless", which is the opposite of what had happened.
+
+    So the runner's dir is stripped by NAME from the env handle, not guessed.
+    """
+    env = dict(os.environ)
+    drop = {str(d) for d in extra_guard_dirs if d}
+    runner_dir = env.get(norepo.GUARD_DIR_ENV)
+    if runner_dir:
+        drop.add(runner_dir)
+    env["PATH"] = os.pathsep.join(
+        p for p in env["PATH"].split(os.pathsep) if p not in drop)
+    # Every layer the runner adds, not just the shim: the env scrub, the
+    # transport lever and the config redirect are all part of "guarded".
+    for v in ("GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
+              "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+              "GIT_CONFIG_COUNT", "GIT_ALLOW_PROTOCOL",
+              "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM"):
+        env.pop(v, None)
+    return env
+
+
+def _discriminating_canary(env, target, label):
+    """A MUTATING write to a PROTECTED repo: refused when the guard is live.
+
+    🔴 This is the leg whose SUCCESS is evidence of ABSENCE. Its predecessor
+    committed inside an UNPROTECTED fixture -- an op the guard permits by
+    design -- and MEASURED as passing both with the guard loaded and without,
+    so it proved permission rather than absence.
+    """
+    key = f"devrc.guard9.canary{abs(hash(label)) % 100000}"
+    r = subprocess.run(["git", "-C", str(target), "config", "--local", key, "1"],
+                       env=env, capture_output=True, text=True)
+    subprocess.run(["git", "-C", str(target), "config", "--local", "--unset", key],
+                   env=env, capture_output=True)
+    return r
+
+
+def _assert_truly_unguarded(env, tmp_path, label, protected_hint=None):
+    """🔴 PROVE the arm is unguarded; never assume it.
+
+    A sibling layer reported its own L2 silently re-guarding 13 "unguarded"
+    controls, whose harness then dutifully reported them VACUOUS. "The victim
+    did not move" would then mean STILL GUARDED, not harmless.
+
+    🔴 AND THE POSITIVE LEG MUST DISCRIMINATE. Its first revision committed
+    inside an UNPROTECTED fixture repo -- an operation the guard PERMITS BY
+    DESIGN. MEASURED: it passed with the guard deliberately loaded AND with it
+    absent, so its success was evidence of permission, not of absence, and it
+    contributed nothing to catching a guarded arm. That is the
+    instrument-answers-before-the-code-is-consulted class, one level inside the
+    check built to prevent it. The legs now are:
+
+      1. STRUCTURAL   -- no directory on PATH carries a guard ledger.
+      2. NEGATIVE     -- a network call the guard WOULD refuse is not refused.
+      3. DISCRIMINATING POSITIVE -- a MUTATING write to a PROTECTED repository
+         succeeds. MEASURED: refused (exit 99) with the guard live, rc 0
+         without it. Its success is evidence of ABSENCE.
+      4. LIVENESS     -- `git --version` runs at all, which is what leg 3 was
+         really testing before, now labelled honestly.
+
+    Leg 3 needs a path the guard would protect. It is DERIVED -- from the
+    caller's hint, else from the runner's own ledger -- never guessed; when
+    neither exists there is no guard to detect and the leg is skipped with a
+    reason rather than replaced by a permitted op.
+    """
+    # --- leg 1: structural ---------------------------------------------------
+    for d in env.get("PATH", "").split(os.pathsep):
+        if d and (Path(d) / norepo.PROTECTED_LIST_NAME).exists():
+            raise AssertionError(
+                f"{label}: a GUARD 9 dir is STILL on PATH ({d}); this arm is "
+                "not unguarded and any 'nothing moved' from it is meaningless")
+
+    # --- leg 2: negative canary ---------------------------------------------
+    probe = subprocess.run(
+        ["git", "ls-remote", "https://guard9-probe.invalid/probe.git"],
+        env=env, capture_output=True, text=True, timeout=60)
+    out = probe.stdout + probe.stderr
+    assert probe.returncode != norepo.REFUSED_EXIT and "GUARD 9" not in out, (
+        f"{label}: the negative canary was REFUSED — this arm is still guarded:\n{out}")
+
+    # --- leg 4: liveness (cheap, and it catches a mangled PATH) --------------
+    v = subprocess.run(["git", "--version"], env=env, capture_output=True, text=True)
+    assert v.returncode == 0, (
+        f"{label}: git does not run at all in this arm, so 'nothing moved' "
+        f"proves nothing:\n{v.stdout}{v.stderr}")
+
+    # --- leg 3: DISCRIMINATING positive canary ------------------------------
+    target = protected_hint
+    if target is None:
+        gdir = os.environ.get(norepo.GUARD_DIR_ENV)
+        if gdir:
+            ledger = Path(gdir) / norepo.PROTECTED_LIST_NAME
+            try:
+                for line in ledger.read_text().splitlines():
+                    p = Path(line.strip())
+                    if p.is_dir() and (p / ".git").exists():
+                        target = p
+                        break
+            except OSError:
+                target = None
+    if target is None:
+        return env      # nothing protected anywhere: no guard to detect
+    r = _discriminating_canary(env, target, label)
+    assert r.returncode == 0 and "GUARD 9" not in (r.stdout + r.stderr), (
+        f"{label}: the DISCRIMINATING canary — a write to the protected repo "
+        f"{target} — was refused (rc={r.returncode}). This arm is STILL "
+        f"GUARDED, so any 'nothing moved' from it is meaningless:\n"
+        f"{r.stdout}{r.stderr}")
+    return env
+
 
 def _digest(f: Path) -> str:
     try:
@@ -287,6 +425,12 @@ def _wt_digest(root: Path) -> str:
         f"{f.relative_to(root)}={_digest(f)}"
         for f in sorted(root.rglob("*"))
         if f.is_file() and ".git" not in f.parts)
+
+
+def _system_cfg(gitconfig: Path) -> Path:
+    """A file distinct from the global one, so a `--global` write cannot be
+    mistaken for a `--system` write."""
+    return gitconfig.with_name(gitconfig.name + ".system")
 
 
 def _full_state(victim: Path, gitconfig: Path) -> dict:
@@ -304,6 +448,7 @@ def _full_state(victim: Path, gitconfig: Path) -> dict:
         "objects": str(sum(1 for f in objs.rglob("*") if f.is_file())),
         "worktree": _wt_digest(victim),
         "global-config": _digest(gitconfig),
+        "system-config": _digest(_system_cfg(gitconfig)),
     }
 
 
@@ -345,8 +490,12 @@ def _vector(vec, victim: Path, gitconfig: Path):
                                  ["hash-object", "-w", "--stdin"], "payload\n"),
         "GIT_CONFIG_GLOBAL": ({"GIT_CONFIG_GLOBAL": str(gitconfig)},
                               ["config", "--global", "user.email", "evil@example.com"], None),
-        "GIT_CONFIG_SYSTEM": ({"GIT_CONFIG_SYSTEM": str(gitconfig)},
-                              ["config", "--global", "user.email", "evil@example.com"], None),
+        # 🔴 `--system`, not `--global`. With `--global` this vector moved the
+        # GLOBAL file and proved nothing about GIT_CONFIG_SYSTEM — a mislabel
+        # the probe-integrity sweep caught. MEASURED: `config --system` with
+        # GIT_CONFIG_SYSTEM set does write that file (rc 0, contents changed).
+        "GIT_CONFIG_SYSTEM": ({"GIT_CONFIG_SYSTEM": str(_system_cfg(gitconfig))},
+                              ["config", "--system", "user.email", "evil@example.com"], None),
         # 🔴 The channel a file-watching guard cannot see: this writes NO
         # config file anywhere. MEASURED with `core.worktree` first, which moved
         # NOTHING (git ignores it for a `-C`-discovered repo) — a vector that
@@ -370,9 +519,10 @@ def test_the_armed_vector_is_DANGEROUS_and_the_guard_HOLDS(guarded, tmp_path, ve
     v1 = _mkrepo(tmp_path / "victim-unguarded")
     cfg1 = tmp_path / "gitconfig-unguarded"
     cfg1.write_text("[user]\n\tname = t\n\temail = t@t\n")
+    _system_cfg(cfg1).write_text("")
     env_add, argv, stdin = _vector(vec, v1, cfg1)
-    unguarded = dict(os.environ)
-    unguarded.pop("GIT_DIR", None)
+    unguarded = _unguarded_env(guarded.dir)
+    _assert_truly_unguarded(unguarded, tmp_path, f"armed-{vec}")
     unguarded["GIT_CONFIG_GLOBAL"] = str(cfg1)
     unguarded.update(env_add)
     before = _full_state(v1, cfg1)
@@ -384,14 +534,22 @@ def test_the_armed_vector_is_DANGEROUS_and_the_guard_HOLDS(guarded, tmp_path, ve
         f"{vec}: UNGUARDED this command moved NO asserted axis (rc={u.returncode}). "
         "The vector is harmless, so refusing it proves nothing — replace it with "
         f"a command that actually writes.\n{u.stdout}{u.stderr}")
+    want = ARMED_EXPECTED_AXIS[vec]
+    assert want in moved, (
+        f"{vec}: moved {moved}, but not its OWN axis `{want}`. The vector is "
+        f"exercising something real about a DIFFERENT mechanism — which is how "
+        f"a named vector silently stops covering what it claims.\n"
+        f"{u.stdout}{u.stderr}")
 
     # --- arm 2: GUARDED. Same command, fresh victim, guard installed. --------
     v2 = _mkrepo(tmp_path / "victim-guarded")
     cfg2 = tmp_path / "gitconfig-guarded"
     cfg2.write_text("[user]\n\tname = t\n\temail = t@t\n")
+    _system_cfg(cfg2).write_text("")
     env_add2, argv2, stdin2 = _vector(vec, v2, cfg2)
     gd = tmp_path / "guard2"
-    norepo.install(gd, norepo.protected_paths(v2), [str(cfg2)])
+    norepo.install(gd, norepo.protected_paths(v2),
+                   [str(cfg2), str(_system_cfg(cfg2))])
     genv = dict(os.environ)
     genv.pop("GIT_DIR", None)
     genv["PATH"] = f"{gd}{os.pathsep}" + os.environ["PATH"]
@@ -1162,6 +1320,755 @@ def test_a_config_write_FROM_A_WORKTREE_cannot_reach_the_base_clone(guarded, tmp
     assert p.returncode == norepo.REFUSED_EXIT, f"NOT refused:\n{out}"
     assert "GUARD 9" in out, out
     assert basecfg2.read_text() == b2, "refused, but the base config CHANGED"
+
+
+# --------------------------------------------------------------------------- #
+# 3e. THE OUTSIDE REVIEW'S F1-F6
+#
+# 🔴 Each was MEASURED to land at rc 0 with LEDGER DELTA 0 against the revision
+# that had already passed every battery above — i.e. the per-target table would
+# have printed `refused=0` for them. Each carries its own live-axis arm, so a
+# vector that stops being dangerous fails loudly instead of reassuring.
+#
+# The shared root, and the reason these are grouped: the guard asked git "which
+# repo am I in" and then reasoned over enumerated shapes. F1 is a write whose
+# REPO is innocent and whose DESTINATION is not; F2 is a URL one character
+# outside two globs; F3/F4 hand a program to the real binary, which never sees
+# this shim because git prepends its own libexec to PATH.
+# --------------------------------------------------------------------------- #
+def _rev689_victim(tmp_path, name):
+    v = _mkrepo(tmp_path / name)
+    bare = _mkrepo(tmp_path / f"{name}-origin.git", bare=True)
+    subprocess.run(["git", "-C", str(v), "remote", "add", "origin", str(bare)],
+                   check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(v), "push", "-q", "origin", "main"],
+                   check=True, capture_output=True)
+    return v, bare
+
+
+def _rev689_state(v, bare):
+    def q(*a):
+        return _git("-C", str(v), *a).stdout.strip()
+    return {
+        "config": q("config", "--local", "--list"),
+        "branches": q("for-each-ref", "--format=%(refname) %(objectname)", "refs/heads"),
+        "HEAD": q("symbolic-ref", "-q", "HEAD"),
+        "commits": q("rev-list", "--count", "--all"),
+        "worktree": _wt_digest(v),
+        # 🔴 DIRECTORY-AWARE. `git init <victim>/planted` creates ONLY
+        # `planted/.git/**`, which a file digest that skips `.git` cannot see —
+        # the vector looked harmless because the PROBE was blind, not because
+        # nothing happened.
+        "tree-entries": "|".join(sorted(
+            str(p.relative_to(v)) for p in v.iterdir() if p.name != ".git")),
+        "bare-refs": _git("-C", str(bare), "for-each-ref",
+                          "--format=%(refname) %(objectname)").stdout.strip(),
+    }
+
+
+def _rev689_case(tag, v, bare, fixture, tmp_path):
+    """(argv, env-additions) for `tag`, aimed at this victim."""
+    if tag == "F1-push-worktree":
+        return ["-C", str(fixture), "push", str(v), "+HEAD:refs/heads/main"], {}
+    if tag == "F1-push-bare":
+        return ["-C", str(fixture), "push", str(bare), "+HEAD:refs/heads/main"], {}
+    if tag == "F2-userless-scp":
+        return ["-C", str(fixture), "push",
+                "github.com:innovation-upstream/devrc.git", "HEAD:refs/heads/main"], {}
+    if tag in ("F3-hookspath", "F3-hookspath-env"):
+        hooks = tmp_path / f"evilhooks-{tag}"
+        hooks.mkdir(exist_ok=True)
+        write_exec(hooks / "post-commit",
+                   f'git -C "{v}" config core.bare true\n'
+                   f'git -C "{v}" branch -m main trunk\n'
+                   f'git -C "{v}" config remote.origin.url /tmp/PWNED.git\n'
+                   f'touch "{v}/PLANTED"\n')
+        if tag == "F3-hookspath":
+            return ["-C", str(fixture), "-c", f"core.hooksPath={hooks}",
+                    "commit", "--allow-empty", "-m", "x"], {}
+        return (["-C", str(fixture), "commit", "--allow-empty", "-m", "x"],
+                {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.hooksPath",
+                 "GIT_CONFIG_VALUE_0": str(hooks)})
+    if tag == "F4-diff-external":
+        scr = tmp_path / f"extdiff-{tag}.sh"
+        write_exec(scr, f'touch "{v}/PLANTED-DIFF"\nexit 0\n')
+        # A TRACKED file: `git diff` shows nothing for an untracked one, so
+        # the external differ would never be invoked and the vector would
+        # look harmless.
+        (fixture / "f").write_text("CHANGED\n")
+        return ["-C", str(fixture), "-c", f"diff.external={scr}", "diff"], {}
+    if tag == "F6-init":
+        return ["init", "-q", str(v / "planted-init")], {}
+    if tag == "F6-clone":
+        return ["clone", "-q", str(fixture), str(v / "planted-clone")], {}
+    # 🔴 THE ABSENT-OPERAND-REPORTS-INNOCENT SHAPE. Both `cd`s fail, so a
+    # resolver that returns the RAW string prefix-matches an allowed directory
+    # and lets the write through — the same family as `git diff --quiet`
+    # reporting SAME for a path on neither side. MEASURED: `readlink -m`
+    # normalises `<allowed>/does-not-exist/deeper/../../../victim/planted` to
+    # `<victim>/planted`, so the traversal is caught by the same fix as F6.
+    if tag == "F6-traversal-init":
+        allowed = tmp_path / f"allowed-{tag}"
+        allowed.mkdir(exist_ok=True)
+        return ["init", "-q",
+                f"{allowed}/does-not-exist/deeper/../../../{v.name}/planted-trav"], {}
+    if tag == "F6-traversal-clone":
+        allowed = tmp_path / f"allowed-{tag}"
+        allowed.mkdir(exist_ok=True)
+        return ["clone", "-q", str(fixture),
+                f"{allowed}/does-not-exist/deeper/../../../{v.name}/planted-trav2"], {}
+    raise AssertionError(tag)
+
+
+#: ⚠ `F1-push-worktree` is deliberately ABSENT: MEASURED, git's own
+#: `receive.denyCurrentBranch` refuses a push to a checked-out branch
+#: ("refusing to update checked out branch"), so on this git it is NOT a live
+#: vector and a battery entry for it could only ever agree with itself.
+#: `F1-push-bare` is the live form — and the more serious one, since the
+#: public repo is a bare remote.
+REV689_VECTORS = (
+    "F1-push-bare", "F2-userless-scp",
+    "F3-hookspath", "F3-hookspath-env", "F4-diff-external",
+    "F6-init", "F6-clone", "F6-traversal-init", "F6-traversal-clone",
+)
+
+
+@pytest.mark.parametrize("tag", REV689_VECTORS)
+def test_the_reviewed_vector_is_DANGEROUS_and_the_guard_HOLDS(guarded, tmp_path, tag):
+    """🔴 BOTH ARMS. Arm 1 must damage an asserted axis with the guard OFF, or
+    the vector was never dangerous; arm 2 must be refused by THIS guard with the
+    victim byte-unchanged.
+
+    🔴 `GIT_ALLOW_PROTOCOL` is REMOVED in both arms. The review's point about F2
+    is that the transport lever — which this PR itself calls the weakest of the
+    three and not the guard — is what stopped it, and 229 in-tree `env={...}`
+    sites would drop that lever. Crediting the guard for it would be measuring
+    the wrong thing.
+    """
+    # --- arm 1: UNGUARDED --------------------------------------------------
+    v1, b1 = _rev689_victim(tmp_path, f"victim-u-{tag}")
+    argv, envadd = _rev689_case(tag, v1, b1, guarded.fixture, tmp_path)
+    ue = _unguarded_env(guarded.dir)
+    _assert_truly_unguarded(ue, tmp_path, f"reviewed-{tag}")
+    ue["GIT_CONFIG_GLOBAL"] = str(tmp_path / f"gc-u-{tag}")
+    ue.update(envadd)
+    before = _rev689_state(v1, b1)
+    u = subprocess.run(["git", *argv], env=ue, capture_output=True, text=True,
+                       timeout=180)
+    moved = [k for k in before if before[k] != _rev689_state(v1, b1)[k]]
+    if tag == "F2-userless-scp":
+        # A real host cannot be reached from the gate, so the damage axis here
+        # is REACH, not victim state: git must have attempted the ssh
+        # connection rather than been stopped by anything of ours.
+        out = u.stdout + u.stderr
+        assert "github.com" in out and "GUARD 9" not in out, (
+            f"unguarded, the userless-scp push was not even attempted:\n{out}")
+    else:
+        assert moved, (
+            f"{tag}: UNGUARDED this moved NO asserted axis (rc={u.returncode}); "
+            f"the vector is harmless and refusing it proves nothing.\n"
+            f"{u.stdout}{u.stderr}")
+
+    # --- arm 2: GUARDED ----------------------------------------------------
+    v2, b2 = _rev689_victim(tmp_path, f"victim-g-{tag}")
+    argv2, envadd2 = _rev689_case(tag, v2, b2, guarded.fixture, tmp_path)
+    gd = tmp_path / f"guard-{tag}"
+    # 🔴 ONLY THE VICTIM IS PASSED. Its local bare origin must be protected
+    # AUTOMATICALLY by `protected_paths`, or F1b is closed only when the caller
+    # already knew to pass it. MEASURED: passing both made a mutant that
+    # deleted the automatic protection SURVIVE — the test was supplying the
+    # very thing it was meant to be checking.
+    norepo.install(gd, norepo.protected_paths(v2), [str(guarded.gitconfig)])
+    ge = dict(os.environ)
+    ge.pop("GIT_DIR", None)
+    ge.pop("GIT_ALLOW_PROTOCOL", None)
+    ge["PATH"] = f"{gd}{os.pathsep}" + os.environ["PATH"]
+    ge["GIT_CONFIG_GLOBAL"] = str(guarded.gitconfig)
+    ge.update(envadd2)
+    b = _rev689_state(v2, b2)
+    p = subprocess.run(["git", *argv2], env=ge, capture_output=True, text=True,
+                       timeout=180)
+    out = p.stdout + p.stderr
+    assert p.returncode == norepo.REFUSED_EXIT, (
+        f"{tag}: expected the guard's exit {norepo.REFUSED_EXIT}, got "
+        f"{p.returncode}\n{out}")
+    assert "GUARD 9" in out, f"{tag}: refused, but not by this guard:\n{out}"
+    a = _rev689_state(v2, b2)
+    assert a == b, f"{tag}: refused but state moved: {[k for k in b if b[k] != a[k]]}"
+
+
+def test_the_injectable_key_list_is_an_ALLOWLIST_not_a_denylist():
+    """🔴 F3's framing, pinned in the CODE. A denylist fails on the next key
+    nobody thought of; the shim must refuse an unknown key by default."""
+    shim = norepo.shim_body("/usr/bin/git", Path("/tmp/l"), Path("/tmp/p"),
+                            Path("/tmp/c"))
+    assert "is not on the injectable-config allowlist" in shim
+    # ...and an obviously-executable key must NOT be on it.
+    for k in ("core.fsmonitor", "diff.external", "core.pager", "core.editor",
+              "include.path", "alias.x", "sequence.editor"):
+        assert k not in norepo.INJECTABLE_KEYS, (
+            f"{k} names a program or a config to load; it must not be injectable")
+
+
+def test_a_neutralising_hookdir_is_allowed_but_an_ARMED_one_is_not(guarded, tmp_path):
+    """🔴 The distinction is MEASURED, not spelled. `analyze-service-index/
+    commit.sh` sets `core.hooksPath` at an EMPTY dir on purpose to NEUTRALISE
+    hooks, and its suite drives that path — refusing the key outright would be
+    a permanently-red gate. What is refused is a directory holding an
+    executable, which is the measured full-incident vector."""
+    empty = tmp_path / "empty-hooks"
+    empty.mkdir()
+    p = subprocess.run(["git", "-C", str(guarded.fixture), "-c",
+                        f"core.hooksPath={empty}", "commit", "--allow-empty",
+                        "-m", "neutralised"], env=guarded.env,
+                       capture_output=True, text=True)
+    assert p.returncode == 0, (
+        f"neutralising hooks was refused — permanently-red gate:\n{p.stdout}{p.stderr}")
+
+    armed = tmp_path / "armed-hooks"
+    armed.mkdir()
+    write_exec(armed / "post-commit", "true\n")
+    q = subprocess.run(["git", "-C", str(guarded.fixture), "-c",
+                        f"core.hooksPath={armed}", "commit", "--allow-empty",
+                        "-m", "armed"], env=guarded.env,
+                       capture_output=True, text=True)
+    assert q.returncode == norepo.REFUSED_EXIT, (
+        f"an ARMED hook directory was allowed:\n{q.stdout}{q.stderr}")
+
+
+def test_the_scanners_run_ABOVE_the_read_fast_path():
+    """🔴 F4, the structural root. With the fast path first, any subcommand on
+    the read list carried its injections straight to the real binary."""
+    src = (REPO_ROOT / "scripts" / "testlib" / "norepo.py").read_text()
+    body = src[src.index("def shim_body("):src.index("def install(")]
+    fast = body.index("---- FAST PATH")
+    for marker in ("_scan_cval", "THE ENVIRONMENT VECTOR", "GIT_CONFIG_COUNT"):
+        assert body.index(marker) < fast, (
+            f"the read fast path precedes `{marker}`; a read subcommand would "
+            "carry its injections to the real binary unscanned")
+
+
+def test_the_protected_config_set_is_RESOLVED_not_hardcoded(tmp_path):
+    """🔴 F5. `~/.gitconfig` does not exist on this host — git uses
+    `${XDG_CONFIG_HOME:-~/.config}/git/config`. Hardcoding the former protected
+    a file that is never written."""
+    guard = tmp_path / "g"
+    repo = _mkrepo(tmp_path / "r")
+    assert norepo.main([str(guard), str(repo)]) == 0
+    listed = (guard / norepo.PROTECTED_CONFIG_NAME).read_text().splitlines()
+    xdg = Path(os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config"))
+    assert str(xdg / "git" / "config") in listed, (
+        f"git's actual --global location is not protected. Listed: {listed}")
+    assert str(Path.home() / ".gitconfig") in listed, "the other candidate is unguarded"
+
+
+def test_a_NOT_YET_EXISTING_path_behind_a_SYMLINK_still_resolves(guarded, tmp_path):
+    """🔴 The case that separates `readlink -m` from `readlink -f`.
+
+    For a plain absolute path the two agree by accident: `-f` fails on a
+    non-existent leaf, the `|| echo "$1"` fallback hands back the raw string,
+    and the raw string still has the protected prefix. MEASURED — a mutant
+    reverting `-m` to `-f` SURVIVED the F6 vectors for exactly that reason.
+
+    It stops agreeing when an ANCESTOR is a symlink: `-f` cannot canonicalise
+    the leaf, the raw string keeps the symlink spelling, and it no longer
+    matches the resolved protected path. `-m` canonicalises regardless of
+    existence, which is what makes the destination check hold under a symlinked
+    path — the shape `~/workspace` genuinely has on this host.
+    """
+    real = tmp_path / "real-parent"
+    real.mkdir()
+    victim = _mkrepo(real / "victim")
+    link = tmp_path / "linked-parent"
+    link.symlink_to(real)
+
+    gd = tmp_path / "guard-symlink"
+    norepo.install(gd, norepo.protected_paths(victim), [str(guarded.gitconfig)])
+    env = dict(os.environ)
+    env.pop("GIT_DIR", None)
+    env["PATH"] = f"{gd}{os.pathsep}" + os.environ["PATH"]
+    env["GIT_CONFIG_GLOBAL"] = str(guarded.gitconfig)
+
+    # 🔴 TWO missing components, not one. MEASURED: `readlink -f` canonicalises
+    # fine when only the LAST component is missing, so a one-level destination
+    # made `-f` and `-m` agree and a mutant reverting `-m` SURVIVED. It fails —
+    # returning empty, so the raw symlink spelling is kept and no longer
+    # matches the resolved protected path — only when more than the last
+    # component is absent.
+    dest = link / "victim" / "planted" / "through-symlink"
+    p = subprocess.run(["git", "init", "-q", str(dest)], env=env,
+                       capture_output=True, text=True)
+    out = p.stdout + p.stderr
+    assert p.returncode == norepo.REFUSED_EXIT, (
+        f"a not-yet-existing path behind a symlink was NOT refused:\n{out}")
+    assert "GUARD 9" in out, out
+    assert not dest.exists(), "refused, but the repository was still created"
+
+
+def _farm_env(guard_dir, gitconfig):
+    env = dict(os.environ)
+    env.pop("GIT_DIR", None)
+    env["PATH"] = f"{guard_dir}{os.pathsep}" + os.environ["PATH"]
+    env["GIT_CONFIG_GLOBAL"] = str(gitconfig)
+    return env
+
+
+def test_an_alias_in_a_repos_OWN_config_is_guarded_by_the_exec_farm(guarded, tmp_path):
+    """🔴 THE RESIDUAL THIS MODULE USED TO ONLY DOCUMENT, NOW CLOSED.
+
+    Git PREPENDS `libexec/git-core` to PATH for every process it spawns, so a
+    bare `git` inside a `!`-alias resolves to the REAL binary and never reaches
+    a PATH shim. Scanning the current invocation cannot help when the alias is
+    ALREADY IN the repo's own `.git/config`.
+
+    BOTH ARMS, because the point is that one layer is insufficient:
+      without GIT_EXEC_PATH -> the alias lands a commit on the victim
+      with the farm         -> refused by THIS guard, victim unchanged
+    """
+    victim = _mkrepo(tmp_path / "farm-victim")
+    fixture = _mkrepo(tmp_path / "farm-fixture")
+    subprocess.run(["git", "-C", str(fixture), "config", "alias.pwn",
+                    f"!git -C {victim} commit --allow-empty -m PWNED-OWN-ALIAS"],
+                   check=True, capture_output=True)
+    gd = tmp_path / "farm-guard"
+    norepo.install(gd, norepo.protected_paths(victim), [str(guarded.gitconfig)])
+
+    def commits():
+        return _git("-C", str(victim), "rev-list", "--count", "--all").stdout.strip()
+
+    # --- arm 1: PATH shim only. The residual must be REAL. -------------------
+    base = commits()
+    env = _farm_env(gd, guarded.gitconfig)
+    env.pop("GIT_EXEC_PATH", None)
+    subprocess.run(["git", "-C", str(fixture), "pwn"], env=env,
+                   capture_output=True, text=True, timeout=120)
+    assert commits() != base, (
+        "the alias-in-own-config residual no longer reproduces. If git stopped "
+        "prepending its libexec, say so — do not delete the farm.")
+
+    # --- arm 2: with the farm. ----------------------------------------------
+    victim2 = _mkrepo(tmp_path / "farm-victim2")
+    fixture2 = _mkrepo(tmp_path / "farm-fixture2")
+    subprocess.run(["git", "-C", str(fixture2), "config", "alias.pwn",
+                    f"!git -C {victim2} commit --allow-empty -m PWNED-OWN-ALIAS"],
+                   check=True, capture_output=True)
+    gd2 = tmp_path / "farm-guard2"
+    norepo.install(gd2, norepo.protected_paths(victim2), [str(guarded.gitconfig)])
+    farm = norepo.install_exec_farm(gd2)
+    assert farm, "the exec farm could not be built"
+    env2 = _farm_env(gd2, guarded.gitconfig)
+    env2["GIT_EXEC_PATH"] = farm
+
+    def commits2():
+        return _git("-C", str(victim2), "rev-list", "--count", "--all").stdout.strip()
+
+    base2 = commits2()
+    p = subprocess.run(["git", "-C", str(fixture2), "pwn"], env=env2,
+                       capture_output=True, text=True, timeout=120)
+    out = p.stdout + p.stderr
+    assert commits2() == base2, (
+        f"the farm did not stop the alias; victim moved {base2} -> {commits2()}\n{out}")
+    assert "GUARD 9" in out, f"stopped, but not by this guard:\n{out}"
+
+
+def test_the_exec_farm_does_not_break_ordinary_git(guarded, tmp_path):
+    """🔴 A farm that broke git would be a permanently-red gate. Substituting
+    `git` inside libexec must leave every other helper reachable."""
+    gd = tmp_path / "ok-guard"
+    norepo.install(gd, norepo.protected_paths(guarded.victim), [str(guarded.gitconfig)])
+    farm = norepo.install_exec_farm(gd)
+    assert farm
+    env = _farm_env(gd, guarded.gitconfig)
+    env["GIT_EXEC_PATH"] = farm
+    for label, argv in (("status", ["-C", str(guarded.fixture), "status", "--porcelain"]),
+                        ("log", ["-C", str(guarded.fixture), "log", "--oneline", "-1"]),
+                        ("commit", ["-C", str(guarded.fixture), "commit", "--allow-empty", "-m", "ok"]),
+                        ("diff", ["-C", str(guarded.fixture), "diff"]),
+                        ("rebase --help", ["rebase", "--help"])):
+        r = subprocess.run(["git", *argv], env=env, capture_output=True, text=True)
+        assert r.returncode == 0, f"the farm broke `git {label}`:\n{r.stdout}{r.stderr}"
+    # The farm must carry essentially all of git's helpers, not a token few.
+    assert len(list(Path(farm).iterdir())) > 50, "the farm is suspiciously small"
+
+
+#: 🔴 THE ESCAPE SET, DERIVED BY MEASUREMENT, PINNED BOTH WAYS.
+#: An earlier revision asserted the residual was ONE — the shell case — and
+#: omitted the absolute-path case entirely. Six shapes were measured; the
+#: guard's reach is exactly the four that go through PATH resolution.
+ALIAS_SHAPES = {
+    "bare git": ("!git -C {v} commit --allow-empty -m PWN", "guarded"),
+    "git via sh -c": ("!sh -c 'git -C {v} commit --allow-empty -m PWN'", "guarded"),
+    "git via env": ("!env git -C {v} commit --allow-empty -m PWN", "guarded"),
+    "git via command": ("!command git -C {v} commit --allow-empty -m PWN", "guarded"),
+    "absolute git path": ("!{git} -C {v} commit --allow-empty -m PWN", "escapes"),
+    "no git at all": ("!touch {v}/PLANTED-SHELL", "escapes"),
+}
+
+
+@pytest.mark.parametrize("shape", sorted(ALIAS_SHAPES))
+def test_the_farms_reach_is_exactly_the_derived_set(guarded, tmp_path, shape):
+    """🔴 BOTH DIRECTIONS. A shape marked `guarded` must be refused; a shape
+    marked `escapes` must STILL escape.
+
+    The second half matters as much as the first: if an escape silently stops
+    escaping, the module's stated residual is now too pessimistic and should be
+    corrected with a measurement — and if a guarded shape starts escaping, the
+    farm has regressed. Either way this test says which.
+    """
+    body, expect = ALIAS_SHAPES[shape]
+    victim = _mkrepo(tmp_path / f"as-v-{abs(hash(shape)) % 9999}")
+    fixture = _mkrepo(tmp_path / f"as-f-{abs(hash(shape)) % 9999}")
+    real = shutil.which("git")
+    subprocess.run(["git", "-C", str(fixture), "config", "alias.pwn",
+                    body.format(v=victim, git=real)], check=True, capture_output=True)
+    gd = tmp_path / f"as-g-{abs(hash(shape)) % 9999}"
+    norepo.install(gd, norepo.protected_paths(victim), [str(guarded.gitconfig)])
+    farm = norepo.install_exec_farm(gd)
+    assert farm, "the exec farm could not be built"
+    env = dict(os.environ)
+    env.pop("GIT_DIR", None)
+    env["PATH"] = f"{gd}{os.pathsep}" + os.environ["PATH"]
+    env["GIT_CONFIG_GLOBAL"] = str(guarded.gitconfig)
+    env["GIT_EXEC_PATH"] = farm
+
+    def moved():
+        n = _git("-C", str(victim), "rev-list", "--count", "--all").stdout.strip()
+        return n != "1" or (victim / "PLANTED-SHELL").exists()
+
+    p = subprocess.run(["git", "-C", str(fixture), "pwn"], env=env,
+                       capture_output=True, text=True, timeout=120)
+    out = p.stdout + p.stderr
+    if expect == "guarded":
+        assert not moved(), f"{shape} was expected GUARDED but it landed:\n{out}"
+        assert "GUARD 9" in out, f"{shape} was stopped, but not by this guard:\n{out}"
+    else:
+        assert moved(), (
+            f"{shape} was expected to ESCAPE and did not. If the farm now covers "
+            "it, the module's stated residual is too pessimistic — correct it "
+            f"with the measurement rather than leaving a stale claim.\n{out}")
+
+
+def test_the_exec_farm_is_DERIVED_and_verified_as_a_SET(guarded, tmp_path):
+    """🔴 A COUNT TEST PASSES WHEN ONE HELPER IS SWAPPED FOR ANOTHER.
+
+    The farm is rebuilt from `git --exec-path` on every call, so a helper added
+    by a git upgrade is picked up automatically — it is not a snapshot ledger.
+    This asserts the SET, and that our own `git` is a real copy rather than a
+    link to the binary it is meant to shadow.
+    """
+    gd = tmp_path / "setfarm-guard"
+    norepo.install(gd, norepo.protected_paths(guarded.victim), [str(guarded.gitconfig)])
+    farm = Path(norepo.install_exec_farm(gd))
+    src = Path(subprocess.run([norepo.real_git(), "--exec-path"],
+                              capture_output=True, text=True).stdout.strip())
+    assert set(os.listdir(farm)) == set(os.listdir(src)), (
+        "the farm's entry SET differs from git's exec-path; a helper git looks "
+        "for would reach the real binary unguarded")
+    assert not (farm / "git").is_symlink(), "the farm's `git` must be OUR shim"
+
+
+def test_a_farm_that_cannot_be_BUILT_makes_install_REFUSE(guarded, tmp_path):
+    """🔴 FAIL CLOSED when the farm cannot be completed.
+
+    MEASURED on an earlier revision: a pre-existing regular file at
+    `.git-archimport-wrapped` was `continue`d past and the farm was returned as
+    usable anyway — a hole handed to git silently. The build now starts from a
+    clean directory, so a stale blocker cannot survive; what remains is the
+    case where the directory cannot be written at all, and that must refuse
+    rather than return a partial farm.
+    """
+    gd = tmp_path / "closed-guard"
+    norepo.install(gd, norepo.protected_paths(guarded.victim), [str(guarded.gitconfig)])
+    # Sanity: it builds normally here, so a refusal below is about the block.
+    assert norepo.install_exec_farm(gd), "the farm does not build even unblocked"
+    shutil.rmtree(gd / norepo.EXEC_FARM_NAME, ignore_errors=True)
+    gd.chmod(0o500)                       # read+execute, not writable
+    try:
+        res = norepo.install_exec_farm(gd)
+    finally:
+        gd.chmod(0o700)
+    assert res == "", (
+        "a farm that could not be built did not refuse; a partial exec-path "
+        "would be handed to git with a hole in it")
+
+
+def test_the_runner_treats_an_unusable_farm_as_FATAL():
+    """Proceeding with a known hole is the thing being refused."""
+    text = RUN_TESTS.read_text(encoding="utf-8")
+    i = text.index("GITGUARD_FARM=")
+    tail = text[i:i + 2000]
+    assert "FATAL" in tail and "exit 2" in tail, (
+        "run-tests.sh no longer refuses to run when the exec farm is unusable")
+
+
+def test_the_runner_exports_the_exec_farm():
+    text = RUN_TESTS.read_text(encoding="utf-8")
+    assert 'export GIT_EXEC_PATH="$GITGUARD_FARM"' in text, (
+        "run-tests.sh does not export the exec farm; a git-spawned child would "
+        "resolve `git` to the real binary")
+    assert "exec-farm=" in (REPO_ROOT / "scripts/testlib/norepo.py").read_text()
+
+
+def test_the_integrity_check_FAILS_on_a_DELIBERATELY_GUARDED_arm(guarded, tmp_path):
+    """🔴 THE CHECK BUILT TO PREVENT A FAKE GREEN, CHECKED ITSELF.
+
+    Every VACUOUS verdict in this file rests on `_assert_truly_unguarded`
+    having passed. If it can pass on a GUARDED arm, every one of them is
+    inherited from a broken instrument. So: hand it an arm that is guarded on
+    purpose and require it to raise.
+    """
+    with pytest.raises(AssertionError):
+        _assert_truly_unguarded(dict(guarded.env), tmp_path, "deliberately-guarded",
+                                protected_hint=guarded.victim)
+
+
+def test_the_positive_canary_ALONE_discriminates(guarded, tmp_path):
+    """🔴 LEG 3 IN ISOLATION. MEASURED on its predecessor: a commit inside an
+    unprotected fixture passed with the guard loaded AND absent — it could not
+    distinguish the two states, so its success proved permission.
+
+    This asserts the pair directly: refused under the guard, rc 0 without it.
+    """
+    guarded_r = _discriminating_canary(dict(guarded.env), guarded.victim, "g")
+    assert guarded_r.returncode == norepo.REFUSED_EXIT, (
+        "the positive canary is an operation the guard PERMITS; its success "
+        "would be evidence of permission, not of the guard being absent:\n"
+        f"{guarded_r.stdout}{guarded_r.stderr}")
+    unguarded_r = _discriminating_canary(
+        _unguarded_env(guarded.dir), guarded.victim, "u")
+    assert unguarded_r.returncode == 0, (
+        f"the canary does not succeed even unguarded, so it cannot be used as "
+        f"evidence of absence:\n{unguarded_r.stdout}{unguarded_r.stderr}")
+
+
+def test_farm_is_complete_rejects_a_missing_or_shadowed_entry(tmp_path):
+    """🔴 The set check, tested DIRECTLY because it is unreachable inside
+    `install_exec_farm` on a healthy box — the build starts clean and always
+    produces the right set. An unreachable guard is one nobody has watched
+    work."""
+    farm = tmp_path / "farm"
+    farm.mkdir()
+    for n in ("a", "b"):
+        (farm / n).write_text("x")
+    (farm / "git").write_text("shim")
+    assert norepo.farm_is_complete(farm, {"a", "b", "git"})
+    # a MISSING helper
+    assert not norepo.farm_is_complete(farm, {"a", "b", "git", "c"})
+    # a SWAPPED helper: same count, different set
+    assert not norepo.farm_is_complete(farm, {"a", "zzz", "git"})
+    # `git` that merely LINKS to the real binary guards nothing
+    (farm / "git").unlink()
+    (farm / "git").symlink_to(shutil.which("git") or "/bin/true")
+    assert not norepo.farm_is_complete(farm, {"a", "b", "git"})
+
+
+# --------------------------------------------------------------------------- #
+# 3f. THE MITIGATION'S OWN ATTACK SURFACE, AND THE DISPATCH-NAME FARM
+# --------------------------------------------------------------------------- #
+def test_the_shim_NEVER_shell_interprets_an_argv_derived_string(guarded, tmp_path):
+    """🔴 A GUARD THAT IS WORSE THAN NO GUARD.
+
+    `--config-env=key=VAR` puts VAR on the command line. An earlier revision did
+    `eval "_cv=${$_ev:-}"` with it, so a command substitution in the NAME ran
+    inside the shim, before any check, on a pure READ. MEASURED:
+
+        git --config-env=core.pager='V:-$(touch X)' --version
+          this shim -> X CREATED, then exit 99
+          real git  -> exit 128, "fatal: missing environment variable", nothing run
+
+    Real git rejects the name and executes nothing, so the mitigation was
+    introducing execution the unguarded system refuses. Both halves are
+    asserted: nothing runs, AND the invocation is refused.
+    """
+    marker = tmp_path / "PWNED-BY-SHIM"
+    p = subprocess.run(
+        ["git", f"--config-env=core.pager=V:-$(touch {marker})", "--version"],
+        env=guarded.env, capture_output=True, text=True, timeout=60)
+    assert not marker.exists(), (
+        "the shim EXECUTED a command taken from argv. On this path the guard is "
+        "strictly worse than no guard — real git refuses the name and runs "
+        f"nothing.\n{p.stdout}{p.stderr}")
+    assert p.returncode == norepo.REFUSED_EXIT, (
+        f"the injection did not run but was not refused either:\n{p.stdout}{p.stderr}")
+
+
+def test_a_VALID_config_env_name_still_works(guarded):
+    """The other direction: `--config-env` with an ordinary name must not be
+    refused, or the fix is a permanently-red gate."""
+    env = dict(guarded.env)
+    env["G9_VALID_NAME"] = "someone@example.com"
+    p = subprocess.run(["git", "-C", str(guarded.fixture),
+                        "--config-env=user.email=G9_VALID_NAME",
+                        "config", "--get", "user.email"],
+                       env=env, capture_output=True, text=True)
+    assert p.returncode == 0, f"a valid --config-env was refused:\n{p.stdout}{p.stderr}"
+
+
+def test_the_eval_family_is_audited_not_just_the_one_instance():
+    r"""🔴 THE PATTERN, NOT THE INSTANCE.
+
+    Every `eval` in the rendered shim must take a HARDCODED variable name or a
+    digit-validated counter -- never a value from argv. Anything that
+    shell-interprets an argv-derived string belongs to the same family as the
+    `--config-env` RCE by construction, so the audit is over the whole set.
+
+    🔴 CODE ONLY. The first revision of this test searched every line and
+    matched the COMMENT documenting the bug -- the prose-walkable shape that
+    has now caught three separate structural checks in this file.
+    """
+    raw = norepo.shim_body("/usr/bin/git", Path("/tmp/l"), Path("/tmp/p"),
+                           Path("/tmp/c"))
+    # Strip comments ONCE, up front: every assertion below is about code.
+    shim = "\n".join(ln for ln in raw.splitlines()
+                     if not ln.strip().startswith("#"))
+    evals = [ln.strip() for ln in shim.splitlines() if "eval " in ln]
+    # $_v comes from REFUSED_ENV (hardcoded); $_n is the digit-validated
+    # GIT_CONFIG_COUNT index. Neither can carry a value from the command line.
+    allowed_names = ("$_v", "GIT_CONFIG_KEY_$_n", "GIT_CONFIG_VALUE_$_n")
+    for e in evals:
+        assert any(n in e for n in allowed_names), (
+            "an `eval` in the shim takes an operand that is not a hardcoded "
+            f"name or a validated counter — if it can come from argv that is "
+            f"remote code execution inside the guard:\n  {e}")
+    assert len(evals) == 3, (
+        f"the shim's `eval` set changed ({len(evals)} found). Re-audit each "
+        f"operand before widening this pin:\n" + "\n".join(evals))
+    # ...and the argv-derived path must be read WITHOUT interpretation.
+    assert "printenv" in shim, "the --config-env value is not read with printenv"
+    assert 'eval "_cv=' not in shim, (
+        "the --config-env value is being eval'd again")
+
+
+FARM_DISPATCH_CASES = [
+    ("git-config -f into a protected repo", "refuse",
+     lambda farm, v, f: ([f"{farm}/git-config", "-f", str(v / ".git" / "config"),
+                          "core.bale", "true"], None)),
+    ("git-commit into a protected repo", "refuse",
+     lambda farm, v, f: ([f"{farm}/git-commit", "--allow-empty", "-m", "PWN"], str(v))),
+    ("git-status on a fixture", "allow",
+     lambda farm, v, f: ([f"{farm}/git-status", "--porcelain"], str(f))),
+    ("git-log on a PROTECTED repo (a read)", "allow",
+     lambda farm, v, f: ([f"{farm}/git-log", "--oneline", "-1"], str(v))),
+]
+
+
+@pytest.mark.parametrize("label,expect,build", FARM_DISPATCH_CASES,
+                         ids=[c[0] for c in FARM_DISPATCH_CASES])
+def test_the_farm_routes_every_DISPATCH_NAME_not_just_git(guarded, tmp_path,
+                                                          label, expect, build):
+    """🔴 GIT DISPATCHES ON argv[0], AND THE FARM MUST OWN EVERY SUCH NAME.
+
+    MEASURED against an earlier revision that substituted only the literal
+    `git`: all 181 `git-<verb>` entries pointed at the real binary and sat
+    FIRST on PATH in exactly the alias/hook context the farm exists for —
+
+        <farm>/git-config -f <victim>/.git/config core.bale true
+          -> core.bare false -> true, rc 0
+
+    the incident's own signature, with `git` never spelled.
+
+    🔴 ROUTED BY NAME, NEVER BY INODE. On this host those entries are SYMLINKS
+    and none shares git's inode; on another packaging they are hardlinks. The
+    property git uses is the NAME, so an inode/`stat` enumeration is the wrong
+    attribute and would report a clean farm on one packaging while missing
+    every entry on the other.
+    """
+    victim = _mkrepo(tmp_path / f"fd-v-{abs(hash(label)) % 9999}")
+    fixture = _mkrepo(tmp_path / f"fd-f-{abs(hash(label)) % 9999}")
+    gd = tmp_path / f"fd-g-{abs(hash(label)) % 9999}"
+    norepo.install(gd, norepo.protected_paths(victim), [str(guarded.gitconfig)])
+    farm = norepo.install_exec_farm(gd)
+    assert farm
+    argv, cwd = build(farm, victim, fixture)
+    env = dict(os.environ)
+    env.pop("GIT_DIR", None)
+    env["PATH"] = f"{gd}{os.pathsep}" + os.environ["PATH"]
+    env["GIT_CONFIG_GLOBAL"] = str(guarded.gitconfig)
+    env["GIT_EXEC_PATH"] = farm
+    before = (victim / ".git" / "config").read_text()
+    p = subprocess.run(argv, env=env, cwd=cwd, capture_output=True, text=True,
+                       timeout=60)
+    out = p.stdout + p.stderr
+    if expect == "refuse":
+        assert p.returncode == norepo.REFUSED_EXIT, f"{label} not refused:\n{out}"
+        assert "GUARD 9" in out, out
+        assert (victim / ".git" / "config").read_text() == before
+    else:
+        assert p.returncode == 0, (
+            f"{label} was refused — a permanently-red gate; the shim must "
+            f"dispatch correctly when invoked AS git-<verb>:\n{out}")
+
+
+def test_every_git_dispatch_name_in_the_farm_is_OUR_shim(guarded, tmp_path):
+    """Derived at run time and checked as a SET, by name."""
+    gd = tmp_path / "dispatch-guard"
+    norepo.install(gd, norepo.protected_paths(guarded.victim), [str(guarded.gitconfig)])
+    farm = Path(norepo.install_exec_farm(gd))
+    names = set(os.listdir(farm))
+    dispatch = {n for n in names if n == "git" or n.startswith("git-")}
+    assert len(dispatch) > 100, f"only {len(dispatch)} dispatch names — suspicious"
+    unrouted = [n for n in dispatch
+                if (farm / n).is_symlink() or not (farm / n).is_file()]
+    assert not unrouted, (
+        f"{len(unrouted)} dispatch names still reach the real binary: "
+        f"{sorted(unrouted)[:8]}")
+
+
+READ_PATH_CASES = [
+    ("log --output= into a protected repo", "refuse",
+     lambda v, f, tmp: ["-C", str(f), "log", "-p",
+                        f"--output={v / '.git' / 'config'}"]),
+    ("log --output= into an ALLOWED path", "allow",
+     lambda v, f, tmp: ["-C", str(f), "log", f"--output={tmp / 'ok.txt'}"]),
+    # 🔴 THE SPACE-SEPARATED FORM. MEASURED: with only `--output=<path>`
+    # covered, a mutant that deleted the `--output <path>` branch SURVIVED —
+    # the two spellings are handled by different branches and only one was
+    # exercised. A synonym walks a guard tested on one spelling.
+    ("log --output <path> (space-separated) into a protected repo", "refuse",
+     lambda v, f, tmp: ["-C", str(f), "log", "-p", "--output",
+                        str(v / ".git" / "config")]),
+    ("grep -O<cmd>", "refuse",
+     lambda v, f, tmp: ["-C", str(f), "grep", f"-O touch {tmp / 'PWN-GREP'}", "A"]),
+]
+
+
+@pytest.mark.parametrize("label,expect,build", READ_PATH_CASES,
+                         ids=[c[0] for c in READ_PATH_CASES])
+def test_a_read_verb_carrying_a_destination_or_command_is_checked(
+        guarded, tmp_path, label, expect, build):
+    """🔴 A VERB'S CLASSIFICATION SAYS NOTHING ABOUT ITS OPTIONS.
+
+    `log` and `grep` are truthfully read verbs. MEASURED against an earlier
+    revision, from an ALLOWED repo: `log -p --output=<victim>/.git/config`
+    clobbered the victim's config and `grep -O<cmd>` ran the command — both rc
+    0, both `exec`d on the fast path before any destination check. Same lesson
+    as `status`, with a destination attached.
+    """
+    victim = _mkrepo(tmp_path / f"rp-v-{abs(hash(label)) % 9999}")
+    fixture = _mkrepo(tmp_path / f"rp-f-{abs(hash(label)) % 9999}")
+    (fixture / "A").write_text("hello\n")
+    subprocess.run(["git", "-C", str(fixture), "add", "A"], check=True,
+                   capture_output=True)
+    subprocess.run(["git", "-C", str(fixture), "commit", "-qm", "A"], check=True,
+                   capture_output=True)
+    gd = tmp_path / f"rp-g-{abs(hash(label)) % 9999}"
+    norepo.install(gd, norepo.protected_paths(victim), [str(guarded.gitconfig)])
+    env = dict(os.environ)
+    env.pop("GIT_DIR", None)
+    env["PATH"] = f"{gd}{os.pathsep}" + os.environ["PATH"]
+    env["GIT_CONFIG_GLOBAL"] = str(guarded.gitconfig)
+    before = (victim / ".git" / "config").read_text()
+    p = subprocess.run(["git", *build(victim, fixture, tmp_path)], env=env,
+                       capture_output=True, text=True, timeout=60)
+    out = p.stdout + p.stderr
+    if expect == "refuse":
+        assert p.returncode == norepo.REFUSED_EXIT, f"{label} not refused:\n{out}"
+        assert (victim / ".git" / "config").read_text() == before
+        assert not (tmp_path / "PWN-GREP").exists(), "the -O command still ran"
+    else:
+        assert p.returncode == 0, (
+            f"{label} was refused — an output destination OUTSIDE any protected "
+            f"repo must be allowed:\n{out}")
 
 
 def test_no_two_testlib_plugins_patch_Popen_the_same_way():

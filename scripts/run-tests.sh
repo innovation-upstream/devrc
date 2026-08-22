@@ -1705,6 +1705,31 @@ GITGUARD_REPOS="$(printf '%s\n' "$GITGUARD_OUT" | grep -c '^protected=' || true)
 export PATH="$GITGUARD_DIR:$PATH"
 export DEVRC_TEST_GITGUARD_DIR="$GITGUARD_DIR"
 
+# 🔴 OWN GIT'S OWN libexec, so a git-SPAWNED child is guarded too. Git prepends
+# `libexec/git-core` to PATH for everything it spawns, so a bare `git` inside a
+# `!`-alias, a hook, a filter or `rebase --exec` resolves to the REAL binary and
+# never reaches the PATH shim. MEASURED with an alias in a fixture's OWN config:
+# PATH shim alone -> rc 0 and the victim gained a commit; with this -> rc 99,
+# refused. `git --exec-path` reports 189 entries here; the farm symlinks the
+# non-git ones and SUBSTITUTES EVERY DISPATCH NAME -- `git` plus all 181
+# `git-<verb>` entries. Substituting only the literal `git` was the earlier,
+# WITHDRAWN version: git dispatches on argv[0], so `<farm>/git-config -f
+# <protected>/.git/config core.bare true` walked straight past it at rc 0.
+GITGUARD_FARM="$(printf '%s\n' "$GITGUARD_OUT" | sed -n 's/^exec-farm=//p')"
+if [ -n "$GITGUARD_FARM" ] && [ "$GITGUARD_FARM" != "UNAVAILABLE" ]; then
+  export GIT_EXEC_PATH="$GITGUARD_FARM"
+else
+  echo "run-tests: FATAL — GUARD 9 could not build the git exec-path farm." >&2
+  echo "  Without it, a \`!\`-alias, hook, filter or \`rebase --exec\` ALREADY IN" >&2
+  echo "  a repo's own config runs a git that this guard never sees — git" >&2
+  echo "  prepends its own libexec to PATH for everything it spawns." >&2
+  echo "  Refusing to run rather than proceed with a known hole: the farm is" >&2
+  echo "  derived from \`git --exec-path\` every run and verified as a SET, so" >&2
+  echo "  an unusable one means an entry could not be linked, not that the" >&2
+  echo "  list is stale." >&2
+  exit 2
+fi
+
 # 🔴 TWO LEVERS THAT DO NOT DEPEND ON THE SHIM BEING REACHED. The shim
 # intercepts by PATH, so an absolute `/usr/bin/git`, or a test that REPLACES
 # $PATH rather than prepending to it, walks past it. These two are enforced by
@@ -1765,6 +1790,7 @@ export GIT_CONFIG_NOSYSTEM=1
 echo "run-tests: real repositories protected from this run (GUARD 9)"
 printf '%s\n' "$GITGUARD_OUT" | sed 's/^/  /'
 echo "  GIT_ALLOW_PROTOCOL=$GIT_ALLOW_PROTOCOL (no ssh/https transport for this run)"
+echo "  GIT_EXEC_PATH=${GIT_EXEC_PATH:-<unchanged>} (git-spawned children are guarded too)"
 echo "  GIT_CONFIG_GLOBAL=$GIT_CONFIG_GLOBAL (redirected; the real one is also refused)"
 if [ "$GITGUARD_REPOS" -eq 0 ]; then
   echo "  ⚠ NO real repository resolved — \$ROOT is not a git checkout and there is"

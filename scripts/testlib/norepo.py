@@ -213,6 +213,7 @@ from .mockbin import write_exec
 LOG_NAME = "git-ops.log"
 PROTECTED_LIST_NAME = "protected-repos.txt"
 PROTECTED_CONFIG_NAME = "protected-config.txt"
+EXEC_FARM_NAME = "execfarm"
 
 #: The handle `run-tests.sh` exports so anything under the runner can find the
 #: ONE guard directory. Same shape as `nolaunch.STUB_DIR_ENV`.
@@ -278,6 +279,48 @@ RETARGETING_ENV = (
     "GIT_CEILING_DIRECTORIES",
     "GIT_PREFIX",
 )
+
+#: 🔴 F3 — AN ALLOWLIST, NOT A DENYLIST. Injected config (`-c`, `--config-env`,
+#: `GIT_CONFIG_KEY_<n>`) can hand the REAL git binary a program to run, and the
+#: shim is not inherited by what git spawns. An earlier revision refused ONE key
+#: (`alias.*=!`) while its own prose NAMED `core.fsmonitor`, clean/smudge
+#: filters and `GIT_SSH_COMMAND` as surface and refused none of them.
+#:
+#: MEASURED against that revision: `-c core.hooksPath=<dir with a hook>` +
+#: `commit` landed ALL FOUR of the incident's documented damages on a victim
+#: (`core.bare` true, `main`->`trunk`, `remote.origin.url` repointed,
+#: `user.email` rewritten) plus a planted file -- at rc 0, ledger delta 0.
+#:
+#: So: an injected key must be on this list or it is REFUSED. Membership means
+#: "this key cannot name a program, a config file to load, or a write
+#: destination". Every entry is a key MEASURED in use in this tree.
+INJECTABLE_KEYS = (
+    "user.name", "user.email", "user.signingkey",
+    "init.defaultbranch",
+    "core.abbrev", "core.filemode", "core.autocrlf", "core.ignorecase",
+    "core.excludesfile", "core.bare", "core.logallrefupdates", "core.quotepath",
+    "core.safecrlf", "core.symlinks", "core.trustctime", "core.precomposeunicode",
+    "commit.gpgsign", "tag.gpgsign", "gpg.program",
+    "merge.autostash", "rebase.autostash", "pull.rebase", "push.default",
+    "fetch.prune", "gc.auto", "advice.detachedhead", "advice.addignoredfile",
+    "diff.algorithm", "diff.renames", "status.showuntrackedfiles",
+    "log.date", "i18n.logoutputencoding", "i18n.commitencoding",
+    "protocol.file.allow", "protocol.ext.allow",
+    "color.ui", "color.diff", "color.status", "color.branch",
+    "index.version", "feature.manyfiles", "extensions.worktreeconfig",
+)
+
+#: Keys that name a HOOK OR TEMPLATE DIRECTORY. `analyze-service-index/
+#: commit.sh` sets both ON PURPOSE, at an EMPTY dir, to NEUTRALISE hooks -- and
+#: its suite drives that path, so refusing them outright is a permanently-red
+#: gate. The distinction is MEASURABLE rather than spelled: neutralising points
+#: at a directory with no executable in it; arming points at one with a hook.
+HOOKDIR_KEYS = ("core.hookspath", "init.templatedir")
+
+#: Keys whose VALUE is a repository or remote. Allowed only when the value is
+#: neither a protected path nor a network remote -- checked by the same two
+#: predicates the operand scanner uses, so there is one rule, not two.
+LOCATION_KEY_SUFFIXES = (".url", ".pushurl")
 
 #: The subset of `RETARGETING_ENV` the shim actually REFUSES on. Everything
 #: here has been MEASURED to move an axis the battery asserts on; membership is
@@ -384,18 +427,33 @@ def _read_forms_case(sub: str) -> str:
     return "|".join(sh_pattern(p) for s, p in PROTECTED_READ_FORMS if s == sub)
 
 
+def _sh_list(items):
+    return "|".join(items)
+
+
 def shim_body(real_git: str, log: Path, protected_list: Path,
               protected_config: Path) -> str:
     """The POSIX-sh body of the `git` shim. No shebang -- write_exec owns it.
 
+    🔴 ORDER IS THE ARCHITECTURE (F4). The read FAST PATH sits BELOW the
+    injected-config scan, the environment scan and the GIT_CONFIG_COUNT scan,
+    and above nothing else. An earlier revision had it FIRST, so any subcommand
+    on the read list carried its injections straight to the real binary:
+    MEASURED, `-c diff.external=<script> ... diff` ran the script (planted a
+    file in the victim) and `GIT_DIR=<victim> ... rev-parse --absolute-git-dir`
+    printed the victim's git dir -- both rc 0, both with the ledger at 0, i.e.
+    a green `refused=0` row. `diff` and `rev-parse` are on the list this file
+    describes as "cannot write and cannot reach a network remote"; that is true
+    of the SUBCOMMAND and says nothing about what was injected alongside it.
+
     🔴 EVERY BRANCH EITHER `exec`s THE REAL BINARY OR REFUSES WITH A NON-ZERO
-    STATUS. There is no path that returns success without having done the work:
-    a git shim that silently no-opped a `commit` would leave the test asserting
-    against a commit that does not exist, and the failure would point anywhere
-    but here.
+    STATUS. There is no path that returns success without having done the work.
     """
-    always_read = "|".join(sorted(set(ALWAYS_READ)))
-    network = "|".join(NETWORK_SUBCOMMANDS)
+    always_read = _sh_list(sorted(set(ALWAYS_READ)))
+    network = _sh_list(NETWORK_SUBCOMMANDS)
+    refused_env = " ".join(v for v in REFUSED_ENV if v != "GIT_CONFIG_COUNT")
+    inj = _sh_list(INJECTABLE_KEYS)
+    hookdirs = _sh_list(HOOKDIR_KEYS)
     read_cases = "\n".join(
         f"    {sub}) case \"$rest\" in {_read_forms_case(sub)}) _pass \"$@\" ;; esac ;;"
         for sub in sorted({s for s, _ in PROTECTED_READ_FORMS})
@@ -409,7 +467,6 @@ PROTCFG='{protected_config}'
 
 _pass() {{ exec "$REAL" "$@"; }}
 
-# $1 = reason, rest = the original argv.
 _refuse() {{
   reason="$1"; shift
   if [ "${{{PROBE_ENV}:-0}}" = 1 ]; then
@@ -422,18 +479,37 @@ _refuse() {{
   echo "  argv   : git $*" >&2
   echo "  cwd    : $PWD" >&2
   echo "  No test may mutate a REAL repository, rewrite the operator's git" >&2
-  echo "  config, or reach a network remote. On 2026-08-21 this tier set" >&2
-  echo "  core.bare on the operator's clone, renamed its main branch and put" >&2
-  echo "  ~40 fixture commits over the PUBLIC repo's default branch." >&2
-  echo "  Build the fixture repo under tmp_path and target it explicitly." >&2
-  echo "  A legitimate READ belongs in norepo.PROTECTED_READ_FORMS." >&2
+  echo "  config, hand the real git binary a program to run, or reach a" >&2
+  echo "  network remote. Build the fixture under tmp_path and target it." >&2
   exit {REFUSED_EXIT}
 }}
 
+# ---- INVOKED AS `git-<verb>`? RECONSTRUCT THE EQUIVALENT `git <verb>` -------
+# 🔴 GIT DISPATCHES ON argv[0]. `libexec/git-core` holds ~181 `git-<verb>`
+# entries, and running one directly is an ordinary spelling -- `git-commit`,
+# `git-config` -- not an exotic one. MEASURED against an earlier revision, with
+# the farm installed and every other check in place:
+#
+#   <farm>/git-config -f <victim>/.git/config core.bale true
+#     -> core.bare false -> true, rc 0
+#
+# i.e. the INCIDENT'S OWN SIGNATURE, with `git` never spelled once. The farm
+# substituted only the literal name `git`, so all 181 verb entries pointed
+# straight at the real binary and sat FIRST on PATH in exactly the alias/hook
+# context the farm was added to cover.
+#
+# 🔴 ROUTED BY NAME, NEVER BY INODE. On this host none of those entries shares
+# git's inode (they are symlinks); on another packaging they are hardlinks. The
+# property that matters is "a name git dispatches on", which is satisfied by a
+# hardlink, a symlink, a copy or a wrapper -- so an inode/`stat` enumeration is
+# the WRONG attribute and would report a clean farm on one packaging and miss
+# every entry on another.
+_self=${{0##*/}}
+case "$_self" in
+  git-*) set -- "${{_self#git-}}" "$@" ;;
+esac
+
 # ---- parse git's GLOBAL options, stopping at the subcommand ------------------
-# Only -C and --git-dir change WHICH repo is targeted. -c/--work-tree/
-# --namespace/--config-env/--super-prefix take a value that must be skipped so
-# it cannot be mistaken for the subcommand.
 sub=''; tgt=''; gdir=''; want=''; cvals=''
 for a in "$@"; do
   case "$want" in
@@ -449,11 +525,6 @@ env:$a"; want=''; continue ;;
     -C) want=C; continue ;;
     --git-dir) want=D; continue ;;
     --git-dir=*) gdir="${{a#--git-dir=}}"; continue ;;
-    # 🔴 `-c key=value` is CAPTURED, not skipped. Skipping it is how
-    # `git -c alias.x='!git -C <victim> commit' x` and
-    # `git -c remote.origin.url=<github> push` both walked straight past an
-    # earlier revision of this shim -- MEASURED, victim commit landed and the
-    # push reached GitHub.
     -c) want=K; continue ;;
     --config-env) want=E; continue ;;
     --config-env=*) cvals="$cvals
@@ -464,184 +535,11 @@ env:${{a#--config-env=}}"; continue ;;
   esac
 done
 
-# ---- FAST PATH ---------------------------------------------------------------
-case "$sub" in
-  ''|{always_read}) _pass "$@" ;;
-esac
-
-# 🔴 PATHNAME EXPANSION OFF from here down. The loops below deliberately
-# word-split `$rest` and `$urls`, and an unquoted `$var` in a `for` list is
-# GLOBBED as well as split -- so a `*` inside a refspec or a path would expand
-# against the cwd and the guard would inspect filenames instead of arguments.
-# `exec` resets this for the real binary, so nothing downstream sees it.
+# 🔴 Pathname expansion OFF: the loops below word-split unquoted `$rest` and
+# `$cvals`, and an unquoted `$var` in a `for` list is GLOBBED as well as split.
 set -f
 
-# 🔴 IS THIS PATH INSIDE A PROTECTED REPOSITORY? One definition, used by BOTH
-# the resolved-repo check and the environment check below. A prefix match, not
-# equality: a linked worktree's git dir is `<protected>/.git/worktrees/<name>`,
-# and an equality test would report it as a different, unprotected repository.
-_prot_match() {{
-  [ -n "$1" ] || return 1
-  # 🔴 ABSOLUTE PATHS ONLY, and this is a CORRECTNESS rule, not a shortcut.
-  # `readlink -f` resolves a relative string against THIS SHIM's cwd -- which
-  # under `run-tests.sh` IS the protected repo. So every non-path operand
-  # matched: `worktree list` flagged the word `list`, `worktree add -b topic`
-  # flagged `topic`, and `-c user.email=t@t` flagged `t@t`. MEASURED: 15 tests
-  # failed on a correct tree, i.e. this guard made itself a permanently-red gate
-  # -- the failure mode claude/RULES.md says trains everyone to click through.
-  #
-  # ⚠ RESIDUAL, stated rather than hidden: a RELATIVE path aimed at a protected
-  # repo is not matched here. git resolves it against the CHILD's cwd, which
-  # this shim cannot know; the repo RESOLUTION below covers the cwd case, and
-  # every environment variable and injected config value that matters in
-  # practice is absolute.
-  case "$1" in
-    /*) ;;
-    *) return 1 ;;
-  esac
-  _rp=$(readlink -f "$1" 2>/dev/null || echo "$1")
-  while IFS= read -r _p; do
-    [ -z "$_p" ] && continue
-    case "$_rp" in
-      "$_p"|"$_p"/*) return 0 ;;
-    esac
-  done < "$PROT"
-  return 1
-}}
-
-# ---- GLOBAL `-c` / `--config-env` INJECTION ---------------------------------
-# 🔴 THE SAME CONFIG VALUES, ON THE COMMAND LINE. These reach git without
-# touching a file and without changing the resolved repo, so neither the config
-# redirect nor repo resolution can see them. MEASURED against an earlier
-# revision of this shim, from an INNOCENT fixture:
-#
-#   git -c 'alias.x=!git -C <victim> commit --allow-empty -m PWNED' x
-#     -> rc 0, the victim gained a commit
-#   git -c remote.origin.url=git@github.com:<real>/devrc.git push origin HEAD:main
-#     -> "To github.com:<real>/devrc.git  ! [rejected]" -- it REACHED GitHub
-#
-# 🔴 AND THE ALIAS CASE IS WHY THE PATH SHIM ALONE IS NOT ENOUGH. Git PREPENDS
-# its own `libexec/git-core` to PATH for every child it spawns, so the `git`
-# inside a `!`-alias resolves to the REAL binary and never sees this shim. The
-# shim is NOT inherited by git-spawned children; the module docstring says so
-# explicitly rather than implying coverage we do not have.
-# $1 = "key=value" (or "env:key=ENVVAR"); remaining args = the original argv.
-_scan_cval() {{
-  case "$1" in
-    env:*)
-      _e="${{1#env:}}"; _ck="${{_e%%=*}}"; _ev="${{_e#*=}}"
-      eval "_cv=\\${{$_ev:-}}"
-      ;;
-    *) _ck="${{1%%=*}}"; _cv="${{1#*=}}" ;;
-  esac
-  [ "$_ck" = "$1" ] && return 0
-  case "$_ck" in
-    alias.*)
-      case "$_cv" in
-        "!"*) _refuse "-c $_ck is a SHELL-ESCAPE alias ($_cv). Git prepends its own libexec to PATH, so the git inside it would NOT be guarded" "$@" ;;
-      esac
-      ;;
-  esac
-  if [ -n "$_cv" ] && _prot_match "$_cv"; then
-    _refuse "-c $_ck=$_cv points into a PROTECTED repository; this channel writes no file, so the config redirect cannot see it" "$@"
-  fi
-  case "$_cv" in
-    *://*|*@*:*) _refuse "-c $_ck=$_cv is a NETWORK remote; this tier is hermetic" "$@" ;;
-  esac
-}}
-if [ -n "$cvals" ]; then
-  _oifs="$IFS"; IFS='
-'
-  for _c in $cvals; do
-    [ -n "$_c" ] && _scan_cval "$_c"
-  done
-  IFS="$_oifs"
-fi
-
-# ---- THE ENVIRONMENT VECTOR, WHICH RESOLUTION ALONE DOES NOT COVER -----------
-# 🔴 THIS IS THE HALF THAT MAKES THE GUARD ENVIRONMENT-AWARE RATHER THAN
-# PATH-VALIDATING, AND IT IS NOT REDUNDANT WITH THE RESOLUTION BELOW.
-#
-# Two different kinds of variable, and only one of them is caught by asking git
-# which repo it is in:
-#
-#   * GIT_DIR / GIT_COMMON_DIR change the repo's IDENTITY. `rev-parse
-#     --git-common-dir` below inherits them and answers with the repo git will
-#     actually use, so those are already covered — that is why the guard
-#     delegates resolution to git instead of parsing `-C` itself.
-#
-#   * GIT_WORK_TREE / GIT_INDEX_FILE / GIT_OBJECT_DIRECTORY /
-#     GIT_ALTERNATE_OBJECT_DIRECTORIES do NOT. They leave the repo identity
-#     alone and redirect WHERE THE WRITE LANDS. With cwd in a throwaway fixture
-#     and GIT_WORK_TREE naming the operator's clone, `git checkout -f` or
-#     `git reset --hard` writes files into the OPERATOR'S WORKING TREE while
-#     every path argument, and the resolved repo, look entirely innocent.
-#     MEASURED, and pinned by `test_no_real_repo_writes.py`'s armed-environment
-#     battery.
-#
-# `run-tests.sh` unsets all of them, but that is a claim about SETUP: it stops
-# what the runner INHERITS, and does nothing about a test that builds its own
-# subprocess environment. So the shim refuses them here as well. The two layers
-# are deliberately not the same fix.
-for _v in GIT_DIR GIT_COMMON_DIR GIT_WORK_TREE GIT_INDEX_FILE \
-          GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES; do
-  eval "_val=\\${{$_v:-}}"
-  if [ -n "$_val" ] && _prot_match "$_val"; then
-    _refuse "$_v points into a PROTECTED repository ($_val); it would redirect this write there whatever the arguments say" "$@"
-  fi
-done
-
-# ---- THE CHANNEL A FILE-WATCHING GUARD CANNOT SEE, EVEN IN PRINCIPLE ---------
-# 🔴 GIT_CONFIG_COUNT / GIT_CONFIG_KEY_<n> / GIT_CONFIG_VALUE_<n> are NOT in
-# `man git`, and git honours them. They set arbitrary config for ONE invocation
-# and TOUCH NO FILE. MEASURED on git 2.55 against an earlier revision of this
-# very shim:
-#
-#   GIT_CONFIG_GLOBAL=<decoy> GIT_CONFIG_SYSTEM=/dev/null
-#     git config --get core.hooksPath            -> <unset>        (guard held)
-#   ...plus GIT_CONFIG_COUNT=1 KEY_0=core.hooksPath VALUE_0=/tmp/PWNED-hooks
-#     git config --get core.hooksPath            -> /tmp/PWNED-hooks
-#   decoy file afterwards: 0 bytes, NEVER OPENED
-#
-# So the `GIT_CONFIG_GLOBAL` redirect above was not merely incomplete for this
-# vector — it was watching a channel the vector does not use. A guard is bounded
-# by the CHANNEL it observes, not by the completeness of its list.
-#
-# 🔴 THIS CHECK IS DELIBERATELY HERE, IN THE SHIM, AT CALL TIME. These variables
-# are per-invocation and live in the CHILD's environment, so a check run in the
-# plugin's process — or around a test — reads its OWN environment, comes back
-# clean, and PASSES while the child is fully injected. The shim is the only
-# place that sees the environment the guarded invocation will actually use.
-#
-# 🔴 AND IT IS SCOPED, NOT A BLANKET BAN. `scripts/analyze-service-index/
-# commit.sh` uses exactly this mechanism ON PURPOSE to NEUTRALISE hooks
-# (`GIT_CONFIG_KEY_0=core.hooksPath` at an empty dir), and its suite drives that
-# path. Refusing all of it would be a permanently-red gate. What is refused is
-# an injected value aimed INTO a protected path, or at a network remote.
-#
-# ⚠ RESIDUAL, STATED RATHER THAN HIDDEN: an injected value pointing somewhere
-# harmless-to-us (a tmpdir) is still arbitrary config, and `core.hooksPath` at a
-# tmpdir is arbitrary CODE EXECUTION during the run. That is outside this
-# guard's mandate (the operator's repo) and inside `commit.sh`'s legitimate
-# usage, so it is permitted here and documented rather than silently allowed.
-case "${{GIT_CONFIG_COUNT:-}}" in
-  ''|*[!0-9]*) : ;;
-  *)
-    _n=0
-    while [ "$_n" -lt "${{GIT_CONFIG_COUNT}}" ]; do
-      eval "_ik=\\${{GIT_CONFIG_KEY_$_n:-}}"
-      eval "_iv=\\${{GIT_CONFIG_VALUE_$_n:-}}"
-      # 🔴 THE SAME SCANNER as the `-c` form. It had its own copy of the checks
-      # and was missing the alias case, so `alias.y=!git -C <victim> commit`
-      # injected through the environment landed a commit on the victim while
-      # the byte-identical `-c` form was refused. One predicate, one place.
-      [ -n "$_ik" ] && _scan_cval "$_ik=$_iv" "$@"
-      _n=$(( _n + 1 ))
-    done
-    ;;
-esac
-
-# The arguments AFTER the subcommand, space-prefixed, for the read-form match.
+# The arguments AFTER the subcommand, space-prefixed.
 rest=''; seen=0
 for a in "$@"; do
   if [ "$seen" = 0 ]; then
@@ -651,20 +549,230 @@ for a in "$@"; do
   rest="$rest $a"
 done
 
-# ---- PROTECTED CONFIG FILES --------------------------------------------------
-# --global / --system reach ~/.gitconfig and /etc/gitconfig without touching any
-# repo at all, so no amount of repo protection sees them. githooks/install.sh
-# writes the global one for real, so this is a live shape, not a hypothetical.
+# ---- IS THIS PATH INSIDE A PROTECTED REPOSITORY? ----------------------------
+# 🔴 `readlink -m`, not `-f` (F6): `-f` returns EMPTY for a path that does not
+# exist yet, so `git clone <src> <victim>/planted` resolved to nothing and was
+# ALLOWED -- MEASURED, the clone landed inside the victim. `-m` canonicalises
+# without requiring existence and keeps the symlink handling that the same
+# check was verified 5/5 on.
+#
+# 🔴 ABSOLUTE ONLY: `readlink` resolves a relative string against THIS SHIM's
+# cwd, which under `run-tests.sh` IS the protected repo, so every non-path
+# operand matched and 15 tests failed on a correct tree. A relative path aimed
+# at a protected repo is left to the repo RESOLUTION below.
+_prot_match() {{
+  [ -n "$1" ] || return 1
+  case "$1" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+  _rp=$(readlink -m "$1" 2>/dev/null || echo "$1")
+  while IFS= read -r _p; do
+    [ -z "$_p" ] && continue
+    case "$_rp" in
+      "$_p"|"$_p"/*) return 0 ;;
+    esac
+  done < "$PROT"
+  return 1
+}}
+
+# ---- IS THIS OPERAND A NETWORK REMOTE? --------------------------------------
+# 🔴 GIT'S OWN RULE, not two globs (F2). The previous test matched `*://*` and
+# `*@*:*` only, so USERLESS scp syntax -- `github.com:owner/repo`, which is
+# valid and has no `@` -- matched neither and was never classified. MEASURED
+# with the transport lever off: git attempted a real ssh connection to
+# github.com while the ledger stayed at 0, i.e. the guard never saw it.
+#
+# git's rule: `://` makes it a URL; otherwise a `:` BEFORE the first `/` makes
+# it scp-like. Checking the segment before the first slash is what keeps a
+# REFSPEC (`HEAD:refs/heads/main`, whose colon follows no slash but whose first
+# segment is `HEAD`) from being mistaken for a host -- and the operand scanner
+# below only ever inspects the REPOSITORY operand anyway, never a refspec.
+_is_network() {{
+  case "$1" in
+    file://*) return 1 ;;
+    *://*) return 0 ;;
+    /*|./*|../*) return 1 ;;
+  esac
+  case "$1" in
+    */*) case "${{1%%/*}}" in *:*) return 0 ;; esac; return 1 ;;
+    *:*) return 0 ;;
+  esac
+  return 1
+}}
+
+# ---- INJECTED CONFIG: AN ALLOWLIST (F3) -------------------------------------
+_hookdir_is_armed() {{ # $1 = directory
+  [ -d "$1" ] || return 1
+  # 🔴 `set +f` around the glob. Pathname expansion is OFF for this whole shim
+  # (the split loops need it off), and an earlier revision left it off HERE —
+  # so `"$1"/*` stayed a LITERAL string, matched nothing, and every armed hook
+  # directory was reported unarmed. MEASURED: the full four-damage
+  # `core.hooksPath` vector still landed at rc 0 with the check "passing".
+  set +f
+  _armed=1
+  for _h in "$1"/* "$1"/hooks/*; do
+    if [ -f "$_h" ] && [ -x "$_h" ]; then _armed=0; break; fi
+  done
+  set -f
+  return $_armed
+}}
+
+# $1 = "key=value" or "env:key=ENVVAR"; remaining args = the original argv.
+_scan_cval() {{
+  case "$1" in
+    env:*)
+      _e="${{1#env:}}"; _ck="${{_e%%=*}}"; _ev="${{_e#*=}}"
+      # 🔴 NEVER `eval` AN ARGV-DERIVED STRING. `--config-env=key=VAR` puts VAR
+      # on the command line, and an earlier revision did
+      # `eval "_cv=\${{$_ev:-}}"` with it. MEASURED:
+      #
+      #   git --config-env=core.pager='V:-$(touch /tmp/X)' --version
+      #     this shim  -> /tmp/X CREATED, then exit 99
+      #     real git   -> exit 128, "fatal: missing environment variable
+      #                   'V:-$(touch /tmp/X)'", nothing executed
+      #
+      # On that path the guard was STRICTLY WORSE THAN NO GUARD: it introduced
+      # code execution that the unguarded system refuses, on a pure READ
+      # (`--version`), before any check ran. A mitigation that adds an attack
+      # surface is not a mitigation.
+      #
+      # The name is validated as a shell identifier and the value is read with
+      # `printenv`, which does not interpret. An invalid name is REFUSED, which
+      # is also what real git does with it.
+      case "$_ev" in
+        ''|*[!A-Za-z0-9_]*|[0-9]*)
+          _refuse "--config-env names an invalid environment variable '$_ev'; real git rejects this and executes nothing, so neither will the guard" "$@" ;;
+      esac
+      _cv=$(printenv "$_ev" 2>/dev/null || true)
+      ;;
+    *) _ck="${{1%%=*}}"; _cv="${{1#*=}}" ;;
+  esac
+  [ "$_ck" = "$1" ] && return 0
+  _lk=$(printf '%s' "$_ck" | tr 'A-Z' 'a-z')
+
+  # A value naming a protected path or a network remote is refused whatever the
+  # key is -- one rule, shared with the operand scanner.
+  if [ -n "$_cv" ] && _prot_match "$_cv"; then
+    _refuse "-c $_ck=$_cv points into a PROTECTED repository" "$@"
+  fi
+  case "$_lk" in
+    *{_sh_list(LOCATION_KEY_SUFFIXES)})
+      if _is_network "$_cv"; then
+        _refuse "-c $_ck=$_cv is a NETWORK remote; this tier is hermetic" "$@"
+      fi
+      return 0 ;;
+  esac
+
+  case "$_lk" in
+    {hookdirs})
+      # Neutralising (an empty dir) is what commit.sh does on purpose. Arming
+      # (a dir holding an executable) is the measured full-incident vector.
+      if _hookdir_is_armed "$_cv"; then
+        _refuse "-c $_ck=$_cv points at a directory containing an EXECUTABLE hook; git would RUN it, and the shim is not inherited by what git spawns" "$@"
+      fi
+      return 0 ;;
+    {inj}) return 0 ;;
+  esac
+  _refuse "-c $_ck is not on the injectable-config allowlist (norepo.INJECTABLE_KEYS). Injected config can hand the REAL git binary a program to run -- aliases, hooks, fsmonitor, clean/smudge filters, pagers, external diff -- and this shim is NOT inherited by what git spawns. If this key genuinely cannot name a program, a config to load or a write destination, add it to the allowlist" "$@"
+}}
+
+if [ -n "$cvals" ]; then
+  _oifs="$IFS"; IFS='
+'
+  for _c in $cvals; do
+    [ -n "$_c" ] && _scan_cval "$_c" "$@"
+  done
+  IFS="$_oifs"
+fi
+
+# ---- THE ENVIRONMENT VECTOR -------------------------------------------------
+# GIT_DIR/GIT_COMMON_DIR change the repo's IDENTITY and are covered by
+# resolution below; GIT_WORK_TREE/GIT_INDEX_FILE/GIT_OBJECT_DIRECTORY leave
+# identity truthful and redirect only WHERE THE WRITE LANDS, which resolution
+# cannot see. All are refused here, above the fast path, because a read
+# subcommand carries them just as well as a write one.
+# The two `eval`s below take a HARDCODED variable name and a digit-validated
+# counter respectively -- never a value from argv. That distinction is the whole
+# audit: see `test_no_argv_derived_string_is_shell_interpreted`.
+for _v in {refused_env}; do
+  eval "_val=\\${{$_v:-}}"
+  if [ -n "$_val" ] && _prot_match "$_val"; then
+    _refuse "$_v points into a PROTECTED repository ($_val); it would redirect this write there whatever the arguments say" "$@"
+  fi
+done
+
+# GIT_CONFIG_COUNT / KEY_<n> / VALUE_<n>: undocumented in `man git`, honoured
+# anyway, and they write NO file -- so neither the config redirect nor path
+# protection can see them. Routed through the SAME scanner as `-c`.
+case "${{GIT_CONFIG_COUNT:-}}" in
+  ''|*[!0-9]*) : ;;
+  *)
+    _n=0
+    while [ "$_n" -lt "${{GIT_CONFIG_COUNT}}" ]; do
+      eval "_ik=\\${{GIT_CONFIG_KEY_$_n:-}}"
+      eval "_iv=\\${{GIT_CONFIG_VALUE_$_n:-}}"
+      [ -n "$_ik" ] && _scan_cval "$_ik=$_iv" "$@"
+      _n=$(( _n + 1 ))
+    done
+    ;;
+esac
+
+# ---- OPTIONS THAT WRITE OR EXECUTE, ON *ANY* SUBCOMMAND ---------------------
+# 🔴 A VERB'S CLASSIFICATION SAYS NOTHING ABOUT ITS OPTIONS. `log` and `grep`
+# are on the read list -- truthfully, as verbs -- and MEASURED against an
+# earlier revision, from an ALLOWED repo:
+#
+#   git -C <allowed> log -p --output=<victim>/.git/config
+#       -> the victim's config CLOBBERED, rc 0
+#   git -C <allowed> grep -O'touch <path>' A
+#       -> the command RAN, rc 0
+#
+# Both `exec`d on the fast path before any destination check. This is the same
+# lesson `status` taught (a read that writes) with a destination attached, so
+# the check sits ABOVE the fast path and applies to every subcommand.
+#
+# ⚠ AN ENUMERATION, AND SAID SO: these are the option spellings that carry a
+# destination or a command. It is a backstop, not the guard -- the guard for a
+# non-read verb is the repo resolution below. `--exec` is deliberately ABSENT:
+# `git --exec-path` is our own farm's mechanism and `rebase --exec` is ordinary
+# git, so refusing it would be a permanently-red gate.
+_dw=''
+for a in "$@"; do
+  if [ -n "$_dw" ]; then
+    _dw=''
+    if _prot_match "$a"; then
+      _refuse "an output destination ($a) inside a PROTECTED repository" "$@"
+    fi
+    continue
+  fi
+  case "$a" in
+    --output|--output-directory) _dw=1 ;;
+    --output=*|--output-directory=*)
+      _od="${{a#*=}}"
+      if _prot_match "$_od"; then
+        _refuse "an output destination ($_od) inside a PROTECTED repository" "$@"
+      fi
+      ;;
+    -O?*|--open-files-in-pager=*|--to-command=*|--upload-pack=*|--receive-pack=*)
+      _refuse "$a names a COMMAND for git to run; this shim is not inherited by what git spawns, so the command would be unguarded" "$@" ;;
+    -O|--open-files-in-pager|--to-command|--upload-pack|--receive-pack)
+      _refuse "$a names a COMMAND for git to run; this shim is not inherited by what git spawns, so the command would be unguarded" "$@" ;;
+  esac
+done
+
+# ---- FAST PATH (deliberately AFTER every scanner above) ---------------------
+case "$sub" in
+  ''|{always_read}) _pass "$@" ;;
+esac
+
+# ---- PROTECTED CONFIG FILES -------------------------------------------------
 if [ "$sub" = config ]; then
   cfgfile=''
   case "$rest" in
     *--global*) cfgfile="${{GIT_CONFIG_GLOBAL:-$HOME/.gitconfig}}" ;;
     *--system*) cfgfile="${{GIT_CONFIG_SYSTEM:-/etc/gitconfig}}" ;;
   esac
-  # 🔴 `--file <path>` / `-f <path>` names a config file DIRECTLY, in a repo the
-  # resolver reports as innocent. MEASURED: `git -C <fixture> config --file
-  # <victim>/.git/config core.bare true` set core.bare on the victim -- one of
-  # the two actual incident damages -- and was NOT refused.
   _cfw=''
   for a in $rest; do
     case "$_cfw" in F) cfgfile="$a"; _cfw=''; continue ;; esac
@@ -673,14 +781,14 @@ if [ "$sub" = config ]; then
       --file=*) cfgfile="${{a#--file=}}" ;;
     esac
   done
-  if [ -n "$cfgfile" ] && _prot_match "$cfgfile"; then
-    case "$rest" in
-      *--get*|*--list*|*" "-l*) _pass "$@" ;;
-    esac
-    _refuse "config --file/-f targets $cfgfile, inside a PROTECTED repository" "$@"
-  fi
   if [ -n "$cfgfile" ]; then
-    rcfg=$(readlink -f "$cfgfile" 2>/dev/null || echo "$cfgfile")
+    if _prot_match "$cfgfile"; then
+      case "$rest" in
+        *--get*|*--list*|*" "-l*) _pass "$@" ;;
+      esac
+      _refuse "config would write $cfgfile, inside a PROTECTED repository" "$@"
+    fi
+    rcfg=$(readlink -m "$cfgfile" 2>/dev/null || echo "$cfgfile")
     while IFS= read -r p; do
       [ -z "$p" ] && continue
       if [ "$rcfg" = "$p" ]; then
@@ -693,24 +801,9 @@ if [ "$sub" = config ]; then
   fi
 fi
 
-# ---- resolve the repo this invocation targets --------------------------------
-# 🔴 --git-common-dir, NEVER --git-dir: a linked worktree's git dir is a
-# subdirectory of the real clone's, and its refs/remotes/config ARE the real
-# clone's. Resolving the per-worktree dir would report a worktree of a protected
-# repo as unprotected -- the exact misconception that makes "just use a
-# worktree" the intuitive and wrong containment answer for this bug.
-#
-# `init` and `clone` name a DESTINATION that may not be a repo yet, so resolve
-# from there. `git init <dir>` on a path that IS already a repo is how a working
-# clone acquires core.bare = true.
-# 🔴 SUBCOMMANDS THAT NAME A DESTINATION INSIDE A DENIED TREE. The repo they
-# RUN in is innocent; the path they WRITE to is not. MEASURED, both unrefused:
-#   git init --separate-git-dir <victim>/planted-gitdir <newrepo>  -> planted
-#   git -C <fixture> worktree add --detach <victim>/planted-worktree -> planted
+# ---- SUBCOMMANDS THAT NAME A DESTINATION ------------------------------------
 for a in $rest; do
-  case "$a" in
-    -*) continue ;;
-  esac
+  case "$a" in -*) continue ;; esac
   case "$sub" in
     worktree|submodule)
       if _prot_match "$a"; then
@@ -719,8 +812,7 @@ for a in $rest; do
       ;;
   esac
 done
-_sgd=''
-_sgw=''
+_sgd=''; _sgw=''
 for a in $rest; do
   case "$_sgw" in S) _sgd="$a"; _sgw=''; continue ;; esac
   case "$a" in
@@ -732,27 +824,94 @@ if [ -n "$_sgd" ] && _prot_match "$_sgd"; then
   _refuse "--separate-git-dir would plant a git dir at $_sgd, inside a PROTECTED repository" "$@"
 fi
 
+# ---- REPOSITORY OPERANDS OF THE REMOTE SUBCOMMANDS (F1/F2) ------------------
+# 🔴 THE DESTINATION, not just the URL SHAPE. An earlier revision tested the
+# operand against two URL globs and `continue`d anything that looked like a
+# filesystem path -- so `git -C <fixture> push <victim-bare> +HEAD:refs/heads/
+# main` force-updated a protected bare repo at rc 0 with the ledger at 0.
+# MEASURED. That is the incident's own damage with the guard silent.
+#
+# Only the REPOSITORY operand is inspected (the first non-flag after the
+# subcommand; for `clone`, the source and then the destination), never a
+# refspec.
+case "$sub" in
+  {network})
+    _op1=''; _op2=''
+    for a in $rest; do
+      case "$a" in -*) continue ;; esac
+      if [ -z "$_op1" ]; then _op1="$a"; elif [ -z "$_op2" ]; then _op2="$a"; fi
+    done
+    # 🔴 ONLY `clone` HAS A SECOND REPOSITORY OPERAND. For push/fetch/pull/
+    # ls-remote the second operand is a REFSPEC, and `HEAD:refs/heads/main`
+    # looks exactly like scp syntax to any host:path rule -- its first
+    # slash-segment is `HEAD:refs`, which contains a colon. MEASURED: an
+    # earlier revision of THIS fix refused every legitimate fixture push with
+    # "would contact the NETWORK remote HEAD:refs/heads/main", i.e. it made
+    # itself a permanently-red gate while closing F1.
+    case "$sub" in
+      clone) _cands="$_op1 $_op2" ;;
+      *)     _cands="$_op1" ;;
+    esac
+    for _cand in $_cands; do
+      [ -n "$_cand" ] || continue
+      if _is_network "$_cand"; then
+        _refuse "$sub would contact the NETWORK remote $_cand; this tier is hermetic" "$@"
+      fi
+      case "$_cand" in
+        /*|./*|../*|file://*)
+          _p="${{_cand#file://}}"
+          if _prot_match "$_p"; then
+            _refuse "$sub names $_cand, inside a PROTECTED repository" "$@"
+          fi
+          ;;
+      esac
+    done
+    # A bare NAME resolves through config; `-c remote.<name>.url=` injections
+    # were already refused by the scanner above, so a fresh `git config` here
+    # cannot be fooled by one.
+    case "$_op1" in
+      ''|-*|*/*|*:*) : ;;
+      *)
+        _u=$( ( cd "${{tgt:-.}}" 2>/dev/null && "$REAL" config --get "remote.$_op1.url" 2>/dev/null ) )
+        if [ -n "$_u" ]; then
+          if _is_network "$_u"; then
+            _refuse "$sub would contact the NETWORK remote $_u (via remote.$_op1.url); this tier is hermetic" "$@"
+          fi
+          _prot_match "${{_u#file://}}" && _refuse "$sub targets remote.$_op1.url=$_u, inside a PROTECTED repository" "$@"
+        fi
+        ;;
+    esac
+    # With no operand at all, every configured remote is a candidate.
+    if [ -z "$_op1" ]; then
+      _urls=$( ( cd "${{tgt:-.}}" 2>/dev/null && "$REAL" config --get-regexp '^remote\\..*\\.url$' 2>/dev/null ) )
+      for _u in $_urls; do
+        case "$_u" in remote.*) continue ;; esac
+        if _is_network "$_u"; then
+          _refuse "$sub would contact the NETWORK remote $_u; this tier is hermetic" "$@"
+        fi
+        _prot_match "${{_u#file://}}" && _refuse "$sub targets $_u, inside a PROTECTED repository" "$@"
+      done
+    fi
+    ;;
+esac
+
+# ---- resolve the repo this invocation targets -------------------------------
 case "$sub" in
   init|clone)
     dest=''
     for a in $rest; do
-      case "$a" in
-        -*) continue ;;
-        *) dest="$a" ;;
-      esac
+      case "$a" in -*) continue ;; esac
+      dest="$a"
     done
-    # 🔴 THE DESTINATION IS RELATIVE TO `-C`, NOT TO THIS SHIM'S CWD. `git -C X
-    # init .` means "init X", because git chdirs to X BEFORE reading the
-    # positional. MEASURED as a FALSE POSITIVE: a fixture running
-    # `git -C <tmp_path>/plain-repo init -q -b trunk .` was refused, because the
-    # `.` was resolved against the runner's cwd -- the repo root -- and landed
-    # on the protected repo. A guard that refuses a legitimate fixture is a
-    # permanently-red gate, which is the failure mode that trains everyone to
-    # click through. GUARD 9's own per-target accounting is what surfaced it.
     case "$dest" in
       '') : ;;
       /*) tgt="$dest" ;;
       *)  tgt="${{tgt:-.}}/$dest" ;;
+    esac
+    # F6: the destination need not exist yet, and `_prot_match` no longer needs
+    # it to. Checked directly, because resolution below cannot `cd` into it.
+    case "$dest" in
+      /*) _prot_match "$dest" && _refuse "$sub would create a repository at $dest, inside a PROTECTED repository" "$@" ;;
     esac
     ;;
 esac
@@ -766,34 +925,15 @@ fi
 protected=0
 rcommon=''
 if [ -n "$common" ]; then
-  rcommon=$(readlink -f "$common" 2>/dev/null || echo "$common")
+  rcommon=$(readlink -m "$common" 2>/dev/null || echo "$common")
   _prot_match "$common" && protected=1
 fi
 
-# ---- NETWORK REMOTES: refused in ANY repo, protected or not ------------------
-case "$sub" in
-  {network})
-    urls=$( ( cd "${{tgt:-.}}" 2>/dev/null && "$REAL" config --get-regexp '^remote\\..*\\.url$' 2>/dev/null ) )
-    urls="$urls $rest"
-    for u in $urls; do
-      case "$u" in
-        file://*|/*|./*|../*) continue ;;
-        *://*) _refuse "would contact the NETWORK remote $u; this tier is hermetic" "$@" ;;
-        *@*:*) _refuse "would contact the NETWORK remote $u; this tier is hermetic" "$@" ;;
-      esac
-    done
-    ;;
-esac
-
 # ---- PROTECTED REPO: only an enumerated READ form is forwarded ---------------
 if [ "$protected" = 1 ]; then
-  # 🔴 `status` is a READ that WRITES: it refreshes and rewrites `.git/index`.
-  # MEASURED on a protected repo -- index bytes and mtime both changed. It is
-  # far too common in this suite to refuse (that would be a permanently-red
-  # gate), and the write is a cache refresh that cannot lose data, so the shim
-  # forwards it with `--no-optional-locks`, which git provides for exactly this
-  # and which was MEASURED to leave the index byte-identical with identical
-  # output.
+  # `status` is a READ that WRITES -- it rewrites `.git/index`. Refusing it
+  # would be a permanently-red gate, and the write is a stat-cache refresh, so
+  # it is forwarded with the flag git provides for exactly this.
   if [ "$sub" = status ]; then
     exec "$REAL" --no-optional-locks "$@"
   fi
@@ -824,7 +964,7 @@ def install(guard_dir: Path, protected_repos, protected_config_files,
     guard_dir = Path(guard_dir)
     guard_dir.mkdir(parents=True, exist_ok=True)
 
-    real = shutil.which("git")
+    real = real_git() if shutil.which("git") else None
     if real is None:
         raise RuntimeError("testlib.norepo.install: no `git` on PATH to shadow.")
     if Path(real).parent.resolve() == guard_dir.resolve():
@@ -882,6 +1022,160 @@ def probe_target(guard_dir) -> str:
         return ""
 
 
+def real_git() -> str:
+    """The real `git`, with any GUARD 9 shim dir removed from the search path.
+
+    🔴 THE INSTALLER MUST NOT BE SUBJECT TO THE GUARD IT INSTALLS. `run-tests.sh`
+    puts a shim first on PATH, and a nested `install()` (every test that builds
+    its own guard) then resolves `git` to THAT shim. `protected_paths` asks git
+    to enumerate worktrees; when the outer shim refuses that call, the protected
+    set silently comes back SMALLER and the new guard protects less.
+
+    MEASURED: a mutant that made `_prot_match` accept relative operands
+    SURVIVED for exactly this reason -- it caused the outer shim to refuse
+    `git worktree list` inside `protected_paths`, so the victim's work-tree
+    root dropped out of the protected set and the assertion it should have
+    tripped no longer applied. A mutant that disables the guard by shrinking
+    what the guard covers is not an isolated mutation, and the fix is to make
+    the installer independent rather than to reword the test.
+
+    A guard dir is identified STRUCTURALLY, by the ledger file `install()`
+    writes beside the shim -- not by a name pattern a future dir could miss.
+    """
+    parts = os.environ.get("PATH", "").split(os.pathsep)
+    clean = [d for d in parts
+             if d and not (Path(d) / PROTECTED_LIST_NAME).exists()]
+    found = shutil.which("git", path=os.pathsep.join(clean))
+    # Fall back to the ordinary lookup rather than failing: a caller with no
+    # real git on PATH has a different problem, and `install()` reports it.
+    return found or (shutil.which("git") or "git")
+
+
+def farm_is_complete(farm, src_names) -> bool:
+    """Is `farm` a COMPLETE stand-in for git's exec-path?
+
+    🔴 THE SET, NOT THE COUNT. A count matches when one helper is swapped for
+    another; only the set catches a missing or renamed one. And `git` must be
+    OUR COPY, not a symlink to the binary it is meant to shadow -- a farm whose
+    `git` links to the real one is a farm that guards nothing while looking
+    complete.
+
+    Extracted so it can be tested directly: inside `install_exec_farm` the
+    check is unreachable on a healthy box (the build starts from a clean
+    directory and always produces the right set), and an unreachable guard is
+    one nobody has watched work.
+    """
+    farm = Path(farm)
+    try:
+        have = set(os.listdir(farm))
+    except OSError:
+        return False
+    if have != set(src_names):
+        return False
+    # 🔴 EVERY name git dispatches on must be OUR copy, not a link to the
+    # binary it is meant to shadow. Checked by NAME -- `git` and `git-*` --
+    # because that is the property git uses, and it holds whether the original
+    # was a hardlink, a symlink or a copy.
+    for n in have:
+        if n == "git" or n.startswith("git-"):
+            if (farm / n).is_symlink() or not (farm / n).is_file():
+                return False
+    return True
+
+
+def install_exec_farm(guard_dir) -> str:
+    """Own `git`'s OWN libexec, so a git-SPAWNED child is guarded too.
+
+    🔴 THIS CLOSES THE RESIDUAL THIS MODULE PREVIOUSLY ONLY DOCUMENTED. Git
+    PREPENDS `libexec/git-core` to PATH for every process it spawns, so a bare
+    `git` inside a `!`-alias, a hook, a clean/smudge filter or `rebase --exec`
+    resolves to the REAL binary and never reaches a PATH shim. That covered the
+    case where the alias or hook is ALREADY IN a repo's own config, which no
+    amount of scanning the CURRENT invocation can see.
+
+    The farm is a directory of symlinks to every entry of `git --exec-path`
+    that is NOT a dispatch name, plus a copy of the shim under EVERY dispatch
+    name -- `git` and each of the ~181 `git-<verb>` entries. Exported as
+    GIT_EXEC_PATH, it is what git hands its children, so the child's `git` is
+    ours. Copying the shim only as `git` was the earlier, WITHDRAWN version:
+    git dispatches on argv[0], so `git-config` reached the real binary.
+
+    MEASURED, with an alias in the fixture's OWN `.git/config`:
+        PATH shim only   -> rc 0, the victim gained a commit  (residual)
+        + the farm       -> rc 99, refused, victim unchanged  (closed)
+    and ordinary work is unaffected: status / log / commit / diff /
+    `rebase --help` all rc 0 through the farm.
+
+    ⚠ THE REMAINING ESCAPES ARE **TWO**, AND THEY WERE DERIVED, NOT ASSUMED.
+    Six alias-body shapes were measured against the farm:
+
+        !git …                    guarded      (resolves through the farm)
+        !sh -c 'git …'            guarded
+        !env git …                guarded
+        !command git …            guarded
+        !/abs/path/to/git …       🔴 ESCAPES   (PATH is never consulted)
+        !touch <victim>/file      🔴 ESCAPES   (never invokes git at all)
+
+    An earlier revision of this comment claimed the residual was ONE -- the
+    shell case -- and omitted the absolute-path case entirely. Owning git's
+    exec path bounds what GIT will resolve for a child; it cannot bind a
+    command that bypasses resolution or never asks for git.
+
+    Returns the farm path, or "" when the exec-path cannot be resolved (the
+    caller reports that rather than proceeding as if it were armed).
+    """
+    guard_dir = Path(guard_dir)
+    shim = guard_dir / "git"
+    if not shim.exists():
+        return ""
+    try:
+        r = subprocess.run([real_git(), "--exec-path"], capture_output=True,
+                           text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    if r.returncode != 0 or not r.stdout.strip():
+        return ""
+    src_dir = Path(r.stdout.strip())
+    if not src_dir.is_dir():
+        return ""
+
+    # 🔴 DERIVED EVERY RUN, AND VERIFIED AS A SET. `os.listdir(src_dir)` is
+    # re-read on every call, so a helper added by a git upgrade is picked up
+    # automatically -- this is not a snapshot ledger. MEASURED: 189 source
+    # entries, 189 in the farm, sets equal.
+    #
+    # 🔴 AND IT FAILS CLOSED. An earlier revision `continue`d past any entry
+    # that already existed, so a pre-existing NON-symlink was left in place and
+    # the farm was returned as usable anyway -- MEASURED: a planted regular
+    # file at `.git-archimport-wrapped` survived and `install_exec_farm` still
+    # handed back a path. That is a hole in the fix for the
+    # channel-vs-list lesson, which is the same shape all over again. Entries
+    # are now REPLACED, and the final set is compared against the source before
+    # the farm is declared usable.
+    src_names = set(os.listdir(src_dir))
+    farm = guard_dir / EXEC_FARM_NAME
+    if farm.exists():
+        shutil.rmtree(farm, ignore_errors=True)
+    try:
+        farm.mkdir(parents=True, exist_ok=True)
+        for name in src_names:
+            if name == "git" or name.startswith("git-"):
+                # 🔴 EVERY DISPATCH NAME IS OURS. Substituting only `git` left
+                # ~181 `git-<verb>` entries pointing at the real binary, and
+                # git dispatches on argv[0] -- `git-config -f <denied>/config`
+                # landed the incident's own signature without spelling `git`.
+                shutil.copy2(shim, farm / name)
+                continue
+            (farm / name).symlink_to(src_dir / name)
+        shutil.copy2(shim, farm / "git")
+    except OSError:
+        return ""
+
+    if not farm_is_complete(farm, src_names):
+        return ""
+    return str(farm)
+
+
 def protected_paths(*starts) -> list[str]:
     """Every path that IS the repo each start sits in: its `--git-common-dir`
     AND the root of every working tree attached to it.
@@ -917,7 +1211,7 @@ def protected_paths(*starts) -> list[str]:
             continue
         try:
             r = subprocess.run(
-                ["git", "-C", str(p), "rev-parse", "--path-format=absolute",
+                [real_git(), "-C", str(p), "rev-parse", "--path-format=absolute",
                  "--git-common-dir"],
                 capture_output=True, text=True, timeout=15)
         except (OSError, subprocess.SubprocessError):
@@ -930,7 +1224,7 @@ def protected_paths(*starts) -> list[str]:
         # entry or `GIT_WORK_TREE=<that worktree>` walks straight past.
         try:
             w = subprocess.run(
-                ["git", "-C", str(p), "worktree", "list", "--porcelain"],
+                [real_git(), "-C", str(p), "worktree", "list", "--porcelain"],
                 capture_output=True, text=True, timeout=15)
         except (OSError, subprocess.SubprocessError):
             continue
@@ -938,6 +1232,34 @@ def protected_paths(*starts) -> list[str]:
             for line in w.stdout.splitlines():
                 if line.startswith("worktree "):
                     add(line[len("worktree "):].strip())
+
+        # 🔴 A PROTECTED REPO'S LOCAL REMOTES ARE PART OF IT. Pushing to the
+        # bare repository a protected clone pushes to is the same damage as
+        # writing the clone -- and MEASURED, it was allowed: `git -C <fixture>
+        # push <victim-bare> +HEAD:refs/heads/main` force-updated it at rc 0
+        # with the ledger at 0. For the operator's own clone the analogue is
+        # the PUBLIC repo, which the network rule already refuses; this closes
+        # the local-bare case so a caller does not have to know to pass it.
+        try:
+            r2 = subprocess.run(
+                [real_git(), "-C", str(p), "config", "--get-regexp", r"^remote\..*\.url$"],
+                capture_output=True, text=True, timeout=15)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if r2.returncode != 0:
+            continue
+        for line in r2.stdout.splitlines():
+            parts = line.split(None, 1)
+            if len(parts) != 2:
+                continue
+            url = parts[1].strip()
+            if url.startswith("file://"):
+                url = url[len("file://"):]
+            # Only LOCAL paths: a network remote is handled by the network rule,
+            # and adding one here would put a URL in a path ledger.
+            if not url.startswith("/"):
+                continue
+            add(url)
     return out
 
 
@@ -978,19 +1300,52 @@ def main(argv: list[str] | None = None) -> int:
     # decoy it created. The measured incident vector is `githooks/install.sh`
     # running `git config --global core.hooksPath` with NO env var set at all,
     # which resolves to exactly this path.
+    # 🔴 F5 -- ASK GIT WHERE `--global` LIVES; do not hardcode `~/.gitconfig`.
+    # MEASURED on this host: `~/.gitconfig` DOES NOT EXIST. git uses
+    # `${XDG_CONFIG_HOME:-~/.config}/git/config`, and `git config --global
+    # --list --show-origin` reports `file:/home/<user>/.config/git/config`. The
+    # ledger was therefore protecting a file that is never written while the
+    # operator's real global config was unprotected -- non-exploitable here
+    # only because the store path it would be reached through is read-only,
+    # i.e. blocked by the filesystem rather than by this guard.
     cfg: list[str] = []
-    for p in (Path.home() / ".gitconfig",
-              Path(os.environ.get("GIT_CONFIG_GLOBAL") or Path.home() / ".gitconfig"),
-              Path("/etc/gitconfig"),
-              Path(os.environ.get("GIT_CONFIG_SYSTEM") or "/etc/gitconfig")):
-        s = str(p)
-        if s not in cfg:
-            cfg.append(s)
+
+    def _add(x) -> None:
+        v = str(Path(x).expanduser())
+        if v not in cfg:
+            cfg.append(v)
+
+    xdg = os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config")
+    _add(Path(xdg) / "git" / "config")     # where git actually looks first
+    _add(Path.home() / ".gitconfig")       # the other candidate, still guarded
+    _add(Path("/etc/gitconfig"))
+    if os.environ.get("GIT_CONFIG_GLOBAL"):
+        _add(os.environ["GIT_CONFIG_GLOBAL"])
+    if os.environ.get("GIT_CONFIG_SYSTEM"):
+        _add(os.environ["GIT_CONFIG_SYSTEM"])
+    # ...and whatever git itself reports, with our own overrides stripped so
+    # the answer is the OPERATOR's, not this run's redirect.
+    try:
+        _env = {k: v for k, v in os.environ.items()
+                if not k.startswith("GIT_CONFIG")}
+        _r = subprocess.run(
+            [real_git(), "config", "--global", "--list", "--show-origin"],
+            capture_output=True, text=True, timeout=15, env=_env)
+        for _line in _r.stdout.splitlines():
+            if _line.startswith("file:") and "\t" in _line:
+                _add(_line.split("\t", 1)[0][len("file:"):])
+    except (OSError, subprocess.SubprocessError):
+        pass
     try:
         install(guard_dir, repos, cfg, allow_no_repos=allow)
     except RuntimeError as exc:
         print(f"norepo: {exc}", file=_sys.stderr)
         return 2
+    farm = install_exec_farm(guard_dir)
+    if farm:
+        print(f"exec-farm={farm}")
+    else:
+        print("exec-farm=UNAVAILABLE")
     for r in repos:
         print(f"protected={r}")
     for c in cfg:
