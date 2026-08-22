@@ -153,17 +153,26 @@ Repo-level facts that are NOT in any skill — they live here on purpose:
   statusCheckRollup` returns **0 checks** on every PR, merged ones included. This line used to
   read `CI gates both suites`, which was false — the exact kind of claim nobody re-checks: an
   agent reads it, believes the merge is protected, and skips the run.
-  🔴 **But a gate SHIPS IN THIS REPO, uninstalled** — `githooks/` (`install.sh`, `pre-push`,
-  `tests-on-push.sh`) is a real blocking pre-push test gate, and `scripts/run-tests.sh` treats
-  it as a first-class consumer. It is simply not installed: `git config --get core.hooksPath`
-  is what answers that, **never** `ls .git/hooks` — githooks installs by pointing
-  `core.hooksPath` elsewhere, so `.git/hooks` stays sample-only whether or not the gate is
-  live. ⚠ **Check for a REPO-LOCAL `core.hooksPath` before installing**: `install.sh` sets the
-  key `--global`, and a local one wins. Measured 2026-08-20: the workbench's `devrc` *and*
-  `homelab-talos` clones both carry `core.hooksPath` pointing back at their own `.git/hooks`
-  while the laptop's `devrc` carries none — so it is per-clone environmental (it correlates
-  with agent-worktree creation), NOT a devrc setting, and it is not safe to assume either way.
-  `git config --local --get core.hooksPath` per clone is the only answer.
+  🔴 **But a gate SHIPS IN THIS REPO, and whether it is INSTALLED is not a fact this file can
+  state** — `githooks/` (`install.sh`, `pre-push`, `tests-on-push.sh`) is a real blocking
+  pre-push test gate, and `scripts/run-tests.sh` treats it as a first-class consumer.
+  `git config --get core.hooksPath` is what answers that, **never** `ls .git/hooks` — githooks
+  installs by pointing `core.hooksPath` elsewhere, so `.git/hooks` stays sample-only whether or
+  not the gate is live. 🔴 **The value is VOLATILE, not merely per-clone — re-measure at the
+  moment you act, never earlier in the session.** This line read "uninstalled" until
+  2026-08-21, when a push from a worktree hung ~2 min and came back with the branch REWRITTEN:
+  the commit gone, the index wrecked, and `autocommit: N change(s) in the some-scope
+  analyze-service index` fixture commits on the branch (reproduced twice; task #322). At that
+  moment `core.hooksPath` was set **repo-LOCALLY** to `<repo>/githooks`. Hours later, same
+  session, it was unset everywhere with no action by anyone here — and `install.sh` sets the
+  key `--global`, so the `--local` value came from something else. **Neither "installed" nor
+  "uninstalled" is safe to carry in prose.** 🔴 **A pre-push gate that runs the suite IN the
+  worktree can corrupt the branch it is pushing** — see #322 before using `--no-verify` to get
+  past it, and re-check the branch afterwards. ⚠ **Check for a REPO-LOCAL `core.hooksPath` before installing**: `install.sh` sets the
+  key `--global`, and a local one wins — observed pointing at `.git/hooks` (08-20, workbench
+  `devrc` + `homelab-talos`; laptop none) and at `githooks/` (08-21). It correlates with
+  agent-worktree creation, is NOT a devrc setting, and `git config --local --get
+  core.hooksPath` per clone is the only answer.
   **Until then: run the gate yourself before you merge, and say which command you ran.**
   `nix build .#checks.x86_64-linux.pytests` / `.#checks.x86_64-linux.nodetests` (or
   `scripts/gate.sh`) are authoritative — they assert collected-test FLOORS and parse structured
