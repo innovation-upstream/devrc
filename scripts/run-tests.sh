@@ -1857,6 +1857,218 @@ _spool_account() {
   SPOOL_SEEN+=("$1|$(( SPOOL_B_S + 1 ))|$(_spool_lines "$SPOOL_SESSIONS_LOG")|$(( SPOOL_B_T + 1 ))|$(_spool_lines "$SPOOL_TRAP_LOG")|$(( SPOOL_B_I + 1 ))|$(_spool_lines "$SPOOL_ISOLATED_LOG")")
 }
 
+# --- GUARD 10: NO TEST MAY TOUCH THE OPERATOR'S GIT CONFIG OR A REAL REMOTE -----
+# 🔴 THE THIRD ENFORCEMENT POINT, attached to the same line for the same reason.
+#
+# MEASURED 2026-08-21. A test ran `githooks/install.sh` for real; that script
+# sets `core.hooksPath` **--global**, so it rewrote the operator's `~/.gitconfig`
+# to point at a pytest tmpdir. In the same window ~63 fixture commits (`base`,
+# `ahead`, `local side`, `un-pushed work stranded on main`, `autocommit: N
+# change(s) …`) were pushed to the REAL `origin/main`, whose tree became a single
+# file named `f`, and the base clone ended up `core.bare = true` on a populated
+# working tree. Everything was repaired; nothing was lost. What was missing was a
+# FLOOR — so the next such test does it again.
+#
+# GUARD 7 (#399) and GUARD 8 (#614) both started life as a conftest fixture and
+# both protected exactly ONE target, because this script runs one pytest process
+# per target. This is the same rule in one module (`scripts/testlib/
+# nogit_plugin.py`) with two entry points — `-p testlib.nogit_plugin` on the
+# single pytest line below, and an import in `scripts/tests/conftest.py` — plus
+# these exports, which are what cover the NON-pytest targets (HOOK_TESTS,
+# SHELL_TESTS) that no conftest can ever reach.
+#
+# The levers, and their limits, are documented in the plugin's header. What is
+# specific to THIS file is the accounting, and it has two halves:
+#
+#   * the CONTROLS (per pytest target): a real `git config --global` write that
+#     must land in the guard's own file, and a real `https` git operation that
+#     must be refused BY GIT. Both are "watch the number move" — a zero from a
+#     target that never ran a control is not evidence of anything.
+#   * the TRIPWIRE (every target): the operator's real config files are
+#     fingerprinted before and after each target. That is what catches the
+#     residual hazard the exports cannot close — code that REMOVES
+#     GIT_CONFIG_GLOBAL from its own environment and drops back to $HOME.
+#
+# 🔴 HOME IS DELIBERATELY NOT REASSIGNED. Several suites legitimately read
+# `~/.claude/...`, so a blanket HOME rewrite would break real tests and be
+# reverted — a durable guard traded for a temporary one. GIT_CONFIG_GLOBAL is the
+# narrow lever that closes the surface that was actually poisoned.
+
+# The protected set is computed BEFORE the exports, while the ambient
+# environment is still the operator's — afterwards `git config --global` reports
+# the guard file and the tripwire would be watching its own scratch copy.
+#
+# Two sources, unioned: what git ITSELF reports as the origin of the operator's
+# global settings (never a restatement of git's lookup rule), and the documented
+# candidate paths, INCLUDING ones that do not exist yet — a test that CREATES
+# `~/.gitconfig` where there was none is the same finding as one that edits it.
+NOGIT_PROTECTED=()
+_nogit_protect() { # $1 = path; ignore empties and duplicates
+  local p="$1" q
+  [ -n "$p" ] || return 0
+  for q in ${NOGIT_PROTECTED[@]+"${NOGIT_PROTECTED[@]}"}; do
+    [ "$q" = "$p" ] && return 0
+  done
+  NOGIT_PROTECTED+=("$p")
+}
+while IFS= read -r origin; do
+  _nogit_protect "$origin"
+done < <(git config --global --list --show-origin 2>/dev/null \
+         | grep '^file:' | sed 's/^file://' | cut -f1 | sort -u)
+_nogit_protect "${HOME:-}/.gitconfig"
+_nogit_protect "${XDG_CONFIG_HOME:-${HOME:-}/.config}/git/config"
+# `core.bare = true` on a populated working tree was the third casualty, and it
+# is a REPO-LOCAL write — GIT_CONFIG_GLOBAL does not govern it at all. The
+# tripwire is the only thing that can see it. (Absent in the nix sandbox, which
+# builds from a store copy with no `.git`; that is reported, not assumed.)
+NOGIT_REPO_GITDIR="$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+[ -n "$NOGIT_REPO_GITDIR" ] && _nogit_protect "$NOGIT_REPO_GITDIR/config"
+
+_nogit_fingerprint_of() { # $@ = paths -> one line each: "<sha256|ABSENT> <path>"
+  local f
+  for f in "$@"; do
+    if [ -f "$f" ]; then
+      printf '%s %s\n' "$(sha256sum "$f" 2>/dev/null | cut -c1-64)" "$f"
+    else
+      printf 'ABSENT %s\n' "$f"
+    fi
+  done
+}
+_nogit_fingerprint() {
+  _nogit_fingerprint_of ${NOGIT_PROTECTED[@]+"${NOGIT_PROTECTED[@]}"}
+}
+
+NOGIT_DIR="$(mktemp -d)"
+NOGIT_CONFIG="$NOGIT_DIR/gitconfig"
+NOGIT_SESSIONS_LOG="$NOGIT_DIR/sessions.log"
+NOGIT_CHANGED_LOG="$NOGIT_DIR/changed.log"
+if ! : > "$NOGIT_CONFIG" || ! : > "$NOGIT_CHANGED_LOG"; then
+  echo "run-tests: FATAL — could not create the git-isolation files under" >&2
+  echo "  $NOGIT_DIR. Refusing to run: without them a test that calls" >&2
+  echo "  'git config --global' rewrites the operator's ~/.gitconfig, and a" >&2
+  echo "  fixture repo can push to the real origin." >&2
+  exit 2
+fi
+
+# 🔴 NEGATIVE CONTROL FOR THE TRIPWIRE'S COMPARATOR — can it go red at all?
+# A fingerprint that always reported "unchanged" is indistinguishable from a
+# perfectly protected run, and it is the cheaper failure to have. So a canary
+# file is fingerprinted, modified, and fingerprinted again BEFORE anything else
+# runs; if the comparator does not notice, this runner cannot vouch for a single
+# `real-config-changed=0` it is about to print.
+NOGIT_CANARY="$NOGIT_DIR/canary"
+printf 'before\n' > "$NOGIT_CANARY"
+_nogit_canary_a="$(_nogit_fingerprint_of "$NOGIT_CANARY")"
+printf 'after\n' > "$NOGIT_CANARY"
+_nogit_canary_b="$(_nogit_fingerprint_of "$NOGIT_CANARY")"
+if [ "$_nogit_canary_a" = "$_nogit_canary_b" ]; then
+  echo "run-tests: FATAL — GUARD 9's tripwire cannot detect a file changing." >&2
+  echo "  A canary was rewritten between two fingerprints and they matched, so" >&2
+  echo "  every 'real-config-changed=0' below would be the zero of a detector" >&2
+  echo "  wired to nothing. (sha256sum missing or unreadable?)" >&2
+  exit 2
+fi
+rm -f "$NOGIT_CANARY"
+
+# THE EXPORTS. Unconditional, including over an ambient value: honouring an
+# inherited GIT_CONFIG_GLOBAL would make the isolation depend on whatever the
+# operator's shell happened to carry. Read the plugin header for what each one
+# does; `GIT_CONFIG_SYSTEM` and `GIT_CONFIG_NOSYSTEM` are BOTH set because they
+# cover different git versions, and neither substitutes for the other.
+export GIT_CONFIG_GLOBAL="$NOGIT_CONFIG"
+export GIT_CONFIG_SYSTEM=/dev/null
+export GIT_CONFIG_NOSYSTEM=1
+export GIT_ALLOW_PROTOCOL=file
+export GIT_TERMINAL_PROMPT=0
+export DEVRC_TEST_GIT_GUARD_DIR="$NOGIT_DIR"
+# A fresh RUN is the ROOT of the session-nesting chain (see the plugin's
+# NESTED_ENV) — the same reason GUARD 8 unsets its own flag here.
+unset DEVRC_TEST_GIT_IN_SESSION
+
+# The tokens shared with `scripts/testlib/nogit_plugin.py`. They are spelled on
+# both sides of a process boundary, so they are PINNED both ways by
+# `scripts/tests/test_nogit_isolation.py` — a rename on one side alone would
+# leave this accounting matching nothing and printing a clean run.
+NOGIT_SESSION_MARKER="nogit(session)"
+NOGIT_CONTROL_SECTION="devrc-nogit-guard"
+NOGIT_CONTROL_OK="emitted"
+NOGIT_PROTOCOL_OK="refused"
+
+# 🔴 VERIFY THE LEVERS GOVERN, UP FRONT — the same shape as GUARD 8's fallback
+# check. An export that does not actually change git's behaviour would leave an
+# unarmed guard reporting green all run.
+_nogit_fp_pre="$(_nogit_fingerprint)"
+if ! git config --global "$NOGIT_CONTROL_SECTION.runner-probe" armed 2>/dev/null \
+   || ! grep -q 'runner-probe' "$NOGIT_CONFIG"; then
+  echo "run-tests: FATAL — 'git config --global' does NOT write to this run's" >&2
+  echo "  isolated file ($NOGIT_CONFIG). GIT_CONFIG_GLOBAL is not governing git," >&2
+  echo "  so a test calling githooks/install.sh would rewrite the operator's" >&2
+  echo "  real ~/.gitconfig exactly as it did on 2026-08-21." >&2
+  exit 2
+fi
+if [ "$_nogit_fp_pre" != "$(_nogit_fingerprint)" ]; then
+  echo "run-tests: FATAL — the runner's own 'git config --global' probe CHANGED" >&2
+  echo "  a protected file. The redirect reported success and the write still" >&2
+  echo "  reached the operator's real configuration." >&2
+  exit 2
+fi
+NOGIT_PROTO_OUT="$(git ls-remote https://devrc-nogit-guard.invalid/refused.git 2>&1 || true)"
+case "$NOGIT_PROTO_OUT" in
+  *"not allowed"*) : ;;
+  *)
+    echo "run-tests: FATAL — a git 'https' operation was NOT refused by the" >&2
+    echo "  protocol allowlist. GIT_ALLOW_PROTOCOL=file is not governing git, so" >&2
+    echo "  a fixture repo can push to a real remote. git said:" >&2
+    printf '  %s\n' "$NOGIT_PROTO_OUT" >&2
+    exit 2
+    ;;
+esac
+
+echo "run-tests: git isolated for this run (GUARD 10)"
+echo "  GIT_CONFIG_GLOBAL=$NOGIT_CONFIG"
+echo "  GIT_ALLOW_PROTOCOL=$GIT_ALLOW_PROTOCOL  (https/ssh refused by git itself)"
+if [ "${#NOGIT_PROTECTED[@]}" -eq 0 ]; then
+  echo "  protected files: 0 — NOT MEASURED. This HOME carries no git config and" \
+       "the tree has no .git, so the tripwire has nothing to watch; the per-target" \
+       "controls are what carry this run."
+else
+  echo "  protected files: ${#NOGIT_PROTECTED[@]} (fingerprinted before/after every target)"
+  for f in "${NOGIT_PROTECTED[@]}"; do
+    if [ -f "$f" ]; then echo "    present $f"; else echo "    absent  $f"; fi
+  done
+fi
+
+# "<target>|<sess-from>|<sess-to>|<n-changed>|<control-delta>"
+NOGIT_SEEN=()
+NOGIT_B_FP=""
+NOGIT_B_CTL=0
+NOGIT_B_S=0
+
+_nogit_controls() { # how many per-session control keys the guard file holds
+  git config --file "$NOGIT_CONFIG" \
+    --get-regexp "^$NOGIT_CONTROL_SECTION\.control-" 2>/dev/null | grep -c . || true
+}
+_nogit_mark_before() {
+  NOGIT_B_FP="$(_nogit_fingerprint)"
+  NOGIT_B_CTL="$(_nogit_controls)"
+  NOGIT_B_S="$(_spool_lines "$NOGIT_SESSIONS_LOG")"
+}
+# $1 = target name. Every call MUST be preceded by the before-mark above, or the
+# range it records belongs to whatever ran previously.
+_nogit_account() {
+  local t="$1" i n=0
+  local -a B A
+  mapfile -t B <<<"$NOGIT_B_FP"
+  mapfile -t A <<<"$(_nogit_fingerprint)"
+  for ((i = 0; i < ${#A[@]}; i++)); do
+    if [ "${B[i]:-}" != "${A[i]}" ]; then
+      n=$(( n + 1 ))
+      printf '%s\t%s\n' "$t" "${A[i]#* }" >> "$NOGIT_CHANGED_LOG"
+    fi
+  done
+  NOGIT_SEEN+=("$t|$(( NOGIT_B_S + 1 ))|$(_spool_lines "$NOGIT_SESSIONS_LOG")|$n|$(( $(_nogit_controls) - NOGIT_B_CTL ))")
+}
+
 # 🔴 THE ACKNOWLEDGEMENT LEDGER — "<target>|<reason>". A target listed here is
 # EXPECTED to drive launchers into the stub, and is REQUIRED to: an entry whose
 # target records zero intercepts fails the run. That direction is the point.
@@ -2030,16 +2242,25 @@ run_pytest() {
   log="$(mktemp)"
   nl_before="$(_nolaunch_lines)"
   _spool_mark_before
+  _nogit_mark_before
   # 🔴 `-p testlib.nolaunch_plugin` is GUARD 7, `-p testlib.spool_plugin` is
-  # GUARD 8 and `-p testlib.gitenv_plugin` is GUARD 9 (see each header). All
-  # three are on THIS line — the one place every target is invoked — and not in
-  # two dozen conftests.
-  python -m pytest "$d" -q -p no:cacheprovider -p testlib.nolaunch_plugin -p testlib.spool_plugin -p testlib.gitenv_plugin \
+  # GUARD 8, `-p testlib.gitenv_plugin` is GUARD 9 and `-p testlib.nogit_plugin`
+  # is GUARD 10 (see each header). All FOUR are on THIS line — the one place
+  # every target is invoked — and not in two dozen conftests, which is what left
+  # GUARD 7 covering 1 target of 17 and GUARD 8 covering 1 directory of 13.
+  #
+  # 9 and 10 are two guards, not one done twice: 9 strips the repo POINTERS
+  # (GIT_DIR and friends) so a fixture cannot reach this checkout by accident;
+  # 10 refuses a WRITE to any repo outside the session tmp roots, which is the
+  # case a pointer strip cannot answer. They landed a day apart from separate
+  # branches and both claimed the number; only the numbering was reconciled.
+  python -m pytest "$d" -q -p no:cacheprovider -p testlib.nolaunch_plugin -p testlib.spool_plugin -p testlib.gitenv_plugin -p testlib.nogit_plugin \
     --no-header -rs >"$log" 2>&1
   rc=$?
   nl_after="$(_nolaunch_lines)"
   NOLAUNCH_SEEN+=("$d|$(( nl_before + 1 ))|$nl_after")
   _spool_account "$d"
+  _nogit_account "$d"
   cat "$log"
 
   # GUARD 4: parse pytest's summary line. `-q` emits it undecorated, e.g.
@@ -2160,6 +2381,7 @@ for HOOK_TEST in "${HOOK_TESTS[@]}"; do
   echo "=== script $HOOK_TEST ==="
   nl_before="$(_nolaunch_lines)"
   _spool_mark_before
+  _nogit_mark_before
   if python "$HOOK_TEST"; then
     RESULTS+=("PASS  $HOOK_TEST (script)")
   else
@@ -2174,6 +2396,9 @@ for HOOK_TEST in "${HOOK_TESTS[@]}"; do
   # marker and no fallback control — their protection is the two env exports,
   # and what is checked is that they leaked nothing into the trap.
   _spool_account "$HOOK_TEST"
+  # GUARD 10 likewise: no plugin, so no session marker and no controls — their
+  # protection is the exports, and what is checked is the tripwire.
+  _nogit_account "$HOOK_TEST"
   echo
 done
 
@@ -2209,6 +2434,7 @@ for SHELL_TEST in "${SHELL_TESTS[@]}"; do
   echo "=== script $SHELL_TEST ==="
   nl_before="$(_nolaunch_lines)"
   _spool_mark_before
+  _nogit_mark_before
   if bash "$SHELL_TEST"; then
     RESULTS+=("PASS  $SHELL_TEST (script)")
   else
@@ -2217,6 +2443,7 @@ for SHELL_TEST in "${SHELL_TESTS[@]}"; do
   fi
   NOLAUNCH_SEEN+=("$SHELL_TEST|$(( nl_before + 1 ))|$(_nolaunch_lines)")
   _spool_account "$SHELL_TEST"
+  _nogit_account "$SHELL_TEST"
   echo
 done
 
@@ -2505,6 +2732,89 @@ if [ "${#spool_problems[@]}" -gt 0 ]; then
   fail=1
 fi
 rm -rf "$SPOOL_DIR"
+
+# --- GUARD 10 (evaluation): per-target git isolation accounting -----------------
+# One line per target, ALWAYS printed — including the zeros, and never the zero
+# ALONE. `real-config-changed=0` on its own is exactly what a guard wired to
+# nothing prints, so every pytest line carries the two CONTROLS beside it: a real
+# `git config --global` write that landed in this run's isolated file, and a real
+# `https` git operation that git itself refused. The pair is the claim — "the
+# write happened and went here; the https attempt happened and was refused; the
+# operator's files are byte-identical" — and a missing control fails the run.
+echo "  ---- git isolation (GUARD 10) ----"
+echo "    isolated-config=$NOGIT_CONFIG"
+if [ "${#NOGIT_PROTECTED[@]}" -eq 0 ]; then
+  echo "    protected-files=0 — NOT MEASURED (no global git config in this HOME," \
+       "no .git in this tree). The controls carry this run; the tripwire watched nothing."
+else
+  echo "    protected-files=${#NOGIT_PROTECTED[@]}  (fingerprinted before/after every target)"
+fi
+nogit_problems=()
+for t in "${TARGETS[@]}"; do
+  seen=0
+  for entry in ${NOGIT_SEEN[@]+"${NOGIT_SEEN[@]}"}; do
+    [ "${entry%%|*}" = "$t" ] && seen=1 && break
+  done
+  [ "$seen" -eq 1 ] || nogit_problems+=("$t  — never accounted: run_pytest returned before GUARD 10 could measure it")
+done
+
+for entry in ${NOGIT_SEEN[@]+"${NOGIT_SEEN[@]}"}; do
+  IFS='|' read -r gt gfrom gto gchanged gctl <<<"$entry"
+
+  gsess="$(_spool_slice "$NOGIT_SESSIONS_LOG" "$gfrom" "$gto")"
+  markers=$(printf '%s\n' "$gsess" | grep -c "^$NOGIT_SESSION_MARKER" || true)
+  _nogit_field() { # $1 = field name -> its value from this target's first marker
+    printf '%s\n' "$gsess" | grep "^$NOGIT_SESSION_MARKER" | head -1 \
+      | awk -F'\t' -v k="$1=" '{for(i=1;i<=NF;i++) if(index($i,k)==1) print substr($i,length(k)+1)}'
+  }
+  m_redirect="$(_nogit_field redirect)"
+  m_control="$(_nogit_field control)"
+  m_control_detail="$(_nogit_field control-detail)"
+  m_protocol="$(_nogit_field protocol)"
+  m_protocol_detail="$(_nogit_field protocol-detail)"
+  m_protocols="$(_nogit_field protocols)"
+
+  is_pytest=0
+  for t in "${TARGETS[@]}"; do [ "$t" = "$gt" ] && is_pytest=1 && break; done
+
+  echo "    $gt  real-config-changed=$gchanged/${#NOGIT_PROTECTED[@]}  config-control=$gctl  protocol=${m_protocol:-n/a}  plugin=$markers"
+
+  # 🔴 THE DAMAGE ITSELF. A protected file whose fingerprint moved is the
+  # 2026-08-21 incident happening again: `~/.gitconfig` rewritten, or
+  # `core.bare = true` written into a populated clone's `.git/config`.
+  if [ "$gchanged" -gt 0 ]; then
+    changed_names="$(grep -F "$(printf '%s\t' "$gt")" "$NOGIT_CHANGED_LOG" 2>/dev/null \
+      | cut -f2- | sed 's/^/             /' || true)"
+    nogit_problems+=("$gt  — CHANGED $gchanged of the operator's protected git config file(s) while it ran. GIT_CONFIG_GLOBAL redirects 'git config --global', so this reached them some other way (code that removes the variable from its own environment, or a repo-local write):"$'\n'"$changed_names")
+  fi
+
+  if [ "$is_pytest" -eq 1 ]; then
+    if [ "$markers" -ne 1 ]; then
+      nogit_problems+=("$gt  — the nogit plugin emitted $markers session marker(s), expected exactly 1. This target ran WITHOUT the guard, so its real-config-changed=$gchanged means nothing (see GUARD 10's header: -p testlib.nogit_plugin on the pytest line).")
+    elif [ "$m_redirect" != "$NOGIT_CONFIG" ]; then
+      nogit_problems+=("$gt  — ran with GIT_CONFIG_GLOBAL='$m_redirect', not this run's '$NOGIT_CONFIG'. Something between this script and pytest is re-pointing git's global config.")
+    elif [ "$m_control" != "$NOGIT_CONTROL_OK" ]; then
+      nogit_problems+=("$gt  — the plugin could not show its 'git config --global' write was CONTAINED (control=$m_control: $m_control_detail). Its zero is not evidence.")
+    elif [ "$gctl" -ne 1 ]; then
+      nogit_problems+=("$gt  — the isolated config gained $gctl control key(s), expected exactly 1. A real 'git config --global' write was fired and did NOT arrive here, so the redirect is not where global writes land.")
+    elif [ "$m_protocol" != "$NOGIT_PROTOCOL_OK" ]; then
+      nogit_problems+=("$gt  — a real 'https' git operation was NOT refused by the allowlist (protocol=$m_protocol, GIT_ALLOW_PROTOCOL='$m_protocols'): $m_protocol_detail. A fixture repo in this target could push to a real remote.")
+    fi
+  else
+    # Non-pytest targets load no plugin, so a marker or a control from one means
+    # the accounting slices are misaligned, not that they are better protected.
+    if [ "$markers" -ne 0 ] || [ "$gctl" -ne 0 ]; then
+      nogit_problems+=("$gt  — a NON-pytest target recorded $markers session marker(s) and $gctl control key(s); it can have neither, so the per-target slices are misattributed.")
+    fi
+  fi
+done
+
+if [ "${#nogit_problems[@]}" -gt 0 ]; then
+  echo "  ERROR: ${#nogit_problems[@]} GUARD 10 problem(s):" >&2
+  for p in "${nogit_problems[@]}"; do echo "         $p" >&2; done
+  fail=1
+fi
+rm -rf "$NOGIT_DIR"
 
 # GUARD 6. One writer, fed the same value `exit` is about to take, so the
 # printed verdict and the process status cannot disagree — including through a

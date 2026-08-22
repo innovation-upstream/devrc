@@ -65,3 +65,20 @@ from testlib.gitenv_plugin import (  # noqa: E402,F401
     pytest_collection_finish,
     pytest_sessionfinish,
 )
+
+# 🔴 THE SAME SHAPE A FOURTH TIME, for git WRITES (GUARD 10). GUARD 9 above
+# strips the repo POINTERS so a fixture cannot reach this checkout by accident;
+# this one refuses a WRITE to any repo outside the session's tmp roots, which is
+# the case a pointer strip cannot answer. Different failure, different guard —
+# they compose, and the numbering is the only thing that had to change when the
+# two landed a day apart. `testlib/nogit_plugin.py` is
+# the implementation and `scripts/run-tests.sh` loads it for EVERY target; this
+# import is the second entry point, so a bare `pytest scripts/tests` outside the
+# runner cannot rewrite the operator's `~/.gitconfig` or push to a real remote.
+#
+# Measured 2026-08-21: a test ran `githooks/install.sh` for real — that script
+# sets `core.hooksPath` --global — and ~63 fixture commits reached the REAL
+# origin/main. The fix is one module registered twice, NOT a fixture added to N
+# conftests: that is what #399 and #614 each did, leaving 1 target of 17 and 1
+# directory of 13 protected while reading as systemic.
+from testlib.nogit_plugin import no_real_git  # noqa: E402,F401

@@ -76,6 +76,7 @@ sys.path.insert(0, str(SCRIPTS))
 
 from testlib.gitenv import (  # noqa: E402
     PROTECT_ENV,
+    global_config_paths,
     REPO_POINTER_VARS,
     VIOLATION_TOKEN,
     diff_snapshots,
@@ -641,3 +642,65 @@ def test_the_violation_message_names_the_remediation(tmp_path):
     out = proc.stdout + proc.stderr
     assert "git reflog" in out, f"no recovery instruction in the failure:\n{out}"
     assert "GIT_DIR" in out, f"the failure does not name the known mechanism:\n{out}"
+
+
+# --- the seam with GUARD 10 (`testlib/nogit_plugin.py`) ----------------------
+# 🔴 REGRESSION, measured 2026-08-22 on the MERGED tree and visible on neither
+# branch alone. GUARD 10 isolates git by pointing `GIT_CONFIG_GLOBAL` at a
+# scratch `gitconfig` under `DEVRC_TEST_GIT_GUARD_DIR` and letting tests write
+# there. This guard fingerprinted that file, so every target reported
+# `DEVRC-GITENV-VIOLATION: CHANGED …/gitconfig` — one guard calling the other's
+# correct behaviour an incident.
+
+
+def test_a_scratch_GIT_CONFIG_GLOBAL_is_not_treated_as_a_config_to_protect(
+    tmp_path, monkeypatch
+):
+    """A redirect the HARNESS made is not the operator's config."""
+    guard_dir = tmp_path / "nogit-run"
+    guard_dir.mkdir()
+    scratch = guard_dir / "gitconfig"
+    scratch.write_text("[user]\n\tname = fixture\n", encoding="utf-8")
+
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(scratch))
+    monkeypatch.setenv("DEVRC_TEST_GIT_GUARD_DIR", str(guard_dir))
+
+    watched = global_config_paths()
+    assert scratch not in watched, (
+        "the session's own scratch gitconfig is watched, so GUARD 10 writing to "
+        "it — which is the entire point of the redirect — reads as a violation"
+    )
+    # 🔴 And the operator's real files ARE watched. Skipping the scratch file
+    # must not become "watch nothing": before this fix ANY override returned
+    # early, so a direct write to ~/.gitconfig went unseen.
+    assert watched, "a scratch redirect left NOTHING watched"
+    assert any(p.name in (".gitconfig", "config") for p in watched), watched
+
+
+def test_a_GIT_CONFIG_GLOBAL_outside_the_guard_dir_is_still_protected(
+    tmp_path, monkeypatch
+):
+    """The control. Only a redirect INTO the session's own dir is exempt —
+    otherwise the exemption would be a hole any test could walk through by
+    setting the variable."""
+    guard_dir = tmp_path / "nogit-run"
+    guard_dir.mkdir()
+    elsewhere = tmp_path / "somewhere-else" / "gitconfig"
+    elsewhere.parent.mkdir()
+    elsewhere.write_text("[user]\n\tname = real\n", encoding="utf-8")
+
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(elsewhere))
+    monkeypatch.setenv("DEVRC_TEST_GIT_GUARD_DIR", str(guard_dir))
+
+    assert global_config_paths() == [elsewhere]
+
+
+def test_with_no_guard_dir_an_override_is_protected_exactly_as_before(
+    tmp_path, monkeypatch
+):
+    """No GUARD 10 in the run at all: unchanged behaviour."""
+    target = tmp_path / "gitconfig"
+    target.write_text("", encoding="utf-8")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(target))
+    monkeypatch.delenv("DEVRC_TEST_GIT_GUARD_DIR", raising=False)
+    assert global_config_paths() == [target]
