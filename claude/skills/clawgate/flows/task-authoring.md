@@ -13,6 +13,15 @@ end at `ready_for_review` — the agent derives the criteria and may not grade a
 it wrote (`SKILL.md` → "Status gate"). So the heading is not decoration; it is the
 one lever the author has, and this interview exists to produce it.
 
+⚠ **That lever is a CONVENTION, not a server check — do not oversell it.** Measured
+2026-08-21: "acceptance criteria" appears in **zero** Go/TS/SQL files under
+`containers/clawgate` (13 files contain "acceptance", none as that phrase; the grep
+was validated on the same command shape by `StatusAllowedForAgent` → 3 files). The
+heading is read by exactly two things: the pickup ritual in `SKILL.md`, and
+`clawgate-task-interview-guard.py`. The separate fact that IS structural is
+narrower — a dispatched devpod agent cannot set `complete` at all
+(`notes.StatusAllowedForAgent`), criteria or no criteria.
+
 **Why an interview and not a form.** `scripts/task-spec-drafter/README.md` measured
 the unattended version of this problem on a real 8-ticket batch: deep-context
 verification scored **8/8** against a naive title-only pass at **~2/8**, and of the 8
