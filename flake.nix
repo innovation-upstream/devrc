@@ -95,10 +95,18 @@
       ]);
       # Read the per-entry justifications on checks.pytests' nativeBuildInputs
       # below before adding or removing anything here.
+      # age: scripts/tests/test_analyze_service_index_backup.py resolves `age` and
+      # `age-keygen` at IMPORT and raises rather than skipping — deliberately, and
+      # for the same reason test_analyze_service_index_commit.py does: a skipped
+      # backup test reports safety it never measured, which for a disaster-recovery
+      # feature is quiet exactly when it is wrong. That suite runs the real
+      # encrypt/decrypt round trip (it generates its own throwaway identity; the
+      # operator's key is never touched), so without age here the whole file is an
+      # import error inside the sandbox rather than a green-with-skips.
       gateTools = [
         gatePyEnv pkgs.bash pkgs.ripgrep pkgs.git pkgs.util-linux pkgs.jq
         pkgs.gnugrep pkgs.curl pkgs.nodejs pkgs.nix pkgs.opencode pkgs.logrotate
-        pkgs.rsync pkgs.zsh
+        pkgs.rsync pkgs.zsh pkgs.age
       ];
     in
     {

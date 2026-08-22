@@ -25,6 +25,16 @@ with pkgs; [
   git
   lefthook
 
+  # age — file encryption for the /analyze-service index off-machine backup
+  # (scripts/analyze-service-index/backup.py). The store is client-confidential
+  # and every scope README says the content never leaves the machine; encrypting
+  # to the operator's EXISTING SOPS age identity before upload keeps that
+  # literally true, so the homelab MinIO tenant holds ciphertext it cannot read.
+  # Provides both `age` and `age-keygen` (the backup derives its recipient from
+  # the identity file rather than hardcoding one, so the key it encrypts to and
+  # the key it can decrypt with cannot drift apart).
+  age
+
   # Nix
   nix-direnv
 

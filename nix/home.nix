@@ -3084,6 +3084,142 @@ in
     };
   };
 
+  # Encrypted OFF-MACHINE backup for the /analyze-service index store.
+  #
+  # WHAT THIS CLOSES, AND WHY THE AUTOCOMMIT ABOVE DOES NOT CLOSE IT. The
+  # committer gives every scope local git history. That defends against exactly
+  # one thing: an agent's Write clobbering a file a previous run had already
+  # committed. Measured on the workbench 2026-08-21: 10 scope repos, 1-65
+  # commits each, every one of them `remote = none`, and not one byte of any of
+  # them anywhere off this disk. The history lives INSIDE the thing a disk
+  # failure or an `rm -rf` of the store root destroys, so until now the store
+  # had a versioning story and no recovery story at all. The content is not
+  # re-derivable — it records gotchas, retracted theories and measurements that
+  # were true at a moment.
+  #
+  # The laptop's store is DIVERGENT CONTENT, not a copy. It is a second thing to
+  # lose, which is why this is NOT gated on serverMode (see below).
+  #
+  # 🔴 A SIBLING UNIT, NOT AN EXTENSION OF THE COMMITTER. The obvious move is to
+  # bolt an upload onto analyze-service-index-commit, and it is the wrong one.
+  # That unit's containment — `PrivateNetwork = true`, `InaccessiblePaths` on
+  # /dev/shm, both bind lists frozen at exactly one entry — IS its
+  # no-exfiltration control, arrived at over several measured rounds after three
+  # earlier attempts to make exfiltration merely DETECTABLE were each evaded a
+  # new way. Backing up needs the network by definition. Giving that unit a
+  # network is not a small edit to it; it is deleting the property it was built
+  # to have, and it would do so for a job that runs on a completely different
+  # schedule. Two units, two threat models, two failure signals.
+  #
+  # DAILY, not hourly. The committer is hourly because its cost is ~200 ms of
+  # local git and the window it narrows is the same-day write-then-clobber. This
+  # one uploads full bundles of every scope over a port-forward: the window it
+  # narrows is "the disk died", which is not a per-hour risk, and 24 full-store
+  # uploads a day would buy nothing over one. Persistent=true catches up a
+  # missed run; RandomizedDelaySec keeps it off a predictable boundary and off
+  # the same instant as the 06:00 mail archiver.
+  #
+  # 🔴 DELIBERATELY NOT GATED ON serverMode, unlike mail-actions-archive which
+  # it otherwise resembles. That gate exists because those jobs need a server
+  # role. This one needs the homelab kubeconfig — which the laptop HAS, over
+  # nebula — and gating it out would leave the laptop's divergent, equally
+  # unrecoverable store with no off-machine copy while the workbench looked
+  # healthy. Same reasoning as the committer above, and the same silent gap.
+  # `backup.py` resolves the right kubeconfig per host itself; KUBECONFIG below
+  # is the workbench's and is simply the first candidate it checks.
+  #
+  # THE STORE IS MOUNTED READ-ONLY. `backup.py` runs no git subcommand outside
+  # its own allowlist (bundle/rev-list/remote/rev-parse) and the test suite
+  # checksums a synthetic store across a full run to prove byte identity — but
+  # BindReadOnlyPaths makes it a property of the namespace too, so a future bug
+  # in the producer cannot reach the only copy of the data it is protecting.
+  # Note the contrast with the committer, which needs the store WRITABLE.
+  #
+  # The age identity is bound in read-only as a single FILE, not its directory:
+  # `~/workspace/homelab-talos/.secrets/` also holds cluster credentials this
+  # job has no business seeing.
+  #
+  # Python comes from a pinned `withPackages` env rather than the runtime
+  # `nix-shell -p` that run-archive.sh uses. nix-shell inside a hardened unit
+  # needs the daemon, a writable cache and a NIX_PATH; a built env needs none of
+  # those and cannot drift between the two hosts.
+  systemd.user.services.analyze-service-index-backup =
+    let
+      pyEnv = pkgs.python3.withPackages (p: [ p.minio ]);
+    in
+    {
+      Unit = {
+        Description = "Encrypted off-machine backup of the /analyze-service index store";
+        After = [ "network-online.target" ];
+        Wants = [ "network-online.target" ];
+        OnFailure = [ "notify-failure@%n.service" ];
+      };
+      Service = {
+        Type = "oneshot";
+        # Ten scopes of a few hundred KB each, bundled, encrypted and uploaded
+        # over a port-forward. Generous, but a hang must not pin the timer.
+        TimeoutStartSec = 900;
+        Environment = [
+          "PATH=${lib.makeBinPath [ pkgs.git pkgs.age pkgs.kubectl pkgs.coreutils ]}"
+          "HOME=%h"
+          "KUBECONFIG=%h/workspace/homelab-talos/homelab-kubeconfig"
+          # The identity this encrypts to: the operator's EXISTING SOPS age key,
+          # the same handle the homelab repos already use. No new key is minted —
+          # a backup encrypted to a key nobody keeps alive is a backup nobody can
+          # open. See SECRETS.md.
+          "SOPS_AGE_KEY_FILE=%h/workspace/homelab-talos/.secrets/age.key"
+          # 🔴 THE TWO HOSTS MUST NOT SHARE A KEY PREFIX. Both machines are
+          # hostname `nixos` and their stores are DIVERGENT content, so a shared
+          # prefix would make each host's retention pass evict the other's
+          # backups — turning the backup into a second way to lose the data.
+          #
+          # `isLaptop` alone is not enough to rely on here. It is a backlight
+          # probe, and the note at the top of this file records that it fails
+          # OPEN: a laptop with an ACPI-only backlight evaluates `false`, which
+          # would label BOTH machines `workbench` and produce exactly the
+          # collision above — silently, and only visible as backups going
+          # missing. So the readable name is joined to `%m`, systemd's machine
+          # ID, which is distinct per host by construction and needs no probe.
+          # The name is for a human reading the bucket; the machine ID is what
+          # actually guarantees separation.
+          "ASIB_HOST=${if isLaptop then "laptop" else "workbench"}-%m"
+        ];
+        ProtectSystem = "strict";
+        ProtectHome = "read-only";
+        # `-` on the store: a host that has never run /analyze-service must start
+        # and no-op cleanly, which is the one empty outcome backup.py treats as a
+        # success. No `-` on the script: it ships with the repo, so its absence is
+        # a real deployment fault and the mount failure names it (measured for the
+        # committer above; the same reasoning applies unchanged).
+        BindReadOnlyPaths = [
+          "%h/workspace/devrc/scripts"
+          "-%h/.claude/analyze-service-index"
+          "-%h/workspace/homelab-talos/.secrets/age.key"
+          "-%h/workspace/homelab-talos/homelab-kubeconfig"
+          "-%h/.kube/homelab-nebula.yaml"
+        ];
+        InaccessiblePaths = [ "/dev/shm" "/dev/mqueue" ];
+        PrivateTmp = true;
+        NoNewPrivileges = true;
+        ExecStart = "${pyEnv}/bin/python3 %h/workspace/devrc/scripts/analyze-service-index/backup.py";
+        X-Restart-Triggers = [ "${../scripts/analyze-service-index/backup.py}" ];
+      };
+    };
+
+  systemd.user.timers.analyze-service-index-backup = {
+    Unit = {
+      Description = "Daily timer for the /analyze-service index off-machine backup";
+    };
+    Timer = {
+      OnCalendar = "*-*-* 04:30:00";
+      Persistent = true;
+      RandomizedDelaySec = 1800;
+    };
+    Install = {
+      WantedBy = [ "timers.target" ];
+    };
+  };
+
   # ClickHouse regrowth check for the activity store.
   #
   # 2026-08-03 the store was cut 112.4 GB -> 82.1 MB after `system.trace_log`

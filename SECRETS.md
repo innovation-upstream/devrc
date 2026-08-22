@@ -42,6 +42,39 @@ completeness:
 | MinIO invoice archiver | k8s secret `minio-archive-config`, key `config.env` → `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD`, ns `minio-archive` (or env `MINIO_ARCHIVE_ENDPOINT`/`_ACCESS_KEY`/`_SECRET_KEY`) | homelab cluster (`_minio.py`) |
 | LLM extraction (Stage 2) | `OPENROUTER_API_KEY` (env) | OpenRouter dashboard |
 
+### analyze-service index backup — no new secret, REUSES the SOPS age key
+
+`scripts/analyze-service-index/backup.py` (systemd user timer
+`analyze-service-index-backup`, daily, **both hosts**) bundles each scope of the
+`/analyze-service` index store, encrypts it with `age`, and uploads it to the
+`minio-archive` tenant. It introduces **no new credential**:
+
+| what | key / secret (names only) | source of truth |
+|---|---|---|
+| encryption identity | the **existing** SOPS age key — file `~/workspace/homelab-talos/.secrets/age.key`, handle `SOPS_AGE_KEY_FILE` (override: `ASIB_AGE_IDENTITY`) | the `homelab-talos` repo; the same key already used for every `*.enc.yaml` in the homelab clusters |
+| MinIO destination | reuses `_minio.py` entirely — k8s secret `minio-archive-config` (see the row above) | homelab cluster |
+| cluster route | `KUBECONFIG`; the unit sets the workbench path and `backup.py` falls back to `~/.kube/homelab-nebula.yaml` on the laptop | see the Kubeconfigs table below |
+
+🔴 **The recipient is DERIVED from that key file at run time** (`age-keygen -y`),
+never hardcoded — devrc is public, and more importantly a hardcoded recipient can
+drift from the key the operator actually holds, producing archives that encrypt
+cleanly and decrypt never. **No new key is minted**: a backup encrypted to a key
+nobody keeps alive is a backup nobody can open. If the key file is missing the
+backup FAILS loudly rather than falling back to an unencrypted upload.
+
+**Restoring** (the whole point — rehearse it before you need it):
+
+```
+age --decrypt -i ~/workspace/homelab-talos/.secrets/age.key \
+    -o <scope>.bundle  <scope>-<stamp>.bundle.age
+git clone <scope>.bundle <scope>            # a full scope repo, history intact
+```
+
+Objects live at `<host>/<scope>/<UTC stamp>.bundle.age` in bucket
+`analyze-service-index-backups`. The host segment carries the machine ID because
+**both machines are hostname `nixos`** and their stores are divergent — a shared
+prefix would make each host's retention pass evict the other's backups.
+
 ---
 
 ## Kubeconfigs (`$KC_*` handles from `nix/programs/zsh/default.nix`)
