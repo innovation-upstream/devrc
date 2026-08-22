@@ -412,6 +412,19 @@ def test_guard1_classifies_by_cause_not_by_site(
     (stub / "bash").symlink_to(bash)
     home = tmp_path_factory.mktemp("home-cause")
 
+    # 🔴 This REPLACES PATH, so it falls under test_no_real_launchers.py's
+    # PINNED_PATH_CLOBBERS ledger, whose justification works by ENUMERATING the
+    # clobbering dir's contents and whose closing line is that the fixture
+    # "ASSERTS the one-entry contents itself, so this justification is a live
+    # invariant rather than prose that can rot". The ledger's needle matches
+    # BOTH stub dirs in this file, so it cannot tell them apart -- without the
+    # same assertion here, the justification is prose again for this site.
+    assert sorted(p.name for p in stub.iterdir()) == ["bash"], (
+        "the stub PATH dir must hold exactly one entry (a bash symlink); it "
+        f"holds {sorted(p.name for p in stub.iterdir())}. PINNED_PATH_CLOBBERS "
+        "justifies this clobber by enumerating those contents."
+    )
+
     # An explicit env dict, so the ambient DEVRC_GATE_ENV cannot leak in and
     # decide the arm for us. That matters: this suite normally runs INSIDE the
     # dev shell, where the marker IS set, so inheriting it would collapse both
@@ -451,12 +464,22 @@ def test_guard1_classifies_by_cause_not_by_site(
 def test_both_sanctioned_gate_envs_export_the_marker():
     """The two tiers that satisfy REQUIRED_TOOLS must both announce themselves.
 
-    🔴 SILENT-FAILURE DIRECTION. If only the devShell exports it, `nix flake
-    check` misclassifies its OWN repo defects as environment faults; if only
-    checks.pytests does, the pre-push tier -- the only one that runs
-    automatically here, since this repo has no CI and no branch protection --
-    goes back to degrading on a typo. Neither shows up as a failure anywhere:
-    the runner still exits, just with the code that lets the push through.
+    🔴 SILENT-FAILURE DIRECTION, and the two halves are NOT symmetric.
+    If only checks.pytests exports it, the pre-push tier goes back to degrading
+    on a typo, and nothing anywhere reports it: the runner still exits, just
+    with the code that lets the push through. That half is genuinely silent.
+    If only the devShell exports it, `nix flake check` misclassifies its own
+    repo defects as environment faults -- but flake.nix fails the derivation on
+    ANY non-zero rc, so that half changes the DIAGNOSIS, not the verdict.
+    Both are worth pinning; only the first is invisible.
+
+    🔴 ASSERT ONE WINDOW PER HALF, never a total. A `count() >= 2` is satisfied
+    by any second occurrence, so it passes while one tier has BOTH exports and
+    the other has none -- measured: delete the checks.pytests export, duplicate
+    the devShell one, and a version of this test that checked only the total
+    plus the shellHook window went green. That is this repo's "a guard's
+    DESCRIPTION claims coverage the implementation does not provide" shape, in
+    the very test written to close a coverage gap.
 
     Reads flake.nix as SOURCE, with the same limitation the seam tests above
     document -- it can see the export is WRITTEN and not commented out, not that
@@ -464,19 +487,30 @@ def test_both_sanctioned_gate_envs_export_the_marker():
     the commented-out case fail rather than pass.
     """
     src = _uncommented_flake()
-    hits = src.count("DEVRC_GATE_ENV=1")
-    assert hits >= 2, (
-        f"DEVRC_GATE_ENV=1 is exported {hits} time(s) in flake.nix; both the "
-        "devShell shellHook AND checks.pytests must set it. GUARD 1 uses it to "
-        "tell a REPO defect from a CALLER defect, so a tier that does not set "
-        "it silently degrades instead of blocking (devrc#705)."
-    )
-    # ...and specifically in the devShell, not twice in the sandbox check.
+    MARKER = "DEVRC_GATE_ENV=1"
+
+    # --- half 1: the devShell's shellHook (the pre-push tier's environment) ---
     shell_at = src.find("shellHook")
     assert shell_at != -1, "no shellHook in flake.nix"
-    tail = src[shell_at:shell_at + 800]
-    assert "DEVRC_GATE_ENV=1" in tail, (
+    assert MARKER in src[shell_at:shell_at + 800], (
         "the devShell's shellHook does not export DEVRC_GATE_ENV=1, so a "
-        "contributor running the gate from `nix develop` gets the "
-        "ENVIRONMENT diagnosis for a REPO defect and the hook degrades."
+        "contributor running the gate from `nix develop` -- which is how the "
+        "pre-push hook invokes it -- gets the ENVIRONMENT diagnosis for a REPO "
+        "defect, and the hook DEGRADES instead of blocking (devrc#705)."
+    )
+
+    # --- half 2: the checks.pytests derivation (the hermetic/CI tier) ---
+    # Bounded by the NEXT derivation so this window cannot drift into it. Both
+    # anchors are assignments: the bare word "nodetests" also appears in a
+    # comment inside the pytests block, and slicing on that truncated the window
+    # to before the export while writing this.
+    py_at = src.find("pytests =")
+    assert py_at != -1, "no `pytests =` derivation in flake.nix"
+    node_at = src.find("nodetests =", py_at)
+    assert node_at != -1, "no `nodetests =` after pytests to bound the window"
+    assert MARKER in src[py_at:node_at], (
+        "the checks.pytests derivation does not export DEVRC_GATE_ENV=1, so the "
+        "hermetic tier misclassifies its OWN repo defects as environment "
+        "faults. Asserted as its own window, not as a count: a total is "
+        "satisfied by two exports in the devShell and none here."
     )

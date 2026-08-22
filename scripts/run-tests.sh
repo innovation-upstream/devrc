@@ -267,8 +267,15 @@ cd "$ROOT" || { echo "run-tests: cannot cd to ROOT=$ROOT" >&2; exit 3; }
 # BLOCKS on 2. Collapsing them was a measured mistake — degrading on 2 turned
 # GUARD 5's and GUARD 3a's own warning ("do NOT delete the entry to make this
 # pass — that is how a suite stops running while the gate goes green") into
-# exactly that outcome, on the only tier that runs automatically: this repo has
-# no CI and no branch protection (pinned by test_ci_claim_matches_reality.py).
+# exactly that outcome, on the only tier that BLOCKS a push. 🔴 "The only tier
+# that RUNS" was true when this was written and is now FALSE: a Tekton PR gate
+# (`tekton/devrc-pytests`, `tekton/devrc-nodetests`) went live between #704 and
+# #714 — measured, #704 reports no checks and #714 reports both. It invokes
+# `nix develop --command bash scripts/run-tests.sh .`, so it IS armed by the
+# devShell's DEVRC_GATE_ENV export and needs no separate handling. What it does
+# NOT do is block a merge: there is still no branch protection, so a red check
+# is advisory. `test_ci_claim_matches_reality.py` cannot see this — its own
+# scope note excludes Tekton — so do not read its green as agreement.
 # A new `exit` here must pick a side deliberately.
 # --- GUARD 1: tool precondition ------------------------------------------------
 # Every binary the suites `skipif` on. Absence must be an ERROR, never a skip.
@@ -342,8 +349,9 @@ if [ "${#missing_tools[@]}" -gt 0 ]; then
   # pre-push hook DEGRADED, and the push went through with ZERO tests run — while
   # the test that would have caught the typo never executed, because the runner
   # aborted before pytest started. That is "a suite stops running while the gate
-  # goes green" on the only tier that runs automatically (no CI, no branch
-  # protection). devrc#705.
+  # goes green" on the only tier that BLOCKS a push — a Tekton PR gate does now
+  # run (see the EXIT CODES block above), but with no branch protection its red
+  # is advisory, so exit 3 here still let the push land. devrc#705.
   #
   # The discriminator is whether we are IN a sanctioned gate env, which both the
   # devShell and checks.pytests announce with DEVRC_GATE_ENV=1:
@@ -358,12 +366,34 @@ if [ "${#missing_tools[@]}" -gt 0 ]; then
   # (ripgrep->rg, util-linux->setsid, gnugrep->grep, nodejs->node), and this repo
   # has already been bitten by exactly that shape once (pyyaml->yaml, #704). A
   # table says nothing about the mapping it is missing.
+  #
+  # 🔴 The accepted value is EXACTLY "1" — not "any truthy value". A future tier
+  # writing `DEVRC_GATE_ENV=true` would fall through to the degrade arm. That is
+  # the fail-SAFE direction (a push blocks over a broken caller only if we get
+  # this wrong the other way), so it is a deliberate exact match, not an
+  # oversight: if you add a tier, export literally 1.
+  #
+  # 🔴 And the marker is a VARIABLE, so unlike the shellHook that sets it, it CAN
+  # be wrong about its environment: an operator who exports it by hand outside a
+  # gate env turns a genuine environment fault into a BLOCK whose message
+  # asserts the repo is broken. Manual paths only — every automated path
+  # re-enters `nix develop`, whose shellHook overwrites any inherited value
+  # (measured: DEVRC_GATE_ENV=0 nix develop … yields 1), so the hook tier cannot
+  # be weakened this way.
   if [ "${DEVRC_GATE_ENV:-0}" = "1" ]; then
     echo >&2
     echo "  🔴 This is a REPO defect, not an environment one: you are inside a" >&2
     echo "  sanctioned gate environment (DEVRC_GATE_ENV=1) and the tool is STILL" >&2
     echo "  missing, so REQUIRED_TOOLS names something flake.nix \`gateTools\`" >&2
-    echo "  does not supply. Fix the spelling, or add the package to gateTools." >&2
+    echo "  does not supply." >&2
+    echo >&2
+    echo "  FIX — the two files that must agree, and the name is in both:" >&2
+    echo "    * $ROOT/scripts/run-tests.sh   -> REQUIRED_TOOLS (the binary name)" >&2
+    echo "    * $ROOT/flake.nix              -> gateTools      (the nix package)" >&2
+    echo "  Correct the spelling in REQUIRED_TOOLS, or add the package that" >&2
+    echo "  provides it to gateTools. Note the two use DIFFERENT names for the" >&2
+    echo "  same tool (ripgrep provides rg, nodejs provides node)." >&2
+    echo >&2
     echo "  Exiting 2 so the pre-push hook BLOCKS rather than degrading." >&2
     exit 2
   fi
