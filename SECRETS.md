@@ -62,18 +62,64 @@ cleanly and decrypt never. **No new key is minted**: a backup encrypted to a key
 nobody keeps alive is a backup nobody can open. If the key file is missing the
 backup FAILS loudly rather than falling back to an unencrypted upload.
 
-**Restoring** (the whole point — rehearse it before you need it):
-
-```
-age --decrypt -i ~/workspace/homelab-talos/.secrets/age.key \
-    -o <scope>.bundle  <scope>-<stamp>.bundle.age
-git clone <scope>.bundle <scope>            # a full scope repo, history intact
-```
-
 Objects live at `<host>/<scope>/<UTC stamp>.bundle.age` in bucket
 `analyze-service-index-backups`. The host segment carries the machine ID because
 **both machines are hostname `nixos`** and their stores are divergent — a shared
 prefix would make each host's retention pass evict the other's backups.
+
+**Restoring** (the whole point — rehearse it before you need it). 🔴 **Step 1 is
+the retrieval, and it is the one thing you will not already have in the scenario
+this exists for.** The bucket is reachable only in-cluster, so bridge to it the
+same way the backup does — `_minio.py`'s `kubectl port-forward`:
+
+```sh
+cd ~/workspace/devrc
+KEY=<host>/<scope>/<UTC stamp>.bundle.age     # from the listing below
+
+# 1a. list what is there (per host, per scope, newest last)
+KUBECONFIG=$KC_HOMELAB nix-shell -p 'python3.withPackages(p:[p.minio])' --run '
+python3 -c "
+import sys; sys.path.insert(0, \"scripts/mail-actions\")
+from _minio import MinioArchive
+with MinioArchive() as mc:
+    for o in sorted(x.object_name for x in mc.client.list_objects(
+            \"analyze-service-index-backups\", recursive=True)):
+        print(o)
+"'
+
+# 1b. fetch ONE object to disk
+KUBECONFIG=$KC_HOMELAB KEY="$KEY" nix-shell -p 'python3.withPackages(p:[p.minio])' --run '
+python3 -c "
+import os, sys; sys.path.insert(0, \"scripts/mail-actions\")
+from _minio import MinioArchive
+key = os.environ[\"KEY\"]
+with MinioArchive() as mc:
+    r = mc.client.get_object(\"analyze-service-index-backups\", key)
+    open(\"restore.bundle.age\", \"wb\").write(r.read()); r.close(); r.release_conn()
+"'
+
+# 2. decrypt
+age --decrypt -i ~/workspace/homelab-talos/.secrets/age.key \
+    -o restore.bundle  restore.bundle.age
+
+# 3. restore, then IMMEDIATELY drop the remote the clone just added
+git clone restore.bundle <scope>
+git -C <scope> remote remove origin
+git -C <scope> remote          # must print NOTHING
+```
+
+🔴 **Step 3's second line is not optional.** `git clone <bundle> <dir>` sets
+`origin` to the bundle's path, which breaks the `remote = none` invariant every
+scope README, `commit.sh`'s `PrivateNetwork` unit and this feature's own
+`test_no_scope_gains_a_remote` rest on. A scope restored and left with a remote
+looks healthy and violates the one property the store is supposed to have.
+
+🔴 **`git clone` restores `refs/heads/*` and tags ONLY.** Measured: a bundle
+created with `--all` that declares `refs/notes/commits` restores through a plain
+(or `--bare`) clone with that ref silently missing. `backup.py`'s own restore
+rehearsal is a `--mirror` clone for exactly this reason. If the scope carried
+non-branch refs, restore with `git clone --mirror restore.bundle <scope>.git`
+instead — or check with `git bundle list-heads restore.bundle` first.
 
 ---
 

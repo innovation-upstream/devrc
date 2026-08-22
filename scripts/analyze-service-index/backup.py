@@ -71,8 +71,18 @@ Usage:
     backup.py [--store DIR] [--bucket B] [--keep N] [--no-upload] [--print-plan]
 
   --print-plan   pure text; reads the store, writes nothing anywhere
-  --no-upload    bundle + verify + encrypt into --work-dir, then stop. Used for
-                 a read-only smoke run against the real store.
+  --no-upload    bundle + verify + encrypt, then stop. WITHOUT --work-dir the
+                 artifacts are built in a private temp dir that is DELETED on
+                 exit, so nothing survives the run; WITH --work-dir they are left
+                 there for inspection. Used for a read-only smoke run against the
+                 real store.
+
+🔴 THE PLAINTEXT BUNDLE IS A FULL, UNENCRYPTED COPY OF A CLIENT-CONFIDENTIAL
+SCOPE. It exists only between `git bundle create` and `age`, and it is unlinked
+on EVERY path out of that window including the failure paths. Everything this
+script creates is mode 0600 inside a 0700 work directory — `PrivateTmp` contains
+the default case under the unit, but the documented `--no-upload --work-dir X`
+smoke run against the real store has no namespace around it at all.
 """
 from __future__ import annotations
 
@@ -85,6 +95,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -94,6 +105,13 @@ DEFAULT_STORE = Path.home() / ".claude" / "analyze-service-index"
 DEFAULT_BUCKET = "analyze-service-index-backups"
 DEFAULT_KEEP = 14
 DEFAULT_IDENTITY = Path.home() / "workspace" / "homelab-talos" / ".secrets" / "age.key"
+
+# Everything created by this script: a 0700 work directory holding 0600 files.
+# The bundle is plaintext history and the ciphertext is still a backup of
+# confidential content; neither may be world- or group-readable, and the
+# `--no-upload --work-dir X` smoke run has no PrivateTmp around it.
+_DIR_MODE = 0o700
+_FILE_MODE = 0o600
 
 # 🔴 THE READ-ONLY ALLOWLIST. Every git invocation in this file goes through
 # `_git()`, which refuses a subcommand that is not in here. This is the guard
@@ -107,9 +125,48 @@ DEFAULT_IDENTITY = Path.home() / "workspace" / "homelab-talos" / ".secrets" / "a
 _READ_ONLY_SUBCOMMANDS = frozenset(
     {"bundle", "rev-list", "remote", "rev-parse", "for-each-ref"})
 
+# 🔴 A VERB IS NOT GRANULAR ENOUGH, AND THE COMMENT ABOVE USED TO CLAIM IT WAS.
+# `remote` and `bundle` are DISPATCHERS: the verb reads, the SUBVERB decides.
+# MEASURED 2026-08-22 against the verb-only allowlist, on a synthetic scope:
+#
+#   git remote add exfil file:///tmp/x   -> rc=0, `.git/config` gained a
+#                                           [remote "exfil"] section
+#   git bundle unbundle <foreign.bundle> -> rc=0, a foreign packfile written
+#                                           into the scope's object store
+#
+# Both are writes to the only copy of the data, both were allowed, and the
+# allowlist comment above named `git remote add` as an example of what it
+# refused. Neither has a call site today and the unit's BindReadOnlyPaths would
+# have blocked them — but a guard narrower than its own description is the kind
+# that gets trusted at exactly the moment it stops being true.
+#
+# So the allowlist is a (verb, subverb) pair set. The subverb is the first
+# argument after the verb that is not an option, which is where git's own
+# grammar puts it for both dispatchers. `None` means "the bare verb, options
+# only": `git remote` LISTS remotes and is the form `scope_remotes()` uses,
+# while `git bundle` with no subverb is a usage error and is not permitted.
+# Pinned as an exact mapping by the test suite, same as the set above.
+_ALLOWED_SUBVERBS: dict[str, frozenset] = {
+    "bundle": frozenset({"create", "verify"}),
+    "remote": frozenset({None}),
+}
+
 
 class BackupError(RuntimeError):
     """A failure that must make the whole run non-zero."""
+
+
+def _private_dir(d: Path) -> Path:
+    """Create (or tighten) `d` to 0700.
+
+    `mkdir(mode=…)` is not enough: it is masked by the umask AND it does nothing
+    at all when the directory already exists, which is the case every run after
+    the first with an explicit `--work-dir`. The chmod is unconditional for that
+    reason.
+    """
+    d.mkdir(parents=True, exist_ok=True)
+    os.chmod(d, _DIR_MODE)
+    return d
 
 
 # --------------------------------------------------------------------------- #
@@ -150,6 +207,21 @@ def _git_env() -> dict:
     return env
 
 
+def _subverb(args: tuple[str, ...]) -> str | None:
+    """The dispatcher subverb in `args`, or None for a bare verb.
+
+    git's grammar for both dispatchers this script allowlists puts the subverb
+    first among the non-option arguments (`git bundle create -q <file> …`,
+    `git remote -v`), so the first argument after the verb that does not start
+    with `-` IS the subverb. Returning None for `git remote` is meaningful, not
+    a miss: that form lists remotes and is the one `scope_remotes()` uses.
+    """
+    for a in args[1:]:
+        if not a.startswith("-"):
+            return a
+    return None
+
+
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
     """Run one read-only git subcommand against `repo`.
 
@@ -167,6 +239,19 @@ def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
             f"genuinely needed, prove it cannot write and add it to "
             f"_READ_ONLY_SUBCOMMANDS in the same commit as the test that pins it."
         )
+    verb = args[0]
+    if verb in _ALLOWED_SUBVERBS:
+        sub = _subverb(args)
+        if sub not in _ALLOWED_SUBVERBS[verb]:
+            raise BackupError(
+                f"refusing `git {verb} {sub}`: {sub!r} is not a READ-ONLY mode of "
+                f"`git {verb}`. The verb is allowlisted; its subverbs are not all "
+                f"reads — `git remote add` writes .git/config and `git bundle "
+                f"unbundle` writes objects into the repository, both against the "
+                f"only copy of the data. Allowed here: "
+                f"{sorted(s for s in _ALLOWED_SUBVERBS[verb] if s is not None)}"
+                f"{' (or the bare verb)' if None in _ALLOWED_SUBVERBS[verb] else ''}."
+            )
     return subprocess.run(
         ["git", "-C", str(repo), "-c", "gc.auto=0", "-c", "core.hooksPath=" + os.devnull, *args],
         capture_output=True, text=True, env=_git_env(),
@@ -294,20 +379,41 @@ def encrypt(plain: Path, cipher: Path, recipient: str) -> None:
             f"age reported success but {cipher} is missing or empty. An empty "
             f"ciphertext uploads happily and restores never."
         )
+    # Ciphertext, but still a backup of client-confidential content sitting on a
+    # real filesystem under `--no-upload --work-dir X`. age creates it 0644.
+    os.chmod(cipher, _FILE_MODE)
 
 
 # --------------------------------------------------------------------------- #
 # bundling
 # --------------------------------------------------------------------------- #
-def _git_scratch(cwd: Path, *args: str) -> subprocess.CompletedProcess:
+def _git_scratch(cwd: Path, *args: str, forbidden: Path) -> subprocess.CompletedProcess:
     """git in a THROWAWAY directory — never the store.
 
     The allowlist on `_git` exists because that function is pointed at the only
     copy of the data. This one is pointed at a directory we created moments ago
-    and are about to delete, so it may run writing subcommands (`clone`). It
-    refuses to run anywhere near the store, so the two cannot be confused by a
-    later edit.
+    and are about to delete, so it may run writing subcommands (`clone`).
+
+    🔴 `forbidden` IS THE REFUSAL, AND IT IS REQUIRED AND KEYWORD-ONLY. An
+    earlier version of this docstring claimed the function "refuses to run
+    anywhere near the store" and no such check existed — a comment describing a
+    guard that is not there is worse than no guard, because it stops the next
+    person looking. Making the parameter mandatory is what makes the refusal
+    structural: a later call site cannot inherit it by forgetting it, because
+    omitting it is a TypeError at the call rather than a silently unguarded
+    write. Pass the STORE ROOT; `cwd` may be neither it nor anything under it.
     """
+    c = Path(cwd).resolve()
+    f = Path(forbidden).resolve()
+    if c == f or f in c.parents:
+        raise BackupError(
+            f"refusing to run `git {' '.join(args[:2])}` with cwd {c}: that is "
+            f"inside the /analyze-service index store ({f}). `_git_scratch` may "
+            f"run WRITING subcommands, so the only thing keeping it safe is "
+            f"where it is aimed — and aiming it at the store would put a "
+            f"writing git inside the only copy of the data this script exists "
+            f"to protect."
+        )
     return subprocess.run(
         ["git", "-c", "gc.auto=0", "-c", "core.hooksPath=" + os.devnull,
          "-c", "protocol.file.allow=always", "-C", str(cwd), *args],
@@ -316,7 +422,10 @@ def _git_scratch(cwd: Path, *args: str) -> subprocess.CompletedProcess:
 
 
 def _refs(run: subprocess.CompletedProcess) -> set[str]:
+    """`{"<refname> <objectname>"}` from a `for-each-ref` in that format."""
     return {ln.strip() for ln in run.stdout.splitlines() if ln.strip()}
+
+
 
 
 def bundle_scope(scope: Path, out: Path, work_dir: Path) -> None:
@@ -353,7 +462,8 @@ def bundle_scope(scope: Path, out: Path, work_dir: Path) -> None:
     # data corruption for a missing directory, which is a message that names the
     # wrong cause at the exact moment someone is deciding whether their backups
     # are intact.
-    work_dir.mkdir(parents=True, exist_ok=True)
+    _private_dir(work_dir)
+    store = scope.parent
 
     p = _git(scope, "bundle", "create", str(out), "--all")
     if p.returncode != 0:
@@ -363,6 +473,10 @@ def bundle_scope(scope: Path, out: Path, work_dir: Path) -> None:
         )
     if not out.is_file() or out.stat().st_size == 0:
         raise BackupError(f"{scope.name}: bundle {out} is missing or empty after create")
+    # Plaintext history of a client-confidential scope, on a real filesystem
+    # under the documented `--no-upload --work-dir X` smoke run. git creates it
+    # 0644 under the operator's umask.
+    os.chmod(out, _FILE_MODE)
 
     v = _git(scope, "bundle", "verify", str(out))
     if v.returncode != 0:
@@ -376,8 +490,24 @@ def bundle_scope(scope: Path, out: Path, work_dir: Path) -> None:
     if rehearsal.exists():
         shutil.rmtree(rehearsal)
     try:
-        c = _git_scratch(work_dir, "clone", "--bare", "--quiet",
-                         str(out), str(rehearsal))
+        # 🔴 `--mirror`, NOT `--bare`. MEASURED 2026-08-22 on a scope carrying
+        # `refs/notes/commits` and `refs/weird/thing` beside `refs/heads/trunk`,
+        # from a bundle created with `--all` that declared all three:
+        #
+        #   git clone --bare   <bundle>  ->  restored refs/heads/trunk ONLY
+        #   git clone --mirror <bundle>  ->  restored all three
+        #
+        # `--bare` uses the default `+refs/heads/*:refs/heads/*` refspec and
+        # SILENTLY DROPS everything else. Two consequences, both bad. It is not
+        # a restore rehearsal at all for those refs — the bundle holds them and
+        # the rehearsal never checks they come back. And because the comparison
+        # below is against what the bundle DECLARES, a scope that ever gained a
+        # notes ref would fail its backup on every run, forever: a
+        # permanently-red gate on a disaster-recovery job. `--mirror` restores
+        # `+refs/*:refs/*`, which is what "this bundle can be restored from"
+        # has to mean for a backup.
+        c = _git_scratch(work_dir, "clone", "--mirror", "--quiet",
+                         str(out), str(rehearsal), forbidden=store)
         if c.returncode != 0:
             raise BackupError(
                 f"{scope.name}: the bundle passed `git bundle verify` but could "
@@ -388,24 +518,59 @@ def bundle_scope(scope: Path, out: Path, work_dir: Path) -> None:
             )
 
         fmt = "--format=%(refname) %(objectname)"
-        want = _refs(_git(scope, "for-each-ref", fmt))
-        got = _refs(_git_scratch(rehearsal, "for-each-ref", fmt))
-        if got != want:
+        got = _refs(_git_scratch(rehearsal, "for-each-ref", fmt, forbidden=store))
+
+        # 🔴 COMPLETENESS BY REF **NAME**, NOT BY (name, objectname) PAIR — AND
+        # THE DIFFERENCE IS A DATA-LOSS BUG, NOT A STYLE CHOICE.
+        #
+        # An earlier version compared the pairs. Nothing locks the scope against
+        # the hourly `analyze-service-index-commit` while this runs, and the
+        # window being compared across contains a FULL CLONE of the scope — so
+        # one ordinary commit landing in it moved `refs/heads/trunk`, the pair
+        # comparison mismatched, and the run reported "the bundle restores to a
+        # DIFFERENT set of refs". The scope lost that day's backup and the
+        # operator was told their archive was corrupt while it cloned cleanly.
+        # REPRODUCED 2026-08-22 with a single commit injected between
+        # `bundle create` and the comparison.
+        #
+        # Names do not race, because `commit.sh` only ever MOVES an existing
+        # branch: it never creates or deletes a ref (it has no code that does,
+        # and no network to fetch one). Which of two adjacent commits the
+        # snapshot captured is not a property a backup needs to have; which REFS
+        # it captured is.
+        #
+        # What still pins the objects: the `--mirror` clone above runs
+        # `index-pack`, which validates every object's hash and the pack
+        # checksum, so a bundle whose bytes do not reconstruct cannot reach this
+        # point at all.
+        #
+        # 🔴 AN OBJECT-LEVEL COMPARISON AGAINST THE BUNDLE'S OWN HEADER WAS
+        # TRIED HERE AND REMOVED. `git bundle list-heads` gives a race-free
+        # reference, and comparing the restore against it looked like a
+        # strictly-better check. A mutation sweep scored it SURVIVED: under a
+        # `--mirror` clone git writes exactly the refs the header declares, so
+        # no input can make the two disagree while the clone succeeds. Same
+        # verdict, and the same reason, as the commit-count comparison noted
+        # below — a guard that cannot fail reads as coverage while providing
+        # none, which is worse than not being there.
+        want_names = {ln.split(" ", 1)[0]
+                      for ln in _refs(_git(scope, "for-each-ref", fmt))}
+        got_names = {ln.split(" ", 1)[0] for ln in got}
+        if got_names != want_names:
             raise BackupError(
                 f"{scope.name}: the bundle restores to a DIFFERENT set of refs "
                 f"than the scope holds. Missing from the restore: "
-                f"{sorted(want - got)}; unexpected in the restore: "
-                f"{sorted(got - want)}. Not uploading it."
+                f"{sorted(want_names - got_names)}; unexpected in the restore: "
+                f"{sorted(got_names - want_names)}. Not uploading it."
             )
 
-        # NOTE: there is deliberately NO separate commit-count comparison here.
-        # An earlier draft had one, and a mutation sweep showed it SURVIVED every
-        # mutation — because it is unreachable: the clone above validates every
-        # object, and matching (refname, objectname) pairs pin the same reachable
-        # commit set by construction, so no input can make the counts differ
-        # while the refs agree. A guard that cannot fail reads as coverage while
-        # providing none, which is worse than not being there, because it stops
-        # the next person looking.
+        # NOTE: there is deliberately NO separate commit-count comparison here
+        # either — the second guard removed from this function for being
+        # unreachable, and for the same measured reason. The `--mirror` clone
+        # validates every object, so a count against the RESTORE cannot differ
+        # from the bundle; and a count against the LIVE SCOPE would be worse
+        # than merely unreachable, because it is exactly the race described
+        # above, reintroduced under a different name.
     finally:
         shutil.rmtree(rehearsal, ignore_errors=True)
 
@@ -479,7 +644,19 @@ class MinioUploader:
 
         self._ctx = MinioArchive()
         self._mc = self._ctx.__enter__()
-        self._mc.ensure_bucket(self.bucket)
+        # 🔴 `__exit__` is NOT called when `__enter__` raises, so anything after
+        # the inner enter must clean up after itself or the `kubectl
+        # port-forward` child outlives the run. `ensure_bucket` is a live call
+        # to the tenant and can absolutely raise (S3Error, a dead forward, a
+        # credential that no longer works) — leaving a forwarder holding a local
+        # port until the unit's TimeoutStartSec kills the cgroup.
+        try:
+            self._mc.ensure_bucket(self.bucket)
+        except BaseException:
+            self._ctx.__exit__(*sys.exc_info())
+            self._ctx = None
+            self._mc = None
+            raise
         return self
 
     def __exit__(self, *exc):
@@ -546,13 +723,30 @@ def prune(uploader, prefix: str, keep: int, just_uploaded: str) -> list[str]:
     Keys embed a UTC timestamp in a fixed-width sortable form, so lexical order
     IS chronological order and no per-object stat is needed.
 
-    🔴 Two refusals, both of which are the difference between retention and data
-    loss. If the listing does not contain the object we just uploaded, the view
-    we are about to prune from is not the bucket we just wrote to — a wrong
+    🔴 Three refusals, all of which are the difference between retention and
+    data loss.
+
+    MEMBERSHIP. If the listing does not contain the object we just uploaded, the
+    view we are about to prune from is not the bucket we just wrote to — a wrong
     prefix, a stale list, a different bucket — and deleting from it would remove
     real backups on the strength of a listing we have already caught being
-    wrong. And `keep` below 1 is refused outright: a retention policy that keeps
-    nothing is a delete-everything policy wearing a retention policy's name.
+    wrong.
+
+    🔴 SURVIVAL, WHICH IS NOT THE SAME CLAIM AND IS THE ONE THAT MATTERS.
+    Membership only says the new object is *somewhere* in the listing; it says
+    nothing about whether it is in the set about to be DELETED. Lexical order is
+    chronological order only while the clock moves forward, and it does not
+    always: an NTP correction, or a laptop RTC after a suspend, steps it
+    BACKWARDS. Today's key then sorts OLDEST, and every subsequent run uploads,
+    verifies, prints "verified", and immediately deletes its own upload —
+    membership satisfied throughout. The bucket silently stops advancing while
+    the timer stays green and the log says the backup succeeded, which is the
+    exact false all-clear this file exists to prevent. Deleting what we just
+    wrote is never the correct outcome of a retention pass, whatever the clock
+    says, so it is refused outright rather than reordered around.
+
+    KEEP. `keep` below 1 is refused: a retention policy that keeps nothing is a
+    delete-everything policy wearing a retention policy's name.
     """
     if keep < 1:
         raise BackupError(f"--keep must be at least 1, got {keep}: a retention "
@@ -566,6 +760,18 @@ def prune(uploader, prefix: str, keep: int, just_uploaded: str) -> list[str]:
             f"so pruning from it could delete real backups."
         )
     doomed = keys[:-keep] if len(keys) > keep else []
+    if just_uploaded in doomed:
+        raise BackupError(
+            f"refusing to prune {prefix}: retention would DELETE THE OBJECT "
+            f"THIS RUN JUST UPLOADED ({just_uploaded}). Its key sorts among the "
+            f"{len(doomed)} oldest of {len(keys)}, which means this host's clock "
+            f"has moved backwards relative to the existing backups (an NTP "
+            f"correction, or an RTC restored after suspend). Pruning here would "
+            f"leave the run reporting a verified backup that no longer exists, "
+            f"and would do so on every future run — a bucket that silently "
+            f"stops advancing behind a green timer. Fix the clock; nothing has "
+            f"been deleted."
+        )
     for k in doomed:
         uploader.remove(k)
     return doomed
@@ -626,8 +832,10 @@ def run(store: Path, *, bucket: str, keep: int, upload: bool,
     # `run()` owns its scratch directory. It used to rely on the caller having
     # made it, which meant `git bundle create` failed with "Unable to create
     # …/x.bundle.lock: No such file or directory" — a message that names the
-    # bundle and points at git, for a fault that is neither.
-    work_dir.mkdir(parents=True, exist_ok=True)
+    # bundle and points at git, for a fault that is neither. 0700 because a
+    # plaintext bundle and a rehearsal clone of a client-confidential scope both
+    # live here, and `--work-dir` may be an ordinary directory on a real disk.
+    _private_dir(work_dir)
 
     identity = resolve_identity()
     recipient = resolve_recipient(identity)
@@ -660,8 +868,20 @@ def run(store: Path, *, bucket: str, keep: int, upload: bool,
 
                 plain = work_dir / f"{scope.name}.bundle"
                 cipher = work_dir / f"{scope.name}.bundle.age"
-                bundle_scope(scope, plain, work_dir)
-                encrypt(plain, cipher, recipient)
+                try:
+                    bundle_scope(scope, plain, work_dir)
+                    encrypt(plain, cipher, recipient)
+                finally:
+                    # 🔴 THE PLAINTEXT BUNDLE DIES HERE, ON EVERY PATH. It is a
+                    # complete unencrypted copy of a client-confidential scope,
+                    # and the whole design rests on the content being encrypted
+                    # BEFORE it exists anywhere durable. `finally`, not the
+                    # success path: a failed encryption is exactly when a
+                    # plaintext copy is most likely to be left behind and least
+                    # likely to be noticed. PrivateTmp contains the default case
+                    # under the unit; the documented `--no-upload --work-dir X`
+                    # smoke run against the real store has no namespace at all.
+                    plain.unlink(missing_ok=True)
                 data = cipher.read_bytes()
 
                 if uploader is not None:
@@ -674,12 +894,33 @@ def run(store: Path, *, bucket: str, keep: int, upload: bool,
                     print(f"{PROG}: {scope.name}: {n} commits -> {cipher} "
                           f"({len(data)} bytes, verified, NOT uploaded)")
                 done += 1
-            except BackupError as exc:
+            except Exception as exc:  # noqa: BLE001 — see below; this is the point
                 # One scope failing must not stop the others being backed up —
                 # but it MUST make the run fail. A partial backup reported as a
                 # success is the false all-clear this file exists to prevent.
-                failures.append(str(exc))
-                print(f"{PROG}: FAILED {scope.name}: {exc}", file=sys.stderr)
+                #
+                # 🔴 `Exception`, NOT `BackupError`. This handler used to catch
+                # only the latter, and the comment above claimed isolation the
+                # code did not provide: `uploader.put/list/remove` go through
+                # the minio client, which raises `S3Error` and urllib3
+                # connection errors — neither a BackupError. One scope hitting a
+                # dead port-forward therefore escaped this handler AND `run()`
+                # entirely, abandoning every scope after it in the alphabet and
+                # handing the operator a bare traceback. The scopes are
+                # independent by construction; nothing about scope N failing
+                # says anything about scope N+1, so the isolation has to be as
+                # wide as the failures that can actually arrive.
+                #
+                # The class name is recorded because for a non-BackupError the
+                # type IS most of the diagnosis (`S3Error` vs `TimeoutError` vs
+                # `FileNotFoundError` are three different faults), and str() on
+                # them is frequently uninformative.
+                label = (str(exc) if isinstance(exc, BackupError)
+                         else f"{type(exc).__name__}: {exc}")
+                failures.append(label)
+                print(f"{PROG}: FAILED {scope.name}: {label}", file=sys.stderr)
+                if not isinstance(exc, BackupError):
+                    traceback.print_exc()
     finally:
         if ctx is not None:
             ctx.__exit__(None, None, None)
@@ -737,9 +978,14 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--bucket", default=os.environ.get("ASIB_BUCKET", DEFAULT_BUCKET))
     ap.add_argument("--keep", type=int, default=int(os.environ.get("ASIB_KEEP", DEFAULT_KEEP)))
     ap.add_argument("--no-upload", action="store_true",
-                    help="bundle+verify+encrypt only; leave the artifacts in --work-dir")
+                    help="bundle+verify+encrypt only, no upload. WITH --work-dir "
+                         "the encrypted artifact is left there; WITHOUT it, "
+                         "everything is built in a private temp dir that is "
+                         "deleted on exit and nothing survives the run. The "
+                         "plaintext bundle is unlinked either way.")
     ap.add_argument("--work-dir", type=Path, default=None,
-                    help="where to build artifacts (default: a private temp dir)")
+                    help="where to build artifacts, created 0700 (default: a "
+                         "private temp dir, deleted on exit)")
     ap.add_argument("--print-plan", action="store_true",
                     help="print what would happen; write nothing")
     args = ap.parse_args(argv)
@@ -750,7 +996,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         if args.work_dir is not None:
-            args.work_dir.mkdir(parents=True, exist_ok=True)
+            _private_dir(args.work_dir)
             n = run(args.store, bucket=args.bucket, keep=args.keep,
                     upload=not args.no_upload, work_dir=args.work_dir)
         else:
@@ -763,6 +1009,22 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     except BackupError as exc:
         print(f"{PROG}: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:  # noqa: BLE001 — the timer's failure signal, not a swallow
+        # 🔴 NOT EVERY FAILURE IS A BackupError, and the ones that are not are
+        # the ones nobody wrote a message for. `S3Error` from the minio client,
+        # a urllib3 connection error, a `FileNotFoundError` for a binary the
+        # unit's PATH forgot — each previously reached the interpreter's default
+        # handler, which prints a traceback with no statement of what it means
+        # for the BACKUP. The traceback is kept, because for these the type and
+        # the stack ARE the diagnosis; what is added is the sentence that says
+        # this run backed nothing up. Still exit 1: `OnFailure` on the unit is
+        # what turns this into a notification.
+        traceback.print_exc()
+        print(f"{PROG}: FAILED with an unexpected {type(exc).__name__}: {exc}. "
+              f"Nothing was backed up on this run, or only part of it was — "
+              f"treat this as NO backup for today and read the traceback above.",
+              file=sys.stderr)
         return 1
 
 

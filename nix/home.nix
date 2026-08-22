@@ -3135,9 +3135,37 @@ in
   # in the producer cannot reach the only copy of the data it is protecting.
   # Note the contrast with the committer, which needs the store WRITABLE.
   #
-  # The age identity is bound in read-only as a single FILE, not its directory:
-  # `~/workspace/homelab-talos/.secrets/` also holds cluster credentials this
-  # job has no business seeing.
+  # 🔴 ProtectHome=tmpfs, NOT read-only. THIS UNIT HAS A NETWORK — it is the one
+  # job here that can carry bytes off the box — so what it can READ is the whole
+  # containment question, and `read-only` answers a different one. `read-only`
+  # makes $HOME unwritable and leaves it fully READABLE, which means the bind
+  # list below confers no confinement whatsoever: it is a list of things already
+  # visible. MEASURED 2026-08-22 with `systemd-run --user`, same directive set
+  # otherwise, probing readability from inside the namespace:
+  #
+  #   ProtectHome=read-only  ~/.ssh/id_ed25519 READABLE, ~/.kube/config READABLE,
+  #                          `.secrets/` listed 6 entries
+  #   ProtectHome=tmpfs      ~/.ssh ABSENT, ~/.kube/config ABSENT,
+  #                          `.secrets/` listed 1 entry — the bound key file
+  #
+  # The comment here used to say the age identity was bound "as a single FILE,
+  # not its directory: `.secrets/` also holds cluster credentials this job has
+  # no business seeing." Under `read-only` that was false in the way that
+  # matters — the job could read all six, and the sentence would have led a
+  # maintainer to believe the narrow bind was doing work.
+  #
+  # NOTHING NEEDED BINDING BACK for the switch. The list below was already
+  # exactly what the job reads, which is why the leak was invisible: measured by
+  # running `backup.py --print-plan` (pure read, writes nothing) inside the
+  # tmpfs namespace — rc=0, identity resolved, all 10 scopes discovered and
+  # commit-counted. Both kubeconfigs are self-contained (`*-data`, no external
+  # cert paths) and `_minio.py` reads nothing from $HOME beyond KUBECONFIG.
+  #
+  # 🔴 The bind list is therefore load-bearing now and pinned as an EXACT LIST by
+  # test_the_backup_unit_pins_its_CONTAINMENT_directives_exactly. Appending an
+  # entry — or widening the age key to its directory — is the one-token hole the
+  # committer unit's comment describes, and it is worse here because this unit
+  # has a route off the machine.
   #
   # Python comes from a pinned `withPackages` env rather than the runtime
   # `nix-shell -p` that run-archive.sh uses. nix-shell inside a hardened unit
@@ -3185,7 +3213,7 @@ in
           "ASIB_HOST=${if isLaptop then "laptop" else "workbench"}-%m"
         ];
         ProtectSystem = "strict";
-        ProtectHome = "read-only";
+        ProtectHome = "tmpfs";
         # `-` on the store: a host that has never run /analyze-service must start
         # and no-op cleanly, which is the one empty outcome backup.py treats as a
         # success. No `-` on the script: it ships with the repo, so its absence is
