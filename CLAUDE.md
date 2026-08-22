@@ -148,29 +148,33 @@ Repo-level facts that are NOT in any skill — they live here on purpose:
 - **Two always-on docs have enforced byte ceilings**, because both load on every session: `scripts/browser-bridge/SKILL.md` (gated by `scripts/browser-bridge/tests/test_skill_size.py`) and `claude/RULES.md` (gated by `scripts/tests/test_rules_size.py`). Each test OWNS its constants and prints an eviction playbook on failure — **read the numbers there, never restate them.** Any addition needs an eviction in the SAME commit.
 - **Run the gate with `scripts/gate.sh`** (`--tier pytest|node|both`, `--set hermetic|all`). It sends the full output to a LOG FILE and prints only a bounded summary, so there is no reason to pipe it — and **its exit status is authoritative**. It also cross-checks that status against the runners' own `RESULT:` line and exits **90 = could-not-vouch** when they disagree, when a run printed no verdict, or when `panic: test timed out` appears. 90 is not "the tests failed"; it means read the log.
 - **The runners' verdict line carries their exit code** (`RESULT: FAIL (exit=1)`), emitted from one writer behind an EXIT trap, so it survives a pipe and a killed run still says so. Historically the status was destroyed by `… | tail; echo "rc=$?"` — four agents reported `exit 0` over `RESULT: FAIL` on 2026-08-11 — which is why counting `PASSED`/`FAILED` lines used to be mandatory. Still a fine cross-check; no longer the only thing you can trust.
-- 🔴 **A Tekton gate RUNS on every PR, but it BLOCKS nothing — do not confuse the two.** <!-- merge-gate: other -->
-  Changed 2026-08-22, measured: the `devrc-ci-pr` trigger on the homelab EventListener fires
-  on `opened`/`reopened`/`synchronize`/`ready_for_review`, and devrc PRs now carry **2 checks**
-  — `tekton/devrc-nodetests` and `tekton/devrc-pytests`. The marker is `other` because this
-  gate is Tekton, which `test_ci_claim_matches_reality.py` cannot see; there is still no
-  `.github/workflows`.
-  🔴 **Running ≠ blocking.** `main` HAS branch protection (`enforce_admins: true`,
-  no force-push, no deletion) but **zero required status checks**, so a red check does not stop
-  a merge. Until a check is marked required, the gate is advisory and **you are still the
-  gate** — run it and say which command you ran.
-  ⚠ **`tekton/devrc-pytests` is RED on every PR** for a reason unrelated to your change:
-  `scripts/browser-bridge/tests/test_browser_agent.py:386` waits 35s for a straggler process to
-  be reaped, which a container's PID 1 does not do. Measured failing on 5 different branches at
-  275-281s wall time — deterministic, not a flake. `tekton/devrc-nodetests` is the trustworthy
-  one (1119/1119 on every run so far). Do not make pytests required until that test is fixed or
-  conditionally skipped, and **do not read a red pytests check as a verdict on your PR.**
-  🔴 **A check that is `error`, not `failure`, means the gate COULD NOT RUN** — the leg never
-  reported (preemption, timeout). That is a broken gate, not a bad change; the description says
-  `COULD NOT RUN: <leg>`.
-  This block used to read `CI gates both suites`, which was false, and was then corrected to
-  `NO AUTOMATED GATE IS RUNNING`, which went stale the day the gate started firing — the exact
-  kind of claim nobody re-checks: an agent reads it, believes the merge is protected (or that
-  nothing runs), and skips the run.
+- 🔴 **CHECKS NOW RUN, BUT NOTHING BLOCKS — the gate is still YOU.** <!-- merge-gate: other -->
+  Since 2026-08-22 Tekton runs both suites on every PR and posts
+  `tekton/devrc-pytests` + `tekton/devrc-nodetests`. **That is reporting, not gating**:
+  `required_status_checks` on `main` is **null** and there are **0 rulesets**, so a RED
+  Tekton does not stop a merge — measured, not inferred, and `enforce_admins: true`
+  protects nothing here because there is nothing required to enforce. There is still no
+  `.github/workflows`. Making the two checks *required* is a one-setting change and the
+  single highest-value thing left; until someone does it, a green tick is a courtesy.
+  🔴 **A brand-new check is not an instrument until it has passed ONCE.** `devrc-ci` was
+  red on its first **5 of 5** runs — every one on the same test
+  (`test_timeout_reaps_the_whole_process_group`), in a file none of those changes touched:
+  the reap check asked `os.kill(pid, 0)`, which succeeds on a **zombie**, and a CI step
+  container's PID 1 does not reap. Fixed in #722; first green run was `devrc-ci-hkgtf`.
+  Read a red check's step log before believing its verdict — the SUMMARY counts nearly
+  matched a local run there and pointed at a different test entirely.
+  🔴 This line used to read `CI gates both suites` and later `NO AUTOMATED GATE IS
+  RUNNING`. Both were false at some point, in **opposite** directions — the exact kind of
+  claim nobody re-checks: an agent reads it, believes the merge is protected (or that no
+  check exists), and skips the run either way.
+  🔴 **`error` is not `failure`.** A check posted as `error` with `COULD NOT RUN: <leg>`
+  means the gate stopped before that leg reported — a broken gate, not a bad change. Do not
+  debug your diff against it.
+  🔴 **Before making a check REQUIRED, know this failure mode:** when a run hits
+  `timeouts.tasks` the `finally` report task never runs, so **nothing is posted and the PR's
+  checks stay `pending` forever** — measured on `devrc-ci-nnt6f` and `devrc-ci-9p6mf`,
+  `childReferences` `[notify, gate]` only, still `pending` hours later. A required check in
+  that state is unsatisfiable and no re-run clears it; only a fresh push does.
   🔴 **But a gate SHIPS IN THIS REPO, and whether it is INSTALLED is not a fact this file can
   state** — `githooks/` (`install.sh`, `pre-push`, `tests-on-push.sh`) is a real blocking
   pre-push test gate, and `scripts/run-tests.sh` treats it as a first-class consumer.
@@ -202,15 +206,19 @@ Repo-level facts that are NOT in any skill — they live here on purpose:
   the repo. **Reword this prose freely — but keep a sentence on the marker's line and do not
   add a second marker anywhere** (the test requires exactly one, and that its line still says
   something to a human: an HTML comment renders as nothing, so a lone marker would leave you
-  reading no warning at all). Change the marker only when a workflow triggering on
-  **`pull_request`, `pull_request_target` or `merge_group`** appears or disappears — a `push`,
-  tag, `schedule` or `workflow_dispatch` workflow runs after or outside the merge, gates
-  nothing, and must leave it at `none`. Values: `none`, `github-actions`, or **`other`** if
-  something this test cannot see starts gating (Tekton, an installed `githooks/` pre-push
-  gate) — `other` exists so the test can never force you to write a false `none`. It pins that
-  one thing: whether such a run actually BLOCKS a merge is branch protection, which — along
-  with Tekton and git hooks — is named above but NOT machine-checked from here. Re-verify
-  those by hand rather than trusting this paragraph's age.
+  reading no warning at all). Change it only when something that runs AT MERGE TIME appears
+  or disappears: a GitHub Actions workflow triggering on **`pull_request`,
+  `pull_request_target` or `merge_group`**, or a non-Actions equivalent. A `push`, tag,
+  `schedule` or `workflow_dispatch` workflow runs after or outside the merge and gates
+  nothing. Values: `none`, `github-actions`, or **`other`** for anything this test cannot
+  see (Tekton — which is why it reads `other` today — or an installed `githooks/` pre-push
+  gate); `other` exists so the test can never force you to write a false `none`.
+  🔴 **The marker records that something RUNS, never that it BLOCKS.** Those are different
+  facts and today they differ: Tekton reports on every PR while
+  `required_status_checks` is null, so `other` is honest and "the merge is protected" is
+  not. Whether a run blocks is branch protection, which — along with Tekton and git hooks —
+  is named above but NOT machine-checked from here. Re-verify by hand rather than trusting
+  this paragraph's age.
 - 🔴 **There is no hand-written test TOTAL any more.** `run-tests.sh` carries a **per-target** floor table (`TARGET_FLOORS`, pinned two-way against the target list) and derives the global floor as their sum. The old single `MIN_TESTS` literal was base-dependent and took **eleven values across eight PRs in one day**; `rerere` replayed a resolution from a different merge and silently wrote a four-way total onto a two-way tree. A floor is now a function of the current measurement — `m - min(50, max(1, m/20))` — and the gate PRINTS the exact replacement number when one drifts. Resolve a conflict here by re-running the gate and copying what it says, never by arithmetic on the two sides.
 - 🔴 **This repo is PUBLIC.** Never commit a real media-library path, directory name, filename, route log, or a real third-party hostname used as an example. **Nor CAPTURED TEXT — anyone's message bodies, prompts, transcripts or chat content, or a model's summaries of them — however it arrives** (an eval capture, a fixture, a debug dump). A test needs the SHAPE; regenerate it synthetic. Gated for JSON/JSONL/JSONC by `scripts/tests/test_no_captured_text.py` and for `.html`/`.txt` by `scripts/tests/test_no_captured_markup.py`; each owns its ledgers, thresholds, pinned allowlist and blind spots — read them there, never restate them. 🔴 All four content gates (these two plus the IP and hostname ones) read `git ls-files` and are **blind to git history** — see `SECRETS.md` → "Dead credentials in reachable history" before treating a green run as "the repo is clean".
 

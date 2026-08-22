@@ -55,14 +55,20 @@ from testlib.spool_plugin import no_real_activity_spool  # noqa: E402,F401
 #
 # 🔴 The names are imported INTO THIS CONFTEST'S NAMESPACE, which is what
 # registers them — pytest reads hooks and fixtures off the conftest module
-# object. `pytest_configure` is deliberately NOT among them: it is an
-# initialisation hook and pytest does not call it for a conftest loaded during
-# collection, so importing it would look like coverage while providing none.
-# The plugin arms its baseline at IMPORT for exactly that reason, so this entry
-# point loses nothing but the marker line.
+# object.
+#
+# 🔴 `pytest_configure` IS AMONG THEM, and the comment that used to sit here
+# saying it could not be was FALSE. It claimed pytest does not call
+# `pytest_configure` for a conftest loaded during collection, which cost this
+# entry point its marker line — the run's only evidence the guard loaded at all.
+# Measured on pytest 9.1.1: a `pytest_configure` in the collected directory's
+# conftest IS called. (`scripts/tests` is also this invocation's rootdir, so it
+# was never the "loaded later" case the claim described in the first place.)
 from testlib.gitenv_plugin import (  # noqa: E402,F401
     _devrc_git_repo_isolation,
     pytest_collection_finish,
+    pytest_configure,
+    pytest_runtest_logstart,
     pytest_sessionfinish,
 )
 

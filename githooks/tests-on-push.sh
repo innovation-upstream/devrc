@@ -19,9 +19,15 @@
 #     the push. 🔴 TWO DISJOINT mechanisms, deliberately not conflated: THIS
 #     file's `degrade()` handles the env-can't-be-built case BEFORE the runner
 #     is invoked at all; the runner's own exit 3 covers its environment
-#     preconditions (GUARDs 1/1b/1c, a failed `cd $ROOT`, the spool `mkdir`).
+#     preconditions (GUARDs 1b/1c, a failed `cd $ROOT`, the spool `mkdir`, and
+#     GUARD 1 ONLY when run outside a sanctioned gate env).
 #     Saying "the runner signals this with exit 3" sent people looking for a
 #     runner message that was never printed.
+#     🔴 GUARD 1 is no longer purely environmental: its input REQUIRED_TOOLS is
+#     REPO CONTENT, so since devrc#705 it exits 2 (BLOCK) when DEVRC_GATE_ENV=1
+#     — i.e. the env already supplies everything `gateTools` declares and the
+#     tool is still missing, which means the repo asked for something nothing
+#     supplies. It is the one guard whose code depends on the CAUSE.
 #   * 🔴 REPO-CONTENT guards BLOCK even though zero tests ran. run-tests.sh exits
 #     2 when its target list, floor table, launcher stubs or spool wiring are
 #     wrong — defects in the REPO, whose own messages warn that silencing them is
@@ -45,6 +51,47 @@
 
 set -uo pipefail
 
+# --- GUARD 9: NO TEST MAY OPERATE ON THE REPO THE SUITE RUNS FROM -------------
+# 🔴 THE FOURTH ENTRY POINT, and it was missing until #683's audit found it.
+# This file matches `RUNNERS`' own description exactly — it resolves a repo root
+# with `rev-parse --show-toplevel` and then runs the suite — and it is the LAST
+# hop before `run-tests.sh` on the `git push` path, which is the path the
+# 2026-08-21 incident travelled. Without the clear here the resolution on the
+# next line is itself corruptible: with GIT_DIR set and no GIT_WORK_TREE, git
+# takes the CWD as the top of the work tree.
+#
+# The SET is owned by `scripts/testlib/gitenv.py::REPO_POINTER_VARS` (and
+# `CONTROL_VARS`); every spelling is pinned two-way, and the ordering against
+# the root line is pinned too, by `scripts/tests/test_git_repo_isolation.py`.
+# Spelled here rather than sourced for the reason in `scripts/run-tests.sh`'s
+# copy of this header — and doubly so here: this file is invoked by a GLOBAL git
+# hook from an arbitrary repository, so a sibling `lib/` is not something it can
+# assume exists.
+DEVRC_GIT_REPO_POINTERS=(
+  GIT_DIR                            # the repository itself; beats -C
+  GIT_WORK_TREE                      # the working tree
+  GIT_COMMON_DIR                     # where refs/config actually live
+  GIT_INDEX_FILE                     # the index a `git add` writes
+  GIT_OBJECT_DIRECTORY               # where new objects are written
+  GIT_ALTERNATE_OBJECT_DIRECTORIES   # extra object stores
+  GIT_NAMESPACE                      # the ref namespace refs land in
+  GIT_PREFIX                         # hook-injected pathspec prefix
+  GIT_GRAFT_FILE                     # repo-scoped grafts
+  GIT_SHALLOW_FILE                   # repo-scoped shallow list
+  GIT_CONFIG                         # legacy: the file `git config` WRITES
+)
+DEVRC_GITENV_CONTROL_VARS=(
+  DEVRC_GITENV_PROTECT               # which git dirs the detector watches
+  DEVRC_GITENV_MODE                  # enforce | report | auto
+)
+unset "${DEVRC_GIT_REPO_POINTERS[@]}"
+unset "${DEVRC_GITENV_CONTROL_VARS[@]}"
+
+# 🔴 `GIT_PREFIX` is on that list and git DOES export it to a pre-push hook
+# (measured, git 2.55.0: `GIT_EXEC_PATH` and `GIT_PREFIX` are exported to
+# `pre-push`; `GIT_DIR` is NOT). Nothing below reads it, and
+# clearing it before `rev-parse` is what keeps the resolution on the next line
+# a function of the CWD alone.
 REPO_ROOT="${1:-$(git rev-parse --show-toplevel 2>/dev/null || true)}"
 [ -n "$REPO_ROOT" ] || exit 0
 
@@ -217,18 +264,38 @@ if [ "$run_rc" -eq 0 ]; then
   exit 0
 fi
 
-# 🔴 rc 3 is an ENVIRONMENT precondition abort (run-tests.sh GUARDs 1/1b/1c): by
-# construction ZERO tests ran, and the fault is in the CALLER, not the repo. This
-# file's header promises "Infra flakiness DEGRADES, never blocks", so it degrades.
+# 🔴 rc 3 is an ENVIRONMENT precondition abort (run-tests.sh GUARDs 1b/1c, a
+# failed `cd $ROOT`, the spool `mkdir`, and GUARD 1 when run outside a gate env):
+# by construction ZERO tests ran, and the fault is in the CALLER, not the repo.
+# This file's header promises "Infra flakiness DEGRADES, never blocks", so it
+# degrades.
 #
 # 🔴 rc 2 STILL BLOCKS, and the distinction is the whole point. A first version of
-# this degraded on rc 2 — but run-tests.sh has TEN abort sites and only six are
-# environmental; the rest are REPO-CONTENT guards (target list, floor table,
-# launcher stubs, spool wiring) whose own messages warn "do NOT delete the entry
-# to make this pass — that is how a suite stops running while the gate goes
-# green". Degrading on 2 produced exactly that, on the only tier that runs
-# automatically: this repo has no CI and no branch protection. The runner now
-# exits 3 for the environment cases so the two can be told apart.
+# this degraded on rc 2 — but run-tests.sh has ELEVEN abort sites, six `exit 3`
+# and five `exit 2`; the exit-2 ones are REPO-CONTENT guards (target list, floor
+# table, launcher stubs, spool wiring) whose own messages warn "do NOT delete the
+# entry to make this pass — that is how a suite stops running while the gate goes
+# green". Degrading on 2 produced exactly that, on the only tier that BLOCKS a
+# push. The runner exits 3 for the environment cases so the two can be told apart.
+#
+# 🔴 GUARD 1 appears in BOTH lists — since devrc#705 its code depends on the CAUSE
+# (DEVRC_GATE_ENV=1 -> repo defect -> 2; unset -> caller defect -> 3), because its
+# input REQUIRED_TOOLS is repo content while its usual failure is environmental.
+# So "which guard fired" no longer determines the code; do not re-derive the
+# mapping from the guard number alone.
+#
+# 🔴 A Tekton PR gate (`tekton/devrc-pytests`, `tekton/devrc-nodetests`) DOES now
+# run on PRs — the older "no CI" claim here was true when written and is not now.
+# It runs `nix build .#checks.x86_64-linux.<leg>` and does NOT enter the
+# devShell, so it is armed by checks.pytests's OWN DEVRC_GATE_ENV export — not
+# by the shellHook this hook relies on. The two exports are not redundant.
+# (The nodetests leg carries no marker and needs none: no DEVRC_GATE_ENV, no
+# exit 3 in its runner.)
+# Its red is advisory — `main`'s protection requires a review but NOT status
+# checks (`required_status_checks` -> 404, measured 2026-08-22) — which is why
+# this hook is still the only tier that blocks A PUSH. (Precisely: `main` also
+# requires 1 approving review, which blocks a MERGE — so "the only tier that
+# blocks" unqualified is wrong. The push is what this hook governs.)
 #
 # Verified in the other direction too: `fail` is only ever assigned 0 or 1 and the
 # script ends `exit "$fail"`, so a genuine pytest failure can never surface as 2

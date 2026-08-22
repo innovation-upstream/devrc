@@ -951,10 +951,17 @@ PINNED_PATH_CLOBBERS = {
         "measured the intended case: two tiers, opposite blind spots"),
     "test_devshell_satisfies_required_tools.py": (
         '{"PATH"' + ': str(stub)',
-        "the SECOND clobber justified by ENUMERATION rather than emptiness, and "
-        "the stronger case of the two: the replacement directory is created by "
-        "the fixture itself two lines above the clobber "
-        "(`tmp_path_factory.mktemp(\"only-bash\")`, then one "
+        "a clobber justified by ENUMERATION rather than emptiness, and the "
+        "strongest of those. (It used to say \"the SECOND … of the two\": there "
+        "are THREE enumeration-justified entries, and next to the \"TWO sites\" "
+        "below the ordinal read as if it counted those instead.) 🔴 This needle "
+        "now matches TWO sites in "
+        "that file — the `emitted_fatal` fixture (`only-bash`) and "
+        "`test_guard1_classifies_by_cause_not_by_site` (`only-bash-cause`) — so "
+        "it cannot tell them apart; BOTH carry the one-entry assertion, which "
+        "is what keeps this justification live for each. In both, the "
+        "replacement directory is created by the test itself near the clobber "
+        "(`tmp_path_factory.mktemp(...)`, then one "
         "`(stub / \"bash\").symlink_to(bash)`), so its contents are not merely "
         "audited but CONSTRUCTED — it holds exactly one entry, a bash symlink, "
         "and nothing else can appear in a freshly-minted tmp dir. No "

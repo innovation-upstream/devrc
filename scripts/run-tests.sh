@@ -236,7 +236,33 @@ DEVRC_GIT_REPO_POINTERS=(
   GIT_SHALLOW_FILE                   # repo-scoped shallow list
   GIT_CONFIG                         # legacy: the file `git config` WRITES
 )
+# 🔴 AND GUARD 9's OWN SEAMS, for the same reason and measured the same way.
+# `DEVRC_GITENV_PROTECT` redirects the DETECTOR at a different repository and
+# `DEVRC_GITENV_MODE` decides whether it fails or merely reports. #683's audit
+# measured the first: `DEVRC_GITENV_PROTECT=":"` gave `protected-git-dirs=0`
+# and a GREEN run while the escaping test really created its branch, and
+# `=/nonexistent/x` gave `protected-git-dirs=1` — a marker line asserting
+# healthy coverage — over the same real mutation. One inherited variable
+# defeating every layer is the bug this whole guard exists for; leaving one
+# inside the fix was not acceptable. `testlib/gitenv.py` now REFUSES an
+# unresolvable value, and no runner passes one down.
+DEVRC_GITENV_CONTROL_VARS=(
+  DEVRC_GITENV_PROTECT               # which git dirs the detector watches
+  DEVRC_GITENV_MODE                  # enforce | report | auto
+)
+# What was actually SET before we cleared it — reported below beside the
+# constant list, because "here is the list I would have cleared" and "here is
+# what was really in this environment" are different claims and only the second
+# one can tell you an incident is in progress.
+DEVRC_GITENV_FOUND=""
+for _devrc_gitenv_var in "${DEVRC_GIT_REPO_POINTERS[@]}" "${DEVRC_GITENV_CONTROL_VARS[@]}"; do
+  if [ -n "${!_devrc_gitenv_var+set}" ]; then
+    DEVRC_GITENV_FOUND="${DEVRC_GITENV_FOUND}${DEVRC_GITENV_FOUND:+,}${_devrc_gitenv_var}"
+  fi
+done
+unset _devrc_gitenv_var
 unset "${DEVRC_GIT_REPO_POINTERS[@]}"
+unset "${DEVRC_GITENV_CONTROL_VARS[@]}"
 
 if [ -z "$ROOT" ]; then
   ROOT="$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel 2>/dev/null || true)"
@@ -254,15 +280,35 @@ fi
 # starts, so unsetting it here is the one place that fixes it for all of them.
 unset CDPATH
 cd "$ROOT" || { echo "run-tests: cannot cd to ROOT=$ROOT" >&2; exit 3; }
-# 🔴 EXIT CODES: 3 = the ENVIRONMENT could not satisfy a precondition (this guard,
-# 1b, 1c). 2 = a REPO-CONTENT guard refused (target list, floor table, launcher
-# stubs, spool wiring). The distinction is load-bearing: `githooks/tests-on-push.sh`
+# 🔴 EXIT CODES: 3 = the ENVIRONMENT could not satisfy a precondition (GUARDs 1b
+# and 1c, a failed `cd $ROOT`, the spool `mkdir`, and GUARD 1 when run OUTSIDE a
+# sanctioned gate env). 2 = a REPO-CONTENT defect (target list, floor table,
+# launcher stubs, spool wiring — and GUARD 1 when DEVRC_GATE_ENV=1, because then
+# the missing tool is something the repo asked for and nothing supplies).
+# 🔴 NOTE GUARD 1 IS IN BOTH LISTS: it is the one guard whose code depends on the
+# CAUSE rather than on which guard fired, because its input (REQUIRED_TOOLS) is
+# repo content but its usual failure is environmental. The distinction is
+# load-bearing: `githooks/tests-on-push.sh`
 # DEGRADES on 3 (an env fault must not block a push over a broken caller) and
 # BLOCKS on 2. Collapsing them was a measured mistake — degrading on 2 turned
 # GUARD 5's and GUARD 3a's own warning ("do NOT delete the entry to make this
 # pass — that is how a suite stops running while the gate goes green") into
-# exactly that outcome, on the only tier that runs automatically: this repo has
-# no CI and no branch protection (pinned by test_ci_claim_matches_reality.py).
+# exactly that outcome, on the only tier that BLOCKS a push. 🔴 "The only tier
+# that RUNS" was true when this was written and is now FALSE: a Tekton PR gate
+# (`tekton/devrc-pytests`, `tekton/devrc-nodetests`) went live between #704 and
+# #714 — measured, #704 reports no checks and #714 reports both. It runs
+# `nix build .#checks.x86_64-linux.<leg>` — it does NOT enter the devShell — so
+# it is armed by checks.pytests's OWN export, not the shellHook's. (The
+# nodetests leg exports no marker and needs none: its runner has no
+# DEVRC_GATE_ENV and no exit 3.)
+#
+# What that gate does NOT do is block a merge: `main`'s branch protection does
+# NOT require status checks — `required_status_checks` returns 404 (measured
+# 2026-08-22) — though it DOES require 1 approving review. So protection EXISTS
+# and a red check is still advisory; do not restate this as "there is no branch
+# protection", which is the wrong mechanism for the right conclusion.
+# `test_ci_claim_matches_reality.py` cannot see any of this — its own scope note
+# excludes Tekton — so do not read its green as agreement.
 # A new `exit` here must pick a side deliberately.
 # --- GUARD 1: tool precondition ------------------------------------------------
 # Every binary the suites `skipif` on. Absence must be an ERROR, never a skip.
@@ -325,8 +371,78 @@ fi
 if [ "${#missing_tools[@]}" -gt 0 ]; then
   echo "run-tests: FATAL — required tool(s) missing from PATH: ${missing_tools[*]}" >&2
   echo "  The suites SKIP the tests that need these, so the run would go green while" >&2
-  echo "  testing less. This is a MISSING ENVIRONMENT, not a code failure — nothing" >&2
-  echo "  in the repo is broken and no test has run yet." >&2
+  echo "  testing less. No test has run yet." >&2
+  echo >&2
+  echo "  Do NOT drop entries from REQUIRED_TOOLS to make this pass — each one is" >&2
+  echo "  justified in the comment block directly above it." >&2
+  # 🔴 CLASSIFY BY CAUSE, NOT BY SITE. This guard reads REQUIRED_TOOLS, which is
+  # REPO CONTENT — so "GUARD 1 fired" does not by itself mean the environment is
+  # at fault, and treating it as environmental let a typo turn the gate off.
+  # MEASURED: `logrotatee` planted in REQUIRED_TOOLS aborted with rc 3, the
+  # pre-push hook DEGRADED, and the push went through with ZERO tests run — while
+  # the test that would have caught the typo never executed, because the runner
+  # aborted before pytest started. That is "a suite stops running while the gate
+  # goes green" on the only tier that BLOCKS a push — a Tekton PR gate does now
+  # run (see the EXIT CODES block above), but its red is advisory — branch
+  # protection does not require status checks — so exit 3 here still let the
+  # push land. devrc#705.
+  #
+  # The discriminator is whether we are IN a sanctioned gate env, which both the
+  # devShell and checks.pytests announce with DEVRC_GATE_ENV=1:
+  #   * set   -> the env supplies everything `gateTools` declares, so a still-
+  #              missing entry means the REPO asked for something nothing
+  #              supplies (a typo, or a gateTools omission). Repo defect: BLOCK.
+  #   * unset -> the caller is not in the gate env. Caller defect: degrade, and
+  #              the FATAL above tells them how to get in.
+  #
+  # 🔴 Deliberately NOT "is the binary declared in gateTools", which was the first
+  # design: that needs a hand-maintained nixpkgs-attr -> binary-name table
+  # (ripgrep->rg, util-linux->setsid, gnugrep->grep, nodejs->node), and this repo
+  # has already been bitten by exactly that shape once (pyyaml->yaml, #704). A
+  # table says nothing about the mapping it is missing.
+  #
+  # 🔴 The accepted value is EXACTLY "1" — not "any truthy value". A future tier
+  # writing `DEVRC_GATE_ENV=true` would fall through to the degrade arm. That is
+  # the fail-SAFE direction (a push blocks over a broken caller only if we get
+  # this wrong the other way), so it is a deliberate exact match, not an
+  # oversight: if you add a tier, export literally 1.
+  #
+  # 🔴 And the marker is a VARIABLE, so unlike the shellHook that sets it, it CAN
+  # be wrong about its environment: an operator who exports it by hand outside a
+  # gate env turns a genuine environment fault into a BLOCK whose message
+  # asserts the repo is broken. Manual paths only — every automated path
+  # re-enters `nix develop`, whose shellHook overwrites any inherited value
+  # (measured: DEVRC_GATE_ENV=0 nix develop … yields 1), so the hook tier cannot
+  # be weakened this way.
+  if [ "${DEVRC_GATE_ENV:-0}" = "1" ]; then
+    echo >&2
+    echo "  🔴 This is a REPO defect, not an environment one: you are inside a" >&2
+    echo "  sanctioned gate environment (DEVRC_GATE_ENV=1) and the tool is STILL" >&2
+    echo "  missing, so REQUIRED_TOOLS names something flake.nix \`gateTools\`" >&2
+    echo "  does not supply." >&2
+    echo >&2
+    echo "  FIX — two files must agree, but they name the tool DIFFERENTLY:" >&2
+    echo "    * $ROOT/scripts/run-tests.sh -> REQUIRED_TOOLS (the BINARY name)" >&2
+    echo "    * $ROOT/flake.nix            -> gateTools      (the NIX PACKAGE)" >&2
+    echo "  🔴 Do NOT expect to find the binary name in flake.nix — the package" >&2
+    echo "  that provides it is usually spelled differently (ripgrep provides" >&2
+    echo "  rg, nodejs provides node, util-linux provides setsid, gnugrep" >&2
+    echo "  provides grep). Finding no match there does NOT mean it is absent." >&2
+    echo "  So: correct the spelling in REQUIRED_TOOLS, or add the package that" >&2
+    echo "  PROVIDES the binary to gateTools." >&2
+    echo >&2
+    echo "  Exiting 2 so the pre-push hook BLOCKS rather than degrading." >&2
+    exit 2
+  fi
+  # The other arm. 🔴 Everything below is TRUE ONLY HERE — it says the repo is
+  # fine and tells you to enter the dev shell, and both are wrong advice for a
+  # caller who is already IN one. That is why it moved out of the shared header:
+  # it was printed unconditionally, so the exit-2 arm this change adds would have
+  # told a contributor with a REQUIRED_TOOLS typo that "nothing in the repo is
+  # broken" and to go re-run in the shell they were already standing in.
+  echo >&2
+  echo "  This is a MISSING ENVIRONMENT, not a code failure — nothing in the" >&2
+  echo "  repo is broken." >&2
   echo >&2
   echo "  FIX — enter the repo's own dev shell, which carries exactly this list," >&2
   echo "  and re-run from there:" >&2
@@ -337,9 +453,6 @@ if [ "${#missing_tools[@]}" -gt 0 ]; then
   echo "  you like). That shell is built from the SAME flake.nix \`gateTools\` list" >&2
   echo "  as the \`nix flake check\` gate, so it cannot drift out of satisfying this" >&2
   echo "  precondition." >&2
-  echo >&2
-  echo "  Do NOT drop entries from REQUIRED_TOOLS to make this pass — each one is" >&2
-  echo "  justified in the comment block directly above it." >&2
   exit 3
 fi
 
@@ -1789,6 +1902,14 @@ SPOOL_SESSION_MARKER="spool(session)"
 SPOOL_CONTROL_SOURCE="devrc-spool-guard"
 SPOOL_CONTROL_OK="emitted"
 
+# 🔴 GUARD 9's marker, the same shape and pinned the same way against
+# `scripts/testlib/gitenv.py::SESSION_MARKER`. #683 declared this marker and
+# then never counted it, which left "this target loaded the detector and saw
+# nothing" indistinguishable from "this target never loaded the detector" — the
+# reassuring zero claude/RULES.md's positive-control rule is about. It is
+# counted per pytest target in `run_pytest`, and its absence is a FAILURE.
+GITENV_SESSION_MARKER="gitenv(session)"
+
 # Where the fallback lands, asked of `spool_emit` ITSELF with the variable
 # removed — never restated here. A second copy of the "…/activity/spool" layout
 # would agree with the first until the day the rule changed, and the trap would
@@ -1823,12 +1944,22 @@ echo "  fallback trap      =$SPOOL_TRAP_LOG"
 # The clearing itself happens at the TOP of this file (before ROOT is resolved —
 # see the GUARD 9 header there); this is only the announcement, printed here so
 # it sits beside GUARDS 7 and 8 where a reader looks for the run's isolation
-# summary. It reports the PAIR: the shell half cleared the pointers for EVERY
-# target including the non-pytest ones, and each pytest target additionally
-# loads the detector that names whichever test moves a ref.
+# summary.
+#
+# 🔴 IT REPORTS A REAL PAIR NOW. It used to print two CONSTANTS under the words
+# "the PAIR" — the ledger it would clear and the flag it would pass — neither of
+# which is a measurement, so the line read identically on a poisoned environment
+# and a clean one. `found-set` is what was actually in this environment when the
+# run started (the clearing itself happens at the TOP of this file, before ROOT
+# is resolved — see the GUARD 9 header there), and `none` there is the normal
+# case. A non-empty value on a machine nobody has instrumented is the single
+# most useful line in this output: it names the variable that would have
+# redirected the suite.
 echo "run-tests: git repo pointers cleared for this run (GUARD 9)"
-echo "  cleared     =${DEVRC_GIT_REPO_POINTERS[*]}"
-echo "  detector    =-p testlib.gitenv_plugin (per pytest target)"
+echo "  ledger      =${DEVRC_GIT_REPO_POINTERS[*]} ${DEVRC_GITENV_CONTROL_VARS[*]}"
+echo "  found-set   =${DEVRC_GITENV_FOUND:-none}"
+echo "  detector    =-p testlib.gitenv_plugin (per pytest target; its own"
+echo "               '$GITENV_SESSION_MARKER' line is counted per target below)"
 
 # "<target>|<sess-from>|<sess-to>|<trap-from>|<trap-to>|<iso-from>|<iso-to>" —
 # three line ranges per target, so every count below is attributed to the target
@@ -2262,6 +2393,26 @@ run_pytest() {
   _spool_account "$d"
   _nogit_account "$d"
   cat "$log"
+
+  # --- GUARD 9's POSITIVE CONTROL, per target -------------------------------
+  # The detector announces itself once per pytest session. Counting it is the
+  # only thing that separates "GUARD 9 ran and this repository did not move"
+  # from "GUARD 9 was never loaded here" — two states with byte-identical
+  # output otherwise, and the second is what #399 and #614 both shipped.
+  # `>= 1` rather than `== 1`: a target whose conftest ALSO re-exports the hooks
+  # legitimately prints it twice (two plugin registrations of the same module's
+  # functions), and that is coverage, not a defect.
+  local gitenv_markers
+  gitenv_markers="$(grep -ac "^$GITENV_SESSION_MARKER" "$log" || true)"
+  if [ "${gitenv_markers:-0}" -lt 1 ]; then
+    echo "run-tests: FATAL — GUARD 9's detector never announced itself for $d." >&2
+    echo "  Expected at least one '$GITENV_SESSION_MARKER …' line. Its absence means" >&2
+    echo "  the target ran WITHOUT the git-repo isolation detector, so a clean" >&2
+    echo "  result there is a claim about nothing. Check that '-p testlib.gitenv_plugin'" >&2
+    echo "  is still on this runner's pytest line." >&2
+    RESULTS+=("FAIL  $d (GUARD 9 marker absent)")
+    fail=1
+  fi
 
   # GUARD 4: parse pytest's summary line. `-q` emits it undecorated, e.g.
   #   "660 passed, 123 skipped in 15.10s"   /   "1 failed, 2 passed in 0.1s"
