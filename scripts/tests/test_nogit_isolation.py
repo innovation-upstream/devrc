@@ -89,7 +89,14 @@ _NOGIT_FLAG = "-p testlib.nogit" + "_plugin"
 # added without updating this pin is a coverage claim nobody reviewed.
 EXPECTED_PLUGINS = {"testlib.nolaunch" + "_plugin",
                     "testlib.spool" + "_plugin",
+                    "testlib.gitenv" + "_plugin",
                     "testlib.nogit" + "_plugin"}
+# 🔴 `gitenv_plugin` (GUARD 9, #683) was added 2026-08-22 when the two git
+# guards landed a day apart. The ledger did exactly what it is for: it went RED
+# on the merged tree because the set GREW, which is the review this comment is.
+# GUARD 9 strips the repo POINTERS so a fixture cannot reach this checkout by
+# accident; GUARD 10 (`nogit_plugin`) refuses a WRITE to any repo outside the
+# session tmp roots. Two guards, not one done twice — see each header.
 
 
 # --------------------------------------------------------------------------- #
