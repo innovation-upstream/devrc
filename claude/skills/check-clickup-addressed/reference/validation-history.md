@@ -5,14 +5,29 @@ scoped, gated by nothing) into devrc: docs at `claude/skills/check-clickup-addre
 code + suite at `scripts/check-clickup-addressed/`. It is now a global skill on both hosts
 and a registered target of `scripts/run-tests.sh`, which had never run it before.
 
-**The move broke a guard, silently, and that is the round's finding.** `_selfrun.py`'s
-anchored markers are PATH FRAGMENTS. One of them was `check-clickup-addressed/scripts/` —
-the talos layout. The devrc layout reverses those two segments
-(`scripts/check-clickup-addressed/`), so after the move no invocation matched, the prior-run
-guard would have stopped recognising its own runs, and the checker would have gone straight
-back to the D4 failure it was built to prevent — reading yesterday's report as today's
-evidence. Nothing errors when this happens; the report just stops printing
-`(ignored N transcript(s) …)`.
+**The move broke a marker, and an audit then corrected how much that mattered.**
+`_selfrun.py`'s anchored markers are PATH FRAGMENTS. One was `check-clickup-addressed/scripts/`
+— the talos layout. The devrc layout reverses those two segments, so after the move no
+invocation matched it.
+
+🔴 **The first write-up of this said the guard "went quiet". Measured, that was wrong, and the
+correction is the more useful fact.** The path markers catch the *invocation*; the report
+header `## Task Completion Status` catches the *output*, and every text-mode run prints it.
+Over the same 762 transcripts the exclusion set is **11 with or without** the path marker. So
+the ordinary path was never blind. Two genuinely broken shapes came out of the audit instead:
+
+1. **`--json` carried no marker at all.** The header lived on the text branch; `--json` printed
+   `json.dumps(report)`. A JSON report lists every task ID beside `likely_addressed` — the exact
+   shape the proximity scorer rewards — so that output, if captured, read back as evidence.
+   Fixed by `render_json()`, which emits the header as a `report_header` field.
+2. **The marker missed the invocation SKILL.md itself teaches.** The quick start is
+   `CCUA=…` then `python3 "$CCUA/check-addressed.py"`; the variable means the path adjacency
+   never appears in the transcript. A marker for a shape nobody types is not a marker. The
+   entry-point basenames are alternatives now — each measured in the anchored class
+   (1.3–1.6%), not the ~10% mention class.
+
+What the path markers uniquely cover, and why they stay: a run whose OUTPUT never reaches the
+transcript — piped to a file, `| jq`, truncated. Defence in depth, labelled as such.
 
 The old literal stays in `SELF_RUN_MARKERS` (transcripts written before the move still say
 it) and the new layout is matched by `NEW_LAYOUT_RE`. The test was watched RED on the

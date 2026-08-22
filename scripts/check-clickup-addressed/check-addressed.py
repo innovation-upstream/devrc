@@ -47,6 +47,30 @@ MARKER_LEGEND = ("Evidence lines: `✓` completion signal / `○` open signal ·
                  "task ID is inside that signal's own snippet, `[○]` merely somewhere in "
                  "the same ±2000-char window — distrust `[○]`.")
 
+# The report header, and simultaneously a SELF-RUN MARKER — `_selfrun.py` matches this exact
+# literal, which is how a transcript that merely PASTED a report is recognised as a prior run.
+# It is defined once here and emitted by BOTH output branches (the JSON one carries it as the
+# `report_header` field); `tests/test_attribution.py` pins that both do. Changing the wording
+# without changing `SELF_RUN_MARKERS` silently unhooks the guard from every future report.
+SELF_RUN_HEADER = "## Task Completion Status"
+
+
+def render_json(report):
+    """Serialise the report for `--json`, CARRYING THE SELF-RUN MARKER.
+
+    🔴 A --json RUN MUST BE SELF-MARKING TOO. The text branch prints `SELF_RUN_HEADER`, which
+    `_selfrun.py` matches, so a transcript holding a pasted report is recognised as a prior
+    run. Until 2026-08-22 the JSON branch emitted `json.dumps(report)` and no marker at all —
+    so a `--json` invocation, whose output lists every task ID beside `likely_addressed` (the
+    exact shape the proximity scorer rewards), was invisible to the guard. Found by an
+    adversarial audit of the devrc migration, which RAN the script rather than reading it.
+
+    🔴 This is a FUNCTION so its test can exercise the real path. The first attempt asserted a
+    payload the test itself had built with the same dict-merge — it passed with the production
+    branch reverted, i.e. it tested nothing. A test may not re-implement the thing it checks.
+    """
+    return json.dumps({**report, "report_header": SELF_RUN_HEADER}, indent=2)
+
 
 def run_script(name, *args):
     script = SCRIPT_DIR / name
@@ -691,7 +715,7 @@ def main():
     }
 
     if as_json:
-        print(json.dumps(report, indent=2))
+        print(render_json(report))
     else:
         print(f"## Recent Comments ({len(comments)})\n")
         for c in comments:
@@ -714,7 +738,7 @@ def main():
                     print(f"  file: {s.get('file', '?')}")
                 print()
 
-        print(f"\n## Task Completion Status\n")
+        print(f"\n{SELF_RUN_HEADER}\n")
         print(f"{MARKER_LEGEND}\n")
         for r in results:
             status_icon = {"likely_addressed": "✅", "partially_addressed": "⚠️", "open": "🔴", "unclear": "❓", "no_sessions_found": "🔍", "no_mentions_found": "🔍"}.get(r["status"], "?")

@@ -44,6 +44,16 @@ SELF_RUN_MARKERS = (
     # transcripts written before the migration still say it. The devrc layout reverses those
     # two segments, so it matches nothing here — it is handled by NEW_LAYOUT_RE below, which
     # is a regex for a measured reason, not a stylistic one.
+    #
+    # ⚠ HOW MUCH THE MOVE ACTUALLY BROKE — corrected after an audit, because the first version
+    # of this comment overstated it. The path markers catch the INVOCATION; the header below
+    # catches the OUTPUT, and every text-mode report prints it. Measured over the 762
+    # transcripts these scripts walk, the exclusion set is **11 with or without** the path
+    # marker — so the guard did NOT go blind on the ordinary path. The one shape that was
+    # genuinely uncovered is a `--json` run, whose output carried no marker at all until
+    # `render_json` was fixed the same day. The path markers remain worth keeping: they catch
+    # a run whose OUTPUT never reaches the transcript (piped to a file, `--json | jq`,
+    # truncated), which the header cannot. Defence in depth, correctly labelled.
     "check-clickup-addressed/scripts/",
     # The report header printed by check-addressed.py — catches a session that pasted the
     # output without running it.
@@ -76,7 +86,23 @@ SELF_RUN_RE = re.compile(r'\\?"skill\\?"\s*:\s*\\?"check-clickup-addressed\\?"')
 #                                                                        slash breaks it)
 # SKILL.md still self-marks, deliberately, because it cites `…/_selfrun.py` — a loaded
 # SKILL.md means the skill fired, which IS a run.
-NEW_LAYOUT_RE = re.compile(r'check-clickup-addressed/[\w.-]+\.py')
+#
+# 🔴 THE PATH FORM ALONE MISSES THE INVOCATION THIS SKILL'S OWN DOCS TEACH. SKILL.md's quick
+# start is `CCUA=~/workspace/devrc/scripts/check-clickup-addressed` then
+# `python3 "$CCUA/check-addressed.py"` — the variable means the adjacency never appears in the
+# transcript, and `cd <dir> && python3 check-addressed.py` breaks it the same way. A marker
+# that only matches the fully-spelled path is a marker for a shape nobody types. So the bare
+# entry-point BASENAMES are alternatives here. Measured 2026-08-22 over the 762 transcripts
+# these scripts walk, each is in the anchored class, not the ~10% mention class:
+#   check-addressed.py 12 (1.6%) · check-completion.py 10 (1.3%)
+#   search-sessions.py 10 (1.3%) · recent-comments.py  10 (1.3%)
+# for reference: the old path marker 11 (1.4%), the bare skill name 96 (12.6%, rejected).
+# The `-` spelling is what keeps them tight: the test modules are `test_check_completion.py`
+# with UNDERSCORES, so a pytest run naming them does not match.
+NEW_LAYOUT_RE = re.compile(
+    r'check-clickup-addressed/[\w.-]+\.py'
+    r'|(?:check-addressed|check-completion|search-sessions|recent-comments)\.py'
+)
 
 _cache = {}
 

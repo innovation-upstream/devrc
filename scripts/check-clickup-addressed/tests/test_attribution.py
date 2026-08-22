@@ -15,7 +15,7 @@ GUARD passed at base too and are labelled as such — they are controls, not cov
   D3  the checker read the transcript it was being written into, which mentions every
       task ID under test by construction.
 """
-import json, sys, tempfile
+import contextlib, io, json, sys, tempfile
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).parent.parent
@@ -531,10 +531,12 @@ def test_the_devrc_invocation_path_is_a_self_run():
     inside datapacket-talos, and the anchored marker was `check-clickup-addressed/scripts/`.
     In devrc the identical call reads
     `~/workspace/devrc/scripts/check-clickup-addressed/check-addressed.py` — the two segments
-    are REVERSED, so the old marker matches none of it. Nothing errors: the guard simply
-    stops recognising its own runs, and the checker goes back to reading yesterday's report
-    as today's evidence, which is the exact failure the guard was built for (see
-    `scripts/check-clickup-addressed/_selfrun.py`).
+    are REVERSED, so the old marker matches none of it.
+
+    ⚠ SCOPE, corrected after an audit: this alone did NOT blind the guard. The report header
+    marker independently catches every text-mode run, and the exclusion set measured 11 either
+    way. What the path marker uniquely covers is a run whose OUTPUT never reaches the
+    transcript — piped to a file, `| jq`, truncated. Keep the claim that size.
 
     Watched RED before the marker was added: the assertion below failed on the migrated tree
     with the marker tuple untouched.
@@ -546,6 +548,111 @@ def test_the_devrc_invocation_path_is_a_self_run():
         path = root / "test-project" / "devrc-run.jsonl"
         assert selfrun.is_self_run(path), \
             "the devrc invocation path was not recognised as a run of this checker"
+
+
+def test_the_invocation_SKILL_MD_ACTUALLY_TEACHES_is_a_self_run():
+    """🔴 A MARKER FOR A SHAPE NOBODY TYPES IS NOT A MARKER.
+
+    The first cut of the devrc marker required the fully-spelled path
+    `scripts/check-clickup-addressed/check-addressed.py`. SKILL.md's own quick start teaches
+    `CCUA=~/workspace/devrc/scripts/check-clickup-addressed` and then
+    `python3 "$CCUA/check-addressed.py"` — the variable means that adjacency never reaches the
+    transcript, so the documented invocation was NOT recognised. Found by an adversarial audit
+    of the migration, which executed the fixture rather than reading the regex.
+
+    All three shapes below are real: the two the docs teach, and the `cd`-then-run a human
+    types. Each was watched RED before the basename alternatives were added.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        for i, cmd in enumerate((
+            'CCUA=~/workspace/devrc/scripts/check-clickup-addressed\n'
+            'python3 "$CCUA/check-addressed.py" --fast',
+            'python3 ~/workspace/devrc/scripts/check-clickup-addressed/check-addressed.py',
+            'cd ~/workspace/devrc/scripts/check-clickup-addressed && python3 check-addressed.py',
+        )):
+            root = _session(tmp, f"inv{i}", cmd)
+            path = root / "test-project" / f"inv{i}.jsonl"
+            assert selfrun.is_self_run(path), \
+                f"an invocation the docs teach was not recognised as a run: {cmd!r}"
+
+
+def test_a_json_run_carries_the_self_run_marker():
+    """🔴 THE ONE SHAPE THE MIGRATION LEFT UNCOVERED, found by the same audit.
+
+    `--json` printed only `json.dumps(report)`; the `## Task Completion Status` header that
+    makes every other report self-marking is on the text branch. So a JSON run — whose output
+    lists every task ID beside `likely_addressed`, the exact shape the proximity scorer
+    rewards — was invisible to the guard, and a session that captured one would have had it
+    read back as evidence.
+
+    🔴 This calls the PRODUCTION renderer. The first version of this test built the payload
+    itself with the same dict-merge the code uses, and so passed with the production branch
+    reverted — a mutant that removed the marker from `--json` output SURVIVED a green suite.
+    Deriving a test's expectation from a copy of the implementation is not a test.
+    """
+    payload = check_addressed.render_json({"task_status": [], "comments": []})
+    with tempfile.TemporaryDirectory() as tmp:
+        root = _session(tmp, "jsonrun", payload)
+        path = root / "test-project" / "jsonrun.jsonl"
+        assert selfrun.is_self_run(path), "a --json report was not recognised as a run"
+    # The payload must still be valid JSON that carries the report through unharmed.
+    parsed = json.loads(payload)
+    assert parsed["task_status"] == [] and "report_header" in parsed
+
+
+def test_main_json_output_is_self_marking_END_TO_END():
+    """🔴 THE SEAM: `render_json` being right does not mean `main()` CALLS it.
+
+    Testing the renderer alone left a live mutant — swapping the `--json` branch back to a
+    bare `json.dumps(report)` kept the suite green, because every assertion was scoped to the
+    function and none to the call site. "Verified in isolation" is not verified.
+
+    So this drives the REAL `main()` with `run_script` stubbed, reads what it actually printed
+    to stdout, and requires `is_self_run` to recognise it. It is hermetic: no ClickUp, no
+    transcripts, no subprocess — the stub answers all three pipeline stages.
+    """
+    canned = {
+        "recent-comments.py": json.dumps([{
+            "task_id": TARGET, "task_name": "a ticket", "date": "2026-08-22 09:00",
+            "author": "someone", "snippet": "please look at this",
+            "task_status": "to do", "task_priority": "high",
+        }]),
+        "search-sessions.py": json.dumps([]),
+        "check-completion.py": json.dumps([{
+            "task_id": TARGET, "status": "no_mentions_found", "sessions_searched": 0,
+            "mentions_found": 0, "completion_signals": [], "open_signals": [],
+        }]),
+    }
+    orig_run, orig_argv = check_addressed.run_script, sys.argv
+    check_addressed.run_script = lambda name, *a: (canned[name], 0)
+    sys.argv = ["check-addressed.py", "--json"]
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            check_addressed.main()
+    finally:
+        check_addressed.run_script, sys.argv = orig_run, orig_argv
+
+    printed = buf.getvalue()
+    assert printed.strip(), "main() printed nothing — the stub did not drive the pipeline"
+    json.loads(printed)                      # positive control: it really is the JSON branch
+    with tempfile.TemporaryDirectory() as tmp:
+        root = _session(tmp, "e2ejson", printed)
+        path = root / "test-project" / "e2ejson.jsonl"
+        assert selfrun.is_self_run(path), (
+            "a real --json run of main() was not recognised as a run of this checker"
+        )
+
+
+def test_the_two_output_branches_share_one_header_literal():
+    """The text branch and the JSON branch must emit the SAME string, and it must be the one
+    `_selfrun.py` matches. Three copies of a literal is how a guard silently unhooks itself
+    from the thing it guards: reword the header for the humans, and every future report stops
+    being recognised, with nothing failing."""
+    assert check_addressed.SELF_RUN_HEADER in selfrun.SELF_RUN_MARKERS, (
+        "check-addressed.py's report header is not in _selfrun.py's marker set — a report "
+        "printed today would not be recognised as a prior run"
+    )
 
 
 def test_a_mention_of_the_scripts_DIRECTORY_is_not_a_self_run():
