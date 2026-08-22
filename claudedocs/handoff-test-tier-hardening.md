@@ -1,4 +1,137 @@
-# Handoff: test-tier-hardening — 2026-08-21
+# Handoff: test-tier-hardening — 2026-08-21, resolved 2026-08-22
+
+> 🔴 **READ THIS BLOCK FIRST — the guard-strategy question below is SETTLED, and several
+> sections underneath it are now WRONG.** Everything from "Goal" down is preserved as the
+> evidence trail that produced the decision, not as current state. Where the two disagree,
+> this block wins. Measured 2026-08-22 in standalone clones with `origin` **removed**.
+
+## RESOLUTION — 2026-08-22
+
+### The decision: converge on the ENV-LEVER architecture, close the INTERCEPTOR family
+
+Four guard PRs existed for one incident, in two architectures. The framing this session
+inherited was "#683 vs #689"; there were actually four, and one of them was complementary
+rather than competing.
+
+| PR | architecture | outcome |
+|---|---|---|
+| **#683** `fix/test-fixtures-escape-ambient-repo` | strip the 11 env vars that redirect git, + fingerprint detector | 🟢 **MERGED** — `dfd2d203` on `main`, 19:05:55Z |
+| **#673** `guard/nogit-test-isolation` | `GIT_CONFIG_GLOBAL` throwaway + `GIT_ALLOW_PROTOCOL=file` | 🟡 **OPEN, complementary** — cannot merge as-is, see the seam below |
+| **#676** `guard/no-real-git-writes` | intercept git (`nogit.py`, 1758 lines) | 🔴 **CLOSED** |
+| **#689** `fix/no-real-git-remote-in-tests` | intercept git (`norepo.py`, 1358 lines) | 🔴 **CLOSED** |
+
+**Why the interceptor family lost, in one line:** the per-verb positional-repo problem is
+not one fix. **14 of git's 181 dispatch names take a repository positionally** by synopsis
+alone (`upload-pack`, `receive-pack`, `fetch-pack`, `send-pack`, `upload-archive`, `clone`,
+`init`, `init-db`, `archive`, `fetch`, `pull`, `push`, `ls-remote`, `mailsplit`), and on top
+sits an open-ended set of destination-bearing *options* across all 181 — #676's own audit
+found `collect_extra_dests` covering 4 verbs and missing 3. Every bounded formulation fails:
+enumerating verbs buys the next audit round; default-deny makes 167 verbs false-refuse
+(permanently red); resolving with real git *is* the measured 8.85× overhead and still cannot
+see `git-upload-pack <dir>`. Full reasoning is on the closed PRs, not repeated here.
+
+🔴 **This SUPERSEDES the "Recommendation on record, and it is SPLIT" paragraph further down**,
+which said #683's detection half was not stronger than #689's and that #689 should continue
+if someone took the positional problem knowingly. Nobody should: the positional problem is
+the *cheapest* part of that surface, and it was hiding the rest.
+
+### The three-way gate, base `a34d695d`, standalone clones with `origin` removed
+
+```
+control  pristine main            pytest 14689 collected /  0 failed   scripts/tests 687.7s   GATE PASS
+main + #683                       pytest 14721 collected /  0 failed   scripts/tests 699.6s   GATE PASS
+main + #683 + #673 (hand-merged)  pytest 14766 collected / 39 failed                          GATE FAIL
+```
+
+`main + #683` node tier: 1119/1119. #683's positive-control marker printed from **26 of 26**
+pytest targets, so it is loaded rather than silently absent. Cost: **+1.7%** wall clock.
+
+🔴 **`main` is GREEN.** The claim in this doc's older sections — and in open PRs #708/#710/#713
+— that `main` is red on the hermetic tier or a signal floor is **STALE**. #708 fixed it;
+measured `GATE: RESULT=PASS` on both tiers at `a34d695d`.
+
+### 🔴 THE FINDING: #683 and #673 are each correct and BREAK TOGETHER
+
+This is the most valuable thing the session produced, and it is a textbook instance of
+`claude/RULES.md` → *"Verified in isolation is the new vacuous green — the defect lives in
+the SEAM nobody owns."* Both guards were mutation-tested and audit-clean **alone**.
+
+Stacked, every one of the 26 targets produced **exactly one error**, always at the teardown
+of whichever test ran first in that target (`.E...`), always identical:
+
+```
+DEVRC-GITENV-VIOLATION: test `…::<first test>` MUTATED a git repository that is not its own tmpdir.
+What moved:
+  CHANGED  /tmp/nix-shell.<x>/tmp.<y>/gitconfig   c2d6f3ff28f7 -> abf7b267f2bd
+```
+
+**Mechanism:** #683's detector fingerprints the user-level git config, and its
+`global_config_paths()` resolves that by reading `GIT_CONFIG_GLOBAL` — which **#673 sets**,
+to its throwaway file. #673's own positive control then performs a real `git config --global`
+write into that file *by design*. #683 sees a file it was told to protect change, and fires
+correctly. Neither guard is wrong; **#683 is watching a file #673 legitimately writes.**
+
+The other 13 failures are the two PRs' pinning tests: each pins the exact
+`python -m pytest …` line in `run-tests.sh` and the conftest import block.
+
+🔴 **Do NOT fix this by dropping `global_config_paths()` from #683's fingerprint.** A
+`--global` write leaves the repo untouched, so it is the one damage class the ref fingerprint
+cannot see — and the incident produced exactly that (`core.hooksPath` in `~/.gitconfig`).
+Fix it on #673's side: put the throwaway somewhere #683 is not watching, or re-baseline
+#683's detector around #673's deliberate control write.
+
+### Why #673 is worth finishing (it is NOT redundant with #683)
+
+They close different levers, and together they cover **both phases** of the incident:
+
+| | #683 (merged) | #673 (open) |
+|---|---|---|
+| which repo git lands in | `GIT_DIR` + 10 siblings, stripped | — |
+| which config git writes | — | `GIT_CONFIG_GLOBAL` → throwaway |
+| whether git can reach the network | — | `GIT_ALLOW_PROTOCOL=file`, refused **by git**, exit 128 |
+
+Local corruption 19:21 = #683's strip. Remote push storm 19:28 = **#673's `GIT_ALLOW_PROTOCOL`**.
+**`main` today does not close the push half.**
+
+#673's remaining work: (1) the seam above; (2) **both PRs call themselves GUARD 9** — the
+stack's runner banner prints the collision verbatim, so one must become GUARD 10 with its
+pinning tests updated; (3) rebase onto `dfd2d203` (its base is `3116225d`, ~20 commits back
+and pre-#683); (4) put a cost number in the body — the stack was slower on `scripts/tests`
+than #683 alone, and #673's per-target live controls are the plausible driver.
+
+### Salvaged from the closed PRs
+
+- **#716 OPEN** — `fix/repo-path-set-but-empty`. The six `${VAR:-default}` sites in
+  `ship.sh`, `drift-check.sh` and `analyze-service-index/commit.sh` where a SET-BUT-EMPTY
+  override silently resolves to the operator's real clone or real index store. Extracted
+  from #689 with its two-way ledger and the behavioural test that asserts the exact `exit 2`.
+  Red/green re-measured: **7 failed at base → 9 passed**. Independent of the guard
+  architecture; it would have died with #689.
+- **Recorded as patterns, not instances:** key a `git-*` exec-path farm on the DISPATCH NAME
+  never the inode (181 names vs 146 inode matches, `PATH`-dependent within one machine);
+  audit every `eval` of an argv-derived value. Both already in the analyze-service index
+  under `devrc/tests`.
+- 🔴 **#689 RETRACTED #676's claim** that the exec-path farm closed the alias/hook residual —
+  the farm substituted only the literal name `git` while git dispatches on `argv[0]`. If
+  anyone revives that approach, start from the retraction.
+
+### Housekeeping done 2026-08-22
+
+- **A Tekton pre-merge gate now exists on devrc PRs** (`tekton/devrc-pytests`,
+  `tekton/devrc-nodetests`). The four guard PRs showed 0 checks only because they predate it.
+  🔴 **`CLAUDE.md`'s `<!-- merge-gate: none -->` marker is therefore STALE** — per the
+  marker's own rules it should read **`other`** (Tekton is not a GitHub Actions
+  `pull_request` workflow). Not yet changed; one-line PR, still owed.
+- The base clone's `CLAUDE.md` was **staged and byte-identical to `86e5311a`** — a stale
+  orphan that would have silently reverted #702. Restored.
+- The base clone was on a **detached HEAD** at `2d1ba0d7` (0 unique commits, verified an
+  ancestor of `origin/main`). Reattached to `main` and fast-forwarded.
+- 🔴 **The freeze can be reconsidered but is NOT lifted here.** #683 closes the measured
+  mechanism on `main`; the residual is a test that writes to some *other* repo by absolute
+  path, which #683 detects only for the repo the suite runs from. Note also that the base
+  clone has **concurrent sessions writing to it** (one landed #715 mid-session), and #683's
+  detector will attribute a concurrent session's ref write to whatever test is running — a
+  real false-positive mode for a bare `pytest` in the live clone, harmless in a contained one.
 
 ## Run this first — the index, one read-only command
 ```bash
