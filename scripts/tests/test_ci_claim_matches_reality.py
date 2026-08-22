@@ -2,11 +2,32 @@
 
 WHY THIS EXISTS
 ---------------
-For an unknown span, `CLAUDE.md` asserted "**CI gates both suites**: `nix build
-.#checks…`". No CI has ever run on a devrc PR: no `.github/workflows`, no branch
-protection, no ruleset, no Tekton trigger, and `statusCheckRollup` is empty on
-every PR including merged ones. Every merge has rested on a human or agent
-running the suite by hand.
+From 2026-08-02 to 2026-08-20, `CLAUDE.md` asserted "**CI gates both suites**:
+`nix build .#checks…`" while nothing ran at all. Every merge rested on a human
+or agent running the suite by hand.
+
+🔴 THIS PARAGRAPH THEN BECAME THE THING IT WARNS ABOUT, and is corrected in
+place rather than deleted, because the drift is the lesson. It used to continue:
+"No CI has ever run on a devrc PR: no `.github/workflows`, no branch protection,
+no ruleset, no Tekton trigger, and `statusCheckRollup` is empty on every PR."
+**Three of those five clauses were measured FALSE on 2026-08-22** — Tekton posts
+`tekton/devrc-pytests` and `tekton/devrc-nodetests` on devrc PRs, `main` DOES
+carry branch protection, and `statusCheckRollup` is non-empty. Still true: no
+`.github/workflows`, and no ruleset.
+
+None of that changed the marker to `github-actions`, because the protection
+carries **no `required_status_checks`**: checks RUN, nothing BLOCKS. Measured
+behaviourally, not inferred — #707 merged **28 minutes** after its
+`devrc-pytests` went RED, #711 two minutes after. The marker is `other` because
+something this test cannot see (Tekton) now reports; it would become
+`github-actions` only if a `pull_request` workflow appeared here.
+
+Re-measure both surfaces rather than quoting any of the above:
+    gh api repos/innovation-upstream/devrc/branches/main/protection   # required_status_checks?
+    gh api repos/innovation-upstream/devrc/rules/branches/main        # org+repo+enterprise rulesets
+On the first, an ABSENT key reads as clean unless you look for it by name; on
+the second the answer is an empty array. Positive-control the `[]` before
+believing it — the same call against a repo with rulesets returns non-empty.
 
 That is the worst shape a false claim can take. It lives in the always-loaded
 project instructions, it is reassuring, and it is exactly the sort of sentence
