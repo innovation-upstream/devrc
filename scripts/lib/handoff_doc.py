@@ -968,6 +968,105 @@ def not_pushed_report(repo: Path, remote: str, branch: str | None) -> str:
     return f"{NOT_PUSHED_HEADLINE}\n{why}\n{topic}\n{NOT_PUSHED_RETRY_NOTE}"
 
 
+COMMIT_LANDED_NOTE = (
+    "\n🔴 THE COMMIT LANDED — a later step failed, so nothing was rolled back "
+    "(rolling back here would DISCARD a committed change). This is the one "
+    "`status=failed` that does NOT mean 'nothing happened': the commit exists "
+    "locally and is un-pushed. Find it with `git log -1` and push it or open a "
+    "PR; do not re-run this tool, which would append the update a second time."
+)
+
+
+def _undo_write(
+    repo: Path, doc: Path, relpath: str, original: bytes | None
+) -> str:
+    """Undo the doc write + `git add` after a commit that never happened.
+
+    🔴 PATH-LIMITED, exactly like the commit it is undoing. A blanket
+    `git reset` would unstage a co-worker's staged files as a side effect of OUR
+    failure — trading one shared-checkout defect for a worse one. `git restore
+    --staged -- <path>` touches only the index entry for that path.
+
+    Best-effort and non-raising: this runs on an error path, and a rollback that
+    threw would replace the caller's real diagnosis with its own. Whatever it
+    could not undo is RETURNED as text so the caller prints it — silence here
+    would be the same defect one level down.
+    """
+    left: list[str] = []
+    try:
+        # Unstage first: if restoring the bytes fails we still want the index
+        # clean, because a staged path is the half that another session's
+        # `git commit` picks up.
+        git(repo, "restore", "--staged", "--", relpath)
+    except (GitError, OSError):
+        # `git restore` predates nothing we support, but a very old git or a
+        # path git no longer knows about can still refuse.
+        try:
+            git(repo, "reset", "--quiet", "HEAD", "--", relpath)
+        except (GitError, OSError):
+            left.append(f"still STAGED: {relpath}")
+    try:
+        if original is None:
+            doc.unlink(missing_ok=True)
+        else:
+            doc.write_bytes(original)
+    except OSError:
+        left.append(f"still MODIFIED: {relpath}")
+    if left:
+        # 🔴 EMIT ADVICE ONLY FOR THE HALF THAT ACTUALLY FAILED. The two halves
+        # fail independently, and printing both was measured to produce a message
+        # that CONTRADICTS what happened: with only the index half failing, it
+        # told the operator their content "was never committed … restore by hand"
+        # while the bytes had in fact been restored and the content WAS in HEAD.
+        # An operator who believes that hand-rewrites a doc they still have.
+        #
+        # 🔴 And do not name `restore --source=HEAD --worktree` in the worktree
+        # arm: it discards UNCOMMITTED local edits — exactly what `original`
+        # exists to preserve — and fails outright when the doc did not exist at
+        # HEAD. Advice printed on an already-degraded path must not be the thing
+        # that loses the work.
+        fixes: list[str] = []
+        if any(s.startswith("still STAGED") for s in left):
+            # 🔴 CONTRACT: the index arm is ONE bare command line, no comment
+            # lines. The worktree arm is comment lines in every wording it has
+            # had, so "no comment lines present" is how the test proves the
+            # worktree half was NOT advised — a check that survives rewording
+            # AND reindenting. Adding a comment here will fail that test; that
+            # is deliberate (a loud false failure beats a silent false pass),
+            # so move any explanation into the message body above instead.
+            fixes.append(f"    git -C {repo} restore --staged -- {relpath}")
+        if any(s.startswith("still MODIFIED") for s in left):
+            fixes.append(
+                f"    # the doc did not exist before this run — delete it:\n"
+                f"    rm -f -- {doc}"
+                if original is None
+                else
+                "    # its previous content is the bytes this process read, and "
+                "they are\n    # not necessarily in git. Run the unstage line "
+                "above FIRST — until you do,\n    # the index still holds THIS "
+                "run's merged text, so `git restore -- <path>`\n    # would "
+                "restore that and look like it worked. Only after unstaging,\n"                "    # and only if the doc was clean at HEAD, is it safe."
+            )
+        return (
+            "\n🔴 ROLLBACK INCOMPLETE — the commit did not happen, but this tree "
+            "was left changed: " + "; ".join(left) + "\n"
+            "  Fix it before doing anything else; in a shared checkout a staged "
+            "path is one `git commit` away from being swept into someone else's "
+            "commit.\n" + "\n".join(fixes)
+        )
+    # 🔴 Deliberately NOT "byte-identical": two measured exceptions. If the doc
+    # was STAGED-modified before the run, `restore --staged` resets its index
+    # entry to HEAD rather than to that staged content; and a `claudedocs/`
+    # directory this run created is not removed. Both are harmless, and neither
+    # is what the sentence would be claiming. A comment is a claim — say the
+    # thing that is true, which is the thing the caller actually needs.
+    return (
+        "\n(rolled back: the doc was restored and unstaged, so nothing from this "
+        "run is left staged or written — re-running is safe and will not append "
+        "the update twice.)"
+    )
+
+
 def uncommitted_paths(repo: Path) -> list[str]:
     """Paths with uncommitted changes in `repo`'s working tree, staged or not.
 
@@ -1305,6 +1404,16 @@ def main(argv: list[str] | None = None) -> int:
             )
             return EXIT_BEHIND
 
+    # 🔴 A BLOCKED COMMIT IS NOT A NO-OP — capture enough to undo the write.
+    # MEASURED 2026-08-21: a PreToolUse hook enforcing "never commit in the
+    # primary clone" refused the commit below — correct behaviour — but the doc
+    # had already been written AND `git add`ed, so `status=failed` left a
+    # modified, STAGED file in a checkout shared with other sessions, where the
+    # next person's `git commit` sweeps it in. The caller then re-ran the tool to
+    # read the error and the merge appended the same block a SECOND time.
+    # `status=failed` reads as "nothing happened"; it must therefore BE that.
+    original: bytes | None = doc.read_bytes() if doc.exists() else None
+    committed = False
     try:
         doc.parent.mkdir(parents=True, exist_ok=True)
         doc.write_text(merged_text, encoding="utf-8")
@@ -1313,9 +1422,17 @@ def main(argv: list[str] | None = None) -> int:
         # Path-limited on purpose: exactly one commit, carrying exactly the
         # diff that was shown, even if the caller had other work staged.
         git(repo, "commit", "-m", subject, "--", relpath)
+        committed = True
         sha = git(repo, "rev-parse", "HEAD").strip()
     except (GitError, OSError) as exc:
-        print(f"status=failed\n{exc}", file=sys.stderr)
+        # Only roll back what did NOT happen. If the commit landed and only
+        # `rev-parse` failed, the tree is already correct and restoring the file
+        # would DISCARD a committed change — the opposite of the fix.
+        note = (
+            COMMIT_LANDED_NOTE if committed
+            else _undo_write(repo, doc, relpath, original)
+        )
+        print(f"status=failed\n{exc}{note}", file=sys.stderr)
         return EXIT_FAIL
 
     if args.push:

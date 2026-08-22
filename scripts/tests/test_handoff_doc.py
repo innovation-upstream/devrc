@@ -26,6 +26,7 @@ import hashlib
 import importlib.util
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -33,6 +34,10 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO_ROOT / "scripts"))
+
+from testlib.mockbin import write_exec  # noqa: E402
+
 TOOL = REPO_ROOT / "scripts" / "lib" / "handoff_doc.py"
 HANDOFF_SKILL = REPO_ROOT / "claude" / "skills" / "handoff" / "SKILL.md"
 
@@ -2161,4 +2166,367 @@ class TestSkillAndModuleAgree:
             "scripts/lib/handoff_doc.py is not tracked by git, so the flake will "
             "omit it from the deploy and `home-manager switch` will succeed with "
             "the file simply absent."
+        )
+
+
+class TestBlockedCommitLeavesNoTrace:
+    """A REFUSED commit must not leave the doc written and staged.
+
+    🔴 MEASURED 2026-08-21, and this is the failure the class exists for. A
+    PreToolUse hook enforcing "never commit in the primary clone" refused the
+    `git commit` — correct behaviour — but the tool had ALREADY written the
+    merged doc and `git add`ed it. The refusal therefore left a modified, STAGED
+    file in a checkout shared with other sessions, where the next person's
+    `git commit` sweeps it in. The caller then re-ran the tool to read the error
+    and the merge appended the same block a SECOND time.
+
+    A blocked commit is not a no-op, and the caller has no reason to expect it
+    left anything behind: `status=failed` reads as "nothing happened".
+    """
+
+    @staticmethod
+    def _block_commits(repo: Path) -> None:
+        """Refuse every commit, the way a real guard hook does."""
+        # write_exec owns the shebang — a call site that supplies its own
+        # trips scripts/tests/test_runtime_shebangs.py, a REPO-WIDE scan that a
+        # three-file test run structurally cannot see.
+        write_exec(repo / ".git" / "hooks" / "pre-commit",
+                   "echo 'blocked by guard' >&2\nexit 1\n")
+
+    def test_the_hook_actually_blocks(self, repo: Path) -> None:
+        """POSITIVE CONTROL for the fixture itself.
+
+        Without this, a hook that silently failed to install would make every
+        assertion below pass for the wrong reason — the commit would simply
+        succeed and there would be nothing to roll back."""
+        self._block_commits(repo)
+        (repo / "canary.txt").write_text("x\n", encoding="utf-8")
+        _sh("git", "add", "--", "canary.txt", cwd=repo)
+        out = subprocess.run(
+            ["git", "-C", str(repo), "commit", "-m", "should be refused"],
+            capture_output=True, text=True, env=dict(os.environ, **GIT_ENV),
+        )
+        assert out.returncode != 0, "the pre-commit hook did not block — fixture is inert"
+
+    def test_doc_is_restored_and_nothing_is_staged(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        before = doc_of(repo)
+        shas_before = commit_shas(repo)
+        self._block_commits(repo)
+
+        res = run_tool(repo, "--confirm", update=update_file)
+
+        assert res.returncode == 3, f"expected EXIT_FAIL, got {res.returncode}"
+        assert "status=failed" in res.stderr
+        # 🔴 The two assertions this class exists for.
+        assert doc_of(repo) == before, (
+            "the doc was left MODIFIED after the commit was refused — in a shared "
+            "checkout that is another session's `git commit` away from being swept in"
+        )
+        staged = _sh("git", "diff", "--cached", "--name-only", cwd=repo).split()
+        assert staged == [], f"paths left STAGED after a refused commit: {staged}"
+        assert commit_shas(repo) == shas_before, "a commit was made despite the refusal"
+
+    def test_unrelated_staged_work_is_not_unstaged_by_the_rollback(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """The rollback must be PATH-LIMITED, like the commit it undoes.
+
+        A blanket `git reset` would unstage a co-worker's staged files as a side
+        effect of our own failure — trading one shared-checkout defect for a
+        worse one."""
+        (repo / "OTHER.md").write_text("someone else's staged work\n", encoding="utf-8")
+        _sh("git", "add", "--", "OTHER.md", cwd=repo)
+        self._block_commits(repo)
+
+        run_tool(repo, "--confirm", update=update_file)
+
+        staged = _sh("git", "diff", "--cached", "--name-only", cwd=repo).split()
+        assert staged == ["OTHER.md"], (
+            f"the rollback must leave unrelated staged work alone; staged={staged}"
+        )
+
+    def test_a_LANDED_commit_is_never_rolled_back(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """🔴 THE HIGHEST-CONSEQUENCE BRANCH, and it had no test.
+
+        The `committed` flag exists so a commit that LANDED and then hit a later
+        failure is left alone. Roll back there and the tool DISCARDS a committed
+        change — strictly worse than the defect it was written to fix.
+
+        🔴 THE FIRST VERSION OF THIS TEST WAS VACUOUS and only mutation testing
+        found it: it used a failing `post-commit` hook, and git IGNORES that
+        hook's exit status (measured: `git commit` rc=0, commit created). The
+        except-branch was never reached, so deleting the guard still passed.
+        A `git` shim that fails `rev-parse` ONLY AFTER a commit has run is the
+        real shape — the commit lands, then a later git step errors.
+        """
+        real_git = shutil.which("git")
+        assert real_git, "git not on PATH"
+        shim = repo / "gitshim-revparse"
+        shim.mkdir()
+        marker = shim / "committed.marker"
+        # `git()` invokes ["git", "-C", <repo>, *args] — the SUBCOMMAND is $3,
+        # not $1. Scan all args instead of indexing, which is what the earlier
+        # broken shim got wrong.
+        fired = shim / "intercepted.marker"
+        write_exec(
+            shim / "git",
+            f'for a in "$@"; do [ "$a" = "commit" ] && : > "{marker}"; done\n'
+            f'for a in "$@"; do\n'
+            f'  if [ "$a" = "rev-parse" ] && [ -f "{marker}" ]; then\n'
+            f'    : > "{fired}"; exit 7\n'
+            f'  fi\n'
+            f'done\n'
+            f'exec {real_git} "$@"\n',
+        )
+        shas_before = commit_shas(repo)
+        env = dict(os.environ, **GIT_ENV)
+        env["PATH"] = f"{shim}:{env['PATH']}"
+
+        res = subprocess.run(
+            [sys.executable, str(TOOL), "--repo", str(repo), "--topic",
+             "sample-topic", "--update", str(update_file), "--advanced",
+             "a landed commit must survive a later failure", "--confirm"],
+            capture_output=True, text=True, env=env,
+        )
+
+        # 🔴 POSITIVE CONTROL. Without these two the test passes with an INERT
+        # shim — measured: reverting the shim to its known-broken form left this
+        # green. `doc_of == head_doc` is ALSO true on the plain success path, so
+        # it cannot on its own prove the failure branch ran.
+        assert fired.exists(), (
+            "the git shim never intercepted rev-parse — this test proved nothing"
+        )
+        assert res.returncode == 3, (
+            f"expected EXIT_FAIL (the later step failed), got {res.returncode}"
+        )
+        assert commit_shas(repo) != shas_before, (
+            "fixture inert: no commit was made, so the guard was never exercised"
+        )
+        head_doc = _sh("git", "show", "HEAD:claudedocs/handoff-sample-topic.md",
+                       cwd=repo)
+        assert doc_of(repo) == head_doc, (
+            "the worktree was rolled back even though the commit LANDED — that "
+            "discards committed work"
+        )
+
+    def test_first_ever_handoff_leaves_no_untracked_file_behind(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """The `original is None` -> `unlink` branch, which had no fixture.
+
+        Every other fixture pre-creates the doc, so the first-ever-handoff path
+        was never exercised: dropping the `unlink` survived the suite. A doc left
+        behind here is an UNTRACKED file in a shared checkout — invisible to
+        `git status -s` habits that scan for ` M`, and it makes a re-run append
+        to a doc the caller believes was never written."""
+        doc = repo / "claudedocs" / "handoff-brand-new-topic.md"
+        assert not doc.exists()
+        self._block_commits(repo)
+
+        res = subprocess.run(
+            [sys.executable, str(TOOL), "--repo", str(repo), "--topic",
+             "brand-new-topic", "--update", str(update_file), "--advanced",
+             "a first-ever handoff for this topic", "--confirm"],
+            capture_output=True, text=True, env=dict(os.environ, **GIT_ENV),
+        )
+
+        assert res.returncode == 3, f"expected EXIT_FAIL, got {res.returncode}"
+        assert not doc.exists(), (
+            "the doc the run CREATED was left behind after the commit was refused"
+        )
+        untracked = _sh("git", "status", "--porcelain", "--untracked-files=all",
+                        cwd=repo).strip()
+        assert untracked == "", f"left untracked residue: {untracked!r}"
+
+    def test_the_reset_FALLBACK_is_also_path_limited(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """The fallback arm had no test — only the primary `restore` arm did.
+
+        `git reset` without `-- <path>` unstages EVERYTHING, so a co-worker's
+        staged file would be unstaged by our failure. Forcing the fallback by
+        making `git restore` unavailable proves the second arm carries the same
+        path limit as the first."""
+        # 🔴 Resolve the real git ABSOLUTELY. `exec /usr/bin/env git` searches
+        # PATH — which this shim is prepended to — so the shim re-execs itself
+        # forever. (Measured: the run had to be killed.)
+        real_git = shutil.which("git")
+        assert real_git, "git not on PATH"
+        shim = repo / "gitshim"
+        shim.mkdir()
+        # 🔴 `git()` invokes ["git", "-C", <repo>, *args], so the subcommand is
+        # $3 — an earlier version tested $1, never intercepted anything, and the
+        # fallback arm was never exercised (the mutant survived). Scan all args.
+        fired = shim / "intercepted.marker"
+        write_exec(shim / "git",
+                   f'for a in "$@"; do\n'
+                   f'  if [ "$a" = "restore" ]; then : > "{fired}"; exit 129; fi\n'
+                   f'done\n'
+                   f'exec {real_git} "$@"\n')
+        (repo / "OTHER.md").write_text("someone else's staged work\n", encoding="utf-8")
+        _sh("git", "add", "--", "OTHER.md", cwd=repo)
+        self._block_commits(repo)
+
+        env = dict(os.environ, **GIT_ENV)
+        env["PATH"] = f"{shim}:{env['PATH']}"
+        res = subprocess.run(
+            [sys.executable, str(TOOL), "--repo", str(repo), "--topic",
+             "sample-topic", "--update", str(update_file), "--advanced",
+             "forcing the reset fallback", "--confirm"],
+            capture_output=True, text=True, env=env,
+        )
+
+        # 🔴 POSITIVE CONTROL — see the sibling above. An inert shim means the
+        # PRIMARY `restore` arm succeeded and the fallback never ran, so the
+        # path-limit this test exists to prove was never exercised. Measured:
+        # with a broken shim AND a blanket-reset mutant, this stayed green.
+        assert fired.exists(), (
+            "the git shim never intercepted `restore` — the fallback arm did not "
+            "run, so this test proved nothing"
+        )
+        assert res.returncode == 3, (
+            f"expected EXIT_FAIL, got {res.returncode}"
+        )
+
+        staged = _sh("git", "diff", "--cached", "--name-only", cwd=repo).split()
+        assert staged == ["OTHER.md"], (
+            f"the reset fallback must be path-limited too; staged={staged}"
+        )
+
+    def test_incomplete_rollback_advises_ONLY_the_half_that_failed(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """🔴 A message that contradicts what happened is worse than none.
+
+        The index and worktree halves fail INDEPENDENTLY. Printing advice for
+        both was measured to tell an operator their content "was never committed
+        … restore by hand" while the bytes HAD been restored and the content WAS
+        in HEAD — advice that makes someone hand-rewrite a doc they still have.
+        Here the index half fails and the worktree half succeeds."""
+        real_git = shutil.which("git")
+        assert real_git, "git not on PATH"
+        shim = repo / "gitshim-index"
+        shim.mkdir()
+        fired = shim / "intercepted.marker"
+        write_exec(shim / "git",
+                   f'for a in "$@"; do\n'
+                   f'  case "$a" in restore|reset) : > "{fired}"; exit 129 ;; esac\n'
+                   f'done\n'
+                   f'exec {real_git} "$@"\n')
+        before = doc_of(repo)
+        self._block_commits(repo)
+        env = dict(os.environ, **GIT_ENV)
+        env["PATH"] = f"{shim}:{env['PATH']}"
+
+        res = subprocess.run(
+            [sys.executable, str(TOOL), "--repo", str(repo), "--topic",
+             "sample-topic", "--update", str(update_file), "--advanced",
+             "only the index half fails", "--confirm"],
+            capture_output=True, text=True, env=env,
+        )
+
+        assert fired.exists(), "the shim never intercepted — test proved nothing"
+        assert res.returncode == 3
+        assert "still STAGED" in res.stderr, res.stderr
+        # The worktree half SUCCEEDED, so nothing may claim otherwise.
+        assert "still MODIFIED" not in res.stderr, res.stderr
+        # 🔴 COUNT the advice lines, do not grep for a PHRASE. An earlier
+        # version asserted the absence of the new wording — so reverting the
+        # message to its old, false text satisfied it vacuously (measured: that
+        # mutant SURVIVED). One half failed, so exactly one fix line may appear.
+        block = res.stderr.split("ROLLBACK INCOMPLETE", 1)[1]
+        fix_lines = [ln for ln in block.splitlines() if ln.startswith("    ")]
+        assert len(fix_lines) == 1, (
+            f"expected exactly ONE fix line (only the index half failed), got "
+            f"{len(fix_lines)}:\n" + "\n".join(fix_lines)
+        )
+        assert "restore --staged" in fix_lines[0], fix_lines[0]
+        # 🔴 Indent-INDEPENDENT complement. The count above pins how many lines
+        # are indented, which a reword can walk in one direction (emit the
+        # worktree advice at a different indent) and break in the other (add an
+        # explanatory comment to the index arm). The worktree arm is comment
+        # lines in BOTH its old and new wording, so their absence is the claim
+        # that survives rewording AND reindenting.
+        # 🔴 The trade, stated: this ALSO fires if the index arm ever gains a
+        # comment line — a false FAILURE on a legitimate reword. That direction
+        # is chosen deliberately over a false PASS, and the invariant it depends
+        # on ("the index arm is one bare command line") is pinned as a contract
+        # beside that line in handoff_doc.py.
+        assert not any(ln.lstrip().startswith("#") for ln in block.splitlines()), (
+            "worktree advice (comment lines) printed although that half "
+            "succeeded:\n" + block
+        )
+        assert doc_of(repo) == before, "the worktree half did not actually restore"
+
+    def test_a_landed_commit_says_so_instead_of_a_bare_status_failed(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """`status=failed` now contracts to "nothing happened" — so the ONE
+        branch where a commit DOES exist must say so, or the contract lies."""
+        real_git = shutil.which("git")
+        assert real_git, "git not on PATH"
+        shim = repo / "gitshim-note"
+        shim.mkdir()
+        marker = shim / "committed.marker"
+        fired = shim / "intercepted.marker"
+        write_exec(
+            shim / "git",
+            f'for a in "$@"; do [ "$a" = "commit" ] && : > "{marker}"; done\n'
+            f'for a in "$@"; do\n'
+            f'  if [ "$a" = "rev-parse" ] && [ -f "{marker}" ]; then\n'
+            f'    : > "{fired}"; exit 7\n'
+            f'  fi\n'
+            f'done\n'
+            f'exec {real_git} "$@"\n',
+        )
+        env = dict(os.environ, **GIT_ENV)
+        env["PATH"] = f"{shim}:{env['PATH']}"
+
+        res = subprocess.run(
+            [sys.executable, str(TOOL), "--repo", str(repo), "--topic",
+             "sample-topic", "--update", str(update_file), "--advanced",
+             "the commit landed", "--confirm"],
+            capture_output=True, text=True, env=env,
+        )
+
+        assert fired.exists(), "the shim never intercepted — test proved nothing"
+        assert res.returncode == 3
+        assert "THE COMMIT LANDED" in res.stderr, (
+            "a commit exists but status=failed said nothing about it:\n" + res.stderr
+        )
+        assert "un-pushed" in res.stderr, res.stderr
+
+    def test_worktree_only_failure_does_NOT_print_index_advice(
+        self, repo: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The MIRROR of the only-the-failed-half test, and it was unpinned.
+
+        Round 2 gated both halves but tested only one, so ungating the INDEX arm
+        survived the suite — a worktree-only failure would tell the operator to
+        `git restore --staged` an index that had already been cleaned. Behaviour
+        was correct; the coverage was not.
+
+        Driven directly because the worktree half only fails on a real `OSError`
+        from `write_bytes`, which no subprocess fixture can force.
+        """
+        doc = repo / "claudedocs" / "handoff-sample-topic.md"
+        original = doc.read_bytes()
+
+        def boom(self, data):  # noqa: ANN001, ANN202 - patched Path.write_bytes
+            raise OSError("disk full")
+
+        monkeypatch.setattr(Path, "write_bytes", boom)
+        note = hd._undo_write(repo, doc, "claudedocs/handoff-sample-topic.md",
+                              original)
+
+        assert "still MODIFIED" in note, note
+        assert "still STAGED" not in note, (
+            "claimed the index was left staged although that half succeeded:\n" + note
+        )
+        assert "restore --staged" not in note, (
+            "printed unstage advice although the index half succeeded:\n" + note
         )
