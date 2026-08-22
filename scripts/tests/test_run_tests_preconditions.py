@@ -410,13 +410,28 @@ def test_guard1c_dep_list_matches_the_flake_interpreter():
 def test_the_hook_degrades_on_ENV_faults_and_BLOCKS_on_repo_content():
     """🔴 The exit-code split, and the reason it exists.
 
-    A first version of the pre-push hook degraded on rc 2. `run-tests.sh` has TEN abort
-    sites and only six are environmental; the rest are REPO-CONTENT
-    guards -- the target list, the floor table, the launcher stubs, the spool
-    wiring -- whose own messages warn "do NOT delete the entry to make this pass
-    -- that is how a suite stops running while the gate goes green". Degrading on
-    2 produced precisely that, on the ONLY tier that runs automatically: this repo
-    has no CI and no branch protection (pinned by test_ci_claim_matches_reality).
+    A first version of the pre-push hook degraded on rc 2. `run-tests.sh` has
+    ELEVEN abort sites -- six `exit 3` and five `exit 2`; the exit-2 ones are
+    REPO-CONTENT guards -- the target list, the floor table, the launcher stubs,
+    the spool wiring -- whose own messages warn "do NOT delete the entry to make
+    this pass -- that is how a suite stops running while the gate goes green".
+    Degrading on 2 produced precisely that, on the only tier that BLOCKS a push.
+
+    🔴 Two corrections, both because the claims above went stale and were still
+    being cited. (a) The census said "TEN abort sites, only six environmental",
+    which is both the wrong total and a 6/4 split against the true 6/5; a
+    line-anchored `^\\s*exit 3$` misses the inline `cd "$ROOT" || { ...; exit 3; }`
+    spelling. (b) "The ONLY tier that runs automatically: no CI and no branch
+    protection" -- a Tekton PR gate now runs (`tekton/devrc-pytests`,
+    `tekton/devrc-nodetests`); measured, #704 reports no checks and #714 reports
+    both. Its red is advisory -- `main`'s protection requires a review but NOT
+    status checks (`required_status_checks` -> 404, measured 2026-08-22) -- so
+    the accurate claim is "the only tier that BLOCKS", not "the only tier that
+    runs", and NOT "there is no branch protection".
+
+    🔴 GUARD 1 is now in BOTH lists: since devrc#705 it classifies by CAUSE
+    (DEVRC_GATE_ENV=1 -> repo defect -> 2; unset -> caller defect -> 3), so the
+    exit code no longer follows from which guard fired.
 
     So the runner now exits 3 for environment faults, and this asserts BOTH sides
     -- the hook degrading on 3 is worthless if it also degrades on 2.

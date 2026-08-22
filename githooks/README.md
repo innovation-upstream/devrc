@@ -72,9 +72,13 @@ Behaviour, all failing in the **safe direction**:
 
   🔴 A Tekton PR gate (`tekton/devrc-pytests`, `tekton/devrc-nodetests`) now
   runs on PRs; the older "no CI" claim here was true when written and is not
-  now. It invokes the runner via `nix develop`, so the marker arms it too. With
-  no branch protection its red is advisory — which is why this hook remains the
-  only tier that **blocks**.
+  now. It runs `nix build .#checks.x86_64-linux.<leg>` and does **not** enter
+  the devShell, so it is armed by `checks.pytests`'s own `DEVRC_GATE_ENV`
+  export rather than the `shellHook` this hook uses — the two are not
+  redundant. (The `nodetests` leg carries no marker and needs none.)
+  Its red is advisory (`main`'s protection requires a review but **not** status
+  checks — `required_status_checks` → 404, measured 2026-08-22) — which is why
+  this hook remains the only tier that **blocks**.
 - **Escape hatch** — `DEVRC_SKIP_TESTS=1 git push …` skips the gate for one push
   regardless of mode (the flake check / CI still enforce the hermetic subset).
 

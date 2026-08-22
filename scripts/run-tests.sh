@@ -270,12 +270,19 @@ cd "$ROOT" || { echo "run-tests: cannot cd to ROOT=$ROOT" >&2; exit 3; }
 # exactly that outcome, on the only tier that BLOCKS a push. 🔴 "The only tier
 # that RUNS" was true when this was written and is now FALSE: a Tekton PR gate
 # (`tekton/devrc-pytests`, `tekton/devrc-nodetests`) went live between #704 and
-# #714 — measured, #704 reports no checks and #714 reports both. It invokes
-# `nix develop --command bash scripts/run-tests.sh .`, so it IS armed by the
-# devShell's DEVRC_GATE_ENV export and needs no separate handling. What it does
-# NOT do is block a merge: there is still no branch protection, so a red check
-# is advisory. `test_ci_claim_matches_reality.py` cannot see this — its own
-# scope note excludes Tekton — so do not read its green as agreement.
+# #714 — measured, #704 reports no checks and #714 reports both. It runs
+# `nix build .#checks.x86_64-linux.<leg>` — it does NOT enter the devShell — so
+# it is armed by checks.pytests's OWN export, not the shellHook's. (The
+# nodetests leg exports no marker and needs none: its runner has no
+# DEVRC_GATE_ENV and no exit 3.)
+#
+# What that gate does NOT do is block a merge: `main`'s branch protection does
+# NOT require status checks — `required_status_checks` returns 404 (measured
+# 2026-08-22) — though it DOES require 1 approving review. So protection EXISTS
+# and a red check is still advisory; do not restate this as "there is no branch
+# protection", which is the wrong mechanism for the right conclusion.
+# `test_ci_claim_matches_reality.py` cannot see any of this — its own scope note
+# excludes Tekton — so do not read its green as agreement.
 # A new `exit` here must pick a side deliberately.
 # --- GUARD 1: tool precondition ------------------------------------------------
 # Every binary the suites `skipif` on. Absence must be an ERROR, never a skip.
@@ -350,8 +357,9 @@ if [ "${#missing_tools[@]}" -gt 0 ]; then
   # the test that would have caught the typo never executed, because the runner
   # aborted before pytest started. That is "a suite stops running while the gate
   # goes green" on the only tier that BLOCKS a push — a Tekton PR gate does now
-  # run (see the EXIT CODES block above), but with no branch protection its red
-  # is advisory, so exit 3 here still let the push land. devrc#705.
+  # run (see the EXIT CODES block above), but its red is advisory — branch
+  # protection does not require status checks — so exit 3 here still let the
+  # push land. devrc#705.
   #
   # The discriminator is whether we are IN a sanctioned gate env, which both the
   # devShell and checks.pytests announce with DEVRC_GATE_ENV=1:
@@ -387,12 +395,15 @@ if [ "${#missing_tools[@]}" -gt 0 ]; then
     echo "  missing, so REQUIRED_TOOLS names something flake.nix \`gateTools\`" >&2
     echo "  does not supply." >&2
     echo >&2
-    echo "  FIX — the two files that must agree, and the name is in both:" >&2
-    echo "    * $ROOT/scripts/run-tests.sh   -> REQUIRED_TOOLS (the binary name)" >&2
-    echo "    * $ROOT/flake.nix              -> gateTools      (the nix package)" >&2
-    echo "  Correct the spelling in REQUIRED_TOOLS, or add the package that" >&2
-    echo "  provides it to gateTools. Note the two use DIFFERENT names for the" >&2
-    echo "  same tool (ripgrep provides rg, nodejs provides node)." >&2
+    echo "  FIX — two files must agree, but they name the tool DIFFERENTLY:" >&2
+    echo "    * $ROOT/scripts/run-tests.sh -> REQUIRED_TOOLS (the BINARY name)" >&2
+    echo "    * $ROOT/flake.nix            -> gateTools      (the NIX PACKAGE)" >&2
+    echo "  🔴 Do NOT expect to find the binary name in flake.nix — the package" >&2
+    echo "  that provides it is usually spelled differently (ripgrep provides" >&2
+    echo "  rg, nodejs provides node, util-linux provides setsid, gnugrep" >&2
+    echo "  provides grep). Finding no match there does NOT mean it is absent." >&2
+    echo "  So: correct the spelling in REQUIRED_TOOLS, or add the package that" >&2
+    echo "  PROVIDES the binary to gateTools." >&2
     echo >&2
     echo "  Exiting 2 so the pre-push hook BLOCKS rather than degrading." >&2
     exit 2

@@ -245,9 +245,14 @@ fi
 #
 # 🔴 A Tekton PR gate (`tekton/devrc-pytests`, `tekton/devrc-nodetests`) DOES now
 # run on PRs — the older "no CI" claim here was true when written and is not now.
-# It invokes the runner through `nix develop`, so it is armed by the same marker.
-# With no branch protection its red is advisory, which is why this hook is still
-# the only tier that BLOCKS.
+# It runs `nix build .#checks.x86_64-linux.<leg>` and does NOT enter the
+# devShell, so it is armed by checks.pytests's OWN DEVRC_GATE_ENV export — not
+# by the shellHook this hook relies on. The two exports are not redundant.
+# (The nodetests leg carries no marker and needs none: no DEVRC_GATE_ENV, no
+# exit 3 in its runner.)
+# Its red is advisory — `main`'s protection requires a review but NOT status
+# checks (`required_status_checks` -> 404, measured 2026-08-22) — which is why
+# this hook is still the only tier that BLOCKS.
 #
 # Verified in the other direction too: `fail` is only ever assigned 0 or 1 and the
 # script ends `exit "$fail"`, so a genuine pytest failure can never surface as 2

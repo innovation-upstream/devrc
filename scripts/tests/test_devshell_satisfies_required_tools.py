@@ -489,10 +489,37 @@ def test_both_sanctioned_gate_envs_export_the_marker():
     src = _uncommented_flake()
     MARKER = "DEVRC_GATE_ENV=1"
 
-    # --- half 1: the devShell's shellHook (the pre-push tier's environment) ---
+    # 🔴 BOTH WINDOWS ARE STRUCTURALLY BOUNDED, AND PROVEN DISJOINT.
+    # The first version bounded half 1 with a FIXED SLICE, src[shell_at:+800].
+    # Measured, that ran 538 chars PAST the devShell block and INTO the pytests
+    # derivation: the windows were (2458,3258) and (2720,5620). A single marker
+    # landing in the overlap satisfied BOTH assertions, so a flake.nix with
+    # NEITHER tier armed could pass -- the exact vacuity this test exists to
+    # prevent, reintroduced by the fix for it. The 800 was only ever "safe" by
+    # however much comment text happened to separate the two blocks, which is
+    # the least stable content in the file.
     shell_at = src.find("shellHook")
+    py_at = src.find("pytests =")
+    node_at = src.find("nodetests =", py_at) if py_at != -1 else -1
     assert shell_at != -1, "no shellHook in flake.nix"
-    assert MARKER in src[shell_at:shell_at + 800], (
+    assert py_at != -1, "no `pytests =` derivation in flake.nix"
+    assert node_at != -1, "no `nodetests =` after pytests to bound the window"
+    # The ordering assumption, made explicit rather than left implicit in a
+    # slice: devShells is declared BEFORE checks. If that ever flips, this fails
+    # loudly here instead of silently producing an empty or inverted window.
+    assert shell_at < py_at, (
+        f"expected the devShell ({shell_at}) to be declared before the checks "
+        f"block ({py_at}); the window bounds below assume it."
+    )
+    dev_win, pyt_win = (shell_at, py_at), (py_at, node_at)
+    # TRIPWIRE: the whole point is that each half is pinned SEPARATELY.
+    assert dev_win[1] <= pyt_win[0], (
+        f"the two windows overlap ({dev_win} vs {pyt_win}) — a single marker in "
+        "the overlap would satisfy both assertions, so neither half is pinned."
+    )
+
+    # --- half 1: the devShell's shellHook (the pre-push tier's environment) ---
+    assert MARKER in src[dev_win[0]:dev_win[1]], (
         "the devShell's shellHook does not export DEVRC_GATE_ENV=1, so a "
         "contributor running the gate from `nix develop` -- which is how the "
         "pre-push hook invokes it -- gets the ENVIRONMENT diagnosis for a REPO "
@@ -500,15 +527,20 @@ def test_both_sanctioned_gate_envs_export_the_marker():
     )
 
     # --- half 2: the checks.pytests derivation (the hermetic/CI tier) ---
-    # Bounded by the NEXT derivation so this window cannot drift into it. Both
-    # anchors are assignments: the bare word "nodetests" also appears in a
-    # comment inside the pytests block, and slicing on that truncated the window
-    # to before the export while writing this.
-    py_at = src.find("pytests =")
-    assert py_at != -1, "no `pytests =` derivation in flake.nix"
-    node_at = src.find("nodetests =", py_at)
-    assert node_at != -1, "no `nodetests =` after pytests to bound the window"
-    assert MARKER in src[py_at:node_at], (
+    # 🔴 This is the export the TEKTON PR GATE runs on. That pipeline does
+    # `nix build .#checks.x86_64-linux.pytests` -- it does NOT enter the
+    # devShell -- so half 1 does not cover CI and this half is not redundant
+    # with it. (`checks.nodetests` exports no marker and needs none: its runner
+    # has no DEVRC_GATE_ENV and no exit 3 at all.)
+    #
+    # The anchors are both ASSIGNMENTS (`nodetests =`, not the bare word). In
+    # THIS code path that is belt-and-braces rather than load-bearing, because
+    # `_uncommented_flake` has already removed the comment that contains the
+    # bare word -- stripped, both spellings resolve to the same offset. It
+    # matters when reading the RAW file, where the bare word appears ~7.7k
+    # chars earlier and truncates the window to before the export. Keep the
+    # assignment form so the anchor is right in both views.
+    assert MARKER in src[pyt_win[0]:pyt_win[1]], (
         "the checks.pytests derivation does not export DEVRC_GATE_ENV=1, so the "
         "hermetic tier misclassifies its OWN repo defects as environment "
         "faults. Asserted as its own window, not as a count: a total is "
