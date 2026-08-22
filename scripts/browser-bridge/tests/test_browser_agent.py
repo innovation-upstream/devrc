@@ -350,6 +350,59 @@ def _stall_extends(waited: float, cap):
     return (base > _SPAWN_IDLE_REF * _SPAWN_STALL_FACTOR and waited < cap), base
 
 
+def _proc_state(pid):
+    """The single-letter process state from /proc, or "" if unreadable."""
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(") ", 1)[1].split(None, 1)[0]
+    except (OSError, IndexError, ValueError):
+        return ""
+
+
+def _process_gone(pid):
+    """Has `pid` stopped running? A ZOMBIE counts as gone.
+
+    🔴 `os.kill(pid, 0)` IS NOT THIS CHECK, and the difference is invisible on a
+    dev host. A killed process that its parent has not `wait()`ed for stays in
+    the table as a zombie, and `kill(pid, 0)` SUCCEEDS on a zombie — so the naive
+    check reports a corpse as a live process, forever.
+
+    On the workbench nothing notices: the straggler below is orphaned when its
+    parent dies, PID 1 is systemd, and systemd reaps an orphan within
+    milliseconds. Inside a CI step container PID 1 is the step's own entrypoint,
+    which does not reap, so the zombie persists for the life of the pod.
+
+    MEASURED 2026-08-22: this made `test_timeout_reaps_the_whole_process_group`
+    the sole failure in every `devrc-ci` PipelineRun — 5 of 5, across unrelated
+    revisions, on a test whose file none of those changes touched. The gate had
+    never once been green, and a gate that has never passed teaches everyone to
+    click through it.
+
+    The state is read from `/proc/<pid>/stat`, whose second field is a
+    parenthesised comm that may itself contain spaces and `)`, so the split is on
+    the LAST `") "` — not `.split()[2]`, which a process named `foo bar` breaks.
+
+    The remaining rival for "killed but kill(0) still succeeds" is PID REUSE. It
+    is not silently folded in: a reused pid is some other live process, reads as
+    R/S here, and is reported STILL RUNNING — the conservative direction, and a
+    different failure with a different diagnosis.
+    """
+    try:
+        os.kill(pid, 0)
+    except (ProcessLookupError, PermissionError):
+        return True
+    try:
+        stat_line = Path(f"/proc/{pid}/stat").read_text()
+    except (OSError, ValueError):
+        # No procfs (not Linux, or the entry vanished between the two reads —
+        # which is itself "gone", but say so only for the vanish case).
+        return False
+    try:
+        state = stat_line.rsplit(") ", 1)[1].split(None, 1)[0]
+    except IndexError:
+        return False
+    return state == "Z"
+
+
 def _await(predicate, what, slice_s=8.0, stall_cap=None, poll=0.05):
     """Wait for a DETERMINISTIC condition, consulting the clock only to judge
     hung-vs-stalled. Same discipline as the subprocess wait — see RUN_TIMEOUT.
@@ -1048,6 +1101,57 @@ def test_unparseable_probe_error_does_not_dump_the_whole_listing(rig):
 # --------------------------------------------------------------------------- #
 # Process-group kill on timeout — no orphaned child survives.
 # --------------------------------------------------------------------------- #
+def test_a_zombie_counts_as_gone_and_the_naive_check_disagrees():
+    """🔴 The reap check must not mistake a corpse for a live process.
+
+    Builds a REAL zombie: spawn a child, SIGKILL it, never `wait()` it. The
+    control is the second assertion — `os.kill(pid, 0)` succeeding is the whole
+    defect, so a version of `_process_gone` that reverts to it fails HERE rather
+    than 35 seconds into the straggler test with "it never happened".
+
+    Why this was invisible: on this host PID 1 is systemd and reaps an orphan in
+    milliseconds, so the naive check is right almost always. In a CI step
+    container PID 1 does not reap, and it is wrong every time — 5 of 5
+    `devrc-ci` runs, on revisions with nothing to do with this file.
+    """
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)"])
+    try:
+        child.kill()
+        _await(lambda: _proc_state(child.pid) == "Z",
+               what=f"child {child.pid} to become a zombie", slice_s=10.0)
+
+        assert _process_gone(child.pid), (
+            f"a zombie ({child.pid}) must count as GONE — it has been killed; "
+            f"only its parent has not reaped it yet")
+
+        # The control. If this ever passes, the assertion above proves nothing,
+        # because the naive check would satisfy it too.
+        naive_says_alive = True
+        try:
+            os.kill(child.pid, 0)
+        except (ProcessLookupError, PermissionError):
+            naive_says_alive = False
+        assert naive_says_alive, (
+            "premise gone: `os.kill(pid, 0)` no longer succeeds on a zombie on "
+            "this platform, so this test can no longer see the defect it pins")
+    finally:
+        child.wait()
+
+    # And once reaped it is gone by BOTH readings — the pid is out of the table.
+    assert _process_gone(child.pid)
+
+
+def test_the_reap_check_reports_a_live_process_as_running():
+    """The other direction, so `_process_gone` cannot be trivially `return True`."""
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)"])
+    try:
+        assert _proc_state(child.pid) in ("R", "S", "D")
+        assert not _process_gone(child.pid), "a running process reported as gone"
+    finally:
+        child.kill()
+        child.wait()
+
+
 def test_timeout_reaps_the_whole_process_group(rig, tmp_path):
     """opencode may spawn helper children in its group; a naive per-pid `timeout`
     kill would orphan them. The wrapper runs opencode under `setsid` and kills the
@@ -1063,12 +1167,11 @@ def test_timeout_reaps_the_whole_process_group(rig, tmp_path):
     assert pid_file.exists(), "the straggler child never started (test rig issue)"
     child_pid = int(pid_file.read_text().strip())
 
-    def _gone(pid):
-        try:
-            os.kill(pid, 0)
-            return False
-        except (ProcessLookupError, PermissionError):
-            return True
+    # 🔴 `_process_gone`, NOT a local `os.kill(pid, 0)` — read its docstring. The
+    # straggler is orphaned by design here, so whether it disappears or lingers
+    # as a zombie is decided by whatever PID 1 happens to be, and that differs
+    # between this dev host and a CI step container.
+    _gone = _process_gone
 
     # 🔴 This was `deadline = time.time() + 8` — a wall clock, and the same defect
     # class as the flake this file now guards: on a stalled box the kill can take
