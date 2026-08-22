@@ -31,17 +31,65 @@ scripts/browser-bridge/tests/test_skill_size.py — that skill is the existence
 proof that 12 KB is achievable for a genuinely complex tool.
 """
 import argparse
+import importlib.machinery
+import importlib.util
 import os
 import re
 import sys
 from pathlib import Path
 
 # --- budgets -------------------------------------------------------------------
-# TARGET is the browser skill's PROVEN ceiling (MAX_BYTES in
-# scripts/browser-bridge/tests/test_skill_size.py): 11 reference topics and a
-# 21-op CLI routed from 11,845 B of core. It is a demonstrated budget, not an
-# aspiration, which is why it is the default rather than something rounder.
-TARGET = 12_288
+# 🔴 THE BUDGET IS NOT RE-DECLARED HERE. scripts/browser-bridge/tests/test_skill_size.py
+# OWNS both numbers, each with the measurement that sized it, and it is the gate
+# that actually blocks a merge. This module used to restate the ceiling as a
+# literal and check ONLY against it -- so it printed
+#
+#     ✓ all 1 skill(s) within budget -- no prune needed (stop; do not churn the files)
+#
+# for scripts/browser-bridge/SKILL.md on a day that gate was RED (12,259 B: inside
+# the 12,288 B ceiling, 221 B inside the 250 B working margin). The documented
+# audit tool told a maintainer to stop about the exact file the authoritative test
+# was rejecting. Reading the constants out of the gate is what makes that
+# disagreement impossible; a fallback literal here would be the duplicate this
+# exists to prevent, so a missing/unreadable gate is a hard failure, not a default.
+_BUDGET_SOURCE = (Path(__file__).resolve().parent
+                  / "browser-bridge" / "tests" / "test_skill_size.py")
+
+
+def _load_budget(path=_BUDGET_SOURCE):
+    """(ceiling, working margin) read from the gate module itself.
+
+    That module imports nothing but pathlib and runs no code at import time, so
+    loading it here is cheap and side-effect free.
+    """
+    if not path.is_file():
+        raise SystemExit(
+            f"skill-audit: cannot read the budget -- {path} is missing.\n"
+            "That file OWNS the ceiling and the working-margin floor. This tool "
+            "deliberately keeps no copy of them (a second hand-maintained number "
+            "is how the audit and the gate came to disagree), so it cannot run "
+            "without it."
+        )
+    loader = importlib.machinery.SourceFileLoader("_skill_size_gate", str(path))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    try:
+        return int(mod.MAX_BYTES), int(mod.MIN_HEADROOM_BYTES)
+    except AttributeError as e:  # the gate renamed a constant
+        raise SystemExit(
+            f"skill-audit: {path} no longer exports the budget constants "
+            f"({e}). Re-point _load_budget at their new names -- do NOT paste "
+            "the numbers back in here."
+        )
+
+
+# TARGET is the browser skill's PROVEN ceiling; MIN_HEADROOM is the working margin
+# that must stay below it, sized off a MEASURED mean table row so the warning
+# precedes the breach. BUDGET is what is actually ENFORCED -- a body between
+# BUDGET and TARGET is inside the ceiling and still fails the gate.
+TARGET, MIN_HEADROOM = _load_budget()
+BUDGET = TARGET - MIN_HEADROOM
 # HARD is where a skill stops being a skill. ~40 KB is ~10k tokens — already a
 # 5% bite out of a 200k context before any work starts. Past this the body
 # routinely displaces the task it was loaded for.
@@ -470,7 +518,7 @@ def audit_one(skill_md):
         # copy under scratchpad/ as the skill "scratchpad".
         "name": skill_md.parent.name if skill_md.name == "SKILL.md" else skill_md.stem,
         "size": size,
-        "status": "OK" if size <= TARGET else ("OVER TARGET" if size <= HARD else "OVER HARD CAP"),
+        "status": status_for(size),
         "preamble_bytes": _bytes(lines[:first_h2]),
         "h2": h2,
         "fattest_h2": fattest,
@@ -517,8 +565,35 @@ def resolve_targets(args):
     return uniq
 
 
+def status_for(size):
+    """The four bands, widest-first in severity.
+
+    NO HEADROOM is the band the ceiling-only check could not see: under TARGET,
+    so the old comparison called it OK, while the gate rejects it. It is a
+    FINDING, not a note -- everything downstream that asks "is this skill over"
+    tests `status != "OK"`, so naming it here is what makes the verdict move.
+    """
+    if size <= BUDGET:
+        return "OK"
+    if size <= TARGET:
+        return "NO HEADROOM"
+    if size <= HARD:
+        return "OVER TARGET"
+    return "OVER HARD CAP"
+
+
 def _mark(status):
-    return {"OK": "✓", "OVER TARGET": "⚠", "OVER HARD CAP": "✗"}[status]
+    return {"OK": "✓", "NO HEADROOM": "⚠", "OVER TARGET": "⚠",
+            "OVER HARD CAP": "✗"}[status]
+
+
+def _overage(a):
+    """(what it is over, by how many bytes) for a non-OK skill."""
+    if a["status"] == "OVER HARD CAP":
+        return "hard cap", a["size"] - HARD
+    if a["status"] == "OVER TARGET":
+        return "target", a["size"] - TARGET
+    return "enforced budget", a["size"] - BUDGET
 
 
 def render(audits, show_all, n_sections, n_detail, out=sys.stdout):
@@ -526,14 +601,24 @@ def render(audits, show_all, n_sections, n_detail, out=sys.stdout):
     audits = sorted(audits, key=lambda a: -a["size"])
     over = [a for a in audits if a["status"] != "OK"]
     p(f"# SKILL.md audit — {len(audits)} skill(s)")
-    p(f"\ntarget {TARGET:,} B   hard cap {HARD:,} B   (the browser skill holds "
-      f"{TARGET:,} with 11 reference topics — the budget is proven, not aspirational)")
+    p(f"\nbudget {BUDGET:,} B ENFORCED   = ceiling {TARGET:,} B − {MIN_HEADROOM:,} B "
+      f"working margin   ·   hard cap {HARD:,} B")
+    p(f"  ({BUDGET:,} is the number the gate rejects at — a body between it and the "
+      f"{TARGET:,} B\n   ceiling is 'under the ceiling' and still RED. Both constants are read "
+      f"from\n   {_BUDGET_SOURCE.relative_to(Path(__file__).resolve().parent.parent)}, "
+      f"which owns them.)")
 
     p("\n## sizes (worst first)")
     listed = audits if show_all else over
     for a in listed:
-        ratio = f"  {a['size'] / TARGET:.1f}x target" if a["size"] > TARGET else ""
-        p(f"  {a['size']:>9,} B  {_mark(a['status'])} {a['status']:<13} {a['name']}{ratio}")
+        if a["status"] == "OK":
+            note = ""
+        elif a["status"] == "NO HEADROOM":
+            note = (f"  {a['size'] - BUDGET:,} B over the enforced budget "
+                    f"(only {TARGET - a['size']:,} B of the {MIN_HEADROOM:,} B margin left)")
+        else:
+            note = f"  {a['size'] / TARGET:.1f}x target"
+        p(f"  {a['size']:>9,} B  {_mark(a['status'])} {a['status']:<13} {a['name']}{note}")
     hidden = len(audits) - len(listed)
     if hidden:
         p(f"  ({hidden} skill(s) within budget — not listed; --all to see them)")
@@ -541,9 +626,8 @@ def render(audits, show_all, n_sections, n_detail, out=sys.stdout):
         p("  (none over budget)")
 
     for a in over[:n_detail]:
-        p(f"\n## {a['name']} — {a['size']:,} B "
-          f"(over {'hard cap' if a['status'] == 'OVER HARD CAP' else 'target'} by "
-          f"{a['size'] - (HARD if a['status'] == 'OVER HARD CAP' else TARGET):,} B)")
+        what, by = _overage(a)
+        p(f"\n## {a['name']} — {a['size']:,} B (over {what} by {by:,} B)")
         p(f"  {a['path']}")
         if not a["fence_ok"]:
             p("  🔴 UNCLOSED ``` FENCE — every heading after it is invisible to this "
@@ -569,8 +653,12 @@ def render(audits, show_all, n_sections, n_detail, out=sys.stdout):
         if a["dated"]:
             pct = 100.0 * a["dated_bytes"] / a["size"]
             after = a["size"] - a["dated_bytes"]
-            verdict = "under target" if after <= TARGET else (
-                "still over target" if after <= HARD else "still over the HARD CAP")
+            verdict = {
+                "OK": "under the enforced budget",
+                "NO HEADROOM": "still inside the working margin — the gate stays RED",
+                "OVER TARGET": "still over target",
+                "OVER HARD CAP": "still over the HARD CAP",
+            }[status_for(after)]
             p(f"    {len(a['dated'])} block(s), {a['dated_bytes']:,} B ({pct:.1f}% of the file)")
             p(f"    → evicting them to a claudedocs/ doc leaves {after:,} B — {verdict}")
             for title, _s, _e, b in sorted(a["dated"], key=lambda s: -s[3])[:5]:
@@ -677,16 +765,23 @@ def render(audits, show_all, n_sections, n_detail, out=sys.stdout):
     p("\n## verdict")
     n_hard = sum(1 for a in audits if a["status"] == "OVER HARD CAP")
     n_over = sum(1 for a in audits if a["status"] == "OVER TARGET")
+    n_tight = sum(1 for a in audits if a["status"] == "NO HEADROOM")
     if not over and not any_ref_issue and not broken_fence:
-        p(f"  ✓ all {len(audits)} skill(s) within budget, references intact — "
-          f"no prune needed (stop; do not churn the files)")
+        p(f"  ✓ all {len(audits)} skill(s) within budget ({BUDGET:,} B enforced), "
+          f"references intact — no prune needed (stop; do not churn the files)")
     else:
         need = []
         if n_hard:
             need.append(f"{n_hard} over the {HARD:,} B hard cap")
         if n_over:
             need.append(f"{n_over} over the {TARGET:,} B target")
-        excess = sum(a["size"] - TARGET for a in over)
+        if n_tight:
+            need.append(f"{n_tight} inside the {TARGET:,} B ceiling but past the "
+                        f"{MIN_HEADROOM:,} B working margin — the gate REJECTS these")
+        # Measured against the ENFORCED budget, not the ceiling: against the
+        # ceiling a NO HEADROOM skill contributes a NEGATIVE number, which
+        # silently cancelled out real overage elsewhere in the same run.
+        excess = sum(a["size"] - BUDGET for a in over)
         if excess > 0:
             need.append(f"cut ~{excess:,} B total")
         if any_ref_issue:

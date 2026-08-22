@@ -949,3 +949,194 @@ def test_two_spellings_of_one_topic_count_once(tmp_path):
             "`.claude/skills/rr/reference/alpha.md` in the repo-layout section\n")
     a = sa.audit_one(_rr_skill(tmp_path, core, ("alpha.md",)))
     assert len(a["refs"]) == 1, f"same file counted {len(a['refs'])}x: {a['refs']}"
+
+
+# --- the working-margin band: the auditor must not disagree with the gate ------
+# 🔴 REGRESSION. Measured on main at 3393c60b: scripts/browser-bridge/SKILL.md was
+# 12,259 B. test_skill_size.py::test_skill_md_keeps_working_headroom was RED (29 B
+# of free space against a 250 B required margin — "RECLAIM: 221 bytes") while this
+# auditor — the tool /prune-skill documents a maintainer to run — printed
+#
+#     ✓ all 1 skill(s) within budget — no prune needed (stop; do not churn the files)
+#
+# about that same file. It compared against the CEILING only and was structurally
+# blind to the headroom floor, so the documented instrument said STOP about a file
+# the authoritative gate was rejecting. These tests pin both halves: the constants
+# are READ from the gate rather than restated, and a file in the band is a FINDING
+# — checked in BOTH directions, because a checker that always says "prune needed"
+# is as useless as one that never does.
+
+GATE_PY = SCRIPTS / "browser-bridge" / "tests" / "test_skill_size.py"
+gate = _load("browser-bridge/tests/test_skill_size.py", "browser_skill_size_gate")
+
+
+def _skill_of_size(tmp_path, name, size):
+    """A well-formed SKILL.md of EXACTLY `size` bytes and nothing else wrong.
+
+    No reference/ dir: a skill that HAS one but routes nowhere is an ORPHAN
+    finding, which would move the verdict for a reason that is not the size band
+    — red for the wrong reason, and still red with the band check deleted.
+    """
+    d = tmp_path / name
+    d.mkdir(parents=True)
+    head = (f"---\nname: {name}\ndescription: a fixture sized to the byte.\n"
+            f"---\n\n## Ops\n\n").encode()
+    assert size >= len(head) + 1, f"{size} is too small to build a valid fixture"
+    remaining = size - len(head)
+    chunks = []
+    while remaining > 80:
+        chunks.append(b"x" * 79 + b"\n")
+        remaining -= 80
+    chunks.append(b"x" * (remaining - 1) + b"\n")
+    p = d / "SKILL.md"
+    p.write_bytes(head + b"".join(chunks))
+    assert len(p.read_bytes()) == size, (
+        "the fixture builder is wrong — every size test below is void")
+    return p
+
+
+def test_the_gate_module_is_the_one_the_auditor_reads():
+    """Guard the guard: if this path is wrong, everything below measures a module
+    the auditor never loads."""
+    assert GATE_PY.is_file()
+    assert sa._BUDGET_SOURCE == GATE_PY.resolve()
+
+
+def test_the_budget_constants_come_from_the_gate_not_a_second_copy():
+    assert sa.TARGET == gate.MAX_BYTES
+    assert sa.MIN_HEADROOM == gate.MIN_HEADROOM_BYTES
+    assert sa.BUDGET == gate.MAX_BYTES - gate.MIN_HEADROOM_BYTES
+
+
+def test_no_budget_number_is_written_as_a_literal_in_the_auditor():
+    """Equality alone cannot separate a derived value from a coincidence — a
+    pasted literal satisfies it until the day the gate moves.
+
+    MIN_HEADROOM is deliberately NOT checked: it could legitimately equal an
+    unrelated constant (FAT_LINE is 500), and a false failure on a coincidence is
+    worse than the narrower pin. The mechanical control in
+    test_changing_the_gates_numbers_changes_what_the_auditor_reads covers it.
+    """
+    import ast
+    literals = {n.value for n in ast.walk(ast.parse(AUDIT_PY.read_text()))
+                if isinstance(n, ast.Constant) and isinstance(n.value, int)
+                and not isinstance(n.value, bool)}
+    assert sa.TARGET not in literals, (
+        f"{sa.TARGET} is a numeric literal in skill-audit.py — the ceiling is "
+        f"owned by {GATE_PY}, and a second hand-maintained copy is exactly how "
+        "the audit and the gate came to disagree.")
+    assert sa.BUDGET not in literals, (
+        f"{sa.BUDGET} (the ENFORCED budget) is a literal in skill-audit.py; it "
+        "must be derived as TARGET - MIN_HEADROOM.")
+
+
+def test_changing_the_gates_numbers_changes_what_the_auditor_reads(tmp_path):
+    """The mechanical control for the derivation: feed _load_budget a DIFFERENT
+    gate file and watch the numbers move. Values picked so neither can equal the
+    real ones by accident."""
+    fake = tmp_path / "fake_gate.py"
+    fake.write_text("MAX_BYTES = 9_001\nMIN_HEADROOM_BYTES = 137\n")
+    assert sa._load_budget(fake) == (9_001, 137)
+
+
+def test_a_missing_gate_file_is_a_hard_failure_not_a_fallback(tmp_path):
+    """A default literal on the missing-file path would BE the duplicate this
+    design removes — and it would apply silently, which is the worse half."""
+    with pytest.raises(SystemExit) as e:
+        sa._load_budget(tmp_path / "not-there.py")
+    assert "OWNS the ceiling" in str(e.value)
+
+
+def test_a_renamed_gate_constant_fails_loudly(tmp_path):
+    fake = tmp_path / "renamed.py"
+    fake.write_text("CEILING = 9_001\n")
+    with pytest.raises(SystemExit) as e:
+        sa._load_budget(fake)
+    assert "no longer exports the budget constants" in str(e.value)
+
+
+# --- the band itself, in BOTH directions ---------------------------------------
+
+def test_a_file_in_the_warning_band_says_prune_needed(tmp_path):
+    """THE non-vacuity test: a body inside the ceiling but past the working margin
+    is exactly what the ceiling-only check called ✓."""
+    size = sa.BUDGET + 1
+    assert size < sa.TARGET, "the band is empty — this test would prove nothing"
+    p = _skill_of_size(tmp_path, "tight", size)
+    assert sa.audit_one(p)["status"] == "NO HEADROOM"
+    out = _run(tmp_path)
+    assert "⚠ prune needed" in out, out
+    assert "no prune needed" not in out, out
+    assert "the gate REJECTS these" in out, out
+
+
+def test_a_comfortably_small_file_still_says_no_prune_needed(tmp_path):
+    p = _skill_of_size(tmp_path, "lean", 2_000)
+    assert sa.audit_one(p)["status"] == "OK"
+    out = _run(tmp_path)
+    assert "no prune needed" in out
+    assert "prune needed —" not in out
+
+
+@pytest.mark.parametrize("offset,expected", [(-1, "OK"), (0, "OK"), (1, "NO HEADROOM")])
+def test_the_enforced_budget_boundary_is_exact(tmp_path, offset, expected):
+    """Inclusive: BUDGET bytes leaves exactly MIN_HEADROOM free, which is what the
+    gate requires (>=, not >). One byte more is a finding."""
+    p = _skill_of_size(tmp_path, "b", sa.BUDGET + offset)
+    assert sa.audit_one(p)["status"] == expected
+
+
+@pytest.mark.parametrize("offset,expected",
+                         [(-1, "NO HEADROOM"), (0, "NO HEADROOM"), (1, "OVER TARGET")])
+def test_the_ceiling_boundary_is_exact(tmp_path, offset, expected):
+    p = _skill_of_size(tmp_path, "c", sa.TARGET + offset)
+    assert sa.audit_one(p)["status"] == expected
+
+
+def test_the_hard_cap_boundary_is_unchanged_by_the_new_band(tmp_path):
+    assert sa.audit_one(_skill_of_size(tmp_path / "a", "h", sa.HARD))["status"] == "OVER TARGET"
+    assert sa.audit_one(_skill_of_size(tmp_path / "b", "h", sa.HARD + 1))["status"] == "OVER HARD CAP"
+
+
+@pytest.mark.parametrize("base,delta", [
+    (None, 2_000),
+    ("BUDGET", -100), ("BUDGET", -1), ("BUDGET", 0), ("BUDGET", 1), ("BUDGET", 100),
+    ("TARGET", -1), ("TARGET", 0), ("TARGET", 1), ("TARGET", 5_000),
+])
+def test_the_auditor_and_the_gate_never_disagree(tmp_path, base, delta):
+    """The disagreement itself, pinned. For ANY size, "the auditor reports a
+    finding" must equal "the gate's headroom assertion fails" — the right-hand
+    side computed from the GATE's own constants, never from the auditor's.
+
+    This is the property the bug violated: at 12,259 B the gate said RED and the
+    auditor said ✓.
+    """
+    size = delta if base is None else {"BUDGET": sa.BUDGET, "TARGET": sa.TARGET}[base] + delta
+    p = _skill_of_size(tmp_path, "x", size)
+    gate_is_red = (gate.MAX_BYTES - size) < gate.MIN_HEADROOM_BYTES
+    auditor_reports_finding = sa.audit_one(p)["status"] != "OK"
+    assert auditor_reports_finding == gate_is_red, (
+        f"at {size:,} B the gate says {'RED' if gate_is_red else 'green'} and the "
+        f"auditor says {'finding' if auditor_reports_finding else '✓'} — that is "
+        "the exact disagreement this block exists to prevent.")
+
+
+def test_the_budget_line_states_the_ENFORCED_number_not_only_the_ceiling(tmp_path):
+    """A maintainer reads the header to learn what they must fit under. Printing
+    only the ceiling is what makes 12,2xx B look like room."""
+    _skill_of_size(tmp_path, "lean", 2_000)
+    out = _run(tmp_path)
+    assert f"budget {sa.BUDGET:,} B ENFORCED" in out, out
+    assert f"ceiling {sa.TARGET:,} B" in out, out
+    assert f"{sa.MIN_HEADROOM:,} B working margin" in out, out
+
+
+def test_the_real_browser_skill_agrees_with_its_own_gate():
+    """The live cross-check on the file the whole pattern is the exemplar for —
+    the repo's CURRENT SKILL.md, so a regrowth into the band is caught on the next
+    commit that touches it, not only in fixtures."""
+    browser = SCRIPTS / "browser-bridge" / "SKILL.md"
+    size = len(browser.read_bytes())
+    gate_is_red = (gate.MAX_BYTES - size) < gate.MIN_HEADROOM_BYTES
+    assert sa.audit_one(browser)["status"] == "OK" and not gate_is_red, (
+        f"browser SKILL.md is {size:,} B; the enforced budget is {sa.BUDGET:,} B")
