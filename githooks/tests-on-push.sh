@@ -252,7 +252,9 @@ fi
 # exit 3 in its runner.)
 # Its red is advisory — `main`'s protection requires a review but NOT status
 # checks (`required_status_checks` -> 404, measured 2026-08-22) — which is why
-# this hook is still the only tier that BLOCKS.
+# this hook is still the only tier that blocks A PUSH. (Precisely: `main` also
+# requires 1 approving review, which blocks a MERGE — so "the only tier that
+# blocks" unqualified is wrong. The push is what this hook governs.)
 #
 # Verified in the other direction too: `fail` is only ever assigned 0 or 1 and the
 # script ends `exit "$fail"`, so a genuine pytest failure can never surface as 2

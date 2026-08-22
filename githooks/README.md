@@ -78,7 +78,9 @@ Behaviour, all failing in the **safe direction**:
   redundant. (The `nodetests` leg carries no marker and needs none.)
   Its red is advisory (`main`'s protection requires a review but **not** status
   checks — `required_status_checks` → 404, measured 2026-08-22) — which is why
-  this hook remains the only tier that **blocks**.
+  this hook remains the only tier that blocks **a push**. (`main` also requires
+  1 approving review, which blocks a *merge* — so the unqualified "only tier
+  that blocks" would be wrong.)
 - **Escape hatch** — `DEVRC_SKIP_TESTS=1 git push …` skips the gate for one push
   regardless of mode (the flake check / CI still enforce the hermetic subset).
 

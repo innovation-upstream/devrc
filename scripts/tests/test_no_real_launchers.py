@@ -951,8 +951,11 @@ PINNED_PATH_CLOBBERS = {
         "measured the intended case: two tiers, opposite blind spots"),
     "test_devshell_satisfies_required_tools.py": (
         '{"PATH"' + ': str(stub)',
-        "the SECOND clobber justified by ENUMERATION rather than emptiness, and "
-        "the stronger case of the two. 🔴 This needle now matches TWO sites in "
+        "a clobber justified by ENUMERATION rather than emptiness, and the "
+        "strongest of those. (It used to say \"the SECOND … of the two\": there "
+        "are THREE enumeration-justified entries, and next to the \"TWO sites\" "
+        "below the ordinal read as if it counted those instead.) 🔴 This needle "
+        "now matches TWO sites in "
         "that file — the `emitted_fatal` fixture (`only-bash`) and "
         "`test_guard1_classifies_by_cause_not_by_site` (`only-bash-cause`) — so "
         "it cannot tell them apart; BOTH carry the one-entry assertion, which "
