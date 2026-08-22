@@ -531,6 +531,11 @@ MUST_ASK = [
     "FOO=1 sops -d s.enc.yaml",
     "sops exec-env s.enc.yaml env",
     "age -d -i k f",
+    # Pinned in its own right since the 2026-08-21 narrowing: with no `*`
+    # between "age" and the flag, this no longer contains the literal
+    # "age -d", so `"*age -d*"` does NOT cover it and the redundancy
+    # ledger entry that used to claim it did was removed.
+    "age --decrypt -i k f",
     "home-manager switch",
     "nixos-rebuild switch",
     "nix profile remove x",
@@ -626,7 +631,8 @@ MUST_ASK = [
     # load-bearing for a real spelling; each went ask -> allow at BOTH layers
     # with its rule deleted. See REDUNDANTLY_COVERED_ASKS' header.
     #
-    # `*age*-d*` rescues only the spellings containing a literal `-d`, so the
+    # `*age -d*` rescues only the spellings CONTAINING the literal "age -d"
+    # ("nix-collect-gar(BAGE) -d", with or without a trailing flag), so the
     # commonest GC invocations were the ones left unguarded.
     "nix-collect-garbage",                                       # *nix-collect-garbage*
     "nix-collect-garbage --max-freed 1G",                        # *nix-collect-garbage*
@@ -688,7 +694,11 @@ MUST_ASK = [
 # rule's, which is a different and much larger piece of work.
 REDUNDANTLY_COVERED_ASKS = {
     "*sops*--decrypt*": ("*sops*-d*", "sops --decrypt s.enc.yaml"),
-    "*age*--decrypt*": ("*age*-d*", "age --decrypt -i k f"),
+    # `"*age --decrypt*"` was listed here as covered by `"*age*-d*"`. That
+    # stopped being true when the age globs were narrowed on 2026-08-21: with
+    # no `*` between "age" and the flag, "age --decrypt …" no longer contains
+    # the literal "age -d", so the two rules now cover disjoint spellings and
+    # neither is redundant. Both are pinned individually in MUST_ASK.
     "*systemctl*restart*": ("*systemctl*start*", "systemctl restart foo"),
 }
 
@@ -738,6 +748,18 @@ MUST_ALLOW = [
     "rg foo",
     "flux get kustomizations -A",
     "kubectl rollout restart deploy/x",
+    # 🔴 REGRESSION, measured 2026-08-21. `"*age*-d*"` (the `age` decryption
+    # tool) had a `*` BETWEEN "age" and "-d", so it matched any command text
+    # containing "age" followed LATER by "-d". "age" is a substring of package,
+    # packages, image, message, storage, manage; "-d" covers -db-, --dir,
+    # --debug, --dry-run. Three ordinary read-only commands below therefore
+    # resolved ASK, which `opencode run` auto-rejects — killing the run
+    # mid-task. Two real dispatches died on exactly these, one on `grep` and
+    # one on `ls`. The fix is to drop that inner `*` so the glob requires the
+    # literal "age -d"; these three pin that it stays dropped.
+    "ls packages/civitai-db-schema/src/",
+    "grep -n REPLICATION_LAG_DELAY packages/civitai-db/src/lag.test.ts",
+    "rg 'storage' src/ --debug",
 ]
 
 # Every agent that ships, plus the implicit primary. `None` == no agent block.
@@ -1481,6 +1503,62 @@ def test_rm_glob_misses_these_recursive_spellings():
         "structural half of this pair and must keep handling r/R bundles."
     )
 
+
+def test_age_glob_misses_these_reordered_decrypt_spellings():
+    """🔴 A KNOWN, OPEN GAP OPENED BY THE 2026-08-21 NARROWING — pinned so it
+    stays visible instead of implied-shut.
+
+    LABEL: CHARACTERIZATION test, not regression coverage. It asserts today's
+    WRONG answer on purpose.
+
+    Narrowing `"*age*-d*"` to `"*age -d*"` removed a large false-positive class
+    (any command text with "age" followed LATER by "-d" — package/packages/
+    image/message/storage vs -db-/--dir/--debug), which was auto-rejecting
+    ordinary read-only commands and killing headless runs. The cost is that the
+    glob now knows exactly ONE argument order: the flag immediately after the
+    binary. Every spelling below puts an identity or output flag first and so
+    resolves plain ALLOW.
+
+    🔴 THIS IS THE ONLY GATE. `guard_core.py` contains no age/sops check at all
+    (grep it — 0 hits for "sops"/"decrypt"), so unlike the `rm` gap above there
+    is no second layer failing in the opposite direction. These spellings are
+    not theoretical: each was executed against a real age keypair (v1.3.1) and
+    yielded the plaintext at rc=0 — the two `-o`/`--output` rows WRITE it to the
+    named file rather than to stdout, which is the same disclosure by a different
+    route. Every row carries an identity flag on purpose —
+    an earlier draft listed `age -o plain.txt -d secret.age` without one, which
+    exits 1 ("identities are required") and so proved nothing about decryption.
+    Adding `-i` changes no verdict here; all six still resolve ALLOW.
+
+    NOT closed here, deliberately, and the reasoning is the same whack-a-mole as
+    the `rm` gap. `"*age -i*"` is the obvious candidate and it is NOT a fix:
+    MEASURED, it matches only the two `age -i …` rows and MISSES all four that
+    spell the identity long-form or put an output flag first. It is also not
+    decrypt-exclusive — `age -e -i k.txt plain.txt` encrypts — so it would buy
+    two spellings plus a false-positive class, not a family.
+    The structural fix is an argv-aware check in guard_core.py, which is where
+    this file's own header says irreversible/secret families belong.
+
+    🔴 If this test FAILS because a verdict became `ask`/`deny`, the gap was
+    CLOSED: delete that row from here and add the command to MUST_ASK.
+    """
+    for cmd in [
+        "age -i key.txt -d secret.age",
+        "age -i key.txt --decrypt secret.age",
+        "age -o plain.txt -i key.txt -d secret.age",
+        "age --identity key.txt -d secret.age",
+        "age --identity key.txt --decrypt secret.age",
+        "age --output plain.txt -i key.txt --decrypt secret.age",
+    ]:
+        assert layered_verdict(cmd, None) == "allow", (
+            f"{cmd!r} no longer resolves 'allow'. If you closed this gap, move "
+            f"it into MUST_ASK and delete it here — do not relax the assertion."
+        )
+    # The contrast cases, so the gap's SHAPE is pinned, not just its existence:
+    # flag-immediately-after still asks, and the sibling sops rule — deliberately
+    # left infix-tolerant — still catches its own reordered spelling.
+    assert effective_bash_action("age -d -i key.txt secret.age", None) == "ask"
+    assert effective_bash_action("sops --config .sops.yaml -d f.enc.yaml", None) == "ask"
 
 def test_guard_core_deliberately_ignores_an_ordinary_recursive_delete():
     """Split out from the attribution test above so each names one claim."""
