@@ -174,7 +174,8 @@ fi
 # fails — would silently `git init`, `git add` and `git commit` in the
 # OPERATOR'S REAL STORE instead of the directory it meant. This is the same
 # class as ship.sh's SHIP_REPO and drift-check.sh's DRIFT_REPO; see
-# scripts/tests/test_no_real_repo_writes.py, which pins all four sites.
+# scripts/tests/test_repo_path_defaults.py, which pins all SIX sites in both
+# directions and asserts each guard actually STOPS the run, not merely warns.
 if [ "${#POSITIONAL[@]}" -eq 1 ] && [ -z "${POSITIONAL[0]}" ]; then
   die "STORE argument was given but is EMPTY.
   That is a caller bug, not a request for the default — an empty value would

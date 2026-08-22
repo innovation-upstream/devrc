@@ -82,11 +82,15 @@
 # take (5 conflicted-tree, 7 cannot-ff, 9 switch-failed, 11 verify-failed) are
 # left UNUSED rather than repurposed.
 #
-#   2   usage error (unknown flag, non-integer tunable), or a RUN THAT CHECKED
+#   2   usage error (unknown flag, non-integer tunable), a RUN THAT CHECKED
 #       NO HOST AT ALL — either because the flags asked for none (`--no-local
 #       --no-remote`) or because the only host it was asked to look at could not
-#       be reached. rc 0 from a run that observed nothing is the vacuous green
-#       this whole subsystem exists to prevent, so it is never emitted.
+#       be reached (rc 0 from a run that observed nothing is the vacuous green
+#       this whole subsystem exists to prevent, so it is never emitted) — or
+#       DRIFT_REPO SET BUT EMPTY, which is a caller bug: `${VAR:-default}`
+#       cannot tell unset from empty, so an empty value would silently resolve
+#       to $HOME/workspace/devrc and fetch into the operator's own clone. UNSET
+#       still defaults, deliberately: the remote leg does not forward it.
 #   3   repo missing on that host
 #   4   git fetch failed, or origin/main is missing / HEAD unborn
 #   6   local host could not be identified (see detect_role)
@@ -571,6 +575,18 @@ severity() {
     # 99 — above rc 8 — which is the wrong answer for "I could not identify the
     # local host" versus "a host has un-pushed commits".
     6)  echo 58 ;;
+    # 2 (DRIFT_REPO set-but-EMPTY) is the same shape as 6 above: today it cannot
+    # reach here — the top-level guard exits before any host leg, and the CHECK /
+    # SRCREPO payload copies only fire if a caller forwards an empty DRIFT_REPO,
+    # which neither leg does. But it is a code this file now OWNS and emits, and
+    # per the rc 6 note an owned code with no case ranks 99, ABOVE rc 8 — wrong
+    # for a caller bug versus a host holding un-pushed commits.
+    #   BELOW 6, because 6 means the run could not even identify what it was
+    #   looking at, whereas this one knows exactly what is wrong and who to tell.
+    #   ABOVE 4/3, because those are single-run "could not evaluate" outcomes
+    #   that may simply be gone next run, whereas an empty override is
+    #   DETERMINISTIC — re-running changes nothing until the caller is fixed.
+    2)  echo 57 ;;
     4)  echo 55 ;;
     3)  echo 50 ;;
     12) echo 40 ;;
