@@ -132,44 +132,6 @@ def emitted_fatal(tmp_path_factory):
     return combined
 
 
-def _fatal_block() -> str:
-    """The `required tool(s) missing` FATAL block AS SOURCE TEXT.
-
-    ⚠ Retained only for the assertions that are genuinely about the SOURCE (that
-    the precondition is still spelled as a hard failure). Anything about what
-    the operator SEES must use the `emitted_fatal` fixture instead -- this
-    function cannot tell a live line from a commented-out one.
-    """
-    src = RUN_TESTS.read_text()
-    start = src.find("required tool(s) missing from PATH")
-    assert start != -1, (
-        "could not find the 'required tool(s) missing from PATH' FATAL in "
-        "run-tests.sh. If it was reworded, update this parser -- do NOT delete "
-        "the test, or the message goes back to being unguarded."
-    )
-    # 🔴 TERMINATE ON ANY `exit <n>`, not a hardcoded code. GUARD 1 exited 2 until
-    # 2026-08-22, when environment preconditions moved to 3 so the pre-push hook
-    # could degrade on them. This parser still looked for `exit 2`, so it walked
-    # PAST GUARD 1 and stopped at GUARD 5's — widening the window from 17 lines to
-    # 1235. The `assert end != -1` tripwire below could not fire, because it DID
-    # find an `exit 2`, just the wrong one. Measured: with the window widened, both
-    # sentences this test exists to protect could be deleted from the real FATAL
-    # and re-planted as dead prose 20 lines further down, and the test PASSED.
-    #
-    # A guard keyed on a value that another file is free to change is a guard with
-    # a remote off-switch. Match the SHAPE instead.
-    m = re.search(r"^\s*exit \d+\s*$", src[start:], re.M)
-    assert m, "found the FATAL but not its `exit <n>`; the parser is broken"
-    end = start + m.start()
-    block = src[start:end]
-    # A window that spans more than this guard is the failure above, returning.
-    assert block.count("\n") < 60, (
-        f"the FATAL window is {block.count(chr(10))} lines — it has run past its "
-        f"own `exit` into a later guard, so every assertion on it is meaningless."
-    )
-    return block
-
-
 # ---------------------------------------------------------------------------
 # REGRESSION
 # ---------------------------------------------------------------------------
@@ -222,18 +184,34 @@ def test_the_missing_tool_fatal_names_a_runnable_invocation(emitted_fatal):
     )
 
 
-def test_the_fatal_still_forbids_deleting_the_precondition():
+def test_the_fatal_still_forbids_deleting_the_precondition(emitted_fatal):
     """INVARIANT guard — the precondition must not be softened into advice.
 
     Making the message friendlier is exactly the edit that would also make
     "just drop logrotate from REQUIRED_TOOLS" sound reasonable. It must not.
+
+    🔴 READS THE EMITTED OUTPUT, NOT THE SOURCE. It used to parse a window out of
+    run-tests.sh, and that window was terminated by a hardcoded `exit 2`. When
+    GUARD 1 moved to `exit 3` the search walked past it into a later guard,
+    widening the window from 17 lines to 1235 — its own `assert end != -1`
+    tripwire could not fire, because it HAD found an `exit 2`, just the wrong
+    one. Both protected sentences could then be deleted from the live echoes and
+    re-planted as dead comment prose further down, and this test passed.
+
+    A width cap was the first repair and it was one guard too loose: the
+    cumulative windows are 17 → 50 → 108 → 126 → 1235, so a `< 60` bound still
+    admitted a ONE-guard overshoot, which is all the walk needs. This file's own
+    source-parser docstring already said the rule — "anything about what the
+    operator SEES must use the `emitted_fatal` fixture, this function cannot tell
+    a live line from a commented-out one". The right repair was to follow it.
+    `emitted_fatal` is the real FATAL, printed by a real run: no window, no
+    terminator, and a commented-out echo prints nothing.
     """
-    block = _fatal_block()
-    assert "Do NOT drop entries from REQUIRED_TOOLS" in block or \
-           "do NOT drop them from" in block, block
-    assert "go green while" in block, (
+    assert "Do NOT drop entries from REQUIRED_TOOLS" in emitted_fatal or \
+           "do NOT drop them from" in emitted_fatal, emitted_fatal
+    assert "go green while" in emitted_fatal, (
         "the message no longer explains WHY a missing tool is fatal (the run "
-        "would go green while testing less)"
+        f"would go green while testing less).\n\nWhat it printed:\n{emitted_fatal}"
     )
 
 

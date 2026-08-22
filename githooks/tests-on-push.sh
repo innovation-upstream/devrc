@@ -15,8 +15,13 @@
 # DESIGN PRINCIPLES (fail in the SAFE direction):
 #   * GLOBAL-hook safe — no-op for every repo except devrc (self-detected).
 #   * Infra flakiness DEGRADES, never blocks — if the test ENV can't be prepared
-#     (offline, uncached, substituter hiccup, disk full, no nix) we WARN loudly
-#     and allow the push. The runner signals this with exit 3.
+#     (offline, uncached, substituter hiccup, no nix) we WARN loudly and allow
+#     the push. 🔴 TWO DISJOINT mechanisms, deliberately not conflated: THIS
+#     file's `degrade()` handles the env-can't-be-built case BEFORE the runner
+#     is invoked at all; the runner's own exit 3 covers its environment
+#     preconditions (GUARDs 1/1b/1c, a failed `cd $ROOT`, the spool `mkdir`).
+#     Saying "the runner signals this with exit 3" sent people looking for a
+#     runner message that was never printed.
 #   * 🔴 REPO-CONTENT guards BLOCK even though zero tests ran. run-tests.sh exits
 #     2 when its target list, floor table, launcher stubs or spool wiring are
 #     wrong — defects in the REPO, whose own messages warn that silencing them is

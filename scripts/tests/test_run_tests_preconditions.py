@@ -239,7 +239,7 @@ def test_every_required_tool_is_reachable_by_the_prepush_tier():
     assert not unsatisfied, (
         f"REQUIRED_TOOLS entries the pre-push tier cannot supply: "
         f"{unsatisfied}.\n"
-        f"  run-tests.sh aborts at GUARD 1 with exit 2 and runs ZERO tests, so "
+        f"  run-tests.sh aborts at GUARD 1 with exit 3 and runs ZERO tests, so "
         f"the gate silently stops being a gate.\n"
         f"  Fix by adding the package to `gateTools` in flake.nix — ONE list, "
         f"shared by devShells.default (which the pre-push hook runs via "
@@ -396,7 +396,10 @@ def test_guard1c_dep_list_matches_the_flake_interpreter():
     assert not missing_from_guard, (
         f"flake.nix gatePyEnv supplies {sorted(missing_from_guard)} but GUARD 1c "
         f"does not check them — the guard would pass an interpreter lacking a dep "
-        f"the suites import. This is the SILENT direction."
+        f"the suites import. This is the SILENT direction.\n"
+        f"  If the nixpkgs attr and the MODULE name differ (pillow/PIL, "
+        f"beautifulsoup4/bs4), add the pair to NIX_TO_MODULE — do NOT copy "
+        f"the attr into GUARD 1c's tuple, which would make it unimportable."
     )
     missing_from_flake = guard_deps - flake_modules
     assert not missing_from_flake, (
@@ -407,8 +410,8 @@ def test_guard1c_dep_list_matches_the_flake_interpreter():
 def test_the_hook_degrades_on_ENV_faults_and_BLOCKS_on_repo_content():
     """🔴 The exit-code split, and the reason it exists.
 
-    A first version of the pre-push hook degraded on rc 2. `run-tests.sh` has NINE
-    `exit 2` sites and only four are environmental; the rest are REPO-CONTENT
+    A first version of the pre-push hook degraded on rc 2. `run-tests.sh` has TEN abort
+    sites and only six are environmental; the rest are REPO-CONTENT
     guards -- the target list, the floor table, the launcher stubs, the spool
     wiring -- whose own messages warn "do NOT delete the entry to make this pass
     -- that is how a suite stops running while the gate goes green". Degrading on
@@ -418,7 +421,7 @@ def test_the_hook_degrades_on_ENV_faults_and_BLOCKS_on_repo_content():
     So the runner now exits 3 for environment faults, and this asserts BOTH sides
     -- the hook degrading on 3 is worthless if it also degrades on 2.
 
-    The BEHAVIOURAL half is already covered: `test_a_typod_target_is_named`
+    The BEHAVIOURAL half is already covered: `test_a_typod_target_entry_is_loud`
     below drives the real runner with a bogus target and asserts exit 2. This
     test pins the WIRING that turns that 2 into a blocked push; a first draft
     of it duplicated the behavioural half as a hollow assertion that a

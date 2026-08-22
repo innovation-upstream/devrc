@@ -47,13 +47,19 @@ Behaviour, all failing in the **safe direction**:
 - **Infra flakiness degrades, never blocks** — the env is the repo's **devShell**
   (never a trusted ambient pytest — the modules import requests/psycopg2/minio/
   yaml at collection). Env preparation is a **separate step** from the pytest
-  run: if the env can't be built (offline, uncached, substituter hiccup, disk
-  full, no `nix`) the worker **warns and allows the push** (exit 0). That is
-  exit 3 from the runner. 🔴 A REPO-CONTENT guard (exit 2 — target list, floor
-  table, launcher stubs, spool wiring) BLOCKS even though zero tests ran: those
-  are defects in the repo, and this hook is the only automatic gate (no CI, no
-  branch protection).
-  tests that actually executed and failed block.
+  run: if the env can't be built (offline, uncached, substituter hiccup, no
+  `nix`) the worker **warns and allows the push** (exit 0). 🔴 Two DISJOINT
+  mechanisms produce that, and conflating them sends people hunting for a
+  message that was never printed:
+  - the hook's own `degrade()`, **before the runner is ever invoked** — this is
+    the offline/substituter/devShell-build case;
+  - the runner exiting **3**, for its own environment preconditions (GUARDs
+    1/1b/1c, a failed `cd $ROOT`, the spool `mkdir`).
+
+  🔴 A REPO-CONTENT guard (runner exit **2** — target list, floor table,
+  launcher stubs, spool wiring) **BLOCKS** even though zero tests ran: those are
+  defects in the repo, and this hook is the only automatic gate (no CI, no
+  branch protection). So: exit 1 blocks, exit 2 blocks, exit 3 degrades.
 - **Escape hatch** — `DEVRC_SKIP_TESTS=1 git push …` skips the gate for one push
   regardless of mode (the flake check / CI still enforce the hermetic subset).
 

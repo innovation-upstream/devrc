@@ -135,7 +135,7 @@ set -uo pipefail
 # Because `_emit_verdict` is the ONLY writer and it is fed `$?`, the verdict and
 # the exit status cannot disagree — there is no code path that prints one and
 # returns the other. The EXIT trap is what makes that total: an abort, a kill,
-# a `set -u` unbound variable or any of the early `exit 2` preconditions now
+# a `set -u` unbound variable or any of the early `exit 3` environment preconditions now
 # ends with a verdict line too, where before they ended with silence that a
 # content-parsing consumer reads as "no failures found".
 #
