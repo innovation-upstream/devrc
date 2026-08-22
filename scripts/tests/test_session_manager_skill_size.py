@@ -217,12 +217,24 @@ PROTECTED_CLAIMS: dict[str, tuple[str, ...]] = {
         "`summary.waiting.probable` — a different population, never summed with "
         "this one.**",
     ),
-    "the NEVER-PASTE-A-CAPTURED-DRAFT rule": (
-        "🔴 **NEVER PASTE A CAPTURED DRAFT INTO A COMMITTED FILE.** "
-        "`unsent_prompt` hands you **text the operator typed**, and devrc is a "
-        "**PUBLIC** repo — as is every `claudedocs/` note, commit message, PR "
-        "body, comment or test fixture an agent writes into it. Report a draft as "
-        "a **count, a length or a shape**, never verbatim.",
+    # 🔴 WIDENED 2026-08-21, and the widening is the point. The rule named
+    # `unsent_prompt` alone from the day it landed (2026-08-17) while
+    # `clickhouse.rows[].first_msg` -- the opening prompt of every recent
+    # session, ~17 KB of operator-typed text in a DEFAULT scan -- had been in
+    # the same payload since the tool's first commit (2026-08-11), with no rule
+    # attached in any document. Nothing was wrong with the sentence; it was NARROWER than the
+    # payload it governed, which is `claude/RULES.md`'s "a guard's DESCRIPTION
+    # claims COVERAGE -- check the implementation is as wide as the sentence".
+    # The pin is what stops it narrowing back: naming BOTH fields is now the
+    # thing that is checked, not merely the thing that is written.
+    "the NEVER-PASTE-CAPTURED-OPERATOR-TEXT rule": (
+        "🔴 **NEVER PASTE CAPTURED OPERATOR TEXT INTO A COMMITTED FILE.** TWO "
+        "fields carry **text the operator typed** — `unsent_prompt` (the draft) "
+        "and `clickhouse.rows[].first_msg` (the opening prompt of every recent "
+        "session) — and devrc is a **PUBLIC** repo, as is every `claudedocs/` "
+        "note, commit message, PR body, comment or test fixture an agent writes "
+        "into it. Report either as a **count, a length or a shape**, never "
+        "verbatim.",
     ),
 }
 

@@ -11015,6 +11015,161 @@ class TestCommitWindowRange:
         assert emitted == set(st.ESCALATION_REASONS)
 
 
+# =============================================================================
+# 🔴 THE MAINLINE IS DERIVED, NOT GUESSED.
+#
+# REGRESSION COVERAGE, watched RED AT BASE `9667fb8b`, where the base ref is a
+# four-name literal ladder — `origin/main, origin/master, main, master` — and a
+# repo whose mainline is `trunk` therefore returns `no-base-ref`. Measured in the
+# field the same day on `homelab-infra` (mainline `trunk`): the `--commit`
+# escalation was INERT in exactly the repo it had been called for.
+#
+# TWO-POINT MEASUREMENT against the REAL repos, before and after:
+#   ~/workspace/homelab-infra (mainline trunk)  no-base-ref -> origin/trunk, READ
+#   ~/workspace/devrc         (mainline main)   origin/main -> origin/main, same
+#
+# RED AT BASE `9667fb8b`: the three tests below whose docstrings do not say
+# otherwise. The other three pass at base and label themselves INVARIANT GUARDS
+# — the base has no derivation to fool, so their green there is vacuous; they
+# are proven live at HEAD by the mutation battery documented in
+# `test_handoff_doc.py`.
+# =============================================================================
+
+
+def _mainline_clone(tmp_path: Path, mainline: str, name: str = "downstream") -> Path:
+    """A real clone of a real bare origin whose default branch is `mainline`.
+
+    Deliberately a CLONE and not a hand-written ref: `refs/remotes/origin/HEAD`
+    is written by `git clone` itself, so the fixture reproduces how the field
+    repo actually got its symref rather than asserting against a shape invented
+    here. Still no network — the origin is a bare repo in the same tmp_path.
+    """
+    origin = tmp_path / f"{name}-origin.git"
+    _run_git(tmp_path, "init", "-q", "--bare", "-b", mainline, str(origin),
+             home=tmp_path)
+    seed = _init_repo(tmp_path, name=f"{name}-seed", branch=mainline)
+    _run_git(seed, "remote", "add", "origin", str(origin), home=tmp_path)
+    _run_git(seed, "push", "-q", "origin", mainline, home=tmp_path)
+    _run_git(tmp_path, "clone", "-q", str(origin), str(tmp_path / name), home=tmp_path)
+    return tmp_path / name
+
+
+class TestMainlineDerivation:
+    """Both directions, at two points: a `trunk` repo AND a `main` repo."""
+
+    def test_a_TRUNK_mainline_repo_MEASURES_its_window(self, tmp_path: Path) -> None:
+        """🔴 THE REGRESSION. Red at base with `no-base-ref`."""
+        repo = _mainline_clone(tmp_path, "trunk")
+        _run_git(repo, "checkout", "-q", "-b", "topic", home=tmp_path)
+        sha = _commit(repo, "src/collector/a.py", tmp_home=tmp_path)
+        rng = st.commit_window_range(repo)
+        assert rng.reason is None, rng.detail
+        assert rng.base_ref == "origin/trunk" and rng.shas == (sha,)
+
+    def test_a_MAIN_mainline_repo_STILL_measures_its_window(
+        self, tmp_path: Path
+    ) -> None:
+        """The other point. A fix verified only on `trunk` proves nothing about
+        the case that already worked.
+
+        ⚠ GREEN AT BASE `9667fb8b` — an INVARIANT GUARD, not regression coverage.
+        It pins that the derivation did not move the answer for the repos the
+        literal ladder already got right."""
+        repo = _mainline_clone(tmp_path, "main")
+        _run_git(repo, "checkout", "-q", "-b", "topic", home=tmp_path)
+        sha = _commit(repo, "src/collector/a.py", tmp_home=tmp_path)
+        rng = st.commit_window_range(repo)
+        assert rng.reason is None, rng.detail
+        assert rng.base_ref == "origin/main" and rng.shas == (sha,)
+
+    def test_the_GIT_SOURCE_window_derives_the_SAME_ref(self, tmp_path: Path) -> None:
+        """🔴 ONE RULE, ONE PLACE — pinned behaviourally, not by reading the
+        source. `collect_git_paths` and `commit_window_range` used to run
+        separate rev-parse loops over the same literal tuple and were blind to
+        `trunk` TOGETHER; a fix that reached only one of them would leave the git
+        source's window and the escalation's describing different ranges under a
+        single report while both claimed to have looked."""
+        repo = _mainline_clone(tmp_path, "trunk")
+        _run_git(repo, "checkout", "-q", "-b", "topic", home=tmp_path)
+        _commit(repo, "src/collector/a.py", tmp_home=tmp_path)
+        src = st.collect_git_paths(repo)
+        assert src.window == "branch", src.notes
+        assert "src/collector/a.py" in src.paths
+
+    def test_a_DANGLING_origin_HEAD_falls_THROUGH_and_is_never_believed(
+        self, tmp_path: Path
+    ) -> None:
+        """🔴 NOT HYPOTHETICAL — measured in `devrc` itself on 2026-08-21, where
+        `refs/remotes/origin/HEAD` pointed at a `refs/remotes/origin/trunk` with
+        no object behind it (a concurrent agent's fixture) while devrc's mainline
+        is `main`. `git symbolic-ref` prints that target cheerfully at exit 0, so
+        a derivation that trusts it INVERTS the bug it was written to fix.
+
+        ⚠ GREEN AT BASE `9667fb8b`, which has no derivation to be fooled — so it
+        is not regression coverage for the base. It IS regression coverage
+        against the FIRST CUT of this fix, and was watched to fail there."""
+        repo = _mainline_clone(tmp_path, "main")
+        _run_git(
+            repo, "symbolic-ref", "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/trunk", home=tmp_path,
+        )
+        _run_git(repo, "checkout", "-q", "-b", "topic", home=tmp_path)
+        sha = _commit(repo, "src/collector/a.py", tmp_home=tmp_path)
+        rng = st.commit_window_range(repo)
+        assert rng.base_ref == "origin/main", rng.detail
+        assert rng.shas == (sha,)
+
+    def test_a_LOCAL_branch_named_after_a_DANGLING_symref_is_NOT_a_rung(
+        self, tmp_path: Path
+    ) -> None:
+        """🔴 THE NEAR-MISS THIS TEST EXISTS FOR. An earlier cut of the fix
+        offered the symref's LOCAL counterpart (`trunk` after `origin/trunk`) as
+        a second rung, on the reasoning that the fallback ladder has the same
+        remote-then-local shape. Run against the real `devrc`, that selected a
+        stray local `trunk` branch sitting beside `main` — same fixture that left
+        the dangling symref — and returned 11 commits off an unrelated branch: a
+        plausible number, silently wrong, where the literal ladder it replaced
+        had been RIGHT. A symref that does not resolve is evidence about the
+        symref, not about a same-named local branch.
+
+        ⚠ GREEN AT BASE `9667fb8b` — the base has no derivation, so this is not
+        regression coverage for it. It is regression coverage against the FIRST
+        CUT of this fix, and was watched to fail there (`base_ref` came back
+        `trunk`)."""
+        repo = _mainline_clone(tmp_path, "main")
+        _run_git(
+            repo, "symbolic-ref", "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/trunk", home=tmp_path,
+        )
+        # the decoy: a local `trunk` with a commit of its own, exactly as devrc had
+        _run_git(repo, "checkout", "-q", "-b", "trunk", home=tmp_path)
+        _commit(repo, "decoy/unrelated.py", tmp_home=tmp_path)
+        _run_git(repo, "checkout", "-q", "-b", "topic", "origin/main", home=tmp_path)
+        sha = _commit(repo, "src/collector/a.py", tmp_home=tmp_path)
+        rng = st.commit_window_range(repo)
+        assert rng.base_ref == "origin/main", rng.detail
+        assert rng.shas == (sha,), "the decoy branch must not bound the window"
+
+    def test_NO_BASE_REF_names_the_LADDER_it_tried_not_the_candidate_tuple(
+        self, tmp_path: Path
+    ) -> None:
+        """🔴 A NAMED REASON MUST NAME WHAT WAS ACTUALLY LOOKED FOR. With a
+        derived rung in front, printing `BASE_REF_CANDIDATES` would describe four
+        refs while omitting the one that was tried FIRST — a message that is
+        wrong about the search it is reporting on."""
+        repo = _mainline_clone(tmp_path, "trunk")
+        _run_git(repo, "checkout", "-q", "-b", "topic", home=tmp_path)
+        _commit(repo, "src/collector/a.py", tmp_home=tmp_path)
+        # delete every ref the ladder can reach, derived rung included
+        _run_git(repo, "update-ref", "-d", "refs/remotes/origin/trunk", home=tmp_path)
+        _run_git(repo, "branch", "-q", "-D", "trunk", home=tmp_path)
+        rng = st.commit_window_range(repo)
+        assert rng.reason == st.ESCALATION_NO_BASE_REF
+        assert "origin/trunk" in rng.detail, rng.detail
+        for cand in st.BASE_REF_CANDIDATES:
+            assert cand in rng.detail, rng.detail
+
+
 class TestWindowEscalationRuns:
     """🔴 THE ESCALATION IS AUTOMATIC, ON EXACTLY THE EXISTING CONDITION.
 

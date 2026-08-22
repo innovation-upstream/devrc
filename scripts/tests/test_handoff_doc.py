@@ -26,6 +26,7 @@ import hashlib
 import importlib.util
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -33,6 +34,10 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO_ROOT / "scripts"))
+
+from testlib.mockbin import write_exec  # noqa: E402
+
 TOOL = REPO_ROOT / "scripts" / "lib" / "handoff_doc.py"
 HANDOFF_SKILL = REPO_ROOT / "claude" / "skills" / "handoff" / "SKILL.md"
 
@@ -2162,3 +2167,824 @@ class TestSkillAndModuleAgree:
             "omit it from the deploy and `home-manager switch` will succeed with "
             "the file simply absent."
         )
+
+
+class TestBlockedCommitLeavesNoTrace:
+    """A REFUSED commit must not leave the doc written and staged.
+
+    🔴 MEASURED 2026-08-21, and this is the failure the class exists for. A
+    PreToolUse hook enforcing "never commit in the primary clone" refused the
+    `git commit` — correct behaviour — but the tool had ALREADY written the
+    merged doc and `git add`ed it. The refusal therefore left a modified, STAGED
+    file in a checkout shared with other sessions, where the next person's
+    `git commit` sweeps it in. The caller then re-ran the tool to read the error
+    and the merge appended the same block a SECOND time.
+
+    A blocked commit is not a no-op, and the caller has no reason to expect it
+    left anything behind: `status=failed` reads as "nothing happened".
+    """
+
+    @staticmethod
+    def _block_commits(repo: Path) -> None:
+        """Refuse every commit, the way a real guard hook does."""
+        # write_exec owns the shebang — a call site that supplies its own
+        # trips scripts/tests/test_runtime_shebangs.py, a REPO-WIDE scan that a
+        # three-file test run structurally cannot see.
+        write_exec(repo / ".git" / "hooks" / "pre-commit",
+                   "echo 'blocked by guard' >&2\nexit 1\n")
+
+    def test_the_hook_actually_blocks(self, repo: Path) -> None:
+        """POSITIVE CONTROL for the fixture itself.
+
+        Without this, a hook that silently failed to install would make every
+        assertion below pass for the wrong reason — the commit would simply
+        succeed and there would be nothing to roll back."""
+        self._block_commits(repo)
+        (repo / "canary.txt").write_text("x\n", encoding="utf-8")
+        _sh("git", "add", "--", "canary.txt", cwd=repo)
+        out = subprocess.run(
+            ["git", "-C", str(repo), "commit", "-m", "should be refused"],
+            capture_output=True, text=True, env=dict(os.environ, **GIT_ENV),
+        )
+        assert out.returncode != 0, "the pre-commit hook did not block — fixture is inert"
+
+    def test_doc_is_restored_and_nothing_is_staged(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        before = doc_of(repo)
+        shas_before = commit_shas(repo)
+        self._block_commits(repo)
+
+        res = run_tool(repo, "--confirm", update=update_file)
+
+        assert res.returncode == 3, f"expected EXIT_FAIL, got {res.returncode}"
+        assert "status=failed" in res.stderr
+        # 🔴 The two assertions this class exists for.
+        assert doc_of(repo) == before, (
+            "the doc was left MODIFIED after the commit was refused — in a shared "
+            "checkout that is another session's `git commit` away from being swept in"
+        )
+        staged = _sh("git", "diff", "--cached", "--name-only", cwd=repo).split()
+        assert staged == [], f"paths left STAGED after a refused commit: {staged}"
+        assert commit_shas(repo) == shas_before, "a commit was made despite the refusal"
+
+    def test_unrelated_staged_work_is_not_unstaged_by_the_rollback(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """The rollback must be PATH-LIMITED, like the commit it undoes.
+
+        A blanket `git reset` would unstage a co-worker's staged files as a side
+        effect of our own failure — trading one shared-checkout defect for a
+        worse one."""
+        (repo / "OTHER.md").write_text("someone else's staged work\n", encoding="utf-8")
+        _sh("git", "add", "--", "OTHER.md", cwd=repo)
+        self._block_commits(repo)
+
+        run_tool(repo, "--confirm", update=update_file)
+
+        staged = _sh("git", "diff", "--cached", "--name-only", cwd=repo).split()
+        assert staged == ["OTHER.md"], (
+            f"the rollback must leave unrelated staged work alone; staged={staged}"
+        )
+
+    def test_a_LANDED_commit_is_never_rolled_back(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """🔴 THE HIGHEST-CONSEQUENCE BRANCH, and it had no test.
+
+        The `committed` flag exists so a commit that LANDED and then hit a later
+        failure is left alone. Roll back there and the tool DISCARDS a committed
+        change — strictly worse than the defect it was written to fix.
+
+        🔴 THE FIRST VERSION OF THIS TEST WAS VACUOUS and only mutation testing
+        found it: it used a failing `post-commit` hook, and git IGNORES that
+        hook's exit status (measured: `git commit` rc=0, commit created). The
+        except-branch was never reached, so deleting the guard still passed.
+        A `git` shim that fails `rev-parse` ONLY AFTER a commit has run is the
+        real shape — the commit lands, then a later git step errors.
+        """
+        real_git = shutil.which("git")
+        assert real_git, "git not on PATH"
+        shim = repo / "gitshim-revparse"
+        shim.mkdir()
+        marker = shim / "committed.marker"
+        # `git()` invokes ["git", "-C", <repo>, *args] — the SUBCOMMAND is $3,
+        # not $1. Scan all args instead of indexing, which is what the earlier
+        # broken shim got wrong.
+        fired = shim / "intercepted.marker"
+        write_exec(
+            shim / "git",
+            f'for a in "$@"; do [ "$a" = "commit" ] && : > "{marker}"; done\n'
+            f'for a in "$@"; do\n'
+            f'  if [ "$a" = "rev-parse" ] && [ -f "{marker}" ]; then\n'
+            f'    : > "{fired}"; exit 7\n'
+            f'  fi\n'
+            f'done\n'
+            f'exec {real_git} "$@"\n',
+        )
+        shas_before = commit_shas(repo)
+        env = dict(os.environ, **GIT_ENV)
+        env["PATH"] = f"{shim}:{env['PATH']}"
+
+        res = subprocess.run(
+            [sys.executable, str(TOOL), "--repo", str(repo), "--topic",
+             "sample-topic", "--update", str(update_file), "--advanced",
+             "a landed commit must survive a later failure", "--confirm"],
+            capture_output=True, text=True, env=env,
+        )
+
+        # 🔴 POSITIVE CONTROL. Without these two the test passes with an INERT
+        # shim — measured: reverting the shim to its known-broken form left this
+        # green. `doc_of == head_doc` is ALSO true on the plain success path, so
+        # it cannot on its own prove the failure branch ran.
+        assert fired.exists(), (
+            "the git shim never intercepted rev-parse — this test proved nothing"
+        )
+        assert res.returncode == 3, (
+            f"expected EXIT_FAIL (the later step failed), got {res.returncode}"
+        )
+        assert commit_shas(repo) != shas_before, (
+            "fixture inert: no commit was made, so the guard was never exercised"
+        )
+        head_doc = _sh("git", "show", "HEAD:claudedocs/handoff-sample-topic.md",
+                       cwd=repo)
+        assert doc_of(repo) == head_doc, (
+            "the worktree was rolled back even though the commit LANDED — that "
+            "discards committed work"
+        )
+
+    def test_first_ever_handoff_leaves_no_untracked_file_behind(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """The `original is None` -> `unlink` branch, which had no fixture.
+
+        Every other fixture pre-creates the doc, so the first-ever-handoff path
+        was never exercised: dropping the `unlink` survived the suite. A doc left
+        behind here is an UNTRACKED file in a shared checkout — invisible to
+        `git status -s` habits that scan for ` M`, and it makes a re-run append
+        to a doc the caller believes was never written."""
+        doc = repo / "claudedocs" / "handoff-brand-new-topic.md"
+        assert not doc.exists()
+        self._block_commits(repo)
+
+        res = subprocess.run(
+            [sys.executable, str(TOOL), "--repo", str(repo), "--topic",
+             "brand-new-topic", "--update", str(update_file), "--advanced",
+             "a first-ever handoff for this topic", "--confirm"],
+            capture_output=True, text=True, env=dict(os.environ, **GIT_ENV),
+        )
+
+        assert res.returncode == 3, f"expected EXIT_FAIL, got {res.returncode}"
+        assert not doc.exists(), (
+            "the doc the run CREATED was left behind after the commit was refused"
+        )
+        untracked = _sh("git", "status", "--porcelain", "--untracked-files=all",
+                        cwd=repo).strip()
+        assert untracked == "", f"left untracked residue: {untracked!r}"
+
+    def test_the_reset_FALLBACK_is_also_path_limited(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """The fallback arm had no test — only the primary `restore` arm did.
+
+        `git reset` without `-- <path>` unstages EVERYTHING, so a co-worker's
+        staged file would be unstaged by our failure. Forcing the fallback by
+        making `git restore` unavailable proves the second arm carries the same
+        path limit as the first."""
+        # 🔴 Resolve the real git ABSOLUTELY. `exec /usr/bin/env git` searches
+        # PATH — which this shim is prepended to — so the shim re-execs itself
+        # forever. (Measured: the run had to be killed.)
+        real_git = shutil.which("git")
+        assert real_git, "git not on PATH"
+        shim = repo / "gitshim"
+        shim.mkdir()
+        # 🔴 `git()` invokes ["git", "-C", <repo>, *args], so the subcommand is
+        # $3 — an earlier version tested $1, never intercepted anything, and the
+        # fallback arm was never exercised (the mutant survived). Scan all args.
+        fired = shim / "intercepted.marker"
+        write_exec(shim / "git",
+                   f'for a in "$@"; do\n'
+                   f'  if [ "$a" = "restore" ]; then : > "{fired}"; exit 129; fi\n'
+                   f'done\n'
+                   f'exec {real_git} "$@"\n')
+        (repo / "OTHER.md").write_text("someone else's staged work\n", encoding="utf-8")
+        _sh("git", "add", "--", "OTHER.md", cwd=repo)
+        self._block_commits(repo)
+
+        env = dict(os.environ, **GIT_ENV)
+        env["PATH"] = f"{shim}:{env['PATH']}"
+        res = subprocess.run(
+            [sys.executable, str(TOOL), "--repo", str(repo), "--topic",
+             "sample-topic", "--update", str(update_file), "--advanced",
+             "forcing the reset fallback", "--confirm"],
+            capture_output=True, text=True, env=env,
+        )
+
+        # 🔴 POSITIVE CONTROL — see the sibling above. An inert shim means the
+        # PRIMARY `restore` arm succeeded and the fallback never ran, so the
+        # path-limit this test exists to prove was never exercised. Measured:
+        # with a broken shim AND a blanket-reset mutant, this stayed green.
+        assert fired.exists(), (
+            "the git shim never intercepted `restore` — the fallback arm did not "
+            "run, so this test proved nothing"
+        )
+        assert res.returncode == 3, (
+            f"expected EXIT_FAIL, got {res.returncode}"
+        )
+
+        staged = _sh("git", "diff", "--cached", "--name-only", cwd=repo).split()
+        assert staged == ["OTHER.md"], (
+            f"the reset fallback must be path-limited too; staged={staged}"
+        )
+
+    def test_incomplete_rollback_advises_ONLY_the_half_that_failed(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """🔴 A message that contradicts what happened is worse than none.
+
+        The index and worktree halves fail INDEPENDENTLY. Printing advice for
+        both was measured to tell an operator their content "was never committed
+        … restore by hand" while the bytes HAD been restored and the content WAS
+        in HEAD — advice that makes someone hand-rewrite a doc they still have.
+        Here the index half fails and the worktree half succeeds."""
+        real_git = shutil.which("git")
+        assert real_git, "git not on PATH"
+        shim = repo / "gitshim-index"
+        shim.mkdir()
+        fired = shim / "intercepted.marker"
+        write_exec(shim / "git",
+                   f'for a in "$@"; do\n'
+                   f'  case "$a" in restore|reset) : > "{fired}"; exit 129 ;; esac\n'
+                   f'done\n'
+                   f'exec {real_git} "$@"\n')
+        before = doc_of(repo)
+        self._block_commits(repo)
+        env = dict(os.environ, **GIT_ENV)
+        env["PATH"] = f"{shim}:{env['PATH']}"
+
+        res = subprocess.run(
+            [sys.executable, str(TOOL), "--repo", str(repo), "--topic",
+             "sample-topic", "--update", str(update_file), "--advanced",
+             "only the index half fails", "--confirm"],
+            capture_output=True, text=True, env=env,
+        )
+
+        assert fired.exists(), "the shim never intercepted — test proved nothing"
+        assert res.returncode == 3
+        assert "still STAGED" in res.stderr, res.stderr
+        # The worktree half SUCCEEDED, so nothing may claim otherwise.
+        assert "still MODIFIED" not in res.stderr, res.stderr
+        # 🔴 COUNT the advice lines, do not grep for a PHRASE. An earlier
+        # version asserted the absence of the new wording — so reverting the
+        # message to its old, false text satisfied it vacuously (measured: that
+        # mutant SURVIVED). One half failed, so exactly one fix line may appear.
+        block = res.stderr.split("ROLLBACK INCOMPLETE", 1)[1]
+        fix_lines = [ln for ln in block.splitlines() if ln.startswith("    ")]
+        assert len(fix_lines) == 1, (
+            f"expected exactly ONE fix line (only the index half failed), got "
+            f"{len(fix_lines)}:\n" + "\n".join(fix_lines)
+        )
+        assert "restore --staged" in fix_lines[0], fix_lines[0]
+        # 🔴 Indent-INDEPENDENT complement. The count above pins how many lines
+        # are indented, which a reword can walk in one direction (emit the
+        # worktree advice at a different indent) and break in the other (add an
+        # explanatory comment to the index arm). The worktree arm is comment
+        # lines in BOTH its old and new wording, so their absence is the claim
+        # that survives rewording AND reindenting.
+        # 🔴 The trade, stated: this ALSO fires if the index arm ever gains a
+        # comment line — a false FAILURE on a legitimate reword. That direction
+        # is chosen deliberately over a false PASS, and the invariant it depends
+        # on ("the index arm is one bare command line") is pinned as a contract
+        # beside that line in handoff_doc.py.
+        assert not any(ln.lstrip().startswith("#") for ln in block.splitlines()), (
+            "worktree advice (comment lines) printed although that half "
+            "succeeded:\n" + block
+        )
+        assert doc_of(repo) == before, "the worktree half did not actually restore"
+
+    def test_a_landed_commit_says_so_instead_of_a_bare_status_failed(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """`status=failed` now contracts to "nothing happened" — so the ONE
+        branch where a commit DOES exist must say so, or the contract lies."""
+        real_git = shutil.which("git")
+        assert real_git, "git not on PATH"
+        shim = repo / "gitshim-note"
+        shim.mkdir()
+        marker = shim / "committed.marker"
+        fired = shim / "intercepted.marker"
+        write_exec(
+            shim / "git",
+            f'for a in "$@"; do [ "$a" = "commit" ] && : > "{marker}"; done\n'
+            f'for a in "$@"; do\n'
+            f'  if [ "$a" = "rev-parse" ] && [ -f "{marker}" ]; then\n'
+            f'    : > "{fired}"; exit 7\n'
+            f'  fi\n'
+            f'done\n'
+            f'exec {real_git} "$@"\n',
+        )
+        env = dict(os.environ, **GIT_ENV)
+        env["PATH"] = f"{shim}:{env['PATH']}"
+
+        res = subprocess.run(
+            [sys.executable, str(TOOL), "--repo", str(repo), "--topic",
+             "sample-topic", "--update", str(update_file), "--advanced",
+             "the commit landed", "--confirm"],
+            capture_output=True, text=True, env=env,
+        )
+
+        assert fired.exists(), "the shim never intercepted — test proved nothing"
+        assert res.returncode == 3
+        assert "THE COMMIT LANDED" in res.stderr, (
+            "a commit exists but status=failed said nothing about it:\n" + res.stderr
+        )
+        assert "un-pushed" in res.stderr, res.stderr
+
+    def test_worktree_only_failure_does_NOT_print_index_advice(
+        self, repo: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The MIRROR of the only-the-failed-half test, and it was unpinned.
+
+        Round 2 gated both halves but tested only one, so ungating the INDEX arm
+        survived the suite — a worktree-only failure would tell the operator to
+        `git restore --staged` an index that had already been cleaned. Behaviour
+        was correct; the coverage was not.
+
+        Driven directly because the worktree half only fails on a real `OSError`
+        from `write_bytes`, which no subprocess fixture can force.
+        """
+        doc = repo / "claudedocs" / "handoff-sample-topic.md"
+        original = doc.read_bytes()
+
+        def boom(self, data):  # noqa: ANN001, ANN202 - patched Path.write_bytes
+            raise OSError("disk full")
+
+        monkeypatch.setattr(Path, "write_bytes", boom)
+        note = hd._undo_write(repo, doc, "claudedocs/handoff-sample-topic.md",
+                              original)
+
+        assert "still MODIFIED" in note, note
+        assert "still STAGED" not in note, (
+            "claimed the index was left staged although that half succeeded:\n" + note
+        )
+        assert "restore --staged" not in note, (
+            "printed unstage advice although the index half succeeded:\n" + note
+        )
+    def test_the_mainline_module_it_imports_is_tracked_by_git(self) -> None:
+        """🔴 THE IMPORT MAKES IT LOAD-BEARING. `handoff_doc.py` imports
+        `git_mainline` at module scope, so an untracked `git_mainline.py` does not
+        merely lose rule (h) — it makes the whole tool fail to start on a freshly
+        deployed host, while the switch reports success."""
+        mod = REPO_ROOT / "scripts" / "lib" / "git_mainline.py"
+        assert mod.exists(), f"{mod} is missing from this tree"
+        if not (REPO_ROOT / ".git").exists():
+            return
+        out = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "ls-files", "--", "scripts/lib/git_mainline.py"],
+            capture_output=True,
+            text=True,
+            env=dict(os.environ, **GIT_ENV),
+        )
+        assert out.stdout.strip() == "scripts/lib/git_mainline.py", (
+            "scripts/lib/git_mainline.py is not tracked by git; the flake omits "
+            "untracked files, so the deployed handoff_doc.py would raise "
+            "ModuleNotFoundError on every run."
+        )
+
+
+# =============================================================================
+# 🔴 RULE (h) — A BASE THAT IS THE WRONG DOCUMENT SAYS SO.
+#
+# THE INCIDENT. `handoff_doc.py` resolves its base from `--repo`'s working tree
+# and never asked whether that clone was current. Pointed at one 313 commits
+# behind, it printed `State now → NEW` — because the stale base genuinely lacked
+# the section — and confirming would have rebuilt an 891-line / 14-heading doc
+# from a 290-line / 9-heading base, silently discarding ~601 lines including a
+# whole incident writeup, and exited 0 saying `status=written`. `BUCKET_NEW` was
+# a bare label appended to a list; the `buckets:` line was the only tell and it
+# reads as a routine classification.
+#
+# 🔴 RED-AT-BASE MATRIX, base `9667fb8b`. A full copy of the tree with
+# `scripts/lib/*.py` rolled back to that revision (`git show "${sha}:${path}"`,
+# each extraction asserted non-empty, each rolled-back file asserted to DIFFER
+# from the working copy — a rollback that silently did nothing scores every test
+# as green for the wrong reason):
+#
+#   test_handoff_doc.py + test_subsystem_touch.py
+#     at 9667fb8b ......... 17 failed, 993 passed
+#     at HEAD ............. 1010 passed
+#   test_git_mainline.py ... cannot COLLECT at 9667fb8b (the module does not
+#                            exist there); 13 passed at HEAD.
+#
+# ⚠ EIGHT OF THE NEW TESTS PASS AT BASE and are NOT regression coverage — the
+# base never warns at all, so their green there is vacuous. Each says so in its
+# own docstring, and each is proven LIVE at HEAD by the mutation battery:
+#
+#   the two SILENCE controls        `block-speaks-on-EVERY-run` and
+#   (current clone, behind-on-code)  `currency-trigger-is-the-CLONE-not-the-DOC`
+#   the three EXIT-CODE invariants  0/4/5 must not move; that they held before
+#                                    is the point
+#   the three derivation guards     dangling symref, local-counterpart decoy,
+#   in test_subsystem_touch.py       and the `main`-repo control
+#
+# MUTATION BATTERY (isolated copy of the tree, `PYTHONDONTWRITEBYTECODE=1` and
+# `__pycache__` cleared between mutants, every module restored from a byte copy
+# and re-hashed, every anchor checked UNIQUE first): **21 mutants, 21 killed by
+# the specifically expected test on that test's own assertion, 0 skipped**, plus
+# a positive control (KILLED) and a no-op negative control (SURVIVED, required).
+# Five rounds, and four of the five found a fault in THESE ASSERTIONS or in the
+# harness rather than in the code:
+#   1. the first POSITIVE CONTROL was DEAD — `EXIT_NO_ADVANCE = 4` -> `40`
+#      survived the whole suite, because the tests compare against
+#      `hd.EXIT_NO_ADVANCE` and the expectation moved with the mutation.
+#   2. the harness scored six KILLED mutants as SURVIVED — it matched the
+#      asserted source line raw, and pytest re-wraps it in the traceback.
+#   3. `established-floor-to-zero` killed a FIXTURE PRECONDITION, not the guard:
+#      the precondition read `< hd.MIN_ESTABLISHED_SECTIONS`, so lowering the
+#      constant failed the setup and the real assertion never ran.
+#   4. `size-tell-widened-to-LINES-only` and `block-speaks-on-EVERY-run` genuinely
+#      SURVIVED: one fixture was shorter than its base on BOTH dimensions so it
+#      could not observe the widening, and the silence assertion was on WORDS —
+#      the mutant printed a block carrying neither headline. Fixed by a
+#      discriminating fixture and by `between_buckets_and_diff`.
+#   5. `commits-behind-unmeasured-becomes-ZERO` was scored against a test that
+#      cannot REACH it (with no base ref the function is never called), and
+#      `touch-ignores-the-derivation` was written so the derived rung still
+#      answered. Both re-aimed.
+# =============================================================================
+
+# A base doc that is ESTABLISHED (5 sections, all canonical) and yet has NO
+# `State now` — the exact shape a 313-commits-stale copy had. Deliberately not
+# BASE_DOC minus a line: each section's text is distinct so a merge that keeps
+# the wrong one cannot match a substring of the right one.
+STALE_BASE_DOC = """# Handoff: sample-topic — 2026-05-01
+
+## Goal
+Make the sample subsystem stop dropping work under load.
+
+## Live state
+- the queue instrumentation has not been written yet
+
+## Open investigations — live diagnosis state
+### the drain counter has never been read
+- **Observed (with values):** no counter exists; the endpoint 404s.
+
+## Next steps (ranked)
+1. Write the counter.
+
+## How to verify
+`python3 tools/queue_probe.py --for 60`
+"""
+
+# What the mainline copy grew into: more sections, more lines, and the whole
+# incident writeup the stale base cannot see.
+MAINLINE_DOC = STALE_BASE_DOC.replace(
+    "## Live state", "## State now\n- Branch / PR: `feat/sample` / #99\n\n## Live state"
+) + """
+## Gotchas / decisions / dead-ends
+- Bumping the pool size did nothing; the ceiling is not connections.
+
+## The outage we caused
+""" + "".join(f"- outage note {i}\n" for i in range(1, 40)) + """
+## Corrections
+""" + "".join(f"- correction {i}\n" for i in range(1, 40))
+
+
+def _cfg(repo: Path) -> None:
+    for k, v in (("user.name", "T"), ("user.email", "t@example.invalid"),
+                 ("commit.gpgsign", "false")):
+        _sh("git", "config", k, v, cwd=repo)
+
+
+def mainline_repo(tmp_path: Path, mainline: str, doc_text: str) -> tuple[Path, Path]:
+    """`(a real clone, the seed checkout that can push to its origin)`.
+
+    🔴 A REAL `git clone`, because `refs/remotes/origin/HEAD` — the ref the
+    derivation reads — is written by clone itself. Hand-writing that symref would
+    test a shape invented here rather than the one the field repo has. Still no
+    network: the origin is a bare repo in the same tmp_path.
+    """
+    origin = tmp_path / f"{mainline}-origin.git"
+    _sh("git", "init", "-q", "--bare", "-b", mainline, str(origin), cwd=tmp_path)
+    seed = tmp_path / f"{mainline}-seed"
+    seed.mkdir()
+    _sh("git", "init", "-q", "-b", mainline, cwd=seed)
+    _cfg(seed)
+    _sh("git", "remote", "add", "origin", str(origin), cwd=seed)
+    (seed / "claudedocs").mkdir()
+    (seed / "claudedocs" / "handoff-sample-topic.md").write_text(
+        doc_text, encoding="utf-8"
+    )
+    _sh("git", "add", "--", "claudedocs/handoff-sample-topic.md", cwd=seed)
+    _sh("git", "commit", "-q", "-m", "the base as it was", cwd=seed)
+    _sh("git", "push", "-q", "origin", mainline, cwd=seed)
+    work = tmp_path / f"{mainline}-work"
+    _sh("git", "clone", "-q", str(origin), str(work), cwd=tmp_path)
+    _cfg(work)
+    return work, seed
+
+
+def advance_doc_on_mainline(work: Path, seed: Path, mainline: str, text: str) -> None:
+    """Move the doc forward on the mainline and FETCH it, leaving HEAD behind."""
+    (seed / "claudedocs" / "handoff-sample-topic.md").write_text(text, encoding="utf-8")
+    _sh("git", "add", "--", "claudedocs/handoff-sample-topic.md", cwd=seed)
+    _sh("git", "commit", "-q", "-m", "the incident writeup", cwd=seed)
+    _sh("git", "push", "-q", "origin", mainline, cwd=seed)
+    _sh("git", "fetch", "-q", "origin", cwd=work)
+
+
+STALE_HEAD = "🔴 THE BASE DOCUMENT IS NOT THE NEWEST COMMITTED COPY"
+TELL_HEAD = "🔴 THIS MERGE LOOKS LIKE IT RESOLVED THE WRONG BASE"
+
+
+def rule_h_block(stdout: str) -> str:
+    """Rule (h)'s block only — headline through the line before the diff."""
+    idx = [stdout.index(h) for h in (STALE_HEAD, TELL_HEAD) if h in stdout]
+    if not idx:
+        return ""
+    rest = stdout[min(idx):]
+    cut = rest.find("--- a/")
+    return rest if cut < 0 else rest[:cut]
+
+
+def between_buckets_and_diff(stdout: str) -> list[str]:
+    """Every line printed after the `buckets:` line and before the diff starts.
+
+    🔴 THE STRUCTURAL FORM OF "SILENT", and the mutation battery is why it
+    exists. Asserting `STALE_HEAD not in out and TELL_HEAD not in out` is a guard
+    on WORDS: the mutant that removed rule (h)'s early return still printed its
+    remedy paragraph on every ordinary run — a block with neither headline in it
+    — and SURVIVED a green suite. `claude/RULES.md`: a guard that can pass while
+    the hazard exists in a different shape is spelled, not structural. This asks
+    the question that actually matters — did the run print ANYTHING extra?
+    """
+    head = "buckets:"
+    if head not in stdout:
+        return []
+    rest = stdout[stdout.index(head):].splitlines()[1:]
+    out: list[str] = []
+    for line in rest:
+        if line.startswith("--- a/") or line.startswith("status="):
+            break
+        out.append(line)
+    return [ln for ln in out if ln.strip()]
+
+
+class TestAStaleBaseIsLoud:
+    """Both directions, and the loudness is measured against the diff's position."""
+
+    def test_a_STALE_base_on_a_TRUNK_mainline_repo_WARNS(self, tmp_path: Path,
+                                                        update_file: Path) -> None:
+        """🔴 THE REGRESSION, red at base `9667fb8b` — which prints only
+        `buckets: State now → NEW` and nothing else.
+
+        The repo's mainline is `trunk` ON PURPOSE: the incident's repo is
+        `homelab-infra`, and a currency check that assumed `main` would report
+        "cannot measure" there and print nothing — the same silence, reached a
+        second way."""
+        work, seed = mainline_repo(tmp_path, "trunk", STALE_BASE_DOC)
+        advance_doc_on_mainline(work, seed, "trunk", MAINLINE_DOC)
+        res = run_tool(work, update=update_file)
+        assert res.returncode == 0, res.stderr
+        block = rule_h_block(res.stdout)
+        assert STALE_HEAD in block, res.stdout
+        # the STATE, not just the word: the ref it derived and the counts a
+        # reader needs to decide. A guard on the headline alone is walkable by
+        # rewording the headline.
+        assert "origin/trunk" in block
+        base_shape = hd.doc_shape(STALE_BASE_DOC)
+        main_shape = hd.doc_shape(MAINLINE_DOC)
+        assert f"{base_shape.sections} sections / {base_shape.lines} lines" in block
+        assert f"{main_shape.sections} sections / {main_shape.lines} lines" in block
+        # the fixture must actually be lopsided, or the size line proves nothing
+        assert main_shape.lines > base_shape.lines * 3
+        assert main_shape.sections > base_shape.sections
+
+    def test_the_block_is_printed_ABOVE_the_diff(self, tmp_path: Path,
+                                                 update_file: Path) -> None:
+        """🔴 POSITION IS THE FIX. The information already existed one token wide
+        inside `buckets:`; putting it after several hundred diff lines would
+        reproduce the incident with more words."""
+        work, seed = mainline_repo(tmp_path, "trunk", STALE_BASE_DOC)
+        advance_doc_on_mainline(work, seed, "trunk", MAINLINE_DOC)
+        out = run_tool(work, update=update_file).stdout
+        assert out.index(STALE_HEAD) < out.index("--- a/"), out
+
+    def test_a_doc_ABSENT_here_but_PRESENT_on_the_mainline_warns(
+        self, tmp_path: Path, update_file: Path
+    ) -> None:
+        """The same bug in its loudest disguise: no base at all, so every section
+        merges as NEW and the committed document is replaced by the delta. Red at
+        base, which treats a missing base as an ordinary first write."""
+        work, seed = mainline_repo(tmp_path, "trunk", STALE_BASE_DOC)
+        (work / "claudedocs" / "handoff-sample-topic.md").unlink()
+        _sh("git", "rm", "-q", "--cached", "--",
+            "claudedocs/handoff-sample-topic.md", cwd=work)
+        _sh("git", "commit", "-q", "-m", "drop it locally", cwd=work)
+        advance_doc_on_mainline(work, seed, "trunk", MAINLINE_DOC)
+        out = run_tool(work, update=update_file).stdout
+        assert STALE_HEAD in out, out
+        assert "there is NO claudedocs/handoff-sample-topic.md in this checkout" in out
+
+    def test_a_CURRENT_clone_prints_NOTHING_new(self, repo: Path,
+                                                update_file: Path) -> None:
+        """🔴 THE NOISE CONTROL, and the reason the tells are shaped as they are.
+        A warning that fires every run is the failure being fixed.
+
+        ⚠ GREEN AT BASE `9667fb8b` — the base never warns at all, so this green
+        is vacuous there. It is proven LIVE at HEAD by the mutation battery:
+        `currency-trigger-inverted` and `established-floor-to-zero` each turn it
+        red."""
+        out = run_tool(repo, update=update_file).stdout
+        assert "buckets:" in out, "the ordinary run must still classify"
+        assert STALE_HEAD not in out and TELL_HEAD not in out, out
+        assert rule_h_block(out) == ""
+        # 🔴 THE STRUCTURAL HALF — see `between_buckets_and_diff`. The two
+        # headline assertions above are walkable by printing a block that
+        # contains neither, which a mutant did.
+        assert between_buckets_and_diff(out) == [], out
+
+    def test_behind_on_CODE_but_current_on_the_DOC_stays_SILENT(
+        self, repo: Path, tmp_path: Path, update_file: Path
+    ) -> None:
+        """🔴 THE TRIGGER IS THE DOC, NOT THE CLONE. Nearly every agent worktree
+        is a few commits behind mainline; warning on that would fire constantly
+        and teach everyone to skip the block. The whole-clone count is printed as
+        CONTEXT inside a block the doc already triggered, never as the trigger.
+
+        ⚠ GREEN AT BASE `9667fb8b` — vacuous there, since the base never warns.
+        Proven LIVE at HEAD by the mutation battery: `currency-trigger-is-the-
+        CLONE-not-the-DOC` turns it red."""
+        advance_remote(tmp_path)
+        _sh("git", "fetch", "-q", "origin", cwd=repo)
+        behind = _sh("git", "rev-list", "--count", "HEAD..origin/main", cwd=repo)
+        assert int(behind.strip()) > 0, "the control did not make the clone behind"
+        out = run_tool(repo, update=update_file).stdout
+        assert STALE_HEAD not in out and TELL_HEAD not in out, out
+
+
+class TestTheTellsAreEachReachableAndEachNarrow:
+    """Unit-level, both directions per tell — a tell that cannot go quiet is
+    noise and a tell that cannot go loud is decoration."""
+
+    def _buckets(self, base: str, update: str):
+        return hd.merge_report(base, update).buckets
+
+    def test_a_SKELETON_heading_arriving_NEW_on_an_established_base_is_a_tell(
+        self,
+    ) -> None:
+        upd = "## State now\n- the drain loop is fixed\n"
+        tells = hd.wrong_base_tells(STALE_BASE_DOC, upd,
+                                    self._buckets(STALE_BASE_DOC, upd))
+        assert any("state now" in t for t in tells), tells
+
+    def test_a_REGLOSSED_heading_is_NOT_a_tell(self) -> None:
+        """🔴 THE MEASURED FALSE-FIRE THIS RULE'S SHAPE EXISTS FOR. Membership is
+        by canonical PREFIX, not by full heading text: an author re-glossing
+        `## State now` to `## State now — THE STORE IS PUBLIC` makes it NEW
+        against a base that plainly HAS a state-now section. Replaying the 49
+        real updates in this repo's history, full-text membership fires on 4 of
+        them (8.2%) and prefix membership on 0."""
+        base = BASE_DOC  # carries a plain `## State now`
+        upd = "## State now — 🔴 THE STORE IS PUBLIC\n- rewritten\n"
+        assert hd.merge_report(base, upd).buckets == (
+            ("State now — 🔴 THE STORE IS PUBLIC", hd.BUCKET_NEW),
+        ), "the fixture must actually produce a NEW bucket, or it proves nothing"
+        assert hd.wrong_base_tells(base, upd, self._buckets(base, upd)) == ()
+
+    def test_a_STUB_base_is_not_established_so_growth_is_not_a_tell(self) -> None:
+        """A doc below `MIN_ESTABLISHED_SECTIONS` is a stub; a canonical heading
+        arriving there is ordinary growth. Of the 44 real handoff docs exactly
+        one has 3 sections and three have 4."""
+        stub = "# H\n\n## Goal\ng\n\n## Next steps\nn\n"
+        upd = "## State now\n- s\n"
+        # 🔴 A LITERAL 2, not `< hd.MIN_ESTABLISHED_SECTIONS`. Derived from the
+        # constant, this precondition ATE the mutant that lowered it: the
+        # mutation battery reported the guard killed while the assertion below
+        # never ran. `claude/RULES.md` — never derive a test's expectation from
+        # the implementation it tests.
+        assert hd.doc_shape(stub).sections == 2
+        assert hd.wrong_base_tells(stub, upd, self._buckets(stub, upd)) == ()
+
+    def test_an_update_LARGER_than_its_base_is_a_tell(self) -> None:
+        upd = "".join(
+            f"## Section {i}\n" + "".join(f"- line {j}\n" for j in range(30))
+            for i in range(9)
+        )
+        tells = hd.wrong_base_tells(BASE_DOC, upd, self._buckets(BASE_DOC, upd))
+        assert any("LARGER than the base" in t for t in tells), tells
+
+    def test_an_ORDINARY_delta_is_not_a_size_tell(self) -> None:
+        """The realistic control: the fixture pair this whole file is built on."""
+        assert hd.wrong_base_tells(
+            BASE_DOC, UPDATE_DOC, self._buckets(BASE_DOC, UPDATE_DOC)
+        ) == ()
+
+    def test_MORE_LINES_ALONE_is_not_a_size_tell(self) -> None:
+        """🔴 THE DISCRIMINATING FIXTURE, and the mutation battery is what
+        demanded it. `test_an_ORDINARY_delta_is_not_a_size_tell` cannot see the
+        `and`→lines-only mutant at all: its update is SHORTER than its base on
+        both dimensions, so widening the rule changes nothing and the mutant
+        SURVIVED a green run. `claude/RULES.md` — a fixture that can only ever
+        produce the same verdict cannot observe the mutation.
+
+        So: one section (fewer than the base's six) carrying far more lines than
+        the base's 22. Lines-only fires here; both-dimensions does not.
+
+        BOTH DIMENSIONS ARE REQUIRED because it is measured: replaying the 49
+        real updates in this repo's history, `lines only` fires on 10 (20.4%)
+        and `lines AND sections` on 1 (2.0%) — comparable to rule (f)'s
+        documented 2.4%. A handoff update routinely rewrites more lines than a
+        short doc contains."""
+        upd = "## Next steps (ranked)\n" + "".join(
+            f"{i}. step {i}\n" for i in range(1, 80)
+        )
+        base = hd.doc_shape(BASE_DOC)
+        got = hd.doc_shape(upd)
+        assert got.lines > base.lines and got.sections < base.sections, (base, got)
+        assert hd.wrong_base_tells(BASE_DOC, upd, self._buckets(BASE_DOC, upd)) == ()
+
+    def test_NO_BASE_AT_ALL_yields_no_TELL_because_every_heading_is_NEW(self) -> None:
+        """The heuristic half must not fire on a genuine first write. That case
+        is `base_currency`'s, and it is the half with hard evidence."""
+        assert hd.wrong_base_tells("", UPDATE_DOC, ()) == ()
+
+
+class TestBaseCurrencyMeasuresAndSaysWhenItCannot:
+    def test_it_derives_a_TRUNK_mainline(self, tmp_path: Path) -> None:
+        work, seed = mainline_repo(tmp_path, "trunk", STALE_BASE_DOC)
+        advance_doc_on_mainline(work, seed, "trunk", MAINLINE_DOC)
+        cur = hd.base_currency(work, "claudedocs/handoff-sample-topic.md")
+        assert cur.base_ref == "origin/trunk" and cur.unmeasured is None
+        assert cur.doc_behind == 1 and cur.stale
+        assert cur.mainline == hd.doc_shape(MAINLINE_DOC)
+
+    def test_a_repo_with_NO_mainline_ref_reports_UNMEASURED_not_zero(
+        self, tmp_path: Path
+    ) -> None:
+        """🔴 AN UNANSWERABLE QUESTION IS NOT A CLEAN ANSWER. A 0 here would be
+        indistinguishable from a measured current base."""
+        lone = tmp_path / "lone"
+        lone.mkdir()
+        _sh("git", "init", "-q", "-b", "topic", cwd=lone)
+        _cfg(lone)
+        (lone / "f.txt").write_text("x\n", encoding="utf-8")
+        _sh("git", "add", "--", "f.txt", cwd=lone)
+        _sh("git", "commit", "-q", "-m", "seed", cwd=lone)
+        cur = hd.base_currency(lone, "claudedocs/handoff-sample-topic.md")
+        assert cur.base_ref is None and cur.doc_behind is None
+        assert not cur.stale and cur.unmeasured
+        assert "origin/main" in cur.unmeasured, cur.unmeasured
+
+    def test_an_UNMEASURED_currency_is_PRINTED_when_a_tell_fired(self) -> None:
+        """…and only then. Printing it every run would be the noise the block
+        exists to avoid; withholding it beside a live suspicion would hand over a
+        doubt with no way to settle it."""
+        cur = hd.BaseCurrency(None, ("origin/main",), None, None, None,
+                              "no mainline ref resolves in this clone")
+        loud = hd.wrong_base_report(("a tell",), cur, "d.md", Path("/r"),
+                                    hd.doc_shape(BASE_DOC))
+        assert "base currency UNCHECKED" in loud
+        quiet = hd.wrong_base_report((), cur, "d.md", Path("/r"),
+                                     hd.doc_shape(BASE_DOC))
+        assert quiet == "", "an unmeasurable check must not speak on its own"
+
+
+class TestRuleHDidNotMoveTheExitCodes:
+    """🔴 IT WARNS AND NEVER REFUSES. A refusal here becomes a gate people learn
+    to click through, and 4/5/6 are load-bearing in the skill.
+
+    ⚠ ALL GREEN AT BASE `9667fb8b` — these are INVARIANT GUARDS, not regression
+    coverage. That the codes held before is exactly the point.
+    """
+
+    def test_a_stale_base_still_exits_0_and_still_writes_under_confirm(
+        self, tmp_path: Path, update_file: Path
+    ) -> None:
+        work, seed = mainline_repo(tmp_path, "trunk", STALE_BASE_DOC)
+        advance_doc_on_mainline(work, seed, "trunk", MAINLINE_DOC)
+        res = run_tool(work, "--confirm", update=update_file)
+        assert res.returncode == 0, res.stderr + res.stdout
+        assert "status=written" in res.stdout + res.stderr
+        doc = (work / "claudedocs" / "handoff-sample-topic.md").read_text(
+            encoding="utf-8"
+        )
+        assert "the drain loop is fixed and merged" in doc
+
+    def test_NO_ADVANCE_is_still_4_and_prints_no_block(self, tmp_path: Path,
+                                                      update_file: Path) -> None:
+        work, seed = mainline_repo(tmp_path, "trunk", STALE_BASE_DOC)
+        advance_doc_on_mainline(work, seed, "trunk", MAINLINE_DOC)
+        res = run_tool(work, update=update_file, advanced="nothing")
+        assert res.returncode == hd.EXIT_NO_ADVANCE
+        assert STALE_HEAD not in res.stdout + res.stderr
+
+    def test_NO_CHANGE_is_still_5_and_prints_no_block(self, tmp_path: Path) -> None:
+        work, seed = mainline_repo(tmp_path, "trunk", STALE_BASE_DOC)
+        advance_doc_on_mainline(work, seed, "trunk", MAINLINE_DOC)
+        noop = tmp_path / "noop.md"
+        noop.write_text("## Goal\nMake the sample subsystem stop dropping work "
+                        "under load.\n", encoding="utf-8")
+        res = run_tool(work, update=noop)
+        assert res.returncode == hd.EXIT_NO_CHANGE, res.stdout + res.stderr
+        assert STALE_HEAD not in res.stdout + res.stderr

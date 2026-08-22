@@ -30,12 +30,12 @@ column — **how it is counted**) are different, and `caveats.kind_scope` carrie
 | `--lean` | 🔴 **with `--json`, prefer this.** Rows trimmed to the fields that answer this tool's question, **untruncated**, every discriminator and caveat kept |
 | `--host workbench\|laptop\|all` | default `all`; `tail` resolves `all` to LOCAL |
 | `--claude-only` | drop the **shell** rows (a `cluster` dispatch is an agent and is KEPT). Every count then describes the FILTERED set |
+| `--no-ch` | skip ClickHouse — drops the **largest non-row block** (17.4 KB below), which answers a different question |
 | `--no-capture` | skip the pane scrape; **every** `waiting_probable` AND `unsent_prompt` becomes `null` (both roll-ups `null`, never `0`) |
 | `--no-ledger` | skip the ledger read → **no age, no session id** on any row |
 | `--fuzzyclaw` | the task-file join, **OFF by default** (see below) |
 
-`--json`, `--no-ch`, `--no-fuzzyclaw`, `--plain`, `--stale-threshold`, `--lines`, and what
-each drops:
+`--json`, `--no-fuzzyclaw`, `--plain`, `--stale-threshold`, `--lines`, and what each drops:
 `~/.claude/skills/session-manager/reference/payload-contract.md`.
 
 ## 🔴 Which output to ask for — you are the only consumer
@@ -43,19 +43,22 @@ each drops:
 Measured: **0 interactive shell invocations in 30 days against 55 agent references**. An agent
 reads this, and pays by the token.
 
-| | cost, one 75-row scan | faithful? |
-|---|---|---|
-| table (default) | ~3,280 tok | ❌ **lossy** — 73 truncated cells, 45 tasks over the 25-char column |
-| `--json --lean` | ~9,629 tok | ✅ on what it keeps |
-| `--json` | ~14,017 tok | ✅ |
+One 77-row two-host scan, re-measured 2026-08-21:
 
-**Ask for `--json --lean` unless you need a dropped field** — cheaper than the full payload AND
-more faithful than the cheap one; `caveats`, the tri-states, `clawgate_queue` and every
-per-host measurement status are kept whole. ⚠ One scan, 2026-08-14, predating
-`unsent_prompt`/`not_measured` which add to all three: the RANKING is load-bearing, the
-absolute numbers are not current. `lean_row_fields`/`lean_host_fields` travel in the payload
-naming what the view CARRIES, so a key absent from a row was omitted by the view, never
-measured as null.
+| | bytes ≈ tokens | faithful? |
+|---|---|---|
+| table (default) | 24,658 ≈ 6.2k | ❌ **lossy** — truncated cells, tasks over the 25-char column |
+| `--json --lean` | 79,008 ≈ 20k | ✅ on what it keeps |
+| `--json` | 103,801 ≈ 26k | ✅ |
+
+🔴 **`--lean` trims ROW fields ONLY** — 39 KB of that lean payload is blocks it never touches:
+`clickhouse` 17.4 KB, `clawgate_queue` 12.7 KB (the queue is enumerated **uncapped**),
+`caveats` 4.3 KB, `ledger` 2.8 KB, `not_measured` 1.8 KB. **So ask for `--json --lean
+--no-ch`** unless you want the session history — that block is the largest single lever and it
+answers a different question than "is anything waiting on me". The tri-states, `caveats`,
+`clawgate_queue` and every per-host measurement status survive all three flags.
+`lean_row_fields`/`lean_host_fields` travel in the payload naming what the view CARRIES, so a
+key absent from a row was omitted by the view, never measured as null.
 
 ## 🔴 `waiting_probable` — is anything waiting on a HUMAN
 
@@ -112,10 +115,11 @@ are never scraped. Scoped to the pane's OWN input line (only the lines *between 
 box-drawing rules*), so scrollback or a pane displaying another session's transcript cannot
 trip it.
 
-🔴 **NEVER PASTE A CAPTURED DRAFT INTO A COMMITTED FILE.** `unsent_prompt` hands you **text
-the operator typed**, and devrc is a **PUBLIC** repo — as is every `claudedocs/` note, commit
-message, PR body, comment or test fixture an agent writes into it. Report a draft as a
-**count, a length or a shape**, never verbatim. Quoting one back to Zach in chat is fine;
+🔴 **NEVER PASTE CAPTURED OPERATOR TEXT INTO A COMMITTED FILE.** TWO fields carry **text the
+operator typed** — `unsent_prompt` (the draft) and `clickhouse.rows[].first_msg` (the opening
+prompt of every recent session) — and devrc is a **PUBLIC** repo, as is every `claudedocs/`
+note, commit message, PR body, comment or test fixture an agent writes into it. Report either
+as a **count, a length or a shape**, never verbatim. Quoting one back to Zach in chat is fine;
 writing one to a file that gets committed is not.
 (`test_no_FIXTURE_DRAFT_string_appears_in_a_shipped_doc` fails on that shape — it has
 happened.)
@@ -130,18 +134,15 @@ it**: `pull_requests` → `standup`, `mail_queue` → `mailbox`, `cluster_alerts
 
 🔴 **It is DERIVED from the report's own keys, not a written-down list.** An entry is emitted
 only while the report carries no key for that population, so the day PR querying lands the
-claim stops being made with no edit anywhere. This file has shipped a constant masquerading as
-a measurement five times; a static list of "things we do not measure" is the same defect with
-a longer fuse. `clawgate_queue` is **not** listed — that one *is* measured.
+claim stops being made with no edit anywhere. `clawgate_queue` is **not** listed — that one
+*is* measured.
 
 ## 🔴 `clawgate_queue` — the clawgate approval queue
 
-🔴 **Renamed from `blocked_on_me` (2026-08-18).** The old name read as "everything waiting on
-you"; a caveat in this tool's own payload already said so, and a reader made that misread
-anyway and shipped it into a brief for three subagents — a field name is read a hundred times
-for every once its caveat is. **For panes that look like they are waiting on a human the field
-is `summary.waiting.probable` — a different population, never summed with this one.** No alias
-is kept and a test bans the old key at any depth.
+🔴 **Renamed from `blocked_on_me` (2026-08-18)** — no alias is kept and a test bans the old key
+at any depth; the misread it cost is in the reference. **For panes that look like they are
+waiting on a human the field is `summary.waiting.probable` — a different population, never
+summed with this one.**
 
 🔴 With the `agent-ops` TUI RETIRED this is the ONLY place the queue surfaces outside the bar
 pill: never answer "is anything waiting for my approval" by pointing somewhere else. Source:
@@ -194,12 +195,11 @@ measurements, and one succeeding says nothing about the others. `clickhouse.stat
 
 ## fuzzyclaw is OFF by default
 
-Measured 2026-08-12: 29 live of 401 task files and **every one of the 29 live rows read
-`paused`**, including a window demonstrably running an agent — 29 table rows, zero
-contribution, from a source `CLAUDE.md` marks UNTRUSTED. Opt in with `--fuzzyclaw`; off, every
-count is `null` rather than `0`. The intersection guard still runs when you do: a task file
-survives only when its `window_id` is live **and** that live window's real `(session, index)`
-equals the one the file recorded.
+Measured 2026-08-12: 29 live of 401 task files and **every one read `paused`**, including a
+window demonstrably running an agent — a source `CLAUDE.md` marks UNTRUSTED. Opt in with
+`--fuzzyclaw`; off, every count is `null` rather than `0`. The intersection guard still runs
+when you do: a task file survives only when its `window_id` is live **and** that live window's
+real `(session, index)` equals the one the file recorded.
 
 ## The agent activity ledger — where age / `stale` / `claude_session_id` come from
 

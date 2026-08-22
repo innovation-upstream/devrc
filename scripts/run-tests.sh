@@ -1705,6 +1705,18 @@ EXPECTED_SKIPS=(
   # network, neither of which a hermetic gate may have. Skips everywhere unless
   # REPO_COS_LIVE_DRIFT_CHECK=1.
   "scripts/repo-cos/tests|live-store drift check is opt-in"
+  # Needs a REAL Postgres (SIGNAL_PG_DSN). Unlike the skill_audit case below —
+  # which was correctly fixed by re-pointing at tracked fixtures so it RUNS —
+  # this one cannot be made hermetic: the test exists because SQLite does not
+  # reproduce Postgres static type checking, which is the exact defect #657
+  # fixed (a COALESCE over uuid/text that had never worked on real Postgres).
+  # gateTools carries psycopg2 (the client) but no Postgres SERVER, so nothing
+  # in the hermetic tier can satisfy it.
+  # 🔴 CONSEQUENCE, stated so it is not a surprise: this test is opt-in only and
+  # never runs in the gate. The regression it guards is caught only when someone
+  # runs with SIGNAL_PG_DSN set. Pinning unbreaks main; it does not restore the
+  # coverage.
+  "scripts/signal/tests|needs a real Postgres"
 )
 # ⚠ REMOVED, deliberately — do not re-add. `scripts/tests/test_skill_audit.py`
 # carried two regression pins against the LIVE datapacket-talos skill corpus, a

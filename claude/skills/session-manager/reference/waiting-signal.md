@@ -128,16 +128,27 @@ So the fact is now measured under its **own** name: row fields `unsent_prompt` (
 `unsent_prompt_status`, roll-up `summary.unsent_prompt`, `caveats.unsent_prompt`, and a
 `✎ UNSENT PROMPT` block in the table.
 
-### 🔴 NEVER PASTE A CAPTURED DRAFT INTO A COMMITTED FILE
+### 🔴 NEVER PASTE CAPTURED OPERATOR TEXT INTO A COMMITTED FILE
 
 This signal's entire job is publishing **text the operator typed**, and it lands in an agent's
 payload — from there into transcripts, commit messages, handoff notes and any `claudedocs/`
 an agent writes. **This repo is PUBLIC.** So: report a draft as a **count, a length or a
 shape**, never verbatim, in any file that gets committed — a doc, a test fixture, a comment,
-a PR body. Every fixture in `test_session_manager.py` is invented for exactly this reason,
+a PR body.
+
+Every fixture in `test_session_manager.py` is invented for exactly this reason,
 and `test_no_FIXTURE_DRAFT_string_appears_in_a_shipped_doc` fails if a string ever appears in
 both places, which is the shape a copied-in real draft takes. This paragraph replaced four
 real drafts that had been quoted here verbatim.
+
+🔴 **`unsent_prompt` is not the only such field, and this rule named it alone while a second
+one shipped unmentioned.** `clickhouse.rows[].first_msg` is the opening prompt of every recent
+session — the same class of text, in the same payload, from a query this skill runs by
+default. Measured: the rule landed 2026-08-17, `first_msg` had been in the payload since the
+tool's first commit on 2026-08-11, and nothing in the skill tree connected them until
+2026-08-21. It is covered by the same rule; `--no-ch` is how you avoid carrying it at all, and
+`test_EVERY_field_that_publishes_OPERATOR_TEXT_is_named_by_the_NEVER_PASTE_rule` now fails if
+a ledgered field goes unnamed. See `clickhouse-queries.md`.
 
 **It is never mixed into `waiting_probable` and never summed into its counts.** The same 79-pane
 sweep measured `waiting_probable` at **11 flagged / 11 true positives / 0 false positives**,
@@ -326,10 +337,11 @@ is a modal (which replaces the box) or a draft taller than the box — **unmeasu
 "nothing typed". Shell panes are **never** scraped (`not_claude`): a half-typed shell command
 is a different and noisier thing.
 
-🔴 **NEVER PASTE A CAPTURED DRAFT INTO A COMMITTED FILE.** `unsent_prompt` hands you **text
-the operator typed**, and devrc is a **PUBLIC** repo — as is every `claudedocs/` note, commit
-message, PR body, comment or test fixture an agent writes into it. Report a draft as a
-**count, a length or a shape**, never verbatim. Quoting one back to Zach in chat is fine;
+🔴 **NEVER PASTE CAPTURED OPERATOR TEXT INTO A COMMITTED FILE.** TWO fields carry **text the
+operator typed** — `unsent_prompt` (the draft) and `clickhouse.rows[].first_msg` (the opening
+prompt of every recent session) — and devrc is a **PUBLIC** repo, as is every `claudedocs/`
+note, commit message, PR body, comment or test fixture an agent writes into it. Report either
+as a **count, a length or a shape**, never verbatim. Quoting one back to Zach in chat is fine;
 writing one to a file that gets committed is not. (Four real drafts were quoted verbatim in
 this file and re-used as fixtures before this rule existed —
 `test_no_FIXTURE_DRAFT_string_appears_in_a_shipped_doc` now fails on that shape.)

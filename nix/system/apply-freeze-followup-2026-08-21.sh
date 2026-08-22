@@ -3,11 +3,40 @@
 #
 #   sudo bash nix/system/apply-freeze-followup-2026-08-21.sh
 #
-# Two changes, both consequences of reading the 2026-07-31 crash dump:
+# Three changes:
 #   1. kernel.panic_on_oops = 1   — reverses an explicit decision in #616
 #   2. a memtest86+ boot entry    — makes the leading hypothesis testable
+#   3. re-assert kernel.nmi_watchdog=1 after powertop — see below; ADDED after
+#      the 2026-08-21 18:45 freeze, which proved #616's headline fix inert
 #
 # Idempotent: safe to re-run.
+#
+# ── 🔴 #616'S HARD-LOCKUP PANIC HAS NEVER ONCE BEEN ARMED ───────────────────
+#
+# #616 set hardlockup_panic=1 and fixed TLP's NMI_WATCHDOG=0 default. That fix
+# is correct and it works. It is also not sufficient: `powertop --auto-tune`
+# runs AFTER TLP and writes 0 to /proc/sys/kernel/nmi_watchdog itself.
+#
+#     19:06:31  kernel: "NMI watchdog: Enabled"
+#     19:06:38  tlp:    "Applying power save settings...done."   (writes 1)
+#     19:06:38  powertop --auto-tune                             (writes 0)
+#     steady state: kernel.nmi_watchdog = 0
+#
+# Measured with a discriminating control on 2026-08-21 (both units restarted in
+# isolation, from a known value of 1):
+#
+#     after `systemctl restart powertop.service` -> 0
+#     after `systemctl restart tlp.service`      -> 1
+#
+# So powertop is the writer and TLP is innocent. hardlockup_panic=1 is DEAD
+# CODE while nmi_watchdog=0 — the detector never runs, so it can never fire the
+# panic. Every freeze since #616 has been unwatched.
+#
+# powertop.service is a `RemainAfterExit=yes` oneshot ordered
+# After=multi-user.target, so ExecStartPost is enough to re-assert the value
+# after it has done its tuning; TLP independently re-writes 1 on every AC<->BAT
+# transition, so the two together cover both the boot path and power events.
+# The rest of powertop's tuning is left alone — this reverses ONE tunable.
 #
 # ── WHY THIS REVERSES AN EARLIER DECISION ───────────────────────────────────
 #
@@ -67,7 +96,7 @@ fi
 
 BAK="$CFG.bak-oops-$(date +%Y%m%d-%H%M%S)"
 cp -a "$CFG" "$BAK"
-echo "[0/4] backed up $CFG -> $BAK"
+echo "[0/5] backed up $CFG -> $BAK"
 
 restore_on_err() {
   local rc=$?
@@ -88,7 +117,7 @@ require_one_match() { # <regex> <human name>
 
 # ---- 1. panic_on_oops ----------------------------------------------------
 if grep -qE '"kernel\.panic_on_oops"' "$CFG"; then
-  echo "[1/4] kernel.panic_on_oops already declared — skipping"
+  echo "[1/5] kernel.panic_on_oops already declared — skipping"
 else
   require_one_match '^[[:space:]]*boot\.kernel\.sysctl[[:space:]]*=' "boot.kernel.sysctl"
   line=$(grep -nE '^[[:space:]]*boot\.kernel\.sysctl[[:space:]]*=' "$CFG" | cut -d: -f1)
@@ -101,7 +130,7 @@ ${ind}# nix/system/apply-freeze-followup-2026-08-21.sh for the decoded trace.\\
 ${ind}\"kernel.panic_on_oops\" = 1;" "$CFG"
   grep -qE '"kernel\.panic_on_oops"[[:space:]]*=[[:space:]]*1;' "$CFG" \
     || { echo "ERROR: panic_on_oops edit did not apply" >&2; false; }
-  echo "[1/4] boot.kernel.sysctl: panic_on_oops=1"
+  echo "[1/5] boot.kernel.sysctl: panic_on_oops=1"
 fi
 
 # ---- 2. memtest86+ boot entry -------------------------------------------
@@ -113,7 +142,7 @@ fi
 # let it complete at least one full pass — a short run that finds nothing is not
 # evidence of good RAM.
 if grep -qE '^[[:space:]]*boot\.loader\.systemd-boot\.memtest86\.enable' "$CFG"; then
-  echo "[2/4] memtest86 boot entry already declared — skipping"
+  echo "[2/5] memtest86 boot entry already declared — skipping"
 else
   require_one_match '^[[:space:]]*boot\.loader\.systemd-boot\.enable' "boot.loader.systemd-boot.enable"
   line=$(grep -nE '^[[:space:]]*boot\.loader\.systemd-boot\.enable' "$CFG" | cut -d: -f1)
@@ -126,16 +155,46 @@ ${ind}# hypothesis. Budget hours: a full pass over 64 GiB is not quick.\\
 ${ind}boot.loader.systemd-boot.memtest86.enable = true;" "$CFG"
   grep -qE 'boot\.loader\.systemd-boot\.memtest86\.enable[[:space:]]*=[[:space:]]*true;' "$CFG" \
     || { echo "ERROR: memtest86 edit did not apply" >&2; false; }
-  echo "[2/4] boot.loader.systemd-boot.memtest86.enable = true"
+  echo "[2/5] boot.loader.systemd-boot.memtest86.enable = true"
 fi
 
-# ---- 3. Validate ---------------------------------------------------------
-if command -v nix-instantiate >/dev/null 2>&1; then
-  echo "[3/4] parsing $CFG ..."
-  nix-instantiate --parse "$CFG" >/dev/null
-  echo "[3/4] parse OK"
+# ---- 3. Re-assert the NMI watchdog after powertop -------------------------
+# Inserted at TOP LEVEL, immediately before `boot.kernel.sysctl = {`.
+#
+# NOT anchored on `powerManagement.powertop.enable` even though that is the
+# obviously related line: it sits at 4-space indent inside a nested block, so an
+# insertion there could land in the wrong attrset and still parse. The
+# boot.kernel.sysctl line is confirmed top-level (2-space indent).
+#
+# /run/current-system/sw/bin/sysctl rather than ${pkgs.procps}: this is inserted
+# by sed into a file whose `let` bindings we cannot see, so it must not depend
+# on any identifier being in scope.
+if grep -qE 'systemd\.services\.powertop\.serviceConfig\.ExecStartPost' "$CFG"; then
+  echo "[3/5] powertop ExecStartPost already declared — skipping"
 else
-  echo "[3/4] nix-instantiate unavailable — SKIPPING parse validation" >&2
+  require_one_match '^[[:space:]]*boot\.kernel\.sysctl[[:space:]]*=' "boot.kernel.sysctl"
+  line=$(grep -nE '^[[:space:]]*boot\.kernel\.sysctl[[:space:]]*=' "$CFG" | cut -d: -f1)
+  ind="$(sed -n "${line}p" "$CFG" | sed -E 's/^([[:space:]]*).*/\1/')"
+  sed -i "$((line - 1))a\\
+${ind}# 🔴 powertop --auto-tune writes 0 to /proc/sys/kernel/nmi_watchdog, AFTER\\
+${ind}# TLP has correctly written 1 (#616). That left hardlockup_panic=1 inert —\\
+${ind}# the hard-lockup detector was never running, so it could never fire the\\
+${ind}# panic. Confirmed 2026-08-21 by restarting each unit in isolation:\\
+${ind}# powertop -> 0, tlp -> 1. See nix/system/diagnose-freeze-2026-08-21.sh.\\
+${ind}systemd.services.powertop.serviceConfig.ExecStartPost =\\
+${ind}  \"/run/current-system/sw/bin/sysctl -w kernel.nmi_watchdog=1\";" "$CFG"
+  grep -qE 'systemd\.services\.powertop\.serviceConfig\.ExecStartPost' "$CFG" \
+    || { echo "ERROR: powertop ExecStartPost edit did not apply" >&2; false; }
+  echo "[3/5] systemd.services.powertop.serviceConfig.ExecStartPost = sysctl -w kernel.nmi_watchdog=1"
+fi
+
+# ---- 4. Validate ---------------------------------------------------------
+if command -v nix-instantiate >/dev/null 2>&1; then
+  echo "[4/5] parsing $CFG ..."
+  nix-instantiate --parse "$CFG" >/dev/null
+  echo "[4/5] parse OK"
+else
+  echo "[4/5] nix-instantiate unavailable — SKIPPING parse validation" >&2
 fi
 
 trap - ERR
@@ -146,7 +205,7 @@ echo "    diff -u $BAK $CFG"
 echo
 
 if [[ $EDIT_ONLY -eq 1 ]]; then
-  echo "[4/4] --edit-only: config edited and validated, nothing applied."
+  echo "[5/5] --edit-only: config edited and validated, nothing applied."
   exit 0
 fi
 
@@ -167,17 +226,28 @@ if [[ ${ans:-n} =~ ^[Yy]$ ]]; then
   # A `nixos-rebuild switch` does NOT restart systemd-sysctl
   # (NixOS/nixpkgs#289174), so the edit is inert until it is.
   systemctl restart systemd-sysctl
-  echo "[4/4] applied; restarted systemd-sysctl"
+  # Nor does it restart powertop.service: it is a RemainAfterExit oneshot that
+  # is already "active (exited)", so the new ExecStartPost would not run until
+  # the next boot. Deployed != restarted.
+  systemctl restart powertop.service
+  echo "[5/5] applied; restarted systemd-sysctl + powertop"
 else
-  echo "[4/4] Config edited and validated; nixos-rebuild NOT run. Run it when ready:"
-  echo "    sudo nixos-rebuild switch && sudo systemctl restart systemd-sysctl"
+  echo "[5/5] Config edited and validated; nixos-rebuild NOT run. Run it when ready:"
+  echo "    sudo nixos-rebuild switch \\"
+  echo "      && sudo systemctl restart systemd-sysctl powertop.service"
 fi
 
 echo
 echo "Verify:"
 echo "  sysctl kernel.panic_on_oops    # expect 1"
 echo "  sysctl kernel.panic            # expect 20  (set by #616)"
-echo "  sysctl kernel.nmi_watchdog     # expect 1   (set by #616)"
+echo "  sysctl kernel.nmi_watchdog     # expect 1   <- THE ONE THAT WAS 0."
+echo "                                 #    #616 alone did NOT achieve this;"
+echo "                                 #    powertop stomped it every boot."
+echo
+echo "  # and prove it SURVIVES the writer, rather than trusting the read above:"
+echo "  sudo systemctl restart powertop.service && sysctl kernel.nmi_watchdog"
+echo "                                 # STILL 1 — this is the real check"
 echo
 echo "Then REBOOT and pick the memtest86+ entry from the boot menu."
 echo "Let it finish at least one FULL pass over 64 GiB — hours, not minutes."
