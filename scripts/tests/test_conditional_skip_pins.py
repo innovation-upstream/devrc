@@ -46,6 +46,12 @@ def _extract(start: str, end: str) -> str:
     code that ships. Fails loudly rather than returning an empty string — an
     empty harness would make every assertion below pass vacuously."""
     txt = _runner_text()
+    # 🔴 The anchor must be UNIQUE. `for line in "${SKIP_LINES[@]}"; do` occurs
+    # twice — the print loop and the matching loop — and an ambiguous anchor
+    # silently extracted the wrong block, which is the "executes a stale copy"
+    # failure an extraction-based test is most exposed to.
+    assert txt.count(start) == 1, (
+        f"anchor {start!r} occurs {txt.count(start)} times — not unique")
     i = txt.index(start)
     j = txt.index(end, i)
     block = txt[i:j]
@@ -53,12 +59,25 @@ def _extract(start: str, end: str) -> str:
     return block
 
 
+def _ledger_condition_vars() -> set[str]:
+    """Every variable named by an `unset:VAR` condition in the real ledger.
+    Derived, so a new conditional entry cannot leave a stale hardcoded pop-set
+    behind — the failure mode that shipped in the first version of this file."""
+    block = _extract("EXPECTED_SKIPS=(", "\n)")
+    return set(re.findall(r"\|unset:([A-Za-z_][A-Za-z0-9_]*)", block))
+
+
 def _bash(script: str, env_extra: dict[str, str] | None = None) -> subprocess.CompletedProcess:
     import os
     env = dict(os.environ)
-    # Start from a known state: the variable under test must be genuinely absent
-    # unless a case sets it, or "unset" cases would silently test "set".
-    env.pop("ZZ_PROBE_DSN", None)
+    # 🔴 Start from a known state: EVERY variable any case or the real ledger
+    # depends on must be genuinely absent unless a case sets it, or an "unset"
+    # arm silently tests "set". Derived from the ledger rather than hardcoded —
+    # the first version of this popped only the synthetic probe var and left
+    # SIGNAL_PG_DSN alone, so `test_the_real_ledger_behaves_the_same_way` FAILED
+    # for exactly the developer this whole change exists to unbreak.
+    for _v in _ledger_condition_vars() | {"ZZ_PROBE_DSN"}:
+        env.pop(_v, None)
     env.update(env_extra or {})
     return subprocess.run(["bash", "-uo", "pipefail", "-c", script],
                           capture_output=True, text=True, env=env)
@@ -72,6 +91,17 @@ def _split_fn() -> str:
     if SPLIT_FN is None:
         SPLIT_FN = _extract("_split_skip_entry() {", "\n}\n") + "\n}\n"
     return SPLIT_FN
+
+
+APPLIES_FN = None
+
+
+def _applies_fn() -> str:
+    """The shipped `_skip_entry_applies`, verbatim."""
+    global APPLIES_FN
+    if APPLIES_FN is None:
+        APPLIES_FN = _extract("_skip_entry_applies() {", "\n}\n") + "\n}\n"
+    return APPLIES_FN
 
 
 # --------------------------------------------------------------------------
@@ -121,7 +151,7 @@ def _count_harness(entries: list[str]) -> str:
         EXPECTED_SKIPS=(
         {decl}
         )
-    """) + _split_fn() + loop + '\nprintf "%s %s\\n" "$pin_expected" "$fail"\n'
+    """) + _split_fn() + _applies_fn() + loop + '\nprintf "%s %s\\n" "$pin_expected" "$fail"\n'
 
 
 def test_unconditional_entry_always_counts():
@@ -173,3 +203,88 @@ def test_an_unknown_condition_is_a_HARD_ERROR_not_a_silent_pass():
     _, fail = r.stdout.split()
     assert fail == "1", "an unrecognised condition must set fail=1"
     assert "unknown condition" in r.stderr.lower()
+
+
+# --------------------------------------------------------------------------
+# THE COMPARISON ITSELF — the line the whole change turns on.
+# --------------------------------------------------------------------------
+
+def _verdict_harness(entries: list[str], tot_skipped: int) -> str:
+    """Counting loop + the real comparison block, driven with a synthetic
+    TOT_SKIPPED. Extends to the end of the equality's `fi` so the branch under
+    test is the shipped one.
+
+    🔴 WHY THIS EXISTS. The first version of this file extracted only up to
+    `for line in `, which stops BEFORE the comparison. So it pinned how
+    `pin_expected` is COMPUTED and never that the gate BRANCHES on it — and an
+    audit demonstrated that reverting the comparison to `${#EXPECTED_SKIPS[@]}`,
+    i.e. deleting the entire fix, left the full suite green. A test that proves a
+    value is calculated proves nothing about whether anything reads it.
+    """
+    count_loop = _extract("pin_expected=0\nfor entry in", "\nfor line in ")
+    cmp_start = _runner_text().index('if [ "$TOT_SKIPPED" -ne "$pin_expected" ]')
+    cmp_end = _runner_text().index("\nfi\n", cmp_start) + len("\nfi\n")
+    comparison = _runner_text()[cmp_start:cmp_end]
+    decl = "\n".join(f'  {e!r}' for e in entries)
+    return (
+        f"fail=0\nTOT_SKIPPED={tot_skipped}\nEXPECTED_SKIPS=(\n{decl}\n)\n"
+        + _split_fn() + _applies_fn() + count_loop + comparison
+        + '\nprintf "fail=%s pin_expected=%s\\n" "$fail" "$pin_expected"\n'
+    )
+
+
+def test_comparison_is_GREEN_when_the_total_matches_applicable_pins():
+    """DSN set: the pinned test RUNS, so one skip and one applicable pin."""
+    h = _verdict_harness(["scripts/signal/tests|needs a real Postgres|unset:ZZ_PROBE_DSN"], 0)
+    r = _bash(h, {"ZZ_PROBE_DSN": "postgres://x"})
+    assert r.returncode == 0, r.stderr
+    assert "fail=0" in r.stdout, f"expected green, got {r.stdout!r} {r.stderr!r}"
+
+
+def test_comparison_is_RED_when_the_total_exceeds_applicable_pins():
+    """The variable is set (pin does not apply) but a skip happened anyway —
+    the discrepancy the gate exists to surface."""
+    h = _verdict_harness(["scripts/signal/tests|needs a real Postgres|unset:ZZ_PROBE_DSN"], 1)
+    r = _bash(h, {"ZZ_PROBE_DSN": "postgres://x"})
+    assert "fail=1" in r.stdout, f"expected red, got {r.stdout!r}"
+    assert "MORE than" in r.stderr
+
+
+def test_comparison_USES_pin_expected_not_the_raw_entry_count():
+    """🔴 THE ANTI-REVERT TEST. Reverting the comparison to
+    `${#EXPECTED_SKIPS[@]}` deletes the fix; this case distinguishes the two,
+    because the raw count (1) and the applicable count (0) differ.
+
+    With the var SET the pin does not apply, so `pin_expected` is 0 and a
+    TOT_SKIPPED of 0 must be GREEN. Under the reverted comparison the raw entry
+    count is 1, so 0 != 1 and it goes RED. Any harness where the two counts are
+    equal cannot tell the versions apart — which is exactly how the reverted
+    mutant survived before.
+    """
+    h = _verdict_harness(["scripts/a/tests|reason|unset:ZZ_PROBE_DSN"], 0)
+    r = _bash(h, {"ZZ_PROBE_DSN": "set"})
+    assert "pin_expected=0" in r.stdout, r.stdout
+    assert "fail=0" in r.stdout, (
+        "the comparison is reading the raw entry count, not pin_expected — "
+        f"the fix is reverted or bypassed. stdout={r.stdout!r} stderr={r.stderr!r}")
+
+
+def test_a_non_applicable_pin_does_not_FORGIVE_a_skip():
+    """🔴 The two halves must agree. A pin whose condition does not hold here
+    must not absorb a skip in the matching loop while being excluded from the
+    count — that combination balanced the totals and hid a real discrepancy."""
+    matching = _extract('for line in "${SKIP_LINES[@]}"; do\n  matched=0', "\nif [ \"${#unexpected[@]}\"")
+    h = (
+        "fail=0\nunexpected=()\n"
+        'SKIP_LINES=("SKIPPED [1] scripts/a/tests/t.py:9: reason here")\n'
+        "EXPECTED_SKIPS=(\n  'scripts/a/tests|reason here|unset:ZZ_PROBE_DSN'\n)\n"
+        + _split_fn() + _applies_fn() + matching
+        + '\nprintf "unexpected=%s\\n" "${#unexpected[@]}"\n'
+    )
+    applies = _bash(h)
+    assert "unexpected=0" in applies.stdout, f"applicable pin must forgive: {applies.stdout!r}"
+
+    not_applies = _bash(h, {"ZZ_PROBE_DSN": "set"})
+    assert "unexpected=1" in not_applies.stdout, (
+        "a pin whose condition does NOT hold here still forgave the skip; the "
+        f"matching loop is condition-blind. stdout={not_applies.stdout!r}")

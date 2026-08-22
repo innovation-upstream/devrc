@@ -1692,14 +1692,24 @@ _nolaunch_ack_reason() {
 # the same way TARGET_FLOORS' two-way pin is tested.
 
 # --- GUARD 2: the pinned expected-skip set -------------------------------------
-# One "<dir>|<reason-regex>" per LEGITIMATELY skipped test. Both halves must match
-# a pytest `SKIPPED [n] <path>:<line>: <reason>` line, and the skip TOTAL must
-# equal the number of entries. Adding an entry is a deliberate act of accounting
-# — do it only when the skip is genuinely unavoidable, and say why.
+# An entry is "<dir>|<reason-regex>" or "<dir>|<reason-regex>|unset:VAR" per
+# LEGITIMATELY skipped test. `dir` and `reason` must both match a pytest
+# `SKIPPED [n] <path>:<line>: <reason>` line, and the skip TOTAL must equal the
+# number of entries THAT APPLY HERE — not the raw entry count. Adding an entry is
+# a deliberate act of accounting — do it only when the skip is genuinely
+# unavoidable, and say why.
 #
-# Built AFTER $HOME is settled: an entry may be conditional, but its condition
+# Built AFTER $HOME is settled: an entry may be conditional, and its condition
 # must be the SAME predicate the test itself uses — never a blanket allowance,
 # or the pin degrades into the numeric ceiling it exists to beat.
+#
+# 🔴 The third field is what makes that promise real. Without it the accounting
+# compared the skip total against a FLAT entry count, so on a host where a pinned
+# skip legitimately RUNS the gate went red — and the advice it printed ("delete
+# its EXPECTED_SKIPS entry") is wrong for a host-conditional pin, because
+# deleting it reds every OTHER host. `unset:VAR` means "expected only where VAR
+# is unset or empty". One predicate — `_skip_entry_applies` — decides both the
+# count and the forgiveness, so the two cannot drift apart.
 EXPECTED_SKIPS=(
   # Opt-in drift check against the LIVE homelab store — needs a kubeconfig and
   # network, neither of which a hermetic gate may have. Skips everywhere unless
@@ -2049,35 +2059,68 @@ _split_skip_entry() {
   if [ "$_rest" = "$ere" ]; then econd=""; else econd="${_rest#*|}"; fi
 }
 
-# Count only the entries whose condition HOLDS here. An unrecognised condition is
-# a hard error, never a silent "treat as unconditional" — a typo must not quietly
-# turn a conditional pin into a permanent one.
+# 🔴 ONE predicate, used by BOTH the counting loop and the matching loop below.
+# They previously evaluated applicability separately — counting honoured the
+# condition, matching ignored it — so a skip could be forgiven by a pin the
+# ledger said did not apply, and the totals still balanced. A rule open-coded at
+# two sites is wrong at one of them; this is the consolidation.
+#
+# Reads the `edir`/`ere`/`econd` that `_split_skip_entry` just set. Returns 0 if
+# the entry applies HERE, 1 if not. An invalid condition sets `fail` and returns
+# 1 — fail CLOSED, so a typo cannot silently widen a pin.
+_skip_entry_applies() {
+  case "$econd" in
+    "") return 0 ;;
+    unset:*)
+      local _v="${econd#unset:}"
+      # 🔴 VALIDATE BEFORE EXPANDING. `${!_v-}` on a non-identifier (a bare
+      # `unset:`, or a 4-field entry leaving `unset:FOO|typo`) raises bash's
+      # `invalid variable name`, and that error ABORTS THE ENCLOSING LOOP — every
+      # later entry goes silently unevaluated and `fail` stays 0. A typo in the
+      # pipe-delimited grammar is the LIKELIER shape than an unknown prefix, so
+      # it must not be the one that fails open.
+      if ! printf '%s' "$_v" | grep -qE '^[A-Za-z_][A-Za-z0-9_]*$'; then
+        echo "  ERROR: EXPECTED_SKIPS condition names an invalid variable: '$_v'" >&2
+        echo "         Expected 'unset:VAR' with VAR matching [A-Za-z_][A-Za-z0-9_]*." >&2
+        fail=1
+        return 1
+      fi
+      # `-z` is unset-OR-EMPTY. That is correct here — it mirrors the pinned
+      # test's own `not os.environ.get(...)` — but a future test using
+      # `"VAR" in os.environ` would disagree, so match the predicate you pin.
+      if [ -z "${!_v-}" ]; then return 0; fi
+      return 1
+      ;;
+    *)
+      echo "  ERROR: EXPECTED_SKIPS entry has an unknown condition: '$econd'" >&2
+      echo "         Supported: 'unset:VAR'." >&2
+      fail=1
+      return 1
+      ;;
+  esac
+}
+
+# Count only the entries whose condition HOLDS here.
 # NOTE (pre-existing, deliberately not changed here): this compares a count of
 # skipped TESTS against a count of ENTRIES, which assumes one test per entry.
 # Both current entries are `SKIPPED [1]`. Widening that is a separate change.
 pin_expected=0
 for entry in "${EXPECTED_SKIPS[@]}"; do
   _split_skip_entry "$entry"
-  case "$econd" in
-    "") pin_expected=$(( pin_expected + 1 )) ;;
-    unset:*)
-      _v="${econd#unset:}"
-      # Indirect expansion: the VALUE of the variable NAMED by $_v, empty when
-      # unset. `$_v` alone is the NAME and always non-empty.
-      [ -z "${!_v-}" ] && pin_expected=$(( pin_expected + 1 ))
-      ;;
-    *)
-      echo "  ERROR: EXPECTED_SKIPS entry has an unknown condition: '$econd'" >&2
-      echo "         Supported: 'unset:VAR'. Entry: $entry" >&2
-      fail=1
-      ;;
-  esac
+  if _skip_entry_applies; then pin_expected=$(( pin_expected + 1 )); fi
 done
 
 for line in "${SKIP_LINES[@]}"; do
   matched=0
   for entry in "${EXPECTED_SKIPS[@]}"; do
     _split_skip_entry "$entry"
+    # 🔴 A pin that does NOT apply here must not forgive anything. Without this,
+    # the two halves of the accounting disagree: `pin_expected` excludes the
+    # entry while this loop still matches on it, so a skip the ledger says
+    # cannot happen here is silently absorbed and the totals still balance.
+    # Measured before the fix: with SIGNAL_PG_DSN set, the signal skip was
+    # forgiven by a pin whose own condition said it could not apply — green.
+    if ! _skip_entry_applies; then continue; fi
     # "SKIPPED [n] <path>:<line>: <reason>" — require BOTH the owning directory
     # and the reason, so a skip that migrates to another suite is not absorbed.
     if printf '%s\n' "$line" | grep -qE "\] $edir/" && printf '%s\n' "$line" | grep -qE "$ere"; then
