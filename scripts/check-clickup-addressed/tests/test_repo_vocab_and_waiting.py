@@ -23,7 +23,7 @@
 
   D11  `disagreements()` emitted nothing for a task that is OPEN, has ZERO transcript
        evidence, and carries a recent comment from someone else. Measured live on
-       868kuam02: `to do`/high, @Ellie King 2026-08-20, 0 mentions — and the "Needs a
+       868gz0hhh: `to do`/high, @Robin Example 2026-08-20, 0 mentions — and the "Needs a
        decision" block said nothing. Nothing "disagrees", so every existing rule stayed
        quiet, but "a colleague asked you something and no work exists anywhere" is the
        most actionable thing this tool can detect.
@@ -48,7 +48,7 @@ check_addressed = importlib.util.module_from_spec(spec2)
 spec2.loader.exec_module(check_addressed)
 
 # The exact snippet the live run produced, verbatim from `check-addressed.py --limit 5`
-# on 2026-08-21 (task 868ktvqf9).
+# on 2026-08-21 (task 868gy0ddd).
 LIVE_SNIPPET = "| **#4181**, **devrc #591** | merged, verified by content |"
 
 NOW = datetime(2026, 8, 21, 12, 0, tzinfo=timezone.utc)
@@ -258,7 +258,7 @@ def test_the_marker_legend_is_printed_in_the_report():
 
 def _run_main(argv, completion=None, open_items=None, status="partially_addressed",
               mentions=3, clickup_status="to do", comment="hi", comment_date=None,
-              task="868ktvqf9"):
+              task="868gy0ddd"):
     """Drive check-addressed.main() with every sub-process stubbed. Returns stdout."""
     def fake(name, *args):
         if name == "recent-comments.py":
@@ -289,8 +289,8 @@ def test_both_marker_values_reach_a_real_report():
     """Positive control on BOTH values — a marker that can only print one symbol is the
     exact defect round 4 fixed, reintroduced one layer up.
 
-    Mirrors the live distribution measured 2026-08-21: 868ktvqf9 carries proximity 1.5
-    AND 1.0 signals; 868kt8pfu carries only 1.0.
+    Mirrors the live distribution measured 2026-08-21: 868gy0ddd carries proximity 1.5
+    AND 1.0 signals; 868gy0eee carries only 1.0.
     """
     out = _run_main(["--no-resolve-prs"], completion=[
         {"signal": "PR merged", "snippet": "ADJACENT", "proximity": 1.5},
@@ -308,10 +308,10 @@ def test_both_marker_values_reach_a_real_report():
 def _waiting(days_ago=1, status="to do", mentions=0, transcript="no_mentions_found"):
     d = (NOW - timedelta(days=days_ago)).strftime("%Y-%m-%d %H:%M")
     return {
-        "task_id": "868kuam02", "status": transcript, "sessions_searched": 1,
+        "task_id": "868gz0hhh", "status": transcript, "sessions_searched": 1,
         "mentions_found": mentions, "clickup_status": status, "clickup_priority": "high",
-        "newest_comment": {"date": d, "author": "Ellie King",
-                           "snippet": "Follow-up from the reporter, on why this looks pixelated"},
+        "newest_comment": {"date": d, "author": "Robin Example",
+                           "snippet": "Follow-up from the reporter, asking for a status update"},
         "completion": [], "open": [],
     }
 
@@ -321,7 +321,7 @@ def _flags(r):
 
 
 def test_an_unanswered_comment_with_zero_evidence_is_flagged():
-    """The live 868kuam02 shape. At base: [].
+    """The live 868gz0hhh shape. At base: [].
 
     An open ticket + zero transcript evidence anywhere + a recent comment from someone
     else means a human asked and nobody has started. Nothing "disagrees", so every
@@ -331,8 +331,8 @@ def test_an_unanswered_comment_with_zero_evidence_is_flagged():
     waiting = [f for f in flags if "WAITING" in f]
     assert waiting, f"an unanswered colleague comment over zero evidence produced no flag: {flags}"
     joined = " ".join(waiting).lower()
-    assert "868kuam02" in joined, f"the flag does not name the task: {waiting}"
-    assert "ellie king" in joined, f"the flag does not name who is waiting: {waiting}"
+    assert "868gz0hhh" in joined, f"the flag does not name the task: {waiting}"
+    assert "robin example" in joined, f"the flag does not name who is waiting: {waiting}"
 
 
 def test_no_sessions_found_is_the_same_zero_evidence_state():
@@ -441,17 +441,17 @@ def test_an_unparseable_comment_date_is_surfaced_not_swallowed():
 
 def test_round_four_flags_all_still_fire():
     """INVARIANT GUARD — the round-4 and round-3 behaviour must survive round 5."""
-    keep_open = {"task_id": "868kr0799", "status": "unclear", "mentions_found": 2,
+    keep_open = {"task_id": "868gx0bbb", "status": "unclear", "mentions_found": 2,
                  "clickup_status": "to do",
                  "newest_comment": {"date": NOW.strftime("%Y-%m-%d %H:%M"),
-                                    "author": "Justin Maier",
+                                    "author": "Jordan Sample",
                                     "snippet": "Still live, do not close. P95 > 5s fired and resolved repeatedly."},
                  "completion": [], "open": []}
     joined = " ".join(check_addressed.disagreements([keep_open], now=NOW))
     assert "do NOT close" in joined, f"the round-3 keep-open veto stopped firing: {joined}"
     assert "close it, or say why" not in joined, f"veto lost its suppression: {joined}"
 
-    unknown = {"task_id": "868kzzzzz", "status": "likely_addressed", "mentions_found": 4,
+    unknown = {"task_id": "868gw0zzz", "status": "likely_addressed", "mentions_found": 4,
                "clickup_status": "in review",
                "newest_comment": {"date": NOW.strftime("%Y-%m-%d %H:%M"),
                                   "author": "x", "snippet": "Resolved. Recommend closing."},

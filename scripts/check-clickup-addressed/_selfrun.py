@@ -9,7 +9,7 @@ exactly the shape the proximity scorer is built to reward.
 
 Measured that day: both tasks in the report scored `likely_addressed` on evidence that was
 100% a previous run's own output. Excluding it, they were `unclear` and `no_mentions_found`.
-One of them (868kr0799) carried a comment reading "Still live, do not close" — the tool told
+One of them (868gx0bbb) carried a comment reading "Still live, do not close" — the tool told
 the operator to close it.
 
 The markers below must be ANCHORED. Measured **2026-08-21** over the population these
@@ -37,7 +37,7 @@ SELF_RUN_MARKERS = (
     "<command-name>/check-clickup-addressed</command-name>",
     # Any Bash call into the pipeline, and the SKILL.md body itself once loaded. Also
     # catches the sessions that BUILT this skill, whose test fixtures hardcode real task
-    # IDs (868krn3y1, 868kr07fu) next to mock completion text.
+    # IDs (868gx1ccc, 868gx0aaa) next to mock completion text.
     #
     # 🔴 THE MARKER IS A PATH AND THE CODE MOVED (2026-08-22): this literal is the
     # datapacket-talos layout `.claude/skills/check-clickup-addressed/scripts/`, kept because

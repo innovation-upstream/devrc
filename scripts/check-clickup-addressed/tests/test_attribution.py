@@ -36,8 +36,8 @@ spec3.loader.exec_module(check_addressed)
 
 import _selfrun as selfrun  # noqa: E402  (SCRIPT_DIR is on sys.path above)
 
-TARGET = "868krn3y1"   # the task under test
-RIVAL = "868kr07fu"    # a different task whose verdict sits in the same window
+TARGET = "868gx1ccc"   # the task under test
+RIVAL = "868gx0aaa"    # a different task whose verdict sits in the same window
 
 
 def _session(tmpdir, session_id, *texts):
@@ -65,7 +65,7 @@ def test_no_mentions_is_not_partially_addressed():
         root = _session(tmp, "s1", "PR #348 merged. The mirror agent is still running.")
         orig, check_completion.CLAUDE_DIR = check_completion.CLAUDE_DIR, root
         try:
-            r = check_completion.check_task("868kt8pfu", session_ids=["s1"])
+            r = check_completion.check_task("868gy0eee", session_ids=["s1"])
         finally:
             check_completion.CLAUDE_DIR = orig
 
@@ -84,10 +84,10 @@ def test_no_mentions_positive_control():
         # NB: the open phrase here must be TICKET state. An earlier version of this
         # fixture said "the mirror agent is still running", which the tightened
         # OPEN_PATTERNS correctly no longer match — the control was asserting on noise.
-        root = _session(tmp, "s1", "868kt8pfu: PR #348 merged. The ticket is still open.")
+        root = _session(tmp, "s1", "868gy0eee: PR #348 merged. The ticket is still open.")
         orig, check_completion.CLAUDE_DIR = check_completion.CLAUDE_DIR, root
         try:
-            r = check_completion.check_task("868kt8pfu", session_ids=["s1"])
+            r = check_completion.check_task("868gy0eee", session_ids=["s1"])
         finally:
             check_completion.CLAUDE_DIR = orig
 
@@ -194,9 +194,9 @@ def test_windows_carry_their_mention_offset():
 def test_prefix_matching_does_not_invent_windows():
     """A different task sharing the first 6 characters must not create a window.
 
-    868kr07fu and 868kr0zzz share "868kr0"; the old prefix pass matched on that.
+    868gx0aaa and 868gx0zzz share "868gx0"; the old prefix pass matched on that.
     """
-    text = "868kr0zzz is a completely different task."
+    text = "868gx0zzz is a completely different task."
     assert check_completion.extract_text_windows(text, RIVAL, window_size=50) == []
 
 
@@ -232,7 +232,7 @@ def test_ticket_scoped_open_signal_still_fires():
 
 
 def test_blocked_on_credential_is_detected():
-    """The 868kt8pfu shape: work finished, landing blocked on a permission."""
+    """The 868gy0eee shape: work finished, landing blocked on a permission."""
     window = f"{TARGET} no PR was opened, blocked on the workflow scope for the token"
     hits = check_completion.extract_signals_from_windows(
         [(window, 0, 0)], check_completion.OPEN_PATTERNS, TARGET
@@ -373,21 +373,21 @@ def test_distant_repo_name_does_not_claim_a_bare_ref():
 # ----------------------------------------------------------------- disagreements
 
 def test_resolved_comment_on_open_ticket_is_flagged():
-    """The 868kr07fu shape: ticket `to do`/urgent, newest comment says "Resolved"."""
+    """The 868gx0aaa shape: ticket `to do`/urgent, newest comment says "Resolved"."""
     flags = check_addressed.disagreements([{
-        "task_id": "868kr07fu", "status": "partially_addressed",
+        "task_id": "868gx0aaa", "status": "partially_addressed",
         "clickup_status": "to do",
-        "newest_comment": {"snippet": "Resolved. The 8/17 DR-SWEEP reads 0 missing. Recommend closing."},
+        "newest_comment": {"snippet": "Resolved. The sweep on the 3rd reads 0 missing. Recommend closing."},
     }])
-    assert any("still" in f and "868kr07fu" in f for f in flags), \
+    assert any("still" in f and "868gx0aaa" in f for f in flags), \
         f"resolved-comment-on-open-ticket not flagged: {flags}"
 
 
 def test_no_flag_when_ticket_and_comment_agree():
     """Control: an open ticket with an open-sounding comment must NOT be flagged."""
     flags = check_addressed.disagreements([{
-        "task_id": "868krn3y1", "status": "unclear", "clickup_status": "to do",
-        "newest_comment": {"snippet": "Escalating priority: this fired on three healthy branches."},
+        "task_id": "868gx1ccc", "status": "unclear", "clickup_status": "to do",
+        "newest_comment": {"snippet": "Bumping priority: this reproduced on three clean branches."},
     }])
     assert flags == [], f"false disagreement raised: {flags}"
 
@@ -395,7 +395,7 @@ def test_no_flag_when_ticket_and_comment_agree():
 def test_open_pr_cited_as_done_is_flagged():
     """A completion signal quoting a PR that is actually still open."""
     flags = check_addressed.disagreements([{
-        "task_id": "868kr07fu", "status": "likely_addressed", "clickup_status": "complete",
+        "task_id": "868gx0aaa", "status": "likely_addressed", "clickup_status": "complete",
         "newest_comment": {"snippet": ""},
         "completion": [{"signal": "PR merged", "snippet": "addressed in #1073",
                         "pr_refs": [{"ref": "civitai/talos-infra#1073", "state": "open"}]}],
@@ -403,18 +403,19 @@ def test_open_pr_cited_as_done_is_flagged():
     assert any("#1073" in f and "OPEN" in f for f in flags), f"open PR not flagged: {flags}"
 
 
-# The real 868kr0799 comment (2026-08-20), abridged. Contains BOTH an explicit refusal to
-# close and the word "resolved" in its alert-cycling sense.
-KEEP_OPEN_COMMENT = ("Still live, do not close. The 8/17 clean CAPACITY-SWEEP looks like a "
-                     "lucky snapshot. Grafana tonight (8/19): MeiliSearch: P95 > 5s "
-                     "(Saturation Burst) fired and resolved repeatedly, A=18.97 at 7:55")
+# SYNTHETIC, built to the shape of the 868gx0bbb comment (2026-08-20): an explicit refusal
+# to close in the first clause, and the word "resolved" in its alert-cycling sense several
+# clauses later. Those two facts are what the veto has to separate; the wording is invented.
+KEEP_OPEN_COMMENT = ("Still live, do not close. The clean sweep on the 3rd looks like a "
+                     "lucky snapshot. Dashboards tonight (the 5th): search-tier P95 > 5s "
+                     "(Saturation Burst) fired and resolved repeatedly, A=12.40 at 03:20")
 
 
 def test_keep_open_comment_vetoes_the_close_flag():
     """A comment refusing closure must never produce a 'close it' instruction, however
     much completion vocabulary it also contains."""
     flags = check_addressed.disagreements([{
-        "task_id": "868kr0799", "status": "likely_addressed", "clickup_status": "to do",
+        "task_id": "868gx0bbb", "status": "likely_addressed", "clickup_status": "to do",
         "newest_comment": {"snippet": KEEP_OPEN_COMMENT},
     }])
     assert not any("close it" in f.lower() for f in flags), \
@@ -423,11 +424,11 @@ def test_keep_open_comment_vetoes_the_close_flag():
 
 
 def test_keep_open_veto_does_not_silence_genuine_resolutions():
-    """Positive control: the 868kr07fu shape must still be flagged for closing. Without
+    """Positive control: the 868gx0aaa shape must still be flagged for closing. Without
     this the veto could pass by suppressing every close-it flag."""
     flags = check_addressed.disagreements([{
-        "task_id": "868kr07fu", "status": "likely_addressed", "clickup_status": "to do",
-        "newest_comment": {"snippet": "Resolved on both counts. Recommend closing."},
+        "task_id": "868gx0aaa", "status": "likely_addressed", "clickup_status": "to do",
+        "newest_comment": {"snippet": "Resolved end to end. Recommend closing."},
     }])
     assert any("close it" in f for f in flags), f"genuine resolution no longer flagged: {flags}"
 
