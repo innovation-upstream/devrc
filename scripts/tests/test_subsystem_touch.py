@@ -4397,7 +4397,15 @@ class TestSessionMutationKillMatrix:
         falls back to git returns 0 and prints a plausible report — an answer to
         a question the caller did not ask, from a window that overlaps enough to
         look right. `/handoff` step 4 keys on the exit code, so this mutant would
-        cause a WRITE."""
+        cause a WRITE.
+
+        🔴 The payload says `scope_of()`, not `scope`: the scope is derived
+        lazily now, so a mutant naming the old local dies of UnboundLocalError —
+        a kill for the WRONG REASON, which proves nothing about this contract.
+        `scope_of()` returns exactly what `scope` used to hold, so the mutant
+        still means what it meant. `assert mod.main(argv) == 0` plus the
+        "collector" check below are what keep that honest: a mutant that merely
+        crashes fails them rather than passing quietly."""
         mod = _session_mutant(
             tmp_path,
             "ms_fallback",
@@ -4409,7 +4417,7 @@ class TestSessionMutationKillMatrix:
                     "    except (TouchError, ResolverError) as exc:\n"
                     '        print(f"subsystem-touch: {exc}", file=sys.stderr)\n'
                     "        print(render_text(build_report(collect_git_paths(repo), "
-                    "args.store, scope, today=stamp)))\n"
+                    "args.store, scope_of(), today=stamp)))\n"
                     "        return 0",
                 )
             ],
@@ -10703,6 +10711,44 @@ class TestValidateReportsUnreachableMarkers:
         )
         out = capsys.readouterr().out
         assert rc == 0
+        assert "MARKER(S) OUT OF REACH" in out
+
+    def test_the_SINGLE_FILE_form_needs_NO_git_repo_AT_CWD(
+        self, tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """🔴 REGRESSION, measured 2026-08-21. The scope was derived EAGERLY, and
+        `scope_for_repo` shells out to git — so this form exited 3 with "fatal:
+        not a git repository" from ANY cwd outside a checkout. The nix check
+        sandbox is exactly such a cwd (`/build/src` is a copy, not a clone), so
+        the hermetic gate that decides merges was red on a path a dev host
+        structurally cannot exercise: a dev host always runs inside the repo.
+
+        The single-file form never reads the scope — it takes its policy scope
+        from the file's own parent directory — so needing a repo was pure
+        coupling.
+
+        The non-repo cwd IS the test, so the premise is asserted rather than
+        assumed: a tmp dir that happened to sit inside a checkout would make this
+        pass without exercising anything.
+        """
+        store = _nuance_store(tmp_path, UNREACHABLE_NUANCE)
+
+        outside = tmp_path / "not-a-repo"
+        outside.mkdir()
+        monkeypatch.chdir(outside)
+        probe = subprocess.run(
+            ["git", "rev-parse", "--git-dir"], cwd=outside, capture_output=True
+        )
+        assert probe.returncode != 0, (
+            "premise gone: cwd resolves to a git repo, so this test cannot see "
+            "the defect it pins"
+        )
+
+        rc = st.main(
+            ["--store", str(store), "--validate", str(store / SCOPE / "collector.md")]
+        )
+        out = capsys.readouterr().out
+        assert rc == 0, f"exited {rc} outside a git repo; stdout={out!r}"
         assert "MARKER(S) OUT OF REACH" in out
 
     def test_the_CLI_json_carries_the_count_and_the_token(
