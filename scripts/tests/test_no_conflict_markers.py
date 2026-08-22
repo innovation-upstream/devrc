@@ -49,14 +49,49 @@ def _marker_lines(text: str) -> list[tuple[int, str]]:
     return hits
 
 
+# Directories a filesystem walk must never descend into. Only reachable on the
+# fallback path below; `git ls-files` already excludes every one of them.
+_WALK_SKIP_DIRS = frozenset(
+    {".git", "__pycache__", ".pytest_cache", "node_modules", "result"}
+)
+
+
 def _tracked_text_files() -> list[Path]:
+    """Every tracked text file — by `git ls-files` where that works, else a walk.
+
+    🔴 THE FALLBACK IS NOT A DEGRADATION, it is what makes this guard exist in
+    the tier that matters. MEASURED 2026-08-21: this ran `git ls-files` with
+    `check=True`, and the nix check sandbox builds from `/build/src` — a COPY of
+    the source, not a clone — so git exited 128 and the test ERRORED. This guard
+    was therefore structurally inert in the ONLY tier that gates a merge, which
+    is precisely the failure it was written to prevent (module docstring: a green
+    gate that cannot see the thing it forbids).
+
+    The fallback is faithful exactly where it fires: nix populates the flake
+    source from the git tree, so what is on disk in the sandbox IS the tracked
+    set. Where git answers we still prefer it, because a dev-host checkout also
+    carries ignored and untracked files that are none of this guard's business.
+
+    Either way the caller asserts the denominator, so a fallback that walked
+    nothing still cannot pass as a clean tree.
+    """
     out = subprocess.run(
         ["git", "-C", str(REPO), "ls-files", "-z"],
         capture_output=True,
         text=True,
-        check=True,
-    ).stdout
-    return [REPO / p for p in out.split("\0") if p]
+        check=False,
+    )
+    if out.returncode == 0:
+        return [REPO / p for p in out.stdout.split("\0") if p]
+
+    found: list[Path] = []
+    for path in REPO.rglob("*"):
+        if not path.is_file():
+            continue
+        if any(part in _WALK_SKIP_DIRS for part in path.relative_to(REPO).parts):
+            continue
+        found.append(path)
+    return found
 
 
 def test_no_tracked_file_carries_a_conflict_marker() -> None:
@@ -82,6 +117,44 @@ def test_no_tracked_file_carries_a_conflict_marker() -> None:
     assert not offenders, (
         f"{len(offenders)} conflict marker(s) in tracked files "
         f"(of {examined} examined):\n  " + "\n  ".join(offenders)
+    )
+
+
+def test_it_still_scans_the_tree_when_git_cannot_answer(monkeypatch) -> None:
+    """🔴 REGRESSION, measured 2026-08-21: this guard ERRORED in the nix check.
+
+    `git ls-files` ran with `check=True`, and the check sandbox builds from
+    `/build/src` — a COPY of the source, not a clone — so git exited 128 and
+    raised. The guard was therefore dead in the ONE tier that gates a merge,
+    while passing on every dev host, which is the same shape of blindness the
+    module docstring exists to describe.
+
+    Simulates git refusing, then asserts the walk actually produced this repo's
+    files — not merely that nothing raised.
+    """
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, *args, **kwargs):
+        calls.append(list(cmd))
+        if kwargs.get("check"):
+            # What the real subprocess.run does on a non-zero exit, which is the
+            # pre-fix behaviour this test must be able to see.
+            raise subprocess.CalledProcessError(128, cmd, output="", stderr="")
+        return subprocess.CompletedProcess(
+            cmd, 128, stdout="", stderr="fatal: not a git repository"
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    files = _tracked_text_files()
+
+    assert calls, "premise gone: it no longer asks git first"
+    assert len(files) > 500, (
+        f"the fallback walk produced only {len(files)} file(s) — it walked "
+        f"nothing useful, so the guard would report a vacuous clean tree"
+    )
+    assert REPO / "flake.nix" in files, "the walk did not reach this repo's root"
+    assert not [p for p in files if "__pycache__" in p.parts], (
+        "the walk descended into a skip directory"
     )
 
 

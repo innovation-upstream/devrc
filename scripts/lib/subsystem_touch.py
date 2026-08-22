@@ -5868,20 +5868,45 @@ def main(argv: Sequence[str] | None = None, *, today: str | None = None) -> int:
             return 0
 
         repo = Path(args.repo).resolve()
-        scope = args.scope if args.scope is not None else scope_for_repo(repo)
+
+        # 🔴 LAZY, and that is the entire point. `scope_for_repo` shells out to
+        # git, so deriving the scope EAGERLY made every subcommand require a git
+        # repo at cwd — including `--validate <file>`, which never reads the
+        # scope at all (it takes its policy scope from the file's own parent
+        # directory, below) and whose whole job is to answer "does this entry
+        # parse". MEASURED 2026-08-21: `--validate <file>` from a non-repo cwd
+        # exited 3 with "fatal: not a git repository", and the nix check sandbox
+        # runs at exactly such a cwd (`/build/src` is a copy, not a clone) — so
+        # the hermetic gate was RED on a path the dev host structurally could not
+        # exercise, because a dev host is always inside the repo.
+        #
+        # Memoized, so the paths that DO need it (the scope form, --template, and
+        # the report below) still pay for exactly one git call.
+        _scope_memo: list[str] = []
+
+        def scope_of() -> str:
+            if not _scope_memo:
+                _scope_memo.append(
+                    args.scope if args.scope is not None else scope_for_repo(repo)
+                )
+            return _scope_memo[0]
 
         if args.template is not None:
-            print(new_entry_template(normalize_ref(args.template), scope, today=stamp))
+            print(
+                new_entry_template(normalize_ref(args.template), scope_of(), today=stamp)
+            )
             return 0
 
         if args.validate is not None:
             if args.validate == VALIDATE_SCOPE:
+                scope = scope_of()
                 checked, malformed = validate_scope(args.store, scope)
                 policy_scope: str | None = scope
                 target = f"`{normalize_ref(scope)}/`"
                 scanned = [
                     Path(args.store) / normalize_ref(scope) / name for name in checked
                 ]
+                reported_scope: str | None = scope
             else:
                 bad = validate_entry_file(args.validate)
                 checked = (Path(args.validate).name,)
@@ -5889,11 +5914,15 @@ def main(argv: Sequence[str] | None = None, *, today: str | None = None) -> int:
                 policy_scope = Path(args.validate).parent.name
                 target = str(args.validate)
                 scanned = [Path(args.validate)]
+                # No scope, and NOT because it could not be derived: the
+                # single-file form is not scoped. Deriving one here is what made
+                # this branch need a git repo.
+                reported_scope = None
             path, basis = governing_policy(args.store, policy_scope or "")
             report = ValidationReport(
                 store_root=str(args.store),
                 target=target,
-                scope=scope if args.validate == VALIDATE_SCOPE else None,
+                scope=reported_scope,
                 checked=tuple(checked),
                 malformed=tuple(malformed),
                 policy_path=path,
@@ -5964,7 +5993,7 @@ def main(argv: Sequence[str] | None = None, *, today: str | None = None) -> int:
         report = build_report(
             source,
             args.store,
-            scope,
+            scope_of(),
             today=stamp,
             min_paths=args.min_paths,
             limit=args.limit,
@@ -5984,7 +6013,7 @@ def main(argv: Sequence[str] | None = None, *, today: str | None = None) -> int:
                 escalation=escalate_to_commit_window(
                     repo,
                     args.store,
-                    scope,
+                    scope_of(),
                     today=stamp,
                     min_paths=args.min_paths,
                     limit=args.limit,
