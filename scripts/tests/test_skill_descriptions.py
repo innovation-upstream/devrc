@@ -113,9 +113,10 @@ CLICKUP_SIBLINGS = {
 #
 # 🔴 Deliberately not a per-name substring check. `claude/RULES.md`: "When the
 # artifact under test IS prose, a guard on WORDS is walkable by REWORDING -- pin
-# the WHOLE normalised string." A description could name all three siblings in
-# passing ("see also clawgate, initiatives, mailbox") and satisfy a word check
-# while telling the router nothing about which one owns which case. The stated
+# the WHOLE normalised string." A description could name EVERY sibling in
+# passing ("see also clawgate, initiatives, mailbox and check-clickup-addressed")
+# and satisfy a word check while telling the router nothing about which one owns
+# which case -- that exact walk is a control below. The stated
 # cost, accepted: a cosmetic reword of this ONE sentence fails this test. The
 # routing keywords in the rest of the description are deliberately left free to
 # change -- rigidifying those would make the gate fight the very tuning it exists
