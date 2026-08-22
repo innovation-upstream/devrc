@@ -227,9 +227,24 @@ longer true, and a permanently-red gate is no longer the expected outcome. See s
 2. **Require `tekton/devrc-nodetests` now** — it went green on the first real run (1119/1119).
    🔴 **Re-open the `devrc-pytests` question: its stated blocker no longer exists.** The first
    run shows the nix sandbox WORKING in-pod (`seed-nix` rc=0; 14,686 tests passed), so the
-   "cannot be required" verdict below is stale. Its one failure is a **stale floor**, fixable
-   in one line — raise `TARGET_FLOORS` to `scripts/signal/tests|682`. Fix that, watch pytests
-   go green across a few runs, *then* decide. Do not require it on one observation.
+   "cannot be required" verdict below is stale. Its one failure was a **stale floor**, and
+   that is now **fixed on `main` by `#708`** (`scripts/signal/tests|553` → `682`, the number
+   the gate printed). Watch pytests go green across a few runs, *then* decide — do not require
+   it on one observation.
+   ⚠ **Concurrency note, and it cost a PR:** `#713` was opened for this same floor and was
+   **superseded mid-flight by `#708`**, which landed the identical value. That is the third
+   time this session's work has been overtaken by a concurrent session. **Check whether
+   someone is already on a defect before starting it** — `git log origin/main -3` costs
+   nothing next to a wasted branch.
+2d. 🔴 **The gate CONGESTS: right-size its requests.** The first day it fired, 8 runs queued
+   and **5 sat `Pending` 15+ min** on `Insufficient memory` while the node idled at 26% mem /
+   20% CPU. Every devrc run is pinned to ONE node (shared `nix-cache` RWO PVC + the
+   pipeline's `volumeClaimTemplate` → Tekton's affinity assistant), and at 4Gi+2Gi per run a
+   32Gi node fits five. Measured peak is **823Mi / 1043m** for the pytests leg — a ~5×
+   over-request. And because Tekton steps run **sequentially**, the pytests and nodetests
+   requests are never both in use yet are both summed into the pod request. Fixed in
+   homelab-infra **`#378`** (requests only; every limit untouched, so nothing can OOM that
+   could not before). Per-run 6Gi→3Gi, 3→1.5 CPU ≈ 10 concurrent instead of 5.
 2c. **`CLAUDE.md` is now falsified by this work and its own gate cannot see it.** On
    `origin/main` it still asserts "**NO AUTOMATED GATE IS RUNNING**", "no Tekton trigger names
    devrc", and "`statusCheckRollup` returns **0 checks** on every PR" — all three measurably
@@ -263,7 +278,7 @@ longer true, and a permanently-red gate is no longer the expected outcome. See s
    returns TWO lines when `CDPATH` is set, because bash's `cd` echoes the target. Use
    `cd -- "$d" >/dev/null && pwd`.
 
-### 🔴 `origin/trunk` is TEST-FIXTURE DEBRIS on a PUBLIC repo — pending deletion
+### ✅ `origin/trunk` was TEST-FIXTURE DEBRIS on a PUBLIC repo — DELETED 2026-08-22
 The wrong-`origin/HEAD` in 2b only did damage because the branch it pointed at exists. What it
 is, measured 2026-08-22:
 - Tip `ff6b2ca3` — author **`t <t@t>`**, message `seed`, adds a single file `seed.py`. That is
@@ -277,8 +292,11 @@ is, measured 2026-08-22:
   `TestBlockedCommitLeavesNoTrace` + 6 tests) are present in `main`. Nothing is orphaned.
   This is the squash/ancestry trap in `claude/RULES.md` firing on a real branch — the "NO"
   reads as "unmerged, don't delete", and it is wrong.
-- **Recovery sha if deletion is regretted:** `ff6b2ca39b5d228aa77243dee2f930a2cfe025fd`
-  (`git push origin ff6b2ca3:refs/heads/trunk`).
+- **Deleted** after re-verifying at the moment of the destructive step (tip still `ff6b2ca3`,
+  0 of the 9 symbols missing from `main`) — not from the earlier survey, per the stale-
+  observation rule. **Recovery sha:** `ff6b2ca39b5d228aa77243dee2f930a2cfe025fd`, also kept
+  locally as `refs/recovery/trunk-ff6b2ca3` on the workbench →
+  `git push origin ff6b2ca3:refs/heads/trunk`.
 
 ## Gotchas / decisions / dead-ends
 
