@@ -111,6 +111,81 @@ BUDGET_JUSTIFICATION = (
 )
 BUDGET_OWNER = "scripts/tests/test_subsystem_audit_budget.py"
 
+# --- acknowledged over-cap entries ----------------------------------------------
+# 🔴 AN ENUMERATION, NOT A THRESHOLD — the same shape as `run-tests.sh`'s
+# `EXPECTED_SKIPS`, and for the same reason.
+#
+# WHY THIS EXISTS. A handful of entries are over the hard cap and CANNOT be
+# brought under it by the lifecycle this auditor owns: what remains in them is
+# `OPEN:` bullets (never evictable, at any age or size) and gotchas whose only
+# written form is that bullet. Before this list, `## verdict` therefore printed
+# `⚠ prune needed` on every run, forever, with no action that could ever clear
+# it — and `claude/RULES.md` is explicit that a permanently-red gate is worse
+# than no gate, because it trains everyone to stop reading the verdict.
+#
+# 🔴 WHAT IT IS NOT. It is not a raised number, not a ratio, not a pattern, and
+# not env-overridable. An over-cap entry that is NOT spelled here is still a
+# finding, so new bloat is caught exactly as before. Raising the CAP would have
+# blessed every future entry up to the new number; naming five files blesses
+# five files.
+#
+# 🔴 ACKNOWLEDGED NEVER MEANS INVISIBLE. `render()` prints the count and names
+# every one of them on every run, in their own block, whether or not the verdict
+# is clean — an exemption nobody can see is how a list like this rots into a
+# permanent excuse.
+#
+# 🔴 IT IS PINNED IN BOTH DIRECTIONS, BY THE AUDIT ITSELF (`account_acknowledged`),
+# so the pin runs against the LIVE store on every invocation rather than only in
+# a hermetic suite that cannot see it:
+#   * an entry over the cap that is NOT listed here          -> a finding;
+#   * a listed entry that is no longer over the cap          -> a STALE
+#     ACKNOWLEDGEMENT finding: delete the line, the exemption has been earned
+#     away. This is the direction that decays silently, which is why it is a
+#     finding and not a comment;
+#   * a listed entry that no longer exists at all            -> also a finding
+#     (renamed or deleted; the list has rotted).
+#
+# 🔴 THE ADMISSION TEST, so a sixth line cannot be added by sentiment. An entry
+# qualifies only when evicting EVERY bullet this auditor classes `EVICTABLE`
+# still leaves it over the cap — i.e. lifecycle pruning provably cannot reach it.
+# Measured 2026-08-22 by simulating the removal (size -> size after evicting all
+# EVICTABLE bullets):
+#
+#   datapacket-talos/tekton-builds.md     26,935 -> 20,917  (3 evictable, 6,018 B)
+#   datapacket-talos/storage-resolver.md  23,765 -> 22,347  (1 evictable, 1,418 B)
+#   datapacket-talos/monitoring.md        23,266 -> 23,266  (0 evictable)
+#   civitai/blocks.md                     14,052 -> 14,052  (0 evictable)
+#   devrc/subsystem-index.md              12,295 -> 12,295  (0 evictable)
+#
+# ⚠ `homelab-talos/subsystem-store.md` (13,299 B) was a candidate and is
+# DELIBERATELY ABSENT: evicting its 2 EVICTABLE bullets (1,193 B) lands it at
+# 12,106 B, UNDER the cap. Lifecycle pruning CAN reach it, so it is a real,
+# actionable finding and the audit keeps reporting it. Prune it via
+# `/prune-index` and the hard-cap line goes clean on its own — which is the
+# proof that this list did not simply silence the gate.
+#
+# Keys are `<scope>/<filename>` — exactly `EntryAudit.where`, and exactly the
+# names the size table already prints. 🔴 NO ENTRY CONTENT MAY BE RECORDED HERE
+# OR ANYWHERE IN THIS REPO: the store is client-confidential and devrc is
+# PUBLIC. Names and aggregate byte counts are the most that may be written down.
+_ACK_REASON = (
+    "remaining content is OPEN bullets or gotchas with no other written form; "
+    "lifecycle pruning cannot reduce it further"
+)
+
+ACKNOWLEDGED_OVER_CAP: dict[str, str] = {
+    "datapacket-talos/tekton-builds.md": _ACK_REASON
+    + " — 3 EVICTABLE bullets (6,018 B); evicting all of them still leaves 20,917 B",
+    "datapacket-talos/storage-resolver.md": _ACK_REASON
+    + " — 1 EVICTABLE bullet (1,418 B); evicting it still leaves 22,347 B",
+    "datapacket-talos/monitoring.md": _ACK_REASON
+    + " — 0 EVICTABLE bullets; the lifecycle has nothing to remove",
+    "civitai/blocks.md": _ACK_REASON
+    + " — 0 EVICTABLE bullets; the lifecycle has nothing to remove",
+    "devrc/subsystem-index.md": _ACK_REASON
+    + " — 0 EVICTABLE bullets; 7 B over, and the 7 B are OPEN/no-other-form content",
+}
+
 # The schema (`index-store.md` -> "## Nuance / work-history") says "dated bullets,
 # newest-first, <=2 lines each".
 #
@@ -649,6 +724,85 @@ def audit_store(
     )
 
 
+# --- acknowledged-list accounting -----------------------------------------------
+
+
+@dataclass(frozen=True)
+class AckAccounting:
+    """The two-way pin on `ACKNOWLEDGED_OVER_CAP`, computed against a real store.
+
+    🔴 THE PIN LIVES HERE, NOT ONLY IN A TEST, on purpose. The hermetic suite runs
+    in a nix sandbox that cannot see `~/.claude/analyze-service-index/` at all, so
+    a test-only pin would be structurally blind to the exact drift it claims to
+    catch (`claude/RULES.md` -> "a suite whose CONFIG pins a dimension is
+    STRUCTURALLY BLIND to that dimension's bugs"). Computing it in the auditor
+    means the list is re-validated against the live store on EVERY run, and the
+    hermetic tests then only have to prove that this function is wired correctly —
+    which they do with synthetic stores, in both directions.
+
+    * `honoured`      over the cap AND listed -> not a finding, but always PRINTED.
+    * `unacknowledged` over the cap and NOT listed -> a finding. New bloat is
+      caught exactly as it was before the list existed.
+    * `stale`         listed, still present, and no longer over the cap -> a
+      finding. THE DIRECTION THAT DECAYS SILENTLY: without it a line could sit
+      here forever excusing an entry that had already been fixed, and the list
+      would quietly become a blanket rather than an enumeration.
+    * `absent`        listed, its scope was audited, and no such entry exists ->
+      a finding. The entry was renamed or deleted and the line has rotted.
+    """
+
+    honoured: tuple[EntryAudit, ...] = ()
+    unacknowledged: tuple[EntryAudit, ...] = ()
+    stale: tuple[tuple[str, int], ...] = ()
+    absent: tuple[str, ...] = ()
+
+    @property
+    def findings(self) -> int:
+        return len(self.unacknowledged) + len(self.stale) + len(self.absent)
+
+
+def account_acknowledged(
+    entries: list[EntryAudit],
+    scopes: list[str],
+    acknowledged: dict[str, str] | None = None,
+) -> AckAccounting:
+    """Reconcile the acknowledged list against what was actually measured.
+
+    🔴 SCOPE-LIMITED, and that is not a detail. Under `--scope civitai` the other
+    scopes' entries were never examined, so a key naming one of them is
+    UNMEASURED, not missing — reporting it `absent` would manufacture a rotten
+    line out of a narrowed run, and the operator would delete a line that is
+    perfectly correct. Only keys whose scope was audited are judged.
+    """
+    ack = ACKNOWLEDGED_OVER_CAP if acknowledged is None else acknowledged
+    in_scope = set(scopes)
+    by_where = {e.where: e for e in entries}
+
+    honoured, unack = [], []
+    for e in entries:
+        if e.size <= HARD:
+            continue
+        (honoured if e.where in ack else unack).append(e)
+
+    stale, absent = [], []
+    for key in sorted(ack):
+        scope = key.split("/", 1)[0]
+        if scope not in in_scope:
+            continue
+        e = by_where.get(key)
+        if e is None:
+            absent.append(key)
+        elif e.size <= HARD:
+            stale.append((key, e.size))
+
+    return AckAccounting(
+        honoured=tuple(sorted(honoured, key=lambda e: -e.size)),
+        unacknowledged=tuple(sorted(unack, key=lambda e: -e.size)),
+        stale=tuple(stale),
+        absent=tuple(absent),
+    )
+
+
 # --- render ---------------------------------------------------------------------
 
 
@@ -656,11 +810,20 @@ def _mark(status: str) -> str:
     return {"OK": "✓", "OVER TARGET": "⚠", "OVER HARD CAP": "✗"}[status]
 
 
-def render(a: StoreAudit, show_all: bool, n_detail: int, check_prs: bool, out=sys.stdout) -> None:
+def render(
+    a: StoreAudit,
+    show_all: bool,
+    n_detail: int,
+    check_prs: bool,
+    out=sys.stdout,
+    acknowledged: dict[str, str] | None = None,
+) -> None:
     p = lambda *x: print(*x, file=out)  # noqa: E731
     ents = sorted(a.entries, key=lambda e: -e.size)
     n = len(ents)
     total = sum(e.size for e in ents)
+    ack_map = ACKNOWLEDGED_OVER_CAP if acknowledged is None else acknowledged
+    ack = account_acknowledged(a.entries, a.scopes, ack_map)
 
     p(f"# /analyze-service index audit — {n} entries in {len(a.scopes)} scope(s)")
     p(f"  store: {a.store_root}")
@@ -678,9 +841,11 @@ def render(a: StoreAudit, show_all: bool, n_detail: int, check_prs: bool, out=sy
     over = [e for e in ents if e.status != "OK"]
     p("\n## sizes (worst first)")
     listed = ents if show_all else over
+    honoured_where = {e.where for e in ack.honoured}
     for e in listed:
         ratio = f"  {e.size / TARGET:.1f}x target" if e.size > TARGET else ""
-        p(f"  {e.size:>9,} B  {_mark(e.status)} {e.status:<13} {e.where}{ratio}")
+        tag = "  [ACKNOWLEDGED]" if e.where in honoured_where else ""
+        p(f"  {e.size:>9,} B  {_mark(e.status)} {e.status:<13} {e.where}{ratio}{tag}")
     if not listed:
         p("  (none over budget)")
     hidden = n - len(listed)
@@ -689,6 +854,42 @@ def render(a: StoreAudit, show_all: bool, n_detail: int, check_prs: bool, out=sy
     p(f"  store total: {total:,} B across {n} entries examined "
       f"(mean {total // max(n, 1):,} B); {len(over)} of {n} over the {TARGET:,} B target, "
       f"excess {sum(e.size - TARGET for e in over):,} B")
+
+    # --- acknowledged over-cap accounting
+    #
+    # 🔴 PRINTED WHETHER OR NOT THE VERDICT IS CLEAN. An exemption nobody can see
+    # is how an enumeration rots into a blanket; `run-tests.sh` prints its
+    # EXPECTED_SKIPS accounting for exactly this reason. The block is emitted
+    # whenever the list has ANY key in an audited scope — including when every
+    # one of them has gone stale, which is precisely when it must be loudest.
+    in_scope_keys = [k for k in sorted(ack_map) if k.split("/", 1)[0] in set(a.scopes)]
+    if in_scope_keys or ack.honoured:
+        p(f"\n## acknowledged over cap — {len(ack.honoured)} ACKNOWLEDGED over cap "
+          f"(of {len(ack.honoured) + len(ack.unacknowledged)} entries over the "
+          f"{HARD:,} B cap, {len(in_scope_keys)} listed in the audited scope(s))")
+        p("  An ENUMERATION, not a raised cap: each of these is over the hard cap and")
+        p("  provably cannot be brought under it by the lifecycle this auditor owns —")
+        p("  evicting every EVICTABLE bullet still leaves it over. They are excluded")
+        p("  from the verdict and NEVER from this page. An over-cap entry not named")
+        p("  here is still a finding.")
+        for e in ack.honoured:
+            p(f"      {e.size:>9,} B  {e.where}")
+            p(f"                   reason: {ack_map[e.where]}")
+        if not ack.honoured:
+            p("      (none of the listed entries is currently over the cap)")
+        if ack.stale:
+            p(f"\n  🔴 {len(ack.stale)} STALE ACKNOWLEDGEMENT(S) — listed, but no longer over "
+              f"the {HARD:,} B cap.")
+            p("     The exemption has been earned away. DELETE the line from")
+            p("     ACKNOWLEDGED_OVER_CAP; leaving it there turns an enumeration into a")
+            p("     standing excuse for an entry that is already fixed.")
+            for key, size in ack.stale:
+                p(f"       {size:>9,} B  {key}  (under the cap by {HARD - size:,} B)")
+        if ack.absent:
+            p(f"\n  🔴 {len(ack.absent)} ACKNOWLEDGED ENTR(IES) NO LONGER EXIST — renamed or "
+              "deleted. Remove the line:")
+            for key in ack.absent:
+                p(f"       {key}")
 
     # --- bullet shape
     bl = [b for e in ents for b in e.bullets]
@@ -837,11 +1038,23 @@ def render(a: StoreAudit, show_all: bool, n_detail: int, check_prs: bool, out=sy
     # --- verdict
     p("\n## verdict")
     need = []
-    n_hard = sum(1 for e in ents if e.status == "OVER HARD CAP")
+    # 🔴 THE VERDICT COUNTS ONLY UNACKNOWLEDGED OVER-CAP ENTRIES. The acknowledged
+    # ones are still over the cap and are still printed, above and below — what
+    # changes is only whether they can EVER be cleared. Six entries that no action
+    # could fix made this line read `⚠ prune needed` on every run forever, which
+    # `claude/RULES.md` calls worse than no gate. The TARGET tier is unaffected:
+    # acknowledgement is about the hard cap only, so an acknowledged entry is still
+    # counted over target below, exactly as before.
+    n_hard_all = sum(1 for e in ents if e.status == "OVER HARD CAP")
+    n_hard = len(ack.unacknowledged)
     if n_hard:
         need.append(f"{n_hard} entr(ies) over the {HARD:,} B hard cap")
-    if len(over) - n_hard:
-        need.append(f"{len(over) - n_hard} over the {TARGET:,} B target")
+    if ack.stale:
+        need.append(f"{len(ack.stale)} stale acknowledgement(s) (listed but no longer over cap)")
+    if ack.absent:
+        need.append(f"{len(ack.absent)} acknowledged entr(ies) that no longer exist")
+    if len(over) - n_hard_all:
+        need.append(f"{len(over) - n_hard_all} over the {TARGET:,} B target")
     if ev:
         need.append(f"{len(ev)} RESOLVED bullet(s) evictable")
     if nh:
@@ -864,9 +1077,29 @@ def render(a: StoreAudit, show_all: bool, n_detail: int, check_prs: bool, out=sy
         p(f"  🔒 {len(opens)} OPEN bullet(s) in {len(open_entries)} entries are NOT in that "
           "list and must not be touched.")
     else:
-        p(f"  ✓ all {n} entries within budget, every ref resolves, every pointer checked "
+        # 🔴 The clean line must not claim "all N entries within budget" while
+        # acknowledged entries sit over the cap — that sentence would be FALSE, and
+        # a verdict that lies to go green is worse than the red one it replaced.
+        # `claude/RULES.md`: "a comment is a claim too", and so is a verdict.
+        budget_clause = (
+            f"all {n} entries within budget"
+            if not ack.honoured
+            else f"{n - len(ack.honoured)} of {n} entries within budget and the other "
+                 f"{len(ack.honoured)} ACKNOWLEDGED over cap (named above)"
+        )
+        p(f"  ✓ {budget_clause}, every ref resolves, every pointer checked "
           "resolves,\n    no RESOLVED bullet is evictable and none lacks a home — "
           "no prune needed (stop; do not churn the files)")
+    # 🔴 NAMED IN BOTH BRANCHES. Whether the verdict is clean or red, an
+    # acknowledged exemption is restated at the point a reader stops reading.
+    if ack.honoured:
+        p(f"  ⓘ {len(ack.honoured)} ACKNOWLEDGED over cap — excluded from the verdict, "
+          "NOT from the store:")
+        for e in ack.honoured:
+            p(f"      {e.size:>9,} B  {e.where}")
+        p("     Each is over the hard cap with no lifecycle eviction that can reach it.")
+        p("     They are an ENUMERATION in `ACKNOWLEDGED_OVER_CAP`, not a raised cap: an")
+        p("     over-cap entry not on that list is still a finding above.")
     if nc or unchecked or a.unresolved_scopes:
         p(f"  ⚠ NOT a complete reading: {len(nc)} lifecycle target(s), {len(unchecked)} "
           f"pointer(s) and {len(a.unresolved_scopes)} scope(s) went unmeasured.")
