@@ -34,6 +34,7 @@ gate cannot see is a guard that reports no failures.
 """
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -73,6 +74,14 @@ DECOY_DOCS = (
     "HANDBOOK.md",
     "SHORTHAND-NOTES.md",
     "handling-errors.md",
+    # 🔴 The tenth, added 2026-08-21 after a mutation SURVIVED at BOTH sites that
+    # spell `*HANDOFF*.md` (the fallback chain and the prose scan): broadening
+    # the uppercase glob to a case-INSENSITIVE variant. Not one of the nine
+    # above contains the letters `handoff` in any case, so nothing could see it.
+    # This one does, lowercase and not at the start, so it matches neither
+    # `handoff-*.md` nor `*HANDOFF*.md` today and is swept in by any
+    # case-folding of the second.
+    "my-handoff-notes.md",
 )
 
 
@@ -253,6 +262,11 @@ def drift_lines(stdout):
     lines = stdout.splitlines()
     i = lines.index("DRIFT")
     return [ln.strip() for ln in lines[i + 1 :] if ln.strip()]
+
+
+def gap_lines(stdout):
+    """Just the `! …` GAP entries, unprefixed. The `!!` banner is excluded."""
+    return [ln[2:] for ln in drift_lines(stdout) if ln.startswith("! ")]
 
 
 # --------------------------------------------------------------------------- #
@@ -448,6 +462,927 @@ def test_resolution_is_scoped_to_claudedocs(tmp_path, stub_bin):
     (repo / "docs").mkdir(exist_ok=True)
     (repo / "docs" / "SESSION-HANDOFF.md").write_text("## sibling dir\n")
     assert handoff_line(run_resume(repo, stub_bin)) == "handoff: (none found — git-only)"
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 #684 — AN ARGUMENT THAT DID NOT RESOLVE MUST NOT FALL BACK SILENTLY
+#
+# The chain ends in "newest claudedocs/handoff-*.md", and that last step could
+# not tell "no argument supplied" (newest IS the contract) from "an argument was
+# supplied and did not resolve" (newest is a guess). Both reached it, and the
+# second was silent: the digest printed the fallback's filename on the `handoff:`
+# line as though that were the intent, and every block below — the DRIFT
+# all-clear included — was then correct about a document nobody asked for.
+#
+# `NEWEST` is written last in every fixture here, so it is the file `ls -t`
+# selects. `WANTED` is deliberately NOT the newest: a test whose target is also
+# the fallback target cannot tell resolution from luck.
+# --------------------------------------------------------------------------- #
+WANTED = "handoff-wanted-2026-01-01.md"
+NEWEST = "handoff-newest-unrelated-2026-08-21.md"
+
+
+def two_initiative_repo(tmp_path):
+    return make_repo(tmp_path, docs=(WANTED, NEWEST))
+
+
+def test_an_unresolvable_slug_is_reported_as_a_gap(tmp_path, stub_bin):
+    """THE REGRESSION. RED before the fix: no `!` line at all.
+
+    The fallback itself is preserved — the digest still reads the newest doc, so
+    the GIT/PR block stays useful. What must not happen is doing that SILENTLY.
+    """
+    repo = two_initiative_repo(tmp_path)
+    out = run_resume(repo, stub_bin, "definitely-not-a-real-topic-xyz")
+    assert handoff_line(out) == f"handoff: {NEWEST}"          # fallback preserved
+    gaps = gap_lines(out)
+    assert gaps, f"an unresolvable argument fell back with no gap line\n{out}"
+    joined = " ".join(gaps)
+    assert "definitely-not-a-real-topic-xyz" in joined, gaps  # what was ASKED FOR
+    assert NEWEST in joined, gaps                             # what was READ
+
+
+def test_the_all_clear_is_withdrawn_when_the_argument_did_not_resolve(
+    tmp_path, stub_bin
+):
+    """The actual damage was never the filename — it was the reassurance.
+
+    RED before the fix: DRIFT printed "(none detected — live state matches the
+    handoff's claims)" about an initiative the caller never named.
+    """
+    lines = drift_lines(run_resume(two_initiative_repo(tmp_path), stub_bin, "nope-xyz"))
+    assert "matches the handoff's claims" not in " ".join(lines), lines
+
+
+def test_a_no_argument_run_keeps_todays_behaviour_exactly(tmp_path, stub_bin):
+    """CONTROL, not a regression test — this passes at base too, and says so.
+
+    With no argument, newest IS the contract, so there is nothing to warn about.
+    A fix that simply always warned would pass the two tests above and fail here.
+    """
+    out = run_resume(two_initiative_repo(tmp_path), stub_bin)
+    assert handoff_line(out) == f"handoff: {NEWEST}"
+    assert gap_lines(out) == [], out
+    assert "matches the handoff's claims" in " ".join(drift_lines(out)), out
+
+
+def test_a_slug_THAT_RESOLVES_is_not_reported_as_a_gap(tmp_path, stub_bin):
+    """CONTROL for the other side: a working slug must stay silent."""
+    out = run_resume(two_initiative_repo(tmp_path), stub_bin, "wanted")
+    assert handoff_line(out) == f"handoff: {WANTED}"
+    assert gap_lines(out) == [], out
+
+
+def test_an_unresolvable_argument_with_nothing_to_fall_back_to_still_gaps(
+    tmp_path, stub_bin
+):
+    """No handoff anywhere: the digest already said "(none found — git-only)",
+    but never that an argument had been supplied and missed."""
+    repo = make_repo(tmp_path, docs=())
+    out = run_resume(repo, stub_bin, "no-such-topic")
+    assert handoff_line(out) == "handoff: (none found — git-only)"
+    assert any("no-such-topic" in g for g in gap_lines(out)), out
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 #684 part 2 — A PATH QUOTED INSIDE A PROSE ARGUMENT IS A PATH
+#
+# /resume passes its topic argument through verbatim and its documented form
+# carries the doc: "continue the X work; handoff: <path>". `[ -f "$arg" ]` is
+# false for that whole sentence, the slug glob interpolated the sentence and
+# matched nothing, and the incident followed. This is the part that would have
+# PREVENTED it rather than merely reported it.
+# --------------------------------------------------------------------------- #
+def test_a_prose_argument_carrying_a_real_path_resolves_to_THAT_path(
+    tmp_path, stub_bin
+):
+    """THE REGRESSION. RED before the fix: resolved NEWEST, the wrong initiative.
+
+    This is the incident's literal shape — the requested doc is not the newest,
+    which is the only reason the assertion can tell resolution from coincidence.
+    """
+    repo = two_initiative_repo(tmp_path)
+    arg = f"continue the wanted work; handoff: {repo / 'claudedocs' / WANTED}"
+    assert handoff_line(run_resume(repo, stub_bin, arg)) == f"handoff: {WANTED}"
+
+
+def test_a_resolved_prose_path_is_a_resolution_not_a_warned_fallback(
+    tmp_path, stub_bin
+):
+    """CONTROL, and an INVARIANT GUARD — declared, not counted as coverage.
+
+    It answered the caller's question, so it must not also cry gap. Today that is
+    structural: the gap is emitted inside the else-branch the prose path never
+    enters, so no mutation of the gap condition can make this fail. It is here to
+    pin the contract if that structure is ever flattened, not because it caught
+    anything.
+    """
+    repo = two_initiative_repo(tmp_path)
+    arg = f"pick up handoff: {repo / 'claudedocs' / WANTED} please"
+    assert gap_lines(run_resume(repo, stub_bin, arg)) == []
+
+
+@pytest.mark.parametrize(
+    "wrap", ["{p}", "`{p}`", "({p})", "'{p}'", '"{p}"', "<{p}>", "{p},", "{p};"]
+)
+def test_one_layer_of_punctuation_around_the_path_is_stripped(
+    tmp_path, stub_bin, wrap
+):
+    """Prose quotes its paths. Backticks and parens are how it does it."""
+    repo = two_initiative_repo(tmp_path)
+    p = wrap.format(p=repo / "claudedocs" / WANTED)
+    assert handoff_line(run_resume(repo, stub_bin, f"resume {p} now")) == (
+        f"handoff: {WANTED}"
+    )
+
+
+@pytest.mark.parametrize(
+    "docs,expected",
+    [
+        pytest.param((WANTED, NEWEST), NEWEST, id="two-candidates"),
+        # 🔴 THE CASE THE TWO-CANDIDATE FIXTURE CANNOT SEE, and the audit of the
+        # previous round found it exactly there: with one candidate the warning
+        # was keyed on the COUNT alone, so an explicit-path miss produced
+        # `handoff: SESSION-HANDOFF.md`, NO gap, and a clean DRIFT all-clear.
+        # civitai-manager's real shape.
+        pytest.param(("SESSION-HANDOFF.md",), "SESSION-HANDOFF.md", id="one-candidate"),
+    ],
+)
+def test_a_prose_path_that_does_NOT_exist_is_not_taken(
+    tmp_path, stub_bin, docs, expected
+):
+    """ADVERSARIAL — pins the `-f` half, AND that the miss is always REPORTED.
+
+    Dropping `-f` would make a renamed or foreign-checkout path resolve to
+    something that is not there. But rejecting it silently is the worse half:
+    the caller named a document, it is not on disk, and the tool substitutes a
+    different one. That must be said whatever the candidate count — the count
+    answers "did the fallback have to choose?", which is a different question.
+    """
+    repo = make_repo(tmp_path, docs=docs)
+    arg = f"resume it; handoff: {repo / 'claudedocs' / 'handoff-gone-2026-01-01.md'}"
+    out = run_resume(repo, stub_bin, arg)
+    assert handoff_line(out) == f"handoff: {expected}"
+    assert any("handoff-gone" in g for g in gap_lines(out)), out
+    # …and the all-clear is withdrawn, which is the harm, not the filename.
+    assert "matches the handoff's claims" not in " ".join(drift_lines(out)), out
+
+
+def test_a_non_md_file_named_in_prose_is_not_taken_as_the_handoff(tmp_path, stub_bin):
+    """ADVERSARIAL — pins the extension half of the shape test.
+
+    Without it, any token that happens to name an existing file wins. The bait
+    must EXIST and NOT end .md, and a name that is simply absent is rejected by
+    the `-f` test instead, which would make this vacuous.
+
+    🔴 THE BAIT MUST LIVE IN `claudedocs/`, or this test passes for a CHANGED
+    REASON — the same vacuity class caught twice already in this file. When the
+    bait was a bare `notes.txt` at the repo root it had no `/`, so `dir` equalled
+    the token, the PARENT-DIRECTORY test rejected it first, and deleting the
+    basename test left this GREEN. `claudedocs/notes.txt` clears the first test
+    and can only be stopped by the second.
+
+    🔴 This docstring used to say "`README.md` could not tell the two halves
+    apart" and leave it there — and that set-aside was the defect the audit of
+    #690 found: nothing covered `README.md`, and the first version of
+    `embedded_md_path` resolved it. The README class is now covered directly, by
+    `test_a_bare_md_token_in_prose_is_not_a_handoff_reference` and its four
+    siblings below. Do not delete this note without reading them.
+    """
+    repo = make_repo(tmp_path, docs=(WANTED, NEWEST), files=("claudedocs/notes.txt",))
+    assert handoff_line(
+        run_resume(repo, stub_bin, "resume claudedocs/notes.txt please")
+    ) == f"handoff: {NEWEST}"
+
+
+def test_a_star_in_the_argument_is_split_not_GLOBBED(tmp_path, stub_bin):
+    """ADVERSARIAL — the word split is an unquoted `$1`, so it is also a PATHNAME
+    EXPANSION unless globbing is off.
+
+    🔴 THE GLOB MUST BE ABLE TO PRODUCE A TOKEN THE SHAPE TEST WOULD ACCEPT, or
+    this test is vacuous. It was: the original spelling used a bare `*`, which
+    expanded to `README.md` — and once the shape test started rejecting
+    `README.md` on its own merits, deleting `set -f` SURVIVED the whole suite
+    while this test went on passing. A guard that keeps passing for a NEW reason
+    has stopped guarding; only the mutation battery could see it.
+
+    `claudedocs/*` is the spelling that still bites: it expands to real
+    `claudedocs/handoff-*.md` paths, every one of which passes both halves of
+    the shape test. Alphabetically first is ALPHA, which is deliberately not the
+    newest — so a globbing implementation resolves ALPHA and this fails.
+    """
+    repo = make_repo(tmp_path, docs=("handoff-alpha-2026-01-01.md", WANTED, NEWEST))
+    out = run_resume(repo, stub_bin, "resume the claudedocs/* work")
+    assert handoff_line(out) != "handoff: handoff-alpha-2026-01-01.md", out
+    assert handoff_line(out) == f"handoff: {NEWEST}", out
+
+
+def test_a_handoff_shaped_name_OUTSIDE_claudedocs_is_not_taken(tmp_path, stub_bin):
+    """ADVERSARIAL — pins the parent-directory half, which the basename half
+    otherwise makes redundant. Deleting it SURVIVED the whole suite.
+
+    It is not redundant, and this is the case that shows why: a handoff-SHAPED
+    name outside `claudedocs/` is accepted without it — and because the path
+    branch derives `$REPO` from the doc's own directory, a `/tmp/handoff-x.md`
+    quoted in prose would retarget the ENTIRE digest away from the cwd's repo.
+    Keeping the scan inside the repo's own convention bounds that.
+
+    A caller who really does keep a handoff elsewhere still has the explicit
+    path form, which takes any filename at all.
+    """
+    repo = make_repo(
+        tmp_path, docs=(WANTED, NEWEST), files=("docs/handoff-notes-2026-05-05.md",)
+    )
+    bait = repo / "docs" / "handoff-notes-2026-05-05.md"
+    out = run_resume(repo, stub_bin, f"resume; handoff: {bait}")
+    assert handoff_line(out) == f"handoff: {NEWEST}", out
+
+
+def test_an_explicit_path_still_beats_a_path_found_in_prose(tmp_path, stub_bin):
+    """The bare-path branch must SURVIVE, not be subsumed by the prose scan.
+
+    The filename carries a SPACE on purpose. For an ordinary path the two
+    branches agree, so this would be an invariant guard rather than a test — and
+    measured: merely REORDERING them (scan first, `-f "$arg"` as the fallback)
+    is invisible to the whole suite, because the reordered code still answers
+    correctly. A spaced name is the case only the whole-argument `[ -f "$arg" ]`
+    test can serve: the prose scan word-splits it into `PICK` and `ME.md`,
+    neither of which is a file.
+
+    The mutation this was watched to kill is the plausible SIMPLIFICATION —
+    deleting the `-f "$arg"` branch on the grounds that the scan covers it. That
+    mutant is survived by both pre-existing explicit-path tests above; this is
+    the case that catches it.
+    """
+    repo = two_initiative_repo(tmp_path)
+    doc = repo / "claudedocs" / "PICK ME.md"
+    doc.write_text("## pick me\n")
+    out = run_resume(repo, stub_bin, str(doc))
+    assert handoff_line(out) == "handoff: PICK ME.md"
+    assert gap_lines(out) == [], out
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE README CLASS — a `.md` token in prose is NOT a handoff reference
+#
+# The first version of `embedded_md_path` accepted any EXISTING `*.md` token,
+# which converted #684's silent-wrong-document failure into a different one that
+# fires on ordinary English. Measured on the shipped branch:
+#
+#   resume-state.sh "rewrite the README.md section then resume the listing work"
+#     handoff: README.md
+#     DRIFT  (none detected — live state matches the handoff's claims)
+#
+# The token must now name a member of the population resolve() itself globs —
+# parent directory `claudedocs`, basename `handoff-*.md` or `*HANDOFF*.md`. Each
+# case below is RED on the shipped branch and green here.
+#
+# `make_repo` tracks README.md at the repo root, which is the cwd of the run, so
+# the first case needs no extra fixture — the bait is what every repo already
+# has, which is exactly why the defect was reachable.
+# --------------------------------------------------------------------------- #
+def test_a_bare_md_token_in_prose_is_not_a_handoff_reference(tmp_path, stub_bin):
+    """THE HEADLINE CASE. `README.md` exists in every repo this tool runs in."""
+    repo = two_initiative_repo(tmp_path)
+    out = run_resume(
+        repo, stub_bin, "rewrite the README.md section then resume the listing work"
+    )
+    assert handoff_line(out) != "handoff: README.md", out
+    assert handoff_line(out) == f"handoff: {NEWEST}"
+    # …and because the argument did not resolve, it degrades LOUDLY.
+    assert gap_lines(out), out
+
+
+def test_a_backticked_md_path_outside_claudedocs_is_not_a_handoff_reference(
+    tmp_path, stub_bin
+):
+    """Backticks are in the strip set, and code-quoting a path is the fleet's
+    prose convention — so the convention made the defect MORE likely, not less.
+    `subsystem_recall` harvests only backticked spans for exactly this reason.
+
+    ⚠ NO COMMA AFTER THE CLOSING BACKTICK. The first draft wrote "`…md`," and
+    passed at the shipped commit for an INCIDENTAL reason — the strip takes one
+    character per side, so the token kept its backtick, failed `*.md`, and was
+    rejected by accident rather than by the rule under test. Green for the wrong
+    reason is the whole failure mode this round is about.
+    """
+    repo = make_repo(tmp_path, docs=(WANTED, NEWEST), files=("docs/ARCHITECTURE.md",))
+    out = run_resume(repo, stub_bin, "see `docs/ARCHITECTURE.md` then resume")
+    assert handoff_line(out) == f"handoff: {NEWEST}", out
+
+
+def test_an_md_token_in_the_cwd_subdir_is_not_a_handoff_reference(tmp_path, stub_bin):
+    """Run from a SUBDIRECTORY, where a relative `.md` token resolves against a
+    directory that is not the repo root at all."""
+    repo = make_repo(tmp_path, docs=(WANTED, NEWEST), files=("sub/keep.md",))
+    out = run_resume(repo, stub_bin, "resume keep.md work", cwd=repo / "sub")
+    assert handoff_line(out) == f"handoff: {NEWEST}", out
+
+
+def test_a_single_token_md_ARGUMENT_is_the_explicit_path_branch(tmp_path, stub_bin):
+    """CHARACTERISATION, and a CORRECTION to the audit — not a regression test.
+
+    The audit listed "a root `wanted.md` shadowing a resolvable slug" alongside
+    the README cases as damage from the prose scan. Measured on all three
+    revisions with the same fixture, it is not:
+
+        main 732db793   handoff: wanted.md
+        #690 3b70baaa   handoff: wanted.md
+        this branch     handoff: wanted.md
+
+    `[ -f "$arg" ]` — the explicit-path branch, unchanged since long before
+    #684 — takes a single-token argument that names an existing file, and that
+    is the documented `handoff path` form. The prose scan cannot be responsible
+    for it and never reaches it: for a SINGLE-token argument that exists, the
+    path branch has already won, and one that does NOT exist fails the scan's
+    own `-f` test. So the scan can shadow no slug that would otherwise resolve.
+
+    Pinned here so the claim is checkable rather than argued: the slug
+    `wanted.md` genuinely globs `claudedocs/handoff-wanted.md-plan.md`, and the
+    root file still wins.
+    """
+    repo = make_repo(
+        tmp_path,
+        docs=("handoff-wanted.md-plan.md", NEWEST),
+        files=("wanted.md",),
+    )
+    out = run_resume(repo, stub_bin, "wanted.md")
+    assert handoff_line(out) == "handoff: wanted.md", out
+    assert gap_lines(out) == [], out          # it RESOLVED; nothing to warn about
+
+
+def test_a_stray_md_token_IN_PROSE_does_not_shadow_the_fallback(tmp_path, stub_bin):
+    """The reachable half of that concern: a MULTI-token argument, where the
+    stray `.md` is not the whole argument and the path branch never fires.
+
+    On the shipped branch `wanted.md` was accepted and became the handoff. Now
+    it is rejected, the argument resolves nothing, and the run degrades LOUDLY
+    to the newest rather than quietly to a file that is not a handoff at all.
+    """
+    repo = make_repo(tmp_path, docs=(WANTED, NEWEST), files=("wanted.md",))
+    out = run_resume(repo, stub_bin, "resume the wanted.md work please")
+    assert handoff_line(out) == f"handoff: {NEWEST}", out
+    assert gap_lines(out), out
+
+
+@pytest.mark.parametrize("doc", DECOY_DOCS)
+def test_a_decoy_doc_NAMED_IN_PROSE_is_not_a_handoff_reference(
+    tmp_path, stub_bin, doc
+):
+    """Why the shape test is parent-dir AND basename, not OR.
+
+    The audit proposed `claudedocs/` OR handoff-shaped. Under OR, every one of
+    these nine resolves from prose — and this module already carries them as
+    DECOY_DOCS precisely because they must never resolve as a handoff. They live
+    IN claudedocs/; only the basename rule excludes them. `HANDBOOK.md` and
+    `SHORTHAND-NOTES.md` are the ones that matter most: HAND, not HANDOFF.
+    """
+    repo = make_repo(tmp_path, docs=(WANTED, NEWEST, doc))
+    arg = f"resume; see claudedocs/{doc} for background"
+    assert handoff_line(run_resume(repo, stub_bin, arg)) == f"handoff: {NEWEST}", doc
+
+
+def test_the_uppercase_family_form_DOES_resolve_from_prose(tmp_path, stub_bin):
+    """POSITIVE CONTROL for the shape test's second glob.
+
+    Without it the whole rule could be `handoff-*.md` and every case above would
+    still pass — a filter that rejects everything is not the goal. This is the
+    civitai-manager shape, quoted in prose.
+    """
+    repo = make_repo(tmp_path, docs=("SESSION-HANDOFF.md", NEWEST))
+    arg = f"resume that work; handoff: {repo / 'claudedocs' / 'SESSION-HANDOFF.md'}"
+    assert handoff_line(run_resume(repo, stub_bin, arg)) == "handoff: SESSION-HANDOFF.md"
+
+
+def test_a_dot_is_required_before_md(tmp_path, stub_bin):
+    """ADVERSARIAL — `handoff-*.md` -> `handoff-*md` survived the whole suite.
+
+    `.mmd` is a mermaid diagram and ends in the letters `md`; it is a real thing
+    to keep beside a handoff. Nothing else here can see the missing dot.
+    """
+    repo = make_repo(tmp_path, docs=(WANTED, NEWEST))
+    bait = repo / "claudedocs" / "handoff-diagram.mmd"
+    bait.write_text("graph TD;\n")
+    out = run_resume(repo, stub_bin, f"resume; see {bait} for the shape")
+    assert handoff_line(out) == f"handoff: {NEWEST}", out
+
+
+def test_a_prose_path_RETARGETS_the_repo_to_the_docs_own_checkout(tmp_path, stub_bin):
+    """ADVERSARIAL — deriving `$REPO` from `$PWD` instead of the doc's directory
+    SURVIVED all 119 tests, and that retarget is the exact mechanism the
+    `claudedocs/` bound exists to contain. Unpinned, it was invisible.
+
+    The handoff names an initiative, and the initiative lives in ITS OWN repo —
+    so the whole digest (branch, PRs, freshness) must follow the doc, not the
+    directory the caller happened to be standing in.
+    """
+    other = make_repo(tmp_path, docs=("handoff-other-2026-06-06.md",), name="other-repo")
+    here = two_initiative_repo(tmp_path)
+    doc = other / "claudedocs" / "handoff-other-2026-06-06.md"
+    out = run_resume(here, stub_bin, f"resume that; handoff: {doc}")
+    assert handoff_line(out) == "handoff: handoff-other-2026-06-06.md", out
+    repo_line = [ln for ln in out.splitlines() if ln.startswith("# repo:")][0]
+    assert "other-repo" in repo_line, repo_line
+    assert "fixture-repo" not in repo_line, repo_line
+
+
+def test_a_directory_merely_ENDING_in_claudedocs_is_not_claudedocs(tmp_path, stub_bin):
+    """ADVERSARIAL — `*/claudedocs|claudedocs` -> `*claudedocs` SURVIVED.
+
+    The pattern must anchor on a whole path COMPONENT. Under the looser form,
+    `myclaudedocs/` — or any `…-claudedocs` sibling — is accepted as the repo's
+    handoff directory.
+    """
+    repo = make_repo(
+        tmp_path,
+        docs=(WANTED, NEWEST),
+        files=("myclaudedocs/handoff-decoy-2026-07-07.md",),
+    )
+    bait = repo / "myclaudedocs" / "handoff-decoy-2026-07-07.md"
+    out = run_resume(repo, stub_bin, f"resume; handoff: {bait}")
+    assert handoff_line(out) == f"handoff: {NEWEST}", out
+
+
+def test_a_DIRECTORY_named_like_a_handoff_is_not_taken(tmp_path, stub_bin):
+    """ADVERSARIAL — pins `-f` against `-e`.
+
+    A directory can be named `claudedocs/handoff-thing.md`, and it satisfies
+    every shape rule; only the regular-file test excludes it. Under `-e` the run
+    would resolve a directory as its handoff and every later block would read it.
+    """
+    repo = make_repo(tmp_path, docs=(WANTED, NEWEST))
+    bait = repo / "claudedocs" / "handoff-adirectory-2026-04-04.md"
+    bait.mkdir()
+    out = run_resume(repo, stub_bin, f"resume; handoff: {bait}")
+    assert handoff_line(out) == f"handoff: {NEWEST}", out
+    assert gap_lines(out), out
+
+
+def test_a_doc_matching_BOTH_globs_counts_as_one_candidate(tmp_path, stub_bin):
+    """ADVERSARIAL — pins the `sort -u` in the candidate count.
+
+    `handoff-HANDOFF.md` matches `handoff-*.md` AND `*HANDOFF*.md`, so a naive
+    concatenation counts one file twice, crosses the >1 threshold, and warns in a
+    repo that has exactly one handoff — reintroducing the permanently-red gate
+    the count exists to prevent. The comment in resume-state.sh claims this
+    explicitly; nothing checked it.
+    """
+    repo = make_repo(tmp_path, docs=("handoff-HANDOFF.md",))
+    out = run_resume(repo, stub_bin, "no-such-topic")
+    assert handoff_line(out) == "handoff: handoff-HANDOFF.md"
+    # The miss itself is reported; what must NOT appear is the discarded-choice
+    # clause, since this repo holds exactly one document.
+    gaps = gap_lines(out)
+    assert len(gaps) == 1, gaps
+    assert "newest of" not in gaps[0], gaps
+
+
+def test_the_FIRST_of_two_prose_paths_wins(tmp_path, stub_bin):
+    """ADVERSARIAL — `break` -> `continue` (last match wins) survived all 94
+    tests of the shipped branch, so the "First match wins" contract stated in
+    the function's own comment was asserted NOWHERE.
+
+    Both tokens are valid handoff references, so the shape test cannot decide
+    this; only the loop's exit can.
+    """
+    repo = make_repo(tmp_path, docs=(WANTED, "handoff-second-2026-03-03.md", NEWEST))
+    first = repo / "claudedocs" / WANTED
+    second = repo / "claudedocs" / "handoff-second-2026-03-03.md"
+    out = run_resume(repo, stub_bin, f"resume {first} and maybe {second}")
+    assert handoff_line(out) == f"handoff: {WANTED}", out
+
+
+def test_the_FIRST_of_two_MISSING_prose_paths_is_the_one_reported(
+    tmp_path, stub_bin
+):
+    """ADVERSARIAL — recording the LAST missing token instead of the first
+    SURVIVED the whole suite.
+
+    The `miss` capture has to agree with the `hit` capture: first-wins. Both are
+    "what the caller wrote", and reporting the second path back at someone who
+    led with the first is a small lie in a message whose entire job is to say
+    what they asked for.
+    """
+    repo = two_initiative_repo(tmp_path)
+    first = repo / "claudedocs" / "handoff-first-gone-2026-01-01.md"
+    second = repo / "claudedocs" / "handoff-second-gone-2026-02-02.md"
+    gaps = gap_lines(run_resume(repo, stub_bin, f"resume {first} or {second}"))
+    # ⚠ Scoped to the named-missing line. The OTHER gap echoes `$arg` verbatim,
+    # so a naive search across all gaps finds BOTH paths and can never fail.
+    named = [g for g in gaps if g.startswith("requested handoff ")]
+    assert len(named) == 1, gaps
+    assert "handoff-first-gone" in named[0], named
+    assert "handoff-second-gone" not in named[0], named
+
+
+def test_a_MISSING_token_does_not_preempt_a_REAL_one_later_in_the_sentence(
+    tmp_path, stub_bin
+):
+    """The miss capture must never short-circuit the search.
+
+    Recording a named-but-missing token is a consolation prize, taken only after
+    the whole argument has been scanned without a hit. An implementation that
+    returned as soon as it saw a handoff-shaped path that was not on disk would
+    resolve NOTHING here and warn — worse than the behaviour it replaced, and
+    invisible to every other test, all of which name one path.
+    """
+    repo = make_repo(tmp_path, docs=("handoff-real-2026-01-01.md", NEWEST))
+    gone = repo / "claudedocs" / "handoff-gone-2026-01-01.md"
+    real = repo / "claudedocs" / "handoff-real-2026-01-01.md"
+    out = run_resume(repo, stub_bin, f"try {gone} then {real}")
+    assert handoff_line(out) == "handoff: handoff-real-2026-01-01.md", out
+    assert gap_lines(out) == [], out
+
+
+def test_a_prose_path_wins_over_the_topic_named_in_the_same_sentence(
+    tmp_path, stub_bin
+):
+    """CHARACTERISATION — and a CORRECTION to what this used to claim.
+
+    It was called `…_BEATS_a_resolvable_slug` and described as pinning a
+    precedence decision. It pins no such thing: the slug branch globs the WHOLE
+    argument, so for the slug to resolve the argument must BE a bare topic, and
+    for the prose scan to fire it must contain a `claudedocs/…` token — which a
+    filename can never match, since it contains `/`. The two branches are
+    structurally MUTUALLY EXCLUSIVE and the "precedence" is unreachable, which
+    is why swapping their order survives the whole suite.
+
+    What is real, and what this now asserts: a sentence that mentions one topic
+    in prose while naming a different doc by path resolves the PATH.
+    """
+    repo = make_repo(tmp_path, docs=("handoff-alpha-2026-01-01.md", WANTED, NEWEST))
+    doc = repo / "claudedocs" / WANTED
+    out = run_resume(repo, stub_bin, f"alpha work; handoff: {doc}")
+    assert handoff_line(out) == f"handoff: {WANTED}", out
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE SEAM — `HANDOFF_GLOBS` is DECLARED the single source and was asserted
+# NOWHERE
+#
+# `subsystem_recall.HANDOFF_GLOBS` is named as the source of truth by
+# resume-state.sh's own comment, and both the fallback chain and the prose scan
+# claim to mirror it. That is a RELATIONSHIP between a Python constant and two
+# shell spellings, and nothing checked it — a "mirrors" claim with no guard is
+# the class this file keeps finding.
+# --------------------------------------------------------------------------- #
+def test_the_shell_globs_mirror_HANDOFF_GLOBS_exactly():
+    """A LEDGER, failing when the set grows OR shrinks OR is respelled.
+
+    Not a keyword check: the whole basename patterns are compared as a set, so a
+    case-folded or widened spelling on either side fails here rather than in
+    production. `focus_window` and `resolve()` disagreeing about which files ARE
+    handoffs is precisely how /resume ends up recalling one initiative while
+    reconciling another.
+    """
+    sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
+    import subsystem_recall  # noqa: PLC0415
+
+    py = {g.split("/", 1)[1] for g in subsystem_recall.HANDOFF_GLOBS}
+    assert {g.split("/", 1)[0] for g in subsystem_recall.HANDOFF_GLOBS} == {
+        "claudedocs"
+    }, subsystem_recall.HANDOFF_GLOBS
+
+    src = (REPO_ROOT / "scripts/resume-state.sh").read_text(encoding="utf-8")
+    # The fallback chain: `ls -t "$REPO"/claudedocs/<pattern>`
+    # The slug branch globs `handoff-"$arg"*.md` from the SAME shape; it is
+    # parameterised by the caller's topic and is not a member of the fallback
+    # family, so drop anything carrying a shell expansion.
+    chain = {
+        p
+        for p in re.findall(r'ls -t "\$REPO"/claudedocs/(\S+\.md)\b', src)
+        if "$" not in p
+    }
+    # The prose scan's basename test: `case "$base" in a|b)`
+    scan = set(re.search(r'case "\$base" in ([^)]+)\)', src).group(1).split("|"))
+
+    assert py == chain, f"fallback chain {chain} != HANDOFF_GLOBS {py}"
+    assert py == scan, f"prose scan {scan} != HANDOFF_GLOBS {py}"
+
+
+def test_the_glob_seam_scanner_can_actually_find_the_patterns():
+    """POSITIVE CONTROL. Two regexes over shell source is exactly the shape that
+    silently matches nothing and passes by comparing two empty sets — the
+    `assert py == chain` above would then be asserting `set() == set()` only if
+    the Python side were also empty, so pin all three as NON-empty explicitly."""
+    sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
+    import subsystem_recall  # noqa: PLC0415
+
+    src = (REPO_ROOT / "scripts/resume-state.sh").read_text(encoding="utf-8")
+    # The slug branch globs `handoff-"$arg"*.md` from the SAME shape; it is
+    # parameterised by the caller's topic and is not a member of the fallback
+    # family, so drop anything carrying a shell expansion.
+    chain = {
+        p
+        for p in re.findall(r'ls -t "\$REPO"/claudedocs/(\S+\.md)\b', src)
+        if "$" not in p
+    }
+    scan = set(re.search(r'case "\$base" in ([^)]+)\)', src).group(1).split("|"))
+    assert len(subsystem_recall.HANDOFF_GLOBS) >= 2
+    assert len(chain) >= 2, "the fallback-chain regex matched nothing"
+    assert len(scan) >= 2, "the prose-scan regex matched nothing"
+
+
+def test_the_two_implementations_TIE_BREAK_differently_and_that_is_recorded():
+    """🔴 A KNOWN, UNFIXED DIVERGENCE — recorded so it is not rediscovered as a
+    surprise, and so nobody reads the seam guard above as covering more than it
+    does.
+
+    The glob SETS match. The ORDER within them does not: `focus_window` sorts by
+    `(mtime, name)` in Python, while resume-state.sh takes `ls -t | head -1`.
+    On equal mtimes the two can pick different files. It does not matter for the
+    set-level claim the guard above makes, and fixing it changes `focus_window`'s
+    behaviour, so it is deliberately out of scope here — but it IS the same
+    "step 3 vs step 4" seam, and it is real.
+    """
+    src = (REPO_ROOT / "scripts/lib/subsystem_recall.py").read_text(encoding="utf-8")
+    assert "focus_window" in src
+    shell = (REPO_ROOT / "scripts/resume-state.sh").read_text(encoding="utf-8")
+    assert "ls -t" in shell, (
+        "resume-state.sh no longer uses `ls -t`; if the ordering was unified with "
+        "focus_window, delete this test and say so — do not just re-point it."
+    )
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE GAP IS ABOUT AN UNATTRIBUTABLE CHOICE, NOT ABOUT THE MISS
+#
+# The first version warned whenever the slug glob missed, which made it
+# PERMANENTLY RED in the very repo the caps fallback exists for: civitai-manager
+# holds one handoff, so `resume-state.sh session` printed a GAPS banner and "NOT
+# a clean bill of health" every single run. A gate that is red on every run
+# trains the reader to skip the GAPS block — which destroys the value of the gap
+# this change exists to add.
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    "docs,resolved,family",
+    [
+        # 🔴 THE BOUNDARY, BOTH SIDES. Keying the whole warning on the count made
+        # the family==1 row SILENT — a supplied topic, no match, a different
+        # document reconciled under "(none detected — live state matches the
+        # handoff's claims)". That is issue #684's own reproduction.
+        pytest.param(("handoff-alpha-2026-01-01.md", "SESSION-HANDOFF.md"),
+                     "handoff-alpha-2026-01-01.md", 1, id="family-1"),
+        pytest.param(("handoff-alpha-2026-01-01.md", "handoff-beta-2026-02-02.md"),
+                     "handoff-beta-2026-02-02.md", 2, id="family-2"),
+    ],
+)
+def test_a_slug_that_matches_NOTHING_always_warns(
+    tmp_path, stub_bin, docs, resolved, family
+):
+    """A supplied topic that resolved nothing is reported WHATEVER the count.
+
+    The count answers "did the fallback have to CHOOSE?" — a different question
+    from "did the caller ask for something the tool then overrode?". Only the
+    "newest of N … MOVES between runs" clause depends on it, because only that
+    clause is false when nothing was discarded.
+    """
+    repo = make_repo(tmp_path, docs=docs)
+    out = run_resume(repo, stub_bin, "no-such-topic-at-all")
+    assert handoff_line(out) == f"handoff: {resolved}"
+    gaps = gap_lines(out)
+    assert len(gaps) == 1, gaps
+    assert "no-such-topic-at-all" in gaps[0], gaps
+    assert "matches the handoff's claims" not in " ".join(drift_lines(out)), out
+    # …and the conditional clause appears on exactly the side where it is true.
+    if family >= 2:
+        assert f"newest of {family}" in gaps[0], gaps
+        assert "MOVES between runs" in gaps[0], gaps
+    else:
+        assert "newest of" not in gaps[0], gaps
+        assert "MOVES" not in gaps[0], gaps
+
+
+def test_the_slug_that_RESOLVES_and_the_no_argument_run_stay_silent(
+    tmp_path, stub_bin
+):
+    """THE CONTRACT the rule above must not swallow.
+
+    Warning unconditionally on a MISS is right; warning on a HIT, or on a run
+    that asked for nothing, would make the GAPS block permanently red and train
+    the reader to skip it. Both sides in one place so the pair cannot drift.
+    """
+    repo = make_repo(tmp_path, docs=("handoff-alpha-2026-01-01.md", NEWEST))
+    hit = run_resume(repo, stub_bin, "alpha")
+    assert handoff_line(hit) == "handoff: handoff-alpha-2026-01-01.md"
+    assert gap_lines(hit) == [], hit
+    noarg = run_resume(repo, stub_bin)
+    assert handoff_line(noarg) == f"handoff: {NEWEST}"
+    assert gap_lines(noarg) == [], noarg
+    assert "matches the handoff's claims" in " ".join(drift_lines(noarg)), noarg
+
+
+def test_a_TWO_candidate_repo_still_warns_and_says_how_many(tmp_path, stub_bin):
+    """The other side of the same boundary — measured at 1 and at 2, because a
+    rule that depends on a count is only pinned if both sides of it are."""
+    repo = two_initiative_repo(tmp_path)
+    gaps = gap_lines(run_resume(repo, stub_bin, "no-such-topic"))
+    assert gaps, "two candidates and no warning"
+    assert "newest of 2" in " ".join(gaps), gaps
+
+
+def test_the_count_follows_the_CAPS_family_when_that_is_what_resolved(
+    tmp_path, stub_bin
+):
+    """ADVERSARIAL — counting only `handoff-*.md` SURVIVED the whole suite.
+
+    Both handoffs here are caps-family, so a lowercase-only count returns 0,
+    never crosses the threshold, and the warning silently stops firing in
+    exactly the repos the caps fallback was written for. The fallback genuinely
+    chose between two docs.
+    """
+    repo = make_repo(tmp_path, docs=("HANDOFF-old-2026-01-01.md", "SESSION-HANDOFF.md"))
+    out = run_resume(repo, stub_bin, "no-such-topic")
+    assert handoff_line(out) == "handoff: SESSION-HANDOFF.md"
+    gaps = gap_lines(out)
+    assert gaps, "two caps-family candidates and no warning"
+    assert "newest of 2" in " ".join(gaps), gaps
+
+
+def test_a_MIXED_family_repo_counts_only_the_family_that_resolved(tmp_path, stub_bin):
+    """🔴 THE UNION OVERSTATES, AND THE SENTENCE IT PRODUCES IS FALSE.
+
+    One lowercase doc and one caps doc. The lowercase glob has exactly one
+    member and decides; the caps glob is never reached. So the choice is
+    DETERMINISTIC — yet a union count says "the newest of 2 … MOVES between
+    runs", which breaks the rule written directly above that message ("EVERY
+    CLAUSE BELOW MUST BE TRUE OF EVERY RUN THAT REACHES IT") and re-creates the
+    spurious-warning shape the count was added to remove.
+
+    Its sibling above is blind to this: 2 caps + 0 lowercase counts the same
+    either way. Both fixtures are needed; neither alone pins the rule.
+    """
+    repo = make_repo(
+        tmp_path, docs=("handoff-alpha-2026-01-01.md", "SESSION-HANDOFF.md")
+    )
+    out = run_resume(repo, stub_bin, "no-such-topic")
+    assert handoff_line(out) == "handoff: handoff-alpha-2026-01-01.md"
+    # The miss is still reported — what the family count controls is only the
+    # "newest of N … MOVES" clause, and here it would be a false statement.
+    gaps = gap_lines(out)
+    assert len(gaps) == 1, gaps
+    assert "newest of" not in gaps[0], gaps
+    assert "MOVES" not in gaps[0], gaps
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 EVERY SHAPE THE GAP CAN TAKE IS PINNED WHOLE — not one of them.
+#
+# The artifact under test is PROSE, so a guard on words is walkable by
+# rewording; the fix is to pin the entire normalised string. That rule was
+# applied to ONE shape, and the block can emit SIX (two leads x {no-fallback,
+# fallback} x {MOVES, no MOVES}). The other five were asserted only by substring
+# or by absence — and that is exactly how a FALSE clause shipped in a change
+# whose thesis is honest messaging:
+#
+#     "... FELL BACK to handoff-alpha-2026-01-01.md, a DIFFERENT document from
+#      the one you asked for"
+#
+# emitted for `resume-state.sh handoff-alpha-2026-01-01.md` — the same filename
+# on both sides of the sentence, called different — and for
+# `resume-state.sh session` in a repo whose only doc IS SESSION-HANDOFF.md, the
+# invocation resolve()'s own comment blesses by name.
+#
+# The clause was an IDENTITY claim; the tool only has evidence for a MECHANICAL
+# one. It is gone. What remains is what is true on every run that reaches it.
+#
+# Assembled from parts so the six expectations cannot drift apart, and so a
+# reworded clause fails in exactly one place.
+# --------------------------------------------------------------------------- #
+GAP_LEAD_MISSING = 'requested handoff "{tok}" — NO SUCH FILE (renamed, moved, or in another checkout?).'
+GAP_LEAD_SLUG = 'requested "{arg}" — nothing in it resolved to a handoff doc under {repo}/claudedocs.'
+GAP_REST_NONE = " NOTHING was reconciled; the DRIFT section below is about no document at all."
+GAP_REST_FELL = " The digest FELL BACK to {name}.{moves} Re-run naming the doc's path, or with no argument to take newest deliberately."
+GAP_MOVES = " It is the newest of {n}, and which one that is depends on commit times, so it MOVES between runs."
+
+
+def _repo_as_the_script_resolved_it(out):
+    """`$REPO` from the digest itself, not as the fixture spells it — a
+    symlinked tmpdir would otherwise fail these on the path alone."""
+    line = [ln for ln in out.splitlines() if ln.startswith("# repo:")][0]
+    return line.split("# repo:", 1)[1].split("slug:")[0].strip()
+
+
+@pytest.mark.parametrize(
+    "docs,kind,n_moves,resolved",
+    [
+        # slug lead x fallback, without and with the MOVES clause
+        pytest.param(("SESSION-HANDOFF.md",), "slug", 0, "SESSION-HANDOFF.md",
+                     id="slug-fell-back-1"),
+        pytest.param((WANTED, NEWEST), "slug", 2, NEWEST, id="slug-fell-back-2"),
+        # named-missing lead x fallback, without and with MOVES
+        pytest.param(("SESSION-HANDOFF.md",), "missing", 0, "SESSION-HANDOFF.md",
+                     id="missing-fell-back-1"),
+        pytest.param((WANTED, NEWEST), "missing", 2, NEWEST, id="missing-fell-back-2"),
+        # …and the two branches where NOTHING resolved. 🔴 F2: this is the
+        # strongest honesty claim in the feature and it had no whole-string pin —
+        # only a substring assert — so replacing it with the FALSE "The digest
+        # FELL BACK to nothing at all." passed 138/138.
+        pytest.param((), "slug", 0, None, id="slug-nothing-resolved"),
+        pytest.param((), "missing", 0, None, id="missing-nothing-resolved"),
+    ],
+)
+def test_every_gap_sentence_is_pinned_WHOLE(
+    tmp_path, stub_bin, docs, kind, n_moves, resolved
+):
+    repo = make_repo(tmp_path, docs=docs)
+    gone = repo / "claudedocs" / "handoff-gone-2026-01-01.md"
+    arg = f"resume it; handoff: {gone}" if kind == "missing" else "no-such-topic"
+
+    out = run_resume(repo, stub_bin, arg)
+    gaps = gap_lines(out)
+    assert len(gaps) == 1, gaps
+
+    where = _repo_as_the_script_resolved_it(out)
+    lead = (
+        GAP_LEAD_MISSING.format(tok=gone)
+        if kind == "missing"
+        else GAP_LEAD_SLUG.format(arg=arg, repo=where)
+    )
+    if resolved is None:
+        rest = GAP_REST_NONE
+    else:
+        moves = GAP_MOVES.format(n=n_moves) if n_moves else ""
+        rest = GAP_REST_FELL.format(name=resolved, moves=moves)
+    assert gaps[0] == lead + rest
+
+
+def test_the_whole_sentence_pins_can_actually_FAIL():
+    """POSITIVE CONTROL for the six assertions above.
+
+    They are equality checks against strings assembled from module constants —
+    if a template ever drifted to match whatever the script emits (or a helper
+    returned the observed value), they would pass by construction. This proves
+    the templates carry real, distinct content rather than being empty or equal.
+    """
+    parts = [GAP_LEAD_MISSING, GAP_LEAD_SLUG, GAP_REST_NONE, GAP_REST_FELL, GAP_MOVES]
+    assert len(set(parts)) == len(parts)
+    assert all(len(p) > 40 for p in parts), parts
+    # 🔴 The identity claim retired by F1 must not creep back into any template.
+    for p in parts:
+        assert "DIFFERENT document" not in p, p
+        assert "nothing below is scoped" not in p, p
+
+# A handoff body that names PRs the stubbed `gh` cannot answer for, so a run
+# gets a PR gap IN ADDITION to whatever the resolution produces. Defined here
+# rather than reusing PR_HANDOFF below, because a @parametrize decorator is
+# evaluated at IMPORT time and that constant is defined further down the file.
+PR_REFERENCING_BODY = (
+    "## Handoff\n"
+    "PR #4101 is OPEN and awaiting review. #4102 is also in-flight.\n"
+)
+
+
+@pytest.mark.parametrize(
+    "arg,docs,body,want",
+    [
+        pytest.param("no-such-topic", (WANTED, NEWEST), None, 1, id="slug-miss"),
+        pytest.param("PROSE_MISSING_PATH", (WANTED, NEWEST), None, 1, id="named-missing"),
+        pytest.param("PROSE_MISSING_PATH", ("SESSION-HANDOFF.md",), None, 1,
+                     id="named-missing-1"),
+        pytest.param("no-such-topic", ("SESSION-HANDOFF.md",), None, 1, id="slug-miss-1"),
+        pytest.param("no-such-topic", (), None, 1, id="nothing-to-fall-back-to"),
+        # 🔴 THE ROW THAT MAKES THE ASSERTION MEAN ANYTHING. Every row above
+        # yields exactly ONE gap, so a header hardcoded to `GAPS (1)` satisfies
+        # `declared == len(lines)` in all of them — measured: that mutant
+        # SURVIVED the whole suite. This doc also references PRs the stubbed gh
+        # cannot answer for, so the resolution gap and the PR gap stack and the
+        # count has to move off 1.
+        pytest.param("no-such-topic", (WANTED, NEWEST), PR_REFERENCING_BODY, 2, id="two-gaps"),
+    ],
+)
+def test_the_GAPS_header_count_equals_the_number_of_lines_printed(
+    tmp_path, stub_bin, arg, docs, body, want
+):
+    """🔴 THE HEADER IS EVIDENCE, so it has to agree with the body.
+
+    `!! GAPS (N)` is read as a count of findings — two audits of this PR used it
+    as evidence — so a header that can disagree with what is printed undermines
+    the block it introduces. Structurally N is `${#UNRECONCILED[@]}` and the body
+    is one `printf` per element, which is why this holds; the point of asserting
+    it is that the resolution paths must keep feeding ONE element per cause.
+
+    This is what a single cause emitting TWO near-duplicate lines looked like
+    from the outside, and why that was consolidated to one append site: the
+    reader cannot tell "two findings" from "one finding, printed twice", and the
+    cheapest reading of the difference is that the count is broken.
+    """
+    repo = make_repo(tmp_path, docs=docs, doc_body=body)
+    if arg == "PROSE_MISSING_PATH":
+        gone = repo / "claudedocs" / "handoff-gone-2026-01-01.md"
+        arg = f"resume it; handoff: {gone}"
+    out = run_resume(repo, stub_bin, arg)
+    lines = gap_lines(out)
+    banner = [ln for ln in drift_lines(out) if ln.startswith("!! GAPS")]
+    assert len(banner) == 1, drift_lines(out)
+    declared = int(re.search(r"GAPS \((\d+)\)", banner[0]).group(1))
+    assert declared == len(lines), f"header says {declared}, printed {len(lines)}: {lines}"
+    # POSITIVE CONTROL, in two parts. A zero on both sides satisfies the equality
+    # while proving nothing — and so does a suite in which the count is ALWAYS 1,
+    # which is why `want` is asserted per row rather than just `>= 1`.
+    assert declared == want, f"expected {want} gap(s), got {declared}: {lines}"
+    # …and no cause may print the same sentence twice.
+    assert len(set(lines)) == len(lines), lines
 
 
 # --------------------------------------------------------------------------- #

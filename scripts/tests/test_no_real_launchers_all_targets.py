@@ -178,7 +178,17 @@ def test_the_non_pytest_targets_are_covered_and_named():
     hooks = _bash_array("HOOK_TESTS")
     shells = _bash_array("SHELL_TESTS")
     assert "scripts/claude-hooks/tests/test_claude_notify.py" in hooks
-    assert shells == ["scripts/tests/test_release_wrapper.sh"], shells
+    # A DELIBERATE LEDGER, not a count — adding an entry is a decision made in
+    # the open, exactly as the NOLAUNCH_ACK pin above describes. Second entry
+    # added 2026-08-21 (#684): `test_resume_state.sh` had been run by no gate at
+    # all since it was written and was RED on main, its assertions silently
+    # split between "fails" and "passes because the helper returns false for
+    # every input". It touches no launcher and no spool — it sources
+    # resume-state.sh and asserts pure extraction helpers on fixture strings.
+    assert shells == [
+        "scripts/tests/test_release_wrapper.sh",
+        "scripts/tests/test_resume_state.sh",
+    ], shells
     for rel in hooks + shells:
         assert (REPO_ROOT / rel).is_file(), f"{rel} is listed but does not exist"
     # Both loops must feed the accounting, or their zeros mean nothing.
