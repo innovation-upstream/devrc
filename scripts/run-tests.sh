@@ -1226,7 +1226,14 @@ TARGET_FLOORS=(
   # rots is silent: an anchor stops matching, the mutant never lands, and the
   # run prints ANCHOR-MISS, which reads like a hiccup rather than "this mutant
   # tested nothing". That has already happened here once.
-  "scripts/signal/tests|553"
+  # 2026-08-22: 717 tripped the ceiling at 691 with every test PASSING (716
+  # passed, 1 pinned skip) — the floor had fallen 164 behind, more than the
+  # 138 of slack the gate allows, so a whole suite could have vanished under it
+  # while the run stayed green. The gate printed "scripts/signal/tests|682" and
+  # that is what is below, copied not computed. Found by a run on an unrelated
+  # branch: this was already RED on origin/main, so it was blocking every push
+  # rather than only the change that noticed it.
+  "scripts/signal/tests|682"
   "scripts/initiatives/tests|745"
   "scripts/repo-cos/tests|315"
   "scripts/task-spec-drafter/tests|135"
