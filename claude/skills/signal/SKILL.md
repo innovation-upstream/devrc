@@ -341,7 +341,8 @@ cannot fix. Read the row when the numbers look wrong.
 | `SIGNAL_API_URL` | signal-cli-rest-api base URL (default `http://signal-api.signal.svc:8080`) |
 | `SIGNAL_ACCOUNT` | the account's own phone number. Required TWICE: the receive endpoint is per-account (`/v1/receive/{number}`) and `/v2/send` rejects a missing `number` with 400 |
 | `SIGNAL_APPROVAL_TOKEN` | must be set for `approve` to run. **Operator-only** — deliberately absent from the Deployment and from agent environments |
-| `CLAWGATE_HOOK_TOKEN` | clawgate hook token; unset → draft cards are a graceful no-op |
+| `CLAWGATE_HOOK_TOKEN` | clawgate hook token. Resolved by `scripts/lib/clawgate_env.py` with `clawgatectl`'s precedence — `~/.claude/clawgate.env` FIRST, then this variable, which overrides it. Unresolvable → draft cards are a graceful no-op **that warns on stderr**; the draft is stored either way |
+| `DEVRC_DIR` | fallback root for locating `scripts/lib/clawgate_env.py` when `clawgate.py` runs away from its sibling `lib/`. Normally unset — the sibling path wins |
 | `SIGNAL_HEARTBEAT_PATH` | where the consumer writes its liveness file (default `/tmp/signal-consumer-heartbeat.json`). The k8s probe reads THIS, never Postgres |
 | `SIGNAL_HEARTBEAT_INTERVAL` | seconds between heartbeats (default 30) |
 | `SIGNAL_HEARTBEAT_MAX_AGE` | seconds before a heartbeat is stale (default 4× the interval — less than a few ticks flaps on scheduling jitter) |

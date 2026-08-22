@@ -51,6 +51,15 @@ COPY scripts/signal/_signal_db.py  /app/scripts/signal/
 COPY scripts/signal/_minio.py      /app/scripts/signal/
 COPY scripts/signal/clawgate.py    /app/scripts/signal/
 
+# The ONE clawgate hook-token resolver, shared with scripts/mail-actions/.
+# `clawgate.py` loads it by explicit path relative to itself, so it must sit at
+# /app/scripts/lib/ — the same repo-relative position it has in the source tree.
+# The pod only ever runs `run`, which never reaches the draft path, but a module
+# resolved by path that is simply ABSENT is the silent failure this image's
+# whole COPY-by-name discipline exists to prevent. Pinned both ways by
+# tests/test_image_deps.py::test_dockerfile_copies_the_shared_lib_modules.
+COPY scripts/lib/clawgate_env.py   /app/scripts/lib/
+
 # --------------------------------------------------------------------------- #
 # 🔴 SIGNAL_PG_DIRECT=1 IS A PROPERTY OF THE IMAGE, NOT A DEPLOYMENT CHOICE.
 # `_signal_db._direct_target()` returns None unless SIGNAL_PG_HOST or
