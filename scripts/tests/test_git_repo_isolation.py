@@ -32,11 +32,15 @@ name. The rename is hygiene, not a diagnosis.
 HOW THIS FILE IS BUILT, and why each layer is not redundant with the next:
 
   1. LEDGERS. The variable lists are owned once in Python (`testlib/gitenv.py`)
-     and re-spelled in each of the four shell entry points — they need them
-     because HOOK_TESTS, SHELL_TESTS and the node tier never load a pytest
-     plugin, and because an inherited GIT_DIR breaks ROOT resolution before any
-     Python runs. Pinned in BOTH directions for every spelling: a set that only
+     and re-spelled in each of the FIVE shell files that clear them
+     (`POINTER_CLEARERS`) — the four entry points need them because HOOK_TESTS,
+     SHELL_TESTS and the node tier never load a pytest plugin, and because an
+     inherited GIT_DIR breaks ROOT resolution before any Python runs;
+     `analyze-service-index/commit.sh` needs them because no test tier reaches
+     it at all. Pinned in BOTH directions for every spelling: a set that only
      grows on one side is a guard that protects twelve targets and not five.
+     The FILE LIST is pinned against a `git ls-files` sweep too, so a sixth
+     clearer added later cannot sit unpinned.
   2. ENTRY POINTS, as a LEDGER rather than an example. Every `conftest.py`
      under `scripts/` must re-export the plugin's hooks, and the SET is pinned,
      so adding a test directory cannot silently leave a bare `pytest <dir>`
@@ -324,6 +328,28 @@ def test_the_shell_ledger_has_no_duplicates(runner):
         assert len(names) == len(set(names)), f"duplicates in {runner.name}:{array}: {names}"
 
 
+def test_the_committers_ledger_has_no_duplicates():
+    """🔴 `commit.sh` is checked SEPARATELY, and deliberately not folded into the
+    parametrised test above.
+
+    That one requires BOTH arrays, and `DEVRC_GITENV_CONTROL_VARS` names the
+    DETECTOR's own seams (`DEVRC_GITENV_PROTECT`, `DEVRC_GITENV_MODE`) — which
+    exist only inside a test harness. `commit.sh` is not one; it is a systemd
+    unit that commits. Adding that array there to satisfy a parametrisation
+    would be cargo-culting a guard into a program it cannot apply to, and would
+    make the pin read as coverage of something that was never at risk.
+    """
+    names = _shell_array(COMMIT_SH, "DEVRC_GIT_REPO_POINTERS")
+    assert len(names) == len(set(names)), f"duplicates in commit.sh: {names}"
+    local = _shell_array(COMMIT_SH, "ASI_LOCAL_GIT_POINTERS")
+    assert len(local) == len(set(local)), f"duplicates in ASI_LOCAL_GIT_POINTERS: {local}"
+    overlap = set(names) & set(local)
+    assert not overlap, (
+        f"{sorted(overlap)} is in BOTH of commit.sh's arrays. The local array is "
+        "for variables the SHARED ledger deliberately does not carry; a name in "
+        "both means one of the two lists is lying about its scope.")
+
+
 def test_GIT_DIR_is_on_every_ledger():
     """The one that actually happened. Pinned by name so a future prune of the
     list cannot quietly drop the variable the incident was made of."""
@@ -347,6 +373,63 @@ def test_the_runner_and_python_session_markers_agree():
         "positive control that is never read is the reassuring zero itself: "
         "'loaded and saw nothing' and 'never loaded' print identically."
     )
+def test_POINTER_CLEARERS_is_every_file_that_declares_the_array():
+    """🔴 THE FILE LIST IS DERIVED, NOT TRUSTED — both directions.
+
+    `POINTER_CLEARERS` is hand-maintained. Every pin above is parametrised over
+    it, so a FIFTH file that grows a `DEVRC_GIT_REPO_POINTERS` array is silently
+    unpinned: its copy could drift from the owner, or spell `unset` wrong, and
+    nothing here would notice. That is the "a count of DECLARATIONS is not a
+    count of INSTANCES" shape.
+
+    So sweep the tracked tree and require the sets to be EQUAL. Growing fails
+    (a new clearer must be pinned); shrinking fails too (a clearer that lost its
+    array must be removed here deliberately, not discovered later).
+
+    Mirrors the precedent in `drift-check.sh`, whose covered package set is
+    derived from `nix/pkgs/` at scan time and pinned two-way.
+    """
+    tracked = subprocess.run(["git", "-C", str(ROOT), "ls-files", "-z"],
+                             capture_output=True, text=True)
+    assert tracked.returncode == 0, f"git ls-files failed: {tracked.stderr}"
+    names = [n for n in tracked.stdout.split("\0") if n]
+    assert len(names) > 100, (
+        f"the tracked-file sweep found only {len(names)} files — it is not "
+        "walking the repo, so its agreement below would be vacuous")
+
+    found: set[Path] = set()
+    for rel in names:
+        p = ROOT / rel
+        if p.suffix not in (".sh", "") or not p.is_file():
+            continue
+        try:
+            text = p.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        if "DEVRC_GIT_REPO_POINTERS=(" in text:
+            found.add(p)
+
+    declared = set(POINTER_CLEARERS)
+    assert found == declared, (
+        "POINTER_CLEARERS disagrees with the files that actually declare the "
+        "array:\n"
+        f"  declares it but NOT pinned: {sorted(str(p.relative_to(ROOT)) for p in found - declared)}\n"
+        f"  pinned but does NOT declare it: {sorted(str(p.relative_to(ROOT)) for p in declared - found)}\n"
+        "Add or remove it here in the same commit — every ledger pin above is "
+        "parametrised over this tuple, so an unlisted clearer is an unchecked one."
+    )
+
+
+def test_the_clearer_sweep_can_actually_find_one():
+    """🔴 POSITIVE CONTROL for the sweep. `found == declared` is also what a
+    walker that matched NOTHING produces on an empty `POINTER_CLEARERS` — and
+    more to the point, a typo'd marker string would make the sweep return an
+    empty set that silently agreed with nothing. Prove it matches a real file."""
+    text = (SCRIPTS / "run-tests.sh").read_text(encoding="utf-8")
+    assert "DEVRC_GIT_REPO_POINTERS=(" in text, (
+        "the marker the sweep greps for is not in run-tests.sh — the sweep is "
+        "looking for a string that no longer exists, so it can only ever "
+        "return an empty set")
 
 
 def _root_line(text: str) -> int:

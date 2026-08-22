@@ -221,12 +221,6 @@ command -v git >/dev/null 2>&1 ||
 # directions, exactly as it does for the three runners. Every name below can make
 # git resolve a DIFFERENT repository, index or object store than the `-C` says.
 #
-# ⚠ GIT_CEILING_DIRECTORIES is deliberately NOT here, and that is measured, not
-# assumed: it can only make the upward discovery walk STOP EARLY (rc 128, "not a
-# git repository"), never point at another one. In this script that maps to
-# state 0, i.e. `git init` inside the scope — the safe direction. See the
-# "DELIBERATELY NOT STRIPPED" list in gitenv.py.
-#
 # UNCONDITIONAL: there is no workflow in which this unit should be aimed at a
 # repository by inherited environment.
 DEVRC_GIT_REPO_POINTERS=(
@@ -248,6 +242,51 @@ DEVRC_GIT_REPO_POINTERS=(
 # fails test_every_unplaceable_git_token_is_pinned_prose — which is the right
 # outcome for that test, and a wording constraint here rather than a pin there.
 unset "${DEVRC_GIT_REPO_POINTERS[@]}"
+
+# --- 🔴 AND TWO MORE THAT ARE THIS SCRIPT'S PROBLEM ALONE -----------------------
+# These are NOT on GUARD 9's shared ledger and must not be added to it. GUARD 9's
+# remit is "which repository does a command LAND in", and neither of these can
+# redirect one — which is exactly why they are invisible to it, and exactly why
+# they still break THIS script. A ledger is only as wide as the question it asks.
+#
+# MEASURED 2026-08-22 (git 2.55.0), each on its own against a decoy:
+#
+#   GIT_CEILING_DIRECTORIES — it stops the upward discovery walk EARLY. It cannot
+#     point git at another repo (with a ceiling naming an UNRELATED repo,
+#     `rev-parse --show-toplevel` still returns the enclosing one). But stopping
+#     the walk is precisely how `scope_repo_state` is made to answer 0 instead of
+#     2, and 0 means BOOTSTRAP. A scope genuinely nested inside a foreign
+#     checkout went from
+#         rc=1  "scope inner: not its own repo — it sits inside <foreign>. Refusing…"
+#     to
+#         rc=0  "scope inner: initialised a new repository … ok — 1 scope(s) processed"
+#     with a `.git` planted INSIDE somebody else's working tree. Nothing lands in
+#     foreign HISTORY, so this is not the exfiltration shape — but the refusal
+#     that test_a_leaked_pointer_does_not_defeat_the_nested_scope_refusal calls
+#     "THE GUARD'S REAL JOB" is silently converted into its opposite, and the run
+#     still prints ok. An earlier version of this comment called that "the safe
+#     direction" and stopped there; that was true about exfiltration and
+#     misleading about everything else.
+#
+#   GIT_TEMPLATE_DIR — the ENVIRONMENT twin of `init.templateDir`, which the
+#     GIT_CONFIG block below already pins off. Neutralising the config route and
+#     leaving the env route open is the asymmetry worth naming: `GIT_CONFIG_GLOBAL
+#     =/dev/null` does not touch a variable. MEASURED: a template
+#     `hooks/post-commit` IS copied into the repository this script bootstraps and
+#     PERSISTS there. It did not fire, because GIT_CONFIG_KEY_0 redirects
+#     core.hooksPath — so this is a planted-but-dormant payload, armed the moment
+#     anyone runs git in that scope by hand, which is exactly what an operator
+#     does to inspect a backup.
+#
+# Kept in a SEPARATE array on purpose: `DEVRC_GIT_REPO_POINTERS` above is pinned
+# two-way against `testlib/gitenv.py::REPO_POINTER_VARS`, so quietly widening it
+# here would break that pin — and widening the shared ledger would change GUARD 9
+# for every runner on the strength of a defect that is local to this script.
+ASI_LOCAL_GIT_POINTERS=(
+  GIT_CEILING_DIRECTORIES            # stops discovery early -> refusal becomes bootstrap
+  GIT_TEMPLATE_DIR                   # env twin of init.templateDir; plants files in the new repo
+)
+unset "${ASI_LOCAL_GIT_POINTERS[@]}"
 
 # --- 🔴 NEUTRALISE AMBIENT GIT CONFIG ------------------------------------------
 # This block exists because the no-exfiltration guarantee was bypassable WITHOUT

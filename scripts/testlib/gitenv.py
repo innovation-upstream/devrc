@@ -51,14 +51,16 @@ written into the clone's config are the tests' OWN correct values. The tests
 computed the right thing and git wrote it into the wrong repository.
 
 WHAT THIS MODULE OWNS. `REPO_POINTER_VARS` below is the ONE owner of the set.
-It is re-spelled as a bash array at the top of `run-tests.sh`,
-`run-node-tests.sh`, `gate.sh` and `githooks/tests-on-push.sh` — each BEFORE
-that script resolves its own ROOT — and `scripts/tests/test_git_repo_isolation.py`
-pins every spelling against this tuple in both directions, plus the ordering.
-Four shell copies rather than one sourced file because `testlib/runner_patch.py`
-writes a patched COPY of `run-tests.sh` into a tmp dir that ~15 tests drive, and
-a copy cannot source a sibling `lib/` that was never copied with it (measured:
-the sourced version turned all fifteen into a FATAL):
+It is re-spelled as a bash array at the top of FIVE shell files:
+`run-tests.sh`, `run-node-tests.sh`, `gate.sh` and `githooks/tests-on-push.sh` —
+each BEFORE that script resolves its own ROOT — and
+`analyze-service-index/commit.sh`, which resolves no ROOT at all (see FIFTH
+SPELLING below). `scripts/tests/test_git_repo_isolation.py` pins every spelling
+against this tuple in both directions, and pins the ORDERING for the four that
+resolve a ROOT. Copies rather than one sourced file because
+`testlib/runner_patch.py` writes a patched COPY of `run-tests.sh` into a tmp dir
+that ~15 tests drive, and a copy cannot source a sibling `lib/` that was never
+copied with it (measured: the sourced version turned all fifteen into a FATAL):
 
   1. `REPO_POINTER_VARS` — the environment variables that decide WHICH
      repository a git command lands in. Stripping them is the FIX.
@@ -125,12 +127,23 @@ re-derive it:
     EARLY, never point at a different repository. MEASURED (git 2.55.0): with a
     ceiling above a scope nested in a repo, `git -C <scope> rev-parse
     --show-toplevel` exits 128 "not a git repository"; with the ceiling naming
-    an UNRELATED repo it returns the enclosing one unchanged. Failing to
-    discover is the safe direction — in `analyze-service-index/commit.sh` it
-    reads as "no repo", i.e. `init` inside the scope. Listed because the name
-    looks like it belongs and the absence of a reason reads as an oversight.
+    an UNRELATED repo it returns the enclosing one unchanged.
+  * `GIT_TEMPLATE_DIR` — it seeds the contents of a repo `git init` CREATES; it
+    does not choose which repo a command lands in.
 
-🔴 FOURTH SPELLING, 2026-08-22. `scripts/analyze-service-index/commit.sh` also
+🔴 BUT "NOT ON THIS LEDGER" IS NOT "HARMLESS", AND THE TWO ABOVE PROVE IT. This
+ledger answers exactly one question — WHICH REPOSITORY DOES A COMMAND LAND IN —
+and a variable that cannot redirect is invisible to it while still being able to
+wreck a consumer. Both were measured doing so in
+`analyze-service-index/commit.sh` on 2026-08-22: a ceiling turns its nested-repo
+REFUSAL into a silent `git init` inside somebody else's checkout, and a template
+dir plants a `hooks/post-commit` into the repo it bootstraps. That script
+therefore strips them in its OWN array (`ASI_LOCAL_GIT_POINTERS`), deliberately
+NOT here — widening a shared ledger on the strength of one consumer's defect
+changes GUARD 9 for every runner. Read this list as "cannot redirect git",
+never as "safe to inherit".
+
+🔴 FIFTH SPELLING, 2026-08-22. `scripts/analyze-service-index/commit.sh` also
 carries the array. It is not a runner — it resolves no ROOT and no test tier
 reaches it (systemd timer, operator shell) — but it is the one program here
 whose job is to COMMIT, and on the pre-fix tree a leaked `GIT_DIR` made its
@@ -138,6 +151,7 @@ whose job is to COMMIT, and on the pre-fix tree a leaked `GIT_DIR` made its
 skipping both the bootstrap and the nested-repo refusal and putting
 `autocommit: N change(s) in the some-scope analyze-service index` on a foreign
 branch. `test_git_repo_isolation.py::POINTER_CLEARERS` pins it like the rest.
+
 """
 from __future__ import annotations
 
@@ -148,15 +162,16 @@ from pathlib import Path
 # --------------------------------------------------------------------------- #
 # 1. THE LEDGER: what redirects git at a repository
 # --------------------------------------------------------------------------- #
-# 🔴 ORDERED and EXACT. Each of the four shell entry points spells the same
-# names in a `DEVRC_GIT_REPO_POINTERS` array — they have to, because the
-# non-pytest targets (HOOK_TESTS, SHELL_TESTS, the node tier) never load a
-# pytest plugin, and because an inherited GIT_DIR corrupts each runner's ROOT
-# resolution before any Python runs. `test_git_repo_isolation.py::
-# test_the_shell_and_python_pointer_ledgers_agree` is parametrised over all
-# four and fails if any diverges from this tuple in EITHER direction. Adding a
-# name here without adding it there would leave those targets unprotected while
-# this file's docstring claimed otherwise.
+# 🔴 ORDERED and EXACT. Each of the FIVE shell files above spells the same names
+# in a `DEVRC_GIT_REPO_POINTERS` array — the four runners have to, because the
+# non-pytest targets (HOOK_TESTS, SHELL_TESTS, the node tier) never load a pytest
+# plugin, and because an inherited GIT_DIR corrupts each runner's ROOT resolution
+# before any Python runs; `commit.sh` has to because no test tier reaches it at
+# all. `test_git_repo_isolation.py::test_the_shell_and_python_pointer_ledgers_
+# agree` is parametrised over all FIVE (`POINTER_CLEARERS`) and fails if any
+# diverges from this tuple in EITHER direction. Adding a name here without adding
+# it there would leave those targets unprotected while this docstring claimed
+# otherwise.
 REPO_POINTER_VARS: tuple[str, ...] = (
     "GIT_DIR",                            # the repository itself; beats -C
     "GIT_WORK_TREE",                      # the working tree
