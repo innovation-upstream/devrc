@@ -197,6 +197,53 @@ newest fixture-shaped reflog entry: 14:42:12 "commit: seed"   ← no recurrence 
 - **107 of 107 per-worktree reflogs** showed **zero** in-window entries (positive control: 107
   worktrees, 107 readable) — rules out every worktree-escape story.
 
+### 🔴 #689 (the runner-layer guard) is GATE RED — and the cause is its own fix
+
+- **State:** `fix/no-real-git-remote-in-tests` @ `1ac08879`, PR #689 OPEN, **not merged**, 9 commits behind `origin/main`. Force-updated from `36ff9e3c` (that head carried an RCE — see Gotchas). Body rewritten with the retraction, the RCE disclosure, and the name-not-inode rationale; a follow-up comment carries the late findings.
+- **Observed (verbatim):**
+  ```
+  RESULT: FAIL (exit=1)
+  TOTAL collected=14505  passed=14281  skipped=2  failed=222  (floor 13324; no floor drifted)
+  3 targets red: scripts/tests (37 failed/177 errors), scripts/repo-cos/tests (7), scripts/task-spec-drafter/tests (1)
+  ERROR: 3 GUARD 9 problem(s)
+  ```
+  ~221 of 222 failures are one shape:
+  ```
+  git(refused)  would mutate the PROTECTED repository <sandbox>/.git
+                git upload-pack <tmp_path>/…/origin.git
+  ```
+- **Mechanism (isolated, not inferred):** a **local** `git clone <fixture>` makes git spawn `git-upload-pack <dir>`. Routing all `git-*` libexec names through the shim means that child *is* the shim — and the repo arrives as a **bare positional**, invisible to a global-option parser that reads `-C`/`--git-dir`. Target falls back to `cwd` = the protected repo ⇒ refusal. Three-arm control, cwd held constant, one variable moved:
+
+  | arm | rc |
+  |---|---|
+  | 1 · no farm | 0 |
+  | 2 · farm as shipped | **128, GUARD 9 REFUSED** |
+  | 3 · farm, only `git-upload-pack` pointed back at the real binary | 0 |
+
+  Arm 3 = 0 is what separates *"the guard is wrong"* from *"the guard is right and target resolution is wrong"*. It is the latter. **The refusals are FALSE** — no test reaches a real repo — but the effect is a permanently-red tier (the **third** this PR has produced).
+- **Ruled out:** not a floor drift (all 25 per-target floors cleared); not exit 90 (runner verdict and gate agree); not the `SKILL.md` headroom test (fixed on main by `ed40ab0c`/#679).
+- **🔴 The 222 is NOT attributable arithmetic.** The branch predates **#696 (`6439921`)**, now an ancestor of `origin/main` (verified, with a bogus-sha negative control), which fixed two hermetic failures on `main` itself plus a third concurrent cause. **2–3 failures are inherited.** Rebase before subtracting.
+- **The design cost, which is the real finding:** the positional-repo shape is **not one special case**. It covers at least `git-upload-pack`, `git-receive-pack`, `git-upload-archive`, `git-init-db`, and `--git-dir`-less forms of other helpers. **Any farm that routes by name inherits a per-verb argument-shape problem** — each verb needs its own parse rule, hit once per verb, forever. The remaining 3 failures are a second class: `-c core.fsmonitor=` is not on `INJECTABLE_KEYS`.
+- **Next probe (verbatim):**
+  ```bash
+  # rebase onto current main, re-gate in a CONTAINED clone, then attribute
+  git -C <standalone-clone> rev-parse --path-format=absolute --git-common-dir   # MUST be inside the sandbox
+  nix develop . --command bash scripts/gate.sh --tier pytest
+  ```
+- **Recommendation on record, and it is SPLIT — do not read it as "merge #683":** #683's **prevention** half is correct and independently verified (guard at `run-tests.sh:235` / `run-node-tests.sh:142` / `gate.sh:120`, each immediately above its own `ROOT=`, nothing git-related executing before it). That half stops the measured mechanism and is worth landing. Its **detection** half is *not* stronger than #689 on the axis that produced #689's fourteen bypasses — two measured defects below. Continue #689 only if someone takes the per-verb positional-repo problem knowingly. Salvage from #689 regardless: the armed-vector battery with **live-axis arms**, the per-target `control=plugin:N inherited:N` accounting, and the fail-open checks.
+
+### 🔴 THE ROOT CAUSE OF THE RECURRENCE IS STILL UNIDENTIFIED — do not close this
+
+- **RETRACTED:** *"`githooks/pre-push` assigns to the exported name `GIT_DIR`, so it hands the base clone's git dir down to `run-tests.sh` → pytest"* was relayed to me as established and is **wrong as stated**. Measured on git 2.55.0: **`git push` exports `GIT_EXEC_PATH`, `GIT_PREFIX=""` and `GIT_EDITOR` to `pre-push` — NOT `GIT_DIR`.** The rename in #683 is a route **only if an outer caller had already exported `GIT_DIR`**; `githooks/pre-push:44-48` states that precondition, and the PR body/commit message drop it. Good hygiene, not the explanation.
+- **Live scan, reported as a pair:** **46 processes carry some `GIT_*` var, 0 carry `GIT_DIR`** (13 unreadable ⇒ unmeasured, not zero). No tracked file assigns one.
+- So *why pushing appeared to trigger corruption* is open. Nothing found so far protects `homelab-talos` or any other repo's tooling either.
+
+### 🔴 #683's DETECTION half — two measured defects (its prevention half is sound)
+
+- **The detector cannot distinguish a fixture escape from ANY other writer to that clone, and asserts the former at maximum confidence.** An innocent nested test plus a background `git branch` yields: *"test 'test_d.py::test_innocent_one' MUTATED a git repository that is not its own tmpdir … This is the 2026-08-21 incident's shape."* Measured live: during a 40-minute audit the operator's clone gained `int/gate-665` and `integ/git-isolation-trio`, deleted a branch and fast-forwarded `main` twice — all from other sessions. Two amplifiers: `common_dir_of` makes a worktree-hosted run watch the **shared** common dir (so sibling agents count), and `drift-check.sh` runs `git fetch origin` on a 6-hourly timer whose own comment notes `fetch` triggers `gc --auto` — a repack would emit **hundreds** of `DELETED refs/...` lines under a banner claiming the incident recurred.
+- 🔴 **`DEVRC_GITENV_PROTECT` is a one-variable defeat of the whole detection half, and no runner unsets it — it is not in `REPO_POINTER_VARS`.** Measured triple, same escaping test: correct ⇒ `protected-git-dirs=1`, RED with the guard's own token ✅ · `":"` ⇒ `protected-git-dirs=0`, **GREEN**, branch actually created · `/nonexistent/x` ⇒ **`protected-git-dirs=1` AND GREEN** while the repo was mutated — **the marker line actively lies**. That reintroduces "one inherited env var defeats every layer" *inside the fix for it*.
+- **Also unswept:** the second entry point covers **1 of 7 conftests**, and not `scripts/claude-hooks/tests/conftest.py` — where the plugin's own rationale says import-time arming matters. Five semantic mutants of the fingerprint's *content* SURVIVE a green suite (dropping `HEAD`, `packed-refs`, `ORIG_HEAD`+`logs/HEAD`; either `starts` reduction); its docstring claims a HEAD-move row that does not exist, and `packed-refs` never exists in any fixture — while the incident's `DELETED refs/heads/main` on a **packed** ref is exactly that case. "12/12 mutants killed" is true of the plumbing mutants chosen and says nothing about the detector's content.
+
 ## Next steps (ranked)
 1. **Land `d43e425a` ONLY, from `salvage/630-enforcement-2026-08-21`** — **not** `7de0e21b`,
    which #696 superseded (see the RESOLVED block above; same three files, so it conflicts).
@@ -247,6 +294,28 @@ newest fixture-shaped reflog entry: 14:42:12 "commit: seed"   ← no recurrence 
 - **Decisions:** #676 deliberately does **not** close B1 (per-target coverage) — that is #689's
   runner layer, and duplicate enforcement is the `Popen` collision this session measured. Both
   guards state their residuals in-file rather than implying coverage.
+
+- 🔴 **A guard can be WORSE than no guard, and #689 shipped that for hours.** `eval "_cv=\${$_ev:-}"` with the value from `--config-env=key=VAR` meant:
+  ```
+  git --config-env=core.pager='V:-$(touch X)' --version
+    shim     -> X CREATED, then exit 99      <- executed
+    real git -> exit 128, "fatal: missing environment variable", nothing run
+  ```
+  The mitigation introduced execution the unguarded system **refuses**. Fixed by validating the name as a shell identifier + `printenv`. All four `eval`s audited; only that one was argv-derived; a test now fails if a new `eval` appears **or the count changes** — the pattern, not the instance.
+- 🔴 **RETRACTED: the `GIT_EXEC_PATH` symlink farm does NOT close the alias/hook residual.** It was reported closed (by a peer, ported and credited by me, relayed to two reviewers). The farm skipped only the literal name `git`; **181 `git-*` entries reached the real binary**, and `<farm>/git-config -f <victim>/.git/config core.bare true` landed the incident's own signature at rc 0. Residual is **narrowed to two derived escapes**, not closed.
+- 🔴 **Key on the DISPATCH NAME, never the inode.** This host has **two git binaries from unrelated nix closures** (`~/.nix-profile/bin/git` inode 53015695 = 2.55.0, which `git` resolves to and whose libexec `--exec-path` reports; `/run/current-system/sw/bin/git` inode 62031535 = 2.52.0). Same-inode counts *within the `--exec-path` dir*: **146** vs **0**; the system git's *own* libexec gives **143**. So an inode-keyed enumeration is **`PATH`-dependent within one machine** and audits green over a live hole. Stronger form: that dir holds **181 dispatch names but only 146 resolve to git's inode** — an inode enumeration misses **35 even on the right binary**. 181 is identical on both hosts.
+- **A ledger can fail in four escalating ways, all seen here:** rotted (upgrade adds a helper) · **born incomplete** (145 aliases enumerated then skipped by name) · **host-dependent** (packaging differs) · **`PATH`-dependent within one host** (which `git` you resolve). All four are the same defect: the ledger described the wrong attribute.
+- 🔴 **A vacuity probe can itself be vacuous.** A peer's second guard layer silently **re-guarded 13 "unguarded" controls** and the harness printed `VACUOUS` — which does not merely mislead, it **shrinks the armed set while reading as rigour**. Ours was checked and held, but only via three integrity checks per arm: structural, a **negative canary** (a call the guard *would* refuse isn't), and a **positive canary** (an ordinary mutating op still lands — catches a PATH so mangled that *nothing* runs, which also produces "nothing moved"). That triple is the mechanical form of *a control must detect its own absence*.
+- **Instrument failures that produced confident wrong answers, all measured today:**
+  - `pgrep -f <pattern>` — **the sweep is itself a process containing the pattern.** Produced a false *confession* (a tier run in the base clone that was my own measuring shell, gone by the next command).
+  - **Kinship tests are vacuous on this box** — every process descends from one tmux (`4025325`), so "shares an ancestor with me" returns MINE for all. The owning `claude` pid is the only real boundary.
+  - **A control built from an input broken for an unrelated reason is not a control** — an `unreachable.invalid` host can only ever fail, so it manufactured a clean-looking discriminator. Against a *reachable* remote the same push **authenticates over ssh** and fails on ref rejection, so `rc != 0` holds in both arms. **Pin the literal `fatal: transport '<proto>' not allowed`, never the exit code.**
+  - **A stale tree answers confidently** — an audit tool was correct and its *input* was 11 commits behind, producing a live-looking defect. Ask *which tree did this read?*
+  - **BRE `\t` is a literal `t`** — `grep -c '^git(control)\tvia=plugin'` matched nothing and reported `control=0` for every target while the guard was healthy.
+  - **`git rev-parse --git-common-dir` returns a REPO-relative path** (`.git`) for a healthy clone and an absolute one for a worktree. A prefix match on the relative form calls a good sandbox unsafe; joining it to your own cwd inside a repo resolves to *that* repo. **Always `--path-format=absolute`.**
+- **Relay discipline:** two claims were relayed today after being *reproduced* rather than *verified* (the transport control, the farm). **A claim's authority does not decay as it is passed along, but its evidence does.** What worked was the correction arriving in the same channel as the overstatement, fast, from whoever measured it.
+- **A test's structural check matched its own explanatory COMMENT three separate times** in this work — a guard reading the documentation and reporting on the code. Each is now scoped to code.
+- **`--force-with-lease=<ref>:<sha>`, never bare `--force`** — and verify the discarded head carried no unique work first (here: `36ff9e3` and `ae7ae82` touched identical files; the only delta was 12 lines absorbed from main's #687).
 
 ## How to verify
 ```bash
