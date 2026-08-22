@@ -119,8 +119,14 @@ def emitted_fatal(tmp_path_factory):
         f"precondition FATAL, so this fixture is measuring the wrong thing.\n"
         f"exit={proc.returncode}\n{combined[-3000:]}"
     )
-    assert proc.returncode == 2, (
-        f"expected the precondition to exit 2, got {proc.returncode}\n"
+    # 🔴 3, not 2, since 2026-08-22. GUARD 1 is an ENVIRONMENT precondition, and
+    # run-tests.sh now distinguishes those (exit 3) from REPO-CONTENT guards
+    # (exit 2) so `githooks/tests-on-push.sh` can degrade on the former without
+    # degrading away the latter -- the target list, floor table, launcher stubs
+    # and spool wiring, whose own messages warn that silencing them is "how a
+    # suite stops running while the gate goes green".
+    assert proc.returncode == 3, (
+        f"expected the ENVIRONMENT precondition to exit 3, got {proc.returncode}\n"
         f"{combined[-3000:]}"
     )
     return combined

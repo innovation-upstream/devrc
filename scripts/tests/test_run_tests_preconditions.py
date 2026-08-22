@@ -211,6 +211,20 @@ def test_every_required_tool_is_reachable_by_the_prepush_tier():
     }
     assert declared, "gateTools parsed as EMPTY — the regex stopped matching"
 
+    # 🔴 `gatePyEnv` is a let-binding, NOT a `pkgs.` token, so the comprehension
+    # above drops it — and `python`/`python3` can never be missing from
+    # `shutil.which` on the test process's own PATH, so deleting gatePyEnv from
+    # gateTools left this test GREEN. Measured. The old TOOL_ENV form compensated
+    # with an explicit `declared |= {"python","python3"}`; the rewrite lost it.
+    # Assert the binding is IN the list rather than re-adding the names blindly,
+    # so the pin fails when the interpreter really is dropped.
+    assert "gatePyEnv" in gate_m.group(1), (
+        "flake.nix gateTools no longer includes gatePyEnv — the devShell and the "
+        "pre-push tier would have no pinned interpreter, and `shutil.which` "
+        "cannot notice because the test process always has some python."
+    )
+    declared |= {"python", "python3"}
+
     # 🔴 `shutil.which` reads THIS process's PATH, and since the
     # no-real-launchers fixture landed (scripts/tests/conftest.py) that PATH
     # begins with a directory of 12 stubs. None of them is a REQUIRED_TOOLS
@@ -227,10 +241,11 @@ def test_every_required_tool_is_reachable_by_the_prepush_tier():
         f"{unsatisfied}.\n"
         f"  run-tests.sh aborts at GUARD 1 with exit 2 and runs ZERO tests, so "
         f"the gate silently stops being a gate.\n"
-        f"  Fix by adding `-p <pkg>` to TOOL_ENV in githooks/tests-on-push.sh "
-        f"(and to flake.nix checks.pytests nativeBuildInputs) — do NOT drop the "
-        f"entry from REQUIRED_TOOLS.\n"
-        f"  hook-declared={sorted(declared)}"
+        f"  Fix by adding the package to `gateTools` in flake.nix — ONE list, "
+        f"shared by devShells.default (which the pre-push hook runs via "
+        f"`nix develop`) and checks.pytests. Do NOT drop the entry from "
+        f"REQUIRED_TOOLS.\n"
+        f"  gateTools-declared={sorted(declared)}"
     )
 
 
@@ -296,8 +311,10 @@ def test_missing_pytest_module_is_named(tmp_path):
     proc = _run([str(RUN_TESTS), str(REPO_ROOT)], env=env)
     out = proc.stdout + proc.stderr
 
-    assert proc.returncode == 2, (
-        f"expected the precondition to abort with exit 2, got {proc.returncode}.\n{out}"
+    assert proc.returncode == 3, (
+        f"expected the ENVIRONMENT precondition to abort with exit 3, got "
+        f"{proc.returncode}. 3 is what githooks/tests-on-push.sh degrades on; 2 "
+        f"means a repo-content guard and BLOCKS the push.\n{out}"
     )
     assert "python -m pytest` is not runnable" in out, (
         f"the failure did not name the pytest MODULE precondition.\n{out}"
@@ -312,6 +329,92 @@ def test_missing_pytest_module_is_named(tmp_path):
         f"the runner started a suite despite the precondition failing.\n{proc.stdout}"
     )
 
+
+
+
+
+def test_guard1c_dep_list_matches_the_flake_interpreter():
+    """🔴 GUARD 1c's dep tuple and flake.nix's `gatePyEnv` are two hand-maintained
+    copies of one list. They agree today and nothing made them.
+
+    The failure modes are ASYMMETRIC, which is why this needs a gate rather than
+    care: forget to add a new import to GUARD 1c and it goes SILENT (the guard
+    stops covering the dep it exists to check); forget `gatePyEnv` and the guard
+    refuses EVERY run. One is invisible, the other is loud — so the invisible one
+    is the one a test has to catch.
+
+    This is the same drift class the round eliminated for `gateTools`, one level
+    down: the round replaced the hook's private TOOL_ENV with the shared list, and
+    left this pair unshared.
+    """
+    runner = RUN_TESTS.read_text()
+    m = re.search(r'need = \((.*?)\)', runner, re.S)
+    assert m, "could not find GUARD 1c's `need` tuple — this pin is reading nothing"
+    guard_deps = set(re.findall(r'"([A-Za-z_][A-Za-z0-9_]*)"', m.group(1)))
+    assert guard_deps, "GUARD 1c's dep tuple parsed as EMPTY"
+
+    flake = (REPO_ROOT / "flake.nix").read_text()
+    fm = re.search(r"gatePyEnv\s*=\s*pkgs\.python312\.withPackages\s*\(ps:\s*with ps;\s*\[(.*?)\]",
+                   flake, re.S)
+    assert fm, "could not find gatePyEnv in flake.nix"
+    flake_deps = set(fm.group(1).split())
+    assert flake_deps, "gatePyEnv parsed as EMPTY"
+
+    # The nixpkgs attribute is `pyyaml`; the importable module is `yaml`.
+    NIX_TO_MODULE = {"pyyaml": "yaml"}
+    flake_modules = {NIX_TO_MODULE.get(d, d) for d in flake_deps}
+
+    missing_from_guard = flake_modules - guard_deps
+    assert not missing_from_guard, (
+        f"flake.nix gatePyEnv supplies {sorted(missing_from_guard)} but GUARD 1c "
+        f"does not check them — the guard would pass an interpreter lacking a dep "
+        f"the suites import. This is the SILENT direction."
+    )
+    missing_from_flake = guard_deps - flake_modules
+    assert not missing_from_flake, (
+        f"GUARD 1c requires {sorted(missing_from_flake)} but gatePyEnv does not "
+        f"supply them — the guard would refuse every run."
+    )
+
+def test_the_hook_degrades_on_ENV_faults_and_BLOCKS_on_repo_content():
+    """🔴 The exit-code split, and the reason it exists.
+
+    A first version of the pre-push hook degraded on rc 2. `run-tests.sh` has NINE
+    `exit 2` sites and only four are environmental; the rest are REPO-CONTENT
+    guards -- the target list, the floor table, the launcher stubs, the spool
+    wiring -- whose own messages warn "do NOT delete the entry to make this pass
+    -- that is how a suite stops running while the gate goes green". Degrading on
+    2 produced precisely that, on the ONLY tier that runs automatically: this repo
+    has no CI and no branch protection (pinned by test_ci_claim_matches_reality).
+
+    So the runner now exits 3 for environment faults, and this asserts BOTH sides
+    -- the hook degrading on 3 is worthless if it also degrades on 2.
+
+    The BEHAVIOURAL half is already covered: `test_a_typod_target_is_named`
+    below drives the real runner with a bogus target and asserts exit 2. This
+    test pins the WIRING that turns that 2 into a blocked push; a first draft
+    of it duplicated the behavioural half as a hollow assertion that a
+    directory exists, which would have read as coverage while providing none.
+    """
+    runner = RUN_TESTS.read_text()
+    hook = (REPO_ROOT / "githooks" / "tests-on-push.sh").read_text()
+    hook_code = [ln for ln in hook.splitlines() if not ln.lstrip().startswith("#")]
+
+    # The runner must keep BOTH codes in play; collapsing to one loses the split.
+    assert "exit 3" in runner, "no environment guard exits 3 — the split is gone"
+    assert [ln for ln in runner.splitlines() if ln.strip() == "exit 2"], (
+        "no guard exits 2 any more — repo-content failures have become degradable"
+    )
+
+    # The hook degrades on 3 ...
+    deg = [ln for ln in hook_code if "run_rc" in ln and '-eq 3' in ln]
+    assert deg, "the hook no longer branches on rc 3, so an env fault blocks again"
+    # ... and must NOT degrade on 2.
+    bad = [ln for ln in hook_code if "run_rc" in ln and '-eq 2' in ln]
+    assert not bad, (
+        "the hook branches on rc 2 — repo-content guards would be degraded away:\n"
+        + "\n".join(f"  {ln.strip()}" for ln in bad)
+    )
 
 
 def test_missing_suite_dependencies_are_named(tmp_path):
@@ -358,8 +461,9 @@ def test_missing_suite_dependencies_are_named(tmp_path):
     proc = _run([str(RUN_TESTS), str(REPO_ROOT)], env=env)
     out = proc.stdout + proc.stderr
 
-    assert proc.returncode == 2, (
-        f"expected the precondition to abort with exit 2, got {proc.returncode}.\n{out}"
+    assert proc.returncode == 3, (
+        f"expected the ENVIRONMENT precondition to abort with exit 3, got "
+        f"{proc.returncode}.\n{out}"
     )
     # THIS guard's own reason, and the NAMES -- "something is wrong with your
     # environment" is the diagnosis that cost four attempts to refine.
@@ -411,8 +515,9 @@ def test_dependency_probe_fails_CLOSED_when_unreadable(tmp_path):
     proc = _run([str(RUN_TESTS), str(REPO_ROOT)], env=env)
     out = proc.stdout + proc.stderr
 
-    assert proc.returncode == 2, (
-        f"an unreadable probe must abort with exit 2, got {proc.returncode}.\n{out}"
+    assert proc.returncode == 3, (
+        f"an unreadable probe must abort with exit 3 (environment), got "
+        f"{proc.returncode}.\n{out}"
     )
     assert "could not read the interpreter dependency probe" in out, (
         f"the failure did not name the unreadable probe.\n{out}"

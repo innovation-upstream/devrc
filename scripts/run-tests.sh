@@ -38,11 +38,15 @@
 #      asserted the fix kept working, which is what this guard is for). We now
 #      check each binary UP FRONT and abort naming it, so "41 tests silently
 #      skipped" becomes "the gate says curl is missing".
-#      ⚠ This binds the pre-push tier too, which supplies only python via
-#      nix-shell and takes the rest from the ambient PATH (all 10 verified
-#      present on the workbench 2026-08-02). A host missing one now BLOCKS the
-#      push with the named tool instead of pushing a silently-thinner run;
-#      `DEVRC_SKIP_TESTS=1 git push …` is the documented override.
+#      ⚠ CORRECTED 2026-08-22 — both halves of what this said are now false.
+#      The pre-push tier used to supply only python via `nix-shell -p …` and take
+#      the rest from the ambient PATH; it now runs `nix develop`, so the devShell
+#      supplies EVERY entry from the same flake.nix `gateTools` list the flake
+#      check uses. And a host missing one no longer BLOCKS: a missing tool is an
+#      ENVIRONMENT precondition, which exits 3, which githooks/tests-on-push.sh
+#      DEGRADES on — blocking a push over a broken caller is what teaches people
+#      to reach for `DEVRC_SKIP_TESTS=1`. Repo-content guards still exit 2 and
+#      still block.
 #
 #   2. PINNED EXPECTED-SKIP SET (`EXPECTED_SKIPS`). Not a numeric ceiling: every
 #      skip must match a pinned (directory, reason-regex) entry, and the observed
@@ -192,6 +196,16 @@ fi
 # starts, so unsetting it here is the one place that fixes it for all of them.
 unset CDPATH
 cd "$ROOT" || { echo "run-tests: cannot cd to ROOT=$ROOT" >&2; exit 2; }
+# 🔴 EXIT CODES: 3 = the ENVIRONMENT could not satisfy a precondition (this guard,
+# 1b, 1c). 2 = a REPO-CONTENT guard refused (target list, floor table, launcher
+# stubs, spool wiring). The distinction is load-bearing: `githooks/tests-on-push.sh`
+# DEGRADES on 3 (an env fault must not block a push over a broken caller) and
+# BLOCKS on 2. Collapsing them was a measured mistake — degrading on 2 turned
+# GUARD 5's and GUARD 3a's own warning ("do NOT delete the entry to make this
+# pass — that is how a suite stops running while the gate goes green") into
+# exactly that outcome, on the only tier that runs automatically: this repo has
+# no CI and no branch protection (pinned by test_ci_claim_matches_reality.py).
+# A new `exit` here must pick a side deliberately.
 # --- GUARD 1: tool precondition ------------------------------------------------
 # Every binary the suites `skipif` on. Absence must be an ERROR, never a skip.
 # Sources (grep `shutil.which` under scripts/):
@@ -268,7 +282,7 @@ if [ "${#missing_tools[@]}" -gt 0 ]; then
   echo >&2
   echo "  Do NOT drop entries from REQUIRED_TOOLS to make this pass — each one is" >&2
   echo "  justified in the comment block directly above it." >&2
-  exit 2
+  exit 3
 fi
 
 # --- GUARD 1b: pytest ITSELF must be importable --------------------------------
@@ -297,9 +311,11 @@ if [ "$CHECK_TARGETS_ONLY" -eq 0 ] && [ "$CHECK_FLOORS_ONLY" -eq 0 ]; then
     echo "  pytest MODULE is not importable from it, so every suite would collect 0" >&2
     echo "  tests and report an unparseable summary. This is NOT a pytest output-format" >&2
     echo "  change — it is a missing dependency in the caller's environment." >&2
-    echo "  Fix the caller: flake.nix checks.pytests builds a python312.withPackages" >&2
-    echo "  env that includes pytest; the pre-push hook wraps this in a nix-shell." >&2
-    exit 2
+    echo "  Fix the caller: use the repo's own devShell, which carries pytest and" >&2
+    echo "  every other suite dep from the same flake.nix \`gateTools\` list the" >&2
+    echo "  \`nix flake check\` gate uses:" >&2
+    echo "      nix develop \"$ROOT\" --command bash \"$ROOT/scripts/run-tests.sh\" \"$ROOT\"" >&2
+    exit 3
   fi
 
   # --- GUARD 1c: the interpreter must carry EVERY dep the suites import --------
@@ -326,14 +342,26 @@ if [ "$CHECK_TARGETS_ONLY" -eq 0 ] && [ "$CHECK_FLOORS_ONLY" -eq 0 ]; then
   # the deps costs the same, catches every wrong-interpreter shape, and needs no
   # escape hatch: if they import, the run is sound by definition.
   #
+  # 🔴 ACTUALLY IMPORT THEM. `find_spec` only resolves the module — it returns a
+  # spec for a package whose C extension is broken (psycopg2 against a mismatched
+  # libpq) or for an empty directory on the path, both of which then ImportError
+  # at COLLECTION time, which is the failure this guard exists to pre-empt. The
+  # first version used find_spec and its own text claimed "if they import"; the
+  # two were not the same check.
+  #
   # 🔴 FAIL CLOSED on an unreadable probe. Anything the interpreter prints ahead
   # of this output (a `sitecustomize.py` on PYTHONPATH will do it) shifts the
   # parse, and a guard that then passes silently is worse than none — GUARD 4
   # already fails the run when pytest's summary is unparseable; this matches it.
   _dep_probe="$(python -c '
-import importlib.util, sys
+import sys
 need = ("pytest", "requests", "psycopg2", "minio", "yaml")
-missing = [m for m in need if importlib.util.find_spec(m) is None]
+missing = []
+for m in need:
+    try:
+        __import__(m)
+    except Exception:
+        missing.append(m)
 print("DEPS:" + (",".join(missing) if missing else "OK"))
 print("EXE:" + sys.executable)
 ' 2>/dev/null)"
@@ -345,7 +373,7 @@ print("EXE:" + sys.executable)
     printf '%s\n' "$_dep_probe" | sed 's/^/    /' >&2
     echo "  Refusing rather than guessing — an unreadable precondition is not a" >&2
     echo "  satisfied one." >&2
-    exit 2
+    exit 3
   fi
   # 🔴 ALWAYS print the resolved interpreter, including on the happy path. A green
   # whose environment you cannot see is what made this expensive: the one fact
@@ -363,7 +391,7 @@ print("EXE:" + sys.executable)
     echo "  hooks that re-activate it. Use the repo's own devShell, which is" >&2
     echo "  immune (measured) and needs no hand-copied dependency list:" >&2
     echo "    nix develop $ROOT --command bash $ROOT/scripts/run-tests.sh --set all $ROOT" >&2
-    exit 2
+    exit 3
   fi
 fi
 

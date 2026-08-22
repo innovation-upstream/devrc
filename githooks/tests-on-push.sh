@@ -155,6 +155,16 @@ degrade() {
   exit 0
 }
 
+# 🔴 `--no-write-lock-file`: `nix develop <repo>` MUTATES a tracked file — it
+# writes flake.lock when an input is unlocked. A pre-push hook that dirties the
+# working tree is a side effect nobody expects, and the changed-files filter
+# fires this gate PRECISELY when flake.nix changed. With the flag, nix errors on
+# a stale lock instead, which degrades — the honest outcome for this tier.
+#
+# 🔴 `env -u PYTHONPATH -u PYTHONHOME`: `nix develop` PRESERVES them, and
+# python honours PYTHONPATH ahead of the env's own site-packages. The nix-sandbox
+# tier has no such variable, so without this the two tiers are not running the
+# identical interpreter environment even though both use the same derivation.
 # 🔴 `nix develop`, NOT `nix-shell -p …`. MEASURED 2026-08-22, and the TRIGGER is
 # the CWD, not an inherited variable: `nix-shell --run` executes the user's shell
 # hooks, which activate a venv belonging to whatever directory you are standing
@@ -174,7 +184,7 @@ if ! command -v nix >/dev/null 2>&1; then
 fi
 
 echo "pre-push: preparing test env (nix develop)…" >&2
-prep_out="$(nix develop "$REPO_ROOT" --command python --version 2>&1)"
+prep_out="$(env -u PYTHONPATH -u PYTHONHOME nix develop --no-write-lock-file "$REPO_ROOT" --command python --version 2>&1)"
 prep_rc=$?
 if [ "$prep_rc" -ne 0 ]; then
   degrade "nix develop env build failed (rc=$prep_rc): $(printf '%s' "$prep_out" | tail -1)"
@@ -188,7 +198,7 @@ fi
 # verdict line now (`RESULT: FAIL (exit=1)`), so a reader who only has the
 # output still gets the truth; see scripts/gate.sh.
 echo "pre-push: running devrc test suite (mode=$MODE)…" >&2
-nix develop "$REPO_ROOT" --command bash "$RUNNER" --set all "$REPO_ROOT"
+env -u PYTHONPATH -u PYTHONHOME nix develop --no-write-lock-file "$REPO_ROOT" --command bash "$RUNNER" --set all "$REPO_ROOT"
 run_rc=$?
 
 if [ "$run_rc" -eq 0 ]; then
@@ -196,16 +206,24 @@ if [ "$run_rc" -eq 0 ]; then
   exit 0
 fi
 
-# 🔴 rc 2 is a PRECONDITION abort (run-tests.sh GUARDs 1/1b/1c): by construction
-# ZERO tests ran. This file's own header promises "Infra flakiness DEGRADES,
-# never blocks — only a genuine pytest failure (tests executed, >=1 failed)
-# blocks", and the comment below says "Tests EXECUTED" — both were false for
-# rc 2, which blocked the push over a broken CALLER. GUARD 1c widens the
-# population reaching here (a wrong interpreter is a far more ordinary state
-# than a missing binary), so the contradiction had to be resolved rather than
-# inherited. Blocking on an env fault is what teaches people DEVRC_SKIP_TESTS=1.
-if [ "$run_rc" -eq 2 ]; then
-  degrade "the test suite could not START (rc=2, a precondition guard aborted) — see its message above"
+# 🔴 rc 3 is an ENVIRONMENT precondition abort (run-tests.sh GUARDs 1/1b/1c): by
+# construction ZERO tests ran, and the fault is in the CALLER, not the repo. This
+# file's header promises "Infra flakiness DEGRADES, never blocks", so it degrades.
+#
+# 🔴 rc 2 STILL BLOCKS, and the distinction is the whole point. A first version of
+# this degraded on rc 2 — but run-tests.sh has NINE `exit 2` sites and only four
+# are environmental; the rest are REPO-CONTENT guards (target list, floor table,
+# launcher stubs, spool wiring) whose own messages warn "do NOT delete the entry
+# to make this pass — that is how a suite stops running while the gate goes
+# green". Degrading on 2 produced exactly that, on the only tier that runs
+# automatically: this repo has no CI and no branch protection. The runner now
+# exits 3 for the environment cases so the two can be told apart.
+#
+# Verified in the other direction too: `fail` is only ever assigned 0 or 1 and the
+# script ends `exit "$fail"`, so a genuine pytest failure can never surface as 2
+# or 3 and be degraded away.
+if [ "$run_rc" -eq 3 ]; then
+  degrade "the ENVIRONMENT could not satisfy a precondition (rc=3) — see the message above"
 fi
 
 # Tests EXECUTED and at least one failed.
