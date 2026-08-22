@@ -1504,8 +1504,6 @@ def test_rm_glob_misses_these_recursive_spellings():
     )
 
 
-
-
 def test_age_glob_misses_these_reordered_decrypt_spellings():
     """🔴 A KNOWN, OPEN GAP OPENED BY THE 2026-08-21 NARROWING — pinned so it
     stays visible instead of implied-shut.
@@ -1525,7 +1523,9 @@ def test_age_glob_misses_these_reordered_decrypt_spellings():
     (grep it — 0 hits for "sops"/"decrypt"), so unlike the `rm` gap above there
     is no second layer failing in the opposite direction. These spellings are
     not theoretical: each was executed against a real age keypair (v1.3.1) and
-    printed plaintext with rc=0. Every row carries an identity flag on purpose —
+    yielded the plaintext at rc=0 — the two `-o`/`--output` rows WRITE it to the
+    named file rather than to stdout, which is the same disclosure by a different
+    route. Every row carries an identity flag on purpose —
     an earlier draft listed `age -o plain.txt -d secret.age` without one, which
     exits 1 ("identities are required") and so proved nothing about decryption.
     Adding `-i` changes no verdict here; all six still resolve ALLOW.
