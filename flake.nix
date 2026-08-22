@@ -171,6 +171,14 @@
         name = "devrc-gate";
         packages = gateTools;
         shellHook = ''
+          # 🔴 Marks a SANCTIONED gate environment. run-tests.sh GUARD 1 uses it to
+          # tell a REPO defect from a CALLER defect: a REQUIRED_TOOLS entry missing
+          # while this is set means the repo asked for something `gateTools` does
+          # not supply (or the entry is a typo) — that BLOCKS. Missing while it is
+          # unset means the caller is simply not in the gate env — that degrades.
+          # Set in BOTH tiers (here and checks.pytests) or the sandbox would
+          # misclassify its own repo defects as environment faults.
+          export DEVRC_GATE_ENV=1
           echo "devrc: gate toolchain ready — bash scripts/run-tests.sh ." >&2
         '';
       };
@@ -321,6 +329,8 @@
             # sandbox (no /usr/bin/env). Rewrite shebangs to store paths so those
             # legitimately-hermetic tests can run. (Does NOT touch test logic.)
             patchShebangs src/scripts
+            # Same marker the devShell sets — see its shellHook for why.
+            export DEVRC_GATE_ENV=1
             export HOME="$TMPDIR/home"
             mkdir -p "$HOME"
             cd src
