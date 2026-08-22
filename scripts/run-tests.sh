@@ -180,6 +180,64 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# --- GUARD 9: NO TEST MAY OPERATE ON THE REPO THE SUITE RUNS FROM -------------
+# 🔴 THE THIRD ENFORCEMENT POINT, beside GUARDS 7 and 8 — but it has to run
+# HERE, at the top, and not down beside them.
+#
+# MEASURED 2026-08-21, on the operator's real clone and on the production
+# remote: a gate run rewrote `refs/heads/main` with fixture commits, created
+# `side`/`topic`/`trunk`/`master`/`only-branch`/`feat/behind-too`, DELETED
+# `refs/heads/main`, repointed HEAD at `trunk`, wrote `core.bare=true`,
+# `user.name=T`, a `core.hooksPath` under `pytest-0/test_install_does_not_
+# depend_o0/` and a `remote.origin.url` under `pytest-0/test_fetch_failure_is_
+# rc40/` — then pushed fixture refs to GitHub.
+#
+# 🔴 NOT ONE FIXTURE WAS SLOPPY. Every git fixture in this repo passes
+# `-C <tmp_path>/…`; several also pin HOME, GIT_CONFIG_GLOBAL and
+# GIT_CONFIG_SYSTEM. `GIT_DIR` OVERRIDES `-C`, so one inherited variable defeats
+# all of them at once — which is why this is an `unset` and not a patch in
+# fourteen test files. Reproduced on a throwaway clone: with GIT_DIR exported,
+# `git -C <tmp>/work branch -D main` DELETES the clone's main.
+#
+# 🔴 AND IT MUST PRECEDE THE ROOT BLOCK BELOW. With GIT_DIR set and no
+# GIT_WORK_TREE, git takes the CWD as the top of the work tree, so
+# `rev-parse --show-toplevel` returns `<repo>/scripts`; this script then hunts
+# for `<repo>/scripts/scripts/run-tests.sh` and dies `exit 127` with NO verdict
+# line. MEASURED — the first placement of this guard was two thirds of the way
+# down this file and the gate never reached it. Same class as the `unset CDPATH`
+# a few lines below ROOT: an inherited variable silently corrupting a resolution
+# every reader assumes is local.
+#
+# 🔴 SPELLED HERE RATHER THAN SOURCED, DELIBERATELY. `scripts/run-node-tests.sh`
+# and `scripts/gate.sh` carry the same block, and so does every COPY of this
+# runner that `testlib/runner_patch.py` writes into a tmp dir — about fifteen
+# tests drive such a copy, and a copy cannot source a sibling `lib/` that was
+# never copied with it. (The first version did source one; MEASURED, it turned
+# those fifteen into `run-tests: FATAL — cannot source lib/git-repo-pointers.sh`,
+# i.e. a permanently-red gate, which claude/RULES.md rates worse than no gate.)
+# The SET is owned once, by `scripts/testlib/gitenv.py::REPO_POINTER_VARS`, and
+# `scripts/tests/test_git_repo_isolation.py` pins all four spellings against it
+# in both directions plus the ordering above — the same treatment
+# `SPOOL_SESSION_MARKER` gets, for the same cross-process reason.
+#
+# UNCONDITIONAL, including over a deliberate ambient value: there is no workflow
+# in which the test gate should be pointed at a repository by inherited
+# environment.
+DEVRC_GIT_REPO_POINTERS=(
+  GIT_DIR                            # the repository itself; beats -C
+  GIT_WORK_TREE                      # the working tree
+  GIT_COMMON_DIR                     # where refs/config actually live
+  GIT_INDEX_FILE                     # the index a `git add` writes
+  GIT_OBJECT_DIRECTORY               # where new objects are written
+  GIT_ALTERNATE_OBJECT_DIRECTORIES   # extra object stores
+  GIT_NAMESPACE                      # the ref namespace refs land in
+  GIT_PREFIX                         # hook-injected pathspec prefix
+  GIT_GRAFT_FILE                     # repo-scoped grafts
+  GIT_SHALLOW_FILE                   # repo-scoped shallow list
+  GIT_CONFIG                         # legacy: the file `git config` WRITES
+)
+unset "${DEVRC_GIT_REPO_POINTERS[@]}"
+
 if [ -z "$ROOT" ]; then
   ROOT="$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel 2>/dev/null || true)"
   [ -n "$ROOT" ] || ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -1742,6 +1800,17 @@ echo "run-tests: activity telemetry isolated for this run (GUARD 8)"
 echo "  ACTIVITY_SPOOL_DIR=$ACTIVITY_SPOOL_DIR"
 echo "  fallback trap      =$SPOOL_TRAP_LOG"
 
+# --- GUARD 9's REPORTING LINE ------------------------------------------------
+# The clearing itself happens at the TOP of this file (before ROOT is resolved —
+# see the GUARD 9 header there); this is only the announcement, printed here so
+# it sits beside GUARDS 7 and 8 where a reader looks for the run's isolation
+# summary. It reports the PAIR: the shell half cleared the pointers for EVERY
+# target including the non-pytest ones, and each pytest target additionally
+# loads the detector that names whichever test moves a ref.
+echo "run-tests: git repo pointers cleared for this run (GUARD 9)"
+echo "  cleared     =${DEVRC_GIT_REPO_POINTERS[*]}"
+echo "  detector    =-p testlib.gitenv_plugin (per pytest target)"
+
 # "<target>|<sess-from>|<sess-to>|<trap-from>|<trap-to>|<iso-from>|<iso-to>" —
 # three line ranges per target, so every count below is attributed to the target
 # that produced it rather than to the run as a whole.
@@ -1942,10 +2011,11 @@ run_pytest() {
   log="$(mktemp)"
   nl_before="$(_nolaunch_lines)"
   _spool_mark_before
-  # 🔴 `-p testlib.nolaunch_plugin` is GUARD 7 and `-p testlib.spool_plugin` is
-  # GUARD 8 (see each header). Both are on THIS line — the one place every
-  # target is invoked — and not in two dozen conftests.
-  python -m pytest "$d" -q -p no:cacheprovider -p testlib.nolaunch_plugin -p testlib.spool_plugin \
+  # 🔴 `-p testlib.nolaunch_plugin` is GUARD 7, `-p testlib.spool_plugin` is
+  # GUARD 8 and `-p testlib.gitenv_plugin` is GUARD 9 (see each header). All
+  # three are on THIS line — the one place every target is invoked — and not in
+  # two dozen conftests.
+  python -m pytest "$d" -q -p no:cacheprovider -p testlib.nolaunch_plugin -p testlib.spool_plugin -p testlib.gitenv_plugin \
     --no-header -rs >"$log" 2>&1
   rc=$?
   nl_after="$(_nolaunch_lines)"

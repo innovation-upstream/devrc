@@ -42,3 +42,26 @@ from testlib.nolaunch_plugin import STUB_DIR_ENV, no_real_launchers  # noqa: E40
 # calls scattered through this directory stay as defence in depth — they narrow
 # the spool per test, which this session-wide floor deliberately does not.
 from testlib.spool_plugin import no_real_activity_spool  # noqa: E402,F401
+
+# 🔴 The SAME shape a third time, for the repository the suite RUNS FROM
+# (GUARD 9). On 2026-08-21 a gate run rewrote this checkout's `main` with
+# fixture commits, deleted the branch, rewrote `core.hooksPath` and
+# `remote.origin.url`, and pushed fixture refs to the production remote —
+# because `GIT_DIR` overrides the `-C <tmp_path>` every git fixture here
+# already passes. `scripts/run-tests.sh` clears the pointers for EVERY target
+# (pytest and non-pytest alike); this import is the second entry point, so a
+# bare `pytest scripts/tests` gets the same strip plus the per-test detector
+# that names whichever test moved a ref.
+#
+# 🔴 The names are imported INTO THIS CONFTEST'S NAMESPACE, which is what
+# registers them — pytest reads hooks and fixtures off the conftest module
+# object. `pytest_configure` is deliberately NOT among them: it is an
+# initialisation hook and pytest does not call it for a conftest loaded during
+# collection, so importing it would look like coverage while providing none.
+# The plugin arms its baseline at IMPORT for exactly that reason, so this entry
+# point loses nothing but the marker line.
+from testlib.gitenv_plugin import (  # noqa: E402,F401
+    _devrc_git_repo_isolation,
+    pytest_collection_finish,
+    pytest_sessionfinish,
+)
