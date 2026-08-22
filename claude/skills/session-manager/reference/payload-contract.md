@@ -47,17 +47,28 @@ these rows. `kind` is never null; `runtime` frequently is, and means something e
 Measured: **0 interactive shell invocations in 30 days against 55 agent references**, confirmed
 by the operator 2026-08-14. An agent reads this, and pays by the token.
 
-| | cost on a 75-row scan | faithful? |
-|---|---|---|
-| table (default) | ~3,280 tok | ❌ **lossy** — 73 truncated cells, 45 rows whose task exceeds the 25-char column |
-| `--json` | ~14,017 tok | ✅ |
-| `--json --lean` | ~9,629 tok | ✅ on what it keeps |
+| | 77 rows, both hosts, 2026-08-21 | 75 rows, 2026-08-14 | faithful? |
+|---|---|---|---|
+| table (default) | 24,658 B ≈ 6.2k tok | ~3,280 tok | ❌ **lossy** — truncated cells, rows whose task exceeds the 25-char column |
+| `--json` | 103,801 B ≈ 26k tok | ~14,017 tok | ✅ |
+| `--json --lean` | 79,008 B ≈ 20k tok | ~9,629 tok | ✅ on what it keeps |
 
-⚠ Those three figures were measured on ONE 75-row scan on 2026-08-14 and **predate the
-`unsent_prompt` pair and `not_measured`**, which add to all three. The RANKING is what the
-table is for and that is unchanged; do not quote the absolute numbers as current.
+⚠ Both columns are single scans of a live fleet whose size moves; the RANKING is what the
+table is for. The 08-14 column is kept only to show the drift — it predates the
+`unsent_prompt` pair and `not_measured`, and was quoted as current for a week after it stopped
+being so.
 
-**Ask for `--json --lean` unless you need a dropped field.** It is cheaper than the full payload
+🔴 **`--lean` TRIMS ROW FIELDS ONLY, and the row fields are barely half the payload.** Measured
+2026-08-21 on the lean output: `hosts` 42.5 KB (of which rows 42.1 KB), `clickhouse` 17.4 KB,
+`clawgate_queue` 12.7 KB, `caveats` 4.3 KB, `ledger` 2.8 KB, `not_measured` 1.8 KB,
+`summary` 1.0 KB. So `--lean` alone buys 24% off the full payload, not the ~31% the 08-14
+figures implied, and **the second-largest block is one flag away**: `--no-ch` drops the
+ClickHouse rows, which answer session-history questions rather than "is anything waiting on
+me". Two smaller structural costs, neither capped: `clawgate_queue` enumerates the whole queue
+(96 entries / 12.1 KB that day) and `ledger.conflicts` is emitted twice, top-level and again
+per host.
+
+**Ask for `--json --lean --no-ch` unless you need a dropped field.** It is cheaper than the full payload
 AND more faithful than the cheap one. `lean_row_fields` and `lean_host_fields` travel in the payload
 naming exactly what this view CARRIES — so a key absent from a row was omitted by the view, never
 measured as null. `caveats`, `summary.waiting`'s tri-state, `clawgate_queue` and every per-host
