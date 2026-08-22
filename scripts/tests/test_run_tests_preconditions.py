@@ -138,7 +138,7 @@ def test_every_required_tool_is_reachable_by_the_prepush_tier():
 
     `run-tests.sh` OWNS `REQUIRED_TOOLS`. `flake.nix` satisfies it with
     `checks.pytests.nativeBuildInputs`; `githooks/tests-on-push.sh` satisfies it
-    with a nix-shell for python PLUS the ambient PATH. Both were verified alone;
+    with the repo's devShell via `nix develop` (one gateTools list). Both were verified alone;
     the RELATIONSHIP was not — so an entry could be added, declared in the flake,
     and be unsatisfiable in the other tier forever.
 
@@ -149,7 +149,7 @@ def test_every_required_tool_is_reachable_by_the_prepush_tier():
     logrotate", exit 2, ZERO tests collected.
 
     So: every REQUIRED_TOOLS entry must be either a binary the pre-push hook
-    DECLARES in its own nix-shell, or one that is genuinely present on this host's
+    DECLARES in flake.nix's gateTools, or one that is genuinely present on this host's
     PATH right now. Nothing may be required on faith.
     """
     tools = re.search(r"^REQUIRED_TOOLS=\((.*?)\)", RUN_TESTS.read_text(),

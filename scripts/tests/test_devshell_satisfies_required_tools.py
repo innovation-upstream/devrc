@@ -47,7 +47,7 @@ WHAT EACH TEST HERE IS:
 That `gateTools` actually satisfies REQUIRED_TOOLS is proven elsewhere and
 better: `checks.pytests` runs this very runner with
 `nativeBuildInputs = gateTools` in the nix sandbox, so an insufficient list
-exits 2 on the precondition. The only way that proof stops transferring to the
+exits 3 on the precondition (an ENVIRONMENT abort; repo-content guards exit 2). The only way that proof stops transferring to the
 devShell is the two consumers drifting apart — which is what the seam guards
 forbid.
 """
@@ -75,7 +75,7 @@ def emitted_fatal(tmp_path_factory):
 
     Driving the real path is cheap and fully deterministic: the tool
     precondition is GUARD 1, before any test runs, so with a PATH containing
-    only `bash` the runner exits 2 in milliseconds. `env -i`-style isolation
+    only `bash` the runner exits 3 in milliseconds. `env -i`-style isolation
     (an explicit env dict) is what makes it independent of the ambient PATH --
     inside the nix sandbox every REQUIRED_TOOLS binary IS present, so a test
     that relied on one being absent would measure the environment, not the code.
@@ -207,11 +207,26 @@ def test_the_fatal_still_forbids_deleting_the_precondition(emitted_fatal):
     `emitted_fatal` is the real FATAL, printed by a real run: no window, no
     terminator, and a commented-out echo prints nothing.
     """
-    assert "Do NOT drop entries from REQUIRED_TOOLS" in emitted_fatal or \
-           "do NOT drop them from" in emitted_fatal, emitted_fatal
-    assert "go green while" in emitted_fatal, (
+    # 🔴 SLICE TO THE FATAL. `emitted_fatal` is the whole run's output, which also
+    # carries the always-printed `RESULT:` verdict line. Matching the protected
+    # sentences against all of it is walkable: soften them in GUARD 1's echoes and
+    # re-plant the exact strings in the verdict line, and this test goes green
+    # while the operator's FATAL is softened. Measured. Narrower than the 1235-line
+    # source window it replaced, but the same shape — so bound it to the block.
+    _m = emitted_fatal.find("required tool(s) missing from PATH")
+    assert _m != -1, f"no FATAL in the output at all:\n{emitted_fatal}"
+    _end = emitted_fatal.find("RESULT:", _m)
+    block = emitted_fatal[_m:_end if _end != -1 else None]
+    assert block.count("\n") < 30, (
+        f"the FATAL block is {block.count(chr(10))} lines — the RESULT: terminator "
+        f"was not found where expected, so this assertion is unbounded again."
+    )
+
+    assert "Do NOT drop entries from REQUIRED_TOOLS" in block or \
+           "do NOT drop them from" in block, block
+    assert "go green while" in block, (
         "the message no longer explains WHY a missing tool is fatal (the run "
-        f"would go green while testing less).\n\nWhat it printed:\n{emitted_fatal}"
+        f"would go green while testing less).\n\nWhat it printed:\n{block}"
     )
 
 
