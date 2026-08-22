@@ -195,7 +195,10 @@ SUITES=(
   # floor 68 = 71 - min(50, max(1, 71/20)).
   # 92 tests measured 2026-08-14 (the astral-character controls js-source.mjs
   # never had), floor 88 = 92 - min(50, max(1, 92/20)) = 92 - 4.
-  "claude/skills/clickup/test|3|88"
+  # 122 tests / 4 files measured 2026-08-21: test/awaiting.test.mjs, the gate for
+  # the `awaiting` command (predicate, fan-out cap, pacing) and for the inbox
+  # cursor loop. Floor 116 = 122 - min(50, max(1, 122/20)) = 122 - 6.
+  "claude/skills/clickup/test|4|116"
 )
 
 # --- discovery roots -----------------------------------------------------------

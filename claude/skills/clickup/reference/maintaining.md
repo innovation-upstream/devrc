@@ -42,6 +42,8 @@ The hermetic gates are `node:test` suites, run by devrc's node gate
 node test/help-coverage.test.mjs      # hermetic; pins showUsage() completeness
 node test/state-paths.test.mjs        # hermetic; pins state OUT of the skill dir
 node test/js-source.test.mjs          # hermetic; controls for the source scanner
+node test/awaiting.test.mjs           # hermetic; the awaiting predicate, cap,
+                                      # pacing + the inbox cursor loop (fake transport)
 node test/smoke-test.mjs --readonly   # live API, needs credentials — NOT in any gate
 ```
 
