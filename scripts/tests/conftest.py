@@ -42,3 +42,15 @@ from testlib.nolaunch_plugin import STUB_DIR_ENV, no_real_launchers  # noqa: E40
 # calls scattered through this directory stay as defence in depth — they narrow
 # the spool per test, which this session-wide floor deliberately does not.
 from testlib.spool_plugin import no_real_activity_spool  # noqa: E402,F401
+
+# 🔴 THE SAME SHAPE A THIRD TIME, for git (GUARD 9). `testlib/nogit_plugin.py` is
+# the implementation and `scripts/run-tests.sh` loads it for EVERY target; this
+# import is the second entry point, so a bare `pytest scripts/tests` outside the
+# runner cannot rewrite the operator's `~/.gitconfig` or push to a real remote.
+#
+# Measured 2026-08-21: a test ran `githooks/install.sh` for real — that script
+# sets `core.hooksPath` --global — and ~63 fixture commits reached the REAL
+# origin/main. The fix is one module registered twice, NOT a fixture added to N
+# conftests: that is what #399 and #614 each did, leaving 1 target of 17 and 1
+# directory of 13 protected while reading as systemic.
+from testlib.nogit_plugin import no_real_git  # noqa: E402,F401
