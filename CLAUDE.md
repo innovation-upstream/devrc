@@ -153,16 +153,25 @@ Repo-level facts that are NOT in any skill — they live here on purpose:
   `tekton/devrc-nodetests` on devrc PRs, and `main` **does** carry branch protection
   (`enforce_admins`, no force-pushes, no deletions). But that protection has **no
   `required_status_checks`** — so a red Tekton run does not stop a merge, and neither does a
-  missing one. There is still no `.github/workflows`. Verify with
-  `gh api repos/innovation-upstream/devrc/branches/main/protection` and look for
-  `required_status_checks`; its **absence** is the answer, and an absent key reads as clean
-  rather than missing unless you look for it by name.
+  missing one. There is still no `.github/workflows`. **Proved behaviourally, not just from the
+  API: #707 merged 28 minutes after its `devrc-pytests` went RED, and #711 two minutes after.**
+  🔴 **Re-measure BOTH surfaces — classic protection AND rulesets, which are separate and
+  either can require a check:**
+  `gh api repos/innovation-upstream/devrc/branches/main/protection` (look for
+  `required_status_checks`) **and** `gh api repos/innovation-upstream/devrc/rules/branches/main`
+  (evaluates org + repo rulesets against the branch; `[]` means none apply). In both, the
+  **absence** is the answer — and an absent key reads as clean rather than missing unless you
+  look for it by name.
   The marker stays `none` deliberately: it pins *does anything BLOCK a merge*, and the answer
   is no. Moving it to `other` because checks appeared would assert a protection that does not
-  exist — the same reassuring falsehood in the opposite direction. This line used to read
-  `CI gates both suites`, which was false; before that it read that no checks run at all,
-  which is now equally false. **Re-measure both halves — runs? blocks? — rather than
-  inheriting either.**
+  exist — the same reassuring falsehood in the opposite direction, and the more dangerous one,
+  since a reader who feels protected skips the run. 🔴 **Flip it to `other` when — and only
+  when — `required_status_checks` appears, or a ruleset requires the tekton contexts.** Tekton
+  merely running is NOT that condition, whatever the `other` example below says.
+  This line read `CI gates both suites` from 2026-08-02 (#304) until 2026-08-20 (#603) — false,
+  because nothing ran; it then read that no checks run at all, which went false on 2026-08-22
+  when Tekton appeared. **It has now been wrong in both directions. Re-measure both halves —
+  runs? blocks? — rather than inheriting either.**
   🔴 **But a gate SHIPS IN THIS REPO, and whether it is INSTALLED is not a fact this file can
   state** — `githooks/` (`install.sh`, `pre-push`, `tests-on-push.sh`) is a real blocking
   pre-push test gate, and `scripts/run-tests.sh` treats it as a first-class consumer.
