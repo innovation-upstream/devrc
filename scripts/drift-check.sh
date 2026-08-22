@@ -82,6 +82,26 @@
 # take (5 conflicted-tree, 7 cannot-ff, 9 switch-failed, 11 verify-failed) are
 # left UNUSED rather than repurposed.
 #
+# 🔴 THE RESERVATION IS RECIPROCAL, AND THE UPWARD DIRECTION IS NOT FREE.
+# ship.sh owns 19 (the two hosts landed on DIFFERENT commits) and 20 (ship.sh was
+# replaced by its own run and the new copy could not be run). Both are ABOVE this
+# script's current ceiling of 18, which is exactly where the note further down
+# ("a new DRIFT code has nowhere to go but upward") points the next one. So:
+#   * 19 and 20 are RESERVED to ship.sh here and must not be taken as DRIFT
+#     codes — the next free code for this script is 21.
+#   * anything this script adds above 20 is reserved back the other way; ship.sh
+#     documents this in its own header for the same reason.
+#
+# RESERVED-TO-SHIP: 5 7 9 11 19 20
+#
+# That line is a LEDGER, machine-read, not a comment: it must equal exactly the
+# set of codes ship.sh can return and this script cannot, so it fails when the
+# set grows (ship.sh gains a code) or shrinks.
+# The two ladders are pinned to each other by
+# test_the_two_rc_ladders_reserve_each_others_codes in
+# scripts/tests/test_drift_check.py, because the alignment lived only in a PR
+# description until 2026-08-21 and neither file mentioned the other's codes.
+#
 #   2   usage error (unknown flag, non-integer tunable), or a RUN THAT CHECKED
 #       NO HOST AT ALL — either because the flags asked for none (`--no-local
 #       --no-remote`) or because the only host it was asked to look at could not
@@ -361,6 +381,9 @@
 # than 16" because it is larger. Every code below 16 that is still free (5, 7, 9, 11) is
 # reserved to a ship.sh meaning this script does not take, so a new DRIFT code
 # has nowhere to go but upward; its rank is stated in severity() and here.
+# 🔴 UPWARD IS NOT EMPTY EITHER: ship.sh owns 19 (hosts-disagree) and 20
+# (superseded), so the next free DRIFT code is 21, not 19. See the reciprocal
+# reservation under EXIT CODES above — that collision was one increment away.
 # (6 is unreachable through this path today — the script exits 6 directly before
 # any per-host leg runs — but the order is documented for every code it owns,
 # and severity() ranks it rather than falling through to the unknown-code slot.)
