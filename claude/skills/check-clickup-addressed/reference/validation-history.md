@@ -1280,3 +1280,107 @@ Round 8c concluded "a scoreboard ended it". One round later the scoreboard itsel
 thing most in need of auditing — blind to its own worst class, and shaped so that over-fitting
 one axis scored *higher*. **A corpus is an instrument, and an instrument gets validated like
 any other: ask which shapes it structurally cannot see, and who wrote the labels.**
+
+---
+
+# Round 6 — D12: the waiting flag could not see the user's own replies (2026-08-22)
+
+**Found by running the tool and opening the ticket**, one day after round 5 shipped the flag.
+
+## What it printed, and what was true
+
+    868kuam02: @Ellie King is WAITING — … Commented 2d ago; nobody has answered. Read it.
+
+Two sessions had already answered her: 2026-08-21 13:52 and 2026-08-22 01:04 — the second
+**eleven hours** before the run. Acting on the flag re-derived an analysis already sitting in
+the thread. (The re-derivation was not worthless — it added a live measurement that closed an
+open question the 01:04 comment had explicitly named — but that was luck, not the tool's doing.)
+
+## Why five green controls did not catch it
+
+Round 5 shipped `_waiting_on_a_human` with five tests, including two anti-widening controls.
+All five were correct. **Every one of them was scoped to one side of a seam**, and the defect
+was the seam: `recent-comments.py` drops the user's own comments (correct — the report is about
+what *others* said), and the flag concludes nobody answered (correct, given the evidence it is
+handed). The function's own docstring even stated the filter as a *guarantee it relies on*:
+
+> The comment is guaranteed not to be the user's own: `recent-comments.py` drops every
+> comment whose author id equals `me` before any of this runs.
+
+True — and exactly why it was blind. The evidence that would refute the flag is removed
+upstream, so no care inside the function could recover it. **A guarantee you depend on is worth
+asking whether it also deletes your disconfirming evidence.**
+
+## Failure direction, and why this one mattered
+
+The recency bound was chosen (round 5) specifically because *"a permanently-noisy block is
+worse than no block — it trains the reader to skip it."* D12 defeated that reasoning: an
+answered ticket is flagged **forever**, because nothing about answering it ever changes the
+inputs the flag reads. The bound bounded the wrong axis.
+
+## The fix
+
+`recent-comments.py` emits `my_latest_reply` per task, computed over the **unfiltered** comment
+list; `_waiting_on_a_human` suppresses when it is at or after the comment. Three deliberate
+choices, each pinned by a mutant:
+
+| Choice | Mutant | Killed by |
+|---|---|---|
+| Compare instants, don't count replies | `if mine is not None:` | `test_a_reply_older_than_the_question_does_not_suppress` |
+| `<=`, not `<` (ClickUp renders to the minute) | `mine < theirs` | `test_a_same_minute_reply_counts_as_answered` |
+| Absent ≠ "no reply" — announce instead | `reply_unreported = False` | `test_an_unreported_reply_field_announces_instead_of_deciding` |
+
+## 🔴 The mutation sweep found a hole the tests did not
+
+`latest_reply_by([], my_id)` — computing the reply over an empty list, i.e. the whole fix
+inert — **SURVIVED a fully green suite.** `latest_reply_by` and `build_record` were each
+pinned in isolation; `_collect`, the only code that joins them, was covered by nothing.
+That is round 6's own defect class reappearing *inside the fix for it*, within the same hour.
+`test_collect_computes_the_reply_over_the_UNFILTERED_comment_list` closes it.
+
+Also worth recording, because it nearly produced a false SURVIVED: the first sweep filtered
+runner output with a `grep -E "^  ✗ test_(my_own_later|…)"` whose alternation did not include
+`test_build_newest_comment_…`, so a mutant that **was** killed printed nothing and scored
+SURVIVED. **Read the whole failure list; a filter is part of the instrument.**
+
+## Ordering bug introduced while fixing this
+
+The first version returned its own message from the unreported-reply branch, *before* the
+recency bound. That silently broke two existing guards at once — a 90-day-old backlog comment
+became flagged forever (the exact unbounded-noise failure round 5 designed against) and an
+unreadable date stopped being surfaced. Caught by the existing suite. **A condition that
+returns its own string owns every condition after it**; the caveats now compose into one head.
+
+## Suite
+
+**170 passed, 0 failed** (155 before this round). Corpus unchanged at 49 cases — D12 is not a
+comment-classification defect, so it adds no corpus rows.
+
+## Two adversarial audit rounds, and what they cost
+
+**Audit 1** found no deploy-blockers and independently reproduced every claim in the PR body,
+but produced **two surviving mutants inside the fix's own design property**:
+
+- `get_my_user_id()` returns `None` on auth expiry / a CLI output change, and `run_clickup`
+  never checks the subprocess return code. Every id comparison then failed, so the record
+  carried `my_latest_reply: null` — the POSITIVE claim "I looked; you never replied" — on the
+  one failure mode that should produce *absent*. Fixed with an `UNIDENTIFIED` sentinel.
+- `test_reported_absence_of_a_reply_still_flags` asserted truthiness while its docstring
+  claimed a relationship, so flattening absent and null survived a green 166/0 suite.
+
+**Audit 2 (delta)** confirmed all four fixes and found the fix round's own regression: the new
+conditional was pinned in the *omit* direction only, so `UNIDENTIFIED = None` — collapsing the
+two states from the producer side — survived. It also measured that the new stderr warning
+reached the operator **zero** times, because `run_script` captured child stderr and returned
+only stdout.
+
+🔴 **The recurring shape, now four rounds deep: introducing a distinction pins one side of it.**
+D12 itself, then the audit-1 fix, then the audit-2 fix each created a new branch and tested the
+branch they were thinking about. Two nearby mutants even died for the WRONG reason — `object()`
+is truthy and non-`None`, so they crashed in `json.dumps` rather than failing an assertion,
+which reads as coverage and is not. **When you add a branch, write the test for the arm you did
+not have in mind.**
+
+🔴 **And a false SURVIVED nearly shipped from the sweep's own harness**: the first sweep filtered
+runner output through a `grep -E` alternation that omitted the killing test's name, so a mutant
+that *was* caught printed nothing and scored SURVIVED. Read the whole failure list.

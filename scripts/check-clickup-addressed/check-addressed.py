@@ -73,11 +73,23 @@ def render_json(report):
 
 
 def run_script(name, *args):
+    """Run a sibling script and return its stdout.
+
+    🔴 Child stderr is FORWARDED, not swallowed. `capture_output=True` captures both streams
+    and this function used to return only stdout, so anything a child wrote to stderr was
+    silently discarded — measured: `recent-comments.py`'s warning that it could not resolve
+    the ClickUp user id (and therefore cannot tell your comments from anyone else's) appeared
+    ZERO times in this entry point's output, on either stream. A warning nobody can see is
+    the same no-op as one that never fires, and this skill has shipped that shape twice
+    already. Forwarding costs nothing on the normal path: children are silent there.
+    """
     script = SCRIPT_DIR / name
     result = subprocess.run(
         [sys.executable, str(script), *args],
         capture_output=True, text=True, timeout=300
     )
+    if result.stderr:
+        print(result.stderr, end="", file=sys.stderr)
     return result.stdout, result.returncode
 
 
@@ -376,6 +388,23 @@ def _waiting_on_a_human(r, now):
 
     The comment is guaranteed not to be the user's own: `recent-comments.py` drops every
     comment whose author id equals `me` before any of this runs.
+
+    🔴 That guarantee is also what made this flag BLIND until 2026-08-22, and it is a SEAM
+    defect — each side is correct alone. Dropping my own comments is right for a report
+    about what other people said; concluding "nobody has answered" from the surviving
+    comments is right given the only evidence handed over. Neither component can observe
+    the other's assumption, so no care inside this function could recover it. Measured on
+    868kuam02: the flag said "Commented 2d ago; nobody has answered" over a ticket TWO
+    sessions had already answered, the later of them eleven hours earlier — and acting on
+    it duplicated an analysis already sitting in the thread. The fix has to cross the seam,
+    so `recent-comments.py` now reports `my_latest_reply` and condition 4 reads it.
+
+    4. **I have not already answered it** — suppressed when my newest reply is at or after
+       the comment. Compared, not merely counted: a reply PREDATING the question does not
+       answer it, which is the ordinary shape on a long-running ticket. An ABSENT
+       `my_latest_reply` is a stale producer that never gathered the fact, so the flag
+       fires but says the check did not run — the same treatment an unreadable date gets,
+       and the reason it cannot be silently disabled by dropping one dict key.
     """
     # PRESENT and zero, not `get(..., 0)`. An absent key is a record that never reported a
     # mention count — inferring "no work exists anywhere", the strongest claim this flag
@@ -396,16 +425,44 @@ def _waiting_on_a_human(r, now):
     if not (nc.get("date") or "").strip():
         return None
 
+    # Answered already? Compare instants, not existence. Equal counts as answered: ClickUp
+    # renders to the MINUTE, so a reply written in the same minute as the comment reads as
+    # equal, and a strict `>` would report it unanswered.
+    reply_unreported = "my_latest_reply" not in nc
+    if not reply_unreported:
+        mine = _comment_age_days(nc.get("my_latest_reply"), now)
+        theirs = _comment_age_days(nc.get("date"), now)
+        # Smaller age = more recent. A malformed value on either side falls through to the
+        # flag rather than suppressing it — never silently drop a waiting human because a
+        # date would not parse.
+        if mine is not None and theirs is not None and mine <= theirs:
+            return None
+
     age = _comment_age_days(nc.get("date"), now)
+    # 🔴 The recency bound runs BEFORE any reporting caveat, and the caveats COMPOSE rather
+    # than each returning their own message. Written the other way round first, and it broke
+    # two existing guards at once: the unreported-reply branch returned early, so a 90-day-old
+    # backlog comment was flagged forever (the exact unbounded-noise failure the recency bound
+    # exists to prevent) and an unreadable date stopped being surfaced. A condition that
+    # returns its own string is a condition that silently owns every condition after it.
+    if age is not None and age > UNANSWERED_COMMENT_DAYS:
+        return None
+
     who = nc.get("author") or "someone"
     head = (f"{r['task_id']}: @{who} is WAITING — the ticket is `{cu or 'unknown status'}`, "
             f"and the task ID appears in NO transcript, so no work exists anywhere.")
     if age is None:
-        return (head + f" (comment date {nc.get('date')!r} was unreadable, so its age is "
-                       f"unknown — surfaced rather than assumed stale.)")
-    if age > UNANSWERED_COMMENT_DAYS:
-        return None
-    return head + f" Commented {age:.0f}d ago; nobody has answered. Read it."
+        head += (f" (comment date {nc.get('date')!r} was unreadable, so its age is unknown "
+                 f"— surfaced rather than assumed stale.)")
+    else:
+        head += f" Commented {age:.0f}d ago"
+        # Only claim nobody answered when that was actually checked.
+        head += "." if reply_unreported else "; nobody has answered. Read it."
+    if reply_unreported:
+        head += (" NOTE: your own replies were not reported by recent-comments.py, so whether "
+                 "you already answered could not be checked — read the thread before treating "
+                 "this as unanswered.")
+    return head
 
 
 def disagreements(results, now=None):
@@ -563,12 +620,18 @@ def build_newest_comment(meta):
     by a sentence reorder — the comment that motivated the veto is 196 characters and
     cleared the old cap by four.
     """
-    return {
+    nc = {
         "date": meta.get("date"),
         "author": meta.get("author"),
         "snippet": (meta.get("snippet") or "")[:200],
         "text": meta.get("text") or meta.get("snippet") or "",
     }
+    # Copied only when PRESENT. A `.get()` here would flatten "the producer reported no
+    # reply" and "the producer never reported" into the same None, and `_waiting_on_a_human`
+    # must tell them apart — one is evidence, the other is a gap to announce.
+    if "my_latest_reply" in meta:
+        nc["my_latest_reply"] = meta["my_latest_reply"]
+    return nc
 
 
 def parse_args(args):

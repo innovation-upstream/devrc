@@ -115,14 +115,57 @@ SNIPPET_CHARS = 200
 TEXT_CHARS = 4000
 
 
-def build_record(tid, tname, task, comment, text):
+# Sentinel for "we could not identify the user at all", which is NOT the same fact as "the
+# user has not replied". `get_my_user_id()` returns None whenever the ClickUp CLI prints no
+# `ID:` line — auth expiry, a network error, an output-format change — and `run_clickup` does
+# not check the subprocess return code, so this is silent. Without the sentinel the id
+# comparison below never matches, `latest_reply_by` returns None, and the record carries
+# `my_latest_reply: null`, which the consumer reads as the POSITIVE claim "I looked; you never
+# replied". That is the one design property this whole seam exists to protect, defeated on the
+# exact failure mode that produces it. `build_record` omits the key for this value, so the
+# consumer takes its announce-rather-than-decide branch.
+UNIDENTIFIED = object()
+
+
+def latest_reply_by(comments, my_id):
+    """Formatted date of the newest comment authored by `my_id`, or None if there is none.
+
+    The loop below drops every comment of mine, which is right for a report about what
+    OTHER people said — and it is exactly why the downstream "nobody has answered" flag
+    was blind: the evidence that would refute it is removed before the flag ever runs.
+    This carries the one fact across that seam.
+
+    Ranked on the raw epoch-ms, never on the formatted string: `format_date` falls back to
+    `str(ts_ms)` for an unparseable value, so a max() over formatted dates can rank garbage
+    above a real timestamp. Format the winner, not the candidates.
+    """
+    best = None
+    for c in comments:
+        if str(c.get("user", {}).get("id", "")) != my_id:
+            continue
+        try:
+            ts = int(c.get("date", ""))
+        except (ValueError, TypeError):
+            continue
+        if best is None or ts > best:
+            best = ts
+    return format_date(best) if best is not None else None
+
+
+def build_record(tid, tname, task, comment, text, my_latest_reply):
     """One comment row.
 
     A function, not an inline dict, so the `snippet`/`text` split is pinned by a test. Both
     ends of that split were tested independently while the JOIN was not — and dropping
     `text` here silently reverts the whole fix, since the consumer falls back to `snippet`.
+    The same is true of `my_latest_reply`: drop it and the waiting flag goes back to
+    reporting answered tickets as unanswered, with nothing failing.
+
+    `my_latest_reply` is a REQUIRED positional argument rather than a defaulted one. A
+    default would let a caller omit it and get the pre-fix behaviour silently; this way the
+    omission is a TypeError at the only call site.
     """
-    return {
+    rec = {
         "task_id": tid,
         "task_name": tname,
         # The ticket's OWN state is the authority on whether work is outstanding; the
@@ -135,10 +178,22 @@ def build_record(tid, tname, task, comment, text):
         "snippet": text[:SNIPPET_CHARS],
         "text": text[:TEXT_CHARS],
     }
+    # Present-and-null ("I looked; you never replied") is a different fact from absent
+    # ("nobody could look"). The consumer branches on which, so the key is emitted for every
+    # value EXCEPT the UNIDENTIFIED sentinel, whose whole purpose is to reach the absent
+    # branch. Emitting it unconditionally is what turned a failed user lookup into a
+    # confident false negative.
+    if my_latest_reply is not UNIDENTIFIED:
+        rec["my_latest_reply"] = my_latest_reply
+    return rec
 
 
 def _collect(limit, fast, as_json):
     my_id = get_my_user_id()
+    if not my_id:
+        print("recent-comments: WARNING — could not resolve your ClickUp user id, so your "
+              "own comments cannot be distinguished from anyone else's. Every downstream "
+              "'have I already replied?' check is disabled for this run.", file=sys.stderr)
     tasks = get_my_tasks()
 
     # In fast mode, only check the 10 most recently updated tasks
@@ -150,6 +205,14 @@ def _collect(limit, fast, as_json):
         tid = task["id"]
         tname = task.get("name", tid)[:80]
         comments = get_comments(tid)
+        # Computed over the FULL comment list, before the loop below discards mine. When the
+        # user could not be identified at all, the answer is UNKNOWN rather than "no reply" —
+        # see UNIDENTIFIED. Loud on stderr too: a report whose author id is missing cannot
+        # tell your comments from anyone else's, and silence there reads as a normal run.
+        if my_id:
+            my_reply = latest_reply_by(comments, my_id)
+        else:
+            my_reply = UNIDENTIFIED
         for c in comments:
             user_id = str(c.get("user", {}).get("id", ""))
             if user_id == my_id:
@@ -157,7 +220,7 @@ def _collect(limit, fast, as_json):
             text = extract_text(c)
             if not text:
                 continue
-            results.append(build_record(tid, tname, task, c, text))
+            results.append(build_record(tid, tname, task, c, text, my_reply))
 
     # Sort newest first, take top N
     results.sort(key=lambda x: x["date"], reverse=True)

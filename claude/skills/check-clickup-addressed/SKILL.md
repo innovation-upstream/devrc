@@ -43,7 +43,13 @@ is run straight out of the working tree — the edit is live immediately, and it
 ## What it does (deterministic pipeline)
 
 1. **`recent-comments.py`** — queries ClickUp for all comments on your assigned tasks,
-   filters out your own, sorts by date, returns the top N with task ID/name/author/snippet.
+   filters out your own, sorts by date, returns the top N with task ID/name, ticket
+   status/priority, author, snippet + full `text`, and `my_latest_reply` — the date of *your*
+   newest comment on that task, computed **before** your comments are dropped, because the
+   consumer otherwise cannot tell an answered ticket from an abandoned one. That last key
+   is **omitted entirely** when the user id could not be resolved — absent means "the
+   check could not run", which is not the same fact as a present `null` ("I looked; you
+   never replied"). Both consumers branch on which.
 2. **`search-sessions.py`** — searches `~/.claude/projects/**/*.jsonl` transcripts for
    sessions mentioning a task ID, ranks by hit count. Terms are **ANDed**, so it is run
    **once per task**, never with several tasks' terms in one query.
@@ -75,7 +81,7 @@ process per task, so lookups dedupe within a task, not across the run.
 
 | Script | Input | Output |
 |--------|-------|--------|
-| `recent-comments.py --limit N` | ClickUp API | task_id, task_name, date, author, snippet |
+| `recent-comments.py --limit N` | ClickUp API | `--json`: task_id, task_name, task_status, task_priority, date, author, snippet, text, and **`my_latest_reply` only when the user id resolved** — its ABSENCE is meaningful (the check could not run), so read with `in`, never `.get()`. The tabular printer emits a different, smaller set — task_id, task_name, date, author, snippet — which `check-completion.py` parses for field 0 only. |
 | `search-sessions.py term1 [term2 ...]` | `~/.claude/projects/` | session_id, date, project, hits |
 | `check-completion.py --task ID` | session transcripts | status, completion signals, open items |
 | `check-addressed.py --limit N` | all of the above | unified report |
@@ -124,8 +130,14 @@ inert proximity tier whose confidence marker printed the same symbol for every s
 Round 5, the same day, fixed a **false explanation** (a named-but-unknown repo reported as
 "repo not named"), the repaired marker never reaching the report, and the missing
 "nobody is on it and someone is waiting" flag (matrix in
-`claude/skills/check-clickup-addressed/reference/validation-history.md`); what remains is listed
-under "Still weak".
+`claude/skills/check-clickup-addressed/reference/validation-history.md`). Round 6, on 2026-08-22, fixed
+that new flag's own blind spot — it could not see **your** replies, so a ticket you had
+already answered was reported unanswered forever. What remains is listed under "Still weak".
+
+🔴 **Every round so far has been found by RUNNING the tool and checking its verdict against
+reality, never by reading the code.** Round 6's defect shipped *with* a fresh adversarial
+test suite that had five controls on the very function that was wrong — all five green, all
+five scoped to one side of a seam. If you are about to trust a verdict here, open the ticket.
 
 - Session search is keyword-based, not semantic — a session that addressed the task
   without ever writing its ID is invisible to this tool. **A `no_mentions_found` or
@@ -213,6 +225,28 @@ plus one state where nothing disagrees and that is exactly the problem (4):
    and would re-fire on every unstarted backlog item forever, training the reader to skip
    the block; recency is a property of the *interaction*, says a human is waiting **now**,
    and self-clears. Fires whatever the status word reads (safe direction, like the veto).
+   🔴 **It could not see YOUR OWN replies until 2026-08-22, so an answered ticket stayed
+   flagged forever** — the unbounded noise the recency bound exists to prevent. Measured on
+   `868kuam02`: "Commented 2d ago; nobody has answered" over a ticket **two** sessions had
+   already answered, the later of them 11 h earlier, and acting on it duplicated an analysis
+   already in the thread. A **seam** defect, each side correct alone — `recent-comments.py`
+   drops your comments (right: the report is about what *others* said), and the flag concludes
+   nobody answered (right, given the only evidence it is handed). Neither can see the other's
+   assumption, so the fix crosses the seam: the producer now emits `my_latest_reply` per task
+   and the flag suppresses when your newest reply is **at or after** the comment. Compared,
+   not counted — a reply *predating* the question does not answer it. An **absent**
+   `my_latest_reply` (stale producer, or a failed user-id lookup) fires but says the check
+   never ran, rather than silently deciding either way.
+   🔴 **The seam is crossed for TOP-LEVEL comments only.** `recent-comments.py` calls the CLI
+   without `--threads`, and `/task/{id}/comment` returns top-level comments only — replies
+   live behind `getThreadedComments`. So an answer you wrote *inside a comment thread* is
+   still invisible and the ticket still reads as unanswered. Narrower than D12, same shape.
+   (Verified 2026-08-22 that the two answers on `868kuam02` are top-level, so the motivating
+   case really is fixed — but do not read that as the general case.)
+   🔴 **New false-SILENCE direction, deliberately unbounded by transcripts:** reply *"I'll
+   look next week"* and the flag is silenced for that comment even though `mentions_found ==
+   0` means no other rule covers the ticket either — which is the gap this flag was added to
+   fill. Bounded only by a *newer* colleague comment re-firing it. Acknowledging is not doing.
 
 🔴 **Sources 1 and 2 are gated on a hardcoded nine-word status vocabulary, and ClickUp
 statuses are per-list and arbitrary.** Until 2026-08-21 a miss was **silent**: measured,
@@ -287,7 +321,7 @@ further drift. **Re-time it rather than quoting it.**
 
 ## Tests
 
-Run all tests (**161** collected, measured 2026-08-22). `run_all.py` exits non-zero on
+Run all tests (**176** collected, measured 2026-08-22). `run_all.py` exits non-zero on
 failure — but read the `Total: N passed, M failed` line, not a piped exit code. 🔴 **If that
 line is missing at all, the run died — treat it as a failure, never as "no output".** A
 `sys.exit()` from code under test is a `SystemExit`, which a bare `except Exception` does
@@ -301,7 +335,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 "$CCUA/tests/run_all.py"
 
 The same files are a **pytest** target of devrc's gate — `scripts/check-clickup-addressed/tests`
 in `HERMETIC_TARGETS`, with its collected-count floor in `TARGET_FLOORS`
-(`scripts/run-tests.sh`). Both runners see the same 161; `run_all.py` survives because it
+(`scripts/run-tests.sh`). Both runners see the same 176; `run_all.py` survives because it
 purges `__pycache__` and reports an import failure as a FAILURE, which pytest's summary
 line does not distinguish as loudly. **Raise the floor when you add tests.**
 
@@ -321,6 +355,12 @@ Test files:
   `test_an_unknown_clickup_status_does_not_disable_the_waiting_flag` asserts the **WAITING**
   flag specifically: a bare `assert flags` was green for round 4's announcement instead, and
   let a mutant rebuilding the D6 blind spot SURVIVE a fully green suite.
+- `test_own_reply_answers.py` — the round-6 set (D12): the waiting flag reading your own
+  replies. 🔴 `test_collect_computes_the_reply_over_the_UNFILTERED_comment_list` exists
+  **because a mutation sweep found the wiring uncovered** — `latest_reply_by` and
+  `build_record` were each pinned in isolation while `_collect`, the only thing that joins
+  them, was not, so `latest_reply_by([], my_id)` made the whole fix inert against a fully
+  green suite. Pin the SEAM, not only the parts.
 - `test_check_completion.py` — windowed signal extraction. ⚠️ Its two proximity tests hand
   `extract_signals_from_windows` a non-zero `distance`, which no production producer emits;
   they cover the formula, not any reachable path. The reachable premise is pinned in
