@@ -252,19 +252,30 @@
       "*sops*-d*": "ask",
       "*sops*--decrypt*": "ask",
       "*sops*exec-env*": "ask",
-      "*age*-d*": "ask",
-      "*age*--decrypt*": "ask",
+      // 🔴 NO `*` BETWEEN "age" AND THE FLAG — it must stay `*age -d*`, not
+      // `*age*-d*`. The inner `*` made this match any command text containing
+      // "age" followed LATER by "-d", and "age" is a substring of package,
+      // packages, image, message, storage and manage while "-d" covers -db-,
+      // --dir, --debug and --dry-run. MEASURED 2026-08-21: `ls packages/…-db-…`
+      // and `grep … packages/…-db/…` both resolved ASK, and since `opencode run`
+      // auto-rejects an ask rather than prompting, two real dispatches were
+      // killed mid-task by it. The leading `*` is still required and still
+      // correct — it catches `/nix/store/…/bin/age -d` and `FOO=1 age -d`.
+      // Pinned by three MUST_ALLOW rows in test_opencode_config.py.
+      "*age -d*": "ask",
+      "*age --decrypt*": "ask",
 
       // --- whole-system state ---
       "*nixos-rebuild*": "ask",
       "*home-manager*switch*": "ask",
       // 🔴 LOAD-BEARING — do not delete it as "already covered".
-      // `"*age*-d*"` DOES match some spellings of this command by pure
-      // coincidence ("nix-collect-gar(BAGE) … -d"), but ONLY those containing a
+      // `"*age -d*"` DOES match some spellings of this command by pure
+      // coincidence ("nix-collect-gar(BAGE) -d" ends in the literal "age -d"),
+      // but ONLY those spelling the flag immediately after, so
       // literal `-d`. MEASURED: with this rule deleted, `nix-collect-garbage`
       // and `nix-collect-garbage --max-freed 1G` both resolve ALLOW at both
       // layers. Two things follow, and they point opposite ways: this rule is
-      // the real gate for the no-`-d` spellings, AND `"*age*-d*"` must not be
+      // the real gate for the no-`-d` spellings, AND `"*age -d*"` must not be
       // deleted on the reasoning that GC is separately gated for the rest.
       "*nix-collect-garbage*": "ask",
       "*nix*profile remove*": "ask",

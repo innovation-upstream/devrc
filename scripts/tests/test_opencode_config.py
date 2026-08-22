@@ -531,6 +531,11 @@ MUST_ASK = [
     "FOO=1 sops -d s.enc.yaml",
     "sops exec-env s.enc.yaml env",
     "age -d -i k f",
+    # Pinned in its own right since the 2026-08-21 narrowing: with no `*`
+    # between "age" and the flag, this no longer contains the literal
+    # "age -d", so `"*age -d*"` does NOT cover it and the redundancy
+    # ledger entry that used to claim it did was removed.
+    "age --decrypt -i k f",
     "home-manager switch",
     "nixos-rebuild switch",
     "nix profile remove x",
@@ -688,7 +693,11 @@ MUST_ASK = [
 # rule's, which is a different and much larger piece of work.
 REDUNDANTLY_COVERED_ASKS = {
     "*sops*--decrypt*": ("*sops*-d*", "sops --decrypt s.enc.yaml"),
-    "*age*--decrypt*": ("*age*-d*", "age --decrypt -i k f"),
+    # `"*age --decrypt*"` was listed here as covered by `"*age*-d*"`. That
+    # stopped being true when the age globs were narrowed on 2026-08-21: with
+    # no `*` between "age" and the flag, "age --decrypt …" no longer contains
+    # the literal "age -d", so the two rules now cover disjoint spellings and
+    # neither is redundant. Both are pinned individually in MUST_ASK.
     "*systemctl*restart*": ("*systemctl*start*", "systemctl restart foo"),
 }
 
@@ -738,6 +747,18 @@ MUST_ALLOW = [
     "rg foo",
     "flux get kustomizations -A",
     "kubectl rollout restart deploy/x",
+    # 🔴 REGRESSION, measured 2026-08-21. `"*age*-d*"` (the `age` decryption
+    # tool) had a `*` BETWEEN "age" and "-d", so it matched any command text
+    # containing "age" followed LATER by "-d". "age" is a substring of package,
+    # packages, image, message, storage, manage; "-d" covers -db-, --dir,
+    # --debug, --dry-run. Three ordinary read-only commands below therefore
+    # resolved ASK, which `opencode run` auto-rejects — killing the run
+    # mid-task. Two real dispatches died on exactly these, one on `grep` and
+    # one on `ls`. The fix is to drop that inner `*` so the glob requires the
+    # literal "age -d"; these three pin that it stays dropped.
+    "ls packages/civitai-db-schema/src/",
+    "grep -n REPLICATION_LAG_DELAY packages/civitai-db/src/lag.test.ts",
+    "node -e \"require('./package.json')\" --debug",
 ]
 
 # Every agent that ships, plus the implicit primary. `None` == no agent block.
