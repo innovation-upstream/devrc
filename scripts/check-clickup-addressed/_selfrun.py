@@ -39,15 +39,12 @@ SELF_RUN_MARKERS = (
     # catches the sessions that BUILT this skill, whose test fixtures hardcode real task
     # IDs (868krn3y1, 868kr07fu) next to mock completion text.
     #
-    # 🔴 TWO SPELLINGS BECAUSE THE MARKER IS A PATH AND THE CODE MOVED (2026-08-22). The
-    # first is the datapacket-talos layout `.claude/skills/check-clickup-addressed/scripts/`,
-    # kept because transcripts written before the migration still say it. The second is the
-    # devrc layout `scripts/check-clickup-addressed/…` — the SAME two segments, REVERSED, so
-    # neither string matches the other's path and dropping either blinds the guard to half
-    # the corpus. Both stay anchored: the always-injected skill catalog names
-    # `~/.claude/skills/check-clickup-addressed/SKILL.md`, which contains NEITHER.
+    # 🔴 THE MARKER IS A PATH AND THE CODE MOVED (2026-08-22): this literal is the
+    # datapacket-talos layout `.claude/skills/check-clickup-addressed/scripts/`, kept because
+    # transcripts written before the migration still say it. The devrc layout reverses those
+    # two segments, so it matches nothing here — it is handled by NEW_LAYOUT_RE below, which
+    # is a regex for a measured reason, not a stylistic one.
     "check-clickup-addressed/scripts/",
-    "scripts/check-clickup-addressed/",
     # The report header printed by check-addressed.py — catches a session that pasted the
     # output without running it.
     "## Task Completion Status",
@@ -59,6 +56,27 @@ SELF_RUN_MARKERS = (
 # (`\"skill\": \"...\"`) when a transcript quotes the call inside message text. The escaped
 # form is why this is not a plain string match — the first version missed it.
 SELF_RUN_RE = re.compile(r'\\?"skill\\?"\s*:\s*\\?"check-clickup-addressed\\?"')
+
+# The devrc layout, anchored on a SCRIPT FILE rather than on the directory.
+#
+# 🔴 THE DIRECTORY SPELLING WAS TRIED AND MEASURED UNUSABLE (2026-08-22). `scripts/check-
+# clickup-addressed/` reads like the obvious counterpart of the old marker, but devrc's
+# CLAUDE.md carries a subsystem table mapping `scripts/<dir>/` to its owning skill, and a
+# project CLAUDE.md is injected into every session in that repo. Measured over the 761
+# transcripts these scripts actually walk: the two sibling rows `scripts/repo-cos/` and
+# `scripts/session-analysis/` appear in **83 (10.9%)** and **72 (9.5%)** of them — the same
+# order as the bare name `check-clickup-addressed` at 96 (12.6%), which this file already
+# rejects as unusable. The gate's own per-target output (`… scripts/check-clickup-addressed/
+# tests`) is a second such source.
+#
+# Requiring a `.py` FILE immediately after the directory separates a run from a mention:
+#   matches      scripts/check-clickup-addressed/check-addressed.py     (an invocation)
+#   NO match     scripts/check-clickup-addressed/                       (CLAUDE.md's table)
+#   NO match     scripts/check-clickup-addressed/tests/test_corpus.py   (gate output — the
+#                                                                        slash breaks it)
+# SKILL.md still self-marks, deliberately, because it cites `…/_selfrun.py` — a loaded
+# SKILL.md means the skill fired, which IS a run.
+NEW_LAYOUT_RE = re.compile(r'check-clickup-addressed/[\w.-]+\.py')
 
 _cache = {}
 
@@ -77,7 +95,9 @@ def is_self_run(path):
     try:
         with open(key, errors="replace") as f:
             for line in f:
-                if any(m in line for m in SELF_RUN_MARKERS) or SELF_RUN_RE.search(line):
+                if (any(m in line for m in SELF_RUN_MARKERS)
+                        or SELF_RUN_RE.search(line)
+                        or NEW_LAYOUT_RE.search(line)):
                     hit = True
                     break
     except OSError:

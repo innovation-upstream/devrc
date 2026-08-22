@@ -548,6 +548,33 @@ def test_the_devrc_invocation_path_is_a_self_run():
             "the devrc invocation path was not recognised as a run of this checker"
 
 
+def test_a_mention_of_the_scripts_DIRECTORY_is_not_a_self_run():
+    """🔴 THE NEGATIVE CONTROL THAT REJECTED THE OBVIOUS FIX, and the whole reason the devrc
+    marker is a regex requiring a `.py` FILE rather than the directory.
+
+    `scripts/check-clickup-addressed/` reads like the exact counterpart of the old marker.
+    It is unusable, for the same reason the bare name is: devrc's CLAUDE.md carries a table
+    mapping `scripts/<dir>/` to its owning skill, and a project CLAUDE.md is injected into
+    every session in that repo. Measured 2026-08-22 over the 761 transcripts these scripts
+    walk, the two sibling rows already in that table appear in 83 (10.9%) and 72 (9.5%) of
+    them — the same order as the bare name at 96 (12.6%), which this module rejects by name.
+    A ~10% over-drop of the corpus, silent, in the direction of trusting stale evidence.
+
+    Both fixtures below are REAL text: the CLAUDE.md row this migration added, and the gate's
+    own per-target line. Both contain the directory; neither is a run.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        for i, text in enumerate((
+            "| `scripts/check-clickup-addressed/` | `check-clickup-addressed` | did the work "
+            "on a ClickUp ticket actually happen |",
+            "  PASS  scripts/check-clickup-addressed/tests  (collected=157 passed=157 floor=149)",
+        )):
+            root = _session(tmp, f"dirmention{i}", f"{text}\n{TARGET} is still open.")
+            path = root / "test-project" / f"dirmention{i}.jsonl"
+            assert not selfrun.is_self_run(path), \
+                f"a mention of the scripts DIRECTORY was mistaken for a run: {text!r}"
+
+
 # Written out as LITERALS, deliberately not read from selfrun.SELF_RUN_MARKERS. Iterating
 # the implementation's own tuple would make "delete a marker" pass vacuously — the deleted
 # marker simply stops being tested. This is a ledger: it fails if the set shrinks (a marker
@@ -556,9 +583,9 @@ def test_the_devrc_invocation_path_is_a_self_run():
 EXPECTED_SELF_RUN_MARKERS = (
     "<command-name>/check-clickup-addressed</command-name>",
     "check-clickup-addressed/scripts/",     # the pre-2026-08-22 datapacket-talos layout
-    "scripts/check-clickup-addressed/",     # the devrc layout the scripts live in now
     "## Task Completion Status",
-    '"skill": "check-clickup-addressed"',   # matched by SELF_RUN_RE, not the literal tuple
+    '"skill": "check-clickup-addressed"',                       # SELF_RUN_RE
+    "scripts/check-clickup-addressed/check-addressed.py",       # NEW_LAYOUT_RE
 )
 
 
@@ -574,8 +601,8 @@ def test_each_self_run_marker_fires_on_its_own():
 
 def test_self_run_marker_set_has_not_drifted():
     """Pin the literal tuple too, so an added marker cannot slip in untested. The tuple
-    holds four of the five; the fifth is the regex."""
-    assert tuple(selfrun.SELF_RUN_MARKERS) == EXPECTED_SELF_RUN_MARKERS[:4], (
+    holds three of the five; the last two are regexes (SELF_RUN_RE, NEW_LAYOUT_RE)."""
+    assert tuple(selfrun.SELF_RUN_MARKERS) == EXPECTED_SELF_RUN_MARKERS[:3], (
         f"self-run marker set changed: {selfrun.SELF_RUN_MARKERS!r}. Add the new marker to "
         f"EXPECTED_SELF_RUN_MARKERS and prove it does not fire on the skill catalog."
     )

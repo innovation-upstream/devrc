@@ -14,10 +14,33 @@ back to the D4 failure it was built to prevent — reading yesterday's report as
 evidence. Nothing errors when this happens; the report just stops printing
 `(ignored N transcript(s) …)`.
 
-Both spellings are now in `SELF_RUN_MARKERS` (transcripts written before the move still say
-the old one), the ledger in `test_the_devrc_invocation_path_is_a_self_run` /
-`EXPECTED_SELF_RUN_MARKERS` pins both, and the new test was watched RED on the migrated tree
-before the marker was added. Suite: 155 → 156.
+The old literal stays in `SELF_RUN_MARKERS` (transcripts written before the move still say
+it) and the new layout is matched by `NEW_LAYOUT_RE`. The test was watched RED on the
+migrated tree before the marker existed. Suite: 155 → 157.
+
+🔴 **And the obvious fix was measured WRONG, which is the more useful half.** The natural
+counterpart to the old marker is the directory, `scripts/check-clickup-addressed/`. That
+re-creates the exact defect this file already rejects the bare name for. devrc's `CLAUDE.md`
+carries a subsystem table mapping `scripts/<dir>/` to its owning skill, a project `CLAUDE.md`
+is injected into every session in that repo, and the gate prints a per-target line naming the
+same directory. Measured over the 761 transcripts these scripts actually walk:
+
+| candidate | transcripts matched | verdict |
+|---|---|---|
+| `check-clickup-addressed` (bare name) | 96 (12.6%) | unusable — the known one |
+| `scripts/repo-cos/` (sibling CLAUDE.md row, as a proxy) | 83 (10.9%) | what the directory spelling would cost |
+| `scripts/session-analysis/` (ditto) | 72 (9.5%) | ” |
+| `check-clickup-addressed/scripts/` (old marker) | 11 (1.4%) | ✅ anchored |
+| `scripts/check-clickup-addressed/[file].py` (shipped) | — | ✅ anchored: requires a FILE |
+
+So the marker requires a `.py` file immediately after the directory. A run matches; the
+CLAUDE.md row and the gate's `…/tests` line do not. `test_a_mention_of_the_scripts_DIRECTORY_
+is_not_a_self_run` uses both of those as REAL fixtures, and the directory-spelling mutant dies
+on that test alone — verified by substituting it and watching 1 failed / 156 passed.
+
+**Generalise:** the over-broad direction has no error and no test of its own unless you write
+one. Ask what OTHER document in the new repo spells your marker, and measure the candidate
+against the real corpus before shipping it.
 
 **Generalise:** a marker built out of a path is a claim about where the code lives. Moving
 the code invalidates it without touching it, and the tell is a guard that goes quiet rather

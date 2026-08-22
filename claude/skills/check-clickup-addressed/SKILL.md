@@ -287,7 +287,7 @@ further drift. **Re-time it rather than quoting it.**
 
 ## Tests
 
-Run all tests (**156** collected, measured 2026-08-22). `run_all.py` exits non-zero on
+Run all tests (**157** collected, measured 2026-08-22). `run_all.py` exits non-zero on
 failure — but read the `Total: N passed, M failed` line, not a piped exit code. 🔴 **If that
 line is missing at all, the run died — treat it as a failure, never as "no output".** A
 `sys.exit()` from code under test is a `SystemExit`, which a bare `except Exception` does
@@ -301,7 +301,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 "$CCUA/tests/run_all.py"
 
 The same files are a **pytest** target of devrc's gate — `scripts/check-clickup-addressed/tests`
 in `HERMETIC_TARGETS`, with its collected-count floor in `TARGET_FLOORS`
-(`scripts/run-tests.sh`). Both runners see the same 156; `run_all.py` survives because it
+(`scripts/run-tests.sh`). Both runners see the same 157; `run_all.py` survives because it
 purges `__pycache__` and reports an import failure as a FAILURE, which pytest's summary
 line does not distinguish as loudly. **Raise the floor when you add tests.**
 

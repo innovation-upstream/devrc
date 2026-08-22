@@ -1246,13 +1246,14 @@ TARGET_FLOORS=(
   "scripts/initiatives/tests|745"
   "scripts/repo-cos/tests|315"
   "scripts/task-spec-drafter/tests|135"
-  # 2026-08-22, check-clickup-addressed arrives as a NEW target: 156 collected on
-  # the branch, agreeing with what its own tests/run_all.py reports (156 passed,
+  # 2026-08-22, check-clickup-addressed arrives as a NEW target: 157 collected on
+  # the branch, agreeing with what its own tests/run_all.py reports (157 passed,
   # 0 failed) — two runners, one number. Gate's own rule on the gate's own count:
-  #   _suggested_floor 156 = 156 - min(50, max(1, 156/20 = 7)) = 156 - 7 = 149.
-  # (155 came over from datapacket-talos; the +1 is the marker-path regression
-  # test the migration itself needed — see _selfrun.py's two spellings.)
-  "scripts/check-clickup-addressed/tests|149"
+  #   _suggested_floor 157 = 157 - min(50, max(1, 157/20 = 7)) = 157 - 7 = 150.
+  # (155 came over from datapacket-talos; the +2 are the marker-path regression the
+  # migration itself created and the negative control that rejected the obvious fix
+  # — see the NEW_LAYOUT_RE block in _selfrun.py.)
+  "scripts/check-clickup-addressed/tests|150"
   "scripts/claude-hooks/tests/test_guard_core.py|1260"
   # 2026-08-13, next-step-nudge.py's suite arrives as a NEW target: 78 collected on the
   # branch. Gate's own count through the gate's own rule:
