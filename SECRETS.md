@@ -42,6 +42,85 @@ completeness:
 | MinIO invoice archiver | k8s secret `minio-archive-config`, key `config.env` → `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD`, ns `minio-archive` (or env `MINIO_ARCHIVE_ENDPOINT`/`_ACCESS_KEY`/`_SECRET_KEY`) | homelab cluster (`_minio.py`) |
 | LLM extraction (Stage 2) | `OPENROUTER_API_KEY` (env) | OpenRouter dashboard |
 
+### analyze-service index backup — no new secret, REUSES the SOPS age key
+
+`scripts/analyze-service-index/backup.py` (systemd user timer
+`analyze-service-index-backup`, daily, **both hosts**) bundles each scope of the
+`/analyze-service` index store, encrypts it with `age`, and uploads it to the
+`minio-archive` tenant. It introduces **no new credential**:
+
+| what | key / secret (names only) | source of truth |
+|---|---|---|
+| encryption identity | the **existing** SOPS age key — file `~/workspace/homelab-talos/.secrets/age.key`, handle `SOPS_AGE_KEY_FILE` (override: `ASIB_AGE_IDENTITY`) | the `homelab-talos` repo; the same key already used for every `*.enc.yaml` in the homelab clusters |
+| MinIO destination | reuses `_minio.py` entirely — k8s secret `minio-archive-config` (see the row above) | homelab cluster |
+| cluster route | `KUBECONFIG`; the unit sets the workbench path and `backup.py` falls back to `~/.kube/homelab-nebula.yaml` on the laptop | see the Kubeconfigs table below |
+
+🔴 **The recipient is DERIVED from that key file at run time** (`age-keygen -y`),
+never hardcoded — devrc is public, and more importantly a hardcoded recipient can
+drift from the key the operator actually holds, producing archives that encrypt
+cleanly and decrypt never. **No new key is minted**: a backup encrypted to a key
+nobody keeps alive is a backup nobody can open. If the key file is missing the
+backup FAILS loudly rather than falling back to an unencrypted upload.
+
+Objects live at `<host>/<scope>/<UTC stamp>.bundle.age` in bucket
+`analyze-service-index-backups`. The host segment carries the machine ID because
+**both machines are hostname `nixos`** and their stores are divergent — a shared
+prefix would make each host's retention pass evict the other's backups.
+
+**Restoring** (the whole point — rehearse it before you need it). 🔴 **Step 1 is
+the retrieval, and it is the one thing you will not already have in the scenario
+this exists for.** The bucket is reachable only in-cluster, so bridge to it the
+same way the backup does — `_minio.py`'s `kubectl port-forward`:
+
+```sh
+cd ~/workspace/devrc
+KEY=<host>/<scope>/<UTC stamp>.bundle.age     # from the listing below
+
+# 1a. list what is there (per host, per scope, newest last)
+KUBECONFIG=$KC_HOMELAB nix-shell -p 'python3.withPackages(p:[p.minio])' --run '
+python3 -c "
+import sys; sys.path.insert(0, \"scripts/mail-actions\")
+from _minio import MinioArchive
+with MinioArchive() as mc:
+    for o in sorted(x.object_name for x in mc.client.list_objects(
+            \"analyze-service-index-backups\", recursive=True)):
+        print(o)
+"'
+
+# 1b. fetch ONE object to disk
+KUBECONFIG=$KC_HOMELAB KEY="$KEY" nix-shell -p 'python3.withPackages(p:[p.minio])' --run '
+python3 -c "
+import os, sys; sys.path.insert(0, \"scripts/mail-actions\")
+from _minio import MinioArchive
+key = os.environ[\"KEY\"]
+with MinioArchive() as mc:
+    r = mc.client.get_object(\"analyze-service-index-backups\", key)
+    open(\"restore.bundle.age\", \"wb\").write(r.read()); r.close(); r.release_conn()
+"'
+
+# 2. decrypt
+age --decrypt -i ~/workspace/homelab-talos/.secrets/age.key \
+    -o restore.bundle  restore.bundle.age
+
+# 3. restore, then IMMEDIATELY drop the remote the clone just added
+git clone restore.bundle <scope>
+git -C <scope> remote remove origin
+git -C <scope> remote          # must print NOTHING
+```
+
+🔴 **Step 3's second line is not optional.** `git clone <bundle> <dir>` sets
+`origin` to the bundle's path, which breaks the `remote = none` invariant every
+scope README, `commit.sh`'s `PrivateNetwork` unit and this feature's own
+`test_no_scope_gains_a_remote` rest on. A scope restored and left with a remote
+looks healthy and violates the one property the store is supposed to have.
+
+🔴 **`git clone` restores `refs/heads/*` and tags ONLY.** Measured: a bundle
+created with `--all` that declares `refs/notes/commits` restores through a plain
+(or `--bare`) clone with that ref silently missing. `backup.py`'s own restore
+rehearsal is a `--mirror` clone for exactly this reason. If the scope carried
+non-branch refs, restore with `git clone --mirror restore.bundle <scope>.git`
+instead — or check with `git bundle list-heads restore.bundle` first.
+
 ---
 
 ## Kubeconfigs (`$KC_*` handles from `nix/programs/zsh/default.nix`)
