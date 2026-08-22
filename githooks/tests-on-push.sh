@@ -45,6 +45,47 @@
 
 set -uo pipefail
 
+# --- GUARD 9: NO TEST MAY OPERATE ON THE REPO THE SUITE RUNS FROM -------------
+# 🔴 THE FOURTH ENTRY POINT, and it was missing until #683's audit found it.
+# This file matches `RUNNERS`' own description exactly — it resolves a repo root
+# with `rev-parse --show-toplevel` and then runs the suite — and it is the LAST
+# hop before `run-tests.sh` on the `git push` path, which is the path the
+# 2026-08-21 incident travelled. Without the clear here the resolution on the
+# next line is itself corruptible: with GIT_DIR set and no GIT_WORK_TREE, git
+# takes the CWD as the top of the work tree.
+#
+# The SET is owned by `scripts/testlib/gitenv.py::REPO_POINTER_VARS` (and
+# `CONTROL_VARS`); every spelling is pinned two-way, and the ordering against
+# the root line is pinned too, by `scripts/tests/test_git_repo_isolation.py`.
+# Spelled here rather than sourced for the reason in `scripts/run-tests.sh`'s
+# copy of this header — and doubly so here: this file is invoked by a GLOBAL git
+# hook from an arbitrary repository, so a sibling `lib/` is not something it can
+# assume exists.
+DEVRC_GIT_REPO_POINTERS=(
+  GIT_DIR                            # the repository itself; beats -C
+  GIT_WORK_TREE                      # the working tree
+  GIT_COMMON_DIR                     # where refs/config actually live
+  GIT_INDEX_FILE                     # the index a `git add` writes
+  GIT_OBJECT_DIRECTORY               # where new objects are written
+  GIT_ALTERNATE_OBJECT_DIRECTORIES   # extra object stores
+  GIT_NAMESPACE                      # the ref namespace refs land in
+  GIT_PREFIX                         # hook-injected pathspec prefix
+  GIT_GRAFT_FILE                     # repo-scoped grafts
+  GIT_SHALLOW_FILE                   # repo-scoped shallow list
+  GIT_CONFIG                         # legacy: the file `git config` WRITES
+)
+DEVRC_GITENV_CONTROL_VARS=(
+  DEVRC_GITENV_PROTECT               # which git dirs the detector watches
+  DEVRC_GITENV_MODE                  # enforce | report | auto
+)
+unset "${DEVRC_GIT_REPO_POINTERS[@]}"
+unset "${DEVRC_GITENV_CONTROL_VARS[@]}"
+
+# 🔴 `GIT_PREFIX` is on that list and git DOES export it to a pre-push hook
+# (measured, git 2.55.0: `GIT_EXEC_PATH` and `GIT_PREFIX` are exported to
+# `pre-push`; `GIT_DIR` is NOT). Nothing below reads it, and
+# clearing it before `rev-parse` is what keeps the resolution on the next line
+# a function of the CWD alone.
 REPO_ROOT="${1:-$(git rev-parse --show-toplevel 2>/dev/null || true)}"
 [ -n "$REPO_ROOT" ] || exit 0
 

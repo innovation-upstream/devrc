@@ -236,7 +236,33 @@ DEVRC_GIT_REPO_POINTERS=(
   GIT_SHALLOW_FILE                   # repo-scoped shallow list
   GIT_CONFIG                         # legacy: the file `git config` WRITES
 )
+# 🔴 AND GUARD 9's OWN SEAMS, for the same reason and measured the same way.
+# `DEVRC_GITENV_PROTECT` redirects the DETECTOR at a different repository and
+# `DEVRC_GITENV_MODE` decides whether it fails or merely reports. #683's audit
+# measured the first: `DEVRC_GITENV_PROTECT=":"` gave `protected-git-dirs=0`
+# and a GREEN run while the escaping test really created its branch, and
+# `=/nonexistent/x` gave `protected-git-dirs=1` — a marker line asserting
+# healthy coverage — over the same real mutation. One inherited variable
+# defeating every layer is the bug this whole guard exists for; leaving one
+# inside the fix was not acceptable. `testlib/gitenv.py` now REFUSES an
+# unresolvable value, and no runner passes one down.
+DEVRC_GITENV_CONTROL_VARS=(
+  DEVRC_GITENV_PROTECT               # which git dirs the detector watches
+  DEVRC_GITENV_MODE                  # enforce | report | auto
+)
+# What was actually SET before we cleared it — reported below beside the
+# constant list, because "here is the list I would have cleared" and "here is
+# what was really in this environment" are different claims and only the second
+# one can tell you an incident is in progress.
+DEVRC_GITENV_FOUND=""
+for _devrc_gitenv_var in "${DEVRC_GIT_REPO_POINTERS[@]}" "${DEVRC_GITENV_CONTROL_VARS[@]}"; do
+  if [ -n "${!_devrc_gitenv_var+set}" ]; then
+    DEVRC_GITENV_FOUND="${DEVRC_GITENV_FOUND}${DEVRC_GITENV_FOUND:+,}${_devrc_gitenv_var}"
+  fi
+done
+unset _devrc_gitenv_var
 unset "${DEVRC_GIT_REPO_POINTERS[@]}"
+unset "${DEVRC_GITENV_CONTROL_VARS[@]}"
 
 if [ -z "$ROOT" ]; then
   ROOT="$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel 2>/dev/null || true)"
@@ -1789,6 +1815,14 @@ SPOOL_SESSION_MARKER="spool(session)"
 SPOOL_CONTROL_SOURCE="devrc-spool-guard"
 SPOOL_CONTROL_OK="emitted"
 
+# 🔴 GUARD 9's marker, the same shape and pinned the same way against
+# `scripts/testlib/gitenv.py::SESSION_MARKER`. #683 declared this marker and
+# then never counted it, which left "this target loaded the detector and saw
+# nothing" indistinguishable from "this target never loaded the detector" — the
+# reassuring zero claude/RULES.md's positive-control rule is about. It is
+# counted per pytest target in `run_pytest`, and its absence is a FAILURE.
+GITENV_SESSION_MARKER="gitenv(session)"
+
 # Where the fallback lands, asked of `spool_emit` ITSELF with the variable
 # removed — never restated here. A second copy of the "…/activity/spool" layout
 # would agree with the first until the day the rule changed, and the trap would
@@ -1823,12 +1857,22 @@ echo "  fallback trap      =$SPOOL_TRAP_LOG"
 # The clearing itself happens at the TOP of this file (before ROOT is resolved —
 # see the GUARD 9 header there); this is only the announcement, printed here so
 # it sits beside GUARDS 7 and 8 where a reader looks for the run's isolation
-# summary. It reports the PAIR: the shell half cleared the pointers for EVERY
-# target including the non-pytest ones, and each pytest target additionally
-# loads the detector that names whichever test moves a ref.
+# summary.
+#
+# 🔴 IT REPORTS A REAL PAIR NOW. It used to print two CONSTANTS under the words
+# "the PAIR" — the ledger it would clear and the flag it would pass — neither of
+# which is a measurement, so the line read identically on a poisoned environment
+# and a clean one. `found-set` is what was actually in this environment when the
+# run started (the clearing itself happens at the TOP of this file, before ROOT
+# is resolved — see the GUARD 9 header there), and `none` there is the normal
+# case. A non-empty value on a machine nobody has instrumented is the single
+# most useful line in this output: it names the variable that would have
+# redirected the suite.
 echo "run-tests: git repo pointers cleared for this run (GUARD 9)"
-echo "  cleared     =${DEVRC_GIT_REPO_POINTERS[*]}"
-echo "  detector    =-p testlib.gitenv_plugin (per pytest target)"
+echo "  ledger      =${DEVRC_GIT_REPO_POINTERS[*]} ${DEVRC_GITENV_CONTROL_VARS[*]}"
+echo "  found-set   =${DEVRC_GITENV_FOUND:-none}"
+echo "  detector    =-p testlib.gitenv_plugin (per pytest target; its own"
+echo "               '$GITENV_SESSION_MARKER' line is counted per target below)"
 
 # "<target>|<sess-from>|<sess-to>|<trap-from>|<trap-to>|<iso-from>|<iso-to>" —
 # three line ranges per target, so every count below is attributed to the target
@@ -2262,6 +2306,26 @@ run_pytest() {
   _spool_account "$d"
   _nogit_account "$d"
   cat "$log"
+
+  # --- GUARD 9's POSITIVE CONTROL, per target -------------------------------
+  # The detector announces itself once per pytest session. Counting it is the
+  # only thing that separates "GUARD 9 ran and this repository did not move"
+  # from "GUARD 9 was never loaded here" — two states with byte-identical
+  # output otherwise, and the second is what #399 and #614 both shipped.
+  # `>= 1` rather than `== 1`: a target whose conftest ALSO re-exports the hooks
+  # legitimately prints it twice (two plugin registrations of the same module's
+  # functions), and that is coverage, not a defect.
+  local gitenv_markers
+  gitenv_markers="$(grep -ac "^$GITENV_SESSION_MARKER" "$log" || true)"
+  if [ "${gitenv_markers:-0}" -lt 1 ]; then
+    echo "run-tests: FATAL — GUARD 9's detector never announced itself for $d." >&2
+    echo "  Expected at least one '$GITENV_SESSION_MARKER …' line. Its absence means" >&2
+    echo "  the target ran WITHOUT the git-repo isolation detector, so a clean" >&2
+    echo "  result there is a claim about nothing. Check that '-p testlib.gitenv_plugin'" >&2
+    echo "  is still on this runner's pytest line." >&2
+    RESULTS+=("FAIL  $d (GUARD 9 marker absent)")
+    fail=1
+  fi
 
   # GUARD 4: parse pytest's summary line. `-q` emits it undecorated, e.g.
   #   "660 passed, 123 skipped in 15.10s"   /   "1 failed, 2 passed in 0.1s"

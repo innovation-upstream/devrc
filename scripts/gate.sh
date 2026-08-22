@@ -117,7 +117,19 @@ DEVRC_GIT_REPO_POINTERS=(
   GIT_SHALLOW_FILE                   # repo-scoped shallow list
   GIT_CONFIG                         # legacy: the file `git config` WRITES
 )
+# 🔴 AND GUARD 9's OWN SEAMS. `DEVRC_GITENV_PROTECT` redirects the DETECTOR at a
+# different repository and `DEVRC_GITENV_MODE` decides whether it fails or
+# merely reports; #683's audit measured `DEVRC_GITENV_PROTECT=":"` producing
+# `protected-git-dirs=0` and a GREEN run over a real escape, and
+# `=/nonexistent/x` producing a marker line that asserted coverage it did not
+# have. One inherited variable defeating every layer is the bug this guard
+# exists for. Owned by `testlib/gitenv.py::CONTROL_VARS`, pinned two-way.
+DEVRC_GITENV_CONTROL_VARS=(
+  DEVRC_GITENV_PROTECT               # which git dirs the detector watches
+  DEVRC_GITENV_MODE                  # enforce | report | auto
+)
 unset "${DEVRC_GIT_REPO_POINTERS[@]}"
+unset "${DEVRC_GITENV_CONTROL_VARS[@]}"
 
 if [ -z "$ROOT" ]; then
   ROOT="$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel 2>/dev/null || true)"
