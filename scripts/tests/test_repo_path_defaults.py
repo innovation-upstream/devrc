@@ -97,40 +97,51 @@ EMPTY_DEFAULT_SITES = (
 #: 🔴 READ-ONLY SITES OF THE SAME SHAPE, ledgered so the scan is complete in
 #: BOTH directions rather than silently blind to them. Each of these is a
 #: `${VAR:-$HOME/...}` repo path exactly like the guarded six — but every
-#: consumer only READS (`git -C "$repo" show`, or an age-key `[ -r ]`), so a
-#: set-but-empty value mis-targets a read and fails, rather than committing or
-#: fetching into the operator's clone. They are exempt from the guard, NOT from
-#: the accounting: if one ever gains a writing consumer it must move up into
-#: `EMPTY_DEFAULT_SITES`. Found by the audit of #716 — the original regex was
-#: narrow enough not to see them, which is the bug this ledger now closes.
-READ_ONLY_SITES = (
-    # `git -C "$homelab_repo" show origin/trunk:…` — a read. An empty $HOMELAB
-    # mis-targets that read and the caller returns 0 with telemetry off; it
-    # cannot fetch, commit or init.
-    ("scripts/initiatives/run-sync.sh",
-     'local homelab_repo="${HOMELAB:-${HOME}/workspace/homelab-talos}"'),
-    # Same shape, same read, plus an age-key `[ -r ]` probe.
-    ("scripts/collector/run-regrowth-check.sh",
-     'HOMELAB_REPO="${HOMELAB:-${HOME}/workspace/homelab-talos}"'),
-    # 🔴 These two were found by the WIDENED regex and had been pinned by
-    # nobody — not by the original ledger, and not by the audit that widened it.
-    # They are a kubeconfig FILE path, not a repo: consumed by `kubectl`, never
-    # a git target, so an empty $KUBECONFIG mis-targets a cluster read. Listed
-    # because the scan must be complete in both directions, and because their
-    # discovery is the evidence that the previous regex was too narrow.
-    ("scripts/initiatives/run-sync.sh",
-     'export KUBECONFIG="${KUBECONFIG:-${HOME}/workspace/homelab-talos/homelab-kubeconfig}"'),
-    ("scripts/collector/run-regrowth-check.sh",
-     'export KUBECONFIG="${KUBECONFIG:-${HOME}/workspace/homelab-talos/homelab-kubeconfig}"'),
-)
+#: 🔴 THE SCANNED FILE SET — DELIBERATELY THE THREE SCRIPTS THIS FILE GUARDS,
+#: AND NOTHING ELSE. Read `UNAUDITED_ELSEWHERE` below before you trust that.
+SCANNED_FILES = tuple(sorted({s[0] for s in EMPTY_DEFAULT_SITES}))
 
-#: 🔴 THE SCANNED FILE SET. The scan cannot be repo-wide without becoming a
-#: lint, so it is an explicit list — every file that today contains a site of
-#: either class. `test_the_scanned_file_set_covers_every_ledger_entry` pins it
-#: against both ledgers so a file cannot be dropped from the scan while its
-#: entries stay pinned.
-SCANNED_FILES = tuple(sorted(
-    {s[0] for s in EMPTY_DEFAULT_SITES} | {s[0] for s in READ_ONLY_SITES}))
+#: 🔴 WHAT THIS FILE DOES **NOT** COVER — stated because an earlier revision
+#: claimed the opposite and was wrong.
+#:
+#: That revision said the scan was "complete in both directions" and that "a
+#: further site cannot be added silently". Running this file's own regex over
+#: `git ls-files` finds **17 matches in 9 files**. Six of them are the guarded
+#: sites below; the rest are these, in NEITHER ledger and NOT scanned:
+#:
+#:   scripts/initiatives/run-sync.sh           HOMELAB, KUBECONFIG
+#:   scripts/collector/run-regrowth-check.sh   HOMELAB, KUBECONFIG
+#:   .zshrc                                    DEVRC_DIR
+#:   scripts/initiatives/run-viewer.sh
+#:   scripts/mail-actions/run-archive.sh
+#:   scripts/mail-triage
+#:   scripts/repo-cos/run-weekly.sh            (x2)
+#:   scripts/task-spec-drafter/drafter.sh
+#:
+#: 🔴 AT LEAST TWO OF THESE HAVE **WRITING** CONSUMERS and are therefore the
+#: same hazard class as the six guarded here, not a lesser one:
+#:   * `run-archive.sh` — `_db.py` issues UPDATE/INSERT and commits; `_minio.py`
+#:     calls `put_object`.
+#:   * `run-sync.sh`'s KUBECONFIG — `sync.py` runs CREATE TABLE, DROP VIEW,
+#:     DELETE FROM, INSERT and `conn.commit()` over that connection. An earlier
+#:     revision of THIS FILE ledgered it as read-only on the reasoning that
+#:     "kubectl reads"; that was wrong, and it is recorded here rather than
+#:     quietly corrected, because a mis-classification in a waiver list is worse
+#:     than an omission — it reads as "considered and cleared".
+#:
+#: They are out of scope for this change, which salvages the guards for three
+#: specific scripts. Widening the sweep repo-wide is a follow-up, and it is a
+#: real one: the hazard is identical.
+UNAUDITED_ELSEWHERE = (
+    "scripts/initiatives/run-sync.sh",
+    "scripts/collector/run-regrowth-check.sh",
+    ".zshrc",
+    "scripts/initiatives/run-viewer.sh",
+    "scripts/mail-actions/run-archive.sh",
+    "scripts/mail-triage",
+    "scripts/repo-cos/run-weekly.sh",
+    "scripts/task-spec-drafter/drafter.sh",
+)
 
 #: Any `${SOMETHING:-…$HOME…}` / `${…:-…~/…}` naming a repo path this repo's
 #: scripts then run git against.
@@ -164,39 +175,52 @@ def _sites_in(path: Path):
         if _HOME_DEFAULT_RE.match(ln)]
 
 
-def test_the_scanned_file_set_covers_every_ledger_entry():
-    """The scan is an explicit file list, so it can rot in the direction that
-    hides sites. Pin it against both ledgers, both ways."""
-    from_ledgers = sorted(
-        {s[0] for s in EMPTY_DEFAULT_SITES} | {s[0] for s in READ_ONLY_SITES})
-    assert list(SCANNED_FILES) == from_ledgers
-    for rel in SCANNED_FILES:
-        assert (REPO_ROOT / rel).is_file(), f"{rel} is scanned but does not exist"
+def test_the_unaudited_list_names_real_files_that_really_have_sites():
+    """🔴 A DOCUMENTED RESIDUAL THAT HAS ROTTED IS A LIE, so pin it.
+
+    `UNAUDITED_ELSEWHERE` is prose making a factual claim: these files contain
+    sites of this shape and nobody has classified them. If one gets guarded,
+    deleted or renamed, the claim silently becomes false and the follow-up it
+    exists to trigger never happens. So: each named file must exist, must still
+    contain at least one match, and must NOT be one of the scanned three.
+    """
+    for rel in UNAUDITED_ELSEWHERE:
+        p = REPO_ROOT / rel
+        assert p.is_file(), (
+            f"{rel} is listed as an unaudited site but does not exist. If it "
+            f"was renamed or deleted, update UNAUDITED_ELSEWHERE; if it was "
+            f"guarded, move it into EMPTY_DEFAULT_SITES.")
+        assert _sites_in(p), (
+            f"{rel} is listed as having an unguarded HOME-defaulting site, but "
+            f"the scan finds none — it was fixed, or the regex regressed.")
+        assert rel not in SCANNED_FILES, f"{rel} is both scanned and unaudited"
 
 
-def test_every_home_defaulting_repo_path_is_pinned_in_one_of_the_two_ledgers():
-    """🔴 BOTH WAYS, and across BOTH classes. A new site in neither ledger is a
-    new copy of the bug; a ledger entry naming no line is accounting that
-    describes nothing.
+def test_every_home_defaulting_site_IN_THE_SCANNED_FILES_is_pinned():
+    """🔴 BOTH WAYS, **within the three scripts this change guards**. A new site
+    in one of those files with no ledger entry is a new copy of the bug; a
+    ledger entry naming no line is accounting that describes nothing.
 
-    🔴 The read-only ledger is not a waiver list. It exists so that a site of
-    this shape whose consumer only READS is *recorded as considered* instead of
-    being invisible to the scan — the state the audit found this file in.
+    🔴 SCOPE, STATED HONESTLY. This is NOT a repo-wide guarantee, and an earlier
+    revision of this file wrongly claimed it was. The rest of the repo's sites
+    are named in `UNAUDITED_ELSEWHERE`, at least two of them with WRITING
+    consumers. A guard whose advertised reach exceeds its detector is how the
+    original false claim happened; do not widen this docstring without widening
+    `SCANNED_FILES`.
     """
     found = []
     for rel in SCANNED_FILES:
         for _, line in _sites_in(REPO_ROOT / rel):
             found.append((rel, line.strip()))
-    pinned = ([(f, line) for f, line, _ in EMPTY_DEFAULT_SITES]
-              + [(f, line) for f, line in READ_ONLY_SITES])
+    pinned = [(f, line) for f, line, _ in EMPTY_DEFAULT_SITES]
     assert sorted(found) == sorted(pinned), (
-        "the HOME-defaulting repo-path sites and the ledgers disagree.\n"
+        "the HOME-defaulting repo-path sites in the GUARDED scripts and "
+        "EMPTY_DEFAULT_SITES disagree.\n"
         f"  on disk: {sorted(found)}\n"
         f"  pinned : {sorted(pinned)}\n"
-        "Do NOT delete an entry to make this pass. If the new site's consumer "
-        "WRITES (fetch/commit/init/add), it belongs in EMPTY_DEFAULT_SITES and "
-        "needs a set-but-empty guard; if it only READS, add it to "
-        "READ_ONLY_SITES with that reason.")
+        "Do NOT delete an entry to make this pass — every one of these silently "
+        "resolves to the operator's own clone when its variable is set-but-EMPTY. "
+        "A new site here needs a set-but-empty guard AND a ledger entry.")
 
 
 def test_the_regex_sees_the_shapes_its_docstring_claims():
@@ -233,6 +257,66 @@ def test_the_regex_sees_the_shapes_its_docstring_claims():
         assert not _HOME_DEFAULT_RE.match(line), f"regex OVER-matched: {line!r}"
 
 
+def _strip_comments(text: str) -> str:
+    """Blank out `#` comments, line by line, preserving line structure.
+
+    🔴 NOT cosmetic. Without this the guard checks are satisfied by a guard that
+    exists only as a COMMENT — the delta re-audit deleted a whole guard, left it
+    commented out, and the test stayed green. `#` inside a quoted string is not
+    a comment, so quotes are tracked rather than doing a naive `split("#")`.
+    """
+    out = []
+    for raw in text.splitlines():
+        q = None
+        for i, ch in enumerate(raw):
+            if q:
+                if ch == q:
+                    q = None
+            elif ch in "\"'":
+                q = ch
+            elif ch == "#" and (i == 0 or raw[i - 1] in " \t"):
+                raw = raw[:i]
+                break
+        out.append(raw)
+    return "\n".join(out)
+
+
+def _guard_body(text: str, idx: int, var: str) -> str:
+    """The inside of the guard protecting the assignment at `idx` — bounded by
+    its OWN `if` and its OWN matching `fi`, with comments stripped.
+
+    🔴 The bound is the whole point. The first version of this helper split on
+    the last literal `if ` in a 25-line window and ran to the end of it, so an
+    `exit` in a trailing comment or in an unrelated statement AFTER the guard's
+    `fi` vouched for a guard that no longer stopped anything. Three mutants
+    walked it.
+    """
+    lines = _strip_comments(text[:idx]).splitlines()
+    cond = f'"${{{var}+set}}" = set' if var != "POSITIONAL" else '[ -z "${POSITIONAL[0]}" ]'
+    # The guard's own `if` = the last line at-or-before the condition that opens one.
+    start = None
+    for n in range(len(lines) - 1, max(-1, len(lines) - 26), -1):
+        if cond in lines[n]:
+            for m in range(n, max(-1, n - 5), -1):
+                if re.match(r"\s*if\b", lines[m]):
+                    start = m
+                    break
+            break
+    if start is None:
+        return ""
+    # Walk forward to the matching `fi`, counting nesting.
+    tail = lines[start:] + _strip_comments(text[idx:]).splitlines()
+    depth = 0
+    body = []
+    for ln in tail:
+        body.append(ln)
+        depth += len(re.findall(r"(?:^|\s|;)if\b", ln))
+        depth -= len(re.findall(r"(?:^|\s|;)fi\b", ln))
+        if depth <= 0 and len(body) > 1:
+            break
+    return "\n".join(body)
+
+
 @pytest.mark.parametrize(
     "rel,line,var", sorted(set(EMPTY_DEFAULT_SITES)),
     ids=[f"{f.split('/')[-1]}:{v}" for f, _, v in sorted(set(EMPTY_DEFAULT_SITES))])
@@ -255,7 +339,10 @@ def test_each_site_is_immediately_preceded_by_a_set_but_empty_guard(rel, line, v
         # The guard must be the NEAREST thing above the assignment, not somewhere
         # else in the file: 25 lines is generous for the comment block plus the
         # test, and small enough that a distant unrelated guard cannot satisfy it.
-        window = "\n".join(text[:idx].splitlines()[-25:])
+        # 🔴 COMMENT-STRIPPED. The re-audit deleted a guard outright, left it
+        # behind as a comment, and this check stayed green — the condition was
+        # "present" in prose. A commented guard is not a guard.
+        window = "\n".join(_strip_comments(text[:idx]).splitlines()[-25:])
         where = f"{rel}: occurrence {n}/{len(starts)} of `{line}`"
         if var == "POSITIONAL":
             assert '[ -z "${POSITIONAL[0]}" ]' in window, (
@@ -268,20 +355,32 @@ def test_each_site_is_immediately_preceded_by_a_set_but_empty_guard(rel, line, v
         # 🔴 A CONDITION IS NOT A GUARD — IT MUST STOP THE RUN.
         # MEASURED by the #716 audit: the "keep the message, drop the exit"
         # mutant SURVIVED at three of the six sites, because this test only ever
-        # asserted that the condition TEXT appeared. Demonstrated end to end —
-        # a mutated `commit.sh` that warned instead of dying went on to `git
-        # init` and commit inside a fake operator store while this suite
-        # reported 9 passed. The docstring below claimed the mutant was killed;
-        # it was killed at two sites and the sentence covered six. That is
-        # exactly "a guard's DESCRIPTION claims COVERAGE its body does not
-        # provide", and it is why the terminator is now asserted separately.
-        after = "\n".join(text[idx:].splitlines()[:1])
-        guard_body = window.rsplit("if ", 1)[-1] + after
-        assert re.search(r"\b(exit\s+\d+|die\b|return\s+\d+)", guard_body), (
-            f"{where}: the set-but-EMPTY condition is present but nothing in it "
-            f"STOPS the run — no `exit`, `die` or `return`. A guard that prints "
-            f"and falls through still resolves to the operator's own path, and "
-            f"is strictly worse than none because it reads as protection.")
+        # asserted that the condition TEXT appeared. Driven end to end — a
+        # mutated `commit.sh` that warned instead of dying went on to initialise
+        # a repository and commit inside a fake operator store while this suite
+        # reported 9 passed.
+        #
+        # 🔴 AND THE FIRST ATTEMPT AT THIS ASSERTION WAS ITSELF SPELLED, which
+        # the delta re-audit then walked three ways. It did
+        # `window.rsplit("if ", 1)[-1]`, which splits on the last literal `if `
+        # ANYWHERE in the window — prose included — and kept everything to the
+        # end, i.e. past the guard's own `fi`. So `exit` in a trailing comment,
+        # or an unrelated `|| exit 4` after the `fi`, satisfied it; and the
+        # condition half was satisfied by the whole guard existing only as a
+        # COMMENT. Fixing a spelled guard with a spelled guard.
+        #
+        # So: strip comments FIRST, find the guard's own `if` (the last one at
+        # or before the condition), and bound the body at its matching `fi`.
+        # Nothing outside the guard can now vouch for it.
+        body = _guard_body(text, idx, var)
+        assert re.search(r"(?:^|[;&|]|\bthen\b|\s)(exit\s+\d+|die\b|return\s+\d+)",
+                         body), (
+            f"{where}: the set-but-EMPTY condition is present but nothing INSIDE "
+            f"the guard STOPS the run — no `exit`, `die` or `return` between its "
+            f"`then` and its `fi`. A guard that prints and falls through still "
+            f"resolves to the operator's own path, and is strictly worse than "
+            f"none because it reads as protection.\n"
+            f"  guard body seen:\n{body}")
 
 
 @pytest.mark.parametrize("script,var", [(SHIP, "SHIP_REPO"), (DRIFT, "DRIFT_REPO")],
@@ -339,7 +438,17 @@ def test_an_empty_store_ARGUMENT_stops_commit_sh_instead_of_writing_the_real_sto
     """
     home = tmp_path / "home"
     store = home / ".claude" / "analyze-service-index"
-    store.mkdir(parents=True)
+    # 🔴 A SCOPE DIRECTORY IS REQUIRED FOR THIS TEST TO MEAN ANYTHING.
+    # Measured by the delta re-audit: `commit.sh` never initialises a repo at
+    # the store ROOT — it does so per SCOPE directory (`git init -q -b
+    # "$ASI_BRANCH" "$scope"`), and calls the root "deliberately not a repo".
+    # The first version of this test seeded only a root-level file, so the
+    # warn-mutant short-circuited at "no scope directories … nothing to do" and
+    # exited 0; the kill came from `returncode != 0` alone, and the two
+    # assertions billed as "THE POINT" could never fire for any mutation.
+    scope = store / "some-scope"
+    scope.mkdir(parents=True)
+    (scope / "entry.md").write_text("pre-existing\n")
     (store / "note.md").write_text("pre-existing\n")
     env = dict(os.environ)
     env.update(HOME=str(home), GIT_CONFIG_GLOBAL=str(tmp_path / "gc"))
@@ -349,12 +458,16 @@ def test_an_empty_store_ARGUMENT_stops_commit_sh_instead_of_writing_the_real_sto
     assert p.returncode != 0, (
         f"an EMPTY STORE argument did not stop commit.sh (rc {p.returncode}):\n{out}")
     assert "EMPTY" in out, f"it stopped, but not for this reason:\n{out}"
-    # 🔴 THE POINT: no repository was created in the operator's real store.
+    # 🔴 THE POINT, and now reachable: no repository was created in the
+    # operator's real store — at the SCOPE, which is where commit.sh inits.
+    assert not (scope / ".git").exists(), (
+        "commit.sh initialised a repository in "
+        "$HOME/.claude/analyze-service-index/some-scope despite being handed an "
+        "empty STORE argument")
     assert not (store / ".git").exists(), (
-        "commit.sh ran `git init` in $HOME/.claude/analyze-service-index "
-        "despite being handed an empty STORE argument")
-    assert sorted(p.name for p in store.iterdir()) == ["note.md"], (
-        f"the real store was modified: {sorted(p.name for p in store.iterdir())}")
+        "commit.sh initialised a repository at the store ROOT")
+    assert sorted(q.name for q in scope.iterdir()) == ["entry.md"], (
+        f"the real store's scope was modified: {sorted(q.name for q in scope.iterdir())}")
 
 
 @pytest.mark.parametrize("script,var", [(SHIP, "SHIP_REPO"), (DRIFT, "DRIFT_REPO")],
@@ -398,8 +511,12 @@ def test_an_unset_repo_override_still_defaults(tmp_path, script, var):
     # empty-value test asserts must be ABSENT. So assert its presence here: the
     # two arms now pin the same observable in opposite directions, and an early
     # exit on the unset path cannot satisfy both.
-    started = [ln for ln in out.splitlines()
-               if ln.startswith("===") or ln.lstrip().startswith("[")]
-    assert started, (
-        f"{script.name} with {var} UNSET never began operating on a host "
-        f"(rc {p.returncode}). The default path must proceed, not exit early:\n{out}")
+    # 🔴 PIN THE ACTUAL LINE, not a prefix class. The first version accepted any
+    # output line beginning `===` or `[`, and the re-audit walked it with a
+    # single `echo "[ship] preflight aborted"; exit 6` before the assignment —
+    # SURVIVED. Both scripts announce the local host as `=== local (<role>) ===`,
+    # so require exactly that.
+    assert re.search(r"^=== local \(\w+\) ===$", out, re.MULTILINE), (
+        f"{script.name} with {var} UNSET never reached the local host banner "
+        f"`=== local (<role>) ===` (rc {p.returncode}). The default path must "
+        f"proceed, not exit early:\n{out}")

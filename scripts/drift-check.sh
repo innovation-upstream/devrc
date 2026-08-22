@@ -359,15 +359,16 @@
 # is reading a timer's output, so the single number it hands to systemd must be
 # the worst thing found, or an un-pushed workbench could hide behind a merely
 # behind laptop. Severity order (worst first):
-#     8 > 17 > 14 > 13 > 18 > 6 > 4 > 3 > 12 > 15 > 10 > 16
+#     8 > 17 > 14 > 13 > 18 > 6 > 2 > 4 > 3 > 12 > 15 > 10 > 16
 # 🔴 THAT ORDER IS THE severity() TABLE, NOT THE DIGITS — it never was monotonic
 # (14 outranks 13 outranks 18 outranks 6 outranks 4), and 17 is not "less severe
 # than 16" because it is larger. Every code below 16 that is still free (5, 7, 9, 11) is
 # reserved to a ship.sh meaning this script does not take, so a new DRIFT code
 # has nowhere to go but upward; its rank is stated in severity() and here.
-# (6 is unreachable through this path today — the script exits 6 directly before
-# any per-host leg runs — but the order is documented for every code it owns,
-# and severity() ranks it rather than falling through to the unknown-code slot.)
+# (6 and 2 are both unreachable through this path today — the script exits each
+# directly, before any per-host leg runs — but the order is documented for every
+# code it owns, and severity() ranks them rather than letting them fall through
+# to the unknown-code slot, which would rank them 99, ABOVE rc 8.)
 # Per-host lines are ALWAYS printed for every host, whatever the code.
 #
 # Untracked files are counted and listed per host as INFORMATION only — they
