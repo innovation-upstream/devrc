@@ -15,9 +15,15 @@
 # DESIGN PRINCIPLES (fail in the SAFE direction):
 #   * GLOBAL-hook safe — no-op for every repo except devrc (self-detected).
 #   * Infra flakiness DEGRADES, never blocks — if the test ENV can't be prepared
-#     (offline, uncached, substituter hiccup, disk full, no nix-shell) we WARN
-#     loudly and allow the push. Only a genuine pytest failure (tests executed,
-#     >=1 failed) blocks — and only in enforce mode.
+#     (offline, uncached, substituter hiccup, disk full, no nix) we WARN loudly
+#     and allow the push. The runner signals this with exit 3.
+#   * 🔴 REPO-CONTENT guards BLOCK even though zero tests ran. run-tests.sh exits
+#     2 when its target list, floor table, launcher stubs or spool wiring are
+#     wrong — defects in the REPO, whose own messages warn that silencing them is
+#     "how a suite stops running while the gate goes green". This header used to
+#     say "only a genuine pytest failure blocks"; that was rewritten on
+#     2026-08-22 rather than left to be cited as authority for degrading them.
+#     So: exit 3 degrades, exit 2 blocks, a real test failure (exit 1) blocks.
 #   * Changed-files filter fails TOWARD running — any ambiguity (new branch we
 #     can't resolve, unparseable stdin, diff error) RUNS the suite.
 #
@@ -211,8 +217,8 @@ fi
 # file's header promises "Infra flakiness DEGRADES, never blocks", so it degrades.
 #
 # 🔴 rc 2 STILL BLOCKS, and the distinction is the whole point. A first version of
-# this degraded on rc 2 — but run-tests.sh has NINE `exit 2` sites and only four
-# are environmental; the rest are REPO-CONTENT guards (target list, floor table,
+# this degraded on rc 2 — but run-tests.sh has TEN abort sites and only six are
+# environmental; the rest are REPO-CONTENT guards (target list, floor table,
 # launcher stubs, spool wiring) whose own messages warn "do NOT delete the entry
 # to make this pass — that is how a suite stops running while the gate goes
 # green". Degrading on 2 produced exactly that, on the only tier that runs

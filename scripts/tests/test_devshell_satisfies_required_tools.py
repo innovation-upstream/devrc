@@ -147,9 +147,27 @@ def _fatal_block() -> str:
         "run-tests.sh. If it was reworded, update this parser -- do NOT delete "
         "the test, or the message goes back to being unguarded."
     )
-    end = src.find("exit 2", start)
-    assert end != -1, "found the FATAL but not its `exit 2`; the parser is broken"
-    return src[start:end]
+    # 🔴 TERMINATE ON ANY `exit <n>`, not a hardcoded code. GUARD 1 exited 2 until
+    # 2026-08-22, when environment preconditions moved to 3 so the pre-push hook
+    # could degrade on them. This parser still looked for `exit 2`, so it walked
+    # PAST GUARD 1 and stopped at GUARD 5's — widening the window from 17 lines to
+    # 1235. The `assert end != -1` tripwire below could not fire, because it DID
+    # find an `exit 2`, just the wrong one. Measured: with the window widened, both
+    # sentences this test exists to protect could be deleted from the real FATAL
+    # and re-planted as dead prose 20 lines further down, and the test PASSED.
+    #
+    # A guard keyed on a value that another file is free to change is a guard with
+    # a remote off-switch. Match the SHAPE instead.
+    m = re.search(r"^\s*exit \d+\s*$", src[start:], re.M)
+    assert m, "found the FATAL but not its `exit <n>`; the parser is broken"
+    end = start + m.start()
+    block = src[start:end]
+    # A window that spans more than this guard is the failure above, returning.
+    assert block.count("\n") < 60, (
+        f"the FATAL window is {block.count(chr(10))} lines — it has run past its "
+        f"own `exit` into a later guard, so every assertion on it is meaningless."
+    )
+    return block
 
 
 # ---------------------------------------------------------------------------

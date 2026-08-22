@@ -360,7 +360,35 @@ def test_guard1c_dep_list_matches_the_flake_interpreter():
     flake_deps = set(fm.group(1).split())
     assert flake_deps, "gatePyEnv parsed as EMPTY"
 
-    # The nixpkgs attribute is `pyyaml`; the importable module is `yaml`.
+    # 🔴 EVERY NAME GUARD 1c CHECKS MUST ACTUALLY IMPORT. A mapping table alone is
+    # the wrong instrument: it needs an entry per nixpkgs-attr/module mismatch and
+    # says nothing when one is missing. Measured — adding `pillow` to BOTH lists
+    # (the natural fix when the cross-check fires) passed this test, while the
+    # runner then failed with `missing : pillow`, because nixpkgs `pillow` imports
+    # as `PIL`. That is rc 3, which the pre-push hook DEGRADES on: a silent,
+    # permanent gate-off with a fully green suite. Same shape for
+    # beautifulsoup4→bs4, attrs→attr, protobuf→google.protobuf.
+    #
+    # The interpreter running this test IS gatePyEnv (under the devShell and under
+    # the flake check), so importability is checkable here directly, and it needs
+    # no table.
+    import importlib
+    unimportable = []
+    for dep in sorted(guard_deps):
+        try:
+            importlib.import_module(dep)
+        except Exception as exc:
+            unimportable.append(f"{dep} ({type(exc).__name__})")
+    assert not unimportable, (
+        f"GUARD 1c checks names that do not import from the gate interpreter: "
+        f"{unimportable}. The runner would exit 3 on every run, the hook would "
+        f"DEGRADE, and the only automatic gate would be silently off. Use the "
+        f"MODULE name, not the nixpkgs attribute (pyyaml→yaml, pillow→PIL)."
+    )
+
+    # The nixpkgs attribute is `pyyaml`; the importable module is `yaml`. The
+    # table only has to cover attrs actually present in gatePyEnv — the import
+    # assertion above is what catches an unmapped one.
     NIX_TO_MODULE = {"pyyaml": "yaml"}
     flake_modules = {NIX_TO_MODULE.get(d, d) for d in flake_deps}
 
@@ -638,4 +666,77 @@ def test_a_failing_run_never_exits_zero(tmp_path):
         pytest.fail(
             "could not force a RESULT: FAIL, so this invariant was never "
             f"exercised — the test would pass vacuously.\n{proc.stdout}"
+        )
+
+
+@pytest.mark.parametrize("rc,should_block", [
+    (0, False),   # suite passed
+    (1, True),    # tests ran and failed
+    (2, True),    # a REPO-CONTENT guard refused — blocks despite zero tests
+    (3, False),   # an ENVIRONMENT precondition — degrades
+])
+def test_the_hook_ACTUALLY_blocks_or_degrades_per_exit_code(tmp_path, rc, should_block):
+    """🔴 The behavioural half. Its sibling above reads the hook's SOURCE and
+    asserts it branches on 3 and not on 2 — a sound structural pin, but it does
+    not assert the branch reaches `degrade`, and nothing else in this repo ever
+    EXECUTES `githooks/tests-on-push.sh`; it is only ever `read_text()`.
+
+    So this drives the real hook against a stub runner at each code. The matrix is
+    the whole contract of the 2026-08-22 exit-code split.
+
+    🔴 THE POSITIVE CONTROL BELOW IS NOT OPTIONAL. A first version of this test
+    built a bare tmp repo; the hook's own self-detection (`flake.nix` must exist
+    and contain DEVRC) made it no-op and return 0, so the two ALLOW rows passed
+    VACUOUSLY while only the BLOCK rows failed. A matrix half of which cannot fail
+    is worse than no matrix. `stub runner` in the output is the proof the hook
+    actually reached the runner.
+    """
+    repo = tmp_path / "devrc"
+    (repo / "scripts").mkdir(parents=True)
+    (repo / ".git").mkdir()
+    write_exec(repo / "scripts" / "run-tests.sh", f'echo "stub runner"; exit {rc}\n')
+    # Self-detection: flake.nix present AND mentioning DEVRC.
+    (repo / "flake.nix").write_text('{ description = "DEVRC stub"; }\n')
+
+    # `nix` shim: run whatever follows --command, so the hook's own control flow
+    # is what is under test rather than a real devShell build.
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    write_exec(
+        bindir / "nix",
+        'shift_to_command() {\n'
+        '  while [ "$#" -gt 0 ]; do\n'
+        '    if [ "$1" = "--command" ]; then shift; exec "$@"; fi\n'
+        '    shift\n'
+        '  done\n'
+        '  exit 0\n'
+        '}\n'
+        'shift_to_command "$@"\n',
+    )
+
+    hook = repo / "tests-on-push.sh"
+    hook.write_text((REPO_ROOT / "githooks" / "tests-on-push.sh").read_text())
+    hook.chmod(0o755)
+
+    env = dict(os.environ)
+    env["TESTS_ON_PUSH"] = "on"
+    env["PATH"] = f"{bindir}{os.pathsep}{env.get('PATH', '')}"
+    proc = subprocess.run(["bash", str(hook), str(repo)], cwd=str(repo), env=env,
+                          capture_output=True, text=True, input="")
+    out = proc.stdout + proc.stderr
+
+    # POSITIVE CONTROL — without this the ALLOW rows pass on a no-op.
+    assert "stub runner" in out, (
+        f"the hook never reached the runner, so this row proves nothing "
+        f"(rc={rc}, exit={proc.returncode}).\n{out}"
+    )
+
+    if should_block:
+        assert proc.returncode != 0, (
+            f"rc={rc} must BLOCK the push, but the hook exited 0.\n{out}"
+        )
+    else:
+        assert proc.returncode == 0, (
+            f"rc={rc} must ALLOW the push (pass or degrade), got "
+            f"{proc.returncode}.\n{out}"
         )

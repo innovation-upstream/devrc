@@ -195,7 +195,7 @@ fi
 # the wrong thing entirely. The variable is inherited by every child this runner
 # starts, so unsetting it here is the one place that fixes it for all of them.
 unset CDPATH
-cd "$ROOT" || { echo "run-tests: cannot cd to ROOT=$ROOT" >&2; exit 2; }
+cd "$ROOT" || { echo "run-tests: cannot cd to ROOT=$ROOT" >&2; exit 3; }
 # 🔴 EXIT CODES: 3 = the ENVIRONMENT could not satisfy a precondition (this guard,
 # 1b, 1c). 2 = a REPO-CONTENT guard refused (target list, floor table, launcher
 # stubs, spool wiring). The distinction is load-bearing: `githooks/tests-on-push.sh`
@@ -1668,7 +1668,7 @@ if ! mkdir -p "$SPOOL_ISOLATED" "$SPOOL_TRAP"; then
   echo "  under $SPOOL_DIR. Refusing to run: without them the suites append" >&2
   echo "  real rows to ~/.local/state/activity/spool, which the collector ships" >&2
   echo "  to the production ClickHouse activity.events." >&2
-  exit 2
+  exit 3
 fi
 export ACTIVITY_SPOOL_DIR="$SPOOL_ISOLATED"
 export XDG_STATE_HOME="$SPOOL_TRAP"
