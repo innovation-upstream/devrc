@@ -136,6 +136,7 @@ is preserved verbatim in `docs/LAYOUT.md` (not auto-loaded, and stale by design)
 | `scripts/initiatives/` | `initiatives` | durable cross-repo initiative ledger + viewer + router + assistant |
 | `scripts/mail-actions/` | `mailbox` | email-automation layer over the self-hosted inbox (**separate from activity telemetry**) |
 | `scripts/repo-cos/` | `repo-cos` | weekly repo "chief-of-staff" proposal digest + reply-driven exclusions |
+| `scripts/check-clickup-addressed/` | `check-clickup-addressed` | did the work on a ClickUp ticket actually happen — reads session transcripts for completion signals (migrated out of datapacket-talos 2026-08-22) |
 | `nix/i3/`, `nix/graphical.nix`, `scripts/bar-status-poll` | `bar` | i3 + i3status-rust bar, count blocks, dunst toasts |
 | `scripts/opencode/` | `opencode` | dispatch a task to the headless opencode agent (`opencode-dispatch`), + its config/agents/guard plugin |
 
