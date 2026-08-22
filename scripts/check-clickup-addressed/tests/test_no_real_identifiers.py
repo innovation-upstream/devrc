@@ -2,12 +2,11 @@
 """🔴 THIS REPO IS PUBLIC. Nothing under this skill may carry a real ClickUp task ID or a
 real person's name.
 
-WHY IT EXISTS. The skill was migrated in from a PRIVATE repo on 2026-08-22 carrying, in
-`.py` and `.md` files, ten real workspace task IDs, two colleagues' names across fifteen
-sites, and verbatim ClickUp comment bodies those people had written. devrc's existing
-content gates (`scripts/tests/test_no_captured_text.py`,
-`scripts/tests/test_no_captured_markup.py`) cover JSON/JSONL/JSONC and `.html`/`.txt` — so
-this arrival path was watched by nothing, and the migration merged clean.
+WHY IT EXISTS. This skill was migrated in from a PRIVATE repo, where none of this
+mattered, and its fixtures are ClickUp-shaped by nature: task IDs, comment authors, comment
+bodies. devrc's existing content gates (`scripts/tests/test_no_captured_text.py`,
+`scripts/tests/test_no_captured_markup.py`) cover JSON/JSONL/JSONC and `.html`/`.txt`, so a
+`.py`/`.md` arrival is watched by nothing else and a migration merges clean either way.
 
 WHAT IT PINS, and why a LEDGER rather than a pattern. "Reject ids that look real" is not
 expressible: a synthetic ID and a real one are the same nine characters by construction
