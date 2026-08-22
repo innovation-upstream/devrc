@@ -243,7 +243,12 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
     --     is EMPTY ('') for every group this consumer has stored — it never
     --     captured names". That is FALSE. `upsert_group()` below persists the
     --     envelope's `groupName`, `test_a_stored_group_keeps_the_name_the_envelope_carried`
-    --     pins it, and the live store has populated names. The advice was right
+    --     pins it, and the live store has populated names — MEASURED 2026-08-21
+    --     against prod `signal.groups`, which holds 'Vetr app group' and
+    --     'Family Winnipeg'. (Stated as a measurement because an auditor
+    --     re-derived the opposite from `consumer.py`'s parse and doubted it;
+    --     reading the code cannot settle what the table contains.)
+    --     The advice was right
     --     for the wrong reason — which is worse than no reason, because a
     --     maintainer who checks the claim, finds names present, and concludes
     --     the whole warning is stale is one step from keying a filter on a
@@ -1318,6 +1323,37 @@ class SignalDB:
                     file=sys.stderr)
         elif _looks_like_uuid(recipient):
             dest_id = self.upsert_contact(signal_uuid=recipient)
+        elif _looks_like_bare_group_internal_id(recipient):
+            # 🔴 THE `mute`/`draft` MIX-UP, REFUSED RATHER THAN DOCUMENTED.
+            # `_looks_like_group_address` is a bare `group.` PREFIX test, so a
+            # bare `internal_id` — the form `mute` takes — has no prefix, is not
+            # a uuid, and used to fall through to `upsert_contact()`. That
+            # recreated EXACTLY the defect this whole change exists to remove: a
+            # phantom contact whose phone_number is a group id, `group_id` NULL,
+            # no warning, exit 0 — and a row that no mute can ever see, because
+            # `not_excluded()` keys on `group_id`. It was worse than the original
+            # bug, because SKILL.md had begun telling operators these two
+            # commands take different halves of the same value.
+            #
+            # Refusing is safe because the shapes cannot collide: a Signal
+            # recipient is `+E164` or a uuid, and `_decode_internal_id` rejects
+            # both (measured at both E.164 length extremes and for upper/lower
+            # uuids — see test_no_REAL_recipient_shape_is_mistaken_for_a_group_id).
+            # Only 24 or 44 characters of canonical base64 reach here.
+            # Hand back the exact string that WOULD have worked: a refusal that
+            # names the fix costs nothing and is the difference between a
+            # correction and a dead end.
+            from consumer import _decode_internal_id  # local import: no cycle
+
+            correct = _group_id_to_address(_decode_internal_id(recipient))
+            raise ValueError(
+                f"{recipient!r} is a bare group `internal_id` — that is what "
+                f"`mute` takes. `draft --to` needs the `id` form: {correct!r}. "
+                f"Drafting to the bare form would silently create a CONTACT "
+                f"whose phone number is a group id (the phantom-contact defect "
+                f"this refusal exists to prevent), store the message with "
+                f"group_id NULL, and put it beyond the reach of every mute."
+            )
         else:
             dest_id = self.upsert_contact(phone_number=recipient)
         ts = provisional_timestamp if provisional_timestamp is not None \
@@ -1787,6 +1823,39 @@ def _looks_like_group_address(recipient) -> bool:
     digits only), so there is no ambiguity to resolve.
     """
     return isinstance(recipient, str) and recipient.startswith(GROUP_ADDRESS_PREFIX)
+
+
+def _looks_like_bare_group_internal_id(recipient) -> bool:
+    """True for the `mute` form of a group id — bare base64, no `group.` prefix.
+
+    🔴 THIS EXISTS TO REFUSE, NOT TO RESOLVE. `mute` takes `internal_id` and
+    `draft --to` takes `id` (the same bytes wrapped in a second base64 layer
+    behind a `group.` prefix), so the two commands want opposite halves of one
+    value and an operator WILL cross them. Without this, the bare form fell
+    through to `upsert_contact(phone_number=...)` and recreated the phantom
+    contact — silently, exit 0, with `group_id` NULL and therefore invisible to
+    every mute.
+
+    🔴 WHY THIS CANNOT SWALLOW A REAL RECIPIENT. It reuses the strict operator
+    decoder, which requires a canonical base64 round-trip AND a 16- (GroupV1) or
+    32-byte (GroupV2) result. A Signal recipient is `+E164` or a uuid: E.164 is
+    at most 16 characters and never a multiple of 4, and a uuid's `-` separators
+    put it at 27 bytes when urlsafe-folded — all rejected. Measured for both
+    E.164 length extremes, upper- and lower-case uuids, a username and a display
+    name in `test_no_REAL_recipient_shape_is_mistaken_for_a_group_id`, which is
+    what keeps this claim true rather than merely argued. Callers must still
+    check `_looks_like_uuid` FIRST; this is the last branch before the
+    contact fallback for exactly that reason.
+    """
+    if not isinstance(recipient, str) or _looks_like_group_address(recipient):
+        return False
+    from consumer import _decode_internal_id  # local import: no cycle
+
+    try:
+        _decode_internal_id(recipient)
+        return True
+    except (ValueError, TypeError):
+        return False
 
 
 def _group_address_to_id(recipient: str) -> bytes:

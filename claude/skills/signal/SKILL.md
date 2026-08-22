@@ -113,11 +113,17 @@ the other, so read the table rather than guessing:
 | command | wants | shape | wrong one does what |
 |---|---|---|---|
 | `mute` / `unmute` | `internal_id` | bare base64, e.g. `zX3i…2IQ=` | **refuses** — `mute` will not mute 32 bytes that match nothing |
-| `draft --to` | `id` | `group.` + base64(base64(raw)) | **refuses** — not a canonical group address |
+| `draft --to` | `id` | `group.` + base64(base64(raw)) | **refuses**, naming the `id` you should have passed |
 
 `id` is `internal_id` wrapped in a `group.`-prefixed **second** base64 encoding. That is
 the literal string `/v2/send` addresses a group with, which is why `draft` takes it and
 `mute` — which writes a `BYTEA` key into `signal.excluded_groups` — does not.
+
+Both directions refuse, so crossing them is loud either way. That was **not** true until
+2026-08-22: `draft --to <bare internal_id>` used to be **accepted**, creating a phantom
+contact whose phone number was the group id, storing the message with `group_id` NULL and
+exiting 0 — a row no mute can ever see. It is now refused, and the refusal prints the
+`id` you should have passed.
 
 ⚠️ **The `draft` refusal only catches a MALFORMED address, never a WRONG one.** Any
 canonically-encoded 32 bytes decodes perfectly, so a well-formed id for a group that does
@@ -138,14 +144,32 @@ Measured live scope: **1 contact and 1 message** (`signal.contacts` id 92,
 `signal.messages` id 51). A reviewed backfill is queued separately — it is **not** part of
 the code change and there is no migration. To check whether any remain:
 
+🔴 **A phantom can wear either encoding, so do not filter on `'group.%'` alone.** The
+`group.`-prefixed form came from drafting with the `id`; the *bare base64* form came from
+drafting with the `internal_id`, which was accepted until 2026-08-22. A `LIKE 'group.%'`
+predicate is blind to the second, and would report a clean 0 while the rows sit there.
+
 ```bash
-# both should be 0 once the backfill has run; each row is a mute the filter cannot see
-psql -c "select count(*) from signal.contacts where phone_number like 'group.%'"
+# every phantom, BOTH encodings: a group-address contact, or one whose "phone number"
+# is 24/44 chars of canonical base64 (a bare internal_id) rather than +E164 or a uuid
+psql -c "select id, phone_number from signal.contacts
+         where phone_number like 'group.%'
+            or phone_number ~ '^[A-Za-z0-9+/]{22}==$'
+            or phone_number ~ '^[A-Za-z0-9+/]{43}=$'"
+
+# the drafts stranded against them — unlinked, and beyond every mute
 psql -c "select count(*) from signal.messages
          where is_outbound and send_state is not null and group_id is null
-           and dest_contact_id in (select id from signal.contacts
-                                   where phone_number like 'group.%')"
+           and dest_contact_id in (
+             select id from signal.contacts
+             where phone_number like 'group.%'
+                or phone_number ~ '^[A-Za-z0-9+/]{22}==$'
+                or phone_number ~ '^[A-Za-z0-9+/]{43}=$')"
 ```
+
+Both should be empty once the backfill has run. Measured 2026-08-21, only the
+`group.`-prefixed shape existed in prod (1 contact, 1 message) — the bare-base64 shape was
+reachable but had never been used, which is why the backfill covers one row and not two.
 
 🔴 **The filter lives in `SignalDB`'s read methods, so RAW `psql` BYPASSES IT COMPLETELY** —
 an application predicate cannot bind a statement typed at a shell. So the body-printing

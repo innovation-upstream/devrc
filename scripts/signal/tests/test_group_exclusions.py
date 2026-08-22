@@ -942,6 +942,84 @@ def test_draft_does_NOT_exit_3_on_a_GOOD_recipient(db, monkeypatch, capsys):
     assert db.conn.rows("SELECT count(*) AS n FROM signal.messages")[0]["n"] == 1
 
 
+def test_a_BARE_internal_id_is_REFUSED_not_turned_into_a_phantom_contact(db):
+    """🔴 The `mute`/`draft` mix-up — the defect this whole PR removes, by the back door.
+
+    `_looks_like_group_address` is a bare `group.` PREFIX test. A bare
+    `internal_id` — the form `mute` takes, and which SKILL.md had begun telling
+    operators about — has no prefix, is not a uuid, and fell through to
+    `upsert_contact(phone_number=...)`. Measured before this fix:
+
+        BARE internal_id -> ACCEPTED, dest_contact_id=2, group_id=None,
+                            group_created=False, stderr=''
+        contacts: [(1,'+15550000'), (2,'zX3i…2IQ=')]
+
+    A phantom contact, `group_id` NULL, NO warning, exit 0 — and a row no mute
+    can ever see, because `not_excluded()` keys on `group_id`. Worse than the
+    original bug, because the docs now point at it.
+    """
+    internal_id = base64.b64encode(GROUP_KEEP).decode()
+    assert not internal_id.startswith("group."), "fixture must be the BARE form"
+
+    with pytest.raises(ValueError) as exc:
+        db.draft_message(recipient=internal_id, body="should never be stored",
+                         self_number=SELF_NUMBER)
+
+    # The refusal must NAME THE FIX, or it is a dead end rather than a correction.
+    assert _group_address(GROUP_KEEP) in str(exc.value), (
+        f"the refusal does not tell the operator what to pass instead: {exc.value}")
+
+    # 🔴 And it must have written NOTHING. A refusal that already created the
+    # phantom is not a refusal.
+    assert db.conn.rows(
+        "SELECT count(*) AS n FROM signal.contacts "
+        "WHERE phone_number = ?", (internal_id,))[0]["n"] == 0, (
+        "the bare internal_id was stored as a contact's phone number — that IS "
+        "the phantom-contact defect")
+    assert db.conn.rows("SELECT count(*) AS n FROM signal.messages")[0]["n"] == 0
+    assert db.conn.rows("SELECT count(*) AS n FROM signal.groups")[0]["n"] == 0
+
+
+def test_a_bare_16_byte_GroupV1_internal_id_is_refused_too(db):
+    """The legacy id length is refused on the same footing — 16, not only 32.
+
+    A guard written for GroupV2 only would let the legacy form through into the
+    contact fallback, which is the same defect in a shape nobody tested.
+    """
+    with pytest.raises(ValueError):
+        db.draft_message(recipient=base64.b64encode(b"\x99" * 16).decode(),
+                         body="legacy", self_number=SELF_NUMBER)
+    assert db.conn.rows("SELECT count(*) AS n FROM signal.messages")[0]["n"] == 0
+
+
+@pytest.mark.parametrize("label,recipient", [
+    ("E.164 short", "+15550100"),
+    ("E.164 max length", "+123456789012345"),
+    ("uuid lower", "550e8400-e29b-41d4-a716-446655440000"),
+    ("uuid upper", "550E8400-E29B-41D4-A716-446655440000"),
+    ("signal username", "gyro.42"),
+    ("display name", "Team"),
+])
+def test_no_REAL_recipient_shape_is_mistaken_for_a_group_id(db, label, recipient):
+    """🔴 The blast radius of the refusal above, MEASURED rather than argued.
+
+    Refusing a whole input shape is only safe if no legitimate recipient can
+    land in it. The argument is that a Signal recipient is `+E164` or a uuid and
+    neither survives a canonical-base64 round-trip to 16 or 32 bytes — but that
+    is reasoning, and this is the measurement, at BOTH E.164 length extremes and
+    in both uuid cases. `Team` is here because it is valid base64 that decodes
+    to 3 bytes: it must be rejected by LENGTH, not by the alphabet.
+    """
+    assert not _signal_db._looks_like_bare_group_internal_id(recipient), (
+        f"{label} ({recipient!r}) would be refused as a group internal_id — "
+        f"the guard is too wide and has broken a legitimate recipient")
+    # …and it really does still draft, which the predicate alone cannot show.
+    draft = db.draft_message(recipient=recipient, body="ordinary recipient",
+                             self_number=SELF_NUMBER)
+    assert draft["dest_contact_id"] is not None
+    assert draft["group_id"] is None
+
+
 def test_the_SEND_recipient_is_derived_from_the_group_row_not_a_contact(db):
     """Criterion 3: what `send_approved()` hands `/v2/send` for a group draft.
 
@@ -1091,21 +1169,54 @@ def test_each_MUTE_PROBE_actually_calls_the_method_it_is_keyed_under(db):
             f"coverage at all.")
 
 
-def test_the_probe_pinning_guard_can_go_red():
-    """Negative control: the guard must reject a MIS-keyed probe.
+class _BlindRecordingReads(_RecordingReads):
+    """`_RecordingReads` with the recording removed — the BLINDING mutant.
 
-    Without this, the test above passing proves only that the current dict is
-    self-consistent — it would look identical if the proxy recorded nothing.
+    An audit produced exactly this: a proxy that still delegates, so every probe
+    returns real rows and every downstream assertion passes, while `called`
+    stays empty and the pinning test can no longer see anything.
     """
-    class _Fake:
-        called: list = []
 
-    spy = _RecordingReads.__new__(_RecordingReads)
-    spy._db = _Fake()
-    spy.called = ["search"]
-    assert spy.called != ["get_message"], (
-        "HARNESS BROKEN: a probe recorded as calling `search` compared equal to "
-        "the `get_message` expectation, so the pinning assertion cannot fail")
+    def __getattr__(self, name):                       # pragma: no cover - via test
+        return getattr(self._db, name)
+
+
+def test_the_probe_pinning_guard_can_go_red(db):
+    """🔴 Negative control that EXERCISES the recording path, not list equality.
+
+    The previous version of this test did `_RecordingReads.__new__`, hand-set
+    `spy.called = ["search"]`, and asserted `["search"] != ["get_message"]` — a
+    tautology about list comparison that never touched the proxy. Its docstring
+    claimed it ruled out "the proxy recorded nothing", which it structurally
+    could not: under an audit's BLINDING mutant, that control still PASSED while
+    the real pinning test went red. A negative control that cannot go red is
+    worse than none, because it stops anyone looking.
+
+    This runs the REAL probes through a blinded proxy and requires the pinning
+    assertion to become FALSE for every one of them.
+    """
+    db.upsert_group(group_id=GROUP_KEEP, name="")
+    draft = db.draft_message(recipient=_group_address(GROUP_KEEP),
+                             body="negative control fixture",
+                             self_number=SELF_NUMBER)
+
+    for name, probe in sorted(_MUTE_PROBES.items()):
+        blind = _BlindRecordingReads(db)
+        rows = probe(blind, draft, "negative control fixture")
+        # POSITIVE half: the probe still WORKS through the blind proxy, so the
+        # only thing this demonstrates is lost VISIBILITY, not a broken probe.
+        assert rows, (
+            f"the blinded proxy broke the {name} probe itself, so this control "
+            f"is measuring the wrong failure")
+        assert blind.called != [name], (
+            f"HARNESS BROKEN: the pinning assertion still holds for {name!r} "
+            f"against a proxy that records NOTHING — it is not reading `called` "
+            f"and would pass against any probe at all")
+
+    # …and the real proxy does record, or the two halves prove nothing together.
+    live = _RecordingReads(db)
+    _MUTE_PROBES["search"](live, draft, "negative control fixture")
+    assert live.called == ["search"], live.called
 
 
 def test_a_muted_group_draft_is_hidden_from_every_filtered_read(db):
