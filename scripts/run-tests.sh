@@ -496,6 +496,15 @@ HERMETIC_TARGETS=(
   scripts/initiatives/tests
   scripts/repo-cos/tests
   scripts/task-spec-drafter/tests
+  # Added 2026-08-22 with the check-clickup-addressed migration out of
+  # datapacket-talos, where no gate had ever run it — the suite was invoked by
+  # hand via its own tests/run_all.py. Hermetic by construction: every ClickUp
+  # call goes through a patched `subprocess.run`, and the transcript walkers get
+  # their CLAUDE_DIR reassigned to a tmp tree, so neither the network nor the
+  # real ~/.claude/projects is touched. run_all.py stays as the skill's own
+  # runner (it purges __pycache__ and scores an import failure as a FAILURE);
+  # pytest collects the same files.
+  scripts/check-clickup-addressed/tests
   # A FILE, not a dir, and deliberately so: scripts/claude-hooks/tests/ also
   # holds hand-rolled scripts that call main() at import and sys.exit(), which
   # pytest cannot collect. Naming the one pytest-collectable file keeps them
@@ -1295,6 +1304,16 @@ TARGET_FLOORS=(
   "scripts/initiatives/tests|745"
   "scripts/repo-cos/tests|315"
   "scripts/task-spec-drafter/tests|135"
+  # 2026-08-22, check-clickup-addressed arrives as a NEW target: 161 collected on
+  # the branch, agreeing with what its own tests/run_all.py reports (161 passed,
+  # 0 failed) — two runners, one number. Gate's own rule on the gate's own count:
+  #   _suggested_floor 161 = 161 - min(50, max(1, 161/20 = 8)) = 161 - 8 = 153.
+  # (155 came over from datapacket-talos; the +6 are the migration's own marker-path
+  # regression, the negative control that rejected the obvious directory fix, and the
+  # four an adversarial audit of the migration produced — the documented `$CCUA/...`
+  # invocation, the unmarked `--json` output, its end-to-end seam, and the
+  # header/marker single-source pin.)
+  "scripts/check-clickup-addressed/tests|153"
   "scripts/claude-hooks/tests/test_guard_core.py|1260"
   # 2026-08-13, next-step-nudge.py's suite arrives as a NEW target: 78 collected on the
   # branch. Gate's own count through the gate's own rule:
