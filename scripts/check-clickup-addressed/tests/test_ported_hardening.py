@@ -192,8 +192,8 @@ def test_keep_open_veto_reads_past_the_display_truncation():
     """The behavioural half of P3, on trunk's own veto: a refusal written after the 200-char
     boundary must still veto. Synthetic, built to the 868gx0bbb shape with the keep-open
     clause LAST — idiomatic for a status update."""
-    padding = ("search-tier P95 > 5s (Saturation Burst) fired and resolved repeatedly, "
-               "A=12.40 at 03:20. The clean sweep on the 3rd looks like a lucky snapshot "
+    padding = ("The queue-depth alert fired and resolved repeatedly overnight, 14 cycles "
+               "in three hours. The clean sweep on the 3rd looks like a lucky snapshot "
                "and the numbers below all come from the same window, so read them together. ")
     text = padding + "Still live, do not close."
     assert len(text) > 200, "fixture must exceed the truncation to test anything"
@@ -321,7 +321,7 @@ def test_widened_window_did_not_widen_the_close_it_trigger():
     padding = ("Weekly status. Throughput held flat across the window and the backlog drained "
                "on schedule; nothing here needs a decision from anyone this week, and the "
                "numbers below are all from the same 24h window so they can be read together. ")
-    text = padding + "search-tier P95 > 5s (Saturation Burst) fired and resolved repeatedly."
+    text = padding + "The queue-depth alert fired and resolved repeatedly overnight."
     assert len(padding) > 200, "the trigger phrase must sit past the display truncation"
 
     flags = check_addressed.disagreements([{

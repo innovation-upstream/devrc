@@ -36,8 +36,10 @@ SELF_RUN_MARKERS = (
     # Slash invocation of the skill.
     "<command-name>/check-clickup-addressed</command-name>",
     # Any Bash call into the pipeline, and the SKILL.md body itself once loaded. Also
-    # catches the sessions that BUILT this skill, whose test fixtures hardcode real task
-    # IDs (868gx1ccc, 868gx0aaa) next to mock completion text.
+    # catches the sessions that BUILT this skill, whose transcripts print task IDs next to
+    # mock completion text. (The committed fixtures are synthetic now — see
+    # tests/test_no_real_identifiers.py — but the transcripts already written are not, and
+    # they are what this marker is protecting the scorer from.)
     #
     # 🔴 THE MARKER IS A PATH AND THE CODE MOVED (2026-08-22): this literal is the
     # datapacket-talos layout `.claude/skills/check-clickup-addressed/scripts/`, kept because

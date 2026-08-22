@@ -407,8 +407,8 @@ def test_open_pr_cited_as_done_is_flagged():
 # to close in the first clause, and the word "resolved" in its alert-cycling sense several
 # clauses later. Those two facts are what the veto has to separate; the wording is invented.
 KEEP_OPEN_COMMENT = ("Still live, do not close. The clean sweep on the 3rd looks like a "
-                     "lucky snapshot. Dashboards tonight (the 5th): search-tier P95 > 5s "
-                     "(Saturation Burst) fired and resolved repeatedly, A=12.40 at 03:20")
+                     "lucky snapshot. Dashboards tonight (the 5th): the queue-depth alert "
+                     "fired and resolved repeatedly overnight, 14 cycles in three hours")
 
 
 def test_keep_open_comment_vetoes_the_close_flag():

@@ -177,7 +177,7 @@ plus one state where nothing disagrees and that is exactly the problem (4):
    reading "Resolved / recommend closing" over a ticket still at `to do` is flagged; that
    exact case (`868gx0aaa`, `to do`/urgent) is why the check exists. 🔴 **An explicit
    refusal to close VETOES that flag**: on 2026-08-20 an alert-cycling clause (a service
-   whose P95 alert *fired and **resolved** repeatedly*) tripped the keyword on `868gx0bbb`,
+   whose queue-depth alert *fired and **resolved** repeatedly*) tripped the keyword on `868gx0bbb`,
    whose opening clause refused closure outright — the report told the operator to close it. The
    reporter's own words outrank both the keyword scan and the transcripts.
    🔴 **The veto has TWO TIERS** — an absolute one was wrong in *both* directions (round 8;

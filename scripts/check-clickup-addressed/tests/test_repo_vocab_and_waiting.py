@@ -445,7 +445,7 @@ def test_round_four_flags_all_still_fire():
                  "clickup_status": "to do",
                  "newest_comment": {"date": NOW.strftime("%Y-%m-%d %H:%M"),
                                     "author": "Jordan Sample",
-                                    "snippet": "Still live, do not close. P95 > 5s fired and resolved repeatedly."},
+                                    "snippet": "Still live, do not close. the queue-depth alert fired and resolved repeatedly overnight."},
                  "completion": [], "open": []}
     joined = " ".join(check_addressed.disagreements([keep_open], now=NOW))
     assert "do NOT close" in joined, f"the round-3 keep-open veto stopped firing: {joined}"

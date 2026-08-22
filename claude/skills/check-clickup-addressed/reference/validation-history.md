@@ -316,7 +316,7 @@ way*. A false negative restores the confident-✅-over-a-live-ticket bug.
 Round 2's headline feature — flag a ticket whose newest comment reads as resolved — fired
 on `868gx0bbb`, telling the operator to close it. The comment, in shape (paraphrased):
 
-> **Still live, do not close.** … the search tier's P95 alert **fired and resolved
+> **Still live, do not close.** … the queue-depth alert **fired and resolved
 > repeatedly** overnight
 
 "resolved" there describes an *alert cycling*. No keyword can separate those two senses, so

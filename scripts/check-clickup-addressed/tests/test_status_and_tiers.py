@@ -38,7 +38,7 @@ spec2.loader.exec_module(check_addressed)
 
 TASK = "868gx0aaa"
 RESOLVED_COMMENT = "Resolved. Recommend closing."
-KEEP_OPEN_COMMENT = "Still live, do not close. P95 > 5s fired and resolved repeatedly."
+KEEP_OPEN_COMMENT = "Still live, do not close. the queue-depth alert fired and resolved repeatedly overnight."
 
 
 def _result(status_word, comment, transcript_status="likely_addressed"):
