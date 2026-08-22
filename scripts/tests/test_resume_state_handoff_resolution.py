@@ -930,7 +930,11 @@ def test_a_doc_matching_BOTH_globs_counts_as_one_candidate(tmp_path, stub_bin):
     repo = make_repo(tmp_path, docs=("handoff-HANDOFF.md",))
     out = run_resume(repo, stub_bin, "no-such-topic")
     assert handoff_line(out) == "handoff: handoff-HANDOFF.md"
-    assert gap_lines(out) == [], out
+    # The miss itself is reported; what must NOT appear is the discarded-choice
+    # clause, since this repo holds exactly one document.
+    gaps = gap_lines(out)
+    assert len(gaps) == 1, gaps
+    assert "newest of" not in gaps[0], gaps
 
 
 def test_the_FIRST_of_two_prose_paths_wins(tmp_path, stub_bin):
@@ -1110,15 +1114,62 @@ def test_the_two_implementations_TIE_BREAK_differently_and_that_is_recorded():
 # trains the reader to skip the GAPS block — which destroys the value of the gap
 # this change exists to add.
 # --------------------------------------------------------------------------- #
-def test_a_ONE_candidate_repo_does_not_warn_on_a_missed_slug(tmp_path, stub_bin):
-    """civitai-manager's exact shape, and the invocation resolve()'s own comment
-    blesses by name. One candidate means the fallback made no choice, discarded
-    nothing, and cannot move between runs — so there is nothing to report."""
-    repo = make_repo(tmp_path, docs=("SESSION-HANDOFF.md",))
-    out = run_resume(repo, stub_bin, "session")
-    assert handoff_line(out) == "handoff: SESSION-HANDOFF.md"
-    assert gap_lines(out) == [], out
-    assert "matches the handoff's claims" in " ".join(drift_lines(out)), out
+@pytest.mark.parametrize(
+    "docs,resolved,family",
+    [
+        # 🔴 THE BOUNDARY, BOTH SIDES. Keying the whole warning on the count made
+        # the family==1 row SILENT — a supplied topic, no match, a different
+        # document reconciled under "(none detected — live state matches the
+        # handoff's claims)". That is issue #684's own reproduction.
+        pytest.param(("handoff-alpha-2026-01-01.md", "SESSION-HANDOFF.md"),
+                     "handoff-alpha-2026-01-01.md", 1, id="family-1"),
+        pytest.param(("handoff-alpha-2026-01-01.md", "handoff-beta-2026-02-02.md"),
+                     "handoff-beta-2026-02-02.md", 2, id="family-2"),
+    ],
+)
+def test_a_slug_that_matches_NOTHING_always_warns(
+    tmp_path, stub_bin, docs, resolved, family
+):
+    """A supplied topic that resolved nothing is reported WHATEVER the count.
+
+    The count answers "did the fallback have to CHOOSE?" — a different question
+    from "did the caller ask for something the tool then overrode?". Only the
+    "newest of N … MOVES between runs" clause depends on it, because only that
+    clause is false when nothing was discarded.
+    """
+    repo = make_repo(tmp_path, docs=docs)
+    out = run_resume(repo, stub_bin, "no-such-topic-at-all")
+    assert handoff_line(out) == f"handoff: {resolved}"
+    gaps = gap_lines(out)
+    assert len(gaps) == 1, gaps
+    assert "no-such-topic-at-all" in gaps[0], gaps
+    assert "matches the handoff's claims" not in " ".join(drift_lines(out)), out
+    # …and the conditional clause appears on exactly the side where it is true.
+    if family >= 2:
+        assert f"newest of {family}" in gaps[0], gaps
+        assert "MOVES between runs" in gaps[0], gaps
+    else:
+        assert "newest of" not in gaps[0], gaps
+        assert "MOVES" not in gaps[0], gaps
+
+
+def test_the_slug_that_RESOLVES_and_the_no_argument_run_stay_silent(
+    tmp_path, stub_bin
+):
+    """THE CONTRACT the rule above must not swallow.
+
+    Warning unconditionally on a MISS is right; warning on a HIT, or on a run
+    that asked for nothing, would make the GAPS block permanently red and train
+    the reader to skip it. Both sides in one place so the pair cannot drift.
+    """
+    repo = make_repo(tmp_path, docs=("handoff-alpha-2026-01-01.md", NEWEST))
+    hit = run_resume(repo, stub_bin, "alpha")
+    assert handoff_line(hit) == "handoff: handoff-alpha-2026-01-01.md"
+    assert gap_lines(hit) == [], hit
+    noarg = run_resume(repo, stub_bin)
+    assert handoff_line(noarg) == f"handoff: {NEWEST}"
+    assert gap_lines(noarg) == [], noarg
+    assert "matches the handoff's claims" in " ".join(drift_lines(noarg)), noarg
 
 
 def test_a_TWO_candidate_repo_still_warns_and_says_how_many(tmp_path, stub_bin):
@@ -1166,7 +1217,12 @@ def test_a_MIXED_family_repo_counts_only_the_family_that_resolved(tmp_path, stub
     )
     out = run_resume(repo, stub_bin, "no-such-topic")
     assert handoff_line(out) == "handoff: handoff-alpha-2026-01-01.md"
-    assert gap_lines(out) == [], out
+    # The miss is still reported — what the family count controls is only the
+    # "newest of N … MOVES" clause, and here it would be a false statement.
+    gaps = gap_lines(out)
+    assert len(gaps) == 1, gaps
+    assert "newest of" not in gaps[0], gaps
+    assert "MOVES" not in gaps[0], gaps
 
 
 def test_the_gap_sentence_is_pinned_WHOLE(tmp_path, stub_bin):
@@ -1189,12 +1245,76 @@ def test_the_gap_sentence_is_pinned_WHOLE(tmp_path, stub_bin):
     assert len(gaps) == 1, gaps
     assert gaps[0] == (
         'requested "rewrite README.md then resume the listing work" — nothing in '
-        f"it resolved to a handoff doc under {resolved}/claudedocs, so the digest "
-        f"FELL BACK to the newest of 2 ({NEWEST}). Which one that is depends on "
-        "commit times and MOVES between runs, so nothing below is scoped to what "
-        "was asked for. Re-run naming the doc's path, or with no argument to take "
-        "newest deliberately."
+        f"it resolved to a handoff doc under {resolved}/claudedocs."
+        f" The digest FELL BACK to {NEWEST}, a DIFFERENT document from the one you"
+        " asked for, so nothing below is scoped to what was asked for."
+        " It is the newest of 2, and which one that is depends on commit times, so"
+        " it MOVES between runs."
+        " Re-run naming the doc's path, or with no argument to take newest"
+        " deliberately."
     )
+
+
+# A handoff body that names PRs the stubbed `gh` cannot answer for, so a run
+# gets a PR gap IN ADDITION to whatever the resolution produces. Defined here
+# rather than reusing PR_HANDOFF below, because a @parametrize decorator is
+# evaluated at IMPORT time and that constant is defined further down the file.
+PR_REFERENCING_BODY = (
+    "## Handoff\n"
+    "PR #4101 is OPEN and awaiting review. #4102 is also in-flight.\n"
+)
+
+
+@pytest.mark.parametrize(
+    "arg,docs,body,want",
+    [
+        pytest.param("no-such-topic", (WANTED, NEWEST), None, 1, id="slug-miss"),
+        pytest.param("PROSE_MISSING_PATH", (WANTED, NEWEST), None, 1, id="named-missing"),
+        pytest.param("PROSE_MISSING_PATH", ("SESSION-HANDOFF.md",), None, 1,
+                     id="named-missing-1"),
+        pytest.param("no-such-topic", ("SESSION-HANDOFF.md",), None, 1, id="slug-miss-1"),
+        pytest.param("no-such-topic", (), None, 1, id="nothing-to-fall-back-to"),
+        # 🔴 THE ROW THAT MAKES THE ASSERTION MEAN ANYTHING. Every row above
+        # yields exactly ONE gap, so a header hardcoded to `GAPS (1)` satisfies
+        # `declared == len(lines)` in all of them — measured: that mutant
+        # SURVIVED the whole suite. This doc also references PRs the stubbed gh
+        # cannot answer for, so the resolution gap and the PR gap stack and the
+        # count has to move off 1.
+        pytest.param("no-such-topic", (WANTED, NEWEST), PR_REFERENCING_BODY, 2, id="two-gaps"),
+    ],
+)
+def test_the_GAPS_header_count_equals_the_number_of_lines_printed(
+    tmp_path, stub_bin, arg, docs, body, want
+):
+    """🔴 THE HEADER IS EVIDENCE, so it has to agree with the body.
+
+    `!! GAPS (N)` is read as a count of findings — two audits of this PR used it
+    as evidence — so a header that can disagree with what is printed undermines
+    the block it introduces. Structurally N is `${#UNRECONCILED[@]}` and the body
+    is one `printf` per element, which is why this holds; the point of asserting
+    it is that the resolution paths must keep feeding ONE element per cause.
+
+    This is what a single cause emitting TWO near-duplicate lines looked like
+    from the outside, and why that was consolidated to one append site: the
+    reader cannot tell "two findings" from "one finding, printed twice", and the
+    cheapest reading of the difference is that the count is broken.
+    """
+    repo = make_repo(tmp_path, docs=docs, doc_body=body)
+    if arg == "PROSE_MISSING_PATH":
+        gone = repo / "claudedocs" / "handoff-gone-2026-01-01.md"
+        arg = f"resume it; handoff: {gone}"
+    out = run_resume(repo, stub_bin, arg)
+    lines = gap_lines(out)
+    banner = [ln for ln in drift_lines(out) if ln.startswith("!! GAPS")]
+    assert len(banner) == 1, drift_lines(out)
+    declared = int(re.search(r"GAPS \((\d+)\)", banner[0]).group(1))
+    assert declared == len(lines), f"header says {declared}, printed {len(lines)}: {lines}"
+    # POSITIVE CONTROL, in two parts. A zero on both sides satisfies the equality
+    # while proving nothing — and so does a suite in which the count is ALWAYS 1,
+    # which is why `want` is asserted per row rather than just `>= 1`.
+    assert declared == want, f"expected {want} gap(s), got {declared}: {lines}"
+    # …and no cause may print the same sentence twice.
+    assert len(set(lines)) == len(lines), lines
 
 
 # --------------------------------------------------------------------------- #

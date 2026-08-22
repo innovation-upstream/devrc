@@ -418,76 +418,57 @@ resolve(){
       HANDOFF=$(ls -t "$REPO"/claudedocs/*HANDOFF*.md 2>/dev/null | head -1)
       [ -n "$HANDOFF" ] && fam='*HANDOFF*.md'
     fi
-    # 🔴 A NAMED-BUT-MISSING HANDOFF IS ALWAYS WORTH SAYING, WHATEVER THE COUNT,
-    # and this must stay ORTHOGONAL to the >=2 rule below. Keyed on the count
-    # alone, a repo holding ONE handoff SWALLOWED an explicit-path miss
-    # entirely: the caller named a file, it was not there, the tool silently
-    # substituted a different document and printed the DRIFT all-clear. That is
-    # #684's exact harm in the case where the caller was MOST specific — and it
-    # was a NARROWING introduced by the very fix that added the count, which had
-    # warned here before. The count answers "did the fallback have to choose?";
-    # this answers "did the caller name something the tool then overrode?".
-    if [ -n "$named_missing" ]; then
-      UNRECONCILED+=("requested handoff \"$named_missing\" — NO SUCH FILE (renamed, moved, or in another checkout?). The digest did NOT reconcile the document you named; the \`handoff:\` line above says what it read instead, and it is a different document.")
-    fi
-    # 🔴 THE SAME RULE AS THE FALLBACK ABOVE, ONE LINE LOWER — and it was missing
-    # for a year. "A missed handoff is not a quiet failure" applies just as hard
-    # to reconciling the WRONG one: the digest prints the fallback's filename on
-    # the `handoff:` line as though that were the intent, and every block below
-    # is then correct about a document nobody asked for, DRIFT all-clear
-    # included. Measured 2026-08-21 (#684): a /resume naming
-    # handoff-app-listing-polish-and-coverage.md reconciled
-    # handoff-remote-write-duplicate-samples.md — a different initiative — and
-    # reported no drift. The requested doc was 67 lines stale vs origin/trunk,
-    # exactly what handoff_freshness exists to catch, and it was not caught,
-    # because freshness ran against the wrong file.
+    # 🔴 AN ARGUMENT THAT RESOLVED NOTHING ALWAYS WARNS. THE COUNT ONLY DECIDES
+    # WHETHER ONE EXTRA CLAUSE IS TRUE.
     #
-    # Worse than a wrong filename: the target is whatever is NEWEST at that
-    # instant, so it MOVES as other sessions land handoff commits. Two runs
-    # minutes apart resolved two different unrelated docs, and a reader
-    # double-checking reads the change as real drift.
+    # This is the rule the previous two rounds each applied to ONE input class
+    # and not the other, narrowing the warning both times:
     #
-    # Not a hard error, deliberately: the GIT/PR block is still true, and
-    # UNRECONCILED already downgrades the DRIFT all-clear (see main), so the
-    # false green is gone once this line exists. What was missing was never the
-    # digest — it was the caller being told which document it is about.
+    #   the count answers  "did the fallback have to CHOOSE?"
+    #   it cannot answer   "did the caller name something the tool overrode?"
     #
-    # 🔴 …BUT THE WARNING IS ABOUT AN UNATTRIBUTABLE CHOICE, NOT ABOUT THE MISS,
-    # AND THAT DISTINCTION IS LOAD-BEARING. The first version fired whenever the
-    # slug glob missed, which made it PERMANENTLY RED in exactly the repo the
-    # caps fallback was written for: civitai-manager holds one handoff,
-    # SESSION-HANDOFF.md, so `resume-state.sh session` — the invocation the
-    # comment above blesses by name — printed a GAPS banner and "NOT a clean
-    # bill of health" on EVERY run. A gate that is red on every run trains the
-    # reader to skip the GAPS block, which destroys the value of the gap this
-    # whole change exists to add.
+    # Keying the whole warning on the count made a one-handoff repo swallow an
+    # explicit-path miss (fixed by `named_missing`), and then — same shape, other
+    # class — swallow a SLUG that matched nothing whenever the resolving family
+    # held one file. That second one is issue #684's own reproduction, silent
+    # again: a supplied topic, no match, a different document reconciled under
+    # "(none detected — live state matches the handoff's claims)".
     #
-    # The harm in #684 was never "the slug missed". It was that `ls -t | head -1`
-    # DISCARDED other candidates and the digest did not say so — and which one
-    # survives depends on commit times, so it MOVES between runs. Where the
-    # family holds exactly one file there is no choice to make, nothing was
-    # discarded, the answer cannot move, and the digest names it on the
-    # `handoff:` line. So: warn when the fallback had to CHOOSE (>=2 candidates),
-    # or when it could not resolve anything at all.
-    if [ -n "$unresolved" ]; then
+    # So the miss is reported unconditionally, and the "newest of N … MOVES
+    # between runs" clause — which is only TRUE when something was discarded —
+    # is appended only when the resolving family holds >=2. That keeps the rule
+    # this block is built on: EVERY CLAUSE MUST BE TRUE OF EVERY RUN THAT
+    # REACHES IT. (An earlier message claimed "no .md path was quoted in it
+    # either", which was false whenever one was quoted and merely failed a
+    # filter; the test that "passed" did so only because `$arg` is echoed back.)
+    #
+    # A no-argument run sets neither flag and stays silent — there, newest IS
+    # the contract, and that is the whole reason this is not unconditional.
+    #
+    # ⚠ ONE APPEND SITE, ON PURPOSE. Two sites produced two near-duplicate lines
+    # for a single cause (the named path AND the generic "nothing resolved",
+    # both naming the same file), which reads as a duplicated gap and invites
+    # exactly the "is the count wrong?" question an audit then has to spend a
+    # round on. One cause, one line — and the `!! GAPS (N)` header cannot
+    # disagree with what is printed, because N is the array length and this is
+    # the only thing that grows it here.
+    if [ -n "$named_missing" ] || [ -n "$unresolved" ]; then
       # Count within the family that ACTUALLY RESOLVED (see `fam` above) — the
       # fallback never chooses across families, so the union would overstate.
-      local n_cand=0
+      local n_cand=0 lead rest moves=""
       [ -n "$fam" ] && n_cand=$(ls -t "$REPO"/claudedocs/$fam 2>/dev/null | grep -c .)
-      # 🔴 EVERY CLAUSE BELOW MUST BE TRUE OF EVERY RUN THAT REACHES IT. The
-      # first version asserted "no .md path was quoted in it either", which is
-      # FALSE whenever one was quoted and merely failed a filter — a trailing
-      # `.`, a markdown `](path)` link, a `.md` directory, a backslash-escaped
-      # path, or (now) a path outside claudedocs/. In a change about honest
-      # messaging an unguarded false sentence is the wrong shape, and the test
-      # that "passed" only did so because `$arg` is echoed back verbatim.
-      # What IS true on every such run: nothing in the argument resolved to a
-      # handoff doc. Say that, and nothing more.
-      if [ -z "$HANDOFF" ]; then
-        UNRECONCILED+=("requested \"$arg\" — nothing in it resolved to a handoff doc under $REPO/claudedocs, and there is none to fall back to. NOTHING was reconciled; the DRIFT section below is about no document at all.")
-      elif [ "$n_cand" -gt 1 ]; then
-        UNRECONCILED+=("requested \"$arg\" — nothing in it resolved to a handoff doc under $REPO/claudedocs, so the digest FELL BACK to the newest of $n_cand ($(basename "$HANDOFF")). Which one that is depends on commit times and MOVES between runs, so nothing below is scoped to what was asked for. Re-run naming the doc's path, or with no argument to take newest deliberately.")
+      if [ -n "$named_missing" ]; then
+        lead="requested handoff \"$named_missing\" — NO SUCH FILE (renamed, moved, or in another checkout?)."
+      else
+        lead="requested \"$arg\" — nothing in it resolved to a handoff doc under $REPO/claudedocs."
       fi
+      if [ -z "$HANDOFF" ]; then
+        rest=" NOTHING was reconciled; the DRIFT section below is about no document at all."
+      else
+        [ "$n_cand" -gt 1 ] && moves=" It is the newest of $n_cand, and which one that is depends on commit times, so it MOVES between runs."
+        rest=" The digest FELL BACK to $(basename "$HANDOFF"), a DIFFERENT document from the one you asked for, so nothing below is scoped to what was asked for.$moves Re-run naming the doc's path, or with no argument to take newest deliberately."
+      fi
+      UNRECONCILED+=("$lead$rest")
     fi
   fi
   local url
