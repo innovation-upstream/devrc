@@ -1060,9 +1060,22 @@ def focus_paths_from_text(text: str) -> tuple[str, ...]:
 def focus_window(repo: str | Path) -> FocusWindow:
     """The repo's newest handoff doc, as a path window. READ-ONLY, one file read.
 
-    Resolution order mirrors `scripts/resume-state.sh` (see `HANDOFF_GLOBS`), so
-    step 3 and step 4 of `/resume` cannot end up reconciling one initiative while
-    recalling against another. An absent or unreadable doc is an ORDINARY
+    Resolution order mirrors the NO-ARGUMENT chain of `scripts/resume-state.sh`
+    (see `HANDOFF_GLOBS`): lowercase family first, caps family second, newest
+    within each.
+
+    🔴 THAT IS A NARROWER GUARANTEE THAN THIS DOCSTRING USED TO CLAIM, and the
+    old wording — "so step 3 and step 4 of `/resume` cannot end up reconciling
+    one initiative while recalling against another" — was already false whenever
+    `/resume` was given an argument. This function takes no topic, so a run with
+    a topic slug reconciles `handoff-<slug>*.md` while recalling against the
+    NEWEST doc, which is a different initiative exactly when it matters. #684
+    (a prose argument carrying an explicit path) widens the same gap. Aligning
+    the two is a real fix and is NOT done here: it needs a topic parameter, a
+    decision about what a miss means on this side, and its own tests. Until then
+    this docstring states what the code does, not what would be nice.
+
+    An absent or unreadable doc is an ORDINARY
     outcome — most repos have no handoff at the moment they are resumed — and
     returns an empty window rather than raising: the caller's fallback is a real
     answer, not a degraded one.

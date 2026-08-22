@@ -14,11 +14,15 @@
 #   no arg      -> newest claudedocs/handoff-*.md in the repo of $PWD,
 #                  else newest claudedocs/*HANDOFF*.md (SESSION-HANDOFF.md &c.)
 #   slug        -> claudedocs/handoff-<slug>*.md in the repo of $PWD,
-#                  else the no-arg chain above — REPORTED AS A GAP, because
-#                  "newest" is only the contract when nothing was asked for
+#                  else the no-arg chain above — REPORTED AS A GAP when that
+#                  fallback had >1 candidate to choose from, because "newest" is
+#                  only the contract when nothing was asked for
 #   handoff path-> that file; the target repo is derived FROM the path. Also
 #                  matched when the path is quoted INSIDE a prose argument,
 #                  which is the form /resume passes through ("…; handoff: <p>")
+#                  — but ONLY for a token shaped like the handoff population
+#                  itself (claudedocs/handoff-*.md, claudedocs/*HANDOFF*.md).
+#                  A bare `README.md` in prose is NOT a handoff reference.
 #
 # v1 workload/alerts target datapacket (prod-kubeconfig at <repo>/prod-kubeconfig);
 # everywhere else it degrades to the (always-run) GIT/PR block.
@@ -248,19 +252,63 @@ REPO="" HANDOFF="" SLUG=""
 # (#684). The caller named the file. Reading it out is not a heuristic about
 # what they meant — it is the thing they said.
 #
-# Deliberately narrow: a whitespace-separated token that ends `.md` AND is an
-# existing file. Both halves matter. Without `.md` this would claim any word
-# that happens to name a file; without the `-f` test a doc that was renamed or
-# lives in another checkout would resolve to a path that isn't there, which is a
-# worse failure than the slug miss it replaces. First match wins — a prose
-# argument naming two docs is not a case this can adjudicate, and taking the
-# first is at least the one the caller wrote first.
+# 🔴 THE ACCEPTED TOKEN IS SCOPED TO THE HANDOFF POPULATION, NOT TO ".md", AND
+# THAT IS THE WHOLE GUARD. The first version of this function accepted any
+# existing `*.md` token, which turned #684's silent-wrong-document failure into
+# a DIFFERENT silent-wrong-document failure — worse, because it fires on
+# perfectly ordinary English:
+#
+#   resume-state.sh "rewrite the README.md section then resume the listing work"
+#     handoff: README.md
+#     DRIFT  (none detected — live state matches the handoff's claims)
+#
+# Measured, along with a backticked `docs/ARCHITECTURE.md`, a `keep.md` in a cwd
+# subdirectory, and every one of the nine DECOY_DOCS this module's own test suite
+# carries. And backticks are in the strip set below, so the fleet convention of
+# code-quoting a path in prose makes it MORE likely, not less.
+#
+# ⚠ NOT in that list, though the audit put it there: a bare `resume-state.sh
+# wanted.md` resolving a root `wanted.md` over a slug that would have matched.
+# Measured on all three revisions — main 732db793, #690 3b70baaa, and here — it
+# is identical, because `[ -f "$arg" ]` takes it first and always has. The scan
+# cannot shadow a slug: a SINGLE-token argument that exists has already been
+# claimed by the path branch, and one that does not exist fails the scan's own
+# `-f` test. Pinned by test_a_single_token_md_ARGUMENT_is_the_explicit_path_branch
+# so the correction stays checkable.
+#
+# 🔴 THE SAME FILE ALREADY RULES THIS OUT ONE SCREEN UP. `extract_branches`
+# disqualifies any token with a trailing file extension — "so `.md`/`.json`…
+# drop" — because "inventing one puts a false statement in front of someone
+# deciding what to do next". Harvesting from prose exactly what that guard
+# refuses to harvest is the same disease at a bigger blast radius: a branch
+# token costs one wrong DRIFT line, a handoff token costs the whole digest.
+#
+# So the token must name a member of the population resolve() itself globs, i.e.
+# match `subsystem_recall.HANDOFF_GLOBS` at its tail:
+#
+#   immediate parent directory  ==  claudedocs
+#   basename                    ==  handoff-*.md   or   *HANDOFF*.md
+#
+# 🔴 BOTH halves, not either. The auditor proposed OR; AND is strictly stronger
+# and costs nothing, because `claudedocs/` in these repos is mostly design and
+# audit docs — `SOME-DESIGN.md`, `SECURITY-AUDIT-*.md`, `HANDBOOK.md` — and this
+# module already carries them as DECOY_DOCS precisely because they must never
+# resolve as a handoff. Under OR, prose naming one of them would resolve it.
+# The uppercase glob is deliberately the caps-family one, so `HANDBOOK.md` (HAND,
+# not HANDOFF) stays out for the same reason it does in the fallback chain.
+#
+# The `-f` test stays: a doc that was renamed or lives in another checkout must
+# fall through to the warned fallback rather than resolve to a path that is not
+# there. FIRST match wins — a prose argument naming two docs is not a case this
+# can adjudicate, and the first is at least the one the caller wrote first.
+# (Pinned: `test_the_FIRST_of_two_prose_paths_wins`. A `break`->`continue`
+# mutant survived all 94 tests before that existed.)
 #
 # One layer of surrounding punctuation is stripped so `(…/x.md)`, `` `…/x.md` ``
 # and `…/x.md,` resolve; a token that survives with anything else attached is
 # left alone rather than guessed at.
 embedded_md_path(){
-  local tok hit="" noglob=""
+  local tok hit="" base dir noglob=""
   # ⚠ `for tok in $1` is UNQUOTED on purpose — that is the word split. It is also
   # a PATHNAME EXPANSION, and the subject is arbitrary prose: an argument
   # containing `*` would otherwise expand against the cwd and hand this loop a
@@ -270,9 +318,19 @@ embedded_md_path(){
   for tok in $1; do
     tok=${tok#[\`\'\"\(\[\<]}
     tok=${tok%[\`\'\"\)\]\>,\;]}
-    case "$tok" in
-      *.md) [ -f "$tok" ] && { hit="$tok"; break; } ;;
-    esac
+    base=${tok##*/}
+    dir=${tok%/*}
+    # ⚠ A token with no `/` leaves `dir` EQUAL TO THE TOKEN rather than empty.
+    # That is deliberately NOT special-cased: the only slash-less token whose
+    # `dir` can pass the test below is the literal `claudedocs`, and its
+    # `base` is `claudedocs` too, which the second test rejects. A
+    # `[ "$dir" = "$tok" ] && dir=""` line was written here first and then
+    # DELETED — mutating it away survived all 115 tests, i.e. it guarded
+    # nothing, and a guard that reads as load-bearing while doing nothing is
+    # worse than its absence.
+    case "$dir" in */claudedocs|claudedocs) ;; *) continue ;; esac
+    case "$base" in handoff-*.md|*HANDOFF*.md) ;; *) continue ;; esac
+    [ -f "$tok" ] && { hit="$tok"; break; }
   done
   [ -n "$noglob" ] && set +f
   [ -n "$hit" ] || return 1
@@ -346,11 +404,44 @@ resolve(){
     # UNRECONCILED already downgrades the DRIFT all-clear (see main), so the
     # false green is gone once this line exists. What was missing was never the
     # digest — it was the caller being told which document it is about.
+    #
+    # 🔴 …BUT THE WARNING IS ABOUT AN UNATTRIBUTABLE CHOICE, NOT ABOUT THE MISS,
+    # AND THAT DISTINCTION IS LOAD-BEARING. The first version fired whenever the
+    # slug glob missed, which made it PERMANENTLY RED in exactly the repo the
+    # caps fallback was written for: civitai-manager holds one handoff,
+    # SESSION-HANDOFF.md, so `resume-state.sh session` — the invocation the
+    # comment above blesses by name — printed a GAPS banner and "NOT a clean
+    # bill of health" on EVERY run. A gate that is red on every run trains the
+    # reader to skip the GAPS block, which destroys the value of the gap this
+    # whole change exists to add.
+    #
+    # The harm in #684 was never "the slug missed". It was that `ls -t | head -1`
+    # DISCARDED other candidates and the digest did not say so — and which one
+    # survives depends on commit times, so it MOVES between runs. Where the
+    # family holds exactly one file there is no choice to make, nothing was
+    # discarded, the answer cannot move, and the digest names it on the
+    # `handoff:` line. So: warn when the fallback had to CHOOSE (>=2 candidates),
+    # or when it could not resolve anything at all.
     if [ -n "$unresolved" ]; then
-      if [ -n "$HANDOFF" ]; then
-        UNRECONCILED+=("requested \"$arg\" — no claudedocs/handoff-<that>*.md in $REPO, and no .md path was quoted in it either; FELL BACK to the newest handoff ($(basename "$HANDOFF")), which is a different initiative unless it happens not to be. Nothing below reconciles what was asked for. Re-run naming the doc's path, or with no argument to take newest deliberately.")
-      else
-        UNRECONCILED+=("requested \"$arg\" — no claudedocs/handoff-<that>*.md in $REPO, no .md path quoted in it, and no fallback handoff to degrade to. NOTHING was reconciled.")
+      # The two globs the chain above actually uses. `sort -u` because a file can
+      # match BOTH (claudedocs/handoff-HANDOFF.md), and double-counting one file
+      # would make a one-candidate repo warn.
+      local n_cand
+      n_cand=$(ls -t "$REPO"/claudedocs/handoff-*.md "$REPO"/claudedocs/*HANDOFF*.md \
+                 2>/dev/null | sort -u | grep -c .)
+      # 🔴 EVERY CLAUSE BELOW MUST BE TRUE OF EVERY RUN THAT REACHES IT. The
+      # first version asserted "no .md path was quoted in it either", which is
+      # FALSE whenever one was quoted and merely failed a filter — a trailing
+      # `.`, a markdown `](path)` link, a `.md` directory, a backslash-escaped
+      # path, or (now) a path outside claudedocs/. In a change about honest
+      # messaging an unguarded false sentence is the wrong shape, and the test
+      # that "passed" only did so because `$arg` is echoed back verbatim.
+      # What IS true on every such run: nothing in the argument resolved to a
+      # handoff doc. Say that, and nothing more.
+      if [ -z "$HANDOFF" ]; then
+        UNRECONCILED+=("requested \"$arg\" — nothing in it resolved to a handoff doc under $REPO/claudedocs, and there is none to fall back to. NOTHING was reconciled; the DRIFT section below is about no document at all.")
+      elif [ "$n_cand" -gt 1 ]; then
+        UNRECONCILED+=("requested \"$arg\" — nothing in it resolved to a handoff doc under $REPO/claudedocs, so the digest FELL BACK to the newest of $n_cand ($(basename "$HANDOFF")). Which one that is depends on commit times and MOVES between runs, so nothing below is scoped to what was asked for. Re-run naming the doc's path, or with no argument to take newest deliberately.")
       fi
     fi
   fi

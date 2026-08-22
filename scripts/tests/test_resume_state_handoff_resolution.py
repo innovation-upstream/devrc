@@ -602,13 +602,19 @@ def test_a_prose_path_that_does_NOT_exist_is_not_taken(tmp_path, stub_bin):
 
 
 def test_a_non_md_file_named_in_prose_is_not_taken_as_the_handoff(tmp_path, stub_bin):
-    """ADVERSARIAL — pins the `*.md` half.
+    """ADVERSARIAL — pins the extension half of the shape test.
 
     Without it, any token that happens to name an existing file wins. The bait
-    must therefore EXIST and NOT end .md: `README.md` could not tell the two
-    halves apart, and a name that is simply absent is rejected by the `-f` test
-    instead, which would make this vacuous. `notes.txt` is tracked at the repo
-    root, which is the cwd of the run.
+    must EXIST and NOT end .md, and a name that is simply absent is rejected by
+    the `-f` test instead, which would make this vacuous. `notes.txt` is tracked
+    at the repo root, which is the cwd of the run.
+
+    🔴 This docstring used to say "`README.md` could not tell the two halves
+    apart" and leave it there — and that set-aside was the defect the audit of
+    #690 found: nothing covered `README.md`, and the first version of
+    `embedded_md_path` resolved it. The README class is now covered directly, by
+    `test_a_bare_md_token_in_prose_is_not_a_handoff_reference` and its four
+    siblings below. Do not delete this note without reading them.
     """
     repo = make_repo(tmp_path, docs=(WANTED, NEWEST), files=("notes.txt",))
     assert handoff_line(run_resume(repo, stub_bin, "resume notes.txt please")) == (
@@ -620,15 +626,43 @@ def test_a_star_in_the_argument_is_split_not_GLOBBED(tmp_path, stub_bin):
     """ADVERSARIAL — the word split is an unquoted `$1`, so it is also a PATHNAME
     EXPANSION unless globbing is off.
 
-    With globbing on, `*` expands against the cwd (the repo root, which tracks
-    README.md) and the loop is handed a directory listing out of which a stray
-    .md resolves as "the doc the caller named". Nothing else in the suite can
-    see this: every other fixture argument is glob-free.
+    🔴 THE GLOB MUST BE ABLE TO PRODUCE A TOKEN THE SHAPE TEST WOULD ACCEPT, or
+    this test is vacuous. It was: the original spelling used a bare `*`, which
+    expanded to `README.md` — and once the shape test started rejecting
+    `README.md` on its own merits, deleting `set -f` SURVIVED the whole suite
+    while this test went on passing. A guard that keeps passing for a NEW reason
+    has stopped guarding; only the mutation battery could see it.
+
+    `claudedocs/*` is the spelling that still bites: it expands to real
+    `claudedocs/handoff-*.md` paths, every one of which passes both halves of
+    the shape test. Alphabetically first is ALPHA, which is deliberately not the
+    newest — so a globbing implementation resolves ALPHA and this fails.
     """
-    repo = two_initiative_repo(tmp_path)
-    assert handoff_line(run_resume(repo, stub_bin, "resume the * work")) == (
-        f"handoff: {NEWEST}"
+    repo = make_repo(tmp_path, docs=("handoff-alpha-2026-01-01.md", WANTED, NEWEST))
+    out = run_resume(repo, stub_bin, "resume the claudedocs/* work")
+    assert handoff_line(out) != "handoff: handoff-alpha-2026-01-01.md", out
+    assert handoff_line(out) == f"handoff: {NEWEST}", out
+
+
+def test_a_handoff_shaped_name_OUTSIDE_claudedocs_is_not_taken(tmp_path, stub_bin):
+    """ADVERSARIAL — pins the parent-directory half, which the basename half
+    otherwise makes redundant. Deleting it SURVIVED the whole suite.
+
+    It is not redundant, and this is the case that shows why: a handoff-SHAPED
+    name outside `claudedocs/` is accepted without it — and because the path
+    branch derives `$REPO` from the doc's own directory, a `/tmp/handoff-x.md`
+    quoted in prose would retarget the ENTIRE digest away from the cwd's repo.
+    Keeping the scan inside the repo's own convention bounds that.
+
+    A caller who really does keep a handoff elsewhere still has the explicit
+    path form, which takes any filename at all.
+    """
+    repo = make_repo(
+        tmp_path, docs=(WANTED, NEWEST), files=("docs/handoff-notes-2026-05-05.md",)
     )
+    bait = repo / "docs" / "handoff-notes-2026-05-05.md"
+    out = run_resume(repo, stub_bin, f"resume; handoff: {bait}")
+    assert handoff_line(out) == f"handoff: {NEWEST}", out
 
 
 def test_an_explicit_path_still_beats_a_path_found_in_prose(tmp_path, stub_bin):
@@ -653,6 +687,283 @@ def test_an_explicit_path_still_beats_a_path_found_in_prose(tmp_path, stub_bin):
     out = run_resume(repo, stub_bin, str(doc))
     assert handoff_line(out) == "handoff: PICK ME.md"
     assert gap_lines(out) == [], out
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE README CLASS — a `.md` token in prose is NOT a handoff reference
+#
+# The first version of `embedded_md_path` accepted any EXISTING `*.md` token,
+# which converted #684's silent-wrong-document failure into a different one that
+# fires on ordinary English. Measured on the shipped branch:
+#
+#   resume-state.sh "rewrite the README.md section then resume the listing work"
+#     handoff: README.md
+#     DRIFT  (none detected — live state matches the handoff's claims)
+#
+# The token must now name a member of the population resolve() itself globs —
+# parent directory `claudedocs`, basename `handoff-*.md` or `*HANDOFF*.md`. Each
+# case below is RED on the shipped branch and green here.
+#
+# `make_repo` tracks README.md at the repo root, which is the cwd of the run, so
+# the first case needs no extra fixture — the bait is what every repo already
+# has, which is exactly why the defect was reachable.
+# --------------------------------------------------------------------------- #
+def test_a_bare_md_token_in_prose_is_not_a_handoff_reference(tmp_path, stub_bin):
+    """THE HEADLINE CASE. `README.md` exists in every repo this tool runs in."""
+    repo = two_initiative_repo(tmp_path)
+    out = run_resume(
+        repo, stub_bin, "rewrite the README.md section then resume the listing work"
+    )
+    assert handoff_line(out) != "handoff: README.md", out
+    assert handoff_line(out) == f"handoff: {NEWEST}"
+    # …and because the argument did not resolve, it degrades LOUDLY.
+    assert gap_lines(out), out
+
+
+def test_a_backticked_md_path_outside_claudedocs_is_not_a_handoff_reference(
+    tmp_path, stub_bin
+):
+    """Backticks are in the strip set, and code-quoting a path is the fleet's
+    prose convention — so the convention made the defect MORE likely, not less.
+    `subsystem_recall` harvests only backticked spans for exactly this reason.
+
+    ⚠ NO COMMA AFTER THE CLOSING BACKTICK. The first draft wrote "`…md`," and
+    passed at the shipped commit for an INCIDENTAL reason — the strip takes one
+    character per side, so the token kept its backtick, failed `*.md`, and was
+    rejected by accident rather than by the rule under test. Green for the wrong
+    reason is the whole failure mode this round is about.
+    """
+    repo = make_repo(tmp_path, docs=(WANTED, NEWEST), files=("docs/ARCHITECTURE.md",))
+    out = run_resume(repo, stub_bin, "see `docs/ARCHITECTURE.md` then resume")
+    assert handoff_line(out) == f"handoff: {NEWEST}", out
+
+
+def test_an_md_token_in_the_cwd_subdir_is_not_a_handoff_reference(tmp_path, stub_bin):
+    """Run from a SUBDIRECTORY, where a relative `.md` token resolves against a
+    directory that is not the repo root at all."""
+    repo = make_repo(tmp_path, docs=(WANTED, NEWEST), files=("sub/keep.md",))
+    out = run_resume(repo, stub_bin, "resume keep.md work", cwd=repo / "sub")
+    assert handoff_line(out) == f"handoff: {NEWEST}", out
+
+
+def test_a_single_token_md_ARGUMENT_is_the_explicit_path_branch(tmp_path, stub_bin):
+    """CHARACTERISATION, and a CORRECTION to the audit — not a regression test.
+
+    The audit listed "a root `wanted.md` shadowing a resolvable slug" alongside
+    the README cases as damage from the prose scan. Measured on all three
+    revisions with the same fixture, it is not:
+
+        main 732db793   handoff: wanted.md
+        #690 3b70baaa   handoff: wanted.md
+        this branch     handoff: wanted.md
+
+    `[ -f "$arg" ]` — the explicit-path branch, unchanged since long before
+    #684 — takes a single-token argument that names an existing file, and that
+    is the documented `handoff path` form. The prose scan cannot be responsible
+    for it and never reaches it: for a SINGLE-token argument that exists, the
+    path branch has already won, and one that does NOT exist fails the scan's
+    own `-f` test. So the scan can shadow no slug that would otherwise resolve.
+
+    Pinned here so the claim is checkable rather than argued: the slug
+    `wanted.md` genuinely globs `claudedocs/handoff-wanted.md-plan.md`, and the
+    root file still wins.
+    """
+    repo = make_repo(
+        tmp_path,
+        docs=("handoff-wanted.md-plan.md", NEWEST),
+        files=("wanted.md",),
+    )
+    out = run_resume(repo, stub_bin, "wanted.md")
+    assert handoff_line(out) == "handoff: wanted.md", out
+    assert gap_lines(out) == [], out          # it RESOLVED; nothing to warn about
+
+
+def test_a_stray_md_token_IN_PROSE_does_not_shadow_the_fallback(tmp_path, stub_bin):
+    """The reachable half of that concern: a MULTI-token argument, where the
+    stray `.md` is not the whole argument and the path branch never fires.
+
+    On the shipped branch `wanted.md` was accepted and became the handoff. Now
+    it is rejected, the argument resolves nothing, and the run degrades LOUDLY
+    to the newest rather than quietly to a file that is not a handoff at all.
+    """
+    repo = make_repo(tmp_path, docs=(WANTED, NEWEST), files=("wanted.md",))
+    out = run_resume(repo, stub_bin, "resume the wanted.md work please")
+    assert handoff_line(out) == f"handoff: {NEWEST}", out
+    assert gap_lines(out), out
+
+
+@pytest.mark.parametrize("doc", DECOY_DOCS)
+def test_a_decoy_doc_NAMED_IN_PROSE_is_not_a_handoff_reference(
+    tmp_path, stub_bin, doc
+):
+    """Why the shape test is parent-dir AND basename, not OR.
+
+    The audit proposed `claudedocs/` OR handoff-shaped. Under OR, every one of
+    these nine resolves from prose — and this module already carries them as
+    DECOY_DOCS precisely because they must never resolve as a handoff. They live
+    IN claudedocs/; only the basename rule excludes them. `HANDBOOK.md` and
+    `SHORTHAND-NOTES.md` are the ones that matter most: HAND, not HANDOFF.
+    """
+    repo = make_repo(tmp_path, docs=(WANTED, NEWEST, doc))
+    arg = f"resume; see claudedocs/{doc} for background"
+    assert handoff_line(run_resume(repo, stub_bin, arg)) == f"handoff: {NEWEST}", doc
+
+
+def test_the_uppercase_family_form_DOES_resolve_from_prose(tmp_path, stub_bin):
+    """POSITIVE CONTROL for the shape test's second glob.
+
+    Without it the whole rule could be `handoff-*.md` and every case above would
+    still pass — a filter that rejects everything is not the goal. This is the
+    civitai-manager shape, quoted in prose.
+    """
+    repo = make_repo(tmp_path, docs=("SESSION-HANDOFF.md", NEWEST))
+    arg = f"resume that work; handoff: {repo / 'claudedocs' / 'SESSION-HANDOFF.md'}"
+    assert handoff_line(run_resume(repo, stub_bin, arg)) == "handoff: SESSION-HANDOFF.md"
+
+
+def test_a_dot_is_required_before_md(tmp_path, stub_bin):
+    """ADVERSARIAL — `handoff-*.md` -> `handoff-*md` survived the whole suite.
+
+    `.mmd` is a mermaid diagram and ends in the letters `md`; it is a real thing
+    to keep beside a handoff. Nothing else here can see the missing dot.
+    """
+    repo = make_repo(tmp_path, docs=(WANTED, NEWEST))
+    bait = repo / "claudedocs" / "handoff-diagram.mmd"
+    bait.write_text("graph TD;\n")
+    out = run_resume(repo, stub_bin, f"resume; see {bait} for the shape")
+    assert handoff_line(out) == f"handoff: {NEWEST}", out
+
+
+def test_a_DIRECTORY_named_like_a_handoff_is_not_taken(tmp_path, stub_bin):
+    """ADVERSARIAL — pins `-f` against `-e`.
+
+    A directory can be named `claudedocs/handoff-thing.md`, and it satisfies
+    every shape rule; only the regular-file test excludes it. Under `-e` the run
+    would resolve a directory as its handoff and every later block would read it.
+    """
+    repo = make_repo(tmp_path, docs=(WANTED, NEWEST))
+    bait = repo / "claudedocs" / "handoff-adirectory-2026-04-04.md"
+    bait.mkdir()
+    out = run_resume(repo, stub_bin, f"resume; handoff: {bait}")
+    assert handoff_line(out) == f"handoff: {NEWEST}", out
+    assert gap_lines(out), out
+
+
+def test_a_doc_matching_BOTH_globs_counts_as_one_candidate(tmp_path, stub_bin):
+    """ADVERSARIAL — pins the `sort -u` in the candidate count.
+
+    `handoff-HANDOFF.md` matches `handoff-*.md` AND `*HANDOFF*.md`, so a naive
+    concatenation counts one file twice, crosses the >1 threshold, and warns in a
+    repo that has exactly one handoff — reintroducing the permanently-red gate
+    the count exists to prevent. The comment in resume-state.sh claims this
+    explicitly; nothing checked it.
+    """
+    repo = make_repo(tmp_path, docs=("handoff-HANDOFF.md",))
+    out = run_resume(repo, stub_bin, "no-such-topic")
+    assert handoff_line(out) == "handoff: handoff-HANDOFF.md"
+    assert gap_lines(out) == [], out
+
+
+def test_the_FIRST_of_two_prose_paths_wins(tmp_path, stub_bin):
+    """ADVERSARIAL — `break` -> `continue` (last match wins) survived all 94
+    tests of the shipped branch, so the "First match wins" contract stated in
+    the function's own comment was asserted NOWHERE.
+
+    Both tokens are valid handoff references, so the shape test cannot decide
+    this; only the loop's exit can.
+    """
+    repo = make_repo(tmp_path, docs=(WANTED, "handoff-second-2026-03-03.md", NEWEST))
+    first = repo / "claudedocs" / WANTED
+    second = repo / "claudedocs" / "handoff-second-2026-03-03.md"
+    out = run_resume(repo, stub_bin, f"resume {first} and maybe {second}")
+    assert handoff_line(out) == f"handoff: {WANTED}", out
+
+
+def test_a_prose_handoff_path_BEATS_a_resolvable_slug(tmp_path, stub_bin):
+    """PRECEDENCE, stated so it is a decision rather than an accident.
+
+    The prose scan runs before the slug glob. When the token is a genuine
+    handoff reference that is right — a path is more specific than a topic — but
+    it is a choice, and an unpinned choice is one someone reorders by accident.
+    """
+    repo = make_repo(tmp_path, docs=("handoff-alpha-2026-01-01.md", WANTED, NEWEST))
+    doc = repo / "claudedocs" / WANTED
+    out = run_resume(repo, stub_bin, f"alpha work; handoff: {doc}")
+    assert handoff_line(out) == f"handoff: {WANTED}", out
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE GAP IS ABOUT AN UNATTRIBUTABLE CHOICE, NOT ABOUT THE MISS
+#
+# The first version warned whenever the slug glob missed, which made it
+# PERMANENTLY RED in the very repo the caps fallback exists for: civitai-manager
+# holds one handoff, so `resume-state.sh session` printed a GAPS banner and "NOT
+# a clean bill of health" every single run. A gate that is red on every run
+# trains the reader to skip the GAPS block — which destroys the value of the gap
+# this change exists to add.
+# --------------------------------------------------------------------------- #
+def test_a_ONE_candidate_repo_does_not_warn_on_a_missed_slug(tmp_path, stub_bin):
+    """civitai-manager's exact shape, and the invocation resolve()'s own comment
+    blesses by name. One candidate means the fallback made no choice, discarded
+    nothing, and cannot move between runs — so there is nothing to report."""
+    repo = make_repo(tmp_path, docs=("SESSION-HANDOFF.md",))
+    out = run_resume(repo, stub_bin, "session")
+    assert handoff_line(out) == "handoff: SESSION-HANDOFF.md"
+    assert gap_lines(out) == [], out
+    assert "matches the handoff's claims" in " ".join(drift_lines(out)), out
+
+
+def test_a_TWO_candidate_repo_still_warns_and_says_how_many(tmp_path, stub_bin):
+    """The other side of the same boundary — measured at 1 and at 2, because a
+    rule that depends on a count is only pinned if both sides of it are."""
+    repo = two_initiative_repo(tmp_path)
+    gaps = gap_lines(run_resume(repo, stub_bin, "no-such-topic"))
+    assert gaps, "two candidates and no warning"
+    assert "newest of 2" in " ".join(gaps), gaps
+
+
+def test_the_candidate_count_spans_BOTH_globs(tmp_path, stub_bin):
+    """ADVERSARIAL — counting only `handoff-*.md` SURVIVED the whole suite.
+
+    This repo's two handoffs are BOTH caps-family, so a lowercase-only count
+    returns 0, never crosses the threshold, and the warning silently stops
+    firing in exactly the repos the caps fallback was written for. The fallback
+    genuinely chose between two docs here; the count has to see both.
+    """
+    repo = make_repo(tmp_path, docs=("HANDOFF-old-2026-01-01.md", "SESSION-HANDOFF.md"))
+    out = run_resume(repo, stub_bin, "no-such-topic")
+    assert handoff_line(out) == "handoff: SESSION-HANDOFF.md"
+    gaps = gap_lines(out)
+    assert gaps, "two caps-family candidates and no warning"
+    assert "newest of 2" in " ".join(gaps), gaps
+
+
+def test_the_gap_sentence_is_pinned_WHOLE(tmp_path, stub_bin):
+    """🔴 THE ARTIFACT UNDER TEST IS PROSE, so a guard on keywords is walkable by
+    rewording. Pin the entire normalised string.
+
+    The sentence this replaced claimed "no .md path was quoted in it either" —
+    FALSE on this very fixture, where one was quoted and merely failed a filter.
+    That claim survived review because the test only checked that `$arg` was
+    echoed back, which is true of any sentence at all. A cosmetic reword now
+    fails here; that is the price of a machine-readable claim.
+    """
+    repo = two_initiative_repo(tmp_path)
+    out = run_resume(repo, stub_bin, "rewrite README.md then resume the listing work")
+    # $REPO as the SCRIPT resolved it (git toplevel), not as the fixture spells
+    # it — a symlinked tmpdir would otherwise fail this on the path alone.
+    resolved = [ln for ln in out.splitlines() if ln.startswith("# repo:")][0]
+    resolved = resolved.split("# repo:", 1)[1].split("slug:")[0].strip()
+    gaps = gap_lines(out)
+    assert len(gaps) == 1, gaps
+    assert gaps[0] == (
+        'requested "rewrite README.md then resume the listing work" — nothing in '
+        f"it resolved to a handoff doc under {resolved}/claudedocs, so the digest "
+        f"FELL BACK to the newest of 2 ({NEWEST}). Which one that is depends on "
+        "commit times and MOVES between runs, so nothing below is scoped to what "
+        "was asked for. Re-run naming the doc's path, or with no argument to take "
+        "newest deliberately."
+    )
 
 
 # --------------------------------------------------------------------------- #
