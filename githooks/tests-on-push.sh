@@ -19,9 +19,15 @@
 #     the push. 🔴 TWO DISJOINT mechanisms, deliberately not conflated: THIS
 #     file's `degrade()` handles the env-can't-be-built case BEFORE the runner
 #     is invoked at all; the runner's own exit 3 covers its environment
-#     preconditions (GUARDs 1/1b/1c, a failed `cd $ROOT`, the spool `mkdir`).
+#     preconditions (GUARDs 1b/1c, a failed `cd $ROOT`, the spool `mkdir`, and
+#     GUARD 1 ONLY when run outside a sanctioned gate env).
 #     Saying "the runner signals this with exit 3" sent people looking for a
 #     runner message that was never printed.
+#     🔴 GUARD 1 is no longer purely environmental: its input REQUIRED_TOOLS is
+#     REPO CONTENT, so since devrc#705 it exits 2 (BLOCK) when DEVRC_GATE_ENV=1
+#     — i.e. the env already supplies everything `gateTools` declares and the
+#     tool is still missing, which means the repo asked for something nothing
+#     supplies. It is the one guard whose code depends on the CAUSE.
 #   * 🔴 REPO-CONTENT guards BLOCK even though zero tests ran. run-tests.sh exits
 #     2 when its target list, floor table, launcher stubs or spool wiring are
 #     wrong — defects in the REPO, whose own messages warn that silencing them is
@@ -258,18 +264,38 @@ if [ "$run_rc" -eq 0 ]; then
   exit 0
 fi
 
-# 🔴 rc 3 is an ENVIRONMENT precondition abort (run-tests.sh GUARDs 1/1b/1c): by
-# construction ZERO tests ran, and the fault is in the CALLER, not the repo. This
-# file's header promises "Infra flakiness DEGRADES, never blocks", so it degrades.
+# 🔴 rc 3 is an ENVIRONMENT precondition abort (run-tests.sh GUARDs 1b/1c, a
+# failed `cd $ROOT`, the spool `mkdir`, and GUARD 1 when run outside a gate env):
+# by construction ZERO tests ran, and the fault is in the CALLER, not the repo.
+# This file's header promises "Infra flakiness DEGRADES, never blocks", so it
+# degrades.
 #
 # 🔴 rc 2 STILL BLOCKS, and the distinction is the whole point. A first version of
-# this degraded on rc 2 — but run-tests.sh has TEN abort sites and only six are
-# environmental; the rest are REPO-CONTENT guards (target list, floor table,
-# launcher stubs, spool wiring) whose own messages warn "do NOT delete the entry
-# to make this pass — that is how a suite stops running while the gate goes
-# green". Degrading on 2 produced exactly that, on the only tier that runs
-# automatically: this repo has no CI and no branch protection. The runner now
-# exits 3 for the environment cases so the two can be told apart.
+# this degraded on rc 2 — but run-tests.sh has ELEVEN abort sites, six `exit 3`
+# and five `exit 2`; the exit-2 ones are REPO-CONTENT guards (target list, floor
+# table, launcher stubs, spool wiring) whose own messages warn "do NOT delete the
+# entry to make this pass — that is how a suite stops running while the gate goes
+# green". Degrading on 2 produced exactly that, on the only tier that BLOCKS a
+# push. The runner exits 3 for the environment cases so the two can be told apart.
+#
+# 🔴 GUARD 1 appears in BOTH lists — since devrc#705 its code depends on the CAUSE
+# (DEVRC_GATE_ENV=1 -> repo defect -> 2; unset -> caller defect -> 3), because its
+# input REQUIRED_TOOLS is repo content while its usual failure is environmental.
+# So "which guard fired" no longer determines the code; do not re-derive the
+# mapping from the guard number alone.
+#
+# 🔴 A Tekton PR gate (`tekton/devrc-pytests`, `tekton/devrc-nodetests`) DOES now
+# run on PRs — the older "no CI" claim here was true when written and is not now.
+# It runs `nix build .#checks.x86_64-linux.<leg>` and does NOT enter the
+# devShell, so it is armed by checks.pytests's OWN DEVRC_GATE_ENV export — not
+# by the shellHook this hook relies on. The two exports are not redundant.
+# (The nodetests leg carries no marker and needs none: no DEVRC_GATE_ENV, no
+# exit 3 in its runner.)
+# Its red is advisory — `main`'s protection requires a review but NOT status
+# checks (`required_status_checks` -> 404, measured 2026-08-22) — which is why
+# this hook is still the only tier that blocks A PUSH. (Precisely: `main` also
+# requires 1 approving review, which blocks a MERGE — so "the only tier that
+# blocks" unqualified is wrong. The push is what this hook governs.)
 #
 # Verified in the other direction too: `fail` is only ever assigned 0 or 1 and the
 # script ends `exit "$fail"`, so a genuine pytest failure can never surface as 2

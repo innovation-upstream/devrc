@@ -54,12 +54,33 @@ Behaviour, all failing in the **safe direction**:
   - the hook's own `degrade()`, **before the runner is ever invoked** — this is
     the offline/substituter/devShell-build case;
   - the runner exiting **3**, for its own environment preconditions (GUARDs
-    1/1b/1c, a failed `cd $ROOT`, the spool `mkdir`).
+    1b/1c, a failed `cd $ROOT`, the spool `mkdir`, and GUARD 1 **only when run
+    outside a sanctioned gate env**).
 
   🔴 A REPO-CONTENT guard (runner exit **2** — target list, floor table,
   launcher stubs, spool wiring) **BLOCKS** even though zero tests ran: those are
-  defects in the repo, and this hook is the only automatic gate (no CI, no
-  branch protection). So: exit 1 blocks, exit 2 blocks, exit 3 degrades.
+  defects in the repo. So: exit 1 blocks, exit 2 blocks, exit 3 degrades.
+
+  🔴 **GUARD 1 is in both lists.** Its input `REQUIRED_TOOLS` is repo content,
+  but its usual failure is environmental — so since devrc#705 it classifies by
+  **cause**: `DEVRC_GATE_ENV=1` (set by the devShell's `shellHook` and by
+  `checks.pytests`) means the environment already supplies everything
+  `gateTools` declares, so a still-missing tool is a repo defect → **exit 2,
+  blocks**; unset means the caller simply isn't in the gate env → **exit 3,
+  degrades**. Before that, a typo in `REQUIRED_TOOLS` aborted with 3 and the
+  push went through with zero tests run.
+
+  🔴 A Tekton PR gate (`tekton/devrc-pytests`, `tekton/devrc-nodetests`) now
+  runs on PRs; the older "no CI" claim here was true when written and is not
+  now. It runs `nix build .#checks.x86_64-linux.<leg>` and does **not** enter
+  the devShell, so it is armed by `checks.pytests`'s own `DEVRC_GATE_ENV`
+  export rather than the `shellHook` this hook uses — the two are not
+  redundant. (The `nodetests` leg carries no marker and needs none.)
+  Its red is advisory (`main`'s protection requires a review but **not** status
+  checks — `required_status_checks` → 404, measured 2026-08-22) — which is why
+  this hook remains the only tier that blocks **a push**. (`main` also requires
+  1 approving review, which blocks a *merge* — so the unqualified "only tier
+  that blocks" would be wrong.)
 - **Escape hatch** — `DEVRC_SKIP_TESTS=1 git push …` skips the gate for one push
   regardless of mode (the flake check / CI still enforce the hermetic subset).
 
