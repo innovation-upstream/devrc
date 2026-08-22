@@ -35,6 +35,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = ROOT / "scripts"
 SCRIPT = SCRIPTS / "analyze-service-index" / "commit.sh"
@@ -2391,3 +2393,204 @@ def test_the_bind_list_parser_sees_an_appended_entry():
         "test_the_bind_lists_are_pinned_by_exact_contents is vacuous")
     assert empty == [], "an EMPTY list must read as empty, not as missing"
     assert absent is None, "a MISSING directive must read as None, not as empty"
+
+
+# --------------------------------------------------------------------------- #
+# 9. 🔴 THE REPO POINTERS — commit.sh must not be aimable by ENVIRONMENT
+# --------------------------------------------------------------------------- #
+# Every git call in this script is `git -C "$scope" …`, and `-C` is the weakest
+# possible claim about where a command lands. GIT_DIR overrides it.
+#
+# WHY IT MATTERS HERE AND NOT ONLY IN THE TEST HARNESS. `scripts/run-tests.sh`,
+# `run-node-tests.sh` and `gate.sh` already strip the pointers for the test tiers
+# (GUARD 9, scripts/testlib/gitenv.py). commit.sh is reached by none of them: it
+# runs from a systemd timer and from an operator's shell, and it is the one
+# program in this repo whose JOB is to commit. Its own strip is what makes the
+# refusal non-spoofable independently of who called it.
+#
+# 🔴 THE SHAPES BELOW ARE MEASURED, NOT IMAGINED. Each was run against the
+# PRE-FIX script with a decoy repo and a linked worktree, and each moved the
+# foreign repository:
+#
+#   GIT_DIR=<worktree gitdir>  refs/heads/decoy/target, config, index, logs/HEAD
+#   GIT_DIR=<main gitdir>      refs/heads/decoy/base,   config, index, logs/HEAD
+#   GIT_INDEX_FILE             the foreign worktree's index, overwritten
+#   GIT_COMMON_DIR             the foreign config (the identity seeding)
+#
+# DELIBERATELY NOT PARAMETRISED OVER, and measured too, so nobody adds them
+# believing they are regression coverage: GIT_OBJECT_DIRECTORY and GIT_NAMESPACE
+# alone left the foreign repo byte-identical on the pre-fix tree, and
+# GIT_WORK_TREE alone made the pre-fix run FAIL (rc 1) rather than misdirect it.
+# They are on the ledger because they redirect git in general; a test over them
+# here would be an invariant guard wearing a regression test's name.
+from testlib.gitenv import (  # noqa: E402
+    common_dir_of,
+    diff_snapshots,
+    resolve_git_dir,
+    snapshot,
+)
+
+
+def _decoy_repo_with_worktree(tmp_path):
+    """A foreign repo + a LINKED worktree on its own branch.
+
+    The linked worktree is the wild shape: `git push` from one exports
+    GIT_DIR=<repo>/.git/worktrees/<name> into the pre-push hook's environment
+    (MEASURED, git 2.55.0 — a push from the MAIN checkout exports no GIT_DIR),
+    which is how the variable reaches a suite, and from there anything the suite
+    runs.
+    """
+    work = tmp_path / "decoy" / "work"
+    work.mkdir(parents=True)
+    env = dict(os.environ)
+    env.update({"GIT_AUTHOR_NAME": "decoy", "GIT_AUTHOR_EMAIL": "d@example.invalid",
+                "GIT_COMMITTER_NAME": "decoy", "GIT_COMMITTER_EMAIL": "d@example.invalid"})
+    subprocess.run(["git", "init", "-q", "-b", "decoy/base", str(work)],
+                   check=True, capture_output=True, env=env)
+    (work / "real-file.txt").write_text("real\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(work), "add", "real-file.txt"],
+                   check=True, capture_output=True, env=env)
+    subprocess.run(["git", "-C", str(work), "commit", "-qm",
+                    "decoy: the real commit that must survive"],
+                   check=True, capture_output=True, env=env)
+    wt = tmp_path / "decoy" / "wt"
+    subprocess.run(["git", "-C", str(work), "worktree", "add", str(wt),
+                    "-b", "decoy/target", "-q"],
+                   check=True, capture_output=True, env=env)
+    gitdir = work / ".git" / "worktrees" / "wt"
+    assert gitdir.is_dir(), f"no linked-worktree gitdir at {gitdir}"
+    return work, wt, gitdir
+
+
+def _foreign_git_dirs(wt):
+    """The per-worktree gitdir AND the common dir where refs/config really live.
+
+    Watching only the per-worktree dir would miss every ref and config write —
+    two of the four measured damage shapes.
+    """
+    git_dir = resolve_git_dir(wt)
+    assert git_dir is not None, f"could not resolve a git dir for {wt}"
+    common = common_dir_of(git_dir)
+    assert common is not None, (
+        f"{wt} reported no common dir; the fingerprint would be blind to "
+        "exactly the refs and config the pre-fix script rewrote")
+    return [git_dir, common]
+
+
+def _fingerprint(dirs):
+    """`index` is INCLUDED here, unlike gitenv.snapshot's default use against the
+    HOST repo. The racy-refresh objection that keeps it out there does not apply
+    to a decoy nothing else reads between two snapshots, and an overwritten
+    index is one of the four measured damage shapes."""
+    return snapshot(dirs, extra_files=[d / "index" for d in dirs])
+
+
+_SPOOF_SHAPES = ("GIT_DIR_worktree", "GIT_DIR_main", "GIT_INDEX_FILE", "GIT_COMMON_DIR")
+
+
+def _spoof_env(shape, work, gitdir):
+    return {
+        "GIT_DIR_worktree": {"GIT_DIR": str(gitdir)},
+        "GIT_DIR_main": {"GIT_DIR": str(work / ".git")},
+        "GIT_INDEX_FILE": {"GIT_INDEX_FILE": str(gitdir / "index")},
+        "GIT_COMMON_DIR": {"GIT_COMMON_DIR": str(work / ".git")},
+    }[shape]
+
+
+@pytest.mark.parametrize("shape", _SPOOF_SHAPES)
+def test_a_leaked_repo_pointer_cannot_aim_the_committer_at_a_foreign_repo(tmp_path, shape):
+    """🔴 THE REGRESSION. Red on the pre-fix tree for all four shapes.
+
+    The assertion is the RELATIONSHIP — the foreign repository is byte-identical
+    afterwards — not that a particular sentence was printed. A message can be
+    reworded; a moved ref cannot be talked out of.
+
+    And the scope is asserted to have become its OWN repo with its OWN commit,
+    because "the foreign repo did not move" is equally true of a script that did
+    nothing at all.
+    """
+    work, wt, gitdir = _decoy_repo_with_worktree(tmp_path)
+    dirs = _foreign_git_dirs(wt)
+    before = _fingerprint(dirs)
+
+    store = _seed(tmp_path)
+    p = _run(store, **_spoof_env(shape, work, gitdir))
+
+    deltas = diff_snapshots(before, _fingerprint(dirs))
+    assert deltas == [], (
+        f"a leaked {shape} aimed commit.sh at the foreign repository:\n"
+        + "\n".join(deltas)
+        + f"\n\nscript said:\n{p.stdout}\n{p.stderr}")
+    assert p.returncode == 0, f"the run should still succeed normally:\n{p.stderr}"
+    assert (store / "some-scope" / ".git").is_dir(), (
+        "the scope did not become its own repo, so this test would pass just as "
+        f"well if the script had done nothing:\n{p.stdout}\n{p.stderr}")
+    assert _commits(store / "some-scope") == 1, (
+        f"the scope has no commit of its own:\n{p.stdout}\n{p.stderr}")
+
+
+def test_the_foreign_repo_fixture_would_actually_record_a_write(tmp_path):
+    """🔴 POSITIVE CONTROL. The four assertions above are ZEROES — "nothing
+    moved" — and a zero is indistinguishable from a fingerprint wired to nothing.
+
+    So do the damaging thing on purpose, with the same fixture and the same
+    variable, and watch the number move. This is the mechanism itself: `git -C`
+    at a directory that is NOT a repo, with GIT_DIR inherited, commits to the
+    foreign branch instead of erroring.
+    """
+    work, wt, gitdir = _decoy_repo_with_worktree(tmp_path)
+    dirs = _foreign_git_dirs(wt)
+    before = _fingerprint(dirs)
+
+    notarepo = tmp_path / "notarepo"
+    notarepo.mkdir()
+    env = dict(os.environ)
+    env.update({"GIT_DIR": str(gitdir),
+                "GIT_AUTHOR_NAME": "probe", "GIT_AUTHOR_EMAIL": "p@example.invalid",
+                "GIT_COMMITTER_NAME": "probe", "GIT_COMMITTER_EMAIL": "p@example.invalid"})
+    p = subprocess.run(["git", "-C", str(notarepo), "commit", "-q", "--allow-empty",
+                        "-m", "control: the write the guard must prevent"],
+                       capture_output=True, text=True, env=env)
+    assert p.returncode == 0, (
+        "git refused the spoof, so the mechanism this section guards against no "
+        f"longer exists on this git — every zero above is unfalsifiable:\n{p.stderr}")
+
+    deltas = diff_snapshots(before, _fingerprint(dirs))
+    assert deltas, (
+        "the foreign repo was written to and the fingerprint saw NOTHING — the "
+        "detector every assertion above relies on is not wired up")
+    assert any("refs/heads/decoy/target" in d for d in deltas), (
+        "the branch write was invisible to the fingerprint:\n" + "\n".join(deltas))
+
+
+def test_a_leaked_pointer_does_not_defeat_the_nested_scope_refusal(tmp_path):
+    """🔴 THE GUARD'S REAL JOB MUST SURVIVE THE FIX.
+
+    `scope_repo_state` exists to refuse a scope that sits INSIDE somebody else's
+    checkout. On the pre-fix tree a leaked GIT_DIR made such a scope report state
+    1 — "it IS its own repo" — so the refusal never fired. A fix that merely
+    stopped the foreign WRITE while leaving the state wrong would still commit
+    client-sensitive content into the enclosing repo.
+
+    So: nested scope AND a leaked pointer, and the refusal must still be the
+    outcome, asserted by its own message.
+    """
+    work, wt, gitdir = _decoy_repo_with_worktree(tmp_path)
+    dirs = _foreign_git_dirs(wt)
+    before = _fingerprint(dirs)
+
+    store = tmp_path / "parentstore"
+    (store / "inner").mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", "-b", "trunk", str(store)],
+                   check=True, capture_output=True)
+    (store / "inner" / "thing.md").write_text("x\n", encoding="utf-8")
+
+    p = _run(store, GIT_DIR=str(gitdir))
+    assert p.returncode != 0, (
+        f"a scope nested in a foreign repo was NOT refused:\n{p.stdout}\n{p.stderr}")
+    assert "not its own repo" in p.stderr, (
+        f"the run failed, but not for the nesting reason:\n{p.stderr}")
+    assert not (store / "inner" / ".git").exists(), (
+        "the nested scope was bootstrapped into its own repo instead of refused")
+    assert diff_snapshots(before, _fingerprint(dirs)) == [], (
+        "the decoy repository moved while the nested scope was being refused")

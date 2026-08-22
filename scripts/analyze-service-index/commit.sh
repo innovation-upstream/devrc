@@ -192,6 +192,63 @@ ASI_NO_INIT="${ASI_NO_INIT:-0}"
 command -v git >/dev/null 2>&1 ||
   die "the version-control binary is not on PATH — refusing to report success"
 
+# --- 🔴 NEUTRALISE THE AMBIENT REPO POINTERS ------------------------------------
+# WHICH repository, before WHICH config. Everything below this line reaches git
+# as `git -C "$scope" …`, and `-C` is the weakest possible claim about where a
+# command lands: GIT_DIR OVERRIDES IT.
+#
+# MEASURED 2026-08-22 against a throwaway decoy repo with a linked worktree, on
+# git 2.55.0, running THIS script unchanged:
+#
+#     GIT_DIR=<decoy>/.git/worktrees/wt  commit.sh <store>
+#       -> scope_repo_state: `git -C "$scope" rev-parse --show-toplevel` honours
+#          GIT_DIR and takes the CWD as the work tree, so it returns "$scope"
+#          ITSELF -> state 1, "it IS its own repo".
+#       -> that skips BOTH the `git init` bootstrap AND the "not its own repo"
+#          refusal, and every later `git -C "$scope" add/commit` writes into the
+#          DECOY's gitdir, index and branch. The decoy's `decoy/target` moved to
+#          `autocommit: 3 change(s) in the some-scope analyze-service index`
+#          while this script printed "committed <sha>" and exited 0.
+#
+# That is the 2026-08-21 incident's mechanism (scripts/testlib/gitenv.py) arriving
+# at the one program in this repo whose whole job is to COMMIT. `run-tests.sh`,
+# `run-node-tests.sh` and `gate.sh` already strip these for the test tiers; this
+# is the same strip AT THE WRITER, so a caller that never goes through a runner —
+# a systemd unit, an operator's shell, a future script — cannot spoof it either.
+#
+# THE SET IS NOT CHOSEN HERE. `scripts/testlib/gitenv.py::REPO_POINTER_VARS` owns
+# it and test_git_repo_isolation.py pins this spelling against it in BOTH
+# directions, exactly as it does for the three runners. Every name below can make
+# git resolve a DIFFERENT repository, index or object store than the `-C` says.
+#
+# ⚠ GIT_CEILING_DIRECTORIES is deliberately NOT here, and that is measured, not
+# assumed: it can only make the upward discovery walk STOP EARLY (rc 128, "not a
+# git repository"), never point at another one. In this script that maps to
+# state 0, i.e. `git init` inside the scope — the safe direction. See the
+# "DELIBERATELY NOT STRIPPED" list in gitenv.py.
+#
+# UNCONDITIONAL: there is no workflow in which this unit should be aimed at a
+# repository by inherited environment.
+DEVRC_GIT_REPO_POINTERS=(
+  GIT_DIR                            # the repository itself; beats -C
+  GIT_WORK_TREE                      # the working tree
+  GIT_COMMON_DIR                     # where refs/config actually live
+  GIT_INDEX_FILE                     # the index that staging writes
+  GIT_OBJECT_DIRECTORY               # where new objects are written
+  GIT_ALTERNATE_OBJECT_DIRECTORIES   # extra object stores
+  GIT_NAMESPACE                      # the ref namespace refs land in
+  GIT_PREFIX                         # hook-injected pathspec prefix
+  GIT_GRAFT_FILE                     # repo-scoped grafts
+  GIT_SHALLOW_FILE                   # repo-scoped shallow list
+  GIT_CONFIG                         # legacy: the config file a write lands in
+)
+# ⚠ The trailing comments above deliberately avoid the word this file's own
+# ledger test scans for. `_script_code_lines` strips comment-ONLY lines, so a
+# trailing comment naming a subcommand reads as an unplaceable call site and
+# fails test_every_unplaceable_git_token_is_pinned_prose — which is the right
+# outcome for that test, and a wording constraint here rather than a pin there.
+unset "${DEVRC_GIT_REPO_POINTERS[@]}"
+
 # --- 🔴 NEUTRALISE AMBIENT GIT CONFIG ------------------------------------------
 # This block exists because the no-exfiltration guarantee was bypassable WITHOUT
 # TOUCHING THIS FILE. MEASURED 2026-08-06 (git 2.55.0), end to end:
@@ -434,6 +491,15 @@ capture() {
 # repo instead — committing client-sensitive content into somebody else's
 # history. Compare the discovered toplevel against the scope and refuse on a
 # mismatch. Echoes: 1 = own repo, 0 = no repo, 2 = inside a DIFFERENT repo.
+#
+# 🔴 THIS FUNCTION IS THE SPOOFABLE ONE, and the thing that makes it honest is
+# NOT in this function: it is the DEVRC_GIT_REPO_POINTERS `unset` at the top of
+# the file. An inherited GIT_DIR makes the `rev-parse` below answer "$scope"
+# whatever the truth is, which reports state 1 — its own repo — for a scope that
+# is a bare directory sitting inside somebody else's checkout, so BOTH the
+# bootstrap and the state-2 refusal are skipped and the commits land in the
+# foreign repo. Do not move that `unset`, and do not add a caller that re-sets a
+# pointer between it and here.
 scope_repo_state() {
   local scope="$1" top
   top="$(git -C "$scope" rev-parse --show-toplevel 2>/dev/null)"

@@ -121,6 +121,23 @@ re-derive it:
   * `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_n` / `GIT_CONFIG_VALUE_n` — they
     inject config VALUES into whatever repo git already resolved. Same reason.
   * `GIT_AUTHOR_*` / `GIT_COMMITTER_*` — identity, not location.
+  * `GIT_CEILING_DIRECTORIES` — it can only make the upward discovery walk STOP
+    EARLY, never point at a different repository. MEASURED (git 2.55.0): with a
+    ceiling above a scope nested in a repo, `git -C <scope> rev-parse
+    --show-toplevel` exits 128 "not a git repository"; with the ceiling naming
+    an UNRELATED repo it returns the enclosing one unchanged. Failing to
+    discover is the safe direction — in `analyze-service-index/commit.sh` it
+    reads as "no repo", i.e. `init` inside the scope. Listed because the name
+    looks like it belongs and the absence of a reason reads as an oversight.
+
+🔴 FOURTH SPELLING, 2026-08-22. `scripts/analyze-service-index/commit.sh` also
+carries the array. It is not a runner — it resolves no ROOT and no test tier
+reaches it (systemd timer, operator shell) — but it is the one program here
+whose job is to COMMIT, and on the pre-fix tree a leaked `GIT_DIR` made its
+`scope_repo_state` report "this scope IS its own repo" for a bare directory,
+skipping both the bootstrap and the nested-repo refusal and putting
+`autocommit: N change(s) in the some-scope analyze-service index` on a foreign
+branch. `test_git_repo_isolation.py::POINTER_CLEARERS` pins it like the rest.
 """
 from __future__ import annotations
 
