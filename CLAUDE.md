@@ -148,12 +148,29 @@ Repo-level facts that are NOT in any skill — they live here on purpose:
 - **Two always-on docs have enforced byte ceilings**, because both load on every session: `scripts/browser-bridge/SKILL.md` (gated by `scripts/browser-bridge/tests/test_skill_size.py`) and `claude/RULES.md` (gated by `scripts/tests/test_rules_size.py`). Each test OWNS its constants and prints an eviction playbook on failure — **read the numbers there, never restate them.** Any addition needs an eviction in the SAME commit.
 - **Run the gate with `scripts/gate.sh`** (`--tier pytest|node|both`, `--set hermetic|all`). It sends the full output to a LOG FILE and prints only a bounded summary, so there is no reason to pipe it — and **its exit status is authoritative**. It also cross-checks that status against the runners' own `RESULT:` line and exits **90 = could-not-vouch** when they disagree, when a run printed no verdict, or when `panic: test timed out` appears. 90 is not "the tests failed"; it means read the log.
 - **The runners' verdict line carries their exit code** (`RESULT: FAIL (exit=1)`), emitted from one writer behind an EXIT trap, so it survives a pipe and a killed run still says so. Historically the status was destroyed by `… | tail; echo "rc=$?"` — four agents reported `exit 0` over `RESULT: FAIL` on 2026-08-11 — which is why counting `PASSED`/`FAILED` lines used to be mandatory. Still a fine cross-check; no longer the only thing you can trust.
-- 🔴 **NO AUTOMATED GATE IS RUNNING — the gate is YOU, by hand.** <!-- merge-gate: none -->
-  Nothing blocks a devrc merge today: there is no `.github/workflows`, `main` has no branch
-  protection or rulesets, no Tekton trigger names devrc, and `gh pr view <n> --json
-  statusCheckRollup` returns **0 checks** on every PR, merged ones included. This line used to
-  read `CI gates both suites`, which was false — the exact kind of claim nobody re-checks: an
-  agent reads it, believes the merge is protected, and skips the run.
+- 🔴 **A Tekton gate RUNS on every PR, but it BLOCKS nothing — do not confuse the two.** <!-- merge-gate: other -->
+  Changed 2026-08-22, measured: the `devrc-ci-pr` trigger on the homelab EventListener fires
+  on `opened`/`reopened`/`synchronize`/`ready_for_review`, and devrc PRs now carry **2 checks**
+  — `tekton/devrc-nodetests` and `tekton/devrc-pytests`. The marker is `other` because this
+  gate is Tekton, which `test_ci_claim_matches_reality.py` cannot see; there is still no
+  `.github/workflows`.
+  🔴 **Running ≠ blocking.** `main` HAS branch protection (`enforce_admins: true`,
+  no force-push, no deletion) but **zero required status checks**, so a red check does not stop
+  a merge. Until a check is marked required, the gate is advisory and **you are still the
+  gate** — run it and say which command you ran.
+  ⚠ **`tekton/devrc-pytests` is RED on every PR** for a reason unrelated to your change:
+  `scripts/browser-bridge/tests/test_browser_agent.py:386` waits 35s for a straggler process to
+  be reaped, which a container's PID 1 does not do. Measured failing on 5 different branches at
+  275-281s wall time — deterministic, not a flake. `tekton/devrc-nodetests` is the trustworthy
+  one (1119/1119 on every run so far). Do not make pytests required until that test is fixed or
+  conditionally skipped, and **do not read a red pytests check as a verdict on your PR.**
+  🔴 **A check that is `error`, not `failure`, means the gate COULD NOT RUN** — the leg never
+  reported (preemption, timeout). That is a broken gate, not a bad change; the description says
+  `COULD NOT RUN: <leg>`.
+  This block used to read `CI gates both suites`, which was false, and was then corrected to
+  `NO AUTOMATED GATE IS RUNNING`, which went stale the day the gate started firing — the exact
+  kind of claim nobody re-checks: an agent reads it, believes the merge is protected (or that
+  nothing runs), and skips the run.
   🔴 **But a gate SHIPS IN THIS REPO, and whether it is INSTALLED is not a fact this file can
   state** — `githooks/` (`install.sh`, `pre-push`, `tests-on-push.sh`) is a real blocking
   pre-push test gate, and `scripts/run-tests.sh` treats it as a first-class consumer.
