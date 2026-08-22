@@ -50,7 +50,77 @@ ClickUp ticket nobody has started.
 
 ## Open investigations — live diagnosis state
 
-### `check-clickup-addressed`'s "nobody is on it and someone is waiting" flag fires over comments you already answered
+### ✅ CLOSED 2026-08-22 — the waiting-flag false positive, fixed on `trunk` by **talos-infra #1238**
+🔴 **Fixed TWICE, in parallel, by two sessions from the same incident.** #1238 ("the WAITING
+flag could not see your OWN replies") merged `1c4418011` at **19:08:57Z**; my #1242 was
+committed at **19:08:23Z** and opened at **19:09:15Z** — **18 seconds after** the competing fix
+landed, on a `fetch` that predated it. `gh pr view 1242` now reports **CONFLICTING / DIRTY** in
+all four substantive files. Trunk's suite: **170 passed, 0 failed**.
+**Take the disposition from "Next steps" below — do not re-open #1242 and try to merge it.**
+
+The leading hypothesis below was confirmed exactly, by both fixes independently:
+`recent-comments.py` filters out the operator's own comments, and the flag consumed that
+filtered list as "the newest comment" while looking only at transcripts for an answer.
+Both converged on the same field name, `my_latest_reply`, and the same three-state design.
+
+- **Fix:** `my_latest_own_comment()` computes the operator's newest reply *before* the filter
+  destroys it; it rides to the consumer as a task-level `my_latest_reply`. Suppress only when
+  it is **strictly** newer (a tie to the minute still fires). The key being **absent** is a
+  third state — *not measured* — which still fires but withholds the words "nobody has
+  answered" in favour of `NOT CHECKED (<reason>)`. Reachable, not theoretical: with no
+  operator id resolved the author filter is not running either.
+- **Corpus first, per that skill's standing rule:** `test_corpus.py` gained a second labelled
+  set, `WAITING_CORPUS` (7 record-shaped cases). Red at `origin/trunk d6d91d56b`
+  (**157 passed / 8 failed**, waiting corpus **3/7**), green at HEAD (**165 / 0**).
+- **Mutation sweep 9/9 killed**, each by a named test. The seam mutant (the
+  `carry_my_latest_reply` copy dropped) is killed by **exactly one** of the 165 — that seam
+  test is the only thing that can see a producer↔consumer rename.
+- **Live (on #1242's code):** the exact failing command re-run — the `868kuam02` WAITING line is gone while the
+  other two flags still fire, so the report was not merely silenced. That confirms the
+  suppression direction only; nothing in range currently has zero transcript evidence, so the
+  still-fires direction rests on the corpus + the seam positive control.
+- 🔴 **Where the two designs DISAGREE, and it is a decision nobody has made:** the tie boundary.
+  Trunk (#1238) uses `mine <= theirs` — *equal counts as answered*, because ClickUp renders to
+  the minute and a same-minute reply reads as equal. Mine used strict `>` — *a tie still
+  fires*, because a tie cannot be ordered and losing a waiting colleague costs more than a
+  noisy line. **Both cite minute resolution and conclude the opposite.** The real answer is
+  probably neither: the producer has the raw epoch-ms and throws the seconds away before
+  comparing. Carry second-resolution and the boundary nearly vanishes.
+- 🔴 **Three fix-reverting mutants survive #1242's green 165/165** (found by the blind audit,
+  each verified end-to-end, and they are the holes its PR body claimed to have closed):
+  deleting the `carry_my_latest_reply(...)` **call** in `main()`; the producer dropping the
+  `my_latest_reply=` kwarg; and `carry_my_latest_reply` using `.get()` instead of the `in`
+  test — that last one restores the original "nobody has answered" defect on any run where the
+  operator's id cannot be resolved. **Trunk is better guarded on two of the three**: #1238 made
+  `my_latest_reply` a REQUIRED POSITIONAL on `build_record` (omission is a `TypeError`, not a
+  silent revert), and its absent-vs-`None` distinction dies to two tests. Making the copy a
+  named function moved the mutation target one level up and left the **call site** exactly as
+  unguarded as the inline lines would have been. **Nothing in either suite executes that line.**
+- 🔴 **A caveat NEITHER fix carries, measured by devrc #675 the same day** (`clickup awaiting`,
+  `claude/skills/clickup/lib/awaiting.mjs`): **ClickUp has no bot identity.** Every comment
+  posted through the `pk_` token comes back authored as the token owner, so *"the owner
+  answered"* and *"a machine answered on the owner's behalf"* are the SAME observable. An
+  agent-posted comment therefore sets `my_latest_reply` and **silently suppresses** the flag.
+  #675 prints that caveat in its own output on the principle that a caveat living only in docs
+  is one nobody reads at the moment it matters — but a *suppressed* flag prints nothing at all,
+  which is exactly the reassuring-nothing this skill exists to police.
+- 🔴 **The same predicate now exists in two repos**: devrc's `clickup awaiting` (#675, *"tasks
+  whose newest comment is NOT the token owner's"*) and this skill's flag. One rule, two places.
+- 🔴 **The primary clone `$DATAPACKET` still holds #1242's edits UNCOMMITTED** and they now
+  **conflict with `trunk`**. They are no longer a harmless copy of a landed fix. The
+  `base-clone-staleness.sh` hook will keep skipping them as local edits. Clear them with
+  `git -C $DATAPACKET checkout origin/trunk -- .claude/skills/check-clickup-addressed/`
+  (a read-refresh, no commit) once the disposition below is settled.
+- **Found, not fixed:** (a) `run_clickup`'s 120 s `subprocess.run` timeout raises **uncaught** —
+  one intermediate run exited 1 with empty stdout and the caller printed `Error fetching
+  comments:` with no body; a transient API slowdown reads as a hard failure. (b)
+  `~/.config/opencode/skills/check-clickup-addressed/` is a **forked, un-symlinked copy** last
+  touched 2026-08-19 (`check-addressed.py` 5.8 KB vs 45 KB in the repo) that predates the
+  waiting flag entirely — a second copy of this tool drifting on its own.
+
+<details><summary>Original diagnosis (kept — it is what the fix confirmed)</summary>
+
+#### `check-clickup-addressed`'s "nobody is on it and someone is waiting" flag fires over comments you already answered
 - **Symptom + exact repro:**
   `python3 $DATAPACKET/.claude/skills/check-clickup-addressed/scripts/check-addressed.py --limit 5`
   emitted, in **Needs a decision**:
@@ -79,10 +149,24 @@ ClickUp ticket nobody has started.
   and add the case to `test/test_corpus.py` **before** changing code (that skill's standing
   rule: score it, don't argue from the example).
 
+</details>
+
 ## Next steps (ranked)
-1. **Fix the waiting-flag false positive above** in `check-clickup-addressed` — it is the
-   single flag most likely to send someone at a ticket that is already handled, and it is
-   ~one predicate. Add the labelled case to `test/test_corpus.py` first.
+1. **Dispose of talos-infra #1242 — recommended: CLOSE it as superseded by #1238**, then open a
+   small follow-up **against current `trunk`** carrying only the parts that are genuinely better
+   than what landed. Do NOT rebase-and-merge #1242 wholesale: it conflicts in every substantive
+   file and would silently flip the landed tie semantics, with its own corpus pinning the
+   flipped value so a green suite would enforce the reversal. Carry over:
+   (a) a test that **executes the `main()` call site**, so the two silent-revert mutants above
+   cannot recur — `test_repo_vocab_and_waiting.py` already drives `main()` with subprocesses
+   stubbed, so the coverage is available and was not taken;
+   (b) `UNMEASURED` on an **unreadable own-comment date** rather than skipping past it;
+   (c) the `_parse_comment_date` extraction (one parser, one place);
+   (d) `WAITING_CORPUS` — the labelled RECORD-level corpus, which trunk has no equivalent of;
+   (e) second-resolution ordering, which dissolves the tie argument instead of picking a side;
+   (f) the bot-identity caveat, surfaced where a suppression happens rather than only in docs.
+   🔴 **Re-audit the follow-up's DELTA** — the audit that found all this was BLIND, and the
+   framing is what made it work.
 2. **`868kv67jf` — image-width ladder.** Start with scope item 3: the two app copies
    (`apps/creator-studio/…`, `apps/moderator/…`) contain **neither** `OPTIMIZED_WIDTH_THRESHOLD`
    nor `shouldForceOptimized`, which `src/client-utils/edge-url.ts` documents as "load-bearing

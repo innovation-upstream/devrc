@@ -38,6 +38,7 @@ import {
   setPriority,
   moveTask,
   parseDateInput,
+  parseSinceInput,
   addWatcher,
   addTag,
   addDependency,
@@ -71,7 +72,7 @@ import {
   formatDocComments,
 } from './api/doc-comments.mjs';
 import {
-  fetchInboxNotifications,
+  fetchAllInboxNotifications,
   fetchInboxStats,
   clearInboxBundle,
   markInboxBundleRead,
@@ -97,6 +98,7 @@ import {
   formatList,
 } from './lib/format.mjs';
 import { stateBaseDir } from './lib/paths.mjs';
+import { findAwaiting, formatAwaiting, AWAITING_DEFAULTS } from './lib/awaiting.mjs';
 
 // Parse arguments
 const args = process.argv.slice(2);
@@ -124,6 +126,12 @@ let attachArgs = [];
 let allSpacesFlag = false;
 let sinceArg = null;
 let allTimeFlag = false;
+let daysArg = null;
+let maxArg = null;
+let mentionedFlag = false;
+let unreadFlag = false;
+let clearedFlag = false;
+let cursorArg = null;
 
 for (let i = 0; i < args.length; i++) {
   const arg = args[i];
@@ -167,6 +175,18 @@ for (let i = 0; i < args.length; i++) {
     sinceArg = args[++i];
   } else if (arg === '--all-time') {
     allTimeFlag = true;
+  } else if (arg === '--days') {
+    daysArg = args[++i];
+  } else if (arg === '--max') {
+    maxArg = args[++i];
+  } else if (arg === '--mentioned') {
+    mentionedFlag = true;
+  } else if (arg === '--unread') {
+    unreadFlag = true;
+  } else if (arg === '--cleared') {
+    clearedFlag = true;
+  } else if (arg === '--cursor') {
+    cursorArg = args[++i];
   } else if (!command) {
     command = arg;
   } else if (!targetInput) {
@@ -217,6 +237,8 @@ Task Commands:
   me                            Show current user info
   create [list_id] "title"      Create a new task (list_id optional if default set)
   my-tasks                      List all tasks assigned to me
+  awaiting                      My tasks whose NEWEST comment is someone else's
+                                (--days N quiet-for, --assignee, --max fan-out cap)
   search "query"                Search tasks across workspace
   assign <task> <user>          Assign task to user
   due <task> "date"             Set due date
@@ -263,7 +285,10 @@ Document Commands:
   doc-reply <comment_id> "text" Reply to a doc comment thread (requires --page)
 
 Inbox Commands (requires JWT):
-  inbox [messages|activity]     View inbox notifications (default: messages)
+  inbox [messages|activity]     View inbox notifications (default: messages; follows
+                                the cursor across pages)
+                                Filters: --me --mentioned --unread --cleared
+                                         --since <window> --cursor <cursor>
   inbox-stats                   Get unread badge counts
   inbox-clear <bundle_id>       Dismiss a notification bundle
   inbox-read <bundle_id>        Mark a notification bundle as read
@@ -292,7 +317,15 @@ Options:
   --all-spaces Search across ALL spaces incl. archived (for search; slow — pulls full history)
   --since      Search look-back window by date_updated (e.g. "90d","6m","1y",date). Default 30d
                (tip: --me / --assignee narrows server-side and is near-instant)
+               Also bounds inbox to notifications after that date
   --all-time   Search with no recency bound (slowest; scans full history)
+  --mentioned  inbox: only bundles that @mention me
+  --unread     inbox: only unread bundles
+  --cleared    inbox: read the CLEARED bundles instead of the uncleared ones
+  --cursor     inbox: start from a specific pagination cursor
+  --days       awaiting: only tasks quiet for at least N days (default 0)
+  --max        awaiting: cap the comment fan-out at N tasks (default ${AWAITING_DEFAULTS.maxTasks};
+               one request per task, paced under the 100 req/min token limit)
   --content    Inline content (markdown). For short text only.
   --file       Read content from a file path (preferred for long content)
   --cleanup    Delete the --file after successful execution
@@ -316,6 +349,8 @@ Examples:
   node query.mjs create 900000000001 "New feature: dark mode"
   node query.mjs create "Quick task" (uses CLICKUP_DEFAULT_LIST_ID)
   node query.mjs my-tasks
+  node query.mjs awaiting                    # someone commented last, and it wasn't me
+  node query.mjs awaiting --days 2 --max 40  # quiet 2+ days, scan at most 40 tasks
   node query.mjs search "dark mode"
   node query.mjs assign 86a1b2c3d alex
   node query.mjs due 86a1b2c3d "tomorrow"
@@ -356,6 +391,9 @@ Inbox Examples:
   node query.mjs inbox                                         # Messages tab
   node query.mjs inbox activity                                # Activity tab
   node query.mjs inbox --me                                    # Assigned to me
+  node query.mjs inbox --mentioned --unread                    # Unread @mentions
+  node query.mjs inbox --since 7d                              # Only the last 7 days
+  node query.mjs inbox --cleared                               # Already-cleared bundles
   node query.mjs inbox-stats                                   # Badge counts
   node query.mjs inbox-clear "<bundle_id>"                     # Dismiss notification
   node query.mjs inbox-read "<bundle_id>"                      # Mark as read
@@ -469,6 +507,68 @@ async function main() {
         console.log(JSON.stringify(tasks, null, 2));
       } else {
         console.log(formatTaskList(tasks));
+      }
+    } catch (err) {
+      console.error('Error:', err.message);
+      process.exit(1);
+    }
+    return;
+  }
+
+  if (command === 'awaiting') {
+    try {
+      // Numeric flags are validated up front: a typo'd --max would otherwise
+      // reach capFanOut() as NaN and be reported as a scan, not as a mistake.
+      let minAgeDays = AWAITING_DEFAULTS.minAgeDays;
+      if (daysArg !== null) {
+        minAgeDays = Number(daysArg);
+        if (!Number.isFinite(minAgeDays) || minAgeDays < 0) {
+          console.error(`Error: --days must be a non-negative number, got "${daysArg}"`);
+          process.exit(1);
+        }
+      }
+      let maxTasks = AWAITING_DEFAULTS.maxTasks;
+      if (maxArg !== null) {
+        maxTasks = Number(maxArg);
+        if (!Number.isInteger(maxTasks) || maxTasks < 1) {
+          console.error(`Error: --max must be a positive integer, got "${maxArg}"`);
+          process.exit(1);
+        }
+      }
+
+      const teamId = await getTeamId();
+      // The AUTHOR test is always against the token owner — that is the only
+      // identity the API reports for anything this token writes. --assignee
+      // only changes WHOSE tasks are scanned, never who counts as "answered".
+      const ownerUserId = await getUserId();
+      let scanUserId = ownerUserId;
+      let scopeLabel = 'you';
+      if (assigneeArg && assigneeArg.toLowerCase() !== 'me') {
+        const user = await findUser(teamId, assigneeArg);
+        if (!user) {
+          console.error(`Error: User "${assigneeArg}" not found in team`);
+          process.exit(1);
+        }
+        scanUserId = user.id.toString();
+        scopeLabel = `${user.username || assigneeArg} (author test still: not the token owner)`;
+      }
+
+      const tasks = await getMyTasks(teamId, scanUserId);
+      const result = await findAwaiting({
+        tasks,
+        ownerUserId,
+        fetchComments: (taskId) => getComments(taskId),
+        maxTasks,
+        minAgeDays,
+        onProgress: ({ done, total }) => {
+          if (!jsonOutput) console.error(`  …read comments on ${done}/${total} task(s)`);
+        },
+      });
+
+      if (jsonOutput) {
+        console.log(JSON.stringify(result, null, 2));
+      } else {
+        console.log(formatAwaiting(result, { scopeLabel }));
       }
     } catch (err) {
       console.error('Error:', err.message);
@@ -643,9 +743,17 @@ async function main() {
     try {
       if (command === 'inbox') {
         const bundleType = targetInput || 'messages';
+        // api/inbox.mjs has always accepted mentioned / unread / dateStart /
+        // cursor; only --me was reachable from here, so the other filters
+        // existed and could not be used.
         const opts = { bundleType, status: 'uncleared' };
         if (filterMe) opts.assignedToMe = true;
-        const result = await fetchInboxNotifications(opts);
+        if (mentionedFlag) opts.mentioned = true;
+        if (unreadFlag) opts.unread = true;
+        if (clearedFlag) opts.status = 'cleared';
+        if (sinceArg) opts.dateStart = parseSinceInput(sinceArg).toISOString();
+        if (cursorArg) opts.cursor = cursorArg;
+        const result = await fetchAllInboxNotifications(opts);
         if (jsonOutput) {
           console.log(JSON.stringify(result, null, 2));
         } else {
@@ -661,9 +769,15 @@ async function main() {
       } else if (command === 'inbox-clear-all') {
         const bundleType = targetInput || 'messages';
         const result = await clearAllInboxBundles(bundleType);
-        console.log(`Cleared ${result.cleared}/${result.total} ${bundleType} notification(s).`);
+        console.log(
+          `Cleared ${result.cleared}/${result.total} ${bundleType} notification(s) ` +
+            `found over ${result.pagesFetched} page(s).`
+        );
         if (result.failed > 0) {
           console.log(`Failed: ${result.failed}`);
+        }
+        if (result.truncated) {
+          console.log('🔴 TRUNCATED: hit the page safety bound — notifications remain uncleared.');
         }
       }
     } catch (err) {

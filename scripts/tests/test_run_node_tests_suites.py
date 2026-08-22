@@ -90,7 +90,12 @@ FORMERLY_UNGATED = {
     # on, split by CODE POINT while indexing by CODE UNIT, so one emoji shifted
     # every later offset. Its own controls asserted exactly the right property
     # and had never been handed a non-ASCII character.
-    "claude/skills/clickup/test": 92,
+    #
+    # 122 on 2026-08-21: test/awaiting.test.mjs, added with the `awaiting`
+    # command — the predicate, the fan-out cap and its truncation notice, the
+    # pacing arithmetic, and the inbox cursor loop against a fake transport
+    # (every inbox endpoint needs a JWT, so that loop has no other witness).
+    "claude/skills/clickup/test": 122,
 }
 
 
