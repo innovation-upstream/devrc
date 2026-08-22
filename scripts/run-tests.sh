@@ -1716,7 +1716,11 @@ EXPECTED_SKIPS=(
   # never runs in the gate. The regression it guards is caught only when someone
   # runs with SIGNAL_PG_DSN set. Pinning unbreaks main; it does not restore the
   # coverage.
-  "scripts/signal/tests|needs a real Postgres"
+  # CONDITIONAL: expected only where the DSN is absent. Without the third field
+  # this pin made the gate permanently RED for any developer who exports
+  # SIGNAL_PG_DSN — the test then RUNS, the skip total drops to 1, and the flat
+  # entry count still said 2.
+  "scripts/signal/tests|needs a real Postgres|unset:SIGNAL_PG_DSN"
 )
 # ⚠ REMOVED, deliberately — do not re-add. `scripts/tests/test_skill_audit.py`
 # carried two regression pins against the LIVE datapacket-talos skill corpus, a
@@ -2019,11 +2023,61 @@ else
 fi
 
 unexpected=()
+# --- CONDITIONAL LEDGER ENTRIES ------------------------------------------------
+# An entry is `dir|reason` or `dir|reason|unset:VAR`. The third field makes the
+# pin CONDITIONAL: it is expected only where VAR is unset.
+#
+# 🔴 WHY. The header above already promises this ("an entry may be conditional"),
+# and the implementation compared the skip TOTAL against a flat entry COUNT, so a
+# host where a pinned skip legitimately RUNS went red — and the runner's own
+# advice there is "delete its EXPECTED_SKIPS entry", which is WRONG for a
+# host-conditional pin: deleting it reds every other host. Measured consequence:
+# any developer with SIGNAL_PG_DSN exported had a permanently-red gate and no
+# correct way to unbreak it, i.e. the state that teaches people to pass
+# DEVRC_SKIP_TESTS=1. A permanently-red gate is worse than no gate.
+#
+# 🔴 PARSING, and why it is not `${entry#*|}`. That takes everything after the
+# FIRST `|`, so on a 3-field entry the reason would become `reason|unset:VAR` —
+# fed straight to `grep -qE`, where `|` is ALTERNATION. The matcher would then
+# accept any skip whose reason contained EITHER side, silently widening the pin
+# instead of narrowing it. Split explicitly.
+_split_skip_entry() {
+  local _e="$1" _rest
+  edir="${_e%%|*}"
+  _rest="${_e#*|}"
+  ere="${_rest%%|*}"
+  if [ "$_rest" = "$ere" ]; then econd=""; else econd="${_rest#*|}"; fi
+}
+
+# Count only the entries whose condition HOLDS here. An unrecognised condition is
+# a hard error, never a silent "treat as unconditional" — a typo must not quietly
+# turn a conditional pin into a permanent one.
+# NOTE (pre-existing, deliberately not changed here): this compares a count of
+# skipped TESTS against a count of ENTRIES, which assumes one test per entry.
+# Both current entries are `SKIPPED [1]`. Widening that is a separate change.
+pin_expected=0
+for entry in "${EXPECTED_SKIPS[@]}"; do
+  _split_skip_entry "$entry"
+  case "$econd" in
+    "") pin_expected=$(( pin_expected + 1 )) ;;
+    unset:*)
+      _v="${econd#unset:}"
+      # Indirect expansion: the VALUE of the variable NAMED by $_v, empty when
+      # unset. `$_v` alone is the NAME and always non-empty.
+      [ -z "${!_v-}" ] && pin_expected=$(( pin_expected + 1 ))
+      ;;
+    *)
+      echo "  ERROR: EXPECTED_SKIPS entry has an unknown condition: '$econd'" >&2
+      echo "         Supported: 'unset:VAR'. Entry: $entry" >&2
+      fail=1
+      ;;
+  esac
+done
+
 for line in "${SKIP_LINES[@]}"; do
   matched=0
   for entry in "${EXPECTED_SKIPS[@]}"; do
-    edir="${entry%%|*}"
-    ere="${entry#*|}"
+    _split_skip_entry "$entry"
     # "SKIPPED [n] <path>:<line>: <reason>" — require BOTH the owning directory
     # and the reason, so a skip that migrates to another suite is not absorbed.
     if printf '%s\n' "$line" | grep -qE "\] $edir/" && printf '%s\n' "$line" | grep -qE "$ere"; then
@@ -2043,11 +2097,12 @@ if [ "${#unexpected[@]}" -gt 0 ]; then
   fail=1
 fi
 
-if [ "$TOT_SKIPPED" -ne "${#EXPECTED_SKIPS[@]}" ]; then
-  echo "  ERROR: $TOT_SKIPPED test(s) skipped, but ${#EXPECTED_SKIPS[@]} are pinned in EXPECTED_SKIPS." >&2
-  if [ "$TOT_SKIPPED" -lt "${#EXPECTED_SKIPS[@]}" ]; then
+if [ "$TOT_SKIPPED" -ne "$pin_expected" ]; then
+  echo "  ERROR: $TOT_SKIPPED test(s) skipped, but $pin_expected of ${#EXPECTED_SKIPS[@]} pinned entries apply here." >&2
+  if [ "$TOT_SKIPPED" -lt "$pin_expected" ]; then
     echo "         FEWER than pinned: a pinned skip now RUNS (good) — delete its" >&2
-    echo "         EXPECTED_SKIPS entry so the pin keeps meaning something." >&2
+    echo "         EXPECTED_SKIPS entry, or make it conditional with '|unset:VAR'" >&2
+    echo "         if it only skips where that variable is absent." >&2
   else
     echo "         MORE than pinned: tests stopped running. See the skip list above." >&2
   fi
