@@ -205,13 +205,39 @@ def global_config_paths() -> "list[Path]":
     escape as the ref damage, and a `--global` write leaves the repo itself
     untouched — so a guard watching only refs would report a clean run.
     """
-    override = os.environ.get("GIT_CONFIG_GLOBAL")
-    if override:
-        return [Path(override)]
     home = Path(os.path.expanduser("~"))
     xdg = os.environ.get("XDG_CONFIG_HOME")
     xdg_dir = Path(xdg) if xdg else home / ".config"
-    return [home / ".gitconfig", xdg_dir / "git" / "config"]
+    real = [home / ".gitconfig", xdg_dir / "git" / "config"]
+
+    override = os.environ.get("GIT_CONFIG_GLOBAL")
+    if not override:
+        return real
+
+    # 🔴 A REDIRECT BY THE HARNESS IS NOT A CONFIG TO PROTECT — measured
+    # 2026-08-22 when GUARD 10 (`testlib/nogit_plugin.py`) landed beside this
+    # one. GUARD 10 isolates git by pointing `GIT_CONFIG_GLOBAL` at a scratch
+    # `gitconfig` under its own run dir and letting tests write there; that file
+    # is SUPPOSED to change — it exists so the operator's config does not. Watching
+    # it made this guard report `DEVRC-GITENV-VIOLATION: CHANGED …/gitconfig` in
+    # EVERY target, i.e. one guard calling the other's correct behaviour an
+    # incident. Neither PR could see it alone; only the merged tree has both.
+    #
+    # So a scratch redirect is skipped — and `real` is watched INSTEAD OF, never
+    # in addition to nothing. That is the strictly stronger reading: the old code
+    # returned early on ANY override, so once something redirected the variable
+    # a direct write to `~/.gitconfig` (not via `--global`) went unwatched. It is
+    # the operator's files that matter, and they are watched either way.
+    ov = Path(override)
+    guard_dir = os.environ.get("DEVRC_TEST_GIT_GUARD_DIR")
+    if guard_dir:
+        try:
+            ov.resolve().relative_to(Path(guard_dir).resolve())
+        except (ValueError, OSError):
+            pass          # points somewhere else — a real config, watch it
+        else:
+            return real   # session-owned scratch: watch the operator's, not this
+    return [ov]
 
 
 def protected_git_dirs(starts: "list[Path] | None" = None) -> "list[Path]":
