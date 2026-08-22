@@ -43,16 +43,39 @@ incompatible mechanisms, and `#649`'s covers every consumer of `~`).
 - `ship.sh` converged BOTH hosts and was verified **at the consumer**, not just at the
   deploy: skill store path moved, byte-identical to `origin/main`, new rule present, with a
   positive control on the grep pattern first.
-- Tekton `devrc-ci-pr` was **DEPLOYED and INERT**: live on the EventListener CR (still 7
-  triggers, CEL byte-identical), **0 of 370 pipelineruns**. Root cause found AND fixed
-  2026-08-22 — private org membership, not the CEL. Awaiting the first PipelineRun as proof.
+- Tekton `devrc-ci-pr` is **LIVE AND FIRING** as of 2026-08-22. It was deployed-and-inert at
+  **0 of 370 pipelineruns**; root cause was private org membership, not the CEL (below).
+  🔴 **Verified behaviourally, not by the control:** PR `#706` was opened at 17:45:36Z and
+  `devrc-ci-djm7n` was created at **17:45:38Z — two seconds later**. Two more runs followed
+  for concurrent PRs (`87vck`, `mnxfh`), so it fires for other sessions' PRs too, and devrc
+  PRs now carry **2 status checks** where the repo had 0 checks on every PR ever.
+- **First-run result — the split is real, and it is NOT what this doc predicted:**
+  | leg | verdict | detail |
+  |---|---|---|
+  | `tekton/devrc-nodetests` | **SUCCESS** | suites=4 files=33 tests=1119 pass=1119 (floor 1098) |
+  | `tekton/devrc-pytests` | **FAILURE** | collected=14689 passed=14686 skipped=2 **failed=1** (floor 13400) |
+  🔴 **The single pytests failure is a STALE FLOOR, not the nix-sandbox blocker.** Verbatim:
+  `scripts/signal/tests collected 717 tests but its floor is only 553 … Raise the TARGET_FLOORS
+  entry to "scripts/signal/tests|682"`. The gate computed its own replacement (717 through the
+  documented `m - min(50, max(1, m/20))` rule) so it needs no measurement. **The sandbox
+  blocker described under "the `devrc-pytests` leg" below is GONE** — `seed-nix` exited 0 and
+  14,686 tests ran in-pod. Re-read that section as history before acting on it.
+  ⚠ Note the shape: every *step* exited `rc=0` and only `verdict` exited `rc=1`. The pipeline
+  derives its verdict from **parsed output**, not exit codes — so never read this gate's
+  result off a step's exit status.
 
 ## Open investigations — live diagnosis state
 
-### 🔴 The devrc Tekton gate never fires — `author_association` is CONTRIBUTOR, the CEL demands MEMBER
-- **Symptom + exact repro:** every devrc PR since the trigger went live (23:32Z) produces no
-  PipelineRun. Repro: open any PR against `innovation-upstream/devrc`, then
-  `kubectl -n tekton-ci get pipelineruns | grep devrc` → empty.
+### ~~SUPERSEDED 2026-08-22 — RESOLVED~~ The devrc Tekton gate never fires (kept ONLY for its ruled-out list)
+🔴 **Read the resolution below first — this block is history, not live state.** The gate now
+fires; `devrc-ci-djm7n` ran for the very PR that recorded this. Nothing in this block is a
+current reading. It is kept because its *ruled-out* entries are still load-bearing (they stop
+the next reader re-walking delivery, HMAC and interceptor theories) and because its wrong
+first diagnosis is worth not repeating.
+- **Symptom + repro, AS IT WAS:** every devrc PR from the trigger going live (23:32Z) until
+  2026-08-22 produced no PipelineRun. `kubectl -n tekton-ci get pipelineruns | grep devrc`
+  → empty. **No longer reproducible** — that command is now the success check, not the
+  symptom.
 - **Observed (values):** the CEL live on the CR is
   ```
   header.match('X-GitHub-Event','pull_request') && body.repository.full_name == 'innovation-upstream/devrc'
@@ -82,11 +105,12 @@ incompatible mechanisms, and `#649`'s covers every consumer of `~`).
   upstream signal that discriminates.
 - **Leading hypothesis:** none needed — the cause is measured. What is *open* is the
   DECISION, below.
-- **Next probe (verbatim), once a fix is chosen** — re-check that the payload, not the API,
-  now satisfies the filter:
+- ~~**Next probe**~~ — the scratchpad `payload.sh` it named is **gone** (a session-scoped temp
+  path), so it was never runnable "verbatim" by a later reader. Superseded by the auth/unauth
+  control in the resolution below, which needs no App key and no scratch file. The remaining
+  half is now just the success check:
   ```bash
-  bash /tmp/.../scratchpad/payload.sh ~/workspace/homelab-infra   # prints each CEL clause against the real delivery
-  kubectl -n tekton-ci get pipelineruns | grep devrc              # must become non-empty
+  kubectl -n tekton-ci get pipelineruns | grep devrc   # non-empty since 2026-08-22
   ```
 
 ### ✅ DECIDED 2026-08-22 — the author gate was never wrong; the MEMBERSHIP was invisible
@@ -99,31 +123,73 @@ fell back to `CONTRIBUTOR`. The CEL was stating the correct policy all along.
 SAME PR's `author_association` with and without auth. Different answers ⇒ visibility, not
 policy.
 ```bash
-gh api /repos/innovation-upstream/devrc/pulls/703 | jq -r .author_association          # MEMBER
+gh api /repos/innovation-upstream/devrc/pulls/703 | jq -r .author_association     # was: MEMBER
 curl -sS https://api.github.com/repos/innovation-upstream/devrc/pulls/703 \
-  | jq -r .author_association                                                          # CONTRIBUTOR
+  | jq -r .author_association                                                     # was: CONTRIBUTOR
 ```
 This replaces the `/app/hook/deliveries` route entirely: the unauthenticated read is the
 same viewer-less computation the webhook gets, and needs no App private key.
+
+🔴 **Those annotated outputs are HISTORICAL (before 2026-08-22) and will NOT reproduce today.**
+Post-fix both lines return `MEMBER` — re-measured, twice. A reader who runs the block now gets
+a matching pair and would wrongly conclude the mechanism claim was bogus. **The split
+reappears only if the membership is re-privatised**, which is exactly the failure mode flagged
+at the end of this section — so this block is the right diagnostic to reach for *then*, and
+proves nothing while the gate is healthy.
 
 **Three independent confirmations of the mechanism:**
 1. Auth vs unauth on the same PR at the same instant: `MEMBER` vs `CONTRIBUTOR`.
 2. devrc has **zero direct collaborators** (`?affiliation=direct` → empty), so there was no
    `COLLABORATOR` fallback either — access came solely from the private org-admin role.
-3. 🔴 **The one PR trigger that DOES fire discriminates it.** `gitops-validate-pr` carries the
-   *same* `['OWNER','MEMBER','COLLABORATOR']` clause and works — because it targets
-   `ZacxDev/homelab-infra`, a **personal** repo, where the association is `OWNER` and `OWNER`
-   is viewer-independent. devrc is **org-owned**, so it is the only trigger this can reach.
-   A rule that works on six triggers and fails on the seventh is about the REPO's ownership,
-   not the rule.
+3. 🔴 **The one OTHER PR trigger discriminates it.** `gitops-validate-pr` contains the
+   *identical* `['OWNER','MEMBER','COLLABORATOR']` sub-expression and works — because it
+   targets `ZacxDev/homelab-infra`, a **personal** repo, where the association is `OWNER`, and
+   `OWNER` is viewer-independent. devrc is **org-owned**, so it is the only trigger this can
+   reach. Two precisions that matter if you diff the two filters:
+   - The triggers are **not** otherwise identical — `gitops-validate-pr` adds
+     `|| (user.login == 'renovate[bot]' && user.type == 'Bot')`. That escape hatch is **not**
+     what carries it: homelab-infra PRs #368–#377 are all authored by `ZacxDev`, so those runs
+     genuinely passed through the association clause.
+   - Only **2 of 7** triggers carry an `author_association` clause at all; the other five are
+     `push` triggers, for which the field does not apply. So the shape is "the rule holds on
+     the one personal-repo PR trigger and failed on the one org-repo PR trigger" — not
+     "six versus one".
 
 **Fix applied — publicize the membership, CEL UNCHANGED:**
 ```bash
 gh api -X PUT /orgs/innovation-upstream/public_members/ZacxDev     # reverse: -X DELETE
 ```
 Verified by re-running the control: PRs 701/702/703 all flipped `CONTRIBUTOR` → `MEMBER`
-unauthenticated, with **no change to the CEL, the trigger, or homelab-infra**. The reviewed
-security posture is preserved exactly; nothing was widened.
+unauthenticated, with **no change to the CEL, the trigger, or homelab-infra**.
+
+🔴 **Phrase the effect precisely — "nothing was widened" is true of the CEL and overstated as
+a whole.** The *policy* was not widened: not one token of the filter changed. But the set of
+principals who can actually fire a code-executing pipeline went from **∅ to {ZacxDev}**. That
+is the entire intended effect, and it is still a change in effective reach. Say "the policy
+was not widened; the set it admits went from empty to its intended member."
+
+⚠ **The cost this fix carries, which must not be left implicit:** publicizing org membership
+is a **permanent, unauthenticated, public disclosure** linking a personal GitHub identity to a
+client-bearing org, across every public repo the org owns. That cuts against this repo's own
+posture — the table above records `#622` *redacting a real client subdomain from this same
+public repo*. It was accepted knowingly; it is not free, and it is reversible
+(`gh api -X DELETE /orgs/innovation-upstream/public_members/ZacxDev`).
+
+🔴 **A better option existed and was NOT considered at decision time** (found by the
+post-merge audit, recorded so it is not lost): keep the association clause **and add a named
+exception as a disjunct** — precisely the shape `gitops-validate-pr` already uses for
+`renovate[bot]`:
+```
+(body.pull_request.author_association in ['OWNER','MEMBER','COLLABORATOR']
+ || body.pull_request.user.login == 'ZacxDev')
+```
+This has none of the failure modes listed under "Rejected" below — the association clause
+stays load-bearing, so a genuine second org member still gets a run — **and** it needs no
+public disclosure. The precedent was sitting in the very CEL cited as confirmation #3. If the
+disclosure is ever judged too expensive, this is the swap to make.
+A third, unmeasured candidate: adding `ZacxDev` as a **direct collaborator** would yield
+`COLLABORATOR`, already in the allowed set, also without org-wide disclosure — untested,
+because verifying it requires mutating collaborators.
 
 **Rejected, and why — keep these written down, they will be re-proposed:**
 - *Add `'CONTRIBUTOR'`.* Safe only because `head.repo.full_name` pins the branch in-repo
@@ -138,12 +204,18 @@ security posture is preserved exactly; nothing was widened.
 setting**, which lives nowhere in this repo and no test can see. If the gate goes inert
 again, run the auth-vs-unauth control FIRST — before touching any CEL.
 
-### The `devrc-pytests` leg must NOT be made required yet
-`tekton/devrc-nodetests` can be required immediately. `devrc-pytests` has **1 known
-environment failure**: the nix sandbox does not exist in the pod, and all three levers
-(`privileged`, `CAP_SYS_ADMIN`, `seccomp Unconfined`) are rejected by PodSecurity
-`baseline:latest` — each verified by an actually-rejected PipelineRun. Requiring it now
-would be the permanently-red gate. Options documented in homelab-infra `#370`.
+### ~~The `devrc-pytests` leg must NOT be made required yet~~ — STALE as of the first real run
+🔴 **This section's premise was overtaken by evidence; do not act on it without re-measuring.**
+It read: `devrc-pytests` has 1 known environment failure — the nix sandbox does not exist in
+the pod, and all three levers (`privileged`, `CAP_SYS_ADMIN`, `seccomp Unconfined`) are
+rejected by PodSecurity `baseline:latest`, each verified by an actually-rejected PipelineRun;
+requiring it would be the permanently-red gate. Options documented in homelab-infra `#370`.
+
+**What the first real run measured instead (2026-08-22, `devrc-ci-djm7n`):** `seed-nix` exited
+**0** and **14,686 pytests passed in-pod**. Whatever closed the sandbox gap, it is closed. The
+single failure was a stale `TARGET_FLOORS` entry, not the environment. The *conclusion* may
+still be right — one run is not a stability claim — but the *reason* recorded here is no
+longer true, and a permanently-red gate is no longer the expected outcome. See step 2.
 
 ## Next steps (ranked)
 1. ✅ **Author gate decided and applied** (block above) — membership publicized, CEL untouched,
@@ -152,22 +224,61 @@ would be the permanently-red gate. Options documented in homelab-infra `#370`.
    must become non-empty. 🔴 The unauth control flipping to `MEMBER` is evidence about the
    API's viewer-less computation — **it is not a PipelineRun**. Do not call this verified
    until a run exists.
-2. **Require `tekton/devrc-nodetests` only.** Not `devrc-pytests`.
-2b. 🔴 **The SessionStart hook syncs `CLAUDE.md` from `origin/trunk`, but devrc's default
-   branch is `main`, and they have DIVERGED** (measured 2026-08-22: 14 commits in `main` not
-   in `trunk`, 3 the other way). It lands **staged** in the base clone, so a careless commit
-   ships it. Measured damage: it reverted merged PR #702 (`4ea2405d`) — restoring the flat
-   claim "a gate SHIPS IN THIS REPO, **uninstalled**" that #702 recorded as *measured FALSE*,
-   and deleting the 🔴 #322 warning that a pre-push gate rewrote a branch mid-push. Every
-   session in this repo starts with that regression staged. Fix the hook's ref; until then
-   `git checkout origin/main -- CLAUDE.md` at session start.
-3. **3 commits authored `T <t@example.com>`** are on 3 feature branches (`zach/requires-env-skip-pins`,
-   `zach/handoff-doc-rollback-on-blocked-commit`, `fix/guard-msg-convention-not-structural`) —
-   one `git commit --amend --author=…` + force-push each, **by their owner**. 26 more are on
-   the preserved incident branch and are *supposed* to carry it.
+2. **Require `tekton/devrc-nodetests` now** — it went green on the first real run (1119/1119).
+   🔴 **Re-open the `devrc-pytests` question: its stated blocker no longer exists.** The first
+   run shows the nix sandbox WORKING in-pod (`seed-nix` rc=0; 14,686 tests passed), so the
+   "cannot be required" verdict below is stale. Its one failure is a **stale floor**, fixable
+   in one line — raise `TARGET_FLOORS` to `scripts/signal/tests|682`. Fix that, watch pytests
+   go green across a few runs, *then* decide. Do not require it on one observation.
+2c. **`CLAUDE.md` is now falsified by this work and its own gate cannot see it.** On
+   `origin/main` it still asserts "**NO AUTOMATED GATE IS RUNNING**", "no Tekton trigger names
+   devrc", and "`statusCheckRollup` returns **0 checks** on every PR" — all three measurably
+   false now. `scripts/tests/test_ci_claim_matches_reality.py` will **not** catch it: it
+   accepts `{none, other}` when no GitHub Actions workflow exists and its header says it
+   cannot see Tekton. So flip the marker to `<!-- merge-gate: other -->` (the value that
+   exists precisely for a gate this test cannot observe) and rewrite those sentences by hand.
+2b. ✅ **FIXED — a stale `origin/HEAD`, NOT a hook bug.** Symptom: the SessionStart hook synced
+   `CLAUDE.md` from `origin/trunk` though devrc's default branch is `main`, and the two had
+   **DIVERGED** (measured 2026-08-22: 14 commits in `main` not in `trunk`, 3 the other way).
+   It lands **staged** in the base clone, so a careless commit ships it. Measured damage: it
+   reverted merged PR #702 (`4ea2405d`) — restoring the flat claim "a gate SHIPS IN THIS REPO,
+   **uninstalled**" that #702 recorded as *measured FALSE*, and deleting the 🔴 #322 warning
+   that a pre-push gate rewrote a branch mid-push.
+   🔴 **The obvious fix was the wrong one.** The hook — `~/.claude/local-hooks/base-clone-
+   staleness.sh:40-43`, which is **outside this repo, unmanaged and per-host** — hardcodes no
+   ref at all. It prefers the branch's `@{upstream}` and falls back to
+   `refs/remotes/origin/HEAD`. Two conditions had to coincide: the base clone was on a
+   **detached HEAD** (so no `@{upstream}`), and its `refs/remotes/origin/HEAD` was **stale at
+   `origin/trunk`**. Editing the hook would have broken it for every other repo.
+   **Fix applied:** `git -C ~/workspace/devrc remote set-head origin -a` → now `origin/main`.
+   ⚠ Per-clone and per-host: the laptop, and any fresh clone, can still inherit the wrong
+   pointer. `git symbolic-ref --short refs/remotes/origin/HEAD` is the check.
+3. **Fixture-author commits — 2 of the 3 branches are GONE; re-measure before acting.**
+   Measured 2026-08-22 with `git ls-remote --exit-code --heads origin <branch>`:
+   `zach/requires-env-skip-pins` **still exists** (1 commit); `zach/handoff-doc-rollback-on-
+   blocked-commit` and `fix/guard-msg-convention-not-structural` are **gone from origin**. So
+   only one `git commit --amend --author=…` + force-push remains, **by its owner**. 26 more
+   are on the preserved incident branch and are *supposed* to carry it.
 4. **Fix `check-tekton-app-install.sh`'s `CDPATH` bug** (homelab-infra): `HERE="$(cd -- … && pwd)"`
    returns TWO lines when `CDPATH` is set, because bash's `cd` echoes the target. Use
    `cd -- "$d" >/dev/null && pwd`.
+
+### 🔴 `origin/trunk` is TEST-FIXTURE DEBRIS on a PUBLIC repo — pending deletion
+The wrong-`origin/HEAD` in 2b only did damage because the branch it pointed at exists. What it
+is, measured 2026-08-22:
+- Tip `ff6b2ca3` — author **`t <t@t>`**, message `seed`, adds a single file `seed.py`. That is
+  a fixture commit, pushed **2026-08-21**, the date of the test-tier incidents (#673/#683/#689
+  — "a test rewrote the operator's clone and pushed fixture commits to the REAL origin").
+  `seed.py` is absent from `main`.
+- Underneath it sit **two genuine commits** — `0bf1b324`, `276d56eb` (`handoff_doc` work).
+- 🔴 **They are already in `main`, and ancestry says otherwise.** `merge-base --is-ancestor`
+  answers **NO** for both, because they landed by **squash**. Checked by CONTENT instead: all
+  **9** symbols they introduce (`_undo_write`, `_block_commits`,
+  `TestBlockedCommitLeavesNoTrace` + 6 tests) are present in `main`. Nothing is orphaned.
+  This is the squash/ancestry trap in `claude/RULES.md` firing on a real branch — the "NO"
+  reads as "unmerged, don't delete", and it is wrong.
+- **Recovery sha if deletion is regretted:** `ff6b2ca39b5d228aa77243dee2f930a2cfe025fd`
+  (`git push origin ff6b2ca3:refs/heads/trunk`).
 
 ## Gotchas / decisions / dead-ends
 
