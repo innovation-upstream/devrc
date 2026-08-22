@@ -70,7 +70,10 @@
 // that fires too often on a mutation family is a far better failure than an
 // `ask` that never fires on the spelling an operator actually types.
 //
-// 🔴 ONE DELIBERATE EXCEPTION, and it is the only one: the two `age` decrypt
+// 🔴 ONE DELIBERATE EXCEPTION — the only rule ever narrowed AWAY from a
+// working infix form (several rules, e.g. `*chmod -R*`, `*dd if=*`, `*sudo *`,
+// were written binary-plus-literal-flag from the start; this is not a claim
+// that every other pattern is infix): the two `age` decrypt
 // rules are `*age -d*` / `*age --decrypt*` — leading-`*` but NOT infix. The
 // infix form `*age*-d*` matched any text with "age" followed LATER by "-d",
 // and "age" is a substring of package, packages, image, message, storage and
@@ -268,8 +271,12 @@
       // sops stays INFIX on purpose, unlike its age neighbours below: "sops" is
       // not a substring of ordinary words or paths, so the over-match that
       // forced the age narrowing does not arise here, and the infix form buys a
-      // real spelling — `sops --config .sops.yaml -d f` (pinned in MUST_ASK).
-      // Do not narrow these for symmetry with age.
+      // real spelling — `sops --config .sops.yaml -d f`, which the narrowed form
+      // would let through. That spelling is pinned as the CONTRAST case inside
+      // `test_age_glob_misses_these_reordered_decrypt_spellings` (not in
+      // MUST_ASK — do not go looking for it there), and independently by
+      // `test_every_ask_rule_is_individually_pinned`, which also goes red if
+      // these are narrowed. Do not narrow them for symmetry with age.
       "*sops*-d*": "ask",
       "*sops*--decrypt*": "ask",
       "*sops*exec-env*": "ask",
@@ -291,7 +298,8 @@
       "*home-manager*switch*": "ask",
       // 🔴 LOAD-BEARING — do not delete it as "already covered".
       // `"*age -d*"` DOES match some spellings of this command by pure
-      // coincidence ("nix-collect-gar(BAGE) -d" ends in the literal "age -d"),
+      // coincidence ("nix-collect-gar(BAGE) -d" CONTAINS the literal "age -d" —
+      // it need not end with it, `… -d --max-freed 1G` matches too),
       // but ONLY those spelling the flag immediately after the word ending in
       // "age". MEASURED: with this rule deleted, `nix-collect-garbage`
       // and `nix-collect-garbage --max-freed 1G` both resolve ALLOW at both
