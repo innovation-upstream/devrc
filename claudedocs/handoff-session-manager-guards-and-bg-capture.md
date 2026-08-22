@@ -50,7 +50,42 @@ ClickUp ticket nobody has started.
 
 ## Open investigations — live diagnosis state
 
-### `check-clickup-addressed`'s "nobody is on it and someone is waiting" flag fires over comments you already answered
+### ✅ CLOSED 2026-08-22 — `check-clickup-addressed`'s waiting-flag false positive
+**talos-infra PR #1242**, branch `zach/ccaddr-waiting-answered-in-ticket`, **open, not merged.**
+The leading hypothesis below was confirmed exactly: `recent-comments.py` filters out the
+operator's own comments, and the flag consumed that filtered list as "the newest comment"
+while looking only at transcripts for an answer.
+
+- **Fix:** `my_latest_own_comment()` computes the operator's newest reply *before* the filter
+  destroys it; it rides to the consumer as a task-level `my_latest_reply`. Suppress only when
+  it is **strictly** newer (a tie to the minute still fires). The key being **absent** is a
+  third state — *not measured* — which still fires but withholds the words "nobody has
+  answered" in favour of `NOT CHECKED (<reason>)`. Reachable, not theoretical: with no
+  operator id resolved the author filter is not running either.
+- **Corpus first, per that skill's standing rule:** `test_corpus.py` gained a second labelled
+  set, `WAITING_CORPUS` (7 record-shaped cases). Red at `origin/trunk d6d91d56b`
+  (**157 passed / 8 failed**, waiting corpus **3/7**), green at HEAD (**165 / 0**).
+- **Mutation sweep 9/9 killed**, each by a named test. The seam mutant (the
+  `carry_my_latest_reply` copy dropped) is killed by **exactly one** of the 165 — that seam
+  test is the only thing that can see a producer↔consumer rename.
+- **Live:** the exact failing command re-run — the `868kuam02` WAITING line is gone while the
+  other two flags still fire, so the report was not merely silenced. That confirms the
+  suppression direction only; nothing in range currently has zero transcript evidence, so the
+  still-fires direction rests on the corpus + the seam positive control.
+- 🔴 **The primary clone `$DATAPACKET` still holds these edits UNCOMMITTED** (byte-identical
+  to the PR branch), so the tool there runs the fixed code today. The `base-clone-staleness.sh`
+  SessionStart hook will report them as local edits and skip them until #1242 merges — that is
+  correct, not drift. **Do not "rescue" or revert them.**
+- **Found, not fixed:** (a) `run_clickup`'s 120 s `subprocess.run` timeout raises **uncaught** —
+  one intermediate run exited 1 with empty stdout and the caller printed `Error fetching
+  comments:` with no body; a transient API slowdown reads as a hard failure. (b)
+  `~/.config/opencode/skills/check-clickup-addressed/` is a **forked, un-symlinked copy** last
+  touched 2026-08-19 (`check-addressed.py` 5.8 KB vs 45 KB in the repo) that predates the
+  waiting flag entirely — a second copy of this tool drifting on its own.
+
+<details><summary>Original diagnosis (kept — it is what the fix confirmed)</summary>
+
+#### `check-clickup-addressed`'s "nobody is on it and someone is waiting" flag fires over comments you already answered
 - **Symptom + exact repro:**
   `python3 $DATAPACKET/.claude/skills/check-clickup-addressed/scripts/check-addressed.py --limit 5`
   emitted, in **Needs a decision**:
@@ -79,10 +114,12 @@ ClickUp ticket nobody has started.
   and add the case to `test/test_corpus.py` **before** changing code (that skill's standing
   rule: score it, don't argue from the example).
 
+</details>
+
 ## Next steps (ranked)
-1. **Fix the waiting-flag false positive above** in `check-clickup-addressed` — it is the
-   single flag most likely to send someone at a ticket that is already handled, and it is
-   ~one predicate. Add the labelled case to `test/test_corpus.py` first.
+1. **Review/merge talos-infra #1242** (the waiting-flag fix above). Not merged — `/audit-pr 1242`
+   was offered and not yet run. After it merges, the `$DATAPACKET` primary clone's uncommitted
+   copies stop being local edits and the SessionStart hook refreshes them on its own.
 2. **`868kv67jf` — image-width ladder.** Start with scope item 3: the two app copies
    (`apps/creator-studio/…`, `apps/moderator/…`) contain **neither** `OPTIMIZED_WIDTH_THRESHOLD`
    nor `shouldForceOptimized`, which `src/client-utils/edge-url.ts` documents as "load-bearing
