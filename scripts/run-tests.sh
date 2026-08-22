@@ -1226,7 +1226,20 @@ TARGET_FLOORS=(
   # rots is silent: an anchor stops matching, the mutant never lands, and the
   # run prints ANCHOR-MISS, which reads like a hiccup rather than "this mutant
   # tested nothing". That has already happened here once.
-  "scripts/signal/tests|553"
+  # 2026-08-22: 717 tripped the ceiling at 691 with every test PASSING (716 passed,
+  # 1 skipped — the pre-existing SIGNAL_PG_DSN skip, so EXPECTED_SKIPS is untouched).
+  # The gate printed "scripts/signal/tests|682" and that is what is below, copied not
+  # computed. 🔴 FIRST DRIFT CAUGHT BY THE TEKTON GATE RATHER THAN BY HAND — this is
+  # the devrc-pytests leg of devrc-ci-djm7n, the first PipelineRun the repo has ever
+  # had, and the drift ceiling was the ONLY thing it failed on. The floor had fallen
+  # 164 behind: a whole suite could have vanished under it while the gate stayed
+  # green. The 135 new tests since the last raise come from four merged PRs —
+  # the outbound group draft linked to a phantom contact instead of its GROUP (#686),
+  # the D3 send path that had never worked on real Postgres because COALESCE mixed
+  # uuid and text (#657), two liveness tests that waited on the CLOCK and lost the
+  # race (#628), and keeping the mutation battery in-repo after eight were written
+  # into scratchpads and thrown away (#606).
+  "scripts/signal/tests|682"
   "scripts/initiatives/tests|745"
   "scripts/repo-cos/tests|315"
   "scripts/task-spec-drafter/tests|135"
