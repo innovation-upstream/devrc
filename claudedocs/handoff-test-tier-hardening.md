@@ -156,40 +156,52 @@ that incident, the two guards written against it, and two PRs parked by the free
 
 ## State now
 
-**Branch:** base clone on `main` @ `295753ae`, **behind origin/main by 2**. Three untracked
-files, none mine (`handoff-espanso-audit-gate.md`, two `nix/system/apply-*.sh`).
+**Branch:** base clone on `main` @ `a0fb39c7`, clean except one other session's
+`M scripts/session-analysis/initiative-scan.py` and five untracked files (not mine).
 
-**DONE — merged AND shipped, all seven verified present after the wipe+restore:**
+🔴 **THE GUARD-STRATEGY QUESTION IS CLOSED. Both surviving guards are ON `main`.**
 
-| PR | what |
-|---|---|
-| #579 | `tmux-scratch-slots.sh` documented an i3 chord bound to nothing |
-| #582 | `session-write` — the four tmux write verbs behind one validated wrapper |
-| #601 | seven holes in #582's test battery |
-| #608 | scanner skip-lists — a live red gate, 2 of 4 copies stale |
-| #611 | `grep -r` honours `.gitignore` → `claude/RULES.md` |
-| #620 | `ship.sh` verified artifacts RESOLVE but not that they are CURRENT (rc 13) |
-| #628 | `test_liveness.py` flake — timing dependency removed |
+| PR | verdict | landed |
+|---|---|---|
+| **#683** GUARD 9 — strip the 11 repo-pointer env vars + fingerprint detector | ✅ MERGED | `dfd2d203` |
+| **#673** GUARD 10 — `GIT_CONFIG_GLOBAL` throwaway + `GIT_ALLOW_PROTOCOL=file` | ✅ MERGED | `4dd14e68` |
+| **#720** audit follow-ups on #683 | ✅ MERGED | closes the seam below |
+| **#676** interceptor (`nogit.py`, 1758 lines) | 🔴 CLOSED | superseded |
+| **#689** interceptor (`norepo.py`, 1358 lines) | 🔴 CLOSED | superseded |
+| **#716** the `${VAR:-default}` guards salvaged out of #689 | ✅ MERGED | `3be3d048` |
+| **#718** the CI-claim guard's own docstring had gone stale | ✅ MERGED | `b0afd63f` |
 
-The **original objective is complete and validated**: `scripts/session-write` is in
-`origin/main`, all four verbs present, and the audited `\x0f` bypass is REFUSED on this
-host while a legitimate payload is accepted (exercised on the live path, not inferred).
+**The decision, and it is not "one guard won":** converge on the ENV-LEVER architecture,
+close the INTERCEPTOR family. #683 and #673 are complementary and both shipped — #683 owns
+*which repo git lands in*, #673 owns *which config git writes* and *whether git can reach
+the network*. Those are the two phases of the 2026-08-21 incident (local corruption 19:21,
+remote push storm 19:28). **`main` now closes both.**
 
-**IN FLIGHT / PARKED:**
+**Why the interceptors lost — an UNBOUNDED surface, not effort.** Measured: **14 of git's
+181 dispatch names take a repository POSITIONALLY** by synopsis alone (`upload-pack`,
+`receive-pack`, `fetch-pack`, `send-pack`, `upload-archive`, `clone`, `init`, `init-db`,
+`archive`, `fetch`, `pull`, `push`, `ls-remote`, `mailsplit`), plus an open-ended set of
+destination-bearing *options* across all 181 — #676's `collect_extra_dests` covered 4 verbs
+and missed 3. Every bounded formulation fails: enumerating verbs buys the next audit round;
+default-deny false-refuses 167 verbs (permanently red); resolving with real git *is* the
+measured 8.85× overhead and still cannot see `git-upload-pack <dir>`. 🔴 **This SUPERSEDES
+this doc's earlier "SPLIT recommendation" that #689 continue if someone took the positional
+problem knowingly** — the positional problem was the cheapest part of that surface.
 
-- **#630** — merged at `19:28:30Z` *inside the wipe window*; the restore rolled `main` back
-  past it. GitHub says MERGED, `main` does not contain it. Branch survives at `bd05708d`.
-  Its enforcement fix is written but **was never pushed** — see the salvage note below.
-- **#632** — `OPEN MERGEABLE`, gated green, two audit rounds clean. Parked on the freeze only.
-- **#676** — `OPEN MERGEABLE`, **needs rework**, seven measured bypasses.
-- **#689** — another session's runner-layer guard. Not mine. Also unmerged.
+**Gate evidence, standalone clones with `origin` removed:**
 
-**Deploy status:** nothing shipped since the seven above. Both hosts were converged and
-consumer-verified at that point.
+```
+control  pristine main a34d695d       14689 collected /  0 failed   scripts/tests 687.7s  PASS
+main + #683                           14721 collected /  0 failed   scripts/tests 699.6s  PASS   (+1.7%)
+main + #683 + #673 (hand-merged)      14766 collected / 39 failed                        FAIL   <- the seam
+main f3244aa8 + #716 + #718           15080 collected /  0 failed                        PASS
+```
 
-🔴 **A FREEZE is in force**: do not run `scripts/run-tests.sh` or
-`nix build .#checks.x86_64-linux.pytests` against `~/workspace/devrc` or any worktree of it.
-Gate in a **standalone clone with `origin` removed** — disposable, therefore safe.
+🔴 **`main` is GREEN.** Every "main is RED" claim in this doc's earlier sections, and in
+PRs #708/#710/#713, is STALE — #708 fixed the signal floor and #722 fixed the CI red.
+
+**Deploy status:** nothing shipped to either host this session. All of the above is merged
+to `origin/main` and NOT deployed — `ship.sh` has not run. Merged ≠ deployed.
 
 ## Open investigations — live diagnosis state
 
@@ -377,20 +389,77 @@ newest fixture-shaped reflog entry: 14:42:12 "commit: seed"   ← no recurrence 
 - 🔴 **`DEVRC_GITENV_PROTECT` is a one-variable defeat of the whole detection half, and no runner unsets it — it is not in `REPO_POINTER_VARS`.** Measured triple, same escaping test: correct ⇒ `protected-git-dirs=1`, RED with the guard's own token ✅ · `":"` ⇒ `protected-git-dirs=0`, **GREEN**, branch actually created · `/nonexistent/x` ⇒ **`protected-git-dirs=1` AND GREEN** while the repo was mutated — **the marker line actively lies**. That reintroduces "one inherited env var defeats every layer" *inside the fix for it*.
 - **Also unswept:** the second entry point covers **1 of 7 conftests**, and not `scripts/claude-hooks/tests/conftest.py` — where the plugin's own rationale says import-time arming matters. Five semantic mutants of the fingerprint's *content* SURVIVE a green suite (dropping `HEAD`, `packed-refs`, `ORIG_HEAD`+`logs/HEAD`; either `starts` reduction); its docstring claims a HEAD-move row that does not exist, and `packed-refs` never exists in any fixture — while the incident's `DELETED refs/heads/main` on a **packed** ref is exactly that case. "12/12 mutants killed" is true of the plumbing mutants chosen and says nothing about the detector's content.
 
+### ✅ RESOLVED — the #683/#673 seam (kept because the mechanism is the lesson)
+- **Symptom:** stacking #673 onto #683 produced **exactly one error in every one of the 26
+  pytest targets**, always at the teardown of whichever test ran FIRST (`.E...`), always
+  `DEVRC-GITENV-VIOLATION … CHANGED <tmp>/gitconfig`.
+- **Mechanism:** #683's detector fingerprints the user-level git config via
+  `global_config_paths()`, which reads `GIT_CONFIG_GLOBAL` — the variable **#673 sets** to
+  its throwaway and then **writes to from its own positive control**. Neither guard was
+  wrong; **#683 was watching a file #673 legitimately writes.**
+- **Both were mutation-tested and audit-clean ALONE.** Textbook `claude/RULES.md` →
+  *"verified in isolation is the new vacuous green — the defect lives in the SEAM nobody owns."*
+- **Fixed on `main` by #720**, on the watcher's side and in a STRICTLY STRONGER form than
+  recommended: `gitenv.py` now skips a *scratch redirect* while still watching the
+  operator's real `~/.gitconfig`. The old code returned early on ANY override, so once
+  something redirected the variable a direct write to `~/.gitconfig` went unwatched.
+  See the comment at `scripts/testlib/gitenv.py` (`A REDIRECT BY THE HARNESS IS NOT A
+  CONFIG TO PROTECT`). #673 was renumbered to **GUARD 10**, as recommended.
+
+### 🟡 OPEN — #683's detector attributes a CONCURRENT SESSION's write to a test
+- **Observed, in practice:** a bare `pytest` whose **cwd is the live clone** went red with
+  `DEVRC-GITENV-VIOLATION` because another session ran a `git checkout` mid-run —
+  `logs/HEAD` is fingerprinted. Re-running passed.
+- **Ruled out:** that it was my change (re-ran clean); that it is a gate problem (the gate
+  runs in a contained clone, where it cannot happen).
+- **Leading hypothesis:** #720's title says the detector "blamed TESTS for a repository with
+  30 other writers", so this class is *known* upstream — but whether #720 fully closes the
+  concurrent-session case, as opposed to the writer-attribution case, is **NOT verified here**.
+- **Next probe:** `git -C <clone> log -1 --format=%H origin/main` then run a bare
+  `pytest scripts/tests/test_skill_descriptions.py` with cwd = the live base clone while a
+  second session commits; see whether GUARD 9 still fails the running test.
+
+### 🟡 OPEN — #493 reaps ~11% of `/tmp`'s machine-generated entries
+- **Observed:** #493's globs cover **6,775** live entries. `nix-shell-*` requires a literal
+  hyphen and therefore **cannot match `nix-shell.<mktemp>`** — which is **3,178** entries,
+  outnumbering the hyphen form 3:1, and is the form `gate.sh` produces on every agent run.
+  Uncovered besides: `cgparent-*` 17,064 · `fx-excerpt-*` 14,012 · `cbf-*` 5,268 ·
+  `tmp.*` 4,227 · `refresh-cli-snapshot-*` 3,370 · `bap-*` 2,634 · `cb-step-*` 2,495 ·
+  `ab-redir-*` 2,140. ≈54,000 uncovered vs 6,775 covered.
+- **Ruled out:** that this was the disk problem — see the incident block below.
+- **Next probe:** add `"e /tmp/nix-shell.* - - - m:7d"` to
+  `nix/system/apply-tmp-churn-retention.sh`. Posted as a comment on #493. 🔴 **It is a
+  `nix/system/apply-*.sh` — Claude CANNOT apply it; it is staged for `sudo`.**
+
+### ✅ RESOLVED — the disk hit 99% and turned the merge gate RED
+- **Symptom:** `OSError: [Errno 28] No space left on device` in
+  `test_agent_ledger_hook.py` during a gate run. **Not a code defect.**
+- **Root cause:** `/tmp` was **766.7 GiB**, of which `/tmp/mutate` was **587.9 GiB** —
+  `/tmp/mutate/work/clusters-app/proc` alone was **582 GiB**, a recursive copy of a rootfs
+  that included `/proc`, so three `pagemap` pseudo-files materialised at 257 G + 257 G + 70 G.
+- 🔴 **Verified genuinely allocated, not sparse**, before acting: `find -printf %s` reports
+  APPARENT size and `/proc/*/pagemap` is a pseudo-file, so the obvious reading is wrong.
+  536,879,872 × 512-byte blocks, and `du` real usage agrees. **Always check allocated
+  blocks before quoting a `/proc`-derived size.**
+- **Deleted with the operator's approval; 97% → 63%, 581 GiB freed.** `var/` (6.6 G, k3s
+  state + coredumps) deliberately kept. A directory literally named `&&` survives in that
+  tree — a shell-quoting bug in whatever ran the copy.
+- 🔴 **RETRACTED, mine:** I estimated the stale `nix-shell.*` dirs at ~52 GiB by multiplying
+  a sample MEAN over a heavy-tailed distribution. Reaping all 1,305 of them freed **1.4 GiB**.
+  The large dirs are the RECENT, in-use ones; the old ones are ~1 MB. The median (996 KiB)
+  was in front of me and I extrapolated from the mean anyway.
+
 ## Next steps (ranked)
-1. **Land `d43e425a` ONLY, from `salvage/630-enforcement-2026-08-21`** — **not** `7de0e21b`,
-   which #696 superseded (see the RESOLVED block above; same three files, so it conflicts).
-   Re-run **both** tiers in a contained clone first. Then push to
-   `fix/managed-path-wrong-writer` and **re-merge**. Re-verified against the current
-   `origin/main` (`454550a`), by content and not ancestry: `scripts/tests/test_githooks_
-   install.py` is **ABSENT** and `CODE_RE` still reads `^(scripts/|flake\.nix$|flake\.lock$)`
-   with no `nix/` — so GitHub still claims work exists that `main` does not contain.
-2. ~~Fix `main`'s hermetic red~~ — **DONE by #696 `6439921`, already on `main`.** Nothing owed.
-3. **#676 rework** — 🔴-4 first (the guard is worse than no guard on that path), then 🔴-1/-2,
-   then 🔴-5 by name across 181 entries, verified on both hosts.
-4. **#632** — unblock when the freeze lifts. It is green and twice-audited; nothing else is owed.
-5. **Decide the freeze-lift sequence.** Suggested: branch protection (done) → stop unowned tier
-   runs → repair holds for a measured interval → guards. The guards are the last step, not the gate.
+
+1. **Deploy.** Everything above is on `origin/main` and on NEITHER host. `scripts/ship.sh`.
+   🔴 Read every per-host line, not the final verdict.
+2. **#493 — add the `nix-shell.*` glob**, then hand the operator
+   `sudo bash nix/system/apply-tmp-churn-retention.sh`. Claude cannot apply it.
+3. **#632** — `OPEN`, gated green and twice-audited when written, **now ~90 commits behind**.
+   Re-gate on the merged tree before believing that.
+4. **Verify the concurrent-session detector case** (probe above) — decide whether #720
+   closed it or only the writer-attribution half.
+5. **#701 (this doc)** — still OPEN. Land it.
 
 ## Gotchas / decisions / dead-ends
 
@@ -450,28 +519,71 @@ newest fixture-shaped reflog entry: 14:42:12 "commit: seed"   ← no recurrence 
 - **A test's structural check matched its own explanatory COMMENT three separate times** in this work — a guard reading the documentation and reporting on the code. Each is now scoped to code.
 - **`--force-with-lease=<ref>:<sha>`, never bare `--force`** — and verify the discarded head carried no unique work first (here: `36ff9e3` and `ae7ae82` touched identical files; the only delta was 12 lines absorbed from main's #687).
 
+- 🔴 **`os.kill(pid, 0)` SUCCEEDS on a zombie** — not a liveness check, and which way it is
+  wrong is decided by whatever PID 1 is. `devrc-ci` was red on its first **5 of 5** runs on
+  this alone (#722). A dev-host green was never evidence about CI.
+- 🔴 **A check that RUNS is not a check that GATES.** Tekton now posts
+  `tekton/devrc-pytests`/`-nodetests` on devrc PRs, and `main` DOES carry branch protection
+  — but with **no `required_status_checks`**, so nothing blocks. Proved behaviourally: #707
+  merged **28 minutes** after its check went RED, #711 two minutes after. The marker is
+  `other` (#723). 🔴 **My call of `none` was overruled and `other` is right** — the marker's
+  own docs name Tekton as an `other` trigger.
+- 🔴 **A mutant that SURVIVES may be a broken MUTANT, not a sound guard.** One of mine
+  scored SURVIVED because it inserted the unrelated `exit` INSIDE the guard rather than
+  after the `fi`, so it was never the case being tested. Rebuilt against the verbatim guard
+  text, it died. **Validate the battery before scoring it** — I nearly reported a hole that
+  did not exist.
+- 🔴 **I fixed a SPELLED guard by writing a spelled guard.** #716's terminator assertion did
+  `window.rsplit("if ", 1)[-1]` — splitting on the last literal `"if "` anywhere in the
+  window, prose included, then running past the guard's own `fi`. Three mutants walked it,
+  and the condition half was satisfied by a guard existing only as a COMMENT. Now
+  comment-stripped and bounded at the matching `fi` by depth-counting.
+- 🔴 **A mis-classification in a waiver list is worse than an omission** — it reads as
+  "considered and cleared". I filed `run-sync.sh`'s `KUBECONFIG` as read-only because
+  "kubectl reads"; `sync.py` runs `CREATE TABLE`/`DROP VIEW`/`DELETE`/`INSERT` over it.
+  Removed the mechanism rather than patching the entry.
+- 🔴 **zsh, twice, both silent:** `mapfile` does not exist, so a liveness scan returned an
+  empty set and printed a confident "no live process references it" — caught ONLY by a
+  positive control that demanded my own scratchpad appear. And **backticks inside a
+  double-quoted string are command-substituted**, which ate several terms from a commit
+  message. Use `-F <file>` / `--body-file`.
+- 🔴 **A squash merge makes the branch head permanently a NON-ancestor.** Verify a landing
+  by CONTENT (`git cat-file -e origin/main:<path>`, grep the guard), never by
+  `merge-base --is-ancestor`.
+- **`grep` cannot tell a QUOTED claim from an ASSERTED one.** My check for "did the stale
+  sentence survive?" found it and was wrong — it survives only inside `It used to
+  continue: "…"`, immediately followed by the correction. Read the context.
+- **The base clone is genuinely shared** — during this session other sessions landed #715,
+  #722, #723, #724, #720, #673, #714, switched its branch to `rules/proactivity-gate`
+  mid-operation, and left uncommitted edits to `claude/RULES.md`. **Every commit here was
+  made in a contained `/tmp` clone and every push was ref-explicit** (`git push origin
+  <local>:<remote>`), which is the only reason none of that mattered.
+- **`/tmp/claude-1000` is 52.7 GiB** of agent scratchpads across sessions, and several
+  `/tmp/wt-*` worktrees persist. Untouched — other sessions' state.
+
 ## How to verify
+
 ```bash
-# the shipped objective, on the live path (not inferred from the deploy)
-python3 - <<'PY'
-import importlib.machinery, importlib.util, sys
-p="/home/zach/workspace/devrc/scripts/session-write"
-s=importlib.util.spec_from_loader("sw", importlib.machinery.SourceFileLoader("sw",p))
-m=importlib.util.module_from_spec(s); sys.modules["sw"]=m; s.loader.exec_module(m)
-print("ctrl-O:", "REFUSED" if m.validate_text("echo X\x0f") else "ACCEPTED")
-print("legit :", "accepted" if m.validate_text("restart the poller") is None else "refused")
-PY
+# both guards are on main, by CONTENT (a squash merge breaks ancestry forever)
+git -C ~/workspace/devrc cat-file -e origin/main:scripts/testlib/gitenv.py      && echo "GUARD 9  present"
+git -C ~/workspace/devrc cat-file -e origin/main:scripts/testlib/nogit_plugin.py && echo "GUARD 10 present"
+git -C ~/workspace/devrc show origin/main:scripts/run-tests.sh | grep -c 'gitenv_plugin\|nogit_plugin'   # expect 2+
 
-# the salvaged #630 work is preserved
-git -C ~/workspace/devrc log --oneline -3 salvage/630-enforcement-2026-08-21
+# the seam is closed on the merged tree, not just in one PR
+git -C ~/workspace/devrc show origin/main:scripts/testlib/gitenv.py | grep -A2 'REDIRECT BY THE HARNESS'
 
-# main's hermetic red — reproduce in a CONTAINED clone, never the real one
+# #716's six guards
+git -C ~/workspace/devrc show origin/main:scripts/ship.sh        | grep -c 'SHIP_REPO+set'    # 2
+git -C ~/workspace/devrc show origin/main:scripts/drift-check.sh | grep -c 'DRIFT_REPO+set'   # 3
+
+# gate — ALWAYS in a standalone clone with origin REMOVED (the freeze still applies)
 git clone --no-hardlinks -q ~/workspace/devrc /tmp/hchk && git -C /tmp/hchk remote remove origin
-git -C /tmp/hchk remote -v            # MUST be empty before anything runs
+git -C /tmp/hchk remote -v          # MUST print nothing before anything runs
+nix develop /tmp/hchk --command bash /tmp/hchk/scripts/gate.sh --tier both --set hermetic
 
 # incident aftermath still clean
-git -C ~/workspace/devrc config --get core.bare      # <unset>
-git -C ~/workspace/devrc config --get core.hooksPath # <unset>
+git -C ~/workspace/devrc config --get core.bare       # <unset>
+git -C ~/workspace/devrc config --get core.hooksPath  # <unset>
 git -C ~/workspace/devrc reflog show main --date=iso | grep -E 'commit: (c|seed)$' | head -1
 # newest must remain 2026-08-21 14:42:12 — anything later is a recurrence
 ```
