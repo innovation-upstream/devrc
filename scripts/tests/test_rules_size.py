@@ -275,7 +275,68 @@ ARCHIVE_MD = REPO_ROOT / "claude" / "RULES-ARCHIVE.md"
 # leaves 34 B of slack above the floor, which is the exact mistake the
 # 2026-08-20 entry diagnosed (32 B of slack -> "the next contributor got the
 # surprise, not the warning"). +400 leaves 1,010 B, i.e. one large rule.
-MAX_BYTES = 39_200
+#
+# 2026-08-21 (later, #661): that 1,010 B was SPENT, not eroded -- the zsh
+# MULTIOS redirection trap cost 106 B and RULES.md reached 38,296, leaving 4 B
+# of slack above the floor. Recorded because it is the gate working exactly as
+# designed: the next author got the WARNING at 4 B rather than the surprise at
+# -1, which is the whole reason MIN_HEADROOM_BYTES exists. No bump was needed
+# or taken for it.
+#
+# 2026-08-22: 39,200 -> 40,100 (+900). The rule that would not fit is the
+# proactivity gate -- "Default to PROCEEDING -- and never ask for what you can
+# measure yourself", a four-branch trigger tree in Push Back Before Acting,
+# 1,206 B. It is the largest single bullet in the file, above the ~900 B the
+# MIN_HEADROOM_BYTES comment calls the largest, and that is deliberate: it is
+# one decision tree with four branches, and splitting it into four bullets
+# costs MORE because each would restate the frame ("stop only on a named
+# trigger; each has its own response").
+#
+# 🔴 EVICTION WAS NOT SKIPPED -- IT WAS PAID BY CONSOLIDATION, WHICH IS WHAT
+# THE 2026-08-11 ENTRY SAID THE ANSWER WOULD BE ("the answer is consolidation
+# ... not another bump"). The tree SUBSUMES two existing bullets, which were
+# deleted, not narrowed: "Flag BEFORE acting, not after" (its whole imperative
+# survives verbatim in the outward-facing branch -- own your uncertainty, the
+# concrete blast radius, "your call to proceed", mass rollouts and prod
+# changes) and "User-facing micro-decisions" (its trigger list survives
+# verbatim as the Fork branch's parenthetical, and "don't ship-then-rework"
+# with it). That is 488 B absorbed, so the NET cost of a 1,206 B rule is 718 B.
+#
+# 🔴 A COLD READ CAUGHT A SCOPE LOSS NO TEST HERE PERFORMS, exactly as the
+# 2026-08-14 entry warned. The first draft's Fork branch read "two readings =>
+# materially different work" -- which silently dropped the deleted bullet's
+# "surface DISAGREEMENT, risk, or a SIMPLER PATH". Ambiguity about what was
+# asked and disagreement with what was asked are different triggers that happen
+# to share a response, and only the first survived. Restored as "or you
+# disagree / see a risk / see a simpler path", +81 B, and that is why the
+# bullet is 1,206 B rather than the 1,125 B an earlier version of this comment
+# recorded. Read a consolidation cold against every bullet it deletes; the
+# ceiling tests cannot see this class of loss.
+#
+# The duplication sweep the 2026-08-20 entry asked for and the 2026-08-21 entry
+# ran to completion is NOT re-run here: it finished one day earlier, by two
+# methods, over every core line >120 B against the whole archive, and returned
+# 24 B. Re-running it a day later finds the same nothing.
+#
+# 🔴 THE OUTWARD-FACING BRANCH IS A SHAPE, NOT A LIST, AND THAT SAVED 61 B
+# WHILE WIDENING THE RULE. The draft enumerated ten instances (push, PR, email,
+# publish, deploy, delete, overwrite, force, prod, mass rollout). A closed list
+# is NARROWER than the shape it samples -- this file's own opening rule is
+# "read every rule at its WIDEST reading", and an enumeration invites "mine
+# isn't on the list", which is precisely how the `git stash` ban failed. It
+# ships as "anything that leaves this machine or cannot be undone, mass
+# rollouts and prod changes included": the two instances that survive are the
+# two the deleted bullet named, so no scope was lost.
+#
+# 🔴 +900 LEAVES 186 B OF SLACK, WHICH IS LESS THAN ONE BULLET, AND SAYING SO
+# IS THE POINT. The formula in the MIN_HEADROOM_BYTES-sizing paragraph above
+# would give ~41,900 and make the gate decorative; the +400/+700 precedents
+# chose modesty. This splits them and does NOT pretend to buy a working margin:
+# the next real rule pays ceiling again. When it does, the answer is the
+# consolidation this entry just demonstrated, applied to the Verification
+# Honesty cluster -- the largest section in the file and the one with the most
+# sibling bullets sharing a frame -- not another bump.
+MAX_BYTES = 40_100
 
 # Required working margin below the ceiling.
 #

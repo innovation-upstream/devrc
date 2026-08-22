@@ -99,3 +99,37 @@ Two of these defer **before any network call**, so a missing card is not evidenc
 🔴 **Debugging "no card appeared"? Rule out 1 and 2 first** — they produce exactly the same
 observable as an outage, and `log`-lines in the hook (`permission_mode=…; deferring` /
 `is an interactive question prompt`) are the only thing that distinguishes them.
+
+## What clawgate can and cannot carry for the proactivity gate
+
+RULES.md's "Default to PROCEEDING" tree names four triggers, three of which can end in a
+question. Clawgate is the **transport** for those questions when Zach is not at the tmux
+window — it is **not** the gate. Verified 2026-08-22 against live `0.7.98`.
+
+**What it carries well.** `approve-with-comment` is exactly the tree's **Fork** branch —
+answer plus proceed in one tap — which is why a fork should become one card rather than a
+stalled window. Stranded windows are a measured problem here (`window-triage`,
+`session-manager` exist for it), so a rule that adds ask-branches without changing where the
+ask LANDS makes it worse, not better.
+
+**What it structurally cannot carry.**
+
+| trigger | reaches the phone? |
+|---|---|
+| Out of scope | **No** — semantic, produces no `PermissionRequest`. File a task instead (`flows/task-authoring.md`; the hook denies a criteria-less create, and criteria you derived cap the result at `ready_for_review`). |
+| Fork | **Only** if it happens to surface as a tool permission prompt. A design fork does not. |
+| Outward-facing / irreversible | **Partially** — an allowlisted command never prompts, so it never reaches the phone at all. |
+| Named hazard | **No, and must not** — the never-list's response is stage-it or hand-it-over, never solicit approval. |
+
+Plus the defer paths in the section above: `bypassPermissions` / `plan` / `AskUserQuestion`
+never contact the server, and any outage or timeout defers to the terminal. The hook is
+**fail-safe toward proceeding**, so no rule may be gated on it.
+
+🔴 **Budget the asks — one per task, forks batched.** `requireSession` is a literal
+`return next` (`internal/api/auth.go`), and `POST /api/auto-approve-all` is registered behind
+it (`internal/api/server.go`), so the unauthenticated LAN NodePort can arm a **global**
+auto-approve window over every future request in every project. Notification fatigue is
+therefore not a comfort problem — it is the thing that arms that lever and kills every gate
+at once, silently. RULES.md's "a permanently-red gate trains everyone to click through" has
+this mirror image: **a too-noisy gate trains you to disable it globally.** The tree's "one
+question buys the whole run" clause is that budget; keep it.

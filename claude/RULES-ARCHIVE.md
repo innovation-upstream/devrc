@@ -1298,3 +1298,55 @@ was wider than what it actually did.
 The common shape: the sentence describes a relationship; the code inspects one side.
 Each read as coverage while providing none, which is what makes them worse than an
 absent guard — a declared guard stops anyone looking.
+
+## proactivity-gate
+
+*Supports: "Default to PROCEEDING — and never ask for what you can measure yourself."*
+
+**Where the shape came from.** The rule as first proposed was three branches — *safe and
+unblocked → proceed; blocked → ask, then proceed; destructive or unsafe → block, warn, ask*.
+Four holes, all of which the shipped wording closes:
+
+1. "Safe and unblocked" is true of out-of-scope work. Writing tests nobody asked for, or
+   refactoring the file you were told to read, passes that predicate.
+2. **Unblocked ≠ unambiguous.** The step where two readings produce materially different work
+   is not blocked — the agent *can* proceed — so branch 1 licenses ship-then-rework.
+3. "Blocked" collapsed three cases with three different correct responses: blocked on
+   something you can measure yourself (go look, don't ask), blocked on something only the
+   user knows (ask), blocked on an external system (asking does not unblock it — report and
+   do the rest).
+4. It dropped **outward-facing** entirely. A push, PR, email, publish or deploy destroys
+   nothing and is locally safe, so all of them landed in branch 1.
+
+**Why the branches do not all end in "ask".** Routing every hazard to a question invites
+asking permission for things on the never-list (`git add -A`, `reset --hard`, `stash` in a
+shared repo, `pkill -f`, raising a window on the operator's screen, `sudo nixos-rebuild`).
+Those rules exist *because* a yes was already given once. Their response is stage-it or
+hand-it-over, never solicit approval.
+
+**The provenance-and-freeze clause is borrowed from clawgate's task status gate**, which is a
+worked solution to the same problem the proposal had — a verdict self-assessed by the party
+who wants to pass it. Clawgate answers it structurally: criteria are AUTHOR-SPECIFIED only
+when the task body carries a `## Acceptance criteria` heading, anything else is DERIVED and
+caps the outcome at `ready_for_review` ("you must not grade an exam you wrote"), and the
+verdict is **frozen at first read** — decided before the agent knows whether it will pass.
+Hence: classify blast radius before starting, and weight a derived safety claim below a
+stated one.
+
+**Clawgate is the transport for the ask branches, never the gate** — measured 2026-08-22
+against live `0.7.98` (deployment pin `harbor.homelab.lan/library/clawgate:0.7.98` matches
+`clawgatectl health`), `PermissionRequest` hook enabled on BOTH hosts:
+
+- It fires on **tool permission prompts only**, so it cannot carry a Fork or an Out-of-scope
+  trigger — those are semantic, and produce no `PermissionRequest`.
+- **Allowlisted commands never prompt**, so they never reach the phone; `bypassPermissions`
+  and `plan` mode, and `AskUserQuestion`, defer *without contacting the server*.
+- It is **fail-safe toward proceeding**: any outage or timeout defers to the terminal. A rule
+  cannot be gated on a mechanism that fails open.
+- 🔴 `internal/api/auth.go` defines `requireSession` as a literal `return next`, and
+  `server.go:364` registers `POST /api/auto-approve-all` behind it — so the LAN NodePort can
+  arm a **global** auto-approve window over every future request in every project, with no
+  auth. Pushing *more* decisions to the phone therefore raises the value of that lever and
+  risks notification fatigue arming it. This is the "permanently-red gate trains you to click
+  through" hazard in its mirror image: a too-noisy gate trains you to disable it globally.
+  The mitigation is the shipped rule's own budget — one ask per task, forks batched.
