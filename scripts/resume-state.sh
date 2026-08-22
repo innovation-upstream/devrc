@@ -307,8 +307,20 @@ REPO="" HANDOFF="" SLUG=""
 # One layer of surrounding punctuation is stripped so `(…/x.md)`, `` `…/x.md` ``
 # and `…/x.md,` resolve; a token that survives with anything else attached is
 # left alone rather than guessed at.
+#
+# 🔴 THREE OUTCOMES, NOT TWO, and the third is why this returns a CODE rather
+# than just a path. "The caller named a handoff and it is not there" is a
+# different fact from "the caller named no handoff at all", and collapsing them
+# is how the fix for #684 re-created #684's harm one round later: in a repo with
+# a single handoff, an argument naming a doc that does NOT exist resolved that
+# single unrelated doc, silently, with a clean DRIFT all-clear. See the
+# `named_missing` block in resolve().
+#
+#   exit 0 + the path   resolved
+#   exit 2 + the TOKEN  a handoff-shaped path was named and does not exist
+#   exit 1 + nothing    no handoff-shaped token in the argument at all
 embedded_md_path(){
-  local tok hit="" base dir noglob=""
+  local tok hit="" miss="" base dir noglob=""
   # ⚠ `for tok in $1` is UNQUOTED on purpose — that is the word split. It is also
   # a PATHNAME EXPANSION, and the subject is arbitrary prose: an argument
   # containing `*` would otherwise expand against the cwd and hand this loop a
@@ -331,17 +343,27 @@ embedded_md_path(){
     case "$dir" in */claudedocs|claudedocs) ;; *) continue ;; esac
     case "$base" in handoff-*.md|*HANDOFF*.md) ;; *) continue ;; esac
     [ -f "$tok" ] && { hit="$tok"; break; }
+    # Shaped like a handoff reference, but not on disk. Remember the FIRST such
+    # token: it is the caller's stated intent, and the run is about to ignore it.
+    [ -n "$miss" ] || miss="$tok"
   done
   [ -n "$noglob" ] && set +f
-  [ -n "$hit" ] || return 1
-  printf '%s\n' "$hit"
+  if [ -n "$hit" ]; then printf '%s\n' "$hit"; return 0; fi
+  [ -n "$miss" ] || return 1
+  printf '%s\n' "$miss"
+  return 2
 }
 
 resolve(){
-  local arg="${1:-}" path="" unresolved=""
+  local arg="${1:-}" path="" unresolved="" named_missing="" fam="" rc=0
   if [ -n "$arg" ]; then
     if [ -f "$arg" ]; then path="$arg"              # explicit handoff path
-    else path=$(embedded_md_path "$arg") || path="" # …or one quoted inside prose
+    else                                            # …or one quoted inside prose
+      path=$(embedded_md_path "$arg"); rc=$?
+      # rc 2 = a handoff path WAS named and is not on disk. Keep it: the gap
+      # below owes the caller that fact regardless of what the fallback finds.
+      [ "$rc" -eq 2 ] && { named_missing="$path"; path=""; }
+      [ "$rc" -eq 1 ] && path=""
     fi
   fi
   if [ -n "$path" ]; then
@@ -357,7 +379,17 @@ resolve(){
       # "newest" IS the contract. Remember that here, before the fallbacks run.
       [ -z "$HANDOFF" ] && unresolved=1
     fi
-    [ -z "$HANDOFF" ] && HANDOFF=$(ls -t "$REPO"/claudedocs/handoff-*.md 2>/dev/null | head -1)
+    # `fam` records WHICH glob produced the answer, because the fallback only
+    # ever chooses WITHIN one family — the caps glob is not even reached while
+    # the lowercase one matches. Counting the union instead says "the newest of
+    # 2 … MOVES between runs" over a repo holding one lowercase and one caps
+    # doc, where the lowercase glob has exactly one member and the choice is
+    # therefore DETERMINISTIC. That sentence would be false, which the rule
+    # below forbids.
+    if [ -z "$HANDOFF" ]; then
+      HANDOFF=$(ls -t "$REPO"/claudedocs/handoff-*.md 2>/dev/null | head -1)
+      [ -n "$HANDOFF" ] && fam='handoff-*.md'
+    fi
     # FALLBACK for repos that name their handoff in caps — civitai-manager uses
     # claudedocs/SESSION-HANDOFF.md, which the lowercase glob above misses, and
     # a missed handoff is not a quiet failure: the DRIFT block below used to
@@ -382,7 +414,22 @@ resolve(){
     # already falls through this chain, so `resume-state.sh session` in a repo
     # whose only handoff is SESSION-HANDOFF.md still finds it, and there is
     # nothing for a slug to disambiguate when the family holds one file.
-    [ -z "$HANDOFF" ] && HANDOFF=$(ls -t "$REPO"/claudedocs/*HANDOFF*.md 2>/dev/null | head -1)
+    if [ -z "$HANDOFF" ]; then
+      HANDOFF=$(ls -t "$REPO"/claudedocs/*HANDOFF*.md 2>/dev/null | head -1)
+      [ -n "$HANDOFF" ] && fam='*HANDOFF*.md'
+    fi
+    # 🔴 A NAMED-BUT-MISSING HANDOFF IS ALWAYS WORTH SAYING, WHATEVER THE COUNT,
+    # and this must stay ORTHOGONAL to the >=2 rule below. Keyed on the count
+    # alone, a repo holding ONE handoff SWALLOWED an explicit-path miss
+    # entirely: the caller named a file, it was not there, the tool silently
+    # substituted a different document and printed the DRIFT all-clear. That is
+    # #684's exact harm in the case where the caller was MOST specific — and it
+    # was a NARROWING introduced by the very fix that added the count, which had
+    # warned here before. The count answers "did the fallback have to choose?";
+    # this answers "did the caller name something the tool then overrode?".
+    if [ -n "$named_missing" ]; then
+      UNRECONCILED+=("requested handoff \"$named_missing\" — NO SUCH FILE (renamed, moved, or in another checkout?). The digest did NOT reconcile the document you named; the \`handoff:\` line above says what it read instead, and it is a different document.")
+    fi
     # 🔴 THE SAME RULE AS THE FALLBACK ABOVE, ONE LINE LOWER — and it was missing
     # for a year. "A missed handoff is not a quiet failure" applies just as hard
     # to reconciling the WRONG one: the digest prints the fallback's filename on
@@ -423,12 +470,10 @@ resolve(){
     # `handoff:` line. So: warn when the fallback had to CHOOSE (>=2 candidates),
     # or when it could not resolve anything at all.
     if [ -n "$unresolved" ]; then
-      # The two globs the chain above actually uses. `sort -u` because a file can
-      # match BOTH (claudedocs/handoff-HANDOFF.md), and double-counting one file
-      # would make a one-candidate repo warn.
-      local n_cand
-      n_cand=$(ls -t "$REPO"/claudedocs/handoff-*.md "$REPO"/claudedocs/*HANDOFF*.md \
-                 2>/dev/null | sort -u | grep -c .)
+      # Count within the family that ACTUALLY RESOLVED (see `fam` above) — the
+      # fallback never chooses across families, so the union would overstate.
+      local n_cand=0
+      [ -n "$fam" ] && n_cand=$(ls -t "$REPO"/claudedocs/$fam 2>/dev/null | grep -c .)
       # 🔴 EVERY CLAUSE BELOW MUST BE TRUE OF EVERY RUN THAT REACHES IT. The
       # first version asserted "no .md path was quoted in it either", which is
       # FALSE whenever one was quoted and merely failed a filter — a trailing
