@@ -124,26 +124,29 @@ if ! should_run_by_files "$STDIN_DATA"; then
 fi
 
 # --- Prepare the test env (DEGRADE, don't block, on failure) -----------------
-# The env is PINNED (nix-shell); we never trust an ambient pytest — the modules
-# under test import requests/psycopg2/minio/yaml at collection time, so a stray
-# bare-pytest venv on PATH would ImportError and wrongly block the push.
-PY_ENV="python312.withPackages(ps: with ps; [pytest requests psycopg2 minio pyyaml])"
-
-# 🔴 Every OTHER entry in run-tests.sh's REQUIRED_TOOLS is taken from the ambient
-# PATH — which works only for tools a dev host actually carries. `logrotate` is
-# NOT one of them: nix/home.nix supplies it to the claude-log-rotate *unit* via
-# `makeBinPath`, never to `home.packages`, so it is on NO interactive PATH on
-# either host. MEASURED 2026-08-11 on the workbench: `command -v logrotate` finds
-# nothing, and this gate therefore died at GUARD 1 with
+# The env is PINNED to the repo's own devShell; we never trust an ambient pytest
+# — the modules under test import requests/psycopg2/minio/yaml at COLLECTION
+# time, so a stray bare-pytest venv on PATH would ImportError and wrongly block
+# the push. `flake.nix devShells.default` carries all five plus logrotate, and
+# is the same `gatePyEnv` the flake's `checks.pytests` uses, so both tiers run
+# the identical interpreter.
+#
+# 🔴 KEPT FROM THE PREVIOUS `nix-shell -p …` FORM, because the lesson outlives
+# the mechanism: every OTHER entry in run-tests.sh's REQUIRED_TOOLS is taken from
+# the ambient PATH, which works only for tools a dev host actually carries.
+# `logrotate` is NOT one of them — nix/home.nix supplies it to the
+# claude-log-rotate *unit* via `makeBinPath`, never to `home.packages`, so it is
+# on NO interactive PATH on either host. MEASURED 2026-08-11 on the workbench:
+# `command -v logrotate` found nothing and this gate died at GUARD 1 with
 #   run-tests: FATAL — required tool(s) missing from PATH: logrotate
 # exit 2, ZERO tests run — a pre-push tier that had stopped being a test gate at
-# all. The flake check already declares it (flake.nix checks.pytests
-# nativeBuildInputs); this is the same declaration for the other tier.
+# all. The devShell now satisfies it, and `test_logrotate_is_on_path`
+# (scripts/tests/test_claude_log_rotate.py) fails the suite if it ever stops
+# being on PATH — deliberately NOT a skipif.
 #
-# Add any future REQUIRED_TOOLS entry that is not a normal user-PATH binary here
-# AND in flake.nix — the two tiers satisfy the same list by different means, and
-# nothing cross-checks them (see test_logrotate_is_supplied_to_the_prepush_tier).
-TOOL_ENV=(-p "$PY_ENV" -p logrotate)
+# So: a new REQUIRED_TOOLS entry that is not a normal user-PATH binary must be
+# added to the devShell AND to flake.nix's checks — the two tiers satisfy the
+# same list by different means, and nothing cross-checks them.
 
 degrade() {
   echo "" >&2
@@ -152,15 +155,29 @@ degrade() {
   exit 0
 }
 
-if ! command -v nix-shell >/dev/null 2>&1; then
-  degrade "nix-shell not found on PATH"
+# 🔴 `nix develop`, NOT `nix-shell -p …`. MEASURED 2026-08-22, and the TRIGGER is
+# the CWD, not an inherited variable: `nix-shell --run` executes the user's shell
+# hooks, which activate a venv belonging to whatever directory you are standing
+# in; `nix develop --command` does not. Setting VIRTUAL_ENV by hand from a
+# neutral cwd reproduces NOTHING — both forms then give the store python — which
+# is why this is worth stating precisely. From a cwd that owns a venv:
+#     nix-shell -p "python312.withPackages(…)" --run python -> …/other-repo/.venv/bin/python
+#     nix develop <repo> --command python                   -> /nix/store/…-env/bin/python
+# That is the whole mechanism behind #698, where an unrelated repo's venv
+# produced 13 failures that read as a broken branch. devShells.default exists so
+# contributors stop hand-rolling the dep list, carries logrotate and all five
+# suite deps, and its own greeting points at this runner. Using it REMOVES the
+# defect rather than detecting it; run-tests.sh's GUARD 1c is the backstop for
+# every other caller.
+if ! command -v nix >/dev/null 2>&1; then
+  degrade "nix not found on PATH"
 fi
 
-echo "pre-push: preparing test env (nix-shell)…" >&2
-prep_out="$(nix-shell "${TOOL_ENV[@]}" --run 'python --version' 2>&1)"
+echo "pre-push: preparing test env (nix develop)…" >&2
+prep_out="$(nix develop "$REPO_ROOT" --command python --version 2>&1)"
 prep_rc=$?
 if [ "$prep_rc" -ne 0 ]; then
-  degrade "nix-shell env build failed (rc=$prep_rc): $(printf '%s' "$prep_out" | tail -1)"
+  degrade "nix develop env build failed (rc=$prep_rc): $(printf '%s' "$prep_out" | tail -1)"
 fi
 
 # --- Run the suite (this env is now cached; a failure here is a REAL failure) -
@@ -171,12 +188,24 @@ fi
 # verdict line now (`RESULT: FAIL (exit=1)`), so a reader who only has the
 # output still gets the truth; see scripts/gate.sh.
 echo "pre-push: running devrc test suite (mode=$MODE)…" >&2
-nix-shell "${TOOL_ENV[@]}" --run "bash '$RUNNER' --set all '$REPO_ROOT'"
+nix develop "$REPO_ROOT" --command bash "$RUNNER" --set all "$REPO_ROOT"
 run_rc=$?
 
 if [ "$run_rc" -eq 0 ]; then
   echo "pre-push: ✅ devrc test suite passed." >&2
   exit 0
+fi
+
+# 🔴 rc 2 is a PRECONDITION abort (run-tests.sh GUARDs 1/1b/1c): by construction
+# ZERO tests ran. This file's own header promises "Infra flakiness DEGRADES,
+# never blocks — only a genuine pytest failure (tests executed, >=1 failed)
+# blocks", and the comment below says "Tests EXECUTED" — both were false for
+# rc 2, which blocked the push over a broken CALLER. GUARD 1c widens the
+# population reaching here (a wrong interpreter is a far more ordinary state
+# than a missing binary), so the contradiction had to be resolved rather than
+# inherited. Blocking on an env fault is what teaches people DEVRC_SKIP_TESTS=1.
+if [ "$run_rc" -eq 2 ]; then
+  degrade "the test suite could not START (rc=2, a precondition guard aborted) — see its message above"
 fi
 
 # Tests EXECUTED and at least one failed.

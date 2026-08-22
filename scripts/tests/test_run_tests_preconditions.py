@@ -167,25 +167,49 @@ def test_every_required_tool_is_reachable_by_the_prepush_tier():
     # only, and stayed GREEN under a mutation that left `TOOL_ENV=` in place while
     # reverting both invocations to the old python-only env — passing while the
     # exact measured outage was fully reintroduced. So pin the wiring first.
-    invocations = [ln for ln in code if "nix-shell" in ln and "--run" in ln]
+    # 🔴 The hook moved from `nix-shell -p …` to `nix develop` (2026-08-22). The
+    # WIRING pin below is unchanged in spirit and had to change in form. The
+    # reason for the move is measured and is the whole point of this seam:
+    # `nix-shell --run` executes the user's shell hooks, which activate a venv
+    # belonging to whatever CWD you are standing in, so the pinned env was not
+    # pinned at all. From a venv-owning cwd:
+    #     nix-shell -p "python312.withPackages(…)" --run python -> …/that-repo/.venv/bin/python
+    #     nix develop <repo> --command python                   -> /nix/store/…-env/bin/python
+    # (Setting VIRTUAL_ENV by hand from a NEUTRAL cwd reproduces nothing — both
+    # forms then give the store python. The trigger is the cwd, not the variable.)
+    invocations = [ln for ln in code if "nix develop" in ln and "--command" in ln]
     assert len(invocations) == 2, (
-        f"expected 2 `nix-shell … --run` invocations in the hook (the env probe "
-        f"and the suite run); found {len(invocations)}:\n"
+        f"expected 2 `nix develop … --command` invocations in the hook (the env "
+        f"probe and the suite run); found {len(invocations)}:\n"
         + "\n".join(f"  {ln.strip()}" for ln in invocations)
     )
+    # And the vulnerable form must not come back.
+    revived = [ln for ln in code if "nix-shell" in ln and "--run" in ln]
+    assert not revived, (
+        "the hook is using `nix-shell … --run` again — that form inherits a venv "
+        "from the caller's cwd, which is devrc#698:\n"
+        + "\n".join(f"  {ln.strip()}" for ln in revived)
+    )
+    # Each invocation must target THIS repo's devShell — `nix develop` with some
+    # other flake ref would be the same class of drift the TOOL_ENV pin guarded.
     for ln in invocations:
-        assert '"${TOOL_ENV[@]}"' in ln, (
-            f"this nix-shell does not use TOOL_ENV, so it does not get the "
-            f"tools declared there: {ln.strip()}"
+        assert '"$REPO_ROOT"' in ln, (
+            f"this `nix develop` does not target $REPO_ROOT, so it does not get "
+            f"the repo's own devShell: {ln.strip()}"
         )
 
-    # Only NOW is the declaration meaningful: parse `-p <pkg>` out of TOOL_ENV.
-    m = re.search(r"^TOOL_ENV=\((.*?)\)", hook, re.M | re.S)
-    assert m, "could not find the TOOL_ENV declaration in tests-on-push.sh"
-    declared = {p for p in re.findall(r'-p\s+([A-Za-z0-9_.-]+)', m.group(1))}
-    # python/python3 come from $PY_ENV, which is declared but not name-matchable.
-    assert '"$PY_ENV"' in m.group(1), "TOOL_ENV no longer includes $PY_ENV"
-    declared |= {"python", "python3"}
+    # The declared set now comes from flake.nix's `gateTools` — the ONE list the
+    # devShell and checks.pytests share — instead of a TOOL_ENV local to the
+    # hook. Same question ("can the pre-push tier supply this?"), single source.
+    flake_txt = (REPO_ROOT / "flake.nix").read_text()
+    gate_m = re.search(r"gateTools\s*=\s*\[(.*?)\]", flake_txt, re.S)
+    assert gate_m, "could not find gateTools in flake.nix — this check is reading nothing"
+    declared = {
+        tok.split(".")[-1]
+        for tok in gate_m.group(1).split()
+        if tok.startswith("pkgs.")
+    }
+    assert declared, "gateTools parsed as EMPTY — the regex stopped matching"
 
     # 🔴 `shutil.which` reads THIS process's PATH, and since the
     # no-real-launchers fixture landed (scripts/tests/conftest.py) that PATH
@@ -217,12 +241,25 @@ def test_logrotate_is_declared_by_the_prepush_hook_specifically():
     the moment anything put logrotate on the ambient PATH — which is not the fix,
     and would make the tier depend on a host's incidental state again.
     """
-    hook = (REPO_ROOT / "githooks" / "tests-on-push.sh").read_text()
-    code = [ln for ln in hook.splitlines() if not ln.lstrip().startswith("#")]
-    assert any("-p logrotate" in ln for ln in code), (
-        "githooks/tests-on-push.sh must DECLARE logrotate in its nix-shell. It "
-        "is in run-tests.sh REQUIRED_TOOLS and on no host's interactive PATH "
-        "(nix/home.nix gives it only to the claude-log-rotate unit's makeBinPath)."
+    # 🔴 STRONGER THAN THE OLD FORM, not weaker. The hook used to declare
+    # logrotate in its OWN `nix-shell -p` list, independently of flake.nix — two
+    # declarations of one requirement, which the previous comment admitted
+    # "nothing cross-checks". Since 2026-08-22 the hook runs `nix develop`, so
+    # both tiers draw from the SINGLE `gateTools` list: `devShells.default`
+    # (packages = gateTools) and `checks.pytests` share it verbatim. Pin that
+    # shared list, so the two tiers cannot drift apart by construction.
+    flake = (REPO_ROOT / "flake.nix").read_text()
+    gate = re.search(r"gateTools\s*=\s*\[(.*?)\]", flake, re.S)
+    assert gate, "could not find gateTools in flake.nix — this pin is not reading the list"
+    assert "logrotate" in gate.group(1), (
+        "flake.nix gateTools must supply logrotate: it is in run-tests.sh "
+        "REQUIRED_TOOLS and on no host's interactive PATH (nix/home.nix gives it "
+        "only to the claude-log-rotate unit's makeBinPath). MEASURED 2026-08-11: "
+        "without it the pre-push tier died at GUARD 1 with ZERO tests run."
+    )
+    assert re.search(r"devShells\.\$\{system\}\.default[^}]*?packages\s*=\s*gateTools", flake, re.S), (
+        "devShells.default no longer uses gateTools, so the pre-push tier (which "
+        "runs `nix develop`) and checks.pytests can drift apart again."
     )
 
 
