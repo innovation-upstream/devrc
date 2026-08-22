@@ -151,11 +151,14 @@ predicate is blind to the second, and would report a clean 0 while the rows sit 
 
 ```bash
 # every phantom, BOTH encodings: a group-address contact, or one whose "phone number"
-# is 24/44 chars of canonical base64 (a bare internal_id) rather than +E164 or a uuid
+# is 24/44 chars of canonical base64 (a bare internal_id) rather than +E164 or a uuid.
+# `_-` is in the class because `_decode_internal_id` folds the URL-safe alphabet before
+# decoding (consumer.py), so a phantom could wear that spelling too. `-` is LAST in the
+# bracket so POSIX reads it as a literal, not a range.
 psql -c "select id, phone_number from signal.contacts
          where phone_number like 'group.%'
-            or phone_number ~ '^[A-Za-z0-9+/]{22}==$'
-            or phone_number ~ '^[A-Za-z0-9+/]{43}=$'"
+            or phone_number ~ '^[A-Za-z0-9+/_-]{22}==$'
+            or phone_number ~ '^[A-Za-z0-9+/_-]{43}=$'"
 
 # the drafts stranded against them — unlinked, and beyond every mute
 psql -c "select count(*) from signal.messages
@@ -163,11 +166,11 @@ psql -c "select count(*) from signal.messages
            and dest_contact_id in (
              select id from signal.contacts
              where phone_number like 'group.%'
-                or phone_number ~ '^[A-Za-z0-9+/]{22}==$'
-                or phone_number ~ '^[A-Za-z0-9+/]{43}=$')"
+                or phone_number ~ '^[A-Za-z0-9+/_-]{22}==$'
+                or phone_number ~ '^[A-Za-z0-9+/_-]{43}=$')"
 ```
 
-Both should be empty once the backfill has run. Measured 2026-08-21, only the
+The first should return no rows and the second `0` once the backfill has run. Measured 2026-08-21, only the
 `group.`-prefixed shape existed in prod (1 contact, 1 message) — the bare-base64 shape was
 reachable but had never been used, which is why the backfill covers one row and not two.
 
