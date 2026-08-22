@@ -147,12 +147,22 @@ Repo-level facts that are NOT in any skill — they live here on purpose:
 - **Two always-on docs have enforced byte ceilings**, because both load on every session: `scripts/browser-bridge/SKILL.md` (gated by `scripts/browser-bridge/tests/test_skill_size.py`) and `claude/RULES.md` (gated by `scripts/tests/test_rules_size.py`). Each test OWNS its constants and prints an eviction playbook on failure — **read the numbers there, never restate them.** Any addition needs an eviction in the SAME commit.
 - **Run the gate with `scripts/gate.sh`** (`--tier pytest|node|both`, `--set hermetic|all`). It sends the full output to a LOG FILE and prints only a bounded summary, so there is no reason to pipe it — and **its exit status is authoritative**. It also cross-checks that status against the runners' own `RESULT:` line and exits **90 = could-not-vouch** when they disagree, when a run printed no verdict, or when `panic: test timed out` appears. 90 is not "the tests failed"; it means read the log.
 - **The runners' verdict line carries their exit code** (`RESULT: FAIL (exit=1)`), emitted from one writer behind an EXIT trap, so it survives a pipe and a killed run still says so. Historically the status was destroyed by `… | tail; echo "rc=$?"` — four agents reported `exit 0` over `RESULT: FAIL` on 2026-08-11 — which is why counting `PASSED`/`FAILED` lines used to be mandatory. Still a fine cross-check; no longer the only thing you can trust.
-- 🔴 **NO AUTOMATED GATE IS RUNNING — the gate is YOU, by hand.** <!-- merge-gate: none -->
-  Nothing blocks a devrc merge today: there is no `.github/workflows`, `main` has no branch
-  protection or rulesets, no Tekton trigger names devrc, and `gh pr view <n> --json
-  statusCheckRollup` returns **0 checks** on every PR, merged ones included. This line used to
-  read `CI gates both suites`, which was false — the exact kind of claim nobody re-checks: an
-  agent reads it, believes the merge is protected, and skips the run.
+- 🔴 **CHECKS NOW RUN, BUT NOTHING BLOCKS — the gate is still YOU, by hand.** <!-- merge-gate: none -->
+  🔴 **A check that RUNS is not a check that GATES, and the difference is the whole point of
+  this line.** Measured 2026-08-22: a **Tekton** gate now reports `tekton/devrc-pytests` and
+  `tekton/devrc-nodetests` on devrc PRs, and `main` **does** carry branch protection
+  (`enforce_admins`, no force-pushes, no deletions). But that protection has **no
+  `required_status_checks`** — so a red Tekton run does not stop a merge, and neither does a
+  missing one. There is still no `.github/workflows`. Verify with
+  `gh api repos/innovation-upstream/devrc/branches/main/protection` and look for
+  `required_status_checks`; its **absence** is the answer, and an absent key reads as clean
+  rather than missing unless you look for it by name.
+  The marker stays `none` deliberately: it pins *does anything BLOCK a merge*, and the answer
+  is no. Moving it to `other` because checks appeared would assert a protection that does not
+  exist — the same reassuring falsehood in the opposite direction. This line used to read
+  `CI gates both suites`, which was false; before that it read that no checks run at all,
+  which is now equally false. **Re-measure both halves — runs? blocks? — rather than
+  inheriting either.**
   🔴 **But a gate SHIPS IN THIS REPO, and whether it is INSTALLED is not a fact this file can
   state** — `githooks/` (`install.sh`, `pre-push`, `tests-on-push.sh`) is a real blocking
   pre-push test gate, and `scripts/run-tests.sh` treats it as a first-class consumer.
