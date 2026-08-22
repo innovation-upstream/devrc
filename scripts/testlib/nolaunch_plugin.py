@@ -106,7 +106,10 @@ def _inherited_stub_dir() -> Path | None:
 # --------------------------------------------------------------------------- #
 # L2 — in-process interception of ABSOLUTE-path launches
 # --------------------------------------------------------------------------- #
-_ORIGINAL_POPEN = subprocess.Popen
+# 🔴 DELIBERATELY NOT CAPTURED HERE. An import-time snapshot of
+# `subprocess.Popen` is what made this policy and `nogit_plugin` delete each
+# other's patch — see `_patch_subprocess` for the measurement. The class to
+# subclass, and the class to restore, are both read at PATCH time.
 
 
 def _redirect_argv(argv, stub_dir: Path):
@@ -145,8 +148,27 @@ def _patch_subprocess(stub_dir: Path):
     Popen is the choke point: `run`, `call`, `check_call` and `check_output` all
     go through it, so patching it once covers the whole module rather than four
     names that must each be remembered.
+
+    🔴 SUBCLASSES WHATEVER `subprocess.Popen` IS RIGHT NOW, not the pristine
+    class captured at import.
+
+    MEASURED: with the import-time capture, this policy and `nogit_plugin` —
+    both session-autouse, both subclassing the pristine class, both restoring
+    it — silently DELETED each other. `subprocess.Popen.__mro__` during a
+    session was `['_NoLaunchPopen', 'Popen', 'object']`: the other policy's L2
+    was simply gone, and an absolute-path `git` write against a denied repo
+    returned 0 with no banner. Whichever fixture happened to run last won, and
+    nothing was red.
+
+    Capturing here rather than at import makes the two compose in either
+    order, and the teardown restores what was live when this patch was applied
+    instead of unwinding the other policy as well.
+    `scripts/tests/test_no_real_git_remote.py::
+    test_both_launch_policies_survive_in_the_popen_chain` pins it.
     """
-    class _NoLaunchPopen(_ORIGINAL_POPEN):
+    current = subprocess.Popen
+
+    class _NoLaunchPopen(current):  # type: ignore[misc,valid-type]
         def __init__(self, args, *a, **kw):
             redirected = _redirect_argv(args, stub_dir)
             if redirected is not None:
@@ -158,7 +180,7 @@ def _patch_subprocess(stub_dir: Path):
             super().__init__(args, *a, **kw)
 
     subprocess.Popen = _NoLaunchPopen
-    return _ORIGINAL_POPEN
+    return current
 
 
 # --------------------------------------------------------------------------- #

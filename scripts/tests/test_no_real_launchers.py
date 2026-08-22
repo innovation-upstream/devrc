@@ -907,6 +907,23 @@ def test_the_module_loader_scan_can_actually_find_something(tmp_path):
 # assembles its patterns — which keeps THIS file inside the scan's scope instead
 # of excluding it, so a real clobber added here would still be caught.
 PINNED_PATH_CLOBBERS = {
+    "test_no_real_git_remote.py": (
+        'e["PATH"]' + ' = path',
+        "🔴 THE ONE PINNED CLOBBER WHOSE WHOLE PURPOSE IS TO DROP A GUARD — "
+        "and it is safe because of WHICH guard and WHY. `_env(..., path=...)` "
+        "is the UNGUARDED half of that file's three-way harness: every "
+        "negative control there is scored only after the identical command has "
+        "been run with the no-real-git shim off PATH and SHOWN to move the "
+        "victim, because a vector that cannot reach the victim makes 'the "
+        "guard refused it' worthless. The value passed is always "
+        "`_real_path()`, which is the session's own PATH with exactly two "
+        "entries removed — the nogit stub dir and its GIT_EXEC_PATH farm — so "
+        "the LAUNCHER stub dir this file protects is still present and no "
+        "HAZARD_VOCABULARY name becomes reachable. It is a REMOVAL of two "
+        "known entries, not a replacement with a new directory, so nothing can "
+        "appear in it that was not already on the ambient PATH. The victim "
+        "repos those unguarded commands write to are throwaway fixtures under "
+        "`tmp_path`; the tree under test is never one of them"),
     "test_rig_control.py": (
         '"PATH"' + ': "/usr/bin/false"',
         "deliberately makes yad unfindable; /usr/bin/false holds no binaries, so "

@@ -43,9 +43,21 @@ from testlib.nolaunch_plugin import STUB_DIR_ENV, no_real_launchers  # noqa: E40
 # the spool per test, which this session-wide floor deliberately does not.
 from testlib.spool_plugin import no_real_activity_spool  # noqa: E402,F401
 
-# 🔴 The SAME shape again, for GIT. `testlib/nogit_plugin.py` is the
-# implementation and this import is one entry point; the runner loads the same
-# module for every target, so this is not a per-directory copy.
+# 🔴 GIT — and unlike the two above, this import is the ONLY entry point.
+#
+# The runner does NOT load `testlib.nogit_plugin`, so this registration covers
+# `scripts/tests` and NOTHING ELSE. MEASURED, per target: `scripts/tests` -> rc
+# 99 (refused); `scripts/repo-cos/tests`, which contains the culprit
+# `test_prescan.py::_init_clone`, -> **rc 0, the write landed**;
+# `scripts/dl-router/tests` -> rc 0. 1 target of 25, and not the culprit's.
+#
+# That is stated rather than closed here on purpose: `scripts/run-tests.sh`
+# belongs to another change which registers ITS guard with `-p` on the single
+# pytest line, and `-p` reaches every target regardless of conftest
+# inheritance. A second registration — here, or via an auto-loaded
+# `scripts/conftest.py` — would put two plugins on the same class, which is the
+# collision already measured with `subprocess.Popen`. Read
+# `testlib/nogit_plugin.py`'s "REGISTRATION SCOPE" header before changing this.
 #
 # It exists because the suite drove `git commit`, `git branch -m`, `git config
 # core.bare true`, `remote set-url` and `git push` against the operator's REAL
@@ -56,8 +68,11 @@ from testlib.spool_plugin import no_real_activity_spool  # noqa: E402,F401
 # clone WHILE the suite ran.
 #
 # The policy is therefore an invariant at the moment of the call, not a
-# cleanup: a shim first on PATH that lets READS through anywhere and refuses
-# WRITES to any repo outside this session's tmp roots. Read
+# cleanup: a shim that lets READS through anywhere and refuses WRITES to any
+# repo outside this session's tmp roots. It is reached through PATH **and**
+# through `GIT_EXEC_PATH` — PATH alone is not enough, because git prepends its
+# own `libexec/git-core` (which ships a real `git`) for every child it spawns,
+# so aliases, hooks and filters escaped a PATH-only shim entirely. Read
 # `testlib/nogit.py` before changing it — in particular the read-verb ledger,
 # which is an allowlist so an unknown verb fails CLOSED.
 from testlib.nogit_plugin import no_real_git_writes  # noqa: E402,F401
