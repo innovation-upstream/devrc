@@ -209,27 +209,36 @@ def test_an_unknown_condition_is_a_HARD_ERROR_not_a_silent_pass():
 # THE COMPARISON ITSELF — the line the whole change turns on.
 # --------------------------------------------------------------------------
 
-def _verdict_harness(entries: list[str], tot_skipped: int) -> str:
-    """Counting loop + the real comparison block, driven with a synthetic
-    TOT_SKIPPED. Extends to the end of the equality's `fi` so the branch under
-    test is the shipped one.
+def _verdict_harness(entries: list[str], tot_skipped: int,
+                     skip_lines: list[str] | None = None) -> str:
+    """ONE CONTIGUOUS slice of the shipped gate: the counting loop, the matching
+    loop, the unpinned-skip report, and the comparison — driven with synthetic
+    `SKIP_LINES` and `TOT_SKIPPED`.
 
-    🔴 WHY THIS EXISTS. The first version of this file extracted only up to
-    `for line in `, which stops BEFORE the comparison. So it pinned how
-    `pin_expected` is COMPUTED and never that the gate BRANCHES on it — and an
-    audit demonstrated that reverting the comparison to `${#EXPECTED_SKIPS[@]}`,
-    i.e. deleting the entire fix, left the full suite green. A test that proves a
-    value is calculated proves nothing about whether anything reads it.
+    🔴 WHY CONTIGUOUS, and why that word is load-bearing. Two earlier versions of
+    this harness were BOTH defeated by the same shape:
+
+      * v1 extracted only up to `for line in `, stopping BEFORE the comparison —
+        so it pinned how `pin_expected` is COMPUTED and never that the gate
+        BRANCHES on it. Reverting the comparison (deleting the whole fix) left
+        the suite green.
+      * v2 stitched the count loop to the comparison across a GAP, skipping the
+        matching loop and the report block. Injecting `pin_expected=${#EXPECTED_SKIPS[@]}`
+        INTO that gap — the same revert, different placement — survived green.
+
+    A harness assembled from disjoint slices cannot see anything in the seams,
+    and the seams are where a revert hides. Taking one slice removes the class
+    rather than the instance.
     """
-    count_loop = _extract("pin_expected=0\nfor entry in", "\nfor line in ")
-    cmp_start = _runner_text().index('if [ "$TOT_SKIPPED" -ne "$pin_expected" ]')
-    cmp_end = _runner_text().index("\nfi\n", cmp_start) + len("\nfi\n")
-    comparison = _runner_text()[cmp_start:cmp_end]
+    block = _extract("pin_expected=0\nfor entry in", "\n# --- GUARD 7")
     decl = "\n".join(f'  {e!r}' for e in entries)
+    lines = "\n".join(f'  {l!r}' for l in (skip_lines or []))
     return (
-        f"fail=0\nTOT_SKIPPED={tot_skipped}\nEXPECTED_SKIPS=(\n{decl}\n)\n"
-        + _split_fn() + _applies_fn() + count_loop + comparison
-        + '\nprintf "fail=%s pin_expected=%s\\n" "$fail" "$pin_expected"\n'
+        f"fail=0\nTOT_SKIPPED={tot_skipped}\nunexpected=()\n"
+        f"SKIP_LINES=(\n{lines}\n)\n"
+        f"EXPECTED_SKIPS=(\n{decl}\n)\n"
+        + _split_fn() + _applies_fn() + block
+        + '\nprintf "fail=%s pin_expected=%s unexpected=%s\\n" "$fail" "$pin_expected" "${#unexpected[@]}"\n'
     )
 
 
@@ -273,18 +282,35 @@ def test_a_non_applicable_pin_does_not_FORGIVE_a_skip():
     """🔴 The two halves must agree. A pin whose condition does not hold here
     must not absorb a skip in the matching loop while being excluded from the
     count — that combination balanced the totals and hid a real discrepancy."""
-    matching = _extract('for line in "${SKIP_LINES[@]}"; do\n  matched=0', "\nif [ \"${#unexpected[@]}\"")
-    h = (
-        "fail=0\nunexpected=()\n"
-        'SKIP_LINES=("SKIPPED [1] scripts/a/tests/t.py:9: reason here")\n'
-        "EXPECTED_SKIPS=(\n  'scripts/a/tests|reason here|unset:ZZ_PROBE_DSN'\n)\n"
-        + _split_fn() + _applies_fn() + matching
-        + '\nprintf "unexpected=%s\\n" "${#unexpected[@]}"\n'
-    )
-    applies = _bash(h)
+    entries = ["scripts/a/tests|reason here|unset:ZZ_PROBE_DSN"]
+    lines = ["SKIPPED [1] scripts/a/tests/t.py:9: reason here"]
+
+    applies = _bash(_verdict_harness(entries, 1, lines))
     assert "unexpected=0" in applies.stdout, f"applicable pin must forgive: {applies.stdout!r}"
 
-    not_applies = _bash(h, {"ZZ_PROBE_DSN": "set"})
+    not_applies = _bash(_verdict_harness(entries, 1, lines), {"ZZ_PROBE_DSN": "set"})
     assert "unexpected=1" in not_applies.stdout, (
         "a pin whose condition does NOT hold here still forgave the skip; the "
         f"matching loop is condition-blind. stdout={not_applies.stdout!r}")
+
+
+def test_a_malformed_unset_tail_is_a_hard_error_and_does_NOT_abort_the_loop():
+    """🔴 The `unset:*` arm is reached by a MALFORMED tail too — `unset:FOO|typo`
+    from a 4-field entry, or a bare `unset:`. Before validation, `${!_v-}` raised
+    bash's `invalid variable name`, and that error ABORTED the enclosing loop:
+    every later entry went unevaluated, `pin_expected` was truncated, and `fail`
+    stayed 0 — a silent widening.
+
+    Asserts BOTH halves, because either alone is satisfiable by the broken code:
+    `fail=1` (it was 0), AND that the entry AFTER the bad one was still counted
+    (it was not). The previously-covered case (`whenever:FOO`) takes the `*)` arm
+    and never exercised this path — the likelier typo shape was the untested one.
+    """
+    for bad in ("unset:FOO|typo", "unset:", "unset:1BAD"):
+        h = _verdict_harness([f"scripts/a/tests|r1|{bad}", "scripts/b/tests|r2"], 1)
+        r = _bash(h)
+        assert "fail=1" in r.stdout, f"{bad!r} must hard-error, got {r.stdout!r}"
+        assert "pin_expected=1" in r.stdout, (
+            f"{bad!r} aborted the loop — the entry after it was never counted. "
+            f"stdout={r.stdout!r} stderr={r.stderr!r}")
+        assert "invalid variable" in r.stderr.lower(), r.stderr
