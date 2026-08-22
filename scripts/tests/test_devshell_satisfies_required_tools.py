@@ -47,7 +47,7 @@ WHAT EACH TEST HERE IS:
 That `gateTools` actually satisfies REQUIRED_TOOLS is proven elsewhere and
 better: `checks.pytests` runs this very runner with
 `nativeBuildInputs = gateTools` in the nix sandbox, so an insufficient list
-exits 2 on the precondition. The only way that proof stops transferring to the
+exits 3 on the precondition (an ENVIRONMENT abort; repo-content guards exit 2). The only way that proof stops transferring to the
 devShell is the two consumers drifting apart — which is what the seam guards
 forbid.
 """
@@ -75,7 +75,7 @@ def emitted_fatal(tmp_path_factory):
 
     Driving the real path is cheap and fully deterministic: the tool
     precondition is GUARD 1, before any test runs, so with a PATH containing
-    only `bash` the runner exits 2 in milliseconds. `env -i`-style isolation
+    only `bash` the runner exits 3 in milliseconds. `env -i`-style isolation
     (an explicit env dict) is what makes it independent of the ambient PATH --
     inside the nix sandbox every REQUIRED_TOOLS binary IS present, so a test
     that relied on one being absent would measure the environment, not the code.
@@ -119,31 +119,17 @@ def emitted_fatal(tmp_path_factory):
         f"precondition FATAL, so this fixture is measuring the wrong thing.\n"
         f"exit={proc.returncode}\n{combined[-3000:]}"
     )
-    assert proc.returncode == 2, (
-        f"expected the precondition to exit 2, got {proc.returncode}\n"
+    # 🔴 3, not 2, since 2026-08-22. GUARD 1 is an ENVIRONMENT precondition, and
+    # run-tests.sh now distinguishes those (exit 3) from REPO-CONTENT guards
+    # (exit 2) so `githooks/tests-on-push.sh` can degrade on the former without
+    # degrading away the latter -- the target list, floor table, launcher stubs
+    # and spool wiring, whose own messages warn that silencing them is "how a
+    # suite stops running while the gate goes green".
+    assert proc.returncode == 3, (
+        f"expected the ENVIRONMENT precondition to exit 3, got {proc.returncode}\n"
         f"{combined[-3000:]}"
     )
     return combined
-
-
-def _fatal_block() -> str:
-    """The `required tool(s) missing` FATAL block AS SOURCE TEXT.
-
-    ⚠ Retained only for the assertions that are genuinely about the SOURCE (that
-    the precondition is still spelled as a hard failure). Anything about what
-    the operator SEES must use the `emitted_fatal` fixture instead -- this
-    function cannot tell a live line from a commented-out one.
-    """
-    src = RUN_TESTS.read_text()
-    start = src.find("required tool(s) missing from PATH")
-    assert start != -1, (
-        "could not find the 'required tool(s) missing from PATH' FATAL in "
-        "run-tests.sh. If it was reworded, update this parser -- do NOT delete "
-        "the test, or the message goes back to being unguarded."
-    )
-    end = src.find("exit 2", start)
-    assert end != -1, "found the FATAL but not its `exit 2`; the parser is broken"
-    return src[start:end]
 
 
 # ---------------------------------------------------------------------------
@@ -198,18 +184,49 @@ def test_the_missing_tool_fatal_names_a_runnable_invocation(emitted_fatal):
     )
 
 
-def test_the_fatal_still_forbids_deleting_the_precondition():
+def test_the_fatal_still_forbids_deleting_the_precondition(emitted_fatal):
     """INVARIANT guard — the precondition must not be softened into advice.
 
     Making the message friendlier is exactly the edit that would also make
     "just drop logrotate from REQUIRED_TOOLS" sound reasonable. It must not.
+
+    🔴 READS THE EMITTED OUTPUT, NOT THE SOURCE. It used to parse a window out of
+    run-tests.sh, and that window was terminated by a hardcoded `exit 2`. When
+    GUARD 1 moved to `exit 3` the search walked past it into a later guard,
+    widening the window from 17 lines to 1235 — its own `assert end != -1`
+    tripwire could not fire, because it HAD found an `exit 2`, just the wrong
+    one. Both protected sentences could then be deleted from the live echoes and
+    re-planted as dead comment prose further down, and this test passed.
+
+    A width cap was the first repair and it was one guard too loose: the
+    cumulative windows are 17 → 50 → 108 → 126 → 1235, so a `< 60` bound still
+    admitted a ONE-guard overshoot, which is all the walk needs. This file's own
+    source-parser docstring already said the rule — "anything about what the
+    operator SEES must use the `emitted_fatal` fixture, this function cannot tell
+    a live line from a commented-out one". The right repair was to follow it.
+    `emitted_fatal` is the real FATAL, printed by a real run: no window, no
+    terminator, and a commented-out echo prints nothing.
     """
-    block = _fatal_block()
+    # 🔴 SLICE TO THE FATAL. `emitted_fatal` is the whole run's output, which also
+    # carries the always-printed `RESULT:` verdict line. Matching the protected
+    # sentences against all of it is walkable: soften them in GUARD 1's echoes and
+    # re-plant the exact strings in the verdict line, and this test goes green
+    # while the operator's FATAL is softened. Measured. Narrower than the 1235-line
+    # source window it replaced, but the same shape — so bound it to the block.
+    _m = emitted_fatal.find("required tool(s) missing from PATH")
+    assert _m != -1, f"no FATAL in the output at all:\n{emitted_fatal}"
+    _end = emitted_fatal.find("RESULT:", _m)
+    block = emitted_fatal[_m:_end if _end != -1 else None]
+    assert block.count("\n") < 30, (
+        f"the FATAL block is {block.count(chr(10))} lines — the RESULT: terminator "
+        f"was not found where expected, so this assertion is unbounded again."
+    )
+
     assert "Do NOT drop entries from REQUIRED_TOOLS" in block or \
            "do NOT drop them from" in block, block
     assert "go green while" in block, (
         "the message no longer explains WHY a missing tool is fatal (the run "
-        "would go green while testing less)"
+        f"would go green while testing less).\n\nWhat it printed:\n{block}"
     )
 
 

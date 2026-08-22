@@ -13,7 +13,7 @@ Version-controlled, global git hooks. Two features, in order on every push:
 | File | Role |
 |---|---|
 | `pre-push` | Global dispatcher. Chains to any repo-local pre-push first (never clobbers it), runs the **blocking test gate**, then fires the audit **backgrounded** so the push is never delayed. |
-| `tests-on-push.sh` | SYNCHRONOUS worker: self-detects devrc, filters on changed files, runs `scripts/run-tests.sh --set all` in a **pinned nix-shell**, and (mode `on`) **blocks the push on a genuine test failure**. Infra-can't-prepare-env → warn + allow. No-op for non-devrc repos. |
+| `tests-on-push.sh` | SYNCHRONOUS worker: self-detects devrc, filters on changed files, runs `scripts/run-tests.sh --set all` in the repo's **own devShell** (`nix develop`, so a venv owned by the caller's cwd cannot shadow the interpreter), and (mode `on`) **blocks on a test failure (exit 1) or a repo-content guard (exit 2)**. An ENVIRONMENT precondition (exit 3) → warn + allow. No-op for non-devrc repos. |
 | `audit-on-push.sh` | The backgrounded worker: branch + diff-size + flag gates, then headless `claude -p "/audit-pr current"`, then routes 🔴/🟡 to clawgate. |
 | `install.sh` | Sets `git config --global core.hooksPath` to this dir. `--uninstall` reverts. |
 | `audit-on-push.env.example` | Config template → copy to `~/.claude/audit-on-push.env`. |
@@ -44,12 +44,22 @@ Behaviour, all failing in the **safe direction**:
   it. Any ambiguity (new branch whose base can't be resolved, unparseable stdin,
   a `git diff` error) **fails toward RUNNING** — it never silently skips a code
   push.
-- **Infra flakiness degrades, never blocks** — the env is a **pinned nix-shell**
+- **Infra flakiness degrades, never blocks** — the env is the repo's **devShell**
   (never a trusted ambient pytest — the modules import requests/psycopg2/minio/
   yaml at collection). Env preparation is a **separate step** from the pytest
-  run: if the env can't be built (offline, uncached, substituter hiccup, disk
-  full, no `nix-shell`) the worker **warns and allows the push** (exit 0). Only
-  tests that actually executed and failed block.
+  run: if the env can't be built (offline, uncached, substituter hiccup, no
+  `nix`) the worker **warns and allows the push** (exit 0). 🔴 Two DISJOINT
+  mechanisms produce that, and conflating them sends people hunting for a
+  message that was never printed:
+  - the hook's own `degrade()`, **before the runner is ever invoked** — this is
+    the offline/substituter/devShell-build case;
+  - the runner exiting **3**, for its own environment preconditions (GUARDs
+    1/1b/1c, a failed `cd $ROOT`, the spool `mkdir`).
+
+  🔴 A REPO-CONTENT guard (runner exit **2** — target list, floor table,
+  launcher stubs, spool wiring) **BLOCKS** even though zero tests ran: those are
+  defects in the repo, and this hook is the only automatic gate (no CI, no
+  branch protection). So: exit 1 blocks, exit 2 blocks, exit 3 degrades.
 - **Escape hatch** — `DEVRC_SKIP_TESTS=1 git push …` skips the gate for one push
   regardless of mode (the flake check / CI still enforce the hermetic subset).
 

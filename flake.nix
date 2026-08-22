@@ -67,7 +67,7 @@
       # ---------------------------------------------------------------------
       # THE GATE'S TOOLCHAIN — ONE list, TWO consumers.
       #
-      # `scripts/run-tests.sh` asserts a REQUIRED_TOOLS precondition and exits 2
+      # `scripts/run-tests.sh` asserts a REQUIRED_TOOLS precondition and exits 3
       # when a binary is missing, because the suites `skipif` on these and a
       # missing one would take the run GREEN while testing less. That
       # precondition is correct and stays. What it lacked was a discoverable way

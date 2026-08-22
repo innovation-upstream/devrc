@@ -15,9 +15,20 @@
 # DESIGN PRINCIPLES (fail in the SAFE direction):
 #   * GLOBAL-hook safe — no-op for every repo except devrc (self-detected).
 #   * Infra flakiness DEGRADES, never blocks — if the test ENV can't be prepared
-#     (offline, uncached, substituter hiccup, disk full, no nix-shell) we WARN
-#     loudly and allow the push. Only a genuine pytest failure (tests executed,
-#     >=1 failed) blocks — and only in enforce mode.
+#     (offline, uncached, substituter hiccup, no nix) we WARN loudly and allow
+#     the push. 🔴 TWO DISJOINT mechanisms, deliberately not conflated: THIS
+#     file's `degrade()` handles the env-can't-be-built case BEFORE the runner
+#     is invoked at all; the runner's own exit 3 covers its environment
+#     preconditions (GUARDs 1/1b/1c, a failed `cd $ROOT`, the spool `mkdir`).
+#     Saying "the runner signals this with exit 3" sent people looking for a
+#     runner message that was never printed.
+#   * 🔴 REPO-CONTENT guards BLOCK even though zero tests ran. run-tests.sh exits
+#     2 when its target list, floor table, launcher stubs or spool wiring are
+#     wrong — defects in the REPO, whose own messages warn that silencing them is
+#     "how a suite stops running while the gate goes green". This header used to
+#     say "only a genuine pytest failure blocks"; that was rewritten on
+#     2026-08-22 rather than left to be cited as authority for degrading them.
+#     So: exit 3 degrades, exit 2 blocks, a real test failure (exit 1) blocks.
 #   * Changed-files filter fails TOWARD running — any ambiguity (new branch we
 #     can't resolve, unparseable stdin, diff error) RUNS the suite.
 #
@@ -124,26 +135,29 @@ if ! should_run_by_files "$STDIN_DATA"; then
 fi
 
 # --- Prepare the test env (DEGRADE, don't block, on failure) -----------------
-# The env is PINNED (nix-shell); we never trust an ambient pytest — the modules
-# under test import requests/psycopg2/minio/yaml at collection time, so a stray
-# bare-pytest venv on PATH would ImportError and wrongly block the push.
-PY_ENV="python312.withPackages(ps: with ps; [pytest requests psycopg2 minio pyyaml])"
-
-# 🔴 Every OTHER entry in run-tests.sh's REQUIRED_TOOLS is taken from the ambient
-# PATH — which works only for tools a dev host actually carries. `logrotate` is
-# NOT one of them: nix/home.nix supplies it to the claude-log-rotate *unit* via
-# `makeBinPath`, never to `home.packages`, so it is on NO interactive PATH on
-# either host. MEASURED 2026-08-11 on the workbench: `command -v logrotate` finds
-# nothing, and this gate therefore died at GUARD 1 with
+# The env is PINNED to the repo's own devShell; we never trust an ambient pytest
+# — the modules under test import requests/psycopg2/minio/yaml at COLLECTION
+# time, so a stray bare-pytest venv on PATH would ImportError and wrongly block
+# the push. `flake.nix devShells.default` carries all five plus logrotate, and
+# is the same `gatePyEnv` the flake's `checks.pytests` uses, so both tiers run
+# the identical interpreter.
+#
+# 🔴 KEPT FROM THE PREVIOUS `nix-shell -p …` FORM, because the lesson outlives
+# the mechanism: every OTHER entry in run-tests.sh's REQUIRED_TOOLS is taken from
+# the ambient PATH, which works only for tools a dev host actually carries.
+# `logrotate` is NOT one of them — nix/home.nix supplies it to the
+# claude-log-rotate *unit* via `makeBinPath`, never to `home.packages`, so it is
+# on NO interactive PATH on either host. MEASURED 2026-08-11 on the workbench:
+# `command -v logrotate` found nothing and this gate died at GUARD 1 with
 #   run-tests: FATAL — required tool(s) missing from PATH: logrotate
 # exit 2, ZERO tests run — a pre-push tier that had stopped being a test gate at
-# all. The flake check already declares it (flake.nix checks.pytests
-# nativeBuildInputs); this is the same declaration for the other tier.
+# all. The devShell now satisfies it, and `test_logrotate_is_on_path`
+# (scripts/tests/test_claude_log_rotate.py) fails the suite if it ever stops
+# being on PATH — deliberately NOT a skipif.
 #
-# Add any future REQUIRED_TOOLS entry that is not a normal user-PATH binary here
-# AND in flake.nix — the two tiers satisfy the same list by different means, and
-# nothing cross-checks them (see test_logrotate_is_supplied_to_the_prepush_tier).
-TOOL_ENV=(-p "$PY_ENV" -p logrotate)
+# So: a new REQUIRED_TOOLS entry that is not a normal user-PATH binary must be
+# added to the devShell AND to flake.nix's checks — the two tiers satisfy the
+# same list by different means, and nothing cross-checks them.
 
 degrade() {
   echo "" >&2
@@ -152,15 +166,39 @@ degrade() {
   exit 0
 }
 
-if ! command -v nix-shell >/dev/null 2>&1; then
-  degrade "nix-shell not found on PATH"
+# 🔴 `--no-write-lock-file`: `nix develop <repo>` MUTATES a tracked file — it
+# writes flake.lock when an input is unlocked. A pre-push hook that dirties the
+# working tree is a side effect nobody expects, and the changed-files filter
+# fires this gate PRECISELY when flake.nix changed. With the flag, nix errors on
+# a stale lock instead, which degrades — the honest outcome for this tier.
+#
+# 🔴 `env -u PYTHONPATH -u PYTHONHOME`: `nix develop` PRESERVES them, and
+# python honours PYTHONPATH ahead of the env's own site-packages. The nix-sandbox
+# tier has no such variable, so without this the two tiers are not running the
+# identical interpreter environment even though both use the same derivation.
+# 🔴 `nix develop`, NOT `nix-shell -p …`. MEASURED 2026-08-22, and the TRIGGER is
+# the CWD, not an inherited variable: `nix-shell --run` executes the user's shell
+# hooks, which activate a venv belonging to whatever directory you are standing
+# in; `nix develop --command` does not. Setting VIRTUAL_ENV by hand from a
+# neutral cwd reproduces NOTHING — both forms then give the store python — which
+# is why this is worth stating precisely. From a cwd that owns a venv:
+#     nix-shell -p "python312.withPackages(…)" --run python -> …/other-repo/.venv/bin/python
+#     nix develop <repo> --command python                   -> /nix/store/…-env/bin/python
+# That is the whole mechanism behind #698, where an unrelated repo's venv
+# produced 13 failures that read as a broken branch. devShells.default exists so
+# contributors stop hand-rolling the dep list, carries logrotate and all five
+# suite deps, and its own greeting points at this runner. Using it REMOVES the
+# defect rather than detecting it; run-tests.sh's GUARD 1c is the backstop for
+# every other caller.
+if ! command -v nix >/dev/null 2>&1; then
+  degrade "nix not found on PATH"
 fi
 
-echo "pre-push: preparing test env (nix-shell)…" >&2
-prep_out="$(nix-shell "${TOOL_ENV[@]}" --run 'python --version' 2>&1)"
+echo "pre-push: preparing test env (nix develop)…" >&2
+prep_out="$(env -u PYTHONPATH -u PYTHONHOME nix develop --no-write-lock-file "$REPO_ROOT" --command python --version 2>&1)"
 prep_rc=$?
 if [ "$prep_rc" -ne 0 ]; then
-  degrade "nix-shell env build failed (rc=$prep_rc): $(printf '%s' "$prep_out" | tail -1)"
+  degrade "nix develop env build failed (rc=$prep_rc): $(printf '%s' "$prep_out" | tail -1)"
 fi
 
 # --- Run the suite (this env is now cached; a failure here is a REAL failure) -
@@ -171,12 +209,32 @@ fi
 # verdict line now (`RESULT: FAIL (exit=1)`), so a reader who only has the
 # output still gets the truth; see scripts/gate.sh.
 echo "pre-push: running devrc test suite (mode=$MODE)…" >&2
-nix-shell "${TOOL_ENV[@]}" --run "bash '$RUNNER' --set all '$REPO_ROOT'"
+env -u PYTHONPATH -u PYTHONHOME nix develop --no-write-lock-file "$REPO_ROOT" --command bash "$RUNNER" --set all "$REPO_ROOT"
 run_rc=$?
 
 if [ "$run_rc" -eq 0 ]; then
   echo "pre-push: ✅ devrc test suite passed." >&2
   exit 0
+fi
+
+# 🔴 rc 3 is an ENVIRONMENT precondition abort (run-tests.sh GUARDs 1/1b/1c): by
+# construction ZERO tests ran, and the fault is in the CALLER, not the repo. This
+# file's header promises "Infra flakiness DEGRADES, never blocks", so it degrades.
+#
+# 🔴 rc 2 STILL BLOCKS, and the distinction is the whole point. A first version of
+# this degraded on rc 2 — but run-tests.sh has TEN abort sites and only six are
+# environmental; the rest are REPO-CONTENT guards (target list, floor table,
+# launcher stubs, spool wiring) whose own messages warn "do NOT delete the entry
+# to make this pass — that is how a suite stops running while the gate goes
+# green". Degrading on 2 produced exactly that, on the only tier that runs
+# automatically: this repo has no CI and no branch protection. The runner now
+# exits 3 for the environment cases so the two can be told apart.
+#
+# Verified in the other direction too: `fail` is only ever assigned 0 or 1 and the
+# script ends `exit "$fail"`, so a genuine pytest failure can never surface as 2
+# or 3 and be degraded away.
+if [ "$run_rc" -eq 3 ]; then
+  degrade "the ENVIRONMENT could not satisfy a precondition (rc=3) — see the message above"
 fi
 
 # Tests EXECUTED and at least one failed.
