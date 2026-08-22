@@ -1151,6 +1151,28 @@ in
   home.file.".claude/hooks/agent_ledger.py" = {
     source = ../scripts/lib/agent_ledger.py;
   };
+  # 🔴 THE BACKGROUNDED-COMMAND CAPTURE LOG — instrumentation for ClickUp
+  # 868ktvqf9, where a unit run that exits non-zero is announced as "exit code 0"
+  # and the run's output file is 0 bytes at the moment the notification arrives.
+  # Both independent things an investigator would check report green over a red
+  # run, and the ONE artifact that discriminates between the live hypotheses —
+  # the VERBATIM command string that was backgrounded — is kept nowhere the
+  # investigator can reach afterwards. This records it.
+  #
+  # It never blocks, warns or rewrites anything; it appends a line and returns 0.
+  # `bg_command_capture.py --report` is the read that puts the captured command
+  # next to the exit code the harness announced for it.
+  #
+  # 🔴 BOTH files are NEW, and the hook imports the library as a SIBLING in
+  # ~/.claude/hooks/ — deploying one without the other is a green switch and an
+  # inert hook (the #452 shape). Both must be `git add`ed or the flake silently
+  # omits them, and the switch still succeeds with the hook absent.
+  home.file.".claude/hooks/bg-command-capture.py" = {
+    source = ../scripts/claude-hooks/bg-command-capture.py;
+  };
+  home.file.".claude/hooks/bg_command_capture.py" = {
+    source = ../scripts/lib/bg_command_capture.py;
+  };
   # 🔴 THE CLAWGATE WRITE-BACK GUARD — the deterministic replacement for a 🔴 prose
   # rule that lost 2/2. Tasks #193 and #194 were both picked up, the work shipped as
   # PRs, and both cards stayed `open` with ZERO comments; both were re-dispatched and
