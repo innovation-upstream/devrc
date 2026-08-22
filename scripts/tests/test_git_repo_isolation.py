@@ -354,8 +354,9 @@ def test_every_pytest_target_gets_the_detector():
     one directory (that is #399's and #614's measured failure, twice).
 
     🔴 The target COUNT is deliberately not written down here. #683 said
-    "seventeen" while `--check-targets` listed 25 — a number nobody re-derives
-    is a claim that rots, and the assertion never depended on it.
+    "seventeen" while `--check-targets` listed 25 at the time of the audit and
+    26 today — a number nobody re-derives is a claim that rots, and the
+    assertion below never depended on it.
     """
     text = re.sub(r"\\\n\s*", " ", RUN_TESTS.read_text(encoding="utf-8"))
     pytest_lines = [ln for ln in text.splitlines()
