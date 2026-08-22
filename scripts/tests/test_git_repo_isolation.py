@@ -97,7 +97,7 @@ RUNNERS = (SCRIPTS / "run-tests.sh",
 
 sys.path.insert(0, str(SCRIPTS))
 
-from testlib import gitenv, gitenv_plugin  # noqa: E402
+from testlib import gitenv, gitenv_plugin, mockbin  # noqa: E402
 from testlib.gitenv import (  # noqa: E402
     CONTROL_VARS,
     FOREIGN_MARKER,
@@ -494,6 +494,12 @@ _SHELL_ROOTS = ("githooks", "scripts", "nix")
 _SHELL_SUFFIXES = {".sh", ".bash", ".zsh", ".nix"}
 _SKIP_DIRS = {".git", "node_modules", "__pycache__", "result", "dist", "build",
               ".direnv", ".pytest_cache"}
+# 🔴 Spelled from character codes, not as a literal. `testlib/shebang_scan.py`
+# treats a quote followed by those two bytes as a test writing its own
+# shebang, and it is right to — it cannot tell a WRITE from a READ, and the
+# false negative it exists to prevent cost two days of red sandbox. Same
+# spelling trick that module uses on itself.
+_HASHBANG = (chr(35) + chr(33)).encode()
 _SHEBANG = re.compile(rb"\b(ba|z|da|k)?sh\b")
 
 _KEYWORDS = re.compile(r"^(?:export|readonly|local|declare|typeset)(?:\s+-\w+)*\s+")
@@ -528,7 +534,7 @@ def _shell_files() -> list[Path]:
                     head = p.open("rb").readline(200)
                 except OSError:
                     continue
-                if head.startswith(b"#!") and _SHEBANG.search(head):
+                if head.startswith(_HASHBANG) and _SHEBANG.search(head):
                     out.append(p)
     return out
 
@@ -797,12 +803,14 @@ def test_git_push_does_not_export_GIT_DIR_to_pre_push(tmp_path):
     assert _git(work, "remote", "add", "origin", str(bare), env=base).returncode == 0
 
     seen = tmp_path / "hookenv.txt"
-    hook = work / ".git" / "hooks" / "pre-push"
-    hook.write_text(
-        "#!/usr/bin/env bash\n"
+    # 🔴 `mockbin.write_exec` OWNS THE SHEBANG. Writing one here would give
+    # the hook `/usr/bin/env`, which `test_runtime_shebangs.py` fails on — a
+    # guard measured to matter: two files that wrote their own put 27 tests
+    # red in the nix sandbox for two days. The body is POSIX sh.
+    hook = mockbin.write_exec(
+        work / ".git" / "hooks" / "pre-push",
         f"env | grep -E '^GIT' | sort > {seen}\n"
-        "cat >/dev/null\nexit 0\n", encoding="utf-8")
-    hook.chmod(0o755)
+        "cat >/dev/null\nexit 0\n")
 
     assert _git(work, "push", "-q", "origin", "main", env=base).returncode == 0
     names = {ln.split("=", 1)[0] for ln in seen.read_text(encoding="utf-8").splitlines()}
