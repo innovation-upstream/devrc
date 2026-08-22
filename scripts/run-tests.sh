@@ -196,9 +196,15 @@ fi
 # starts, so unsetting it here is the one place that fixes it for all of them.
 unset CDPATH
 cd "$ROOT" || { echo "run-tests: cannot cd to ROOT=$ROOT" >&2; exit 3; }
-# 🔴 EXIT CODES: 3 = the ENVIRONMENT could not satisfy a precondition (this guard,
-# 1b, 1c). 2 = a REPO-CONTENT guard refused (target list, floor table, launcher
-# stubs, spool wiring). The distinction is load-bearing: `githooks/tests-on-push.sh`
+# 🔴 EXIT CODES: 3 = the ENVIRONMENT could not satisfy a precondition (GUARDs 1b
+# and 1c, a failed `cd $ROOT`, the spool `mkdir`, and GUARD 1 when run OUTSIDE a
+# sanctioned gate env). 2 = a REPO-CONTENT defect (target list, floor table,
+# launcher stubs, spool wiring — and GUARD 1 when DEVRC_GATE_ENV=1, because then
+# the missing tool is something the repo asked for and nothing supplies).
+# 🔴 NOTE GUARD 1 IS IN BOTH LISTS: it is the one guard whose code depends on the
+# CAUSE rather than on which guard fired, because its input (REQUIRED_TOOLS) is
+# repo content but its usual failure is environmental. The distinction is
+# load-bearing: `githooks/tests-on-push.sh`
 # DEGRADES on 3 (an env fault must not block a push over a broken caller) and
 # BLOCKS on 2. Collapsing them was a measured mistake — degrading on 2 turned
 # GUARD 5's and GUARD 3a's own warning ("do NOT delete the entry to make this
@@ -267,8 +273,51 @@ fi
 if [ "${#missing_tools[@]}" -gt 0 ]; then
   echo "run-tests: FATAL — required tool(s) missing from PATH: ${missing_tools[*]}" >&2
   echo "  The suites SKIP the tests that need these, so the run would go green while" >&2
-  echo "  testing less. This is a MISSING ENVIRONMENT, not a code failure — nothing" >&2
-  echo "  in the repo is broken and no test has run yet." >&2
+  echo "  testing less. No test has run yet." >&2
+  echo >&2
+  echo "  Do NOT drop entries from REQUIRED_TOOLS to make this pass — each one is" >&2
+  echo "  justified in the comment block directly above it." >&2
+  # 🔴 CLASSIFY BY CAUSE, NOT BY SITE. This guard reads REQUIRED_TOOLS, which is
+  # REPO CONTENT — so "GUARD 1 fired" does not by itself mean the environment is
+  # at fault, and treating it as environmental let a typo turn the gate off.
+  # MEASURED: `logrotatee` planted in REQUIRED_TOOLS aborted with rc 3, the
+  # pre-push hook DEGRADED, and the push went through with ZERO tests run — while
+  # the test that would have caught the typo never executed, because the runner
+  # aborted before pytest started. That is "a suite stops running while the gate
+  # goes green" on the only tier that runs automatically (no CI, no branch
+  # protection). devrc#705.
+  #
+  # The discriminator is whether we are IN a sanctioned gate env, which both the
+  # devShell and checks.pytests announce with DEVRC_GATE_ENV=1:
+  #   * set   -> the env supplies everything `gateTools` declares, so a still-
+  #              missing entry means the REPO asked for something nothing
+  #              supplies (a typo, or a gateTools omission). Repo defect: BLOCK.
+  #   * unset -> the caller is not in the gate env. Caller defect: degrade, and
+  #              the FATAL above tells them how to get in.
+  #
+  # 🔴 Deliberately NOT "is the binary declared in gateTools", which was the first
+  # design: that needs a hand-maintained nixpkgs-attr -> binary-name table
+  # (ripgrep->rg, util-linux->setsid, gnugrep->grep, nodejs->node), and this repo
+  # has already been bitten by exactly that shape once (pyyaml->yaml, #704). A
+  # table says nothing about the mapping it is missing.
+  if [ "${DEVRC_GATE_ENV:-0}" = "1" ]; then
+    echo >&2
+    echo "  🔴 This is a REPO defect, not an environment one: you are inside a" >&2
+    echo "  sanctioned gate environment (DEVRC_GATE_ENV=1) and the tool is STILL" >&2
+    echo "  missing, so REQUIRED_TOOLS names something flake.nix \`gateTools\`" >&2
+    echo "  does not supply. Fix the spelling, or add the package to gateTools." >&2
+    echo "  Exiting 2 so the pre-push hook BLOCKS rather than degrading." >&2
+    exit 2
+  fi
+  # The other arm. 🔴 Everything below is TRUE ONLY HERE — it says the repo is
+  # fine and tells you to enter the dev shell, and both are wrong advice for a
+  # caller who is already IN one. That is why it moved out of the shared header:
+  # it was printed unconditionally, so the exit-2 arm this change adds would have
+  # told a contributor with a REQUIRED_TOOLS typo that "nothing in the repo is
+  # broken" and to go re-run in the shell they were already standing in.
+  echo >&2
+  echo "  This is a MISSING ENVIRONMENT, not a code failure — nothing in the" >&2
+  echo "  repo is broken." >&2
   echo >&2
   echo "  FIX — enter the repo's own dev shell, which carries exactly this list," >&2
   echo "  and re-run from there:" >&2
@@ -279,9 +328,6 @@ if [ "${#missing_tools[@]}" -gt 0 ]; then
   echo "  you like). That shell is built from the SAME flake.nix \`gateTools\` list" >&2
   echo "  as the \`nix flake check\` gate, so it cannot drift out of satisfying this" >&2
   echo "  precondition." >&2
-  echo >&2
-  echo "  Do NOT drop entries from REQUIRED_TOOLS to make this pass — each one is" >&2
-  echo "  justified in the comment block directly above it." >&2
   exit 3
 fi
 

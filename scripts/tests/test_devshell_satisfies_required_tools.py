@@ -370,3 +370,113 @@ def test_every_required_tool_is_justified_in_the_comment_block():
         f"REQUIRED_TOOLS entries with no justification in the comment block "
         f"above them: {unjustified}. The FATAL promises the reader one."
     )
+
+
+# ---------------------------------------------------------------------------
+# GUARD 1 CLASSIFIES BY CAUSE (devrc#705)
+#
+# GUARD 1 reads REQUIRED_TOOLS, which is REPO CONTENT, but exited 3 for every
+# cause -- so `githooks/tests-on-push.sh` DEGRADED on a typo there and the push
+# went through with zero tests run. Measured before the fix: `logrotatee` in
+# REQUIRED_TOOLS -> rc 3 -> push allowed. The test that would have caught the
+# typo never ran, because the runner aborts at GUARD 1 before pytest starts.
+#
+# The discriminator is DEVRC_GATE_ENV=1, exported by BOTH sanctioned gate
+# environments. The two tests below pin the two halves, and BOTH are needed:
+# the behavioural one proves the runner branches on the marker, and the seam one
+# proves something still SETS it. Drop the export from flake.nix and the
+# behavioural test still passes while the gate silently reverts to
+# always-degrade -- the exact silent direction this issue was filed about.
+
+
+@pytest.mark.parametrize(
+    "marker,expect_rc,must_say,must_not_say",
+    [
+        # In a sanctioned gate env the toolchain supplies everything gateTools
+        # declares, so a STILL-missing entry means the repo asked for something
+        # nothing supplies. Repo defect -> 2 -> the hook BLOCKS.
+        ("1", 2, "REPO defect", "not a code failure"),
+        # Outside one, the caller simply is not in the gate env. Caller defect
+        # -> 3 -> the hook degrades, and the FATAL says how to get in.
+        (None, 3, "not a code failure", "REPO defect"),
+    ],
+    ids=["inside-gate-env-BLOCKS", "outside-gate-env-degrades"],
+)
+def test_guard1_classifies_by_cause_not_by_site(
+    tmp_path_factory, marker, expect_rc, must_say, must_not_say
+):
+    """Same missing tool, two causes, two exit codes -- driven, not parsed."""
+    bash = shutil.which("bash")
+    assert bash, "bash is not on PATH; this suite cannot drive the runner"
+    stub = tmp_path_factory.mktemp("only-bash-cause")
+    (stub / "bash").symlink_to(bash)
+    home = tmp_path_factory.mktemp("home-cause")
+
+    # An explicit env dict, so the ambient DEVRC_GATE_ENV cannot leak in and
+    # decide the arm for us. That matters: this suite normally runs INSIDE the
+    # dev shell, where the marker IS set, so inheriting it would collapse both
+    # parametrisations onto the same arm and the pair would agree vacuously.
+    env = {"PATH": str(stub), "HOME": str(home)}
+    if marker is not None:
+        env["DEVRC_GATE_ENV"] = marker
+
+    proc = subprocess.run(
+        [bash, str(RUN_TESTS), str(REPO_ROOT)],
+        env=env, capture_output=True, text=True, timeout=120,
+    )
+    out = proc.stdout + proc.stderr
+
+    # POSITIVE CONTROL -- without it, an abort from some OTHER guard that
+    # happened to share the expected code would read as a pass.
+    assert "required tool(s) missing from PATH" in out, (
+        "GUARD 1 is not what fired, so this measures the wrong guard.\n"
+        f"exit={proc.returncode}\n{out[-3000:]}"
+    )
+    assert proc.returncode == expect_rc, (
+        f"DEVRC_GATE_ENV={marker!r} should classify as exit {expect_rc}, got "
+        f"{proc.returncode}. Exit 3 DEGRADES the pre-push hook; exit 2 blocks "
+        f"it.\n{out[-3000:]}"
+    )
+    # The wording must match the classification. A correct code under the wrong
+    # diagnosis is its own defect: the environment arm tells the reader "nothing
+    # in the repo is broken" and to go enter the dev shell, which is actively
+    # wrong advice for someone who is already inside one.
+    assert must_say in out, f"expected {must_say!r} in the FATAL:\n{out[-3000:]}"
+    assert must_not_say not in out, (
+        f"the FATAL carries {must_not_say!r}, which belongs to the OTHER arm — "
+        f"the diagnosis contradicts the exit code.\n{out[-3000:]}"
+    )
+
+
+def test_both_sanctioned_gate_envs_export_the_marker():
+    """The two tiers that satisfy REQUIRED_TOOLS must both announce themselves.
+
+    🔴 SILENT-FAILURE DIRECTION. If only the devShell exports it, `nix flake
+    check` misclassifies its OWN repo defects as environment faults; if only
+    checks.pytests does, the pre-push tier -- the only one that runs
+    automatically here, since this repo has no CI and no branch protection --
+    goes back to degrading on a typo. Neither shows up as a failure anywhere:
+    the runner still exits, just with the code that lets the push through.
+
+    Reads flake.nix as SOURCE, with the same limitation the seam tests above
+    document -- it can see the export is WRITTEN and not commented out, not that
+    nix evaluates it into the environment. `_uncommented_flake` is what makes
+    the commented-out case fail rather than pass.
+    """
+    src = _uncommented_flake()
+    hits = src.count("DEVRC_GATE_ENV=1")
+    assert hits >= 2, (
+        f"DEVRC_GATE_ENV=1 is exported {hits} time(s) in flake.nix; both the "
+        "devShell shellHook AND checks.pytests must set it. GUARD 1 uses it to "
+        "tell a REPO defect from a CALLER defect, so a tier that does not set "
+        "it silently degrades instead of blocking (devrc#705)."
+    )
+    # ...and specifically in the devShell, not twice in the sandbox check.
+    shell_at = src.find("shellHook")
+    assert shell_at != -1, "no shellHook in flake.nix"
+    tail = src[shell_at:shell_at + 800]
+    assert "DEVRC_GATE_ENV=1" in tail, (
+        "the devShell's shellHook does not export DEVRC_GATE_ENV=1, so a "
+        "contributor running the gate from `nix develop` gets the "
+        "ENVIRONMENT diagnosis for a REPO defect and the hook degrades."
+    )
