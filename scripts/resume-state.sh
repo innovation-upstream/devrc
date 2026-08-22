@@ -466,7 +466,26 @@ resolve(){
         rest=" NOTHING was reconciled; the DRIFT section below is about no document at all."
       else
         [ "$n_cand" -gt 1 ] && moves=" It is the newest of $n_cand, and which one that is depends on commit times, so it MOVES between runs."
-        rest=" The digest FELL BACK to $(basename "$HANDOFF"), a DIFFERENT document from the one you asked for, so nothing below is scoped to what was asked for.$moves Re-run naming the doc's path, or with no argument to take newest deliberately."
+        # 🔴 MECHANICAL CLAIMS ONLY. This used to add "a DIFFERENT document from
+        # the one you asked for, so nothing below is scoped to what was asked
+        # for" — an IDENTITY claim the tool has no evidence for, and FALSE in the
+        # shape the fallback chain exists to serve. Measured:
+        #
+        #   resume-state.sh handoff-alpha-2026-01-01.md   (a bare basename, which
+        #   is what a user pastes) in a repo holding exactly that doc printed
+        #   "FELL BACK to handoff-alpha-2026-01-01.md, a DIFFERENT document from
+        #   the one you asked for" — the same filename on both sides of the
+        #   sentence, called different, over a digest that had reconciled
+        #   precisely what the reader wanted;
+        #
+        #   resume-state.sh session   in civitai-manager, whose only doc IS
+        #   SESSION-HANDOFF.md — the invocation blessed by name 30 lines above.
+        #
+        # Same class as the retired "no .md path was quoted in it either", and it
+        # broke the rule stated at the top of this block. The reader already has
+        # the `handoff:` line and the "nothing in it resolved" clause; what they
+        # do NOT have is a tool claiming to know which document they meant.
+        rest=" The digest FELL BACK to $(basename "$HANDOFF").$moves Re-run naming the doc's path, or with no argument to take newest deliberately."
       fi
       UNRECONCILED+=("$lead$rest")
     fi

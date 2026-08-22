@@ -156,6 +156,28 @@ MUTANTS: list[tuple[str, str, str, str, str]] = [
     ("M36", "guard hoist", "a no-argument run warns too (the contract inverted)",
      '    if [ -n "$named_missing" ] || [ -n "$unresolved" ]; then',
      '    if true; then'),
+    # ---- prose fidelity (F1/F2/F3) --------------------------------------
+    # Every one of these rewrites a SENTENCE rather than a branch. They exist
+    # because the six whole-string pins are the only thing that can see them:
+    # Z16 was the auditor's own mutant and it passed 138/138 before those pins.
+    ("Z16", "false sentence", "the no-fallback branch claims a fallback happened",
+     'rest=" NOTHING was reconciled; the DRIFT section below is about no document at all."',
+     'rest=" The digest FELL BACK to nothing at all."'),
+    ("Z17", "false sentence", "the identity claim retired by F1 creeps back in",
+     'rest=" The digest FELL BACK to $(basename "$HANDOFF").$moves',
+     'rest=" The digest FELL BACK to $(basename "$HANDOFF"), a DIFFERENT document from the one you asked for.$moves'),
+    ("Z18", "reword", "the named-missing lead is reworded",
+     'lead="requested handoff \\"$named_missing\\" — NO SUCH FILE (renamed, moved, or in another checkout?)."',
+     'lead="requested handoff \\"$named_missing\\" — not found."'),
+    ("Z19", "reword", "the slug-miss lead is reworded",
+     'lead="requested \\"$arg\\" — nothing in it resolved to a handoff doc under $REPO/claudedocs."',
+     'lead="requested \\"$arg\\" — no match under $REPO/claudedocs."'),
+    ("Z20", "reword", "the MOVES clause is reworded",
+     'moves=" It is the newest of $n_cand, and which one that is depends on commit times, so it MOVES between runs."',
+     'moves=" It is the newest of $n_cand."'),
+    ("Z21", "reword", "the re-run advice is dropped from the fallback branch",
+     " Re-run naming the doc's path, or with no argument to take newest deliberately.\"",
+     '"'),
     ("M31", "early exit", "a miss short-circuits the scan before a later hit",
      '    [ -f "$tok" ] && { hit="$tok"; break; }\n'
      '    # Shaped like a handoff reference, but not on disk. Remember the FIRST such\n'

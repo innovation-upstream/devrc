@@ -1225,35 +1225,103 @@ def test_a_MIXED_family_repo_counts_only_the_family_that_resolved(tmp_path, stub
     assert "MOVES" not in gaps[0], gaps
 
 
-def test_the_gap_sentence_is_pinned_WHOLE(tmp_path, stub_bin):
-    """🔴 THE ARTIFACT UNDER TEST IS PROSE, so a guard on keywords is walkable by
-    rewording. Pin the entire normalised string.
+# --------------------------------------------------------------------------- #
+# 🔴 EVERY SHAPE THE GAP CAN TAKE IS PINNED WHOLE — not one of them.
+#
+# The artifact under test is PROSE, so a guard on words is walkable by
+# rewording; the fix is to pin the entire normalised string. That rule was
+# applied to ONE shape, and the block can emit SIX (two leads x {no-fallback,
+# fallback} x {MOVES, no MOVES}). The other five were asserted only by substring
+# or by absence — and that is exactly how a FALSE clause shipped in a change
+# whose thesis is honest messaging:
+#
+#     "... FELL BACK to handoff-alpha-2026-01-01.md, a DIFFERENT document from
+#      the one you asked for"
+#
+# emitted for `resume-state.sh handoff-alpha-2026-01-01.md` — the same filename
+# on both sides of the sentence, called different — and for
+# `resume-state.sh session` in a repo whose only doc IS SESSION-HANDOFF.md, the
+# invocation resolve()'s own comment blesses by name.
+#
+# The clause was an IDENTITY claim; the tool only has evidence for a MECHANICAL
+# one. It is gone. What remains is what is true on every run that reaches it.
+#
+# Assembled from parts so the six expectations cannot drift apart, and so a
+# reworded clause fails in exactly one place.
+# --------------------------------------------------------------------------- #
+GAP_LEAD_MISSING = 'requested handoff "{tok}" — NO SUCH FILE (renamed, moved, or in another checkout?).'
+GAP_LEAD_SLUG = 'requested "{arg}" — nothing in it resolved to a handoff doc under {repo}/claudedocs.'
+GAP_REST_NONE = " NOTHING was reconciled; the DRIFT section below is about no document at all."
+GAP_REST_FELL = " The digest FELL BACK to {name}.{moves} Re-run naming the doc's path, or with no argument to take newest deliberately."
+GAP_MOVES = " It is the newest of {n}, and which one that is depends on commit times, so it MOVES between runs."
 
-    The sentence this replaced claimed "no .md path was quoted in it either" —
-    FALSE on this very fixture, where one was quoted and merely failed a filter.
-    That claim survived review because the test only checked that `$arg` was
-    echoed back, which is true of any sentence at all. A cosmetic reword now
-    fails here; that is the price of a machine-readable claim.
-    """
-    repo = two_initiative_repo(tmp_path)
-    out = run_resume(repo, stub_bin, "rewrite README.md then resume the listing work")
-    # $REPO as the SCRIPT resolved it (git toplevel), not as the fixture spells
-    # it — a symlinked tmpdir would otherwise fail this on the path alone.
-    resolved = [ln for ln in out.splitlines() if ln.startswith("# repo:")][0]
-    resolved = resolved.split("# repo:", 1)[1].split("slug:")[0].strip()
+
+def _repo_as_the_script_resolved_it(out):
+    """`$REPO` from the digest itself, not as the fixture spells it — a
+    symlinked tmpdir would otherwise fail these on the path alone."""
+    line = [ln for ln in out.splitlines() if ln.startswith("# repo:")][0]
+    return line.split("# repo:", 1)[1].split("slug:")[0].strip()
+
+
+@pytest.mark.parametrize(
+    "docs,kind,n_moves,resolved",
+    [
+        # slug lead x fallback, without and with the MOVES clause
+        pytest.param(("SESSION-HANDOFF.md",), "slug", 0, "SESSION-HANDOFF.md",
+                     id="slug-fell-back-1"),
+        pytest.param((WANTED, NEWEST), "slug", 2, NEWEST, id="slug-fell-back-2"),
+        # named-missing lead x fallback, without and with MOVES
+        pytest.param(("SESSION-HANDOFF.md",), "missing", 0, "SESSION-HANDOFF.md",
+                     id="missing-fell-back-1"),
+        pytest.param((WANTED, NEWEST), "missing", 2, NEWEST, id="missing-fell-back-2"),
+        # …and the two branches where NOTHING resolved. 🔴 F2: this is the
+        # strongest honesty claim in the feature and it had no whole-string pin —
+        # only a substring assert — so replacing it with the FALSE "The digest
+        # FELL BACK to nothing at all." passed 138/138.
+        pytest.param((), "slug", 0, None, id="slug-nothing-resolved"),
+        pytest.param((), "missing", 0, None, id="missing-nothing-resolved"),
+    ],
+)
+def test_every_gap_sentence_is_pinned_WHOLE(
+    tmp_path, stub_bin, docs, kind, n_moves, resolved
+):
+    repo = make_repo(tmp_path, docs=docs)
+    gone = repo / "claudedocs" / "handoff-gone-2026-01-01.md"
+    arg = f"resume it; handoff: {gone}" if kind == "missing" else "no-such-topic"
+
+    out = run_resume(repo, stub_bin, arg)
     gaps = gap_lines(out)
     assert len(gaps) == 1, gaps
-    assert gaps[0] == (
-        'requested "rewrite README.md then resume the listing work" — nothing in '
-        f"it resolved to a handoff doc under {resolved}/claudedocs."
-        f" The digest FELL BACK to {NEWEST}, a DIFFERENT document from the one you"
-        " asked for, so nothing below is scoped to what was asked for."
-        " It is the newest of 2, and which one that is depends on commit times, so"
-        " it MOVES between runs."
-        " Re-run naming the doc's path, or with no argument to take newest"
-        " deliberately."
-    )
 
+    where = _repo_as_the_script_resolved_it(out)
+    lead = (
+        GAP_LEAD_MISSING.format(tok=gone)
+        if kind == "missing"
+        else GAP_LEAD_SLUG.format(arg=arg, repo=where)
+    )
+    if resolved is None:
+        rest = GAP_REST_NONE
+    else:
+        moves = GAP_MOVES.format(n=n_moves) if n_moves else ""
+        rest = GAP_REST_FELL.format(name=resolved, moves=moves)
+    assert gaps[0] == lead + rest
+
+
+def test_the_whole_sentence_pins_can_actually_FAIL():
+    """POSITIVE CONTROL for the six assertions above.
+
+    They are equality checks against strings assembled from module constants —
+    if a template ever drifted to match whatever the script emits (or a helper
+    returned the observed value), they would pass by construction. This proves
+    the templates carry real, distinct content rather than being empty or equal.
+    """
+    parts = [GAP_LEAD_MISSING, GAP_LEAD_SLUG, GAP_REST_NONE, GAP_REST_FELL, GAP_MOVES]
+    assert len(set(parts)) == len(parts)
+    assert all(len(p) > 40 for p in parts), parts
+    # 🔴 The identity claim retired by F1 must not creep back into any template.
+    for p in parts:
+        assert "DIFFERENT document" not in p, p
+        assert "nothing below is scoped" not in p, p
 
 # A handoff body that names PRs the stubbed `gh` cannot answer for, so a run
 # gets a PR gap IN ADDITION to whatever the resolution produces. Defined here
