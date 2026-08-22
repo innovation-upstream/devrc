@@ -33,12 +33,23 @@ decidable, and only those are asserted:
   3. `clickup` names its disambiguating siblings, AND each name it uses is a
      skill that actually exists.
 
-(3) is a RELATIONSHIP, not a word: renaming or deleting `clawgate`,
-`initiatives` or `mailbox` turns it red, so the disambiguation cannot rot into a
-pointer at nothing. The DECLARED gap: the sibling ledger below is a judgement
-call and is checked in one direction only -- a name in it must exist and must be
-named, but nothing here can know that a FOURTH task-shaped skill has appeared.
-Add it here when one does.
+(3) is a RELATIONSHIP, not a word: renaming or deleting any ledgered sibling
+turns it red, so the disambiguation cannot rot into a pointer at nothing. The
+DECLARED gap: the sibling ledger below is a judgement call and is checked in one
+direction only -- a name in it must exist and must be named, but nothing here can
+know that a FIFTH task-shaped skill has appeared. Add it here when one does.
+
+A FOURTH did, which is why that sentence now reads FIFTH.
+`check-clickup-addressed` was migrated into devrc after this gate was written,
+and it is the most confusable sibling yet: it works the SAME ClickUp tasks and
+asks the opposite question -- not "what is on this ticket" but "was the work
+actually done", answered by reading session transcripts. The overlap has a cheap
+half and an expensive half, and only the expensive half is a listing entry:
+`node query.mjs awaiting` (in `clickup`) is the ~45s triage pass answering WHICH
+tasks have someone else's comment last, and `check-clickup-addressed` is the
+transcript-reading verdict on WHETHER each is done. `awaiting` is a CLI command,
+not a skill, so it costs the listing nothing and must NOT be added to the ledger
+below -- every key there is asserted to be a real skill directory.
 
 NOT asserted: a minimum description length. Measured when this was written, the
 defect was 175 chars and the next-shortest entry was 181 (`espanso-audit`), so
@@ -88,6 +99,10 @@ CLICKUP_SIBLINGS = {
     "clawgate": "the self-hosted approval UI, which has its own Tasks",
     "initiatives": "the durable cross-repo initiative board",
     "mailbox": "the email action-items queue",
+    "check-clickup-addressed": (
+        "verifies from session transcripts whether work on a ClickUp task was "
+        "actually completed -- the same tasks, the opposite question"
+    ),
 }
 
 # The disambiguating sentence, pinned WHOLE and built from the sibling names.
@@ -104,7 +119,9 @@ CLICKUP_SIBLINGS = {
 CLICKUP_DISAMBIGUATION = (
     "This is the EXTERNAL ClickUp workspace — the self-hosted approval UI and "
     "ITS Tasks are `clawgate`, the durable cross-repo board is `initiatives`, "
-    "and the email action-items queue is `mailbox`."
+    "the email action-items queue is `mailbox`, and verifying from session "
+    "transcripts whether work on a task was actually done is "
+    "`check-clickup-addressed`."
 )
 
 
@@ -348,7 +365,7 @@ def test_control_a_passing_mention_of_every_sibling_still_fails_the_pin():
     disambiguate from none of them. A per-name substring check passes this."""
     walked = (
         "Interact with ClickUp tasks and documents. See also clawgate, "
-        "initiatives and mailbox."
+        "initiatives, mailbox and check-clickup-addressed."
     )
     for sibling in CLICKUP_SIBLINGS:
         assert sibling in walked, "fixture broken: it must name every sibling"
