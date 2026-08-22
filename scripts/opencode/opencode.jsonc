@@ -70,6 +70,22 @@
 // that fires too often on a mutation family is a far better failure than an
 // `ask` that never fires on the spelling an operator actually types.
 //
+// 🔴 ONE DELIBERATE EXCEPTION, and it is the only one: the two `age` decrypt
+// rules are `*age -d*` / `*age --decrypt*` — leading-`*` but NOT infix. The
+// infix form `*age*-d*` matched any text with "age" followed LATER by "-d",
+// and "age" is a substring of package, packages, image, message, storage and
+// manage while "-d" covers -db-, --dir, --debug and --dry-run. Because
+// `opencode run` AUTO-REJECTS an ask rather than prompting, that over-match did
+// not "fire too often" — it KILLED runs on `ls packages/…-db-…` and
+// `grep … packages/…`. Measured 2026-08-21; two real dispatches died on it.
+// The trade is real and is NOT free: the narrowed rules know exactly one
+// argument order, so reordered spellings like `age -i k.txt -d f` now resolve
+// ALLOW, and guard_core.py has NO age/sops check to catch them. That gap is
+// pinned as a characterization test —
+// `test_age_glob_misses_these_reordered_decrypt_spellings` — so it stays
+// visible. Do NOT "restore consistency" by re-widening these to infix without
+// reading that test first.
+//
 // Other measured facts baked into this file (v1.18.18, EXCEPT where a bullet
 // says otherwise — the 2026-08-19 re-derivation could not reach three of them,
 // and a claim relabelled to a version nothing measured it on is worse than a
@@ -249,6 +265,11 @@
       "*talosctl*": "ask",
 
       // --- secrets to plaintext ---
+      // sops stays INFIX on purpose, unlike its age neighbours below: "sops" is
+      // not a substring of ordinary words or paths, so the over-match that
+      // forced the age narrowing does not arise here, and the infix form buys a
+      // real spelling — `sops --config .sops.yaml -d f` (pinned in MUST_ASK).
+      // Do not narrow these for symmetry with age.
       "*sops*-d*": "ask",
       "*sops*--decrypt*": "ask",
       "*sops*exec-env*": "ask",
@@ -271,8 +292,8 @@
       // 🔴 LOAD-BEARING — do not delete it as "already covered".
       // `"*age -d*"` DOES match some spellings of this command by pure
       // coincidence ("nix-collect-gar(BAGE) -d" ends in the literal "age -d"),
-      // but ONLY those spelling the flag immediately after, so
-      // literal `-d`. MEASURED: with this rule deleted, `nix-collect-garbage`
+      // but ONLY those spelling the flag immediately after the word ending in
+      // "age". MEASURED: with this rule deleted, `nix-collect-garbage`
       // and `nix-collect-garbage --max-freed 1G` both resolve ALLOW at both
       // layers. Two things follow, and they point opposite ways: this rule is
       // the real gate for the no-`-d` spellings, AND `"*age -d*"` must not be

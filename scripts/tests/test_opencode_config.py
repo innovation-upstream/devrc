@@ -631,7 +631,8 @@ MUST_ASK = [
     # load-bearing for a real spelling; each went ask -> allow at BOTH layers
     # with its rule deleted. See REDUNDANTLY_COVERED_ASKS' header.
     #
-    # `*age*-d*` rescues only the spellings containing a literal `-d`, so the
+    # `*age -d*` rescues only the spellings ending in the literal "age -d"
+    # ("nix-collect-gar-BAGE -d"), so the
     # commonest GC invocations were the ones left unguarded.
     "nix-collect-garbage",                                       # *nix-collect-garbage*
     "nix-collect-garbage --max-freed 1G",                        # *nix-collect-garbage*
@@ -758,7 +759,7 @@ MUST_ALLOW = [
     # literal "age -d"; these three pin that it stays dropped.
     "ls packages/civitai-db-schema/src/",
     "grep -n REPLICATION_LAG_DELAY packages/civitai-db/src/lag.test.ts",
-    "node -e \"require('./package.json')\" --debug",
+    "rg 'storage' src/ --debug",
 ]
 
 # Every agent that ships, plus the implicit primary. `None` == no agent block.
@@ -1464,6 +1465,55 @@ def test_guard_core_catches_recursive_rm_without_the_force_flag():
             f"recursive-flag test in check_rm_rf_critical was narrowed."
         )
     # …and the deliberate NON-coverage, so the narrowness stays a decision.
+def test_age_glob_misses_these_reordered_decrypt_spellings():
+    """🔴 A KNOWN, OPEN GAP OPENED BY THE 2026-08-21 NARROWING — pinned so it
+    stays visible instead of implied-shut.
+
+    LABEL: CHARACTERIZATION test, not regression coverage. It asserts today's
+    WRONG answer on purpose.
+
+    Narrowing `"*age*-d*"` to `"*age -d*"` removed a large false-positive class
+    (any command text with "age" followed LATER by "-d" — package/packages/
+    image/message/storage vs -db-/--dir/--debug), which was auto-rejecting
+    ordinary read-only commands and killing headless runs. The cost is that the
+    glob now knows exactly ONE argument order: the flag immediately after the
+    binary. Every spelling below puts an identity or output flag first and so
+    resolves plain ALLOW.
+
+    🔴 THIS IS THE ONLY GATE. `guard_core.py` contains no age/sops check at all
+    (grep it — 0 hits for "sops"/"decrypt"), so unlike the `rm` gap above there
+    is no second layer failing in the opposite direction. These spellings are
+    not theoretical: each was executed against a real age keypair and printed
+    plaintext with rc=0.
+
+    NOT closed here, deliberately, and the reasoning is the same whack-a-mole as
+    the `rm` gap: `"*age -i*"` catches these but `-i` is not decrypt-exclusive
+    (`age -e -i k.txt plain.txt` encrypts), so it buys spellings, not a family.
+    The structural fix is an argv-aware check in guard_core.py, which is where
+    this file's own header says irreversible/secret families belong.
+
+    🔴 If this test FAILS because a verdict became `ask`/`deny`, the gap was
+    CLOSED: delete that row from here and add the command to MUST_ASK.
+    """
+    for cmd in [
+        "age -i key.txt -d secret.age",
+        "age -i key.txt --decrypt secret.age",
+        "age -o plain.txt -d secret.age",
+        "age --identity key.txt -d secret.age",
+        "age --identity key.txt --decrypt secret.age",
+        "age --output plain.txt --decrypt secret.age",
+    ]:
+        assert layered_verdict(cmd, None) == "allow", (
+            f"{cmd!r} no longer resolves 'allow'. If you closed this gap, move "
+            f"it into MUST_ASK and delete it here — do not relax the assertion."
+        )
+    # The contrast cases, so the gap's SHAPE is pinned, not just its existence:
+    # flag-immediately-after still asks, and the sibling sops rule — deliberately
+    # left infix-tolerant — still catches its own reordered spelling.
+    assert effective_bash_action("age -d -i key.txt secret.age", None) == "ask"
+    assert effective_bash_action("sops --config .sops.yaml -d f.enc.yaml", None) == "ask"
+
+
 def test_rm_glob_misses_these_recursive_spellings():
     """🔴 A KNOWN, OPEN GAP — pinned so it stays visible instead of implied-shut.
 
