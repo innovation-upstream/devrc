@@ -22,47 +22,29 @@ the homelab Tekton platform. Secondary: land the subsystem-store hosted-vs-local
 
 ## State now
 
-**Merged, verified on `main` by content (squash breaks ancestry — content is the check):**
+🔴 **THE GATE IS REAL AND BLOCKING as of 2026-08-23.** devrc went from
+`<!-- merge-gate: none -->` and a trigger that had **never fired once** (0 of 370
+pipelineruns) to a required, enforced pre-merge check.
 
-| PR | what |
-|---|---|
-| devrc `#613` | the hosted-vs-local DECISION — local authoritative, hosted an entry-level advisory |
-| devrc `#622` | a real client subdomain committed to a PUBLIC repo, redacted to `*.example.test` |
-| devrc `#623` | 3 guard-core tests took their verdict from the runner's branch |
-| devrc `#629` | a REPLACE silently deleted durable findings — classify the drop above the diff |
-| devrc `#647` | a marker on a CONTINUATION line reached no surface; auto window escalation |
-| devrc `#677` | the base-ref ladder had no `trunk`; stale-base detection for the handoff writer |
-| homelab-infra `#370` | the devrc CI pipeline, trigger, CEL |
+- **`required_status_checks.contexts = ["tekton/devrc-nodetests"]`** on `main`,
+  `enforce_admins: true`, `strict: false`.
+- **Verified behaviourally, not from the setting:** nodetests `ERROR`/`PENDING` ⇒
+  `mergeStateStatus=BLOCKED`; `SUCCESS` ⇒ `CLEAN`; pytests red + nodetests green ⇒
+  `UNSTABLE` (mergeable). pytests **reports**, nodetests **gates**.
+- **Proven end-to-end on a live PR:** `#748` went `BLOCKED` → gate green → `CLEAN` →
+  merged (`27fa67f9`). First merge in this repo held by anything but a human choosing
+  to wait.
 
-Closed as **superseded** — both fixed better, concurrently, by other sessions: `#651`
-(beaten by `#650`, which added a `doc.count(...) == 1` unambiguity guard mine lacked) and
-`#656` (beaten by `#649`, which isolates by relocating `HOME` rather than an env override —
-incompatible mechanisms, and `#649`'s covers every consumer of `~`).
+**Merged this session** — devrc `#706` (df8d0319), `#732` (5a2a7b21), `#735`
+(2cd378a8), `#748` (27fa67f9); homelab-infra `#378` (0740ad10), `#383` (b340bd26),
+`#385` (15092256). Closed deliberately: `#380` (node choice refuted by audit),
+`#713` (superseded by `#708`).
 
-**Deploy/verify status, stated separately:**
-- `ship.sh` converged BOTH hosts and was verified **at the consumer**, not just at the
-  deploy: skill store path moved, byte-identical to `origin/main`, new rule present, with a
-  positive control on the grep pattern first.
-- Tekton `devrc-ci-pr` is **LIVE AND FIRING** as of 2026-08-22. It was deployed-and-inert at
-  **0 of 370 pipelineruns**; root cause was private org membership, not the CEL (below).
-  🔴 **Verified behaviourally, not by the control:** PR `#706` was opened at 17:45:36Z and
-  `devrc-ci-djm7n` was created at **17:45:38Z — two seconds later**. Two more runs followed
-  for concurrent PRs (`87vck`, `mnxfh`), so it fires for other sessions' PRs too, and devrc
-  PRs now carry **2 status checks** where the repo had 0 checks on every PR ever.
-- **First-run result — the split is real, and it is NOT what this doc predicted:**
-  | leg | verdict | detail |
-  |---|---|---|
-  | `tekton/devrc-nodetests` | **SUCCESS** | suites=4 files=33 tests=1119 pass=1119 (floor 1098) |
-  | `tekton/devrc-pytests` | **FAILURE** | collected=14689 passed=14686 skipped=2 **failed=1** (floor 13400) |
-  🔴 **The single pytests failure is a STALE FLOOR, not the nix-sandbox blocker.** Verbatim:
-  `scripts/signal/tests collected 717 tests but its floor is only 553 … Raise the TARGET_FLOORS
-  entry to "scripts/signal/tests|682"`. The gate computed its own replacement (717 through the
-  documented `m - min(50, max(1, m/20))` rule) so it needs no measurement. **The sandbox
-  blocker described under "the `devrc-pytests` leg" below is GONE** — `seed-nix` exited 0 and
-  14,686 tests ran in-pod. Re-read that section as history before acting on it.
-  ⚠ Note the shape: every *step* exited `rc=0` and only `verdict` exited `rc=1`. The pipeline
-  derives its verdict from **parsed output**, not exit codes — so never read this gate's
-  result off a step's exit status.
+**Deploy/verify status, stated separately:** all homelab-infra changes reconciled via
+`flux reconcile kustomization tekton-triggers` and verified **at the consumer** —
+live `Pipeline devrc-ci-pipeline` shows `notify timeout=2m0s`, `gate timeout=45m0s`;
+`PriorityClass ci-bulk` exists at `-10000/Never`; a real gate pod carries
+`prio=-10000 class=ci-bulk`.
 
 ## Open investigations — live diagnosis state
 
@@ -217,107 +199,61 @@ single failure was a stale `TARGET_FLOORS` entry, not the environment. The *conc
 still be right — one run is not a stability claim — but the *reason* recorded here is no
 longer true, and a permanently-red gate is no longer the expected outcome. See step 2.
 
-## Next steps (ranked)
-1. ✅ **Author gate decided and applied** (block above) — membership publicized, CEL untouched,
-   so there is **nothing to merge or reconcile in homelab-infra**. What remains is the
-   behavioural confirmation: a PipelineRun. `kubectl -n tekton-ci get pipelineruns | grep devrc`
-   must become non-empty. 🔴 The unauth control flipping to `MEMBER` is evidence about the
-   API's viewer-less computation — **it is not a PipelineRun**. Do not call this verified
-   until a run exists.
-2. **Requiring a check — NOT YET, and the blocker is now a different one.** `nodetests` has
-   been 1149/1149 on every run. `pytests` reached `BOTH TIERS PASS` (15150/0) on
-   `devrc-ci-vl88r`, 2026-08-23T04:00Z. The remaining blocker is 2e below, not test health.
-   🔴 **The nix-sandbox premise below is FALSE and stayed false** — `seed-nix` exits 0 and
-   ~15,150 tests run in-pod. Read that section as history.
-   🔴 **What the first day actually taught: FOUR separate defects made the gate red, none of
-   them in any PR being gated, and every one invisible to a dev-host run.** That is the
-   pattern to expect, not an unlucky streak:
-   | defect | fixed by | why local runs missed it |
-   |---|---|---|
-   | `scripts/signal/tests` floor 164 behind | `#708` | the drift ceiling only runs in the gate |
-   | `os.kill(pid,0)` says a ZOMBIE is alive | `#722` | a dev host's PID 1 is systemd, which reaps |
-   | module root asserted THIS tree has a `.git` | `#732` | the runner's source is a `/nix/store` path |
-   | audit-line race left at 2 of 3 sites | `#735` | needs a slow handler; 0/12 red when idle |
-   **So: do not read a red devrc check as a verdict on the PR until you have looked.** Three
-   of those four were diagnosed only by reading the step log.
-   ⚠ **Concurrency cost, measured: SIX pieces of work this session were superseded or nearly
-   clobbered** — `#651`, `#656`, `#713` (identical floor value to `#708`), the zombie fix
-   (another session's was better and handled PID REUSE), the `CLAUDE.md` rewrite, and the
-   guards/gates trace (`#728`). One of those was a near-miss where a `cp` between branches
-   would have **silently deleted** 109 lines of a better fix; only diffing before committing
-   caught it. **`git log origin/main -3` and a `gh pr list` before starting on a defect costs
-   nothing next to a wasted branch — or a deleted one.**
-2e. 🔴 **THE BLOCKER ON REQUIRING ANY CHECK — a timed-out run posts NOTHING and the PR sits on
-   `pending` forever.** When a PipelineRun hits `timeouts.tasks`, the `finally` report task
-   does not run at all, so no status is ever posted. Measured on `devrc-ci-nnt6f` and
-   `devrc-ci-9p6mf`: `childReferences` `[notify, gate]` only, checks still `pending` hours
-   later. **A required check in that state is unsatisfiable and no re-run clears it** — only a
-   fresh push does. Fix the reporting path (or raise the budget) BEFORE marking anything
-   required.
-   ⚠ **`enforce_admins: true` is a red herring — I raised it as a lockout risk and was wrong.**
-   `required_status_checks` is `null` and there are 0 rulesets, so there is nothing to enforce
-   and admins are not blocked by anything today. It only becomes real once a check is required.
-2d. 🔴 **The gate CONGESTS: right-size its requests.** The first day it fired, 8 runs queued
-   and **5 sat `Pending` 15+ min** on `Insufficient memory` while the node idled at 26% mem /
-   20% CPU. Every devrc run is pinned to ONE node (shared `nix-cache` RWO PVC + the
-   pipeline's `volumeClaimTemplate` → Tekton's affinity assistant), and at 4Gi+2Gi per run a
-   32Gi node fits five. Measured peak is **823Mi / 1043m** for the pytests leg — a ~5×
-   over-request. And because Tekton steps run **sequentially**, the pytests and nodetests
-   requests are never both in use yet are both summed into the pod request. Fixed in
-   homelab-infra **`#378`** (requests only; every limit untouched, so nothing can OOM that
-   could not before). Per-run 6Gi→3Gi, 3→1.5 CPU ≈ 10 concurrent instead of 5.
-2c. **`CLAUDE.md` is now falsified by this work and its own gate cannot see it.** On
-   `origin/main` it still asserts "**NO AUTOMATED GATE IS RUNNING**", "no Tekton trigger names
-   devrc", and "`statusCheckRollup` returns **0 checks** on every PR" — all three measurably
-   false now. `scripts/tests/test_ci_claim_matches_reality.py` will **not** catch it: it
-   accepts `{none, other}` when no GitHub Actions workflow exists and its header says it
-   cannot see Tekton. So flip the marker to `<!-- merge-gate: other -->` (the value that
-   exists precisely for a gate this test cannot observe) and rewrite those sentences by hand.
-2b. ✅ **FIXED — a stale `origin/HEAD`, NOT a hook bug.** Symptom: the SessionStart hook synced
-   `CLAUDE.md` from `origin/trunk` though devrc's default branch is `main`, and the two had
-   **DIVERGED** (measured 2026-08-22: 14 commits in `main` not in `trunk`, 3 the other way).
-   It lands **staged** in the base clone, so a careless commit ships it. Measured damage: it
-   reverted merged PR #702 (`4ea2405d`) — restoring the flat claim "a gate SHIPS IN THIS REPO,
-   **uninstalled**" that #702 recorded as *measured FALSE*, and deleting the 🔴 #322 warning
-   that a pre-push gate rewrote a branch mid-push.
-   🔴 **The obvious fix was the wrong one.** The hook — `~/.claude/local-hooks/base-clone-
-   staleness.sh:40-43`, which is **outside this repo, unmanaged and per-host** — hardcodes no
-   ref at all. It prefers the branch's `@{upstream}` and falls back to
-   `refs/remotes/origin/HEAD`. Two conditions had to coincide: the base clone was on a
-   **detached HEAD** (so no `@{upstream}`), and its `refs/remotes/origin/HEAD` was **stale at
-   `origin/trunk`**. Editing the hook would have broken it for every other repo.
-   **Fix applied:** `git -C ~/workspace/devrc remote set-head origin -a` → now `origin/main`.
-   ⚠ Per-clone and per-host: the laptop, and any fresh clone, can still inherit the wrong
-   pointer. `git symbolic-ref --short refs/remotes/origin/HEAD` is the check.
-3. **Fixture-author commits — 2 of the 3 branches are GONE; re-measure before acting.**
-   Measured 2026-08-22 with `git ls-remote --exit-code --heads origin <branch>`:
-   `zach/requires-env-skip-pins` **still exists** (1 commit); `zach/handoff-doc-rollback-on-
-   blocked-commit` and `fix/guard-msg-convention-not-structural` are **gone from origin**. So
-   only one `git commit --amend --author=…` + force-push remains, **by its owner**. 26 more
-   are on the preserved incident branch and are *supposed* to carry it.
-4. **Fix `check-tekton-app-install.sh`'s `CDPATH` bug** (homelab-infra): `HERE="$(cd -- … && pwd)"`
-   returns TWO lines when `CDPATH` is set, because bash's `cd` echoes the target. Use
-   `cd -- "$d" >/dev/null && pwd`.
+### ✅ RESOLVED — a timed-out run posted NOTHING and left checks on `pending` forever
+- **Was:** a PipelineRun exceeding `timeouts.tasks` never ran its `finally` report task,
+  so no status was posted and the PR's checks sat on `pending` indefinitely. No re-run
+  clears it; only a fresh push. This was the blocker on requiring any check.
+- **Evidence:** `devrc-ci-nnt6f` / `devrc-ci-9p6mf` — `childReferences [notify, gate]`,
+  no report, `completionTime` exactly `startTime + 50m`; checks still `pending` 13h
+  later. homelab-infra `#378`'s own gitops run left `f2479e73` with **zero statuses**.
+- 🔴 **Root cause was NOT a misconfiguration — `finally: 10m` WAS correctly reserved.**
+  The discriminating control: `gitops-validate` has a `report` finally task too and
+  **all 21** of its retained timeouts also lack it. Platform-wide Tekton v1.12.0
+  behaviour, not a devrc bug.
+- **Three-way probe (minimal PipelineRuns, `sleep 300` + a `finally` echoing a marker):**
+  | config | reason | children | finally |
+  |---|---|---|---|
+  | `timeouts.tasks: 40s` | `PipelineRunTimeout` | `[slow]` | **never ran** |
+  | `timeouts.pipeline: 40s` | `PipelineRunTimeout` | `[slow]` | **never ran** |
+  | task-level `timeout: 40s` | `Failed` | `[slow,reporter]` | **RAN** |
+  A pipeline-level budget expiring TERMINATES the run and the reserved
+  `timeouts.finally` is not honoured on that path; the reporter TaskRun is never even
+  CREATED. A task-level timeout is an ordinary failure, which is what `finally` is for.
+- **Fixed:** `#385` — `timeout: "45m"` on `gate`, plus `timeout: "2m"` on `notify` so the
+  50m budget is unreachable by *arithmetic* rather than by assertion (the deadlines cross
+  whenever notify exceeds 5m, and notify previously inherited the cluster's 1h default).
+- ⚠ **Still open for the other five pipelines** — see next steps 1.
 
-### ✅ `origin/trunk` was TEST-FIXTURE DEBRIS on a PUBLIC repo — DELETED 2026-08-22
-The wrong-`origin/HEAD` in 2b only did damage because the branch it pointed at exists. What it
-is, measured 2026-08-22:
-- Tip `ff6b2ca3` — author **`t <t@t>`**, message `seed`, adds a single file `seed.py`. That is
-  a fixture commit, pushed **2026-08-21**, the date of the test-tier incidents (#673/#683/#689
-  — "a test rewrote the operator's clone and pushed fixture commits to the REAL origin").
-  `seed.py` is absent from `main`.
-- Underneath it sit **two genuine commits** — `0bf1b324`, `276d56eb` (`handoff_doc` work).
-- 🔴 **They are already in `main`, and ancestry says otherwise.** `merge-base --is-ancestor`
-  answers **NO** for both, because they landed by **squash**. Checked by CONTENT instead: all
-  **9** symbols they introduce (`_undo_write`, `_block_commits`,
-  `TestBlockedCommitLeavesNoTrace` + 6 tests) are present in `main`. Nothing is orphaned.
-  This is the squash/ancestry trap in `claude/RULES.md` firing on a real branch — the "NO"
-  reads as "unmerged, don't delete", and it is wrong.
-- **Deleted** after re-verifying at the moment of the destructive step (tip still `ff6b2ca3`,
-  0 of the 9 symbols missing from `main`) — not from the earlier survey, per the stale-
-  observation rule. **Recovery sha:** `ff6b2ca39b5d228aa77243dee2f930a2cfe025fd`, also kept
-  locally as `refs/recovery/trunk-ff6b2ca3` on the workbench →
-  `git push origin ff6b2ca3:refs/heads/trunk`.
+## Next steps (ranked)
+
+1. 🔴 **Fix the `finally`-on-timeout defect in the OTHER FOUR pipelines.** `#385` fixed
+   devrc only. `gitops-validate`, `auditloop`, `naida`, `remix` **and `clawgate-ci`**
+   all have a `finally` report task behind a pipeline-level budget with no task-level
+   timeout. **`clawgate-ci` first** — busiest pipeline on the cluster and described
+   elsewhere as the real pre-merge gate. One line each: `timeout:` on the PipelineTask.
+   Measured impact: across 447 retained PipelineRuns there are **25 timeouts and 0 of
+   them ran their report task**.
+2. **Do NOT make `tekton/devrc-pytests` required yet.** It first reached `BOTH TIERS PASS`
+   (pytests 15150/0, nodetests 1149/0) on `devrc-ci-vl88r` at 2026-08-23T04:00Z and has been
+   green since — but it was red for **four independent reasons** on day one. Wants a stretch
+   of consecutive greens, not one observation.
+3. **Revisit the 45m gate timeout.** Headroom over the observed max is **3m32s (8.5%)**,
+   and every measured run had a WARM nix cache — the budget's own stated worst case (a
+   cold run after a nixpkgs bump) is absent from the evidence.
+4. **Right-size the other pipelines' requests.** `gitops-validate` alone asks
+   **4.65 CPU / 4.688Gi across 8 SEQUENTIAL steps** — the same inflation `#378` fixed
+   for devrc, and Tekton sums them into the pod request.
+5. **Watch for a `Preempted` event.** `ci-bulk` is live but has **never fired**, so its
+   mechanism is verified as *configured*, not as *working*:
+   `kubectl -n tekton-ci get events --field-selector reason=Preempted`.
+6. **CARRIED FORWARD, still open — 1 fixture-author commit.** `zach/requires-env-skip-pins`
+   still exists on origin with a commit authored `T <t@example.com>`; one
+   `git commit --amend --author=…` + force-push, **by its owner**. (The other two branches
+   named in the previous revision are gone from origin — re-measure before acting.) 26 more
+   are on the preserved incident branch and are *supposed* to carry it.
+7. **CARRIED FORWARD, still open — `check-tekton-app-install.sh`'s `CDPATH` bug**
+   (homelab-infra): `HERE="$(cd -- … && pwd)"` returns TWO lines when `CDPATH` is set,
+   because bash's `cd` echoes the target. Use `cd -- "$d" >/dev/null && pwd`.
 
 ## Gotchas / decisions / dead-ends
 
@@ -358,21 +294,100 @@ is, measured 2026-08-22:
   my PRs were superseded mid-flight by better fixes from other sessions. Check whether
   someone is already on a defect before dispatching an agent at it.
 
+- 📌 **CARRIED FORWARD from the previous revision's `Next steps`, which this update replaces.**
+  These are durable *findings*, not pending actions, and would otherwise have been deleted —
+  the merge tool flagged the drop, which is the only reason they are here:
+  - ✅ **`origin/trunk` was TEST-FIXTURE DEBRIS on a PUBLIC repo — DELETED 2026-08-22.** Tip
+    `ff6b2ca3`, author **`t <t@t>`**, message `seed`, adding one file `seed.py`; pushed
+    2026-08-21, the date of the test-tier incidents (#673/#683/#689). Two genuine commits sat
+    underneath (`0bf1b324`, `276d56eb`). 🔴 **`merge-base --is-ancestor` said NO for both
+    because they landed by SQUASH** — checked by CONTENT instead: all 9 symbols they introduce
+    are in `main`. Recovery sha `ff6b2ca39b5d228aa77243dee2f930a2cfe025fd`, also held locally
+    as `refs/recovery/trunk-ff6b2ca3`.
+  - ✅ **The SessionStart hook synced `CLAUDE.md` from the WRONG REF — a stale `origin/HEAD`,
+    not a hook bug.** `~/.claude/local-hooks/base-clone-staleness.sh` hardcodes no ref; it
+    prefers `@{upstream}` and falls back to `refs/remotes/origin/HEAD`. Two conditions had to
+    coincide: a **detached HEAD** in the base clone (no upstream) and `origin/HEAD` **stale at
+    `origin/trunk`** — the two refs had **DIVERGED: 14 commits in `main` not in `trunk`, 3 the
+    other way** (measured 2026-08-22). It landed **staged**, reverting merged #702. Fix:
+    `git remote set-head origin -a`. ⚠ Per-clone and per-host — the laptop and any fresh clone
+    can still inherit it; `git symbolic-ref --short refs/remotes/origin/HEAD` is the check.
+  - ✅ **The gate CONGESTED on day one** — 8 runs queued, 5 `Pending` 15+ min on
+    `Insufficient memory` while the node idled at 26% mem / 20% CPU. Every devrc run is pinned
+    to ONE node (shared `nix-cache` RWO PVC + `volumeClaimTemplate` → affinity assistant).
+    Measured peak **823Mi / 1043m** against a 4Gi/2-CPU request; Tekton sums SEQUENTIAL steps
+    into the pod request. Fixed in homelab-infra **#378** (requests only, every limit
+    untouched): per-run 6Gi→3Gi, 3→1.5 CPU.
+
+- 🔴 **FOUR times this session a ZERO of mine came from a BROKEN INSTRUMENT, not an
+  absence** — and every one looked like evidence:
+  - `grep` for an old assertion string matched **my own docstring quoting it**, reading
+    as "the fix didn't apply". Fix: grep for a *live* `assert`, not the sentence.
+  - `kubectl get $p` with the resource type stripped → `FINALLY-RAN=0` from a command
+    that errored. The `error: the server doesn't have a resource type` line beside it
+    was the tell.
+  - `grep 'timeout: "45m"'` found nothing because **kustomize strips the quotes**.
+  - `rc=$?` after a pipe read `tail`'s status, not the command's (twice — including the
+    clawgate resolve in this very handoff).
+  **The positive control separated real zeros from broken ones every time.** Before
+  quoting a zero, prove the pattern CAN match.
+- 🔴 **`core.hooksPath` volatility CONFIRMED LIVE, not just recorded.** It read `(unset)`
+  before every push this session — checked each time — and was then found set
+  **repo-locally** to `/home/zach/workspace/devrc/githooks` on a later push, with
+  `global` still unset. Nothing here set it. Checking once per session would have been
+  wrong. The push was verified intact afterwards (local == remote HEAD, 0 `autocommit`
+  fixture commits) — no #322 recurrence.
+- 🔴 **`scripts/kustomize-validate.sh` does NOT cover
+  `clusters/homelab/apps/tekton-pipelines/triggers`** — it defaults to
+  `ROOTS=(clusters/*/flux-system)`, and all 23 roots it builds are under those. **So
+  `gitops-validate` does not validate that directory either.** I cited its PASS as
+  evidence on three PRs before catching it. Correct instrument for that path:
+  `kustomize build <root>` + `kubeconform -strict -kubernetes-version 1.35.2`, **plus a
+  baseline run on `origin/trunk`** to separate pre-existing invalids (4 SOPS Secrets)
+  from new ones.
+- 🔴 **TWICE my own FIX was the next defect, caught only by an adversarial audit.**
+  (a) `retries: 1` on the gate task looked obviously right; Tekton retries **any**
+  non-cancelled failure, and **27 of 27** completed gate TaskRuns that day were
+  `StepFailed` — real verdicts — so every run would have executed twice (~1.76× node
+  occupancy) *and* some would have landed in the no-status-at-all state. Reverted, and
+  recorded as a 🔴 DO-NOT at the task because it will be re-proposed.
+  (b) The node choice in `#380` was made on **resource requests**, a metric that
+  **inverts** the real ranking: the target node was the most *physically* loaded in the
+  cluster and hosts the entire Tekton control plane plus 7 Postgres databases on 111GB
+  of unquota'd disk. PR closed.
+- 🔴 **SIX pieces of work superseded or nearly clobbered by concurrent sessions** —
+  `#651`, `#656`, `#713`, the zombie fix (another session's handled PID REUSE, which
+  mine did not), the `CLAUDE.md` rewrite, and the guards/gates trace (`#728`). One was a
+  near-miss where a `cp` between branches would have **silently deleted 109 lines** of a
+  better fix; only diffing before committing caught it. **`git log origin/main -3` and a
+  `gh pr list` before starting on a defect is not optional in this repo.**
+- **The gate's permanent character:** four defects made it red on day one, **none in any
+  PR being gated**, every one invisible to a dev-host run (stale floor → `#708`; zombie
+  `os.kill(pid,0)` → `#722`; module root asserting a `.git` → `#732`; audit-line race →
+  `#735`). **Read the step log before believing a red devrc check** — three of the four
+  were only diagnosable that way.
+
 ## How to verify
+
 ```bash
-# the gate is live on the CR (pod age tells you NOTHING — triggers are hot-read)
-KUBECONFIG=$KC_HOMELAB kubectl -n tekton-ci get eventlistener github-listener \
-  -o jsonpath='{range .spec.triggers[*]}{.name}{"\n"}{end}'      # want: devrc-ci-pr among 7
+# the requirement is live AND enforced (read it, don't assume)
+gh api /repos/innovation-upstream/devrc/branches/main/protection \
+  --jq '{required:.required_status_checks.contexts, strict:.required_status_checks.strict,
+         enforce_admins:.enforce_admins.enabled}'
+#   want: ["tekton/devrc-nodetests"], strict=false, enforce_admins=true
 
-# has it EVER fired? (this is the open item — currently 0)
-KUBECONFIG=$KC_HOMELAB kubectl -n tekton-ci get pipelineruns | grep devrc
+# it actually BLOCKS — the only check that matters
+gh pr list --repo innovation-upstream/devrc --state open \
+  --json number,mergeStateStatus,statusCheckRollup \
+  --jq '.[]|"#\(.number) \(.mergeStateStatus) [\([.statusCheckRollup[]?|"\(.context)=\(.state)"]|join(" "))]"'
+#   want: nodetests ERROR/PENDING => BLOCKED ; SUCCESS => CLEAN ;
+#         pytests red + nodetests green => UNSTABLE (mergeable)
 
-# the App can see devrc (carries its own positive control; refuses to report if it fails)
-cd <homelab-infra checkout> && env -u CDPATH SOPS_AGE_KEY_FILE=$HOME/workspace/homelab-talos/.secrets/age.key \
-  nix-shell -p sops yq-go openssl curl jq --run "env -u CDPATH bash scripts/check-tekton-app-install.sh"
-#   want: control ZacxDev/homelab-infra 200, subject innovation-upstream/devrc 200
+# the timeout fix is live at the CONSUMER (merged != deployed)
+KUBECONFIG=$KC_HOMELAB kubectl -n tekton-ci get pipeline devrc-ci-pipeline \
+  -o jsonpath='{range .spec.tasks[*]}{.name}={.timeout}{"\n"}{end}'
+#   want: notify=2m0s  gate=45m0s
 
-# devrc's own gate, from a CONTAINED sandbox only (see the recipe above)
-cd <scratch>/gate && nix develop --command bash scripts/run-tests.sh .
-#   read RESULT: and collected=/passed=/failed= from the LOG CONTENT, never an exit code through a pipe
+# 🔴 ESCAPE HATCH if Tekton is down — enforce_admins:true means NO admin override
+gh api -X DELETE /repos/innovation-upstream/devrc/branches/main/protection/required_status_checks
 ```
