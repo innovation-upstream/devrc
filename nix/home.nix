@@ -1239,6 +1239,62 @@ in
   home.file.".claude/hooks/clawgate-task-interview-guard.py" = {
     source = ../scripts/claude-hooks/clawgate-task-interview-guard.py;
   };
+  # 🔴 THE BASE-CLONE STALENESS HOOK — the only hook here that fixes what the
+  # agent READS rather than what it does.
+  #
+  # Why it exists: when all work happens in throwaway worktrees + PRs, a base
+  # clone is never written to and silently falls behind. That is harmless for
+  # WRITES — `git worktree add <path> origin/<branch>` resolves the REMOTE
+  # tracking ref, so a clone 700 commits behind still yields a current worktree —
+  # but it is dangerous for READS: `CLAUDE.md` and `.claude/skills/**` load into
+  # agent context FROM THE WORKING TREE, so a stale clone serves stale,
+  # authoritative-looking instructions with nothing on screen to indicate it.
+  # Measured 2026-08-21 in the datapacket-talos hub: every dispatch-hub clone was
+  # behind (talos 33 commits, civitai-orchestration 53, civitai 18), and one of
+  # them served a skill whose retention figure had been corrected upstream five
+  # days earlier — a whole session was framed on the corrected-away claim.
+  #
+  # On SessionStart it fetches the cwd repo's upstream and `git checkout
+  # <upstream> --`s ONLY those two paths. It does NOT move HEAD (that would need
+  # a clean tree and would move the branch), never overwrites content that is
+  # absent from the upstream branch's recent history, and reports what it
+  # touched. `BASE_CLONE_NO_REFRESH=1` makes it report-only.
+  #
+  # Registration in ~/.claude/settings.json stays PER-HOST and unmanaged, exactly
+  # like bash-guard.py above: register-nudge-hook.py deliberately does NOT own
+  # it. That is structural, not an omission — the registrar's managed-command
+  # surface recognises `<python> <path>.py` commands only, and its whole rewrite
+  # half exists to normalise a python INTERPRETER token to an absolute /nix/store
+  # path. This hook is bash, so there is no interpreter hazard to fix and nothing
+  # for the registrar to match; teaching that shared component a second
+  # interpreter would widen a load-bearing surface for no benefit. Consequence,
+  # the same known gap bash-guard.py has: on any host where the entry has not
+  # been added by hand, the switch delivers the script and the hook is INERT.
+  #
+  # 🔴 A NEW file, so it must be `git add`ed or the flake silently omits it and
+  # the switch still succeeds with the hook absent — this repo's standing trap
+  # (the #452 shape, called out twice above).
+  #
+  # No `force = true` and no `dropStaleClaudeHooks` entry, for the reason the
+  # register-nudge-hook.py block below records verbatim: that treatment exists
+  # only to displace a PRE-EXISTING hand-placed regular file, and this path has
+  # never been hand-placed. MEASURED 2026-08-22 before the first switch that
+  # deploys it — `ls -la ~/.claude/hooks/` shows 14 entries on this host, ALL
+  # /nix/store symlinks, no regular files, and no base-clone-staleness.sh among
+  # them. The live copy being replaced lives in ~/.claude/local-hooks/, a
+  # different directory this attribute does not write to. If a foreign file ever
+  # does appear at this path the switch fails LOUDLY ("would be clobbered")
+  # rather than silently leaving it unmanaged — add it to dropStaleClaudeHooks
+  # then.
+  #
+  # Its regression suite is `scripts/tests/test_base_clone_staleness.sh`, run by
+  # `scripts/run-tests.sh` as a SHELL_TESTS target (24 assertions / 8 cases,
+  # offline synthetic fixtures). Every case there is a defect that actually
+  # shipped; run it before changing this script.
+  home.file.".claude/hooks/base-clone-staleness.sh" = {
+    source = ../scripts/claude-hooks/base-clone-staleness.sh;
+    executable = true;
+  };
 
   # 🔴 THE REGISTRAR ITSELF — the hook that makes the hooks above DO anything.
   # settings.json is per-host and unmanaged (permissions/allowlists), so a hook
