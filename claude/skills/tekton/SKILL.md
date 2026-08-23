@@ -100,10 +100,12 @@ debugging, changing or copying a specific pipeline.
    `taskStart + timeout` while the budget is `runStart + tasks`, so an unbounded early task
    (devrc's `notify` inherited the cluster's 1h default) lets them cross and re-opens this.
 9. ⚠ **Gotcha 6 is scoped to `homelab-infra`, not to Tekton.** `innovation-upstream/devrc` is a
-   DIFFERENT repo on a plan where protection works, and since 2026-08-23 it requires
-   `tekton/devrc-nodetests` — verified behaviourally: nodetests `ERROR`/`PENDING` ⇒
-   `mergeStateStatus=BLOCKED`, `SUCCESS` ⇒ `CLEAN`, pytests red + nodetests green ⇒ `UNSTABLE`.
-   So on devrc a Tekton check **is** a gate. 🔴 `enforce_admins: true` there means a wedged
+   DIFFERENT repo on a plan where protection works, and it now requires **BOTH**
+   `tekton/devrc-nodetests` **and** `tekton/devrc-pytests`. So on devrc a Tekton check
+   **is** a gate — and either leg can block. 🔴 **This entry said only nodetests was
+   required and that pytests red + nodetests green reads `UNSTABLE`; measured hours later
+   the same day, that pair reads `BLOCKED`.** Read the contexts, never this line:
+   `gh api /repos/innovation-upstream/devrc/branches/main/protection --jq .required_status_checks` 🔴 `enforce_admins: true` there means a wedged
    Tekton blocks everyone with no override; the escape hatch is
    `gh api -X DELETE /repos/innovation-upstream/devrc/branches/main/protection/required_status_checks`.
 

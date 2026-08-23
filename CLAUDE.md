@@ -148,14 +148,18 @@ Repo-level facts that are NOT in any skill — they live here on purpose:
 - **Two always-on docs have enforced byte ceilings**, because both load on every session: `scripts/browser-bridge/SKILL.md` (gated by `scripts/browser-bridge/tests/test_skill_size.py`) and `claude/RULES.md` (gated by `scripts/tests/test_rules_size.py`). Each test OWNS its constants and prints an eviction playbook on failure — **read the numbers there, never restate them.** Any addition needs an eviction in the SAME commit.
 - **Run the gate with `scripts/gate.sh`** (`--tier pytest|node|both`, `--set hermetic|all`). It sends the full output to a LOG FILE and prints only a bounded summary, so there is no reason to pipe it — and **its exit status is authoritative**. It also cross-checks that status against the runners' own `RESULT:` line and exits **90 = could-not-vouch** when they disagree, when a run printed no verdict, or when `panic: test timed out` appears. 90 is not "the tests failed"; it means read the log.
 - **The runners' verdict line carries their exit code** (`RESULT: FAIL (exit=1)`), emitted from one writer behind an EXIT trap, so it survives a pipe and a killed run still says so. Historically the status was destroyed by `… | tail; echo "rc=$?"` — four agents reported `exit 0` over `RESULT: FAIL` on 2026-08-11 — which is why counting `PASSED`/`FAILED` lines used to be mandatory. Still a fine cross-check; no longer the only thing you can trust.
-- 🔴 **A MERGE IS NOW BLOCKED BY `tekton/devrc-nodetests`. `devrc-pytests` is NOT.** <!-- merge-gate: other -->
-  Since 2026-08-23 `required_status_checks.contexts = ["tekton/devrc-nodetests"]` on `main`,
-  with `enforce_admins: true`. Verified behaviourally, not from the setting: PRs with
-  nodetests `ERROR` or `PENDING` read `mergeStateStatus=BLOCKED`, green ones read `CLEAN`,
-  and a PR with pytests red but nodetests green reads `UNSTABLE` — mergeable. That split is
-  deliberate — and nodetests collects `*.test.mjs` ONLY, so a Python-only PR cannot fail
-  the required check at all. There is still no `.github/workflows`, so
-  the marker stays `other`.
+- 🔴 **A MERGE IS BLOCKED BY BOTH `tekton/devrc-nodetests` AND `tekton/devrc-pytests`.** <!-- merge-gate: other -->
+  Measured 2026-08-23 (later the same day): `required_status_checks.contexts =
+  ["tekton/devrc-nodetests", "tekton/devrc-pytests"]` on `main`, `enforce_admins: true`,
+  `strict: false`. 🔴 **This line said `devrc-pytests` is NOT required, and gave the
+  behavioural evidence for it — that was true when written and false hours later**, which is
+  the third opposite-direction reversal this paragraph has recorded. It is why a red
+  pytests leg on #764 read `BLOCKED` when the file predicted `UNSTABLE`, and why the
+  Python-only-PRs-are-safe corollary below is gone: **a Python-only PR can now fail a
+  required check.** Do not infer the contexts from this prose — one command answers it, and
+  the answer has changed three times:
+  `gh api /repos/innovation-upstream/devrc/branches/main/protection --jq .required_status_checks`
+  There is still no `.github/workflows`, so the marker stays `other`.
   🔴 **`enforce_admins: true` is LIVE now** — it protected nothing while nothing was
   required. If Tekton is down or wedged, NOTHING merges and there is no admin override.
   The escape hatch, deliberately written down because you will want it under pressure:
