@@ -61,6 +61,26 @@
 #   nix-[0-9]*             778 /  612      homelab-talos-prs-*   2554 / 2537
 # Every glob matches real entries — none is a dead rule.
 #
+# 🔴 A HYPHEN IS NOT A WILDCARD: `nix-shell-*` CANNOT MATCH `nix-shell.<mktemp>`.
+# nix-shell writes its TMPDIR in two spellings and this rule set only ever saw
+# one of them. Re-measured live on the workbench 2026-08-22, top-level /tmp:
+#
+#   nix-shell.*   3340   <- UNCOVERED until this rule
+#   nix-shell-*   1017      covered since 2026-08-15
+#
+# The dot form outnumbers the hyphen form 3.3:1, and it is the form `gate.sh`
+# produces on every agent run (its log lands in /tmp/nix-shell.<x>/devrc-gate-*/),
+# so it is the one that grows fastest on a machine driven by agents. The glob
+# below closes it. Control for the count above: an unrestricted `find /tmp
+# -maxdepth 1` returns 119,066 — the zeros here are real zeros, not a walk that
+# never ran.
+#
+# 🔴 Still UNCOVERED after this change, and deliberately not taken here — each is
+# larger than everything this file reaps put together, and none has been checked
+# against live work the way the globs above were:
+#   cgparent-*  17064    fx-excerpt-*  14012    cbf-*  5268    tmp.*  4227
+# `tmp.*` in particular is bare mktemp's default and would need its own audit.
+#
 # Dry-run of the exact rule set below: 4,255,261 entries would be removed, and
 # ZERO matches against /tmp/wt-*, /tmp/claude-1000 or the named project dirs
 # (civitai-integration, peakmaps, chunkcache, pnpmvar, audit187). Estimated
@@ -103,35 +123,77 @@ restore_on_err() {
 }
 trap restore_on_err ERR
 
-if grep -qF "$MARKER" "$CFG"; then
-  echo "[1/1] tmp churn retention rules already present — skipping edit"
-else
-  echo "[1/1] inserting tmpfiles rules into systemd.tmpfiles.rules"
-  python3 - "$CFG" <<'PY'
+# 🔴 THE SKIP IS PER-RULE, NOT PER-MARKER. This block used to return early on
+# `grep -qF "$MARKER"` alone, which meant a host that had ALREADY run the script
+# could never receive a rule added later — the run printed "already present" and
+# exited 0 over a config missing the new glob. That is how `nix-shell.*` would
+# have shipped to nobody: the workbench is unapplied today, but the laptop's
+# /etc/nixos is not readable from here, so its state is UNMEASURED, not clean.
+# The ledger below is the single source of truth; the script inserts exactly the
+# rules that are absent and then re-reads the file to prove every one landed.
+echo "[1/1] reconciling tmpfiles rules in systemd.tmpfiles.rules"
+python3 - "$CFG" <<'PY'
 import sys
+
 path = sys.argv[1]
 src = open(path).read()
-anchor = "  systemd.tmpfiles.rules = [\n"
-if anchor not in src:
-    raise SystemExit("ERROR: could not find 'systemd.tmpfiles.rules = [' in configuration.nix")
-rules = '''    # /tmp churn retention (2026-08-15). mtime-ONLY ageing (`m:`), because
+
+HEADER = '''    # /tmp churn retention (2026-08-15). mtime-ONLY ageing (`m:`), because
     # systemd-tmpfiles ages on the newest of atime/mtime/ctime and any `du`/`find`
     # over /tmp refreshes atime — which made the stock 10d rule never expire
     # anything. Scoped to machine-generated prefixes ONLY: a blanket rule would
     # delete live git worktrees parked in /tmp. See nix/system/apply-tmp-churn-retention.sh.
-    "e /tmp/nix-shell-* - - - m:7d"
-    "e /tmp/nix-develop-* - - - m:7d"
-    "e /tmp/nix-[0-9]* - - - m:7d"
-    "e /tmp/go-build* - - - m:7d"
-    "e /tmp/chromedp-runner* - - - m:7d"
-    "e /tmp/homelab-talos-prs-* - - - m:7d"
 '''
-open(path, "w").write(src.replace(anchor, anchor + rules, 1))
+
+# 🔴 A hyphen is a LITERAL. `nix-shell-*` and `nix-shell.*` are two globs, and
+# nix-shell writes both spellings — see the header for the 3340-vs-1017 count.
+RULES = [
+    '    "e /tmp/nix-shell-* - - - m:7d"',
+    '    "e /tmp/nix-shell.* - - - m:7d"',
+    '    "e /tmp/nix-develop-* - - - m:7d"',
+    '    "e /tmp/nix-[0-9]* - - - m:7d"',
+    '    "e /tmp/go-build* - - - m:7d"',
+    '    "e /tmp/chromedp-runner* - - - m:7d"',
+    '    "e /tmp/homelab-talos-prs-* - - - m:7d"',
+]
+
+missing = [r for r in RULES if r.strip() not in src]
+if not missing:
+    print("      all %d rules already present — nothing to insert" % len(RULES))
+    raise SystemExit(0)
+
+anchor = "  systemd.tmpfiles.rules = [\n"
+if anchor not in src:
+    raise SystemExit("ERROR: could not find 'systemd.tmpfiles.rules = [' in configuration.nix")
+
+# Re-applying onto a config that already carries the block must not duplicate the
+# comment header; a first application must not omit it.
+block = "".join(r + "\n" for r in missing)
+if HEADER.splitlines()[0] not in src:
+    block = HEADER + block
+
+open(path, "w").write(src.replace(anchor, anchor + block, 1))
+print("      inserted %d of %d rules (%d already present)"
+      % (len(missing), len(RULES), len(RULES) - len(missing)))
+for r in missing:
+    print("        + " + r.strip())
 PY
-  grep -qF "$MARKER" "$CFG" || { echo "ERROR: tmpfiles edit did not apply"; false; }
-  grep -qF 'e /tmp/nix-shell-* - - - m:7d' "$CFG" || { echo "ERROR: rule text missing after edit"; false; }
-  echo "      rules inserted and verified present"
-fi
+
+# Verify by RE-READING the file, every rule individually — the insert reporting
+# success is a claim about the writer, not about what is now on disk.
+for _rule in \
+  'e /tmp/nix-shell-* - - - m:7d' \
+  'e /tmp/nix-shell.* - - - m:7d' \
+  'e /tmp/nix-develop-* - - - m:7d' \
+  'e /tmp/nix-[0-9]* - - - m:7d' \
+  'e /tmp/go-build* - - - m:7d' \
+  'e /tmp/chromedp-runner* - - - m:7d' \
+  'e /tmp/homelab-talos-prs-* - - - m:7d'
+do
+  grep -qF "$_rule" "$CFG" || { echo "ERROR: rule missing after edit: $_rule" >&2; false; }
+done
+grep -qF "$MARKER" "$CFG" || { echo "ERROR: comment header missing after edit" >&2; false; }
+echo "      all rules verified present on disk"
 
 trap - ERR
 
