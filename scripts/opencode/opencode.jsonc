@@ -100,14 +100,30 @@
 // rather than prompting, an over-match on a family an agent types CONSTANTLY
 // does not "fire too often" — it KILLS the run mid-task. That inverts the trade
 // argued above, but only for patterns whose binary name is a substring of
-// ordinary English/flag text. `kubectl`, `talosctl`, `sops`, `sudoedit` are not,
-// which is why they stay infix.
+// ordinary English/flag text. `kubectl` and `sops` are not, which is why they
+// stay infix. (`*talosctl*` and `*sudoedit*` are single-token wildcards with no
+// middle `*` at all — they are not infix rules and are not evidence either way.)
 //
-// THE TRADE IS REAL AND IS NOT FREE, in the same way for both: a narrowed rule
-// knows exactly one argument order, so `age -i k.txt -d f` and `rm -f -r <path>`
-// now resolve ALLOW. guard_core.py has NO age/sops check at all, and its `rm`
-// check has a deliberately narrow TARGET set that an ordinary project path never
-// reaches. Both gaps are pinned as characterization tests —
+// 🔴 THE TRADE IS REAL, IS NOT FREE, AND THE TARGET NEED NOT BE DISPOSABLE.
+// A narrowed rule knows exactly one argument order, so `age -i k.txt -d f` and
+// `rm -f -r <path>` now resolve ALLOW. State the `rm` cost at its WORST, not its
+// mildest — the examples in the tests use `/repo/build`, but nothing restricts
+// it to a build dir. MEASURED at both layers on this config:
+//     rm -f -r ~/.ssh                        ALLOW   (was ask before the narrowing)
+//     rm -f -r /etc/nixos                    ALLOW   (was ask)
+//     rm --force --recursive /var/lib/…      ALLOW   (was ask)
+//     rm /repo/build -rf                     ALLOW   (was ask — flags AFTER the operand)
+// 🔴 But read the counterfactual before treating the narrowing as the cause:
+// `rm -fr ~/.ssh`, `rm -Rf ~/.ssh` and `rm -R ~/.ssh` were ALREADY plain ALLOW
+// at both layers BEFORE this change (measured on `main`). So this glob was never
+// a control for that target — the narrowing WIDENS an already-open hole, it does
+// not open one. The honest summary is: layer 1 does not protect `$HOME` from a
+// recursive delete and never did; if you want that, it belongs in guard_core.py,
+// per this header's own rule about irreversible families.
+// guard_core.py has NO age/sops check at all, and its `rm`
+// check has a deliberately narrow TARGET set — `/`, `~`/`$HOME`, `.`/`..` and
+// top-level system dirs — that a SUBPATH like `~/.ssh` never reaches.
+// Both gaps are pinned as characterization tests —
 // `test_age_glob_misses_these_reordered_decrypt_spellings` and
 // `test_rm_glob_misses_these_recursive_spellings` — so they stay visible. Do NOT
 // "restore consistency" by re-widening any of these four rules to infix without
@@ -380,8 +396,13 @@
       // does NOT contain the literal "rm -r", so deleting the second row releases
       // `rm --recursive <path>` — which guard_core does not backstop on an
       // ordinary path. Each is pinned individually in MUST_ASK.
-      // Known gap, pinned by test_rm_glob_misses_these_recursive_spellings:
-      // `-R` bundles and any flag placed BEFORE `-r` (`rm -f -r <path>`).
+      // Known gap, pinned by test_rm_glob_misses_these_recursive_spellings, in
+      // THREE classes: `-R` bundles (pre-existing), any flag placed BEFORE `-r`
+      // (`rm -f -r <path>`, opened here), and flags placed AFTER the operand
+      // (`rm <path> -rf`, opened here — GNU rm permutes options, so it works).
+      // 🔴 And the target is not restricted to a build dir: `rm -f -r ~/.ssh` is
+      // ALLOW at both layers. See the header for the counterfactual — `rm -fr
+      // ~/.ssh` was already ALLOW before this change, so layer 1 never gated it.
       "*rm -r*": "ask",
       "*rm --recursive*": "ask",
       // `dd` stays ANCHORED / operand-scoped on purpose: a leading-`*` `"*dd *"`

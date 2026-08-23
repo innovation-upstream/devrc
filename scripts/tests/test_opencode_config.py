@@ -779,6 +779,12 @@ MUST_ALLOW = [
     # Third row deliberately mirrors `rg 'storage' src/ --debug` above: same
     # binary, different substring pair. `rg --replace` rewrites only the OUTPUT,
     # never a file, so this list stays honestly read-only.
+    # 🔴 Honest caveat on the `terraform` row, since this list's HEADER is itself
+    # a claim: `terraform plan` is read-only w.r.t. infrastructure, but it does
+    # take a STATE LOCK and can write a plan file with `-out`. It is pinned here
+    # because it is the measured witness from the narrowing, not because it is
+    # side-effect-free. If that ever matters, swap it for another token ending in
+    # a non-adjacent "rm" — the rule under test is the substring, not terraform.
     "git log --format=oneline --reverse",
     "terraform plan -refresh=false",
     "rg 'formatBytes' src/ --replace ''",
@@ -1505,21 +1511,44 @@ def test_rm_glob_misses_these_recursive_spellings():
     Their intersection is a recursive delete of a project directory written with
     `-R`, `-Rf` or `-fr`: ALLOW at both layers, no prompt.
 
-    🔴 THE LAST THREE ROWS ARE NEWLY OPEN, and they are the price of the
-    2026-08-22 narrowing. `"*rm*-r*"` matched "rm" followed LATER by "-r"
-    anywhere in the text, so it DID hold `rm -f -r <path>` — at the cost of
-    auto-rejecting `git log --format=… --reverse`, `terraform plan
-    -refresh=false` and any other text where a format/terraform/firmware/
-    confirm/platform token PRECEDES a `-r` flag (see the three MUST_ALLOW rows
-    added with this change; the order matters — `grep -r 'format' src/` was
-    never matched, because there the "rm" comes second). Requiring the literal
-    "rm -r"
-    removes that false-positive class and gives up every spelling that puts
-    another flag first. This is the same trade, and the same shape of loss, as
+    🔴 THE LAST SIX ROWS ARE NEWLY OPEN, and they are the price of the
+    2026-08-22 narrowing. They fall in TWO classes, both of which `"*rm*-r*"`
+    used to hold:
+      * a flag placed BEFORE `-r`   — `rm -f -r <p>`, `rm -v -r <p>`,
+        `rm --force --recursive <p>`;
+      * flags placed AFTER the operand — `rm <p> -r`, `rm <p> -rf`,
+        `rm <p> --recursive`. GNU `rm` permutes options, so these really run.
+
+    The old glob matched "rm" followed LATER by "-r" anywhere in the text, which
+    covered both classes — at the cost of auto-rejecting `git log --format=…
+    --reverse`, `terraform plan -refresh=false` and other text where a
+    format/terraform/firmware/confirm/platform token PRECEDES a `-r` flag (see
+    the three MUST_ALLOW rows added with this change; the order matters —
+    `grep -r 'format' src/` was never matched, because there the "rm" comes
+    second).
+
+    Requiring the literal "rm -r" NARROWS that false-positive class — it does
+    not remove it. MEASURED, still `ask` on this config: `ls src/form -r`,
+    `terraform -refresh=false plan`, `./scripts/perform -r x`,
+    `docker run --rm -r foo`. What survives is any token ENDING in "rm"
+    immediately followed by a `-r` flag; what goes away is the much larger
+    non-adjacent class, which is where every measured dead run came from.
+    This is the same trade, and the same shape of loss, as
     `test_age_glob_misses_these_reordered_decrypt_spellings` records for `age`.
 
+    🔴 THE TARGET IS NOT RESTRICTED TO A BUILD DIRECTORY. The rows below use
+    `/repo/build` for readability, but the globs are target-blind: `rm -f -r
+    ~/.ssh` and `rm -f -r /etc/nixos` are ALLOW at both layers too. Before
+    reading that as this change's doing, note the counterfactual — `rm -fr
+    ~/.ssh`, `rm -Rf ~/.ssh` and `rm -R ~/.ssh` were ALREADY plain ALLOW on
+    `main`. Layer 1 does not protect `$HOME` from a recursive delete and never
+    did; this change WIDENS that hole rather than opening it. Closing it
+    properly is a guard_core change, per opencode.jsonc's own header.
+
     NOT closed here, deliberately. Widening the glob is whack-a-mole — `-R`
-    needs its own rule, then `-fR`, then `-vr`, then `-f -r`; and a candidate
+    needs its own rule, then `-fR`, then `-vr`, then `-f -r`, and NONE of them
+    reaches the target-first class at all (`rm <p> -rf` has no "rm -" prefix to
+    match); and a candidate
     that looked like it generalised (`"*rm*-*r*"`) matched `rm -R /repo/build`
     only because the PATH contains an "r", so it fails on `rm -R /x`. Re-widening
     to `"*rm*-r*"` closes three of these rows and reopens the auto-reject class
@@ -1533,8 +1562,12 @@ def test_rm_glob_misses_these_recursive_spellings():
     CLOSED: delete that row from here and add the command to MUST_ASK.
     """
     for cmd in ["rm -R /repo/build", "rm -Rf /repo/build", "rm -fr /repo/build",
+                # flag BEFORE -r — opened by the 2026-08-22 narrowing
                 "rm -f -r /repo/build", "rm -v -r /repo/build",
-                "rm --force --recursive /repo/build"]:
+                "rm --force --recursive /repo/build",
+                # flags AFTER the operand — also opened by it; GNU rm permutes
+                "rm /repo/build -r", "rm /repo/build -rf",
+                "rm /repo/build --recursive"]:
         assert layered_verdict(cmd, None) == "allow", (
             f"{cmd!r} no longer resolves 'allow'. If you closed this gap, move "
             f"it into MUST_ASK and delete it here — do not relax the assertion."
