@@ -19,11 +19,24 @@ That is expensive twice over:
     UNATTENDED path; this hook plus `flows/task-authoring.md` is its INTERACTIVE
     counterpart, not a second copy of it.
 
-  * A body with no `## Acceptance criteria` heading structurally forces every
-    pickup to end at `ready_for_review` — SKILL.md's status gate says an agent may
-    not grade an exam it wrote itself. So the missing heading is not a style nit:
-    it is the one lever the task AUTHOR has, and dropping it converts every
-    dispatch into a human read.
+  * A body with no `## Acceptance criteria` heading sends every pickup to
+    `ready_for_review` — SKILL.md's status gate says an agent may not grade an
+    exam it wrote itself. So the missing heading is not a style nit: it is the one
+    lever the task AUTHOR has, and dropping it converts every dispatch into a
+    human read.
+
+    🔴 That is a CLIENT-SIDE CONVENTION, not a server behaviour, and this file
+    used to call it "structural" — which was false. MEASURED 2026-08-21 against
+    `containers/clawgate`: the string "acceptance criteria" appears in ZERO Go,
+    TS or SQL files (13 files contain "acceptance", none as that phrase; grep
+    validated on the same command shape by `StatusAllowedForAgent` -> 3 files and
+    `reapIdleTasks` -> 4). Nothing on the server reads the heading. What enforces
+    it is exactly two things: SKILL.md's pickup ritual, and THIS HOOK.
+
+    The one genuinely structural fact nearby is different and narrower: a
+    DISPATCHED devpod agent cannot set `complete` at all, because
+    `notes.StatusAllowedForAgent` forbids it on `PATCH /agent/task/status`. That
+    holds whether or not criteria exist. Do not merge the two claims.
 
 🔴 THE TRIGGER IS THE ABSENCE OF ACCEPTANCE CRITERIA, NOT "A TASK IS BEING MADE".
 A body that already carries `## Acceptance criteria` passes SILENTLY. That is the
@@ -599,10 +612,12 @@ def body_candidates(argv, text, curl):
 # Messages
 # --------------------------------------------------------------------------- #
 _WHY = (
-    "A task body with no `## Acceptance criteria` heading structurally forces "
-    "EVERY pickup to end at `ready_for_review`: the agent derives the criteria "
-    "itself and may not grade an exam it wrote (clawgate SKILL.md -> \"Status "
-    "gate\"). That heading is the one lever the task AUTHOR has."
+    "A task body with no `## Acceptance criteria` heading sends EVERY pickup to "
+    "`ready_for_review`: the agent derives the criteria itself and may not grade "
+    "an exam it wrote (clawgate SKILL.md -> \"Status gate\"). That heading is the "
+    "one lever the task AUTHOR has.\n"
+    "(That is a convention the pickup ritual and this hook enforce, NOT a server "
+    "check -- nothing in clawgate reads the heading.)"
 )
 
 _HOW = (

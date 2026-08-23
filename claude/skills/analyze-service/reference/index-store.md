@@ -55,7 +55,10 @@ Markdown, so prose is surfaced verbatim via Read and reads well in a diff.
   - `manage-* skill:` the matching skill (e.g. `manage-redis`) — invoke it for ops.
   - `MEMORY.md slug(s):` slug filename(s) in the project memory dir.
   - `claudedocs handoff(s):` handoff doc path(s).
-- **`## Nuance / work-history`** — dated bullets, newest-first, ≤2 lines each: a gotcha, a lying/misleading status condition, a revert or bump that explains why someone was looking, an incident tie-in. Prune-on-resolve.
+- **`## Nuance / work-history`** — dated bullets, newest-first: a gotcha, a lying/misleading status condition, a revert or bump that explains why someone was looking, an incident tie-in.
+  - **Openness is MARKED, never deleted.** `- YYYY-MM-DD: OPEN: …` or `- YYYY-MM-DD: RESOLVED <sha>: …` at the HEAD of the bullet — the grammar is exact (`subsystem_resolver._JOURNAL_OPENNESS`); a marker on a continuation line is unreachable, and a date not followed by `:` breaks the prefix.
+  - **`OPEN:` always stays. `RESOLVED` is evictable only once a target it names is verified to EXIST, and is `NO HOME — write the record first` otherwise.** The full lifecycle is `write-back.md` → "Prune-on-resolve"; `scripts/subsystem-audit.py` reports it and the `prune-index` skill drives the confirm-gated cut. 🔴 The audit is READ-ONLY and runs no git command inside the store.
+  - ⚠ **"≤2 lines each" was the original rule here and the corpus disagrees with it** — 428 of 518 live bullets exceed two lines (measured 2026-08-21), and `JournalBullet` documents the same finding independently. Treat it as a trim target, not a rule: the audit reports it as an advisory and deliberately keeps it out of the verdict, because a permanently-red gate trains everyone to click through.
 
 ## How the recon brief reports this
 

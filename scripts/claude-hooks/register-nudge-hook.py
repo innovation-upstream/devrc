@@ -97,6 +97,15 @@ Registers (APPEND surface):
     task write-back non-optional — PostToolUse watches for a read of a specific task
     id and for real work after it, Stop re-reads the board live and blocks a turn
     that is about to end with the card still uncommented).
+  * PreToolUse(Bash) / PostToolUse(Bash): bg-command-capture.py — INSTRUMENTATION,
+    not a guard and not a nudge. It has no verdict, writes nothing to stdout and
+    returns 0 on every input; it appends the VERBATIM command string of every
+    backgrounded (or status-masking) Bash call to a bounded log, because that
+    string is the one artifact that discriminates between the open hypotheses in
+    ClickUp 868ktvqf9 and the harness keeps it nowhere reachable afterwards. Both
+    events, because they carry different halves: PreToolUse has the verbatim
+    command and `run_in_background`, PostToolUse has the `backgroundTaskId` that
+    names the run's output file.
 
 🔴 TWO of these carry NO `matcher` on PostToolUse — agent-ledger-hook.py and
 clawgate-writeback-guard.py — unlike the three nudges above. Those three are about
@@ -199,6 +208,7 @@ MANAGED_HOOK_SCRIPTS = frozenset({
     "agent-ledger-hook.py",
     "audit-pr-nudge.py",
     "bash-guard.py",
+    "bg-command-capture.py",
     "claude-notify.py",
     "clawgate-task-interview-guard.py",
     "clawgate-writeback-guard.py",
@@ -207,7 +217,8 @@ MANAGED_HOOK_SCRIPTS = frozenset({
     "shell-env-nudge.py",
 })
 
-HOOK_LIBRARY_MODULES = frozenset({"agent_ledger.py", "guard_core.py"})
+HOOK_LIBRARY_MODULES = frozenset({"agent_ledger.py", "bg_command_capture.py",
+                                  "guard_core.py"})
 
 REGISTRAR_SCRIPT = "register-nudge-hook.py"
 
@@ -422,6 +433,11 @@ POST_BASH_CMDS = [
     with_python("~/.claude/hooks/audit-pr-nudge.py"),
     with_python("~/.claude/hooks/shell-env-nudge.py"),
     with_python("~/.claude/hooks/search-tool-nudge.py"),
+    # Not a nudge — INSTRUMENTATION. It injects nothing and blocks nothing; on
+    # this event it exists only to capture `tool_response.backgroundTaskId`,
+    # which names the output file a backgrounded run writes to and appears on NO
+    # other event. See scripts/lib/bg_command_capture.py (ClickUp 868ktvqf9).
+    with_python("~/.claude/hooks/bg-command-capture.py"),
 ]
 
 # The turn-finished notifier fires on these three events (single script,
@@ -453,6 +469,19 @@ WRITEBACK_EVENTS = ["PostToolUse", "Stop"]
 # pins that): the append surface adds only what is in this table.
 PRE_BASH_CMDS = [
     with_python("~/.claude/hooks/clawgate-task-interview-guard.py"),
+    # 🔴 THE LOAD-BEARING HALF of the 868ktvqf9 instrument, and the SECOND
+    # PreToolUse entry this script registers. `tool_input.command` (verbatim) and
+    # `tool_input.run_in_background` exist on this event and on no other — a
+    # backgrounded run's PostToolUse response carries only a task id, and the
+    # completion notification is not a hook event at all. If this entry is
+    # missing, the one artifact that discriminates between the open hypotheses is
+    # never recorded and the next hit needs a reconstruction again.
+    #
+    # 🔴 Unlike its neighbour above, this hook has NO verdict: it never emits a
+    # permissionDecision, never writes to stdout, and returns 0 on every input.
+    # Registering it does not widen what PreToolUse can REFUSE — only what it
+    # observes.
+    with_python("~/.claude/hooks/bg-command-capture.py"),
 ]
 
 # Hooks registered on exactly one event each: {event: [command, ...]}.

@@ -1,6 +1,6 @@
 ---
 name: obs-read
-description: "Query Prometheus/Loki/Pyroscope on a named cluster in ONE deterministic call (port-forward -> query -> teardown), with a LOUD silent-zero guard so a wrong service or label cannot look like a real 0. Use for metrics/logs/profiles during an incident or perf dig, the 5xx / error-rate / latency / CPU-saturation reads, or \"is X actually zero or did my query just miss\"."
+description: "Query Prometheus/Loki/Pyroscope on a named cluster in ONE deterministic call (port-forward -> query -> teardown), with a LOUD silent-zero guard. Use for metrics/logs/profiles during an incident or perf dig, the 5xx / error-rate / latency / CPU-saturation reads, or \"is X actually zero or did my query just miss\"."
 argument-hint: "--cluster homelab|workbench|dpprod|nebula (--preset NAME | --backend B --query 'EXPR') [--since 30m] [--json] | --list-presets"
 allowed-tools: Bash
 ---

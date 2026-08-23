@@ -254,7 +254,7 @@ import re
 import subprocess
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
@@ -274,6 +274,7 @@ from subsystem_resolver import (  # noqa: E402
     ResolverError,
     SubsystemEntry,
     SubsystemIndex,
+    UNREACHABLE_MARKER,
     UnknownScopeError,
     associate_paths,
     entry_mapping,
@@ -286,6 +287,14 @@ from subsystem_resolver import (  # noqa: E402
     resolve_ref_tiered,
     scan_headings,
 )
+
+# 🔴 ONE RULE, ONE PLACE — "what is this repo's mainline?". Same `sys.path`
+# idiom as `subsystem_resolver` above. It lives in its own module because
+# `handoff_doc.py` needs the identical answer and must not re-derive it: two
+# derivations would disagree the first time a repo's `origin/HEAD` is dangling,
+# which is a state MEASURED in this very repo (see `git_mainline`'s docstring).
+from git_mainline import FALLBACK_BASE_REFS  # noqa: E402
+from git_mainline import resolve_base_ref as _resolve_mainline_ref  # noqa: E402
 
 __all__ = [
     "WRITER_ID",
@@ -339,6 +348,9 @@ __all__ = [
     "SHAPE_EMPTY",
     "ShapeFinding",
     "scan_entry_shape",
+    "UNREACHABLE_MARKER",
+    "UnreachableMarkerFinding",
+    "scan_unreachable_markers",
     "POLICY_SCOPE",
     "POLICY_STORE_ROOT",
     "POLICY_NONE",
@@ -358,6 +370,19 @@ __all__ = [
     "build_report",
     "wrong_window_dominance",
     "render_wrong_window",
+    "ESCALATION_BASIS_COMMIT",
+    "ESCALATION_REASONS",
+    "ESCALATION_NO_BASE_REF",
+    "ESCALATION_HEAD_UNRESOLVABLE",
+    "ESCALATION_NO_SHARED_HISTORY",
+    "ESCALATION_NO_COMMITS",
+    "ESCALATION_GIT_FAILED",
+    "ESCALATION_READ_FAILED",
+    "CommitRange",
+    "WindowEscalation",
+    "commit_window_range",
+    "escalate_to_commit_window",
+    "render_window_escalation",
     "render_text",
     "report_json",
     "new_entry_template",
@@ -431,10 +456,21 @@ def governing_policy(store_root: str | Path, scope: str) -> tuple[str | None, st
 # nominations: a confirm gate a human stops reading is not a confirm gate.
 DEFAULT_NOMINATION_LIMIT = 5
 
-# Tried in order; the FIRST that exists wins. Remote-tracking refs come first so
-# that on a branch named `main` with unpushed local commits the window is those
-# commits (the diverged-host case CLAUDE.md describes), not empty.
-BASE_REF_CANDIDATES: tuple[str, ...] = ("origin/main", "origin/master", "main", "master")
+# 🔴 A FALLBACK, NOT THE ANSWER — and it is passed through `git_mainline`, which
+# puts the ref DERIVED from `refs/remotes/origin/HEAD` in front of it. This tuple
+# used to be the whole rule, and had already been extended reactively once (the
+# first repo that used `master`); on 2026-08-21 `homelab-infra`, whose mainline
+# is `trunk`, made every consumer return `no-base-ref` in exactly the repo the
+# escalation had been called for. Appending `"trunk"` buys until the next repo.
+# The derivation is where the rule lives now; this is what a clone with no
+# `origin/HEAD` falls back to, and the name is kept because it is exported and
+# it is what callers pass as `base_ref_candidates`.
+#
+# ⚠ The candidates are NOT the ladder any more. Anything rendering "we looked
+# for X" must print the ladder `_base_ref_of` returns, not this tuple — see
+# `commit_window_range`, which would otherwise name four refs it never tried
+# first.
+BASE_REF_CANDIDATES: tuple[str, ...] = FALLBACK_BASE_REFS
 
 # 🔴 THE LIVENESS BOUND ON A CALLER-SUPPLIED SESSION ID. There is no session-id
 # environment variable, so the id arrives as an argument and can be WRONG — a
@@ -1163,14 +1199,6 @@ def _git(repo: Path, args: Sequence[str]) -> str:
     return proc.stdout
 
 
-def _git_ok(repo: Path, args: Sequence[str]) -> bool:
-    try:
-        _git(repo, args)
-    except GitError:
-        return False
-    return True
-
-
 def _nul_list(out: str) -> list[str]:
     return [p for p in out.split("\0") if p]
 
@@ -1192,6 +1220,25 @@ def _toplevel(repo: str | Path) -> Path:
     different frames in one path set — components both manufactured and lost.
     """
     return Path(_git(Path(repo), ["rev-parse", "--show-toplevel"]).strip())
+
+
+def _base_ref_of(
+    top: Path, candidates: Sequence[str]
+) -> tuple[str | None, tuple[str, ...]]:
+    """`(this repo's base ref, the whole ladder that was tried)`. READ-ONLY.
+
+    🔴 ONE RULE, ONE PLACE. `collect_git_paths` and `commit_window_range` both
+    need this and each used to open-code the same rev-parse loop over
+    `BASE_REF_CANDIDATES`. `claude/RULES.md` → "One rule, one place": a predicate
+    open-coded at N sites is typically wrong at N−1 of them in the same
+    direction, and these two were — both blind to `trunk`, so the git source's
+    window and the escalation's agreed with each other while both were wrong.
+
+    The derivation itself is `git_mainline`'s, because `handoff_doc.py` needs the
+    same answer. The ladder comes back so a failure can NAME what it looked for:
+    the candidate tuple alone would describe refs that were never reached.
+    """
+    return _resolve_mainline_ref(top, fallback=candidates)
 
 
 def _filter_excluded(
@@ -1281,16 +1328,12 @@ def collect_git_paths(
     commands.append(("git", *untracked_args))
     add(_nul_list(_git(repo, untracked_args)))
 
-    base_ref: str | None = None
-    for cand in base_ref_candidates:
-        if _git_ok(repo, ["rev-parse", "--verify", "--quiet", f"{cand}^{{commit}}"]):
-            base_ref = cand
-            break
+    base_ref, tried = _base_ref_of(repo, base_ref_candidates)
 
     window = "worktree"
     if base_ref is None:
         notes.append(
-            f"no base ref among {', '.join(base_ref_candidates)}; committed work is not "
+            f"no base ref among {', '.join(tried)}; committed work is not "
             f"in the window"
         )
     else:
@@ -2905,6 +2948,20 @@ class TouchReport:
     at policy written FOR this scope, and mistaking the fallback for the scope's
     own is believing a scope has spoken when it has not."""
 
+    escalation: "WindowEscalation | None" = None
+    """The SECOND window, run automatically because the first was dominated.
+
+    🔴 CARRIED ON THE REPORT SO THE RENDERERS STAY PURE. `render_text` promises
+    "same report in, same bytes out"; a renderer that shelled out to git would
+    break that and would make every existing test of it depend on a repo. The
+    git work happens once, at the CLI's impure boundary (`main`), and the answer
+    travels here — the same shape as `policy_path`, and for the same reason.
+
+    `None` means the escalation DID NOT RUN — never "it ran and found nothing".
+    A run that ran and could not measure carries a `WindowEscalation` with a
+    NAMED `reason`, because an empty result cannot distinguish two mechanisms.
+    """
+
     journals: Mapping[str, EntryJournal] = field(default_factory=dict)
     """ref -> what that entry's `## Nuance / work-history` ALREADY holds.
 
@@ -3869,6 +3926,342 @@ def render_wrong_window(source: PathSource) -> list[str]:
     ]
 
 
+# --- The escalation: reading the SECOND window instead of recommending it ------
+#
+# 🔴 THE ADVISORY WAS NOT ENOUGH, AND THAT IS A MEASUREMENT, NOT A HUNCH. The
+# block above has named `--pr` and `--commit` as the windows to run next since it
+# shipped, and it FIRED IDENTICALLY ON TWO CONSECUTIVE SESSIONS with nobody
+# running either: 3 paths under cwd against 24 in the PR window on one, 0 under
+# 19 on the other. A recommendation whose only executor is a human or an agent
+# re-typing a command is one more thing to skip on the run where it matters —
+# the same failure mode the `note:` counters had before this block existed, one
+# level up.
+#
+# 🔴 `--commit`, NOT `--pr`, AND THE REASON IS THE MODULE'S POSTURE. The commit
+# range is inferable with git alone (`merge-base(<base ref>, HEAD)..HEAD`); a PR
+# number is not — `collect_pr_paths` shells out to `gh`, which is a NETWORK call,
+# an auth dependency and a rate limit. Nothing on the automatic path may acquire
+# those. The block above still NAMES `--pr` as the window a human should run when
+# the branch landed through one; this runs the half that costs nothing.
+#
+# 🔴 IT FIRES ON EXACTLY THE EXISTING CONDITION AND ADDS NO CONSTANT.
+# `wrong_window_dominance` already decides this, tie goes to silence, and its
+# docstring records why a lower threshold was rejected: a warning tuned low
+# enough to catch 9-outside/10-under fires often enough to become wallpaper.
+# Escalating on a SECOND, looser rule would re-open exactly that. And the
+# counters the first window prints are untouched — this is a second basis
+# reported beside the first, never a replacement for it.
+
+ESCALATION_BASIS_COMMIT = "commit"
+"""The only basis this escalation has. Named rather than implied so the report
+can say WHICH window produced the nominations under it, and so a future second
+basis is an addition rather than a re-reading of an unlabelled block."""
+
+ESCALATION_NO_BASE_REF = "no-base-ref"
+ESCALATION_HEAD_UNRESOLVABLE = "head-unresolvable"
+ESCALATION_NO_SHARED_HISTORY = "no-shared-history"
+ESCALATION_NO_COMMITS = "no-commits-in-range"
+ESCALATION_GIT_FAILED = "git-failed"
+ESCALATION_READ_FAILED = "commit-window-failed"
+
+ESCALATION_REASONS: tuple[str, ...] = (
+    ESCALATION_NO_BASE_REF,
+    ESCALATION_HEAD_UNRESOLVABLE,
+    ESCALATION_NO_SHARED_HISTORY,
+    ESCALATION_NO_COMMITS,
+    ESCALATION_GIT_FAILED,
+    ESCALATION_READ_FAILED,
+)
+"""Every way this escalation can fail to measure, each with its OWN token.
+
+🔴 A NAMED REASON, NEVER AN EMPTY RESULT. `claude/RULES.md`: an empty result
+cannot distinguish two mechanisms, and "0 paths, nothing nominated" is the
+observable that ALL of these share with a genuinely empty commit range. A reader
+who cannot tell "this repo has no `origin/main`" from "this branch has landed
+nothing yet" from "git is broken here" has not been told anything.
+
+⚠ DETACHED HEAD IS DELIBERATELY NOT IN THIS TUPLE. It was specified as a failure
+and it is not one: `merge-base(<base ref>, HEAD)..HEAD` is well defined on a
+detached HEAD and means exactly what it means on a branch — the commits this
+checkout has that the base ref does not. Refusing there would have made the
+escalation blind in an agent worktree, which is the case it exists for. The
+detachment is REPORTED in the provenance line instead, and pinned by a test.
+"""
+
+
+@dataclass(frozen=True)
+class CommitRange:
+    """`merge-base(<base ref>, HEAD)..HEAD`, or the NAMED reason there is none."""
+
+    shas: tuple[str, ...]
+    base_ref: str | None
+    merge_base: str | None
+    branch: str | None
+    """The branch name, or None when HEAD is DETACHED — a reading, not a fault."""
+
+    reason: str | None
+    detail: str
+    """Always non-empty, on success and on failure alike. On failure it is what
+    makes the token actionable; on success it states the range that was read."""
+
+    commands: tuple[tuple[str, ...], ...] = ()
+
+
+@dataclass(frozen=True)
+class WindowEscalation:
+    """The second window's whole answer — or why there isn't one."""
+
+    basis: str
+    reason: str | None
+    """None ⇔ it measured. Any member of `ESCALATION_REASONS` ⇔ it could not."""
+
+    detail: str
+    commit_range: CommitRange
+    source: "PathSource | None" = None
+    report: "TouchReport | None" = None
+
+    @property
+    def measured(self) -> bool:
+        return self.reason is None
+
+
+def commit_window_range(
+    repo: str | Path,
+    *,
+    base_ref_candidates: Sequence[str] = BASE_REF_CANDIDATES,
+) -> CommitRange:
+    """The commits this checkout has that the base ref does not. READ-ONLY.
+
+    🔴 THE SAME `_base_ref_of` `collect_git_paths` USES, from the same function —
+    not merely the same constant, which is what it was and what let both sites
+    be blind to `trunk` together. Two answers to "what is this branch's base"
+    would disagree the first time a repo used a mainline neither had been taught,
+    and the git source's window and this one would then describe different ranges
+    under one report while agreeing they had looked.
+
+    🔴 `--no-merges` IS NOT A PREFERENCE. `_resolve_commit` REFUSES a merge commit
+    (`CommitIsMergeError`) because `git diff-tree` prints nothing for one at exit
+    0 — so a range containing a merge would abort the whole escalation rather
+    than report it. Excluding them is stated in the rendered provenance line, so
+    the exclusion is accounted rather than silent.
+
+    Every failure returns a `reason` token; none returns a bare empty range.
+    """
+    try:
+        top = _toplevel(repo)
+    except GitError as exc:
+        return CommitRange(
+            (), None, None, None, ESCALATION_GIT_FAILED,
+            f"git could not resolve {repo} to a repository root, so no range could "
+            f"be computed: {exc}",
+        )
+
+    # Detached HEAD is a READING. See `ESCALATION_REASONS`.
+    try:
+        branch = _git(top, ["symbolic-ref", "--quiet", "--short", "HEAD"]).strip() or None
+    except GitError:
+        branch = None
+
+    try:
+        _git(top, ["rev-parse", "--verify", "--quiet", "HEAD^{commit}"])
+    except GitError:
+        return CommitRange(
+            (), None, None, branch, ESCALATION_HEAD_UNRESOLVABLE,
+            "HEAD does not resolve to a commit — an unborn branch has no commits, "
+            "so there is no range to read. This is not an empty range: nothing was "
+            "measured.",
+        )
+
+    base_ref, tried = _base_ref_of(top, base_ref_candidates)
+    if base_ref is None:
+        return CommitRange(
+            (), None, None, branch, ESCALATION_NO_BASE_REF,
+            f"none of {', '.join(tried)} exists in this repo, so "
+            f"`merge-base ..HEAD` has no left-hand side. The commit window was NOT "
+            f"read — this is not a claim that the branch landed nothing.",
+        )
+
+    try:
+        merge_base = _git(top, ["merge-base", "HEAD", base_ref]).strip()
+    except GitError:
+        return CommitRange(
+            (), base_ref, None, branch, ESCALATION_NO_SHARED_HISTORY,
+            f"HEAD and {base_ref} share no history, so there is no merge-base to "
+            f"bound the range. The commit window was NOT read.",
+        )
+
+    args = ["rev-list", "--no-merges", f"{merge_base}..HEAD"]
+    try:
+        shas = tuple(_git(top, args).split())
+    except GitError as exc:
+        return CommitRange(
+            (), base_ref, merge_base, branch, ESCALATION_GIT_FAILED,
+            f"`git {' '.join(args)}` failed, so the range is unknown: {exc}",
+            commands=(("git", *args),),
+        )
+
+    if not shas:
+        return CommitRange(
+            (), base_ref, merge_base, branch, ESCALATION_NO_COMMITS,
+            f"HEAD is at the merge-base with {base_ref}, or every commit since it is "
+            f"a merge — so this checkout has no non-merge commit the base ref lacks. "
+            f"The window was READ and is genuinely empty; nothing has been committed "
+            f"here yet, which is a different fact from work having been done.",
+            commands=(("git", *args),),
+        )
+
+    return CommitRange(
+        shas, base_ref, merge_base, branch, None,
+        f"{len(shas)} non-merge commit(s) in {merge_base[:12]}..HEAD, the commits "
+        f"this checkout has that {base_ref} does not.",
+        commands=(("git", *args),),
+    )
+
+
+def escalate_to_commit_window(
+    repo: str | Path,
+    store_root: str | Path,
+    scope: str,
+    *,
+    today: str,
+    min_paths: int = DEFAULT_MIN_PATHS,
+    limit: int = DEFAULT_NOMINATION_LIMIT,
+    exclude: Iterable[str] = (),
+    base_ref_candidates: Sequence[str] = BASE_REF_CANDIDATES,
+) -> WindowEscalation:
+    """Run the `--commit` window and resolve it against the SAME store. READ-ONLY.
+
+    Every failure is caught and turned into a NAMED reason rather than raised: a
+    dominated session's report is already useful, and killing it because the
+    second window could not be computed would trade a partial answer for none.
+    """
+    rng = commit_window_range(repo, base_ref_candidates=base_ref_candidates)
+    if rng.reason is not None:
+        return WindowEscalation(
+            basis=ESCALATION_BASIS_COMMIT,
+            reason=rng.reason,
+            detail=rng.detail,
+            commit_range=rng,
+        )
+    try:
+        source = collect_commit_paths(repo, rng.shas, exclude=exclude)
+        report = build_report(
+            source, store_root, scope, today=today, min_paths=min_paths, limit=limit
+        )
+    except (TouchError, ResolverError) as exc:
+        return WindowEscalation(
+            basis=ESCALATION_BASIS_COMMIT,
+            reason=ESCALATION_READ_FAILED,
+            detail=(
+                f"the range was computed ({rng.detail}) but reading it failed, so the "
+                f"second window has NO answer: {exc}"
+            ),
+            commit_range=rng,
+        )
+    return WindowEscalation(
+        basis=ESCALATION_BASIS_COMMIT,
+        reason=None,
+        detail=rng.detail,
+        commit_range=rng,
+        source=source,
+        report=report,
+    )
+
+
+def _ran_lines(commands: Sequence[Sequence[str]], indent: str = "  ") -> list[str]:
+    """`ran: <full argv>` for each command. ONE writer, for BOTH renderers.
+
+    🔴 FULL ARGV, PROGRAM INCLUDED — see `PathSource.commands`: the word `git` was
+    once hardcoded into this line and became a false provenance line (`ran: git gh
+    pr view 421`) the moment a source ran something else. The escalation block
+    renders provenance too, so the rule now has two call sites and therefore has
+    to have exactly one implementation (`claude/RULES.md` → "One rule, one place").
+    """
+    return [f"{indent}ran: {' '.join(cmd)}" for cmd in commands]
+
+
+def _nomination_labels(report: TouchReport | None) -> str:
+    """`ref (n paths), …` for one report's proposals, or an explicit nothing."""
+    if report is None:
+        return "(not read)"
+    parts = [f"{m.entry.ref} ({m.path_count} paths)" for m in report.known]
+    parts += [f"{n.ref} ({n.path_count} paths, NEW)" for n in report.nominations]
+    return ", ".join(parts) if parts else "(nothing)"
+
+
+def render_window_escalation(
+    escalation: "WindowEscalation | None", primary: TouchReport | None = None
+) -> list[str]:
+    """The second window's block, or NOTHING when it did not run.
+
+    🔴 IT NAMES THE BASIS OF EVERY NOMINATION IT PRINTS, and prints the FIRST
+    window's nominations beside them under their own label. The two path sets are
+    reported side by side and never merged — the module's standing rule for
+    windows — so the reader has to be able to say which basis produced which
+    proposal without counting back up the page.
+    """
+    if escalation is None:
+        return []
+    rng = escalation.commit_range
+    where = f"branch `{rng.branch}`" if rng.branch else "DETACHED HEAD"
+    if not escalation.measured:
+        # 🔴 TWO HEADERS, BECAUSE THEY ARE TWO MECHANISMS. `no-commits-in-range`
+        # is the ONE reason where the range genuinely WAS computed and came back
+        # empty; every other token means the instrument never ran. One header
+        # covering both would state a falsehood on whichever case it was not
+        # written for — and "nothing came back" is exactly the observable
+        # `claude/RULES.md` says cannot distinguish two mechanisms on its own.
+        headline = (
+            "🔴 SECOND WINDOW READ, AND IT IS EMPTY"
+            if escalation.reason == ESCALATION_NO_COMMITS
+            else "🔴 SECOND WINDOW COULD NOT BE READ"
+        )
+        return [
+            "",
+            f"{headline} — basis `--{escalation.basis}`, reason `{escalation.reason}`.",
+            f"  {escalation.detail}",
+            f"  read from: {where}"
+            + (f", base ref {rng.base_ref}" if rng.base_ref else ", no base ref"),
+            "  🔴 THIS IS NOT \"NOTHING TO NOMINATE\". The window above is dominated and "
+            "this one added nothing, so",
+            "  NEITHER has told you what this session did. Run a window by hand before "
+            "concluding there is nothing to record.",
+        ]
+    src = escalation.source
+    rep = escalation.report
+    assert src is not None and rep is not None  # `measured` is the discriminator
+    out = [
+        "",
+        f"SECOND WINDOW, RUN AUTOMATICALLY — basis `--{escalation.basis}`, because the "
+        f"window above is dominated.",
+        f"  {escalation.detail} Merge commits are excluded (they have no single diff).",
+        f"  read from: {where}, base ref {rng.base_ref}",
+        f"  paths: {len(src.paths)} ({src.kind}, window={src.window}, "
+        f"min_paths={rep.min_paths}, status={rep.status})",
+        f"  caveat: {src.caveat}",
+    ]
+    out.extend(_ran_lines(rng.commands))
+    out.append(f"  nominated BY THE COMMIT WINDOW: {_nomination_labels(rep)}")
+    out.append(f"  nominated BY THE SESSION WINDOW: {_nomination_labels(primary)}")
+    out.append(
+        "  🔴 REPORTED SIDE BY SIDE, NEVER MERGED. Attribute a bullet to ONE basis and "
+        "say which — the commit"
+    )
+    out.append(
+        "  window is what THESE COMMITS changed, the session window is what this "
+        "session's own turns named, and a"
+    )
+    out.append(
+        "  path in both is not corroboration. `--pr` is still UNREAD and is the only "
+        "window that sees a subagent's"
+    )
+    out.append(
+        "  work through a branch; it is not run here because it needs the network, "
+        "which this path never takes."
+    )
+    return out
+
+
 def render_text(report: TouchReport) -> str:
     """The agent-facing brief.
 
@@ -3897,11 +4290,8 @@ def render_text(report: TouchReport) -> str:
     out.append(f"  caveat: {src.caveat}")
     for note in src.notes:
         out.append(f"  note: {note}")
-    for cmd in src.commands:
-        # The FULL argv, program included. See `PathSource.commands`: the word
-        # `git` used to be hardcoded here, which made this line a false claim
-        # the moment a source ran something else.
-        out.append(f"  ran: {' '.join(cmd)}")
+    # The FULL argv, program included, from the one writer — see `_ran_lines`.
+    out.extend(_ran_lines(src.commands))
 
     # 🔴 BEFORE EVERY STATUS BLOCK, ON EVERY STATUS. The measured failure was a
     # `no-match` — but a run can equally clear the threshold on its 1 visible
@@ -3910,6 +4300,12 @@ def render_text(report: TouchReport) -> str:
     # `if not report.writes_proposed:` with `ROUTE OUT`. It is a fact about the
     # WINDOW, and the window is the same whatever the store said about it.
     out.extend(render_wrong_window(src))
+    # 🔴 ONE CALL SITE, DIRECTLY BELOW THE BLOCK IT ANSWERS — and above the status
+    # branches, not inside them, for the same reason `render_wrong_window` is:
+    # `looked-at-nothing` is one of the states the dominance rule fires on (0
+    # under, N outside), so an end-of-function placement would need this in every
+    # early-return branch, which is the duplicated predicate the module refuses.
+    out.extend(render_window_escalation(report.escalation, report))
 
     if report.status == "looked-at-nothing":
         out.append("")
@@ -4196,6 +4592,39 @@ def report_json(report: TouchReport) -> dict:
         ],
         "unmatched_path_count": len(assoc.unmatched_paths) if assoc else 0,
         "journal_line_shape": journal_line_shape(report.today),
+        # 🔴 `None` ⇔ THE ESCALATION DID NOT RUN. When it ran and could not
+        # measure, `reason` carries the token — a machine consumer must be able
+        # to tell "not attempted" from "attempted, no answer" without prose.
+        "escalation": _escalation_json(report.escalation),
+    }
+
+
+def _escalation_json(escalation: "WindowEscalation | None") -> dict | None:
+    if escalation is None:
+        return None
+    rng = escalation.commit_range
+    rep = escalation.report
+    return {
+        "basis": escalation.basis,
+        "measured": escalation.measured,
+        "reason": escalation.reason,
+        "detail": escalation.detail,
+        "base_ref": rng.base_ref,
+        "merge_base": rng.merge_base,
+        "branch": rng.branch,
+        "detached_head": rng.branch is None,
+        "commit_count": len(rng.shas),
+        "commits": list(rng.shas),
+        "commands": [list(c) for c in rng.commands],
+        "path_count": len(escalation.source.paths) if escalation.source else None,
+        "paths": list(escalation.source.paths) if escalation.source else [],
+        "status": rep.status if rep else None,
+        "known": [
+            {"ref": m.entry.ref, "path_count": m.path_count} for m in rep.known
+        ] if rep else [],
+        "nominations": [
+            {"ref": n.ref, "path_count": n.path_count} for n in rep.nominations
+        ] if rep else [],
     }
 
 
@@ -4625,6 +5054,22 @@ class ValidationReport:
     needs one edit.
     """
 
+    unreachable: tuple[UnreachableMarkerFinding, ...] = ()
+    """Correctly-spelled markers typed where NO parser looks. Advisory only.
+
+    🔴 IT DOES NOT AFFECT `clean`, ON THE SAME REASONING AS `open_actions` AND
+    FOR THE SAME REASON IT MUST NOT: the loader accepts the file, and an entry
+    with an open action — reachable or not — is well-formed. A verdict change
+    here would be a gate the author cannot turn green by fixing the file, which
+    `claude/RULES.md` names as worse than no gate.
+
+    🔴 AND IT IS NEVER ADDED TO `near_miss_marker_count`. A near-miss is a marker
+    mis-spelled WHERE THE PARSER LOOKS and is fixed by editing that line; this is
+    a marker spelled correctly where the parser NEVER looks and is fixed by
+    promoting it to a bullet of its own. One count covering both would send half
+    the readers to the wrong remedy.
+    """
+
     @property
     def clean(self) -> bool:
         return not self.malformed
@@ -4683,6 +5128,20 @@ class ValidationReport:
                 1 for s in self.shape if s.kind == SHAPE_DUPLICATED
             ),
             "shape_empty_count": sum(1 for s in self.shape if s.kind == SHAPE_EMPTY),
+            # 🔴 ITS OWN KEY, ITS OWN REASON TOKEN, NEVER SUMMED WITH
+            # `near_miss_marker_count`. See `ValidationReport.unreachable`.
+            "unreachable_marker_count": len(self.unreachable),
+            "unreachable_marker_reason": UNREACHABLE_MARKER,
+            "unreachable_markers": [
+                {
+                    "file": u.filename,
+                    "bullet_first_line": u.bullet_first_line,
+                    "offset": u.offset,
+                    "line": u.line,
+                    "openness": u.openness,
+                }
+                for u in self.unreachable
+            ],
             "shape_headings_checked": list(SHAPE_HEADINGS),
             "shape": [
                 {
@@ -4766,6 +5225,72 @@ def scan_open_actions(paths: Iterable[str | Path]) -> tuple[OpenAction, ...]:
                     first_line=b.first_line,
                 )
             )
+    return tuple(out)
+
+
+@dataclass(frozen=True)
+class UnreachableMarkerFinding:
+    """One bullet carrying a correctly-spelled marker where no parser looks.
+
+    🔴 A FIFTH POPULATION, AND IT IS DELIBERATELY NOT AN `OpenAction`. Those four
+    are all readings of a bullet's OPENING line and are separated by
+    `openness_population`; this one is a fact about lines 2..n, and the bullet it
+    is about is usually `none` — skipped by `scan_open_actions` entirely. Carried
+    in its own field, counted in its own key and rendered in its own block, so
+    there is no place where it could be added to `near_miss_marker_count`.
+    """
+
+    filename: str
+    bullet_first_line: str
+    """The bullet's OPENING line — what a reader will search the file for."""
+
+    offset: int
+    """1-based line index WITHIN the bullet. Always >= 2."""
+
+    line: str
+    """The continuation line carrying the marker, verbatim."""
+
+    openness: str
+    """`open` | `resolved` — what it would have declared at a bullet's head."""
+
+
+def scan_unreachable_markers(
+    paths: Iterable[str | Path],
+) -> tuple[UnreachableMarkerFinding, ...]:
+    """Markers typed into a bullet's BODY, where `_bullet_openness` never reads.
+
+    Same tolerance and the same walk as `scan_open_actions` — a file that cannot
+    be read, or that has no `## Nuance / work-history`, contributes nothing — and
+    for the same reason: this is an advisory that runs BESIDE the parse check,
+    never in front of it.
+
+    🔴 IT IS A SEPARATE WALK BY CHOICE, NOT BY OVERSIGHT. Merging it into
+    `scan_open_actions` would mean deciding what to do with a bullet that is
+    `none` on its opening line, and the answer there is "report it, but never as
+    an open action" — which is a second population inside a function whose whole
+    contract is the one-branch precedence in `openness_population`.
+    """
+    out: list[UnreachableMarkerFinding] = []
+    for p in paths:
+        path = Path(p)
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        body = extract_sections(text, (NUANCE_HEADING,)).get(NUANCE_HEADING)
+        if not body:
+            continue
+        for b in parse_journal_bullets(body):
+            for m in b.unreachable_markers:
+                out.append(
+                    UnreachableMarkerFinding(
+                        filename=path.name,
+                        bullet_first_line=b.first_line,
+                        offset=m.offset,
+                        line=m.line,
+                        openness=m.openness,
+                    )
+                )
     return tuple(out)
 
 
@@ -4930,7 +5455,10 @@ def render_validation(report: ValidationReport) -> str:
             f"0 malformed. They will load, be listed, and be reachable by `--ref`."
         )
         return "\n".join(
-            out + _render_validation_shape(report) + _render_validation_open_actions(report)
+            out
+            + _render_validation_shape(report)
+            + _render_validation_open_actions(report)
+            + _render_validation_unreachable(report)
         )
     n = len(report.malformed)
     out.append(
@@ -4946,7 +5474,10 @@ def render_validation(report: ValidationReport) -> str:
         "line, or the parser reads an unterminated bare string.)"
     )
     return "\n".join(
-        out + _render_validation_shape(report) + _render_validation_open_actions(report)
+        out
+        + _render_validation_shape(report)
+        + _render_validation_open_actions(report)
+        + _render_validation_unreachable(report)
     )
 
 
@@ -5094,6 +5625,59 @@ def _render_validation_open_actions(report: ValidationReport) -> list[str]:
         "  (Advisory. None of this changes the verdict above: an entry with unfinished "
         "business is still well-formed, and failing it here would be a red gate nobody "
         "could turn green by fixing the file.)"
+    )
+    return out
+
+
+def _render_validation_unreachable(report: ValidationReport) -> list[str]:
+    """The MARKER-REACHABILITY advisory. Prints on every path that CHECKED something.
+
+    🔴 ITS OWN BLOCK, BECAUSE IT IS ITS OWN SHAPE. It sits after the open-action
+    block rather than inside it for the reason the two counts are never summed:
+    the block above is about what a bullet DECLARED, and every line in it names a
+    remedy — "fix the LINE", "rewrite as `RESOLVED <sha>:`" — that is wrong here.
+    A marker on a continuation line is spelled correctly; the edit it needs is to
+    be PROMOTED to a bullet of its own.
+
+    🔴 IT PRINTS ITS DENOMINATOR EVEN WHEN IT FINDS NOTHING, like both siblings.
+    A bare absence is indistinguishable from a scanner wired to nothing, and this
+    one has a second way to be vacuous that the zero must not hide: it can only
+    see bullets, so an entry whose `## Nuance / work-history` heading is renamed
+    contributes zero here for a reason the SHAPE block above is the one to state.
+    """
+    n_files = len(report.checked)
+    out = [""]
+    if not report.unreachable:
+        out.append(
+            f"marker reachability: 0 out-of-reach marker(s) across {n_files} entry "
+            f"file(s) — every `OPEN:`/`RESOLVED:` found is on a bullet's OPENING line, "
+            f"where the parser reads. [{UNREACHABLE_MARKER}]"
+        )
+        return out
+    n = len(report.unreachable)
+    out.append(
+        f"🔴 {n} MARKER(S) OUT OF REACH across {n_files} entry file(s) "
+        f"[{UNREACHABLE_MARKER}] — spelled CORRECTLY, on a bullet's CONTINUATION "
+        f"line, where NO reader looks. `_bullet_openness` reads a bullet's OPENING "
+        f"line and its pattern is anchored at position 0, so this declares NOTHING: "
+        f"it raises neither the `OPEN` badge nor `NEAR-MISS`. 🔴 It is NOT a "
+        f"near-miss and is NOT counted as one — a near-miss is mis-spelled where "
+        f"the parser looks and is fixed by editing the line; this is fixed by "
+        f"PROMOTING the line to a top-level bullet of its own."
+    )
+    for u in report.unreachable:
+        out.append(f"    {u.filename}: line {u.offset} of the bullet opening")
+        out.append(f"      bullet: {u.bullet_first_line[:120]}")
+        out.append(f"      marker: {u.line.strip()[:120]}   (would declare `{u.openness}`)")
+    out.append(
+        "  🔴 BEFORE FIXING ANY MARKER ABOVE IT IN THE SAME SECTION, re-check this "
+        "one against the repo. Measured 2026-08-20: such a bullet had only ever "
+        "raised a badge BY ACCIDENT, through a broken `RESOLVED —` sitting above "
+        "it — so repairing that line would have SILENCED a still-open action."
+    )
+    out.append(
+        "  (Advisory. It changes no verdict, for the same reason the block above "
+        "does not: the loader accepts the file.)"
     )
     return out
 
@@ -5284,20 +5868,45 @@ def main(argv: Sequence[str] | None = None, *, today: str | None = None) -> int:
             return 0
 
         repo = Path(args.repo).resolve()
-        scope = args.scope if args.scope is not None else scope_for_repo(repo)
+
+        # 🔴 LAZY, and that is the entire point. `scope_for_repo` shells out to
+        # git, so deriving the scope EAGERLY made every subcommand require a git
+        # repo at cwd — including `--validate <file>`, which never reads the
+        # scope at all (it takes its policy scope from the file's own parent
+        # directory, below) and whose whole job is to answer "does this entry
+        # parse". MEASURED 2026-08-21: `--validate <file>` from a non-repo cwd
+        # exited 3 with "fatal: not a git repository", and the nix check sandbox
+        # runs at exactly such a cwd (`/build/src` is a copy, not a clone) — so
+        # the hermetic gate was RED on a path the dev host structurally could not
+        # exercise, because a dev host is always inside the repo.
+        #
+        # Memoized, so the paths that DO need it (the scope form, --template, and
+        # the report below) still pay for exactly one git call.
+        _scope_memo: list[str] = []
+
+        def scope_of() -> str:
+            if not _scope_memo:
+                _scope_memo.append(
+                    args.scope if args.scope is not None else scope_for_repo(repo)
+                )
+            return _scope_memo[0]
 
         if args.template is not None:
-            print(new_entry_template(normalize_ref(args.template), scope, today=stamp))
+            print(
+                new_entry_template(normalize_ref(args.template), scope_of(), today=stamp)
+            )
             return 0
 
         if args.validate is not None:
             if args.validate == VALIDATE_SCOPE:
+                scope = scope_of()
                 checked, malformed = validate_scope(args.store, scope)
                 policy_scope: str | None = scope
                 target = f"`{normalize_ref(scope)}/`"
                 scanned = [
                     Path(args.store) / normalize_ref(scope) / name for name in checked
                 ]
+                reported_scope: str | None = scope
             else:
                 bad = validate_entry_file(args.validate)
                 checked = (Path(args.validate).name,)
@@ -5305,17 +5914,22 @@ def main(argv: Sequence[str] | None = None, *, today: str | None = None) -> int:
                 policy_scope = Path(args.validate).parent.name
                 target = str(args.validate)
                 scanned = [Path(args.validate)]
+                # No scope, and NOT because it could not be derived: the
+                # single-file form is not scoped. Deriving one here is what made
+                # this branch need a git repo.
+                reported_scope = None
             path, basis = governing_policy(args.store, policy_scope or "")
             report = ValidationReport(
                 store_root=str(args.store),
                 target=target,
-                scope=scope if args.validate == VALIDATE_SCOPE else None,
+                scope=reported_scope,
                 checked=tuple(checked),
                 malformed=tuple(malformed),
                 policy_path=path,
                 policy_basis=basis,
                 open_actions=scan_open_actions(scanned),
                 shape=scan_entry_shape(scanned),
+                unreachable=scan_unreachable_markers(scanned),
             )
             print(
                 json.dumps(report.to_json(), indent=2)
@@ -5379,11 +5993,33 @@ def main(argv: Sequence[str] | None = None, *, today: str | None = None) -> int:
         report = build_report(
             source,
             args.store,
-            scope,
+            scope_of(),
             today=stamp,
             min_paths=args.min_paths,
             limit=args.limit,
         )
+        # 🔴 THE IMPURE BOUNDARY, AND THE ONLY ONE. The renderers stay
+        # deterministic in the report; the git work that answers the second
+        # window happens here, once, and travels on the report.
+        #
+        # The condition is `wrong_window_dominance` and NOTHING ELSE — no second
+        # threshold, no new constant. Only the session source carries the two
+        # counters, so a run already reading the commit window can never
+        # re-escalate into itself; that is a property of the existing rule, not
+        # a guard added here.
+        if wrong_window_dominance(source) is not None:
+            report = replace(
+                report,
+                escalation=escalate_to_commit_window(
+                    repo,
+                    args.store,
+                    scope_of(),
+                    today=stamp,
+                    min_paths=args.min_paths,
+                    limit=args.limit,
+                    exclude=args.exclude,
+                ),
+            )
     except (TouchError, ResolverError) as exc:
         print(f"subsystem-touch: {exc}", file=sys.stderr)
         return 3

@@ -3669,7 +3669,6 @@ class TestSkillDocsArePinned:
         """Structural, not a phrase: recall is context for a doc already read,
         not a substitute for reading it.
 
-<<<<<<< HEAD
         ⚠ RED ON `main` FROM #643 UNTIL THIS COMMIT, and nothing caught it — the
         repo has no automated merge gate. #643 extended step 2's imperative from
         `**Read it fully.**` to `**Read it fully — but treat its "Open

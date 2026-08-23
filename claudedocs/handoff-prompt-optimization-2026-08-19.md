@@ -1,7 +1,9 @@
-# Handoff: prompt-optimization — CLOSED 2026-08-20 (PR #586 merged)
+# Handoff: prompt-optimization — CLOSED 2026-08-21 (#586 #605 #617 #621 #644)
 
-**Status: DONE and merged** (`56de7b2`, squash). Deployed to the **laptop**;
-the **workbench is not deployed** — see "Left open" below.
+**Status: DONE, merged, deployed to BOTH hosts, and VERIFIED BY REAL USE.**
+Landed across five PRs — #586 (the contract + the clickup slim), #605 (this
+doc), #617, #621 and #644 — each shipped with `scripts/ship.sh` and confirmed on
+workbench and laptop.
 
 This doc originally carried the design for two tasks. **Two of its premises were
 false**, and they are recorded here so nobody re-derives them.
@@ -61,21 +63,202 @@ has 13.** `emulate` landed in #321 without updating that prose, and
 `browser_tool.test.mjs` had pinned 13 all along. Corrected, and the test now
 parses `ALLOWED_OPS_DEFAULT` from the code rather than prose about it.
 
+## Verified by real use (2026-08-21, PR #644)
+
+The contract has now been RUN, twice, against a public read-only target. Ground
+truth read from `tool-audit.jsonl`, not the returned envelope — because the
+contract itself says `steps_used` is untrustworthy:
+
+    run 1   whoami -> nav -> wake -> text x4                        9 ops, ok
+    run 2   whoami -> nav -> text x2 -> wake -> text x2 -> eval x2   9 ops, ok
+
+- **ZERO `open`/`close`/`activate`/`upload`/`tabs` attempts** in either run, so
+  the round-2 fix (rails 2 and 8 no longer instructing ops `browser agent` does
+  not have) holds against a live model and not merely against a pinned string.
+- **The first call was `whoami` both times**, and run 2's evidence quotes
+  "whoami: personal - other instance, no extension_stale" — rail 1 steered
+  behaviour including its second half. The rails are not decoration.
+- **Rail 7 fired for real**: run 1's read came back `hidden`, the deterministic
+  auto-wake ran (`auto_wake_ok woke:true settleMs:1500`), and the re-read had
+  content.
+- 0 leftover tabs in the operator's profile either time.
+- `steps_used` claimed **5 against 9** real op calls BOTH times — a fresh
+  reproduction of `reference/agent.md` guardrail 3.
+
+**What first use found that 47 document-guards could not:** the template's
+`INSTANCE:` line read as optional prose, I left it out, and the run died at
+`browser-agent: failed to open a tab` before a single model token was spent.
+Two profiles are connected, so `--instance` is required — and the wrapper forces
+the tab via env BEFORE the model runs, so a profile named in the goal text can
+never satisfy it. Fixed in #644 and re-verified live afterwards.
+
 ## Left open
 
-- 🔴 **The workbench is NOT deployed.** `ship.sh` correctly SKIPPED it (rc=7):
-  `claude/skills/resume/SKILL.md` has ~9 lines of uncommitted work that collides
-  with incoming commit `92e06db`. That work is intact and untouched; a safety
-  copy is in this session's scratchpad. To finish: commit or set aside that
-  file on the workbench, then re-run `scripts/ship.sh`. **Do not stash** — the
-  stash is repo-global.
-- **Never exercised on a real browser validation run.** The contract is tested
-  as a document, not as a prompt. First real use is the verification.
-- Repo-wide gap (not this PR's): the content-leak gates cover JSON/JSONL/JSONC
-  and `.html`/`.txt`, but **not `.md`**, so the two new markdown files landed
-  under no automated leak gate. Both were read manually and are clean.
+- **The `.md` leak-gate gap is NARROWER than this doc first claimed.** The
+  hostname and public-IP gates enumerate `git ls-files` with **no extension
+  filter**, which is why #619's client subdomain was caught inside a `.md`.
+  Only `test_no_captured_text.py` (JSON/JSONL/JSONC) and
+  `test_no_captured_markup.py` (`.html`/`.txt`) are extension-limited. So the
+  real gap is CAPTURED TEXT — message bodies, prompts, transcripts, or a model's
+  summaries of them — in `.md`. `claudedocs/` is exactly where handoffs quoting
+  real conversations land. Extending it is a design call, not a one-liner:
+  `.md` is mostly legitimate prose, so the false-positive rate is the whole
+  question.
+- **Path-rot coverage for the two mkOutOfStoreSymlink skills.** `browser` and
+  `dl-router` deploy from `scripts/`, so they sit outside
+  `test_doc_path_rot.py`'s `CORPUS_DIRS = ("claude", "CLAUDE.md")` — 6,337 lines
+  ungated. Extending it found exactly one real rot (fixed in #621); the
+  remaining 47 hits are rule 1c firing on the bare `reference/<file>.md`
+  spelling that subtree uses deliberately, 28 of them in a byte-ceilinged
+  SKILL.md. Three options are laid out in #621; it needs a rule decision, and
+  the gate explicitly refuses the baseline shortcut.
 
-## This file is UNTRACKED
+## Shipped
 
-It was never committed. Commit it or delete it — do not leave it for a
-`git clean` to decide.
+Both hosts converged and verified at each merge. The workbench skip recorded in
+an earlier draft of this doc is RESOLVED — it was another session's uncommitted
+`claude/skills/resume/SKILL.md`, which landed on its own; `ship.sh` then
+fast-forwarded and switched both hosts.
+## State now
+
+- Branch: `main`. **7 PRs merged this thread**: #586 (contract + clickup slim),
+  #605 (this doc), #617 (op-count prose gate), #621 (path rot), #644 (INSTANCE
+  slot), #654 (doc correction), #664 (/proc race).
+- Both hosts were converged and verified at `2ae0d081` by `scripts/ship.sh` at
+  18:47 — 499/460 managed artifacts, 0 dangling, 0 stale.
+- ⚠ The workbench base clone was briefly broken by an unrelated process
+  (`core.bare=true` + an un-pushed 947-file `seed` commit on `main`). **RESOLVED
+  by someone else while this handoff was being written** — see "Open
+  investigations" for the full diagnosis, kept because the failure mode recurs.
+- The browser validation contract is **verified by real use**, not just by its
+  own tests: two live `browser agent` runs, ops read from `tool-audit.jsonl`.
+
+## Open investigations — live diagnosis state
+
+### RESOLVED 2026-08-21 — base clone was `core.bare=true` with an un-pushed 947-file deletion on `main`
+
+🔴 **Already fixed — do NOT run the remedy below.** Re-verified at the moment of acting
+(`claude/RULES.md`: a fact measured an hour ago is a hypothesis about now): `core.bare`
+read EMPTY and `main` was already 0 ahead of `origin/main`. The reflog is the arbiter —
+`main@{2}: commit: seed` then a move back to `fc83693e` then `merge origin/main:
+Fast-forward` to `9667fb8b`. Someone else resolved it in the interim. The commit remains
+reachable as `preserve/seed-4b31471c-2026-08-21`. Kept in full because the SHAPE recurs
+and the diagnosis is the reusable part.
+
+- **Symptom + exact repro:** `git -C ~/workspace/devrc status -sb` →
+  `fatal: this operation must be run in a work tree`, while `git -C … log`
+  works normally. `scripts/ship.sh` cannot run; every `git worktree add`
+  against this clone will fail.
+- **Observed (with values):**
+  - `git -C ~/workspace/devrc config --get core.bare` → `true`
+  - `stat -c %y ~/workspace/devrc/.git/config` → `2026-08-21 14:44:14`
+  - `git -C … rev-parse --is-inside-work-tree` → `false`
+  - local `main` = `4b31471c`, `origin/main` = `fc83693e`; **ahead 1, behind 0**
+  - `git show -s 4b31471c` → author `t <t@t>`, date `Fri Aug 21 14:42:12 2026`,
+    subject `seed`
+  - `git show --stat 4b31471c` → **949 files changed, 2 insertions(+),
+    400083 deletions(-)** — 947 files deleted, 1 added (`seed.py`)
+  - Working tree content is INTACT: 400/400 sampled files tracked at
+    `origin/main` are present on disk (`core.bare=true` means git stopped
+    managing the worktree; it did not delete anything).
+  - The commit is **local-only and un-pushed**; `origin/main` is unaffected.
+- **Ruled out:**
+  - *Not my session's doing* — my last write to this clone was `ship.sh` at
+    18:47 on 2026-08-20 and every PR was authored in a separate worktree.
+  - *Not a devrc convention* — the terse-message commits nearby (`flake`,
+    `skill`, `espanso`: `c93ec3d5`, `dc0c2bca`, `9b671a96`) are all ancestors
+    of `origin/main`, i.e. legitimately pushed. `seed` is the only outlier.
+  - *Not data loss* — the deletion never reached the remote and the files are
+    still on disk.
+- **Leading hypothesis:** a scripted/experimental process (placeholder identity
+  `t <t@t>`, and it added a `seed.py`) was pointed at `~/workspace/devrc`
+  instead of a throwaway directory: it committed a wipe, then set `core.bare`
+  two minutes later.
+- **Next probe / remedy** — the commit is already preserved as a ref, so
+  nothing is at risk:
+  ```bash
+  # 1. it is preserved (done): branch preserve/seed-4b31471c-2026-08-21
+  # 2. un-break the checkout:
+  git -C ~/workspace/devrc config core.bare false
+  git -C ~/workspace/devrc status -sb          # must now work
+  # 3. drop the stray commit from main WITHOUT --hard (--keep refuses rather
+  #    than destroys, and the preserve/ ref keeps it reachable regardless):
+  git -C ~/workspace/devrc reset --keep origin/main
+  # 4. confirm and re-converge:
+  git -C ~/workspace/devrc rev-list --count origin/main..main   # want 0
+  ~/workspace/devrc/scripts/ship.sh
+  ```
+  🔴 Step 3 discards someone else's commit — **get a human decision first**.
+  Whatever ran this may still be running and may redo it.
+
+## Next steps (ranked)
+
+1. **Fix the base clone** (above). Until then `ship.sh` is dead on the
+   workbench and it will silently stop receiving every future change — the
+   exact failure `CLAUDE.md` → "Git discipline" describes.
+2. **Find what wrote `seed`** before assuming it is one-off. `seed.py` at the
+   repo root of that commit is the lead: `git show 4b31471c:seed.py`.
+3. **`.md` captured-text gate** — design call, not a one-liner. Hostnames and
+   public IPs are ALREADY covered (`test_no_client_hostnames.py` /
+   `test_no_public_ips.py` enumerate `git ls-files` with no extension filter —
+   that is why #619's client subdomain was caught inside a `.md`). The real gap
+   is message bodies / prompts / transcripts in `.md`, where `claudedocs/`
+   handoffs live. `.md` is mostly legitimate prose, so the false-positive rate
+   is the whole question.
+4. **Rule 1c subtree resolution** — three options in #621. `browser` and
+   `dl-router` deploy from `scripts/`, so 6,337 lines sit outside
+   `test_doc_path_rot.py`'s `CORPUS_DIRS`. Extending it found exactly one real
+   rot (fixed); the other 47 hits are the deliberate bare-`reference/`
+   convention, 28 in a byte-ceilinged SKILL.md, and the gate explicitly refuses
+   the baseline shortcut.
+
+## Gotchas / decisions / dead-ends
+
+- 🔴 **A guard over the machine-readable half leaves the prose beside it
+  ungated.** This thread hit it three times: `OP-SET PARITY` parsed the op
+  LISTS and never the sentences (three said "11 ops" for months, one 75 lines
+  below the constant listing 13); the rail ledger pinned headlines and not
+  bodies; the template fence was pinned by one line only. Fixed by deriving
+  the prose figure from the constant and by pinning whole normalised blocks.
+- 🔴 **`browser agent` cannot read files** — 13-op browser-only surface, with
+  `bash`/`read`/`edit`/`write`/`webfetch` denied by a fail-closed gate. A
+  prompt that CITES a filesystem path reaches it with ZERO rails while reading
+  complete. That is why the contract leads with a capability split and carries
+  an inlineable block.
+- **`--instance` is a CLI flag, not a prompt slot** — the wrapper forces the
+  tab via env before the model runs. Two profiles connected + no flag ⇒
+  `failed to open a tab` before a single model token is spent.
+- **`steps_used` undercounts**: 5 reported against 9 real op calls, in BOTH
+  live runs. Read `tool-audit.jsonl`.
+- 🔴 **Three harness self-deceptions, all caught only by reading content:**
+  a mutation battery scored SURVIVED when pytest had ERRORED at collection;
+  a `sed` mutant that never applied was nearly recorded as a kill; and pytest
+  TRUNCATED an assertion repr so a 47-hit result read as 6. Classify only from
+  a parseable `N passed`/`N failed`, and confirm a mutant is present before
+  believing its verdict.
+- **Two-dot vs three-dot diff**: `git diff origin/main..HEAD` shows commits
+  that landed on main after your branch point and reads as if they were yours.
+  Use `origin/main...HEAD`.
+- **A gate run overlapping a `home-manager switch` fails spuriously** — the
+  intermediate profile generation drops every `home.packages` binary for ~1s
+  (`bash: /home/zach/.nix-profile/bin/git: No such file or directory`).
+  Correlate against `~/.local/state/nix/profiles/profile-*-link` mtimes.
+
+## How to verify
+
+```bash
+# the contract is deployed and its route resolves (workbench + laptop)
+readlink -f ~/.claude/skills/browser/SKILL.md          # -> repo path, live on pull
+grep -c 'reference/validation-prompt.md' ~/.claude/skills/browser/SKILL.md   # 1
+wc -c ~/workspace/devrc/scripts/browser-bridge/reference/validation-prompt.md
+
+# its guards
+nix-shell -p python3Packages.pytest --run \
+  "python3 -m pytest ~/workspace/devrc/scripts/browser-bridge/tests/test_validation_prompt.py -q"
+
+# the prose op-count gate added in #617
+node ~/workspace/devrc/scripts/browser-bridge/tests/browser_tool.test.mjs 2>&1 | grep "PROSE op COUNT"
+
+# the base-clone incident (expect FAILURE until fixed)
+git -C ~/workspace/devrc status -sb
+```

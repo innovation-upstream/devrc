@@ -1,6 +1,6 @@
 ---
 name: signal
-description: "Query and operate the self-hosted Signal chat pipeline (Zach's phone -> signal-cli-rest-api -> homelab Postgres `signal` schema + MinIO attachments), and DRAFT outbound replies for clawgate approval. Use for: my Signal messages, signal chat, who messaged me on Signal, search my Signal history, Signal conversations/groups/reactions/attachments, the signal-consumer or signal-api pod, \"draft a Signal reply\", \"text someone on Signal\". Email and the mail inbox are the sibling `mailbox` skill, not this one."
+description: "Query and operate the self-hosted Signal chat pipeline (phone -> signal-cli-rest-api -> homelab Postgres + MinIO attachments), and DRAFT outbound replies for clawgate approval. Use for: my Signal messages, signal chat, who messaged me on Signal, search my Signal history, Signal conversations/groups/reactions/attachments, the signal-consumer or signal-api pod, \"draft a Signal reply\", \"text someone on Signal\". Email and the mail inbox are the sibling `mailbox` skill, not this one."
 ---
 
 # Signal chat operations
@@ -59,6 +59,9 @@ cd ~/workspace/devrc/scripts/signal
 python3 consumer.py conversations --limit 10
 python3 consumer.py search "harbour permit"
 python3 consumer.py draft --to +15550100 --body "on my way"   # -> pending + a clawgate card
+
+# draft to a GROUP: --to takes the `id` field (group.<double-base64>), NOT internal_id
+python3 consumer.py draft --to 'group.<double-base64>' --body "on my way"
 python3 consumer.py drafts --state pending
 python3 consumer.py approve 42 --ref clawgate-task-91
 python3 consumer.py send 42
@@ -76,9 +79,13 @@ holds the mute list; **the rows are still there** — muting hides, it never del
 `unmute` restores a conversation exactly. That is why it is the default: this pipeline is
 forward-only, so a deleted message can never be re-fetched.
 
-🔴 **It is keyed on the group's BINARY id, never the name** — `signal.groups.name` is
-empty (`''`) for every group this consumer has stored, so a name-based filter would match
-nothing while looking like it worked.
+🔴 **It is keyed on the group's BINARY id, never the name.** `signal.excluded_groups` has
+one column to match on and it is `group_id BYTEA`, so a name-based filter matches nothing
+while looking like it worked. (An earlier version of this line justified that with "`name`
+is `''` for every group this consumer has stored" — **that is wrong**: `upsert_group()`
+persists the `groupName` an envelope carries, `Vetr app group` and `Family Winnipeg` are
+both populated in the live store, and `test_a_stored_group_keeps_the_name_the_envelope_carried`
+pins it. The advice is unchanged; only its reason was false.)
 
 ```bash
 python3 consumer.py muted
@@ -86,17 +93,86 @@ python3 consumer.py mute <internal_id> --note "why"     # base64, from the API b
 python3 consumer.py unmute <internal_id>
 ```
 
-Get `internal_id` (base64) — the pipeline does not store group names, so this is the only
-way to go from a name you recognise to the id the mute list wants:
+Get `internal_id` (base64). `signal.groups.name` may already hold the name (see above), but
+it is only as good as the envelope that last carried one, so the API is the reliable way to
+go from a name you recognise to the id the mute list wants:
 ```bash
 kubectl -n signal exec deploy/signal-consumer -- python3 -c "
 import os,json,urllib.request
 api=os.environ['SIGNAL_API_URL'].rstrip('/'); acct=os.environ['SIGNAL_ACCOUNT']
 for g in json.load(urllib.request.urlopen(api+'/v1/groups/'+acct,timeout=20)):
-    print(g['internal_id'], repr(g['name']))"
+    print(g['internal_id'], repr(g['name']), g['id'])"
 ```
-Pass `internal_id`, **not** `id` — `id` is the same value wrapped in a `group.`-prefixed
-second encoding, and `mute` refuses it rather than muting 32 bytes that match nothing.
+
+### 🔴 `internal_id` vs `id` — the two commands want OPPOSITE halves of one value
+
+The API hands back the same 32 bytes twice, in two encodings, and **which one you need
+depends on the command**. Getting this backwards is silent in one direction and loud in
+the other, so read the table rather than guessing:
+
+| command | wants | shape | wrong one does what |
+|---|---|---|---|
+| `mute` / `unmute` | `internal_id` | bare base64, e.g. `zX3i…2IQ=` | **refuses** — `mute` will not mute 32 bytes that match nothing |
+| `draft --to` | `id` | `group.` + base64(base64(raw)) | **refuses**, naming the `id` you should have passed |
+
+`id` is `internal_id` wrapped in a `group.`-prefixed **second** base64 encoding. That is
+the literal string `/v2/send` addresses a group with, which is why `draft` takes it and
+`mute` — which writes a `BYTEA` key into `signal.excluded_groups` — does not.
+
+Both directions refuse, so crossing them is loud either way. That was **not** true until
+2026-08-22: `draft --to <bare internal_id>` used to be **accepted**, creating a phantom
+contact whose phone number was the group id, storing the message with `group_id` NULL and
+exiting 0 — a row no mute can ever see. It is now refused, and the refusal prints the
+`id` you should have passed.
+
+⚠️ **The `draft` refusal only catches a MALFORMED address, never a WRONG one.** Any
+canonically-encoded 32 bytes decodes perfectly, so a well-formed id for a group that does
+not exist is created on the spot and the message sends into a conversation nobody is in.
+`draft` therefore prints a **`WARNING: … matched NO stored group`** on stderr whenever it
+mints a group — that warning is the only signal you get, so do not ignore it. (It is a
+warning and not a refusal on purpose: a group can legitimately be drafted to before its
+first message has been ingested, because the pipeline is forward-only.)
+
+⚠️ **Group-draft linkage is NEW-ROWS-ONLY — old drafts are still unlinked, and a mute does
+not hide them.** Until 2026-08-21 `draft_message()` stored a group draft with
+`messages.group_id = NULL` and invented a phantom contact whose `phone_number` was the
+group address. `not_excluded()` keys on `group_id`, so **those rows walk straight through
+every mute.** Nothing repairs them automatically: `upsert_message`'s `ON CONFLICT` never
+sets `group_id`, so not even a device-sync echo can backfill one.
+
+Measured live scope: **1 contact and 1 message** (`signal.contacts` id 92,
+`signal.messages` id 51). A reviewed backfill is queued separately — it is **not** part of
+the code change and there is no migration. To check whether any remain:
+
+🔴 **A phantom can wear either encoding, so do not filter on `'group.%'` alone.** The
+`group.`-prefixed form came from drafting with the `id`; the *bare base64* form came from
+drafting with the `internal_id`, which was accepted until 2026-08-22. A `LIKE 'group.%'`
+predicate is blind to the second, and would report a clean 0 while the rows sit there.
+
+```bash
+# every phantom, BOTH encodings: a group-address contact, or one whose "phone number"
+# is 24/44 chars of canonical base64 (a bare internal_id) rather than +E164 or a uuid.
+# `_-` is in the class because `_decode_internal_id` folds the URL-safe alphabet before
+# decoding (consumer.py), so a phantom could wear that spelling too. `-` is LAST in the
+# bracket so POSIX reads it as a literal, not a range.
+psql -c "select id, phone_number from signal.contacts
+         where phone_number like 'group.%'
+            or phone_number ~ '^[A-Za-z0-9+/_-]{22}==$'
+            or phone_number ~ '^[A-Za-z0-9+/_-]{43}=$'"
+
+# the drafts stranded against them — unlinked, and beyond every mute
+psql -c "select count(*) from signal.messages
+         where is_outbound and send_state is not null and group_id is null
+           and dest_contact_id in (
+             select id from signal.contacts
+             where phone_number like 'group.%'
+                or phone_number ~ '^[A-Za-z0-9+/_-]{22}==$'
+                or phone_number ~ '^[A-Za-z0-9+/_-]{43}=$')"
+```
+
+The first should return no rows and the second `0` once the backfill has run. Measured 2026-08-21, only the
+`group.`-prefixed shape existed in prod (1 contact, 1 message) — the bare-base64 shape was
+reachable but had never been used, which is why the backfill covers one row and not two.
 
 🔴 **The filter lives in `SignalDB`'s read methods, so RAW `psql` BYPASSES IT COMPLETELY** —
 an application predicate cannot bind a statement typed at a shell. So the body-printing
@@ -165,6 +241,44 @@ operator token as `approve`):
 
 `--sent` refuses a missing or unusable timestamp rather than guessing, and
 `reconcile` refuses any draft that is not `sending` — it is not a state editor.
+
+🔴 **The timestamp is recoverable WITHOUT reading the phone — but only for 24 HOURS.**
+`signal-cli` keeps its own resend cache, `message_send_log_content`, in the account
+SQLite store inside the `signal-api` pod, and it records the minted server timestamp
+**plus the destination group's binary id**:
+
+```bash
+POD=$(kubectl -n signal get pods -l app=signal-api -o name | head -1 | cut -d/ -f2)
+kubectl -n signal exec "$POD" -- python3 -c "
+import sqlite3, base64, datetime
+c = sqlite3.connect('file:/home/.local/share/signal-cli/data/<acct>.d/account.db?mode=ro', uri=True)
+for _id, ts, gid, n in c.execute(
+        'select _id, timestamp, group_id, length(content) from message_send_log_content order by timestamp'):
+    print(_id, ts, datetime.datetime.fromtimestamp(ts/1000, datetime.UTC).isoformat(),
+          base64.b64encode(gid).decode() if gid else '(DM)', n)"
+```
+
+Rows line up 1:1 with the POSTs in the signal-api access log, so a send's row is
+identifiable by time, size and — for a group — the group id, which you can cross-check
+against `signal.groups` and against the draft's own stored `recipient`.
+
+⚠ **Retention is exactly one day**, not approximately: `LOG_DURATION = Duration.ofDays(1)`
+in `MessageSendLogStore.java`, swept by an `msl-cleanup` daemon thread every hour and
+opportunistically on every send and every retry lookup (read at tag `v0.14.7`). **So
+reconcile a stranded send the SAME DAY or the timestamp is gone for real.** It is not an
+archive — it exists to answer retry receipts when a recipient cannot decrypt (routine
+with sealed sender and sender-key group fan-out), which is also why it holds sendable
+content and therefore cannot be kept.
+
+🔴 **Confirm the row is YOUR send before storing it.** Storing another message's timestamp
+breaks sync-echo dedupe and files the message twice under two identities. A blind audit
+once attributed the wrong row to a draft — a note-to-self probe five minutes later —
+and it survived into a PR comment before an epoch decode caught it. Cross-check at least
+two of: the group id, the byte length, and the access-log time. Anchoring on a value you
+have already ruled out is a free positive control that the table is being read correctly.
+
+If the timestamp genuinely cannot be established, **leave the draft in `sending`** — it is
+inert and cannot resend itself. Guessing is the one thing that is not safe.
 
 ## Event kinds the consumer emits
 

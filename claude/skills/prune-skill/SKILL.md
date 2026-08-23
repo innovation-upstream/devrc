@@ -1,6 +1,6 @@
 ---
 name: prune-skill
-description: "Audit and aggressively shrink a bloated SKILL.md body so it stops displacing the task it was loaded for. Runs scripts/skill-audit.py, demotes detail to reference/, evicts dated history, rewrites atomically, re-measures. Use when asked to prune/shrink/trim a skill, when a skill body is huge, or when its reference paths have rotted."
+description: "Audit and aggressively shrink a bloated SKILL.md body so it stops displacing the task it was loaded for — demotes detail to reference/, evicts dated history, re-measures. Use when asked to prune/shrink/trim a skill, when a skill body is huge, or when its reference paths have rotted."
 argument-hint: "[SKILL_DIR | path/to/SKILL.md] — optional; defaults to $PWD/.claude/skills"
 allowed-tools: Bash, Read, Write, Edit, Grep, Glob, Agent
 ---

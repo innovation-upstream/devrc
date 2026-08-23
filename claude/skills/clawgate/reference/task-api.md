@@ -244,7 +244,17 @@ silently.** (4 is exempt — it reads clawgate's own secret rather than holding 
    dismissed ticket being resurrected — **it deliberately does NOT dedupe by tag**, so tasks created
    outside that ledger get duplicated on the next run. Reads `CLAWGATE_HOOK_TOKEN` from clawgate's
    **own `clawgate-secrets`** (same namespace, never copied — hence exempt from the rotation
-   coupling above). As of 2026-08-19 it ships **suspended**, dry-run, with write-back disabled.
+   coupling above). 🔴 **RE-MEASURED against the live cluster 2026-08-21: it is ON.** CronJob
+   `suspend: false` (hourly at `:17`, last run succeeded), env `CLICKUP_MIRROR_MODE=commit`, and the
+   ConfigMap's `writeback.enabled: true` — so phase 2 EXECUTES and **ClickUp may ALREADY have been
+   told** about a task you are looking at; only `writeback.allow_terminal_status` is still shut, so
+   it will not close a ticket. The older claim here — "as of 2026-08-19 it ships suspended, dry-run,
+   with write-back disabled" — was true the day it was written and is now WRONG; do not re-derive
+   it. ⚠ This is another repo's **deployment** state, which no devrc test can pin, so **verify
+   before acting on it**: `kubectl -n clawgate get cronjob clickup-mirror -o
+   jsonpath='{.spec.suspend}'`, the container's `CLICKUP_MIRROR_MODE`, and the `writeback` block of
+   `cm/clickup-mirror-config`. The four-gate ledger is kept in
+   `<homelab-talos>/clusters/workbench/apps/clickup-mirror/README.md`.
 
 ## Auth / access (0.7.37 — clawgate has NO human auth of its own)
 No magic-link `/login?token=`, no session cookie, no `CLAWGATE_AUTH_TOKEN` /
@@ -324,6 +334,37 @@ directly above: a count re-derived against a live pin decays the moment the next
 **re-derive it rather than quoting it**. Count the golden with
 `grep -vc '^#' routes.golden` (the file's first three lines are comments) and subtract anything
 committed after the live pin.
+
+### Task ↔ session threads (#357, 0.7.98) — the direction that EXISTS, and the one that does not
+
+The `task_sessions` table records which Claude Code sessions touched a task, with a role of
+`created` / `worked` / `read`, and `/ui/tasks` renders a `👥 N session(s)` chip with a deep link.
+🔴 **The link is written by the SERVER as a side effect of the request; there is no producer API for
+it,** and the query is asymmetric:
+
+| direction | surface | state |
+|---|---|---|
+| session → tasks | `GET /api/sessions/{id}/tasks` | ✅ callable (hook token), pinned in the golden |
+| task → sessions | *(none)* | 🔴 **no route.** `GET /api/tasks/{id}/sessions` returns **404** and appears nowhere in `routes.golden` |
+| either direction | `clawgatectl` | 🔴 **no subcommand** — not under `task`, not top-level |
+
+So *"which sessions worked task N"* — the question the feature was built to answer — is today
+answerable **only by reading `/ui/tasks`**. A machine consumer can ask the reverse question only.
+
+🔴 **Membership OVER-reports, and a role NEVER downgrades.** Two measured causes, both live:
+- a **400-rejected** `PATCH` still records the session as having `worked` the task: `noteTaskSession`
+  (defined in `internal/api/task_sessions.go`, called from the PATCH handler in
+  `internal/api/notes.go`) runs **before** the body/tag validation that rejects the request —
+  verified on trunk, the call precedes both `StatusBadRequest` returns in that handler. Card #306
+  carries three fix options;
+- a **subagent inherits the parent's `CLAUDE_CODE_SESSION_ID`**, so a subagent merely *reading* a
+  task links the **parent** session to work it never did.
+
+⚠ **No FK to `cc_sessions`, deliberately** — that table is swept at 14 days, and a cascading FK would
+silently empty every thread, making a task that HAD five sessions render identically to one that
+never had any. Link rows denormalise `project` / `cwd` / `host`; expect most rows to have no live
+detail link once their session is reaped. The cap is **advisory** and must never fail a request:
+evict oldest `read`, never `created`/`worked`; if nothing is evictable, skip and count.
 
 🔴 **The golden records PATTERNS ONLY — it is BLIND to auth.** By the time a handler reaches the
 mux it is already wrapped, so `requireHookToken(h)` and `requireSession(h)` are the same type and

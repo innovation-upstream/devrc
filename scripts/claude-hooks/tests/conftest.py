@@ -230,3 +230,51 @@ class _SystemExitIsACollectError(pytest.Module):
                 "'no tests ran' because that pair was indistinguishable from a "
                 "clean zero."
             ) from exc
+
+
+# --- GUARD 9: the repository the suite RUNS FROM ----------------------------- #
+# 🔴 THE SECOND ENTRY POINT, and it belongs in EVERY test directory a bare
+# `pytest <dir>` can be pointed at. `scripts/run-tests.sh` loads the same module
+# with `-p testlib.gitenv_plugin` for every target, so this changes nothing
+# under the runner; it is what protects a hand-run `pytest`. #683's audit found
+# exactly ONE of seven conftests wired, and not the one `gitenv_plugin`'s own
+# rationale cites (`test_bash_guard.py::_mkrepo` and `test_guard_core.py`'s
+# module-scoped repos, which run during COLLECTION).
+# `test_git_repo_isolation.py::test_the_conftest_entry_points_are_a_pinned_ledger`
+# fails when a conftest under `scripts/` is added or removed, so the next one
+# cannot be forgotten — that is the "asserted ledger of every caller" shape
+# claude/RULES.md asks for, rather than a single pinned example.
+import sys as _guard9_sys  # noqa: E402
+from pathlib import Path as _Guard9Path  # noqa: E402
+
+for _guard9_parent in _Guard9Path(__file__).resolve().parents:
+    if (_guard9_parent / "testlib" / "gitenv_plugin.py").is_file():
+        if str(_guard9_parent) not in _guard9_sys.path:
+            _guard9_sys.path.insert(0, str(_guard9_parent))
+        break
+
+# 🔴 THIS FILE IS DELIBERATELY COPIED OUT OF THE TREE.
+# `scripts/tests/test_hook_tests_dir_collects.py` `shutil.copy`s it into a tmp
+# dir, and a copy has no `scripts/` above it — the loop above finds nothing, so
+# the import below depends entirely on the copying harness putting `scripts/` on
+# PYTHONPATH. It does; this error exists so that if it ever stops, the failure
+# names the cause instead of reading as a broken repo. Same lesson as #683's
+# `runner_patch.py` finding: a copy cannot reach a sibling it was not copied
+# with. Do NOT "fix" this by deleting the import — that silently drops GUARD 9
+# for a bare `pytest scripts/claude-hooks/tests/...`.
+try:
+    from testlib.gitenv_plugin import (  # noqa: E402,F401
+        _devrc_git_repo_isolation,
+        pytest_collection_finish,
+        pytest_configure,
+        pytest_runtest_logstart,
+        pytest_sessionfinish,
+    )
+except ModuleNotFoundError as _guard9_exc:  # pragma: no cover - harness-only path
+    raise RuntimeError(
+        "GUARD 9's second entry point cannot import `testlib.gitenv_plugin` from "
+        f"{__file__}. In the real tree it is found by walking up to `scripts/`; "
+        "this looks like a COPY of the conftest, whose harness must export "
+        "PYTHONPATH=<repo>/scripts (see `_pytest` in "
+        "scripts/tests/test_hook_tests_dir_collects.py)."
+    ) from _guard9_exc

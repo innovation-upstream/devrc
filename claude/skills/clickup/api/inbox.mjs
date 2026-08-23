@@ -71,6 +71,105 @@ export async function fetchInboxNotifications(options = {}) {
 }
 
 /**
+ * The pagination cursor for the NEXT page of an inbox search, or null when the
+ * response says there is none.
+ *
+ * ⚠️ The request nests the cursor under `pagination.nextCursor`, and the
+ * response is assumed to answer in the same shape (or flat). That assumption is
+ * UNVERIFIED against the live API: every `inbox-*` command needs a JWT this
+ * host's accounts.json does not have, so no response body could be observed
+ * while writing this. It is written to read several plausible locations and to
+ * STOP rather than loop when it finds none — a missed cursor costs a page, a
+ * wrong-shaped guess that never terminates costs the command.
+ */
+export function nextInboxCursor(response) {
+  const candidates = [
+    response?.pagination?.nextCursor,
+    response?.nextCursor,
+    response?.data?.pagination?.nextCursor,
+    response?.data?.nextCursor,
+  ];
+  for (const c of candidates) {
+    if (c !== undefined && c !== null && c !== '') return String(c);
+  }
+  return null;
+}
+
+/** Bundles carried by one inbox search response. */
+export function bundlesOf(response) {
+  return response?.notificationBundleGroups?.flatMap((g) => g.notificationBundles || []) || [];
+}
+
+/**
+ * Merge consecutive inbox search pages into one response-shaped object.
+ * Resources are de-duplicated by `entityResourceName` (the key the formatter
+ * looks them up by); groups are concatenated in page order.
+ */
+export function mergeInboxPages(pages) {
+  const resources = [];
+  const seenResources = new Set();
+  const groups = [];
+  const users = {};
+
+  for (const page of pages) {
+    for (const r of page?.resources || []) {
+      const key = r?.entityResourceName ?? JSON.stringify(r);
+      if (seenResources.has(key)) continue;
+      seenResources.add(key);
+      resources.push(r);
+    }
+    for (const g of page?.notificationBundleGroups || []) groups.push(g);
+    Object.assign(users, page?.users || {});
+  }
+
+  return {
+    resources,
+    notificationBundleGroups: groups,
+    users,
+    pagesFetched: pages.length,
+  };
+}
+
+/**
+ * Fetch EVERY page of inbox notifications, following the cursor.
+ *
+ * 🔴 A single-page read is the bug `reference/raw-api.md` is about: it returns a
+ * number that looks like an answer. `inbox` read one page of 20 and
+ * `inbox-clear-all` one page of 140, so a deeper queue was silently truncated
+ * and "cleared all" cleared a prefix.
+ *
+ * @param {object} options - as fetchInboxNotifications, plus:
+ * @param {number} options.maxPages - safety bound on the loop (default 25)
+ * @param {function} options.fetchPage - injected transport. Every inbox
+ *        endpoint needs a JWT this host does not have, so the cursor loop is
+ *        only testable through a seam; this is it.
+ * @returns {Promise<object>} merged response, plus `pagesFetched` / `truncated`
+ */
+export async function fetchAllInboxNotifications(options = {}) {
+  const { maxPages = 25, fetchPage = fetchInboxNotifications, ...rest } = options;
+  const pages = [];
+  const seenCursors = new Set();
+  let cursor = rest.cursor || '';
+  let truncated = false;
+
+  for (let page = 0; page < maxPages; page++) {
+    const response = await fetchPage({ ...rest, cursor });
+    pages.push(response);
+
+    const next = nextInboxCursor(response);
+    // No cursor, an empty page, or a cursor the server already handed us: stop.
+    // The repeat check is what keeps a misread cursor shape from spinning.
+    if (!next || bundlesOf(response).length === 0 || seenCursors.has(next)) break;
+    seenCursors.add(next);
+    cursor = next;
+
+    if (page === maxPages - 1) truncated = true;
+  }
+
+  return { ...mergeInboxPages(pages), truncated, maxPages };
+}
+
+/**
  * Get inbox badge counts
  * @returns {Promise<{ messagesCount, activityCount, reminderCount, savedCount, lastUpdatedAt }>}
  */
@@ -122,11 +221,16 @@ export async function markInboxBundleRead(bundleId) {
 /**
  * Clear all uncleared bundles for a given tab
  * @param {'messages'|'activity'} bundleType
- * @returns {Promise<{ total: number, cleared: number, failed: number }>}
+ * @returns {Promise<{ total: number, cleared: number, failed: number,
+ *                     pagesFetched: number, truncated: boolean }>}
+ *          `total` is what was FOUND across every page read; `truncated` says
+ *          the page bound stopped the read, so bundles remain uncleared.
  */
 export async function clearAllInboxBundles(bundleType = 'messages') {
-  const data = await fetchInboxNotifications({ bundleType, status: 'uncleared', limit: 140 });
-  const bundles = data.notificationBundleGroups?.flatMap(g => g.notificationBundles) || [];
+  // Cursor-following: a single 140-item page made "clear all" mean "clear the
+  // first 140", with no sign that anything was left behind.
+  const data = await fetchAllInboxNotifications({ bundleType, status: 'uncleared', limit: 140 });
+  const bundles = bundlesOf(data);
 
   let cleared = 0;
   let failed = 0;
@@ -139,7 +243,13 @@ export async function clearAllInboxBundles(bundleType = 'messages') {
     }
   }
 
-  return { total: bundles.length, cleared, failed };
+  return {
+    total: bundles.length,
+    cleared,
+    failed,
+    pagesFetched: data.pagesFetched,
+    truncated: data.truncated,
+  };
 }
 
 // ============================================================================
@@ -183,7 +293,7 @@ function parseAuthor(author) {
  * @returns {string} - Formatted output
  */
 export function formatInboxNotifications(data, userMap = {}) {
-  const bundles = data.notificationBundleGroups?.flatMap(g => g.notificationBundles) || [];
+  const bundles = bundlesOf(data);
   const resourceMap = new Map((data.resources || []).map(r => [r.entityResourceName, r]));
   // Also map by root entity resource name for name lookups
   const rootMap = new Map();
@@ -244,7 +354,16 @@ export function formatInboxNotifications(data, userMap = {}) {
     lines.push('');
   }
 
-  lines.push(`Total: ${bundles.length} notification bundle(s)`);
+  // Say how much was READ, not just how much matched: a total from a
+  // single-page read is a number that looks like an answer.
+  const pages = data.pagesFetched ? ` over ${data.pagesFetched} page(s)` : '';
+  lines.push(`Total: ${bundles.length} notification bundle(s)${pages}`);
+  if (data.truncated) {
+    lines.push(
+      `🔴 TRUNCATED: stopped at the ${data.maxPages}-page safety bound — there are more ` +
+        `notifications than this listing shows.`
+    );
+  }
   return lines.join('\n');
 }
 

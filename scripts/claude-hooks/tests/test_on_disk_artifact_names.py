@@ -529,6 +529,18 @@ OWNS_NO_ON_DISK_STATE = {
                                  # a per-session "already asked" counter would let a
                                  # second create in the same turn through unchecked.
     "bash-guard.py",             # thin wrapper over guard_core.py
+    "bg-command-capture.py",     # delegates every path to lib/bg_command_capture.py,
+                                 # exactly as agent-ledger-hook.py does. Its names
+                                 # ARE pinned — as whole relative paths, in the same
+                                 # form as this file — by
+                                 # tests/test_bg_command_capture.py::
+                                 # test_the_on_disk_artifact_names_are_pinned_as_whole_paths.
+                                 # 🔴 Its state root is `.local/state`, which
+                                 # CACHE_LITERAL below does not match: the
+                                 # corroboration scan is blind to it by construction,
+                                 # which is precisely the blind spot that test's own
+                                 # docstring names. The enumeration, not the scan, is
+                                 # what covers this entry.
     "guard_core.py",             # pure predicate library
     "register-nudge-hook.py",    # writes ~/.claude/settings.json; the deployed-path
                                  # seam is pinned by test_registrar_activation.py

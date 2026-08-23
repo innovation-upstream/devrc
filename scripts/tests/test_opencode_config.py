@@ -37,7 +37,9 @@ WHAT IS UNDER TEST (see scripts/opencode/README.md for the measurements):
      fully green** — 17 of them real holes where a realistic command dropped to
      plain `allow` at BOTH layers (`*git*commit*`, `*kubectl*drain*`,
      `*helm*upgrade*`, all four mutating `systemctl` verbs, the anchored
-     `sudo*`, `*rm*-r*`, …). The aggregate `len(asks) >= 40` floor could not see
+     `sudo*`, `*rm*-r*` (the recursive-`rm` rule, spelled infix at that ref and
+     narrowed to `*rm -r*` + `*rm --recursive*` on 2026-08-22), …). The
+     aggregate `len(asks) >= 40` floor could not see
      it: deleting exactly ten ask rules left exactly 40 and reported
      480 passed, 0 failed while ten dangerous families ran unprompted.
      `test_every_ask_rule_is_individually_pinned` and its deny twin turn that
@@ -531,6 +533,11 @@ MUST_ASK = [
     "FOO=1 sops -d s.enc.yaml",
     "sops exec-env s.enc.yaml env",
     "age -d -i k f",
+    # Pinned in its own right since the 2026-08-21 narrowing: with no `*`
+    # between "age" and the flag, this no longer contains the literal
+    # "age -d", so `"*age -d*"` does NOT cover it and the redundancy
+    # ledger entry that used to claim it did was removed.
+    "age --decrypt -i k f",
     "home-manager switch",
     "nixos-rebuild switch",
     "nix profile remove x",
@@ -607,13 +614,18 @@ MUST_ASK = [
     # check_rm_rf_critical deliberately does NOT fire here (its fatal-target set
     # is `/`, `~`/`$HOME`, `.`/`..` and the top-level system dirs only — see
     # test_guard_core_catches_recursive_rm_without_the_force_flag below), so
-    # this glob is the only thing gating these two SPELLINGS.
-    # 🔴 NOT the family: the glob is spelled, and `-R`, `-Rf` and `-fr` all
-    # resolve ALLOW today. That live gap is pinned, deliberately, by
+    # these globs are the only thing gating these two SPELLINGS.
+    # 🔴 TWO ROWS, TWO RULES, NEITHER REDUNDANT. Since the 2026-08-22 narrowing
+    # of `*rm*-r*` to `*rm -r*`, the long spelling is held by its OWN rule:
+    # "rm --recursive" does not contain the literal "rm -r", so each row below
+    # is the sole decider for exactly one rule.
+    # 🔴 NOT the family: the globs are spelled, so `-R`, `-Rf`, `-fr` AND any
+    # flag placed before `-r` (`rm -f -r <path>`) all resolve ALLOW today. That
+    # live gap is pinned, deliberately, by
     # test_rm_glob_misses_these_recursive_spellings below — do not read this
     # pair as "recursive delete is covered".
-    "rm -r /repo/build",                                         # *rm*-r*
-    "rm --recursive /repo/node_modules",                         # *rm*-r*
+    "rm -r /repo/build",                                         # *rm -r*
+    "rm --recursive /repo/node_modules",                         # *rm --recursive*
     # A leading `dd` with neither an `if=` nor an `of=` operand — the one shape
     # the operand-scoped `*dd if=*`/`*dd of=*` rules structurally cannot see.
     # Stated honestly: this spelling is the least dangerous of the dd family
@@ -626,7 +638,8 @@ MUST_ASK = [
     # load-bearing for a real spelling; each went ask -> allow at BOTH layers
     # with its rule deleted. See REDUNDANTLY_COVERED_ASKS' header.
     #
-    # `*age*-d*` rescues only the spellings containing a literal `-d`, so the
+    # `*age -d*` rescues only the spellings CONTAINING the literal "age -d"
+    # ("nix-collect-gar(BAGE) -d", with or without a trailing flag), so the
     # commonest GC invocations were the ones left unguarded.
     "nix-collect-garbage",                                       # *nix-collect-garbage*
     "nix-collect-garbage --max-freed 1G",                        # *nix-collect-garbage*
@@ -688,7 +701,11 @@ MUST_ASK = [
 # rule's, which is a different and much larger piece of work.
 REDUNDANTLY_COVERED_ASKS = {
     "*sops*--decrypt*": ("*sops*-d*", "sops --decrypt s.enc.yaml"),
-    "*age*--decrypt*": ("*age*-d*", "age --decrypt -i k f"),
+    # `"*age --decrypt*"` was listed here as covered by `"*age*-d*"`. That
+    # stopped being true when the age globs were narrowed on 2026-08-21: with
+    # no `*` between "age" and the flag, "age --decrypt …" no longer contains
+    # the literal "age -d", so the two rules now cover disjoint spellings and
+    # neither is redundant. Both are pinned individually in MUST_ASK.
     "*systemctl*restart*": ("*systemctl*start*", "systemctl restart foo"),
 }
 
@@ -725,6 +742,11 @@ GUARD_BACKSTOPPED_DENIES = {
 
 # Read-only, high-frequency. If these start prompting, the operator is trained
 # to click through — which is how the prompts that matter stop working.
+# 🔴 "Read-only" is the CONTRACT, not a proven property of every row: the
+# `terraform plan` row below is deliberately admitted with a documented caveat
+# (it takes a state lock). Read that comment before adding a row — an unflagged
+# non-read-only entry makes this header a false claim, which is the defect class
+# this file exists to catch.
 MUST_ALLOW = [
     "ls -la",
     "kubectl get pods -A",
@@ -738,6 +760,39 @@ MUST_ALLOW = [
     "rg foo",
     "flux get kustomizations -A",
     "kubectl rollout restart deploy/x",
+    # 🔴 REGRESSION, measured 2026-08-21. `"*age*-d*"` (the `age` decryption
+    # tool) had a `*` BETWEEN "age" and "-d", so it matched any command text
+    # containing "age" followed LATER by "-d". "age" is a substring of package,
+    # packages, image, message, storage, manage; "-d" covers -db-, --dir,
+    # --debug, --dry-run. Three ordinary read-only commands below therefore
+    # resolved ASK, which `opencode run` auto-rejects — killing the run
+    # mid-task. Two real dispatches died on exactly these, one on `grep` and
+    # one on `ls`. The fix is to drop that inner `*` so the glob requires the
+    # literal "age -d"; these three pin that it stays dropped.
+    "ls packages/civitai-db-schema/src/",
+    "grep -n REPLICATION_LAG_DELAY packages/civitai-db/src/lag.test.ts",
+    "rg 'storage' src/ --debug",
+    # 🔴 THE SAME REGRESSION, SAME CLASS, ONE DAY LATER — measured 2026-08-22.
+    # `"*rm*-r*"` had a `*` BETWEEN "rm" and "-r", so it matched any command text
+    # containing "rm" followed LATER by "-r". "rm" is a substring of format,
+    # terraform, firmware, confirm and platform; "-r" covers --reverse,
+    # --refresh, --reporter, --repo and --recursive. All three below resolved
+    # ASK on the primary agent before the narrowing — watched to fail — and
+    # `opencode run` auto-rejects an ask, so each one kills a run mid-task.
+    # The fix is `"*rm -r*"` (drop the inner `*`) plus a second rule
+    # `"*rm --recursive*"`, because the long spelling does not contain "rm -r".
+    # Third row deliberately mirrors `rg 'storage' src/ --debug` above: same
+    # binary, different substring pair. `rg --replace` rewrites only the OUTPUT,
+    # never a file, so this list stays honestly read-only.
+    # 🔴 Honest caveat on the `terraform` row, since this list's HEADER is itself
+    # a claim: `terraform plan` is read-only w.r.t. infrastructure, but it does
+    # take a STATE LOCK and can write a plan file with `-out`. It is pinned here
+    # because it is the measured witness from the narrowing, not because it is
+    # side-effect-free. If that ever matters, swap it for another token ending in
+    # a non-adjacent "rm" — the rule under test is the substring, not terraform.
+    "git log --format=oneline --reverse",
+    "terraform plan -refresh=false",
+    "rg 'formatBytes' src/ --replace ''",
 ]
 
 # Every agent that ships, plus the implicit primary. `None` == no agent block.
@@ -966,9 +1021,10 @@ def test_all_asks_precede_all_denies():
     """
     items = list(load_config()["permission"]["bash"].items())[1:]
     asks = [k for k, v in items if v == "ask"]
-    assert len(asks) == 51, (
-        f"{len(asks)} `ask` rules in the bash block, pinned at 51 (50 after the "
-        f"1fb8c2b restoration, +1 for `*sudoedit*`). This is `==`, not `>=`, on "
+    assert len(asks) == 52, (
+        f"{len(asks)} `ask` rules in the bash block, pinned at 52 (50 after the "
+        f"1fb8c2b restoration, +1 for `*sudoedit*`, +1 for `*rm --recursive*` "
+        f"when `*rm*-r*` was narrowed to `*rm -r*`). This is `==`, not `>=`, on "
         f"purpose — see the docstring: a one-sided floor lets the cushion regrow "
         f"silently until it is the same slack that let ten dangerous families be "
         f"deleted with the gate green.\n"
@@ -1432,7 +1488,8 @@ def test_guard_core_catches_recursive_rm_without_the_force_flag():
 
     The complement is the part that IS regression coverage, and it lives in
     MUST_ASK: an ordinary recursive delete (`rm -r /repo/build`) is deliberately
-    NOT in the guard's fatal-target set, so the `*rm*-r*` glob is its only gate.
+    NOT in the guard's fatal-target set, so the `*rm -r*` / `*rm --recursive*`
+    globs are its only gate.
     """
     for cmd in ["rm -r /", "rm --recursive /", "rm -R /", "rm -r $HOME",
                 "rm --recursive $HOME", "rm -r ~", "rm -r .", "rm -r /etc",
@@ -1453,23 +1510,80 @@ def test_rm_glob_misses_these_recursive_spellings():
       * guard_core's flag test is STRUCTURAL (`--recursive`, or any short bundle
         containing r/R), but its TARGET set is deliberately narrow — `/`, `~`,
         `.`/`..`, top-level system dirs — so an ordinary path never reaches it;
-      * the `"*rm*-r*"` glob covers any target but is SPELLED, and knows exactly
-        one flag spelling.
+      * the `"*rm -r*"` / `"*rm --recursive*"` globs cover any target but are
+        SPELLED, and know exactly two flag spellings, each with the flag
+        IMMEDIATELY after the binary.
     Their intersection is a recursive delete of a project directory written with
     `-R`, `-Rf` or `-fr`: ALLOW at both layers, no prompt.
 
+    🔴 THE LAST SIX ROWS ARE NEWLY OPEN, and they are the price of the
+    2026-08-22 narrowing. They fall in TWO classes, both of which `"*rm*-r*"`
+    used to hold:
+      * a flag placed BEFORE `-r`   — `rm -f -r <p>`, `rm -v -r <p>`,
+        `rm --force --recursive <p>`;
+      * flags placed AFTER the operand — `rm <p> -r`, `rm <p> -rf`,
+        `rm <p> --recursive`. GNU `rm` permutes options, so these really run.
+
+    The old glob matched "rm" followed LATER by "-r" anywhere in the text, which
+    covered both classes — at the cost of auto-rejecting `git log --format=…
+    --reverse`, `terraform plan -refresh=false` and other text where a
+    format/terraform/firmware/confirm/platform token PRECEDES a `-r` flag (see
+    the three MUST_ALLOW rows added with this change; the order matters —
+    `grep -r 'format' src/` was never matched, because there the "rm" comes
+    second).
+
+    Requiring the literal "rm -r" NARROWS that false-positive class — it does
+    not remove it. State the residual EXACTLY, because a loose paraphrase is
+    wrong in both directions: what survives is any text CONTAINING the literal
+    substring `"rm -r"` or `"rm --recursive"`. Both halves matter, and an earlier
+    draft of this docstring named only the first.
+      * via `"*rm -r*"`  — a token ending in "rm" directly before a `-r` flag:
+        `ls src/form -r`, `terraform -refresh=false plan`,
+        `./scripts/perform -r x`, `docker run --rm -r foo`   (all still `ask`)
+      * via `"*rm --recursive*"` — its own class, and NOT illustrated by any row
+        above: `pnpm --filter form --recursive build`,
+        `npm run build:form --recursive`, `terraform --recursive x`
+        (all still `ask` — real dead runs under `opencode run`)
+    Do NOT read it as "a token ending in rm before any recursive-ish flag": the
+    match is a literal substring, so `perform -R x` and `perform --recurse x`
+    resolve ALLOW. What goes away is the much larger non-adjacent class, which is
+    where every measured dead run came from.
+    This is the same trade, and the same shape of loss, as
+    `test_age_glob_misses_these_reordered_decrypt_spellings` records for `age`.
+
+    🔴 THE TARGET IS NOT RESTRICTED TO A BUILD DIRECTORY. The rows below use
+    `/repo/build` for readability, but the globs are target-blind: `rm -f -r
+    ~/.ssh` and `rm -f -r /etc/nixos` are ALLOW at both layers too. Before
+    reading that as this change's doing, note the counterfactual — `rm -fr
+    ~/.ssh`, `rm -Rf ~/.ssh` and `rm -R ~/.ssh` were ALREADY plain ALLOW on
+    `main`. Layer 1 does not protect `$HOME` from a recursive delete and never
+    did; this change WIDENS that hole rather than opening it. Closing it
+    properly is a guard_core change, per opencode.jsonc's own header.
+
     NOT closed here, deliberately. Widening the glob is whack-a-mole — `-R`
-    needs its own rule, then `-fR`, then `-vr`; and a candidate that looked like
-    it generalised (`"*rm*-*r*"`) matched `rm -R /repo/build` only because the
-    PATH contains an "r", so it fails on `rm -R /x`. The structural fix is to
-    widen guard_core's target set, which its own docstring records as an
-    operator decision needing a measurement of how often it would fire on real
-    sessions — not a change to smuggle into a test-coverage PR.
+    needs its own rule, then `-fR`, then `-vr`, then `-f -r`, and NONE of them
+    reaches the target-first class at all (`rm <p> -rf` has no "rm -" prefix to
+    match); and a candidate
+    that looked like it generalised (`"*rm*-*r*"`) matched `rm -R /repo/build`
+    only because the PATH contains an "r", so it fails on `rm -R /x`. Re-widening
+    to `"*rm*-r*"` closes six of these rows (measured — rows 4-9; only `-R`,
+    `-Rf` and `-fr` stay open) and reopens the auto-reject class
+    the narrowing was made to remove — that trade was already measured and
+    rejected. The structural fix is to widen guard_core's target set, which its
+    own docstring records as an operator decision needing a measurement of how
+    often it would fire on real sessions — not a change to smuggle into a
+    test-coverage PR.
 
     🔴 If this test FAILS because a verdict became `ask`/`deny`, the gap was
     CLOSED: delete that row from here and add the command to MUST_ASK.
     """
-    for cmd in ["rm -R /repo/build", "rm -Rf /repo/build", "rm -fr /repo/build"]:
+    for cmd in ["rm -R /repo/build", "rm -Rf /repo/build", "rm -fr /repo/build",
+                # flag BEFORE -r — opened by the 2026-08-22 narrowing
+                "rm -f -r /repo/build", "rm -v -r /repo/build",
+                "rm --force --recursive /repo/build",
+                # flags AFTER the operand — also opened by it; GNU rm permutes
+                "rm /repo/build -r", "rm /repo/build -rf",
+                "rm /repo/build --recursive"]:
         assert layered_verdict(cmd, None) == "allow", (
             f"{cmd!r} no longer resolves 'allow'. If you closed this gap, move "
             f"it into MUST_ASK and delete it here — do not relax the assertion."
@@ -1481,6 +1595,62 @@ def test_rm_glob_misses_these_recursive_spellings():
         "structural half of this pair and must keep handling r/R bundles."
     )
 
+
+def test_age_glob_misses_these_reordered_decrypt_spellings():
+    """🔴 A KNOWN, OPEN GAP OPENED BY THE 2026-08-21 NARROWING — pinned so it
+    stays visible instead of implied-shut.
+
+    LABEL: CHARACTERIZATION test, not regression coverage. It asserts today's
+    WRONG answer on purpose.
+
+    Narrowing `"*age*-d*"` to `"*age -d*"` removed a large false-positive class
+    (any command text with "age" followed LATER by "-d" — package/packages/
+    image/message/storage vs -db-/--dir/--debug), which was auto-rejecting
+    ordinary read-only commands and killing headless runs. The cost is that the
+    glob now knows exactly ONE argument order: the flag immediately after the
+    binary. Every spelling below puts an identity or output flag first and so
+    resolves plain ALLOW.
+
+    🔴 THIS IS THE ONLY GATE. `guard_core.py` contains no age/sops check at all
+    (grep it — 0 hits for "sops"/"decrypt"), so unlike the `rm` gap above there
+    is no second layer failing in the opposite direction. These spellings are
+    not theoretical: each was executed against a real age keypair (v1.3.1) and
+    yielded the plaintext at rc=0 — the two `-o`/`--output` rows WRITE it to the
+    named file rather than to stdout, which is the same disclosure by a different
+    route. Every row carries an identity flag on purpose —
+    an earlier draft listed `age -o plain.txt -d secret.age` without one, which
+    exits 1 ("identities are required") and so proved nothing about decryption.
+    Adding `-i` changes no verdict here; all six still resolve ALLOW.
+
+    NOT closed here, deliberately, and the reasoning is the same whack-a-mole as
+    the `rm` gap. `"*age -i*"` is the obvious candidate and it is NOT a fix:
+    MEASURED, it matches only the two `age -i …` rows and MISSES all four that
+    spell the identity long-form or put an output flag first. It is also not
+    decrypt-exclusive — `age -e -i k.txt plain.txt` encrypts — so it would buy
+    two spellings plus a false-positive class, not a family.
+    The structural fix is an argv-aware check in guard_core.py, which is where
+    this file's own header says irreversible/secret families belong.
+
+    🔴 If this test FAILS because a verdict became `ask`/`deny`, the gap was
+    CLOSED: delete that row from here and add the command to MUST_ASK.
+    """
+    for cmd in [
+        "age -i key.txt -d secret.age",
+        "age -i key.txt --decrypt secret.age",
+        "age -o plain.txt -i key.txt -d secret.age",
+        "age --identity key.txt -d secret.age",
+        "age --identity key.txt --decrypt secret.age",
+        "age --output plain.txt -i key.txt --decrypt secret.age",
+    ]:
+        assert layered_verdict(cmd, None) == "allow", (
+            f"{cmd!r} no longer resolves 'allow'. If you closed this gap, move "
+            f"it into MUST_ASK and delete it here — do not relax the assertion."
+        )
+    # The contrast cases, so the gap's SHAPE is pinned, not just its existence:
+    # flag-immediately-after still asks, and the sibling sops rule — deliberately
+    # left infix-tolerant — still catches its own reordered spelling.
+    assert effective_bash_action("age -d -i key.txt secret.age", None) == "ask"
+    assert effective_bash_action("sops --config .sops.yaml -d f.enc.yaml", None) == "ask"
 
 def test_guard_core_deliberately_ignores_an_ordinary_recursive_delete():
     """Split out from the attribution test above so each names one claim."""
@@ -1524,7 +1694,18 @@ EXPECTED_TOOL_PERMISSIONS = {
     "task": "allow",
     "skill": "allow",
     "doom_loop": "ask",
-    "external_directory": "ask",
+    # 🔴 NOT a scalar any more, and the change was a reviewed decision — see the
+    # comment block in opencode.jsonc. `ask` still applies to EVERYTHING except
+    # this host's own skills tree, which is read-only nix-store content the agent
+    # already loads. Rationale, measured 2026-08-23: a skill that keeps detail in
+    # `reference/` was HALF-USABLE under dispatch — the agent followed the skill's
+    # own pointer, hit an auto-reject, and the run died. Pinned in full below so
+    # that widening the glob, adding a second entry, or flipping `*` to `allow`
+    # all fail here rather than silently.
+    "external_directory": {
+        "*": "ask",
+        "/home/zach/.config/opencode/skills/**": "allow",
+    },
 }
 
 

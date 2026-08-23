@@ -264,6 +264,193 @@ MUTANTS: list[Mutant] = [
            'want_choices="approve conversations draft drafts health mute muted reconcile run search send unmute "',
            'want_choices="approve conversations draft drafts health reconcile run search send "',
            "test_the_build_control_lists_EXACTLY_the_CLI_subcommands", SUITE_IMAGE),
+
+    # ------------------------------------------------------------------ #
+    # Outbound GROUP drafting (#686). Before this, `draft_message()` sent every
+    # recipient through `upsert_contact()`: a group draft stored `group_id`
+    # NULL — invisible to `not_excluded()`, which keys on it — and minted a
+    # PHANTOM CONTACT whose phone_number was the group address.
+    # ------------------------------------------------------------------ #
+    Mutant("GD1", "the shipped defect, in its narrowest form: the INSERT stops carrying "
+                  "`group_id`. The draft still resolves the group, so nothing about the "
+                  "address looks wrong — the row is simply unlinked, and every read that "
+                  "believes it is filtering returns a MUTED group's draft in full.",
+           DB,
+           "                (ts, source_id, dest_id, group_row_id, body, STATE_PENDING,",
+           "                (ts, source_id, dest_id, None, body, STATE_PENDING,",
+           "test_a_muted_group_draft_is_hidden_from_every_filtered_read", SUITE_EXCL),
+
+    Mutant("GD2", "the phantom contact returns: a group recipient ALSO resolved through "
+                  "`upsert_contact`. `group_id` is still set, so the mute keeps working "
+                  "and the mute test stays GREEN — only the contacts table shows it. A "
+                  "battery that checked mute alone would score this SURVIVED.",
+           DB,
+           "            gid = _group_address_to_id(recipient)",
+           "            dest_id = self.upsert_contact(phone_number=recipient)\n"
+           "            gid = _group_address_to_id(recipient)",
+           "test_a_group_draft_is_LINKED_to_the_group_row_not_a_contact", SUITE_EXCL),
+
+    Mutant("GD3", "`get_draft` stops deriving the recipient from the group row. The "
+                  "phantom contact was LOAD-BEARING — it was where the send address was "
+                  "read from — so removing it without this rewiring addresses every "
+                  "group send to None.",
+           DB,
+           "            if group_signal_id is not None:", "            if False:",
+           "test_the_SEND_recipient_is_derived_from_the_group_row_not_a_contact",
+           SUITE_EXCL),
+
+    Mutant("GD4", "the group address SINGLE-encodes. `/v2/send` takes `group.` + "
+                  "base64(base64(raw)) — a DOUBLE encoding — and the single form is "
+                  "well-formed base64 that decodes to something plausible, so only a "
+                  "literal anchor can tell them apart.",
+           DB,
+           "    return GROUP_ADDRESS_PREFIX + base64.b64encode(\n"
+           "        base64.b64encode(bytes(raw))).decode()",
+           "    return GROUP_ADDRESS_PREFIX + base64.b64encode(bytes(raw)).decode()",
+           "test_the_group_address_encoding_round_trips_against_a_LITERAL", SUITE_EXCL),
+
+    Mutant("GD5", "the group-address decoder drops the STRICT reader, so a display name "
+                  "or a truncated paste resolves to some other bytes and "
+                  "`upsert_group` CREATES that group — a send into the void, reported "
+                  "as success.",
+           DB,
+           "    return _decode_internal_id(internal)",
+           "    return base64.b64decode(internal)",
+           "test_a_MALFORMED_group_address_is_refused_and_stores_nothing", SUITE_EXCL),
+
+    Mutant("GD6", "🔴 [audit] a BARE `internal_id` — the form `mute` takes — is accepted "
+                  "instead of refused, falling through to `upsert_contact()`. This is "
+                  "the phantom-contact defect by the back door, and SKILL.md documented "
+                  "the opposite. Found by a delta re-audit AFTER the fix was called "
+                  "complete.",
+           DB,
+           "        elif _looks_like_bare_group_internal_id(recipient):",
+           "        elif False:",
+           "test_a_BARE_internal_id_is_REFUSED_not_turned_into_a_phantom_contact",
+           SUITE_EXCL),
+
+    Mutant("GD7", "the bare-internal-id refusal WIDENED to swallow real recipients — the "
+                  "risk the refusal itself carries. Dropping the length check makes "
+                  "`Team` (3 bytes) and any short base64 a 'group id', so ordinary "
+                  "contacts stop being draftable.",
+           CON,
+           "    if len(raw) not in (16, 32):",
+           "    if False:",
+           "test_no_REAL_recipient_shape_is_mistaken_for_a_group_id", SUITE_EXCL),
+
+    Mutant("GD8", "`draft` mints a previously-unseen group SILENTLY. A canonically "
+                  "encoded but WRONG id decodes perfectly and cannot be rejected, so the "
+                  "stderr warning is the ONLY signal that the message is going nowhere — "
+                  "the silent-zero shape `mute` was hardened against.",
+           DB,
+           "            group_created = not self.group_exists(gid)",
+           "            group_created = False",
+           "test_drafting_to_an_UNSEEN_group_WARNS_loudly_on_stderr", SUITE_EXCL),
+
+    Mutant("GD9", "the same warning fired UNCONDITIONALLY. A warning on every draft is "
+                  "one an operator learns to ignore, which is indistinguishable from no "
+                  "warning at all — so the SILENT case needs its own mutant.",
+           DB,
+           "            group_created = not self.group_exists(gid)",
+           "            group_created = True",
+           "test_drafting_to_a_KNOWN_group_is_SILENT", SUITE_EXCL),
+
+    Mutant("GD10", "the `draft` CLI loses its refusal branch, so a bad `--to` escapes as "
+                   "an uncaught traceback and exit 1 — indistinguishable, to a caller, "
+                   "from the interpreter dying for an unrelated reason. `mute` and "
+                   "`send` both exit 3.",
+            CON,
+            # 🔴 Anchored on TWO lines: `except ValueError as exc:` alone now
+            # matches twice (the `mute` branch has one too), and the battery's
+            # own exactly-once guard caught it. Keep the comment line in the
+            # anchor, or this silently re-ambiguates the day another branch
+            # grows a ValueError handler.
+            "            except ValueError as exc:\n"
+            "                # 🔴 EXIT 3, like every sibling.",
+            "            except ZeroDivisionError as exc:\n"
+            "                # 🔴 EXIT 3, like every sibling.",
+            "test_draft_REFUSES_a_bad_recipient_with_exit_3_like_its_siblings",
+            SUITE_EXCL),
+
+    # ------------------------------------------------------------------ #
+    # The mute LEDGER and its behavioural probes (#686). The ledger says which
+    # reads filter; these check the ledger cannot drift from the code.
+    # ------------------------------------------------------------------ #
+    Mutant("LP1", "a read method that is in NEITHER ledger. The seam this whole ledger "
+                  "exists for: a new read surface added without the filter.",
+           DB,
+           "    def commit(self) -> None:",
+           "    def list_archived_messages(self):\n"
+           "        with self._c.cursor() as cur:\n"
+           '            cur.execute("SELECT m.id, m.body FROM signal.messages m")\n'
+           "            return cur.fetchall()\n\n"
+           "    def commit(self) -> None:",
+           "test_the_two_ledgers_PARTITION_every_read_of_signal_messages", SUITE_EXCL),
+
+    Mutant("LP2", "🔴 `get_message` declared EXEMPT while it is still FILTERED, so the "
+                  "ledger now says the mute does not cover the id route. The two sets' "
+                  "UNION is IDENTICAL after this — the union check that preceded the "
+                  "partition scored exactly this class GREEN. Only a DISJOINTNESS check, "
+                  "plus comparing the ledger against what the CODE does, can see it.",
+           SUITE_EXCL,
+           "EXEMPT_READS = {\n",
+           'EXEMPT_READS = {\n    "get_message": "declared exempt while still calling the '
+           'predicate — the ledger and the code now disagree",\n',
+           "test_the_two_ledgers_PARTITION_every_read_of_signal_messages", SUITE_EXCL),
+
+    Mutant("LP7", "the mute filter removed from `list_conversations` — scored here against "
+                  "the LEDGER rather than the behavioural test. Same edit as M2, "
+                  "deliberately: M2 proves a muted group reappears, this proves the "
+                  "ledger notices the code drifted away from what it claims. A "
+                  "structural check that only ever agreed with the behavioural one would "
+                  "be decorative, and nothing else in the file distinguishes them.",
+           DB,
+           "                    WHERE {not_excluded('m')}\n", "",
+           "test_the_two_ledgers_PARTITION_every_read_of_signal_messages", SUITE_EXCL),
+
+    Mutant("LP3", "the predicate detector reverted to a SUBSTRING over source text. "
+                  "`get_draft` does NOT filter but its docstring EXPLAINS the mute "
+                  "predicate, so the substring form certified it as filtering — a guard "
+                  "satisfiable by PROSE. Measured on the shipped code, not imagined.",
+           SUITE_EXCL,
+           "    return any(isinstance(n, ast.Call) and isinstance(n.func, ast.Name)\n"
+           '               and n.func.id == "not_excluded" for n in ast.walk(node))',
+           '    return "not_excluded(" in inspect.getsource(fn)',
+           "test_the_predicate_detector_is_NOT_walked_by_a_DOCSTRING_mention", SUITE_EXCL),
+
+    Mutant("LP4", "`get_draft` loses `send_state IS NOT NULL`, which is the PREMISE its "
+                  "mute exemption rests on: without it the method also returns "
+                  "device-sync ECHOES, which carry OTHER PEOPLE's bodies from muted "
+                  "groups. The exemption silently becomes a real leak.",
+           DB,
+           "WHERE m.id = %s AND m.is_outbound AND m.send_state IS NOT NULL",
+           "WHERE m.id = %s AND m.is_outbound",
+           "test_the_draft_exemptions_PREMISE_is_still_in_the_code", SUITE_EXCL),
+
+    Mutant("LP5", "🔴 [audit] two behavioural probes SWAPPED — `get_message` given the "
+                  "`search` probe's body. The probe KEY set is unchanged, so "
+                  "`set(_MUTE_PROBES) == FILTERED_READS` cannot see it and the suite "
+                  "stayed fully green while `get_message` had NO behavioural coverage of "
+                  "a group draft. Found by an audit; the same set-invariant-under-a-swap "
+                  "shape as LP2.",
+           SUITE_EXCL,
+           '    "get_message": lambda db, draft, body: [\n'
+           '        r for r in [db.get_message(draft["id"])] if r],\n',
+           '    "get_message": lambda db, draft, body: [\n'
+           '        r for r in db.search(body) if r["id"] == draft["id"]],\n',
+           "test_each_MUTE_PROBE_actually_calls_the_method_it_is_keyed_under", SUITE_EXCL),
+
+    Mutant("LP6", "🔴 [audit] the recording proxy BLINDED — it still delegates, so every "
+                  "probe returns real rows and every downstream assertion passes, while "
+                  "`called` stays empty. This is what the old, vacuous negative control "
+                  "could not see: it PASSED under this mutant.",
+           SUITE_EXCL,
+           "            def recording(*a, **kw):\n"
+           "                self.called.append(name)\n"
+           "                return attr(*a, **kw)\n"
+           "            return recording",
+           "            return attr",
+           "test_each_MUTE_PROBE_actually_calls_the_method_it_is_keyed_under", SUITE_EXCL),
 ]
 
 
