@@ -972,6 +972,91 @@ def uncovered_local_scopes(store: Path, covered: set[str], now: datetime,
     return out
 
 
+def sibling_prefixes(all_keys: list[str], exclude: str) -> list[str]:
+    """Every `<host>/` prefix the bucket actually holds, except the one searched."""
+    out = {k.split("/", 1)[0] + "/" for k in all_keys if "/" in k}
+    out.discard(normalise_prefix(exclude))
+    return sorted(out)
+
+
+def diagnose_empty_prefix(*, bucket: str, prefix: str, siblings: list[str],
+                          store: Path, this_host: str,
+                          this_machine_id: str | None,
+                          prefix_was_explicit: bool) -> tuple[bool, str]:
+    """`(is_failure, message)` for a prefix that listed ZERO objects.
+
+    🔴 AN EMPTY RESULT CANNOT DISTINGUISH ITS CAUSES — RULES.md names this
+    exactly, and the first version of this code walked straight into it. "Zero
+    objects here" is the observable shared by *four* mechanisms, and the message
+    confidently asserted three of them:
+
+        the backup never ran, stopped running, or its objects were deleted
+
+    while the real cause, every single time on this host, was the fourth: THE
+    RUN LOOKED UNDER THE WRONG PREFIX. The unit writes `ASIB_HOST=<name>-%m` and
+    systemd expands `%m`; a hand-run has `ASIB_HOST` unset, so `host_label()`
+    falls back to the hostname — `nixos` on BOTH machines. So the bare
+    no-argument command, which is the first thing anybody types and what a timer
+    would run, searches `nixos/` and can never find anything.
+
+    🔴 THE FAILURE MODE IS HUMAN, AND IT IS THE WORST ONE THIS TOOL HAS.
+    Someone runs this during an actual disaster, reads "the backup never ran,
+    stopped running, or its objects were deleted", and concludes the backups are
+    gone — while they sit intact under the next prefix over. So the absence is
+    made DISCRIMINATING before anything is asserted: one extra list call, on a
+    path that is already failing, turns "nothing here" into "nothing here, and
+    here is what IS there".
+
+    🔴 AND THE EXIT-0 VARIANT IS WORSE THAN THE REFUSAL. The permitted
+    no-op requires `not local_scopes(store)` — i.e. THE STORE IS GONE, which is
+    precisely the disaster this whole feature exists for. Bare command + missing
+    store therefore exited **0** with "this host has never run the backup, so
+    there is nothing to verify", while every artifact was present. That is the
+    false all-clear the module docstring promises to prevent, on the one path
+    where it costs the most. `ours` is checked BEFORE the no-op for that reason.
+    """
+    ours = [p for p in siblings
+            if prefix_belongs_to_this_host(p, this_host, this_machine_id)]
+
+    if ours:
+        return True, (
+            f"ZERO objects under {bucket}/{prefix} — BUT THE BUCKET DOES HOLD "
+            f"ARTIFACTS, under {ours}, and that prefix carries THIS MACHINE'S "
+            f"ID. So the backups are almost certainly intact and this run simply "
+            f"looked in the wrong place. The backup unit writes "
+            f"ASIB_HOST=<name>-%m (systemd expands %m to the machine id); a "
+            f"hand-run has ASIB_HOST unset, so the label falls back to the "
+            f"hostname — which is the same on both machines. Re-run with "
+            f"--host {ours[0].rstrip('/')}. NOTHING HERE SAYS YOUR BACKUPS ARE "
+            f"MISSING.")
+
+    if prefix_was_explicit or local_scopes(store):
+        why = (f"The prefix was named explicitly, so this is an answer about a "
+               f"host you asked about: it has no off-machine backups at all."
+               if prefix_was_explicit else
+               f"The local store at {store} holds {len(local_scopes(store))} "
+               f"scope(s), so /analyze-service HAS run here and there should be "
+               f"artifacts.")
+        # 🔴 THE CAUSES ARE ONLY ASSERTED WHEN THE BUCKET IS GENUINELY
+        # EMPTY. With siblings present the honest statement is what IS there,
+        # not a list of three guesses about what is not.
+        where = (f" The bucket holds artifacts under other prefixes: "
+                 f"{siblings} — none of which carries this machine's id, so "
+                 f"this is NOT evidence that THOSE backups are gone."
+                 if siblings else
+                 f" The bucket holds NO objects under ANY prefix, so this is "
+                 f"not a lookup problem: the backup never ran, stopped running, "
+                 f"or its objects were deleted.")
+        return True, (f"ZERO objects under {bucket}/{prefix}. {why}{where} "
+                      f"Refusing to report a successful verification of nothing.")
+
+    where = (f" (the bucket does hold artifacts under {siblings}, none carrying "
+             f"this machine's id)" if siblings else "")
+    return False, (f"no objects under {bucket}/{prefix} and no local store at "
+                   f"{store} — this host has never run the backup, so there is "
+                   f"nothing to verify{where}")
+
+
 def run(*, bucket: str, prefix: str, this_host: str,
         this_machine_id: str | None, store: Path, identity: Path,
         scope_filter: str | None, verify_all: bool, max_lag_days: float,
@@ -1000,28 +1085,22 @@ def run(*, bucket: str, prefix: str, this_host: str,
         keys = sorted(downloader.list(prefix))
 
         if not keys:
-            # 🔴 THE ONLY PERMITTED CLEAN NO-OP, and it is narrow. A host that has
-            # never run the backup has nothing to verify; failing there would make
-            # this a permanently-red gate on the laptop, which RULES.md says is
-            # worse than no gate. Everything else about an empty listing is a
-            # failure, because a prefix that was full yesterday and empty today is
-            # the single worst thing this script can find.
-            if prefix_was_explicit or local_scopes(store):
-                raise RestoreVerifyError(
-                    f"ZERO objects under {bucket}/{prefix}. "
-                    + (f"The prefix was named explicitly, so this is an answer "
-                       f"about a host you asked about: it has no off-machine "
-                       f"backups at all."
-                       if prefix_was_explicit else
-                       f"The local store at {store} holds "
-                       f"{len(local_scopes(store))} scope(s), so /analyze-service "
-                       f"HAS run here and there should be artifacts. An empty "
-                       f"prefix beside a populated store means the backup never "
-                       f"ran, stopped running, or its objects were deleted.")
-                    + " Refusing to report a successful verification of nothing.")
-            print(f"{PROG}: no objects under {bucket}/{prefix} and no local "
-                  f"store at {store} — this host has never run the backup, so "
-                  f"there is nothing to verify", file=sys.stderr)
+            # 🔴 MAKE THE ABSENCE DISCRIMINATING BEFORE SAYING ANYTHING
+            # ABOUT IT. One extra list call, on a path that is already failing,
+            # is what separates "the backups are gone" from "you looked under
+            # the wrong prefix" — see `diagnose_empty_prefix`. The permitted
+            # clean no-op still exists (a host that has never run the backup
+            # must not be a permanently-red gate on the laptop), but it no
+            # longer swallows the case where THIS machine's artifacts are
+            # sitting one prefix over.
+            siblings = sibling_prefixes(downloader.list(""), prefix)
+            failed, message = diagnose_empty_prefix(
+                bucket=bucket, prefix=prefix, siblings=siblings, store=store,
+                this_host=this_host, this_machine_id=this_machine_id,
+                prefix_was_explicit=prefix_was_explicit)
+            if failed:
+                raise RestoreVerifyError(message)
+            print(f"{PROG}: {message}", file=sys.stderr)
             return []
 
         by_scope = group_by_scope(keys, prefix)

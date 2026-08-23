@@ -110,6 +110,9 @@ AGE_KEYGEN: str = _require("age-keygen", "The identities here are generated per 
 HOST = "synthetic-host"
 PREFIX = HOST + "/"
 
+# A synthetic /etc/machine-id. Never this machine's real one: devrc is public.
+SYNTH_MACHINE_ID = "0123456789abcdef0123456789abcdef"
+
 
 # --------------------------------------------------------------------------- #
 # helpers
@@ -1069,6 +1072,167 @@ def test_the_never_ran_no_op_EXITS_ZERO_through_the_CLI(tmp_path, identity):
         f"a no-op printed a verification summary:\n{r.stdout}")
 
 
+OTHER_PREFIX = "workbench-" + SYNTH_MACHINE_ID + "/"
+
+
+def _bucket_with_only_the_other_prefix(identity, scope, tmp_path):
+    """A bucket whose ONLY artifacts live under this machine's UNIT label.
+
+    The exact live shape: the unit writes `ASIB_HOST=workbench-%m`, the bare
+    hand-run looks under `nixos/`, and every object is one prefix over.
+    """
+    return {OTHER_PREFIX + "scope-alpha/20260822T234650Z.bundle.age":
+            _make_artifact(scope, identity, tmp_path)}
+
+
+def test_an_empty_prefix_NAMES_the_prefix_that_DOES_hold_artifacts(
+        tmp_path, identity):
+    """🔴 AN EMPTY RESULT CANNOT DISTINGUISH ITS CAUSES.
+
+    "Zero objects here" is shared by four mechanisms and the message asserted
+    three of them — never the real one, which on this host is always the fourth:
+    THE RUN LOOKED UNDER THE WRONG PREFIX. The human failure is what matters:
+    somebody runs this during a real disaster, reads "the backup never ran,
+    stopped running, or its objects were deleted", and concludes the backups are
+    gone while they sit intact one prefix over.
+    """
+    store = tmp_path / "store"
+    scope = _make_scope(store, "scope-alpha", {"e.md": "x"}, commits=3)
+    objects = _bucket_with_only_the_other_prefix(identity, scope, tmp_path)
+
+    with pytest.raises(RV.RestoreVerifyError) as exc:
+        _verify(store, tmp_path / "work", FakeDownloader(objects), identity,
+                prefix="nixos", this_host="nixos",
+                this_machine_id=SYNTH_MACHINE_ID, now=datetime.now(timezone.utc))
+    msg = str(exc.value)
+    assert OTHER_PREFIX.rstrip("/") in msg, (
+        f"the message does not NAME the prefix that actually holds the "
+        f"artifacts, so the absence is still ambiguous: {msg}")
+    assert "THIS MACHINE'S ID" in msg, msg
+    assert "--host " + OTHER_PREFIX.rstrip("/") in msg, (
+        f"the message does not say how to re-run: {msg}")
+    assert "NOTHING HERE SAYS YOUR BACKUPS ARE MISSING" in msg, msg
+    assert "never ran, stopped running, or its objects were deleted" not in msg, (
+        f"it still asserts three causes, none of which is the real one: {msg}")
+
+
+def test_a_GENUINELY_EMPTY_bucket_still_says_the_original_thing(
+        tmp_path, identity):
+    """🔴 THE OTHER DIRECTION — or the fix has replaced one misleading message
+    with another. When the bucket holds NOTHING under ANY prefix, it is NOT a
+    lookup problem, and the three causes are the honest answer."""
+    store = tmp_path / "store"
+    _make_scope(store, "scope-alpha", {"e.md": "x"}, commits=3)
+
+    with pytest.raises(RV.RestoreVerifyError) as exc:
+        _verify(store, tmp_path / "work", FakeDownloader({}), identity,
+                prefix="nixos", this_host="nixos",
+                this_machine_id=SYNTH_MACHINE_ID, now=datetime.now(timezone.utc))
+    msg = str(exc.value)
+    assert "NO objects under ANY prefix" in msg, f"wrong reason: {msg}"
+    assert "never ran, stopped running, or its objects were deleted" in msg, msg
+    assert "Refusing to report a successful verification of nothing" in msg, msg
+    assert "BUT THE BUCKET DOES HOLD ARTIFACTS" not in msg, (
+        f"it claims artifacts exist in an empty bucket: {msg}")
+
+
+def test_a_MISSING_STORE_with_our_artifacts_elsewhere_FAILS_instead_of_exit_0(
+        tmp_path, identity):
+    """🔴 THE EXIT-0 VARIANT, AND IT IS THE WORST PATH THIS TOOL HAS.
+
+    The permitted clean no-op requires `not local_scopes(store)` — i.e. THE
+    STORE IS GONE, which is precisely the disaster this feature exists for. So
+    the bare command during a real disaster exited **0** saying "this host has
+    never run the backup, so there is nothing to verify", while all the
+    artifacts were present under the unit's label. A false all-clear, delivered
+    at the exact moment someone is deciding whether they have lost their data.
+    """
+    scope = _make_scope(tmp_path / "elsewhere", "scope-alpha", {"e.md": "x"},
+                        commits=3)
+    objects = _bucket_with_only_the_other_prefix(identity, scope, tmp_path)
+
+    with pytest.raises(RV.RestoreVerifyError) as exc:
+        _verify(tmp_path / "gone-store", tmp_path / "work",
+                FakeDownloader(objects), identity, prefix="nixos",
+                this_host="nixos", this_machine_id=SYNTH_MACHINE_ID,
+                now=datetime.now(timezone.utc))
+    msg = str(exc.value)
+    assert OTHER_PREFIX.rstrip("/") in msg, msg
+    assert "never run the backup" not in msg, (
+        f"it still reports 'never run the backup' while this machine's "
+        f"artifacts are in the bucket: {msg}")
+
+
+def test_the_LAPTOP_no_op_is_PRESERVED_when_no_prefix_is_ours(
+        tmp_path, identity):
+    """🔴 THE PERMANENTLY-RED GATE THE NO-OP EXISTS TO PREVENT, still prevented.
+
+    A host that has genuinely never run /analyze-service — no store, and no
+    prefix in the bucket carrying ITS machine id — must still exit 0. The fix
+    above must not have turned every laptop run red just because the workbench's
+    artifacts exist.
+
+    The only difference from the test above is WHOSE machine id is in the
+    sibling prefix.
+    """
+    scope = _make_scope(tmp_path / "elsewhere", "scope-alpha", {"e.md": "x"},
+                        commits=2)
+    objects = _bucket_with_only_the_other_prefix(identity, scope, tmp_path)
+
+    verdicts = _verify(tmp_path / "gone-store", tmp_path / "work",
+                       FakeDownloader(objects), identity, prefix="laptop",
+                       this_host="laptop",
+                       this_machine_id="ffffffffffffffffffffffffffffffff",
+                       now=datetime.now(timezone.utc))
+    assert verdicts == [], verdicts
+
+
+def test_the_no_op_still_MENTIONS_what_the_bucket_holds(tmp_path, identity,
+                                                        capsys):
+    """Exit 0, but not silent about the sibling: "nothing for me" and "nothing
+    at all" are different facts, and only one of them is reassuring."""
+    scope = _make_scope(tmp_path / "elsewhere", "scope-alpha", {"e.md": "x"},
+                        commits=2)
+    objects = _bucket_with_only_the_other_prefix(identity, scope, tmp_path)
+    _verify(tmp_path / "gone-store", tmp_path / "work", FakeDownloader(objects),
+            identity, prefix="laptop", this_host="laptop",
+            this_machine_id="ffffffffffffffffffffffffffffffff",
+            now=datetime.now(timezone.utc))
+    err = capsys.readouterr().err
+    assert "never run the backup" in err, err
+    assert OTHER_PREFIX.rstrip("/") in err, (
+        f"the no-op does not say what the bucket DOES hold: {err}")
+
+
+@pytest.mark.parametrize("keys,exclude,want", [
+    (["a/s/x.age", "b/s/x.age"], "a", ["b/"]),
+    (["a/s/x.age", "a/t/y.age"], "a", []),
+    (["a/s/x.age", "b/s/x.age", "c/s/x.age"], "z", ["a/", "b/", "c/"]),
+    (["loose-object"], "a", []),           # no "/" -> not a host prefix
+    ([], "a", []),
+])
+def test_the_sibling_prefix_reader_is_VALIDATED(keys, exclude, want):
+    """VALIDATE THE INSTRUMENT. Every message above is a claim about this
+    reader until it has been watched to work: one that returned nothing would
+    make the discriminating branch unreachable and quietly restore the old
+    three-causes message everywhere."""
+    assert RV.sibling_prefixes(keys, exclude) == want
+
+
+def test_the_directory_store_exit_PROPAGATES_rather_than_swallowing(tmp_path):
+    """🔴 `__exit__(self, *_exc): return False` — pyright flags `_exc` as unused,
+    which is the CONTEXT-MANAGER PROTOCOL, not a swallowed failure.
+
+    Pinned because the audit specifically credited this file for keeping
+    decrypt-vs-corruption-vs-network distinguishable, and a `return True` here
+    would silently swallow every one of them. A falsy return re-raises.
+    """
+    d = _dir_store(tmp_path / "objects", {})
+    with pytest.raises(ValueError, match="propagated"):
+        with RV.DirectoryStore(d):
+            raise ValueError("propagated")
+
+
 def test_a_SELECTED_scope_with_zero_objects_is_a_FAILURE(tmp_path, identity):
     store = tmp_path / "store"
     alpha = _make_scope(store, "scope-alpha", {"e.md": "a"}, commits=2)
@@ -1387,9 +1551,6 @@ def test_the_foreign_predicate_tolerates_a_TRAILING_SLASH_difference(
                 max_lag_days=3.0, now=now)[0]
     assert v.cross_checked is True, (
         "a trailing slash made this host's own artifacts look foreign")
-
-
-SYNTH_MACHINE_ID = "0123456789abcdef0123456789abcdef"
 
 
 @pytest.mark.parametrize("prefix,this_host,mid,ours,why", [
