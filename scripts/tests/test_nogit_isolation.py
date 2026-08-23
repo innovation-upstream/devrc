@@ -61,6 +61,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -68,6 +69,11 @@ SCRIPTS = REPO_ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 from testlib import nogit_plugin  # noqa: E402
+# 🔴 The SAME helper the runner's evidence probe calls — imported, not restated.
+# A second copy of "is another process sitting in this repo?" would agree with
+# the first until the day one of them changed, and the control below would then
+# be asserting its own opinion instead of the guard's.
+from testlib.gitenv import live_cotenants  # noqa: E402
 from testlib.runner_patch import runner_with_targets, write_pytest_suite  # noqa: E402
 
 RUN_TESTS = SCRIPTS / "run-tests.sh"
@@ -735,3 +741,321 @@ def test_a_target_that_rewrites_the_home_config_is_named_and_red(tmp_path):
         f"the failure did not NAME the file that changed:\n{out}")
     # The positive control for the assertion above: the write really happened.
     assert "planted-by-a-test" in (home / ".gitconfig").read_text(encoding="utf-8")
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 #730 — THE REPO-LOCAL CLASS, AND THE THREE DIRECTIONS THAT DEFINE IT
+# --------------------------------------------------------------------------- #
+# `NOGIT_PROTECTED` holds two classes of file and they are NOT the same claim:
+#
+#   GLOBAL      `~/.gitconfig`, `$XDG_CONFIG_HOME/git/config`, everything
+#               `git config --global --list --show-origin` names. Nothing a
+#               concurrent worktree operation does writes these, so a change is
+#               still attributable to whatever was running. Always enforcing.
+#   REPO-LOCAL  `<git-common-dir>/config`. Shared by EVERY worktree of the
+#               clone: `git worktree add`, `git branch --track` and any
+#               `git config` in any of them rewrite it. On the operator's box
+#               that is ~90 worktrees and ~15 concurrent sessions, so it moves
+#               continuously and GUARD 10 blamed whichever target was running.
+#
+# MEASURED, one commit, two environments (#730):
+#   isolated clone -> real-config-changed=0/3 on every target, PASS
+#   shared clone   -> .git/config CHANGED on 2 targets, FAIL, with failed=0
+# In that same shared run GUARD 9 PROVED co-tenancy and downgraded itself.
+#
+# WHAT IS REGRESSION COVERAGE HERE AND WHAT IS NOT. All four are RED at
+# `a0fb39c7`, but only ONE of them is red for a BEHAVIOURAL reason, and the
+# difference is the label:
+#   * `test_a_repo_local_change_is_REPORTED_when_a_cotenant_is_PROVEN` is THE
+#     regression test. At base, MEASURED: `real-config-changed=1/3`,
+#     `RESULT: FAIL (exit=1)` with `failed=0` — #730's shape exactly. GREEN at
+#     HEAD. This is the only one that may be counted as regression coverage.
+#   * `test_a_repo_local_change_still_FAILS_when_no_cotenant_is_proven` and
+#     `test_a_global_change_FAILS_even_with_a_cotenant_PROVEN` are NEGATIVE
+#     CONTROLS. The BEHAVIOUR they pin (the run must go red) is what base
+#     already did; they are red at base only because they also assert the new
+#     class WORDING. Do not read their base-red as regression coverage. Without
+#     them, "#730 is fixed" is satisfied by a patch that simply stops watching
+#     the file, or by one that lets co-tenancy suppress `~/.gitconfig` too.
+#   * `test_a_broken_evidence_probe_fails_TOWARD_enforcing` is a FAIL-SAFE guard
+#     on code that did not exist at base, so its base-red is structural (its
+#     mutation anchor is absent), not behavioural. Its branch is proved
+#     REACHABLE by the mutation that flips the probe's failure path to `proven`,
+#     which turns it red at HEAD.
+#
+# THE MEASUREMENT METHOD, and why it is sound: the runner is driven against a
+# SCRATCH ROOT — a directory whose top-level entries are symlinks to this repo
+# (so `$ROOT/scripts/...` resolves and the runner's own preconditions hold) but
+# which owns a FRESH `.git` of its own. The operator's real clone is never
+# written. Co-tenancy is then flipped with REAL evidence rather than a stub: a
+# live process whose cwd sits in that scratch root, which is exactly what
+# `testlib.gitenv.live_cotenants` looks for.
+_G10_PROBE_IMPORT = "from testlib.gitenv import attribution_evidence, protected_git_dirs"
+
+
+def _scratch_root(tmp_path: Path) -> Path:
+    """A repository of its own whose content is this repo, by symlink.
+
+    🔴 The point is the `.git`: `git init` here gives the runner a
+    `<git-common-dir>/config` that this test OWNS, so a planted repo-local write
+    is measured against a directory pytest created and never against the
+    operator's shared clone.
+    """
+    scratch = tmp_path / "scratch-root"
+    scratch.mkdir(parents=True, exist_ok=True)
+    for entry in REPO_ROOT.iterdir():
+        if entry.name == ".git":
+            continue
+        (scratch / entry.name).symlink_to(entry)
+    init = subprocess.run(["git", "init", "-q", str(scratch)],
+                          capture_output=True, text=True, timeout=120)
+    assert init.returncode == 0, f"could not init the scratch root:\n{init.stderr}"
+    assert (scratch / ".git" / "config").is_file(), (
+        "the scratch root has no repo-local config — the whole measurement "
+        "below would be about a file that does not exist")
+    return scratch
+
+
+def _runner_over(tmp_path: Path, scratch: Path, shell_tests: list[str]) -> Path:
+    target = tmp_path / "plain_tests"
+    write_pytest_suite(target, 2, prefix="test_plain")
+    return runner_with_targets(tmp_path, [str(target)], {str(target): 1},
+                               hook_tests=[], shell_tests=shell_tests)
+
+
+def _run_at(runner: Path, scratch: Path, tmp_path: Path) -> subprocess.CompletedProcess:
+    env = {**os.environ, **_unguarded_home(tmp_path)}
+    for k, v in list(env.items()):
+        if v is None:
+            del env[k]
+    return subprocess.run(["bash", str(runner), str(scratch)], capture_output=True,
+                          text=True, timeout=900, cwd=str(REPO_ROOT), env=env)
+
+
+class _cotenant:
+    """A REAL live process sitting in `root`, which is the evidence itself.
+
+    Not a stub and not a monkeypatch: `live_cotenants` scans `/proc` for a
+    process whose cwd is inside a protected repository and which is not one of
+    our own ancestors. A `sleep` started here is a sibling of the runner, so it
+    is precisely the thing that function exists to find.
+    """
+
+    def __init__(self, root: Path):
+        self.root = root
+        self.proc: subprocess.Popen | None = None
+
+    def __enter__(self):
+        self.proc = subprocess.Popen(["sleep", "900"], cwd=str(self.root),
+                                     stdout=subprocess.DEVNULL,
+                                     stderr=subprocess.DEVNULL)
+        # The positive control for the evidence itself: assert the helper the
+        # runner will call ACTUALLY sees it, before the run whose verdict
+        # depends on it. Without this a run that passed for some unrelated
+        # reason would be scored as "the downgrade worked".
+        for _ in range(50):
+            if live_cotenants([self.root / ".git"]):
+                return self
+            time.sleep(0.1)
+        raise AssertionError(
+            f"no co-tenant was visible in {self.root} after starting one — the "
+            "evidence this test depends on was never established")
+
+    def __exit__(self, *exc):
+        if self.proc is not None:
+            self.proc.terminate()
+            try:
+                self.proc.wait(timeout=30)
+            except subprocess.TimeoutExpired:      # pragma: no cover - defensive
+                self.proc.kill()
+        return False
+
+
+# 🔴 NO SHEBANG, DELIBERATELY, AND NOT AN OVERSIGHT. `run-tests.sh`'s
+# SHELL_TESTS loop invokes each entry as `bash "$SHELL_TEST"`, so the shebang is
+# never consulted — and writing `#!/usr/bin/env bash` here would plant the exact
+# defect `test_runtime_shebangs.py` exists to catch: `/usr/bin/env` is present on
+# the dev host and ABSENT in the nix build sandbox, which is the tier that gates
+# merges. Measured: this file's first full-suite run was RED on that guard.
+def _plant_repo_local_write(scratch: Path) -> str:
+    name = "g10-write-repo-local.sh"
+    (scratch / name).write_text(
+        "set -euo pipefail\n"
+        f'git -C "{scratch}" config devrc-g10.planted yes\n',
+        encoding="utf-8")
+    return name
+
+
+def _plant_global_write(scratch: Path, home: Path) -> str:
+    name = "g10-write-global.sh"
+    (scratch / name).write_text(
+        "set -euo pipefail\n"
+        "env -u GIT_CONFIG_GLOBAL -u GIT_CONFIG_SYSTEM -u GIT_CONFIG_NOSYSTEM "
+        f'HOME="{home}" git config --global core.hooksPath /tmp/planted-by-a-test\n',
+        encoding="utf-8")
+    return name
+
+
+def test_a_repo_local_change_is_REPORTED_when_a_cotenant_is_PROVEN(tmp_path):
+    """🔴 THE REGRESSION TEST FOR #730. RED at a0fb39c7, GREEN at HEAD.
+
+    A target changes `<git-common-dir>/config` while another live process sits
+    in that repository. The change is real and is NOT dropped — it is counted,
+    named, and its reason is printed — but it does not fail the run, because
+    nothing in this environment can attribute it to the target.
+    """
+    scratch = _scratch_root(tmp_path)
+    name = _plant_repo_local_write(scratch)
+    runner = _runner_over(tmp_path, scratch, [name])
+
+    with _cotenant(scratch):
+        proc = _run_at(runner, scratch, tmp_path)
+    out = proc.stdout + proc.stderr
+
+    assert proc.returncode == 0, (
+        "a repo-local config change with a PROVEN external writer still failed "
+        f"the run — this is #730:\n{out}")
+    # The write really happened: without this the pass above is satisfied by
+    # nothing having changed at all.
+    assert "planted" in (scratch / ".git" / "config").read_text(encoding="utf-8"), (
+        "the planted repo-local write never landed, so this run proves nothing")
+    assert f"{name}  real-config-changed=0/" in out, (
+        f"the accounting did not record the change as non-enforcing:\n{out}")
+    assert "repo-local-reported=1" in out, (
+        f"the downgraded change was not COUNTED on the target's line:\n{out}")
+    assert "repo-local-reported-total=1" in out, (
+        f"the downgraded change is missing from the run's summary:\n{out}")
+
+    # 🔴 SCOPED TO GUARD 10's OWN BLOCK, and the mutation sweep is why.
+    # `cannot attribute: live processes are sitting inside …` is also printed by
+    # GUARD 9's per-target `gitenv(session)` lines, which fire here because that
+    # detector watches the repo `testlib` lives in — the operator's co-tenanted
+    # clone. Asserted against the whole output, the mutant that DELETES GUARD
+    # 10's reason logging SURVIVED a fully green suite: the neighbour's sentence
+    # satisfied the pin. The same applies to the file path, which the startup
+    # `protected files:` listing also prints. Both are read out of the reported
+    # block only.
+    head = "---- repo-local git config: REPORTED, not enforced (#730) ----"
+    tail = "This file is the git COMMON dir's config"
+    assert head in out, f"the downgrade block was never printed:\n{out}"
+    assert tail in out, f"the downgrade block is not delimited as expected:\n{out}"
+    block = out.split(head, 1)[1].split(tail, 1)[0]
+    assert name in block, (
+        f"the downgrade block did not NAME the target:\n{block}\n---\n{out}")
+    assert str(scratch / ".git" / "config") in block, (
+        f"the downgrade block did not NAME the file:\n{block}\n---\n{out}")
+    assert "cannot attribute: live processes are sitting inside" in block, (
+        f"the downgrade block did not state the REASON, as GUARD 9 does:"
+        f"\n{block}\n---\n{out}")
+
+
+def test_a_repo_local_change_still_FAILS_when_no_cotenant_is_proven(tmp_path):
+    """🔴 NEGATIVE CONTROL — NOT regression coverage.
+
+    The behaviour it pins (the run goes red) is what base already did; it is red
+    at base only over the new class wording. Counting that as regression
+    coverage would be a coverage claim nobody measured.
+
+    This is the half that matters. Without it, "#730 is fixed" is satisfied by a
+    patch that simply stops watching the repo-local file, and the `core.bare =
+    true` casualty that motivated protecting it would be uncovered on a clean
+    machine and in CI — which is exactly where it happened.
+    """
+    scratch = _scratch_root(tmp_path)
+    name = _plant_repo_local_write(scratch)
+    runner = _runner_over(tmp_path, scratch, [name])
+
+    assert not live_cotenants([scratch / ".git"]), (
+        "something is already sitting in this scratch root, so the 'no proven "
+        "writer' arm of this control does not hold")
+    proc = _run_at(runner, scratch, tmp_path)
+    out = proc.stdout + proc.stderr
+
+    assert proc.returncode != 0, (
+        f"an ATTRIBUTABLE repo-local config change produced a PASSING run:\n{out}")
+    assert "GUARD 10 problem" in out, (
+        f"the run failed, but not for the git-config reason:\n{out}")
+    assert "repo-local-enforced" in out, (
+        f"the failure did not classify the change as repo-local-ENFORCED:\n{out}")
+    assert "repo-local-reported-total=0" in out, (
+        f"nothing should have been downgraded in this run:\n{out}")
+    assert "FOUND NO OTHER WRITER" in out, (
+        f"the failure did not say WHY it was attributable:\n{out}")
+    assert str(scratch / ".git" / "config") in out, (
+        f"the failure did not NAME the file that changed:\n{out}")
+
+
+def test_a_global_change_FAILS_even_with_a_cotenant_PROVEN(tmp_path):
+    """🔴 NEGATIVE CONTROL on the CLASS BOUNDARY — NOT regression coverage.
+
+    Same label as the control above: base already failed this run, so its
+    base-red is about the new wording, not about behaviour.
+
+    Co-tenancy licenses a downgrade for the repo-local file and for NOTHING
+    else. `~/.gitconfig` is the 2026-08-21 incident's actual shape; a fix that
+    let proven co-tenancy suppress it would have removed the guard's teeth while
+    reading, in the output, exactly like the fix that keeps them.
+
+    Measured against a SCRATCH home, never the operator's.
+    """
+    scratch = _scratch_root(tmp_path)
+    home = tmp_path / "scratch-home"
+    home.mkdir(parents=True, exist_ok=True)
+    (home / ".gitconfig").write_text("[user]\n\tname = pre-existing\n",
+                                     encoding="utf-8")
+    name = _plant_global_write(scratch, home)
+    runner = _runner_over(tmp_path, scratch, [name])
+
+    with _cotenant(scratch):
+        proc = _run_at(runner, scratch, tmp_path)
+    out = proc.stdout + proc.stderr
+
+    assert proc.returncode != 0, (
+        f"a GLOBAL config change was downgraded by co-tenancy:\n{out}")
+    assert "GUARD 10 problem" in out, (
+        f"the run failed, but not for the git-config reason:\n{out}")
+    assert "global-enforced" in out, (
+        f"the failure did not classify the change as GLOBAL:\n{out}")
+    assert str(home / ".gitconfig") in out, (
+        f"the failure did not NAME the file that changed:\n{out}")
+    # The positive control for the assertion above: the write really happened.
+    assert "planted-by-a-test" in (home / ".gitconfig").read_text(encoding="utf-8")
+
+
+def test_a_broken_evidence_probe_fails_TOWARD_enforcing(tmp_path):
+    """🔴 A BROKEN PROBE MUST NOT SILENTLY DISABLE THE GUARD.
+
+    The downgrade is licensed by evidence collected from `testlib.gitenv`. If
+    that collection cannot run — no python, an import error, a helper that
+    raises — the honest answer is "no writer was PROVEN", i.e. enforce. A probe
+    whose failure read as proof would be a guard switched off by a typo.
+
+    Its base-red is STRUCTURAL, not behavioural: base has no probe, so the
+    mutation anchor is simply absent. Its branch is proved REACHABLE by the
+    mutation that makes the failure path return `proven`, which turns it red.
+    """
+    scratch = _scratch_root(tmp_path)
+    name = _plant_repo_local_write(scratch)
+    runner = _runner_over(tmp_path, scratch, [name])
+
+    src = runner.read_text(encoding="utf-8")
+    assert src.count(_G10_PROBE_IMPORT) == 1, (
+        "expected exactly one live import in the evidence probe to break; "
+        "found a different number, so this mutation would not land")
+    runner.write_text(
+        src.replace(_G10_PROBE_IMPORT, "import testlib.no_such_module_g10"),
+        encoding="utf-8")
+    assert "no_such_module_g10" in runner.read_text(encoding="utf-8"), (
+        "the mutation did not land — a non-matching anchor scores a bogus pass")
+
+    with _cotenant(scratch):
+        proc = _run_at(runner, scratch, tmp_path)
+    out = proc.stdout + proc.stderr
+
+    assert proc.returncode != 0, (
+        "a BROKEN evidence probe downgraded a repo-local change — the guard was "
+        f"switched off by an import error:\n{out}")
+    assert "evidence=probe-failed" in out, (
+        f"the run failed, but not because the probe could not run:\n{out}")
+    assert "repo-local-reported-total=0" in out, (
+        f"a failed probe must downgrade NOTHING:\n{out}")
