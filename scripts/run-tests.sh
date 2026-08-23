@@ -2583,9 +2583,25 @@ done
 # cases passed FOR THE WRONG REASON. It asserts the pure extraction helpers that
 # the DRIFT block's whole PR-reconciliation rests on; an unrun suite is a guard
 # that reports no failures.
+#
+# `test_base_clone_staleness.sh` is here from birth rather than being found
+# ungated later, which is the only difference between it and the two above. It
+# covers `scripts/claude-hooks/base-clone-staleness.sh`, a SessionStart hook that
+# WRITES to a clone's working tree (`git checkout <upstream> -- CLAUDE.md
+# .claude/skills/`), so an unrun suite here is an unguarded write path, not just
+# an unmeasured helper. Hermetic: its fixtures are local bare repos under a
+# mktemp dir — no network, no real remote, and every commit carries its identity
+# via `git -c user.email=…`, so it needs nothing from the operator's gitconfig
+# and stays inside GUARD 10's isolation.
+#
+# 🔴 Its HOOK default resolves the hook RELATIVE TO THE SUITE (../claude-hooks/),
+# not a deployed ~/.claude/ path. That is what makes this gate grade the tracked
+# file; a default pointing at a per-host copy would be green about something that
+# is not in the commit. Do not "simplify" it back.
 SHELL_TESTS=(
   "scripts/tests/test_release_wrapper.sh"
   "scripts/tests/test_resume_state.sh"
+  "scripts/tests/test_base_clone_staleness.sh"
 )
 for SHELL_TEST in "${SHELL_TESTS[@]}"; do
   if [ ! -f "$SHELL_TEST" ]; then
