@@ -39,6 +39,7 @@ actually observed — including the half of the original claim that is FALSE.
 
 from __future__ import annotations
 
+import collections
 import hashlib
 import importlib.util
 import json
@@ -84,7 +85,7 @@ import subsystem_touch as st  # noqa: E402
 SCOPE = "workbench-cfg"
 OTHER_SCOPE = "hardware-notes"
 
-WHAT_IT_IS = "A durable thing that must NEVER appear in a recall block."
+WHAT_IT_IS = "A durable thing a recall block MUST say the identity of."
 POINTER_LINE = "- ops skill `manage-widget` — invoke it for restarts"
 NUANCE_LINE = "- 2026-01-02: the readiness probe lies for 40s after a reload."
 
@@ -96,10 +97,14 @@ def _entry(
     aliases=(),
     kind=None,
     sensitivity=None,
+    what: str | None = WHAT_IT_IS,
     pointers: str | None = POINTER_LINE,
     nuance: str | None = NUANCE_LINE,
     extra_body: str = "",
 ) -> str:
+    """`what=None` omits the `## What it is` HEADING entirely; `what=""` writes
+    the heading with an empty body. They are different on-disk states (absent vs
+    present-but-empty) and the reader has to degrade cleanly on both."""
     lines = ["---", f"service: {service}", f"scope: {scope}"]
     if aliases:
         lines.append("aliases: [" + ", ".join(aliases) + "]")
@@ -107,7 +112,9 @@ def _entry(
         lines.append(f"kind: {kind}")
     if sensitivity is not None:
         lines.append(f"sensitivity: {sensitivity}")
-    lines += ["---", "", "## What it is", WHAT_IT_IS, ""]
+    lines += ["---", ""]
+    if what is not None:
+        lines += ["## What it is", what, ""]
     if pointers is not None:
         lines += ["## Pointers", pointers, ""]
     if nuance is not None:
@@ -393,25 +400,40 @@ class TestNegativeControls:
 
 
 # =============================================================================
-# WHAT IS SURFACED — the two sections, and NOTHING else.
+# WHAT IS SURFACED — the three schema sections, and NOTHING else.
 # =============================================================================
 
 
-class TestSurfacesOnlyTheTwoSections:
-    def test_what_it_is_is_NOT_surfaced(self, store: Path) -> None:
-        """🔴 The brief's hard line: recall, not a dump. `## What it is` is
-        durable boilerplate a resuming session either knows or can open."""
+class TestSurfacesOnlyTheThreeSections:
+    def test_what_it_is_IS_surfaced_in_a_body(self, store: Path) -> None:
+        """🔴 THE DEFECT THIS CLASS WAS RENAMED FOR. It used to assert the
+        opposite — `## What it is` was excluded as "durable boilerplate" — and
+        measured on 2026-08-20 the exclusion meant no BRIEFING path printed the
+        one section that says what a service IS: not `--ref`, not the digest, not
+        `service_recon`'s `index:` block. (`search` did, and still does — see
+        `test_search_covers_WHAT_IT_IS_like_every_other_section` — but only for an
+        entry a query matched, so it briefs nobody.) An agent briefed only on an
+        entry could not name the thing the entry was about."""
         rep = rc.recall(store, SCOPE)
         text = rc.render_text(rep)
-        assert WHAT_IT_IS not in text
-        assert "## What it is" not in text
+        assert rc.WHAT_HEADING in text
+        assert WHAT_IT_IS in text
         blob = json.dumps(rc.report_json(rep))
-        assert WHAT_IT_IS not in blob
+        assert WHAT_IT_IS in blob
 
-    def test_both_wanted_sections_ARE_surfaced(self, store: Path) -> None:
+    def test_what_it_is_is_rendered_FIRST_in_a_body(self, store: Path) -> None:
+        """It is the orienting sentence; pointers and nuance both assume the
+        reader has already identified the thing."""
         text = rc.render_text(rc.recall(store, SCOPE))
+        assert text.index(rc.WHAT_HEADING) < text.index(rc.POINTERS_HEADING)
+        assert text.index(rc.POINTERS_HEADING) < text.index(rc.NUANCE_HEADING)
+
+    def test_all_three_wanted_sections_ARE_surfaced(self, store: Path) -> None:
+        text = rc.render_text(rc.recall(store, SCOPE))
+        assert rc.WHAT_HEADING in text
         assert rc.POINTERS_HEADING in text
         assert rc.NUANCE_HEADING in text
+        assert WHAT_IT_IS in text
         assert POINTER_LINE in text
         assert NUANCE_LINE in text
 
@@ -459,6 +481,246 @@ class TestSurfacesOnlyTheTwoSections:
         rep = rc.recall(store, SCOPE)
         assert rep.entries[0].is_bare
         assert "has not been filled in" in rc.render_text(rep)
+
+    def test_a_what_it_is_stub_does_NOT_make_an_entry_look_filled_in(
+        self, tmp_path: Path
+    ) -> None:
+        """🔴 THE REGRESSION SURFACING CREATED. `is_bare` used to read every
+        value in `sections`, and `sections` now carries `## What it is` — which
+        the writer's own `new_entry_template` PRE-FILLS with a placeholder. Read
+        naively, every freshly created stub would report as filled-in and lose
+        the "has not been filled in" notice in exactly the case it exists for."""
+        store = tmp_path / "s"
+        (store / SCOPE).mkdir(parents=True)
+        (store / SCOPE / "collector.md").write_text(
+            _entry("collector", SCOPE, what="<one line: what this thing IS.>",
+                   pointers=None, nuance=None),
+            encoding="utf-8",
+        )
+        rep = rc.recall(store, SCOPE)
+        assert rep.entries[0].sections[rc.WHAT_HEADING]  # the stub IS there…
+        assert rep.entries[0].is_bare  # …and the entry is still bare.
+        assert "has not been filled in" in rc.render_text(rep)
+
+
+class TestWhatItIsDegradesCleanly:
+    """An entry whose `## What it is` is absent, or present-but-empty, must not
+    crash and must not print a stray heading with nothing under it.
+
+    🔴 ABSENT AND PRESENT-BUT-EMPTY ARE DIFFERENT ON-DISK STATES and the
+    extractor tells them apart (`TestSectionExtraction`), so both are exercised:
+    a renderer keyed on `in sections` rather than on truthiness would print a
+    bare `## What it is` line for the second one.
+    """
+
+    def _one(self, tmp_path: Path, **kw) -> str:
+        # A store per call — the loop below builds two, and reusing one path
+        # would make the second render read the FIRST fixture's file.
+        store = tmp_path / ("absent" if kw.get("what") is None else "empty")
+        (store / SCOPE).mkdir(parents=True)
+        (store / SCOPE / "collector.md").write_text(
+            _entry("collector", SCOPE, **kw), encoding="utf-8"
+        )
+        return rc.render_text(rc.recall(store, SCOPE))
+
+    def test_an_ABSENT_what_it_is_prints_no_stray_heading(self, tmp_path: Path) -> None:
+        text = self._one(tmp_path, what=None)
+        assert f"    {rc.WHAT_HEADING}\n" not in text
+        assert POINTER_LINE in text and NUANCE_LINE in text
+
+    def test_an_EMPTY_what_it_is_prints_no_stray_heading(self, tmp_path: Path) -> None:
+        text = self._one(tmp_path, what="")
+        assert f"    {rc.WHAT_HEADING}\n" not in text
+        assert POINTER_LINE in text and NUANCE_LINE in text
+
+    #: The notice, pinned as ONE normalised sentence rather than by a keyword.
+    #: A guard on a word is walkable by rewording, and this sentence is the whole
+    #: claim — see `test_the_notice_claims_the_PARSE_not_the_ENTRY`.
+    NOTICE = (
+        "(no parsable `## What it is` — absent, empty, or not parsed as a heading "
+        "[renamed, indented, fenced, among others], so this read cannot say what "
+        "the subsystem IS; re-derive it live)"
+    )
+
+    def test_both_states_are_NAMED_not_silently_dropped(self, tmp_path: Path) -> None:
+        """Said, not left blank — the rule the bare-entry notice already
+        follows. Nothing printed is indistinguishable from an extractor that
+        failed to find the section."""
+        for kw in ({"what": None}, {"what": ""}):
+            text = self._one(tmp_path, **kw)
+            assert self.NOTICE in text, kw
+
+    @pytest.mark.parametrize(
+        "heading",
+        ["## What It Is", "## What it is:", "### What it is", "  ## What it is"],
+        ids=["case", "colon", "depth", "indent"],
+    )
+    def test_the_notice_claims_the_PARSE_not_the_ENTRY(
+        self, tmp_path: Path, heading: str
+    ) -> None:
+        """🔴 A THIRD ON-DISK STATE, and the one the old wording lied about.
+
+        `_heading_blocks` matches a heading EXACTLY, at column 0 — so every
+        rename here parses to nothing and lands in this same branch while the
+        sentence sits on disk. The notice used to read "this entry never says
+        what the subsystem IS", which is a claim about the ENTRY that the
+        extractor is in no position to make; and `subsystem_touch.SHAPE_HEADINGS`
+        deliberately excludes `## What it is`, so `--validate` reports the rename
+        nowhere either. The sibling `🔴 NO <heading>` badge already draws this
+        line ("0 BY PARSE FAILURE and not by measurement"); this notice now does
+        too, and names the rename so the reader knows where to look.
+        """
+        store = tmp_path / "renamed"
+        (store / SCOPE).mkdir(parents=True)
+        marooned = "This entry DOES say what it is, under a renamed heading."
+        (store / SCOPE / "collector.md").write_text(
+            _entry("collector", SCOPE, what=None).replace(
+                "## Pointers", f"{heading}\n{marooned}\n\n## Pointers", 1
+            ),
+            encoding="utf-8",
+        )
+        text = rc.render_text(rc.recall(store, SCOPE))
+        assert marooned not in text, "fixture is inert — the extractor matched the rename"
+        assert self.NOTICE in text
+        # 🔴 …and it makes no claim about the entry that the parse cannot support.
+        assert "never says what the subsystem IS" not in text
+        assert "no `## What it is` content" not in text
+
+    def test_a_FENCED_heading_reaches_the_SAME_notice(self, tmp_path: Path) -> None:
+        """🔴 THE CAUSE THE OLD ENUMERATION LEFT UNNAMED, and why the list now
+        ends "among others".
+
+        `_heading_blocks` skips fenced regions wholesale, so a `## What it is`
+        inside a ``` fence is not a heading at all: it reaches this branch while
+        being neither absent, nor empty, nor RENAMED — the three words the notice
+        used to offer. An indented heading is not literally a rename either. The
+        headline (`no parsable`) was always right; only the tail enumeration was
+        narrower than its own branch, which reads as a closed list and sends the
+        reader looking for the two states it names.
+        """
+        store = tmp_path / "fenced"
+        (store / SCOPE).mkdir(parents=True)
+        marooned = "This entry DOES say what it is, inside a code fence."
+        fenced = f"```\n{rc.WHAT_HEADING}\n{marooned}\n```"
+        (store / SCOPE / "collector.md").write_text(
+            _entry("collector", SCOPE, what=None).replace(
+                "## Pointers", f"{fenced}\n\n## Pointers", 1
+            ),
+            encoding="utf-8",
+        )
+        text = rc.render_text(rc.recall(store, SCOPE))
+        assert marooned not in text, "fixture is inert — the extractor read into the fence"
+        assert self.NOTICE in text
+        # The rest of the entry is untouched: this is a section-level degrade.
+        assert POINTER_LINE in text and NUANCE_LINE in text
+
+    def test_the_notice_does_NOT_reach_the_index_row(self, tmp_path: Path) -> None:
+        """🔴 The body is where the reader is already looking; the index row is
+        printed once PER ENTRY and this decision leaves it at zero bytes. A
+        missing `## What it is` is also NOT a `🔴 NO <heading>` badge, because
+        that badge means "a count on this row is not a measurement" and this
+        section feeds no count."""
+        store = tmp_path / "s"
+        (store / SCOPE).mkdir(parents=True)
+        (store / SCOPE / "collector.md").write_text(
+            _entry("collector", SCOPE, what=None), encoding="utf-8"
+        )
+        rep = rc.recall(store, SCOPE)
+        assert rep.entries[0].missing_sections == ()
+        row = rc.listing_line(rep.listing[0], 20)
+        assert "🔴" not in row and "What it is" not in row
+        # …and a control that the badge machinery is not simply inert here: an
+        # entry missing a COUNTED heading in the same store DOES badge its row.
+        (store / SCOPE / "other.md").write_text(
+            _entry("other", SCOPE, nuance=None), encoding="utf-8"
+        )
+        rows = {e.ref: rc.listing_line(e, 20) for e in rc.recall(store, SCOPE).listing}
+        assert "🔴 NO Nuance / work-history" in rows["other"]
+        assert "🔴" not in rows["collector"]
+
+
+class TestWhatItIsIsBodyOnlyNotPerEntry:
+    """🔴 THE DECISION, MACHINE-CHECKED. Surfacing `## What it is` is unambiguous
+    on the SINGLE-entry paths; the risk was the multi-entry ones, where a scope
+    holding N entries would pay N copies of it.
+
+    The choice: **the full section in every printed BODY, and nothing at all on
+    the index rows.** A body is printed once per `--ref`, once per digest and
+    `--limit N` times in `full` mode — which is already an explicit dump of N
+    whole entries. The index row is printed once per entry on EVERY read, which
+    is where the multiplier actually lives, so it stays byte-identical.
+
+    The tests below pin that as a COUNT THAT DOES NOT SCALE WITH N: grow the
+    scope and the digest's occurrence count must stay at 1. Asserting merely
+    that it "appears" would pass just as well for a renderer that printed it N
+    times, which is the outcome this decision exists to prevent.
+    """
+
+    @staticmethod
+    def _scope_of_size(root: Path, n: int) -> Path:
+        store = root / "index-store"
+        (store / SCOPE).mkdir(parents=True)
+        for i in range(n):
+            (store / SCOPE / f"svc-{i:02d}.md").write_text(
+                _entry(f"svc-{i:02d}", SCOPE), encoding="utf-8"
+            )
+        return store
+
+    def test_the_digest_prints_it_ONCE_however_many_entries_the_scope_holds(
+        self, tmp_path: Path
+    ) -> None:
+        """🔴 TWO POINTS ON THE DIMENSION, per `claude/RULES.md` — one
+        measurement of a size-dependent claim is not a general claim. 3 and 24
+        are a boundary and a middle; 24 is deliberately not a multiple of the
+        default entry limit."""
+        counts = {}
+        for n in (3, 24):
+            store = self._scope_of_size(tmp_path / f"n{n}", n)
+            text = rc.render_text(rc.recall(store, SCOPE))
+            assert text.count("### ") == 1, "the digest stopped printing exactly one body"
+            counts[n] = text.count(WHAT_IT_IS)
+        assert counts == {3: 1, 24: 1}, counts
+
+    def test_the_index_rows_carry_NO_what_it_is_at_all(self, tmp_path: Path) -> None:
+        """`--list` prints the whole index and no bodies. It is the pure
+        per-entry surface, so its occurrence count is the one that must be 0."""
+        store = self._scope_of_size(tmp_path, 24)
+        rep = rc.recall(store, SCOPE, mode="list")
+        text = rc.render_text(rep)
+        assert "NO ENTRY BODIES WERE PRINTED" in text
+        assert WHAT_IT_IS not in text
+        assert rc.WHAT_HEADING not in "\n".join(
+            rc.listing_line(e, 12) for e in rep.listing
+        )
+
+    def test_a_ref_lookup_prints_the_FULL_section_not_a_first_line(
+        self, tmp_path: Path
+    ) -> None:
+        """The other half of the decision: `--ref` is the single-entry path
+        `service_recon` uses, and it is not truncated. A first-line-only render
+        would silently drop the p90 entry's other 7 lines."""
+        store = tmp_path / "s"
+        (store / SCOPE).mkdir(parents=True)
+        body = "Line one of the description.\nLine two.\nLine three, the last."
+        (store / SCOPE / "collector.md").write_text(
+            _entry("collector", SCOPE, what=body), encoding="utf-8"
+        )
+        text = rc.render_text(rc.recall(store, SCOPE, ref="collector"))
+        for line in body.splitlines():
+            assert line in text
+
+    def test_full_mode_prints_it_per_BODY_which_is_the_opt_in_dump(
+        self, tmp_path: Path
+    ) -> None:
+        """Stated rather than left implicit: `--mode full --limit N` DOES pay N
+        copies. That mode already prints N whole entries on purpose, and across
+        the live store `## What it is` is the smallest of the three sections
+        (26 KB vs `## Pointers` 49 KB vs `## Nuance` 235 KB, measured
+        2026-08-20)."""
+        store = self._scope_of_size(tmp_path, 5)
+        text = rc.render_text(rc.recall(store, SCOPE, mode="full", limit=5))
+        assert text.count("### ") == 5
+        assert text.count(WHAT_IT_IS) == 5
 
 
 class TestSectionExtraction:
@@ -1622,11 +1884,9 @@ class TestSearchFixtureCorpus:
         q = rc.tokenize("quill scheduler")
         line_a = "- 2026-03-05: the quill worker drops a job when the"
         line_b = "  scheduler restarts mid-batch."
-        assert rc.score_unit(q, rc.tokenize(line_a)) < rc.DEFAULT_SEARCH_THRESHOLD
-        assert rc.score_unit(q, rc.tokenize(line_b)) < rc.DEFAULT_SEARCH_THRESHOLD
-        assert rc.score_unit(q, rc.tokenize(line_a + "\n" + line_b)) >= (
-            rc.DEFAULT_SEARCH_THRESHOLD
-        )
+        assert rc.score_unit(q, line_a) < rc.DEFAULT_SEARCH_THRESHOLD
+        assert rc.score_unit(q, line_b) < rc.DEFAULT_SEARCH_THRESHOLD
+        assert rc.score_unit(q, line_a + "\n" + line_b) >= rc.DEFAULT_SEARCH_THRESHOLD
 
     def test_the_name_only_hit_SAYS_it_is_one(self, search_store: Path) -> None:
         """A hunk shown because the ENTRY was named must not read as a hunk whose
@@ -1669,40 +1929,54 @@ class TestSearchScorer:
             assert rc.tokenize(spelling) == ("rate", "limit"), spelling
 
     def test_the_concatenation_is_what_makes_a_COMPOUND_query_exact(self) -> None:
-        """🔴 Deliberate, and not a lowered cutoff — but be precise about what it
-        buys, because the prefix rule already reaches `rate` from `ratelimit` at
-        0.92. TWO things, both measured below:
+        """🔴 Deliberate, and not a lowered cutoff. TWO things it buys, both
+        measured below:
 
-          1. RANKING. The joined token scores 1.00, so the block that really says
-             `rate-limit` out-ranks every block that merely contains `rate`.
-          2. REACH. When a compound's parts are shorter than `MIN_INEXACT_LEN`
-             (`k8s`+`api`) the concatenation is the ONLY rule that can match at
-             all — every other rung is closed to a 3-character token.
+          1. REACH FOR THE WHOLE COMPOUND. The inexact rungs are DIRECTIONAL, so
+             `rate` — a FRAGMENT of the query — scores 0.00, and the
+             concatenation is the only thing that can match a corpus writing
+             `rate-limit` at all. (It used to be phrased as "the joined form
+             out-RANKS the bare half"; the bare half scored 0.92 and had no
+             business on the screen. See `TestSearchDirectionality`.)
+          2. REACH WHEN THE PARTS ARE SHORT. When a compound's parts are below
+             `MIN_INEXACT_LEN` (`k8s`+`api`) every other rung is closed to a
+             3-character token, join or no join.
         """
-        cands = rc.candidate_tokens(rc.tokenize("the rate-limit cap"))
+        cands = rc.candidate_tokens("the rate-limit cap")
         assert "ratelimit" in cands
         assert rc.pair_strength("ratelimit", "ratelimit") == 1.0
-        # (1) the joined form outranks the bare half the prefix rule reaches.
-        assert rc.pair_strength("ratelimit", "rate") == rc.PREFIX_STRENGTH < 1.0
+        # (1) the bare halves are FRAGMENTS of the query and no longer score.
+        assert rc.pair_strength("ratelimit", "rate") == 0.0
+        assert rc.pair_strength("ratelimit", "limit") == 0.0
+        assert rc.score_unit(rc.tokenize("ratelimit"), "the rate-limit cap") == 1.0
         # (2) the reach case: nothing but the join gets there.
-        short = rc.tokenize("the k8s api server")
-        assert all(rc.pair_strength("k8sapi", t) == 0.0 for t in short)
+        short = "the k8s api server"
+        assert all(rc.pair_strength("k8sapi", t) == 0.0 for t in rc.tokenize(short))
         assert "k8sapi" in rc.candidate_tokens(short)
         assert rc.score_unit(rc.tokenize("k8sapi"), short) == 1.0
 
-    def test_the_compound_hit_OUT_RANKS_the_bare_half(self, search_store: Path) -> None:
-        """The ranking half of the claim above, end to end and with the
-        distractor present — otherwise the compound fixture would pass on a
-        scorer that joins nothing."""
+    def test_the_compound_hit_is_the_ONLY_hit_the_bare_half_is_GONE(
+        self, search_store: Path
+    ) -> None:
+        """End to end, with the distractor still in the store. `mailer` carries a
+        bare `rate`; under the old symmetric prefix rule it rode along at 0.92
+        for a query it does not contain. It must now be absent — and the fixture
+        is still a genuine kill for the join, because with the join removed
+        `ratelimit` reaches NOTHING (asserted in the mutation matrix)."""
         hunks = rc.search(search_store, SEARCH_SCOPE, "ratelimit").hunks
         assert hunks[0].ref == "edge-proxy"
         assert hunks[0].score == 1.0
-        assert "mailer" in {h.ref for h in hunks}, "the distractor stopped matching"
-        assert next(h for h in hunks if h.ref == "mailer").score == rc.PREFIX_STRENGTH
+        assert "mailer" not in {h.ref for h in hunks}, (
+            "the bare-`rate` distractor is back on the screen — the reverse "
+            "direction has reopened in `pair_strength`"
+        )
 
-    def test_the_reverse_direction_is_covered_by_prefix_and_substring(self) -> None:
+    def test_a_query_the_candidate_EXTENDS_still_matches_both_rungs(self) -> None:
+        """The direction that is KEPT, named as the two documented motivating
+        cases. If a directional fix breaks either of these the fix is wrong."""
         assert rc.pair_strength("rate", "ratelimit") == rc.PREFIX_STRENGTH
         assert rc.pair_strength("limit", "ratelimit") == rc.SUBSTRING_STRENGTH
+        assert rc.pair_strength("postgres", "postgresql") == rc.PREFIX_STRENGTH
 
     def test_a_short_token_must_match_EXACTLY(self) -> None:
         """🔴 ONE length rule guarding all three inexact rungs. Short tokens are
@@ -1722,15 +1996,283 @@ class TestSearchScorer:
     def test_an_absent_TERM_costs_its_share_because_the_score_is_a_MEAN(self) -> None:
         """🔴 The reason a multi-token query cannot be as loose as its loosest
         word. A max would have scored this 1.00."""
-        block = rc.tokenize("the edge-proxy rate-limit cap is global")
+        block = "the edge-proxy rate-limit cap is global"
         assert rc.score_unit(rc.tokenize("edge kryptonite"), block) == pytest.approx(0.5)
         assert rc.score_unit(rc.tokenize("edge kryptonite"), block) < (
             rc.DEFAULT_SEARCH_THRESHOLD
         )
 
     def test_an_empty_query_matches_NOTHING_rather_than_everything(self) -> None:
-        assert rc.score_unit((), rc.tokenize("anything at all")) == 0.0
-        assert rc.score_unit(rc.tokenize("anything"), ()) == 0.0
+        assert rc.score_unit((), "anything at all") == 0.0
+        assert rc.score_unit(rc.tokenize("anything"), "") == 0.0
+
+
+# =============================================================================
+# DIRECTIONALITY: the inexact rungs are ONE-WAY, and the join stops at a clause.
+# =============================================================================
+#
+# 🔴 EVERY ENTRY BELOW IS INVENTED, like the corpus above it. The real store is
+# client-confidential and this repo is public.
+
+DIRECTIONAL_SCOPE = "widget-yard"
+
+
+def _make_directional_store(root: Path) -> Path:
+    """A synthetic scope carrying one BAIT for each way an inexact rung can lie.
+
+    Each bait is a word the corpus really writes, chosen so that a query which
+    STRICTLY CONTAINS it has no honest business matching here."""
+    store = root / "directional-store"
+    d = store / DIRECTIONAL_SCOPE
+    d.mkdir(parents=True)
+
+    def w(name: str, **kw) -> None:
+        (d / f"{name}.md").write_text(
+            _entry(name, DIRECTIONAL_SCOPE, **kw), encoding="utf-8"
+        )
+
+    # SUBSTRING BAIT — and THE HEADLINE CASE. The corpus writes `rotate`; nothing
+    # anywhere writes `logrotate`. `rotate` is not a PREFIX of `logrotate`, so
+    # this bait can only ever be taken by the substring rung.
+    w(
+        "spin-drive",
+        pointers="- the drum will rotate once per cycle.",
+        nuance="- 2026-04-01: a stalled drum reports ready for a further 20s.",
+    )
+    # PREFIX BAIT. `drain` IS a prefix of `drainage`, so a symmetric prefix rung
+    # takes this at 0.92 while a symmetric substring rung takes it at 0.85 — two
+    # different numbers, which is what lets the two mutants be told apart.
+    w(
+        "relay-hub",
+        pointers="- drain that node, port-forward the admin socket first.",
+        nuance="- 2026-04-04: draining twice in a minute wedges the queue.",
+    )
+    # POSITIVE CONTROL, prefix rung: the query is a PREFIX of what the corpus
+    # writes. This direction is KEPT and must not regress.
+    w(
+        "ledger-store",
+        pointers="- the postgresql primary is the only writer.",
+        nuance="- 2026-04-02: failover promotes a stale replica when the vip lags.",
+    )
+    # POSITIVE CONTROL, substring rung: the query is CONTAINED BY what the corpus
+    # writes. Also kept.
+    w(
+        "edge-gate",
+        pointers="- one listener per tenant.",
+        nuance="- 2026-04-03: the ratelimit cap is global and not per-tenant.",
+    )
+    # WITHIN-CLAUSE JOIN, so the clause rule cannot be satisfied by deleting the
+    # join outright — that mutant has to stay separately killable.
+    w(
+        "mesh-probe",
+        pointers="- the health check runs every 30s.",
+        nuance="- 2026-04-05: a failed check is retried three times before it counts.",
+    )
+    return store
+
+
+@pytest.fixture()
+def directional_store(tmp_path: Path) -> Path:
+    return _make_directional_store(tmp_path)
+
+
+class TestSearchDirectionality:
+    """🔴 THE INEXACT RUNGS ASK ONE QUESTION: does the candidate spell MORE than
+    the query? Never the reverse.
+
+    A symmetric rung ("either is a prefix/substring of the other") accepts a
+    candidate that is a FRAGMENT of the query. `score_unit` is a mean over the
+    QUERY's tokens, so a ONE-TOKEN query then took FULL coverage from a single
+    incidental short word, and every hit on the page carried a 0.85 or 0.92 that
+    nothing in the entry justified — on real single-token queries a MAJORITY of
+    the hunks served did not contain the query anywhere, and some first pages
+    were fabricated end to end. No fraction is quoted: it is a property of a
+    store that changes daily. This class pins the BEHAVIOUR instead."""
+
+    def test_the_fixture_still_carries_its_BAIT(self, directional_store: Path) -> None:
+        """🔴 The positive control on the corpus itself. Every assertion below is
+        an ABSENCE, and an absence is worthless if the bait quietly left the
+        fixture — the store would then be silent for the wrong reason."""
+        corpus = "\n".join(
+            p.read_text(encoding="utf-8")
+            for p in sorted((directional_store / DIRECTIONAL_SCOPE).glob("*.md"))
+        ).lower()
+        for bait in ("rotate", "drain", "node", "port"):
+            assert bait in corpus, f"the `{bait}` bait left the fixture"
+        for absent in ("logrotate", "drainage", "nodeport"):
+            assert absent not in corpus, f"`{absent}` is IN the corpus — no bait left"
+
+    def test_a_FRAGMENT_of_the_query_is_NOT_a_match(
+        self, directional_store: Path
+    ) -> None:
+        """THE HEADLINE. A corpus that only ever writes `rotate` must be SILENT
+        for `logrotate` — the whole word is absent, and a searcher that answers
+        anyway has invented its answer.
+
+        The end-to-end claim is asserted FIRST, so the red this test throws on
+        pre-change code is the symptom a CALLER sees and not only a number."""
+        rep = rc.search(directional_store, DIRECTIONAL_SCOPE, "logrotate")
+        assert rep.status == "search-no-match", (
+            f"a corpus that never writes `logrotate` served {len(rep.hunks)} hunks "
+            f"for it, top score {rep.hunks[0].score if rep.hunks else 0:.2f}"
+        )
+        assert rep.hunks == ()
+        # …and the rung that used to take the bait, at its own number (0.85).
+        assert rc.pair_strength("logrotate", "rotate") == 0.0
+
+    def test_the_prefix_FRAGMENT_is_not_a_match_either(
+        self, directional_store: Path
+    ) -> None:
+        """The other rung's bait, end to end: `drain` prefixes `drainage`, so
+        this one used to be taken at 0.92 rather than 0.85."""
+        rep = rc.search(directional_store, DIRECTIONAL_SCOPE, "drainage")
+        assert rep.status == "search-no-match", (
+            f"a corpus that never writes `drainage` served {len(rep.hunks)} hunks "
+            f"for it, top score {rep.hunks[0].score if rep.hunks else 0:.2f}"
+        )
+        assert rc.pair_strength("drainage", "drain") == 0.0
+
+    def test_the_POSITIVE_CONTROLS_the_fix_must_not_break(
+        self, directional_store: Path
+    ) -> None:
+        """🔴 The direction that is KEPT, as the two cases `pair_strength` names
+        as motivating. If a directional fix breaks either of these the FIX is
+        wrong, not the test."""
+        pg = rc.search(directional_store, DIRECTIONAL_SCOPE, "postgres")
+        assert pg.status == "search-hit"
+        assert pg.hunks[0].ref == "ledger-store"
+        assert pg.hunks[0].score == rc.PREFIX_STRENGTH
+        assert "postgresql" in "\n".join(pg.hunks[0].lines)
+
+        lim = rc.search(directional_store, DIRECTIONAL_SCOPE, "limit")
+        assert lim.status == "search-hit"
+        assert lim.hunks[0].ref == "edge-gate"
+        assert lim.hunks[0].score == rc.SUBSTRING_STRENGTH
+        assert "ratelimit" in "\n".join(lim.hunks[0].lines)
+
+    def test_an_EXACT_hit_still_outranks_every_inexact_rung(
+        self, directional_store: Path
+    ) -> None:
+        """The narrowing control at the top of the ladder: a whole-word query
+        still lands at 1.00 and still beats the 0.92 the same store can offer."""
+        rep = rc.search(directional_store, DIRECTIONAL_SCOPE, "rotate")
+        assert rep.status == "search-hit"
+        assert rep.hunks[0].ref == "spin-drive"
+        assert rep.hunks[0].score == 1.0
+        assert rep.hunks[0].score > rc.PREFIX_STRENGTH
+
+    def test_a_MULTI_token_query_still_covers_across_the_block(
+        self, directional_store: Path
+    ) -> None:
+        """The token-set path, so a fix that narrowed matching in general is
+        caught here and not only at the rung it touched."""
+        rep = rc.search(directional_store, DIRECTIONAL_SCOPE, "stalled drum")
+        assert rep.status == "search-hit"
+        assert rep.hunks[0].ref == "spin-drive"
+        assert rep.hunks[0].score == 1.0
+        # …and the mean still charges for a word that is not there.
+        half = rc.search(directional_store, DIRECTIONAL_SCOPE, "stalled kryptonite")
+        assert half.status == "search-no-match"
+
+    def test_the_NONSENSE_query_control_AND_the_no_match_affordance(
+        self, directional_store: Path
+    ) -> None:
+        """🔴 THE `NO MATCH` BRANCH, PROVEN REACHABLE IN BOTH ITS SHAPES.
+
+        They are reached differently and neither may be assumed. A ONE-TOKEN
+        query can never produce a NEAR MISS at the default threshold — its score
+        IS its single token's strength, and every non-zero rung (0.85 and up)
+        already clears 0.60 — so the near-miss shape is reached by raising the
+        threshold, exactly as the flag's own help says. The advice is then
+        EXECUTED, because an affordance nobody runs is decoration."""
+        gone = rc.search(directional_store, DIRECTIONAL_SCOPE, "kryptonite")
+        assert gone.status == "search-no-match"
+        assert gone.best_below is None
+        n = len(list((directional_store / DIRECTIONAL_SCOPE).glob("*.md")))
+        assert gone.entries_searched == n > 1
+        absent_text = rc.render_search(gone)
+        assert "No candidate scored above zero at all" in absent_text
+        assert "closest candidate" not in absent_text
+
+        near = rc.search(
+            directional_store, DIRECTIONAL_SCOPE, "postgres", threshold=0.95
+        )
+        assert near.status == "search-no-match"
+        assert near.best_below == ("ledger-store", rc.PREFIX_STRENGTH)
+        near_text = rc.render_search(near)
+        assert "closest candidate was `ledger-store` at 0.92" in near_text
+        assert "`--threshold 0.91`" in near_text
+        # The advertised flag, RUN.
+        again = rc.search(
+            directional_store, DIRECTIONAL_SCOPE, "postgres", threshold=0.91
+        )
+        assert again.status == "search-hit"
+        assert again.hunks[0].ref == "ledger-store"
+
+
+class TestCandidateJoinStopsAtAClause:
+    """🔴 The join may cross the four ways ONE term is spelled, and nothing else.
+
+    Joining `node`+`port` across a comma manufactured a PERFECT 1.00 for
+    `nodeport` in an entry that does not contain the word — the worst shape this
+    scorer can emit, because 1.00 out-ranks every genuine match on the page."""
+
+    def test_a_COMMA_is_not_part_of_a_compound(self, directional_store: Path) -> None:
+        assert "nodeport" not in rc.candidate_tokens("drain that node, port-forward it")
+        assert "nodeport" in rc.candidate_tokens("drain that node port-forward it")
+        rep = rc.search(directional_store, DIRECTIONAL_SCOPE, "nodeport")
+        assert rep.status == "search-no-match"
+
+    def test_every_clause_BREAKER_is_reachable(self) -> None:
+        """Each character in the class, exercised — a set nobody probes is a set
+        whose members can be wrong one at a time."""
+        assert "alphabeta" in rc.candidate_tokens("one alpha beta two"), (
+            "the positive control failed: the join is not happening at all, so "
+            "every absence below would pass for the wrong reason"
+        )
+        for ch in ",;:!?()[]":
+            assert "alphabeta" not in rc.candidate_tokens(f"one alpha{ch} beta two"), ch
+
+    def test_a_SENTENCE_stop_breaks_it_but_a_DOTTED_identifier_does_not(self) -> None:
+        """🔴 The `.` rule is the narrow one, and this is why: a dotted
+        identifier is a single term whose halves must keep joining, so the break
+        fires only when the `.` is followed by whitespace or end-of-text."""
+        assert "alphabeta" not in rc.candidate_tokens("one alpha. Beta follows")
+        assert "alphabeta" not in rc.candidate_tokens("it ends in alpha.")
+        assert "alphabeta" in rc.candidate_tokens("the alpha.beta key")
+
+    def test_the_join_still_crosses_every_spelling_of_ONE_compound(
+        self, directional_store: Path
+    ) -> None:
+        """🔴 THE COST SIDE, MEASURED SEPARATELY. A hyphen, an underscore, a
+        space and a dot inside an identifier are the four ways one term gets
+        written; a clause rule that broke on any of them would trade one false
+        positive for a lost match."""
+        for spelling in ("health-check", "health_check", "health check", "health.check"):
+            assert "healthcheck" in rc.candidate_tokens(f"the {spelling} runs"), spelling
+        rep = rc.search(directional_store, DIRECTIONAL_SCOPE, "healthcheck")
+        assert rep.status == "search-hit"
+        assert rep.hunks[0].ref == "mesh-probe"
+        assert rep.hunks[0].score == 1.0
+
+    def test_clause_FREE_text_yields_EXACTLY_the_old_candidate_set(self) -> None:
+        """🔴 THE NARROWING CONTROL. Where there is no clause punctuation the new
+        rule must produce precisely the tokens-plus-every-adjacent-join set the
+        old one did — same members, same order — or the fix has quietly shrunk
+        real matching everywhere instead of only at the boundary it targets."""
+        text = "the readiness probe lies for 40s after a reload"
+        toks = rc.tokenize(text)
+        old = tuple(toks) + tuple(a + b for a, b in zip(toks, toks[1:]))
+        assert rc.candidate_tokens(text) == old
+
+    def test_candidate_tokens_takes_TEXT_so_the_guard_cannot_be_BYPASSED(
+        self,
+    ) -> None:
+        """🔴 One rule, one place. If it accepted a token sequence, a caller that
+        tokenized first would silently lose the clause boundary — which is the
+        exact shape of the defect. Passing tokens must FAIL, loudly."""
+        with pytest.raises(TypeError):
+            rc.candidate_tokens(rc.tokenize("drain that node, port-forward it"))
 
 
 class TestEntryBlocks:
@@ -1893,19 +2435,19 @@ class TestSearchOutputContract:
         assert rep.hunks[0].start == 1
         assert len(rep.hunks[0].lines) == len(raw)
 
-    def test_search_covers_WHAT_IT_IS_which_the_digest_deliberately_hides(
+    def test_search_covers_WHAT_IT_IS_like_every_other_section(
         self, search_store: Path
     ) -> None:
-        """🔴 A DELIBERATE DIVERGENCE, stated so it is not read as a leak of the
-        digest's rule. The digest excludes `## What it is` because printing it for
-        every entry turns recall into a dump; a SEARCH is a targeted question and
-        hiding a section would answer it with a confident zero. The hunk names its
-        section, so the reader always knows which one they got."""
+        """Search has always covered `## What it is` — a targeted question, and
+        hiding a section would answer it with a confident zero. The hunk names
+        its section, so the reader always knows which one they got.
+
+        ⚠ This test used to end by asserting the DIGEST hid the same section. It
+        no longer does: search and the digest now agree, and the divergence this
+        docstring used to justify is gone."""
         rep = rc.search(search_store, SEARCH_SCOPE, "durable")
         assert rep.hunks
         assert any("What it is" in h.section for h in rep.hunks)
-        # …and the digest's rule is untouched.
-        assert WHAT_IT_IS not in rc.render_text(rc.recall(search_store, SEARCH_SCOPE))
 
     def test_the_hunk_truncation_is_LOUD(self, search_store: Path) -> None:
         rep = rc.search(search_store, SEARCH_SCOPE, "the", threshold=0.5, max_hits=2)
@@ -2482,9 +3024,16 @@ class TestCli:
             assert forbidden not in help_text, f"the reader grew {forbidden}"
 
     def test_the_help_states_the_read_only_contract(self) -> None:
-        help_text = rc._build_parser().format_help()
+        # ⚠ WHITESPACE-NORMALIZED, and that is a FIX not a loosening. argparse
+        # re-wraps the description to the terminal width, so whether a phrase
+        # survives as a literal substring depends on `COLUMNS` and on how long
+        # the sentence before it happens to be — this assertion went red on a
+        # description edit that did not touch either phrase. The claim under
+        # test is "the help says these words", never "at this column".
+        help_text = " ".join(rc._build_parser().format_help().split())
         assert "never writes to the store" in help_text
         assert "never touches the network" in help_text
+        assert "## What it is" in help_text
 
     def test_list_prints_the_index_and_no_bodies(self, store: Path, capsys) -> None:
         assert rc.main(["--store", str(store), "--scope", SCOPE, "--list"]) == 0
@@ -2493,6 +3042,18 @@ class TestCli:
         assert POINTER_LINE not in out
         for ref in ("collector", "status-bar", "weekly-digest.process"):
             assert ref in out
+        # 🔴 THE FOOTER'S POINTER SENTENCE, PINNED WHOLE — a MUTATION SURVIVOR
+        # until this line existed. `--list` was measured to cost a flat +18 B when
+        # `## What it is` joined the surfaced set, and this sentence IS that +18 B:
+        # dropping `{WHAT_HEADING}` from it left the entire suite green, so the
+        # only thing `--list` pays for was pinned nowhere. It is asserted as ONE
+        # normalised string and not by keyword, because a guard on a word is
+        # walkable by rewording — and the three headings are asserted through the
+        # module's own constants, so renaming a heading moves the guard with it.
+        assert (
+            f"Run `--ref <name>` for one entry's `{rc.WHAT_HEADING}` + "
+            f"`{rc.POINTERS_HEADING}` + `{rc.NUANCE_HEADING}`."
+        ) in out
 
     def test_the_bare_default_is_the_DIGEST(self, store: Path, capsys) -> None:
         """🔴 RED AT origin/main: the bare default printed every entry's body."""
@@ -3037,6 +3598,23 @@ class TestSkillDocsArePinned:
             "the fail-safe overrode it",
             "🔴 an overridden sensitivity marker is shown, never silently rewritten",
         ),
+        # --- the three badges added with items 2 and 1 of the entry-shape
+        #     proposal. Each pins the CONSEQUENCE, not the glyph: a step that
+        #     lists a badge without saying what it implies about the numbers
+        #     beside it has documented a decoration.
+        (
+            "`N OPEN` is **short by up to N**",
+            "🔴 what a NEAR-MISS badge implies about the OPEN count on the same row",
+        ),
+        (
+            "the closure cannot be checked",
+            "what UNVERIFIABLE means — a real closure, just not a checkable one",
+        ),
+        (
+            "0 by parse failure, not by measurement",
+            "🔴 a `NO <heading>` row's counts are not readings, and the step must not "
+            "report such an entry as empty",
+        ),
     ]
 
     def test_the_RETRACTED_cost_claim_is_not_reasserted(self) -> None:
@@ -3089,16 +3667,48 @@ class TestSkillDocsArePinned:
 
     def test_the_recall_step_comes_AFTER_the_handoff_is_read(self) -> None:
         """Structural, not a phrase: recall is context for a doc already read,
-        not a substitute for reading it."""
+        not a substitute for reading it.
+
+        ⚠ RED ON `main` FROM #643 UNTIL THIS COMMIT, and nothing caught it — the
+        repo has no automated merge gate. #643 extended step 2's imperative from
+        `**Read it fully.**` to `**Read it fully — but treat its "Open
+        investigations" section as RECALL, not live state.**`, a legitimate
+        reword, and this pin was anchored on the sentence INCLUDING its full
+        stop. That is the wrong anchor for this test: what it asserts is an
+        ORDERING of four steps, so it should hold the imperative that opens the
+        step and let the rest of the sentence evolve. The sentence's WORDING is
+        somebody else's pin (`_assert_rationale_pin` above); this one is about
+        position. Asserted unique below so the index cannot silently move.
+        ⚠ THE RECONCILE STEP MOVED, DELIBERATELY, AND THIS TEST ASSERTED THE OLD
+        ORDER. It used to require `read_it < reconcile`. `resume-state.sh` now
+        compares the handoff against `origin/<default-branch>` and decides which
+        copy is authoritative, so it has to run BEFORE the doc is read —
+        otherwise the agent reads the working-tree copy first, which is the
+        stale-handoff defect (a clone served one 276 lines behind origin/trunk,
+        and the whole session was framed on it).
+
+        So the order is now reconcile < read_it, pinned here so the swap cannot
+        be silently undone. The invariant this test is named for is untouched:
+        recall still comes after the doc is read.
+        """
         doc = RESUME_DOC.read_text(encoding="utf-8")
-        read_it = doc.index("**Read it fully.**")
+        # Anchor on the imperative that OPENS the step, never the full sentence:
+        # this test asserts an ORDERING, so the rest of the sentence must be free
+        # to evolve (a reword inside the bold span turned `main` RED once).
+        # Uniqueness is asserted because `.index()` would otherwise return
+        # whichever occurrence came first and the ordering claim could invert.
+        assert doc.count("**Read the handoff in full") == 1, (
+            "the ordering anchor is no longer unique — `.index()` would return "
+            "whichever came first and the ordering claim could invert"
+        )
+        read_it = doc.index("**Read the handoff in full")
         # The INVOCATION, not the bare filename: `resume-state.sh` is also named
         # in step 1's prose, so `.index()` on the bare name finds a point BEFORE
         # the handoff is read and the ordering claim inverts.
         reconcile = doc.index("bash ~/workspace/devrc/scripts/resume-state.sh")
         step = doc.index("subsystem_recall.py")
         report = doc.index("**Report**")
-        assert read_it < reconcile < step < report
+        assert reconcile < read_it < step < report
 
     def test_the_pin_can_report_absence(self) -> None:
         """Negative control on the pin: a check against a doc that happens to
@@ -3448,22 +4058,37 @@ class TestMutationKillMatrix:
         rep = mod.recall(store, SCOPE, limit=0, mode="full")
         assert rep.entries == (), "limit=0 silently surfaced nothing instead of erroring"
 
-    def test_kills_the_what_it_is_exclusion(self, tmp_path: Path) -> None:
-        """🔴 Without it the recall block becomes a dump of the store — the one
-        thing the brief forbids, and invisible to any test that only checks the
-        two wanted sections ARE present."""
+    def test_kills_the_what_it_is_INCLUSION(self, tmp_path: Path) -> None:
+        """🔴 THE RED HALF OF THE FIX, PERMANENTLY. Drop `WHAT_HEADING` back out
+        of `SURFACED_HEADINGS` — the exact pre-2026-08-20 source — and the recall
+        block silently stops answering "what IS this thing", which is the defect
+        the change exists to close. Invisible to any test that only checks the
+        other two sections are present, which is how it survived for months.
+
+        ⚠ This mutation is the INVERSE of the one that used to live here: the
+        anchor asserts the shipped source really carries the wider tuple, so the
+        test cannot pass by mutating a line that no longer exists."""
         mod = _load_mutant(
             tmp_path,
             "m_sections",
             [
                 (
+                    'SURFACED_HEADINGS: tuple[str, ...] = (WHAT_HEADING, POINTERS_HEADING, NUANCE_HEADING)',
                     'SURFACED_HEADINGS: tuple[str, ...] = (POINTERS_HEADING, NUANCE_HEADING)',
-                    'SURFACED_HEADINGS: tuple[str, ...] = (POINTERS_HEADING, NUANCE_HEADING, "## What it is")',
                 )
             ],
         )
         store = _make_store(tmp_path / "s")
-        assert WHAT_IT_IS in mod.render_text(mod.recall(store, SCOPE))
+        text = mod.render_text(mod.recall(store, SCOPE))
+        # The CONTENT sentinel, not the heading string: the mutant still prints
+        # the "(no parsable `## What it is` …)" note, so grepping the heading
+        # would score this mutant SURVIVED for a reason that has nothing to do
+        # with the section being surfaced.
+        assert WHAT_IT_IS not in text
+        # …and the kill is distinguishable from a broken harness: the other two
+        # sections still render, so this is a section-SELECTION kill and not
+        # "the renderer produced nothing".
+        assert POINTER_LINE in text and NUANCE_LINE in text
 
     # ⚠ THE FENCE-SKIP AND PRESENT-BUT-EMPTY KILLS MOVED TO
     # test_subsystem_resolver.py, with the parser itself. `extract_sections` is
@@ -3893,18 +4518,97 @@ class TestMutationKillMatrix:
 
     def test_kills_the_concatenation(self, tmp_path: Path) -> None:
         """Without it a compound whose parts are shorter than MIN_INEXACT_LEN is
-        unreachable — every other rung is closed to a 3-character token."""
+        unreachable — every other rung is closed to a 3-character token — and,
+        now that the rungs are directional, so is a compound whose parts are LONG
+        (`ratelimit` against a corpus writing `rate-limit`)."""
         mod = _load_mutant(
             tmp_path,
             "m_concat",
-            [("    return tuple(tokens) + tuple(a + b for a, b in zip(tokens, tokens[1:]))",
-              "    return tuple(tokens)")],
+            [("        joined.extend(a + b for a, b in zip(toks, toks[1:]))",
+              "        joined.extend(())")],
         )
         store = _make_search_store(tmp_path / "s")
         assert mod.search(store, SEARCH_SCOPE, "k8sapi").status == "search-no-match"
+        assert mod.search(store, SEARCH_SCOPE, "ratelimit").status == "search-no-match"
         real = rc.search(store, SEARCH_SCOPE, "k8sapi")
         assert real.hunks[0].ref == "beacon"
         assert real.hunks[0].score == 1.0
+        assert rc.search(store, SEARCH_SCOPE, "ratelimit").hunks[0].score == 1.0
+
+    def test_kills_the_PREFIX_rung_DIRECTION(self, tmp_path: Path) -> None:
+        """🔴 ONE RUNG, ISOLATED. Only the prefix `if` is reverted to the
+        symmetric form — the substring rung below it is untouched, so a green
+        here could not be a neighbour's doing.
+
+        The kill is asserted on THIS rung's own number. Both mutants take the
+        same bait (`drain` prefixes `drainage`, and therefore is also contained
+        by it), but the prefix rung answers 0.92 and the substring rung 0.85, so
+        the score IS the discriminator."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_prefix_dir",
+            [("    if t.startswith(q):", "    if t.startswith(q) or q.startswith(t):")],
+        )
+        assert mod.pair_strength("drainage", "drain") == mod.PREFIX_STRENGTH
+        assert mod.pair_strength("drainage", "drain") != mod.SUBSTRING_STRENGTH
+        assert rc.pair_strength("drainage", "drain") == 0.0
+        store = _make_directional_store(tmp_path / "s")
+        mutant = mod.search(store, DIRECTIONAL_SCOPE, "drainage")
+        assert mutant.status == "search-hit"
+        assert mutant.hunks[0].score == mod.PREFIX_STRENGTH
+        assert "drainage" not in "\n".join(mutant.hunks[0].lines).lower()
+        assert rc.search(store, DIRECTIONAL_SCOPE, "drainage").status == "search-no-match"
+        # …and the rung it must NOT have touched still answers as itself.
+        assert mod.pair_strength("logrotate", "rotate") == 0.0
+
+    def test_kills_the_SUBSTRING_rung_DIRECTION(self, tmp_path: Path) -> None:
+        """🔴 The other rung, isolated the same way — and reached by a bait the
+        PREFIX rung structurally cannot take: `rotate` is contained by
+        `logrotate` but does not begin it. Without this rung's direction the
+        headline defect is back: a corpus that only writes `rotate` answers a
+        `logrotate` query at 0.85."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_substr_dir",
+            [("    if q in t:", "    if q in t or t in q:")],
+        )
+        assert mod.pair_strength("logrotate", "rotate") == mod.SUBSTRING_STRENGTH
+        assert rc.pair_strength("logrotate", "rotate") == 0.0
+        store = _make_directional_store(tmp_path / "s")
+        mutant = mod.search(store, DIRECTIONAL_SCOPE, "logrotate")
+        assert mutant.status == "search-hit"
+        assert mutant.hunks[0].score == mod.SUBSTRING_STRENGTH
+        assert "logrotate" not in "\n".join(mutant.hunks[0].lines).lower()
+        assert rc.search(store, DIRECTIONAL_SCOPE, "logrotate").status == "search-no-match"
+        # …and the rung above it stayed directional, at ITS own number.
+        assert mod.pair_strength("drainage", "drain") == mod.SUBSTRING_STRENGTH
+        assert mod.pair_strength("drainage", "drain") != mod.PREFIX_STRENGTH
+
+    def test_kills_the_CLAUSE_boundary_on_the_join(self, tmp_path: Path) -> None:
+        """🔴 The join's boundary, mutated NARROWLY: the break class is emptied
+        to a pattern that matches nothing, leaving the join itself intact — a
+        mutant that deleted both would die for the concatenation's reason and
+        prove nothing about the boundary.
+
+        Its symptom is specific and is the worst one available: a PERFECT 1.00
+        for a query the winning entry does not contain anywhere."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_clause",
+            [(r'_CLAUSE_BREAK = re.compile(r"[,;:!?()\[\]]|\.(?=\s|$)")',
+              '_CLAUSE_BREAK = re.compile(r"(?!x)x")')],
+        )
+        assert "nodeport" in mod.candidate_tokens("drain that node, port-forward it")
+        assert "nodeport" not in rc.candidate_tokens("drain that node, port-forward it")
+        store = _make_directional_store(tmp_path / "s")
+        mutant = mod.search(store, DIRECTIONAL_SCOPE, "nodeport")
+        assert mutant.status == "search-hit"
+        assert mutant.hunks[0].score == 1.0
+        assert "nodeport" not in "\n".join(mutant.hunks[0].lines).lower()
+        assert rc.search(store, DIRECTIONAL_SCOPE, "nodeport").status == "search-no-match"
+        # …and the legitimate join is still there in the mutant, so this kill is
+        # about the BOUNDARY and not about the join having vanished.
+        assert mod.search(store, DIRECTIONAL_SCOPE, "healthcheck").hunks[0].score == 1.0
 
     def test_kills_the_short_token_exactness_rule(self, tmp_path: Path) -> None:
         """🔴 Without it short tokens fuzzily reach anything they prefix, which is
@@ -4563,3 +5267,685 @@ class TestDegradationMutationKills:
         assert rep.status == "recalled"
         assert len(rep.malformed) == 1
         assert "widget-index.md" in mod.render_text(rep)
+
+
+# =============================================================================
+# The index line's OPEN annotation. See test_subsystem_touch.py's open-actions
+# section for the measured incident behind the marker.
+# =============================================================================
+
+
+def _recalled(
+    nuance: list[str], ref: str = "svc", nuance_heading: str = sr.NUANCE_HEADING
+) -> rc.RecalledEntry:
+    """A `RecalledEntry` built the way `read_entry` builds one — EVERY field the
+    index row can render, not just the ones a given test is about.
+
+    🔴 The omission mattered. This helper used to populate `open_count` and
+    nothing else, so the byte-identical pin below was silently asserting about
+    an entry whose near-miss/unverifiable/missing-section fields were all at
+    their dataclass defaults — it could not have caught a badge that renders
+    unconditionally. `nuance_heading` is a parameter so a test can rename the
+    heading and watch the section stop being found, which is the §2.2 bug.
+    """
+    text = "\n".join(
+        ["---", f"service: {ref}", "sensitivity: public", "---", "",
+         "## Pointers", "- a", "", nuance_heading, *nuance, ""]
+    )
+    sections = sr.extract_sections(text, (sr.POINTERS_HEADING, sr.NUANCE_HEADING))
+    bullets = sr.parse_journal_bullets(sections.get(sr.NUANCE_HEADING, ""))
+    pops = collections.Counter(b.openness_population for b in bullets)
+    return rc.RecalledEntry(
+        ref=ref, filename=f"{ref}.md", sensitivity="public", sections=sections,
+        bullet_count=len(bullets),
+        open_count=pops["open"],
+        near_miss_count=pops["near-miss"],
+        unverifiable_count=pops["unverifiable"],
+        missing_sections=tuple(
+            h for h in (sr.POINTERS_HEADING, sr.NUANCE_HEADING) if h not in sections
+        ),
+    )
+
+
+class TestListingLineOpenAnnotation:
+    def test_an_entry_with_nothing_open_renders_BYTE_IDENTICAL_to_before(self):
+        """🔴 The index prints for EVERY entry on EVERY read, so a field that
+        rendered unconditionally would tax the common case forever to describe the
+        rare one. The annotation is conditional for that reason, and this pins it:
+        the no-open line ends at the sensitivity, exactly as it always has."""
+        # The pre-change format, SPELLED OUT here rather than copied from the
+        # renderer — a literal lifted from the implementation would agree with it
+        # by construction and could not detect the format moving.
+        expected = "  " + "svc".ljust(12) + "  " + f"{1:>3}" + " nuance   " + "public"
+        line = rc.listing_line(_recalled(["- 2026-08-15: an ordinary lesson."]), 12)
+        assert line == expected
+
+    def test_an_open_entry_is_annotated_with_its_COUNT(self):
+        line = rc.listing_line(
+            _recalled([
+                "- 2026-08-01: OPEN: one.",
+                "- 2026-08-02: OPEN: two.",
+                "- 2026-08-03: an ordinary lesson.",
+            ]), 12,
+        )
+        assert line.endswith("🔴 2 OPEN")
+        assert "3 nuance" in line
+
+    def test_a_RESOLVED_bullet_does_not_count_as_open(self):
+        """The whole point of the marker: closing one has to be visible on the
+        index, or nobody is rewarded for closing it."""
+        line = rc.listing_line(
+            _recalled(["- 2026-08-02: RESOLVED b83bfb584: closed."]), 12
+        )
+        assert "OPEN" not in line
+
+    def test_an_unmarked_action_does_NOT_reach_the_index_line(self):
+        """Deliberate: the index is the highest-traffic surface in the tool, and a
+        two-phrasing guess with unmeasured recall does not belong on a line that
+        cannot carry its own caveat. It is reported by `--validate`, which can."""
+        line = rc.listing_line(
+            _recalled(["- 2026-07-24: FIX (1 line): widen the widget timeout."]), 12
+        )
+        assert "OPEN" not in line
+
+    def test_read_entry_populates_open_count_from_disk(self, tmp_path):
+        store = tmp_path / "s"
+        (store / "sc").mkdir(parents=True)
+        (store / "sc" / "svc.md").write_text(
+            "\n".join(["---", "service: svc", "scope: sc", "---", "",
+                       "## Nuance / work-history",
+                       "- 2026-08-01: OPEN: outstanding.",
+                       "- 2026-08-02: an ordinary lesson.", ""]),
+            encoding="utf-8",
+        )
+        index = sr.load_index(store)
+        entry = index.entries("sc")[0]
+        assert rc.read_entry(store, entry).open_count == 1
+
+
+class TestReadEntryOpenCountIsNotFixtureCollapsed:
+    """An audit found `read_entry`'s open count mutation-blind: replacing
+    `if b.is_open` with `if b.openness is not None` SURVIVED the whole suite,
+    because the only disk-level fixture had no `RESOLVED` bullet — so "open" and
+    "declared anything" produced identical output.
+
+    `claude/RULES.md`: a fixture of default or absent sibling values collapses
+    distinct implementations into the same result. The fix is a fixture whose
+    values are pairwise DISTINCT — here, all three openness states present at
+    once, so any predicate that confuses two of them moves the number.
+    """
+
+    def _store(self, tmp_path, bullets):
+        store = tmp_path / "s"
+        (store / "sc").mkdir(parents=True)
+        (store / "sc" / "svc.md").write_text(
+            "\n".join(["---", "service: svc", "scope: sc", "---", "",
+                       "## Nuance / work-history", *bullets, ""]),
+            encoding="utf-8",
+        )
+        return store
+
+    def test_all_three_openness_states_at_once_and_only_OPEN_is_counted(self, tmp_path):
+        store = self._store(tmp_path, [
+            "- 2026-08-01: OPEN: still outstanding.",
+            "- 2026-08-02: RESOLVED b83bfb584: closed by that commit.",
+            "- 2026-08-03: an ordinary durable lesson, no marker.",
+        ])
+        index = sr.load_index(store)
+        got = rc.read_entry(store, index.entries("sc")[0])
+        assert got.bullet_count == 3, "the fixture must exercise all three states"
+        assert got.open_count == 1, (
+            "counted something other than the OPEN bullet — a predicate of "
+            "'declared anything' gives 2 here, and 'any bullet' gives 3"
+        )
+
+
+# =============================================================================
+# The index row's three ADDITIONAL badges: near-miss, unverifiable, and the
+# missing-section note. Items 2 and 1 of
+# `claudedocs/proposal-entry-shape-explicit.md` §4.2.
+#
+# 🔴 WHAT THESE CLOSE, MEASURED, NOT READ OFF THE SOURCE. Two silent-failure
+# paths shared one observable — a row that reads `0 nuance` with no badge:
+#
+#   §2.4  2 bullets in the live store attempted an openness marker and missed
+#         the grammar, against 8 that declare `OPEN:` and parse (re-measured
+#         2026-08-19 over 53 entries / 323 nuance bullets; the proposal's
+#         "2 of 10 textual `OPEN:`" denominator did NOT reproduce — a raw grep
+#         returns 11 — but its near-miss count of 2 did).
+#         A near-miss was byte-identical to no marker on the read surface, so
+#         the population MOST likely to hold a stale open action was the one
+#         no routine surface reported. `--validate` reported it; `/resume`
+#         does not run `--validate`.
+#   §2.2  A renamed `## Nuance / work-history` heading zeroes the bullet count
+#         AND deletes the `🔴 N OPEN` badge, and `--validate` returns `OK` at
+#         exit 0. `missing_sections` already existed and was rendered ONLY
+#         under a printed body — and the digest prints one body out of N.
+#
+# The store was NOT touched to produce any of this: every fixture below is
+# synthetic, under `tmp_path`, with invented names. This repo is PUBLIC.
+# =============================================================================
+
+
+class TestNearMissAndUnverifiableReachTheIndexRow:
+    """§2.4 — a marker that was ATTEMPTED and missed is not "no marker"."""
+
+    def test_a_near_miss_bullet_is_annotated_with_its_COUNT(self):
+        """The regression. Before this badge the line below rendered exactly as
+        an entry with two ordinary lessons: the emphasis-wrapped `**OPEN:**` and
+        the parenthetical `RESOLVED <sha> (repo):` both declare nothing."""
+        line = rc.listing_line(
+            _recalled([
+                "- 2026-08-02: **OPEN:** an emphasis-wrapped marker.",
+                "- 2026-08-03: RESOLVED abc1234 (repo): a parenthetical first.",
+            ]), 12,
+        )
+        assert "🔴 2 NEAR-MISS" in line, line
+        assert "OPEN" not in line.replace("NEAR-MISS", ""), (
+            "a near-miss was counted as a declared OPEN — it declares nothing"
+        )
+
+    def test_a_near_miss_does_not_render_as_a_CLEAN_row(self):
+        """The differential the badge exists for: identical bullets, one of them
+        spelled so the marker parses. The two rows must not be the same string."""
+        parses = rc.listing_line(_recalled(["- 2026-08-02: OPEN: the retry budget."]), 12)
+        misses = rc.listing_line(_recalled(["- 2026-08-02: **OPEN:** the retry budget."]), 12)
+        clean = rc.listing_line(_recalled(["- 2026-08-02: an ordinary lesson."]), 12)
+        assert parses != misses, "the two spellings still render identically"
+        assert misses != clean, (
+            "a bullet that TRIED to declare an action is still byte-identical to "
+            "one that never tried — which is the §2.4 bug, unfixed"
+        )
+
+    def test_an_unverifiable_closure_is_annotated_with_its_COUNT(self):
+        line = rc.listing_line(
+            _recalled(["- 2026-08-04: RESOLVED: closed, no sha named."]), 12
+        )
+        assert "⚠ 1 UNVERIFIABLE" in line, line
+
+    def test_a_RESOLVED_WITH_a_sha_carries_NO_unverifiable_badge(self):
+        """The sha is the whole point of the marker: naming one has to be
+        visible, or nobody is rewarded for making the claim checkable."""
+        line = rc.listing_line(
+            _recalled(["- 2026-08-05: RESOLVED b83bfb584: closed and checkable."]), 12
+        )
+        assert "UNVERIFIABLE" not in line, line
+        assert "NEAR-MISS" not in line, line
+
+    def test_an_unmarked_action_still_does_NOT_reach_the_index_row(self):
+        """Unchanged, and deliberately so. The unmarked-action detector is a
+        FLOOR with unknown recall over two measured phrasings; a guess that
+        cannot state its own recall does not belong on a line with no room for a
+        caveat. `--validate` reports it, and can say so."""
+        line = rc.listing_line(
+            _recalled(["- 2026-07-24: FIX (1 line): widen the widget timeout."]), 12
+        )
+        for badge in ("OPEN", "NEAR-MISS", "UNVERIFIABLE", "NO "):
+            assert badge not in line, (badge, line)
+
+    def test_the_badges_are_in_VALIDATE_order_and_count_DISTINCT_populations(self):
+        """🔴 PAIRWISE-DISTINCT COUNTS, so no two badges can be swapped and stay
+        green. 1 open, 2 near-miss, 3 unverifiable: any assignment that reads the
+        wrong population moves a printed number.
+
+        The order is `--validate`'s (declared → near-miss → unverifiable) and is
+        asserted as one whole string, not three `in` checks — a substring set is
+        satisfied by any permutation.
+        """
+        line = rc.listing_line(
+            _recalled([
+                "- 2026-08-01: OPEN: still outstanding.",
+                "- 2026-08-02: **OPEN:** emphasis-wrapped, declares nothing.",
+                "- 2026-08-03: RESOLVED abc1234 (repo): parenthetical, declares nothing.",
+                "- 2026-08-04: RESOLVED: no sha (a).",
+                "- 2026-08-05: RESOLVED: no sha (b).",
+                "- 2026-08-06: RESOLVED: no sha (c).",
+                "- 2026-08-07: RESOLVED b83bfb584: closed and checkable.",
+                "- 2026-08-08: an ordinary durable lesson.",
+            ]), 12,
+        )
+        assert line == (
+            "  " + "svc".ljust(12) + "  " + f"{8:>3}" + " nuance   public"
+            + "   🔴 1 OPEN   🔴 2 NEAR-MISS   ⚠ 3 UNVERIFIABLE"
+        ), line
+
+    def test_read_entry_populates_the_counts_FROM_DISK(self, tmp_path):
+        """The renderer tests above build a `RecalledEntry` by hand. This one
+        goes through the real disk path, because a field the renderer prints and
+        `read_entry` never sets is a badge that can only ever be zero."""
+        store = tmp_path / "s"
+        (store / "sc").mkdir(parents=True)
+        (store / "sc" / "svc.md").write_text(
+            "\n".join(["---", "service: svc", "scope: sc", "---", "",
+                       "## Nuance / work-history",
+                       "- 2026-08-01: OPEN: still outstanding.",
+                       "- 2026-08-02: **OPEN:** emphasis-wrapped.",
+                       "- 2026-08-03: RESOLVED abc1234 (repo): parenthetical.",
+                       "- 2026-08-04: RESOLVED: no sha (a).",
+                       "- 2026-08-05: RESOLVED: no sha (b).",
+                       "- 2026-08-06: RESOLVED: no sha (c).",
+                       "- 2026-08-07: RESOLVED b83bfb584: checkable.",
+                       "- 2026-08-08: an ordinary durable lesson.", ""]),
+            encoding="utf-8",
+        )
+        index = sr.load_index(store)
+        got = rc.read_entry(store, index.entries("sc")[0])
+        assert (got.bullet_count, got.open_count) == (8, 1)
+        assert got.near_miss_count == 2, (
+            "read_entry did not count the near-miss population — 'any bullet with "
+            "no marker' gives 4 here and counting every bullet gives 8"
+        )
+        assert got.unverifiable_count == 3, (
+            "read_entry did not count sha-less RESOLVED bullets — counting all "
+            "RESOLVED gives 4 and counting none gives 0"
+        )
+
+    def test_the_counts_reach_the_RENDERED_index_block(self, tmp_path):
+        """End to end: disk → `read_entry` → `render_text`. A badge that only
+        appears when a test calls `listing_line` directly is a badge `/resume`
+        never sees."""
+        store = tmp_path / "s"
+        (store / "sc").mkdir(parents=True)
+        (store / "sc" / "svc.md").write_text(
+            "\n".join(["---", "service: svc", "scope: sc", "sensitivity: public", "---", "",
+                       "## Pointers", "- a", "",
+                       "## Nuance / work-history",
+                       "- 2026-08-02: **OPEN:** emphasis-wrapped.", ""]),
+            encoding="utf-8",
+        )
+        text = rc.render_text(rc.recall(store, "sc", mode="list"))
+        row = next(l for l in text.splitlines() if l.strip().startswith("svc "))
+        assert "🔴 1 NEAR-MISS" in row, row
+
+
+class TestAMissingSurfacedSectionReachesTheIndexRow:
+    """§2.2 — the differential control, as a test.
+
+    Two entries differing in EXACTLY ONE variable (the nuance heading) and
+    carrying the same `OPEN:` marker. Before this badge the renamed one rendered
+    `0 nuance` with no badge at all, which is what a well-formed entry with an
+    empty work-history renders — so `/resume`, which consumes exactly this row,
+    could not tell a curated entry with an open action from an empty one.
+    """
+
+    NUANCE = [
+        "- 2026-08-01: OPEN: the retry budget is still unset.",
+        "- 2026-08-02: an ordinary lesson.",
+    ]
+
+    def _store(self, tmp_path, heading: str, ref: str = "payments-api"):
+        store = tmp_path / "s"
+        (store / "example-scope").mkdir(parents=True, exist_ok=True)
+        (store / "example-scope" / f"{ref}.md").write_text(
+            "\n".join(["---", f"service: {ref}", "scope: example-scope",
+                       "sensitivity: public", "---", "",
+                       "## What it is", "", "A synthetic fixture.", "",
+                       "## Pointers", "- `some/path` — a pointer.", "",
+                       heading, *self.NUANCE, ""]),
+            encoding="utf-8",
+        )
+        return store
+
+    def _row(self, store, ref):
+        rep = rc.recall(store, "example-scope", mode="list")
+        return rc.listing_line(next(e for e in rep.listing if e.ref == ref), 14)
+
+    def test_the_renamed_heading_is_ANNOUNCED_on_the_row(self, tmp_path):
+        store = self._store(tmp_path, "## Nuance and work history")
+        row = self._row(store, "payments-api")
+        assert "🔴 NO Nuance / work-history" in row, row
+
+    def test_the_renamed_row_no_longer_matches_a_WELL_FORMED_EMPTY_one(self, tmp_path):
+        """🔴 THE ACTUAL BUG, stated as a difference rather than as a substring.
+        A word-level check would pass on a row that merely happened to spell
+        something; this compares the two renders that used to be equal."""
+        renamed = self._row(self._store(tmp_path / "a", "## Nuance and work history"),
+                            "payments-api")
+        store_empty = tmp_path / "b" / "s"
+        (store_empty / "example-scope").mkdir(parents=True)
+        (store_empty / "example-scope" / "payments-api.md").write_text(
+            "\n".join(["---", "service: payments-api", "scope: example-scope",
+                       "sensitivity: public", "---", "",
+                       "## Pointers", "- `some/path` — a pointer.", "",
+                       "## Nuance / work-history", ""]),
+            encoding="utf-8",
+        )
+        empty = self._row(store_empty, "payments-api")
+        assert renamed != empty, (
+            "an entry whose OPEN marker the parser never reached still renders "
+            "byte-identically to a genuinely empty one — §2.2 unfixed"
+        )
+
+    def test_the_CORRECT_heading_renders_the_row_UNCHANGED(self, tmp_path):
+        """The other half of the differential: the conforming entry keeps its
+        badge and grows nothing."""
+        row = self._row(self._store(tmp_path, sr.NUANCE_HEADING), "payments-api")
+        assert row == (
+            "  " + "payments-api".ljust(14) + "  " + f"{2:>3}" + " nuance   public"
+            + "   🔴 1 OPEN"
+        ), row
+
+    def test_a_missing_POINTERS_section_names_POINTERS(self, tmp_path):
+        """The badge names WHICH heading. `NO Pointers` and `NO Nuance /
+        work-history` are different facts with different next actions, and a
+        badge that said only `NO SECTION` would collapse them."""
+        store = tmp_path / "s"
+        (store / "sc").mkdir(parents=True)
+        (store / "sc" / "svc.md").write_text(
+            "\n".join(["---", "service: svc", "scope: sc", "sensitivity: public", "---", "",
+                       "## Nuance / work-history",
+                       "- 2026-08-01: OPEN: outstanding.", ""]),
+            encoding="utf-8",
+        )
+        row = rc.listing_line(rc.recall(store, "sc", mode="list").listing[0], 12)
+        assert row.endswith("🔴 1 OPEN   🔴 NO Pointers"), row
+
+    def test_BOTH_missing_sections_are_named_in_the_stored_order(self, tmp_path):
+        store = tmp_path / "s"
+        (store / "sc").mkdir(parents=True)
+        (store / "sc" / "svc.md").write_text(
+            "\n".join(["---", "service: svc", "scope: sc", "sensitivity: public", "---", "",
+                       "## What it is", "", "prose only, no spine.", ""]),
+            encoding="utf-8",
+        )
+        row = rc.listing_line(rc.recall(store, "sc", mode="list").listing[0], 12)
+        assert row.endswith("🔴 NO Pointers, Nuance / work-history"), row
+
+    def test_short_heading_drops_the_ATX_marker_and_nothing_else(self):
+        assert rc.short_heading(sr.NUANCE_HEADING) == "Nuance / work-history"
+        assert rc.short_heading(sr.POINTERS_HEADING) == "Pointers"
+
+
+class TestTheCommonCaseRowIsUnchanged:
+    """🔴 THE INDEX PRINTS FOR EVERY ENTRY ON EVERY READ. Measured over the live
+    store on 2026-08-19: of 53 entries, 1 would carry a near-miss badge, 0 an
+    unverifiable badge and 0 a missing-section badge. So 52 rows must render
+    byte-identically to what they rendered before this change, or three rare
+    signals have taxed the common case forever to describe them.
+    """
+
+    def test_a_conforming_entry_with_nothing_flagged_renders_the_BARE_row(self):
+        """The pre-change format, SPELLED OUT rather than lifted from the
+        renderer — a literal copied from the implementation agrees with it by
+        construction and cannot detect the format moving."""
+        expected = "  " + "svc".ljust(12) + "  " + f"{2:>3}" + " nuance   public"
+        line = rc.listing_line(
+            _recalled([
+                "- 2026-08-15: an ordinary lesson.",
+                "- 2026-08-16: RESOLVED b83bfb584: closed and checkable.",
+            ]), 12,
+        )
+        assert line == expected, line
+
+    def test_the_whole_index_BLOCK_is_unchanged_for_a_conforming_scope(
+        self, store: Path
+    ) -> None:
+        """Not one row — every row of the shared fixture store, which no test in
+        this file wrote a near-miss or a renamed heading into."""
+        rows = [
+            rc.listing_line(e, 16)
+            for e in rc.recall(store, SCOPE, mode="list").listing
+        ]
+        assert rows
+        for row in rows:
+            for badge in ("NEAR-MISS", "UNVERIFIABLE", "NO Pointers", "NO Nuance"):
+                assert badge not in row, (
+                    f"a conforming entry grew a `{badge}` badge — the new signals "
+                    f"are supposed to be conditional"
+                )
+
+
+def _store_with(tmp_path: Path, name: str, nuance: list[str],
+                heading: str = sr.NUANCE_HEADING) -> Path:
+    """A one-entry store whose single row carries whatever badge `nuance` earns.
+
+    🔴 The badge explanations are CONDITIONAL, so a test that wants to see one
+    must PUT one on a row. Asserting against the shared `store` fixture is what
+    these tests used to do, and it worked only while the caveat named every badge
+    unconditionally — i.e. it was asserting about prose, not about a badge.
+    """
+    root = tmp_path / "condstore"
+    (root / SCOPE).mkdir(parents=True, exist_ok=True)
+    (root / SCOPE / f"{name}.md").write_text(
+        "\n".join(["---", f"service: {name}", "sensitivity: public", "---", "",
+                    "## Pointers", "- a", "", heading, *nuance, ""]),
+        encoding="utf-8",
+    )
+    return root
+
+
+class TestTheCaveatExplainsEveryBadgeItPrints:
+    """🔴 A BADGE THE CAVEAT DOES NOT NAME IS A GLYPH THE READER GUESSES AT, and
+    the caveat is the one place this tool states what it can and cannot see. The
+    `🔴 N OPEN` clause has been there since the badge shipped; these three
+    arrived with the same obligation.
+
+    🔴 STRENGTHENED when the explanations became conditional. These used to assert
+    against a fixture store that contains NO near-miss and NO renamed heading — so
+    they passed on prose alone and could not have told you whether the caveat
+    matched the ROWS. Each now puts the badge on a row first, which is what the
+    class name claims to test, and the complementary "no badge ⇒ no clause" half
+    lives in `TestCaveatBadgeClausesAreConditional`.
+    """
+
+    def test_the_caveat_names_the_NEAR_MISS_badge_and_what_it_costs(
+        self, tmp_path: Path
+    ):
+        root = _store_with(tmp_path, "svc", ["- 2026-08-19: OPEN gaps found here."])
+        rep = rc.recall(root, SCOPE)
+        assert any("NEAR-MISS" in rc.listing_line(e, 16) for e in rep.listing), (
+            "fixture must actually earn the badge, or this asserts about prose"
+        )
+        caveat = rep.caveat
+        assert "NEAR-MISS" in caveat
+        assert "missed the grammar" in caveat
+        assert "short by up to N" in caveat, (
+            "the caveat names the badge without saying what it implies about the "
+            "OPEN count beside it — which is the whole reason it is on the row"
+        )
+
+    def test_the_caveat_names_the_UNVERIFIABLE_badge(self, tmp_path: Path):
+        root = _store_with(tmp_path, "svc", ["- 2026-08-19: RESOLVED: closed, no sha."])
+        rep = rc.recall(root, SCOPE)
+        assert any("UNVERIFIABLE" in rc.listing_line(e, 16) for e in rep.listing)
+        caveat = rep.caveat
+        assert "UNVERIFIABLE" in caveat
+        assert "name no sha" in caveat
+
+    def test_the_caveat_says_a_missing_heading_makes_the_counts_PARSE_FAILURES(
+        self, tmp_path: Path
+    ):
+        """The claim that matters: `0 nuance` on such a row is not a reading."""
+        root = _store_with(tmp_path, "svc", ["- 2026-08-19: a note."],
+                           heading="## Nuance and work history")
+        rep = rc.recall(root, SCOPE)
+        assert any("NO " in rc.listing_line(e, 16) for e in rep.listing)
+        caveat = rep.caveat
+        assert "NO <heading>" in caveat
+        assert "0 BY PARSE FAILURE and not by measurement" in caveat
+
+    def test_the_caveat_is_still_ONE_spelling_on_every_surface(self, store: Path):
+        rep = rc.recall(store, SCOPE)
+        assert rep.caveat in rc.render_text(rep)
+        assert rc.report_json(rep)["caveat"] == rep.caveat
+
+
+# --- the caveat's badge explanations are CONDITIONAL ----------------------------
+#
+# Measured on the first real session to use the resume→recall flow: the caveat is
+# ~1.5 KB and is paid PER CALL, so a targeted `--ref` lookup — the cheap operation
+# the design encourages — spent 27% of its output explaining NEAR-MISS,
+# UNVERIFIABLE and NO <heading> while showing NONE of them. The badges already
+# render conditionally; the prose explaining them did not.
+
+
+class TestBadgesPresent:
+    """`badges_present` reports what the OUTPUT will render, nothing wider."""
+
+    def test_no_entries_yields_an_empty_set(self) -> None:
+        assert rc.badges_present(()) == frozenset()
+
+    def test_a_clean_entry_yields_an_empty_set(self) -> None:
+        """POSITIVE CONTROL's partner: an entry with every count at zero must not
+        claim a badge, or the conditional degenerates to unconditional."""
+        e = _recalled(["- 2026-08-19: a plain dated bullet."])
+        assert e.near_miss_count == 0 and e.unverifiable_count == 0
+        assert rc.badges_present((e,)) == frozenset()
+
+    def test_a_near_miss_bullet_yields_only_NEAR_MISS(self) -> None:
+        e = _recalled(["- 2026-08-19: OPEN gaps found while fixing the above."])
+        assert e.near_miss_count > 0, "fixture must actually produce a near-miss"
+        assert rc.badges_present((e,)) == frozenset({rc.BADGE_NEAR_MISS})
+
+    def test_an_unverifiable_bullet_yields_only_UNVERIFIABLE(self) -> None:
+        e = _recalled(["- 2026-08-19: RESOLVED: closed it, no sha named."])
+        assert e.unverifiable_count > 0, "fixture must actually produce one"
+        assert rc.badges_present((e,)) == frozenset({rc.BADGE_UNVERIFIABLE})
+
+    def test_a_renamed_heading_yields_only_MISSING_HEADING(self) -> None:
+        e = _recalled(["- 2026-08-19: a note."], nuance_heading="## Nuance and work history")
+        assert e.missing_sections, "fixture must actually lose the section"
+        assert rc.badges_present((e,)) == frozenset({rc.BADGE_MISSING_HEADING})
+
+    def test_the_set_is_a_UNION_across_entries_not_the_first_hit(self) -> None:
+        """The index renders many rows; one row's badge must not mask another's."""
+        near = _recalled(["- 2026-08-19: OPEN gaps found."], ref="a")
+        unver = _recalled(["- 2026-08-19: RESOLVED: no sha."], ref="b")
+        gone = _recalled(["- 2026-08-19: x."], ref="c", nuance_heading="## Renamed")
+        got = rc.badges_present((near, unver, gone))
+        assert got == frozenset(
+            {rc.BADGE_NEAR_MISS, rc.BADGE_UNVERIFIABLE, rc.BADGE_MISSING_HEADING}
+        )
+
+
+class TestCaveatBadgeClausesAreConditional:
+    SCOPE = "example-scope/"
+
+    # --- what must NEVER be gated -------------------------------------------------
+
+    def test_the_UNCONDITIONAL_contract_survives_an_empty_badge_set(self) -> None:
+        """🔴 The half that makes this safe rather than merely cheaper. These
+        sentences are the anti-confabulation contract and apply to every read."""
+        text = rc.caveat_text(self.SCOPE, frozenset())
+        assert "RECALL, NOT LIVE OBSERVATION" in text
+        assert "This window CANNOT see" in text
+        assert "POINTER to verify" in text
+        assert rc.SENSITIVITY_FAIL_SAFE in text
+        assert "never copy an" in text
+
+    def test_the_OPEN_ABSENCE_warning_is_NOT_gated(self) -> None:
+        """🔴 The asymmetry, pinned. The OPEN clause ends "the absence of that
+        marker means nothing was declared, NOT that nothing is open" — a warning
+        about a MISSING badge. Gating it on a badge being PRESENT would delete it
+        in exactly the case it was written for."""
+        for badges in (frozenset(), frozenset({rc.BADGE_NEAR_MISS}), None):
+            text = rc.caveat_text(self.SCOPE, badges)
+            assert "NOT that nothing is open" in text, badges
+
+    # --- what must be gated -------------------------------------------------------
+
+    def test_an_empty_badge_set_drops_ALL_THREE_explanations(self) -> None:
+        text = rc.caveat_text(self.SCOPE, frozenset())
+        for absent in ("N NEAR-MISS", "N UNVERIFIABLE", "NO <heading>"):
+            assert absent not in text, absent
+
+    def test_each_badge_brings_ONLY_its_own_clause(self) -> None:
+        """Killed separately, so no clause can hide behind another."""
+        cases = {
+            rc.BADGE_NEAR_MISS: ("N NEAR-MISS", ("N UNVERIFIABLE", "NO <heading>")),
+            rc.BADGE_UNVERIFIABLE: ("N UNVERIFIABLE", ("N NEAR-MISS", "NO <heading>")),
+            rc.BADGE_MISSING_HEADING: ("NO <heading>", ("N NEAR-MISS", "N UNVERIFIABLE")),
+        }
+        for badge, (present, absent) in cases.items():
+            text = rc.caveat_text(self.SCOPE, frozenset({badge}))
+            assert present in text, f"{badge} should explain {present}"
+            for a in absent:
+                assert a not in text, f"{badge} should NOT explain {a}"
+
+    def test_all_three_badges_reproduce_the_FULL_prose(self) -> None:
+        """The unconditional text is the ceiling, not a different text: with every
+        badge present the caveat must equal the `badges=None` rendering."""
+        every = frozenset(
+            {rc.BADGE_NEAR_MISS, rc.BADGE_UNVERIFIABLE, rc.BADGE_MISSING_HEADING}
+        )
+        assert rc.caveat_text(self.SCOPE, every) == rc.caveat_text(self.SCOPE, None)
+
+    def test_the_lead_phrase_AGREES_with_the_clause_count(self) -> None:
+        """Prose that says "Three further badges" above one clause is the kind of
+        near-miss this module exists to complain about."""
+        one = rc.caveat_text(self.SCOPE, frozenset({rc.BADGE_NEAR_MISS}))
+        assert "One further badge says" in one and "Three further" not in one
+        two = rc.caveat_text(
+            self.SCOPE, frozenset({rc.BADGE_NEAR_MISS, rc.BADGE_UNVERIFIABLE})
+        )
+        assert "Two further badges say" in two
+        three = rc.caveat_text(
+            self.SCOPE,
+            frozenset({rc.BADGE_NEAR_MISS, rc.BADGE_UNVERIFIABLE, rc.BADGE_MISSING_HEADING}),
+        )
+        assert "Three further badges say" in three
+
+    def test_badges_None_is_FAIL_SAFE_toward_saying_more(self) -> None:
+        """A caller that computed nothing gets the full text, never a silent trim."""
+        full = rc.caveat_text(self.SCOPE, None)
+        for clause in ("N NEAR-MISS", "N UNVERIFIABLE", "NO <heading>"):
+            assert clause in full, clause
+
+    def test_it_is_SHORTER_when_nothing_is_badged(self) -> None:
+        """The point of the change, asserted as a relation rather than a constant
+        so a reword cannot make it vacuous and cannot pin a number that drifts."""
+        assert len(rc.caveat_text(self.SCOPE, frozenset())) < len(
+            rc.caveat_text(self.SCOPE, None)
+        )
+
+
+class TestTheCaveatDescribesTHISReportsRows:
+    """🔴 The regression test for the bug this change shipped with once.
+
+    `badges_present` was first wired to `RecallReport.entries` — which holds only
+    the FEATURED bodies — while badges are rendered by `listing_line` over
+    `report.listing`. On a real index whose visible `🔴 2 NEAR-MISS` row was not
+    among the featured entries, the explanation silently vanished. It read
+    correctly and was wrong; only running it caught it.
+    """
+
+    def test_a_badge_in_LISTING_but_not_in_ENTRIES_is_still_explained(self) -> None:
+        badged = _recalled(["- 2026-08-19: OPEN gaps found."], ref="badged")
+        featured = _recalled(["- 2026-08-19: a clean bullet."], ref="featured")
+        assert badged.near_miss_count > 0
+        assert featured.near_miss_count == 0
+        report = rc.RecallReport(
+            status="recalled", scope="example-scope", store_root="/nowhere",
+            entries=(featured,), listing=(badged, featured), total_in_scope=2,
+        )
+        assert "N NEAR-MISS" in report.caveat, (
+            "the caveat must describe the rows the INDEX renders, not the featured subset"
+        )
+
+    def test_a_clean_listing_gets_no_badge_prose(self) -> None:
+        clean = _recalled(["- 2026-08-19: a clean bullet."], ref="clean")
+        report = rc.RecallReport(
+            status="recalled", scope="example-scope", store_root="/nowhere",
+            entries=(clean,), listing=(clean,), total_in_scope=1,
+        )
+        for absent in ("N NEAR-MISS", "N UNVERIFIABLE", "NO <heading>"):
+            assert absent not in report.caveat, absent
+        assert "NOT that nothing is open" in report.caveat
+
+
+class TestTheSearchReportCaveat:
+    def test_search_explains_no_badges_because_it_renders_none(self) -> None:
+        """Search prints matched Hunks, never an index row, so no badge can appear
+        in its output. It also has no `entries` field at all — asking for one was
+        an AttributeError waiting to happen."""
+        report = rc.SearchReport(
+            status="searched", scope="example-scope", store_root="/nowhere",
+            query="anything", scopes_searched=("example-scope",),
+        )
+        assert not hasattr(report, "entries")
+        text = report.caveat
+        for absent in ("N NEAR-MISS", "N UNVERIFIABLE", "NO <heading>"):
+            assert absent not in text, absent
+        # …but the contract still ships.
+        assert "RECALL, NOT LIVE OBSERVATION" in text
+        assert "NOT that nothing is open" in text

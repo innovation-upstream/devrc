@@ -31,6 +31,14 @@ WHERE source IN ('claude','opencode') AND ts > now() - INTERVAL 1 DAY
 GROUP BY session ORDER BY last_seen DESC LIMIT 20
 ```
 
+🔴 **NEVER PASTE CAPTURED OPERATOR TEXT INTO A COMMITTED FILE.** `first_msg` is **text the
+operator typed** — the opening prompt of every recent session, up to 20 of them, ~17 KB in a
+default scan — and devrc is a **PUBLIC** repo, as is every `claudedocs/` note, commit message,
+PR body, comment or test fixture an agent writes into it. Report it as a **count, a length or
+a shape**, never verbatim; `--no-ch` drops the block entirely. Identical rule, identical
+reason, to `unsent_prompt` in `waiting-signal.md` — and that rule named only the draft until
+2026-08-21, which is why this paragraph exists here rather than being assumed.
+
 🔴 **There is no `first_message` column.** `activity.events` has 13 columns — `ts, host,
 source, kind, project, cwd, session, app, text, duration_ms, exit_code, payload,
 ingested_at` — and an earlier draft of this query named `first_message`, which fails
@@ -118,8 +126,9 @@ since taken its slot — measured: 7 of 43 survivors, plus 5 contested slots res
 silent last-wins.
 
 **2. task → ClickHouse.** `fuzzyclaw.claude_session` → `activity.events.session` is the only
-carrier of the session id from a tmux pane to ClickHouse; `agent-ops` detects *that* Claude
-runs in a pane but never learns *which* session. Measured 2026-08-11:
+carrier of the session id from a tmux pane to ClickHouse; the `/proc` detector
+(`scripts/lib/claude_sessions.py`) sees *that* Claude runs in a pane but never learns
+*which* session. Measured 2026-08-11:
 `activity.events.session` is 36 chars in 100% of `source='claude'` rows (1107/1107 over 2
 days) and fuzzyclaw's `claude_session` is a 36-char UUID, so the join is structurally sound
 — **provided** the task file survived join 1. That proviso is load-bearing: a wrong

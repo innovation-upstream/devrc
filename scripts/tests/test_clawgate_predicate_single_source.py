@@ -35,11 +35,16 @@ in isolation is the new vacuous green".
 from __future__ import annotations
 
 import ast
+import sys
 from pathlib import Path
 
 import pytest
 
 REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO / "scripts"))
+
+from testlib import skip_dirs  # noqa: E402
+
 LIB_REL = "scripts/lib/clawgate_tasks.py"
 
 #: The pending states, spelled here ONCE so this guard can look for them. This
@@ -87,12 +92,27 @@ ALLOWLIST = {
 #: 🔴 The importer ledger. Exactly these files load the shared module.
 EXPECTED_IMPORTERS = {
     "scripts/bar-status-poll",      # the 45s bar poller, writes the cache
-    "scripts/agent-ops",            # the mission-control TUI, reads it live
     "scripts/session-manager",      # the cross-host JSON report
 }
+# `scripts/agent-ops` — the mission-control TUI — was the third importer until it
+# was RETIRED. It is not "one fewer surface to keep in sync": it read this
+# predicate live, and dropping it here is the SHRINK case this ledger is built
+# to make audible, recorded rather than silently absorbed.
 
-SKIP_DIRS = {".git", "node_modules", "__pycache__", ".direnv", "result",
-             ".claude"}
+#: 🔴 SHARED BASE + THIS SITE'S OWN ADDITION, spelled here so the effective set
+#: is readable where it is used. The base is `testlib/skip_dirs.GENERATED`; this
+#: set was one of the two that had NOT learned about `.pytest_cache` (see that
+#: module's header for the measurement and for the red it caused in the sibling
+#: shared-detector ledger — not named here, because that ledger hunts for its
+#: own trigger token repo-wide and naming it makes this file a finding).
+#:
+#: `.claude` is added HERE and deliberately not in the base: per-host Claude Code
+#: state, gitignored, and the parent of the agent worktrees. It must NOT reach
+#: `public_ip_scan` / `client_host_scan`, which are security gates on a PUBLIC
+#: repo. `VIRTUALENVS` is granted because this walker has no `git ls-files`
+#: tier — it AST-parses whatever `.py` files are on disk, which in the
+#: operator's checkout is 395 files of vendored pip source under `.venv/`.
+SKIP_DIRS = set(skip_dirs.GENERATED | skip_dirs.VIRTUALENVS) | {".claude"}
 
 #: `#!`, assembled from character codes rather than written as a quoted literal.
 #: Same reason as `scripts/testlib/shebang_scan.py`'s needles: the repo-wide
@@ -422,8 +442,8 @@ def test_exactly_the_expected_surfaces_import_the_shared_module():
 def test_each_importer_resolves_the_module_by_explicit_path_not_sys_path():
     # scripts/lib/ holds unrelated modules; a sys.path insert would let any of
     # them shadow a name these consumers rely on (the CLAUDE.md _db.py/llm.py
-    # gotcha). Also: agent-ops is DEPLOYED as a lone nix-store copy, so it must
-    # fall back to $DEVRC_DIR rather than assume a sibling lib/ exists.
+    # gotcha). Also: a consumer may be DEPLOYED as a lone nix-store copy, so it
+    # must fall back to $DEVRC_DIR rather than assume a sibling lib/ exists.
     for rel in sorted(EXPECTED_IMPORTERS):
         text = (REPO / rel).read_text(encoding="utf-8")
         assert "SourceFileLoader" in text, rel

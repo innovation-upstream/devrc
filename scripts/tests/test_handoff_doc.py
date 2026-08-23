@@ -26,6 +26,7 @@ import hashlib
 import importlib.util
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -33,6 +34,10 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO_ROOT / "scripts"))
+
+from testlib.mockbin import write_exec  # noqa: E402
+
 TOOL = REPO_ROOT / "scripts" / "lib" / "handoff_doc.py"
 HANDOFF_SKILL = REPO_ROOT / "claude" / "skills" / "handoff" / "SKILL.md"
 
@@ -112,7 +117,36 @@ UPDATE_DOC = f"""## State now
 # Hermetic git: the sandbox and the dev host must behave the same, so no global
 # or system config (a stray `core.hooksPath` or `commit.gpgsign` would otherwise
 # decide whether these tests can commit at all).
-GIT_ENV = {"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null"}
+# 🔴 BACKGROUND GIT MAINTENANCE IS PINNED OFF, AND THAT IS WHAT MAKES
+# `tree_hash` HONEST. That function hashes every file under the repo root
+# INCLUDING `.git`, deliberately — a stray lockfile is signal, not noise, because
+# it is how you catch the tool writing something it should not. But git also
+# creates and deletes `.git/objects/maintenance.lock` on its own, from a
+# `gc --auto` fired by an ordinary command; when that happened between
+# `rglob` listing the file and `read_bytes` reading it, the walk died on
+#
+#     FileNotFoundError: …/work/.git/objects/maintenance.lock
+#
+# Measured in CI (`devrc-ci-x9zkh`, on a PR touching neither this file nor the
+# tool). Filtering `.git` out of the hash would have "fixed" it by deleting the
+# guard's whole point, so the SOURCE of the transience is removed instead: with
+# maintenance and gc pinned off, the only lock that can ever appear under a
+# fixture repo is one the code under test created — which is exactly what
+# `tree_hash` is watching for.
+#
+# It lives in GIT_ENV rather than in each `git init` because there are five of
+# those and the next fixture would silently be the sixth. Both `_sh` and
+# `run_tool` pass this env, so it reaches the TOOL's git calls too, not just the
+# fixtures' — and env vars are inherited, so any git the tool spawns gets it.
+GIT_ENV = {
+    "GIT_CONFIG_GLOBAL": "/dev/null",
+    "GIT_CONFIG_SYSTEM": "/dev/null",
+    "GIT_CONFIG_COUNT": "2",
+    "GIT_CONFIG_KEY_0": "maintenance.auto",
+    "GIT_CONFIG_VALUE_0": "false",
+    "GIT_CONFIG_KEY_1": "gc.auto",
+    "GIT_CONFIG_VALUE_1": "0",
+}
 
 
 def _sh(*args: str, cwd: Path) -> str:
@@ -137,6 +171,49 @@ def tree_hash(root: Path) -> str:
         h.update(path.read_bytes())
         h.update(b"\0")
     return h.hexdigest()
+
+
+def test_git_maintenance_cannot_fire_inside_a_fixture_repo(repo: Path):
+    """🔴 THE REGRESSION GUARD FOR `tree_hash`'s FileNotFoundError.
+
+    `tree_hash` hashes `.git` on purpose, so it can only stay honest if git is
+    not concurrently creating and deleting lock files under it. This asserts the
+    pin is REACHING a real git process launched the way this module launches
+    them — not merely that the constant is spelled correctly, which a dict
+    literal cannot get wrong in an interesting way.
+
+    The negative control is the load-bearing half: it re-runs the same query with
+    ONLY the `GIT_CONFIG_COUNT` injection removed — `GIT_CONFIG_GLOBAL` and
+    `GIT_CONFIG_SYSTEM` stay pinned at `/dev/null`, so exactly one variable
+    moves. If git defaulted these off by itself, the assertions above would pass
+    while proving nothing, and this control is what tells them apart.
+    """
+    # `--default ''` so an UNSET key exits 0 and returns empty, instead of exit 1
+    # killing the call inside `_sh`'s own `returncode == 0` assert. Without it a
+    # broken pin fails with "('git','config',…) failed:" — a message about the
+    # helper, not about maintenance being armed.
+    def _cfg(key: str) -> str:
+        return _sh("git", "config", "--get", "--default", "", key, cwd=repo).strip()
+
+    assert _cfg("maintenance.auto") == "false", (
+        "background git maintenance is NOT pinned off in a fixture repo, so "
+        "`gc --auto` can create and delete .git/objects/maintenance.lock mid-walk "
+        "and `tree_hash` will die on FileNotFoundError"
+    )
+    assert _cfg("gc.auto") == "0", "gc.auto is not pinned off in a fixture repo"
+
+    without_injection = {
+        k: v for k, v in dict(os.environ, **GIT_ENV).items()
+        if not k.startswith(("GIT_CONFIG_COUNT", "GIT_CONFIG_KEY", "GIT_CONFIG_VALUE"))
+    }
+    probe = subprocess.run(
+        ["git", "-C", str(repo), "config", "--get", "maintenance.auto"],
+        capture_output=True, text=True, env=without_injection,
+    )
+    assert probe.returncode != 0, (
+        "git reports maintenance.auto without our injection, so the assertions "
+        f"above are about a git default rather than about GIT_ENV: {probe.stdout!r}"
+    )
 
 
 @pytest.fixture()
@@ -184,6 +261,46 @@ def run_tool(repo: Path, *extra: str, update: Path | None = None, advanced: str 
     return subprocess.run(
         argv, capture_output=True, text=True, env=dict(os.environ, **GIT_ENV)
     )
+
+
+def advance_remote(tmp_path: Path) -> None:
+    """Push a commit to origin from a SECOND clone — the other session."""
+    # Clone the BARE origin, not the working repo — pushing into a non-bare
+    # checkout's current branch is refused, which would fail for a reason
+    # that has nothing to do with what the callers are testing.
+    other = tmp_path / "other"
+    _sh("git", "clone", "-q", str(tmp_path / "origin.git"), str(other), cwd=tmp_path)
+    for k, v in (("user.name", "Other"), ("user.email", "o@example.invalid"),
+                 ("commit.gpgsign", "false")):
+        _sh("git", "config", k, v, cwd=other)
+    (other / "OTHER.md").write_text("other session\n", encoding="utf-8")
+    _sh("git", "add", "--", "OTHER.md", cwd=other)
+    _sh("git", "commit", "-q", "-m", "another session's work", cwd=other)
+    _sh("git", "push", "-q", "origin", "main", cwd=other)
+
+
+_SHA40 = re.compile(r"\b[0-9a-f]{40}\b")
+_SHA12 = re.compile(r"\b[0-9a-f]{12}\b")
+
+
+def normalised_run(res, repo: Path, update: Path) -> str:
+    """`rc` + stdout + stderr, with every varying path and sha tokenised.
+
+    🔴 THE INSTRUMENT FOR THE BYTE-IDENTITY PINS, and the first version of it was
+    WRONG in the direction that matters. It replaced only the repo path — but
+    git's own error text quotes SIBLING paths beside the repo (`…/sibling`,
+    `…/nope.git`), so two genuinely unchanged exit paths compared DIFFERENT
+    purely because the scratch directory was named differently. Replace the
+    parent too, and always AFTER the more specific paths or the specific ones
+    stop matching.
+
+    Its positive control is that failure: before the parent was tokenised the
+    comparison DID report a difference, so it is not a check that can only pass.
+    """
+    text = f"rc={res.returncode}\n--- stdout\n{res.stdout}--- stderr\n{res.stderr}"
+    text = text.replace(str(repo), "<REPO>").replace(str(update), "<UPDATE>")
+    text = text.replace(str(repo.parent), "<TMP>")
+    return _SHA12.sub("<SHA12>", _SHA40.sub("<SHA40>", text))
 
 
 def doc_of(repo: Path) -> str:
@@ -345,8 +462,14 @@ class TestAcceptLandsExactlyWhatWasShown:
         assert touched == ["claudedocs/handoff-sample-topic.md"]
 
     def test_confirm_alone_does_not_push(self, repo: Path, update_file: Path) -> None:
-        """Rule (b): the write is local and reversible; only the push is the
-        act that needs consent, and it takes its own flag."""
+        """Rule (b): only the push is the act that needs consent, and it takes
+        its own flag.
+
+        ⚠ The FILE write is local and reversible; the COMMIT this also makes is
+        not "cheap" in the sense that phrasing implied — see
+        `TestALocalCommitDoesNotGoUNANNOUNCED`, which is why that path now states
+        what it left behind.
+        """
         remote = Path(_sh("git", "remote", "get-url", "origin", cwd=repo).strip())
         before = _sh("git", "-C", str(remote), "log", "--format=%H", cwd=repo)
         run_tool(repo, "--confirm", update=update_file)
@@ -558,6 +681,672 @@ class TestNoChangeIsNotAnEmptyCommit:
 
 
 # --------------------------------------------------------------------------
+# rule (f) — a REPLACE that drops durable-looking content says so, and still
+#            does it; and rule (g) — every run states the buckets
+# --------------------------------------------------------------------------
+#
+# 🔴 THE FIELD TRAP, REPRODUCED. A session hit this on two CONSECUTIVE handoff
+# updates: a completed arc, a survey's negative result and a closure were each
+# about to be deleted for sitting under "State now", which is a REPLACE heading.
+# It caught them by hand-reading the diff and then wrote a prose gotcha — which
+# is a prompt-tuning patch for something structural, hence rule (f).
+#
+# 🔴 THE THREE FIXTURE LINES CARRY EXACTLY ONE SIGNAL EACH, and that is a
+# MUTATION-ISOLATION requirement, not tidiness. A line reading
+# `- 🔴 MEASURED 2026-08-14 — …` carries BOTH a date and an evidence verb, so a
+# mutant that breaks the date regex is still caught by the verb branch and is
+# scored SURVIVED while the guard it targets is genuinely dead. Each line below
+# is therefore orthogonal, and `TestTheDurableSignalsAreEachReachable` pins that
+# orthogonality so a later edit cannot quietly reintroduce the overlap.
+DURABLE_DATED_LINE = (
+    "- 🔴 2026-08-14 — the coverage sweep's ledger exempts generated files, so "
+    "nothing will catch a regression in them."
+)
+DURABLE_VERB_LINE = (
+    "- RETRACTED — the capture survey came back empty: 0 of 48 captures showed "
+    "the banner, so the earlier sighting was a local cache."
+)
+DURABLE_OPEN_LINE = (
+    "- OPEN: the coverage sweep still exempts generated files."
+)
+# 🔴 THE CLOSURE-SHAPED CASE, and it needs its own fixture for the same reason
+# the others do — one line per WORD, not merely one per branch. `RETRACTED` and
+# `CLOSED` are both the evidence-verb branch, so a single line carrying either
+# would let a mutant that deletes one word from the list hide behind the other,
+# and the mutant would be scored SURVIVED with that word genuinely dead.
+DURABLE_CLOSED_LINE = (
+    "- The brand-coverage question is CLOSED: every surface now reads from one "
+    "token set."
+)
+
+# The base doc's "State now" carries all three, exactly as the field case did.
+DURABLE_BASE_DOC = f"""# Handoff: drop-topic — 2026-08-14
+
+## Goal
+Stop the coverage sweep from exempting generated files.
+
+## State now
+- Branch / PR: `feat/coverage-sweep` / none
+{DURABLE_DATED_LINE}
+{DURABLE_VERB_LINE}
+{DURABLE_CLOSED_LINE}
+{DURABLE_OPEN_LINE}
+- Deploy/verify status: NOT deployed
+
+## Findings
+### the ledger is built from the wrong glob
+- **Observed (with values):** 0 generated paths in a ledger of 311 entries.
+- **Ruled out:** a stale manifest — re-derived it on 2026-08-13 and it matched.
+
+## Next steps (ranked)
+1. Re-derive the ledger from the build manifest.
+"""
+
+# …and the update rewrites the status without carrying any of them forward.
+DURABLE_UPDATE_DOC = """## State now
+- Branch / PR: `feat/coverage-sweep` / #412
+- Deploy/verify status: deployed, verified against the real path
+"""
+
+# Ordinary status churn: pairwise-distinct wording, no durable signal anywhere.
+# The dates here are the shape the predicate must NOT fire on — welded into a
+# path token, and inside a code span besides.
+CHURN_BASE_DOC = """# Handoff: churn-topic
+
+## State now
+- Branch / PR: `feat/churn` / none
+- What's DONE this session: the probe harness landed
+- Design spec: `claudedocs/churn-design-2026-08-02.md`
+- Deploy/verify status: NOT deployed
+"""
+CHURN_UPDATE_DOC = """## State now
+- Branch / PR: `feat/churn` / #77
+- What's DONE this session: the probe harness is wired to the runner
+- Design spec: `claudedocs/churn-design-2026-08-02.md`
+- Deploy/verify status: deployed
+"""
+
+WARNING_HEAD = "line(s) that look DURABLE"
+
+
+@pytest.fixture()
+def durable_repo(repo: Path) -> Path:
+    """`repo`, with the handoff doc replaced by the field-trap base."""
+    (repo / "claudedocs" / "handoff-sample-topic.md").write_text(
+        DURABLE_BASE_DOC, encoding="utf-8"
+    )
+    _sh("git", "add", "--", "claudedocs/handoff-sample-topic.md", cwd=repo)
+    _sh("git", "commit", "-q", "-m", "seed durable", cwd=repo)
+    return repo
+
+
+def write_update(tmp_path: Path, text: str, name: str = "durable-update.md") -> Path:
+    p = tmp_path / name
+    p.write_text(text, encoding="utf-8")
+    return p
+
+
+def warning_block(stdout: str) -> str:
+    """The rule (f) block only — from its headline to the line before the diff."""
+    if WARNING_HEAD not in stdout:
+        return ""
+    start = stdout.index("🔴 This replace DROPS")
+    rest = stdout[start:]
+    cut = rest.find("--- a/")
+    return rest if cut < 0 else rest[:cut]
+
+
+# 🔴 THE RED-AT-BASE MATRIX, and the honest split inside it. This whole file was
+# run against `d12f84c8` — the commit before rules (f) and (g) existed — by
+# extracting that revision's `handoff_doc.py` and `SKILL.md` into a scratch tree
+# and pointing this exact test file at them. Result: **32 failed, 97 passed at
+# d12f84c8; 129 passed at HEAD.**
+#
+# ⚠ EIGHT OF THE NEW TESTS PASS AT BASE, and they are NOT regression coverage —
+# they pin an invariant the bug never violated, and saying so is the difference
+# between coverage and the appearance of it:
+#
+#   the three SILENCE / exemption tests   base never warns at all, so their
+#   (churn, default fixture, carried-      green there is vacuous. They are
+#    forward, APPEND-exempt)               proven LIVE at HEAD by the mutation
+#                                          battery instead — `verb-list-widened-
+#                                          with-DONE` and `append-branch-also-
+#                                          classified` each kill one.
+#   the three EXIT-CODE invariants        4, 5 and the constants must not move;
+#                                          that they held before is the point.
+#   `test_the_module_spells_no_openness_   base has no openness regex either.
+#    grammar_of_its_own`                   It guards the FUTURE, not the past.
+#
+# MUTATION BATTERY (run under `PYTHONDONTWRITEBYTECODE=1`, the module restored
+# from a byte-copy and re-hashed after every mutant): **20 mutants, 20 killed by
+# the specifically expected test**, one no-op mutant kept as a negative control
+# and SURVIVED. Three rounds were needed, and every round found a hole in THESE
+# ASSERTIONS rather than in the code:
+#   1. `POSITIVE-CONTROL-bucket-label` SURVIVED — `BUCKET_REPLACE` renamed to
+#      `REPLACED` still satisfied a substring `in`. Now whole normalised lines.
+#   2. `code-span-strip-removed` SURVIVED — the fixture's date was suppressed by
+#      the OTHER net too, so the assertion could not tell a live net from a dead
+#      one. Now each suppression case is chosen so only ONE net can catch it.
+#   3. `verb-list-widened-with-DONE` came back SKIPPED (its anchor had moved when
+#      `CLOSED` was added) — a skipped mutant is a coverage claim nobody holds,
+#      so the harness prints ANCHOR NOT UNIQUE loudly rather than scoring it.
+
+
+class TestAReplaceThatDropsDurableContentSaysSo:
+    """The field trap, and both directions of the guard it produced."""
+
+    def test_the_field_trap_is_named(
+        self, durable_repo: Path, tmp_path: Path
+    ) -> None:
+        """The whole point: three durable lines are about to be deleted for
+        sitting under a REPLACE heading, and the run says which ones."""
+        upd = write_update(tmp_path, DURABLE_UPDATE_DOC)
+        res = run_tool(durable_repo, update=upd)
+        assert res.returncode == hd.EXIT_OK, res.stderr
+        block = warning_block(res.stdout)
+        assert block, f"no durable-drop warning was printed:\n{res.stdout}"
+        # 🔴 The whole normalised headline, not a keyword — a reworded headline
+        # is an output change a `in` assertion walks straight past.
+        assert block.splitlines()[0] == (
+            "🔴 This replace DROPS 4 line(s) that look DURABLE "
+            "(they sit under a REPLACE heading):"
+        ), block
+        for fragment in (
+            "the coverage sweep's ledger exempts generated files",
+            "the capture survey came back empty",
+            "The brand-coverage question is CLOSED",
+            "the coverage sweep still exempts generated files",
+        ):
+            assert fragment in block, f"{fragment!r} was not named:\n{block}"
+
+    def test_it_names_the_heading_and_a_usable_base_line_number(
+        self, durable_repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 The address must resolve. A line number computed off the MERGED
+        doc, or off the section body rather than the file, would still print a
+        plausible integer — so this opens the base doc at every number it
+        printed and checks the line is the one that was flagged."""
+        upd = write_update(tmp_path, DURABLE_UPDATE_DOC)
+        res = run_tool(durable_repo, update=upd)
+        base_lines = DURABLE_BASE_DOC.splitlines()
+        found = re.findall(r"^  (.+?):(\d+): (.*?)  \[", warning_block(res.stdout),
+                           re.M)
+        assert len(found) == 4, res.stdout
+        for heading, line_no, quoted in found:
+            assert heading == "State now", heading
+            assert base_lines[int(line_no) - 1].strip().startswith(quoted[:40])
+
+    def test_the_warning_comes_BEFORE_the_diff(
+        self, durable_repo: Path, tmp_path: Path
+    ) -> None:
+        """It annotates the diff, so it must arrive before it — after several
+        hundred lines of hunks it is a footnote nobody reaches."""
+        upd = write_update(tmp_path, DURABLE_UPDATE_DOC)
+        out = run_tool(durable_repo, update=upd).stdout
+        assert out.index(WARNING_HEAD) < out.index("--- a/claudedocs/")
+
+    def test_it_WARNS_and_never_refuses(
+        self, durable_repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 The direction that makes this survivable. A gate that can block
+        the ordinary case is a permanently-red gate everyone clicks through: the
+        write must still land, exit 0, one commit, with the warning shown."""
+        upd = write_update(tmp_path, DURABLE_UPDATE_DOC)
+        before = commit_shas(durable_repo)
+        res = run_tool(durable_repo, "--confirm", update=upd)
+        assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
+        assert WARNING_HEAD in res.stdout
+        assert "status=written commit=" in res.stdout
+        assert len(commit_shas(durable_repo)) == len(before) + 1
+        after = (durable_repo / "claudedocs" / "handoff-sample-topic.md").read_text(
+            encoding="utf-8"
+        )
+        assert "Deploy/verify status: deployed" in after
+        assert DURABLE_DATED_LINE not in after, (
+            "the replace was BLOCKED. Rule (f) warns and never refuses — "
+            "replacing stale status is the ordinary case."
+        )
+
+    def test_ordinary_status_churn_is_SILENT(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 The other direction, and the failure mode being fixed. A warning
+        that fires on every run is noise, and noise is what gets ignored."""
+        (repo / "claudedocs" / "handoff-sample-topic.md").write_text(
+            CHURN_BASE_DOC, encoding="utf-8"
+        )
+        upd = write_update(tmp_path, CHURN_UPDATE_DOC, "churn.md")
+        res = run_tool(repo, update=upd)
+        assert res.returncode == hd.EXIT_OK, res.stderr
+        assert diff_body(res.stdout), "nothing changed — the silence is vacuous"
+        assert WARNING_HEAD not in res.stdout, (
+            "ordinary status churn produced a durable-drop warning:\n" + res.stdout
+        )
+
+    def test_the_suites_own_default_fixture_is_SILENT_too(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """A second, independent silence sample: the doc every other test in
+        this file runs against. One hand-built quiet fixture could be quiet by
+        construction; this one was written years of tests ago for other reasons."""
+        res = run_tool(repo, update=update_file)
+        assert WARNING_HEAD not in res.stdout, res.stdout
+
+    def test_a_durable_line_CARRIED_FORWARD_is_not_named(
+        self, durable_repo: Path, tmp_path: Path
+    ) -> None:
+        """Moving the line forward is one of the two remedies the block names,
+        so taking it must clear the warning for that line — otherwise the
+        remedy does not work and the block fires forever."""
+        upd = write_update(
+            tmp_path,
+            "## State now\n"
+            "- Branch / PR: `feat/coverage-sweep` / #412\n"
+            f"{DURABLE_DATED_LINE}\n"
+            f"{DURABLE_VERB_LINE}\n"
+            f"{DURABLE_CLOSED_LINE}\n"
+            f"{DURABLE_OPEN_LINE}\n"
+            "- Deploy/verify status: deployed\n",
+        )
+        res = run_tool(durable_repo, update=upd)
+        assert res.returncode == hd.EXIT_OK, res.stderr
+        assert diff_body(res.stdout), "nothing changed — the silence is vacuous"
+        assert WARNING_HEAD not in res.stdout, res.stdout
+
+    def test_only_SOME_carried_forward_still_names_the_rest(
+        self, durable_repo: Path, tmp_path: Path
+    ) -> None:
+        """NEGATIVE CONTROL on the test above: carrying forward is not a blanket
+        mute. Three of four kept, one dropped, one named."""
+        upd = write_update(
+            tmp_path,
+            "## State now\n"
+            f"{DURABLE_DATED_LINE}\n"
+            f"{DURABLE_VERB_LINE}\n"
+            f"{DURABLE_CLOSED_LINE}\n"
+            "- Deploy/verify status: deployed\n",
+        )
+        block = warning_block(run_tool(durable_repo, update=upd).stdout)
+        assert "DROPS 1 line(s)" in block, block
+        assert "the coverage sweep still exempts generated files" in block
+
+    def test_an_APPEND_section_is_never_warned_about(
+        self, durable_repo: Path, tmp_path: Path
+    ) -> None:
+        """Rule (c) already guarantees those survive verbatim, so a warning
+        there would be about a deletion that cannot happen.
+
+        🔴 DISCRIMINATING BY CONSTRUCTION: `## Findings` in the fixture carries a
+        dated line that `durable_reason` DOES flag, and the update below does not
+        repeat it. So a mutant that ran the classification over the append branch
+        too has something to report here and the test goes red — without that
+        line the assertion could not tell the branches apart."""
+        upd = write_update(
+            tmp_path,
+            "## Findings\n"
+            "### a second glob is applied after the ledger is built\n"
+            "- **Observed (with values):** 311 entries in, 311 out.\n",
+            "findings.md",
+        )
+        res = run_tool(durable_repo, update=upd)
+        assert res.returncode == hd.EXIT_OK, res.stderr
+        assert WARNING_HEAD not in res.stdout, res.stdout
+
+    def test_a_fenced_sample_is_not_scanned(self, tmp_path: Path) -> None:
+        """A pasted log or sample command inside a fence carries dates and says
+        nothing durable — 610 of the real corpus's REPLACE-bucket lines are
+        inside one."""
+        base = (
+            "## How to verify\n"
+            "```\n"
+            "$ probe --since 2026-08-14\n"
+            "ok 2026-08-14T09:00:00Z\n"
+            "```\n"
+        )
+        report = hd.merge_report(base, "## How to verify\n`probe --now`\n")
+        assert report.dropped == (), report.dropped
+
+    def test_a_date_welded_into_a_path_is_not_a_claim(self) -> None:
+        """Handoff docs cite each other constantly; a filename is a reference,
+        not a measurement. TWO nets, and each case below is chosen so that
+        exactly ONE of them can suppress it — a case both nets catch cannot tell
+        a live net from a dead one, which is how the first draft of this test
+        scored a `prose = line` mutant SURVIVED."""
+        # only the LEADING path boundary can suppress this (no code span).
+        assert hd.durable_reason(
+            "- Design spec: claudedocs/churn-design-2026-08-02.md and nothing else"
+        ) is None
+        # only the CODE-SPAN strip can suppress this: the date's left neighbour
+        # is a space, so the boundary lets it through.
+        assert hd.durable_reason(
+            "- Re-run it with `probe --since 2026-08-02` and compare"
+        ) is None
+        # and both together on the shape the corpus actually carries.
+        assert hd.durable_reason(
+            "- Design spec: `claudedocs/churn-design-2026-08-02.md`"
+        ) is None
+
+    def test_the_same_date_OUTSIDE_a_code_span_IS_a_claim(self) -> None:
+        """NEGATIVE CONTROL on the three suppressions above: they are not a
+        blanket mute on dates. Same date, free-standing, flagged."""
+        assert hd.durable_reason(
+            "- Re-ran it on 2026-08-02 and the ledger was still short"
+        ) == "dated claim"
+
+    def test_the_listing_is_BOUNDED_and_says_how_many_it_elided(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 An unbounded list printed ABOVE the diff pushes the diff off the
+        screen. The elision count is what stops `…` reading as `and nothing
+        else worth mentioning`."""
+        many = "\n".join(
+            f"- 🔴 2026-08-{day:02d} — measurement number {day} of the ledger sweep."
+            for day in range(1, 10)
+        )
+        (repo / "claudedocs" / "handoff-sample-topic.md").write_text(
+            f"## State now\n{many}\n", encoding="utf-8"
+        )
+        upd = write_update(tmp_path, "## State now\n- all of it is stale now\n", "b.md")
+        block = warning_block(run_tool(repo, update=upd).stdout)
+        assert "DROPS 9 line(s)" in block, block
+        rows = [ln for ln in block.splitlines() if re.match(r"^  \S.*:\d+: ", ln)]
+        assert len(rows) == hd.DROPPED_SHOWN_MAX, f"{len(rows)} rows printed:\n{block}"
+        assert "… and 3 more not shown" in block, block
+
+    def test_a_very_long_line_is_clipped(self) -> None:
+        """The second bound: one pathological line must not be the whole block."""
+        long = "- 2026-08-14 — " + ("x" * 4000)
+        row = hd.dropped_durable_report(
+            [hd.DroppedDurable("State now", 4, long, "dated claim")]
+        )
+        assert max(len(ln) for ln in row.splitlines()) < 300, row
+        assert "…" in row
+
+
+class TestTheDurableSignalsAreEachReachable:
+    """🔴 A guard that can never execute is not a guard, and a mutation sweep
+    over overlapping fixtures reports SURVIVED for a guard that is genuinely
+    dead. `durable_reason` tries three signals in precedence order, so each
+    fixture line must be reachable — matched by ITS signal and by no other."""
+
+    @pytest.mark.parametrize(
+        "line,expected",
+        [
+            (DURABLE_DATED_LINE, "dated claim"),
+            (DURABLE_VERB_LINE, "evidence verb"),
+            (DURABLE_CLOSED_LINE, "evidence verb"),
+            (DURABLE_OPEN_LINE, "openness/open"),
+        ],
+        ids=["dated", "verb-RETRACTED", "verb-CLOSED", "openness"],
+    )
+    def test_each_fixture_line_is_flagged_by_exactly_its_own_signal(
+        self, line: str, expected: str
+    ) -> None:
+        """🔴 LITERAL expectations, never `hd.DURABLE_DATED`. Reading the
+        expected value out of the module under test makes the assertion true by
+        construction — a mutant that renamed the reason would pass. These
+        strings are printed to a human, so pinning them literally is also what
+        keeps the output stable."""
+        assert hd.durable_reason(line) == expected
+
+    def test_the_reason_constants_are_the_strings_that_get_printed(self) -> None:
+        """The other half: the module's constants must BE those literals, so a
+        rename is a visible test change rather than a silent output change."""
+        assert hd.DURABLE_DATED == "dated claim"
+        assert hd.DURABLE_EVIDENCE == "evidence verb"
+
+    def test_the_fixture_lines_do_not_overlap_across_BRANCHES(self) -> None:
+        """🔴 THE ISOLATION PIN. If the dated line ever also carries an evidence
+        verb, breaking the date regex still leaves it flagged and the mutant is
+        scored SURVIVED while the guard is dead. Assert the orthogonality
+        directly rather than trusting the wording to stay put."""
+        verb_lines = (DURABLE_VERB_LINE, DURABLE_CLOSED_LINE)
+        assert hd._BARE_ISO_DATE.search(DURABLE_DATED_LINE)
+        assert not hd._EVIDENCE_VERB.search(DURABLE_DATED_LINE)
+        assert not hd._EVIDENCE_VERB.search(DURABLE_OPEN_LINE)
+        assert not hd._BARE_ISO_DATE.search(DURABLE_OPEN_LINE)
+        for line in verb_lines:
+            assert hd._EVIDENCE_VERB.search(line), line
+            assert not hd._BARE_ISO_DATE.search(line), line
+
+    def test_the_two_verb_fixtures_do_not_overlap_on_the_WORD(self) -> None:
+        """🔴 ONE LINE PER WORD, not merely one per branch — and this is the pin
+        that makes `verb-RETRACTED-dropped` and `verb-CLOSED-dropped` isolate.
+        If one fixture matched both words, deleting either from the list would
+        leave it flagged by the other and the mutant would be scored SURVIVED
+        with that word genuinely dead."""
+        matched = {
+            "RETRACTED": DURABLE_VERB_LINE,
+            "CLOSED": DURABLE_CLOSED_LINE,
+        }
+        for word, own in matched.items():
+            for other_word, other in matched.items():
+                found = hd._EVIDENCE_VERB.search(other)
+                assert found is not None, other
+                if word == other_word:
+                    assert found.group(1) == word, (word, found.group(1))
+                else:
+                    assert found.group(1) != word, (
+                        f"{other!r} also matches {word!r} — the two verb "
+                        f"fixtures overlap and neither word can be isolated"
+                    )
+
+    def test_a_hyphen_compounded_verb_is_a_MODIFIER_not_a_declaration(self) -> None:
+        """Measured: `the loop-CLOSED reframing of the #1 soak item` is an
+        inventory line about a doc edit. Same reasoning as the date's leading
+        boundary — a shouted word welded to its neighbour modifies it."""
+        assert hd.durable_reason(
+            "- The loop-CLOSED reframing of the soak item landed in the header."
+        ) is None
+        # NEGATIVE CONTROL: the same word, free-standing, is still a claim.
+        assert hd.durable_reason(
+            "- The soak item is CLOSED and the header says so."
+        ) == "evidence verb"
+
+    def test_VERIFIED_is_NOT_in_the_vocabulary(self) -> None:
+        """🔴 REJECTED ON MEASUREMENT, and this is the line that decided it.
+        `Deploy/verify status:` is a field the handoff skill's own step-2
+        TEMPLATE prescribes, so on any session that deployed successfully a
+        `VERIFIED` net fires on the template's own status line — the definition
+        of the churn rule (f) must stay silent on. Pinned so a later widening
+        has to delete an assertion that says why."""
+        assert hd.durable_reason(
+            "- **Deploy/verify status: DEPLOYED AND VERIFIED.**"
+        ) is None
+        assert hd.durable_reason("- Both VERIFIED + switched, no skips.") is None
+        assert hd.durable_reason("- CONFIRMED on the second run.") is None
+
+    def test_the_evidence_verb_is_case_sensitive(self) -> None:
+        """All-caps is the precision half — measured, the case-insensitive form
+        matches 10x as many corpus lines. A lowercase sentence must stay quiet."""
+        assert hd.durable_reason("- we retracted that and decided to move on") is None
+
+    def test_the_predicate_is_quiet_on_ordinary_status_lines(self) -> None:
+        for line in (
+            "- Branch / PR: `feat/coverage-sweep` / #412",
+            "- Deploy/verify status: deployed, verified against the real path",
+            "1. Re-derive the ledger from the build manifest.",
+            "`python3 tools/queue_probe.py --for 240`",
+        ):
+            assert hd.durable_reason(line) is None, line
+
+
+class TestTheOpennessPredicateIsSHAREDNotReimplemented:
+    """🔴 ONE RULE, ONE PLACE. `subsystem_resolver` owns the `OPEN:` /
+    `RESOLVED <sha>:` grammar and its near-miss detector, each backed by a
+    committed evaluation matrix. A second copy here would regenerate that
+    module's bugs at a second site and disagree with `subsystem_touch
+    --validate` about the same line."""
+
+    def test_it_is_the_SAME_function_object(self) -> None:
+        import subsystem_resolver  # the module handoff_doc's import registered
+
+        assert hd.parse_journal_bullets is subsystem_resolver.parse_journal_bullets
+
+    def test_the_two_call_sites_agree_over_the_COMMITTED_matrix(self) -> None:
+        """🔴 THE SEAM PIN, and it is two-way. Over every shape in
+        `fixtures/near_miss_shapes.json` — the matrix `test_subsystem_touch.py`
+        reads — a population the resolver calls anything but `none` must come
+        back from `durable_reason` spelled `openness/<that population>`, and a
+        population it calls `none` must NEVER come back as an openness reason.
+        A divergence in either direction fails here."""
+        import json
+
+        import subsystem_resolver
+
+        fixture = json.loads(
+            (REPO_ROOT / "scripts" / "tests" / "fixtures" / "near_miss_shapes.json")
+            .read_text(encoding="utf-8")
+        )
+        lines = [
+            ln
+            for key in ("attempts", "prose", "accepted_false_positives", "real")
+            for ln in fixture[key]
+        ]
+        assert len(lines) >= 40, f"the matrix shrank to {len(lines)} shapes"
+        seen: set[str] = set()
+        for line in lines:
+            bullets = subsystem_resolver.parse_journal_bullets(line)
+            population = bullets[0].openness_population if bullets else "none"
+            seen.add(population)
+            reason = hd.durable_reason(line)
+            if population == "none":
+                assert not (reason or "").startswith("openness/"), (
+                    f"handoff_doc invented an openness verdict the resolver does "
+                    f"not make, for {line!r}: {reason!r}"
+                )
+            else:
+                assert reason == f"openness/{population}", (
+                    f"the two call sites disagree about {line!r}: resolver says "
+                    f"{population!r}, handoff_doc says {reason!r}"
+                )
+        assert {"none"} < seen, (
+            f"POSITIVE CONTROL: the matrix produced only {seen} — an agreement "
+            f"test over one population cannot see a disagreement"
+        )
+
+    def test_the_module_spells_no_openness_grammar_of_its_own(self) -> None:
+        """The structural half. `test_it_is_the_SAME_function_object` proves the
+        import is wired today; this is what fails if someone later adds a
+        second, local regex beside it and the import quietly stops mattering."""
+        src = TOOL.read_text(encoding="utf-8")
+        code = "\n".join(
+            ln for ln in src.splitlines() if not ln.lstrip().startswith("#")
+        )
+        code = code[code.index("EXIT_OK = 0"):]  # past the module docstring
+        for token in ("OPEN|RESOLVED", "RESOLVED|OPEN", r"\bOPEN\b", "OPENNESS_"):
+            assert token not in code, (
+                f"scripts/lib/handoff_doc.py appears to spell the openness "
+                f"grammar itself ({token!r}). It belongs to subsystem_resolver — "
+                f"import it, do not copy it."
+            )
+
+
+class TestEveryRunStatesItsBuckets:
+    """Rule (g). The replace/append rule lived only in a module docstring and in
+    step 5 of the skill, neither of which is in front of an author choosing a
+    heading."""
+
+    def test_the_line_names_both_buckets(
+        self, durable_repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 THE WHOLE LINE, not `in`. MEASURED: the first draft asserted
+        `"State now → REPLACE" in line`, and a mutant renaming the label to
+        `REPLACED` SURVIVED the battery — the mutated line still contains the
+        substring. A guard on prose is walked by a longer word unless it pins
+        the normalised string."""
+        upd = write_update(
+            tmp_path,
+            DURABLE_UPDATE_DOC + "\n## Findings\n### a second glob\n- 311 in, 311 out.\n",
+        )
+        out = run_tool(durable_repo, update=upd).stdout
+        line = next(ln for ln in out.splitlines() if ln.startswith("buckets: "))
+        assert line == "buckets: State now → REPLACE · Findings → APPEND", line
+
+    def test_a_section_only_the_update_has_is_reported_as_NEW(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        upd = write_update(tmp_path, "## Rollback\n`git revert <sha>`\n", "new.md")
+        out = run_tool(repo, update=upd).stdout
+        line = next(ln for ln in out.splitlines() if ln.startswith("buckets: "))
+        assert line == "buckets: Rollback → NEW", line
+
+    def test_the_bucket_labels_are_the_words_that_get_printed(self) -> None:
+        """The constants themselves, for the same reason the reason-strings are
+        pinned: they are read by a human and a rename is an output change."""
+        assert (hd.BUCKET_REPLACE, hd.BUCKET_APPEND, hd.BUCKET_NEW) == (
+            "REPLACE",
+            "APPEND",
+            "NEW",
+        )
+
+    def test_it_is_printed_before_the_diff_and_carries_no_status_token(
+        self, durable_repo: Path, tmp_path: Path
+    ) -> None:
+        """`status=` is the machine-readable verdict and the skill's contract
+        pins one per run — a second one would be read as a second verdict."""
+        upd = write_update(tmp_path, DURABLE_UPDATE_DOC)
+        out = run_tool(durable_repo, update=upd).stdout
+        assert out.index("buckets: ") < out.index("--- a/claudedocs/")
+        buckets = next(ln for ln in out.splitlines() if ln.startswith("buckets: "))
+        assert "status=" not in buckets
+        assert "status=" not in warning_block(out)
+
+
+class TestRuleFDidNotMoveTheExitCodes:
+    """🔴 Rule (f) adds no exit code and must not reach one. `TestTheOtherExITSDidNotMove`
+    pins the four failure paths byte-for-byte on the SUITE's fixture; these
+    re-assert 4 and 5 with durable content actually present, which is the state
+    that would trip a guard written as a refusal."""
+
+    def test_no_advance_is_still_4_and_prints_nothing_at_all(
+        self, durable_repo: Path, tmp_path: Path
+    ) -> None:
+        upd = write_update(tmp_path, DURABLE_UPDATE_DOC)
+        before = tree_hash(durable_repo)
+        res = run_tool(durable_repo, "--confirm", update=upd, advanced=None)
+        assert res.returncode == hd.EXIT_NO_ADVANCE
+        both = res.stdout + res.stderr
+        assert WARNING_HEAD not in both, "rule (f) leaked past rule (d)'s refusal"
+        assert "buckets:" not in both
+        assert diff_body(both) == []
+        assert tree_hash(durable_repo) == before
+
+    def test_no_change_is_still_5_with_durable_content_in_the_doc(
+        self, durable_repo: Path, tmp_path: Path
+    ) -> None:
+        upd = write_update(
+            tmp_path,
+            "## State now\n"
+            "- Branch / PR: `feat/coverage-sweep` / none\n"
+            f"{DURABLE_DATED_LINE}\n"
+            f"{DURABLE_VERB_LINE}\n"
+            f"{DURABLE_CLOSED_LINE}\n"
+            f"{DURABLE_OPEN_LINE}\n"
+            "- Deploy/verify status: NOT deployed\n",
+            "noop.md",
+        )
+        before = tree_hash(durable_repo)
+        res = run_tool(durable_repo, "--confirm", update=upd)
+        assert res.returncode == hd.EXIT_NO_CHANGE, res.stdout + res.stderr
+        assert "status=no-change" in res.stderr
+        assert WARNING_HEAD not in res.stdout + res.stderr
+        assert tree_hash(durable_repo) == before
+
+    def test_the_exit_code_constants_did_not_move(self) -> None:
+        """Their VALUES, not just their names — a caller reads the number."""
+        assert (hd.EXIT_OK, hd.EXIT_USAGE, hd.EXIT_FAIL) == (0, 2, 3)
+        assert (hd.EXIT_NO_ADVANCE, hd.EXIT_NO_CHANGE, hd.EXIT_BEHIND) == (4, 5, 6)
+
+    def test_merge_still_returns_a_plain_string(self) -> None:
+        """`merge()` is public and called directly by other tests in this file;
+        rule (f) moved its body into `merge_report` and it must stay a string."""
+        out = hd.merge(BASE_DOC, UPDATE_DOC)
+        assert isinstance(out, str)
+        assert out == hd.merge_report(BASE_DOC, UPDATE_DOC).text
+
+
+# --------------------------------------------------------------------------
 # the skill and the module must not drift apart
 # --------------------------------------------------------------------------
 
@@ -582,7 +1371,798 @@ SKILL_PINS: list[tuple[str, str]] = [
         "Do NOT forbid updating the handoff",
         "rule (a): the fix is a safe update, never a suppressed one",
     ),
+    (
+        "NOT PUSHED",
+        "🔴 the executor is told that --confirm without --push LEAVES A COMMIT",
+    ),
+    (
+        "Do NOT retry by re-running with `--push`",
+        "🔴 …and that the obvious retry duplicates the findings instead",
+    ),
+    (
+        "line(s) that look DURABLE",
+        "rule (f): the executor is told what the drop warning IS when it fires",
+    ),
+    (
+        "a WARNING, never a refusal",
+        "🔴 rule (f): …and that it blocks nothing, so it is not clicked through",
+    ),
+    (
+        "a silent run is NOT evidence that nothing durable was dropped",
+        "🔴 rule (f) is a FLOOR — silence must not be read as a guarantee",
+    ),
+    (
+        "buckets:",
+        "rule (g): the executor is told the bucket line exists and to read it",
+    ),
 ]
+
+
+class TestBehindRemoteWritesNothing:
+    """🔴 The gap this closes, and it is not hypothetical.
+
+    MEASURED 2026-08-15: `--confirm --push` committed the doc to `main` in a
+    SHARED base clone, then the push was rejected non-fast-forward because two
+    other sessions had pushed during the session. The commit STAYED. An
+    un-pushed commit on `main` in a devrc checkout is exactly what `ship.sh`
+    skips over — silently, because `merge --ff-only` refuses and the host is
+    left "as found" — so that host stops receiving every future change while
+    still looking healthy. It has bitten this repo twice.
+
+    The tool already had the right property everywhere else: a failure writes
+    nothing. Push was the one path that traded it for a commit the caller then
+    had to know how to undo.
+    """
+
+    def _advance_remote(self, repo: Path, tmp_path: Path) -> None:
+        return advance_remote(tmp_path)
+
+    def test_behind_remote_writes_NOTHING(
+        self, repo: Path, update_file: Path, tmp_path: Path
+    ) -> None:
+        """🔴 THE LOAD-BEARING CASE. Not 'the push fails cleanly' — nothing is
+        written at all, so there is no commit to strand on a shared branch."""
+        self._advance_remote(repo, tmp_path)
+        # 🔴 NOT `tree_hash` here, and the reason matters: it hashes `.git` too,
+        # and the pre-check's `git fetch` legitimately writes FETCH_HEAD and
+        # remote refs. Using it would fail for a side effect that is the guard
+        # working, so assert the three things "nothing written" actually means.
+        doc_before, shas_before = doc_of(repo), commit_shas(repo)
+        remote_before = _sh("git", "rev-parse", "refs/heads/main",
+                            cwd=tmp_path / "origin.git")
+        res = run_tool(repo, "--confirm", "--push", update=update_file)
+        assert res.returncode == 6, (res.returncode, res.stdout, res.stderr)
+        assert "status=behind" in res.stderr
+        assert doc_of(repo) == doc_before, "the doc was written before refusing"
+        assert commit_shas(repo) == shas_before, (
+            "a commit was made and then stranded — the exact failure this closes"
+        )
+        assert _sh("git", "rev-parse", "refs/heads/main",
+                   cwd=tmp_path / "origin.git") == remote_before
+
+    def test_it_names_the_hazard_and_the_recovery(
+        self, repo: Path, update_file: Path, tmp_path: Path
+    ) -> None:
+        """A refusal a caller cannot act on gets worked around. It must name the
+        fast-forward, and the preserve-verify-reset path for a real divergence."""
+        self._advance_remote(repo, tmp_path)
+        err = run_tool(repo, "--confirm", "--push", update=update_file).stderr
+        assert "merge --ff-only" in err
+        assert "reset --keep" in err
+        assert "ship.sh" in err, "the consequence is what makes this worth obeying"
+
+    # --- the remedy DEPENDS on the tree, and a dirty tree gets a different one ---
+    #
+    # 🔴 MEASURED 2026-08-19. An agent hit this refusal in a shared clone that was
+    # 90 commits behind with 38 uncommitted paths belonging to at least three
+    # sessions. It correctly declined the `merge --ff-only` this message printed —
+    # that repo's own rules forbid committing, adding, stashing, checking out or
+    # switching in the primary clone precisely because the tree is shared. The
+    # tool was recommending an operation the target repo bans, and the message's
+    # `ship.sh` framing (devrc-specific) was repeated back as fact about a repo
+    # `ship.sh` does not converge.
+
+    def _dirty_the_tree(self, repo: Path) -> str:
+        """Leave an uncommitted path that is NOT the handoff doc — i.e. the shape
+        of someone else's in-progress work."""
+        other = repo / "SOMEONE_ELSES_WIP.md"
+        other.write_text("another session is mid-edit here\n", encoding="utf-8")
+        return other.name
+
+    def test_a_DIRTY_checkout_is_NOT_told_to_fast_forward(
+        self, repo: Path, update_file: Path, tmp_path: Path
+    ) -> None:
+        """🔴 The load-bearing half. `merge --ff-only` into a tree holding another
+        session's work either refuses or overwrites it."""
+        self._advance_remote(repo, tmp_path)
+        self._dirty_the_tree(repo)
+        res = run_tool(repo, "--confirm", "--push", update=update_file)
+        assert res.returncode == 6, (res.returncode, res.stderr)
+        err = res.stderr
+        # 🔴 The property is "no PASTEABLE COMMAND", not "the string never
+        # appears". The dirty branch NAMES `merge --ff-only` inside the sentence
+        # explaining why not to run it, which is correct and must stay legal —
+        # an earlier version of this assertion forbade the string outright and
+        # would have banned explaining the hazard at all.
+        assert f"git -C {repo} merge --ff-only" not in err, (
+            "the tool handed over a runnable fast-forward for a tree that holds "
+            "uncommitted work"
+        )
+        assert "merge --ff-only" in err, (
+            "it should still NAME the operation it is warning against"
+        )
+        assert "THIS CHECKOUT IS DIRTY" in err
+        assert "worktree add" in err, "it must name the remedy, not just refuse one"
+        assert "HEAD:" in err, "the push must go HEAD->branch from the worktree"
+
+    def test_the_dirty_message_NAMES_the_paths_it_is_protecting(
+        self, repo: Path, update_file: Path, tmp_path: Path
+    ) -> None:
+        """A refusal that does not say WHAT it saw is one the caller second-guesses."""
+        self._advance_remote(repo, tmp_path)
+        name = self._dirty_the_tree(repo)
+        err = run_tool(repo, "--confirm", "--push", update=update_file).stderr
+        assert name in err, "the dirty path is the evidence for the whole branch"
+        assert "uncommitted path(s)" in err
+
+    def test_the_dirty_message_gates_worktree_REMOVAL_on_the_push(
+        self, repo: Path, update_file: Path, tmp_path: Path
+    ) -> None:
+        """Removing a worktree after a FAILED push deletes the branch ref and
+        orphans the commit — the recipe is incomplete without this."""
+        self._advance_remote(repo, tmp_path)
+        self._dirty_the_tree(repo)
+        err = run_tool(repo, "--confirm", "--push", update=update_file).stderr
+        assert "AFTER the push succeeds" in err
+        assert "orphans the commit" in err
+
+    def test_a_CLEAN_checkout_still_gets_the_fast_forward(
+        self, repo: Path, update_file: Path, tmp_path: Path
+    ) -> None:
+        """🔴 The negative control. Without it, "never suggest ff-only" would pass
+        every test above while making the clean case needlessly heavy — the
+        fast-forward is correct there and is the cheaper remedy."""
+        self._advance_remote(repo, tmp_path)
+        err = run_tool(repo, "--confirm", "--push", update=update_file).stderr
+        assert "merge --ff-only" in err
+        assert "This checkout is CLEAN" in err
+        assert "THIS CHECKOUT IS DIRTY" not in err
+
+    def test_the_ship_sh_claim_is_SCOPED_not_asserted_of_every_repo(
+        self, repo: Path, update_file: Path, tmp_path: Path
+    ) -> None:
+        """`ship.sh` converges devrc only. Stating it flatly taught a reader that a
+        stranded commit in an unrelated repo blocks it — they repeated the claim."""
+        self._advance_remote(repo, tmp_path)
+        err = run_tool(repo, "--confirm", "--push", update=update_file).stderr
+        assert "In a devrc checkout" in err, "the ship.sh consequence must be scoped"
+        assert "elsewhere" in err, "and the other case must be stated, not implied"
+
+    def test_it_does_not_fire_when_the_remote_has_not_moved(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """🔴 The negative control. A check that always refuses would pass the
+        two tests above while making --push permanently unusable."""
+        res = run_tool(repo, "--confirm", "--push", update=update_file)
+        assert res.returncode == 0, (res.returncode, res.stderr)
+        assert "status=pushed" in res.stdout
+        assert "status=behind" not in res.stderr
+
+    def test_it_does_not_fetch_or_refuse_WITHOUT_push(
+        self, repo: Path, update_file: Path, tmp_path: Path
+    ) -> None:
+        """A behind remote is irrelevant to a local-only `--confirm`: there is no
+        push to be rejected, so refusing would block honest offline work."""
+        self._advance_remote(repo, tmp_path)
+        res = run_tool(repo, "--confirm", update=update_file)
+        assert res.returncode == 0, (res.returncode, res.stderr)
+        assert "status=written" in res.stdout
+
+    def test_an_UNREACHABLE_remote_refuses_rather_than_assuming_pushable(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """🔴 A fetch that FAILS is not '0 behind'. Guessing pushable is exactly
+        the confident-wrong-answer this guard exists to prevent, and it would
+        strand the commit the same way."""
+        doc_before, shas_before = doc_of(repo), commit_shas(repo)
+        _sh("git", "remote", "set-url", "origin",
+            str(repo.parent / "does-not-exist.git"), cwd=repo)
+        res = run_tool(repo, "--confirm", "--push", update=update_file)
+        assert res.returncode != 0
+        assert "refusing to commit something that may not be pushable" in res.stderr
+        # 🔴 Pin the DIAGNOSTIC, not just the refusal. Two guards reach "refuse"
+        # here — the non-zero exit and the empty-sha fallback — so disabling the
+        # first left the suite green while the message degraded from "cannot read
+        # origin/main: <git's actual error>" to "returned no sha". The refusal is
+        # the safety property; naming WHY (network vs auth vs no such remote) is
+        # what makes it actionable.
+        assert "cannot read origin/main" in res.stderr, res.stderr
+        # …and the local-only escape hatch, since a dead remote must not cost the
+        # whole handoff.
+        assert "re-run without" in res.stderr and "--push" in res.stderr
+        assert doc_of(repo) == doc_before
+        assert commit_shas(repo) == shas_before
+
+
+class TestPushabilityCasesTheFetchVersionGotWRONG:
+    """🔴 Each of these was measured wrong, or dangerously right, before the
+    mechanism moved from `git fetch` + `FETCH_HEAD` to `git ls-remote`.
+
+    `FETCH_HEAD` is shared mutable state: a concurrent fetch between the write
+    and the read made the check return a confident 0 on a checkout that was
+    genuinely behind — write, commit, push rejected, stranded commit. And
+    `fetch <remote> <branch>` simply FAILS when the branch is not on the remote,
+    which made a first push impossible.
+    """
+
+    def test_a_branch_NOT_YET_on_the_remote_is_pushable(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """🔴 THE REGRESSION. A first push cannot be rejected non-fast-forward,
+        so it must not be refused. `git fetch origin <branch>` exits 128 here."""
+        _sh("git", "checkout", "-q", "-b", "brand-new", cwd=repo)
+        res = run_tool(repo, "--confirm", "--push", update=update_file)
+        assert res.returncode == 0, (res.returncode, res.stdout, res.stderr)
+        assert "status=pushed" in res.stdout
+        assert "status=behind" not in res.stderr
+
+    def test_AHEAD_only_is_pushable(self, repo: Path, update_file: Path) -> None:
+        """Ahead is the normal case; refusing it would block every handoff."""
+        (repo / "extra.md").write_text("x\n", encoding="utf-8")
+        _sh("git", "add", "--", "extra.md", cwd=repo)
+        _sh("git", "commit", "-q", "-m", "local work", cwd=repo)
+        res = run_tool(repo, "--confirm", "--push", update=update_file)
+        assert res.returncode == 0, res.stderr
+        assert "status=pushed" in res.stdout
+
+    def test_AHEAD_and_BEHIND_refuses(
+        self, repo: Path, update_file: Path, tmp_path: Path
+    ) -> None:
+        """Diverged. `behind`-only logic that asked 'is the remote strictly
+        ahead' would call this pushable and strand the commit."""
+        other = tmp_path / "other2"
+        _sh("git", "clone", "-q", str(tmp_path / "origin.git"), str(other), cwd=tmp_path)
+        for k, v in (("user.name", "O"), ("user.email", "o@example.invalid"),
+                     ("commit.gpgsign", "false")):
+            _sh("git", "config", k, v, cwd=other)
+        (other / "theirs.md").write_text("t\n", encoding="utf-8")
+        _sh("git", "add", "--", "theirs.md", cwd=other)
+        _sh("git", "commit", "-q", "-m", "theirs", cwd=other)
+        _sh("git", "push", "-q", "origin", "main", cwd=other)
+        (repo / "mine.md").write_text("m\n", encoding="utf-8")
+        _sh("git", "add", "--", "mine.md", cwd=repo)
+        _sh("git", "commit", "-q", "-m", "mine", cwd=repo)
+        shas = commit_shas(repo)
+        res = run_tool(repo, "--confirm", "--push", update=update_file)
+        assert res.returncode == 6, (res.returncode, res.stderr)
+        assert commit_shas(repo) == shas
+
+    def test_AHEAD_and_BEHIND_refuses_even_when_the_tip_IS_known_locally(
+        self, repo: Path, update_file: Path, tmp_path: Path
+    ) -> None:
+        """🔴 The sibling test above does NOT reach the ancestry comparison.
+
+        Its repo has never fetched the other clone's commit, so the lookup
+        refuses on the unknown tip and the `merge-base` result is never
+        consulted — measured: replacing that comparison with a flat `False` left
+        the whole suite green. Fetching the object first (without merging it) is
+        what forces the ancestry path to be the thing deciding.
+        """
+        other = tmp_path / "other4"
+        _sh("git", "clone", "-q", str(tmp_path / "origin.git"), str(other), cwd=tmp_path)
+        for k, v in (("user.name", "O"), ("user.email", "o@example.invalid"),
+                     ("commit.gpgsign", "false")):
+            _sh("git", "config", k, v, cwd=other)
+        (other / "theirs2.md").write_text("t\n", encoding="utf-8")
+        _sh("git", "add", "--", "theirs2.md", cwd=other)
+        _sh("git", "commit", "-q", "-m", "theirs2", cwd=other)
+        _sh("git", "push", "-q", "origin", "main", cwd=other)
+        # The object is now LOCAL, but not merged: ahead 1, behind 1.
+        _sh("git", "fetch", "-q", "origin", "main", cwd=repo)
+        (repo / "mine2.md").write_text("m\n", encoding="utf-8")
+        _sh("git", "add", "--", "mine2.md", cwd=repo)
+        _sh("git", "commit", "-q", "-m", "mine2", cwd=repo)
+        hd = _load_module()
+        tip = _sh("git", "rev-parse", "refs/heads/main", cwd=tmp_path / "origin.git").strip()
+        assert hd.git_allow(repo, "cat-file", "-e", f"{tip}^{{commit}}").code == 0, (
+            "premise: the remote tip must be present locally, or this test takes "
+            "the unknown-tip path and proves nothing about ancestry"
+        )
+        shas = commit_shas(repo)
+        res = run_tool(repo, "--confirm", "--push", update=update_file)
+        assert res.returncode == 6, (res.returncode, res.stderr)
+        assert commit_shas(repo) == shas
+
+    def test_the_lookup_writes_NOTHING_into_dot_git(
+        self, repo: Path, update_file: Path, tmp_path: Path
+    ) -> None:
+        """🔴 The claim the previous version got wrong. `fetch` writes
+        `refs/remotes/<remote>/<branch>` in the COMMON gitdir — shared by every
+        worktree — plus objects and reflogs, and two concurrent fetches failed to
+        lock in 30/30 trials. `ls-remote` must write nothing at all."""
+        def snapshot() -> dict:
+            return {
+                str(p.relative_to(repo)): p.stat().st_mtime_ns
+                for p in (repo / ".git").rglob("*") if p.is_file()
+            }
+        # Make the remote ahead so the pre-check refuses AFTER doing its lookup.
+        other = tmp_path / "other3"
+        _sh("git", "clone", "-q", str(tmp_path / "origin.git"), str(other), cwd=tmp_path)
+        for k, v in (("user.name", "O"), ("user.email", "o@example.invalid"),
+                     ("commit.gpgsign", "false")):
+            _sh("git", "config", k, v, cwd=other)
+        (other / "z.md").write_text("z\n", encoding="utf-8")
+        _sh("git", "add", "--", "z.md", cwd=other)
+        _sh("git", "commit", "-q", "-m", "z", cwd=other)
+        _sh("git", "push", "-q", "origin", "main", cwd=other)
+        before = snapshot()
+        assert run_tool(repo, "--confirm", "--push", update=update_file).returncode == 6
+        assert snapshot() == before, (
+            "the pushability lookup wrote into .git — on a shared gitdir that is "
+            "a side effect on every other worktree, and FETCH_HEAD in particular "
+            "is what made the old check racy"
+        )
+
+    def test_an_unreadable_remote_tip_is_NOT_read_as_pushable(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """A remote tip this repo has never fetched is by definition a commit
+        HEAD lacks. `merge-base` would FAIL on the unknown object, and a failure
+        must not collapse to 'pushable'."""
+        hd = _load_module()
+        assert hd.remote_has_commits_we_lack(repo, "origin", "main") is False
+        # An unknown sha must land on REFUSE via the ancestry check's non-zero,
+        # which is the single fail-safe now that the redundant guard is gone.
+        ghost = "0" * 40
+        assert hd.git_allow(repo, "merge-base", "--is-ancestor", ghost, "HEAD").code != 0
+
+
+class TestResolveBranch:
+    """🔴 Extracted by this PR and shipped with ZERO coverage — a mutant
+    returning the constant "main", ignoring `--branch` and never raising on a
+    detached HEAD, survived all 55 tests."""
+
+    def test_it_honours_the_override(self, repo: Path) -> None:
+        hd = _load_module()
+        assert hd.resolve_branch(repo, "release-42") == "release-42"
+
+    def test_it_reads_the_current_branch(self, repo: Path) -> None:
+        hd = _load_module()
+        _sh("git", "checkout", "-q", "-b", "topic-x", cwd=repo)
+        assert hd.resolve_branch(repo, None) == "topic-x"
+
+    def test_a_detached_HEAD_refuses_rather_than_guessing(self, repo: Path) -> None:
+        hd = _load_module()
+        _sh("git", "checkout", "-q", "--detach", cwd=repo)
+        with pytest.raises(hd.GitError) as exc:
+            hd.resolve_branch(repo, None)
+        assert "detached HEAD" in str(exc.value)
+
+
+class TestPushFailureHandsOverTheRecovery:
+    """The RESIDUAL path: the pre-check passed and the push still failed.
+
+    🔴 It cannot be designed away — the remote can move in the window between
+    the fetch and the push — so the commit really does exist at that point. What
+    must not happen is the caller not being told: an un-pushed commit on a shared
+    branch is the state `ship.sh` skips over silently, and a session that does
+    not know it is there will not clean it up.
+
+    Triggered deterministically by pointing `origin` at a NON-BARE repo with
+    `main` checked out: fetch succeeds (so the pre-check passes), push is refused
+    ("refusing to update checked out branch"). Discovered by accident when a
+    fixture cloned the wrong path.
+    """
+
+    def _origin_that_fetches_but_refuses_push(self, repo: Path, tmp_path: Path) -> None:
+        sibling = tmp_path / "sibling"
+        _sh("git", "clone", "-q", str(tmp_path / "origin.git"), str(sibling), cwd=tmp_path)
+        _sh("git", "remote", "set-url", "origin", str(sibling), cwd=repo)
+
+    def test_it_says_the_commit_exists_and_names_the_recovery(
+        self, repo: Path, update_file: Path, tmp_path: Path
+    ) -> None:
+        self._origin_that_fetches_but_refuses_push(repo, tmp_path)
+        before = commit_shas(repo)
+        res = run_tool(repo, "--confirm", "--push", update=update_file)
+        assert res.returncode != 0
+        assert "status=push-failed" in res.stderr
+        # The commit DOES exist — the message must not pretend otherwise.
+        assert len(commit_shas(repo)) == len(before) + 1
+        # 🔴 "in that order" is pinned too, not just the three commands. The
+        # ORDER is the load-bearing part — verifying the sha reached the remote
+        # BEFORE moving the branch pointer is what makes the recovery safe, and
+        # deleting that clause left the suite green while the commands stayed.
+        for needed in ("EXISTS LOCALLY", "ship.sh", "in that order",
+                       "branch <topic>", "ls-remote", "reset --keep"):
+            assert needed in res.stderr, f"recovery step missing: {needed}"
+
+    def test_the_pre_check_did_not_fire_here(
+        self, repo: Path, update_file: Path, tmp_path: Path
+    ) -> None:
+        """🔴 Distinguishes the two paths. Without this, a pre-check that refused
+        everything would satisfy the test above for the wrong reason."""
+        self._origin_that_fetches_but_refuses_push(repo, tmp_path)
+        res = run_tool(repo, "--confirm", "--push", update=update_file)
+        assert "status=behind" not in res.stderr
+        assert "status=written" in res.stdout, "the write must have happened first"
+
+
+class TestALocalCommitDoesNotGoUNANNOUNCED:
+    """🔴 THE DEFECT, MEASURED. `--confirm` WITHOUT `--push` made a commit and
+    said, in full: `status=written commit=<sha40>`. Not the branch it landed on,
+    and not one word about the commit existing only in this checkout.
+
+    That end state is IDENTICAL to the one `status=push-failed` spends nine
+    alarmed lines on — "🔴 THE COMMIT … EXISTS LOCALLY … and is NOT on
+    <remote>" plus a preserve→verify→`reset --keep` recovery — because it is the
+    same state, reached by the ordinary SUCCESS path instead of a failure.
+    `claude/RULES.md` calls docs written into a working tree UNSAVED WORK; this
+    repo's `CLAUDE.md` records the un-pushed-commit incident twice.
+
+    The corpus: 69 distinct shas came out of `status=written commit=`, from 58
+    transcripts, of which only 19 ever printed `status=pushed`. Of the handoff
+    commits still in this repo's object store, roughly a third are contained by
+    NO remote branch — every one of them on a feature branch, none on `main`,
+    which is why the feature-branch remedy is the DEFAULT below and the shared
+    branch is the special case, not the other way round.
+
+    🔴 EXIT CODE UNCHANGED. This is information, not a refusal: a local write is
+    a legitimate thing to want, and turning it into a failure would push callers
+    toward `--push` on a shared branch, which is worse.
+    """
+
+    def test_it_names_the_commit_the_BRANCH_and_that_it_is_not_pushed(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """🔴 THE HEADLINE REGRESSION. Red at base: the old output was exactly
+        `status=written commit=<sha>` and stopped there."""
+        res = run_tool(repo, "--confirm", update=update_file)
+        assert res.returncode == 0, res.stderr
+        sha = commit_shas(repo)[0]
+        assert f"status=written commit={sha} branch=main" in res.stdout, res.stdout
+        assert (
+            "NOT PUSHED — the commit exists only in this checkout; push it or "
+            "open a PR in THIS session." in res.stdout
+        ), res.stdout
+
+    def test_the_PUSHED_path_says_nothing_about_not_being_pushed(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """🔴 THE NEGATIVE CONTROL, and the whole reason to bother with one: a
+        warning printed on the path where it is false is wallpaper, and the next
+        reader learns to skip the line on the path where it is true."""
+        res = run_tool(repo, "--confirm", "--push", update=update_file)
+        assert res.returncode == 0, res.stderr
+        assert "status=pushed" in res.stdout
+        assert "NOT PUSHED" not in res.stdout + res.stderr
+        assert "branch <topic>" not in res.stdout
+        assert "no-change" not in res.stdout
+
+    def test_a_feature_branch_gets_the_PASTEABLE_push_command(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """Pasteable beats descriptive, and `git push` is safe to paste in a way
+        the `behind` path's `merge --ff-only` is not: a push that should not
+        happen is REJECTED, never destructive, so this needs no dirty-tree check."""
+        _sh("git", "checkout", "-q", "-b", "docs/handoff-sample", cwd=repo)
+        res = run_tool(repo, "--confirm", update=update_file)
+        assert res.returncode == 0, res.stderr
+        assert "branch=docs/handoff-sample" in res.stdout
+        assert (
+            f"    git -C {repo} push -u origin HEAD:refs/heads/docs/handoff-sample"
+            in res.stdout
+        ), res.stdout
+        # 🔴 The retry note belongs on THIS arm too. A mutation that deleted it
+        # from the feature-branch arm alone SURVIVED the whole suite, because
+        # both retry tests happened to run on `main` — the shared arm — so the
+        # note they read came from the other branch of the same function.
+        assert "Do NOT retry by re-running this tool with --push" in res.stdout
+
+    def test_a_SHARED_branch_is_NOT_handed_a_push_command_it_must_not_run(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """🔴 A WRONG pasteable command is worse than a descriptive one. devrc's
+        own rules forbid committing to `main` in either host checkout, so
+        printing `push … HEAD:refs/heads/main` would be the tool recommending an
+        operation the target repo refuses — the shape that already shipped once
+        in a `behind` message. The topic-branch route is what this repo's
+        diverged-host recipe and `status=push-failed` both already name."""
+        res = run_tool(repo, "--confirm", update=update_file)
+        assert "push -u origin HEAD:refs/heads/main" not in res.stdout, res.stdout
+        assert (
+            f"    git -C {repo} branch <topic> HEAD && "
+            f"git -C {repo} push -u origin <topic>" in res.stdout
+        ), res.stdout
+
+    def test_the_ship_sh_claim_is_SCOPED_here_too(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """`ship.sh` converges devrc only. The `behind` message learned this the
+        hard way — stating it flatly taught a reader that a stranded commit in an
+        unrelated repo blocks it, and they repeated the claim — so the same
+        scoping is required of the new message rather than re-derived."""
+        out = run_tool(repo, "--confirm", update=update_file).stdout
+        assert "In a devrc checkout" in out, "the ship.sh consequence must be scoped"
+        assert "elsewhere" in out, "and the other case must be stated, not implied"
+
+    def test_a_feature_branch_is_NOT_told_it_is_shared(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """🔴 NEGATIVE CONTROL on the classifier. A `branch_is_shared` that
+        always returned True would satisfy every shared-branch assertion above
+        while burying the ordinary case — measured as the COMMON case — under a
+        `ship.sh` warning that is false for it."""
+        _sh("git", "checkout", "-q", "-b", "docs/handoff-sample", cwd=repo)
+        out = run_tool(repo, "--confirm", update=update_file).stdout
+        assert "SHARED branch" not in out, out
+        assert "ship.sh" not in out, out
+
+    def test_the_STRUCTURAL_signal_catches_a_shared_branch_the_NAME_LIST_misses(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """🔴 The name list is a fallback, not the answer. A remote whose default
+        branch is not called main/master/trunk is not hypothetical — this
+        module's own history records a concurrent `git fetch origin stable` — and
+        a name-only classifier calls that branch a feature branch and hands over
+        a push command the repo may forbid."""
+        _sh("git", "checkout", "-q", "-b", "stable", cwd=repo)
+        _sh("git", "push", "-q", "origin", "stable", cwd=repo)
+        _sh("git", "symbolic-ref", "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/stable", cwd=repo)
+        out = run_tool(repo, "--confirm", update=update_file).stdout
+        assert "`stable` is a SHARED branch" in out, out
+        assert "push -u origin HEAD:refs/heads/stable" not in out
+
+    def test_the_retry_the_message_RULES_OUT_is_ruled_out_for_a_REPLACE_delta(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 THE CLAIM IN THE PROSE, MEASURED — point A of two.
+
+        The message tells the caller not to retry with `--push`. That is the
+        single most likely next action, so an unverified claim there would be
+        worse than silence. Point A: a delta that only REPLACES sections leaves
+        the doc equal to the merge result, so the no-change guard fires first.
+        """
+        replace_only = tmp_path / "replace-only.md"
+        replace_only.write_text(
+            "## State now\n- Branch / PR: `feat/sample` / #99\n", encoding="utf-8"
+        )
+        first = run_tool(repo, "--confirm", update=replace_only)
+        assert first.returncode == 0
+        assert "Do NOT retry by re-running this tool with --push" in first.stdout
+        remote = Path(_sh("git", "remote", "get-url", "origin", cwd=repo).strip())
+        before = _sh("git", "-C", str(remote), "log", "--format=%H", cwd=repo)
+        again = run_tool(repo, "--confirm", "--push", update=replace_only)
+        assert again.returncode == 5, (again.returncode, again.stdout, again.stderr)
+        assert "status=no-change" in again.stderr
+        assert _sh("git", "-C", str(remote), "log", "--format=%H", cwd=repo) == before
+
+    def test_the_retry_is_ruled_out_for_an_APPEND_delta_TOO_and_differently(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """🔴 POINT B, and it is the one that FOUND THE BUG IN THIS MESSAGE.
+
+        The note's first draft said the retry "will NOT land it: … it exits 5
+        `no-change`". That was one measurement on a replace-only fixture stated
+        as a general claim. A delta carrying an APPEND section — which the
+        canonical `## Open investigations` block IS, and which every real handoff
+        update carries — appends a SECOND copy under rule (c), so the retry
+        exits 0, pushes, and silently duplicates the findings.
+
+        Both halves are ruled out, for different reasons, and the message now
+        says so. Exit code 0 is why this half is invisible without the test.
+        """
+        first = run_tool(repo, "--confirm", update=update_file)
+        assert first.returncode == 0
+        again = run_tool(repo, "--confirm", "--push", update=update_file)
+        assert again.returncode == 0, (again.returncode, again.stderr)
+        marker = "### the at-max reading was misread"
+        assert doc_of(repo).count(marker) == 2, (
+            "the retry appended the update a SECOND time — that is the hazard "
+            "the note names, and if this ever becomes 1 the note is stale"
+        )
+        assert "APPENDS your findings a second time" in first.stdout
+
+    def test_a_detached_HEAD_still_SUCCEEDS_and_names_no_bogus_target(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """🔴 `resolve_branch` is now called unconditionally, and it RAISES on a
+        detached HEAD. That must not turn a working local write into a refusal:
+        without `--push` there is no push to be wrong about, so the failure costs
+        a NAME, never the write. And with no branch there is no push target, so
+        no push command may be printed — a `HEAD:refs/heads/<unresolved>` would
+        be exactly the wrong-pasteable-command failure."""
+        shas_before = commit_shas(repo)
+        _sh("git", "checkout", "-q", "--detach", cwd=repo)
+        res = run_tool(repo, "--confirm", update=update_file)
+        assert res.returncode == 0, (res.returncode, res.stderr)
+        assert len(commit_shas(repo)) == len(shas_before) + 1
+        assert "branch=<unresolved>" in res.stdout, res.stdout
+        assert "detached HEAD, no --branch" in res.stdout
+        assert "refs/heads/" not in res.stdout, res.stdout
+        assert f"git -C {repo} branch <topic> HEAD" in res.stdout
+
+    def test_a_detached_HEAD_still_REFUSES_under_push(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """The other half of the pair: deferring the resolve error must not have
+        smuggled a detached-HEAD push past the refusal that used to catch it."""
+        doc_before, shas_before = doc_of(repo), commit_shas(repo)
+        _sh("git", "checkout", "-q", "--detach", cwd=repo)
+        res = run_tool(repo, "--confirm", "--push", update=update_file)
+        assert res.returncode == 3, (res.returncode, res.stderr)
+        assert "detached HEAD and no --branch given" in res.stderr
+        assert doc_of(repo) == doc_before
+        assert commit_shas(repo) == shas_before
+
+    def test_branch_is_shared_predicate(self, repo: Path) -> None:
+        """The predicate in one place, so the message and the tests agree — and
+        so the UNION of the two signals is pinned rather than assumed. Neither
+        may veto the other: a false True costs a line of prose, a false False
+        costs the louder half of the warning exactly where it matters."""
+        # No refs/remotes/origin/HEAD in this fixture (git init + remote add
+        # never creates one) — so these exercise the NAME fallback alone.
+        assert hd.branch_is_shared(repo, "origin", "main") is True
+        assert hd.branch_is_shared(repo, "origin", "trunk") is True
+        assert hd.branch_is_shared(repo, "origin", "master") is True
+        assert hd.branch_is_shared(repo, "origin", "docs/handoff-x") is False
+        assert hd.branch_is_shared(repo, "origin", "stable") is False
+        # …and now the structural signal alone, on a name the list does not know.
+        _sh("git", "checkout", "-q", "-b", "stable", cwd=repo)
+        _sh("git", "push", "-q", "origin", "stable", cwd=repo)
+        _sh("git", "symbolic-ref", "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/stable", cwd=repo)
+        assert hd.branch_is_shared(repo, "origin", "stable") is True
+        assert hd.branch_is_shared(repo, "origin", "docs/handoff-x") is False
+        # The name list still wins where they disagree — union, not override.
+        assert hd.branch_is_shared(repo, "origin", "main") is True
+
+
+# --------------------------------------------------------------------------
+# 🔴 the property most likely to regress: every OTHER exit path, byte for byte
+# --------------------------------------------------------------------------
+
+# Full normalised `rc` + stdout + stderr for the exits that carry NO git-authored
+# text. Pinned WHOLE, not by keyword: when the artifact under test is prose, a
+# keyword guard is walkable by rewording, and these messages are the entire
+# product of their code paths. A cosmetic reword must fail here — that is the
+# cost of a machine-readable claim that they did not change.
+PIN_NO_ADVANCE = """rc=4
+--- stdout
+--- stderr
+status=no-advance
+This session did not state what changed since the handoff was written, so no update is offered: no diff, no write, no commit.
+  If state DID advance, re-run with --advanced '<what changed>'.
+  If it did not, say so plainly and write nothing — a handoff that still describes reality is not stale.
+"""
+
+PIN_NO_CHANGE = """rc=5
+--- stdout
+--- stderr
+status=no-change
+The merge of <UPDATE> into claudedocs/handoff-sample-topic.md changes nothing. No diff, no commit — an empty commit is not a handoff update.
+"""
+
+PIN_BEHIND_CLEAN_STDERR = """status=behind remote=origin branch=main
+NOTHING WRITTEN — not the doc, not a commit, not a ref.
+  origin/main has commit(s) this checkout does not, so the push would be rejected and the commit would be left behind on a shared branch. In a devrc checkout that is the state that silently blocks `ship.sh`; elsewhere it is a stranded commit on a branch other people push to.
+  This checkout is CLEAN, so a fast-forward is safe. Run it, then re-run this exact command:
+    git -C <REPO> merge --ff-only origin/main
+  🔴 If `--branch main` is not the branch you are ON, do NOT run that merge — it would merge an unrelated branch into your checkout. Push from a checkout of main instead.
+  If the merge refuses, this checkout has DIVERGED — preserve, verify, then move the pointer, in that order:
+    git -C <REPO> branch <topic> HEAD && git -C <REPO> push -u origin <topic>
+    git -C <REPO> ls-remote --heads origin <topic>
+    git -C <REPO> reset --keep origin/main
+"""
+
+PIN_BEHIND_DIRTY_STDERR = """status=behind remote=origin branch=main
+NOTHING WRITTEN — not the doc, not a commit, not a ref.
+  origin/main has commit(s) this checkout does not, so the push would be rejected and the commit would be left behind on a shared branch. In a devrc checkout that is the state that silently blocks `ship.sh`; elsewhere it is a stranded commit on a branch other people push to.
+  🔴 THIS CHECKOUT IS DIRTY — 2 uncommitted path(s): README.md, other-wip.txt
+  DO NOT fast-forward it. Some or all of that work is probably another session's, and `merge --ff-only` would either refuse or overwrite it. Several repos forbid committing in a shared primary clone for exactly this reason.
+  Commit and push from a THROWAWAY WORKTREE off the remote branch instead, leaving this tree untouched:
+    git -C <REPO> worktree add /tmp/handoff-wt origin/main
+    # write the doc there, commit it path-limited, then:
+    git -C /tmp/handoff-wt push origin HEAD:main
+  🔴 Remove the worktree only AFTER the push succeeds — removing it after a failed push deletes the branch ref and orphans the commit.
+  Verify by CONTENT, never ancestry: a squash merge never makes your head an ancestor of main.
+"""
+
+# push-failed interleaves git's OWN stderr, whose wording is a git-version
+# dependency this suite must not pin. So its two tool-authored halves are pinned
+# instead — the head token and everything from the 🔴 line to the end.
+PIN_PUSH_FAILED_TAIL = """🔴 THE COMMIT <SHA12> EXISTS LOCALLY on `main` and is NOT on origin. On a shared branch that is the state `ship.sh` skips over silently.
+  Preserve, verify, then move the pointer — in that order:
+    git -C <REPO> branch <topic> HEAD && git -C <REPO> push -u origin <topic>
+    git -C <REPO> ls-remote --heads origin <topic>   # confirm it landed
+    git -C <REPO> reset --keep origin/main   # --keep refuses rather than destroys
+"""
+
+
+class TestTheOtherExITSDidNotMove:
+    """🔴 Adding a line to ONE exit path is exactly how the neighbouring paths
+    get edited by accident, and nothing else in this suite reads their messages
+    whole — the existing tests check for keywords, which a reword walks straight
+    past. These pin the bytes.
+
+    Verified against the pre-change module by extracting it with `git show` and
+    running all seven exit paths through the same normaliser: 7/7 identical. The
+    normaliser's positive control is recorded in `normalised_run`.
+    """
+
+    def _noop_update(self, tmp_path: Path) -> Path:
+        p = tmp_path / "noop.md"
+        p.write_text("## Goal\nMake the sample subsystem stop dropping work "
+                     "under load.\n", encoding="utf-8")
+        return p
+
+    def test_no_advance_is_byte_identical(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        res = run_tool(repo, "--confirm", update=update_file, advanced=None)
+        assert normalised_run(res, repo, update_file) == PIN_NO_ADVANCE
+
+    def test_no_change_is_byte_identical(self, repo: Path, tmp_path: Path) -> None:
+        noop = self._noop_update(tmp_path)
+        res = run_tool(repo, "--confirm", update=noop)
+        assert normalised_run(res, repo, noop) == PIN_NO_CHANGE
+
+    def test_behind_CLEAN_is_byte_identical(
+        self, repo: Path, update_file: Path, tmp_path: Path
+    ) -> None:
+        advance_remote(tmp_path)
+        res = run_tool(repo, "--confirm", "--push", update=update_file)
+        assert res.returncode == 6
+        assert normalised_run(res, repo, update_file).split("--- stderr\n")[1] == (
+            PIN_BEHIND_CLEAN_STDERR
+        )
+        assert "status=" not in res.stdout, "nothing was written; no status on stdout"
+
+    def test_behind_DIRTY_is_byte_identical(
+        self, repo: Path, update_file: Path, tmp_path: Path
+    ) -> None:
+        advance_remote(tmp_path)
+        (repo / "README.md").write_text("someone else's WIP\n", encoding="utf-8")
+        (repo / "other-wip.txt").write_text("wip\n", encoding="utf-8")
+        res = run_tool(repo, "--confirm", "--push", update=update_file)
+        assert res.returncode == 6
+        assert normalised_run(res, repo, update_file).split("--- stderr\n")[1] == (
+            PIN_BEHIND_DIRTY_STDERR
+        )
+
+    def test_push_failed_is_byte_identical(
+        self, repo: Path, update_file: Path, tmp_path: Path
+    ) -> None:
+        sibling = tmp_path / "sibling"
+        _sh("git", "clone", "-q", str(tmp_path / "origin.git"), str(sibling),
+            cwd=tmp_path)
+        _sh("git", "remote", "set-url", "origin", str(sibling), cwd=repo)
+        res = run_tool(repo, "--confirm", "--push", update=update_file)
+        assert res.returncode == 3
+        norm = normalised_run(res, repo, update_file)
+        err = norm.split("--- stderr\n")[1]
+        assert err.startswith("status=push-failed\n")
+        assert err[err.index("🔴 THE COMMIT"):] == PIN_PUSH_FAILED_TAIL
+        # 🔴 And the stdout half: `status=written` on the push path must NOT have
+        # grown the `branch=` token, or the not-pushed change reached a path it
+        # has no business on.
+        assert norm.rstrip("\n").endswith("status=written commit=<SHA40>") is False
+        assert "status=written commit=<SHA40>\n--- stderr" in norm, norm
+
+    def test_the_pins_can_report_a_difference(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """🔴 NEGATIVE CONTROL on the four pins above. A normaliser that
+        tokenised too much — or an equality that compared something constant —
+        would make every one of them vacuous. Feed it a run whose output is
+        genuinely different and watch it NOT match."""
+        res = run_tool(repo, "--confirm", update=update_file)
+        text = normalised_run(res, repo, update_file)
+        assert text != PIN_NO_ADVANCE
+        assert text != PIN_NO_CHANGE
+        assert "<SHA40>" in text, "the sha WAS tokenised — the instrument works"
+        assert str(repo) not in text, "the repo path WAS tokenised"
 
 
 class TestSkillAndModuleAgree:
@@ -623,8 +2203,21 @@ class TestSkillAndModuleAgree:
         """A status the tool returns and the skill never mentions leaves the
         agent improvising at the moment it is about to push to a shared branch."""
         doc = HANDOFF_SKILL.read_text(encoding="utf-8")
-        for status in ("no-advance", "no-change", "proposed"):
-            assert status in doc, f"SKILL.md never mentions `{status}`"
+        # 🔴 DERIVED FROM THE MODULE, not restated. The hand-written literal
+        # ("no-advance", "no-change", "proposed") is why `behind` — added by the
+        # very PR that closes the stranded-commit bug — reached the skill's only
+        # audience undocumented: the test built to catch exactly that could not
+        # see a status nobody remembered to add to its own list.
+        src = TOOL.read_text(encoding="utf-8")
+        emitted = sorted(set(re.findall(r'status=([a-z-]+)', src)))
+        assert len(emitted) >= 5, f"the scraper found too few statuses: {emitted}"
+        for status in emitted:
+            assert status in doc, (
+                f"the module can print `status={status}` and "
+                f"claude/skills/handoff/SKILL.md never mentions it. An agent hits "
+                f"an undocumented status at the moment it is about to push to a "
+                f"shared branch. Document it, or stop emitting it."
+            )
 
     def test_the_tool_is_tracked_by_git(self) -> None:
         """A new file the flake never sees deploys as an absence, silently.
@@ -646,3 +2239,824 @@ class TestSkillAndModuleAgree:
             "omit it from the deploy and `home-manager switch` will succeed with "
             "the file simply absent."
         )
+
+
+class TestBlockedCommitLeavesNoTrace:
+    """A REFUSED commit must not leave the doc written and staged.
+
+    🔴 MEASURED 2026-08-21, and this is the failure the class exists for. A
+    PreToolUse hook enforcing "never commit in the primary clone" refused the
+    `git commit` — correct behaviour — but the tool had ALREADY written the
+    merged doc and `git add`ed it. The refusal therefore left a modified, STAGED
+    file in a checkout shared with other sessions, where the next person's
+    `git commit` sweeps it in. The caller then re-ran the tool to read the error
+    and the merge appended the same block a SECOND time.
+
+    A blocked commit is not a no-op, and the caller has no reason to expect it
+    left anything behind: `status=failed` reads as "nothing happened".
+    """
+
+    @staticmethod
+    def _block_commits(repo: Path) -> None:
+        """Refuse every commit, the way a real guard hook does."""
+        # write_exec owns the shebang — a call site that supplies its own
+        # trips scripts/tests/test_runtime_shebangs.py, a REPO-WIDE scan that a
+        # three-file test run structurally cannot see.
+        write_exec(repo / ".git" / "hooks" / "pre-commit",
+                   "echo 'blocked by guard' >&2\nexit 1\n")
+
+    def test_the_hook_actually_blocks(self, repo: Path) -> None:
+        """POSITIVE CONTROL for the fixture itself.
+
+        Without this, a hook that silently failed to install would make every
+        assertion below pass for the wrong reason — the commit would simply
+        succeed and there would be nothing to roll back."""
+        self._block_commits(repo)
+        (repo / "canary.txt").write_text("x\n", encoding="utf-8")
+        _sh("git", "add", "--", "canary.txt", cwd=repo)
+        out = subprocess.run(
+            ["git", "-C", str(repo), "commit", "-m", "should be refused"],
+            capture_output=True, text=True, env=dict(os.environ, **GIT_ENV),
+        )
+        assert out.returncode != 0, "the pre-commit hook did not block — fixture is inert"
+
+    def test_doc_is_restored_and_nothing_is_staged(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        before = doc_of(repo)
+        shas_before = commit_shas(repo)
+        self._block_commits(repo)
+
+        res = run_tool(repo, "--confirm", update=update_file)
+
+        assert res.returncode == 3, f"expected EXIT_FAIL, got {res.returncode}"
+        assert "status=failed" in res.stderr
+        # 🔴 The two assertions this class exists for.
+        assert doc_of(repo) == before, (
+            "the doc was left MODIFIED after the commit was refused — in a shared "
+            "checkout that is another session's `git commit` away from being swept in"
+        )
+        staged = _sh("git", "diff", "--cached", "--name-only", cwd=repo).split()
+        assert staged == [], f"paths left STAGED after a refused commit: {staged}"
+        assert commit_shas(repo) == shas_before, "a commit was made despite the refusal"
+
+    def test_unrelated_staged_work_is_not_unstaged_by_the_rollback(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """The rollback must be PATH-LIMITED, like the commit it undoes.
+
+        A blanket `git reset` would unstage a co-worker's staged files as a side
+        effect of our own failure — trading one shared-checkout defect for a
+        worse one."""
+        (repo / "OTHER.md").write_text("someone else's staged work\n", encoding="utf-8")
+        _sh("git", "add", "--", "OTHER.md", cwd=repo)
+        self._block_commits(repo)
+
+        run_tool(repo, "--confirm", update=update_file)
+
+        staged = _sh("git", "diff", "--cached", "--name-only", cwd=repo).split()
+        assert staged == ["OTHER.md"], (
+            f"the rollback must leave unrelated staged work alone; staged={staged}"
+        )
+
+    def test_a_LANDED_commit_is_never_rolled_back(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """🔴 THE HIGHEST-CONSEQUENCE BRANCH, and it had no test.
+
+        The `committed` flag exists so a commit that LANDED and then hit a later
+        failure is left alone. Roll back there and the tool DISCARDS a committed
+        change — strictly worse than the defect it was written to fix.
+
+        🔴 THE FIRST VERSION OF THIS TEST WAS VACUOUS and only mutation testing
+        found it: it used a failing `post-commit` hook, and git IGNORES that
+        hook's exit status (measured: `git commit` rc=0, commit created). The
+        except-branch was never reached, so deleting the guard still passed.
+        A `git` shim that fails `rev-parse` ONLY AFTER a commit has run is the
+        real shape — the commit lands, then a later git step errors.
+        """
+        real_git = shutil.which("git")
+        assert real_git, "git not on PATH"
+        shim = repo / "gitshim-revparse"
+        shim.mkdir()
+        marker = shim / "committed.marker"
+        # `git()` invokes ["git", "-C", <repo>, *args] — the SUBCOMMAND is $3,
+        # not $1. Scan all args instead of indexing, which is what the earlier
+        # broken shim got wrong.
+        fired = shim / "intercepted.marker"
+        write_exec(
+            shim / "git",
+            f'for a in "$@"; do [ "$a" = "commit" ] && : > "{marker}"; done\n'
+            f'for a in "$@"; do\n'
+            f'  if [ "$a" = "rev-parse" ] && [ -f "{marker}" ]; then\n'
+            f'    : > "{fired}"; exit 7\n'
+            f'  fi\n'
+            f'done\n'
+            f'exec {real_git} "$@"\n',
+        )
+        shas_before = commit_shas(repo)
+        env = dict(os.environ, **GIT_ENV)
+        env["PATH"] = f"{shim}:{env['PATH']}"
+
+        res = subprocess.run(
+            [sys.executable, str(TOOL), "--repo", str(repo), "--topic",
+             "sample-topic", "--update", str(update_file), "--advanced",
+             "a landed commit must survive a later failure", "--confirm"],
+            capture_output=True, text=True, env=env,
+        )
+
+        # 🔴 POSITIVE CONTROL. Without these two the test passes with an INERT
+        # shim — measured: reverting the shim to its known-broken form left this
+        # green. `doc_of == head_doc` is ALSO true on the plain success path, so
+        # it cannot on its own prove the failure branch ran.
+        assert fired.exists(), (
+            "the git shim never intercepted rev-parse — this test proved nothing"
+        )
+        assert res.returncode == 3, (
+            f"expected EXIT_FAIL (the later step failed), got {res.returncode}"
+        )
+        assert commit_shas(repo) != shas_before, (
+            "fixture inert: no commit was made, so the guard was never exercised"
+        )
+        head_doc = _sh("git", "show", "HEAD:claudedocs/handoff-sample-topic.md",
+                       cwd=repo)
+        assert doc_of(repo) == head_doc, (
+            "the worktree was rolled back even though the commit LANDED — that "
+            "discards committed work"
+        )
+
+    def test_first_ever_handoff_leaves_no_untracked_file_behind(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """The `original is None` -> `unlink` branch, which had no fixture.
+
+        Every other fixture pre-creates the doc, so the first-ever-handoff path
+        was never exercised: dropping the `unlink` survived the suite. A doc left
+        behind here is an UNTRACKED file in a shared checkout — invisible to
+        `git status -s` habits that scan for ` M`, and it makes a re-run append
+        to a doc the caller believes was never written."""
+        doc = repo / "claudedocs" / "handoff-brand-new-topic.md"
+        assert not doc.exists()
+        self._block_commits(repo)
+
+        res = subprocess.run(
+            [sys.executable, str(TOOL), "--repo", str(repo), "--topic",
+             "brand-new-topic", "--update", str(update_file), "--advanced",
+             "a first-ever handoff for this topic", "--confirm"],
+            capture_output=True, text=True, env=dict(os.environ, **GIT_ENV),
+        )
+
+        assert res.returncode == 3, f"expected EXIT_FAIL, got {res.returncode}"
+        assert not doc.exists(), (
+            "the doc the run CREATED was left behind after the commit was refused"
+        )
+        untracked = _sh("git", "status", "--porcelain", "--untracked-files=all",
+                        cwd=repo).strip()
+        assert untracked == "", f"left untracked residue: {untracked!r}"
+
+    def test_the_reset_FALLBACK_is_also_path_limited(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """The fallback arm had no test — only the primary `restore` arm did.
+
+        `git reset` without `-- <path>` unstages EVERYTHING, so a co-worker's
+        staged file would be unstaged by our failure. Forcing the fallback by
+        making `git restore` unavailable proves the second arm carries the same
+        path limit as the first."""
+        # 🔴 Resolve the real git ABSOLUTELY. `exec /usr/bin/env git` searches
+        # PATH — which this shim is prepended to — so the shim re-execs itself
+        # forever. (Measured: the run had to be killed.)
+        real_git = shutil.which("git")
+        assert real_git, "git not on PATH"
+        shim = repo / "gitshim"
+        shim.mkdir()
+        # 🔴 `git()` invokes ["git", "-C", <repo>, *args], so the subcommand is
+        # $3 — an earlier version tested $1, never intercepted anything, and the
+        # fallback arm was never exercised (the mutant survived). Scan all args.
+        fired = shim / "intercepted.marker"
+        write_exec(shim / "git",
+                   f'for a in "$@"; do\n'
+                   f'  if [ "$a" = "restore" ]; then : > "{fired}"; exit 129; fi\n'
+                   f'done\n'
+                   f'exec {real_git} "$@"\n')
+        (repo / "OTHER.md").write_text("someone else's staged work\n", encoding="utf-8")
+        _sh("git", "add", "--", "OTHER.md", cwd=repo)
+        self._block_commits(repo)
+
+        env = dict(os.environ, **GIT_ENV)
+        env["PATH"] = f"{shim}:{env['PATH']}"
+        res = subprocess.run(
+            [sys.executable, str(TOOL), "--repo", str(repo), "--topic",
+             "sample-topic", "--update", str(update_file), "--advanced",
+             "forcing the reset fallback", "--confirm"],
+            capture_output=True, text=True, env=env,
+        )
+
+        # 🔴 POSITIVE CONTROL — see the sibling above. An inert shim means the
+        # PRIMARY `restore` arm succeeded and the fallback never ran, so the
+        # path-limit this test exists to prove was never exercised. Measured:
+        # with a broken shim AND a blanket-reset mutant, this stayed green.
+        assert fired.exists(), (
+            "the git shim never intercepted `restore` — the fallback arm did not "
+            "run, so this test proved nothing"
+        )
+        assert res.returncode == 3, (
+            f"expected EXIT_FAIL, got {res.returncode}"
+        )
+
+        staged = _sh("git", "diff", "--cached", "--name-only", cwd=repo).split()
+        assert staged == ["OTHER.md"], (
+            f"the reset fallback must be path-limited too; staged={staged}"
+        )
+
+    def test_incomplete_rollback_advises_ONLY_the_half_that_failed(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """🔴 A message that contradicts what happened is worse than none.
+
+        The index and worktree halves fail INDEPENDENTLY. Printing advice for
+        both was measured to tell an operator their content "was never committed
+        … restore by hand" while the bytes HAD been restored and the content WAS
+        in HEAD — advice that makes someone hand-rewrite a doc they still have.
+        Here the index half fails and the worktree half succeeds."""
+        real_git = shutil.which("git")
+        assert real_git, "git not on PATH"
+        shim = repo / "gitshim-index"
+        shim.mkdir()
+        fired = shim / "intercepted.marker"
+        write_exec(shim / "git",
+                   f'for a in "$@"; do\n'
+                   f'  case "$a" in restore|reset) : > "{fired}"; exit 129 ;; esac\n'
+                   f'done\n'
+                   f'exec {real_git} "$@"\n')
+        before = doc_of(repo)
+        self._block_commits(repo)
+        env = dict(os.environ, **GIT_ENV)
+        env["PATH"] = f"{shim}:{env['PATH']}"
+
+        res = subprocess.run(
+            [sys.executable, str(TOOL), "--repo", str(repo), "--topic",
+             "sample-topic", "--update", str(update_file), "--advanced",
+             "only the index half fails", "--confirm"],
+            capture_output=True, text=True, env=env,
+        )
+
+        assert fired.exists(), "the shim never intercepted — test proved nothing"
+        assert res.returncode == 3
+        assert "still STAGED" in res.stderr, res.stderr
+        # The worktree half SUCCEEDED, so nothing may claim otherwise.
+        assert "still MODIFIED" not in res.stderr, res.stderr
+        # 🔴 COUNT the advice lines, do not grep for a PHRASE. An earlier
+        # version asserted the absence of the new wording — so reverting the
+        # message to its old, false text satisfied it vacuously (measured: that
+        # mutant SURVIVED). One half failed, so exactly one fix line may appear.
+        block = res.stderr.split("ROLLBACK INCOMPLETE", 1)[1]
+        fix_lines = [ln for ln in block.splitlines() if ln.startswith("    ")]
+        assert len(fix_lines) == 1, (
+            f"expected exactly ONE fix line (only the index half failed), got "
+            f"{len(fix_lines)}:\n" + "\n".join(fix_lines)
+        )
+        assert "restore --staged" in fix_lines[0], fix_lines[0]
+        # 🔴 Indent-INDEPENDENT complement. The count above pins how many lines
+        # are indented, which a reword can walk in one direction (emit the
+        # worktree advice at a different indent) and break in the other (add an
+        # explanatory comment to the index arm). The worktree arm is comment
+        # lines in BOTH its old and new wording, so their absence is the claim
+        # that survives rewording AND reindenting.
+        # 🔴 The trade, stated: this ALSO fires if the index arm ever gains a
+        # comment line — a false FAILURE on a legitimate reword. That direction
+        # is chosen deliberately over a false PASS, and the invariant it depends
+        # on ("the index arm is one bare command line") is pinned as a contract
+        # beside that line in handoff_doc.py.
+        assert not any(ln.lstrip().startswith("#") for ln in block.splitlines()), (
+            "worktree advice (comment lines) printed although that half "
+            "succeeded:\n" + block
+        )
+        assert doc_of(repo) == before, "the worktree half did not actually restore"
+
+    def test_a_landed_commit_says_so_instead_of_a_bare_status_failed(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """`status=failed` now contracts to "nothing happened" — so the ONE
+        branch where a commit DOES exist must say so, or the contract lies."""
+        real_git = shutil.which("git")
+        assert real_git, "git not on PATH"
+        shim = repo / "gitshim-note"
+        shim.mkdir()
+        marker = shim / "committed.marker"
+        fired = shim / "intercepted.marker"
+        write_exec(
+            shim / "git",
+            f'for a in "$@"; do [ "$a" = "commit" ] && : > "{marker}"; done\n'
+            f'for a in "$@"; do\n'
+            f'  if [ "$a" = "rev-parse" ] && [ -f "{marker}" ]; then\n'
+            f'    : > "{fired}"; exit 7\n'
+            f'  fi\n'
+            f'done\n'
+            f'exec {real_git} "$@"\n',
+        )
+        env = dict(os.environ, **GIT_ENV)
+        env["PATH"] = f"{shim}:{env['PATH']}"
+
+        res = subprocess.run(
+            [sys.executable, str(TOOL), "--repo", str(repo), "--topic",
+             "sample-topic", "--update", str(update_file), "--advanced",
+             "the commit landed", "--confirm"],
+            capture_output=True, text=True, env=env,
+        )
+
+        assert fired.exists(), "the shim never intercepted — test proved nothing"
+        assert res.returncode == 3
+        assert "THE COMMIT LANDED" in res.stderr, (
+            "a commit exists but status=failed said nothing about it:\n" + res.stderr
+        )
+        assert "un-pushed" in res.stderr, res.stderr
+
+    def test_worktree_only_failure_does_NOT_print_index_advice(
+        self, repo: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The MIRROR of the only-the-failed-half test, and it was unpinned.
+
+        Round 2 gated both halves but tested only one, so ungating the INDEX arm
+        survived the suite — a worktree-only failure would tell the operator to
+        `git restore --staged` an index that had already been cleaned. Behaviour
+        was correct; the coverage was not.
+
+        Driven directly because the worktree half only fails on a real `OSError`
+        from `write_bytes`, which no subprocess fixture can force.
+        """
+        doc = repo / "claudedocs" / "handoff-sample-topic.md"
+        original = doc.read_bytes()
+
+        def boom(self, data):  # noqa: ANN001, ANN202 - patched Path.write_bytes
+            raise OSError("disk full")
+
+        monkeypatch.setattr(Path, "write_bytes", boom)
+        note = hd._undo_write(repo, doc, "claudedocs/handoff-sample-topic.md",
+                              original)
+
+        assert "still MODIFIED" in note, note
+        assert "still STAGED" not in note, (
+            "claimed the index was left staged although that half succeeded:\n" + note
+        )
+        assert "restore --staged" not in note, (
+            "printed unstage advice although the index half succeeded:\n" + note
+        )
+    def test_the_mainline_module_it_imports_is_tracked_by_git(self) -> None:
+        """🔴 THE IMPORT MAKES IT LOAD-BEARING. `handoff_doc.py` imports
+        `git_mainline` at module scope, so an untracked `git_mainline.py` does not
+        merely lose rule (h) — it makes the whole tool fail to start on a freshly
+        deployed host, while the switch reports success."""
+        mod = REPO_ROOT / "scripts" / "lib" / "git_mainline.py"
+        assert mod.exists(), f"{mod} is missing from this tree"
+        if not (REPO_ROOT / ".git").exists():
+            return
+        out = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "ls-files", "--", "scripts/lib/git_mainline.py"],
+            capture_output=True,
+            text=True,
+            env=dict(os.environ, **GIT_ENV),
+        )
+        assert out.stdout.strip() == "scripts/lib/git_mainline.py", (
+            "scripts/lib/git_mainline.py is not tracked by git; the flake omits "
+            "untracked files, so the deployed handoff_doc.py would raise "
+            "ModuleNotFoundError on every run."
+        )
+
+
+# =============================================================================
+# 🔴 RULE (h) — A BASE THAT IS THE WRONG DOCUMENT SAYS SO.
+#
+# THE INCIDENT. `handoff_doc.py` resolves its base from `--repo`'s working tree
+# and never asked whether that clone was current. Pointed at one 313 commits
+# behind, it printed `State now → NEW` — because the stale base genuinely lacked
+# the section — and confirming would have rebuilt an 891-line / 14-heading doc
+# from a 290-line / 9-heading base, silently discarding ~601 lines including a
+# whole incident writeup, and exited 0 saying `status=written`. `BUCKET_NEW` was
+# a bare label appended to a list; the `buckets:` line was the only tell and it
+# reads as a routine classification.
+#
+# 🔴 RED-AT-BASE MATRIX, base `9667fb8b`. A full copy of the tree with
+# `scripts/lib/*.py` rolled back to that revision (`git show "${sha}:${path}"`,
+# each extraction asserted non-empty, each rolled-back file asserted to DIFFER
+# from the working copy — a rollback that silently did nothing scores every test
+# as green for the wrong reason):
+#
+#   test_handoff_doc.py + test_subsystem_touch.py
+#     at 9667fb8b ......... 17 failed, 993 passed
+#     at HEAD ............. 1010 passed
+#   test_git_mainline.py ... cannot COLLECT at 9667fb8b (the module does not
+#                            exist there); 13 passed at HEAD.
+#
+# ⚠ EIGHT OF THE NEW TESTS PASS AT BASE and are NOT regression coverage — the
+# base never warns at all, so their green there is vacuous. Each says so in its
+# own docstring, and each is proven LIVE at HEAD by the mutation battery:
+#
+#   the two SILENCE controls        `block-speaks-on-EVERY-run` and
+#   (current clone, behind-on-code)  `currency-trigger-is-the-CLONE-not-the-DOC`
+#   the three EXIT-CODE invariants  0/4/5 must not move; that they held before
+#                                    is the point
+#   the three derivation guards     dangling symref, local-counterpart decoy,
+#   in test_subsystem_touch.py       and the `main`-repo control
+#
+# MUTATION BATTERY (isolated copy of the tree, `PYTHONDONTWRITEBYTECODE=1` and
+# `__pycache__` cleared between mutants, every module restored from a byte copy
+# and re-hashed, every anchor checked UNIQUE first): **21 mutants, 21 killed by
+# the specifically expected test on that test's own assertion, 0 skipped**, plus
+# a positive control (KILLED) and a no-op negative control (SURVIVED, required).
+# Five rounds, and four of the five found a fault in THESE ASSERTIONS or in the
+# harness rather than in the code:
+#   1. the first POSITIVE CONTROL was DEAD — `EXIT_NO_ADVANCE = 4` -> `40`
+#      survived the whole suite, because the tests compare against
+#      `hd.EXIT_NO_ADVANCE` and the expectation moved with the mutation.
+#   2. the harness scored six KILLED mutants as SURVIVED — it matched the
+#      asserted source line raw, and pytest re-wraps it in the traceback.
+#   3. `established-floor-to-zero` killed a FIXTURE PRECONDITION, not the guard:
+#      the precondition read `< hd.MIN_ESTABLISHED_SECTIONS`, so lowering the
+#      constant failed the setup and the real assertion never ran.
+#   4. `size-tell-widened-to-LINES-only` and `block-speaks-on-EVERY-run` genuinely
+#      SURVIVED: one fixture was shorter than its base on BOTH dimensions so it
+#      could not observe the widening, and the silence assertion was on WORDS —
+#      the mutant printed a block carrying neither headline. Fixed by a
+#      discriminating fixture and by `between_buckets_and_diff`.
+#   5. `commits-behind-unmeasured-becomes-ZERO` was scored against a test that
+#      cannot REACH it (with no base ref the function is never called), and
+#      `touch-ignores-the-derivation` was written so the derived rung still
+#      answered. Both re-aimed.
+# =============================================================================
+
+# A base doc that is ESTABLISHED (5 sections, all canonical) and yet has NO
+# `State now` — the exact shape a 313-commits-stale copy had. Deliberately not
+# BASE_DOC minus a line: each section's text is distinct so a merge that keeps
+# the wrong one cannot match a substring of the right one.
+STALE_BASE_DOC = """# Handoff: sample-topic — 2026-05-01
+
+## Goal
+Make the sample subsystem stop dropping work under load.
+
+## Live state
+- the queue instrumentation has not been written yet
+
+## Open investigations — live diagnosis state
+### the drain counter has never been read
+- **Observed (with values):** no counter exists; the endpoint 404s.
+
+## Next steps (ranked)
+1. Write the counter.
+
+## How to verify
+`python3 tools/queue_probe.py --for 60`
+"""
+
+# What the mainline copy grew into: more sections, more lines, and the whole
+# incident writeup the stale base cannot see.
+MAINLINE_DOC = STALE_BASE_DOC.replace(
+    "## Live state", "## State now\n- Branch / PR: `feat/sample` / #99\n\n## Live state"
+) + """
+## Gotchas / decisions / dead-ends
+- Bumping the pool size did nothing; the ceiling is not connections.
+
+## The outage we caused
+""" + "".join(f"- outage note {i}\n" for i in range(1, 40)) + """
+## Corrections
+""" + "".join(f"- correction {i}\n" for i in range(1, 40))
+
+
+def _cfg(repo: Path) -> None:
+    for k, v in (("user.name", "T"), ("user.email", "t@example.invalid"),
+                 ("commit.gpgsign", "false")):
+        _sh("git", "config", k, v, cwd=repo)
+
+
+def mainline_repo(tmp_path: Path, mainline: str, doc_text: str) -> tuple[Path, Path]:
+    """`(a real clone, the seed checkout that can push to its origin)`.
+
+    🔴 A REAL `git clone`, because `refs/remotes/origin/HEAD` — the ref the
+    derivation reads — is written by clone itself. Hand-writing that symref would
+    test a shape invented here rather than the one the field repo has. Still no
+    network: the origin is a bare repo in the same tmp_path.
+    """
+    origin = tmp_path / f"{mainline}-origin.git"
+    _sh("git", "init", "-q", "--bare", "-b", mainline, str(origin), cwd=tmp_path)
+    seed = tmp_path / f"{mainline}-seed"
+    seed.mkdir()
+    _sh("git", "init", "-q", "-b", mainline, cwd=seed)
+    _cfg(seed)
+    _sh("git", "remote", "add", "origin", str(origin), cwd=seed)
+    (seed / "claudedocs").mkdir()
+    (seed / "claudedocs" / "handoff-sample-topic.md").write_text(
+        doc_text, encoding="utf-8"
+    )
+    _sh("git", "add", "--", "claudedocs/handoff-sample-topic.md", cwd=seed)
+    _sh("git", "commit", "-q", "-m", "the base as it was", cwd=seed)
+    _sh("git", "push", "-q", "origin", mainline, cwd=seed)
+    work = tmp_path / f"{mainline}-work"
+    _sh("git", "clone", "-q", str(origin), str(work), cwd=tmp_path)
+    _cfg(work)
+    return work, seed
+
+
+def advance_doc_on_mainline(work: Path, seed: Path, mainline: str, text: str) -> None:
+    """Move the doc forward on the mainline and FETCH it, leaving HEAD behind."""
+    (seed / "claudedocs" / "handoff-sample-topic.md").write_text(text, encoding="utf-8")
+    _sh("git", "add", "--", "claudedocs/handoff-sample-topic.md", cwd=seed)
+    _sh("git", "commit", "-q", "-m", "the incident writeup", cwd=seed)
+    _sh("git", "push", "-q", "origin", mainline, cwd=seed)
+    _sh("git", "fetch", "-q", "origin", cwd=work)
+
+
+STALE_HEAD = "🔴 THE BASE DOCUMENT IS NOT THE NEWEST COMMITTED COPY"
+TELL_HEAD = "🔴 THIS MERGE LOOKS LIKE IT RESOLVED THE WRONG BASE"
+
+
+def rule_h_block(stdout: str) -> str:
+    """Rule (h)'s block only — headline through the line before the diff."""
+    idx = [stdout.index(h) for h in (STALE_HEAD, TELL_HEAD) if h in stdout]
+    if not idx:
+        return ""
+    rest = stdout[min(idx):]
+    cut = rest.find("--- a/")
+    return rest if cut < 0 else rest[:cut]
+
+
+def between_buckets_and_diff(stdout: str) -> list[str]:
+    """Every line printed after the `buckets:` line and before the diff starts.
+
+    🔴 THE STRUCTURAL FORM OF "SILENT", and the mutation battery is why it
+    exists. Asserting `STALE_HEAD not in out and TELL_HEAD not in out` is a guard
+    on WORDS: the mutant that removed rule (h)'s early return still printed its
+    remedy paragraph on every ordinary run — a block with neither headline in it
+    — and SURVIVED a green suite. `claude/RULES.md`: a guard that can pass while
+    the hazard exists in a different shape is spelled, not structural. This asks
+    the question that actually matters — did the run print ANYTHING extra?
+    """
+    head = "buckets:"
+    if head not in stdout:
+        return []
+    rest = stdout[stdout.index(head):].splitlines()[1:]
+    out: list[str] = []
+    for line in rest:
+        if line.startswith("--- a/") or line.startswith("status="):
+            break
+        out.append(line)
+    return [ln for ln in out if ln.strip()]
+
+
+class TestAStaleBaseIsLoud:
+    """Both directions, and the loudness is measured against the diff's position."""
+
+    def test_a_STALE_base_on_a_TRUNK_mainline_repo_WARNS(self, tmp_path: Path,
+                                                        update_file: Path) -> None:
+        """🔴 THE REGRESSION, red at base `9667fb8b` — which prints only
+        `buckets: State now → NEW` and nothing else.
+
+        The repo's mainline is `trunk` ON PURPOSE: the incident's repo is
+        `homelab-infra`, and a currency check that assumed `main` would report
+        "cannot measure" there and print nothing — the same silence, reached a
+        second way."""
+        work, seed = mainline_repo(tmp_path, "trunk", STALE_BASE_DOC)
+        advance_doc_on_mainline(work, seed, "trunk", MAINLINE_DOC)
+        res = run_tool(work, update=update_file)
+        assert res.returncode == 0, res.stderr
+        block = rule_h_block(res.stdout)
+        assert STALE_HEAD in block, res.stdout
+        # the STATE, not just the word: the ref it derived and the counts a
+        # reader needs to decide. A guard on the headline alone is walkable by
+        # rewording the headline.
+        assert "origin/trunk" in block
+        base_shape = hd.doc_shape(STALE_BASE_DOC)
+        main_shape = hd.doc_shape(MAINLINE_DOC)
+        assert f"{base_shape.sections} sections / {base_shape.lines} lines" in block
+        assert f"{main_shape.sections} sections / {main_shape.lines} lines" in block
+        # the fixture must actually be lopsided, or the size line proves nothing
+        assert main_shape.lines > base_shape.lines * 3
+        assert main_shape.sections > base_shape.sections
+
+    def test_the_block_is_printed_ABOVE_the_diff(self, tmp_path: Path,
+                                                 update_file: Path) -> None:
+        """🔴 POSITION IS THE FIX. The information already existed one token wide
+        inside `buckets:`; putting it after several hundred diff lines would
+        reproduce the incident with more words."""
+        work, seed = mainline_repo(tmp_path, "trunk", STALE_BASE_DOC)
+        advance_doc_on_mainline(work, seed, "trunk", MAINLINE_DOC)
+        out = run_tool(work, update=update_file).stdout
+        assert out.index(STALE_HEAD) < out.index("--- a/"), out
+
+    def test_a_doc_ABSENT_here_but_PRESENT_on_the_mainline_warns(
+        self, tmp_path: Path, update_file: Path
+    ) -> None:
+        """The same bug in its loudest disguise: no base at all, so every section
+        merges as NEW and the committed document is replaced by the delta. Red at
+        base, which treats a missing base as an ordinary first write."""
+        work, seed = mainline_repo(tmp_path, "trunk", STALE_BASE_DOC)
+        (work / "claudedocs" / "handoff-sample-topic.md").unlink()
+        _sh("git", "rm", "-q", "--cached", "--",
+            "claudedocs/handoff-sample-topic.md", cwd=work)
+        _sh("git", "commit", "-q", "-m", "drop it locally", cwd=work)
+        advance_doc_on_mainline(work, seed, "trunk", MAINLINE_DOC)
+        out = run_tool(work, update=update_file).stdout
+        assert STALE_HEAD in out, out
+        assert "there is NO claudedocs/handoff-sample-topic.md in this checkout" in out
+
+    def test_a_CURRENT_clone_prints_NOTHING_new(self, repo: Path,
+                                                update_file: Path) -> None:
+        """🔴 THE NOISE CONTROL, and the reason the tells are shaped as they are.
+        A warning that fires every run is the failure being fixed.
+
+        ⚠ GREEN AT BASE `9667fb8b` — the base never warns at all, so this green
+        is vacuous there. It is proven LIVE at HEAD by the mutation battery:
+        `currency-trigger-inverted` and `established-floor-to-zero` each turn it
+        red."""
+        out = run_tool(repo, update=update_file).stdout
+        assert "buckets:" in out, "the ordinary run must still classify"
+        assert STALE_HEAD not in out and TELL_HEAD not in out, out
+        assert rule_h_block(out) == ""
+        # 🔴 THE STRUCTURAL HALF — see `between_buckets_and_diff`. The two
+        # headline assertions above are walkable by printing a block that
+        # contains neither, which a mutant did.
+        assert between_buckets_and_diff(out) == [], out
+
+    def test_behind_on_CODE_but_current_on_the_DOC_stays_SILENT(
+        self, repo: Path, tmp_path: Path, update_file: Path
+    ) -> None:
+        """🔴 THE TRIGGER IS THE DOC, NOT THE CLONE. Nearly every agent worktree
+        is a few commits behind mainline; warning on that would fire constantly
+        and teach everyone to skip the block. The whole-clone count is printed as
+        CONTEXT inside a block the doc already triggered, never as the trigger.
+
+        ⚠ GREEN AT BASE `9667fb8b` — vacuous there, since the base never warns.
+        Proven LIVE at HEAD by the mutation battery: `currency-trigger-is-the-
+        CLONE-not-the-DOC` turns it red."""
+        advance_remote(tmp_path)
+        _sh("git", "fetch", "-q", "origin", cwd=repo)
+        behind = _sh("git", "rev-list", "--count", "HEAD..origin/main", cwd=repo)
+        assert int(behind.strip()) > 0, "the control did not make the clone behind"
+        out = run_tool(repo, update=update_file).stdout
+        assert STALE_HEAD not in out and TELL_HEAD not in out, out
+
+
+class TestTheTellsAreEachReachableAndEachNarrow:
+    """Unit-level, both directions per tell — a tell that cannot go quiet is
+    noise and a tell that cannot go loud is decoration."""
+
+    def _buckets(self, base: str, update: str):
+        return hd.merge_report(base, update).buckets
+
+    def test_a_SKELETON_heading_arriving_NEW_on_an_established_base_is_a_tell(
+        self,
+    ) -> None:
+        upd = "## State now\n- the drain loop is fixed\n"
+        tells = hd.wrong_base_tells(STALE_BASE_DOC, upd,
+                                    self._buckets(STALE_BASE_DOC, upd))
+        assert any("state now" in t for t in tells), tells
+
+    def test_a_REGLOSSED_heading_is_NOT_a_tell(self) -> None:
+        """🔴 THE MEASURED FALSE-FIRE THIS RULE'S SHAPE EXISTS FOR. Membership is
+        by canonical PREFIX, not by full heading text: an author re-glossing
+        `## State now` to `## State now — THE STORE IS PUBLIC` makes it NEW
+        against a base that plainly HAS a state-now section. Replaying the 49
+        real updates in this repo's history, full-text membership fires on 4 of
+        them (8.2%) and prefix membership on 0."""
+        base = BASE_DOC  # carries a plain `## State now`
+        upd = "## State now — 🔴 THE STORE IS PUBLIC\n- rewritten\n"
+        assert hd.merge_report(base, upd).buckets == (
+            ("State now — 🔴 THE STORE IS PUBLIC", hd.BUCKET_NEW),
+        ), "the fixture must actually produce a NEW bucket, or it proves nothing"
+        assert hd.wrong_base_tells(base, upd, self._buckets(base, upd)) == ()
+
+    def test_a_STUB_base_is_not_established_so_growth_is_not_a_tell(self) -> None:
+        """A doc below `MIN_ESTABLISHED_SECTIONS` is a stub; a canonical heading
+        arriving there is ordinary growth. Of the 44 real handoff docs exactly
+        one has 3 sections and three have 4."""
+        stub = "# H\n\n## Goal\ng\n\n## Next steps\nn\n"
+        upd = "## State now\n- s\n"
+        # 🔴 A LITERAL 2, not `< hd.MIN_ESTABLISHED_SECTIONS`. Derived from the
+        # constant, this precondition ATE the mutant that lowered it: the
+        # mutation battery reported the guard killed while the assertion below
+        # never ran. `claude/RULES.md` — never derive a test's expectation from
+        # the implementation it tests.
+        assert hd.doc_shape(stub).sections == 2
+        assert hd.wrong_base_tells(stub, upd, self._buckets(stub, upd)) == ()
+
+    def test_an_update_LARGER_than_its_base_is_a_tell(self) -> None:
+        upd = "".join(
+            f"## Section {i}\n" + "".join(f"- line {j}\n" for j in range(30))
+            for i in range(9)
+        )
+        tells = hd.wrong_base_tells(BASE_DOC, upd, self._buckets(BASE_DOC, upd))
+        assert any("LARGER than the base" in t for t in tells), tells
+
+    def test_an_ORDINARY_delta_is_not_a_size_tell(self) -> None:
+        """The realistic control: the fixture pair this whole file is built on."""
+        assert hd.wrong_base_tells(
+            BASE_DOC, UPDATE_DOC, self._buckets(BASE_DOC, UPDATE_DOC)
+        ) == ()
+
+    def test_MORE_LINES_ALONE_is_not_a_size_tell(self) -> None:
+        """🔴 THE DISCRIMINATING FIXTURE, and the mutation battery is what
+        demanded it. `test_an_ORDINARY_delta_is_not_a_size_tell` cannot see the
+        `and`→lines-only mutant at all: its update is SHORTER than its base on
+        both dimensions, so widening the rule changes nothing and the mutant
+        SURVIVED a green run. `claude/RULES.md` — a fixture that can only ever
+        produce the same verdict cannot observe the mutation.
+
+        So: one section (fewer than the base's six) carrying far more lines than
+        the base's 22. Lines-only fires here; both-dimensions does not.
+
+        BOTH DIMENSIONS ARE REQUIRED because it is measured: replaying the 49
+        real updates in this repo's history, `lines only` fires on 10 (20.4%)
+        and `lines AND sections` on 1 (2.0%) — comparable to rule (f)'s
+        documented 2.4%. A handoff update routinely rewrites more lines than a
+        short doc contains."""
+        upd = "## Next steps (ranked)\n" + "".join(
+            f"{i}. step {i}\n" for i in range(1, 80)
+        )
+        base = hd.doc_shape(BASE_DOC)
+        got = hd.doc_shape(upd)
+        assert got.lines > base.lines and got.sections < base.sections, (base, got)
+        assert hd.wrong_base_tells(BASE_DOC, upd, self._buckets(BASE_DOC, upd)) == ()
+
+    def test_NO_BASE_AT_ALL_yields_no_TELL_because_every_heading_is_NEW(self) -> None:
+        """The heuristic half must not fire on a genuine first write. That case
+        is `base_currency`'s, and it is the half with hard evidence."""
+        assert hd.wrong_base_tells("", UPDATE_DOC, ()) == ()
+
+
+class TestBaseCurrencyMeasuresAndSaysWhenItCannot:
+    def test_it_derives_a_TRUNK_mainline(self, tmp_path: Path) -> None:
+        work, seed = mainline_repo(tmp_path, "trunk", STALE_BASE_DOC)
+        advance_doc_on_mainline(work, seed, "trunk", MAINLINE_DOC)
+        cur = hd.base_currency(work, "claudedocs/handoff-sample-topic.md")
+        assert cur.base_ref == "origin/trunk" and cur.unmeasured is None
+        assert cur.doc_behind == 1 and cur.stale
+        assert cur.mainline == hd.doc_shape(MAINLINE_DOC)
+
+    def test_a_repo_with_NO_mainline_ref_reports_UNMEASURED_not_zero(
+        self, tmp_path: Path
+    ) -> None:
+        """🔴 AN UNANSWERABLE QUESTION IS NOT A CLEAN ANSWER. A 0 here would be
+        indistinguishable from a measured current base."""
+        lone = tmp_path / "lone"
+        lone.mkdir()
+        _sh("git", "init", "-q", "-b", "topic", cwd=lone)
+        _cfg(lone)
+        (lone / "f.txt").write_text("x\n", encoding="utf-8")
+        _sh("git", "add", "--", "f.txt", cwd=lone)
+        _sh("git", "commit", "-q", "-m", "seed", cwd=lone)
+        cur = hd.base_currency(lone, "claudedocs/handoff-sample-topic.md")
+        assert cur.base_ref is None and cur.doc_behind is None
+        assert not cur.stale and cur.unmeasured
+        assert "origin/main" in cur.unmeasured, cur.unmeasured
+
+    def test_an_UNMEASURED_currency_is_PRINTED_when_a_tell_fired(self) -> None:
+        """…and only then. Printing it every run would be the noise the block
+        exists to avoid; withholding it beside a live suspicion would hand over a
+        doubt with no way to settle it."""
+        cur = hd.BaseCurrency(None, ("origin/main",), None, None, None,
+                              "no mainline ref resolves in this clone")
+        loud = hd.wrong_base_report(("a tell",), cur, "d.md", Path("/r"),
+                                    hd.doc_shape(BASE_DOC))
+        assert "base currency UNCHECKED" in loud
+        quiet = hd.wrong_base_report((), cur, "d.md", Path("/r"),
+                                     hd.doc_shape(BASE_DOC))
+        assert quiet == "", "an unmeasurable check must not speak on its own"
+
+
+class TestRuleHDidNotMoveTheExitCodes:
+    """🔴 IT WARNS AND NEVER REFUSES. A refusal here becomes a gate people learn
+    to click through, and 4/5/6 are load-bearing in the skill.
+
+    ⚠ ALL GREEN AT BASE `9667fb8b` — these are INVARIANT GUARDS, not regression
+    coverage. That the codes held before is exactly the point.
+    """
+
+    def test_a_stale_base_still_exits_0_and_still_writes_under_confirm(
+        self, tmp_path: Path, update_file: Path
+    ) -> None:
+        work, seed = mainline_repo(tmp_path, "trunk", STALE_BASE_DOC)
+        advance_doc_on_mainline(work, seed, "trunk", MAINLINE_DOC)
+        res = run_tool(work, "--confirm", update=update_file)
+        assert res.returncode == 0, res.stderr + res.stdout
+        assert "status=written" in res.stdout + res.stderr
+        doc = (work / "claudedocs" / "handoff-sample-topic.md").read_text(
+            encoding="utf-8"
+        )
+        assert "the drain loop is fixed and merged" in doc
+
+    def test_NO_ADVANCE_is_still_4_and_prints_no_block(self, tmp_path: Path,
+                                                      update_file: Path) -> None:
+        work, seed = mainline_repo(tmp_path, "trunk", STALE_BASE_DOC)
+        advance_doc_on_mainline(work, seed, "trunk", MAINLINE_DOC)
+        res = run_tool(work, update=update_file, advanced="nothing")
+        assert res.returncode == hd.EXIT_NO_ADVANCE
+        assert STALE_HEAD not in res.stdout + res.stderr
+
+    def test_NO_CHANGE_is_still_5_and_prints_no_block(self, tmp_path: Path) -> None:
+        work, seed = mainline_repo(tmp_path, "trunk", STALE_BASE_DOC)
+        advance_doc_on_mainline(work, seed, "trunk", MAINLINE_DOC)
+        noop = tmp_path / "noop.md"
+        noop.write_text("## Goal\nMake the sample subsystem stop dropping work "
+                        "under load.\n", encoding="utf-8")
+        res = run_tool(work, update=noop)
+        assert res.returncode == hd.EXIT_NO_CHANGE, res.stdout + res.stderr
+        assert STALE_HEAD not in res.stdout + res.stderr

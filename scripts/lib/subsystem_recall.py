@@ -165,7 +165,7 @@ CONTRACT SUMMARY
     recall(store_root, scope, *, ref=…, limit=…, mode=…, page=…, focus_paths=…)
                                               -> RecallReport
     render_text(report) / report_json(report) -> str / dict
-    tokenize(text) / pair_strength(a, b) / score_unit(q_tokens, unit_tokens)
+    tokenize(text) / pair_strength(q, t) / score_unit(q_tokens, unit_TEXT)
     entry_blocks(text)                        -> tuple[Block, ...]
     search(store_root, scope, query, *, context=…, threshold=…, …)
                                               -> SearchReport
@@ -252,6 +252,7 @@ import difflib
 import json
 import re
 import sys
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping, Sequence
@@ -261,6 +262,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from subsystem_resolver import (  # noqa: E402
     NUANCE_HEADING,
     POINTERS_HEADING,
+    WHAT_HEADING,
     AmbiguousRefError,
     ON_MALFORMED_COLLECT,
     EntryUnreadableError,
@@ -287,9 +289,11 @@ from subsystem_touch import (  # noqa: E402
 
 __all__ = [
     "RECALL_LABEL",
+    "WHAT_HEADING",
     "POINTERS_HEADING",
     "NUANCE_HEADING",
     "SURFACED_HEADINGS",
+    "COUNTED_HEADINGS",
     "DEFAULT_ENTRY_LIMIT",
     "DEFAULT_MODE",
     "RECALL_MODES",
@@ -337,6 +341,7 @@ __all__ = [
     "focus_paths_from_text",
     "focus_window",
     "select_featured",
+    "short_heading",
     "listing_line",
     "recall",
     "render_text",
@@ -351,18 +356,56 @@ __all__ = [
 # agent, in the same session, for the same store.
 RECALL_LABEL = "from index"
 
-# The two sections the recon step front-loads, RE-EXPORTED from the resolver —
-# they are schema headings, so they belong with the rest of the on-disk shape and
-# not in one of the two modules that read it. `## What it is` is deliberately NOT
-# in `SURFACED_HEADINGS`: it is one line of durable boilerplate that a resuming
-# session either already knows or can read in the file, and including it turns a
-# recall block into a dump of the store. The point is recall, not a dump.
+# The sections a printed BODY renders, RE-EXPORTED from the resolver — they are
+# schema headings, so they belong with the rest of the on-disk shape and not in
+# one of the modules that read it.
 #
 # The tuple itself stays HERE because it is this reader's DISPLAY CHOICE, not a
 # fact about the store: `subsystem_touch` reads the same entries and wants only
 # `NUANCE_HEADING`. A shared constant would have made one module's display
 # decision binding on the other.
-SURFACED_HEADINGS: tuple[str, ...] = (POINTERS_HEADING, NUANCE_HEADING)
+#
+# 🔴 `## What it is` USED TO BE EXCLUDED, AND THE EXCLUSION WAS WRONG. The stated
+# reason was "one line of durable boilerplate a resuming session either already
+# knows or can read in the file, and including it turns a recall block into a
+# dump". Measured 2026-08-20 against the live store, both halves fail:
+#
+#   * it is not one line — 73 of 73 entries carry it, median 3 lines / 297 chars,
+#     p90 8 lines, max 12;
+#   * NO BRIEFING PATH printed it. Not `--ref`, not the digest, not
+#     `service_recon`'s `index:` block. An agent briefed only on an entry could
+#     not say what the service WAS, where it lived or what it owned, because the
+#     one section that answers that was parsed by none of the three. `--search`
+#     is the exception and always was — it surfaces every section — but it only
+#     reaches an entry a query MATCHED, so nobody is briefed through it.
+#
+# The dump worry was real but aimed at the wrong surface: the multiplier lives on
+# the INDEX ROWS (one per entry, 37 in the largest scope), and those are untouched
+# — see `listing_line`, which still renders `COUNTED_HEADINGS` only. A BODY is
+# printed once per `--ref`, once per digest, and `--limit N` times in `full` mode,
+# which is already an opt-in dump of N whole entries; across the live store
+# `## What it is` is 26 KB against `## Pointers`' 49 KB and `## Nuance`' 235 KB,
+# i.e. the SMALLEST of the three, ~8.6% of what a full dump already prints.
+#
+# It is rendered FIRST because it is the orienting sentence: pointers and nuance
+# are both about a thing the reader is assumed to have already identified.
+SURFACED_HEADINGS: tuple[str, ...] = (WHAT_HEADING, POINTERS_HEADING, NUANCE_HEADING)
+
+# 🔴 THE SET WHOSE ABSENCE MAKES A NUMBER WRONG — a strictly different question
+# from "what does a body print", and the two are kept apart rather than merged.
+#
+# `missing_sections`, `is_bare`, the index row's `🔴 NO <heading>` badge and the
+# caveat clause that explains that badge all key off THIS tuple. Their shared
+# meaning is "the parser never reached the bullets, so `0 nuance` and a missing
+# `OPEN` badge on that row are a PARSE FAILURE and not an empty entry" — a claim
+# about counts. `## What it is` feeds no count and no badge, so widening this
+# would put a heading with no numeric consequence beside two whose consequence is
+# measured, and grow the one line printed for EVERY entry. An entry that lacks it
+# is instead named under its own body, where the reader is already looking.
+#
+# ⚠ This is the tuple `subsystem_touch.SHAPE_HEADINGS` is pinned against by
+# `test_subsystem_touch.py` — the validator checks what the counts depend on.
+COUNTED_HEADINGS: tuple[str, ...] = (POINTERS_HEADING, NUANCE_HEADING)
 
 # A cap, not a filter — see the module docstring on selection. Truncation is
 # always PRINTED. 12 is chosen as "more than any scope currently holds per repo
@@ -542,14 +585,89 @@ STATUS_PRECEDENCE: tuple[str, ...] = (
 UNREADABLE_STATUSES: tuple[str, ...] = ("scope-unreadable", "search-unreadable")
 
 
-def caveat_text(scope: str) -> str:
+#: Badge kinds whose EXPLANATION is emitted only when that badge is on screen.
+#: `OPEN` is deliberately NOT here — see `caveat_text`.
+BADGE_NEAR_MISS = "near-miss"
+BADGE_UNVERIFIABLE = "unverifiable"
+BADGE_MISSING_HEADING = "missing-heading"
+
+
+def badges_present(entries: "Sequence[RecalledEntry]") -> frozenset[str]:
+    """Which conditional badge kinds this report will actually render.
+
+    🔴 READ OFF THE ENTRIES THE REPORT IS ABOUT, never off the store. A caveat
+    that described the store rather than this output would explain a badge the
+    reader cannot see, which is the whole defect this exists to fix.
+    """
+    kinds: set[str] = set()
+    for e in entries:
+        if getattr(e, "near_miss_count", 0):
+            kinds.add(BADGE_NEAR_MISS)
+        if getattr(e, "unverifiable_count", 0):
+            kinds.add(BADGE_UNVERIFIABLE)
+        if getattr(e, "missing_sections", ()):
+            kinds.add(BADGE_MISSING_HEADING)
+    return frozenset(kinds)
+
+
+def caveat_text(scope: str, badges: "frozenset[str] | None" = None) -> str:
     """What every window this module opens can and cannot see. ONE spelling.
 
     🔴 A MODULE-LEVEL FUNCTION rather than a property on one report, because
     there are now TWO report types and a caveat spelled twice is wrong in one of
     them. `/analyze-service` words the provenance as `from index`; this reuses
     that exact label.
+
+    🔴 THE BADGE EXPLANATIONS ARE CONDITIONAL; EVERY WARNING ABOUT AN ABSENCE IS
+    NOT. Measured on the first real session to use this flow: the caveat is 1,513
+    chars (~378 tokens) and is paid PER CALL, so a targeted `--ref` lookup — the
+    cheap operation this design encourages — spent 27% of its output explaining
+    `NEAR-MISS`, `UNVERIFIABLE` and `NO <heading>` when its output contained NONE
+    of them. The badges themselves already render conditionally so the common row
+    stays byte-identical; the prose explaining them did not, which made the text
+    grow with every badge added while the reader's need for it did not.
+
+    🔴 `OPEN` STAYS UNCONDITIONAL, and the asymmetry is the point. Its clause is
+    not "here is what this badge means" — it ends "the absence of that marker
+    means nothing was declared, NOT that nothing is open." That is a warning
+    about a MISSING badge, so gating it on a badge being present would delete it
+    in exactly the case it was written for. Same test for anything added later:
+    if the sentence is only true when the reader can see the badge, gate it; if
+    it warns about what the reader CANNOT see, it is unconditional.
+
+    `badges=None` means "caller did not compute a set" and yields the full text —
+    fail-safe toward saying MORE, never less.
     """
+    show_all = badges is None
+    if badges is None:
+        badges = frozenset()
+
+    optional = ""
+    clauses = []
+    if show_all or BADGE_NEAR_MISS in badges:
+        clauses.append(
+            "`🔴 N NEAR-MISS` — N bullets TRIED to write a marker and missed the "
+            "grammar, so they declare nothing and `N OPEN` is short by up to N"
+        )
+    if show_all or BADGE_UNVERIFIABLE in badges:
+        clauses.append(
+            "`⚠ N UNVERIFIABLE` — N `RESOLVED:` bullets name no sha, so the "
+            "closure cannot be checked"
+        )
+    if show_all or BADGE_MISSING_HEADING in badges:
+        clauses.append(
+            "`🔴 NO <heading>` — that heading is absent or renamed, so `N nuance` "
+            "and every openness count on that row are 0 BY PARSE FAILURE and not "
+            "by measurement, and the entry's content is on disk but invisible to "
+            "this read"
+        )
+    if clauses:
+        lead = (
+            "Three further badges say" if len(clauses) == 3
+            else ("Two further badges say" if len(clauses) == 2 else "One further badge says")
+        )
+        optional = f" {lead} the row's own numbers cannot be trusted: " + "; ".join(clauses) + "."
+
     return (
         f"{RECALL_LABEL} — RECALL, NOT LIVE OBSERVATION. These are notes curated by "
         f"PAST sessions in the local store under `{scope}`. Nothing here was "
@@ -559,8 +677,13 @@ def caveat_text(scope: str) -> str:
         f"fixed. This window CANNOT see: live state of any kind, any repo whose scope "
         f"has no directory in this store, and any work neither `/analyze-service` nor "
         f"`/handoff` ever recorded. Treat every line as a POINTER to verify, never as "
-        f"a current reading. Sensitivity is marked per entry; absent means "
-        f"`{SENSITIVITY_FAIL_SAFE}` — never copy an entry's content into a public repo."
+        f"a current reading. `🔴 N OPEN` on an index row means N bullets DECLARE "
+        f"unfinished business — re-check each against the repo, because a remedy that "
+        f"has since landed reads exactly like one that has not; the absence of that "
+        f"marker means nothing was declared, NOT that nothing is open."
+        f"{optional} Sensitivity is "
+        f"marked per entry; absent means `{SENSITIVITY_FAIL_SAFE}` — never copy an "
+        f"entry's content into a public repo."
     )
 
 
@@ -748,6 +871,59 @@ class RecalledEntry:
     count would have been cheaper and would have measured markdown, not history.
     """
 
+    open_count: int = 0
+    """Bullets DECLARING `OPEN:` — unfinished business the writer marked.
+
+    On the index line this is the one field that changes what a reader should DO,
+    which is why it earns a place beside the size signal: an entry carrying an
+    open action may be describing a remedy that has since landed, and reading it
+    as current is the `forgejo` failure (proposed a fix at 15:00:18 that shipped
+    at 15:02:21, served as outstanding for 22 days).
+
+    🔴 A ZERO HERE IS NOT "NOTHING IS OPEN". The marker is opt-in and every bullet
+    written before it existed carries none, so zero means "nothing was declared".
+    The digest's caveat says so; this docstring exists so a future caller cannot
+    quietly promote the field to a completeness claim.
+    """
+
+    near_miss_count: int = 0
+    """Bullets that TRIED to write an openness marker and missed the grammar.
+
+    🔴 THE POPULATION MOST LIKELY TO HOLD A STALE OPEN ACTION, and until this
+    field existed it was byte-identical to "no marker" on the read surface: the
+    writer's `RESOLVED <sha> (<repo>):` or `**OPEN:**` declared nothing, the
+    badge simply did not render, and the vanishing badge LOOKS like success.
+
+    Measured over the live store on 2026-08-19 — 53 entries, 323 top-level
+    nuance bullets: **8 declare `OPEN:` and parse, 11 declare `RESOLVED <sha>:`,
+    and 2 attempted a marker and missed** (one `OPEN`-shaped, one
+    `RESOLVED`-shaped). The advisory that reported those 2 lived only in
+    `subsystem_touch --validate`, which `/resume` never runs.
+
+    ⚠ The proposal this closes states "2 of 10 textual `OPEN:` markers do not
+    parse". The near-miss count of 2 reproduces exactly; the denominator does
+    not — a raw `grep -o 'OPEN:'` over the store returns **11**, not 10, and not
+    every occurrence leads a top-level bullet. The rate is quoted here as the
+    two populations rather than as a ratio, because the ratio's denominator is
+    the part that moved.
+
+    Counted from `JournalBullet.openness_population`, never from the raw
+    `near_miss_marker` predicate, so this surface and `--validate` can never
+    disagree about which population a bullet belongs to.
+    """
+
+    unverifiable_count: int = 0
+    """`RESOLVED:` bullets naming no sha — closed, but the closure is unprovable.
+
+    ⚠ Advisory, not a defect: closing an action is the point, and a sha-less
+    `RESOLVED` is a real closure that simply cannot be checked with
+    `git cat-file -e`. It rides the same row as `near_miss_count` because both
+    are "the marker did not fully land" and a reader who sees one wants the
+    other. Measured 2026-08-19: **0** across all 53 live entries, so this badge
+    does not fire on the store today — it is here because a sha-less `RESOLVED`
+    is one hurried write away, not because the corpus is full of them.
+    """
+
     mtime: float = 0.0
     """The entry file's mtime. Used ONLY as the featured-entry fallback, and
     deliberately NOT rendered or emitted in JSON — `render_text` must produce
@@ -762,12 +938,29 @@ class RecalledEntry:
     writer's own `new_entry_template` ships a stub. What is not ordinary is a
     reader that shows nothing and lets a caller conclude the entry is empty when
     the extractor missed, so the two are told apart in the output.
+
+    🔴 IT REACHES THE INDEX ROW, not only a printed body. It was computed here
+    and rendered ONLY under an entry the digest printed in full — and the digest
+    prints exactly ONE body out of N, so for every other entry the field existed
+    and was discarded. Measured differential control (two synthetic entries
+    differing in NOTHING but the nuance heading): the renamed one reported
+    `0 nuance`, lost its `🔴 1 OPEN` badge entirely, and `--validate` called it
+    `OK` at exit 0 — rendering byte-identical to a well-formed entry with an
+    empty work-history. Heading matching is exact-string at column 0, so a
+    rename, a trailing colon or an indent all land here.
     """
 
     @property
     def is_bare(self) -> bool:
-        """True when neither surfaced section had any content."""
-        return not any(self.sections.values())
+        """True when neither COUNTED section had any content.
+
+        🔴 DELIBERATELY NOT `any(self.sections.values())`. `sections` now also
+        carries `## What it is`, which the writer's own template pre-fills with a
+        placeholder — so reading every value would make a freshly created stub
+        report as filled-in and delete the "exists but has not been filled in"
+        notice in exactly the case it was written for.
+        """
+        return not any(self.sections.get(h) for h in COUNTED_HEADINGS)
 
 
 def read_entry(store_root: str | Path, entry: SubsystemEntry) -> RecalledEntry:
@@ -791,15 +984,27 @@ def read_entry(store_root: str | Path, entry: SubsystemEntry) -> RecalledEntry:
         mtime = path.stat().st_mtime
     except OSError:  # pragma: no cover - the read above already succeeded
         mtime = 0.0
+    bullets = parse_journal_bullets(sections.get(NUANCE_HEADING, ""))
+    # 🔴 ONE PASS, ONE PREDICATE. Every count on the index row is read off
+    # `openness_population` — the resolver's single source of the precedence
+    # order — rather than off `is_open` / `near_miss_marker` / `resolved_by`
+    # separately. A delta audit already caught two surfaces disagreeing about
+    # one bullet because each decided membership for itself; the index row is
+    # now the third consumer, and it branches on the same thing `--validate`
+    # does, so the two can never report different populations for one file.
+    populations = Counter(b.openness_population for b in bullets)
     return RecalledEntry(
         ref=entry.ref,
         filename=entry.filename,
         sensitivity=fold_sensitivity(fm.get("sensitivity")),
         declared_sensitivity=discarded_sensitivity(fm.get("sensitivity")),
         sections=sections,
-        bullet_count=len(parse_journal_bullets(sections.get(NUANCE_HEADING, ""))),
+        bullet_count=len(bullets),
+        open_count=populations["open"],
+        near_miss_count=populations["near-miss"],
+        unverifiable_count=populations["unverifiable"],
         mtime=mtime,
-        missing_sections=tuple(h for h in SURFACED_HEADINGS if h not in sections),
+        missing_sections=tuple(h for h in COUNTED_HEADINGS if h not in sections),
     )
 
 
@@ -855,9 +1060,22 @@ def focus_paths_from_text(text: str) -> tuple[str, ...]:
 def focus_window(repo: str | Path) -> FocusWindow:
     """The repo's newest handoff doc, as a path window. READ-ONLY, one file read.
 
-    Resolution order mirrors `scripts/resume-state.sh` (see `HANDOFF_GLOBS`), so
-    step 3 and step 4 of `/resume` cannot end up reconciling one initiative while
-    recalling against another. An absent or unreadable doc is an ORDINARY
+    Resolution order mirrors the NO-ARGUMENT chain of `scripts/resume-state.sh`
+    (see `HANDOFF_GLOBS`): lowercase family first, caps family second, newest
+    within each.
+
+    🔴 THAT IS A NARROWER GUARANTEE THAN THIS DOCSTRING USED TO CLAIM, and the
+    old wording — "so step 3 and step 4 of `/resume` cannot end up reconciling
+    one initiative while recalling against another" — was already false whenever
+    `/resume` was given an argument. This function takes no topic, so a run with
+    a topic slug reconciles `handoff-<slug>*.md` while recalling against the
+    NEWEST doc, which is a different initiative exactly when it matters. #684
+    (a prose argument carrying an explicit path) widens the same gap. Aligning
+    the two is a real fix and is NOT done here: it needs a topic parameter, a
+    decision about what a miss means on this side, and its own tests. Until then
+    this docstring states what the code does, not what would be nice.
+
+    An absent or unreadable doc is an ORDINARY
     outcome — most repos have no handoff at the moment they are resumed — and
     returns an empty window rather than raising: the caller's fallback is a real
     answer, not a degraded one.
@@ -1070,7 +1288,13 @@ class RecallReport:
         sentence duplicated per branch is one edit away from a branch that
         promises more than the store can support.
         """
-        return caveat_text(f"{self.scope}/")
+        # 🔴 `listing`, NOT `entries`. Badges are rendered by `listing_line`, which
+        # iterates `report.listing`; `entries` holds only the FEATURED bodies and is
+        # a different, usually smaller set. Reading `entries` here looked right and
+        # was silently wrong — the explanation vanished on an index whose visible
+        # `🔴 2 NEAR-MISS` row simply was not among the featured entries. Caught by
+        # running it, not by reading it.
+        return caveat_text(f"{self.scope}/", badges_present(self.listing))
 
 
 def load_store(store_root: str | Path, *, verb: str) -> tuple[Path, SubsystemIndex]:
@@ -1123,7 +1347,7 @@ def recall(
     focus_paths: Sequence[str] = (),
     focus_source: str | None = None,
 ) -> RecallReport:
-    """Surface the index's `## Pointers` + `## Nuance / work-history` for a scope.
+    """Surface an entry's `## What it is` + `## Pointers` + `## Nuance / work-history`.
 
     READ-ONLY. No clock, no network, no git, no prompt — `/resume`'s job is to
     re-enter work, and a recall step that interrogated the network or blocked on
@@ -1383,13 +1607,34 @@ def sensitivity_label(effective: str, declared: str | None) -> str:
     return f"{effective} (declared: {declared})"
 
 
-def listing_line(entry: RecalledEntry, width: int) -> str:
-    """ONE index line: `  <ref>   N nuance  <sensitivity>`. ~60 B.
+def short_heading(heading: str) -> str:
+    """`## Nuance / work-history` → `Nuance / work-history`. ONE spelling.
 
-    Three fields and no fourth. The ref is what `--ref` takes, the count is the
-    size signal that says whether a `--ref` is worth spending, and the
-    sensitivity has to travel WITH the entry it describes — a sensitivity stated
-    once at the top of a block is a sensitivity that gets copied away from.
+    The index row names a heading in ~60 B of budget, so it drops the ATX
+    marker the printed body keeps. It still names the heading in FULL — `NO
+    Pointers` and `NO Nuance / work-history` are different facts with different
+    next actions, and a badge that said only `NO SECTION` would make them one.
+    """
+    return heading.lstrip("#").strip()
+
+
+def listing_line(entry: RecalledEntry, width: int) -> str:
+    """ONE index line: `  <ref>   N nuance  <sensitivity>[  <badges>]`. ~60 B.
+
+    The ref is what `--ref` takes, the count is the size signal that says whether
+    a `--ref` is worth spending, and the sensitivity has to travel WITH the entry
+    it describes — a sensitivity stated once at the top of a block is a
+    sensitivity that gets copied away from.
+
+    🔴 THIS SAID "THREE FIELDS AND NO FOURTH", AND THE FOURTH IS ADDED
+    DELIBERATELY. The bar that wording set is the right one, so it is restated
+    rather than dropped: a field earns this line only if it changes what the
+    reader DOES, because the index is the one thing printed for every entry and
+    the cost is paid on every read. `open` clears that bar where size does not —
+    an entry with unfinished business may be describing a remedy that has since
+    landed, and the reader cannot tell from the body. It is also **conditional**:
+    entries with nothing declared open render byte-identical to before, so the
+    common case pays nothing. Nothing else has cleared this bar; keep it that way.
 
     ⚠ THE COUNT IS `## Nuance / work-history` BULLETS ONLY, and the word says so
     rather than leaving it to be assumed. It was `N bullets`, which reads as
@@ -1399,8 +1644,55 @@ def listing_line(entry: RecalledEntry, width: int) -> str:
     deliberately not entry size: pointers are durable and do not grow, while
     work-history is what the store's prune-on-resolve discipline is denominated
     in, so it is the number that predicts whether a `--ref` is worth spending.
+
+    🔴 THREE MORE BADGES, AND THE BAR ABOVE IS WHY THEY CLEAR IT — every one
+    reports a state in which the NUMBERS TO THEIR LEFT ARE NOT MEASUREMENTS:
+
+      `🔴 N NEAR-MISS`  N bullets tried to write a marker and missed the
+                        grammar. They declare nothing, so `N OPEN` is short by
+                        up to N and the reader cannot tell. Measured
+                        2026-08-19: 2 such bullets across 53 entries, against
+                        8 that declare `OPEN:` and parse.
+      `⚠ N UNVERIFIABLE` N `RESOLVED:` bullets name no sha. Advisory — closing
+                        is the point — but the closure cannot be checked.
+      `🔴 NO <heading>` the heading is absent or renamed, so the section was
+                        never parsed: `0 nuance` and a missing `OPEN` badge on
+                        that row mean PARSE FAILURE, not an empty entry. This
+                        one used to render only under a printed BODY, and the
+                        digest prints one body out of N — so on every other row
+                        it was computed and thrown away.
+
+    All three are CONDITIONAL, like `OPEN` and for the same reason: measured
+    over the live store on 2026-08-19, 1 entry of 53 would carry a near-miss
+    badge and 0 would carry either of the other two, so the other 52 rows stay
+    byte-identical to what they render today.
+
+    ⚠ ORDER IS `--validate`'S ORDER (declared → near-miss → unverifiable), so a
+    reader who has seen one surface can read the other without re-learning it.
+    The `NO <heading>` badge sits last because it is not a bullet population at
+    all — it says the parser never reached the bullets.
+
+    ⚠ THE BADGES ARE TEXT-ROW ONLY, deliberately, following `open_count`: the
+    JSON `listing` rows carry `ref`/`file`/`sensitivity`/`nuance_bullets` and no
+    openness field of any kind. A JSON consumer that wants the populations
+    reads `entries[].missing_sections` or runs `--validate`; splitting the row's
+    vocabulary across two payloads is how the two start to disagree.
     """
-    return f"  {entry.ref.ljust(width)}  {entry.bullet_count:>3} nuance   {sensitivity_label(entry.sensitivity, entry.declared_sensitivity)}"
+    base = f"  {entry.ref.ljust(width)}  {entry.bullet_count:>3} nuance   {sensitivity_label(entry.sensitivity, entry.declared_sensitivity)}"
+    badges: list[str] = []
+    if entry.open_count:
+        badges.append(f"🔴 {entry.open_count} OPEN")
+    if entry.near_miss_count:
+        badges.append(f"🔴 {entry.near_miss_count} NEAR-MISS")
+    if entry.unverifiable_count:
+        badges.append(f"⚠ {entry.unverifiable_count} UNVERIFIABLE")
+    if entry.missing_sections:
+        badges.append(
+            "🔴 NO " + ", ".join(short_heading(h) for h in entry.missing_sections)
+        )
+    if not badges:
+        return base
+    return base + "   " + "   ".join(badges)
 
 
 def _render_listing(report: RecallReport) -> list[str]:
@@ -1621,7 +1913,8 @@ def render_text(report: RecallReport) -> str:
         out.append("")
         out.append(
             f"NO ENTRY BODIES WERE PRINTED (--list). {what} — this is not an empty scope. "
-            f"Run `--ref <name>` for one entry's `{POINTERS_HEADING}` + `{NUANCE_HEADING}`."
+            f"Run `--ref <name>` for one entry's `{WHAT_HEADING}` + `{POINTERS_HEADING}` "
+            f"+ `{NUANCE_HEADING}`."
         )
         return "\n".join(out)
 
@@ -1652,9 +1945,48 @@ def render_text(report: RecallReport) -> str:
                 out.append(f"    {heading}")
                 for line in body.splitlines():
                     out.append(f"      {line}")
+        if not e.sections.get(WHAT_HEADING):
+            # 🔴 SAID, NOT LEFT BLANK — and BODY-ONLY, never on the index row.
+            # Absent and present-but-empty are folded together on purpose: both
+            # render as nothing above, and the reader's question ("what IS this
+            # thing?") is unanswered either way. It is not routed through
+            # `missing_sections` because that field drives the index-row badge
+            # and the caveat clause explaining it, which are per-entry costs
+            # this decision deliberately leaves at zero.
+            #
+            # 🔴 IT CLAIMS A PARSE, NEVER A FACT ABOUT THE ENTRY. The notice used
+            # to read "this entry never says what the subsystem IS" — which the
+            # extractor cannot know. A heading the parser does not match parses to
+            # nothing and produced that same sentence while the answer sat on
+            # disk, and `subsystem_touch.SHAPE_HEADINGS` deliberately excludes
+            # this heading so `--validate` says nothing either. The sibling
+            # `🔴 NO <heading>` badge draws exactly this line ("0 BY PARSE FAILURE
+            # and not by measurement"); this notice now draws it too, and names
+            # causes the reader can act on.
+            #
+            # 🔴 THE CAUSE LIST IS EXPLICITLY NON-EXHAUSTIVE ("among others"), and
+            # it has to be: `_heading_blocks` matches at column 0 and skips fenced
+            # regions, so a RENAME (`## What It Is`, `## What it is:`,
+            # `### What it is`), an INDENTED heading and one inside a ``` FENCE all
+            # reach this same branch — and only the first is literally a "rename".
+            # An enumeration that reads as closed is a narrower claim than the
+            # branch, which is how the previous wording ("absent, empty, or the
+            # heading was renamed") left two real causes unnamed.
+            #
+            # 🔴 THE PREFIX THIS SHARES WITH `service_recon`'s TWIN NOTICE IS
+            # QUOTED IN `claude/skills/analyze-service/SKILL.md` step 2, which
+            # tells the agent to relay it AS WRITTEN. Pinned to this string by
+            # `test_service_recon.py::TestTheSkillQuotesTheDegradeNotice`, which
+            # DERIVES the expected text from both renderers — so rewording either
+            # notice goes red naming the doc.
+            out.append(
+                f"    (no parsable `{WHAT_HEADING}` — absent, empty, or not parsed as a "
+                f"heading [renamed, indented, fenced, among others], so this read cannot "
+                f"say what the subsystem IS; re-derive it live)"
+            )
         if e.is_bare:
             # 🔴 Said, not left blank. An entry that exists with nothing under
-            # either surfaced heading is a real state (the writer's own template
+            # either COUNTED heading is a real state (the writer's own template
             # ships a stub), and printing nothing for it is indistinguishable
             # from an extractor that failed to find the sections.
             out.append(
@@ -1780,37 +2112,100 @@ def tokenize(text: str) -> tuple[str, ...]:
     return tuple(_TOKEN.findall(text.lower()))
 
 
-def candidate_tokens(tokens: Sequence[str]) -> tuple[str, ...]:
-    """A unit's tokens PLUS every adjacent pair joined.
+# Punctuation that ENDS a compound instead of spelling one, so `candidate_tokens`
+# must not join across it. `-`, `_` and a plain space are deliberately ABSENT:
+# those are the three ways the store actually writes one compound term, and
+# `tokenize` already folds them together.
+#
+# 🔴 A `.` counts ONLY at a sentence end — followed by whitespace or end-of-text.
+# A dotted identifier (`activity.events`, `nginx.conf`, a dotted config key) is a
+# single term whose halves must keep joining, and a rule that broke on every `.`
+# would silently stop reaching them.
+_CLAUSE_BREAK = re.compile(r"[,;:!?()\[\]]|\.(?=\s|$)")
 
-    🔴 THIS IS THE COMPOUND-TERM FIX, and it is deliberate rather than a lowered
-    cutoff. `ratelimit` never clears a fuzzy threshold against `rate` or `limit`
-    — it is not a typo of either — so the corpus side grows the concatenation and
-    the match becomes EXACT (1.00) instead of fuzzy-and-arguable. The other
-    direction (`rate limit` searched against a corpus that writes `ratelimit`) is
-    covered by the prefix/substring rules in `pair_strength`.
+
+def candidate_tokens(text: str) -> tuple[str, ...]:
+    """Every token a unit's TEXT offers as a match candidate: its own tokens,
+    PLUS every adjacent pair joined WITHIN one clause.
+
+    🔴 THE JOIN IS THE COMPOUND-TERM FIX, and it is deliberate rather than a
+    lowered cutoff. `ratelimit` never clears a fuzzy threshold against `rate` or
+    `limit` — it is not a typo of either — so the corpus side grows the
+    concatenation and the match becomes EXACT (1.00) instead of
+    fuzzy-and-arguable. The other direction (`rate limit` searched against a
+    corpus that writes `ratelimit`) is covered by `pair_strength`'s prefix and
+    substring rungs.
+
+    🔴 IT TAKES TEXT AND NOT TOKENS, because the clause boundary is exactly the
+    information tokenizing throws away — and the join is unsafe without it. A
+    bullet of the shape "drain that node, port-forward the socket" joins
+    `node`+`port` across the comma and scores a PERFECT 1.00 for `nodeport` in an
+    entry that never says the word — two facts glued into a term neither of them
+    spells. A 1.00 with no evidence behind it is the worst shape this scorer can
+    emit, because it out-ranks every genuine match on the page, so the clause
+    boundary is a hard stop. Taking text also removes the bypass: a caller cannot
+    tokenize first and lose the guard, because there is nothing to pass but the
+    text. The trade is measured in `TestCandidateJoinStopsAtAClause` — every
+    spelling of one compound still joins.
 
     Adjacent PAIRS only. Triples were not added: nothing in the corpus or the
     fixture set needs them, and each extra join widens the false-match surface.
+
+    Plain tokens first, then the joins — `score_unit` scans in order and stops at
+    1.00, so this keeps a whole-token exact hit cheaper than a joined one.
     """
-    return tuple(tokens) + tuple(a + b for a, b in zip(tokens, tokens[1:]))
+    plain: list[str] = []
+    joined: list[str] = []
+    for clause in _CLAUSE_BREAK.split(text):
+        toks = tokenize(clause)
+        plain.extend(toks)
+        joined.extend(a + b for a, b in zip(toks, toks[1:]))
+    return tuple(plain) + tuple(joined)
 
 
 def pair_strength(q: str, t: str) -> float:
-    """How strongly one query token matches one candidate token, in [0, 1].
+    """How strongly one query token `q` matches one candidate token `t`, in [0, 1].
 
     The ladder, each rung strictly below the one above so an exact match always
     wins and a weak hit PRINTS as weak:
 
         1.00  identical
-        0.92  one is a prefix of the other   (`postgres` → `postgresql`)
-        0.85  one contains the other         (`limit` → `ratelimit`)
-        ratio a `difflib` ratio ≥ FUZZY_FLOOR (`conection` → `connection`, 0.95)
+        0.92  the candidate EXTENDS the query   (`postgres` → `postgresql`)
+        0.85  the candidate CONTAINS the query  (`limit` → `ratelimit`)
+        ratio a `difflib` ratio ≥ FUZZY_FLOOR   (`conection` → `connection`, 0.95)
         0.00  otherwise
+
+    🔴 THE TWO MIDDLE RUNGS ARE DIRECTIONAL, AND THAT IS THE WHOLE POINT. They
+    ask whether the candidate spells MORE than the query, never the reverse. A
+    symmetric rule ("either is a prefix of the other") scores a candidate that is
+    a FRAGMENT of the query just as highly, and because `score_unit` is a mean
+    over the QUERY's tokens, a single-token query then takes FULL coverage from
+    one incidental short word: `logrotate` scores 0.85 off a bare `rotate`,
+    `kubeconfig` 0.92 off `kube`, `nodeport` 0.92 off `node`. The symmetric form
+    put a MAJORITY of every above-threshold hunk on the screen for queries whose
+    word appeared nowhere in them, some pages entirely fabricated, and each one
+    wearing a 0.85 or 0.92 that nothing in the entry justified.
+
+    🔴 DO NOT QUOTE A FRACTION HERE — it is a property of a store that changes
+    daily, and a stale one reads as a live claim. MEASURE IT: run single-token
+    queries with `--all-scopes --json` and count the hunks whose `lines` do not
+    contain the query. The behaviour itself is pinned by
+    `TestSearchDirectionality` and the labelled fixture corpus.
+
+    Both documented motivating cases are query ⊂ candidate and are UNCHANGED:
+    `postgres` → `postgresql`, `limit` → `ratelimit`. The reverse direction buys
+    no recall the join and the fuzzy rung do not already cover, and it is where
+    the false positives lived.
 
     🔴 Tokens shorter than `MIN_INEXACT_LEN` take the first rung or nothing. One
     length rule guarding all three inexact rungs, not three — a per-rung length
-    constant is how a predicate ends up wrong at N−1 of its sites.
+    constant is how a predicate ends up wrong at N−1 of its sites. A length
+    RATIO floor (`len(q)/len(t)`) was considered as a SECOND guard and REJECTED
+    on measurement: once the rungs are directional it moves almost nothing —
+    every pair it would reject is already one the candidate legitimately extends
+    — while at 0.5 it refuses `rate` → `ratelimit` (4/9), a case this module
+    names as motivating. A guard that costs a documented match to buy a rounding
+    error is taste, not a rule.
 
     The `difflib` call is gated on a length window as well as on the floor: a
     ratio can only reach `FUZZY_FLOOR` when the lengths are close, so the window
@@ -1820,9 +2215,9 @@ def pair_strength(q: str, t: str) -> float:
         return 1.0
     if len(q) < MIN_INEXACT_LEN or len(t) < MIN_INEXACT_LEN:
         return 0.0
-    if t.startswith(q) or q.startswith(t):
+    if t.startswith(q):
         return PREFIX_STRENGTH
-    if q in t or t in q:
+    if q in t:
         return SUBSTRING_STRENGTH
     if abs(len(q) - len(t)) > 2:
         return 0.0
@@ -1830,7 +2225,7 @@ def pair_strength(q: str, t: str) -> float:
     return ratio if ratio >= FUZZY_FLOOR else 0.0
 
 
-def score_unit(query_tokens: Sequence[str], unit_tokens: Sequence[str]) -> float:
+def score_unit(query_tokens: Sequence[str], unit_text: str) -> float:
     """COVERAGE of the query by the unit: the mean best strength per query token.
 
     🔴 A MEAN AND NOT A MAX, which is the whole reason an absent term is
@@ -1843,10 +2238,15 @@ def score_unit(query_tokens: Sequence[str], unit_tokens: Sequence[str]) -> float
     An empty query scores 0 everywhere rather than matching everything: "the user
     asked for nothing" and "everything matches" are different answers and only one
     of them is honest.
+
+    🔴 THE CANDIDATE SIDE IS TEXT, NOT TOKENS. `candidate_tokens` needs the clause
+    boundaries to decide what it may join, so handing it a pre-tokenized sequence
+    would silently disable that guard at whichever call site did it. There is one
+    way in, and it carries the punctuation.
     """
     if not query_tokens:
         return 0.0
-    cands = candidate_tokens(unit_tokens)
+    cands = candidate_tokens(unit_text)
     if not cands:
         return 0.0
     total = 0.0
@@ -2050,7 +2450,14 @@ class SearchReport:
         # The label is handed over UNQUOTED — `caveat_text` owns the backticks, so
         # quoting here too would print them twice and is exactly the kind of
         # near-miss a second spelling of one string produces.
-        return caveat_text(self.label)
+        #
+        # 🔴 EMPTY badge set, and that is a claim about THIS renderer, not a
+        # shortcut: search prints `Hunk`s — matched excerpts — and never an index
+        # row, so no badge can appear in its output and no badge explanation can
+        # apply to it. `SearchReport` has no `entries` at all; asking it for one
+        # would be an AttributeError, which is the loud version of the same fact.
+        # If search ever grows an index-row view, compute the set here.
+        return caveat_text(self.label, frozenset())
 
 
 def _entry_hunks(
@@ -2072,8 +2479,8 @@ def _entry_hunks(
     text = path.read_text(encoding="utf-8", errors="replace")
     raw = text.splitlines()
 
-    name_tokens = tokenize(" ".join((entry.ref, entry.slug, *entry.aliases)))
-    name_score = score_unit(query_tokens, name_tokens)
+    name_text = " ".join((entry.ref, entry.slug, *entry.aliases))
+    name_score = score_unit(query_tokens, name_text)
 
     def make(block: Block, score: float, basis: str) -> Hunk:
         if context == CONTEXT_BULLET:
@@ -2099,7 +2506,7 @@ def _entry_hunks(
             name_score=name_score,
         )
 
-    scored =[(score_unit(query_tokens, tokenize(b.text)), b) for b in entry_blocks(text)]
+    scored = [(score_unit(query_tokens, b.text), b) for b in entry_blocks(text)]
     cleared = [make(b, s, "line") for s, b in scored if s >= threshold]
     if cleared:
         return cleared, []
@@ -2369,7 +2776,8 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="subsystem-recall",
         description=(
             "Surface what the /analyze-service index already records for this repo's "
-            "scope: `## Pointers` + `## Nuance / work-history`, and nothing else. "
+            "scope: `## What it is` + `## Pointers` + `## Nuance / work-history`, and "
+            "nothing else. "
             "READ-ONLY: it never writes to the store, and it never touches the network."
         ),
     )
@@ -2426,7 +2834,10 @@ def _build_parser() -> argparse.ArgumentParser:
             "whole is affordable. Fuzzy and stdlib-only: it shells out to nothing. Every "
             "hunk carries its own scope/ref, section and sensitivity=, plus its score and "
             "the threshold, so a weak match is visibly weak. A query term that matches "
-            "nothing costs its share of the score, so a two-word query needs both words."
+            "nothing costs its share of the score, so a two-word query needs both words. "
+            "Matching is one-way: a term is matched by corpus words that EXTEND it "
+            "(`postgres` finds `postgresql`), never by ones it merely contains — so "
+            "type the SHORTER form when you are unsure, not the longer."
         ),
     )
     p.add_argument(

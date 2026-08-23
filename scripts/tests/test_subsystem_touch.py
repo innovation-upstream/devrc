@@ -61,6 +61,17 @@ ROOT = Path(__file__).resolve().parents[2]
 MODULE_PATH = ROOT / "scripts" / "lib" / "subsystem_touch.py"
 HANDOFF_DOC = ROOT / "claude" / "skills" / "handoff" / "SKILL.md"
 ANALYZE_DOC = ROOT / "claude" / "skills" / "analyze-service" / "SKILL.md"
+# 🔴 THE PINNED PROSE MOVED OUT OF THE ALWAYS-LOADED BODY, and these pins moved
+# with it in the SAME commit. `SKILL.md` was 17,476 bytes and loads on every
+# `/analyze-service` run; the entry schema and the write-back protocol are
+# detail a recon run does not need in context. Both `reference/` files ship —
+# every file under `claude/skills/<name>/` becomes a store symlink under
+# `~/.claude/skills/<name>/` — and `test_the_pinned_docs_are_the_DEPLOYED_ones`
+# below is what keeps that a claim about DEPLOYMENT rather than about spelling.
+ANALYZE_STORE_DOC = (ROOT / "claude" / "skills" / "analyze-service"
+                     / "reference" / "index-store.md")
+ANALYZE_WRITEBACK_DOC = (ROOT / "claude" / "skills" / "analyze-service"
+                         / "reference" / "write-back.md")
 
 sys.path.insert(0, str(ROOT / "scripts" / "lib"))
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -805,6 +816,60 @@ class TestBelowThreshold:
         assert "NOTHING RESOLVED" in other
         assert "NOTHING CLEARED THE THRESHOLD" not in other
 
+    # --- the below-threshold block must stand on its own ------------------------
+    #
+    # 🔴 MEASURED 2026-08-19 on `--pr 1146,1149`. `tests` (5 paths) was proposed
+    # for CREATION while `tekton-builds` — 1 path, already on disk at 18 KB with
+    # 15 bullets — sat under "reported, not proposed" with no explanation. The
+    # "Entries WERE reached" tail lives under `if not report.writes_proposed:`,
+    # so ANY nomination suppresses it: exactly the run where a create-proposal
+    # sits beside an existing entry the reader should append to instead.
+    # Five separate runs read that heading as a dead end and re-found the entry
+    # by hand. Every one of them landed on the entry already named here.
+
+    def test_the_block_says_the_entry_EXISTS_even_when_something_is_nominated(
+        self, store: Path
+    ) -> None:
+        """🔴 The load-bearing case: a nomination present, so the tail is gone."""
+        rep = _report(
+            ["src/collector/only.py", "tests/a.py", "tests/b.py", "tests/c.py"], store
+        )
+        assert [m.entry.ref for m in rep.below_threshold] == ["collector"]
+        assert rep.nominations, "fixture must nominate, or this tests the wrong branch"
+        text = st.render_text(rep)
+        assert "NOTHING CLEARED THE THRESHOLD" not in text, (
+            "fixture assumption changed: the tail is supposed to be suppressed here"
+        )
+        assert "EXISTS" in text
+        assert "NOT a dead end" in text
+        assert "APPEND there" in text
+
+    def test_it_says_paths_cannot_carry_a_SUBJECT(self, store: Path) -> None:
+        """The reason the count is weak evidence, not just that it is weak. Work
+        ABOUT one subsystem routinely lands in files under another."""
+        text = st.render_text(_report(["src/collector/only.py", "docs/other.md"], store))
+        assert "Paths cannot carry a subject" in text
+        assert "weak evidence about the FILES, not about the SUBJECT" in text
+
+    def test_the_guidance_is_ABSENT_when_nothing_is_below_threshold(
+        self, store: Path
+    ) -> None:
+        """🔴 The negative control. Printed unconditionally it becomes wallpaper —
+        and would be actively wrong on a run that reached no entry at all."""
+        rep = _report(["docs/a.md", "notes/b.md"], store)
+        assert rep.below_threshold == (), "fixture must reach no entry"
+        text = st.render_text(rep)
+        assert "NOT a dead end" not in text
+        assert "Paths cannot carry a subject" not in text
+
+    def test_singular_and_plural_AGREE_with_the_count(self, store: Path) -> None:
+        """Prose that says "This entry EXISTS ... is one of them" is the kind of
+        near-miss this module complains about elsewhere."""
+        one = st.render_text(_report(["src/collector/only.py", "docs/other.md"], store))
+        assert "This entry EXISTS" in one
+        assert "subject is it," in one
+        assert "one of them" not in one
+
 
 # =============================================================================
 # 🔴 The store is never written.
@@ -1366,7 +1431,8 @@ class TestSkillDocsArePinned:
     HANDOFF_SENTENCES: list[tuple[str, str]] = [
         ("scripts/lib/subsystem_touch.py", "the step actually calls this module"),
         ("It **never writes**", "the helper's read-only contract, stated to its caller"),
-        ("Write only on explicit confirm, diff first", "the confirm gate"),
+        ("Write it — no question", "the index write is deliberately ungated"),
+        ("Step 5 keeps its y/N", "the PUSH gate survives; blast radius earns a gate"),
         ("re-read the file and re-apply to current bytes", "no concurrent append is clobbered"),
         ("Never silent-mutate.", "the invariant carried over from analyze-service"),
         ("pointers, not copies", "the bloat rule"),
@@ -1393,6 +1459,8 @@ class TestSkillDocsArePinned:
         # intact".
         ("grep -ril", "the agent can search its OWN domain term when the tool matched none"),
         ("must be `git add`ed", "a new skill file the flake never sees is a silent no-op"),
+        ("NO PATH FOOTPRINT?", "work the path model cannot see is still recordable"),
+        ("gains normal path resolution", "the trade, stated without overclaiming"),
         ("never persist live status", "the anti-bloat rule that matters most"),
         (
             "persist the *derivation method and what a stale reading looks like*",
@@ -1648,6 +1716,44 @@ class TestSkillDocsArePinned:
             "run it separately, never merge the path sets",
             "the compose rule, restated for the third source",
         ),
+        # 🔴 THE ESCALATION. MEASURED 2026-08-16: the session that built and
+        # deployed a whole service across nine merged PRs got 1 path under the
+        # cwd and 5 outside from `--session`, reported "Propose no write", and
+        # never ran `--pr` — which saw 17 paths and nominated the service above
+        # threshold. Every sentence below carries one half of the fix; deleting
+        # any one restores the stop-at-the-first-window behaviour, silently.
+        (
+            "ESCALATE BEFORE CONCLUDING",
+            "🔴 a thin or empty session window is a prompt to read a second one",
+        ),
+        (
+            "run `--pr` (or `--commit`) NOW, in this same step, before you report anything",
+            "🔴 the escalation is an ACTION in this step, not advice for later",
+        ),
+        (
+            "\"a second window was read and also came back empty\"",
+            "🔴 the stop condition — never \"the first window was empty\"",
+        ),
+        (
+            "This does NOT violate \"the windows never compose.\"",
+            "🔴 the rule an executor would otherwise cite to justify stopping",
+        ),
+        (
+            "It says nothing about **reading** a second window",
+            "the distinction: merging path sets is forbidden, reading two reports is not",
+        ),
+        (
+            "Reading one window and stopping is not compliance with that rule",
+            "🔴 the misreading named as the failure it is",
+        ),
+        (
+            "The better the session followed the rules, the less of it `--session` can see",
+            "🔴 the preferred window is blind to the MANDATED workflow, not an odd one",
+        ),
+        (
+            "`WRONG WINDOW?`",
+            "the computed block exists and the step tells the agent to act on it",
+        ),
     ]
 
     def test_EVERY_emitted_status_has_a_bullet_in_the_skill(self) -> None:
@@ -1667,9 +1773,25 @@ class TestSkillDocsArePinned:
         still have the deliverable. Asserted on ORDER in the file, because the
         pin above only proves the sentence exists somewhere."""
         doc = HANDOFF_DOC.read_text(encoding="utf-8")
-        kickoff = doc.index("**Output a kickoff block**")
-        index_step = doc.index("**Record what this session touched")
-        gate = doc.index("append this to the index? (y/N)")
+
+        def at(needle: str) -> int:
+            # 🔴 Not `.index()`: a deleted anchor raised a bare ValueError, which
+            # reports a real regression as a traceback and names nothing.
+            pos = doc.find(needle)
+            assert pos >= 0, (
+                f"anchor missing from claude/skills/handoff/SKILL.md: {needle!r}. "
+                f"If a step was deliberately removed, update this ordering test "
+                f"in the SAME commit — it is the only thing asserting the "
+                f"deliverable comes before anything that can block."
+            )
+            return pos
+
+        kickoff = at("**Output a kickoff block**")
+        index_step = at("**Record what this session touched")
+        # The index write is no longer gated (2026-08-15, operator decision), so
+        # the ordering anchor is step 5's PUSH gate — still the last thing that
+        # can block, and still after the deliverable.
+        gate = at("update the handoff doc and push it? (y/N)")
         assert kickoff < index_step < gate
 
     @pytest.mark.parametrize(
@@ -1698,6 +1820,17 @@ class TestSkillDocsArePinned:
             assert d.exists(), f"the pinned doc is gone: {d}"
             assert d.name == "SKILL.md"
             assert d.parent.parent.name == "skills"
+        # The demoted halves ship from the same skill directory, under
+        # `reference/` — and the body must still ROUTE to them, or the prose is
+        # technically shipped and operationally gone.
+        body = ANALYZE_DOC.read_text(encoding="utf-8")
+        for d in (ANALYZE_STORE_DOC, ANALYZE_WRITEBACK_DOC):
+            assert d.exists(), f"the pinned reference doc is gone: {d}"
+            assert d.parent.name == "reference"
+            assert d.parent.parent == ANALYZE_DOC.parent
+            assert f"reference/{d.name}" in body, (
+                f"analyze-service/SKILL.md no longer points at reference/{d.name}"
+            )
         # Shared predicate — declared-and-not-switched-off only; see
         # testlib/skills_mapping.py for what it does NOT check, and why.
         assert_skills_mapping_declared(ROOT / "nix" / "home.nix")
@@ -1710,7 +1843,7 @@ class TestEntrySchemaAgreement:
     nothing is the one way to make that guard worthless."""
 
     def test_the_field_is_declared_in_the_schema(self) -> None:
-        doc = ANALYZE_DOC.read_text(encoding="utf-8")
+        doc = ANALYZE_STORE_DOC.read_text(encoding="utf-8")
         assert "`created_by:` — which writer created the entry" in doc
         assert "absent means the entry predates the stamp" in doc
 
@@ -1726,14 +1859,14 @@ class TestEntrySchemaAgreement:
         assert sr.SubsystemEntry.from_mapping({**without, "filename": "roster.md"}) == entry
 
     def test_both_writer_ids_are_named_in_the_schema(self) -> None:
-        doc = ANALYZE_DOC.read_text(encoding="utf-8")
+        doc = ANALYZE_STORE_DOC.read_text(encoding="utf-8")
         for writer in st.KNOWN_WRITERS:
             assert f"`{writer}`" in doc, f"the schema does not name the writer {writer!r}"
 
     def test_analyze_service_stamps_itself_on_a_new_file(self) -> None:
         """Otherwise the census could not tell "created before the stamp" from
         "created by the other writer", and the experiment would not resolve."""
-        doc = ANALYZE_DOC.read_text(encoding="utf-8")
+        doc = ANALYZE_WRITEBACK_DOC.read_text(encoding="utf-8")
         assert "stamp `created_by: analyze-service` in the front matter" in doc
 
 
@@ -1753,7 +1886,7 @@ class TestNoRealStoreIsRead:
     def test_the_default_points_where_the_skill_says_it_does(self) -> None:
         assert st.DEFAULT_STORE_ROOT.name == "analyze-service-index"
         assert st.DEFAULT_STORE_ROOT.parent.name == ".claude"
-        assert f"~/.claude/{st.DEFAULT_STORE_ROOT.name}" in ANALYZE_DOC.read_text(
+        assert f"~/.claude/{st.DEFAULT_STORE_ROOT.name}" in ANALYZE_STORE_DOC.read_text(
             encoding="utf-8"
         )
 
@@ -2812,6 +2945,442 @@ class TestSessionCaveatIsAccuratePerSource:
         assert st.report_json(rep)["source"]["session"] is not None
 
 
+class TestWrongWindowWarning:
+    """🔴 THE PREFERRED WINDOW IS BLIND TO THE MANDATED WORKFLOW, and the report
+    now says so with THIS RUN's numbers.
+
+    MEASURED 2026-08-16 on the session that designed, built, tested and deployed
+    the `subsystem-store-api` service across NINE merged PRs:
+
+        --session   1 path under the session cwd, 5 outside  -> no-match,
+                                                                "Propose no write"
+        --pr  over those same nine PRs   17 paths            -> nominated at 7
+
+    ~94% of the work was invisible to the preferred window. Nothing was
+    mis-counted: the 5 were counted and printed, in a note, and were not read.
+
+    🔴 BOTH CONTROLS OR NEITHER (`claude/RULES.md` → "a warning that always fires
+    is noise"). A block asserted only on the firing case is indistinguishable
+    from one printed unconditionally — so every arm here is a PAIR, and
+    `test_the_NEGATIVE_control` is the half that makes the positive one mean
+    anything.
+    """
+
+    # Pairwise distinct, and distinct from every number the assertions name, so
+    # a mutant that hardcodes one of them cannot survive by coincidence.
+    ONE_UNDER = ["src/collector/a.py"]
+    FIVE_OUTSIDE = ["w/x.py", "w/y.py", "w/z.py", "w/p.py", "w/q.py"]
+
+    def _src(self, under: int | None, outside: int | None, paths=()) -> st.PathSource:
+        """A session source with the two counters set directly.
+
+        The boundary is a property of the two integers, and driving it through a
+        transcript would make each boundary case an exercise of the extractor as
+        well. The transcript-driven pair below proves REACHABILITY; this proves
+        the rule.
+        """
+        return st.PathSource(
+            kind="session",
+            window="session",
+            paths=tuple(paths),
+            session="s-boundary",
+            under_cwd=under,
+            outside_cwd=outside,
+        )
+
+    # --- the rule, at the boundary and on BOTH sides of it ---------------------
+
+    @pytest.mark.parametrize(
+        "under,outside,fires,why",
+        [
+            (3, 2, False, "below: more is visible than not"),
+            (2, 2, False, "ON the boundary: a tie is not dominance"),
+            (2, 3, True, "one path past the boundary"),
+            (0, 0, False, "the empty window: no evidence of dominance either way"),
+            (0, 1, True, "nothing visible at all"),
+            (1, 5, True, "THE MEASURED CASE"),
+            (9, 10, True, "a bare majority still fires"),
+            (10, 9, False, "47% invisible and SILENT — the documented cost"),
+        ],
+        ids=lambda v: str(v),
+    )
+    def test_the_boundary_is_outside_greater_than_under(
+        self, under: int, outside: int, fires: bool, why: str
+    ) -> None:
+        hit = st.wrong_window_dominance(self._src(under, outside))
+        assert (hit is not None) is fires, f"{under} under / {outside} outside: {why}"
+
+    def test_the_percentage_is_computed_from_THIS_run(self) -> None:
+        """Three inputs, three different answers. A constant cannot do this, and
+        a mutant that swaps the numerator lands on 17/40/0 instead."""
+        assert st.wrong_window_dominance(self._src(1, 5))[2] == 83
+        assert st.wrong_window_dominance(self._src(2, 3))[2] == 60
+        assert st.wrong_window_dominance(self._src(0, 1))[2] == 100
+
+    def test_the_counters_are_returned_unchanged_not_recomputed(self) -> None:
+        assert st.wrong_window_dominance(self._src(1, 5))[:2] == (1, 5)
+
+    # --- the block, and the pair that makes it readable ------------------------
+
+    def test_THE_POSITIVE_control_the_block_names_the_actual_numbers(self) -> None:
+        lines = "\n".join(st.render_wrong_window(self._src(1, 5, self.ONE_UNDER)))
+        assert "WRONG WINDOW?" in lines
+        # The numbers, all three, from this run and not a template.
+        assert "5 of the 6 path(s) this session named (83%)" in lines
+        assert "NOT among the 1 this window reports" in lines
+        # …and the exact flags to run instead, taken from the module's own map
+        # rather than re-spelled here.
+        assert st._SOURCE_FLAG["pr"] in lines
+        assert st._SOURCE_FLAG["commit"] in lines
+
+    def test_the_block_PRE_EMPTS_the_generalisation_four_runs_have_now_made(self) -> None:
+        """🔴 The block must say the zero is THIN, not structural — measured.
+
+        Four separate runs have read this block, concluded "the session window is
+        structurally empty here because I worked in a worktree", and reported it
+        as a finding. Three were recorded in the store and refuted by a two-minute
+        scan: over 14 devrc sessions only ONE had an empty in-cwd set and 41 of 232
+        paths (17.7%) landed under cwd. The blindness this block describes is about
+        a SUBAGENT's separate transcript, not about the reader's own edits.
+
+        The refutation lived only in a store bullet the reader does not open at the
+        moment it forms the belief — it reads THIS text. So the counterweight has to
+        be here, and it has to survive a reword, which is why the numbers are pinned
+        rather than a phrase.
+        """
+        lines = "\n".join(st.render_wrong_window(self._src(1, 5, self.ONE_UNDER)))
+        assert "THIN, NOT PROOF THE WINDOW IS DEAD" in lines
+        # The measurement, not an adjective — a reader can check these.
+        assert "14 devrc sessions" in lines
+        assert "41 of 232 paths (17.7%)" in lines
+        # It must name the claim it is refuting, or it reads as generic hedging.
+        assert "REFUTED" in lines
+        # …and say what to DO, since the correct action is escalate-and-move-on.
+        assert "do not file a finding about this" in lines.lower()
+
+    def test_the_pre_emption_is_ABSENT_when_the_block_does_not_fire(self) -> None:
+        """The negative half: a mostly-visible session must not be lectured about
+        a generalisation it is in no position to make."""
+        assert st.render_wrong_window(self._src(5, 1, self.FIVE_OUTSIDE)) == []
+
+    def test_THE_NEGATIVE_control_a_mostly_visible_session_gets_NOTHING(self) -> None:
+        """🔴 The half that makes the positive control mean something. A block
+        that also printed here would be boilerplate, and boilerplate is what the
+        measured failure walked past."""
+        assert st.render_wrong_window(self._src(5, 1, self.FIVE_OUTSIDE)) == []
+        assert st.wrong_window_dominance(self._src(5, 1)) is None
+
+    def test_a_source_with_no_counters_never_fires(self) -> None:
+        """Every non-session window: the counters do not exist there, and `None`
+        must stay `None` rather than becoming a reassuring zero."""
+        assert st.wrong_window_dominance(st.caller_supplied(["a/b.py"])) is None
+        assert st.wrong_window_dominance(self._src(None, 5)) is None
+        assert st.wrong_window_dominance(self._src(1, None)) is None
+
+    # --- reachability: the same pair, driven through a real transcript ---------
+
+    def _transcripts(self, tmp_path: Path):
+        repo = _init_repo(tmp_path, SCOPE)
+        cwd = str(repo)
+        dominated = _write_transcript(
+            tmp_path / "dominated.jsonl",
+            cwd,
+            [f"{cwd}/{p}" for p in self.ONE_UNDER]
+            + [f"{tmp_path}/elsewhere/{p}" for p in self.FIVE_OUTSIDE],
+        )
+        visible = _write_transcript(
+            tmp_path / "visible.jsonl",
+            cwd,
+            [f"{cwd}/src/collector/{Path(p).name}" for p in self.FIVE_OUTSIDE]
+            + [f"{tmp_path}/elsewhere/{p}" for p in self.ONE_UNDER],
+        )
+        return repo, dominated, visible
+
+    def test_THE_PAIR_end_to_end_through_a_real_transcript(
+        self, tmp_path: Path, tailer_cache
+    ) -> None:
+        """🔴 Reachable, not merely breakable. The extractor really produces the
+        two counters, `collect_session_paths` really carries them, and the
+        renderer really reads them — on the same code path, with the same shape,
+        differing only in which side the paths fell on."""
+        repo, dominated, visible = self._transcripts(tmp_path)
+        store = _make_store(tmp_path / "s")
+
+        dom = st.build_report(_session_source(repo, dominated), store, SCOPE, today=TODAY)
+        vis = st.build_report(_session_source(repo, visible), store, SCOPE, today=TODAY)
+
+        assert dom.source.under_cwd == 1 and dom.source.outside_cwd == 5
+        assert vis.source.under_cwd == 5 and vis.source.outside_cwd == 1
+
+        assert "WRONG WINDOW?" in st.render_text(dom)
+        assert "WRONG WINDOW?" not in st.render_text(vis)
+
+    def test_it_fires_on_a_RESOLVED_run_too_not_only_on_a_dead_end(
+        self, tmp_path: Path, tailer_cache
+    ) -> None:
+        """🔴 NOT a `ROUTE OUT` sibling. A run can clear the threshold on the few
+        paths it CAN see and propose a bullet for a subsystem that was a sliver
+        of the session — the window is just as wrong there, and that run gets no
+        dead-end block at all."""
+        repo = _init_repo(tmp_path, SCOPE)
+        cwd = str(repo)
+        store = _make_store(tmp_path / "s")
+        t = _write_transcript(
+            tmp_path / "t.jsonl",
+            cwd,
+            [f"{cwd}/src/collector/a.py", f"{cwd}/src/collector/b.py"]
+            + [f"{tmp_path}/elsewhere/{p}" for p in self.FIVE_OUTSIDE],
+        )
+        rep = st.build_report(_session_source(repo, t), store, SCOPE, today=TODAY)
+        assert rep.status == "resolved"
+        rendered = st.render_text(rep)
+        assert "WRONG WINDOW?" in rendered
+        assert "5 of the 7 path(s) this session named (71%)" in rendered
+        assert "ROUTE OUT" not in rendered, "premise gone: this is not a dead end"
+
+    def test_the_cross_repo_window_carries_NO_counters(
+        self, tmp_path: Path, tailer_cache
+    ) -> None:
+        """🔴 `session-absolute` measures the same two counters against ANOTHER
+        repo's cwd, so a dominance claim read off them would answer a different
+        question. It carries its own caveat instead — see `PathSource.outside_cwd`."""
+        repo = _init_repo(tmp_path, SCOPE)
+        other = tmp_path / "the-other-checkout"
+        other.mkdir()
+        t = _write_transcript(
+            tmp_path / "t.jsonl", str(other), [f"{repo}/src/collector/a.py"]
+        )
+        src = _session_source(repo, t)
+        assert src.window == "session-absolute"
+        assert src.under_cwd is None and src.outside_cwd is None
+        assert st.render_wrong_window(src) == []
+
+    # --- the JSON half reads the SAME predicate --------------------------------
+
+    def test_the_json_carries_the_dominance_and_its_numbers(
+        self, tmp_path: Path, tailer_cache
+    ) -> None:
+        repo, dominated, visible = self._transcripts(tmp_path)
+        store = _make_store(tmp_path / "s")
+        dom = st.report_json(
+            st.build_report(_session_source(repo, dominated), store, SCOPE, today=TODAY)
+        )["source"]
+        vis = st.report_json(
+            st.build_report(_session_source(repo, visible), store, SCOPE, today=TODAY)
+        )["source"]
+        assert dom["wrong_window"] == {
+            "under_cwd": 1,
+            "outside_cwd": 5,
+            "percent_outside": 83,
+        }
+        assert vis["wrong_window"] is None
+        assert (vis["under_cwd"], vis["outside_cwd"]) == (5, 1)
+
+    # --- and it is still READ-ONLY ---------------------------------------------
+
+    def test_rendering_the_warning_WRITES_NOTHING(
+        self, tmp_path: Path, tailer_cache
+    ) -> None:
+        """🔴 The module's contract is that no mode writes to the store. A new
+        render path is a new chance to break it, so it is hashed like every
+        other — `TestNeverWrites`' predicate, on the branch that did not exist
+        when that class was written."""
+        repo, dominated, _ = self._transcripts(tmp_path)
+        store = _make_store(tmp_path / "s")
+        before = _tree_hash(store)
+        rep = st.build_report(_session_source(repo, dominated), store, SCOPE, today=TODAY)
+        rendered = st.render_text(rep)
+        json.dumps(st.report_json(rep))
+        assert "WRONG WINDOW?" in rendered, "the write-free path under test never ran"
+        assert _tree_hash(store) == before
+
+
+class TestTheZeroIsSCOPEDToItsWindow:
+    """🔴 THE SENTENCE THAT ENDED TWO SESSIONS EARLY.
+
+    `--session` used to close a `no-match` with *"This is a real zero, not an
+    empty window."* The distinction it draws is real and worth keeping — the
+    instrument RAN, versus nothing was readable — but as written it reads as
+    "there is nothing to record", which is how two separate sessions stopped.
+
+    `claude/RULES.md` → "when the artifact under test IS prose, a guard on WORDS
+    is walkable by REWORDING — pin the WHOLE normalised string." So this pins the
+    whole sentence, not a phrase from it. A cosmetic reword fails this test on
+    purpose; that is the price of a machine-readable claim.
+    """
+
+    SCOPED = (
+        "The instrument RAN: this is a real zero FOR THIS WINDOW, not an unread "
+        "window. It is NOT a finding about the SESSION — the other windows are "
+        "UNREAD, they are blind in different directions, and this run says "
+        "nothing about what they would return. See ROUTE OUT below before "
+        "concluding there is nothing to record."
+    )
+
+    SUPERSEDED = "This is a real zero, not an empty window."
+
+    def _no_match(self, tmp_path: Path) -> str:
+        store = _make_store(tmp_path / "s")
+        rep = _report(["src/unlisted-widget/a.py"], store)
+        assert rep.status == "no-match", "premise gone: this is not the no-match branch"
+        return st.render_text(rep)
+
+    def test_the_whole_scoped_sentence_is_printed(self, tmp_path: Path) -> None:
+        assert self.SCOPED in self._no_match(tmp_path)
+
+    def test_the_misreadable_sentence_is_GONE(self, tmp_path: Path) -> None:
+        """Deliberate wording change: the old assertion pinned this string and was
+        updated in the same commit, not deleted."""
+        assert self.SUPERSEDED not in self._no_match(tmp_path)
+
+    def test_it_still_distinguishes_the_two_zeros(self, tmp_path: Path) -> None:
+        """The tightening must not cost the distinction it was tightening. A run
+        that looked at nothing still says something different from one that
+        looked and resolved nothing."""
+        store = _make_store(tmp_path / "s")
+        empty = st.render_text(_report([], store))
+        assert "NOTHING WAS LOOKED AT" in empty
+        assert "real zero FOR THIS WINDOW" not in empty
+
+
+class TestWrongWindowMutationKillMatrix:
+    """Break the NARROWEST expression that can be wrong, one at a time, and
+    require THIS guard's own symptom.
+
+    🔴 POSITIVE CONTROL FOR THE BATCH: `test_kills_the_render_call_site` — a
+    mutant that is certainly caught if the harness works at all. It runs in this
+    same class, through the same `_load_mutant`, so a batch where every other
+    mutant "survives" is distinguishable from a harness wired to nothing.
+    """
+
+    ONE_UNDER = TestWrongWindowWarning.ONE_UNDER
+    FIVE_OUTSIDE = TestWrongWindowWarning.FIVE_OUTSIDE
+
+    def _src(self, mod, under, outside):
+        return mod.PathSource(
+            kind="session", window="session", paths=(), session="s-m",
+            under_cwd=under, outside_cwd=outside,
+        )
+
+    def test_kills_the_render_call_site(self, tmp_path: Path) -> None:
+        """POSITIVE CONTROL. Without the call the computation is intact and
+        nothing reaches the reader — the exact shape of the measured failure,
+        where the numbers existed and were never surfaced."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_ww_callsite",
+            [("    out.extend(render_wrong_window(src))", "    pass")],
+        )
+        store = _make_store(tmp_path / "s")
+        src = self._src(mod, 1, 5)
+        rep = mod.build_report(src, store, SCOPE, today=TODAY)
+        assert mod.wrong_window_dominance(src) is not None  # still computed…
+        assert "WRONG WINDOW?" not in mod.render_text(rep)  # …and never printed
+        assert "WRONG WINDOW?" in st.render_text(
+            st.build_report(st.PathSource(**vars(src)), store, SCOPE, today=TODAY)
+        )
+
+    def test_kills_the_boundary_itself(self, tmp_path: Path) -> None:
+        """`<=` -> `<`: a TIE becomes dominance. The mutant is silent on every
+        case the real rule fires on, so only the boundary case can see it."""
+        mod = _load_mutant(
+            tmp_path, "m_ww_tie", [("    if outside <= under:", "    if outside < under:")]
+        )
+        assert mod.wrong_window_dominance(self._src(mod, 2, 2)) is not None
+        assert st.wrong_window_dominance(
+            st.PathSource(kind="session", window="session", paths=(), under_cwd=2, outside_cwd=2)
+        ) is None
+        # …and the cases either side are unchanged, so the mutation is the
+        # boundary and nothing else.
+        assert mod.wrong_window_dominance(self._src(mod, 2, 3)) is not None
+        assert mod.wrong_window_dominance(self._src(mod, 3, 2)) is None
+
+    def test_kills_the_condition_entirely(self, tmp_path: Path) -> None:
+        """`if False`: the block fires on a session that is MOSTLY visible —
+        i.e. it becomes the unconditional sentence this design exists not to
+        be. Caught by the negative control, which is the only test that can."""
+        mod = _load_mutant(
+            tmp_path, "m_ww_always", [("    if outside <= under:", "    if False:")]
+        )
+        assert mod.wrong_window_dominance(self._src(mod, 5, 1)) is not None
+        assert "WRONG WINDOW?" in "\n".join(
+            mod.render_wrong_window(self._src(mod, 5, 1))
+        )
+
+    def test_kills_the_absent_counter_guard(self, tmp_path: Path) -> None:
+        """Without it a source that carries no counters is compared anyway. The
+        symptom is THIS guard's: a TypeError from `None`, on a window that has
+        no business being judged — not a quietly wrong answer."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_ww_none",
+            [("    if under is None or outside is None:", "    if False:")],
+        )
+        with pytest.raises(TypeError):
+            mod.wrong_window_dominance(mod.caller_supplied(["a/b.py"]))
+        assert st.wrong_window_dominance(st.caller_supplied(["a/b.py"])) is None
+
+    def test_kills_the_percentage_numerator(self, tmp_path: Path) -> None:
+        """The number must be THIS run's invisible share. Swap the numerator and
+        it reports the visible one — 17% where the real module says 83%, which
+        is the reassuring direction."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_ww_pct",
+            [
+                (
+                    "    return under, outside, round(100 * outside / (under + outside))",
+                    "    return under, outside, round(100 * under / (under + outside))",
+                )
+            ],
+        )
+        assert mod.wrong_window_dominance(self._src(mod, 1, 5))[2] == 17
+        assert "(17%)" in "\n".join(mod.render_wrong_window(self._src(mod, 1, 5)))
+        assert st.wrong_window_dominance(
+            st.PathSource(kind="session", window="session", paths=(), under_cwd=1, outside_cwd=5)
+        )[2] == 83
+
+    @pytest.fixture()
+    def tailer(self, tailer_cache):
+        return st._session_tailer()
+
+    def test_kills_the_counter_wiring(self, tmp_path: Path, tailer) -> None:
+        """The collector must carry the extractor's counters. Pinned to 0 the
+        rule can never fire, and the report reads exactly as it did during the
+        measured failure: a plausible small count and no escalation.
+
+        ⚠ `_session_mutant`, not `_load_mutant`: a mutant written to `tmp_path`
+        cannot traverse to the real extractor, so every session-reaching mutant
+        would die of `ExtractorMissingError` and be green for the wrong reason.
+        The injection is not part of the mutation."""
+        mod = _session_mutant(
+            tmp_path,
+            "m_ww_wiring",
+            [("        outside_cwd=_as_count(outside),", "        outside_cwd=0,")],
+            tailer,
+        )
+        repo = _init_repo(tmp_path, SCOPE)
+        cwd = str(repo)
+        t = _write_transcript(
+            tmp_path / "t.jsonl",
+            cwd,
+            [f"{cwd}/{p}" for p in self.ONE_UNDER]
+            + [f"{tmp_path}/elsewhere/{p}" for p in self.FIVE_OUTSIDE],
+        )
+        store = _make_store(tmp_path / "s")
+        src = mod.collect_session_paths(repo, transcript=t)
+        assert src.outside_cwd == 0
+        assert "WRONG WINDOW?" not in mod.render_text(
+            mod.build_report(src, store, SCOPE, today=TODAY)
+        )
+        # the real module, same transcript, same store:
+        real = st.collect_session_paths(repo, transcript=t)
+        assert real.outside_cwd == 5
+        assert "WRONG WINDOW?" in st.render_text(
+            st.build_report(real, store, SCOPE, today=TODAY)
+        )
+
+
 class TestSessionCli:
     """The CLI is the only surface `/handoff` touches."""
 
@@ -3828,7 +4397,15 @@ class TestSessionMutationKillMatrix:
         falls back to git returns 0 and prints a plausible report — an answer to
         a question the caller did not ask, from a window that overlaps enough to
         look right. `/handoff` step 4 keys on the exit code, so this mutant would
-        cause a WRITE."""
+        cause a WRITE.
+
+        🔴 The payload says `scope_of()`, not `scope`: the scope is derived
+        lazily now, so a mutant naming the old local dies of UnboundLocalError —
+        a kill for the WRONG REASON, which proves nothing about this contract.
+        `scope_of()` returns exactly what `scope` used to hold, so the mutant
+        still means what it meant. `assert mod.main(argv) == 0` plus the
+        "collector" check below are what keep that honest: a mutant that merely
+        crashes fails them rather than passing quietly."""
         mod = _session_mutant(
             tmp_path,
             "ms_fallback",
@@ -3840,7 +4417,7 @@ class TestSessionMutationKillMatrix:
                     "    except (TouchError, ResolverError) as exc:\n"
                     '        print(f"subsystem-touch: {exc}", file=sys.stderr)\n'
                     "        print(render_text(build_report(collect_git_paths(repo), "
-                    "args.store, scope, today=stamp)))\n"
+                    "args.store, scope_of(), today=stamp)))\n"
                     "        return 0",
                 )
             ],
@@ -5257,12 +5834,17 @@ class TestPrMutationKillMatrix:
 
     def test_kills_the_FULL_ARGV_renderer(self, tmp_path: Path) -> None:
         """🔴 The regression the PR source exposed: with `git` hardcoded back into
-        the renderer, a `gh` invocation renders as `ran: git gh pr view 421`."""
+        the renderer, a `gh` invocation renders as `ran: git gh pr view 421`.
+
+        ⚠ Anchored on `_ran_lines`, not on the call site. The line moved into a
+        shared writer when the escalation block acquired a provenance line of its
+        own — two open-coded copies would have made this anchor ambiguous, which
+        `_load_mutant`'s uniqueness assert reports rather than scoring."""
         mod = _load_mutant(
             tmp_path,
             "mp_argv",
-            [('        out.append(f"  ran: {\' \'.join(cmd)}")',
-              '        out.append(f"  ran: git {\' \'.join(cmd)}")')],
+            [('    return [f"{indent}ran: {\' \'.join(cmd)}" for cmd in commands]',
+              '    return [f"{indent}ran: git {\' \'.join(cmd)}" for cmd in commands]')],
         )
         store = _make_store(tmp_path / "s")
         src = st.PathSource(
@@ -5458,7 +6040,12 @@ class TestCommitPositiveControl:
         # zero uninformative.
         assert len(neg_rep.source.paths) == 3
         rendered = st.render_text(neg_rep)
-        assert "This is a real zero, not an empty window." in rendered
+        # 🔴 DELIBERATE WORDING UPDATE, not a weakened assertion. This pinned
+        # "This is a real zero, not an empty window." — true, and read by two
+        # sessions as "there is nothing to record". The claim is now scoped to
+        # the window in the same sentence; `TestTheZeroIsSCOPEDToItsWindow` pins
+        # the whole replacement and asserts the old one is gone.
+        assert "real zero FOR THIS WINDOW" in rendered
         assert "3 paths examined" in rendered
 
     def test_a_commit_OUTSIDE_every_subsystem_still_NOMINATES_when_it_clusters(
@@ -8018,6 +8605,153 @@ class TestRouteOutOfADeadEnd:
 # REASON TO DECLINE; nothing routed the lesson there, so it ended as prose in a
 # transcript.
 # --------------------------------------------------------------------------- #
+class TestNoPathFootprint:
+    """The third dead end: the subsystem is real and the PATH MODEL cannot see it.
+
+    🔴 Not a wrong home (SKILL HOMES) and not a wrong window (ROUTE OUT) — there
+    is no window. MEASURED 2026-08-14: a session did every step right (hit
+    `looked-at-nothing`, followed the route to `--commit`, applied the
+    PR-vs-commit discriminator, called the zero genuine) and closed with "the
+    work happened in the production database, which no path window can see."
+    Nothing was offered, and the escape hatch (`--template <slug>`, which needs
+    no paths at all) already existed.
+    """
+
+    def test_it_offers_the_template_when_nothing_was_nominated(self) -> None:
+        body = "\n".join(st.render_no_path_footprint("homelab-talos"))
+        assert "--template <slug>" in body
+        assert "--scope homelab-talos" in body, (
+            "the command must carry THIS report's scope or it is not pasteable"
+        )
+
+    def test_the_NOMINATION_branch_also_offers_it(self, store: Path) -> None:
+        """🔴 THE CASE THE FIRST DRAFT LOST, and it is the common one.
+
+        That draft suppressed this block whenever a nomination printed, reasoning
+        that NO ENTRY already asked. Two things were wrong. The suppression was
+        DEAD CODE — never taken through either call site (measured: 0 trips
+        across 600 tests) — and the reasoning was backwards: a nomination is
+        derived from PATHS, so it names the directory the session happened to
+        touch, never the database it actually worked on. Measured over 287 real
+        commits, ~65% of dead ends nominate something — a PROXY, from per-commit
+        file lists rather than the real windows — so this branch is where
+        the no-footprint case usually hides. The two blocks are mutually
+        exclusive by construction (the sibling sits under
+        `if not writes_proposed`), so NO ENTRY has to carry its own line.
+        """
+        rep = _report(["src/newthing/a.py", "src/newthing/b.py"], store)
+        assert rep.nominations, "fixture must nominate, or this proves nothing"
+        text = st.render_text(rep)
+        assert "NO ENTRY" in text
+        assert "NO file footprint" in text, (
+            "the nomination branch offers only path-derived slugs"
+        )
+        assert f"--template <slug> --scope {SCOPE}" in text
+        assert f"python3 {st.SELF_PATH} --template" in text, (
+            "the NO ENTRY variant must carry the absolute path too"
+        )
+
+    def test_the_nomination_offer_prints_EXACTLY_ONCE(self, store: Path) -> None:
+        """🔴 It belongs after the loop, not inside it. This round put it inside
+        by accident once (caught only because the indentation happened to be
+        invalid); moved one line further down it would have been VALID, printed
+        once per nomination, and passed 602/602 — measured, four copies for a
+        four-nomination report."""
+        rep = _report(
+            ["src/alpha/a.py", "src/alpha/b.py", "src/beta/c.py", "src/beta/d.py"],
+            store,
+        )
+        assert len(rep.nominations) >= 2, rep.nominations
+        assert st.render_text(rep).count("NO file footprint") == 1
+
+    def test_the_printed_command_names_a_file_that_EXISTS(self) -> None:
+        """🔴 A pasteable command is worth printing only if it runs. Replacing
+        `SELF_PATH` with a bare relative string survived every other test — the
+        block would look right and the command would fail from any other cwd.
+        """
+        assert Path(st.SELF_PATH).is_file(), st.SELF_PATH
+        assert Path(st.SELF_PATH).is_absolute()
+        assert Path(st.SELF_PATH).name == "subsystem_touch.py"
+
+    def test_it_renders_AFTER_the_other_two_routes(self, store: Path) -> None:
+        """Ordering is load-bearing: this block offers a competing explanation
+        for an empty window, so it must not appear before ROUTE OUT (which names
+        the window that was not read) or SKILL HOMES. Moving it earlier survived
+        every other test."""
+        text = st.render_text(_report([], store))
+        assert text.index("ROUTE OUT") < text.index("NO PATH FOOTPRINT?")
+        assert text.index("SKILL HOMES") < text.index("NO PATH FOOTPRINT?")
+
+    def test_it_states_the_limit_it_buys(self) -> None:
+        """🔴 An entry with no paths IS resolvable — verified, twice.
+
+        Write one via `--template` with zero paths, then let two paths carry the
+        slug: `status=resolved`, matched on the filename tier. Resolution is a
+        property of the PATHS, not of the entry.
+
+        This docstring used to assert the opposite, and survived the commit that
+        corrected the same claim in the module, the skill and the pin — the
+        fourth copy, inside the corrective test, contradicting its own body two
+        lines down. The practical cost of the false version was not confusion but
+        bad advice: it discouraged choosing a slug a future path would carry,
+        which is the one choice that makes the entry findable later.
+        """
+        body = "\n".join(st.render_no_path_footprint("s"))
+        assert "automatically TODAY" in body
+        assert "PREFER a slug a future path would carry" in body, (
+            "the actionable half: a matching slug is strictly better"
+        )
+        assert "--search" in body, "the way it IS findable must be named too"
+        assert "never be RESOLVED" not in body, (
+            "VERIFIED FALSE: an entry written with no paths resolved normally as "
+            "soon as a path named its slug (status=resolved, matched via "
+            "filename). The absolute claim was pinned in FOUR places, the last of\n            them this test's own docstring."
+        )
+
+    def test_it_reaches_render_text_on_BOTH_dead_ends(self, store: Path) -> None:
+        """🔴 STRUCTURAL, not spelled — asserts the SCOPE reaches the command, so
+        a call site passing a constant or the wrong field is visible. A previous
+        block in this file was pinned by a header string and stayed green while
+        both its call sites were corrupted.
+        """
+        for paths, why in (([], "looked-at-nothing"),
+                           (["docs/a.md", "notes/b.md"], "no-match")):
+            text = st.render_text(_report(paths, store))
+            assert "NO PATH FOOTPRINT?" in text, why
+            assert f"--scope {SCOPE}" in text, (
+                f"{why}: the call site did not pass the report's scope"
+            )
+            # 🔴 The RENDERED line, not just the constant. Substituting a bare
+            # relative path at either call site individually left all 602 tests
+            # green: the command would read correctly and fail from any other
+            # cwd. `Path(SELF_PATH).is_file()` cannot see a per-site swap.
+            assert f"python3 {st.SELF_PATH} --template" in text, (
+                f"{why}: the rendered command does not carry the absolute path"
+            )
+
+    def test_a_RESOLVED_run_stays_silent_about_the_STANDALONE_block(
+        self, store: Path
+    ) -> None:
+        """Narrowly named on purpose: a `resolved` report that ALSO nominates does
+        print the one-line offer from the NO ENTRY branch. Only the standalone
+        block is silent here."""
+        rep = _report(["src/collector/a.py", "src/collector/b.py"], store)
+        assert rep.status == "resolved", rep.status
+        assert "NO PATH FOOTPRINT?" not in st.render_text(rep)
+
+    def test_the_template_it_points_at_actually_works_with_no_paths(
+        self, tmp_path: Path
+    ) -> None:
+        """🔴 The pointer is only worth printing if the destination exists. Pins
+        that `--template <slug>` really does emit a complete entry for an
+        arbitrary slug — the whole premise of this block.
+        """
+        out = st.new_entry_template("prod-postgres", "devrc", today=TODAY)
+        assert "service: prod-postgres" in out
+        assert "scope: devrc" in out
+        assert "created_by: handoff" in out
+
+
 class TestSkillHomes:
     def _root(self, tmp_path: Path) -> Path:
         """A fixture catalogue with PAIRWISE-DISTINCT domains, so a hit cannot be
@@ -8214,3 +8948,2666 @@ class TestSkillHomes:
                                                skills_root=self._root(tmp_path)))
         assert "claude/skills/" in body
         assert "git add" in body
+
+
+# =============================================================================
+# Open actions — the `OPEN:` / `RESOLVED <sha>:` marker.
+#
+# WHY THIS EXISTS, measured rather than imagined. `datapacket-talos/forgejo` was
+# written at 15:00:18 on 2026-07-24 carrying a bullet that proposed a
+# one-line remedy as future work. That remedy landed at 15:02:21 — 2m03s later — and the entry served the remedy as
+# outstanding for the next 22 days. The store had no way to say "still open", so
+# nothing could notice it had stopped being true.
+#
+# The marker is a PREFIX the writer types, not a phrase the tool greps for,
+# because `claude/RULES.md` names the alternative: "a guard on WORDS is walkable
+# by REWORDING". `unmarked_action` is a deliberately narrow net under the entries
+# written before the marker existed, and every test below that touches it pins
+# the FLOOR language, not a completeness claim.
+# =============================================================================
+
+
+class TestOpennessMarkerParsing:
+    def test_the_four_marker_shapes_parse_to_their_declared_values(self):
+        body = "\n".join([
+            "- 2026-08-15: OPEN: dated and open.",
+            "- OPEN: undated and open.",
+            "- 2026-08-15: RESOLVED b83bfb584: dated, closed, with a sha.",
+            "- 2026-08-15: RESOLVED: closed but naming no sha.",
+        ])
+        got = [(b.openness, b.resolved_by) for b in sr.parse_journal_bullets(body)]
+        assert got == [
+            (sr.OPENNESS_OPEN, None),
+            (sr.OPENNESS_OPEN, None),
+            (sr.OPENNESS_RESOLVED, "b83bfb584"),
+            (sr.OPENNESS_RESOLVED, None),
+        ]
+
+    def test_an_unmarked_bullet_declares_nothing_rather_than_defaulting_to_open(self):
+        """195 of the 196 live bullets carry no marker. If the absent marker read
+        as OPEN, every one of them would light up red on its next read and the
+        signal would be worthless on the day it shipped.
+
+        (The 196th was already written `- OPEN: …` by hand, by a session with no
+        tooling asking for it — the shape here formalises what the corpus had
+        already invented.)"""
+        (b,) = sr.parse_journal_bullets("- 2026-08-15: an ordinary durable lesson.")
+        assert b.openness is None
+        assert b.is_open is False
+
+    def test_the_sha_is_lowercased_so_one_claim_is_not_two(self):
+        (b,) = sr.parse_journal_bullets("- RESOLVED B83BFB584: shouty.")
+        assert b.resolved_by == "b83bfb584"
+
+    def test_a_lowercase_marker_is_NOT_a_marker(self):
+        """Uppercase is the whole point: it is a token a writer types on purpose,
+        so it cannot be produced by prose that happens to use the word 'open'."""
+        (b,) = sr.parse_journal_bullets("- 2026-08-15: open: the port is open: 8080.")
+        assert b.openness is None
+
+    def test_the_marker_is_read_from_the_FIRST_line_only(self):
+        """A marker matched anywhere in wrapped prose would INVENT openness — the
+        mirror of the rewording failure, and the worse direction of the two."""
+        body = "- 2026-08-15: a durable lesson.\n  Later prose mentioning OPEN: nothing.\n"
+        (b,) = sr.parse_journal_bullets(body)
+        assert b.openness is None
+
+    def test_a_marker_inside_a_fenced_block_is_not_a_bullet_at_all(self):
+        body = "\n".join([
+            "- 2026-08-15: a lesson with a sample.",
+            "  ```",
+            "  - OPEN: this is sample text, not history",
+            "  ```",
+        ])
+        bullets = sr.parse_journal_bullets(body)
+        assert len(bullets) == 1
+        assert bullets[0].openness is None
+
+
+class TestUnmarkedActionIsAFloor:
+    """The narrow net.
+
+    🔴 THE FIXTURES BELOW ARE INVENTED, AND THAT IS A REQUIREMENT, NOT A STYLE
+    CHOICE. They started out as the real corpus bullets — which made them
+    load-bearing evidence and also copied client-confidential prose into a PUBLIC
+    repo, where a push is irreversible. An audit caught it; the docstring that
+    used to sit here said "Both positives below are REAL bullets from the live
+    corpus", which documented the leak while asserting its own correctness.
+
+    What the fixtures must preserve is the SHAPE the detector keys on — a `FIX (`
+    prefix, an `addressed` suffix — never the content. A delta re-audit found one
+    fixture still sharing a SEVEN-token run with a real entry, one word under the
+    guard's threshold, while this docstring already claimed everything here was
+    invented. Zero margin is not a margin.
+
+    ⚠ The `b83bfb584` in these fixtures is a FICTIONAL sha and must stay
+    fictional — it is deliberately not the real commit (verified: it resolves to
+    no object). A single token is structurally below an n-gram check, so nothing
+    would catch it if a real one were pasted here. If you ever need to
+    check a phrasing against the corpus, do it in a scratch probe and land the
+    COUNT, not the line. `scripts/tests/test_store_content_not_copied.py` fails if
+    a corpus phrase reappears here.
+    """
+
+    def test_it_catches_the_forgejo_shape_that_motivated_the_work(self):
+        (b,) = sr.parse_journal_bullets(
+            "- 2026-07-24: FIX (1 line): widen the widget timeout."
+        )
+        assert b.unmarked_action is True
+
+    def test_it_catches_the_other_live_shape_an_unpinned_image(self):
+        (b,) = sr.parse_journal_bullets(
+            "- the sidecar chart is tracking a floating tag (not addressed)."
+        )
+        assert b.unmarked_action is True
+
+    def test_an_ordinary_durable_lesson_is_not_flagged(self):
+        """Precision matters more than recall here: a noisy advisory is one nobody
+        reads, and the corpus measurement that chose these two phrasings rejected
+        `TODO` and bare `not yet` for exactly this — both scored false positives."""
+        (b,) = sr.parse_journal_bullets(
+            "- 2026-01-05: a dedicated worker pool for this = DO NOT re-attempt — "
+            "tried twice, reverted twice."
+        )
+        assert b.unmarked_action is False
+
+    def test_the_rejected_TODO_phrasing_stays_rejected(self):
+        """Measured FALSE on the corpus: an entry describing an UPSTREAM project's
+        TODO as a fact about that project, not a remedy this operator owes."""
+        (b,) = sr.parse_journal_bullets(
+            "- the signed-link lifetime defaults to a year, with an upstream TODO to "
+            "shorten it."
+        )
+        assert b.unmarked_action is False
+
+    def test_a_declared_bullet_is_never_ALSO_reported_as_unmarked(self):
+        """Double-reporting one bullet in two populations would make the advisory's
+        own count wrong, and train the reader to discount it."""
+        for line in (
+            "- OPEN: FIX (1 line): widen the widget timeout.",
+            "- RESOLVED b83bfb584: FIX (1 line): widened the widget timeout.",
+        ):
+            (b,) = sr.parse_journal_bullets(line)
+            assert b.unmarked_action is False, line
+
+
+def _journal(*bullets: str) -> st.EntryJournal:
+    body = "\n".join(bullets)
+    return st.EntryJournal(
+        ref="r", filename="r.md", state="journalled",
+        bullets=sr.parse_journal_bullets(body),
+    )
+
+
+class TestEntryJournalOpenAccessors:
+    def test_open_bullets_counts_only_the_declared_ones(self):
+        j = _journal(
+            "- 2026-08-01: OPEN: one.",
+            "- 2026-08-02: RESOLVED abc1234: two.",
+            "- 2026-08-03: FIX (1 line): three.",
+            "- 2026-08-04: an ordinary lesson.",
+        )
+        assert len(j.open_bullets) == 1
+        assert len(j.unmarked_action_bullets) == 1
+
+    def test_oldest_open_days_takes_the_OLDEST_not_the_newest(self):
+        """The question is 'how long has something here been unverified', and the
+        newest open action structurally cannot answer it. A `min()` here would
+        report the forgejo case as 0 days old on the day a second one was added."""
+        j = _journal(
+            "- 2026-08-09: OPEN: recent.",
+            "- 2026-07-24: OPEN: the old one — this is the answer.",
+        )
+        assert j.oldest_open_days("2026-08-15") == 22
+
+    def test_an_undated_open_bullet_is_skipped_not_guessed_at(self):
+        """It must still COUNT as open — the age is unknown, the openness is not."""
+        j = _journal("- OPEN: no date on this one.")
+        assert len(j.open_bullets) == 1
+        assert j.oldest_open_days("2026-08-15") is None
+
+    def test_a_garbage_today_returns_None_rather_than_a_wrong_number(self):
+        j = _journal("- 2026-07-24: OPEN: something.")
+        assert j.oldest_open_days("not-a-date") is None
+
+    def test_no_open_bullets_gives_None_and_an_empty_tuple(self):
+        j = _journal("- 2026-08-15: an ordinary lesson.")
+        assert j.open_bullets == ()
+        assert j.oldest_open_days("2026-08-15") is None
+
+
+class TestRenderOpenActionsAddressesTheWriter:
+    def test_it_names_the_age_and_demands_a_verdict_before_appending(self):
+        j = _journal("- 2026-07-24: OPEN: widen the widget timeout.")
+        body = "\n".join(st._render_open_actions(j, "2026-08-15", ""))
+        assert "22 days" in body
+        assert "RE-CHECK" in body
+        assert "RESOLVED <sha>:" in body
+
+    def test_the_unmarked_block_says_AT_LEAST_and_never_states_a_total(self):
+        """The floor language is the load-bearing part. Without it the advisory
+        reads as a complete count of the entry's open work, which it is not and
+        cannot be — the detector knows two phrasings and recall is unmeasured.
+
+        🔴 PINS THE WHOLE NORMALISED CLAIM, not two keywords. The keyword version
+        of this test was WALKED by a mutation that deleted "so this is a floor and
+        never a count of what exists" while leaving `AT LEAST` standing in an
+        adjacent fragment — `claude/RULES.md`: when the artifact under test is
+        prose, a guard on words is walkable by rewording, so pin the string. A
+        cosmetic reword now fails this test; that is the price of the claim being
+        machine-readable, and it is worth paying here because this exact sentence
+        is what stops a floor being read as a total."""
+        j = _journal("- 2026-07-24: FIX (1 line): widen the widget timeout.")
+        body = " ".join("\n".join(st._render_open_actions(j, "2026-08-15", "")).split())
+        assert (
+            "AT LEAST this many — the detector matches two phrasings measured over "
+            "the live corpus and has UNKNOWN recall, so this is a floor and never a "
+            "count of what exists."
+        ) in body
+
+    def test_it_renders_NOTHING_when_the_entry_has_no_unfinished_business(self):
+        """The common case by far. A block that printed 'no open actions' on every
+        entry would push the `already there` bullets — the thing step 4 must
+        actually read — down the screen for no information."""
+        j = _journal("- 2026-08-15: an ordinary durable lesson.")
+        assert st._render_open_actions(j, "2026-08-15", "") == []
+
+    def test_an_undated_open_bullet_says_its_age_is_unknown_not_zero(self):
+        j = _journal("- OPEN: something.")
+        body = "\n".join(st._render_open_actions(j, "2026-08-15", ""))
+        assert "age is unknown" in body
+        assert "0 day" not in body
+
+
+def _entry_with(nuance: list[str], service: str = "svc", scope: str = SCOPE) -> str:
+    return "\n".join(
+        ["---", f"service: {service}", f"scope: {scope}", "---", "",
+         "## Pointers", "- somewhere", "", "## Nuance / work-history", *nuance, ""]
+    )
+
+
+class TestValidateReportsOpenActionsWithoutChangingTheVerdict:
+    def _store(self, tmp_path: Path, nuance: list[str]) -> Path:
+        store = tmp_path / "s"
+        (store / SCOPE).mkdir(parents=True)
+        (store / SCOPE / "svc.md").write_text(_entry_with(nuance), encoding="utf-8")
+        return store
+
+    def test_an_entry_with_open_actions_still_validates_CLEAN_and_exits_0(self, tmp_path, capsys):
+        """🔴 THE INVARIANT. `--validate` answers 'would the loader accept this
+        file'. An entry with unfinished business is well-formed, and failing it
+        would be a gate nobody can turn green by fixing the file — the
+        permanently-red gate `claude/RULES.md` forbids, which trains everyone to
+        click through the malformed findings sitting beside it."""
+        store = self._store(tmp_path, [
+            "- 2026-08-01: OPEN: still outstanding.",
+            "- 2026-07-24: FIX (1 line): widen the widget timeout.",
+        ])
+        rc = st.main(["--store", str(store), "--scope", SCOPE, "--validate"])
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "OK — 1 of 1 entry file(s) parse, 0 malformed" in out
+        assert "1 declared `OPEN:`" in out
+        assert "1 unmarked bullet(s)" in out
+
+    def test_a_zero_prints_its_DENOMINATOR_and_refuses_to_be_a_clean_bill(self, tmp_path, capsys):
+        """A reassuring zero has to carry the size of what it is a zero over, and
+        this one has to disclaim its own recall as well."""
+        store = self._store(tmp_path, ["- 2026-08-15: an ordinary durable lesson."])
+        st.main(["--store", str(store), "--scope", SCOPE, "--validate"])
+        out = capsys.readouterr().out
+        assert "0 declared across 1 entry file(s)" in out
+        assert "FLOOR" in out
+        assert "not a clean bill of health" in out
+
+    def test_a_MALFORMED_entry_still_reports_malformed_first_and_exits_3(self, tmp_path, capsys):
+        """The advisory must never displace the finding that actually blocks a read."""
+        store = tmp_path / "s"
+        (store / SCOPE).mkdir(parents=True)
+        (store / SCOPE / "bad.md").write_text(
+            "---\nservice: bad\nscope: " + SCOPE + "\naliases: [a,\n  b]\n---\n\n"
+            "## Nuance / work-history\n- 2026-08-01: OPEN: outstanding.\n",
+            encoding="utf-8",
+        )
+        rc = st.main(["--store", str(store), "--scope", SCOPE, "--validate"])
+        out = capsys.readouterr().out
+        assert rc == 3
+        assert "🔴 MALFORMED" in out
+        assert out.index("MALFORMED") < out.index("open actions")
+
+    def test_json_keeps_the_two_populations_separate(self, tmp_path, capsys):
+        """Merged into one number, a floor masquerades as a count."""
+        store = self._store(tmp_path, [
+            "- 2026-08-01: OPEN: declared.",
+            "- 2026-07-24: FIX (1 line): guessed.",
+        ])
+        st.main(["--store", str(store), "--scope", SCOPE, "--validate", "--json"])
+        payload = json.loads(capsys.readouterr().out)
+        # 🔴 NO SUMMED TOTAL. An audit found this test asserting a single
+        # `open_action_count == 2` — which PINNED the very merge the
+        # `OpenAction` docstring forbids, so the guard was certifying the bug.
+        # JSON cannot carry the floor caveat the text renderer states in words,
+        # so a merged number is all a machine consumer would ever see.
+        assert "open_action_count" not in payload, (
+            "a summed count is back: it lets a two-phrasing floor with unmeasured "
+            "recall masquerade as a count of what exists"
+        )
+        assert payload["declared_open_count"] == 1
+        assert payload["unmarked_action_count"] == 1
+        assert payload["unmarked_is_a_floor"] is True
+        assert sum(a["declared"] for a in payload["open_actions"]) == 1
+
+
+class TestScanOpenActions:
+    def test_a_file_with_no_nuance_section_contributes_nothing_and_does_not_raise(self, tmp_path):
+        p = tmp_path / "x.md"
+        p.write_text("---\nservice: x\n---\n\n## Pointers\n- a\n", encoding="utf-8")
+        assert st.scan_open_actions([p]) == ()
+
+    def test_an_unreadable_path_is_skipped_rather_than_raising(self, tmp_path):
+        """The advisory runs beside the parse check; it must never be the thing
+        that turns a validation run into a crash."""
+        assert st.scan_open_actions([tmp_path / "does-not-exist.md"]) == ()
+
+
+class TestTheOpenBlockActuallyREACHESStep4Output:
+    """🔴 THE SEAM, which nothing tested until an audit mutated it.
+
+    `_render_open_actions` was exercised only in isolation. Replacing its CALL
+    SITE in `_render_journal` with `pass` left the ENTIRE suite green — the
+    feature was one refactor from being completely inert behind a green gate,
+    which is `claude/RULES.md` → "verified in isolation is the new vacuous green:
+    the defect lives in the SEAM nobody owns".
+
+    So this asserts the RELATIONSHIP — that the writer-facing block a `/handoff`
+    step 4 actually prints contains the re-check text — rather than that the
+    renderer works when called directly.
+    """
+
+    def test_render_journal_carries_the_open_block(self):
+        j = _journal(
+            "- 2026-07-24: OPEN: widen the widget timeout.",
+            "- 2026-08-01: an ordinary durable lesson.",
+        )
+        body = "\n".join(st._render_journal(j, "2026-08-15", ""))
+        assert "RE-CHECK" in body
+        assert "22 day" in body
+        # and the pre-existing content is still there beside it, not displaced
+        assert "already there — READ THESE BEFORE PROPOSING" in body
+
+    def test_render_journal_carries_the_unmarked_floor_too(self):
+        j = _journal("- 2026-07-24: FIX (1 line): widen the widget timeout.")
+        body = "\n".join(st._render_journal(j, "2026-08-15", ""))
+        assert "AT LEAST" in body
+
+    def test_a_journal_with_nothing_open_is_unchanged_by_the_block(self):
+        """The seam must be invisible in the common case, or every step 4 pays."""
+        j = _journal("- 2026-08-15: an ordinary durable lesson.")
+        body = "\n".join(st._render_journal(j, "2026-08-15", ""))
+        assert "RE-CHECK" not in body and "AT LEAST" not in body
+
+
+class TestNearMissMarkersFailLOUDLY:
+    """🔴 An audit found that a marker which misses the grammar declares NOTHING
+    and says nothing about it — the badge simply does not appear, which reads as
+    success. That is the same SILENT class as the 22-day bug the marker exists to
+    prevent, reachable by a typo.
+
+    The measured shapes below all parse as no-marker. The first is the common
+    one: `_JOURNAL_DATE` accepts a date followed by any of `[:,)\\]\\s]` while the
+    openness grammar requires `date:` + whitespace, and 7 of 147 dated bullets in
+    the live corpus (4.8%) already use a date form the openness regex cannot
+    parse.
+    """
+
+    SHAPES = [
+        "- 2026-08-15 OPEN: rotate the key.",
+        "- 2026-08-15: RESOLVED abc1234 (some-repo): closed.",
+        "- 2026-08-15: **OPEN:** rotate the key.",
+        "- 2026-08-15: OPEN : rotate the key.",
+        "- 2026-08-15: RESOLVED PR#505: closed.",
+    ]
+
+    @pytest.mark.parametrize("line", SHAPES)
+    def test_each_measured_near_miss_is_detected(self, line):
+        (b,) = sr.parse_journal_bullets(line)
+        assert b.openness is None, "precondition: this shape must NOT parse as a marker"
+        assert b.near_miss_marker is True
+
+    def test_a_REAL_marker_is_never_a_near_miss(self):
+        """Otherwise every correct marker also raises an alarm, and the alarm dies."""
+        for line in ("- 2026-08-15: OPEN: fine.",
+                     "- 2026-08-15: RESOLVED b83bfb584: fine."):
+            (b,) = sr.parse_journal_bullets(line)
+            assert b.near_miss_marker is False, line
+
+    def test_ordinary_prose_using_the_word_open_is_not_a_near_miss(self):
+        """The detector anchors at the start of the bullet for this reason: the
+        word `open` is ordinary English and matching it anywhere would make the
+        loud path fire constantly, which is how a loud path gets ignored."""
+        for line in ("- 2026-08-15: the port is open for business.",
+                     "- 2026-08-15: we resolved the ticket last week."):
+            (b,) = sr.parse_journal_bullets(line)
+            assert b.near_miss_marker is False, line
+
+    def test_the_writer_block_names_it_and_says_the_marker_declared_nothing(self):
+        j = _journal("- 2026-08-15 OPEN: rotate the key.")
+        body = " ".join("\n".join(st._render_open_actions(j, "2026-08-15", "")).split())
+        assert "DID NOT PARSE" in body
+        assert "declares nothing" in body
+
+    def test_validate_reports_it_as_its_own_population(self, tmp_path, capsys):
+        store = tmp_path / "s"
+        (store / SCOPE).mkdir(parents=True)
+        (store / SCOPE / "svc.md").write_text(
+            _entry_with([
+                "- 2026-08-01: OPEN: a real one.",
+                "- 2026-08-15 OPEN: an attempted one.",
+                "- 2026-07-24: FIX (1 line): an unmarked one.",
+            ]),
+            encoding="utf-8",
+        )
+        st.main(["--store", str(store), "--scope", SCOPE, "--validate", "--json"])
+        p = json.loads(capsys.readouterr().out)
+        # 🔴 THREE populations, none of them summed into the others.
+        assert p["declared_open_count"] == 1
+        assert p["near_miss_marker_count"] == 1
+        assert p["unmarked_action_count"] == 1
+
+
+class TestOpenBulletQuotesAreBounded:
+    def test_a_long_open_list_is_capped_and_says_how_many_it_dropped(self):
+        """An audit found these lists uncapped while the sibling `already there`
+        list caps at 3 — on the highest-traffic writer surface in the tool."""
+        j = _journal(*[f"- 2026-08-0{i}: OPEN: item {i}." for i in range(1, 8)])
+        body = "\n".join(st._render_open_actions(j, "2026-08-15", ""))
+        assert body.count("  ? ") == st.JOURNAL_BULLETS_SHOWN
+        assert "4 more not quoted" in body
+        # the COUNT in the sentence is never truncated
+        assert "7 bullets here" in body
+
+
+class TestNegativeAgeIsNotStatedAsFact:
+    def test_a_future_dated_open_bullet_does_not_render_a_negative_age(self):
+        j = _journal("- 2026-09-01: OPEN: dated in the future.")
+        body = "\n".join(st._render_open_actions(j, "2026-08-15", ""))
+        assert "-17" not in body
+        assert "FUTURE" in body and "one of those dates is wrong" in body
+
+
+class TestResolvedByIsBranchedOnNotJustStored:
+    """🔴 An audit found `resolved_by` read by nothing outside the tests, while
+    its docstring claimed a renderer displayed it. `claude/RULES.md`: a field
+    that exists in a DTO is not a guard — only a BRANCH on it is. The design's
+    headline rationale ("the sha makes the closure checkable") was unimplemented,
+    so `RESOLVED:` and `RESOLVED <sha>:` were indistinguishable downstream.
+    """
+
+    def _validate(self, tmp_path, capsys, nuance, json_mode=False):
+        store = tmp_path / "s"
+        (store / SCOPE).mkdir(parents=True)
+        (store / SCOPE / "svc.md").write_text(_entry_with(nuance), encoding="utf-8")
+        argv = ["--store", str(store), "--scope", SCOPE, "--validate"]
+        st.main(argv + (["--json"] if json_mode else []))
+        return capsys.readouterr().out
+
+    def test_a_shaless_RESOLVED_is_reported_as_unverifiable(self, tmp_path, capsys):
+        out = self._validate(tmp_path, capsys, ["- 2026-08-02: RESOLVED: closed."])
+        assert "name no sha" in out
+        assert "cannot be checked" in out
+
+    def test_a_RESOLVED_WITH_a_sha_is_not_reported(self, tmp_path, capsys):
+        """The branch must DISCRIMINATE. If both shapes reported, the field is
+        still doing nothing and the test would pass anyway."""
+        out = self._validate(
+            tmp_path, capsys, ["- 2026-08-02: RESOLVED b83bfb584: closed."]
+        )
+        assert "name no sha" not in out
+        assert "0 declared" in out
+
+    def test_it_is_its_own_population_in_json(self, tmp_path, capsys):
+        payload = json.loads(self._validate(
+            tmp_path, capsys,
+            ["- 2026-08-01: OPEN: one.", "- 2026-08-02: RESOLVED: no sha."],
+            json_mode=True,
+        ))
+        assert payload["declared_open_count"] == 1
+        assert payload["unverifiable_closure_count"] == 1
+        assert payload["unmarked_action_count"] == 0
+
+
+class TestPopulationsAreMutuallyExclusive:
+    """🔴 A delta re-audit found ONE bullet counted twice on the writer surface
+    while `--validate` counted it once — the two disagreed about the same input,
+    because each site re-derived membership from the individual predicates.
+    `openness_population` is now the single source; these pin it.
+    """
+
+    def test_the_bullet_that_was_double_counted_lands_in_exactly_one(self):
+        """`- Open items: … not yet addressed.` is BOTH a near-miss shape and an
+        unmarked-action shape. Before the precedence rule it rendered under both
+        headings, quoted twice."""
+        (b,) = sr.parse_journal_bullets(
+            "- Open items: the retry budget is not yet addressed."
+        )
+        assert b.openness_population == "unmarked"
+
+    def test_a_bullet_that_is_genuinely_BOTH_resolves_to_near_miss(self):
+        """🔴 THE ARM THE FIRST TEST COULD NOT SEE. Once `re.I` was dropped from
+        the near-miss detector, `- Open items: … not yet addressed.` stopped being
+        both — so the precedence BETWEEN near-miss and unmarked became
+        unobservable and swapping the two arms survived the suite. These lines are
+        genuinely both, so the order is pinned by behaviour rather than by reading.
+
+        near-miss wins because "your write did not land" is actionable and
+        specific; "this reads like an open action" is a guess about the same line.
+        """
+        for line in ("- 2026-08-15 OPEN: the retry budget is not yet addressed.",
+                     "- Open: the retry budget is not yet addressed."):
+            (b,) = sr.parse_journal_bullets(line)
+            assert b.near_miss_marker and b.unmarked_action, (
+                f"precondition: {line!r} must match BOTH detectors, or this test "
+                f"cannot observe the precedence it exists to pin"
+            )
+            assert b.openness_population == "near-miss", line
+
+    @pytest.mark.parametrize("line,expected", [
+        ("- 2026-08-15: OPEN: still open.", "open"),
+        ("- 2026-08-15: RESOLVED b83bfb584: closed.", "resolved"),
+        ("- 2026-08-15: RESOLVED: closed, no sha.", "unverifiable"),
+        ("- 2026-08-15 OPEN: attempted marker.", "near-miss"),
+        ("- 2026-08-15: FIX (1 line): unmarked action.", "unmarked"),
+        ("- 2026-08-15: an ordinary durable lesson.", "none"),
+    ])
+    def test_every_population_is_reachable_and_distinct(self, line, expected):
+        """Reachability matters as much as exclusivity: a precedence order with an
+        unreachable arm is a branch that can never fire."""
+        (b,) = sr.parse_journal_bullets(line)
+        assert b.openness_population == expected
+
+    def test_the_writer_block_and_validate_agree_on_the_same_input(self):
+        """🔴 THE SEAM BETWEEN THE TWO SURFACES — the actual defect. Neither
+        renderer alone could reveal it; only comparing them can."""
+        line = "- Open items: the retry budget is not yet addressed."
+        j = _journal(line)
+        body = "\n".join(st._render_open_actions(j, "2026-08-15", ""))
+        # quoted exactly once, under exactly one heading
+        assert body.count("  ? ") == 1
+        assert ("DID NOT PARSE" in body) != ("AT LEAST" in body)
+
+    def test_the_writer_block_renders_a_genuinely_BOTH_bullet_exactly_once(self):
+        """🔴 THE GUARD THAT WAS MISSING, and its absence let the round-2 defect be
+        reintroduced against a green suite: reverting `unmarked_action_bullets` to
+        the raw `b.unmarked_action` predicate put a genuinely-both bullet in TWO
+        lists again, quoting it under both headings, with the suite green.
+
+        ⚠ NAMED PRECISELY, because an earlier version of this docstring blamed the
+        `near_miss_bullets` revert instead — which is an EQUIVALENT mutant and
+        survives, since `near_miss_marker` already self-suppresses on `openness`.
+        Two claims about the same mutant shipped in one commit, contradicting each
+        other; `subsystem_touch.py` had it right and this did not.
+
+        The earlier test asserted on the `openness_population` PROPERTY, which
+        neither revert touches. Nothing rendered a genuinely-both bullet through
+        `_render_open_actions`, so nothing could see it. This does.
+        """
+        line = "- 2026-08-15 OPEN: the retry budget is not yet addressed."
+        (b,) = sr.parse_journal_bullets(line)
+        assert b.near_miss_marker and b.unmarked_action, (
+            "precondition: this line must match BOTH raw detectors, or the test "
+            "cannot observe the consolidation it exists to pin"
+        )
+        body = "\n".join(st._render_open_actions(_journal(line), "2026-08-15", ""))
+        assert body.count("  ? ") == 1, "the bullet is quoted more than once"
+        assert ("DID NOT PARSE" in body) != ("AT LEAST" in body), (
+            "the bullet appears under two headings"
+        )
+
+    def test_the_writer_block_and_validate_classify_a_BOTH_bullet_the_SAME_way(
+        self, tmp_path
+    ):
+        """🔴 THE ACTUAL SEAM. The previous version of this test called
+        `scan_open_actions([])` and asserted it returned `()` — an empty-input
+        smoke test whose comment claimed "the validator's classification matches".
+        Nothing was compared, which is why the divergence survived.
+        """
+        line = "- 2026-08-15 OPEN: the retry budget is not yet addressed."
+        store = tmp_path / "s"
+        (store / SCOPE).mkdir(parents=True)
+        (store / SCOPE / "svc.md").write_text(_entry_with([line]), encoding="utf-8")
+
+        rows = st.scan_open_actions([store / SCOPE / "svc.md"])
+        assert len(rows) == 1, "the validator split one bullet across rows"
+        row = rows[0]
+        validator_says = (
+            "near-miss" if row.near_miss else "unmarked" if not row.declared else "open"
+        )
+
+        body = "\n".join(st._render_open_actions(_journal(line), "2026-08-15", ""))
+        writer_says = "near-miss" if "DID NOT PARSE" in body else "unmarked"
+
+        assert validator_says == writer_says == "near-miss", (
+            f"the two surfaces disagree about the same bullet: validator says "
+            f"{validator_says!r}, writer block says {writer_says!r}"
+        )
+
+    def test_scan_open_actions_emits_one_row_per_bullet(self, tmp_path):
+        store = tmp_path / "s"
+        (store / SCOPE).mkdir(parents=True)
+        (store / SCOPE / "svc.md").write_text(
+            _entry_with(["- Open items: the retry budget is not yet addressed."]),
+            encoding="utf-8",
+        )
+        rows = st.scan_open_actions([store / SCOPE / "svc.md"])
+        assert len(rows) == 1
+        r = rows[0]
+        assert sum([r.declared, r.near_miss, r.unverifiable_closure]) <= 1
+
+
+class TestNearMissDoesNotFireOnOrdinaryProse:
+    """🔴 The previous guard was VACUOUS. It probed `open` MID-sentence, where a
+    `^`-anchored pattern structurally cannot match — so `re.I` could be deleted
+    and the whole suite stayed green while the detector fired on correct English.
+    These probe sentence-INITIAL capitalised prose, which is where the false
+    positives actually were.
+    """
+
+    @pytest.mark.parametrize("line", [
+        "- Open questions remain about the retry budget.",
+        "- 2026-08-15: Resolved by pinning the image tag.",
+        "- resolved upstream in 1.2.3.",
+        "- **Open** by design.",
+        # ⚠ `Opening…` is a WEAK probe, kept and labelled — and an audit measured
+        # that the reason previously given here was WRONG. It is NOT guarded by
+        # the shouted branch's lookahead: it is rejected because branch (a) is
+        # case-SENSITIVE and `Opening` is not all-caps. The lookahead only bites
+        # on `OPENing`/`OPENED`, which the all-caps prose shapes now cover.
+        "- Opening the pool early caused the stall.",
+    ])
+    def test_capitalised_prose_is_not_an_attempted_marker(self, line):
+        (b,) = sr.parse_journal_bullets(line)
+        assert b.near_miss_marker is False, (
+            "a 🔴 'DID NOT PARSE, fix the LINE' advisory about a correct sentence "
+            "is how a loud path gets ignored"
+        )
+
+    def test_the_marker_is_still_case_SENSITIVE_in_the_real_grammar(self):
+        (b,) = sr.parse_journal_bullets("- 2026-08-15: open: not a marker.")
+        assert b.openness is None
+
+
+NEAR_MISS_MATRIX = json.loads(
+    (ROOT / "scripts" / "tests" / "fixtures" / "near_miss_shapes.json").read_text(
+        encoding="utf-8"
+    )
+)
+
+
+def matrix_problems(matrix: dict) -> list[str]:
+    """Everything wrong with a near-miss matrix, as a list. Empty means sound.
+
+    A FUNCTION rather than inline assertions, so the guard itself is testable:
+    on the real fixture it is always silent, which is exactly the shape that ships
+    broken. `test_the_degeneracy_guard_can_actually_FIRE` feeds it degenerate
+    matrices and watches it speak.
+
+    Counts DISTINCT shapes: duplicates inflate a length without covering anything,
+    and that is how the first version of this check was walked.
+    """
+    problems = []
+    for arm, floor in (("attempts", 12), ("prose", 10),
+                       ("accepted_false_positives", 2), ("real", 2)):
+        shapes = matrix.get(arm, [])
+        if len(set(shapes)) < floor:
+            problems.append(
+                f"{arm}: {len(set(shapes))} distinct shape(s) of {len(shapes)} "
+                f"entries — below the floor of {floor}"
+            )
+    overlap = set(matrix.get("attempts", [])) & set(matrix.get("prose", []))
+    if overlap:
+        problems.append(f"attempts and prose share {len(overlap)} shape(s)")
+    return problems
+
+
+class TestNearMissShapesAgainstTheCommittedMatrix:
+    """🔴 THE MATRIX IS A FIXTURE IN THE REPO, and that is the point.
+
+    This pattern changed in three consecutive review rounds. Each change was
+    justified by a matrix that existed only in the author's scratchpad, so the
+    next round could not re-run it — and round 4 built a different 20-shape
+    matrix and reached the OPPOSITE verdict from round 3's 8-shape one. A matrix
+    nobody can re-run is an opinion, not a measurement.
+
+    `fixtures/near_miss_shapes.json` is now the shared one. Changing the pattern
+    means changing numbers anyone can reproduce, and a shape that regresses names
+    itself.
+    """
+
+    @pytest.mark.parametrize("line", NEAR_MISS_MATRIX["attempts"])
+    def test_every_attempted_marker_shape_is_detected(self, line):
+        """A miss here is SILENT in production: the writer sees no badge and no
+        advisory, which reads as success. That is the 22-day failure by typo."""
+        (b,) = sr.parse_journal_bullets(line)
+        assert b.near_miss_marker is True
+
+    @pytest.mark.parametrize("line", NEAR_MISS_MATRIX["prose"])
+    def test_no_prose_shape_is_flagged(self, line):
+        """A 🔴 'DID NOT PARSE, fix the LINE' advisory about a correct sentence is
+        how a loud path gets ignored."""
+        (b,) = sr.parse_journal_bullets(line)
+        assert b.near_miss_marker is False
+
+    @pytest.mark.parametrize("line", NEAR_MISS_MATRIX["accepted_false_positives"])
+    def test_the_accepted_false_positives_stay_a_recorded_DECISION(self, line):
+        """These ARE flagged, deliberately. Pinned so the trade is a decision on
+        the record rather than an accident a later round "fixes" by narrowing the
+        pattern — a narrowing that was measured (9/16 found) and is worse. Each is
+        genuinely ambiguous, and the advisory is non-blocking."""
+        (b,) = sr.parse_journal_bullets(line)
+        assert b.near_miss_marker is True
+
+    @pytest.mark.parametrize("line", NEAR_MISS_MATRIX["real"])
+    def test_a_real_marker_never_reaches_the_near_miss_population(self, line):
+        (b,) = sr.parse_journal_bullets(line)
+        assert b.openness_population in ("open", "resolved")
+
+    def test_the_matrix_is_not_degenerate(self):
+        """A fixture that lost its arms would make every test above vacuous.
+
+        🔴 COUNTS DISTINCT SHAPES, AND FLOORS ALL FOUR ARMS. The first version
+        counted `len()` on two arms only, and an audit walked it: replacing
+        `attempts` with 12 copies of ONE line, or emptying
+        `accepted_false_positives` and `real` entirely, left the whole 700-test
+        file green — pytest silently skips an empty parametrize set, so three
+        tests vanished without a failure. A guard on a fixture has to be able to
+        see the fixture collapse.
+        """
+        assert matrix_problems(NEAR_MISS_MATRIX) == []
+
+    def test_the_degeneracy_guard_can_actually_FIRE(self):
+        """🔴 A GUARD NOBODY HAS WATCHED GO RED IS A CLAIM ABOUT NOTHING — and this
+        one guards a fixture, so on the real matrix it is always silent.
+
+        Its first version counted `len()` on two arms; an audit walked it by
+        replacing `attempts` with 12 copies of one line and by emptying two arms
+        entirely (pytest skips an empty parametrize set, so three tests vanished
+        with the suite green). These are those exact degeneracies.
+        """
+        good = NEAR_MISS_MATRIX
+        assert matrix_problems(good) == [], "precondition: the real matrix is sound"
+
+        one = good["attempts"][0]
+        cases = {
+            "duplicates": {**good, "attempts": [one] * 40},
+            "emptied arm": {**good, "accepted_false_positives": []},
+            "emptied real": {**good, "real": []},
+            "overlapping arms": {**good, "prose": list(good["prose"]) + [one]},
+        }
+        for label, bad in cases.items():
+            assert matrix_problems(bad), f"{label} was not detected"
+
+    def test_the_prose_arm_can_express_the_ALL_CAPS_failure_mode(self):
+        """🔴 THE BLIND SPOT THAT LET A WHOLE FP CLASS SHIP. The shouted branch was
+        introduced with a `prose` arm containing ZERO all-caps shapes, so the
+        matrix was structurally incapable of seeing that branch fire on
+        `OPENSSL_CONF`, `OPEN_MAX`, `RESOLVED_ADDR`. A fixture that cannot express
+        the failure mode is not covering it, however green it is."""
+        caps = [s for s in NEAR_MISS_MATRIX["prose"]
+                if any(w.isupper() and len(w) > 3 for w in s.split())]
+        assert len(caps) >= 4, (
+            f"only {len(caps)} all-caps prose shape(s) — the shouted branch's own "
+            f"false-positive class is not represented"
+        )
+
+    def test_the_attempts_arm_reaches_the_sentence_cased_ref_loop(self):
+        """The ref loop (`PR#n`, `#n`, `[...]`, the punctuation run) lives ONLY on
+        branch (b), which all-caps shapes short-circuit past. An audit measured
+        five mutants inside it surviving because every ref-shape in the fixture was
+        shouted. These reach it."""
+        lower_refs = [s for s in NEAR_MISS_MATRIX["attempts"]
+                      if ("#" in s or "[" in s or " : " in s)
+                      and "OPEN" not in s and "RESOLVED" not in s]
+        assert len(lower_refs) >= 3, (
+            f"only {len(lower_refs)} sentence-cased ref shape(s) — branch (b)'s "
+            f"loop is unreachable from this fixture"
+        )
+
+    def test_the_SHOUTED_branch_needs_no_terminator(self):
+        """Round 3 required `:` and so went silent on the likeliest omission of
+        all — the colon itself. This is the arm that fixes that."""
+        (b,) = sr.parse_journal_bullets("- OPEN the retry budget is not addressed.")
+        assert b.near_miss_marker is True
+
+    def test_the_sentence_cased_branch_DOES_need_a_terminator(self):
+        """And this is why the shouted arm cannot simply be case-insensitive:
+        `Open questions remain…` is ordinary English."""
+        (b,) = sr.parse_journal_bullets("- Open questions remain about the budget.")
+        assert b.near_miss_marker is False
+
+    def test_a_long_hex_run_without_a_terminator_returns_promptly(self):
+        """🔴 ReDoS REGRESSION GUARD. `{7,40}` inside a `*` loop is exponentially
+        ambiguous when the trailing `:` never arrives. Measured before the
+        `(?![0-9a-fA-F])` lookahead was added: 64 hex chars 0.07 s, 80 chars
+        2.9 s, three 40-char shas did not return in 30 s — hanging
+        `scan_open_actions`, and so `/handoff` and `--validate`, with no output.
+
+        The bound is deliberately loose (1 s against a ~0 s expectation): this
+        must fail on exponential blow-up, not on a slow machine.
+
+        🔴 THE MARKER IS SENTENCE-CASED ON PURPOSE, and an earlier version of this
+        test was all-caps and therefore VACUOUS: the shouted branch matches at
+        `OPEN` immediately and never enters the ref loop, so the pathological
+        input never reached the vulnerable code and deleting the lookahead
+        survived. Only the sentence-cased branch requires the terminator, so only
+        it backtracks looking for a `:` that never comes. Measured without the
+        lookahead: `Open` + 64 hex → 0.028 s, + 120 hex → no return in 30 s;
+        `OPEN` with the same payload → 0.000 s either way.
+        """
+        import time as _time
+
+        line = "- Open " + " ".join(["a1b2c3d4" * 5] * 3) + " still needs rebasing"
+        started = _time.perf_counter()
+        # 🔴 THE PROPERTY MUST BE READ, not just the bullet parsed. `near_miss_marker`
+        # is lazy — `parse_journal_bullets` alone never evaluates it, so an earlier
+        # version of this test timed a call that could not reach the regex at all
+        # and passed happily with the lookahead deleted. Its own mutation battery
+        # is what caught that, twice: first the all-caps payload, then this.
+        # `False` is the CORRECT verdict — sentence-cased with no terminator is
+        # prose. What matters is that the property is EVALUATED (which is what
+        # reaches the regex) and that it comes back at all.
+        assert [b.near_miss_marker for b in sr.parse_journal_bullets(line)] == [False]
+        assert _time.perf_counter() - started < 1.0
+
+
+# =============================================================================
+# 🔴 THE SHAPE POPULATION — `--validate` was a front-matter parser, not a shape
+# checker. Everything below is synthetic; nothing reads the real store.
+# =============================================================================
+#
+# MEASURED (proposal §2.1, 2026-08-19, eight synthetic fixtures through
+# `--validate`): a file with ALL THREE spine headings renamed, a file with NO
+# headings at all, and a file with a perfect spine and every section EMPTY were
+# each reported `OK — 1 of 1 parse` at exit 0 — byte-indistinguishable from the
+# conforming positive control. The 53/53 spine every consumer depends on was
+# enforced by nothing.
+#
+# 🔴 AND THE VERDICT MUST STAY EXACTLY WHERE IT IS. That is not a caveat, it is
+# the property most likely to regress: `handoff/SKILL.md` step 4 branches on the
+# exit code alone, and a non-zero there means "write NOTHING" — the wrong
+# response to a file already on disk whose heading needs one edit. So the tests
+# that pin `OK`/0 over a shape-broken entry come FIRST, and the mutation matrix
+# at the bottom breaks the invariant on purpose to prove they can see it.
+
+SHAPE_FM = (
+    "---\nservice: payments-unit\nscope: " + SCOPE + "\n"
+    "sensitivity: public\ncreated_by: a-synthetic-writer\n---\n"
+)
+SHAPE_SPINE = (
+    "\n## What it is\nA synthetic fixture.\n"
+    "\n## Pointers\n- `example/path` — synthetic.\n"
+    "\n## Nuance / work-history\n- 2026-08-01: OPEN: synthetic.\n"
+)
+
+
+def _shape_store(tmp_path: Path, body: str, name: str = "payments-unit.md") -> Path:
+    store = tmp_path / "s"
+    (store / SCOPE).mkdir(parents=True, exist_ok=True)
+    (store / SCOPE / name).write_text(body, encoding="utf-8")
+    return store
+
+
+def _shape_kinds(store: Path, name: str = "payments-unit.md") -> list[tuple[str, str]]:
+    rows = st.scan_entry_shape([store / SCOPE / name])
+    return sorted((s.heading, s.kind) for s in rows)
+
+
+# --- the §2.1 table, reproduced as the regression base -----------------------
+#
+# Each row: (label, body, expected exit, expected verdict fragment, expected
+# {(heading, kind)} set). The two controls are named as such and kept in the
+# table rather than beside it — a table whose negative control lives elsewhere
+# can go all-green while the instrument is wired to nothing.
+_S1_CONFORMING = SHAPE_FM + SHAPE_SPINE
+_S2_NO_FRONT_MATTER = "# payments-unit\n" + SHAPE_SPINE
+_S3_SPINE_RENAMED = SHAPE_FM + (
+    "\n## Overview\nA synthetic fixture.\n"
+    "\n## pointers\n- `example/path` — synthetic.\n"
+    "\n## Nuance / work history\n- 2026-08-01: OPEN: synthetic.\n"
+)
+_S4_NO_HEADINGS = SHAPE_FM + "\nJust prose, and not a heading anywhere in it.\n"
+_S5_LEGACY_REPO = (
+    "---\nservice: payments-unit\nrepo: " + SCOPE + "\n---\n" + SHAPE_SPINE
+)
+_S6_RESOLVED_NO_SHA = SHAPE_FM + (
+    "\n## What it is\nA synthetic fixture.\n"
+    "\n## Pointers\n- `example/path` — synthetic.\n"
+    "\n## Nuance / work-history\n- 2026-08-01: RESOLVED: no sha on this one.\n"
+)
+_S7_UNDATED_ONLY = SHAPE_FM + (
+    "\n## What it is\nA synthetic fixture.\n"
+    "\n## Pointers\n- `example/path` — synthetic.\n"
+    "\n## Nuance / work-history\n- an undated durable lesson.\n"
+)
+_S8_SECTIONS_EMPTY = SHAPE_FM + (
+    "\n## What it is\n\n## Pointers\n\n## Nuance / work-history\n"
+)
+
+SHAPE_TABLE = [
+    ("1 conforming (POSITIVE CONTROL)", _S1_CONFORMING, 0, "OK — 1 of 1", []),
+    ("2 no front matter (NEGATIVE CONTROL)", _S2_NO_FRONT_MATTER, 3, "🔴 MALFORMED", []),
+    ("3 spine headings renamed", _S3_SPINE_RENAMED, 0, "OK — 1 of 1", [
+        (sr.NUANCE_HEADING, st.SHAPE_ABSENT),
+        (sr.POINTERS_HEADING, st.SHAPE_RENAMED),
+    ]),
+    ("4 no headings at all", _S4_NO_HEADINGS, 0, "OK — 1 of 1", [
+        (sr.NUANCE_HEADING, st.SHAPE_ABSENT),
+        (sr.POINTERS_HEADING, st.SHAPE_ABSENT),
+    ]),
+    ("5 legacy repo:, no sensitivity", _S5_LEGACY_REPO, 0, "OK — 1 of 1", []),
+    ("6 RESOLVED: with no sha", _S6_RESOLVED_NO_SHA, 0, "OK — 1 of 1", []),
+    ("7 undated bullets only", _S7_UNDATED_ONLY, 0, "OK — 1 of 1", []),
+    ("8 perfect spine, sections empty", _S8_SECTIONS_EMPTY, 0, "OK — 1 of 1", [
+        (sr.NUANCE_HEADING, st.SHAPE_EMPTY),
+        (sr.POINTERS_HEADING, st.SHAPE_EMPTY),
+    ]),
+]
+
+
+class TestTheEightFixtureTableIsTheRegressionBASE:
+    """🔴 THE VERDICT AND THE EXIT CODE DID NOT MOVE — every row, both controls.
+
+    This is the table from proposal §2.1 that MEASURED the gap, re-run as a
+    guard. Rows 3, 4 and 8 are the finding: they returned `OK` at 0 before this
+    change and they must STILL return `OK` at 0 after it. The only thing that
+    may differ is the advisory.
+    """
+
+    @pytest.mark.parametrize(
+        "label,body,rc,verdict,_kinds",
+        SHAPE_TABLE,
+        ids=[r[0] for r in SHAPE_TABLE],
+    )
+    def test_the_verdict_and_exit_code_are_UNCHANGED(
+        self, label, body, rc, verdict, _kinds, tmp_path, capsys
+    ) -> None:
+        store = _shape_store(tmp_path, body)
+        got = st.main(["--store", str(store), "--scope", SCOPE, "--validate"])
+        out = capsys.readouterr().out
+        assert got == rc, label
+        assert verdict in out, label
+
+    @pytest.mark.parametrize(
+        "label,body,_rc,_verdict,kinds",
+        SHAPE_TABLE,
+        ids=[r[0] for r in SHAPE_TABLE],
+    )
+    def test_the_shape_population_reports_exactly_these_findings(
+        self, label, body, _rc, _verdict, kinds, tmp_path
+    ) -> None:
+        """The other half: an advisory that changes no verdict is only worth
+        having if it SAYS something, and the rows that say nothing are named
+        here too — five of the eight, which is what stops this from being a
+        detector that fires on everything."""
+        store = _shape_store(tmp_path, body)
+        assert _shape_kinds(store) == sorted(kinds), label
+
+
+class TestTheAdvisoryNeverTouchesTheVERDICT:
+    """🔴 The property the whole change is constrained by, pinned on its own.
+
+    Advisory only, exactly like the open-actions population. Failing a
+    shape-broken entry would be the permanently-red gate `claude/RULES.md`
+    forbids — and worse than useless, since `/handoff` step 4 reads a non-zero
+    exit as "write NOTHING".
+    """
+
+    def test_an_entry_broken_in_SHAPE_but_parsing_is_OK_at_exit_0(
+        self, tmp_path, capsys
+    ) -> None:
+        store = _shape_store(tmp_path, _S3_SPINE_RENAMED)
+        rc = st.main(["--store", str(store), "--scope", SCOPE, "--validate"])
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "OK — 1 of 1 entry file(s) parse, 0 malformed" in out
+        assert "🔴 MALFORMED" not in out
+        # and it is not silent about it either — the advisory is the ONLY
+        # difference from the conforming control
+        assert "RENAMED" in out
+
+    def test_the_report_property_that_drives_the_exit_code_ignores_shape(self) -> None:
+        """Structural half. `clean` answers ONE question — would the loader
+        accept this file — and the loader accepts a file whose sections it
+        cannot find. A `shape` term in this property is the regression."""
+        rep = st.ValidationReport(
+            store_root="/nowhere", target="`x/`", scope="x",
+            checked=("a.md",), malformed=(),
+            shape=(st.ShapeFinding(filename="a.md", heading=sr.POINTERS_HEADING,
+                                   kind=st.SHAPE_ABSENT),),
+        )
+        assert rep.clean is True
+
+    def _render(self, tmp_path, capsys, sub: str, body: str) -> list[str]:
+        store = _shape_store(tmp_path / sub, body)
+        st.main(["--store", str(store), "--scope", SCOPE, "--validate"])
+        # the store root differs between the two fixtures by construction
+        return [
+            l for l in capsys.readouterr().out.splitlines() if str(tmp_path) not in l
+        ]
+
+    def test_everything_up_to_and_INCLUDING_the_verdict_is_byte_identical(
+        self, tmp_path, capsys
+    ) -> None:
+        """🔴 The strongest form of "the verdict did not change": render a
+        conforming entry and a shape-broken one and compare the whole region
+        that ENDS at the verdict line, byte for byte.
+
+        A keyword check ("is `OK` still in the output") would pass while the
+        sentence around it moved; this cannot. The advisory blocks below the
+        verdict are excluded deliberately — they are the part that is ALLOWED
+        to differ, and `test_the_advisory_blocks_are_the_ONLY_thing_that_moved`
+        is what says nothing else hides down there.
+        """
+        a = self._render(tmp_path, capsys, "g", _S1_CONFORMING)
+        b = self._render(tmp_path, capsys, "b", _S3_SPINE_RENAMED)
+        verdict = "OK — 1 of 1 entry file(s) parse, 0 malformed."
+        ia = next(i for i, l in enumerate(a) if l.startswith(verdict))
+        ib = next(i for i, l in enumerate(b) if l.startswith(verdict))
+        assert a[: ia + 1] == b[: ib + 1]
+
+    def test_the_advisory_blocks_are_the_ONLY_thing_that_moved(
+        self, tmp_path, capsys
+    ) -> None:
+        """🔴 AND THE OPEN-ACTION BLOCK MOVED TOO — which is the finding, not an
+        exception to it.
+
+        The first draft of this test asserted every differing line belonged to
+        the SHAPE block and went red on `open actions across 1 entry file(s):`.
+        It is right to: renaming `## Nuance / work-history` is precisely what
+        makes `scan_open_actions` find nothing, so the open-action block flips
+        from reporting one declared `OPEN:` to reporting a zero — over a section
+        the parser never reached. That is §2.2's silent data loss showing up in
+        this tool's own output, and it is exactly why the shape block is
+        rendered ABOVE it rather than below.
+
+        So the claim is the accurate one: every differing line sits at or after
+        the start of the advisory region, and none of them is a verdict line.
+        """
+        a = self._render(tmp_path, capsys, "g", _S1_CONFORMING)
+        b = self._render(tmp_path, capsys, "b", _S3_SPINE_RENAMED)
+        first_advisory = next(i for i, l in enumerate(b) if "entry shape" in l)
+        moved = [l for l in b if l not in a]
+        assert moved, "positive control: the two renderings must actually differ"
+        for line in moved:
+            assert b.index(line) >= first_advisory, f"a pre-verdict line moved: {line!r}"
+            assert "MALFORMED" not in line and "OK — " not in line
+        # the pair that proves the ordering is not cosmetic
+        assert any("declared `OPEN:`" in l for l in a)
+        assert any("0 declared across" in l for l in b)
+
+
+class TestScanEntryShape:
+    """The four kinds, each on its own, and each DISJOINT from the others."""
+
+    def test_a_RENAMED_heading_names_what_the_writer_ACTUALLY_TYPED(
+        self, tmp_path
+    ) -> None:
+        """The difference between a finding fixable in one edit and one that
+        sends the writer looking for prose already on disk."""
+        store = _shape_store(
+            tmp_path,
+            SHAPE_FM + "\n## pointers\n- p\n\n## Nuance / work-history\n- n\n",
+        )
+        (row,) = [s for s in st.scan_entry_shape([store / SCOPE / "payments-unit.md"])]
+        assert row.kind == st.SHAPE_RENAMED
+        assert row.heading == sr.POINTERS_HEADING, "the SCHEMA heading, never the typo"
+        assert row.found == ("## pointers",)
+
+    @pytest.mark.parametrize(
+        "written",
+        ["## pointers", "#Pointers", "### Pointers", "## Pointers:", "##   Pointers  "],
+    )
+    def test_each_documented_NEAR_MISS_folds_to_renamed_not_absent(
+        self, written, tmp_path
+    ) -> None:
+        """The three folds `_heading_key` names — level, case/whitespace, a
+        trailing colon — measured one shape at a time so a fold that stopped
+        working could not hide behind a sibling."""
+        store = _shape_store(
+            tmp_path,
+            SHAPE_FM + f"\n{written}\n- p\n\n## Nuance / work-history\n- n\n",
+        )
+        (row,) = st.scan_entry_shape([store / SCOPE / "payments-unit.md"])
+        assert row.kind == st.SHAPE_RENAMED, written
+
+    def test_the_LOOSE_key_never_ACCEPTS_a_heading(self, tmp_path) -> None:
+        """🔴 The fold exists to REPORT, never to admit. If `## pointers` were
+        accepted the store would quietly widen to whatever a writer typed —
+        the opposite of what this change is for. `extract_sections` stays exact.
+        """
+        text = SHAPE_FM + "\n## pointers\n- p\n"
+        assert sr.POINTERS_HEADING not in sr.extract_sections(
+            text, (sr.POINTERS_HEADING,)
+        )
+
+    def test_an_ABSENT_heading_prints_the_files_whole_INVENTORY(
+        self, tmp_path
+    ) -> None:
+        """Because "it is not there" is only actionable beside what IS."""
+        store = _shape_store(
+            tmp_path, SHAPE_FM + "\n## Somewhere Else Entirely\n- p\n"
+        )
+        rows = st.scan_entry_shape([store / SCOPE / "payments-unit.md"])
+        assert {r.kind for r in rows} == {st.SHAPE_ABSENT}
+        assert all("## Somewhere Else Entirely" in r.found for r in rows)
+
+    def test_a_DUPLICATED_heading_is_reported_with_its_COUNT(self, tmp_path) -> None:
+        """`extract_sections` merges the two blocks and drops what sat between
+        them; this is the only surface on which that is visible."""
+        store = _shape_store(
+            tmp_path,
+            SHAPE_FM + "\n## Pointers\n- a\n\n## Nuance / work-history\n- n\n"
+            "\n## Pointers\n- b\n",
+        )
+        (row,) = [
+            s for s in st.scan_entry_shape([store / SCOPE / "payments-unit.md"])
+            if s.kind == st.SHAPE_DUPLICATED
+        ]
+        assert row.heading == sr.POINTERS_HEADING
+        assert row.count == 2
+
+    def test_an_EMPTY_section_is_its_own_kind_not_ABSENT(self, tmp_path) -> None:
+        """`extract_sections` tracks presence separately from content precisely
+        so this distinction survives: the reader FINDS this section and prints a
+        blank, which is a different remedy from a heading that is not there."""
+        store = _shape_store(
+            tmp_path, SHAPE_FM + "\n## Pointers\n\n## Nuance / work-history\n- n\n"
+        )
+        (row,) = st.scan_entry_shape([store / SCOPE / "payments-unit.md"])
+        assert row.kind == st.SHAPE_EMPTY
+        assert row.heading == sr.POINTERS_HEADING
+
+    def test_DUPLICATED_and_EMPTY_can_both_be_true_of_ONE_heading(
+        self, tmp_path
+    ) -> None:
+        """Neither branch excludes the other, and they are different remedies:
+        fold the sections AND fill them."""
+        store = _shape_store(
+            tmp_path,
+            SHAPE_FM + "\n## Pointers\n\n## Nuance / work-history\n- n\n\n## Pointers\n",
+        )
+        kinds = {
+            s.kind for s in st.scan_entry_shape([store / SCOPE / "payments-unit.md"])
+        }
+        assert kinds == {st.SHAPE_DUPLICATED, st.SHAPE_EMPTY}
+
+    def test_a_FENCED_hash_neither_ends_a_section_nor_enters_the_inventory(
+        self, tmp_path
+    ) -> None:
+        """The seam between this checker and the reader. Both are views over one
+        walker, so a fenced `#` must be invisible to BOTH — otherwise the
+        validator predicts a read the reader will not perform.
+
+        🔴 BOTH HALVES OF THE NAME ARE ASSERTED, and the second half needs its
+        own fixture. An `== ()` on a conforming entry is satisfied by a scanner
+        that reports nothing at all — measured: it survived a stub returning `()`
+        — so it can only witness "does not end a section". The inventory is
+        printed only beside an ABSENT finding, so proving the fenced `#` never
+        ENTERS it takes an entry that is missing a heading.
+        """
+        store = _shape_store(
+            tmp_path,
+            SHAPE_FM + "\n## Pointers\n- p\n\n## Nuance / work-history\n"
+            "- run:\n```\n## not a heading\n```\n- after the fence\n",
+        )
+        assert st.scan_entry_shape([store / SCOPE / "payments-unit.md"]) == ()
+
+        # ... and the inventory half, which the row above structurally cannot see.
+        bare = _shape_store(
+            tmp_path / "inv",
+            SHAPE_FM + "\n## Pointers\n- p\n\n```\n## not a heading\n```\n",
+        )
+        rows = st.scan_entry_shape([bare / SCOPE / "payments-unit.md"])
+        assert [(s.heading, s.kind) for s in rows] == [
+            (sr.NUANCE_HEADING, st.SHAPE_ABSENT)
+        ]
+        assert rows[0].found == (sr.POINTERS_HEADING,), rows[0].found
+
+    def test_an_unreadable_path_is_skipped_rather_than_raising(self, tmp_path) -> None:
+        """It runs BESIDE the parse check, never in front of it: a malformed
+        file's own rejection is the finding that matters, and this must never be
+        the thing that turns a validation run into a crash.
+
+        🔴 SKIPPED, NOT ABANDONED — asserted with a readable entry AFTER the
+        unreadable one. `== ()` over the missing path alone is green for a
+        scanner that gives up on the first `OSError`, and for one that reports
+        nothing ever; only a later file's finding tells the two apart.
+        """
+        assert st.scan_entry_shape([tmp_path / "does-not-exist.md"]) == ()
+
+        store = _shape_store(tmp_path, _S3_SPINE_RENAMED)
+        rows = st.scan_entry_shape(
+            [tmp_path / "does-not-exist.md", store / SCOPE / "payments-unit.md"]
+        )
+        assert sorted(s.kind for s in rows) == [st.SHAPE_ABSENT, st.SHAPE_RENAMED]
+
+    def test_scan_entry_shape_WRITES_NOTHING(self, tmp_path) -> None:
+        """The store is curated, client-confidential and unbacked. Hashed, not
+        grepped — a grep for `open(..., "w")` passes while a different spelling
+        writes."""
+        store = _shape_store(tmp_path, _S3_SPINE_RENAMED)
+        before = _tree_hash(store)
+        st.scan_entry_shape([store / SCOPE / "payments-unit.md"])
+        assert _tree_hash(store) == before
+
+
+class TestTheShapeBlockActuallyREACHESValidateOutput:
+    """🔴 THE SEAM. `_render_validation_shape` exercised alone proves nothing
+    about `--validate`; `claude/RULES.md` — "verified in isolation is the new
+    vacuous green: the defect lives in the SEAM nobody owns". Every assertion
+    here runs the CLI.
+    """
+
+    def test_the_scope_mode_carries_it(self, tmp_path, capsys) -> None:
+        store = _shape_store(tmp_path, _S4_NO_HEADINGS)
+        st.main(["--store", str(store), "--scope", SCOPE, "--validate"])
+        assert "ABSENT" in capsys.readouterr().out
+
+    def test_the_SINGLE_FILE_mode_carries_it_too(self, tmp_path, capsys) -> None:
+        """`--validate <path>` is the mode `/handoff` step 4 runs on the file it
+        just wrote — the whole reason this catches the class ON WRITE."""
+        store = _shape_store(tmp_path, _S4_NO_HEADINGS)
+        st.main([
+            "--store", str(store), "--scope", SCOPE,
+            "--validate", str(store / SCOPE / "payments-unit.md"),
+        ])
+        assert "ABSENT" in capsys.readouterr().out
+
+    def test_a_MALFORMED_run_still_reports_malformed_FIRST(
+        self, tmp_path, capsys
+    ) -> None:
+        """The advisory must never displace the finding that actually blocks a
+        read — and it must not vanish on that path either."""
+        store = _shape_store(tmp_path, _S2_NO_FRONT_MATTER)
+        rc = st.main(["--store", str(store), "--scope", SCOPE, "--validate"])
+        out = capsys.readouterr().out
+        assert rc == 3
+        assert "🔴 MALFORMED" in out
+        assert out.index("MALFORMED") < out.index("entry shape")
+
+    def test_the_shape_block_comes_BEFORE_the_open_action_block(
+        self, tmp_path, capsys
+    ) -> None:
+        """🔴 Not cosmetic. A renamed `## Nuance / work-history` makes
+        `scan_open_actions` find nothing, so the open-action block's `0
+        declared` is a fact about a section the parser never reached. Read in
+        the other order it is simply false."""
+        store = _shape_store(tmp_path, _S3_SPINE_RENAMED)
+        st.main(["--store", str(store), "--scope", SCOPE, "--validate"])
+        out = capsys.readouterr().out
+        assert out.index("entry shape") < out.index("open actions")
+
+    def test_a_ZERO_carries_its_denominator_AND_the_SET_it_looked_at(
+        self, tmp_path, capsys
+    ) -> None:
+        """🔴 A reassuring zero is indistinguishable from an instrument wired to
+        nothing unless it carries the size of what it looked at — and here also
+        the SET, because a reader who assumed the third spine heading was
+        checked would take this zero as a claim about a heading nothing
+        examined.
+
+        The whole normalised sentence is pinned, not a keyword: `claude/RULES.md`
+        — when the artifact under test IS prose, a guard on words is walkable by
+        rewording. A cosmetic reword fails this test on purpose.
+        """
+        store = _shape_store(tmp_path, _S1_CONFORMING)
+        st.main(["--store", str(store), "--scope", SCOPE, "--validate"])
+        out = " ".join(capsys.readouterr().out.split())
+        assert (
+            "entry shape: 1 entry file(s) checked for `## Pointers`, "
+            "`## Nuance / work-history` — each present exactly once and non-empty. "
+            "🔴 `## What it is` is NOT checked here: the reader DOES surface it, but "
+            "it feeds no count and no badge, so its absence changes nothing this zero "
+            "is about — `subsystem_recall` names a missing one under that entry's own "
+            "body instead."
+        ) in out
+
+    def test_the_json_keeps_FOUR_populations_and_never_sums_them(
+        self, tmp_path, capsys
+    ) -> None:
+        """`renamed` and `absent` are the same missing section at two
+        resolutions and only one is actionable from the number alone;
+        `duplicated` and `empty` are sections the reader DOES find. A single
+        `shape_finding_count` would let a machine consumer treat "you typo'd a
+        heading" and "the section is there but blank" as one quantity."""
+        store = _shape_store(
+            tmp_path,
+            SHAPE_FM + "\n## pointers\n- p\n\n## Nuance / work-history\n"
+            "\n## Nuance / work-history\n",
+        )
+        st.main(["--store", str(store), "--scope", SCOPE, "--validate", "--json"])
+        p = json.loads(capsys.readouterr().out)
+        assert "shape_finding_count" not in p, "a summed count is back"
+        assert "shape_count" not in p
+        assert p["shape_renamed_count"] == 1
+        assert p["shape_absent_count"] == 0
+        assert p["shape_duplicated_count"] == 1
+        assert p["shape_empty_count"] == 1
+        assert p["shape_headings_checked"] == list(st.SHAPE_HEADINGS)
+        assert {r["kind"] for r in p["shape"]} == {
+            st.SHAPE_RENAMED, st.SHAPE_DUPLICATED, st.SHAPE_EMPTY
+        }
+
+    def test_the_inventory_beside_an_ABSENT_finding_is_CAPPED_and_says_so(
+        self, tmp_path, capsys
+    ) -> None:
+        """A bound, not a filter — the remainder is counted in the line, like
+        every other display cap in this module."""
+        extra = "".join(f"\n## Section {i}\n- x\n" for i in range(12))
+        store = _shape_store(tmp_path, SHAPE_FM + extra)
+        st.main(["--store", str(store), "--scope", SCOPE, "--validate"])
+        out = capsys.readouterr().out
+        line = next(l for l in out.splitlines() if "the file's headings are" in l)
+        assert line.count("`## Section") == st.SHAPE_INVENTORY_SHOWN
+        assert f"… {12 - st.SHAPE_INVENTORY_SHOWN} more" in line
+
+
+class TestShapeHeadingsIsPinnedToTheCOUNTEDSetNotTheDISPLAYOne:
+    """🔴 The claim `SHAPE_HEADINGS`' own docstring makes, enforced.
+
+    It is pinned to `subsystem_recall.COUNTED_HEADINGS` and deliberately not
+    imported from it — `subsystem_recall` imports THIS module, so the direction
+    is impossible. Pinned rather than merged, so a display decision cannot
+    silently become a validation rule, and so a change to either is a
+    deliberate, visible edit to both.
+
+    🔴 THE TWO USED TO BE PINNED TO `SURFACED_HEADINGS`, AND THAT WAS THE BUG'S
+    HIDING PLACE. When the display set and the checked set were the same tuple,
+    "does the reader print it" and "does a count depend on it" were one
+    question, and `## What it is` — which is written by every entry and feeds no
+    count — could only be added to BOTH or neither. It was neither, for months,
+    with nothing printing it on any path. The two are now separate tuples that
+    genuinely DIFFER, which is what this class was built to make visible.
+    """
+
+    def test_shape_headings_is_pinned_to_the_COUNTED_set(self) -> None:
+        import subsystem_recall as srec  # noqa: PLC0415
+
+        assert tuple(st.SHAPE_HEADINGS) == tuple(srec.COUNTED_HEADINGS)
+
+    def test_the_DISPLAY_set_is_WIDER_and_that_is_the_point(self) -> None:
+        """A negative control on the pin above: if the two tuples were still
+        identical, the previous test would pass for the old reason and prove
+        nothing about the split."""
+        import subsystem_recall as srec  # noqa: PLC0415
+
+        assert set(srec.COUNTED_HEADINGS) < set(srec.SURFACED_HEADINGS)
+        assert sr.WHAT_HEADING in srec.SURFACED_HEADINGS
+
+    def test_the_checked_set_is_exactly_the_two_a_COUNT_depends_on(self) -> None:
+        """🔴 `## What it is` IS read now — `subsystem_recall` surfaces it in
+        every printed body — but it feeds no bullet count and no index badge, so
+        its absence cannot make a NUMBER wrong. Flagging it would report a
+        convention with no numeric consequence beside two whose consequence is
+        measured, and a writer cannot tell those apart in a list. The reader
+        names it under the entry's own body instead."""
+        assert st.SHAPE_HEADINGS == (sr.POINTERS_HEADING, sr.NUANCE_HEADING)
+        assert sr.WHAT_HEADING not in st.SHAPE_HEADINGS
+
+    def test_an_entry_missing_ONLY_what_it_is_produces_NO_finding(
+        self, tmp_path
+    ) -> None:
+        """The behavioural half — a structural check type-checks past a wrong
+        argument."""
+        store = _shape_store(
+            tmp_path, SHAPE_FM + "\n## Pointers\n- p\n\n## Nuance / work-history\n- n\n"
+        )
+        assert st.scan_entry_shape([store / SCOPE / "payments-unit.md"]) == ()
+
+
+class TestShapeMutationKills:
+    """One kill per new guard. Each mutates the SMALLEST sub-expression capable
+    of being incorrect — never a guard together with its enclosing condition,
+    which dies for the wrong reason — and each asserts THIS guard's own symptom
+    rather than a neighbour's error.
+    """
+
+    def test_kills_the_renamed_vs_absent_split(self, tmp_path: Path) -> None:
+        """With the near-miss lookup collapsed, a writer who typo'd a heading is
+        told the section is absent and goes looking for prose already on disk —
+        the finding degrades to the one it exists to replace, silently, with the
+        count unchanged."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_shape_renamed",
+            [("kind=SHAPE_RENAMED if near else SHAPE_ABSENT", "kind=SHAPE_ABSENT")],
+        )
+        store = _shape_store(
+            tmp_path, SHAPE_FM + "\n## pointers\n- p\n\n## Nuance / work-history\n- n\n"
+        )
+        p = store / SCOPE / "payments-unit.md"
+        assert st.scan_entry_shape([p])[0].kind == st.SHAPE_RENAMED
+        assert mod.scan_entry_shape([p])[0].kind == mod.SHAPE_ABSENT
+
+    def test_kills_the_trailing_colon_fold(self, tmp_path: Path) -> None:
+        """One fold at a time. `## Pointers:` is the near-miss the schema doc
+        names explicitly; without the fold it reports ABSENT."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_shape_colon",
+            [('heading.lstrip("#").strip().rstrip(":").strip()',
+              'heading.lstrip("#").strip()')],
+        )
+        store = _shape_store(
+            tmp_path, SHAPE_FM + "\n## Pointers:\n- p\n\n## Nuance / work-history\n- n\n"
+        )
+        p = store / SCOPE / "payments-unit.md"
+        assert st.scan_entry_shape([p])[0].kind == st.SHAPE_RENAMED
+        assert mod.scan_entry_shape([p])[0].kind == mod.SHAPE_ABSENT
+
+    def test_kills_the_case_fold(self, tmp_path: Path) -> None:
+        """The second fold, killed separately from the first so neither can hide
+        behind the other. Case is the near-miss `extract_sections` refuses by
+        design — `## POINTERS` reaches no reader — and without the fold the
+        writer is told the section is absent instead of being shown their own
+        heading."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_shape_case",
+            [('.strip()).lower()', ".strip())")],
+        )
+        store = _shape_store(
+            tmp_path, SHAPE_FM + "\n## POINTERS\n- p\n\n## Nuance / work-history\n- n\n"
+        )
+        p = store / SCOPE / "payments-unit.md"
+        assert st.scan_entry_shape([p])[0].kind == st.SHAPE_RENAMED
+        assert mod.scan_entry_shape([p])[0].kind == mod.SHAPE_ABSENT
+
+    def test_kills_the_duplicate_detection(self, tmp_path: Path) -> None:
+        """🔴 Reachable by construction: the heading is PRESENT, so it is past
+        the absent/renamed branch's `continue` and this is the only check that
+        can fire on it. The `> 1` is mutated alone — deleting the enclosing
+        block would take the count with it and die for the wrong reason."""
+        mod = _load_mutant(
+            tmp_path, "m_shape_dup", [("            if n > 1:", "            if False:")]
+        )
+        store = _shape_store(
+            tmp_path,
+            SHAPE_FM + "\n## Pointers\n- a\n\n## Nuance / work-history\n- n\n"
+            "\n## Pointers\n- b\n",
+        )
+        p = store / SCOPE / "payments-unit.md"
+        assert [s.kind for s in st.scan_entry_shape([p])] == [st.SHAPE_DUPLICATED]
+        assert mod.scan_entry_shape([p]) == ()
+
+    def test_kills_the_OFF_BY_ONE_in_duplicate_detection(self, tmp_path: Path) -> None:
+        """The narrower mutation the test above cannot see: `>= 1` fires on
+        every single correct heading in the store and the advisory becomes noise
+        nobody reads. A guard that only survives `if False:` is half-tested."""
+        mod = _load_mutant(
+            tmp_path, "m_shape_dup1", [("            if n > 1:", "            if n >= 1:")]
+        )
+        store = _shape_store(tmp_path, _S1_CONFORMING)
+        p = store / SCOPE / "payments-unit.md"
+        assert st.scan_entry_shape([p]) == ()
+        assert [s.kind for s in mod.scan_entry_shape([p])] == [
+            mod.SHAPE_DUPLICATED, mod.SHAPE_DUPLICATED
+        ]
+
+    def test_kills_the_empty_section_detection(self, tmp_path: Path) -> None:
+        mod = _load_mutant(
+            tmp_path,
+            "m_shape_empty",
+            [("            if not present[h].strip():", "            if False:")],
+        )
+        store = _shape_store(tmp_path, _S8_SECTIONS_EMPTY)
+        p = store / SCOPE / "payments-unit.md"
+        assert [s.kind for s in st.scan_entry_shape([p])] == [
+            st.SHAPE_EMPTY, st.SHAPE_EMPTY
+        ]
+        assert mod.scan_entry_shape([p]) == ()
+
+    def test_kills_the_CALL_SITE_the_whole_feature_hangs_from(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        """🔴 THE SEAM MUTATION. Replacing one argument in `main` leaves the
+        scanner, the renderer and every unit test above completely green while
+        `--validate` reports nothing — the feature one refactor from inert
+        behind a green gate."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_shape_seam",
+            [("                shape=scan_entry_shape(scanned),", "                shape=(),")],
+        )
+        store = _shape_store(tmp_path, _S3_SPINE_RENAMED)
+        argv = ["--store", str(store), "--scope", SCOPE, "--validate"]
+        assert mod.main(argv) == 0
+        assert "RENAMED" not in capsys.readouterr().out
+        assert st.main(argv) == 0
+        assert "RENAMED" in capsys.readouterr().out
+
+    def test_kills_the_RENDERER_call_on_the_clean_path(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        """The second half of the seam: the scan can run and the block still not
+        print. Anchored on the `OK` branch specifically — the malformed branch
+        has its own identical call and mutating both at once would not say which
+        one was load-bearing."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_shape_render",
+            [("        return \"\\n\".join(\n"
+              "            out\n"
+              "            + _render_validation_shape(report)\n"
+              "            + _render_validation_open_actions(report)\n"
+              "            + _render_validation_unreachable(report)\n"
+              "        )\n"
+              "    n = len(report.malformed)",
+              "        return \"\\n\".join(\n"
+              "            out\n"
+              "            + _render_validation_open_actions(report)\n"
+              "            + _render_validation_unreachable(report)\n"
+              "        )\n"
+              "    n = len(report.malformed)")],
+        )
+        store = _shape_store(tmp_path, _S3_SPINE_RENAMED)
+        argv = ["--store", str(store), "--scope", SCOPE, "--validate"]
+        assert mod.main(argv) == 0
+        out = capsys.readouterr().out
+        assert "entry shape" not in out
+        assert "open actions" in out, "the neighbouring block must be untouched"
+
+    def test_kills_the_ADVISORY_ONLY_invariant_itself(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        """🔴 The positive control for `TestTheAdvisoryNeverTouchesTheVERDICT`.
+        A guard asserting "the exit code did NOT change" is exactly the shape
+        that passes vacuously; this builds the regression it claims to catch —
+        `clean` taking a `shape` term — and confirms the fixture goes to 3.
+        Without this, "the verdict is unchanged" is an untested claim about an
+        untested claim.
+        """
+        mod = _load_mutant(
+            tmp_path,
+            "m_shape_verdict",
+            [("    @property\n    def clean(self) -> bool:\n        return not self.malformed",
+              "    @property\n    def clean(self) -> bool:\n"
+              "        return not self.malformed and not self.shape")],
+        )
+        store = _shape_store(tmp_path, _S3_SPINE_RENAMED)
+        argv = ["--store", str(store), "--scope", SCOPE, "--validate"]
+        assert mod.main(argv) == 3, "the mutant must break the invariant"
+        capsys.readouterr()
+        assert st.main(argv) == 0, "and the real module must not"
+        assert "OK — 1 of 1" in capsys.readouterr().out
+
+
+class TestStep4IsTOLDToReadTheShapeBlock:
+    """🔴 THE CONSUMER SEAM. A block nobody is told to read is inert.
+
+    `/handoff` step 4 already runs `--validate` on the file it just wrote — that
+    is the entire reason this advisory catches the class ON WRITE rather than
+    hours later on read. But the advisory deliberately does NOT move the exit
+    code, and step 4's own prose previously described the command as "exits 0 …
+    or 3": a writer following it literally branches on the exit code and never
+    looks at the block. The feature would then be measurably present and
+    behaviourally absent, which is `claude/RULES.md`'s "a field that exists is
+    not a guard — only a BRANCH on it is", one level up.
+
+    So the pin is DERIVED from the code, not from a remembered sentence: every
+    kind the scanner can emit and every heading it checks must be named in the
+    step-4 prose. A fifth kind added without documenting it fails here.
+    """
+
+    KINDS = (st.SHAPE_ABSENT, st.SHAPE_RENAMED, st.SHAPE_DUPLICATED, st.SHAPE_EMPTY)
+
+    def test_the_kind_vocabulary_is_pinned_two_way_to_the_constants(self) -> None:
+        """The ledger half: this tuple must BE the module's kinds — failing when
+        the set grows *or* shrinks, so the doc pin below cannot go stale by
+        quietly checking a subset."""
+        emitted = {
+            v for k, v in vars(st).items()
+            if k.startswith("SHAPE_") and isinstance(v, str) and not k.endswith("HEADINGS")
+        }
+        assert emitted == set(self.KINDS)
+
+    def test_step_4_names_every_kind_the_scanner_can_emit(self) -> None:
+        doc = HANDOFF_DOC.read_text(encoding="utf-8")
+        for kind in self.KINDS:
+            assert kind.upper() in doc, (
+                f"`{kind}` can be reported by --validate and step 4 never mentions it; "
+                f"a writer branching on the exit code alone will not see it"
+            )
+
+    def test_step_4_names_the_headings_the_shape_block_CHECKS(self) -> None:
+        """And only those: a writer told the spine is checked would read the
+        zero as a claim about `## What it is`, which nothing examines."""
+        doc = HANDOFF_DOC.read_text(encoding="utf-8")
+        for heading in st.SHAPE_HEADINGS:
+            assert heading in doc, heading
+
+    def test_step_4_says_the_block_does_NOT_move_the_verdict(self) -> None:
+        """The one fact that makes the instruction necessary rather than
+        redundant. Without it "run --validate and read the output" is advice a
+        reader discharges by checking `rc == 0`."""
+        doc = " ".join(HANDOFF_DOC.read_text(encoding="utf-8").split())
+        assert "advisory and deliberately does **not** move the verdict" in doc
+        assert "still exits 0" in doc
+
+
+# =============================================================================
+# 🔴 MARKER REACHABILITY, at the `--validate` surface.
+#
+# REGRESSION COVERAGE, watched RED AT BASE `3c54918`, where `--validate` has no
+# such block and `ValidationReport` has no such field. The resolver-level half
+# of the same defect is in `test_subsystem_resolver.py`.
+# =============================================================================
+
+
+UNREACHABLE_NUANCE = "\n".join(
+    [
+        "- 2026-03-04: a bullet whose head declares nothing at all,",
+        "  with wrapped prose under it that runs to a second line,",
+        "  - 2026-03-02: OPEN: the sibling repo still points at the old bucket.",
+        "- 2026-02-11: an ordinary bullet with no marker anywhere in it.",
+    ]
+)
+"""The FIELD SHAPE: a correctly-spelled marker several lines into a bullet body.
+Values chosen pairwise distinct from every literal the assertions name."""
+
+REACHABLE_NUANCE = "\n".join(
+    [
+        "- 2026-03-04: OPEN: an ordinary, perfectly reachable declaration.",
+        "  with a continuation line that only mentions the open question again.",
+        "- 2026-02-11: an ordinary bullet with no marker anywhere in it.",
+    ]
+)
+
+NEAR_MISS_NUANCE = "- 2026-03-04: RESOLVED abc1234 (some-repo): closed.\n  prose under it."
+
+
+def _entry_with_nuance(service: str, scope: str, nuance: str) -> str:
+    """`_entry`, with its `## Nuance / work-history` body replaced wholesale."""
+    head = _entry(service, scope).split("## Nuance / work-history")[0]
+    return f"{head}## Nuance / work-history\n{nuance}\n"
+
+
+def _nuance_store(root: Path, nuance: str, service: str = "collector") -> Path:
+    store = root / "reach-store"
+    d = store / SCOPE
+    d.mkdir(parents=True)
+    (d / f"{service}.md").write_text(
+        _entry_with_nuance(service, SCOPE, nuance), encoding="utf-8"
+    )
+    return store
+
+
+def _validated(store: Path) -> st.ValidationReport:
+    checked, malformed = st.validate_scope(store, SCOPE)
+    scanned = [store / SCOPE / name for name in checked]
+    return st.ValidationReport(
+        store_root=str(store),
+        target=f"`{SCOPE}/`",
+        scope=SCOPE,
+        checked=tuple(checked),
+        malformed=tuple(malformed),
+        open_actions=st.scan_open_actions(scanned),
+        shape=st.scan_entry_shape(scanned),
+        unreachable=st.scan_unreachable_markers(scanned),
+    )
+
+
+class TestValidateReportsUnreachableMarkers:
+    """🔴 A MARKER SPELLED CORRECTLY WHERE THE PARSER NEVER LOOKS, reported.
+
+    Every arm is a PAIR. The block is asserted PRESENT on the field shape and
+    ABSENT on a store whose markers are all reachable — a block that also printed
+    there would be boilerplate, and boilerplate is what the measured failure
+    walked past.
+    """
+
+    def test_THE_FIELD_SHAPE_is_reported(self, tmp_path: Path) -> None:
+        rep = _validated(_nuance_store(tmp_path, UNREACHABLE_NUANCE))
+        (found,) = rep.unreachable
+        assert found.filename == "collector.md"
+        assert found.offset == 3
+        assert found.openness == "open"
+        assert "OPEN: the sibling repo" in found.line
+        assert found.bullet_first_line.startswith("- 2026-03-04: a bullet whose head")
+
+    def test_THE_NEGATIVE_CONTROL_all_reachable_markers_report_NOTHING(
+        self, tmp_path: Path
+    ) -> None:
+        rep = _validated(_nuance_store(tmp_path, REACHABLE_NUANCE))
+        assert rep.unreachable == ()
+        assert [a.declared for a in rep.open_actions] == [True], (
+            "premise gone: the reachable store must still declare its open action"
+        )
+
+    def test_the_block_PRINTS_ITS_DENOMINATOR_at_zero(self, tmp_path: Path) -> None:
+        """🔴 A bare absence is indistinguishable from a scanner wired to nothing.
+        The zero has to carry the size of what it is a zero over."""
+        out = st.render_validation(_validated(_nuance_store(tmp_path, REACHABLE_NUANCE)))
+        assert "marker reachability: 0 out-of-reach marker(s) across 1 entry file(s)" in out
+        assert st.UNREACHABLE_MARKER in out
+        assert "MARKER(S) OUT OF REACH" not in out
+
+    def test_the_firing_block_names_the_bullet_the_line_and_the_remedy(
+        self, tmp_path: Path
+    ) -> None:
+        out = st.render_validation(_validated(_nuance_store(tmp_path, UNREACHABLE_NUANCE)))
+        assert f"🔴 1 MARKER(S) OUT OF REACH across 1 entry file(s) [{st.UNREACHABLE_MARKER}]" in out
+        assert "PROMOTING the line to a top-level bullet of its own" in out
+        assert "collector.md: line 3 of the bullet opening" in out
+        # …and the counterweight that stops the reader tidying it away silently.
+        assert "SILENCED a still-open action" in out
+
+    # --- the population boundary, which is the whole point of a separate shape --
+
+    def test_it_is_NOT_a_near_miss_and_is_NOT_counted_as_one(self, tmp_path: Path) -> None:
+        """🔴 THE DISTINCTION THE BRIEF EXISTS FOR. A near-miss is mis-spelled
+        WHERE THE PARSER LOOKS; this is spelled correctly where it never does. One
+        count covering both would send half the readers to the wrong remedy."""
+        rep = _validated(_nuance_store(tmp_path, UNREACHABLE_NUANCE))
+        blob = rep.to_json()
+        assert blob["unreachable_marker_count"] == 1
+        assert blob["near_miss_marker_count"] == 0
+        assert blob["declared_open_count"] == 0
+        assert blob["unmarked_action_count"] == 0
+        assert blob["unreachable_marker_reason"] == st.UNREACHABLE_MARKER
+
+    def test_the_two_shapes_are_counted_SEPARATELY_when_BOTH_are_present(
+        self, tmp_path: Path
+    ) -> None:
+        """The discriminating case: one store, one of each. Either count reading
+        2, or either reading 0, is the fold this design refuses."""
+        rep = _validated(
+            _nuance_store(tmp_path, f"{NEAR_MISS_NUANCE}\n{UNREACHABLE_NUANCE}")
+        )
+        blob = rep.to_json()
+        assert (blob["near_miss_marker_count"], blob["unreachable_marker_count"]) == (1, 1)
+
+    def test_it_does_NOT_MOVE_THE_VERDICT(self, tmp_path: Path) -> None:
+        """🔴 A gate an author cannot turn green by fixing the file is worse than
+        no gate. An entry with an out-of-reach marker is still well-formed."""
+        rep = _validated(_nuance_store(tmp_path, UNREACHABLE_NUANCE))
+        assert rep.unreachable != (), "premise gone: nothing to be advisory about"
+        assert rep.clean is True
+
+    # --- the CLI, which is the only surface `/handoff` touches -----------------
+
+    def test_the_CLI_prints_it_and_still_EXITS_0(self, tmp_path: Path, capsys) -> None:
+        store = _nuance_store(tmp_path, UNREACHABLE_NUANCE)
+        rc = st.main(["--store", str(store), "--scope", SCOPE, "--validate"])
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "MARKER(S) OUT OF REACH" in out
+
+    def test_the_SINGLE_FILE_form_reports_it_too(self, tmp_path: Path, capsys) -> None:
+        """The two `--validate` forms build the report at different call sites; a
+        block wired into one of them only is half a fix."""
+        store = _nuance_store(tmp_path, UNREACHABLE_NUANCE)
+        rc = st.main(
+            ["--store", str(store), "--validate", str(store / SCOPE / "collector.md")]
+        )
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "MARKER(S) OUT OF REACH" in out
+
+    def test_the_SINGLE_FILE_form_needs_NO_git_repo_AT_CWD(
+        self, tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """🔴 REGRESSION, measured 2026-08-21. The scope was derived EAGERLY, and
+        `scope_for_repo` shells out to git — so this form exited 3 with "fatal:
+        not a git repository" from ANY cwd outside a checkout. The nix check
+        sandbox is exactly such a cwd (`/build/src` is a copy, not a clone), so
+        the hermetic gate that decides merges was red on a path a dev host
+        structurally cannot exercise: a dev host always runs inside the repo.
+
+        The single-file form never reads the scope — it takes its policy scope
+        from the file's own parent directory — so needing a repo was pure
+        coupling.
+
+        The non-repo cwd IS the test, so the premise is asserted rather than
+        assumed: a tmp dir that happened to sit inside a checkout would make this
+        pass without exercising anything.
+        """
+        store = _nuance_store(tmp_path, UNREACHABLE_NUANCE)
+
+        outside = tmp_path / "not-a-repo"
+        outside.mkdir()
+        monkeypatch.chdir(outside)
+        probe = subprocess.run(
+            ["git", "rev-parse", "--git-dir"], cwd=outside, capture_output=True
+        )
+        assert probe.returncode != 0, (
+            "premise gone: cwd resolves to a git repo, so this test cannot see "
+            "the defect it pins"
+        )
+
+        rc = st.main(
+            ["--store", str(store), "--validate", str(store / SCOPE / "collector.md")]
+        )
+        out = capsys.readouterr().out
+        assert rc == 0, f"exited {rc} outside a git repo; stdout={out!r}"
+        assert "MARKER(S) OUT OF REACH" in out
+
+    def test_the_CLI_json_carries_the_count_and_the_token(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        store = _nuance_store(tmp_path, UNREACHABLE_NUANCE)
+        st.main(["--store", str(store), "--scope", SCOPE, "--validate", "--json"])
+        blob = json.loads(capsys.readouterr().out)
+        assert blob["unreachable_marker_count"] == 1
+        assert blob["unreachable_markers"][0]["offset"] == 3
+        assert blob["unreachable_markers"][0]["openness"] == "open"
+
+    def test_it_prints_on_the_MALFORMED_path_too(self, tmp_path: Path) -> None:
+        """🔴 THE SEAM `render_validation` HAS TWO OF. `--validate` returns from
+        two places — the `OK` branch and the malformed one — and the block's own
+        docstring claims it prints "on every path that CHECKED something".
+
+        This was FALSE when first written: the two returns differ by four spaces
+        of indentation, so the edit that wired the clean path silently missed the
+        other, and a scope holding one broken entry beside a good one with an
+        out-of-reach marker would have reported the marker nowhere. A guard's
+        description claims coverage; only reading the code against it says whether
+        the implementation is as wide as the sentence.
+        """
+        store = _nuance_store(tmp_path, UNREACHABLE_NUANCE)
+        (store / SCOPE / "broken.md").write_text(
+            "---\nservice: broken\naliases: [\n  wrapped\n]\n---\n", encoding="utf-8"
+        )
+        rep = _validated(store)
+        assert rep.clean is False, "premise gone: this is not the malformed branch"
+        out = st.render_validation(rep)
+        assert "🔴 MALFORMED" in out
+        assert "MARKER(S) OUT OF REACH" in out
+
+    def test_the_scan_is_READ_ONLY(self, tmp_path: Path) -> None:
+        store = _nuance_store(tmp_path, UNREACHABLE_NUANCE)
+        before = _tree_hash(store)
+        assert _validated(store).unreachable != (), "the path under test never ran"
+        assert _tree_hash(store) == before
+
+
+class TestUnreachableMarkerMutationKills:
+    """One kill per guard, each with THIS guard's own symptom.
+
+    🔴 POSITIVE CONTROL FOR THE BATCH: `test_kills_the_SCANNER_wiring`.
+    🔴 NEGATIVE CONTROL: `test_the_NO_OP_mutant_changes_nothing`.
+    """
+
+    def _out(self, mod, tmp_path: Path, nuance: str = UNREACHABLE_NUANCE) -> str:
+        store = _nuance_store(tmp_path, nuance)
+        checked, malformed = mod.validate_scope(store, SCOPE)
+        scanned = [store / SCOPE / n for n in checked]
+        return mod.render_validation(
+            mod.ValidationReport(
+                store_root=str(store),
+                target=f"`{SCOPE}/`",
+                scope=SCOPE,
+                checked=tuple(checked),
+                malformed=tuple(malformed),
+                open_actions=mod.scan_open_actions(scanned),
+                shape=mod.scan_entry_shape(scanned),
+                unreachable=mod.scan_unreachable_markers(scanned),
+            )
+        )
+
+    def test_the_NO_OP_mutant_changes_nothing(self, tmp_path: Path) -> None:
+        """🔴 NEGATIVE CONTROL FOR THE BATCH — without it, a loader quietly
+        returning the real module would score every kill below."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_um_noop",
+            [('    n = len(report.unreachable)', '    n = len(tuple(report.unreachable))')],
+        )
+        assert "1 MARKER(S) OUT OF REACH" in self._out(mod, tmp_path)
+
+    def test_kills_the_SCANNER_wiring(self, tmp_path: Path, capsys) -> None:
+        """POSITIVE CONTROL. The scanner exists, the renderer exists, and the CLI
+        simply never connects them — the exact shape of the measured failure,
+        where the fact was computable and reached no surface."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_um_wiring",
+            [
+                (
+                    "                unreachable=scan_unreachable_markers(scanned),",
+                    "                unreachable=(),",
+                )
+            ],
+        )
+        store = _nuance_store(tmp_path, UNREACHABLE_NUANCE)
+        assert mod.main(["--store", str(store), "--scope", SCOPE, "--validate"]) == 0
+        out = capsys.readouterr().out
+        assert "MARKER(S) OUT OF REACH" not in out
+        assert "marker reachability: 0" in out, "the block itself must still print"
+        assert st.main(["--store", str(store), "--scope", SCOPE, "--validate"]) == 0
+        assert "MARKER(S) OUT OF REACH" in capsys.readouterr().out
+
+    def test_kills_the_RENDERER_call_site_on_the_clean_path(self, tmp_path: Path) -> None:
+        """The other half of the seam: the scan runs and the block still never
+        prints. Anchored on the `OK` branch, which has its own return."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_um_render",
+            [
+                (
+                    "            + _render_validation_open_actions(report)\n"
+                    "            + _render_validation_unreachable(report)\n"
+                    "        )\n"
+                    "    n = len(report.malformed)",
+                    "            + _render_validation_open_actions(report)\n"
+                    "        )\n"
+                    "    n = len(report.malformed)",
+                )
+            ],
+        )
+        out = self._out(mod, tmp_path)
+        assert "marker reachability" not in out
+        assert "open actions" in out, "the neighbouring block must be untouched"
+
+    def test_kills_the_RENDERER_call_site_on_the_MALFORMED_path(
+        self, tmp_path: Path
+    ) -> None:
+        """🔴 THE SECOND HALF OF A SEAM THAT WAS REALLY BROKEN. `render_validation`
+        returns from two places and this call was missing from one of them — the
+        indentation differs by four spaces, so the edit that wired the clean path
+        matched nothing on the other and said so to nobody. Mutated separately
+        from its twin, because mutating both at once cannot say which one was
+        load-bearing."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_um_render_bad",
+            [
+                (
+                    "    return \"\\n\".join(\n"
+                    "        out\n"
+                    "        + _render_validation_shape(report)\n"
+                    "        + _render_validation_open_actions(report)\n"
+                    "        + _render_validation_unreachable(report)\n"
+                    "    )",
+                    "    return \"\\n\".join(\n"
+                    "        out\n"
+                    "        + _render_validation_shape(report)\n"
+                    "        + _render_validation_open_actions(report)\n"
+                    "    )",
+                )
+            ],
+        )
+        store = _nuance_store(tmp_path, UNREACHABLE_NUANCE)
+        (store / SCOPE / "broken.md").write_text(
+            "---\nservice: broken\naliases: [\n  wrapped\n]\n---\n", encoding="utf-8"
+        )
+        checked, malformed = mod.validate_scope(store, SCOPE)
+        scanned = [store / SCOPE / n for n in checked]
+        out = mod.render_validation(
+            mod.ValidationReport(
+                store_root=str(store),
+                target=f"`{SCOPE}/`",
+                scope=SCOPE,
+                checked=tuple(checked),
+                malformed=tuple(malformed),
+                unreachable=mod.scan_unreachable_markers(scanned),
+            )
+        )
+        assert "🔴 MALFORMED" in out, "the mutation must not change the branch taken"
+        assert "marker reachability" not in out
+        assert "MARKER(S) OUT OF REACH" in st.render_validation(_validated(store))
+
+    def test_kills_the_NOT_FOLDED_INTO_NEAR_MISS_invariant(self, tmp_path: Path) -> None:
+        """🔴 The fold this shape exists to prevent, done on purpose. The mutant's
+        near-miss count absorbs the out-of-reach one, and the reader is sent to
+        "fix the LINE" for a line that is spelled correctly."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_um_fold",
+            [
+                (
+                    '            "near_miss_marker_count": sum(1 for a in self.open_actions if a.near_miss),',
+                    '            "near_miss_marker_count": sum(1 for a in self.open_actions if a.near_miss) + len(self.unreachable),',
+                )
+            ],
+        )
+        store = _nuance_store(tmp_path, UNREACHABLE_NUANCE)
+        checked, _ = mod.validate_scope(store, SCOPE)
+        scanned = [store / SCOPE / n for n in checked]
+        blob = mod.ValidationReport(
+            store_root=str(store),
+            target=f"`{SCOPE}/`",
+            scope=SCOPE,
+            checked=tuple(checked),
+            unreachable=mod.scan_unreachable_markers(scanned),
+        ).to_json()
+        assert blob["near_miss_marker_count"] == 1, "the mutation did not land"
+        assert _validated(store).to_json()["near_miss_marker_count"] == 0
+
+
+# =============================================================================
+# 🔴 THE WRONG-WINDOW ESCALATION — reading the second window, not naming it.
+#
+# REGRESSION COVERAGE, watched RED AT BASE `3c54918`, where `render_wrong_window`
+# is the end of the story: it returns advice and nothing runs it.
+# =============================================================================
+
+
+def _base_ref(repo: Path, tmp_home: Path) -> None:
+    """Give the repo an `origin/main` the base-ref candidate loop can find.
+
+    A LOCAL branch of that name, deliberately — no remote, no network, and
+    `rev-parse --verify origin/main^{commit}` resolves it exactly as it resolves
+    a real remote-tracking ref. The escalation's whole claim is that it needs
+    git and nothing else.
+    """
+    _run_git(repo, "branch", "-f", "origin/main", "HEAD", home=tmp_home)
+
+
+class TestCommitWindowRange:
+    """The range, and EVERY way it can fail to produce one — each NAMED.
+
+    🔴 `claude/RULES.md`: an empty result cannot distinguish two mechanisms. "0
+    paths, nothing nominated" is the observable that a broken repo, a missing base
+    ref and a branch that has landed nothing all share.
+    """
+
+    def test_THE_POSITIVE_CONTROL_a_branch_with_commits_measures(
+        self, tmp_path: Path
+    ) -> None:
+        repo = _init_repo(tmp_path)
+        _base_ref(repo, tmp_path)
+        first = _commit(repo, "src/collector/a.py", tmp_home=tmp_path)
+        second = _commit(repo, "src/collector/b.py", tmp_home=tmp_path)
+        rng = st.commit_window_range(repo)
+        assert rng.reason is None
+        assert set(rng.shas) == {first, second}
+        assert rng.base_ref == "origin/main" and rng.branch == "main"
+        assert rng.detail and "2 non-merge commit(s)" in rng.detail
+
+    def test_NO_BASE_REF_is_named_not_silently_empty(self, tmp_path: Path) -> None:
+        """⚠ The branch is `topic` on purpose: `BASE_REF_CANDIDATES` includes the
+        bare `main`, so a repo whose only branch IS `main` has a base ref and
+        would exercise a different reason entirely."""
+        repo = _init_repo(tmp_path, branch="topic")
+        _commit(repo, "src/collector/a.py", tmp_home=tmp_path)
+        rng = st.commit_window_range(repo)
+        assert rng.reason == st.ESCALATION_NO_BASE_REF
+        assert rng.shas == () and "origin/main" in rng.detail
+
+    def test_NO_COMMITS_IN_RANGE_is_its_OWN_token(self, tmp_path: Path) -> None:
+        """Distinct from every other zero: the window WAS read and is empty."""
+        repo = _init_repo(tmp_path)
+        _base_ref(repo, tmp_path)
+        rng = st.commit_window_range(repo)
+        assert rng.reason == st.ESCALATION_NO_COMMITS
+        assert rng.merge_base is not None, "it got far enough to compute a merge-base"
+
+    def test_NO_SHARED_HISTORY_is_named(self, tmp_path: Path) -> None:
+        repo = _init_repo(tmp_path)
+        _run_git(repo, "checkout", "--orphan", "unrelated", home=tmp_path)
+        _commit(repo, "src/collector/orphan.py", tmp_home=tmp_path)
+        _run_git(repo, "branch", "-f", "origin/main", "main", home=tmp_path)
+        rng = st.commit_window_range(repo)
+        assert rng.reason == st.ESCALATION_NO_SHARED_HISTORY
+
+    def test_AN_UNBORN_HEAD_is_named(self, tmp_path: Path) -> None:
+        repo = tmp_path / "unborn"
+        repo.mkdir()
+        _run_git(repo, "init", "-b", "main", home=tmp_path)
+        rng = st.commit_window_range(repo)
+        assert rng.reason == st.ESCALATION_HEAD_UNRESOLVABLE
+
+    def test_A_NON_REPO_is_named_not_raised(self, tmp_path: Path) -> None:
+        plain = tmp_path / "not-a-repo"
+        plain.mkdir()
+        rng = st.commit_window_range(plain)
+        assert rng.reason == st.ESCALATION_GIT_FAILED
+
+    def test_A_DETACHED_HEAD_MEASURES_and_says_so(self, tmp_path: Path) -> None:
+        """🔴 DELIBERATE DIVERGENCE FROM THE SPEC, PINNED. A detached HEAD was
+        specified as a failure and is NOT one: `merge-base(<base>, HEAD)..HEAD`
+        means exactly what it means on a branch. Refusing here would blind the
+        escalation inside an agent worktree, which is the case it exists for. The
+        detachment is REPORTED — `branch is None` — never invented into an error."""
+        repo = _init_repo(tmp_path)
+        _base_ref(repo, tmp_path)
+        sha = _commit(repo, "src/collector/a.py", tmp_home=tmp_path)
+        _run_git(repo, "checkout", "--detach", sha, home=tmp_path)
+        rng = st.commit_window_range(repo)
+        assert rng.reason is None and rng.shas == (sha,)
+        assert rng.branch is None, "the detachment must be reported"
+        assert "DETACHED HEAD" in "\n".join(
+            st.render_window_escalation(
+                st.WindowEscalation(
+                    basis=st.ESCALATION_BASIS_COMMIT,
+                    reason=st.ESCALATION_GIT_FAILED,
+                    detail="x",
+                    commit_range=rng,
+                )
+            )
+        )
+
+    def test_EVERY_reason_the_range_can_emit_is_in_the_LEDGER(self) -> None:
+        """🔴 A ledger that can go stale is not a ledger. Pinned two-way against
+        the module's own `ESCALATION_*` constants, so a new reason added without
+        being enumerated fails here rather than arriving unnamed."""
+        emitted = {
+            v
+            for k, v in vars(st).items()
+            if k.startswith("ESCALATION_")
+            and isinstance(v, str)
+            and k != "ESCALATION_BASIS_COMMIT"
+        }
+        assert emitted == set(st.ESCALATION_REASONS)
+
+
+# =============================================================================
+# 🔴 THE MAINLINE IS DERIVED, NOT GUESSED.
+#
+# REGRESSION COVERAGE, watched RED AT BASE `9667fb8b`, where the base ref is a
+# four-name literal ladder — `origin/main, origin/master, main, master` — and a
+# repo whose mainline is `trunk` therefore returns `no-base-ref`. Measured in the
+# field the same day on `homelab-infra` (mainline `trunk`): the `--commit`
+# escalation was INERT in exactly the repo it had been called for.
+#
+# TWO-POINT MEASUREMENT against the REAL repos, before and after:
+#   ~/workspace/homelab-infra (mainline trunk)  no-base-ref -> origin/trunk, READ
+#   ~/workspace/devrc         (mainline main)   origin/main -> origin/main, same
+#
+# RED AT BASE `9667fb8b`: the three tests below whose docstrings do not say
+# otherwise. The other three pass at base and label themselves INVARIANT GUARDS
+# — the base has no derivation to fool, so their green there is vacuous; they
+# are proven live at HEAD by the mutation battery documented in
+# `test_handoff_doc.py`.
+# =============================================================================
+
+
+def _mainline_clone(tmp_path: Path, mainline: str, name: str = "downstream") -> Path:
+    """A real clone of a real bare origin whose default branch is `mainline`.
+
+    Deliberately a CLONE and not a hand-written ref: `refs/remotes/origin/HEAD`
+    is written by `git clone` itself, so the fixture reproduces how the field
+    repo actually got its symref rather than asserting against a shape invented
+    here. Still no network — the origin is a bare repo in the same tmp_path.
+    """
+    origin = tmp_path / f"{name}-origin.git"
+    _run_git(tmp_path, "init", "-q", "--bare", "-b", mainline, str(origin),
+             home=tmp_path)
+    seed = _init_repo(tmp_path, name=f"{name}-seed", branch=mainline)
+    _run_git(seed, "remote", "add", "origin", str(origin), home=tmp_path)
+    _run_git(seed, "push", "-q", "origin", mainline, home=tmp_path)
+    _run_git(tmp_path, "clone", "-q", str(origin), str(tmp_path / name), home=tmp_path)
+    return tmp_path / name
+
+
+class TestMainlineDerivation:
+    """Both directions, at two points: a `trunk` repo AND a `main` repo."""
+
+    def test_a_TRUNK_mainline_repo_MEASURES_its_window(self, tmp_path: Path) -> None:
+        """🔴 THE REGRESSION. Red at base with `no-base-ref`."""
+        repo = _mainline_clone(tmp_path, "trunk")
+        _run_git(repo, "checkout", "-q", "-b", "topic", home=tmp_path)
+        sha = _commit(repo, "src/collector/a.py", tmp_home=tmp_path)
+        rng = st.commit_window_range(repo)
+        assert rng.reason is None, rng.detail
+        assert rng.base_ref == "origin/trunk" and rng.shas == (sha,)
+
+    def test_a_MAIN_mainline_repo_STILL_measures_its_window(
+        self, tmp_path: Path
+    ) -> None:
+        """The other point. A fix verified only on `trunk` proves nothing about
+        the case that already worked.
+
+        ⚠ GREEN AT BASE `9667fb8b` — an INVARIANT GUARD, not regression coverage.
+        It pins that the derivation did not move the answer for the repos the
+        literal ladder already got right."""
+        repo = _mainline_clone(tmp_path, "main")
+        _run_git(repo, "checkout", "-q", "-b", "topic", home=tmp_path)
+        sha = _commit(repo, "src/collector/a.py", tmp_home=tmp_path)
+        rng = st.commit_window_range(repo)
+        assert rng.reason is None, rng.detail
+        assert rng.base_ref == "origin/main" and rng.shas == (sha,)
+
+    def test_the_GIT_SOURCE_window_derives_the_SAME_ref(self, tmp_path: Path) -> None:
+        """🔴 ONE RULE, ONE PLACE — pinned behaviourally, not by reading the
+        source. `collect_git_paths` and `commit_window_range` used to run
+        separate rev-parse loops over the same literal tuple and were blind to
+        `trunk` TOGETHER; a fix that reached only one of them would leave the git
+        source's window and the escalation's describing different ranges under a
+        single report while both claimed to have looked."""
+        repo = _mainline_clone(tmp_path, "trunk")
+        _run_git(repo, "checkout", "-q", "-b", "topic", home=tmp_path)
+        _commit(repo, "src/collector/a.py", tmp_home=tmp_path)
+        src = st.collect_git_paths(repo)
+        assert src.window == "branch", src.notes
+        assert "src/collector/a.py" in src.paths
+
+    def test_a_DANGLING_origin_HEAD_falls_THROUGH_and_is_never_believed(
+        self, tmp_path: Path
+    ) -> None:
+        """🔴 NOT HYPOTHETICAL — measured in `devrc` itself on 2026-08-21, where
+        `refs/remotes/origin/HEAD` pointed at a `refs/remotes/origin/trunk` with
+        no object behind it (a concurrent agent's fixture) while devrc's mainline
+        is `main`. `git symbolic-ref` prints that target cheerfully at exit 0, so
+        a derivation that trusts it INVERTS the bug it was written to fix.
+
+        ⚠ GREEN AT BASE `9667fb8b`, which has no derivation to be fooled — so it
+        is not regression coverage for the base. It IS regression coverage
+        against the FIRST CUT of this fix, and was watched to fail there."""
+        repo = _mainline_clone(tmp_path, "main")
+        _run_git(
+            repo, "symbolic-ref", "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/trunk", home=tmp_path,
+        )
+        _run_git(repo, "checkout", "-q", "-b", "topic", home=tmp_path)
+        sha = _commit(repo, "src/collector/a.py", tmp_home=tmp_path)
+        rng = st.commit_window_range(repo)
+        assert rng.base_ref == "origin/main", rng.detail
+        assert rng.shas == (sha,)
+
+    def test_a_LOCAL_branch_named_after_a_DANGLING_symref_is_NOT_a_rung(
+        self, tmp_path: Path
+    ) -> None:
+        """🔴 THE NEAR-MISS THIS TEST EXISTS FOR. An earlier cut of the fix
+        offered the symref's LOCAL counterpart (`trunk` after `origin/trunk`) as
+        a second rung, on the reasoning that the fallback ladder has the same
+        remote-then-local shape. Run against the real `devrc`, that selected a
+        stray local `trunk` branch sitting beside `main` — same fixture that left
+        the dangling symref — and returned 11 commits off an unrelated branch: a
+        plausible number, silently wrong, where the literal ladder it replaced
+        had been RIGHT. A symref that does not resolve is evidence about the
+        symref, not about a same-named local branch.
+
+        ⚠ GREEN AT BASE `9667fb8b` — the base has no derivation, so this is not
+        regression coverage for it. It is regression coverage against the FIRST
+        CUT of this fix, and was watched to fail there (`base_ref` came back
+        `trunk`)."""
+        repo = _mainline_clone(tmp_path, "main")
+        _run_git(
+            repo, "symbolic-ref", "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/trunk", home=tmp_path,
+        )
+        # the decoy: a local `trunk` with a commit of its own, exactly as devrc had
+        _run_git(repo, "checkout", "-q", "-b", "trunk", home=tmp_path)
+        _commit(repo, "decoy/unrelated.py", tmp_home=tmp_path)
+        _run_git(repo, "checkout", "-q", "-b", "topic", "origin/main", home=tmp_path)
+        sha = _commit(repo, "src/collector/a.py", tmp_home=tmp_path)
+        rng = st.commit_window_range(repo)
+        assert rng.base_ref == "origin/main", rng.detail
+        assert rng.shas == (sha,), "the decoy branch must not bound the window"
+
+    def test_NO_BASE_REF_names_the_LADDER_it_tried_not_the_candidate_tuple(
+        self, tmp_path: Path
+    ) -> None:
+        """🔴 A NAMED REASON MUST NAME WHAT WAS ACTUALLY LOOKED FOR. With a
+        derived rung in front, printing `BASE_REF_CANDIDATES` would describe four
+        refs while omitting the one that was tried FIRST — a message that is
+        wrong about the search it is reporting on."""
+        repo = _mainline_clone(tmp_path, "trunk")
+        _run_git(repo, "checkout", "-q", "-b", "topic", home=tmp_path)
+        _commit(repo, "src/collector/a.py", tmp_home=tmp_path)
+        # delete every ref the ladder can reach, derived rung included
+        _run_git(repo, "update-ref", "-d", "refs/remotes/origin/trunk", home=tmp_path)
+        _run_git(repo, "branch", "-q", "-D", "trunk", home=tmp_path)
+        rng = st.commit_window_range(repo)
+        assert rng.reason == st.ESCALATION_NO_BASE_REF
+        assert "origin/trunk" in rng.detail, rng.detail
+        for cand in st.BASE_REF_CANDIDATES:
+            assert cand in rng.detail, rng.detail
+
+
+class TestWindowEscalationRuns:
+    """🔴 THE ESCALATION IS AUTOMATIC, ON EXACTLY THE EXISTING CONDITION.
+
+    Measured motivation: the advisory fired identically on two consecutive
+    sessions and nobody ran the window it named — 3 paths under cwd against 24 in
+    the PR window on one, 0 under 19 on the other.
+
+    Every arm is a PAIR: it must run when dominated and must NOT run otherwise.
+    """
+
+    ONE_UNDER = ["src/collector/a.py"]
+    FIVE_OUTSIDE = ["w/x.py", "w/y.py", "w/z.py", "w/p.py", "w/q.py"]
+
+    def _repo_with_commits(self, tmp_path: Path) -> Path:
+        repo = _init_repo(tmp_path, SCOPE)
+        _base_ref(repo, tmp_path)
+        _commit(
+            repo, "src/collector/one.py", "src/collector/two.py", tmp_home=tmp_path
+        )
+        _commit(repo, "src/collector/three.py", tmp_home=tmp_path)
+        return repo
+
+    def _transcript(self, tmp_path: Path, repo: Path, dominated: bool) -> Path:
+        cwd = str(repo)
+        under = self.ONE_UNDER if dominated else self.FIVE_OUTSIDE
+        outside = self.FIVE_OUTSIDE if dominated else self.ONE_UNDER
+        return _write_transcript(
+            tmp_path / f"{'dom' if dominated else 'vis'}.jsonl",
+            cwd,
+            [f"{cwd}/{p}" for p in under] + [f"{tmp_path}/elsewhere/{p}" for p in outside],
+        )
+
+    def _run(self, tmp_path: Path, dominated: bool, capsys, extra=()):
+        repo = self._repo_with_commits(tmp_path)
+        t = self._transcript(tmp_path, repo, dominated)
+        store = _make_store(tmp_path / "s")
+        rc = st.main(
+            ["--repo", str(repo), "--store", str(store), "--scope", SCOPE,
+             "--transcript", str(t), "--today", TODAY, *extra]
+        )
+        return rc, capsys.readouterr().out
+
+    def test_THE_POSITIVE_CONTROL_a_dominated_run_reads_the_commit_window(
+        self, tmp_path: Path, capsys, tailer_cache
+    ) -> None:
+        rc, out = self._run(tmp_path, True, capsys)
+        assert rc == 0
+        assert "🔴 WRONG WINDOW?" in out, "premise gone: the run is not dominated"
+        assert "SECOND WINDOW, RUN AUTOMATICALLY — basis `--commit`" in out
+        assert "2 non-merge commit(s)" in out
+        assert "ran: git rev-list --no-merges" in out
+
+    def test_THE_NEGATIVE_CONTROL_a_mostly_visible_run_reads_NOTHING_extra(
+        self, tmp_path: Path, capsys, tailer_cache
+    ) -> None:
+        """🔴 The half that makes the positive control mean something. An
+        escalation that also ran here would be the unconditional second window
+        this design exists not to be — and it would cost a git walk every run.
+
+        ⚠ INVARIANT GUARD, NOT REGRESSION COVERAGE — measured green at base
+        `3c54918`, where nothing escalates at all so silence here is free. It
+        pins the silence against a future widening; it does not demonstrate the
+        defect. `test_kills_the_CONDITION_itself` is what proves it can go red.
+        """
+        rc, out = self._run(tmp_path, False, capsys)
+        assert rc == 0
+        assert "WRONG WINDOW?" not in out
+        # ⚠ NOT a bare `"SECOND WINDOW" not in out`: the advisory block's own
+        # text says "READ A SECOND WINDOW", so that substring is ambiguous and
+        # would pass here for the wrong reason on a run where it DID fire.
+        assert "SECOND WINDOW, RUN AUTOMATICALLY" not in out
+        assert "SECOND WINDOW COULD NOT BE READ" not in out
+
+    def test_it_LABELS_which_basis_produced_the_nominations(
+        self, tmp_path: Path, capsys, tailer_cache
+    ) -> None:
+        """🔴 Two path sets reported SIDE BY SIDE and never merged. A reader has
+        to be able to say which basis produced which proposal without counting
+        back up the page."""
+        _, out = self._run(tmp_path, True, capsys)
+        assert "nominated BY THE COMMIT WINDOW: collector (3 paths)" in out
+        assert "nominated BY THE SESSION WINDOW: (nothing)" in out
+        assert "REPORTED SIDE BY SIDE, NEVER MERGED" in out
+
+    def test_the_LABELS_are_load_bearing_when_the_two_bases_DISAGREE(
+        self, tmp_path: Path, capsys, tailer_cache
+    ) -> None:
+        """🔴 THE CASE THE LABELS EXIST FOR, and the one that makes them more than
+        decoration: a dominated session whose few visible paths still resolve to
+        ONE entry, while the commit window resolves to a DIFFERENT one. Both sides
+        non-empty, and different — so a reader who cannot tell them apart would
+        attribute a bullet to the wrong basis.
+
+        The two entries are distinct store entries and the two path sets are
+        disjoint, so neither label can be right by coincidence.
+        """
+        repo = _init_repo(tmp_path, SCOPE)
+        _base_ref(repo, tmp_path)
+        _commit(repo, "src/status-bar/x.py", "src/status-bar/y.py", tmp_home=tmp_path)
+        cwd = str(repo)
+        t = _write_transcript(
+            tmp_path / "both.jsonl",
+            cwd,
+            [f"{cwd}/src/collector/a.py", f"{cwd}/src/collector/b.py"]
+            + [f"{tmp_path}/elsewhere/{p}" for p in self.FIVE_OUTSIDE],
+        )
+        store = _make_store(tmp_path / "s")
+        st.main(
+            ["--repo", str(repo), "--store", str(store), "--scope", SCOPE,
+             "--transcript", str(t), "--today", TODAY]
+        )
+        out = capsys.readouterr().out
+        assert "🔴 WRONG WINDOW?" in out, "premise gone: the run is not dominated"
+        assert "nominated BY THE COMMIT WINDOW: status-bar (2 paths)" in out
+        assert "nominated BY THE SESSION WINDOW: collector (2 paths)" in out
+
+    def test_it_does_NOT_REMOVE_the_existing_counters(
+        self, tmp_path: Path, capsys, tailer_cache
+    ) -> None:
+        """The unconditional `note:` line is load-bearing — the escalation adds a
+        second basis, it does not replace the first.
+
+        ⚠ INVARIANT GUARD, NOT REGRESSION COVERAGE — measured green at base
+        `3c54918`, where those counters were already printed. It exists so a
+        later "the second window supersedes the first" tidy-up fails here.
+        """
+        _, out = self._run(tmp_path, True, capsys)
+        assert "5 of the 6 path(s) this session named (83%)" in out
+        assert "NOT among the 1 this window reports" in out
+
+    def test_it_DEGRADES_LOUDLY_with_a_NAMED_reason(
+        self, tmp_path: Path, capsys, tailer_cache
+    ) -> None:
+        """🔴 Not an empty result that reads as "nothing to nominate"."""
+        # Branch `topic`, deliberately: `main` is itself a base-ref candidate, so
+        # a repo on `main` has one and would take a different branch entirely.
+        repo = _init_repo(tmp_path, SCOPE, branch="topic")
+        t = self._transcript(tmp_path, repo, True)
+        store = _make_store(tmp_path / "s")
+        rc = st.main(
+            ["--repo", str(repo), "--store", str(store), "--scope", SCOPE,
+             "--transcript", str(t), "--today", TODAY]
+        )
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert f"SECOND WINDOW COULD NOT BE READ — basis `--commit`, reason `{st.ESCALATION_NO_BASE_REF}`" in out
+        assert 'THIS IS NOT "NOTHING TO NOMINATE"' in out
+        assert "SECOND WINDOW, RUN AUTOMATICALLY" not in out
+
+    def test_AN_EMPTY_RANGE_gets_a_DIFFERENT_headline_from_a_BROKEN_one(
+        self, tmp_path: Path
+    ) -> None:
+        """🔴 TWO MECHANISMS, TWO HEADLINES. `no-commits-in-range` is the one
+        token where the range genuinely WAS computed and came back empty; every
+        other means the instrument never ran. A single "could not be read" header
+        would be a false statement on whichever case it was not written for."""
+        empty = _init_repo(tmp_path, "empty-range")
+        _base_ref(empty, tmp_path)
+        broken = _init_repo(tmp_path, "no-base", branch="topic")
+        store = _make_store(tmp_path / "s")
+        a = st.escalate_to_commit_window(empty, store, SCOPE, today=TODAY)
+        b = st.escalate_to_commit_window(broken, store, SCOPE, today=TODAY)
+        assert (a.reason, b.reason) == (
+            st.ESCALATION_NO_COMMITS,
+            st.ESCALATION_NO_BASE_REF,
+        )
+        first = "\n".join(st.render_window_escalation(a))
+        second = "\n".join(st.render_window_escalation(b))
+        assert "SECOND WINDOW READ, AND IT IS EMPTY" in first
+        assert "COULD NOT BE READ" not in first
+        assert "SECOND WINDOW COULD NOT BE READ" in second
+        assert "READ, AND IT IS EMPTY" not in second
+
+    def test_it_TAKES_NO_NETWORK(self, tmp_path: Path, capsys, monkeypatch, tailer_cache) -> None:
+        """🔴 `--commit`, NOT `--pr`. The PR window needs `gh`, which is a network
+        call, an auth dependency and a rate limit; nothing on the automatic path
+        may acquire those. A fetcher wired to explode is the only way to prove the
+        automatic path never reaches it."""
+        def _boom(*a, **k):  # pragma: no cover - it must never be called
+            raise AssertionError("the escalation reached the network")
+
+        monkeypatch.setattr(st, "_gh_fetch_pr", _boom)
+        _, out = self._run(tmp_path, True, capsys)
+        assert "SECOND WINDOW, RUN AUTOMATICALLY" in out
+        for line in out.splitlines():
+            if line.strip().startswith("ran: "):
+                assert line.split("ran: ", 1)[1].startswith("git "), line
+
+    def test_the_JSON_carries_the_escalation_and_its_provenance(
+        self, tmp_path: Path, capsys, tailer_cache
+    ) -> None:
+        _, out = self._run(tmp_path, True, capsys, extra=("--json",))
+        esc = json.loads(out)["escalation"]
+        assert esc["basis"] == "commit" and esc["measured"] is True
+        assert esc["reason"] is None
+        assert esc["commit_count"] == 2 and esc["detached_head"] is False
+        assert esc["base_ref"] == "origin/main"
+        assert [n["ref"] for n in esc["known"]] == ["collector"]
+
+    def test_the_JSON_is_NONE_when_the_escalation_DID_NOT_RUN(
+        self, tmp_path: Path, capsys, tailer_cache
+    ) -> None:
+        """🔴 `None` must mean "not attempted" and nothing else — a run that
+        attempted and could not measure carries a dict with a `reason`."""
+        _, out = self._run(tmp_path, False, capsys, extra=("--json",))
+        assert json.loads(out)["escalation"] is None
+
+    def test_the_escalation_WRITES_NOTHING(
+        self, tmp_path: Path, capsys, tailer_cache
+    ) -> None:
+        repo = self._repo_with_commits(tmp_path)
+        t = self._transcript(tmp_path, repo, True)
+        store = _make_store(tmp_path / "s")
+        before = _tree_hash(store)
+        st.main(
+            ["--repo", str(repo), "--store", str(store), "--scope", SCOPE,
+             "--transcript", str(t), "--today", TODAY]
+        )
+        assert "SECOND WINDOW, RUN AUTOMATICALLY" in capsys.readouterr().out
+        assert _tree_hash(store) == before
+
+    def test_the_RENDERERS_STAY_PURE(self, tmp_path: Path) -> None:
+        """🔴 `render_text` promises same-report-in, same-bytes-out. The git work
+        happens once at the CLI's impure boundary and travels on the report — a
+        renderer that shelled out would break that and make every existing test of
+        it depend on a repo."""
+        store = _make_store(tmp_path / "s")
+        rep = _report(["src/collector/a.py"], store)
+        assert rep.escalation is None
+        assert st.render_text(rep) == st.render_text(rep)
+
+
+class TestWindowEscalationMutationKills:
+    """Break the NARROWEST expression that can be wrong, one at a time.
+
+    🔴 POSITIVE CONTROL FOR THE BATCH: `test_kills_the_ESCALATION_call_site`.
+    🔴 NEGATIVE CONTROL: `test_the_NO_OP_mutant_changes_nothing`.
+    """
+
+    def _repo(self, tmp_path: Path) -> Path:
+        repo = _init_repo(tmp_path, SCOPE)
+        _base_ref(repo, tmp_path)
+        _commit(repo, "src/collector/one.py", tmp_home=tmp_path)
+        return repo
+
+    def _dominated(self, tmp_path: Path, repo: Path) -> Path:
+        cwd = str(repo)
+        return _write_transcript(
+            tmp_path / "dom.jsonl",
+            cwd,
+            [f"{cwd}/src/collector/a.py"]
+            + [f"{tmp_path}/elsewhere/{p}" for p in TestWindowEscalationRuns.FIVE_OUTSIDE],
+        )
+
+    def _visible(self, tmp_path: Path, repo: Path) -> Path:
+        cwd = str(repo)
+        return _write_transcript(
+            tmp_path / "vis.jsonl",
+            cwd,
+            [f"{cwd}/src/collector/{n}.py" for n in ("a", "b", "c", "d", "e")]
+            + [f"{tmp_path}/elsewhere/q.py"],
+        )
+
+    def _run(self, mod, repo: Path, transcript: Path, store: Path, capsys) -> str:
+        mod.main(
+            ["--repo", str(repo), "--store", str(store), "--scope", SCOPE,
+             "--transcript", str(transcript), "--today", TODAY]
+        )
+        return capsys.readouterr().out
+
+    def test_the_NO_OP_mutant_changes_nothing(
+        self, tmp_path: Path, capsys, tailer_cache
+    ) -> None:
+        """🔴 NEGATIVE CONTROL FOR THE BATCH."""
+        mod = _session_mutant(
+            tmp_path,
+            "m_esc_noop",
+            [('ESCALATION_BASIS_COMMIT = "commit"', 'ESCALATION_BASIS_COMMIT = "com" "mit"')],
+            st._session_tailer(),
+        )
+        repo = self._repo(tmp_path)
+        out = self._run(mod, repo, self._dominated(tmp_path, repo), _make_store(tmp_path / "s"), capsys)
+        assert "SECOND WINDOW, RUN AUTOMATICALLY — basis `--commit`" in out
+
+    def test_kills_the_ESCALATION_call_site(
+        self, tmp_path: Path, capsys, tailer_cache
+    ) -> None:
+        """POSITIVE CONTROL. The escalation is computable and simply never runs —
+        the pre-change behaviour, and the exact failure this fix is for."""
+        mod = _session_mutant(
+            tmp_path,
+            "m_esc_callsite",
+            [("        if wrong_window_dominance(source) is not None:",
+              "        if False:")],
+            st._session_tailer(),
+        )
+        repo = self._repo(tmp_path)
+        t = self._dominated(tmp_path, repo)
+        store = _make_store(tmp_path / "s")
+        out = self._run(mod, repo, t, store, capsys)
+        assert "WRONG WINDOW?" in out, "the advisory half must be untouched"
+        assert "SECOND WINDOW, RUN AUTOMATICALLY" not in out
+        assert "SECOND WINDOW COULD NOT BE READ" not in out
+        assert "SECOND WINDOW, RUN AUTOMATICALLY" in self._run(st, repo, t, store, capsys)
+
+    def test_kills_the_CONDITION_itself(
+        self, tmp_path: Path, capsys, tailer_cache
+    ) -> None:
+        """`if True`: a git walk on EVERY run, and a second window reported for a
+        session the first one saw fine. Only the negative control can see it."""
+        mod = _session_mutant(
+            tmp_path,
+            "m_esc_always",
+            [("        if wrong_window_dominance(source) is not None:", "        if True:")],
+            st._session_tailer(),
+        )
+        repo = self._repo(tmp_path)
+        out = self._run(mod, repo, self._visible(tmp_path, repo), _make_store(tmp_path / "s"), capsys)
+        assert "WRONG WINDOW?" not in out, "the mutation must be the condition, not the rule"
+        assert "SECOND WINDOW, RUN AUTOMATICALLY" in out
+
+    def test_kills_the_RENDERER_call_site(
+        self, tmp_path: Path, capsys, tailer_cache
+    ) -> None:
+        """The other half of the seam: the window is read and never surfaces —
+        the numbers exist and no reader sees them."""
+        mod = _session_mutant(
+            tmp_path,
+            "m_esc_render",
+            [("    out.extend(render_window_escalation(report.escalation, report))",
+              "    pass")],
+            st._session_tailer(),
+        )
+        repo = self._repo(tmp_path)
+        out = self._run(mod, repo, self._dominated(tmp_path, repo), _make_store(tmp_path / "s"), capsys)
+        assert "WRONG WINDOW?" in out
+        assert "SECOND WINDOW, RUN AUTOMATICALLY" not in out
+        assert "SECOND WINDOW COULD NOT BE READ" not in out
+
+    def test_kills_the_EMPTY_RANGE_reason(self, tmp_path: Path) -> None:
+        """🔴 THIS guard's own symptom, not a neighbour's. Without the named
+        `no-commits-in-range`, an empty range falls through to
+        `collect_commit_paths`, which raises — and the run reports
+        `commit-window-failed`: a real token for the WRONG mechanism, which is
+        the diagnosis-by-coin-flip `claude/RULES.md` forbids."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_esc_empty",
+            [("    if not shas:", "    if False:")],
+        )
+        repo = _init_repo(tmp_path, SCOPE)
+        _base_ref(repo, tmp_path)  # base ref present, but HEAD is AT the merge-base
+        store = _make_store(tmp_path / "s")
+        got = mod.escalate_to_commit_window(repo, store, SCOPE, today=TODAY)
+        assert got.reason == mod.ESCALATION_READ_FAILED
+        real = st.escalate_to_commit_window(repo, store, SCOPE, today=TODAY)
+        assert real.reason == st.ESCALATION_NO_COMMITS
+
+    def test_kills_the_NO_MERGES_filter(self, tmp_path: Path) -> None:
+        """Without it a merge commit lands in the range, `_resolve_commit` refuses
+        it, and the whole escalation degrades to `commit-window-failed` — a window
+        that stops working on any branch that ever merged."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_esc_merges",
+            [('    args = ["rev-list", "--no-merges", f"{merge_base}..HEAD"]',
+              '    args = ["rev-list", f"{merge_base}..HEAD"]')],
+        )
+        repo = _init_repo(tmp_path, SCOPE)
+        _base_ref(repo, tmp_path)
+        _run_git(repo, "checkout", "-b", "side", home=tmp_path)
+        _commit(repo, "src/collector/side.py", tmp_home=tmp_path)
+        _run_git(repo, "checkout", "main", home=tmp_path)
+        _commit(repo, "src/collector/main.py", tmp_home=tmp_path)
+        _run_git(repo, "merge", "--no-ff", "-m", "m", "side", home=tmp_path)
+        store = _make_store(tmp_path / "s")
+        assert mod.escalate_to_commit_window(
+            repo, store, SCOPE, today=TODAY
+        ).reason == mod.ESCALATION_READ_FAILED
+        assert st.escalate_to_commit_window(repo, store, SCOPE, today=TODAY).reason is None
+
+    def test_kills_the_DID_NOT_RUN_guard(self, tmp_path: Path) -> None:
+        """`escalation is None` means NOT ATTEMPTED. Without the guard the
+        renderer reads attributes off `None` — this guard's own symptom, an
+        AttributeError on a report that simply has no second window, not a
+        quietly wrong block."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_esc_none",
+            [("    if escalation is None:\n        return []",
+              "    if False:\n        return []")],
+        )
+        with pytest.raises(AttributeError):
+            mod.render_window_escalation(None)
+        assert st.render_window_escalation(None) == []

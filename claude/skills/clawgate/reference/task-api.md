@@ -10,11 +10,12 @@ Routes registered in `internal/api/server.go` `registerNotesRoutes`, handlers in
 | op | route | notes |
 |---|---|---|
 | **create** | `POST /api/tasks` | `{directory, title, body, model, repo, branch, privileges, tags}`; `body` required (400); unknown keys silently dropped (no `DisallowUnknownFields`). ⚠ **Response is `{"id":N}` and nothing else** — not the created task; read any field back with `GET /api/tasks/{id}` |
-| **read** | `GET /api/tasks[/{id}]` · `?tag=&status=&limit=&summary=` | ⚠ **RE-MEASURED against live 0.7.87 (2026-08-13): `?status=`, `?limit=` and `?summary=1` are now honoured SERVER-SIDE.** The older claim here that they were "silently ignored" was true at 0.7.85 and is now WRONG — do not re-derive it. Positive control run today: unfiltered `19` tasks vs `--limit 3` → `3`; `--status open` returned only `open`. `tag` ANDs (repeatable), bogus tag → `200 []`; default order newest-`updated_at` first. Unfiltered+unsummarised is still ~25k tokens, so **always pass `--summary` first** (drops bodies/comments/attachments for counts). 🔑 **Comments are EMBEDDED in both the list and the single GET** (`comments: [{id,noteId,author,body,createdAt}]`) — there is **no read endpoint**: `GET /api/tasks/{id}/comments` is **405** (POST-only), which reads as "wrong method, keep looking" and sends you hunting for a route that was never there. Attachments are `omitempty` metadata only; bytes come from the session route `GET /tasks/{id}/attachments/{aid}` |
+| **read** | `GET /api/tasks[/{id}]` · `?tag=&status=&limit=&summary=` | ⚠ **RE-MEASURED against live 0.7.87 (2026-08-13): `?status=`, `?limit=` and `?summary=1` are now honoured SERVER-SIDE.** The older claim here that they were "silently ignored" was true at 0.7.85 and is now WRONG — do not re-derive it. Positive control run today: unfiltered `19` tasks vs `--limit 3` → `3`; `--status open` returned only `open`. `tag` ANDs (repeatable), bogus tag → `200 []`; default order newest-`updated_at` first. Unfiltered+unsummarised is still ~25k tokens, so **always pass `--summary` first** (drops bodies/comments/attachments for counts). 🔑 **Comments are EMBEDDED in both the list and the single GET** (`comments: [{id,noteId,author,body,createdAt,retracted?}]`) — there is **no read endpoint**: `GET /api/tasks/{id}/comments` is **405** (POST-only), which reads as "wrong method, keep looking" and sends you hunting for a route that was never there. 🔴 **A retracted comment still appears here with `body: ""` and `"retracted": true`** — see "Comment retraction" below before reading an empty body as a bug. Attachments are `omitempty` metadata only; bytes come from the session route `GET /tasks/{id}/attachments/{aid}` |
 | **edit** | `PATCH /api/tasks/{id}` | content + dispatch config + `tags` (replace) / `addTags` / `removeTags` (merge); **status/provenance/created_at immutable**; `tags`+merge together → 400 (0.7.73/0.7.75). ⚠ **The `in_progress` 409 is REFINED, not blanket**: a **descriptive-tag-only** edit SUCCEEDS while in progress (a label is not a spec change). 409 fires only when a non-tag field is present, or any touched tag is a ROUTING tag — and a `tags` **replace** counts the CURRENT set as touched, so it 409s on any task that already has one |
 | **set-status** | `PATCH /api/tasks/{id}/status` | ANY status incl. `complete`; **NO `in_progress` guard**; broadcasts `task.changed` + fires the `ready_for_review` push (0.7.74) |
 | **delete** | `DELETE /api/tasks/{id}` | ⚠ shares `dismissTask`, so it **TEARS DOWN a live dispatched agent pod** (`Provisioner.Destroy`, background best-effort). **No in-progress guard — deliberately** (`TestAPITaskDeleteInProgressAllowed`). Delete a dispatched task only if you mean to kill its agent. `404` if absent — the existence probe is load-bearing, since `DELETE … WHERE id=$1` succeeds with 0 rows (0.7.76) |
-| **comment (write)** | `POST /api/tasks/{id}/comments` | `{body}` only; author from the bounded `X-Clawgate-Source` allowlist (`{extension, api, drafter, repo-cos, claude-code}`, unknown → `api`), **NEVER from the body** — `user`/`operator` are structurally unreachable. Markdown; coalesced push on the machine path only (0.7.78) |
+| **comment (write)** | `POST /api/tasks/{id}/comments` | `{body}` only; author from the bounded `X-Clawgate-Source` allowlist (`{extension, api, drafter, repo-cos, claude-code}`, unknown → `api`), **NEVER from the body** — `user`/`operator` are structurally unreachable. 🔴 **`clickup` is a SIXTH member in trunk SOURCE (PR #346, 2026-08-19) that is NOT in any released image** — probed live on **0.7.96**, `X-Clawgate-Source: clickup` still comes back `author: "api"`. This is the skill drifting in BOTH directions at once, so treat the set as *five live, six in source* until a release lands, and **probe rather than assume**: post a throwaway comment and read the author back. A producer that keys an echo guard on `author == "clickup"` today is silently inert — clickup-mirror keys on its own ledger for exactly this reason. This entry is the authoritative copy; `internals.md` defers to it. Markdown; coalesced push on the machine path only (0.7.78). ⚠ **The body is `strings.TrimSpace`d before storage**, so it comes back shorter than you sent it whenever it had surrounding whitespace — normalisation, NOT truncation. The real cap is `maxTaskBodyLen` = **200,000 runes** (truncate-never-reject). `clawgatectl` ≤ 2026-08-15 misreported the trimmed newline every heredoc/`--body-file` produces as *"sent N runes, stored N-1 … not recoverable"* (homelab-infra #325) |
+| **comment (delete)** | `DELETE /api/tasks/{id}/comments/{cid}` | 🔴 **SOFT — it redacts, it does not remove** (migration 0021, shipped 0.7.90). Sets `note_comments.deleted_at`; the ROW SURVIVES and still appears in both embeds with `body: ""` + `"retracted": true`. Recoverable by a one-column `UPDATE`. Task-scoped: a `cid` on a different task is a 404, not a cross-thread hit. **Idempotent-by-404** — a repeat is `404 {"error":"comment not found"}`, exactly as a repeat task delete answers. Bad id → 400 · unknown/**dismissed** task → 404 `task not found` · store failure → 500. Broadcasts `task.changed`. There is **no bulk/undelete route** |
 | **tag vocab** | `GET /api/tags` | `[{tag,count}]` |
 | **projects** | `GET /api/projects` | ⚠ an **OBJECT**, not an array: `{"projects":[{"name","count"}]}` — and keyed `name`, unlike `/api/tags`'s `[{"tag","count"}]`. Derives from the `project:` tag namespace (0.7.81) |
 | **merge** | `POST /tasks/merge` | 🔴 **SESSION route, no `/api` counterpart, FORM-encoded** (`winner=`,`loser=`). Merge by SUPERSEDE — nothing is deleted; winner gains the tag union + a comment, loser gets a comment and `complete`. 400 self-merge/bad id · 404 unknown · 409 if EITHER task is `in_progress` or already `complete`. 200 with an EMPTY body + `HX-Trigger`. The machine gap is deliberate: the audit comments are authored `user`, which `taskCommentAuthor` structurally cannot mint (0.7.84) |
@@ -30,6 +31,32 @@ read-back `GET` is usually redundant:
 - `PATCH /api/tasks/{id}` and `PATCH /api/tasks/{id}/status` → the **full updated task**.
 - `POST /api/tasks/{id}/comments` → the **created comment** `{id,noteId,author,body,createdAt}`.
 - `DELETE /api/tasks/{id}` → `{"id":N,"deleted":true}`.
+- `DELETE /api/tasks/{id}/comments/{cid}` → `{"id":<cid>,"taskId":N,"deleted":true}`.
+
+## 🔴 Comment retraction: an empty `body` is a TOMBSTONE, not a blanking bug
+Verified live on 0.7.95 (2026-08-15) against a throwaway task. Deleting a comment leaves it in
+place, redacted:
+
+```json
+{ "id": 105, "noteId": 205, "author": "claude-code", "body": "", "retracted": true }
+```
+
+**Why the row survives rather than disappearing.** A dismissed TASK vanishing from the board is
+visible — the card is gone. A comment vanishing from a thread would be **invisible**: the thread
+just silently shortens, and on a board agents read as authoritative a quiet mass retraction would
+leave no trace. So the reads REDACT rather than filter (`commentCols` in
+`internal/notes/pgstore.go` selects `CASE WHEN deleted_at IS NULL THEN body ELSE '' END` plus the
+flag). The body is never selected out of the database at all, so no read path can leak it.
+
+🔴 **`retracted` is the predicate — never infer retraction from an empty body**, and never treat an
+empty body on a live comment as a retraction. The field is `omitempty`, so a live comment simply
+has no `retracted` key.
+
+⚠ **This is the trap that makes the soft delete look broken.** A consumer that prints `.body` per
+comment (the bare `jq` recipe below used to) renders a retraction as a blank, unexplained entry —
+which reads as "DELETE returned 200 and blanked the body". It didn't; it retracted it. Check the
+flag before filing a bug. The UI already draws a `comment retracted` tombstone in its place, on both
+the task card and the agent detail page.
 
 ## 🔴 Notifications: a COMMENT is the only write that notifies a watcher
 Read in source on `trunk`, 2026-08-14 — not inferred from behaviour:
@@ -82,6 +109,19 @@ is answered structurally, not by promising to keep it fresh: response bodies are
 prints a one-line `note: server X, clawgatectl built for Y` skew warning **to stderr** when the two
 disagree. What is NOT answered: a route the CLI has never heard of is still a route you must curl.
 
+🔴 **That skew note was MUTE for 19 hours on the laptop, and the argument above was wrong until
+2026-08-18.** `clawgatectl.nix` used to carry a hand-written `version` literal and stamp it with
+`-ldflags -X main.buildVersion=`, so on 2026-08-14 the laptop — whose `~/workspace/homelab-talos`
+was 24 commits behind — built a CLI with **no `task status` and no `task comment`** and the nix
+literal labelled it `0.7.95` anyway. `h.Version == buildVersion` compared equal, the note stayed
+silent, and `clawgatectl task status <id> in_progress` printed help and **exited 0**. The fix is
+in devrc: the version is now **read out of
+`<homelab-talos>/containers/clawgate/cmd/clawgatectl/client.go`'s own `var buildVersion`**,
+so a stale checkout reports its real version and the skew note fires correctly. Two consequences
+worth knowing: **the note is only as good as the checkout's freshness** — `drift-check.sh` rc 17
+now reports a stale `homelab-talos` per host — and an **unparseable** `var buildVersion` line means
+the package is not installed at all (`clawgatectl: command not found`), never a guessed label.
+
 It reads `CLAWGATE_API_URL` + `CLAWGATE_HOOK_TOKEN` out of `~/.claude/clawgate.env` itself, so the
 `H="Authorization: Bearer $(grep '^CLAWGATE_HOOK_TOKEN=' … | cut -d= -f2)"` preamble that used to
 head every recipe in this skill **is gone** — the token never reaches argv (`/proc` is world
@@ -106,8 +146,10 @@ clawgatectl task ls --summary --status open --limit 20 \
   | jq -r '.[] | "\(.id)\t\(.status)\t\(.title // .directory)\t\((.tags//[])|join(","))\t\(.commentCount)c"'
 
 # one task + its comments (comments are ALREADY here — there is no /comments GET)
+# NOTE the `.retracted` branch: without it a retracted comment prints as a blank
+# entry and reads as a server bug. See "Comment retraction" above.
 clawgatectl task get 177 \
-  | jq -r '"#\(.id) [\(.status)] \(.title)\n\n\(.body)\n\n--- comments ---", ((.comments//[])[] | "[\(.author) \(.createdAt[0:16])]\n\(.body)")'
+  | jq -r '"#\(.id) [\(.status)] \(.title)\n\n\(.body)\n\n--- comments ---", ((.comments//[])[] | "[\(.author) \(.createdAt[0:16])]\n\(if .retracted then "(comment retracted)" else .body end)")'
 
 # name -> id: THE read that replaces `SELECT id FROM agents WHERE name=…`
 clawgatectl agent resolve operator --id       # -> 10
@@ -178,7 +220,8 @@ adjacent text → selector → accessible name. Full procedure, worked example, 
 `/home/zach/workspace/devrc/claude/skills/clawgate/reference/element-references.md`.
 
 ## Card producers — all share `CLAWGATE_HOOK_TOKEN`
-⚠ **Rotation coupling: rotating the token means updating all three, or they fail silently.**
+⚠ **Rotation coupling: rotating the token means updating all three of 1–3 below, or they fail
+silently.** (4 is exempt — it reads clawgate's own secret rather than holding a copy.)
 1. The two local hooks (token in `~/.claude/clawgate.env`).
 2. The **task-spec drafter** — a homelab kubeclaw CronJob POSTing one daily `type:"permission"`
    digest card to `/api/send`, tool=`Task-spec drafter`, project=`task-drafter-agent`. It reads the
@@ -189,6 +232,29 @@ adjacent text → selector → accessible name. Full procedure, worked example, 
 3. **repo-cos** (`devrc/scripts/repo-cos/clawgate.py`) — on an "approve" reply it POSTs the proposal
    as a durable Task via `POST /api/tasks`. Reads the token from **`~/.claude/clawgate.env`** on the
    workbench (NOT a k8s secret). See the `repo-cos` skill.
+4. **clickup-mirror** (`homelab-talos/scripts/clickup-mirror/`, CronJob in
+   `clusters/workbench/apps/clickup-mirror/`) — mirrors Zach's assigned ClickUp tickets into Tasks
+   and writes agent progress back. 🔴 **The first producer that is not write-only**: it also
+   `GET`s `/api/tasks`, `PATCH`es content/tags/status and POSTs comments, so it is a *consumer* of
+   this whole surface, not just `POST /api/tasks`. Two consequences worth knowing before you change
+   a route's semantics: it depends on **comments being EMBEDDED** in the task read (there is no
+   comment GET), and on a **descriptive-tag-only `PATCH` succeeding while `in_progress`**.
+   Correlation key is the descriptive tag **`clickup:<ticket-id>`** (+ `clickup-list:<slug>`); a
+   durable ledger in Postgres schema `clickup_mirror` (inside clawgate's own DB) is what stops a
+   dismissed ticket being resurrected — **it deliberately does NOT dedupe by tag**, so tasks created
+   outside that ledger get duplicated on the next run. Reads `CLAWGATE_HOOK_TOKEN` from clawgate's
+   **own `clawgate-secrets`** (same namespace, never copied — hence exempt from the rotation
+   coupling above). 🔴 **RE-MEASURED against the live cluster 2026-08-21: it is ON.** CronJob
+   `suspend: false` (hourly at `:17`, last run succeeded), env `CLICKUP_MIRROR_MODE=commit`, and the
+   ConfigMap's `writeback.enabled: true` — so phase 2 EXECUTES and **ClickUp may ALREADY have been
+   told** about a task you are looking at; only `writeback.allow_terminal_status` is still shut, so
+   it will not close a ticket. The older claim here — "as of 2026-08-19 it ships suspended, dry-run,
+   with write-back disabled" — was true the day it was written and is now WRONG; do not re-derive
+   it. ⚠ This is another repo's **deployment** state, which no devrc test can pin, so **verify
+   before acting on it**: `kubectl -n clawgate get cronjob clickup-mirror -o
+   jsonpath='{.spec.suspend}'`, the container's `CLICKUP_MIRROR_MODE`, and the `writeback` block of
+   `cm/clickup-mirror-config`. The four-gate ledger is kept in
+   `<homelab-talos>/clusters/workbench/apps/clickup-mirror/README.md`.
 
 ## Auth / access (0.7.37 — clawgate has NO human auth of its own)
 No magic-link `/login?token=`, no session cookie, no `CLAWGATE_AUTH_TOKEN` /
@@ -219,12 +285,16 @@ and **no login QR to manage**.
   Runbook **checkpoints** (`store.TypeCheckpoint`) are skipped in the sweep — an approval gate stays
   a human decision. Disable with `enabled=false`, which clears the window and falls back to the
   per-project rules. e2e coverage: `e2e/tests/auto-approve-all.spec.ts` (2 tests, **not** Docker-gated).
-- 🔴 **The idle-task reaper is a second unattended destroyer.** `defaultTaskReapAfter = 7d`
-  (`internal/api/server.go:1229`); the daily retention sweep calls `reapIdleTasks` (`:1303`) which
-  calls the **same `dismissTask`** as `DELETE /api/tasks/{id}` (`:1318`) — so an idle task's linked
-  agent pod is torn down too. `CLAWGATE_TASK_TTL` is **unset in the live deployment** (verified
-  2026-08-12), so the 7d default is what is running; `off` or `0` disables the reaper. Measured live 0.7.85, 2026-08-11: `GET /api/requests` → **200
-  with no credential**, `GET /api/tasks` → **401**. Never infer exposure from the path prefix.
+- ⚠ **The idle-task reaper is NOT a second unattended destroyer — not since 0.7.96.** It used to
+  call the **same `dismissTask`** as `DELETE /api/tasks/{id}`, tearing down the linked agent pod on a
+  timer; `cf529d41` replaced that with `AddTags`+`AddComment`, so a task untouched past the window is
+  **tagged `stale` and left intact** (`reapIdleTasks`, `internal/api/server.go:1398`). Re-read the
+  function before re-deriving the old claim — the 60 lines of comment ABOVE it still describe the
+  destructive version. `defaultTaskReapAfter = 7d` (`:1284`) and `CLAWGATE_TASK_TTL` is **unset in
+  the live deployment** (re-verified 2026-08-20, live 0.7.97), so the 7d default is what runs;
+  `off`/`0` disables it.
+- 🔴 **Never infer exposure from the path prefix.** Measured live 0.7.85, 2026-08-11:
+  `GET /api/requests` → **200 with no credential**, `GET /api/tasks` → **401**.
 - 🔴 **`/operator/*` is a THIRD credential** — `requireOperatorToken` demands the reserved Operator
   *agent's* hooks token, not the hook token, which gets `401 {"error":"not the operator"}`. It
   covers **11 of the 13** `/operator*` routes; `GET /operator` and `POST /operator/provision` are
@@ -238,17 +308,63 @@ and **no login QR to manage**.
 
 ---
 
-## The complete machine surface — all 22 `/api/*` routes, with auth
+## The complete machine surface — all 23 `/api/*` routes, with auth
 
 🔴 **Read this before concluding a capability does not exist.** The core SKILL.md used to name
-three clawgate routes (`/health`, `/api/send`, `POST /agents`) out of **118 registered**. That gap
+three clawgate routes (`/health`, `/api/send`, `POST /agents`) out of **120 registered**. That gap
 is not cosmetic: it is why `GET /api/agents` went unnoticed and someone reached into Postgres with
 `SELECT id FROM agents WHERE name=…` for a lookup one authenticated GET already answered.
 
-**Source of truth: `containers/clawgate/internal/api/testdata/routes.golden`** — 118 routes, checked
-in, diffed by `TestRoutesMatchGolden` against what `registerRoutes` actually registers, so a route
+**Source of truth: `containers/clawgate/internal/api/testdata/routes.golden`** — checked in, diffed
+by `TestRoutesMatchGolden` against what `registerRoutes` actually registers, so a route
 added/removed/re-verbed cannot land without a human eyeballing the diff. Regenerate with
 `UPDATE_ROUTES_GOLDEN=1 go test ./internal/api -run TestRoutesMatchGolden`.
+
+⚠ **The golden lives on `trunk`; the surface you can CALL is the deployed pin — they are different
+numbers and the counts here are the DEPLOYED ones.** Re-derived 2026-08-21 against live **`0.7.98`**:
+**121 routes / 24 `/api/*` deployed**, and trunk agrees — the gap is closed.
+
+🔴 **`GET /api/sessions/{id}/tasks` IS CALLABLE.** This note previously said it was "committed
+without a pin bump, so **not callable yet**" — true when derived against `0.7.97`, and **false since
+0.7.98 shipped** (2026-08-20). Measured, not inferred: `GET /api/sessions/<uuid>/tasks` with the hook
+token returns `200 {"sessionId":"…","tasks":[…]}`. ⚠ **An unknown session is `200` with an EMPTY
+array, not a 404** — so an empty result cannot distinguish "this session touched nothing" from "wrong
+id", and must never be reported as a clean bill of health. This is the worked example of the warning
+directly above: a count re-derived against a live pin decays the moment the next version ships, so
+**re-derive it rather than quoting it**. Count the golden with
+`grep -vc '^#' routes.golden` (the file's first three lines are comments) and subtract anything
+committed after the live pin.
+
+### Task ↔ session threads (#357, 0.7.98) — the direction that EXISTS, and the one that does not
+
+The `task_sessions` table records which Claude Code sessions touched a task, with a role of
+`created` / `worked` / `read`, and `/ui/tasks` renders a `👥 N session(s)` chip with a deep link.
+🔴 **The link is written by the SERVER as a side effect of the request; there is no producer API for
+it,** and the query is asymmetric:
+
+| direction | surface | state |
+|---|---|---|
+| session → tasks | `GET /api/sessions/{id}/tasks` | ✅ callable (hook token), pinned in the golden |
+| task → sessions | *(none)* | 🔴 **no route.** `GET /api/tasks/{id}/sessions` returns **404** and appears nowhere in `routes.golden` |
+| either direction | `clawgatectl` | 🔴 **no subcommand** — not under `task`, not top-level |
+
+So *"which sessions worked task N"* — the question the feature was built to answer — is today
+answerable **only by reading `/ui/tasks`**. A machine consumer can ask the reverse question only.
+
+🔴 **Membership OVER-reports, and a role NEVER downgrades.** Two measured causes, both live:
+- a **400-rejected** `PATCH` still records the session as having `worked` the task: `noteTaskSession`
+  (defined in `internal/api/task_sessions.go`, called from the PATCH handler in
+  `internal/api/notes.go`) runs **before** the body/tag validation that rejects the request —
+  verified on trunk, the call precedes both `StatusBadRequest` returns in that handler. Card #306
+  carries three fix options;
+- a **subagent inherits the parent's `CLAUDE_CODE_SESSION_ID`**, so a subagent merely *reading* a
+  task links the **parent** session to work it never did.
+
+⚠ **No FK to `cc_sessions`, deliberately** — that table is swept at 14 days, and a cascading FK would
+silently empty every thread, making a task that HAD five sessions render identically to one that
+never had any. Link rows denormalise `project` / `cwd` / `host`; expect most rows to have no live
+detail link once their session is reaped. The cap is **advisory** and must never fail a request:
+evict oldest `read`, never `created`/`worked`; if nothing is evictable, skip and count.
 
 🔴 **The golden records PATTERNS ONLY — it is BLIND to auth.** By the time a handler reaches the
 mux it is already wrapped, so `requireHookToken(h)` and `requireSession(h)` are the same type and
@@ -266,7 +382,26 @@ two until it was corrected):
 | `requireOperatorToken` | `operator.go:58` | bearer must be the reserved agent named `Operator` |
 | `requireAgentToken` | `agent.go:30` | bearer resolves to *any* agent; that agent is injected into the request ctx |
 
-### `requireHookToken` — 15 routes (what clawgatectl and every producer use)
+### `requireHookToken` — 17 routes (what clawgatectl and every producer use)
+<!-- RE-DERIVED 2026-08-21 against live 0.7.98: 17, up from 16, the new one being
+     `GET /api/sessions/{id}/tasks` (#357) — which IS now pinned and callable, so
+     the trunk/deployed gap this file used to warn about is CLOSED.
+     Was 15 before the comment-delete route (0.7.90), 16 before #357.
+
+     🔴 THE RE-DERIVE COMMAND WAS OVER-BROAD AND IS FIXED BELOW. It matched
+     `s.require[A-Za-z]+` — i.e. EVERY wrapper — and so returned 24 while the
+     heading claimed 16. Anyone checking the figure with the command printed
+     beside it got a mismatch and no way to tell which half was wrong. The
+     heading's arithmetic was right; the command was measuring a different set.
+     Pin the wrapper you are actually counting.
+
+     Re-derive with:
+       grep -hoE 'HandleFunc\("(GET|POST|PATCH|DELETE) /api/[^"]*",\s*s\.requireHookToken' \
+         internal/api/*.go | wc -l
+     Separately, `grep -vc '^#' routes.golden` = 121 total routes, 24 under /api/. -->
+     Re-derive with: grep -hoE 'HandleFunc\("(GET|POST|PATCH|DELETE) /api/[^"]*",\s*s\.require[A-Za-z]+' \
+       internal/api/*.go | sort | uniq -c -->
+
 | route | clawgatectl | note |
 |---|---|---|
 | `GET /api/agents` | `agent ls` / `agent resolve` | the roster; **the Postgres-lookup killer** |
@@ -277,6 +412,7 @@ two until it was corrected):
 | `PATCH /api/tasks/{id}/status` | `task status` | any status incl. `complete`; no in-progress guard. The CLI validates the status client-side (exit 2, nothing sent) because the server's 400 is the bare `invalid or missing status` and never names the four |
 | `DELETE /api/tasks/{id}` | — curl | ⚠ tears down a live agent pod |
 | `POST /api/tasks/{id}/comments` | `task comment` | author from `X-Clawgate-Source`, never the body — so the CLI has **no `--author` flag**. `--source` defaults to `claude-code`; an unallowlisted value is not an error, it is silently authored as `api`, so the CLI compares the returned author against the requested source and warns on **stderr** |
+| `DELETE /api/tasks/{id}/comments/{cid}` | — curl | 🔴 **SOFT delete** (0.7.90) — redacts to `body:""` + `retracted:true`, row survives, idempotent-by-404. Its session twin `DELETE /tasks/{id}/comments/{cid}` is **open on the LAN**, deliberately (the browser holds no token) |
 | `GET /api/tags` | — curl | `[{tag,count}]` |
 | `GET /api/projects` | — curl | ⚠ an OBJECT `{"projects":[…]}`, keyed `name` |
 | `POST /api/send` | — curl | the approval card the PermissionRequest hook posts |
@@ -290,7 +426,7 @@ two until it was corrected):
 `POST /api/push/subscribe` · `POST /api/push/unsubscribe` · `POST /api/auto-approve` ·
 🔴🔴 `POST /api/auto-approve-all` (the firehose — see above).
 
-### The other 96 routes
+### The other 97 routes
 Not `/api/*` and mostly not machine-facing: `/ui/*` htmx fragments, the page routes, `/agents*`
 (dispatch, **form-encoded**, `requireSession`), `/tasks/*` session routes (incl. `POST /tasks/merge`,
 which has **no `/api` counterpart** — deliberately, since its audit comments are authored `user`),

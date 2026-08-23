@@ -48,9 +48,14 @@ Even a crude version replaces ~30% of an agent's calls *and produces a better an
 it covers all 40 windows instead of the 13 a tail-budget allows.
 
 ### 🔴 Open decision — resolve BEFORE building
-Run 2 found four windows showing **dimmed text at the `❯` prompt** (`merge 131`, `clean up the
-worktrees`, …) and reported them as unsent instructions one Enter away. It flagged honestly
+Run 2 found four windows showing **dimmed text at the `❯` prompt** — each a short imperative
+instruction — and reported them as unsent instructions one Enter away. It flagged honestly
 that it could not distinguish typed-but-unsubmitted from placeholder text.
+
+> 🔴 Two of those four were quoted here verbatim until 2026-08-17. They were **real operator
+> drafts**, and this repo is PUBLIC. See
+> `claude/skills/session-manager/reference/waiting-signal.md` → *NEVER PASTE A CAPTURED DRAFT
+> INTO A COMMITTED FILE*: a count and a shape is the whole of what may be written down.
 
 There is a **third reading it did not consider**: Claude Code renders *queued* messages dimmed
 — typed while the agent is working, already submitted, processed when the turn ends. If that

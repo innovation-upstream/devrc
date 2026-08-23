@@ -1,12 +1,12 @@
 ---
 name: initiatives
-description: "Operate the DURABLE initiatives board — the Postgres store, the 15-min sync, LLM recaps, the workbench viewer at 192.168.50.250:8899, the signal->initiative router and the read-only /api/ask assistant. Use for: the initiatives viewer/board, initiatives.current/latest, the initiative store/sync, initiative recaps, the vllm-recap model, the initiatives assistant/chat, \"what's on my board\" as a durable page. The one-off scan is `initiative-scan`."
+description: "Operate the DURABLE initiatives board — the Postgres store, the sync, LLM recaps, the workbench viewer, the signal->initiative router and the /api/ask assistant. Use for: the initiatives viewer/board, initiatives.current/latest, the initiative store/sync, initiative recaps, the vllm-recap model, the initiatives assistant/chat, \"what's on my board\" as a durable page. The one-off scan is `initiative-scan`."
 ---
 
 # initiatives subsystem operations
 
-The **durable, queryable counterpart** to the on-demand `/initiative-scan` scan and the ephemeral
-agent-ops TUI. Four layers **store → sync → viewer → recaps** + a **router** (signal→initiative)
+The **durable, queryable counterpart** to the on-demand `/initiative-scan` scan, and the
+successor to the retired agent-ops TUI's momentum panel. Four layers **store → sync → viewer → recaps** + a **router** (signal→initiative)
 + a **read-only assistant**. Code: `~/workspace/devrc/scripts/initiatives/` (sync.py, viewer.py,
 route.py, assistant.py, recap.py, run-sync.sh, run-viewer.sh); engine =
 `scripts/session-analysis/initiative-scan.py`. Everything is **workbench-only,
@@ -52,10 +52,10 @@ Arc: `devrc/claudedocs/handoff-initiatives-nextstep-dispatch-shipped-2026-07-26.
 | Sync creds | `run-sync.sh` **runtime sops-decrypts** the ClickHouse **reader** password from homelab-talos trunk (`clusters/homelab/apps/activity/secrets.enc.yaml`, host age key) → `CLICKHOUSE_*` exported → scan runs **telemetry-on**. Every step guarded → missing key/repo/sops ⇒ telemetry-off (still writes a useful handoff+git snapshot). `--input-type yaml` is REQUIRED (mktemp has no `.yaml` ext) |
 | Viewer | `initiatives-viewer.service` (`systemd --user`, **workbench**, serverMode-gated, `Restart=on-failure`) → `run-viewer.sh` → `viewer.py` (stdlib `http.server`). **LIVE at http://192.168.50.250:8899/** |
 | Viewer bind | ⚠ binds the workbench **eth1 LAN IP `192.168.50.250`** — **NOT `192.168.50.94`, which is a HOMELAB node** (kube-apiserver/NodePorts/ClickHouse); binding `.94` → `OSError: Cannot assign requested address` crash-loop (bit us in #140→#141), and **a `127.0.0.1` smoke test will NOT catch it**. See `[[workbench-lan-ip]]`. Internal work data — deliberately NOT wired to the public gateway |
-| Viewer board | Grouped-by-repo triage board, two-line collapsed cards, 4 sections, state chips + fuzzy search, state-driven per-card actions, archive lifecycle. **Full detail → `reference/viewer-board.md`** |
+| Viewer board | Grouped-by-repo triage board, two-line collapsed cards, 4 sections, state chips + fuzzy search, state-driven per-card actions, archive lifecycle. **Full detail → `~/.claude/skills/initiatives/reference/viewer-board.md`** |
 | Recap model | **`vllm-recap`** — homelab vLLM, **ns `promptver`, svc `vllm-recap:8000`, served model `recap` = Qwen2.5-7B-Instruct-AWQ**. Wired via the unit env (`INITIATIVES_RECAP_ENABLED=1`, `RECAP_NAMESPACE=promptver`, `RECAP_SERVICE=svc/vllm-recap`, `RECAP_SERVICE_PORT=8000`, `RECAP_MODEL=recap`) — recap.py's in-code defaults are PLACEHOLDERs |
 | Router | `route.py` — `route(signal,repo,limit)` / `rank_matches()` / `classify()`. Reads `initiatives.current`; scoring single-sourced from the scan's `best_title_match` (word-equality, no stemming). Read-only, suggests-never-acts. Wired into repo-cos digests (#138) + mail-actions (#139, adds `related_initiative` col) |
-| Assistant (Phase 1 agent) | **PRIMARY `/api/ask` = a model-driven OpenClaw devpod** (ns `devpod-initiatives`, svc `initiatives-devpod:18789`, `openclaw/initiatives`, **DeepSeek V4 Pro via OpenRouter**). The MODEL selects which deterministic skill-tool(s) to run (incl. MULTIPLE for compound Qs) — the tools are `scripts/initiatives/skills/query.py` (reuses assistant.py's `run_tool`/`build_facts`/`sources_of`), reached via `_db.py` **direct in-cluster mode** (#156) with a **least-priv `initiatives_agent` PG role** (SELECT-only on `initiatives.*`). Viewer's `agent_client.py` proxies via kubectl port-forward + gateway token `sha256("gw-"+HOOKS_TOKEN)`, **streams** the answer (SSE `/api/ask/stream`) and **renders markdown**; **graceful FALLBACK** to the deterministic regex `assistant.py` if the devpod is down. Every ask audit-logged to `initiatives.assistant_log` (`intent=agent`). Phase 2 (write/dispatch) stays deferred behind a structural server-side gate. **Deploy/hardening → `reference/agent-devpod.md`** |
+| Assistant (Phase 1 agent) | **PRIMARY `/api/ask` = a model-driven OpenClaw devpod** (ns `devpod-initiatives`, svc `initiatives-devpod:18789`, `openclaw/initiatives`, **DeepSeek V4 Pro via OpenRouter**). The MODEL selects which deterministic skill-tool(s) to run (incl. MULTIPLE for compound Qs) — the tools are `scripts/initiatives/skills/query.py` (reuses assistant.py's `run_tool`/`build_facts`/`sources_of`), reached via `_db.py` **direct in-cluster mode** (#156) with a **least-priv `initiatives_agent` PG role** (SELECT-only on `initiatives.*`). Viewer's `agent_client.py` proxies via kubectl port-forward + gateway token `sha256("gw-"+HOOKS_TOKEN)`, **streams** the answer (SSE `/api/ask/stream`) and **renders markdown**; **graceful FALLBACK** to the deterministic regex `assistant.py` if the devpod is down. Every ask audit-logged to `initiatives.assistant_log` (`intent=agent`). Phase 2 (write/dispatch) stays deferred behind a structural server-side gate. **Deploy/hardening → `~/.claude/skills/initiatives/reference/agent-devpod.md`** |
 
 ## status
 ```bash
@@ -116,7 +116,7 @@ curl -s -X POST http://192.168.50.250:8899/api/dispatch -H 'Content-Type: applic
   -d '{"repo":"<repo full path OR repo_name>","slug":"<slug>"}'   # 200 {ok,task_id} / 400 / 404 / 502
 # dispatch.py mirrors repo-cos/clawgate.py: POST clawgate /api/tasks {directory(=label),body,repo?,tags} —
 #   model OMITTED → clawgate default deepseek. Confirm the card: GET {CLAWGATE_API_URL}/api/tasks (Bearer).
-# Linked-task join, dispatch guard, fetch shape + what still leaks → reference/clawgate-tasks.md
+# Linked-task join, dispatch guard, fetch shape + what still leaks → ~/.claude/skills/initiatives/reference/clawgate-tasks.md
 ```
 
 **Grounded next step (nextstep.py, read-only):** every card carries one — documented cards
@@ -135,7 +135,7 @@ systemctl --user restart initiatives-viewer.service
 # regenerate the store immediately (e.g. after a sync.py or recap change):
 KUBECONFIG=$KC_HOMELAB systemctl --user start initiatives-sync.service
 # tests: scripts/initiatives/tests/ via nix-shell pytest (pure fixtures; query/agent_client/assistant/sync)
-# agent devpod deploy → reference/agent-devpod.md
+# agent devpod deploy → ~/.claude/skills/initiatives/reference/agent-devpod.md
 ```
 
 ## ⚠ gotchas (each cost real time)

@@ -100,7 +100,7 @@ def replay(events, window, threshold=None):
     `orphaned` is the count still pending at the end of the log — turns that
     were held and whose summarising toast had not yet fired. That number is the
     honest cost of coalescing: it is delayed information, not lost (it still
-    reaches tmux / the agent-ops dashboard / clawgate), but it is delayed
+    reaches tmux / clawgate), but it is delayed
     indefinitely if the stream simply stops.
     """
     before = collections.Counter()

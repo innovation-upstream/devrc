@@ -14,8 +14,12 @@ $BB --instance <key> --tab <id> text   # cheap read of a specific tab
 
 🔴 **Run `whoami` first on every fresh browser task.** Both hosts are hostname
 `nixos` and this bridge could be either, with several Brave profiles — confirm the
-host and pick the right `--instance` before acting. Architecture / security model:
-`scripts/browser-bridge/README.md`.
+host and pick the right `--instance` first. Architecture / security model:
+`~/workspace/devrc/scripts/browser-bridge/README.md`.
+
+🔴 **Every `reference/<file>.md` named below lives at
+`~/workspace/devrc/scripts/browser-bridge/reference/`** — that exact path; only
+`SKILL.md` + the CLI are symlinked into `~/.claude/skills/browser/`.
 
 ## FIRST DECISION: agent or direct?
 
@@ -24,8 +28,6 @@ A cheap autonomous model works in its OWN isolated tab and returns a compact
 `{answer,evidence,steps_used,status}` — the page HTML (10K–100K tokens on a heavy
 page) never enters YOUR context.
 
-    browser agent "go to news.ycombinator.com and report the top 3 story titles"
-
 **Drive ops directly when** the task is **precise** (URL + selector/JS known, 1–3
 ops) · **interactive** (click/type/submit/upload) · **diagnostic** (the agent is
 BLIND — its tool returns no pixels; you must SEE a screenshot, or hit-test paint
@@ -33,51 +35,46 @@ order) · **secret** — agent-read pages go to
 **OpenRouter/DeepSeek**: never banking, private mail, credential managers, or
 anything you wouldn't hand a third party. Nor **virtualised/lazy-loaded lists**.
 
-KNOW something from it → agent. Ambiguous → agent first; taking over costs ~200
-tokens, so agent-first wins even at a low success rate.
+KNOW something from it → agent. Ambiguous → agent first: taking over is cheap, so
+agent-first wins even at a low success rate.
 
-**Measured** 2026-07-31 (laptop, `deepseek-v4-flash`, n=1/goal): ≈0.9 correct,
-~$0.0025/run, ~20s — read as "≈0.9", **not** a rate. Numbers, guardrails, and what
-was NOT measured → `reference/agent.md`.
-
-`blocked` → non-zero exit, take over. `partial` → read `evidence`, drive the rest.
-Thin `evidence` is a weak smell, **NOT** protection against a wrong answer. What
-protects you: the agent tool's auto-`wake` on a hidden `text`/`html` read — **never
-`eval`/`js`, so ASSERT a non-zero content count in any `js` measurement** — and
-escalation: if the answer depends on rendered SPA state, ONE `text --wake`. Ignore
-`steps_used` (undercounted); keep `--allow-domains` TIGHT, incl. frame hosts.
+🔴 The AGENT's auto-`wake` covers a hidden `text`/`html` read but **never `eval`/`js`** — so
+ASSERT a non-zero content count in any `js` measurement. Result handling
+(`blocked`/`partial`), why thin `evidence` is NOT protection, and the
+`--allow-domains` guardrail → `reference/agent.md`.
 
 ## Ops
 
 Global flags, usable before any op: `--instance <key>` (which profile),
 `--tab <id>` (explicit tab), `--frame <numericId|urlSubstring>` (inside an iframe).
+Env defaults `$BB_INSTANCE`/`$BB_TAB`/`$BB_FRAME` (flag wins; zsh does NOT
+split an unquoted `$F`). ⚠ an export outlives the call — env-routed ops say so
+once, on stderr.
 Result payloads land under `.result.data`.
 
 | command | does |
 |---|---|
-| `whoami` | **read-only identity** (global; no `--instance`/`--tab`) — host label (`laptop`/`workbench`), connected instances (active-tab **domain** only), bridge diagnostics, `extension_version_current` |
-| `health` / `instances` | connected instances + count (JSON: key, label, instanceId, tab url/title). `extension_stale` on `health` ONLY (`false` is MARKER-backed; version MISMATCH → `true`; `null` = undecidable) |
+| `whoami` | **read-only identity** (global; no `--instance`) — host label (`laptop`/`workbench`), connected instances (active-tab **domain** only), bridge diagnostics, `extension_version_current` |
+| `health` / `instances` | connected instances + count (JSON: key, label, instanceId, tab url/title). `extension_stale` on `health`+`whoami`, NOT `instances` — ⚠ `null` = "undecidable", NOT "fine" → `reference/errors.md` |
 | `ping` | **which extension CODE is loaded?** → `{pong,extensionVersion,buildMarker,id,ops}`; read `buildMarker` — version+id describe the DIRECTORY. Staleness is PER PROFILE |
 | `context` | **page metadata, no DOM read** — url/domain/path/query/title/tabId, tab-scoped. Cheapest read; ⚠ NOT a render check → `reference/read-envelopes.md` |
-| `open [url] [--wake[=MS]]` | open a NEW tab this session owns (default `about:blank`, **created in the BACKGROUND/hidden**), returns `tabId`. Idempotent — a re-`open` does NOT navigate (url DISCARDED). Use for multi-step work |
+| `open [url] [--wake[=MS]]` | open a NEW tab this session owns (default `about:blank`, **created in the BACKGROUND/hidden**), returns `tabId`. 🔴 A re-`open` does NOT navigate — it DISCARDS your url → `reference/tabs-instances.md` |
 | `close` / `release` | close this session's owned tab / drop ownership without closing it |
 | `tabs` | list open tabs (`.data.ownedTabId` flags yours) |
 | `nav <url> [--wake[=MS]]` | navigate the owned/active tab; it lands hidden, so `--wake` un-throttles in the SAME call |
-| `text [selector] [--max-bytes N] [--annotated]` | **cheap read** — visible `innerText` (optional CSS selector), whitespace-normalized, byte-capped (default 32768; `0`=uncapped). ~98% smaller than `html` — **prefer it**. `--annotated` swaps flat text for per-element extraction — use it when you need a SELECTOR to click/type; works with `--frame` (frame-relative CSS paths). Envelope fields + `--annotated` schema → `reference/read-envelopes.md` |
-| `html [--max-bytes N]` | `outerHTML`, same byte cap and same envelope. One uncapped `html` on a heavy SPA is ~100K tokens — the cap is ON by default |
-| `js '<expr>'` (alias: `eval`) | run JS in the tab, return its value; same op on the wire either way. **Prefer `js` in a worktree-isolated agent** — Claude Code's isolation guard refuses any command containing the literal token `eval` (it matches the WORD, not the behaviour) |
-| `screenshot [path] [--fullpage] [--data-url]` | CDP capture — **works on a BACKGROUND/occluded tab**. **Always writes a `.png`** (to `path`, else a mode-0600 temp auto-pruned after 24h) and prints `{ok,path,bytes,url,via}`; the base64 is **NEVER** printed (it cost 133K–890K tokens/call) — **`Read` the `.png`**. `--data-url` is the escape hatch |
+| `text [selector] [--max-bytes N] [--annotated]` | **cheap read** — visible `innerText` (optional CSS selector), byte-capped by default. ~98% smaller than `html` — **prefer it**. `--annotated` gives per-element extraction — use it when you need a SELECTOR to click/type; works with `--frame`. Byte cap, envelope fields, `--annotated` schema → `reference/read-envelopes.md` |
+| `html [--max-bytes N]` | `outerHTML`, same byte cap and envelope. One uncapped `html` on a heavy SPA is ~100K tokens — the cap is ON by default |
+| `js '<expr>'` (alias: `eval`) | run JS in the tab, return its value; same wire op either way. **Prefer the `js` spelling in a worktree-isolated agent** — Claude Code's isolation guard refuses any command with the literal token `eval` |
+| `screenshot [path] [--fullpage] [--data-url] [--json]` | CDP capture — **works on a BACKGROUND/occluded tab**. **Always writes a `.png`** (to `path`, else a 0600 temp); base64 **NEVER** printed — **`Read` it**. ⚠ with `path`, stdout is the bare path, NOT JSON — add `--json` (refused with `--data-url`). `--data-url` = escape hatch |
 | `frames` | list the tab's frames (`frameId`/`url`/`parentFrameId`) **incl. cross-origin OOPIFs** — pick a numeric `frameId` for `--frame` |
-| `click <selector>` | click the element's center — **TRUSTED** CDP on the top frame, **SYNTHETIC** inside `--frame` |
-| `type <text> [--selector S]` | text input — TRUSTED CDP top frame, SYNTHETIC in-frame |
-| `key <Enter\|Tab\|Escape\|Backspace\|Delete\|Arrow*\|Home\|End\|Page*> [--selector S]` | one bounded keypress, same trust rules |
+| `click <selector>` · `type <text> [--selector S]` · `key <Enter\|Tab\|Escape\|Backspace\|Delete\|Arrow*\|Home\|End\|Page*> [--selector S]` | the input ops — click the element's centre, type text, send one bounded keypress. All three: **TRUSTED** CDP on the top frame, **SYNTHETIC** inside `--frame` |
 | `upload <selector> <path>` | fill an `<input type=file>` via CDP — Chrome reads the file BY PATH, **no bytes cross the bridge**. AUDIT-LOGGED, **operator-only** (agent → `op_not_allowed:upload`) |
-| `wake [--wait MS]`, or `text\|html\|js\|nav\|open --wake[=MS]` | **UN-THROTTLE a hidden/background tab with NO focus movement** — the fix for an empty or `hidden` read. ~1.5s settle, cap **6s**. **Wake once per PAGE, not per read** — the un-throttled state ends at detach, but the DOM already rendered PERSISTS. `--wake` folds un-throttle+read into one session; refused with `--frame` (`wake_with_frame_unsupported`). ISOLATED-vs-MAIN world nuance → `reference/spa-wake.md` |
-| `activate` | **⚠⚠ STEALS THE OPERATOR'S SCREEN — the ONE intrusive op, a LAST RESORT.** It is **NOT** the fix for a hidden/unrendered tab — that is `wake`. Read `reference/spa-wake.md` BEFORE using it |
-| `emulate <preset>\|--reset` | **device emulation** (mobile testing) on a tab you `open`ed; sticky, owned-tab-only. `--reset` undoes it, viewport included (#319); `--recreate` replaces the tab → `reference/emulation.md` |
+| `wake [--wait MS]`, or `text\|html\|js\|nav\|open --wake[=MS]` | **UN-THROTTLE a hidden/background tab with NO focus movement** — the fix for an empty or `hidden` read. **Wake once per PAGE, not per read.** `--wake` folds un-throttle+read into one call; refused with `--frame`. Settle/cap, once-per-page, ISOLATED-vs-MAIN world → `reference/spa-wake.md` |
+| `activate` | **⚠⚠ TAKES THE OPERATOR'S SCREEN — LAST RESORT.** The i3 raise is OPT-IN: `--focus` (auto-on on a TTY) → raise, else `withheld`; `skipped` where there is no i3. **NOT** the hidden-tab fix — that is `wake`, see `reference/spa-wake.md` |
+| `emulate <preset>\|--reset` | **device emulation** (mobile testing) on a tab you `open`ed; sticky, owned-tab-only. Presets, `--reset`, `--recreate` → `reference/emulation.md` |
 | `agent "<goal>"` | the autonomous browser-agent — see **FIRST DECISION** above, then `reference/agent.md` |
 
-## 🔴 Three traps that return a WRONG answer SILENTLY
+## 🔴 Four traps that return a WRONG answer SILENTLY
 
 1. **`js`/`eval` evaluates ONE EXPRESSION, not a script.** A multi-statement body
    (`window.scrollBy(0,1400); "ok"`) returns **`null` with no error** — it looks
@@ -92,37 +89,38 @@ Result payloads land under `.result.data`.
    `activate`, and spoofing `visibilityState` does not recover the page.
    **A reload RE-throttles: re-`wake` or clicks go silently inert.**
    → `reference/spa-wake.md`
+4. **A JS `.click()` does not open a React/Mantine popover — and the read then
+   reports a confident ABSENCE.** Use the trusted **`click`** op, **ONCE** (it is a
+   TOGGLE, so a stale earlier click makes the next read lie); prove it with
+   `aria-expanded`. **And an OPEN menu can still hide a SECOND VIEW behind a
+   chevron-row drill-in — its items are not in the DOM until you click it, so
+   "not in the dropdown" is NOT "not in the UI".** → `reference/css-hit-test.md`
 
 ## When things look broken — triage
 
-1. **A call that WORKED now fails, errors, or returns nothing** → re-run `browser
-   health` BEFORE debugging the page or the CLI; the extension drops mid-session
-   (`extension_connected:false`) with no user action and no error. ⚠ ↻ **in the
-   profile you are driving** (`brave://extensions` is per-profile) — and ↻ is
-   UNRELIABLE, so prefer a full Brave restart. → `reference/errors.md`
-2. **A read is empty / half-built / `data.hidden:true`** → the tab is throttled.
-   `browser wake`, then re-read. → `reference/spa-wake.md`
-3. **`null` from `js`/`eval`** → trap 1, then trap 2. Fall back to `text`/`html`
-   before concluding the bridge is down. **`unknown_op`** on an op the CLI knows →
-   stale extension, see 1. Any other error string → `reference/errors.md`.
-4. **Never diagnose a site OUTAGE from a browser read** — "broken for real users?"
-   needs server-side evidence (RUM, metrics, pod health, an anonymous `curl`).
-   → `reference/spa-wake.md`
+`health` FIRST (the extension drops mid-session with no error), then `wake` a
+throttled/empty read, then fall back to `text`/`html` before concluding the
+bridge is down. Full flow — including stale-build vs restart, and what `null` /
+`unknown_op` each mean — →
+`~/workspace/devrc/scripts/browser-bridge/reference/errors.md`.
+
+🔴 **Never diagnose a site OUTAGE from a browser read** — "broken for real
+users?" needs server-side evidence (RUM, metrics, pod health, anonymous `curl`).
 
 ## This is the user's LIVE session
 
 It's their real browser, not a scratch VM. Don't `nav` a tab that may hold unsaved
 work (a half-typed comment, a form) — `open` your own tab, or an obviously
-disposable one. If anything moved their focus, **restore it**
-(`i3-msg '[id="<prev-winid>"] focus'`).
+disposable one. 🔴 If ANYTHING takes their screen — `activate`, the X-fallback
+capture — RECORD focus AND workspace first, restore BOTH at the end, on failure
+too. Restoring focus usually carries the workspace, but not always — restore it
+explicitly. Why, and the commands → `reference/spa-wake.md`.
 
 ## Reference files — load ONE only when its trigger fires
 
-**Read them at `~/workspace/devrc/scripts/browser-bridge/reference/<file>`** — that
-exact path; only `SKILL.md` + the CLI are symlinked into `~/.claude/skills/browser/`.
-
 | file | load it when… |
 |---|---|
+| `reference/validation-prompt.md` | writing or dispatching a browser validation prompt — the standing rails, cited not retyped |
 | `reference/spa-wake.md` | a read came back empty/half-built, `data.hidden:true`, an SPA is stuck "Loading…", or you're about to call a site broken |
 | `reference/read-envelopes.md` | a read's exact envelope fields; `context` vs `text`; `text --annotated` + the `attrs` it returns; getting a SELECTOR out of a read |
 | `reference/errors.md` | any op returned an error string you don't recognise; `unknown_op`; a reload ↻ didn't take |
@@ -134,3 +132,4 @@ exact path; only `SKILL.md` + the CLI are symlinked into `~/.claude/skills/brows
 | `reference/auth-pages.md` | an authenticated request; you were about to read a cookie; a read looks logged-OUT; `extension_connected:false` |
 | `reference/security-ops.md` | 🔴 **you are MODIFYING browser-bridge** (the live-verify-on-real-Brave gate is mandatory); the user asks whether/what it records; first-time setup or a second profile |
 | `reference/x-fallback.md` | CDP `screenshot` is unsatisfactory and you must capture the raw X window (`DISPLAY`/`XAUTHORITY`, xdotool/maim) |
+| `reference/sites/<host>.md` | 🔴 **READ IT BEFORE the first action on that host, not after something fails** — the CLI names it in every result envelope (`site_notes`). It carries that site's **multi-step FLOWS** (sign-in, account switching, pickers, wizards) plus the reads that lie there. Skipping it is how a one-click flow gets reported to the operator as a blocker |

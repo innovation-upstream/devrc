@@ -1,0 +1,356 @@
+// Host telemetry -> homelab Prometheus + Loki.
+//
+// Runs as a USER service (see nix/observability.nix). That is deliberate: the
+// system-level alternative would live in /etc/nixos, which is per-host, not in
+// this repo, and needs sudo on every change. Everything here works unprivileged
+// because `zach` is in `wheel`, and systemd's journal ACLs grant `wheel` full
+// read of the system journal.
+//
+// AUTHENTICATION: there is deliberately NO `basic_auth` block.
+//
+// The receivers this ships to are unauthenticated, and a `basic_auth` block is
+// NOT conditional — Alloy has no `if`. Sourcing empty values from the
+// environment does NOT mean "no auth": measured against alloy 1.17.1 with a
+// header-echoing listener,
+//     basic_auth with username="" password=""  ->  Authorization: Basic Og==
+//     no basic_auth block at all               ->  no Authorization header
+// and `Og==` decodes to ":". So an env-driven block always asserts credentials,
+// which is a claim the deployment does not make. Omitting it is the honest
+// encoding of "these endpoints need no auth".
+//
+// IF AN ENDPOINT LATER REQUIRES AUTH, add the block back here explicitly:
+//     basic_auth {
+//       username = sys.env("OBS_USERNAME")
+//       password = sys.env("OBS_PASSWORD")
+//     }
+// Do NOT instead put credentials in the URL (`http://user:pass@host/...`).
+// That works — measured, it yields the correct header — but alloy logs `url=`
+// in remote_write error messages, so the credentials land in the journal.
+//
+// 🔴 NO ENDPOINT, HOSTNAME OR CREDENTIAL MAY BE WRITTEN INTO THIS FILE.
+// devrc is a PUBLIC repo. Every site-specific value comes from the environment,
+// supplied by an EnvironmentFile outside the nix store:
+//     ~/.config/obs-ship/env      (gitignored, per-host, 0600)
+// Required: OBS_PROM_URL, OBS_LOKI_URL, OBS_HOST
+//
+// Validated AT BUILD TIME by nix/observability.nix, which runs `alloy validate`
+// in a derivation — so an invalid config fails `home-manager switch` and cannot
+// deploy. `alloy fmt` is NOT sufficient and is forbidden there: it checks syntax
+// only. scripts/tests/test_obs_alloy_config.py runs no binary; it guards that
+// wiring plus the contracts checkable without one.
+//
+// 🔴 `alloy validate` accepts every redaction bug this file has already had.
+// Regex semantics are not a syntax property — they must be measured by running
+// lines through the pipeline. See the block above stage.replace below.
+
+logging {
+  level  = "warn"
+  format = "logfmt"
+}
+
+// ---------------------------------------------------------------- metrics --
+
+prometheus.remote_write "homelab" {
+  endpoint {
+    url = sys.env("OBS_PROM_URL")
+
+    // A laptop is off-network often (asleep, travelling, WiFi drop). Without a
+    // generous WAL the agent drops samples during every ordinary disconnection,
+    // and the gap looks identical to a host that froze — which is precisely the
+    // signal this whole pipeline exists to make legible.
+    queue_config {
+      capacity             = 10000
+      max_shards           = 4
+      min_backoff          = "1s"
+      max_backoff          = "5m"
+      retry_on_http_429    = true
+    }
+  }
+
+  external_labels = {
+    host   = sys.env("OBS_HOST"),
+    source = "devrc-host-telemetry",
+  }
+}
+
+prometheus.scrape "node" {
+  targets = [{
+    __address__ = "127.0.0.1:9101",
+    instance    = sys.env("OBS_HOST"),
+  }]
+
+  forward_to = [prometheus.remote_write.homelab.receiver]
+
+  // 15s, not the 60s default: the run-up to a freeze is minutes long at most.
+  // At 60s a thermal or IO cliff would be represented by one or two points.
+  scrape_interval = "15s"
+  scrape_timeout  = "10s"
+}
+
+// ------------------------------------------------------------------- logs --
+
+loki.write "homelab" {
+  endpoint {
+    url = sys.env("OBS_LOKI_URL")
+
+  }
+
+  // 🔴 Without this, journal lines are DROPPED for the entire duration of any
+  // disconnection while the source's position cursor advances anyway — so they
+  // are gone, not delayed. Measured: after a run where every write failed, the
+  // positions file had moved on and no Loki WAL directory existed.
+  //
+  // A roaming laptop disconnects constantly (sleep, WiFi drop, travel), and the
+  // journal is the highest-value stream here. `queue_config` on the metrics
+  // remote_write does NOT cover this: that buffering is per-pipeline.
+  // NOTE: only `enabled` is set. `max_segment_age` was tried and removed — I
+  // could not confirm from the shipped binary whether "1h" differs from the
+  // default, and an argument that merely restates a default is an inert line
+  // that reads as a tuning decision.
+  //
+  // Scope, measured: the WAL replays after a disconnection AND across a process
+  // restart. The one gap is a COLD start — before `wal/remote/segment_marker`
+  // exists, alloy logs "marker segment file does not exist" and begins at the
+  // newest segment, so entries written during the very first run are not
+  // replayed by the first restart. Every restart after that replays.
+  wal {
+    enabled = true
+  }
+
+  external_labels = {
+    host = sys.env("OBS_HOST"),
+  }
+}
+
+// Journal -> Loki. This is the single highest-value part of the pipeline: the
+// local journal syncs to disk every 30s (and shipped as 5m before PR #616), so
+// the final minutes before every recorded freeze existed only in RAM and died
+// with the box. Shipped continuously, they survive the host.
+loki.source.journal "system" {
+  // Read the SYSTEM journal, not just this user's.
+  path = "/var/log/journal"
+
+  // On (re)start, replay recent history so a freeze that happened while the
+  // agent was down is not lost. Bounded so a long outage cannot flood Loki.
+  max_age = "12h"
+
+  labels = {
+    job = "systemd-journal",
+  }
+
+  relabel_rules = loki.relabel.journal.rules
+  forward_to    = [loki.process.scrub.receiver]
+}
+
+// Promote a small, FIXED set of journal fields to labels. Deliberately small:
+// every label is a Loki stream, and high-cardinality fields (PID, message hash,
+// boot id) multiply streams without making anything easier to find.
+loki.relabel "journal" {
+  forward_to = []
+
+  // 🔴 DEFAULT-DENY TRANSPORT ALLOWLIST. This is the primary privacy control;
+  // the redaction stages further down are defence-in-depth, not the guarantee.
+  //
+  // Why structural rather than pattern-matching: FIVE successive audit rounds
+  // each found a defect in the redaction regexes, and the last three were
+  // introduced by the preceding fix. A denylist has to enumerate every shape a
+  // secret can take, which is unbounded. Dropping the transport that carries
+  // application output removes the hazard class instead of chasing it.
+  //
+  // Measured on this host (7 days, ~98k lines):
+  //     stdout  69.9%   application output — docker, MinIO, Postgres, agent
+  //                     tooling. Every content class the scrubbing existed for.
+  //     journal 24.1%   systemd's own messages
+  //     syslog   4.2%   sudo, ssh, cron
+  //     kernel   1.9%   THE FREEZE EVIDENCE
+  //
+  // So the dropped 70% is almost exactly the risky part, and the freeze
+  // forensics this pipeline exists for live in the kept 30%.
+  //
+  // `keep` is an ALLOWLIST on purpose: a transport that does not exist yet is
+  // dropped by default rather than shipped by default. Adding one is a
+  // deliberate edit here, not an accident of some other change.
+  rule {
+    source_labels = ["__journal__transport"]
+    regex         = "kernel|journal|syslog"
+    action        = "keep"
+  }
+
+  rule {
+    source_labels = ["__journal__systemd_unit"]
+    target_label  = "unit"
+  }
+
+  // 🔴 Collapse per-session scope units to a constant. Measured on one boot: 71
+  // distinct unit values, of which 39 were `session-<N>.scope` — and N
+  // increments forever, so this label would churn a new Loki stream per login,
+  // per boot, indefinitely. That is unbounded cardinality, which is exactly what
+  // the "deliberately small label set" above is meant to avoid.
+  rule {
+    source_labels = ["unit"]
+    regex         = "session-\\d+\\.scope"
+    target_label  = "unit"
+    replacement   = "session.scope"
+  }
+
+  rule {
+    source_labels = ["__journal_syslog_identifier"]
+    target_label  = "identifier"
+  }
+
+  rule {
+    source_labels = ["__journal_priority_keyword"]
+    target_label  = "priority"
+  }
+
+  rule {
+    source_labels = ["__journal__transport"]
+    target_label  = "transport"
+  }
+}
+
+// Scrubbing. The journal on these hosts is NOT neutral telemetry: it carries
+// desktop-notification bodies, database errors that echo query values, and
+// object-store credential errors. Kernel and systemd lines are what this
+// pipeline is for; the rest is kept only after redaction.
+loki.process "scrub" {
+  forward_to = [loki.write.homelab.receiver]
+
+  // 1. Desktop notification BODIES are message content, not telemetry. Drop the
+  //    line entirely rather than trying to redact inside free text.
+  stage.drop {
+    source        = "identifier"
+    expression    = "^dunst$"
+    drop_counter_reason = "notification-body"
+  }
+
+  // 🔴 EXACTLY ONE CAPTURE GROUP PER RULE, WRAPPING PRECISELY WHAT MUST DIE.
+  //
+  // stage.replace does NOT do `$1` template expansion, and it does NOT operate
+  // on the whole match. It substitutes the `replace` string for EVERY capture
+  // group individually. All three consequences were measured against alloy
+  // 1.17.1 end-to-end (loki.source.file -> loki.process -> loki.echo), because
+  // all three are invisible to `alloy validate`, which accepts every variant:
+  //
+  //   two groups + replace="${1}[REDACTED]"
+  //     "password: hunter2"           -> "${1}[REDACTED]${1}[REDACTED]"
+  //     ...the literal characters ${1}, and the key name destroyed.
+  //   ZERO groups (non-capturing) + replace="[REDACTED-KEYID]"
+  //     "key AKIAIOSFODNN7EXAMPLE"    -> UNCHANGED. Nothing is replaced at all.
+  //   one group around the 4-char prefix only
+  //     "AKIAIOSFODNN7EXAMPLE"        -> "[REDACTED-KEYID]IOSFODNN7EXAMPLE"
+  //     ...16 of 20 characters leak. A partially redacted secret is leaked.
+  //
+  // So: one group, around the SECRET ITSELF, and `replace` is a literal.
+  // Keeping the keyword outside the group is what preserves "password: " as
+  // readable context — the point of shipping the journal is to debug with it.
+
+  // 2. Credential-shaped assignments.
+  //
+  //    Three parts of this are load-bearing, each measured end-to-end:
+  //
+  //    a. `(?:bearer\s+|basic\s+)` — WITHOUT it, `(\S+)` captures the scheme
+  //       word and the credential survives in clear. Both schemes are covered:
+  //       an earlier version handled only `bearer`, so
+  //       `Authorization: Basic dXNlcjpwdw==` shipped the base64 unredacted.
+  //    b. `["']?` on BOTH sides of the separator — a quoted JSON key put a `"`
+  //       between the keyword and the `:`, so `{"password": "hunter2xyz"}` did
+  //       not match AT ALL and shipped byte-identical.
+  //    c. There are TWO rules, split by SHAPE — quoted value, then unquoted.
+  //       One rule cannot serve both, and trying cost a real leak:
+  //
+  //       A single rule with value class `[^\s"',;&]+` (chosen to stop eating
+  //       URL query tails) TRUNCATED any secret containing one of those
+  //       characters. Measured:
+  //         password=p@ss;w0rd          -> password=[REDACTED];w0rd
+  //         password=a&b&c              -> password=[REDACTED]&b&c
+  //         SECRET_KEY='django-...ab,cd'-> SECRET_KEY='[REDACTED],cd'
+  //       `&` and `;` are in most password alphabets — Django's own
+  //       get_random_secret_key() includes `&`. That is the same partial-leak
+  //       class as the AKIA prefix bug above, reintroduced while fixing a
+  //       COSMETIC over-redaction. Under-redaction is a security cost;
+  //       over-redaction is a usability cost. They are not interchangeable.
+  //
+  //       So: the quoted rule takes everything between the quotes (commas,
+  //       semicolons and spaces included), and the unquoted rule runs to
+  //       whitespace, excluding only quotes so it stays idempotent over the
+  //       output of the first.
+  //
+  //    KNOWN AND ACCEPTED OVER-REDACTION, both asserted in the tests so they
+  //    stay decisions rather than surprises:
+  //      * a keyword plus separator redacts the next token whatever it is, so
+  //        `the token: is missing` -> `the token: [REDACTED] missing`;
+  //      * a URL query tail is eaten: `?token=abc&user=bob&page=2` ->
+  //        `?token=[REDACTED]`. Deliberately reverted to this: preserving the
+  //        tail is what required the leaky value class above.
+
+  // 2a. Quoted value — JSON, YAML, config dumps, and any secret containing a
+  //     comma, semicolon or space.
+  //
+  //     🔴 The value class is `[^'"]*`, NOT an escape-aware `(?:[^'"\\]|\\.)*`.
+  //     The escape-aware form was tried, to stop `{"password": "a\\"b"}` leaving
+  //     one character behind — and it introduced a WORSE leak: it treats a lone
+  //     trailing backslash as an escape, so
+  //         token="abc\\" password="hunter2zz"
+  //     matched through the real closing quote to the NEXT quote, yielding
+  //         token="[REDACTED]"hunter2zz"     <- the second secret in CLEAR.
+  //     Both measured against alloy 1.17.1. A one-character residue is a
+  //     bounded cosmetic leak; a whole following credential is not. Reverted.
+  //
+  //     Residual, accepted and asserted: an ESCAPED quote inside a value leaves
+  //     the tail of that value behind. JSON is the main producer of that shape,
+  //     and JSON arrives on `stdout`, which the transport allowlist above now
+  //     drops entirely.
+  stage.replace {
+    expression = "(?i)(?:access[_-]?key|secret[_-]?key|api[_-]?key|secret|token|password|passwd|authorization)[\"']?\\s*[=:]\\s*(?:bearer\\s+|basic\\s+)?['\"]([^'\"]*)['\"]"
+    replace    = "[REDACTED]"
+  }
+
+  // 2b. Unquoted value — runs to whitespace.
+  //
+  //     The leading `['"]?` catches an UNTERMINATED quoted value. Without it,
+  //     2a needs a closing quote and 2b cannot start on one, so
+  //     `password: "abcdef` (a line journald split at LineMax, say) shipped in
+  //     CLEAR — a redaction the single-rule version did perform. Measured.
+  //
+  //     The class excludes `"` but ALLOWS `'`. Excluding `"` keeps this
+  //     idempotent over 2a's DOUBLE-quoted output; allowing `'` stops
+  //     `password=ab'cd` truncating to `[REDACTED]'cd`.
+  //
+  //     🔴 BE PRECISE ABOUT THE COST — an earlier comment here called it
+  //     "consuming the closing quote", which understated it. For a SINGLE-quoted
+  //     value the match runs on to the next WHITESPACE, so following
+  //     comma/semicolon-joined fields are eaten too (measured):
+  //         password='abc',user=bob,host=h   ->  password='[REDACTED]
+  //         {'password': 'abc', 'user': 'bob'} -> {'password': '[REDACTED] 'user': 'bob'}
+  //     That is over-redaction (the acceptable direction) and no secret leaks,
+  //     but Python/Ruby dict reprs are a real shape. Idempotency likewise holds
+  //     for double-quoted and unquoted output but NOT for single-quoted: each
+  //     re-pass eats further. Production is single-pass.
+  stage.replace {
+    expression = "(?i)(?:access[_-]?key|secret[_-]?key|api[_-]?key|secret|token|password|passwd|authorization)[\"']?\\s*[=:]\\s*(?:bearer\\s+|basic\\s+)?['\"]?([^\\s\"]+)"
+    replace    = "[REDACTED]"
+  }
+
+  // 3. A bare `Bearer <token>` / `Basic <creds>` with no `:` or `=` separator,
+  //    which the rules above cannot match because they require one.
+  //
+  //    OVER-REDACTS ENGLISH PROSE containing "basic ". Quantified against this
+  //    host's real journal (100,609 lines over 7 days): 8 lines altered, 7 of
+  //    them `Reached target Basic System.` -> `Reached target Basic [REDACTED]`.
+  //    0.008%, all `Reached`/`Stopped target Basic System.`, and nothing under
+  //    scripts/ parses those. Kept because
+  //    `Authorization: Basic` with no separator is a real credential shape and
+  //    missing it is the costlier error. Asserted in the tests.
+  stage.replace {
+    expression = "(?i)\\b(?:bearer|basic)\\s+([^\\s\"']+)"
+    replace    = "[REDACTED]"
+  }
+
+  // 4. AWS-style access key ids, which appear in MinIO errors with no adjacent
+  //    keyword. The group wraps the WHOLE id, per the measurements above.
+  stage.replace {
+    expression = "\\b((?:AKIA|ASIA)[0-9A-Z]{16})\\b"
+    replace    = "[REDACTED-KEYID]"
+  }
+}

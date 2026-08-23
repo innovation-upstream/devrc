@@ -1,6 +1,6 @@
 ---
 name: ux-audit-loops
-description: "Run the re-runnable naida + vetr UX-audit harnesses — walk the app's funnel, screenshot every view, capture console/network/axe findings, optionally draft vision-LLM UX notes, then re-run to verify. Local-only. Use for: UX-audit or QA-sweep naida or vetr, \"make ux-audit\", the funnel review, the hermetic vetr e2e stack. One-off sweep of any app -> `ux-sweep`; hosted crawler -> `auditloop`."
+description: "Run the re-runnable naida + vetr UX-audit harnesses — walk the app's funnel, screenshot every view, capture console/network/axe findings, then re-run to verify. Local-only. Use for: UX-audit or QA-sweep naida or vetr, \"make ux-audit\", the funnel review, the hermetic vetr e2e stack. One-off sweep of any app -> `ux-sweep`; hosted crawler -> `auditloop`."
 ---
 
 # UX-audit loops (naida + vetr)
@@ -26,7 +26,7 @@ implement → re-run". Cross-session detail: memory `qa-ux-audit-harness` (read 
 |---|---|
 | Repos | workbench `~/workspace/vetr-app` + `~/workspace/vetr-api` (SIBLINGS — the e2e workflow uses `../vetr-api`) · laptop workspace `~/workspace/scratch/vetr` (`vetrllc/vetr-workspace`, docs/plans). Code: `vetrllc/vetr-app` (React Router v7 SPA), `vetr-api` (Laravel) |
 | Run | `make ux-audit` (brings up the hermetic stack → walk → teardown). `KEEP_UP=1` leaves it up. `PAYMENT_GATEWAY=stripe make ux-audit` for the legacy path (default is **authnet**, matching prod). |
-| Target | the team's **hermetic E2E stack** on NixOS via `scripts/e2e-hermetic-nixos.sh`: docker `mysql:8.4` → vetr-api (nix php84+exts, composer, APP_ENV=e2e, MAIL=array, `migrate:fresh --seed=E2ESeeder`, `e2e:mint-tokens`, `artisan serve --no-reload :8000`) → vetr-app SPA built+served :5174 → Playwright (nix chromium). **NEVER** app.vetr.com / api.vetr.com (prod = live Authorize.net, real charges). |
+| Target | the team's **hermetic E2E stack** on NixOS via `<vetr-app>/scripts/e2e-hermetic-nixos.sh`: docker `mysql:8.4` → vetr-api (nix php84+exts, composer, APP_ENV=e2e, MAIL=array, `migrate:fresh --seed=E2ESeeder`, `e2e:mint-tokens`, `artisan serve --no-reload :8000`) → vetr-app SPA built+served :5174 → Playwright (nix chromium). **NEVER** app.vetr.com / api.vetr.com (prod = live Authorize.net, real charges). |
 | Views | 14 (welcome→choose-experience→signup→6-step vet-registration wizard→dashboards→appointments→booking funnel→checkout-UI, stops before payment) |
 | Auth | Sanctum bearer token (from `e2e:mint-tokens`) seeded into `localStorage["CapacitorStorage.token"]` |
 | Payments | prod runs `PAYMENT_GATEWAY=authnet` (Stripe→Authorize.net migration, env-flag). Harness defaults authnet, **forces `ANET_ENDPOINT=sandbox`**. Sandbox creds in `~/.config/vetr/authnet.env` (ANET_LOGIN_ID/TRANSACTION_KEY suffice — add-card is server-token HOSTED CIM, not inline Accept.js, so PUBLIC_CLIENT_KEY/SIGNATURE_KEY not needed). |

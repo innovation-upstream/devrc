@@ -234,7 +234,7 @@ export function hostDenied(host, allowList, denyList) {
 }
 
 // BROWSER_AGENT_ALLOWED_OPS — the operator's explicit op-set override (a space/
-// comma separated list). Unset/empty → ALLOWED_OPS_DEFAULT (the 11-op browser-only
+// comma separated list). Unset/empty → ALLOWED_OPS_DEFAULT (the 13-op browser-only
 // set). Set → it REPLACES the default wholesale, so it can both narrow the agent
 // (`"text,html"`) and deliberately re-enable an off-by-default op such as `upload`.
 // It is read from the wrapper's environment, which the MODEL cannot influence.
@@ -595,6 +595,16 @@ export function buildRequest(args, env, token) {
       Authorization: `Bearer ${token}`,
       Host: "127.0.0.1", // loopback Host-allowlist invariant (#168)
       "X-Session-Id": sessionId, // routing-only; forced `tab` overrides ownership
+      // 🔴 X-Session-Origin: this request was NOT issued by the session whose id
+      // X-Session-Id carries. browser-agent captures its INVOKER's id (its
+      // `--print-session-id` call) and forwards it here purely so routing and the
+      // audit trail stay consistent with the `open` that created our tab. The
+      // telemetry `session` column means "the agent session that ISSUED this
+      // command"; for a nested run the issuer is this opencode agent, whose own id
+      // we do not have. Declaring the origin makes the server record the forwarded
+      // id as `origin_session` (the causal PARENT) instead of attributing N nested
+      // calls to the operator's own session — ~11% of bridge commands in 14d.
+      "X-Session-Origin": "browser-agent",
       "Content-Type": "application/json",
     },
     body,

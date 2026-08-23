@@ -99,3 +99,55 @@ Two of these defer **before any network call**, so a missing card is not evidenc
 🔴 **Debugging "no card appeared"? Rule out 1 and 2 first** — they produce exactly the same
 observable as an outage, and `log`-lines in the hook (`permission_mode=…; deferring` /
 `is an interactive question prompt`) are the only thing that distinguishes them.
+
+## What clawgate can and cannot carry for the proactivity gate
+
+RULES.md's "Default to PROCEEDING" tree names four triggers, only TWO of which can end in a
+question (Fork, and Outward-facing/irreversible/high-blast-radius — Out of scope and Named
+hazard both route to "don't ask"). Clawgate is the **transport** for those questions when Zach is not at the tmux
+window — it is **not** the gate. Verified 2026-08-22 against live `0.7.98`.
+
+🔴 **`approve-with-comment` is NOT the Fork branch, however much it looks like one.** The
+comment is **record-only** — `clawgate-hook.sh` logs it and emits a bare `allow`/`deny`
+(§"PermissionRequest hook semantics" above, and the script's own comment: *"No
+reason/additionalContext channel exists"*). An agent that turns a Fork into a card gets
+back **permission, never an answer**, and proceeds down whichever reading it had already
+picked — the exact ship-then-rework the Fork branch exists to prevent, while the operator
+believes they answered. A Fork must reach a human through a channel that can carry prose.
+
+That leaves clawgate carrying **less** of the tree than its shape suggests, which matters
+because stranded windows are a measured problem here (`window-triage`, `session-manager`
+exist for it): a rule that adds ask-branches without changing where the ask LANDS makes it
+worse, not better — and this hook is not that change.
+
+**What it structurally cannot carry.**
+
+| trigger | reaches the phone? |
+|---|---|
+| Out of scope | **No** — semantic, produces no `PermissionRequest`. File a task instead (`flows/task-authoring.md` — note the criteria-less-create denial comes from a devrc PreToolUse hook, `clawgate-task-interview-guard.py`, NOT this one; and the criteria table in SKILL.md governs the final status on the LOCAL pickup path, which may set `complete` — it is the DISPATCHED devpod route that cannot, `taskstatus.go:79-81`). |
+| Fork | **No.** A design fork raises no `PermissionRequest` at all; and even when one does surface, the return channel is binary — see the 🔴 above. Never route a Fork here. |
+| Outward-facing / irreversible | **Partially** — an allowlisted command never prompts, so it never reaches the phone at all. |
+| Named hazard | **No, and must not** — a named hazard's response is stage-it or hand-it-over, never solicit approval. |
+
+Plus the defer paths in the section above: `bypassPermissions` / `plan` / `AskUserQuestion`
+never contact the server, and any outage or timeout defers to the terminal. The hook is
+**fail-safe toward proceeding**, so no rule may be gated on it.
+
+🔴 **Budget the asks — one per task.** `requireSession` is a literal `return next`
+(`internal/api/auth.go`), and `POST /api/auto-approve-all` is registered behind it
+(`internal/api/server.go`), so the LAN NodePort can arm a **global** auto-approve window over
+every future request in every project with no app-level auth. ⚠ That posture is **deliberate,
+not an oversight** — the same file states it: human auth was removed in favour of the Authelia
+forward-auth edge on the public path, and the LAN is treated as trusted-open. The hazard is
+therefore about BLAST RADIUS on a trusted LAN, not a missing gate. Notification fatigue is
+therefore not a comfort problem — it is the thing that arms that lever and kills every gate
+at once, silently. RULES.md's "a permanently-red gate trains everyone to click through" has
+this mirror image: **a too-noisy gate trains you to disable it globally.**
+
+⚠ **The tree does NOT hand you this budget — do not cite it as if it did.** Its "a Fork ANSWER
+buys the whole run" clause is scoped to Forks, and a Fork never reaches this hook (table above).
+The only branch that does is Outward-facing/irreversible, which the tree governs with "an
+APPROVAL covers only the step it was given for" — i.e. **per-step by design**. So the
+one-ask-per-task budget is THIS file's, resting on the auto-approve-all blast radius above, and
+it has to be argued here rather than borrowed. Batch what can be batched; never let one run emit
+a stream of cards.

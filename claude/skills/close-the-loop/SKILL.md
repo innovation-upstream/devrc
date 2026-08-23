@@ -1,6 +1,6 @@
 ---
 name: close-the-loop
-description: "Decide what to automate next and SHIP it as a closed loop — score candidates on verifier-cost x revenue proximity, enforce the bounded-work + cheap-automatic-verifier gate, validate over real runs. Reads and updates its STATE.md ledger every run. Use when deciding what to automate next, when an agentic effort feels like \"more harness but no value\", or when asked to close or validate a loop."
+description: "Decide what to automate next and SHIP it as a closed loop — score candidates, enforce the bounded-work + cheap-verifier gate, validate over real runs. Use when deciding what to automate next, when an agentic effort feels like \"more harness but no value\", or when asked to close or validate a loop."
 argument-hint: "<action> — run (full pass, default) | aim (just pick the next loop) | validate (drive an in-flight loop to closed) | capture (write a lesson/decision back to STATE.md)"
 allowed-tools: Bash, Read, Edit, Write, Grep, Glob, Agent, AskUserQuestion, WebSearch, WebFetch
 ---

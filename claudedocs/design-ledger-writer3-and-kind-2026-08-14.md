@@ -99,7 +99,7 @@ enriched by the embedded `agent` object for liveness — which is the read `claw
 already performs and which just fired correctly. Writer 3 collapses from *"a new fetch and a new
 entity"* into *"promote the existing clawgate dispatch read into rows"*.
 
-**Non-overlap with `blocked_on_me`, stated so it cannot drift:** `blocked_on_me` counts tasks
+**Non-overlap with `clawgate_queue`, stated so it cannot drift:** `clawgate_queue` counts tasks
 **waiting on the operator** (`open` + `ready_for_review`); cluster rows would carry tasks
 **in flight** (`in_progress`). Disjoint by status, no double count. Without that line written
 down, clawgate lands in the report three times.
@@ -174,7 +174,7 @@ or, under the §2 correction, rows for **2** in-flight dispatches.
 axis through `fold_windows`, `summarize`, `_waiting_rollup`, `classify_status`, the table, the
 lean view and `LEAN_ROW_FIELDS`; and re-deciding the claude/shell split that 18 tests assert.
 
-**What already covers the same ground:** `blocked_on_me` (tasks needing the operator, with the
+**What already covers the same ground:** `clawgate_queue` (tasks needing the operator, with the
 count/discriminant contract) **plus** the stuck detector, which today reported the 2 wedged
 dispatches by id, title, reason and age — the exact rows writer 3 would add, in a surface that
 already exists and just proved itself on live data.
@@ -185,7 +185,7 @@ already exists and just proved itself on live data.
    split by it). This settles the entity model, is testable with no network, and makes the three
    defects above impossible to ship later by accident. It is the part agent-ops retirement and
    the §5 bar inversion actually need.
-2. **Promote the stuck rows into the report** as the cheap 80% — `summary.blocked_on_me` already
+2. **Promote the stuck rows into the report** as the cheap 80% — `summary.clawgate_queue` already
    carries `stuck_count`; surfacing the stuck *rows* costs no new fetch.
 3. **Gate writer 3** on a stated trigger: the `in_progress` population being routinely non-zero
    **and** `task.agent` non-null (i.e. #316 resolved). Both are false today. Re-check by reading

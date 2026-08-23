@@ -74,6 +74,8 @@ import re
 import sys
 from pathlib import Path
 
+from . import skip_dirs as _skip_dirs
+
 _REPO = Path(__file__).resolve().parents[2]
 # guard_core is a hook module, not a package; it is import-safe (its only
 # top-level work is building regexes — the CLI is behind `if __name__`).
@@ -126,10 +128,14 @@ DOC_NETWORKS = (
 #: Directories never scanned. `.claude/worktrees` matters most: on a dev host it
 #: holds FULL copies of this repo, so without it the scan re-reports every other
 #: agent's tree as if it were this one.
-SKIP_DIRS = frozenset({
-    ".git", ".direnv", "result", "node_modules", "__pycache__",
-    ".pytest_cache", ".mypy_cache", ".ruff_cache", "worktrees",
-})
+#:
+#: 🔴 THE BASE SET AND NOTHING ELSE. This is a SECURITY gate on a PUBLIC repo:
+#: every name added here is a directory a real address may be committed into
+#: unseen. In particular it must never inherit `.claude`/`claudedocs` from the
+#: `scripts/tests/` ledgers that share `skip_dirs.GENERATED` -- `claudedocs/` is
+#: committed prose and one of the likeliest places an address gets written down.
+#: `test_skip_dirs_ledger.py` pins this two-way. See `testlib/skip_dirs.py`.
+SKIP_DIRS = _skip_dirs.GENERATED
 
 SKIP_SUFFIXES = frozenset({
     ".png", ".jpg", ".jpeg", ".gif", ".ico", ".webp", ".pdf", ".zip", ".gz",

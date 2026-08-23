@@ -20,7 +20,7 @@ WHY THE FIXTURES ARE HAND-AUTHORED AND NOT A SNAPSHOT OF THE REAL STORE
 -----------------------------------------------------------------------
 🔴 The real corpus MUST NOT be copied in here. `~/.claude/analyze-service-index/`
 carries client-identifying infrastructure detail; all 21 live entries lack a
-`sensitivity:` field, which `analyze-service/SKILL.md` defines as fail-safe
+`sensitivity:` field, which `analyze-service/reference/index-store.md` defines as fail-safe
 `client-confidential`. This repo is PUBLIC, and `scripts/testlib/
 client_host_scan.py` exists precisely because six client subdomains had already
 leaked into fixtures once (devrc `60e6d9d` scrubbed them retroactively) — several
@@ -67,6 +67,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -80,6 +81,23 @@ MODULE_PATH = ROOT / "scripts" / "lib" / "subsystem_resolver.py"
 # `test_the_doc_path_is_the_deployed_one` below is what pins it to the file that
 # actually ships.
 SKILL_DOC = ROOT / "claude" / "skills" / "analyze-service" / "SKILL.md"
+
+# 🔴 THE PINNED PROSE MOVED, AND THE PINS MOVED WITH IT — same commit, which is
+# what `claude/RULES.md` demands of a location change. `SKILL.md` loads on every
+# `/analyze-service` invocation and was 17,476 bytes; the resolver rules and the
+# entry schema are detail that a recon run does not need in context, so both
+# HASHED BLOCKS moved INTACT into `reference/index-store.md` (which ships — every
+# file under `claude/skills/<name>/` becomes a store symlink under
+# `~/.claude/skills/<name>/`, `reference/` included).
+#
+# The move is PROVEN INTACT by the hashes below being UNCHANGED: a block that
+# had been reflowed, re-indented or edited in transit could not reproduce them.
+# That is the strongest available evidence that this was a move and not a
+# rewrite, and it is why the shas are not touched in the same commit as the move.
+STORE_DOC = (ROOT / "claude" / "skills" / "analyze-service"
+             / "reference" / "index-store.md")
+WRITEBACK_DOC = (ROOT / "claude" / "skills" / "analyze-service"
+                 / "reference" / "write-back.md")
 
 sys.path.insert(0, str(ROOT / "scripts" / "lib"))
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -156,7 +174,7 @@ ENTRIES: list[dict[str, object]] = [
         "filename": "bar-status-poll.md",
     },
     # 7 + 8. THE DELIBERATE AMBIGUITY, in a different scope so it cannot
-    #    contaminate the tests above. `analyze-service/SKILL.md`'s own example:
+    #    contaminate the tests above. The store reference doc's own example:
     #    `repo-cos.md` vs `repo-cos.process.md`.
     {
         "service": "repo-cos",
@@ -187,8 +205,10 @@ def index() -> sr.SubsystemIndex:
 
 @pytest.fixture(scope="module")
 def doc() -> str:
-    """The skill doc, read once — the other half of the one-predicate pair."""
-    return SKILL_DOC.read_text(encoding="utf-8")
+    """The STORE reference doc, read once — the other half of the one-predicate
+    pair. It was `SKILL.md` until the resolver rules and entry schema were
+    demoted out of the always-loaded body; see `STORE_DOC`."""
+    return STORE_DOC.read_text(encoding="utf-8")
 
 
 # =============================================================================
@@ -1506,7 +1526,8 @@ class TestFrontMatterParser:
 
 
 class TestCommandDocIsPinned:
-    """`claude/skills/analyze-service/SKILL.md` states these rules in prose because
+    """`claude/skills/analyze-service/reference/index-store.md` states these rules in
+    prose because
     its reader is an LLM. This module states them in Python. That is one
     predicate at two sites, which `claude/RULES.md` says regenerates the same bug
     at both — and here the drift is SILENT (a ref stops resolving, and the miss
@@ -1644,7 +1665,8 @@ class TestCommandDocIsPinned:
     )
     def test_sentence_still_present(self, doc: str, sentence: str, why: str) -> None:
         assert sentence in doc, (
-            f"analyze-service/SKILL.md no longer contains the sentence pinning {why}.\n"
+            f"analyze-service/reference/index-store.md no longer contains the sentence\n"
+            f"pinning {why}.\n"
             f"  missing: {sentence!r}\n"
             f"  Either restore it, or change scripts/lib/subsystem_resolver.py in the SAME\n"
             f"  commit and update this pin. The two are one predicate at two sites; the\n"
@@ -1669,10 +1691,10 @@ class TestCommandDocIsPinned:
         begin = f"<!-- {name}:begin"
         end = f"<!-- {name}:end"
         i = doc.find(begin)
-        assert i != -1, f"marker {begin!r} is missing from analyze-service/SKILL.md"
+        assert i != -1, f"marker {begin!r} is missing from analyze-service/reference/index-store.md"
         i = doc.index("-->", i) + len("-->")
         j = doc.find(end, i)
-        assert j != -1, f"marker {end!r} is missing from analyze-service/SKILL.md"
+        assert j != -1, f"marker {end!r} is missing from analyze-service/reference/index-store.md"
         body = doc[i:j].strip()
         assert body, f"region {name!r} is EMPTY — the hash would guard nothing"
         return body
@@ -1687,7 +1709,8 @@ class TestCommandDocIsPinned:
     ) -> None:
         actual = hashlib.sha256(self._region(doc, name).encode("utf-8")).hexdigest()
         assert actual == expected_sha, (
-            f"\nThe `{name}` block of claude/skills/analyze-service/SKILL.md CHANGED.\n"
+            f"\nThe `{name}` block of claude/skills/analyze-service/reference/index-store.md\n"
+            f"CHANGED.\n"
             f"  expected sha256 {expected_sha}\n"
             f"  actual   sha256 {actual}\n\n"
             f"This is not a formatting nit. That block is the PROSE HALF of a\n"
@@ -1718,7 +1741,7 @@ class TestCommandDocIsPinned:
         never silently hash the empty string."""
         with pytest.raises(AssertionError) as exc:
             self._region("no markers here at all\n", "resolver-rules")
-        assert "is missing from analyze-service/SKILL.md" in str(exc.value)
+        assert "is missing from analyze-service/reference/index-store.md" in str(exc.value)
 
     def test_an_empty_region_fails_loudly(self) -> None:
         with pytest.raises(AssertionError) as exc:
@@ -1733,7 +1756,7 @@ class TestCommandDocIsPinned:
 
         Without this, a `in doc` check against a doc that happened to contain
         everything is indistinguishable from a check pointed at the wrong file."""
-        sentinel = "a sentence that is deliberately not in analyze-service/SKILL.md"
+        sentinel = "a sentence deliberately absent from analyze-service/reference/index-store.md"
         assert sentinel not in doc
 
     def test_the_doc_path_is_the_deployed_one(self) -> None:
@@ -1744,14 +1767,19 @@ class TestCommandDocIsPinned:
         load-bearing half is the `nix/home.nix` check: it is what makes this a
         claim about DEPLOYMENT rather than about this file's own spelling.
 
-        This test earned its keep — it is what went red when the commands→skills
-        migration moved the doc out from under a pin written against the old
-        `claude/commands/analyze-service.md` path.
+        This test earned its keep TWICE — it is what went red when the
+        commands→skills migration moved the doc out from under a pin written
+        against the old `claude/commands/analyze-service.md` path, and again when
+        the resolver rules were demoted from `SKILL.md` into `reference/`.
         """
         assert SKILL_DOC.exists(), f"the pinned doc is gone: {SKILL_DOC}"
         assert SKILL_DOC.name == "SKILL.md"
         assert SKILL_DOC.parent.name == "analyze-service"
         assert SKILL_DOC.parent.parent.name == "skills"
+
+        assert STORE_DOC.exists(), f"the pinned store doc is gone: {STORE_DOC}"
+        assert STORE_DOC.parent.name == "reference"
+        assert STORE_DOC.parent.parent == SKILL_DOC.parent
 
         # The non-tautological half: nix must actually deploy the directory this
         # pin lives under. A pin under a directory home-manager does not ship is
@@ -1760,6 +1788,23 @@ class TestCommandDocIsPinned:
         # narrow one: the mapping is declared and not switched off. Whether its
         # source resolves to this tree is ship.sh/drift-check.sh's job.
         assert_skills_mapping_declared(ROOT / "nix" / "home.nix")
+
+    def test_the_demoted_reference_is_REACHABLE_from_the_skill_body(self) -> None:
+        """🔴 A reference nobody is told to open is a deletion with extra steps.
+
+        Demoting prose out of an always-loaded body only works if the body still
+        ROUTES to it — otherwise the rules are technically shipped and
+        operationally gone, which is strictly worse than the bloat it replaced.
+        So the skill body must name both reference files by path.
+        """
+        body = SKILL_DOC.read_text(encoding="utf-8")
+        for ref in (STORE_DOC, WRITEBACK_DOC):
+            rel = f"reference/{ref.name}"
+            assert rel in body, (
+                f"{SKILL_DOC.name} does not point at {rel}. The prose moved there is "
+                f"then unreachable: nothing loads a reference file it was not sent to."
+            )
+            assert ref.exists(), f"the skill body points at a missing file: {rel}"
 
     # --- the behavioural half: what each sentence ASSERTS ---------------------
 
@@ -2169,6 +2214,88 @@ class TestEntryMarkdownShape:
         assert sr.NUANCE_HEADING not in sr.extract_sections("## Pointers\n- p\n", HEADINGS)
 
 
+class TestScanHeadings:
+    """The heading INVENTORY — what `extract_sections` structurally cannot say.
+
+    `extract_sections` answers only about the headings it was asked for, so
+    "this entry has no `## Pointers`" and "the writer typed `## pointers`" are
+    the same answer there, and a heading written twice is merged before anyone
+    could see it. `scan_headings` is the other view over the same walker, and
+    it is what `subsystem_touch --validate`'s shape advisory is built on.
+    """
+
+    def test_POSITIVE_CONTROL_a_real_shaped_entry_yields_its_headings(self) -> None:
+        """A zero from this is only a reading once it has been watched to find
+        something — the same pairing `TestJournalBullets` opens with."""
+        got = sr.scan_headings(
+            "# alpha-unit\n\n## What it is\nprose\n\n## Pointers\n- p\n"
+            "\n## Nuance / work-history\n- n\n\n### A sub-heading\n"
+        )
+        assert got == (
+            "# alpha-unit",
+            "## What it is",
+            "## Pointers",
+            "## Nuance / work-history",
+            "### A sub-heading",
+        )
+
+    def test_NEGATIVE_PAIR_a_body_with_no_headings_yields_none(self) -> None:
+        assert sr.scan_headings("just prose\nand more prose\n") == ()
+        assert sr.scan_headings("") == ()
+
+    def test_a_REPEATED_heading_appears_ONCE_PER_OCCURRENCE(self) -> None:
+        """🔴 The only reason duplicate detection is possible at all. This
+        function is the sole surface on which a duplicate is still visible —
+        `extract_sections` concatenates the two blocks under one key and drops
+        whatever sat between them, silently."""
+        text = "## Pointers\n- a\n\n## Nuance / work-history\n- mid\n\n## Pointers\n- b\n"
+        assert sr.scan_headings(text).count(sr.POINTERS_HEADING) == 2
+        merged = sr.extract_sections(text, HEADINGS)
+        assert "- a" in merged[sr.POINTERS_HEADING]
+        assert "- b" in merged[sr.POINTERS_HEADING]
+        assert "- mid" not in merged[sr.POINTERS_HEADING]
+
+    def test_a_heading_inside_a_FENCE_is_not_a_heading(self) -> None:
+        """The RELATIONSHIP, not the component: the two views over the walker
+        must agree about what a heading IS. If `scan_headings` counted a fenced
+        `#` the validator would report a section that ends nowhere, while
+        `extract_sections` — reading the same file — would report it intact."""
+        text = (
+            "## Nuance / work-history\n- 2026-01-01: run this:\n"
+            "```\n## not a heading\n```\n- 2026-01-02: after the fence\n"
+        )
+        assert sr.scan_headings(text) == (sr.NUANCE_HEADING,)
+        assert "after the fence" in sr.extract_sections(text, HEADINGS)[sr.NUANCE_HEADING]
+
+    def test_a_hash_that_is_NOT_at_column_zero_is_not_a_heading(self) -> None:
+        """Same rule `extract_sections` matches on, stated where a reader of the
+        inventory will look for it. An indented `#` is a list continuation."""
+        assert sr.scan_headings("  ## indented\n\t## tabbed\n") == ()
+
+    def test_headings_are_VERBATIM_and_UNNORMALIZED(self) -> None:
+        """The caller reporting a near-miss has to print what the writer
+        actually typed. A folded form would turn "you wrote `## pointers`" back
+        into "the section is absent", which is the finding it exists to replace.
+        """
+        got = sr.scan_headings("##Pointers\n\n## Pointers:\n\n##  POINTERS  \n")
+        assert got == ("##Pointers", "## Pointers:", "##  POINTERS")
+
+    def test_the_two_views_never_disagree_about_a_heading_they_BOTH_see(self) -> None:
+        """One parser, pinned as a relationship. Every heading `extract_sections`
+        returns a body for must appear in the inventory, and the inventory must
+        contain no requested heading `extract_sections` called absent — the
+        disagreement `--validate` would render as "the section is absent"
+        directly beside "the heading is right there"."""
+        text = (
+            "---\nservice: alpha-unit\n---\n\n## What it is\nprose\n\n"
+            "## Pointers\n- p\n\n## Nuance / work-history\n```\n## fenced\n```\n- n\n"
+        )
+        inventory = sr.scan_headings(text)
+        sections = sr.extract_sections(text, HEADINGS)
+        for h in HEADINGS:
+            assert (h in sections) == (h in inventory), h
+
+
 class TestJournalBullets:
     """🔴 THE POSITIVE CONTROL COMES FIRST, and its pair with it. An empty
     result is indistinguishable from a parser wired to nothing, so "it found
@@ -2256,15 +2383,24 @@ class TestEntryMarkdownMutationKills:
 
     def test_kills_the_section_fence_skip(self, tmp_path: Path) -> None:
         """Relocated. Without it a `#` inside a fence ends the section early —
-        HALF an entry's nuance, looking exactly like a complete read."""
+        HALF an entry's nuance, looking exactly like a complete read.
+
+        🔴 THE ANCHOR MOVED, and the anchor-uniqueness assert is what said so.
+        When `extract_sections`' inline walker became `_heading_blocks` — one
+        parser, two views — this mutant's old anchor stopped existing and the
+        test went RED with `mutation anchor occurs 0x` rather than quietly
+        passing. That is the harness working: a mutation kill re-anchored by
+        hand is a kill; one that silently stops applying is a coverage claim
+        with nothing behind it.
+        """
         mod = _load_mutant(
             tmp_path,
             "m_sec_fence",
             [(
                 "        if _is_fence(line):\n            in_fence = not in_fence\n"
-                "            if current is not None:",
+                "            blocks[-1][1].append(line)",
                 "        if False:\n            in_fence = not in_fence\n"
-                "            if current is not None:",
+                "            blocks[-1][1].append(line)",
             )],
         )
         text = "## Nuance / work-history\n- a\n```\n## not a heading\n```\n- the SECOND bullet\n"
@@ -2272,19 +2408,45 @@ class TestEntryMarkdownMutationKills:
         assert "the SECOND bullet" not in got.get(sr.NUANCE_HEADING, "")
 
     def test_kills_the_present_but_empty_tracking(self, tmp_path: Path) -> None:
-        """Relocated. Without it presence is derived from content, so an empty
-        section mid-file reads ABSENT while the same section at EOF reads
-        present — two answers to one question."""
+        """Relocated, then re-anchored onto `_heading_blocks`. Without it
+        presence is derived from content, so an empty section mid-file reads
+        ABSENT while the same section at EOF reads present — two answers to one
+        question."""
         mod = _load_mutant(
             tmp_path,
             "m_seen",
-            [("            if current is not None:\n                seen.add(current)",
-              "            if False:\n                seen.add(current)")],
+            [("        seen.add(heading)\n        wanted[heading].extend(body)",
+              "        wanted[heading].extend(body)")],
         )
         got = mod.extract_sections(
             "## Pointers\n- p\n## Nuance / work-history\n- n\n", HEADINGS
         )
         assert got == {}, "the presence tracking was not what produced the keys"
+
+    def test_kills_the_heading_REPEAT_that_makes_duplicates_visible(
+        self, tmp_path: Path
+    ) -> None:
+        """🔴 `scan_headings` keeping repeats is load-bearing, not incidental.
+
+        `extract_sections` MERGES a duplicated heading, so it is structurally
+        unable to report one; `subsystem_touch --validate`'s DUPLICATED finding
+        exists only because this walker emits a separate block per occurrence.
+        The mutant de-duplicates — the shape a reasonable refactor would reach
+        for — and the duplicate becomes invisible while `extract_sections` keeps
+        working, i.e. green everywhere except the one caller that needed it.
+        """
+        mod = _load_mutant(
+            tmp_path,
+            "m_repeat",
+            [("    return tuple(h for h, _ in _heading_blocks(text) if h is not None)",
+              "    return tuple(dict.fromkeys("
+              "h for h, _ in _heading_blocks(text) if h is not None))")],
+        )
+        text = "## Pointers\n- a\n\n## Pointers\n- b\n"
+        assert sr.scan_headings(text).count(sr.POINTERS_HEADING) == 2
+        assert mod.scan_headings(text).count(sr.POINTERS_HEADING) == 1, (
+            "the mutant must collapse the repeat this finding is built on"
+        )
 
     def test_kills_the_bullet_fence_skip(self, tmp_path: Path) -> None:
         """Without it a `- ` line inside a fence is promoted to a bullet and the
@@ -2620,3 +2782,304 @@ class TestEntryMappingIsShared:
         )
         assert got["scope"] == "the-dir"
         assert "repo" not in got
+
+
+# =============================================================================
+# 🔴 MARKER REACHABILITY — the THIRD openness shape.
+#
+# REGRESSION COVERAGE, watched RED AT BASE: every test in the two classes below
+# fails at the base commit, where `JournalBullet.unreachable_markers` does not
+# exist. That AttributeError IS the pre-change behaviour — no surface in the
+# module reads past a bullet's opening line, which is the defect.
+# =============================================================================
+
+
+MARKER_SHAPES = json.loads(
+    (ROOT / "scripts" / "tests" / "fixtures" / "near_miss_shapes.json").read_text(
+        encoding="utf-8"
+    )
+)
+
+
+def _bullet_with_continuation(*continuation: str) -> sr.JournalBullet:
+    """One bullet whose OPENING line declares nothing, plus the given body lines.
+
+    The head line is deliberately inert prose: the finding under test is about
+    lines 2..n, so a head that declared anything would leave every result
+    ambiguous between the two mechanisms.
+    """
+    body = "- 2026-08-19: an ordinary head line with no marker on it\n" + "".join(
+        f"{c}\n" for c in continuation
+    )
+    (bullet,) = sr.parse_journal_bullets(body)
+    return bullet
+
+
+class TestMarkerReachability:
+    """🔴 A MARKER SPELLED CORRECTLY WHERE THE PARSER NEVER LOOKS.
+
+    Measured in the field 2026-08-20 (`claudedocs/handoff-subsystem-store.md`):
+    one bullet carried a second, correctly-spelled marker several lines into its
+    body. It showed on NO openness surface — not `OPEN`, not `NEAR-MISS` — and had
+    only ever raised a badge BY ACCIDENT through a broken `RESOLVED —` above it,
+    so repairing that broken line would have SILENCED a still-open action.
+
+    🔴 EVERY ARM IS A PAIR. A detector asserted only on its firing case is
+    indistinguishable from one that fires on everything, and this one runs over a
+    `## Nuance / work-history` section that is mostly ordinary prose.
+    """
+
+    # Pairwise distinct, and distinct from every literal any assertion names, so
+    # a mutant that hardcodes one of them cannot survive by coincidence.
+    NESTED_MARKER = "  - 2026-08-17: OPEN: rotate the credential in the other repo."
+    BARE_MARKER = "  OPEN: the sibling repo still points at the old bucket."
+
+    # --- the positive half ----------------------------------------------------
+
+    def test_THE_FIELD_SHAPE_a_nested_marker_several_lines_in_is_FOUND(self) -> None:
+        b = _bullet_with_continuation(
+            "  wrapped prose that says nothing about openness at all,",
+            "  and a second line of it,",
+            self.NESTED_MARKER,
+        )
+        (found,) = b.unreachable_markers
+        assert found.openness == sr.OPENNESS_OPEN
+        assert found.offset == 4, "the offset must be the line's place IN THE BULLET"
+        assert found.line == self.NESTED_MARKER, "quoted VERBATIM, indentation and all"
+
+    def test_a_marker_on_an_UNBULLETED_continuation_line_is_FOUND_too(self) -> None:
+        """Wrapped prose carries no `- `, so a scanner that only handled nested
+        list items would miss the commoner shape of the same defect."""
+        (found,) = _bullet_with_continuation(self.BARE_MARKER).unreachable_markers
+        assert found.openness == sr.OPENNESS_OPEN and found.offset == 2
+
+    def test_a_RESOLVED_marker_out_of_reach_carries_its_sha_normalised(self) -> None:
+        (found,) = _bullet_with_continuation(
+            "  RESOLVED B83BFB584: closed in the other repo."
+        ).unreachable_markers
+        assert found.openness == sr.OPENNESS_RESOLVED
+        assert found.resolved_by == "b83bfb584", "the same lower-casing the parser does"
+
+    def test_TWO_out_of_reach_markers_in_one_bullet_are_BOTH_reported(self) -> None:
+        got = _bullet_with_continuation(
+            self.BARE_MARKER, "  more prose here,", self.NESTED_MARKER
+        ).unreachable_markers
+        assert [m.offset for m in got] == [2, 4]
+
+    # --- the negative half, which is what makes the positive half mean anything -
+
+    def test_THE_NEGATIVE_CONTROL_a_normal_OPENING_line_marker_is_SILENT(self) -> None:
+        """🔴 The whole population this must not touch. A marker at a bullet's
+        head is REACHABLE by definition — reporting it would make the advisory
+        fire on every well-formed open action in the store."""
+        (b,) = sr.parse_journal_bullets(
+            "- 2026-08-18: OPEN: an ordinary, perfectly reachable declaration.\n"
+            "  with a continuation line under it.\n"
+        )
+        assert b.openness == sr.OPENNESS_OPEN
+        assert b.unreachable_markers == ()
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "  the open file limit is the constraint here, not the pool.",
+            "  we resolved the ticket last week and moved on.",
+            "  Open questions remain about the retry budget.",
+            "  OPENSSL_CONF must point at the vendored bundle.",
+            "  it is still OPEN to debate whether that was right.",
+        ],
+        ids=lambda s: s.strip()[:30],
+    )
+    def test_prose_that_merely_CONTAINS_the_word_is_SILENT(self, line: str) -> None:
+        assert _bullet_with_continuation(line).unreachable_markers == ()
+
+    def test_a_bullet_with_NO_continuation_lines_reports_nothing(self) -> None:
+        (b,) = sr.parse_journal_bullets("- 2026-08-18: a one-line bullet.\n")
+        assert b.unreachable_markers == ()
+
+    def test_a_marker_inside_a_FENCE_is_sample_text_not_a_declaration(self) -> None:
+        """The same rule `parse_journal_bullets` already applies to `- ` lines.
+        Reporting it would send a writer to promote a line that is quoting."""
+        assert (
+            _bullet_with_continuation(
+                "  ```", "  - OPEN: sample text in a fence", "  ```"
+            ).unreachable_markers
+            == ()
+        )
+
+    def test_a_marker_AFTER_a_closed_fence_is_still_found(self) -> None:
+        """The pair for the fence skip: without it, one fence anywhere in a bullet
+        would silence the whole remainder of that bullet."""
+        got = _bullet_with_continuation(
+            "  ```", "  sample", "  ```", self.BARE_MARKER
+        ).unreachable_markers
+        assert [m.offset for m in got] == [5]
+
+    def test_BLANK_continuation_lines_contribute_nothing(self) -> None:
+        assert _bullet_with_continuation("", "   ", "").unreachable_markers == ()
+
+    # --- the population boundary ----------------------------------------------
+
+    def test_it_changes_NO_existing_population(self) -> None:
+        """🔴 `openness_population` answers "what did this bullet DECLARE", and a
+        bullet whose only marker is out of reach declared NOTHING — which is the
+        finding. Folding this in would have silently moved every existing count."""
+        b = _bullet_with_continuation(self.NESTED_MARKER)
+        assert b.openness_population == "none"
+        assert b.near_miss_marker is False
+        assert b.openness is None and b.is_open is False
+        assert b.unreachable_markers != (), "premise gone: nothing to be distinct from"
+
+    def test_a_bullet_that_declares_AND_hides_a_second_marker_reports_both(self) -> None:
+        """Not suppressed by a good head marker: the field case was exactly a
+        bullet carrying two claims, only one of which was reachable."""
+        (b,) = sr.parse_journal_bullets(
+            "- 2026-08-18: OPEN: the first claim.\n"
+            "  - 2026-08-17: RESOLVED abc1234: the second, unreachable one.\n"
+        )
+        assert b.openness_population == "open"
+        assert [m.openness for m in b.unreachable_markers] == [sr.OPENNESS_RESOLVED]
+
+    # --- the DERIVATION pin ----------------------------------------------------
+
+    @pytest.mark.parametrize(
+        "shape",
+        MARKER_SHAPES["real"] + MARKER_SHAPES["attempts"] + MARKER_SHAPES["prose"],
+        ids=lambda s: s[:44],
+    )
+    def test_THE_TWO_CALL_SITES_AGREE_SHAPE_FOR_SHAPE(self, shape: str) -> None:
+        """🔴 THE LEDGER THAT MAKES THIS A DERIVATION AND NOT A SECOND COPY.
+
+        For every shape in the committed matrix — all three arms — the
+        continuation scanner must reach EXACTLY the verdict the real opening-line
+        parser reaches on the same text. A hand-written second vocabulary cannot
+        stay in step with `_bullet_openness`, and staying in step is the entire
+        point: this fails the moment the two disagree, in either direction, on any
+        shape anyone can re-run.
+        """
+        opening_line_verdict = sr._bullet_openness(shape)[0]
+        continuation = _bullet_with_continuation(f"  {shape.strip()}").unreachable_markers
+        assert bool(continuation) == (opening_line_verdict is not None), (
+            f"the continuation scanner and `_bullet_openness` disagree about {shape!r}"
+        )
+        if opening_line_verdict is not None:
+            assert continuation[0].openness == opening_line_verdict
+
+    def test_the_AGREEMENT_LEDGER_is_not_vacuous(self) -> None:
+        """POSITIVE CONTROL on the parametrisation above: a ledger whose shapes all
+        land on one side proves nothing. Both sides must be populated, and by more
+        than a single shape.
+
+        ⚠ INVARIANT GUARD, NOT REGRESSION COVERAGE — and it is the ONLY test in
+        these two classes that is: measured green at base `3c54918`, where it
+        reads only the committed fixture and `_bullet_openness`, neither of which
+        this change touches. It pins the ledger against becoming one-sided later;
+        it does not demonstrate the defect.
+        """
+        arms = MARKER_SHAPES["real"] + MARKER_SHAPES["attempts"] + MARKER_SHAPES["prose"]
+        verdicts = [sr._bullet_openness(s)[0] is not None for s in arms]
+        assert sum(verdicts) >= 2, "no shape in the ledger parses as a marker at all"
+        assert verdicts.count(False) >= 10, "the ledger is almost all markers"
+
+
+class TestMarkerReachabilityMutationKills:
+    """Break the NARROWEST expression that can be wrong, one at a time, and
+    require THIS guard's own symptom.
+
+    🔴 POSITIVE CONTROL FOR THE BATCH: `test_kills_the_line_slice` — a mutant that
+    is certainly caught if the harness works at all, run through the same
+    `_load_mutant`. 🔴 NEGATIVE CONTROL: `test_the_NO_OP_mutant_changes_nothing`,
+    which is what distinguishes "every mutant died" from "the loader quietly
+    handed back the real module".
+    """
+
+    NESTED = TestMarkerReachability.NESTED_MARKER
+    BARE = TestMarkerReachability.BARE_MARKER
+
+    def _bullet(self, mod, *continuation: str):
+        body = "- 2026-08-19: an ordinary head line with no marker on it\n" + "".join(
+            f"{c}\n" for c in continuation
+        )
+        (b,) = mod.parse_journal_bullets(body)
+        return b
+
+    def test_the_NO_OP_mutant_changes_nothing(self, tmp_path: Path) -> None:
+        """🔴 NEGATIVE CONTROL FOR THE BATCH. This edit cannot change behaviour,
+        and the answer must come back identical — otherwise a green batch below is
+        a fact about the loader, not about the guards."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_mr_noop",
+            [
+                (
+                    'UNREACHABLE_MARKER = "unreachable-marker"',
+                    'UNREACHABLE_MARKER = "unreachable" "-marker"',
+                )
+            ],
+        )
+        assert mod.UNREACHABLE_MARKER == sr.UNREACHABLE_MARKER
+        got = self._bullet(mod, self.NESTED).unreachable_markers
+        assert [(m.offset, m.openness) for m in got] == [(2, "open")]
+
+    def test_kills_the_line_slice(self, tmp_path: Path) -> None:
+        """POSITIVE CONTROL. `lines[1:]` -> `lines[0:]`: the scanner starts reading
+        the OPENING line, so every ordinary reachable `OPEN:` bullet in the store
+        is reported as out of reach. Only the negative control can see this."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_mr_slice",
+            [
+                (
+                    "        for offset, line in enumerate(self.lines[1:], start=2):",
+                    "        for offset, line in enumerate(self.lines[0:], start=2):",
+                )
+            ],
+        )
+        reachable = "- 2026-08-18: OPEN: an ordinary, perfectly reachable declaration.\n"
+        (b,) = mod.parse_journal_bullets(reachable)
+        assert len(b.unreachable_markers) == 1, "the mutation did not land"
+        (real,) = sr.parse_journal_bullets(reachable)
+        assert real.unreachable_markers == ()
+
+    def test_kills_the_opening_line_NORMALISATION(self, tmp_path: Path) -> None:
+        """`- ` -> nothing: an UNBULLETED continuation line no longer satisfies the
+        parser's `^[-*][ \\t]+` prefix, so wrapped prose carrying a marker goes
+        silent again — the commoner half of the defect, and silently.
+
+        Reached with a case no earlier check rejects: the line is non-blank, is not
+        a fence, and its marker parses. The NESTED shape is asserted still found in
+        the SAME mutant, so this mutation is the normalisation and nothing else."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_mr_prefix",
+            [('    return f"- {stripped}"', "    return stripped")],
+        )
+        assert self._bullet(mod, self.BARE).unreachable_markers == ()
+        assert self._bullet(mod, self.NESTED).unreachable_markers != ()
+        assert _bullet_with_continuation(self.BARE).unreachable_markers != ()
+
+    def test_kills_the_FENCE_skip(self, tmp_path: Path) -> None:
+        """Without it a `- OPEN:` inside a code fence is reported as a lost
+        declaration, and the remedy printed beside it — promote it to a bullet —
+        would edit a line that is quoting something.
+
+        Isolated to the fence half: the blank-line half of the same `if` is left
+        intact and asserted still working, so a kill here is about fences."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_mr_fence",
+            [
+                (
+                    "            if in_fence or not line.strip():",
+                    "            if not line.strip():",
+                )
+            ],
+        )
+        assert self._bullet(mod, "  ```", "  - OPEN: sample", "  ```").unreachable_markers
+        assert self._bullet(mod, "", "   ").unreachable_markers == ()
+        assert (
+            _bullet_with_continuation(
+                "  ```", "  - OPEN: sample", "  ```"
+            ).unreachable_markers
+            == ()
+        )

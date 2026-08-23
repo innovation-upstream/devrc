@@ -15,36 +15,32 @@ Make *"what is being worked on, and what is waiting on me"* answerable in one ca
 of 13 pane tails, and stop turns ending without a stated next step.
 
 ## State now
-- **Branch:** `main`, at `df12bdf` = `origin/main`. Both hosts converged and switched
-  (`ship.sh`: workbench 431 managed artifacts resolve / 0 dangling, laptop 393 / 0), and the
-  deployed skill + tool were exercised on BOTH hosts, not just rolled out.
-- **Working tree:** ⚠ the base clone is DIRTY with work that is NOT mine and NOT in any PR —
-  `nix/i3/config.nix` (a `for_window [class="Espanso"] floating enable` rule) and
-  `scripts/tmux-scratch-status.sh` (per-session window counts on the scratch slots, plus an
-  em-dash→`--` mangling that looks unintended). Untracked: `.envrc`, `.opencode/`,
-  `claudedocs/proposal-tmux-server-multiplexing.md`, `claudedocs/proposed-rules-cut/`,
-  `nix/system/apply-nebula-443.sh.LOCAL-preserved-2026-08-02`. **`ship.sh` says `tree is DIRTY`
-  on BOTH hosts** — it still converged, but this is stranded work one `checkout` from deletion.
+- **Branch:** `main` = `origin/main`. At snapshot `fc48807`; **it moved ~10× during this session** from
+  other sessions (#560-#574 are not mine). Re-fetch before assuming anything.
+- **Working tree:** clean except three untracked, none mine to touch —
+  `claudedocs/handoff-opencode-autocomplete-commands.md`, `nix/system/apply-nebula-443.sh.LOCAL-preserved-2026-08-02`,
+  `nix/system/apply-nvidia-kernel-7.2.sh`.
 
-**Shipped and verified live this session:**
+**Five PRs merged AND shipped this session:**
 
-| what | PR / sha |
+| what | PR |
 |---|---|
-| the agent activity ledger — closes the #419 regression | **#471** `a12f101` |
-| writer 2 (opencode) | **#478** `1797d42` |
-| the `kind` entity axis + the design pass gating writer 3 | **#482** `df12bdf` |
+| pin every on-disk artifact NAME as a class — 15 renamed with zero test movement | **#530** |
+| `blocked_on_me` held the CLAWGATE queue; the caveat warning against that misread was read past, so rename the field | **#534** |
+| `waiting-windows` — windows waiting on the operator past a threshold, banded by kind | **#559** |
+| `session-resolve` — one selector to one target, three-state presence trichotomy | **#558** |
+| `window-triage` skill — one operating surface over both tools | **#569** |
 
-`scripts/lib/agent_ledger.py` (record, write/prune, read protocol, live-join filter) ·
-`scripts/claude-hooks/agent-ledger-hook.py` (writer 1, Claude Code) ·
-`scripts/session-manager` reads it **per host** · deploy + registration in `nix/home.nix` /
-`register-nudge-hook.py`.
+**Deploy verified at the CONSUMER, twice** (`ship.sh` run after #558 and again after #569):
+workbench 481 managed artifacts resolve / 0 dangling / 0 absent; laptop fast-forwarded, 442 / 0 / 0.
+Both VERIFIED + switched, no skips. `window-triage` is **live in the skill listing** (observed in a
+session's own available-skills set — the strongest routability check there is), `session-resolve`
+runs on the workbench, and the laptop carries the round-4 `measurable` fix (`grep -c measurable` = 8,
+matching `origin/main`).
 
-**Verified live, not merely deployed.** Before: `rows with an age: 0`, `claude_session_id` on
-0 rows, no `stale` bucket. After the switch, both hosts: `AGENT LEDGER (15 live of 16)`,
-`ages: 15 of 73 (ledger=15)`, `session ids: 15` — the hooks fired *naturally* as each live
-session took its next turn, no manual probing. The laptop's writer is confirmed too (all four
-events registered; its deployed hook wrote `claude-p23.json` from a real pane), so this is
-verified on the WHOLE fleet, not half.
+🔴 **#558 took FOUR audit rounds after a green gate.** Each round's fix created the next round's
+finding, all in one surface (per-host disclosure). See the new Open investigation below for where a
+fifth is predicted.
 
 ## Open investigations — live diagnosis state
 
@@ -124,46 +120,173 @@ verified on the WHOLE fleet, not half.
   non-trivial `stale.claude` count on windows that are demonstrably working means the
   heartbeat is not reaching them — check `age_source` on those rows first.
 
+### RESOLVED: the clawgate wedge — mechanism (b), no agent was ever dispatched
+- **Was:** tasks #193/#194 sat `in_progress` 23.9h with `agent: null`; the stuck detector
+  fired for the first time (`stuck_count: 2`, reasons `["no_agent"]`).
+- 🔴 **The handoff's own discriminator was WRONG and is retracted.** It said `no_agent`
+  rather than `not_kicked_off` would confirm the #316 link theory. `no_agent` is an
+  ABSENCE and cannot separate "link broken" from "never dispatched" — following it would
+  have recorded a coin flip as a diagnosis.
+- **Settled by server-side route counters** (`clawgate_http_requests_total`, 30d Prometheus
+  retention). The one pod serving at 20:12:22 (`clawgate-6d7779c7d9-7fxzp`, 0.7.91) served
+  `PATCH /api/tasks/{id}/status` ×2 and **no `POST /agents` at all**;
+  `clawgate_agent_provision_total` empty on that pod. Both controls run: task-creation
+  counters saw the window (×2), and `POST /agents` is a real emitted label on 11 other pods
+  — so the zero is measured, not wiring.
+- **The receipt:** a local Claude session's own transcript, a two-iteration `curl` loop
+  flipping both to `in_progress` — the 10 ms "batch write". "dispatch both" meant **local
+  subagents**, not a devpod. It never wrote back.
+- 🔴 **`no_agent` conflates THREE states, not two.** `Provisioner.Destroy` hard-deletes the
+  agent row with no tombstone, and deleting a task sets `agents.note_id` NULL.
+- **Recommended, not built:** split `agent_link_missing` (some agent claims this task id but
+  the task read shows `agent: null`) from a residual `no_agent`. One extra API call, and it
+  gives #316 a detector instead of an anecdote. `never_dispatched` vs `agent_missing` is
+  **not client-observable** — it needs clawgate to write a `system` comment on dispatch.
+
+### RETRACTED: two "defects" I reported that were misreadings
+- **`DELETE /api/tasks/{id}/comments/{cid}` blanking the body** is a designed **soft delete**
+  — shipped homelab-infra #318, live at 0.7.95, `retracted: true`, body redacted rather than
+  filtered so the thread shows a tombstone instead of silently shortening. `retracted` is
+  `omitempty` (absent on normal comments) and the reference's own `jq` recipe printed
+  `.body`, so a retraction rendered as an unexplained blank. **The trap was in the docs**;
+  fixed in #499.
+- **"The server truncates comment bodies" (3929 → 3928 runes)** — nothing was truncated. A
+  trailing newline meeting `strings.TrimSpace` server-side, compared untrimmed in the CLI.
+  Real cap is 200,000 runes. I quoted the CLI's warning as fact about the server.
+
+### The board write-back is a single point of failure — 2 for 2
+- **Observed:** both tasks dispatched this session were **already shipped** — #193 by #458,
+  #194 by #461, whose commit subject literally reads `(#194) (#461)`. Both cards stayed
+  `open` with **zero comments**, so both were re-dispatched and paid for twice.
+- **So:** git recorded it, the board never did. The pickup ritual's write-back is the only
+  thing closing that loop and it failed both times, including once by me an hour after
+  diagnosing it. That is evidence it needs enforcing by something other than discipline.
+
+### `--claude-only` is a writer-3 prerequisite, and got slightly worse
+- It filters on `r["claude"]` (`scripts/session-manager`) and runs BEFORE `measured_caveats`,
+  so once cluster rows exist a filtered-out row is dropped **and** has its exclusion
+  attributed to the build rather than to the filter.
+
+### The fuzzyclaw phase-2 gate is OPEN-BUT-NOT-READY, and decaying on its own
+- **Observed:** `drift-check.sh` rc-16 block reads `fuzzyclaw-only ages: 6 of 49 row(s) EXAMINED`
+  → `NOT READY`. Was **7** earlier the same day, so the count is decaying as pre-deploy sessions
+  restart. Phase 2 (deleting the fuzzyclaw readers) is safe at **0**.
+- **Ruled out:** that this needs a human decision — it does not. It is now a machine check.
+- **Next probe:** none. Wait. `bash scripts/drift-check.sh` reports it every run, and the
+  `drift-check` systemd timer fires 4×/day.
+
+### `waiting` false-positive on a pane showing ANOTHER session's output — STILL OPEN
+- **Symptom:** a pane displaying another session's transcript trips `trailing_question` /
+  `context_exhausted` on text that is not its own state. Originally seen as `Yarrow (Y)` window 1
+  matching on this session's own SSH probe output echoed into that pane.
+- **Observed this session:** the same *class* was independently re-derived while designing
+  `unsent_prompt` — which is why `detect_unsent_prompt` reads ONLY between the two box-drawing
+  rules (`_input_box_span`), and why `PANE_TAILING_A_RENDERED_BOX` exists as a fixture.
+  `waiting`'s own detector was NOT given that treatment.
+- **Leading hypothesis:** scope the waiting signals to the pane's own last assistant block, the
+  same way the unsent detector scopes to its own input box. The helper already exists.
+- **Next probe:** `python3 scripts/session-manager --no-ch --json | python3 -c 'import sys,json;
+  d=json.load(sys.stdin); print([(r["window"], r["waiting_signals"]) for hv in d["hosts"].values()
+  for r in (hv.get("windows") or []) if r.get("waiting_probable")])'` — then read each flagged
+  pane and check whether the matched line is its own output.
+
+### `idle`-with-no-age and `idle`-with-a-fresh-age render identically
+- **Observed:** 32 of 81 rows have `age_source: None`. Measured decisively earlier: **0** of them
+  are a join bug — every ageless row genuinely has no ledger record, because its Claude process
+  started BEFORE the ledger shipped (`2026-08-14T04:01:41Z` is the first record; those processes
+  date from Aug 5–12). Self-healing: the first tool call in such a window writes a record.
+- **Ruled out:** a read/join defect (0 ageless rows had a record present), and prune (TTL is 7d).
+- **Next probe:** none needed for correctness. The open question is presentational — `idle` with
+  no age and `idle` with a 2-minute age are different states rendered the same.
+
+### Two false comments in MERGED code, both verified this session
+- **Symptom:** `scripts/tmux-scratch-slots.sh:4,14` documents the hotkey as an i3 binding
+  (`$mod+Shift+<key>`, e.g. "`$mod+Shift+V` -> `scratch4` -> `Vapor`"). No such i3 binding exists.
+- **Observed:** `grep -rn 'mod+Shift+(V|G|P)' nix/i3/` → **0**; `i3-msg -t get_config | grep -E
+  'bindsym.*Shift\+(V|G|P)\b'` → **0**. Controls fired: 75 live `bindsym` lines, 27 with `Shift`,
+  79 in `nix/i3/config.nix`, so the zeros are real and not a broken pattern. The actual binding is
+  tmux `bind -n M-<key>`: `tmux list-keys -T root | grep 'M-P '` → `scratch6`.
+- **Second, separate:** `session-resolve` and `waiting-windows` spell the same presence fact
+  differently. `grep -c structurally_excluded` → **3** in `session-resolve`, **0** in
+  `waiting-windows`, which uses `unmeasured` + `harness_presence_reason: "remote_host"`.
+- **Ruled out:** that `session-resolve:109`'s docstring is false. It says "spelled to MATCH the
+  waiting-windows" and is correctly scoped to `coverage.registry.hosts_not_covered`, which DOES
+  match. I nearly reported a defect that was not one — read the line, not the summary of it.
+- **Next probe:** none needed. Both are one-line docs/vocabulary fixes; neither is urgent.
+
+### Where a FIFTH variant of the #558 disclosure bug is predicted
+- **The pattern, four for four:** silent gap → false positive (unread host printed `consulted`) →
+  false negative (attempted host printed `not-attempted`) → the model fix constrained the STATUS but
+  not the PROSE derived from it (a caveat keyed on `not answered` instead of `not measurable`).
+- **Leading hypothesis, from the agent that fixed it:** the remaining unpinned prose is where the
+  next one lands. Measured: rewording the `source-failed` reason, dropping the sm failure detail, and
+  reversing `answered_by` order **all survived** mutation; `ALL_HOST_STATUSES`' string values are a
+  `--json` contract and are unpinned.
+- **Next probe:** pin the whole normalised reason strings (repo rule for prose artifacts), then
+  re-run the same mutants and watch them die.
+
+### `tmux` failure path in session-resolve is never exercised
+- **Observed:** `tmux_ok` is True in **all** matrix cells, so every failure status is produced by
+  session-manager only. Wrong-operand and always-False mutants at `session-resolve:428-429`
+  (tmux `detail`/`source_failed`) both SURVIVED.
+- **Ruled out:** that this is a coverage accident — the matrix's `tmux_ok=False` path sets
+  `panes_raw=""`, which yields `panes=[]` / `panes_status="ok"` (measured empty, not a failure).
+- **Next probe:** add a genuine tmux-failure cell; note it changes the matrix's shape, and tmux
+  fails far more rarely than session-manager, which is why it was filed rather than fixed.
+
+### The ClickUp board audit — findings are ~1 day stale, re-measure before acting
+Three sweeps (live tmux / git+PR / transcripts) ran early this session. **Board statuses were
+re-verified once and all 10 still held**, but the live half has certainly moved.
+- **Board wrong in both directions:** `868kphutm` reads `to do` / "root cause still unfixed" while
+  talos-infra **#1065 merged 2026-08-16** IS the root-cause fix (verified directly).
+  `868kr07fu` urgent-and-open with both asks closed and Justin's confirmation on the ticket.
+  `868kt4bhq`, `868kt5wju`, `868kt5wq4` all `to do` with the work merged.
+- **12 tickets whose own comments invert their premise** — worst `868kt4bh4`: *"The remedy in this
+  ticket's title would CAUSE the incident it describes."* These need rewriting, not working.
+- **Two colleague debts:** `868krn3y1` (Justin escalated 08-15 with three reproduced incidents, no
+  session took it up) and `868kqvkrr` (Justin partially answered, unworked).
+- 🔴 **122 completed tickets are invisible to the CLI**: `api/tasks.mjs` appends `include_closed=true`
+  only on an option **no CLI flag ever sets**. Direct API returns **160 vs 38**. Verified: `868kt8wzf`,
+  `868krm9cm`, `868kn05xg` all read `Status: complete` and all return 0 hits from `my-tasks --json`.
+- **Full synthesis + the three source reports** are in this session's scratchpad only
+  (`SYNTHESIS-clickup-gaps-2026-08-18.md`) — deliberately NOT in `claudedocs/`, because devrc is
+  PUBLIC and they carry client ticket titles and internal hostnames.
+
 ## Next steps (ranked)
-
-🔴 **Writer 3 is GATED, not next — and spec §4's premise is wrong.** Design pass with the
-measurements: `claudedocs/design-ledger-writer3-and-kind-2026-08-14.md`. In short: §4 says the
-primary entity "becomes an agent run", but clawgate has **no agent-run entity** — `/api/agents`
-is 2 long-lived devpods, both `status: error`, one created 2026-06-06. The ephemeral thing is
-the **task in `in_progress`**, which `scripts/lib/clawgate_tasks.py` already models and which
-just reported the 2 wedged dispatches correctly. So if cluster rows are ever built, their
-source is `/api/tasks` filtered to `in_progress`, **not** `/api/agents`.
-**Trigger to un-gate:** the `in_progress` population routinely non-zero **and** `task.agent`
-non-null (#316 resolved). Both false today; re-check with one `/api/tasks?summary=1` call.
-
-1. **fuzzyclaw removal, phase 2** — migrate the readers ONE at a time. `tmux-scratch-status.sh`
-   is already done (#475 deleted the marker rather than migrating it). Remaining:
-   `session-manager`, `agent-ops`, `tmux-claude-counters.sh`, `verify-agent-work`,
-   `validation/{reconcile,refsources}.py`. Then phase 3 (a test that fails if any fuzzyclaw
-   read reappears), then phase 4 (remove the writers — never first).
-2. **agent-ops retirement does NOT gate on writer 3 or on `kind`** — re-read of spec §7 against
-   the code: every disposition routes to `session-manager` / `standup` / `/initiative-scan`.
-   The one 🔴 KEEP is the **`/proc` detector** (`scripts/i3status-agent-ops` depends on it, and
-   it is strictly more accurate than `pane_current_command =~ /claude/`, which is why rows
-   render `? unk`). Moving that to a shared module IS the real gate.
-3. **Writer-3 prerequisites, tracked from the #482 audits** (same defect class as `kind`, left
-   open at the sites it did not consolidate):
-   - 🔴 `--claude-only` filters on `r["claude"]` and runs BEFORE `measured_caveats`, so a
-     cluster row would be dropped AND have its exclusion attributed to the build rather than
-     to the filter.
-   - The `CLASS` column and every roll-up are class-generic now, but nothing else is.
-4. **The §5 bar inversion** — a 45s systemd-user timer writing `~/.cache/bar-status/sessions.json`.
-   🔴 The cache MUST carry its own timestamp and measured/unmeasured state; both existing caches
-   have failed exactly there. Note #475 deleted the `●` waiting marker outright (the operator
-   does not use it), so this now has one fewer consumer — re-justify before building.
-5. **`no_session_reason` is KNOWN INCOMPLETE** (`scripts/session-manager`) — it reasons about
-   fuzzyclaw alone while the ledger is a second, winning supplier. Failure mode is bounded and
-   safe: it can understate what is known, never assert an unsupported measured absence.
-6. `render_caveats`' caveat CONTENT is **now pinned** for `kind_scope` (whole-string, five
-   branches) but NOT for the other four caveats. The `waiting` false-positive item below is
-   still open.
+1. **Nothing is blocking.** All five PRs merged, shipped and consumer-verified.
+2. **PR 3 — the write verbs** (`type` / `send` / `focus` / `dismiss`) on top of `session-resolve`.
+   This was the agreed sequence; I shipped the skill first because the read half solves the actual
+   pain (a question sat 55h) and write verbs add real risk. 🔴 **`tmux detach-client` is BLOCKED by
+   the permission classifier** — measured this session — so "full control" needs
+   `Bash(tmux detach-client:*)` in settings or every write verb needs a hand-the-keystroke fallback.
+3. **The two false comments** above — one-line fixes.
+4. **Pin the unpinned prose contracts** in `session-resolve` (predicted 5th-variant site).
+5. **`include_closed` in the clickup skill** — one flag; without it "what did I finish" silently
+   answers over open tickets only.
+6. **`find-session.py` skips `subagents/` and sidechains** — it could not see the two most
+   substantive investigations in the ClickUp sweep. An `--include-subagents` path.
+7. **`window_id` is absent from `LEAN_ROW_FIELDS`** — session-manager's "agent-shaped view" omits the
+   only stable join key, so `--lean` cannot be joined to anything. Small fix, deliberately held while
+   three branches were fighting over `run-tests.sh`.
 
 ## Gotchas / decisions / dead-ends
+
+**From the #530 sweep — three harness failures, all mine, all caught:**
+- 🔴 **THE `.pyc` CACHE TRAP FIRES IN THE *OTHER* DIRECTION TOO — a false KILL.** RULES records
+  it as "a mutant that never ran is scored SURVIVED". The same staleness scored an **unmutated**
+  module as mutated: the sweep's import-check subprocess inherited an env without
+  `PYTHONDONTWRITEBYTECODE` and wrote `__pycache__`, and `STATE_TOKEN = "fired"` → `"burnt"` is a
+  **same-length** edit landing in the same second — so a later run of a RESTORED file imported the
+  mutant's bytecode. Result: a shell-env rename "killed" the next-step-nudge test, `0 survivors`,
+  and every attribution wrong. **Purge `__pycache__` before every scored run, and set the env on
+  EVERY subprocess the harness spawns, not just the scoring one.**
+- 🔴 **A seam test that RESTATES the writer's arguments validates its own copy.** The ledger
+  temp-file test hand-wrote `prefix=".ledger.", suffix=".tmp"`; the mutant that changed the
+  WRITER's suffix to `.json` — the entire hazard — survived it. Fixed by spying on the shipped
+  `mkstemp` call. `agent_ledger`'s own docstring names this trap for `read_command`; it recurred
+  one level up, in the test written to guard it.
+- **A sweep that dies mid-mutant leaves the mutation on disk**, and the NEXT sweep's "baseline"
+  then measures a mutated tree. Restore in a `finally`, and assert byte-identity after.
 
 **Instrument failures — every one produced a confident wrong zero:**
 - `readlink -f` **returns a path for a file that does not exist.** Bit me twice (`~/.tmux.conf`,
@@ -278,29 +401,207 @@ not in the code. Every one passed a full green gate.**
   seed in a subprocess **plus a positive control** asserting that seed still orders the raw set
   the other way — otherwise the guard is a coin flip.
 
+**Five occurrences of ONE trap, and it is now a rule:**
+🔴 **A fixture whose value EQUALS the constant it tests cannot see the difference.** Every
+time, a mutant replacing a lookup with a hardcoded literal produced byte-identical output and
+survived a fully green suite: `kinds_produced == ["tmux"]` off a tmux-only gather;
+`kinds_enumerated` set to a value that WAS `KINDS`; `KINDS_PRODUCED_BY_CONSTRUCTION` pinned
+to the same value every other assertion used; `stuck_count: 2` in every carry-forward fixture
+(so `stuck > 0` → `stuck > 1` survived, and a SINGLE wedged dispatch would have dropped from
+`!1?` Critical to `?` Warning); and a systemctl stub with no mode failing only the `--failed`
+probe. **The third recurred INSIDE the commit that fixed the second.** The control is
+mechanical: feed a value the constant CANNOT be, and watch the output move.
+
+🔴 **A mutation that did not APPLY is not a survival.** Bit three parties: an agent's
+validator used `py_compile.compile(path, cfile="/dev/null")`, which raises `FileExistsError`
+on every input → 5 phantom survivors; I patched by string match, the pattern silently did not
+match, and the green suite read exactly like a result; and another session landed #504 on the
+same class (198/200 never ran). Assert the patch site occurs exactly once, apply by line
+number when the text is fiddly, and PROVE the mutation landed before scoring it.
+
+🔴 **A guard on PROSE is walkable by rewording — pin the WHOLE normalised string.** Four
+guards were walked: two asserted words that also appear in the sentence's own STATIC prose;
+banning one literal phrasing was walked by "every row **here is** a tmux pane"; banning a
+term by NAME was walked by a SYNONYM ("a terminal pane… the second enumerated entity"). The
+structural version ("names no member of `KINDS`") adds no kill power on its own — the
+whole-string pin is what kills. Accept that a cosmetic reword fails the test.
+
+🔴 **`grep -c` counts MENTIONS, not INSTANCES — it lied to me three times in one session.**
+"agent-ops referenced 4,233 times" (it is in always-loaded context; real invocations: **0**);
+"the false claims are still present" (they were fixed — the phrase now appears inside a
+comment explaining that it did not); "16 vs 22 requireHookToken sites" (my count included
+three comment lines and the function definition; 16 route wraps is right).
+
+**Instrument failures, all mine:**
+- A **cache-hit `nix build` returns exit 0 with NO output** — read the derivation log, never
+  trust silence. Nearly read it as success twice.
+- **zsh brace-expands `{'a':1,'b':2}` inside double quotes**, so a control payload I thought
+  I wrote never landed; and `"$BR:scripts/…"` is eaten by history modifiers (`:s`) →
+  "bad substitution". Brace it: `${BR}`.
+- **A non-integral `ts` is rejected by design** (`cache_age_secs` treats it as "not from a
+  poller we recognise"), so a float `time.time()` in a fixture short-circuits every case to
+  `?` and looks exactly like a code bug.
+- **A subprocess harness cannot distinguish a correct render from a swallowed crash** —
+  `__main__` catches everything and prints a byte-identical `?` pill. Five parametrizations
+  passed with `render()` replaced by `raise`. Call `render()` DIRECTLY.
+
+**Decisions:**
+- **A recorded alarm is carried forward** (operator, 2026-08-15). A frozen cache renders
+  `39?` / `LEAK?` in Critical, not `?` in Warning — alerts do not resolve because the poller
+  died, and the `?` already marks it unmeasured. A MEASURED quiet board still hides.
+- **`RULES.md` ceiling raised, not evicted** — measured first: `skill-audit.py` found ZERO
+  work-status and ZERO dated-lesson blocks, and 18 of 24 fat lines already carry
+  `→ archive:` tags. Note `skill-audit.py` reports RULES.md "over target by 21,980 B"
+  against a **12 KB SKILL** budget that does not govern it; the prune-skill's own 🔴 says
+  report the mismatch, not execute it.
+- **agent-ops TUI deleted, detector kept.** 0 invocations in 30 days; the GUI half rests on
+  the operator's statement, not data (transcripts cannot see a bar-button launch).
+- 🔴 **A block rename needs `i3-msg restart`.** The switch DELETES the old symlink while a
+  running `i3status-rs` holds the old parsed config, so the pill is broken between `ship.sh`
+  and the restart. Sequence: **merge → `ship.sh` → `i3-msg restart` → re-check the pill.**
+  Now in `claude/skills/bar/SKILL.md`, generalised to any block rename/removal/`command`
+  change.
+- **`cp -a` of a worktree gives ZERO git isolation** — `.git` is a POINTER FILE, so a copy
+  shares the real git dir, index and refs. An auditor's scratch `git commit` landed on a live
+  branch (recovered, never pushed). `rm -f <copy>/.git` after any copy.
+
+**Loose ends, not defects:**
+- Two `i3status-rs` processes from Aug 4 are orphaned to systemd (`--no-init`, ppid 1,
+  attached to no `i3bar`). Not killed — resolving PIDs I did not start is the documented
+  sibling-kill hazard.
+- `~/workspace/homelab-talos` (which IS `ZacxDev/homelab-infra` — the directory name lies)
+  carries untracked `.kube/`, a `cilium-l2-announcement-policy.yaml`, and a modified
+  `flake.nix`.
+- GitHub Actions is **billing-blocked repo-wide** on homelab-infra; gates run on Tekton as
+  `tekton/clawgate-ci`, and the workflow was cut to `workflow_dispatch` so it contributes no
+  red check. Merging a `containers/clawgate` change does NOT redeploy clawgate.
+
+**Six audit rounds this session, and EVERY fix round created the next finding. None of it was
+visible to a green gate.**
+- 🔴 **A fix for a false positive made the guard INERT on the incident that motivated it.**
+  #506 round 2: refusing every `agent_id` event (to stop a subagent's READ arming the parent)
+  also stopped a subagent's WORK counting — and the handoff records that #193/#194's work ran in
+  local subagents. The guard would have been silent on its own motivating case. Fixed
+  **asymmetrically**: a subagent's read does not arm, its work does count.
+- 🔴 **"Equivalent mutant" hid a real one, twice.** #515: the tombstone write-order was labelled
+  an equivalent-order negative control; writing it AFTER the removals leaves a window where
+  `record_read` re-creates `read-<id>`, producing the exact false-promise state the PR existed to
+  remove. No test distinguished the orders.
+- 🔴 **A gate can be blind to its own motivating shape.** #526's `.txt` free-text rule could not
+  see the slugs fixture (all 144 data lines are single tokens, 0 have whitespace) and its `.html`
+  prose rule keys on the LONGEST UNINTERRUPTED TEXT RUN — measured: 5×40 and 8×25 char runs
+  totalling 200 chars of prose → **0 findings**. Fixed with block aggregation + a run-count rule.
+
+**Instrument failures — mine, and they produced confident WRONG zeros:**
+- 🔴 **A marker scan looked for the wrong vocabulary and I relayed its zero as fact.** The sweep
+  reported `forum-thread-page.html` as "a real scraped thread, 0 synthetic markers, 7 real
+  hostnames". Measured: **150 SYNTH tokens, 144 `example.test` refs, 0 other hosts**, and the
+  file's own first line declares it sanitised. Its positive control matched `html` in the same
+  file — proving the file was READABLE, not that the marker patterns could MATCH.
+- 🔴 **A fixture one character under a threshold.** Re-testing #526's prose rule, my runs were
+  `'word '` truncated to 25, which strips to **24** — one under `MIN_CHAT_TEXT_CHARS=25`. Every
+  cell read 0 and I nearly reported the fix as ineffective.
+- **`openssl ec -in -` does not accept `-` as stdin at all** — a freshly generated P-256 key
+  fails identically. Reading "unable to load Key" as "malformed key material" is available and
+  wrong; decode the DER instead.
+- **`nix build path:<worktree>#…` is a FALSE RED** — a worktree's `.git` is a *file*, `path:`
+  copies it, and five pre-existing tracked-ness tests then fail `git exit 128`. Use the git flake ref.
+- **`pgrep -f` self-match caught THREE agents this session**, one of them mid-PR. A loop
+  `until ! pgrep -f "<pat>"` matches its own command line and can only end by timeout.
+
+**Decisions:**
+- **Git history is NOT being rewritten** (operator, 2026-08-17). The dspy capture was 333 of the
+  operator's OWN truncated prompts (≤200 chars) — NOT third-party bodies, a mischaracterisation
+  that reached the #521 commit message. Credential sweep of all 3,444 reachable blobs: clean.
+- **Linkerd anchors: dead, no rotation** (operator: "we dont use linkerd"; measured 0 Linkerd
+  namespaces across 3 reachable clusters). Four P-256 keys remain in reachable history by
+  decision. Recorded in `SECRETS.md`.
+- **The client workspace path in 34 tracked files is an ACCEPTED disclosure** — the client's org
+  and flagship repo are both public, 141 files already carry the brand as prose, and a partial
+  scrub would be worse than none (~8 additional partial-fragment carriers a full-path scrub misses).
+- 🔴 **All four gates scan `git ls-files` only — none reads history.** That is what hid the
+  private keys for 4–5 years. Recorded as an EXECUTABLE limitation pin
+  (`test_no_captured_markup.py::test_the_gate_is_blind_to_git_history`), not prose.
+- **Two briefs of mine were substantially wrong and the agents that pushed back with measurements
+  were right both times.** Keep telling them to refute rather than implement.
+
+**From #558's four audit rounds — every finding survived a GREEN gate:**
+- 🔴 **`--host` defaulted to a literal `"workbench"`** while session-manager's default is `"all"`. A
+  real laptop window reported `UNMATCHED` with every source listed as consulted, and
+  `hosts_not_covered` was **empty** — the disclosure mechanism was disabled by the very bug it would
+  disclose. My own live validation missed it because I only ever resolved workbench windows.
+- 🔴 **A hermeticity fixture that did not cover its own path.** `Sources.registry_dir` is a dataclass
+  FIELD DEFAULT bound at class creation, so `monkeypatch.setattr(module, "DEFAULT_REGISTRY_DIR", …)`
+  cannot reach it. Measured at the audited tip: **345 real `subprocess.run(['git',…])`** calls and
+  `load_registry(Sources())` returning **47 live records** off the operator's machine. Its positive
+  control asserted the module global — the one value nothing on that path reads.
+- 🔴 **Each fix created the next finding, four rounds running**, all in one surface. Round 3's model
+  rewrite is what broke the cycle: the facts are per **(host, source)**, not per host — tmux covers
+  the local host only and is read regardless of `--host`, session-manager covers what `--host`
+  selects. Deriving status from session-manager ALONE is why a host that supplied every window was
+  labelled from session-manager's silence.
+- **A 144-cell matrix that was 26 whole-cell signatures / 16 distinct outcomes.** `sm_broken=True`
+  discards `sm_reports`, `tmux_ok` is inert. Corrected publicly on the PR rather than by a silent
+  body edit.
+
+**Instrument failures — MINE, and each produced a confident wrong answer I reported or nearly did:**
+- 🔴 **A flag that forced the result I then reported as a finding.** I ran `waiting-windows --no-state`
+  and reported "the registry clock is unused, 28/28 fallback". `--no-state`'s own `--help` says every
+  row then reports `ledger_age_fallback`. Corrected: `registry_status_updated=9, ledger_age_fallback=15`.
+- 🔴 **Guessed a JSON key instead of reading the schema.** `d.get('rows')` when the key is
+  `over_threshold`, producing "0 rows at threshold 0" — which I nearly reported as a defect in merged
+  code. The human view said 47 at the same moment.
+- 🔴 **Verified by ANCESTRY where only CONTENT could answer.** I reported three finished docs as
+  "stranded on unpushed branches" off `git branch -r --contains` = 0, and recommended pushing them.
+  All three were already on `origin/trunk`; one worktree copy was **49 lines BEHIND** trunk, so
+  pushing it would have regressed the file. The empty cherry-pick caught it — a control I should have
+  run before reporting, not after acting.
+- **`grep | head` returns HEAD's status**, so an `rc=$?` after it is meaningless — reported `rc=0`
+  for a command that exits 2.
+- **zsh history modifiers ate `$b:scripts/...`** → "bad substitution". Brace it: `${b}`.
+- **A type mismatch produced a confident empty result** — `window_index` is a **string**, so an int
+  comparison reported five live windows as "no longer exist".
+- **An ISO-only timestamp parser reported an epoch-ms INT field as absent** on all 48 registry
+  records. I nearly concluded `statusUpdatedAt` did not exist.
+
+**Decisions:**
+- **The harness session registry is at `~/.claude/sessions/<pid>.json`, readable by any script** —
+  `status`, `statusUpdatedAt` (epoch **ms int**), `tmux` (`session:@window.%pane`), `name`,
+  `sessionId`, `cwd`. It is **LOCAL-HOST ONLY by construction** (remote 0/7 rows measured), which is
+  a structural exclusion, not "not yet populated".
+- 🔴 **Two `waiting` signals that disagree, carried separately and NEVER merged.** Measured at one
+  instant: session-manager `waiting_probable` = **3**, harness registry `status: waiting` = **1**,
+  **zero overlap**, with `scratch11:@136` `idle` in one and `waiting` in the other. They answer
+  different questions. No mapping was invented; log both and measure agreement before writing one.
+- **`--lean` DROPS `window_id`** — session-manager's agent-shaped view carries `window_index` only, so
+  a brief mandating `--lean` AND a join on `window_id` is impossible. Both agents refuted it; both use
+  the full `--json` (a strict superset) with `--lean` pinned OUT of their argv by a test.
+- **A skill description reproducing a sibling's trigger phrases is the HOUSE PATTERN, not a defect.**
+  `window-triage` contains "waiting on me", "tail a window", "unsent" in its disambiguation sentence;
+  so does `signal` (contains `mailbox`'s "mail inbox" trigger). What was wrong was the *justification*
+  — "vocabularies disjoint by construction" was asserted, not measured.
+- **The audit sequencing cost is real and should be a conscious choice**: #558 consumed ~10 full gate
+  cycles (~10 min each under load 25-30 from concurrent sibling gates). Three of those were "a fix in
+  response to a gate resets the verification", which is the rule working. A `flock` around the gate
+  was **proposed and then dropped** — the evidence was 3 data points showing ~35% inflation, two of
+  them identical under different load, which does not justify changing a load-bearing script.
+
 ## How to verify
 ```bash
-# the ledger, both hosts — `live of seen` per host, and the ages meter
-python3 ~/workspace/devrc/scripts/session-manager --no-ch | grep -E 'AGENT LEDGER|live of|ages:'
+# the two shipped tools, live — both read-only
+python3 ~/workspace/devrc/scripts/session-resolve show Gold          # -> AMBIGUOUS, refuses, exit 2
+python3 ~/workspace/devrc/scripts/session-resolve show scratch2:@81  # -> RESOLVED, exit 0
+python3 ~/workspace/devrc/scripts/waiting-windows                    # banded, actionable kinds first
 
-# the writer, on THIS host, without touching the real ledger
-python3 ~/.claude/hooks/agent-ledger-hook.py --selftest   # expect "1 expected, 1 observed -> PASS"
+# the skill is deployed AND routable (a store symlink -> needs a switch, not a git pull)
+readlink -f ~/.claude/skills/window-triage/SKILL.md   # must terminate in /nix/store
+grep -c 'Renamed from' ~/.claude/skills/session-manager/SKILL.md   # 1 = #534's rename is deployed
 
-# registered on all four events
-jq -r '.hooks | to_entries[] | .key as $e | .value[] | .hooks[]?
-       | select(.command|test("agent-ledger")) | $e' ~/.claude/settings.json | sort
+# #530's fix, at the deployed consumer
+grep -c _read_tmp_name ~/.claude/hooks/clawgate-writeback-guard.py  # 2
 
-# the gate (authoritative). 🔴 A CACHE HIT RETURNS EXIT 0 WITH NO OUTPUT — read the log,
-# never trust silence, and never read a piped exit code.
-nix build ~/workspace/devrc#checks.x86_64-linux.pytests -L --no-link 2>&1 \
-  | grep -E 'TOTAL collected|RESULT:'
-
-# the entity axis, live — every row tmux, and NO cluster key in any bucket
-python3 ~/workspace/devrc/scripts/session-manager --no-ch --json \
-  | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d["summary"]["kind"], d["summary"]["status"]["idle"])'
-
-# the clawgate board + the stuck detector, one call
-curl -s -H "Authorization: Bearer $CLAWGATE_HOOK_TOKEN" \
-  "${CLAWGATE_API_URL:-http://192.168.50.250:30302}/api/tasks?summary=1" \
-  | python3 -c 'import sys,json,collections; t=json.load(sys.stdin); print(collections.Counter(r["status"] for r in t)); print("agent non-null:", sum(1 for r in t if r.get("agent")))'
+# the gate (its exit status is authoritative; 90 = could-not-vouch, read the log)
+bash ~/workspace/devrc/scripts/gate.sh --tier pytest --set hermetic
+# 🔴 test_opencode_engine.py fails on THIS HOST already: opencode 1.18.18 vs pinned 1.18.16.
+#    Pre-existing and unrelated — confirm with: git diff --stat origin/main -- <that path>
 ```

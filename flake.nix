@@ -63,6 +63,51 @@
         inherit system;
         config.allowUnfree = true;
       };
+
+      # ---------------------------------------------------------------------
+      # THE GATE'S TOOLCHAIN — ONE list, TWO consumers.
+      #
+      # `scripts/run-tests.sh` asserts a REQUIRED_TOOLS precondition and exits 3
+      # when a binary is missing, because the suites `skipif` on these and a
+      # missing one would take the run GREEN while testing less. That
+      # precondition is correct and stays. What it lacked was a discoverable way
+      # to SATISFY it: the FATAL named `flake.nix checks.pytests
+      # nativeBuildInputs`, which is a derivation you cannot stand in, so a
+      # contributor's only route was to reverse-engineer the list into an ad-hoc
+      # `nix-shell -p ...`. Getting that list wrong reads as a red gate that
+      # looks like a code failure.
+      #
+      # So the same list now also backs `devShells.default`, and the FATAL names
+      # `nix develop` (see run-tests.sh's GUARD 1). Hoisted to ONE binding
+      # rather than copied: two hand-maintained copies is how the shell that is
+      # supposed to satisfy the precondition drifts out of satisfying it, and
+      # that drift would resurface as exactly the message this fixes.
+      # `scripts/tests/test_devshell_satisfies_required_tools.py` pins the
+      # relationship in the other direction -- every REQUIRED_TOOLS entry must
+      # be reachable from this list.
+      # ---------------------------------------------------------------------
+      gatePyEnv = pkgs.python312.withPackages (ps: with ps; [
+        pytest
+        requests
+        psycopg2
+        minio
+        pyyaml
+      ]);
+      # Read the per-entry justifications on checks.pytests' nativeBuildInputs
+      # below before adding or removing anything here.
+      # age: scripts/tests/test_analyze_service_index_backup.py resolves `age` and
+      # `age-keygen` at IMPORT and raises rather than skipping — deliberately, and
+      # for the same reason test_analyze_service_index_commit.py does: a skipped
+      # backup test reports safety it never measured, which for a disaster-recovery
+      # feature is quiet exactly when it is wrong. That suite runs the real
+      # encrypt/decrypt round trip (it generates its own throwaway identity; the
+      # operator's key is never touched), so without age here the whole file is an
+      # import error inside the sandbox rather than a green-with-skips.
+      gateTools = [
+        gatePyEnv pkgs.bash pkgs.ripgrep pkgs.git pkgs.util-linux pkgs.jq
+        pkgs.gnugrep pkgs.curl pkgs.nodejs pkgs.nix pkgs.opencode pkgs.logrotate
+        pkgs.rsync pkgs.zsh pkgs.age
+      ];
     in
     {
       # ---------------------------------------------------------------------
@@ -119,17 +164,35 @@
       # Deps below cover the modules-under-test's import-time requirements
       # (requests/psycopg2/minio/pyyaml); the tests themselves mock the I/O.
       # ---------------------------------------------------------------------
+      # ---------------------------------------------------------------------
+      # `nix develop` — the environment `scripts/run-tests.sh` demands, by name.
+      #
+      # Built from the SAME `gateTools` list as checks.pytests below, so the
+      # shell a contributor is told to enter cannot drift out of satisfying the
+      # precondition that told them to enter it.
+      #
+      # This is a shell, NOT a second gate: `nix flake check` remains the
+      # hermetic authority (no network, no /home). The shell just makes the
+      # authoritative runner runnable by hand.
+      # ---------------------------------------------------------------------
+      devShells.${system}.default = pkgs.mkShell {
+        name = "devrc-gate";
+        packages = gateTools;
+        shellHook = ''
+          # 🔴 Marks a SANCTIONED gate environment. run-tests.sh GUARD 1 uses it to
+          # tell a REPO defect from a CALLER defect: a REQUIRED_TOOLS entry missing
+          # while this is set means the repo asked for something `gateTools` does
+          # not supply (or the entry is a typo) — that BLOCKS. Missing while it is
+          # unset means the caller is simply not in the gate env — that degrades.
+          # Set in BOTH tiers (here and checks.pytests) or the sandbox would
+          # misclassify its own repo defects as environment faults.
+          export DEVRC_GATE_ENV=1
+          echo "devrc: gate toolchain ready — bash scripts/run-tests.sh ." >&2
+        '';
+      };
+
       checks.${system} = {
         pytests =
-        let
-          pyEnv = pkgs.python312.withPackages (ps: with ps; [
-            pytest
-            requests
-            psycopg2
-            minio
-            pyyaml
-          ]);
-        in
         pkgs.runCommandLocal "devrc-pytests"
           {
             # ripgrep: one repo-cos prescan test skipif's without it on PATH.
@@ -217,11 +280,11 @@
             # 🔴 This ALSO makes the sandbox the tier that pins the VERSION.
             # `pkgs.opencode` here and in nix/pkgs/tools/default.nix resolve from
             # the same flake.lock, so CI tests the exact binary the hosts deploy
-            # (1.18.16 at rev 044bfe75bfe4). Cost, stated as deliberately as the
+            # (1.18.18 at rev 5c680dac9f02). Cost, stated as deliberately as the
             # nodejs and nix entries above: this check's closure grows by
             # opencode, and a nixpkgs bump that moves it invalidates the cache
             # AND turns the version assertion red. That red is the point — the
-            # config header's "measured on v1.18.16 — do not re-derive" claims are
+            # config header's "measured on v1.18.18 — do not re-derive" claims are
             # otherwise pinned to nothing.
             #
             # logrotate: scripts/tests/test_claude_log_rotate.py drives the REAL
@@ -234,7 +297,37 @@
             # nix-instantiate and opencode above. Hermetic — logrotate only ever
             # sees a pytest tmp_path, its own generated config and its own state
             # file; no network, no ambient /var/lib/logrotate.status.
-            nativeBuildInputs = [ pyEnv pkgs.bash pkgs.ripgrep pkgs.git pkgs.util-linux pkgs.jq pkgs.gnugrep pkgs.curl pkgs.nodejs pkgs.nix pkgs.opencode pkgs.logrotate ];
+            #
+            # rsync: MEASURED 2026-08-16 — scripts/tests/test_subsystem_store_api.py
+            # drives the REAL scripts/subsystem-store-api/seed.sh, whose one
+            # copy step is `rsync -a --delete "$STORE"/ "$STAGE"/`. Without the
+            # binary those tests fail with `rsync: command not found` (rc 127),
+            # which is a FAILURE and not a skip, deliberately: the property they
+            # pin is that seeding never writes to the local store, and that store
+            # is the only copy of client-confidential content. The same
+            # nix-shell-stripped-PATH method as the `nix` entry above reproduced
+            # it. Present on the workbench (`~/.nix-profile/bin/rsync`), so the
+            # pre-push tier is unaffected.
+            #
+            # zsh: scripts/tests/test_run3.py. The rule `scripts/run3` enforces
+            # is a zsh-vs-bash DIFFERENCE — MULTIOS duplicates stdout onto a
+            # pipe, so `cmd 2>&1 >/dev/null | c` hands the consumer stdout where
+            # bash hands it nothing — so a tier without zsh is structurally
+            # blind to the entire class: both zsh tests would skip and the gate
+            # would go green having exercised only the shell in which the defect
+            # cannot occur. Hermetic enough to gate: `zsh -c` on a literal
+            # string, no network, no writes. ⚠ It DOES source `~/.zshenv` — in
+            # the sandbox HOME holds none, and on the workbench devrc's does not
+            # touch MULTIOS, which is exactly why the trap is live there. That
+            # is a property the control test ASSERTS rather than assumes.
+            # Present on both hosts as the login shell, so the pre-push tier is
+            # unaffected.
+            # `gateTools` is defined in the outer `let` and is SHARED verbatim
+            # with devShells.default — see the block that defines it. Adding a
+            # tool there is what makes `nix develop` able to run this same
+            # runner by hand; adding it only here would put the gate and the
+            # shell back out of sync.
+            nativeBuildInputs = gateTools;
           }
           ''
             cp -r ${./.} src
@@ -244,6 +337,8 @@
             # sandbox (no /usr/bin/env). Rewrite shebangs to store paths so those
             # legitimately-hermetic tests can run. (Does NOT touch test logic.)
             patchShebangs src/scripts
+            # Same marker the devShell sets — see its shellHook for why.
+            export DEVRC_GATE_ENV=1
             export HOME="$TMPDIR/home"
             mkdir -p "$HOME"
             cd src

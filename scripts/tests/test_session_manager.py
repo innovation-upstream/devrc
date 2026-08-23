@@ -23,7 +23,9 @@ The section numbering below maps 1:1 onto `claudedocs/kickoff-session-manager.md
 """
 from __future__ import annotations
 
+import ast
 import copy
+import glob
 import importlib.machinery
 import importlib.util
 import json
@@ -114,7 +116,7 @@ def test_hermeticity_fixture_is_actually_installed():
 def test_the_blocked_cache_seam_is_separate_from_the_general_file_reader():
     """🔴 The guard above is only real if the two seams are actually distinct.
 
-    If `read_blocked_on_me` were changed to call `_read_text` directly, the
+    If `read_clawgate_queue` were changed to call `_read_text` directly, the
     autouse raiser would stop covering it and every later test would be free to
     read the live machine again — with the suite still green, because the
     positive control above only proves the raiser is INSTALLED, not that the
@@ -122,10 +124,10 @@ def test_the_blocked_cache_seam_is_separate_from_the_general_file_reader():
     reader injected, the read must raise.
     """
     with pytest.raises(_Forbidden):
-        sm.read_blocked_on_me()
+        sm.read_clawgate_queue()
     # ...and an INJECTED reader must bypass the seam entirely, or every test
     # below is testing the raiser rather than the parser.
-    got = sm.read_blocked_on_me(path="/nope", reader=lambda p: None)
+    got = sm.read_clawgate_queue(path="/nope", reader=lambda p: None)
     assert got["status"] == "absent"
 
 
@@ -348,7 +350,7 @@ def base_gather(**kw):
         slots=SLOTS_FIXTURE,
         # The clawgate cache: absent by default, so no test inherits a value
         # that depends on the operator's real queue. Override per test.
-        blocked_reader=lambda p: None,
+        clawgate_reader=lambda p: None,
     )
     defaults.update(kw)
     return _REAL_GATHER(**defaults)
@@ -1705,7 +1707,10 @@ def test_json_golden_schema_and_values():
     assert blob["stale_threshold_secs"] == 3600
     assert set(blob) == {"ts", "local_host", "stale_threshold_secs", "hosts",
                          "clickhouse", "fuzzyclaw", "ledger", "filters",
-                         "caveats", "summary", "blocked_on_me"}
+                         "caveats", "summary", "clawgate_queue",
+                         # what this report contains NOTHING about, derived from
+                         # the keys above rather than written down
+                         "not_measured"}
     assert set(blob["hosts"]) == {"workbench", "laptop"}
 
     wb = blob["hosts"]["workbench"]
@@ -1755,6 +1760,12 @@ def test_json_golden_schema_and_values():
         "waiting_probable": None,
         "waiting_signals": None,
         "waiting_status": "uncaptured",
+        # 🔴 The FOURTH signal inherits the SAME not-measured path, and its null
+        # is readable only because the status rides beside it. `uncaptured`, not
+        # `ok`: this pane's screen was never parsed, so "no unsent prompt" is
+        # not a thing this row is entitled to say.
+        "unsent_prompt": None,
+        "unsent_prompt_status": "uncaptured",
         "claude_session_id": "11111111-2222-4333-8444-555555555555",
         # 🔴 `runtime` names WHICH agent recorded the window. Null here because
         # this fixture runs `use_ledger=False`, so no writer answered — and
@@ -1803,7 +1814,9 @@ def test_json_golden_schema_and_values():
         # 🔴 LITERAL, and the whole point: this fixture's 3 windows are one busy
         # claude, one idle claude and one unknown SHELL. No bucket publishes a
         # bare number, and no flat `idle` key exists to be read as an agent
-        # count. `claude_only` false -> `excluded_non_claude` is None, not 0.
+        # count. `claude_only` false -> `excluded_shells` is None, not 0, and
+        # so is `kinds_excluded_by_filter`: no filter ran, so "which kinds did
+        # it remove" was never measured and `[]` would be a fake measurement.
         "status": {
             "busy": {"claude": 1, "shell": 0, "total": 1},
             "idle": {"claude": 1, "shell": 0, "total": 1},
@@ -1811,7 +1824,8 @@ def test_json_golden_schema_and_values():
             "unknown": {"claude": 0, "shell": 1, "total": 1},
         },
         "claude_only": False,
-        "excluded_non_claude": None,
+        "excluded_shells": None,
+        "kinds_excluded_by_filter": None,
         "hosts_reachable": ["laptop", "workbench"],
         "hosts_unreachable": [],
         "fuzzyclaw_live": 1,
@@ -1828,12 +1842,22 @@ def test_json_golden_schema_and_values():
             "per_signal": None,
             "unmeasured_reasons": {"uncaptured": 2, "not_claude": 1},
         },
+        # 🔴 THE FOURTH SIGNAL, IN THE GOLDEN, AND IT IS THE UNMEASURED SHAPE
+        # FOR THE SAME REASON — not a copy of the block above but the same
+        # capture failing, reported under its own name. `count: None` is the
+        # load-bearing literal: a `0` here would be this report answering "is
+        # any work parked one Enter away" with a look nobody took, which is
+        # precisely how five such windows went unreported on 79 live panes.
+        "unsent_prompt": {
+            "count": None, "measured": 0, "unmeasured": 3,
+            "unmeasured_reasons": {"uncaptured": 2, "not_claude": 1},
+        },
         # The clawgate queue was never read (no reader injected in this
         # fixture's environment), so the count is None with its discriminant —
         # and so is `stuck_count`, which is the same rule applied to the
         # stuck-dispatch half rather than a second, weaker one.
-        "blocked_on_me": {"count": None, "status": "absent",
-                          "stuck_count": None, "schema_ok": False},
+        "clawgate_queue": {"count": None, "status": "absent",
+                           "stuck_count": None, "schema_ok": False},
         # 🔴 THE #419 METER, in the golden. One of these three windows has an
         # age and it came from fuzzyclaw — because this fixture runs
         # `use_ledger=False`. The two `none` rows are the shape the SHIPPED
@@ -2002,6 +2026,788 @@ def test_stale_threshold_flows_from_the_argument_into_the_rows():
     # the row that moved is a CLAUDE row, so it moved on the claude half
     assert stale["summary"]["status"]["stale"] == {"claude": 1, "shell": 0,
                                                   "total": 1}
+
+
+# =========================================================================== #
+# §3.16b — the misnomer, banned structurally
+# =========================================================================== #
+def _all_keys(obj, out=None):
+    """Every dict key anywhere in a nested payload."""
+    if out is None:
+        out = set()
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            out.add(k)
+            _all_keys(v, out)
+    elif isinstance(obj, list):
+        for v in obj:
+            _all_keys(v, out)
+    return out
+
+
+def test_no_key_named_blocked_on_me_survives_at_ANY_depth():
+    """\U0001f534 THE MISNOMER, BANNED STRUCTURALLY, BECAUSE THE PROSE MITIGATION FAILED.
+
+    `report["blocked_on_me"]` held the CLAWGATE APPROVAL QUEUE, not "everything
+    waiting on you". This tool already carried a caveat saying exactly that,
+    whose own text called the wrong reading "the misread this entry exists to
+    prevent" — and a reader made that misread anyway, in a brief that then
+    shipped to three subagents. A field NAME is read a hundred times for every
+    once its caveat is. RULES.md: prefer the deterministic/structural fix over
+    the prose one. The name is now `clawgate_queue`; this is what stops the old
+    one coming back.
+
+    Walked over the WHOLE payload rather than the top level, because the
+    top-level key set is already pinned by the golden test while `lean_report`
+    is a SEPARATE builder — a key resurrected inside `summary` or inside the
+    lean projection would be invisible to that pin. Both surfaces here.
+
+    \U0001f534 POSITIVE CONTROL, and not decoration: a walker wired to nothing
+    returns an empty set, and `"blocked_on_me" not in set()` passes happily. The
+    control asserts the walker really finds the key that REPLACED the misnomer,
+    so an empty result cannot be read as a clean one.
+    """
+    report = base_gather()
+    for label, payload in (("full", report), ("lean", lean_of(report))):
+        keys = _all_keys(json.loads(json.dumps(payload, default=str)))
+        assert keys, "%s: the walker found NO keys — it is wired to nothing" % label
+        assert "clawgate_queue" in keys, (
+            "%s: POSITIVE CONTROL FAILED — the walker cannot see the key that "
+            "replaced the misnomer, so its verdict on the misnomer is worthless"
+            % label)
+        assert "blocked_on_me" not in keys, label
+
+
+def test_the_clawgate_queue_and_the_tmux_WAITING_count_stay_SEPARATE_populations():
+    """\U0001f534 A RELATIONSHIP, not a value. The rename fixes what the field is
+    CALLED; this pins what it must not BECOME.
+
+    The two answer different questions from different stores: `clawgate_queue`
+    is the approval queue read out of the bar-status cache, and
+    `summary.waiting.probable` is panes whose own tail looks like it is asking a
+    human something. Summing them, or sourcing either from the other, rebuilds
+    the exact conflation the rename removed.
+
+    🔴 BOTH POPULATIONS ARE DRIVEN TO A REAL, MEASURED NUMBER, and that is the
+    whole point. The default fixture leaves BOTH counts `None`, and the first
+    version of this test asserted a "separation" that `None == None` satisfied
+    trivially. The SECOND version fixed only half of it: it populated the cache
+    (12 / stuck 1) but still ran on panes nobody scraped, so `waiting.probable`
+    was `None` and the closing assertion reduced to `None != 12` — true no
+    matter what. Measured: sourcing `summary.waiting.probable` from the clawgate
+    `stuck_count` SURVIVED it, and that is precisely the cross-population
+    conflation this test exists to ban.
+
+    So the panes are scraped too: `%11` sits on a modal and `%21` is out of
+    context, both Claude panes flag, and `waiting.probable` is a measured 2
+    against a queue of 12 / pending 11 / stuck 1. The values are pairwise
+    distinct AND the fixture-integrity loop below asserts that NO number this
+    queue publishes equals 2 — so a mutant sourcing `probable` from ANY field of
+    it moves the number and dies. (`schema=3` for exactly that reason: the
+    canonical `_cache()` ships `schema: 2`, which would have collided with the
+    expected count. 3 is a valid future bump — see
+    `test_the_schema_gate_is_measured_either_side_of_the_boundary`.)
+
+    🔴 `summary.clawgate_queue` IS a deliberate projection of the top-level
+    field, not a duplicate to be removed — the summary carries count WITH its
+    discriminant so a roll-up reader can tell "none pending" from "never
+    measured". So the invariant is that the projection MIRRORS, on every field
+    it republishes; a hardcoded value in either place breaks it.
+    """
+    report = waiting_gather(local={"%11": PANE_MENU},
+                            remote={"%21": PANE_CTX_ZERO},
+                            clawgate_reader=_cache(schema=3), now=NOW)
+    top = report["clawgate_queue"]
+    proj = report["summary"]["clawgate_queue"]
+    waiting = report["summary"]["waiting"]
+
+    # The cache really did land — without this the mirror assertions below could
+    # be comparing None to None and pass with the reader unwired.
+    assert top["count"] == 12 and top["stuck_count"] == 1, top
+    assert top["pending_count"] == 11 and top["schema"] == 3, top
+
+    # The projection mirrors, field for field.
+    for field in ("count", "status", "stuck_count", "schema_ok"):
+        assert proj[field] == top[field], (field, proj[field], top[field])
+
+    # 🔴 The tmux waiting population is MEASURED — from the panes, not from the
+    # queue. Both Claude panes flag, so this is a real 2 and never a None that
+    # every inequality below would satisfy for free.
+    assert set(waiting) >= {"probable", "measured", "unmeasured"}
+    assert waiting["measured"] == 2, waiting
+    assert waiting["probable"] == 2, waiting
+
+    # 🔴 FIXTURE-INTEGRITY LOOP — what makes the assertion above able to SEE a
+    # conflation mutant. No number the clawgate queue publishes may equal the
+    # expected waiting count, so `probable = <any field of the queue>` changes
+    # it and goes red. If a later fixture edit collapses that, this fails HERE,
+    # loudly, instead of quietly making the test vacuous again.
+    for field, value in sorted(top.items()):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        assert value != waiting["probable"], (
+            "FIXTURE COLLAPSE: clawgate `%s` == the expected waiting count "
+            "(%r), so a mutant sourcing one from the other would pass"
+            % (field, value))
+
+    # ...and the two stay structurally apart: a separate key, a separate shape.
+    assert waiting["probable"] != top["count"]
+    assert "waiting" not in top and "probable" not in proj
+
+
+# A near-miss arm is only granted to tokens and keys of at least this length.
+# Below it the distance-1 neighbourhood of a key stops being "a typo of a key"
+# and becomes ordinary short prose: the payload's 2-char key `ts` sits one edit
+# from `is`/`as`/`to`/`tsx`, and claiming those as payload pointers is the very
+# false-red this helper was narrowed to remove. Measured (see
+# `test_a_stale_SINGLE_WORD_pointer_is_caught_not_just_an_underscored_one`):
+# with the floor at 4, every ordinary word tried sits >=2 edits from every
+# top-level key, while every plausible drift of a real key sits at 1.
+_NEAR_MISS_MIN_LEN = 4
+
+
+def _within_one_edit(a, b):
+    """True iff `a` becomes `b` under at most ONE edit — insert, delete,
+    substitute, or TRANSPOSE two adjacent characters (restricted Damerau).
+
+    🔴 TRANSPOSITION IS PART OF THE RULE AND IS NOT FREE-RIDING ON THE OTHER
+    THREE. `sumamry`/`summary`, `hsots`/`hosts`, `ledegr`/`ledger`,
+    `caevats`/`caveats` and `clikchouse`/`clickhouse` are every one of them
+    Levenshtein distance TWO, so a plain-Levenshtein rule misses the single
+    commonest real typo shape while claiming to cover "the drift shapes that
+    actually occur" — measured, 5 of 5 transposition drifts tried were missed.
+    The widening is not speculative either: measured against cracklib-small
+    (50,692 entries matching `[a-z]+`), adding transposition to this payload's
+    key set drags in ZERO further ordinary English words — the transposition
+    neighbourhood of every key here is entirely non-words. Ledger and re-derive
+    recipe: `test_the_near_miss_arm_PRICES_the_false_reds_it_buys`.
+    """
+    la, lb = len(a), len(b)
+    if abs(la - lb) > 1:
+        return False
+    if la == lb:
+        diff = [i for i, (x, y) in enumerate(zip(a, b)) if x != y]
+        if len(diff) <= 1:
+            return True              # at most ONE substitution...
+        return (len(diff) == 2 and diff[1] == diff[0] + 1     # ...or exactly
+                and a[diff[0]] == b[diff[1]]                  # one ADJACENT
+                and a[diff[1]] == b[diff[0]])                 # transposition
+    if la > lb:                      # normalise so `a` is the shorter one
+        a, b, la, lb = b, a, lb, la
+    i = 0
+    while i < la and a[i] == b[i]:   # skip the common prefix...
+        i += 1
+    return a[i:] == b[i + 1:]        # ...the rest must match past one insert
+
+
+def _names_a_top_level_key(tok, top_keys):
+    """Is this bare word a pointer AT the payload — naming a top-level key, or
+    one edit away from naming one (a typo, a plural, a small rename)?
+
+    🔴 THE NEAR-MISS ARM IS OFFERED ONLY BY KEYS THAT CARRY NO UNDERSCORE,
+    and that restriction costs nothing while removing the sharpest false red
+    this rule had. Reasoning: the arm can only ever be reached by an
+    underscore-FREE token — twice over, because the clause of
+    `_payload_paths_in` that reaches it matches `[a-z]+` only, and anything
+    carrying an underscore is already extracted one clause earlier and
+    unconditionally. So against
+    an underscored key the arm's only reachable shape is UNDERSCORE DELETION —
+    and `localhost` is exactly one underscore-deletion from the key
+    `local_host`, i.e. the ordinary vocabulary of a note about hosts was being
+    read as a stale pointer. What is given up in exchange is the case of a note
+    writing a snake_case key with its underscore simply dropped
+    (`clawgatequeue` for `clawgate_queue`), which is not a typo shape that
+    occurs; a real stale pointer at an underscored key KEEPS its underscore and
+    is already caught outright by the earlier clause — those 4 keys were the
+    only ones the pre-near-miss rule could see at all. Measured: the blind set
+    stays exactly `['ts']` with the restriction in place.
+
+    The `len(k) >= _NEAR_MISS_MIN_LEN` clause below is DEFENCE, not live cover:
+    for this payload it is unreachable (the only sub-floor key is the 2-char
+    `ts`, which the token-length guard plus the length-difference test in
+    `_within_one_edit` already reject). It is kept so that a future 3-char key
+    cannot silently open a near-miss neighbourhood over short prose, and it is
+    made reachable — and mutation-killable — by a direct unit assertion in
+    `test_the_near_miss_arm_PINS_its_own_width_and_preconditions`.
+    """
+    if tok in top_keys:
+        return True
+    if len(tok) < _NEAR_MISS_MIN_LEN:
+        return False
+    return any("_" not in k and len(k) >= _NEAR_MISS_MIN_LEN
+               and _within_one_edit(tok, k)
+               for k in top_keys)
+
+
+def _payload_paths_in(text, report):
+    """Backticked tokens in a note that CLAIM to be payload paths.
+
+    Structural, not lexical. A token qualifies if it is (a) a DOTTED snake_case
+    path, (b) a bare snake_case word carrying an UNDERSCORE, or (c) a bare word
+    that NAMES A TOP-LEVEL KEY of `report`, or sits one edit from naming one.
+    Prose like `list-panes` (hyphen) and `--claude-only` (dashes) is not
+    mistaken for a key. What comes back is a list of things the note tells a
+    JSON reader to go and look at.
+
+    🔴 CLAUSE (c) IS DERIVED FROM THE REAL PAYLOAD, NEVER FROM A LITERAL LIST,
+    and `report` is REQUIRED for exactly that reason — an optional argument
+    would let a future call site silently drop back to the underscore-only rule
+    that this docstring used to describe. Measured against a real
+    `base_gather()` report: of its 12 top-level keys only 4 carry an
+    underscore, so (a)+(b) alone left `caveats`, `clickhouse`, `filters`,
+    `fuzzyclaw`, `hosts`, `ledger`, `summary` and `ts` unextractable — a note
+    misspelling any of them was NOT CHECKED AT ALL. With (c) that is 11 of 12
+    (all but the 2-char `ts`, below `_NEAR_MISS_MIN_LEN`).
+
+    🔴 WHY A NEAR MISS AND NOT AN EXACT MATCH: an exact-match-only clause (c)
+    is worthless as a guard. A token that exactly names a live key always
+    resolves, so it can never go red; the pointer this guard exists to catch is
+    by definition one that NO LONGER names a key. One edit covers the drift
+    shapes that actually occur — a typo (`summry`), a lost character
+    (`clickhous`), a plural gained or lost (`caveat`, `ledgers`), a
+    transposition (`sumamry`, `hsots`).
+
+    🔴 THE PRICE, MEASURED AGAINST THE RIGHT POPULATION. An earlier wording
+    priced this at "one word wide — `host`, the ONLY such collision in the
+    payload's 60 single-word segments". That sentence is TRUE and it is the
+    wrong measurement: the population that can turn this gate red is the
+    ENGLISH PROSE a future note is written in, not the payload's own key
+    segments. Re-measured against cracklib-small (50,692 entries matching
+    `[a-z]+`), the distance-1 neighbourhood of this payload's non-underscored
+    top-level keys contains SEVENTEEN ordinary English words — `caveat`,
+    `costs`, `falters`, `fillers`, `filter`, `fitters`, `ghosts`, `hoists`,
+    `hoots`, `hoses`, `host`, `ledge`, `ledgers`, `ledges`, `leger`, `lodger`,
+    `posts` — an order of magnitude more than "one word". Six of them
+    (`caveat`, `costs`, `filter`, `ghosts`, `host`, `posts`) already occur in
+    this repo's own prose, and each of them, planted into a real not_measured
+    note, turns this gate red today. That ledger is pinned, tied to the key set
+    it was measured against, in
+    `test_the_near_miss_arm_PRICES_the_false_reds_it_buys` — so it cannot
+    silently grow, and a changed key set forces a human to re-measure.
+
+    🔴 THE TRADEOFF WAS TAKEN DELIBERATELY, NOT OVERLOOKED. The obvious
+    mitigation — denylist ordinary English — is REJECTED, because the two
+    populations overlap at exactly the words that matter: `caveat` is both an
+    ordinary English word AND the most plausible typo of the key `caveats`, and
+    so are `ledgers` for `ledger` and `filter` for `filters`. A denylist would
+    buy back false-red budget by reintroducing blindness at the drift shape
+    this rule was widened to catch. The asymmetry decides it: a false red costs
+    ONE reword by the author who is editing that very note (the failure message
+    names the token), while a false green ships a stale machine-readable
+    pointer to every `--json` consumer, which is the failure this gate exists
+    for. So the price is paid, stated, and pinned rather than reduced.
+
+    🔴 ONE SHAPE OF THE PRICE *WAS* OVERLOOKED AND IS NOW REMOVED: the arm
+    silently spanned UNDERSCORE DELETION from an underscored key, so
+    `localhost` — one deletion from `local_host`, and precisely the vocabulary
+    a note about hosts would use — was claimed. The near-miss arm is now
+    offered only by keys carrying no underscore; see `_names_a_top_level_key`
+    for why that costs nothing.
+
+    🔴 WHY TOP-LEVEL KEYS AND NOT EVERY KEY SEGMENT — measured, not assumed.
+    The same report has 136 distinct key segments, 60 of them single words.
+    Anchoring on those instead is not a stricter version of this rule, it is a
+    different and much worse one: `count`, `note`, `open`, `path`, `stale`,
+    `status`, `waiting`, `error`, `task` and ~8 more are ordinary English that
+    the tool's OWN caveat prose already backticks, and none of them resolve
+    from the root, so every one would be a false red. Widening to one edit over
+    that vocabulary is worse still — it swallows `state`, `mode` and `node`.
+    Against the 12 TOP-LEVEL keys the separation is clean: every ordinary word
+    tried is >=2 edits away (`standup` 6, `stalled` 6), every real drift is 1.
+
+    🔴 WHAT THIS STILL DOES NOT CATCH — stated because the claim it replaces
+    ("an underscore keeps the case this guard exists for") was measurably
+    false, and then restated because ITS OWN first version was incomplete too.
+    Three gaps, all measured:
+
+      1. A WHOLESALE rename that leaves no similar key behind — `hosts`
+         becoming `by_host`, 4 edits — is invisible to any payload-derived
+         rule, because after the rename the old name is simply not in the
+         payload to be recognised. The predecessor rule (`[a-z_]{3,}`) caught
+         that only by treating EVERY bare word as a pointer, which is what made
+         backticking `standup` or `stalled` fail this gate with no defect
+         present.
+      2. Any key shorter than `_NEAR_MISS_MIN_LEN`: `ts`, 2 chars. Pinned as
+         the exact blind set in the test below, so it fails if it grows.
+      3. TWO edits. One transposition IS covered (that gap was real and is
+         closed — see `_within_one_edit`), but `hoods` for `hosts` (two
+         substitutions), `clickhou` for `clickhouse` (two deletions) and a
+         transposition-plus-substitution are not. Widening to two edits is not
+         a free extension of the same argument: at distance 1 the separation
+         from ordinary prose is clean (`standup` and `stalled` sit 6 edits
+         out), and every additional edit multiplies the English neighbourhood
+         that the paragraph above already prices at seventeen words. The width
+         is pinned in
+         `test_the_near_miss_arm_PINS_its_own_width_and_preconditions`.
+
+    This helper buys back the typo/transposition/plural/small-rename population
+    without buying back the `standup`-goes-red false red; 1–3 are known,
+    accepted, and now asserted gaps rather than prose.
+    """
+    import re as _re
+    top_keys = set(report)
+    out = []
+    for tok in _re.findall(r"`([^`]+)`", text):
+        if _re.fullmatch(r"[a-z]+(?:_[a-z]+)*(?:\.[a-z]+(?:_[a-z]+)*)+", tok):
+            out.append(tok)        # a dotted path is unambiguous on its own
+        elif _re.fullmatch(r"[a-z]+(?:_[a-z]+)+", tok):
+            out.append(tok)        # a bare word may carry the underscore...
+        elif _re.fullmatch(r"[a-z]+", tok) and _names_a_top_level_key(tok, top_keys):
+            out.append(tok)        # ...or name (or nearly name) a real key
+    return out
+
+
+def _resolves(report, path):
+    node = report
+    for part in path.split("."):
+        if not isinstance(node, dict) or part not in node:
+            return False
+        node = node[part]
+    return True
+
+
+def test_every_payload_path_a_not_measured_NOTE_points_at_actually_EXISTS():
+    """\U0001f534 A CAVEAT IS A MACHINE-READABLE CLAIM, so its POINTERS are claims too.
+
+    These notes are what a `--json` consumer reads to find out what this tool did
+    not measure and where to look instead. This repo has already been bitten by a
+    caveat that went stale the moment the code changed
+    (`CAVEATS["fuzzyclaw_scope"]` told every consumer that remote rows carry null
+    `age_secs` — exactly the field the ledger had just started filling). A note
+    that says "see `summary.waiting.probable`" is worthless the day that key is
+    renamed, and nothing until now checked it.
+
+    Resolves each path against a REAL report rather than against a list of
+    expected names, so this cannot be satisfied by keeping a stale allowlist in
+    step with a stale note.
+
+    \U0001f534 THREE CONTROLS. Positive: the extractor must find paths at all, and
+    they must be MORE than one, or a regex that quietly stopped matching would
+    read as "every pointer is valid". Negative: a note containing a path that
+    does NOT exist must be reported — otherwise `_resolves` returning True for
+    everything would look identical to a clean run. And the OTHER direction: an
+    ordinary backticked word is not a pointer, so a future note that backticks
+    a skill name cannot fail this gate with no defect present.
+    """
+    report = base_gather()
+    notes = [p.get("note", "") for p in report["not_measured"]]
+    assert notes, "no not_measured entries — nothing was checked"
+
+    found = [pth for n in notes for pth in _payload_paths_in(n, report)]
+    assert len(found) > 1, (
+        "POSITIVE CONTROL FAILED — the extractor found %d payload paths across "
+        "%d notes; a pointer guard that finds nothing passes vacuously"
+        % (len(found), len(notes)))
+
+    broken = [pth for pth in found if not _resolves(report, pth)]
+    assert broken == [], (
+        "a not_measured note points at payload path(s) that do not exist: %s"
+        % broken)
+
+    # NEGATIVE CONTROL: a planted bad pointer must be caught by the same code.
+    planted = _payload_paths_in(
+        "see `summary.waiting.probable` and `no_such_key`", report)
+    assert "no_such_key" in planted, planted
+    assert [p for p in planted if not _resolves(report, p)] == ["no_such_key"]
+
+    # 🔴 THE OTHER DIRECTION, and the failure the old `[a-z_]{3,}` rule was one
+    # wording away from: an ordinary backticked WORD is not a payload pointer.
+    # Backticking a skill name or a plain word in a future note must NOT turn
+    # this gate red — the whole point of a delta guard is that it fires on a
+    # defect, not on prose.
+    assert _payload_paths_in(
+        "see `standup` for PRs, whether it is `stalled`, and `list-panes`",
+        report) == []
+    # ...and the discriminant is not "no bare word ever counts": a key that was
+    # RENAMED AWAY still carries its underscore, and a note still pointing at
+    # it is exactly the stale pointer this guard exists to catch.
+    stale = _payload_paths_in("for approvals see `blocked_on_me`", report)
+    assert stale == ["blocked_on_me"], stale
+    assert not _resolves(report, "blocked_on_me")
+
+
+def test_a_stale_SINGLE_WORD_pointer_is_caught_not_just_an_underscored_one():
+    """\U0001f534 THE BLINDNESS ITSELF, pinned so it cannot silently come back.
+
+    The guard above was once narrowed to "a bare word needs an UNDERSCORE",
+    which removed a real false red but bought it with measured blindness: only
+    4 of this payload's 12 top-level keys carry an underscore, so a note
+    misspelling any of the other 8 was not merely un-caught, it was never even
+    extracted. The justification offered at the time — "a key that was RENAMED
+    AWAY still carries an underscore (`blocked_on_me`)" — is true of that one
+    key and false for 8 of the tool's own 12.
+
+    So this test asserts the property directly: a note pointing at a
+    NONEXISTENT SINGLE-WORD payload key must be caught. It derives both the
+    keys and the corruptions from a REAL report, so it cannot be satisfied by a
+    hardcoded list drifting alongside a hardcoded rule.
+    """
+    report = base_gather()
+    top = sorted(report)
+
+    # 1. POSITIVE CONTROL on the near-miss primitive itself, both directions —
+    #    a predicate nobody has watched return False is not a predicate.
+    assert _within_one_edit("summary", "summry")      # one deletion
+    assert _within_one_edit("ledger", "ledgers")      # one insertion
+    assert _within_one_edit("hosts", "hests")         # one substitution
+    assert not _within_one_edit("summary", "standup")
+    assert not _within_one_edit("stale", "stalled")   # two edits, not one
+
+    # 2. The literal pointers that SURVIVED the underscore-only rule. Each is
+    #    one edit from a real top-level key and resolves against nothing.
+    for bad, real in (("summry", "summary"), ("clickhous", "clickhouse"),
+                      ("caveat", "caveats"), ("ledgers", "ledger")):
+        assert real in report, (real, top)
+        got = _payload_paths_in("the rows are in `%s`" % bad, report)
+        assert got == [bad], (
+            "BLINDNESS RETURNED — `%s` (one edit from the real top-level key "
+            "`%s`) was not extracted as a payload pointer, so a note "
+            "misspelling that key would pass this gate unnoticed; got %r"
+            % (bad, real, got))
+        assert not _resolves(report, bad), bad
+
+    # 3. Now EVERY top-level key, enumerated — not a sample. Drop the last
+    #    character of each and record which corruptions the rule fails to
+    #    catch. The blind set is asserted EXACTLY, so it fails if it grows (a
+    #    new key the rule cannot see) or shrinks (`ts` renamed) — either way a
+    #    human re-reads `_NEAR_MISS_MIN_LEN` instead of inheriting it.
+    blind = []
+    for key in top:
+        corrupt = key[:-1]
+        if corrupt in report:
+            continue                 # a corruption that lands on another real
+                                     # key is not a stale pointer at all
+        caught = (_payload_paths_in("see `%s`" % corrupt, report) == [corrupt]
+                  and not _resolves(report, corrupt))
+        if not caught:
+            blind.append(key)
+    assert blind == ["ts"], (
+        "the set of top-level keys whose misspelling this gate CANNOT see "
+        "changed: expected exactly ['ts'] (2 chars, under the %d-char "
+        "near-miss floor), got %r out of %r"
+        % (_NEAR_MISS_MIN_LEN, blind, top))
+
+    # 4. THE CONTRAST THAT MAKES 3 A NUMBER AND NOT A VIBE. Under the
+    #    underscore-only rule — written out literally here, not read off the
+    #    implementation — 8 of those same corruptions were invisible: the 7
+    #    real keys clause (c) buys back, plus `ts`, which neither rule sees.
+    def _underscore_only(tok):
+        return bool(re.fullmatch(r"[a-z]+(?:_[a-z]+)*(?:\.[a-z]+(?:_[a-z]+)*)+",
+                                 tok)
+                    or re.fullmatch(r"[a-z]+(?:_[a-z]+)+", tok))
+
+    old_blind = [k for k in top
+                 if k[:-1] not in report and not _underscore_only(k[:-1])]
+    assert sorted(old_blind) == ["caveats", "clickhouse", "filters",
+                                 "fuzzyclaw", "hosts", "ledger", "summary",
+                                 "ts"], old_blind
+    assert len(old_blind) == 8 and len(blind) == 1, (old_blind, blind)
+
+    # 5. AND THE FALSE RED STAYS FIXED. The whole reason the underscore rule
+    #    existed: an ordinary backticked word must not become a pointer. These
+    #    sit 6 edits from the nearest top-level key, so the widened rule has
+    #    margin, not luck.
+    assert _payload_paths_in(
+        "see `standup`, whether it is `stalled`, run `list-panes`", report) == []
+    for word in ("standup", "stalled"):
+        assert not _names_a_top_level_key(word, set(top)), word
+
+    # 6. THE COST OF THE NEAR MISS, PINNED so the docstring's measurement
+    #    cannot rot. Widening to one edit necessarily drags in words that are
+    #    not top-level keys. Enumerate every single-word key segment at EVERY
+    #    depth and assert which ones the rule now claims: the top-level ones,
+    #    plus exactly `host` (one edit from `hosts`). If that set grows, a new
+    #    key has put an ordinary word inside a near-miss neighbourhood and the
+    #    false-red budget needs re-reading.
+    segments = set()
+
+    def _walk(node):
+        if isinstance(node, dict):
+            for k, v in node.items():
+                if isinstance(k, str):
+                    segments.add(k)
+                _walk(v)
+        elif isinstance(node, (list, tuple)):
+            for v in node:
+                _walk(v)
+
+    _walk(report)
+    single = sorted(s for s in segments if re.fullmatch(r"[a-z]+", s))
+    assert len(single) >= 50, len(single)      # the enumeration really ran
+    claimed = sorted(s for s in single if _payload_paths_in("`%s`" % s, report))
+    assert claimed == sorted(set(top) & set(single) | {"host"}), (
+        "the near-miss neighbourhood changed: the rule claims %r out of %d "
+        "single-word key segments; expected the top-level keys plus 'host'"
+        % (claimed, len(single)))
+
+
+# The ordinary ENGLISH words that the near-miss arm claims as payload pointers,
+# measured -- not guessed -- against cracklib-small (50,692 entries matching
+# `[a-z]+`) over the non-underscored top-level keys of a real `base_gather()`
+# report. This is the gate's FALSE-RED BUDGET: backticking any of these in a
+# future not_measured note turns the pointer gate red with no defect present.
+# Re-derive after any change to the key set or to `_within_one_edit`:
+#     report = base_gather(); top = set(report)
+#     [w for w in open(DICT) if re.fullmatch(r"[a-z]+", w.strip())
+#      and _names_a_top_level_key(w.strip(), top) and w.strip() not in top]
+_MEASURED_ENGLISH_FALSE_REDS = (
+    "caveat", "costs", "falters", "fillers", "filter", "fitters", "ghosts",
+    "hoists", "hoots", "hoses", "host", "ledge", "ledgers", "ledges", "leger",
+    "lodger", "posts")
+
+# The key set those 17 were measured against. If this moves, the ledger above
+# is stale and a human must re-run the recipe -- that is the whole mechanism
+# that stops the false-red budget growing in silence.
+_LEDGER_KEY_SET = ("caveats", "clawgate_queue", "clickhouse", "filters",
+                   "fuzzyclaw", "hosts", "ledger", "local_host",
+                   "not_measured", "stale_threshold_secs", "summary", "ts")
+
+
+def test_the_near_miss_arm_PRICES_the_false_reds_it_buys():
+    """\U0001f534 THE COST OF CLAUSE (c), MEASURED OVER THE POPULATION THAT CAN PAY IT.
+
+    The near-miss arm was priced in prose at "one word wide -- `host`, the ONLY
+    such collision in the payload's 60 single-word segments". That sentence is
+    true and it is the wrong measurement: nothing forces a future note to be
+    written out of the payload's own key names. The population that can turn
+    this gate red is ENGLISH PROSE, and over English the neighbourhood is
+    SEVENTEEN words, not one -- an order of magnitude more.
+
+    The tradeoff was then taken deliberately rather than mitigated: a denylist
+    of "ordinary words" would buy false-red budget back by re-blinding the gate
+    at exactly the drift shapes it was widened to catch (`caveat` is both an
+    English word and the likeliest typo of the key `caveats`; so are `ledgers`
+    for `ledger` and `filter` for `filters`). A false red costs one reword by
+    the author editing that note; a false green ships a stale machine-readable
+    pointer to every `--json` consumer. So the price stays -- and this test
+    exists so that it is KNOWN and cannot grow unnoticed.
+    """
+    report = base_gather()
+    top = set(report)
+
+    # 1. THE LEDGER IS TIED TO THE KEY SET IT WAS MEASURED AGAINST. A new or
+    #    renamed top-level key moves the whole neighbourhood, so the 17 below
+    #    stop being a measurement and become a leftover -- fail loudly instead.
+    assert tuple(sorted(top)) == _LEDGER_KEY_SET, (
+        "the top-level key set changed, so the measured English false-red "
+        "ledger is STALE -- re-run the recipe above `_MEASURED_ENGLISH_FALSE_"
+        "REDS` and update it. expected %r, got %r"
+        % (list(_LEDGER_KEY_SET), sorted(top)))
+
+    # 2. EVERY LEDGER WORD IS REALLY CLAIMED, and really fails to resolve. An
+    #    aspirational list nobody executed is not a measurement; this is the
+    #    positive control on the ledger itself.
+    for word in _MEASURED_ENGLISH_FALSE_REDS:
+        assert _payload_paths_in("see `%s`" % word, report) == [word], (
+            "%r is in the measured false-red ledger but the rule no longer "
+            "claims it -- the ledger has drifted from the code" % word)
+        assert not _resolves(report, word), word
+    assert len(_MEASURED_ENGLISH_FALSE_REDS) == 17, (
+        "the ledger holds %d words, not the 17 that were measured -- it has "
+        "been edited without re-running the recipe above it: %r"
+        % (len(_MEASURED_ENGLISH_FALSE_REDS), _MEASURED_ENGLISH_FALSE_REDS))
+
+    # 3. NEGATIVE CONTROL on the same predicate, so 2 is not "it claims
+    #    everything". These sit >=2 edits from every key and stay prose.
+    for word in ("standup", "stalled", "session", "windows"):
+        assert _payload_paths_in("see `%s`" % word, report) == [], word
+
+    # 4. THE ONE FALSE RED THAT WAS NOT PRICED BUT REMOVED: `localhost` is a
+    #    single underscore-deletion from the key `local_host`, so the arm --
+    #    whose entire justification was written about single-WORD keys -- was
+    #    silently spanning underscore removal, and claiming the exact
+    #    vocabulary a note about hosts would use. The near-miss arm is now
+    #    offered only by keys with no underscore.
+    assert _payload_paths_in("reachable over `localhost`", report) == [], (
+        "`localhost` is claimed as a payload pointer again -- the near-miss "
+        "arm is spanning underscore-deletion from `local_host`")
+    assert "local_host" in report and "localhost" not in report
+    assert not _names_a_top_level_key("localhost", top)
+
+    # 5. ...and removing it cost no coverage: an underscored key's stale
+    #    pointer keeps its underscore, so clause (b) catches it outright,
+    #    near-miss arm or not.
+    for underscored in sorted(k for k in top if "_" in k):
+        corrupt = underscored + "s"
+        assert corrupt not in report
+        assert _payload_paths_in("see `%s`" % corrupt, report) == [corrupt], (
+            "clause (b) no longer catches a stale pointer at the underscored "
+            "key %r, so restricting the near-miss arm DID cost coverage"
+            % underscored)
+
+
+def test_the_near_miss_arm_PINS_its_own_width_and_preconditions():
+    """\U0001f534 HOW WIDE "ONE EDIT" IS -- asserted, because it was never exercised.
+
+    The only negative controls the near-miss primitive had were `summary` vs
+    `standup` (distance 6) and `stale` vs `stalled` (rejected by the LENGTH
+    guard, never reaching the substitution arm). So no same-length distance-2
+    pair was ever fed to it, and mutating `len(diff) <= 1` to `<= 2` -- i.e.
+    doubling the neighbourhood the test above prices at 17 English words --
+    survived the entire suite.
+
+    Also pins the two things the docstrings assert about the rule but nothing
+    executed: that a TRANSPOSITION is one edit (5 of 5 real transposition
+    drifts were previously missed, all being Levenshtein distance 2), and that
+    the `len(k) >= _NEAR_MISS_MIN_LEN` guard on the KEY side actually excludes
+    a short key -- unreachable for this payload, so it is exercised directly.
+    """
+    report = base_gather()
+    top = set(report)
+    qualifying = sorted(k for k in top
+                        if "_" not in k and len(k) >= _NEAR_MISS_MIN_LEN)
+    assert len(qualifying) >= 6, qualifying      # the enumeration really ran
+
+    # 1. TRANSPOSITION IS ONE EDIT. Every one of these is Levenshtein 2, so
+    #    before this they were invisible while the docstring claimed "one edit
+    #    covers the drift shapes that actually occur".
+    for bad, real in (("sumamry", "summary"), ("hsots", "hosts"),
+                      ("ledegr", "ledger"), ("caevats", "caveats"),
+                      ("clikchouse", "clickhouse")):
+        assert real in report, real
+        assert _within_one_edit(bad, real), (
+            "%r is one ADJACENT TRANSPOSITION from the real key %r and must "
+            "count as one edit" % (bad, real))
+        assert _payload_paths_in("the rows are in `%s`" % bad, report) == [bad]
+        assert not _resolves(report, bad), bad
+
+    # 2. ...AND STOPS THERE. Same length, two substitutions, no swap: these
+    #    must NOT be one edit. This is the assertion that a `<= 1` -> `<= 2`
+    #    mutant dies on.
+    for a, b in (("hoods", "hosts"), ("summers", "summary"),
+                 ("folders", "filters"), ("lodges", "ledger")):
+        assert not _within_one_edit(a, b), (
+            "%r is TWO substitutions from %r and must not count as one edit -- "
+            "the substitution arm has been widened past one edit, which "
+            "multiplies the measured English false-red neighbourhood" % (a, b))
+        assert _payload_paths_in("see `%s`" % a, report) == [], (a, b)
+
+    # 3. A TRANSPOSITION MUST BE ADJACENT. Swapping two characters that are not
+    #    neighbours is two edits, not one.
+    for key in qualifying:
+        chars = list(key)
+        for i in range(len(chars)):
+            for j in range(i + 2, len(chars)):
+                if chars[i] == chars[j]:
+                    continue
+                swapped = list(chars)
+                swapped[i], swapped[j] = swapped[j], swapped[i]
+                tok = "".join(swapped)
+                if any(_within_one_edit(tok, k) for k in qualifying):
+                    continue         # lands inside some other key's real D1
+                assert not _names_a_top_level_key(tok, top), (
+                    "%r is a NON-ADJACENT swap in %r -- two edits -- and must "
+                    "not be claimed" % (tok, key))
+
+    # 4. THE KEY-SIDE LENGTH FLOOR IS REAL, exercised directly because this
+    #    payload cannot reach it: its only sub-floor key is the 2-char `ts`,
+    #    which `_within_one_edit`'s length test already rejects against any
+    #    >=4-char token. Kept as defence against a future 3-char key opening a
+    #    near-miss neighbourhood over short prose.
+    assert _NEAR_MISS_MIN_LEN == 4, _NEAR_MISS_MIN_LEN
+    assert _within_one_edit("abcd", "abc"), "precondition: one deletion apart"
+    assert not _names_a_top_level_key("abcd", {"abc"}), (
+        "a 3-char key (< _NEAR_MISS_MIN_LEN) must not offer a near-miss arm; "
+        "the len(k) guard in _names_a_top_level_key has been dropped")
+    assert _names_a_top_level_key("abcd", {"abcd"}), (
+        "control: an EXACT match must still be claimed regardless of length")
+    assert not _names_a_top_level_key("tsx", top), "tsx / ts: below the floor"
+
+
+def test_the_near_miss_neighbourhood_is_EXACTLY_one_edit_by_construction():
+    """\U0001f534 THE NEIGHBOURHOOD ENUMERATED, NOT SAMPLED, IN BOTH DIRECTIONS.
+
+    The tests above feed the rule hand-picked tokens, which pins the shapes
+    someone thought of. This one generates the exact distance-1 neighbourhood
+    of every qualifying key -- delete, substitute, insert, adjacent-transpose,
+    over the whole alphabet -- and requires the rule to claim ALL of it, then
+    generates distance-2 tokens of each shape and requires it to claim NONE.
+    A rule quietly narrowed (some drift shape no longer covered) and a rule
+    quietly widened (the English false-red ledger silently doubling) are
+    different mutants, and this is the assertion that separates them.
+    """
+    report = base_gather()
+    top = set(report)
+    qualifying = sorted(k for k in top
+                        if "_" not in k and len(k) >= _NEAR_MISS_MIN_LEN)
+    alphabet = "abcdefghijklmnopqrstuvwxyz"
+
+    def _d1(word):
+        out = set()
+        for i in range(len(word)):
+            out.add(word[:i] + word[i + 1:])                      # delete
+            for c in alphabet:
+                if c != word[i]:
+                    out.add(word[:i] + c + word[i + 1:])          # substitute
+            if i + 1 < len(word) and word[i] != word[i + 1]:
+                out.add(word[:i] + word[i + 1] + word[i]          # transpose
+                        + word[i + 2:])
+        for i in range(len(word) + 1):
+            for c in alphabet:
+                out.add(word[:i] + c + word[i:])                  # insert
+        out.discard(word)
+        return out
+
+    near = set()
+    for key in qualifying:
+        near |= _d1(key)
+    near = {t for t in near if len(t) >= _NEAR_MISS_MIN_LEN}
+    assert len(near) > 1500, len(near)          # the construction really ran
+    unclaimed = sorted(t for t in near if not _names_a_top_level_key(t, top))
+    assert unclaimed == [], (
+        "%d of %d constructed distance-1 neighbours are NOT claimed, so the "
+        "near-miss arm is NARROWER than one edit and some real drift shape is "
+        "no longer covered: %r" % (len(unclaimed), len(near), unclaimed[:12]))
+
+    far = set()
+    for key in qualifying:
+        for i in range(len(key)):
+            for j in range(i + 1, len(key)):
+                if key[i] != "x" and key[j] != "x":
+                    far.add(key[:i] + "x" + key[i + 1:j] + "x" + key[j + 1:])
+                far.add(key[:i] + key[i + 1:j] + key[j + 1:])      # two deletes
+        far.add("qz" + key)                                        # two inserts
+        far.add(key + "qz")
+    far = {t for t in far
+           if len(t) >= _NEAR_MISS_MIN_LEN and t not in near and t not in top}
+    assert len(far) > 100, len(far)             # the construction really ran
+    claimed_far = sorted(t for t in far if _names_a_top_level_key(t, top))
+    assert claimed_far == [], (
+        "%d of %d constructed distance-2 tokens ARE claimed, so the rule is "
+        "WIDER than one edit and the measured 17-word English false-red ledger "
+        "no longer bounds the cost: %r"
+        % (len(claimed_far), len(far), claimed_far[:12]))
+
+
+def test_payload_paths_in_REQUIRES_a_report_and_cannot_default_to_none():
+    """\U0001f534 THE ARGUMENT THAT MAKES CLAUSE (c) PAYLOAD-DERIVED, PINNED IN CODE.
+
+    `_payload_paths_in`'s docstring says `report` is REQUIRED "for exactly that
+    reason -- an optional argument would let a future call site silently drop
+    back to the underscore-only rule". That was asserted in prose only:
+    mutating the signature to `report={}` survived the whole suite, because
+    every existing call site happens to pass one. A defaulted `report` gives an
+    empty `top_keys`, so clause (c) can never fire and the guard silently
+    reverts to the blindness it was widened to remove -- with no test failing.
+    """
+    import inspect
+
+    sig = inspect.signature(_payload_paths_in)
+    assert list(sig.parameters) == ["text", "report"], sig
+    assert sig.parameters["report"].default is inspect.Parameter.empty, (
+        "`report` acquired a default (%r) -- a call site that omits it would "
+        "get an empty key set, silently disabling clause (c) and reverting the "
+        "guard to the underscore-only rule with no test going red"
+        % (sig.parameters["report"].default,))
+    with pytest.raises(TypeError):
+        _payload_paths_in("see `summry`")
+
+    # ...and the reason it matters, executed: with an empty report the
+    # single-word arm is dead, which is exactly the pre-fix blindness.
+    report = base_gather()
+    assert _payload_paths_in("see `summry`", report) == ["summry"]
+    assert _payload_paths_in("see `summry`", {}) == []
+
 
 
 # =========================================================================== #
@@ -3754,7 +4560,7 @@ def test_claude_only_drops_the_shells_on_EVERY_host_and_keeps_the_agents():
     assert [r["session"] for r in wb] == ["scratch7"], "misc:5 is a zsh window"
     assert [r["session"] for r in lt] == ["naida-dev"], "thistle:4 is a shell"
     assert all(r["claude"] is True for r in wb + lt)
-    assert report["summary"]["excluded_non_claude"] == 2, "one PER HOST"
+    assert report["summary"]["excluded_shells"] == 2, "one PER HOST"
     # ...and the unfiltered scan still carries both shells, so the drop is
     # caused by the flag and by nothing else (positive control on the filter).
     unfiltered = base_gather(runner=make_runner(
@@ -3779,7 +4585,7 @@ def test_claude_only_filters_on_the_claude_BOOLEAN_not_a_lookalike_field():
 
 def test_claude_only_summary_counts_the_FILTERED_set_and_says_what_it_dropped():
     """🔴 KILLS: summarizing the UNFILTERED set (the silent trap), and
-    reporting `excluded_non_claude` as 0 when the filter never ran.
+    reporting `excluded_shells` as 0 when the filter never ran.
 
     Counting the unfiltered set would publish `total_sessions: 5` beside 3
     printed rows. The dropped count is what keeps the filtered zero from
@@ -3791,11 +4597,11 @@ def test_claude_only_summary_counts_the_FILTERED_set_and_says_what_it_dropped():
     assert s["status"]["idle"] == {"claude": 2, "shell": 0, "total": 2}
     assert s["status"]["busy"]["total"] == 0, "the busy SHELL is gone"
     assert s["claude_only"] is True
-    assert s["excluded_non_claude"] == 2
+    assert s["excluded_shells"] == 2
 
     off = mix_gather()["summary"]
     assert off["claude_only"] is False
-    assert off["excluded_non_claude"] is None, (
+    assert off["excluded_shells"] is None, (
         "nothing was excluded because nothing was ever counted — not 0")
 
 
@@ -3804,7 +4610,7 @@ def test_claude_only_composes_with_host_and_counts_only_the_scanned_host():
                          local_host="workbench")
     assert [r["host"] for r in report["hosts"]["laptop"]["windows"]] \
         == ["laptop"]
-    assert report["summary"]["excluded_non_claude"] == 0, (
+    assert report["summary"]["excluded_shells"] == 0, (
         "the laptop fixture has no shell window — a MEASURED zero")
     assert report["summary"]["total_sessions"] == 1
     # the workbench's zsh window was never scanned, so it is not in the count
@@ -3825,7 +4631,7 @@ def test_claude_only_over_a_shell_only_host_is_a_MEASURED_zero_not_a_success():
     assert report["summary"]["total_sessions"] == 0
     assert sm.exit_code_for(report) == sm.EXIT_EMPTY == 3
     assert sm.exit_code_for(report) != sm.EXIT_OK
-    assert report["summary"]["excluded_non_claude"] == 1, (
+    assert report["summary"]["excluded_shells"] == 1, (
         "and the zero says the host was NOT empty — 1 shell was dropped")
     # unfiltered, the very same scan is a non-empty EXIT_OK
     unfiltered = mix_gather(
@@ -3837,8 +4643,12 @@ def test_claude_only_over_a_shell_only_host_is_a_MEASURED_zero_not_a_success():
 def test_claude_only_is_STATED_in_the_table_beside_the_counts_it_changed():
     text = sm.render_table(mix_gather(claude_only=True))
     assert "FILTER --claude-only" in text
-    assert "2 non-claude window(s) excluded" in text
+    assert "2 shell window(s) excluded" in text
     assert "FILTER --claude-only" not in sm.render_table(mix_gather())
+    # ...and on a tmux-only scan NO kind vanished, so the second FILTER line —
+    # the one that names a removed kind — must not appear. Printing it with an
+    # empty slot would assert a removal that did not happen.
+    assert "removed EVERY kind=" not in text
 
 
 def test_cli_claude_only_flag_reaches_gather_and_defaults_off(monkeypatch):
@@ -3871,8 +4681,11 @@ def test_main_json_end_to_end_carries_the_split_and_the_filter(
     assert rc == sm.EXIT_OK
     assert blob["summary"]["status"]["idle"] == {"claude": 2, "shell": 0,
                                                  "total": 2}
-    assert blob["summary"]["excluded_non_claude"] == 2
-    assert blob["filters"] == {"claude_only": True, "excluded_non_claude": 2}
+    assert blob["summary"]["excluded_shells"] == 2
+    assert blob["filters"] == {"claude_only": True, "excluded_shells": 2,
+                               # the filter RAN and removed no whole kind —
+                               # `[]`, not None, and not absent
+                               "kinds_excluded_by_filter": []}
 
 
 def test_detail_under_claude_only_explains_its_own_emptiness(monkeypatch):
@@ -3884,7 +4697,7 @@ def test_detail_under_claude_only_explains_its_own_emptiness(monkeypatch):
     rows = [r for h in narrowed["hosts"].values() for r in h["windows"]]
     assert rows == []
     assert narrowed["summary"]["claude_only"] is True
-    assert narrowed["summary"]["excluded_non_claude"] == 2
+    assert narrowed["summary"]["excluded_shells"] == 2
     assert "NOT a measured absence" in sm.no_session_reason(narrowed)
 
 
@@ -3905,6 +4718,345 @@ def test_claude_only_says_it_does_nothing_for_tail_rather_than_ignoring_it(
 
 
 # --------------------------------------------------------------------------- #
+# §5.2b — --claude-only AGAINST THE `kind` AXIS
+#
+# Two defects, one flag. `r.get("claude")` was a correct SPELLING of "drop the
+# shells" only while every row was a tmux pane, and the filter runs BEFORE both
+# `summarize` and `measured_caveats`, so whatever it removed was then attributed
+# to the BUILD rather than to the FILTER.
+#
+# 🔴 NO REAL SCAN CAN REACH EITHER ONE. Writer 3 is still gated (measured on the
+# live board: `in_progress: 0`, `agent` non-null on 0 of 29 tasks), so every real
+# scan is 100% tmux. A test that waited for a cluster row would be green today,
+# green with the whole predicate deleted, and green on the day writer 3 lands
+# wrong. So the rows are CONSTRUCTED and injected at the `fold_windows` seam,
+# which is the last point before the filter runs.
+# --------------------------------------------------------------------------- #
+def gather_with_injected(monkeypatch, *rows, **kw):
+    """A REAL `gather` whose local `fold_windows` also emits `rows`.
+
+    🔴 THE SEAM MATTERS: appending to `report["hosts"][h]["windows"]` AFTER
+    `gather` returns — which is what `with_cluster_rows` does — is too late.
+    The `--claude-only` block, `summarize` and `measured_caveats` have all
+    already run, so such a row exercises none of them. Wrapping `fold_windows`
+    puts the constructed row in front of the filter, which is the code under
+    test.
+    """
+    real = sm.fold_windows
+
+    def folded(panes, host, **fkw):
+        out = real(panes, host, **fkw)
+        if host == "workbench":
+            out.extend(copy.deepcopy(r) for r in rows)
+        return out
+
+    monkeypatch.setattr(sm, "fold_windows", folded)
+    return mix_gather(**kw)
+
+
+def test_the_injection_seam_reaches_the_filter_and_the_baseline_is_tmux_only(
+        monkeypatch):
+    """INSTRUMENT CHECK, before any verdict is read off this seam.
+
+    Two things every test below depends on, neither of which is observable from
+    the assertions themselves: the constructed row really arrives (so a seam
+    that silently stopped applying would not leave the suite green), and the
+    UNINJECTED baseline really is tmux-only (so the deltas are measured against
+    a known starting point rather than an unknown one).
+    """
+    plain = mix_gather()
+    assert {r["kind"] for r in plain["hosts"]["workbench"]["windows"]} == {"tmux"}
+    assert plain["summary"]["kind"] == {"tmux": 5}
+
+    rep = gather_with_injected(monkeypatch, cluster_row(status="busy"))
+    kinds = [r["kind"] for r in rep["hosts"]["workbench"]["windows"]]
+    assert kinds.count("cluster") == 1, (
+        "the fold_windows seam did not deliver the constructed row: %r" % kinds)
+    # ...and it went through the REAL summarize, i.e. it was present before the
+    # roll-up ran rather than bolted on afterwards.
+    assert rep["summary"]["kind"] == {"tmux": 5, "cluster": 1}
+
+
+# --- the PREDICATE, unit --------------------------------------------------- #
+def test_the_claude_only_predicate_is_the_CLASS_axis_not_the_claude_FLAG():
+    """🔴 THE DEFECT. `row["claude"]` is `pane_current_command =~ /claude/` — a
+    fact about a PANE. A cluster dispatch has no pane, so `claude` is None,
+    which is FALSY, and `--claude-only` silently reclassified an AGENT as a
+    shell and deleted it. That is the identical conflation `row_class` exists
+    to prevent, one operation further along.
+
+    Every case is pinned, including the two that must be UNCHANGED, so a fix
+    that merely inverts something cannot pass.
+    """
+    claude_pane = {"kind": "tmux", "claude": True}
+    shell_pane = {"kind": "tmux", "claude": False}
+    # a pane whose command did not parse: genuinely "not a claude pane"
+    unparsed_pane = {"kind": "tmux", "claude": None}
+    dispatch = cluster_row()
+    kindless = {"kind": None, "claude": None}
+
+    assert sm.dropped_by_claude_only(shell_pane) is True
+    assert sm.dropped_by_claude_only(unparsed_pane) is True
+    assert sm.dropped_by_claude_only(claude_pane) is False
+    # 🔴 THE REGRESSION. `not row.get("claude")` returns True here.
+    assert sm.dropped_by_claude_only(dispatch) is False, (
+        "a cluster dispatch is an AGENT, not a shell — the flag must keep it")
+    assert dispatch["claude"] is None, (
+        "fixture no longer exercises the falsy-claude path this pins")
+    # ...and a cluster row that DOES assert claude:True is kept for the same
+    # reason, so the answer comes from `kind` and not from the flag either way.
+    assert sm.dropped_by_claude_only(cluster_row(claude=True)) is False
+    # a row whose kind nobody set is a BUG; filtering it out deletes the
+    # evidence, so it survives and stays visible in `unknown_kind`.
+    assert sm.dropped_by_claude_only(kindless) is False
+    assert sm.row_class(kindless) == "unknown_kind"
+
+
+def test_the_predicate_is_DERIVED_from_row_class_not_a_second_copy_of_it():
+    """🔴 ONE RULE, ONE PLACE — asserted BEHAVIOURALLY, because a structural
+    check would type-check past a copy that merely happens to agree today.
+
+    Move `row_class`'s answer to a value the predicate cannot coincidentally
+    equal and watch the predicate follow. A second open-coded classifier stays
+    put and fails here.
+    """
+    row = {"kind": "tmux", "claude": False}
+    assert sm.dropped_by_claude_only(row) is True    # control: it drops today
+    seen = []
+
+    def fake_class(r):
+        seen.append(r)
+        return "claude"
+
+    orig = sm.row_class
+    sm.row_class = fake_class
+    try:
+        assert sm.dropped_by_claude_only(row) is False, (
+            "the predicate ignored row_class — it holds a second copy of the "
+            "claude/shell rule, and the two will disagree")
+    finally:
+        sm.row_class = orig
+    assert seen == [row], "row_class was not consulted with the row itself"
+
+
+def test_gather_applies_the_ONE_predicate_rather_than_open_coding_it(
+        monkeypatch):
+    """The seam between the flag and its definition, pinned. `gather` used to
+    spell the rule inline (`if r.get("claude")`), which is how the definition
+    and its only caller drifted apart in the first place."""
+    calls = []
+    real = sm.dropped_by_claude_only
+
+    def spy(row):
+        calls.append(row)
+        return real(row)
+
+    monkeypatch.setattr(sm, "dropped_by_claude_only", spy)
+    rep = mix_gather(claude_only=True)
+    assert len(calls) == 5, (
+        "gather did not consult the predicate for every row: %d call(s)"
+        % len(calls))
+    assert rep["summary"]["excluded_shells"] == 2
+    # POSITIVE CONTROL on the spy: with the predicate forced to keep
+    # everything, the filter must keep everything. A spy nothing calls would
+    # leave this identical to the line above.
+    monkeypatch.setattr(sm, "dropped_by_claude_only", lambda r: False)
+    kept_all = mix_gather(claude_only=True)
+    assert kept_all["summary"]["total_sessions"] == 5
+    assert kept_all["summary"]["excluded_shells"] == 0
+
+
+# --- cluster rows SURVIVE the filter, end to end --------------------------- #
+def test_claude_only_KEEPS_a_cluster_dispatch_and_still_drops_the_shells(
+        monkeypatch):
+    """🔴 THE HEADLINE REGRESSION, through the real `gather` filter.
+
+    The mix fixture is 3 agents + 2 bare shells. Adding one cluster dispatch
+    must leave the shells dropped and the dispatch present — under the old
+    predicate the dispatch went with the shells, and `excluded_shells` counted
+    it as one of them.
+    """
+    rep = gather_with_injected(monkeypatch, cluster_row(status="busy"),
+                               claude_only=True)
+    rows = rep["hosts"]["workbench"]["windows"]
+    kinds = sorted(r["kind"] for r in rows)
+    assert kinds == ["cluster", "tmux", "tmux", "tmux"], (
+        "the cluster dispatch was filtered out with the shells")
+    assert sorted(sm.row_class(r) for r in rows) == [
+        "claude", "claude", "claude", "cluster"]
+    # exactly the two BARE SHELLS went, and the count says two — not three
+    assert rep["summary"]["excluded_shells"] == 2, (
+        "the dispatch was counted among the excluded shells")
+    assert rep["summary"]["total_sessions"] == 4
+    assert rep["summary"]["kind"] == {"tmux": 3, "cluster": 1}
+    assert rep["summary"]["status"]["busy"] == {
+        "claude": 0, "shell": 0, "cluster": 1, "total": 1}
+
+
+def test_a_cluster_only_host_under_claude_only_is_not_an_empty_scan(
+        monkeypatch):
+    """The direction that changes the EXIT CODE. A host whose only agent work
+    is a cluster dispatch used to filter down to nothing and exit EXIT_EMPTY —
+    "no agent windows" over a live dispatch."""
+    rep = gather_with_injected(
+        monkeypatch, cluster_row(status="busy"), claude_only=True,
+        runner=make_runner(local_panes=SHELLS_ONLY_PANES,
+                           local_windows=SHELLS_ONLY_WINDOWS))
+    assert rep["summary"]["total_sessions"] == 1
+    assert sm.exit_code_for(rep) == sm.EXIT_OK
+    assert sm.exit_code_for(rep) != sm.EXIT_EMPTY
+    assert rep["summary"]["excluded_shells"] == 1
+
+
+# --- ATTRIBUTION: what the filter removed, said out loud ------------------- #
+def test_a_kind_the_FILTER_removed_is_never_attributed_to_the_build(
+        monkeypatch):
+    """🔴 THE SECOND DEFECT, and it is REACHABLE TODAY with no cluster row
+    anywhere: `--claude-only` over a host whose tmux rows are all bare shells
+    removes the LAST `tmux` row, so `kinds_produced` measures `[]`.
+
+    The scan produced tmux rows. The filter removed them. Every claim the
+    caveat could make about `tmux` from `kinds_produced` alone would therefore
+    be about the wrong actor, and the reader most likely to be misled is the one
+    reading that line to find out what this build emits.
+    """
+    rep = gather_with_injected(
+        monkeypatch, cluster_row(status="busy"), claude_only=True,
+        runner=make_runner(local_panes=SHELLS_ONLY_PANES,
+                           local_windows=SHELLS_ONLY_WINDOWS))
+    kd = rep["caveats"]["kind_scope"]
+    assert kd["kinds_produced"] == ["cluster"]
+    assert kd["kinds_excluded_by_filter"] == ["tmux"]
+    assert rep["summary"]["kinds_excluded_by_filter"] == ["tmux"]
+    line = next(ln for ln in sm.render_caveats(rep) if "kind_scope" in ln)
+    # the false sentence the old code rendered, banned BY NAME
+    assert "tmux is ENUMERATED but NOT PRODUCED" not in line
+    assert "a FILTER REMOVED every kind=tmux row this scan produced" in line
+
+
+def test_the_filter_records_an_EMPTY_removal_set_distinctly_from_NO_FILTER():
+    """🔴 `[]` AND `None` ARE DIFFERENT FACTS, one level down from the rule this
+    file already applies to `excluded_shells`. `[]` says a filter ran and
+    removed no whole kind; `None` says nothing was ever measured. Collapsing
+    them lets a future reader treat an unfiltered scan as one that was checked
+    and came back clean."""
+    filtered = mix_gather(claude_only=True)
+    assert filtered["filters"]["kinds_excluded_by_filter"] == []
+    assert filtered["summary"]["kinds_excluded_by_filter"] == []
+    assert filtered["caveats"]["kind_scope"]["kinds_excluded_by_filter"] == []
+
+    off = mix_gather()
+    assert off["filters"]["kinds_excluded_by_filter"] is None
+    assert off["summary"]["kinds_excluded_by_filter"] is None
+    # 🔴 and the CAVEAT omits the key entirely rather than carrying a null, so
+    # the JSON reader sees the same not-measured-vs-measured-none distinction
+    # here as in the two surfaces above. A null would spell "a filter ran"
+    # inside a structure whose other two keys spell "none ran".
+    #
+    # 🔴 THE RENDERER DELIBERATELY DOES NOT DISTINGUISH THEM, and an earlier
+    # version of this comment claimed it did ("`_fmt_kind_scope` branches on its
+    # presence") — it does not; it is `kd.get(...) or []`. Pinned as behaviour
+    # by `test_the_kind_scope_RENDER_collapses_missing_and_empty_deliberately`,
+    # with the reasoning there.
+    assert "kinds_excluded_by_filter" not in off["caveats"]["kind_scope"]
+
+
+def test_the_kind_scope_RENDER_collapses_missing_and_empty_deliberately():
+    """🔴 THE PROSE ASKS A NARROWER QUESTION THAN THE JSON, and that is the
+    whole reason the two surfaces differ. `_fmt_kind_scope` asks only WHICH
+    WHOLE KINDS A FILTER TOOK — every clause it can emit about the filter is
+    guarded on a non-empty list. "No filter ran" and "a filter ran and took no
+    whole kind" give the same answer to that question, so rendering them
+    differently would mean inventing a sentence about a filter that removed
+    nothing.
+
+    Contrast `kinds_produced` one field over, where missing and empty ARE
+    different sentences ("no scan happened, describe the build" vs "a scan
+    measured zero rows") and an `or` would be the literal-masquerading-as-a-
+    measurement bug that field's guard exists to prevent. The asymmetry is the
+    point; this pins it so the docstring stating it is machine-checked.
+    """
+    base = {"kinds_produced": ["tmux"], "kinds_enumerated": ["cluster", "tmux"]}
+    missing = sm._fmt_kind_scope(dict(base))
+    empty = sm._fmt_kind_scope(dict(base, kinds_excluded_by_filter=[]))
+    assert missing == empty, (missing, empty)
+    # ...and a POSITIVE CONTROL, or the equality above is satisfiable by a
+    # renderer that ignores the field entirely.
+    populated = sm._fmt_kind_scope(
+        dict(base, kinds_excluded_by_filter=["cluster"]))
+    assert populated != missing
+    assert "a FILTER REMOVED every kind=cluster row this scan produced" in populated
+    assert "a FILTER REMOVED" not in missing
+
+
+def test_an_unfiltered_scan_still_renders_the_UNCHANGED_caveat_sentence():
+    """CONTROL. Every assertion above is about what changes under the flag; this
+    pins that nothing changes without it, so the new clause cannot leak into the
+    ordinary render."""
+    line = next(ln for ln in sm.render_caveats(mix_gather())
+                if "kind_scope" in ln)
+    assert line == (
+        "  caveat[kind_scope]: rows in this scan are kind=tmux — cluster is "
+        "ENUMERATED but NOT PRODUCED, so no such row appears and its absence "
+        "is NOT a measured zero; clawgate is reported separately under "
+        "CLAWGATE QUEUE")
+
+
+def test_the_FILTER_line_in_the_table_names_the_kind_it_removed():
+    """The rendered claim, pinned WHOLE. A word check on this line has been
+    walked before: "shell" and "kind" both appear in its own static prose."""
+    rep = mix_gather(
+        claude_only=True,
+        runner=make_runner(local_panes=SHELLS_ONLY_PANES,
+                           local_windows=SHELLS_ONLY_WINDOWS))
+    lines = [ln for ln in sm.render_table(rep).splitlines()
+             if "FILTER --claude-only" in ln]
+    assert lines == [
+        "  FILTER --claude-only: 1 shell window(s) excluded from every count "
+        "above",
+        "  FILTER --claude-only: it removed EVERY kind=tmux row this scan "
+        "produced — their absence above is the FILTER's doing, not a measured "
+        "absence",
+    ]
+    # ...and the second line is absent when no whole kind went (positive
+    # control on the pair: the SAME flag, one row different).
+    assert [ln for ln in sm.render_table(mix_gather(claude_only=True)).splitlines()
+            if "FILTER --claude-only" in ln] == [
+        "  FILTER --claude-only: 2 shell window(s) excluded from every count "
+        "above"]
+
+
+def test_measured_caveats_does_not_SHARE_the_excluded_kinds_with_the_report():
+    """🔴 The purity claim, extended to the field this change adds. `cav` is
+    deep-copied from CAVEATS, but the excluded-kinds list comes from
+    `report["filters"]` — a DIFFERENT object, so the deepcopy says nothing
+    about it. Handing the caller the report's own list lets a consumer writing
+    through the returned caveats mutate the report it was derived from."""
+    rep = {"hosts": {}, "filters": {"kinds_excluded_by_filter": ["cluster"]}}
+    out = sm.measured_caveats(rep)
+    got = out["kind_scope"]["kinds_excluded_by_filter"]
+    assert got == ["cluster"]
+    assert got is not rep["filters"]["kinds_excluded_by_filter"]
+    got.append("POISONED")
+    assert rep["filters"]["kinds_excluded_by_filter"] == ["cluster"]
+
+
+def test_measured_caveats_reads_the_excluded_kinds_where_they_are_RECORDED():
+    """🔴 It cannot recompute them: by the time this function runs the removed
+    rows are GONE, and only the filter ever saw them. So the derivation is a
+    lookup, and this feeds values that CANNOT coincide with anything derivable
+    from the rows — which is the trap this file has walked into five times."""
+    rep = {"hosts": {"h": {"windows": [{"kind": "tmux"}]}},
+           "filters": {"kinds_excluded_by_filter": ["zzz", "qqq"]}}
+    out = sm.measured_caveats(rep)["kind_scope"]
+    assert out["kinds_produced"] == ["tmux"]
+    assert out["kinds_excluded_by_filter"] == ["qqq", "zzz"], "sorted"
+    # ...and the render moves with it, so the field is not merely stored
+    line = sm._fmt_kind_scope(out)
+    assert "a FILTER REMOVED every kind=qqq/zzz row this scan produced" in line
+
+
+# --------------------------------------------------------------------------- #
 # §5.3 — the two caveats, in the OUTPUT
 # --------------------------------------------------------------------------- #
 def test_the_caveats_are_in_the_json_as_structured_fields_not_prose():
@@ -3912,7 +5064,7 @@ def test_the_caveats_are_in_the_json_as_structured_fields_not_prose():
     string a consumer would have to parse."""
     cav = mix_gather()["caveats"]
     assert set(cav) == {"claude_detection", "fuzzyclaw_scope", "ledger_scope",
-                        "waiting_signal", "kind_scope"}
+                        "waiting_signal", "unsent_prompt", "kind_scope"}
     det = cav["claude_detection"]
     assert det["method"] == "pane_current_command_regex"
     assert det["pattern"] == sm.CLAUDE_RE.pattern == "claude"
@@ -4023,7 +5175,7 @@ def test_the_caveats_are_printed_in_the_table_UNCONDITIONALLY(
     assert "caveat[fuzzyclaw_scope]:" in capsys.readouterr().out
 
 
-def test_the_caveat_footer_is_two_lines_and_does_not_touch_the_row_table():
+def test_the_caveat_footer_is_one_line_per_CAVEAT_pinned_both_ways():
     """Compactness is part of the requirement — a caveat that bloats the table
     gets deleted by the next person.
 
@@ -4059,6 +5211,15 @@ def test_the_caveat_footer_is_two_lines_and_does_not_touch_the_row_table():
 # 🔴 EVERY STRING IS SYNTHETIC. This repo is PUBLIC and the real panes hold
 # client work; the SHAPES are copied, the words are invented, and the values
 # are pairwise distinct so a test cannot pass by matching the wrong row.
+#
+# 🔴 THAT CLAIM WAS FALSE ONCE, AND SAYING IT LOUDER IS NOT THE FIX. Four REAL
+# operator-typed drafts were quoted verbatim in
+# `reference/waiting-signal.md` and re-used as fixtures below, under this very
+# header. The route they took is mechanical — a string that lands in the doc
+# recording the dogfood AND in the test reproducing it — so that route is what
+# is now checked, by `test_no_FIXTURE_DRAFT_string_appears_in_a_shipped_doc`.
+# NEVER PASTE A CAPTURED DRAFT INTO A COMMITTED FILE: report counts, lengths and
+# shapes instead.
 # =========================================================================== #
 _RULE = "─" * 60
 CAP_NONCE = "deadbeefcafe1234"
@@ -4792,7 +5953,7 @@ def test_the_waiting_caveat_is_structured_for_json_consumers_not_prose():
 
 
 # =========================================================================== #
-# §B — BLOCKED ON ME (the clawgate approval queue)
+# §B — CLAWGATE QUEUE (the clawgate approval queue)
 #
 # 🔴 The failure this closes was MEASURED, not imagined: a dogfood agent read
 # an accurate line saying `agent-ops` has no JSON API, correctly preferred this
@@ -4838,7 +5999,7 @@ def _legacy_cache(**kw):
 
 
 def test_a_fresh_cache_is_ok_and_carries_the_count():
-    got = sm.read_blocked_on_me(reader=_cache(), now=NOW)
+    got = sm.read_clawgate_queue(reader=_cache(), now=NOW)
     assert got["status"] == "ok"
     assert got["count"] == 12
     assert got["cache_age_secs"] == 30
@@ -4851,7 +6012,7 @@ def test_a_fresh_cache_is_ok_and_carries_the_count():
 # one, plus the twin that must not.
 # --------------------------------------------------------------------------- #
 def test_a_schema2_cache_surfaces_the_stuck_dispatch_with_its_idle_time():
-    got = sm.read_blocked_on_me(reader=_cache(), now=NOW)
+    got = sm.read_clawgate_queue(reader=_cache(), now=NOW)
     assert got["schema_ok"] is True and got["schema_note"] is None
     assert got["stuck_count"] == 1
     assert got["stuck"] == [{"id": 173, "title": "wedged dispatch",
@@ -4865,7 +6026,7 @@ def test_a_schema2_cache_surfaces_the_stuck_dispatch_with_its_idle_time():
 def test_a_LEGACY_cache_reports_stuck_as_UNMEASURED_never_as_zero():
     """🔴 The exact substitution this whole script refuses, on the newest field.
     A poller that never looked for stuck dispatches did not find zero of them."""
-    got = sm.read_blocked_on_me(reader=_legacy_cache(), now=NOW)
+    got = sm.read_clawgate_queue(reader=_legacy_cache(), now=NOW)
     assert got["status"] == "ok", "the COUNT it does carry is still usable"
     assert got["count"] == 11
     assert got["schema"] is None and got["schema_ok"] is False
@@ -4881,17 +6042,17 @@ def test_a_LEGACY_cache_reports_stuck_as_UNMEASURED_never_as_zero():
 ])
 def test_the_schema_gate_is_measured_either_side_of_the_boundary(schema, ok):
     body = {} if schema is None else {"schema": schema}
-    got = sm.read_blocked_on_me(reader=_cache(**body) if schema is not None
-                                else _legacy_cache(), now=NOW)
+    got = sm.read_clawgate_queue(reader=_cache(**body) if schema is not None
+                                 else _legacy_cache(), now=NOW)
     assert got["schema_ok"] is ok, schema
 
 
 def test_a_schema2_cache_enumerates_ready_for_review_rather_than_folding_it_in():
     """🔴 Three finished tasks once appeared in NO list on any surface: the
     count moved and nothing said what had finished."""
-    got = sm.read_blocked_on_me(reader=_cache(), now=NOW)
+    got = sm.read_clawgate_queue(reader=_cache(), now=NOW)
     assert got["ready_for_review"] == [{"id": 172, "title": "finished item"}]
-    text = "\n".join(sm.render_blocked_on_me(got))
+    text = "\n".join(sm.render_clawgate_queue(got))
     assert "#172 REVIEW finished item" in text
     # and every open row is named too — not just the six the detail string caps
     for i in range(10):
@@ -4899,8 +6060,8 @@ def test_a_schema2_cache_enumerates_ready_for_review_rather_than_folding_it_in()
 
 
 def test_the_rendered_stuck_row_carries_the_idle_time_beside_the_flag():
-    text = "\n".join(sm.render_blocked_on_me(
-        sm.read_blocked_on_me(reader=_cache(), now=NOW)))
+    text = "\n".join(sm.render_clawgate_queue(
+        sm.read_clawgate_queue(reader=_cache(), now=NOW)))
     assert "1 STUCK dispatch(es)" in text
     assert "#173 idle 4h [agent_idle]" in text
     # 🔴 and it says what the measure cannot see, in the output itself
@@ -4913,8 +6074,8 @@ def test_a_stuck_row_at_sixteen_minutes_reads_differently_from_one_at_four_hours
     near = _cache(stuck=[{"id": 173, "title": "wedged dispatch",
                           "reasons": ["agent_idle"], "agent_idle_secs": 960}])
     far = _cache()
-    a = "\n".join(sm.render_blocked_on_me(sm.read_blocked_on_me(reader=near, now=NOW)))
-    b = "\n".join(sm.render_blocked_on_me(sm.read_blocked_on_me(reader=far, now=NOW)))
+    a = "\n".join(sm.render_clawgate_queue(sm.read_clawgate_queue(reader=near, now=NOW)))
+    b = "\n".join(sm.render_clawgate_queue(sm.read_clawgate_queue(reader=far, now=NOW)))
     assert "idle 16m" in a and "idle 4h" in b
     assert a != b
 
@@ -4927,7 +6088,7 @@ def test_a_schema2_cache_MISSING_the_stuck_key_is_still_None_not_empty():
     nothing was read."""
     body = {"schema": 2, "count": 3, "ts": NOW - 30, "state": "Warning",
             "detail": "3 need you"}
-    got = sm.read_blocked_on_me(reader=lambda p: json.dumps(body), now=NOW)
+    got = sm.read_clawgate_queue(reader=lambda p: json.dumps(body), now=NOW)
     assert got["status"] == "ok" and got["count"] == 3
     assert got["stuck"] is None and got["stuck_count"] is None
     assert got["ready_for_review"] is None and got["open"] is None
@@ -4935,7 +6096,7 @@ def test_a_schema2_cache_MISSING_the_stuck_key_is_still_None_not_empty():
 
 def test_the_RENDERER_also_says_UNMEASURED_for_a_schema2_cache_with_no_lists():
     """🔴 THE SAME BUG ONE LAYER DOWN, and the reason a reader test was not
-    enough. `read_blocked_on_me` preserves the None correctly (test above) — and
+    enough. `read_clawgate_queue` preserves the None correctly (test above) — and
     then `_render_blocked_rows` did `b.get("stuck") or []`, collapsing exactly
     the distinction the reader had just protected. Measured: this cache rendered
     a clean "3 clawgate task(s) needing you" with NO warning anywhere, while the
@@ -4946,8 +6107,8 @@ def test_the_RENDERER_also_says_UNMEASURED_for_a_schema2_cache_with_no_lists():
     """
     body = {"schema": 2, "count": 3, "ts": NOW - 30, "state": "Warning",
             "detail": "3 need you"}
-    got = sm.read_blocked_on_me(reader=lambda p: json.dumps(body), now=NOW)
-    text = "\n".join(sm.render_blocked_on_me(got))
+    got = sm.read_clawgate_queue(reader=lambda p: json.dumps(body), now=NOW)
+    text = "\n".join(sm.render_clawgate_queue(got))
     assert "NOT measured" in text or "NOT enumerated" in text, text
     assert "stuck" in text.lower()
     # …and it must not read as a measured all-clear.
@@ -4958,15 +6119,15 @@ def test_the_renderer_distinguishes_a_MEASURED_empty_queue_from_an_ABSENT_one():
     """🔴 THE DISCRIMINATING PAIR for the renderer. A measured-empty board and a
     cache that carries no lists at all must not produce the same text — that
     equality IS the bug."""
-    measured = sm.read_blocked_on_me(
+    measured = sm.read_clawgate_queue(
         reader=_cache(stuck=[], stuck_count=0, open=[], ready_for_review=[],
                       count=0), now=NOW)
-    absent_lists = sm.read_blocked_on_me(
+    absent_lists = sm.read_clawgate_queue(
         reader=lambda p: json.dumps({"schema": 2, "count": 3, "ts": NOW - 30,
                                      "state": "Warning", "detail": "3 need you"}),
         now=NOW)
-    a = "\n".join(sm.render_blocked_on_me(measured))
-    b = "\n".join(sm.render_blocked_on_me(absent_lists))
+    a = "\n".join(sm.render_clawgate_queue(measured))
+    b = "\n".join(sm.render_clawgate_queue(absent_lists))
     assert a != b
     assert "NOT measured" not in a and "NOT enumerated" not in a
     assert "NOT measured" in b or "NOT enumerated" in b
@@ -4991,8 +6152,8 @@ def test_EACH_absent_list_announces_itself_separately(missing):
         ready_for_review=[{"id": 192, "title": "queued beta"}],
         count=2, pending_count=2)("p"))
     del full[missing]
-    got = sm.read_blocked_on_me(reader=lambda p: json.dumps(full), now=NOW)
-    text = "\n".join(sm.render_blocked_on_me(got))
+    got = sm.read_clawgate_queue(reader=lambda p: json.dumps(full), now=NOW)
+    text = "\n".join(sm.render_clawgate_queue(got))
     assert missing in text, text
     assert "NOT measured" in text or "NOT enumerated" in text
 
@@ -5000,10 +6161,10 @@ def test_EACH_absent_list_announces_itself_separately(missing):
 def test_a_schema2_cache_with_zero_stuck_is_a_MEASURED_zero():
     """The other half of the discriminating control: `0` and `None` must not
     render the same, or the field is worthless."""
-    got = sm.read_blocked_on_me(
+    got = sm.read_clawgate_queue(
         reader=_cache(stuck=[], stuck_count=0, count=11), now=NOW)
     assert got["stuck_count"] == 0 and got["schema_ok"] is True
-    text = "\n".join(sm.render_blocked_on_me(got))
+    text = "\n".join(sm.render_clawgate_queue(got))
     assert "STUCK" not in text
     assert "UNMEASURED" not in text
 
@@ -5012,7 +6173,7 @@ def test_an_ABSENT_cache_is_None_and_NEVER_zero():
     """🔴 THE TOOL'S ENTIRE THESIS, applied to its newest source. A missing file
     rendering as "nothing is blocked on you" is the exact substitution every
     other section of this script exists to refuse."""
-    got = sm.read_blocked_on_me(reader=lambda p: None, now=NOW)
+    got = sm.read_clawgate_queue(reader=lambda p: None, now=NOW)
     assert got["status"] == "absent"
     assert got["count"] is None, "an unread queue is not an empty queue"
     assert got["error"] and "not measured" in got["error"].lower()
@@ -5021,7 +6182,7 @@ def test_an_ABSENT_cache_is_None_and_NEVER_zero():
 def test_an_UNPARSEABLE_cache_is_None_and_says_so():
     for body in ("{not json", "", "null", "[]", '{"state":"Warning"}',
                  '{"count":"12"}', '{"count":true}'):
-        got = sm.read_blocked_on_me(reader=lambda p, b=body: b, now=NOW)
+        got = sm.read_clawgate_queue(reader=lambda p, b=body: b, now=NOW)
         assert got["status"] == "unparseable", body
         assert got["count"] is None, body
 
@@ -5037,7 +6198,7 @@ def test_the_staleness_boundary_is_measured_at_more_than_one_point(age, status):
     """🔴 One measurement is not a claim about a threshold. Measured AT the
     boundary, one second either side, and well outside it — a comparison that
     is off by one is invisible from a single point."""
-    got = sm.read_blocked_on_me(reader=_cache(ts=NOW - age), now=NOW)
+    got = sm.read_clawgate_queue(reader=_cache(ts=NOW - age), now=NOW)
     assert got["status"] == status
     assert got["cache_age_secs"] == age
 
@@ -5045,7 +6206,7 @@ def test_the_staleness_boundary_is_measured_at_more_than_one_point(age, status):
 def test_a_STALE_cache_still_carries_its_number_but_never_calls_it_current():
     """The count is real, just possibly old — dropping it would lose signal,
     and publishing it as `ok` would fabricate freshness. Both, labelled."""
-    got = sm.read_blocked_on_me(reader=_cache(ts=NOW - 9999), now=NOW)
+    got = sm.read_clawgate_queue(reader=_cache(ts=NOW - 9999), now=NOW)
     assert got["status"] == "stale"
     assert got["count"] == 12
     assert "out of date" in got["error"]
@@ -5055,7 +6216,7 @@ def test_a_STALE_cache_still_carries_its_number_but_never_calls_it_current():
 def test_a_cache_whose_AGE_cannot_be_established_is_stale_not_ok(ts):
     """🔴 The conservative direction. A count whose freshness is unknowable is
     not a fresh count; calling it `ok` is a guess about the writer."""
-    got = sm.read_blocked_on_me(reader=_cache(ts=ts), now=NOW)
+    got = sm.read_clawgate_queue(reader=_cache(ts=ts), now=NOW)
     assert got["status"] == "stale"
     assert got["cache_age_secs"] is None
     assert "freshness" in got["error"]
@@ -5068,7 +6229,7 @@ def test_the_detail_string_is_NEVER_parsed_for_a_count():
     DISAGREES with itself: 11 pending, 6 named. Anything deriving the number
     from the string reports 6 and loses five tasks silently.
     """
-    got = sm.read_blocked_on_me(reader=_legacy_cache(), now=NOW)
+    got = sm.read_clawgate_queue(reader=_legacy_cache(), now=NOW)
     assert got["count"] == 11, "the count is the measurement, not the string"
     assert got["detail"].count("#") == 6, "fixture must actually be truncated"
     assert got["detail_truncated"] is True
@@ -5079,7 +6240,7 @@ def test_a_schema2_detail_string_STATES_its_own_truncation():
     """🔴 Item 5. The old string named six of eleven with no hint any were
     missing, and the dropped tail has included `ready_for_review` work. The new
     one says `(+N more)` AND the full sets travel structurally beside it."""
-    got = sm.read_blocked_on_me(reader=_cache(), now=NOW)
+    got = sm.read_clawgate_queue(reader=_cache(), now=NOW)
     assert "(+6 more)" in got["detail"]
     assert got["detail_shown"] == 6 and got["detail_total"] == 12
     # the note is gone precisely because the lists are present
@@ -5092,82 +6253,126 @@ def test_a_real_measured_zero_is_distinguishable_from_an_absent_cache():
     """🔴 THE DISCRIMINATING CONTROL. Both are "no pending approvals" to a
     careless reader; only one of them is a measurement, and the renderer must
     not spell them the same."""
-    zero = sm.read_blocked_on_me(
+    zero = sm.read_clawgate_queue(
         reader=_cache(count=0, pending_count=0, stuck_count=0, open=[],
                       ready_for_review=[], stuck=[], detail=None), now=NOW)
-    absent = sm.read_blocked_on_me(reader=lambda p: None, now=NOW)
+    absent = sm.read_clawgate_queue(reader=lambda p: None, now=NOW)
     assert zero["status"] == "ok" and zero["count"] == 0
     assert absent["status"] == "absent" and absent["count"] is None
-    a = "\n".join(sm.render_blocked_on_me(zero))
-    b = "\n".join(sm.render_blocked_on_me(absent))
+    a = "\n".join(sm.render_clawgate_queue(zero))
+    b = "\n".join(sm.render_clawgate_queue(absent))
     assert a != b
     assert "a measured zero" in a and "UNMEASURED" not in a
     assert "UNMEASURED" in b and "NOT zero pending" in b
 
 
-def test_the_blocked_section_is_rendered_in_EVERY_state():
+def test_the_clawgate_queue_section_is_rendered_in_EVERY_state():
     """Printed unconditionally, because the failure being closed is a reader
     who never learned the queue exists. A section that appears only sometimes
     is one nobody learns to look for."""
     for reader in (_cache(), _cache(count=0), _cache(ts=NOW - 9999),
                    lambda p: None, lambda p: "{broken"):
-        rep = base_gather(blocked_reader=reader, now=NOW)
+        rep = base_gather(clawgate_reader=reader, now=NOW)
         text = sm.render_table(rep)
-        assert "▸ BLOCKED ON ME" in text
+        assert "▸ CLAWGATE QUEUE" in text
+        # 🔴 and the RETIRED title is gone. `▸ BLOCKED ON ME` is the exact
+        # string that produced the misread the rename exists to close — a
+        # human reading "12 things are blocked on me" off the clawgate queue.
+        # Asserting only the new title would pass with both printed.
+        assert "BLOCKED ON ME" not in text
 
 
-def test_the_rendered_queue_points_the_reader_AT_agent_ops_for_the_full_list():
-    """🔴 Unit B's other half. This script has the COUNT; agent-ops has the
-    enumerated queue with titles. The cross-reference now sends a reader
-    toward it instead of away."""
-    text = sm.render_table(base_gather(blocked_reader=_cache(), now=NOW))
-    assert "12 clawgate task(s) needing you" in text
-    assert "agent-ops" in text
-    # and the same is true when the count could NOT be read — that is exactly
-    # when a reader most needs somewhere else to look
-    absent = sm.render_table(base_gather(blocked_reader=lambda p: None))
-    assert "agent-ops" in absent
+def test_the_rendered_queue_points_the_reader_AT_A_LIVE_SURFACE_for_the_full_list():
+    """🔴 Unit B's other half. This script has the COUNT, not the enumerated
+    queue with titles, so the render must name somewhere to GET that list.
+
+    ⚠ It used to name `agent-ops`, and this test asserted the literal string
+    "agent-ops" appeared. That tool is now RETIRED — and the test kept passing
+    after its two pointer strings were rewritten, because the word still
+    occurred elsewhere in the render. A guard that a stray mention can satisfy
+    is the "spelled, not structural" failure: it would have certified a render
+    pointing readers at a tool that no longer exists. So assert the CONTRACT
+    (the pointer names a surface that is still live) and assert the retired
+    name is ABSENT, which is the half that can actually go red.
+
+    ⚠⚠ The FIRST fix was still only HALF structural: `any(live)` was applied to
+    the UNMEASURED branch only, and the measured branches asserted nothing but
+    the absence of `agent-ops`. Measured: deleting `, or the clawgate API,`
+    from `BLOCKED_DETAIL_NOTE` SURVIVED the whole 508-test file, while the same
+    deletion in the unmeasured render died. `BLOCKED_DETAIL_NOTE` renders on
+    the branch a reader hits when there ARE pending approvals and the cache is
+    too old to enumerate them — i.e. the count is real, the `detail` truncates,
+    and that note is the ONLY pointer to somewhere the full queue lives. It
+    could be stripped with a green suite.
+
+    So the contract is now stated per RENDER, because the three differ in what
+    they owe the reader:
+      * schema-ok + a count -> the queue is ENUMERATED here; no pointer is owed
+        (and asserting one would be asserting a string, not a contract).
+      * legacy cache + a count -> truncated detail, no lists: a live surface
+        MUST be named. This is the render the surviving mutant lived in.
+      * unmeasured -> a live surface MUST be named; that is the whole render.
+    """
+    live = ("clawgate API", "clawgate pill")
+    text = sm.render_table(base_gather(clawgate_reader=_cache(), now=NOW))
+    assert "12 task(s) needing you" in text
+    assert "agent-ops" not in text, "the render points at a retired tool"
+    # what this render owes instead of a pointer: the queue itself, enumerated
+    assert "#172 REVIEW finished item" in text, text
+    assert "#173 idle 4h" in text, text
+
+    # 🔴 the branch the mutant survived in: a real count whose detail truncates
+    legacy = sm.render_table(base_gather(clawgate_reader=_legacy_cache(), now=NOW))
+    assert "11 task(s) needing you" in legacy
+    assert "agent-ops" not in legacy
+    assert any(s in legacy for s in live), legacy
+
+    # and the same when the count could NOT be read — that is exactly when a
+    # reader most needs somewhere else to look
+    absent = sm.render_table(base_gather(clawgate_reader=lambda p: None))
+    assert "agent-ops" not in absent
+    assert any(s in absent for s in live), absent
 
 
 def test_the_summary_carries_the_count_WITH_its_discriminant():
     """The count never travels alone, in the roll-up any consumer reads first."""
-    ok = base_gather(blocked_reader=_cache(), now=NOW)
-    assert ok["summary"]["blocked_on_me"] == {"count": 12, "status": "ok",
-                                              "stuck_count": 1,
-                                              "schema_ok": True}
-    gone = base_gather(blocked_reader=lambda p: None, now=NOW)
-    assert gone["summary"]["blocked_on_me"] == {"count": None,
-                                                "status": "absent",
-                                                "stuck_count": None,
-                                                "schema_ok": False}
+    ok = base_gather(clawgate_reader=_cache(), now=NOW)
+    assert ok["summary"]["clawgate_queue"] == {"count": 12, "status": "ok",
+                                               "stuck_count": 1,
+                                               "schema_ok": True}
+    gone = base_gather(clawgate_reader=lambda p: None, now=NOW)
+    assert gone["summary"]["clawgate_queue"] == {"count": None,
+                                                 "status": "absent",
+                                                 "stuck_count": None,
+                                                 "schema_ok": False}
     # 🔴 And a legacy cache: a real count, but `stuck_count` None — a roll-up
     # reader must be able to tell "no wedged dispatches" from "never looked".
-    old = base_gather(blocked_reader=_legacy_cache(), now=NOW)
-    assert old["summary"]["blocked_on_me"] == {"count": 11, "status": "ok",
-                                               "stuck_count": None,
-                                               "schema_ok": False}
+    old = base_gather(clawgate_reader=_legacy_cache(), now=NOW)
+    assert old["summary"]["clawgate_queue"] == {"count": 11, "status": "ok",
+                                                "stuck_count": None,
+                                                "schema_ok": False}
 
 
 def test_the_blocked_reader_is_resolved_at_CALL_time_not_bound_as_a_default():
     """🔴 The same hole `ch_client_factory` had, on a new seam. A default of
-    `blocked_reader=_read_blocked_text` would capture the ORIGINAL function at
+    `clawgate_reader=_read_blocked_text` would capture the ORIGINAL function at
     def time, so the autouse hermeticity raiser would NOT be honoured on the
     one path with no injection point — `main()` -> `gather()` — and the suite
     would quietly read the operator's live queue while staying green."""
     import inspect
     params = inspect.signature(sm.gather).parameters
-    assert params["blocked_reader"].default is None
-    assert params["blocked_path"].default is None
+    assert params["clawgate_reader"].default is None
+    assert params["clawgate_path"].default is None
     with pytest.raises(_Forbidden):
-        base_gather(blocked_reader=None)
+        base_gather(clawgate_reader=None)
 
 
 def test_the_cache_path_is_the_bar_pollers_and_is_not_hardcoded_elsewhere():
     """One constant, so the poller and the reader cannot drift apart."""
     assert sm.BLOCKED_CACHE.endswith("/.cache/bar-status/clawgate.json")
     seen = {}
-    sm.read_blocked_on_me(reader=lambda p: seen.setdefault("path", p) and None,
-                          now=NOW)
+    sm.read_clawgate_queue(reader=lambda p: seen.setdefault("path", p) and None,
+                           now=NOW)
     assert seen["path"] == sm.BLOCKED_CACHE
 
 
@@ -5222,7 +6427,7 @@ def test_fuzzyclaw_is_OFF_by_default_and_publishes_None_not_zero():
         is False
     rep = _REAL_GATHER(hosts=("workbench",), local_host="workbench",
                        runner=make_runner(), use_ch=False, now=NOW,
-                       slots={}, blocked_reader=lambda p: None)
+                       slots={}, clawgate_reader=lambda p: None)
     assert rep["fuzzyclaw"]["status"] == "skipped"
     assert rep["fuzzyclaw"]["files_seen"] is None
     assert rep["summary"]["fuzzyclaw_live"] is None
@@ -5248,7 +6453,7 @@ def test_the_fuzzyclaw_flags_compose_with_explicit_OFF_winning(
         seen.update(kw)
         return _REAL_GATHER(**dict(kw, runner=make_runner(),
                                    fuzzyclaw_texts=[], slots={},
-                                   blocked_reader=lambda p: None, now=NOW))
+                                   clawgate_reader=lambda p: None, now=NOW))
     monkeypatch.setattr(sm, "gather", fake_gather)
     sm.main(["scan", "--host", "workbench", "--no-ch", *argv])
     assert seen["use_fuzzyclaw"] is expect_on
@@ -5264,7 +6469,7 @@ def test_no_capture_flag_reaches_gather(monkeypatch, absent_blocked_cache):
     def fake_gather(**kw):
         seen.update(kw)
         return _REAL_GATHER(**dict(kw, runner=make_runner(), slots={},
-                                   blocked_reader=lambda p: None, now=NOW))
+                                   clawgate_reader=lambda p: None, now=NOW))
     monkeypatch.setattr(sm, "gather", fake_gather)
     sm.main(["scan", "--host", "workbench", "--no-ch", "--no-capture"])
     assert seen["use_capture"] is False
@@ -5300,6 +6505,9 @@ def test_the_row_FIELD_LEDGER_fails_when_it_grows_or_shrinks():
         "command",
         "task", "claude", "busy", "age_secs", "age_source", "status",
         "waiting_probable", "waiting_signals", "waiting_status",
+        # The FOURTH signal. It rides the same capture as `waiting` but is a
+        # separate pair of fields on purpose — see `UNSENT_STATUSES`.
+        "unsent_prompt", "unsent_prompt_status",
         "claude_session_id", "runtime", "ledger", "fuzzyclaw",
         "panes",
     }
@@ -5863,6 +7071,12 @@ def test_the_LEAN_row_field_ledger_fails_when_it_grows_or_shrinks():
         "path", "task", "runtime", "claude", "busy", "status", "age_secs",
         "age_source",
         "waiting_probable", "waiting_signals", "waiting_status",
+        # 🔴 The TEXT, not just a flag. The lean view's sole consumer is an
+        # agent triaging without opening panes, and a boolean "something is
+        # parked here" costs it a `tail` per row — the LOSSY-table failure this
+        # view replaces. Its status rides with it for the same reason
+        # `waiting_status` does: it is what makes the null readable.
+        "unsent_prompt", "unsent_prompt_status",
         "claude_session_id",
     }
     # 🔴 `label_source` is here because an audit caught the view's own rule
@@ -5891,7 +7105,7 @@ def test_the_lean_view_keeps_EVERY_null_vs_zero_discriminator():
                          ledger_outputs={"workbench": None})
     lean = lean_of(full)
 
-    for key in ("summary", "caveats", "blocked_on_me", "ledger", "fuzzyclaw",
+    for key in ("summary", "caveats", "clawgate_queue", "ledger", "fuzzyclaw",
                 "filters", "local_host", "ts"):
         assert key in lean, key
     # the caveats survive IN FULL, not as a pointer to somewhere else
@@ -5977,7 +7191,7 @@ def test_the_lean_view_shrinks_the_ROWS_which_is_where_the_payload_lives():
     """🔴 ASSERTED ON THE ROWS, not on the whole payload, and the first draft of
     this test got that wrong. Rows are 86% of a real payload (52,564 B of
     60,631 B on a 75-row scan) and are the only part lean trims — the fixed
-    sections (`caveats`, `blocked_on_me`, `summary`) are kept ON PURPOSE.
+    sections (`caveats`, `clawgate_queue`, `summary`) are kept ON PURPOSE.
 
     So whole-payload saving SCALES WITH ROW COUNT: 36% measured live at 75
     rows, but only ~12% on this 3-row fixture, where the retained fixed cost
@@ -6002,7 +7216,7 @@ def test_the_lean_view_shrinks_the_ROWS_which_is_where_the_payload_lives():
                                                    rowbytes(full))
     # ...and the retained fixed sections really are byte-identical, so the
     # saving above came from trimming rows and nothing else.
-    for key in ("caveats", "summary", "blocked_on_me"):
+    for key in ("caveats", "summary", "clawgate_queue"):
         assert enc(lean[key]) == enc(full[key]), key
 
 
@@ -6073,7 +7287,13 @@ def test_the_retained_TOP_LEVEL_set_is_pinned_in_both_directions():
     assert set(lean) == {
         "ts", "local_host", "stale_threshold_secs", "hosts", "clickhouse",
         "fuzzyclaw", "ledger", "filters", "caveats", "summary",
-        "blocked_on_me", "view", "lean_row_fields", "lean_host_fields",
+        # 🔴 `not_measured` SURVIVES THE LEAN PROJECTION, and it is the cheapest
+        # thing here to justify keeping: it is the only key that tells a cold
+        # agent what this payload contains NOTHING about. A lean view that
+        # dropped it would be a smaller payload that reads as more complete —
+        # the exact trade this view's own rule forbids.
+        "not_measured",
+        "clawgate_queue", "view", "lean_row_fields", "lean_host_fields",
     }
 
 
@@ -6312,12 +7532,23 @@ def test_a_CROSS_RUNTIME_conflict_names_the_runtimes_in_the_TABLE():
 def cluster_row(status="busy", **kw):
     """A row shaped the way spec §4 says a clawgate dispatch will be shaped:
     the tmux-only fields null, `claude` null because there is no pane whose
-    command could be read, `kind` the discriminant that says so."""
+    command could be read, `kind` the discriminant that says so.
+
+    🔴 IT SETS NEITHER `waiting_status` NOR `unsent_prompt_status`, AND THAT
+    SYMMETRY IS LOAD-BEARING. It used to set `waiting_status="not_tmux"` while
+    leaving `unsent_prompt_status` absent, and that asymmetry hid a real crash
+    for a whole PR: `_unsent_rollup` grew an `or "none"` coercion whose source
+    comment correctly generalised the diagnosis to "a row built anywhere ELSE
+    need not set the field", and `_waiting_rollup` — which has the identical
+    histogram over the identical class of row — was left uncoerced. No fixture
+    could see it, because this one always handed waiting a string. A row built
+    outside `fold_windows` carries NEITHER field, so this one carries neither.
+    """
     row = dict(kind="cluster", host=None, session=None, window_index=None,
                window_id=None, claude=None, busy=None, status=status,
                age_secs=42.0, age_source="clawgate", runtime="clawgate",
                claude_session_id=None, task="a wedged dispatch",
-               waiting_probable=None, waiting_status="not_tmux",
+               waiting_probable=None,
                waiting_signals=None, path="", command="", panes=0,
                label="cg", label_source="none", hotkey=None, codename=None,
                window_name="", pane_id=None, ledger=None, fuzzyclaw=None)
@@ -6529,7 +7760,7 @@ def test_the_kind_scope_caveat_is_rendered_and_names_the_unproduced_kind():
     assert "NOT PRODUCED" in line
     # it must point at where clawgate IS reported, or the reader concludes the
     # tool cannot say anything about cluster work at all
-    assert "BLOCKED ON ME" in line
+    assert "CLAWGATE QUEUE" in line
 
 
 def test_the_kind_scope_caveat_SLOTS_ARE_LIVE_not_static_prose():
@@ -6559,7 +7790,7 @@ def test_the_caveat_does_not_degrade_when_EVERY_kind_is_produced():
     assert "  is ENUMERATED" not in line, "blank subject"
     assert "every enumerated kind IS produced" in line
     # the pointer to where clawgate lives survives BOTH branches
-    assert "BLOCKED ON ME" in line
+    assert "CLAWGATE QUEUE" in line
 
 
 def test_the_caveat_is_MEASURED_from_the_rows_not_asserted_from_the_constant():
@@ -6750,7 +7981,7 @@ def test_measured_caveats_detaches_EVERY_caveat_from_the_module_constant():
 # a cosmetic reword fails this test. That is the price of a guard a reword
 # cannot walk, and these four sentences are the tool's machine-readable claims
 # about what it did and did not measure.
-_CG = ("clawgate is reported separately under BLOCKED ON ME")
+_CG = ("clawgate is reported separately under CLAWGATE QUEUE")
 KIND_SCOPE_SENTENCES = {
     # no measurement supplied — the bare-constant render. MUST NOT say "scan".
     "missing": (
@@ -6774,12 +8005,35 @@ KIND_SCOPE_SENTENCES = {
         "this tool produces kind=tmux rows by construction (no scan measured "
         "here) — every enumerated kind IS produced, so this build covers the "
         "whole entity axis; clawgate approval state is still reported "
-        "separately under BLOCKED ON ME"),
+        "separately under CLAWGATE QUEUE"),
     # after writer 3
     "both": (
         "rows in this scan are kind=cluster/tmux — every enumerated kind IS "
         "produced, so this scan covers the whole entity axis; clawgate "
-        "approval state is still reported separately under BLOCKED ON ME"),
+        "approval state is still reported separately under CLAWGATE QUEUE"),
+    # 🔴 A FILTER REMOVED A WHOLE KIND. Without its own clause this rendered
+    # "tmux is ENUMERATED but NOT PRODUCED" — three false claims in one
+    # sentence, about rows the scan had just measured and thrown away.
+    "filtered_out": (
+        "rows in this scan are kind=cluster — a FILTER REMOVED every kind=tmux "
+        "row this scan produced, so their absence above is the FILTER's doing "
+        "and NOT a measured absence of that work; " + _CG),
+    # a filter removed one kind AND another was never produced — both causes
+    # are named, and neither is allowed to absorb the other
+    "filtered_and_unproduced": (
+        "rows in this scan are kind=tmux — a FILTER REMOVED every kind=zzz row "
+        "this scan produced, so their absence above is the FILTER's doing and "
+        "NOT a measured absence of that work; cluster is ENUMERATED but NOT "
+        "PRODUCED, so no such row appears and its absence is NOT a measured "
+        "zero; " + _CG),
+    # 🔴 ZERO SURVIVING ROWS BECAUSE OF THE FILTER. "NO rows were measured in
+    # this scan" is FALSE here and blames the hosts for what the flag did —
+    # reachable TODAY, as `--claude-only` over a shell-only host.
+    "filtered_to_empty": (
+        "every row this scan measured was REMOVED BY A FILTER (kind=tmux), so "
+        "no kind survives to be reported — rows were measured and dropped, NOT "
+        "absent, and this says nothing about what an unfiltered scan holds; "
+        + _CG),
 }
 
 
@@ -6804,15 +8058,36 @@ def test_every_kind_scope_sentence_is_pinned_WHOLE_not_by_feature():
         # moment writer 3 lands, which is what this caveat is FOR.
         "by_construction_all_produced": sm._fmt_kind_scope(
             {"kinds_enumerated": ["tmux"]}),
+        # 🔴 THE FILTERED BRANCHES. `kinds_excluded_by_filter` is the field that
+        # separates "this build never emitted that kind" from "this run threw
+        # those rows away", and both of those render out of `kinds_produced`
+        # alone as the SAME sentence.
+        "filtered_out": sm._fmt_kind_scope(
+            {"kinds_produced": ["cluster"], "kinds_enumerated": E,
+             "kinds_excluded_by_filter": ["tmux"]}),
+        # `zzz` cannot be a member of KINDS, so the filter slot is proved LIVE
+        # rather than coincident with a constant this module already holds.
+        "filtered_and_unproduced": sm._fmt_kind_scope(
+            {"kinds_produced": ["tmux"], "kinds_enumerated": ["tmux", "cluster",
+                                                              "zzz"],
+             "kinds_excluded_by_filter": ["zzz"]}),
+        "filtered_to_empty": sm._fmt_kind_scope(
+            {"kinds_produced": [], "kinds_enumerated": E,
+             "kinds_excluded_by_filter": ["tmux"]}),
     }
     assert got == KIND_SCOPE_SENTENCES
-    # INSTRUMENT CHECK: all five are genuinely distinct, so a builder that
+    # INSTRUMENT CHECK: all eight are genuinely distinct, so a builder that
     # collapsed two branches into one could not satisfy this by accident.
-    assert len(set(got.values())) == 5
+    assert len(set(got.values())) == 8
     # the three that must never phrase themselves as a measurement of a scan
     assert "in this scan are" not in got["missing"]
     assert "kind=" not in got["empty"]
     assert "this scan" not in got["by_construction_all_produced"]
+    # 🔴 the two claims a filtered branch must NEVER make about a kind the
+    # filter removed, banned by name in the branches that could make them
+    assert "tmux is ENUMERATED but NOT PRODUCED" not in got["filtered_out"]
+    assert "every enumerated kind IS produced" not in got["filtered_out"]
+    assert "NO rows were measured" not in got["filtered_to_empty"]
 
 
 def test_the_BY_CONSTRUCTION_slot_IS_LIVE_not_a_coincident_literal(monkeypatch):
@@ -6904,21 +8179,23 @@ def test_the_kind_scope_NOTE_names_NO_kind_at_all():
             f"will contradict the measured `kinds_produced` after writer 3")
     # ...and it must still do its job, or "names no kind" is satisfied by ""
     assert "MEASURED" in note and "kinds_produced" in note
-    assert "blocked_on_me" in note
+    assert "clawgate_queue" in note
     assert len(note) > 200
 
 
 def test_the_kind_scope_NOTE_is_pinned_WHOLE():
     """The structural guard above bans naming a kind; this pins everything
     else, so a reword that keeps the kinds out but drops the pointer to
-    `blocked_on_me` — or reintroduces a scope claim in other words — fails."""
+    `clawgate_queue` — or reintroduces a scope claim in other words — fails."""
     assert sm.CAVEATS["kind_scope"]["note"] == (
         "`kinds_produced` is MEASURED from this scan's rows — read it rather "
         "than assuming. A kind that is enumerated but absent from "
         "`kinds_produced` was NOT LOOKED FOR by this build, so its absence is "
-        "NOT a measured absence of that work. For clawgate use "
-        "report.blocked_on_me (tasks needing the operator, and its "
-        "`stuck_count` for wedged dispatches), a different population from "
+        "NOT a measured absence of that work — UNLESS it is named in "
+        "`kinds_excluded_by_filter`, which is where a kind removed by a filter "
+        "is reported instead of being silently attributed to the build. For "
+        "clawgate use report.clawgate_queue (tasks needing the operator, and "
+        "its `stuck_count` for wedged dispatches), a different population from "
         "these rows that is never double-counted with them.")
 
 
@@ -6966,7 +8243,7 @@ def test_the_kind_scope_NOTE_does_not_restate_the_measured_field():
     assert "cluster is ENUMERATED but NOT PRODUCED" not in note
     # it still has to say the durable part, or the field loses its meaning
     assert "NOT a measured absence" in note
-    assert "blocked_on_me" in note
+    assert "clawgate_queue" in note
 
 
 def _under_seed(seed, expr):
@@ -7137,3 +8414,1835 @@ def test_the_kind_scope_caveat_MATCHES_what_the_code_actually_produces():
         "cluster is enumerated but must not be produced yet")
     # what the build produces WITHOUT measuring agrees with what it measured
     assert set(sm.KINDS_PRODUCED_BY_CONSTRUCTION) == produced
+
+
+# =========================================================================== #
+# §C — `unsent_prompt`: THE FOURTH SIGNAL, REPORTED SEPARATELY
+#
+# 🔴 THE MEASUREMENT THAT MOTIVATED IT. A blind dogfood of this tool
+# hand-verified its answer against all 79 panes on both hosts and found FIVE
+# panes holding text typed at the prompt and never sent — real work one Enter
+# from running, some of it hours old. The one-call answer reported none of them.
+#
+# 🔴 AND THE MEASUREMENT THAT CONSTRAINS IT. The same sweep measured
+# `waiting_probable` at 11 flagged / 11 TRUE POSITIVES / ZERO false positives,
+# pane by pane. That precision is the most valuable property this tool has, so
+# the new signal is published BESIDE `waiting` and never inside it. The first
+# test below is the guard on exactly that.
+#
+# Every fixture here is SYNTHETIC — this repo is PUBLIC. 🔴 Three of them were
+# NOT, for the length of this PR: they were real captured drafts, copied out of
+# `reference/waiting-signal.md` where the dogfood had quoted them verbatim. §C.4
+# below turns this sentence from an assertion into a check, and states the rule
+# it protects — NEVER PASTE A CAPTURED DRAFT INTO A COMMITTED FILE.
+# =========================================================================== #
+
+# 🔴 MEASURED AT THE BASE SHA (56c0a72), BEFORE `unsent_prompt` EXISTED, and
+# transcribed here as a LITERAL. It is deliberately NOT derived from the code it
+# guards: a golden computed by calling `detect_waiting` would agree with any
+# `detect_waiting`, including a broken one. Every value below was produced by
+# running the base-sha module over these same fixtures.
+WAITING_GOLDEN_AT_BASE = {
+    "PANE_CTX_ZERO": {
+        "probable": True,
+        "signals": [{"signal": "context_exhausted",
+                     "line": "ctx: 0%                           new task? "
+                             "/clear to save 610.0k tokens"}]},
+    "PANE_IDLE": {"probable": False, "signals": []},
+    "PANE_MENU": {
+        "probable": True,
+        "signals": [{"signal": "selection_menu",
+                     "line": "❯ 1. Resume from summary (recommended)"}]},
+    "PANE_QUESTION": {
+        "probable": True,
+        "signals": [{"signal": "trailing_question",
+                     "line": "Want me to run the post-deploy check before I "
+                             "close this out?"}]},
+    "PANE_SHELL": {
+        "probable": True,
+        "signals": [{"signal": "trailing_question",
+                     "line": "no open pull requests. run `gh pr create`?"}]},
+    "PANE_TYPED_AT_PROMPT": {"probable": False, "signals": []},
+}
+
+# The same snapshot, one layer up: what a REAL scan's waiting roll-up and rows
+# looked like at the base sha for `waiting_gather`'s fixture pair.
+WAITING_ROLLUP_AT_BASE = {
+    "probable": 1, "measured": 2, "unmeasured": 1,
+    "per_signal": {"selection_menu": 0, "context_exhausted": 0,
+                   "trailing_question": 1},
+    "unmeasured_reasons": {"not_claude": 1},
+}
+WAITING_CELLS_AT_BASE = ["YES trailing_question", "no", "?not_claude"]
+
+
+def _all_panes():
+    return {
+        "PANE_CTX_ZERO": PANE_CTX_ZERO,
+        "PANE_IDLE": PANE_IDLE,
+        "PANE_MENU": PANE_MENU,
+        "PANE_QUESTION": PANE_QUESTION,
+        "PANE_SHELL": PANE_SHELL,
+        "PANE_TYPED_AT_PROMPT": PANE_TYPED_AT_PROMPT,
+    }
+
+
+def _waiting_scan():
+    """The scan the waiting-invariance assertions read, so they cannot disagree
+    about which run they are describing.
+
+    🔴 THE LOCAL PANE CARRIES A PARKED DRAFT AND THE REMOTE ONE A REAL WAITING
+    SIGNAL, and that pairing is what makes the golden DISCRIMINATING rather than
+    merely stable. A scan with no draft in it cannot see the single most
+    dangerous mutation — folding the parked count into `waiting.probable` —
+    because with nothing parked the two roll-ups agree by accident. Here that
+    mutation moves `probable` from 1 to 2 and the golden catches it.
+    """
+    return waiting_gather(local={"%11": PANE_TYPED_AT_PROMPT},
+                          remote={"%21": PANE_QUESTION})
+
+
+def test_the_existing_WAITING_SET_is_byte_identical_after_the_fourth_signal():
+    """🔴 THE HARD GUARD ON CHANGE 1, AND THE REASON IT IS THE FIRST TEST HERE.
+
+    `waiting_probable` measured 11 flagged / 11 true positives / ZERO false
+    positives across 79 live panes. A new, noisier signal sharing the same
+    capture, the same roll-up module and the same table is one careless `or`
+    away from degrading that — and the degradation would be invisible, because
+    every existing waiting test asserts what waiting SHOULD say, not that it
+    still says exactly what it said yesterday.
+
+    So this pins the whole waiting surface against values MEASURED AT THE BASE
+    SHA (56c0a72), before `unsent_prompt` existed:
+
+      * `WAITING_SIGNALS` — the closed enumeration, unchanged;
+      * `detect_waiting` on all six fixtures — flag AND matched line, whole;
+      * `summary.waiting` — the roll-up dict, whole;
+      * the per-row waiting triple through a real `gather`;
+      * the rendered WAIT cells.
+
+    KILLS: adding `unsent_prompt` to `WAITING_SIGNALS`; summing the parked count
+    into `waiting.probable`; letting a draft raise `waiting_probable`; changing
+    which line `detect_waiting` reports. Any of those changes a value here.
+    """
+    assert sm.WAITING_SIGNALS == ("selection_menu", "context_exhausted",
+                                  "trailing_question")
+    for name, text in sorted(_all_panes().items()):
+        assert sm.detect_waiting(text) == WAITING_GOLDEN_AT_BASE[name], name
+
+    rep = _waiting_scan()
+    assert rep["summary"]["waiting"] == WAITING_ROLLUP_AT_BASE
+    rows = [r for h in sorted(rep["hosts"])
+            for r in rep["hosts"][h]["windows"]]
+    assert [(r["waiting_probable"], r["waiting_signals"], r["waiting_status"])
+            for r in rows] == [
+        # laptop naida-dev:1 — a real trailing question
+        (True, [{"signal": "trailing_question",
+                 "line": "Want me to run the post-deploy check before I close "
+                         "this out?"}], "ok"),
+        # 🔴 workbench scratch7:3 — THE PARKED DRAFT. `False`, MEASURED, with an
+        # EMPTY signal list. This is the row the whole guard is about: at the
+        # base sha it read exactly this, and it must still.
+        (False, [], "ok"),
+        (None, None, "not_claude"),
+    ]
+    assert [sm._fmt_waiting(r) for r in rows] == WAITING_CELLS_AT_BASE
+    # ...and the parked draft really IS there, or the row above is `False` for
+    # the boring reason and this fixture proves nothing about the fold.
+    assert rows[1]["unsent_prompt"] == "then open the PR"
+
+
+def test_the_fourth_signal_is_not_IN_the_waiting_signal_set_at_any_layer():
+    """🔴 THE STRUCTURAL HALF of the guard above, checked at every layer the two
+    signals touch — because the golden pins VALUES and a value can coincide.
+
+    A parked draft must not be reachable from `waiting` through the enumeration,
+    the per-signal histogram, or the roll-up's key set.
+    """
+    assert "unsent_prompt" not in sm.WAITING_SIGNALS
+    rep = waiting_gather(local={"%11": PANE_TYPED_AT_PROMPT})
+    w = rep["summary"]["waiting"]
+    assert set(w) == {"probable", "measured", "unmeasured", "per_signal",
+                      "unmeasured_reasons"}
+    assert "unsent" not in json.dumps(w)
+    # ...and the two roll-ups are SIBLINGS, not nested — nesting is one
+    # refactor away from being summed.
+    assert "unsent_prompt" in rep["summary"]
+    assert "unsent_prompt" not in rep["summary"]["waiting"]
+
+
+def test_a_PARKED_DRAFT_alone_never_raises_waiting_probable():
+    """🔴 THE BEHAVIOURAL HALF, and the one that actually protects the 11/11.
+
+    `PANE_TYPED_AT_PROMPT` is mid-turn with a live spinner and a draft in the
+    box: precisely the window a naive detector calls `waiting` and precisely the
+    window that is working fine. It must come back `waiting_probable: False`
+    (MEASURED, not null — the pane was scraped) while carrying the draft.
+    """
+    rep = waiting_gather(local={"%11": PANE_TYPED_AT_PROMPT})
+    row = _row(rep, "workbench", "scratch7", "3")
+    assert row["waiting_probable"] is False
+    assert row["waiting_signals"] == []
+    assert row["waiting_status"] == "ok"
+    # ...and the fact is NOT lost, which is the whole point of the change
+    assert row["unsent_prompt"] == "then open the PR"
+    assert row["unsent_prompt_status"] == "ok"
+    # the roll-ups disagree in exactly the intended direction
+    assert rep["summary"]["waiting"]["probable"] == 0
+    assert rep["summary"]["unsent_prompt"]["count"] == 1
+
+
+# --------------------------------------------------------------------------- #
+# §C.1 — the detector: scoped to the pane's OWN input line
+# --------------------------------------------------------------------------- #
+# 🔴 A pane DISPLAYING ANOTHER SESSION'S TRANSCRIPT. This is not a hypothetical
+# shape: a live, documented false positive of exactly this class already bit the
+# `waiting` scrape — a pane showing another window's output tripped a signal on
+# text that was not its own state. Every `❯` line here belongs to somebody else,
+# and this pane's OWN input box is empty.
+PANE_SHOWING_ANOTHER_TRANSCRIPT = _pane(
+    "❯ tail the other window",
+    "",
+    "● Here is what that session has on screen:",
+    "",
+    "    ❯ been a couple of days, see whether the patch shipped",
+    "    ❯ look at the nightly job",
+    "    ❯ park 907 until review",
+    "",
+    "  That is the end of the captured region.",
+    "",
+    "✻ Baked for 2m 11s",
+    "",
+    _RULE,
+    "❯ ",
+    _RULE,
+    "  ctx: 44%",
+)
+
+# A draft SO TALL the input box grows past the rule pair. Under-reported as
+# `no_input_box` — UNMEASURED — never as an empty box.
+PANE_TALL_DRAFT = _pane(
+    "● Ready when you are.",
+    "",
+    _RULE,
+    "❯ first line of a long draft",
+    "  second line of a long draft",
+    "  third line of a long draft",
+    "  fourth line of a long draft",
+    _RULE,
+    "  ctx: 12%",
+)
+
+# A two-line draft that DOES fit the box pair — the boundary on the other side.
+PANE_TWO_LINE_DRAFT = _pane(
+    "● Ready when you are.",
+    "",
+    _RULE,
+    "❯ work out what caused",
+    "  the queue backlog",
+    _RULE,
+    "  ctx: 12%",
+)
+
+# 🔴 THE BOUNDARY ITSELF, AND THE ONLY VALUE THAT MEASURES IT. `_input_box_span`
+# accepts `rules[-1] - rules[-2] <= 3`. The two fixtures above straddle it at 3
+# (in) and 5 (out), so `<= 3` and `<= 4` agree on BOTH of them — the mutant
+# survived a fully green suite. Here the rules are exactly 4 apart: the one
+# value where the two constants disagree.
+PANE_THREE_LINE_DRAFT = _pane(
+    "● Ready when you are.",
+    "",
+    _RULE,
+    "❯ first line of the draft",
+    "  second line of the draft",
+    "  third line of the draft",
+    _RULE,
+    "  ctx: 12%",
+)
+
+# 🔴 A MODAL DRAWN WITH **TWO** RULES. `PANE_MENU` models the shape seen live —
+# one rule — which `_input_box_span` rejects outright, so the two-rule variant
+# was never exercised: its `❯ 1. …` sits INSIDE a valid box pair and read as a
+# parked draft whose text was the option label. Not observed live (both live
+# `selection_menu` panes reported `no_input_box`), which is why it is a fixture
+# and not a bug report.
+PANE_MODAL_TWO_RULES = _pane(
+    "● I can take either route here.",
+    "",
+    "✻ Baked for 9m 41s",
+    "",
+    _RULE,
+    "❯ 1. Resume from summary (recommended)",
+    "  2. Resume the full session as-is",
+    _RULE,
+    "  Enter to confirm · Esc to cancel",
+)
+
+# 🔴 THE HARDEST VERSION OF THE "ANOTHER SESSION'S TRANSCRIPT" CLAIM.
+# `PANE_SHOWING_ANOTHER_TRANSCRIPT` carries five stray `❯` lines but no stray
+# box RULES, so it cannot see `_input_box_span` reading the wrong pair: swapping
+# `rules[-2], rules[-1]` for `rules[0], rules[1]` survived it. Here the tailed
+# session's own box is rendered too, so the capture holds FOUR rules and only
+# the LAST pair is this pane's own box.
+PANE_TAILING_A_RENDERED_BOX = _pane(
+    "❯ show me that other window",
+    "",
+    "● That session's screen, verbatim:",
+    "",
+    "    " + _RULE,
+    "    ❯ the other window's own parked draft",
+    "    " + _RULE,
+    "    ctx: 71%",
+    "",
+    "  That is the end of the captured region.",
+    "",
+    "✻ Baked for 3m 40s",
+    "",
+    _RULE,
+    "❯ ",
+    _RULE,
+    "  ctx: 44%",
+)
+
+# A located box whose FIRST interior line is chrome and whose SECOND is the
+# input line. `_PROMPT_MARK_RE.match(interior[0])` -> `any(...)` survived every
+# fixture, because the only box-we-cannot-read fixture has a ONE-line interior
+# and `any` and `match` agree on a single line.
+PANE_PROMPT_ON_THE_SECOND_INTERIOR_LINE = _pane(
+    "● done",
+    "",
+    _RULE,
+    "  some other chrome",
+    "❯ typed after the chrome",
+    _RULE,
+    "ctx: 9%",
+)
+
+
+def test_INSTRUMENT_the_unsent_fixtures_are_what_they_claim():
+    """🔴 INSTRUMENT CHECK before any verdict is read off these fixtures.
+
+    Every assertion below depends on the transcript fixture really containing
+    `❯` lines OUTSIDE its own box and an EMPTY box of its own. A fixture that
+    quietly had a draft in the box would make the false-positive test pass for
+    the wrong reason, and one with no stray `❯` at all would make it vacuous.
+    """
+    body_prompts = [l for l in PANE_SHOWING_ANOTHER_TRANSCRIPT.splitlines()
+                    if "❯" in l]
+    assert len(body_prompts) == 5, "need stray ❯ lines or the test is vacuous"
+    span = sm._input_box_span(PANE_SHOWING_ANOTHER_TRANSCRIPT.splitlines())
+    assert span is not None, "fixture must have a real input box"
+    top, bottom = span
+    interior = PANE_SHOWING_ANOTHER_TRANSCRIPT.splitlines()[top + 1:bottom]
+    assert interior == ["❯ "], "this pane's OWN box must be empty"
+    # and the tall draft really is taller than the pair rule
+    assert sm._input_box_span(PANE_TALL_DRAFT.splitlines()) is None
+    assert sm._input_box_span(PANE_TWO_LINE_DRAFT.splitlines()) is not None
+
+
+def test_POSITIVE_CONTROL_the_unsent_detector_produces_a_NON_ZERO_count():
+    """🔴 MANDATORY, and quoted as a PAIR wherever it is reported. A detector
+    returning 0 is indistinguishable from one wired to nothing, so the number is
+    watched to MOVE against a set that contains both kinds of pane.
+
+    Here: 2 parked of 8 realistic panes.
+    """
+    panes = dict(_all_panes(),
+                 PANE_SHOWING_ANOTHER_TRANSCRIPT=PANE_SHOWING_ANOTHER_TRANSCRIPT,
+                 PANE_TWO_LINE_DRAFT=PANE_TWO_LINE_DRAFT)
+    parked = {n for n, t in panes.items()
+              if sm.detect_unsent_prompt(t)["text"]}
+    assert parked == {"PANE_TYPED_AT_PROMPT", "PANE_TWO_LINE_DRAFT"}
+    assert len(parked) == 2, "positive control must be NON-ZERO and exact"
+
+
+def test_the_detector_reads_the_panes_OWN_input_line_NOT_any_matching_line():
+    """🔴 THE FALSE-POSITIVE CLASS THIS DESIGN EXISTS TO AVOID, and it is not a
+    hypothetical — a pane displaying another session's transcript already
+    tripped the `waiting` scrape on text that was not its own state.
+
+    `PANE_SHOWING_ANOTHER_TRANSCRIPT` carries FIVE `❯` lines, four of them with
+    text after them, none of them in its own input box. A detector scanning "any
+    line starting with ❯ that has text after it" reports a draft here. The
+    structural one reports a MEASURED EMPTY box.
+
+    KILLS: scanning the whole capture; scanning above the box; using the FIRST
+    `❯` line rather than the one inside the box.
+    """
+    got = sm.detect_unsent_prompt(PANE_SHOWING_ANOTHER_TRANSCRIPT)
+    assert got == {"status": "ok", "text": None}
+    # PANE_IDLE is the same hazard in its commonest form: the operator's OWN
+    # submitted prompt, echoed into the scrollback above the box.
+    assert sm.detect_unsent_prompt(PANE_IDLE) == {"status": "ok", "text": None}
+    # ...and the positive control on the same instrument, so "None" is not
+    # simply what this function always returns.
+    assert sm.detect_unsent_prompt(PANE_TYPED_AT_PROMPT) == {
+        "status": "ok", "text": "then open the PR"}
+
+
+def test_the_detector_returns_the_TEXT_so_an_operator_can_triage():
+    """🔴 A BOOLEAN WOULD NOT HAVE CLOSED THE DOGFOOD'S GAP. Five parked panes
+    with five different drafts need five different decisions, and "something is
+    typed here" costs a `tail` per pane to resolve — which is the manual sweep
+    this signal exists to replace.
+
+    Pinned as WHOLE strings, and the two fixtures carry DIFFERENT text so a
+    mutant returning a constant, or the wrong pane's draft, cannot satisfy both.
+    """
+    assert sm.detect_unsent_prompt(PANE_TYPED_AT_PROMPT)["text"] == \
+        "then open the PR"
+    assert sm.detect_unsent_prompt(PANE_TWO_LINE_DRAFT)["text"] == \
+        "work out what caused the queue backlog"
+
+
+def test_a_MODAL_pane_is_no_input_box_and_NOT_a_measured_empty_draft():
+    """🔴 THE NULL-VS-ZERO RULE, ONE SIGNAL OVER. A modal REPLACES the input
+    box, so there is no box to read — and `text: None, status: "ok"` would
+    publish "this window has nothing parked" about a window whose box was never
+    on screen. `no_input_box` is the honest answer and it is NOT counted as
+    measured.
+    """
+    got = sm.detect_unsent_prompt(PANE_MENU)
+    assert got == {"status": "no_input_box", "text": None}
+    # ...and `waiting` measured that SAME capture perfectly well, which is why
+    # the two signals need separate statuses rather than one shared one.
+    assert sm.detect_waiting(PANE_MENU)["probable"] is True
+
+
+def test_a_draft_TALLER_than_the_box_is_UNMEASURED_never_empty():
+    """🔴 THE STATED LIMIT, PINNED. `_input_box_span` accepts a rule pair up to
+    three lines apart, so a draft occupying more than two rendered lines makes
+    the box taller than that and is not recognised.
+
+    Under-reporting into the UNMEASURED bucket is the safe direction; the
+    failure this must never have is answering `ok`/None — "I looked in the box
+    and it was empty" — about a box holding four lines of work.
+
+    The two-line fixture is the control on the other side of the boundary: one
+    point is not a claim about a threshold.
+    """
+    assert sm.detect_unsent_prompt(PANE_TALL_DRAFT) == {
+        "status": "no_input_box", "text": None}
+    assert sm.detect_unsent_prompt(PANE_TWO_LINE_DRAFT)["status"] == "ok"
+    assert sm.detect_unsent_prompt(PANE_TWO_LINE_DRAFT)["text"]
+
+
+def test_the_box_HEIGHT_boundary_is_pinned_AT_FOUR_the_only_value_that_moves():
+    """🔴 ONE MEASUREMENT IS NOT A CLAIM ABOUT A THRESHOLD, and this threshold
+    had two measurements that could not see it. `_input_box_span` accepts
+    `rules[-1] - rules[-2] <= 3`; the existing pair measures 3 (accepted) and 5
+    (rejected), and `<= 4` gives the SAME answer on both — so the mutant
+    survived 553 green tests.
+
+    Four is the boundary. It is pinned at BOTH consumers of the constant,
+    because the same span now decides where `last_assistant_line` cuts: a future
+    one-off edit here would silently retune `waiting_probable` too, and a test
+    that watched only the draft would not notice.
+    """
+    lines = PANE_THREE_LINE_DRAFT.splitlines()
+    rules = [i for i, l in enumerate(lines) if sm._RULE_RE.match(l)]
+    # INSTRUMENT: the fixture really is the boundary, or this proves nothing
+    assert len(rules) == 2 and rules[1] - rules[0] == 4, rules
+
+    assert sm._input_box_span(lines) is None
+    assert sm.detect_unsent_prompt(PANE_THREE_LINE_DRAFT) == {
+        "status": "no_input_box", "text": None}
+    # ...and the OTHER consumer moves with it. With no span the cut falls at the
+    # bottom rule, so the transcript still ends inside the unrecognised box;
+    # under `<= 4` the cut moves to the TOP rule and this becomes the assistant
+    # sentence above it. Two different strings, one constant.
+    assert sm.last_assistant_line(PANE_THREE_LINE_DRAFT) == \
+        "  third line of the draft"
+    # the three points, so the claim carries its own scope: 3 in, 4 out, 5 out
+    assert sm._input_box_span(PANE_TWO_LINE_DRAFT.splitlines()) is not None
+    assert sm._input_box_span(PANE_TALL_DRAFT.splitlines()) is None
+
+
+def test_a_MODAL_drawn_with_TWO_rules_is_still_no_input_box_not_a_draft():
+    """🔴 `❯ 1. Resume …` IS A MENU'S SELECTED OPTION, NOT TYPED WORK, and
+    `_PROMPT_MARK_RE` cannot tell them apart — a menu row opens with the same
+    marker. The live modal is drawn with ONE rule, which `_input_box_span`
+    rejects for free; a two-rule variant puts the option INSIDE a valid box pair
+    and it was read as a parked draft whose text was the option label.
+
+    Not observed live — both live `selection_menu` panes reported
+    `no_input_box`, as do bordered `│ ❯ …` modals — so this is a fixture for a
+    shape the repo modelled only in its easy form.
+
+    KILLS: dropping the menu guard; keying it on the selected marker ALONE (a
+    lone `❯ 1.` is ordinary typing and must stay a draft). It does NOT kill the
+    other half — see `test_the_menu_guard_needs_the_MARKER_half_too_...` below,
+    which is where the marker check is pinned.
+    """
+    # INSTRUMENT: it really is a box pair, i.e. the span check does NOT already
+    # answer this — otherwise the guard below is unreachable and untested.
+    assert sm._input_box_span(PANE_MODAL_TWO_RULES.splitlines()) is not None
+    assert sm.detect_unsent_prompt(PANE_MODAL_TWO_RULES) == {
+        "status": "no_input_box", "text": None}
+    # ...and `waiting` still calls it what it is, from the same two lines
+    assert [s["signal"] for s in
+            sm.detect_waiting(PANE_MODAL_TWO_RULES)["signals"]] == \
+        ["selection_menu"]
+    # 🔴 THE CONTROL THE GUARD MUST NOT SWALLOW: a lone numbered line in the box
+    # with NO second option is a draft, and stays one.
+    lone = _pane("● ok", "", _RULE, "❯ 1. rewrite the intro paragraph", _RULE,
+                 "  ctx: 5%")
+    assert sm.detect_unsent_prompt(lone) == {
+        "status": "ok", "text": "1. rewrite the intro paragraph"}
+
+
+def test_the_menu_guard_needs_the_MARKER_half_too_not_only_the_SECOND_OPTION():
+    """🔴 HALF THE GUARD'S CONJUNCTION WAS UNGUARDED, and it is the half with
+    the blast radius. Replacing `_MENU_SELECTED_RE.match(interior[0])` with a
+    tautology SURVIVED all 563 tests: every fixture that reaches the option
+    count either has a menu marker in the box (so the mutant agrees) or fewer
+    than two numbered lines (so the count decides). Nothing built the shape
+    where the two disagree.
+
+    That shape is COMMON, not exotic: an ordinary parked draft in a pane whose
+    transcript happens to hold two numbered lines — an agent listing options,
+    quoting a checklist, printing a `1.`/`2.` plan. With the marker check gone,
+    every one of those becomes `no_input_box`, i.e. the draft is silently
+    unmeasured, with a fully green suite. This is the guard on the behaviour
+    this PR exists to add, so it gets its own fixture.
+
+    KILLS: `_MENU_SELECTED_RE.match(interior[0])` -> `True` (or its deletion,
+    leaving the option count alone to decide).
+    """
+    drafting_below_a_quoted_list = _pane(
+        "● I was going to offer you these:",
+        "",
+        "  1. rebuild the index from scratch",
+        "  2. leave the stale entries alone",
+        "",
+        "  ...but you already said which one you wanted.",
+        "",
+        _RULE,
+        "❯ carry on with the second one",
+        _RULE,
+        "  ctx: 33%",
+    )
+    lines = drafting_below_a_quoted_list.splitlines()
+    # INSTRUMENT, both halves — or the mutant is unreachable and this is vacuous
+    span = sm._input_box_span(lines)
+    assert span is not None, "the box must be FOUND, or the guard never runs"
+    interior = lines[span[0] + 1:span[1]]
+    assert not sm._MENU_SELECTED_RE.match(interior[0]), (
+        "the box's first line must NOT look like a selected option, or the "
+        "mutant and the real code agree here and the kill proves nothing")
+    assert sum(1 for l in lines if sm._MENU_OPTION_RE.match(l)) >= 2, (
+        "two numbered lines must be in the capture, or the OTHER half of the "
+        "conjunction rejects this pane and the marker check is never reached")
+
+    # the behaviour: a draft, read whole, NOT swallowed as a modal
+    assert sm.detect_unsent_prompt(drafting_below_a_quoted_list) == {
+        "status": "ok", "text": "carry on with the second one"}
+
+
+def test_the_SECOND_OPTION_is_counted_ANYWHERE_in_the_capture_not_in_the_box():
+    """🔴 THE SCOPE OF THE OPTION COUNT IS A CLAIM, AND IT WAS UNMEASURED.
+    Narrowing `sum(... for l in lines ...)` to `... for l in interior ...`
+    SURVIVED all 563 — `PANE_MODAL_TWO_RULES` puts BOTH options inside the box,
+    so the two scopes agree on it and no other fixture reaches the count with a
+    marker in the box.
+
+    That narrowing is a real semantic change, not a refactor: it removes the
+    documented cost (a draft that really begins `1. …` beside another numbered
+    line reads as UNMEASURED) and it breaks the coupling the source comment
+    claims — that `detect_unsent_prompt` and `detect_waiting` use the SAME
+    definition of a menu, `selected marker + a second numbered option ANYWHERE
+    in the capture`, so the two signals cannot form independent opinions about
+    what a modal is. Both halves are asserted here rather than described.
+
+    KILLS: `lines` -> `interior` in the option count.
+    """
+    # A draft that really begins `1. …`, with the second numbered line OUTSIDE
+    # the box. This is the documented COST of the wide scope, so pinning it is
+    # pinning the scope.
+    cost = _pane(
+        "● Two things came up:",
+        "",
+        "  1. the index rebuild",
+        "  2. the stale worktrees",
+        "",
+        _RULE,
+        "❯ 1. rebuild the index",
+        _RULE,
+        "  ctx: 33%",
+    )
+    lines = cost.splitlines()
+    span = sm._input_box_span(lines)
+    assert span is not None
+    interior = lines[span[0] + 1:span[1]]
+    # INSTRUMENT: the two scopes must DISAGREE on this fixture, or narrowing the
+    # scope changes nothing here and a green is green for the wrong reason.
+    assert sum(1 for l in lines if sm._MENU_OPTION_RE.match(l)) >= 2
+    assert sum(1 for l in interior if sm._MENU_OPTION_RE.match(l)) < 2
+    assert sm._MENU_SELECTED_RE.match(interior[0]), (
+        "the marker half must be TRUE here, or the conjunction short-circuits "
+        "before the count and the scope is never exercised")
+
+    assert sm.detect_unsent_prompt(cost) == {
+        "status": "no_input_box", "text": None}
+    # 🔴 THE COUPLING, MEASURED RATHER THAN ASSERTED: `detect_waiting` reads the
+    # same two lines and reaches the same verdict about the same pane. If the
+    # scopes ever diverge, these two disagree and this line fails.
+    assert [s["signal"] for s in sm.detect_waiting(cost)["signals"]] == \
+        ["selection_menu"]
+    # ...and the `lone` control still holds under the wide scope: one numbered
+    # line in the whole capture is a draft, not a menu.
+    lone = _pane("● ok", "", _RULE, "❯ 1. rewrite the intro paragraph", _RULE,
+                 "  ctx: 5%")
+    assert sum(1 for l in lone.splitlines()
+               if sm._MENU_OPTION_RE.match(l)) == 1
+    assert sm.detect_unsent_prompt(lone)["status"] == "ok"
+
+
+def test_a_pane_tailing_another_sessions_RENDERED_BOX_reads_its_OWN_box():
+    """🔴 THE SAME FALSE-POSITIVE CLASS AS `PANE_SHOWING_ANOTHER_TRANSCRIPT`, in
+    the version that fixture could not reach. That one carries five stray `❯`
+    lines and NO stray box rules, so it cannot see `_input_box_span` picking the
+    WRONG PAIR — `rules[-2], rules[-1]` -> `rules[0], rules[1]` survived it.
+
+    Here the tailed session's own input box is on screen, so the capture holds
+    FOUR rules. The real code handles this correctly today; this pins working
+    behaviour rather than reporting a bug.
+    """
+    lines = PANE_TAILING_A_RENDERED_BOX.splitlines()
+    rules = [i for i, l in enumerate(lines) if sm._RULE_RE.match(l)]
+    # INSTRUMENT: four rules, two candidate pairs, or the mutant is unreachable
+    assert len(rules) == 4, rules
+    assert rules[1] - rules[0] <= 3 and rules[3] - rules[2] <= 3, (
+        "BOTH pairs must look like a box, or picking the first is not a "
+        "temptation the code could fall for")
+    assert sm._input_box_span(lines) == (rules[2], rules[3])
+    assert sm.detect_unsent_prompt(PANE_TAILING_A_RENDERED_BOX) == {
+        "status": "ok", "text": None}
+    # the other window's draft text is REALLY in the capture, so "None" above is
+    # a scope decision and not an empty fixture
+    assert "the other window's own parked draft" in PANE_TAILING_A_RENDERED_BOX
+
+
+def test_the_prompt_marker_must_be_the_boxs_FIRST_interior_line_not_ANY_of_them():
+    """🔴 `match(interior[0])` -> `any(match(l) for l in interior)` SURVIVED,
+    because the only box-we-cannot-read fixture has a ONE-LINE interior, where
+    the two are the same function.
+
+    A two-line interior whose SECOND line carries the marker is the case that
+    separates them. It must be `no_input_box`: we located a box we do not
+    understand, and gluing its chrome to the text after the marker would publish
+    `some other chrome ❯ typed after the chrome` as a draft.
+    """
+    lines = PANE_PROMPT_ON_THE_SECOND_INTERIOR_LINE.splitlines()
+    span = sm._input_box_span(lines)
+    assert span is not None, "the box must be FOUND, or the guard is unreachable"
+    interior = lines[span[0] + 1:span[1]]
+    # INSTRUMENT: two lines, marker on the second only — the shape `any` needs
+    assert len(interior) == 2
+    assert not sm._PROMPT_MARK_RE.match(interior[0])
+    assert sm._PROMPT_MARK_RE.match(interior[1])
+    assert sm.detect_unsent_prompt(PANE_PROMPT_ON_THE_SECOND_INTERIOR_LINE) == {
+        "status": "no_input_box", "text": None}
+
+
+def test_a_box_whose_first_line_is_not_the_input_line_is_unmeasured():
+    """A located box we cannot read is `no_input_box`, never a draft. KILLS:
+    dropping the prompt-marker check and treating any box interior as text."""
+    weird = _pane("● done", "", _RULE, "  some other chrome", _RULE, "ctx: 9%")
+    assert sm.detect_unsent_prompt(weird) == {"status": "no_input_box",
+                                              "text": None}
+    # an empty capture has no box at all
+    assert sm.detect_unsent_prompt("") == {"status": "no_input_box",
+                                           "text": None}
+    assert sm.detect_unsent_prompt(None) == {"status": "no_input_box",
+                                             "text": None}
+
+
+def test_the_input_box_span_is_the_ONE_definition_shared_with_the_transcript_cut():
+    """🔴 ONE RULE, ONE PLACE — and here it is a correctness property, not
+    hygiene. `last_assistant_line` cuts the transcript at the box's TOP rule and
+    `detect_unsent_prompt` reads BETWEEN the rules; two independent opinions
+    about where the box is would put a draft in the transcript or an assistant
+    sentence in the draft.
+
+    So: for every fixture with a box, the span's top is exactly where the
+    transcript cut lands, proven by the assistant line never being a box line.
+    """
+    for name, text in sorted(_all_panes().items()):
+        lines = text.splitlines()
+        span = sm._input_box_span(lines)
+        if span is None:
+            continue
+        top, bottom = span
+        last = sm.last_assistant_line(text)
+        assert last is None or last in lines[:top], (
+            f"{name}: the assistant line came from inside/below the box")
+        # and the draft, if any, comes from strictly inside the box
+        draft = sm.detect_unsent_prompt(text)["text"]
+        if draft:
+            assert any(draft in l for l in lines[top + 1:bottom]), name
+
+
+# --------------------------------------------------------------------------- #
+# §C.2 — the row fields, the statuses, and the roll-up
+# --------------------------------------------------------------------------- #
+def test_the_unsent_status_vocabulary_is_CLOSED_and_every_value_is_REACHABLE():
+    """🔴 A STRUCTURAL LEDGER TYPE-CHECKS PAST A STATUS NOTHING CAN EMIT, so
+    both halves are here: the enumeration is pinned, AND every value in it gets
+    a scan that MUST produce it.
+
+    `error` is the one that would otherwise be declared-and-dead — it needs a
+    capture batch that fails on a REACHABLE host, which no other test builds.
+    """
+    assert sm.UNSENT_STATUSES == ("ok", "no_input_box", "uncaptured",
+                                  "not_claude", "skipped", "error")
+    produced = {}
+    # ok + not_claude: a normal framed scan (misc:5 is the bare shell)
+    rep = waiting_gather(local={"%11": PANE_IDLE})
+    produced["ok"] = _row(rep, "workbench", "scratch7", "3")
+    produced["not_claude"] = _row(rep, "workbench", "misc", "5")
+    # no_input_box: the same pane captured on a modal
+    produced["no_input_box"] = _row(
+        waiting_gather(local={"%11": PANE_MENU}), "workbench", "scratch7", "3")
+    # uncaptured: the batch ran, this pane's marker is absent from it
+    produced["uncaptured"] = _row(
+        waiting_gather(local={"%99": PANE_IDLE}), "workbench", "scratch7", "3")
+    # skipped: --no-capture
+    produced["skipped"] = _row(base_gather(use_capture=False),
+                               "workbench", "scratch7", "3")
+    # error: the host answered list-panes but the capture call failed
+    produced["error"] = _row(
+        base_gather(runner=make_runner(local_capture_rc=1,
+                                       local_capture_err="capture blew up")),
+        "workbench", "scratch7", "3")
+    got = {want: row["unsent_prompt_status"] for want, row in produced.items()}
+    assert got == {k: k for k in got}, got
+    assert set(got) == set(sm.UNSENT_STATUSES), (
+        "a declared status has no reachability case: %r"
+        % sorted(set(sm.UNSENT_STATUSES) ^ set(got)))
+    # 🔴 and NONE of them carries a text — every non-`ok` status must be null,
+    # or the status stops being the discriminant that makes the null readable.
+    for want, row in produced.items():
+        if want != "ok":
+            assert row["unsent_prompt"] is None, want
+
+
+def test_the_unsent_rollup_count_is_None_NEVER_zero_when_nothing_was_measured():
+    """🔴 THE SENTENCE THIS TOOL MUST NEVER EMIT, applied to the fourth signal.
+
+    "0 windows have work parked" and "0 windows had their input box read" are
+    different facts, and the first is the one an operator acts on. Five parked
+    windows went unreported on 79 live panes; a fabricated zero here would
+    re-create that blind spot while ASSERTING the check had been done.
+
+    Three ways to measure nothing, all of which must be None — and the measured
+    zero as the control, which must be 0 and not None.
+    """
+    for rep in (base_gather(use_capture=False),
+                base_gather(runner=make_runner(local_capture_rc=1,
+                                               remote_capture_rc=1)),
+                waiting_gather(local={"%99": PANE_IDLE},
+                               remote={"%98": PANE_IDLE})):
+        u = rep["summary"]["unsent_prompt"]
+        assert u["count"] is None, u
+        assert u["measured"] == 0
+        assert u["unmeasured"] > 0
+        assert u["unmeasured_reasons"], "a None must name its reason"
+    # 🔴 THE CONTROL: boxes really were read and really held nothing. This one
+    # is 0, NOT None — without it, a mutant hardcoding None would survive every
+    # assertion above.
+    measured_empty = waiting_gather(local={"%11": PANE_IDLE},
+                                    remote={"%21": PANE_QUESTION})
+    u = measured_empty["summary"]["unsent_prompt"]
+    assert u["count"] == 0
+    assert u["measured"] == 2
+
+
+def test_the_unsent_rollup_counts_only_boxes_it_READ_not_panes_it_captured():
+    """🔴 `measured` HERE IS STRICTER THAN `waiting`'s, and that is the point of
+    giving the signal its own status rather than reusing `waiting_status`.
+
+    A pane sitting on a modal captured fine — `waiting` measured it — and its
+    input box was never on screen. Counting it as a read box would publish a
+    denominator that overstates what was looked at.
+    """
+    rep = waiting_gather(local={"%11": PANE_MENU}, remote={"%21": PANE_IDLE})
+    assert rep["summary"]["waiting"]["measured"] == 2
+    assert rep["summary"]["unsent_prompt"]["measured"] == 1
+    assert rep["summary"]["unsent_prompt"]["unmeasured_reasons"] == {
+        "no_input_box": 1, "not_claude": 1}
+
+
+def test_a_row_MISSING_the_status_field_is_counted_loudly_not_crashed_on():
+    """🔴 REGRESSION, and it was a real crash — IN BOTH ROLL-UPS. `_unsent_
+    rollup` and `_waiting_rollup` each histogram a status field; a row built
+    OUTSIDE `fold_windows` (a `cluster` row from writer 3 is the live example)
+    carries neither key, and a `None` histogram key is unsortable beside the
+    real string keys — `render_table` raised `TypeError` on a report that was
+    otherwise fine.
+
+    🔴 THE FIRST FIX TOOK ONE OF THE TWO. Its own comment generalised the
+    diagnosis correctly ("a row built anywhere ELSE need not set the field") and
+    then coerced `_unsent_rollup` only; `_waiting_rollup` kept the identical
+    crash, invisible because `cluster_row` used to hand waiting a string while
+    leaving unsent's field absent. Both are asserted here, off ONE symmetric
+    fixture, so neither can be fixed alone again.
+
+    Coerced to `"none"`, the same idiom as `age_sources` and `row_kind`: a row
+    missing the field is a BUG in whatever built it, so it is COUNTED and NAMED
+    in the not-measured bucket rather than dropped or fatal.
+    """
+    rep = with_cluster_rows(mix_gather(), cluster_row(status="busy"))
+    rep["summary"] = sm.summarize(rep)
+    # INSTRUMENT: the injected row really carries NEITHER field, and the report
+    # really holds a string-keyed reason beside it — a histogram of `{None: 1}`
+    # alone sorts fine, so a fixture without the string key cannot crash.
+    injected = [r for r in rep["hosts"]["workbench"]["windows"]
+                if r.get("kind") == "cluster"]
+    assert len(injected) == 1
+    assert "waiting_status" not in injected[0]
+    assert "unsent_prompt_status" not in injected[0]
+    for key in ("waiting", "unsent_prompt"):
+        reasons = rep["summary"][key]["unmeasured_reasons"]
+        assert reasons.get("none") == 1, (key, reasons)
+        assert set(reasons) - {"none"}, (
+            "need a real string key beside `none`, or `sorted()` never has "
+            "two types to compare and this fixture cannot see the crash: %r"
+            % reasons)
+    # and the renderer survives it — the actual regression
+    text = sm.render_table(rep)
+    assert "unsent prompts:" in text
+
+
+def test_every_rollup_UNMEASURED_equals_the_sum_of_its_OWN_reason_histogram():
+    """🔴 THE NUMBER AND THE HISTOGRAM BESIDE IT MUST AGREE, and nothing pinned
+    that. Computing `summary.unsent_prompt.unmeasured` off `waiting_status`
+    instead of `unsent_prompt_status` stayed green and rendered
+
+        0 parked of 1 box(es) read (1 not read: no_input_box=1, not_claude=1)
+
+    — "1 not read", two reasons — which is a self-contradicting line an operator
+    reads as a bug in the tool, or worse, does not notice.
+
+    The two roll-ups take their unmeasured set from DIFFERENT fields, so the
+    fixture is chosen to make the two numbers differ.
+
+    🔴 CORRECTED — THIS DOCSTRING CLAIMED A SYMMETRY THAT IS FALSE IN ONE
+    DIRECTION, and it was false as MEASURED, not as a quibble. It used to end
+    "cross-wiring either one to the other's field breaks its own sum". True of
+    `_unsent_rollup`, whose set and key are the SAME field. Not true of
+    `_waiting_rollup`: it FILTERS on `waiting_probable is None` and only KEYS on
+    `waiting_status`, so the row SET is field-independent and the sum holds
+    whichever field supplies the key. Cross-wiring that key to
+    `unsent_prompt_status` SURVIVES all 563 tests, this one included.
+
+    What it breaks is the VOCABULARY, not the arithmetic:
+    `summary.waiting.unmeasured_reasons` would report the other signal's status
+    names while the counts still add up. That is what
+    `test_each_rollups_unmeasured_reasons_are_keyed_by_its_OWN_status_field`
+    below pins, and it is where the cross-wire is killed — this test is an
+    invariant guard on the sum, and only on the sum.
+    """
+    # a modal locally (waiting CAN read it, unsent cannot) + a shell row
+    rep = waiting_gather(local={"%11": PANE_MENU}, remote={"%21": PANE_IDLE})
+    w = rep["summary"]["waiting"]
+    u = rep["summary"]["unsent_prompt"]
+    # 🔴 THE TWO DIFFER ON PURPOSE (1 vs 2). A fixture where they coincide
+    # cannot see a roll-up reading the other's field — the fixture-equals-the-
+    # constant trap, in its cross-wiring form.
+    assert (w["unmeasured"], u["unmeasured"]) == (1, 2)
+    for key in ("waiting", "unsent_prompt"):
+        roll = rep["summary"][key]
+        assert roll["unmeasured"] == sum(roll["unmeasured_reasons"].values()), (
+            key, roll)
+    # ...and again on a scan whose unmeasured set is EVERYTHING, so the
+    # invariant is not pinned only at a small number
+    for rep2 in (base_gather(use_capture=False),
+                 with_cluster_rows(mix_gather(), cluster_row())):
+        rep2["summary"] = sm.summarize(rep2)
+        for key in ("waiting", "unsent_prompt"):
+            roll = rep2["summary"][key]
+            assert roll["unmeasured"] == sum(
+                roll["unmeasured_reasons"].values()), (key, roll)
+    # POSITIVE CONTROL ON THE INVARIANT: it CAN fail. A histogram that dropped
+    # one bucket must break the equality, or `sum(...)` proves nothing here.
+    broken = dict(u, unmeasured_reasons={"not_claude": 1})
+    assert broken["unmeasured"] != sum(broken["unmeasured_reasons"].values())
+
+
+def test_each_rollups_unmeasured_reasons_are_keyed_by_its_OWN_status_field():
+    """🔴 THE SUM CANNOT SEE THIS, AND THE SUM IS ALL THERE WAS. `_waiting_
+    rollup` filters its unmeasured set on `waiting_probable is None` and keys
+    the histogram on `waiting_status` — two different fields — so swapping the
+    KEY to `unsent_prompt_status` leaves the row set, and therefore the sum,
+    identical. That mutant SURVIVED all 563 tests. The damage it does is a
+    histogram of the OTHER signal's status names printed under
+    `summary.waiting.unmeasured_reasons`, with a total that still adds up.
+
+    No pane can build the disagreement: `fold_windows` sets `waiting_status` and
+    `unsent_prompt_status` to the SAME value on every path where nothing was
+    scraped (`not_claude`/`uncaptured`/`skipped`/`error`), and the one status
+    that is unsent's alone — `no_input_box` — only occurs on rows where waiting
+    WAS measured, so they are absent from waiting's set entirely. The
+    disagreement lives exactly where the last two histogram bugs lived: a row
+    built OUTSIDE `fold_windows`, carrying one field and not the other. That is
+    not hypothetical — `cluster_row` used to be shaped that way, with
+    `waiting_status="not_tmux"` and no `unsent_prompt_status`, and that
+    asymmetry hid a `TypeError` for a whole PR.
+
+    So the fixture is one row of each asymmetry, and the assertion is on the
+    reason NAMES. Both directions, because a guard that pins one is half a
+    guard.
+
+    KILLS: `_waiting_rollup`'s histogram keyed on `unsent_prompt_status`;
+    `_unsent_rollup`'s keyed on `waiting_status`.
+    """
+    rep = with_cluster_rows(
+        mix_gather(),
+        # writer 3 set waiting's field and not unsent's — the real shape
+        cluster_row(waiting_status="not_tmux"),
+        # ...and the mirror, so neither direction is pinned alone
+        cluster_row(unsent_prompt_status="no_input_box"),
+    )
+    rep["summary"] = sm.summarize(rep)
+    w = rep["summary"]["waiting"]["unmeasured_reasons"]
+    u = rep["summary"]["unsent_prompt"]["unmeasured_reasons"]
+
+    # INSTRUMENT: the two vocabularies must be DISJOINT on this fixture, or a
+    # cross-wire produces the same histogram and the assertions below are
+    # vacuous. `not_tmux` is deliberately outside `UNSENT_STATUSES` and
+    # `no_input_box` is deliberately outside anything waiting can emit.
+    assert "not_tmux" not in sm.UNSENT_STATUSES
+    assert w.get("not_tmux") == 1, w
+    assert "not_tmux" not in u, u
+    assert u.get("no_input_box") == 1, u
+    assert "no_input_box" not in w, w
+    # the field-less halves land in `none` on the OTHER roll-up, loudly
+    assert w.get("none") == 1 and u.get("none") == 1, (w, u)
+
+    # ...and the sum invariant still holds, so this is a claim ABOUT the names
+    # and not a second copy of the test above
+    for key in ("waiting", "unsent_prompt"):
+        roll = rep["summary"][key]
+        assert roll["unmeasured"] == sum(roll["unmeasured_reasons"].values())
+    # the renderer survives a status outside either vocabulary
+    assert "unsent prompts:" in sm.render_table(rep)
+
+
+def test_the_parked_text_reaches_the_LEAN_view_untruncated():
+    """The lean view's sole consumer is an agent triaging without opening panes.
+    A flag it cannot act on would be the LOSSY-table failure this view replaces.
+    """
+    rep = waiting_gather(local={"%11": PANE_TYPED_AT_PROMPT})
+    lean = sm.lean_report(rep)
+    row = [r for r in lean["hosts"]["workbench"]["windows"]
+           if r["session"] == "scratch7"][0]
+    assert row["unsent_prompt"] == "then open the PR"
+    assert row["unsent_prompt_status"] == "ok"
+    assert "unsent_prompt" in lean["summary"]
+
+
+# --------------------------------------------------------------------------- #
+# §C.3 — the rendered surfaces, pinned WHOLE
+# --------------------------------------------------------------------------- #
+def _lines(text):
+    return [l.strip() for l in text.splitlines()]
+
+
+_UNSENT_HEADING = ("✎ UNSENT PROMPT — typed and never sent; NOT 'waiting on "
+                   "you', but work parked one Enter away:")
+_WAITING_HEADING = "⚠ WAITING — the matched line, so you can disagree with it:"
+
+
+def _block_after(lines, heading):
+    """The rows of ONE rendered block: every line after `heading` up to the
+    first blank one. Returned WHOLE, so a membership claim about a block is an
+    equality and not an `in` — an `in` cannot see an extra row.
+    """
+    assert heading in lines, f"no such block: {heading!r}"
+    out = []
+    for line in lines[lines.index(heading) + 1:]:
+        if not line:
+            break
+        out.append(line)
+    return out
+
+
+def test_the_unsent_TABLE_SECTION_is_pinned_as_a_WHOLE_normalised_string():
+    """🔴 A WORD CHECK IS WALKABLE BY A REWORD, and four prose guards in this
+    repo have been walked exactly that way — two satisfied by the sentence's own
+    STATIC prose, one by a reword, one by a synonym. So the heading and the row
+    are pinned WHOLE.
+
+    The cost is real and accepted: a cosmetic reword fails this test. That is
+    the trade for a machine-readable claim — and the claim here is load-bearing,
+    because the heading is what stops a reader filing these under "waiting".
+    """
+    text = sm.render_table(waiting_gather(local={"%11": PANE_TYPED_AT_PROMPT}))
+    lines = _lines(text)
+    assert ("✎ UNSENT PROMPT — typed and never sent; NOT 'waiting on you', "
+            "but work parked one Enter away:") in lines
+    assert "workbench:scratch7:3  then open the PR" in lines
+    # 🔴 and it is a SEPARATE block from the waiting evidence, not merged into
+    # it — the one surface a human actually reads is where re-conflating the
+    # two signals would cost the most.
+    assert "⚠ WAITING — the matched line, so you can disagree with it:" \
+        not in lines
+    # an unparked scan prints no block at all
+    assert not [l for l in _lines(sm.render_table(
+        waiting_gather(local={"%11": PANE_IDLE}))) if "UNSENT PROMPT" in l]
+
+
+def test_the_unsent_TABLE_SECTION_excludes_a_WAITING_row_with_no_draft():
+    """🔴 THE HEADLINE GUARANTEE, AT THE ONE SURFACE A HUMAN ACTUALLY READS —
+    and it was untested there. Widening the row filter to
+    `r.get("unsent_prompt") or r.get("waiting_probable")` passed the ENTIRE
+    suite and rendered a waiting row, holding no draft at all, underneath a
+    heading that says "typed and never sent".
+
+    The pinned-whole-string test could not see it: its fixture is a single pane
+    with `waiting_probable: False`, so the `or` had nobody to add. This one uses
+    the scan that carries BOTH — a real waiting row on one host and a parked
+    draft on the other — and asserts the block WHOLE, so an extra row fails.
+
+    That is what separation means at this surface: not that the two never
+    co-occur (they may, and a row carrying both is correct), but that neither
+    list can be populated from the other's signal.
+    """
+    rep = _waiting_scan()
+    rows = [r for h in sorted(rep["hosts"]) for r in rep["hosts"][h]["windows"]]
+    # INSTRUMENT, both halves — a fixture missing either makes this vacuous
+    waiting_only = [r for r in rows
+                    if r.get("waiting_probable") and not r.get("unsent_prompt")]
+    parked_only = [r for r in rows
+                   if r.get("unsent_prompt") and not r.get("waiting_probable")]
+    assert len(waiting_only) == 1 and waiting_only[0]["session"] == "naida-dev"
+    assert len(parked_only) == 1 and parked_only[0]["session"] == "scratch7"
+
+    lines = _lines(sm.render_table(rep))
+    # 🔴 WHOLE-BLOCK EQUALITY, not `in`. The waiting row would render as a bare
+    # `laptop:naida-dev:1` with an empty draft column, which every `in` check in
+    # this file would step straight past.
+    assert _block_after(lines, _UNSENT_HEADING) == [
+        "workbench:scratch7:3  then open the PR"]
+    # ...and the mirror, so the guard is not one-directional: the parked-only
+    # row must not appear under the WAITING evidence either.
+    waiting_block = _block_after(lines, _WAITING_HEADING)
+    assert waiting_block == [
+        "laptop:naida-dev:1  [trailing_question]  Want me to run the "
+        "post-deploy check before I close this out?"]
+    # POSITIVE CONTROL ON THE BLOCK READER: it really can see a second row, so
+    # the two one-element results above are measurements, not a broken parser.
+    both = _block_after(
+        _lines(sm.render_table(waiting_gather(
+            local={"%11": PANE_TYPED_AT_PROMPT},
+            remote={"%21": PANE_TWO_LINE_DRAFT}))),
+        _UNSENT_HEADING)
+    assert len(both) == 2, both
+
+
+def test_a_row_carrying_BOTH_signals_is_listed_under_BOTH_headings():
+    """🔴 CO-OCCURRENCE IS CORRECT AND MUST NOT BE SUPPRESSED. The agent asked a
+    question and the operator half-typed a reply — that is one window with two
+    true facts about it, and a build that dropped either would be strictly worse
+    than one that prints both.
+
+    An earlier version of the reference doc promoted "0 rows flagged BOTH" on
+    one live run to the separation claim; the next run measured 1. Separation is
+    that neither signal can RAISE the other, which the tests above pin. This one
+    pins the other half: when a row genuinely has both, both blocks say so.
+    """
+    both = _pane(
+        "❯ deploy it",
+        "",
+        "● Deployed. The rollout finished and both replicas are ready.",
+        "",
+        "  Want me to run the post-deploy check before I close this out?",
+        "",
+        _RULE,
+        "❯ yes and tag the release",
+        _RULE,
+        "  ctx: 61%",
+    )
+    rep = waiting_gather(local={"%11": both})
+    row = _row(rep, "workbench", "scratch7", "3")
+    assert row["waiting_probable"] is True
+    assert row["unsent_prompt"] == "yes and tag the release"
+    # counted ONCE in each roll-up, never summed together
+    assert rep["summary"]["waiting"]["probable"] == 1
+    assert rep["summary"]["unsent_prompt"]["count"] == 1
+    lines = _lines(sm.render_table(rep))
+    assert _block_after(lines, _UNSENT_HEADING) == [
+        "workbench:scratch7:3  yes and tag the release"]
+    assert _block_after(lines, _WAITING_HEADING) == [
+        "workbench:scratch7:3  [trailing_question]  Want me to run the "
+        "post-deploy check before I close this out?"]
+
+
+def test_the_unsent_SUMMARY_LINE_is_pinned_whole_in_BOTH_states():
+    """🔴 BOTH BRANCHES, WHOLE. The measured line and the UNMEASURED line say
+    opposite things and are two format strings apart; pinning only one leaves
+    the other free to render `unsent: 0` for a look nobody took.
+    """
+    # 🔴 `count` AND `measured` DIFFER HERE ON PURPOSE (1 of 2). A fixture where
+    # they coincide cannot see a mutant that renders one in the other's slot —
+    # the fixture-equals-the-constant trap, in its arithmetic form.
+    one_of_two = sm.render_table(waiting_gather(
+        local={"%11": PANE_TYPED_AT_PROMPT}, remote={"%21": PANE_IDLE}))
+    assert ("unsent prompts: 1 parked of 2 box(es) read "
+            "(1 not read: not_claude=1)") in _lines(one_of_two)
+    # ...and both parked, so the count MOVES while the denominator does not
+    two_of_two = sm.render_table(waiting_gather(
+        local={"%11": PANE_TYPED_AT_PROMPT},
+        remote={"%21": PANE_TWO_LINE_DRAFT}))
+    assert ("unsent prompts: 2 parked of 2 box(es) read "
+            "(1 not read: not_claude=1)") in _lines(two_of_two)
+    unmeasured = sm.render_table(base_gather(use_capture=False))
+    assert ("unsent prompts: UNMEASURED — 0 of 3 window(s) had an input box "
+            "read (not_claude=1, skipped=2)") in _lines(unmeasured)
+    # 🔴 THE WORD THAT MUST NOT APPEAR IN THE UNMEASURED BRANCH. `0 parked` is
+    # the whole failure, spelled.
+    assert "0 parked" not in unmeasured
+
+
+def test_the_unsent_CAVEAT_line_is_pinned_whole_and_names_the_separation():
+    """🔴 PINNED WHOLE, because this line is the ONE place a cold reader learns
+    that a `waiting: no` window may still be holding work — and that the null is
+    not a zero. A word check here is walkable by a reword; the claim is not.
+    """
+    line = [l for l in sm.render_caveats(base_gather())
+            if "caveat[unsent_prompt]" in l]
+    assert len(line) == 1
+    assert line[0].strip() == (
+        "caveat[unsent_prompt]: text typed at the `❯` prompt and never sent IS "
+        "measured, separately from `waiting` and never summed into it, on "
+        "claude_rows_only — `unsent_prompt: null` is an EMPTY BOX only when "
+        "`unsent_prompt_status` is `ok` "
+        "(ok/no_input_box/uncaptured/not_claude/skipped/error); a shell pane is "
+        "never scraped and a modal reports `no_input_box`")
+
+
+def test_the_waiting_caveat_no_longer_implies_the_fact_is_DISCARDED():
+    """🔴 A COMMENT IS A CLAIM TOO, AND THIS ONE WENT FROM TRUE TO MISLEADING.
+
+    The waiting caveat says text at the `❯` prompt is EXCLUDED — still true of
+    `waiting`. Left alone, the honest reading of it became "so nothing reports
+    it", which is now false and would send an operator back to opening panes by
+    hand: the exact cost the measurement was taken to remove. Both the rendered
+    line and the machine-readable caveat must point at where it went.
+    """
+    line = [l for l in sm.render_caveats(base_gather())
+            if "caveat[waiting_signal]" in l][0]
+    assert "EXCLUDED" in line
+    assert "is reported under `unsent_prompt` instead" in line
+    excl = (base_gather()["caveats"]["waiting_signal"]["excluded"]
+            ["prompt_buffer_text"])
+    assert "NO LONGER DISCARDED" in excl
+    assert "`unsent_prompt`" in excl
+
+
+def test_the_unsent_caveat_is_STRUCTURED_for_json_consumers_not_prose():
+    cav = base_gather()["caveats"]["unsent_prompt"]
+    assert cav["scope"] == "claude_rows_only"
+    assert cav["statuses"] == list(sm.UNSENT_STATUSES)
+    # 🔴 the separation is a FIELD, not a sentence a consumer has to parse
+    assert cav["separate_from"] == "waiting_probable"
+    assert cav["method"] == "capture_pane_input_box"
+
+
+# --------------------------------------------------------------------------- #
+# §C.4 — the drafts are INVENTED, and that is enforced rather than asserted
+# --------------------------------------------------------------------------- #
+_REPO_ROOT = os.path.normpath(os.path.join(_HERE, "..", ".."))
+_SKILL_DIR = os.path.join(_REPO_ROOT, "claude", "skills", "session-manager")
+
+# 🔴 DERIVED, NOT HAND-LISTED, because the hand-listed version could not see the
+# file that actually leaked. It named `SKILL.md` and `reference/waiting-signal.md`
+# only; `claudedocs/kickoff-waiting-signal.md` held two of the same real drafts
+# and was scrubbed by hand, outside the guard, while the rule the guard enforces
+# is scoped in prose to "any file that gets committed". Now: every `.md` under
+# the skill (a NEW `reference/*.md` is covered the day it is added) plus this
+# feature's kickoff doc, which lives outside the skill tree.
+#
+# 🔴 DELIBERATELY NOT THE WHOLE REPO. Measured 2026-08-17: `deploy it` and
+# `keep going` — two of the fixture drafts below — already occur as ordinary
+# prose in `scripts/mail-actions/`, `nix/system/` and three test files. A
+# repo-wide scope would fail on five files that never saw a draft, and a guard
+# that cries wolf gets deleted. The scope is "the docs this feature ships",
+# which is the route all six real drafts actually took.
+_SKILL_BODY = os.path.join(_SKILL_DIR, "SKILL.md")
+_WAITING_REF = os.path.join(_SKILL_DIR, "reference", "waiting-signal.md")
+_CH_REF = os.path.join(_SKILL_DIR, "reference", "clickhouse-queries.md")
+_KICKOFF_DOC = os.path.join(_REPO_ROOT, "claudedocs", "kickoff-waiting-signal.md")
+
+# 🔴 THE LEDGER OF FIELDS THAT PUBLISH OPERATOR-TYPED TEXT, and the reason it is
+# a ledger rather than a sentence. The NEVER-PASTE rule named `unsent_prompt`
+# alone while `clickhouse.rows[].first_msg` — the opening prompt of every recent
+# session, shipped by a query that runs by DEFAULT — sat in the same payload
+# with nothing said about it anywhere in the skill tree.
+#
+# Every member must be NAMED in the core's rule (asserted below), and every
+# member is bound to the code that produces it, so this list cannot rot into
+# fields that no longer exist. 🔴 ITS HONEST LIMIT, stated rather than implied:
+# it cannot see a THIRD such field appearing in the payload on its own — nothing
+# derives "carries operator text" from the code. What it does buy is that adding
+# one here, which is where anyone widening the rule starts, fails until the
+# docs name it too.
+_OPERATOR_TEXT_FIELDS = ("unsent_prompt", "clickhouse.rows[].first_msg")
+# Six files at the time of writing, against the two the hand-list named. The
+# three above are NAMED as well as derived because the prose guard below asserts
+# a specific sentence in a specific one of them — a positional index into a
+# glob is a bug waiting for the next `reference/*.md`.
+_SHIPPED_DOCS = tuple(
+    sorted(glob.glob(os.path.join(_SKILL_DIR, "**", "*.md"), recursive=True))
+    + [_KICKOFF_DOC])
+
+
+def _derive_fixture_draft_strings(source: str) -> set:
+    """Every operator-typed line the `_pane(...)` fixtures in `source` carry.
+
+    🔴 DERIVED FROM THE FIXTURES THEMSELVES so the claim beside the tuple cannot
+    rot. The hand-listed version held 9 strings under a comment reading "every
+    draft string the fixtures in this file carry, whole and in halves" — the
+    file carried 29. Eleven of the twenty it missed are drafts (`deploy it`,
+    `keep going`, `start the refactor`, `yes and tag the release`, the
+    second/third-line halves of the multi-line fixtures, …), and a new fixture
+    added tomorrow would have been uncovered too, silently. A count of
+    DECLARATIONS is not a count of INSTANCES.
+
+    The extraction is the shape a draft has in a fixture: a string literal
+    argument to `_pane()` whose stripped form begins with the `❯` marker and has
+    text after it, plus the CONTINUATION lines that follow it inside the same
+    call — consecutive string literals that are neither blank nor a new `❯`
+    line. `_RULE` and `"    " + _RULE` are not string literals, so a box rule
+    ends a draft for free.
+    """
+    out = set()
+    for node in ast.walk(ast.parse(source)):
+        if not (isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "_pane"):
+            continue
+        args, i = node.args, 0
+        while i < len(args):
+            arg = args[i]
+            if not (isinstance(arg, ast.Constant)
+                    and isinstance(arg.value, str)
+                    and arg.value.strip().startswith("❯")):
+                i += 1
+                continue
+            body = arg.value.strip()[1:].strip()
+            if not body:
+                i += 1
+                continue
+            out.add(body)
+            i += 1
+            while i < len(args):
+                nxt = args[i]
+                if not (isinstance(nxt, ast.Constant)
+                        and isinstance(nxt.value, str)):
+                    break
+                cont = nxt.value.strip()
+                if not cont or cont.startswith("❯"):
+                    break
+                out.add(cont)
+                i += 1
+    return out
+
+
+# 🔴 EXCLUDED, AND IT IS AN ENUMERATION RATHER THAN A PATTERN: these are labels
+# CLAUDE CODE DRAWS, not text an operator typed, and a shipped doc quotes them
+# legitimately — `2. No` is in `reference/waiting-signal.md` today, so deriving
+# without this list fails on a real, correct sentence. Excluding by shape
+# instead (anything matching `_MENU_OPTION_RE`) would also drop
+# `1. rewrite the intro paragraph`, which is a DRAFT built to look like an
+# option, and losing coverage of the ambiguous case is the wrong trade. An entry
+# here must be a label the UI renders; anything else is a draft by default.
+_MODAL_OPTION_LABELS_NOT_DRAFTS = frozenset((
+    "1. Resume from summary (recommended)",
+    "2. Resume the full session as-is",
+    "3. Do not ask me again",
+    "1. Retitle and post the nudge",
+    "1. Yes",
+    "2. No",
+))
+
+# Every draft string the fixtures in this file carry, whole and in halves.
+# 🔴 ALL INVENTED. Four REAL operator-typed drafts were quoted verbatim in
+# `reference/waiting-signal.md` and re-used as three of these fixtures, beneath
+# two headers that each asserted "every string is SYNTHETIC" — in a PUBLIC repo,
+# for a feature whose entire job is capturing what the operator types.
+_FIXTURE_DRAFT_STRINGS = tuple(sorted(
+    _derive_fixture_draft_strings(open(
+        os.path.join(_HERE, "test_session_manager.py"), encoding="utf-8").read())
+    - _MODAL_OPTION_LABELS_NOT_DRAFTS))
+
+
+def _draft_strings_found_in(text) -> set:
+    return {s for s in _FIXTURE_DRAFT_STRINGS if s in text}
+
+
+def test_no_FIXTURE_DRAFT_string_appears_in_a_shipped_doc():
+    """🔴 THE INVARIANT THE PROSE ASSERTED AND NOTHING CHECKED. Two headers in
+    this file claim every fixture string is synthetic ("the words are
+    invented"); both were FALSE, and the tell was mechanical — the same four
+    drafts appeared verbatim in `reference/waiting-signal.md` AND as fixtures
+    here. That is the shape a captured draft takes when it gets copied in: it
+    lands in the doc that records the dogfood and in the test that reproduces
+    it.
+
+    So the shape is what is banned. A string cannot be in both places. This does
+    not prove a string is invented — nothing can, from inside the repo — but it
+    fails on the exact route the four real ones took, and it is a deterministic
+    guard where the alternative is a sentence asking people to be careful.
+
+    The prose guard lives beside it: both shipped docs must carry the
+    never-paste rule, pinned whole in the test below.
+
+    🔴 BOTH SIDES ARE DERIVED NOW, and the file that leaked is the reason. The
+    needle list was hand-written and 9 long against 29 fixture drafts; the
+    haystack was two hand-named paths, and the third file holding two of the
+    same real drafts — `claudedocs/kickoff-waiting-signal.md` — was not one of
+    them, so the one file with a demonstrated leak was the one this guard could
+    not see. See `_derive_fixture_draft_strings` and `_SHIPPED_DOCS`.
+    """
+    for path in _SHIPPED_DOCS:
+        assert os.path.isfile(path), path
+        with open(path, encoding="utf-8") as fh:
+            doc = fh.read()
+        found = _draft_strings_found_in(doc)
+        assert not found, (
+            "%s quotes a fixture draft verbatim — a real captured draft copied "
+            "into a committed file takes exactly this shape, and this repo is "
+            "PUBLIC: %r" % (os.path.basename(path), sorted(found)))
+    # 🔴 POSITIVE CONTROL ON THE CHECKER, because a "0 matches" from a scanner
+    # wired to nothing is indistinguishable from a clean result. Feed it a doc
+    # that DOES contain one and watch the number move.
+    planted = "prose prose prose then open the PR prose prose"
+    assert _draft_strings_found_in(planted) == {"then open the PR"}
+    # ...and the needles really are the fixtures' drafts, not a stale list.
+    # BOTH of this pane's drafts, because the derived set sees the scrollback
+    # echo the hand-written tuple missed.
+    assert _draft_strings_found_in(PANE_TYPED_AT_PROMPT) == {
+        "start the refactor", "then open the PR"}
+    assert _draft_strings_found_in(PANE_TWO_LINE_DRAFT) == {
+        "work out what caused", "the queue backlog"}
+    assert _draft_strings_found_in(PANE_SHOWING_ANOTHER_TRANSCRIPT) == {
+        "tail the other window",
+        "been a couple of days, see whether the patch shipped",
+        "look at the nightly job",
+        "park 907 until review"}
+
+
+def test_INSTRUMENT_the_leak_guards_NEEDLES_and_HAYSTACK_are_both_derived():
+    """🔴 VALIDATE THE INSTRUMENT BEFORE BELIEVING ITS ZERO. The test above
+    reports "no fixture draft is in a shipped doc". That sentence is
+    indistinguishable from "the needle list is empty" and from "the file list
+    walked nothing" — both of which were TRUE ENOUGH to matter: the needles
+    covered 9 of 29 fixture drafts, and the haystack omitted the file that
+    leaked. So both derivations are pinned here, and both are proven able to
+    move.
+
+    Four claims, none of which the guard above can make about itself:
+      1. the haystack really contains the three files, and every entry EXISTS;
+      2. the needle set really contains drafts the old hand-list missed, and is
+         far bigger than the 9 it held;
+      3. a NEW fixture draft is picked up automatically — the whole point of
+         deriving, and the fourth mutant an audit found surviving;
+      4. every excluded modal label is one the derivation actually produces, so
+         the exclusion list cannot rot into a silent hole.
+    """
+    # 1 — the haystack, including the file the hand-list could not see
+    names = {os.path.relpath(p, _REPO_ROOT) for p in _SHIPPED_DOCS}
+    assert {"claude/skills/session-manager/SKILL.md",
+            "claude/skills/session-manager/reference/waiting-signal.md",
+            "claudedocs/kickoff-waiting-signal.md"} <= names, sorted(names)
+    for path in _SHIPPED_DOCS:
+        assert os.path.isfile(path), path
+
+    # 2 — the needles, and eleven the hand-written tuple did not hold
+    assert len(_FIXTURE_DRAFT_STRINGS) >= 20, _FIXTURE_DRAFT_STRINGS
+    for missed in ("deploy it", "keep going", "start the refactor",
+                   "yes and tag the release", "show me that other window",
+                   "tail the other window", "first line of a long draft",
+                   "second line of a long draft", "second line of the draft",
+                   "can you double-check the fixture ordering?",
+                   "1. rewrite the intro paragraph"):
+        assert missed in _FIXTURE_DRAFT_STRINGS, missed
+
+    # 3 — POSITIVE CONTROL ON THE DERIVATION: a fixture that does not exist yet.
+    # This is the mutant "add a fixture draft with no guard coverage": under the
+    # old hand-list it survived by construction, because the list could not
+    # change without a human. Feed the extractor a fresh `_pane(...)` and watch
+    # BOTH the marker line and its continuation appear.
+    grown = _derive_fixture_draft_strings(
+        'x = _pane("● hi", "", _RULE,\n'
+        '          "❯ a brand new draft nobody guarded",\n'
+        '          "  and its second rendered line",\n'
+        '          _RULE, "  ctx: 7%")\n')
+    assert grown == {"a brand new draft nobody guarded",
+                     "and its second rendered line"}, grown
+    # ...and it does NOT invent needles out of chrome: an empty box, a rule and
+    # a footer yield nothing, or every doc would match something.
+    assert _derive_fixture_draft_strings(
+        'y = _pane(_RULE, "❯ ", _RULE, "  ctx: 9%")\n') == set()
+
+    # 4 — the exclusion ledger is pinned TWO-WAY against the fixtures. A label
+    # reworded in a fixture, or one deleted outright, must fail here rather than
+    # quietly widen the hole it was cut for.
+    raw = _derive_fixture_draft_strings(open(
+        os.path.join(_HERE, "test_session_manager.py"), encoding="utf-8").read())
+    assert _MODAL_OPTION_LABELS_NOT_DRAFTS <= raw, (
+        "an excluded label is no longer produced by any fixture — a stale "
+        "exclusion is a hole nobody can see: %r"
+        % sorted(_MODAL_OPTION_LABELS_NOT_DRAFTS - raw))
+    # ...and the exclusion is NARROW: it removes six labels, not the corpus.
+    assert len(raw) - len(_MODAL_OPTION_LABELS_NOT_DRAFTS) == \
+        len(_FIXTURE_DRAFT_STRINGS) >= 20, (len(raw), len(_FIXTURE_DRAFT_STRINGS))
+    # 🔴 AND IT DOES NOT SWALLOW THE AMBIGUOUS CASE: `1. rewrite the intro
+    # paragraph` is a DRAFT shaped like an option, and it stays a needle. An
+    # exclusion by SHAPE (`_MENU_OPTION_RE`) would have dropped it silently.
+    assert "1. rewrite the intro paragraph" not in \
+        _MODAL_OPTION_LABELS_NOT_DRAFTS
+
+
+def test_EVERY_field_that_publishes_OPERATOR_TEXT_is_named_by_the_NEVER_PASTE_rule():
+    """🔴 THE GUARD WAS NARROWER THAN ITS OWN SENTENCE, which is the defect it
+    now exists to stop.
+
+    The original rule — and the original version of this test — named
+    `unsent_prompt` alone, from the day it landed (2026-08-17).
+    `clickhouse.rows[].first_msg` is the opening prompt of every recent session,
+    shipped in the SAME payload by a query that runs by DEFAULT (~17 KB of
+    operator-typed text in an ordinary scan), and it had been there since the
+    tool's first commit (2026-08-11) with no document in the skill tree
+    mentioning it. Nothing about the sentence was false; it was NARROWER THAN
+    THE PAYLOAD IT GOVERNED, and a rule that reads as complete is worse than
+    none because it stops anyone looking.
+    `claude/RULES.md`: "a guard's DESCRIPTION claims COVERAGE — check the
+    implementation is as wide as the sentence."
+
+    So the width is now the thing that is CHECKED, not the thing that is
+    written. `_OPERATOR_TEXT_FIELDS` is an asserted LEDGER: it fails when the
+    set grows (a third such field cannot ship without a doc naming it) and when
+    it shrinks (a field cannot be quietly dropped from the rule while the
+    payload still carries it), and each member is bound to the code that
+    produces it below, so the ledger cannot drift from reality either.
+
+    Pinned as WHOLE normalised strings. A word check here is walkable by a
+    reword — four prose guards in this repo were walked exactly that way, one by
+    a synonym — and this claim is load-bearing enough to pay a cosmetic-reword
+    failure for.
+    """
+    def _norm(text):
+        return " ".join(text.split())
+
+    # 🔴 BY NAME, NEVER BY INDEX. These used to be `_SHIPPED_DOCS[0]` and
+    # `[1]`, which silently became `reference/clickhouse-queries.md` and
+    # `cross-host.md` the moment that tuple was derived from a glob — a guard
+    # asserting a sentence into whichever file sorted first.
+    with open(_SKILL_BODY, encoding="utf-8") as fh:
+        skill = _norm(fh.read())
+    with open(_WAITING_REF, encoding="utf-8") as fh:
+        ref = _norm(fh.read())
+    with open(_CH_REF, encoding="utf-8") as fh:
+        ch_ref = _norm(fh.read())
+
+    assert ("🔴 **NEVER PASTE CAPTURED OPERATOR TEXT INTO A COMMITTED FILE.** "
+            "TWO fields carry **text the operator typed** — `unsent_prompt` "
+            "(the draft) and `clickhouse.rows[].first_msg` (the opening prompt "
+            "of every recent session) — and devrc is a **PUBLIC** repo, as is "
+            "every `claudedocs/` note, commit message, PR body, comment or "
+            "test fixture an agent writes into it. Report either as a "
+            "**count, a length or a shape**, never verbatim.") in skill
+    assert ("### 🔴 NEVER PASTE CAPTURED OPERATOR TEXT INTO A COMMITTED "
+            "FILE") in ref
+    assert ("report a draft as a **count, a length or a shape**, never "
+            "verbatim, in any file that gets committed") in ref
+
+    # 🔴 AND WHERE THE SECOND FIELD ACTUALLY LIVES. A reader who opens the
+    # ClickHouse reference to write a query never passes the `unsent_prompt`
+    # section, so the rule has to be on the query's own page too — the same
+    # "put it where the reader hits it" argument that put it in two files
+    # originally, applied to the file the original pass missed.
+    assert ("🔴 **NEVER PASTE CAPTURED OPERATOR TEXT INTO A COMMITTED FILE.** "
+            "`first_msg` is **text the operator typed**") in ch_ref
+
+    # 🔴 THE WIDTH CHECK. Every ledgered field must be NAMED in the core's rule
+    # — not merely present somewhere in the file, which `unsent_prompt` would
+    # satisfy from its own section heading while the rule ignored it.
+    rule = skill.split("NEVER PASTE CAPTURED OPERATOR TEXT")[1].split("never verbatim.")[0]
+    for field in _OPERATOR_TEXT_FIELDS:
+        assert field in rule, (
+            f"`{field}` publishes operator-typed text and the core's "
+            f"NEVER-PASTE rule does not name it. Widen the rule (and its pin in "
+            f"test_session_manager_skill_size.py) in the SAME commit — or, if "
+            f"the field no longer carries operator text, remove it from "
+            f"_OPERATOR_TEXT_FIELDS and say why.")
+
+    # 🔴 AND THE LEDGER IS BOUND TO THE CODE, so it cannot drift into a list of
+    # fields that no longer exist while a real one ships uncovered. Each member
+    # is checked against the thing that PRODUCES it, not against another doc.
+    assert "first_msg" in sm.SQL_RECENT_SESSIONS, (
+        "the ledger names `clickhouse.rows[].first_msg`, but the query no "
+        "longer selects it — drop it from _OPERATOR_TEXT_FIELDS if the payload "
+        "genuinely stopped carrying operator text")
+    assert "unsent_prompt" in sm.LEAN_ROW_FIELDS, (
+        "the ledger names `unsent_prompt`, but no row carries it")
+    # 🔴 AND THE CO-OCCURRENCE CORRECTION, in the same pass: the reference used
+    # to promote "0 rows flagged BOTH" on ONE live run to the separation claim.
+    # The next run measured 1, and suppressing co-occurrence would make the tool
+    # WORSE. The doc must now say what separation actually means.
+    assert "**Rows flagged BOTH: 0 on that run, 1 on the next.**" in ref
+    assert ("**Separation means the two signals are COUNTED separately and "
+            "neither can raise the other**") in ref
+    assert "The two signals were disjoint on live data" not in ref
+    # the skill body carries the same correction, for the reader who never
+    # opens the reference
+    assert ("🔴 **A row can carry BOTH, and that is correct**") in skill
+
+
+def test_the_docstring_documents_the_shell_pane_DECISION_not_just_the_behaviour():
+    """🔴 THE BRIEF REQUIRED THE CHOICE BE STATED, and a decision recorded only
+    in a test is a decision the next reader re-litigates. Both halves of the
+    reasoning must be in the detector's own docstring: that it does not fire for
+    shell panes, and WHY (a half-typed shell command is a different, noisier
+    thing — not merely that the capture happens to skip them).
+    """
+    doc = sm.detect_unsent_prompt.__doc__
+    assert "CLAUDE ROWS ONLY, AND NOT ON SHELL PANES" in doc
+    assert "noisier" in doc
+    assert "not_claude" in doc
+
+
+# =========================================================================== #
+# §D — `not_measured`: the populations this tool structurally CANNOT see
+#
+# 🔴 THE MEASUREMENT. The same blind dogfood found 60 open PRs invisible to this
+# tool, one CONFLICTING for eleven days and one open since February. Its verdict:
+# the tool "is precise about what it measured but does not tell a cold reader
+# what it did NOT measure".
+#
+# 🔴 AND THE CONSTRAINT. This file has shipped a constant masquerading as a
+# measurement FIVE times — `kinds_produced` was a literal `["tmux"]` that kept
+# asserting itself whatever the rows were, and the third recurrence landed
+# INSIDE the commit that fixed the second. So the claim is DERIVED from the
+# report's own keys, and the tests below pin that derivation two ways: a
+# structural `ast` ledger (the shape `test_drift_check.py`'s phase-2 reason-token
+# ledger uses) and a behavioural control that watches the output MOVE.
+# =========================================================================== #
+_GATHER_REPORT_KEYS = {
+    "ts", "local_host", "stale_threshold_secs", "hosts", "clickhouse",
+    "fuzzyclaw", "ledger", "filters", "clawgate_queue", "caveats", "summary",
+    "not_measured",
+}
+
+# 🔴 THE LEDGER'S MEMBERSHIP, AS A LITERAL THAT DOES NOT COME FROM THE LEDGER.
+# Measured by an audit: deleting the whole `cluster_alerts` entry left the suite
+# at 553 PASSED. GROW was genuinely pinned (a new `report[...]` key fails the
+# ast test), but SHRINK was not — only three of the five populations were named
+# anywhere, and the one count assertion read `1 + len(NOT_MEASURED_POPULATIONS)`,
+# derived from the very constant it claimed to guard. That is the
+# fixture-equals-the-constant trap this file has now hit SIX times, and the
+# control for it is mechanical: state the expected values somewhere the constant
+# cannot reach, and watch a deletion move them.
+_EXPECTED_NOT_MEASURED = {
+    "pull_requests": ("pull_requests", "standup"),
+    "mail_queue": ("mail_queue", "mailbox"),
+    "cluster_alerts": ("cluster_alerts", "standup"),
+    "initiative_board": ("initiative_board", "initiatives"),
+    "gui_windows_outside_tmux": ("gui_windows", "i3"),
+}
+
+
+def _sm_ast():
+    import ast
+    return ast.parse(open(_SCRIPT, encoding="utf-8").read())
+
+
+def _gather_report_keys() -> set:
+    """Every top-level `report[...]` key `gather` touches, read from its OWN
+    source: the keys of the `report = {...}` literal plus every constant-string
+    subscript of the name `report`.
+
+    🔴 STATICALLY, NOT BY RUNNING A SCAN. A runtime read would only ever see the
+    keys a scan happens to produce, which is the fixture-equals-the-constant
+    trap one level up: it could not tell "gather does not write this key" from
+    "this fixture did not reach the branch that writes it".
+    """
+    import ast
+    fn = next(n for n in _sm_ast().body
+              if isinstance(n, ast.FunctionDef) and n.name == "gather")
+    keys = set()
+    for node in ast.walk(fn):
+        if (isinstance(node, ast.Subscript)
+                and isinstance(node.value, ast.Name)
+                and node.value.id == "report"
+                and isinstance(node.slice, ast.Constant)
+                and isinstance(node.slice.value, str)):
+            keys.add(node.slice.value)
+        if (isinstance(node, ast.Assign)
+                and isinstance(node.value, ast.Dict)
+                and any(isinstance(t, ast.Name) and t.id == "report"
+                        for t in node.targets)):
+            for k in node.value.keys:
+                if isinstance(k, ast.Constant) and isinstance(k.value, str):
+                    keys.add(k.value)
+    return keys
+
+
+def test_the_not_measured_ledger_is_PINNED_to_the_keys_gather_actually_WRITES():
+    """🔴 THE STRUCTURAL FIX FOR THE WHOLE CLASS, not for the one instance —
+    the same shape as `test_drift_check.py::test_the_phase2_reason_token_ledger_
+    is_pinned_to_the_fields_read`, and here for the same reason.
+
+    Two sets, both extracted from the source, pinned two-way:
+
+      * the top-level keys `gather` writes must be exactly `_GATHER_REPORT_KEYS`;
+      * every ledger `report_key` must be DISJOINT from that set.
+
+    Add PR querying that writes `report["pull_requests"]` and the first
+    assertion fails; updating it to green then fails the second, whose only fix
+    is deleting the `pull_requests` entry — which is exactly the step that does
+    not happen on its own. Delete a key `gather` writes and the first fails too.
+
+    🔴 WHAT IT DOES **NOT** GUARD, stated because the earlier version of this
+    docstring claimed it did: this test pins `gather`'s KEYS, not the ledger's
+    MEMBERSHIP. Deleting a whole ledger entry passes every assertion here — it
+    was measured, at 553 green. `test_the_not_measured_POPULATION_SET_cannot_
+    silently_SHRINK` is the one that fails on that.
+
+    A static list of "things we do not measure" needs no such guard and is
+    wrong the day someone adds the measurement — the one day a reader is most
+    likely to trust it.
+    """
+    keys = _gather_report_keys()
+    assert keys == _GATHER_REPORT_KEYS, (
+        "the keys `gather` writes drifted from the ledger:\n"
+        "  only in source: %r\n  only in ledger: %r"
+        % (sorted(keys - _GATHER_REPORT_KEYS),
+           sorted(_GATHER_REPORT_KEYS - keys)))
+    claimed = {spec["report_key"]
+               for spec in sm.NOT_MEASURED_POPULATIONS.values()}
+    overlap = claimed & keys
+    assert not overlap, (
+        "a population is claimed UNMEASURED while `gather` writes its key — "
+        "the claim is already false: %r" % sorted(overlap))
+    # ...and the ledger's own shape, so an entry cannot ship half-filled
+    for name, spec in sm.NOT_MEASURED_POPULATIONS.items():
+        assert set(spec) == {"report_key", "owner_skill", "note"}, name
+        assert spec["note"] and isinstance(spec["note"], str), name
+
+
+def test_the_ast_key_extractor_can_SEE_a_key_it_is_supposed_to_catch():
+    """🔴 POSITIVE CONTROL ON THE INSTRUMENT, read before its verdict. The
+    assertion above is a `==` between two sets, and a walker that silently found
+    NOTHING would make it a comparison of two empty-ish shapes — or worse, would
+    make the disjointness check vacuously true forever.
+
+    So prove the walker sees BOTH shapes it must see: a key from the `report =
+    {...}` literal and a key from a later `report[...] = ` assignment.
+    """
+    keys = _gather_report_keys()
+    assert keys, "the extractor found nothing — every verdict off it is vacuous"
+    assert "clickhouse" in keys, "missed a key from the dict literal"
+    assert "not_measured" in keys, "missed a key from a later assignment"
+    assert "pull_requests" not in keys, (
+        "gather does not write this — if it now does, the ledger entry must go")
+
+
+def test_the_not_measured_POPULATION_SET_cannot_silently_SHRINK():
+    """🔴 THE HALF THE AST PIN DOES NOT COVER, and it was measured OPEN:
+    deleting the entire `cluster_alerts` entry left the suite at 553 PASSED,
+    while both the source comment and the PR body claimed "the set cannot drift
+    in either direction … deleting an entry fails too".
+
+    Three reasons it survived, all of them the same reason: only three of the
+    five populations were named by any test; the count assertion was `1 +
+    len(NOT_MEASURED_POPULATIONS)`, i.e. derived from the constant it guarded;
+    and the ast test pins `gather`'s keys, which a ledger deletion does not
+    touch.
+
+    So membership is pinned against `_EXPECTED_NOT_MEASURED` — a literal in THIS
+    file, which the module constant cannot influence. Deleting an entry fails
+    here. Adding one fails here AND on the ast test. Re-pointing an entry's
+    `report_key` or `owner_skill` fails here too, which nothing else saw.
+    """
+    got = {name: (spec["report_key"], spec["owner_skill"])
+           for name, spec in sm.NOT_MEASURED_POPULATIONS.items()}
+    assert got == _EXPECTED_NOT_MEASURED, (
+        "the not_measured ledger drifted:\n  only in source: %r\n"
+        "  only in this test: %r"
+        % (sorted(set(got) - set(_EXPECTED_NOT_MEASURED)),
+           sorted(set(_EXPECTED_NOT_MEASURED) - set(got))))
+    # 🔴 AND THE DERIVED OUTPUT MOVES WITH IT, against a LITERAL count. `5` is a
+    # number the constant cannot supply; `len(NOT_MEASURED_POPULATIONS)` is the
+    # trap this test exists to close, so it must not appear on this line.
+    assert len(base_gather()["not_measured"]) == 5
+    assert len(sm.render_not_measured(base_gather())) == 6  # heading + 5 rows
+
+
+def test_every_not_measured_population_names_a_skill_that_EXISTS():
+    """🔴 A POINTER TO A SKILL THAT IS NOT THERE IS WORSE THAN NO POINTER: it
+    costs a hop to discover, and it discovers it at the moment the reader has
+    already decided to trust the output.
+
+    Checked against the repo, not against a list — a list would be a second copy
+    of the same claim.
+    """
+    skills = os.path.normpath(os.path.join(_HERE, "..", "..",
+                                           "claude", "skills"))
+    assert os.path.isdir(skills), skills
+    for name, spec in sorted(sm.NOT_MEASURED_POPULATIONS.items()):
+        body = os.path.join(skills, spec["owner_skill"], "SKILL.md")
+        assert os.path.isfile(body), (
+            f"{name} points at /{spec['owner_skill']}, which has no {body}")
+    # POSITIVE CONTROL on this check: it must be able to FAIL. A path built the
+    # same way for a skill that does not exist must not be a file.
+    assert not os.path.isfile(
+        os.path.join(skills, "no-such-skill-xyz", "SKILL.md"))
+
+
+def test_not_measured_is_DERIVED_where_derived_DIFFERS_from_the_constant():
+    """🔴 THE FIXTURE-EQUALS-THE-CONSTANT TRAP, CLOSED. Every realistic report
+    is missing every one of these keys, so a mutant replacing the derivation
+    with the module constant's own contents produces byte-identical output on
+    every real fixture and SURVIVES a green suite. A fixture whose value
+    coincides with the constant cannot tell "derived" from "hardcoded".
+
+    So the ledger is injected with populations whose names the constant does NOT
+    contain, and the output is watched to follow the INJECTED set rather than
+    the module's.
+    """
+    ledger = {
+        "zulu_population": {"report_key": "zulu_key",
+                            "owner_skill": "standup", "note": "n1"},
+        "yankee_population": {"report_key": "yankee_key",
+                              "owner_skill": "mailbox", "note": "n2"},
+    }
+    got = sm.measured_not_measured({"ts": "x"}, ledger=ledger)
+    assert [p["population"] for p in got] == ["yankee_population",
+                                              "zulu_population"]
+    # none of the MODULE's populations leaked in — the mutant that returns the
+    # constant fails right here
+    assert not ({p["population"] for p in got}
+                & set(sm.NOT_MEASURED_POPULATIONS))
+    # and the entries are projected, not the raw ledger dicts
+    assert got[0] == {"population": "yankee_population",
+                      "report_key": "yankee_key",
+                      "owner_skill": "mailbox", "note": "n2"}
+
+
+def test_ADDING_a_measurement_REMOVES_the_claim_that_it_is_unmeasured():
+    """🔴 THE WHOLE POINT OF THE DERIVATION, as a behavioural control — and the
+    number is watched to MOVE, not merely to be non-zero.
+
+    A report carrying `pull_requests` must stop claiming PRs are unmeasured,
+    with no edit to the ledger. Measured as a PAIR: N without the key, N-1 with
+    it, and the population that vanished is the right one.
+    """
+    rep = base_gather()
+    before = {p["population"] for p in rep["not_measured"]}
+    assert "pull_requests" in before, "baseline must claim it, or this is vacuous"
+
+    after = {p["population"]
+             for p in sm.measured_not_measured(dict(rep, pull_requests=[]))}
+    assert "pull_requests" not in after
+    assert after == before - {"pull_requests"}
+    assert len(after) == len(before) - 1
+    # 🔴 the key is the coupling, and it is the DECLARED one — not the
+    # population name. `gui_windows_outside_tmux` is keyed on `gui_windows`, so
+    # a derivation matching on the name would fail here.
+    assert "gui_windows_outside_tmux" in before
+    assert "gui_windows_outside_tmux" not in {
+        p["population"] for p in sm.measured_not_measured(
+            dict(rep, gui_windows=[]))}
+    assert "gui_windows_outside_tmux" in {
+        p["population"] for p in sm.measured_not_measured(
+            dict(rep, gui_windows_outside_tmux=[]))}, (
+        "the derivation matched the POPULATION name, not its report_key")
+
+
+def test_the_not_measured_key_is_in_the_report_and_names_the_two_required_ones():
+    """The brief's floor: `pull_requests` -> standup and `mail_queue` ->
+    mailbox, both present in a real scan's payload with their owners."""
+    pops = {p["population"]: p for p in base_gather()["not_measured"]}
+    assert pops["pull_requests"]["owner_skill"] == "standup"
+    assert pops["mail_queue"]["owner_skill"] == "mailbox"
+    # 🔴 the note carries the EVIDENCE, not just the label — a reader deciding
+    # whether to spend a hop needs to know what is at stake behind the name
+    assert "conflicting" in pops["pull_requests"]["note"].lower()
+    # and clawgate is NOT re-listed: `clawgate_queue` measures it
+    assert "clawgate" not in pops
+    # nor is the opencode misclassification, which is a measured population
+    # reported under the wrong class, not an unmeasured one
+    assert not [p for p in pops if "opencode" in p]
+
+
+def test_the_NOT_MEASURED_section_is_pinned_as_a_WHOLE_normalised_string():
+    """🔴 PINNED WHOLE. The heading is the entire mechanism: a reader who takes
+    "these are NOT zero, they were never looked at" as "these are zero" is the
+    reader this section exists for, and a word check is walkable by a reword.
+    """
+    heading = ("▸ NOT MEASURED HERE — these are NOT zero, they were never "
+               "looked at; the owning skill has each:")
+    lines = _lines(sm.render_table(base_gather()))
+    assert heading in lines
+    # 🔴 EVERY population, as a WHOLE block. Naming three of five was how a
+    # deleted entry stayed green: the two nobody spelled were the two free to
+    # vanish. Equality, not `in` — an `in` per row cannot see one go missing.
+    assert _block_after(lines, heading) == [
+        "cluster_alerts             -> /standup",
+        "gui_windows_outside_tmux   -> /i3",
+        "initiative_board           -> /initiatives",
+        "mail_queue                 -> /mailbox",
+        "pull_requests              -> /standup",
+    ]
+
+
+def test_render_not_measured_tells_an_ABSENT_key_from_an_EMPTY_list():
+    """🔴 THE NULL-VS-ZERO RULE, APPLIED TO THIS SECTION ITSELF. A report with
+    no `not_measured` key had no derivation run — which is NOT "everything is
+    measured" — and a heading printed over no rows reads as a failed render
+    rather than as an all-clear. Three states, three different sentences.
+    """
+    absent = sm.render_not_measured({"ts": "x"})
+    assert absent == ["▸ NOT MEASURED HERE: UNKNOWN — this report carries no "
+                      "`not_measured` key, so the scope of what was left out "
+                      "was never derived (this is NOT a claim that nothing "
+                      "was)"]
+    empty = sm.render_not_measured({"not_measured": []})
+    assert empty == ["▸ NOT MEASURED HERE: none — every enumerated population "
+                     "now has a measurement in this report"]
+    assert absent != empty
+    populated = sm.render_not_measured(base_gather())
+    # 🔴 A LITERAL, NOT `1 + len(sm.NOT_MEASURED_POPULATIONS)`. That expression
+    # was this assertion for the whole PR, and it is the reason deleting an
+    # entry stayed green: both sides shrank together. See
+    # `test_the_not_measured_POPULATION_SET_cannot_silently_SHRINK`.
+    assert len(populated) == 6
+
+
+def test_the_not_measured_section_is_printed_in_EVERY_state_including_empty():
+    """Same rule as CLAWGATE QUEUE: a section that appears only sometimes is one
+    a reader learns not to expect, and the run where it matters is the run where
+    everything else looked clean."""
+    for rep in (base_gather(),
+                base_gather(runner=make_runner(local_rc=1, remote_rc=1)),
+                mix_gather(claude_only=True)):
+        assert "▸ NOT MEASURED HERE" in sm.render_table(rep)
+
+
+def test_measured_not_measured_is_PURE_and_shares_nothing_with_the_constant():
+    """🔴 A purity claim is only as true as its deepest shared object, and this
+    file has been bitten at depth 2 before (`measured_caveats`). Writing through
+    a returned entry must not poison `NOT_MEASURED_POPULATIONS` for every later
+    caller in the process."""
+    before = copy.deepcopy(sm.NOT_MEASURED_POPULATIONS)
+    out = sm.measured_not_measured({})
+    for entry in out:
+        entry["note"] = "clobbered"
+        entry["owner_skill"] = "clobbered"
+    assert sm.NOT_MEASURED_POPULATIONS == before
+    assert sm.measured_not_measured({})[0]["note"] != "clobbered"
+

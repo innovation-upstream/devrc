@@ -17,7 +17,7 @@ Action + args come from `$ARGUMENTS`.
 | `windows [ws]` | all windows, optionally filtered to a workspace |
 | `focus <target>` | focus by class, title substring, mark, or con_id |
 | `move <target> <ws>` | move a window to a workspace |
-| `workspace <n>` | switch workspace |
+| `workspace <n>` | switch workspace — 🔴 **this is the operator's screen.** Only on an explicit request naming a workspace; never as a step inside another task, and never in a loop |
 | `layout <type>` | split / tabbed / stacking on the focused container |
 | `exec <cmd>` · `mark <name>` · `goto <mark>` · `resize <dir> <px>` | |
 | `scratch [show\|hide\|toggle]` · `config` · `find <query>` | |
@@ -66,7 +66,7 @@ i3-msg -t get_tree | jq '[recurse(.nodes[]?, .floating_nodes[]?) | select(.type 
 For `focus`, `move`, `workspace`, `layout`, `exec`, `mark`, `resize`, `scratch`:
 validate the target exists (query the tree first for focus/move), prefer criteria
 selectors (`i3-msg '[class="Firefox"] focus'`), and report the result — `i3-msg`
-returns `[{"success": true|false}]`. Command vocabulary → `reference/ipc.md`.
+returns `[{"success": true|false}]`. Command vocabulary → `~/.claude/skills/i3/reference/ipc.md`.
 
 ## 3. See
 Claude is multimodal, so a screenshot gives real visual awareness of the desktop.
@@ -83,7 +83,7 @@ GEOM=$(xdotool getwindowgeometry --shell "$WID")         # X, Y, WIDTH, HEIGHT
 **Always `rm /tmp/claude-i3-screenshot.png` once you have read it.**
 
 ## 4. Type / click / clipboard
-Full recipes and the safety protocols are in `reference/interaction.md`. The
+Full recipes and the safety protocols are in `~/.claude/skills/i3/reference/interaction.md`. The
 non-negotiables:
 - Confirm which window is focused **before** sending any keystroke; focus via i3-msg
   criteria and let X11 settle (`… && sleep 0.1 && …`) before typing.
@@ -105,3 +105,15 @@ runtime · run a destructive window operation without saying what it will do fir
 the clipboard unasked · send keystrokes before confirming focus · chain more than 3 blind
 actions without a screenshot check · use xdotool mouse for browser work when the `browser`
 skill or Playwright is available · leave screenshots in `/tmp`.
+
+🔴 **Will not: take the operator's screen as a side effect of another task.** Switching a
+workspace, raising or focusing a window changes what a human is looking at right now — only
+on explicit request, once, never alternately. **Record the prior state first and restore it
+when done, including on failure**: `PREV_WIN=$(xdotool getactivewindow)`,
+`PREV_WS=$(i3-msg -t get_workspaces | jq -r '.[]|select(.focused).num')`, restore with
+`i3-msg "workspace number $PREV_WS"` then `i3-msg "[id=$PREV_WIN] focus"`. If a task needs a
+browser window in front, that is `browser activate`'s job — **it runs the host-side raise
+itself, so driving `i3-msg` alongside it is a second theft, not a fix.** Measured 2026-08-19:
+a capture subagent issued 42 `i3-msg` calls and 14 workspace switches in one run, restoring
+nothing, against a skill that contains no `i3-msg` invocation at all. Note this list had ten
+prohibitions and none about the operator's screen — that absence is what read as permission.

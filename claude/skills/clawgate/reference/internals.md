@@ -88,7 +88,9 @@ should send `title` and leave `directory` for an actual directory.
 
 ## Comment authorship is structurally bounded (`POST /api/tasks/{id}/comments`, 0.7.78)
 The author is derived from the bounded `X-Clawgate-Source` allowlist
-(`{extension, api, drafter, repo-cos, claude-code}`, unknown → `api`), **NEVER from the body** —
+(`{extension, api, drafter, repo-cos, claude-code}` — plus `clickup` **in trunk source only, NOT in
+any released image**; see `task-api.md` → "comment (write)" for the source-vs-live split, which is
+the authoritative copy of this set — unknown → `api`), **NEVER from the body** —
 the decoded struct is `{body}` only, so `user` / `operator` are **structurally unreachable**
 (pinned by a `reservedCommentAuthors` map + test).
 

@@ -39,6 +39,24 @@ debugging, changing or copying a specific pipeline.
    walk-gate **cold 3m04s → warm 1m15s** (~1m50s saved) — the old "~2–15 min cold" figure was
    **wrong** (cache.nixos.org is fast here; cold ≈ 3 min). Tradeoff: if `talos-xr6-r7p` is
    down, runs Pend.
+   🔴 **AND PUSHING N BRANCHES IS NOT N INDEPENDENT ACTIONS — IT IS ONE BLAST-RADIUS ACTION.**
+   Node-pinning means every run lands on `talos-xr6-r7p`, so a burst of pushes stacks full
+   pipeline runs onto one node with **no concurrency control** (the known-open issue below).
+   Measured 2026-08-23: five branches pushed in quick succession took that node to 77% CPU
+   requests / 237% limits with 424 Completed + 97 Error pods resident, the cluster began
+   emitting `ExceededNodeResources: Insufficient resources to schedule pod`, and steps were
+   **killed with exit 255**. The rate moved **2/54 (4%) → 8/34 (24%)**. It is not your branch:
+   **anyone else's PR checks in that window die too.** Push, wait for the queue to drain, push.
+   🔴 **`exited with code 255` is the CONGESTION signature, and it names whichever step was
+   running** — it appeared in `step-clone` AND `step-pytests` in the same burst, which reads as
+   two unrelated bugs and is one. The check then posts `NOT RUN: <leg> — the gate stopped
+   before this leg reported`: **a broken gate, not a bad change — do not debug your diff
+   against it.** The tell that it is congestion rather than code: it heals when the queue
+   drains, and a code cause does not.
+   🔴 **Do NOT measure a flake rate from inside a burst you are causing.** That mistake was
+   made here and written into a handoff as a property of the CI tier before it was caught —
+   `claude/RULES.md` → *"a control that SHARES the step you doubt"*. Take the baseline from a
+   window with no pushes of your own in it.
 4. **Placeholder imagePullSecret breaks ALL pulls.** A `harbor-cred` dockerconfigjson with a
    non-base64 `auth` placeholder makes every pod fail image pull ("illegal base64 data").
    **Do NOT attach a placeholder imagePullSecret** to the pipeline SA — public images
@@ -48,6 +66,47 @@ debugging, changing or copying a specific pipeline.
    operator CRs (force-remove finalizers — no controller left to run them), admission
    webhooks, CRDs, namespaces, and cluster RBAC.
 
+6. 🔴 **These pipelines are DETECTORS, not GATES — nothing can block a merge on them.**
+   `homelab-infra` is private on a plan where **branch protection AND rulesets both return
+   403** (`"Upgrade to GitHub Pro or make this repository public"`, on
+   `/branches/trunk/protection` and `/rulesets`), so a **required status check cannot be
+   configured at all**. Measured 2026-08-21 on four PRs: three were **merged BEFORE** their
+   `tekton/gitops-validate` status settled (#338 by 109 s, #339 by 110 s, #341 by 66 s).
+   So "it has a green check" and "it was validated before it landed" are different claims —
+   never write a comment asserting the second. Consequence worth acting on: the **trunk-push**
+   leg is the one that reliably observes anything, which makes the CEL path list in
+   `eventlistener.yaml` load-bearing rather than cosmetic — **when you add a leg reading a path
+   outside `clusters/**`, add that path to the filter in the SAME commit** (two legs were
+   missing from it as of #369).
+7. 🔴 **A PipelineRun executes the DEPLOYED Task, not the PR's version — so a PR that adds a
+   leg cannot exercise that leg.** The `Task` is a Flux-reconciled cluster object; only the
+   *scripts it runs* come from the PR checkout. Measured on #369: the PR's own green
+   `gitops-validate` ran an **11-step** Task with no `clickup-mirror` step, and the merge's own
+   trunk-push run did too (it fired before Flux reconciled). Verify a new leg by reading the
+   live object — `kubectl -n tekton-ci get task gitops-validate -o jsonpath='{range
+   .spec.steps[*]}{.name}{"\n"}{end}'` — and then watch the **first run after** the reconcile.
+   A green check on the PR that adds a leg is not evidence about the leg.
+8. 🔴 **A pipeline-level timeout SKIPS `finally` — so a timed-out run posts NOTHING and the PR
+   sits on `pending` forever.** Put the limit on the **PipelineTask** (`spec.tasks[].timeout`),
+   never on `timeouts.tasks`/`timeouts.pipeline`. Measured three ways on v1.12.0 (a `sleep 300`
+   task + a `finally` echoing a marker): `timeouts.tasks: 40s` → `PipelineRunTimeout`,
+   children `[slow]`, **reporter TaskRun never CREATED**; `timeouts.pipeline: 40s` → identical;
+   task-level `timeout: 40s` → `Failed`, children `[slow,reporter]`, **finally RAN**. The
+   reserved `timeouts.finally` is **not honoured** on the budget-expiry path — reserving it
+   looks like protection and is not. Across 447 retained PipelineRuns: **25 timeouts, 0 ran
+   their report.** ⚠ **Still unfixed on `gitops-validate`, `auditloop`, `naida`, `remix` and
+   `clawgate-ci`** — devrc alone was fixed (homelab-infra #385). `clawgate-ci` first: busiest
+   pipeline on the cluster. 🔴 Bound EVERY task, not just the slow one — the task deadline is
+   `taskStart + timeout` while the budget is `runStart + tasks`, so an unbounded early task
+   (devrc's `notify` inherited the cluster's 1h default) lets them cross and re-opens this.
+9. ⚠ **Gotcha 6 is scoped to `homelab-infra`, not to Tekton.** `innovation-upstream/devrc` is a
+   DIFFERENT repo on a plan where protection works, and since 2026-08-23 it requires
+   `tekton/devrc-nodetests` — verified behaviourally: nodetests `ERROR`/`PENDING` ⇒
+   `mergeStateStatus=BLOCKED`, `SUCCESS` ⇒ `CLEAN`, pytests red + nodetests green ⇒ `UNSTABLE`.
+   So on devrc a Tekton check **is** a gate. 🔴 `enforce_admins: true` there means a wedged
+   Tekton blocks everyone with no override; the escape hatch is
+   `gh api -X DELETE /repos/innovation-upstream/devrc/branches/main/protection/required_status_checks`.
+
 ## What / where
 
 - **Tekton Operator v0.80.0** → Pipelines **1.12.2** / Triggers **0.36.0** / Dashboard
@@ -56,7 +115,14 @@ debugging, changing or copying a specific pipeline.
   EventListener, PipelineRuns).
 - GitOps via **Flux**, repo **`ZacxDev/homelab-infra`** branch **`trunk`**, under
   `clusters/homelab/apps/tekton-pipelines/`.
-- Kubeconfig: `~/workspace/homelab-infra/homelab-kubeconfig`.
+- Kubeconfig: `~/workspace/homelab-talos/homelab-kubeconfig` (handle: `$KC_HOMELAB`).
+  🔴 **`homelab-talos`, NOT `homelab-infra`** — the line above names the GitOps *repo*
+  (`homelab-infra`), and this file used to reuse that name for the *kubeconfig*, giving a
+  path that does not exist on disk. `kubectl` then falls back to `localhost:8080` and every
+  read dies with `connection refused` — an error that names a port appearing nowhere in the
+  skill, so it reads as a cluster outage rather than a bad path. Measured 2026-08-23 while
+  debugging the devrc gate. Six sibling skills (`signal`, `activity`, `mailbox`, `sglang`,
+  `standup`) all spell `homelab-talos`; this was the only file that did not.
 
 ## GitHub App — `tekton-homelab`
 
@@ -74,7 +140,7 @@ debugging, changing or copying a specific pipeline.
 Path: GitHub → Cloudflare → **prod Traefik** → prod nginx `0.0.0.0:19100` →
 `10.42.0.10:19100` → **homelab nginx** → `el-github-listener:8080`.
 
-## Pipelines (detail in `reference/pipelines.md`)
+## Pipelines (detail in `~/.claude/skills/tekton/reference/pipelines.md`)
 
 | Pipeline | Trigger / scope | Gate + commit status |
 |---|---|---|
@@ -99,7 +165,8 @@ kustomize + kubeconform + gitleaks + helm render-diff + sops-rules.
   `BASELINE DRIFT: gitleaks` instead of masquerading as `FAILED: gitleaks`. That masquerade
   is what made the gate look permanently broken. (Drift still sets the commit state to
   `failure` — only the description distinguishes it.) Third class: `COULD NOT RUN: <leg>`.
-- **`scripts/check-gitleaks-baseline.py`** (+ `scripts/tests/test-check-gitleaks-baseline.sh`).
+- **`<homelab-talos>/scripts/check-gitleaks-baseline.py`**
+  (+ `<homelab-talos>/scripts/tests/test-check-gitleaks-baseline.sh`).
   rc: `0` clean · `1` drift ONLY · `2` usage/environment error · `3` drift **AND** a finding
   with no baseline counterpart. 🔴 **It fails CLOSED** — `die()` is `NoReturn`/rc=2 for a
   missing, empty, unreadable or malformed baseline. An earlier revision let an `OSError`

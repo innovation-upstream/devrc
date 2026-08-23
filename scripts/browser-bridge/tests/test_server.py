@@ -124,14 +124,14 @@ def _wait_events(spool_dir, n=1, timeout=3.0) -> list:
     return _read_events(spool_dir)
 
 
-@pytest.fixture(autouse=True)
-def _isolate_activity_spool(tmp_path, monkeypatch):
-    """Protect the REAL activity spool: EVERY test's telemetry writes go to a
-    per-test temp dir, and the lazy emitter cache is reset so each test loads it
-    fresh under the current env."""
-    monkeypatch.setenv("ACTIVITY_SPOOL_DIR", str(tmp_path / "activity-spool"))
-    monkeypatch.setattr(S, "_spool_emit_mod", None)
-    monkeypatch.setattr(S, "_spool_emit_tried", False)
+# NOTE: `_isolate_activity_spool` — the autouse fixture that points
+# ACTIVITY_SPOOL_DIR at a per-test tmp dir — now lives in `conftest.py`, one
+# directory-wide definition instead of this module-scoped copy. It was scoped to
+# this file only while its docstring claimed it covered EVERY test, so the other
+# eight modules in this directory ran unisolated (one of them, test_site_notes,
+# genuinely writing rows into the production activity pipeline).
+# `telemetry` below depends on it having run — it returns the very path that
+# fixture pointed ACTIVITY_SPOOL_DIR at. `_disable_i3` does not; it is unrelated.
 
 
 @pytest.fixture(autouse=True)
@@ -1234,8 +1234,14 @@ def test_cmd_ok_emits_one_metadata_event(telemetry):
         assert int(e["duration_ms"]) >= 0        # latency present
         assert e["text"] == "mail.google.com"    # text = bare domain
         p = json.loads(e["payload"])
+        # Exact equality on purpose: metadata-only is asserted POSITIVELY and
+        # NEGATIVELY — nothing may creep into this payload unnoticed. `sess_src`
+        # is here because every /cmd row now states which tier its session id
+        # came from; this request sends NO X-Session-Id, so the honest answer is
+        # `unknown` and no `session` key is written (asserted below).
         assert p == {"op": "getHtml", "key": "", "outcome": "ok",
-                     "domain": "mail.google.com"}
+                     "domain": "mail.google.com", "sess_src": "unknown"}
+        assert "session" not in e, e
     finally:
         ext.stop(); srv.shutdown(); srv.server_close()
 
@@ -2112,7 +2118,12 @@ def test_orientation_ops_emit_exactly_one_metadata_only_event(telemetry, path, o
         assert e["exit_code"] == "0"
         assert e["text"] == op                      # no domain → text is the op
         p = json.loads(e["payload"])
-        assert p == {"op": op, "key": "", "outcome": "ok"}, p
+        # Exact equality still, so nothing can creep in unnoticed. `sess_src` is
+        # here because these are OPERATOR calls and are now attributed like any
+        # other command (see test_only_the_heartbeat_is_server_originated); this
+        # request sends no X-Session-Id, so the honest tier is `unknown`.
+        assert p == {"op": op, "key": "", "outcome": "ok",
+                     "sess_src": "unknown"}, p
     finally:
         ext.stop(); srv.shutdown(); srv.server_close()
 
@@ -2150,6 +2161,912 @@ def test_load_spool_emit_missing_path_returns_none(monkeypatch, tmp_path):
     monkeypatch.setattr(S, "_spool_emit_mod", None)
     monkeypatch.setattr(S, "_spool_emit_tried", False)
     assert S._load_spool_emit() is None
+
+
+# --------------------------------------------------------------------------- #
+# The session JOIN KEY on browser-bridge telemetry rows.
+#
+# THE BUG (measured 2026-08-18): every `source='browser-bridge'` row had an EMPTY
+# `session` column — 0 of 6,937 over 14 days — while claude/opencode/keys/tmux/
+# zsh filled it 100%. The value already reached the server (X-Session-Id, used
+# for tab-ownership routing) and was simply never handed to emit_cmd_event, so
+# "which agent session made this browser call" was unanswerable from the one
+# structured source and had to be answered by scanning 1.5M transcript records.
+#
+# THE TWO HAZARDS THE FIX MUST NOT CREATE:
+#   1. TIER. The id is TAGGED with the fallback tier that produced it, and only
+#      `claude:` is a join key. `tmux:%3` is stable across many unrelated
+#      sessions in one pane, so recording it would silently merge them into one
+#      apparent session — worse than the empty column.
+#   2. NESTING. `browser agent` forwards its INVOKER's id, so a nested run's
+#      commands arrive wearing the operator's own `claude:` tag. Attributed
+#      naively, one `browser agent` call becomes N calls credited to the
+#      operator's session — fabricated rows in the `session` JOIN column. (NOT,
+#      as an earlier draft said, "the column adoption-scan reads": adoption-scan
+#      never selects `session` for this source, and the deadman reads only row
+#      existence. The harm is latent — it corrupts the first consumer that does
+#      read it.) The nested tool declares X-Session-Origin, and the
+#      forwarded id is then recorded as the causal PARENT, not the actor.
+#
+# FIXTURE DISCIPLINE: every id below is pairwise distinct AND distinct from every
+# constant the assertions name ("claude", "tmux", "unknown", "browser-agent", …),
+# so a mutant that hardcodes any of those literals cannot survive.
+# --------------------------------------------------------------------------- #
+JOINABLE_UUID = "6f1c9a20-1111-4bbb-8ccc-000000000001"
+JOINABLE_ID = "claude:" + JOINABLE_UUID
+NESTED_UUID = "8ab3d704-2222-4eee-9fff-000000000002"
+NESTED_ID = "claude:" + NESTED_UUID
+# A Claude session uuid that LEAKED into an opencode tool shell. It arrives
+# `claude:`-tagged and is INDISTINGUISHABLE from a direct call by inspection --
+# the id is genuinely the outer session's. Only the origin header separates them,
+# which is exactly why the fix is a header and not a tier. Distinct from both
+# uuids above so a mutant reusing either cannot satisfy its tests.
+LEAKED_UUID = "c05e17b6-3333-4aaa-8ddd-000000000003"
+LEAKED_ID = "claude:" + LEAKED_UUID
+# The complete set of origin tokens any caller may declare. Pinned as a LEDGER:
+# both mean "issued by something nested under origin_session", and both must
+# suppress the session key identically. A third one added without a test here
+# fails the ledger rather than silently getting a different behaviour.
+ORIGIN_TOKENS = ("browser-agent", "opencode-inherited")
+# An opencode session id, exported into the bash tool by
+# scripts/opencode/plugin/session-env.js's `shell.env` hook. It JOINS for the
+# same reason the claude one does: `source='opencode'` rows in activity.events
+# store exactly this string (activity-plugin.js emits `session: input.sessionID`
+# from `tool.execute.after`, the same id `shell.env` receives). Deliberately NOT
+# uuid-shaped — the tag is what makes it joinable, never the form, and a
+# differently-shaped id is the fixture that would catch a shape check sneaking in.
+OC_SESSION = "ses_5d9e2b71a4"
+OC_ID = "opencode:" + OC_SESSION
+# tier tag -> (wire id, the bare id behind it). Mirrors derive_session_id's tags.
+TIER_IDS = {
+    "claude": (JOINABLE_ID, JOINABLE_UUID),
+    "opencode": (OC_ID, OC_SESSION),
+    "tmux": ("tmux:%77", "%77"),
+    "sid": ("sid:424242:99887766", "424242:99887766"),
+    "ppid": ("ppid:31337:deadbeefcafef00d", "31337:deadbeefcafef00d"),
+    "synthetic": ("synthetic:" + JOINABLE_ID + "+recreate-close",
+                  JOINABLE_ID + "+recreate-close"),
+}
+
+
+def _cmd_sess(srv, body, sid=None, origin=None):
+    """POST /cmd with explicit session headers; None omits the header entirely."""
+    hdrs = {}
+    if sid is not None:
+        hdrs[S.HDR_SESSION_ID] = sid
+    if origin is not None:
+        hdrs[S.HDR_SESSION_ORIGIN] = origin
+    return _req(srv, "POST", "/cmd", body, headers=hdrs or None)
+
+
+# The tiers that MAY fill the join column, as a LITERAL contract — never read off
+# `S.SESSION_JOINABLE_TIERS`, which would make every row below assert whatever
+# the implementation currently believes. Whether the server's set equals this one
+# is a separate question, pinned in test_browser_session_id.py against tags
+# PARSED from the CLI.
+JOINABLE_TIERS_EXPECTED = {"claude", "opencode"}
+
+
+@pytest.mark.parametrize("tier", sorted(TIER_IDS))
+def test_session_column_is_filled_for_the_joinable_tiers_only(telemetry, tier):
+    """Each tier reports its own `sess_src`; only a JOINABLE tier fills `session`.
+
+    Both halves matter and are asserted together per tier:
+      * `sess_src` is always present, so a row is self-describing about WHY it
+        does or does not carry a key;
+      * `session` is the BARE id for the joinable tier and ABSENT for every other
+        — asserted as "the key is not in the record", not "it is empty", because
+        an empty column and a merged-sessions column are the two outcomes this
+        test exists to keep apart.
+    """
+    spool_dir = telemetry
+    wire_id, bare = TIER_IDS[tier]
+    srv, _ = _serve()
+    ext = FakeExtension(srv, instance_id="solo", label="only")
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        assert _read_events(spool_dir) == [], "the negative control: 0 before"
+        st, body = _cmd_sess(srv, {"op": "tabs"}, sid=wire_id)
+        assert st == 200 and body["ok"] is True
+
+        evs = _wait_events(spool_dir, 1)
+        assert len(evs) == 1, evs
+        e = evs[0]
+        assert e["source"] == "browser-bridge"
+        # The USAGE signal (adoption-scan.py) is untouched by this change.
+        assert e["kind"] == "cmd"
+        p = json.loads(e["payload"])
+        assert p["sess_src"] == tier, p
+        if tier in JOINABLE_TIERS_EXPECTED:
+            assert e.get("session") == bare, e
+        else:
+            assert "session" not in e, (
+                f"tier {tier!r} must NOT produce a join key; got {e.get('session')!r}")
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_the_session_column_carries_the_bare_id_not_the_wire_tag(telemetry):
+    """`session` must equal what `source='claude'` rows store — the BARE uuid.
+
+    The CLI tags its routing id `claude:<uuid>` so tiers cannot collide on the
+    wire. Storing that tag in the COLUMN would make browser-bridge the one source
+    needing a replaceOne() at every join site, and a forgotten one returns zero
+    rows — which reads as a valid "no sessions matched" answer.
+    """
+    spool_dir = telemetry
+    srv, _ = _serve()
+    ext = FakeExtension(srv)
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        assert _cmd_sess(srv, {"op": "tabs"}, sid=JOINABLE_ID)[0] == 200
+        e = _wait_events(spool_dir, 1)[0]
+        assert e["session"] == JOINABLE_UUID
+        assert ":" not in e["session"], e["session"]
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_only_the_first_colon_splits_a_multi_colon_id(telemetry):
+    """`sid:` and `ppid:` ids contain further colons. Splitting on the LAST one
+    (or on every one) would report a tier of `424242` and mangle the id — this
+    pins that the tag is the FIRST field and the remainder is kept whole."""
+    spool_dir = telemetry
+    wire_id, bare = TIER_IDS["sid"]
+    srv, _ = _serve()
+    ext = FakeExtension(srv)
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        assert _cmd_sess(srv, {"op": "tabs"}, sid=wire_id)[0] == 200
+        p = json.loads(_wait_events(spool_dir, 1)[0]["payload"])
+        assert p["sess_src"] == "sid"
+        assert S._split_session_id(wire_id) == ("sid", bare)
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+@pytest.mark.parametrize("untagged", ["", None])
+def test_an_absent_or_empty_id_fails_closed(telemetry, untagged):
+    """No id at all: the event still lands (usage is still usage), reports the
+    unknown tier, and carries no join key."""
+    spool_dir = telemetry
+    srv, _ = _serve()
+    ext = FakeExtension(srv)
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        assert _cmd_sess(srv, {"op": "tabs"}, sid=untagged)[0] == 200
+        e = _wait_events(spool_dir, 1)[0]
+        assert e["kind"] == "cmd"
+        assert json.loads(e["payload"])["sess_src"] == "unknown"
+        assert "session" not in e, e
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_an_untagged_id_is_never_promoted_to_a_join_key(telemetry):
+    """🔴 THE FAIL-CLOSED CASE THAT LOOKS MOST LIKE A JOIN KEY. A bare uuid with
+    no tier tag is exactly the value it would be tempting to accept — and a
+    version-skewed or hand-rolled caller can send anything (the opencode tool's
+    own default is the literal "browser-agent"). Provenance is stated or it is
+    unknown; it is never inferred from the value's FORM."""
+    spool_dir = telemetry
+    srv, _ = _serve()
+    ext = FakeExtension(srv)
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        assert _cmd_sess(srv, {"op": "tabs"}, sid=JOINABLE_UUID)[0] == 200
+        e = _wait_events(spool_dir, 1)[0]
+        p = json.loads(e["payload"])
+        assert p["sess_src"] == "unknown", p
+        assert p["sess_src"] not in TIER_IDS, "must not spell a real tier"
+        assert "session" not in e, e
+        # And the id itself is nowhere on the row, in any field.
+        assert JOINABLE_UUID not in _log_file(spool_dir).read_text()
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+@pytest.mark.parametrize("bogus_tag", [
+    "futuretier",      # a tier that does not exist yet
+    "CLAUDE",          # the joinable tag, wrong case
+    "claud",           # a near-miss
+    "['claude",        # the shape a mangled caller actually produced
+])
+def test_a_tag_outside_the_vocabulary_is_normalised_not_recorded(telemetry, bogus_tag):
+    """🔴 `sess_src` IS A CLOSED SET, NOT FREE TEXT. It arrives on a
+    caller-supplied header, so recording it verbatim makes it an
+    unbounded-cardinality column: every string below was measured landing in it
+    unchanged, and four of the five are near-misses of the joinable tag that a
+    reader skimming a GROUP BY would misread as the real thing.
+
+    Anything outside SESSION_TIER_TAGS collapses to `unknown` and carries NO id.
+    A genuinely new tier needs a CLI change, which the two-way vocabulary pin in
+    test_browser_session_id.py already forces someone to declare.
+    """
+    spool_dir = telemetry
+    srv, _ = _serve()
+    ext = FakeExtension(srv)
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        assert _cmd_sess(srv, {"op": "tabs"},
+                         sid=bogus_tag + ":" + JOINABLE_UUID)[0] == 200
+        e = _wait_events(spool_dir, 1)[0]
+        p = json.loads(e["payload"])
+        assert p["sess_src"] == "unknown", p
+        assert "session" not in e, e
+        # Neither half of an unrecognised id may survive anywhere on the row.
+        assert JOINABLE_UUID not in _log_file(spool_dir).read_text()
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+@pytest.mark.parametrize("padded", [" claude", "claude ", "\tclaude"])
+def test_a_whitespace_padded_tag_is_rejected_at_the_unit(padded):
+    """Unit-level because these CANNOT travel: an HTTP header value is delimited
+    by the colon-space, so `X-Session-Id:  claude:<uuid>` arrives as
+    `claude:<uuid>` with the padding already gone -- measured, and it is why this
+    case is not in the HTTP table above. The validator is still what decides, and
+    a padded tag must not slip through if a future caller reaches the emitter by
+    another route.
+
+    Paired with its own control so a validator that rejected EVERYTHING would be
+    caught rather than looking correct."""
+    assert S._split_session_id(padded + ":" + JOINABLE_UUID) == ("unknown", "")
+    assert S._split_session_id(JOINABLE_ID) == ("claude", JOINABLE_UUID)
+
+
+def test_the_tier_vocabulary_holds_its_internal_invariants():
+    """The SELF-CONSISTENCY half only. Whether the set matches the CLI is pinned
+    in test_browser_session_id.py::
+    test_the_server_validation_set_equals_the_tags_parsed_from_the_cli, which
+    compares it against tags PARSED from the CLI source.
+
+    🔴 The literal that used to live here has been DELETED, deliberately. It read
+    as a cross-file pin and was not one: retyping the CLI's tags beside the
+    server's meant a change touching both real files sailed through, and a delta
+    audit measured exactly that (grow the CLI + its own ledger, leave the server
+    alone -> 400 passed, SURVIVED). A literal that can be updated in lockstep
+    with the thing it checks is worse than no check, because it reads as one."""
+    assert set(S.SESSION_JOINABLE_TIERS) <= set(S.SESSION_TIER_TAGS), (
+        "a joinable tier that is not in the vocabulary can never be reached — "
+        "_split_session_id normalises it to unknown before the gate is asked")
+    assert S.SESSION_SRC_UNKNOWN not in S.SESSION_TIER_TAGS, (
+        "the fallback marker must not also be a real tier -- an unparseable id "
+        "and a genuine tier would become indistinguishable")
+    assert S.SESSION_SRC_UNKNOWN not in S.SESSION_JOINABLE_TIERS
+
+
+# --- nesting: the forwarded id is the causal PARENT, not the actor --------- #
+def test_a_nested_run_records_the_forwarded_id_as_origin_not_as_session(telemetry):
+    """`browser agent` forwards its INVOKER's `claude:` id. Attributed naively,
+    one agent call becomes N calls credited to the operator's own session —
+    fabricated rows in the `session` JOIN column (~11% of bridge commands over
+    14d). Not "the column adoption-scan reads" -- it does not read this one; the
+    harm is latent, landing on the first consumer that does. The origin declaration moves it to `origin_session`, where nothing
+    can mistake the parent for the actor.
+
+    The id is DISTINCT from the ordinary-request fixture below, so a mutant that
+    wrote whichever id it had lying around cannot satisfy both.
+    """
+    spool_dir = telemetry
+    srv, _ = _serve()
+    ext = FakeExtension(srv)
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        assert _cmd_sess(srv, {"op": "tabs"}, sid=NESTED_ID,
+                         origin="browser-agent")[0] == 200
+        e = _wait_events(spool_dir, 1)[0]
+        p = json.loads(e["payload"])
+        assert "session" not in e, f"a nested run must not claim the session: {e}"
+        assert p["origin"] == "browser-agent", p
+        assert p["origin_session"] == NESTED_UUID, p
+        assert p["sess_src"] == "claude", p   # the tier of the forwarded id
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_an_ordinary_request_sets_session_and_declares_no_origin(telemetry):
+    """The other side of the nesting fork, on the SAME request shape: a direct
+    call fills `session` and adds NO origin fields. Without this pair, a change
+    that dropped attribution entirely would still satisfy the nested test."""
+    spool_dir = telemetry
+    srv, _ = _serve()
+    ext = FakeExtension(srv)
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        assert _cmd_sess(srv, {"op": "tabs"}, sid=JOINABLE_ID)[0] == 200
+        e = _wait_events(spool_dir, 1)[0]
+        p = json.loads(e["payload"])
+        assert e["session"] == JOINABLE_UUID, e
+        assert "origin" not in p, p
+        assert "origin_session" not in p, p
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_an_origin_wins_over_the_joinable_tier_on_every_emit_site(telemetry):
+    """The three /cmd emit call sites are three places to forget the fork. All
+    three are exercised with a joinable tier PLUS an origin; none may write a
+    session key."""
+    spool_dir = telemetry
+    # 1. the `release` short-circuit (returns before submit).
+    srv, _ = _serve()
+    try:
+        assert _cmd_sess(srv, {"op": "release"}, sid=NESTED_ID,
+                         origin="browser-agent")[0] == 200
+        e = _wait_events(spool_dir, 1)[0]
+        assert "session" not in e, e
+        assert json.loads(e["payload"])["origin_session"] == NESTED_UUID
+    finally:
+        srv.shutdown(); srv.server_close()
+
+    # 2. the throttle path, and 3. the terminal emit.
+    reg = S.Registry(rate_per_sec=0.001, burst=1, max_queue=1000)
+    srv, _ = _serve(registry=reg)
+    ext = FakeExtension(srv)
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        assert _cmd_sess(srv, {"op": "tabs"}, sid=NESTED_ID,
+                         origin="browser-agent")[0] == 200          # terminal
+        assert _cmd_sess(srv, {"op": "tabs"}, sid=NESTED_ID,
+                         origin="browser-agent")[0] == 429          # throttled
+        evs = _wait_events(spool_dir, 3)[1:]
+        assert len(evs) == 2, evs
+        for e in evs:
+            assert "session" not in e, e
+            assert json.loads(e["payload"])["origin"] == "browser-agent"
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_the_release_short_circuit_attributes_an_ordinary_session(telemetry):
+    """`release` returns BEFORE the submit path, from its own emit call site. A
+    second call site is a second place to forget the attribution — pin it."""
+    spool_dir = telemetry
+    srv, _ = _serve()
+    try:
+        st, body = _cmd_sess(srv, {"op": "release"}, sid=JOINABLE_ID)
+        assert st == 200 and body["ok"] is True
+        e = _wait_events(spool_dir, 1)[0]
+        assert json.loads(e["payload"])["sess_src"] == "claude"
+        assert e["session"] == JOINABLE_UUID
+    finally:
+        srv.shutdown(); srv.server_close()
+
+
+def test_the_throttle_path_carries_both_the_hash_and_the_join_key(telemetry):
+    """The throttle emit is the THIRD call site. `sess` (the coarse hash) is KEPT
+    on purpose beside the new `session` column: the column is filled for the
+    joinable tier and non-nested calls only, and a flood from a tmux/sid/unknown
+    tier or a nested agent run is exactly the case where you still need some
+    stable handle to tell one flooder from two."""
+    spool_dir = telemetry
+    reg = S.Registry(rate_per_sec=0.001, burst=1, max_queue=1000)
+    srv, _ = _serve(registry=reg)
+    ext = FakeExtension(srv)
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        assert _cmd_sess(srv, {"op": "tabs"}, sid=JOINABLE_ID)[0] == 200
+        assert _cmd_sess(srv, {"op": "tabs"}, sid=JOINABLE_ID)[0] == 429
+        evs = _wait_events(spool_dir, 2)
+        thr = [e for e in evs
+               if json.loads(e["payload"]).get("outcome") == "throttled"]
+        assert len(thr) == 1, evs
+        p = json.loads(thr[0]["payload"])
+        assert p["sess"] == hashlib.sha256(JOINABLE_ID.encode()).hexdigest()[:8]
+        assert p["sess_src"] == "claude"
+        assert thr[0]["session"] == JOINABLE_UUID
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_a_raising_emitter_still_lets_the_command_succeed(telemetry, monkeypatch):
+    """BEST-EFFORT CONTRACT, re-proved through the NEW code path: the attribution
+    branch runs inside emit_cmd_event's swallowing try, so an emitter that
+    explodes while attributing must still leave /cmd at 200.
+
+    Four header shapes are exercised — joinable, non-joinable, nested, and none
+    at all — because a guard that only holds on the path you thought about is not
+    a guard."""
+    class _Boom:
+        @staticmethod
+        def emit(_rec):
+            raise RuntimeError("spool exploded")
+
+    monkeypatch.setattr(S, "_load_spool_emit", lambda: _Boom)
+    srv, _ = _serve()
+    ext = FakeExtension(srv)
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        for sid, origin in ((JOINABLE_ID, None), (TIER_IDS["tmux"][0], None),
+                            (NESTED_ID, "browser-agent"), (None, None)):
+            st, body = _cmd_sess(srv, {"op": "tabs"}, sid=sid, origin=origin)
+            assert st == 200 and body["ok"] is True, (sid, origin)
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_an_oversized_id_is_dropped_whole_never_truncated(telemetry):
+    """A truncated join key is a WRONG join key — it silently attributes a call to
+    a different session. So an id past the sanity bound is dropped ENTIRELY.
+
+    The paired control is the point: the SAME request shape with a well-formed id
+    DOES produce a key, so this cannot pass by the emitter being wired to nothing.
+    """
+    spool_dir = telemetry
+    srv, _ = _serve()
+    ext = FakeExtension(srv)
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        # Positive control first: a good id on this exact path yields a key.
+        assert _cmd_sess(srv, {"op": "tabs"}, sid=JOINABLE_ID)[0] == 200
+        good = _wait_events(spool_dir, 1)[0]
+        assert good["session"] == JOINABLE_UUID, "positive control: no key emitted"
+
+        over = "claude:" + ("x" * (S.MAX_SESSION_FIELD + 1))
+        assert _cmd_sess(srv, {"op": "tabs"}, sid=over)[0] == 200
+        evs = _wait_events(spool_dir, 2)
+        assert "session" not in evs[1], evs[1]
+        assert json.loads(evs[1]["payload"])["sess_src"] == "unknown", evs[1]
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+@pytest.mark.parametrize("bad", ["has\ttab", "has\nnewline", "has\x00nul",
+                                 "has\x7fdel"])
+def test_a_control_character_id_is_dropped_at_the_unit(bad):
+    """Unit-level because these cannot travel: http.client refuses a header value
+    containing a newline, so the wire cannot deliver one. The sanitiser is still
+    what decides, and a control character in a column other tools compare with
+    `=` is an unreadable handle — drop it whole.
+
+    Paired with its own control, so a sanitiser that rejected EVERYTHING would be
+    caught rather than looking correct."""
+    assert S._clean_session_field(bad) == ""
+    assert S._split_session_id("claude:" + bad) == ("unknown", "")
+    assert S._split_session_id(JOINABLE_ID) == ("claude", JOINABLE_UUID)  # control
+
+
+def test_extra_cannot_overwrite_the_attribution(telemetry):
+    """The attribution fields are written AFTER the `extra` merge, so an internal
+    call site cannot smuggle a tier or an origin the headers did not send.
+    Unit-level: `extra` is not caller-reachable today, and this pins that it stays
+    uncontestable if it ever becomes so."""
+    spool_dir = telemetry
+    S.emit_cmd_event(op="tabs", key="", outcome="ok", duration_ms=1,
+                     extra={"sess_src": "claude", "origin": "spoofed"},
+                     session_id=TIER_IDS["tmux"][0], attribute_session=True)
+    e = _read_events(spool_dir)[0]
+    p = json.loads(e["payload"])
+    assert p["sess_src"] == "tmux", p
+    assert "origin" not in p, p
+    assert "session" not in e, e
+
+
+# --------------------------------------------------------------------------- #
+# The opencode leak, server side.
+#
+# `CLAUDE_CODE_SESSION_ID` survives into opencode's tool shells (opencode sets
+# OPENCODE=1 in a yargs top-level `.middleware()` and hands its tools
+# `{...process.env}` -- confirmed in the PINNED build, see PINNED_VERSION in
+# scripts/tests/test_opencode_engine.py; a live env dump showed the outer Claude
+# id still present). So a plain `opencode run …` whose bash tool shells out to
+# `browser` sends a genuinely `claude:`-tagged id that names an ANCESTOR.
+#
+# 🔴 THE ID IS INDISTINGUISHABLE FROM A DIRECT CALL. There is nothing in it to
+# branch on -- it IS the outer session's id, correctly tagged. That is precisely
+# why the fix is the ORIGIN HEADER and not a new tier: the server cannot tell
+# these apart by inspection, so the caller has to say so. It is the same question
+# `browser agent` already answers the same way, and one question gets one
+# mechanism.
+#
+# 🔴 HONEST LABEL: everything in this section is an INVARIANT GUARD, green at
+# BOTH f47be59 (which introduced the origin path) and 84bf324. The server needed
+# NO change for the opencode leak -- the origin path already did the right thing,
+# and reusing it rather than adding a parallel one is the entire point of this
+# round. These tests pin that BOTH origin tokens behave identically and that a
+# leaked-but-genuinely-claude-tagged id composes with the tier gate; they are not
+# regression coverage for a server bug. They ARE red against origin/main
+# (da33356), where the origin header does not exist. Reachability is proved by
+# mutants N7 (origin never detected) and N8 (the token collapsed to a constant).
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("token", ORIGIN_TOKENS)
+def test_every_origin_token_suppresses_the_session_key(telemetry, token):
+    """LEDGER + BEHAVIOUR. Both declared origins mean the same thing -- "issued by
+    something nested under this id" -- so both must suppress `session` and record
+    the id as the causal parent instead.
+
+    Parametrized over the ledger rather than written once per token: a third
+    token added to ORIGIN_TOKENS without server support fails here, and a token
+    that got special-cased into filling `session` fails here too.
+
+    The id is `claude:`-tagged on purpose. A non-joinable tier would suppress
+    `session` on its own, so the test would pass with the origin logic deleted --
+    the joinable tier is the only fixture that can distinguish the two.
+    """
+    spool_dir = telemetry
+    srv, _ = _serve()
+    ext = FakeExtension(srv)
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        assert _cmd_sess(srv, {"op": "tabs"}, sid=LEAKED_ID, origin=token)[0] == 200
+        e = _wait_events(spool_dir, 1)[0]
+        p = json.loads(e["payload"])
+        assert "session" not in e, f"origin {token!r} must claim no session: {e}"
+        assert p["origin"] == token, p
+        assert p["origin_session"] == LEAKED_UUID, p
+        assert ":" not in p["origin_session"], p
+        # The tier is still reported honestly -- the id really is claude-tagged.
+        assert p["sess_src"] == "claude", p
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_the_same_id_fills_the_session_when_no_origin_is_declared(telemetry):
+    """🔴 THE CONTROL FOR THE WHOLE MECHANISM, and the reason the fixture above is
+    `claude:`-tagged. The EXACT SAME id on the EXACT SAME path, differing only in
+    whether the origin header is present, must fill `session`.
+
+    Without this pair, a server that had simply stopped writing `session`
+    altogether would satisfy every origin test in this file.
+    """
+    spool_dir = telemetry
+    srv, _ = _serve()
+    ext = FakeExtension(srv)
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        assert _cmd_sess(srv, {"op": "tabs"}, sid=LEAKED_ID)[0] == 200
+        e = _wait_events(spool_dir, 1)[0]
+        assert e["session"] == LEAKED_UUID, e
+        assert "origin" not in json.loads(e["payload"])
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_the_two_origin_tokens_are_distinct_and_recorded_verbatim(telemetry):
+    """`origin` is a two-value enum and its VALUE carries the diagnosis: which
+    nesting mechanism produced the row. Recording one token under the other's
+    name would make the two populations unseparable in the column -- the same
+    class of harm as the session key itself.
+
+    Asserted as distinctness plus verbatim round-trip, so a mutant that collapsed
+    them to a single constant dies here rather than in a test that only checks
+    `origin` is truthy."""
+    spool_dir = telemetry
+    assert len(set(ORIGIN_TOKENS)) == len(ORIGIN_TOKENS), ORIGIN_TOKENS
+    srv, _ = _serve()
+    ext = FakeExtension(srv)
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        for token in ORIGIN_TOKENS:
+            assert _cmd_sess(srv, {"op": "tabs"}, sid=LEAKED_ID,
+                             origin=token)[0] == 200
+        evs = _wait_events(spool_dir, len(ORIGIN_TOKENS))
+        seen = [json.loads(e["payload"])["origin"] for e in evs]
+        assert seen == list(ORIGIN_TOKENS), seen
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+# --------------------------------------------------------------------------- #
+# The ORIGIN path, hardened. Three findings from the blind audit of #549, all one
+# shape: the origin path was more permissive than the id path beside it.
+#
+#   A1. The origin sanitiser failed OPEN. `if origin:` on the CLEANED value meant
+#       an oversized or control-char origin cleaned to "" and fell through to the
+#       `elif`, writing `session` WITH THE PARENT'S ID -- the exact fabrication
+#       the mechanism exists to prevent. Measured: a 201-char origin produced
+#       session='uuid-w'.
+#   A2. `origin` accepted anything. `totally-made-up`, `false`, `   ` were all
+#       recorded verbatim and all suppressed `session`. The "two-value enum" was
+#       documentation, not a contract.
+#   A3. `origin_session` bypassed the tier gate, and is REACHABLE: browser-agent
+#       forwards whatever --print-session-id produced and the opencode tool
+#       declares its origin unconditionally, so `tmux:%3` genuinely arrived and
+#       was recorded as `origin_session='%3'`.
+#
+# The fix is one rule: branch on header PRESENCE, validate the value against the
+# ledger, and put `origin_session` behind the SAME tier gate as `session`.
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("bad_origin,label", [
+    ("x" * (S.MAX_SESSION_FIELD + 1), "oversized"),
+    ("", "empty"),
+    ("   ", "whitespace"),
+    ("totally-made-up", "unknown token"),
+    ("false", "a word that looks like a negative"),
+    ("unknown", "collides with the tier fallback marker"),
+    ("BROWSER-AGENT", "a real token, wrong case"),
+])
+def test_an_unreadable_origin_still_suppresses_the_session(telemetry, bad_origin,
+                                                           label):
+    """🔴 THE A1/A2 REGRESSION. A present-but-unreadable origin must STILL
+    suppress.
+
+    The id is `claude:`-tagged, so if suppression were keyed off the cleaned
+    value's truthiness -- as it was -- every row here would carry the PARENT's
+    uuid in `session`. Fail closed: a caller that tried to disclaim authorship and
+    could not be understood loses attribution rather than fabricating it.
+
+    `unknown` and `BROWSER-AGENT` are in the table on purpose: the first collides
+    with the tier fallback marker, the second is a real token in the wrong case --
+    both are near-misses a `value in LEDGER` check must still reject.
+
+    HONEST NOTE ON THE TABLE: over HTTP the `whitespace` row is NOT a distinct
+    case from `empty`. A header value is delimited by the colon-space and trailing
+    whitespace is stripped, so `X-Session-Origin:    ` arrives as `""`. Measured
+    via mutant P6, which kills both rows identically. The row is kept because it
+    documents what a caller writing whitespace actually gets, not because it
+    exercises a separate branch.
+    """
+    spool_dir = telemetry
+    srv, _ = _serve()
+    ext = FakeExtension(srv)
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        assert _cmd_sess(srv, {"op": "tabs"}, sid=LEAKED_ID,
+                         origin=bad_origin)[0] == 200
+        e = _wait_events(spool_dir, 1)[0]
+        p = json.loads(e["payload"])
+        assert "session" not in e, (
+            f"{label}: a present origin must suppress the key; "
+            f"got {e.get('session')!r}")
+        assert p["origin"] == "invalid", p
+        assert p["origin"] not in ORIGIN_TOKENS, p
+        # The parent id is still recorded -- suppression is not amnesia.
+        assert p["origin_session"] == LEAKED_UUID, p
+        # And no session field reached the line at all, under any name.
+        assert "b64:session=" not in _log_file(spool_dir).read_text()
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_the_invalid_marker_is_distinguishable_from_every_real_token():
+    """The marker exists so the failure is VISIBLE in the data rather than silent.
+    It must not collide with a real token, or a malformed declaration would be
+    indistinguishable from a working one when someone groups by `origin`."""
+    assert S.SESSION_ORIGIN_INVALID == "invalid"
+    assert S.SESSION_ORIGIN_INVALID not in S.ORIGIN_TOKENS
+
+
+def test_the_origin_ledger_is_the_same_set_the_tests_pin():
+    """SEAM. The server's ledger and this suite's expectation are two lists that
+    nothing forces to agree; pin them, or a token added to one alone changes
+    behaviour with a green suite."""
+    assert tuple(S.ORIGIN_TOKENS) == ORIGIN_TOKENS, S.ORIGIN_TOKENS
+
+
+@pytest.mark.parametrize("tier", ["tmux", "sid", "ppid", "synthetic"])
+def test_origin_session_passes_the_same_tier_gate_as_session(telemetry, tier):
+    """🔴 THE A3 REGRESSION, and it is REACHABLE rather than theoretical.
+
+    browser-agent forwards whatever `--print-session-id` produced -- its own
+    opencode-tool test exercises `BROWSER_AGENT_SESSION_ID: "tmux:%41"` -- and the
+    tool declares the origin unconditionally. So a non-joinable parent id really
+    does arrive here. The tier gate's own rationale applies verbatim: a pane id is
+    stable across many unrelated sessions, so a reader grouping by
+    `origin_session` would merge them exactly as they would on `session`.
+
+    The tier is still recorded, so the suppressed population stays measurable --
+    that is the difference between a gate and a silent drop.
+    """
+    spool_dir = telemetry
+    wire_id, bare = TIER_IDS[tier]
+    srv, _ = _serve()
+    ext = FakeExtension(srv)
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        assert _cmd_sess(srv, {"op": "tabs"}, sid=wire_id,
+                         origin="browser-agent")[0] == 200
+        e = _wait_events(spool_dir, 1)[0]
+        p = json.loads(e["payload"])
+        assert "session" not in e, e
+        assert "origin_session" not in p, (
+            f"tier {tier!r} is not joinable and must not be recorded as a parent "
+            f"key; got {p.get('origin_session')!r}")
+        assert p["origin"] == "browser-agent", p
+        assert p["sess_src"] == tier, p        # measurable, not silent
+        # The bare id must not have leaked onto the row under any other name.
+        assert bare not in _log_file(spool_dir).read_text()
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+@pytest.mark.parametrize("tier", sorted(JOINABLE_TIERS_EXPECTED))
+def test_both_join_sites_answer_the_same_way_for_every_joinable_tier(telemetry, tier):
+    """🔴 THE CONSOLIDATION GUARD. Joinability is asked at TWO places — `session`
+    (no origin) and `origin_session` (origin declared) — and they were open-coded
+    as the same comparison twice. Widening the joinable set from one tag to
+    several is exactly the edit that lands on one copy and not the other, and the
+    result is an id that is attributable in one field and silently dropped in the
+    neighbouring one.
+
+    Driven by the LEDGER, not by the server's own tuple, and it runs both arms
+    for each tier IN ONE TEST, so a mutant that widens only `session` (or only
+    `origin_session`) dies on whichever arm it did not touch. Distinct ids per
+    tier, so nothing can pass by echoing a constant.
+
+    BASELINES DIFFER PER ROW: `[opencode]` is RED at origin/main; `[claude]` is
+    an INVARIANT GUARD there (base already answers both sites the same way for
+    that one tier) and is what makes the widening measurable rather than assumed.
+    """
+    spool_dir = telemetry
+    wire_id, bare = TIER_IDS[tier]
+    srv, _ = _serve()
+    ext = FakeExtension(srv)
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        # ARM 1 — no origin: the actor is this session, so `session` is filled.
+        assert _cmd_sess(srv, {"op": "tabs"}, sid=wire_id)[0] == 200
+        direct = _wait_events(spool_dir, 1)[0]
+        assert direct.get("session") == bare, direct
+        assert "origin_session" not in json.loads(direct["payload"]), direct
+
+        # ARM 2 — origin declared: the same id is now a causal PARENT, so it
+        # moves to `origin_session` and `session` stays empty.
+        assert _cmd_sess(srv, {"op": "tabs"}, sid=wire_id,
+                         origin="browser-agent")[0] == 200
+        nested = _wait_events(spool_dir, 2)[1]
+        assert "session" not in nested, nested
+        p = json.loads(nested["payload"])
+        assert p["origin_session"] == bare, p
+        assert p["origin"] == "browser-agent", p
+        assert p["sess_src"] == tier, p
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+@pytest.mark.parametrize("tier,bare,want", [
+    ("claude", JOINABLE_UUID, True),
+    ("opencode", OC_SESSION, True),
+    ("tmux", "%77", False),
+    ("sid", "424242:99887766", False),
+    ("ppid", "31337:deadbeefcafef00d", False),
+    ("synthetic", "whatever-the-cli-made-up", False),
+    ("unknown", "", False),
+    # A joinable TAG with an empty bare half is not a key. Both halves are
+    # required, and this is the row that keeps the `and bare` conjunct alive.
+    ("claude", "", False),
+    ("opencode", "", False),
+])
+def test_the_joinability_predicate_at_the_unit(tier, bare, want):
+    """The predicate both emit sites go through, exercised directly so the
+    boundary rows (empty bare half; every non-joinable tier) are cheap to keep.
+    Paired True/False rows so a predicate stuck at either constant dies."""
+    assert S._is_joinable(tier, bare) is want
+
+
+def test_a_joinable_parent_is_still_recorded(telemetry):
+    """The control for the gate above: the joinable tier still yields a parent
+    key. Without this, deleting `origin_session` entirely would pass every test
+    in this section."""
+    spool_dir = telemetry
+    srv, _ = _serve()
+    ext = FakeExtension(srv)
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        assert _cmd_sess(srv, {"op": "tabs"}, sid=LEAKED_ID,
+                         origin="browser-agent")[0] == 200
+        p = json.loads(_wait_events(spool_dir, 1)[0]["payload"])
+        assert p["origin_session"] == LEAKED_UUID, p
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_an_absent_origin_header_is_not_the_same_as_an_empty_one(telemetry):
+    """PRESENCE vs VALUE, asserted as the pair that defines the rule.
+
+    Absent -> attribute normally (the ordinary case; regressing it would re-empty
+    the column this PR exists to fill). Present but empty -> suppress. They differ
+    ONLY in whether the header is on the request, which is exactly what
+    `session_origin is None` tests and what `or None` in the handler destroyed.
+    """
+    spool_dir = telemetry
+    srv, _ = _serve()
+    ext = FakeExtension(srv)
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        assert _cmd_sess(srv, {"op": "tabs"}, sid=LEAKED_ID)[0] == 200
+        assert _cmd_sess(srv, {"op": "tabs"}, sid=LEAKED_ID, origin="")[0] == 200
+        absent, empty = _wait_events(spool_dir, 2)
+        assert absent["session"] == LEAKED_UUID, absent
+        assert "origin" not in json.loads(absent["payload"])
+        assert "session" not in empty, empty
+        assert json.loads(empty["payload"])["origin"] == "invalid"
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_only_the_heartbeat_is_server_originated(telemetry):
+    """🔴 CATEGORY CORRECTION. This test used to assert that the heartbeat AND the
+    /whoami+/health diagnostics "have no caller session to attribute". That was
+    true of the heartbeat and FALSE of the other two, and the wrong half was
+    load-bearing: `browser whoami` / `browser health` are subcommands a person
+    runs, and the CLI sends its ordinary session headers on them because `_curl`
+    is one code path. 125 rows / 2.0% of `kind='cmd'` over 14d were being
+    de-attributed on a false premise, while the SAME `whoami` reached via POST
+    /cmd was attributed -- one operation, two outcomes.
+
+    So the category now contains exactly one member. The heartbeat is emitted by a
+    timer with no request behind it; a `sess_src` on it would be a claim about a
+    caller that does not exist.
+    """
+    spool_dir = telemetry
+    S.emit_heartbeat_event(S.Registry())
+    e = _wait_events(spool_dir, 1)[0]
+    assert e["kind"] == "heartbeat"
+    assert "session" not in e, e
+    p = json.loads(e["payload"])
+    assert "sess_src" not in p and "origin" not in p, e
+
+
+def test_the_diagnostic_gets_are_attributed_like_any_operator_command(telemetry):
+    """The other side of that correction: /whoami and /health are operator calls,
+    so they attribute exactly like a POST /cmd.
+
+    Asserted through the REAL HTTP path with real headers rather than by calling
+    the emitter directly -- the bug was that the handler never passed the headers
+    it already had, which a direct-call test cannot see.
+    """
+    spool_dir = telemetry
+    srv, _ = _serve()
+    ext = FakeExtension(srv)
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        for path in ("/whoami", "/health"):
+            st, _b = _req(srv, "GET", path,
+                          headers={S.HDR_SESSION_ID: JOINABLE_ID})
+            assert st == 200, path
+        evs = _wait_events(spool_dir, 2)
+        assert len(evs) == 2, evs
+        for e in evs:
+            assert e["session"] == JOINABLE_UUID, e
+            assert json.loads(e["payload"])["sess_src"] == "claude", e
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_a_diagnostic_get_from_a_nested_run_is_not_credited(telemetry):
+    """And they honour the origin header too -- otherwise `browser health` from
+    inside an opencode session would be the one command that still credited the
+    inherited id, which is the whole class this PR closes."""
+    spool_dir = telemetry
+    srv, _ = _serve()
+    ext = FakeExtension(srv)
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        st, _b = _req(srv, "GET", "/whoami",
+                      headers={S.HDR_SESSION_ID: LEAKED_ID,
+                               S.HDR_SESSION_ORIGIN: "opencode-inherited"})
+        assert st == 200
+        e = _wait_events(spool_dir, 1)[0]
+        p = json.loads(e["payload"])
+        assert "session" not in e, e
+        assert p["origin"] == "opencode-inherited", p
+        assert p["origin_session"] == LEAKED_UUID, p
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
 
 
 # --------------------------------------------------------------------------- #
@@ -2388,79 +3305,415 @@ def _enable_i3(monkeypatch, returncode=0, raise_exc=None):
 _FAKE_I3_MSG = "/run/current-system/sw/bin/i3-msg"
 
 
-def test_i3_focus_argv_hostile_title_is_safe():
-    """KEY SECURITY TEST: a hostile, page-controlled title (i3-criteria breakout
-    attempt, regex metachars, quotes, `;`, newlines, `$()`, backticks, very long)
-    can NEVER break out of the `title="..."` value into an i3 command. The argv is
-    a 2-element LIST (→ shell=False), constrained to class="Brave-browser", and
-    the criteria has EXACTLY the 4 structural `"`, one `[`, one `]` — a hostile
-    `"`/`]` would add more. Worst case is "wrong Brave window or none"."""
-    hostile = (
-        'evil"] exec xterm [title="pwn'      # try to close value → i3 `exec`
-        + '; rm -rf ~ | cat `id` $(whoami)'  # shell metachars (irrelevant, no shell)
-        + '\n\r\tmore .*+?[]{}^$\\ '          # control chars + regex metachars
-        + "A" * 500                             # length bomb
-    )
-    argv = S.i3_focus_argv(hostile)
-    assert isinstance(argv, list) and len(argv) == 2
-    assert argv[0] == "i3-msg"
-    crit = argv[1]
-    # Structural integrity: exactly one criteria bracket pair + the 2 quoted
-    # attribute values (class + title) → 4 double-quotes, and NO breakout.
-    assert crit.startswith('[class="Brave-browser" title="')
-    assert crit.endswith('"] focus')
-    assert crit.count('"') == 4, crit
-    assert crit.count("[") == 1 and crit.count("]") == 1, crit
-    assert "\n" not in crit and "\r" not in crit and "\t" not in crit
-    # `exec` cannot be a standalone i3 command — it only survives as inert text
-    # INSIDE the quoted title value (still between title=" and "]).
-    title_frag = crit[len('[class="Brave-browser" title="'):-len('"] focus')]
-    assert '"' not in title_frag and "]" not in title_frag and "[" not in title_frag
-    # Length is capped (the 500-char bomb cannot bloat the criteria unbounded).
-    assert len(title_frag) <= len(re.escape("A" * S.I3_TITLE_MAX)) + 40
+# --- a FAKE of the `i3-msg` boundary --------------------------------------- #
+# 🔴 NEVER a real i3. Every test below stubs subprocess.run, so the suite cannot
+# switch a workspace, raise a window or otherwise take the operator's screen.
+#
+# 🔴 THE FAKE'S ONE LOAD-BEARING FIDELITY REQUIREMENT: real `i3-msg` exits 0 and
+# replies `[{"success":true}]` for a command whose criteria matched ZERO windows —
+# byte-identical to a real raise. That is the entire defect. A fake that returned
+# nonzero on a miss would make the buggy implementation look correct and every
+# test here would be vacuous, so the fake reproduces the lie faithfully and
+# test_fake_i3_mirrors_real_i3_success_on_zero_match pins that it does.
+_I3_SUCCESS_REPLY = b'[{"success":true}]'
+_TITLE_CRITERIA_RE = re.compile(r'^\[class="([^"]*)" title="(.*)"\] focus$')
+_ID_CRITERIA_RE = re.compile(r'^\[id="(\d+)"\] focus$')
 
 
-def test_i3_focus_argv_escapes_regex_metacharacters():
+class _FakeI3:
+    """An in-memory i3 that answers `-t get_tree` and `… focus`.
+
+    windows: list of (x11_window_id, wm_class, wm_name). `focused` is the id of
+    the currently focused window (None = none). Understands BOTH command shapes
+    so one test file can be run against the pre-fix implementation (which focuses
+    by a `title="…"` criteria) and the fixed one (which focuses by `id="…"`)."""
+
+    def __init__(self, windows=(), focused=None):
+        self.windows = [list(w) for w in windows]
+        self.focused = focused
+        self.calls = []            # every argv, in order
+        self.tree_rc = 0
+        self.tree_stdout = None    # not None → return this instead of a tree
+        self.focus_rc = 0
+        # False → focus is ACCEPTED (rc 0, success:true) but changes nothing.
+        # This is not hypothetical: an id that vanished between the tree read and
+        # the focus answers exactly this way.
+        self.focus_effective = True
+        self.on_call = None        # hook(fake, call_index) run BEFORE each reply
+
+    # -- test-facing helpers ------------------------------------------------ #
+    def set_title(self, window_id, name):
+        for w in self.windows:
+            if w[0] == window_id:
+                w[2] = name
+
+    def _is_tree(self, argv):
+        return argv[1:] == ["-t", "get_tree"]
+
+    @property
+    def tree_calls(self):
+        return [a for a in self.calls if self._is_tree(a)]
+
+    @property
+    def focus_calls(self):
+        return [a for a in self.calls if not self._is_tree(a)]
+
+    # -- the i3 model ------------------------------------------------------- #
+    def tree(self):
+        nodes = [{"type": "con", "window": wid, "name": name,
+                  "window_properties": {"class": cls, "instance": "brave-browser"},
+                  "focused": wid == self.focused,
+                  "nodes": [], "floating_nodes": []}
+                 for wid, cls, name in self.windows]
+        return {"type": "root", "name": "root", "window": None, "focused": False,
+                "floating_nodes": [],
+                "nodes": [{"type": "workspace", "name": "1", "window": None,
+                           "focused": False, "floating_nodes": [],
+                           "nodes": nodes}]}
+
+    def _focus(self, window_id):
+        if not self.focus_effective:
+            return
+        if any(w[0] == window_id for w in self.windows):
+            self.focused = window_id
+
+    def run(self, argv, **kw):
+        argv = list(argv)
+        self.calls.append(argv)
+        if self.on_call is not None:
+            self.on_call(self, len(self.calls) - 1)
+        if self._is_tree(argv):
+            if self.tree_stdout is not None:
+                return _FakeProcOut(self.tree_rc, self.tree_stdout)
+            return _FakeProcOut(self.tree_rc,
+                                json.dumps(self.tree()).encode("utf-8"))
+        cmd = argv[1] if len(argv) > 1 else ""
+        m = _ID_CRITERIA_RE.match(cmd)
+        if m:
+            self._focus(int(m.group(1)))
+        else:
+            m = _TITLE_CRITERIA_RE.match(cmd)
+            if m:
+                cls, pat = m.group(1), m.group(2)
+                try:
+                    rx = re.compile(pat)
+                except re.error:
+                    rx = None
+                if rx is not None:
+                    for wid, wcls, name in self.windows:
+                        if wcls == cls and rx.search(name):
+                            self._focus(wid)
+                            break
+        # 🔴 UNCONDITIONAL success — matched or not. This is what real i3 does.
+        return _FakeProcOut(self.focus_rc, _I3_SUCCESS_REPLY)
+
+
+class _FakeProcOut:
+    def __init__(self, returncode, stdout):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = b""
+
+
+def _enable_fake_i3(monkeypatch, windows=(), focused=None, match_wait=0.0):
+    """Turn the i3 path ON, routed at a _FakeI3. `match_wait` 0 = one tree read
+    (keeps the suite fast); the settle-race tests raise it deliberately."""
+    fake = _FakeI3(windows=windows, focused=focused)
+    monkeypatch.setattr(S, "i3_available", lambda: True)
+    monkeypatch.setattr(S, "_resolve_i3_msg", lambda: _FAKE_I3_MSG)
+    monkeypatch.setattr(S, "I3_MATCH_WAIT", match_wait, raising=False)
+    monkeypatch.setattr(S, "I3_MATCH_POLL", 0.01, raising=False)
+    monkeypatch.setattr(S.subprocess, "run",
+                        lambda argv, **kw: fake.run(argv, **kw))
+    return fake
+
+
+# The live pair measured 2026-08-19, reproduced as a fixture: `activate` is
+# answered by Chrome with the NEW tab title while the Brave X11 window's WM_NAME
+# still advertises the OLD one.
+_NEW_TITLE = "Model Benchmarking"
+_OLD_TITLE = "New Tab"
+_BRAVE = "Brave-browser"
+
+
+def _activate_with_fake_i3(fake_windows, focused=None, match_wait=0.0,
+                           title=_NEW_TITLE, monkeypatch=None, mutate=None):
+    """Drive ONE real `activate` through the HTTP surface against a fake i3.
+    Returns (response_body, fake)."""
+    fake = _enable_fake_i3(monkeypatch, windows=fake_windows, focused=focused,
+                           match_wait=match_wait)
+    if mutate is not None:
+        mutate(fake)
+    srv, _ = _serve()
+    ext = FakeExtension(srv, executor=lambda c: {
+        "tabId": 5, "windowId": 1, "active": True, "status": "complete",
+        "url": "https://model-benchmarking.example.test/run", "title": title})
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        st, body = _req(srv, "POST", "/cmd", {"op": "activate", "focus": True})
+        assert st == 200
+        return body, fake
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+_HOSTILE_TITLE = (
+    'evil"] exec xterm [title="pwn'      # try to close value → i3 `exec`
+    + '; rm -rf ~ | cat `id` $(whoami)'  # shell metachars (irrelevant, no shell)
+    + '\n\r\tmore .*+?[]{}^$\\ '          # control chars + regex metachars
+    + "A" * 500                             # length bomb
+)
+
+
+def test_i3_title_pattern_hostile_title_is_inert():
+    """KEY SECURITY TEST (was: the criteria-breakout test). A hostile,
+    page-controlled title is reduced to a LITERAL regex — every metacharacter
+    re.escape'd, every i3-structural char stripped, length capped. It is matched
+    in-process against i3's get_tree reply, so a `"`/`]` has nothing to break out
+    of; the escaping also means the compiled pattern is a literal (no ReDoS)."""
+    pat = S.i3_title_pattern(_HOSTILE_TITLE)
+    assert isinstance(pat, str) and pat
+    assert '"' not in pat and "\n" not in pat and "\r" not in pat and "\t" not in pat
+    # A LITERAL: the compiled pattern matches its own unescaped text and nothing
+    # a metacharacter would have let through.
+    lit = S._sanitize_i3_title(_HOSTILE_TITLE)
+    assert re.compile(pat).search(lit)
+    assert not re.compile(pat).search("totally unrelated window title")
+    # Length is capped (the 500-char bomb cannot bloat the pattern unbounded).
+    assert len(lit) <= S.I3_TITLE_MAX
+
+
+def test_i3_title_pattern_escapes_regex_metacharacters():
     """A plain title with regex metacharacters is re.escape'd so it matches
-    literally (never alters i3's regex matching)."""
-    argv = S.i3_focus_argv("Model Benchmarking")
-    assert argv == ["i3-msg",
-                    '[class="Brave-browser" title="%s"] focus'
-                    % re.escape("Model Benchmarking")]
+    literally (never alters the match)."""
+    assert S.i3_title_pattern("Model Benchmarking") == re.escape("Model Benchmarking")
 
 
-def test_i3_focus_argv_empty_title_returns_none():
+def test_i3_title_pattern_empty_title_returns_none():
     """No usable title (empty / only structural+control chars) → None → skip."""
-    assert S.i3_focus_argv("") is None
-    assert S.i3_focus_argv(None) is None
-    assert S.i3_focus_argv('"[]\\\n\t ') is None
+    assert S.i3_title_pattern("") is None
+    assert S.i3_title_pattern(None) is None
+    assert S.i3_title_pattern('"[]\\\n\t ') is None
 
 
 def test_activate_invokes_i3_msg_on_success(monkeypatch):
-    """On a successful activate the server runs i3-msg with the ARGV LIST
-    (shell=False), a class="Brave-browser" + re.escape'd-title criteria, and
-    `focus`; the result reports i3:"applied"."""
-    calls = _enable_i3(monkeypatch, returncode=0)
+    """On a successful activate the server talks to i3 with ARGV LISTS
+    (shell=False), reads the tree, focuses the matched window, and reports
+    i3:"applied" / i3_detail:"focused"."""
+    body, fake = _activate_with_fake_i3(
+        [(4242, _BRAVE, _NEW_TITLE)], focused=None, monkeypatch=monkeypatch)
+    assert body["result"]["data"]["i3"] == "applied"
+    assert body["result"]["data"]["i3_detail"] == "focused"
+    # argv[0] is the RESOLVED ABSOLUTE i3-msg path (not the bare name) so the
+    # call works even under the minimal systemd --user service PATH.
+    assert all(a[0] == _FAKE_I3_MSG for a in fake.calls), fake.calls
+    assert fake.tree_calls, "the raise must be decided from a get_tree read"
+    assert fake.focus_calls == [[_FAKE_I3_MSG, '[id="4242"] focus']]
+    assert fake.focused == 4242
+
+
+def test_activate_i3_calls_are_shell_false_and_bounded(monkeypatch):
+    """Every i3-msg invocation is an argv LIST with shell=False and a timeout."""
+    seen = []
+    fake = _FakeI3(windows=[(7, _BRAVE, _NEW_TITLE)])
+    monkeypatch.setattr(S, "i3_available", lambda: True)
+    monkeypatch.setattr(S, "_resolve_i3_msg", lambda: _FAKE_I3_MSG)
+
+    def _run(argv, **kw):
+        seen.append((argv, kw))
+        return fake.run(argv, **kw)
+
+    monkeypatch.setattr(S.subprocess, "run", _run)
+    assert S.i3_foreground(_NEW_TITLE, match_wait=0) == ("applied", "focused")
+    assert seen, "positive control: at least one i3-msg call was made"
+    for argv, kw in seen:
+        assert isinstance(argv, list)          # NEVER a shell string
+        assert kw.get("shell", False) is False
+        assert kw.get("timeout")               # bounded
+
+
+def test_i3_state_and_detail_constants_match_the_literals_the_matrix_asserts():
+    """The matrix compares against LITERALS (so it stays behavioural at a pre-fix
+    baseline). That only stays honest while the constants agree with them."""
+    assert S.I3_SKIPPED == "skipped"
+    assert S.I3_WITHHELD == "withheld"
+    assert S.I3_DETAIL_UNAVAILABLE == "unavailable"
+    assert S.I3_DETAIL_NOT_REQUESTED == "not_requested"
+
+
+def test_call_site_unavailable_detail_matches_i3_foreground(monkeypatch):
+    """🔴 SEAM GUARD. The REFUSED path reports "i3 is not here" WITHOUT going
+    through i3_foreground (calling it would cost a get_tree round trip we must
+    not make when no raise was asked for). So the same fact is produced in two
+    places and can drift. Pin them to each other by ASKING i3_foreground.
+
+    This is the ledger-style check `claude/RULES.md` asks for at a seam: it fails
+    if either side renames its detail, not merely if the call site does."""
+    monkeypatch.setattr(S, "i3_available", lambda: False)
+    state, detail = S.i3_foreground("anything")
+    assert state == S.I3_SKIPPED
+    assert detail == S.I3_DETAIL_UNAVAILABLE, (
+        f"i3_foreground says {detail!r} when i3 is absent, but the /cmd refused "
+        f"path reports {S.I3_DETAIL_UNAVAILABLE!r}; the two have drifted"
+    )
+
+
+# --- the (consent x availability x match) matrix, re-derived against #557 ---- #
+# WHAT CHANGED WHEN #557 LANDED. `applied` is now EARNED: i3-msg exits 0 even for
+# a criteria that matched NOTHING, so the server confirms via `get_tree` that a
+# window exists and ended up focused. Two consequences for this matrix:
+#
+#   * the cells' MEANING is unchanged for skipped/withheld — they changed only
+#     their FIXTURE (a bare `subprocess.run`→rc0 stub can no longer produce
+#     `applied`, because rc 0 with empty stdout is now `failed`/`tree_unreadable`);
+#   * the consented x available cell SPLIT IN TWO. "i3 is there and a window
+#     matches" → applied/focused; "i3 is there and nothing matches" →
+#     failed/no_match, a state that did not exist before and that used to be
+#     reported as `applied`. That new cell is included below.
+#
+# Every cell also asserts `data["i3"]` is a STRING. #557 changed i3_foreground to
+# return a (state, detail) TUPLE, so a call site that forgets to unpack puts a
+# tuple in the JSON — silently wrong rather than a crash. That is the single
+# highest-value regression guard in this block.
+@pytest.mark.parametrize(
+    "i3_up,consent,window_matches,want_state,want_detail,want_note", [
+        (True,  True,  True,  "applied",  "focused",      False),
+        (True,  True,  False, "failed",   "no_match",     False),
+        (True,  False, None,  "withheld", "not_requested", True),
+        (False, True,  None,  "skipped",  "unavailable",  False),
+        (False, False, None,  "skipped",  "unavailable",  False),
+    ],
+    ids=["i3+consent+match", "i3+consent+nomatch", "i3+refused",
+         "noi3+consent", "noi3+refused"])
+def test_activate_i3_state_matrix(monkeypatch, i3_up, consent, window_matches,
+                                  want_state, want_detail, want_note):
+    """All (availability x consent x match) cells, so ORDER and SHAPE are pinned.
+
+    `want_note` is asserted BOTH ways: the withheld note must appear exactly
+    where its `--focus` advice is actionable, and nowhere else.
+    """
+    fake = None
+    if i3_up:
+        windows = [(77, _BRAVE, _NEW_TITLE if window_matches else "Something Else")]
+        fake = _enable_fake_i3(monkeypatch, windows=windows, focused=None)
+    else:
+        # autouse _disable_i3 already forces i3_available False; make ANY
+        # subprocess a hard failure so "we never shelled out" is proven, not
+        # inferred from the reported state.
+        def _boom(*a, **k):
+            raise AssertionError("i3-msg must NOT run when i3 is unavailable")
+        monkeypatch.setattr(S.subprocess, "run", _boom)
+
     srv, _ = _serve()
     ext = FakeExtension(srv, executor=lambda c: {
         "tabId": 5, "windowId": 1, "active": True, "status": "complete",
         "url": "https://model-benchmarking.example.test/run",
-        "title": "Model Benchmarking"})
+        "title": _NEW_TITLE})
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        cmd = {"op": "activate"}
+        if consent:
+            cmd["focus"] = True
+        st, body = _req(srv, "POST", "/cmd", cmd)
+        assert st == 200
+        data = body["result"]["data"]
+
+        # 🔴 TUPLE GUARD (#557 made i3_foreground return a pair).
+        assert isinstance(data["i3"], str), (
+            f"data['i3'] is {type(data['i3']).__name__} {data['i3']!r} — a call "
+            "site forgot to unpack i3_foreground's (state, detail) pair"
+        )
+        assert isinstance(data.get("i3_detail", ""), str)
+
+        assert data["i3"] == want_state, (
+            f"i3_up={i3_up} consent={consent} match={window_matches} -> "
+            f"i3={data['i3']!r}, want {want_state!r}"
+        )
+        assert data.get("i3_detail") == want_detail, (
+            f"i3_up={i3_up} consent={consent} match={window_matches} -> "
+            f"i3_detail={data.get('i3_detail')!r}, want {want_detail!r}"
+        )
+        assert ("note" in data) is want_note, (
+            f"note present={'note' in data}, want {want_note}"
+        )
+        # The Chrome-side result survives in every cell — this gates the WM step
+        # only, never the op.
+        assert data["tabId"] == 5
+
+        # 🔴 A REFUSED raise must not even LOOK at i3: no get_tree, no focus.
+        if fake is not None and not consent:
+            assert fake.calls == [], (
+                f"a refused activate talked to i3 anyway: {fake.calls}"
+            )
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_refused_activate_makes_no_i3_round_trip_at_all(monkeypatch):
+    """🔴 The consent gate must sit AHEAD of #557's confirmation step.
+
+    #557 made a consented activate do a `get_tree` read (and a re-read to confirm
+    focus). None of that may happen for a raise nobody asked for — not because it
+    would move focus (a tree read does not), but because the gate's promise is
+    that a refusal touches the WM path not at all. Asserted on the fake's own call
+    log rather than on the reported state, since a state string cannot tell you
+    whether a subprocess ran."""
+    fake = _enable_fake_i3(monkeypatch,
+                           windows=[(77, _BRAVE, _NEW_TITLE)], focused=None)
+    srv, _ = _serve()
+    ext = FakeExtension(srv, executor=lambda c: {
+        "tabId": 5, "windowId": 1, "active": True, "status": "complete",
+        "url": "https://model-benchmarking.example.test/run",
+        "title": _NEW_TITLE})
     ext.start()
     try:
         assert _wait_connected(srv, want=True)
         st, body = _req(srv, "POST", "/cmd", {"op": "activate"})
         assert st == 200
-        assert body["result"]["data"]["i3"] == "applied"
-        assert len(calls) == 1
-        argv, kw = calls[0]
-        # argv[0] is the RESOLVED ABSOLUTE i3-msg path (not the bare name) so the
-        # call works even under the minimal systemd --user service PATH.
-        assert argv[0] == _FAKE_I3_MSG
-        assert argv[1] == ('[class="Brave-browser" title="%s"] focus'
-                           % re.escape("Model Benchmarking"))
-        assert kw.get("shell", False) is False  # NEVER a shell string
-        assert kw.get("timeout")  # bounded
+        # LITERAL, not S.I3_WITHHELD: at a baseline without the gate the constant
+        # does not exist, and an AttributeError here would be red for the wrong
+        # reason — it would prove nothing about whether a round trip happened.
+        assert body["result"]["data"]["i3"] == "withheld"
+        assert fake.tree_calls == [], f"get_tree ran for a refused raise: {fake.tree_calls}"
+        assert fake.focus_calls == [], f"focus ran for a refused raise: {fake.focus_calls}"
+        # …and the window really was left alone.
+        assert fake.focused is None
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_non_consented_activate_on_a_non_i3_host_says_skipped_not_withheld(monkeypatch):
+    """🔴 Unavailability must beat non-consent.
+
+    Compared against the LITERAL "skipped", not S.I3_SKIPPED: at the pre-fix
+    commit the constant did not exist, so referencing it made this red with an
+    AttributeError — red for the wrong reason, which proves nothing about
+    behaviour. Drift is pinned separately, above."""
+    def _boom(*a, **k):
+        raise AssertionError("i3-msg must NOT run when i3 is unavailable")
+    monkeypatch.setattr(S.subprocess, "run", _boom)
+    srv, _ = _serve()
+    ext = FakeExtension(srv, executor=lambda c: {
+        "tabId": 5, "windowId": 1, "active": True, "status": "complete",
+        "url": "https://model-benchmarking.example.test/run",
+        "title": _NEW_TITLE})
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        st, body = _req(srv, "POST", "/cmd", {"op": "activate"})
+        assert st == 200
+        data = body["result"]["data"]
+        assert data["i3"] == "skipped", (
+            f"a non-consented activate on a host with NO i3 reported "
+            f"{data['i3']!r}; it must report 'skipped' — there is no raise to "
+            "withhold, and 'withheld' invites a pointless --focus retry"
+        )
+        assert "note" not in data, (
+            "the withheld note (which tells the caller to pass --focus) was "
+            f"attached on a host that cannot raise at all: {data.get('note')!r}"
+        )
     finally:
         ext.stop(); srv.shutdown(); srv.server_close()
 
@@ -2480,9 +3733,10 @@ def test_activate_i3_skipped_when_unavailable(monkeypatch):
     ext.start()
     try:
         assert _wait_connected(srv, want=True)
-        st, body = _req(srv, "POST", "/cmd", {"op": "activate"})
+        st, body = _req(srv, "POST", "/cmd", {"op": "activate", "focus": True})
         assert st == 200
         assert body["result"]["data"]["i3"] == "skipped"
+        assert body["result"]["data"]["i3_detail"] == "unavailable"
         assert body["result"]["data"]["tabId"] == 5  # Chrome-side result intact
     finally:
         ext.stop(); srv.shutdown(); srv.server_close()
@@ -2498,9 +3752,10 @@ def test_activate_i3_skipped_when_no_title(monkeypatch):
     ext.start()
     try:
         assert _wait_connected(srv, want=True)
-        st, body = _req(srv, "POST", "/cmd", {"op": "activate"})
+        st, body = _req(srv, "POST", "/cmd", {"op": "activate", "focus": True})
         assert st == 200
         assert body["result"]["data"]["i3"] == "skipped"
+        assert body["result"]["data"]["i3_detail"] == "no_title"
         assert calls == []
     finally:
         ext.stop(); srv.shutdown(); srv.server_close()
@@ -2517,9 +3772,10 @@ def test_activate_i3_failed_on_nonzero(monkeypatch):
     ext.start()
     try:
         assert _wait_connected(srv, want=True)
-        st, body = _req(srv, "POST", "/cmd", {"op": "activate"})
+        st, body = _req(srv, "POST", "/cmd", {"op": "activate", "focus": True})
         assert st == 200
         assert body["result"]["data"]["i3"] == "failed"
+        assert body["result"]["data"]["i3_detail"] == "tree_unreadable"
         assert body["result"]["data"]["tabId"] == 5
     finally:
         ext.stop(); srv.shutdown(); srv.server_close()
@@ -2536,19 +3792,374 @@ def test_activate_i3_failed_on_timeout(monkeypatch):
     ext.start()
     try:
         assert _wait_connected(srv, want=True)
-        st, body = _req(srv, "POST", "/cmd", {"op": "activate"})
+        st, body = _req(srv, "POST", "/cmd", {"op": "activate", "focus": True})
         assert st == 200
         assert body["result"]["data"]["i3"] == "failed"
+        assert body["result"]["data"]["i3_detail"] == "tree_unreadable"
     finally:
         ext.stop(); srv.shutdown(); srv.server_close()
 
 
+# ======================================================================== #
+# 🔴 `i3: applied` MUST MEAN A WINDOW WAS RAISED
+#
+# Live pair, 2026-08-19: `activate` #1 (right after `open`) reported
+# i3:"applied" while raising NOTHING — the tab stayed `hidden` — because the
+# Brave window's WM_NAME still held the OLD title, the `title="…"` criteria
+# matched zero windows, and `i3-msg` exits 0 with `[{"success":true}]` anyway.
+# `activate` #2, once the title had settled, reported the SAME "applied" and
+# really did raise it. One signal, two opposite realities.
+#
+# Downstream that is the dominant live cause of a capture tool exiting 11 "the
+# app never booted": it never booted because nothing was ever raised, and the
+# only status said everything was fine.
+# ======================================================================== #
+
+def test_fake_i3_mirrors_real_i3_success_on_zero_match():
+    """INSTRUMENT VALIDATION — pin the fake's fidelity to the ONE real i3
+    behaviour every test below depends on: a `focus` whose criteria matched ZERO
+    windows still exits 0 with `[{"success":true}]`.
+
+    If this ever stops holding, the fake has become kinder than i3 and every
+    zero-match test below would pass against the BUGGY implementation."""
+    fake = _FakeI3(windows=[(1, _BRAVE, _OLD_TITLE)])
+    miss = fake.run([_FAKE_I3_MSG,
+                     '[class="%s" title="%s"] focus' % (_BRAVE, re.escape(_NEW_TITLE))])
+    assert miss.returncode == 0                     # ← the trap, faithfully
+    assert miss.stdout == b'[{"success":true}]'
+    assert fake.focused is None                     # …and nothing was raised
+    # POSITIVE CONTROL: the same reply shape for a criteria that DOES match, so
+    # the assertion above is about the MATCH, not about the fake refusing to work.
+    hit = fake.run([_FAKE_I3_MSG,
+                    '[class="%s" title="%s"] focus' % (_BRAVE, re.escape(_OLD_TITLE))])
+    assert hit.returncode == 0 and hit.stdout == b'[{"success":true}]'
+    assert fake.focused == 1                        # this one really raised
+
+
+def test_activate_i3_zero_match_is_never_reported_as_applied(monkeypatch):
+    """🔴 THE REGRESSION TEST. RED on the pre-fix implementation.
+
+    The exact live race: Chrome answers `activate` with the NEW title while the
+    only Brave window still advertises the OLD one. i3 matches nothing and exits
+    0 — so the pre-fix code reported i3:"applied" with the tab still hidden.
+    `applied` must be unreachable here."""
+    body, fake = _activate_with_fake_i3(
+        [(4242, _BRAVE, _OLD_TITLE)], monkeypatch=monkeypatch)
+    data = body["result"]["data"]
+    assert data["i3"] != "applied", (
+        "zero windows matched — `applied` is a lie the caller acts on")
+    assert data["i3"] == "failed"
+    assert data["i3_detail"] == "no_match"
+    # Ground truth from the fake: nothing was ever focused.
+    assert fake.focused is None
+    # The Chrome-side result is untouched (the i3 step is non-fatal metadata).
+    assert data["tabId"] == 5
+
+
+def test_activate_i3_real_match_is_reported_as_applied(monkeypatch):
+    """POSITIVE CONTROL for the test above — the SAME fixture with the SAME code
+    path, differing only in the window's title. Reported pair:
+      window title OLD (no match) → i3="failed"  / detail="no_match"
+      window title NEW (a match)  → i3="applied" / detail="focused"
+    Without this, "never applied" could be satisfied by a check wired to nothing."""
+    body, fake = _activate_with_fake_i3(
+        [(4242, _BRAVE, _NEW_TITLE)], monkeypatch=monkeypatch)
+    data = body["result"]["data"]
+    assert data["i3"] == "applied"
+    assert data["i3_detail"] == "focused"
+    assert fake.focused == 4242          # ground truth: it really was raised
+
+
+def test_activate_i3_zero_match_issues_no_focus_command(monkeypatch):
+    """A raise that cannot match must not fire a focus at all — and the ZERO is
+    reported WITH its positive control (0 focus calls on a miss, 1 on a hit), so
+    a harness wired to nothing cannot masquerade as the finding."""
+    miss_body, miss = _activate_with_fake_i3(
+        [(1, _BRAVE, _OLD_TITLE)], monkeypatch=monkeypatch)
+    hit_body, hit = _activate_with_fake_i3(
+        [(1, _BRAVE, _NEW_TITLE)], monkeypatch=monkeypatch)
+    assert len(miss.focus_calls) == 0, miss.focus_calls
+    assert len(hit.focus_calls) == 1, hit.focus_calls   # ← the positive control
+    assert miss_body["result"]["data"]["i3"] == "failed"
+    assert hit_body["result"]["data"]["i3"] == "applied"
+    # Both arms DID talk to i3 — the miss is a real read, not a skipped step.
+    assert miss.tree_calls and hit.tree_calls
+
+
+def test_activate_i3_focus_is_keyed_on_stable_window_id(monkeypatch):
+    """The focus is keyed on the X11 window ID from i3's own reply, not on the
+    racy title — the id cannot change underneath us while WM_NAME settles."""
+    body, fake = _activate_with_fake_i3(
+        [(9, _BRAVE, "Some Other Tab"), (77, _BRAVE, _NEW_TITLE)],
+        monkeypatch=monkeypatch)
+    assert body["result"]["data"]["i3"] == "applied"
+    assert fake.focus_calls == [[_FAKE_I3_MSG, '[id="77"] focus']]
+    assert fake.focused == 77            # the RIGHT window, not the first one
+
+
+def test_activate_i3_untrusted_title_never_reaches_any_argv(monkeypatch):
+    """SECURITY: with the title out of the criteria entirely, no fragment of the
+    page-controlled title appears in ANY i3-msg argv. The window is named with
+    the sanitized title so the match SUCCEEDS — the positive control that proves
+    this assertion is made over a run that really did find and focus a window."""
+    lit = S._sanitize_i3_title(_HOSTILE_TITLE)
+    body, fake = _activate_with_fake_i3(
+        [(31337, _BRAVE, "prefix " + lit + " suffix")],
+        title=_HOSTILE_TITLE, monkeypatch=monkeypatch)
+    assert body["result"]["data"]["i3"] == "applied"      # ← positive control
+    assert fake.focused == 31337
+    flat = " ".join(" ".join(a) for a in fake.calls)
+    for probe in ("exec", "xterm", "rm -rf", "whoami", "pwn", "AAAA"):
+        assert probe not in flat, (probe, flat)
+    assert fake.focus_calls == [[_FAKE_I3_MSG, '[id="31337"] focus']]
+
+
+def test_activate_i3_focus_accepted_but_not_focused_is_failed(monkeypatch):
+    """VERIFY step: i3 accepting the focus (rc 0, success:true) is not proof. A
+    window that does not end up focused → failed/not_focused, never applied.
+
+    Reported pair — same window, same command, only the effect differs:
+      focus takes effect     → applied / focused
+      focus is a no-op       → failed  / not_focused"""
+    eff_body, eff = _activate_with_fake_i3(
+        [(5, _BRAVE, _NEW_TITLE)], monkeypatch=monkeypatch)
+    noop_body, noop = _activate_with_fake_i3(
+        [(5, _BRAVE, _NEW_TITLE)], monkeypatch=monkeypatch,
+        mutate=lambda f: setattr(f, "focus_effective", False))
+    assert eff_body["result"]["data"]["i3"] == "applied"          # control
+    assert noop_body["result"]["data"]["i3"] == "failed"
+    assert noop_body["result"]["data"]["i3_detail"] == "not_focused"
+    # Both arms issued the focus and got rc 0 — the difference is only the EFFECT.
+    assert len(eff.focus_calls) == 1 and len(noop.focus_calls) == 1
+    assert eff.focused == 5 and noop.focused is None
+
+
+def test_activate_i3_focus_nonzero_is_failed(monkeypatch):
+    """The focus command itself erroring → failed/focus_error (not applied)."""
+    body, fake = _activate_with_fake_i3(
+        [(5, _BRAVE, _NEW_TITLE)], monkeypatch=monkeypatch,
+        mutate=lambda f: setattr(f, "focus_rc", 2))
+    assert body["result"]["data"]["i3"] == "failed"
+    assert body["result"]["data"]["i3_detail"] == "focus_error"
+    assert len(fake.focus_calls) == 1     # positive control: it WAS attempted
+
+
+def test_activate_i3_unparseable_tree_is_failed(monkeypatch):
+    """A get_tree reply that is not JSON → failed/tree_unreadable, and NO focus
+    is attempted (we cannot know what would match). Positive control: the same
+    fixture with a parseable tree focuses exactly once."""
+    bad_body, bad = _activate_with_fake_i3(
+        [(5, _BRAVE, _NEW_TITLE)], monkeypatch=monkeypatch,
+        mutate=lambda f: setattr(f, "tree_stdout", b"not json at all"))
+    good_body, good = _activate_with_fake_i3(
+        [(5, _BRAVE, _NEW_TITLE)], monkeypatch=monkeypatch)
+    assert bad_body["result"]["data"]["i3"] == "failed"
+    assert bad_body["result"]["data"]["i3_detail"] == "tree_unreadable"
+    assert len(bad.focus_calls) == 0
+    assert good_body["result"]["data"]["i3"] == "applied"     # ← control
+    assert len(good.focus_calls) == 1
+
+
+def test_activate_i3_ignores_non_brave_windows(monkeypatch):
+    """A same-titled window of ANOTHER application must not be raised or counted
+    as a match — the class constraint survived the move out of the criteria."""
+    body, fake = _activate_with_fake_i3(
+        [(8, "Alacritty", _NEW_TITLE)], monkeypatch=monkeypatch)
+    assert body["result"]["data"]["i3"] == "failed"
+    assert body["result"]["data"]["i3_detail"] == "no_match"
+    assert fake.focused is None
+    assert len(fake.focus_calls) == 0
+    # POSITIVE CONTROL: identical title, class Brave → matched and raised.
+    body2, fake2 = _activate_with_fake_i3(
+        [(8, _BRAVE, _NEW_TITLE)], monkeypatch=monkeypatch)
+    assert body2["result"]["data"]["i3"] == "applied" and fake2.focused == 8
+
+
+def test_i3_foreground_waits_out_the_title_settling_race(monkeypatch):
+    """THE OTHER HALF OF THE LIVE PAIR: a bounded re-read of the tree turns the
+    first post-`open` activate — the one that used to match nothing — into a real
+    raise once WM_NAME catches up.
+
+    Reported pair:
+      title settles on the 3rd tree read → applied / focused, >1 tree read
+      title never settles                → failed  / no_match, >1 tree read
+    (the second arm is the control proving the loop actually re-read and did not
+    simply succeed on its first look)."""
+    monkeypatch.setattr(S, "i3_available", lambda: True)
+    monkeypatch.setattr(S, "_resolve_i3_msg", lambda: _FAKE_I3_MSG)
+    monkeypatch.setattr(S, "I3_MATCH_POLL", 0.001)
+
+    settling = _FakeI3(windows=[(4242, _BRAVE, _OLD_TITLE)])
+
+    def _settle(fake, idx):
+        if len(fake.tree_calls) >= 2:      # this call is the 3rd tree read
+            fake.set_title(4242, _NEW_TITLE)
+
+    settling.on_call = _settle
+    monkeypatch.setattr(S.subprocess, "run",
+                        lambda argv, **kw: settling.run(argv, **kw))
+    assert S.i3_foreground(_NEW_TITLE, match_wait=1.0) == ("applied", "focused")
+    assert len(settling.tree_calls) > 1, "it must have re-read the tree"
+    assert settling.focused == 4242
+
+    stuck = _FakeI3(windows=[(4242, _BRAVE, _OLD_TITLE)])
+    monkeypatch.setattr(S.subprocess, "run",
+                        lambda argv, **kw: stuck.run(argv, **kw))
+    assert S.i3_foreground(_NEW_TITLE, match_wait=0.05) == ("failed", "no_match")
+    assert len(stuck.tree_calls) > 1, "the wait must have polled, not given up"
+    assert stuck.focused is None
+
+
+def test_i3_foreground_state_vocabulary_is_closed(monkeypatch):
+    """LEDGER over `i3_foreground`'s OWN RETURNS: exactly {applied, skipped,
+    failed}, and "applied" pairs with exactly one detail.
+
+    🔴 SCOPE, corrected. This used to claim it guarded `result.data.i3` — "the
+    three values consumers branch on". That was false the moment the consent gate
+    added a FOURTH value: `withheld` is produced at the /cmd CALL SITE and never
+    passes through this function, so this enumeration cannot observe it and stayed
+    green while the field it claimed to close gained a value. A ledger that names a
+    RELATIONSHIP but pins a COMPONENT is the failure `claude/RULES.md` describes.
+
+    The field-level ledger it pretended to be now exists separately, and covers
+    both producers — see test_data_i3_value_set_is_a_closed_ledger."""
+    monkeypatch.setattr(S, "i3_available", lambda: True)
+    monkeypatch.setattr(S, "_resolve_i3_msg", lambda: _FAKE_I3_MSG)
+    monkeypatch.setattr(S, "I3_MATCH_POLL", 0.001)
+
+    def _outcome(windows, **attrs):
+        fake = _FakeI3(windows=windows)
+        for k, v in attrs.items():
+            setattr(fake, k, v)
+        monkeypatch.setattr(S.subprocess, "run",
+                            lambda argv, **kw: fake.run(argv, **kw))
+        return S.i3_foreground(_NEW_TITLE, match_wait=0)
+
+    seen = {
+        _outcome([(1, _BRAVE, _NEW_TITLE)]),
+        _outcome([(1, _BRAVE, _OLD_TITLE)]),
+        _outcome([(1, _BRAVE, _NEW_TITLE)], focus_effective=False),
+        _outcome([(1, _BRAVE, _NEW_TITLE)], focus_rc=3),
+        _outcome([(1, _BRAVE, _NEW_TITLE)], tree_rc=1),
+        _outcome([(1, _BRAVE, _NEW_TITLE)], tree_stdout=b"{"),
+    }
+    monkeypatch.setattr(S, "i3_available", lambda: False)
+    seen.add(S.i3_foreground(_NEW_TITLE, match_wait=0))
+    monkeypatch.setattr(S, "i3_available", lambda: True)
+    seen.add(S.i3_foreground("", match_wait=0))
+
+    # Positive control: the enumeration really did exercise every branch.
+    assert len(seen) >= 7, seen
+    assert {s for s, _ in seen} == {"applied", "skipped", "failed"}, seen
+    assert {d for s, d in seen if s == "applied"} == {"focused"}, seen
+    assert all(d for _, d in seen), "every outcome carries a reason"
+
+
+# The COMPLETE value set of `result.data.i3`, across BOTH producers: whatever
+# `i3_foreground` returns, plus whatever the /cmd activate branch assigns without
+# calling it. Adding a value to either side without updating this line fails.
+DATA_I3_VALUES = {"applied", "skipped", "failed", "withheld"}
+
+
+def _call_site_state_values():
+    """Every value the /cmd activate branch can put in `state`, read STRUCTURALLY
+    from server.py's AST — not from running it.
+
+    Structural on purpose: a behavioural sweep can only see states some fixture
+    happens to produce, so a fifth value added on a branch no test exercises would
+    sail past it. Parsing the assignments sees it whether or not it is reachable,
+    which is the half a ledger has to have to fail when the set GROWS.
+    """
+    import ast
+    import pathlib as _pl
+    tree = ast.parse(_pl.Path(S.__file__).read_text())
+    out = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        for tgt in node.targets:
+            if not (isinstance(tgt, ast.Tuple) and len(tgt.elts) == 2):
+                continue
+            names = [e.id for e in tgt.elts if isinstance(e, ast.Name)]
+            if names[:1] != ["state"]:
+                continue
+            val = node.value
+            if isinstance(val, ast.Tuple) and val.elts:
+                first = val.elts[0]
+                if isinstance(first, ast.Constant):
+                    out.add(first.value)
+                elif isinstance(first, ast.Name):
+                    out.add(getattr(S, first.id))
+            # `state, detail = i3_foreground(...)` contributes that function's
+            # returns, which the sibling ledger above pins.
+    return out
+
+
+def _i3_foreground_return_values():
+    """The state half of every literal `return` in i3_foreground, from the AST."""
+    import ast
+    import pathlib as _pl
+    tree = ast.parse(_pl.Path(S.__file__).read_text())
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, ast.FunctionDef) and n.name == "i3_foreground")
+    out = set()
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Return) and isinstance(node.value, ast.Tuple):
+            first = node.value.elts[0]
+            if isinstance(first, ast.Constant):
+                out.add(first.value)
+            elif isinstance(first, ast.Name):
+                out.add(getattr(S, first.id))
+    return out
+
+
+def test_data_i3_value_set_is_a_closed_ledger():
+    """🔴 THE FIELD-LEVEL LEDGER: `result.data.i3` takes EXACTLY DATA_I3_VALUES.
+
+    Fails when the set GROWS *or* SHRINKS, and covers BOTH producers — the
+    `i3_foreground` returns and the call-site assignments that bypass it. The
+    predecessor of this test enumerated only the former while claiming the latter,
+    which is how a fourth value was added to this field with the suite green.
+
+    Structural rather than behavioural on the GROW side by design: a fifth value
+    added on a branch nothing exercises is exactly the case a driven sweep cannot
+    see, and exactly the case a ledger must catch.
+    """
+    produced = _i3_foreground_return_values() | _call_site_state_values()
+    assert produced == DATA_I3_VALUES, (
+        "the set of values `result.data.i3` can take has changed.\n"
+        f"  produced by the code: {sorted(produced)}\n"
+        f"  declared here:        {sorted(DATA_I3_VALUES)}\n"
+        f"  added:   {sorted(produced - DATA_I3_VALUES)}\n"
+        f"  removed: {sorted(DATA_I3_VALUES - produced)}\n"
+        "If this is a deliberate contract change, update DATA_I3_VALUES *and* the "
+        "docs that publish the vocabulary (README op table, browser CLI usage "
+        "block, _annotate_i3's docstring) in the SAME commit."
+    )
+
+
+def test_data_i3_ledger_is_not_vacuous():
+    """POSITIVE CONTROL for the ledger above: both halves must actually find
+    something. A parser that silently matched nothing would make the ledger a
+    tautology (empty == empty is false here, but a HALF that returns empty would
+    still let the other half carry it and hide a whole producer)."""
+    fg = _i3_foreground_return_values()
+    cs = _call_site_state_values()
+    assert fg, "the i3_foreground return parser found no states — it is wired to nothing"
+    assert cs, "the call-site parser found no states — it is wired to nothing"
+    # The call site must contribute at least the value i3_foreground CANNOT.
+    assert "withheld" in cs, cs
+    assert "withheld" not in fg, fg
+
+
 def test_activate_i3_telemetry_stays_metadata_only(telemetry, monkeypatch):
-    """Even when i3 focusing is APPLIED, the activate telemetry event carries NO
-    page title — only op / outcome / bare domain (the title can hold page
-    content; the i3 step must not leak it into activity.events)."""
+    """Even when i3 focusing is APPLIED (focus:true — the consented path, which
+    is the only one that reaches i3_foreground at all), the activate telemetry
+    event carries NO page title — only op / outcome / bare domain (the title can
+    hold page content; the i3 step must not leak it into activity.events)."""
     spool_dir = telemetry
-    _enable_i3(monkeypatch, returncode=0)
+    _enable_fake_i3(monkeypatch,
+                    windows=[(5, _BRAVE, "SECRET PAGE CONTENT IN TITLE")])
     srv, _ = _serve()
     ext = FakeExtension(srv, executor=lambda c: {
         "tabId": 5, "active": True, "status": "complete",
@@ -2557,8 +4168,13 @@ def test_activate_i3_telemetry_stays_metadata_only(telemetry, monkeypatch):
     ext.start()
     try:
         assert _wait_connected(srv, want=True)
-        st, _ = _req(srv, "POST", "/cmd", {"op": "activate"})
+        st, body = _req(srv, "POST", "/cmd",
+                        {"op": "activate", "focus": True})
         assert st == 200
+        # POSITIVE CONTROL: the i3 step really RAN and raised the window, so the
+        # "no title in telemetry" assertion below is made over a live i3 path —
+        # a skipped/failed i3 step would leak nothing for trivial reasons.
+        assert body["result"]["data"]["i3"] == "applied"
         e = _wait_events(spool_dir, 1)[0]
         p = json.loads(e["payload"])
         assert p["op"] == "activate" and p["outcome"] == "ok"
@@ -2566,6 +4182,266 @@ def test_activate_i3_telemetry_stays_metadata_only(telemetry, monkeypatch):
         # No title anywhere in the emitted event.
         assert "SECRET" not in json.dumps(e)
         assert "title" not in p
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+# --- the focus-steal CONSENT gate (regression, #focus-steal) --------------- #
+# WHY THESE EXIST — the measurement, not a hunch. Correlating 55,003
+# `browser-bridge` cmd events in activity.events against `i3` window-focus
+# events (2026-07-29 .. 2026-08-18): `activate` is the ONLY op with a causal
+# signature — 111/166 calls (66.9%) have a Brave window-focus event within
+# +/-1s, against 1.7-7.3% for every other op, and only 5/166 land in the 1-5s
+# band (a WM raise is immediate; a human context-switch is not). `screenshot`
+# was the leading rival hypothesis (captureVisibleTab only grabs the focused
+# window) and is FLAT: 7.3% at +/-1s vs 8.5% across the 1-5s bands, n=531.
+#
+# Before this gate, `i3_foreground()` ran on EVERY successful activate. The two
+# prior mitigations were a PROSE nudge (HIDDEN_TAB_NOTE steering to `wake`) and
+# an op-allowlist in ONE caller (the sandboxed browser-agent tool) — so every
+# other caller of the `browser` CLI walked straight past both, which is what the
+# 166 activates are. The rule now lives in the single place the screen is
+# actually taken.
+#
+# Each test below is RED at the pre-fix commit (i3_foreground was
+# unconditional); none of them is an invariant guard.
+def test_activate_withholds_the_i3_raise_without_explicit_consent(monkeypatch):
+    """🔴 THE REGRESSION. An activate that does NOT carry focus:true must never
+    reach i3-msg: no subprocess call at all, and the result says so.
+
+    This is the measured focus steal, closed at its source. The assertion is on
+    the SUBPROCESS CALL LIST, not only on the reported state — a state string is
+    something a future refactor can set while still shelling out, and the thing
+    that actually takes the operator's screen is the exec."""
+    calls = _enable_i3(monkeypatch, returncode=0)
+    srv, _ = _serve()
+    ext = FakeExtension(srv, executor=lambda c: {
+        "tabId": 5, "windowId": 1, "active": True, "status": "complete",
+        "url": "https://model-benchmarking.example.test/run",
+        "title": "Model Benchmarking"})
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        st, body = _req(srv, "POST", "/cmd", {"op": "activate"})
+        assert st == 200
+        assert calls == [], (
+            "activate without focus:true shelled out to i3-msg — the operator's "
+            f"screen was taken without consent (argv: {calls})"
+        )
+        assert body["result"]["data"]["i3"] == "withheld"
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_activate_still_activates_the_tab_when_the_raise_is_withheld(monkeypatch):
+    """INVARIANT GUARD (green at origin/main — NOT regression coverage).
+
+    Withholding the RAISE must not break the OP. The Chrome-side tab activation
+    still happens (it is a no-op for real visibility under i3 and takes
+    nothing), so `activate` keeps working as a tab-state change — this is a gate
+    on the WM step alone, not a removal of the op. Base passes it because base
+    also activates the tab; its job is to stop a future "fix" from turning the
+    gate into a removal."""
+    _enable_i3(monkeypatch, returncode=0)
+    srv, _ = _serve()
+    ext = FakeExtension(srv, executor=lambda c: {
+        "tabId": 5, "windowId": 1, "active": True, "status": "complete",
+        "url": "https://model-benchmarking.example.test/run",
+        "title": "Model Benchmarking"})
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        st, body = _req(srv, "POST", "/cmd", {"op": "activate"})
+        assert st == 200
+        data = body["result"]["data"]
+        assert data["active"] is True and data["tabId"] == 5
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_withheld_activate_names_wake_before_the_focus_override(monkeypatch):
+    """The note an agent READS is what it learns, so pin the whole normalised
+    string, not a keyword an unrelated sentence could spell.
+
+    Load-bearing ORDER: the non-intrusive remedy (`browser wake`) must appear
+    BEFORE the `--focus` override, or the note teaches the escape hatch as the
+    headline and the gate decays into a speed bump — which is exactly how the
+    prose-only mitigation in protocol.js's HIDDEN_TAB_NOTE half-failed."""
+    note = S.I3_WITHHELD_NOTE
+    assert "browser wake" in note
+    assert "--focus" in note
+    assert note.index("browser wake") < note.index("--focus"), (
+        "the note offers --focus before it offers `browser wake`; the "
+        "non-intrusive remedy must lead"
+    )
+    # The whole string, normalised — a reword has to come here and be read.
+    assert " ".join(note.split()) == (
+        "the tab is now the active tab of its window, but the Brave WINDOW was "
+        "NOT raised: taking the operator's screen needs explicit consent. If "
+        "you only needed the page to render, use 'browser wake' (un-throttles "
+        "via CDP, moves no focus). Pass --focus only if something genuinely "
+        "needs the real foreground."
+    )
+
+
+def test_withheld_activate_carries_the_note_and_applied_does_not(monkeypatch):
+    """The note rides on the WITHHELD result so the caller is told what did not
+    happen and what to do instead — and is ABSENT when the raise was applied
+    (a note on a successful raise would be noise the agent learns to ignore).
+
+    FIXTURE CHANGED BY #557, meaning unchanged. `applied` is now EARNED via a
+    `get_tree` confirmation, so the old `_enable_i3` stub (bare subprocess.run →
+    rc 0, empty stdout) can no longer reach it — it now parses as an unreadable
+    tree and yields failed/tree_unreadable. The assertion this test exists to
+    make is identical; only the i3 it is told to imagine is real now."""
+    fake = _enable_fake_i3(monkeypatch,
+                           windows=[(77, _BRAVE, _NEW_TITLE)], focused=None)
+    srv, _ = _serve()
+    ext = FakeExtension(srv, executor=lambda c: {
+        "tabId": 5, "windowId": 1, "active": True, "status": "complete",
+        "url": "https://model-benchmarking.example.test/run",
+        "title": _NEW_TITLE})
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        _st, withheld = _req(srv, "POST", "/cmd", {"op": "activate"})
+        assert withheld["result"]["data"]["i3"] == S.I3_WITHHELD
+        assert withheld["result"]["data"]["note"] == S.I3_WITHHELD_NOTE
+        # POSITIVE CONTROL for the "absent when applied" half: the second call
+        # must genuinely reach `applied`, or "no note" would hold for the boring
+        # reason that the raise failed.
+        _st, applied = _req(srv, "POST", "/cmd",
+                            {"op": "activate", "focus": True})
+        assert applied["result"]["data"]["i3"] == "applied", (
+            f"expected a real raise; got {applied['result']['data']['i3']!r}/"
+            f"{applied['result']['data'].get('i3_detail')!r}"
+        )
+        assert "note" not in applied["result"]["data"]
+        assert fake.focused == 77
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_activate_telemetry_records_the_consent_decision(telemetry, monkeypatch):
+    """`payload.focus` distinguishes a withheld activate from a consented one.
+
+    This is what makes the fix FALSIFIABLE with the same instrument that found
+    the bug. The focus-steal rate was measured per-op out of activity.events;
+    without this field a post-deploy re-run of that query cannot separate the
+    two cases, so "the steals stopped" would be a claim with no data behind it.
+
+    It is a bare boolean — no page content — so the PRIVACY contract is
+    unchanged, and `kind` stays "cmd" so the adoption-scan usage signal is
+    unchanged (both asserted here, because a telemetry addition is exactly where
+    those two contracts get broken by accident)."""
+    spool_dir = telemetry
+    _enable_i3(monkeypatch, returncode=0)
+    srv, _ = _serve()
+    ext = FakeExtension(srv, executor=lambda c: {
+        "tabId": 5, "windowId": 1, "active": True, "status": "complete",
+        "url": "https://model-benchmarking.example.test/run",
+        "title": "Model Benchmarking"})
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        st, _ = _req(srv, "POST", "/cmd", {"op": "activate"})
+        assert st == 200
+        e = _wait_events(spool_dir, 1)[0]
+        p = json.loads(e["payload"])
+        assert p["op"] == "activate" and p["focus"] is False
+        assert e["kind"] == "cmd", "the usage signal must not change"
+
+        st, _ = _req(srv, "POST", "/cmd", {"op": "activate", "focus": True})
+        assert st == 200
+        e2 = _wait_events(spool_dir, 2)[1]
+        p2 = json.loads(e2["payload"])
+        assert p2["op"] == "activate" and p2["focus"] is True
+        # No page content rode along with the new field.
+        assert "title" not in p2 and "Model Benchmarking" not in json.dumps(e2)
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_focus_field_never_reaches_the_extension(monkeypatch):
+    """`focus` is a SERVER-side decision: it must be popped like target/tab and
+    never dispatched.
+
+    Two reasons this is pinned. (1) The extension's validateCommand is permissive
+    about unknown fields today, so a leak would be silent — and a future strict
+    validator would turn it into a hard failure of the one op this gate governs.
+    (2) It is what lets this fix deploy with NO extension rebuild and NO Brave
+    restart: the wire contract the extension sees is byte-identical."""
+    _enable_i3(monkeypatch, returncode=0)
+    srv, _ = _serve()
+    seen = []
+
+    def _exec(c):
+        seen.append(dict(c))
+        return {"tabId": 5, "windowId": 1, "active": True, "status": "complete",
+                "url": "https://model-benchmarking.example.test/run",
+                "title": "Model Benchmarking"}
+
+    ext = FakeExtension(srv, executor=_exec)
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        st, _ = _req(srv, "POST", "/cmd", {"op": "activate", "focus": True})
+        assert st == 200
+        acts = [c for c in seen if c.get("op") == "activate"]
+        assert acts, "the activate never reached the fake extension"
+        assert all("focus" not in c for c in acts), (
+            f"the server forwarded the `focus` consent flag to the extension: {acts}"
+        )
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_focus_requested_accepts_only_a_literal_json_true():
+    """Consent is a literal `true`, never Python truthiness.
+
+    The dangerous direction is a STRING: a caller that builds the body by shell
+    interpolation can easily send "false", and `bool("false")` is True — which
+    would read a refusal as consent and hand back exactly the bug this gate
+    closes. Pinned pairwise-distinct: every value below is a different shape,
+    and the two that differ ONLY by type ("true" vs True) sit next to each other
+    so a truthiness mutant cannot pass by coincidence."""
+    assert S.focus_requested({"op": "activate", "focus": True}) is True
+    # Everything else is a refusal.
+    for value in ("true", "false", "1", 1, 0, "", [], {}, None, "yes"):
+        assert S.focus_requested({"op": "activate", "focus": value}) is False, (
+            f"focus={value!r} ({type(value).__name__}) was read as consent"
+        )
+    assert S.focus_requested({"op": "activate"}) is False   # absent → refuse
+    assert S.focus_requested(None) is False                 # not a dict → refuse
+
+
+def test_every_other_op_is_untouched_by_the_gate(monkeypatch):
+    """SCOPE GUARD / INVARIANT GUARD (green at origin/main — NOT regression
+    coverage). The gate must bind `activate` and nothing else: no other op has
+    ever reached i3_foreground, and a mutant that widened or moved the condition
+    would show up as a behaviour change here.
+
+    `wake` is the op that matters most — it is the sanctioned non-intrusive
+    remedy, so if it ever started shelling out to i3-msg the whole fix is moot.
+    Sending focus:true on these ops must ALSO change nothing (it is meaningless
+    outside activate), which is what the second pass pins."""
+    calls = _enable_i3(monkeypatch, returncode=0)
+    srv, _ = _serve()
+    ext = FakeExtension(srv, executor=lambda c: {
+        "tabId": 5, "windowId": 1, "active": True, "status": "complete",
+        "url": "https://model-benchmarking.example.test/run",
+        "title": "Model Benchmarking", "value": "x", "text": "x", "html": "x"})
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        for op in ("wake", "screenshot", "text", "getHtml", "tabs"):
+            for extra in ({}, {"focus": True}):
+                st, _ = _req(srv, "POST", "/cmd", dict(op=op, **extra))
+                assert st == 200, f"{op} {extra} returned {st}"
+        assert calls == [], (
+            f"a non-activate op reached i3-msg — the gate is on the wrong "
+            f"condition (argv: {calls})"
+        )
     finally:
         ext.stop(); srv.shutdown(); srv.server_close()
 
@@ -3433,7 +5309,13 @@ def test_cmd_rate_limited_returns_429_and_emits_throttle(telemetry):
         # Attribution is a COARSE, non-reversible hash of X-Session-Id — NOT raw.
         assert p["sess"] == hashlib.sha256(b"floodsession").hexdigest()[:8]
         raw = _log_file(spool_dir).read_text()
-        assert "floodsession" not in raw          # raw session id NEVER stored
+        # This id carries no tier TAG, so it is `unknown` and no join key may be
+        # written — the raw id appears nowhere. (Since the session-key fix a
+        # `claude:`-tagged id DOES reach the `session` column, deliberately; see
+        # the join-key section below. The invariant here is the fail-closed one,
+        # not "never".)
+        assert "floodsession" not in raw
+        assert p["sess_src"] == "unknown"
         # No deadlock: the server still answers after shedding load.
         assert _req(srv, "GET", "/health")[0] == 200
     finally:

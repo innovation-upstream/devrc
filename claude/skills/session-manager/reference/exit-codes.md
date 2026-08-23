@@ -57,4 +57,56 @@ Under `--claude-only`, every summary count describes the **filtered** set. That 
 direction: counting the unfiltered set would publish `total_sessions: 20` beside an empty
 table and **exit 0** — "ran, found windows" over nothing printed. Counting the filtered set
 makes the same run a real measured zero (**exit 3**), because zero *agent* windows is what
-was asked, and `summary.excluded_non_claude` keeps it from reading as an empty host.
+was asked, and `summary.excluded_shells` keeps it from reading as an empty host.
+
+🔴 **The predicate is the CLASS axis, not the `claude` flag.** `--claude-only` drops
+`CLASS=shell` (via `dropped_by_claude_only` → `row_class`), so a `cluster` dispatch — an
+agent with no pane, hence `claude: null` — is **kept**. The old `r["claude"]` spelling was
+correct only while every row was a tmux pane; with the `kind` axis it silently reclassified
+every cluster agent as a shell and deleted it.
+
+🔴 **And whatever the filter removed is attributed to the FILTER, not to the build.** The
+filter runs *before* `summarize` and `measured_caveats`, both of which derive from the rows
+that survived — so a kind it removed entirely would have shown up in `kinds_produced` as a
+kind this build never emits, and rendered *"X is ENUMERATED but NOT PRODUCED, so no such row
+appears and its absence is NOT a measured zero"*, which would be false in all three clauses.
+`caveats.kind_scope.kinds_excluded_by_filter` (mirrored at
+`summary.kinds_excluded_by_filter`) names those kinds, and the rendered caveat carries an
+explicit *"a FILTER REMOVED every kind=… row this scan produced"* clause instead. The key is
+**absent when no filter ran** and `[]` when one ran and removed no whole kind — the same
+not-measured-vs-measured-none distinction as `excluded_shells` being `null` rather than `0`.
+
+Reachable today with no cluster row anywhere: `--claude-only` over a host whose tmux rows are
+all bare shells removes the last `tmux` row.
+
+🔴 **`excluded_shells` was `excluded_non_claude` until this change, and THE SCRIPT IS THE
+AUTHORITY ON WHICH NAME IS LIVE — not this file.** These skill docs deploy as a **nix-store
+copy**, so they only change on a `home-manager switch`; `scripts/session-manager` is read from
+the checkout. Between a `git pull` and the switch the two genuinely disagree, and the doc is
+the stale one. Settle it by reading the emitter, never the prose:
+`git grep -n 'excluded_' scripts/session-manager`, or just run a scan and look at the key.
+Same rule for every field named here.
+
+## The consumer-facing text, moved out of the SKILL body
+
+_Moved verbatim out of `SKILL.md` on 2026-08-21, when the body was cut from 23,233 B. The core keeps every load-bearing claim below in compressed form; this is the wording it was cut from, and the evidence behind it._
+
+
+## 🔴 Read the exit code — the two zeroes are different facts
+
+| code | meaning |
+|---|---|
+| `0` | ran, found windows (**including** a partial scan where one host was unreachable) |
+| `2` | usage / bad `<session>:<window>` / **`tail`: the host answered, no such window** |
+| `3` | every requested host answered and the answer is a **real zero** |
+| `4` | **no** host could be reached — the zero is unmeasured, not measured |
+| `5` | **`tail` only**: the host answered and there is **no tmux server** on it |
+
+Rationale, and why 5 had to be split out of 3: this file, below.
+
+Same discipline inside the payload: `hosts.<n>.reachable`/`.error` describe the
+**`list-panes`** call, `.windows_measured`/`.windows_error` the **`list-windows`** call, and
+`.captures_measured`/`.captures_status` the **capture batch** — three independent
+measurements, and one succeeding says nothing about the others. `clickhouse.status` must be
+`ok` before `rows: []` is believable. **Never read a bare count without its status.**
+

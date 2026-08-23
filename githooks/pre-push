@@ -41,14 +41,39 @@ URL="${2:-}"
 STDIN_DATA="$(cat || true)"
 
 REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
-GIT_DIR="$(git rev-parse --git-dir 2>/dev/null || true)"
+# 🔴 NOT NAMED `GIT_DIR`, AND THE NAME IS THE WHOLE POINT. In bash, assigning to
+# a variable that is ALREADY EXPORTED keeps it exported — so if any caller (an
+# outer hook, a wrapper, a shell where someone exported it) has GIT_DIR in the
+# environment, `GIT_DIR=…` here silently hands this repository's git dir to
+# every child, including `tests-on-push.sh` -> `run-tests.sh` -> pytest. GIT_DIR
+# OVERRIDES `-C`, so the whole devrc suite would then build its fixtures inside
+# THIS checkout — the shape of the 2026-08-21 incident, in which
+# `refs/heads/main` was rewritten with fixture commits and pushed.
+#
+# 🔴 BUT THE PRECONDITION IN THE FIRST SENTENCE IS LOAD-BEARING AND #683's PR
+# BODY DROPPED IT, turning a hygiene fix into a false diagnosis that was then
+# relayed onward as established fact. **Measured on git 2.55.0, as a PAIR: a
+# `git push` from a `GIT_DIR`-free parent gives `pre-push` only `GIT_EXEC_PATH`
+# and `GIT_PREFIX` (plus the caller's own `GIT_AUTHOR_*`/`GIT_CONFIG_*`) — no
+# `GIT_DIR`; the same push with `GIT_DIR` exported by the caller passes it
+# straight through.** So pushing does not, on its own, hand `GIT_DIR` to
+# anything; the old line was a route only when some OUTER caller had already
+# exported that name. A live scan of the box found 46 processes carrying some
+# `GIT_*` variable and ZERO carrying `GIT_DIR` (13 unreadable).
+# 🔴 THE ROOT CAUSE OF THE INCIDENT — what exported `GIT_DIR` into that gate run
+# — REMAINS UNIDENTIFIED. This rename removes a real route and is worth keeping;
+# it is not the explanation. `scripts/testlib/gitenv.py` closes the mechanism
+# from the suite's side whatever set the variable, and
+# `scripts/tests/test_git_repo_isolation.py` asserts no shell script that can
+# reach the runner assigns to one of those names.
+HOOK_GIT_DIR="$(git rev-parse --git-dir 2>/dev/null || true)"
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 
 # --- 1. Chain to a repo-local pre-push hook, if any (and it isn't us) --------
 # Candidates: the repo's .git/hooks/pre-push and (defensively) a tracked
 # .githooks/pre-push. Skip any path that resolves to THIS file (no recursion).
 for candidate in \
-  "${GIT_DIR:+$GIT_DIR/hooks/pre-push}" \
+  "${HOOK_GIT_DIR:+$HOOK_GIT_DIR/hooks/pre-push}" \
   "${REPO_ROOT:+$REPO_ROOT/.githooks/pre-push}" \
 ; do
   [ -n "$candidate" ] || continue

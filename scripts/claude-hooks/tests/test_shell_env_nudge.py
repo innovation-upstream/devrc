@@ -1,11 +1,25 @@
 #!/usr/bin/env python3
 """Unit tests for shell-env-nudge.analyze() + the hook's IO contract.
 Run: python3 scripts/claude-hooks/tests/test_shell_env_nudge.py"""
-import os, sys, json, subprocess, importlib.util
+import os, sys, json, shutil, subprocess, tempfile, atexit, importlib.util
+
+# 🔴 HOME ISOLATION — before anything reads `~`, including the hook import below.
+# Same defect as test_search_tool_nudge.py: this file DELETES a cache entry and
+# spawns the hook, and shell-env-nudge.py resolves both its repo/kubeconfig map
+# and its CACHE_DIR from `os.path.expanduser("~")` == $HOME on POSIX. Against the
+# real home that writes and removes files in `~/.cache/claude-shell-env-nudge/`.
+# Redirecting $HOME moves the hook's map AND the suite's expectations together —
+# they are built from the same constant — so the assertions are unchanged.
+TEST_HOME = tempfile.mkdtemp(prefix="shell-env-nudge-HOME-")
+os.environ["HOME"] = TEST_HOME
+atexit.register(shutil.rmtree, TEST_HOME, ignore_errors=True)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 HOOK = os.path.join(HERE, "..", "shell-env-nudge.py")
-HOME = os.path.expanduser("~")
+HOME = os.path.expanduser("~")  # == TEST_HOME; the hook resolves the same value
+assert HOME == TEST_HOME, (
+    "HOME redirection did not take effect (%r != %r) — every path below would "
+    "resolve into the operator's real home." % (HOME, TEST_HOME))
 
 spec = importlib.util.spec_from_file_location("shell_env_nudge", HOOK)
 assert spec and spec.loader
@@ -75,6 +89,15 @@ check("io non-bash silent", (rc3, out3), (0, ""))
 p = subprocess.run([sys.executable, HOOK], input="not json", capture_output=True, text=True)
 check("io malformed rc", p.returncode, 0)
 
+# 🔴 ISOLATION POSITIVE CONTROL, counted BEFORE the cleanup below removes it.
+# "the real home was untouched" is the same reassuring zero a suite that stopped
+# driving the hook at all would print, so the count under the throwaway HOME is
+# measured and reported beside it. The inherited-home half is measured from
+# outside, in scripts/tests/test_hook_suites_do_not_touch_the_inherited_home.py.
+TEMP_HOME_FILES = sum(len(fs) for _, _, fs in os.walk(TEST_HOME))
+check("isolation positive control: the suite wrote state under the temp HOME",
+      TEMP_HOME_FILES > 0, True)
+
 if os.path.exists(cache):
     os.remove(cache)
 
@@ -84,3 +107,5 @@ if fails:
         print("  -", f)
     sys.exit(1)
 print("all shell-env-nudge tests passed")
+# Machine-readable, and PARSED by the external isolation guard — keep the wording.
+print(f"isolation: {TEMP_HOME_FILES} files under the temp HOME")

@@ -241,7 +241,7 @@ has not been exercised against a third-party authenticated API beyond that.)
 | `key`        | top frame: **CDP `Input.dispatchKeyEvent`** (trusted); `--frame`: **SYNTHETIC** key via `chrome.scripting`; one bounded key; `key` required | `{url,key,frame,trusted}` |
 | `wake`       | **UN-THROTTLE the tab WITHOUT touching focus** — CDP `Emulation.setFocusEmulationEnabled` (+ best-effort `Page.setWebLifecycleState`) held for a bounded settle (`waitMs`, default 1.5s, clamped ≤**6s**) so a background SPA gets real animation frames and renders, then **explicitly disables focus emulation** and detaches. Own-tab-scoped like every CDP op. **This is the remedy for a hidden/empty read — not `activate`.** ⚠ the un-throttled STATE ends at detach (measured); rendered DOM persists | `{tabId,url,title,woke,visibilityState,readyState,applied,skipped,settleMs,note}` |
 | `--wake` on `text`/`html`/`eval` | the SAME un-throttle applied **inside the same CDP session as the read**, for a read that must OBSERVE live un-throttled state (rather than the DOM `wake` left behind). Opt-in only — the default read path is unchanged (see below) | the read's normal shape + `{woke,wake:{applied,settleMs}}` |
-| `activate`   | **FOREGROUND the tab** — `chrome.tabs.update(tab,{active:true})` + `chrome.windows.update(windowId,{focused:true})`, then an OPTIONAL bounded wait-for-`status:"complete"` + paint settle (`waitMs`, clamped ≤8s; a discarded/never-completing tab returns promptly — no wedge). **⚠⚠ STEALS THE OPERATOR'S SCREEN** — the one intrusive op, and a **LAST RESORT**: use it only when something genuinely needs the REAL foreground (a permission prompt, a native picker, seeing it yourself). For a throttled/unrendered tab use `wake`. Needed at most **once per tab, never per read**. **Operator-only — absent from the autonomous agent's op set entirely.** **i3:** the server also raises the Brave window via `i3-msg` | `{tabId,windowId,url,title,active,status,i3}` |
+| `activate`   | **FOREGROUND the tab** — `chrome.tabs.update(tab,{active:true})` + `chrome.windows.update(windowId,{focused:true})`, then an OPTIONAL bounded wait-for-`status:"complete"` + paint settle (`waitMs`, clamped ≤8s; a discarded/never-completing tab returns promptly — no wedge). **⚠⚠ STEALS THE OPERATOR'S SCREEN** — the one intrusive op, and a **LAST RESORT**: use it only when something genuinely needs the REAL foreground (a permission prompt, a native picker, seeing it yourself). For a throttled/unrendered tab use `wake`. Needed at most **once per tab, never per read**. **Absent from the autonomous agent's op set** (not reachable via `OP_TO_SERVER`). **i3:** the server also raises the Brave window via `i3-msg`, but only when the command asks for it (`focus:true`; the CLI's `--focus`, defaulted on when stdout is a TTY) — otherwise the raise is `withheld` and the result carries a note. On a host with no i3 the answer is `skipped` whatever the flag says. This is a **default**, not an authorization boundary — see *Opt-in by default*. 🔴 `applied` is EARNED (#557): i3-msg exits 0 even for a criteria that matched NOTHING, so the server confirms via `get_tree` that a window was found and ended up focused. `i3_detail` says why — `focused` / `no_match` / `not_focused` / `tree_unreadable` / `focus_error` / `unavailable` / `no_title` / `not_requested`. A withheld raise makes no `get_tree` round trip at all | `{tabId,windowId,url,title,active,status,i3,i3_detail,note?}` |
 | `upload`     | **CDP `DOM.setFileInputFiles`** — resolve the `<input type=file>` at `selector` to a RemoteObject, VERIFY it is a file input, then hand Chrome the ABSOLUTE `path` (Chrome reads the file itself — **no bytes cross the bridge**); `--frame` routes into a same-process iframe OR a cross-origin OOPIF (incl. a **NESTED** one — same bounded cascade + caps as `eval --frame`). Own-tab, #189-bounded, NO raw-CDP passthrough. **Data-exfil-capable → the server AUDIT-LOGS every upload** (op + target domain + path) and it is **OPERATOR-ONLY — not in the autonomous agent's default op set** (`BROWSER_AGENT_ALLOWED_OPS` opt-in only). `selector`+`path` required | `{ok,selector,frame,url,files:[basename]}` |
 
 `open`/`close` are dispatched to the extension; `release` (drop ownership, don't
@@ -874,14 +874,170 @@ run `browser wake` on the tab, then re-issue the frame read.
 
 **`activate` stays** — it is still the honest answer when something genuinely needs
 the real foreground (a permission prompt, a native picker, verifying with your own
-eyes). It just stops being the default advice, and it is now **operator-only**
-(absent from the agent's op set entirely).
+eyes). It just stops being the default advice, and it is absent from the
+autonomous agent's op set entirely.
 
 **✅ LIVE-VERIFIED against the operator's real Brave** using the sequence in *Live
 verification* below: `WAKE-RIG-SHELL` → `WAKE-RIG-RENDERED`, `visibilityState`
 `"visible"` during the wake and back to `"hidden"` after detach, and
 `xdotool getactivewindow` **unchanged** before/after — the page rendered and the
 operator's focus never moved.
+
+### The focus steal is OPT-IN BY DEFAULT (2026-08-18)
+
+The two mitigations above are a **prose** nudge (reword `HIDDEN_TAB_NOTE` so the
+model reaches for `wake`) and an **op-allowlist in one caller** (drop `activate`
+from `OP_TO_SERVER`). Re-measuring three weeks later says that combination only
+half-held, and says exactly why: the allowlist binds the sandboxed browser-agent
+tool and *nothing else*, so Claude Code's Bash tool, an opencode session's bash
+tool, and any script still reach `activate` through the ordinary `browser` CLI.
+
+🔴 **What this change IS, and what it is NOT.** It flips the **default** for the
+host-side raise from *always* to *only when asked*. That is the whole of it, and it
+is worth having: every one of the 166 measured activates came from a caller that
+never asked, so the default is what was costing the operator their screen.
+
+It is **not** an authorization boundary, and the README must not be read as
+claiming one. Any caller that can reach the bridge can still take the screen:
+
+* the refusal note names the flag (`--focus`) — deliberately, so a caller with a
+  real need is not stuck — which means an agent that reads its own error output can
+  simply retry with it;
+* the `browser` CLI is on `PATH` for every agent that has a shell;
+* and `/cmd` is plain loopback HTTP, so `curl` plus the token from
+  `~/.config/browser-bridge/token` bypasses the CLI entirely.
+
+The only *structural* barrier remains the sandboxed browser-agent's op allowlist,
+which binds that one tool. Everything else here is a well-chosen default. Calling
+it "operator-only" or "requires explicit consent" would overstate it into a
+security claim it cannot support.
+
+Measured out of `activity.events` (55,003 `source='browser-bridge' kind='cmd'`
+rows, **cut-off 2026-07-29 → 08-18**, correlated against `source='i3'
+kind='window-focus'` rows for `app='Brave-browser'`). ⚠ The PR body quotes
+**108/163 (66.3%)** for `activate`: same population, cut-off extended to 08-19.
+Both are right for their window; this table's numbers are the ones used below.
+
+| op | n | focus event within ±1s | in the 1–5s bands |
+|---|---|---|---|
+| **`activate`** | 166 | **111 (66.9%)** | 5 |
+| `screenshot` | 531 | 39 (7.3%) | 45 |
+| `nav` | 661 | 34 (5.1%) | 52 |
+| `open` | 477 | 17 (3.6%) | 41 |
+| `eval` | 3,586 | 106 (3.0%) | 214 |
+| `text` | 2,396 | 43 (1.8%) | 103 |
+| `wake` | 1,101 | 19 (1.7%) | 52 |
+
+`activate` is the only op whose mass concentrates at ±1s while the 1–5s bands sit
+near empty — the shape a WM-driven raise makes, and the shape a human
+context-switch does not. Every other op is flat across both bands, i.e. at
+background. In particular **`screenshot` does not steal focus**: the leading rival
+hypothesis was that `chrome.tabs.captureVisibleTab` structurally needs the
+foreground, and it does — which is precisely why the extension only takes that
+fast path for a tab that is *already* visible and routes everything else through
+CDP.
+
+So the rule moved to the one place the screen is actually taken. `i3_foreground()`
+now runs only when the command carries `focus:true` (`focus_requested`, a literal
+JSON `true` — never Python truthiness, so a shell-interpolated `"false"` cannot
+read as consent). Without it the result reports `i3:"withheld"` plus a note naming
+`browser wake` *before* it names `--focus`. The `browser` CLI sends the flag
+explicitly on every activate and defaults it to **`[ -t 1 ]`** — a human typing
+`browser activate` in a terminal gets today's behaviour unchanged; an agent on a
+pipe does not. Over the same window all 166 activates came from non-interactive
+callers and 0 of the 9 interactive `browser` commands were an activate, so the
+default costs the operator nothing.
+
+Two deployment properties fall out of putting the gate here. The `focus` field is
+**popped before dispatch** like `target`/`tab`, so the extension's wire contract is
+byte-identical and the fix needs **no extension rebuild and no Brave restart** —
+only a `home-manager switch` for `server.py` (the CLI is an `mkOutOfStoreSymlink`
+and is live from the working tree). And `payload.focus` is recorded on the activate
+telemetry event, so the same query that established the bug can falsify the fix:
+after deploy, consented activates should still correlate and withheld ones should
+fall toward background.
+
+🔴 **Expect a RESIDUAL, and do not score it as the gate failing.** This change gates
+the host-side `i3-msg` raise **only**. The extension also calls
+`chrome.windows.update(windowId,{focused:true})` unconditionally
+(`extension/service_worker.js:1403`), and nothing here gates that.
+
+**What is ESTABLISHED** (cited, not inferred): `focus_on_window_activation` is
+**unset** in `nix/i3/config.nix`, so i3's documented default applies — i3 4.24
+userguide §4.30 *Focus on window activation*: "**smart** — This is the default
+behavior. If the window requesting focus is on an active workspace, it will receive
+the focus. Otherwise, the urgency hint will be set." i3's own example of a window
+requesting focus is `google-chrome www.google.com`. (Verified against the i3 actually
+running here: `readlink -f $(which i3)` and the userguide quoted above are the **same
+store path**, `…-i3-4.24`, so this is the doc for the binary in use, not a version
+guess. `grep -rn focus_on_window_activation nix/` returns nothing.) So a request from
+Brave **on the visible workspace would be granted focus**, and the older
+"Chrome-side focus is a no-op under i3" wording (since corrected in the CLI and
+`server.py`) was false as an unconditional claim — it holds only cross-workspace,
+which is the usual agent case and exactly why #196 needed `i3-msg`.
+
+**What is NOT established:** whether `chrome.windows.update({focused:true})`
+actually emits that X11 activation request. It is the standard mechanism and the
+extension's own comment says it "REQUESTS focus", but **nobody has measured it** —
+not this PR, not the audit. So the Chrome-side path's contribution is **unknown,
+not zero and not proven non-zero**.
+
+Both paths fired together on every pre-fix activate, so the table above cannot
+attribute its **111/166 (66.9%)** between them. Therefore, post-deploy:
+
+* **withheld activates should fall TOWARD background, not necessarily TO it**;
+* **the baseline to compare against is 66.9% (111/166)**, and background for a
+  non-focus-moving op is **~2–7%** (see `wake` 1.7%, `eval` 3.0%, `screenshot`
+  7.3% in the table). A withheld residual landing in that band is consistent with
+  the gate holding; only a residual **at or near 66.9%** indicates it leaked;
+* a residual **between** those — say 15–40% — is the interesting case and means
+  the Chrome-side path contributes materially. That is a finding, not a failure.
+
+🔴 **The discriminator, so this is decidable either way.** i3 focus events carry
+`payload.workspace`. Split withheld activates by whether Brave was **already on the
+visible workspace** at the time:
+
+* residual concentrated in the **same-workspace** subset → the Chrome-side path is
+  real, `smart` granted it, and the gate is working as designed;
+* residual spread across **both** subsets → something is still calling `i3-msg`,
+  i.e. the gate genuinely leaked.
+
+That split does not depend on knowing the answer in advance, which is why it is the
+check to run rather than either claim above.
+
+🔴 **And treat an absent `focus` field as UNKNOWN, never as pre-deploy.** Throttled
+(HTTP 429) activates return from their own branch *before* the `payload.focus`
+augmentation runs, so a row can legitimately carry no `focus` key on the new server.
+A falsification query that buckets "no focus field" as "old server" will silently
+mix throttled new-server rows into the pre-deploy bucket. Bucket it as UNKNOWN and
+report its count separately.
+
+**Trade-off, stated plainly:** a script or an agent that genuinely wanted the
+foreground now has to ask for it, and will silently not get it until someone reads
+the `withheld` note and adds `--focus`. That is the intended direction — a caller
+that wanted the screen can re-run, whereas a caller that did not want it cannot
+un-interrupt the operator — but it *is* a behaviour change for every existing
+non-interactive `browser activate` caller.
+
+🔴 **VERIFICATION STATUS OF THIS SECTION — read it against the ✅ badge above, which
+is NOT about `activate`.** That badge covers the **`wake`** rig (`open` → `text` →
+`wake` → `text`); its cited sequence contains no `activate` call at all. For the
+consent gate:
+
+* **`browser activate --focus` has never been run against a real i3 — by anyone.**
+  Not in this PR (no live reproduction was performed: reproducing the bug means
+  taking the operator's screen), and not in #557, whose own commit message says
+  nothing was checked against a live i3 either. **The escape hatch is the
+  unverified surface.**
+* The **withheld** path is the half that *was* observed, and it is unverified in a
+  much weaker sense: it never enters `i3_foreground` at all, so there is no i3
+  interaction to get wrong. That is asserted on the fake's call log
+  (`test_refused_activate_makes_no_i3_round_trip_at_all`), not inferred.
+* Everything else rests on 55,003 telemetry rows plus the code path — see the table
+  above — and on the suite, not on a live run.
+
+So: the path this change **closes** is well evidenced; the path it **leaves open for
+a human who types `--focus`** is the one nobody has watched work end to end.
 
 ### Real false-outage report — a hidden tab that looked like a production outage
 
@@ -995,7 +1151,7 @@ debugging this browser" banner window tiny and prevents a leaked attachment.
 Cancel). All decision logic (attach-scope validation, the always-detach
 orchestration `withCdpSession`, frame enumeration/resolution, the key/coordinate
 math, the frame read-expression builders) is **pure + unit-tested** in
-`extension/protocol.js` (`../tests/cdp_protocol.test.mjs`); `service_worker.js` is
+`extension/protocol.js` (`scripts/browser-bridge/tests/cdp_protocol.test.mjs`); `service_worker.js` is
 only the thin `chrome.debugger` side-effect glue.
 
 **Security model — the `debugger` permission is the biggest blast radius, so:**
@@ -1364,9 +1520,308 @@ unchanged.
 distinct `{"event":"throttled","key":…,"reason":…,"sess":…}` line AND emits a
 telemetry event (`outcome="throttled"`, `payload.reason`) into `activity.events`.
 `payload.sess` is a **coarse, non-reversible** fingerprint (first 8 hex of
-sha256 of the `X-Session-Id`) — enough to attribute a flood to a session without
-storing the raw id, kept metadata-only (no page content). This is the ONLY event
-that carries the session hash.
+sha256 of the `X-Session-Id`), kept metadata-only (no page content). This is the
+ONLY event that carries the session hash.
+
+`sess` was **kept** when the `session` join key landed (below) rather than
+replaced by it: the column is filled for the `claude:` tier and non-nested calls
+only, so a flood driven from a `tmux:`/`sid:`/`ppid:`/untagged id — or from a
+nested `browser agent` run — is exactly the case where you still need *some*
+stable handle to tell one flooder from two.
+
+## Session as a telemetry join key
+
+**The bug (measured 2026-08-18).** Every `source='browser-bridge'` row in
+`activity.events` had an **empty `session` column** — 0 of 6,937 over 14 days —
+while `claude`, `opencode`, `keys`, `tmux` and `zsh` filled it 100%. The value
+already reached the server (`X-Session-Id`, used for tab-ownership routing); it
+was simply never passed to `emit_cmd_event`. So a browser-skill call could not be
+joined to the agent session that made it, and "which sessions used the browser
+skill" had to be answered by scanning 1.5M transcript records.
+
+### Hazard 1 — only some tiers are join keys
+
+The id is **tagged** with the tier that produced it (everything before the first
+`:`), and the server reads that tag. Reading a tag the CLI emits on purpose is not
+shape inference; deciding from the value's *form* ("looks like a uuid → claude")
+would be, and is forbidden.
+
+| `X-Session-Id` | `payload.sess_src` | fills `session`? | why |
+|---|---|---|---|
+| `claude:<uuid>` | `claude` | **yes** — the bare `<uuid>` | it IS Claude Code's session uuid, the same value `source='claude'` rows store |
+| `opencode:<id>` | `opencode` | **yes** — the bare `<id>` | it IS opencode's session id, the same value `source='opencode'` rows store (`activity-plugin.js` emits `session: input.sessionID`); exported per bash-tool call by `scripts/opencode/plugin/session-env.js` |
+| `tmux:%3` | `tmux` | no | a pane id is stable across **many unrelated sessions**; storing it would silently merge them — worse than empty |
+| `sid:<sid>:<start>` | `sid` | no | no other source records it |
+| `ppid:<pid>:<rand>` | `ppid` | no | last-resort random token |
+| `synthetic:…` | `synthetic` | no | an id the CLI made up on purpose (the `emulate --recreate` close) |
+| anything untagged, absent, or empty | `unknown` | no | fail closed |
+
+Only the **first** colon splits (a `sid:`/`ppid:` id contains more). An id with no
+tag is **never** promoted — a bare uuid is exactly the value it would be tempting
+to accept, and the opencode tool's own default is the literal `browser-agent`.
+
+### Hazard 2 — a nested `browser agent` run is not its invoker
+
+`browser agent` captures the id of the session that **invoked** it
+(`--print-session-id`) and forwards it to the nested opencode tool, which sends it
+as `X-Session-Id`. Right for routing and the audit trail; **wrong** for the
+`session` column, which means *the agent session that issued this command*. Left
+alone, one `browser agent "<goal>"` call would become N browser calls credited to
+the operator's own session — fabricated rows in the `session` JOIN column
+(~581 nested rows in 14d, ~11% of bridge commands).
+
+So the nested tool declares `X-Session-Origin: browser-agent`. When that header is
+present the server writes **no** `session`; the forwarded id is recorded as
+`payload.origin_session` (the causal **parent**) beside `payload.origin`. Giving
+the nested session an id of its own is a later change.
+
+### Hazard 3 — `CLAUDE_CODE_SESSION_ID` leaks into opencode
+
+opencode sets `process.env.OPENCODE="1"` in a yargs **top-level `.middleware()`**
+— registered before every `.command(...)`, so it runs for every subcommand — and
+hands its tool shells `{...process.env}`. Launch opencode from a Claude Code bash
+call and the outer session's `CLAUDE_CODE_SESSION_ID` rides all the way down: a
+live env dump from inside an opencode bash tool still had it.
+
+Derived against the **pinned** build (`PINNED_VERSION` in
+`scripts/tests/test_opencode_engine.py`) — named rather than copied so it cannot
+go stale — and confirmed byte-identical in the newer build on this host's own
+profile, which is the one a real `opencode run` here actually executes. The
+assignment is therefore not specific to whichever of the two you land on.
+
+So inside opencode that variable names an **ancestor**, not the session issuing
+the command. A plain `opencode run …` whose bash tool shells out to `browser`
+would otherwise have the bridge credit the **outer** Claude session with browser
+usage it never performed.
+
+**🔴 The id is indistinguishable from a direct call.** There is nothing in it to
+branch on: it *is* the outer session's id, correctly tagged `claude:`. So the
+server cannot tell the two apart by inspection — the caller has to say so.
+
+That is the **same question** `browser agent` already answers (hazard 2), so it
+gets the **same mechanism**: `X-Session-Id` is left completely alone and the
+nested-run fact travels beside it.
+
+```
+X-Session-Id:     claude:<uuid>        # unchanged — routing, ownership, not_owned_tab
+X-Session-Origin: opencode-inherited   # this command was issued by something nested
+```
+
+`origin` is a two-value enum — `browser-agent` | `opencode-inherited` — both
+meaning "issued by something nested under `origin_session`", which is precisely
+true of both cases. The server needed **no change**: the origin path already
+suppresses `session` and records `payload.origin` + `payload.origin_session`.
+
+Why this beats re-tagging the id, which was tried first and rejected:
+
+- **Routing is byte-identical.** Tab ownership, `--tab`, `not_owned_tab` and the
+  `$( … )` stability property are untouched, because the id is untouched. A
+  re-tagged id would have silently stopped an opencode-inner call from sharing
+  ownership with its outer session. The equivalence is now machine-checked: the
+  id is derived with and without `OPENCODE` and both must equal the same pinned
+  literal.
+- **One question, one mechanism.** Two ways to say "this is nested" inside one
+  system is a defect regardless of which is better in isolation.
+- It reuses a path that is already tested, rather than adding a parallel one.
+
+The origin is declared only when a Claude id was **actually inherited** — the
+condition reads the *derived* id (`claude:*`) rather than re-testing the env
+vars, so it cannot drift out of step with the precedence chain. An opencode
+session run interactively with no Claude ancestor derives `tmux:`/`sid:`/`ppid:`,
+declares nothing, and behaves exactly as it does today.
+
+### Hazard 3, resolved — the opencode session now has an id of its own
+
+`scripts/opencode/plugin/session-env.js` registers a `shell.env` hook that
+exports `OPENCODE_SESSION_ID` into every bash-tool invocation. opencode builds
+the tool environment as `{...process.env, ...pluginEnv}` — **plugin wins** — so a
+value present there was written for *that* call by the session issuing it.
+`derive_session_id` reads it as **tier 0, above the claude tiers**, because the
+claude variables may be an ancestor's. The bare half joins `source='opencode'`
+rows, which carry the same `sessionID`.
+
+```
+X-Session-Id:  opencode:<id>     # attributed — no origin header is sent
+```
+
+Two consequences, both deliberate:
+
+- **🔴 The token did NOT retire.** An earlier version of this section said the
+  `opencode-inherited` token would "become dead code to delete". That is wrong,
+  and it is kept as the **fallback** for every way `OPENCODE_SESSION_ID` can be
+  absent while `OPENCODE` is set — deploy skew (the CLI is a live
+  `mkOutOfStoreSymlink`, the plugin a `home.file` copy needing a switch), an
+  opencode process started before the plugin was deployed, opencode's **PTY**
+  path (which fires `shell.env` with `{cwd}` only, so the hook writes the
+  variable empty rather than letting a parent's stale id survive), and a
+  plugin-load failure. In each of those the derived id is the inherited claude
+  uuid again and the suppression must come back. The `claude:*` case needed no
+  edit to do this: with the new tier present it simply stops matching.
+- **🔴 Routing DOES move for this population** — the one place the "the id is
+  never touched" claim above no longer holds. An opencode session that used to
+  inherit its Claude parent's id and drive that parent's owned tab now owns a tab
+  of its own and must `open` one. `browser agent` is unaffected: its agent runs
+  with `"*": deny` (no shell), drives a forced tab through the custom tool, and
+  that tool sends the wrapper-captured parent id plus its own
+  `X-Session-Origin: browser-agent`.
+
+  🔴 **"Must `open` one" is the happy path; nothing refuses when it doesn't.**
+  `emulate` is the only member of `OWNED_TAB_ONLY_OPS`, so a session owning no
+  tab and passing no `--tab` resolves to `None` for `nav`/`click`/`type`/`key`
+  and **the extension drives the ACTIVE tab — the operator's screen**. Before
+  this change the nested run inherited the parent's ownership and landed on the
+  parent's tab instead. Not widened blind: the same fallback is the documented
+  one-shot "read the tab I have open" idiom, and the four writes are the part
+  that matters. `open` first inside opencode.
+
+  🔴 **`browser --tab <parent's tab> emulate` now raises `not_owned_tab`** from
+  inside opencode — `emulate` requires the resolved tab to be one *this* session
+  owns. Narrow (that one op) but it regresses the explicit-`--tab` workaround
+  `reference/tabs-instances.md` teaches for concurrent drivers; that file now
+  says so, and the remedy is for each driver to `open` its own tab.
+
+  ⚠ **An opencode `task` subagent gets a DIFFERENT id, not its parent's.**
+  Measured in the shipped 1.18.18 binary: `TaskTool.execute` creates a child
+  session and the shell tool passes that child's `sessionID`. Telemetry stays
+  coherent — each row names the session that really ran the tool — but **routing
+  fragments**: parent and subagent own different tabs. This is the exact mirror
+  of Claude Code, where sibling subagents *share* one id and collide on one tab.
+  Same remedy (`open`, then thread `--tab`), opposite cause.
+
+**Known residual, not fixed here.** The mirror nesting — a Claude Code session
+launched *from* an opencode bash tool — inherits `OPENCODE_SESSION_ID` and is
+credited to that outer opencode session. No environment variable separates the
+two directions (both ids are equally inheritable by descendants), and the shape
+this fixes is by far the common one.
+
+**Known follow-up, not fixed here.** `browser-agent` still forwards its
+*caller's* id with `X-Session-Origin: browser-agent`, so a nested agent run is
+still suppressed rather than attributed to its own (now-identifiable) opencode
+session. Fixing it means the tool sending its own id in a *new* field —
+`X-Session-Id` must keep carrying the parent's, because that is what routes the
+run to the forced tab.
+
+### Contract
+
+- `payload.sess_src` is **always** set on a `/cmd` event, so every row is
+  self-describing about why it does or does not carry a key.
+- `session` holds the **bare** id (the tag stripped) so it compares `=` against
+  `source='claude'` rows with no `replaceOne()` at the join site.
+- Stored **raw, not hashed** — deliberately. A hash would make browser-bridge the
+  one source needing `hex(SHA256())` at query time, and a forgotten join returns
+  zero rows, which reads as a valid "no sessions matched" answer.
+- An id over 200 chars or carrying a control character is **dropped whole**, never
+  truncated — a truncated join key is a *wrong* join key.
+- **Only the heartbeat** is server-originated and carries none of these fields.
+  `/whoami` and `/health` are **operator** calls — `browser whoami` / `browser
+  health` are subcommands a person runs, and the CLI sends its ordinary session
+  headers on them because `_curl` is one code path — so they are attributed like
+  any other command. They were previously excluded on the stated grounds of
+  having "no caller session", which was false for these two and made ONE
+  operation have TWO outcomes: `whoami` via POST `/cmd` was attributed, the same
+  `whoami` via GET was not (125 rows, 2.0% of `kind='cmd'` over 14d).
+- Both header vocabularies are **validated closed sets**, not documentation. A
+  `sess_src` tag outside the tier list becomes `unknown` and carries no id; an
+  `origin` outside the two tokens is recorded as `invalid`. Both arrive on
+  caller-supplied headers, so without this each is an unbounded-cardinality
+  column.
+- **Origin suppression keys off header PRESENCE, never the value.** Any present
+  value — including empty, oversized or control-char — suppresses `session`.
+  Losing attribution beats fabricating it.
+- `origin_session` passes the **same tier gate** as `session`: a non-joinable
+  parent id (`tmux:`/`sid:`/`ppid:`) is not recorded, because a reader grouping by
+  it would merge unrelated sessions exactly as they would on `session`.
+- `kind='cmd'` is unchanged — it is the usage signal `adoption-scan.py` reads.
+- Best-effort is unchanged: every field above is written inside `emit_cmd_event`'s
+  swallowing `try`, off the critical path.
+
+**Privacy.** A deliberate widening of the metadata-only contract, and a narrow
+one: the agent session's own opaque handle is not page content, is not derived
+from anything the browser saw, and is minted by the local agent harness before
+any browser command exists. It says *who asked*, never *what was browsed*.
+
+### What this makes answerable — and what it does not
+
+**Answerable once this ships — which Claude sessions used the browser skill, and
+how much:**
+
+🔴 *"Once this ships", not "now": `session` is filled by code that is not
+deployed yet, so this returns **0 of 6,166** browser-bridge `kind='cmd'` rows
+today (measured over 14d). Merged is not deployed — every `home.file` target here
+changes only on a `home-manager switch`, and reading these queries as live before
+that is the same silent-empty-result trap the replaced query fell into.*
+
+```sql
+SELECT session, count() AS browser_calls,
+       min(ts) AS first_call, max(ts) AS last_call
+FROM activity.events
+WHERE source = 'browser-bridge' AND kind = 'cmd' AND session != ''
+GROUP BY session
+ORDER BY browser_calls DESC
+```
+
+`session` holds the bare Claude session uuid, so it joins straight against
+`source='claude'` rows — same column, same values, no transform:
+
+```sql
+SELECT count(DISTINCT session) AS joinable_browser_sessions
+FROM activity.events
+WHERE source = 'browser-bridge' AND kind = 'cmd' AND session != ''
+  AND session IN (SELECT DISTINCT session FROM activity.events WHERE source = 'claude')
+```
+
+✅ **"Which sessions used opencode AND the browser skill" — now answerable, but
+read the caveat.** That was the motivating question, and it was blocked by two
+independent reasons. **One is fixed; the other never was a bug.**
+
+1. **The id spaces are disjoint, and that is correct, not broken.**
+   `source='opencode'` sessions are `ses_`-prefixed opencode ids;
+   `source='claude'` sessions are uuids. Measured over 14 days: 406 distinct
+   claude sessions, 183 distinct opencode sessions, **overlap 0**. So you must
+   join a browser-bridge row against **its own runtime's** rows — which is what
+   the tier tag on `payload.sess_src` is for. A query that joins
+   `browser-bridge.session` against the wrong runtime's `session` cannot match,
+   and it fails as a **silent empty result** that reads exactly like a truthful
+   "no sessions matched". Always filter on `sess_src`.
+2. ~~**Those calls deliberately carry no `session`.**~~ **Fixed.** An opencode
+   bash tool now exports `OPENCODE_SESSION_ID`, so those calls carry a joinable
+   `opencode:` id of their own and `origin='opencode-inherited'` is only the
+   fallback (see "Hazard 3, resolved" above).
+
+An earlier draft of this README shipped a broken cross-runtime join as its
+flagship example. It is replaced rather than annotated, because a wrong query
+that returns zero rows is worse than no query.
+
+```sql
+-- opencode sessions that used the browser skill. Note the sess_src filter: it is
+-- what keeps this from silently matching nothing across the two id spaces.
+SELECT count(DISTINCT b.session) AS joinable_opencode_sessions
+FROM activity.events AS b
+WHERE b.source = 'browser-bridge' AND b.kind = 'cmd' AND b.session != ''
+  AND JSONExtractString(toString(b.payload), 'sess_src') = 'opencode'
+  AND b.session IN (SELECT DISTINCT session FROM activity.events
+                    WHERE source = 'opencode')
+```
+
+⚠ **Two populations are still unattributed, and both are `origin`-marked rather
+than silent.** `browser-agent` runs forward their *caller's* id (hazard 2 — not
+fixed, and not fixable without a new header), and the `opencode-inherited`
+fallback still fires wherever `OPENCODE_SESSION_ID` is absent. Count them:
+
+```sql
+SELECT JSONExtractString(toString(payload), 'sess_src') AS tier,
+       JSONExtractString(toString(payload), 'origin')   AS origin, count()
+FROM activity.events
+WHERE source = 'browser-bridge' AND kind = 'cmd'
+GROUP BY tier, origin ORDER BY count() DESC
+```
+
+⚠ **A large `sess_src='unknown'` population is NOT evidence of a stale
+`server.py`.** Measured on the workbench after #549 deployed: 504 `unknown` /
+217 `claude`, with **zero** rows carrying any `origin` key at all — 493 of the
+504 `op=text`, all with an empty instance key. That predates the `opencode:`
+tier and is **undiagnosed**; do not read `unknown` as "the switch did not take"
+on this host until it is.
 
 ## Session isolation (concurrent-session tab clobbering)
 
@@ -1380,7 +1835,11 @@ per-session (multi-step **workflow**) isolation did not.
 **Fix — a per-session owned tab:**
 
 - **Per-session id.** The `browser` skill sends a stable `X-Session-Id` on every
-  `/cmd`, derived (in order) from `CLAUDE_CODE_SESSION_ID` (Claude Code's own
+  `/cmd`, derived (in order) from `OPENCODE_SESSION_ID` (the opencode session
+  whose bash tool is running the command, exported per call by
+  `scripts/opencode/plugin/session-env.js`; **first** because it is the only one
+  of these rewritten on every tool call, while the claude variables can be an
+  ancestor's) → `CLAUDE_CODE_SESSION_ID` (Claude Code's own
   session UUID — identical across every Bash-tool call in a session, verified on
   the 2.1.x CLI) → `CLAUDE_SESSION_ID` (defensive alternate) → `$TMUX_PANE` (each
   session runs in its own tmux pane) → the **POSIX session id**
@@ -1389,6 +1848,10 @@ per-session (multi-step **workflow**) isolation did not.
   **routing only** and is **never** trusted for auth — bearer + Host still gate
   every request. If two sessions ever resolve the same id they share a tab
   (documented degradation — no worse than before).
+- 🔴 **The tier tag before the first `:` is load-bearing for telemetry too.**
+  `server.py` parses it to decide whether the id is a joinable session key — see
+  "Session as a telemetry join key" above. Adding a tier means deciding which it
+  is; never emit an id whose tag misdescribes it.
 - **⚠ Why the POSIX session id, and not `$PPID` (fixed 2026-08-01).** The
   PPID-keyed token was **not stable across a command substitution**: a `$( … )`
   that forks gives `browser` a different parent pid, so
@@ -1600,10 +2063,15 @@ field** (the CDP ops are bounded typed ops only; see the CDP security model abov
   interaction while the operator was working. The capability the agent actually
   needed was *un-throttling*, which `wake` now provides without touching focus.
   Focus theft is a decision only a human at the machine should make, so it stays
-  on the `browser` CLI. (Deliberately a stronger stance than `upload`'s opt-in:
+  on the `browser` CLI. 🔴 As of 2026-08-18 this exclusion is no longer the only
+  thing holding: the host-side raise is now OPT-IN server-side too (see *The focus
+  steal is OPT-IN BY DEFAULT*), because an allowlist in one caller left every
+  other caller unguarded — which is what the re-measurement found. That is a
+  DEFAULT, not an authorization boundary — see that section's "what this IS and
+  what it is NOT". (Deliberately a stronger stance than `upload`'s opt-in:
   `upload` is a risk an operator can knowingly accept for one run, whereas a model
   stealing the screen has no legitimate autonomous use at all.)
-- **`upload` is NOT in the agent's op set** (11 ops, above — no `upload`). The
+- **`upload` is NOT in the agent's op set** (13 ops, above — no `upload`). The
   `browser` CLI keeps it: an operator choosing a path by hand is a legitimate,
   audit-logged action. The autonomous model is different — it is by design pointed
   at untrusted, prompt-injecting pages, and `upload` takes a caller-chosen
@@ -1650,12 +2118,15 @@ field** (the CDP ops are bounded typed ops only; see the CDP security model abov
   Because the gate runs **before** the tab is opened, a gate failure leaks no tab.
 
   *Prerequisite:* an opencode whose `debug agent` reports a browser-only tool set.
-  **Both hosts run 1.18.4 and both resolve browser-only** (verified: the dump
-  parses to exactly one enabled tool, `browser`). There is no version-skew caveat
-  here any more. 🔴 1.18.4 is what the hosts RUN; `flake.lock` pins **1.18.16**
-  and they converge on the next `ship.sh` — merged is not deployed. The
-  browser-only resolution was re-derived on 1.18.16 too — identical resolved tool
-  set, on both binaries. 🔴 The RAW dump is NOT byte-stable, on either binary: the
+  **Both hosts run 1.18.18 and both resolve browser-only** (verified 2026-08-19:
+  the gate replicated ON EACH HOST parses to exactly one enabled tool, `browser`,
+  with every host tool present and `false`). There is no version-skew caveat
+  here any more. The hosts CONVERGED on 2026-08-15 and the pin's move to 1.18.18
+  had reached both before it was re-keyed — verified at the consumer, both
+  `readlink -f $(command -v opencode)` resolving to the same
+  `…-opencode-1.18.18` store path — so the pin and the deploy agree. The
+  browser-only resolution was measured identical on 1.18.4 and 1.18.16, and again
+  on the 1.18.18 binary, so no bump has changed it. 🔴 The RAW dump is NOT byte-stable, on either binary: the
   `permission` array's order follows a directory walk and varies run to run, so
   `cmp` on two dumps differs for reasons that have nothing to do with the version.
   Compare the resolved tool set, or canonicalise first. So the deploy gap does not
@@ -1748,8 +2219,8 @@ ln -sf ~/workspace/devrc/scripts/browser-bridge/opencode/tools/browser_tool_impl
 the wrapper substitutes them per run.)
 
 **opencode version.** The custom-tool mechanism (`.opencode/tools/*.js`,
-`permission: {"*": deny, …}`) is **verified on 1.18.4, which is what BOTH hosts
-run today, and re-derived on the pinned 1.18.16** — `opencode debug agent
+`permission: {"*": deny, …}`) is **verified on 1.18.18, which is what BOTH hosts
+run and what `flake.lock` pins** (measured identical on 1.18.4 before the bump) — `opencode debug agent
 browser-agent` resolves to `bash:false … browser:true`
 (exactly one enabled tool) on each, plus an end-to-end `opencode debug agent …
 --tool browser` run against a fake bridge. The wrapper still writes the tool to
@@ -1768,7 +2239,7 @@ set none of them; it only ever supplies typed tool args):
 
 | var | default | what it does |
 |---|---|---|
-| `BROWSER_AGENT_ALLOWED_OPS` | *(unset → the 11-op `ALLOWED_OPS_DEFAULT`)* | space/comma list that REPLACES the agent's op allowlist wholesale. Narrows it (`"text,html"`) or deliberately re-enables an off-by-default op — this is the ONLY supported way to give the autonomous agent `upload` |
+| `BROWSER_AGENT_ALLOWED_OPS` | *(unset → the 13-op `ALLOWED_OPS_DEFAULT`)* | space/comma list that REPLACES the agent's op allowlist wholesale. Narrows it (`"text,html"`) or deliberately re-enables an off-by-default op — this is the ONLY supported way to give the autonomous agent `upload` |
 | `BROWSER_AGENT_OPENCODE` | `opencode` | the opencode binary (test seam) |
 | `BROWSER_AGENT_BROWSER_BIN` | `./browser` | the `browser` CLI used for open/close/probe (test seam) |
 | `BROWSER_AGENT_MODEL` | `openrouter/deepseek/deepseek-v4-flash` | model baked into the per-run agent def |

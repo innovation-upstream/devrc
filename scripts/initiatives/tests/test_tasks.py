@@ -445,23 +445,59 @@ def test_abandoned_worker_dies_promptly_on_a_chunk_spanning_body():
 
     This test asserts WHEN THE WORKER DIES, not what it parsed — a body that merely parses
     correctly does not reproduce the bug. So: a body several READ_CHUNKs long, paced so that
-    assembling ONE chunk takes ~6x the deadline, and every individual send well inside the
-    socket timeout — leaving the between-chunk clock re-check as the only thing that can end
-    the read. The worker function returning is the observable: `_run_with_deadline`'s target
-    does nothing afterwards, so the thread exits with it.
+    assembling ONE chunk takes far longer than the worker is allowed to outlive its
+    abandonment, and every individual send well inside the socket timeout — leaving the
+    between-chunk clock re-check as the only thing that can end the read. The worker function
+    returning is the observable: `_run_with_deadline`'s target does nothing afterwards, so the
+    thread exits with it.
+
+    🔴 WHY THE CLOCK IS INJECTED (2026-08-20) — this test used to FLAKE, and it flaked in the
+    one way a "died for the right reason" assertion must not: red for a reason that is not the
+    bug. Production reads with `urlopen(timeout=min(SOCKET_TIMEOUT, deadline))`, so the old
+    `deadline = 0.4` made the PER-OPERATION socket timeout EQUAL the deadline. Both then raced
+    to end the same blocked `read1`, and `socket.timeout` IS `TimeoutError`, so the type
+    assertion below could not tell them apart — but a socket timeout says only "timed out",
+    with no byte count, so the byte-count assertion failed. Any single stall of the paced
+    sender lasting a whole deadline (a loaded box running the full gate) handed the race to
+    the socket timeout. Measured 2026-08-20 by injecting the stall rather than loading the
+    machine: 0.45s stall at deadline=0.4 gave "timed out" 3/3, versus the module's own
+    "...after 12288 bytes" 1/1 unstalled.
+
+    The fix separates the two clocks instead of widening either. The JOIN deadline — what
+    actually abandons the worker — stays real wall clock at `join_deadline`. The BODY-READ
+    deadline decision is made by `abandonment_clock`, which blows the instant the caller has
+    abandoned the worker, so the re-check fires on the very next chunk. The deadline handed to
+    `_get` is then `SOCKET_TIMEOUT`, which pins the per-operation timeout at its MAXIMUM
+    (`min(SOCKET_TIMEOUT, SOCKET_TIMEOUT)`) — 2.0s against a 0.02s pacing gap, and strictly
+    longer than the 1.0s promptness bound this test allows. A socket timeout can therefore no
+    longer be the thing that ends the read before the promptness assertion has already spoken:
+    that failure mode is now unreachable, not merely rarer.
+
+    None of this weakens the guard. The pacing that gives the test its power is unchanged in
+    kind — with `read` the worker is still stuck mid-chunk for `chunk_seconds` (~2.6s) and
+    still fails the promptness assertion, which is the mutation that was re-run to confirm it.
     """
     import re
     import threading
     import time
 
-    piece, gap = 2048, 0.08
+    # Finer pacing than the defect-era 2048/0.08 — same chunk_seconds, but the worker comes
+    # back to the clock ~4x sooner after being abandoned, so the promptness bound is not
+    # spending most of its budget waiting for the next send.
+    piece, gap = 512, 0.02
     body = ("[" + ",".join(
         json.dumps(_task(i, ["initiative:alpha"], title="t" * 240)) for i in range(1000)
     ) + "]").encode()
     assert len(body) > 2 * tasks.READ_CHUNK, "the body must SPAN chunks to reproduce this"
     chunk_seconds = (tasks.READ_CHUNK / piece) * gap    # what ONE read() would block for
-    deadline = 0.4
-    assert chunk_seconds > 5 * deadline, "the pacing must dwarf the deadline"
+    join_deadline = 0.4      # real wall clock: when the caller gives up and abandons the worker
+    prompt_bound = 1.0       # how long after that the abandoned worker may still be running
+    # With `read` the worker is stuck for a whole chunk; that must dwarf the promptness bound,
+    # or the regression this test exists for would slip through green.
+    assert chunk_seconds > 2 * prompt_bound, "the pacing must dwarf the promptness bound"
+    # ...and the per-operation socket timeout must outlast that bound too, so it can never be
+    # the thing that ends the read while the promptness assertion still has budget left.
+    assert tasks.SOCKET_TIMEOUT > prompt_bound, "the socket timeout must not pre-empt the bound"
 
     def paced(conn, stop):
         try:
@@ -483,11 +519,25 @@ def test_abandoned_worker_dies_promptly_on_a_chunk_spanning_body():
             except OSError:
                 pass
 
+    entered = threading.Event()           # the worker actually reached `_get`
+    abandoned = threading.Event()         # the caller's join has expired — worker is orphaned
     worker_returned = threading.Event()   # set when `_get` returns/raises — i.e. when the
     box: dict = {}                        # abandoned thread is about to exit
     real_get = tasks._get
 
+    def abandonment_clock():
+        """Real monotonic time, then a ONE-WAY jump far past any deadline the moment the
+        caller has abandoned the worker. This — not a race between two equal timeouts — is
+        what decides the body-read deadline, so the re-check fires on the next chunk."""
+        t = time.monotonic()
+        return t + 1e6 if abandoned.is_set() else t
+
     def spy(url, token, **kw):
+        entered.set()
+        # The deadline handed to `_get` pins the per-operation socket timeout at its MAXIMUM;
+        # the deadline DECISION belongs to `abandonment_clock`, not to this number.
+        kw["deadline"] = tasks.SOCKET_TIMEOUT
+        kw["clock"] = abandonment_clock
         try:
             return real_get(url, token, **kw)
         except BaseException as exc:      # noqa: BLE001 - recorded, then re-raised verbatim
@@ -500,18 +550,39 @@ def test_abandoned_worker_dies_promptly_on_a_chunk_spanning_body():
     try:
         creds = {"CLAWGATE_API_URL": url, "CLAWGATE_HOOK_TOKEN": "tok"}
         t0 = time.monotonic()
-        ok, got = tasks.fetch_tasks_result(creds=creds, env={}, deadline=deadline, getter=spy)
+        ok, got = tasks.fetch_tasks_result(creds=creds, env={},
+                                           deadline=join_deadline, getter=spy)
         caller_elapsed = time.monotonic() - t0
-        died_in_time = worker_returned.wait(1.0)
+        # ORDERING, not a stopwatch: the caller must have been released by the JOIN while the
+        # worker was STILL RUNNING. That is the PREMISE of everything below — if the worker had
+        # already finished, nothing was abandoned and the rest of this test proves nothing. An
+        # ordering fact is exact, unlike the wall-clock slack bound this replaces (see below).
+        worker_still_running = not worker_returned.is_set()
+        # The worker must already be inside `_get` — otherwise it captured `started` AFTER the
+        # jump and nothing was abandoned, which would make everything below vacuous.
+        assert entered.is_set(), "the worker never reached `_get` — nothing was abandoned"
+        abandoned.set()
+        died_in_time = worker_returned.wait(prompt_bound)
         worker_elapsed = time.monotonic() - t0
     finally:
         stop()
 
     assert (ok, got) == (False, [])                  # degrades to "no linked tasks"
-    assert caller_elapsed < deadline + 0.6           # the join bound is unaffected either way
+    assert worker_still_running, (
+        "the worker had already returned when the caller was released, so nothing was ever "
+        "abandoned and the promptness assertion below would be vacuous")
+    # The caller was released by the 0.4s JOIN, not by the read finishing. Had the join failed
+    # to bound it, it would have sat there for a whole chunk (`chunk_seconds`), so half a chunk
+    # is the bound the DEFECT'S OWN SIGNATURE gives us. This replaces a flat `join_deadline +
+    # 0.6`, which was a guess about how well the box schedules threads rather than a claim
+    # about this code: it measured 1.087s for a 0.4s join under load 38 on 2026-08-20 and
+    # failed, with nothing wrong. The ordering assertion above is what actually pins the
+    # premise; this one only has to exclude "the caller waited for the body".
+    assert caller_elapsed < chunk_seconds / 2, (
+        f"the caller took {caller_elapsed:.2f}s — the {join_deadline}s join did not bound it")
     assert died_in_time, (
         f"the ABANDONED worker was still running {worker_elapsed:.2f}s in — "
-        f"{caller_elapsed:.2f}s after the {deadline}s deadline was declared blown. It is "
+        f"{caller_elapsed:.2f}s after the {join_deadline}s deadline was declared blown. It is "
         f"blocked inside ONE read() waiting for a full {tasks.READ_CHUNK}-byte chunk "
         f"(~{chunk_seconds:.1f}s at this pace), so the wall-clock re-check never runs. "
         f"Read the body with read1().")

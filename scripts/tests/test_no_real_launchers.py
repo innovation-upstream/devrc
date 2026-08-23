@@ -131,7 +131,7 @@ def test_the_stubbed_launcher_set_is_pinned():
 # seven scripts named it.
 ACKNOWLEDGED_UNSTUBBED = {
     "systemctl": (
-        {"agent-ops", "airvpn-menu", "keylog-spin-capture.sh",
+        {"airvpn-menu", "keylog-spin-capture.sh",
          "monitor-blackout.sh", "run-tests.sh", "sync-claude-permissions.py"},
         "verb-split rather than record-only — see the systemctl tests below. "
         "run-tests.sh is a THIRD case, re-justified rather than absorbed: its "
@@ -148,8 +148,9 @@ ACKNOWLEDGED_UNSTUBBED = {
         "justification cannot rot into a claim about a file that has changed"),
     "home-manager": (
         {"bar-status-poll", "drift-check.sh", "keylog-spin-capture.sh",
-         "notify-failure.sh", "playwright-nixos", "session-manager", "ship.sh",
-         "tmux-post-save.sh"},
+         "notify-failure.sh", "playwright-nixos", "session-manager",
+         "session-resolve", "ship.sh", "tmux-post-save.sh",
+         "tmux-scratch-slots.sh"},
         "MEASURED unreachable: a whole-tier run under a recording interceptor "
         "logged ZERO calls. TWO of these are executed by scripts/tests and "
         "neither can reach the binary: notify-failure.sh names home-manager in "
@@ -160,11 +161,61 @@ ACKNOWLEDGED_UNSTUBBED = {
         "a TEXT scan (launcher_scan.hazard_hits regexes the file body), so a "
         "prose mention is a hit; verified by grep that the file carries no "
         "call site, and re-justified here rather than reworded to dodge the "
-        "scanner"),
+        "scanner. session-resolve (added 2026-08-19) is the THIRD of exactly "
+        "this shape and is re-justified the same way: its single occurrence "
+        "is one word of module-docstring prose, explaining that the tmux "
+        "bindings are generated from the slot table at home-manager build "
+        "time and therefore that the table must be PARSED rather than "
+        "re-hardcoded. It is not a call site. The complete set of argv[0] "
+        "literals the script can spawn is `tmux`, `git` and `gh` (plus "
+        "sys.executable for session-manager), and its tmux seam is further "
+        "narrowed by an ALLOWLIST of list-panes/list-windows/list-clients "
+        "that raises on anything else — test_session_resolve.py pins that "
+        "allowlist in both directions, so this justification cannot rot into "
+        "a claim about a file that has grown a launcher. "
+        "tmux-scratch-slots.sh (added 2026-08-19) is the FOURTH of this shape "
+        "and carries the STRONGEST form of the justification: the other three "
+        "merely lack a call site, whereas this file has no executable "
+        "statement at all. It is the slot table that session-resolve's entry "
+        "above refers to, and its entire non-comment body is a single "
+        "`SCRATCH_SLOTS=( ... )` array literal of 20 quoted "
+        "session:key:colour:name strings — measured with "
+        "`grep -vE '^\\s*#|^\\s*$'`, which returns the array and nothing else. "
+        "There is no command substitution, pipe, exec or eval anywhere in it, "
+        "and it is SOURCED rather than executed. Its single `home-manager` "
+        "occurrence is one word of comment prose at line 4, recording that the "
+        "tmux `bind -n M-<key>` popup toggles are GENERATED from this table by "
+        "nix/programs/tmux/default.nix (`builtins.readFile`) and that the "
+        "table is therefore the source of truth rather than a mirror. That "
+        "sentence was added to correct a comment which had documented the "
+        "hotkey as a `$mod+Shift+<key>` i3 chord bound to nothing; the "
+        "correction is what put the file in this scanner's sights, and it is "
+        "re-justified here rather than reworded to dodge the scanner"),
     "nixos-rebuild": (
         {"airvpn-sudo", "ship.sh"},
         "MEASURED unreachable in the same whole-tier run; both call sites are "
         "behind sudo and neither script is executed by scripts/tests"),
+    "wmctrl": (
+        {"session-write"},
+        "The FOURTH occurrence of the prose-mention shape already justified "
+        "three times under `home-manager` above, and justified here rather "
+        "than reworded away — this scan is a TEXT scan "
+        "(launcher_scan.hazard_hits regexes the file body), so naming a binary "
+        "in order to promise you never call it is indistinguishable from "
+        "calling it. session-write (added 2026-08-19) names `wmctrl` in ONE "
+        "line of module-docstring prose, in the sentence declaring that the "
+        "i3 workspace is OUT OF SCOPE for its `focus` verb: the tool is "
+        "tmux-only, so it changes a tmux client's session and a tmux session's "
+        "active window and NOTHING a window manager owns. Deleting the word to "
+        "get green would delete the guarantee. Verified by grep that the file "
+        "carries no call site: the complete set of argv[0] literals it can "
+        "spawn is `tmux` alone, and even that is narrowed by an ALLOWLIST "
+        "(send-keys / select-window / switch-client / detach-client, plus "
+        "session-resolve's three read verbs) that RAISES on anything else — "
+        "test_session_write.py pins that allowlist in both directions, so this "
+        "justification cannot rot into a claim about a file that has grown a "
+        "launcher. `i3-msg` and `xdotool` appear in the same sentence and need "
+        "no entry: both are in HOST_LAUNCHERS and therefore stubbed."),
 }
 
 
@@ -864,6 +915,66 @@ PINNED_PATH_CLOBBERS = {
         'e["PATH"]' + ' = str(tmp_path / "empty-bin")',
         "an empty directory in tmp_path — the point of the test is that "
         "logrotate is absent; nothing else is present either"),
+    "test_standup_local_health.py": (
+        'env["PATH"]' + ' = str(self._restricted_bin())',
+        "the FIRST pinned clobber whose replacement directory is not empty, so "
+        "it is justified by ENUMERATION rather than by emptiness: "
+        "Harness.RESTRICTED_BIN lists the nine coreutils standup needs to run "
+        "at all, the harness asserts the directory's contents are a subset of "
+        "that list, and it asserts systemctl is absent — which is the point of "
+        "the test: standup.sh must skip its host-health section gracefully "
+        "when the systemctl BINARY IS NOT INSTALLED, and no amount of "
+        "PREPENDING can make a binary unfindable. 🔴 That is ALL it removes — "
+        "it says nothing about a systemctl that is present while the user "
+        "manager/bus is unreachable, which is a different condition with a "
+        "different (and once-broken) rendering; that one is covered by the "
+        "SC_FAIL_ALL/SC_FAIL_SHOW modes of the stub, with systemctl very much "
+        "on PATH. No launcher in HAZARD_VOCABULARY is reachable "
+        "from it: no systemctl, kubectl, gh, ssh, home-manager or pkill"),
+    "test_resume_state_clawgate.py": (
+        'env["PATH"]' + ' = f"{nocg}',
+        "justified by ENUMERATION, like test_standup_local_health.py above. The "
+        "replacement is two directories the test CONSTRUCTS: `nocg`, holding "
+        "copies of this suite's gh/kubectl/curl tripwire stubs and nothing "
+        "else, and `_sandbox_bin`, holding symlinks to exactly its "
+        "_SANDBOX_TOOLS list (coreutils + bash/git/jq) — which the helper "
+        "ASSERTS is a superset of the directory's real contents, so this is a "
+        "live invariant rather than prose that can rot. No HAZARD_VOCABULARY "
+        "name is reachable from either: no systemd-run, systemctl, "
+        "notify-send, rofi, yad, xdotool, i3-msg, openrgb, espanso, "
+        "home-manager or nixos-rebuild. 🔴 REPLACING is the point: the case "
+        "under test is `clawgatectl` NOT INSTALLED — resume-state.sh must emit "
+        "a `!` gap rather than a clean reconcile — and clawgatectl IS "
+        "installed on the dev host, so no amount of PREPENDING can make it "
+        "unfindable. A prepending version measured a live call to the real "
+        "board on this host while the nix sandbox (which has no clawgatectl) "
+        "measured the intended case: two tiers, opposite blind spots"),
+    "test_devshell_satisfies_required_tools.py": (
+        '{"PATH"' + ': str(stub)',
+        "a clobber justified by ENUMERATION rather than emptiness, and the "
+        "strongest of those. (It used to say \"the SECOND … of the two\": there "
+        "are THREE enumeration-justified entries, and next to the \"TWO sites\" "
+        "below the ordinal read as if it counted those instead.) 🔴 This needle "
+        "now matches TWO sites in "
+        "that file — the `emitted_fatal` fixture (`only-bash`) and "
+        "`test_guard1_classifies_by_cause_not_by_site` (`only-bash-cause`) — so "
+        "it cannot tell them apart; BOTH carry the one-entry assertion, which "
+        "is what keeps this justification live for each. In both, the "
+        "replacement directory is created by the test itself near the clobber "
+        "(`tmp_path_factory.mktemp(...)`, then one "
+        "`(stub / \"bash\").symlink_to(bash)`), so its contents are not merely "
+        "audited but CONSTRUCTED — it holds exactly one entry, a bash symlink, "
+        "and nothing else can appear in a freshly-minted tmp dir. No "
+        "HAZARD_VOCABULARY name is reachable from it: no systemd-run, "
+        "systemctl, notify-send, rofi, yad, xdotool, i3-msg, openrgb, espanso, "
+        "home-manager or nixos-rebuild. 🔴 REPLACING is the point, not an "
+        "oversight: the fixture drives run-tests.sh's tool precondition, whose "
+        "whole job is to react to binaries being ABSENT, and no amount of "
+        "PREPENDING can make a binary unfindable — inside the nix sandbox every "
+        "REQUIRED_TOOLS binary IS present, so a prepending version would "
+        "measure the environment instead of the code. The fixture ASSERTS the "
+        "one-entry contents itself, so this justification is a live invariant "
+        "rather than prose that can rot"),
 }
 
 

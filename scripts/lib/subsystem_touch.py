@@ -68,6 +68,12 @@ working pattern, so the source that cannot see it is the one that has to change.
     edits (a separate transcript — measured at 196 of 733 file-tool calls across
     the 40 most recent transcripts), files written by a Bash command rather than
     a file tool, and paths outside the session cwd (counted, never dropped).
+    🔴 THIS ENVIRONMENT'S TWO STANDING DEFAULTS — delegate to a subagent, isolate
+    that subagent in a worktree — hit two of those three AT ONCE, so the
+    preferred window is blind to the MANDATED workflow rather than to an
+    occasional one. When the outside count dominates, the report says so with the
+    run's own numbers and names the flags to run instead; see
+    `wrong_window_dominance` for the rule, the measurement and its cost.
   * PULL REQUESTS (`--pr <n>[,<n>...]`) — the only source that sees a SUBAGENT's
     work. The standing default in this environment is to DELEGATE non-trivial
     work to a subagent, and a subagent's turns are a separate transcript the
@@ -171,6 +177,7 @@ CONTRACT SUMMARY
                                               -> tuple[Nomination, ...]
     build_report(source, store_root, scope, *, today, ...)
                                               -> TouchReport
+    wrong_window_dominance(source)            -> (under, outside, pct) | None
     render_text(report) / report_json(report) -> str / dict
     census(store_root, now=None)              -> Census  (counts + write activity)
     main(argv)                                -> int
@@ -243,10 +250,11 @@ import argparse
 import collections.abc as _abc
 import json
 import os
+import re
 import subprocess
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
@@ -256,6 +264,7 @@ from subsystem_resolver import (  # noqa: E402
     DEFAULT_MIN_PATHS,
     NUANCE_HEADING,
     ON_MALFORMED_COLLECT,
+    POINTERS_HEADING,
     AmbiguousRefError,
     Association,
     EntryUnreadableError,
@@ -265,6 +274,7 @@ from subsystem_resolver import (  # noqa: E402
     ResolverError,
     SubsystemEntry,
     SubsystemIndex,
+    UNREACHABLE_MARKER,
     UnknownScopeError,
     associate_paths,
     entry_mapping,
@@ -275,7 +285,16 @@ from subsystem_resolver import (  # noqa: E402
     parse_journal_bullets,
     path_refs,
     resolve_ref_tiered,
+    scan_headings,
 )
+
+# 🔴 ONE RULE, ONE PLACE — "what is this repo's mainline?". Same `sys.path`
+# idiom as `subsystem_resolver` above. It lives in its own module because
+# `handoff_doc.py` needs the identical answer and must not re-derive it: two
+# derivations would disagree the first time a repo's `origin/HEAD` is dangling,
+# which is a state MEASURED in this very repo (see `git_mainline`'s docstring).
+from git_mainline import FALLBACK_BASE_REFS  # noqa: E402
+from git_mainline import resolve_base_ref as _resolve_mainline_ref  # noqa: E402
 
 __all__ = [
     "WRITER_ID",
@@ -322,6 +341,16 @@ __all__ = [
     "TouchReport",
     "Census",
     "ValidationReport",
+    "SHAPE_HEADINGS",
+    "SHAPE_ABSENT",
+    "SHAPE_RENAMED",
+    "SHAPE_DUPLICATED",
+    "SHAPE_EMPTY",
+    "ShapeFinding",
+    "scan_entry_shape",
+    "UNREACHABLE_MARKER",
+    "UnreachableMarkerFinding",
+    "scan_unreachable_markers",
     "POLICY_SCOPE",
     "POLICY_STORE_ROOT",
     "POLICY_NONE",
@@ -339,6 +368,21 @@ __all__ = [
     "caller_supplied",
     "nominate",
     "build_report",
+    "wrong_window_dominance",
+    "render_wrong_window",
+    "ESCALATION_BASIS_COMMIT",
+    "ESCALATION_REASONS",
+    "ESCALATION_NO_BASE_REF",
+    "ESCALATION_HEAD_UNRESOLVABLE",
+    "ESCALATION_NO_SHARED_HISTORY",
+    "ESCALATION_NO_COMMITS",
+    "ESCALATION_GIT_FAILED",
+    "ESCALATION_READ_FAILED",
+    "CommitRange",
+    "WindowEscalation",
+    "commit_window_range",
+    "escalate_to_commit_window",
+    "render_window_escalation",
     "render_text",
     "report_json",
     "new_entry_template",
@@ -412,10 +456,21 @@ def governing_policy(store_root: str | Path, scope: str) -> tuple[str | None, st
 # nominations: a confirm gate a human stops reading is not a confirm gate.
 DEFAULT_NOMINATION_LIMIT = 5
 
-# Tried in order; the FIRST that exists wins. Remote-tracking refs come first so
-# that on a branch named `main` with unpushed local commits the window is those
-# commits (the diverged-host case CLAUDE.md describes), not empty.
-BASE_REF_CANDIDATES: tuple[str, ...] = ("origin/main", "origin/master", "main", "master")
+# 🔴 A FALLBACK, NOT THE ANSWER — and it is passed through `git_mainline`, which
+# puts the ref DERIVED from `refs/remotes/origin/HEAD` in front of it. This tuple
+# used to be the whole rule, and had already been extended reactively once (the
+# first repo that used `master`); on 2026-08-21 `homelab-infra`, whose mainline
+# is `trunk`, made every consumer return `no-base-ref` in exactly the repo the
+# escalation had been called for. Appending `"trunk"` buys until the next repo.
+# The derivation is where the rule lives now; this is what a clone with no
+# `origin/HEAD` falls back to, and the name is kept because it is exported and
+# it is what callers pass as `base_ref_candidates`.
+#
+# ⚠ The candidates are NOT the ladder any more. Anything rendering "we looked
+# for X" must print the ladder `_base_ref_of` returns, not this tuple — see
+# `commit_window_range`, which would otherwise name four refs it never tried
+# first.
+BASE_REF_CANDIDATES: tuple[str, ...] = FALLBACK_BASE_REFS
 
 # 🔴 THE LIVENESS BOUND ON A CALLER-SUPPLIED SESSION ID. There is no session-id
 # environment variable, so the id arrives as an argument and can be WRONG — a
@@ -958,6 +1013,33 @@ class PathSource:
     much of its work the absolute subset represents.
     """
 
+    under_cwd: int | None = None
+    """Distinct paths this session named that ARE expressible under the session
+    cwd — i.e. the population the window below is drawn from.
+
+    🔴 STRUCTURED, NOT ONLY PROSE. These two counters were already computed and
+    already printed, inside a `note` string — which means the only consumer that
+    could act on them was a human reading the note. `wrong_window_dominance`
+    needs them as numbers, so they are carried as numbers; the note keeps
+    printing them and now quotes the same fields rather than re-deriving them.
+
+    `None` for every source that cannot produce the pair. See `outside_cwd`.
+    """
+
+    outside_cwd: int | None = None
+    """Distinct paths this session named that are NOT expressible under the
+    session cwd, and are therefore NOT in `paths`.
+
+    🔴 POPULATED FOR `window == "session"` ONLY, and that is a correctness
+    constraint rather than laziness. In the `session-absolute` window the same
+    two extractor counters are measured against the SESSION's own cwd, which is
+    another repo — so "outside it" there means "outside a tree this repo is not
+    reporting on anyway", and a dominance rule read off them would be answering a
+    different question. That window carries its own caveat, which already says
+    outright that its count is a FLOOR and that the relative paths are excluded
+    rather than counted.
+    """
+
     prs: tuple[int, ...] = ()
     """The pull requests read, when `kind == "pr"`. Part of the caveat."""
 
@@ -1076,6 +1158,20 @@ class PathSource:
         )
 
 
+def _as_count(value: object) -> int | None:
+    """A non-negative `int` count, or None for anything that is not one.
+
+    🔴 `bool` IS EXCLUDED DELIBERATELY: `isinstance(True, int)` is True in
+    Python, and a counter that degraded to a flag would silently become the
+    count `1`. And a missing counter must stay None rather than becoming 0 —
+    `None or 0` is how "we could not measure it" turns into "there is nothing
+    outside", which is the reassuring half of the answer.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if value >= 0 else None
+
+
 def caller_supplied(paths: Iterable[str]) -> PathSource:
     """Wrap an externally-supplied path set. Pure; no git, no clock."""
     seen: list[str] = []
@@ -1103,14 +1199,6 @@ def _git(repo: Path, args: Sequence[str]) -> str:
     return proc.stdout
 
 
-def _git_ok(repo: Path, args: Sequence[str]) -> bool:
-    try:
-        _git(repo, args)
-    except GitError:
-        return False
-    return True
-
-
 def _nul_list(out: str) -> list[str]:
     return [p for p in out.split("\0") if p]
 
@@ -1132,6 +1220,25 @@ def _toplevel(repo: str | Path) -> Path:
     different frames in one path set — components both manufactured and lost.
     """
     return Path(_git(Path(repo), ["rev-parse", "--show-toplevel"]).strip())
+
+
+def _base_ref_of(
+    top: Path, candidates: Sequence[str]
+) -> tuple[str | None, tuple[str, ...]]:
+    """`(this repo's base ref, the whole ladder that was tried)`. READ-ONLY.
+
+    🔴 ONE RULE, ONE PLACE. `collect_git_paths` and `commit_window_range` both
+    need this and each used to open-code the same rev-parse loop over
+    `BASE_REF_CANDIDATES`. `claude/RULES.md` → "One rule, one place": a predicate
+    open-coded at N sites is typically wrong at N−1 of them in the same
+    direction, and these two were — both blind to `trunk`, so the git source's
+    window and the escalation's agreed with each other while both were wrong.
+
+    The derivation itself is `git_mainline`'s, because `handoff_doc.py` needs the
+    same answer. The ladder comes back so a failure can NAME what it looked for:
+    the candidate tuple alone would describe refs that were never reached.
+    """
+    return _resolve_mainline_ref(top, fallback=candidates)
 
 
 def _filter_excluded(
@@ -1221,16 +1328,12 @@ def collect_git_paths(
     commands.append(("git", *untracked_args))
     add(_nul_list(_git(repo, untracked_args)))
 
-    base_ref: str | None = None
-    for cand in base_ref_candidates:
-        if _git_ok(repo, ["rev-parse", "--verify", "--quiet", f"{cand}^{{commit}}"]):
-            base_ref = cand
-            break
+    base_ref, tried = _base_ref_of(repo, base_ref_candidates)
 
     window = "worktree"
     if base_ref is None:
         notes.append(
-            f"no base ref among {', '.join(base_ref_candidates)}; committed work is not "
+            f"no base ref among {', '.join(tried)}; committed work is not "
             f"in the window"
         )
     else:
@@ -1687,6 +1790,14 @@ def collect_session_paths(
         commands=(("git", "rev-parse", "--show-toplevel"),),
         notes=tuple(notes),
         session=label,
+        # 🔴 THE SAME TWO NUMBERS THE NOTE ABOVE PRINTS, carried as numbers so
+        # something other than a human eye can act on them. `_as_count` returns
+        # None for anything that is not a real integer count, so a future
+        # extractor that stops emitting a counter disables the dominance warning
+        # rather than firing it off a `None` coerced to 0 — which would read as
+        # "0 outside", i.e. the reassuring answer.
+        under_cwd=_as_count(total),
+        outside_cwd=_as_count(outside),
     )
 
 
@@ -2656,6 +2767,66 @@ class EntryJournal:
         """
         return max(self.dated) if self.dated else None
 
+    @property
+    def open_bullets(self) -> tuple[JournalBullet, ...]:
+        """Bullets DECLARED `OPEN:` and not since closed. Exact, not heuristic.
+
+        🔴 An empty tuple means "nothing is declared open", NOT "there is no open
+        work here" — the marker is opt-in and every bullet written before it
+        existed carries None. `unmarked_action_bullets` is the (narrow, floor)
+        net for those; anything phrased a third way is invisible to both, and
+        every renderer says so rather than printing a bare confident zero.
+        """
+        return tuple(b for b in self.bullets if b.openness_population == "open")
+
+    @property
+    def near_miss_bullets(self) -> tuple[JournalBullet, ...]:
+        """Bullets that TRIED to declare a marker and missed the grammar.
+
+        Reported separately from both other populations: this is neither an open
+        action nor a guess about one, it is a WRITE THAT DID NOT LAND. Treating
+        it as either would hide the only thing the writer can act on.
+
+        ⚠ Reverting this to the raw `b.near_miss_marker` is an EQUIVALENT mutant
+        (measured — it survives the battery), because `near_miss_marker` already
+        returns False whenever `openness` is set, so the two sets are identical.
+        Its SIBLING is not: reverting `unmarked_action_bullets` to the raw
+        predicate reintroduces the double-count and IS killed. Both go through
+        `openness_population` anyway, so the precedence has exactly one home.
+        """
+        return tuple(b for b in self.bullets if b.openness_population == "near-miss")
+
+    @property
+    def unmarked_action_bullets(self) -> tuple[JournalBullet, ...]:
+        """Bullets that LOOK like an unmarked open action. A FLOOR, never a list.
+
+        See `subsystem_resolver._UNMARKED_ACTION` for why this is two phrasings
+        and not twelve: the others measured either zero hits or false ones over
+        the live corpus, and a noisy advisory is one nobody reads.
+        """
+        return tuple(b for b in self.bullets if b.openness_population == "unmarked")
+
+    def oldest_open_days(self, today: str) -> int | None:
+        """Age in days of the OLDEST dated `OPEN:` bullet, or None.
+
+        The oldest rather than the newest: the question this answers is "how long
+        has something here been unverified", and the newest open action cannot
+        answer it. Undated open bullets are skipped, not guessed at — same rule as
+        `newest_date` — so this can be None while `open_bullets` is non-empty, and
+        the renderer prints the count either way.
+        """
+        from datetime import date
+
+        ages = []
+        for b in self.open_bullets:
+            if not b.date:
+                continue
+            try:
+                ages.append((date.fromisoformat(today) - date.fromisoformat(b.date)).days)
+            except ValueError:
+                return None
+        return max(ages) if ages else None
+
     def dated_on(self, day: str) -> int:
         """How many bullets already carry `day`. The repeat-run signal."""
         return sum(1 for d in self.dated if d == day)
@@ -2776,6 +2947,20 @@ class TouchReport:
     fallback, or neither. The path alone cannot say whether the reader is looking
     at policy written FOR this scope, and mistaking the fallback for the scope's
     own is believing a scope has spoken when it has not."""
+
+    escalation: "WindowEscalation | None" = None
+    """The SECOND window, run automatically because the first was dominated.
+
+    🔴 CARRIED ON THE REPORT SO THE RENDERERS STAY PURE. `render_text` promises
+    "same report in, same bytes out"; a renderer that shelled out to git would
+    break that and would make every existing test of it depend on a repo. The
+    git work happens once, at the CLI's impure boundary (`main`), and the answer
+    travels here — the same shape as `policy_path`, and for the same reason.
+
+    `None` means the escalation DID NOT RUN — never "it ran and found nothing".
+    A run that ran and could not measure carries a `WindowEscalation` with a
+    NAMED `reason`, because an empty result cannot distinguish two mechanisms.
+    """
 
     journals: Mapping[str, EntryJournal] = field(default_factory=dict)
     """ref -> what that entry's `## Nuance / work-history` ALREADY holds.
@@ -3011,6 +3196,96 @@ def _render_recency(j: EntryJournal, today: str) -> str:
     )
 
 
+def _render_open_actions(j: EntryJournal, today: str, indent: str) -> list[str]:
+    """The RE-CHECK block: what this entry still claims is unfinished.
+
+    🔴 WHY THIS IS ADDRESSED TO THE WRITER AND NOT THE READER. Measured on
+    `datapacket-talos/forgejo`: the entry was written at 15:00:18 on 2026-07-24
+    proposing a one-line remedy, which landed at **15:02:21** —
+    two minutes and three seconds later, by the same effort. It then served that
+    remedy as outstanding for 22 days. Nobody was negligent; the writer simply had
+    no prompt to come back, because `/handoff` runs mid-effort and the store had no
+    way to represent "this is still open".
+
+    So the moment to re-check an open action is the NEXT write to the same entry,
+    which is exactly when this block prints. It asks for a verdict — close it, or
+    restate it — and refuses to imply anything about bullets that declared nothing.
+    """
+    out: list[str] = []
+    open_b = j.open_bullets
+    unmarked = j.unmarked_action_bullets
+    near = j.near_miss_bullets
+    if not open_b and not unmarked and not near:
+        return out
+    if open_b:
+        age = j.oldest_open_days(today)
+        if age is None:
+            aged = ", none of them dated, so their age is unknown"
+        elif age < 0:
+            # A bullet dated in the FUTURE. Rendering "-17 days" inside a 🔴
+            # advisory states a nonsense age as fact; the honest reading is that
+            # one of the two dates is wrong, and which one is not knowable here.
+            aged = (
+                f", but the oldest is dated {-age} day(s) in the FUTURE relative to "
+                f"{today} — one of those dates is wrong, so its age is not usable"
+            )
+        else:
+            aged = f", oldest unverified for {age} day{'' if age == 1 else 's'}"
+        out.append(
+            f"{indent}🔴 {len(open_b)} bullet{'' if len(open_b) == 1 else 's'} here "
+            f"still declare{'s' if len(open_b) == 1 else ''} `OPEN:`{aged}. RE-CHECK "
+            f"{'it' if len(open_b) == 1 else 'each'} against the repo BEFORE appending: "
+            f"if the work landed, rewrite the line as `RESOLVED <sha>:` in the same edit. "
+            f"An open action that has quietly been done is the failure this marker exists "
+            f"for — it reads exactly like one that has not."
+        )
+        out += _bullet_lines(open_b, indent)
+    if unmarked:
+        out.append(
+            f"{indent}⚠ {len(unmarked)} further bullet{'' if len(unmarked) == 1 else 's'} "
+            f"read{'s' if len(unmarked) == 1 else ''} like an open action but declare"
+            f"{'s' if len(unmarked) == 1 else ''} no marker. 🔴 AT LEAST this many — the "
+            f"detector matches two phrasings measured over the live corpus and has UNKNOWN "
+            f"recall, so this is a floor and never a count of what exists. If one is still "
+            f"open, mark it `OPEN:`; if it landed, `RESOLVED <sha>:`."
+        )
+        out += _bullet_lines(unmarked, indent)
+    if near:
+        out.append(
+            f"{indent}🔴 {len(near)} bullet{'' if len(near) == 1 else 's'} here "
+            f"look{'s' if len(near) == 1 else ''} like an attempted `OPEN:`/"
+            f"`RESOLVED <sha>:` marker that DID NOT PARSE, so it declares nothing "
+            f"and no badge will show. The grammar is strict on purpose — inventing "
+            f"a marker is worse than missing one — so fix the LINE: the marker goes "
+            f"immediately after `YYYY-MM-DD: `, is upper-case, carries no emphasis "
+            f"or parenthetical, and ends in `:`."
+        )
+        out += _bullet_lines(near, indent)
+    return out
+
+
+def _bullet_lines(bullets: Sequence[JournalBullet], indent: str) -> list[str]:
+    """Quote a bounded number of bullets, and SAY how many were not quoted.
+
+    Capped at `JOURNAL_BULLETS_SHOWN` — the same cap the sibling `already there`
+    list uses. An audit found these lists uncapped while their neighbour was
+    bounded: an entry with 9 open bullets printed 10 lines here and then quoted
+    several of them AGAIN below, on the highest-traffic writer surface in the
+    tool. The count in the sentence above is never truncated, so nothing is
+    hidden by capping the quotes — but the remainder is stated anyway, because a
+    list that silently stops looks like a complete one.
+    """
+    shown = list(bullets[:JOURNAL_BULLETS_SHOWN])
+    out = [f"{indent}  ? {b.first_line[:160]}" for b in shown]
+    rest = len(bullets) - len(shown)
+    if rest:
+        out.append(
+            f"{indent}  … {rest} more not quoted (display cap; the count above is "
+            f"complete, and `--json` carries every one)"
+        )
+    return out
+
+
 def _render_journal(j: EntryJournal, today: str, indent: str) -> list[str]:
     """The per-entry `already there` block: recency, the repeat warning, bullets.
 
@@ -3032,6 +3307,7 @@ def _render_journal(j: EntryJournal, today: str, indent: str) -> list[str]:
             f"only if you can say what it adds that the line{'' if repeats == 1 else 's'} "
             f"below do{'es' if repeats == 1 else ''} not."
         )
+    out += _render_open_actions(j, today, indent)
     if not j.bullets:
         return out
     shown = j.bullets[:JOURNAL_BULLETS_SHOWN]
@@ -3221,6 +3497,9 @@ _SOURCE_FLAG: dict[str, str] = {src: flag for src, flag, _ in _ROUTE_OUT}
 # description IS the routing surface (it is what the always-on listing carries),
 # and matching bodies would return half the catalogue for a common word.
 SKILLS_ROOT_DEFAULT = "~/.claude/skills"
+
+# The command a reader can paste. `__file__` so it is right in a worktree too.
+SELF_PATH = os.path.abspath(__file__)
 
 # Tokens that appear in paths everywhere and would match a skill by accident.
 # Deliberately short: over-filtering loses the lead, and every hit is printed with
@@ -3429,6 +3708,74 @@ def render_skill_homes(
     return lines
 
 
+# 🔴 THE THIRD DEAD END: the subsystem is real and has NO PATH FOOTPRINT.
+#
+# Every window above produces FILE PATHS, `nominate()` clusters paths and needs
+# two of them, and the `NO ENTRY` prompt is gated on there being a nomination. So
+# a session whose work product is not files — a production database, a cluster, a
+# DNS record, a SaaS config — resolves nothing, nominates nothing, and is offered
+# nothing. It is not a wrong home (that is SKILL HOMES above) and not a wrong
+# window (that is ROUTE OUT); there is no window, by construction.
+#
+# MEASURED 2026-08-14, the report this exists for: a session correctly hit
+# `looked-at-nothing`, correctly followed the ROUTE OUT to `--commit`, correctly
+# applied the PR-vs-commit discriminator, and correctly called the zero genuine —
+# then closed with "the work happened in the production database, which no path
+# window can see." Every step right, and the knowledge still had nowhere to go.
+#
+# 🔴 THE BIAS IS THE POINT. The subsystems that live OUTSIDE the repo are exactly
+# the ones whose knowledge is tribal and least recoverable from code — how to
+# reach the prod database, which operations are irreversible on it, which schema
+# quirk bites. A store that can only learn about things with a file footprint
+# will never hold any of them, and the emptiness then reads as nobody wanting it.
+#
+# The escape hatch already existed and nothing pointed at it: `--template <slug>`
+# takes an arbitrary slug and needs no paths at all. This is a pointer, not a
+# recommendation — "at most one, or none" still applies, and declining stays a
+# normal outcome.
+def render_no_path_footprint(scope: str) -> list[str]:
+    """The route for work the path model cannot represent.
+
+    🔴 THIS TOOK A `nominations` ARGUMENT AND SUPPRESSED ITSELF WHEN IT WAS
+    NON-EMPTY, and that branch was DEAD — never taken through either call site.
+    `looked-at-nothing` returns before `nominations` is ever set, and the other
+    site sits inside `if not report.writes_proposed:` where
+    `writes_proposed = bool(known) or bool(nominations)` makes it empty by
+    construction. Measured with an instrumented counter over 600 tests: 25 of 25 calls
+    FROM `render_text` had zero nominations. (One trip existed, from a test
+    calling the helper directly with a hand-made list — which is the point: the
+    only way to reach it was to construct a state `render_text` cannot produce.) The commit
+    that introduced it called the suppression the design's load-bearing decision
+    and its "negative control" test built a state `render_text` cannot produce —
+    breakable, not reachable, which is the distinction RULES.md draws.
+    Deleting it changed nothing, so it is gone rather than left to be believed.
+
+    The real gap it was reaching for is handled where it actually occurs: see the
+    one-line variant appended to the `NO ENTRY` block, which is the branch that
+    genuinely has nominations. Estimated at ~65% of dead ends over 287 real commits, which would have been
+    suppressed there — the common case, not the corner. 🔴 A PROXY: per-commit
+    file lists standing in for the real `--session`/`--pr`/`--commit` windows,
+    against a synthetic empty scope. The direction is unambiguous and the dead
+    branch is proved statically; the exact rate in live use will differ.
+    """
+    return [
+        "",
+        "NO PATH FOOTPRINT? — every window above reads FILE PATHS. If this "
+        "session's work was on a subsystem that has none",
+        "  (a production database, a cluster, a DNS record, an external service), "
+        "the store can still hold it:",
+        f"    python3 {SELF_PATH} --template <slug> --scope {scope}",
+        "  🔴 Nothing matches it automatically TODAY — but it is not permanently "
+        "unresolvable: it gains normal path",
+        "  resolution the moment some path is named for the slug (verified). So "
+        "PREFER a slug a future path would carry.",
+        "  Until then it is listed in the scope index and found by `--search`, "
+        "which is enough to read at /resume.",
+        "  Still at most ONE, or none: a subsystem you will want to know about "
+        "again, never a log of what you did today.",
+    ]
+
+
 def render_route_out(window: str) -> list[str]:
     """The untried windows, named, for a run that resolved nothing.
 
@@ -3453,6 +3800,466 @@ def render_route_out(window: str) -> list[str]:
         "the skill: run it twice, never merge the two path sets)."
     )
     return lines
+
+
+# --- The wrong-window warning --------------------------------------------------
+#
+# 🔴 THE PREFERRED WINDOW IS STRUCTURALLY BLIND TO THE MANDATED WORKFLOW — a
+# defect in the ROUTING, not in the extractor. MEASURED 2026-08-16, on the
+# session that designed, built, tested and deployed the `subsystem-store-api`
+# service across NINE merged PRs:
+#
+#     --session                       1 path under the session cwd, 5 outside
+#                                     -> status=no-match, "Propose no write"
+#     --pr over those same nine PRs   17 paths
+#                                     -> nominated `subsystem-store-api` at 7
+#                                        paths, above threshold
+#
+# ~94% of the work was invisible to the window the skill prefers, and the store
+# went without an entry for the largest thing that session produced. Nothing was
+# wrong with the report: it counted the 5 correctly and printed them. They were
+# simply not READ — a count sitting mid-note beside a plausible "1 path examined"
+# reads as an accounting detail rather than as the finding.
+#
+# 🔴 WHY THIS IS STRUCTURAL AND NOT OCCASIONAL. The standing default in this
+# environment is to DELEGATE non-trivial work to a subagent, and the standing
+# default for any file-modifying subagent is WORKTREE isolation. Those two
+# defaults land on opposite blind spots of this one window simultaneously: a
+# subagent's turns are a separate transcript (196 of 733 file-tool calls across
+# the 40 most recent transcripts, measured 2026-08-12), and a worktree is a
+# directory outside the session cwd. The better a session follows the rules, the
+# less of it this window can see.
+#
+# 🔴 IT IS COMPUTED FROM THIS RUN, AND THAT IS THE WHOLE DESIGN. A sentence that
+# printed unconditionally would be boilerplate on every run where it does not
+# apply and would therefore be skipped on the run where it does — which is not a
+# prediction: the `caveat:` line DOES print unconditionally, DOES name the
+# subagent blind spot in full, and was on screen throughout the measured failure.
+# This fires off the run's own two counters and quotes them, so it is a reading.
+
+
+def wrong_window_dominance(source: PathSource) -> tuple[int, int, int] | None:
+    """`(under, outside, percent_outside)` when OUTSIDE dominates — else None.
+
+    🔴 THE RULE IS `outside > under`: STRICTLY more of what this session named
+    lies outside the window than inside it. Three properties earned it over a
+    tuned fraction:
+
+      * It is the weakest claim the two counters can support on their own, and
+        the report can state it without hedging — "most of what this session
+        named is not below" is either true of the numbers or it is not.
+      * It carries NO constant to defend or to go stale. It IS the fraction rule
+        at exactly ½ (`outside/(under+outside) > 0.5` ⟺ `outside > under`), so ½
+        is chosen rather than tuned, and there is no threshold for a future
+        inconvenienced caller to move by one.
+      * The measured failure clears it by a distance rather than by a hair: 5 vs
+        1 is 83% outside, and the two other recorded cases were 12 vs 0 and 25 vs
+        0 — 100%. A rule that only just caught the motivating case would be
+        fitted to it.
+
+    What it deliberately does NOT do, stated because it is the cost: a run at 9
+    outside / 10 under (47% invisible) is silent. Firing there would need a
+    constant, and a warning tuned low enough to catch it fires often enough to
+    become the wallpaper this exists not to be. The unconditional `note:` line
+    still prints both counters on every session run, so that case is reported —
+    just not escalated.
+
+    ⚠ TIE GOES TO SILENCE, including 0 vs 0. Equal counts are not evidence of
+    dominance in either direction, and an empty window (0 and 0) is already
+    named by `looked-at-nothing` and routed by `ROUTE OUT`; adding a second
+    voice there would only make the block fire on runs it cannot inform.
+
+    Returns None for every source that carries no counters — see
+    `PathSource.outside_cwd` for why `session-absolute` is one of them.
+    """
+    under = source.under_cwd
+    outside = source.outside_cwd
+    if under is None or outside is None:
+        return None
+    if outside <= under:
+        return None
+    # `outside > under >= 0` ⇒ `outside >= 1` ⇒ the denominator is never 0.
+    return under, outside, round(100 * outside / (under + outside))
+
+
+def render_wrong_window(source: PathSource) -> list[str]:
+    """The escalation block, or NOTHING. Lines only; the caller owns placement.
+
+    Empty on every run that does not meet the condition — that emptiness is the
+    feature, not a degenerate case.
+    """
+    hit = wrong_window_dominance(source)
+    if hit is None:
+        return []
+    under, outside, percent = hit
+    total = under + outside
+    return [
+        "",
+        f"🔴 WRONG WINDOW? — {outside} of the {total} path(s) this session named "
+        f"({percent}%) are OUTSIDE the session cwd,",
+        f"  so they are NOT among the {under} this window reports. MOST of what this "
+        f"session named is not below.",
+        "  The two standing defaults here land on this window's two blind spots at "
+        "once: non-trivial work is DELEGATED to a",
+        "  subagent (whose turns are a SEPARATE transcript), and a file-modifying "
+        "subagent gets its own WORKTREE (which is",
+        "  a directory OUTSIDE the session cwd). So a well-run session is exactly the "
+        "one this window sees least of.",
+        "  ⚠ THIS RUN IS THIN, NOT PROOF THE WINDOW IS DEAD — and the difference has "
+        "been measured, so do not re-derive it",
+        "  from this one reading. Over 14 devrc sessions only 1 had an empty in-cwd "
+        "set and 41 of 232 paths (17.7%)",
+        "  landed under cwd. \"Structurally empty here because of the worktree rule\" "
+        "is REFUTED: the blindness above is",
+        "  about a SUBAGENT's separate transcript, not about your own edits. Three "
+        "prior runs generalised a single 0",
+        "  into a claim about the host and were wrong. Escalate the window; do not "
+        "file a finding about this.",
+        "  🔴 READ A SECOND WINDOW BEFORE CONCLUDING ANYTHING FROM THE COUNT BELOW:",
+        f"    {_SOURCE_FLAG['pr']:<26} what the BRANCH landed — the only source that "
+        f"sees a SUBAGENT's work",
+        f"    {_SOURCE_FLAG['commit']:<26} what THOSE COMMITS changed — work that "
+        f"became a commit but no PR",
+        "  One at a time, and never merge the path sets. 🔴 Reading a second window is "
+        "NOT composing them: the rule",
+        "  forbids MERGING two path sets under one caveat, not reading two reports.",
+    ]
+
+
+# --- The escalation: reading the SECOND window instead of recommending it ------
+#
+# 🔴 THE ADVISORY WAS NOT ENOUGH, AND THAT IS A MEASUREMENT, NOT A HUNCH. The
+# block above has named `--pr` and `--commit` as the windows to run next since it
+# shipped, and it FIRED IDENTICALLY ON TWO CONSECUTIVE SESSIONS with nobody
+# running either: 3 paths under cwd against 24 in the PR window on one, 0 under
+# 19 on the other. A recommendation whose only executor is a human or an agent
+# re-typing a command is one more thing to skip on the run where it matters —
+# the same failure mode the `note:` counters had before this block existed, one
+# level up.
+#
+# 🔴 `--commit`, NOT `--pr`, AND THE REASON IS THE MODULE'S POSTURE. The commit
+# range is inferable with git alone (`merge-base(<base ref>, HEAD)..HEAD`); a PR
+# number is not — `collect_pr_paths` shells out to `gh`, which is a NETWORK call,
+# an auth dependency and a rate limit. Nothing on the automatic path may acquire
+# those. The block above still NAMES `--pr` as the window a human should run when
+# the branch landed through one; this runs the half that costs nothing.
+#
+# 🔴 IT FIRES ON EXACTLY THE EXISTING CONDITION AND ADDS NO CONSTANT.
+# `wrong_window_dominance` already decides this, tie goes to silence, and its
+# docstring records why a lower threshold was rejected: a warning tuned low
+# enough to catch 9-outside/10-under fires often enough to become wallpaper.
+# Escalating on a SECOND, looser rule would re-open exactly that. And the
+# counters the first window prints are untouched — this is a second basis
+# reported beside the first, never a replacement for it.
+
+ESCALATION_BASIS_COMMIT = "commit"
+"""The only basis this escalation has. Named rather than implied so the report
+can say WHICH window produced the nominations under it, and so a future second
+basis is an addition rather than a re-reading of an unlabelled block."""
+
+ESCALATION_NO_BASE_REF = "no-base-ref"
+ESCALATION_HEAD_UNRESOLVABLE = "head-unresolvable"
+ESCALATION_NO_SHARED_HISTORY = "no-shared-history"
+ESCALATION_NO_COMMITS = "no-commits-in-range"
+ESCALATION_GIT_FAILED = "git-failed"
+ESCALATION_READ_FAILED = "commit-window-failed"
+
+ESCALATION_REASONS: tuple[str, ...] = (
+    ESCALATION_NO_BASE_REF,
+    ESCALATION_HEAD_UNRESOLVABLE,
+    ESCALATION_NO_SHARED_HISTORY,
+    ESCALATION_NO_COMMITS,
+    ESCALATION_GIT_FAILED,
+    ESCALATION_READ_FAILED,
+)
+"""Every way this escalation can fail to measure, each with its OWN token.
+
+🔴 A NAMED REASON, NEVER AN EMPTY RESULT. `claude/RULES.md`: an empty result
+cannot distinguish two mechanisms, and "0 paths, nothing nominated" is the
+observable that ALL of these share with a genuinely empty commit range. A reader
+who cannot tell "this repo has no `origin/main`" from "this branch has landed
+nothing yet" from "git is broken here" has not been told anything.
+
+⚠ DETACHED HEAD IS DELIBERATELY NOT IN THIS TUPLE. It was specified as a failure
+and it is not one: `merge-base(<base ref>, HEAD)..HEAD` is well defined on a
+detached HEAD and means exactly what it means on a branch — the commits this
+checkout has that the base ref does not. Refusing there would have made the
+escalation blind in an agent worktree, which is the case it exists for. The
+detachment is REPORTED in the provenance line instead, and pinned by a test.
+"""
+
+
+@dataclass(frozen=True)
+class CommitRange:
+    """`merge-base(<base ref>, HEAD)..HEAD`, or the NAMED reason there is none."""
+
+    shas: tuple[str, ...]
+    base_ref: str | None
+    merge_base: str | None
+    branch: str | None
+    """The branch name, or None when HEAD is DETACHED — a reading, not a fault."""
+
+    reason: str | None
+    detail: str
+    """Always non-empty, on success and on failure alike. On failure it is what
+    makes the token actionable; on success it states the range that was read."""
+
+    commands: tuple[tuple[str, ...], ...] = ()
+
+
+@dataclass(frozen=True)
+class WindowEscalation:
+    """The second window's whole answer — or why there isn't one."""
+
+    basis: str
+    reason: str | None
+    """None ⇔ it measured. Any member of `ESCALATION_REASONS` ⇔ it could not."""
+
+    detail: str
+    commit_range: CommitRange
+    source: "PathSource | None" = None
+    report: "TouchReport | None" = None
+
+    @property
+    def measured(self) -> bool:
+        return self.reason is None
+
+
+def commit_window_range(
+    repo: str | Path,
+    *,
+    base_ref_candidates: Sequence[str] = BASE_REF_CANDIDATES,
+) -> CommitRange:
+    """The commits this checkout has that the base ref does not. READ-ONLY.
+
+    🔴 THE SAME `_base_ref_of` `collect_git_paths` USES, from the same function —
+    not merely the same constant, which is what it was and what let both sites
+    be blind to `trunk` together. Two answers to "what is this branch's base"
+    would disagree the first time a repo used a mainline neither had been taught,
+    and the git source's window and this one would then describe different ranges
+    under one report while agreeing they had looked.
+
+    🔴 `--no-merges` IS NOT A PREFERENCE. `_resolve_commit` REFUSES a merge commit
+    (`CommitIsMergeError`) because `git diff-tree` prints nothing for one at exit
+    0 — so a range containing a merge would abort the whole escalation rather
+    than report it. Excluding them is stated in the rendered provenance line, so
+    the exclusion is accounted rather than silent.
+
+    Every failure returns a `reason` token; none returns a bare empty range.
+    """
+    try:
+        top = _toplevel(repo)
+    except GitError as exc:
+        return CommitRange(
+            (), None, None, None, ESCALATION_GIT_FAILED,
+            f"git could not resolve {repo} to a repository root, so no range could "
+            f"be computed: {exc}",
+        )
+
+    # Detached HEAD is a READING. See `ESCALATION_REASONS`.
+    try:
+        branch = _git(top, ["symbolic-ref", "--quiet", "--short", "HEAD"]).strip() or None
+    except GitError:
+        branch = None
+
+    try:
+        _git(top, ["rev-parse", "--verify", "--quiet", "HEAD^{commit}"])
+    except GitError:
+        return CommitRange(
+            (), None, None, branch, ESCALATION_HEAD_UNRESOLVABLE,
+            "HEAD does not resolve to a commit — an unborn branch has no commits, "
+            "so there is no range to read. This is not an empty range: nothing was "
+            "measured.",
+        )
+
+    base_ref, tried = _base_ref_of(top, base_ref_candidates)
+    if base_ref is None:
+        return CommitRange(
+            (), None, None, branch, ESCALATION_NO_BASE_REF,
+            f"none of {', '.join(tried)} exists in this repo, so "
+            f"`merge-base ..HEAD` has no left-hand side. The commit window was NOT "
+            f"read — this is not a claim that the branch landed nothing.",
+        )
+
+    try:
+        merge_base = _git(top, ["merge-base", "HEAD", base_ref]).strip()
+    except GitError:
+        return CommitRange(
+            (), base_ref, None, branch, ESCALATION_NO_SHARED_HISTORY,
+            f"HEAD and {base_ref} share no history, so there is no merge-base to "
+            f"bound the range. The commit window was NOT read.",
+        )
+
+    args = ["rev-list", "--no-merges", f"{merge_base}..HEAD"]
+    try:
+        shas = tuple(_git(top, args).split())
+    except GitError as exc:
+        return CommitRange(
+            (), base_ref, merge_base, branch, ESCALATION_GIT_FAILED,
+            f"`git {' '.join(args)}` failed, so the range is unknown: {exc}",
+            commands=(("git", *args),),
+        )
+
+    if not shas:
+        return CommitRange(
+            (), base_ref, merge_base, branch, ESCALATION_NO_COMMITS,
+            f"HEAD is at the merge-base with {base_ref}, or every commit since it is "
+            f"a merge — so this checkout has no non-merge commit the base ref lacks. "
+            f"The window was READ and is genuinely empty; nothing has been committed "
+            f"here yet, which is a different fact from work having been done.",
+            commands=(("git", *args),),
+        )
+
+    return CommitRange(
+        shas, base_ref, merge_base, branch, None,
+        f"{len(shas)} non-merge commit(s) in {merge_base[:12]}..HEAD, the commits "
+        f"this checkout has that {base_ref} does not.",
+        commands=(("git", *args),),
+    )
+
+
+def escalate_to_commit_window(
+    repo: str | Path,
+    store_root: str | Path,
+    scope: str,
+    *,
+    today: str,
+    min_paths: int = DEFAULT_MIN_PATHS,
+    limit: int = DEFAULT_NOMINATION_LIMIT,
+    exclude: Iterable[str] = (),
+    base_ref_candidates: Sequence[str] = BASE_REF_CANDIDATES,
+) -> WindowEscalation:
+    """Run the `--commit` window and resolve it against the SAME store. READ-ONLY.
+
+    Every failure is caught and turned into a NAMED reason rather than raised: a
+    dominated session's report is already useful, and killing it because the
+    second window could not be computed would trade a partial answer for none.
+    """
+    rng = commit_window_range(repo, base_ref_candidates=base_ref_candidates)
+    if rng.reason is not None:
+        return WindowEscalation(
+            basis=ESCALATION_BASIS_COMMIT,
+            reason=rng.reason,
+            detail=rng.detail,
+            commit_range=rng,
+        )
+    try:
+        source = collect_commit_paths(repo, rng.shas, exclude=exclude)
+        report = build_report(
+            source, store_root, scope, today=today, min_paths=min_paths, limit=limit
+        )
+    except (TouchError, ResolverError) as exc:
+        return WindowEscalation(
+            basis=ESCALATION_BASIS_COMMIT,
+            reason=ESCALATION_READ_FAILED,
+            detail=(
+                f"the range was computed ({rng.detail}) but reading it failed, so the "
+                f"second window has NO answer: {exc}"
+            ),
+            commit_range=rng,
+        )
+    return WindowEscalation(
+        basis=ESCALATION_BASIS_COMMIT,
+        reason=None,
+        detail=rng.detail,
+        commit_range=rng,
+        source=source,
+        report=report,
+    )
+
+
+def _ran_lines(commands: Sequence[Sequence[str]], indent: str = "  ") -> list[str]:
+    """`ran: <full argv>` for each command. ONE writer, for BOTH renderers.
+
+    🔴 FULL ARGV, PROGRAM INCLUDED — see `PathSource.commands`: the word `git` was
+    once hardcoded into this line and became a false provenance line (`ran: git gh
+    pr view 421`) the moment a source ran something else. The escalation block
+    renders provenance too, so the rule now has two call sites and therefore has
+    to have exactly one implementation (`claude/RULES.md` → "One rule, one place").
+    """
+    return [f"{indent}ran: {' '.join(cmd)}" for cmd in commands]
+
+
+def _nomination_labels(report: TouchReport | None) -> str:
+    """`ref (n paths), …` for one report's proposals, or an explicit nothing."""
+    if report is None:
+        return "(not read)"
+    parts = [f"{m.entry.ref} ({m.path_count} paths)" for m in report.known]
+    parts += [f"{n.ref} ({n.path_count} paths, NEW)" for n in report.nominations]
+    return ", ".join(parts) if parts else "(nothing)"
+
+
+def render_window_escalation(
+    escalation: "WindowEscalation | None", primary: TouchReport | None = None
+) -> list[str]:
+    """The second window's block, or NOTHING when it did not run.
+
+    🔴 IT NAMES THE BASIS OF EVERY NOMINATION IT PRINTS, and prints the FIRST
+    window's nominations beside them under their own label. The two path sets are
+    reported side by side and never merged — the module's standing rule for
+    windows — so the reader has to be able to say which basis produced which
+    proposal without counting back up the page.
+    """
+    if escalation is None:
+        return []
+    rng = escalation.commit_range
+    where = f"branch `{rng.branch}`" if rng.branch else "DETACHED HEAD"
+    if not escalation.measured:
+        # 🔴 TWO HEADERS, BECAUSE THEY ARE TWO MECHANISMS. `no-commits-in-range`
+        # is the ONE reason where the range genuinely WAS computed and came back
+        # empty; every other token means the instrument never ran. One header
+        # covering both would state a falsehood on whichever case it was not
+        # written for — and "nothing came back" is exactly the observable
+        # `claude/RULES.md` says cannot distinguish two mechanisms on its own.
+        headline = (
+            "🔴 SECOND WINDOW READ, AND IT IS EMPTY"
+            if escalation.reason == ESCALATION_NO_COMMITS
+            else "🔴 SECOND WINDOW COULD NOT BE READ"
+        )
+        return [
+            "",
+            f"{headline} — basis `--{escalation.basis}`, reason `{escalation.reason}`.",
+            f"  {escalation.detail}",
+            f"  read from: {where}"
+            + (f", base ref {rng.base_ref}" if rng.base_ref else ", no base ref"),
+            "  🔴 THIS IS NOT \"NOTHING TO NOMINATE\". The window above is dominated and "
+            "this one added nothing, so",
+            "  NEITHER has told you what this session did. Run a window by hand before "
+            "concluding there is nothing to record.",
+        ]
+    src = escalation.source
+    rep = escalation.report
+    assert src is not None and rep is not None  # `measured` is the discriminator
+    out = [
+        "",
+        f"SECOND WINDOW, RUN AUTOMATICALLY — basis `--{escalation.basis}`, because the "
+        f"window above is dominated.",
+        f"  {escalation.detail} Merge commits are excluded (they have no single diff).",
+        f"  read from: {where}, base ref {rng.base_ref}",
+        f"  paths: {len(src.paths)} ({src.kind}, window={src.window}, "
+        f"min_paths={rep.min_paths}, status={rep.status})",
+        f"  caveat: {src.caveat}",
+    ]
+    out.extend(_ran_lines(rng.commands))
+    out.append(f"  nominated BY THE COMMIT WINDOW: {_nomination_labels(rep)}")
+    out.append(f"  nominated BY THE SESSION WINDOW: {_nomination_labels(primary)}")
+    out.append(
+        "  🔴 REPORTED SIDE BY SIDE, NEVER MERGED. Attribute a bullet to ONE basis and "
+        "say which — the commit"
+    )
+    out.append(
+        "  window is what THESE COMMITS changed, the session window is what this "
+        "session's own turns named, and a"
+    )
+    out.append(
+        "  path in both is not corroboration. `--pr` is still UNREAD and is the only "
+        "window that sees a subagent's"
+    )
+    out.append(
+        "  work through a branch; it is not run here because it needs the network, "
+        "which this path never takes."
+    )
+    return out
 
 
 def render_text(report: TouchReport) -> str:
@@ -3483,11 +4290,22 @@ def render_text(report: TouchReport) -> str:
     out.append(f"  caveat: {src.caveat}")
     for note in src.notes:
         out.append(f"  note: {note}")
-    for cmd in src.commands:
-        # The FULL argv, program included. See `PathSource.commands`: the word
-        # `git` used to be hardcoded here, which made this line a false claim
-        # the moment a source ran something else.
-        out.append(f"  ran: {' '.join(cmd)}")
+    # The FULL argv, program included, from the one writer — see `_ran_lines`.
+    out.extend(_ran_lines(src.commands))
+
+    # 🔴 BEFORE EVERY STATUS BLOCK, ON EVERY STATUS. The measured failure was a
+    # `no-match` — but a run can equally clear the threshold on its 1 visible
+    # path and propose a bullet for a subsystem that was 6% of the session's
+    # work, so this is not a dead-end block and must not sit under
+    # `if not report.writes_proposed:` with `ROUTE OUT`. It is a fact about the
+    # WINDOW, and the window is the same whatever the store said about it.
+    out.extend(render_wrong_window(src))
+    # 🔴 ONE CALL SITE, DIRECTLY BELOW THE BLOCK IT ANSWERS — and above the status
+    # branches, not inside them, for the same reason `render_wrong_window` is:
+    # `looked-at-nothing` is one of the states the dominance rule fires on (0
+    # under, N outside), so an end-of-function placement would need this in every
+    # early-return branch, which is the duplicated predicate the module refuses.
+    out.extend(render_window_escalation(report.escalation, report))
 
     if report.status == "looked-at-nothing":
         out.append("")
@@ -3498,6 +4316,7 @@ def render_text(report: TouchReport) -> str:
         out.append("Propose no write. Say which window was empty and why.")
         out.extend(render_route_out(src.window))
         out.extend(render_skill_homes(src.paths, report.scope))
+        out.extend(render_no_path_footprint(report.scope))
         return "\n".join(out)
 
     if report.status == "scope-absent":
@@ -3552,6 +4371,33 @@ def render_text(report: TouchReport) -> str:
         )
         for m in report.below_threshold:
             out.append(f"  - {m.entry.ref}  ({m.path_count} path)")
+        # 🔴 THESE ARE EXISTING ENTRIES, AND THE HEADING DOES NOT SAY SO.
+        # `below_threshold` items carry `.entry` by construction — a ref only
+        # lands here after RESOLVING to a real file. "reported, not proposed"
+        # describes what the tool will do (not auto-propose a write), and five
+        # separate runs read it as "this is a dead end" and went looking for the
+        # right entry by hand — after which every one of them found exactly the
+        # entry named here.
+        #
+        # The sibling summary that says "Entries WERE reached" lives under
+        # `if not report.writes_proposed:` below, so a run that nominates
+        # ANYTHING suppresses it — which is precisely the run where a proposal to
+        # CREATE something sits next to an existing entry the reader should
+        # probably append to instead. Measured 2026-08-19 on `--pr 1146,1149`:
+        # `tests` (5 paths) was proposed for creation while `tekton-builds`
+        # (1 path, 18 KB, 15 bullets, already on disk) sat here unexplained.
+        one = len(report.below_threshold) == 1
+        out.append(
+            f"  ⇢ {'This entry EXISTS' if one else 'These entries EXIST'} — too few"
+            f" paths to auto-propose, NOT a dead end. If this session's subject is"
+            f" {'it' if one else 'one of them'}, APPEND there rather than creating"
+            f" anything below."
+        )
+        out.append(
+            "  ⇢ Paths cannot carry a subject: work ABOUT one subsystem often lands in"
+            " files under another (tests/, scripts/, a shared manifest dir). A low path"
+            " count is weak evidence about the FILES, not about the SUBJECT."
+        )
 
     if report.ambiguous:
         out.append("")
@@ -3578,6 +4424,20 @@ def render_text(report: TouchReport) -> str:
             f"`## What it is` + `## Pointers`; sensitivity={_SENSITIVITY_FAIL_SAFE}, "
             f"created_by={WRITER_ID})"
         )
+        # 🔴 Every nomination above is derived from PATHS, so it can only name
+        # what left a file behind. A session whose real subject was a database or
+        # a cluster is offered the directory it happened to touch and nothing
+        # about the thing it actually worked on. Measured over 287 real commits,
+        # ~65% of dead ends nominate SOMETHING (estimated from per-commit file lists,
+        # not the real windows — a proxy) — so THIS branch, not the empty
+        # one, is where the no-footprint case usually hides. The sibling block
+        # below never renders here (it sits under `if not writes_proposed`), so
+        # without this line the common case gets no route at all.
+        out.append(
+            "  …or, if this session's real subject has NO file footprint (a "
+            "database, a cluster, an external service), it needs no paths:"
+        )
+        out.append(f"    python3 {SELF_PATH} --template <slug> --scope {report.scope}")
 
     if not report.writes_proposed:
         out.append("")
@@ -3597,16 +4457,31 @@ def render_text(report: TouchReport) -> str:
                 f"reached; none strongly enough."
             )
         elif report.status == "no-match":
+            # 🔴 THE DISTINCTION IS KEPT AND THE MISREADING IS CLOSED. "A real
+            # zero, not an empty window" was true and load-bearing — the
+            # instrument RAN, which is a different fact from nothing being
+            # readable — but as a bare sentence it terminated two sessions:
+            # read as "there is nothing to record", when all it can support is
+            # "this window resolved nothing". The claim is now scoped to the
+            # window in the same breath as it is made, and the sentence that
+            # could be mistaken for a verdict on the SESSION says the opposite
+            # explicitly, because the reader who needs it is the one who has
+            # already stopped reading carefully.
             out.append(
                 f"NOTHING RESOLVED — {examined} and none named an entry in "
-                f"`{report.scope}`, and none clustered enough to nominate one. This is a "
-                f"real zero, not an empty window."
+                f"`{report.scope}`, and none clustered enough to nominate one. The "
+                f"instrument RAN: this is a real zero FOR THIS WINDOW, not an unread "
+                f"window. It is NOT a finding about the SESSION — the other windows are "
+                f"UNREAD, they are blind in different directions, and this run says "
+                f"nothing about what they would return. See ROUTE OUT below before "
+                f"concluding there is nothing to record."
             )
         else:
             out.append(f"NOTHING TO PROPOSE — {examined}; see the accounting above.")
         out.append("Propose no write.")
         out.extend(render_route_out(src.window))
         out.extend(render_skill_homes(src.paths, report.scope))
+        out.extend(render_no_path_footprint(report.scope))
 
     return "\n".join(out)
 
@@ -3630,6 +4505,10 @@ def _journal_json(j: EntryJournal | None, today: str) -> dict | None:
 def report_json(report: TouchReport) -> dict:
     src = report.source
     assoc = report.association
+    # The same predicate the text renderer prints, not a second expression of it
+    # — one rule, one place. `None` means "did not fire"; a dict means it did and
+    # carries the numbers it fired on, so a consumer never re-derives them.
+    dominance = wrong_window_dominance(src)
     return {
         "status": report.status,
         "scope": report.scope,
@@ -3652,6 +4531,17 @@ def report_json(report: TouchReport) -> dict:
             "commands": [list(c) for c in src.commands],
             "path_count": len(src.paths),
             "paths": list(src.paths),
+            "under_cwd": src.under_cwd,
+            "outside_cwd": src.outside_cwd,
+            "wrong_window": (
+                None
+                if dominance is None
+                else {
+                    "under_cwd": dominance[0],
+                    "outside_cwd": dominance[1],
+                    "percent_outside": dominance[2],
+                }
+            ),
         },
         "known": [
             {
@@ -3702,6 +4592,39 @@ def report_json(report: TouchReport) -> dict:
         ],
         "unmatched_path_count": len(assoc.unmatched_paths) if assoc else 0,
         "journal_line_shape": journal_line_shape(report.today),
+        # 🔴 `None` ⇔ THE ESCALATION DID NOT RUN. When it ran and could not
+        # measure, `reason` carries the token — a machine consumer must be able
+        # to tell "not attempted" from "attempted, no answer" without prose.
+        "escalation": _escalation_json(report.escalation),
+    }
+
+
+def _escalation_json(escalation: "WindowEscalation | None") -> dict | None:
+    if escalation is None:
+        return None
+    rng = escalation.commit_range
+    rep = escalation.report
+    return {
+        "basis": escalation.basis,
+        "measured": escalation.measured,
+        "reason": escalation.reason,
+        "detail": escalation.detail,
+        "base_ref": rng.base_ref,
+        "merge_base": rng.merge_base,
+        "branch": rng.branch,
+        "detached_head": rng.branch is None,
+        "commit_count": len(rng.shas),
+        "commits": list(rng.shas),
+        "commands": [list(c) for c in rng.commands],
+        "path_count": len(escalation.source.paths) if escalation.source else None,
+        "paths": list(escalation.source.paths) if escalation.source else [],
+        "status": rep.status if rep else None,
+        "known": [
+            {"ref": m.entry.ref, "path_count": m.path_count} for m in rep.known
+        ] if rep else [],
+        "nominations": [
+            {"ref": n.ref, "path_count": n.path_count} for n in rep.nominations
+        ] if rep else [],
     }
 
 
@@ -3908,6 +4831,183 @@ def render_census(c: Census, now: float | None = None) -> str:
 
 
 @dataclass(frozen=True)
+class OpenAction:
+    """One bullet `--validate` is reporting as unfinished business.
+
+    `declared` separates the two populations, which must never be added together
+    into one number: a `OPEN:` bullet is a claim the WRITER made and is exact,
+    while an unmarked one is this tool's guess from two measured phrasings and has
+    unknown recall. Merging them would let a floor masquerade as a count.
+    """
+
+    filename: str
+    declared: bool
+    date: str | None
+    first_line: str
+    near_miss: bool = False
+    """The bullet tried to declare a marker and missed the grammar.
+
+    A THIRD population, never folded into either other one: it is not an open
+    action and not a guess about one, it is a write that did not land.
+    """
+
+    unverifiable_closure: bool = False
+    """A `RESOLVED:` that names no sha, so its claim cannot be checked.
+
+    A FOURTH population. Not a problem — closing an action is the outcome this
+    whole design wants — but the sha is what separates "closed, and here is the
+    commit" from an assertion, and only a branch on `resolved_by` makes the field
+    mean anything.
+    """
+
+
+# --- The entry's SHAPE, as opposed to whether its front matter parses ----------
+#
+# 🔴 WHY A SHAPE CHECK EXISTS AT ALL. Measured 2026-08-19 over eight synthetic
+# fixtures, `--validate` returned `OK` at exit 0 for an entry with all three spine
+# headings renamed, for one with no headings at all, and for one whose sections
+# were all empty. Only a missing `service:` went red. So the spine every consumer
+# depends on — 56 of 56 real entries carry it, measured the same day — was
+# enforced by NOTHING: it held because two skills happen to describe it and one
+# template happens to emit it.
+#
+# 🔴 AND IT IS NOT COSMETIC. `subsystem_recall` computes an entry's bullet count
+# and its `🔴 N OPEN` badge from `extract_sections(...)[NUANCE_HEADING]`, so a
+# heading that is renamed — or given a trailing colon, or shifted off column 0 —
+# yields an empty body, and the index row `/resume` consumes renders an entry with
+# genuine open actions as a well-formed empty one. `#560` put `🔴 NO <heading>` on
+# that row, which catches it ON READ. This catches the same thing ON WRITE, in the
+# turn that wrote it, which is the difference between "someone eventually notices"
+# and "the writer is told".
+#
+# 🔴 WHICH HEADINGS, AND WHY STILL NOT `## What it is`. The checked set is the set
+# whose absence makes a NUMBER wrong. `## What it is` IS read now —
+# `subsystem_recall` surfaces it in every printed body since 2026-08-20, and
+# before that nothing on any path printed it — but it feeds no bullet count and no
+# index badge, so a missing one cannot turn a parse failure into a well-formed
+# empty entry the way a missing `## Nuance / work-history` can. Flagging it would
+# report a convention with no numeric consequence beside two whose consequence is
+# measured, and a writer cannot tell those apart in a list. The reader names its
+# absence under the entry's own body, where the person reading that entry is
+# already looking.
+SHAPE_HEADINGS: tuple[str, ...] = (POINTERS_HEADING, NUANCE_HEADING)
+"""The schema headings whose absence makes a COUNT or a BADGE wrong on the read
+path.
+
+⚠ Pinned against `subsystem_recall.COUNTED_HEADINGS` — NOT its `SURFACED_HEADINGS`,
+which is wider — and deliberately not imported from either: `subsystem_recall`
+imports THIS module, so the direction is impossible. The tuples answer different
+questions: `SURFACED_HEADINGS` is a DISPLAY choice ("which sections does a printed
+body render"), `COUNTED_HEADINGS` and this one are a CHECK ("which sections must
+exist before any number this tool prints is a measurement"). Pinned by
+`test_subsystem_touch.py` rather than merged, so a display decision cannot
+silently become a validation rule — and, since the two now genuinely differ, so
+that widening the display set does not drag the validator along behind it.
+"""
+
+SHAPE_ABSENT = "absent"
+SHAPE_RENAMED = "renamed"
+SHAPE_DUPLICATED = "duplicated"
+SHAPE_EMPTY = "empty"
+
+# Cap on the heading inventory printed beside an ABSENT finding. A bound, not a
+# filter — the remainder is always counted in the line, following every other
+# display cap in this module.
+SHAPE_INVENTORY_SHOWN = 6
+
+
+def _heading_key(heading: str) -> str:
+    """The LOOSE form, used ONLY to pair a heading with the schema one it missed.
+
+    🔴 IT NEVER ACCEPTS A HEADING. `extract_sections` matches the exact string and
+    keeps doing so; folding `## Pointers` and `## pointers` together there would
+    quietly widen what the store is allowed to look like, which is the opposite of
+    what this change is for. This exists so the report can say "you wrote
+    `## pointers`" instead of "the section is absent" — the difference between a
+    finding a writer can act on in one edit and one that sends them looking for
+    prose that is already on disk.
+
+    Folds exactly the three near-misses the schema doc names: the `#` level, the
+    case and surrounding whitespace, and a trailing colon.
+    """
+    return re.sub(r"\s+", " ", heading.lstrip("#").strip().rstrip(":").strip()).lower()
+
+
+@dataclass(frozen=True)
+class ShapeFinding:
+    """One way an entry's spine departs from the schema. FOUR DISJOINT KINDS.
+
+    They are never summed, for the same reason `OpenAction`'s populations are not:
+    they are different facts with different remedies. `renamed` and `absent` are
+    the same missing section reported at different resolutions — the writer typed
+    something we can show them, or they did not — and collapsing them would throw
+    away the only half that is actionable. `duplicated` is a section that IS
+    parsed, twice, silently merged. `empty` is a section present and unfilled,
+    which `extract_sections` tracks separately from absent precisely so this can.
+    """
+
+    filename: str
+    heading: str
+    """The SCHEMA heading this finding is about, always — never the typo."""
+
+    kind: str
+    found: tuple[str, ...] = ()
+    """For `renamed`, the near-miss heading(s) actually written; for `absent`, the
+    file's whole heading inventory, so the writer sees what they wrote instead."""
+
+    count: int = 0
+    """For `duplicated`, how many times the exact heading appears."""
+
+
+def scan_entry_shape(paths: Iterable[str | Path]) -> tuple[ShapeFinding, ...]:
+    """Report each entry's spine against `SHAPE_HEADINGS`. READ-ONLY.
+
+    Tolerant in exactly the way `scan_open_actions` is: a file that cannot be read
+    contributes nothing rather than raising, because this runs BESIDE the parse
+    check and never in front of it — a malformed file's own rejection is the
+    finding that matters.
+
+    🔴 IT REUSES `extract_sections` AND `scan_headings` AND PARSES NOTHING ITSELF.
+    Both are views over one walker in `subsystem_resolver`, so this cannot come to
+    a different conclusion about what a heading is than the reader does — which
+    would be the worst possible defect in a checker whose entire job is to predict
+    what the reader will see.
+    """
+    out: list[ShapeFinding] = []
+    for p in paths:
+        path = Path(p)
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        present = extract_sections(text, SHAPE_HEADINGS)
+        headings = scan_headings(text)
+        for h in SHAPE_HEADINGS:
+            if h not in present:
+                near = tuple(x for x in headings if _heading_key(x) == _heading_key(h))
+                out.append(
+                    ShapeFinding(
+                        filename=path.name,
+                        heading=h,
+                        kind=SHAPE_RENAMED if near else SHAPE_ABSENT,
+                        found=near or headings,
+                    )
+                )
+                continue
+            # Both of the remaining kinds can be true of ONE heading at once (a
+            # duplicated heading whose merged body is still empty), so neither
+            # branch excludes the other.
+            n = sum(1 for x in headings if x == h)
+            if n > 1:
+                out.append(
+                    ShapeFinding(filename=path.name, heading=h, kind=SHAPE_DUPLICATED, count=n)
+                )
+            if not present[h].strip():
+                out.append(ShapeFinding(filename=path.name, heading=h, kind=SHAPE_EMPTY))
+    return tuple(out)
+
+
+@dataclass(frozen=True)
 class ValidationReport:
     """What `--validate` checked, and what it found. Counts on EVERY path.
 
@@ -3928,6 +5028,47 @@ class ValidationReport:
     malformed: tuple[MalformedEntry, ...] = ()
     policy_path: str | None = None
     policy_basis: str = POLICY_NONE
+    open_actions: tuple[OpenAction, ...] = ()
+    """Unfinished business found in the files that PARSED. Advisory only.
+
+    🔴 IT DOES NOT AFFECT `clean`, AND MUST NOT. `--validate` answers one question
+    — "would the loader accept this file?" — and an entry with an open action is
+    perfectly well-formed. Folding this into the verdict would fail 2 of the 40
+    live entries for a reason that is not a schema violation, and a gate that goes
+    red for something the author cannot fix by fixing the file is the
+    permanently-red gate `claude/RULES.md` forbids.
+    """
+
+    shape: tuple[ShapeFinding, ...] = ()
+    """How the files that PARSED depart from the section spine. Advisory only.
+
+    🔴 IT DOES NOT AFFECT `clean` EITHER, AND FOR A DIFFERENT REASON THAN
+    `open_actions`. An entry whose `## Nuance / work-history` is renamed is not
+    unfinished — it is genuinely, silently broken. It still must not fail the
+    verdict, because the verdict answers ONE question ("would the loader accept
+    this file?") and the loader accepts it: every other reader will happily index
+    it, list it and reach it by `--ref`. Changing the answer to that question
+    would make `--validate` mean two things at once, and `handoff/SKILL.md` step 4
+    branches on the exit code alone — a non-zero there means "write NOTHING",
+    which is exactly the wrong response to a file already written whose heading
+    needs one edit.
+    """
+
+    unreachable: tuple[UnreachableMarkerFinding, ...] = ()
+    """Correctly-spelled markers typed where NO parser looks. Advisory only.
+
+    🔴 IT DOES NOT AFFECT `clean`, ON THE SAME REASONING AS `open_actions` AND
+    FOR THE SAME REASON IT MUST NOT: the loader accepts the file, and an entry
+    with an open action — reachable or not — is well-formed. A verdict change
+    here would be a gate the author cannot turn green by fixing the file, which
+    `claude/RULES.md` names as worse than no gate.
+
+    🔴 AND IT IS NEVER ADDED TO `near_miss_marker_count`. A near-miss is a marker
+    mis-spelled WHERE THE PARSER LOOKS and is fixed by editing that line; this is
+    a marker spelled correctly where the parser NEVER looks and is fixed by
+    promoting it to a bullet of its own. One count covering both would send half
+    the readers to the wrong remedy.
+    """
 
     @property
     def clean(self) -> bool:
@@ -3944,6 +5085,73 @@ class ValidationReport:
             "malformed": [
                 {"scope": m.scope, "file": m.filename, "reason": m.reason, "line": m.line}
                 for m in self.malformed
+            ],
+            # 🔴 TWO COUNTS, NEVER A SUM. `OpenAction.declared` exists precisely
+            # because these populations must not be added: `declared` is exact
+            # (a writer typed the marker) and `unmarked` is a two-phrasing FLOOR
+            # with unmeasured recall. An audit caught a single `open_action_count`
+            # here — the text renderer states the floor caveat in words, but JSON
+            # has nowhere to put a caveat, so a merged number is the only thing a
+            # machine consumer would ever see. `unmarked_is_a_floor` carries the
+            # disclaimer as DATA so it cannot be dropped by a reader skimming keys.
+            "declared_open_count": sum(1 for a in self.open_actions if a.declared),
+            "near_miss_marker_count": sum(1 for a in self.open_actions if a.near_miss),
+            "unverifiable_closure_count": sum(
+                1 for a in self.open_actions if a.unverifiable_closure
+            ),
+            "unmarked_action_count": sum(
+                1 for a in self.open_actions
+                if not a.declared and not a.near_miss and not a.unverifiable_closure
+            ),
+            "unmarked_is_a_floor": True,
+            "open_actions": [
+                {
+                    "file": a.filename,
+                    "declared": a.declared,
+                    "near_miss": a.near_miss,
+                    "unverifiable_closure": a.unverifiable_closure,
+                    "date": a.date,
+                    "first_line": a.first_line,
+                }
+                for a in self.open_actions
+            ],
+            # 🔴 FOUR COUNTS, NEVER A SUM, on the same reasoning as the open-action
+            # populations one screen up: `renamed` and `absent` are the same
+            # missing section at two resolutions and only one of them can be acted
+            # on from the number alone, while `duplicated` and `empty` are sections
+            # the reader DOES find. A single `shape_finding_count` would let a
+            # machine consumer treat "you typo'd a heading" and "the section is
+            # there but blank" as one quantity.
+            "shape_absent_count": sum(1 for s in self.shape if s.kind == SHAPE_ABSENT),
+            "shape_renamed_count": sum(1 for s in self.shape if s.kind == SHAPE_RENAMED),
+            "shape_duplicated_count": sum(
+                1 for s in self.shape if s.kind == SHAPE_DUPLICATED
+            ),
+            "shape_empty_count": sum(1 for s in self.shape if s.kind == SHAPE_EMPTY),
+            # 🔴 ITS OWN KEY, ITS OWN REASON TOKEN, NEVER SUMMED WITH
+            # `near_miss_marker_count`. See `ValidationReport.unreachable`.
+            "unreachable_marker_count": len(self.unreachable),
+            "unreachable_marker_reason": UNREACHABLE_MARKER,
+            "unreachable_markers": [
+                {
+                    "file": u.filename,
+                    "bullet_first_line": u.bullet_first_line,
+                    "offset": u.offset,
+                    "line": u.line,
+                    "openness": u.openness,
+                }
+                for u in self.unreachable
+            ],
+            "shape_headings_checked": list(SHAPE_HEADINGS),
+            "shape": [
+                {
+                    "file": s.filename,
+                    "heading": s.heading,
+                    "kind": s.kind,
+                    "found": list(s.found),
+                    "count": s.count,
+                }
+                for s in self.shape
             ],
             "policy_file": self.policy_path,
             "policy_basis": self.policy_basis,
@@ -3978,6 +5186,112 @@ def validate_entry_file(path: str | Path) -> MalformedEntry | None:
             scope=normalize_ref(p.parent.name), filename=p.name, reason=exc.why
         )
     return None
+
+
+def scan_open_actions(paths: Iterable[str | Path]) -> tuple[OpenAction, ...]:
+    """Read each entry file's journal and collect its unfinished business.
+
+    READ-ONLY, and deliberately tolerant: a file that cannot be read or has no
+    `## Nuance / work-history` section contributes nothing rather than raising.
+    This runs BESIDE the parse check, never in front of it — a malformed file's
+    own rejection is the finding that matters, and an advisory computed from its
+    half-parsed body would bury it.
+    """
+    out: list[OpenAction] = []
+    for p in paths:
+        path = Path(p)
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        body = extract_sections(text, (NUANCE_HEADING,)).get(NUANCE_HEADING)
+        if not body:
+            continue
+        for b in parse_journal_bullets(body):
+            # ONE branch, on the resolver's single precedence source. Re-deriving
+            # membership from the individual predicates here is what let a bullet
+            # be both a near-miss and an unmarked action on the writer surface
+            # while being one thing in JSON.
+            pop = b.openness_population
+            if pop in ("none", "resolved"):
+                continue
+            out.append(
+                OpenAction(
+                    filename=path.name,
+                    declared=pop == "open",
+                    near_miss=pop == "near-miss",
+                    unverifiable_closure=pop == "unverifiable",
+                    date=b.date,
+                    first_line=b.first_line,
+                )
+            )
+    return tuple(out)
+
+
+@dataclass(frozen=True)
+class UnreachableMarkerFinding:
+    """One bullet carrying a correctly-spelled marker where no parser looks.
+
+    🔴 A FIFTH POPULATION, AND IT IS DELIBERATELY NOT AN `OpenAction`. Those four
+    are all readings of a bullet's OPENING line and are separated by
+    `openness_population`; this one is a fact about lines 2..n, and the bullet it
+    is about is usually `none` — skipped by `scan_open_actions` entirely. Carried
+    in its own field, counted in its own key and rendered in its own block, so
+    there is no place where it could be added to `near_miss_marker_count`.
+    """
+
+    filename: str
+    bullet_first_line: str
+    """The bullet's OPENING line — what a reader will search the file for."""
+
+    offset: int
+    """1-based line index WITHIN the bullet. Always >= 2."""
+
+    line: str
+    """The continuation line carrying the marker, verbatim."""
+
+    openness: str
+    """`open` | `resolved` — what it would have declared at a bullet's head."""
+
+
+def scan_unreachable_markers(
+    paths: Iterable[str | Path],
+) -> tuple[UnreachableMarkerFinding, ...]:
+    """Markers typed into a bullet's BODY, where `_bullet_openness` never reads.
+
+    Same tolerance and the same walk as `scan_open_actions` — a file that cannot
+    be read, or that has no `## Nuance / work-history`, contributes nothing — and
+    for the same reason: this is an advisory that runs BESIDE the parse check,
+    never in front of it.
+
+    🔴 IT IS A SEPARATE WALK BY CHOICE, NOT BY OVERSIGHT. Merging it into
+    `scan_open_actions` would mean deciding what to do with a bullet that is
+    `none` on its opening line, and the answer there is "report it, but never as
+    an open action" — which is a second population inside a function whose whole
+    contract is the one-branch precedence in `openness_population`.
+    """
+    out: list[UnreachableMarkerFinding] = []
+    for p in paths:
+        path = Path(p)
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        body = extract_sections(text, (NUANCE_HEADING,)).get(NUANCE_HEADING)
+        if not body:
+            continue
+        for b in parse_journal_bullets(body):
+            for m in b.unreachable_markers:
+                out.append(
+                    UnreachableMarkerFinding(
+                        filename=path.name,
+                        bullet_first_line=b.first_line,
+                        offset=m.offset,
+                        line=m.line,
+                        openness=m.openness,
+                    )
+                )
+    return tuple(out)
 
 
 def validate_scope(store_root: str | Path, scope: str) -> tuple[tuple[str, ...], tuple[MalformedEntry, ...]]:
@@ -4140,7 +5454,12 @@ def render_validation(report: ValidationReport) -> str:
             f"OK — {len(report.checked)} of {len(report.checked)} entry file(s) parse, "
             f"0 malformed. They will load, be listed, and be reachable by `--ref`."
         )
-        return "\n".join(out)
+        return "\n".join(
+            out
+            + _render_validation_shape(report)
+            + _render_validation_open_actions(report)
+            + _render_validation_unreachable(report)
+        )
     n = len(report.malformed)
     out.append(
         f"🔴 MALFORMED — {n} of {len(report.checked)} entry file(s) could NOT be indexed. "
@@ -4154,7 +5473,213 @@ def render_validation(report: ValidationReport) -> str:
         "across two physical lines — an `aliases: [...]` list in particular must be on ONE "
         "line, or the parser reads an unterminated bare string.)"
     )
-    return "\n".join(out)
+    return "\n".join(
+        out
+        + _render_validation_shape(report)
+        + _render_validation_open_actions(report)
+        + _render_validation_unreachable(report)
+    )
+
+
+def _render_validation_shape(report: ValidationReport) -> list[str]:
+    """The SHAPE advisory. Prints on every path that CHECKED something.
+
+    🔴 IT PRINTS ITS DENOMINATOR EVEN WHEN IT FINDS NOTHING, and it prints WHICH
+    HEADINGS it looked for. `claude/RULES.md`: a reassuring zero is
+    indistinguishable from an instrument wired to nothing unless it carries the
+    size of what it looked at — and here it must also carry the SET it looked at,
+    because a reader who assumes the third spine heading was checked would take
+    this zero as a claim about a heading nothing examined.
+
+    🔴 IT COMES BEFORE THE OPEN-ACTION BLOCK, deliberately. A renamed
+    `## Nuance / work-history` makes `scan_open_actions` find nothing, so that
+    block's "0 declared" is a fact about a section the parser never reached. Read
+    in the other order it is simply false.
+    """
+    n_files = len(report.checked)
+    spine = ", ".join(f"`{h}`" for h in SHAPE_HEADINGS)
+    absent = [s for s in report.shape if s.kind == SHAPE_ABSENT]
+    renamed = [s for s in report.shape if s.kind == SHAPE_RENAMED]
+    duplicated = [s for s in report.shape if s.kind == SHAPE_DUPLICATED]
+    empty = [s for s in report.shape if s.kind == SHAPE_EMPTY]
+    out = [""]
+    if not report.shape:
+        out.append(
+            f"entry shape: {n_files} entry file(s) checked for {spine} — each present "
+            f"exactly once and non-empty. 🔴 `## What it is` is NOT checked here: the "
+            f"reader DOES surface it, but it feeds no count and no badge, so its "
+            f"absence changes nothing this zero is about — `subsystem_recall` names a "
+            f"missing one under that entry's own body instead."
+        )
+        return out
+    out.append(f"entry shape across {n_files} entry file(s), checked for {spine}:")
+    if renamed:
+        out.append(
+            f"  🔴 {len(renamed)} section(s) RENAMED — the heading is close but not "
+            f"exact, so NO reader reaches the section. Matching is exact-string after "
+            f"`rstrip()`, case-sensitive, at column 0. On that entry's index row this "
+            f"reads as `0 nuance` with no `OPEN` badge: PARSE FAILURE, not an empty "
+            f"entry."
+        )
+        for s in renamed:
+            wrote = ", ".join(f"`{h}`" for h in s.found)
+            out.append(f"    {s.filename}: `{s.heading}` is written as {wrote}")
+    if absent:
+        out.append(
+            f"  🔴 {len(absent)} section(s) ABSENT — the heading is not in the file at "
+            f"all, under any spelling this tool can pair with it. Whatever the entry "
+            f"says on that subject is invisible to every default read. Read the "
+            f"inventory below against the schema heading: a section retitled far "
+            f"enough that no folding pairs it lands here rather than under RENAMED."
+        )
+        for s in absent:
+            shown = list(s.found[:SHAPE_INVENTORY_SHOWN])
+            rest = len(s.found) - len(shown)
+            inventory = ", ".join(f"`{h}`" for h in shown) if shown else "(none at all)"
+            if rest > 0:
+                inventory += f", … {rest} more"
+            out.append(f"    {s.filename}: no `{s.heading}`; the file's headings are {inventory}")
+    if duplicated:
+        out.append(
+            f"  🔴 {len(duplicated)} heading(s) DUPLICATED — the sections silently MERGE "
+            f"into one body and anything written under a heading BETWEEN them is dropped "
+            f"from the read entirely. Fold them into one section."
+        )
+        for s in duplicated:
+            out.append(f"    {s.filename}: `{s.heading}` appears {s.count} times")
+    if empty:
+        out.append(
+            f"  ⚠ {len(empty)} section(s) PRESENT AND EMPTY — the heading is there with "
+            f"nothing under it. Not a parse failure and not the same as absent: the "
+            f"reader finds the section and prints a blank."
+        )
+        for s in empty:
+            out.append(f"    {s.filename}: `{s.heading}`")
+    out.append(
+        "  (Advisory, and it changes no verdict: the loader accepts a file whose "
+        "sections it cannot find, which is precisely the silent failure this block "
+        "exists to make loud. Fix the heading, not the exit code.)"
+    )
+    return out
+
+
+def _render_validation_open_actions(report: ValidationReport) -> list[str]:
+    """The advisory tail. Prints on every path that CHECKED something.
+
+    🔴 IT PRINTS ITS DENOMINATOR EVEN WHEN IT FINDS NOTHING. `claude/RULES.md`:
+    a reassuring zero is indistinguishable from an instrument wired to nothing
+    unless it carries the size of what it looked at. "0 open actions across 29
+    entry file(s)" is a reading; a blank space is not.
+    """
+    n_files = len(report.checked)
+    declared = [a for a in report.open_actions if a.declared]
+    near = [a for a in report.open_actions if a.near_miss]
+    unverifiable = [a for a in report.open_actions if a.unverifiable_closure]
+    guessed = [
+        a for a in report.open_actions
+        if not a.declared and not a.near_miss and not a.unverifiable_closure
+    ]
+    out = [""]
+    if not report.open_actions:
+        out.append(
+            f"open actions: 0 declared across {n_files} entry file(s), 0 attempted-but-"
+            f"unparsed, and 0 unmarked "
+            f"bullets matched the two phrasings this tool can recognise. 🔴 The second "
+            f"half of that is a FLOOR with unknown recall, not a clean bill of health — "
+            f"an unfinished action phrased any other way is invisible here."
+        )
+        return out
+    out.append(f"open actions across {n_files} entry file(s):")
+    if declared:
+        out.append(
+            f"  🔴 {len(declared)} declared `OPEN:` — exact, the writer said so. "
+            f"Re-check against the repo; if it landed, rewrite as `RESOLVED <sha>:`."
+        )
+        for a in declared:
+            out.append(f"    {a.filename}: {a.first_line[:150]}")
+    if near:
+        out.append(
+            f"  🔴 {len(near)} bullet(s) look like an ATTEMPTED marker that did not "
+            f"parse — they declare nothing and show no badge. Fix the line: the "
+            f"marker follows `YYYY-MM-DD: `, is upper-case, carries no emphasis or "
+            f"parenthetical, and ends in `:`."
+        )
+        for a in near:
+            out.append(f"    {a.filename}: {a.first_line[:150]}")
+    if guessed:
+        out.append(
+            f"  ⚠ {len(guessed)} unmarked bullet(s) that READ like an open action. "
+            f"AT LEAST this many — two measured phrasings, unknown recall."
+        )
+        for a in guessed:
+            out.append(f"    {a.filename}: {a.first_line[:150]}")
+    if unverifiable:
+        out.append(
+            f"  ⚠ {len(unverifiable)} `RESOLVED:` bullet(s) name no sha, so the "
+            f"closure cannot be checked. Not a defect — closing is the point — but "
+            f"`RESOLVED <sha>:` is what makes it verifiable rather than asserted."
+        )
+        for a in unverifiable:
+            out.append(f"    {a.filename}: {a.first_line[:150]}")
+    out.append(
+        "  (Advisory. None of this changes the verdict above: an entry with unfinished "
+        "business is still well-formed, and failing it here would be a red gate nobody "
+        "could turn green by fixing the file.)"
+    )
+    return out
+
+
+def _render_validation_unreachable(report: ValidationReport) -> list[str]:
+    """The MARKER-REACHABILITY advisory. Prints on every path that CHECKED something.
+
+    🔴 ITS OWN BLOCK, BECAUSE IT IS ITS OWN SHAPE. It sits after the open-action
+    block rather than inside it for the reason the two counts are never summed:
+    the block above is about what a bullet DECLARED, and every line in it names a
+    remedy — "fix the LINE", "rewrite as `RESOLVED <sha>:`" — that is wrong here.
+    A marker on a continuation line is spelled correctly; the edit it needs is to
+    be PROMOTED to a bullet of its own.
+
+    🔴 IT PRINTS ITS DENOMINATOR EVEN WHEN IT FINDS NOTHING, like both siblings.
+    A bare absence is indistinguishable from a scanner wired to nothing, and this
+    one has a second way to be vacuous that the zero must not hide: it can only
+    see bullets, so an entry whose `## Nuance / work-history` heading is renamed
+    contributes zero here for a reason the SHAPE block above is the one to state.
+    """
+    n_files = len(report.checked)
+    out = [""]
+    if not report.unreachable:
+        out.append(
+            f"marker reachability: 0 out-of-reach marker(s) across {n_files} entry "
+            f"file(s) — every `OPEN:`/`RESOLVED:` found is on a bullet's OPENING line, "
+            f"where the parser reads. [{UNREACHABLE_MARKER}]"
+        )
+        return out
+    n = len(report.unreachable)
+    out.append(
+        f"🔴 {n} MARKER(S) OUT OF REACH across {n_files} entry file(s) "
+        f"[{UNREACHABLE_MARKER}] — spelled CORRECTLY, on a bullet's CONTINUATION "
+        f"line, where NO reader looks. `_bullet_openness` reads a bullet's OPENING "
+        f"line and its pattern is anchored at position 0, so this declares NOTHING: "
+        f"it raises neither the `OPEN` badge nor `NEAR-MISS`. 🔴 It is NOT a "
+        f"near-miss and is NOT counted as one — a near-miss is mis-spelled where "
+        f"the parser looks and is fixed by editing the line; this is fixed by "
+        f"PROMOTING the line to a top-level bullet of its own."
+    )
+    for u in report.unreachable:
+        out.append(f"    {u.filename}: line {u.offset} of the bullet opening")
+        out.append(f"      bullet: {u.bullet_first_line[:120]}")
+        out.append(f"      marker: {u.line.strip()[:120]}   (would declare `{u.openness}`)")
+    out.append(
+        "  🔴 BEFORE FIXING ANY MARKER ABOVE IT IN THE SAME SECTION, re-check this "
+        "one against the repo. Measured 2026-08-20: such a bullet had only ever "
+        "raised a badge BY ACCIDENT, through a broken `RESOLVED —` sitting above "
+        "it — so repairing that line would have SILENCED a still-open action."
+    )
+    out.append(
+        "  (Advisory. It changes no verdict, for the same reason the block above "
+        "does not: the loader accepts the file.)"
+    )
+    return out
 
 
 # --- CLI -----------------------------------------------------------------------
@@ -4343,32 +5868,68 @@ def main(argv: Sequence[str] | None = None, *, today: str | None = None) -> int:
             return 0
 
         repo = Path(args.repo).resolve()
-        scope = args.scope if args.scope is not None else scope_for_repo(repo)
+
+        # 🔴 LAZY, and that is the entire point. `scope_for_repo` shells out to
+        # git, so deriving the scope EAGERLY made every subcommand require a git
+        # repo at cwd — including `--validate <file>`, which never reads the
+        # scope at all (it takes its policy scope from the file's own parent
+        # directory, below) and whose whole job is to answer "does this entry
+        # parse". MEASURED 2026-08-21: `--validate <file>` from a non-repo cwd
+        # exited 3 with "fatal: not a git repository", and the nix check sandbox
+        # runs at exactly such a cwd (`/build/src` is a copy, not a clone) — so
+        # the hermetic gate was RED on a path the dev host structurally could not
+        # exercise, because a dev host is always inside the repo.
+        #
+        # Memoized, so the paths that DO need it (the scope form, --template, and
+        # the report below) still pay for exactly one git call.
+        _scope_memo: list[str] = []
+
+        def scope_of() -> str:
+            if not _scope_memo:
+                _scope_memo.append(
+                    args.scope if args.scope is not None else scope_for_repo(repo)
+                )
+            return _scope_memo[0]
 
         if args.template is not None:
-            print(new_entry_template(normalize_ref(args.template), scope, today=stamp))
+            print(
+                new_entry_template(normalize_ref(args.template), scope_of(), today=stamp)
+            )
             return 0
 
         if args.validate is not None:
             if args.validate == VALIDATE_SCOPE:
+                scope = scope_of()
                 checked, malformed = validate_scope(args.store, scope)
                 policy_scope: str | None = scope
                 target = f"`{normalize_ref(scope)}/`"
+                scanned = [
+                    Path(args.store) / normalize_ref(scope) / name for name in checked
+                ]
+                reported_scope: str | None = scope
             else:
                 bad = validate_entry_file(args.validate)
                 checked = (Path(args.validate).name,)
                 malformed = (bad,) if bad is not None else ()
                 policy_scope = Path(args.validate).parent.name
                 target = str(args.validate)
+                scanned = [Path(args.validate)]
+                # No scope, and NOT because it could not be derived: the
+                # single-file form is not scoped. Deriving one here is what made
+                # this branch need a git repo.
+                reported_scope = None
             path, basis = governing_policy(args.store, policy_scope or "")
             report = ValidationReport(
                 store_root=str(args.store),
                 target=target,
-                scope=scope if args.validate == VALIDATE_SCOPE else None,
+                scope=reported_scope,
                 checked=tuple(checked),
                 malformed=tuple(malformed),
                 policy_path=path,
                 policy_basis=basis,
+                open_actions=scan_open_actions(scanned),
+                shape=scan_entry_shape(scanned),
+                unreachable=scan_unreachable_markers(scanned),
             )
             print(
                 json.dumps(report.to_json(), indent=2)
@@ -4432,11 +5993,33 @@ def main(argv: Sequence[str] | None = None, *, today: str | None = None) -> int:
         report = build_report(
             source,
             args.store,
-            scope,
+            scope_of(),
             today=stamp,
             min_paths=args.min_paths,
             limit=args.limit,
         )
+        # 🔴 THE IMPURE BOUNDARY, AND THE ONLY ONE. The renderers stay
+        # deterministic in the report; the git work that answers the second
+        # window happens here, once, and travels on the report.
+        #
+        # The condition is `wrong_window_dominance` and NOTHING ELSE — no second
+        # threshold, no new constant. Only the session source carries the two
+        # counters, so a run already reading the commit window can never
+        # re-escalate into itself; that is a property of the existing rule, not
+        # a guard added here.
+        if wrong_window_dominance(source) is not None:
+            report = replace(
+                report,
+                escalation=escalate_to_commit_window(
+                    repo,
+                    args.store,
+                    scope_of(),
+                    today=stamp,
+                    min_paths=args.min_paths,
+                    limit=args.limit,
+                    exclude=args.exclude,
+                ),
+            )
     except (TouchError, ResolverError) as exc:
         print(f"subsystem-touch: {exc}", file=sys.stderr)
         return 3

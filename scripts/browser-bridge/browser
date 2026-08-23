@@ -132,9 +132,9 @@
 #                               fast path would silently return the UN-emulated
 #                               view. `click` dispatches TOUCH events while touch
 #                               emulation is on, as DevTools does.
-#   browser activate [--wait MS | --no-wait]
+#   browser activate [--wait MS | --no-wait] [--focus | --no-focus]
 #                             — FOREGROUND the owned/active tab (--tab to target
-#                               one). ⚠⚠ STEALS THE OPERATOR'S SCREEN — the ONE
+#                               one). ⚠⚠ CAN STEAL THE OPERATOR'S SCREEN — the ONE
 #                               intrusive op. LAST RESORT: use it only when
 #                               something genuinely needs the REAL foreground (a
 #                               permission prompt, a native picker, seeing it with
@@ -143,8 +143,18 @@
 #                               per read. Waits (bounded, default ~3s, cap ~8s) for
 #                               load unless --no-wait; --wait MS overrides. On i3
 #                               the SERVER also runs `i3-msg` host-side to actually
-#                               raise the Brave window + switch workspace; the
-#                               result's `i3` field reports applied/skipped/failed.
+#                               raise the Brave window + switch workspace — but
+#                               ONLY on request: --focus asks for it, --no-focus
+#                               refuses, and the DEFAULT is "yes iff stdout is a
+#                               TTY", so a human typing this gets the raise and an
+#                               agent on a pipe does not. The result's `i3` field
+#                               reports applied/skipped/failed/withheld, and
+#                               `i3_detail` says WHY (focused / no_match /
+#                               not_focused / unavailable / no_title /
+#                               not_requested / …).
+#                               🔴 `applied` means a window was FOUND and CONFIRMED
+#                               focused — i3-msg exits 0 even matching nothing, so
+#                               it is not inferred from an exit code.
 #   browser html              — outerHTML of the owned/active tab (+ url, title);
 #                               --max-bytes N caps it (default 32768, 0 = uncapped,
 #                               truncation appends a "…[truncated N bytes]" note).
@@ -175,13 +185,15 @@
 #                               un-throttles the (background → throttled) tab in
 #                               the SAME invocation, so the next read is not a
 #                               shell — it replaces the `nav` then `wake` pair.
-#   browser screenshot [path] [--fullpage] [--data-url]
+#   browser screenshot [path] [--fullpage] [--data-url] [--json]
 #                             — screenshot the owned/active tab via CDP
 #                               (Page.captureScreenshot) — WORKS on a background/
 #                               occluded tab and on each profile's own tab; a
 #                               foreground tab uses the cheap captureVisibleTab fast
 #                               path. --fullpage grabs the whole scrollable document.
-#                               Writes a .png: to <path> if given (prints the path),
+#                               Writes a .png: to <path> if given (prints the path
+#                               plus a `#` Read hint — the ONE non-JSON stdout in
+#                               this CLI; pass --json for the envelope instead),
 #                               else to a MODE-0600 temp file (honours TMPDIR) and
 #                               prints compact JSON {path,bytes,url,via}. The base64
 #                               data URL is NEVER printed — Read the .png instead.
@@ -232,6 +244,21 @@
 #
 # Global flags (before the subcommand): --instance <key>, --tab <id>,
 #   --frame <frameId|url-substring> (route a read/click INTO a cross-origin frame).
+#
+#   ENV DEFAULTS: BB_INSTANCE / BB_TAB / BB_FRAME seed those three, so a caller
+#   driving one profile+tab for a whole run sets them ONCE instead of repeating
+#   the flags on every call. An explicit flag always wins (and `--instance ''`
+#   deliberately clears an inherited BB_INSTANCE).
+#     export BB_INSTANCE=work BB_TAB=1234
+#     browser text ; browser click '#go'          # both routed, no flags
+#   🔴 Prefer these to hoisting the flags into a shell variable. Under zsh an
+#   unquoted `$F` is NOT word-split, so `F="--instance work --tab 12"; browser $F
+#   text` passes ONE argument — the whole string — and the error names a
+#   subcommand you never typed. An env var cannot be split wrong.
+#   🔴 An exported BB_* OUTLIVES the command that set it and is inherited by every
+#   descendant, so a later destructive op can be routed with nothing in its argv
+#   saying so. Any op whose target came from the ENVIRONMENT therefore prints ONE
+#   line on stderr naming the variable; `BB_NO_ROUTE_NOTE=1` silences it.
 # Frame enumeration + --frame reads/input use chrome.webNavigation + chrome.scripting,
 # which reach CROSS-ORIGIN out-of-process iframes (OOPIFs) that CDP getFrameTree could
 # NOT see. `screenshot` still uses chrome.debugger (CDP), attaching ONLY to the owned/
@@ -240,6 +267,12 @@
 #
 # Output is JSON on stdout (pretty-printed if `jq` is present). Exit non-zero on
 # transport/HTTP error so a caller can branch.
+#
+# STDOUT IS JSON, STDERR IS FOR HUMANS. Every advisory — the hidden-tab warning,
+# a disconnected instance, routing help — goes to STDERR, so
+# `json.loads(<stdout>)` is safe. The ONE exception is `screenshot <path>`, which
+# prints the bare path plus a `#` Read hint for back-compat: pass `--json` there
+# to get the same envelope the no-path form prints.
 #
 # EXIT CODES
 #   0  success
@@ -257,9 +290,43 @@ HOST="${BROWSER_BRIDGE_HOST:-127.0.0.1}"
 PORT="${BROWSER_BRIDGE_PORT:-8788}"
 TOKEN_FILE="${BROWSER_BRIDGE_TOKEN_FILE:-$HOME/.config/browser-bridge/token}"
 BASE="http://${HOST}:${PORT}"
-INSTANCE=""   # routing key set via --instance <key> (empty → single-instance)
-TAB=""        # explicit tab id set via --tab <id> (overrides owned/active routing)
-FRAME=""      # --frame <frameId|url-substring>: route a read/click INTO that frame (CDP)
+# Targeting: --instance / --tab / --frame, each with an ENVIRONMENT DEFAULT.
+#
+# WHY THE ENV DEFAULTS EXIST (measured, 2026-08-20). Every op has to carry the
+# same three flags, so callers hoisted them into a shell variable and splatted it:
+#
+#     F="--instance work --tab 1234"; browser $F text        # ← WRONG under zsh
+#
+# zsh does NOT field-split an unquoted `$var` (bash does), so `$F` arrives as ONE
+# argument — the literal string `--instance work --tab 1234` — and the CLI reports
+# an unknown-subcommand error naming something the caller never typed. The failure
+# is silent in the sense that matters: nothing about it points at word splitting.
+# An env var cannot be word-split wrong because it is never split at all.
+#
+# PRECEDENCE: an explicit flag always wins, because the flag loop below ASSIGNS
+# over whatever the environment seeded here. `--instance ""` therefore genuinely
+# clears an inherited BB_INSTANCE (it is an explicit empty, not an absent flag).
+INSTANCE="${BB_INSTANCE:-}"   # routing key; --instance <key> (empty → single-instance)
+TAB="${BB_TAB:-}"             # explicit tab id; --tab <id> (overrides owned/active routing)
+FRAME="${BB_FRAME:-}"         # --frame <frameId|url-substring>: route INTO that frame (CDP)
+# Which SOURCE supplied TAB, so the numeric-validation error in cmd_op can name it.
+# A malformed `BB_TAB` reported as "--tab must be a numeric tab id" sends the reader
+# hunting a flag that appears nowhere in their command line.
+#
+# 🔴 AN ENV DEFAULT OUTLIVES THE COMMAND THAT SET IT, so each of the three also
+# records WHERE its value came from. Precedence is the easy half and it is
+# correct above; LIFETIME is the risk. `export BB_FRAME=evil.example` is inherited
+# by every descendant for the rest of that shell's life, so a later
+# `browser type '<secret>' --selector '#x'` is routed into that frame — or at
+# another profile's tab — with NOTHING in its command line saying so, and the
+# envelope it prints looks exactly like the un-routed one. Silence there makes an
+# inherited destructive route indistinguishable from a deliberate one, so cmd_op
+# says so ONCE on stderr (stdout stays pure JSON). The flag branches reset these
+# to the flag name, which is what keeps the note honest when a flag has won.
+INSTANCE_SRC="--instance"; [ -n "${BB_INSTANCE:-}" ] && INSTANCE_SRC="\$BB_INSTANCE"
+TAB_SRC="--tab";           [ -n "${BB_TAB:-}" ]      && TAB_SRC="\$BB_TAB"
+FRAME_SRC="--frame";       [ -n "${BB_FRAME:-}" ]    && FRAME_SRC="\$BB_FRAME"
+ENV_ROUTE_NOTED=0
 
 die() { echo "browser: $*" >&2; exit 1; }
 
@@ -268,7 +335,22 @@ die() { echo "browser: $*" >&2; exit 1; }
 # `bash` process, so it must come from the environment / process tree, not shell
 # state). Sent as X-Session-Id on every /cmd so the server can route this session
 # to its OWN owned tab. Namespaced by source so ids from different sources can't
-# collide. Fallback chain (most→least reliable), documented in README/SKILL:
+# collide.
+# 🔴 THAT NAMESPACE TAG — everything before the FIRST `:` — IS LOAD-BEARING
+# BEYOND COLLISION AVOIDANCE. server.py parses it to decide whether the id is a
+# joinable key for activity telemetry: `claude:` is Claude Code's own session
+# uuid (the same value `source='claude'` rows store, so it JOINS) and
+# `opencode:` is opencode's own session id (the same value `source='opencode'`
+# rows store, so it JOINS too), while `tmux:`/`sid:`/`ppid:` are not — a pane id
+# like %3 is stable across many
+# UNRELATED sessions and recording it as a session key would silently merge
+# them. Do not add a tier without deciding which of those it is, and never emit
+# an id whose tag misdescribes it (see the recreate-close re-tag below). Fallback chain (most→least reliable), documented in README/SKILL:
+#   0. OPENCODE_SESSION_ID — the id of the opencode session whose bash tool is
+#      running this command, exported per call by the `shell.env` hook in
+#      scripts/opencode/plugin/session-env.js. FIRST because it is the only one
+#      of these that is re-written on every tool call: the claude vars below can
+#      be a stale value inherited from an ancestor process.
 #   1. CLAUDE_CODE_SESSION_ID — Claude Code's own session UUID (present since the
 #      2.1.x CLI; verified stable across every Bash-tool call in a session). Best.
 #   2. CLAUDE_SESSION_ID — defensive alternate spelling, in case a CLI build
@@ -307,6 +389,14 @@ die() { echo "browser: $*" >&2; exit 1; }
 # drivers that may share a session id should each `open` and then pass the
 # returned `--tab <id>` explicitly on every subsequent op — an explicit --tab
 # overrides owned-tab routing entirely, so they never collide. See SKILL.md.
+# 🔴 THAT PARAGRAPH IS ABOUT CLAUDE CODE ONLY, and opencode is now its MIRROR.
+# Measured in the shipped 1.18.18 binary: `TaskTool.execute` creates a CHILD
+# session and `ShellTool` passes that child's `sessionID` to `shell.env`, so an
+# opencode `task` subagent exports a DIFFERENT `OPENCODE_SESSION_ID` and lands on
+# tier 0 with an id of its own. Claude siblings SHARE identity and collide on one
+# tab; opencode siblings have DISTINCT identities and fragment across tabs. Same
+# escape hatch works for both (`open`, then thread `--tab`), for opposite reasons
+# — but do not read the Claude sentence above as describing opencode.
 
 # _session_from_proc — `sid:<session-id>:<leader-starttime>` from procfs, or
 # non-zero if procfs is unreadable. WHY the POSIX session id and not $PPID/$$:
@@ -348,6 +438,25 @@ _session_from_proc() {
 }
 
 derive_session_id() {
+  # 🔴 TIER 0, ABOVE THE CLAUDE TIERS ON PURPOSE — this ordering IS the fix.
+  # `OPENCODE_SESSION_ID` is exported per bash-tool call by
+  # scripts/opencode/plugin/session-env.js's `shell.env` hook, and opencode
+  # merges its tool environment as `{...process.env, ...pluginEnv}` — plugin
+  # wins — so the value present here was written by the opencode session
+  # ISSUING this command. `CLAUDE_CODE_SESSION_ID`, by contrast, may be a value
+  # opencode INHERITED from a Claude Code ancestor several processes up (see the
+  # WHY block below). Reading the claude vars first would credit that ancestor.
+  # JOINABLE: the bare id is exactly what `source='opencode'` rows in
+  # activity.events carry (activity-plugin.js emits `session: input.sessionID`
+  # from `tool.execute.after`, the same id `shell.env` receives).
+  #
+  # 🔴 KNOWN RESIDUAL, deliberately not fixed here: the MIRROR nesting — a
+  # Claude Code session launched FROM an opencode bash tool — inherits
+  # OPENCODE_SESSION_ID and would be credited to that outer opencode session.
+  # No environment variable separates the two directions (both ids are equally
+  # inheritable), and the common shape by far is the one this branch fixes.
+  # Recorded so nobody re-derives it as a discovery; see the PR.
+  if [ -n "${OPENCODE_SESSION_ID:-}" ]; then printf 'opencode:%s' "$OPENCODE_SESSION_ID"; return; fi
   if [ -n "${CLAUDE_CODE_SESSION_ID:-}" ]; then printf 'claude:%s' "$CLAUDE_CODE_SESSION_ID"; return; fi
   if [ -n "${CLAUDE_SESSION_ID:-}" ];      then printf 'claude:%s' "$CLAUDE_SESSION_ID"; return; fi
   if [ -n "${TMUX_PANE:-}" ];              then printf 'tmux:%s' "$TMUX_PANE"; return; fi
@@ -367,12 +476,12 @@ derive_session_id() {
 # subcommand. --print-session-id short-circuits (no server/token needed).
 while [ $# -gt 0 ]; do
   case "$1" in
-    --instance) shift; [ $# -ge 1 ] || die "usage: browser --instance <key> <subcommand>"; INSTANCE="$1"; shift ;;
-    --instance=*) INSTANCE="${1#--instance=}"; shift ;;
-    --tab) shift; [ $# -ge 1 ] || die "usage: browser --tab <id> <subcommand>"; TAB="$1"; shift ;;
-    --tab=*) TAB="${1#--tab=}"; shift ;;
-    --frame) shift; [ $# -ge 1 ] || die "usage: browser --frame <frameId|url-substring> <subcommand>"; FRAME="$1"; shift ;;
-    --frame=*) FRAME="${1#--frame=}"; shift ;;
+    --instance) shift; [ $# -ge 1 ] || die "usage: browser --instance <key> <subcommand>"; INSTANCE="$1"; INSTANCE_SRC="--instance"; shift ;;
+    --instance=*) INSTANCE="${1#--instance=}"; INSTANCE_SRC="--instance"; shift ;;
+    --tab) shift; [ $# -ge 1 ] || die "usage: browser --tab <id> <subcommand>"; TAB="$1"; TAB_SRC="--tab"; shift ;;
+    --tab=*) TAB="${1#--tab=}"; TAB_SRC="--tab"; shift ;;
+    --frame) shift; [ $# -ge 1 ] || die "usage: browser --frame <frameId|url-substring> <subcommand>"; FRAME="$1"; FRAME_SRC="--frame"; shift ;;
+    --frame=*) FRAME="${1#--frame=}"; FRAME_SRC="--frame"; shift ;;
     --print-session-id) derive_session_id; echo; exit 0 ;;
     *) break ;;
   esac
@@ -413,6 +522,113 @@ done
 [ "$_sub_known" -eq 1 ] || die "unknown subcommand: ${1:-} (try: $SUBCOMMANDS)"
 
 SESSION_ID="$(derive_session_id)"
+
+# SESSION_ORIGIN — non-empty when THIS command was issued by something NESTED
+# under the session whose id we just derived. Sent as X-Session-Origin; the
+# bridge then records the id as `payload.origin_session` (the causal parent)
+# instead of as the issuing `session`. See server.py's HDR_SESSION_ORIGIN.
+#
+# ---- THE FOLLOW-UP LANDED, AND THE TOKEN DID *NOT* RETIRE --------------- #
+# The `opencode:` tier now exists (tier 0 in `derive_session_id`), fed by
+# scripts/opencode/plugin/session-env.js. In the ordinary case the `claude:*`
+# case below therefore stops matching on its own — the derived id is
+# `opencode:<id>`, no origin is declared, and the row carries a REAL session key.
+#
+# 🔴 BUT THE TOKEN STAYS, CORRECTING THE COMMENT THIS REPLACES, WHICH SAID IT
+# WOULD BECOME "dead code to delete". It is not dead: it is now the FALLBACK for
+# every way `OPENCODE_SESSION_ID` can be absent while `OPENCODE` is set, and each
+# of those is reachable rather than theoretical —
+#   * DEPLOY SKEW. This CLI is a mkOutOfStoreSymlink (edits are live on `git
+#     pull`), while the plugin is a `home.file` copy that only appears on a
+#     `home-manager switch`. The window where the new CLI runs without the new
+#     plugin is the normal state of affairs between a merge and a switch.
+#   * A RUNNING opencode does not pick up a newly deployed plugin — it needs a
+#     restart. Long-lived sessions keep the old environment for as long as they
+#     live.
+#   * THE PTY PATH fires `shell.env` with `{cwd}` only, no sessionID, so the hook
+#     sets the variable EMPTY there by design (a stale inherited id would be
+#     worse than none).
+#   * VERSION SKEW / a plugin-load failure, which opencode reports only in its
+#     own logs.
+# In every one of those the derived id falls back to `claude:<inherited uuid>`
+# and the leak below is live again, so deleting the token would restore exactly
+# the fabrication it was added to prevent. Empty is recoverable;
+# plausible-but-wrong is not.
+#
+# ---- WHY: CLAUDE_CODE_SESSION_ID is INHERITED inside opencode ----------- #
+# 🔴 opencode's CLI sets `process.env.OPENCODE="1"` in a yargs TOP-LEVEL
+# `.middleware()` — registered before every `.command(...)`, so it runs for every
+# subcommand — and hands its tool shells `{...process.env}`. VERIFIED in the
+# PINNED bundle (named, not copied: PINNED_VERSION in
+# scripts/tests/test_opencode_engine.py) AND in the newer build on this host's
+# profile — the assignment is identical in both, so it is not pin-specific. And
+# separately by a live env dump from inside an opencode bash tool which still
+# carried the OUTER Claude session's CLAUDE_CODE_SESSION_ID:
+# launch opencode from a Claude Code bash call and the variable rides down, still
+# set several processes deep.
+#
+# So inside opencode that variable names an ANCESTOR, not the session issuing the
+# command. Left unmarked, a plain `opencode run …` whose bash tool shells out to
+# `browser` would have the bridge write the OUTER session's uuid into the
+# telemetry `session` column, where those rows are indistinguishable from that
+# session's own direct browser use. The column is EMPTY today: empty is
+# recoverable, plausible-but-wrong is not.
+#
+# 🔴 SCOPE OF THAT CLAIM, CORRECTED. It used to read "THE ID ITSELF IS NOT
+# TOUCHED … routing, per-session tab ownership and the `not_owned_tab` semantics
+# are unchanged", full stop. That is still exactly true of `OPENCODE` — setting
+# it perturbs nothing, and test_routing_equivalence_opencode_does_not_change_the_id
+# machine-checks it. It is NOT true once `OPENCODE_SESSION_ID` is present: the id
+# then becomes `opencode:<id>` and ROUTING MOVES WITH IT. Stated plainly because
+# it is a real behaviour change, not a side effect to discover later:
+#   * an opencode session that used to inherit its Claude parent's id and drive
+#     that parent's OWNED TAB now owns a tab of its own, and must `open` one —
+#     which is the documented per-session model, and the same DEGRADATION note
+#     above already called shared identity a trade rather than a feature.
+#     🔴 SAY THE FAILURE MODE, NOT JUST THE HAPPY PATH: "must `open` one" is what
+#     a well-behaved run does; NOTHING REFUSES when it doesn't. `emulate` is the
+#     only op in server.py's OWNED_TAB_ONLY_OPS, so for `nav`/`click`/`type`/`key`
+#     an unowned session resolves to no tab and the extension drives the ACTIVE
+#     tab — the one the operator is looking at. Before this change that same run
+#     inherited the parent's ownership and landed on the parent's tab instead. So
+#     a nested opencode run that starts interacting WITHOUT `open`ing first now
+#     types into the human's screen. See the matching note on OWNED_TAB_ONLY_OPS.
+#   * 🔴 `browser --tab <the parent's tab> emulate` from inside opencode now
+#     RAISES `not_owned_tab` where it used to work: `emulate` requires
+#     `owned is not None and resolved == owned`, and the nested run no longer
+#     owns that tab. Narrow — `emulate` alone — but it regresses the explicit
+#     `--tab` workaround reference/tabs-instances.md teaches for concurrent
+#     drivers. The fix is for each driver to `open` its own tab, which that
+#     section already tells you to do; the doc now says so for this case too.
+#   * 🔴 An opencode `task` SUBAGENT gets a DIFFERENT id, not its parent's:
+#     measured in the 1.18.18 binary, `TaskTool.execute` creates a child session
+#     and `ShellTool` passes that child's `sessionID`. Telemetry stays coherent
+#     (each row names the session that really ran the tool) but ROUTING
+#     FRAGMENTS — parent and subagent own different tabs. That is the exact
+#     mirror of the Claude Code case in the DEGRADATION note above, where
+#     siblings SHARE identity: the note is true for Claude and false for
+#     opencode, and each needs the opposite remedy.
+#   * `browser agent` is UNAFFECTED. Its opencode agent runs with `"*": deny`
+#     (scripts/browser-bridge/opencode/browser-agent.md) — no shell at all — so
+#     it cannot reach this CLI; it drives a FORCED tab through the custom tool,
+#     which sends the wrapper-captured parent id and its own
+#     `X-Session-Origin: browser-agent`. Neither value comes from here.
+# The nested-run fact still travels beside the id for the FALLBACK case, exactly
+# as it does for `browser agent` — ONE mechanism for one question.
+#
+# The `claude:*` case is what keeps this honest, and it is read off the DERIVED
+# id rather than re-testing the env vars, so it cannot drift out of step with the
+# precedence chain above — including the new tier 0. That is why this case needs
+# NO edit to self-retire: when `OPENCODE_SESSION_ID` is present the derived id is
+# `opencode:…`, the pattern simply stops matching, and the session is attributed.
+# When it is absent the pattern matches again and the suppression is back. An
+# opencode session with NO Claude ancestor (run interactively) derives
+# `tmux:`/`sid:`/`ppid:` — nothing was inherited, so no origin is declared and the
+# row behaves exactly as it does today.
+SESSION_ORIGIN=""
+case "$SESSION_ID" in
+  claude:*) if [ -n "${OPENCODE:-}" ]; then SESSION_ORIGIN="opencode-inherited"; fi ;;
+esac
 
 [ -r "$TOKEN_FILE" ] || die "token file not found/readable: $TOKEN_FILE (is the browser-bridge service running?)"
 TOKEN="$(tr -d '[:space:]' < "$TOKEN_FILE")"
@@ -583,11 +799,21 @@ _curl() {
   local method="$1" path="$2" body="${3:-}"
   # X-Session-Id routes this session to its owned tab. It is ROUTING-ONLY — the
   # server never trusts it for auth (bearer + Host still gate every request).
+  # X-Session-Origin, when present, says the command was issued by something
+  # NESTED under that id (see SESSION_ORIGIN); it changes telemetry attribution
+  # only, never routing.
   local args=(-sS -m 60 -X "$method"
     -H "Authorization: Bearer ${TOKEN}"
     -H "Host: 127.0.0.1"
     -H "X-Session-Id: ${SESSION_ID}"
     -w '\n%{http_code}')
+  # Declared ONLY when set — an empty `-H "X-Session-Origin: "` is not a
+  # no-origin request, and curl treats a header with no content on the right of
+  # the colon as an instruction to REMOVE that header, so an unconditional flag
+  # would be both wrong and confusing to read on the wire.
+  if [ -n "${SESSION_ORIGIN:-}" ]; then
+    args+=(-H "X-Session-Origin: ${SESSION_ORIGIN}")
+  fi
   if [ -n "$body" ]; then
     args+=(-H "Content-Type: application/json" --data "$body")
   fi
@@ -893,6 +1119,37 @@ json.dump(d, sys.stdout)
 '
 }
 
+# _note_env_routing — say ONCE, on stderr, that this op's target came from the
+# ENVIRONMENT and not from anything in the command line.
+#
+# 🔴 The hazard the env defaults introduce is LIFETIME, not precedence. An
+# exported BB_TAB/BB_FRAME/BB_INSTANCE silently steers every later `browser` call
+# in that shell AND in every descendant process — including a destructive
+# `type`/`click`/`upload` whose argv mentions no routing at all, and whose result
+# envelope is identical either way. One line naming the variable is the only thing
+# that makes an inherited route visible at the moment it is used.
+#
+# Called ONCE, from the subcommand dispatch below, NOT from cmd_op: several
+# subcommands invoke cmd_op inside a command substitution, and a subshell's
+# assignment to ENV_ROUTE_NOTED cannot reach this shell — so calling it there
+# printed the advisory once per op. STDERR only — `json.loads` on stdout must
+# stay safe, which is the contract the whole file is built around.
+# `BB_NO_ROUTE_NOTE=1` silences it for a caller that has deliberately exported the
+# variables for a long run and does not want the line on every op.
+_note_env_routing() {
+  [ "$ENV_ROUTE_NOTED" -eq 0 ] || return 0
+  ENV_ROUTE_NOTED=1
+  [ -z "${BB_NO_ROUTE_NOTE:-}" ] || return 0
+  local from=""
+  [ "$INSTANCE_SRC" = "\$BB_INSTANCE" ] && [ -n "$INSTANCE" ] && from="${from} \$BB_INSTANCE=${INSTANCE}"
+  [ "$TAB_SRC" = "\$BB_TAB" ] && [ -n "$TAB" ] && from="${from} \$BB_TAB=${TAB}"
+  [ "$FRAME_SRC" = "\$BB_FRAME" ] && [ -n "$FRAME" ] && from="${from} \$BB_FRAME=${FRAME}"
+  [ -n "$from" ] || return 0
+  echo "browser: routed from the ENVIRONMENT, not this command line:${from}" >&2
+  echo "browser:   (an exported BB_* is inherited by every later call — pass the flag" >&2
+  echo "browser:   explicitly, or unset it; BB_NO_ROUTE_NOTE=1 silences this line.)" >&2
+}
+
 # cmd_op OP [EXTRA_JSON_FIELDS] — POST /cmd, print the result JSON on a genuine
 # success; exit non-zero with a readable message on a transport, HTTP, OR
 # op-level (result.ok:false) error. Honours the global --instance (INSTANCE) by
@@ -904,7 +1161,7 @@ cmd_op() {
   # --tab injects an explicit numeric tab override (validated as an integer).
   local tabf=""
   if [ -n "$TAB" ]; then
-    case "$TAB" in (*[!0-9]*|"") die "--tab must be a numeric tab id (got: $TAB)";; esac
+    case "$TAB" in (*[!0-9]*|"") die "${TAB_SRC} must be a numeric tab id (got: $TAB)";; esac
     tabf=",\"tab\":${TAB}"
   fi
   # --frame routes a read/click INTO a specific (cross-origin OOPIF) frame; the
@@ -1194,8 +1451,17 @@ print(t)
   # both empty, the new tab id lost). The `$( … )` confines the exit to a
   # subshell, so `close_ok="false"` / `closeError` / `closedOldTab:false` are live
   # code paths rather than the dead ones they used to be.
+  #
+  # 🔴 THE THROWAWAY ID IS RE-TAGGED, not just suffixed. The id carries an
+  # explicit TIER TAG before its first `:` (claude:/tmux:/sid:/ppid: — see
+  # derive_session_id), and server.py reads that tag to decide whether the id is
+  # a joinable session key for activity telemetry. Appending alone would leave a
+  # fabricated value still wearing the live session's `claude:` tag, and the
+  # bridge would store it in the `session` column as a near-duplicate of the real
+  # key. `synthetic:` is not a joinable tier, so nothing is attributed. Routing is
+  # unaffected: all this id has to be is DIFFERENT from ours, which it still is.
   local close_ok="true" close_err="" saved_sid="$SESSION_ID" close_rc close_stderr
-  SESSION_ID="${SESSION_ID}+recreate-close"
+  SESSION_ID="synthetic:${SESSION_ID}+recreate-close"
   TAB="$old_tab"
   close_stderr="$( cmd_op close 2>&1 >/dev/null )"; close_rc=$?
   if [ "$close_rc" -ne 0 ]; then
@@ -1278,6 +1544,13 @@ pos_rest() {
 }
 
 sub="${1:-}"; shift || true
+# ONCE, here, and NOT inside cmd_op: several subcommands run cmd_op in a command
+# substitution (`resp="$(cmd_op nav …)"`), and a subshell cannot write the
+# "already noted" flag back to this shell — so a nav --wake printed the advisory
+# TWICE. Measured, not reasoned: the once-per-invocation test caught it.
+# The flag loop above exits for --help/--print-session-id before reaching this
+# line, so a command that never touches the wire never emits it.
+_note_env_routing
 case "$sub" in
   health)
     raw="$(_curl GET /health)" || die "curl failed talking to ${BASE}/health"
@@ -1554,22 +1827,54 @@ sys.stdout.write(json.dumps(fields)[1:-1])
     fi
     ;;
   activate)
-    # browser [--tab <id>] activate [--wait MS | --no-wait]
-    # Foreground the owned/explicit/active tab (STEALS FOCUS — the one intrusive
-    # op) so a foreground-throttled SPA loads and can then be driven. Optional
-    # bounded wait-for-load: default a modest wait (server-clamped, cap ~8s);
-    # --wait MS overrides; --no-wait skips (waitMs:0). On i3, the SERVER then runs
-    # `i3-msg` host-side to actually raise the Brave window + switch workspace
-    # (Chrome-side focus alone is a no-op under i3); the result's `i3` field is
-    # applied/skipped/failed. Off a graphical/i3 host it is skipped (best-effort).
+    # browser [--tab <id>] activate [--wait MS | --no-wait] [--focus | --no-focus]
+    # Foreground the owned/explicit/active tab so a foreground-throttled SPA loads
+    # and can then be driven. Optional bounded wait-for-load: default a modest wait
+    # (server-clamped, cap ~8s); --wait MS overrides; --no-wait skips (waitMs:0).
+    #
+    # 🔴 --focus / --no-focus: whether to also RAISE the Brave X11 window via the
+    # server's host-side `i3-msg` — the RELIABLE way this CLI takes the operator's
+    # screen. The result's `i3` reports applied/skipped/failed/withheld and
+    # `i3_detail` says why. 🔴 `applied` is EARNED (#557): i3-msg exits 0 even for
+    # a criteria that matched NOTHING, so the server confirms via `get_tree` that
+    # a window was found and ended up focused before it says "applied".
+    # A withheld raise never makes that round trip at all.
+    #
+    # ⚠ i3-msg is NOT the only path, and the older wording here ("Chrome-side focus
+    # is a no-op under i3") was wrong as an unconditional claim. The extension also
+    # calls chrome.windows.update({focused:true}), which this flag does NOT gate.
+    # i3 4.24 userguide §4.30: `focus_on_window_activation` defaults to `smart`,
+    # under which "If the window requesting focus is on an active workspace, it
+    # will receive the focus. Otherwise, the urgency hint will be set." It is unset
+    # in nix/i3/config.nix, so `smart` applies. So Chrome-side focus is a no-op
+    # only when Brave is on ANOTHER workspace — which is the usual agent case, and
+    # why #196 needed i3-msg at all. Same workspace, it may well move focus.
+    # UNMEASURED: whether chrome.windows.update actually emits the X11 activation
+    # request. Do not read --no-focus as "nothing can move my screen".
+    #
+    # DEFAULT = "on iff stdout is a TTY". A human typing `browser activate` in a
+    # terminal means it and gets today's behaviour unchanged. An AGENT (Claude
+    # Code's Bash tool, an opencode bash tool, any script) runs with stdout on a
+    # pipe and gets the tab activated WITHOUT the raise — which is what the
+    # measurement says we want: over three weeks all 166 `activate` calls came
+    # from non-interactive callers, and 0 of the 9 interactive `browser` commands
+    # in the same telemetry were an activate. The default therefore costs the
+    # operator nothing and closes the agent path.
+    #
+    # This is a STRUCTURAL discriminator (a real property of the process's stdio),
+    # not a keyword/suffix heuristic — and it is overridable in both directions,
+    # so a script that genuinely wants the screen says --focus and says it out loud.
     wait=""
+    focus=""     # "" = undecided → fall back to the TTY default below
     while [ $# -gt 0 ]; do
       case "$1" in
         --wait) shift; [ $# -ge 1 ] || die "usage: browser activate [--wait MS]"; wait="$1"; shift ;;
         --wait=*) wait="${1#--wait=}"; shift ;;
         --no-wait) wait="0"; shift ;;
+        --focus) focus="true"; shift ;;
+        --no-focus) focus="false"; shift ;;
         --) shift; [ $# -eq 0 ] || die "browser activate takes no positional args (got: $1)"; break ;;
-        -*) die "browser activate: unknown flag: $1 (try: --wait MS | --no-wait)" ;;
+        -*) die "browser activate: unknown flag: $1 (try: --wait MS | --no-wait | --focus | --no-focus)" ;;
         *) die "browser activate takes no positional args (got: $1)" ;;
       esac
     done
@@ -1578,6 +1883,20 @@ sys.stdout.write(json.dumps(fields)[1:-1])
       case "$wait" in (*[!0-9]*) die "--wait must be a non-negative integer of ms (got: $wait)";; esac
       extra="\"waitMs\":${wait}"
     fi
+    # Resolve the default HERE, and always put an explicit boolean on the wire:
+    # the server default-denies, so an omitted field and `false` mean the same
+    # thing — but sending it explicitly makes the decision auditable in the
+    # request rather than inferred from an absence.
+    #
+    # 🔴 `[ -t 1 ]` MUST be evaluated HERE, not inside cmd_op. The dispatch below
+    # is `cmd_op activate … | pretty` — a pipeline, so cmd_op's own stdout is
+    # always a pipe and the test would read FALSE on a real terminal, silently
+    # turning the TTY default into a constant. Every other subcommand pipes to
+    # `pretty` the same way, so this trap is one refactor away at all times.
+    if [ -z "$focus" ]; then
+      if [ -t 1 ]; then focus="true"; else focus="false"; fi
+    fi
+    extra="${extra:+${extra},}\"focus\":${focus}"
     cmd_op activate "$extra" | pretty
     ;;
   html)
@@ -1723,13 +2042,27 @@ sys.stdout.write(json.dumps(fields)[1:-1])
     # DEFAULT (no path) now writes the PNG to a temp file and prints a compact
     # JSON result carrying the PATH + metadata. `--data-url` is the explicit
     # escape hatch that restores the old raw-data-URL output.
-    full=""; POS=""; POS_SEEN=0; dataurl=0
+    #
+    # 🔴 `--json` — THE ONE OP WHOSE STDOUT IS NOT JSON, MADE PARSEABLE ON REQUEST.
+    # Every other subcommand puts a JSON envelope and nothing else on stdout (the
+    # advisories — hidden tab, disconnected instance, routing help — all go to
+    # STDERR, and `tests/test_browser_cli_args.py` now pins that). `screenshot
+    # <path>` is the exception: for back-compat it prints the bare path on line 1
+    # and a `#`-prefixed Read hint on line 2, so a caller doing
+    # `json.loads(subprocess.run(...).stdout)` gets "Expecting value: line 1
+    # column 1" — measured 2026-08-20, and the reason three consumers broke.
+    #
+    # ADDITIVE, never a behaviour change: the default output is byte-identical to
+    # before. `--json` opts in to the SAME compact envelope the no-path branch has
+    # always printed ({ok,path,bytes,url,via,note}), so one parser handles both.
+    full=""; POS=""; POS_SEEN=0; dataurl=0; asjson=0
     while [ $# -gt 0 ]; do
       case "$1" in
         --fullpage) full="\"fullpage\":true"; shift ;;
         --data-url) dataurl=1; shift ;;
+        --json) asjson=1; shift ;;
         --) shift; pos_rest "screenshot takes at most one path" "$@"; break ;;
-        -*) die "browser screenshot: unknown flag: $1 (try: --fullpage, --data-url; use '--' before a path starting with '-')" ;;
+        -*) die "browser screenshot: unknown flag: $1 (try: --fullpage, --data-url, --json; use '--' before a path starting with '-')" ;;
         *) pos_add "screenshot takes at most one path" "$1"; shift ;;
       esac
     done
@@ -1742,6 +2075,15 @@ sys.stdout.write(json.dumps(fields)[1:-1])
     out="$POS"
     if [ "$dataurl" -eq 1 ] && [ -n "$out" ]; then
       die "browser screenshot: --data-url and an explicit path are mutually exclusive"
+    fi
+    # `--data-url` prints the RAW response envelope and never builds the compact
+    # {ok,path,bytes,…} shape, so `--json` has nothing to opt into there. Accepting
+    # the pair and ignoring one of them is the worst outcome: the caller asked for a
+    # parseable envelope, got a DIFFERENT parseable envelope with none of the keys
+    # they were about to read, and nothing said so. Refuse instead — the same rule
+    # the mutually-exclusive check above already applies to --data-url + a path.
+    if [ "$dataurl" -eq 1 ] && [ "$asjson" -eq 1 ]; then
+      die "browser screenshot: --data-url and --json are mutually exclusive (--data-url prints the raw response envelope, which has no path/bytes to report)"
     fi
     # cmd_op runs in a command substitution, so its `die`/exit can't propagate
     # on its own — `|| exit 1` forwards an op/transport error to the caller.
@@ -1815,37 +2157,76 @@ if not png.startswith(PNG_MAGIC):
     sys.exit(1)
 
 out=sys.argv[1]
+asjson=sys.argv[2]=="1"
 explicit=bool(out)
 tmpdir=tempfile.gettempdir()
 prune(tmpdir)
+
+def emit(payload):
+    """The ONE way this helper puts a result in front of the caller: FD 1.
+
+    Explicit rather than `print` because the whole point of `--json` is that
+    `json.loads(<stdout>)` works — every diagnostic in this script goes to
+    sys.stderr, and the two must never be confused. Flushed because the payload
+    is the last thing written and stdout is block-buffered when it is a pipe."""
+    sys.stdout.write(payload + "\n")
+    sys.stdout.flush()
+
+def envelope(path, note):
+    """The ONE compact result shape, shared by every JSON-printing branch.
+
+    It used to be built inline in the temp-file branch only, so `--json` had a
+    choice between duplicating it (two shapes that drift) and reusing it. One
+    rule, one place: the temp-file branch and `--json` now emit the SAME keys,
+    which is the whole point of --json — a caller writes one parser."""
+    data=d.get("result",{}).get("data",{}) or {}
+    res={"ok":True,"path":path,"bytes":len(png)}
+    for k in ("url","via"):
+        if data.get(k) is not None:
+            res[k]=data[k]
+    res["note"]=note
+    return json.dumps(res)
+
 if explicit:
-    with open(out,"wb") as fh:
-        fh.write(png)
-    print(out)
-    # A capture nobody Reads is pure waste: the 2026-08-02 usage audit measured
-    # 7 of 63 explicit-path captures never Read back. Exit 0 and a path on stdout
-    # look like success, so the one thing still required is easy to forget. ONE
-    # short line, and deliberately `#`-prefixed so line 1 stays the bare path for
-    # anything parsing it (and so the hint cannot be mistaken FOR a path).
-    # NOT printed for --data-url (no file exists) or the temp-file branch (whose
-    # JSON already carries an equivalent `note`) — printing it there would be
-    # wrong, and those two are the negative controls for the test.
-    print("# Read %s to view it." % out)
+    # A caller-supplied path can be a directory, a read-only dir, a dangling
+    # symlink. An uncaught OSError here prints a TRACEBACK on stderr and NOTHING
+    # on stdout — which reads exactly like "the --json payload went to stderr".
+    # One clean line instead, so a failed write can never be mistaken for a
+    # routing bug in the branch below.
+    try:
+        with open(out,"wb") as fh:
+            fh.write(png)
+    except OSError as exc:
+        sys.stderr.write("browser: screenshot: could not write %s (%s)\n" % (out, exc))
+        sys.exit(1)
+    if asjson:
+        # --json: the SAME envelope, so `json.loads(stdout)` works. The Read hint
+        # moves INTO `note` rather than being dropped — a caller that parses JSON
+        # still gets told the file has to be Read, and gets it in a field instead
+        # of a comment line their parser would choke on.
+        emit(envelope(out, "PNG written to %s — Read the file to view it "
+                           "(the base64 data URL is not printed; use --data-url "
+                           "to get it)" % out))
+    else:
+        print(out)
+        # A capture nobody Reads is pure waste: the 2026-08-02 usage audit measured
+        # 7 of 63 explicit-path captures never Read back. Exit 0 and a path on stdout
+        # look like success, so the one thing still required is easy to forget. ONE
+        # short line, and deliberately `#`-prefixed so line 1 stays the bare path for
+        # anything parsing it (and so the hint cannot be mistaken FOR a path).
+        # NOT printed for --data-url (no file exists) or the temp-file branch (whose
+        # JSON already carries an equivalent `note`) — printing it there would be
+        # wrong, and those two are the negative controls for the test.
+        print("# Read %s to view it." % out)
 else:
     # mkstemp: O_CREAT|O_EXCL at 0600 — not world-readable, not symlink-followable.
     fd,out=tempfile.mkstemp(prefix=PREFIX, suffix=SUFFIX, dir=tmpdir)
     with os.fdopen(fd,"wb") as fh:
         fh.write(png)
-    data=d.get("result",{}).get("data",{}) or {}
-    res={"ok":True,"path":out,"bytes":len(png)}
-    for k in ("url","via"):
-        if data.get(k) is not None:
-            res[k]=data[k]
-    res["note"]=("PNG written to disk (mode 0600, auto-pruned after 24h) — Read the "
-                 "file to view it (the base64 data URL is not printed; use --data-url "
-                 "to get it)")
-    print(json.dumps(res))
-' "$out"
+    emit(envelope(out, "PNG written to disk (mode 0600, auto-pruned after 24h) "
+                       "— Read the file to view it (the base64 data URL is not "
+                       "printed; use --data-url to get it)"))
+' "$out" "$asjson"
     fi
     ;;
   frames)
