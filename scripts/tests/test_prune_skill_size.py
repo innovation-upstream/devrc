@@ -30,7 +30,7 @@ WHY THE CEILING IS ABOVE THE 12,288 B TARGET, AND WHAT THAT COSTS
 -----------------------------------------------------------------
 The skill states a 12,288 B target and browser-bridge MEETS it while routing ~11x
 its own weight, so the target is achievable and is not in dispute.
-This file does not: it sits at 12,859 B (12.56 KiB) after being cut from 14,918 B
+This file does not: it sits at 12,812 B (12.51 KiB) after being cut from 14,918 B
 by demoting §6 (landing), §4's deployment table, §7's verification rationale, §0's
 axes and the always-loaded model to three sidecars, plus stripping evidence from
 every remaining section.
@@ -53,8 +53,8 @@ because a permanently-red gate trains everyone to click through -- which
 leaner is the intended direction of travel; raising it needs the same kind of
 justification recorded above.
 
-The honest accounting: the skill is 571 B -- 4.65% -- over the target it asks
-others to meet (12,859 against 12,288; `skill-audit.py` prints the same 571 B
+The honest accounting: the skill is 524 B -- 4.26% -- over the target it asks
+others to meet (12,812 against 12,288; `skill-audit.py` prints the same 524 B
 independently). That is disclosed in the body, in the PR that introduced it, and
 here. Every number in this docstring is re-measured, not carried forward: an
 earlier revision restated a size, a growth figure, a percentage and a per-pass
@@ -70,11 +70,11 @@ import pytest
 
 # The hard ceiling: SKILL.md must never exceed this many bytes.
 #
-# NOT a derivation -- a measured position. SKILL.md is 12,859 B (`stat -c %s` and
-# `git cat-file -s` agree), so 13,056 leaves 197 B of headroom, of which
-# MIN_HEADROOM_BYTES (192) is the floor that must remain: 5 B of true working
-# room before the headroom test fires -- i.e. effectively none; the next edit
-# here must evict something. The comment here previously read
+# NOT a derivation -- a measured position. SKILL.md is 12,812 B (`stat -c %s` and
+# `git cat-file -s` agree), so 13,056 leaves 244 B of headroom, of which
+# MIN_HEADROOM_BYTES (192) is the floor that must remain: 52 B of true working
+# room before the headroom test fires -- i.e. barely any; the next edit
+# here will likely have to evict something. The comment here previously read
 # "12,864 B measured + 192 B headroom"; the file measured 12,834 at the time, so
 # the arithmetic was describing a size the file never had. Re-measure before
 # touching this number, and lower it as the file gets leaner -- never raise it.

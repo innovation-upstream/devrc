@@ -1,6 +1,6 @@
 ---
 name: prune-index
-description: "Audit and prune the /analyze-service index store so recall keeps surfacing the RIGHT entry — evicts RESOLVED bullets whose record already has a home, keeps every OPEN one, and finds refs that resolve to two entries. Runs scripts/subsystem-audit.py, classifies, confirm-gated diff, re-measures. Use for: prune/shrink/audit the analyze-service index, the subsystem index store, an entry that got huge, `--ref X` returns ref-ambiguous, RESOLVED bullets piling up, ~/.claude/analyze-service-index. Shrinking a SKILL.md body is `prune-skill`; the per-session MEMORY.md index is `prune-memory`."
+description: "Audit and prune the /analyze-service index store so recall keeps surfacing the RIGHT entry — evicts RESOLVED bullets, keeps every OPEN one, finds refs that resolve to two entries. Use for: prune/shrink/audit the analyze-service index, the subsystem index store, an entry that got huge, `--ref X` returns ref-ambiguous, RESOLVED bullets piling up, ~/.claude/analyze-service-index. Shrinking a SKILL.md body is `prune-skill`; the per-session MEMORY.md index is `prune-memory`."
 argument-hint: "[SCOPE | SCOPE/ENTRY.md] — optional; defaults to the whole store"
 allowed-tools: Bash, Read, Write, Edit, Grep, Glob
 ---

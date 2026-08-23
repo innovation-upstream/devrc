@@ -1,6 +1,6 @@
 ---
 name: window-triage
-description: "Point at ONE tmux window by codename, hotkey or address (Gold, Alt+Shift+G, scratch2:@81) — refusing to guess when the selector is ambiguous — and rank the windows STRANDED past a threshold, longest-waited first, banded by kind. Read-only. Use for: which window is Gold, what does Alt+p open, which window has been stranded / unanswered for hours or days, the oldest unanswered question, a codename with no hotkey, why a window shows no harness record, what the scan could not cover. The live inventory — is anything waiting on me, what's running where, tail a window, unsent prompts — is `session-manager`."
+description: "Point at ONE tmux window by codename, hotkey or address (Gold, Alt+Shift+G, scratch2:@81), and rank the windows STRANDED past a threshold, longest-waited first. Use for: which window is Gold, what does Alt+p open, which window has been stranded / unanswered for hours or days, the oldest unanswered question, a codename with no hotkey, why a window shows no harness record, what the scan could not cover. The live inventory — is anything waiting on me, what's running where, tail a window, unsent prompts — is `session-manager`."
 ---
 
 # window-triage — name one window, rank the stranded ones
