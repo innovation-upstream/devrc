@@ -77,6 +77,19 @@ node query.mjs edit-page <doc_id> <page_id> --file /tmp/page.md
   `node query.mjs status id1,id2 "complete"`.
 - **Internal-API commands** (`inbox-*`, `doc-comments`) need a JWT in the account, not
   just a token — see setup below.
+- 🔴 **Every task this skill creates is STAMPED as agent-created, automatically.**
+  `create`, `create-subtask` and `batch-create` all route through one choke point, which
+  appends `<!-- claw:obj v=1 src=<producer>/<run-id> cond=<id> -->` to the description
+  and attaches the tag `agent/<producer>`. The tag is the load-bearing half **on this
+  platform specifically**: the API token resolves to a HUMAN identity, so an agent-filed
+  task is otherwise indistinguishable from a hand-typed one. Pass **`--cond`** to record
+  what will close the task — from the enumerated allowlist `gh_pr_merged:<owner>/<repo>#<n>`,
+  `alert_cleared:<name>`, `cmd_exit_zero:<id>`, `metric_below:<id>`, `manual`. Anything
+  else is REJECTED at the CLI, not stored; omitting it means `manual`. ⚠️ The tag is
+  **best-effort** — ClickUp requires a tag to exist at the SPACE level first, and creating
+  one is a workspace mutation this will not do silently, so a missing space tag warns on
+  stderr and the task is still created with its marker. Opt out with `CLICKUP_AGENT_STAMP=0`
+  when a human is genuinely the author.
 
 ## Going deeper — load ONE only when its trigger fires
 

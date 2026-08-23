@@ -32,6 +32,35 @@ All mutable state lives in `$XDG_STATE_HOME/clickup` (fallback
 `~/.local/state/clickup`), credentials included; a write next to the code is
 `EROFS`. Pinned by `test/state-paths.test.mjs`.
 
+## The agent-object stamp (`claw:obj`)
+
+`lib/agent-marker.mjs` is the ONE definition of the marker grammar on this side.
+`api/tasks.mjs` applies it in exactly one place — `applyAgentStamp()`, called by
+both `createTask` and `createSubtask`, which is every path that creates a ClickUp
+task here. **Do not stamp at a call site**: a per-call-site stamp regenerates the
+same omission at every new caller, which is the defect this replaced.
+
+🔴 **It is a SECOND implementation of one grammar.** The canonical one is Python,
+in another repo — `<talos-infra>/scripts/lib/agent_obj_marker.py` — byte-mirrored
+into the in-cluster CronJob producers and drift-gated there. Python and JS cannot share
+a byte-mirror, so what keeps these two in step is the `VECTORS` block in
+`test/agent-marker.test.mjs` — literal markers, fingerprints and the `cond`
+allowlist computed on the **Python** side and pinned here. **Change the grammar in
+both, and move the vectors with it.** Never regenerate the vectors from this file:
+a self-referential pin agrees with any drift.
+
+Two gotchas worth keeping:
+
+- `fingerprint()` sorts keys **recursively**, matching Python's
+  `json.dumps(sort_keys=True)`. `JSON.stringify` preserves insertion order, so a
+  shallow sort silently fingerprints two identical claims apart whenever a nested
+  object's keys were built in a different order. Mutation-verified: only the
+  nested vector catches it.
+- `agentIdentity()` **sanitises rather than trusts**, and an unusable
+  `CLAW_AGENT_COND` degrades to `manual`, never to silence. `manual` is an honest
+  "no machine closes this"; dropping the marker would make the object invisible
+  again, which is the whole defect.
+
 ## Tests
 
 The hermetic gates are `node:test` suites, run by devrc's node gate

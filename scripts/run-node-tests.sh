@@ -210,7 +210,14 @@ SUITES=(
   # 122 tests / 4 files measured 2026-08-21: test/awaiting.test.mjs, the gate for
   # the `awaiting` command (predicate, fan-out cap, pacing) and for the inbox
   # cursor loop. Floor 116 = 122 - min(50, max(1, 122/20)) = 122 - 6.
-  "claude/skills/clickup/test|4|116"
+  #
+  # 152 tests / 5 files measured 2026-08-23: test/agent-marker.test.mjs, the gate
+  # for the `claw:obj` agent-object marker (Phase 0 of agent-object hygiene) —
+  # the grammar, the enumerated `cond` allowlist, the CROSS-LANGUAGE pin against
+  # talos-infra's Python implementation (no byte-mirror can bridge the two, so
+  # shared vectors are what keeps them from drifting), and the create-path seam.
+  # Floor 145 = 152 - min(50, max(1, 152/20)) = 152 - 7.
+  "claude/skills/clickup/test|5|145"
 )
 
 # --- discovery roots -----------------------------------------------------------

@@ -4,6 +4,7 @@
 
 import { apiRequest, apiRequestV3, fetchAllPages } from './client.mjs';
 import { getList } from './lists.mjs';
+import { agentIdentity, buildMarker, stampDescription } from '../lib/agent-marker.mjs';
 
 // Get task details
 export async function getTask(taskId, includeSubtasks = false) {
@@ -70,13 +71,98 @@ export async function updateTaskStatus(taskId, statusInput) {
   return { task: response, matchedStatus: match };
 }
 
+// ── Agent-object hygiene (Phase 0) ──────────────────────────────────────────
+//
+// 🔴 THE STAMP LIVES HERE, AT THE ONE CHOKE POINT, and that placement is the
+// point. Every ClickUp task this skill creates goes through createTask() —
+// `query.mjs create`, `query.mjs create-subtask`, and lib/batch-create.mjs's
+// whole fan-out. Stamping at the CALL SITES instead would regenerate the same
+// omission at each one, and a new caller would arrive unstamped by default.
+//
+// Two things get stamped, and they answer different questions:
+//   * the TAG `agent/<producer>` — "which objects did an agent create?",
+//     answerable through the API with no body parsing at all;
+//   * the MARKER in the description — "what closes this one?".
+//
+// On ClickUp the tag is the load-bearing half for a reason specific to this
+// platform: the API token resolves to a HUMAN identity, so creator-based
+// attribution is structurally impossible here. Without a tag there is no
+// queryable signal that an agent filed the task at all.
+//
+// ⚠️ TAGGING IS BEST-EFFORT AND CAN LEGITIMATELY FAIL. ClickUp requires a tag to
+// exist at the SPACE level before it can be attached to a task; creating one is
+// a workspace-level mutation this must not perform silently. So a missing space
+// tag warns on stderr and the task is still created, with the marker intact.
+// Create the `agent/<producer>` space tag once, per space, to turn the tag half
+// on. (lib/batch-create.mjs already treats its own tag failures this way.)
+//
+// Opt out with CLICKUP_AGENT_STAMP=0 or `{ agentStamp: false }` — for the case
+// where a human is driving the CLI by hand and the object genuinely is theirs.
+function agentStampEnabled(options) {
+  if (options.agentStamp === false) return false;
+  return process.env.CLICKUP_AGENT_STAMP !== '0';
+}
+
+// Split the caller's options into (a) the body ClickUp receives, marker folded
+// into the description, and (b) the tag to attach afterwards.
+//
+// EXPORTED for test/agent-marker.test.mjs. It is the entire stamping decision,
+// and it is pure — so the suite can assert what ClickUp would actually receive
+// without a network call or a module mock. createTask/createSubtask do nothing
+// with the result but spread it into the POST body and attach the tag.
+export function applyAgentStamp(options) {
+  const { agentStamp: _drop, agentFp, agentCond, ...rest } = options;
+  if (!agentStampEnabled(options)) return { body: rest, tag: null };
+  const id = agentIdentity();
+  const marker = buildMarker({
+    srcProducer: id.producer,
+    srcRunId: id.runId,
+    // A caller with a real machine-checkable condition passes one; a session
+    // filing a one-off gets `manual`, which is an honest "no machine closes
+    // this" rather than a fabricated condition nobody will evaluate.
+    cond: agentCond ?? id.cond,
+    // 🔴 fp is OMITTED unless the caller supplies one. A session-filed task has
+    // no stable claim tuple, and a fingerprint that changes every run defeats
+    // the dedupe it exists to provide — see lib/agent-marker.mjs.
+    fp: agentFp ?? null,
+    init: id.init,
+  });
+  // ClickUp renders `markdown_description` when present and ignores
+  // `description`; stamping only one of them would put the marker in the field
+  // the UI is not showing, or drop it entirely on a task that set neither.
+  const body = { ...rest };
+  if (typeof body.markdown_description === 'string' || typeof body.description !== 'string') {
+    body.markdown_description = stampDescription(body.markdown_description, marker);
+  } else {
+    body.description = stampDescription(body.description, marker);
+  }
+  return { body, tag: id.label };
+}
+
+async function attachAgentTag(taskId, tag) {
+  if (!tag || !taskId) return;
+  try {
+    await addTag(taskId, tag);
+  } catch (e) {
+    // Never fatal: the marker is already in the body, so the object is still
+    // identifiable. Loud on stderr because a silently untagged fleet is exactly
+    // the state Phase 0 exists to end.
+    process.stderr.write(
+      `Warning: could not attach agent tag "${tag}" to ${taskId}: ${e.message}\n` +
+      `  (ClickUp requires the tag to exist at the SPACE level first.)\n`,
+    );
+  }
+}
+
 // Create a new task in a list
 export async function createTask(listId, name, options = {}) {
-  const body = { name, ...options };
+  const { body: stamped, tag } = applyAgentStamp(options);
+  const body = { name, ...stamped };
   const response = await apiRequest(`/list/${listId}/task`, {
     method: 'POST',
     body: JSON.stringify(body),
   });
+  await attachAgentTag(response?.id, tag);
   return response;
 }
 
@@ -89,11 +175,13 @@ export async function createSubtask(parentTaskId, name, options = {}) {
     throw new Error('Could not determine list ID from parent task');
   }
 
-  const body = { name, parent: parentTaskId, ...options };
+  const { body: stamped, tag } = applyAgentStamp(options);
+  const body = { name, parent: parentTaskId, ...stamped };
   const response = await apiRequest(`/list/${listId}/task`, {
     method: 'POST',
     body: JSON.stringify(body),
   });
+  await attachAgentTag(response?.id, tag);
   return response;
 }
 
