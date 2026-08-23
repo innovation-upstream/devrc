@@ -520,9 +520,53 @@ one variable moved per arm, each with a positive control proving the writer real
   The large dirs are the RECENT, in-use ones; the old ones are ~1 MB. The median (996 KiB)
   was in front of me and I extrapolated from the mean anyway.
 
+### 🔴 THE CI TIER HAS THREE INDEPENDENT FLAKES, AND THEY SHARE ONE SHAPE
+
+Found in a single evening, only one of them on anybody's list. Each was a red
+check on a PR whose diff could not have caused it, and each was diagnosed by
+reading the STEP LOG rather than the verdict — twice the totals coincided with a
+different failure, which is `handoff-guards-and-gates.md`'s recorded trap firing
+again.
+
+| | flake | evidence | owner |
+|---|---|---|---|
+| 1 | the audit line does not exist yet when the client's response arrives | 9 fails / 43 runs under load, all the same `IndexError`; `devrc-ci-jxf5j` FAILED vs `devrc-ci-vl88r` SUCCEEDED on the **identical** revision `ba97a9d7` | **#740** |
+| 2 | `step-clone` exits 255 — no test runs at all | **4 of 75** gate taskruns (5.3%); check reads `fail` with `COULD NOT RUN: the gate stopped before this leg reported` | 🔴 **UNOWNED** |
+| 3 | `tree_hash` reads `.git/objects/maintenance.lock` after git deletes it | `devrc-ci-x9zkh`, on a PR touching neither the test nor the tool | **#743** |
+
+🔴 **They are one shape, not three accidents: a test observing a system that is
+still moving.** A response does not imply the log line. A `rglob` listing does not
+imply the file is still there to read. A clone step reporting does not imply a
+checkout. In every case the test took an observation as a proof of a LATER state,
+which is the same error as `claude/RULES.md` → *"a control that SHARES the step
+you doubt"*. Worth one deliberate sweep of the suite for that shape rather than
+finding them one CI run at a time; **not done**, and nobody should read this table
+as the closed set.
+
+🔴 **#2 is written up rather than chased, deliberately.** Its pod logs are
+garbage-collected by the time the failure is noticed, so there is no evidence left
+to diagnose; a Tekton retry would paper over it and the root cause would stay
+unknown. What matters is the number: **~5% of runs fail for reasons unrelated to
+the code.** Adding a retry is the obvious workaround and is NOT recommended
+without first learning why the clone dies.
+
+🔴 **What this does to the "make the checks REQUIRED" step — read this before
+running the branch-protection command.** Arming a check that fails ~1 run in 20 on
+infrastructure means roughly one PR in twenty is blocked by nothing, needing a
+manual re-run each time. That is the same mechanism as a permanently-red gate,
+intermittent instead of constant: it teaches everyone to click through a red run.
+It does **not** argue against arming them — it argues that "red" will not mean
+"broken code" until #740 and #743 land and #2 has an owner, and that whoever arms
+them should expect to want a re-run affordance on day one.
+
 ## Next steps (ranked) — rewritten 2026-08-22 after the four above were worked
 
-1. 🔴 **`tekton/devrc-pytests` is RED on EVERY open PR, and the cause is on `main`.**
+0. ✅ **DONE — main's red is closed.** #732 merged (`5a2a7b21`, by a concurrent session).
+   Proved live rather than by the merge notification: `origin/main` extracted into a
+   `.git`-less tree runs `test_the_module_root_is_load_bearing` → **1 passed**, where the
+   same extraction of the pre-merge `main` gave the verbatim CI assertion. The item below
+   is kept because its evidence is the reason the three-flake table above exists.
+1. ~~🔴 `tekton/devrc-pytests` is RED on EVERY open PR, and the cause is on `main`.~~
    `test_the_module_root_is_load_bearing` asserts `gitenv.py` sits inside a git checkout;
    the authoritative runner's source is a `/nix/store` path with **no `.git`**, so it dies on
    its own precondition. It passes on a dev host and fails in the one environment that would
@@ -541,14 +585,32 @@ one variable moved per arm, each with a positive control proving the writer real
    are **0 rulesets**, and `enforce_admins: true` is enforcing an empty set. 🔴 **Do it only
    after step 1 lands and pytests has gone green once**: arming a check that cannot pass makes
    every PR unmergeable, and a permanently-red gate is worse than no gate.
-3. **#632** — 🔴 **it does NOT merge.** `gh pr view` says `CONFLICTING`/`DIRTY` and a local
-   test-merge onto `ec4fc008` confirms: 2 conflict hunks in `scripts/ship.sh`, 2 in
-   `scripts/drift-check.sh`. **The collision is semantic, not textual**: `main` (via #716) now
-   uses **rc 2** for *`SHIP_REPO` set-but-empty* — two `exit 2` sites — while #632 uses **rc 2**
-   for *usage error*, one site. One meaning has to move, and #632 also introduces a
-   machine-read reservation ledger (`RESERVED-TO-DRIFT-CHECK` / `RESERVED-TO-SHIP`, pinned by
-   `test_the_two_rc_ladders_reserve_each_others_codes`) that says the next free code is **21**.
-   So "re-gate #632" is really "resolve an rc-ladder collision, then re-gate". Not attempted here.
+3. ~~#632 does not merge~~ — ✅ **RESOLVED AND RE-GATED 2026-08-22.** The conflict was
+   semantic, not textual: `main` (#716, shipped to both hosts) uses **rc 2** for *`SHIP_REPO`
+   set-but-empty* — two `exit 2` sites — while #632 used **rc 2** for *usage error*.
+   **Operator's decision: the usage error moves to 21**, the code #632's own reservation
+   ledger already pointed at. Both `exit 2` usage sites became `exit 21`; the two
+   `SHIP_REPO` guards keep rc 2; the rc legend prints both.
+   🔴 **The ledger values were not hand-computed.**
+   `test_the_two_rc_ladders_reserve_each_others_codes` DERIVES them from the two measured
+   code sets and prints the answer on failure — it said *"drift-check.sh reserves
+   [5, 7, 9, 11, 19, 20] to ship.sh, but ship.sh alone can return [5, 7, 9, 11, 19, 20, 21]"*
+   and that is what was written. Next-free is now 22 on both sides. rc 2 is returned by
+   BOTH scripts, so it correctly appears on neither reservation line.
+   **Verified behaviourally, because a clean git merge is not a clean merge** — both sides
+   edited the same ladder, so the result was exercised against a non-existent `SHIP_REPO`
+   (no host touched): unknown arg → **21**, `--no-local --no-remote` → **21**, `SHIP_REPO`
+   set-but-empty → **2**, and the same call on `origin/main` → **2**, unchanged.
+   Re-gate on the resolved merged tree, contained clone, origin removed:
+   `pytests 15184 collected / 0 failed` · `nodetests 1149/1149` — **both PASS**.
+   🔴 **A consequence of the decision, stated rather than buried:** rc 2 now means different
+   things in `ship.sh` and `drift-check.sh`. The ledger's machine-checked property is intact
+   (it governs only codes one script can return and the other cannot), but the headers' prose
+   intent *"a number must not mean two things across the pair"* is now aspirational for rc 2.
+   That was already true on `main` before #632 was touched; this merge only makes it visible.
+   `test_a_run_with_no_host_in_scope_is_a_usage_error`'s docstring claimed the two ladders
+   were "deliberately aligned" on rc 2 — true when written, false now, and rewritten rather
+   than left as a comment asserting coverage it no longer has.
 4. ~~Verify the concurrent-session detector case~~ — **done**, see the five-arm matrix above.
    #720 closes it except when the other writer's cwd is outside the tree **and** it is quiescent
    by teardown. Residual documented with its next probe; not fixed.
