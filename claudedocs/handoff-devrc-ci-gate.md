@@ -224,18 +224,39 @@ longer true, and a permanently-red gate is no longer the expected outcome. See s
    must become non-empty. 🔴 The unauth control flipping to `MEMBER` is evidence about the
    API's viewer-less computation — **it is not a PipelineRun**. Do not call this verified
    until a run exists.
-2. **Require `tekton/devrc-nodetests` now** — it went green on the first real run (1119/1119).
-   🔴 **Re-open the `devrc-pytests` question: its stated blocker no longer exists.** The first
-   run shows the nix sandbox WORKING in-pod (`seed-nix` rc=0; 14,686 tests passed), so the
-   "cannot be required" verdict below is stale. Its one failure was a **stale floor**, and
-   that is now **fixed on `main` by `#708`** (`scripts/signal/tests|553` → `682`, the number
-   the gate printed). Watch pytests go green across a few runs, *then* decide — do not require
-   it on one observation.
-   ⚠ **Concurrency note, and it cost a PR:** `#713` was opened for this same floor and was
-   **superseded mid-flight by `#708`**, which landed the identical value. That is the third
-   time this session's work has been overtaken by a concurrent session. **Check whether
-   someone is already on a defect before starting it** — `git log origin/main -3` costs
-   nothing next to a wasted branch.
+2. **Requiring a check — NOT YET, and the blocker is now a different one.** `nodetests` has
+   been 1149/1149 on every run. `pytests` reached `BOTH TIERS PASS` (15150/0) on
+   `devrc-ci-vl88r`, 2026-08-23T04:00Z. The remaining blocker is 2e below, not test health.
+   🔴 **The nix-sandbox premise below is FALSE and stayed false** — `seed-nix` exits 0 and
+   ~15,150 tests run in-pod. Read that section as history.
+   🔴 **What the first day actually taught: FOUR separate defects made the gate red, none of
+   them in any PR being gated, and every one invisible to a dev-host run.** That is the
+   pattern to expect, not an unlucky streak:
+   | defect | fixed by | why local runs missed it |
+   |---|---|---|
+   | `scripts/signal/tests` floor 164 behind | `#708` | the drift ceiling only runs in the gate |
+   | `os.kill(pid,0)` says a ZOMBIE is alive | `#722` | a dev host's PID 1 is systemd, which reaps |
+   | module root asserted THIS tree has a `.git` | `#732` | the runner's source is a `/nix/store` path |
+   | audit-line race left at 2 of 3 sites | `#735` | needs a slow handler; 0/12 red when idle |
+   **So: do not read a red devrc check as a verdict on the PR until you have looked.** Three
+   of those four were diagnosed only by reading the step log.
+   ⚠ **Concurrency cost, measured: SIX pieces of work this session were superseded or nearly
+   clobbered** — `#651`, `#656`, `#713` (identical floor value to `#708`), the zombie fix
+   (another session's was better and handled PID REUSE), the `CLAUDE.md` rewrite, and the
+   guards/gates trace (`#728`). One of those was a near-miss where a `cp` between branches
+   would have **silently deleted** 109 lines of a better fix; only diffing before committing
+   caught it. **`git log origin/main -3` and a `gh pr list` before starting on a defect costs
+   nothing next to a wasted branch — or a deleted one.**
+2e. 🔴 **THE BLOCKER ON REQUIRING ANY CHECK — a timed-out run posts NOTHING and the PR sits on
+   `pending` forever.** When a PipelineRun hits `timeouts.tasks`, the `finally` report task
+   does not run at all, so no status is ever posted. Measured on `devrc-ci-nnt6f` and
+   `devrc-ci-9p6mf`: `childReferences` `[notify, gate]` only, checks still `pending` hours
+   later. **A required check in that state is unsatisfiable and no re-run clears it** — only a
+   fresh push does. Fix the reporting path (or raise the budget) BEFORE marking anything
+   required.
+   ⚠ **`enforce_admins: true` is a red herring — I raised it as a lockout risk and was wrong.**
+   `required_status_checks` is `null` and there are 0 rulesets, so there is nothing to enforce
+   and admins are not blocked by anything today. It only becomes real once a check is required.
 2d. 🔴 **The gate CONGESTS: right-size its requests.** The first day it fired, 8 runs queued
    and **5 sat `Pending` 15+ min** on `Insufficient memory` while the node idled at 26% mem /
    20% CPU. Every devrc run is pinned to ONE node (shared `nix-cache` RWO PVC + the
