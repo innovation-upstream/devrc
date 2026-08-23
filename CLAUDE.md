@@ -153,7 +153,8 @@ Repo-level facts that are NOT in any skill — they live here on purpose:
   with `enforce_admins: true`. Verified behaviourally, not from the setting: PRs with
   nodetests `ERROR` or `PENDING` read `mergeStateStatus=BLOCKED`, green ones read `CLEAN`,
   and a PR with pytests red but nodetests green reads `UNSTABLE` — mergeable. That split is
-  deliberate: pytests reports, nodetests gates. There is still no `.github/workflows`, so
+  deliberate — and nodetests collects `*.test.mjs` ONLY, so a Python-only PR cannot fail
+  the required check at all. There is still no `.github/workflows`, so
   the marker stays `other`.
   🔴 **`enforce_admins: true` is LIVE now** — it protected nothing while nothing was
   required. If Tekton is down or wedged, NOTHING merges and there is no admin override.
