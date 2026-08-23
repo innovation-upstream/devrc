@@ -244,7 +244,17 @@ silently.** (4 is exempt — it reads clawgate's own secret rather than holding 
    dismissed ticket being resurrected — **it deliberately does NOT dedupe by tag**, so tasks created
    outside that ledger get duplicated on the next run. Reads `CLAWGATE_HOOK_TOKEN` from clawgate's
    **own `clawgate-secrets`** (same namespace, never copied — hence exempt from the rotation
-   coupling above). As of 2026-08-19 it ships **suspended**, dry-run, with write-back disabled.
+   coupling above). 🔴 **RE-MEASURED against the live cluster 2026-08-21: it is ON.** CronJob
+   `suspend: false` (hourly at `:17`, last run succeeded), env `CLICKUP_MIRROR_MODE=commit`, and the
+   ConfigMap's `writeback.enabled: true` — so phase 2 EXECUTES and **ClickUp may ALREADY have been
+   told** about a task you are looking at; only `writeback.allow_terminal_status` is still shut, so
+   it will not close a ticket. The older claim here — "as of 2026-08-19 it ships suspended, dry-run,
+   with write-back disabled" — was true the day it was written and is now WRONG; do not re-derive
+   it. ⚠ This is another repo's **deployment** state, which no devrc test can pin, so **verify
+   before acting on it**: `kubectl -n clawgate get cronjob clickup-mirror -o
+   jsonpath='{.spec.suspend}'`, the container's `CLICKUP_MIRROR_MODE`, and the `writeback` block of
+   `cm/clickup-mirror-config`. The four-gate ledger is kept in
+   `<homelab-talos>/clusters/workbench/apps/clickup-mirror/README.md`.
 
 ## Auth / access (0.7.37 — clawgate has NO human auth of its own)
 No magic-link `/login?token=`, no session cookie, no `CLAWGATE_AUTH_TOKEN` /
@@ -311,12 +321,50 @@ added/removed/re-verbed cannot land without a human eyeballing the diff. Regener
 `UPDATE_ROUTES_GOLDEN=1 go test ./internal/api -run TestRoutesMatchGolden`.
 
 ⚠ **The golden lives on `trunk`; the surface you can CALL is the deployed pin — they are different
-numbers and the counts here are the DEPLOYED ones.** Re-derived 2026-08-20 against live `0.7.97`:
-**120 routes / 23 `/api/*` deployed**, vs **121 / 24 on trunk**. The single difference is
-`GET /api/sessions/{id}/tasks` (`requireHookToken`, PR #357 — task↔session threads), committed
-without a pin bump, so it is **not callable yet**. Count the golden with
+numbers and the counts here are the DEPLOYED ones.** Re-derived 2026-08-21 against live **`0.7.98`**:
+**121 routes / 24 `/api/*` deployed**, and trunk agrees — the gap is closed.
+
+🔴 **`GET /api/sessions/{id}/tasks` IS CALLABLE.** This note previously said it was "committed
+without a pin bump, so **not callable yet**" — true when derived against `0.7.97`, and **false since
+0.7.98 shipped** (2026-08-20). Measured, not inferred: `GET /api/sessions/<uuid>/tasks` with the hook
+token returns `200 {"sessionId":"…","tasks":[…]}`. ⚠ **An unknown session is `200` with an EMPTY
+array, not a 404** — so an empty result cannot distinguish "this session touched nothing" from "wrong
+id", and must never be reported as a clean bill of health. This is the worked example of the warning
+directly above: a count re-derived against a live pin decays the moment the next version ships, so
+**re-derive it rather than quoting it**. Count the golden with
 `grep -vc '^#' routes.golden` (the file's first three lines are comments) and subtract anything
 committed after the live pin.
+
+### Task ↔ session threads (#357, 0.7.98) — the direction that EXISTS, and the one that does not
+
+The `task_sessions` table records which Claude Code sessions touched a task, with a role of
+`created` / `worked` / `read`, and `/ui/tasks` renders a `👥 N session(s)` chip with a deep link.
+🔴 **The link is written by the SERVER as a side effect of the request; there is no producer API for
+it,** and the query is asymmetric:
+
+| direction | surface | state |
+|---|---|---|
+| session → tasks | `GET /api/sessions/{id}/tasks` | ✅ callable (hook token), pinned in the golden |
+| task → sessions | *(none)* | 🔴 **no route.** `GET /api/tasks/{id}/sessions` returns **404** and appears nowhere in `routes.golden` |
+| either direction | `clawgatectl` | 🔴 **no subcommand** — not under `task`, not top-level |
+
+So *"which sessions worked task N"* — the question the feature was built to answer — is today
+answerable **only by reading `/ui/tasks`**. A machine consumer can ask the reverse question only.
+
+🔴 **Membership OVER-reports, and a role NEVER downgrades.** Two measured causes, both live:
+- a **400-rejected** `PATCH` still records the session as having `worked` the task: `noteTaskSession`
+  (defined in `internal/api/task_sessions.go`, called from the PATCH handler in
+  `internal/api/notes.go`) runs **before** the body/tag validation that rejects the request —
+  verified on trunk, the call precedes both `StatusBadRequest` returns in that handler. Card #306
+  carries three fix options;
+- a **subagent inherits the parent's `CLAUDE_CODE_SESSION_ID`**, so a subagent merely *reading* a
+  task links the **parent** session to work it never did.
+
+⚠ **No FK to `cc_sessions`, deliberately** — that table is swept at 14 days, and a cascading FK would
+silently empty every thread, making a task that HAD five sessions render identically to one that
+never had any. Link rows denormalise `project` / `cwd` / `host`; expect most rows to have no live
+detail link once their session is reaped. The cap is **advisory** and must never fail a request:
+evict oldest `read`, never `created`/`worked`; if nothing is evictable, skip and count.
 
 🔴 **The golden records PATTERNS ONLY — it is BLIND to auth.** By the time a handler reaches the
 mux it is already wrapped, so `requireHookToken(h)` and `requireSession(h)` are the same type and
@@ -334,12 +382,23 @@ two until it was corrected):
 | `requireOperatorToken` | `operator.go:58` | bearer must be the reserved agent named `Operator` |
 | `requireAgentToken` | `agent.go:30` | bearer resolves to *any* agent; that agent is injected into the request ctx |
 
-### `requireHookToken` — 16 routes (what clawgatectl and every producer use)
-<!-- COUNT RE-DERIVED from source on trunk 2026-08-15: 14 registrations in server.go
-     + `GET /api/agents` (agents.go:50) + `POST /api/suggest` (suggest.go:30) = 16.
-     Was 15 before the comment-delete route (0.7.90).
-     RE-CONFIRMED 2026-08-20 (live 0.7.97): still 16 deployed. Trunk carries a 17th,
-     `GET /api/sessions/{id}/tasks` (#357), NOT yet pinned — see the note above.
+### `requireHookToken` — 17 routes (what clawgatectl and every producer use)
+<!-- RE-DERIVED 2026-08-21 against live 0.7.98: 17, up from 16, the new one being
+     `GET /api/sessions/{id}/tasks` (#357) — which IS now pinned and callable, so
+     the trunk/deployed gap this file used to warn about is CLOSED.
+     Was 15 before the comment-delete route (0.7.90), 16 before #357.
+
+     🔴 THE RE-DERIVE COMMAND WAS OVER-BROAD AND IS FIXED BELOW. It matched
+     `s.require[A-Za-z]+` — i.e. EVERY wrapper — and so returned 24 while the
+     heading claimed 16. Anyone checking the figure with the command printed
+     beside it got a mismatch and no way to tell which half was wrong. The
+     heading's arithmetic was right; the command was measuring a different set.
+     Pin the wrapper you are actually counting.
+
+     Re-derive with:
+       grep -hoE 'HandleFunc\("(GET|POST|PATCH|DELETE) /api/[^"]*",\s*s\.requireHookToken' \
+         internal/api/*.go | wc -l
+     Separately, `grep -vc '^#' routes.golden` = 121 total routes, 24 under /api/. -->
      Re-derive with: grep -hoE 'HandleFunc\("(GET|POST|PATCH|DELETE) /api/[^"]*",\s*s\.require[A-Za-z]+' \
        internal/api/*.go | sort | uniq -c -->
 

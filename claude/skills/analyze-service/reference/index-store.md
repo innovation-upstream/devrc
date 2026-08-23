@@ -55,16 +55,19 @@ Markdown, so prose is surfaced verbatim via Read and reads well in a diff.
   - `manage-* skill:` the matching skill (e.g. `manage-redis`) — invoke it for ops.
   - `MEMORY.md slug(s):` slug filename(s) in the project memory dir.
   - `claudedocs handoff(s):` handoff doc path(s).
-- **`## Nuance / work-history`** — dated bullets, newest-first, ≤2 lines each: a gotcha, a lying/misleading status condition, a revert or bump that explains why someone was looking, an incident tie-in. Prune-on-resolve.
+- **`## Nuance / work-history`** — dated bullets, newest-first: a gotcha, a lying/misleading status condition, a revert or bump that explains why someone was looking, an incident tie-in.
+  - **Openness is MARKED, never deleted.** `- YYYY-MM-DD: OPEN: …` or `- YYYY-MM-DD: RESOLVED <sha>: …` at the HEAD of the bullet — the grammar is exact (`subsystem_resolver._JOURNAL_OPENNESS`); a marker on a continuation line is unreachable, and a date not followed by `:` breaks the prefix.
+  - **`OPEN:` always stays. `RESOLVED` is evictable only once a target it names is verified to EXIST, and is `NO HOME — write the record first` otherwise.** The full lifecycle is `write-back.md` → "Prune-on-resolve"; `scripts/subsystem-audit.py` reports it and the `prune-index` skill drives the confirm-gated cut. 🔴 The audit is READ-ONLY and runs no git command inside the store.
+  - ⚠ **"≤2 lines each" was the original rule here and the corpus disagrees with it** — 428 of 518 live bullets exceed two lines (measured 2026-08-21), and `JournalBullet` documents the same finding independently. Treat it as a trim target, not a rule: the audit reports it as an advisory and deliberately keeps it out of the verdict, because a permanently-red gate trains everyone to click through.
 
 ## How the recon brief reports this
 
-`service_recon.py` prints one `index:` line plus the two surfaced sections. Its
-statuses come from `subsystem_recall.recall`, unchanged:
+`service_recon.py` prints one `index:` line plus the three surfaced sections, in
+schema order. Its statuses come from `subsystem_recall.recall`, unchanged:
 
 | line | meaning |
 |---|---|
-| `index: <scope>/<ref> — HIT (from index) sensitivity=<s>` | resolved; `## Pointers` + `## Nuance / work-history` follow |
+| `index: <scope>/<ref> — HIT (from index) sensitivity=<s>` | resolved; `## What it is` + `## Pointers` + `## Nuance / work-history` follow |
 | `index: ref-absent (scope <s>) … — checked N scope(s): …` | every scope named was read; nothing is recorded under that ref in any of them |
 | `index: scope-absent` | the store holds no directory for this repo yet |
 | `index: AMBIGUOUS in <scope> — a.md \| b.md` | 🔴 more than one candidate; **pick one, never guess** — no body is surfaced |
@@ -73,6 +76,27 @@ statuses come from `subsystem_recall.recall`, unchanged:
 
 That last row is the one to read carefully: `not-attempted` and `ref-absent` both
 show "nothing from the index", and only one of them is a finding.
+
+🔴 **`## What it is` is surfaced on the BODY paths only, never on an index row.**
+Until 2026-08-21 no BRIEFING path printed it — `subsystem_recall` left it out of
+`SURFACED_HEADINGS` as "durable boilerplate", so neither `--ref`, nor the digest,
+nor `service_recon`'s `index:` block carried it, and an agent briefed on an entry
+got pointers and nuance, both of which assume you already know what the thing IS.
+**`--search` is the exception and always was**: it splits an entry on *any*
+heading, wholly independent of `SURFACED_HEADINGS`, so it surfaced this section
+then and still does — but it only ever reaches an entry a query matched, so it
+briefs nobody. It is now rendered FIRST, in full, wherever a whole entry body is
+printed: `--ref` (which is what this brief's `index:` block runs), `--search`,
+the digest's one featured body, and each body `--mode full` prints.
+
+The one-line index rows that `--list` and the digest print for **every** entry
+carry nothing new — that surface is where the per-entry multiplier lives and it
+stays byte-identical. An entry whose `## What it is` does not PARSE — absent,
+empty, or not matched as a heading (renamed, indented, inside a code fence, among
+others) — prints a named notice under its own body and gets **no**
+`🔴 NO <heading>` badge: that badge means "a count on this row is not a
+measurement", and this section feeds no count. `subsystem_touch --validate` does
+not check it, for the same reason.
 
 🔴 **EVERY searched root's scope is asked — not just the one that "won".** Root
 ranking is a path-name heuristic, so it answers two different questions badly:

@@ -92,6 +92,7 @@ from subsystem_recall import (  # noqa: E402
     NUANCE_HEADING,
     POINTERS_HEADING,
     STATUS_PRECEDENCE,
+    WHAT_HEADING,
     RecallReport,
     StoreMissingError,
     recall,
@@ -411,6 +412,19 @@ class IndexResult:
     """recall's own status, or `not-attempted` / `store-missing`."""
     scope: str | None = None
     ref: str | None = None
+    what: str = ""
+    """`## What it is` — the entry's own answer to "what IS this thing".
+
+    🔴 FIRST IN THE BLOCK, AND IT IS THE FIELD THE BRIEF WAS MISSING. Until
+    2026-08-21 no BRIEFING path printed this section — not `subsystem_recall
+    --ref`, not its digest, not this `index:` block. (`subsystem_recall.search`
+    always surfaced it, but only for an entry a query happened to match, so it is
+    not a path anyone gets briefed on.) A controlled A/B on 2026-08-20 found an
+    agent briefed only on an `index:` block could not say what the service was,
+    where it lived or what it owned, because `pointers` and `nuance` both assume
+    the reader has already identified the thing. The content was on disk in 73 of
+    73 entries the whole time.
+    """
     pointers: str = ""
     nuance: str = ""
     candidates: tuple[str, ...] = ()
@@ -926,6 +940,7 @@ def _read_index_one(
         "hit",
         scope=scope,
         ref=hit.ref,
+        what=(sections.get(WHAT_HEADING) or "").strip(),
         pointers=(sections.get(POINTERS_HEADING) or "").strip(),
         nuance=(sections.get(NUANCE_HEADING) or "").strip(),
         sensitivity=hit.sensitivity,
@@ -1352,6 +1367,12 @@ def render_brief(b: Brief, *, file_limit: int = DEFAULT_FILE_LIMIT) -> str:
     if i.status == "hit":
         sens = f" sensitivity={i.sensitivity}" if i.sensitivity else ""
         L.append(f"index: {i.scope}/{i.ref} — HIT (from index){sens}{via}")
+        # 🔴 `## What it is` FIRST — it is the orienting sentence, and the two
+        # sections after it assume the reader already has it.
+        if i.what:
+            L.append(f"  {WHAT_HEADING}")
+            for ln in i.what.splitlines():
+                L.append(f"  {ln}")
         if i.pointers:
             L.append(f"  {POINTERS_HEADING}")
             for ln in i.pointers.splitlines():
@@ -1360,8 +1381,40 @@ def render_brief(b: Brief, *, file_limit: int = DEFAULT_FILE_LIMIT) -> str:
             L.append(f"  {NUANCE_HEADING}")
             for ln in i.nuance.splitlines():
                 L.append(f"  {ln}")
+        if not i.what:
+            # Said, not left blank — the same rule `subsystem_recall.render_text`
+            # applies to its own bodies. Absent and present-but-empty fold
+            # together: both render as nothing above, and either way the block
+            # does not answer what the thing IS.
+            #
+            # 🔴 AND IT CLAIMS A PARSE, NEVER A FACT ABOUT THE ENTRY — the same
+            # correction, in the same words, as the notice in
+            # `subsystem_recall.render_text`. "no `## What it is` content" reads
+            # as "the entry has none"; what this branch actually knows is that
+            # the extractor found none, and a heading the parser does not match
+            # reaches here with the answer sitting on disk.
+            # `subsystem_touch.SHAPE_HEADINGS` excludes this heading, so
+            # `--validate` will not flag it either — naming the causes here is the
+            # only signal the reader gets.
+            #
+            # 🔴 THE CAUSE LIST IS EXPLICITLY NON-EXHAUSTIVE ("among others"), for
+            # the reason spelled out beside the twin notice in `subsystem_recall`:
+            # a RENAME (`## What It Is`, `## What it is:`, `### What it is`), an
+            # INDENTED heading and one inside a ``` FENCE all land in this branch,
+            # and only the first is literally a "rename".
+            #
+            # 🔴 THE PREFIX THIS SHARES WITH THE `subsystem_recall` notice IS
+            # QUOTED IN `claude/skills/analyze-service/SKILL.md` step 2, which
+            # tells the agent to relay it AS WRITTEN. That quotation is pinned to
+            # this string by `test_service_recon.py::
+            # TestTheSkillQuotesTheDegradeNotice` — reword either notice and the
+            # pin goes red naming the doc, so the two cannot drift apart.
+            L.append(f"  (no parsable `{WHAT_HEADING}` — absent, empty, or not parsed as a "
+                     f"heading [renamed, indented, fenced, among others]; "
+                     f"re-derive what it is live)")
         if not i.pointers and not i.nuance:
-            L.append("  (entry exists but carries neither section)")
+            L.append(f"  (entry exists but carries neither `{POINTERS_HEADING}` "
+                     f"nor `{NUANCE_HEADING}`)")
     elif i.status == "ref-ambiguous":
         L.append(f"index: AMBIGUOUS in {i.scope} — {' | '.join(i.candidates) or '(candidates unlisted)'}"
                  f" — pick one, never guess{via}")

@@ -1,6 +1,6 @@
 ---
 name: opencode
-description: Dispatch a task to opencode — the separate headless CLI agent — instead of burning this session's context on it. Preflights the brief first (a brief naming paths outside --dir makes `opencode run` auto-reject and exit 0 having done nothing), then launches detached. Use for "dispatch opencode", "call opencode", "run this with opencode", "hand it to flash/mimo/pro", opencode token efficiency. NOT the Agent tool — "dispatch a subagent" means that, not this.
+description: Dispatch a task to opencode — the separate headless CLI agent — instead of burning this session's context on it. Preflights the brief, then launches detached. Use for "dispatch opencode", "call opencode", "run this with opencode", "hand it to flash/mimo/pro", opencode token efficiency. NOT the Agent tool — "dispatch a subagent" means that, not this.
 ---
 
 # opencode dispatch

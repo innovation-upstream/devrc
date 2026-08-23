@@ -18,7 +18,7 @@ explicit confirm, diff first … on decline, discard"). The gap was underneath:
 the handoff DOC's own write+push carried no equivalent gate, and a session
 running after a resume inherited no constraint at all.
 
-FIVE RULES, and this module is what makes four of them structural rather than
+EIGHT RULES, and this module is what makes seven of them structural rather than
 prose an agent can read and then not follow:
 
 a. UPDATING IS NOT FORBIDDEN. The incident's update was correct and valuable;
@@ -70,6 +70,59 @@ e. A LOCAL COMMIT IS NOT A CHEAP LOCAL STATE, AND MUST NOT BE SILENT. `--confirm
    that it was unpushed. So that path now states the fact — without the alarm,
    because it is information, not a refusal. See `not_pushed_report`.
 
+f. A REPLACE THAT DROPS A DURABLE LINE SAYS SO — AND STILL DOES IT. Rule (c)'s
+   allowlist is three prefixes wide, so every OTHER heading replaces, "State
+   now" included — the heading an updating session is usually already editing.
+   Durable content written there is deleted on the next update, and the loss is
+   NOT the gap: the diff below already shows it. The gap is CLASSIFICATION. In a
+   large doc's diff a `-` line that is stale status and a `-` line that is a
+   measured finding look identical, so the reader must hand-classify every
+   deletion on every update — and a session that did exactly that caught a
+   completed arc, a survey's negative result and a closure on two CONSECUTIVE
+   updates, then recorded a prose gotcha about it. This is the structural form
+   of that gotcha: BEFORE the diff, every dropped line that looks durable is
+   named, with its base line number and why it was flagged.
+
+   🔴 IT WARNS AND NEVER REFUSES. No exit code, no block, no new failure path —
+   replacing genuinely stale status is the ORDINARY case, and a warning that
+   could stop the write would become a permanently-red gate everyone learns to
+   click through. For the same reason it must be SILENT on ordinary churn:
+   measured over the 44 real handoff docs in this repo, the predicate flags
+   63 of the 2,626 lines sitting under REPLACE headings (2.4%), so a typical
+   status replace prints nothing at all.
+
+   The "looks durable" question is answered in ONE place, `durable_reason`, and
+   its openness half is NOT re-implemented here — it is `subsystem_resolver`'s
+   `OPEN:` / `RESOLVED <sha>:` / near-miss vocabulary, imported. See there.
+
+g. A RUN STATES WHICH BUCKET EACH SECTION LANDED IN. Rule (c) lived only in this
+   docstring and in step 5 of the skill — neither of which is in front of an
+   author at the moment they choose a heading. So every run that prints a diff
+   also prints one line naming the bucket each touched section fell into, which
+   is the fact rule (f)'s warning is downstream of.
+
+h. A BASE THAT IS THE WRONG DOCUMENT SAYS SO, LOUDLY. Rule (g)'s bucket line was
+   the ONLY tell when this tool was pointed at a clone 313 commits behind: it
+   printed `State now → NEW` and would have rebuilt an 891-line document from a
+   290-line base, discarding ~601 lines including a whole incident writeup, and
+   exited 0 saying `status=written`. A bare `NEW` token inside a classification
+   line is not a warning. So a run now also asks, ABOVE the diff and in rule
+   (f)'s voice, whether the base is the document the update was written against —
+   from a skeleton heading arriving `NEW` on an established doc, from an update
+   larger than the base it merges into, and from the hard question: does the
+   repo's own MAINLINE (derived, never a hardcoded `main` — this incident's repo
+   uses `trunk`) carry commits to this doc that the checkout lacks?
+
+   🔴 IT WARNS AND NEVER REFUSES, like rule (f), and no exit code moved — 4
+   `no-advance` and 5 `no-change` keep their exact meanings. Working on a
+   deliberately-behind clone is legitimate, and a gate that could block the write
+   is one people learn to click through.
+
+   🔴 IT IS SILENT ON THE ORDINARY RUN, MEASURED. All 49 real handoff-doc updates
+   in this repo's history were replayed through `merge_report`; the two
+   heuristic tells fire on 0 and 1 of them. The rejected looser variants and
+   their rates are recorded at `CANONICAL_HEADING_PREFIXES`.
+
 EXIT CODES
   0  proposed (diff shown, nothing written) — or written/pushed under --confirm.
      `written` WITHOUT `--push` also reports the branch and that it is not pushed
@@ -88,6 +141,30 @@ import subprocess
 import sys
 import typing
 from pathlib import Path
+
+# 🔴 ONE RULE, ONE PLACE — rule (f)'s openness half. `subsystem_resolver` owns
+# the `OPEN:` / `RESOLVED <sha>:` grammar, the near-miss detector and the narrow
+# unmarked-action floor, each with a measured matrix behind it and a
+# `openness_population` property that is explicitly "the single source of the
+# precedence order". A second regex here would regenerate that module's bugs at
+# a second site and disagree with `subsystem_touch --validate` about the same
+# line. So it is imported, and `test_handoff_doc.py` pins that the two call
+# sites give the SAME verdict rather than trusting the import to stay one.
+#
+# Same `sys.path` idiom as `subsystem_recall` / `subsystem_touch`: these modules
+# are run as scripts and loaded by path in the tests, so there is no package to
+# import them relative to. Stdlib-only over there, so this costs a parse.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from subsystem_resolver import parse_journal_bullets  # noqa: E402
+
+# 🔴 ONE RULE, ONE PLACE — rule (h)'s "what is this repo's mainline?" half.
+# `subsystem_touch` resolves the same question for its commit window and takes
+# the same answer from the same module. A second derivation here would disagree
+# with that one the first time a clone's `origin/HEAD` is dangling — a state
+# measured in devrc itself — and rule (h) would then measure currency against a
+# branch the rest of the toolchain does not consider mainline.
+import git_mainline  # noqa: E402
 
 EXIT_OK = 0
 EXIT_USAGE = 2
@@ -148,6 +225,231 @@ NO_ADVANCE_SENTINELS: frozenset[str] = frozenset(
 
 _H2 = re.compile(r"^##\s+\S")
 _FENCE = re.compile(r"^(`{3,}|~{3,})")
+
+# YAML front matter, and ONLY at the very start of the file: `---` on line 1,
+# then everything through the next `---` line. Same strictness as
+# `clawgate_task_field` in scripts/lib/clawgate_handoff.sh — a `---` later in a
+# markdown doc is a horizontal rule, not a front-matter opener.
+#
+# ⚠ ONE KNOWN DIVERGENCE from that shell reader, recorded rather than fixed:
+# the `\r?\n` after the closing `---` means a document that ENDS at the closing
+# delimiter with no trailing newline is front matter to the shell and preamble
+# here. That document has no body at all, so the only consumer that can tell —
+# the merge — reports it through the preamble-drop warning either way. Fix it if
+# a document like that ever turns up; do not "tidy" it without one.
+_FRONT_MATTER = re.compile(r"\A---\r?\n.*?^---\r?\n", re.DOTALL | re.MULTILINE)
+
+
+def split_front_matter(text: str) -> tuple[str, str]:
+    """(front_matter, rest) — and `front_matter + rest == text` exactly.
+
+    🔴 WHY THE MERGE HAS TO KNOW ABOUT THIS. Front matter is not a section, so
+    it lands in `split_sections`'s PREAMBLE, and `merge` takes the update's
+    preamble whenever it has one. That means a delta file whose first line is
+    prose rather than a `## ` heading SILENTLY DELETED the doc's front matter —
+    including the `clawgate-task:` field /resume reconciles against, which then
+    reads as "this doc names no task" rather than as data loss.
+
+    The field is meant to be DURABLE, so it survives a merge structurally
+    rather than by everyone remembering to write their delta heading-first.
+    """
+    m = _FRONT_MATTER.match(text)
+    return (m.group(0), text[m.end():]) if m else ("", text)
+
+
+#: 🔴 THE SAME SPELLING `CLAWGATE_FIELD_KEY` CARRIES IN
+#: `scripts/lib/clawgate_handoff.sh`. Two languages, one key — pinned by
+#: `test_the_two_languages_spell_the_key_identically`, because a rename on one
+#: side is silent on the other and turns the durable field into a body line.
+CLAWGATE_TASK_KEY = "clawgate-task"
+#: The reason string a dropped preamble `clawgate-task:` line is reported with.
+DURABLE_CLAWGATE = "clawgate task"
+
+
+def _dropped_preamble_task(
+    base_pre: str, out_pre: str, line_offset: int, label: str = "(preamble)"
+) -> list[DroppedDurable]:
+    """`clawgate-task:` lines a wholesale block replacement is about to delete.
+
+    Called for BOTH replaceable blocks — the front matter and the preamble — so
+    the two cannot drift apart: whichever one carried the field, losing it is
+    reported the same way, with an address the author can open.
+
+    🔴 THE HOLE THE FRONT-MATTER FIX DOES NOT COVER, found by a test written for
+    the seam rather than for either component. `split_front_matter` only sees a
+    block that is properly CLOSED; an unterminated one is preamble, and
+    `merge_report` replaces the whole preamble whenever the update brings its
+    own. So a writer who forgets the closing `---` gets the field deleted on the
+    next update — the exact silent loss this change exists to stop, one line
+    below where it was stopped.
+
+    Deliberately NARROW: only lines carrying this key, not `durable_reason` over
+    the whole preamble. A handoff preamble is normally `# Handoff: <topic> —
+    <date>`, which carries a DATE, so the general predicate would fire rule (f)
+    on every preamble-replacing update in the corpus — a warning on the ordinary
+    case, which rule (f)'s own header calls the failure mode to avoid.
+
+    WARNS, never refuses — same contract as the rest of rule (f).
+    """
+    kept = {" ".join(ln.split()) for ln in out_pre.splitlines() if ln.strip()}
+    out: list[DroppedDurable] = []
+    for idx, line in enumerate(base_pre.splitlines()):
+        if not line.strip().startswith(CLAWGATE_TASK_KEY + ":"):
+            continue
+        if " ".join(line.split()) in kept:
+            continue
+        out.append(
+            DroppedDurable(label, line_offset + idx + 1, line.rstrip(),
+                           DURABLE_CLAWGATE)
+        )
+    return out
+
+
+# --- rule (f): does this line look DURABLE? -----------------------------------
+#
+# 🔴 A FLOOR, NOT A CLASSIFIER, and every renderer of it says "look(s) DURABLE"
+# rather than "is". Recall is unknown and unknowable — a durable finding can be
+# written in plain prose that no predicate can separate from status — so a
+# SILENT run is never evidence that a replace dropped nothing worth keeping. The
+# claim it makes is the narrow one: these lines carry a marker that ordinary
+# status churn does not.
+#
+# THREE SIGNALS, tried in that order. The first is imported (see the top of the
+# file); the other two exist because that vocabulary alone has almost no reach
+# over this corpus. MEASURED 2026-08-20 over the 44 real
+# `claudedocs/handoff-*.md` in this repo — 2,626 non-blank, non-fenced lines
+# sitting under REPLACE-bucket headings, counted with THIS function's precedence
+# (so a line carrying two signals is counted once, under the first):
+#
+#     openness (imported)      6 lines   0.23%
+#     dated claim             46 lines   1.75%
+#     evidence verb           11 lines   0.42%
+#     ---------------------------------------
+#     flagged                 63 lines   2.40%
+#
+# 🔴 SO THE IMPORTED SCHEMA FIRES ON 6 LINES IN 44 DOCUMENTS, and never once
+# through its own `OPEN:` / `RESOLVED <sha>:` markers — all six come from its
+# narrow unmarked-action floor. That grammar is the subsystem STORE's journal
+# convention, which handoff authors do not write. Importing it is still right (a
+# line that DOES declare `OPEN:` under "State now" is durable, and the question
+# must not be answered in two places), but shipping it ALONE would have been a
+# guard reading as coverage while providing almost none.
+#
+# Sensitivity is the design constraint, not an afterthought: at ~2% of lines a
+# typical "State now" replace of a dozen lines prints nothing. Per SECTION the
+# worst case is 40 of 230 (17%) — worst because that assumes a replace carrying
+# NOTHING forward; a real update that keeps a flagged line verbatim clears it.
+# Widening is not free — see the rejected signals below, each measured on its
+# INCREMENTAL half (a match on a line already flagged buys nothing).
+
+# (i) A DATE THE LINE ASSERTS, not one that happens to sit inside a filename.
+# Handoff docs cite each other constantly (`handoff-browser-bridge-2026-08-01.md`,
+# `apply-nebula-443.sh.LOCAL-preserved-2026-08-02`, `…-eval-2026-07-24.md`), and
+# that reference is not a claim about anything. TWO independent nets, each
+# measured ALONE over the 67 raw date-bearing lines of the corpus, because they
+# overlap almost completely and either one on its own would look unnecessary:
+#
+#     code-span strip alone     suppresses 21/67
+#     leading boundary alone    suppresses 20/67
+#     both (shipped)            suppresses 21/67, leaving 46
+#
+# 🔴 THE BOUNDARY IS LEADING-ONLY, AND A SYMMETRIC ONE WAS MEASURED WRONG. The
+# first draft used `(?![\w/.-])` on the trailing side too, by symmetry rather
+# than by measurement, and it silently ate four GENUINELY durable lines in the
+# corpus — `**DONE 2026-08-20.**` (a `.`), `2026-08-19/20` (a `/`) and
+# `merged 2026-08-18T23:28:31Z` (a `\w`) — while suppressing nothing the leading
+# half had not already caught. A date's LEFT neighbour is what says it was
+# welded into a path token; its right neighbour is ordinary sentence punctuation.
+_CODE_SPAN = re.compile(r"`[^`]*`")
+_BARE_ISO_DATE = re.compile(r"(?<![\w/.-])\d{4}-\d{2}-\d{2}")
+
+# (ii) The evidence vocabulary — SHOUTED, and deliberately short.
+#
+# 🔴 `claude/RULES.md`: "a guard on WORDS is walkable by REWORDING". True, and
+# accepted here on purpose: this is an ADVISORY that costs a line of output when
+# it is wrong and blocks nothing when it is missed, exactly the shape
+# `subsystem_resolver._UNMARKED_ACTION` already documents as "a FLOOR, never a
+# list". The structural half of rule (f) is the bucket a heading falls in, which
+# no rewording touches.
+#
+# All-caps is load-bearing, not decoration. `decided`, `measured` and `ruled
+# out` are ordinary English that turns up in ordinary status prose: over the
+# same 2,626 lines this list matched CASE-INSENSITIVELY hits 58 (2.2%) against
+# 7 (0.27%) shouted — a 8x widening of the single noisiest axis, on top of the
+# dated-claim signal it would mostly duplicate.
+#
+# 🔴 THE LEADING CLASS EXCLUDES `-`, which is the SAME reasoning the date's
+# leading boundary uses: a shouted word welded to its neighbour is a compound
+# MODIFIER, not a declaration. Measured — `the loop-CLOSED reframing of the #1
+# soak item` is an inventory line about a doc edit, and it was the only thing
+# the guard removed: the existing verbs matched 7 lines with it and 7 without,
+# so it costs no recall at all.
+#
+# REJECTED, each measured over the same 2,626 lines, and the split matters —
+# a match on a line the OTHER signals already flag adds nothing but noise, so
+# what is counted below is the INCREMENTAL half:
+#
+#   VERIFIED    7 matches, 3 already flagged, 4 incremental — and 3 of those 4
+#       are ordinary status: `Both VERIFIED + switched`, a "what shipped" list
+#       entry, and 🔴 `- **Deploy/verify status: DEPLOYED AND VERIFIED.**`. That
+#       last one is decisive: `Deploy/verify status:` is a field the handoff
+#       skill's own step-2 TEMPLATE prescribes, so on any session that deployed
+#       successfully this net fires on the template's own status line. That is
+#       the definition of the churn rule (f) must stay silent on.
+#   CONFIRMED   0 matches. No corpus evidence, so it buys recall that cannot be
+#       demonstrated and precision that cannot be defended — the same argument
+#       `subsystem_resolver._UNMARKED_ACTION` makes for its own rejections.
+#   negative-result phrasing   99 lines (3.8%) — `does not`, `did not`, `never`,
+#       `no evidence`, `turned out`. Alone it is larger than the whole shipped
+#       predicate: a block on nearly every run, which is the failure mode rule
+#       (f) exists to avoid rather than a wider net.
+#
+# CLOSED was rejected with them in the first draft and that was WRONG, on a
+# number that was never broken down. Measured properly: 8 matches, 2 already
+# flagged, **6 incremental of which 4 are genuine durable closures** — `is
+# **CLOSED and refuted**`, `the fail-open is CLOSED, deployed, and verified`,
+# `**CLOSED by PR #185**`, `the close-the-loop thread is now **CLOSED**`. The
+# two misses are attributive (`a CLOSED PR`, and the hyphen case above, which
+# the leading class now takes). It is also the ONLY candidate that catches a
+# closure-shaped finding, which is one of the three field cases this rule exists
+# for and the one every other signal is silent on. Cost: 58 -> 63 lines
+# (2.21% -> 2.40%), 38 -> 40 of 230 sections.
+_EVIDENCE_VERB = re.compile(
+    r"(?:^|[^A-Za-z-])"
+    r"(MEASURED|RETRACTED|SUPERSEDED|SUPERSEDES|DISPROVED|RULED OUT|WONTFIX"
+    r"|CORRECTION|DECIDED|CLOSED)"
+    r"(?![a-z])"
+)
+
+DURABLE_DATED = "dated claim"
+DURABLE_EVIDENCE = "evidence verb"
+
+
+def durable_reason(line: str) -> str | None:
+    """Why this ONE line looks durable, as a short reason, or None.
+
+    The single home of rule (f)'s question. Consumers branch on truthiness and
+    PRINT the reason, so a new signal becomes visible in the output rather than
+    silently widening a boolean nobody can attribute.
+
+    The openness reason is spelled `openness/<population>` and comes verbatim
+    from `subsystem_resolver`, which is what makes the two call sites' agreement
+    testable: anything that module calls other than `none` is durable here, so a
+    population added upstream is durable by default. That direction is
+    deliberate — a new population is a new kind of declared claim, and the
+    fail-safe for a warning that cannot refuse is to say more, not less.
+    """
+    bullets = parse_journal_bullets(line)
+    if bullets:
+        population = bullets[0].openness_population
+        if population != "none":
+            return f"openness/{population}"
+    prose = _CODE_SPAN.sub(" ", line)
+    if _BARE_ISO_DATE.search(prose):
+        return DURABLE_DATED
+    if _EVIDENCE_VERB.search(prose):
+        return DURABLE_EVIDENCE
+    return None
 
 
 def _fence_token(line: str) -> str | None:
@@ -211,13 +513,57 @@ def _norm_heading(heading_line: str) -> str:
     return " ".join(heading_text(heading_line).lower().split())
 
 
+BUCKET_APPEND = "APPEND"
+BUCKET_REPLACE = "REPLACE"
+BUCKET_NEW = "NEW"
+
+
+class DroppedDurable(typing.NamedTuple):
+    """One base line a REPLACE deletes that `durable_reason` flagged."""
+
+    heading: str
+    """The BASE heading's text — the one the line was written under."""
+    line_no: int
+    """1-based line number in the BASE doc, so it can be opened and moved."""
+    line: str
+    """The line, verbatim apart from trailing whitespace."""
+    reason: str
+
+
+class MergeReport(typing.NamedTuple):
+    text: str
+    dropped: tuple[DroppedDurable, ...]
+    buckets: tuple[tuple[str, str], ...]
+    """`(heading text, BUCKET_*)` for each section the update touched, in the
+    update's own order — rule (g)."""
+
+
 def merge(base_text: str, update_text: str) -> str:
-    """Rule (c): replace current-state sections, APPEND diagnosis-state ones.
+    """Rule (c): replace current-state sections, APPEND diagnosis-state ones."""
+    return merge_report(base_text, update_text).text
+
+
+def merge_report(base_text: str, update_text: str) -> MergeReport:
+    """`merge()`, plus what rules (f) and (g) need to say about it.
+
+    🔴 ONE MATCHER. The dropped-line classification and the bucket line are
+    computed HERE, inside the loop that decides each section's fate, rather than
+    by a second pass that re-derives which section matched which. A second pass
+    would be free to disagree with this one — and the disagreement would render
+    as a warning naming a section the merge did not touch, or silence about one
+    it did.
 
     A section present in the base and absent from the update is left ALONE —
     an update is a delta, not a replacement document, so omitting a section
     never deletes it. A section present only in the update is added at the end.
+
+    FRONT MATTER IS CARRIED, not merged: the base's block survives unless the
+    update supplies one of its own (an explicit re-statement wins, so a session
+    that genuinely needs to change the recorded task can). See
+    `split_front_matter` for why this cannot be left to the preamble rule.
     """
+    base_fm, base_text = split_front_matter(base_text)
+    upd_fm, update_text = split_front_matter(update_text)
     base_pre, base_secs = split_sections(base_text)
     upd_pre, upd_secs = split_sections(update_text)
 
@@ -232,21 +578,143 @@ def merge(base_text: str, update_text: str) -> str:
             by_bucket.setdefault(bucket, i)
         by_heading.setdefault(_norm_heading(h), i)
 
+    # base_fm was stripped above and is still part of the file a reader opens —
+    # see _body_start_lines. Dropping it here silently shifts every rule (f)
+    # line number on any doc that records a clawgate task.
+    body_starts = _body_start_lines(base_pre, base_secs, base_fm)
+    dropped: list[DroppedDurable] = []
+    # TWO WAYS THE FIELD LEAVES A DOCUMENT WITHOUT ANY SECTION BEING TOUCHED,
+    # and the same function reports both — the asymmetry between them was a real
+    # gap, not a design:
+    #
+    #  (a) the update brings its own FRONT MATTER, so `(upd_fm or base_fm)`
+    #      discards the base's. "An explicit one wins" is the intended rule and
+    #      stays — but a rule whose only statement is prose in a skill is not a
+    #      guard, and a delta can claim front matter by ACCIDENT: a `---` used as
+    #      a horizontal rule on line 1 with another `---` further down is a
+    #      well-formed block to `split_front_matter`. Offset 0 because front
+    #      matter starts at line 1 of the file.
+    #  (b) the update brings its own PREAMBLE, which is where an UNTERMINATED
+    #      block lives. Offset = the height of the real front matter above it.
+    if upd_fm and upd_fm != base_fm:
+        dropped.extend(_dropped_preamble_task(base_fm, upd_fm, 0, "(front matter)"))
+    if out_pre != base_pre:
+        dropped.extend(
+            _dropped_preamble_task(base_pre, out_pre, base_fm.count("\n"))
+        )
+    buckets: list[tuple[str, str]] = []
+
     tail: list[list[str]] = []
     for h, b in upd_secs:
         bucket = append_bucket(h)
         if bucket is not None and bucket in by_bucket:
             i = by_bucket[bucket]
             out[i][1] = _append_body(out[i][1], b)
+            buckets.append((heading_text(out[i][0]), BUCKET_APPEND))
         elif bucket is None and _norm_heading(h) in by_heading:
             i = by_heading[_norm_heading(h)]
+            # 🔴 Classified BEFORE the body is overwritten — `out[i][1]` is the
+            # outgoing text only until the next statement runs.
+            dropped.extend(
+                _durable_dropped(
+                    heading_text(out[i][0]), out[i][1], b, body_starts[i]
+                )
+            )
             out[i][0] = h
             out[i][1] = _replace_body(out[i][1], b)
+            buckets.append((heading_text(h), BUCKET_REPLACE))
         else:
             tail.append([h, b])
+            buckets.append((heading_text(h), BUCKET_NEW))
 
-    rendered = out_pre + "".join(h + b for h, b in out + tail)
-    return rendered.rstrip("\n") + "\n"
+    rendered = (upd_fm or base_fm) + out_pre + "".join(h + b for h, b in out + tail)
+    return MergeReport(
+        text=rendered.rstrip("\n") + "\n",
+        dropped=tuple(dropped),
+        buckets=tuple(buckets),
+    )
+
+
+def _body_start_lines(
+    pre: str, sections: list[list[str]], front_matter: str = ""
+) -> list[int]:
+    """1-based line number of each section BODY's first line in the base doc.
+
+    Derived from the same lossless split the merge walks, so a line number can
+    never name a line from a different section: `split_sections` guarantees
+    `pre + "".join(h + b)` reproduces the document byte-for-byte, which makes
+    counting newlines an exact address rather than an estimate.
+
+    🔴 `front_matter` IS PART OF THE FILE THE READER OPENS, so it counts, and it
+    is a SEPARATE argument because `merge_report` strips it off `base_text`
+    BEFORE `split_sections` ever sees it. Without it every rule (f) warning on a
+    doc carrying `clawgate-task:` names a line short by the height of that block
+    — and a line number is the whole value of that warning. Losslessness is a
+    property of `pre + "".join(h + b)` against the STRIPPED text, so nothing
+    else in the walk can notice the missing lines.
+    """
+    starts: list[int] = []
+    # the first heading's own line number, in the WHOLE file
+    cur = front_matter.count("\n") + pre.count("\n") + 1
+    for _h, b in sections:
+        starts.append(cur + 1)
+        cur = cur + 1 + b.count("\n")
+    return starts
+
+
+def _unfenced(body: str) -> typing.Iterator[tuple[int, str]]:
+    """`(0-based index within body, line)` for lines OUTSIDE code fences.
+
+    Fence lines and their contents are skipped: a sample command or a pasted log
+    inside a fence routinely carries a date, and 610 of the corpus's
+    REPLACE-bucket lines sit inside one. Flagging those would put the block in
+    front of a reader on runs where nothing durable moved at all.
+    """
+    open_tok: str | None = None
+    for idx, line in enumerate(body.splitlines()):
+        tok = _fence_token(line)
+        if open_tok is None:
+            if tok:
+                open_tok = tok
+                continue
+            yield idx, line
+        elif (
+            tok
+            and tok[0] == open_tok[0]
+            and len(tok) >= len(open_tok)
+            and line.strip() == tok
+        ):
+            open_tok = None
+
+
+def _norm_line(line: str) -> str:
+    """Whitespace-collapsed, for the carried-forward comparison only."""
+    return " ".join(line.split())
+
+
+def _durable_dropped(
+    heading: str, old_body: str, new_body: str, first_line_no: int
+) -> list[DroppedDurable]:
+    """The durable-looking lines this replace deletes and does not carry forward.
+
+    🔴 CARRIED FORWARD IS AN EXACT (whitespace-collapsed) LINE MATCH, and the
+    looseness is deliberately in the LOUD direction: a durable line the author
+    reworded while carrying it counts as dropped and gets named. That is a line
+    of output on a line the author is already looking at. The other direction —
+    treating a near-match as carried — would silence the exact case this rule
+    exists for, since a status rewrite of a section naturally reuses much of its
+    wording.
+    """
+    carried = {_norm_line(ln) for ln in new_body.splitlines() if ln.strip()}
+    out: list[DroppedDurable] = []
+    for idx, line in _unfenced(old_body):
+        if not line.strip():
+            continue
+        reason = durable_reason(line)
+        if reason is None or _norm_line(line) in carried:
+            continue
+        out.append(DroppedDurable(heading, first_line_no + idx, line.rstrip(), reason))
+    return out
 
 
 def _spacing(body: str) -> str:
@@ -298,6 +766,374 @@ def unified(base_text: str, merged_text: str, relpath: str) -> str:
             n=3,
         )
     )
+
+
+# Rule (f), bounded. A doc can drop many lines and the block is printed ABOVE
+# the diff, where an unbounded list would push the thing it is annotating off
+# the top of the screen. Six is enough to see the shape; the count that follows
+# is what stops "…" from reading as "and nothing else worth mentioning".
+DROPPED_SHOWN_MAX = 6
+DROPPED_LINE_MAX = 140
+
+#: 🔴 The remedy for a dropped `clawgate-task:` — and it is the OPPOSITE of the
+#: standing one. That field is read ONLY from a block whose `---` is line 1, so
+#: "move it under an APPEND heading" would put it where nothing parses it and
+#: /resume would report the doc as naming no task at all.
+CLAWGATE_DROP_REMEDY = (
+    "  RESTORE IT AT LINE 1, in a closed `---` block — that is the only place\n"
+    "  /resume reads it from. Do NOT move it under a heading: a `clawgate-task:`\n"
+    "  line anywhere else is invisible to every reader, so the doc would report\n"
+    "  as naming no task at all.\n"
+    "  This is a WARNING, not a refusal. Dropping it on purpose (the work moved "
+    "to another task, or none) is a legitimate update — this only makes it a "
+    "decision rather than an accident."
+)
+
+DROPPED_REMEDY = (
+    "  Move them under an APPEND heading (open investigations / findings / "
+    "gotchas) or carry them forward in this update.\n"
+    "  This is a WARNING, not a refusal — replacing stale status is the "
+    "ordinary case and nothing here blocks it. It is a FLOOR, so a silent run "
+    "is not evidence that nothing durable was dropped."
+)
+
+
+def buckets_line(buckets: typing.Sequence[tuple[str, str]]) -> str:
+    """Rule (g): which sections replaced, which appended, this run — one line."""
+    if not buckets:
+        return "buckets: (this update touched no section)"
+    shown = " · ".join(f"{_clip(h, 44)} → {bucket}" for h, bucket in buckets)
+    return f"buckets: {shown}"
+
+
+def dropped_durable_report(dropped: typing.Sequence[DroppedDurable]) -> str:
+    """Rule (f)'s block, or "" when nothing was flagged.
+
+    Empty on the ordinary run BY DESIGN — the caller prints nothing rather than
+    a reassuring "0 durable lines dropped", which would be a line on every run
+    saying the same thing and would be read as a guarantee the predicate cannot
+    make (see `durable_reason`: recall is unknown).
+    """
+    if not dropped:
+        return ""
+    # 🔴 THE FRONT-MATTER CLASS GETS ITS OWN HEADING AND ITS OWN REMEDY, because
+    # the standing one SILENTLY DISABLES THE FEATURE. `clawgate-task:` is only
+    # read out of a block whose `---` is line 1; an author who follows "move
+    # them under an APPEND heading" moves the field somewhere no reader parses,
+    # and /resume then prints `(no clawgate-task: field …)` — the exact silent
+    # disable this whole change exists to prevent, arrived at by obeying the
+    # tool. The ADDRESS was right either way; the label and the advice were not.
+    fm_rows = [d for d in dropped if d.reason == DURABLE_CLAWGATE]
+    other = [d for d in dropped if d.reason != DURABLE_CLAWGATE]
+    blocks: list[str] = []
+    if fm_rows:
+        blocks.append("\n".join([
+            f"🔴 This update DROPS the doc's recorded clawgate task "
+            f"({len(fm_rows)} line(s), from the front matter or preamble):",
+            *[f"  {_clip(d.heading, 44)}:{d.line_no}: "
+              f"{_clip(d.line.strip(), DROPPED_LINE_MAX)}  [{d.reason}]"
+              for d in fm_rows[:DROPPED_SHOWN_MAX]],
+            CLAWGATE_DROP_REMEDY,
+        ]))
+    if other:
+        rows = [
+            f"  {_clip(d.heading, 44)}:{d.line_no}: "
+            f"{_clip(d.line.strip(), DROPPED_LINE_MAX)}  [{d.reason}]"
+            for d in other[:DROPPED_SHOWN_MAX]
+        ]
+        elided = len(other) - len(rows)
+        if elided:
+            rows.append(f"  … and {elided} more not shown (read the diff below).")
+        blocks.append("\n".join([
+            f"🔴 This replace DROPS {len(other)} line(s) that look DURABLE "
+            f"(they sit under a REPLACE heading):",
+            *rows,
+            DROPPED_REMEDY,
+        ]))
+    return "\n".join(blocks)
+
+
+def _clip(text: str, limit: int) -> str:
+    text = " ".join(text.split())
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+# --- rule (h): is the BASE the document this update was written against? ------
+#
+# 🔴 THE INCIDENT. Pointed at a clone 313 commits behind its mainline, this tool
+# resolved the base doc from that clone's working tree, found no section matching
+# the update's `State now`, and reported `State now → NEW`. Confirming would have
+# rebuilt an 891-line / 14-heading document from a 290-line / 9-heading base —
+# discarding ~601 lines including a whole incident writeup — and exited 0 having
+# said `status=written`. The ONLY tell was one token inside the `buckets:` line,
+# which reads as a routine classification.
+#
+# 🔴 IT WARNS AND NEVER REFUSES, and no exit code moves. Rule (f) already
+# establishes why: a gate that can stop the write becomes a gate people learn to
+# click through, and working on a deliberately-behind clone is legitimate. Exit
+# 4 (`no-advance`) and 5 (`no-change`) keep their exact meanings.
+#
+# 🔴 IT MUST BE SILENT ON THE ORDINARY RUN, and that is measured rather than
+# hoped. Every one of the 49 real handoff-doc updates in this repo's history was
+# REPLAYED through `merge_report` with the update delta reconstructed from the
+# commit, and the tells below fire on 0 and 1 of them respectively:
+#
+#   canonical heading NEW, membership by CANONICAL PREFIX ..... 0/49  (0.0%)
+#   canonical heading NEW, membership by FULL heading text .... 4/49  (8.2%)
+#   base smaller than update, LINES only ..................... 10/49 (20.4%)
+#   base smaller than update, lines AND sections .............. 1/49  (2.0%)
+#
+# The two rejected variants are why the rules are shaped the way they are.
+# Membership is by prefix because an author re-glossing `## State now` to
+# `## State now — THE STORE IS PUBLIC` makes it `NEW` against a base that plainly
+# HAS a state-now section (4 real cases, all in one doc) — the heading moved, the
+# skeleton did not. And the size tell needs BOTH dimensions because a handoff
+# update routinely rewrites more lines than a short doc contains.
+
+# The skeleton of a handoff doc, as PREFIXES — same matching discipline as
+# `APPEND_PREFIXES` and for the same reason: the canonical spellings carry a
+# trailing gloss an updating session will not reproduce. Occurrence across the
+# 44 real handoff docs in this repo (2026-08-21): how-to-verify 27, next-steps
+# 26, state-now 25, goal 24, gotchas 21, open-investigations 14, what-shipped 11.
+CANONICAL_HEADING_PREFIXES: tuple[str, ...] = (
+    "goal",
+    "state now",
+    "next steps",
+    "how to verify",
+    "what shipped",
+    *APPEND_PREFIXES,
+)
+
+# A base with fewer sections than this is a stub, not an established handoff, and
+# a canonical heading arriving NEW in one is ordinary growth. Of the 44 real docs
+# exactly one has 3 sections and three have 4; the median is 6.
+MIN_ESTABLISHED_SECTIONS = 4
+
+
+def canonical_prefix(heading: str) -> str | None:
+    """The skeleton section this heading TEXT belongs to, or None."""
+    low = " ".join(heading.lower().split())
+    for prefix in CANONICAL_HEADING_PREFIXES:
+        if low.startswith(prefix):
+            return prefix
+    return None
+
+
+class DocShape(typing.NamedTuple):
+    """How big a document is, and which skeleton sections it carries."""
+
+    sections: int
+    lines: int
+    canonical: frozenset[str]
+
+
+def doc_shape(text: str) -> DocShape:
+    """Measured with the SAME splitters the merge uses, so the numbers in the
+    warning are the numbers the merge acted on — front matter stripped, fences
+    respected."""
+    _fm, body = split_front_matter(text)
+    _pre, secs = split_sections(body)
+    canon = {c for c in (canonical_prefix(heading_text(h)) for h, _ in secs) if c}
+    return DocShape(len(secs), len(text.splitlines()), frozenset(canon))
+
+
+def wrong_base_tells(
+    base_text: str,
+    update_text: str,
+    buckets: typing.Sequence[tuple[str, str]],
+) -> tuple[str, ...]:
+    """Reasons to doubt the base, in the update's own order. Empty on an ordinary
+    run — see the measurement above.
+
+    Returns "" reasons, not a boolean, because the two tells are different
+    evidence and a reader who is told which one fired can settle it in one
+    command. An empty tuple is NOT a claim that the base is current; that
+    question is `base_currency`'s, and it is the one with hard evidence.
+    """
+    if not base_text.strip():
+        # No base at all. Every heading is NEW by construction, so the tell
+        # would fire on every genuine first write. `base_currency` still speaks:
+        # a doc that is absent HERE and present on the mainline is the same bug.
+        return ()
+    base = doc_shape(base_text)
+    upd = doc_shape(update_text)
+    tells: list[str] = []
+    if base.sections >= MIN_ESTABLISHED_SECTIONS and base.canonical:
+        for heading, bucket in buckets:
+            prefix = canonical_prefix(heading)
+            if bucket != BUCKET_NEW or prefix is None or prefix in base.canonical:
+                continue
+            tells.append(
+                f"`{_clip(heading, 56)}` came back {BUCKET_NEW} — but this base "
+                f"has {base.sections} sections and NOT ONE of them is a "
+                f"`{prefix}` section. On an established handoff doc that is a "
+                f"skeleton section MISSING from the base, not a section being "
+                f"introduced."
+            )
+    if upd.sections > base.sections and upd.lines > base.lines:
+        tells.append(
+            f"the incoming update is LARGER than the base it merges into "
+            f"({upd.sections} sections / {upd.lines} lines against the base's "
+            f"{base.sections} / {base.lines}). An update is a delta; a delta "
+            f"bigger than the whole document is a base missing most of it."
+        )
+    return tuple(tells)
+
+
+class BaseCurrency(typing.NamedTuple):
+    """Whether the base document is the newest COMMITTED copy this clone can see.
+
+    🔴 `unmeasured` is never a 0 and never a clean bill. It carries the reason
+    the question could not be answered, and the renderer prints it — but only
+    beside a tell, so an ordinary run stays silent.
+    """
+
+    base_ref: str | None
+    ladder: tuple[str, ...]
+    doc_behind: int | None
+    """Commits touching THIS doc that the mainline has and HEAD does not."""
+    clone_behind: int | None
+    """Commits the mainline has that HEAD does not, whole-repo. Context, not the
+    trigger: a clone can be far behind on code with a perfectly current doc, and
+    warning on that would fire on nearly every agent worktree."""
+    mainline: DocShape | None
+    """The mainline copy's shape — read ONLY when `doc_behind` is non-zero, so
+    the ordinary run costs no extra `git show`."""
+    unmeasured: str | None
+
+    @property
+    def stale(self) -> bool:
+        return bool(self.doc_behind)
+
+
+def base_currency(repo: Path, relpath: str) -> BaseCurrency:
+    """Is the base doc behind its mainline? READ-ONLY, and it does NOT fetch.
+
+    🔴 The mainline ref is DERIVED (`git_mainline`), never a hardcoded `main`.
+    The clone this incident happened in has mainline `trunk`; a hardcoded ladder
+    would have answered "cannot measure" there and printed nothing at all — the
+    silence being fixed, arrived at a second way.
+
+    No fetch by design: this tool is invoked inside a confirm gate a human is
+    waiting on, and a network round-trip is not something to add there. The
+    counts are therefore a FLOOR against refs already fetched — never an
+    overstatement, and a clone that has never fetched can be far worse.
+    """
+    base_ref, ladder = git_mainline.resolve_base_ref(repo)
+    if base_ref is None:
+        return BaseCurrency(
+            None, ladder, None, None, None,
+            f"no mainline ref resolves in this clone (tried {', '.join(ladder)})",
+        )
+    doc_behind = git_mainline.commits_behind(repo, base_ref, path=relpath)
+    clone_behind = git_mainline.commits_behind(repo, base_ref)
+    if doc_behind is None:
+        return BaseCurrency(
+            base_ref, ladder, None, clone_behind, None,
+            f"git could not count commits to {relpath} in HEAD..{base_ref}",
+        )
+    mainline: DocShape | None = None
+    if doc_behind:
+        shown = git_allow(repo, "show", f"{base_ref}:{relpath}")
+        if shown.code == 0:
+            mainline = doc_shape(shown.out)
+    return BaseCurrency(base_ref, ladder, doc_behind, clone_behind, mainline, None)
+
+
+WRONG_BASE_REMEDY = (
+    "  Settle it BEFORE answering y: read the mainline copy — `git -C {repo} "
+    "show {ref}:{relpath}` — and re-run against a current clone if it is the "
+    "fuller document.\n"
+    "  This is a WARNING, not a refusal, and no exit code changed. Updating a "
+    "deliberately-behind clone is legitimate. It is a FLOOR: a silent run is "
+    "NOT evidence that the base is current."
+)
+
+
+def wrong_base_report(
+    tells: typing.Sequence[str],
+    currency: BaseCurrency,
+    relpath: str,
+    repo: Path,
+    local: DocShape,
+) -> str:
+    """Rule (h)'s block, or "" when there is nothing to say.
+
+    Printed when the currency check found the base STALE (hard evidence), or
+    when a tell fired (soft evidence) — and in the soft case the currency
+    verdict is printed WITH it, including the reason it could not be taken, so
+    the reader is never handed a suspicion with no way to settle it.
+    """
+    if not currency.stale and not tells:
+        return ""
+    lines: list[str] = []
+    if currency.stale:
+        behind = currency.doc_behind
+        lines.append(
+            f"🔴 THE BASE DOCUMENT IS NOT THE NEWEST COMMITTED COPY — "
+            f"{currency.base_ref} has {behind} commit(s) to {relpath} that this "
+            f"checkout does not."
+        )
+        # 🔴 THE ABSENT CASE IS CHECKED FIRST, not folded into the size line. A
+        # base of "0 sections / 0 lines" is technically the same fact and reads
+        # as a formatting artefact; the reader needs to be told the document is
+        # not here at all, because that is the case where EVERY section merges as
+        # NEW and the committed doc is replaced wholesale by the delta.
+        if not local.lines:
+            shape = (
+                f" ({currency.mainline.sections} sections / "
+                f"{currency.mainline.lines} lines)"
+                if currency.mainline is not None
+                else ""
+            )
+            lines.append(
+                f"  there is NO {relpath} in this checkout at all, and "
+                f"{currency.base_ref} has one{shape} — every section will merge "
+                f"as {BUCKET_NEW} and the committed document will be replaced by "
+                f"this delta."
+            )
+        elif currency.mainline is not None:
+            lines.append(
+                f"  base being merged into: {local.sections} sections / "
+                f"{local.lines} lines   ·   {currency.base_ref}: "
+                f"{currency.mainline.sections} sections / "
+                f"{currency.mainline.lines} lines"
+            )
+        if currency.clone_behind:
+            lines.append(
+                f"  (this clone is {currency.clone_behind} commit(s) behind "
+                f"{currency.base_ref} overall — a floor: nothing here fetched.)"
+            )
+    if tells:
+        lines.append(
+            f"🔴 THIS MERGE LOOKS LIKE IT RESOLVED THE WRONG BASE "
+            f"({len(tells)} tell(s)):"
+        )
+        lines.extend(f"  - {t}" for t in tells)
+        if not currency.stale:
+            if currency.unmeasured:
+                lines.append(
+                    f"  base currency UNCHECKED: {currency.unmeasured}. That is "
+                    f"not a clean reading — check the base by hand."
+                )
+            else:
+                lines.append(
+                    f"  base currency: 0 commit(s) to {relpath} in "
+                    f"HEAD..{currency.base_ref}"
+                    + (
+                        f", though the clone is {currency.clone_behind} behind "
+                        f"overall"
+                        if currency.clone_behind
+                        else ""
+                    )
+                    + " — so the base is the newest copy this clone has FETCHED."
+                )
+    lines.append(
+        WRONG_BASE_REMEDY.format(
+            repo=repo, ref=currency.base_ref or "<mainline>", relpath=relpath
+        )
+    )
+    return "\n".join(lines)
 
 
 def advance_is_real(advanced: str | None) -> bool:
@@ -438,6 +1274,105 @@ def not_pushed_report(repo: Path, remote: str, branch: str | None) -> str:
             f"{NOT_PUSHED_RETRY_NOTE}"
         )
     return f"{NOT_PUSHED_HEADLINE}\n{why}\n{topic}\n{NOT_PUSHED_RETRY_NOTE}"
+
+
+COMMIT_LANDED_NOTE = (
+    "\n🔴 THE COMMIT LANDED — a later step failed, so nothing was rolled back "
+    "(rolling back here would DISCARD a committed change). This is the one "
+    "`status=failed` that does NOT mean 'nothing happened': the commit exists "
+    "locally and is un-pushed. Find it with `git log -1` and push it or open a "
+    "PR; do not re-run this tool, which would append the update a second time."
+)
+
+
+def _undo_write(
+    repo: Path, doc: Path, relpath: str, original: bytes | None
+) -> str:
+    """Undo the doc write + `git add` after a commit that never happened.
+
+    🔴 PATH-LIMITED, exactly like the commit it is undoing. A blanket
+    `git reset` would unstage a co-worker's staged files as a side effect of OUR
+    failure — trading one shared-checkout defect for a worse one. `git restore
+    --staged -- <path>` touches only the index entry for that path.
+
+    Best-effort and non-raising: this runs on an error path, and a rollback that
+    threw would replace the caller's real diagnosis with its own. Whatever it
+    could not undo is RETURNED as text so the caller prints it — silence here
+    would be the same defect one level down.
+    """
+    left: list[str] = []
+    try:
+        # Unstage first: if restoring the bytes fails we still want the index
+        # clean, because a staged path is the half that another session's
+        # `git commit` picks up.
+        git(repo, "restore", "--staged", "--", relpath)
+    except (GitError, OSError):
+        # `git restore` predates nothing we support, but a very old git or a
+        # path git no longer knows about can still refuse.
+        try:
+            git(repo, "reset", "--quiet", "HEAD", "--", relpath)
+        except (GitError, OSError):
+            left.append(f"still STAGED: {relpath}")
+    try:
+        if original is None:
+            doc.unlink(missing_ok=True)
+        else:
+            doc.write_bytes(original)
+    except OSError:
+        left.append(f"still MODIFIED: {relpath}")
+    if left:
+        # 🔴 EMIT ADVICE ONLY FOR THE HALF THAT ACTUALLY FAILED. The two halves
+        # fail independently, and printing both was measured to produce a message
+        # that CONTRADICTS what happened: with only the index half failing, it
+        # told the operator their content "was never committed … restore by hand"
+        # while the bytes had in fact been restored and the content WAS in HEAD.
+        # An operator who believes that hand-rewrites a doc they still have.
+        #
+        # 🔴 And do not name `restore --source=HEAD --worktree` in the worktree
+        # arm: it discards UNCOMMITTED local edits — exactly what `original`
+        # exists to preserve — and fails outright when the doc did not exist at
+        # HEAD. Advice printed on an already-degraded path must not be the thing
+        # that loses the work.
+        fixes: list[str] = []
+        if any(s.startswith("still STAGED") for s in left):
+            # 🔴 CONTRACT: the index arm is ONE bare command line, no comment
+            # lines. The worktree arm is comment lines in every wording it has
+            # had, so "no comment lines present" is how the test proves the
+            # worktree half was NOT advised — a check that survives rewording
+            # AND reindenting. Adding a comment here will fail that test; that
+            # is deliberate (a loud false failure beats a silent false pass),
+            # so move any explanation into the message body above instead.
+            fixes.append(f"    git -C {repo} restore --staged -- {relpath}")
+        if any(s.startswith("still MODIFIED") for s in left):
+            fixes.append(
+                f"    # the doc did not exist before this run — delete it:\n"
+                f"    rm -f -- {doc}"
+                if original is None
+                else
+                "    # its previous content is the bytes this process read, and "
+                "they are\n    # not necessarily in git. Run the unstage line "
+                "above FIRST — until you do,\n    # the index still holds THIS "
+                "run's merged text, so `git restore -- <path>`\n    # would "
+                "restore that and look like it worked. Only after unstaging,\n"                "    # and only if the doc was clean at HEAD, is it safe."
+            )
+        return (
+            "\n🔴 ROLLBACK INCOMPLETE — the commit did not happen, but this tree "
+            "was left changed: " + "; ".join(left) + "\n"
+            "  Fix it before doing anything else; in a shared checkout a staged "
+            "path is one `git commit` away from being swept into someone else's "
+            "commit.\n" + "\n".join(fixes)
+        )
+    # 🔴 Deliberately NOT "byte-identical": two measured exceptions. If the doc
+    # was STAGED-modified before the run, `restore --staged` resets its index
+    # entry to HEAD rather than to that staged content; and a `claudedocs/`
+    # directory this run created is not removed. Both are harmless, and neither
+    # is what the sentence would be claiming. A comment is a claim — say the
+    # thing that is true, which is the thing the caller actually needs.
+    return (
+        "\n(rolled back: the doc was restored and unstaged, so nothing from this "
+        "run is left staged or written — re-running is safe and will not append "
+        "the update twice.)"
+    )
 
 
 def uncommitted_paths(repo: Path) -> list[str]:
@@ -638,9 +1573,14 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_FAIL
 
     base_text = doc.read_text(encoding="utf-8") if doc.exists() else ""
-    merged_text = merge(base_text, update_text) if base_text else (
-        update_text.rstrip("\n") + "\n"
-    )
+    if base_text:
+        report = merge_report(base_text, update_text)
+    else:
+        # No base: the update simply becomes the doc. Nothing was replaced, so
+        # rule (f) has nothing to classify and rule (g) has no bucket to state —
+        # an empty report is the honest answer, not a missing one.
+        report = MergeReport(update_text.rstrip("\n") + "\n", (), ())
+    merged_text = report.text
 
     if _canon(merged_text) == _canon(base_text):
         print(
@@ -654,6 +1594,31 @@ def main(argv: list[str] | None = None) -> int:
     diff = unified(base_text, merged_text, relpath)
     print(f"doc: {relpath}")
     print(f"advanced: {args.advanced.strip()}")
+    # 🔴 BOTH BEFORE THE DIFF, and on the SAME stream. The diff is what the human
+    # is being asked to approve, so the classification of what it deletes has to
+    # arrive before it, not after several hundred lines of it. Neither line
+    # carries a `status=` token: `status=` is the machine-readable verdict and
+    # the skill's contract pins one per run.
+    if base_text:
+        print(buckets_line(report.buckets))
+    # 🔴 RULE (h) FIRST, above rule (f) and above the diff. It is the only one of
+    # the three that can invalidate the OTHER two: a wrong base makes the bucket
+    # line describe a merge nobody wanted and makes "nothing durable dropped"
+    # true of a document that is not the one being replaced. It runs even with no
+    # base at all — a doc absent HERE and present on the mainline is the same bug
+    # wearing its loudest disguise, every section arriving NEW.
+    wrong_base = wrong_base_report(
+        wrong_base_tells(base_text, update_text, report.buckets),
+        base_currency(repo, relpath),
+        relpath,
+        repo,
+        doc_shape(base_text),
+    )
+    if wrong_base:
+        print(wrong_base)
+    warning = dropped_durable_report(report.dropped)
+    if warning:
+        print(warning)
     print(diff, end="" if diff.endswith("\n") else "\n")
 
     if not args.confirm:
@@ -762,6 +1727,16 @@ def main(argv: list[str] | None = None) -> int:
             )
             return EXIT_BEHIND
 
+    # 🔴 A BLOCKED COMMIT IS NOT A NO-OP — capture enough to undo the write.
+    # MEASURED 2026-08-21: a PreToolUse hook enforcing "never commit in the
+    # primary clone" refused the commit below — correct behaviour — but the doc
+    # had already been written AND `git add`ed, so `status=failed` left a
+    # modified, STAGED file in a checkout shared with other sessions, where the
+    # next person's `git commit` sweeps it in. The caller then re-ran the tool to
+    # read the error and the merge appended the same block a SECOND time.
+    # `status=failed` reads as "nothing happened"; it must therefore BE that.
+    original: bytes | None = doc.read_bytes() if doc.exists() else None
+    committed = False
     try:
         doc.parent.mkdir(parents=True, exist_ok=True)
         doc.write_text(merged_text, encoding="utf-8")
@@ -770,9 +1745,17 @@ def main(argv: list[str] | None = None) -> int:
         # Path-limited on purpose: exactly one commit, carrying exactly the
         # diff that was shown, even if the caller had other work staged.
         git(repo, "commit", "-m", subject, "--", relpath)
+        committed = True
         sha = git(repo, "rev-parse", "HEAD").strip()
     except (GitError, OSError) as exc:
-        print(f"status=failed\n{exc}", file=sys.stderr)
+        # Only roll back what did NOT happen. If the commit landed and only
+        # `rev-parse` failed, the tree is already correct and restoring the file
+        # would DISCARD a committed change — the opposite of the fix.
+        note = (
+            COMMIT_LANDED_NOTE if committed
+            else _undo_write(repo, doc, relpath, original)
+        )
+        print(f"status=failed\n{exc}{note}", file=sys.stderr)
         return EXIT_FAIL
 
     if args.push:

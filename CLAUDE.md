@@ -9,7 +9,7 @@ Personal dev-environment config (zsh, tmux, neovim, i3, scripts) for the workben
 - **Canonical env handles are pre-exported in `.zshenv`** (via `envExtra`) so you don't re-`cd`/`export` on every call — non-interactive `zsh -c` doesn't persist state. Use them directly (each is existence-guarded, absent on hosts without that checkout): repo roots `$DEVRC` `$HOMELAB` `$DATAPACKET` `$CIVITAI` (e.g. `git -C $DATAPACKET status`); kubeconfigs `$KC_HOMELAB` `$KC_WORKBENCH` `$KC_DPPROD` `$KC_NEBULA` (e.g. `KUBECONFIG=$KC_DPPROD kubectl get pods`). There is deliberately **no default `KUBECONFIG`** — pick a cluster per command so a bare `kubectl` can't hit prod.
 
 ## Applying changes
-- **Deploy to BOTH hosts (after merge):** `scripts/ship.sh` — converges workbench + laptop to `origin/main` (fetch → `merge --ff-only` → `home-manager switch` → verify HEAD==origin/main) in one idempotent call. **It never stashes** (the stash is repo-GLOBAL and would reach into other worktrees — see RULES.md "Git Workflow"); a host it cannot fast-forward, or one with a conflicted/mid-merge tree, is **skipped and left exactly as found**, with the blocking files named. Use this instead of hand-running the per-host dance; `--no-laptop`/`--no-local` to scope. Covers home-manager only (not `sudo nixos-rebuild`).
+- **Deploy to BOTH hosts (after merge):** `scripts/ship.sh` — converges workbench + laptop to `origin/main` (fetch → `merge --ff-only` → `home-manager switch` → verify HEAD==origin/main) in one idempotent call. **It never stashes** (the stash is repo-GLOBAL and would reach into other worktrees — see RULES.md "Git Workflow"); a host it cannot fast-forward, or one with a conflicted/mid-merge tree, is **skipped and left exactly as found**, with the blocking files named. Use this instead of hand-running the per-host dance; `--no-laptop`/`--no-local` to scope. Covers home-manager only (not `sudo nixos-rebuild`). 🔴 **Its verdict is now a claim about the two hosts agreeing on ONE sha** (rc 19 when they don't — origin/main can move between the two legs' fetches, and every per-host check stays green while it does), and **a run that ships a change to `ship.sh` itself RE-EXECS the new copy** before the remote leg (rc 20 if it cannot), because the CONVERGE payload is expanded before the fast-forward. A one-host run says `cross-host agreement NOT COMPARED` rather than implying two.
 - **Apply config (single host):** `home-manager switch --flake ~/workspace/devrc --impure` (allowlisted). This is how you validate a Nix edit end-to-end.
 - 🔴 **Merged ≠ deployed — `git pull` changes NOTHING that nix manages.** Every `home.file` target (`~/.claude/{RULES.md,skills/}`, `~/.config/browser-bridge/server.py`, `~/.local/share/browser-bridge-ext/`, the hooks) only changes on a **`home-manager switch`**. That git-immunity is deliberate — a concurrent session's `git checkout` cannot swap deployed code out mid-verification — and is exactly what makes it easy to trip on. The full sequence is **merge → pull → `switch` → restart the consumer** (`systemctl --user restart <svc>`, or a FULL Brave restart for an extension); skip the last two and you will verify the OLD artifact. Whether a given path is live-or-stale is answered by `readlink -f` only (RULES.md → "Shell & Tooling Gotchas"), never by diffing it against the repo.
 - **Quick syntax check** before switching: `nix-instantiate --parse <file>.nix >/dev/null`.
@@ -115,7 +115,12 @@ there. Only what's specific to this repo, where a working tree is also a **deplo
 - `nix/` — home-manager modules (`programs/zsh`, tmux, nvim, i3, …). `flake.nix` at root.
 - `scripts/` — utility scripts (prefer extending these over re-typing inline bash / heredocs).
 - `claude/` — **global Claude Code config, managed declaratively**: `RULES.md` (+ `RULES-ARCHIVE.md`), `PRINCIPLES.md`, and **every skill under `claude/skills/<name>/SKILL.md`** (+ its `reference/`, which ships too). `nix/home.nix` symlinks these into `~/.claude/`, so both hosts stay in sync. **Edit them HERE + `home-manager switch`/`ship.sh` — NOT `~/.claude/*`** (read-only nix-store symlinks). 🔴 **`claude/commands/` NO LONGER EXISTS** — upstream merged custom commands into skills, so all 17 migrated to `claude/skills/` (a skill still gives you `/<name>`, and now also auto-fires on its description). **opencode commands are auto-generated** from these skills by `scripts/opencode/generate-commands.py` (nix derivation `opencodeCommands` in `nix/home.nix`), deployed to `~/.config/opencode/commands/`. This makes every skill show as `/<name>` in opencode's TUI autocomplete (source="command" with hints, instead of source="skill" with empty hints). Deliberate MUTABLE exceptions: the `browser` + `dl-router` skills (`mkOutOfStoreSymlink` onto `scripts/`, edits apply with no switch), `close-the-loop`'s `STATE.md`/`ARCHIVE.md` (sourced from `claudedocs/close-the-loop/` — the skill WRITES to them every run, so they must not be store symlinks), and `~/.claude/CLAUDE.md` (genuinely per-host, unreferenced by `home.nix`). New-host caveat: `home.file.force` does NOT clobber a pre-existing *foreign* `~/.claude/RULES.md` or `skills/*` — `rm` those once before the first switch. Also managed: `~/.claude/hooks/bash-guard.py` (from `scripts/claude-hooks/`; `dropStaleClaudeHooks` displaces a hand-placed regular file, `force` alone cannot).
-- 🔴 **The skill LISTING is a third always-on cost, and it fails SILENTLY.** Every skill's name + `description` (+ `when_to_use`) loads on **every session** under a budget of **1% of the context window** (per-entry cap 1,536 chars); on overflow Claude Code DROPS descriptions starting with the skills you invoke least — stripping the very trigger keywords that make a skill auto-fire, with no error. So a description is **routing surface, not documentation**: key use case first, then the literal phrases Zach says, then disambiguation from a sibling skill. Narrative goes in the body (0 until invoked). `/doctor` estimates the listing cost.
+- **`reference/` vs `flows/` inside a skill**: `reference/` holds durable FACTS you verify
+  against; `flows/` (sibling dir, same `cp -R` deploy, no nix change needed) holds PROCEDURES you
+  execute step by step. 🔴 A `flows/` file does **not** auto-fire the way a skill `description`
+  does — something must NAME it, so give each one a router (a SKILL.md table row, and where it
+  matters a hook that names the path in its message; see `clawgate/flows/task-authoring.md`).
+- 🔴 **The skill LISTING is a third always-on cost, and it fails SILENTLY.** Every skill's name + `description` (+ `when_to_use`) loads on **every session** under a budget of **1% of the context window** (per-entry cap 1,536 chars); on overflow Claude Code DROPS descriptions starting with the skills you invoke least — stripping the very trigger keywords that make a skill auto-fire, with no error. So a description is **routing surface, not documentation**: key use case first, then the literal phrases Zach says, then disambiguation from a sibling skill. Narrative goes in the body (0 until invoked). 🔴 **Measured 2026-08-23: the listing does NOT fit a 200k context and cannot be made to — it fits 1M.** The TOTAL is now ratcheted by `scripts/tests/test_skill_descriptions.py`, which owns the constants, the measurement, the break-even argument and the eviction playbook — **read them there, never restate them.** Any addition needs an eviction in the SAME commit; closing the remaining gap means retiring or merging skills, or disabling the cloudflare plugin (a quarter of the total, and not devrc's to edit). ⚠ `claude doctor` (the CLI) reports no listing cost; the interactive `/doctor` reportedly does — unverified.
 - `.zshrc`, `.tmux.conf` etc. are read by the nix modules — read with offset/limit, they're large.
 
 ### Subsystems — operate each via its SKILL, not from here
@@ -131,6 +136,7 @@ is preserved verbatim in `docs/LAYOUT.md` (not auto-loaded, and stale by design)
 | `scripts/initiatives/` | `initiatives` | durable cross-repo initiative ledger + viewer + router + assistant |
 | `scripts/mail-actions/` | `mailbox` | email-automation layer over the self-hosted inbox (**separate from activity telemetry**) |
 | `scripts/repo-cos/` | `repo-cos` | weekly repo "chief-of-staff" proposal digest + reply-driven exclusions |
+| `scripts/check-clickup-addressed/` | `check-clickup-addressed` | did the work on a ClickUp ticket actually happen — reads session transcripts for completion signals (migrated out of datapacket-talos 2026-08-22) |
 | `nix/i3/`, `nix/graphical.nix`, `scripts/bar-status-poll` | `bar` | i3 + i3status-rust bar, count blocks, dunst toasts |
 | `scripts/opencode/` | `opencode` | dispatch a task to the headless opencode agent (`opencode-dispatch`), + its config/agents/guard plugin |
 
@@ -142,23 +148,62 @@ Repo-level facts that are NOT in any skill — they live here on purpose:
 - **Two always-on docs have enforced byte ceilings**, because both load on every session: `scripts/browser-bridge/SKILL.md` (gated by `scripts/browser-bridge/tests/test_skill_size.py`) and `claude/RULES.md` (gated by `scripts/tests/test_rules_size.py`). Each test OWNS its constants and prints an eviction playbook on failure — **read the numbers there, never restate them.** Any addition needs an eviction in the SAME commit.
 - **Run the gate with `scripts/gate.sh`** (`--tier pytest|node|both`, `--set hermetic|all`). It sends the full output to a LOG FILE and prints only a bounded summary, so there is no reason to pipe it — and **its exit status is authoritative**. It also cross-checks that status against the runners' own `RESULT:` line and exits **90 = could-not-vouch** when they disagree, when a run printed no verdict, or when `panic: test timed out` appears. 90 is not "the tests failed"; it means read the log.
 - **The runners' verdict line carries their exit code** (`RESULT: FAIL (exit=1)`), emitted from one writer behind an EXIT trap, so it survives a pipe and a killed run still says so. Historically the status was destroyed by `… | tail; echo "rc=$?"` — four agents reported `exit 0` over `RESULT: FAIL` on 2026-08-11 — which is why counting `PASSED`/`FAILED` lines used to be mandatory. Still a fine cross-check; no longer the only thing you can trust.
-- 🔴 **NO AUTOMATED GATE IS RUNNING — the gate is YOU, by hand.** <!-- merge-gate: none -->
-  Nothing blocks a devrc merge today: there is no `.github/workflows`, `main` has no branch
-  protection or rulesets, no Tekton trigger names devrc, and `gh pr view <n> --json
-  statusCheckRollup` returns **0 checks** on every PR, merged ones included. This line used to
-  read `CI gates both suites`, which was false — the exact kind of claim nobody re-checks: an
-  agent reads it, believes the merge is protected, and skips the run.
-  🔴 **But a gate SHIPS IN THIS REPO, uninstalled** — `githooks/` (`install.sh`, `pre-push`,
-  `tests-on-push.sh`) is a real blocking pre-push test gate, and `scripts/run-tests.sh` treats
-  it as a first-class consumer. It is simply not installed: `git config --get core.hooksPath`
-  is what answers that, **never** `ls .git/hooks` — githooks installs by pointing
-  `core.hooksPath` elsewhere, so `.git/hooks` stays sample-only whether or not the gate is
-  live. ⚠ **Check for a REPO-LOCAL `core.hooksPath` before installing**: `install.sh` sets the
-  key `--global`, and a local one wins. Measured 2026-08-20: the workbench's `devrc` *and*
-  `homelab-talos` clones both carry `core.hooksPath` pointing back at their own `.git/hooks`
-  while the laptop's `devrc` carries none — so it is per-clone environmental (it correlates
-  with agent-worktree creation), NOT a devrc setting, and it is not safe to assume either way.
-  `git config --local --get core.hooksPath` per clone is the only answer.
+- 🔴 **A MERGE IS NOW BLOCKED BY `tekton/devrc-nodetests`. `devrc-pytests` is NOT.** <!-- merge-gate: other -->
+  Since 2026-08-23 `required_status_checks.contexts = ["tekton/devrc-nodetests"]` on `main`,
+  with `enforce_admins: true`. Verified behaviourally, not from the setting: PRs with
+  nodetests `ERROR` or `PENDING` read `mergeStateStatus=BLOCKED`, green ones read `CLEAN`,
+  and a PR with pytests red but nodetests green reads `UNSTABLE` — mergeable. That split is
+  deliberate — and nodetests collects `*.test.mjs` ONLY, so a Python-only PR cannot fail
+  the required check at all. There is still no `.github/workflows`, so
+  the marker stays `other`.
+  🔴 **`enforce_admins: true` is LIVE now** — it protected nothing while nothing was
+  required. If Tekton is down or wedged, NOTHING merges and there is no admin override.
+  The escape hatch, deliberately written down because you will want it under pressure:
+  `gh api -X DELETE /repos/innovation-upstream/devrc/branches/main/protection/required_status_checks`
+  ⚠ **`strict` is FALSE on purpose.** `strict: true` would force every PR to be up to date
+  with `main` before merging — correct in principle, and unworkable here: `main` moved 11+
+  times in one session and each move would re-queue a ~20-minute gate for every open PR.
+  **So a green check is a claim about the PR's BRANCH, not about the tree the merge
+  creates.** Gating the merged tree is still yours to do by hand.
+  🔴 **A brand-new check is not an instrument until it has passed ONCE.** `devrc-ci` was
+  red on its first **5 of 5** runs — every one on the same test
+  (`test_timeout_reaps_the_whole_process_group`), in a file none of those changes touched:
+  the reap check asked `os.kill(pid, 0)`, which succeeds on a **zombie**, and a CI step
+  container's PID 1 does not reap. Fixed in #722; first green run was `devrc-ci-hkgtf`.
+  Read a red check's step log before believing its verdict — the SUMMARY counts nearly
+  matched a local run there and pointed at a different test entirely.
+  🔴 This line used to read `CI gates both suites` and later `NO AUTOMATED GATE IS
+  RUNNING`. Both were false at some point, in **opposite** directions — the exact kind of
+  claim nobody re-checks: an agent reads it, believes the merge is protected (or that no
+  check exists), and skips the run either way.
+  🔴 **`error` is not `failure`.** A check posted as `error` with `COULD NOT RUN: <leg>`
+  means the gate stopped before that leg reported — a broken gate, not a bad change. Do not
+  debug your diff against it.
+  🔴 **Before making a check REQUIRED, know this failure mode:** when a run hits
+  `timeouts.tasks` the `finally` report task never runs, so **nothing is posted and the PR's
+  checks stay `pending` forever** — measured on `devrc-ci-nnt6f` and `devrc-ci-9p6mf`,
+  `childReferences` `[notify, gate]` only, still `pending` hours later. A required check in
+  that state is unsatisfiable and no re-run clears it; only a fresh push does.
+  🔴 **But a gate SHIPS IN THIS REPO, and whether it is INSTALLED is not a fact this file can
+  state** — `githooks/` (`install.sh`, `pre-push`, `tests-on-push.sh`) is a real blocking
+  pre-push test gate, and `scripts/run-tests.sh` treats it as a first-class consumer.
+  `git config --get core.hooksPath` is what answers that, **never** `ls .git/hooks` — githooks
+  installs by pointing `core.hooksPath` elsewhere, so `.git/hooks` stays sample-only whether or
+  not the gate is live. 🔴 **The value is VOLATILE, not merely per-clone — re-measure at the
+  moment you act, never earlier in the session.** This line read "uninstalled" until
+  2026-08-21, when a push from a worktree hung ~2 min and came back with the branch REWRITTEN:
+  the commit gone, the index wrecked, and `autocommit: N change(s) in the some-scope
+  analyze-service index` fixture commits on the branch (reproduced twice; task #322). At that
+  moment `core.hooksPath` was set **repo-LOCALLY** to `<repo>/githooks`. Hours later, same
+  session, it was unset everywhere with no action by anyone here — and `install.sh` sets the
+  key `--global`, so the `--local` value came from something else. **Neither "installed" nor
+  "uninstalled" is safe to carry in prose.** 🔴 **A pre-push gate that runs the suite IN the
+  worktree can corrupt the branch it is pushing** — see #322 before using `--no-verify` to get
+  past it, and re-check the branch afterwards. ⚠ **Check for a REPO-LOCAL `core.hooksPath` before installing**: `install.sh` sets the
+  key `--global`, and a local one wins — observed pointing at `.git/hooks` (08-20, workbench
+  `devrc` + `homelab-talos`; laptop none) and at `githooks/` (08-21). It correlates with
+  agent-worktree creation, is NOT a devrc setting, and `git config --local --get
+  core.hooksPath` per clone is the only answer.
   **Until then: run the gate yourself before you merge, and say which command you ran.**
   `nix build .#checks.x86_64-linux.pytests` / `.#checks.x86_64-linux.nodetests` (or
   `scripts/gate.sh`) are authoritative — they assert collected-test FLOORS and parse structured
@@ -170,15 +215,21 @@ Repo-level facts that are NOT in any skill — they live here on purpose:
   the repo. **Reword this prose freely — but keep a sentence on the marker's line and do not
   add a second marker anywhere** (the test requires exactly one, and that its line still says
   something to a human: an HTML comment renders as nothing, so a lone marker would leave you
-  reading no warning at all). Change the marker only when a workflow triggering on
-  **`pull_request`, `pull_request_target` or `merge_group`** appears or disappears — a `push`,
-  tag, `schedule` or `workflow_dispatch` workflow runs after or outside the merge, gates
-  nothing, and must leave it at `none`. Values: `none`, `github-actions`, or **`other`** if
-  something this test cannot see starts gating (Tekton, an installed `githooks/` pre-push
-  gate) — `other` exists so the test can never force you to write a false `none`. It pins that
-  one thing: whether such a run actually BLOCKS a merge is branch protection, which — along
-  with Tekton and git hooks — is named above but NOT machine-checked from here. Re-verify
-  those by hand rather than trusting this paragraph's age.
+  reading no warning at all). Change it only when something that runs AT MERGE TIME appears
+  or disappears: a GitHub Actions workflow triggering on **`pull_request`,
+  `pull_request_target` or `merge_group`**, or a non-Actions equivalent. A `push`, tag,
+  `schedule` or `workflow_dispatch` workflow runs after or outside the merge and gates
+  nothing. Values: `none`, `github-actions`, or **`other`** for anything this test cannot
+  see (Tekton — which is why it reads `other` today — or an installed `githooks/` pre-push
+  gate); `other` exists so the test can never force you to write a false `none`.
+  🔴 **The marker records that something RUNS, never that it BLOCKS.** Those are different
+  facts, and the marker cannot tell them apart: it read `other` both while nothing blocked
+  (2026-08-22) and now that `tekton/devrc-nodetests` is required (2026-08-23) — the value
+  did not move, because what changed was branch protection, which this test cannot see.
+  So `other` never licenses "the merge is protected". Whether a run blocks is branch
+  protection, which — along with Tekton and git hooks — is named above but NOT
+  machine-checked from here. Re-verify by hand rather than trusting this paragraph's age:
+  `gh api /repos/innovation-upstream/devrc/branches/main/protection --jq .required_status_checks`
 - 🔴 **There is no hand-written test TOTAL any more.** `run-tests.sh` carries a **per-target** floor table (`TARGET_FLOORS`, pinned two-way against the target list) and derives the global floor as their sum. The old single `MIN_TESTS` literal was base-dependent and took **eleven values across eight PRs in one day**; `rerere` replayed a resolution from a different merge and silently wrote a four-way total onto a two-way tree. A floor is now a function of the current measurement — `m - min(50, max(1, m/20))` — and the gate PRINTS the exact replacement number when one drifts. Resolve a conflict here by re-running the gate and copying what it says, never by arithmetic on the two sides.
 - 🔴 **This repo is PUBLIC.** Never commit a real media-library path, directory name, filename, route log, or a real third-party hostname used as an example. **Nor CAPTURED TEXT — anyone's message bodies, prompts, transcripts or chat content, or a model's summaries of them — however it arrives** (an eval capture, a fixture, a debug dump). A test needs the SHAPE; regenerate it synthetic. Gated for JSON/JSONL/JSONC by `scripts/tests/test_no_captured_text.py` and for `.html`/`.txt` by `scripts/tests/test_no_captured_markup.py`; each owns its ledgers, thresholds, pinned allowlist and blind spots — read them there, never restate them. 🔴 All four content gates (these two plus the IP and hostname ones) read `git ls-files` and are **blind to git history** — see `SECRETS.md` → "Dead credentials in reachable history" before treating a green run as "the repo is clean".
 

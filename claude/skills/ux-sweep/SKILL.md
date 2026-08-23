@@ -1,6 +1,6 @@
 ---
 name: ux-sweep
-description: "One-off first-impression UX sweep of ANY app or flow: a subagent clicks through it with Playwright, screenshots every view at 5 breakpoints, and judges it as a non-technical, easily-deterred user would. Use to sanity-check a UI before shipping or after a change, or for \"click through X and evaluate the UX\". Re-runnable naida/vetr harnesses -> `ux-audit-loops`."
+description: "One-off first-impression UX sweep of ANY app or flow, judged as a non-technical user would. Use for \"click through X and evaluate the UX\", or sanity-checking a UI before shipping. Re-runnable naida/vetr harnesses -> `ux-audit-loops`."
 argument-hint: "<app/flow> [url] — e.g. 'the vet signup and onboarding flow', 'the admin dashboard http://localhost:3000'"
 allowed-tools: Bash, Read, Agent
 ---

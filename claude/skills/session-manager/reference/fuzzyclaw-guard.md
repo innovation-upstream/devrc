@@ -99,3 +99,20 @@ integers are **gone** — a deliberate break in the loud direction, since keepin
 have left every reader on the mixed number while the fix sat in keys they never learned
 about. `summary["status"]["idle"]["total"]` is the same number and you have to type `total`
 to get it. All four buckets split, not just `idle`.
+
+## Why it was switched off — the measurement, moved out of the SKILL body
+
+_Moved verbatim out of `SKILL.md` on 2026-08-21, when the body was cut from 23,233 B. The core keeps every load-bearing claim below in compressed form; this is the wording it was cut from, and the evidence behind it._
+
+## fuzzyclaw is OFF by default
+
+Measured 2026-08-12: **29 live of 401 files, 363 stale, 9 slot-mismatched — and every one of
+the 29 live rows read `paused`**, including a window demonstrably running an agent. 29 table
+rows, zero contribution, from a source `CLAUDE.md` marks UNTRUSTED. Opt in with
+`--fuzzyclaw`; `--no-fuzzyclaw` still works and now names the default. Off, every count is
+`null` rather than `0`.
+
+The intersection guard is unchanged and still runs when you opt in — a task file survives
+only when its `window_id` is live **and** that live window's real `(session, index)` equals
+the one the file recorded. Why that relationship (not mere existence) is the guard, what the
+slot-conflict drop does and does not still catch, and the field ledger: this file, above.

@@ -33,6 +33,7 @@ WHAT EACH TEST HERE IS (labelled, because "it passes" is not a category):
         hand-maintained lists. Nothing made those agree. This fails when the
         sets GROW or SHRINK on either side.
 """
+import os
 import re
 import shutil
 import subprocess
@@ -48,12 +49,24 @@ CONFTEST = HOOK_TESTS_DIR / "conftest.py"
 
 
 def _pytest(*args, cwd=None):
+    # 🔴 `scripts/` ON PYTHONPATH, EXPLICITLY. Several tests below `shutil.copy`
+    # CONFTEST into a tmp dir, and that conftest is a second entry point for
+    # GUARD 9 — it imports `testlib.gitenv_plugin`. In the real tree it finds
+    # `scripts/` by walking up from its own location; a COPY has nothing above
+    # it, so the copying harness has to supply what the location supplied.
+    # Without this the copy tests are GREEN under `run-tests.sh` (which exports
+    # PYTHONPATH) and RED under a bare `pytest scripts/tests` — a suite green in
+    # one tier and broken in the other, which claude/RULES.md rates as moving
+    # the bug rather than removing it. Measured, both tiers, before fixing it.
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(REPO_ROOT / "scripts") + os.pathsep + env.get("PYTHONPATH", "")
     return subprocess.run(
         [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", *args],
         cwd=str(cwd or REPO_ROOT),
         capture_output=True,
         text=True,
         timeout=600,
+        env=env,
     )
 
 
