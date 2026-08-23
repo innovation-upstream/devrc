@@ -390,8 +390,9 @@ ARCHIVE_MD = REPO_ROOT / "claude" / "RULES-ARCHIVE.md"
 # two the deleted bullet named, so no scope was lost.
 #
 # 🔴 THE BUMP WAS +900 AND HAD TO BECOME +1,100 WITHIN THE SAME PR, WHICH IS
-# ITSELF THE FINDING. Every slack figure in this entry is FLOOR-relative.
-# +900 left 186 B. A blind adversarial audit then
+# ITSELF THE FINDING. Slack figures in this entry are FLOOR-relative unless
+# the sentence says otherwise -- and one below does, so read the label, not
+# this blanket. +900 left 186 B. A blind adversarial audit then
 # found three scope losses in the consolidation (below), and restoring them
 # cost 130 B -- taking slack to 56 B (FLOOR-relative), i.e. the sub-one-bullet
 # slack mistake the UNDATED 2026-08-15 block (`d8ffb466`) diagnosed at 32 B,

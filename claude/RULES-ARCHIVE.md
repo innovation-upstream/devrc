@@ -1340,9 +1340,14 @@ title is "the deny message called a CONVENTION 'structural'").**
   uses — **deliberately allows every status including `complete`** (`internal/api/notes.go`:
   *"A hook-token producer is trusted, so ALL statuses are allowed here INCLUDING `complete`"*;
   `taskstatus.go` says the same: *"the in-devpod agent route enforces it while the machine route
-  deliberately does not"*). ⚠ Those are the two routes that matter here, **not the whole set** —
-  seven server-side paths can set a status and only the two agent-token ones are gated (the
-  operator route may set `complete` too, deliberately). Enumerate them before quoting this.
+  deliberately does not"*). 🔴 **Those are the two routes that matter here, NOT the whole set, and do not quote a
+  COUNT for the rest** — three drafts of this sentence stated one and all three were wrong. What
+  is durable: `notes.SetStatus` is the single writer; exactly **two** surfaces gate on
+  `AllowedForAgent` and both are the in-devpod AGENT tool/route (not "agent-token" — the operator
+  route is agent-token-authed and is NOT gated); and **several** other paths may set `complete`
+  deliberately, including the hook-token machine route, the operator route and its tool, and the
+  losing side of `POST /tasks/merge`. Enumerate from `SetStatus`'s call sites at the moment you
+  need it; any number written here goes stale and has.
 - **Convention, not enforced SERVER-side:** the AUTHOR-SPECIFIED vs DERIVED split and the
   freeze-at-first-read exist only in the skill's prose, read by the agent about itself — i.e.
   self-assessed, the very property this was cited as structurally solving. The string "acceptance
