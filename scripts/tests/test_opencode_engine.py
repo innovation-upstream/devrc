@@ -136,7 +136,10 @@ TOOLS_NIX = ROOT / "nix" / "pkgs" / "tools" / "default.nix"
 #   * the DEPRECATED-key list — a config-SCHEMA claim about keys this repo does
 #     not set, which the resolved dumps cannot see.
 #   * the k8s "index 74 after all 30 global rules" incident record, whose counts
-#     describe a tree that no longer exists (65 global bash rules today), so no
+#     describe a tree that no longer exists (66 global bash rules today — it was
+#     65 until `*rm --recursive*` was added alongside the `*rm -r*` narrowing;
+#     this is a PRESENT-TENSE count, so re-derive it when you change the block,
+#     do not carry it), so no
 #     fresh measurement could confirm that sentence. The STRUCTURAL claim under
 #     it — agent rules are appended AFTER the whole global block — IS re-derived,
 #     by the engine-vs-model conformance tests below.

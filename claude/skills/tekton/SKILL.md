@@ -68,6 +68,26 @@ debugging, changing or copying a specific pipeline.
    live object — `kubectl -n tekton-ci get task gitops-validate -o jsonpath='{range
    .spec.steps[*]}{.name}{"\n"}{end}'` — and then watch the **first run after** the reconcile.
    A green check on the PR that adds a leg is not evidence about the leg.
+8. 🔴 **A pipeline-level timeout SKIPS `finally` — so a timed-out run posts NOTHING and the PR
+   sits on `pending` forever.** Put the limit on the **PipelineTask** (`spec.tasks[].timeout`),
+   never on `timeouts.tasks`/`timeouts.pipeline`. Measured three ways on v1.12.0 (a `sleep 300`
+   task + a `finally` echoing a marker): `timeouts.tasks: 40s` → `PipelineRunTimeout`,
+   children `[slow]`, **reporter TaskRun never CREATED**; `timeouts.pipeline: 40s` → identical;
+   task-level `timeout: 40s` → `Failed`, children `[slow,reporter]`, **finally RAN**. The
+   reserved `timeouts.finally` is **not honoured** on the budget-expiry path — reserving it
+   looks like protection and is not. Across 447 retained PipelineRuns: **25 timeouts, 0 ran
+   their report.** ⚠ **Still unfixed on `gitops-validate`, `auditloop`, `naida`, `remix` and
+   `clawgate-ci`** — devrc alone was fixed (homelab-infra #385). `clawgate-ci` first: busiest
+   pipeline on the cluster. 🔴 Bound EVERY task, not just the slow one — the task deadline is
+   `taskStart + timeout` while the budget is `runStart + tasks`, so an unbounded early task
+   (devrc's `notify` inherited the cluster's 1h default) lets them cross and re-opens this.
+9. ⚠ **Gotcha 6 is scoped to `homelab-infra`, not to Tekton.** `innovation-upstream/devrc` is a
+   DIFFERENT repo on a plan where protection works, and since 2026-08-23 it requires
+   `tekton/devrc-nodetests` — verified behaviourally: nodetests `ERROR`/`PENDING` ⇒
+   `mergeStateStatus=BLOCKED`, `SUCCESS` ⇒ `CLEAN`, pytests red + nodetests green ⇒ `UNSTABLE`.
+   So on devrc a Tekton check **is** a gate. 🔴 `enforce_admins: true` there means a wedged
+   Tekton blocks everyone with no override; the escape hatch is
+   `gh api -X DELETE /repos/innovation-upstream/devrc/branches/main/protection/required_status_checks`.
 
 ## What / where
 
