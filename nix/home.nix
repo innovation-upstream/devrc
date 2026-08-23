@@ -237,6 +237,7 @@ in
           # process. Lead the label with "feedback" and add those three terms.
           { trigger = ":acq"; replace = "dispatch subagent to process feedback\nask clarifying questions and recommend improvements and anything useful to include before dispatching (include complete test coverage)"; label = "Process feedback: dispatch subagent + ask clarifying questions"; search_terms = ["feedback" "dispatch" "process" "ask" "clarify" "clarifying" "questions" "elicit" "scope" "include"]; }
           { trigger = ":alo"; replace = "anything left outstanding from this thread?"; label = "Anything left outstanding?"; search_terms = ["anything" "left" "outstanding" "loose" ]; }
+          { trigger = ":roo"; replace = "reflect on objectives specified this session and determine if fully addressed and validated"; label = "reflect on objectives specified this session and determine if fully addressed and validated"; search_terms = ["reflect" "objectives" "addressed" ]; }
           { trigger = ":kickoff"; replace = "give me the kickoff message to copy paste to next session"; label = "Kickoff message for next session"; search_terms = ["kickoff" "kick off" "next session" "copy paste" "handoff" "message"]; }
           # Added 2026-08-05 via /espanso-audit — both are WHOLE-STANDALONE-MESSAGE
           # shaped, the one shape that has stuck (:eos 72 fires, :kickoff 38); every
@@ -1150,6 +1151,28 @@ in
   home.file.".claude/hooks/agent_ledger.py" = {
     source = ../scripts/lib/agent_ledger.py;
   };
+  # 🔴 THE BACKGROUNDED-COMMAND CAPTURE LOG — instrumentation for ClickUp
+  # 868ktvqf9, where a unit run that exits non-zero is announced as "exit code 0"
+  # and the run's output file is 0 bytes at the moment the notification arrives.
+  # Both independent things an investigator would check report green over a red
+  # run, and the ONE artifact that discriminates between the live hypotheses —
+  # the VERBATIM command string that was backgrounded — is kept nowhere the
+  # investigator can reach afterwards. This records it.
+  #
+  # It never blocks, warns or rewrites anything; it appends a line and returns 0.
+  # `bg_command_capture.py --report` is the read that puts the captured command
+  # next to the exit code the harness announced for it.
+  #
+  # 🔴 BOTH files are NEW, and the hook imports the library as a SIBLING in
+  # ~/.claude/hooks/ — deploying one without the other is a green switch and an
+  # inert hook (the #452 shape). Both must be `git add`ed or the flake silently
+  # omits them, and the switch still succeeds with the hook absent.
+  home.file.".claude/hooks/bg-command-capture.py" = {
+    source = ../scripts/claude-hooks/bg-command-capture.py;
+  };
+  home.file.".claude/hooks/bg_command_capture.py" = {
+    source = ../scripts/lib/bg_command_capture.py;
+  };
   # 🔴 THE CLAWGATE WRITE-BACK GUARD — the deterministic replacement for a 🔴 prose
   # rule that lost 2/2. Tasks #193 and #194 were both picked up, the work shipped as
   # PRs, and both cards stayed `open` with ZERO comments; both were re-dispatched and
@@ -1169,6 +1192,11 @@ in
   # is followed, including by a subagent or a devpod agent. Escalates block, block,
   # notice, silence per task per session, and NEVER blocks when the board could not
   # be reached (it says so instead). Every error path exits 0.
+  #
+  # Its block message names `claude/skills/clawgate/flows/task-pickup.md`, the flow
+  # the ritual moved into — same reason as the interview gate below: a file under a
+  # skill's flows/ dir does not auto-fire the way a skill DESCRIPTION does, so the
+  # hook is the router as well as the enforcer.
   #
   # 🔴 A NEW file, so it must be `git add`ed or the flake silently omits it and the
   # switch still succeeds with the hook absent — this repo's standing trap.
@@ -1210,6 +1238,62 @@ in
   # OPEN — PR #609).
   home.file.".claude/hooks/clawgate-task-interview-guard.py" = {
     source = ../scripts/claude-hooks/clawgate-task-interview-guard.py;
+  };
+  # 🔴 THE BASE-CLONE STALENESS HOOK — the only hook here that fixes what the
+  # agent READS rather than what it does.
+  #
+  # Why it exists: when all work happens in throwaway worktrees + PRs, a base
+  # clone is never written to and silently falls behind. That is harmless for
+  # WRITES — `git worktree add <path> origin/<branch>` resolves the REMOTE
+  # tracking ref, so a clone 700 commits behind still yields a current worktree —
+  # but it is dangerous for READS: `CLAUDE.md` and `.claude/skills/**` load into
+  # agent context FROM THE WORKING TREE, so a stale clone serves stale,
+  # authoritative-looking instructions with nothing on screen to indicate it.
+  # Measured 2026-08-21 in the datapacket-talos hub: every dispatch-hub clone was
+  # behind (talos 33 commits, civitai-orchestration 53, civitai 18), and one of
+  # them served a skill whose retention figure had been corrected upstream five
+  # days earlier — a whole session was framed on the corrected-away claim.
+  #
+  # On SessionStart it fetches the cwd repo's upstream and `git checkout
+  # <upstream> --`s ONLY those two paths. It does NOT move HEAD (that would need
+  # a clean tree and would move the branch), never overwrites content that is
+  # absent from the upstream branch's recent history, and reports what it
+  # touched. `BASE_CLONE_NO_REFRESH=1` makes it report-only.
+  #
+  # Registration in ~/.claude/settings.json stays PER-HOST and unmanaged, exactly
+  # like bash-guard.py above: register-nudge-hook.py deliberately does NOT own
+  # it. That is structural, not an omission — the registrar's managed-command
+  # surface recognises `<python> <path>.py` commands only, and its whole rewrite
+  # half exists to normalise a python INTERPRETER token to an absolute /nix/store
+  # path. This hook is bash, so there is no interpreter hazard to fix and nothing
+  # for the registrar to match; teaching that shared component a second
+  # interpreter would widen a load-bearing surface for no benefit. Consequence,
+  # the same known gap bash-guard.py has: on any host where the entry has not
+  # been added by hand, the switch delivers the script and the hook is INERT.
+  #
+  # 🔴 A NEW file, so it must be `git add`ed or the flake silently omits it and
+  # the switch still succeeds with the hook absent — this repo's standing trap
+  # (the #452 shape, called out twice above).
+  #
+  # No `force = true` and no `dropStaleClaudeHooks` entry, for the reason the
+  # register-nudge-hook.py block below records verbatim: that treatment exists
+  # only to displace a PRE-EXISTING hand-placed regular file, and this path has
+  # never been hand-placed. MEASURED 2026-08-22 before the first switch that
+  # deploys it — `ls -la ~/.claude/hooks/` shows 14 entries on this host, ALL
+  # /nix/store symlinks, no regular files, and no base-clone-staleness.sh among
+  # them. The live copy being replaced lives in ~/.claude/local-hooks/, a
+  # different directory this attribute does not write to. If a foreign file ever
+  # does appear at this path the switch fails LOUDLY ("would be clobbered")
+  # rather than silently leaving it unmanaged — add it to dropStaleClaudeHooks
+  # then.
+  #
+  # Its regression suite is `scripts/tests/test_base_clone_staleness.sh`, run by
+  # `scripts/run-tests.sh` as a SHELL_TESTS target (24 assertions / 8 cases,
+  # offline synthetic fixtures). Every case there is a defect that actually
+  # shipped; run it before changing this script.
+  home.file.".claude/hooks/base-clone-staleness.sh" = {
+    source = ../scripts/claude-hooks/base-clone-staleness.sh;
+    executable = true;
   };
 
   # 🔴 THE REGISTRAR ITSELF — the hook that makes the hooks above DO anything.
@@ -3072,6 +3156,170 @@ in
       OnCalendar = "hourly";
       Persistent = true;
       RandomizedDelaySec = 600;
+    };
+    Install = {
+      WantedBy = [ "timers.target" ];
+    };
+  };
+
+  # Encrypted OFF-MACHINE backup for the /analyze-service index store.
+  #
+  # WHAT THIS CLOSES, AND WHY THE AUTOCOMMIT ABOVE DOES NOT CLOSE IT. The
+  # committer gives every scope local git history. That defends against exactly
+  # one thing: an agent's Write clobbering a file a previous run had already
+  # committed. Measured on the workbench 2026-08-21: 10 scope repos, 1-65
+  # commits each, every one of them `remote = none`, and not one byte of any of
+  # them anywhere off this disk. The history lives INSIDE the thing a disk
+  # failure or an `rm -rf` of the store root destroys, so until now the store
+  # had a versioning story and no recovery story at all. The content is not
+  # re-derivable — it records gotchas, retracted theories and measurements that
+  # were true at a moment.
+  #
+  # The laptop's store is DIVERGENT CONTENT, not a copy. It is a second thing to
+  # lose, which is why this is NOT gated on serverMode (see below).
+  #
+  # 🔴 A SIBLING UNIT, NOT AN EXTENSION OF THE COMMITTER. The obvious move is to
+  # bolt an upload onto analyze-service-index-commit, and it is the wrong one.
+  # That unit's containment — `PrivateNetwork = true`, `InaccessiblePaths` on
+  # /dev/shm, both bind lists frozen at exactly one entry — IS its
+  # no-exfiltration control, arrived at over several measured rounds after three
+  # earlier attempts to make exfiltration merely DETECTABLE were each evaded a
+  # new way. Backing up needs the network by definition. Giving that unit a
+  # network is not a small edit to it; it is deleting the property it was built
+  # to have, and it would do so for a job that runs on a completely different
+  # schedule. Two units, two threat models, two failure signals.
+  #
+  # DAILY, not hourly. The committer is hourly because its cost is ~200 ms of
+  # local git and the window it narrows is the same-day write-then-clobber. This
+  # one uploads full bundles of every scope over a port-forward: the window it
+  # narrows is "the disk died", which is not a per-hour risk, and 24 full-store
+  # uploads a day would buy nothing over one. Persistent=true catches up a
+  # missed run; RandomizedDelaySec keeps it off a predictable boundary and off
+  # the same instant as the 06:00 mail archiver.
+  #
+  # 🔴 DELIBERATELY NOT GATED ON serverMode, unlike mail-actions-archive which
+  # it otherwise resembles. That gate exists because those jobs need a server
+  # role. This one needs the homelab kubeconfig — which the laptop HAS, over
+  # nebula — and gating it out would leave the laptop's divergent, equally
+  # unrecoverable store with no off-machine copy while the workbench looked
+  # healthy. Same reasoning as the committer above, and the same silent gap.
+  # `backup.py` resolves the right kubeconfig per host itself; KUBECONFIG below
+  # is the workbench's and is simply the first candidate it checks.
+  #
+  # THE STORE IS MOUNTED READ-ONLY. `backup.py` runs no git subcommand outside
+  # its own allowlist (bundle/rev-list/remote/rev-parse) and the test suite
+  # checksums a synthetic store across a full run to prove byte identity — but
+  # BindReadOnlyPaths makes it a property of the namespace too, so a future bug
+  # in the producer cannot reach the only copy of the data it is protecting.
+  # Note the contrast with the committer, which needs the store WRITABLE.
+  #
+  # 🔴 ProtectHome=tmpfs, NOT read-only. THIS UNIT HAS A NETWORK — it is the one
+  # job here that can carry bytes off the box — so what it can READ is the whole
+  # containment question, and `read-only` answers a different one. `read-only`
+  # makes $HOME unwritable and leaves it fully READABLE, which means the bind
+  # list below confers no confinement whatsoever: it is a list of things already
+  # visible. MEASURED 2026-08-22 with `systemd-run --user`, same directive set
+  # otherwise, probing readability from inside the namespace:
+  #
+  #   ProtectHome=read-only  ~/.ssh/id_ed25519 READABLE, ~/.kube/config READABLE,
+  #                          `.secrets/` listed 6 entries
+  #   ProtectHome=tmpfs      ~/.ssh ABSENT, ~/.kube/config ABSENT,
+  #                          `.secrets/` listed 1 entry — the bound key file
+  #
+  # The comment here used to say the age identity was bound "as a single FILE,
+  # not its directory: `.secrets/` also holds cluster credentials this job has
+  # no business seeing." Under `read-only` that was false in the way that
+  # matters — the job could read all six, and the sentence would have led a
+  # maintainer to believe the narrow bind was doing work.
+  #
+  # NOTHING NEEDED BINDING BACK for the switch. The list below was already
+  # exactly what the job reads, which is why the leak was invisible: measured by
+  # running `backup.py --print-plan` (pure read, writes nothing) inside the
+  # tmpfs namespace — rc=0, identity resolved, all 10 scopes discovered and
+  # commit-counted. Both kubeconfigs are self-contained (`*-data`, no external
+  # cert paths) and `_minio.py` reads nothing from $HOME beyond KUBECONFIG.
+  #
+  # 🔴 The bind list is therefore load-bearing now and pinned as an EXACT LIST by
+  # test_the_backup_unit_pins_its_CONTAINMENT_directives_exactly. Appending an
+  # entry — or widening the age key to its directory — is the one-token hole the
+  # committer unit's comment describes, and it is worse here because this unit
+  # has a route off the machine.
+  #
+  # Python comes from a pinned `withPackages` env rather than the runtime
+  # `nix-shell -p` that run-archive.sh uses. nix-shell inside a hardened unit
+  # needs the daemon, a writable cache and a NIX_PATH; a built env needs none of
+  # those and cannot drift between the two hosts.
+  systemd.user.services.analyze-service-index-backup =
+    let
+      pyEnv = pkgs.python3.withPackages (p: [ p.minio ]);
+    in
+    {
+      Unit = {
+        Description = "Encrypted off-machine backup of the /analyze-service index store";
+        After = [ "network-online.target" ];
+        Wants = [ "network-online.target" ];
+        OnFailure = [ "notify-failure@%n.service" ];
+      };
+      Service = {
+        Type = "oneshot";
+        # Ten scopes of a few hundred KB each, bundled, encrypted and uploaded
+        # over a port-forward. Generous, but a hang must not pin the timer.
+        TimeoutStartSec = 900;
+        Environment = [
+          "PATH=${lib.makeBinPath [ pkgs.git pkgs.age pkgs.kubectl pkgs.coreutils ]}"
+          "HOME=%h"
+          "KUBECONFIG=%h/workspace/homelab-talos/homelab-kubeconfig"
+          # The identity this encrypts to: the operator's EXISTING SOPS age key,
+          # the same handle the homelab repos already use. No new key is minted —
+          # a backup encrypted to a key nobody keeps alive is a backup nobody can
+          # open. See SECRETS.md.
+          "SOPS_AGE_KEY_FILE=%h/workspace/homelab-talos/.secrets/age.key"
+          # 🔴 THE TWO HOSTS MUST NOT SHARE A KEY PREFIX. Both machines are
+          # hostname `nixos` and their stores are DIVERGENT content, so a shared
+          # prefix would make each host's retention pass evict the other's
+          # backups — turning the backup into a second way to lose the data.
+          #
+          # `isLaptop` alone is not enough to rely on here. It is a backlight
+          # probe, and the note at the top of this file records that it fails
+          # OPEN: a laptop with an ACPI-only backlight evaluates `false`, which
+          # would label BOTH machines `workbench` and produce exactly the
+          # collision above — silently, and only visible as backups going
+          # missing. So the readable name is joined to `%m`, systemd's machine
+          # ID, which is distinct per host by construction and needs no probe.
+          # The name is for a human reading the bucket; the machine ID is what
+          # actually guarantees separation.
+          "ASIB_HOST=${if isLaptop then "laptop" else "workbench"}-%m"
+        ];
+        ProtectSystem = "strict";
+        ProtectHome = "tmpfs";
+        # `-` on the store: a host that has never run /analyze-service must start
+        # and no-op cleanly, which is the one empty outcome backup.py treats as a
+        # success. No `-` on the script: it ships with the repo, so its absence is
+        # a real deployment fault and the mount failure names it (measured for the
+        # committer above; the same reasoning applies unchanged).
+        BindReadOnlyPaths = [
+          "%h/workspace/devrc/scripts"
+          "-%h/.claude/analyze-service-index"
+          "-%h/workspace/homelab-talos/.secrets/age.key"
+          "-%h/workspace/homelab-talos/homelab-kubeconfig"
+          "-%h/.kube/homelab-nebula.yaml"
+        ];
+        InaccessiblePaths = [ "/dev/shm" "/dev/mqueue" ];
+        PrivateTmp = true;
+        NoNewPrivileges = true;
+        ExecStart = "${pyEnv}/bin/python3 %h/workspace/devrc/scripts/analyze-service-index/backup.py";
+        X-Restart-Triggers = [ "${../scripts/analyze-service-index/backup.py}" ];
+      };
+    };
+
+  systemd.user.timers.analyze-service-index-backup = {
+    Unit = {
+      Description = "Daily timer for the /analyze-service index off-machine backup";
+    };
+    Timer = {
+      OnCalendar = "*-*-* 04:30:00";
+      Persistent = true;
+      RandomizedDelaySec = 1800;
     };
     Install = {
       WantedBy = [ "timers.target" ];

@@ -42,6 +42,7 @@ auto-fire — something must name it.
 | file | run it when |
 |---|---|
 | `task-authoring.md` | **CREATING a task** — pre-verify → interview → recommend → tags → confirm → create. 🔴 A PreToolUse hook DENIES a create with no `## Acceptance criteria`, or an unreadable body. Override `CLAWGATE_NO_INTERVIEW=1`. |
+| `task-pickup.md` | **PICKING UP a task** — "read and evaluate clawgate task N", then "local dispatch": read → evaluate → pre-start comment → `in_progress` → work → ONE completion comment → status. Carries the criteria detector, the ordering trap and the comment rules. 🔴 A Stop hook BLOCKS on a missing write-back and names this file. |
 
 Memories: `clawgate-phase2` · `clawgate-phase3` · `clawgate-runbooks` ·
 `clawgate-loop-validation` · `authelia-passkey-sso`.
@@ -58,7 +59,7 @@ Memories: `clawgate-phase2` · `clawgate-phase3` · `clawgate-runbooks` ·
 | LAN URL (hook + UI) | `http://192.168.50.250:30302` (NodePort) — **OPEN, no auth**; machine endpoints still need the token |
 | Public / nebula URL | `https://clawgate.zacx.dev` behind **Authelia passkey** (portal `login.zacx.dev`); laptop `http://10.42.0.10:8109` (homelab gateway) |
 | Hook events | `PermissionRequest` (`CLAWGATE_REMOTE_APPROVAL=off`) + `Stop` (async, `CLAWGATE_SUGGEST=off`), both in `~/.claude/settings.json`, ON by default. 🔴 The `Stop` array also carries **two** unrelated hooks (`tmux/task-hook.sh`, `claude-notify.py`) — **preserve both** |
-| 🔴 Machine client | **`clawgatectl`** (devrc `nix/pkgs/tools/clawgatectl.nix`; on PATH after a switch). 🔴 **Built from a LOCAL working tree of homelab-talos, so it can be present but STALE** — a behind checkout ships a binary MISSING verbs that prints help and **exits 0** under a plausible version label. Closed both ways (devrc #536): the version derives from the compiled source, and `drift-check.sh` **rc 17** reports a stale source subtree per host; a checkout lacking `cmd/clawgatectl` gets no binary at all. **Exactly eight commands**: `health` · `agent ls` · `agent resolve <name> [--id]` · `task ls/get/create` · **`task status <id> <status>`** · **`task comment <id> --body …`** (the last two hit pre-existing routes — NO server release needed). Reads `clawgate.env` itself (no token in argv); JSON on stdout only; rc 0–8. **Every other route is still curl.** `task-api.md` |
+| 🔴 Machine client | **`clawgatectl`** (devrc `nix/pkgs/tools/clawgatectl.nix`; on PATH after a switch). 🔴 **Built from a LOCAL working tree of homelab-talos, so it can be present but STALE** — a behind checkout ships a binary MISSING verbs that prints help and **exits 0** under a plausible version label. JSON on stdout only; rc 0–8. **Every other route is still curl.** Commands, config, the staleness closure and the skew note: `task-api.md` |
 
 🔴 **clawgate has NO human auth of its own** (since 0.7.37): `requireSession` is a pass-through no-op,
 so **the LAN NodePort is fully unauthenticated** — including `DELETE /tasks/{id}` and 🔴 **`POST
@@ -103,85 +104,24 @@ version-from-the-live-pin, the ONE commit path (worktree off `origin/trunk`; nev
 test gate, build/push, pin bump, the CSS-cwd trap that fakes ~25 e2e failures, chart sync.
 
 ## task pickup — "read and evaluate clawgate task N", then "local dispatch"
-🔴 **The comment/status ritual is NOT optional and NOT a thing to be asked for.** Run it unprompted.
+🔴 **Run `flows/task-pickup.md`** — the comment/status ritual is NOT optional and NOT a thing to be
+asked for. Run it unprompted. The bash block, the criteria detector, the frozen-verdict rule, the
+completion-comment shape, the ordering trap and the two-comments rule are all there.
 
 🔴 **A hook ENFORCES this** (`~/.claude/hooks/clawgate-writeback-guard.py`): armed by the
 step-1 **read**, it **blocks Stop** when work followed (edit/commit/push/PR) and a **live** re-read
 shows no `claude-code` comment since. Read-and-evaluate-only never fires; commenting silences it.
+Its block message names `~/.claude/skills/clawgate/flows/task-pickup.md` by path.
 
-🔴 **A COMMENT is the only write that notifies a watcher.** A status flip pushes **only** on
-*entering* `ready_for_review` (`notifyTaskDone`), so going `in_progress` notifies **nobody**. That is
-*why* the pre-start comment exists: Zach's only chance to object **before** the work, not after.
-Route-level cites: `task-api.md` → "Notifications".
-
-```bash
-clawgatectl task get <id>            # 1. READ — body + comments are BOTH already here
-                                     #    (no /comments GET exists; it is 405)
-#  2. EVALUATE and report to Zach. Do NOT flip status yet — see the ordering trap below.
-#  3a. On "local dispatch": settle the acceptance criteria (detector below).
-clawgatectl task comment <id> --body "$(cat <<'EOF'
-**Starting** — host <host>, session <id>.
-Acceptance criteria (AUTHOR-SPECIFIED | DERIVED — not author-specified):
-1. … 2. …
-Plan: <2–3 lines>.
-Not doing: <explicit non-goals>.
-Assumptions: <the ones that would change the work if wrong>.
-<if DERIVED> These criteria are mine, not yours — object now if they are wrong.
-EOF
-)"                                                # 3b. PRE-START comment, BEFORE the flip
-clawgatectl task status <id> in_progress          # 3c. THEN flip, and work
-#     …4. implement per repo defaults: tests watched to FAIL at base, worktree, PR…
-clawgatectl task comment <id> --body "…"          # 5. ONE completion comment (shape below)
-clawgatectl task status <id> ready_for_review     # 6. …or `complete` — see the gate
-```
-
-**Acceptance-criteria detector — deterministic, not a judgement call.** A heading matching
-`## Acceptance criteria` (case-insensitive) → **AUTHOR-SPECIFIED**. Anything else — including a body
-that merely *reads* like criteria — means you **DERIVE** them and must label them
-`DERIVED — not author-specified` in the comment.
-
-🔴 **The verdict is frozen at your FIRST read (step 1).** Body edits are legal before the
-`in_progress` flip, so otherwise an agent could PATCH the heading in, re-read it as AUTHOR-SPECIFIED
-and self-complete — the exact self-grading the gate exists to stop. **Writing the criteria and
-grading them is one act, in either order**: touch or reword the author's and they become yours,
-DERIVED. **Quote them VERBATIM in the pre-start comment** (author-specified ones too) — that
-timestamped copy is what makes this auditable rather than honour-system.
-
-**The completion comment (5)** carries evidence **per criterion** — one line each, naming what proves
-it — plus an explicit **NOT verified** list. "All green" with no per-criterion mapping is not a
-completion report.
-
-🔴 **Status gate (6) — the only place `complete` is ever yours to set:**
+🔴 **Status gate — the only place `complete` is ever yours to set.** Criteria are
+**AUTHOR-SPECIFIED** only when the task body carries a `## Acceptance criteria` heading; anything
+else means you **DERIVED** them, and that verdict is frozen at your first read.
 
 | criteria | every criterion validated with evidence? | final status |
 |---|---|---|
 | AUTHOR-SPECIFIED | yes | **`complete`** |
 | DERIVED | yes | **`ready_for_review`** — you must not grade an exam you wrote |
 | either | **no** | **`ready_for_review`**, naming WHICH criterion and WHY it was not validatable |
-
-🔴 **That gate is LOCAL-pickup only, structurally.** The in-devpod agent route
-`PATCH /agent/task/status` **forbids `complete`** (`notes.StatusAllowedForAgent`), so a dispatched
-devpod agent ends at `ready_for_review` regardless of what this skill says. Only the machine route
-this ritual uses can set `complete` at all — the gate governs that permission, nothing else.
-
-📌 **For the task AUTHOR (Zach): a `## Acceptance criteria` section in the body is what unlocks agent
-self-completion.** Without one, every pickup comes back `ready_for_review` for a human read. That is
-the one lever you have; `flows/task-authoring.md` is the interview that produces it.
-
-- 🔴 **Ordering trap — flip to `in_progress` LAST, after any edit to the task ITSELF.** The
-  `in_progress` 409 is refined but real: once in progress, a `PATCH /api/tasks/{id}` carrying any
-  non-tag field (or any routing tag) is refused. Descriptive-tag-only edits still succeed.
-  **Comments are exempt** — different route, no in-progress guard. So derived criteria go in the
-  **comment, never PATCHed into the body**: it dodges the 409, leaves Zach's task text untouched, and
-  makes provenance unambiguous (body = the author's words, comments = the agent's).
-- **Exactly TWO comments per pickup — start and finish, never per turn.** Per-turn self-reporting was
-  measured as noise and removed once already (memory `clawgate-loop-validation`); do not reintroduce
-  it in a new costume.
-- **Comments author as `claude-code`** via `X-Clawgate-Source`; no `--author` flag — the header IS
-  the impersonation guard, and `user`/`operator` are unreachable by design. An unknown `--source`
-  silently downgrades to `api`, so the CLI warns on stderr when the author it gets back differs.
-- ⚠ **A comment/status write also refreshes the task's idle clock** — the 7d idle reaper, which is
-  non-destructive since 0.7.96 (one copy of that fact: "machine Task API" below).
 
 ## machine (hook-token) Task API
 🔴 **Authoring one? `flows/task-authoring.md` FIRST** — a hook denies a criteria-less create.
@@ -204,6 +144,12 @@ deployment**, so the 7d default is LIVE — it now costs a tag, not the task (`o
 create** — a load-bearing wire contract producers key their retry on.
 ⚠ **A task body may carry extension-picked element references** — never search the selector first
 (`element-references.md`).
+
+⚠ **Task↔session threads (#357) are ONE-WAY.** `/ui/tasks` shows a `👥 N` chip, but
+`GET /api/tasks/{id}/sessions` **404s** — only the reverse `GET /api/sessions/{id}/tasks` is
+callable and `clawgatectl` has neither, so *"which sessions worked task N"* is **UI-only**.
+🔴 Membership OVER-reports and never downgrades: a 400-rejected PATCH still records `worked` (#306),
+and a subagent inherits the parent's session id. `task-api.md`
 
 **Writing/debugging a producer? Load `task-api.md`** — per-op semantics + status codes,
 409/immutability, the author allowlist, provenance, tag grammar, the route×auth inventory.

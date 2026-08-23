@@ -118,6 +118,11 @@ LEDGER = PY + " ~/.claude/hooks/agent-ledger-hook.py"
 WRITEBACK = PY + " ~/.claude/hooks/clawgate-writeback-guard.py"
 INTERVIEW = PY + " ~/.claude/hooks/clawgate-task-interview-guard.py"
 BASH_GUARD = PY + " ~/.claude/hooks/bash-guard.py"
+# The backgrounded-command capture log (ClickUp 868ktvqf9) — the SECOND entry
+# PRE_BASH_CMDS owns, and the reason several whole-list equalities below moved.
+# It is instrumentation: no permissionDecision, no stdout, exit 0 always, so it
+# widens what PreToolUse OBSERVES and not what it can refuse.
+BG_CAPTURE = PY + " ~/.claude/hooks/bg-command-capture.py"
 
 # The pre-migration spellings, i.e. what is on both hosts right now.
 OLD_BASH_GUARD = "python3 ~/.claude/hooks/bash-guard.py"
@@ -276,10 +281,13 @@ with tempfile.TemporaryDirectory() as tmp:
     # owns — asserted by identity, not by a count, so "gained an entry" cannot be
     # confused with "gained the right entry". Before PRE_BASH_CMDS existed this
     # read `len(pre_entries) == 3`; PreToolUse was rewrite-only then.
-    check("6: PreToolUse gained exactly ONE entry, and it is the appended interview guard",
-          len(pre_entries) == 4
+    check("6: PreToolUse gained exactly TWO entries, and they are the two the "
+          "append table owns — the interview guard and the capture log",
+          len(pre_entries) == 5
           and pre_entries[3]["hooks"][0]["command"] == INTERVIEW
-          and pre_entries[3].get("matcher") == "Bash")
+          and pre_entries[3].get("matcher") == "Bash"
+          and pre_entries[4]["hooks"][0]["command"] == BG_CAPTURE
+          and pre_entries[4].get("matcher") == "Bash")
     check("6: the three pre-existing PreToolUse entries kept their positions",
           [e["hooks"][0]["command"] for e in pre_entries[:3]]
           == [FOREIGN_ELSEWHERE, BASH_GUARD, FOREIGN_UNMANAGED_HOOK])
@@ -295,10 +303,14 @@ with tempfile.TemporaryDirectory() as tmp:
           d["hooks"]["PermissionRequest"][0]["hooks"][0].get("timeout") == 180)
     check("7: the two foreign .sh Stop hooks are untouched",
           TMUX_STOP in stop and CLAWGATE_STOP in stop)
-    check("7: PreToolUse is the three commands it started with (one rewritten) plus the interview guard",
-          pre == [FOREIGN_ELSEWHERE, BASH_GUARD, FOREIGN_UNMANAGED_HOOK, INTERVIEW])
+    check("7: PreToolUse is the three commands it started with (one rewritten) "
+          "plus the two the append table owns",
+          pre == [FOREIGN_ELSEWHERE, BASH_GUARD, FOREIGN_UNMANAGED_HOOK,
+                  INTERVIEW, BG_CAPTURE])
     check("7: the interview guard is registered exactly once",
           pre.count(INTERVIEW) == 1)
+    check("7: the capture log is registered exactly once",
+          pre.count(BG_CAPTURE) == 1)
 
     check("2: both PostToolUse nudges preserved",
           any(c.endswith("/audit-pr-nudge.py") for c in cmds(d, "PostToolUse"))
@@ -317,8 +329,9 @@ with tempfile.TemporaryDirectory() as tmp:
     SHELL_HOMEVAR = PY + " $HOME/.claude/hooks/shell-env-nudge.py"
     check("8: PostToolUse holds exactly the three migrated hooks plus the two appended ones",
           set(post) == {PY + " ~/.claude/hooks/audit-pr-nudge.py",
-                        SHELL_HOMEVAR, WB_EXPANDED, SEARCH_NUDGE, LEDGER})
-    check("8: no hook was double-registered", len(post) == 5)
+                        SHELL_HOMEVAR, WB_EXPANDED, SEARCH_NUDGE, LEDGER,
+                        BG_CAPTURE})
+    check("8: no hook was double-registered", len(post) == 6)
     check("8: the $HOME/ spelling was rewritten in place, not re-added",
           post.count(SHELL_HOMEVAR) == 1
           and PY + " ~/.claude/hooks/shell-env-nudge.py" not in post)
@@ -503,8 +516,9 @@ with tempfile.TemporaryDirectory() as tmp:
         d4 = json.load(f)
     check("10: every unrecognised command came back BYTE-IDENTICAL, in place",
           cmds(d4, "PreToolUse")[:len(UNRECOGNISED)] == UNRECOGNISED)
-    check("10: ...and the ONLY thing added to PreToolUse is the interview guard",
-          cmds(d4, "PreToolUse") == UNRECOGNISED + [INTERVIEW])
+    check("10: ...and the ONLY things added to PreToolUse are the two the append "
+          "table owns",
+          cmds(d4, "PreToolUse") == UNRECOGNISED + [INTERVIEW, BG_CAPTURE])
     # Anti-vacuity: this run DID rewrite/append elsewhere in the same file, so
     # the check above is about the recogniser and not about a run that no-oped.
     check("10: ...while the run did its normal work on the same file",
@@ -701,7 +715,8 @@ with tempfile.TemporaryDirectory() as tmp:
           "distinct-matcher entry SURVIVED on a matcher-supporting event",
           entries(d12, "PostToolUse") == [
               ("Bash", AUDIT), ("Bash", SHELL), ("Bash", SEARCH_NUDGE),
-              (None, LEDGER), ("Bash", LEDGER), (None, WRITEBACK)])
+              (None, LEDGER), ("Bash", LEDGER), (None, WRITEBACK),
+              ("Bash", BG_CAPTURE)])
     check("12: Stop healed, keeping the first copy of each and the three survivors",
           entries(d12, "Stop") == [
               (None, TMUX_STOP), (None, CLAWGATE_STOP),
@@ -722,7 +737,7 @@ with tempfile.TemporaryDirectory() as tmp:
     # removed. Its registration belongs to the host.
     check("12: the doubled bash-guard entry is PINNED but NOT deleted",
           entries(d12, "PreToolUse") == [("Bash", BASH_GUARD), ("Bash", BASH_GUARD),
-                                         ("Bash", INTERVIEW)])
+                                         ("Bash", INTERVIEW), ("Bash", BG_CAPTURE)])
     # The first bash-guard entry keeps both keys this script knows nothing about.
     check("12: the surviving bash-guard entry kept its foreign keys",
           d12["hooks"]["PreToolUse"][0].get("description")
@@ -864,8 +879,13 @@ for hostile, why, hostile_cwd, expected_reason in HOSTILE_OVERRIDES:
               all(expected_reason in r.stderr for r in runs))
         # THE UNBOUNDED-GROWTH LOOP, CLOSED: a literal, not a comparison against
         # run 1 — a run that appended nothing at all would satisfy `a == b == c`.
-        check(tag + ": three consecutive runs hold exactly 16 hook commands",
-              counts == [16, 16, 16])
+        # 16 -> 18: the backgrounded-command capture log (868ktvqf9) joined BOTH
+        # PRE_BASH_CMDS and POST_BASH_CMDS, so one converged run holds two more
+        # commands than it did. The literal stays a literal — `a == b == c` is
+        # satisfied by a run that appends nothing at all, which is the unbounded-
+        # growth guard's own failure mode inverted.
+        check(tag + ": three consecutive runs hold exactly 18 hook commands",
+              counts == [18, 18, 18])
         with open(settings) as f:
             d13 = json.load(f)
         written = [c for ev in d13.get("hooks", {}) for c in cmds(d13, ev)
@@ -913,7 +933,7 @@ with tempfile.TemporaryDirectory() as tmp:
     with open(settings) as f:
         d14 = json.load(f)
     check("14: every unpinnable command came back BYTE-IDENTICAL",
-          cmds(d14, "PreToolUse") == UNPINNABLE + SILENT + [INTERVIEW])
+          cmds(d14, "PreToolUse") == UNPINNABLE + SILENT + [INTERVIEW, BG_CAPTURE])
     check("14: exactly one warning per unpinnable command, and no more",
           p14.stderr.count("is not in the form this script can pin") == 5)
     for c in UNPINNABLE:

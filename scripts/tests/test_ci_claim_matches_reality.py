@@ -2,11 +2,43 @@
 
 WHY THIS EXISTS
 ---------------
-For an unknown span, `CLAUDE.md` asserted "**CI gates both suites**: `nix build
-.#checks…`". No CI has ever run on a devrc PR: no `.github/workflows`, no branch
-protection, no ruleset, no Tekton trigger, and `statusCheckRollup` is empty on
-every PR including merged ones. Every merge has rested on a human or agent
-running the suite by hand.
+From 2026-08-02 to 2026-08-20, `CLAUDE.md` asserted "**CI gates both suites**:
+`nix build .#checks…`" while nothing ran at all. Every merge rested on a human
+or agent running the suite by hand.
+
+🔴 THIS PARAGRAPH THEN BECAME THE THING IT WARNS ABOUT, and is corrected in
+place rather than deleted, because the drift is the lesson. It used to continue:
+"No CI has ever run on a devrc PR: no `.github/workflows`, no branch protection,
+no ruleset, no Tekton trigger, and `statusCheckRollup` is empty on every PR."
+**Three of those five clauses were measured FALSE on 2026-08-22** — Tekton posts
+`tekton/devrc-pytests` and `tekton/devrc-nodetests` on devrc PRs, `main` DOES
+carry branch protection, and `statusCheckRollup` is non-empty. Still true: no
+`.github/workflows`, and no ruleset.
+
+🔴 AND IT DRIFTED AGAIN, this time in the REASSURING direction. This paragraph
+used to continue: "the protection carries **no `required_status_checks`**:
+checks RUN, nothing BLOCKS", evidenced by #707 merging **28 minutes** after its
+`devrc-pytests` went RED and #711 two minutes after. **Measured FALSE on
+2026-08-23**: `required_status_checks.contexts` is `["tekton/devrc-nodetests"]`,
+`strict: false`, `enforce_admins: true` — a merge DOES block now. But on one
+tier of two, and the required one collects `*.test.mjs` ONLY, so a Python-only
+change cannot fail it. "Partially blocked" is the shape that reads as "blocked".
+
+The marker was `other` before that change and is `other` after, because it
+encodes what REPORTS, not what BLOCKS: something this test cannot see (Tekton)
+runs here, and it would become `github-actions` only if a `pull_request`
+workflow appeared. Branch protection is invisible to this test in BOTH states —
+see SCOPE below — so nothing in this file verifies the paragraph above, and a
+green run here is not evidence for it. Re-measure it.
+
+Re-measure both surfaces rather than quoting any of the above:
+    gh api repos/innovation-upstream/devrc/branches/main/protection   # required_status_checks?
+    gh api repos/innovation-upstream/devrc/rules/branches/main        # org+repo+enterprise rulesets
+On the first the key is PRESENT today, so read the `contexts` LIST and `strict`,
+not merely whether the key exists — a one-element list is a PARTIAL gate, and an
+absent key would read as clean unless you looked for it by name. On the second
+the answer is an empty array. Positive-control the `[]` before believing it —
+the same call against a repo with rulesets returns non-empty.
 
 That is the worst shape a false claim can take. It lives in the always-loaded
 project instructions, it is reassuring, and it is exactly the sort of sentence

@@ -69,12 +69,18 @@ echo "== handoff_says_inflight (repo-qualified) =="
 # Two repos, same PR number, opposite framing. Repo-blind matching sees both
 # lines and answers for whichever it likes — which is the cross-repo defect
 # reappearing inside the drift test.
-TMP2=$(mktemp)
-printf '%s\n' 'acme/widget#900 is OPEN and awaiting review.' \
-              'other/repo#900 MERGED and shipped last week.' > "$TMP2"
-if handoff_says_inflight 900 "$TMP2" "acme/widget"; then pass "qualified: acme/widget#900 in-flight"; else fail "qualified: acme/widget#900 in-flight"; fi
-if handoff_says_inflight 900 "$TMP2" "other/repo"; then fail "qualified: other/repo#900 should NOT be in-flight"; else pass "qualified: other/repo#900 not in-flight"; fi
-rm -f "$TMP2"
+#
+# 🔴 $2 IS THE TEXT, NOT A PATH. This suite passed a `mktemp` PATH for both
+# calls, left over from the signature that took one — so `grep` searched the
+# LITERAL STRING "/tmp/tmp.XXXX" for `#900`, found nothing, and both helpers
+# returned false. That makes the two `should NOT be in-flight` assertions PASS
+# FOR THE WRONG REASON while their positive twins fail: a false-negative helper
+# satisfies every negative assertion in the file. Nothing caught it because this
+# suite is not in `run-tests.sh`'s SHELL_TESTS — the gate has never run it.
+INFLIGHT_TEXT='acme/widget#900 is OPEN and awaiting review.
+other/repo#900 MERGED and shipped last week.'
+if handoff_says_inflight 900 "$INFLIGHT_TEXT" "acme/widget"; then pass "qualified: acme/widget#900 in-flight"; else fail "qualified: acme/widget#900 in-flight"; fi
+if handoff_says_inflight 900 "$INFLIGHT_TEXT" "other/repo"; then fail "qualified: other/repo#900 should NOT be in-flight"; else pass "qualified: other/repo#900 not in-flight"; fi
 
 echo "== extract_branches =="
 BR=$(extract_branches "$FIX")
@@ -88,11 +94,10 @@ has "real deploy token present"  "$TOK" "civitai-dp-prod-api-primary"
 has "hyphenated token intact"    "$TOK" "metrics-server"
 
 echo "== handoff_says_inflight =="
-TMP=$(mktemp); printf '%s\n' "$FIX" > "$TMP"
 # #478 is framed "OPEN" -> in-flight; #415 is framed "MERGED" -> not in-flight
-if handoff_says_inflight 478 "$TMP"; then pass "478 framed in-flight (OPEN)"; else fail "478 framed in-flight (OPEN)"; fi
-if handoff_says_inflight 415 "$TMP"; then fail "415 framed merged (should NOT be in-flight)"; else pass "415 not framed in-flight"; fi
-rm -f "$TMP"
+# (TEXT, not a path — see the note above.)
+if handoff_says_inflight 478 "$FIX"; then pass "478 framed in-flight (OPEN)"; else fail "478 framed in-flight (OPEN)"; fi
+if handoff_says_inflight 415 "$FIX"; then fail "415 framed merged (should NOT be in-flight)"; else pass "415 not framed in-flight"; fi
 
 echo
 if [ "$FAIL" -eq 0 ]; then echo "ALL PASS"; exit 0; else echo "FAILURES"; exit 1; fi

@@ -9572,7 +9572,23 @@ _SKILL_DIR = os.path.join(_REPO_ROOT, "claude", "skills", "session-manager")
 # which is the route all six real drafts actually took.
 _SKILL_BODY = os.path.join(_SKILL_DIR, "SKILL.md")
 _WAITING_REF = os.path.join(_SKILL_DIR, "reference", "waiting-signal.md")
+_CH_REF = os.path.join(_SKILL_DIR, "reference", "clickhouse-queries.md")
 _KICKOFF_DOC = os.path.join(_REPO_ROOT, "claudedocs", "kickoff-waiting-signal.md")
+
+# 🔴 THE LEDGER OF FIELDS THAT PUBLISH OPERATOR-TYPED TEXT, and the reason it is
+# a ledger rather than a sentence. The NEVER-PASTE rule named `unsent_prompt`
+# alone while `clickhouse.rows[].first_msg` — the opening prompt of every recent
+# session, shipped by a query that runs by DEFAULT — sat in the same payload
+# with nothing said about it anywhere in the skill tree.
+#
+# Every member must be NAMED in the core's rule (asserted below), and every
+# member is bound to the code that produces it, so this list cannot rot into
+# fields that no longer exist. 🔴 ITS HONEST LIMIT, stated rather than implied:
+# it cannot see a THIRD such field appearing in the payload on its own — nothing
+# derives "carries operator text" from the code. What it does buy is that adding
+# one here, which is where anyone widening the rule starts, fails until the
+# docs name it too.
+_OPERATOR_TEXT_FIELDS = ("unsent_prompt", "clickhouse.rows[].first_msg")
 # Six files at the time of writing, against the two the hand-list named. The
 # three above are NAMED as well as derived because the prose guard below asserts
 # a specific sentence in a specific one of them — a positional index into a
@@ -9790,14 +9806,28 @@ def test_INSTRUMENT_the_leak_guards_NEEDLES_and_HAYSTACK_are_both_derived():
         _MODAL_OPTION_LABELS_NOT_DRAFTS
 
 
-def test_BOTH_shipped_docs_carry_the_NEVER_PASTE_A_CAPTURED_DRAFT_rule():
-    """🔴 THE MISSING GUARDRAIL. Neither the skill body nor the reference told
-    anyone not to paste a captured draft into a committed file — and this
-    feature hands operator-typed text to an agent, which writes it onward into
-    transcripts, commit messages and any `claudedocs/` note in this PUBLIC repo.
-    The rule has to be where a reader hits it, in BOTH places: the skill body is
-    what an agent loads to use the tool, the reference is what it loads to
-    change the tool.
+def test_EVERY_field_that_publishes_OPERATOR_TEXT_is_named_by_the_NEVER_PASTE_rule():
+    """🔴 THE GUARD WAS NARROWER THAN ITS OWN SENTENCE, which is the defect it
+    now exists to stop.
+
+    The original rule — and the original version of this test — named
+    `unsent_prompt` alone, from the day it landed (2026-08-17).
+    `clickhouse.rows[].first_msg` is the opening prompt of every recent session,
+    shipped in the SAME payload by a query that runs by DEFAULT (~17 KB of
+    operator-typed text in an ordinary scan), and it had been there since the
+    tool's first commit (2026-08-11) with no document in the skill tree
+    mentioning it. Nothing about the sentence was false; it was NARROWER THAN
+    THE PAYLOAD IT GOVERNED, and a rule that reads as complete is worse than
+    none because it stops anyone looking.
+    `claude/RULES.md`: "a guard's DESCRIPTION claims COVERAGE — check the
+    implementation is as wide as the sentence."
+
+    So the width is now the thing that is CHECKED, not the thing that is
+    written. `_OPERATOR_TEXT_FIELDS` is an asserted LEDGER: it fails when the
+    set grows (a third such field cannot ship without a doc naming it) and when
+    it shrinks (a field cannot be quietly dropped from the rule while the
+    payload still carries it), and each member is bound to the code that
+    produces it below, so the ledger cannot drift from reality either.
 
     Pinned as WHOLE normalised strings. A word check here is walkable by a
     reword — four prose guards in this repo were walked exactly that way, one by
@@ -9815,16 +9845,50 @@ def test_BOTH_shipped_docs_carry_the_NEVER_PASTE_A_CAPTURED_DRAFT_rule():
         skill = _norm(fh.read())
     with open(_WAITING_REF, encoding="utf-8") as fh:
         ref = _norm(fh.read())
+    with open(_CH_REF, encoding="utf-8") as fh:
+        ch_ref = _norm(fh.read())
 
-    assert ("🔴 **NEVER PASTE A CAPTURED DRAFT INTO A COMMITTED FILE.** "
-            "`unsent_prompt` hands you **text the operator typed**, and devrc "
-            "is a **PUBLIC** repo — as is every `claudedocs/` note, commit "
-            "message, PR body, comment or test fixture an agent writes into "
-            "it. Report a draft as a **count, a length or a shape**, never "
-            "verbatim.") in skill
-    assert ("### 🔴 NEVER PASTE A CAPTURED DRAFT INTO A COMMITTED FILE") in ref
+    assert ("🔴 **NEVER PASTE CAPTURED OPERATOR TEXT INTO A COMMITTED FILE.** "
+            "TWO fields carry **text the operator typed** — `unsent_prompt` "
+            "(the draft) and `clickhouse.rows[].first_msg` (the opening prompt "
+            "of every recent session) — and devrc is a **PUBLIC** repo, as is "
+            "every `claudedocs/` note, commit message, PR body, comment or "
+            "test fixture an agent writes into it. Report either as a "
+            "**count, a length or a shape**, never verbatim.") in skill
+    assert ("### 🔴 NEVER PASTE CAPTURED OPERATOR TEXT INTO A COMMITTED "
+            "FILE") in ref
     assert ("report a draft as a **count, a length or a shape**, never "
             "verbatim, in any file that gets committed") in ref
+
+    # 🔴 AND WHERE THE SECOND FIELD ACTUALLY LIVES. A reader who opens the
+    # ClickHouse reference to write a query never passes the `unsent_prompt`
+    # section, so the rule has to be on the query's own page too — the same
+    # "put it where the reader hits it" argument that put it in two files
+    # originally, applied to the file the original pass missed.
+    assert ("🔴 **NEVER PASTE CAPTURED OPERATOR TEXT INTO A COMMITTED FILE.** "
+            "`first_msg` is **text the operator typed**") in ch_ref
+
+    # 🔴 THE WIDTH CHECK. Every ledgered field must be NAMED in the core's rule
+    # — not merely present somewhere in the file, which `unsent_prompt` would
+    # satisfy from its own section heading while the rule ignored it.
+    rule = skill.split("NEVER PASTE CAPTURED OPERATOR TEXT")[1].split("never verbatim.")[0]
+    for field in _OPERATOR_TEXT_FIELDS:
+        assert field in rule, (
+            f"`{field}` publishes operator-typed text and the core's "
+            f"NEVER-PASTE rule does not name it. Widen the rule (and its pin in "
+            f"test_session_manager_skill_size.py) in the SAME commit — or, if "
+            f"the field no longer carries operator text, remove it from "
+            f"_OPERATOR_TEXT_FIELDS and say why.")
+
+    # 🔴 AND THE LEDGER IS BOUND TO THE CODE, so it cannot drift into a list of
+    # fields that no longer exist while a real one ships uncovered. Each member
+    # is checked against the thing that PRODUCES it, not against another doc.
+    assert "first_msg" in sm.SQL_RECENT_SESSIONS, (
+        "the ledger names `clickhouse.rows[].first_msg`, but the query no "
+        "longer selects it — drop it from _OPERATOR_TEXT_FIELDS if the payload "
+        "genuinely stopped carrying operator text")
+    assert "unsent_prompt" in sm.LEAN_ROW_FIELDS, (
+        "the ledger names `unsent_prompt`, but no row carries it")
     # 🔴 AND THE CO-OCCURRENCE CORRECTION, in the same pass: the reference used
     # to promote "0 rows flagged BOTH" on ONE live run to the separation claim.
     # The next run measured 1, and suppressing co-occurrence would make the tool

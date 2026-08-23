@@ -44,6 +44,7 @@ the last revision before the core/archive split.
 
 **Deterministic Over Prose**
 - [consolidation-finds-bugs](#consolidation-finds-bugs)
+- [proactivity-gate](#proactivity-gate)
 
 **Green Test Suite**
 - [merged-tree](#merged-tree)
@@ -478,7 +479,8 @@ but identity was simply the consequence of their being **one file**, and acting 
 either an unnecessary rebuild or, worse, treating a live edit as inert.
 
 ## zsh-unbraced-var
-*Supports: 🔴 "zsh's unbraced `$var` is NOT bash's — two traps." (Shell & Tooling).*
+*Supports: 🔴 "zsh is NOT bash — four traps, all returning a confident WRONG value with no
+error." (Shell & Tooling).*
 
 **(a) No word-splitting.** `for x in $SPACE_SEPARATED` loops **once** with the whole string as
 `$x`; a following `${x%%:*}`/`${x##*:}` then silently grabs the wrong field. Bit prod: a
@@ -517,6 +519,39 @@ line, so `some` and `phrase` become **filename filters**. Playwright matched no 
 `No tests found` and **exited 0** — zero tests run, reported as success. The generalisable half:
 a wrapper that answers "nothing to do" instead of erroring is how a green gets believed; make a
 zero-selection case a non-zero exit.
+
+**(d) Redirection: `MULTIOS` clones stdout onto the pipe (2026-08-20).** The canonical
+"stderr only, discard stdout" idiom does the OPPOSITE of its intent in zsh. Measured on the
+workbench:
+
+```
+zsh  -c 'printf "PAYLOAD\n" 2>&1 >/dev/null | cat'                    ->  PAYLOAD
+bash -c 'printf "PAYLOAD\n" 2>&1 >/dev/null | cat'                    ->  (nothing)
+zsh  -c 'unsetopt multios; printf "PAYLOAD\n" 2>&1 >/dev/null | cat'  ->  (nothing)
+```
+
+zsh's `MULTIOS` option duplicates stdout to *every* destination it has, the pipe included, so
+the consumer receives **stdout** — the exact stream the idiom exists to suppress. Nothing
+errors, and the payload that arrives looks entirely plausible.
+
+**What it cost, three times in one session.** A `--json` payload correctly on **stdout** was
+read through this idiom, reported as being on **stderr**, and a subagent was dispatched to fix
+a bug that did not exist. Twice more in the same session the two streams were merged with a
+plain `2>&1` and the advisory text that surfaced was reported as "polluting stdout" — it had
+been on stderr the whole time. So the failure class is not the idiom; it is **attributing
+output to the wrong stream**, and its output is a confident, wrong bug report about correct
+code.
+
+Reasoning about redirection order cannot settle it: `2>&1 >/dev/null` is genuinely
+"dup stderr to the current stdout, then move stdout" in both shells, and `MULTIOS` changes the
+answer without changing the text. Only separate destinations settle it.
+
+**The mechanical fix** is `scripts/run3`: it runs the command with
+`"$@" >"$outf" 2>"$errf"` — two destinations, never `2>&1` — prints the exit code and each
+stream's byte count and path, and exits with the command's own status.
+`scripts/tests/test_run3.py` pins it, including a mutation control (merge the streams inside
+run3, watch 9 tests go red) and a positive control that asserts the MULTIOS behaviour above is
+still live in this environment.
 
 ## config-blind-suite
 *Supports: 🔴 "A test that skips itself, or passes by accident of the environment, is worse than
@@ -1264,3 +1299,103 @@ was wider than what it actually did.
 The common shape: the sentence describes a relationship; the code inspects one side.
 Each read as coverage while providing none, which is what makes them worse than an
 absent guard — a declared guard stops anyone looking.
+
+## proactivity-gate
+
+*Supports: "Default to PROCEEDING — and never ask for what you can measure yourself."*
+
+**Where the shape came from.** The rule as first proposed was three branches — *safe and
+unblocked → proceed; blocked → ask, then proceed; destructive or unsafe → block, warn, ask*.
+Four holes, all of which the shipped wording closes:
+
+1. "Safe and unblocked" is true of out-of-scope work. Writing tests nobody asked for, or
+   refactoring the file you were told to read, passes that predicate.
+2. **Unblocked ≠ unambiguous.** The step where two readings produce materially different work
+   is not blocked — the agent *can* proceed — so branch 1 licenses ship-then-rework.
+3. "Blocked" collapsed three cases with three different correct responses: blocked on
+   something you can measure yourself (go look, don't ask), blocked on something only the
+   user knows (ask), blocked on an external system (asking does not unblock it — report and
+   do the rest).
+4. It dropped **outward-facing** entirely. A push, PR, email, publish or deploy destroys
+   nothing and is locally safe, so all of them landed in branch 1.
+
+**Why the branches do not all end in "ask".** Routing every hazard to a question invites
+asking permission for things on the never-list (`git add -A`, `reset --hard`, `stash` in a
+shared repo, `pkill -f`, raising a window on the operator's screen, `sudo nixos-rebuild`).
+Those rules exist *because* a yes was already given once. Their response is stage-it or
+hand-it-over, never solicit approval.
+
+**The provenance-and-freeze clause was prompted by clawgate's task status gate**, which faces the
+same problem the proposal had — a verdict self-assessed by the party who wants to pass it. 🔴 **Be
+exact about which half of that gate is real, because an earlier draft of this entry was not, and
+got it wrong in the direction this repo had corrected ONE DAY EARLIER (#691, `b8e8843b`, whose
+title is "the deny message called a CONVENTION 'structural'").**
+
+- **Structural, and NARROWER than it looks — scope it to the ROUTE or you will get it wrong in the
+  other direction, which is what an earlier draft of this entry did.** A *dispatched devpod* agent
+  cannot set `complete`: `internal/api/agent.go` gates the two AGENT surfaces on
+  `AllowedForAgent` (`internal/taskstatus/taskstatus.go:79-81` = `Valid(s) && s != Complete`), and
+  that gate is **criteria-independent**. But the *machine* route — `PATCH /api/tasks/{id}/status`,
+  hook token, which is what `clawgatectl task status` and therefore a LOCAL Claude Code pickup
+  uses — **deliberately allows every status including `complete`** (`internal/api/notes.go`:
+  *"A hook-token producer is trusted, so ALL statuses are allowed here INCLUDING `complete`"*;
+  `taskstatus.go` says the same: *"the in-devpod agent route enforces it while the machine route
+  deliberately does not"*). 🔴 **Those are the two routes that matter here, NOT the whole set, and do not quote a
+  COUNT for the rest** — three drafts of this sentence stated one and all three were wrong. What
+  is durable: `notes.SetStatus` is the single writer; exactly **two** surfaces gate on
+  `AllowedForAgent` and both are the in-devpod AGENT tool/route (not "agent-token" — the operator
+  route is agent-token-authed and is NOT gated); and **several** other paths may set `complete`
+  deliberately, including the hook-token machine route, the operator route and its tool, the
+  losing side of `POST /tasks/merge`, and — most permissive of all — the session route
+  `PATCH /tasks/{id}/status`, whose `requireSession` is a literal `return next`, so an
+  UNAUTHENTICATED LAN request can set `complete`. Enumerate from `SetStatus`'s call sites at the moment you
+  need it; any number written here goes stale and has.
+- **Convention, not enforced SERVER-side:** the AUTHOR-SPECIFIED vs DERIVED split and the
+  freeze-at-first-read exist only in the skill's prose, read by the agent about itself — i.e.
+  self-assessed, the very property this was cited as structurally solving. The string "acceptance
+  criteria" appears in **zero** Go files. ⚠ Not *unenforced*: the `## Acceptance criteria` heading
+  is a deterministic create-time deny in devrc's `clawgate-task-interview-guard.py` PreToolUse
+  hook. Server-side is the distinction that matters, and it is the one #691 drew.
+
+So the borrowed IDEA is sound and stands on its own — classify by provenance, and freeze the
+verdict before you know whether you pass it. What is false is that clawgate enforces it. 🔴 **And
+note how this was gotten wrong TWICE in opposite directions**: first by calling the convention
+structural, then by "correcting" that into a blanket "an agent can never set `complete`" — which
+would defeat the criteria gate's whole purpose, since the local pickup path is exactly the one
+that may. #691's own message warned about this merge: *"the genuinely structural fact nearby is
+different and NARROWER … merging the two is what produced the overstatement."* Read the route,
+not the verb.
+
+**Clawgate is the transport for the ask branches, never the gate** — measured 2026-08-22
+against live `0.7.98` (deployment pin `harbor.homelab.lan/library/clawgate:0.7.98` matches
+`clawgatectl health`), `PermissionRequest` hook enabled on BOTH hosts:
+
+- It fires on **tool permission prompts only**, so it cannot carry a Fork or an Out-of-scope
+  trigger — those are semantic, and produce no `PermissionRequest`.
+- 🔴 **And its return channel is BINARY, which kills the tempting design.** An earlier draft of
+  this entry claimed `approve-with-comment` *was* the Fork branch — "answer plus proceed in one
+  tap". It is not: `clawgate-hook.sh` logs the comment and emits a bare `allow`/`deny`, so the
+  agent receives permission and never the answer, then proceeds down whichever reading it had
+  already picked while the operator believes they replied. The claim was asserted from the
+  feature's NAME, was contradicted by the hook's own source comment ("No reason/additionalContext
+  channel exists"), and was contradicted by a pre-existing line in the very file it was written
+  into (*"Never design on feeding an approver's words back into the session through this hook"*)
+  — which is what a blind audit caught and three rounds of self-review did not.
+- **Allowlisted commands never prompt**, so they never reach the phone; `bypassPermissions`
+  and `plan` mode, and `AskUserQuestion`, defer *without contacting the server*.
+- It is **fail-safe toward proceeding**: any outage or timeout defers to the terminal. A rule
+  cannot be gated on a mechanism that fails open.
+- 🔴 `internal/api/auth.go` defines `requireSession` as a literal `return next`, and
+  `server.go:364` registers `POST /api/auto-approve-all` behind it — so the LAN NodePort can
+  arm a **global** auto-approve window over every future request in every project, with no
+  app-level auth. ⚠ That posture is **deliberate, not an oversight** — `auth.go` says so: human
+  auth was removed in favour of the Authelia forward-auth edge on the public path, and the LAN is
+  treated as trusted-open. The hazard is blast radius on a trusted LAN, not a missing gate.
+  Pushing *more* decisions to the phone therefore raises the value of that lever and
+  risks notification fatigue arming it. This is the "permanently-red gate trains you to click
+  through" hazard in its mirror image: a too-noisy gate trains you to disable it globally.
+  The mitigation is `hooks.md`'s OWN one-ask-per-task budget, argued from this blast radius —
+  **not** the tree's "a Fork ANSWER buys the whole run", which is Fork-scoped and therefore
+  cannot reach a hook that carries no Forks (first bullet above). Two copies of that wrong
+  citation shipped in this PR; one was retracted a round before the other, which is the
+  "one rule, one place" bullet demonstrating itself.

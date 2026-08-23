@@ -1169,3 +1169,118 @@ def test_clawgate_card_truncates_a_huge_body():
                                            body="z" * 5000)
     assert len(payload["body"]) < 2000
     assert payload["body"].count("z") == clawgate.BODY_PREVIEW_MAX
+
+
+# --------------------------------------------------------------------------- #
+# Route 12 — the LIVE wire shape, driven through send_approved()
+#
+# 🔴 Every other `transmit=` fixture in this file returns a bare DICT, because
+# the fixture authors read the upstream TYPE (`ds.SendMessageResponse`, an
+# object) rather than the wire. The live server in json-rpc mode returns a
+# LIST — measured 2026-08-21:
+#
+#     POST /v2/send  ->  201  [{"timestamp":"1787331796630"}]
+#
+# That mismatch shipped a defect where a SUCCESSFUL send raised AttributeError
+# and stranded the draft in `sending`, inviting a duplicate resend. Verifying
+# the normaliser in isolation was NOT enough: an adversarial audit ran two
+# mutants that survived the whole suite because nothing drove `send_approved`
+# with a list. These tests close that seam.
+# --------------------------------------------------------------------------- #
+def test_send_approved_accepts_the_LIVE_list_shape(db):
+    """The end-to-end happy path with the shape the real server sends."""
+    draft = _pending(db)
+    db.approve_draft(draft["id"], approval_ref="cg-live-list")
+    sent = db.send_approved(
+        draft["id"], transmit=lambda a, **kw: [{"timestamp": str(SERVER_TS)}])
+    assert sent["send_state"] == "sent"
+    assert sent["message_timestamp"] == SERVER_TS, (
+        "the server timestamp must be stored from the list entry — a locally "
+        "generated one would not dedupe the sync echo (🔧 #4)")
+
+
+def test_a_LIST_response_carrying_errors_is_NOT_recorded_as_sent(db):
+    """🔴 The inverse of the bug this seam fixed, and the worse direction.
+
+    Upstream sets `Errors` for any non-SUCCESS recipient while still returning
+    201 (`client/client.go` -> `api/api.go`). If the errors check were skipped
+    on the list path, a FAILED send would be recorded as `sent` — silently, and
+    unrecoverably, because nothing would remain to reconcile.
+
+    A mutant that checked errors only on the dict path SURVIVED the entire
+    suite before this test existed.
+    """
+    draft = _pending(db)
+    db.approve_draft(draft["id"], approval_ref="cg-live-list-errors")
+    with pytest.raises(RuntimeError) as exc:
+        db.send_approved(draft["id"], transmit=lambda a, **kw: [
+            {"timestamp": str(SERVER_TS),
+             "errors": {"recipients": [{"message": "rate limited"}]}}])
+    assert "rate limited" in str(exc.value), (
+        "the per-recipient reason must survive — it is what an operator needs "
+        "in order to reconcile")
+    assert db.get_draft(draft["id"])["send_state"] == "sending", (
+        "a failed send must stay in `sending` for manual reconciliation, never "
+        "be recorded as sent")
+
+
+def test_a_singular_error_key_in_the_list_shape_also_blocks_the_send(db):
+    """The `error` (singular) branch had ZERO coverage — deleting it survived."""
+    draft = _pending(db)
+    db.approve_draft(draft["id"], approval_ref="cg-live-list-singular")
+    with pytest.raises(RuntimeError) as exc:
+        db.send_approved(draft["id"], transmit=lambda a, **kw: [
+            {"error": "Invalid identifier", "timestamp": str(SERVER_TS)}])
+    assert "Invalid identifier" in str(exc.value)
+    assert db.get_draft(draft["id"])["send_state"] == "sending"
+
+
+def test_the_error_message_carries_the_timestamp_the_response_returned(db):
+    """A partly-failed GROUP send DID go out, and the reply carried its ts.
+
+    Without it in the error, the operator has to hunt the timestamp in the
+    Signal thread before they can `reconcile --sent`. Draft 51 was exactly that
+    situation.
+    """
+    draft = _pending(db)
+    db.approve_draft(draft["id"], approval_ref="cg-live-list-ts-in-error")
+    with pytest.raises(RuntimeError) as exc:
+        db.send_approved(draft["id"], transmit=lambda a, **kw: [
+            {"timestamp": "1787331796630",
+             "errors": {"recipients": [{"message": "unregistered"}]}}])
+    assert "1787331796630" in str(exc.value), (
+        "the server timestamp must appear in the error — it is what "
+        "`reconcile --sent --timestamp` needs and it is otherwise lost")
+
+
+def test_send_approved_refuses_an_EMPTY_response_rather_than_indexing_it(db):
+    """A malformed reply must raise the NORMALISER's error, not an IndexError.
+
+    Kills the `bypass-normaliser` mutant: replacing the call with
+    `result if isinstance(result, list) else [result]` produces identical
+    entries for well-formed input, so it survives every happy-path test. It
+    diverges only here — and it diverges into `entries[0]` on an empty list.
+    """
+    draft = _pending(db)
+    db.approve_draft(draft["id"], approval_ref="cg-empty-response")
+    with pytest.raises(ValueError, match="EMPTY"):
+        db.send_approved(draft["id"], transmit=lambda a, **kw: [])
+    assert db.get_draft(draft["id"])["send_state"] == "sending"
+
+
+def test_send_approved_refuses_a_MULTI_ENTRY_response_instead_of_guessing(db):
+    """🔴 The dangerous half of the same mutant.
+
+    Bypassing the normaliser on a two-entry reply does NOT raise — it silently
+    takes `entries[0]`, stores that timestamp and marks the draft `sent`. The
+    stored timestamp may belong to the OTHER message, which breaks sync-echo
+    dedupe (🔧 #4) exactly the way a locally generated one would.
+    """
+    draft = _pending(db)
+    db.approve_draft(draft["id"], approval_ref="cg-multi-response")
+    with pytest.raises(ValueError, match="refusing to guess"):
+        db.send_approved(draft["id"], transmit=lambda a, **kw: [
+            {"timestamp": "1787331796630"}, {"timestamp": "1787331796999"}])
+    assert db.get_draft(draft["id"])["send_state"] == "sending", (
+        "a response we cannot interpret must leave the draft for manual "
+        "reconciliation, never be recorded as sent")

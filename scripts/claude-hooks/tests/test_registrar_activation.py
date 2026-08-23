@@ -92,6 +92,7 @@ LEDGER = HOOK_PY + " ~/.claude/hooks/agent-ledger-hook.py"
 WRITEBACK = HOOK_PY + " ~/.claude/hooks/clawgate-writeback-guard.py"
 INTERVIEW = HOOK_PY + " ~/.claude/hooks/clawgate-task-interview-guard.py"
 BASH_GUARD = HOOK_PY + " ~/.claude/hooks/bash-guard.py"
+BG_CAPTURE = HOOK_PY + " ~/.claude/hooks/bg-command-capture.py"
 CLAWGATE_STOP = "/home/zach/.claude/clawgate-stop-hook.sh"
 TMUX_STOP = "~/.config/tmux/task-hook.sh"
 
@@ -247,10 +248,14 @@ def test_unrelated_settings_content_is_untouched(tmp_path):
     # 127 mid-switch, and a PreToolUse hook exiting 127 fails OPEN) while its
     # REGISTRATION is left exactly as it was — still ONE entry, still first, never
     # created and never duplicated. Two surfaces, two widths; see the registrant's
-    # docstring. The only other entry is the clawgate task interview guard, which
-    # the registrant DOES own. Asserted as a whole-list equality so a third entry,
-    # or a doubled bash-guard, fails it.
-    assert pre == [BASH_GUARD, INTERVIEW], pre
+    # docstring. The other entries are ones the registrant DOES own: the clawgate
+    # task interview guard, and the backgrounded-command capture log (868ktvqf9),
+    # which is INSTRUMENTATION — it emits no permissionDecision and cannot refuse a
+    # command, so its presence here widens what PreToolUse OBSERVES and not what it
+    # can block. Asserted as a whole-list equality, IN ORDER, so a fourth entry or a
+    # doubled bash-guard fails it — the strictness is the point, and is why adding a
+    # PreToolUse hook has to come through this line.
+    assert pre == [BASH_GUARD, INTERVIEW, BG_CAPTURE], pre
 
 
 def test_a_settings_file_that_already_has_the_nudge_is_left_byte_identical(tmp_path):

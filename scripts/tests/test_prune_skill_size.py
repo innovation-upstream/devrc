@@ -30,7 +30,7 @@ WHY THE CEILING IS ABOVE THE 12,288 B TARGET, AND WHAT THAT COSTS
 -----------------------------------------------------------------
 The skill states a 12,288 B target and browser-bridge MEETS it while routing ~11x
 its own weight, so the target is achievable and is not in dispute.
-This file does not: it sits at 12,859 B (12.56 KiB) after being cut from 14,918 B
+This file does not: it sits at 12,812 B (12.51 KiB) after being cut from 14,918 B
 by demoting §6 (landing), §4's deployment table, §7's verification rationale, §0's
 axes and the always-loaded model to three sidecars, plus stripping evidence from
 every remaining section.
@@ -53,8 +53,8 @@ because a permanently-red gate trains everyone to click through -- which
 leaner is the intended direction of travel; raising it needs the same kind of
 justification recorded above.
 
-The honest accounting: the skill is 571 B -- 4.65% -- over the target it asks
-others to meet (12,859 against 12,288; `skill-audit.py` prints the same 571 B
+The honest accounting: the skill is 524 B -- 4.26% -- over the target it asks
+others to meet (12,812 against 12,288; `skill-audit.py` prints the same 524 B
 independently). That is disclosed in the body, in the PR that introduced it, and
 here. Every number in this docstring is re-measured, not carried forward: an
 earlier revision restated a size, a growth figure, a percentage and a per-pass
@@ -70,11 +70,11 @@ import pytest
 
 # The hard ceiling: SKILL.md must never exceed this many bytes.
 #
-# NOT a derivation -- a measured position. SKILL.md is 12,859 B (`stat -c %s` and
-# `git cat-file -s` agree), so 13,056 leaves 197 B of headroom, of which
-# MIN_HEADROOM_BYTES (192) is the floor that must remain: 5 B of true working
-# room before the headroom test fires -- i.e. effectively none; the next edit
-# here must evict something. The comment here previously read
+# NOT a derivation -- a measured position. SKILL.md is 12,812 B (`stat -c %s` and
+# `git cat-file -s` agree), so 13,056 leaves 244 B of headroom, of which
+# MIN_HEADROOM_BYTES (192) is the floor that must remain: 52 B of true working
+# room before the headroom test fires -- i.e. barely any; the next edit
+# here will likely have to evict something. The comment here previously read
 # "12,864 B measured + 192 B headroom"; the file measured 12,834 at the time, so
 # the arithmetic was describing a size the file never had. Re-measure before
 # touching this number, and lower it as the file gets leaner -- never raise it.
@@ -250,23 +250,48 @@ def _resolve_routing_path(token: str) -> Path:
     return _under_repo(SKILL_DIR, token)
 
 
-def _dangling_routes(body: str) -> list[str]:
+def dangling_routes_in(body: str, resolve) -> list[str]:
     """Direction 1 of the gate: routing paths in `body` that resolve to no file.
 
     Factored out so the probes at the bottom of this module grade THE GATE
     rather than a re-implementation of it. A probe that rebuilt this pipeline
     out of `_routing_paths` and `_resolve_routing_path` by hand would stay green
     against a mutation of the wiring between them.
+
+    🔴 AND PARAMETERISED BY `resolve`, NOT BOUND TO THIS SKILL. A second
+    size-gate module (`test_session_manager_skill_size.py`) gates a different
+    skill through the same tokenizer with its own resolver base, and it started
+    life with the pipeline open-coded inside each assertion AND again inside
+    each probe. Measured on that module before this refactor: forcing the
+    verdict to a constant (`dangling = sorted(set())`, `unrouted = []`) left all
+    nine of its routing tests GREEN -- the probes graded a copy, so the gate
+    could be deleted without a red. One rule, one place: both modules now bind
+    their own `resolve` to this body.
     """
-    return sorted(
-        {t for t in _routing_paths(body) if not _resolve_routing_path(t).is_file()}
-    )
+    return sorted({t for t in _routing_paths(body) if not resolve(t).is_file()})
+
+
+def unrouted_topics_in(registry: str, topics, reference_dir: Path, resolve) -> list[str]:
+    """Direction 2 of the gate: topics on disk the registry does not route to.
+
+    Takes the ALREADY-EXTRACTED registry block rather than the whole body: each
+    skill locates its own registry (different marker, different terminator), and
+    that extraction is the one part of the pipeline that is genuinely per-skill.
+    """
+    routed = {resolve(t) for t in _routing_paths(registry)}
+    return [t for t in topics if reference_dir / t not in routed]
+
+
+def _dangling_routes(body: str) -> list[str]:
+    """This skill's binding of `dangling_routes_in`."""
+    return dangling_routes_in(body, _resolve_routing_path)
 
 
 def _unrouted_topics(body: str) -> list[str]:
-    """Direction 2 of the gate: topics on disk the registry does not route to."""
-    routed = {_resolve_routing_path(t) for t in _routing_paths(_registry_block(body))}
-    return [t for t in _existing_topics() if REFERENCE_DIR / t not in routed]
+    """This skill's binding of `unrouted_topics_in`."""
+    return unrouted_topics_in(
+        _registry_block(body), _existing_topics(), REFERENCE_DIR, _resolve_routing_path
+    )
 
 
 def _existing_topics() -> list[str]:

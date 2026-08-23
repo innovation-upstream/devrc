@@ -1,6 +1,6 @@
 ---
 name: bar
-description: "Fix or extend the i3status-rust status bar and its status-count poller — add/reorder blocks, tune the hide-at-zero count pills and their --red-above thresholds, wire block<->poller signals, debug the bar-status-poll timer and its dunst toasts. Use for: the status/i3 bar, a bar block/icon/threshold, the alert/mail/clawgate/civitai pills, bar-status-poll, ~/.cache/bar-status, the DND/rig-control bar buttons, \"the bar is wrong/stale/red\"."
+description: "Fix or extend the i3status-rust status bar and its status-count poller — add/reorder blocks, tune the count pills and their thresholds, debug the bar-status-poll timer and its dunst toasts. Use for: the status/i3 bar, a bar block/icon/threshold, the alert/mail/clawgate/civitai pills, bar-status-poll, ~/.cache/bar-status, the DND/rig-control bar buttons, \"the bar is wrong/stale/red\"."
 ---
 
 # i3status-rust status bar — operations

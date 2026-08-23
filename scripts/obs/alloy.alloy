@@ -6,11 +6,32 @@
 // because `zach` is in `wheel`, and systemd's journal ACLs grant `wheel` full
 // read of the system journal.
 //
+// AUTHENTICATION: there is deliberately NO `basic_auth` block.
+//
+// The receivers this ships to are unauthenticated, and a `basic_auth` block is
+// NOT conditional — Alloy has no `if`. Sourcing empty values from the
+// environment does NOT mean "no auth": measured against alloy 1.17.1 with a
+// header-echoing listener,
+//     basic_auth with username="" password=""  ->  Authorization: Basic Og==
+//     no basic_auth block at all               ->  no Authorization header
+// and `Og==` decodes to ":". So an env-driven block always asserts credentials,
+// which is a claim the deployment does not make. Omitting it is the honest
+// encoding of "these endpoints need no auth".
+//
+// IF AN ENDPOINT LATER REQUIRES AUTH, add the block back here explicitly:
+//     basic_auth {
+//       username = sys.env("OBS_USERNAME")
+//       password = sys.env("OBS_PASSWORD")
+//     }
+// Do NOT instead put credentials in the URL (`http://user:pass@host/...`).
+// That works — measured, it yields the correct header — but alloy logs `url=`
+// in remote_write error messages, so the credentials land in the journal.
+//
 // 🔴 NO ENDPOINT, HOSTNAME OR CREDENTIAL MAY BE WRITTEN INTO THIS FILE.
 // devrc is a PUBLIC repo. Every site-specific value comes from the environment,
 // supplied by an EnvironmentFile outside the nix store:
 //     ~/.config/obs-ship/env      (gitignored, per-host, 0600)
-// Required: OBS_PROM_URL, OBS_LOKI_URL, OBS_USERNAME, OBS_PASSWORD, OBS_HOST
+// Required: OBS_PROM_URL, OBS_LOKI_URL, OBS_HOST
 //
 // Validated AT BUILD TIME by nix/observability.nix, which runs `alloy validate`
 // in a derivation — so an invalid config fails `home-manager switch` and cannot
@@ -32,11 +53,6 @@ logging {
 prometheus.remote_write "homelab" {
   endpoint {
     url = sys.env("OBS_PROM_URL")
-
-    basic_auth {
-      username = sys.env("OBS_USERNAME")
-      password = sys.env("OBS_PASSWORD")
-    }
 
     // A laptop is off-network often (asleep, travelling, WiFi drop). Without a
     // generous WAL the agent drops samples during every ordinary disconnection,
@@ -77,10 +93,6 @@ loki.write "homelab" {
   endpoint {
     url = sys.env("OBS_LOKI_URL")
 
-    basic_auth {
-      username = sys.env("OBS_USERNAME")
-      password = sys.env("OBS_PASSWORD")
-    }
   }
 
   // 🔴 Without this, journal lines are DROPPED for the entire duration of any
