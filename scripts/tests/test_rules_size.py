@@ -60,9 +60,13 @@ ARCHIVE_MD = REPO_ROOT / "claude" / "RULES-ARCHIVE.md"
 # The hard ceiling: RULES.md must never exceed this many bytes.
 #
 # Sized off the post-split measurement, NOT off a round number and NOT off an
-# aspiration. At the split RULES.md was 33,105 B (down from 41,566 B); this
-# ceiling is that plus ~1.4 KB, i.e. room for a genuinely new rule or two before
-# anyone has to make a decision.
+# aspiration. At the split RULES.md was 33,105 B (down from 41,566 B) and the
+# ceiling was set ~1.4 KB above it -- room for a genuinely new rule or two
+# before anyone had to make a decision. ⚠ That describes the ORIGINAL sizing,
+# not the constant below: the dated ledger entries that follow have raised it
+# repeatedly, so read `MAX_BYTES` for the current value and never infer it from
+# this paragraph. (It read "this ceiling is that plus ~1.4 KB" in the present
+# tense until 2026-08-22, by which point it was understating by ~5.8 KB.)
 #
 # 🔴 This is an ANTI-REGROWTH gate, not a target. It is deliberately NOT set to
 # the 15 KB that motivated the split -- see the module docstring of the split PR
@@ -203,8 +207,10 @@ ARCHIVE_MD = REPO_ROOT / "claude" / "RULES-ARCHIVE.md"
 #
 # 🔴 THE COST IS REAL AND IS THE REASON THIS IS NOT GENEROUS. This file loads
 # EVERY session AND is concatenated into opencode's `AGENTS.md`, so every byte
-# is paid TWICE per session. At the new ceiling, full, that is roughly 9.6k
-# tokens per load and ~19k per session.
+# is paid TWICE per session. At the ceiling in force when this paragraph was
+# written that was roughly 9.6k tokens per load and ~19k per session; at the
+# current MAX_BYTES it is ~10.1k and ~20.2k. Recompute from MAX_BYTES rather
+# than trusting either figure -- both go stale on every bump.
 #
 # Sized in the same units as MIN_HEADROOM_BYTES rather than picked round: the
 # mean substantive bullet is ~500 B, so slack for SIX of them (3,000 B) plus the
@@ -238,7 +244,9 @@ ARCHIVE_MD = REPO_ROOT / "claude" / "RULES-ARCHIVE.md"
 #
 # The +400 matches the 2026-08-11 precedent's modesty rather than the sizing
 # formula above, which would give ~41,500 and make the gate decorative. It
-# leaves 1,208 B of headroom, i.e. one large rule above the floor.
+# leaves 1,208 B of headroom CEILING-relative -- 308 B above the FLOOR, i.e.
+# about a third of a large rule, not one. (Labelled retroactively; see the
+# MIND THE BASE note in the 2026-08-21 entry below.)
 #
 # 2026-08-21: 38,800 -> 39,200 (+400). The rule that would not fit was "a
 # control that SHARES the step you doubt is a second sample of the same
@@ -272,10 +280,147 @@ ARCHIVE_MD = REPO_ROOT / "claude" / "RULES-ARCHIVE.md"
 # two different methods, and returned 24 B against a 324 B rule.
 #
 # +400 rather than the +300 that would just clear MIN_HEADROOM_BYTES: +300
-# leaves 34 B of slack above the floor, which is the exact mistake the
-# 2026-08-20 entry diagnosed (32 B of slack -> "the next contributor got the
-# surprise, not the warning"). +400 leaves 1,010 B, i.e. one large rule.
-MAX_BYTES = 39_200
+# leaves single-digit-to-low-tens bytes above the floor. (The "34" this line
+# carried was computed against a 300 B DRAFT of a rule that shipped at 324 B;
+# at the committed size it is 10 B. The point holds at either value -- which is
+# why the number should not have been here at all.) That is the exact mistake
+# diagnosed by the UNDATED 35,200 -> 38,400 block above (32 B of slack -> "the
+# next contributor got the surprise, not the warning"). ⚠ That block is
+# 2026-08-15, `d8ffb466`; it carries no date header, which is what made this
+# line misattribute it to the 2026-08-20 entry. +400 leaves 1,010 B
+# CEILING-relative, i.e. one large rule.
+#
+# 2026-08-21 (later, #661): the zsh MULTIOS redirection trap cost 106 B and
+# RULES.md reached 38,296. 🔴 MIND THE BASE -- the two slack figures in this
+# module are measured from DIFFERENT points and subtracting one from the other
+# is meaningless: "1,010 B" above is CEILING-relative (MAX_BYTES - size), while
+# "4 B" here is FLOOR-relative (MAX_BYTES - size - MIN_HEADROOM_BYTES), and the
+# bases differ by MIN_HEADROOM_BYTES. Floor-relative, #642 left 110 B and #661
+# spent 106 of it, leaving 4. A draft of this PR's body did that subtraction
+# and reported the 106 B rule as having cost 1,006 B.
+#
+# Recorded because it is the gate working exactly as designed: the next author
+# got the WARNING at 4 B rather than the surprise at -1, which is the whole
+# reason MIN_HEADROOM_BYTES exists. No bump was needed or taken for it.
+#
+# 2026-08-22: 39,200 -> 40,300 (+1,100, in TWO steps -- see the bump note
+# below for why the second was forced). The rule that would not fit is the
+# proactivity gate -- "Default to PROCEEDING -- and never ask for what you can
+# measure yourself", a four-branch trigger tree in Push Back Before Acting.
+# It is the THIRD-largest bullet in the file, behind "Validate the INSTRUMENT"
+# and "Mutation-test a guard"; an earlier draft called it the largest, which
+# the 2026-08-11 entry above already contradicted. Its byte size is NOT stated
+# here -- see this entry's closing note on derived measurements for why. It is
+# over the ~900 B the MIN_HEADROOM_BYTES comment calls a large rule, and that is
+# deliberate: it is one decision tree with four branches, and splitting it
+# into four bullets costs MORE because each would restate the frame ("stop
+# only on a named trigger; each has its own response").
+#
+# 🔴 EVICTION WAS NOT SKIPPED -- IT WAS PAID BY CONSOLIDATION, WHICH IS WHAT
+# THE 2026-08-11 ENTRY SAID THE ANSWER WOULD BE ("the answer is consolidation
+# ... not another bump"). The tree SUBSUMES two existing bullets, which were
+# deleted, not narrowed: "Flag BEFORE acting, not after" (its whole imperative
+# survives verbatim in the outward-facing branch -- own your uncertainty, the
+# concrete blast radius, "your call to proceed", mass rollouts and prod
+# changes) and "User-facing micro-decisions" (its trigger list survives
+# verbatim as the Fork branch's parenthetical, and "don't ship-then-rework"
+# with it). The two deleted bullets are fixed history and can be stated: 295 B
+# + 192 B = 487 B of text, 489 B counting their newlines. The NET cost is not
+# stated, because it is a function of a bullet that kept changing -- and note
+# the convention trap that produced two wrong numbers here already: a text-only
+# bullet minus a newline-counted eviction corresponds to NOTHING. Subtract
+# like from like -- or measure both ends directly, the way the docstring at
+# the top of this module already does it:
+# `git show <merge-base>:claude/RULES.md | wc -c`. NOT `git diff --stat`,
+# which counts LINES for a text file and answers a different question.
+#
+# 🔴 A COLD READ CAUGHT ONE SCOPE LOSS; A BLIND AUDIT THEN CAUGHT THREE MORE.
+# That ratio is the reusable part -- the cold read is necessary and was not
+# sufficient, and the author who just wrote the replacement is the worst
+# reader of it. What the cold read caught: the first draft's Fork branch read
+# "two readings => materially different work", silently dropping the deleted
+# bullet's "surface DISAGREEMENT, risk, or a SIMPLER PATH".
+#
+# What it MISSED, and an adversarial audit found by diffing clause-by-clause
+# against `git show origin/main:claude/RULES.md`:
+#   1. The RESPONSE imperatives moved. On main, "own your uncertainty, state
+#      the concrete blast radius, end with 'your call to proceed'" and "get
+#      direction" governed the WHOLE bullet -- both {disagreement, risk,
+#      simpler path} and {high-blast-radius actions}. The draft left them only
+#      on the outward-facing branch, so Fork kept the trigger and lost the
+#      response. The words survived verbatim while the COVERAGE halved, which
+#      is this file's own "a guard's DESCRIPTION claims COVERAGE" failure
+#      wearing a different hat. Fixed by hoisting them to govern both branches
+#      ("On BOTH of those: ..."), which also costs fewer bytes than stating
+#      them twice.
+#   2. The TRIGGER CATEGORY was swapped while its examples were kept. Main's
+#      category was "high-blast-radius autonomous actions", with mass rollouts
+#      and prod changes as EXAMPLES; the draft replaced the category with
+#      "leaves this machine or cannot be undone" and kept the examples, so a
+#      local, git-reversible, high-blast-radius action (a 200-file mechanical
+#      refactor) matched main and matched NO branch of the tree. Note the
+#      draft's own justification -- "a closed list is NARROWER than the shape
+#      it samples" -- argues against what it did: keeping the samples while
+#      replacing the shape is not scope-preserving. Both categories now ship.
+#   3. The micro-decisions trigger CONDITION vanished. Main fired on options
+#      "with several reasonable options"; only the parenthetical example list
+#      survived, and it had re-attached grammatically to "a simpler path".
+#      Restored, along with "present the choice" -- which is a different act
+#      from "one question with a recommendation" (show the options vs advocate
+#      one), so the shipped wording does both.
+#
+# Read a consolidation cold against every bullet it deletes, AND have someone
+# who did not write it diff the clauses. The ceiling tests cannot see this
+# class of loss -- a mutant that guts the rule to a 60 B stub while keeping
+# its `-> archive:` tag passes all five of them.
+#
+# The duplication sweep the 2026-08-20 entry asked for and the 2026-08-21 entry
+# ran to completion is NOT re-run here: it finished one day earlier, by two
+# methods, over every core line >120 B against the whole archive, and returned
+# 24 B. Re-running it a day later finds the same nothing.
+#
+# 🔴 THE OUTWARD-FACING BRANCH IS A SHAPE, NOT A LIST, AND THAT SAVED 61 B
+# WHILE WIDENING THE RULE. The draft enumerated ten instances (push, PR, email,
+# publish, deploy, delete, overwrite, force, prod, mass rollout). A closed list
+# is NARROWER than the shape it samples -- this file's own opening rule is
+# "read every rule at its WIDEST reading", and an enumeration invites "mine
+# isn't on the list", which is precisely how the `git stash` ban failed. It
+# ships as "anything that leaves this machine or cannot be undone, mass
+# rollouts and prod changes included": the two instances that survive are the
+# two the deleted bullet named, so no scope was lost.
+#
+# 🔴 THE BUMP WAS +900 AND HAD TO BECOME +1,100 WITHIN THE SAME PR, WHICH IS
+# ITSELF THE FINDING. Slack figures in this entry are FLOOR-relative unless
+# the sentence says otherwise -- and one below does, so read the label, not
+# this blanket. +900 left 186 B. A blind adversarial audit then
+# found three scope losses in the consolidation (below), and restoring them
+# cost 130 B -- taking slack to 56 B (FLOOR-relative), i.e. the sub-one-bullet
+# slack mistake the UNDATED 2026-08-15 block (`d8ffb466`) diagnosed at 32 B,
+# reproduced by the very round that was
+# fixing a different narrowing. So: a ceiling sized to leave less than one
+# bullet is not merely tight, it cannot absorb its OWN review round. Size the
+# margin to survive the audit, not to clear the floor.
+#
+# 🔴 THE REMAINING SLACK IS DELIBERATELY NOT WRITTEN DOWN, AND THAT IS THIS
+# ENTRY'S LAST FINDING. Three consecutive rounds stated it and three
+# consecutive rounds invalidated it -- 186 -> 56, then 256 -> 177 -- each time
+# by the very edit that wrote the figure, in the module whose own docstring
+# says a second hand-maintained copy of a number "is exactly how the drift
+# regrows". A derived measurement does not belong in prose that is edited in
+# the same commit as the thing it measures. `test_rules_md_keeps_working_
+# headroom` already PRINTS current / ceiling / free / budget / RECLAIM on
+# failure; that is the authority. Same for the sizing formula: it is
+# size + 3,900, and two drafts carried a stale absolute forward rather than
+# recomputing it.
+#
+# What IS durable: the slack after +1,100 is under one bullet FLOOR-relative
+# (it is over one ceiling-relative -- the bases disagree about this very claim,
+# which is why the sentence must name one), so the next real rule pays ceiling.
+# When it does, the answer is the consolidation
+# this entry demonstrated, applied to the Verification Honesty cluster -- the
+# largest section in the file and the one with the most sibling bullets
+# sharing a frame -- not another bump.
+MAX_BYTES = 40_300
 
 # Required working margin below the ceiling.
 #
