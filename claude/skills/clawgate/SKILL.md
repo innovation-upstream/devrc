@@ -59,7 +59,7 @@ Memories: `clawgate-phase2` · `clawgate-phase3` · `clawgate-runbooks` ·
 | LAN URL (hook + UI) | `http://192.168.50.250:30302` (NodePort) — **OPEN, no auth**; machine endpoints still need the token |
 | Public / nebula URL | `https://clawgate.zacx.dev` behind **Authelia passkey** (portal `login.zacx.dev`); laptop `http://10.42.0.10:8109` (homelab gateway) |
 | Hook events | `PermissionRequest` (`CLAWGATE_REMOTE_APPROVAL=off`) + `Stop` (async, `CLAWGATE_SUGGEST=off`), both in `~/.claude/settings.json`, ON by default. 🔴 The `Stop` array also carries **two** unrelated hooks (`tmux/task-hook.sh`, `claude-notify.py`) — **preserve both** |
-| 🔴 Machine client | **`clawgatectl`** (devrc `nix/pkgs/tools/clawgatectl.nix`; on PATH after a switch). 🔴 **Built from a LOCAL working tree of homelab-talos, so it can be present but STALE** — a behind checkout ships a binary MISSING verbs that prints help and **exits 0** under a plausible version label. Closed both ways (devrc #536): the version derives from the compiled source, and `drift-check.sh` **rc 17** reports a stale source subtree per host; a checkout lacking `cmd/clawgatectl` gets no binary at all. **Exactly eight commands**: `health` · `agent ls` · `agent resolve <name> [--id]` · `task ls/get/create` · **`task status <id> <status>`** · **`task comment <id> --body …`** (the last two hit pre-existing routes — NO server release needed). Reads `clawgate.env` itself (no token in argv); JSON on stdout only; rc 0–8. **Every other route is still curl.** `task-api.md` |
+| 🔴 Machine client | **`clawgatectl`** (devrc `nix/pkgs/tools/clawgatectl.nix`; on PATH after a switch). 🔴 **Built from a LOCAL working tree of homelab-talos, so it can be present but STALE** — a behind checkout ships a binary MISSING verbs that prints help and **exits 0** under a plausible version label. JSON on stdout only; rc 0–8. **Every other route is still curl.** Commands, config, the staleness closure and the skew note: `task-api.md` |
 
 🔴 **clawgate has NO human auth of its own** (since 0.7.37): `requireSession` is a pass-through no-op,
 so **the LAN NodePort is fully unauthenticated** — including `DELETE /tasks/{id}` and 🔴 **`POST
@@ -144,6 +144,12 @@ deployment**, so the 7d default is LIVE — it now costs a tag, not the task (`o
 create** — a load-bearing wire contract producers key their retry on.
 ⚠ **A task body may carry extension-picked element references** — never search the selector first
 (`element-references.md`).
+
+⚠ **Task↔session threads (#357) are ONE-WAY.** `/ui/tasks` shows a `👥 N` chip, but
+`GET /api/tasks/{id}/sessions` **404s** — only the reverse `GET /api/sessions/{id}/tasks` is
+callable and `clawgatectl` has neither, so *"which sessions worked task N"* is **UI-only**.
+🔴 Membership OVER-reports and never downgrades: a 400-rejected PATCH still records `worked` (#306),
+and a subagent inherits the parent's session id. `task-api.md`
 
 **Writing/debugging a producer? Load `task-api.md`** — per-op semantics + status codes,
 409/immutability, the author allowlist, provenance, tag grammar, the route×auth inventory.
