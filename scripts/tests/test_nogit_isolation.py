@@ -1026,6 +1026,226 @@ def test_a_repo_local_change_still_FAILS_when_no_cotenant_is_proven(tmp_path):
         f"the failure did not NAME the file that changed:\n{block}\n---\n{out}")
 
 
+# --------------------------------------------------------------------------- #
+# 🔴 THE ATTRIBUTION MESSAGE — WHAT MOVED, AND WHICH HYPOTHESIS IT SUPPORTS
+# --------------------------------------------------------------------------- #
+# MEASURED 2026-08-23 on the operator's box: GUARD 10 flagged `<devrc>/.git/config`
+# FOUR separate times in one day and each time the message named whichever target
+# was in teardown ("…so the change is attributed to this target"). Every one of
+# those writes was a concurrent `git branch` / `worktree add` in the shared clone.
+# Cost: a four-run experiment by one agent and a diagnosis pass by the operator,
+# all of it auditing tests that had done nothing.
+#
+# The DETECTION is deliberately unchanged — an unattributable repo-local delta
+# still fails the run, and the controls below pin that in both directions. What
+# these tests pin is the MESSAGE: the key names that moved, and a ranking that
+# follows them rather than always landing on the target.
+#
+# WHAT IS REGRESSION COVERAGE HERE AND WHAT IS NOT:
+#   * `test_an_ORDINARY_git_delta_does_not_blame_the_target` is THE regression
+#     test. Base prints the accusatory sentence and no key delta at all.
+#   * the HAZARD, VALUE and NOT-VISIBLE tests are NEGATIVE CONTROLS on the
+#     ranking, the redaction and the empty list. They are red at base only
+#     because base emits none of this; the behaviour they defend is "the fix did
+#     not overshoot into always excusing the target", "a config VALUE is never
+#     printed", and "an unobservable delta says so instead of rendering blank".
+
+def _plant_repo_local_keys(scratch: Path, *pairs: tuple[str, str]) -> str:
+    """A shell target that writes specific KEYS into the scratch clone's config.
+
+    Same no-shebang convention as `_plant_repo_local_write` above, and for the
+    same reason: `run-tests.sh` invokes SHELL_TESTS as `bash "$SHELL_TEST"`.
+    """
+    name = "g10-write-keys.sh"
+    body = "set -euo pipefail\n" + "".join(
+        f'git -C "{scratch}" config {k} {v}\n' for k, v in pairs)
+    (scratch / name).write_text(body, encoding="utf-8")
+    return name
+
+
+def test_an_ORDINARY_git_delta_does_not_blame_the_target(tmp_path):
+    """🔴 THE REGRESSION TEST for the four misattributions of 2026-08-23.
+
+    `branch.<name>.remote` / `.merge` appearing in a clone's SHARED config is
+    what `git branch --track`, `checkout -b --track` and `push -u` write. The
+    run must still FAIL — that is the guard's job and it is unchanged — but the
+    message must name the keys and rank the concurrent writer FIRST, instead of
+    telling the reader the target did it.
+    """
+    scratch = _scratch_root(tmp_path)
+    name = _plant_repo_local_keys(
+        scratch,
+        ("branch.topic-x.remote", "origin"),
+        ("branch.topic-x.merge", "refs/heads/topic-x"))
+    runner = _runner_over(tmp_path, scratch, [name])
+
+    assert not live_cotenants([scratch / ".git"]), (
+        "something is already sitting in this scratch root, so this run would "
+        "take the DOWNGRADE arm and measure a different message")
+    proc = _run_at(runner, scratch, tmp_path)
+    out = proc.stdout + proc.stderr
+
+    # 🔴 THE DETECTION IS UNCHANGED. Without this the whole fix is satisfied by
+    # a patch that simply stops failing, which is the outcome the message was
+    # annoying enough to tempt someone into.
+    assert proc.returncode != 0, (
+        f"the run PASSED — the message fix silently disarmed the guard:\n{out}")
+
+    block = _guard10_failure_block(out)
+    assert block, f"GUARD 10's failure block was not printed at all:\n{out}"
+    # The sentence that was wrong four times. Its absence is the fix.
+    assert "attributed to this target" not in block, (
+        f"the failure still hands the reader a VERDICT it cannot support:\n{block}")
+    assert "WINDOW, NOT A CULPRIT" in block, (
+        f"the failure did not say the target is the window rather than the "
+        f"writer:\n{block}")
+    # 🔴 The keys themselves, in GUARD 10's block — not merely somewhere in the
+    # run. Same reason `_guard10_failure_block` exists.
+    assert "+ branch.topic-x.remote" in block, (
+        f"the failure did not name the key that moved:\n{block}")
+    assert "+ branch.topic-x.merge" in block, (
+        f"the failure named only one of the two keys that moved:\n{block}")
+    assert "SHAPE: ORDINARY GIT" in block, (
+        f"the failure did not classify the delta's shape:\n{block}")
+    assert "LEADING hypothesis is a concurrent git command" in block, (
+        f"the failure did not rank the concurrent writer first:\n{block}")
+    # A ranking, never a clearance — the probe proved nothing either way.
+    assert "RANKING, not a verdict" in block, (
+        f"the failure presented its ranking as a finding:\n{block}")
+    assert "worktree list" in block, (
+        f"the failure did not hand over the discriminator for the blind spot it "
+        f"just admitted to:\n{block}")
+
+
+def test_a_HAZARD_shaped_delta_still_points_at_the_target(tmp_path):
+    """🔴 NEGATIVE CONTROL ON THE RANKING — the fix must not overshoot.
+
+    `core.hooksPath` written into a clone's config is the 2026-08-21 incident
+    itself. If the new wording led with "the target is the window, not a
+    culprit" here it would have traded one confident misdiagnosis for its
+    mirror image, and the guard's whole reason for existing reads as noise.
+    """
+    scratch = _scratch_root(tmp_path)
+    name = _plant_repo_local_keys(
+        scratch, ("core.hooksPath", "/tmp/planted-by-a-test"))
+    runner = _runner_over(tmp_path, scratch, [name])
+
+    proc = _run_at(runner, scratch, tmp_path)
+    out = proc.stdout + proc.stderr
+    assert proc.returncode != 0, (
+        f"a core.hooksPath write into the clone's config PASSED:\n{out}")
+
+    block = _guard10_failure_block(out)
+    assert block, f"GUARD 10's failure block was not printed at all:\n{out}"
+    # git lower-cases key names in `--list`; pin what is actually printed.
+    assert "+ core.hookspath" in block, (
+        f"the failure did not name the key that moved:\n{block}")
+    assert "SHAPE: HAZARD" in block, (
+        f"the incident's own key shape was not classified as a hazard:\n{block}")
+    assert "AUDIT THIS TARGET FIRST" in block, (
+        f"the failure did not send the reader to the target:\n{block}")
+    assert "WINDOW, NOT A CULPRIT" not in block, (
+        f"the failure led with the concurrent-writer excuse on a delta that is "
+        f"the 2026-08-21 incident's own shape:\n{block}")
+
+
+def test_the_key_delta_never_prints_a_config_VALUE(tmp_path):
+    """🔴 NEGATIVE CONTROL ON REDACTION, with its positive control beside it.
+
+    `<git-common-dir>/config` holds `remote.<name>.url`, which on some clones
+    carries a token, and this output lands in CI logs. The rendering prints key
+    NAMES only — so a value-only change must still surface (positive control:
+    the key name appears, marked `~`) while the value must not appear ANYWHERE
+    in the run's output, not merely outside GUARD 10's block.
+    """
+    scratch = _scratch_root(tmp_path)
+    secret = "s3cr3t-token-that-must-never-be-printed"
+    seed = subprocess.run(
+        ["git", "-C", str(scratch), "config", "remote.origin.url",
+         "https://example.invalid/before"],
+        capture_output=True, text=True, timeout=120)
+    assert seed.returncode == 0, f"could not seed the remote URL:\n{seed.stderr}"
+    name = _plant_repo_local_keys(
+        scratch, ("remote.origin.url", f"https://example.invalid/{secret}"))
+    runner = _runner_over(tmp_path, scratch, [name])
+
+    proc = _run_at(runner, scratch, tmp_path)
+    out = proc.stdout + proc.stderr
+
+    # Positive control: the write really landed, so a clean output below is
+    # about the RENDERING and not about a write that never happened.
+    assert secret in (scratch / ".git" / "config").read_text(encoding="utf-8"), (
+        "the planted value never reached the config — this run proves nothing")
+    block = _guard10_failure_block(out)
+    assert block, f"GUARD 10's failure block was not printed at all:\n{out}"
+    assert "~ remote.origin.url" in block, (
+        f"a VALUE-only change did not surface as a moved key:\n{block}")
+    assert secret not in out, (
+        "a git config VALUE was printed into the run's output")
+
+
+def test_bytes_that_move_with_no_key_delta_SAY_SO(tmp_path):
+    """🔴 AN EMPTY LIST WOULD BE A CLAIM ABOUT THE FILE, NOT THE PARSE.
+
+    A comment appended to `.git/config` moves the bytes the tripwire hashes and
+    changes nothing `git config --list` reports. Rendering that as an empty
+    "keys that moved" list reads as "nothing identifiable changed" — which is
+    the same shape of confident silence this whole fix exists to remove.
+    """
+    scratch = _scratch_root(tmp_path)
+    name = "g10-comment.sh"
+    (scratch / name).write_text(
+        "set -euo pipefail\n"
+        f'printf "\\t# planted by a test\\n" >> "{scratch}/.git/config"\n',
+        encoding="utf-8")
+    runner = _runner_over(tmp_path, scratch, [name])
+
+    proc = _run_at(runner, scratch, tmp_path)
+    out = proc.stdout + proc.stderr
+    assert proc.returncode != 0, (
+        f"a byte-level change to the clone's config PASSED:\n{out}")
+
+    block = _guard10_failure_block(out)
+    assert block, f"GUARD 10's failure block was not printed at all:\n{out}"
+    assert "NOT VISIBLE" in block, (
+        f"a delta with no visible keys rendered as an empty list:\n{block}")
+    assert "no key-level delta was visible" in block, (
+        f"the failure did not say WHY the key list is empty:\n{block}")
+    assert "SHAPE: UNRECOGNISED" in block, (
+        f"an unobservable delta was ranked instead of declared unrankable:"
+        f"\n{block}")
+
+
+def test_the_DOWNGRADED_block_also_carries_the_key_delta(tmp_path):
+    """The reader's question is the same whether the run failed or not.
+
+    A downgrade answers "this will not fail you"; it does not answer "who wrote
+    it". The rows are already recorded, so withholding them here would leave the
+    #730 arm — the common one on the operator's box — as uninformative as the
+    message this change replaced.
+    """
+    scratch = _scratch_root(tmp_path)
+    name = _plant_repo_local_keys(scratch, ("branch.topic-y.remote", "origin"))
+    runner = _runner_over(tmp_path, scratch, [name])
+
+    with _cotenant(scratch):
+        proc = _run_at(runner, scratch, tmp_path)
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 0, (
+        f"a repo-local change with a PROVEN external writer failed the run — "
+        f"this test is measuring the wrong arm:\n{out}")
+
+    head = "---- repo-local git config: REPORTED, not enforced (#730) ----"
+    tail = "This file is the git COMMON dir's config"
+    assert head in out and tail in out, (
+        f"the downgrade block was not printed as expected:\n{out}")
+    block = out.split(head, 1)[1].split(tail, 1)[0]
+    assert "+ branch.topic-y.remote" in block, (
+        f"the downgrade block did not say WHICH key moved:\n{block}")
+    assert "SHAPE: ORDINARY GIT" in block, (
+        f"the downgrade block did not classify the delta's shape:\n{block}")
+
+
 def test_a_global_change_FAILS_even_with_a_cotenant_PROVEN(tmp_path):
     """🔴 NEGATIVE CONTROL on the CLASS BOUNDARY — NOT regression coverage.
 

@@ -2126,6 +2126,108 @@ _nogit_is_repo_local() { # $1 = path -> 0 when it is the shared repo-local confi
   done
   return 1
 }
+_nogit_repo_local_index() { # $1 = path -> its slot in NOGIT_REPO_LOCAL, or nothing
+  local p="$1" i
+  for ((i = 0; i < ${#NOGIT_REPO_LOCAL[@]}; i++)); do
+    [ "${NOGIT_REPO_LOCAL[i]}" = "$p" ] && { printf '%s' "$i"; return 0; }
+  done
+  return 1
+}
+
+# --- WHAT MOVED, BY KEY NAME ---------------------------------------------------
+# 🔴 THIS IS THE FIX FOR AN ATTRIBUTION MESSAGE, NOT A NEW DETECTOR. The verdict
+# is unchanged: an unattributable repo-local delta still FAILS exactly as before.
+# What changed is that the failure now says WHICH KEYS moved, because that is the
+# one thing that separates the two hypotheses and the guard already had it.
+#
+# MEASURED 2026-08-23: on the operator's box GUARD 10 flagged
+# `<devrc>/.git/config` four separate times in one day and each time the message
+# named whichever target was in teardown. Every one of those writes was a
+# concurrent `git branch` / `worktree add` in the shared clone. The cost was a
+# four-run experiment by one agent and a diagnosis pass by the operator — all of
+# it spent auditing tests that had done nothing. `branch.<name>.remote` appearing
+# in the operator's real clone and a fixture write escaping a tmpdir are
+# STRUCTURALLY different events; the old sentence rendered them identically.
+#
+# 🔴 KEY NAMES ONLY, NEVER VALUES — and that is a hard requirement, not tidiness.
+# `<git-common-dir>/config` legitimately holds `remote.origin.url`, which on some
+# clones carries a token, and this output lands in CI logs. The rendering below
+# prints the left-hand side of each entry and nothing else; a VALUE-ONLY change
+# still surfaces, as `~ <key>`, with the value itself never leaving this file.
+#
+# `--list -z` rather than plain `--list`: with `-z` git separates ENTRIES with
+# NUL and key from value with a newline, so a multi-line config value cannot
+# masquerade as extra entries. Folding it back to one line per entry keeps the
+# diff a line diff.
+_nogit_config_entries() { # $1 = path -> "<key> <value…>", one per entry, sorted
+  [ -f "$1" ] || return 0
+  git config --file "$1" --list -z 2>/dev/null \
+    | tr '\n' ' ' | tr '\0' '\n' | LC_ALL=C sort
+}
+# $1 = before-snapshot file, $2 = after-snapshot file -> "<sign> <key>" lines.
+#   +  the key is new       -  the key is gone       ~  its value moved
+# Set semantics: two identical entries collapse to one, so a duplicated line is
+# invisible here. That is a limit of the RENDERING; the sha256 tripwire above is
+# what decides whether anything changed at all, and it saw the bytes.
+_nogit_key_delta() {
+  LC_ALL=C awk '
+    function key(l) { sub(/ .*$/, "", l); return l }
+    NR == FNR { b[$0] = 1; next }
+    { a[$0] = 1 }
+    END {
+      for (l in b) if (!(l in a)) rm[key(l)] = 1
+      for (l in a) if (!(l in b)) ad[key(l)] = 1
+      for (k in rm) if (k in ad) { ch[k] = 1; delete rm[k]; delete ad[k] }
+      for (k in ch) print "~ " k
+      for (k in ad) print "+ " k
+      for (k in rm) print "- " k
+    }' "$1" "$2" 2>/dev/null | LC_ALL=C sort -k2 -k1
+}
+# 🔴 THE SHAPE VERDICT RANKS TWO HYPOTHESES; IT NEVER CLEARS THE TARGET.
+# $1 = the "<sign> <key>" lines -> one of: ordinary | hazard | unrecognised
+#
+#   hazard   any `core.*` / `user.*` / `url.*` / `http.*` / `credential.*` /
+#            `include*` / `alias.*` key, PLUS `remote.<name>.url|pushurl`. That
+#            is the 2026-08-21 incident's own shape (`core.hooksPath` --global,
+#            `core.bare = true` on a populated tree, ~63 fixture commits pushed
+#            to the REAL origin); nothing routine rewrites these in an existing
+#            clone. Hazard WINS over ordinary in a mixed delta — the safe
+#            direction, and the reason `remote.<name>.url` is HERE while the
+#            rest of `remote.*` is below: `git remote add` in a test is how a
+#            fixture reaches a real remote, and no ordinary session rewrites an
+#            established clone's origin URL mid-run.
+#   ordinary `branch.*` / `remote.*` (except the two above) / `worktree.*` /
+#            `submodule.*` / `maintenance.*` / `extensions.worktreeconfig`, and
+#            nothing else. These are what `git branch`, `checkout -b`,
+#            `push -u`, `worktree add` and `maintenance start` write. A hermetic
+#            test works under a tmpdir and has no route to them in the
+#            operator's real clone.
+#   unrecognised  anything else, including an empty delta. Ranked as NEITHER —
+#            an unknown key must not be laundered into "probably concurrent".
+_nogit_delta_shape() {
+  local delta="$1"
+  [ -n "$delta" ] || { printf 'unrecognised'; return 0; }
+  if printf '%s\n' "$delta" \
+     | grep -qiE '^[+~-] (core|user|url|http|credential|include|includeif|alias)\.|^[+~-] remote\..*\.(url|pushurl)$'; then
+    printf 'hazard'; return 0
+  fi
+  if printf '%s\n' "$delta" \
+     | grep -qvE '^[+~-] (branch|remote|worktree|submodule|maintenance)\.|^[+~-] extensions\.worktreeconfig$'; then
+    printf 'unrecognised'; return 0
+  fi
+  printf 'ordinary'
+}
+# $1 = target, $2 = path -> the shape of THAT file's delta, or `none` when this
+# run recorded no key rows for the pair (the GLOBAL class). One reader for the
+# rows, used by the renderer and by the headline, so the two cannot disagree.
+_nogit_shape_for() {
+  local rows delta
+  rows="$(awk -F'\t' -v t="$1" -v p="$2" '$1 == t && $2 == p { print $3 }' \
+          "$NOGIT_KEYS_LOG" 2>/dev/null || true)"
+  [ -n "$rows" ] || { printf 'none'; return 0; }
+  delta="$(printf '%s\n' "$rows" | grep -v '^? ' || true)"
+  _nogit_delta_shape "$delta"
+}
 
 _nogit_fingerprint_of() { # $@ = paths -> one line each: "<sha256|ABSENT> <path>"
   local f
@@ -2146,10 +2248,16 @@ NOGIT_CONFIG="$NOGIT_DIR/gitconfig"
 NOGIT_SESSIONS_LOG="$NOGIT_DIR/sessions.log"
 NOGIT_CHANGED_LOG="$NOGIT_DIR/changed.log"
 NOGIT_EVIDENCE_LOG="$NOGIT_DIR/evidence.log"
+NOGIT_KEYS_LOG="$NOGIT_DIR/keydelta.log"
 # 🔴 THE EVIDENCE LOG IS IN THIS CHECK, not just in the list above. It is the
 # only record of WHY anything was downgraded, there is no `set -e` here, and an
-# unwritable one would silently produce downgrades with no stated cause.
-if ! : > "$NOGIT_CONFIG" || ! : > "$NOGIT_CHANGED_LOG" || ! : > "$NOGIT_EVIDENCE_LOG"; then
+# unwritable one would silently produce downgrades with no stated cause. The
+# key-delta log is in it for the same reason one step further on: an unwritable
+# one would produce a failure message with an EMPTY "keys that moved" list, and an
+# empty list reads as "nothing identifiable moved" — a claim about the file when
+# it is really a claim about this directory.
+if ! : > "$NOGIT_CONFIG" || ! : > "$NOGIT_CHANGED_LOG" || ! : > "$NOGIT_EVIDENCE_LOG" \
+   || ! : > "$NOGIT_KEYS_LOG"; then
   echo "run-tests: FATAL — could not create the git-isolation files under" >&2
   echo "  $NOGIT_DIR. Refusing to run: without them a test that calls" >&2
   echo "  'git config --global' rewrites the operator's ~/.gitconfig, and a" >&2
@@ -2362,6 +2470,17 @@ _nogit_mark_before() {
   NOGIT_B_FP="$(_nogit_fingerprint)"
   NOGIT_B_CTL="$(_nogit_controls)"
   NOGIT_B_S="$(_spool_lines "$NOGIT_SESSIONS_LOG")"
+  # The key snapshot is taken for EVERY target, unconditionally, because the
+  # question it answers only exists once a delta has already happened — by then
+  # the "before" is gone. Absent or unreadable file -> an empty snapshot, which
+  # the delta renders as "every key is new"; that is honest and visible, and it
+  # is why the reason for an empty delta is stated rather than left blank.
+  local i p
+  for ((i = 0; i < ${#NOGIT_REPO_LOCAL[@]}; i++)); do
+    p="${NOGIT_REPO_LOCAL[i]}"
+    _nogit_config_entries "$p" > "$NOGIT_DIR/keys-before.$i" 2>/dev/null \
+      || : > "$NOGIT_DIR/keys-before.$i"
+  done
 }
 # $1 = target name. Every call MUST be preceded by the before-mark above, or the
 # range it records belongs to whatever ran previously.
@@ -2390,12 +2509,34 @@ _nogit_account() {
     _nogit_cotenancy_probe "$t"
     [ "$NOGIT_EV_STATUS" = "proven" ] && proven=1
   fi
+  local idx delta
   for path in ${CHANGED[@]+"${CHANGED[@]}"}; do
     if _nogit_is_repo_local "$path"; then
       if [ "$proven" -eq 1 ]; then
         cls="repo-local-reported"; rep=$(( rep + 1 ))
       else
         cls="repo-local-enforced"; n=$(( n + 1 ))
+      fi
+      # 🔴 RECORDED FOR BOTH OUTCOMES. A downgraded delta gets the same key
+      # listing as an enforced one: the reader's question ("who wrote this?") is
+      # identical, and only the verdict differs.
+      if idx="$(_nogit_repo_local_index "$path")"; then
+        _nogit_config_entries "$path" > "$NOGIT_DIR/keys-after.$idx" 2>/dev/null \
+          || : > "$NOGIT_DIR/keys-after.$idx"
+        delta="$(_nogit_key_delta "$NOGIT_DIR/keys-before.$idx" "$NOGIT_DIR/keys-after.$idx")"
+        if [ -n "$delta" ]; then
+          while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            printf '%s\t%s\t%s\n' "$t" "$path" "$line" >> "$NOGIT_KEYS_LOG"
+          done <<<"$delta"
+        else
+          # 🔴 NEVER AN EMPTY LIST. The bytes moved — the tripwire is what said
+          # so — and no key-level delta was visible, which is a DIFFERENT fact
+          # from "nothing moved" and must not render as one.
+          printf '%s\t%s\t%s\n' "$t" "$path" \
+            "? the file's bytes changed but no key-level delta was visible: a comment, whitespace, key reordering, a duplicated entry, or 'git config --file' could not parse it" \
+            >> "$NOGIT_KEYS_LOG"
+        fi
       fi
     else
       cls="global-enforced"; n=$(( n + 1 ))
@@ -3124,6 +3265,68 @@ else
        "(always enforcing)  repo-local:${#NOGIT_REPO_LOCAL[@]}" \
        "(enforcing unless another writer is PROVEN — see #730)"
 fi
+# 🔴 THE DISCRIMINATOR, RENDERED BESIDE THE FILE IT DESCRIBES.
+# $1 = target, $2 = changed path, $3 = indent. Prints nothing for a file this run
+# recorded no key rows for — today that is exactly the GLOBAL class.
+#
+# 🔴 THAT IS A DELIBERATE SCOPE LIMIT, NOT COVERAGE. The misattribution this
+# rendering fixes was repo-local: a global file has no concurrent writer to
+# confuse it with, so its one-line "reached the operator's file some other way"
+# is not wrong the way the repo-local sentence was. It is still LESS informative
+# than it could be — a `core.hooksPath` landing in `~/.gitconfig` would be worth
+# naming — so read the silence here as "not extended yet", never as "the global
+# class has nothing to say".
+#
+# Never prints an empty "keys that moved" list: `_nogit_account` writes a `?` row
+# with its reason when the bytes moved and no key delta was visible, and that row
+# is rendered as the reason. An empty list would read as "nothing identifiable
+# moved", which is a claim about the FILE; the truth would be a claim about the
+# PARSE.
+_nogit_render_keys() {
+  local t="$1" p="$2" pad="$3" rows delta unk shape
+  rows="$(awk -F'\t' -v t="$t" -v p="$p" '$1 == t && $2 == p { print $3 }' \
+          "$NOGIT_KEYS_LOG" 2>/dev/null || true)"
+  [ -n "$rows" ] || return 0
+  unk="$(printf '%s\n' "$rows" | grep '^? ' || true)"
+  delta="$(printf '%s\n' "$rows" | grep -v '^? ' || true)"
+  printf '%skeys that moved in this file (NAMES ONLY — values are never printed,\n' "$pad"
+  printf '%sbecause remote.<name>.url can carry a token and this lands in CI logs):\n' "$pad"
+  if [ -n "$delta" ]; then
+    printf '%s\n' "$delta" | sed "s|^|$pad  |"
+  fi
+  if [ -n "$unk" ]; then
+    printf '%s\n' "$unk" | sed "s|^? |$pad  NOT VISIBLE — |"
+  fi
+  shape="$(_nogit_shape_for "$t" "$p")"
+  case "$shape" in
+    ordinary)
+      printf '%s→ SHAPE: ORDINARY GIT. Every key above is one that "git branch",\n' "$pad"
+      printf '%s  "checkout -b", "push -u", "worktree add", "remote add" or\n' "$pad"
+      printf '%s  "maintenance start" writes into the SHARED config of a clone. A\n' "$pad"
+      printf '%s  hermetic test works under a tmpdir and has no route to the operator'"'"'s\n' "$pad"
+      printf '%s  real clone, so the LEADING hypothesis is a concurrent git command in\n' "$pad"
+      printf '%s  another worktree or session, and the target above is the SECOND. This\n' "$pad"
+      printf '%s  is a RANKING, not a verdict — this run proved neither.\n' "$pad"
+      ;;
+    hazard)
+      printf '%s→ SHAPE: HAZARD. At least one key above is the 2026-08-21 incident'"'"'s own\n' "$pad"
+      printf '%s  shape (core.* / user.* / url.* / http.* / credential.* / include* /\n' "$pad"
+      printf '%s  alias.*). Nothing routine rewrites those in an existing clone, so the\n' "$pad"
+      printf '%s  LEADING hypothesis is a test in the target above escaping isolation.\n' "$pad"
+      printf '%s  AUDIT THE TARGET FIRST. Still a ranking, not a verdict.\n' "$pad"
+      ;;
+    *)
+      printf '%s→ SHAPE: UNRECOGNISED. The keys above match neither the ordinary-git set\n' "$pad"
+      printf '%s  nor the known-hazard set, so this run cannot rank the two hypotheses.\n' "$pad"
+      printf '%s  Do not read that as either one.\n' "$pad"
+      ;;
+  esac
+  printf '%sDiscriminate before auditing any test, cheapest first:\n' "$pad"
+  printf '%s  stat -c '"'"'%%y %%n'"'"' %s\n' "$pad" "$p"
+  printf '%s  git -C %s worktree list      # a SIBLING worktree the probe cannot see\n' "$pad" "$ROOT"
+  printf '%s  git -C %s reflog --date=iso | head -20\n' "$pad" "$ROOT"
+}
+
 nogit_problems=()
 nogit_reported_total=0
 for t in "${TARGETS[@]}"; do
@@ -3168,9 +3371,29 @@ for entry in ${NOGIT_SEEN[@]+"${NOGIT_SEEN[@]}"}; do
   # proven external writer is in `$greported` instead and is rendered below,
   # never here and never silently.
   if [ "$gchanged" -gt 0 ]; then
-    changed_names="$(awk -F'\t' -v t="$gt" \
-      '$1 == t && $2 != "repo-local-reported" { printf "             %s  [%s]\n", $3, $2 }' \
-      "$NOGIT_CHANGED_LOG" 2>/dev/null || true)"
+    changed_names=""
+    _tshape="none"
+    while IFS=$'\t' read -r _ct _ccls _cpath; do
+      [ -n "$_cpath" ] || continue
+      changed_names+="             $_cpath  [$_ccls]"$'\n'
+      # Aggregate the worst shape across this target's changed files, hazard
+      # first. It picks the LEAD SENTENCE below, so a mixed run must lead with
+      # the accusatory one — under-warning is the expensive direction here.
+      case "$(_nogit_shape_for "$gt" "$_cpath")" in
+        hazard)       _tshape="hazard" ;;
+        unrecognised) if [ "$_tshape" != "hazard" ]; then _tshape="unrecognised"; fi ;;
+        ordinary)     if [ "$_tshape" = "none" ];   then _tshape="ordinary"; fi ;;
+      esac
+      # 🔴 THE KEY LISTING GOES *WITH THE FILE*, not in the prose above it. A
+      # run can carry more than one changed file, and a reader who has to pair
+      # a floating key list with a path by eye is back to guessing.
+      _kb="$(_nogit_render_keys "$gt" "$_cpath" "               ")"
+      [ -n "$_kb" ] && changed_names+="$_kb"$'\n'
+    done < <(awk -F'\t' -v t="$gt" \
+      '$1 == t && $2 != "repo-local-reported" { print }' \
+      "$NOGIT_CHANGED_LOG" 2>/dev/null || true)
+    changed_names="${changed_names%$'\n'}"
+    unset _ct _ccls _cpath _kb
     # The cause differs by class, and the old single sentence was a confident
     # misdiagnosis for the repo-local one: it sent the reader to audit a target
     # that had done nothing (#730).
@@ -3182,11 +3405,31 @@ for entry in ${NOGIT_SEEN[@]+"${NOGIT_SEEN[@]}"}; do
       # Telling a reader no other writer exists, when the writer this guard
       # exists for is structurally invisible, is the same class of confident
       # misdiagnosis #730 was filed about.
-      nogit_why="A repo-local one is a write to <git-common-dir>/config, which GIT_CONFIG_GLOBAL does not govern at all — and this run FOUND NO PROOF of another writer, so the change is attributed to this target. What was actually checked: no live process outside this run's own lineage had its cwd inside the git dir or its parent. That does NOT cover a session sitting in a SIBLING worktree of the same clone, which is invisible to this probe — if that is what wrote here, 'git reflog' and the file's mtime will say so. A global one reached the operator's file some other way: code that removes GIT_CONFIG_GLOBAL from its own environment."
+      #
+      # 🔴 AND THE SENTENCE THAT FOLLOWED IT WAS THE SAME MISTAKE ONE STEP ON.
+      # It read "so the change is attributed to this target" — a VERDICT, from a
+      # probe that had just been described as blind to the likeliest writer.
+      # MEASURED 2026-08-23: four such failures in one day on the operator's box,
+      # every one of them a concurrent `git branch`/`worktree add` in the shared
+      # clone, every one of them reported against whichever target was in
+      # teardown. The window is now stated as a WINDOW, both hypotheses are named
+      # in the order the key delta supports, and the discriminators are printed
+      # beside the file. The VERDICT is unchanged — this still fails the run.
+      # The LEAD SENTENCE follows the key delta, because a `core.hooksPath` write
+      # and a `branch.<name>.remote` write are not the same event and leading
+      # both with "not a culprit" would under-warn on the one that IS the
+      # incident. The window caveat is stated in every arm regardless — it is a
+      # fact about the file, not about the shape.
+      if [ "$_tshape" = "hazard" ]; then
+        nogit_lead="🔴 AND THE KEY DELTA BELOW POINTS AT THIS TARGET: it carries a key of the 2026-08-21 incident's own shape, which nothing routine writes into an existing clone. AUDIT THIS TARGET FIRST. The window caveat still applies and is stated below, but do not start there."
+      else
+        nogit_lead="🔴 THE TARGET NAMED HERE IS THE WINDOW, NOT A CULPRIT: that file is shared by every worktree of the clone, and any concurrent 'git branch' / 'checkout -b' / 'push -u' / 'worktree add' / 'maintenance start' in ANY of them rewrites it while this run is going."
+      fi
+      nogit_why="A repo-local one is a write to <git-common-dir>/config, which GIT_CONFIG_GLOBAL does not govern at all. $nogit_lead This run FOUND NO PROOF of another writer, so the delta is REPORTED AGAINST whatever happened to be running — the probe only asks whether a live process outside this run's own lineage has its cwd inside the git dir or its parent, so a session sitting in a SIBLING worktree of the same clone is invisible to it. Read the key delta beside the file below BEFORE auditing any test. A global one is different and IS attributable: it reached the operator's file some other way — code that removes GIT_CONFIG_GLOBAL from its own environment."
     else
       nogit_why="GIT_CONFIG_GLOBAL redirects 'git config --global', so this reached them some other way — code that removes the variable from its own environment."
     fi
-    nogit_problems+=("$gt  — CHANGED $gchanged of the operator's protected git config file(s) while it ran. $nogit_why"$'\n'"$changed_names")
+    nogit_problems+=("$gt  — 🔴 $gchanged of the operator's protected git config file(s) changed DURING this target's window. $nogit_why"$'\n'"$changed_names")
   fi
 
   if [ "$is_pytest" -eq 1 ]; then
@@ -3218,8 +3461,16 @@ done
 echo "    repo-local-reported-total=$nogit_reported_total  (deltas to <git-common-dir>/config this run could NOT attribute)"
 if [ "$nogit_reported_total" -gt 0 ]; then
   echo "    ---- repo-local git config: REPORTED, not enforced (#730) ----"
-  awk -F'\t' '$2 == "repo-local-reported" { printf "      %s\n        changed: %s\n", $1, $3 }' \
-    "$NOGIT_CHANGED_LOG" 2>/dev/null || true
+  # The same key listing the ENFORCED arm gets. A downgrade answers "this run
+  # will not fail you for it"; it does not answer "who wrote it", which is the
+  # question the reader actually has, and the rows are already recorded.
+  while IFS=$'\t' read -r _rt _rcls _rpath; do
+    [ -n "$_rpath" ] || continue
+    printf '      %s\n        changed: %s\n' "$_rt" "$_rpath"
+    _nogit_render_keys "$_rt" "$_rpath" "          "
+  done < <(awk -F'\t' '$2 == "repo-local-reported" { print }' \
+    "$NOGIT_CHANGED_LOG" 2>/dev/null || true)
+  unset _rt _rcls _rpath
   awk -F'\t' '$2 == "proven" { printf "      %s\n        cannot attribute: %s\n", $1, $3 }' \
     "$NOGIT_EVIDENCE_LOG" 2>/dev/null || true
   echo "      This file is the git COMMON dir's config, shared by every worktree of"
