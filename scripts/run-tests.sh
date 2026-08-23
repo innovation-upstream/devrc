@@ -280,15 +280,35 @@ fi
 # starts, so unsetting it here is the one place that fixes it for all of them.
 unset CDPATH
 cd "$ROOT" || { echo "run-tests: cannot cd to ROOT=$ROOT" >&2; exit 3; }
-# 🔴 EXIT CODES: 3 = the ENVIRONMENT could not satisfy a precondition (this guard,
-# 1b, 1c). 2 = a REPO-CONTENT guard refused (target list, floor table, launcher
-# stubs, spool wiring). The distinction is load-bearing: `githooks/tests-on-push.sh`
+# 🔴 EXIT CODES: 3 = the ENVIRONMENT could not satisfy a precondition (GUARDs 1b
+# and 1c, a failed `cd $ROOT`, the spool `mkdir`, and GUARD 1 when run OUTSIDE a
+# sanctioned gate env). 2 = a REPO-CONTENT defect (target list, floor table,
+# launcher stubs, spool wiring — and GUARD 1 when DEVRC_GATE_ENV=1, because then
+# the missing tool is something the repo asked for and nothing supplies).
+# 🔴 NOTE GUARD 1 IS IN BOTH LISTS: it is the one guard whose code depends on the
+# CAUSE rather than on which guard fired, because its input (REQUIRED_TOOLS) is
+# repo content but its usual failure is environmental. The distinction is
+# load-bearing: `githooks/tests-on-push.sh`
 # DEGRADES on 3 (an env fault must not block a push over a broken caller) and
 # BLOCKS on 2. Collapsing them was a measured mistake — degrading on 2 turned
 # GUARD 5's and GUARD 3a's own warning ("do NOT delete the entry to make this
 # pass — that is how a suite stops running while the gate goes green") into
-# exactly that outcome, on the only tier that runs automatically: this repo has
-# no CI and no branch protection (pinned by test_ci_claim_matches_reality.py).
+# exactly that outcome, on the only tier that BLOCKS a push. 🔴 "The only tier
+# that RUNS" was true when this was written and is now FALSE: a Tekton PR gate
+# (`tekton/devrc-pytests`, `tekton/devrc-nodetests`) went live between #704 and
+# #714 — measured, #704 reports no checks and #714 reports both. It runs
+# `nix build .#checks.x86_64-linux.<leg>` — it does NOT enter the devShell — so
+# it is armed by checks.pytests's OWN export, not the shellHook's. (The
+# nodetests leg exports no marker and needs none: its runner has no
+# DEVRC_GATE_ENV and no exit 3.)
+#
+# What that gate does NOT do is block a merge: `main`'s branch protection does
+# NOT require status checks — `required_status_checks` returns 404 (measured
+# 2026-08-22) — though it DOES require 1 approving review. So protection EXISTS
+# and a red check is still advisory; do not restate this as "there is no branch
+# protection", which is the wrong mechanism for the right conclusion.
+# `test_ci_claim_matches_reality.py` cannot see any of this — its own scope note
+# excludes Tekton — so do not read its green as agreement.
 # A new `exit` here must pick a side deliberately.
 # --- GUARD 1: tool precondition ------------------------------------------------
 # Every binary the suites `skipif` on. Absence must be an ERROR, never a skip.
@@ -351,8 +371,78 @@ fi
 if [ "${#missing_tools[@]}" -gt 0 ]; then
   echo "run-tests: FATAL — required tool(s) missing from PATH: ${missing_tools[*]}" >&2
   echo "  The suites SKIP the tests that need these, so the run would go green while" >&2
-  echo "  testing less. This is a MISSING ENVIRONMENT, not a code failure — nothing" >&2
-  echo "  in the repo is broken and no test has run yet." >&2
+  echo "  testing less. No test has run yet." >&2
+  echo >&2
+  echo "  Do NOT drop entries from REQUIRED_TOOLS to make this pass — each one is" >&2
+  echo "  justified in the comment block directly above it." >&2
+  # 🔴 CLASSIFY BY CAUSE, NOT BY SITE. This guard reads REQUIRED_TOOLS, which is
+  # REPO CONTENT — so "GUARD 1 fired" does not by itself mean the environment is
+  # at fault, and treating it as environmental let a typo turn the gate off.
+  # MEASURED: `logrotatee` planted in REQUIRED_TOOLS aborted with rc 3, the
+  # pre-push hook DEGRADED, and the push went through with ZERO tests run — while
+  # the test that would have caught the typo never executed, because the runner
+  # aborted before pytest started. That is "a suite stops running while the gate
+  # goes green" on the only tier that BLOCKS a push — a Tekton PR gate does now
+  # run (see the EXIT CODES block above), but its red is advisory — branch
+  # protection does not require status checks — so exit 3 here still let the
+  # push land. devrc#705.
+  #
+  # The discriminator is whether we are IN a sanctioned gate env, which both the
+  # devShell and checks.pytests announce with DEVRC_GATE_ENV=1:
+  #   * set   -> the env supplies everything `gateTools` declares, so a still-
+  #              missing entry means the REPO asked for something nothing
+  #              supplies (a typo, or a gateTools omission). Repo defect: BLOCK.
+  #   * unset -> the caller is not in the gate env. Caller defect: degrade, and
+  #              the FATAL above tells them how to get in.
+  #
+  # 🔴 Deliberately NOT "is the binary declared in gateTools", which was the first
+  # design: that needs a hand-maintained nixpkgs-attr -> binary-name table
+  # (ripgrep->rg, util-linux->setsid, gnugrep->grep, nodejs->node), and this repo
+  # has already been bitten by exactly that shape once (pyyaml->yaml, #704). A
+  # table says nothing about the mapping it is missing.
+  #
+  # 🔴 The accepted value is EXACTLY "1" — not "any truthy value". A future tier
+  # writing `DEVRC_GATE_ENV=true` would fall through to the degrade arm. That is
+  # the fail-SAFE direction (a push blocks over a broken caller only if we get
+  # this wrong the other way), so it is a deliberate exact match, not an
+  # oversight: if you add a tier, export literally 1.
+  #
+  # 🔴 And the marker is a VARIABLE, so unlike the shellHook that sets it, it CAN
+  # be wrong about its environment: an operator who exports it by hand outside a
+  # gate env turns a genuine environment fault into a BLOCK whose message
+  # asserts the repo is broken. Manual paths only — every automated path
+  # re-enters `nix develop`, whose shellHook overwrites any inherited value
+  # (measured: DEVRC_GATE_ENV=0 nix develop … yields 1), so the hook tier cannot
+  # be weakened this way.
+  if [ "${DEVRC_GATE_ENV:-0}" = "1" ]; then
+    echo >&2
+    echo "  🔴 This is a REPO defect, not an environment one: you are inside a" >&2
+    echo "  sanctioned gate environment (DEVRC_GATE_ENV=1) and the tool is STILL" >&2
+    echo "  missing, so REQUIRED_TOOLS names something flake.nix \`gateTools\`" >&2
+    echo "  does not supply." >&2
+    echo >&2
+    echo "  FIX — two files must agree, but they name the tool DIFFERENTLY:" >&2
+    echo "    * $ROOT/scripts/run-tests.sh -> REQUIRED_TOOLS (the BINARY name)" >&2
+    echo "    * $ROOT/flake.nix            -> gateTools      (the NIX PACKAGE)" >&2
+    echo "  🔴 Do NOT expect to find the binary name in flake.nix — the package" >&2
+    echo "  that provides it is usually spelled differently (ripgrep provides" >&2
+    echo "  rg, nodejs provides node, util-linux provides setsid, gnugrep" >&2
+    echo "  provides grep). Finding no match there does NOT mean it is absent." >&2
+    echo "  So: correct the spelling in REQUIRED_TOOLS, or add the package that" >&2
+    echo "  PROVIDES the binary to gateTools." >&2
+    echo >&2
+    echo "  Exiting 2 so the pre-push hook BLOCKS rather than degrading." >&2
+    exit 2
+  fi
+  # The other arm. 🔴 Everything below is TRUE ONLY HERE — it says the repo is
+  # fine and tells you to enter the dev shell, and both are wrong advice for a
+  # caller who is already IN one. That is why it moved out of the shared header:
+  # it was printed unconditionally, so the exit-2 arm this change adds would have
+  # told a contributor with a REQUIRED_TOOLS typo that "nothing in the repo is
+  # broken" and to go re-run in the shell they were already standing in.
+  echo >&2
+  echo "  This is a MISSING ENVIRONMENT, not a code failure — nothing in the" >&2
+  echo "  repo is broken." >&2
   echo >&2
   echo "  FIX — enter the repo's own dev shell, which carries exactly this list," >&2
   echo "  and re-run from there:" >&2
@@ -363,9 +453,6 @@ if [ "${#missing_tools[@]}" -gt 0 ]; then
   echo "  you like). That shell is built from the SAME flake.nix \`gateTools\` list" >&2
   echo "  as the \`nix flake check\` gate, so it cannot drift out of satisfying this" >&2
   echo "  precondition." >&2
-  echo >&2
-  echo "  Do NOT drop entries from REQUIRED_TOOLS to make this pass — each one is" >&2
-  echo "  justified in the comment block directly above it." >&2
   exit 3
 fi
 
