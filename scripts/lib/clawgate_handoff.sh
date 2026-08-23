@@ -40,12 +40,16 @@
 #   clawgate_handoff.sh field <doc>        — print the doc's recorded task id
 #
 # Exit codes for `resolve`:
-#   0  exactly one task resolved (the id is on stdout, ready to record)
+#   0  exactly one WORKED task resolved (the id is on stdout, ready to record).
+#      With no `role` on any row it falls back to "exactly one task", and says so.
 #   3  no session id — nothing was asked
 #   4  clawgate did NOT answer (no token, a missing tool, unreachable, non-200,
 #      no `tasks` array, or a row carrying no usable id)
 #   5  the board answered and resolved NOTHING — see the caveat printed with it
-#   6  several tasks resolved — ASK; this command will not pick one
+#   6  ASK; this command will not pick one. FOUR distinguishable causes, each
+#      named in the output: several WORKED tasks, NO worked task beside one or
+#      more created/read links, a role this tool does not recognise, or (roles
+#      unavailable) several tasks by the old count-based rule.
 # For `field`:
 #   0  a readable id is on stdout
 #   1  no clawgate-task: field at all
@@ -95,6 +99,34 @@ CLAWGATE_FIELD_KEY="clawgate-task"
 #: emits a `!` gap for anything outside it rather than letting an unknown state
 #: read as "no drift". Space-separated for `case` matching in `clawgate_known_status`.
 CLAWGATE_TASK_STATUSES="open in_progress ready_for_review complete"
+
+#: 🔴 THE SESSION↔TASK LINK ROLES, and the SECOND cross-repo seam in this file —
+#: same shape as the status vocabulary above, same lack of a gate. The authority
+#: is `<homelab-talos>/containers/clawgate/internal/notes/threads.go`
+#: (`RoleRead` / `RoleWorked` / `RoleCreated`), verified by reading that file
+#: 2026-08-22. WHAT SETS EACH, from `internal/api/notes.go`:
+#:
+#:   read     GET /api/tasks/{id}                     — the session merely looked
+#:   worked   PATCH /api/tasks/{id}                   — edited the task
+#:            PATCH /api/tasks/{id}/status            — flipped its status
+#:            POST  /api/tasks/{id}/comments          — commented on it
+#:   created  POST /api/tasks (+ the 0023 backfill)   — the session FILED it
+#:
+#: 🔴 SPELLED IN THE SERVER'S OWN MONOTONIC ORDER (read < worked < created): a
+#: link's role only ever moves UP that list. TWO consequences this file depends
+#: on, neither of them obvious:
+#:   * `worked` is NOT a weak signal. `flows/task-pickup.md` mandates the
+#:     comment/status write-back on every pickup and
+#:     `scripts/claude-hooks/clawgate-writeback-guard.py` BLOCKS the turn from
+#:     ending without it — so a session that actually worked a task carries it.
+#:   * `created` is TERMINAL and outranks `worked`, so a session that FILES a
+#:     task and then works it stays `created`. That case therefore lands in the
+#:     "none worked" branch below and is ASKED about, not auto-recorded. It is
+#:     the honest answer: this tool cannot tell it apart from a session that only
+#:     filed the ticket, and those want opposite verdicts.
+#:
+#: Space-separated to match CLAWGATE_TASK_STATUSES; split by jq, not by the shell.
+CLAWGATE_TASK_ROLES="read worked created"
 
 # `clawgate_known_status <status>` — is this one of the four we can reason about?
 clawgate_known_status(){
@@ -285,6 +317,212 @@ clawgate_drift_lines(){
 
 
 # --------------------------------------------------------------------------- #
+# PURE: ranking the rows the board returned
+# --------------------------------------------------------------------------- #
+
+# `clawgate_rank_rows <response-body-text>` — the whole verdict, from text alone.
+# Prints the candidate rows (role-ANNOTATED and role-ORDERED, worked first) and
+# then one verdict line, and returns `resolve`'s 0/4/5/6 (see the header).
+#
+# 🔴 IT TAKES TEXT, NOT A PATH, and it lives above the I/O line on purpose. The
+# caller does the network; this does the deciding, so the suite can drive every
+# verdict off a fixture string with no server and no temp file.
+#
+# 🔴 WHY `role` DECIDES AND A COUNT NO LONGER DOES. The endpoint has always
+# returned `role` beside `id`/`status`/`title`; this function used to discard it
+# and count links instead, so every link weighed the same. Measured against the
+# live board 2026-08-22 (138 tasks, 43 links, 12 linked sessions): 6 of the 12
+# sessions were multi-task and therefore got "ASK which one", while only 1 had
+# more than one WORKED task — i.e. 5 of the 6 questions had an answer the data
+# already knew. The worst was a backlog-filling session linked to 19 tasks, 18
+# `created` + 1 `read`: asking there is not merely noisy, EVERY answer is wrong,
+# because the front-matter field means "the task whose work this doc describes"
+# and that session did nobody's work.
+#
+# 🔴 A LONE `created` ROW IS NOT A RESOLUTION — a deliberate behaviour change
+# from the old count rule, which returned 0 for it. "I filed this ticket" and
+# "this document describes that work" are different claims, and recording the
+# first as the second is how a doc acquires a task it will be reconciled against
+# for its whole life.
+#
+# 🔴 A MISSING FIELD MUST NOT BECOME "ZERO WORKED". If NOT ONE row carries a
+# role — an older server, or the field being dropped — the counts are all zero
+# and the role rule would silently answer "none of them worked" about a board
+# that was never asked. So that case falls back to the old count rule and SAYS
+# it did. Partial absence is different and is treated as data: the rows that do
+# carry a role are ranked, the ones that do not are reported and count as not
+# worked.
+#
+# 🔴 AN UNRECOGNISED ROLE IS REPORTED, NEVER GUESSED AT. The server's CHECK
+# constraint means today's board cannot emit one, so this is not a
+# permanently-red gate — it fires only on a vocabulary change, which is exactly
+# when a silent "that is not `worked`" would be wrong. Same reasoning as
+# `clawgate_known_status` above: a state nobody here has heard of must not
+# render like a healthy one.
+clawgate_rank_rows(){
+  local body="${1:-}"
+
+  # Shared jq prelude. `norm` is the reason every field access below is safe: a
+  # row that is not an object becomes `{}`, so it renders as a visibly broken
+  # `#? role=? status=?` line and is caught by the usable-id check, instead of
+  # aborting jq and turning a schema break into a silent zero.
+  #
+  # 🔴 TWO jq TRAPS, BOTH MEASURED HERE, BOTH SILENT.
+  #   * A FILTER ARGUMENT IS EVALUATED AGAINST THE FILTER'S INPUT, not against
+  #     the surrounding `.`. `$known | index(.role)` reads `.role` off the
+  #     ARRAY `$known`, which aborts jq — so the counts came back empty, all
+  #     seven fell back to 0, and every payload carrying a REAL role rendered
+  #     as "NOTHING RESOLVED — 0 tasks", the reassuring shape of a source that
+  #     never answered. Hence `.role as $r` first, everywhere.
+  #   * `index` RETURNS 0 FOR THE FIRST ELEMENT, and 0 is TRUTHY in jq (only
+  #     `null` and `false` are falsy), so a bare `if ($known|index($r))` happens
+  #     to be right — and would be wrong the moment anyone "fixed" it with a C
+  #     intuition. Compared against `null` explicitly so the reading is the
+  #     same in both languages.
+  local jqdefs='
+    def norm: if type == "object" then . else {} end;
+    def rolestr: norm
+      | if .role == null then "?"
+        elif (.role | type) == "string" then .role
+        else (.role | tojson) end;
+    def bucket($known): norm | .role as $r
+      | if $r == null then "absent"
+        elif ($r | type) != "string" then "unknown"
+        elif ($known | index($r)) != null then $r
+        else "unknown" end;
+    def rank: rolestr
+      | if . == "worked" then 0 elif . == "created" then 1
+        elif . == "read" then 2 else 3 end;
+    def usable: select((type == "number" and . == floor and . >= 0)
+                       or (type == "string" and test("^[0-9]+$")));
+  '
+
+  local shape
+  shape=$(printf '%s' "$body" | jq -r '(.tasks | type)' 2>/dev/null)
+  if [ "$shape" != "array" ]; then
+    echo "clawgate: DID NOT ANSWER USABLY — the 200 carried no \`tasks\` array. UNKNOWN, not empty."
+    return 4
+  fi
+
+  # 🔴 COUNTED BY jq, NOT BY LINES. A task TITLE may contain a newline — the
+  # server trims and rune-caps titles but does not strip interior newlines — so
+  # counting rendered lines reported "2 tasks resolved — ASK which one" for a
+  # single task. Fails safe, but the verdict was wrong and the writer would have
+  # gone and asked about a task that does not exist. Every number below comes
+  # out of ONE jq pass so they cannot disagree with each other.
+  #
+  # `n_id` counts rows carrying a USABLE id. A row without one used to reach a
+  # `sed` that matched zero digits and told the writer to record
+  # `clawgate-task:` with NO VALUE — which the reader then classifies as
+  # present-and-unreadable, i.e. a permanent `!` gap on every future /resume of
+  # that doc. Unreachable from today's server; free to refuse.
+  local counts n n_id n_worked n_read n_created n_unknown n_absent
+  counts=$(printf '%s' "$body" | jq -r --arg roles "$CLAWGATE_TASK_ROLES" "$jqdefs"'
+    ($roles | split(" ")) as $known
+    | [ .tasks[]? | bucket($known) ] as $b
+    | [ (.tasks | length),
+        ([ .tasks[]? | norm | .id | usable ] | length),
+        ($b | map(select(. == "worked"))  | length),
+        ($b | map(select(. == "read"))    | length),
+        ($b | map(select(. == "created")) | length),
+        ($b | map(select(. == "unknown")) | length),
+        ($b | map(select(. == "absent"))  | length) ]
+    | map(tostring) | join(" ")' 2>/dev/null)
+  # 🔴 EVERY ONE OF THE SEVEN IS RE-VALIDATED AS A NUMBER. jq printing nothing
+  # (a syntax error, a jq that died) must land as 0 and reach the NOTHING
+  # RESOLVED / usable-id branches, never as an empty string an arithmetic
+  # comparison would abort on — the same defence the old `case` on `$n` carried,
+  # now applied to all seven rather than the two anybody remembered.
+  IFS=' ' read -r n n_id n_worked n_read n_created n_unknown n_absent <<<"$counts"
+  local v
+  for v in n n_id n_worked n_read n_created n_unknown n_absent; do
+    case "${!v:-}" in ''|*[!0-9]*) printf -v "$v" '%s' 0 ;; esac
+  done
+
+  if [ "$n" -eq 0 ]; then
+    echo "clawgate: NOTHING RESOLVED — 0 tasks for this session."
+    echo "  An unknown session id answers 200 with an EMPTY ARRAY, so this cannot"
+    echo "  distinguish 'this session touched no task' from 'the id is wrong'."
+    echo "  Write NO clawgate-task: field, say so in the report, and never create a task."
+    return 5
+  fi
+
+  # 🔴 THE ORDER IS THE ANSWER TO THE QUESTION rc 6 ASKS. Printing the rows
+  # worked-first, each with its role, is what lets the operator answer without
+  # running a second command. The two-space indent is jq's — a `sed` here would
+  # be a fourth external command inside a function whose preflight names three.
+  local rows
+  rows=$(printf '%s' "$body" | jq -r "$jqdefs"'
+    [ .tasks[]? | norm ] | to_entries
+    | map({k: (.value | rank), i: .key,
+           s: ("  #\(.value.id // "?") role=\(.value | rolestr) status=\(.value.status // "?") "
+               + ((.value.title // "") | tostring | gsub("\\s+"; " ")))})
+    | sort_by([.k, .i]) | .[] | .s' 2>/dev/null)
+  [ -n "$rows" ] && printf '%s\n' "$rows"
+
+  if [ "$n_id" -ne "$n" ]; then
+    echo "clawgate: DID NOT ANSWER USABLY — $n task(s) came back but only $n_id carry a usable id. UNKNOWN, not empty; record nothing."
+    return 4
+  fi
+
+  if [ "$n_unknown" -gt 0 ]; then
+    local unknown_vals
+    unknown_vals=$(printf '%s' "$body" | jq -r --arg roles "$CLAWGATE_TASK_ROLES" "$jqdefs"'
+      ($roles | split(" ")) as $known
+      | [ .tasks[]? | norm | .role | select(. != null) | . as $r
+          | select(((($r | type) == "string")
+                    and (($known | index($r)) != null)) | not)
+          | (if ($r | type) == "string" then $r else ($r | tojson) end) ]
+      | unique | join(", ")' 2>/dev/null)
+    echo "clawgate: UNRECOGNISED ROLE — $n_unknown of $n link(s) carry a role this tool has never heard of: ${unknown_vals:-<unprintable>}."
+    echo "  The vocabulary it knows is \`$CLAWGATE_TASK_ROLES\`. An unrecognised role is NOT 'worked' and is NOT guessed at."
+    echo "  ASK which one this handoff belongs to. Do not guess, and never create a task."
+    return 6
+  fi
+
+  if [ "$n_absent" -eq "$n" ]; then
+    echo "clawgate: ROLES UNAVAILABLE — not one of the $n row(s) carried a \`role\`, so this COUNTED the links instead of ranking them. Read the rows yourself."
+    if [ "$n" -gt 1 ]; then
+      echo "clawgate: $n tasks resolved — ASK which one this handoff belongs to. Do not guess, and never create a task."
+      return 6
+    fi
+    local ids
+    ids=$(printf '%s' "$body" | jq -r "$jqdefs"'
+      [ .tasks[]? | norm | .id | usable ] | map(tostring) | .[]' 2>/dev/null)
+    echo "clawgate: 1 task resolved — record it as front matter: $CLAWGATE_FIELD_KEY: $ids"
+    return 0
+  fi
+
+  if [ "$n_absent" -gt 0 ]; then
+    echo "clawgate: $n_absent of $n row(s) carried no \`role\` — ranked as NOT worked, not as unknown."
+  fi
+
+  # 🔴 THE ID CANNOT COME OUT BLANK HERE, and that is an invariant rather than a
+  # check: the `n_id -ne n` branch above already returned 4 unless EVERY row
+  # carries a usable id, and `n_worked` is 1, so this re-read selects exactly one
+  # of them. Written down instead of guarded because a guard nothing can reach is
+  # decoration that reads as coverage — if that branch ever moves below this one,
+  # `clawgate-task:` with no value ships again (a permanent `!` gap on every
+  # future /resume of the doc), so move them back or add the guard then.
+  if [ "$n_worked" -eq 1 ]; then
+    local worked_ids
+    worked_ids=$(printf '%s' "$body" | jq -r "$jqdefs"'
+      [ .tasks[]? | norm | select(.role == "worked") | .id | usable ]
+      | map(tostring) | .[]' 2>/dev/null)
+    echo "clawgate: 1 WORKED task of $n link(s) ($n_created created, $n_read read) — record it as front matter: $CLAWGATE_FIELD_KEY: $worked_ids"
+    return 0
+  fi
+  if [ "$n_worked" -gt 1 ]; then
+    echo "clawgate: $n_worked WORKED tasks resolved — ASK which one this handoff belongs to. Do not guess, and never create a task."
+    return 6
+  fi
+  echo "clawgate: $n task(s) linked to this session, NONE of them WORKED ($n_created created, $n_read read) — this handoff likely belongs to NONE of them; record nothing unless you recognise one."
+  echo "  Filing a task and reading a task are not doing its work. ASK which one rather than guessing, and never create a task."
+  return 6
+}
+
+
+# --------------------------------------------------------------------------- #
 # I/O — everything below this line touches the filesystem or the network
 # --------------------------------------------------------------------------- #
 
@@ -416,59 +654,16 @@ clawgate_resolve(){
     return 4
   fi
 
-  # 🔴 COUNTED BY jq, NOT BY LINES. A task TITLE may contain a newline — the
-  # server trims and rune-caps titles but does not strip interior newlines — so
-  # counting rendered lines reported "2 tasks resolved — ASK which one" for a
-  # single task. Fails safe, but the verdict was wrong and the writer would have
-  # gone and asked about a task that does not exist.
-  #
-  # `n_id` counts rows carrying a USABLE id. A row without one used to reach the
-  # last line's `sed`, which matched zero digits and told the writer to record
-  # `clawgate-task:` with NO VALUE — which the reader then classifies as
-  # present-and-unreadable, i.e. a permanent `!` gap on every future /resume of
-  # that doc. Unreachable from today's server; free to refuse.
-  local shape n n_id rows ids
-  shape=$(jq -r '(.tasks | type)' < "$body" 2>/dev/null)
-  if [ "$shape" != "array" ]; then
-    rm -f "$body"; trap - EXIT INT TERM
-    echo "clawgate: DID NOT ANSWER USABLY — the 200 carried no \`tasks\` array. UNKNOWN, not empty."
-    return 4
-  fi
-  n=$(jq -r '.tasks | length' < "$body" 2>/dev/null)
-  # jq counts the usable ids too — `grep -c` would be a fourth external command
-  # deciding a verdict about the board, which is the class of bug finding 9 was.
-  n_id=$(jq -r '[ .tasks[] | .id
-                  | select((type == "number" and . == floor and . >= 0)
-                           or (type == "string" and test("^[0-9]+$"))) ]
-                | length' < "$body" 2>/dev/null)
-  ids=$(jq -r '[ .tasks[] | .id
-                 | select((type == "number" and . == floor and . >= 0)
-                          or (type == "string" and test("^[0-9]+$"))) ]
-               | map(tostring) | .[]' < "$body" 2>/dev/null)
-  rows=$(jq -r '.tasks[] | "#\(.id // "?") status=\(.status // "?") \((.title // "") | gsub("\\s+"; " "))"' \
-         < "$body" 2>/dev/null)
+  # 🔴 THE DECIDING HAPPENS ABOVE THE I/O LINE. Everything from here is handing
+  # the response TEXT to `clawgate_rank_rows` — `$(< "$body")` is a bash
+  # redirection, not a `cat`, so this does not grow the preflight ledger. The
+  # body is read and the temp file unlinked BEFORE any verdict runs, so no exit
+  # path can leave it behind.
+  local body_text
+  body_text=$(< "$body")
   rm -f "$body"; trap - EXIT INT TERM
 
-  case "$n" in ''|*[!0-9]*) n=0 ;; esac
-  case "$n_id" in ''|*[!0-9]*) n_id=0 ;; esac
-  if [ "$n" -eq 0 ]; then
-    echo "clawgate: NOTHING RESOLVED — 0 tasks for this session."
-    echo "  An unknown session id answers 200 with an EMPTY ARRAY, so this cannot"
-    echo "  distinguish 'this session touched no task' from 'the id is wrong'."
-    echo "  Write NO clawgate-task: field, say so in the report, and never create a task."
-    return 5
-  fi
-  printf '%s\n' "$rows" | sed 's/^/  /'
-  if [ "$n_id" -ne "$n" ]; then
-    echo "clawgate: DID NOT ANSWER USABLY — $n task(s) came back but only $n_id carry a usable id. UNKNOWN, not empty; record nothing."
-    return 4
-  fi
-  if [ "$n" -gt 1 ]; then
-    echo "clawgate: $n tasks resolved — ASK which one this handoff belongs to. Do not guess, and never create a task."
-    return 6
-  fi
-  echo "clawgate: 1 task resolved — record it as front matter: $CLAWGATE_FIELD_KEY: $ids"
-  return 0
+  clawgate_rank_rows "$body_text"
 }
 
 clawgate_handoff_usage(){
