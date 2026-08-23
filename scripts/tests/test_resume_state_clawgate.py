@@ -140,6 +140,52 @@ def laundered_readers(src: list[str]) -> list[tuple[str, list[str]]]:
             out.append((name, hits))
     return out
 
+
+def shell_fn_body(src: str, name: str) -> str:
+    """The source text BETWEEN `name(){` and its closing `}` in column 0.
+
+    Scoping every scan below to one function is what makes them STATE
+    assertions rather than file-wide word searches: a `jq` call that moves out
+    of `clawgate_rank_rows` leaves the ledger, and one that moves in joins it.
+    """
+    m = re.search(rf"^{re.escape(name)}\(\)\{{\n(.*?)^\}}\s*$", src, re.M | re.S)
+    assert m, f"{name}() is no longer a top-level `name(){{ … }}` block"
+    return m.group(1)
+
+
+def _decommented(code: str) -> str:
+    """`code` with whole-line comments blanked, offsets preserved.
+
+    Whole-line only, on purpose: the jq filters here contain `#` inside quoted
+    strings (`"  #\\(.value.id …)"`), so stripping from the first `#` on a line
+    would eat live code. Blanking rather than deleting keeps every offset below
+    comparable against the original text.
+    """
+    return "\n".join("" if re.match(r"\s*#", ln) else ln for ln in code.splitlines())
+
+
+def cmd_subst_assignments(code: str) -> list[tuple[str, int, int, str]]:
+    """Every `VAR=$( … )` in `code` as (var, name_offset, close_offset, text).
+
+    The closing paren is found by BALANCING, not by a regex — `$(printf … | jq
+    … 2>/dev/null)` contains no nested parens today, but a filter that grew one
+    would silently truncate a lazy match and shrink the ledger without failing
+    it.
+    """
+    out: list[tuple[str, int, int, str]] = []
+    for m in re.finditer(r"(?:^|[;&|]\s*)\s*(?:local\s+)?([A-Za-z_]\w*)=\$\(", code, re.M):
+        i, depth = m.end() - 1, 0
+        for j in range(i, len(code)):
+            if code[j] == "(":
+                depth += 1
+            elif code[j] == ")":
+                depth -= 1
+                if depth == 0:
+                    out.append((m.group(1), m.start(1), j, code[i:j]))
+                    break
+    return out
+
+
 pytestmark = pytest.mark.skipif(
     shutil.which("bash") is None
     or shutil.which("git") is None
@@ -1694,18 +1740,96 @@ class TestResolve:
         assert recorded(r.stdout) == [], r.stdout
         assert not re.search(r"clawgate-task:\s*$", r.stdout, re.M), r.stdout
 
-    def test_BOTH_id_rereads_refuse_through_the_SAME_predicate(self):
-        """SEAM, not component. The two branches must not drift into disagreeing
-        about what a usable id is — the ledger fails if a third re-read appears
-        unguarded, or if either stops calling the shared predicate."""
-        src = LIB.read_text(encoding="utf-8")
-        rereads = re.findall(r"^\s*(\w+)=\$\(printf '%s' \"\$body\" \| jq -r \"\$jqdefs\"'\n"
-                             r"\s*\[ \.tasks\[\]\? \| norm[^\n]*\| \.id \| usable \]",
-                             src, re.M)
-        assert sorted(rereads) == ["ids", "worked_ids"], rereads
-        for var in rereads:
-            assert re.search(rf'clawgate_usable_id "\${var}" \|\| return 4', src), \
-                f"the {var} re-read does not route through clawgate_usable_id"
+    #: 🔴 THE EXTRACTION LEDGER — every jq pass inside `clawgate_rank_rows`, in
+    #: source order, named by the variable it fills. `ids` and `worked_ids` are
+    #: the two whose answer can become the RECORDED id — the adjacency test
+    #: below is what gates those; `shape`, `counts`, `rows` and `unknown_vals`
+    #: never reach the writer. Compared as an ORDERED list, so a second `ids=`
+    #: fails it exactly as a new name does.
+    RANK_ROWS_JQ_PASSES = ["shape", "counts", "rows", "unknown_vals", "ids", "worked_ids"]
+
+    def test_every_jq_pass_in_rank_rows_is_LEDGERED(self):
+        """🔴 STATE, NOT SPELLING — and this replaces a ledger that was neither.
+
+        The previous version matched one exact two-line textual shape of the id
+        re-read. An audit injected a THIRD, UNGUARDED re-read and it stayed
+        green three ways: the identical jq filter reformatted onto one line, a
+        different extraction (`jq -r '.tasks[0].id'`), and a guard relocated
+        BELOW the echo that records its value. A guard that reads as coverage
+        while providing none is worse than none — `claude/RULES.md` -> "A guard
+        can be SPELLED rather than STRUCTURAL".
+
+        So this asserts the SET of extraction sites instead, and fails when it
+        GROWS or SHRINKS. No filter text is matched at all: a jq pass is a
+        `VAR=$( … jq … )` inside the function, whatever it extracts and however
+        it is wrapped. The token count is the catch-all for the shape the
+        assignment scan cannot see — a jq invoked in a pipeline, a here-doc or
+        an `if VAR=$(…)` header — so a pass can neither hide from the ledger nor
+        join it silently.
+
+        WHAT IT DOES NOT CATCH: a jq whose command word is assembled at runtime
+        (`$JQ -r …`), and a second writer of the recorded value that is not a jq
+        pass at all. The adjacency half below covers the second; the first would
+        need a shell parser and is deliberately not attempted."""
+        body = _decommented(shell_fn_body(LIB.read_text(encoding="utf-8"), "clawgate_rank_rows"))
+        passes = [v for (v, _, _, text) in cmd_subst_assignments(body) if re.search(r"\bjq\b", text)]
+        assert passes == self.RANK_ROWS_JQ_PASSES, passes
+        # every `jq` in the function is accounted for by exactly one ledger entry
+        assert len(re.findall(r"\bjq\b", body)) == len(self.RANK_ROWS_JQ_PASSES), \
+            "a jq invocation in clawgate_rank_rows is not a ledgered `VAR=$( … )` pass"
+
+    def test_every_RECORDED_id_passes_through_the_predicate_FIRST(self):
+        """🔴 SEAM, and an ORDERING one. The hazard is not "a jq call exists
+        somewhere unguarded" — it is a value reaching the front-matter field
+        without having been judged, so the ledger is built from the WRITERS.
+
+        Every `$CLAWGATE_FIELD_KEY: $var` in the function must have
+        `clawgate_usable_id "$var" || return 4` between that variable's
+        assignment and the echo. Positional, because the old ledger's
+        `re.search` over the whole file made the guard's LOCATION irrelevant:
+        moving it below the recording echo left it silent. The `CLAWGATE_FIELD_KEY`
+        mention count is pinned too, so a third recording site cannot appear
+        without this test moving."""
+        body = _decommented(shell_fn_body(LIB.read_text(encoding="utf-8"), "clawgate_rank_rows"))
+        assigned = {v: n for (v, n, _, _) in cmd_subst_assignments(body)}
+        sites = [(m.group(1), m.start())
+                 for m in re.finditer(r"\$\{?CLAWGATE_FIELD_KEY\}?:\s*\$\{?(\w+)\}?", body)]
+        assert [v for v, _ in sites] == ["ids", "worked_ids"], sites
+        assert len(re.findall(r"CLAWGATE_FIELD_KEY", body)) == len(sites), \
+            "clawgate_rank_rows names CLAWGATE_FIELD_KEY somewhere this ledger does not read"
+        for var, echo_at in sites:
+            assert var in assigned, f"{var} is recorded but never assigned in this function"
+            guards = [m.start() for m in re.finditer(
+                rf'clawgate_usable_id\s+"\$\{{?{var}\}}?"\s*\|\|\s*return\s+4', body)]
+            assert any(assigned[var] < g < echo_at for g in guards), (
+                f"the value recorded as `{var}` is not gated by clawgate_usable_id "
+                f"BETWEEN its assignment and the echo that writes it "
+                f"(assigned@{assigned[var]}, echo@{echo_at}, guards@{guards})")
+
+    def test_the_predicate_REFUSES_a_MULTI_LINE_value(self):
+        """🔴 A COMMENT IS A CLAIM TOO — and this one was untested. The
+        `''|*[!0-9]*` pattern's comment says it "also rejects a MULTI-LINE
+        value"; nothing drove that direction, and the mutant widening the class
+        to `''|*[!0-9$'\\n']*` (which ACCEPTS `11\\n22`) SURVIVED the whole file.
+
+        COVERAGE-GAP FIX, NOT REGRESSION COVERAGE: the behaviour was already
+        correct, so this is green at the base commit.
+
+        Driven at the predicate, not through a payload, because no payload can
+        reach it: the tally and the re-read run the same filter over the same
+        rows, so a two-line answer to a one-row tally means the PASS broke, not
+        the board — which is the case the predicate exists for."""
+        r = call_fn("clawgate_usable_id", "11\n22")
+        assert r.returncode == 1, r.stdout
+        assert "RE-READS the resolved task's id" in r.stdout
+
+    def test_the_predicate_ACCEPTS_one_bare_id(self):
+        """POSITIVE CONTROL on every refusal above: a predicate that said NO to
+        everything would satisfy all of them for free, and would take rc 4 on a
+        perfectly good resolution."""
+        r = call_fn("clawgate_usable_id", "11")
+        assert r.returncode == 0, r.stdout
+        assert r.stdout == "", r.stdout
 
     def test_a_DEAD_row_render_is_REPORTED_not_silently_empty(self, resolver):
         """🔴 SELF-CONTRADICTING OUTPUT. `[ -n "$rows" ] &&` swallowed a failed

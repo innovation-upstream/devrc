@@ -322,6 +322,42 @@ clawgate_drift_lines(){
 # PURE: ranking the rows the board returned
 # --------------------------------------------------------------------------- #
 
+# `clawgate_usable_id <text>` — is this ONE bare task id, fit to be written into
+# a doc? Prints the refusal and returns 1 when it is not.
+#
+# 🔴 THIS GUARD WAS ARGUED AWAY ONCE, ON A REACHABILITY CLAIM THAT WAS FALSE.
+# The reasoning was: the `n_id -ne n` branch above already proved every row
+# carries a usable id, and the tally says exactly one row matches, so the re-read
+# below cannot come back empty. That is true of the PAYLOAD and says nothing
+# about the PASS — kill the jq invocation that performs the re-read and the
+# substitution yields "" while every count stays valid. An audit measured it:
+# `clawgate: 1 WORKED task of 2 link(s) … record it as front matter:
+# clawgate-task:` — rc 0, blank value.
+#
+# 🔴 PRICED FROM THE CONSUMER, WHICH IS WHY IT IS rc 4 AND NOT A COSMETIC NOTE.
+# `claude/skills/handoff/SKILL.md` tells the executor to act on the exit code and
+# nothing else, so rc 0 means it writes `clawgate-task:` with no value. That is
+# not a blank field: `clawgate_task_field_raw` classifies it present-and-
+# UNREADABLE, so `resume-state.sh` prints an UNRECONCILED gap on every future
+# /resume of that document, forever. A one-line refusal here is cheaper than a
+# permanent gap in a file nobody will connect back to this function.
+#
+# Both callers ask the identical question, so it is asked in one place —
+# `claude/RULES.md` -> "One rule, one place": a predicate open-coded at two sites
+# is wrong at one of them in the same direction.
+clawgate_usable_id(){
+  case "${1:-}" in
+    # Empty, or anything that is not a pure run of digits — which also rejects a
+    # MULTI-LINE value (a newline is not a digit), i.e. a re-read that matched
+    # more rows than the tally said it would.
+    ''|*[!0-9]*)
+      echo "clawgate: DID NOT ANSWER USABLY — the pass that RE-READS the resolved task's id produced '${1:-}', which is not one bare id. Recording that would write an UNREADABLE \`$CLAWGATE_FIELD_KEY:\` field and gap every future /resume of the doc. UNKNOWN, not empty; record nothing."
+      return 1
+      ;;
+  esac
+  return 0
+}
+
 # `clawgate_rank_rows <response-body-text>` — the whole verdict, from text alone.
 # Prints the candidate rows (role-ANNOTATED and role-ORDERED, worked first) and
 # then one verdict line, and returns `resolve`'s 0/4/5/6 (see the header).
@@ -361,42 +397,6 @@ clawgate_drift_lines(){
 # when a silent "that is not `worked`" would be wrong. Same reasoning as
 # `clawgate_known_status` above: a state nobody here has heard of must not
 # render like a healthy one.
-# `clawgate_usable_id <text>` — is this ONE bare task id, fit to be written into
-# a doc? Prints the refusal and returns 1 when it is not.
-#
-# 🔴 THIS GUARD WAS ARGUED AWAY ONCE, ON A REACHABILITY CLAIM THAT WAS FALSE.
-# The reasoning was: the `n_id -ne n` branch above already proved every row
-# carries a usable id, and the tally says exactly one row matches, so the re-read
-# below cannot come back empty. That is true of the PAYLOAD and says nothing
-# about the PASS — kill the jq invocation that performs the re-read and the
-# substitution yields "" while every count stays valid. An audit measured it:
-# `clawgate: 1 WORKED task of 2 link(s) … record it as front matter:
-# clawgate-task:` — rc 0, blank value.
-#
-# 🔴 PRICED FROM THE CONSUMER, WHICH IS WHY IT IS rc 4 AND NOT A COSMETIC NOTE.
-# `claude/skills/handoff/SKILL.md` tells the executor to act on the exit code and
-# nothing else, so rc 0 means it writes `clawgate-task:` with no value. That is
-# not a blank field: `clawgate_task_field_raw` classifies it present-and-
-# UNREADABLE, so `resume-state.sh` prints an UNRECONCILED gap on every future
-# /resume of that document, forever. A one-line refusal here is cheaper than a
-# permanent gap in a file nobody will connect back to this function.
-#
-# Both callers ask the identical question, so it is asked in one place —
-# `claude/RULES.md` -> "One rule, one place": a predicate open-coded at two sites
-# is wrong at one of them in the same direction.
-clawgate_usable_id(){
-  case "${1:-}" in
-    # Empty, or anything that is not a pure run of digits — which also rejects a
-    # MULTI-LINE value (a newline is not a digit), i.e. a re-read that matched
-    # more rows than the tally said it would.
-    ''|*[!0-9]*)
-      echo "clawgate: DID NOT ANSWER USABLY — the pass that RE-READS the resolved task's id produced '${1:-}', which is not one bare id. Recording that would write an UNREADABLE \`$CLAWGATE_FIELD_KEY:\` field and gap every future /resume of the doc. UNKNOWN, not empty; record nothing."
-      return 1
-      ;;
-  esac
-  return 0
-}
-
 clawgate_rank_rows(){
   local body="${1:-}"
 
