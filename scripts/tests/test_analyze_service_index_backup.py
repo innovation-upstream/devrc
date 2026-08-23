@@ -2109,3 +2109,604 @@ def test_the_producer_reuses_the_mail_actions_minio_helper():
     assert "from _minio import MinioArchive" in src
     assert "mail-actions" in src
     assert (SCRIPTS / "mail-actions" / "_minio.py").is_file()
+
+
+# --------------------------------------------------------------------------- #
+# 12. 🔴 WHICH REPOSITORY — a leaked git repo-pointer must not aim this
+#     program, which HAS A NETWORK, at a foreign repository (clawgate #343)
+# --------------------------------------------------------------------------- #
+#
+# THE MECHANISM. Every git call in backup.py is `git -C <scope> …`, and `-C` is
+# the weakest possible claim about where a command lands: GIT_DIR OVERRIDES IT.
+# The pre-fix `_git_env()` built from `dict(os.environ)` and added five config
+# keys, stripping none of the repo-pointer family.
+#
+# MEASURED 2026-08-23, git 2.55.0, driving the real CLI end to end
+# (`--no-upload --work-dir`) under the systemd unit's own environment SHAPE
+# (`env -i` plus PATH/HOME/SOPS_AGE_KEY_FILE/ASIB_HOST — NOT the operator's
+# shell, whose GIT_AUTHOR_* would fix a dimension the unit does not have), on
+# the pre-fix tree at d7d682f0. One variable at a time, exit code included:
+#
+#   VARIABLE                          rc   the BUNDLE declared        decoy
+#   ------------------------------------------------------------------------
+#   (control: no leak)                 0   refs/heads/trunk           identical
+#   GIT_DIR                            0   refs/heads/foreign-branch  identical  <- EXFILTRATION
+#   GIT_WORK_TREE                      0   refs/heads/trunk           identical
+#   GIT_COMMON_DIR                     1   (no bundle: rev-list 128)  identical
+#   GIT_INDEX_FILE                     0   refs/heads/trunk           identical
+#   GIT_OBJECT_DIRECTORY               1   (no bundle: rev-list 128)  identical
+#   GIT_ALTERNATE_OBJECT_DIRECTORIES   0   refs/heads/trunk           identical
+#   GIT_NAMESPACE                      0   refs/heads/trunk           identical
+#   GIT_PREFIX                         0   refs/heads/trunk           identical
+#   GIT_GRAFT_FILE                     0   refs/heads/trunk           identical
+#   GIT_SHALLOW_FILE                   0   refs/heads/trunk           identical
+#   GIT_CONFIG                         0   refs/heads/trunk           identical
+#
+# 🔴 EVERY ROW WAS RUN, exit code included. #721 shipped a table row claiming
+# `rc 0` where the truth was `rc 1`, because its probe exported GIT_AUTHOR_*.
+#
+# 🔴 READ THE SECOND COLUMN, NOT THE THIRD. The exfiltration signature is a
+# bundle full of the WRONG repository's refs while the foreign repo sits there
+# byte-identical — a read-only theft leaves nothing behind. A test that only
+# asserted "the decoy did not move" would have called the GIT_DIR row clean.
+#
+# 🔴 AND THE RESTORE REHEARSAL IN `bundle_scope` CANNOT CATCH IT: `want_names`
+# is read with `_git(scope, "for-each-ref")`, through the same poisoned
+# environment, so both sides report the decoy's refs and agree. rc=0, "verified".
+# That is a second sample of the unknown, not a control. Independently
+# re-measured here (card criterion 1) — the audit's two reported claims HOLD.
+#
+# The fix is the `strip_repo_pointers()` call in `_git_env()`, using the ledger
+# `testlib/gitenv.py` OWNS. Post-fix every row above is rc=0 / refs/heads/trunk,
+# including the two that used to fail outright.
+
+# 🔴 PARAMETRISED FROM THE LEDGER'S OWNER, NOT FROM `B`. Importing it here
+# rather than reading `B.REPO_POINTER_VARS` is what lets these tests COLLECT
+# against the pre-fix producer, where that attribute does not exist: parametrise
+# off `B` and the whole section dies at collection with an AttributeError, which
+# is red for an earlier check's reason and proves nothing about the guard
+# (claude/RULES.md → "prove it REACHABLE, not just breakable"). Whether the
+# producer uses this same object is a SEPARATE assertion, below.
+from testlib.gitenv import REPO_POINTER_VARS as _LEDGER  # noqa: E402
+
+_POINTER_VERDICTS: dict[str, str] = {
+    # name                             -> what the PRE-FIX tree did with it
+    "GIT_DIR": "spoofed: the bundle carried the DECOY's refs at rc=0",
+    "GIT_WORK_TREE": "no effect: the scope's own refs, rc=0",
+    "GIT_COMMON_DIR": "broke the run: rev-list rc=128, no bundle, rc=1",
+    "GIT_INDEX_FILE": "no effect: the scope's own refs, rc=0",
+    "GIT_OBJECT_DIRECTORY": "broke the run: rev-list rc=128, no bundle, rc=1",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES": "no effect: the scope's own refs, rc=0",
+    "GIT_NAMESPACE": "no effect: the scope's own refs, rc=0",
+    "GIT_PREFIX": "no effect: the scope's own refs, rc=0",
+    "GIT_GRAFT_FILE": "no effect: the scope's own refs, rc=0",
+    "GIT_SHALLOW_FILE": "no effect: the scope's own refs, rc=0",
+    "GIT_CONFIG": "no effect: the scope's own refs, rc=0",
+}
+
+# The pre-fix rows that are REGRESSION coverage rather than invariant guards:
+# these are the parametrisations watched RED at d7d682f0. The rest are labelled
+# invariant guards below and are NOT counted as regression coverage.
+_RED_AT_BASE_SECURITY = ("GIT_DIR",)
+_RED_AT_BASE_AVAILABILITY = ("GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY")
+
+
+def _leak_value(var: str, decoy: Path) -> str:
+    """A REALISTIC value for `var` that aims git at `decoy`.
+
+    Realistic, not a textbook fixture: each is what the variable would actually
+    hold if it had leaked out of a session working in that repository.
+    """
+    return {
+        "GIT_DIR": str(decoy / ".git"),
+        "GIT_WORK_TREE": str(decoy),
+        "GIT_COMMON_DIR": str(decoy / ".git"),
+        "GIT_INDEX_FILE": str(decoy / ".git" / "index"),
+        "GIT_OBJECT_DIRECTORY": str(decoy / ".git" / "objects"),
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES": str(decoy / ".git" / "objects"),
+        "GIT_NAMESPACE": "foreignns",
+        "GIT_PREFIX": "sub/",
+        "GIT_GRAFT_FILE": str(decoy / ".git" / "info" / "grafts"),
+        "GIT_SHALLOW_FILE": str(decoy / ".git" / "shallow"),
+        "GIT_CONFIG": str(decoy / ".git" / "config"),
+    }[var]
+
+
+def _git_dir_fingerprint(git_dir: Path) -> dict[str, str]:
+    """sha256 of EVERY file under a git dir — `objects/` INCLUDED.
+
+    🔴 `objects/` IS THE POINT. #721's foreign-repo fingerprint omitted it, and
+    that blindness produced a confident, wrong "harmless" verdict for
+    GIT_OBJECT_DIRECTORY — the variable that decides where NEW OBJECTS ARE
+    WRITTEN, i.e. the one whose whole damage class lives in the directory the
+    fingerprint could not see. Walking the entire git dir covers `objects/`,
+    `refs/`, `HEAD`, `config`, `logs/` and `index` by construction, and covers
+    whatever git grows next without anyone remembering to add it.
+    """
+    out: dict[str, str] = {}
+    for dirpath, _dirs, files in os.walk(git_dir):
+        for name in files:
+            p = Path(dirpath) / name
+            rel = p.relative_to(git_dir).as_posix()
+            try:
+                out[rel] = hashlib.sha256(p.read_bytes()).hexdigest()
+            except OSError as exc:  # unreadable is a CHANGE we must not hide
+                out[rel] = f"<unreadable {exc.__class__.__name__}>"
+    return out
+
+
+def test_the_foreign_fingerprint_covers_the_categories_it_CLAIMS(tmp_path):
+    """🔴 VALIDATE THE INSTRUMENT BEFORE READING ITS VERDICT.
+
+    A fingerprint helper that walked nothing would return `{}` and make every
+    byte-identity assertion below pass vacuously — and one that walked only refs
+    would report "harmless" for an object-store write, which is exactly the
+    blind spot this section exists to not repeat. So: it must SEE `objects/`,
+    `refs/`, `HEAD`, `config`, `logs/` and `index`, and it must MOVE when each
+    of those changes.
+    """
+    repo = _make_scope(tmp_path / "store", "probe", {"a.md": "x"})
+    git_dir = repo / ".git"
+
+    fp = _git_dir_fingerprint(git_dir)
+    assert fp, "the fingerprint walked nothing — every comparison below is vacuous"
+    for needed, why in (
+        ("objects/", "#721's blind spot: where GIT_OBJECT_DIRECTORY writes"),
+        ("refs/", "where a branch lands"),
+        ("HEAD", "which branch the repo is on"),
+        ("config", "the incident's config damage"),
+        ("logs/", "the reflog"),
+        ("index", "what a stage writes"),
+    ):
+        assert any(k == needed or k.startswith(needed) for k in fp), (
+            f"the fingerprint does not cover {needed!r} — {why}. Present: "
+            f"{sorted(fp)[:20]}")
+
+    def moved(before, after):
+        return sorted(k for k in set(before) | set(after)
+                      if before.get(k) != after.get(k))
+
+    # POSITIVE CONTROL, per category: watch the fingerprint move for each one.
+    before = _git_dir_fingerprint(git_dir)
+    (repo / "b.md").write_text("new\n", encoding="utf-8")
+    _git_run(repo, "add", "b.md")
+    _git_run(repo, "commit", "-q", "-m", "second")
+    delta = moved(before, _git_dir_fingerprint(git_dir))
+    assert any(k.startswith("objects/") for k in delta), (
+        f"a real commit wrote no object the fingerprint could see: {delta}")
+    assert any(k.startswith("refs/") or k == "packed-refs" for k in delta), delta
+    assert any(k.startswith("logs/") for k in delta), delta
+    assert "index" in delta, delta
+
+    before = _git_dir_fingerprint(git_dir)
+    _git_run(repo, "config", "user.name", "mutated")
+    assert "config" in moved(before, _git_dir_fingerprint(git_dir))
+
+    before = _git_dir_fingerprint(git_dir)
+    _git_run(repo, "symbolic-ref", "HEAD", "refs/heads/elsewhere")
+    assert "HEAD" in moved(before, _git_dir_fingerprint(git_dir))
+
+
+def _unit_shaped_env(home: Path, identity: Path) -> dict:
+    """The systemd unit's environment SHAPE, not the operator's shell.
+
+    🔴 `env -i` plus exactly what nix/home.nix sets: PATH, HOME, the age key
+    handle, ASIB_HOST. NOT `dict(os.environ)`. #721 shipped a measured table row
+    with the wrong exit code because its probe exported
+    GIT_AUTHOR_*/GIT_COMMITTER_*, fixing a dimension the unit does not have — a
+    probe built from the harness's own environment measures the harness.
+    """
+    return {
+        "PATH": os.environ["PATH"],
+        "HOME": str(home),
+        "SOPS_AGE_KEY_FILE": str(identity),
+        "ASIB_HOST": "synthetic-host",
+    }
+
+
+def _run_isolated(store: Path, work: Path, home: Path, identity: Path,
+                  leak: dict | None = None) -> subprocess.CompletedProcess:
+    env = _unit_shaped_env(home, identity)
+    env.update(leak or {})
+    return subprocess.run(
+        [sys.executable, str(SCRIPT), "--store", str(store),
+         "--no-upload", "--work-dir", str(work)],
+        capture_output=True, text=True, env=env)
+
+
+def _bundle_heads_cleanly(bundle: Path, home: Path) -> list[str]:
+    """`git bundle list-heads`, read with an environment WITHOUT the leak.
+
+    🔴 The artifact must be inspected through a channel the leaked variable does
+    not touch. Reading it back through the same poisoned environment is the
+    mistake `bundle_scope`'s own cross-check makes — a second sample of the
+    unknown, which is why that check reports "verified" over a foreign bundle.
+    """
+    p = subprocess.run(
+        [GIT, "bundle", "list-heads", str(bundle)],
+        capture_output=True, text=True,
+        env={"PATH": os.environ["PATH"], "HOME": str(home)})
+    assert p.returncode == 0, f"git bundle list-heads rc={p.returncode}: {p.stderr}"
+    return [ln.strip() for ln in p.stdout.splitlines() if ln.strip()]
+
+
+@pytest.fixture()
+def leak_bed(tmp_path, identity):
+    """A scope to back up, a DECOY repository to try to steal, and a fake HOME."""
+    home = tmp_path / "home"
+    home.mkdir()
+    store = tmp_path / "store"
+    scope = _make_scope(store, "some-scope", {"NOTES.md": "scope content"})
+
+    decoy = tmp_path / "decoy"
+    decoy.mkdir()
+    subprocess.run([GIT, "init", "-q", "-b", "foreign-branch", str(decoy)],
+                   check=True, capture_output=True, env=_git_env())
+    (decoy / "SECRET.md").write_text("foreign secret content\n", encoding="utf-8")
+    _git_run(decoy, "add", "SECRET.md")
+    _git_run(decoy, "commit", "-q", "-m", "foreign secret commit")
+
+    return {"home": home, "store": store, "scope": scope, "decoy": decoy,
+            "work": tmp_path / "work", "identity": identity}
+
+
+def test_the_leak_bed_really_builds_two_DIFFERENT_repositories(leak_bed):
+    """Positive control for the fixture. If the decoy shared the scope's refs,
+    every "did the bundle carry the decoy's refs" assertion below would be
+    unable to tell the two apart and would pass no matter what."""
+    scope_refs = set(_git_run(leak_bed["scope"], "for-each-ref",
+                              "--format=%(refname)").stdout.split())
+    decoy_refs = set(_git_run(leak_bed["decoy"], "for-each-ref",
+                              "--format=%(refname)").stdout.split())
+    assert scope_refs == {"refs/heads/trunk"}, scope_refs
+    assert decoy_refs == {"refs/heads/foreign-branch"}, decoy_refs
+    assert scope_refs.isdisjoint(decoy_refs)
+
+
+def test_a_clean_run_bundles_the_SCOPE(leak_bed):
+    """The control the parametrised tests below are read against. Without it a
+    green row cannot distinguish "the strip worked" from "the run never produced
+    a bundle at all"."""
+    p = _run_isolated(leak_bed["store"], leak_bed["work"],
+                      leak_bed["home"], leak_bed["identity"])
+    assert p.returncode == 0, f"control run failed rc={p.returncode}: {p.stderr}"
+    cipher = leak_bed["work"] / "some-scope.bundle.age"
+    assert cipher.is_file(), "the control run produced no artifact"
+    plain = leak_bed["work"] / "readback.bundle"
+    d = _decrypt(cipher.read_bytes(), leak_bed["identity"], plain)
+    assert d.returncode == 0, d.stderr
+    heads = _bundle_heads_cleanly(plain, leak_bed["home"])
+    assert any("refs/heads/trunk" in h for h in heads), heads
+    assert not any("foreign" in h for h in heads), heads
+
+
+@pytest.mark.parametrize("var", _LEDGER)
+def test_a_leaked_pointer_cannot_aim_the_backup_at_a_FOREIGN_repository(leak_bed, var):
+    """🔴 THE REGRESSION TEST. Red at d7d682f0 for GIT_DIR; green at HEAD.
+
+    Two claims, and the second is the one a foreign-repo-unchanged assertion
+    alone would miss:
+
+      1. the DECOY is byte-identical afterwards, `objects/` INCLUDED, and
+      2. the BUNDLE — the thing that gets encrypted and UPLOADED OFF-BOX —
+         declares the SCOPE's refs and none of the decoy's.
+
+    Claim 2 is the exfiltration signature. On the pre-fix tree with GIT_DIR
+    leaked the run exited 0, the decoy was untouched, `bundle_scope`'s restore
+    rehearsal passed, and the artifact was a complete copy of the decoy.
+
+    Rows other than GIT_DIR / GIT_COMMON_DIR / GIT_OBJECT_DIRECTORY were already
+    green at d7d682f0 — see `_POINTER_VERDICTS`. Those parametrisations are
+    INVARIANT GUARDS, not regression coverage, and they are here because "no
+    effect on this program today" is a measurement with a date on it, not a
+    property.
+    """
+    before = _git_dir_fingerprint(leak_bed["decoy"] / ".git")
+
+    p = _run_isolated(leak_bed["store"], leak_bed["work"], leak_bed["home"],
+                      leak_bed["identity"],
+                      leak={var: _leak_value(var, leak_bed["decoy"])})
+
+    cipher = leak_bed["work"] / "some-scope.bundle.age"
+    if p.returncode != 0:
+        # "Refuses" is an acceptable outcome per the card — but it must not have
+        # left an artifact behind that something downstream could upload.
+        assert not cipher.is_file(), (
+            f"{var}: the run FAILED (rc={p.returncode}) but still left an "
+            f"encrypted artifact behind: {cipher}")
+    else:
+        assert cipher.is_file(), f"{var}: rc=0 but no artifact: {p.stdout}\n{p.stderr}"
+        plain = leak_bed["work"] / "readback.bundle"
+        d = _decrypt(cipher.read_bytes(), leak_bed["identity"], plain)
+        assert d.returncode == 0, f"{var}: could not decrypt the artifact: {d.stderr}"
+        heads = _bundle_heads_cleanly(plain, leak_bed["home"])
+        assert heads, f"{var}: the artifact declares no heads at all"
+        assert not any("foreign" in h for h in heads), (
+            f"🔴 {var} AIMED THE BACKUP AT THE DECOY. The artifact that gets "
+            f"encrypted and uploaded declares the FOREIGN repository's refs: "
+            f"{heads}. This program has no PrivateNetwork and uploads what it "
+            f"bundles to MinIO, so this is content exfiltration, not local "
+            f"corruption. `git -C <scope>` does not win against a repo pointer "
+            f"— `_git_env()` must strip "
+            f"`testlib/gitenv.py::REPO_POINTER_VARS`.")
+        assert any("refs/heads/trunk" in h for h in heads), (
+            f"{var}: the artifact does not carry the SCOPE's own branch: {heads}")
+
+    after = _git_dir_fingerprint(leak_bed["decoy"] / ".git")
+    moved = sorted(k for k in set(before) | set(after) if before.get(k) != after.get(k))
+    assert not moved, (
+        f"🔴 {var} let the backup WRITE INTO the foreign repository. Paths that "
+        f"changed under {leak_bed['decoy'] / '.git'} ({len(moved)}, of which "
+        f"{sum(1 for k in moved if k.startswith('objects/'))} under objects/): "
+        f"{moved[:20]}")
+
+
+@pytest.mark.parametrize("var", _LEDGER)
+def test_a_leaked_pointer_does_not_BREAK_the_backup(leak_bed, var):
+    """The availability half. Red at d7d682f0 for GIT_COMMON_DIR and
+    GIT_OBJECT_DIRECTORY (both `rev-list` rc=128, so the run exited 1).
+
+    Refusing is safe, but a backup that refuses is a backup that does not exist,
+    and this one runs unattended on a daily timer behind an `OnFailure` toast.
+    Stripping the pointers makes the run correct AND available; the card's
+    "refuses or operates on the scope" is the floor, this is the standard.
+    """
+    p = _run_isolated(leak_bed["store"], leak_bed["work"], leak_bed["home"],
+                      leak_bed["identity"],
+                      leak={var: _leak_value(var, leak_bed["decoy"])})
+    assert p.returncode == 0, (
+        f"{var} broke the backup (rc={p.returncode}). A leaked pointer must be "
+        f"neutralised, not survived-by-failing:\n{p.stderr[-1500:]}")
+    assert (leak_bed["work"] / "some-scope.bundle.age").is_file()
+
+
+def test_the_leak_is_ANNOUNCED_so_the_broken_caller_gets_fixed(leak_bed):
+    """The strip fixes THIS program; it does not fix whoever exported the
+    variable. Saying so in the journal is the only thing that does."""
+    p = _run_isolated(leak_bed["store"], leak_bed["work"], leak_bed["home"],
+                      leak_bed["identity"],
+                      leak={"GIT_DIR": str(leak_bed["decoy"] / ".git")})
+    assert p.returncode == 0, p.stderr
+    assert "STRIPPED GIT_DIR=" in p.stderr, (
+        f"the run neutralised a leaked GIT_DIR silently:\n{p.stderr}")
+
+
+def test_a_clean_run_announces_NOTHING(leak_bed):
+    """The other half of the pair. A message printed unconditionally is not a
+    signal, and would train the operator to ignore the one that matters."""
+    p = _run_isolated(leak_bed["store"], leak_bed["work"],
+                      leak_bed["home"], leak_bed["identity"])
+    assert p.returncode == 0, p.stderr
+    assert "STRIPPED" not in p.stderr, p.stderr
+
+
+# --------------------------------------------------------------------------- #
+# 12b. the LEDGER: one owner, no second spelling
+# --------------------------------------------------------------------------- #
+def test_the_producer_uses_the_SHARED_ledger_object_itself():
+    """🔴 ONE RULE, ONE PLACE — and here it can be an identity check.
+
+    `commit.sh` has to RE-SPELL the ledger as a bash array (bash cannot import)
+    and is pinned two-way by `test_git_repo_isolation.py`. backup.py is Python,
+    so it uses the owner's object directly: there is no copy, so there is
+    nothing to drift, and a name added to `testlib/gitenv.py` reaches this
+    program with no edit here at all.
+    """
+    from testlib import gitenv
+    assert getattr(B, "REPO_POINTER_VARS", None) is gitenv.REPO_POINTER_VARS, (
+        "backup.py is not using testlib/gitenv.py's ledger OBJECT. Either it "
+        "does not import it at all (the pre-fix shape: `_git_env()` built from "
+        "`dict(os.environ)` and stripped nothing), or it re-spells the names — "
+        "and a second spelling can drift from the owner, which is the failure "
+        "this pins.")
+    assert getattr(B, "strip_repo_pointers", None) is gitenv.strip_repo_pointers, (
+        "backup.py does not use the owner's `strip_repo_pointers`; a local "
+        "re-implementation is a second place for the fix to be wrong.")
+
+
+def test_the_measured_table_covers_every_ledger_name():
+    """Two-way pin. A name added to `REPO_POINTER_VARS` with no measured verdict
+    here is a name nobody ran against this program; a verdict for a name that
+    left the ledger is a claim about something no longer stripped."""
+    assert set(_POINTER_VERDICTS) == set(_LEDGER), (
+        f"the measured table and the ledger disagree:\n"
+        f"  measured but not on the ledger: "
+        f"{sorted(set(_POINTER_VERDICTS) - set(_LEDGER))}\n"
+        f"  on the ledger but never measured: "
+        f"{sorted(set(_LEDGER) - set(_POINTER_VERDICTS))}\n"
+        "Run it — do not infer the row. #721 shipped a row claiming rc 0 where "
+        "the truth was rc 1.")
+    for var in _RED_AT_BASE_SECURITY + _RED_AT_BASE_AVAILABILITY:
+        assert var in _LEDGER, var
+    # And every name must have a leak value, or its parametrisation is vacuous.
+    for var in _LEDGER:
+        assert _leak_value(var, Path("/nonexistent/decoy")), var
+
+
+def test_the_git_environment_strips_every_pointer_on_the_ledger(monkeypatch):
+    """The unit-level assertion the mutation sweep is read against.
+
+    Ledger-driven, so it grows and shrinks with `REPO_POINTER_VARS` instead of
+    pinning a hand-typed list that could quietly cover fewer names than the
+    docstring claims.
+    """
+    for name in _LEDGER:
+        monkeypatch.setenv(name, f"/tmp/foreign/{name}")
+    env = B._git_env()
+    still = sorted(n for n in _LEDGER if n in env)
+    assert not still, (
+        f"_git_env() passed {still} straight through to git. Each of these "
+        f"decides WHICH repository a command lands in and OVERRIDES `git -C`.")
+    # The config half must survive the strip — the two sets are disjoint.
+    assert env["GIT_OPTIONAL_LOCKS"] == "0"
+    assert env["GIT_CONFIG_NOSYSTEM"] == "1"
+    assert env["GIT_CONFIG_GLOBAL"] == os.devnull
+    assert env["GIT_CONFIG_SYSTEM"] == os.devnull
+    assert env["GIT_TERMINAL_PROMPT"] == "0"
+
+
+def test_the_strip_does_not_mutate_the_CALLERS_environment(monkeypatch):
+    """`strip_repo_pointers()` mutates what it is handed. It is handed a COPY
+    here; handing it `os.environ` would make one `_git_env()` call silently
+    reshape the whole process, which is a behaviour change nobody asked for."""
+    monkeypatch.setenv("GIT_DIR", "/tmp/foreign/x")
+    B._git_env()
+    assert os.environ.get("GIT_DIR") == "/tmp/foreign/x"
+
+
+def test_every_git_invocation_takes_its_environment_from_git_env():
+    """🔴 A SEAM GUARD: it pins the RELATIONSHIP, not one function.
+
+    `_git` and `_git_scratch` are two separate `subprocess.run` sites and both
+    must inherit the strip. The failure this closes is a THIRD site added later
+    that builds `dict(os.environ)` itself — which is exactly the shape the bug
+    had. Walking the AST rather than grepping, because a grep for `_git_env`
+    would be satisfied by the two that already exist while a new one sat beside
+    them.
+    """
+    import ast
+    tree = ast.parse(SCRIPT.read_text(encoding="utf-8"))
+    git_sites = [(node.lineno, _env_is_git_env(node))
+                 for node in ast.walk(tree) if _is_git_subprocess(node)]
+
+    assert len(git_sites) >= 2, (
+        f"the AST walk found {len(git_sites)} git subprocess site(s) in "
+        f"{SCRIPT.name}; it should see at least `_git` and `_git_scratch`. A "
+        f"walker that finds nothing would make this pass vacuously.")
+    bad = [ln for ln, ok in git_sites if not ok]
+    assert not bad, (
+        f"{SCRIPT.name} invokes git at line(s) {bad} with an environment that "
+        f"did not come from `_git_env()`. That site does not get the "
+        f"repo-pointer strip, so a leaked GIT_DIR aims it at a foreign "
+        f"repository — the whole of clawgate #343.")
+
+
+def _is_git_subprocess(node) -> bool:
+    """`subprocess.run(["git", …], …)` — the shape both git helpers use."""
+    import ast
+    if not isinstance(node, ast.Call):
+        return False
+    fn = node.func
+    if not (isinstance(fn, ast.Attribute) and fn.attr == "run"
+            and isinstance(fn.value, ast.Name) and fn.value.id == "subprocess"):
+        return False
+    if not node.args or not isinstance(node.args[0], ast.List):
+        return False
+    elts = node.args[0].elts
+    first = elts[0] if elts else None
+    return isinstance(first, ast.Constant) and first.value == "git"
+
+
+def _env_is_git_env(node) -> bool:
+    import ast
+    env = {k.arg: k.value for k in node.keywords}.get("env")
+    return (isinstance(env, ast.Call) and isinstance(env.func, ast.Name)
+            and env.func.id == "_git_env")
+
+
+def test_the_git_env_seam_guard_can_go_RED():
+    """Negative control for the walker above: hand it the pre-fix shape and
+    watch it refuse. Without this, "0 bad sites" is indistinguishable from a
+    walker wired to nothing — the reassuring zero RULES.md's positive-control
+    rule is about."""
+    import ast
+    tree = ast.parse(
+        "import subprocess, os\n"
+        "def _git_env():\n    return {}\n"
+        "def a():\n"
+        "    return subprocess.run(['git', 'status'], env=_git_env())\n"
+        "def b():\n"
+        "    return subprocess.run(['git', 'log'], env=dict(os.environ))\n"
+        "def c():\n"
+        "    return subprocess.run(['age', '-e'], env=dict(os.environ))\n"
+    )
+    verdicts = [_env_is_git_env(n) for n in ast.walk(tree) if _is_git_subprocess(n)]
+    assert verdicts == [True, False], (
+        f"the seam walker cannot tell the two git shapes apart, or counted the "
+        f"non-git `age` call: {verdicts}")
+
+
+def test_scope_remotes_has_no_production_call_site():
+    """Card criterion 7, machine-checked in BOTH directions.
+
+    `scope_remotes()` is called by the test suite only. Its docstring says so;
+    this is what stops that sentence from quietly becoming false — and what
+    stops a future reader citing it as the control that ENFORCES the no-remote
+    invariant when it enforces nothing. Wire it in and this goes red, which is
+    the point: the docstring has to change in the same commit.
+    """
+    import ast
+    tree = ast.parse(SCRIPT.read_text(encoding="utf-8"))
+    defs = [n for n in ast.walk(tree)
+            if isinstance(n, ast.FunctionDef) and n.name == "scope_remotes"]
+    assert len(defs) == 1, f"expected exactly one definition, found {len(defs)}"
+    calls = [n.lineno for n in ast.walk(tree)
+             if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+             and n.func.id == "scope_remotes"]
+    assert not calls, (
+        f"scope_remotes() now HAS a production call site (line(s) {calls}). Its "
+        f"docstring says it has none and that no future reader may cite it as a "
+        f"run-path control. Update that docstring in this commit — and note "
+        f"that a post-hoc no-remote assertion on the run path would be "
+        f"UNREACHABLE, since nothing in this program can add a remote.")
+    src = SCRIPT.read_text(encoding="utf-8")
+    assert "TEST-ONLY" in src and "NO PRODUCTION CALL SITE" in src, (
+        "the dead-code status is no longer stated where a reader lands")
+
+
+def test_the_unit_can_actually_reach_the_pointer_ledger_at_runtime():
+    """🔴 THE IMPORT IS A NEW RUNTIME DEPENDENCY, so the sandbox must contain it.
+
+    backup.py imports `testlib/gitenv.py`, and the unit runs under
+    `ProtectSystem=strict` + `ProtectHome=tmpfs` — the ledger is reachable ONLY
+    because `BindReadOnlyPaths` mounts the whole `scripts/` tree. If someone
+    narrows that mount to `scripts/analyze-service-index`, the import raises and
+    the backup stops. Loudly, by design — but this says so before it happens.
+    """
+    ledger = SCRIPTS / "testlib" / "gitenv.py"
+    assert ledger.is_file(), f"{ledger} is missing — backup.py imports it"
+    binds = _containment_directives(_backup_block())["BindReadOnlyPaths"]
+    assert '"%h/workspace/devrc/scripts"' in binds, (
+        f"the backup unit no longer mounts the whole `scripts/` tree: {binds}. "
+        f"backup.py imports its repo-pointer ledger from "
+        f"`scripts/testlib/gitenv.py`; without that mount the unit cannot even "
+        f"import, and the daily backup stops.")
+
+
+def test_the_docstring_no_longer_claims_more_than_the_code_does():
+    """Card criterion 6. The old wording — "makes git structurally incapable of
+    writing to the repo" — was wider than the check in two directions at once:
+    nothing in `_git_env()` made git incapable of writing (the allowlist and
+    `BindReadOnlyPaths` do that), and it said nothing at all about WHICH
+    repository git resolves, which was the half that was missing.
+
+    🔴 A BAN ON THE PHRASE WOULD BE THE WRONG GUARD TWICE OVER: the docstring
+    QUOTES the old claim in order to retract it (which is the useful thing to
+    do), and a word-ban is walkable by rewording anyway. So this pins the whole
+    normalised RETRACTION — claude/RULES.md → "when the artifact under test IS
+    prose, pin the WHOLE normalised string". A cosmetic reword fails this test;
+    that is the price of a machine-readable claim, and it is worth paying here
+    because the sentence is the only thing standing between a reader and a
+    guarantee the code does not provide.
+    """
+    doc = " ".join((B._git_env.__doc__ or "").split())
+    retraction = (
+        'It said this environment "makes git structurally incapable of writing '
+        'to the repo" — a claim WIDER than the code: nothing here made git '
+        'incapable of writing (the allowlist in `_git` and the unit\'s '
+        '`BindReadOnlyPaths` do that), and nothing here said anything about '
+        'WHICH repository git resolves, which was the half that was actually '
+        'missing.'
+    )
+    assert retraction in doc, (
+        "`_git_env`'s docstring no longer carries the retraction of its old, "
+        "over-wide claim verbatim. Either the claim came back un-retracted, or "
+        "the sentence was reworded — re-read the implementation against it and "
+        "update this pin in the same commit.\n\n"
+        f"docstring now reads:\n{doc[:1200]}")
+    assert "WHICH REPOSITORY — `strip_repo_pointers`" in doc, (
+        "`_git_env`'s docstring does not name repo resolution and the strip "
+        "that provides it, which is now the main thing the function does")
+    assert "GIT_DIR OVERRIDES IT" in doc, (
+        "the docstring no longer states WHY `-C` is not enough, which is the "
+        "fact the whole function turns on")
