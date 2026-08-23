@@ -31,15 +31,33 @@ a. UPDATING IS NOT FORBIDDEN. The incident's update was correct and valuable;
    doc stability over state accuracy is backwards. So this tool exists to make
    the update SAFE, not to make it rare — there is no "don't update" path here.
 
-b. THE GATE IS ON THE PUSH, and it is the SAME gate shape `/handoff` already
-   specifies for the index write: one compact unified diff, a single y/N, and
-   on decline DISCARD. Structurally: the default mode writes NOTHING — not the
-   doc, not a commit, not a ref — it only prints the diff a human is being
-   asked to approve. Landing it takes a SECOND invocation carrying `--confirm`
-   (and `--push`), which is the action that happens after the `y`. A decline is
+b. THE TWO-PHASE SHAPE IS ON THE PUSH. The default mode writes NOTHING — not
+   the doc, not a commit, not a ref — it only prints the diff. Landing it takes
+   a SECOND invocation carrying `--confirm` (and `--push`). A decline is
    therefore not a code path that has to behave; it is the absence of one, and
    `TestDeclineWritesNothing` hashes the whole repo tree either side of a
    default-mode run to keep it that way.
+
+   🔴 THE y/N IS GONE — retired 2026-08-23 by operator decision, on the same
+   evidence that retired the index write's prompt on 2026-08-15: it was always
+   answered `y`, so it bought a round trip and no safety. This paragraph used to
+   describe it as "the SAME gate shape `/handoff` specifies for the index
+   write", which had ALREADY stopped being true of that write.
+
+   🔴 WHAT THE PROMPT WAS NOT DOING, and what now carries the whole load: the
+   refusals (`no-advance`, `no-change`, `behind`, `failed` — every one writes
+   nothing) and the three WARNINGS printed above the diff (both base-currency
+   tells and the durable-drop report). Those were advisory when a human read the
+   diff and answered; they are the only reader now. Do not weaken one on the
+   grounds that "the caller will see it" — the caller is the thing that stopped
+   being asked.
+
+   ⚠ AND THE PUSH IS NO LONGER BRANCH-LIMITED IN PRACTICE. `branch_is_shared()`
+   picks which remedy text prints; it blocks nothing, and because this module
+   shells out to git from inside Python, a `bash-guard.py`-style PreToolUse hook
+   never sees the inner `git commit` either. Operator was asked explicitly and
+   chose to push wherever the checkout sits, `main` included. If that is ever
+   revisited, THIS is the place to add the refusal — a prompt is not the fix.
 
 c. THE STATUS HEADER IS REPLACED; THE FINDINGS APPEND. "State now" / "Next
    steps" / "How to verify" are current state and are overwritten. "Open
@@ -1633,12 +1651,15 @@ def main(argv: list[str] | None = None) -> int:
     if not args.confirm:
         print("status=proposed")
         print(
-            "NOTHING WRITTEN — not the doc, not a commit, not a ref. Ask exactly "
-            "one `update the handoff doc and push it? (y/N)`.\n"
-            "  y -> re-run this exact command with --confirm (add --push to land "
-            "it on the shared branch, which is what the question asked about)\n"
-            "  n -> discard: write nothing and run nothing else. The tree is "
-            "already byte-identical."
+            "NOTHING WRITTEN — not the doc, not a commit, not a ref. This run "
+            "exists to put the diff above in the transcript.\n"
+            "  land it -> re-run this exact command with --confirm --push\n"
+            "  🔴 READ THE WARNINGS ABOVE THE DIFF FIRST. They were advisory "
+            "while a human answered a y/N here; that prompt was retired "
+            "2026-08-23 (operator decision — it was always answered y), so they "
+            "are now the only thing between this diff and a pushed commit.\n"
+            "  Declining is still normal: run nothing else and the tree stays "
+            "byte-identical. Nothing about this run has to be undone."
         )
         return EXIT_OK
 

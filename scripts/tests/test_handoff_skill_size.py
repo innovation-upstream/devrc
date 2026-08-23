@@ -5,7 +5,8 @@ WHY THIS EXISTS
 `/handoff` is the skill that runs at the END of a session -- at a context reset,
 or when the window is already tight. It is therefore the one skill body whose
 cost lands at the worst possible moment, and it is the LARGEST skill body in the
-repo. Measured 2026-08-23 across `claude/skills/*/SKILL.md`:
+repo. Measured 2026-08-23 across `claude/skills/*/SKILL.md` (sizes at the base
+commit; this file has since grown -- read `_size()`, not this table):
 
     handoff                   46,263 B     <- this file
     check-clickup-addressed   41,207 B
@@ -13,24 +14,48 @@ repo. Measured 2026-08-23 across `claude/skills/*/SKILL.md`:
     activity                  27,196 B
     resume                    23,849 B
 
-Two other always-on docs already have enforced ceilings -- `claude/RULES.md`
-(`scripts/tests/test_rules_size.py`) and `scripts/browser-bridge/SKILL.md`
-(`scripts/browser-bridge/tests/test_skill_size.py`). Skill BODIES had none, and
-`CLAUDE.md`'s note about ceilings names only those two. This closes the gap for
-the body that most needs it. The other skills are deliberately NOT gated here:
-a repo-wide ratchet would go red on `check-clickup-addressed` the day it landed,
-and `claude/RULES.md` is explicit that a permanently-red gate is worse than no
-gate. Extending this module per-skill, each with its own measured ceiling, is
-the natural next step -- not a single shared constant.
+🔴 THIS IS THE FIFTH BYTE GATE IN THE REPO AND THE THIRD ON A SKILL BODY -- it
+follows an established pattern, it did not invent one. The full set:
+
+    claude/RULES.md                      test_rules_size.py
+    scripts/browser-bridge/SKILL.md      browser-bridge/tests/test_skill_size.py
+    claude/skills/prune-skill/SKILL.md   test_prune_skill_size.py
+    claude/skills/session-manager/…      test_session_manager_skill_size.py
+    claude/skills/handoff/SKILL.md       this module
+
+⚠ THE FIRST VERSION OF THIS DOCSTRING SAID "Skill BODIES had none", AND SAID THE
+GATE WAS SCOPED TO ONE BODY BECAUSE "a repo-wide ratchet would go red on
+`check-clickup-addressed` the day it landed". Both were wrong, and a delta audit
+measured it: two skill-body gates already existed, and 41,207 B is comfortably
+UNDER this module's MAX_BYTES, so that justification never held at the constant
+actually chosen. Only `claude/RULES.md` is genuinely always-on; the
+browser-bridge one is a skill body too. The real reason for per-file gates is the
+boring one -- bodies differ by an order of magnitude, so one shared constant
+would be slack for most and a permanently-red gate for one, and `claude/RULES.md`
+says a permanently-red gate is worse than none.
+
+The reusable lesson, which is why this paragraph survives instead of being
+deleted: the wrong version was a crisp, checkable, FALSE claim, and it got that
+way by being SHARPENED from a vaguer one during a cleanup. Nobody re-measures a
+sentence that reads like it was already checked.
 
 WHAT THE CEILING PROTECTS -- AND WHAT IT MUST NOT DO
 ----------------------------------------------------
 🔴 This gate must NEVER be satisfied by deleting an instruction. The skill's
-prose is pinned verbatim by two lists -- `HANDOFF_SENTENCES` (77 entries, in
-`TestSkillDocsArePinned`, `scripts/tests/test_subsystem_touch.py`; that list
-covers two skills, not only this one) and `SKILL_PINS` (14 entries, in
-`scripts/tests/test_handoff_doc.py`). Counts measured 2026-08-23 -- re-count
-rather than trusting them. The comments in the first record that pinning only a
+prose is pinned verbatim by two lists -- `HANDOFF_SENTENCES` (in
+`TestSkillDocsArePinned`, `scripts/tests/test_subsystem_touch.py`; every entry
+asserts against THIS skill, though the enclosing class also covers another) and
+`SKILL_PINS` (`scripts/tests/test_handoff_doc.py`, none of whose entries is in
+step 4).
+
+⚠ NO COUNTS HERE ON PURPOSE. `_pin_lists()` parses both modules and the
+eviction playbook prints the live numbers. This paragraph carried "77" and "14",
+measured the same day; by the end of that day they were 78 and 16, because the
+round that wrote them added pins. A hand-written count of a list this module
+edits is stale before the commit lands -- which is what the docstring says two
+paragraphs down and did not do.
+
+The comments in the first record that pinning only a
 headline clause left the surrounding paragraph "deletable green" -- 1,513 chars
 -> 100 with the suite passing, silently taking the doc's only mention of a tool
 block, a fallback search and an UNFILED instruction with it.
@@ -41,11 +66,21 @@ incident narrative into `reference/index-write.md` §7 while keeping every
 imperative and every pinned phrase -- yielded **1,993 bytes out of 28,589**
 (step 4, base -> head).
 
-⚠ THOSE ARE BYTES, which is the unit this gate measures. Characters run ~5%
-lower on this file, and an audit reported the same eviction as "1,890" that way.
-The two are not in conflict -- they are different units -- but a size claim that
-says only "~2 KB" cannot be checked against either, which is the same ambiguity
-`test_the_gate_measures_BYTES_not_characters` exists to kill in the code.
+⚠ THOSE ARE BYTES, which is the unit this gate measures. Always say which.
+
+🔴 AND HERE IS HOW NOT TO RECONCILE TWO NUMBERS. An audit reported that same
+eviction as "1,890"; an earlier version of this paragraph explained the gap as
+bytes-vs-characters and asserted characters run "~5% lower on this file". A
+delta audit measured both halves and neither survived: the real spread is
+**1.22%**, and the eviction in CHARACTERS is 2,002 -- HIGHER than the byte
+figure, not lower. 1,890 was a different TREE (origin/main -> the previous tip,
+which is 1,882 B / 1,890 chars), not a different unit.
+
+The failure is `claude/RULES.md`'s "an EMPTY RESULT cannot distinguish two
+mechanisms" wearing a numeric hat: two plausible mechanisms (unit, tree) explain
+one discrepancy, the first was picked because it was already in mind, and a
+confident reconciliation got written down. A theory that explains the gap is not
+evidence for it. The cheap discriminating control was one `git cat-file -s`.
 
 The step is mostly imperative and procedure, not narrative. So the lever this
 gate provides is NOT "cut step 4 again"; it is "do not add without evicting",
@@ -108,7 +143,32 @@ REFERENCE_DIR = SKILL_MD.parent / "reference"
 # sizing formula (size + floor + six mean rules) would give ~50,200 here; that
 # is deliberately not taken, because the finding this file is under review for is
 # that it is already too big.
-MAX_BYTES = 48_000
+# 2026-08-23 (same day it was created): 48,000 -> 48,600 (+600).
+#
+# 🔴 WHAT WOULD NOT FIT, which is what this ledger is for: the operator retired
+# step 5's y/N prompt ("it always prompts y/n, we can remove that, the answer is
+# always y"). Removing a prompt COSTS bytes rather than saving them, because the
+# prompt was load-bearing prose and what replaces it has to be written down --
+# what now carries the protection (the four refusing statuses and the warnings
+# above the diff, previously advisory because a human was reading), that the
+# push is no longer branch-limited in practice, and a corrected account of the
+# one `status=failed` arm where the commit DOES exist.
+#
+# 🔴 EVICTION WAS RUN FIRST, AND IS RECORDED BECAUSE IT WENT BADLY. Three trim
+# passes over step 5 and its neighbours recovered a few hundred bytes and BROKE
+# A PIN doing it (`Do NOT retry by re-running with --push` was shortened to
+# `Do NOT retry with --push`; TestSkillAndModuleAgree caught it). That is the
+# gate working -- and it is also the evidence that trimming imperative prose for
+# bytes is how an instruction gets lost. The block evictions that did work went
+# to reference/write-gate.md; what remained were sentences whose every clause
+# was scope-bearing.
+#
+# +600 is one mean 🔴 rule of this file (measured 572 B), matching
+# test_rules_size.py's precedent of modest bumps over its sizing formula. It is
+# deliberately NOT sized to make the next round comfortable: the pressure is the
+# point, and the answer to the round after this one is lever 1 in the playbook
+# (move guidance into the tool), not another +600.
+MAX_BYTES = 48_600
 
 # Required working margin below the ceiling.
 #
@@ -132,16 +192,70 @@ def _existing_topics() -> str:
     return ", ".join(topics)
 
 
+def _pin_lists() -> dict[str, int]:
+    """How many verbatim phrases of this skill each pin list holds, RIGHT NOW.
+
+    Derived by parsing the two modules rather than restated, for the reason this
+    module's own docstring gives about hand-maintained numbers -- and because it
+    already happened here: the playbook rendered "~70 sentences ... and ~12 more"
+    while the docstring said 77 and 14, so the only copy a maintainer ever SEES
+    (the playbook renders on failure; the docstring does not) carried the stale
+    pair. A derived count cannot drift.
+    """
+    import ast
+
+    sources = {
+        "HANDOFF_SENTENCES": REPO_ROOT / "scripts/tests/test_subsystem_touch.py",
+        "SKILL_PINS": REPO_ROOT / "scripts/tests/test_handoff_doc.py",
+    }
+    counts: dict[str, int] = {}
+    for name, path in sources.items():
+        if not path.is_file():
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            # 🔴 isinstance FIRST, not `getattr(node, "targets", …)`. `ast.Delete`
+            # also carries `targets` and has no `.value`, so a `del <name>`
+            # anywhere in either module would crash this helper -- and it renders
+            # inside a FAILURE message, where a traceback replaces the playbook
+            # exactly when someone needs it.
+            if isinstance(node, ast.Assign):
+                targets = node.targets
+            elif isinstance(node, ast.AnnAssign):
+                targets = [node.target]
+            else:
+                continue
+            if any(
+                isinstance(tgt, ast.Name) and tgt.id == name for tgt in targets
+            ) and isinstance(node.value, ast.List):
+                counts[name] = len(node.value.elts)
+    return counts
+
+
+def _pin_counts() -> str:
+    counts = _pin_lists()
+    if not counts:
+        return (
+            "The skill's prose is pinned verbatim by HANDOFF_SENTENCES "
+            "(scripts/tests/test_subsystem_touch.py) and SKILL_PINS "
+            "(scripts/tests/test_handoff_doc.py) -- neither could be parsed "
+            "from here, so re-count them by hand before editing."
+        )
+    parts = ", ".join(f"{n} in {k}" for k, n in sorted(counts.items()))
+    return (
+        f"The skill's prose is pinned verbatim, phrase by phrase: {parts}. "
+        f"Deleting any one of them is a test failure, not a silent loss."
+    )
+
+
 def _eviction_playbook() -> str:
     return f"""
   How to fix -- do NOT delete or narrow an instruction to make this pass:
 
-    🔴 ~70 sentences in step 4 are pinned verbatim by TestSkillDocsArePinned in
-       scripts/tests/test_subsystem_touch.py, and ~12 more in
-       scripts/tests/test_handoff_doc.py. A green suite does NOT mean the step
-       survived an edit: those pins catch DELETION of a named instruction and
-       DRIFT in its wording, not a rewrite that keeps the words and guts the
-       reasoning around them. Read the step cold after editing it.
+    🔴 {_pin_counts()} A green suite does NOT mean the skill survived an edit:
+       those pins catch DELETION of a named instruction and DRIFT in its
+       wording, not a rewrite that keeps the words and guts the reasoning
+       around them. Read the step cold after editing it.
 
     What to move OUT (to claude/skills/handoff/reference/<topic>.md):
       - dated measurements, incident narratives, byte/token counts, PR numbers
@@ -155,12 +269,20 @@ def _eviction_playbook() -> str:
       - every command the executor has to run, with its flags
       - enough failure SHAPE that a reader knows when the rule applies
 
-    ⚠ MEASURED: a full eviction pass over step 4 (2026-08-23) yielded ~2.0 KB
-    out of 28.3 KB. If you are here again, prose eviction is probably exhausted.
-    The remaining lever is to move guidance INTO the tool -- subsystem_touch.py
-    already prints ROUTE OUT / WRONG WINDOW? / NO PATH FOOTPRINT? / SKILL HOMES
-    / RECOVER at the moment each applies, which costs nothing on the runs where
-    it does not fire, unlike a paragraph in the body that is paid every time.
+    ⚠ MEASURED: a full eviction pass over step 4 (2026-08-23) yielded 1,993
+    BYTES out of 28,589 -- and three further trim passes the same day, under
+    real budget pressure, yielded a few hundred more and BROKE A PIN doing it.
+    If you are here again, prose eviction is close to exhausted and trimming is
+    how you lose an instruction. The remaining levers, in order:
+
+      1. move guidance INTO the tool -- subsystem_touch.py already prints
+         ROUTE OUT / WRONG WINDOW? / NO PATH FOOTPRINT? / SKILL HOMES / RECOVER
+         at the moment each applies, which costs nothing on the runs where it
+         does not fire, unlike a paragraph paid on every run;
+      2. demote a whole coherent block to reference/ with a pointer;
+      3. raise MAX_BYTES, saying in the commit message which instruction could
+         not be expressed in the budget. This is legitimate and has been done --
+         see the ledger on the constant -- but it is third, not first.
 
     Ceiling + headroom constants live in scripts/tests/test_handoff_skill_size.py.
 """
@@ -288,11 +410,43 @@ def test_the_headroom_half_fires_on_its_OWN_condition(tmp_path, monkeypatch):
         MAX_BYTES - MIN_HEADROOM_BYTES + 1  ->  headroom == MIN_HEADROOM_BYTES - 1
 
     and asserts BOTH directions -- the ceiling test PASSES while the headroom
-    test FAILS. Lower MIN_HEADROOM_BYTES by one byte and this goes red.
+    test FAILS.
+
+    ⚠ WHAT THIS DOES AND DOES NOT PIN, corrected after a delta audit measured it.
+    An earlier version of this docstring claimed "lower MIN_HEADROOM_BYTES by one
+    byte and this goes red". FALSE: 899, 500, 100 and 1 all leave the suite
+    green, because the fixture is DERIVED from the constant and therefore moves
+    with it. What is pinned is the comparison's SHAPE -- measured red for
+    `headroom >= 0` as a literal, for `>=` weakened to `>`, and for an off-by-one
+    in `headroom`. The one value it does catch is 0, and only via the guard
+    below.
+
+    That is the right trade, not a gap to close: a test that pinned the constant
+    to 900 would false-fail every legitimate ratchet, and a ratchet is the
+    intended direction of travel here. But the sentence has to say so --
+    `claude/RULES.md`: "a guard's DESCRIPTION claims COVERAGE."
     """
     in_band = tmp_path / "in-band.md"
     in_band.write_bytes(b"x" * (MAX_BYTES - MIN_HEADROOM_BYTES + 1))
     monkeypatch.setattr("test_handoff_skill_size.SKILL_MD", in_band)
+
+    # 🔴 THE BAND MUST EXIST, asserted HERE with its own message. At
+    # MIN_HEADROOM_BYTES = 0 the fixture above is MAX_BYTES + 1, i.e. over the
+    # CEILING -- so the call below would raise, this test would fail, and it
+    # would fail for the ceiling's reason with the ceiling's message. That is
+    # `claude/RULES.md`'s "a mutant that removes a guard TOGETHER WITH ITS
+    # ENCLOSING CONDITION ... dies for the wrong reason", and a delta audit
+    # found it here after the first fix. Now a zero floor is reported as what it
+    # is: a warning band nothing can enter.
+    assert MIN_HEADROOM_BYTES > 0, (
+        "MIN_HEADROOM_BYTES is 0, so the warning band is EMPTY and "
+        "test_handoff_skill_keeps_working_headroom can never fire before the "
+        "ceiling does -- the early-warning half of this gate is inert."
+    )
+    assert len(in_band.read_bytes()) <= MAX_BYTES, (
+        "the in-band fixture is over the CEILING, so the assertion below would "
+        "fire for the ceiling's reason and prove nothing about the floor"
+    )
 
     # The ceiling is NOT breached -- this is the half that makes the assertion
     # below a statement about MIN_HEADROOM_BYTES rather than about MAX_BYTES.
@@ -317,8 +471,9 @@ def test_the_gate_measures_BYTES_not_characters(tmp_path, monkeypatch):
     """🔴 THE UNIT WAS UNPINNED, and it is worth ~561 bytes of silent budget.
 
     MEASURED: mutating `_size()` from `read_bytes()` to `read_text("utf-8")`
-    left every test GREEN while granting the real file 561 bytes of extra
-    allowance -- it is 46,014 bytes but 45,453 characters.
+    left every test GREEN while granting the real file several hundred bytes of
+    extra allowance -- this file's byte and character counts differ by ~1.2%,
+    and the exact figure moves with every edit, so it is not written down here.
 
     The cause is `claude/RULES.md`'s fixture rule: every control above writes
     `b"x" * N`, pure ASCII, where bytes and characters are the same number. A
