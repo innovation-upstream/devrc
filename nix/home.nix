@@ -1260,16 +1260,22 @@ in
   # absent from the upstream branch's recent history, and reports what it
   # touched. `BASE_CLONE_NO_REFRESH=1` makes it report-only.
   #
-  # Registration in ~/.claude/settings.json stays PER-HOST and unmanaged, exactly
-  # like bash-guard.py above: register-nudge-hook.py deliberately does NOT own
-  # it. That is structural, not an omission — the registrar's managed-command
-  # surface recognises `<python> <path>.py` commands only, and its whole rewrite
-  # half exists to normalise a python INTERPRETER token to an absolute /nix/store
-  # path. This hook is bash, so there is no interpreter hazard to fix and nothing
-  # for the registrar to match; teaching that shared component a second
-  # interpreter would widen a load-bearing surface for no benefit. Consequence,
-  # the same known gap bash-guard.py has: on any host where the entry has not
-  # been added by hand, the switch delivers the script and the hook is INERT.
+  # 🔴 REGISTERED BY register-nudge-hook.py since 2026-08-23 — this comment used to
+  # say the opposite, and the opposite was a shipped gap. It reasoned that the
+  # registrar recognises `<python> <path>.py` only, that a bash hook has no
+  # interpreter hazard to fix, and concluded that teaching it a second interpreter
+  # "would widen a load-bearing surface for no benefit". The first two clauses are
+  # still true; the conclusion did not follow. The benefit is not interpreter
+  # pinning — it is REGISTRATION, and the stated consequence was the #452 shape
+  # verbatim: on the second host the switch delivers the script, reports success,
+  # and the hook sits INERT with nothing on screen to say so. Measured: it fired on
+  # exactly one host, the one where the entry had been hand-added.
+  #
+  # What the registrar gained is an IDENTITY recogniser (`hook_script_of`) sitting
+  # beside the interpreter one, not a widened rewrite surface. The rewrite pass
+  # still keys on the python-only `managed_match`, because normalising this
+  # command's first token to a python path would make every session start a
+  # SyntaxError. See MANAGED_SHELL_HOOK_SCRIPTS in that script.
   #
   # 🔴 A NEW file, so it must be `git add`ed or the flake silently omits it and
   # the switch still succeeds with the hook absent — this repo's standing trap
@@ -1281,8 +1287,10 @@ in
   # never been hand-placed. MEASURED 2026-08-22 before the first switch that
   # deploys it — `ls -la ~/.claude/hooks/` shows 14 entries on this host, ALL
   # /nix/store symlinks, no regular files, and no base-clone-staleness.sh among
-  # them. The live copy being replaced lives in ~/.claude/local-hooks/, a
-  # different directory this attribute does not write to. If a foreign file ever
+  # them. The live copy being replaced lived in ~/.claude/local-hooks/, a
+  # different directory this attribute never wrote to; it was kept as the rollback
+  # path until the hook was observed to fire from here, and deleted 2026-08-23
+  # once it had been. If a foreign file ever
   # does appear at this path the switch fails LOUDLY ("would be clobbered")
   # rather than silently leaving it unmanaged — add it to dropStaleClaudeHooks
   # then.
