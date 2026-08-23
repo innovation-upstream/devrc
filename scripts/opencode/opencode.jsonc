@@ -101,8 +101,10 @@
 // does not "fire too often" — it KILLS the run mid-task. That inverts the trade
 // argued above, but only for patterns whose binary name is a substring of
 // ordinary English/flag text. `kubectl` and `sops` are not, which is why they
-// stay infix. (`*talosctl*` and `*sudoedit*` are single-token wildcards with no
-// middle `*` at all — they are not infix rules and are not evidence either way.)
+// stay infix. (The *rules named* `*talosctl*` and `*sudoedit*` are single-token
+// wildcards with no middle `*` at all, so they are not evidence either way —
+// but do not read that as "there is no infix talosctl rule": `*talosctl*reset*`
+// in the deny block below is one.)
 //
 // 🔴 THE TRADE IS REAL, IS NOT FREE, AND THE TARGET NEED NOT BE DISPOSABLE.
 // A narrowed rule knows exactly one argument order, so `age -i k.txt -d f` and
@@ -116,10 +118,14 @@
 // 🔴 But read the counterfactual before treating the narrowing as the cause:
 // `rm -fr ~/.ssh`, `rm -Rf ~/.ssh` and `rm -R ~/.ssh` were ALREADY plain ALLOW
 // at both layers BEFORE this change (measured on `main`). So this glob was never
-// a control for that target — the narrowing WIDENS an already-open hole, it does
-// not open one. The honest summary is: layer 1 does not protect `$HOME` from a
-// recursive delete and never did; if you want that, it belongs in guard_core.py,
-// per this header's own rule about irreversible families.
+// a RELIABLE control for that target — three ordinary spellings already walked
+// around it — and the narrowing WIDENS an already-open hole rather than opening
+// one. Do not overstate that in either direction: the old glob DID gate
+// `rm -f -r ~/.ssh` (it is `ask` on `main`, per the table above), so this is a
+// partial control being made weaker, not a no-op being blamed. The honest
+// summary is: layer 1 does not reliably protect `$HOME` from a recursive delete
+// and never did; if you want that, it belongs in guard_core.py, per this
+// header's own rule about irreversible families.
 // guard_core.py has NO age/sops check at all, and its `rm`
 // check has a deliberately narrow TARGET set — `/`, `~`/`$HOME`, `.`/`..` and
 // top-level system dirs — that a SUBPATH like `~/.ssh` never reaches.

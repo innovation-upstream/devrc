@@ -742,6 +742,11 @@ GUARD_BACKSTOPPED_DENIES = {
 
 # Read-only, high-frequency. If these start prompting, the operator is trained
 # to click through — which is how the prompts that matter stop working.
+# 🔴 "Read-only" is the CONTRACT, not a proven property of every row: the
+# `terraform plan` row below is deliberately admitted with a documented caveat
+# (it takes a state lock). Read that comment before adding a row — an unflagged
+# non-read-only entry makes this header a false claim, which is the defect class
+# this file exists to catch.
 MUST_ALLOW = [
     "ls -la",
     "kubectl get pods -A",
@@ -1528,11 +1533,21 @@ def test_rm_glob_misses_these_recursive_spellings():
     second).
 
     Requiring the literal "rm -r" NARROWS that false-positive class — it does
-    not remove it. MEASURED, still `ask` on this config: `ls src/form -r`,
-    `terraform -refresh=false plan`, `./scripts/perform -r x`,
-    `docker run --rm -r foo`. What survives is any token ENDING in "rm"
-    immediately followed by a `-r` flag; what goes away is the much larger
-    non-adjacent class, which is where every measured dead run came from.
+    not remove it. State the residual EXACTLY, because a loose paraphrase is
+    wrong in both directions: what survives is any text CONTAINING the literal
+    substring `"rm -r"` or `"rm --recursive"`. Both halves matter, and an earlier
+    draft of this docstring named only the first.
+      * via `"*rm -r*"`  — a token ending in "rm" directly before a `-r` flag:
+        `ls src/form -r`, `terraform -refresh=false plan`,
+        `./scripts/perform -r x`, `docker run --rm -r foo`   (all still `ask`)
+      * via `"*rm --recursive*"` — its own class, and NOT illustrated by any row
+        above: `pnpm --filter form --recursive build`,
+        `npm run build:form --recursive`, `terraform --recursive x`
+        (all still `ask` — real dead runs under `opencode run`)
+    Do NOT read it as "a token ending in rm before any recursive-ish flag": the
+    match is a literal substring, so `perform -R x` and `perform --recurse x`
+    resolve ALLOW. What goes away is the much larger non-adjacent class, which is
+    where every measured dead run came from.
     This is the same trade, and the same shape of loss, as
     `test_age_glob_misses_these_reordered_decrypt_spellings` records for `age`.
 
@@ -1551,7 +1566,8 @@ def test_rm_glob_misses_these_recursive_spellings():
     match); and a candidate
     that looked like it generalised (`"*rm*-*r*"`) matched `rm -R /repo/build`
     only because the PATH contains an "r", so it fails on `rm -R /x`. Re-widening
-    to `"*rm*-r*"` closes three of these rows and reopens the auto-reject class
+    to `"*rm*-r*"` closes six of these rows (measured — rows 4-9; only `-R`,
+    `-Rf` and `-fr` stay open) and reopens the auto-reject class
     the narrowing was made to remove — that trade was already measured and
     rejected. The structural fix is to widen guard_core's target set, which its
     own docstring records as an operator decision needing a measurement of how
