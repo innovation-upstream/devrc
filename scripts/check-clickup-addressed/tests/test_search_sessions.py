@@ -96,14 +96,14 @@ def test_search_sessions_match():
         session_file = session_dir / "session1.jsonl"
         
         with open(session_file, "w") as f:
-            f.write(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "Task 868ktvqf9 was fixed. PR #123 merged."}]}}) + "\n")
+            f.write(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "Task 868gy0ddd was fixed. PR #123 merged."}]}}) + "\n")
         
         # Override CLAUDE_DIR
         original_dir = search_sessions.CLAUDE_DIR
         search_sessions.CLAUDE_DIR = projects_dir
         
         try:
-            results = search_sessions.search_sessions(["868ktvqf9"])
+            results = search_sessions.search_sessions(["868gy0ddd"])
             assert len(results) == 1
             assert results[0]["session_id"] == "session1"
             assert results[0]["hits"] >= 1
@@ -123,7 +123,7 @@ def test_search_sessions_multiple_terms():
         session_file = session_dir / "session1.jsonl"
         
         with open(session_file, "w") as f:
-            f.write(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "868ktvqf9 was fixed. Exit 0 confirmed."}]}}) + "\n")
+            f.write(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "868gy0ddd was fixed. Exit 0 confirmed."}]}}) + "\n")
         
         # Override CLAUDE_DIR
         original_dir = search_sessions.CLAUDE_DIR
@@ -131,11 +131,11 @@ def test_search_sessions_multiple_terms():
         
         try:
             # Should match (both terms present)
-            results = search_sessions.search_sessions(["868ktvqf9", "exit 0"])
+            results = search_sessions.search_sessions(["868gy0ddd", "exit 0"])
             assert len(results) == 1
             
             # Should not match (one term missing)
-            results = search_sessions.search_sessions(["868ktvqf9", "nonexistent"])
+            results = search_sessions.search_sessions(["868gy0ddd", "nonexistent"])
             assert len(results) == 0
         finally:
             search_sessions.CLAUDE_DIR = original_dir
@@ -153,7 +153,7 @@ def test_search_sessions_any_mode():
         session_file = session_dir / "session1.jsonl"
         
         with open(session_file, "w") as f:
-            f.write(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "868ktvqf9 was fixed."}]}}) + "\n")
+            f.write(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "868gy0ddd was fixed."}]}}) + "\n")
         
         # Override CLAUDE_DIR
         original_dir = search_sessions.CLAUDE_DIR
@@ -161,7 +161,7 @@ def test_search_sessions_any_mode():
         
         try:
             # With match_any=True, should match even with only one term
-            results = search_sessions.search_sessions(["868ktvqf9", "nonexistent"], match_any=True)
+            results = search_sessions.search_sessions(["868gy0ddd", "nonexistent"], match_any=True)
             assert len(results) == 1
         finally:
             search_sessions.CLAUDE_DIR = original_dir

@@ -1113,18 +1113,41 @@ def test_the_cwd_root_is_load_bearing(tmp_path, monkeypatch):
 def test_the_module_root_is_load_bearing(tmp_path, monkeypatch):
     """Kills the `starts = [Path.cwd()]` mutant. Every nested control in this
     file runs pytest with `cwd` in a tmp dir that is not a repository at all; so
-    does any `pytest` launched from `/tmp`. This repo is then protected only by
-    the module root."""
+    does any `pytest` launched from `/tmp`. The module root is what protects a
+    repo then.
+
+    🔴 This must NOT depend on THIS checkout having a `.git`. It used to assert
+    exactly that (`gitenv.py is not inside a git checkout`) and the assertion
+    fired — not as a bug in the guard, but because the AUTHORITATIVE runner is
+    `nix build .#checks.x86_64-linux.pytests`, whose source is a `/nix/store`
+    path with no `.git` at all. So the suite passed on a dev host and failed in
+    the one environment that gates a merge, on every branch, for reasons no PR
+    had touched. Reproduce it in one line: `rm .git` from a copy of the tree and
+    run this test.
+
+    The rule under test is "the module's own directory is consulted", which does
+    not need the real repo. `protected_git_dirs` reads `Path(__file__)` — a
+    module global resolved at CALL time — so pointing `gitenv.__file__` at a
+    repository this test CONSTRUCTS exercises the real default `starts` (no
+    `starts=` argument is passed) while owning both roots outright.
+    """
     monkeypatch.delenv(PROTECT_ENV, raising=False)
+    # The module's home is a repo we control, so the assertion is about the
+    # discovery RULE and not about how this file happens to be checked out.
+    home = _mkrepo(tmp_path / "module-home")
+    monkeypatch.setattr(gitenv, "__file__", str(home / "gitenv.py"))
+    # ...and cwd is deliberately in no repository, so the cwd root finds nothing
+    # and ONLY the module root can supply the answer.
     outside = tmp_path / "not-a-repo"
     outside.mkdir()
     monkeypatch.chdir(outside)
     dirs = protected_git_dirs()
-    devrc_git_dir = resolve_git_dir(Path(gitenv.__file__).resolve().parent)
-    assert devrc_git_dir is not None, "gitenv.py is not inside a git checkout"
-    assert devrc_git_dir in dirs, (
-        "this checkout was not discovered from a cwd outside any repository — "
-        f"dropping Path(__file__) from `starts` would be invisible.\nfound: {dirs}")
+    home_git_dir = resolve_git_dir(home)
+    assert home_git_dir is not None, "the fixture repo has no git dir (test rig issue)"
+    assert home_git_dir in dirs, (
+        "the module's own repository was not discovered from a cwd outside any "
+        "repository — dropping Path(__file__) from `starts` would be "
+        f"invisible.\nfound: {dirs}")
 
 
 # --------------------------------------------------------------------------- #

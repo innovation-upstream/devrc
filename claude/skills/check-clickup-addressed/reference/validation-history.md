@@ -1,3 +1,17 @@
+# 🔴 Identifiers in this file are SYNTHETIC
+
+devrc is a **public** repo. Every ClickUp task ID, comment author and quoted comment body
+below has been regenerated: the IDs are invented (and carry the shared-prefix structure the
+fixtures depend on, not the originals'), the names are invented people, and the comment
+wording is paraphrased. What is preserved is the **shape** each record was kept for —
+negator position, clause boundaries, closure vocabulary, which clause carried the refusal —
+because that is the entire content of a labelled case. **Do not try to look an ID up**, and
+when you add a round here, write it synthetic from the start.
+`scripts/check-clickup-addressed/tests/test_no_real_identifiers.py` pins both ledgers and
+goes red on an unregistered ID or author. It reads the working tree only.
+
+---
+
 # Migration to devrc — 2026-08-22
 
 The skill moved out of `datapacket-talos/.claude/skills/check-clickup-addressed/` (project-
@@ -76,12 +90,12 @@ appeared nowhere, scoring every signal at a hardcoded `proximity: 0.5`. The "clo
 requires `> 0.5`, so those results could never reach it and always fell through to
 `elif completion and open_items → "partially_addressed"`. Any unmatched task, in a corpus
 containing one `#N merged` and one `still running`, was labelled partially-addressed **by
-construction**, citing other tasks' work. Observed on `868kt8pfu`: 5 completion + 5 open
+construction**, citing other tasks' work. Observed on `868gy0eee`: 5 completion + 5 open
 signals, `mentions_found: 0`, every snippet about unrelated work. One of the five
 "completion" signals literally read *"PR #346 is still unmerged."*
 
 **D2 — ±2000-char windows bleed across a multi-task triage table.**
-Asking about `868krn3y1` returned `868kr07fu`'s merge at **proximity 1.5** — the task-ID
+Asking about `868gx1ccc` returned `868gx0aaa`'s merge at **proximity 1.5** — the task-ID
 boost fired because the *target's* ID also fell inside the 80-char snippet, making the
 misattributed signal the highest-confidence one in the report.
 
@@ -127,8 +141,8 @@ Base = the pre-fix scripts, copied aside before editing. Suite: `python3 scripts
 **Note — two of those reds are weak.** The attribution tests fail at base on the tuple
 *shape* (`too many values to unpack`), not on the behaviour, so they died for the wrong
 reason. The behaviour was therefore proven separately against the baseline's own 2-tuple
-API: asking about `868krn3y1` over a two-row table returned
-`[PR merged] prox=1.5 | 868kr07fu | talos-infra #1065 merged 08-16 …`. That is the defect,
+API: asking about `868gx1ccc` over a two-row table returned
+`[PR merged] prox=1.5 | 868gx0aaa | talos-infra #1065 merged 08-16 …`. That is the defect,
 measured at base.
 
 `test_no_mentions_positive_control` passes at base and is an **invariant guard**, not
@@ -164,20 +178,20 @@ Ground truth taken from each ticket's newest ClickUp comment and live status, pl
 
 | Task | Before | After | Ground truth |
 |---|---|---|---|
-| `868ktvqf9` | partially_addressed (5c/4o) | partially_addressed (5c/4o) | ✅ `in progress`; #4102 merged, headline defect open |
-| `868kt8pfu` | partially_addressed (5c/5o, **all false**) | **open** (0c/1o) | ✅ nothing shipped; blocked on `workflow` OAuth scope |
-| `868kr07fu` | partially_addressed (5c/3o, **all cross-task**) | **likely_addressed** (1c/0o) | ✅ *"Resolved … Recommend closing"* |
-| `868krn3y1` | partially_addressed (3c/3o, **all cross-task**) | **unclear** (0c/0o) | ✅ no work recorded since 08-15 |
+| `868gy0ddd` | partially_addressed (5c/4o) | partially_addressed (5c/4o) | ✅ `in progress`; #4102 merged, headline defect open |
+| `868gy0eee` | partially_addressed (5c/5o, **all false**) | **open** (0c/1o) | ✅ nothing shipped; blocked on `workflow` OAuth scope |
+| `868gx0aaa` | partially_addressed (5c/3o, **all cross-task**) | **likely_addressed** (1c/0o) | ✅ comment reads as resolved and asks for closure |
+| `868gx1ccc` | partially_addressed (3c/3o, **all cross-task**) | **unclear** (0c/0o) | ✅ no work recorded since 08-15 |
 
-(These are the round-1 verdicts. Round 2 reads more text — user messages — so `868kr07fu`
+(These are the round-1 verdicts. Round 2 reads more text — user messages — so `868gx0aaa`
 moves to `partially_addressed`; its resolved state is surfaced by the disagreement flag
 instead. See the round-2 section.)
 
-`sessions_found: 0` → `sessions_by_task: {868ktvqf9: 2, 868kt8pfu: 2, 868kr07fu: 4,
-868krn3y1: 2}`.
+`sessions_found: 0` → `sessions_by_task: {868gy0ddd: 2, 868gy0eee: 2, 868gx0aaa: 4,
+868gx1ccc: 2}`.
 
-🔴 **Honest residual:** `868kr07fu`'s single surviving signal is
-``#1065 … merged 08-16 (I confirmed). `868kr07fu` is u[nfixed]``. Nearest-ID attribution
+🔴 **Honest residual:** `868gx0aaa`'s single surviving signal is
+``#1065 … merged 08-16 (I confirmed). `868gx0aaa` is u[nfixed]``. Nearest-ID attribution
 is now correct, but the sentence is about a *different repo's* PR and the clause it
 actually attaches to says **un**fixed. Right verdict, wrong reason. Lexical proximity
 cannot fix this; see "Still weak" in `SKILL.md`.
@@ -237,7 +251,7 @@ The report now leads with the thing that actually needed a human:
 
 ```
 ## Needs a decision
-⚠️  868kr07fu: newest comment reads as RESOLVED but the ticket is still `to do`
+⚠️  868gx0aaa: newest comment reads as RESOLVED but the ticket is still `to do`
     — close it, or say why it stays open.
 ```
 
@@ -270,8 +284,8 @@ lesson. Removing that one session:
 
 | Task | Verdict citing the prior run | Verdict without it | Ground truth |
 |---|---|---|---|
-| `868kr0799` | ✅ `likely_addressed` | ❓ `unclear` (2 mentions) | ✅ open — comment reads *"Still live, do not close"* |
-| `868kuam02` | ✅ `likely_addressed` | 🔍 `no_mentions_found` (0 mentions) | ✅ untouched; two cover-image comments unanswered |
+| `868gx0bbb` | ✅ `likely_addressed` | ❓ `unclear` (2 mentions) | ✅ open — comment refuses closure outright |
+| `868gz0hhh` | ✅ `likely_addressed` | 🔍 `no_mentions_found` (0 mentions) | ✅ untouched; two comments from the reporter unanswered |
 
 Left alone this is self-reinforcing: each run writes the evidence the next run reads.
 
@@ -291,7 +305,7 @@ Counted over `~/.claude/projects` (~250 transcripts) before anything was added:
 
 The `check-clickup-addressed/scripts/` marker also catches the skill's own build sessions,
 which is correct rather than incidental: their test fixtures hardcode real task IDs
-(`868krn3y1`, `868kr07fu`) next to mock completion text.
+(`868gx1ccc`, `868gx0aaa`) next to mock completion text.
 
 Failure direction is deliberate. A false positive drops a session and degrades a verdict to
 `unclear`/`no_mentions_found` — which this skill already documents as *no evidence either
@@ -300,10 +314,10 @@ way*. A false negative restores the confident-✅-over-a-live-ticket bug.
 ## D5: "resolved" in a comment that says DO NOT CLOSE
 
 Round 2's headline feature — flag a ticket whose newest comment reads as resolved — fired
-on `868kr0799`, telling the operator to close it. The comment:
+on `868gx0bbb`, telling the operator to close it. The comment, in shape (paraphrased):
 
-> **Still live, do not close.** … MeiliSearch: P95 > 5s (Saturation Burst) fired and
-> **resolved** repeatedly, A=18.97 at 7:55
+> **Still live, do not close.** … the queue-depth alert **fired and resolved
+> repeatedly** overnight
 
 "resolved" there describes an *alert cycling*. No keyword can separate those two senses, so
 an explicit refusal to close (`KEEP_OPEN_RE`) now **vetoes** the flag outright rather than
@@ -357,9 +371,9 @@ inside message text. Caught by the marker test, not by review.
 ## End-to-end after round 3
 
 ```
-❓ **868kr0799** — transcripts say `unclear` (searched 2 sessions, 2 mentions)
+❓ **868gx0bbb** — transcripts say `unclear` (searched 2 sessions, 2 mentions)
      ClickUp says: **to do** / prio urgent
-🔍 **868kuam02** — transcripts say `no_mentions_found` (searched 1 sessions, 0 mentions)
+🔍 **868gz0hhh** — transcripts say `no_mentions_found` (searched 1 sessions, 0 mentions)
      (ignored 1 transcript(s) that are prior runs of this checker …)
 ## Summary: 0 addressed, 0 partial, 0 open, 2 unclear
 ```
@@ -414,7 +428,7 @@ threshold. Consequences, all measured:
 - `close_completion` was always `== completion` ⇒ the three branches behind the tier
   (`elif completion and not open_items` …) were **unreachable**.
 - The `●` / `○` marker printed **`●` for every signal ever emitted**, including one 2000
-  characters from the mention. Confirmed on a live run of `868kr07fu`: every line `●`.
+  characters from the mention. Confirmed on a live run of `868gx0aaa`: every line `●`.
 - The two tests covering proximity (`test_proximity_scoring`,
   `test_extract_signals_from_windows`) hand-build windows with `distance` 100 and 500 —
   values production cannot produce. Green over a path that does not exist. One of them is
@@ -433,14 +447,14 @@ corpus, same second:
 
 | Task | round 3 | round 4 |
 |---|---|---|
-| `868kr07fu` | partially_addressed 8/7/2c/1o | identical |
-| `868krn3y1` | unclear 5/6/0c/0o | identical |
-| `868ktvqf9` | partially_addressed 6/25/5c/5o | identical |
-| `868kt8pfu` | partially_addressed 4/29/3c/4o | identical |
-| `868kr0799` | unclear 5/2/0c/0o | identical |
-| `868kuam02` | no_mentions_found 1/0/0c/0o | identical |
+| `868gx0aaa` | partially_addressed 8/7/2c/1o | identical |
+| `868gx1ccc` | unclear 5/6/0c/0o | identical |
+| `868gy0ddd` | partially_addressed 6/25/5c/5o | identical |
+| `868gy0eee` | partially_addressed 4/29/3c/4o | identical |
+| `868gx0bbb` | unclear 5/2/0c/0o | identical |
+| `868gz0hhh` | no_mentions_found 1/0/0c/0o | identical |
 
-And the marker now discriminates: on `868kt8pfu` **all seven** signals are `○` — none of
+And the marker now discriminates: on `868gy0eee` **all seven** signals are `○` — none of
 that evidence has the task ID in its own snippet, which is exactly what the operator needed
 to know and previously could not see.
 
@@ -539,7 +553,7 @@ one layer up: the defects live where nothing was looking.
 
 `_repo_for_ref` returns `None` in more than one situation and `annotate_pr_refs` rendered
 every one as `unresolved (repo not named)`. Measured live on the report's own output for
-`868ktvqf9`, snippet ``| **#4181**, **devrc #591** | merged, verified by content |``:
+`868gy0ddd`, snippet ``| **#4181**, **devrc #591** | merged, verified by content |``:
 
 ```
   ✓ PR merged: red **both inherited**; unaudited | | **#4181**, **devrc #591** | merged, verifi
@@ -609,8 +623,8 @@ printed once per report.
 ## D11: the highest-signal state in the tool produced no flag at all
 
 `disagreements()` emitted nothing for a task that is OPEN, has **zero** transcript
-evidence, and carries a recent comment from someone else. Measured live on `868kuam02`:
-`to do` / high, comment from @Ellie King 2026-08-20, `mentions_found: 0` — and the
+evidence, and carries a recent comment from someone else. Measured live on `868gz0hhh`:
+`to do` / high, comment from @Robin Example 2026-08-20, `mentions_found: 0` — and the
 **Needs a decision** block said nothing about it.
 
 Every existing rule stayed quiet because **nothing disagrees**: the ticket is open, the
@@ -689,8 +703,8 @@ BASE report rendering (printer code copied verbatim from check-addressed.py main
     ✓ PR merged: ADJACENT (prox 1.5)   /   ✓ PR merged: FAR AWAY (prox 1.0)   <-- identical
     ○ still open: ADJ     (prox 1.5)   /   ○ still open: FAR     (prox 1.0)   <-- identical
 
-BASE disagreements() for the live 868kuam02 shape -> []
-BASE live run's "Needs a decision" block -> one flag (868kr0799 keep-open), nothing about 868kuam02
+BASE disagreements() for the live 868gz0hhh shape -> []
+BASE live run's "Needs a decision" block -> one flag (868gx0bbb keep-open), nothing about 868gz0hhh
 ```
 
 The seven ✓-at-base rows are **false-positive controls, not regression coverage** — base
@@ -716,7 +730,7 @@ not committed.
 | M33 legend never printed | KILLED | `test_the_marker_legend_is_printed_in_the_report` — `no legend glyphs in the report` |
 | M34 entry point re-implements the marker at the dead `0.5` | KILLED | `test_report_lines_carry_the_adjacency_marker` — `a same-window-only signal was marked ●: '  ✓ [●] PR merged: FAR AWAY'` |
 | M35 waiting flag never fires | KILLED | `test_an_unanswered_comment_with_zero_evidence_is_flagged` — `produced no flag: []` |
-| **M36 WIDENING**: waiting flag fires unconditionally | KILLED (9 red) | `test_no_flag_when_ticket_and_comment_agree` — `false disagreement raised: ['868krn3y1: @x is WAITING — unconditional']` |
+| **M36 WIDENING**: waiting flag fires unconditionally | KILLED (9 red) | `test_no_flag_when_ticket_and_comment_agree` — `false disagreement raised: ['868gx1ccc: @x is WAITING — unconditional']` |
 | M37 recency bound removed | KILLED | `test_a_stale_backlog_comment_does_not_fire` — `every unstarted backlog item with an old comment would be flagged forever` |
 | M38 evidence no longer suppresses the flag | KILLED | `test_evidence_in_the_transcripts_suppresses_the_flag` — `the flag fired over a task the transcripts actually discuss` |
 | M39 a DONE ticket reported as waiting | KILLED | `test_a_closed_ticket_does_not_fire` — `a closed ticket was reported as waiting` |
@@ -756,11 +770,11 @@ Same corpus, `--limit 5`, ~15 minutes apart.
   ✓ PR merged: red **both inherited**; unaudited | | **#4181**, **devrc #591** | merged, verifi
       ↳ #4181: unresolved (repo not named)
       ↳ #591: unresolved (repo not named)
-  ○ still open: fact instead of reasoning about it.  ## Still open, unchanged  - **`868ktvqf9`**
+  ○ still open: fact instead of reasoning about it.  ## Still open, unchanged  - **`868gy0ddd`**
   ○ needs action: commands** (`inbox-*`, `doc-comments`) need a JWT in the account, not   just a t
 
 ## Needs a decision
-⚠️  868kr0799: newest comment says "Still live" — do NOT close. …
+⚠️  868gx0bbb: newest comment says "Still live" — do NOT close. …
 ```
 
 **After** (85.4s):
@@ -771,17 +785,17 @@ that signal's own snippet, `[○]` merely somewhere in the same ±2000-char wind
   ✓ [●] PR merged: red **both inherited**; unaudited | | **#4181**, **devrc #591** | merged, verifi
       ↳ #4181: unresolved (repo not named)
       ↳ innovation-upstream/devrc#591: merged 2026-08-20
-  ○ [●] still open: fact instead of reasoning about it.  ## Still open, unchanged  - **`868ktvqf9`**
+  ○ [●] still open: fact instead of reasoning about it.  ## Still open, unchanged  - **`868gy0ddd`**
   ○ [○] needs action: commands** (`inbox-*`, `doc-comments`) need a JWT in the account, not   just a t
 
 ## Needs a decision
-⚠️  868kr0799: newest comment says "Still live" — do NOT close. …
-⚠️  868kuam02: @Ellie King is WAITING — the ticket is `to do`, and the task ID appears in NO
+⚠️  868gx0bbb: newest comment says "Still live" — do NOT close. …
+⚠️  868gz0hhh: @Robin Example is WAITING — the ticket is `to do`, and the task ID appears in NO
     transcript, so no work exists anywhere. Commented 1d ago; nobody has answered. Read it.
 ```
 
 Round 4 behaviour confirmed intact in the same run: the keep-open veto still fires on
-`868kr0799`, and the unknown-status announcement still fires (verified separately by
+`868gx0bbb`, and the unknown-status announcement still fires (verified separately by
 direct call on `in review` / `blocked` / `needs qa` — the live run could not exercise it,
 because both real statuses that day were in the vocabulary).
 
@@ -834,7 +848,7 @@ whose transcripts read `likely_addressed`:
 
 | Comment | trunk `d11e67e87` | round 8 |
 |---|---|---|
-| "Resolved on both counts, recommend closing. (The follow-up PR is still open but unrelated.)" | 🔴 do NOT close | READ IT |
+| "Resolved end to end, recommend closing. (The follow-up PR is still open but unrelated.)" | 🔴 do NOT close | READ IT |
 | "One review thread is not resolved on the PR, but the ticket itself is done. Recommend closing." | 🔴 do NOT close | READ IT |
 | "The alert fired and was not resolved automatically. Ticket work is done — recommend closing." | 🔴 do NOT close | READ IT |
 | "The fix landed in #1234 and is live. The follow-up PR is still open but unrelated." | 🔴 do NOT close | READ IT |
@@ -850,7 +864,7 @@ whose transcripts read `likely_addressed`:
 | "This is still open. The bug is not fixed." | do NOT close | do NOT close |
 | "This is still open — nothing has been merged." | do NOT close | do NOT close |
 | "Still live, do not close." | do NOT close | do NOT close |
-| "Resolved on both counts. Recommend closing." | close it | close it |
+| "Resolved end to end. Recommend closing." | close it | close it |
 
 9 rows move, 8 hold. **The second block is the dangerous one and it is live on trunk today**:
 six comments that refuse a close draw an affirmative instruction to close.
@@ -917,10 +931,10 @@ running that found a test asserting a substring the surrounding sentence also co
 ## 🔴 The live run found what the table could not
 
 The 17-case table above is synthetic, and it was green when the tool was run for real against
-ClickUp — where it **downgraded a live keep-open**. `868ktt2ct`'s newest comment opens
-*"Status check during ClickUp triage 2026-08-21 — **staying open**, and mostly not verifiable
-from this repo"*, and its only closure vocabulary is one "shipped" describing a sub-item that
-landed in a **different repo**. The tier read that as ambiguity and emitted "READ IT and
+ClickUp — where it **downgraded a live keep-open**. `868gy0fff`'s newest comment opened with a
+triage status line declaring the ticket **staying open** and mostly not verifiable from this
+repo, and its only closure vocabulary was one "shipped" describing a sub-item that landed in a
+**different repo**. The tier read that as ambiguity and emitted "READ IT and
 decide"; trunk's absolute veto had it right, by luck of a later "still open".
 
 `stay(s|ing) open` / `remains open` / `leaving it open` are now STRONG. They belong in the
@@ -961,7 +975,7 @@ mutant that dies to a neighbour's assertion is a green for the wrong reason.
 
 **141 passed, 0 failed**, up from 122 (`Total:` line, from a tree whose `__pycache__` was
 purged by `run_all.py` — the round-7 stale-bytecode trap). Verified live end-to-end against
-ClickUp, which is what caught the `868ktt2ct` downgrade above.
+ClickUp, which is what caught the `868gy0fff` downgrade above.
 
 ## Residual risk
 
@@ -1289,7 +1303,7 @@ any other: ask which shapes it structurally cannot see, and who wrote the labels
 
 ## What it printed, and what was true
 
-    868kuam02: @Ellie King is WAITING — … Commented 2d ago; nobody has answered. Read it.
+    868gz0hhh: @Robin Example is WAITING — … Commented 2d ago; nobody has answered. Read it.
 
 Two sessions had already answered her: 2026-08-21 13:52 and 2026-08-22 01:04 — the second
 **eleven hours** before the run. Acting on the flag re-derived an analysis already sitting in
@@ -1384,3 +1398,123 @@ not have in mind.**
 🔴 **And a false SURVIVED nearly shipped from the sweep's own harness**: the first sweep filtered
 runner output through a `grep -E` alternation that omitted the killing test's name, so a mutant
 that *was* caught printed nothing and scored SURVIVED. Read the whole failure list.
+
+---
+
+# Rounds 7 + 8 — ported from the upstream copy (2026-08-22)
+
+This skill was migrated out of a private client repo earlier the same day. Two rounds of work
+landed there AFTER the migration and are ported here. **It is a PORT, not a copy**: every real
+ClickUp id, real person's name and verbatim third-party comment body in the upstream hunks was
+replaced with a synthetic equivalent registered in `tests/test_no_real_identifiers.py`. This
+repo is PUBLIC; the upstream one is not.
+
+## What was NOT ported, and why
+
+Upstream round 8's headline finding is a **scan-less-run announcement**: one line per run
+saying that the waiting flag and *"ClickUp `<done>` but open signals remain"* could not fire,
+because a parallel upstream change made the transcript scan **opt-in** and its scan-less
+record omits `mentions_found` rather than reporting `0`.
+
+**That opt-in does not exist here.** Measured: `check-addressed.py` has no `--transcripts`
+flag (`parse_args` rejects it), `main()` always runs `search-sessions.py` and
+`check-completion.py`, and `check-completion.py` emits `mentions_found` on all three of its
+exit paths. No record here can carry a `not_scanned` status or omit the mention count, so the
+announcement would guard a state no input can reach — and an unreachable guard reads as
+protection while providing none. Not ported, together with the `"mentions_found" in r` gate
+its sibling puts on the open-signals flag (same premise), the SKILL.md correction about the
+default invocation (this tool's default DOES run the decision flags), and mutants N1–N5.
+Every one of those omissions is written down at the site that would carry it, with the
+condition for restoring it: **a `--transcripts` opt-in landing here.**
+
+## Round 7 — three follow-ups to D12
+
+* **F1 — an unreadable date on MY OWN comment restored the exact false positive D12 fixed.**
+  `latest_reply_by` skipped a comment of mine whose date would not parse. If that was my
+  NEWEST, it returned an OLDER reply of mine — or `None`, which is the POSITIVE claim *"I
+  looked; you never replied"*. `latest_reply_ts_by` now returns the `UNIDENTIFIED` sentinel,
+  `build_record` omits the key, and the consumer announces rather than deciding. It is ANY of
+  my comments, not "the newest": an unreadable date has no position in the ordering.
+* **F2 — the tie boundary was a judgement call and the data to settle it was being thrown
+  away.** Minute-resolution ages made a reply written **20 seconds BEFORE** the question
+  compare EQUAL to it and count as an answer — a waiting colleague dropped from the report.
+  `date_ms` / `my_latest_reply_ms` now ride beside the display fields, used **only when BOTH**
+  are present; an unreadable date yields an ABSENT ms, never a `0` (1970 makes every reply
+  look newer than every question).
+* **F3 — ClickUp has no bot identity, and the suppression path printed NOTHING.** Every
+  comment posted through a `pk_` token comes back authored as the token's owner, so *"you
+  answered"* and *"an agent answered as you"* are the same observable. `suppressed_notes`
+  emits one line per suppressed task into its own `## Answered already` block, with the
+  caveat leading the block once.
+* **The instrument**: `tests/test_waiting_corpus.py`, 21 labelled RECORDS. `test_corpus.py`
+  scores comment TEXT; this flag reads FIELDS, so all 49 of its cases are blind to it. The
+  verdict is read off the CLAIM, never off whether something fired.
+* Round 7b's audit fixes are folded in: the computed other-coverage sentence, the
+  display-vs-bound age split, the note requiring a bound that was actually EVALUATED, and
+  `report_blocks` being driven THROUGH `main()` rather than merely extracted.
+
+## Round 8 — three invariants the prose guaranteed and nothing pinned
+
+All three SURVIVED upstream's full battery. `tests/test_bounds_and_parsing.py` closes them:
+per-record `disagreements([r])` scoping, the DISPLAY half of the two-ages split, and
+`UNANSWERED_COMMENT_DAYS` pinned ON its boundary (14.0) and at a NON-multiple overshoot (20).
+🔴 **The reusable lesson is the third: 30 is more than 2×14, so a DOUBLING mutant passed
+straight through the gap between fixtures at 13 and 30.** A bound needs a case exactly on it
+and an overshoot that is not a multiple of the step.
+
+Also ported: `TypeError` added to `_age_days_from_ms`' except tuple (dropping the `_ms()` call
+at the caller is a one-token edit that let a string `date_ms` crash the whole report), and
+three comment corrections — the `OSError` blame in `_age_days_from_ms` (the exception is
+`ValueError`; the real mechanism is that `_epoch_ms` never range-checks), the "changes NO flag
+outcome" claim about moving the recency bound (it now changes exactly one case), and the
+retracted *"`mentions_found == 0` means no other rule covers the ticket"* non-sequitur
+wherever it appeared.
+
+## 🔴 The battery is in the repo — `tests/mutation_sweep.py`
+
+Mutants as DATA plus a runner (`--list`, an id filter, `--check` which fails on a stale
+`NOT APPLIED`). **59 mutants + a positive control + a NULL CONTROL, non-KILLED: 0.**
+
+🔴 **And the null control earned its place on the first run.** All 59 mutants reported KILLED,
+and every killer list opened with `test_the_scan_actually_walks_files_and_can_see_an_id`:
+`test_no_real_identifiers.py` resolves `<repo>/scripts` and `<repo>/claude` from `__file__`,
+which cannot exist inside the sweep's temp copy, so its four tests failed in **every** run and
+a mutant that changed nothing would have scored KILLED too. That is a fully green sweep
+proving nothing — the exact "dying to a different guard's assertion is a green you cannot
+spend" failure, hit by the file that warns about it. Fixed two ways: that gate is dropped from
+each mutant copy (no code mutant can ever be caught by a tree-hygiene check), and the sweep
+now runs an unmutated copy FIRST and aborts unless it reports SURVIVED.
+
+## Red at base / green at HEAD
+
+Measured with `test_no_real_identifiers.py` excluded from all three trees — it is a
+repo-hygiene gate that cannot resolve the repo from a temp copy, so it would fail identically
+everywhere and inflate each row by the same 4:
+
+| tree | result |
+|---|---|
+| pre-port scripts + pre-port tests (baseline) | **176 passed, 0 failed** |
+| pre-port scripts + **HEAD tests** | **178 passed, 31 failed** |
+| HEAD scripts + HEAD tests | **209 passed, 0 failed** |
+
+In-repo, with that gate included: **180 → 213 collected.** Corpus **10/21 pre-port → 21/21**.
+
+⚠️ Four of the five round-8 guards are among those 31 reds, and they are **not** regression
+coverage: they go red with `AttributeError` because `suppressed_notes` / `_age_days_from_ms`
+do not exist pre-port, not because pre-port got those cases wrong. The file says so at the
+top. Counting them would overstate the port's regression matrix by four.
+
+## 🔴 What was NOT verified
+
+**No live ClickUp run**, in any round of this line of work, upstream or here. Every claim
+above is measured against the suite, the corpus and the sweep. The bot-identity finding is
+carried over from an independent measurement in a sibling tool and was not re-measured.
+
+The **threaded-comment blind spot is unchanged**: `recent-comments.py` still fetches
+top-level comments only, so a reply written inside a comment thread is invisible to
+`my_latest_reply` and the ticket still reads as unanswered.
+
+Found and deliberately NOT fixed: `_collect` still sorts on the FORMATTED `date` string. That
+is lexicographically correct for `%Y-%m-%d %H:%M`, and `date_ms` now exists so the sort could
+read it — but it would change which comments the report samples, and nothing measured says
+the current order is wrong.

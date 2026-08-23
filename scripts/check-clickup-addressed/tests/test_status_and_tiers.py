@@ -36,9 +36,9 @@ spec2 = importlib.util.spec_from_file_location("check_addressed", SCRIPT_DIR / "
 check_addressed = importlib.util.module_from_spec(spec2)
 spec2.loader.exec_module(check_addressed)
 
-TASK = "868kr07fu"
+TASK = "868gx0aaa"
 RESOLVED_COMMENT = "Resolved. Recommend closing."
-KEEP_OPEN_COMMENT = "Still live, do not close. P95 > 5s fired and resolved repeatedly."
+KEEP_OPEN_COMMENT = "Still live, do not close. the queue-depth alert fired and resolved repeatedly overnight."
 
 
 def _result(status_word, comment, transcript_status="likely_addressed"):
@@ -145,7 +145,7 @@ def test_confidence_marker_distinguishes_adjacent_from_same_window():
     At base it is computed inline as `"●" if prox > 0.5 else "○"`, and production
     proximity is only ever 1.0 or 1.5 — so it printed ● for every signal ever emitted,
     including signals whose snippet is 2000 characters from the task ID. Verified live on
-    868kr07fu: every line was ●.
+    868gx0aaa: every line was ●.
     """
     adjacent = {"proximity": 1.5}      # the task ID is inside the signal's own snippet
     same_window_only = {"proximity": 1.0}  # merely somewhere in the +/-2000-char window

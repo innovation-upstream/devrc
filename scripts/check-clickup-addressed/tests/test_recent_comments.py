@@ -83,13 +83,13 @@ def test_get_my_user_id_not_found():
 
 def test_get_my_tasks_mock():
     """Test get_my_tasks with mocked API response."""
-    mock_tasks = [{"id": "868ktvqf9", "name": "Test Task"}]
+    mock_tasks = [{"id": "868gy0ddd", "name": "Test Task"}]
     mock_output = "Scanned 19 spaces\n" + json.dumps(mock_tasks)
     
     with patch.object(recent_comments, "run_clickup", return_value=mock_output):
         result = recent_comments.get_my_tasks()
         assert len(result) == 1
-        assert result[0]["id"] == "868ktvqf9"
+        assert result[0]["id"] == "868gy0ddd"
 
 
 def test_get_my_tasks_empty():
@@ -105,7 +105,7 @@ def test_get_comments_mock():
     mock_output = json.dumps(mock_comments)
     
     with patch.object(recent_comments, "run_clickup", return_value=mock_output):
-        result = recent_comments.get_comments("868ktvqf9")
+        result = recent_comments.get_comments("868gy0ddd")
         assert len(result) == 1
         assert result[0]["id"] == "123"
 

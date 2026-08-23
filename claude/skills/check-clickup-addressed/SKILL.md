@@ -9,6 +9,25 @@ Deterministic check: given the N most recent comments not from you on your assig
 tasks, find the sessions that worked on those tasks, read the transcripts, and report
 what's done vs what's still open.
 
+## Run the cheap pass first — `clickup`'s `awaiting`
+
+🔴 **If the question is *which* tasks are waiting on you, this is the wrong tool.** The
+`clickup` skill answers that on its own, with no transcript reads:
+
+```bash
+node query.mjs awaiting        # from the clickup skill dir; --max bounds the fan-out
+```
+
+`awaiting` decides on ONE predicate — the newest comment on the task was not authored by
+the token owner — and sweeps the whole assigned queue in ~45s at one API request per
+task. It cannot tell you whether anything got *done*; that is the question this skill
+exists for, and answering it costs a transcript read per task.
+
+So: `awaiting` to get the list, this skill on the few entries that matter. The two are
+complementary, not alternatives, and the split is by QUESTION (which vs whether), not by
+speed. Running both does duplicate one ClickUp fan-out — step 1 below makes its own pass —
+which is cheap for a handful of tasks and wasteful across the whole queue.
+
 ## Quick start
 
 The scripts live in **devrc**, not in this deployed skill dir — `~/.claude/skills/` is a
@@ -47,9 +66,14 @@ is run straight out of the working tree — the edit is live immediately, and it
    status/priority, author, snippet + full `text`, and `my_latest_reply` — the date of *your*
    newest comment on that task, computed **before** your comments are dropped, because the
    consumer otherwise cannot tell an answered ticket from an abandoned one. That last key
-   is **omitted entirely** when the user id could not be resolved — absent means "the
-   check could not run", which is not the same fact as a present `null` ("I looked; you
-   never replied"). Both consumers branch on which.
+   is **omitted entirely** when the user id could not be resolved, or when a date on one of
+   *your* comments would not parse — absent means "the check could not run", which is not the
+   same fact as a present `null` ("I looked; you never replied"). Both consumers branch on
+   which. Beside the two display dates it also emits the raw epoch-ms they were formatted
+   from (`date_ms`, `my_latest_reply_ms`), because `format_date` throws the seconds away and
+   the "have I answered?" comparison then runs at minute resolution. Each is emitted **only
+   when it parses** — absent, never `0`, and `my_latest_reply_ms` is nested under
+   `my_latest_reply` so a precise instant can never outlive the reply it refines.
 2. **`search-sessions.py`** — searches `~/.claude/projects/**/*.jsonl` transcripts for
    sessions mentioning a task ID, ranks by hit count. Terms are **ANDed**, so it is run
    **once per task**, never with several tasks' terms in one query.
@@ -81,7 +105,7 @@ process per task, so lookups dedupe within a task, not across the run.
 
 | Script | Input | Output |
 |--------|-------|--------|
-| `recent-comments.py --limit N` | ClickUp API | `--json`: task_id, task_name, task_status, task_priority, date, author, snippet, text, and **`my_latest_reply` only when the user id resolved** — its ABSENCE is meaningful (the check could not run), so read with `in`, never `.get()`. The tabular printer emits a different, smaller set — task_id, task_name, date, author, snippet — which `check-completion.py` parses for field 0 only. |
+| `recent-comments.py --limit N` | ClickUp API | `--json`: task_id, task_name, task_status, task_priority, date, author, snippet, text, and **`my_latest_reply` only when the user id resolved AND every comment of yours could be ranked** — its ABSENCE is meaningful (the check could not run), so read with `in`, never `.get()`. Plus `date_ms` / `my_latest_reply_ms`, the raw epoch-ms behind the two display dates, each present only when it parsed. The tabular printer emits a different, smaller set — task_id, task_name, date, author, snippet — which `check-completion.py` parses for field 0 only. |
 | `search-sessions.py term1 [term2 ...]` | `~/.claude/projects/` | session_id, date, project, hits |
 | `check-completion.py --task ID` | session transcripts | status, completion signals, open items |
 | `check-addressed.py --limit N` | all of the above | unified report |
@@ -151,8 +175,8 @@ five scoped to one side of a seam. If you are about to trust a verdict here, ope
 
 - **A signal is attributed by lexical proximity, not by meaning.** Nearest-ID keeps a
   neighbouring *task's* verdict out, but not a neighbouring *clause's*: ``#1065 … merged
-  08-16 (I confirmed). `868kr07fu` is u[nfixed]`` still scores as completion for
-  `868kr07fu`, because the merge sentence really is adjacent to it. **Read the snippet.**
+  08-16 (I confirmed). `868gx0aaa` is u[nfixed]`` still scores as completion for
+  `868gx0aaa`, because the merge sentence really is adjacent to it. **Read the snippet.**
 - **A PR reference the tool cannot pin to a repo is reported `unresolved`, not guessed** —
   a snippet-wide scan was tried and attributed every bare `#N` to `civitai/civitai`,
   returning a real but unrelated PR ("merged 2024-03-18"). 🔴 **Three distinct ways to fail,
@@ -175,10 +199,10 @@ plus one state where nothing disagrees and that is exactly the problem (4):
 1. **ClickUp status + priority**, printed beside every verdict.
 2. **The ticket's newest comment** — usually the real record of what happened. A comment
    reading "Resolved / recommend closing" over a ticket still at `to do` is flagged; that
-   exact case (`868kr07fu`, `to do`/urgent) is why the check exists. 🔴 **An explicit
-   refusal to close VETOES that flag**: on 2026-08-20 the alert-cycling sentence *"P95 > 5s …
-   fired and **resolved** repeatedly"* tripped the keyword on `868kr0799`, whose very next
-   words were *"Still live, do not close"* — the report told the operator to close it. The
+   exact case (`868gx0aaa`, `to do`/urgent) is why the check exists. 🔴 **An explicit
+   refusal to close VETOES that flag**: on 2026-08-20 an alert-cycling clause (a service
+   whose queue-depth alert *fired and **resolved** repeatedly*) tripped the keyword on `868gx0bbb`,
+   whose opening clause refused closure outright — the report told the operator to close it. The
    reporter's own words outrank both the keyword scan and the transcripts.
    🔴 **The veto has TWO TIERS** — an absolute one was wrong in *both* directions (round 8;
    17-case before/after table in the validation doc). **STRONG** ("do not close", "still
@@ -220,14 +244,14 @@ plus one state where nothing disagrees and that is exactly the problem (4):
    evidence (`mentions_found == 0`) + a comment from someone else within
    `UNANSWERED_COMMENT_DAYS` (14). No rule produced this before 2026-08-21 because nothing
    *disagrees*: ticket open, transcripts empty, and they agree. Measured live on
-   `868kuam02` (`to do`/high, colleague comment, 0 mentions) the block said nothing.
+   `868gz0hhh` (`to do`/high, colleague comment, 0 mentions) the block said nothing.
    🔴 Bounded by **recency, not priority** — priority is a stale property of the *ticket*
    and would re-fire on every unstarted backlog item forever, training the reader to skip
    the block; recency is a property of the *interaction*, says a human is waiting **now**,
    and self-clears. Fires whatever the status word reads (safe direction, like the veto).
    🔴 **It could not see YOUR OWN replies until 2026-08-22, so an answered ticket stayed
    flagged forever** — the unbounded noise the recency bound exists to prevent. Measured on
-   `868kuam02`: "Commented 2d ago; nobody has answered" over a ticket **two** sessions had
+   `868gz0hhh`: "Commented 2d ago; nobody has answered" over a ticket **two** sessions had
    already answered, the later of them 11 h earlier, and acting on it duplicated an analysis
    already in the thread. A **seam** defect, each side correct alone — `recent-comments.py`
    drops your comments (right: the report is about what *others* said), and the flag concludes
@@ -235,18 +259,65 @@ plus one state where nothing disagrees and that is exactly the problem (4):
    assumption, so the fix crosses the seam: the producer now emits `my_latest_reply` per task
    and the flag suppresses when your newest reply is **at or after** the comment. Compared,
    not counted — a reply *predating* the question does not answer it. An **absent**
-   `my_latest_reply` (stale producer, or a failed user-id lookup) fires but says the check
-   never ran, rather than silently deciding either way.
+   `my_latest_reply` (stale producer, a failed user-id lookup, or a date on one of YOUR
+   comments the producer could not read) fires but says the check never ran, rather than
+   silently deciding either way.
+   🔴 **Compared on the raw epoch-ms, not on the displayed minute** (2026-08-22, round 7).
+   `format_date` threw the seconds away before anything compared them, so a reply written
+   **20 seconds BEFORE** the question rendered identical to it and counted as an answer — a
+   waiting colleague dropped from the report. Whether a tie means "answered" was a judgement
+   call argued to opposite conclusions from the same evidence; the producer HAS the raw ms,
+   so it is now a question of fact and a tie means the same millisecond. `date_ms` /
+   `my_latest_reply_ms` ride beside the display fields and are used **only when BOTH are
+   present** — comparing one raw instant against a rounded one is worse than comparing two
+   rounded ones — otherwise the minute-age comparison is used unchanged. An unreadable date
+   yields an **absent** ms, never a `0`: zero is 1970, which would make every reply look
+   newer than every question.
+   🔴 **A SUPPRESSED flag now prints one line of its own, and that is where the bot-identity
+   caveat lives.** **ClickUp has no bot identity**: every comment posted through the `pk_`
+   token comes back authored as the token's owner whoever typed it, so *"you answered"* and
+   *"an agent answered as you"* are the **same observable** — an agent-posted comment sets
+   `my_latest_reply` and suppresses this flag. Suppression used to print nothing at all, so a
+   genuinely-waiting colleague left the report with no trace — and with the transcripts
+   finding nothing, the flag that would have caught it was the one being suppressed. The line
+   goes in its **own** block (`## Answered already — no action, but check who answered`),
+   never in **Needs a decision** — a "no action" line in the act-on-this block is how a block
+   stops being read — and the caveat leads that block **once**, not per line (199 chars ×
+   every line was ~11 KB in a `--limit 20` report, in the one block whose justification is
+   that volume kills a block). Each note keeps the caveat's *consequence*.
+   🔴 **The note is bounded, and it must be able to PROVE it is bounded.** It carries the same
+   recency window as the flag; the bound falls back to `date_ms` when the display date is
+   unreadable (otherwise a drifted `format_date` kills the bound for every record while the ms
+   path keeps deciding — measured: a 2019 ticket printed an unbounded note); and if NO bound
+   can be evaluated from either field the record falls through to the **flag** instead, since
+   an un-expirable "no action needed" line is exactly the permanent noise this is guarding
+   against, while a call to action should survive an unreadable date.
+   🔴 **The note states other coverage as a COMPUTED fact, never an assumed one.** It used to
+   assert that nothing else in the report named the ticket, *because* `mentions_found == 0` —
+   false in four reproduced shapes (unknown status / RESOLVED-reading comment / keep-open veto
+   / open cited PR, each printing a **Needs a decision** line about the same ticket directly
+   above it), and a non-sequitur besides: not one of those four rules reads `mentions_found`.
+   It now runs `disagreements([r])` on that ONE record and says what came back — `[r]`, not
+   the whole result list, or every note in the report inherits one ticket's flag.
    🔴 **The seam is crossed for TOP-LEVEL comments only.** `recent-comments.py` calls the CLI
    without `--threads`, and `/task/{id}/comment` returns top-level comments only — replies
    live behind `getThreadedComments`. So an answer you wrote *inside a comment thread* is
    still invisible and the ticket still reads as unanswered. Narrower than D12, same shape.
-   (Verified 2026-08-22 that the two answers on `868kuam02` are top-level, so the motivating
+   (Verified 2026-08-22 that the two answers on `868gz0hhh` are top-level, so the motivating
    case really is fixed — but do not read that as the general case.)
+   🔴 **THIS FLAG HAS ITS OWN CORPUS — SCORE IT, DO NOT ARGUE FROM THE EXAMPLE.**
+   `tests/test_waiting_corpus.py` holds **21 labelled RECORDS** (pre-port 10/21, shipped
+   21/21). `test_corpus.py` cannot help here: it scores comment TEXT and this flag reads
+   FIELDS. Verdicts are read off the **claim** — "nobody has answered" vs "the check did not
+   run" vs "the date was unreadable" vs the suppression note vs silence — because "the flag
+   fired" is satisfied by four lines that tell a reader four different things.
    🔴 **New false-SILENCE direction, deliberately unbounded by transcripts:** reply *"I'll
-   look next week"* and the flag is silenced for that comment even though `mentions_found ==
-   0` means no other rule covers the ticket either — which is the gap this flag was added to
-   fill. Bounded only by a *newer* colleague comment re-firing it. Acknowledging is not doing.
+   look next week"* and the flag is silenced for that comment even though the transcripts
+   showed no work — which is the gap this flag was added to fill. (Do NOT restate that as
+   *"`mentions_found == 0` means no other rule covers the ticket"*: that is a non-sequitur,
+   retracted 2026-08-22. A zero mention count says the TRANSCRIPTS are empty; the status,
+   comment and PR rules never read it and can each still flag the ticket.) Bounded only by a
+   *newer* colleague comment re-firing it. Acknowledging is not doing.
 
 🔴 **Sources 1 and 2 are gated on a hardcoded nine-word status vocabulary, and ClickUp
 statuses are per-list and arbitrary.** Until 2026-08-21 a miss was **silent**: measured,
@@ -273,7 +344,7 @@ announcement.
   tasks); then the repaired marker was wired only into `check-completion.py`'s printer, not
   into `check-addressed.py` — the entry point everyone runs — so it still reached no report.
   **A marker nobody sees is the same no-op as one that cannot vary.** Live 2026-08-21:
-  `868ktvqf9` shows both values, `868kt8pfu` is all `[○]`.
+  `868gy0ddd` shows both values, `868gy0eee` is all `[○]`.
 - **Deduplication**: same signal from multiple windows is only reported once
 - **Cross-task attribution guard**: a signal is kept only if the task under test is the
   ClickUp ID lexically *nearest* to it. Without this, a triage table listing several
@@ -300,7 +371,7 @@ announcement.
   SKILL.md, so any session that loads the skill, reads this file, or reviews its diff becomes
   a permanent self-run — and a session that both *did work* and *ran the checker* is dropped
   from tomorrow's evidence. Measured 2026-08-21: **5 task IDs are visible only inside
-  dropped transcripts, and `868kt9qye` is a real ticket**, not a test fixture — its only
+  dropped transcripts, and one of them is a LIVE ticket**, not a test fixture — its only
   mentions sit in a work session that also ran the checker. An earlier note claiming "real
   loss is currently zero" was true when written and is no longer. The drop lands in the safe
   direction (→ `no_mentions_found`, i.e. *no evidence*, never a false ✅) but it lands on the
@@ -321,7 +392,7 @@ further drift. **Re-time it rather than quoting it.**
 
 ## Tests
 
-Run all tests (**176** collected, measured 2026-08-22). `run_all.py` exits non-zero on
+Run all tests (**213** collected, measured 2026-08-22). `run_all.py` exits non-zero on
 failure — but read the `Total: N passed, M failed` line, not a piped exit code. 🔴 **If that
 line is missing at all, the run died — treat it as a failure, never as "no output".** A
 `sys.exit()` from code under test is a `SystemExit`, which a bare `except Exception` does
@@ -335,9 +406,25 @@ PYTHONDONTWRITEBYTECODE=1 python3 "$CCUA/tests/run_all.py"
 
 The same files are a **pytest** target of devrc's gate — `scripts/check-clickup-addressed/tests`
 in `HERMETIC_TARGETS`, with its collected-count floor in `TARGET_FLOORS`
-(`scripts/run-tests.sh`). Both runners see the same 176; `run_all.py` survives because it
+(`scripts/run-tests.sh`). Both runners see the same 213; `run_all.py` survives because it
 purges `__pycache__` and reports an import failure as a FAILURE, which pytest's summary
 line does not distinguish as loudly. **Raise the floor when you add tests.**
+
+🔴 **The mutation battery lives in the repo now**: `tests/mutation_sweep.py` holds every
+mutant as DATA plus a runner (`--list`, an id filter, `--check` to fail on a stale one).
+Earlier rounds each ran a sweep, reported "0 survived", and threw the driver away — the
+number was then unreproducible from the repo, and the next round re-invented the list and
+re-discovered the same sites. A blind re-audit of one such "51 mutants, 0 non-killed" found
+**seven more at the same delta sites**, one of which reverted that round's headline fix.
+**Extend the list; do not start a new one.** Currently **59 mutants + a positive control + a
+NULL CONTROL, 0 non-killed.** 🔴 That null control is not decoration: it copies the skill,
+mutates NOTHING and must report SURVIVED. On this battery's first run every mutant scored
+KILLED *because* `test_no_real_identifiers.py` cannot resolve the repo root from a temp copy
+and reddened all 59 for free. Read the killer NAME, not just the verdict.
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 "$CCUA/tests/mutation_sweep.py" --check
+```
 
 Test files:
 - `test_attribution.py` — the 2026-08-19 regression set (cross-task attribution, the
@@ -360,10 +447,35 @@ Test files:
   **because a mutation sweep found the wiring uncovered** — `latest_reply_by` and
   `build_record` were each pinned in isolation while `_collect`, the only thing that joins
   them, was not, so `latest_reply_by([], my_id)` made the whole fix inert against a fully
-  green suite. Pin the SEAM, not only the parts.
+  green suite. Pin the SEAM, not only the parts. It also carries the round-7 set: the
+  `UNIDENTIFIED` sentinel for an unreadable date on one of YOUR comments, the raw-ms
+  comparison, and the suppression note — including
+  `test_main_actually_PRINTS_both_blocks_end_to_end`, which drives `main()` and reads STDOUT
+  because deleting its whole print loop left the suite green.
+- `test_waiting_corpus.py` — 🔴 **the second labelled corpus, 21 whole RECORDS.**
+  `test_corpus.py` scores comment TEXT; the waiting flag reads FIELDS, so none of those 49
+  cases can see it — and this flag had by then been argued from single anecdotes three
+  rounds running. Verdicts are read off the **claim** the report makes (`WAITING` /
+  `ANNOUNCE` / `UNREADABLE` / `ANSWERED` / `SILENT`), never off whether something fired.
+  Pre-port scores 10/21, shipped 21/21. Same rule as the other corpus: **add your motivating
+  case, with the verdict a human would give, BEFORE you change code.**
+- `test_bounds_and_parsing.py` — the round-8 set: the other-coverage sentence's SCOPING, the
+  DISPLAY half of the two-ages split, and `UNANSWERED_COMMENT_DAYS` pinned ON its boundary
+  (14.0) and at a NON-multiple overshoot (20) — the old fixtures sat at 13 and 30, and 30 is
+  more than 2×14, so a doubling mutant passed straight through the gap. ⚠️ These are
+  **mutation-coverage guards, not regression coverage**: each SURVIVED a full green battery
+  on a tree where the behaviour was already right. The file says so, and says why its red
+  against pre-port `main` does not count.
 - `test_check_completion.py` — windowed signal extraction. ⚠️ Its two proximity tests hand
   `extract_signals_from_windows` a non-zero `distance`, which no production producer emits;
   they cover the formula, not any reachable path. The reachable premise is pinned in
   `test_status_and_tiers.py` instead.
 - `test_search_sessions.py` — session search, ranking, date filtering
 - `test_recent_comments.py` — ClickUp API parsing, filtering, sorting
+- `test_no_real_identifiers.py` — 🔴 **this repo is PUBLIC.** Two pinned LEDGERS over both
+  halves of the skill: every task-ID-shaped token, and every fixture comment author. An
+  unregistered value is red by default, because a synthetic ID and a real one are the same
+  nine characters and nothing can tell them apart by looking. Regenerate the fixture
+  SYNTHETIC — preserving the shape the case was chosen for — then write it down. It reads
+  the working tree only, like devrc's four sibling content gates: **it says nothing about
+  what is already in git history.**
