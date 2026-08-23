@@ -119,9 +119,10 @@ than #683 alone, and #673's per-target live controls are the plausible driver.
 
 - **A Tekton pre-merge gate now exists on devrc PRs** (`tekton/devrc-pytests`,
   `tekton/devrc-nodetests`). The four guard PRs showed 0 checks only because they predate it.
-  🔴 **`CLAUDE.md`'s `<!-- merge-gate: none -->` marker is therefore STALE** — per the
-  marker's own rules it should read **`other`** (Tekton is not a GitHub Actions
-  `pull_request` workflow). Not yet changed; one-line PR, still owed.
+  🔴 **`CLAUDE.md`'s `<!-- merge-gate: … -->` marker was STALE at `none`** — per the marker's
+  own rules it must read **`other`** (Tekton is not a GitHub Actions `pull_request` workflow).
+  ✅ **Changed by #723**, `f3244aa8`. This paragraph said "still owed" and was itself stale
+  within the hour; the Gotchas section below has always carried the correct version.
 - The base clone's `CLAUDE.md` was **staged and byte-identical to `86e5311a`** — a stale
   orphan that would have silently reverted #702. Restored.
 - The base clone was on a **detached HEAD** at `2d1ba0d7` (0 unique commits, verified an
@@ -200,8 +201,27 @@ main f3244aa8 + #716 + #718           15080 collected /  0 failed               
 🔴 **`main` is GREEN.** Every "main is RED" claim in this doc's earlier sections, and in
 PRs #708/#710/#713, is STALE — #708 fixed the signal floor and #722 fixed the CI red.
 
-**Deploy status:** nothing shipped to either host this session. All of the above is merged
-to `origin/main` and NOT deployed — `ship.sh` has not run. Merged ≠ deployed.
+**Deploy status: ✅ SHIPPED 2026-08-22.** `scripts/ship.sh` converged **both** hosts from
+`b8f1e996` to `ec4fc008`, rc 0. Per-host lines read individually, not the final verdict:
+
+```
+workbench  fast-forwarded · 526 artifacts checked / 0 dangling / 0 absent · 373 examined / 0 stale · VERIFIED + switched
+           NOTE: tree DIRTY — what was built is origin/main + another session's local WIP
+laptop     fast-forwarded · 487 artifacts checked / 0 dangling / 0 absent · 358 examined / 0 stale · VERIFIED + switched (clean tree)
+```
+
+Payload confirmed present on both machines by content, not by the rc: `scripts/testlib/gitenv.py`
+(GUARD 9), `nogit_plugin.py` (GUARD 10), and #716's two `SHIP_REPO+set` guards in `ship.sh`.
+🔴 The **workbench** built from a dirty tree, so only the **laptop** is an honest witness that
+`origin/main` alone builds. Incident aftermath re-checked at deploy time and still clean:
+`core.bare` unset, `core.hooksPath` unset both `--local` and effective (**re-measured then, not
+carried from earlier in the session — that value is volatile**), newest fixture-shaped reflog
+entry on `main` still `2026-08-21 14:42:12 commit: seed`.
+
+🔴 **And already 1 behind again.** `origin/main` moved to `a689441f` (#731, #733) within the
+hour, from other sessions. The hosts are at `ec4fc008`. That is not a deploy failure — it is
+what "merged ≠ deployed" costs in a repo this concurrent, and it is why the passive deadman
+(`scripts/drift-check.sh`, the `drift-check` timer) exists rather than a one-shot claim here.
 
 ## Open investigations — live diagnosis state
 
@@ -406,20 +426,71 @@ newest fixture-shaped reflog entry: 14:42:12 "commit: seed"   ← no recurrence 
   See the comment at `scripts/testlib/gitenv.py` (`A REDIRECT BY THE HARNESS IS NOT A
   CONFIG TO PROTECT`). #673 was renumbered to **GUARD 10**, as recommended.
 
-### 🟡 OPEN — #683's detector attributes a CONCURRENT SESSION's write to a test
-- **Observed, in practice:** a bare `pytest` whose **cwd is the live clone** went red with
-  `DEVRC-GITENV-VIOLATION` because another session ran a `git checkout` mid-run —
-  `logs/HEAD` is fingerprinted. Re-running passed.
-- **Ruled out:** that it was my change (re-ran clean); that it is a gate problem (the gate
-  runs in a contained clone, where it cannot happen).
-- **Leading hypothesis:** #720's title says the detector "blamed TESTS for a repository with
-  30 other writers", so this class is *known* upstream — but whether #720 fully closes the
-  concurrent-session case, as opposed to the writer-attribution case, is **NOT verified here**.
-- **Next probe:** `git -C <clone> log -1 --format=%H origin/main` then run a bare
-  `pytest scripts/tests/test_skill_descriptions.py` with cwd = the live base clone while a
-  second session commits; see whether GUARD 9 still fails the running test.
+### 🟢 MEASURED 2026-08-22 — #720 closes the concurrent-session case, with ONE residual
 
-### 🟡 OPEN — #493 reaps ~11% of `/tmp`'s machine-generated entries
+The probe below was run. The answer is not "closed" or "open" — it is a boundary, and the
+boundary needs **two** conditions to fail. Five arms in a contained clone at `a689441f`,
+one variable moved per arm, each with a positive control proving the writer really wrote.
+
+| arm | who writes | writer's cwd | still writing at teardown | GUARD 9 verdict |
+|---|---|---|---|---|
+| A | nobody | — | — | green · `mode=enforce(auto)` · `unattributable=0` |
+| D | **the test itself** (a real escape) | — | — | 🔴 `DEVRC-GITENV-VIOLATION` · attributed=1 — **correct** |
+| B | another process | **inside** the tree | no | downgrade → `report(auto)` · `gitenv(observed)` · test PASSES — **correct** |
+| E | another process, `git -C <repo>` | **outside** | no | 🔴 `DEVRC-GITENV-VIOLATION` on an innocent sleeping test — **FALSE** |
+| F | another process, `git -C <repo>` | outside | **yes** | `gitenv(foreign-writer)` via the 0.25s settle · test PASSES — **correct** |
+
+- **Arm D is the reachability control and it is not optional.** Without it a green in B or F
+  is indistinguishable from a disarmed guard. It fires with the guard's own `VIOLATION_TOKEN`,
+  so B/F's greens are about the guard's judgement rather than its absence.
+- **The mechanism, from the source rather than inferred:** #720 downgrades on *proven*
+  evidence of another writer, from two independent probes — `live_cotenants` (processes whose
+  **CWD** is inside a protected work tree and are not our ancestors) and a **settle re-read**
+  when a delta appears. Arm B trips the first; arm F trips the second. **Arm E trips neither**,
+  and enforce mode then asserts at full confidence against whatever test happened to be running.
+- 🔴 **The residual is narrow but it is the HOUSE STYLE.** It needs cwd-outside **and**
+  quiescent-by-teardown together — but that is the exact shape of an ordinary agent write, and
+  `CLAUDE.md` *mandates* the half that defeats the cwd probe: *"Use `git -C <path>` and absolute
+  paths — never `cd <repo> && …`"*. A `git -C <repo> commit` from a shell sitting elsewhere
+  finishes in well under a second. So the probe designed to prove another writer exists is
+  blind to the dominant way writers in this repo actually write.
+- **What this does NOT affect:** the pointer strip (prevention) is independent of mode, and the
+  gate runs in a contained clone where no co-tenant exists. This is a false-positive class for
+  a bare `pytest` in the live clone, not a hole in the guard.
+- **Also corrected while measuring:** the earlier text here blamed `logs/HEAD` being
+  fingerprinted. #720 **removed** `logs/HEAD` from the fingerprint outright (a pure derivative
+  that `gc`'s reflog expiry rewrites on its own) and replaced `packed-refs`-as-a-file with a
+  parsed name→object-id map. That specific mechanism is gone; the class survived it by a
+  different route.
+- **Next probe, if someone takes the residual:** widen `live_cotenants` from CWD to also match
+  a process whose **argv** names a protected repo path (`git -C <repo> …`, `--git-dir=<repo>`),
+  and re-run arm E — it must move from `enforce` to `report`. Keep arm D in the same battery:
+  a widening that silences arm D has removed the guard, not the false positive.
+
+### 🟢 DONE 2026-08-22 — #493's `nix-shell.*` glob, plus the reason it could not have shipped
+- **Rebased** onto current `main` (it was **227 commits behind**; original blob OID preserved,
+  force-pushed with `--force-with-lease` pinned to `08849bd3`) and the glob added.
+- **Re-measured live** rather than carried from the numbers below: `nix-shell.*` = **3340**,
+  `nix-shell-*` = **1017** — a 3.3:1 ratio, against a positive control of **119,066** total
+  top-level `/tmp` entries, so the zeros are real zeros and not a walk that never ran.
+- 🔴 **The fix could not have reached an already-applied host.** The script gated its entire
+  edit on `grep -qF "$MARKER"` — the presence of a *comment* — so a host that had run it
+  printed `already present — skipping edit` and exited **0** over a config missing every rule
+  added since. The skip is now per-RULE, off a single ledger, and the script **re-reads the
+  file** afterwards to prove each rule landed. Applied state, measured: workbench **0**
+  (unapplied, positive control confirms the anchor greps 1); laptop **UNMEASURED** —
+  `Permission denied`, *not* zero. That laptop row is why the idempotency half is in the same PR.
+- **Coverage:** `scripts/tests/test_tmp_churn_retention.py` extracts the inserter heredoc
+  verbatim from the shipped script, so there is no second copy of the rules to drift. 11 tests,
+  **watched to fail**: inert reword → 11 passed (control) · marker-only skip restored → **1
+  failed, the regression test by name** · late rule deleted → 4 failed · glob broadened to
+  `/tmp/*` → 4 failed · restored byte-identical → 11 passed.
+- 🔴 **Still staged, not applied** — `sudo bash nix/system/apply-tmp-churn-retention.sh`.
+- **Deliberately NOT taken**, each larger than everything this PR reaps put together and none
+  checked against live work: `cgparent-*` 17064 · `fx-excerpt-*` 14012 · `cbf-*` 5268 ·
+  `tmp.*` 4227. `tmp.*` is bare `mktemp`'s default and needs its own audit first.
+
+### 🟡 SUPERSEDED — the original #493 measurement
 - **Observed:** #493's globs cover **6,775** live entries. `nix-shell-*` requires a literal
   hyphen and therefore **cannot match `nix-shell.<mktemp>`** — which is **3,178** entries,
   outnumbering the hyphen form 3:1, and is the form `gate.sh` produces on every agent run.
@@ -449,17 +520,40 @@ newest fixture-shaped reflog entry: 14:42:12 "commit: seed"   ← no recurrence 
   The large dirs are the RECENT, in-use ones; the old ones are ~1 MB. The median (996 KiB)
   was in front of me and I extrapolated from the mean anyway.
 
-## Next steps (ranked)
+## Next steps (ranked) — rewritten 2026-08-22 after the four above were worked
 
-1. **Deploy.** Everything above is on `origin/main` and on NEITHER host. `scripts/ship.sh`.
-   🔴 Read every per-host line, not the final verdict.
-2. **#493 — add the `nix-shell.*` glob**, then hand the operator
-   `sudo bash nix/system/apply-tmp-churn-retention.sh`. Claude cannot apply it.
-3. **#632** — `OPEN`, gated green and twice-audited when written, **now ~90 commits behind**.
-   Re-gate on the merged tree before believing that.
-4. **Verify the concurrent-session detector case** (probe above) — decide whether #720
-   closed it or only the writer-attribution half.
-5. **#701 (this doc)** — still OPEN. Land it.
+1. 🔴 **`tekton/devrc-pytests` is RED on EVERY open PR, and the cause is on `main`.**
+   `test_the_module_root_is_load_bearing` asserts `gitenv.py` sits inside a git checkout;
+   the authoritative runner's source is a `/nix/store` path with **no `.git`**, so it dies on
+   its own precondition. It passes on a dev host and fails in the one environment that would
+   gate a merge — the two-tier blindness again, from GUARD 9's own test file. **#732 fixes it**,
+   verified independently here, red-at-base / green-at-HEAD in a `.git`-less tree:
+   ```
+   main          (no .git)  ->  1 failed   AssertionError: gitenv.py is not inside a git checkout
+   #732 ba97a9d7 (no .git)  ->  1 passed
+   ```
+   🔴 **#732's OWN Tekton check still reads FAILURE on that head sha, with totals byte-identical
+   to its pre-fix measurement** (`collected=15152 failed=1`). That is either a stale run or a
+   DIFFERENT test — precisely the coincidence `handoff-guards-and-gates.md` records. Read the
+   step log or re-run it; do not merge on the local matrix alone.
+2. **Make the two Tekton checks REQUIRED** — the highest-value thing left, and blocked on a
+   sudo-mode GitHub action Claude cannot perform. `required_status_checks` is **null**, there
+   are **0 rulesets**, and `enforce_admins: true` is enforcing an empty set. 🔴 **Do it only
+   after step 1 lands and pytests has gone green once**: arming a check that cannot pass makes
+   every PR unmergeable, and a permanently-red gate is worse than no gate.
+3. **#632** — 🔴 **it does NOT merge.** `gh pr view` says `CONFLICTING`/`DIRTY` and a local
+   test-merge onto `ec4fc008` confirms: 2 conflict hunks in `scripts/ship.sh`, 2 in
+   `scripts/drift-check.sh`. **The collision is semantic, not textual**: `main` (via #716) now
+   uses **rc 2** for *`SHIP_REPO` set-but-empty* — two `exit 2` sites — while #632 uses **rc 2**
+   for *usage error*, one site. One meaning has to move, and #632 also introduces a
+   machine-read reservation ledger (`RESERVED-TO-DRIFT-CHECK` / `RESERVED-TO-SHIP`, pinned by
+   `test_the_two_rc_ladders_reserve_each_others_codes`) that says the next free code is **21**.
+   So "re-gate #632" is really "resolve an rc-ladder collision, then re-gate". Not attempted here.
+4. ~~Verify the concurrent-session detector case~~ — **done**, see the five-arm matrix above.
+   #720 closes it except when the other writer's cwd is outside the tree **and** it is quiescent
+   by teardown. Residual documented with its next probe; not fixed.
+5. ~~#493~~ — **done**, rebased and extended; still needs the operator's `sudo`.
+6. **#701 (this doc)** — being landed with these updates.
 
 ## Gotchas / decisions / dead-ends
 
