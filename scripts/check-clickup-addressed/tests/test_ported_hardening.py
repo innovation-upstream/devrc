@@ -35,7 +35,7 @@ Two of the twelve are LIVE DEFECTS on trunk, not merely missing coverage:
     transcript containing one invalid byte, which the callers do not catch.
   * `test_keep_open_veto_reads_past_the_display_truncation` — trunk decides the veto on the
     200-char snippet, so a refusal written after that boundary produces "close it". That is
-    the 868kr0799 shape with the clauses reordered.
+    the 868gx0bbb shape with the clauses reordered.
 """
 import contextlib, io, json, sys, tempfile
 from datetime import datetime
@@ -60,7 +60,7 @@ check_addressed = _load("check_addressed", "check-addressed.py")
 recent_comments = _load("recent_comments", "recent-comments.py")
 import _selfrun as selfrun  # noqa: E402
 
-TARGET = "868krn3y1"
+TARGET = "868gx1ccc"
 PRIOR_RUN_REPORT = (
     "## Task Completion Status\n\n"
     f"✅ **{TARGET}** — transcripts say `likely_addressed`\n"
@@ -190,15 +190,15 @@ def test_newest_comment_carries_full_text_not_just_the_snippet():
 
 def test_keep_open_veto_reads_past_the_display_truncation():
     """The behavioural half of P3, on trunk's own veto: a refusal written after the 200-char
-    boundary must still veto. Same sentences as the real 868kr0799 comment with the
-    keep-open clause LAST — idiomatic for a status update."""
-    padding = ("MeiliSearch: P95 > 5s (Saturation Burst) fired and resolved repeatedly, "
-               "A=18.97 at 7:55. The 8/17 clean CAPACITY-SWEEP looks like a lucky snapshot "
+    boundary must still veto. Synthetic, built to the 868gx0bbb shape with the keep-open
+    clause LAST — idiomatic for a status update."""
+    padding = ("The queue-depth alert fired and resolved repeatedly overnight, 14 cycles "
+               "in three hours. The clean sweep on the 3rd looks like a lucky snapshot "
                "and the numbers below all come from the same window, so read them together. ")
     text = padding + "Still live, do not close."
     assert len(text) > 200, "fixture must exceed the truncation to test anything"
     flags = check_addressed.disagreements([{
-        "task_id": "868kr0799", "status": "likely_addressed", "clickup_status": "to do",
+        "task_id": "868gx0bbb", "status": "likely_addressed", "clickup_status": "to do",
         "mentions_found": 3, "newest_comment": {"snippet": text[:200], "text": text},
     }])
     assert not any("close it" in f.lower() for f in flags), \
@@ -321,7 +321,7 @@ def test_widened_window_did_not_widen_the_close_it_trigger():
     padding = ("Weekly status. Throughput held flat across the window and the backlog drained "
                "on schedule; nothing here needs a decision from anyone this week, and the "
                "numbers below are all from the same 24h window so they can be read together. ")
-    text = padding + "MeiliSearch: P95 > 5s (Saturation Burst) fired and resolved repeatedly."
+    text = padding + "The queue-depth alert fired and resolved repeatedly overnight."
     assert len(padding) > 200, "the trigger phrase must sit past the display truncation"
 
     flags = check_addressed.disagreements([{
