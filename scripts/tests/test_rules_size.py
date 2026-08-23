@@ -60,9 +60,13 @@ ARCHIVE_MD = REPO_ROOT / "claude" / "RULES-ARCHIVE.md"
 # The hard ceiling: RULES.md must never exceed this many bytes.
 #
 # Sized off the post-split measurement, NOT off a round number and NOT off an
-# aspiration. At the split RULES.md was 33,105 B (down from 41,566 B); this
-# ceiling is that plus ~1.4 KB, i.e. room for a genuinely new rule or two before
-# anyone has to make a decision.
+# aspiration. At the split RULES.md was 33,105 B (down from 41,566 B) and the
+# ceiling was set ~1.4 KB above it -- room for a genuinely new rule or two
+# before anyone had to make a decision. ⚠ That describes the ORIGINAL sizing,
+# not the constant below: the dated ledger entries that follow have raised it
+# repeatedly, so read `MAX_BYTES` for the current value and never infer it from
+# this paragraph. (It read "this ceiling is that plus ~1.4 KB" in the present
+# tense until 2026-08-22, by which point it was understating by ~5.8 KB.)
 #
 # 🔴 This is an ANTI-REGROWTH gate, not a target. It is deliberately NOT set to
 # the 15 KB that motivated the split -- see the module docstring of the split PR
@@ -292,7 +296,7 @@ ARCHIVE_MD = REPO_ROOT / "claude" / "RULES-ARCHIVE.md"
 # It is the THIRD-largest bullet in the file, behind "Validate the INSTRUMENT"
 # and "Mutation-test a guard"; an earlier draft called it the largest, which
 # the 2026-08-11 entry above already contradicted. Its byte size is NOT stated
-# here -- see the note at the bottom of this entry for why. It is over the
+# here -- see this entry's closing note on derived measurements for why. It is over the
 # ~900 B the MIN_HEADROOM_BYTES comment calls a large rule, and that is
 # deliberate: it is one decision tree with four branches, and splitting it
 # into four bullets costs MORE because each would restate the frame ("stop
@@ -311,7 +315,10 @@ ARCHIVE_MD = REPO_ROOT / "claude" / "RULES-ARCHIVE.md"
 # stated, because it is a function of a bullet that kept changing -- and note
 # the convention trap that produced two wrong numbers here already: a text-only
 # bullet minus a newline-counted eviction corresponds to NOTHING. Subtract
-# like from like, or just read `git diff --stat` against the merge base.
+# like from like -- or measure both ends directly, the way the docstring at
+# the top of this module already does it:
+# `git show <merge-base>:claude/RULES.md | wc -c`. NOT `git diff --stat`,
+# which counts LINES for a text file and answers a different question.
 #
 # 🔴 A COLD READ CAUGHT ONE SCOPE LOSS; A BLIND AUDIT THEN CAUGHT THREE MORE.
 # That ratio is the reusable part -- the cold read is necessary and was not

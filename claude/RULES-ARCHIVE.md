@@ -1362,4 +1362,8 @@ against live `0.7.98` (deployment pin `harbor.homelab.lan/library/clawgate:0.7.9
   Pushing *more* decisions to the phone therefore raises the value of that lever and
   risks notification fatigue arming it. This is the "permanently-red gate trains you to click
   through" hazard in its mirror image: a too-noisy gate trains you to disable it globally.
-  The mitigation is the shipped rule's own budget — one ask per task.
+  The mitigation is `hooks.md`'s OWN one-ask-per-task budget, argued from this blast radius —
+  **not** the tree's "a Fork ANSWER buys the whole run", which is Fork-scoped and therefore
+  cannot reach a hook that carries no Forks (first bullet above). Two copies of that wrong
+  citation shipped in this PR; one was retracted a round before the other, which is the
+  "one rule, one place" bullet demonstrating itself.
