@@ -148,14 +148,22 @@ Repo-level facts that are NOT in any skill — they live here on purpose:
 - **Two always-on docs have enforced byte ceilings**, because both load on every session: `scripts/browser-bridge/SKILL.md` (gated by `scripts/browser-bridge/tests/test_skill_size.py`) and `claude/RULES.md` (gated by `scripts/tests/test_rules_size.py`). Each test OWNS its constants and prints an eviction playbook on failure — **read the numbers there, never restate them.** Any addition needs an eviction in the SAME commit.
 - **Run the gate with `scripts/gate.sh`** (`--tier pytest|node|both`, `--set hermetic|all`). It sends the full output to a LOG FILE and prints only a bounded summary, so there is no reason to pipe it — and **its exit status is authoritative**. It also cross-checks that status against the runners' own `RESULT:` line and exits **90 = could-not-vouch** when they disagree, when a run printed no verdict, or when `panic: test timed out` appears. 90 is not "the tests failed"; it means read the log.
 - **The runners' verdict line carries their exit code** (`RESULT: FAIL (exit=1)`), emitted from one writer behind an EXIT trap, so it survives a pipe and a killed run still says so. Historically the status was destroyed by `… | tail; echo "rc=$?"` — four agents reported `exit 0` over `RESULT: FAIL` on 2026-08-11 — which is why counting `PASSED`/`FAILED` lines used to be mandatory. Still a fine cross-check; no longer the only thing you can trust.
-- 🔴 **CHECKS NOW RUN, BUT NOTHING BLOCKS — the gate is still YOU.** <!-- merge-gate: other -->
-  Since 2026-08-22 Tekton runs both suites on every PR and posts
-  `tekton/devrc-pytests` + `tekton/devrc-nodetests`. **That is reporting, not gating**:
-  `required_status_checks` on `main` is **null** and there are **0 rulesets**, so a RED
-  Tekton does not stop a merge — measured, not inferred, and `enforce_admins: true`
-  protects nothing here because there is nothing required to enforce. There is still no
-  `.github/workflows`. Making the two checks *required* is a one-setting change and the
-  single highest-value thing left; until someone does it, a green tick is a courtesy.
+- 🔴 **A MERGE IS NOW BLOCKED BY `tekton/devrc-nodetests`. `devrc-pytests` is NOT.** <!-- merge-gate: other -->
+  Since 2026-08-23 `required_status_checks.contexts = ["tekton/devrc-nodetests"]` on `main`,
+  with `enforce_admins: true`. Verified behaviourally, not from the setting: PRs with
+  nodetests `ERROR` or `PENDING` read `mergeStateStatus=BLOCKED`, green ones read `CLEAN`,
+  and a PR with pytests red but nodetests green reads `UNSTABLE` — mergeable. That split is
+  deliberate: pytests reports, nodetests gates. There is still no `.github/workflows`, so
+  the marker stays `other`.
+  🔴 **`enforce_admins: true` is LIVE now** — it protected nothing while nothing was
+  required. If Tekton is down or wedged, NOTHING merges and there is no admin override.
+  The escape hatch, deliberately written down because you will want it under pressure:
+  `gh api -X DELETE /repos/innovation-upstream/devrc/branches/main/protection/required_status_checks`
+  ⚠ **`strict` is FALSE on purpose.** `strict: true` would force every PR to be up to date
+  with `main` before merging — correct in principle, and unworkable here: `main` moved 11+
+  times in one session and each move would re-queue a ~20-minute gate for every open PR.
+  **So a green check is a claim about the PR's BRANCH, not about the tree the merge
+  creates.** Gating the merged tree is still yours to do by hand.
   🔴 **A brand-new check is not an instrument until it has passed ONCE.** `devrc-ci` was
   red on its first **5 of 5** runs — every one on the same test
   (`test_timeout_reaps_the_whole_process_group`), in a file none of those changes touched:
@@ -214,11 +222,13 @@ Repo-level facts that are NOT in any skill — they live here on purpose:
   see (Tekton — which is why it reads `other` today — or an installed `githooks/` pre-push
   gate); `other` exists so the test can never force you to write a false `none`.
   🔴 **The marker records that something RUNS, never that it BLOCKS.** Those are different
-  facts and today they differ: Tekton reports on every PR while
-  `required_status_checks` is null, so `other` is honest and "the merge is protected" is
-  not. Whether a run blocks is branch protection, which — along with Tekton and git hooks —
-  is named above but NOT machine-checked from here. Re-verify by hand rather than trusting
-  this paragraph's age.
+  facts, and the marker cannot tell them apart: it read `other` both while nothing blocked
+  (2026-08-22) and now that `tekton/devrc-nodetests` is required (2026-08-23) — the value
+  did not move, because what changed was branch protection, which this test cannot see.
+  So `other` never licenses "the merge is protected". Whether a run blocks is branch
+  protection, which — along with Tekton and git hooks — is named above but NOT
+  machine-checked from here. Re-verify by hand rather than trusting this paragraph's age:
+  `gh api /repos/innovation-upstream/devrc/branches/main/protection --jq .required_status_checks`
 - 🔴 **There is no hand-written test TOTAL any more.** `run-tests.sh` carries a **per-target** floor table (`TARGET_FLOORS`, pinned two-way against the target list) and derives the global floor as their sum. The old single `MIN_TESTS` literal was base-dependent and took **eleven values across eight PRs in one day**; `rerere` replayed a resolution from a different merge and silently wrote a four-way total onto a two-way tree. A floor is now a function of the current measurement — `m - min(50, max(1, m/20))` — and the gate PRINTS the exact replacement number when one drifts. Resolve a conflict here by re-running the gate and copying what it says, never by arithmetic on the two sides.
 - 🔴 **This repo is PUBLIC.** Never commit a real media-library path, directory name, filename, route log, or a real third-party hostname used as an example. **Nor CAPTURED TEXT — anyone's message bodies, prompts, transcripts or chat content, or a model's summaries of them — however it arrives** (an eval capture, a fixture, a debug dump). A test needs the SHAPE; regenerate it synthetic. Gated for JSON/JSONL/JSONC by `scripts/tests/test_no_captured_text.py` and for `.html`/`.txt` by `scripts/tests/test_no_captured_markup.py`; each owns its ledgers, thresholds, pinned allowlist and blind spots — read them there, never restate them. 🔴 All four content gates (these two plus the IP and hostname ones) read `git ls-files` and are **blind to git history** — see `SECRETS.md` → "Dead credentials in reachable history" before treating a green run as "the repo is clean".
 

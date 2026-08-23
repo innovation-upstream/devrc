@@ -86,16 +86,23 @@ def _state(snippet, ref_num):
 
 # --------------------------------------------------------------------------- D9
 
-def test_a_named_but_unknown_repo_is_not_reported_as_unnamed():
-    """The false message. `devrc` IS named; it is merely absent from KNOWN_REPOS.
+def test_an_unknown_token_is_not_asserted_to_be_a_repo():
+    """The false message. `notarepo-xyz` IS on the '#'; it is merely absent from KNOWN_REPOS.
 
-    At base both refs in this live snippet came back "unresolved (repo not named)".
+    At base both refs in this snippet came back "unresolved (repo not named)".
     """
     ref, state = _state("| **#4181**, **notarepo-xyz #591** | merged |", "591")
-    assert "not named" not in state, \
-        f"a NAMED repo was reported as unnamed — the message is false: {state!r}"
-    assert "notarepo-xyz" in state, \
-        f"the unknown repo must be named so the reader can add it: {state!r}"
+    # 🔴 ROUND 7 REVERSES ROUND 5's REMEDY, on measurement. Round 5 made this case say
+    # `repo 'notarepo-xyz' is not in KNOWN_REPOS`. On a live run upstream, 2 of 3 cited PRs
+    # rendered that way with the captured token being an ENGLISH WORD ('their', 'which')
+    # while the comment plainly named a repo — so the "precise" message was wrong more often
+    # than the vague one it replaced. `word` is simply whatever precedes the '#', and nothing
+    # short of enumerating the world tells `devrc` from `landed`. The message must therefore
+    # NOT assert that a repo was named.
+    assert "notarepo-xyz" not in state, \
+        f"the captured token is asserted to be a repo — the false premise: {state!r}"
+    assert "KNOWN_REPOS" in state, \
+        f"the affordance was dropped entirely; keep it as a CONDITIONAL: {state!r}"
 
 
 def test_the_unknown_repo_message_says_what_to_do():
@@ -145,16 +152,19 @@ def test_the_hub_repos_are_all_present_and_correctly_owned():
          f"  expected: {expected}")
 
 
-def test_a_genuinely_unnamed_ref_still_says_not_named():
-    """INVARIANT GUARD — passes at base. The refusal to guess is deliberate and stays.
+def test_an_unnamed_ref_renders_the_same_could_not_determine_message():
+    """INVARIANT GUARD — the refusal to guess is deliberate and stays.
 
-    `#4181` in the live snippet has no repo word before it and no known repo within
-    REPO_LOOKBEHIND. "repo not named" is the CORRECT message there, and the D9 fix must
-    not relabel it as an unknown-repo problem.
+    `#4181` in the snippet has no repo word before it and no known repo within
+    REPO_LOOKBEHIND.
     """
     _, state = _state(LIVE_SNIPPET, "4181")
-    assert state == "unresolved (repo not named)", \
-        f"the honest not-named case was relabelled: {state!r}"
+    # Round 7: this and the unknown-token case now render IDENTICALLY, deliberately — the
+    # tool cannot tell them apart on real input, so claiming to is the defect. What must
+    # survive is the refusal to GUESS a repo.
+    assert state == ("unresolved (could not determine the repo; if one is named here, add it "
+                     "to KNOWN_REPOS in check-completion.py)"), \
+        f"the honest could-not-determine case was relabelled: {state!r}"
 
 
 def test_an_unknown_repo_is_still_never_guessed():
@@ -276,7 +286,12 @@ def _run_main(argv, completion=None, open_items=None, status="partially_addresse
 
     orig_run, orig_argv, orig_stdout = check_addressed.run_script, sys.argv, sys.stdout
     check_addressed.run_script = fake
-    sys.argv = ["check-addressed.py", *argv]
+    # `--transcripts` FIRST and unconditionally: every caller of this helper is asserting on
+    # a transcript-derived verdict, and the scan is opt-in since the 2026-08-22 port. Without
+    # it `main()` never calls `check-completion.py` at all and `status`/`mentions` below are
+    # simply not in the record — the tests would pass or fail for reasons unrelated to what
+    # they assert.
+    sys.argv = ["check-addressed.py", "--transcripts", *argv]
     sys.stdout = io.StringIO()
     try:
         check_addressed.main()

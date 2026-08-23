@@ -272,7 +272,7 @@ def test_main_forwards_skips_and_reports_the_count():
 
     real_run, real_argv = check_addressed.run_script, sys.argv
     check_addressed.run_script = fake_run_script
-    sys.argv = ["check-addressed.py", "--limit", "1", "--no-resolve-prs"]
+    sys.argv = ["check-addressed.py", "--transcripts", "--limit", "1", "--no-resolve-prs"]
     out = io.StringIO()
     try:
         with contextlib.redirect_stdout(out):
