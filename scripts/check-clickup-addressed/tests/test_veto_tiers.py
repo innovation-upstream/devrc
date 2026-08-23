@@ -67,7 +67,7 @@ def joined(comment, **kw):
 # --------------------------------------------------------- direction 1: over-veto
 
 AMBIGUOUS_COMMENTS = [
-    "Resolved on both counts, recommend closing. (The follow-up PR is still open but unrelated.)",
+    "Resolved end to end, recommend closing. (The follow-up PR is still open but unrelated.)",
     "One review thread is not resolved on the PR, but the ticket itself is done. Recommend closing.",
     "The alert fired and was not resolved automatically. Ticket work is done — recommend closing.",
     "The fix landed in #1234 and is live. The follow-up PR is still open but unrelated.",
@@ -239,7 +239,7 @@ def test_naming_a_ticket_beside_still_open_is_NOT_promoted_to_strong():
     Weak is the right tier for every "still open"; the ambiguity downgrade is what handles
     the ones that are about this ticket.
     """
-    for c in ("Resolved on both counts, recommend closing. The upstream task is still open "
+    for c in ("Resolved end to end, recommend closing. The upstream task is still open "
               "but that is tracked separately.",
               "Fix merged. The duplicate task is still open, closing this one.",
               "This is done and deployed. The parent ticket is still open; it covers the "
@@ -466,20 +466,21 @@ def test_strong_veto_is_absolute_even_beside_a_closure_claim():
 def test_a_declaration_that_the_ticket_STAYS_open_is_strong():
     """🔴 REGRESSION FROM THE LIVE RUN, not from the table.
 
-    The real comment on `868ktt2ct` (2026-08-21) opens "Status check during ClickUp triage —
-    staying open, and mostly not verifiable from this repo", and its ONLY closure vocabulary
-    is one "shipped" describing a sub-item that landed in a different repo. The first version
-    of this round downgraded it to "READ IT and decide" — trunk's absolute veto had it right.
+    A live comment on `868gy0fff` (2026-08-21) opened with a triage status line declaring the
+    ticket is STAYING OPEN, whose ONLY closure vocabulary was one "shipped" describing a
+    sub-item that landed in a different repo. The first version of this round downgraded it
+    to "READ IT and decide" — trunk's absolute veto had it right. The fixture below is
+    SYNTHETIC and reproduces that shape; the original wording is not reproduced here.
 
     These phrasings are STRONG because they are not this domain's vocabulary for anything
     else: a PR or an alert is "open", never "staying open". The synthetic 17-case table could
     not have found this; only running the tool against real comments did.
     """
-    real = ("Status check during ClickUp triage 2026-08-21 — staying open, and mostly not "
-            "verifiable from this repo. Per the comment thread: R1 (log_lock_waits=on) "
-            "shipped via talos-infra #1093, a separate repo. R2, the global lock_timeout "
-            "this task is named for, is still open and needs re-sizing.")
-    j = joined(real)
+    live_shape = ("Status check during ClickUp triage 2026-08-21 — staying open, and mostly "
+                  "not verifiable from this repo. Per the comment thread: part one (the "
+                  "tracing flag) shipped via a sibling repo, #1093. Part two, the global "
+                  "timeout this task is named for, is still open and needs re-sizing.")
+    j = joined(live_shape)
     assert "do NOT close" in j, f"an explicit 'staying open' was downgraded: {j}"
     assert "READ IT and decide" not in j, f"a deliberate keep-open read as ambiguous: {j}"
 
@@ -532,7 +533,7 @@ def test_the_close_it_flag_still_fires_on_a_clean_resolution():
     file alone; the first was `"do not close" in j.lower()` matching the flag's own
     boilerplate. **Never assert a substring the surrounding sentence can also produce.**
     """
-    j = joined("Resolved on both counts. Recommend closing.", transcript_status="unclear")
+    j = joined("Resolved end to end. Recommend closing.", transcript_status="unclear")
     assert "reads as RESOLVED" in j, f"the close-it flag was lost: {j}"
     assert "close it, or say why it stays open" in j, f"the close-it flag was lost: {j}"
     assert "do NOT close" not in j, f"a clean resolution was vetoed: {j}"

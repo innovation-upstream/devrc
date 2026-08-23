@@ -95,7 +95,7 @@ def run_script(name, *args):
 
 # A ticket whose newest comment declares the work done while the ticket itself is still
 # open. This is the single highest-value thing in the report and no transcript scan can
-# produce it: on 2026-08-19 `868kr07fu` sat at `to do` / urgent under a comment reading
+# produce it: on 2026-08-19 `868gx0aaa` sat at `to do` / urgent under a comment reading
 # "Resolved ... Recommend closing".
 RESOLVED_COMMENT_RE = re.compile(
     r"\b(?:resolved|recommend closing|can be closed|both asks are (?:now )?closed|"
@@ -104,9 +104,9 @@ RESOLVED_COMMENT_RE = re.compile(
 # An explicit refusal to close. This VETOES the close-it flag rather than being weighed
 # against it, because that flag is an instruction to a human, not a score.
 #
-# Measured 2026-08-20 on 868kr0799, whose newest comment read: "Still live, do not close.
-# ... MeiliSearch: P95 > 5s (Saturation Burst) fired and resolved repeatedly". The word
-# "resolved" there describes an ALERT cycling, and the ticket sat at `to do`/urgent — so
+# Measured 2026-08-20 on 868gx0bbb, whose newest comment refused closure in its first
+# clause and then said, of a service alert, that it "fired and resolved repeatedly". The
+# word "resolved" there describes an ALERT cycling, and the ticket sat at `to do`/urgent — so
 # the report told the operator to close a ticket whose reporter had just said, in the same
 # sentence, not to. A keyword cannot tell those two senses of "resolved" apart; an explicit
 # override can, and it is the reporter's own words doing the overriding.
@@ -114,9 +114,9 @@ RESOLVED_COMMENT_RE = re.compile(
 # STRONG = an instruction about THIS ticket that no other reading survives. It is absolute.
 # 🔴 `stay(s|ing) open` / `remains open` / `leaving it open` are here because the LIVE
 # end-to-end run found them, not the 17-case table. On 2026-08-21 the real ticket
-# `868ktt2ct` opened with "Status check during ClickUp triage — **staying open**, and mostly
-# not verifiable from this repo", and its only closure vocabulary was one "shipped" about a
-# sub-item in another repo. The tier downgraded an unmistakable refusal to "READ IT" —
+# `868gy0fff` opened with a triage status line declaring the ticket **staying open** and
+# mostly not verifiable from this repo, and its only closure vocabulary was one "shipped"
+# about a sub-item in another repo. The tier downgraded an unmistakable refusal to "READ IT" —
 # trunk's absolute veto had it right, by luck of "still open" appearing later in the comment.
 #
 # They are STRONG rather than WEAK because, unlike `still open` and `not resolved`, they are
@@ -139,7 +139,7 @@ STRONG_KEEP_OPEN_RE = re.compile(
 # GitHub review thread is resolved/unresolved, Alertmanager says firing/resolved, and a
 # sibling PR is open or closed — so "still open" and "not resolved" are as likely to be
 # about a PR or an alert as about the ticket. Measured on trunk 2026-08-21: a comment
-# reading "Resolved on both counts, recommend closing. (The follow-up PR is still open but
+# reading "Resolved end to end, recommend closing. (The follow-up PR is still open but
 # unrelated.)" on a `to do` ticket emitted **do NOT close** — the veto suppressing exactly
 # the flag the reporter asked for.
 #
@@ -362,7 +362,7 @@ def _waiting_on_a_human(r, now):
 
     This is the highest-signal state the tool can reach and no existing rule produced it:
     nothing "disagrees" — the ticket is open, the transcripts are empty, and they agree.
-    Measured live 2026-08-21 on `868kuam02` (`to do`/high, two unanswered comments from a
+    Measured live 2026-08-21 on `868gz0hhh` (`to do`/high, two unanswered comments from a
     colleague, 0 mentions): the "Needs a decision" block said nothing at all.
 
     Three conditions, and the bounding choice matters more than the detection:
@@ -394,7 +394,7 @@ def _waiting_on_a_human(r, now):
     about what other people said; concluding "nobody has answered" from the surviving
     comments is right given the only evidence handed over. Neither component can observe
     the other's assumption, so no care inside this function could recover it. Measured on
-    868kuam02: the flag said "Commented 2d ago; nobody has answered" over a ticket TWO
+    868gz0hhh: the flag said "Commented 2d ago; nobody has answered" over a ticket TWO
     sessions had already answered, the later of them eleven hours earlier — and acting on
     it duplicated an analysis already sitting in the thread. The fix has to cross the seam,
     so `recent-comments.py` now reports `my_latest_reply` and condition 4 reads it.

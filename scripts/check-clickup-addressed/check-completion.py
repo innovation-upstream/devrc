@@ -20,7 +20,7 @@ from _selfrun import is_self_run  # noqa: E402
 
 CLAUDE_DIR = Path.home() / ".claude" / "projects"
 
-# Shape of a ClickUp task ID in this workspace (e.g. 868ktvqf9). Used to detect when a
+# Shape of a ClickUp task ID in this workspace (e.g. 868gy0ddd). Used to detect when a
 # signal inside a task's text window actually belongs to a DIFFERENT task — the window is
 # ±window_size characters wide, so a triage table listing several tasks puts each task's
 # verdict inside every other task's window.

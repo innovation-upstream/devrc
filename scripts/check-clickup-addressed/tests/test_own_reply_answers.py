@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Round 6 (2026-08-22). D12 — the WAITING flag cannot see the user's OWN replies.
 
-MEASURED LIVE, and it cost real work. On 868kuam02 the report said:
+MEASURED LIVE, and it cost real work. On 868gz0hhh the report said:
 
-    @Ellie King is WAITING — the ticket is `to do`, and the task ID appears in NO
+    @Robin Example is WAITING — the ticket is `to do`, and the task ID appears in NO
     transcript, so no work exists anywhere. Commented 2d ago; nobody has answered.
 
-Two sessions had already answered her — 2026-08-21 13:52 and 2026-08-22 01:04, the
+Two sessions had already answered them — 2026-08-21 13:52 and 2026-08-22 01:04, the
 second eleven hours before the run that printed that line. Acting on the flag
 duplicated an analysis that was already in the thread.
 
@@ -64,21 +64,21 @@ def _at(days_ago):
 
 
 def _rec(comment_days_ago=2, reply_days_ago=None, reply_reported=True):
-    """The live 868kuam02 shape: open ticket, zero transcript evidence, colleague comment.
+    """The live 868gz0hhh shape: open ticket, zero transcript evidence, colleague comment.
 
     `reply_reported=False` omits the key entirely — the stale-producer case, which is a
     different fact from "reported, and there is no reply" (`reply_days_ago=None`).
     """
     nc = {
         "date": _at(comment_days_ago),
-        "author": "Ellie King",
-        "snippet": "Follow-up from the reporter, on why this looks pixelated",
-        "text": "Follow-up from the reporter, on why this looks pixelated",
+        "author": "Robin Example",
+        "snippet": "Follow-up from the reporter, asking for a status update",
+        "text": "Follow-up from the reporter, asking for a status update",
     }
     if reply_reported:
         nc["my_latest_reply"] = _at(reply_days_ago) if reply_days_ago is not None else None
     return {
-        "task_id": "868kuam02", "status": "no_mentions_found", "sessions_searched": 1,
+        "task_id": "868gz0hhh", "status": "no_mentions_found", "sessions_searched": 1,
         "mentions_found": 0, "clickup_status": "to do", "clickup_priority": "high",
         "newest_comment": nc, "completion": [], "open": [],
     }
@@ -93,13 +93,13 @@ def _waiting_flags(r):
 def test_my_own_later_reply_suppresses_the_waiting_flag():
     """THE REGRESSION. Red at base: base emits WAITING over a ticket already answered.
 
-    The exact live shape — Ellie commented 2 days ago, I replied 11 hours ago. Nobody is
+    The exact live shape — the reporter commented 2 days ago, I replied 11 hours ago. Nobody is
     waiting on a first response, so the report must not send the reader to write one.
     """
     flags = _waiting_flags(_rec(comment_days_ago=2, reply_days_ago=0.46))
     assert flags == [], (
         "a ticket answered AFTER the colleague's comment was still reported as unanswered "
-        f"— the live 868kuam02 false positive: {flags}")
+        f"— the live 868gz0hhh false positive: {flags}")
 
 
 def test_a_reply_older_than_the_question_does_not_suppress():
@@ -225,7 +225,7 @@ def test_build_record_carries_my_latest_reply():
     from this dict silently reverted the keep-open veto.
     """
     r = recent_comments.build_record(
-        "868kuam02", "name", {}, {"user": {"username": "Ellie King"}, "date": "1755900000000"},
+        "868gz0hhh", "name", {}, {"user": {"username": "Robin Example"}, "date": "1755900000000"},
         "some text", "2026-08-22 01:04")
     assert r.get("my_latest_reply") == "2026-08-22 01:04", \
         f"build_record dropped my_latest_reply, so the fix cannot reach the flag: {r}"
@@ -248,7 +248,7 @@ def test_build_record_EMITS_the_key_for_a_genuine_absence_of_replies():
     reason and prove nothing about the null direction. Only this assertion isolates it.
     """
     r = recent_comments.build_record(
-        "868kuam02", "name", {}, {"user": {"username": "Ellie King"}, "date": "1755900000000"},
+        "868gz0hhh", "name", {}, {"user": {"username": "Robin Example"}, "date": "1755900000000"},
         "some text", None)
     assert "my_latest_reply" in r, (
         "a genuine 'no reply from me' lost the key, so the consumer will announce that the "
@@ -270,7 +270,7 @@ def test_collect_computes_the_reply_over_the_UNFILTERED_comment_list():
 
     def fake_comments(_tid):
         return [
-            {"user": {"id": "9", "username": "Ellie King"},
+            {"user": {"id": "9", "username": "Robin Example"},
              "date": "1755800000000", "comment": [{"text": "a question"}]},
             {"user": {"id": "7", "username": "me"},
              "date": "1755900000000", "comment": [{"text": "my answer"}]},
@@ -280,7 +280,7 @@ def test_collect_computes_the_reply_over_the_UNFILTERED_comment_list():
             recent_comments.get_comments)
     try:
         recent_comments.get_my_user_id = lambda: "7"
-        recent_comments.get_my_tasks = lambda: [{"id": "868kuam02", "name": "t"}]
+        recent_comments.get_my_tasks = lambda: [{"id": "868gz0hhh", "name": "t"}]
         recent_comments.get_comments = fake_comments
         buf = io.StringIO()
         real_stdout, sys.stdout = sys.stdout, buf
@@ -294,7 +294,7 @@ def test_collect_computes_the_reply_over_the_UNFILTERED_comment_list():
          recent_comments.get_comments) = orig
 
     assert len(calls) == 1, f"expected only the colleague's comment to survive: {calls}"
-    assert calls[0]["author"] == "Ellie King"
+    assert calls[0]["author"] == "Robin Example"
     assert calls[0]["my_latest_reply"] == recent_comments.format_date("1755900000000"), (
         "_collect did not report my reply — the reply must be computed over the FULL "
         f"comment list, before mine are discarded: {calls[0]}")
@@ -311,14 +311,14 @@ def test_a_failed_user_lookup_omits_the_key_instead_of_claiming_no_reply():
     property this seam exists to protect, defeated on the exact failure mode that produces it.
     """
     def fake_comments(_tid):
-        return [{"user": {"id": "9", "username": "Ellie King"},
+        return [{"user": {"id": "9", "username": "Robin Example"},
                  "date": "1755800000000", "comment": [{"text": "a question"}]}]
 
     orig = (recent_comments.get_my_user_id, recent_comments.get_my_tasks,
             recent_comments.get_comments)
     try:
         recent_comments.get_my_user_id = lambda: None          # the failure under test
-        recent_comments.get_my_tasks = lambda: [{"id": "868kuam02", "name": "t"}]
+        recent_comments.get_my_tasks = lambda: [{"id": "868gz0hhh", "name": "t"}]
         recent_comments.get_comments = fake_comments
         buf, err = io.StringIO(), io.StringIO()
         real_out, real_err = sys.stdout, sys.stderr
@@ -342,7 +342,7 @@ def test_a_failed_user_lookup_omits_the_key_instead_of_claiming_no_reply():
     # And the consumer must actually take the announce branch on that record.
     nc = check_addressed.build_newest_comment(rows[0])
     r = _rec()
-    r["newest_comment"] = dict(nc, date=_at(2), author="Ellie King")
+    r["newest_comment"] = dict(nc, date=_at(2), author="Robin Example")
     flags = _waiting_flags(r)
     assert flags and "not reported" in " ".join(flags).lower(), (
         f"the absent key did not reach the announce branch end-to-end: {flags}")

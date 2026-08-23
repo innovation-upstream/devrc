@@ -15,22 +15,22 @@ spec.loader.exec_module(check_completion)
 
 
 def test_extract_text_windows_exact_match():
-    text = "Task 868ktvqf9 was fixed. PR #123 merged for 868ktvqf9. Later 868ktvqf9 was closed."
-    windows = check_completion.extract_text_windows(text, "868ktvqf9", window_size=50)
+    text = "Task 868gy0ddd was fixed. PR #123 merged for 868gy0ddd. Later 868gy0ddd was closed."
+    windows = check_completion.extract_text_windows(text, "868gy0ddd", window_size=50)
     assert len(windows) == 3, f"Expected 3 windows, got {len(windows)}"
     for window, dist, offset in windows:
-        assert window[offset:offset + 9] == "868ktvqf9"
+        assert window[offset:offset + 9] == "868gy0ddd"
 
 
 def test_extract_text_windows_no_match():
     text = "No task ID here."
-    windows = check_completion.extract_text_windows(text, "868ktvqf9", window_size=50)
+    windows = check_completion.extract_text_windows(text, "868gy0ddd", window_size=50)
     assert len(windows) == 0
 
 
 def test_extract_text_windows_partial_match():
-    text = "Task 868ktvqf9 done. Also 868ktv referenced."
-    windows = check_completion.extract_text_windows(text, "868ktvqf9", window_size=100)
+    text = "Task 868gy0ddd done. Also 868gy0 referenced."
+    windows = check_completion.extract_text_windows(text, "868gy0ddd", window_size=100)
     # Should find exact match and partial match
     assert len(windows) >= 1
 
@@ -40,7 +40,7 @@ def test_extract_text_windows_partial_match():
 
 def test_extract_signals_from_windows():
     windows = [
-        ("Task 868ktvqf9 fixed. PR #123 merged.", 0, 5),
+        ("Task 868gy0ddd fixed. PR #123 merged.", 0, 5),
         ("Different task. Still open.", 100, 0),
     ]
     completion = check_completion.extract_signals_from_windows(windows, check_completion.COMPLETION_PATTERNS)
@@ -64,7 +64,7 @@ def test_check_task_status_likely_addressed():
         # Create mock session with completion signals near task ID
         mock_data = [
             {"type": "assistant", "message": {"content": [
-                {"type": "text", "text": "Working on 868ktvqf9. PR #123 merged for this task. Verified on main."}
+                {"type": "text", "text": "Working on 868gy0ddd. PR #123 merged for this task. Verified on main."}
             ]}}
         ]
         with open(session_file, "w") as f:
@@ -76,7 +76,7 @@ def test_check_task_status_likely_addressed():
         check_completion.CLAUDE_DIR = Path(tmpdir) / ".claude" / "projects"
         
         try:
-            result = check_completion.check_task("868ktvqf9", session_ids=[session_id])
+            result = check_completion.check_task("868gy0ddd", session_ids=[session_id])
             assert result["status"] == "likely_addressed", f"Expected likely_addressed, got {result['status']}"
             assert len(result["completion"]) > 0, "Should find completion signals"
         finally:
@@ -113,8 +113,8 @@ def test_proximity_scoring():
     test_production_windows_are_all_distance_zero in test_status_and_tiers.py.
     """
     windows = [
-        ("868ktvqf9 fixed. PR #123 merged.", 0, 0),  # Very close
-        ("868ktvqf9 elsewhere. PR #456 merged.", 500, 0),  # Far away
+        ("868gy0ddd fixed. PR #123 merged.", 0, 0),  # Very close
+        ("868gy0ddd elsewhere. PR #456 merged.", 500, 0),  # Far away
     ]
     completion = check_completion.extract_signals_from_windows(windows, check_completion.COMPLETION_PATTERNS)
     if len(completion) >= 2:
@@ -123,13 +123,13 @@ def test_proximity_scoring():
 
 
 def test_empty_text():
-    windows = check_completion.extract_text_windows("", "868ktvqf9")
+    windows = check_completion.extract_text_windows("", "868gy0ddd")
     assert len(windows) == 0
 
 
 def test_special_characters_in_task_id():
-    text = "Task 868kt-vqf9 with dash. And 868kt_vqf9 with underscore."
-    windows = check_completion.extract_text_windows(text, "868kt-vqf9", window_size=50)
+    text = "Task 868gy-0ddd with dash. And 868gy_0ddd with underscore."
+    windows = check_completion.extract_text_windows(text, "868gy-0ddd", window_size=50)
     assert len(windows) >= 1
 
 
