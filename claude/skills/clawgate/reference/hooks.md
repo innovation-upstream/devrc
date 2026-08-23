@@ -142,5 +142,12 @@ forward-auth edge on the public path, and the LAN is treated as trusted-open. Th
 therefore about BLAST RADIUS on a trusted LAN, not a missing gate. Notification fatigue is
 therefore not a comfort problem — it is the thing that arms that lever and kills every gate
 at once, silently. RULES.md's "a permanently-red gate trains everyone to click through" has
-this mirror image: **a too-noisy gate trains you to disable it globally.** The tree's "an
-ANSWER buys the whole run" clause is that budget; keep it.
+this mirror image: **a too-noisy gate trains you to disable it globally.**
+
+⚠ **The tree does NOT hand you this budget — do not cite it as if it did.** Its "a Fork ANSWER
+buys the whole run" clause is scoped to Forks, and a Fork never reaches this hook (table above).
+The only branch that does is Outward-facing/irreversible, which the tree governs with "an
+APPROVAL covers only the step it was given for" — i.e. **per-step by design**. So the
+one-ask-per-task budget is THIS file's, resting on the auto-approve-all blast radius above, and
+it has to be argued here rather than borrowed. Batch what can be batched; never let one run emit
+a stream of cards.

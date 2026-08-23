@@ -288,11 +288,11 @@ ARCHIVE_MD = REPO_ROOT / "claude" / "RULES-ARCHIVE.md"
 # 2026-08-22: 39,200 -> 40,300 (+1,100, in TWO steps -- see the bump note
 # below for why the second was forced). The rule that would not fit is the
 # proactivity gate -- "Default to PROCEEDING -- and never ask for what you can
-# measure yourself", a four-branch trigger tree in Push Back Before Acting,
-# 1,336 B. That is the THIRD-largest bullet in the file -- "Validate the
-# INSTRUMENT" (2,183 B) and "Mutation-test a guard" (1,985 B) are bigger, and
-# an earlier draft of this entry called it the largest, which line 84 of this
-# same module already contradicted. Recompute; do not restate. It is over the
+# measure yourself", a four-branch trigger tree in Push Back Before Acting.
+# It is the THIRD-largest bullet in the file, behind "Validate the INSTRUMENT"
+# and "Mutation-test a guard"; an earlier draft called it the largest, which
+# the 2026-08-11 entry above already contradicted. Its byte size is NOT stated
+# here -- see the note at the bottom of this entry for why. It is over the
 # ~900 B the MIN_HEADROOM_BYTES comment calls a large rule, and that is
 # deliberate: it is one decision tree with four branches, and splitting it
 # into four bullets costs MORE because each would restate the frame ("stop
@@ -306,12 +306,12 @@ ARCHIVE_MD = REPO_ROOT / "claude" / "RULES-ARCHIVE.md"
 # concrete blast radius, "your call to proceed", mass rollouts and prod
 # changes) and "User-facing micro-decisions" (its trigger list survives
 # verbatim as the Fork branch's parenthetical, and "don't ship-then-rework"
-# with it). That is 487 B of bullet text absorbed -- 489 B counting their
-# newlines, which is the convention the net is computed in -- so the NET cost
-# of the rule is 848 B, and that figure equals the real `git` delta on the
-# file. Mind the convention on BOTH sides: the bullet is 1,336 B of text and
-# 1,337 B with its newline, so 1,337 - 489 = 848; 1,336 - 489 = 847 is the
-# text-only pair. An earlier draft wrote "488", which is neither.
+# with it). The two deleted bullets are fixed history and can be stated: 295 B
+# + 192 B = 487 B of text, 489 B counting their newlines. The NET cost is not
+# stated, because it is a function of a bullet that kept changing -- and note
+# the convention trap that produced two wrong numbers here already: a text-only
+# bullet minus a newline-counted eviction corresponds to NOTHING. Subtract
+# like from like, or just read `git diff --stat` against the merge base.
 #
 # 🔴 A COLD READ CAUGHT ONE SCOPE LOSS; A BLIND AUDIT THEN CAUGHT THREE MORE.
 # That ratio is the reusable part -- the cold read is necessary and was not
@@ -377,14 +377,23 @@ ARCHIVE_MD = REPO_ROOT / "claude" / "RULES-ARCHIVE.md"
 # bullet is not merely tight, it cannot absorb its OWN review round. Size the
 # margin to survive the audit, not to clear the floor.
 #
-# +1,100 leaves 256 B. That is still under one bullet and the next real rule
-# still pays ceiling; when it does, the answer is the consolidation this entry
-# demonstrated, applied to the Verification Honesty cluster -- the largest
-# section in the file and the one with the most sibling bullets sharing a
-# frame -- not another bump. The formula in the MIN_HEADROOM_BYTES-sizing
-# paragraph above would give ~43,000 at the current size and make the gate
-# decorative -- recompute it as size + 3,900 rather than reusing that figure,
-# which two drafts of this entry carried forward stale.
+# 🔴 THE REMAINING SLACK IS DELIBERATELY NOT WRITTEN DOWN, AND THAT IS THIS
+# ENTRY'S LAST FINDING. Three consecutive rounds stated it and three
+# consecutive rounds invalidated it -- 186 -> 56, then 256 -> 177 -- each time
+# by the very edit that wrote the figure, in the module whose own docstring
+# says a second hand-maintained copy of a number "is exactly how the drift
+# regrows". A derived measurement does not belong in prose that is edited in
+# the same commit as the thing it measures. `test_rules_md_keeps_working_
+# headroom` already PRINTS current / ceiling / free / budget / RECLAIM on
+# failure; that is the authority. Same for the sizing formula: it is
+# size + 3,900, and two drafts carried a stale absolute forward rather than
+# recomputing it.
+#
+# What IS durable: the slack after +1,100 is still under one bullet, so the
+# next real rule pays ceiling; when it does, the answer is the consolidation
+# this entry demonstrated, applied to the Verification Honesty cluster -- the
+# largest section in the file and the one with the most sibling bullets
+# sharing a frame -- not another bump.
 MAX_BYTES = 40_300
 
 # Required working margin below the ceiling.
