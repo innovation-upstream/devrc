@@ -85,7 +85,50 @@ def _rec(tid="868gz0hhh", days=2, reply_days=None, status="to do", date_str=None
     return r
 
 
+def _armed(scanned=True):
+    """One record arming EVERY rule in `SCAN_ONLY_RULES` at once.
+
+    THREE records, not one, and the split is forced rather than stylistic: "open signals
+    remain" needs a DONE ClickUp status, while both "transcripts read as done" and the
+    waiting flag need an OPEN one, so no single record can arm all four. They are returned
+    together and fed to ONE `disagreements` call, which is what the ledger diff requires —
+    per-rule fixtures would let one silently stop arming without the set changing size.
+
+    ⚠️ The assertion that this fixture arms everything is IN the test, not here: a fixture
+    that quietly stopped arming a rule would otherwise make the whole guard vacuous, and it
+    already caught itself once (the waiting flag, missing on the first attempt).
+    """
+    their = NOW - timedelta(days=2)
+    nc = {"date": _fmt(their), "date_ms": _ms(their), "author": "Robin Example",
+          "snippet": "a question", "text": "a question", "my_latest_reply": None}
+    cited = [{"signal": "PR merged", "snippet": "shipped in #4242",
+              "pr_refs": [{"ref": "someorg/somerepo#4242", "state": "open"}]}]
+    done = {"task_id": "868gy0ddd", "status": "open", "clickup_status": "closed",
+            "clickup_priority": "high", "newest_comment": nc,
+            "completion": cited, "open": []}
+    still_open = {"task_id": "868gy0eee", "status": "likely_addressed",
+                  "clickup_status": "to do", "clickup_priority": "high",
+                  "newest_comment": nc, "completion": [], "open": []}
+    waiting = {"task_id": "868gy0fff", "status": "no_mentions_found",
+               "clickup_status": "to do", "clickup_priority": "high",
+               "newest_comment": nc, "completion": [], "open": []}
+    recs = (done, still_open, waiting)
+    if scanned:
+        done["mentions_found"] = 0
+        still_open["mentions_found"] = 3
+        waiting["mentions_found"] = 0
+    else:
+        # Exactly what the scan-less builder produces: no mention count, no verdict, and no
+        # evidence lists for the cited-PR loop to walk.
+        for r in recs:
+            r["status"] = "not_scanned"
+            r["completion"] = []
+    return recs
+
+
 def _flags(*recs):
+    if recs and isinstance(recs[0], tuple):
+        recs = recs[0]
     return check_addressed.disagreements(list(recs), now=NOW)
 
 
@@ -117,6 +160,87 @@ def test_a_scanless_run_ANNOUNCES_the_two_rules_it_could_not_run():
     assert "waiting" in joined and "open signals remain" in joined, (
         "the announcement does not NAME the two rules that could not fire, so a reader cannot "
         f"tell which coverage is missing: {out}")
+
+
+def test_the_scanless_ledger_matches_what_actually_goes_quiet():
+    """🔴 THE RELATIONSHIP GUARD, and the reason the first announcement was wrong.
+
+    It named TWO rules. FOUR go quiet in the scan-less default — the two gated on a SEARCHED
+    zero, plus "transcripts read as done" (whose `likely_addressed` status a scan-less record
+    can never hold) and the cited-PR loop (whose `completion`/`open` lists are empty). Naming
+    a SUBSET is worse than naming none: it implies the unnamed ones ran, which is the same
+    "an empty block reads as checked" defect the announcement exists to kill.
+
+    So this does not check the WORDS. It arms every rule on one record, runs `disagreements`
+    in both modes, and diffs. Whatever falls out of the scanned run must be exactly the
+    ledger — failing when a fifth transcript-dependent rule is ADDED and when one is REMOVED,
+    because a ledger asserted in one direction rots silently in the other.
+    """
+    scanned = _armed(scanned=True)
+    quiet = _armed(scanned=False)
+    before = {tail for _n, tail in check_addressed.SCAN_ONLY_RULES
+              if any(tail in f for f in _flags(scanned))}
+    assert before == {t for _n, t in check_addressed.SCAN_ONLY_RULES}, (
+        "the fixture did not arm every ledger rule, so this test cannot see one going quiet "
+        f"— it proves nothing until it does. Armed: {sorted(before)}")
+
+    after = {tail for _n, tail in check_addressed.SCAN_ONLY_RULES
+             if any(tail in f for f in _flags(quiet))}
+    assert after == set(), \
+        f"a ledger rule still fired on a record with no transcript evidence: {sorted(after)}"
+
+    named = " ".join(f for f in _flags(quiet) if f.startswith(check_addressed.SCANLESS_LEAD))
+    for name, _tail in check_addressed.SCAN_ONLY_RULES:
+        assert name in named, \
+            f"rule {name!r} goes quiet in the default run and the announcement does not name it"
+
+
+def test_the_announcement_never_contains_a_flags_own_tail():
+    """🔴 INSTRUMENT SAFETY, made unexpressible rather than remembered.
+
+    The announcement talks ABOUT these flags. If a rule's announcement NAME embedded that
+    rule's unique TAIL, then `"<tail>" in output` — the obvious check, and the one three
+    tests above use — would be TRUE in a run where the flag never fired. Upstream hit exactly
+    this and it cost a false failure; it could as easily have cost a false pass.
+    """
+    for name, tail in check_addressed.SCAN_ONLY_RULES:
+        assert tail not in name, (
+            f"the announcement name {name!r} contains its own flag tail {tail!r}, so every "
+            "substring check for that flag is now ambiguous")
+
+
+def test_the_run_level_announcement_is_not_counted_as_a_flag_about_ONE_ticket():
+    """🔴 The `[r]` scoping fix, re-entered from the other end of `disagreements`.
+
+    The note's closing sentence is computed by asking `disagreements([r])` what else names
+    THIS ticket. The scan-less announcement is a sentence about the RUN, appended to whatever
+    list the function is handed — so counted, it makes the note say "'Needs a decision' above
+    ALSO carries a line about this ticket" when the only line there is about the invocation.
+
+    ⚠️ REACHABILITY WAS MEASURED, not assumed, and the first reading was wrong. `main()`
+    cannot build this record (its scan-less path omits `mentions_found`, so the verdict can
+    never be ANSWERED) — which nearly got the guard deleted as unreachable. But a record that
+    is `not_scanned` AND carries a searched zero — a stale producer, a partial write, the
+    exact shape the announcement's own comment names — reaches ANSWERED and leaks the line.
+    """
+    their = NOW - timedelta(days=2)
+    mine = NOW - timedelta(hours=6)
+    r = {"task_id": "868gz0hhh", "status": "not_scanned", "mentions_found": 0,
+         "clickup_status": "to do", "clickup_priority": "high",
+         "completion": [], "open": [],
+         "newest_comment": {"date": _fmt(their), "date_ms": _ms(their),
+                            "author": "Robin Example", "snippet": "q", "text": "q",
+                            "my_latest_reply": _fmt(mine), "my_latest_reply_ms": _ms(mine)}}
+
+    # Positive control on the fixture: it must actually reach the note, or this proves nothing.
+    notes = _notes(r)
+    assert len(notes) == 1, f"the fixture never reached the suppression note: {notes}"
+    assert any(f.startswith(check_addressed.SCANLESS_LEAD) for f in _flags(r)), \
+        "the fixture does not produce the run-level announcement, so nothing could leak"
+
+    assert "no other flag names this ticket" in notes[0].lower(), (
+        "the run-level scan-less announcement was counted as a per-ticket flag, so the note "
+        f"claims another block names this ticket when none does: {notes[0]}")
 
 
 def test_the_announcement_is_ONE_line_per_run_not_one_per_ticket():
@@ -231,6 +355,141 @@ def test_main_announces_in_the_DEFAULT_mode_and_stops_once_the_scan_runs():
         f"a scanned run rendered as if it had skipped the scan:\n{scanned[-900:]}"
     assert "no completion verdict was formed" not in scanned and " addressed," in scanned, \
         f"a scanned run withheld its own summary tally:\n{scanned[-400:]}"
+
+
+def test_the_DEFAULT_run_still_carries_the_comment_derived_evidence():
+    """🔴 THE COVERAGE HOLE THAT LET THREE CALL-SITE MUTANTS LIVE.
+
+    Every other default-mode drive uses a NEUTRAL comment, so no comment- or status-derived
+    rule was exercised in default mode anywhere — and three one-token mutants on the
+    scan-less record's CONTENT (`newest_comment` -> `{}`, `meta` -> `{}`, `clickup_status`
+    -> `None`) survived a fully green suite. The first silently deletes the RESOLVED-comment-
+    on-an-open-ticket flag, which this skill's docs call the highest-value line in the report,
+    on what is now the DEFAULT path.
+
+    T4-T9 cover whether the scan-less BRANCH runs and what its count fields say. This covers
+    what the record actually CARRIES, end to end, on stdout — the ClickUp evidence is the
+    only evidence the default mode has, so a record that drops it has nothing left.
+    """
+    now = datetime.now(timezone.utc)
+    theirs = now - timedelta(days=1)
+    comments = [{"task_id": "868qw0e2e", "task_name": "t", "task_status": "to do",
+                 "task_priority": "urgent", "date": theirs.strftime(FMT),
+                 "author": "Robin Example",
+                 "snippet": "this is fixed and shipped, resolved on our side",
+                 "text": "this is fixed and shipped, resolved on our side",
+                 "date_ms": int(theirs.timestamp() * 1000), "my_latest_reply": None}]
+
+    def fake(name, *a):
+        if name == "recent-comments.py":
+            return json.dumps(comments), 0
+        raise AssertionError("a scan-less run must not call " + name)
+
+    o_run, o_argv, buf, o_out = check_addressed.run_script, sys.argv, io.StringIO(), sys.stdout
+    try:
+        check_addressed.run_script = fake
+        sys.argv = ["check-addressed.py"]
+        sys.stdout = buf
+        check_addressed.main()
+    finally:
+        sys.stdout = o_out
+        check_addressed.run_script, sys.argv = o_run, o_argv
+    out = buf.getvalue()
+
+    assert "reads as RESOLVED but the ticket is still" in out, (
+        "the DEFAULT run lost the resolved-comment-on-an-open-ticket flag — the scan-less "
+        f"record is not carrying its ClickUp evidence:\n{out[-900:]}")
+    assert "868qw0e2e" in out and "to do" in out, \
+        f"the scan-less record dropped the ticket's own status:\n{out[-900:]}"
+    assert "urgent" in out, f"the scan-less record dropped the priority:\n{out[-900:]}"
+    assert "resolved on our side" in out, \
+        f"the scan-less record dropped the newest comment itself:\n{out[-900:]}"
+
+
+def test_a_scanless_json_run_omits_UNSEARCHED_session_counts_and_declares_the_mode():
+    """The absent-vs-zero discipline applied to `mentions_found`' SIBLINGS.
+
+    `sessions_found: 0` / `sessions_by_task: {}` / `sessions_searched: 0` are unsearched
+    zeros — the exact claim this path refuses to make — and a consumer was left inferring the
+    mode from a spelled sentinel. `transcripts` is now stated outright.
+    """
+    comments = [{"task_id": "868qw0e2e", "task_name": "t", "task_status": "to do",
+                 "task_priority": "high", "date": "2026-08-21 09:00",
+                 "author": "Robin Example", "snippet": "q", "text": "q"}]
+
+    def fake(name, *a):
+        if name == "recent-comments.py":
+            return json.dumps(comments), 0
+        raise AssertionError(name)
+
+    def drive(*argv):
+        o_run, o_argv, buf, o_out = check_addressed.run_script, sys.argv, io.StringIO(), sys.stdout
+        try:
+            check_addressed.run_script = fake
+            sys.argv = ["check-addressed.py", "--json", *argv]
+            sys.stdout = buf
+            check_addressed.main()
+        finally:
+            sys.stdout = o_out
+            check_addressed.run_script, sys.argv = o_run, o_argv
+        return json.loads(buf.getvalue())
+
+    p = drive()
+    assert p["transcripts"] is False, \
+        "a --json consumer cannot tell the mode without parsing a spelled status sentinel"
+    assert "sessions_found" not in p and "sessions_by_task" not in p, (
+        "an UNSEARCHED zero was emitted as a session count — the claim this path exists to "
+        f"refuse: {{k: p[k] for k in ('sessions_found', 'sessions_by_task') if k in p}}")
+    assert "sessions_searched" not in p["task_status"][0], \
+        f"the record emitted an unsearched session count: {p['task_status'][0]}"
+    assert "mentions_found" not in p["task_status"][0], \
+        "the mention count regressed to a reported zero"
+
+
+def test_flags_that_only_feed_the_scan_WARN_when_the_scan_is_off():
+    """`parse_args`' own rule, applied one level up: a silently-ignored flag is a run that
+    looks like it honoured your request and did not. This file already shipped that bug once
+    with `--include-self-runs`, which was parsed by nothing and forwarded nowhere.
+    """
+    comments = [{"task_id": "868qw0e2e", "task_name": "t", "task_status": "to do",
+                 "task_priority": "high", "date": "2026-08-21 09:00",
+                 "author": "Robin Example", "snippet": "q", "text": "q"}]
+
+    def fake(name, *a):
+        if name == "recent-comments.py":
+            return json.dumps(comments), 0
+        if name == "search-sessions.py":
+            return json.dumps({"sessions": [], "self_runs_skipped": 0,
+                               "self_runs_skipped_ids": []}), 0
+        return json.dumps([{"task_id": "868qw0e2e", "status": "no_mentions_found",
+                            "sessions_searched": 1, "mentions_found": 0,
+                            "completion": [], "open": []}]), 0
+
+    def drive(argv):
+        o_run, o_argv, o_out, o_err = (check_addressed.run_script, sys.argv,
+                                       sys.stdout, sys.stderr)
+        err = io.StringIO()
+        try:
+            check_addressed.run_script = fake
+            sys.argv = ["check-addressed.py", *argv]
+            sys.stdout, sys.stderr = io.StringIO(), err
+            check_addressed.main()
+        finally:
+            sys.stdout, sys.stderr = o_out, o_err
+            check_addressed.run_script, sys.argv = o_run, o_argv
+        return err.getvalue()
+
+    warned = drive(["--since", "2026-08-01", "--include-self-runs"])
+    assert "WARNING" in warned and "--since" in warned and "--include-self-runs" in warned, \
+        f"inert flags were accepted in silence: {warned!r}"
+
+    # Anti-widening controls in BOTH directions — a warning that always fires is noise, and
+    # one that fires when the flags DO work is a lie about the run.
+    assert drive([]) == "", \
+        "a bare default run warned about flags nobody passed"
+    with_scan = drive(["--transcripts", "--since", "2026-08-01", "--include-self-runs"])
+    assert "WARNING" not in with_scan, \
+        f"the flags were honoured and the run still called them ignored: {with_scan!r}"
 
 
 # ------------------------------------------------ 2. the three unpinned invariants

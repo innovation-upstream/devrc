@@ -1,8 +1,15 @@
 #!/usr/bin/env python3
-"""Orchestrate: recent comments → task IDs → sessions → completion check.
+"""Orchestrate: recent comments → task IDs → [sessions → completion check].
 
 Usage:
-    python3 check-addressed.py [--limit N] [--json] [--since YYYY-MM-DD] [--verbose] [--fast]
+    python3 check-addressed.py [--limit N] [--json] [--since YYYY-MM-DD] [--verbose]
+                               [--fast] [--transcripts] [--no-transcripts]
+
+🔴 THE TRANSCRIPT SCAN IS OPT-IN (2026-08-22). The DEFAULT reads ClickUp only — the ticket's
+status and its newest comment — and does NOT search session transcripts or form a completion
+verdict. `--transcripts` restores the full pipeline. The bracketed stages above are the ones
+that only run under it, and the flags that feed them (`--since`, `--include-self-runs`,
+`--no-resolve-prs`) are inert without it; the run says so on stderr rather than pretending.
 
 Default: top 3 most recent comments not from the current user.
 --fast: Only check the 10 most recently updated tasks (much faster for large backlogs).
@@ -332,6 +339,38 @@ def keep_open_signal(text):
 # premise: add a phrase to RESOLVED_COMMENT_RE whose words are not in CLOSURE_VOCAB_RE and
 # that test goes red, which is the signal to bring the filter back.
 
+
+# 🔴 EVERY RULE IN `disagreements` THAT NEEDS THE TRANSCRIPT SCAN — the LEDGER, and the
+# scan-less announcement is BUILT from it rather than restating it.
+#
+# The first version of that announcement named TWO rules. FOUR are structurally dead in the
+# scan-less default, and naming a subset is worse than naming none: it implies the unnamed
+# ones ran. That is the same "an empty block reads as checked" defect the announcement exists
+# to kill, one axis over — and it arrived INSIDE the fix for it.
+#
+# Each entry is (name for the announcement, the flag's own unique TAIL). The tail is what
+# `test_the_scanless_ledger_matches_what_actually_goes_quiet` diffs the two modes against, so
+# a fifth transcript-dependent rule fails the suite when it is ADDED, and an entry that stops
+# being scan-dependent fails when it is REMOVED. A ledger asserted in one direction only is a
+# ledger that silently rots in the other.
+#
+# 🔴 A NAME MUST NEVER CONTAIN ITS OWN TAIL. The announcement talks ABOUT these flags, so if a
+# name embedded its tail, `"<tail>" in output` would be true in a run where the flag never
+# fired — the instrument matching its own announcement. Upstream hit exactly that and it cost
+# a false failure; `test_the_announcement_never_contains_a_flags_own_tail` makes it
+# unexpressible rather than remembered.
+SCAN_ONLY_RULES = (
+    ("nobody is on it and someone is waiting", "is WAITING"),
+    ("ClickUp `<done>` but open signals remain", "verify before trusting the close"),
+    ("the transcripts read as done while ClickUp is still open", "close it or re-check"),
+    ("a PR the transcripts cited is still open", "the signal that quoted it reads as done"),
+)
+
+# The announcement's stable opening. A CONSTANT because two consumers need to recognise the
+# line: the test that reads it, and `suppressed_notes`, whose per-ticket `disagreements([r])`
+# query must not mistake this RUN-level sentence for a flag about its own ticket.
+SCANLESS_LEAD = ("transcripts were NOT scanned (this is the default; pass `--transcripts` "
+                 "to enable), so ")
 
 OPEN_STATUSES = {"to do", "open", "in progress", "backlog", "todo"}
 DONE_STATUSES = {"complete", "closed", "done", "resolved"}
@@ -700,7 +739,22 @@ def suppressed_notes(results, now=None):
         kind, line = _waiting_verdict(r, now)
         if kind != ANSWERED:
             continue
-        others = disagreements([r], now)
+        # 🔴 RUN-level lines are stripped: this query asks "does anything else in the report
+        # name THIS TICKET", and the scan-less announcement is a sentence about the RUN that
+        # `disagreements` appends whatever list it is handed. Counting it would make the note
+        # say "'Needs a decision' above ALSO carries a line about this ticket" when the only
+        # line there is about the invocation — the same false-scoping the `[r]` argument was
+        # introduced to fix, re-entering through the other end of the function.
+        #
+        # 🔴 REACHABLE, and measured rather than argued. `main()` alone cannot produce the
+        # state — an ANSWERED verdict needs `mentions_found == 0` and its scan-less builder
+        # omits the key — so the first version of this comment called the guard unreachable
+        # and nearly deleted it. A record that is `not_scanned` AND carries a searched zero
+        # reaches ANSWERED and DOES leak the announcement: verdict `answered`, one note, the
+        # run-level line counted as a flag about that ticket. That record is exactly the
+        # stale-producer / partial-write shape this file's own announcement comment warns
+        # about, and `suppressed_notes` is a public function with its own callers.
+        others = [f for f in disagreements([r], now) if not f.startswith(SCANLESS_LEAD)]
         if others:
             line += (" ⚠️  'Needs a decision' above ALSO carries a line about this ticket — "
                      "this note is only about the waiting check.")
@@ -889,12 +943,13 @@ def disagreements(results, now=None):
     # evidence needs the state (is there a searched zero?), while an announcement that
     # DESCRIBES the run needs the run's own declaration. Same two facts, opposite directions.
     if any(r.get("status") == "not_scanned" for r in results):
+        named = "; ".join(f"'{name}'" for name, _tail in SCAN_ONLY_RULES)
         out.append(
-            "transcripts were NOT scanned (this is the default; pass `--transcripts` to "
-            "enable), so TWO checks in this block DID NOT RUN for any ticket: 'nobody is on "
-            "it and someone is waiting', and 'ClickUp `<done>` but open signals remain'. "
-            "Both require a SEARCHED zero and an unsearched one is not the same fact, so "
-            "their silence here is not evidence of anything.")
+            f"{SCANLESS_LEAD}{len(SCAN_ONLY_RULES)} checks in this block DID NOT RUN for any "
+            f"ticket: {named}. Each needs evidence this run never gathered — a SEARCHED zero, "
+            f"a completion verdict, or the cited-PR resolution — and an unsearched zero is "
+            f"not the same fact as a searched one, so their silence here is not evidence of "
+            f"anything.")
     return out
 
 
@@ -970,6 +1025,30 @@ def build_newest_comment(meta):
     return nc
 
 
+def attach_clickup_meta(record, meta):
+    """Attach the ClickUp-side facts to a task record, and return it.
+
+    🔴 ONE WRITER, TWO CALL SITES — and it is a helper because it briefly was not. The
+    transcript opt-in added a SECOND, independent construction of this record (the scan-less
+    path), which duplicated these three assignments by hand. Nothing pinned that the two
+    agreed, and three one-token mutants on the copy — `newest_comment` -> `{}`, `meta` ->
+    `{}`, `clickup_status` -> `None` — SURVIVED a fully green suite. The first of those
+    silently removes the RESOLVED-comment-on-an-open-ticket flag, which this skill's own
+    docs call the highest-value line in the report, on the path that is now the DEFAULT.
+
+    That is the "one rule, one place" failure in its usual shape: the predicate was right at
+    both sites the day it was copied, and only one of them was ever exercised. Consolidated
+    so a future divergence is not expressible, rather than tested for.
+
+    `meta` is `{}` when no comment matched the task — `.get` throughout, so an absent ClickUp
+    fact lands as `None` (unknown) rather than raising.
+    """
+    record["clickup_status"] = meta.get("task_status")
+    record["clickup_priority"] = meta.get("task_priority")
+    record["newest_comment"] = build_newest_comment(meta)
+    return record
+
+
 def parse_args(args):
     """Parse the entry point's flags, rejecting anything it does not know.
 
@@ -1036,6 +1115,26 @@ def main():
     include_self_runs = opts["include_self_runs"]
     transcripts = opts["transcripts"]
 
+    # 🔴 A FLAG THAT DOES NOTHING MUST SAY SO. These four only ever reach the transcript
+    # stages — three are forwarded verbatim to `search-sessions.py` / `check-completion.py`,
+    # and `--verbose` only widens session and signal listings — so with the scan off they are
+    # inert. `parse_args`' own docstring is the rule being applied here: a silently-ignored
+    # flag is "a run that looks like it honoured your request and did not", and this file has
+    # already shipped that exact bug once with `--include-self-runs`.
+    #
+    # A WARNING, not `sys.exit(2)`: unlike an unknown argument these are real flags spelled
+    # correctly, and a habitual `--since` in a wrapper script should not become a hard
+    # failure. stderr is where the child scripts' own warnings already surface.
+    if not transcripts:
+        inert = [name for name, on in (("--since", since is not None),
+                                       ("--include-self-runs", include_self_runs),
+                                       ("--no-resolve-prs", not resolve_prs),
+                                       ("--verbose", verbose)) if on]
+        if inert:
+            print(f"WARNING: {', '.join(inert)} affect ONLY the transcript scan, which is off "
+                  f"by default — so this run ignored them. Add --transcripts to make them "
+                  f"take effect.", file=sys.stderr)
+
     # Step 1: Get recent comments
     recent_args = ["--limit", str(limit), "--json"]
     if fast:
@@ -1074,16 +1173,17 @@ def main():
             # flag fires on `mentions_found == 0` and `r.get(...) != 0` already sends an
             # absent key down the no-claim path — so a scan-less run cannot flag every open
             # ticket as abandoned. Pinned by a test; emitting 0 here would fire it on all.
+            #
+            # 🔴 `sessions_searched` is ABSENT for the same reason `mentions_found` is: zero
+            # sessions searched is an unsearched zero, and emitting it as a count is the
+            # exact claim this whole path exists to refuse. Only the scanned branch prints
+            # it, and every other reader uses `.get`.
             meta = next((c for c in comments if c["task_id"] == tid), {})
-            results.append({
+            results.append(attach_clickup_meta({
                 "task_id": tid,
                 "status": "not_scanned",
-                "sessions_searched": 0,
                 "completion": [], "open": [], "sessions": [],
-                "clickup_status": meta.get("task_status"),
-                "clickup_priority": meta.get("task_priority"),
-                "newest_comment": build_newest_comment(meta),
-            })
+            }, meta))
             continue
 
         search_args = ["--limit", "5", "--json"]
@@ -1130,20 +1230,28 @@ def main():
                 # authority the transcript scan cannot see, so it is reported beside
                 # every verdict rather than left in the comments block.
                 meta = next((c for c in comments if c["task_id"] == tid), {})
-                task_results[0]["clickup_status"] = meta.get("task_status")
-                task_results[0]["clickup_priority"] = meta.get("task_priority")
-                task_results[0]["newest_comment"] = build_newest_comment(meta)
+                attach_clickup_meta(task_results[0], meta)
                 task_results[0]["self_runs_skipped_search"] = search_skipped
                 results.append(task_results[0])
 
     # Step 5: Build report
+    #
+    # 🔴 `transcripts` is REPORTED, and the two session counts are OMITTED when it is false.
+    # A consumer was otherwise left inferring the mode from a spelled sentinel (`status ==
+    # "not_scanned"`) — the same spelled-guard shape the open-signals flag was fixed for —
+    # while `sessions_found: 0` and `sessions_by_task: {}` handed it two UNSEARCHED zeros
+    # dressed as searched counts. That is precisely the claim this whole path refuses to
+    # make, and applying the absent-vs-zero discipline to `mentions_found` while emitting its
+    # siblings as zeros was inconsistent in the direction that misleads.
     report = {
         "comments": comments,
-        "sessions_found": sum(len(v) for v in sessions_by_task.values()),
-        "sessions_by_task": {k: len(v) for k, v in sessions_by_task.items()},
+        "transcripts": transcripts,
         "excluded_self_session": self_session or None,
         "task_status": results,
     }
+    if transcripts:
+        report["sessions_found"] = sum(len(v) for v in sessions_by_task.values())
+        report["sessions_by_task"] = {k: len(v) for k, v in sessions_by_task.items()}
 
     if as_json:
         print(render_json(report))

@@ -1416,16 +1416,25 @@ saying that the waiting flag and *"ClickUp `<done>` but open signals remain"* co
 because a parallel upstream change made the transcript scan **opt-in** and its scan-less
 record omits `mentions_found` rather than reporting `0`.
 
-**That opt-in does not exist here.** Measured: `check-addressed.py` has no `--transcripts`
-flag (`parse_args` rejects it), `main()` always runs `search-sessions.py` and
-`check-completion.py`, and `check-completion.py` emits `mentions_found` on all three of its
-exit paths. No record here can carry a `not_scanned` status or omit the mention count, so the
-announcement would guard a state no input can reach — and an unreachable guard reads as
-protection while providing none. Not ported, together with the `"mentions_found" in r` gate
-its sibling puts on the open-signals flag (same premise), the SKILL.md correction about the
-default invocation (this tool's default DOES run the decision flags), and mutants N1–N5.
-Every one of those omissions is written down at the site that would carry it, with the
-condition for restoring it: **a `--transcripts` opt-in landing here.**
+~~**That opt-in does not exist here.**~~ 🔴 **SUPERSEDED 2026-08-23 — every clause below was
+reversed, and this paragraph is kept struck through rather than deleted because it is the
+paragraph someone reads to justify deleting the upstream copy.**
+
+The original measurement read: `check-addressed.py` has no `--transcripts` flag (`parse_args`
+rejects it), `main()` always runs `search-sessions.py` and `check-completion.py`, and
+`check-completion.py` emits `mentions_found` on all three of its exit paths — so no record
+here can carry a `not_scanned` status or omit the mention count, and the announcement would
+guard a state no input can reach. On that basis the announcement, the `"mentions_found" in r`
+gate, the SKILL.md default-invocation correction and mutants N1–N5 were all left unported,
+each recorded at the site that would carry it with one condition for restoring it: **a
+`--transcripts` opt-in landing here.**
+
+**That opt-in landed** (the round below). `--transcripts` exists and defaults to OFF, `main()`
+skips both subscripts in the default mode, and its scan-less record carries `status:
+"not_scanned"` and no `mentions_found` at all. **All four deferrals are ported**, plus the
+ledger of every scan-dependent rule that the announcement is now built from. Nothing on this
+list is outstanding, and nothing in the upstream copy is unported — which is the whole
+precondition for deleting it.
 
 ## Round 7 — three follow-ups to D12
 
@@ -1473,7 +1482,11 @@ wherever it appeared.
 ## 🔴 The battery is in the repo — `tests/mutation_sweep.py`
 
 Mutants as DATA plus a runner (`--list`, an id filter, `--check` which fails on a stale
-`NOT APPLIED`). **59 mutants + a positive control + a NULL CONTROL, non-KILLED: 0.**
+`NOT APPLIED`). It was **59 mutants + a positive control + a NULL CONTROL, non-KILLED: 0** at
+this round; it has grown since. 🔴 **Count it, do not quote this number** — the same rule
+SKILL.md applies to the test total, and for the same reason: `--check` prints the live figure
+in one line, and a quoted count is stale the first time anyone extends the list, which the
+file's own header instructs them to do.
 
 🔴 **And the null control earned its place on the first run.** All 59 mutants reported KILLED,
 and every killer list opened with `test_the_scan_actually_walks_files_and_can_see_an_id`:
@@ -1497,7 +1510,8 @@ everywhere and inflate each row by the same 4:
 | pre-port scripts + **HEAD tests** | **178 passed, 31 failed** |
 | HEAD scripts + HEAD tests | **209 passed, 0 failed** |
 
-In-repo, with that gate included: **180 → 213 collected.** Corpus **10/21 pre-port → 21/21**.
+In-repo, with that gate included: **180 → 213 collected** *at that round* (see the round below
+for the current figure). Corpus **10/21 pre-port → 21/21**.
 
 ⚠️ Four of the five round-8 guards are among those 31 reds, and they are **not** regression
 coverage: they go red with `AttributeError` because `suppressed_notes` / `_age_days_from_ms`

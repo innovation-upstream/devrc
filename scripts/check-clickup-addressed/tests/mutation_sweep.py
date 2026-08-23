@@ -189,8 +189,12 @@ MUTANTS = [
      "the ms-based bound never answers"),
     ("M48", CA, "        if others:\n            line +=", "        if not others:\n            line +=",
      "invert the other-coverage branch"),
-    ("M49", CA, "        others = disagreements([r], now)", "        others = []",
-     "always claim the report is silent about the ticket"),
+    # ⚠️ M49 and M-SCOPE were re-anchored 2026-08-23: the run-level-announcement filter
+    # rewrote this line, and BOTH went `NOT APPLIED` — which `--check` caught and failed on,
+    # exactly as its docstring promises. M-SCOPE is round 8's headline mutant; a silent
+    # NOT APPLIED there would have read like every other green row.
+    ("M49", CA, "        others = [f for f in disagreements([r], now) if not f.startswith(SCANLESS_LEAD)]",
+     "        others = []", "always claim the report is silent about the ticket"),
     ("M50", CA, "                       [f\"🔴 {BOT_IDENTITY_CAVEAT}\"] + [f\"ℹ️  {n}\" for n in notes]))",
      "                       [f\"ℹ️  {n}\" for n in notes]))", "drop the caveat preamble"),
     ("M51", CA, "                       [f\"🔴 {BOT_IDENTITY_CAVEAT}\"] + [f\"ℹ️  {n}\" for n in notes]))",
@@ -211,7 +215,8 @@ MUTANTS = [
     # ---------- round 8: the invariants nothing pinned. M-SCOPE is the one a blind re-audit
     # found surviving a green sweep — it reverts round 7b's headline fix, and the guard
     # written for that fix could not see it because every fixture passed a single-record list.
-    ("M-SCOPE", CA, "        others = disagreements([r], now)", "        others = disagreements(results, now)",
+    ("M-SCOPE", CA, "if not f.startswith(SCANLESS_LEAD)]\n        if others:",
+     "if not f.startswith(SCANLESS_LEAD)]\n        others = disagreements(results, now)\n        if others:",
      "the other-coverage sentence stops being scoped to its own ticket"),
     ("N7", CA, "        seen = f\"{age:.0f}d ago\" if age is not None else f\"at {nc.get('date')!r} (unreadable)\"",
      "        seen = f\"{bound_age:.0f}d ago\" if bound_age is not None else f\"at {nc.get('date')!r} (unreadable)\"",
@@ -262,8 +267,8 @@ MUTANTS = [
      "CALL SITE: main() ignores the parsed flag and never scans"),
     ("T5", CA, "        if not transcripts:", "        if False:",
      "CALL SITE: main() always scans, whatever the flag said"),
-    ("T6", CA, "                \"sessions_searched\": 0,",
-     "                \"sessions_searched\": 0, \"mentions_found\": 0,",
+    ("T6", CA, "                \"status\": \"not_scanned\",\n                \"completion\": [], \"open\": [], \"sessions\": [],",
+     "                \"status\": \"not_scanned\", \"mentions_found\": 0,\n                \"completion\": [], \"open\": [], \"sessions\": [],",
      "the scan-less record emits an UNSEARCHED zero as a searched one"),
     ("T7", CA, "        if transcripts:\n            print(f\"{MARKER_LEGEND}\\n\")",
      "        if True:\n            print(f\"{MARKER_LEGEND}\\n\")",
@@ -273,6 +278,28 @@ MUTANTS = [
      "a tally of verdicts nobody computed — four zeroes that read as a finding"),
     ("T9", CA, "            if r[\"status\"] == \"not_scanned\":", "            if False:",
      "a scan-less record prints a searched-sessions/mentions count"),
+
+    # ---------- the scan-less record's CONTENT, and the announcement's LEDGER. Z1-Z3 are the
+    # three that survived a 220-green suite before `attach_clickup_meta` collapsed the two
+    # record writers into one: T4-T9 cover whether the branch runs and what its counts say,
+    # and nothing covered what the record CARRIES. Z1 alone deletes the highest-value line in
+    # the report on the default path. They stay in the list even though the duplicate writer
+    # is gone — a mutant that can no longer be expressed at two sites is still worth pinning
+    # at the one.
+    ("Z1", CA, "    record[\"newest_comment\"] = build_newest_comment(meta)",
+     "    record[\"newest_comment\"] = {}",
+     "the record carries no newest comment: the RESOLVED-on-open flag silently disappears"),
+    ("Z2", CA, "    record[\"clickup_status\"] = meta.get(\"task_status\")",
+     "    record[\"clickup_status\"] = None",
+     "the record carries no ClickUp status: every status-gated rule goes to 'unknown'"),
+    ("Z3", CA, "            }, meta))", "            }, {}))",
+     "CALL SITE: the scan-less builder is handed an empty meta"),
+    ("Z4", CA, "    named = \"; \".join(f\"'{name}'\" for name, _tail in SCAN_ONLY_RULES)",
+     "    named = \"; \".join(f\"'{name}'\" for name, _tail in SCAN_ONLY_RULES[:2])",
+     "the announcement names a SUBSET again — the defect the ledger replaced"),
+    ("Z5", CA, "        others = [f for f in disagreements([r], now) if not f.startswith(SCANLESS_LEAD)]",
+     "        others = disagreements([r], now)",
+     "the RUN-level announcement counts as a per-TICKET flag in the note"),
 
     # ---------- round 7: the retracted false-premise message in `_unresolved_state`. Round 5
     # replaced one vague failure with three precise ones; measured on live input the precise
