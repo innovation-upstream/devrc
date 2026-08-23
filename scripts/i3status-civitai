@@ -10,20 +10,42 @@ DISTINCT from it — a `civ` text label prefixes the count (`civ 317`) so civita
 prod can be told apart from the homelab alert count at a glance.
 
 CALM rendering (colour == "look at me"):
-  missing / stale / error / count<=0  -> empty, invisible block
-  count > 0                           -> `󰀪` alert glyph + `civ <count>`,
+  measured, count <= 0                -> empty, invisible block (hide-at-zero)
+  measured, count > 0                 -> `󰀪` alert glyph + `civ <count>`,
                                           coloured (Critical if any critical is
                                           firing, else the cache's state)
+  UNMEASURED, nothing recorded        -> `󰀪 civ ?`, VISIBLE (Warning) — CLIENT
+   (missing / corrupt / marker)          PROD could not be read, which is not a
+                                         healthy client prod
+  UNMEASURED, count still on disk     -> `󰀪 civ 146?`, keeping the colour the
+   (the poller stopped refreshing)       reading had — see `render`
 Click (wired in graphical.nix) opens the civitai Grafana.
+
+🔴 WHY AN UNREADABLE CACHE IS NOT A HEALTHY ONE, AND WHY THIS BLOCK CARES MOST.
+It rendered as one, measured 2026-08-14: a `stale` payload, an `error` marker, a
+missing file and a cache the poller had stopped refreshing ALL produced
+`{"text": "", "state": "Idle"}` — byte-identical to the measured all-clear. This
+is a CLIENT PROD cluster reached through its own kubeconfig and its own
+port-forward, i.e. the source most likely of the seven to fail on its own while
+everything else on the bar stays green, and the one whose silence is most
+expensive. "Red is CORRECT when real" is the standing rule for this pill; a
+blackout that renders as no-red-at-all is the same claim made without a
+measurement. And nothing here read the `ts` the poller stamps, so a cache nobody
+had rewritten for days rendered a confident, present-tense count.
 
 The leading glyph is the nf-md-alert triangle (rendered from the bar font),
 deliberately DISTINCT from the notifications-pill bell so a firing alert never
 reads as an unseen notification. Same glyph as the homelab alerts block; the
-`civ` label is what tells the two count blocks apart.
+`civ` label is what tells the two count blocks apart. Text grammar, shared with
+the rest of the bar: a TRAILING `?` is "this reading is not a current
+measurement".
 """
+import importlib.machinery
+import importlib.util
 import json
 import os
 import sys
+import time
 
 NAME = "civitai"
 # nf-md-alert 󰀪 (U+F002A) — a warning triangle, rendered in the bar's
@@ -34,6 +56,55 @@ ALERT_GLYPH = "\U000f002a"
 LABEL = "civ"
 _VALID_STATES = ("Idle", "Info", "Good", "Warning", "Critical")
 _EMPTY = {"text": "", "state": "Idle"}
+
+
+def _load_freshness():
+    """Load the co-located `bar_freshness.py` sibling by EXPLICIT PATH.
+
+    Extensionless block scripts cannot be a package, so this is the repo's
+    standard sibling-module shape (cf. `notif-center` loading `i3status-notifs`,
+    `bar-status-poll` loading `scripts/lib/`). `dont_write_bytecode` keeps a
+    `__pycache__` out of the operator's ~/.config/i3status-rust/scripts.
+    """
+    sys.dont_write_bytecode = True
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "bar_freshness.py")
+    loader = importlib.machinery.SourceFileLoader("_bar_freshness", path)
+    spec = importlib.util.spec_from_loader("_bar_freshness", loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+try:
+    fresh = _load_freshness()
+except Exception:
+    # 🔴 THE FAILURE IS DEFERRED, NEVER ANSWERED. This load used to run bare at
+    # module level and four documents claimed a block that could not load the
+    # sibling "falls through to its `?` pill". It did not: the block died at
+    # import — traceback, exit 1, EMPTY stdout — so the promised fallback was
+    # unreachable, which is a guard that reads as protection while providing
+    # none. Now `fresh` stays None, every use of it raises inside `render`, and
+    # `__main__` below turns that into the VISIBLE `?` pill.
+    # 🔴 None IS THE POINT: a `try` that degraded to a permissive stub
+    # (`unmeasured -> False`) would reinstate the whole defect with the suite
+    # green. None cannot be permissive, because it cannot answer at all. Pinned
+    # by `test_a_block_that_cannot_load_the_SIBLING_renders_the_VISIBLE_pill`,
+    # which runs each block with the sibling absent and a fresh QUIET cache.
+    fresh = None
+
+
+def unknown_pill(glyph: str = ALERT_GLYPH) -> dict:
+    """The VISIBLE "could not be read" pill: glyph, `civ`, then a bare `?`.
+
+    Carries the SAME `civ` label the measured pill does, so an operator seeing a
+    `?` knows which of the two alert pills lost its measurement — the homelab
+    one renders `󰀪 ?` with no label. Warning rather than Critical because
+    "cannot tell" is not a confirmed fire; it must never be the empty block,
+    which means "measured, and nothing is firing".
+    """
+    text = "%s %s ?" % (glyph, LABEL)
+    return {"text": text, "short_text": text, "state": "Warning"}
 
 
 def cache_path() -> str:
@@ -50,27 +121,15 @@ def load(path):
         return None
 
 
-def render(payload, glyph: str = ALERT_GLYPH, red_above: int = 0) -> dict:
-    """Pure: cache payload (or None) -> i3status-rust block dict.
+def _reading_pill(payload, count, glyph: str, red_above: int):
+    """The pill the payload's OWN count renders, or None if it counted nothing.
 
-    Hide-at-zero + fail-safe: None / malformed / stale / error / count<=0 all
-    map to the empty (invisible) block — never a crash. Visible text carries a
-    `civ ` label prefix so it reads distinctly from the homelab alerts block.
-
-    red_above: the standing-backlog baseline. count <= red_above shows the count
-    but NEUTRAL (no colour); red is reserved for the count climbing ABOVE the
-    known backlog. red_above=0 => colour whenever >0.
+    Shared by the measured path and the carry-forward path below, so the number
+    and the colour an outage carries cannot drift from the ones it would have
+    shown. `count` is passed in already read (and refused) by `render`.
     """
-    if not isinstance(payload, dict):
-        return dict(_EMPTY)
-    if payload.get("error") or payload.get("state") == "stale":
-        return dict(_EMPTY)
-    try:
-        count = int(payload.get("count", 0))
-    except (TypeError, ValueError):
-        return dict(_EMPTY)
-    if count <= 0:
-        return dict(_EMPTY)
+    if count is None or count <= 0:
+        return None
     if count <= red_above:
         state = "Idle"
     else:
@@ -79,6 +138,61 @@ def render(payload, glyph: str = ALERT_GLYPH, red_above: int = 0) -> dict:
             state = "Critical"
     text = "%s %s %d" % (glyph, LABEL, count)
     return {"text": text, "short_text": text, "state": state}
+
+
+def render(payload, glyph: str = ALERT_GLYPH, red_above: int = 0,
+           now=None) -> dict:
+    """Pure: cache payload (or None) -> i3status-rust block dict.
+
+    Four outcomes, and the first two are what this module gained:
+      * NOT MEASURED, with a count still on disk (the poller stopped refreshing)
+        -> that count, MARKED: `󰀪 civ 146?`, keeping the colour it had;
+      * NOT MEASURED, nothing recorded (None / malformed / stale / error / no or
+        old `ts` over a zero) -> the visible `󰀪 civ ?` pill, never the empty one;
+      * measured, count <= 0 -> the empty, invisible block (hide-at-zero);
+      * measured, count > 0  -> glyph, `civ`, the count, and a colour.
+
+    Visible text always carries the `civ ` label so it reads distinctly from the
+    homelab alerts block — including on the `?` pill, where knowing WHICH prod
+    cluster went unreadable is the whole content of the message.
+
+    🔴 A MEASUREMENT OUTAGE MUST NOT MAKE A KNOWN ALARM QUIETER, which is what
+    the first outcome exists for and what this block used to get wrong: a frozen
+    cache still holding `146` on a CLIENT PROD cluster rendered a bare
+    `󰀪 civ ?`. Alerts do not resolve because the poller died, the trailing `?`
+    already says the number is not a current measurement, and this is the one
+    pill whose standing rule is "red is CORRECT when real". Only a RECORDED
+    alarm is carried — a measured quiet board still hides, and a marker, which
+    writes `count: 0` over the last reading, still renders the bare `?`.
+    `bar_freshness.carry_forward` is the one definition of how a carried reading
+    renders, shared with every other block.
+
+    red_above: the standing-backlog baseline. count <= red_above shows the count
+    but NEUTRAL (no colour); red is reserved for the count climbing ABOVE the
+    known backlog. red_above=0 => colour whenever >0. 🔴 It applies to a MEASURED
+    count only — a backlog baseline is a statement about how many alerts are
+    boring, and says nothing about a reading that does not exist. So it can
+    still say a CARRIED count is boring (`carry_forward` floors that at
+    Warning), but it can never quieten the pill to Idle or hide it.
+
+    `now` is injected rather than read here so the freshness gate is testable
+    without sleeping; it defaults to the wall clock. Fail-safe throughout: it
+    never raises, whatever the file contains — a claim only a DIRECT call can
+    test, since `__main__` below prints a `?` pill for any exception.
+    """
+    now = time.time() if now is None else now
+    count = (fresh.int_or_none(payload.get("count", 0))
+             if isinstance(payload, dict) else None)
+    recorded = _reading_pill(payload, count, glyph, red_above)
+    if fresh.unmeasured(payload, now):
+        return fresh.carry_forward(recorded, unknown_pill(glyph))
+    if count is None:
+        # A count we refuse to read is not a count of zero. `int()` would coerce
+        # `"2"`, `2.5` and `True` into confident numbers nobody measured.
+        return unknown_pill(glyph)
+    if recorded is None:
+        return dict(_EMPTY)
+    return recorded
 
 
 def _red_above_arg() -> int:
@@ -102,5 +216,12 @@ if __name__ == "__main__":
     try:
         sys.exit(main())
     except Exception:
-        sys.stdout.write(json.dumps(_EMPTY) + "\n")
+        # 🔴 The last-resort fallback is the `?` pill, NOT the empty one: a block
+        # that crashed measured nothing, and that must not look like a healthy
+        # client prod. Built literally so it cannot depend on anything that just
+        # failed — including the sibling module the import above may not have
+        # found.
+        sys.stdout.write(
+            '{"text": "%s %s ?", "short_text": "%s %s ?", "state": "Warning"}\n'
+            % (ALERT_GLYPH, LABEL, ALERT_GLYPH, LABEL))
         sys.exit(0)

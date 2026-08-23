@@ -44,14 +44,23 @@ CONTRACT SUMMARY
     normalize_ref(raw)                -> str            (the shared predicate)
     split_kind(ref)                   -> (slug, kind|None)
     SubsystemEntry.from_mapping(m)    -> SubsystemEntry (raises MalformedEntryError)
-    build_index(mappings)             -> SubsystemIndex (raises MalformedEntryError)
+    build_index(mappings, *, on_malformed=RAISE)
+                                      -> SubsystemIndex (raises MalformedEntryError
+                                         under RAISE; collects into
+                                         `.malformed` under COLLECT)
     resolve_ref(ref, index, scope)    -> SubsystemEntry|None
                                         (raises UnknownScopeError, AmbiguousRefError)
     associate_paths(paths, index, scope, *, min_paths=DEFAULT_MIN_PATHS)
                                       -> Association
                                         (raises UnknownScopeError,
                                          InvalidPathError, ValueError)
-    load_index(root)                  -> SubsystemIndex (the thin disk loader)
+    entry_mapping(text, *, filename, scope)
+                                      -> dict  (ONE entry file -> the mapping the
+                                         loader would build; the shared step a
+                                         validator and the loader must not spell
+                                         twice)
+    load_index(root, *, on_malformed=RAISE)
+                                      -> SubsystemIndex (the thin disk loader)
 
 Every raise carries a distinct sentinel phrase so a caller — or a mutation test —
 can tell WHICH guard fired, not merely that something did:
@@ -75,17 +84,34 @@ from __future__ import annotations
 import re
 from collections.abc import Sequence as _AbcSequence
 from dataclasses import dataclass
+from datetime import date as _date
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
 __all__ = [
     "KINDS",
     "DEFAULT_MIN_PATHS",
+    "WHAT_HEADING",
+    "POINTERS_HEADING",
+    "NUANCE_HEADING",
     "ResolverError",
     "MalformedEntryError",
     "UnknownScopeError",
     "AmbiguousRefError",
     "InvalidPathError",
+    "EntryUnreadableError",
+    "MalformedEntry",
+    "ON_MALFORMED",
+    "ON_MALFORMED_RAISE",
+    "ON_MALFORMED_COLLECT",
+    "OPENNESS_OPEN",
+    "OPENNESS_RESOLVED",
+    "UNREACHABLE_MARKER",
+    "UnreachableMarker",
+    "JournalBullet",
+    "extract_sections",
+    "scan_headings",
+    "parse_journal_bullets",
     "SubsystemEntry",
     "SubsystemIndex",
     "Evidence",
@@ -100,6 +126,7 @@ __all__ = [
     "resolve_ref_tiered",
     "associate_paths",
     "parse_front_matter",
+    "entry_mapping",
     "load_index",
 ]
 
@@ -153,7 +180,21 @@ class ResolverError(Exception):
 
 
 class MalformedEntryError(ResolverError):
-    """An index entry cannot be interpreted. Sentinel: 'malformed index entry'."""
+    """An index entry cannot be interpreted. Sentinel: 'malformed index entry'.
+
+    `.why` is the REASON with the sentinel prefix stripped, and `.source` is the
+    entry it was raised about. Both are carried STRUCTURALLY rather than left to
+    be recovered by splitting `str(exc)` on `": "` — a degrading loader has to
+    print one row per bad entry, and a row assembled by re-parsing an error
+    message is a second parser for a format nothing pins. `str(exc)` is unchanged
+    and still leads with the sentinel, so every existing caller and every `in`
+    assertion over it keeps working.
+    """
+
+    def __init__(self, message: str, *, source: str | None = None, why: str | None = None) -> None:
+        self.source = source
+        self.why = message if why is None else why
+        super().__init__(message)
 
 
 class UnknownScopeError(ResolverError):
@@ -195,6 +236,82 @@ class AmbiguousRefError(ResolverError):
             f"in the {tier} tier ({', '.join(self.candidates)}). The resolver never picks — "
             f"disambiguate the ref or the index."
         )
+
+
+class EntryUnreadableError(ResolverError):
+    """An entry file cannot be read. Sentinel: 'index entry unreadable'.
+
+    🔴 It exists because the alternative is an unnamed `OSError` escaping from
+    inside `load_index`. The store is a plain directory of hand-curated files on
+    a machine that also runs an hourly autocommit: a file can be mid-rename, a
+    directory can be sitting where a `.md` is expected, a mode can be wrong. Any
+    of those would otherwise reach the caller as `IsADirectoryError` or
+    `PermissionError` with no indication that the SUBSYSTEM STORE was the thing
+    that failed.
+
+    🔴 IT LIVES HERE, IN THE MODULE BOTH READERS IMPORT, RATHER THAN IN EITHER OF
+    THEM. `subsystem_recall` raises it when a `/resume` read fails and
+    `subsystem_touch` raises it when a `/handoff` read fails — the SAME condition
+    on the SAME files. Two classes spelling one condition is how a caller ends up
+    catching the reader's and missing the writer's; the precedent is
+    `StoreMissingError`, which `subsystem_recall` imports from `subsystem_touch`
+    for exactly this reason rather than declaring a second one. It cannot live in
+    either of those two modules, because `subsystem_recall` already imports
+    `subsystem_touch` and the reverse edge would close a cycle.
+    """
+
+
+# --- Degrading: what a rejected entry looks like when it is not an exception ----
+#
+# 🔴 ONE BAD ENTRY USED TO COST THE WHOLE SCOPE. Measured on a synthetic store:
+# 2 good entries listed 2; 2 good + 1 malformed listed **0** and exited 3, so
+# `/resume` step 4, `--list`, `--ref` and `--search` all died together on one
+# wrapped `aliases:` line. `RAISE` is still the default — every existing caller
+# keeps its fail-closed contract and no test changes meaning — and `COLLECT` is
+# opt-in, per call site, because whether a rejection should abort is a POLICY of
+# the caller and not a property of the store.
+#
+# 🔴 COLLECT IS NOT "SKIP". A collected entry is carried on the index, counted,
+# and every reader that uses this mode is obliged to print it: silently serving a
+# short index would be a WORSE failure than the collapse it replaces, because a
+# missing entry is indistinguishable from an entry that was never written.
+ON_MALFORMED_RAISE = "raise"
+ON_MALFORMED_COLLECT = "collect"
+ON_MALFORMED: tuple[str, ...] = (ON_MALFORMED_RAISE, ON_MALFORMED_COLLECT)
+
+
+@dataclass(frozen=True)
+class MalformedEntry:
+    """One entry file that could not be interpreted, and WHY — as data, not a raise.
+
+    `scope` is the NORMALIZED owning scope, which for a disk load is the
+    directory name (the authority on scope; see `load_index`). It is what lets a
+    reader report this entry against the scope it belongs to and no other — a
+    malformed entry in `scope-b/` must not appear while recalling `scope-a/`, and
+    must not make `scope-a` look broken.
+    """
+
+    scope: str
+    filename: str
+    reason: str
+    """The `why` clause — the sentence after the sentinel, e.g. "`aliases:` must
+    be a list, not a bare string"."""
+
+    @property
+    def label(self) -> str:
+        """`<scope>/<filename>` — how every surface names this file."""
+        return f"{self.scope}/{self.filename}" if self.scope else self.filename
+
+    @property
+    def line(self) -> str:
+        """ONE row, carrying the sentinel phrase.
+
+        🔴 The sentinel is repeated PER ROW rather than hoisted into a block
+        header, because a row is what gets copied into a report, quoted in a
+        message, or grepped for — and a row that has left its header behind is a
+        row that no longer says what kind of problem it describes.
+        """
+        return f"malformed index entry `{self.label}`: {self.reason}"
 
 
 # --- The shared predicate ------------------------------------------------------
@@ -304,7 +421,9 @@ class SubsystemEntry:
         """
 
         def bad(why: str) -> MalformedEntryError:
-            return MalformedEntryError(f"malformed index entry {source!r}: {why}")
+            return MalformedEntryError(
+                f"malformed index entry {source!r}: {why}", source=source, why=why
+            )
 
         raw_service = mapping.get("service")
         if not isinstance(raw_service, str) or not raw_service.strip():
@@ -410,9 +529,40 @@ class SubsystemIndex:
 
     by_scope: Mapping[str, tuple[SubsystemEntry, ...]]
 
+    malformed: tuple[MalformedEntry, ...] = ()
+    """Entries that were REJECTED, when the index was built with `COLLECT`.
+
+    Always empty under the default `RAISE` — there the first rejection is the
+    whole answer. It is a field on the index rather than a second return value so
+    that "the entries" and "what could not become an entry" cannot be separated
+    by a caller that only unpacks the first thing: a reader holding a
+    `SubsystemIndex` is holding the bad news too, whether or not it asked.
+    """
+
     @property
     def scopes(self) -> tuple[str, ...]:
         return tuple(sorted(self.by_scope))
+
+    def malformed_in(self, scope: str) -> tuple[MalformedEntry, ...]:
+        """The rejected entries belonging to ONE scope, normalized like every ref.
+
+        No `UnknownScopeError`: this answers "what is broken here", and an
+        unknown scope has nothing broken in it. Raising would force every caller
+        to wrap a question it asks on every code path.
+        """
+        key = normalize_ref(scope)
+        return tuple(m for m in self.malformed if m.scope == key)
+
+    def malformed_outside(self, scopes: Iterable[str]) -> tuple[MalformedEntry, ...]:
+        """The rejected entries in EVERY OTHER scope — the store-wide defect count.
+
+        A reader is scope-scoped, so without this a broken entry in a scope
+        nobody happens to recall today is invisible until someone recalls it. The
+        surfaces print it as a COUNT with its scopes named, never as full rows:
+        loud enough to be actionable, cheap enough to sit on every output.
+        """
+        keys = {normalize_ref(s) for s in scopes}
+        return tuple(m for m in self.malformed if m.scope not in keys)
 
     def entries(self, scope: str) -> tuple[SubsystemEntry, ...]:
         key = normalize_ref(scope)
@@ -427,35 +577,111 @@ class SubsystemIndex:
         return sum(len(v) for v in self.by_scope.values())
 
 
+def _rejection(
+    mapping: Mapping[str, object], source: str, exc: MalformedEntryError
+) -> MalformedEntry:
+    """Turn one raise into one row. The scope comes from the MAPPING, deliberately.
+
+    On a disk load `scope` was set from the directory name before validation ran,
+    so it is known even for an entry too broken to construct — which is what lets
+    a rejected entry be reported against the scope it lives in instead of against
+    the store at large. An in-memory mapping with no usable scope yields `""`,
+    and `malformed_in` then matches no scope, so such a row surfaces only through
+    the store-wide count. Stated rather than left to be discovered.
+    """
+    raw_scope = mapping.get("scope")
+    if not isinstance(raw_scope, str) or not raw_scope.strip():
+        raw_scope = mapping.get("repo")
+    scope = normalize_ref(raw_scope) if isinstance(raw_scope, str) else ""
+    filename = mapping.get("filename")
+    return MalformedEntry(
+        scope=scope,
+        filename=filename if isinstance(filename, str) and filename else source,
+        reason=exc.why,
+    )
+
+
 def build_index(
     mappings: Iterable[Mapping[str, object]],
     *,
     extra_scopes: Iterable[str] = (),
+    on_malformed: str = ON_MALFORMED_RAISE,
 ) -> SubsystemIndex:
     """Validate and group entry mappings.
 
     `extra_scopes` registers scopes that exist but hold no entries (a scope dir
     the loader found empty), so they resolve to an empty result rather than
     `UnknownScopeError`.
+
+    `on_malformed` picks the POLICY, and the default keeps the historical one:
+
+      `RAISE`   — the first rejection aborts the whole build. Right for a WRITER,
+                  which is about to modify a curated store and must not act on a
+                  partial picture of it.
+      `COLLECT` — a rejection becomes a `MalformedEntry` on the index and the
+                  build continues. Right for a READER, where aborting spends
+                  every good entry in the scope to report one bad one. **A
+                  collecting caller MUST print what it collected**; see
+                  `ON_MALFORMED`'s note.
+
+    🔴 BOTH REJECTION SITES COLLECT — the per-entry validator AND the duplicate
+    check. A duplicate is a relationship between two files, and the one recorded
+    is the LATER of the pair in the loader's sorted order, so the first spelling
+    of a ref keeps serving and the collision is still named. Collecting only the
+    first site would have left `COLLECT` able to raise, which is the shape a
+    caller cannot defend against because it looks handled.
     """
+    if on_malformed not in ON_MALFORMED:
+        raise ValueError(
+            f"on_malformed must be one of {ON_MALFORMED}, got {on_malformed!r}"
+        )
+    collecting = on_malformed == ON_MALFORMED_COLLECT
     by_scope: dict[str, list[SubsystemEntry]] = {}
+    malformed: list[MalformedEntry] = []
     seen: dict[tuple[str, str, str | None], str] = {}
     for mapping in mappings:
         source = str(mapping.get("filename") or mapping.get("service") or "<unnamed>")
-        entry = SubsystemEntry.from_mapping(mapping, source=source)
+        try:
+            entry = SubsystemEntry.from_mapping(mapping, source=source)
+        except MalformedEntryError as exc:
+            if not collecting:
+                raise
+            malformed.append(_rejection(mapping, source, exc))
+            continue
         key = (entry.scope, entry.slug, entry.kind)
         if key in seen:
-            raise MalformedEntryError(
+            dup = MalformedEntryError(
                 f"malformed index entry {source!r}: duplicate {entry.ref!r} in scope "
-                f"{entry.scope!r} — already defined by {seen[key]!r}"
+                f"{entry.scope!r} — already defined by {seen[key]!r}",
+                source=source,
+                why=(
+                    f"duplicate {entry.ref!r} in scope {entry.scope!r} — already defined "
+                    f"by {seen[key]!r}"
+                ),
             )
+            if not collecting:
+                raise dup
+            malformed.append(_rejection(mapping, source, dup))
+            continue
         seen[key] = entry.filename
         by_scope.setdefault(entry.scope, []).append(entry)
+    # 🔴 A SCOPE THAT HOLDS ONLY BROKEN ENTRIES STILL EXISTS. Without this the
+    # scope would be unknown to the index and a reader would answer `scope-absent`
+    # — "nothing recorded yet" — about a directory full of content it simply
+    # could not parse. That is the exact conflation this store guards against
+    # everywhere else. (On a disk load `extra_scopes` already registers every
+    # directory; this covers `build_index` called directly.)
+    for m in malformed:
+        if m.scope:
+            by_scope.setdefault(m.scope, [])
     for scope in extra_scopes:
         key = normalize_ref(scope)
         if key:
             by_scope.setdefault(key, [])
-    return SubsystemIndex(by_scope={k: tuple(v) for k, v in by_scope.items()})
+    return SubsystemIndex(
+        by_scope={k: tuple(v) for k, v in by_scope.items()},
+        malformed=tuple(malformed),
+    )
 
 
 # --- Resolution ----------------------------------------------------------------
@@ -754,6 +980,646 @@ def associate_paths(
     )
 
 
+# --- Entry markdown shape ------------------------------------------------------
+#
+# 🔴 ONE PARSER, TWO CONSUMERS. `subsystem_recall` (the `/resume` reader) and
+# `subsystem_touch` (the `/handoff` writer) both have to read an entry's prose:
+# the reader to surface it, the writer to show what is ALREADY THERE before it
+# proposes an append. These functions started in `subsystem_recall`, where they
+# were verified against the real 23-entry corpus, and moved DOWN here unchanged
+# when the writer needed them — because `subsystem_recall` already imports
+# `subsystem_touch`, so the writer cannot import the reader without closing a
+# cycle, and a copy in the writer would be a second parser free to drift from the
+# one the corpus was measured against.
+#
+# They are pure and touch no filesystem, which is why they sit above the disk
+# loader with the rest of the pure functions.
+
+
+WHAT_HEADING = "## What it is"
+POINTERS_HEADING = "## Pointers"
+NUANCE_HEADING = "## Nuance / work-history"
+
+# A top-level journal bullet starts at COLUMN 0. Measured over the whole live
+# corpus on 2026-08-12 (26 entries, 110 top-level bullets): every bullet line is
+# at indent 0 and every one of the 250 continuation lines is at indent 2. So an
+# indented `-` is a CONTINUATION (a nested list, or prose that happens to start
+# with a dash), never a new bullet — folding the two together would split one
+# bullet into several and report a history longer than the entry has.
+_JOURNAL_BULLET = re.compile(r"^[-*][ \t]+")
+
+# `- YYYY-MM-DD: …` — the dated form. The date is OPTIONAL: 62 of those 110
+# bullets carry one and 48 do not, so a parser that required a date would drop
+# 44% of the real corpus on the floor and call the result a complete read.
+_JOURNAL_DATE = re.compile(r"^[-*][ \t]+(\d{4}-\d{2}-\d{2})(?=[:,)\]\s]|$)")
+
+# `- [YYYY-MM-DD: ]OPEN: …` / `- [YYYY-MM-DD: ]RESOLVED <sha>: …` — the openness
+# marker, and the reason it is a PREFIX rather than a phrase.
+#
+# 🔴 WHY THIS IS SCHEMA AND NOT A PROSE DETECTOR. The motivating entry
+# (`datapacket-talos/forgejo`) carries a bullet proposing a one-line config change
+# as future work. That change landed at 15:02:21 on 2026-07-24 (the sha is in the
+# client repo and is deliberately not reproduced here);
+# the entry was written at
+# 15:00:18 — stale 2m03s after it was written, and still being served as an open
+# action 22 days later. Nothing could have noticed, because "this remedy is not
+# applied yet" was a claim made only in prose.
+#
+# The obvious repair is to grep the prose for remedy words. Measured over the live
+# corpus (196 nuance bullets, 2026-08-15) that finds TWO bullets — and
+# `claude/RULES.md` names the failure it would be: "a guard on WORDS is walkable by
+# REWORDING". A writer who says "the endpoint is already correct" instead of
+# "FIX:" walks past it, and the walk is silent. A prefix a writer must TYPE cannot
+# be walked by rewording the sentence after it; that is the whole reason the
+# marker sits before the prose rather than inside it.
+#
+# `RESOLVED` takes the sha that closed it so the claim is checkable — `git cat-file
+# -e <sha>` answers it — rather than being a second unverifiable assertion.
+_JOURNAL_OPENNESS = re.compile(
+    r"^[-*][ \t]+"
+    r"(?:\d{4}-\d{2}-\d{2}:[ \t]+)?"           # the optional leading date
+    r"(OPEN|RESOLVED)"
+    r"(?:[ \t]+([0-9a-fA-F]{7,40}))?"          # RESOLVED carries the closing sha
+    r":"                                        # exact terminator, no fuzz
+)
+
+OPENNESS_OPEN = "open"
+OPENNESS_RESOLVED = "resolved"
+
+# The retrospective advisory — DELIBERATELY NARROW, and a FLOOR, not a list.
+#
+# These two shapes are the only ones that scored 2 hits and 0 false positives over
+# the 196-bullet corpus. The ones rejected, and why, so nobody re-adds them:
+#   `TODO`        1 hit, FALSE — an entry describing an UPSTREAM project's TODO as
+#                 a fact about that project, not a remedy this operator owes.
+#   `not yet`     3 hits, 2 FALSE — one describes a mechanism (deps not yet on
+#                 npm), one is an explicit WONTFIX that says "don't re-litigate".
+#   `should be` / `next step` / `pending` / `deferred` / `proposed fix` — 0 hits
+#                 each. Adding a marker with no corpus evidence buys recall that
+#                 cannot be demonstrated and precision that cannot be defended.
+#
+# 🔴 RECALL IS UNKNOWN AND MUST BE REPORTED AS SUCH. This finds bullets that
+# HAPPEN to be phrased the two ways already seen. It is an advisory that says
+# "at least these"; it is never evidence that an entry has no open actions. The
+# schema marker above is the mechanism; this is a net under it for entries written
+# before the marker existed.
+_UNMARKED_ACTION = re.compile(r"\bFIX\s*[(:]|\bnot (yet )?addressed\b", re.I)
+
+# A bullet that MEANT to carry a marker and just missed the grammar.
+#
+# 🔴 THE SILENT FAILURE IS THE SAME CLASS AS THE ORIGINAL BUG, which is why this
+# exists at all. Measured shapes that parse as NO MARKER today:
+#
+#   - 2026-08-15 OPEN: …                 (date not followed by `:`)
+#   - 2026-08-15: RESOLVED abc1234 (repo): …   (parenthetical before the colon)
+#   - 2026-08-15: **OPEN:** …            (marker wrapped in emphasis)
+#   - 2026-08-15: OPEN : …               (space before the colon)
+#   - 2026-08-15: RESOLVED PR#505: …     (a non-sha reference)
+#
+# The first matters most: `_JOURNAL_DATE` accepts a date followed by any of
+# `[:,)\]\s]` while `_JOURNAL_OPENNESS` requires `date:` + whitespace, and **7 of
+# 147 dated bullets in the live corpus (4.8%) already use a date form the
+# openness regex cannot parse**. So a writer follows the skill, closes an action
+# as `RESOLVED <sha> (<repo>):`, the `🔴 N OPEN` badge disappears — which LOOKS
+# like success — and the claim is discarded. Symmetrically a typo'd `OPEN`
+# reverts the entry to "nothing declared", reintroducing the exact 22-day failure
+# the marker exists to prevent, through a typo, silently.
+#
+# Deliberately NOT fixed by widening `_JOURNAL_OPENNESS`. A lenient marker
+# regex starts matching prose, and inventing a marker is worse than missing one:
+# a false `RESOLVED` closes an action nobody closed. So the strict grammar stands
+# and the near-misses are REPORTED instead, which is the fail-loud half.
+#
+# ⚠ ONLY THE BARE `^` IS REDUNDANT. The `[-*][ \t]+` after it is LOAD-BEARING in
+# BOTH patterns, and two earlier versions of this comment said the opposite.
+#
+# Measured against the full `test_subsystem_touch.py` (baseline 712 passed):
+#     delete `^[-*][ \t]+` from `_JOURNAL_OPENNESS`  → 22 FAILURES
+#     delete `^[-*][ \t]+` from `_NEAR_MISS_MARKER`  → 19 FAILURES
+#     delete only the `^` from either                → 712 passed (equivalent)
+#
+# The `^` is redundant because both are consumed with `re.match`, which anchors at
+# position 0, over patterns with no `re.MULTILINE`. The bullet marker is not: the
+# optional date and punctuation prefixes mean that without it these match happily
+# mid-string. A maintainer acting on the old wording — "do not count it as a
+# guard" — would have deleted the whole prefix and broken 22 tests.
+#
+# The `^` stays regardless: it costs nothing, and it is what keeps the anchoring
+# true if a consumer ever switches to `search`.
+_NEAR_MISS_MARKER = re.compile(
+    r"^[-*][ \t]+"
+    r"(?:\d{4}-\d{2}-\d{2}[^A-Za-z]{0,3})?"    # a date in any of its corpus forms
+    r"[^A-Za-z0-9]{0,4}"                        # `**`, quotes, stray punctuation
+    r"(?:"
+    # (a) SHOUTED — all-caps marker, no terminator needed. Prose does not shout.
+    r"(?:OPEN|RESOLVED)(?![A-Za-z0-9_])"
+    r"|"
+    # (b) sentence-cased — then a `:` IS required, optionally after a sha /
+    #     PR reference / parenthetical / bracketed ref.
+    r"(?i:OPEN|RESOLVED)"
+    r"(?:[ \t]*(?:[0-9a-fA-F]{7,40}(?![0-9a-fA-F])|PR#\d+|#\d+"
+    r"|\([^)]{1,30}\)|\[[^\]]{1,30}\]))*"
+    r"[^A-Za-z0-9\n]{0,4}:"
+    r")",
+)
+# 🔴 TWO BRANCHES, BECAUSE THREE ROUNDS PROVED NEITHER ALONE IS ENOUGH — and the
+# matrix that says so is COMMITTED at `scripts/tests/fixtures/near_miss_shapes.json`
+# rather than living in whoever's scratchpad wrote the last version. Each previous
+# pattern was justified by a private matrix, and round 4 built a different one and
+# reached the opposite verdict; a matrix nobody can re-run is an opinion.
+#
+# Measured over that fixture (16 attempted shapes, 10 prose shapes) plus the live
+# 196-bullet corpus:
+#
+#     re.I, no terminator    (round 1)    16/16 found   6 prose FP   0 corpus
+#     no re.I, no terminator (round 2)     ?/16 found   0 prose FP   0 corpus
+#     terminator + re.I      (round 3)     9/16 found   0 prose FP   0 corpus
+#     this union                          16/16 found   0 prose FP   0 corpus
+#
+# Round 3's terminator requirement was the subtler failure: it demanded the exact
+# character whose OMISSION is the likeliest way to miss the grammar, so
+# `- OPEN the retry budget is not addressed.` went silent — the failure this
+# detector exists to prevent, reintroduced by the fix for the previous one.
+#
+# (a) carries no terminator because an all-caps `OPEN`/`RESOLVED` opening a bullet
+# is a marker attempt in every sample examined.
+#
+# 🔴 THE GUARD IS `(?![A-Za-z0-9_])`, NOT `(?![a-z])`, and the difference is a
+# whole class of false positive. `(?![a-z])` blocks only a LOWERCASE continuation,
+# so it stopped `Opening` and let through every all-caps identifier a real bullet
+# quotes: `OPENSSL_CONF`, `OPEN_MAX`, `RESOLVED_ADDR`, `OPENTELEMETRY`, `OPENED`.
+# Each produced a 🔴 "attempted marker that DID NOT PARSE — fix the LINE" advisory
+# about a correct sentence, which is how a loud path gets ignored.
+#
+# ⚠ AND THE FIXTURE COULD NOT SEE IT: the `prose` arm shipped with this branch held
+# ZERO all-caps shapes, so the matrix introduced alongside the branch was
+# structurally blind to the class the branch introduced. All-caps prose is pinned
+# in the fixture now, and a test asserts the arm can still express it — a fixture
+# that cannot express the failure mode is not covering it, however green it is.
+# (b) needs the terminator because sentence case IS ordinary English — "Open
+# questions remain" must not fire, while "Open:" must.
+#
+# 🔴 THE `(?![0-9a-fA-F])` ON THE HEX ATOM IS A ReDoS FIX, NOT STYLE. `{7,40}`
+# inside a `*` loop is exponentially ambiguous when the trailing `:` never
+# arrives — which is branch (b) only, since (a) matches before the loop is
+# reached. Measured on a SENTENCE-CASED bullet quoting long shas without a colon:
+# 48 hex 0.0007 s, 64 hex 0.028 s, three 40-char shas did not return in 30 s,
+# hanging `scan_open_actions` and therefore `/handoff` and `--validate` with no
+# output. An all-caps bullet with the identical payload is unaffected, which is
+# exactly why the regression test for this must be sentence-cased.
+# The lookahead makes the atom non-splittable and drops the pathological case to
+# ~0 s with zero behavioural change across the whole fixture.
+
+
+def _is_fence(line: str) -> bool:
+    s = line.lstrip()
+    return s.startswith("```") or s.startswith("~~~")
+
+
+def _heading_blocks(text: str) -> list[tuple[str | None, list[str]]]:
+    """Split `text` into `(heading, body-lines)` blocks, in document order.
+
+    🔴 THE ONE HEADING PARSER, and the reason it exists as its own function is
+    that it now has TWO views over it: `extract_sections` ("which of these
+    sections does the entry have, and what is in them") and `scan_headings`
+    ("what headings does it have at all"). A second walker would be free to
+    disagree with the first about what a heading IS — and `subsystem_touch
+    --validate` prints both answers in the SAME block, where the disagreement
+    would render as "the section is absent" directly beside "the heading is
+    right there". `claude/RULES.md` → "One rule, one place".
+
+    A heading is a line beginning with `#` at COLUMN 0, outside a fence; the
+    block key is that line `rstrip()`ed and otherwise verbatim. Every line that
+    is not such a heading — fence lines included — belongs to the block it sits
+    in. The FIRST block's heading is `None` whenever the text opens with
+    anything other than a heading (front matter, prose), so a caller can tell
+    "before the first heading" from any real section.
+
+    🔴 FENCED BLOCKS ARE SKIPPED. A `#` line inside a code fence is not a
+    heading, and treating it as one would END the section early — surfacing
+    HALF an entry's nuance while looking exactly like a complete read. That is a
+    silent under-report, the failure class this whole module is built against,
+    so it is handled rather than left to "entries probably don't contain
+    fences".
+
+    A REPEATED heading yields a SEPARATE block each time. That is deliberate and
+    it is the only reason duplicate detection is possible at all: the sections
+    are merged by `extract_sections` (see there), so a walker that merged them
+    here would destroy the evidence before anyone could report it.
+    """
+    blocks: list[tuple[str | None, list[str]]] = [(None, [])]
+    in_fence = False
+    for line in text.splitlines():
+        if _is_fence(line):
+            in_fence = not in_fence
+            blocks[-1][1].append(line)
+            continue
+        if not in_fence and line.startswith("#"):
+            blocks.append((line.rstrip(), []))
+            continue
+        blocks[-1][1].append(line)
+    return blocks
+
+
+def scan_headings(text: str) -> tuple[str, ...]:
+    """Every ATX heading in `text`, in document order, REPEATS INCLUDED.
+
+    The inventory `extract_sections` cannot give you: it answers only about the
+    headings you asked for, so "the entry has no `## Pointers`" and "the writer
+    called it `## pointers`" are the same answer there. This is what separates
+    them — and what makes a duplicate visible, since `extract_sections` merges
+    duplicates by design.
+
+    Verbatim and unnormalized, for the same reason matching is exact: the caller
+    reporting a near-miss must be able to print the heading the writer actually
+    typed, not a folded form of it.
+    """
+    return tuple(h for h, _ in _heading_blocks(text) if h is not None)
+
+
+def extract_sections(text: str, headings: Sequence[str]) -> dict[str, str]:
+    """Return `{heading: body}` for each requested heading found in `text`.
+
+    Bodies are VERBATIM — the store is markdown precisely so prose survives a
+    read unmangled — with surrounding blank lines trimmed. A heading that is
+    absent is simply not a key; the caller reports it by name rather than
+    printing an empty block (an absent section and an empty one are different
+    facts about a curated entry).
+
+    A section runs from its heading to the next ATX heading of any level, or to
+    end of file. Fenced blocks are skipped — see `_heading_blocks`, which is the
+    parser this is a view over.
+
+    Matching is on the EXACT heading string, not a normalized one: these are
+    schema headings from `analyze-service/SKILL.md`, not user refs. Normalizing
+    them would fold `## Pointers` and `## pointers!` together and quietly widen
+    what the store is allowed to look like.
+
+    A heading written TWICE has its blocks CONCATENATED under the one key, and
+    whatever sat under an intervening heading is dropped. That is a silent merge
+    and it is why `subsystem_touch --validate` reports duplicates from
+    `scan_headings` rather than from this mapping, which cannot show them.
+    """
+    wanted: dict[str, list[str]] = {h: [] for h in headings}
+    # 🔴 PRESENCE IS TRACKED SEPARATELY FROM CONTENT. A heading that appears with
+    # nothing under it must be reported as PRESENT-AND-EMPTY, not as absent —
+    # "the section was never started" and "the section is there and unfilled"
+    # are different facts about a curated entry, and only one of them is a
+    # reason to go look somewhere else. Deriving presence from a non-empty body
+    # collapses them, and it did: an empty section followed by another heading
+    # read as absent while the same empty section at end-of-file read as
+    # present, purely because of what came after it.
+    seen: set[str] = set()
+    for heading, body in _heading_blocks(text):
+        if heading is None or heading not in wanted:
+            continue
+        seen.add(heading)
+        wanted[heading].extend(body)
+    return {h: "\n".join(wanted[h]).strip("\n") for h in headings if h in seen}
+
+
+UNREACHABLE_MARKER = "unreachable-marker"
+"""The reason token for the third openness shape. NOT a near-miss, and the two
+counts are never added.
+
+A near-miss is a marker MIS-SPELLED where the parser looks. This is a marker
+spelled CORRECTLY where the parser never looks — so it raises neither badge, and
+its remedy is different: a near-miss is fixed by editing the line, this one by
+PROMOTING it to a top-level bullet of its own.
+"""
+
+
+@dataclass(frozen=True)
+class UnreachableMarker:
+    """One correctly-spelled openness marker sitting where NO reader looks.
+
+    🔴 THE SHAPE THAT COST A REAL OPEN ACTION ITS BADGE. Measured in the field
+    (`claudedocs/handoff-subsystem-store.md`, 2026-08-20): one bullet carried a
+    second, correctly-spelled marker several lines into its body. `_bullet_openness`
+    reads a bullet's OPENING line and the pattern is anchored at position 0, so
+    that declaration reached no surface at all — it had only ever raised a badge
+    BY ACCIDENT, through a broken `RESOLVED —` sitting above it in the same
+    section. Fixing the broken line would therefore have SILENCED a still-open
+    action, which is the failure this whole marker exists to prevent, arriving
+    through the fix for a different one.
+    """
+
+    offset: int
+    """1-based index of the line WITHIN THE BULLET. Always >= 2 — line 1 is what
+    the parser already reads, so a marker there is reachable by definition."""
+
+    line: str
+    """The continuation line, VERBATIM — indentation and all. The report quotes
+    it, and a stripped copy would send a writer looking for a line as typed."""
+
+    openness: str
+    """`open` | `resolved` — what this marker WOULD have declared had it been at
+    the head of a bullet. Derived by running the real parser, never re-spelled."""
+
+    resolved_by: str | None
+    """The sha a `RESOLVED <sha>:` names, same normalisation as the real parser."""
+
+
+def _as_opening_line(line: str) -> str:
+    """Put a CONTINUATION line into OPENING-line position, verbatim otherwise.
+
+    🔴 THIS IS THE WHOLE DERIVATION, AND IT IS DELIBERATELY THE ONLY NEW GRAMMAR.
+    The marker vocabulary is NOT restated here: the continuation scanner hands
+    each line to `_bullet_openness` — the same function `parse_journal_bullets`
+    calls for line 1 — and this normalisation exists solely because both patterns
+    require the `^[-*][ \\t]+` bullet prefix, which a wrapped prose line does not
+    have. A ledger that restated `OPEN|RESOLVED` could not catch what it was
+    written for: the point is that this stays in step with the real pattern even
+    if that pattern changes. `test_subsystem_resolver.py` pins the two call sites
+    against each other over the committed shape fixture.
+
+    A line that ALREADY opens with a bullet marker (a nested list item — the
+    field case) is passed through with only its indentation removed, so nothing
+    is manufactured; anything else is given the minimal `- ` prefix.
+    """
+    stripped = line.strip()
+    if _JOURNAL_BULLET.match(stripped):
+        return stripped
+    return f"- {stripped}"
+
+
+@dataclass(frozen=True)
+class JournalBullet:
+    """One top-level bullet of a `## Nuance / work-history` section, VERBATIM.
+
+    🔴 `lines` IS A TUPLE, NOT A STRING, because a real bullet is WRAPPED PROSE.
+    Measured over the live corpus on 2026-08-12: 110 top-level bullets carry 250
+    continuation lines between them — a median bullet is 3 lines and the longest
+    is 19. Any model that assumed one line per bullet would silently truncate
+    most of the corpus, and a truncated bullet is exactly the thing an agent
+    would fail to recognize as a near-duplicate of the line it is about to write.
+    """
+
+    lines: tuple[str, ...]
+    date: str | None
+    """The ISO date the bullet is dated with, or None. ~44% of the real corpus
+    carries no date; `None` is an ordinary reading, not a parse failure."""
+
+    openness: str | None = None
+    """`'open'` | `'resolved'` | None — the bullet's DECLARED openness marker.
+
+    None is by far the common reading — **195 of 196** bullets in the live corpus
+    on 2026-08-15 — and means only that nothing was declared. 🔴 It does NOT mean
+    "this bullet proposes no work": an unmarked bullet that proposes a remedy is
+    exactly the `forgejo` failure, and `unmarked_action` is the (narrow,
+    floor-only) net for that case.
+
+    ⚠ The 196th is why this reads 195 and not 196. A past session had ALREADY
+    written `- OPEN: rotate …` by hand, with no tooling asking it to and no
+    convention documented — so this schema is a formalisation of a shape the
+    corpus invented on its own, not one imposed on it. An earlier revision of
+    this docstring claimed all 196 were unmarked; that was written before the
+    corpus was grepped for markers, and the grep is what corrected it.
+    """
+
+    resolved_by: str | None = None
+    """The sha a `RESOLVED <sha>:` bullet names as having closed it, or None.
+
+    Carried so the claim is CHECKABLE — a reader can run `git cat-file -e` on it.
+    A `RESOLVED` with no sha parses fine and leaves this None: the marker is still
+    worth having, it just cannot be verified.
+
+    🔴 BRANCHED ON, not merely stored. An audit found this field read by nothing
+    outside the tests while its docstring claimed "the renderer says which it
+    got" — a field in a DTO is not a guard (`claude/RULES.md`), and the design's
+    headline rationale ("the sha makes the claim checkable") was unimplemented.
+    `--validate` now reports every sha-less `RESOLVED` as an UNVERIFIABLE closure,
+    which is the branch that makes the field load-bearing.
+    """
+
+    @property
+    def first_line(self) -> str:
+        return self.lines[0] if self.lines else ""
+
+    @property
+    def text(self) -> str:
+        return "\n".join(self.lines)
+
+    @property
+    def is_open(self) -> bool:
+        return self.openness == OPENNESS_OPEN
+
+    @property
+    def unmarked_action(self) -> bool:
+        """Does this bullet LOOK like an unmarked open action? A FLOOR, never a list.
+
+        True only for the two phrasings measured to occur with no false positives
+        over the live corpus (see `_UNMARKED_ACTION`). An unmarked bullet phrased
+        any other way returns False, and that False is not evidence of anything —
+        which is why every renderer of this prints it as "at least N", never as a
+        count of what exists.
+
+        Suppressed once the bullet declares openness: a bullet that already says
+        `OPEN:` is not *unmarked*, and one that says `RESOLVED:` has been closed —
+        re-flagging either would train the reader to ignore the advisory.
+        """
+        if self.openness is not None:
+            return False
+        return bool(_UNMARKED_ACTION.search(self.text))
+
+    @property
+    def openness_population(self) -> str:
+        """WHICH of the six populations this bullet belongs to. Exactly one.
+
+        🔴 THE SINGLE SOURCE OF THE PRECEDENCE ORDER, and the reason it exists.
+        A delta re-audit found one bullet counted TWICE in the writer-facing
+        block — `- Open items: the retry budget is not yet addressed.` is both a
+        near-miss and an unmarked action, so it rendered under both headings with
+        its own line quoted under each, while `--validate` classified it once.
+        Two surfaces disagreed about the same input because each decided
+        membership for itself (`claude/RULES.md` → "One rule, one place: a
+        predicate duplicated across call sites regenerates the same bug at every
+        site"). Every consumer now branches on THIS.
+
+        Precedence, most-certain first — an earlier case wins outright:
+
+          `open`          the writer declared `OPEN:`. Exact.
+          `unverifiable`  a `RESOLVED:` naming no sha; closed but unprovable.
+          `resolved`      a `RESOLVED <sha>:`. Nothing to report.
+          `near-miss`     no marker parsed, but the line looks like an attempt.
+                          Beats `unmarked` because "your write did not land" is
+                          actionable and specific, where "this reads like an open
+                          action" is a guess about the same line.
+          `unmarked`      no marker, and the prose matches the narrow floor.
+          `none`          everything else — the overwhelming majority.
+
+        ⚠ ONLY `near-miss` > `unmarked` IS OBSERVABLE, and the docstring says so
+        rather than implying all five levels are load-bearing. `near_miss_marker`
+        and `unmarked_action` both self-suppress when `openness` is set, so
+        reordering `open`/`resolved`/`unverifiable` against them are EQUIVALENT
+        mutants that no test can kill (measured — they survive the battery). The
+        order is still written most-certain-first because that is what makes it
+        readable; just do not count those levels as guards.
+        """
+        if self.openness == OPENNESS_OPEN:
+            return "open"
+        if self.openness == OPENNESS_RESOLVED:
+            return "resolved" if self.resolved_by else "unverifiable"
+        if self.near_miss_marker:
+            return "near-miss"
+        if self.unmarked_action:
+            return "unmarked"
+        return "none"
+
+    @property
+    def near_miss_marker(self) -> bool:
+        """Did this bullet TRY to carry a marker and miss the grammar?
+
+        The fail-loud half of a deliberately strict `_JOURNAL_OPENNESS`. True only
+        when no marker parsed AND the first line opens with something that reads
+        like an attempt — so a writer whose `RESOLVED <sha> (<repo>):` silently
+        did nothing is told, instead of seeing the badge vanish and reading that
+        as success.
+        """
+        if self.openness is not None:
+            return False
+        return bool(_NEAR_MISS_MARKER.match(self.first_line))
+
+    @property
+    def unreachable_markers(self) -> tuple[UnreachableMarker, ...]:
+        """Markers on lines 2..n that WOULD have parsed at the head of a bullet.
+
+        🔴 A THIRD SHAPE, AND IT IS NOT A POPULATION. `openness_population` is
+        untouched by this: that property answers "what did this bullet DECLARE",
+        and a bullet whose only marker is out of reach declared nothing — which
+        is precisely the finding. Folding this in would have changed the answer
+        to a different question and silently moved existing counts.
+
+        🔴 NOT SUPPRESSED WHEN THE BULLET ALREADY DECLARES ONE. The field case
+        was exactly a bullet carrying two markers, and the head one was broken;
+        a bullet with a good head marker AND a second one further down is two
+        claims stored as one, which is worth saying either way.
+
+        Blank lines contribute nothing, and FENCED regions are skipped for the
+        same reason `parse_journal_bullets` skips them: a `- OPEN:` inside a code
+        fence is sample text, and reporting it would send a writer to promote a
+        line that is quoting something.
+        """
+        out: list[UnreachableMarker] = []
+        in_fence = False
+        for offset, line in enumerate(self.lines[1:], start=2):
+            if _is_fence(line):
+                in_fence = not in_fence
+                continue
+            if in_fence or not line.strip():
+                continue
+            # 🔴 THE REAL PARSER, not a second copy of its vocabulary. See
+            # `_as_opening_line`.
+            openness, sha = _bullet_openness(_as_opening_line(line))
+            if openness is None:
+                continue
+            out.append(
+                UnreachableMarker(
+                    offset=offset, line=line, openness=openness, resolved_by=sha
+                )
+            )
+        return tuple(out)
+
+
+def parse_journal_bullets(body: str) -> tuple[JournalBullet, ...]:
+    """Group a `## Nuance / work-history` body into top-level bullets.
+
+    Order is preserved exactly as stored — this function makes NO claim about
+    which bullet is newest. The store's convention is newest-first, but that is a
+    convention a writer can break, so recency is derived from the DATES (see
+    `subsystem_touch.EntryJournal.newest_date`) rather than from position.
+
+    Rules, each measured against the corpus rather than assumed:
+
+      * A bullet starts at column 0 (`_JOURNAL_BULLET`). Every other non-blank
+        line attaches to the bullet above it, indented or not.
+      * Text BEFORE the first bullet is dropped from the bullet list. The caller
+        must not read an empty tuple as "the section is empty" — a non-empty body
+        that yields no bullets is its own state, and `subsystem_touch` reports it
+        as one rather than showing a blank.
+      * 🔴 FENCED BLOCKS ARE SKIPPED, for the same reason `extract_sections`
+        skips them: a `- ` line inside a fence is sample text, and promoting it
+        to a bullet invents history the entry does not have. No fence appears in
+        the corpus today (measured: 0 fence lines across all 26 nuance sections)
+        — this is here because the sibling parser one screen up already had to
+        learn it, and a fence is one pasted snippet away.
+      * Trailing blank lines are stripped from each bullet so a blank separator
+        cannot inflate a bullet's line count.
+    """
+    bullets: list[list[str]] = []
+    in_fence = False
+    for line in body.splitlines():
+        if _is_fence(line):
+            in_fence = not in_fence
+            if bullets:
+                bullets[-1].append(line)
+            continue
+        if not in_fence and _JOURNAL_BULLET.match(line):
+            bullets.append([line])
+            continue
+        if bullets:
+            bullets[-1].append(line)
+    out: list[JournalBullet] = []
+    for group in bullets:
+        while group and not group[-1].strip():
+            group.pop()
+        openness, resolved_by = _bullet_openness(group[0])
+        out.append(
+            JournalBullet(
+                lines=tuple(group),
+                date=_bullet_date(group[0]),
+                openness=openness,
+                resolved_by=resolved_by,
+            )
+        )
+    return tuple(out)
+
+
+def _bullet_openness(first_line: str) -> tuple[str | None, str | None]:
+    """`(openness, resolved_by)` for one bullet's first line.
+
+    Takes the first line only, but 🔴 THAT IS NOT WHAT ENFORCES IT — the guard is
+    `re.match`, which anchors at position 0, over a pattern with no `re.MULTILINE`.
+    A marker on a continuation line is therefore unreachable whether this is passed
+    one line or the whole joined bullet.
+
+    Stated because a mutation battery proved it: replacing `group[0]` with the
+    joined bullet text is an EQUIVALENT mutant and survives the suite, and an
+    earlier version of this docstring claimed the argument was the protection.
+    Two mechanisms reaching one outcome cannot be told apart by any test
+    (`claude/RULES.md`), so the honest form is to name the one that actually holds
+    and keep the narrower argument as defence-in-depth — if the pattern ever gains
+    `re.MULTILINE`, passing one line is what stops markers being invented from
+    wrapped prose, and that is a real hazard rather than a hypothetical one.
+
+    The sha is normalised to lower case so `RESOLVED B83BFB58:` and
+    `RESOLVED b83bfb58:` are one claim, not two.
+    """
+    m = _JOURNAL_OPENNESS.match(first_line)
+    if not m:
+        return None, None
+    marker = OPENNESS_OPEN if m.group(1) == "OPEN" else OPENNESS_RESOLVED
+    sha = m.group(2)
+    return marker, sha.lower() if sha else None
+
+
+def _bullet_date(first_line: str) -> str | None:
+    """The bullet's ISO date, or None — VALIDATED, not just shaped.
+
+    `2026-13-45` matches the shape and is not a date; returning it would put a
+    nonexistent day into a recency claim and into any arithmetic done on it.
+    `fromisoformat` is the check, so what comes back is always a real date.
+    """
+    m = _JOURNAL_DATE.match(first_line)
+    if not m:
+        return None
+    try:
+        _date.fromisoformat(m.group(1))
+    except ValueError:
+        return None
+    return m.group(1)
+
+
 # --- The thin disk loader ------------------------------------------------------
 #
 # Deliberately separate from everything above: the pure functions never touch the
@@ -802,7 +1668,35 @@ def parse_front_matter(text: str) -> dict[str, object]:
     return out
 
 
-def load_index(root: Path) -> SubsystemIndex:
+def entry_mapping(text: str, *, filename: str, scope: str) -> dict[str, object]:
+    """ONE entry file's bytes -> the mapping `from_mapping` would be handed.
+
+    🔴 EXTRACTED FROM `load_index` SO A VALIDATOR CANNOT BUILD A DIFFERENT ONE.
+    `subsystem_touch --validate` has to answer "would the loader accept this
+    file?", and the only honest way to answer it is to construct exactly what the
+    loader constructs. Re-spelling these four lines at the validator would be the
+    duplicated predicate `claude/RULES.md` names: the day one side learns a new
+    identity field, the validator starts blessing entries the reader rejects —
+    the precise drift a write-time check exists to prevent.
+
+    The directory name is the authority on scope: it is where the file actually
+    lives. A `scope:`/`repo:` field that disagrees is stale front matter, not a
+    relocation, so `scope` is set unconditionally and `repo` is dropped.
+    """
+    fm = dict(parse_front_matter(text))
+    fm["filename"] = filename
+    fm["scope"] = scope
+    # ⚠ REDUNDANT-BUT-KEPT, labelled: `from_mapping` reads `scope` in preference
+    # to `repo`, and `scope` was just set unconditionally on the line above, so
+    # the pop cannot change any outcome. It stays to keep the mapping honest —
+    # leaving a contradicted `repo:` in a dict that is also the malformed-entry
+    # error's source label would put a stale value in front of whoever reads that
+    # error.
+    fm.pop("repo", None)
+    return fm
+
+
+def load_index(root: Path, *, on_malformed: str = ON_MALFORMED_RAISE) -> SubsystemIndex:
     """Read `<root>/<scope>/*.md` into a `SubsystemIndex`. READ-ONLY.
 
     `README.md` is skipped in every scope — each scope dir carries one as its
@@ -812,20 +1706,30 @@ def load_index(root: Path) -> SubsystemIndex:
     or service file may not exist yet". An existing empty scope must resolve to
     an honest empty result, while a scope that does not exist stays an error.
 
-    🔴 FAIL-CLOSED, AND P1 MUST DECIDE WHETHER THAT IS STILL RIGHT. One malformed
-    entry aborts the WHOLE index. That is correct for the interactive caller this
-    was written for — a human running `/analyze-service` should be told the store
-    is broken, loudly, rather than handed a silently short index. It is likely
-    WRONG for P1's 5-minute timer, where the same raise means every session in
-    that window gets no association at all, and downstream that is indistinguishable
-    from "these subsystems had no sessions" — the exact silent zero this module
-    exists to prevent, reintroduced one layer up.
+    🔴 FAIL-CLOSED BY DEFAULT, AND THE CALLER CHOOSES. `on_malformed=RAISE` (the
+    default) aborts the whole index on the first bad entry — correct for a WRITER
+    about to modify a curated store. `COLLECT` degrades: the good entries load
+    and the rejects come back on `index.malformed` for the caller to PRINT.
 
-    Deliberately NOT changed here: the alternative (skip the bad entry, report it)
-    needs somewhere for the report to GO, and that is P1's design decision, not
-    something to guess at now. When P1 lands, either give it a skip-and-report
-    mode or have the timer treat this raise as a hard alert — but do not let it
-    log-and-continue.
+    The question this docstring used to defer is now answered, and the answer was
+    measured. Fail-closed cost the whole scope: on a synthetic store, 2 good
+    entries listed 2, and 2 good + 1 malformed listed **0** with exit 3 — one
+    wrapped `aliases:` line took `/resume` step 4, `--list`, `--ref` and
+    `--search` down together. The reader (`subsystem_recall`) therefore loads
+    with `COLLECT` and reports every reject per-entry in the same output; the
+    writer's probe (`subsystem_touch.build_report`) keeps `RAISE`, because it
+    gates a WRITE into a store it would then be reading only partially.
+
+    🔴 What `COLLECT` is NOT is "skip the bad entry". Silently serving a short
+    index is a worse failure than the collapse, because a dropped entry is
+    indistinguishable from an entry nobody ever wrote. The obligation to print is
+    part of the mode; see `ON_MALFORMED`.
+
+    ⚠ AN `OSError` STILL FAILS CLOSED IN BOTH MODES, and that is a different
+    fact, not an oversight: a malformed entry is a file we read and could not
+    interpret, while an unreadable one means the store was not fully READ — the
+    set of entries is then unknown, so there is nothing honest to degrade to.
+    `load_store`/`build_report` name it `index entry unreadable`.
     """
     mappings: list[Mapping[str, object]] = []
     scopes: list[str] = []
@@ -839,18 +1743,11 @@ def load_index(root: Path) -> SubsystemIndex:
         for md in sorted(scope_dir.glob("*.md")):
             if md.name == "README.md":
                 continue
-            fm = dict(parse_front_matter(md.read_text(encoding="utf-8", errors="replace")))
-            fm["filename"] = md.name
-            # The directory name is the authority on scope: it is where the file
-            # actually lives. A `scope:`/`repo:` field that disagrees is stale
-            # front matter, not a relocation.
-            fm["scope"] = scope_dir.name
-            # ⚠ REDUNDANT-BUT-KEPT, labelled: `from_mapping` reads `scope` in
-            # preference to `repo`, and `scope` was just set unconditionally on
-            # the line above, so the pop cannot change any outcome. It stays to
-            # keep the mapping honest — leaving a contradicted `repo:` in a dict
-            # that is also the malformed-entry error's source label would put a
-            # stale value in front of whoever reads that error.
-            fm.pop("repo", None)
-            mappings.append(fm)
-    return build_index(mappings, extra_scopes=scopes)
+            mappings.append(
+                entry_mapping(
+                    md.read_text(encoding="utf-8", errors="replace"),
+                    filename=md.name,
+                    scope=scope_dir.name,
+                )
+            )
+    return build_index(mappings, extra_scopes=scopes, on_malformed=on_malformed)

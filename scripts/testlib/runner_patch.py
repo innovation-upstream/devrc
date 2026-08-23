@@ -23,7 +23,30 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 RUN_TESTS = REPO_ROOT / "scripts" / "run-tests.sh"
 
 
-def patch_runner_source(src: str, targets: list[str], floors: dict[str, int]) -> str:
+def _replace_array(src: str, name: str, entries: list[str]) -> str:
+    """Replace a whole `NAME=( … )` bash array literal, asserting the hit.
+
+    Same contract as the two rewrites below: a regex that silently matches
+    nothing leaves the copy identical to the real runner, so the "known-bad
+    state" the caller believes it built never exists and the test passes for a
+    reason unrelated to its subject.
+    """
+    body = "\n".join(f'  "{e}"' for e in entries)
+    patched, n = re.subn(
+        rf"^{name}=\(.*?^\)",
+        f"{name}=(\n{body}\n)" if entries else f"{name}=()",
+        src,
+        count=1,
+        flags=re.S | re.M,
+    )
+    assert n == 1, f"failed to replace {name} in the copied runner"
+    return patched
+
+
+def patch_runner_source(src: str, targets: list[str], floors: dict[str, int], *,
+                        ack: list[str] | None = None,
+                        hook_tests: list[str] | None = None,
+                        shell_tests: list[str] | None = None) -> str:
     """Return `src` with HERMETIC_TARGETS and TARGET_FLOORS replaced wholesale.
 
     Both replacements are asserted to have landed. A silently-unmatched regex
@@ -64,6 +87,17 @@ def patch_runner_source(src: str, targets: list[str], floors: dict[str, int]) ->
         r"^EXPECTED_SKIPS=\(.*?^\)", "EXPECTED_SKIPS=()", patched, count=1, flags=re.S | re.M
     )
     assert n == 1, "failed to empty EXPECTED_SKIPS in the copied runner"
+
+    # GUARD 7's ledger and the two non-pytest target lists. Left ALONE by
+    # default so every existing caller keeps driving the real ones; a caller
+    # that is testing GUARD 7 itself, or that wants a copy which does not pay
+    # for the hook/shell scripts, names them explicitly.
+    if ack is not None:
+        patched = _replace_array(patched, "NOLAUNCH_ACK", ack)
+    if hook_tests is not None:
+        patched = _replace_array(patched, "HOOK_TESTS", hook_tests)
+    if shell_tests is not None:
+        patched = _replace_array(patched, "SHELL_TESTS", shell_tests)
     return patched
 
 
@@ -71,6 +105,7 @@ def runner_with_targets(
     tmp_path: Path,
     targets: list[str],
     floors: dict[str, int] | None = None,
+    **kwargs,
 ) -> Path:
     """Write a patched copy of run-tests.sh into `tmp_path` and return its path.
 
@@ -86,7 +121,8 @@ def runner_with_targets(
         f"targets={sorted(targets)}\nfloors={sorted(floors)}"
     )
     dst = tmp_path / "run-tests.sh"
-    dst.write_text(patch_runner_source(RUN_TESTS.read_text(), targets, floors))
+    dst.write_text(patch_runner_source(RUN_TESTS.read_text(), targets, floors,
+                                       **kwargs))
     return dst
 
 

@@ -46,6 +46,9 @@ homelab `mailbox` Postgres.
   (now on the secondary line, lower harm) — fix if needed via the same substantive-prompt filter as the
   card face. dspy-eval/ (#148, report-only) still imports the retired single-recap API — harmless (not
   run by run-tests.sh), left as the point-in-time eval record.
+  **UPDATE: dspy-eval/ has since been DELETED** — its frozen `scan-days30.json` capture was captured
+  third-party text in a PUBLIC repo (333 `recent_messages[].text` bodies). The eval record survives in
+  `claudedocs/dspy-recap-eval-2026-07-23.md`; the class is gated by `scripts/tests/test_no_captured_text.py`.
 
 - **Coverage fix (PRs #150 viewer + #151 matcher, merged, deployed, live-verified).** A reconciliation of
   the viewer's live-tmux overlay against RAW tmux (44 live claude panes) found the overlay was **precise

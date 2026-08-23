@@ -1043,8 +1043,10 @@ Run the five-step pipeline on ticket $TID now and output ONLY the json block."
   # deny layer with the suite still green. The value is validated by the
   # DENY-LAYER INTEGRITY GUARD above, which aborts the run if it is empty or
   # short, so there is nothing left for a conditional to guard against.
+  # NEXT_STEP_NUDGE_OFF: headless run on a bounded budget; the consumer is the JSON
+  # parser below, not a person, so a Stop next-step nudge would only burn DRAFTER_TIMEOUT.
   RAW="$(timeout "$DRAFTER_TIMEOUT" \
-    env KUBECONFIG="$PROD_KUBECONFIG" \
+    env KUBECONFIG="$PROD_KUBECONFIG" NEXT_STEP_NUDGE_OFF=1 \
     claude -p "$PROMPT" \
       --model "$DRAFTER_MODEL" \
       --allowedTools "$DRAFTER_ALLOWED_TOOLS" \

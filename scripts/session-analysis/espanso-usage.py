@@ -117,11 +117,21 @@ DEMAND_TEXTS = {
     # pre-rewrite text and the eviction-half rewrite, because transcripts from
     # earlier in any window still carry the old wording.
     ":eos":     ["may need updating", "write the handoff first"],
-    ":acq":     ["recommend anything you think would be useful to include"],
+    # :acq's probe was "recommend anything you think would be useful to
+    # include", which matched NEITHER the pre- nor the post-2026-08-19
+    # expansion — a silent UNPROBED on the config's second-busiest snippet.
+    # Match the opener instead: it is the half that has never been reworded.
+    ":acq":     ["dispatch subagent to process feedback"],
     ":kickoff": ["kickoff message to copy paste to next session"],
     ":rna":     ["recommend next actions"],
     ":lr":      ["limit restored, resume agent"],
     ":mt":      ["tee up what we can do in the meantime"],
+    # Added 2026-08-19 with the snippets themselves. Without these the next
+    # /espanso-audit reports them UNPROBED and cannot re-measure the transcript
+    # demand that justified adding them in the first place.
+    ":alo":     ["left open or unaddressed from this session"],
+    ":pdt":     ["proceed, dispatch, include complete test coverage"],
+    ":cgt":     ["clawgate task to pick up the issues"],
 }
 # Substrings that DISQUALIFY a demand hit (one expansion containing another).
 DEMAND_EXCLUDE = {":cdp": ["prod-kubeconfig"]}
@@ -743,14 +753,261 @@ def declared_terms(ts, trig):
     return terms
 
 
+# --------------------------------------------------------------------------- #
+# CONFIG DIFF — the two-axis check neither --lint nor --replay performs
+# --------------------------------------------------------------------------- #
+# 🔴 WHY THIS EXISTS, and what is FATAL versus merely reported.
+#
+# --lint sees one config. --replay sees only terms he ACTUALLY TYPED in the
+# window. On 2026-08-19 both called a change clean while it took 'nebula',
+# 'mesh' and 'remote' from TWO picker rows to ZERO.
+#
+# FATAL (exit 1):
+#   NARROWED   a snippet that SURVIVES the edit and strictly loses ways of being
+#              found — reaching words go away and none arrive. That is the
+#              2026-08-19 shape, and it stays fatal even when the snippet keeps
+#              one word (an earlier all-or-nothing rule let exactly that pass).
+#   EXPANSION  a query that resolved to one snippet now resolves to another that
+#              types DIFFERENT text. `attr_moved` alone is NOT this: a plain
+#              trigger rename lands there and is harmless, so the discriminator
+#              is the `replace` text.
+#
+# REPORTED, never graded:
+#   queries reaching nothing, attribution lost/gained/moved. espanso lists EVERY
+#   match as a row, so ambiguity costs telemetry, not reach; and pruning or
+#   rewording drops words BY DESIGN. Grading those made this gate red on the
+#   skill's own primary actions — pruning a DEAD snippet, fixing a typo — and a
+#   permanently-red gate teaches everyone to click through.
+#
+# Both halves have been wrong in this file's history; neither is obvious. If you
+# change the grading, re-run the six-scenario matrix in
+# test_espanso_usage.py, which pins all of them.
+GATE_OK = 0
+GATE_FAIL = 1
+
+
+def _vocab(ts) -> dict:
+    """trigger -> the WHOLE words it can be found by (label + search_terms).
+
+    The trigger itself is excluded: typing it verbatim is a different modality
+    from finding a snippet by describing it.
+    """
+    out = {}
+    for trig in ts.triggers:
+        meta = ts.meta.get(trig) or {}
+        words = set(LABEL_WORD_RE.findall((meta.get("label") or "").lower()))
+        for st in meta.get("search_terms") or []:
+            if isinstance(st, str):
+                words |= set(LABEL_WORD_RE.findall(st.lower()))
+        out[trig] = {w for w in words if w}
+    return out
+
+
+def _probe_universe(ts) -> set:
+    """Every query the search bar can be driven with, as far as we model it.
+
+    Single-token PREFIXES, because he matches as he types ('nebu', not just
+    'nebula'), from the trigger, the LABEL and the search_terms — the exact
+    three sources `_token_matches` reads.
+
+    Plus TWO-TOKEN probes built from each snippet's OWN vocabulary. Multi-word
+    queries are how the bar is really driven — `espanso_detect` records that
+    19+ of 46 unattributed keylog rows were multi-word ('ssh work', 'civit
+    prod') — and a single-token universe is structurally blind to a regression
+    that only shows up for them. Pairs are drawn WITHIN a snippet rather than
+    across the whole vocabulary: the cross product is quadratic and mostly
+    nonsense, while the within-snippet pairs are exactly the queries a user
+    forms when naming one thing two ways.
+    """
+    probes, per_snippet = set(), []
+    for trig in ts.triggers:
+        words = {trig.lstrip(":").lower()}
+        meta = ts.meta.get(trig) or {}
+        words |= set(LABEL_WORD_RE.findall((meta.get("label") or "").lower()))
+        for st in meta.get("search_terms") or []:
+            if isinstance(st, str):
+                words |= set(LABEL_WORD_RE.findall(st.lower()))
+        words = {w for w in words if w}
+        per_snippet.append(words)
+        probes |= {w[:i] for w in words for i in range(1, len(w) + 1)}
+    for words in per_snippet:
+        ordered = sorted(words)
+        for i, a in enumerate(ordered):
+            for b in ordered[i + 1:]:
+                probes.add(f"{a} {b}")
+    return probes
+
+
+def _reaching(det, probes) -> dict:
+    """trigger -> the probes that reach it WITHOUT typing its trigger.
+
+    The trigger is a different modality (type it verbatim and it fires); what
+    this gate is about is whether a snippet can still be FOUND by describing
+    it. Passing an empty trigger to the detector's own `_token_matches` turns
+    off the trigger arm and leaves the label+search_terms arms untouched — the
+    authoritative matcher, not a re-spelling of it.
+    """
+    out = {}
+    for trig in det.ts.triggers:
+        meta = det.ts.meta.get(trig) or {}
+        hit = set()
+        for probe in probes:
+            toks = probe.split()
+            if toks and all(det._token_matches(tok, "", meta) for tok in toks):
+                hit.add(probe)
+        out[trig] = hit
+    return out
+
+
+def diff_configs(ts_before, ts_after) -> dict:
+    """Resolve the whole probe universe against both configs.
+
+    Uses the detector's OWN matcher rather than re-spelling the rules — a
+    re-spelt copy of its label tokenizer once invented findings for every
+    hyphenated label word (see LABEL_WORD_RE above).
+    """
+    d_before, d_after = EspansoDetector(ts_before), EspansoDetector(ts_after)
+    probes = sorted(_probe_universe(ts_before) | _probe_universe(ts_after))
+    reach_b, reach_a = _reaching(d_before, probes), _reaching(d_after, probes)
+
+    # THE FATAL AXIS: a WHOLE WORD that used to find a snippet, finds nothing
+    # now, and at least one snippet it used to find still exists.
+    #
+    # 🔴 FOUR earlier rules were each walked by a one-line edit, because each
+    # tried to INFER INTENT from the config and intent is not in the config:
+    #   * "a query reaches nothing"        -> red on every prune;
+    #   * "snippet reaches nothing at all" -> walked by keeping ONE word;
+    #   * "lost with no gain"              -> walked by ADDING one junk word;
+    #   * any magnitude threshold          -> walked by staying under it.
+    # Removing 'nebula' from a label is byte-identical whether you retired the
+    # word deliberately or destroyed the only way you find that snippet. So
+    # this stops guessing: every such loss is reported and FATAL, and the
+    # operator acknowledges the deliberate ones with --accept. A prune needs no
+    # acknowledgement, because the snippet the word described is gone too.
+    vocab_b, vocab_a = _vocab(ts_before), _vocab(ts_after)
+    graded_words = sorted(set().union(*vocab_b.values()) if vocab_b else set())
+    lost_queries = []
+    for word in graded_words:
+        owners_b = [x for x in d_before.ts.triggers if d_before._term_matches(word, x)]
+        owners_a = [x for x in d_after.ts.triggers if d_after._term_matches(word, x)]
+        if not owners_b or owners_a:
+            continue
+        # Excused automatically when every snippet the word reached is GONE:
+        # the vocabulary went with the snippet, which is what a prune is.
+        survivors = [x for x in owners_b if x in vocab_a]
+        if survivors:
+            lost_queries.append((word, sorted(owners_b), sorted(survivors)))
+
+    rows_lost, attr_lost, attr_gained, attr_moved, moved_expansion = [], [], [], [], []
+    for probe in probes:
+        rows_b = [x for x in d_before.ts.triggers if d_before._term_matches(probe, x)]
+        rows_a = [x for x in d_after.ts.triggers if d_after._term_matches(probe, x)]
+        if rows_b and not rows_a:
+            rows_lost.append((probe, sorted(rows_b)))
+        att_b, att_a = d_before._attribute(probe), d_after._attribute(probe)
+        if att_b and not att_a:
+            attr_lost.append((probe, att_b, len(rows_a)))
+        elif att_a and not att_b:
+            attr_gained.append((probe, att_a))
+        elif att_b and att_a and att_b != att_a:
+            attr_moved.append((probe, att_b, att_a))
+            # A MOVE only reaches the user if the EXPANSION changed. A plain
+            # trigger rename lands in attr_moved too and is harmless; pressing
+            # Enter still types the same text. Compare what gets typed.
+            exp_b = (ts_before.meta.get(att_b) or {}).get("replace")
+            exp_a = (ts_after.meta.get(att_a) or {}).get("replace")
+            if exp_b != exp_a:
+                moved_expansion.append((probe, att_b, att_a))
+    return {
+        "probes": len(probes),
+        "lost_queries": lost_queries,
+        "rows_lost": rows_lost,
+        "attr_lost": attr_lost,
+        "attr_gained": attr_gained,
+        "attr_moved": attr_moved,
+        "moved_expansion": moved_expansion,
+    }
+
+
+def render_diff(d, before_label, after_label, accepted=frozenset()) -> list:
+    def _listing(rows, fmt, cap=20):
+        out = [f"       {fmt(r)}" for r in rows[:cap]]
+        if len(rows) > cap:
+            out.append(f"       ... and {len(rows) - cap} more (not shown)")
+        return out
+
+    out = [f"## CONFIG DIFF — {before_label} -> {after_label}", "",
+           f"   {d['probes']} probes. FATAL = a WHOLE WORD that used to find a",
+           "   snippet finds nothing now while that snippet still exists, or a",
+           "   query that now types DIFFERENT text. Deliberate losses are",
+           "   acknowledged with --accept; a PRUNE needs none, because the word",
+           "   went with the snippet. Everything else is reported, not graded:",
+           "   espanso lists every match as a row, so ambiguity costs telemetry,",
+           "   not reach.",
+           ""]
+    unack = [r for r in d["lost_queries"] if r[0] not in accepted]
+    ack = [r for r in d["lost_queries"] if r[0] in accepted]
+    if unack:
+        out.append(f"  🔴 QUERIES THAT STOP WORKING — {len(unack)} word(s) find "
+                   "nothing now, and the snippet they found still exists:")
+        out.extend(_listing(
+            unack, lambda r: f"{r[0]!r} reached {' '.join(r[1])} -> nothing"))
+        out.append("")
+        out.append("     If these losses are DELIBERATE, acknowledge them:")
+        out.append("       --accept " + ",".join(r[0] for r in unack[:12])
+                   + (" ..." if len(unack) > 12 else ""))
+        out.append("")
+    else:
+        out.append("  ✅ every word that found a surviving snippet still does")
+    if d["moved_expansion"]:
+        out.append(f"  🔴 EXPANSION CHANGED — {len(d['moved_expansion'])} quer(y/ies) "
+                   "now type DIFFERENT text:")
+        out.extend(_listing(d["moved_expansion"],
+                            lambda r: f"{r[0]!r}: {r[1]} -> {r[2]}"))
+        out.append("")
+    if ack:
+        out.append(f"  ({len(ack)} loss(es) acknowledged via --accept: "
+                   + ", ".join(r[0] for r in ack[:12])
+                   + (" ..." if len(ack) > 12 else "") + ")")
+    out.append("")
+    out.append(f"  queries reaching nothing : {len(d['rows_lost'])}  "
+               "(includes prefixes and pairs; only WHOLE WORDS with a "
+               "surviving owner are graded, above)")
+    out.extend(_listing(d["rows_lost"], lambda r: f"{r[0]!r} was {' '.join(r[1])} -> 0"))
+    out.append(f"  attribution gained       : {len(d['attr_gained'])}")
+    out.extend(_listing(d["attr_gained"], lambda r: f"{r[0]!r} -> {r[1]}"))
+    out.append(f"  attribution lost         : {len(d['attr_lost'])}  "
+               "(telemetry only — the fire still happens, logged trigger=None)")
+    out.extend(_listing(d["attr_lost"], lambda r: f"{r[0]!r} was {r[1]}, now {r[2]} rows"))
+    if d["attr_moved"]:
+        out.append(f"  attribution moved        : {len(d['attr_moved'])}  "
+                   f"({len(d['moved_expansion'])} of them change the EXPANSION — "
+                   "those are graded above)")
+        out.extend(_listing(d["attr_moved"], lambda r: f"{r[0]!r} {r[1]} -> {r[2]}"))
+    out.append("")
+    return out
+
+
 def lint(ts):
     """Offline findings, worst first.
 
-    `unreachable` is the one that matters: `_attribute` returns None whenever a
-    term matches >=2 snippets, so a snippet with NO uniquely-resolving term
-    cannot be reached through the search UI AT ALL — which is how the four
-    :ssh* snippets read as dead while being searched for weekly. The old
-    "no trigger is a prefix of another" check is kept, but it has never fired.
+    🔴 EVERY finding here is about ATTRIBUTION, never about reachability.
+    espanso's search UI lists EVERY match as a row and the user picks one, so a
+    term matching >=2 snippets shows two rows — it does NOT fail. What breaks is
+    `_attribute`, which returns None on >=2 matches, so the fire is recorded
+    UNATTRIBUTED (`_close_search` emits the row either way). A snippet with no
+    uniquely-resolving term is therefore INVISIBLE TO THIS TOOL, not unreachable
+    to the user.
+
+    This docstring used to say such a snippet "cannot be reached through the
+    search UI AT ALL". That is false, and on 2026-08-19 an audit acted on it:
+    it stripped `label`+`search_terms` from the two nebula :ssh* snippets to
+    force uniqueness, which took 'nebula'/'mesh'/'remote' from 2 picker rows to
+    ZERO and made those rows render as their raw `ssh zach@...` expansion
+    (espanso falls back to the replacement text when a label is absent).
+    Fix ambiguity by changing which WORDS a snippet spells — never by removing
+    its label. The old "no trigger is a prefix of another" check is kept, but it
+    has never fired.
     """
     findings = []
     det = EspansoDetector(ts)
@@ -788,8 +1045,11 @@ def lint(ts):
         if terms and not unique:
             findings.append({"kind": "unreachable", "trigger": trig,
                              "message": "NO declared term resolves uniquely to it — "
-                                        "every search that reaches it is ambiguous, "
-                                        "so it can never fire from the search UI"})
+                                        "every search that reaches it is ambiguous, so "
+                                        "its fires are recorded UNATTRIBUTED. It is "
+                                        "still reachable: espanso lists it as one row "
+                                        "among several. Fix by changing which WORDS it "
+                                        "spells — NEVER by removing its label"})
     for term in sorted(owners):
         m = _matches(term)
         if len(m) > 1:
@@ -804,10 +1064,14 @@ _LINT_ORDER = {"unreachable": 0, "self-miss": 1, "undiscoverable": 2,
 
 
 def render_lint(findings, config_path):
-    out = [f"## LINT — offline discoverability check ({config_path})", "",
-           "   `_attribute` returns None when a term matches >=2 snippets, so an",
-           "   AMBIGUOUS term is a search that silently fires nothing — and a",
-           "   snippet with no unique term is UNREACHABLE from the search UI.", ""]
+    out = [f"## LINT — offline ATTRIBUTION check ({config_path})", "",
+           "   🔴 AMBIGUOUS IS NOT DEAD. espanso lists EVERY match as a row and",
+           "   the user picks one, so an ambiguous term still fires. What breaks",
+           "   is `_attribute` (None on >=2 matches), so the fire is logged",
+           "   UNATTRIBUTED — these findings are about TELEMETRY, not reach.",
+           "   Fix one by changing which WORDS a snippet spells. NEVER by",
+           "   removing its label: espanso then shows the raw expansion as the",
+           "   row text, and the snippet loses the picker entirely.", ""]
     if not findings:
         out.append("  (no findings)")
         out.append("")
@@ -980,6 +1244,22 @@ def parse_args(argv=None) -> argparse.Namespace:
                    help="raw search-term breakdown instead of the report")
     p.add_argument("--replay", action="store_true",
                    help="resolve observed search terms through the real detector")
+    p.add_argument("--diff-config", default=None, metavar="PATH",
+                   help="resolve a probe universe against the deployed config "
+                        "(or --config) AND this candidate. Exits 1 if a "
+                        "SURVIVING snippet strictly loses ways of being found, "
+                        "or if a query now types DIFFERENT text; everything "
+                        "else is reported, not graded.")
+    p.add_argument("--accept", default="", metavar="W,W",
+                   help="comma-separated words whose loss is DELIBERATE. Each "
+                        "one stops failing the gate; the report still lists it. "
+                        "Intent is not in the config, so it is stated here "
+                        "rather than guessed.")
+    p.add_argument("--gate", default=None, metavar="PATH",
+                   help="PRE-SHIP GATE, offline: --lint the candidate then diff "
+                        "it against the deployed config, in one command with one "
+                        "verdict. Exits 1 on a lost query or a changed "
+                        "expansion.")
     p.add_argument("--lint", action="store_true",
                    help="offline discoverability/ambiguity check (no creds needed)")
     p.add_argument("--config", default=None, metavar="PATH",
@@ -1023,6 +1303,37 @@ def main(argv=None) -> int:
     # ---- modes that need no ClickHouse ----
     if a.verify_deploy:
         rc = _run_verify(a, out)
+        print("\n".join(out))
+        return rc
+
+    if a.diff_config or a.gate:
+        candidate = a.gate or a.diff_config
+        before_path = a.config or default_config_path()
+        try:
+            ts_before = load_config(a.config)
+        except ConfigUnavailable as e:
+            print("\n".join(unmeasured_banner(e, what="CONFIG (deployed side)")))
+            return 3
+        try:
+            ts_after = load_config(candidate)
+        except ConfigUnavailable as e:
+            print("\n".join(unmeasured_banner(e, what="CONFIG (candidate)")))
+            return 3
+        # NOTE: a candidate that parses to ZERO snippets is already refused by
+        # load_config (it raises ConfigUnavailable), so the empty side can never
+        # reach the diff and produce a confident wall of "rows lost". A guard
+        # here as well was UNREACHABLE — a mutation sweep showed disabling it
+        # changed nothing — so it is deliberately absent rather than sitting
+        # there looking like protection. test_gate_exit_codes pins the rc 3.
+        if a.gate:
+            out.extend(render_lint(lint(ts_after), candidate))
+        accepted = {w.strip().lower() for w in (a.accept or "").split(",") if w.strip()}
+        d = diff_configs(ts_before, ts_after)
+        out.extend(render_diff(d, before_path, candidate, accepted))
+        unack = [r for r in d["lost_queries"] if r[0] not in accepted]
+        rc = GATE_FAIL if (unack or d["moved_expansion"]) else GATE_OK
+        out.append("GATE: FAIL — see the 🔴 sections above"
+                   if rc else "GATE: PASS — nothing lost its findability")
         print("\n".join(out))
         return rc
 

@@ -263,3 +263,25 @@ def recorded(stub_dir: Path) -> list[str]:
 def blocked_systemctl(stub_dir: Path) -> list[str]:
     """The recorded systemctl calls that were SWALLOWED rather than executed."""
     return [ln for ln in recorded(stub_dir) if ln.startswith("systemctl(blocked)")]
+
+
+def main(argv: list[str] | None = None) -> int:
+    """`python -m testlib.nolaunch <dir>` — install the stubs, print the log path.
+
+    Exists so `scripts/run-tests.sh` can install ONE stub dir for the whole run,
+    before any target starts, and put it first on PATH for everything it
+    invokes — including the targets that are NOT pytest and therefore load no
+    plugin. Same `install()` the plugin calls; the shell needed a door into it,
+    not a second implementation of it.
+    """
+    import sys as _sys
+    args = list(_sys.argv[1:] if argv is None else argv)
+    if len(args) != 1:
+        print("usage: python -m testlib.nolaunch <stub-dir>", file=_sys.stderr)
+        return 2
+    print(install(Path(args[0])))
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover — exercised via run-tests.sh
+    raise SystemExit(main())

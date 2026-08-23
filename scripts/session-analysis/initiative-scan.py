@@ -4,7 +4,7 @@
 The gap this fills: Zach runs many multi-session work threads ("initiatives") —
 "App Blocks soft-launch", "sysRedis HA", "mail-automation", "dp-prod 500-floor".
 Each is anchored by a handoff doc (`claudedocs/handoff-<slug>.md`) and spans many
-Claude Code sessions over days. The live tmux `agent-ops` dashboard ($mod+i) shows
+Claude Code sessions over days. The bar's live Claude-runs pill shows
 only LIVE tmux sessions — ephemeral, lost on reboot. This is the durable analogue:
 a re-runnable, deterministic, read-only report of every initiative + its momentum +
 its next step, so you can stop searching for your own in-flight work.
@@ -73,6 +73,7 @@ import glob
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -1449,6 +1450,24 @@ def git_recent_commit_subjects(repo: str, branch: str, since_days: int,
     return res[:limit]
 
 
+def gh_available() -> bool:
+    """Can we read PRs at all?
+
+    `gh_open_prs`/`gh_merged_prs` return `[]` on ANY failure, so a repo with no
+    open PRs and a host where `gh` is absent or unauthenticated produce the
+    IDENTICAL `open_prs: []`. That ambiguity is reported (not resolved) via the
+    report's `gh_available` flag: with it False, every PR field in the report is
+    "not wired up here", not "measured zero". One probe per report.
+    """
+    if not shutil.which("gh"):
+        return False
+    try:
+        return subprocess.run(["gh", "auth", "status"], capture_output=True,
+                              timeout=15).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 def gh_open_prs(repo: str) -> list[dict]:
     """OPEN PRs as [{number, title, headRefName}] — empty on any failure."""
     out = _run([
@@ -2246,13 +2265,16 @@ def attribute_git(initiatives: list[dict], days: int) -> None:
 def build_report(days: int, repos: list[str] | None = None,
                  client=None, projects_root: str = PROJECTS_ROOT,
                  now: float | None = None, include_tmux: bool = False,
-                 panes: list[dict] | None = None) -> dict:
+                 panes: list[dict] | None = None,
+                 gh_ok: bool | None = None) -> dict:
     """Fuse the three sources into a ranked, per-repo report dict.
 
     `client` may be None (telemetry skipped). `repos` None -> auto-discover from the
     session/telemetry cwds + doc globs (session-first discovery). `include_tmux` links
     live tmux sessions to initiatives; `panes` overrides the live `collect_tmux_panes()`
-    read (for tests / reproducibility).
+    read (for tests / reproducibility). `gh_ok` overrides the `gh_available()` probe
+    the same way — a test that stubs `gh_open_prs` must state which world it is in,
+    rather than letting the report's honesty flag depend on the host running it.
     """
     now_epoch = now if now is not None else time.time()
 
@@ -2359,6 +2381,10 @@ def build_report(days: int, repos: list[str] | None = None,
     return {
         "days": days,
         "telemetry_available": telemetry_available,
+        # Says which zeroes are MEASURED and which are "not wired up here":
+        # False means every `open_prs: []` / `merged_prs: 0` in this report is
+        # an absence of data, not an absence of PRs.
+        "gh_available": gh_available() if gh_ok is None else bool(gh_ok),
         "tmux_enabled": tmux_active,
         "tmux_unmatched": tmux_unmatched,
         "repos": repos,
@@ -2487,6 +2513,9 @@ def render(report: dict, now: float | None = None) -> str:
     if not report["telemetry_available"]:
         out.append("\n(NOTE: telemetry OFF — CLICKHOUSE_* unset or unreachable. "
                    "Momentum/recency here come from commits + sessions + handoff mtime only.)")
+    if report.get("gh_available") is False:
+        out.append("\n(NOTE: gh UNAVAILABLE — every 'open PR' / 'merged PR' figure above is "
+                   "NOT MEASURED, not zero. Authenticate `gh` to get real PR counts.)")
     return "\n".join(out)
 
 

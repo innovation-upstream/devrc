@@ -62,6 +62,46 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+def age_histogram(rows, fuzzy):
+    """A `summary.age_sources` histogram that is COHERENT — its values sum to
+    `rows`, which is an invariant of the producer, not a nicety: `summarize()`
+    derives `total_sessions = len(rows)` and `age_sources = _count_by(... for r
+    in rows)` from the SAME list one line apart, so every row lands in exactly
+    one bucket.
+
+    🔴 THE HAND-WRITTEN VERSION OF THIS WAS NOT COHERENT, and that is worth
+    recording. It was the literal `{"fuzzyclaw": fuzzy, "ledger": 27, "none":
+    13}`, which sums to `fuzzy + 40` regardless of `rows` — so `sm_report(rows=
+    47, fuzzy=0)`, the fixture behind the whole READY path, published a
+    histogram accounting for 40 of 47 rows. Nothing could see it until the
+    reader gained a coherence check, and then every READY test went red at once.
+    A fixture that cannot occur in production tests a payload the code will
+    never receive.
+
+    🔴 A ZERO IS SPELLED BY ABSENCE, not by `fuzzyclaw: 0` — `_count_by` creates
+    a key only for a value it OBSERVED. Reproduced here so the READY tests
+    exercise the shape a real all-clear scan actually emits.
+
+    The default `rows=47, fuzzy=7` reproduces the measured workbench payload
+    exactly (`{fuzzyclaw: 7, ledger: 27, none: 13}`), and the three buckets are
+    kept pairwise distinct so an assertion cannot pass by reading the wrong key.
+    """
+    out = {}
+    if fuzzy:
+        out["fuzzyclaw"] = fuzzy
+    rest = rows - fuzzy
+    if rest > 0:
+        none = rest // 3
+        if none == fuzzy:
+            none += 1
+        none = min(none, rest)
+        if none:
+            out["none"] = none
+        if rest - none:
+            out["ledger"] = rest - none
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # fixture: a throwaway origin + working clone, origin/main one commit ahead
 # --------------------------------------------------------------------------- #
@@ -152,10 +192,24 @@ class Fleet:
         self.git(self.work, "commit", "-q", "-m", msg)
 
     # -- the subject under test --------------------------------------------- #
-    def check(self, *args, repo=None, **envextra):
+    def check(self, *args, repo=None, script=None, **envextra):
         env = self.env(
             SHIP_ROLE="workbench",           # bypass IP detection (no `ip` here)
             DRIFT_REPO=str(repo or self.work),
+            # 🔴 THE FOURTH HERMETICITY SEAM, and it caught a live breach the
+            # moment it was added. The fuzzyclaw phase-2 gate EXECS
+            # `scripts/session-manager`, which scans the operator's REAL tmux —
+            # unstubbed, every test in this file did exactly that (48 live
+            # windows, measured), and one of them declared "READY — 0 of 48"
+            # because the fixture $HOME has no fuzzyclaw task files. A
+            # read-only breach is still a breach, and the verdict it produced
+            # was wrong.
+            #
+            # Defaulted to a path INSIDE tmp_path that does not exist, so the
+            # gate takes its no-session-manager branch. A test that wants the
+            # gate to answer calls `stub_session_manager()`, exactly like
+            # `stub_ssh`.
+            DRIFT_SESSION_MANAGER=str(self.bin / "session-manager"),
             # Pinned into tmp_path: the unreachable streak is PERSISTENT state,
             # and left to its default ($XDG_STATE_HOME/…) these tests would both
             # write to the operator's real state dir and inherit a streak from
@@ -163,8 +217,12 @@ class Fleet:
             DRIFT_STATE_DIR=str(self.state),
         )
         env.update(envextra)   # per-test overrides win (e.g. a blocked state dir)
+        # `script` runs a COPY of the checker whose `lib/` a test controls. The
+        # reader path is derived from the script's own resolved dirname and is
+        # deliberately NOT env-overridable, so a copy is the only way to drive
+        # the shell against a reader that breaks the output contract.
         proc = subprocess.run(
-            ["bash", str(DRIFT), *args],
+            ["bash", str(script or DRIFT), *args],
             capture_output=True, text=True, env=env,
         )
         return proc.returncode, proc.stdout + proc.stderr
@@ -182,6 +240,40 @@ class Fleet:
             body.append("echo '%s'" % stdout.replace("'", "'\\''"))
         body.append("exit %d" % exit_code)
         write_exec(self.bin / "ssh", "\n".join(body) + "\n")
+
+    def stub_session_manager(self, payload, exit_code=0):
+        """Install a stub `session-manager` that prints `payload` on stdout.
+
+        `payload` is a dict (serialised to JSON) or a raw string, so both the
+        well-formed reports and the malformed ones — a crash, an empty stream,
+        a truncated body — are drivable. The real binary is never executed by
+        this suite: it scans the operator's live tmux.
+        """
+        text = payload if isinstance(payload, str) else json.dumps(payload)
+        body = "cat <<'SM_JSON_EOF'\n%s\nSM_JSON_EOF\nexit %d\n" % (
+            text, exit_code)
+        write_exec(self.bin / "session-manager", body)
+
+    def sm_report(self, rows=47, fuzzy=7, host="workbench", files_seen=400,
+                  status="ok"):
+        """The SHAPE `session-manager scan --json` really emits, cut down to the
+        four facts the phase-2 reader consults.
+
+        Pinned against the live payload rather than invented: `age_sources` is
+        a histogram keyed by WRITER (`ledger`/`fuzzyclaw`/`none`) and
+        `total_sessions` is the row count, both under `summary`. Measured on
+        the workbench 2026-08-15 — `{fuzzyclaw: 7, ledger: 27, none: 13}` over
+        47 rows — which is the default here so the fixture is a real
+        observation and not a round number.
+        """
+        return {
+            "local_host": host,
+            "fuzzyclaw": {"status": status, "files_seen": files_seen},
+            "summary": {
+                "total_sessions": rows,
+                "age_sources": age_histogram(rows, fuzzy),
+            },
+        }
 
 
 @pytest.fixture
@@ -1435,6 +1527,28 @@ UNIT_PATH_REQUIREMENTS = {
     # remote payload are both handed to.
     "dirname": "pkgs.coreutils",
     "bash": "pkgs.bash",
+    # The fuzzyclaw phase-2 gate: `timeout` caps the scan, `python3` runs
+    # lib/drift_phase2.py over its JSON. Both are resolved from PATH BY THIS
+    # SCRIPT, which is what puts them in this table rather than the child table
+    # below.
+    "timeout": "pkgs.coreutils",
+    "python3": "pkgs.python3",
+}
+
+# 🔴 A SECOND SEAM, AND THE TABLE ABOVE STRUCTURALLY CANNOT SEE IT. The phase-2
+# gate EXECS `scripts/session-manager`, and that child resolves binaries of its
+# own from the same unit PATH: `python3` (its `#!/usr/bin/env python3` shebang)
+# and `tmux` (`tmux list-panes -a`, its only subprocess on a local scan). Neither
+# word ever appears in drift-check.sh, so the reverse tokenizer cannot find them
+# and `test_every_command_the_checker_runs_is_on_the_unit_path` would fail if
+# they were added above (it asserts the command IS called by the scripts).
+#
+# The failure is the silent kind this file keeps meeting: nothing crashes. The
+# gate reports COULD NOT MEASURE on every timer run, forever, from a unit that
+# looks correct — a checker wired to nothing, wearing an honest error message.
+CHILD_PATH_REQUIREMENTS = {
+    "python3": "pkgs.python3",
+    "tmux": "pkgs.tmux",
 }
 
 # Shell builtins/keywords: present as command words, never resolved via PATH.
@@ -1902,25 +2016,204 @@ def test_settings_values_never_reach_the_output(fleet):
     )
 
 
-def test_settings_key_set_divergence_is_rc15(fleet):
-    """🔴 NEGATIVE CONTROL for the key-set check: a key present on one host and
-    absent on the other, watched red with this code's own message."""
+def _two_host_parity(fleet, local_keys, remote_keys, **env):
+    """Run the checker across two fixture homes differing only in settings keys.
+
+    Both sides carry the same plugin state, so the ONLY thing that can move the
+    verdict is the top-level key set — otherwise a green here could come from a
+    plugin agreement rather than from the key comparison under test.
+    """
     fleet.catch_up()
-    lstore = _mkhome(fleet.home, healthy=1,
-                     settings_keys=["hooks", "permissions", "theme"],
+    lstore = _mkhome(fleet.home, healthy=1, settings_keys=local_keys,
                      enabled=["gopls-lsp@m"], installed=["gopls-lsp@m"])
     rhome = fleet.root / "remote-home"
     rhome.mkdir()
     rstore = _mkhome(rhome, healthy=1, store=fleet.root / "remote-store",
-                     settings_keys=["hooks", "effortLevel", "voice"],
+                     settings_keys=remote_keys,
                      enabled=["gopls-lsp@m"], installed=["gopls-lsp@m"])
     _remote_running_the_real_payload(fleet, rhome, rstore)
+    return _parity(fleet, store=lstore, REMOTE_SSH="stub@example.invalid", **env)
 
-    rc, out = _parity(fleet, store=lstore, REMOTE_SSH="stub@example.invalid")
+
+def test_settings_key_set_divergence_is_rc15(fleet):
+    """🔴 NEGATIVE CONTROL for the key-set check: a key present on one host and
+    absent on the other, watched red with this code's own message.
+
+    🔴 The keys here are deliberately NOT the ones on the per-host allowlist
+    (`theme`/`voice`/`effortLevel`). This test previously used exactly those, so
+    scoping the comparison would have turned the subsystem's primary negative
+    control green while looking like a test that still fired. `statusLine` and
+    `hooks` are the right shape: a host quietly losing either is the failure this
+    check exists for, and neither is anybody's preference.
+    """
+    rc, out = _two_host_parity(
+        fleet,
+        ["hooks", "permissions", "statusLine"],
+        ["hooks", "env", "model"],
+    )
     assert rc == 15, f"diverging key sets must be rc 15, got {rc}\n{out}"
     assert "settings.json top-level KEY SETS differ" in out, out
-    assert "only on workbench: permissions theme" in out, out
-    assert "only on laptop: effortLevel voice" in out, out
+    assert "only on workbench: permissions statusLine" in out, out
+    assert "only on laptop: env model" in out, out
+
+
+# --- the per-host allowlist ------------------------------------------------- #
+#
+# 🔴 WHAT THIS SECTION IS DEFENDING. `~/.claude/settings.json` is per-host and
+# unmanaged by design, so a handful of keys can NEVER agree across the fleet and
+# the deadman was red on them from its first autonomous run. The fix is a scoped
+# comparison — and the way a scoped comparison fails is by scoping away
+# EVERYTHING, which leaves a green deadman wired to nothing. So every test below
+# is paired: one asserting the allowlisted keys go quiet, one asserting that a
+# key beside them still fires.
+ALLOWLISTED = ("effortLevel", "theme", "voice")
+
+
+def _perhost_reason(key):
+    """Call the script's own `perhost_reason` for `key`, in isolation.
+
+    Extracted and executed rather than re-implemented: a second copy of the
+    enumeration in the test file would agree with itself forever while the script
+    drifted, which is the shape of guard this repo keeps finding.
+    """
+    src = DRIFT.read_text()
+    i = src.index("perhost_reason() {")
+    j = src.index("\n}\n", i) + 3
+    proc = subprocess.run(
+        ["bash", "-c", src[i:j] + '\nperhost_reason "$1"\n', "_", key],
+        capture_output=True, text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    return proc.stdout.strip()
+
+
+def test_the_measured_live_divergence_is_no_longer_drift(fleet):
+    """🔴 THE RED THIS CHANGE EXISTS TO FIX, in the shape measured on 2026-08-11.
+
+    Four keys differed on the live fleet: `theme` (workbench only), `voice` and
+    `effortLevel` (laptop only) — all per-host preference — and `permissions`,
+    which is a real gap and is NOT allowlisted. With `permissions` present on
+    both hosts (the state `scripts/sync-claude-permissions.sh` produces on the
+    laptop), the remaining three must produce rc 0.
+    """
+    rc, out = _two_host_parity(
+        fleet,
+        ["hooks", "permissions", "theme"],
+        ["hooks", "permissions", "effortLevel", "voice"],
+    )
+    assert rc == 0, f"the per-host preference keys still fail the deadman: {rc}\n{out}"
+    assert "AGREE apart from the per-host keys below" in out, out
+    # 🔴 SILENCED IS NOT HIDDEN. Each exempted key is named with its reason, in
+    # the same block as the verdict — a tolerated difference and a difference
+    # nobody looked at must never print the same way.
+    assert "IGNORED (allowlisted in drift-check.sh, not drift)" in out, out
+    for key in ALLOWLISTED:
+        assert key in out, f"exempted key {key} vanished from the report\n{out}"
+    assert "per-host by design: terminal colour theme" in out, out
+    assert "per-host by design: TTS voice" in out, out
+    assert "per-host by design: reasoning-effort" in out, out
+
+
+def test_the_measured_live_divergence_still_fires_on_permissions(fleet):
+    """The OTHER half of the pair, in the same measured shape: before the laptop
+    gets a permissions block, the check must still be red — and red naming ONLY
+    `permissions`, not the three preference keys it now tolerates.
+
+    This is what makes the rc 0 above a measurement rather than a silencing.
+    """
+    rc, out = _two_host_parity(
+        fleet,
+        ["hooks", "permissions", "theme"],
+        ["hooks", "effortLevel", "voice"],
+    )
+    assert rc == 15, f"the real permissions gap was swallowed by the allowlist: {rc}\n{out}"
+    assert "only on workbench: permissions" in out, out
+    drift_lines = [ln for ln in out.splitlines()
+                   if ln.startswith("[parity]   only on")
+                   and "per-host by design" not in ln]
+    assert drift_lines == ["[parity]   only on workbench: permissions"], (
+        "the DRIFT verdict named a key the allowlist covers\n" + "\n".join(drift_lines)
+    )
+
+
+@pytest.mark.parametrize("unknown", ["autoCompactWindow", "zzSomeFutureKey"])
+def test_an_unknown_key_beside_allowlisted_ones_still_fires(fleet, unknown):
+    """🔴 FAILS CLOSED. The allowlist is an enumeration, so a key nobody has
+    argued about — an upstream addition, a rename, a typo — is drift by default
+    EVEN WHEN it arrives alongside keys that are legitimately exempt.
+
+    Parameterised over a real Claude Code key and an invented one: a guard that
+    only rejects made-up names would be spelled rather than structural.
+    """
+    rc, out = _two_host_parity(
+        fleet,
+        ["hooks", "theme", unknown],
+        ["hooks", "voice", "effortLevel"],
+    )
+    assert rc == 15, f"an unknown key was silently exempted: {rc}\n{out}"
+    assert "only on workbench: %s" % unknown in out, out
+    assert "theme" not in out.split("IGNORED")[0].split("KEY SETS differ")[-1], (
+        "an allowlisted key was reported as drift\n" + out
+    )
+
+
+def test_the_allowlist_is_not_a_wildcard():
+    """🔴 THE MUTANT THAT DISARMS THE DEADMAN, pinned directly.
+
+    `perhost_reason` returning a reason for everything makes every future
+    divergence invisible while every behavioural test above still passes on its
+    happy path. So assert the enumeration BOTH ways: each listed key has a
+    reason, and keys that are not listed have none.
+    """
+    for key in ALLOWLISTED:
+        why = _perhost_reason(key)
+        assert why, f"allowlisted key {key} carries no reason"
+        assert len(why) > 20, f"the reason for {key} is not a reason: {why!r}"
+    for key in ("permissions", "hooks", "statusLine", "enabledPlugins", "env",
+                "model", "alwaysThinkingEnabled", "", "*", "zzSomeFutureKey"):
+        assert _perhost_reason(key) == "", (
+            f"{key!r} is exempt from the parity check and nobody decided that"
+        )
+
+
+def test_the_allowlist_cannot_be_widened_from_the_environment(fleet):
+    """🔴 Every other tunable in this file is an env override. This one must not
+    be: a stray export in a unit file or a shell profile could otherwise widen it
+    to everything, and the resulting green would be indistinguishable from a real
+    pass. Both halves are asserted — no such variable is READ by the script, and
+    setting the plausible names changes nothing.
+    """
+    src = "\n".join(ln for ln in DRIFT.read_text().splitlines()
+                    if not ln.strip().startswith("#"))
+    assert not re.search(r"DRIFT_(PERHOST|ALLOW|IGNORE|EXEMPT)", src), (
+        "the per-host allowlist reads an environment variable — it must be "
+        "reviewable source, not runtime input"
+    )
+    rc, out = _two_host_parity(
+        fleet,
+        ["hooks", "permissions"],
+        ["hooks"],
+        DRIFT_PERHOST_KEYS="permissions",
+        DRIFT_ALLOW_KEYS="permissions",
+        DRIFT_IGNORE_KEYS="permissions",
+        DRIFT_EXEMPT_KEYS="permissions",
+    )
+    assert rc == 15, f"an env var widened the allowlist: {rc}\n{out}"
+    assert "only on workbench: permissions" in out, out
+
+
+def test_an_allowlisted_key_present_on_BOTH_hosts_is_not_reported(fleet):
+    """The allowlist scopes the DIFFERENCE, not the key. A key both hosts have is
+    not a difference at all, so it must not appear in the IGNORED block — that
+    block is a record of decisions actually applied, and padding it with keys
+    that never diverged would make it noise nobody reads."""
+    keys = ["hooks", "theme", "voice"]
+    rc, out = _two_host_parity(fleet, keys, keys)
+    assert rc == 0, out
+    assert "key sets AGREE (4 key names on each host)" in out, out
+    assert "IGNORED" not in out, (
+        "keys that agree were listed as allowlisted exemptions\n" + out
+    )
 
 
 def test_identical_key_sets_agree(fleet):
@@ -2125,3 +2418,2336 @@ def test_the_parity_scan_writes_nothing_into_the_home_it_walks(fleet):
     before = snapshot()
     _parity(fleet, "--no-remote", store=store)
     assert snapshot() == before, "the parity scan modified the tree it was reading"
+
+
+# --------------------------------------------------------------------------- #
+# 11. THE FUZZYCLAW PHASE-2 GATE (rc 16)
+#
+# 🔴 WHY IT IS A GATE AND NOT A NOTE. "Is it safe to delete the fuzzyclaw
+# readers?" was answered by a human remembering to run a probe — the same shape
+# as "nothing runs ship.sh on a schedule", which is the failure this whole file
+# exists to convert into a measurement.
+#
+# 🔴 AND WHY THE ZERO IS THE DANGEROUS DIRECTION. The answer this gate hands over
+# is a DELETION, and every way it can break produces the number that authorises
+# one: no session-manager -> 0, a crashed scan -> 0, fuzzyclaw not read -> 0, a
+# scan of the wrong host -> 0, a host with no windows -> 0. So the load-bearing
+# tests here are not the READY case; they are the six ways a zero can be false.
+# Each must be visibly distinct from a real zero AND must not set rc 16.
+# --------------------------------------------------------------------------- #
+def _phase2(fleet, report=None, raw=None, exit_code=0, **env):
+    """A clean local-only run with the phase-2 gate pointed at a stubbed scan."""
+    fleet.catch_up()
+    if raw is not None:
+        fleet.stub_session_manager(raw, exit_code=exit_code)
+    elif report is not None:
+        fleet.stub_session_manager(report, exit_code=exit_code)
+    return fleet.check("--no-remote", **env)
+
+
+def test_the_phase2_stub_is_the_instrument_and_it_can_move(fleet):
+    """INSTRUMENT CHECK, before any verdict is read off this stub.
+
+    A stub whose output the gate never actually reads would make every
+    assertion below pass for the wrong reason — and the zero it would report is
+    exactly the value that means READY. So: two different stub payloads, two
+    different rendered numbers, from the same fixture.
+    """
+    rc_a, out_a = _phase2(fleet, fleet.sm_report(rows=47, fuzzy=7))
+    assert "fuzzyclaw-only ages: 7 of 47 row(s) EXAMINED" in out_a, out_a
+    rc_b, out_b = _phase2(fleet, fleet.sm_report(rows=12, fuzzy=3))
+    assert "fuzzyclaw-only ages: 3 of 12 row(s) EXAMINED" in out_b, out_b
+    # BOTH numbers moved, so neither slot is static prose
+    assert rc_a == 0 and rc_b == 0
+
+
+def test_a_nonzero_fuzzyclaw_count_is_NOT_READY_and_does_not_fail_the_unit(fleet):
+    """🔴 TODAY'S STATE, and it must stay green. 7 of 47 rows were measured on
+    the workbench 2026-08-15. A gate that went red for the NORMAL condition
+    would be permanently red, which trains the operator to click through the one
+    alert that has to keep its meaning."""
+    rc, out = _phase2(fleet, fleet.sm_report(rows=47, fuzzy=7))
+    assert rc == 0, out
+    assert "fuzzyclaw-only ages: 7 of 47 row(s) EXAMINED" in out
+    assert "NOT READY — 7 of 47 row(s) still take their age ONLY from" in out
+    assert "READY — 0 of" not in out
+    assert "rc=16" not in out
+
+
+def test_a_REAL_zero_over_real_rows_is_READY_and_is_rc16(fleet):
+    """The transition this gate exists to catch, pinned at BOTH the exit code
+    and the rendered claim."""
+    rc, out = _phase2(fleet, fleet.sm_report(rows=47, fuzzy=0))
+    assert rc == 16, out
+    assert "fuzzyclaw-only ages: 0 of 47 row(s) EXAMINED" in out
+    assert "🔴 READY — 0 of 47 rows depend on fuzzyclaw for an age." in out
+    assert "Phase 2 is UNBLOCKED" in out
+    # 🔴 rc 16 is NOT drift, and the verdict word is a claim like any other.
+    assert "drift-check: ACTIONABLE (not drift) (rc=16)" in out
+    assert "drift-check: DRIFT (rc=16)" not in out
+    assert "rc16=NOT drift: the fuzzyclaw phase-2 gate OPENED" in out
+
+
+def test_a_zero_over_ZERO_ROWS_is_not_ready_and_says_it_walked_nothing(fleet):
+    """🔴 THE SILENT ZERO, in the one form this file already has a name for:
+    "a scan that examined nothing is not a clean scan; it is no scan." A host
+    with no tmux windows reports `0 of 0`, which is byte-identical to a real
+    zero if only the numerator is printed."""
+    rc, out = _phase2(fleet, fleet.sm_report(rows=0, fuzzy=0))
+    assert rc == 0, out
+    # the pair is the claim — the denominator is what distinguishes this
+    assert "fuzzyclaw-only ages: 0 of 0 row(s) EXAMINED" in out
+    assert "COULD NOT MEASURE — 0 rows examined. A zero over zero rows is a scan" in out
+    assert "that walked nothing, not a measurement. NOT 'phase 2 is ready'." in out
+    assert "READY — 0 of" not in out
+    assert "UNBLOCKED" not in out
+
+
+def test_a_missing_session_manager_is_a_could_not_measure_not_a_zero(fleet):
+    """The default in this suite: no stub installed, so the path does not exist.
+    A tool that is not there cannot have measured 0."""
+    fleet.catch_up()
+    rc, out = fleet.check("--no-remote")
+    assert rc == 0, out
+    assert "COULD NOT MEASURE — no executable session-manager at" in out
+    assert "This is NOT a zero and NOT 'phase 2 is ready'." in out
+    assert "EXAMINED" not in out
+
+
+def test_a_CRASHED_scan_is_a_could_not_measure_not_a_zero(fleet):
+    """A non-zero exit with no JSON on stdout. The reader sees an empty stream,
+    which `json.load` rejects — and the reason token names it rather than
+    letting the run fall through to the numbers."""
+    rc, out = _phase2(fleet, raw="", exit_code=2)
+    assert rc == 0, out
+    assert "COULD NOT MEASURE — the scan produced no usable counts" in out
+    assert "reason: no-json:JSONDecodeError" in out
+    assert "UNBLOCKED" not in out
+
+
+def test_TRUNCATED_json_is_a_could_not_measure_not_a_zero(fleet):
+    """Half a payload parses as nothing, and a stream cut mid-object is what a
+    `timeout` kill actually looks like."""
+    rc, out = _phase2(fleet, raw='{"summary": {"total_sessions": 47,')
+    assert rc == 0, out
+    assert "reason: no-json:" in out
+    assert "UNBLOCKED" not in out
+
+
+def test_a_scan_of_the_WRONG_HOST_is_a_could_not_measure_not_a_zero(fleet):
+    """🔴 THE ONE THAT WOULD HAVE BEEN INVISIBLE. `session-manager` decides which
+    host is local from ACTIVITY_HOST / the collector env file; drift-check
+    decides from lib/host-role.sh and the machine's IPs. If they disagree,
+    `--host <role>` names the REMOTE machine and the scan ssh's there — and a
+    remote row can never carry a fuzzyclaw age, so the count comes back 0 and
+    the gate authorises a deletion off the wrong machine."""
+    rc, out = _phase2(fleet, fleet.sm_report(rows=47, fuzzy=0, host="laptop"))
+    assert rc == 0, out
+    assert "COULD NOT MEASURE — reason: host-mismatch:laptop" in out
+    assert "UNBLOCKED" not in out
+    # ...and the counts are still shown, so the finding is legible
+    assert "raw: 0 of 47 row(s)" in out
+
+
+def test_fuzzyclaw_NOT_READ_is_a_could_not_measure_not_a_zero(fleet):
+    """fuzzyclaw is opt-in. With the index unread, NO row can have a fuzzyclaw
+    age — so 0 is guaranteed by the reader being wired to nothing, which is the
+    same output as the answer that authorises deleting it."""
+    rc, out = _phase2(fleet, fleet.sm_report(rows=47, fuzzy=0,
+                                             status="skipped"))
+    assert rc == 0, out
+    assert "COULD NOT MEASURE — reason: fuzzyclaw-skipped" in out
+    assert "UNBLOCKED" not in out
+
+
+def test_ZERO_TASK_FILES_is_a_could_not_measure_not_a_zero(fleet):
+    """🔴 MEASURED, NOT IMAGINED — this suite produced the false READY itself.
+    An empty (or absent) `~/.tmux/tasks` reads successfully, so `status` is
+    "ok" with `files_seen: 0`, and the first version of this gate announced
+    "READY — 0 of 48 rows" off a fixture HOME while the real count on that
+    machine was 7. `status == "ok"` is necessary and NOT sufficient."""
+    rc, out = _phase2(fleet, fleet.sm_report(rows=47, fuzzy=0, files_seen=0))
+    assert rc == 0, out
+    assert "COULD NOT MEASURE — reason: fuzzyclaw-no-task-files" in out
+    assert "UNBLOCKED" not in out
+    # ...and with task files present the SAME payload IS ready — the positive
+    # control that pins this guard to `files_seen` and nothing else.
+    rc2, out2 = _phase2(fleet, fleet.sm_report(rows=47, fuzzy=0, files_seen=1))
+    assert rc2 == 16, out2
+
+
+def test_a_no_local_run_does_not_report_a_phase2_zero(fleet):
+    """The gate is LOCAL-ONLY (fuzzyclaw task files are local state), so a
+    --no-local run has not measured it. That must not read as a pass, for the
+    same reason `[parity] NOT COMPARED` exists one block up."""
+    fleet.catch_up()
+    fleet.stub_ssh(0, "[laptop] clean")
+    fleet.stub_session_manager(fleet.sm_report(rows=47, fuzzy=0))
+    rc, out = fleet.check("--no-local")
+    assert "NOT EVALUATED — --no-local, and this gate is LOCAL-ONLY" in out
+    assert "Not a zero, and not a pass." in out
+    assert "UNBLOCKED" not in out
+    assert rc != 16
+
+
+def test_rc16_never_outranks_a_real_drift(fleet):
+    """🔴 SEVERITY. rc 16 says an optional cleanup became possible; rc 8 says
+    work exists on exactly one machine. A run that is both must report 8, or the
+    codes that need a rescue procedure hide behind a housekeeping note."""
+    fleet.catch_up()
+    fleet.add_local_commit()
+    fleet.stub_session_manager(fleet.sm_report(rows=47, fuzzy=0))
+    rc, out = fleet.check("--no-remote")
+    assert rc == 8, out
+    # the phase-2 finding is still PRINTED — it just does not win
+    assert "Phase 2 is UNBLOCKED" in out
+    assert "drift-check: DRIFT (rc=8)" in out
+    # ...and the mirror image: alone, the same phase-2 state IS the verdict
+    fleet.git(fleet.work, "reset", "--soft", "HEAD~1")
+    rc2, _ = fleet.check("--no-remote")
+    assert rc2 == 16
+
+
+def test_the_phase2_gate_does_not_fail_the_run_when_it_cannot_measure(fleet):
+    """"Cheap and non-fatal": a broken phase-2 gate must never change another
+    leg's verdict. A behind-only host is rc 10 with the gate answering, silent,
+    and crashed alike.
+
+    RED/GREEN: this is GREEN at the base sha and is NOT regression coverage —
+    with no gate there is nothing to interfere, so it passes vacuously there.
+    It is a non-interference guard on the new block. Proved REACHABLE by
+    mutation: changing `note_rc 16` to `note_rc 4` in the could-not-measure
+    branch fails it with rc 4 != 10."""
+    fleet.stub_session_manager(fleet.sm_report(rows=47, fuzzy=7))
+    rc_ok, _ = fleet.check("--no-remote")          # `work` is 1 behind origin
+    fleet.stub_session_manager("not json at all")
+    rc_broken, _ = fleet.check("--no-remote")
+    fleet.stub_session_manager("", exit_code=127)
+    rc_gone, _ = fleet.check("--no-remote")
+    assert rc_ok == rc_broken == rc_gone == 10
+
+
+def test_the_phase2_gate_passes_the_flags_that_make_the_measurement_valid(fleet):
+    """🔴 THE FLAGS ARE LOAD-BEARING, and two of the four fail SILENTLY.
+
+    Without `--fuzzyclaw` the index is never read and the count is a guaranteed
+    0; without `--host <role>` the scan can ssh to the other machine; `--no-ch`
+    and `--no-capture` keep a 6-hourly timer from opening a ClickHouse
+    connection and capturing every pane. Asserted from the argv the stub
+    actually received, not from the source text.
+    """
+    fleet.catch_up()
+    argv_log = fleet.root / "sm-argv.txt"
+    write_exec(
+        fleet.bin / "session-manager",
+        'printf "%%s\\n" "$*" >> "$SM_ARGV_LOG"\n'
+        "cat <<'SM_JSON_EOF'\n%s\nSM_JSON_EOF\n" % json.dumps(fleet.sm_report()),
+    )
+    fleet.check("--no-remote", SM_ARGV_LOG=str(argv_log))
+    argv = argv_log.read_text().strip()
+    assert argv.split() == ["scan", "--json", "--no-ch", "--no-capture",
+                            "--fuzzyclaw", "--host", "workbench"], argv
+
+
+def test_the_phase2_reader_is_read_only_and_imports_nothing_else():
+    """The passivity scanner walks drift-check.sh and lib/host-role.sh only, so
+    a NEW file under lib/ is unscanned by it. This is that file's guard: it may
+    import `json` and `sys`, and nothing else — no `os`, no `subprocess`, no
+    `open`, no `pathlib`."""
+    import ast
+
+    src = (REPO_ROOT / "scripts" / "lib" / "drift_phase2.py").read_text()
+    tree = ast.parse(src)
+    imported = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(a.name.split(".")[0] for a in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            imported.add((node.module or "").split(".")[0])
+    assert imported == {"json", "sys"}, imported
+    called = {n.func.id for n in ast.walk(tree)
+              if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+    assert "open" not in called, "the phase-2 reader opened a file"
+    assert "exec" not in called and "eval" not in called
+
+
+@pytest.mark.parametrize("cmd,attr", sorted(CHILD_PATH_REQUIREMENTS.items()))
+def test_the_phase2_child_binaries_are_on_the_unit_path(cmd, attr):
+    """🔴 THE SEAM NEITHER EXISTING GUARD CAN SEE. `session-manager` is exec'd
+    by drift-check but resolves ITS OWN binaries from the same unit PATH, and
+    neither `python3`-as-a-shebang nor `tmux` appears as a command word in
+    drift-check.sh — so the reverse tokenizer cannot find them and the forward
+    table would reject them. Nothing crashes when they are missing: the gate
+    just reports COULD NOT MEASURE on every timer run, forever."""
+    assert attr in _drift_service_block(), (
+        "the drift-check unit's PATH is missing %s — the phase-2 gate execs "
+        "session-manager, which needs %r and would silently never measure"
+        % (attr, cmd)
+    )
+
+
+def test_the_phase2_child_requirements_are_what_session_manager_actually_runs():
+    """The table above is only accounting if it matches the child. `tmux` is
+    session-manager's ONLY subprocess on a local scan, and `python3` is its
+    shebang — both read off session-manager itself, so a child that grows a new
+    dependency makes this fail rather than silently unmeasurable.
+
+    RED/GREEN: GREEN at the base sha — it reads facts about session-manager
+    that were already true there. It is an INVARIANT GUARD on the ledger, not
+    regression coverage: it fires when the child's dependencies change and the
+    table does not.
+
+    🔴 THE SHEBANG IS MATCHED BY ITS TAIL, NOT PINNED WHOLE, and both halves of
+    that are forced. `patchShebangs` rewrites it to an absolute store path
+    inside the nix sandbox — the tier that gates merges — so a whole-string pin
+    is red exactly where it must be green; and the repo-wide scan in
+    `test_runtime_shebangs.py` forbids this file from containing the literal
+    interpreter path at all. What both tiers agree on, and what this table is
+    actually about, is that the interpreter IS python3.
+    """
+    sm_src = (REPO_ROOT / "scripts" / "session-manager").read_text()
+    shebang = sm_src.splitlines()[0]
+    # 🔴 ASSEMBLED FROM CHARACTER CODES, the same idiom and the same reason as
+    # `testlib/shebang_scan.py`'s own needles: a quote followed by the two
+    # shebang characters is shape 1 of the hazard that scan looks for, so
+    # writing it as a literal makes this read-only assertion its own offender.
+    assert shebang.startswith(chr(35) + chr(33)), shebang
+    assert shebang.rstrip().endswith("python3"), shebang
+    assert 'TMUX_PANES_ARGV = ("tmux"' in sm_src
+    assert set(CHILD_PATH_REQUIREMENTS) == {"python3", "tmux"}
+
+
+# --------------------------------------------------------------------------- #
+# 12. THE PHASE-2 REASON-TOKEN LEDGER, THE THIRD STRUCTURAL ZERO, AND THE
+#     ALERTING POLICY FOR rc 16
+#
+# 🔴 WHY THIS SECTION EXISTS AND SECTION 11 WAS NOT ENOUGH. Section 11 tests
+# every reason token the reader HAS. It structurally cannot see a field the
+# reader READS and gives NO token to — and that is precisely what shipped:
+# `summary.age_sources` was read as `(summ.get("age_sources") or {}).get(
+# "fuzzyclaw", 0)`, so a report without it printed `ok 47 0` and the run
+# declared `🔴 READY — 0 of 47 rows`, byte-identical to a legitimate one.
+# Section 11's own fixture (`Fleet.sm_report`) ALWAYS emits `age_sources`, so no
+# test could reach the shape, and the mutant `.get("fuzzyclaw", 0)` ->
+# `.get("fuzzyclaw", 1)` SURVIVED a fully green run of both changed suites.
+#
+# 🔴 AND IT WAS REACHABLE ON THE HOST SHAPE THIS DEADMAN IS FOR. `age_sources`
+# landed 2026-08-13 and `DRIFT_SESSION_MANAGER` defaults to the CHECKOUT's own
+# `scripts/session-manager` — so a host a few days behind ran a scan that never
+# emitted the field and got READY. The staleness detector, disabled by staleness.
+#
+# So the guard here is not another token test: it is a SEAM guard pinning the
+# RELATIONSHIP between the tokens emitted and the fields read, failing when
+# either set GROWS or SHRINKS, plus a behavioural half proving every declared
+# token is REACHABLE — a structural check alone type-checks past a dead branch.
+# --------------------------------------------------------------------------- #
+PHASE2_PY = REPO_ROOT / "scripts" / "lib" / "drift_phase2.py"
+
+# Every reason token `lib/drift_phase2.py` may emit. A token built with a `%`
+# format is written here as its literal PREFIX + `*` — the variable tail is a
+# JSON key / host name / exception class and is not part of the contract.
+PHASE2_TOKENS = {
+    "ok",
+    "no-json:*",                 # json.load raised — crash, truncation, empty stream
+    "no-json:not-an-object",     # valid JSON that is not a report
+    "no-counts",                 # total_sessions, or an age_sources value, is not an int
+    "no-age-sources",            # THE ONE THAT SHIPPED MISSING
+    "unknown-age-writer:*",      # the age_source VOCABULARY changed under us
+    "age-sources-incoherent:*",  # the histogram does not account for every row
+    "host-mismatch:*",           # the scan answered about the other machine
+    "fuzzyclaw-*",               # fuzzyclaw.status was not "ok"
+    "fuzzyclaw-no-task-files",   # status ok over an empty ~/.tmux/tasks
+}
+
+# 🔴 THE SEAM ITSELF: every field of the report the reader consults, mapped to
+# the token that fires when it is absent or unusable. This is the ledger that
+# makes "a newly-consulted field with no reason token" a RED TEST rather than a
+# silent zero — add a `.get("something_new")` to the reader and the extracted
+# field set below stops matching this dict, and the only way to green it is to
+# write down which token covers that field's absence.
+#
+# `fuzzyclaw` appears once as a KEY OF THE HISTOGRAM and once as a TOP-LEVEL
+# BLOCK. Keyed by name, so the entry names the histogram reader's token; the
+# top-level block's absence makes `fz.get("status")` None -> `fuzzyclaw-*`,
+# which `status` already accounts for.
+PHASE2_FIELD_TOKENS = {
+    "summary":        "no-counts",
+    "total_sessions": "no-counts",
+    "age_sources":    "no-age-sources",
+    "fuzzyclaw":      "unknown-age-writer:*",
+    "local_host":     "host-mismatch:*",
+    "status":         "fuzzyclaw-*",
+    "files_seen":     "fuzzyclaw-no-task-files",
+}
+
+
+def _phase2_ast():
+    import ast
+    return ast.parse(PHASE2_PY.read_text())
+
+
+def _emitted_tokens() -> set:
+    """Every first argument to `emit(...)`, normalised at the first `%`."""
+    import ast
+    out = set()
+    for node in ast.walk(_phase2_ast()):
+        if not (isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "emit"
+                and node.args):
+            continue
+        arg = node.args[0]
+        if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+            out.add(arg.value)
+        elif (isinstance(arg, ast.BinOp) and isinstance(arg.op, ast.Mod)
+              and isinstance(arg.left, ast.Constant)
+              and isinstance(arg.left.value, str)):
+            out.add(arg.left.value.split("%")[0] + "*")
+        else:  # pragma: no cover - a shape the ledger cannot account for
+            raise AssertionError(
+                "emit() called with an expression this guard cannot read "
+                "statically: %r. The token set is the contract — keep it a "
+                "literal or a `<literal>%%s` format." % ast.dump(arg))
+    return out
+
+
+def _fields_read() -> set:
+    """Every string literal used as the first argument of a `.get(...)`."""
+    import ast
+    return {
+        n.args[0].value
+        for n in ast.walk(_phase2_ast())
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+        and n.func.attr == "get" and n.args
+        and isinstance(n.args[0], ast.Constant)
+        and isinstance(n.args[0].value, str)
+    }
+
+
+def _read_phase2(payload, want="workbench"):
+    """Drive the REAL reader over stdin and return (token, whole line)."""
+    text = payload if isinstance(payload, str) else json.dumps(payload)
+    proc = subprocess.run([sys.executable, str(PHASE2_PY), want],
+                          input=text, capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    line = proc.stdout.strip()
+    assert len(line.split()) == 3, f"output contract broken: {line!r}"
+    return line.split()[0], line
+
+
+def _normalise(token) -> str:
+    if token in PHASE2_TOKENS:
+        return token
+    for known in PHASE2_TOKENS:
+        if known.endswith("*") and token.startswith(known[:-1]):
+            return known
+    return token
+
+
+def _report(rows=47, sources=None, host="workbench", status="ok", files_seen=3,
+            omit_sources=False):
+    """A phase-2-shaped report, built from the SAME `age_histogram` the fleet
+    fixture uses, so the coherence guard is satisfied unless a test breaks it
+    on purpose. `rows` may be a non-int here (that IS one of the cases)."""
+    if sources is None:
+        sources = age_histogram(rows, 7) if isinstance(rows, int) else {}
+    summary = {"total_sessions": rows}
+    if not omit_sources:
+        summary["age_sources"] = sources
+    return {"local_host": host,
+            "fuzzyclaw": {"status": status, "files_seen": files_seen},
+            "summary": summary}
+
+
+# -- the ledger seam -------------------------------------------------------- #
+def test_the_phase2_reason_token_ledger_is_pinned_to_the_fields_read():
+    """🔴 THE STRUCTURAL FIX FOR THE WHOLE CLASS, not for the one instance.
+
+    Two sets, both extracted from the reader's own source, both pinned two-way:
+
+      * the tokens it EMITS must be exactly `PHASE2_TOKENS`;
+      * the report fields it READS must be exactly the keys of
+        `PHASE2_FIELD_TOKENS`, whose values name the token that fires when the
+        field is missing or unusable.
+
+    Consult a new field and the second assertion fails; the only way to green it
+    is to write down which token covers its absence — which is the step that did
+    not happen for `age_sources`. Delete a token and the first fails, so a guard
+    cannot be quietly removed either.
+
+    RED/GREEN: RED at 494d14d, which emits none of `no-age-sources`,
+    `unknown-age-writer:*`, `age-sources-incoherent:*`. Regression coverage for
+    the MECHANISM, not only for the one instance.
+    """
+    assert _emitted_tokens() == PHASE2_TOKENS, (
+        "the reader's reason-token set drifted from the ledger:\n"
+        "  only in source: %r\n  only in ledger: %r"
+        % (sorted(_emitted_tokens() - PHASE2_TOKENS),
+           sorted(PHASE2_TOKENS - _emitted_tokens())))
+    assert _fields_read() == set(PHASE2_FIELD_TOKENS), (
+        "the reader consults a report field with no entry in the reason-token "
+        "ledger — that is the shape that shipped `age_sources` as a silent "
+        "zero.\n  read but unaccounted: %r\n  accounted but unread: %r"
+        % (sorted(_fields_read() - set(PHASE2_FIELD_TOKENS)),
+           sorted(set(PHASE2_FIELD_TOKENS) - _fields_read())))
+    unknown = {f: t for f, t in PHASE2_FIELD_TOKENS.items()
+               if t not in PHASE2_TOKENS}
+    assert not unknown, f"ledger names tokens the reader cannot emit: {unknown}"
+
+
+def test_every_declared_phase2_token_is_actually_reachable():
+    """🔴 THE BEHAVIOURAL HALF. A structural ledger type-checks past a token
+    whose branch can never run — and an unreachable guard is exactly what makes
+    a mutation sweep report SURVIVED for a right-looking reason. So every token
+    in the ledger gets a payload that MUST produce it, driven through the real
+    reader, and the produced set must equal the declared set.
+    """
+    cases = {
+        "ok":                       _report(),
+        "no-json:*":                "not json at all",
+        "no-json:not-an-object":    "[1, 2, 3]",
+        "no-counts":                _report(rows="47"),
+        "no-age-sources":           _report(omit_sources=True),
+        "unknown-age-writer:*":     _report(sources={"fz": 7, "ledger": 40}),
+        "age-sources-incoherent:*": _report(sources={"ledger": 40}),
+        "host-mismatch:*":          _report(host="laptop"),
+        "fuzzyclaw-*":              _report(status="skipped"),
+        "fuzzyclaw-no-task-files":  _report(files_seen=0),
+    }
+    assert set(cases) == PHASE2_TOKENS, (
+        "a declared token has no reachability case: %r"
+        % sorted(PHASE2_TOKENS ^ set(cases)))
+    produced = {}
+    for want, payload in cases.items():
+        token, line = _read_phase2(payload)
+        produced[want] = _normalise(token)
+        assert produced[want] == want, (
+            f"payload for {want!r} produced {token!r} ({line!r})")
+    assert set(produced.values()) == PHASE2_TOKENS
+
+
+# -- the third structural zero ---------------------------------------------- #
+def test_a_report_without_age_sources_is_a_could_not_measure_not_a_zero(fleet):
+    """🔴 THE DEFECT, END TO END THROUGH THE SHELL. A session-manager older than
+    `age_sources` (it landed 2026-08-13) emits a report without it, and
+    `DRIFT_SESSION_MANAGER` defaults to the checkout's own copy — so this is the
+    STALE HOST, the one condition drift-check exists to detect.
+
+    Measured at 494d14d with this exact stub: `🔴 READY — 0 of 47 rows depend on
+    fuzzyclaw`, rc 16, indistinguishable from a real all-clear.
+    """
+    rc, out = _phase2(fleet, {"local_host": "workbench",
+                              "fuzzyclaw": {"status": "ok", "files_seen": 3},
+                              "summary": {"total_sessions": 47}})
+    assert rc == 0, out
+    # Pinned whole: the reason is NAMED, and the line says COULD NOT MEASURE
+    # rather than reporting a count. The fuzzyclaw count is genuinely unknown
+    # here (unlike host-mismatch, where the numbers are real but about the wrong
+    # machine), so this is the no-usable-counts phrasing, not the raw one.
+    assert ("[phase2] COULD NOT MEASURE — the scan produced no usable counts "
+            "(reason: no-age-sources)." in out), out
+    assert "[phase2]   This is NOT a zero and NOT 'phase 2 is ready'." in out, out
+    assert "READY" not in out, out
+    assert "UNBLOCKED" not in out, out
+    assert "EXAMINED" not in out, out
+
+
+@pytest.mark.parametrize("sources,reason", [
+    # the whole histogram renamed away — what this PR did to a sibling key
+    (None, "no-age-sources"),
+    # not a dict at all (it used to raise AttributeError)
+    ("age_sources", "no-age-sources"),
+    # the age_source VALUE renamed: the count would silently read 0
+    ({"fz": 7, "ledger": 27, "none": 13}, "unknown-age-writer:fz"),
+    # a histogram that does not account for every row is not a measurement
+    ({"ledger": 27, "none": 13}, "age-sources-incoherent:40"),
+    # a non-int count must never print as a count
+    ({"fuzzyclaw": "7", "ledger": 27, "none": 13}, "no-counts"),
+])
+def test_a_broken_age_histogram_is_a_could_not_measure_not_a_zero(
+        fleet, sources, reason):
+    """Each way `summary.age_sources` can arrive unusable, through the shell.
+    All five produce the deletion-authorising number at 494d14d."""
+    report = fleet.sm_report(rows=47, fuzzy=0)
+    if sources is None:
+        del report["summary"]["age_sources"]
+    else:
+        report["summary"]["age_sources"] = sources
+    rc, out = _phase2(fleet, report)
+    assert rc == 0, out
+    assert "[phase2] COULD NOT MEASURE" in out, out
+    assert f"(reason: {reason})." in out, out
+    assert "READY" not in out, out
+    assert "EXAMINED" not in out, out
+
+
+def test_an_absent_fuzzyclaw_KEY_in_a_sound_histogram_IS_a_real_zero(fleet):
+    """🔴 THE DECISION, WRITTEN DOWN. `summary.age_sources` is
+    `_count_by(r.get("age_source") or "none" for r in rows)` — a histogram that
+    creates a key only for a value it OBSERVED — so zero fuzzyclaw-sourced rows
+    emits NO `fuzzyclaw` key rather than `fuzzyclaw: 0`. Refusing to measure
+    that would make the gate structurally unable to ever say READY, i.e. a gate
+    that can never open.
+
+    It is a real zero only because two guards hold at the same time: the writer
+    vocabulary is recognised (so the key is not merely RENAMED) and the
+    histogram accounts for every row (so it is not merely TRUNCATED). That
+    conjunction is the measurement; neither guard alone is.
+    """
+    rc, out = _phase2(fleet, _report(rows=47,
+                                     sources={"ledger": 34, "none": 13}))
+    assert rc == 16, out
+    assert "fuzzyclaw-only ages: 0 of 47 row(s) EXAMINED" in out, out
+    assert "🔴 READY — 0 of 47 rows depend on fuzzyclaw for an age." in out, out
+
+
+@pytest.mark.parametrize("payload,reason", [
+    ({"total_sessions": True, "age_sources": {"ledger": 1}}, "no-counts"),
+    ({"total_sessions": 47,
+      "age_sources": {"fuzzyclaw": True, "ledger": 46}}, "no-counts"),
+])
+def test_a_bool_never_prints_as_a_phase2_count(payload, reason):
+    """🔴 READ AT THE READER, BECAUSE THE SHELL CANNOT SEE THIS ONE. `bool` is
+    an `int` in Python, so without the explicit bool checks `total_sessions:
+    true` reaches the output as the word `True` — which drift-check.sh's numeric
+    filter then rejects as unparseable, i.e. the right verdict via a completely
+    different mechanism. Through the shell the guard's removal mutant is
+    UNOBSERVABLE (measured: it survived a sweep). Read here instead, where the
+    two mechanisms ARE distinguishable, so the guard has a test that can go red
+    when it is deleted.
+    """
+    token, line = _read_phase2({"local_host": "workbench",
+                                "fuzzyclaw": {"status": "ok", "files_seen": 3},
+                                "summary": payload})
+    assert token == reason, line
+
+
+def test_a_reason_token_never_contains_a_space():
+    """🔴 THE OUTPUT CONTRACT IS POSITIONAL. drift-check.sh reads the token as
+    `${p2_out%% *}` and the counts as the fields after it, so a space inside an
+    interpolated JSON key or host name would truncate the reason AND shift both
+    counts, printing a prefix of the real reason over numbers belonging to the
+    wrong fields."""
+    token, line = _read_phase2(_report(sources={"a b c": 47}))
+    assert token == "unknown-age-writer:a_b_c", line
+    assert len(line.split()) == 3, line
+    token2, line2 = _read_phase2(_report(host="two words"))
+    assert token2 == "host-mismatch:two_words", line2
+    assert len(line2.split()) == 3, line2
+
+
+# -- the alerting policy for rc 16 ------------------------------------------ #
+def test_the_unit_does_not_fail_on_the_phase2_actionable_code():
+    """🔴 rc 16 MUST NOT FAIL THE UNIT. `Type = "oneshot"` fails on any non-zero
+    exit, `OnFailure` fires `notify-failure@`, and that toast is the ONE class
+    deliberately wired to DEFEAT do-not-disturb (`zz_notify_failure_bypass`,
+    `override_pause_level = 100`) — a bypass justified in home.nix by a MEASURED
+    rate of ~1 firing in 9 days.
+
+    rc 16 stays set until somebody deletes the fuzzyclaw readers, and the timer
+    runs every 6h, so without `SuccessExitStatus` the gate OPENING converts that
+    into 4 DND-defeating toasts a day, forever, on runs where nothing is wrong.
+    That is the permanently-red gate this same subsystem already refuses for an
+    unreachable remote.
+
+    Asserted TOGETHER WITH the OnFailure line, deliberately: deleting the alert
+    would also make "does not toast on 16" true, and that is the wrong fix.
+    """
+    block = _drift_service_block()
+    assert "SuccessExitStatus = 16;" in block, (
+        "drift-check.service has no SuccessExitStatus, so rc 16 — the phase-2 "
+        "gate reporting that a CLEANUP is possible — puts the unit in `failed` "
+        "and fires the DND-defeating failure toast 4x a day forever:\n" + block)
+    assert "notify-failure@%n.service" in block, (
+        "the failure alert was removed rather than the exit code excused")
+
+
+def test_only_16_is_excused_from_failing_the_unit():
+    """The excuse must name exactly one code. `SuccessExitStatus` takes a LIST,
+    so a second entry would silently mute a real drift verdict — the deadman's
+    whole point. An INVARIANT GUARD, not regression coverage: at 494d14d there
+    is no SuccessExitStatus at all, so it fails there for the OTHER reason (the
+    assertion above owns that). It fires if somebody later widens the excuse."""
+    block = _drift_service_block()
+    m = re.search(r"SuccessExitStatus\s*=\s*([^;]+);", block)
+    assert m, "no SuccessExitStatus in the drift-check service block"
+    assert re.findall(r"\d+", m.group(1)) == ["16"], (
+        "only rc 16 (ACTIONABLE, not drift) may be excused from failing the "
+        f"unit; found {m.group(1).strip()!r}")
+
+
+def test_the_phase2_ready_run_still_prints_the_no_drift_line(fleet):
+    """🔴 BOTH CLAIMS, BECAUSE THEY ARE INDEPENDENT. rc 16 is the one owned code
+    that says nothing about host health, so routing it through the DRIFT branch
+    alone withheld the finding the run actually made — "no drift on the host(s)
+    CHECKED" — and printed only the cleanup notice. An operator then cannot tell
+    an rc 16 over a clean host from an rc 16 over a host nobody vouched for.
+    """
+    rc, out = _phase2(fleet, fleet.sm_report(rows=47, fuzzy=0))
+    assert rc == 16, out
+    assert "no drift on the host(s) CHECKED" in out, out
+    assert "ACTIONABLE (not drift) (rc=16)" in out, out
+    assert "🔴 READY — 0 of 47 rows depend on fuzzyclaw for an age." in out, out
+
+
+def test_a_plain_clean_run_does_not_gain_the_verdict_block(fleet):
+    """The other half of the pair above: widening the affirmative branch to
+    `rc = 0 || rc = 16` must not give an ordinary rc-0 run a verdict line. No
+    session-manager is stubbed, so the gate takes its COULD NOT MEASURE branch
+    and the run is a plain rc 0."""
+    fleet.catch_up()
+    rc, out = fleet.check("--no-remote")
+    assert rc == 0, out
+    assert "no drift on the host(s) CHECKED" in out, out
+    assert "ACTIONABLE" not in out, out
+    assert "(rc=" not in out, out
+
+
+def test_a_real_drift_verdict_does_not_gain_the_no_drift_line(fleet):
+    """The mirror image, and the dangerous one to get wrong: rc 8 must print
+    DRIFT and must NOT print the affirmative line."""
+    fleet.catch_up()
+    fleet.add_local_commit("commit the workbench never pushed")
+    rc, out = fleet.check("--no-remote")
+    assert rc == 8, out
+    assert "no drift on the host(s) CHECKED" not in out, out
+    assert "DRIFT (rc=8)" in out, out
+
+
+# -- the shell's own robustness to a reader that breaks the contract -------- #
+def _drift_copy(fleet, reader_src):
+    """A COPY of drift-check.sh whose `lib/drift_phase2.py` a test controls.
+
+    🔴 WHY A COPY. `_drift_phase2_py` is derived from the script's own resolved
+    dirname and is deliberately not env-overridable (unlike
+    `DRIFT_SESSION_MANAGER`), so the numeric filters that defend against a
+    malformed reader line are otherwise unreachable from any test — the real
+    reader cannot produce one. Measured: removing either `case` filter SURVIVED
+    a full mutation sweep before this existed.
+
+    🔴 AND IT IS NOT A HYPOTHETICAL. `scripts/` is read from the checkout while
+    the skill docs beside it deploy as a store copy, and any future consumer of
+    this line is a second implementation of the contract. A shell that trusts
+    its reader is a shell whose COULD NOT MEASURE depends on someone else's bug.
+    """
+    d = fleet.root / "driftcopy"
+    (d / "lib").mkdir(parents=True, exist_ok=True)
+    shutil.copy(str(DRIFT), str(d / "drift-check.sh"))
+    shutil.copy(str(HOST_ROLE_LIB), str(d / "lib" / "host-role.sh"))
+    if reader_src is not None:
+        (d / "lib" / "drift_phase2.py").write_text(reader_src)
+    return d / "drift-check.sh"
+
+
+@pytest.mark.parametrize("line", [
+    "ok forty-seven 0",   # rows is not a number
+    "ok 47 zero",         # the fuzzyclaw count is not a number
+    "ok 47",              # only TWO fields — both counts came from field 2
+    "ok",                 # only one
+    "ok 47 0 9",          # FOUR — the middle two are not the pair we read
+    "",                   # nothing at all
+])
+def test_a_malformed_reader_line_is_a_could_not_measure_not_a_zero(fleet, line):
+    """🔴 THE COUNTS ARE READ POSITIONALLY, so a line that is not
+    `<token> <int> <int>` puts arbitrary text where a number belongs — and
+    `[ "$x" -gt 0 ]` over text is a shell ERROR, not a false. The `case` filters
+    turn each into -1 first, which is what makes this COULD NOT MEASURE instead
+    of a crash or, worse, a fall-through to the READY branch.
+
+    🔴 THE FIELD COUNT IS HALF OF IT, and it is the half that was missing.
+    `${x%% *}` and `${x##* }` both return the WHOLE STRING when it holds no
+    space, so `ok 47` set both counts from field 2 and printed `47 of 47 row(s)
+    EXAMINED` — a fabricated denominator that passed every numeric filter.
+    MEASURED here before the fix; it reads as NOT READY, so it was fail-safe by
+    luck rather than by construction, which is not the standard this gate holds
+    every other non-measurement to.
+    """
+    fleet.catch_up()
+    fleet.stub_session_manager(fleet.sm_report(rows=47, fuzzy=0))
+    script = _drift_copy(
+        fleet, "import sys\nsys.stdin.read()\nprint(%r)\n" % line)
+    rc, out = fleet.check("--no-remote", script=str(script))
+    assert rc == 0, out
+    assert "[phase2] COULD NOT MEASURE" in out, out
+    assert "READY" not in out, out
+    assert "UNBLOCKED" not in out, out
+
+
+def test_an_unreadable_phase2_reader_is_a_could_not_measure(fleet):
+    """The `[ ! -r "$_drift_phase2_py" ]` branch, reachable only through a copy.
+    A checkout missing the reader must not report a zero."""
+    fleet.catch_up()
+    fleet.stub_session_manager(fleet.sm_report(rows=47, fuzzy=0))
+    script = _drift_copy(fleet, None)      # lib/ has host-role.sh but no reader
+    rc, out = fleet.check("--no-remote", script=str(script))
+    assert rc == 0, out
+    assert "[phase2] COULD NOT MEASURE — cannot read" in out, out
+    assert "This is NOT a zero and NOT 'phase 2 is ready'." in out, out
+    assert "READY" not in out, out
+
+
+def test_the_drift_copy_harness_can_still_produce_a_ready(fleet):
+    """🔴 POSITIVE CONTROL FOR THE HARNESS ABOVE. Every assertion in the two
+    tests before this one is that something did NOT happen, and a copy whose
+    phase-2 gate is broken for an unrelated reason (a missing lib, a bad path)
+    would satisfy all of them while measuring nothing. So: the same copy, the
+    REAL reader, and the READY verdict must come back."""
+    fleet.catch_up()
+    fleet.stub_session_manager(fleet.sm_report(rows=47, fuzzy=0))
+    script = _drift_copy(fleet, PHASE2_PY.read_text())
+    rc, out = fleet.check("--no-remote", script=str(script))
+    assert rc == 16, out
+    assert "🔴 READY — 0 of 47 rows depend on fuzzyclaw for an age." in out, out
+
+
+def test_a_non_integer_phase2_timeout_is_rejected(fleet):
+    """`DRIFT_PHASE2_TIMEOUT` is handed to `timeout`, and `require_int` is what
+    keeps it an integer. Removing that call survived a mutation sweep because
+    nothing exercised it."""
+    rc, out = fleet.check("--no-remote", DRIFT_PHASE2_TIMEOUT="60; echo PWNED")
+    assert rc == 2, f"expected a usage error, got {rc}\n{out}"
+    assert "DRIFT_PHASE2_TIMEOUT must be a non-negative integer" in out, out
+    assert not [ln for ln in out.splitlines() if ln.strip() == "PWNED"], out
+
+
+# --------------------------------------------------------------------------- #
+# 11. SOURCE-REPO PARITY (rc 17) — the repos devrc BUILDS PACKAGES FROM
+#
+# 🔴 A THIRD KIND OF PARITY. devrc has `nix/pkgs/**` derivations whose `src` is
+# `${workspace}/<repo>/…` — a LOCAL working tree of a DIFFERENT repo. Nothing
+# converges those: ship.sh is scoped to $HOME/workspace/devrc. So a host can have
+# a perfect devrc checkout, every managed symlink resolving, and still compile
+# months-old code, and both existing halves of this deadman report clean.
+#
+# MEASURED 2026-08-14 on clawgatectl: the laptop's ~/workspace/homelab-talos was
+# 24 commits behind, so it built a CLI without `task status`/`task comment` —
+# and devrc's hand-written version literal stamped "0.7.95" onto it anyway, so
+# `clawgatectl task status <id> in_progress` printed help and exited 0. Silent.
+# This file was green on that host the whole time.
+#
+# The load-bearing tests here are, in order:
+#   * the NEGATIVE CONTROLS — behind, and ahead — watched red with rc 17;
+#   * the POSITIVE CONTROL — a current repo is green, so the reds mean something;
+#   * the four NOT-DRIFT-BUT-NOT-A-PASS shapes (absent, fetch failed, no
+#     upstream, dirty), each of which must be counted as UNMEASURED rather than
+#     folded into a reassuring "0 stale";
+#   * the TWO-WAY PIN of the covered set against the real nix/pkgs, which is what
+#     makes "a third package is covered automatically" a fact instead of a hope.
+# --------------------------------------------------------------------------- #
+
+# 🔴 THE LEDGER. The BUILT-SOURCE SCOPES devrc compiles, as of this commit — the
+# full `${workspace}/…` path of each package's `srcDir`, NOT merely its repo. That
+# distinction is the whole point of the pathspec scoping: `homelab-talos` takes
+# ~7 commits a day of which only about a third touch `containers/clawgate`, so
+# escalating on the REPO made rc 17 a permanently-red gate (measured — see the
+# SOURCE-REPO PARITY block in drift-check.sh).
+#
+# Pinned as a LITERAL and cross-checked BOTH ways below — against an independent
+# Python extraction and against what the shell payload itself reports — so the
+# set fails the suite when it GROWS (a new source package nobody told the
+# deadman about) and when it SHRINKS (a package moved to fetchFromGitHub and the
+# checker is now fetching a repo for no reason). Same discipline as
+# run-tests.sh's TARGET_FLOORS: a derived value, pinned two-way against the
+# thing it is derived from.
+EXPECTED_BUILT_SOURCE_SCOPES = {"homelab-talos/containers/clawgate", "tmux-fuzzyclaw"}
+
+# The repos those scopes live in — the unit that gets FETCHED (one fetch however
+# many packages sit in it), which is what the unit's time budget is a function of.
+EXPECTED_SOURCE_REPOS = {q.split("/", 1)[0] for q in EXPECTED_BUILT_SOURCE_SCOPES}
+
+NIX_PKGS = REPO_ROOT / "nix" / "pkgs"
+
+
+def _oracle_source_repos():
+    """An INDEPENDENT extraction of the same set, built differently on purpose.
+
+    The payload walks with a bash glob and bash parameter expansion; this walks
+    with pathlib.rglob and a regex. Two constructions that agree are evidence;
+    one construction compared to itself is not (a shared blind spot survives).
+
+    Returns the FULL srcDir paths, because that — not the repo — is the unit the
+    verdict is computed over.
+    """
+    out = set()
+    for p in sorted(NIX_PKGS.rglob("*.nix")):
+        for ln in p.read_text().splitlines():
+            for hit in re.findall(r"\$\{workspace\}/([A-Za-z0-9._/-]+)",
+                                  ln.split("#", 1)[0]):
+                out.add(hit.rstrip("/"))
+    return out
+
+
+def _src_facts(out):
+    """The `FACT src-repos …` line as a {name: head} dict.
+
+    Raises rather than returning {} when the line is missing: an absent fact set
+    and an empty one are the same value to a comparison, and only one of them is
+    good news."""
+    m = re.search(r"FACT src-repos(.*)", out)
+    assert m, "no `FACT src-repos` line in the output:\n" + out
+    d = {}
+    for tok in m.group(1).split():
+        k, _, v = tok.partition("=")
+        d[k] = v
+    return d
+
+
+def _src_counts(out):
+    """(examined, stale, unmeasured) — 🔴 THE TRIPLE IS THE CLAIM, never one of
+    them. A bare `stale=0` from a scan that walked no repos, or one whose every
+    fetch failed, is indistinguishable from a clean host."""
+    m = re.search(r"source repos: examined=(\d+) stale=(\d+) unmeasured=(\d+)", out)
+    assert m, ("no examined/stale/unmeasured TRIPLE in the output — the triple "
+               "IS the claim:\n" + out)
+    return int(m.group(1)), int(m.group(2)), int(m.group(3))
+
+
+def _nixpkg(fleet, filename, *names, repo=None):
+    """Write a nix/pkgs file into the devrc checkout naming `${workspace}/<name>`
+    sources, in the shape the real derivations use."""
+    d = (repo or fleet.work) / "nix" / "pkgs" / "tools"
+    d.mkdir(parents=True, exist_ok=True)
+    body = ["{ pkgs, workspace }:", "let"]
+    for n in names:
+        body.append('  src%s = pkgs.lib.cleanSource (/. + "${workspace}/%s");' % (len(body), n))
+    body.append("in [ ]")
+    (d / filename).write_text("\n".join(body) + "\n")
+
+
+# The paths every fixture source repo carries. Two of them sit UNDER a srcDir a
+# package would be built from and one deliberately does not — that third path is
+# what makes "behind, but not in anything we compile" constructible, which is the
+# case the whole pathspec scoping exists for and which no single-file fixture can
+# express.
+SRC_FILES = ("f", "containers/clawgate/main.go", "clusters/naida/deploy.yaml")
+
+
+def _src_repo(fleet, name, *, branch="main", home=None):
+    """A bare origin plus a clone at <home>/workspace/<name>, both on `branch`.
+
+    Returns (clone, builder). The builder is a second clone used to advance the
+    upstream, so `behind` is produced the way it happens in life — someone else
+    pushed — rather than by rewriting the clone's refs."""
+    home = home or fleet.home
+    origin = fleet.root / ("srcorigin-%s-%s.git" % (home.name, name))
+    fleet._run(["git", "init", "-q", "--bare", "-b", branch, str(origin)])
+    builder = fleet.root / ("srcbuild-%s-%s" % (home.name, name))
+    fleet._run(["git", "clone", "-q", str(origin), str(builder)])
+    for rel in SRC_FILES:
+        f = builder / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text("base\n")
+    fleet.git(builder, "checkout", "-q", "-B", branch)
+    for rel in SRC_FILES:
+        fleet.git(builder, "add", rel)
+    fleet.git(builder, "commit", "-q", "-m", "base")
+    fleet.git(builder, "push", "-q", "-u", "origin", branch)
+    clone = home / "workspace" / name
+    clone.parent.mkdir(parents=True, exist_ok=True)
+    fleet._run(["git", "clone", "-q", str(origin), str(clone)])
+    fleet.git(clone, "checkout", "-q", branch)
+    return clone, builder
+
+
+def _push_upstream(fleet, builder, branch="main", n=1, path="f"):
+    """Advance the upstream by `n` commits, each touching exactly `path`.
+
+    🔴 `path` is the load-bearing parameter. The verdict is computed with a
+    pathspec limited to the package's own srcDir, so "behind by N" is only
+    meaningful once you say WHERE — and a fixture that always writes the same
+    file cannot tell a commit that changes the built source from one that
+    cannot.
+    """
+    for i in range(n):
+        f = builder / path
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text("base\nupstream-%d\n" % i)
+        fleet.git(builder, "add", path)
+        fleet.git(builder, "commit", "-q", "-m", "upstream %d (%s)" % (i, path))
+    fleet.git(builder, "push", "-q", "origin", branch)
+
+
+# --- the negative controls, in the real failure shape ----------------------- #
+def test_a_source_repo_behind_its_upstream_is_rc17(fleet):
+    """🔴 THE MEASURED FAILURE, reproduced: the checkout devrc compiles is behind
+    what its own upstream says, and no other check in this file can see it."""
+    fleet.catch_up()
+    _nixpkg(fleet, "clawgatectl.nix", "homelab-talos")
+    _, builder = _src_repo(fleet, "homelab-talos", branch="trunk")
+    _push_upstream(fleet, builder, branch="trunk", n=3)
+
+    rc, out = fleet.check("--no-remote")
+    assert rc == 17, f"a stale source repo must be rc 17, got {rc}\n{out}"
+    assert "BUILT SOURCE homelab-talos is NOT current: 3 behind / 0 ahead" in out, out
+    assert _src_counts(out) == (1, 1, 0), out
+
+
+def test_a_source_repo_with_UNPUSHED_commits_is_rc17(fleet):
+    """The other direction, and it is the same loss class as rc 8 one repo over:
+    a commit that exists on exactly one machine, in code the other machine
+    compiles."""
+    fleet.catch_up()
+    _nixpkg(fleet, "clawgatectl.nix", "homelab-talos")
+    clone, _ = _src_repo(fleet, "homelab-talos", branch="trunk")
+    (clone / "new.go").write_text("package main\n")
+    fleet.git(clone, "add", "new.go")
+    fleet.git(clone, "commit", "-q", "-m", "un-pushed")
+
+    rc, out = fleet.check("--no-remote")
+    assert rc == 17, f"un-pushed source commits must be rc 17, got {rc}\n{out}"
+    assert "0 behind / 1 ahead" in out, out
+    assert _src_counts(out) == (1, 1, 0), out
+
+
+# --- the positive control --------------------------------------------------- #
+def test_a_current_source_repo_is_green(fleet):
+    """🔴 REPORT THIS ALONGSIDE THE REDS, never alone: a zero from a checker
+    wired to nothing looks exactly like this. Here the checker must both find the
+    repo (examined=1) and pronounce it current."""
+    fleet.catch_up()
+    _nixpkg(fleet, "clawgatectl.nix", "homelab-talos")
+    _src_repo(fleet, "homelab-talos", branch="trunk")
+
+    rc, out = fleet.check("--no-remote")
+    assert rc == 0, f"a current source repo must not be drift, got {rc}\n{out}"
+    assert "BUILT SOURCE homelab-talos is CURRENT — trunk ==" in out, out
+    assert _src_counts(out) == (1, 0, 0), out
+
+
+def test_the_examined_count_is_reported_beside_the_stale_count(fleet):
+    """One stale repo among two must print BOTH numbers.
+
+    `stale=1` alone says nothing about coverage, and `examined=2` alone says
+    nothing about health. The pair is the claim — the same rule the managed
+    symlink scan follows one subsystem over."""
+    fleet.catch_up()
+    _nixpkg(fleet, "clawgatectl.nix", "homelab-talos")
+    _nixpkg(fleet, "tmux-fuzzyclaw.nix", "tmux-fuzzyclaw")
+    _, b1 = _src_repo(fleet, "homelab-talos", branch="trunk")
+    _src_repo(fleet, "tmux-fuzzyclaw")
+    _push_upstream(fleet, b1, branch="trunk")
+
+    rc, out = fleet.check("--no-remote")
+    assert rc == 17, out
+    assert _src_counts(out) == (2, 1, 0), out
+    assert "BUILT SOURCE tmux-fuzzyclaw is CURRENT" in out, out
+
+
+def test_a_scan_that_found_no_source_packages_says_so_instead_of_reporting_zero(fleet):
+    """🔴 A checkout with no `${workspace}/` derivations must print NOT EVALUATED.
+
+    `examined=0 stale=0` would be a scan that walked nothing wearing the exact
+    output of a clean host — the failure mode this whole file exists to refuse."""
+    fleet.catch_up()
+    rc, out = fleet.check("--no-remote")
+    assert rc == 0, out
+    assert "source repos: NOT EVALUATED" in out, out
+    assert "a scan that examined nothing is not a clean scan" in out, out
+    assert "source repos: examined=" not in out, (
+        "a scan that walked nothing printed a count triple:\n" + out
+    )
+
+
+# --- reported, but NOT drift (and never folded into a zero) ------------------ #
+def test_an_absent_source_repo_is_reported_as_unmeasured_not_as_clean(fleet):
+    """A host without the checkout is a documented, tolerated state — the
+    derivations guard on pathExists and simply omit the binary. It must still
+    never be counted as a repo that was found current."""
+    fleet.catch_up()
+    _nixpkg(fleet, "clawgatectl.nix", "homelab-talos")
+
+    rc, out = fleet.check("--no-remote")
+    assert rc == 0, f"an absent source repo is not drift, got {rc}\n{out}"
+    assert "source repo homelab-talos: ABSENT" in out, out
+    assert _src_counts(out) == (1, 0, 1), out
+    assert _src_facts(out)["homelab-talos"] == "ABSENT", out
+
+
+def test_a_failed_fetch_is_reported_as_unmeasured_not_as_clean(fleet):
+    """These repos are private and reached over ssh, and a systemd --user unit
+    has no ssh-agent. "We could not look" must read as neither a pass nor a
+    divergence — and git's own stderr must survive, because for a unit whose only
+    output is the journal that message is the entire diagnosis."""
+    fleet.catch_up()
+    _nixpkg(fleet, "clawgatectl.nix", "homelab-talos")
+    clone, _ = _src_repo(fleet, "homelab-talos", branch="trunk")
+    fleet.git(clone, "remote", "set-url", "origin",
+              str(fleet.root / "definitely-not-a-repo"))
+
+    rc, out = fleet.check("--no-remote")
+    assert rc == 0, f"an unreachable source remote is not drift, got {rc}\n{out}"
+    assert "git fetch FAILED" in out, out
+    assert "git:" in out, "git's own stderr was swallowed\n" + out
+    assert _src_counts(out) == (1, 0, 1), out
+
+
+def test_a_detached_source_repo_is_reported_as_unmeasured_not_as_clean(fleet):
+    """A detached HEAD has no upstream, so there is no defined answer to compare
+    against. Assuming `main` would be a guess printed as a measurement — and
+    these repos do not even agree on a default branch (homelab-talos uses
+    `trunk`)."""
+    fleet.catch_up()
+    _nixpkg(fleet, "clawgatectl.nix", "homelab-talos")
+    clone, _ = _src_repo(fleet, "homelab-talos", branch="trunk")
+    fleet.git(clone, "checkout", "-q", "--detach", "HEAD")
+
+    rc, out = fleet.check("--no-remote")
+    assert rc == 0, f"a detached source checkout is not drift, got {rc}\n{out}"
+    assert "no upstream to compare against" in out, out
+    assert _src_counts(out) == (1, 0, 1), out
+
+
+def test_a_dirty_source_repo_is_reported_even_when_it_is_current(fleet):
+    """🔴 REPORTED, NEVER DRIFT — and reported even on a repo that is otherwise
+    perfectly current, which is the case a "report the problems" check would
+    drop. These derivations copy the working TREE, so an untracked .go file is IN
+    the binary while `git log` says nothing happened. The workbench's
+    homelab-talos is routinely dirty; failing the unit on it would be a
+    permanently-red gate."""
+    fleet.catch_up()
+    _nixpkg(fleet, "clawgatectl.nix", "homelab-talos")
+    clone, _ = _src_repo(fleet, "homelab-talos", branch="trunk")
+    (clone / "scratch.go").write_text("package main\n")
+    (clone / "f").write_text("edited\n")
+
+    rc, out = fleet.check("--no-remote")
+    assert rc == 0, f"a dirty source repo is not drift on its own, got {rc}\n{out}"
+    assert "source repo homelab-talos: DIRTY — 2 path(s)" in out, out
+    assert "BUILT SOURCE homelab-talos is CURRENT" in out, out
+    assert _src_counts(out) == (1, 0, 0), out
+
+
+# --- the covered set is DERIVED, and pinned two-way -------------------------- #
+def _run_srcrepo_payload(tmp_path, repo, home, label="pin"):
+    """Run ONLY the SRCREPO payload, against a chosen repo and a chosen $HOME.
+
+    Used to point the REAL extraction at the REAL nix/pkgs without running the
+    git leg over the operator's own checkout: the fixture $HOME contains no
+    `workspace/` at all, so every repo it names comes back ABSENT and not one
+    git command touches anything real."""
+    payload = _payload_literal("SRCREPO")
+    env = dict(os.environ)
+    env.update(HOME=str(home), DRIFT_REPO=str(repo), DRIFT_LABEL=label)
+    proc = subprocess.run(["bash", "-c", payload],
+                          capture_output=True, text=True, env=env)
+    return proc.stdout + proc.stderr
+
+
+def test_the_source_repo_set_is_pinned_two_way_against_nix_pkgs(tmp_path):
+    """🔴 THE LEDGER, in three independent spellings that must all agree.
+
+      1. `EXPECTED_SOURCE_REPOS` — the literal a human has reviewed;
+      2. `_oracle_source_repos()` — pathlib + regex over nix/pkgs;
+      3. what the SHELL PAYLOAD itself reports, run against the real nix/pkgs.
+
+    Fails when the set GROWS — a new `${workspace}/`-sourced package that nobody
+    told the deadman about, which is the exact shape of the bug this whole
+    section exists for — and when it SHRINKS. (3) is what makes (1) and (2) more
+    than bookkeeping: a checker that agrees with a regex but does not actually
+    walk the tree is the thing being ruled out.
+    """
+    home = tmp_path / "empty-home"
+    home.mkdir()
+    out = _run_srcrepo_payload(tmp_path, REPO_ROOT, home)
+    reported = set(_src_facts(out))
+
+    assert _oracle_source_repos() == EXPECTED_BUILT_SOURCE_SCOPES, (
+        "nix/pkgs' `${workspace}/`-sourced SCOPE set has CHANGED. Update "
+        "EXPECTED_BUILT_SOURCE_SCOPES — and check that the new srcDir is one the "
+        "deadman should be judging on both hosts: %r" % (_oracle_source_repos(),)
+    )
+    assert reported == EXPECTED_BUILT_SOURCE_SCOPES, (
+        "drift-check.sh's own scan disagrees with nix/pkgs: it reported %r\n%s"
+        % (sorted(reported), out)
+    )
+    # 🔴 AND THE SUBTREE MUST SURVIVE THE ROUND TRIP. `homelab-talos` alone would
+    # satisfy a repo-level pin while silently restoring the whole-repo verdict
+    # that made this gate permanently red, so assert the path is still there.
+    assert any("/" in k for k in reported), (
+        "no scope carries a srcDir SUBTREE — the scan has collapsed back to repo "
+        "roots, which is the permanently-red-gate defect: %r" % sorted(reported)
+    )
+    # ...and it must have walked real files to get there. `0 scanned` producing
+    # the right answer would mean the answer came from somewhere else.
+    m = re.search(r"\((\d+) nix file\(s\) scanned\)", out)
+    assert m and int(m.group(1)) >= len(list(NIX_PKGS.rglob("*.nix"))), out
+
+
+def test_a_third_source_package_is_covered_with_no_change_to_the_checker(fleet):
+    """🔴 THE GENERALISATION CLAIM, asserted rather than hoped.
+
+    The set is derived from nix/pkgs at scan time, so a package added later is
+    covered the day it lands. A hardcoded pair would have been correct when it
+    was written and silently incomplete afterwards — the same shape as the bug.
+    """
+    fleet.catch_up()
+    _nixpkg(fleet, "clawgatectl.nix", "homelab-talos")
+    _nixpkg(fleet, "tmux-fuzzyclaw.nix", "tmux-fuzzyclaw")
+    _nixpkg(fleet, "brand-new.nix", "some-new-repo")
+    _src_repo(fleet, "homelab-talos", branch="trunk")
+    _src_repo(fleet, "tmux-fuzzyclaw")
+    _, b3 = _src_repo(fleet, "some-new-repo")
+    _push_upstream(fleet, b3, n=2)
+
+    rc, out = fleet.check("--no-remote")
+    assert rc == 17, f"the third package was not covered, got {rc}\n{out}"
+    assert "BUILT SOURCE some-new-repo is NOT current: 2 behind" in out, out
+    assert _src_counts(out) == (3, 1, 0), out
+
+
+def test_two_subtrees_of_ONE_repo_are_judged_separately(fleet):
+    """clawgatectl's src is `${workspace}/homelab-talos/containers/clawgate` — a
+    SUBDIRECTORY. The repo root is what has a `.git` and gets fetched ONCE, but
+    each srcDir under it is its own verdict.
+
+    Here the upstream moves inside ONE of the two subtrees. A repo-level check
+    would call both stale (or, worse, one repo "stale" with no way to say which
+    package is affected); the scoped check must report exactly one.
+    """
+    fleet.catch_up()
+    _nixpkg(fleet, "a.nix", "homelab-talos/containers/clawgate")
+    _nixpkg(fleet, "b.nix", "homelab-talos/clusters/naida")
+    _, b = _src_repo(fleet, "homelab-talos", branch="trunk")
+    _push_upstream(fleet, b, branch="trunk", n=2,
+                   path="containers/clawgate/main.go")
+
+    rc, out = fleet.check("--no-remote")
+    assert rc == 17, out
+    # ONE repo, TWO scopes, exactly ONE of them stale.
+    assert _src_counts(out) == (2, 1, 0), out
+    assert "over 1 repo(s)" in out, "the repo was walked more than once\n" + out
+    assert set(_src_facts(out)) == {
+        "homelab-talos/containers/clawgate", "homelab-talos/clusters/naida"}, out
+    assert "BUILT SOURCE homelab-talos/containers/clawgate is NOT current: 2 behind" in out, out
+    assert "BUILT SOURCE homelab-talos/clusters/naida is CURRENT" in out, out
+
+
+def test_two_source_repos_named_on_ONE_line_are_both_found(fleet):
+    """🔴 FOUND BY A SURVIVING MUTANT, not by review.
+
+    Mutating `LN="$REST"` (advance past the occurrence just consumed) to
+    `LN=""` (stop after the first) SURVIVED the whole suite including the
+    two-way pin — because every line in the real nix/pkgs happens to name at
+    most one source, so the pin compared two extractions that shared the blind
+    spot. A `let a = "${workspace}/x"; b = "${workspace}/y";` line is entirely
+    legal nix, and under that mutant the second repo silently stops being
+    watched. This is the fixture the pin cannot build for itself.
+    """
+    fleet.catch_up()
+    d = fleet.work / "nix" / "pkgs" / "tools"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "pair.nix").write_text(
+        '{ pkgs, workspace }:\n'
+        'let a = "${workspace}/first-repo"; b = "${workspace}/second-repo";\n'
+        'in [ ]\n'
+    )
+    _src_repo(fleet, "first-repo")
+    _, b2 = _src_repo(fleet, "second-repo")
+    _push_upstream(fleet, b2, n=4)
+
+    rc, out = fleet.check("--no-remote")
+    assert set(_src_facts(out)) == {"first-repo", "second-repo"}, out
+    assert rc == 17, f"the SECOND repo on the line went unwatched, got {rc}\n{out}"
+    assert "BUILT SOURCE second-repo is NOT current: 4 behind" in out, out
+    assert _src_counts(out) == (2, 1, 0), out
+
+
+def test_a_workspace_path_inside_a_comment_is_not_a_source_repo(fleet):
+    """clawgatectl.nix's header discusses its own source path in prose, and this
+    checker's own header documents the `${workspace}/` pattern it looks for. A
+    whole-file grep would "find" repos in the documentation and then report them
+    ABSENT forever."""
+    fleet.catch_up()
+    d = fleet.work / "nix" / "pkgs" / "tools"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "commented.nix").write_text(
+        "# the source lives at ${workspace}/ghost-repo, historically\n"
+        '{ pkgs, workspace }:\n'
+        '  src = pkgs.lib.cleanSource (/. + "${workspace}/real-repo");'
+        '   # was ${workspace}/old-ghost\n'
+    )
+    _src_repo(fleet, "real-repo")
+
+    rc, out = fleet.check("--no-remote")
+    assert rc == 0, out
+    assert set(_src_facts(out)) == {"real-repo"}, out
+    assert "ghost" not in out, out
+
+
+# --- severity: where rc 17 sorts -------------------------------------------- #
+def test_unpushed_devrc_commits_still_outrank_a_stale_source_repo(fleet):
+    """rc 8 > rc 17. A diverged devrc stops EVERY future change to the host, of
+    which a stale source repo is one instance, and its rescue can destroy work."""
+    fleet.catch_up()
+    fleet.add_local_commit()
+    _nixpkg(fleet, "clawgatectl.nix", "homelab-talos")
+    _, b = _src_repo(fleet, "homelab-talos", branch="trunk")
+    _push_upstream(fleet, b, branch="trunk")
+
+    rc, out = fleet.check("--no-remote")
+    assert rc == 8, f"rc 8 must outrank rc 17, got {rc}\n{out}"
+    assert "BUILT SOURCE homelab-talos is NOT current" in out, (
+        "the source-repo finding must still be PRINTED even when outranked\n" + out
+    )
+
+
+def test_a_stale_source_repo_outranks_dangling_symlinks_and_a_behind_checkout(fleet):
+    """rc 17 > rc 14 and rc 17 > rc 10.
+
+    A dangling managed symlink is LOUD at the moment of use (`command not
+    found`); a stale source repo is SILENT — the measured failure ran, exited 0
+    and did nothing. `behind` is merely a ship away."""
+    lstore = _mkhome(fleet.home, healthy=1, dangling=2)
+    _nixpkg(fleet, "clawgatectl.nix", "homelab-talos")
+    _, b = _src_repo(fleet, "homelab-talos", branch="trunk")
+    _push_upstream(fleet, b, branch="trunk")
+
+    # `work` is left one commit BEHIND origin/main (the fixture's default), so
+    # rc 10 is live too and all three conditions are present at once.
+    rc, out = _parity(fleet, "--no-remote", store=lstore)
+    assert rc == 17, f"rc 17 must outrank rc 14 and rc 10, got {rc}\n{out}"
+    assert "managed symlink(s) point at a path that does not exist" in out, out
+    assert "local main is BEHIND origin/main" in out, out
+
+
+def test_the_rc17_legend_is_printed_with_the_verdict(fleet):
+    """The journal is the only place this output is ever read, so the code it
+    hands systemd has to be legible there without opening the source."""
+    fleet.catch_up()
+    _nixpkg(fleet, "clawgatectl.nix", "homelab-talos")
+    _, b = _src_repo(fleet, "homelab-talos", branch="trunk")
+    _push_upstream(fleet, b, branch="trunk")
+
+    rc, out = fleet.check("--no-remote")
+    assert rc == 17, out
+    assert "drift-check: DRIFT (rc=17)" in out, out
+    assert "rc17=the srcDir SUBTREE" in out, out
+
+
+# --- the cross-host half ----------------------------------------------------- #
+def test_the_cross_host_source_comparison_is_NOT_COMPARED_with_one_host(fleet):
+    """One host's facts is not "the machines agree", it is "agreement not looked
+    for", and the two must never print the same way."""
+    fleet.catch_up()
+    _nixpkg(fleet, "clawgatectl.nix", "homelab-talos")
+    _src_repo(fleet, "homelab-talos", branch="trunk")
+
+    rc, out = fleet.check("--no-remote")
+    assert rc == 0, out
+    assert "[srcrepo] NOT COMPARED" in out, out
+    assert "Nothing was compared" in out, out
+
+
+def _two_host_src(fleet, *, remote_extra=0):
+    """Both hosts run the REAL payload against the SAME nix/pkgs but their OWN
+    $HOME/workspace, which is exactly how the two machines differ in life.
+
+    `remote_extra` commits are made AND PUSHED on the remote side, so that host
+    ends up CURRENT with its own upstream at a sha the local host does not have.
+    That is the shape the cross-host claim is about, and it is deliberately not
+    reachable through "behind": with identical fixture content and one clock
+    second, two independently built base commits hash the SAME, so a test that
+    tried to make the heads differ by advancing an upstream compared a sha to
+    itself and passed for the wrong reason (measured).
+    """
+    fleet.catch_up()
+    _nixpkg(fleet, "clawgatectl.nix", "homelab-talos")
+    lstore = _mkhome(fleet.home, healthy=1)
+    _src_repo(fleet, "homelab-talos", branch="trunk")
+
+    rhome = fleet.root / "remote-home"
+    rhome.mkdir()
+    rstore = _mkhome(rhome, healthy=1, store=fleet.root / "remote-store")
+    rclone, _ = _src_repo(fleet, "homelab-talos", branch="trunk", home=rhome)
+    for i in range(remote_extra):
+        (rclone / "f").write_text("remote-only-%d\n" % i)
+        fleet.git(rclone, "commit", "-q", "-am", "remote work %d" % i)
+    if remote_extra:
+        fleet.git(rclone, "push", "-q", "origin", "trunk")
+    _remote_running_the_real_payload(fleet, rhome, rstore)
+    return _parity(fleet, store=lstore, REMOTE_SSH="stub@example.invalid")
+
+
+def test_the_cross_host_comparison_reports_differing_heads_without_setting_an_rc(fleet):
+    """🔴 INFORMATION, NOT A VERDICT — and that is a decision, not an omission.
+
+    Whether a given HEAD is WRONG has a defined answer and is measured per host
+    against that branch's own upstream. "The two hosts are on different commits"
+    has no such answer: these are shared development repos and one machine on a
+    feature branch is normal. A code that fired on it would be red most of the
+    time, and a permanently-red gate is worse than no gate.
+
+    So this is the load-bearing case: BOTH hosts are current with their own
+    upstreams — nothing is stale anywhere — and their source HEADs still differ.
+    The difference is printed and the exit code stays 0.
+    """
+    rc, out = _two_host_src(fleet, remote_extra=1)
+    assert rc == 0, (
+        "a cross-host source difference must not set an exit code, got %d\n%s"
+        % (rc, out))
+    assert "the two hosts build DIFFERENT source" in out, out
+    assert "information only" in out, out
+    assert "compared=1 same=0 differing=1" in out, out
+
+
+def test_the_cross_host_comparison_reports_agreement_when_the_heads_match(fleet):
+    """🔴 POSITIVE CONTROL for the comparison. Without it, `differing=0` is
+    indistinguishable from a comparator wired to nothing — an empty union minus
+    anything is still empty."""
+    rc, out = _two_host_src(fleet)
+    assert rc == 0, out
+    assert "[srcrepo] compared=1 same=1 differing=0" in out, out
+    assert "NOT COMPARED" not in out.split("=== source-repo parity")[1], out
+
+
+def test_a_non_integer_source_fetch_timeout_is_rejected(fleet):
+    """`DRIFT_SRC_FETCH_TIMEOUT` is handed to `timeout`, so `require_int` is what
+    keeps it an integer — and what keeps a shell metacharacter out of a command
+    line. Its sibling for DRIFT_PHASE2_TIMEOUT survived a mutation sweep because
+    nothing exercised it; this is the same guard, exercised."""
+    rc, out = fleet.check("--no-remote", DRIFT_SRC_FETCH_TIMEOUT="30; echo PWNED")
+    assert rc == 2, f"expected a usage error, got {rc}\n{out}"
+    assert "DRIFT_SRC_FETCH_TIMEOUT must be a non-negative integer" in out, out
+    assert not [ln for ln in out.splitlines() if ln.strip() == "PWNED"], out
+
+
+def test_the_source_fetch_timeout_is_not_forwarded_over_ssh(fleet):
+    """⚠ INVARIANT GUARD, not regression coverage — trivially GREEN AT a2707be,
+    where the variable did not exist. It pins a property of the new code that
+    nothing else asserts.
+
+    🔴 Every value this script sends across the ssh hop is a value that has to be
+    proved safe on the FAR side, where the static passivity scanner cannot see
+    it. The remote host uses the default — asserted on the payload the driver
+    actually builds, not on a comment claiming it.
+    """
+    src = DRIFT.read_text()
+    i = src.index("| ssh -o ConnectTimeout=10")
+    forwarded = src[src.rindex("printf 'DRIFT_LABEL", 0, i):i]
+    # Positive control: the slice must contain the values that ARE forwarded, or
+    # "the timeout is not in it" is a claim about an empty string.
+    for expected in ("DRIFT_LABEL", "DRIFT_UNTRACKED_MAX", "DRIFT_DANGLING_MAX"):
+        assert expected in forwarded, (
+            "the forwarded-env slice is not the one the driver builds: %r"
+            % forwarded)
+    assert "DRIFT_SRC_FETCH_TIMEOUT" not in forwarded, (
+        "the source-fetch timeout is interpolated into the REMOTE payload:\n"
+        + forwarded
+    )
+
+
+# --- the SEAM: the script's fetch budget vs the unit's start timeout ---------- #
+def test_the_unit_start_timeout_can_absorb_every_source_repo_fetch():
+    """🔴 A SEAM NEITHER FILE'S TESTS OWN.
+
+    The per-fetch cap is a tunable in drift-check.sh; the ceiling on the whole
+    run is `TimeoutStartSec` in nix/home.nix. Their PRODUCT is what decides
+    whether the unit finishes, and nothing computed it: the ceiling was 180,
+    sized for "two `git fetch`es plus one ssh round trip", while the source-repo
+    leg adds `2 hosts x N repos x cap` on top.
+
+    The failure it guards is the silent kind. systemd kills the cgroup at the
+    ceiling, the deadman reports NOTHING — no verdict about either host — and
+    the unit merely looks slow. So this recomputes the budget from BOTH files
+    and fails when either moves out from under the other, whether the cap grows,
+    a third source repo lands, or the ceiling shrinks.
+    """
+    m = re.search(r'DRIFT_SRC_FETCH_TIMEOUT="\$\{DRIFT_SRC_FETCH_TIMEOUT:-(\d+)\}"',
+                  DRIFT.read_text())
+    assert m, "no DRIFT_SRC_FETCH_TIMEOUT default in drift-check.sh"
+    cap = int(m.group(1))
+    m2 = re.search(r'DRIFT_PHASE2_TIMEOUT="\$\{DRIFT_PHASE2_TIMEOUT:-(\d+)\}"',
+                   DRIFT.read_text())
+    assert m2, "no DRIFT_PHASE2_TIMEOUT default in drift-check.sh"
+    phase2 = int(m2.group(1))
+
+    block = _drift_service_block()
+    m3 = re.search(r"TimeoutStartSec = (\d+);", block)
+    assert m3, "the drift-check unit declares no TimeoutStartSec:\n" + block
+    ceiling = int(m3.group(1))
+
+    # 2 hosts x every source repo, plus the phase-2 scan, plus the 60s this
+    # already needed for the two devrc fetches and the ssh round trip.
+    needed = 2 * len(EXPECTED_SOURCE_REPOS) * cap + phase2 + 60
+    assert ceiling >= needed, (
+        "TimeoutStartSec=%d cannot absorb the worst case: %d source fetches at "
+        "%ds + a %ds phase-2 scan + 60s of devrc fetch/ssh = %ds. systemd would "
+        "kill the run and the deadman would report nothing, on a schedule."
+        % (ceiling, 2 * len(EXPECTED_SOURCE_REPOS), cap, phase2, needed)
+    )
+
+
+# --- passivity, behaviourally ------------------------------------------------ #
+def test_a_run_against_a_stale_source_repo_mutates_nothing(fleet):
+    """🔴 THE CONTRACT. This leg FETCHES — a write to remote-tracking refs and
+    nothing else. Branch, HEAD, worktree and stash stack of the source repo must
+    all be byte-identical afterwards, for shapes nobody enumerated.
+    """
+    fleet.catch_up()
+    _nixpkg(fleet, "clawgatectl.nix", "homelab-talos")
+    clone, b = _src_repo(fleet, "homelab-talos", branch="trunk")
+    _push_upstream(fleet, b, branch="trunk", n=2)
+    (clone / "wip.go").write_text("package main // uncommitted\n")
+
+    def snapshot():
+        return (
+            fleet.git(clone, "symbolic-ref", "--quiet", "--short", "HEAD"),
+            fleet.git(clone, "rev-parse", "HEAD"),
+            fleet.git(clone, "status", "--porcelain"),
+            fleet.git(clone, "stash", "list"),
+            (clone / "wip.go").read_text(),
+        )
+
+    before = snapshot()
+    rc, out = fleet.check("--no-remote")
+    assert rc == 17, out
+    assert snapshot() == before, (
+        "🔴 the deadman MUTATED a source repo — it may only fetch\n" + out
+    )
+
+
+# --------------------------------------------------------------------------- #
+# 11b. THE VERDICT IS SCOPED TO THE srcDir SUBTREE, NOT THE REPO
+#
+# 🔴 rc 17 shipped escalating on WHOLE-REPO staleness, and that is a
+# permanently-red gate — the failure mode RULES.md names explicitly, because it
+# trains click-through on the one alert that has to keep its meaning. MEASURED on
+# the workbench 2026-08-18: it was 1 commit behind `origin/trunk`, and that commit
+# was `2ce7cbdc fix(naida-ai-demo): raise memory limit 128Mi -> 512Mi` —
+# `git diff --name-only HEAD..origin/trunk -- containers/clawgate` EMPTY, so it
+# cannot reach the built binary. Over the preceding 14 days that repo took 98
+# commits of which only 32 touched `containers/clawgate`; at ~7 commits/day the
+# host is behind nearly continuously and about two thirds of those reds could not
+# affect any package devrc builds.
+#
+# The two tests that matter are a PAIR, and neither is worth anything alone:
+#   * a commit OUTSIDE every srcDir must NOT escalate — the regression;
+#   * a commit INSIDE one still MUST — or the noise was "fixed" by breaking the
+#     detector, and every mutation would pass.
+# --------------------------------------------------------------------------- #
+def test_a_commit_OUTSIDE_every_srcDir_is_reported_but_is_NOT_rc17(fleet):
+    """🔴 THE REGRESSION, in the measured shape: the repo is behind, and not by
+    anything the package is compiled from.
+
+    The fixture mirrors the real one — a `containers/clawgate` srcDir and an
+    unrelated `clusters/naida` path — and the upstream commit lands only in the
+    latter. rc must stay 0, and the finding must still be legible: the repo-wide
+    count is printed, and the built source is stated to be CURRENT.
+    """
+    fleet.catch_up()
+    _nixpkg(fleet, "clawgatectl.nix", "homelab-talos/containers/clawgate")
+    _, b = _src_repo(fleet, "homelab-talos", branch="trunk")
+    _push_upstream(fleet, b, branch="trunk", n=1,
+                   path="clusters/naida/deploy.yaml")
+
+    rc, out = fleet.check("--no-remote")
+    assert rc == 0, (
+        "a commit that cannot reach the built binary escalated to rc %d — that is "
+        "the permanently-red gate\\n%s" % (rc, out))
+    # 🔴 Reported, not dropped: the repo-wide number is true and useful.
+    assert "repo-wide 1 behind / 0 ahead" in out, (
+        "the whole-repo count was silently dropped\\n" + out)
+    assert "repo-wide is INFORMATION ONLY" in out, out
+    assert "BUILT SOURCE homelab-talos/containers/clawgate is CURRENT (0 behind / 0 ahead)" in out, out
+    assert "touch nothing this package is built from" in out, out
+    assert _src_counts(out) == (1, 0, 0), out
+
+
+def test_a_commit_INSIDE_a_srcDir_is_still_rc17(fleet):
+    """🔴 THE OTHER HALF OF THE PAIR — and the guard against "fixing" the noise
+    by breaking the detector.
+
+    Byte-for-byte the fixture above except for WHICH path the upstream commit
+    touches. That is the only variable, so a green here plus a green above is a
+    statement about the pathspec and nothing else.
+    """
+    fleet.catch_up()
+    _nixpkg(fleet, "clawgatectl.nix", "homelab-talos/containers/clawgate")
+    _, b = _src_repo(fleet, "homelab-talos", branch="trunk")
+    _push_upstream(fleet, b, branch="trunk", n=1,
+                   path="containers/clawgate/main.go")
+
+    rc, out = fleet.check("--no-remote")
+    assert rc == 17, (
+        "a commit INSIDE the srcDir did not escalate — the detector is broken, "
+        "not merely quiet\\n%s" % out)
+    assert "BUILT SOURCE homelab-talos/containers/clawgate is NOT current: 1 behind / 0 ahead" in out, out
+    assert "repo-wide 1 behind / 0 ahead" in out, out
+    assert _src_counts(out) == (1, 1, 0), out
+
+
+def test_UNPUSHED_commits_inside_a_srcDir_still_escalate_and_outside_do_not(fleet):
+    """The AHEAD direction gets the same pathspec, in both directions.
+
+    Scoping only the behind half would leave un-pushed cluster manifests firing
+    rc 17 forever while un-pushed clawgate code was the case that mattered.
+    """
+    fleet.catch_up()
+    _nixpkg(fleet, "clawgatectl.nix", "homelab-talos/containers/clawgate")
+    clone, _ = _src_repo(fleet, "homelab-talos", branch="trunk")
+
+    # (a) un-pushed work OUTSIDE the srcDir — reported, not drift.
+    (clone / "clusters" / "naida" / "deploy.yaml").write_text("local edit\\n")
+    fleet.git(clone, "add", "clusters/naida/deploy.yaml")
+    fleet.git(clone, "commit", "-q", "-m", "local manifest tweak")
+    rc, out = fleet.check("--no-remote")
+    assert rc == 0, "un-pushed work outside every srcDir escalated\\n" + out
+    assert "repo-wide 0 behind / 1 ahead" in out, out
+    assert "BUILT SOURCE homelab-talos/containers/clawgate is CURRENT (0 behind / 0 ahead)" in out, out
+
+    # (b) now un-pushed work INSIDE it — same repo, same run shape, must fire.
+    (clone / "containers" / "clawgate" / "main.go").write_text("local code\\n")
+    fleet.git(clone, "add", "containers/clawgate/main.go")
+    fleet.git(clone, "commit", "-q", "-m", "un-pushed clawgate change")
+    rc, out = fleet.check("--no-remote")
+    assert rc == 17, "un-pushed work INSIDE the srcDir did not escalate\\n" + out
+    assert "BUILT SOURCE homelab-talos/containers/clawgate is NOT current: 0 behind / 1 ahead" in out, out
+
+
+def test_a_root_srcDir_package_is_unchanged_by_the_scoping(fleet):
+    """⚠ MOSTLY AN INVARIANT GUARD, and the distinction is worth stating.
+
+    MEASURED at b10c4ae: RED — but only on the message wording, which this commit
+    renamed. Its BEHAVIOURAL claim (rc 17 for a root-srcDir package that is one
+    commit behind) already held there, so this is not regression coverage for the
+    scoping defect. What it does hold is the boundary the fix could have broken:
+    tmux-fuzzyclaw's srcDir IS its repo root, its scope and its repo coincide, and
+    every commit anywhere in it genuinely does change what is built. A pathspec
+    accidentally applied to the root case would silence it, and that mutation is
+    in the battery.
+    """
+    fleet.catch_up()
+    _nixpkg(fleet, "tmux-fuzzyclaw.nix", "tmux-fuzzyclaw")
+    _, b = _src_repo(fleet, "tmux-fuzzyclaw")
+    _push_upstream(fleet, b, n=1, path="clusters/naida/deploy.yaml")
+
+    rc, out = fleet.check("--no-remote")
+    assert rc == 17, (
+        "a root-srcDir package stopped escalating — for it, EVERY commit is in "
+        "the built source\\n%s" % out)
+    assert "BUILT SOURCE tmux-fuzzyclaw is NOT current: 1 behind / 0 ahead" in out, out
+    assert set(_src_facts(out)) == {"tmux-fuzzyclaw"}, out
+
+
+def test_an_unmeasurable_repo_makes_EVERY_scope_under_it_unmeasured(fleet):
+    """🔴 One repo, several packages: a repo we could not evaluate must not let
+    any of its scopes read as a silent pass.
+
+    Without this, `examined` counted repos and a two-package repo whose fetch
+    failed contributed ONE unmeasured — leaving the second package accounted for
+    nowhere at all.
+    """
+    fleet.catch_up()
+    _nixpkg(fleet, "a.nix", "homelab-talos/containers/clawgate")
+    _nixpkg(fleet, "b.nix", "homelab-talos/clusters/naida")
+    clone, _ = _src_repo(fleet, "homelab-talos", branch="trunk")
+    fleet.git(clone, "remote", "set-url", "origin",
+              str(fleet.root / "definitely-not-a-repo"))
+
+    rc, out = fleet.check("--no-remote")
+    assert rc == 0, "an unreachable source remote is not drift\\n" + out
+    assert _src_counts(out) == (2, 0, 2), out
+    facts = _src_facts(out)
+    assert facts == {"homelab-talos/containers/clawgate": "FETCHFAILED",
+                     "homelab-talos/clusters/naida": "FETCHFAILED"}, out
+
+
+# --- the cross-host half, scoped the same way -------------------------------- #
+def _two_host_scoped(fleet, *, remote_path):
+    """Both hosts current with their own upstreams; the REMOTE carries one extra
+    pushed commit touching `remote_path`. The only variable is where it lands."""
+    fleet.catch_up()
+    _nixpkg(fleet, "clawgatectl.nix", "homelab-talos/containers/clawgate")
+    lstore = _mkhome(fleet.home, healthy=1)
+    _src_repo(fleet, "homelab-talos", branch="trunk")
+
+    rhome = fleet.root / "remote-home"
+    rhome.mkdir()
+    rstore = _mkhome(rhome, healthy=1, store=fleet.root / "remote-store")
+    rclone, _ = _src_repo(fleet, "homelab-talos", branch="trunk", home=rhome)
+    f = rclone / remote_path
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text("remote-only\\n")
+    fleet.git(rclone, "add", remote_path)
+    fleet.git(rclone, "commit", "-q", "-m", "remote work")
+    fleet.git(rclone, "push", "-q", "origin", "trunk")
+    _remote_running_the_real_payload(fleet, rhome, rstore)
+    return _parity(fleet, store=lstore, REMOTE_SSH="stub@example.invalid")
+
+
+def test_the_cross_host_comparison_ignores_divergence_OUTSIDE_every_srcDir(fleet):
+    """🔴 "The two hosts build DIFFERENT source" must mean DIFFERENT BUILT
+    SOURCE. Compared on repo HEADs it fired whenever the machines disagreed about
+    any commit at all — cluster manifests included — which is the same
+    permanently-noisy shape one level over.
+    """
+    rc, out = _two_host_scoped(fleet, remote_path="clusters/naida/deploy.yaml")
+    assert rc == 0, out
+    block = out.split("=== source-repo parity")[1]
+    assert "the two hosts build DIFFERENT source" not in block, (
+        "a divergence outside every srcDir was reported as different built "
+        "source\\n" + block)
+    assert "compared=1 same=1 differing=0" in block, block
+
+
+def test_the_cross_host_comparison_still_reports_a_differing_built_subtree(fleet):
+    """POSITIVE CONTROL for the test above — without it, `differing=0` is
+    indistinguishable from a comparator wired to nothing."""
+    rc, out = _two_host_scoped(fleet, remote_path="containers/clawgate/main.go")
+    block = out.split("=== source-repo parity")[1]
+    assert "the two hosts build DIFFERENT source" in block, block
+    assert "srcDir subtree trees, not repo HEADs" in block, block
+    assert "compared=1 same=0 differing=1" in block, block
+
+
+# --------------------------------------------------------------------------- #
+# 13. rc 18 — A BUILT-SOURCE SCOPE THAT STAYS UNMEASURED
+#
+# 🔴 THE GAP rc 17 LEFT, and it is the same shape as the bug rc 17 was built to
+# catch. "We could not look" correctly sets no exit code — so it escalated NEVER,
+# and a scope whose currency is never evaluated read as a clean run forever.
+# Measured live on the workbench 2026-08-18: tmux-fuzzyclaw on a local branch
+# with no upstream, `unmeasured=1`, rc 0 — while concealing a genuinely divergent
+# build between the two hosts.
+#
+# The ladder is deliberately the rc-13 one: reported every run, escalated only
+# after N CONSECUTIVE runs, per (HOST, SCOPE), reset the moment it measures. So
+# these tests are written in the same two directions rc 13's are — the softening
+# must not make the deadman mute, AND the escalation must not fire on the normal
+# case (a scratch branch for an afternoon, a laptop that never had the checkout).
+# --------------------------------------------------------------------------- #
+def _blind(out):
+    """(hosts-reporting, scopes, unmeasured, escalated) off the rc-18 summary.
+
+    🔴 THE QUADRUPLE IS THE CLAIM, never `escalated=0` alone: a ladder walked
+    over no hosts, or over no scopes, prints exactly that zero. Raises when the
+    line is absent, because an absent summary and a clean one are the same value
+    to a comparison and only one of them is good news."""
+    m = re.search(r"\[srcblind\] hosts-reporting=(\d+) scopes=(\d+) "
+                  r"unmeasured=(\d+) escalated=(\d+)", out)
+    assert m, ("no hosts-reporting/scopes/unmeasured/escalated line — the "
+               "quadruple IS the claim:\n" + out)
+    return tuple(int(g) for g in m.groups())
+
+
+def _no_upstream(fleet, clone, branch="docs/tui-rendering-footguns"):
+    """Park the source clone on a local branch with NO upstream.
+
+    🔴 THE MEASURED SHAPE, not a synonym for it. A detached HEAD reaches the same
+    NOUPSTREAM branch in the checker, but the live instance was a NAMED branch
+    somebody was working on — the state that looks completely normal in
+    `git status` and that a human will leave in place for days.
+    """
+    fleet.git(clone, "checkout", "-q", "-b", branch)
+
+
+def _blind_state_files(fleet):
+    return sorted(p.name for p in fleet.state.glob("unmeasured-*"))
+
+
+# --- the softening, in both directions -------------------------------------- #
+def test_a_scope_with_no_upstream_below_the_threshold_does_not_fail_the_unit(fleet):
+    """🔴 A SCRATCH BRANCH FOR AN AFTERNOON MUST NOT LOOK LIKE DRIFT.
+
+    These are working repos and parking one on an unpushed branch is normal, so
+    a code that fired on the first run would be red most of the time — the
+    permanently-red gate this file refuses everywhere else. Reported loudly,
+    exit code unaffected.
+
+    RED AT BASE (15da9908) on the streak line: base reports the scope as
+    unmeasured and then says nothing further, forever. The rc==0 half is an
+    INVARIANT GUARD — base is green on it too — and is asserted here only
+    because "not escalated" is meaningless without it.
+    """
+    fleet.catch_up()
+    _nixpkg(fleet, "tmux-fuzzyclaw.nix", "tmux-fuzzyclaw")
+    clone, _ = _src_repo(fleet, "tmux-fuzzyclaw")
+    _no_upstream(fleet, clone)
+
+    rc, out = fleet.check("--no-remote")
+    assert rc == 0, f"one unmeasured run must not fail the unit, got {rc}\n{out}"
+    assert "tmux-fuzzyclaw: UNMEASURED (NOUPSTREAM) — 1/4 consecutive" in out, out
+    assert "NOT escalated" in out, out
+    assert "Still not a pass" in out, out          # and not sold as a green
+    assert _blind(out) == (1, 1, 1, 0), out
+
+
+def test_a_scope_with_no_upstream_escalates_after_n_consecutive_runs(fleet):
+    """🔴 THE OTHER DIRECTION: the softening must not make the deadman mute.
+
+    A scope whose currency has been unevaluable for the whole threshold window is
+    no longer "somebody is mid-branch" — it is a scope rc 17 CANNOT fire for, so
+    a stale built source there is invisible. At that point not alerting is the
+    deadman failing at its one job.
+
+    RED AT BASE (15da9908): the ladder there is [0, 0, 0, 0] — base never
+    escalates, which is the whole defect.
+    """
+    fleet.catch_up()
+    _nixpkg(fleet, "tmux-fuzzyclaw.nix", "tmux-fuzzyclaw")
+    clone, _ = _src_repo(fleet, "tmux-fuzzyclaw")
+    _no_upstream(fleet, clone)
+
+    codes = []
+    for _ in range(4):
+        rc, out = fleet.check("--no-remote", DRIFT_UNMEASURED_ESCALATE="3")
+        codes.append(rc)
+    assert codes == [0, 0, 18, 18], f"escalation ladder wrong: {codes}\n{out}"
+    # `out` is the FOURTH run's, so the streak reads 4 over a threshold of 3 —
+    # the ladder keeps counting past the threshold rather than latching, which is
+    # what makes "how long has this been true" legible in the journal.
+    assert ("workbench tmux-fuzzyclaw: UNMEASURED (NOUPSTREAM) for 4 CONSECUTIVE "
+            "runs (threshold 3)." in out), out
+    assert "rc 17 CANNOT fire for it" in out, out
+    assert _blind(out) == (1, 1, 1, 1), out
+
+
+def test_the_unmeasured_streak_resets_when_the_scope_measures(fleet):
+    """The streak counts CONSECUTIVE runs. One real measurement clears it —
+    otherwise a repo that is merely branchy every other day escalates anyway and
+    the threshold means nothing.
+
+    RED AT BASE (15da9908): no ladder exists there at all.
+    """
+    fleet.catch_up()
+    _nixpkg(fleet, "tmux-fuzzyclaw.nix", "tmux-fuzzyclaw")
+    clone, _ = _src_repo(fleet, "tmux-fuzzyclaw")
+    _no_upstream(fleet, clone)
+    for _ in range(2):
+        rc, out = fleet.check("--no-remote", DRIFT_UNMEASURED_ESCALATE="3")
+        assert rc == 0, out
+    assert "2/3 consecutive" in out, out
+
+    fleet.git(clone, "checkout", "-q", "main")      # back on a tracked branch
+    rc, out = fleet.check("--no-remote", DRIFT_UNMEASURED_ESCALATE="3")
+    assert rc == 0, out
+    assert _blind(out) == (1, 1, 0, 0), out         # measured: nothing unmeasured
+
+    _no_upstream(fleet, clone, branch="docs/again")  # ...and it goes away again
+    rc, out = fleet.check("--no-remote", DRIFT_UNMEASURED_ESCALATE="3")
+    assert rc == 0, f"the streak did not reset on a real measurement\n{out}"
+    assert "1/3 consecutive" in out, out
+
+
+def test_a_measured_fleet_reports_a_zero_over_a_REAL_denominator(fleet):
+    """🔴 POSITIVE CONTROL for the quadruple, and the partner of every red above.
+
+    `escalated=0` is the output of a ladder wired to nothing. It is only evidence
+    beside a non-zero `scopes=`: one scope was found, walked, and measured.
+    """
+    fleet.catch_up()
+    _nixpkg(fleet, "tmux-fuzzyclaw.nix", "tmux-fuzzyclaw")
+    _src_repo(fleet, "tmux-fuzzyclaw")
+
+    rc, out = fleet.check("--no-remote")
+    assert rc == 0, out
+    assert _blind(out) == (1, 1, 0, 0), out
+    blind_lines = [ln for ln in out.splitlines() if ln.startswith("[srcblind]")]
+    assert not [ln for ln in blind_lines if "UNMEASURED" in ln], blind_lines
+
+
+# --- the reasons are not one hazard ----------------------------------------- #
+def test_an_ABSENT_source_repo_never_escalates_however_many_runs(fleet):
+    """🔴 THE ONE EXEMPTION, and it must hold at every count.
+
+    `clawgatectl.nix` deliberately supports a host without the checkout: the
+    derivation guards on pathExists and omits the binary. Escalating on absence
+    would make that host permanently red for a package it correctly does not
+    ship — which is worse than no gate.
+
+    Driven at threshold 1, so a single shared counter would fire on run one.
+
+    RED AT BASE (15da9908) on the NEVER-escalates line and the counter-file
+    assertion. The rc==0 half is an INVARIANT GUARD — base never escalates
+    anything — and is the property that must survive, not new coverage.
+    """
+    fleet.catch_up()
+    _nixpkg(fleet, "clawgatectl.nix", "homelab-talos/containers/clawgate")
+
+    for _ in range(5):
+        rc, out = fleet.check("--no-remote", DRIFT_UNMEASURED_ESCALATE="1",
+                              DRIFT_UNMEASURED_FETCH_ESCALATE="1")
+        assert rc == 0, f"an absent source repo escalated: {rc}\n{out}"
+    assert "UNMEASURED (ABSENT) — reported, and it NEVER escalates" in out, out
+    assert _blind(out) == (1, 1, 1, 0), out
+    assert _blind_state_files(fleet) == [], (
+        "an ABSENT scope consulted the counter at all: %r"
+        % _blind_state_files(fleet))
+
+
+def test_a_FAILED_FETCH_takes_its_own_LONGER_ladder(fleet):
+    """🔴 THE REASONS DO NOT SHARE A COUNTER, and this is the pair that proves it.
+
+    A failed fetch has a plausibly transient cause (no ssh-agent under a user
+    unit, a key rotation, a remote that is down), so it gets more patience than
+    the structural reasons. Same fixture, both directions:
+
+      * 5 consecutive runs at the STRUCTURAL threshold of 4 -> still rc 0, i.e.
+        it is genuinely not on that ladder rather than merely slower;
+      * the same shape with its OWN threshold at 2 -> rc 18, i.e. it does still
+        escalate. A reason that can never escalate is the defect, one costume on.
+    """
+    fleet.catch_up()
+    _nixpkg(fleet, "tmux-fuzzyclaw.nix", "tmux-fuzzyclaw")
+    clone, _ = _src_repo(fleet, "tmux-fuzzyclaw")
+    fleet.git(clone, "remote", "set-url", "origin",
+              str(fleet.root / "definitely-not-a-repo"))
+
+    for _ in range(5):
+        rc, out = fleet.check("--no-remote", DRIFT_UNMEASURED_ESCALATE="4")
+        assert rc == 0, f"a failed fetch took the structural ladder: {rc}\n{out}"
+    assert "UNMEASURED (FETCHFAILED) — 5/12 consecutive" in out, out
+
+    rc, out = fleet.check("--no-remote", DRIFT_UNMEASURED_FETCH_ESCALATE="2")
+    assert rc == 18, f"a persistently failing fetch never escalates: {rc}\n{out}"
+    assert ("workbench tmux-fuzzyclaw: UNMEASURED (FETCHFAILED) for 6 CONSECUTIVE "
+            "runs (threshold 2)." in out), out
+
+
+def test_a_CHANGED_reason_restarts_the_ladder(fleet):
+    """The two ladders have different thresholds, so a FETCHFAILED streak must
+    not be spent on a NOUPSTREAM escalation — that would escalate on evidence
+    that was never about this hazard.
+
+    Fetch first (it runs before the upstream lookup), then the fetch is repaired
+    and the branch is left untracked: at threshold 3 a carried-over count would
+    be 3 and fire on that very run.
+    """
+    fleet.catch_up()
+    _nixpkg(fleet, "tmux-fuzzyclaw.nix", "tmux-fuzzyclaw")
+    clone, _ = _src_repo(fleet, "tmux-fuzzyclaw")
+    good = fleet.git(clone, "remote", "get-url", "origin")
+    fleet.git(clone, "remote", "set-url", "origin",
+              str(fleet.root / "definitely-not-a-repo"))
+    for _ in range(2):
+        rc, out = fleet.check("--no-remote", DRIFT_UNMEASURED_ESCALATE="3",
+                              DRIFT_UNMEASURED_FETCH_ESCALATE="3")
+        assert rc == 0, out
+    assert "(FETCHFAILED) — 2/3 consecutive" in out, out
+
+    fleet.git(clone, "remote", "set-url", "origin", good)
+    _no_upstream(fleet, clone)
+    rc, out = fleet.check("--no-remote", DRIFT_UNMEASURED_ESCALATE="3",
+                          DRIFT_UNMEASURED_FETCH_ESCALATE="3")
+    assert rc == 0, f"a FETCHFAILED streak was spent on a NOUPSTREAM ladder\n{out}"
+    assert "(NOUPSTREAM) — 1/3 consecutive" in out, out
+
+
+# --- per (HOST, SCOPE), never per run --------------------------------------- #
+def test_the_unmeasured_streak_is_kept_PER_SCOPE(fleet):
+    """🔴 TWO SCOPES ARE TWO LADDERS. Keyed per HOST alone, two unmeasured scopes
+    would bump one counter twice a run and reach a threshold of 4 in two runs —
+    an escalation manufactured by counting, on a fleet where nothing has been
+    unevaluable for long enough to matter.
+
+    Both directions in one fixture: two runs must stay green (no double
+    counting), and the same pair must still escalate on its own ladder at four.
+    """
+    fleet.catch_up()
+    _nixpkg(fleet, "a.nix", "homelab-talos/containers/clawgate")
+    _nixpkg(fleet, "b.nix", "tmux-fuzzyclaw")
+    c1, _ = _src_repo(fleet, "homelab-talos", branch="trunk")
+    c2, _ = _src_repo(fleet, "tmux-fuzzyclaw")
+    _no_upstream(fleet, c1)
+    _no_upstream(fleet, c2)
+
+    for _ in range(2):
+        rc, out = fleet.check("--no-remote")
+        assert rc == 0, f"two scopes shared one counter: {rc}\n{out}"
+    assert _blind(out) == (1, 2, 2, 0), out
+    assert "homelab-talos/containers/clawgate: UNMEASURED (NOUPSTREAM) — 2/4" in out, out
+    assert "tmux-fuzzyclaw: UNMEASURED (NOUPSTREAM) — 2/4" in out, out
+
+    for _ in range(2):
+        rc, out = fleet.check("--no-remote")
+    assert rc == 18, f"per-scope ladders never reach the threshold: {rc}\n{out}"
+    assert _blind(out) == (1, 2, 2, 2), out
+
+
+def test_one_scope_recovering_does_not_reset_ANOTHER_scopes_ladder(fleet):
+    """The complement of the test above, and the direction a shared counter
+    breaks the other way: the repo that recovered would clear the ladder of the
+    repo that did not, and the stuck one would never escalate."""
+    fleet.catch_up()
+    _nixpkg(fleet, "a.nix", "homelab-talos/containers/clawgate")
+    _nixpkg(fleet, "b.nix", "tmux-fuzzyclaw")
+    c1, _ = _src_repo(fleet, "homelab-talos", branch="trunk")
+    c2, _ = _src_repo(fleet, "tmux-fuzzyclaw")
+    _no_upstream(fleet, c1)
+    _no_upstream(fleet, c2)
+
+    for _ in range(2):
+        rc, out = fleet.check("--no-remote", DRIFT_UNMEASURED_ESCALATE="3")
+        assert rc == 0, out
+
+    fleet.git(c2, "checkout", "-q", "main")          # one of the two recovers
+    rc, out = fleet.check("--no-remote", DRIFT_UNMEASURED_ESCALATE="3")
+    assert rc == 18, (
+        "the recovered scope reset the stuck scope's ladder: %d\n%s" % (rc, out))
+    assert "homelab-talos/containers/clawgate: UNMEASURED (NOUPSTREAM) for 3 CONSECUTIVE" in out, out
+    assert _blind(out) == (1, 2, 1, 1), out
+
+
+def test_the_scope_counter_filename_is_INJECTIVE(fleet):
+    """🔴 `a/b` AND `a_b` MUST NOT SHARE A FILE. The scope alphabet includes both
+    `/` and `_`, so the obvious `/`->`_` sanitisation collides them — and two
+    scopes sharing a counter is a ladder that double-counts on one run and resets
+    itself on another, for reasons nothing in the output can explain.
+
+    Behavioural, not a filename assertion alone: at threshold 2 a collision
+    reaches 2 on the FIRST run and escalates. Both spellings are checked to exist
+    separately as well, because a green rc alone would not say which property
+    held.
+    """
+    fleet.catch_up()
+    _nixpkg(fleet, "a.nix", "talos/containers")
+    _nixpkg(fleet, "b.nix", "talos_containers")
+    c1, _ = _src_repo(fleet, "talos")
+    c2, _ = _src_repo(fleet, "talos_containers")
+    _no_upstream(fleet, c1)
+    _no_upstream(fleet, c2)
+
+    rc, out = fleet.check("--no-remote", DRIFT_UNMEASURED_ESCALATE="2")
+    assert rc == 0, f"two scopes collided onto one counter: {rc}\n{out}"
+    assert _blind(out) == (1, 2, 2, 0), out
+    assert _blind_state_files(fleet) == [
+        "unmeasured-workbench-talos__containers",
+        "unmeasured-workbench-talos_containers",
+    ], _blind_state_files(fleet)
+
+
+def test_the_unmeasured_streak_is_kept_PER_HOST(fleet):
+    """One host's blindness is not the other's. The remote runs the SAME payload
+    against its own $HOME, with its clone parked on an untracked branch while the
+    local clone is current: only the remote's scope may have a ladder."""
+    fleet.catch_up()
+    _nixpkg(fleet, "tmux-fuzzyclaw.nix", "tmux-fuzzyclaw")
+    lstore = _mkhome(fleet.home, healthy=1)
+    _src_repo(fleet, "tmux-fuzzyclaw")
+
+    rhome = fleet.root / "remote-home"
+    rhome.mkdir()
+    rstore = _mkhome(rhome, healthy=1, store=fleet.root / "remote-store")
+    rclone, _ = _src_repo(fleet, "tmux-fuzzyclaw", home=rhome)
+    _no_upstream(fleet, rclone)
+    _remote_running_the_real_payload(fleet, rhome, rstore)
+
+    rc, out = _parity(fleet, store=lstore, REMOTE_SSH="stub@example.invalid")
+    assert rc == 0, out
+    assert "laptop tmux-fuzzyclaw: UNMEASURED (NOUPSTREAM) — 1/4" in out, out
+    assert "workbench tmux-fuzzyclaw: UNMEASURED" not in out, out
+    assert _blind(out) == (2, 2, 1, 0), out
+    assert _blind_state_files(fleet) == ["unmeasured-laptop-tmux-fuzzyclaw"], (
+        _blind_state_files(fleet))
+
+
+def test_a_host_that_never_ANSWERED_accumulates_no_ladder(fleet):
+    """🔴 A HOST NOBODY LOOKED AT MUST NOT ACQUIRE A STREAK. An unreachable
+    laptop reports no scopes at all, and rc 13 already owns that finding; bumping
+    a scope ladder for it would escalate a second code off one missed ssh, and
+    would go on doing it while the machine is simply shut.
+
+    RED AT BASE (15da9908) on `_blind()` (no such summary exists there). The
+    rc==0 half is an INVARIANT GUARD."""
+    fleet.catch_up()
+    _nixpkg(fleet, "tmux-fuzzyclaw.nix", "tmux-fuzzyclaw")
+    _src_repo(fleet, "tmux-fuzzyclaw")
+    fleet.stub_ssh(255)
+
+    for _ in range(5):
+        rc, out = fleet.check(REMOTE_SSH="stub@example.invalid",
+                              DRIFT_UNMEASURED_ESCALATE="2",
+                              DRIFT_UNREACHABLE_ESCALATE="99")
+        assert rc == 0, f"an unreachable host grew a scope ladder: {rc}\n{out}"
+    assert _blind(out) == (1, 1, 0, 0), out          # only the local host walked
+    assert _blind_state_files(fleet) == [], _blind_state_files(fleet)
+
+
+# --- it cannot be satisfied by measuring nothing ---------------------------- #
+def test_a_ladder_over_ZERO_SCOPES_says_so_instead_of_printing_a_clean_line(fleet):
+    """🔴 `escalated=0` over no scopes is a checker wired to nothing wearing the
+    output of a clean fleet. Both refusals are asserted: the per-host line naming
+    WHY that host contributed nothing, and the withheld summary."""
+    fleet.catch_up()
+    rc, out = fleet.check("--no-remote")
+    assert rc == 0, out
+    blk = out.split("=== built-source scopes")[1]
+    assert "workbench: NOT EVALUATED" in blk, blk
+    assert "named no ${workspace}/" in blk, blk
+    assert "named ZERO" in blk, blk
+    assert "hosts-reporting=" not in blk, (
+        "a ladder over zero scopes printed a clean-looking summary:\n" + blk)
+
+
+def test_a_ladder_over_ZERO_HOSTS_says_so_instead_of_printing_a_clean_line(fleet):
+    """The same refusal one level up: a run that reached no host has no scopes to
+    have measured, and must not print a summary at all.
+
+    RED AT BASE (15da9908) on the block assertions; the rc==2 half is an
+    INVARIANT GUARD — that refusal predates this change."""
+    fleet.stub_ssh(255)
+    rc, out = fleet.check("--no-local", REMOTE_SSH="stub@example.invalid")
+    assert rc == 2, out                              # the existing checked-nothing rc
+    blk = out.split("=== built-source scopes")[1]
+    assert "no host returned a src-unmeasured fact set" in blk, blk
+    assert "hosts-reporting=" not in blk, blk
+
+
+def test_the_ladder_escalates_immediately_when_the_streak_cannot_be_persisted(fleet):
+    """If 'for how long' is unknowable the run must fail CLOSED, exactly as the
+    unreachable ladder does: a state dir that cannot be created is the one case
+    where the threshold logic has no input at all, and going quiet there is an
+    unbounded silent window."""
+    fleet.catch_up()
+    _nixpkg(fleet, "tmux-fuzzyclaw.nix", "tmux-fuzzyclaw")
+    clone, _ = _src_repo(fleet, "tmux-fuzzyclaw")
+    _no_upstream(fleet, clone)
+    blocked = fleet.root / "blocked-state"
+    blocked.write_text("not a directory\n")
+
+    rc, out = fleet.check("--no-remote", DRIFT_STATE_DIR=str(blocked))
+    assert rc == 18, f"expected an immediate escalation, got {rc}\n{out}"
+    assert "could not be persisted" in out, out
+    assert _blind(out) == (1, 1, 1, 1), out
+
+
+@pytest.mark.skipif(
+    os.geteuid() == 0, reason="root ignores directory write permissions"
+)
+def test_the_ladder_escalates_when_the_streak_FILE_cannot_be_written(fleet):
+    """🔴 THE SECOND FAIL-CLOSED LIMB, and the one the test above does NOT reach
+    — the identical blind spot the rc 13 ladder had.
+
+    `test_the_ladder_escalates_immediately_when_the_streak_cannot_be_persisted`
+    points DRIFT_STATE_DIR at a regular FILE, so `mkdir -p` fails and
+    u_streak_bump returns from its FIRST limb. The `printf … > "$f" || echo -1`
+    limb — an existing, readable, but UNWRITABLE state dir — is only reached
+    here, and mutating its `echo -1` to `echo 0` would otherwise leave the whole
+    suite green while the ladder went permanently mute: 0 is below every
+    threshold, forever.
+
+    BOTH permission changes are required, for the reason the rc 13 twin records:
+    a mode-500 directory does not stop a write to a file that already EXISTS
+    inside it, so without the read-only file this passes on the mutant and is a
+    vacuous guard.
+    """
+    fleet.catch_up()
+    _nixpkg(fleet, "tmux-fuzzyclaw.nix", "tmux-fuzzyclaw")
+    clone, _ = _src_repo(fleet, "tmux-fuzzyclaw")
+    _no_upstream(fleet, clone)
+
+    ro = fleet.root / "readonly-state"
+    ro.mkdir()
+    counter = ro / "unmeasured-workbench-tmux-fuzzyclaw"
+    counter.write_text("NOUPSTREAM 2\n")             # a streak already in flight
+    counter.chmod(0o400)
+    ro.chmod(0o500)
+    try:
+        rc, out = fleet.check("--no-remote", DRIFT_STATE_DIR=str(ro))
+    finally:
+        ro.chmod(0o700)                              # so tmp_path can be cleaned
+        counter.chmod(0o600)
+    assert rc == 18, (
+        "an unpersistable streak must escalate immediately — 'for how long' is "
+        f"unknowable, so going quiet is an unbounded silent window. got {rc}\n{out}"
+    )
+    assert "could not be persisted" in out, out
+    # ...and via the UNKNOWN-streak branch, not the threshold one: the counter on
+    # disk says 2, below the default threshold of 4. Without this the test would
+    # pass on a mutant that never reaches the write limb at all.
+    assert "CONSECUTIVE runs" not in out, (
+        "escalated through the threshold branch, so the cannot-persist limb was "
+        "never exercised\n" + out)
+    # The same journal-hygiene claim the rc 13 twin makes: `2>/dev/null > "$f"`
+    # (in that order) is what keeps the shell's own redirection error out of the
+    # journal, and it is only observable on this path.
+    stray = [
+        ln for ln in out.splitlines()
+        if ln.strip() and not ln.startswith(("[", "===", "drift-check: ", "  "))
+    ]
+    assert stray == [], (
+        "unprefixed output leaked into the journal between the [host] lines: %r" % stray
+    )
+
+
+# --- it must not outrank, or be outranked by, the wrong thing --------------- #
+def test_unpushed_devrc_commits_still_outrank_an_escalated_rc18(fleet):
+    """rc 8 is the code with the rescue-before-reset procedure and the one the
+    legend is read against. A scope nobody could measure must never displace it.
+
+    RED AT BASE (15da9908) only on the escalation line: base cannot produce an
+    rc 18 to be outranked, so the rc==8 half is an INVARIANT GUARD. It is the
+    property that must not break, not evidence of a fixed bug."""
+    fleet.catch_up()
+    fleet.add_local_commit("un-pushed while a source scope is unmeasurable")
+    _nixpkg(fleet, "tmux-fuzzyclaw.nix", "tmux-fuzzyclaw")
+    clone, _ = _src_repo(fleet, "tmux-fuzzyclaw")
+    _no_upstream(fleet, clone)
+
+    rc, out = fleet.check("--no-remote", DRIFT_UNMEASURED_ESCALATE="1")
+    assert rc == 8, f"an escalated rc 18 displaced rc 8: {rc}\n{out}"
+    assert "CONSECUTIVE runs" in out, out             # both are still reported
+
+
+def test_an_escalated_rc18_outranks_a_merely_BEHIND_host(fleet):
+    """The other side of the rank: 18 sits above 10 (and 12 and 15) because a
+    scope that cannot be measured hides an rc 17 indefinitely, while a behind
+    checkout is one `ship.sh` away and says exactly what it is."""
+    _nixpkg(fleet, "tmux-fuzzyclaw.nix", "tmux-fuzzyclaw")   # fleet is 1 BEHIND
+    clone, _ = _src_repo(fleet, "tmux-fuzzyclaw")
+    _no_upstream(fleet, clone)
+
+    rc, out = fleet.check("--no-remote", DRIFT_UNMEASURED_ESCALATE="1")
+    assert rc == 18, f"rc 18 lost to a behind checkout: {rc}\n{out}"
+    assert "is BEHIND origin/main" in out, out        # both are still reported
+
+
+def test_a_MEASURED_stale_source_still_outranks_an_unmeasurable_one(fleet):
+    """17 over 18: "we looked and it is wrong" beats "we could not look", the
+    same argument severity() already makes for 14 over 13.
+
+    RED AT BASE (15da9908) only on the escalation line — base has no rc 18 — so
+    the rc==17 half is an INVARIANT GUARD."""
+    fleet.catch_up()
+    _nixpkg(fleet, "a.nix", "homelab-talos/containers/clawgate")
+    _nixpkg(fleet, "b.nix", "tmux-fuzzyclaw")
+    _, b1 = _src_repo(fleet, "homelab-talos", branch="trunk")
+    _push_upstream(fleet, b1, branch="trunk", path="containers/clawgate/main.go")
+    c2, _ = _src_repo(fleet, "tmux-fuzzyclaw")
+    _no_upstream(fleet, c2)
+
+    rc, out = fleet.check("--no-remote", DRIFT_UNMEASURED_ESCALATE="1")
+    assert rc == 17, f"an unmeasurable scope displaced a measured one: {rc}\n{out}"
+    assert "CONSECUTIVE runs" in out, out
+
+
+def test_the_rc18_legend_is_printed_with_the_verdict(fleet):
+    """The journal is the only surface this unit has, so the code must arrive
+    with its meaning — including that ABSENT is not on the ladder."""
+    fleet.catch_up()
+    _nixpkg(fleet, "tmux-fuzzyclaw.nix", "tmux-fuzzyclaw")
+    clone, _ = _src_repo(fleet, "tmux-fuzzyclaw")
+    _no_upstream(fleet, clone)
+
+    rc, out = fleet.check("--no-remote", DRIFT_UNMEASURED_ESCALATE="1")
+    assert rc == 18, out
+    assert "drift-check: DRIFT (rc=18)" in out, out
+    assert "rc18=a built-source scope has been UNMEASURABLE" in out, out
+    assert "repo ABSENT never" in out, out
+
+
+@pytest.mark.parametrize("var", ["DRIFT_UNMEASURED_ESCALATE",
+                                 "DRIFT_UNMEASURED_FETCH_ESCALATE"])
+def test_a_non_integer_unmeasured_threshold_is_rejected(fleet, var):
+    """Both are compared with `-ge`, where a non-integer is a shell ERROR rather
+    than a false — and an erroring comparison is a ladder that goes quiet, which
+    is the direction this whole code exists to refuse."""
+    rc, out = fleet.check("--no-remote", **{var: "4; touch /tmp/pwned"})
+    assert rc == 2, out
+    assert "must be a non-negative integer" in out, out
+
+
+# --------------------------------------------------------------------------- #
+# THE TWO RC LADDERS
+#
+# 🔴 drift-check.sh and ship.sh publish ONE numbering between them, and until
+# 2026-08-21 that fact lived only in a PR description. Neither file named a
+# single one of the other's codes, while this file's own header said "a new DRIFT
+# code has nowhere to go but upward" — pointing the next one straight at 19,
+# which ship.sh had just taken for hosts-disagree. A collision one increment
+# away, invisible to every test in either suite.
+# --------------------------------------------------------------------------- #
+def _codes_ship_can_return():
+    """ship.sh's non-zero statuses: `exit N` and `rc=N` outside comments.
+
+    The same two spellings ship.sh's own ledger test uses — it writes rc 19 only
+    as an assignment, never as `exit 19`.
+    """
+    code = "\n".join(
+        ln for ln in SHIP.read_text().splitlines() if not ln.strip().startswith("#")
+    )
+    c = {int(m) for m in re.findall(r"\bexit (\d+)", code)}
+    c |= {int(m) for m in re.findall(r"\b[a-z_]*rc=(\d+)", code)}
+    c.discard(0)
+    return c
+
+
+def _codes_drift_can_return():
+    """drift-check.sh's codes, read off severity()'s case labels.
+
+    Not a grep for assignments: this script sets its codes through several
+    per-scope variables (`p_rc`, `s_rc`, streak ladders) and an assignment scan
+    misses 13, 16 and 18. severity() is the authoritative table — the header says
+    so ("its rank is stated in severity() and here") — and every code that can be
+    returned has to be ranked there or it falls into the unknown-code slot.
+    """
+    body = DRIFT.read_text().split("severity() {", 1)[1].split("\n}", 1)[0]
+    body = "\n".join(ln for ln in body.splitlines() if not ln.strip().startswith("#"))
+    c = {int(m) for m in re.findall(r"^\s*(\d+)\)", body, re.M)}
+    c.discard(0)
+    # rc 2 exits directly, before any per-host leg, so it is never ranked.
+    c.add(2)
+    return c
+
+
+def _reserved_ledger(path, tag):
+    """The `# RESERVED-TO-<X>: n n n` line out of a script's header."""
+    m = re.search(rf"^#\s*RESERVED-TO-{tag}:\s*([0-9 ]+)$", path.read_text(), re.M)
+    assert m, (
+        f"{path.name} has no `# RESERVED-TO-{tag}:` ledger line — the reciprocal "
+        f"reservation is back to living outside both files"
+    )
+    return {int(n) for n in m.group(1).split()}
+
+
+def test_the_two_rc_ladders_reserve_each_others_codes():
+    """🔴 A LEDGER of the shared numbering, failing when either side moves.
+
+    Both halves are asserted as SETS, so this goes red when a code is added on
+    either side without being reserved on the other — not merely when 19 or 20 is
+    taken. And the "next free code" both headers publish is DERIVED here from the
+    two measured sets, so a stale number in the prose is a failure rather than a
+    thing a reader has to notice.
+    """
+    ship_codes = _codes_ship_can_return()
+    drift_codes = _codes_drift_can_return()
+
+    # 🔴 POSITIVE CONTROL for both parsers. A ledger computed from an empty set
+    # is satisfied by an empty reservation line, in silence.
+    assert {2, 19, 20} <= ship_codes, (
+        f"the ship.sh parser is reading almost nothing: {sorted(ship_codes)}"
+    )
+    assert {8, 10, 14, 18} <= drift_codes, (
+        f"the drift-check.sh parser is reading almost nothing: {sorted(drift_codes)}"
+    )
+
+    ship_only = ship_codes - drift_codes
+    drift_only = drift_codes - ship_codes
+
+    assert _reserved_ledger(SHIP, "DRIFT-CHECK") == drift_only, (
+        f"ship.sh reserves {sorted(_reserved_ledger(SHIP, 'DRIFT-CHECK'))} to "
+        f"drift-check.sh, but drift-check.sh alone can return "
+        f"{sorted(drift_only)}. A code missing from that ledger is a code ship.sh "
+        f"may take next."
+    )
+    assert _reserved_ledger(DRIFT, "SHIP") == ship_only, (
+        f"drift-check.sh reserves {sorted(_reserved_ledger(DRIFT, 'SHIP'))} to "
+        f"ship.sh, but ship.sh alone can return {sorted(ship_only)}."
+    )
+
+    # ...and neither script actually emits a code it has reserved to the other.
+    assert not (drift_codes & _reserved_ledger(DRIFT, "SHIP")), (
+        "drift-check.sh returns a code it reserves to ship.sh"
+    )
+    assert not (ship_codes & _reserved_ledger(SHIP, "DRIFT-CHECK")), (
+        "ship.sh returns a code it reserves to drift-check.sh"
+    )
+
+    next_free = max(ship_codes | drift_codes) + 1
+    for path in (SHIP, DRIFT):
+        header = path.read_text().split("\n{\n", 1)[0].split("\nset -", 1)[0]
+        assert re.search(rf"next free[^.]*\b{next_free}\b", header), (
+            f"{path.name}'s header does not publish {next_free} as the next free "
+            f"code. The two ladders now reach {max(ship_codes | drift_codes)}, so "
+            f"'nowhere to go but upward' points at a number that is already taken."
+        )

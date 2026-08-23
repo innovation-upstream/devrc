@@ -1,201 +1,255 @@
 ---
 name: session-manager
-description: "Live cross-host view of every tmux window on workbench + laptop — which have Claude Code running, what each is doing, how stale it is, plus recent agent sessions from ClickHouse. JSON-first, read-only. Use for: active sessions, what's running where, tmux state across both hosts, cross-host session status, tail a tmux window, which windows are stale/idle/busy."
+description: "Live cross-host view of every tmux window on workbench + laptop — which have Claude Code running, what each is doing, which ones are WAITING ON A HUMAN (asked a question / blocked on a modal / out of context), how stale it is, plus the clawgate approval queue, recent agent sessions, and UNSENT PROMPTS — text typed into a window and never sent. Use for: is anything waiting on me, active sessions, what's running where, tmux state across both hosts, cross-host session status, tail a tmux window, which windows are stale/idle/busy/blocked, did I leave anything half-typed / unsent."
 ---
 
 # session-manager — cross-host tmux + agent activity
 
-`scripts/session-manager`. One-shot, read-only, `--json`-first. It is the **queryable
-counterpart to `agent-ops`**, which is the always-on local tmux popup with no JSON API and
-no cross-host reach.
-
-## Run it
+`scripts/session-manager`. One-shot, **read-only**, `--json`-first, both hosts.
 
 ```bash
-python3 $DEVRC/scripts/session-manager                       # table, both hosts
-python3 $DEVRC/scripts/session-manager --json                # agent-readable
-python3 $DEVRC/scripts/session-manager --host workbench --no-ch   # fast + offline
-python3 $DEVRC/scripts/session-manager list                  # tmux only, no ClickHouse
-python3 $DEVRC/scripts/session-manager detail scratch7:3     # one window + its prompt history
-python3 $DEVRC/scripts/session-manager tail scratch7:3 --lines 200   # --host defaults to LOCAL
+python3 $DEVRC/scripts/session-manager --json --lean               # everything, agent-shaped
+python3 $DEVRC/scripts/session-manager --host workbench --no-ch    # fast + offline
+python3 $DEVRC/scripts/session-manager detail scratch7:3           # one window + prompts
+python3 $DEVRC/scripts/session-manager tail scratch7:3 --plain     # scrollback, no ANSI
 ```
 
-`detail` additionally runs the per-session prompt-history query for that window's
-`claude_session_id` and attaches it as `session_history` (skipped, with a stated reason,
-under `--no-ch` or when the window carries no session id). See
-`reference/clickhouse-queries.md`.
+🔴 **Rows are at `report["hosts"][<"workbench"|"laptop">]["windows"]`** — not at the top
+level. Roll-ups: `summary.waiting`, `summary.unsent_prompt`, `summary.status[bucket]`,
+`summary.kind`, `clawgate_queue`. And `report["not_measured"]` for what this tool does **not**
+see at all.
 
-🔴 **Read `session_history.reason` — only one of its answers is a measured absence.** A
-single hardcoded reason used to answer every no-session-id case, so one `detail --json`
-could print `LIVE COUNT UNMEASURED` and then assert a *measured* absence over that same
-unmeasured set. The reason now branches on what was actually measured: `--no-ch`,
-`--no-fuzzyclaw` (the files were never read), **any** matched window is on a **remote** host
-(fuzzyclaw is local-only — and with the default `--host all` a `session:index` that exists on
-both machines yields a row from each, so this fires on a *mixed* row set too), the
-intersection **never ran**, the slot was **contested and all claimants dropped**, an
-**unrecognised** `fuzzyclaw.status`, or — the one genuine measured absence — *"no live
-fuzzyclaw task file joined to it"*, which is reached only when the status is `ok`. Every
-other reason says **"this is NOT a measured absence"** in so many words.
+🔴 **An ABSENT summary key is not a measured zero.** `summary.status[bucket]` pre-seeds
+`claude` and `shell`, so a zero in those is real and a missing `cluster` key is not. Same
+trap on the other axis: `kind` (row field — **what the entity is**) and `CLASS` (table
+column — **how it is counted**) are different, and `caveats.kind_scope` carries
+`kinds_produced` **measured from the rows** rather than asserted.
 
 | flag | effect |
 |---|---|
-| `--json` | JSON (default is a table) |
-| `--host workbench\|laptop\|all` | default `all` |
-| `--stale-threshold <secs>` | default 3600; `age >= threshold` is stale |
-| `--no-ch` | skip ClickHouse — the client is never even constructed |
-| `--no-fuzzyclaw` | skip the task files |
-| `--lines N` | `tail` scrollback depth (default 100) |
+| `--lean` | 🔴 **with `--json`, prefer this.** Rows trimmed to the fields that answer this tool's question, **untruncated**, every discriminator and caveat kept |
+| `--host workbench\|laptop\|all` | default `all`; `tail` resolves `all` to LOCAL |
+| `--claude-only` | drop the **shell** rows (a `cluster` dispatch is an agent and is KEPT). Every count then describes the FILTERED set |
+| `--no-ch` | skip ClickHouse — drops the **largest non-row block** (17.4 KB below), which answers a different question |
+| `--no-capture` | skip the pane scrape; **every** `waiting_probable` AND `unsent_prompt` becomes `null` (both roll-ups `null`, never `0`) |
+| `--no-ledger` | skip the ledger read → **no age, no session id** on any row |
+| `--fuzzyclaw` | the task-file join, **OFF by default** (see below) |
+
+`--json`, `--no-fuzzyclaw`, `--plain`, `--stale-threshold`, `--lines`, and what each drops:
+`~/.claude/skills/session-manager/reference/payload-contract.md`.
+
+## 🔴 Which output to ask for — you are the only consumer
+
+Measured: **0 interactive shell invocations in 30 days against 55 agent references**. An agent
+reads this, and pays by the token.
+
+One 77-row two-host scan, re-measured 2026-08-21:
+
+| | bytes ≈ tokens | faithful? |
+|---|---|---|
+| table (default) | 24,658 ≈ 6.2k | ❌ **lossy** — truncated cells, tasks over the 25-char column |
+| `--json --lean` | 79,008 ≈ 20k | ✅ on what it keeps |
+| `--json` | 103,801 ≈ 26k | ✅ |
+
+🔴 **`--lean` trims ROW fields ONLY** — 39 KB of that lean payload is blocks it never touches:
+`clickhouse` 17.4 KB, `clawgate_queue` 12.7 KB (the queue is enumerated **uncapped**),
+`caveats` 4.3 KB, `ledger` 2.8 KB, `not_measured` 1.8 KB. **So ask for `--json --lean
+--no-ch`** unless you want the session history — that block is the largest single lever and it
+answers a different question than "is anything waiting on me". The tri-states, `caveats`,
+`clawgate_queue` and every per-host measurement status survive all three flags.
+`lean_row_fields`/`lean_host_fields` travel in the payload naming what the view CARRIES, so a
+key absent from a row was omitted by the view, never measured as null.
+
+## 🔴 `waiting_probable` — is anything waiting on a HUMAN
+
+`status: idle` merges four states that need four different actions. Each Claude pane is
+scraped (one batched `capture-pane` per host) for three signals, and every row carries the
+**matched line** so you can disagree with it:
+
+| signal | means | do |
+|---|---|---|
+| `trailing_question` | the agent's last sentence ends in `?` | answer it |
+| `selection_menu` | `❯ 1./2./3.` modal is up | press a key |
+| `context_exhausted` | `ctx: 0%` | `/clear` it |
+
+🔴 **`waiting_probable: false` means "these three were looked for and none matched" — NOT
+"this window needs nothing."** Recall is partial by construction: measured on 40 live panes
+2026-08-12, a window parked on `Press Enter to continue…` matches none of them, and text
+typed at the `❯` prompt is deliberately **excluded** (a window one Enter away reads `no` —
+the evidence, and what would justify turning it on, is in
+`~/.claude/skills/session-manager/reference/waiting-signal.md`).
+
+🔴 **`waiting_probable: null` is not `false`.** Read `waiting_status` — `ok` (scraped),
+`not_claude` (never scraped: the signals are Claude-TUI shapes, so a shell's last line ending
+in `?` would be a false positive), `uncaptured`, `skipped`, `error`.
+`summary.waiting.probable` is likewise **`null`, never `0`**, when nothing was scraped: the
+one sentence this tool must never emit is "nothing is waiting on you" off a look that never
+happened.
+
+## 🔴 `unsent_prompt` — work PARKED one Enter away (a DIFFERENT question)
+
+Five of 79 panes held text typed at the prompt and never sent — real work, hours old — and the
+one-call answer reported none of them (2026-08-15). Now on the row as `unsent_prompt` (**the
+text**, so you can triage without opening the pane) + `unsent_prompt_status`, rolled up as
+`summary.unsent_prompt`.
+
+🔴 **It is NOT part of `waiting_probable` and is never summed into it.** The same sweep
+measured `waiting_probable` at **11 flagged, 11 true positives, ZERO false positives** — that
+precision is this tool's most valuable property, and a noisier signal folded in would destroy
+exactly it. Read both:
+
+| | means | |
+|---|---|---|
+| `waiting_probable` | this window is **BLOCKED** and cannot proceed without you | go unblock it |
+| `unsent_prompt` | this window has **WORK PARKED** in its input box | send it, or clear it |
+
+🔴 **A row can carry BOTH, and that is correct** — the agent asked a question and you
+half-typed a reply. Separation does not mean they never co-occur; it means neither can raise
+or be summed into the other.
+
+🔴 **`unsent_prompt: null` is an empty box ONLY when `unsent_prompt_status == "ok"`.**
+Statuses: `ok`, `no_input_box`, `uncaptured`, `not_claude`, `skipped`, `error`; and
+`summary.unsent_prompt.count` is **`null`, never `0`**, when no box was read. `no_input_box`
+is a modal or a draft taller than the box — **unmeasured**, never "nothing typed". Shell panes
+are never scraped. Scoped to the pane's OWN input line (only the lines *between the two
+box-drawing rules*), so scrollback or a pane displaying another session's transcript cannot
+trip it.
+
+🔴 **NEVER PASTE CAPTURED OPERATOR TEXT INTO A COMMITTED FILE.** TWO fields carry **text the
+operator typed** — `unsent_prompt` (the draft) and `clickhouse.rows[].first_msg` (the opening
+prompt of every recent session) — and devrc is a **PUBLIC** repo, as is every `claudedocs/`
+note, commit message, PR body, comment or test fixture an agent writes into it. Report either
+as a **count, a length or a shape**, never verbatim. Quoting one back to Zach in chat is fine;
+writing one to a file that gets committed is not.
+(`test_no_FIXTURE_DRAFT_string_appears_in_a_shipped_doc` fails on that shape — it has
+happened.)
+
+## 🔴 `not_measured` — what this tool CANNOT see, and who owns it
+
+A blind dogfood found this tool "precise about what it measured but it does not tell a cold
+reader what it did **not** measure" — while **60 open PRs** sat outside every number it
+prints. `report["not_measured"]` names each such population and the **skill that answers
+it**: `pull_requests` → `standup`, `mail_queue` → `mailbox`, `cluster_alerts` → `standup`,
+`initiative_board` → `initiatives`, `gui_windows_outside_tmux` → `i3`.
+
+🔴 **It is DERIVED from the report's own keys, not a written-down list.** An entry is emitted
+only while the report carries no key for that population, so the day PR querying lands the
+claim stops being made with no edit anywhere. `clawgate_queue` is **not** listed — that one
+*is* measured.
+
+## 🔴 `clawgate_queue` — the clawgate approval queue
+
+🔴 **Renamed from `blocked_on_me` (2026-08-18)** — no alias is kept and a test bans the old key
+at any depth; the misread it cost is in the reference. **For panes that look like they are
+waiting on a human the field is `summary.waiting.probable` — a different population, never
+summed with this one.**
+
+🔴 With the `agent-ops` TUI RETIRED this is the ONLY place the queue surfaces outside the bar
+pill: never answer "is anything waiting for my approval" by pointing somewhere else. Source:
+the bar poller's cache, not a live API call.
+
+- **`count` = pending + STUCK.** `pending_count` is the `{open, ready_for_review}` half;
+  `stuck_count` is `in_progress` tasks whose agent looks dead — excluding those is what hid a
+  dispatch dead **four hours**. Predicate `scripts/lib/clawgate_tasks.py`, shared with the poller.
+- **`open` / `ready_for_review` / `stuck` ENUMERATE the queue**, each `stuck` row with its
+  `reasons` and `agent_idle_secs` — **`idle 16m` and `idle 4h` are the same boolean.**
+- 🔴 **`schema_ok: false` means STUCK WAS NOT MEASURED, not zero stuck** — the cache predates
+  the predicate (no `switch` + `bar-status-poll` restart yet); `stuck_count` is `null` there.
+- Four states: `ok` / `stale` (cache older than 300s — the poller writes every 45s) /
+  `absent` / `unparseable`. The last three publish **`count: null`, never `0`**.
+
+## `label` + `hotkey` — a name for the sessions the slot table never named
+
+Every row carries `label` (+ `label_source`, + `hotkey`): **`codename`** if the session is a
+scratch slot → else the **leaf of the pane's cwd** → else **`main`** (`fallback`).
+
+🔴 **`hotkey` is the actionable half** — the `$mod+Shift+<k>` that gets you there — and it is
+**`null` (never `""`) on tiers 2 and 3**: no binding exists, so quoting a key would send the
+operator to press something and land nowhere. 🔴 **`label` is NOT an address —
+`session:window` still is**; two sessions in one repo resolve to the SAME label, so quote both.
+
+## The caveats are in the OUTPUT, not just in this file
+
+So read them from the run, not from here. `report["caveats"]` is structured and the table
+prints one footer line each **unconditionally**, so an agent that runs the script cold gets
+them anyway. The vocabulary is the keys of `CAVEATS` in `scripts/session-manager` —
+`claude_detection`, `fuzzyclaw_scope`, `kind_scope`, `ledger_scope`, `waiting_signal`,
+`unsent_prompt` — which `measured_caveats` fills in per scan. That list is gated against the
+script's own `CAVEATS`; the prose this section used to hold was not, and had rotted to five.
 
 ## 🔴 Read the exit code — the two zeroes are different facts
 
 | code | meaning |
 |---|---|
 | `0` | ran, found windows (**including** a partial scan where one host was unreachable) |
-| `2` | usage / malformed `<session>:<window>` target / **`tail`: the host answered and there is no such window** |
-| `3` | every requested host answered and the answer is a **real zero** (for `tail`: the window exists and its scrollback is empty) |
+| `2` | usage / bad `<session>:<window>` / **`tail`: the host answered, no such window** |
+| `3` | every requested host answered and the answer is a **real zero** |
 | `4` | **no** host could be reached — the zero is unmeasured, not measured |
-| `5` | **`tail` only**: the host answered and there is **no tmux server** on it, so no window exists there |
+| `5` | **`tail` only**: the host answered and there is **no tmux server** on it |
 
-🔴 For `tail`, "no such window" is **exit 2**, not 4. The host answered; calling it
-unreachable states a false fact and sends you to debug SSH over a typo. `tail`'s JSON
-carries `reachable` *and* `found` — `found: null` means the host never answered, so it has
-said nothing about whether the target exists. `--json` prints that payload on **every** exit
-path, 0/2/3/4/5, not only on success — the failure exits are precisely where the
-discriminants are worth reading. The human sentence goes to stderr, so stdout stays parseable.
+Same discipline inside the payload: `hosts.<n>.reachable`/`.error` describe the
+**`list-panes`** call, `.windows_measured`/`.windows_error` the **`list-windows`** call, and
+`.captures_measured`/`.captures_status` the **capture batch** — three independent
+measurements, and one succeeding says nothing about the others. `clickhouse.status` must be
+`ok` before `rows: []` is believable. **Never read a bare count without its status.**
 
-🔴 **Exit 5 exists because 3 was carrying two facts.** `tmux` saying *"no server running"*
-is a **reachable** host, so `tail` used to take the success branch and publish
-`found: true, text: ""` → exit 3 — identical to a window that exists with an empty
-scrollback, which is the only thing exit 3 is documented to mean. A down server now gets
-`found: false, no_server: true` and its own code. It is deliberately **not** exit 2 (the
-target may be spelled perfectly — the repair is starting tmux, not fixing a typo) and not
-exit 4 (the host *did* answer).
+## fuzzyclaw is OFF by default
 
-`--host` defaults to `all`, which is meaningless for a command targeting one window, so
-`tail` resolves it to the **local** host. That default is recorded, not silent:
-`host_defaulted: true` in the JSON, and the not-found message names the host searched and
-how to search the other one.
+Measured 2026-08-12: 29 live of 401 task files and **every one read `paused`**, including a
+window demonstrably running an agent — a source `CLAUDE.md` marks UNTRUSTED. Opt in with
+`--fuzzyclaw`; off, every count is `null` rather than `0`. The intersection guard still runs
+when you do: a task file survives only when its `window_id` is live **and** that live window's
+real `(session, index)` equals the one the file recorded.
 
-Same discipline inside the payload. `hosts.<name>.reachable` + `.error` are always present;
-`clickhouse.status` is one of `ok` / `unreachable` / `query_error` / `unavailable` /
-`skipped`, so `rows: []` is only believable when it is `ok`; `fuzzyclaw` reports
-`files_seen` / `files_live` / `files_unparseable`, so "no live tasks" is distinguishable
-from "no task files". Never read a bare count without its status.
+## The agent activity ledger — where age / `stale` / `claude_session_id` come from
 
-Under `--no-fuzzyclaw` **every one of those counts is `null`, not `0`** — the directory is
-never opened, so a `0` would be a fabricated measurement. `status: "skipped"` discriminates
-it, but a discriminated lie is still a lie in the count.
+Two writers record one file per tmux PANE into `~/.cache/agent-ledger/` — a devrc-owned Claude
+hook and an opencode plugin — read per host (locally and over SSH). Row fields: `age_secs`,
+`age_source` (`ledger`/`fuzzyclaw`/null — which SOURCE answered; the ledger wins), `runtime`
+(`claude`/`opencode`/null — which AGENT recorded it), `ledger`, `claude_session_id`.
+
+🔴 **Read `report["ledger"]`, never just the row.** `status` is `ok` / `partial` / `error` /
+`skipped` and only the first two publish integers — the rest are `null`, never `0`;
+`summary.rows_with_age` is the meter separating a `stale=0` bucket that means *nothing is
+stale* from one that means *nothing has an age*.
+
+🔴 `runtime` is not `claude`. The `claude` column is `pane_current_command =~ /claude/`, so an
+opencode window reads `shell` — an agent counted as a bare prompt in every bucket.
+
+🔴 **A null age is not age 0** — no writer has recorded that window yet.
+
+🔴 **Records carry the tmux SERVER pid and the reader checks it**, so after a reboot a stale
+`@41` cannot hand a fresh `@41` window a dead session's id. Spec:
+`claudedocs/spec-agent-activity-ledger.md`.
 
 ## Where everything lives
 
-| path | what |
+`scripts/tests/test_session_manager.py` is the hermetic suite (mocks tmux, SSH, CH, FS);
+`scripts/lib/agent_ledger.py` owns the ledger record shape. State it reads:
+`~/.cache/agent-ledger/*.json` (the ledger), `~/.cache/bar-status/clawgate.json` (the queue
+cache, written by `scripts/bar-status-poll`), `~/.tmux/tasks/*.json` (fuzzyclaw, UNTRUSTED),
+`scripts/tmux-scratch-slots.sh` (codenames).
+
+**Reference topics** — each costs nothing until you open it:
+
+| load it when | file |
 |---|---|
-| `scripts/session-manager` | the script |
-| `scripts/tests/test_session_manager.py` | the hermetic suite (mocks tmux, SSH, CH, FS) |
-| `scripts/tmux-scratch-slots.sh` | codename table (`~/.config/tmux/scratch-slots.sh` deployed) |
-| `scripts/validation/chquery.py` | shared CH client — a LIBRARY, imported by `sys.path` insert |
-| `~/.config/activity-collector/env` | CH endpoint + creds (never hardcoded) |
-| `~/.tmux/tasks/*.json` | fuzzyclaw task files |
-
-Details: `reference/clickhouse-queries.md`, `reference/cross-host.md`.
-
-## 🔴 fuzzyclaw is only usable intersected with LIVE windows — and the guard pins a RELATIONSHIP
-
-`CLAUDE.md` marks `~/.tmux/tasks/*.json` UNTRUSTED. Measured on the workbench 2026-08-11:
-**400 files, 44 live windows, 357 stale (89%), 11 slot-mismatched, 32 live, 0 unparseable.**
-The failure mode is staleness, not corruption — so it is filterable, and
-`filter_live_tasks()` does the filtering against
-`tmux list-windows -a -F '#{window_id}|#{window_index}|#{session_name}'`.
-
-A task file survives only when **both** hold:
-
-```
-window_id is live   AND   that live window's real (session, index) == the file's
-```
-
-🔴 **Existence alone is not enough, and checking only existence was a real defect here.** An
-earlier revision keyed the guard on `window_id` but joined the task onto a pane row by
-`(tmux_session, window_index)` — two independent facts, never checked against each other.
-`renumber-windows` is `on`, so indexes shift under live windows: of the 43 files that passed
-the id-only guard, only **32** still sat in the slot they recorded, **7** named a slot now
-held by a *different* live window, and **5** slots were claimed by more than one survivor
-(silently last-wins). Two rendered rows carried another window's `claude_session_id` — the
-one carrier of the session id into ClickHouse — so a `detail` would have pulled a stranger's
-prompt history.
-
-Consequences, all pinned by tests:
-
-- rejections are counted **separately**: `files_stale` (the window is gone) vs
-  `files_mismatched` (alive, but somewhere else now). Collapsing them hides a renumber storm.
-- a slot two files both claim resolves to **nothing**. `index_tasks_by_window()` drops it and
-  reports it under `fuzzyclaw.slot_conflicts`; attaching an arbitrary one of two
-  contradictory records is worse than attaching none, because it reads as measured data.
-  🔴 **What that drop still catches is narrower than the "5 contested slots" above — but it
-  is not empty.** Gone for good: two *distinct* live window ids contending for one slot (a
-  slot belongs to exactly one window, so `list-windows` cannot report it) — that was the
-  shape produced by the *old id-only* guard. **Still reachable: two task files carrying the
-  same `window_id`.** The files are `<index>.json`, not `<window_id>.json`, so nothing
-  enforces one file per window, and `CLAUDE.md` marks the directory UNTRUSTED — the
-  400-files/400-distinct-ids reading of 2026-08-11 is a snapshot of that writer, not an
-  invariant. Both duplicates pass the relationship guard and collide, and the conflict
-  renders; a test drives that case through `gather()`. Note that `claimants` counts *files*
-  while `window_ids` is deduplicated, so `claimants: 2, window_ids: ["@41"]` is exactly this
-  case — duplicate files for one window, not contention — and the rendered line states both
-  numbers so it cannot be misread.
-- every row carries `window_id`, so the join is auditable in the output:
-  `row.window_id == row.fuzzyclaw.window_id` for every joined row. 🔴 That holds **by
-  construction, not by luck** — both sides derive from the same `list-windows` snapshot — so
-  it is documentation of the join, **not a defence**, and re-checking it at runtime would be
-  an unreachable guard. It does **not** cover the one skew that is genuinely reachable:
-  `list-panes` and `list-windows` are two non-atomic calls, so with `renumber-windows on` a
-  window can move between them and a row can pair one snapshot's pane data with the other's
-  window id. The pane format carries no `window_id`, so nothing catches that. **Unguarded,
-  and named rather than implied away.**
-- `filter_live_tasks()` **rejects a bare set of ids with a `TypeError`** rather than
-  degrading to the old existence-only check.
-
-Same precedent and rationale as `scripts/tmux-scratch-status.sh:28-34`. If you add a second
-consumer of these files, intersect there too — do not copy the fields out raw.
-
-The task-file key set consumed is pinned as a **field ledger** (`FUZZYCLAW_FIELDS`, 11 keys
-including `transcript_path`, which the original spec omitted). It fails the suite when the
-set grows *or* shrinks.
-
-## 🔴 The third zero: `fuzzyclaw.status`
-
-The live-window set is **measured or `None`**, never a fabricated empty set. When it was not
-measured, `fuzzyclaw.status` is `"unmeasured"` and `files_live` is `null` — *not* `0`, and
-never `"ok"`. Two ways to get there, both of which used to report
-`files_seen: 400, files_live: 0, status: "ok"`:
-
-| cause | what you see |
-|---|---|
-| `--host laptop` — the local host is never scanned, so its windows are never listed | `fuzzyclaw.error` names the unscanned local host |
-| `list-panes` succeeded but `list-windows` failed | `hosts.<n>.windows_measured: false` + `windows_error`; `live_window_ids: null` |
-
-`hosts.<n>.reachable`/`.error` describe the **`list-panes`** call; `.windows_measured`/
-`.windows_error` describe the **`list-windows`** call. They are independent measurements —
-one succeeding says nothing about the other.
-
-## Honest limits — do not describe these as working
-
-- Claude detection is `pane_current_command =~ /claude/`, **shallower** than agent-ops'
-  `/proc` descendant walk. `/proc` is not reachable over SSH, so a deeper local check would
-  make the two hosts report by different rules.
-- fuzzyclaw is read on the **local host only** (the files are local state). A remote row
-  therefore has `fuzzyclaw: null`, `claude_session_id: null` and `age_secs: null`, and is
-  classified busy/idle from the title glyph alone — it is never labelled `stale`, because
-  no age was measured.
-- `tail --stream` is **not implemented** — one-shot `capture-pane` only.
-- `signal` / `kill` are **not implemented**, deliberately. This tool never writes to,
-  signals, or kills a window. Adding a destructive verb needs its own PR and its own guards.
+| reading `--json` field by field — every flag, summary buckets, the lean view, row/label tiers, what each caveat entry carries, ledger internals | `~/.claude/skills/session-manager/reference/payload-contract.md` |
+| changing or doubting the `waiting` / `unsent_prompt` detector | `~/.claude/skills/session-manager/reference/waiting-signal.md` |
+| a caller must branch on an exit code | `~/.claude/skills/session-manager/reference/exit-codes.md` |
+| reading the approval queue field by field | `~/.claude/skills/session-manager/reference/clawgate-queue.md` |
+| touching the fuzzyclaw task-file join | `~/.claude/skills/session-manager/reference/fuzzyclaw-guard.md` |
+| writing a ClickHouse query over the session history | `~/.claude/skills/session-manager/reference/clickhouse-queries.md` |
+| the SSH call, its failure taxonomy, or which host is which | `~/.claude/skills/session-manager/reference/cross-host.md` |
 
 ## Gotchas
 
-- Both hosts report `hostname` as `nixos`. The local host label comes from `ACTIVITY_HOST`
-  (env, then the collector env file), defaulting to `workbench`.
-- `tmux` exiting non-zero with *"no server running"* is a **reachable** host with zero
-  windows, not an unreachable one. The script already separates them; keep it that way.
-- zsh reserves `status` — use `rc=`/`out=`. Use `git -C <path>`, never `cd <repo> &&`.
-- Merged ≠ deployed: this file only reaches `~/.claude/skills/` on a `home-manager switch`
-  / `ship.sh`. The script itself runs straight from the repo checkout.
+- Both hosts report `hostname` as `nixos`; the local label comes from `ACTIVITY_HOST` (env,
+  then the collector env file), defaulting to `workbench`.
+- `tmux` saying *"no server running"* is a **reachable** host with zero windows, not an
+  unreachable one. Keep the two separate.
+- `signal` / `kill` are **not implemented, deliberately** — this tool never writes to, signals
+  or kills a window, which is the only reason it is safe to point at a live machine holding
+  40+ windows of real work. A `waiting` flag is a read; acting on it is not.
+- Merged ≠ deployed: this file only reaches `~/.claude/skills/` on a `home-manager switch` /
+  `ship.sh`. The script runs straight from the repo checkout.

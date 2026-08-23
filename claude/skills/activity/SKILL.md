@@ -1,6 +1,6 @@
 ---
 name: activity
-description: "Operate the personal activity-telemetry pipeline: 9 sources -> per-host collector -> homelab ClickHouse activity.events -> Grafana + a per-source deadman. Query the data, revive a stalled or silently DEAD source, deploy, validate. Use for: activity tracking, the keylogger, \"where my time goes\", the activity dashboard, activity.events, the collector, a stale telemetry source, the `tlm` bar pill."
+description: "Operate the personal activity-telemetry pipeline: 9 sources -> collector -> homelab ClickHouse activity.events -> Grafana + a per-source deadman. Query it, revive a stalled or DEAD source, deploy, validate. Use for: activity tracking, the keylogger, \"where my time goes\", the activity dashboard, activity.events, the collector, a stale telemetry source, the `tlm` bar pill."
 ---
 
 # activity-telemetry operations
@@ -65,7 +65,7 @@ Per-source detail that matters when querying:
   `active_ms` + focus/idle were **RETIRED** (PR #27) — structurally wrong on i3
   (`chrome.idle` is system-wide, blur unreliable → counted *other-app* time as
   browser-active). Browser attention is derived downstream (i3 ∩ domain — see
-  `reference/queries.md`).
+  `~/.claude/skills/activity/reference/queries.md`).
 - `claude` — tails `~/.claude/projects/**/*.jsonl`. Kinds: `prompt`/`command` (message
   stream), `session-summary` (Layer A rollups), `session-insight` (Layer B facets).
 - `i3` — `window::focus` + `workspace::focus` → `i3-source`; captures attention even when
@@ -343,7 +343,7 @@ python3 $CLI prepare --days 14 --limit 6 --json     # 2. select settled+un-extra
                                                     #    attach Layer A ground truth
                                                     #    → prints run_id, staging dir, input.json paths
 # 3. EXTRACT — read each input.json, write results/<run-id>/<session>.result.json per the
-#    schema in the input. 🔴 FIRST read reference/session-insights.md (the anti-confabulation
+#    schema in the input. 🔴 FIRST read ~/.claude/skills/activity/reference/session-insights.md (the anti-confabulation
 #    contract + how to batch/fan out) — do not extract from memory of these rules.
 python3 $CLI write --run-id <id> --json             # 4. validate + emit to ClickHouse
 python3 ~/workspace/devrc/scripts/session-analysis/insights.py --days 30   # 5. read the report

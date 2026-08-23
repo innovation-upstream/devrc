@@ -72,11 +72,164 @@
 #   first for months while its entire ~/.claude/skills/ dangled. Reported per
 #   host with the count of what was EXAMINED, never a bare "0 dangling".
 #
+#   CURRENCY — and every path that resolves must serve the content the REPO is
+#   at (verify_managed_currency, rc 13). The resolution half reads the manifest
+#   out of the host's own active generation, so its reference point moves with
+#   the host: a machine on a three-week-old generation has a three-week-old
+#   manifest whose links all resolve, and it passes green. Measured 2026-08-19 —
+#   the workbench served the pre-#611 ~/.claude/RULES.md while ship printed
+#   "488 checked, 0 dangling, 0 absent" and "✅ VERIFIED … + switched". Three
+#   questions, three exit codes, none of them a substitute for another.
+#
+# 🔴 SELF-SUPERSESSION — this script's own source is one of the things it ships.
+# The first thing a run does is fast-forward the working tree, and that tree
+# CONTAINS scripts/ship.sh. Two independent failures follow, both MEASURED:
+#
+#   * THE VERDICT IS COMPUTED BY THE COPY THAT WAS JUST REPLACED. The CONVERGE
+#     payload is expanded into a variable near the top of this file, long before
+#     the fast-forward, and it is that STRING which runs locally and is sent over
+#     ssh. 2026-08-19: the run that DELIVERED #620 (4548e6b -> c7eb5c3, the
+#     commit that added verify_managed_currency) printed no currency line at all
+#     and exited 0; an immediate second run printed "347 repo-sourced examined,
+#     0 stale". The operator was handed a green produced by the code they had
+#     just replaced — the one shape of green this file exists to refuse.
+#
+#   * BASH RE-READS A SCRIPT FROM A BYTE OFFSET after every external command, so
+#     a writer that overwrites this file IN PLACE while it runs truncates or
+#     splices it. Measured 2026-08-20: a script that `cp`s over itself loses
+#     everything past that point and exits 0 — at 45 of 45 swept offsets, and at
+#     ship.sh's own byte geometry. Replaced by a same-length file it resumes
+#     INSIDE the new bytes and runs a splice of the two versions (a padding line
+#     executed as the bare command `yyyyy`), also exit 0. Wrapping the body in a
+#     brace group made the identical experiment run the ORIGINAL to completion.
+#
+#     🔴 BUT NOT VIA `git`, AND THE OBVIOUS INSTRUMENT SAYS OTHERWISE. Comparing
+#     st_ino across a fast-forward reports the SAME inode and reads as "git
+#     overwrites in place" — it is wrong, because a freed inode number is
+#     immediately reused. Holding an OPEN FD across `git merge --ff-only` shows
+#     what actually happens: the fd still yields the OLD bytes with st_nlink=0,
+#     i.e. git UNLINKS AND RECREATES. A running bash keeps its own unlinked
+#     inode, so a fast-forward cannot corrupt the run — only stale it. Three
+#     end-to-end fixture runs agree (incoming copy +27 KB, −30 KB, same size:
+#     all completed cleanly on the pre-fix script).
+#
+# Both halves are closed here — the first being a LATENT hazard closed cheaply,
+# not a reproducing one:
+#   1. the whole executable body is ONE BRACE GROUP ending in `exit`, so bash
+#      must parse this file to EOF before running any of it and can never re-read
+#      it. It defends against an IN-PLACE writer (`cp` without
+#      --remove-destination, `install`, `>>`, an editor that truncates), NOT
+#      against git — see the measurement above; claiming otherwise would be a
+#      comment the code contradicts. 🔴 The group opens immediately below and
+#      closes on the last line — do not add anything after the closing brace, and
+#      do not remove the trailing `exit`.
+#   2. this file (and lib/host-role.sh) is fingerprinted before the local leg and
+#      again after it. If it changed, the run RE-EXECS the new copy with
+#      $SHIP_SELF_GEN incremented, BEFORE the remote leg — so the remote host
+#      gets the new CONVERGE payload too. That counter is the loop guard: past
+#      SHIP_SELF_MAX_GEN the run REFUSES (rc 20) rather than exec'ing again.
+#      Cost, stated rather than hidden: on a run that ships a change to ship.sh,
+#      `home-manager switch` runs TWICE on the local host. That is the price of
+#      never printing a verdict the running code did not compute.
+#
+# 🔴 CROSS-HOST AGREEMENT — "each host reached origin/main" is NOT "the two hosts
+# hold the same commit". Each leg fetches independently, so origin/main is a
+# MOVING target across a run. MEASURED 2026-08-19, in the very same run as above:
+#
+#     [nixos] fast-forwarded main 4548e6b -> c7eb5c3      (workbench)
+#     [nixos] fast-forwarded main 4548e6b -> e7ceb1f      (laptop)
+#     ship: converged + verified at origin/main (local=workbench remote=laptop)
+#
+# #619 merged between the two fetches. Both hosts passed every per-host check —
+# each really was at origin/main as IT saw it — and the fleet was nonetheless in
+# two different states. rc 11 structurally cannot see this: it compares HEAD
+# against the `target` THAT LEG captured, so a target that moved afterwards is
+# invisible to it, and no other check compares the hosts to each other at all.
+# So each converged host now EMITS the sha it landed on (`ship-landed-sha`), and
+# the final verdict is a claim about those two shas being EQUAL — printed with
+# the sha and with the number of hosts compared beside it. Disagreement, or
+# fewer than two shas from a two-host run, is rc 19 and gets its own code
+# because the operator action differs from every per-host code: re-run ship.
+#
+# 🔴 What that does NOT claim: that the agreed sha is the NEWEST origin/main.
+# Both hosts can agree on a commit origin has since moved past — nothing here
+# re-fetches after the fact, and a run cannot outrun a remote that keeps moving.
+# It answers "are the two machines in ONE state", which is the question the old
+# verdict line got wrong; "is that state current" is drift-check's rc 10.
+#
 # Skips are per-host and non-fatal to the run: if one host cannot fast-forward,
 # it is reported with the blocking files named and the OTHER host is still
 # converged.
 #
 # Exit codes:
+#   2  SHIP_REPO was SET but EMPTY — a caller bug, not a request for the
+#      default. `${SHIP_REPO:-…}` cannot tell "unset" from "set to the empty
+#      string", so an empty value would silently converge the operator's own
+#      $HOME/workspace/devrc. Refused instead. UNSET still defaults, which the
+#      remote leg relies on.
+#
+# 🔴 THE LADDER IS SHARED WITH scripts/drift-check.sh, RECIPROCALLY. That script
+# is the passive deadman for the same fleet and deliberately uses the same
+# vocabulary, so a number must not mean two things across the pair. It owns
+# 10, 14, 15, 16, 17 and 18 — DRIFT meanings this script does not take — and
+# reserves them here; this script owns 5, 7, 9, 11, 19 and 20 and they are
+# reserved there. Its header says "a new DRIFT code has nowhere to go but
+# upward", which points the next one at 19 unless the reservation is written
+# down on both sides: so the next free code for THIS script is 22, and so is the
+# next free code for that one.
+#
+# RESERVED-TO-DRIFT-CHECK: 10 14 15 16 17 18
+#
+# That line is a LEDGER, machine-read, not a comment: it must equal exactly the
+# set of codes drift-check.sh can return and this script cannot, so it fails when
+# the set grows (a new DRIFT code appears) or shrinks. Pinned by
+# test_the_two_rc_ladders_reserve_each_others_codes in
+# scripts/tests/test_drift_check.py — until 2026-08-21 the alignment existed only
+# in a PR description and neither file mentioned the other's numbers.
+#
+#   21 usage error: an unknown argument, or a run asked to check NO host at all
+#      (`--no-local --no-remote`). Raised before any host is touched, so the rc
+#      legend printed on failure is never reached on this path — it is in both
+#      ledgers anyway, because a ledger with a known hole is not a ledger.
+#
+#      🔴 BASH ITSELF ALSO EXITS 2, on a syntax error, and this script hands
+#      control to another copy of itself (the re-exec below). A superseded copy
+#      that does not parse exits 2 AFTER the local host has already been
+#      fast-forwarded and switched — an rc whose only documented meaning says
+#      "raised before any host is touched", i.e. a ledger entry that is FALSE on
+#      the one path that can produce it.
+#
+#      That one IS closed at the source rather than documented as an extra code:
+#      EVERY file in `SHIP_SELF_WATCH` — this script AND the sourced
+#      `lib/host-role.sh`, not merely the one that gets exec'd — is
+#      `bash -n`-checked before the exec and becomes rc 20, which already means
+#      "this script was replaced and the new copy could not be run". Checking
+#      only the exec'd half would leave the WORSE half open: a syntax error in
+#      a SOURCED file does not abort anything, so it surfaces as a green
+#      verdict over a broken deploy rather than as a failure — the shape
+#      test_a_superseding_lib_that_does_not_parse_is_rc20_not_a_green_verdict
+#      measures at both error positions before asserting the guard.
+#
+#      The choice is deliberate, because the test suite's ledger
+#      (`_ship_exit_codes` in scripts/tests/test_ship_converge.py) reads this
+#      FILE for `exit N` / `rc=N` and is structurally blind to statuses BASH
+#      produces. It cannot see this class at all, so teaching it 2 would pin
+#      prose no assertion can keep honest; making the status unreachable is the
+#      guard, and test_a_syntactically_broken_new_copy_is_rc20_not_bash_2 is the
+#      one that watches it hold.
+#
+#      🔴 THE SIBLING HAZARD — the new copy REMOVED between the parse check and
+#      the exec — IS NOT CLOSED, and the shape of it is not what it looks like.
+#      Measured 2026-08-21: `exec bash "$file"` execs BASH, not `$file`, so the
+#      exec syscall SUCCEEDS whatever state `$file` is in; the freshly-exec'd
+#      bash then fails to open it and exits 127 on its own. By then this process
+#      no longer exists, so nothing here can catch, relabel or diagnose it — an
+#      operator sees a bare 127 in no ledger. `shopt -s execfail` below does NOT
+#      cover this (it fires only when BASH ITSELF cannot be exec'd); `bash -n`
+#      immediately beforehand is what shrinks the window to the gap between two
+#      adjacent statements. Stated rather than silently mis-covered: an earlier
+#      revision of this comment claimed execfail closed it, which the same
+#      measurement refutes.
 #   3  repo missing on that host
 #   4  git fetch failed, or origin/main is missing / HEAD unborn
 #   5  SKIPPED — an unresolved merge/cherry-pick is in progress (conflicted
@@ -94,6 +247,41 @@
 #      host do not resolve there (dangling/absent), or the manifest listing them
 #      could not be read, in which case NOTHING was examined and the run proves
 #      nothing about that host. Both spellings are RED on purpose.
+#   13 post-switch CURRENCY check failed — the managed paths RESOLVE (12 passed)
+#      but their content is an OLDER version of the repo source: this host is
+#      serving a stale home-manager generation. Deliberately distinct from 12,
+#      because the operator action is different — 12 is a repair, 13 is a
+#      re-switch. Also RED when nothing comparable was examined.
+#   19 the two hosts converged to DIFFERENT commits, or their agreement could
+#      not be checked at all. Every per-host code above is a claim about ONE
+#      machine; this is the only claim about the two of them TOGETHER, and both
+#      can be green while the fleet sits in two states (see CROSS-HOST AGREEMENT
+#      above). Also RED when a two-host run got a landed sha from fewer than two
+#      hosts: an agreement that was not compared is not an agreement.
+#   20 THIS SCRIPT was replaced by its own run and the new copy could not be run:
+#      the re-exec budget was exhausted (ship.sh kept changing under the run),
+#      the new copy is unreadable, ANY watched file does not PARSE (`bash -n`),
+#      `bash` itself could not be exec'd, or the self-check could not be measured
+#      at all. Five spellings, one code, because they are one operator action —
+#      re-run ship by hand — and because a run that cannot tell whether its own
+#      source changed must not print a verdict either way.
+#
+#      🔴 Every exit-20 site sits between the local leg and the remote one, so
+#      the FLEET IS PROVABLY IN TWO STATES when it fires: the local host was
+#      converged (and, unless --no-switch, switched) and the remote host was NOT
+#      visited at all. "re-run ship by hand" alone reads like a retry of nothing;
+#      each site therefore prints which host got what. The local leg's own
+#      non-zero rc is also DISCARDED by the re-exec — the exec replaces the
+#      process before the verdict block can report it — so a re-exec announces
+#      that too rather than letting pass 2 silently re-attempt a failed switch.
+#
+#      🔴 Like rc 2, the `rc20=` line in the legend below is UNREACHABLE: every
+#      exit-20 site returns before the verdict block that prints the legend. It
+#      stays in both ledgers for the same reason rc 2 does — a ledger with a
+#      known hole is not a ledger, and the two prose copies are pinned to the
+#      code by test_every_exit_code_ship_can_return_is_documented_in_the_header_
+#      and_the_legend, which cannot tell a printed line from an unprinted one.
+#      Saying so here is the honest version of "the test enforces dead prose".
 #
 # Usage:
 #   scripts/ship.sh              # converge local host + the other (remote) host
@@ -108,6 +296,18 @@
 #   LAPTOP_SSH    back-compat: ssh target used ONLY when the remote host is the laptop
 #   SHIP_REPO     repo path the CONVERGE routine operates on (default $HOME/workspace/devrc)
 #   SHIP_NO_SWITCH=1  same as --no-switch: run full git-landing logic, skip home-manager switch
+#   SHIP_SELF_GEN     re-exec generation counter — set BY this script when it
+#                     re-execs a copy of itself that its own run installed. Never
+#                     set it by hand: a value >= SHIP_SELF_MAX_GEN tells the run
+#                     it has already spent its budget, so a superseded script
+#                     will refuse (rc 20) instead of picking up the new logic.
+#
+# 🔴 EVERYTHING BELOW IS ONE BRACE GROUP, closed on the final line, so bash
+# parses this file to EOF before running any of it. See SELF-SUPERSESSION above
+# for what it does and does NOT defend against: an IN-PLACE writer splices or
+# truncates a running script (measured, 45 of 45 offsets); `git` does not,
+# because it unlinks and recreates. Latent class, closed cheaply.
+{
 set -uo pipefail
 
 # --- Canonical per-host identity (both hosts share hostname `nixos`) -----------
@@ -173,6 +373,20 @@ if [ "${1:-}" = "--detect-role" ]; then
   exit 0
 fi
 
+# 🔴 SET-BUT-EMPTY IS A BUG, NOT A REQUEST FOR THE DEFAULT. `${VAR:-default}`
+# cannot tell "unset" from "set to the empty string", so a caller that computed
+# a repo path and got `""` — a failed `git rev-parse`, an unexpanded template, a
+# `SHIP_REPO=$SOME_UNSET_VAR` — silently converges the OPERATOR'S OWN CLONE
+# instead of the one it meant. UNSET must keep defaulting (the remote leg
+# deliberately does not forward this variable, and the far host's repo is at its
+# own $HOME/workspace/devrc); EMPTY must stop the run.
+if [ "${SHIP_REPO+set}" = set ] && [ -z "$SHIP_REPO" ]; then
+  echo "ship: SHIP_REPO is SET but EMPTY." >&2
+  echo "  That is a caller bug, not a request for the default — an empty value" >&2
+  echo "  would silently resolve to \$HOME/workspace/devrc and converge the" >&2
+  echo "  operator's own clone. Unset it to get the default, or give it a path." >&2
+  exit 2
+fi
 SHIP_REPO="${SHIP_REPO:-$HOME/workspace/devrc}"
 SHIP_NO_SWITCH="${SHIP_NO_SWITCH:-0}"
 DO_LOCAL=1
@@ -186,9 +400,20 @@ for a in "$@"; do
     # Print the contiguous comment block after the shebang. Range-proof: no
     # hardcoded line numbers to drift as the header grows.
     -h|--help)   awk 'NR>1 { if (/^#/) print; else exit }' "$0"; exit 0 ;;
-    *) echo "unknown arg: $a" >&2; exit 2 ;;
+    *) echo "unknown arg: $a" >&2; exit 21 ;;
   esac
 done
+
+# 🔴 A run that was asked to check NO host is a usage error, not a success.
+# rc 0 from a run that observed nothing is the vacuous green this whole file is
+# built to refuse, and drift-check.sh already spells the same refusal as its own
+# rc 2 ("a RUN THAT CHECKED NO HOST AT ALL"). Caught here rather than at the
+# verdict so nothing downstream has to special-case an empty scope.
+if [ "$DO_LOCAL" = 0 ] && [ "$DO_REMOTE" = 0 ]; then
+  echo "ship: --no-local and --no-remote together leave NO host to converge." >&2
+  echo "  0 hosts in scope cannot produce a verdict about either machine." >&2
+  exit 21
+fi
 
 # --- Resolve local role (detection, override-able) + derive the remote target --
 SHIP_ROLE="$(resolve_local_role)"
@@ -214,10 +439,236 @@ if [ "$DO_REMOTE" = 1 ] && [ -z "$REMOTE_SSH" ]; then
   exit 6
 fi
 
+# --- Self-supersession fingerprint --------------------------------------------
+# See SELF-SUPERSESSION in the header. Watched: this script, and the lib it
+# sources. Both live inside the repo a local converge fast-forwards, so both can
+# be replaced by the very run that is reading them.
+#
+# 🔴 The budget is a CONSTANT, deliberately not env-overridable: it exists to
+# bound a loop, and a loop guard an operator can widen from the environment is a
+# loop guard the next incident turns off. One re-exec is enough to pick up the
+# copy this run just installed; a SECOND change means the tree is still moving
+# under us and no copy of ship.sh can vouch for the result.
+SHIP_SELF_MAX_GEN=1
+SHIP_SELF_GEN="${SHIP_SELF_GEN:-0}"
+# 🔴 The counter arrives from the ENVIRONMENT, so it is attacker-shaped input to
+# an arithmetic comparison. Non-numeric junk makes `[ "$x" -ge 1 ]` error out
+# ("integer expression expected"), and because this script runs without `set -e`
+# that error is not fatal — the test simply takes its FALSE branch, i.e. the
+# budget check passes and the loop guard is off. Anything that is not a run of
+# digits is therefore normalised to 0 (a fresh run) rather than trusted.
+# Reachability is pinned by test_a_garbage_self_gen_is_normalised_not_trusted.
+case "$SHIP_SELF_GEN" in ''|*[!0-9]*) SHIP_SELF_GEN=0 ;; esac
+SHIP_SELF_WATCH=("$_ship_self")
+[ -r "$_ship_lib" ] && SHIP_SELF_WATCH+=("$_ship_lib")
+
+# ship_self_fingerprint — one "<path> <crc> <bytes>" line per watched file, or
+# "<path> UNMEASURED" when it cannot be digested.
+#
+# `cksum` reads the file WHOLE and is POSIX (a BusyBox applet too, though this
+# only ever runs on the local host). It is used in preference to `$(cat "$f")`
+# because command substitution STRIPS trailing newlines — an edit that only adds
+# or removes them would compare equal, i.e. a superseded script reported as
+# unchanged. The size field is carried alongside the CRC for the same reason:
+# two claims are harder to collide than one.
+#
+# 🔴 UNMEASURED is a distinct outcome, not a quiet skip. "unchanged" and "never
+# looked" must never print the same, so the caller counts it and refuses (rc 20)
+# rather than inheriting a comparison it did not make.
+ship_self_fingerprint() {
+  local f sum
+  for f in "${SHIP_SELF_WATCH[@]}"; do
+    if sum=$(cksum < "$f" 2>/dev/null) && [ -n "$sum" ]; then
+      printf '%s %s\n' "$f" "$sum"
+    else
+      printf '%s UNMEASURED\n' "$f"
+    fi
+  done
+}
+SHIP_SELF_BEFORE="$(ship_self_fingerprint)"
+
+# ship_self_fleet_state — what the two hosts got, printed by every exit-20 site.
+# 🔴 A refusal that only says "re-run ship" hides that the run already converged
+# ONE machine and never touched the other. The fleet is in two states at every
+# one of these exits; saying which is the difference between an operator who
+# re-runs and one who first wonders why the laptop is behind.
+ship_self_fleet_state() {
+  if [ "$DO_LOCAL" = 1 ]; then
+    if [ "${lrc:-0}" = 0 ]; then
+      echo "  fleet state: local ($SHIP_ROLE) WAS converged by this run." >&2
+    else
+      echo "  fleet state: local ($SHIP_ROLE) leg exited ${lrc} — see its lines above." >&2
+    fi
+  else
+    echo "  fleet state: local ($SHIP_ROLE) was out of scope (--no-local)." >&2
+  fi
+  if [ "$DO_REMOTE" = 1 ]; then
+    echo "  remote ($REMOTE_ROLE) was NOT converged — this refusal happens BEFORE the remote leg." >&2
+  else
+    echo "  remote was out of scope (--no-remote), so only the local host is affected." >&2
+  fi
+}
+
+# ship_self_check "$@" — re-take the fingerprint and act on the difference.
+# 🔴 Pass the SCRIPT's arguments: inside a function "$@" is the FUNCTION's, and
+# the re-exec must carry --no-remote/--no-switch/... through unchanged.
+#
+# 🔴 THAT ARGV IS ALSO THE TEST SUITE'S ONLY GUARD AGAINST A REAL HOST. With
+# REMOTE_SSH unset, remote_ssh_of falls back to the laptop's real LAN address, so
+# `--no-remote` in argv is what keeps a fixture off the operator's actual laptop.
+# Dropping "$@" at either site (here, or the exec below) makes pass 2 argv-less
+# and remote-enabled. test_the_re_exec_carries_the_scripts_own_argv pins it, and
+# the suite additionally puts a REFUSING `ssh` on PATH so the failure can never
+# be a live host — belt and braces, because the argv assertion is prose about a
+# hazard whose blast radius is somebody else's machine.
+#
+# Either returns (nothing was superseded), execs the new copy, or exits 20.
+ship_self_check() {
+  local i n f b a _ship_parse_err _ship_w
+  local unmeasured=0 changed=0 detail="" names=""
+  local -a after_lines=() before_lines=()
+  n=${#SHIP_SELF_WATCH[@]}
+  mapfile -t after_lines < <(ship_self_fingerprint)
+  mapfile -t before_lines <<< "$SHIP_SELF_BEFORE"
+  for ((i = 0; i < n; i++)); do
+    f="${SHIP_SELF_WATCH[$i]}"
+    b="${before_lines[i]:-}"
+    a="${after_lines[i]:-}"
+    names="$names${names:+, }$f"
+    if [ "${b##* }" = UNMEASURED ] || [ "${a##* }" = UNMEASURED ]; then
+      unmeasured=$((unmeasured + 1))
+      continue
+    fi
+    if [ "$b" != "$a" ]; then
+      changed=$((changed + 1))
+      detail="$detail    $f: ${b#"$f "} -> ${a#"$f "}
+"
+    fi
+  done
+
+  if [ "$unmeasured" != 0 ]; then
+    echo "ship: ❌ SELF-CHECK NOT MEASURED — $unmeasured of $n watched files could not be digested." >&2
+    echo "  watched: $names" >&2
+    echo "  cksum(1) is what answers 'did my own source change under me'. With no answer this run" >&2
+    echo "  cannot tell a verdict IT computed from one the superseded copy computed, and a" >&2
+    echo "  comparison that was never made must not read as 'unchanged'." >&2
+    ship_self_fleet_state
+    echo "  re-run ship by hand." >&2
+    exit 20
+  fi
+
+  # 🔴 The examined count rides on the success line too. "0 superseded" out of 0
+  # files compared is the same reassuring zero as "0 dangling" out of 0 checked.
+  if [ "$changed" = 0 ]; then
+    echo "ship: self-check — $n files compared ($names), 0 superseded"
+    return 0
+  fi
+
+  echo "ship: 🔴 SUPERSEDED — this run's own fast-forward replaced the script running it:"
+  printf '%s' "$detail"
+  echo "  everything printed above was computed by the OLD copy: the CONVERGE payload is expanded"
+  echo "  into a variable before the fast-forward, so neither this host nor the remote one has yet"
+  echo "  run the logic this run just delivered."
+  if [ "$SHIP_SELF_GEN" -ge "$SHIP_SELF_MAX_GEN" ]; then
+    echo "ship: ❌ SUPERSEDED AGAIN at generation $SHIP_SELF_GEN (budget $SHIP_SELF_MAX_GEN) — refusing to re-exec." >&2
+    echo "  ship.sh keeps changing under this run, so no copy of it can vouch for the result." >&2
+    ship_self_fleet_state
+    echo "  re-run ship by hand once the tree has stopped moving." >&2
+    exit 20
+  fi
+  if [ ! -r "$_ship_self" ]; then
+    echo "ship: ❌ SUPERSEDED but the new copy at $_ship_self is not readable — refusing to guess." >&2
+    ship_self_fleet_state
+    echo "  re-run ship by hand." >&2
+    exit 20
+  fi
+  # 🔴 PARSE THE NEW COPY BEFORE HANDING IT THE PROCESS. `exec bash <broken>`
+  # exits 2 — bash's own syntax-error status — from a run that has ALREADY
+  # converged and switched the local host. rc 2 documents itself as "raised
+  # before any host is touched", so that path publishes a false ledger entry
+  # under a code the operator reads as a typo in their own command line.
+  # `bash -n` costs a parse and turns it into rc 20, which is what actually
+  # happened: this script was replaced and the new copy could not be run.
+  # 🔴 PARSE EVERY WATCHED FILE, NOT JUST THE EXECUTED ONE. `SHIP_SELF_WATCH`
+  # holds this script AND `lib/host-role.sh`, and only one of them is exec'd —
+  # so a `bash -n "$_ship_self"` alone leaves the LIB half open, and a lib is
+  # the worse half: a syntax error in a SOURCED file does not kill bash.
+  # `source` returns 2 and execution continues with every function defined
+  # after the error MISSING. Measured on a superseded lib: an error near the
+  # END yields rc 0 and `ship: converged + verified` — a GREEN VERDICT OVER A
+  # BROKEN DEPLOY, with the diagnosis on stderr only — on a terminal the
+  # operator sees bash's complaint FIRST and a green verdict overriding it; an
+  # error near the TOP yields rc 6 ("could not identify this host"), returned
+  # after the local host was already fast-forwarded and switched. That is the
+  # same false-ledger-entry shape rc 20 exists to close, one code over.
+  for _ship_w in "${SHIP_SELF_WATCH[@]}"; do
+    [ -r "$_ship_w" ] || continue
+    if ! _ship_parse_err=$(bash -n "$_ship_w" 2>&1); then
+      echo "ship: ❌ SUPERSEDED but the new copy at $_ship_w does not PARSE — refusing to exec it." >&2
+      printf '  %s\n' "$_ship_parse_err" >&2
+      if [ "$_ship_w" = "$_ship_self" ]; then
+        echo "  exec'ing it would exit 2 (bash's syntax-error status), which this script documents as" >&2
+        echo "  a usage error raised before any host is touched — false here, and the wrong diagnosis." >&2
+      else
+        echo "  this file is SOURCED, not exec'd: a syntax error would NOT abort the run. \`source\`" >&2
+        echo "  returns 2 and execution continues with the functions after the error undefined," >&2
+        echo "  which reads as a converged run (or as rc 6) over a deploy that is actually broken." >&2
+      fi
+      ship_self_fleet_state
+      echo "  fix the syntax (or roll back the commit that landed it) and re-run ship by hand." >&2
+      exit 20
+    fi
+  done
+  SHIP_SELF_GEN=$((SHIP_SELF_GEN + 1))
+  export SHIP_SELF_GEN
+  echo "ship: re-executing the NEW copy (generation $SHIP_SELF_GEN of $SHIP_SELF_MAX_GEN)."
+  echo "  the remote leg has NOT run yet, so it will be sent the new CONVERGE payload."
+  # 🔴 The local leg's status does not survive the exec — the process is replaced
+  # before the verdict block can report it. Say so, or pass 2 silently re-attempts
+  # a failed switch and the operator never learns pass 1 failed at all.
+  if [ "${lrc:-0}" != 0 ]; then
+    echo "  NOTE: the local leg exited ${lrc}; that status is DISCARDED by this re-exec."
+    echo "        pass 2 re-runs the local converge with the new logic and reports its own."
+  fi
+  echo
+  # 🔴 execfail — and READ WHAT IT ACTUALLY COVERS, because the obvious reading
+  # is wrong. The exec target is `bash`, NOT "$_ship_self": the script is an
+  # ARGUMENT. So the exec syscall's success has nothing to do with the script's
+  # state, and this net catches exactly one thing — `bash` itself being
+  # unexecutable at this instant (stripped from PATH, a noexec mount, EAGAIN or
+  # ENOMEM under a fork storm). Without execfail that kills the shell with
+  # 126/127 from a run that has already converged one host; with it the exec
+  # RETURNS and we own the outcome.
+  #
+  # 🔴 It does NOT cover the case the header used to claim for it: the script
+  # removed after the `bash -n` above. Measured 2026-08-21 — `exec bash <missing
+  # file>` execs bash fine, and the NEW bash exits 127 with this process already
+  # gone, so the block below never runs. That hazard is named in the header as
+  # open, not silently mis-covered here.
+  #
+  # 🔴 The block below is therefore UNREACHABLE FROM THE TEST SUITE and is
+  # labelled as such rather than counted as coverage: reaching it needs a PATH
+  # with no usable `bash`, and every step before it (`bash -c "$CONVERGE"`,
+  # `bash -n`) resolves `bash` from that same PATH, with no external command in
+  # between to remove it. Kept because it is five lines and turns a bare 126/127
+  # into a diagnosis on a run that has already touched a host.
+  shopt -s execfail
+  exec bash "$_ship_self" "$@"
+  echo "ship: ❌ SUPERSEDED but exec of the new copy at $_ship_self FAILED — refusing to continue." >&2
+  echo "  \`bash\` itself could not be executed (PATH, a noexec mount, or a resource limit)." >&2
+  ship_self_fleet_state
+  echo "  re-run ship by hand once the tree has stopped moving." >&2
+  exit 20
+}
+
 # Self-contained converge routine, run identically on each host (local via
 # bash -c, remote via ssh). Single source of truth for the sequence.
 CONVERGE='
 set -uo pipefail
+if [ "${SHIP_REPO+set}" = set ] && [ -z "$SHIP_REPO" ]; then
+  echo "ship: SHIP_REPO is SET but EMPTY — refusing to fall back to \$HOME/workspace/devrc." >&2
+  exit 2
+fi
 repo="${SHIP_REPO:-$HOME/workspace/devrc}"
 no_switch="${SHIP_NO_SWITCH:-0}"
 host=$(hostname 2>/dev/null || echo local)
@@ -327,10 +778,21 @@ ma_manifest() {
 # checkout whose node_modules is full of pnpm symlinks; the manifest simply
 # never mentions it).
 #
-# WHAT IT CANNOT SEE, so nobody reads more into a green than is there: a managed
-# path REPLACED by a real file of the same name resolves fine and is not
-# reported. This answers "does every managed path resolve", not "is every
-# managed path the store link nix intended".
+# WHAT IT CANNOT SEE, so nobody reads more into a green than is there. This
+# answers ONE question — "does every managed path resolve" — and the blind spots
+# are NOT limited to the first one, which is how this paragraph used to read:
+#   * a managed path REPLACED by a real file of the same name resolves fine and
+#     is not reported. (Live on the workbench 2026-08-20: 19 of the 20 entries
+#     under ~/.config/opencode/commands/ were regular files, not store links.)
+#   * 🔴 STALENESS is structurally invisible. Every path here — the manifest AND
+#     the links it lists — comes from THIS host'"'"'s CURRENTLY-ACTIVE generation, so
+#     the reference point MOVES WITH THE HOST. A machine sitting on a three-week
+#     -old generation has a three-week-old manifest whose links all resolve, and
+#     passes with a perfect green. Measured 2026-08-19: the workbench served the
+#     pre-#611 ~/.claude/RULES.md while this printed "488 checked, 0 dangling, 0
+#     absent". It asks "is this host consistent WITH ITSELF", never "is this host
+#     running what origin/main says it should" — that is verify_managed_currency
+#     (rc 13) below, which is why both run and neither replaces the other.
 #
 # 🔴 EVERY exit from here that did not examine files is RED, never a quiet pass.
 # "0 dangling" out of 0 examined is precisely the reassuring zero that let this
@@ -412,6 +874,200 @@ verify_managed_artifacts() {
   return 1
 }
 
+# verify_managed_currency — assert that what this host is SERVING is what the
+# repo currently SAYS, not merely that it is internally consistent. Returns 0/1;
+# prints its own line. This is the second, independent half of the consumer
+# check and it exists because the first one CANNOT see the following:
+#
+# MEASURED 2026-08-19. The workbench served the pre-#611 ~/.claude/RULES.md
+# (store path k1001c6...) while the repo working tree sat at origin/main with the
+# new content, and verify_managed_artifacts printed "488 checked, 0 dangling, 0
+# absent" — a perfect green — because every path it consults, manifest included,
+# is read out of the hosts OWN currently-active generation. An old generation is
+# perfectly self-consistent. "Resolves" and "is current" are different questions
+# and they get different exit codes (12 vs 13) because they are different
+# operator actions: one is a repair, the other is a re-switch.
+#
+# HOW, without a name mapping. Comparing a deployed path to "its" repo source
+# would need a manifest-path -> repo-path table, and every such table is a
+# hardcoded spelling that rots. Instead the comparison is by CONTENT, using git
+# as the oracle, which needs no table at all:
+#   * a home.file deployed verbatim from a repo file has BYTE-IDENTICAL content,
+#     so its git blob id equals that of some file in the working tree -> CURRENT;
+#   * if the blob is not in the working tree but IS in this repos object store,
+#     the host is serving a HISTORICAL version of a repo file -> STALE. After the
+#     `git fetch` above, everything that has ever been on main is reachable here;
+#   * if the blob is unknown to the repo entirely, the artifact was GENERATED, not
+#     copied (the nvim/zsh/systemd/i3 files home-manager renders itself, the
+#     opencode AGENTS.md and generated commands) -> NOT REPO-SOURCED, excluded,
+#     because it carries no evidence either way. Measured on the workbench:
+#     347 repo-sourced, 122 generated, 16 out-of-store, 3 dirs, of 488.
+# Structural, exactly like the resolution check above: nothing is spelled, so the
+# same routine covers skills/, hooks/, the opencode mirrors and any home.file
+# target added tomorrow.
+#
+# 🔴 mkOutOfStoreSymlink TARGETS ARE EXCLUDED, and counted separately. Those
+# resolve BACK INTO the repo working tree (the browser + dl-router skills, the
+# close-the-loop ledger), so comparing them against the repo source is vacuously
+# true — they can NEVER be stale. Counting them would inflate the examined number
+# with checks incapable of detecting anything, which is the same lie as a bare
+# "0 stale". The arbiter is where `readlink -f` terminates: inside the repo ->
+# vacuous, anywhere else -> real evidence. (claude/RULES.md, "readlink is the
+# arbiter".) The EXAMINED number printed is repo-sourced only, and 0 of those is
+# RED, never a quiet pass.
+#
+# 🔴 GNU-only flags are banned here for the same measured reason as above: this
+# routine runs over ssh on the laptop, where `find` is a BusyBox applet. Only
+# git, find, grep, sort, cut, wc and readlink -f are used, no -printf, no stat
+# format, no sha256sum (git hash-object is the digest on BOTH sides, so the two
+# can never disagree about how bytes are hashed).
+verify_managed_currency() {
+  # 🔴 A PRECONDITION, not a verification guard, and deliberately labelled as
+  # such: it is UNREACHABLE while verify_managed_artifacts runs first and exits
+  # 12 on the same condition, so it is NOT tested and must not be counted as
+  # coverage. It stays because an empty $mc_hf would make the walk below read
+  # `find "/" -mindepth 1` and traverse the entire filesystem.
+  mc_hf=$(ma_manifest)
+  if [ -z "$mc_hf" ]; then
+    echo "[$host] ❌ CURRENCY NOT CHECKED — cannot locate the home-manager file manifest."
+    echo "[$host]   0 artifacts were examined, so this run proves NOTHING about currency."
+    return 1
+  fi
+  mc_repo=$(readlink -f "$repo" 2>/dev/null || echo "$repo")
+
+  mc_list=$(mktemp); mc_rels=$(mktemp); mc_paths=$(mktemp)
+  mc_vacuous=0; mc_dirs=0
+  find "$mc_hf/" -mindepth 1 ! -type d > "$mc_list" 2>/dev/null
+  while IFS= read -r mc_p; do
+    mc_rel="${mc_p#"$mc_hf/"}"
+    [ -n "$mc_rel" ] || continue
+    # A leading slash means find(1) changed its output shape. rc 12 OWNS that
+    # diagnosis and has already exited on it, so this is a skip, not a second
+    # guard — an unreachable duplicate would be untested code claiming coverage.
+    # If it ever did run, dropping the entries lands on the zero-examined guard
+    # below, which is red.
+    case "$mc_rel" in
+      /*) continue ;;
+    esac
+    mc_t="$HOME/$mc_rel"
+    # Non-resolving paths are rc 12s job, not ours; it runs first and is fatal.
+    [ -e "$mc_t" ] || continue
+    if [ -d "$mc_t/" ]; then mc_dirs=$((mc_dirs + 1)); continue; fi
+    mc_r=$(readlink -f "$mc_t" 2>/dev/null || echo "")
+    case "$mc_r" in
+      "$mc_repo"/*) mc_vacuous=$((mc_vacuous + 1)); continue ;;
+    esac
+    printf "%s\n" "$mc_rel" >> "$mc_rels"
+    printf "%s\n" "$mc_t"   >> "$mc_paths"
+  done < "$mc_list"
+  rm -f "$mc_list"
+
+  # --- digest both sides with the SAME function ------------------------------
+  mc_blobs=$(mktemp)
+  if [ -s "$mc_paths" ]; then
+    git -C "$repo" hash-object --stdin-paths < "$mc_paths" > "$mc_blobs" 2>/dev/null
+  fi
+  mc_np=$(wc -l < "$mc_paths"); mc_nb=$(wc -l < "$mc_blobs")
+  if [ "$mc_np" -ne "$mc_nb" ]; then
+    echo "[$host] ❌ CURRENCY NOT CHECKED — git hash-object returned $mc_nb digests for $mc_np paths."
+    echo "[$host]   the walk is unreliable, not clean; nothing about currency is proven."
+    rm -f "$mc_rels" "$mc_paths" "$mc_blobs"
+    return 1
+  fi
+
+  mc_tracked=$(mktemp); mc_srcpaths=$(mktemp); mc_srcblobs=$(mktemp)
+  git -C "$repo" ls-files > "$mc_tracked" 2>/dev/null
+  while IFS= read -r mc_f; do
+    [ -f "$repo/$mc_f" ] && printf "%s\n" "$repo/$mc_f"
+  done < "$mc_tracked" > "$mc_srcpaths"
+  if [ -s "$mc_srcpaths" ]; then
+    git -C "$repo" hash-object --stdin-paths < "$mc_srcpaths" 2>/dev/null | sort -u > "$mc_srcblobs"
+  fi
+  if [ ! -s "$mc_srcblobs" ]; then
+    echo "[$host] ❌ CURRENCY NOT CHECKED — read NO source files out of $repo."
+    echo "[$host]   with an empty reference set every artifact would look stale (or none would);"
+    echo "[$host]   either way the comparison is wired to nothing. Check git ls-files there."
+    rm -f "$mc_rels" "$mc_paths" "$mc_blobs" "$mc_tracked" "$mc_srcpaths" "$mc_srcblobs"
+    return 1
+  fi
+
+  # --- classify --------------------------------------------------------------
+  mc_pairs=$(mktemp); mc_uniq=$(mktemp); mc_cur=$(mktemp); mc_unk=$(mktemp)
+  mc_staleblobs=$(mktemp); mc_pat=$(mktemp); mc_rows=$(mktemp)
+  exec 9< "$mc_rels"
+  while IFS= read -r mc_b; do
+    IFS= read -r mc_one <&9 || mc_one=""
+    printf "%s %s\n" "$mc_b" "$mc_one"
+  done < "$mc_blobs" > "$mc_pairs"
+  exec 9<&-
+
+  sort -u "$mc_blobs" > "$mc_uniq"
+  : > "$mc_cur"
+  [ -s "$mc_uniq" ] && grep -Fxf "$mc_srcblobs" "$mc_uniq" > "$mc_cur"
+  if [ -s "$mc_cur" ]; then
+    grep -Fxvf "$mc_cur" "$mc_uniq" > "$mc_unk"
+  else
+    cat "$mc_uniq" > "$mc_unk"
+  fi
+  : > "$mc_staleblobs"
+  if [ -s "$mc_unk" ]; then
+    # "<sha> blob <size>" for a known object, "<sha> missing" otherwise.
+    git -C "$repo" cat-file --batch-check < "$mc_unk" 2>/dev/null \
+      | grep " blob " | cut -d" " -f1 > "$mc_staleblobs"
+  fi
+
+  # Anchored patterns (a blob id is pure hex, so it carries no regex metachars)
+  # so a 40-hex string inside a PATH can never be mistaken for a digest column.
+  mc_current=0
+  while IFS= read -r mc_b; do printf "^%s \n" "$mc_b"; done < "$mc_cur" > "$mc_pat"
+  [ -s "$mc_pat" ] && mc_current=$(grep -c -E -f "$mc_pat" "$mc_pairs")
+  mc_stale=0
+  while IFS= read -r mc_b; do printf "^%s \n" "$mc_b"; done < "$mc_staleblobs" > "$mc_pat"
+  : > "$mc_rows"
+  if [ -s "$mc_pat" ]; then
+    grep -E -f "$mc_pat" "$mc_pairs" > "$mc_rows"
+    mc_stale=$(wc -l < "$mc_rows")
+  fi
+  mc_sourced=$((mc_current + mc_stale))
+  mc_generated=$((mc_np - mc_sourced))
+  mc_gen=$(readlink -f "$mc_hf" 2>/dev/null || echo "$mc_hf")
+  rm -f "$mc_rels" "$mc_paths" "$mc_blobs" "$mc_tracked" "$mc_srcpaths" \
+        "$mc_srcblobs" "$mc_pairs" "$mc_uniq" "$mc_cur" "$mc_unk" \
+        "$mc_staleblobs" "$mc_pat"
+
+  # 🔴 The vacuous zero, in its currency spelling: no repo-sourced artifact means
+  # nothing comparable was looked at, whatever the other counters say.
+  if [ "$mc_sourced" = 0 ]; then
+    echo "[$host] ❌ CURRENCY NOT CHECKED — 0 repo-sourced artifacts examined"
+    echo "[$host]   ($mc_np resolved, $mc_generated not repo-sourced, $mc_vacuous out-of-store, $mc_dirs dirs)."
+    echo "[$host]   Nothing deployed here has content matching ANY file in $repo, so the"
+    echo "[$host]   comparison examined nothing. That is a broken probe, not a current host."
+    rm -f "$mc_rows"
+    return 1
+  fi
+
+  if [ "$mc_stale" = 0 ]; then
+    echo "[$host] ✅ managed artifacts CURRENT — $mc_sourced repo-sourced examined, 0 stale ($mc_generated not repo-sourced, $mc_vacuous out-of-store, $mc_dirs dirs)"
+    rm -f "$mc_rows"
+    return 0
+  fi
+
+  # Same counter shape on the failure line as on the success line, so one parser
+  # reads either and the examined count is never dropped from the bad case.
+  echo "[$host] ❌ MANAGED ARTIFACTS STALE — $mc_sourced repo-sourced examined, $mc_stale stale ($mc_generated not repo-sourced, $mc_vacuous out-of-store, $mc_dirs dirs)"
+  echo "[$host]   these resolve fine, but their CONTENT is an older version of a file in $repo:"
+  cut -d" " -f2- "$mc_rows" | head -12 | sed "s|^|[$host]     - |"
+  mc_more=$((mc_stale - 12))
+  [ "$mc_more" -gt 0 ] && echo "[$host]     ... and $mc_more more"
+  echo "[$host]   generation being served: $mc_gen"
+  echo "[$host]   repo HEAD: $(git -C "$repo" rev-parse --short HEAD 2>/dev/null)"
+  echo "[$host]   this host is running an OLD home-manager generation, or its switch did"
+  echo "[$host]   not take. It is NOT a broken link — rc 12 passed. Re-switch on that host:"
+  echo "[$host]     home-manager switch --flake $repo --impure"
+  rm -f "$mc_rows"
+  return 1
+}
+
 # 0) Refuse a mid-merge / conflicted tree OUTRIGHT, before anything else.
 #    This must run even when HEAD is already AT origin/main, because that path
 #    short-circuits the merge entirely and would otherwise fall straight through
@@ -485,10 +1141,15 @@ fi
 if [ "$no_switch" = 1 ]; then
   echo "[$host] (SHIP_NO_SWITCH) skipping home-manager switch"
 else
-  log=$(mktemp /tmp/ship-hm.XXXXXX.log)
+  # 🔴 $TMPDIR, not a hardcoded /tmp: a hardcoded path ignores an operator or
+  # harness that redirected temp elsewhere, and there is no reason for this one
+  # file to be the exception. Removed on BOTH paths — a self-superseding run
+  # executes this block twice (once per pass), so a leak here leaks twice.
+  log=$(mktemp "${TMPDIR:-/tmp}/ship-hm.XXXXXX.log")
   if ! home-manager switch --flake "$repo" --impure >"$log" 2>&1; then
-    echo "[$host] home-manager switch FAILED:"; tail -4 "$log"; exit 9
+    echo "[$host] home-manager switch FAILED:"; tail -4 "$log"; rm -f "$log"; exit 9
   fi
+  rm -f "$log"
 fi
 
 # 4) Verify the GIT state: must be ON branch main AND HEAD == origin/main.
@@ -504,6 +1165,22 @@ fi
 #    This is the step that looks at what the host actually has.
 verify_managed_artifacts || exit 12
 
+# 5b) Verify the CONSUMER is CURRENT. Step 5 answers "does every managed path
+#     resolve" against a manifest read out of THIS HOST S OWN generation, so an
+#     old generation is self-consistent and passes it. This is the only step
+#     whose reference point is the REPO rather than the host.
+verify_managed_currency || exit 13
+
+# 5c) Publish the sha THIS host landed on, so the driver can compare the two
+#     hosts against EACH OTHER (rc 19). Every check above is per-host and passes
+#     happily while the two machines hold different commits, because each leg
+#     fetched its own origin/main and each is right about itself.
+#     🔴 Machine-readable on purpose: the driver parses this exact line, so its
+#     shape is a contract. It is emitted only HERE, after every per-host check
+#     has passed — a host that did not finish converging must contribute no sha,
+#     so "fewer than two shas" stays distinguishable from "two that agree".
+echo "[$host] ship-landed-sha $now"
+
 # 6) Verdict. Name the dirty state explicitly: converging a dirty tree is the
 #    NORMAL supported path, and home-manager builds from the WORKING TREE — so
 #    what got deployed is origin/main PLUS that WIP, not origin/main. Saying so
@@ -517,18 +1194,62 @@ fi
 '
 
 rc=0
+LOCAL_SHA=""
+REMOTE_SHA=""
+lrc=0
+
+# Capture files for the two legs. 🔴 $TMPDIR-aware and trap-cleaned: a hardcoded
+# /tmp ignores a redirected temp dir, and an exit that skips the explicit `rm`
+# (every rc-20 site sits between the two legs) would leave the file behind — on a
+# self-superseding run, twice.
+cap_local=""
+cap_remote=""
+trap 'rm -f "$cap_local" "$cap_remote"' EXIT
+
+# ship_landed_sha <capture-file> — the sha that leg reported landing on, or "".
+# 🔴 Anchored on the WHOLE line. A 40-hex string turns up in this output in prose
+# too (a "generation being served" store path, a git error, a blocking-file
+# name), and reading one of those as the answer would produce a confident WRONG
+# verdict instead of a missing one — which is strictly worse, because the missing
+# case is itself red (rc 19).
+ship_landed_sha() {
+  sed -n 's/^\[[^]]*\] ship-landed-sha \([0-9a-f][0-9a-f]*\)$/\1/p' "$1" | tail -1
+}
 
 if [ "$DO_LOCAL" = 1 ]; then
   echo "=== local ($SHIP_ROLE) ==="
-  SHIP_REPO="$SHIP_REPO" SHIP_NO_SWITCH="$SHIP_NO_SWITCH" bash -c "$CONVERGE" || rc=$?
+  # `| tee`, not capture-then-print: a home-manager switch takes minutes and an
+  # operator watching a silent terminal cannot tell it from a hang. stdout only,
+  # so stderr keeps its own stream untouched.
+  # 🔴 The status comes from PIPESTATUS[0], never $?: a pipeline reports the LAST
+  # command's status and `tee` always succeeds, so `$?` here would be a hardcoded
+  # 0 over any per-host skip. Same lesson as scripts/run-tests.sh GUARD 6, from
+  # the other side of the pipe.
+  cap_local=$(mktemp "${TMPDIR:-/tmp}/ship-local.XXXXXX")
+  SHIP_REPO="$SHIP_REPO" SHIP_NO_SWITCH="$SHIP_NO_SWITCH" bash -c "$CONVERGE" | tee "$cap_local"
+  lrc=${PIPESTATUS[0]}
+  [ "$lrc" = 0 ] || rc=$lrc
+  LOCAL_SHA=$(ship_landed_sha "$cap_local")
+  rm -f "$cap_local"
   echo
 fi
+
+# 🔴 BEFORE the remote leg, not after: the local fast-forward above may have
+# replaced this very script, and if it did, the CONVERGE payload about to be sent
+# over ssh is the superseded one. Re-execing here means the remote host receives
+# the logic this run delivered. See SELF-SUPERSESSION in the header.
+ship_self_check "$@"
+echo
 
 if [ "$DO_REMOTE" = 1 ]; then
   echo "=== remote ($REMOTE_ROLE — $REMOTE_SSH) ==="
   # Pass the switch toggle remotely; SHIP_REPO stays host-default ($HOME/workspace/devrc).
-  if ssh -o ConnectTimeout=10 "$REMOTE_SSH" "SHIP_NO_SWITCH=$SHIP_NO_SWITCH; $CONVERGE"; then :; else
-    remrc=$?
+  cap_remote=$(mktemp "${TMPDIR:-/tmp}/ship-remote.XXXXXX")
+  ssh -o ConnectTimeout=10 "$REMOTE_SSH" "SHIP_NO_SWITCH=$SHIP_NO_SWITCH; $CONVERGE" | tee "$cap_remote"
+  remrc=${PIPESTATUS[0]}
+  REMOTE_SHA=$(ship_landed_sha "$cap_remote")
+  rm -f "$cap_remote"
+  if [ "$remrc" != 0 ]; then
     # Keep the FIRST non-zero code so a local skip is not masked by a later
     # remote failure — the distinct codes are the signal callers act on.
     [ "$rc" = 0 ] && rc=$remrc
@@ -542,13 +1263,75 @@ if [ "$DO_REMOTE" = 1 ]; then
   echo
 fi
 
+# --- Do the two hosts agree with EACH OTHER on ONE commit? (rc 19) -------------
+# See CROSS-HOST AGREEMENT in the header. Every code above is a per-host claim;
+# this is the only cross-host one, and on 2026-08-19 every per-host claim was
+# true while the two machines held different commits.
+hosts_in_scope=0
+[ "$DO_LOCAL" = 1 ]  && hosts_in_scope=$((hosts_in_scope + 1))
+[ "$DO_REMOTE" = 1 ] && hosts_in_scope=$((hosts_in_scope + 1))
+hosts_reporting=0
+[ -n "$LOCAL_SHA" ]  && hosts_reporting=$((hosts_reporting + 1))
+[ -n "$REMOTE_SHA" ] && hosts_reporting=$((hosts_reporting + 1))
+agreed_sha=""
+scope_label="local=$SHIP_ROLE remote=$REMOTE_ROLE"
+[ "$DO_REMOTE" = 0 ] && scope_label="local=$SHIP_ROLE"
+[ "$DO_LOCAL" = 0 ]  && scope_label="remote=$REMOTE_ROLE"
+
+if [ "$rc" = 0 ] && [ "$hosts_reporting" -lt "$hosts_in_scope" ]; then
+  # 🔴 A leg that exits 0 has passed every per-host check, so it MUST have
+  # emitted its landed sha. Missing one while the run claims success means the
+  # marker or the parser is wired to nothing — and a verdict computed from a
+  # short list is the reassuring zero in its cross-host spelling. Red whatever
+  # the scope: this is a broken probe, not a narrow one.
+  echo "ship: ❌ CROSS-HOST AGREEMENT NOT COMPARED — $hosts_reporting of $hosts_in_scope hosts reported a landed sha."
+  echo "  local($SHIP_ROLE)=${LOCAL_SHA:-<none>}  remote($REMOTE_ROLE)=${REMOTE_SHA:-<none>}"
+  echo "  every leg that exits 0 emits one, so a missing sha next to a clean run means the"
+  echo "  marker or its parser stopped working. 'Both at origin/main' is UNPROVEN, not true."
+  rc=19
+elif [ "$hosts_reporting" -lt "$hosts_in_scope" ]; then
+  # A host was SKIPPED. Its own code is the actionable diagnosis and stands;
+  # this line only records that the comparison consequently did not happen.
+  echo "ship: cross-host agreement NOT COMPARED — $hosts_reporting of $hosts_in_scope hosts reported a landed sha (see the per-host code above)."
+elif [ "$hosts_in_scope" -lt 2 ]; then
+  # Scoped by the operator (--no-remote / --no-local). Not red — but the claim
+  # the verdict is allowed to make shrinks with the scope, and it says so rather
+  # than letting a one-host run read like a two-host one.
+  echo "ship: cross-host agreement NOT COMPARED — $hosts_in_scope host in scope, $hosts_reporting reported a landed sha."
+elif [ "$LOCAL_SHA" != "$REMOTE_SHA" ]; then
+  echo "ship: ❌ HOSTS DISAGREE — 2 hosts compared, 2 distinct commits:"
+  echo "  local  ($SHIP_ROLE) landed on $LOCAL_SHA"
+  echo "  remote ($REMOTE_ROLE) landed on $REMOTE_SHA"
+  echo "  origin/main MOVED between the two fetches (a PR merged mid-run). Each host is"
+  echo "  internally consistent and each really is at origin/main AS IT SAW IT — which is why"
+  echo "  every per-host check above passed — but the fleet is in TWO states, not one."
+  echo "  re-run ship: the second pass lands both on the newer commit."
+  [ "$rc" = 0 ] && rc=19
+else
+  agreed_sha="$LOCAL_SHA"
+fi
+
 if [ "$rc" = 0 ]; then
-  echo "ship: converged + verified at origin/main (local=$SHIP_ROLE remote=$REMOTE_ROLE)."
+  # 🔴 The verdict names the SHA and the number of hosts compared. "converged +
+  # verified at origin/main" was true of each host separately on 2026-08-19 and
+  # false of the fleet; a verdict that cannot be wrong that way has to carry the
+  # thing the hosts agreed ON, not the moving ref they each resolved.
+  if [ -n "$agreed_sha" ]; then
+    echo "ship: converged + verified — 2 hosts compared, both at $agreed_sha ($scope_label)."
+  else
+    echo "ship: converged + verified at ${LOCAL_SHA:-$REMOTE_SHA} — 1 host ($scope_label); cross-host agreement NOT COMPARED."
+  fi
 else
   echo "ship: incomplete (rc=$rc) — see per-host lines above."
+  echo "  rc2=ship-repo-set-but-empty(caller bug — refused rather than defaulting to \$HOME/workspace/devrc)"
+  echo "  rc21=usage(unknown arg, or no host in scope)"
   echo "  rc3=no-repo  rc4=fetch/origin-main-unavailable  rc5=skipped:conflicted-tree(merge in progress)"
   echo "  rc6=host-unidentified"
   echo "  rc7=skipped:cannot-fast-forward(local changes in the way)  rc8=skipped:diverged(needs rebase)"
   echo "  rc9=switch-failed  rc11=verify-failed(git-state)  rc12=consumer-broken(managed artifacts do not resolve)"
+  echo "  rc13=consumer-stale(managed artifacts resolve but serve OLD content — re-switch that host)"
+  echo "  rc19=hosts-disagree(the two hosts landed on DIFFERENT commits, or agreement was not compared)"
+  echo "  rc20=superseded(this run replaced its own script and could not re-run it — re-run ship)"
 fi
 exit "$rc"
+}

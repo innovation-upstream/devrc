@@ -66,6 +66,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from . import skip_dirs as _skip_dirs
+
 #: Registrable domains belonging to CLIENTS / third parties whose internal
 #: subdomains must not be written down here. Apexes only — a subdomain in this
 #: list would defeat the point of the list.
@@ -83,10 +85,12 @@ CLIENT_DOMAINS = frozenset({
 #: the same 🔴 trap: this is matched against the path RELATIVE to the root,
 #: because every agent worktree lives under `…/.claude/worktrees/<id>/` and an
 #: absolute-parts test skips the entire repo while reporting a confident zero.
-SKIP_DIRS = frozenset({
-    ".git", ".direnv", "result", "node_modules", "__pycache__",
-    ".pytest_cache", ".mypy_cache", ".ruff_cache", "worktrees",
-})
+#:
+#: 🔴 THE BASE SET AND NOTHING ELSE, for the same reason as public_ip_scan: this
+#: is a SECURITY gate on a PUBLIC repo, so it must not inherit the `.claude` /
+#: `claudedocs` entries the `scripts/tests/` ledgers add to the same shared
+#: base. `test_skip_dirs_ledger.py` pins this two-way.
+SKIP_DIRS = _skip_dirs.GENERATED
 
 SKIP_SUFFIXES = frozenset({
     ".png", ".jpg", ".jpeg", ".gif", ".ico", ".webp", ".pdf", ".zip", ".gz",

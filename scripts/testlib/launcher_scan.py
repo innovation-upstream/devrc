@@ -161,6 +161,74 @@ def _path_values(module: ast.Module):
                 yield node, node.args[1]
 
 
+def _loader_constants(call: ast.Call, module: ast.Module, depth: int = 0) -> set:
+    """Every string constant a loader call's arguments can resolve to.
+
+    One level of variable indirection, for the same measured reason `_inherits`
+    resolves it: `SourceFileLoader("_bar_status_poll", str(path))` with
+    `path = REPO / "scripts" / "bar-status-poll"` assigned above is the shape
+    `test_bar_url.py` actually uses, and a direct-constants-only scan reports it
+    as loading nothing.
+    """
+    out = set()
+    for sub in ast.walk(call):
+        if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
+            out.add(sub.value)
+        if depth < 1 and isinstance(sub, ast.Name):
+            for other in ast.walk(module):
+                if isinstance(other, ast.Assign) and any(
+                        isinstance(t, ast.Name) and t.id == sub.id
+                        for t in other.targets):
+                    for deep in ast.walk(other.value):
+                        if isinstance(deep, ast.Constant) and isinstance(
+                                deep.value, str):
+                            out.add(deep.value)
+    return out
+
+
+# The call shapes this suite uses to execute an extensionless `scripts/<name>`
+# as a Python module. They have no `.py` suffix, so they are never `import`ed.
+_LOADER_FUNCS = ("_load", "SourceFileLoader", "spec_from_file_location",
+                 "spec_from_loader")
+
+
+def module_loaders(tests_dir: Path, script_name: str) -> dict[str, list[int]]:
+    """`{test file: [line…]}` for every test file that LOADS `scripts/<script_name>`.
+
+    🔴 WHY THIS EXISTS — a per-FILE fixture protects exactly one file.
+    `test_bar_status.py` carries an autouse fixture that patches the poller's
+    `_toast_runner` seam, and that fixture is bound to the module object THAT
+    FILE loaded. Another file loading the same script gets a DIFFERENT module
+    object with a live `_toast_runner`, and inherits none of the protection —
+    two such files exist today. So the set of loaders is a RELATIONSHIP the
+    guard has to pin: it must go red when the set GROWS (a new unprotected
+    reacher) as well as when it SHRINKS.
+
+    Deliberately narrower than a text search for the name: `test_no_real_
+    launchers.py` and `test_subsystem_resolver.py` both spell "bar-status-poll"
+    as data without ever executing it, and counting those would train everyone
+    to widen the ledger instead of reading it.
+    """
+    found: dict[str, list[int]] = {}
+    for py in sorted(Path(tests_dir).glob("test_*.py")):
+        text = py.read_text(encoding="utf-8")
+        try:
+            module = ast.parse(text)
+        except SyntaxError:  # pragma: no cover — a broken test file fails elsewhere
+            continue
+        for node in ast.walk(module):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = (func.id if isinstance(func, ast.Name)
+                    else func.attr if isinstance(func, ast.Attribute) else None)
+            if name not in _LOADER_FUNCS:
+                continue
+            if script_name in _loader_constants(node, module):
+                found.setdefault(py.name, []).append(node.lineno)
+    return found
+
+
 def path_clobbers(tests_dir: Path) -> list[tuple[str, int, str]]:
     """`(file, lineno, source)` for every PATH assignment that DROPS the ambient PATH.
 
@@ -192,3 +260,46 @@ def path_clobbers(tests_dir: Path) -> list[tuple[str, int, str]]:
             src = ast.get_source_segment(text, node) or ""
             out.append((py.name, lineno, " ".join(src.split())[:160]))
     return sorted(out)
+
+
+def absolute_launcher_sites(scripts_root: Path) -> dict[str, list[str]]:
+    """`{relative-path: [literals…]}` for every ABSOLUTE path to a launcher.
+
+    🔴 THE SHAPE NO PATH STUB CAN COVER. A stub directory shadows a launcher by
+    winning the PATH lookup; a literal like
+    `"/run/current-system/sw/bin/i3-msg"` never performs one. That is not
+    hypothetical — `scripts/browser-bridge/server.py`'s `_I3_MSG_FALLBACKS`
+    exists precisely because the browser-bridge systemd --user unit runs with a
+    minimal PATH, and `i3_available()` returns True off it.
+
+    The in-process layer in `testlib.nolaunch_plugin` intercepts these by
+    BASENAME for launches made by the pytest process itself. A launch made by a
+    CHILD process (a shell script execing an absolute path) is covered by
+    NEITHER layer, which is why this scan exists: the set of sites is pinned, so
+    a new one is a decision someone makes in the open rather than a silent hole.
+
+    Scans every `.py` under `scripts_root` (excluding `__pycache__`). It matches
+    STRING LITERALS, so — like `hazard_hits` — it cannot see a path assembled at
+    runtime from pieces. Stated, not implied.
+    """
+    out: dict[str, list[str]] = {}
+    root = Path(scripts_root)
+    for py in sorted(root.rglob("*.py")):
+        if "__pycache__" in py.parts:
+            continue
+        try:
+            module = ast.parse(py.read_text(encoding="utf-8", errors="replace"))
+        except (SyntaxError, OSError):  # pragma: no cover
+            continue
+        found = []
+        for node in ast.walk(module):
+            if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
+                continue
+            v = node.value
+            if "/" not in v:
+                continue
+            if v.rsplit("/", 1)[-1] in HAZARD_VOCABULARY:
+                found.append(v)
+        if found:
+            out[str(py.relative_to(root))] = sorted(set(found))
+    return out

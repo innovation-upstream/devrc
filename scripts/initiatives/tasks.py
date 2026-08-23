@@ -249,7 +249,7 @@ def _run_with_deadline(fn, deadline: float, *, label: str = "clawgate fetch"):
 
 
 def _get(url: str, token: str, *, deadline: float = FETCH_DEADLINE,
-         max_bytes: int = MAX_RESPONSE_BYTES) -> str:
+         max_bytes: int = MAX_RESPONSE_BYTES, clock=time.monotonic) -> str:
     """Isolated network GET (stdlib urllib) — injected/mocked in tests. Returns the body.
 
     Runs INSIDE the deadline thread, so its own guards are belt-and-braces for cleanup rather
@@ -257,8 +257,20 @@ def _get(url: str, token: str, *, deadline: float = FETCH_DEADLINE,
     body chunks (so an abandoned worker stops dribbling — this is why the body is read with
     `read1`, see the loop), and a `max_bytes` cap — the queue endpoint has no server-side
     `LIMIT` and rows carry full task bodies, so an unbounded `resp.read()` on the render path
-    is an amplifier we decline."""
-    started = time.monotonic()
+    is an amplifier we decline.
+
+    `clock` is a SEAM, defaulting to the real monotonic clock, and matches the one
+    `LinkedTaskCache` already takes as `now`. It exists because the per-operation socket
+    timeout below is `min(SOCKET_TIMEOUT, deadline)`: whenever the caller picks a deadline
+    under `SOCKET_TIMEOUT` the two become EQUAL, so a `read1` that blocks past the deadline is
+    a coin-flip between this loop's re-check and `socket.timeout` — and `socket.timeout` IS
+    `TimeoutError` on py3.10+, so the two are not even distinguishable by type. Nothing in
+    production cares which fires (both degrade to "no linked tasks"), but a test that asserts
+    WHICH guard ended the read cannot separate them in real time. Injecting the clock lets a
+    test pin the deadline DECISION while leaving the socket timeout at its maximum, instead of
+    racing the two. Do not use it to extend a deadline — it decides one, it does not widen it.
+    """
+    started = clock()
     req = urllib.request.Request(
         url, method="GET",
         headers={"Accept": "application/json", "Authorization": f"Bearer {token}"},
@@ -270,7 +282,7 @@ def _get(url: str, token: str, *, deadline: float = FETCH_DEADLINE,
         chunks: list[bytes] = []
         total = 0
         while True:
-            if (time.monotonic() - started) >= deadline:
+            if (clock() - started) >= deadline:
                 raise TimeoutError(
                     f"body read exceeded the {deadline}s wall-clock deadline "
                     f"after {total} bytes")
@@ -319,7 +331,16 @@ def fetch_tasks_result(*, creds: dict | None = None, env=None,
         _log("CLAWGATE_HOOK_TOKEN not set (~/.claude/clawgate.env) — no linked tasks")
         return False, []
 
-    url = f"{clawgate_base_url(c, env)}/api/tasks"
+    # 🔴 `?summary=1`, on the BOARD RENDER path. It swaps each task's (unbounded)
+    # `body` for `commentCount`/`attachmentCount` and keeps everything else —
+    # this module reads only `id`, `title`, `directory`, `status` and `tags`, all
+    # of which survive it. Measured 2026-08-13 on the live board: 217,379 B full
+    # vs 8,088 B summary, a 27x cut. The headroom under MAX_RESPONSE_BYTES had
+    # fallen to 4.8x (from 11x when that cap was chosen) and the comment there
+    # warns the payload "only ever goes up"; this restores ~130x instead of
+    # raising the cap. `?summary=1` is a query flag an older clawgate ignores, so
+    # it degrades to the full payload rather than failing.
+    url = f"{clawgate_base_url(c, env)}/api/tasks?summary=1"
     get = getter if getter is not None else _get
     try:
         # THE deadline: bounds every phase of the call (and any injected getter), unlike the

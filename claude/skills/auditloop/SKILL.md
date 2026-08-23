@@ -71,7 +71,7 @@ goal (success **OBSERVED via a success-assertion, NEVER LLM-judged**) and runs t
 over the driven trace; Phase 4 diffs a walkthrough vs the previous terminal one for a CI
 `--fail-on-regression` gate. Migrations through **0063**.
 **Full detail (tables, routes, metrics, DOM/a11y grounding, LLM token tiers) →
-`reference/persona-evaluator.md`.**
+`~/.claude/skills/auditloop/reference/persona-evaluator.md`.**
 
 ### 🔴 Driver safety model (foreground it)
 - **`driving_enabled` default-OFF per-target opt-in** (migration 0054) — enforced at **BOTH**
@@ -180,7 +180,7 @@ the exact-hostname env **`AUDITLOOP_INTERNAL_ALLOW_HOSTS`** (in the auditloop SO
 the private-IP refusal **soft for an exact-allowlisted host only**, while metadata/link-local/
 multicast/unspecified stay **HARD-blocked**. **Reversible** — clear the env → all private
 blocked again. **Recipe, the three PRs (auditloop #26, homelab-infra #138/#139) and the
-live-verified run → `reference/internal-naida-drive.md`.**
+live-verified run → `~/.claude/skills/auditloop/reference/internal-naida-drive.md`.**
 
 ## 🔴 a11y gate only works for pushed runs since #18 (2026-07-17)
 The P2 a11y-rule delta (`new_a11y_rules`, what the CI `--fail-on-regression` gate keys on)
@@ -256,7 +256,7 @@ semantic tokens + an `@layer components` set + `motion-safe:`-gated keyframes.
 self-poll root** (re-fires every 3s = a blink); progressive disclosure = native `<details>`
 accordions. Full token/component list, the redesigned views, and the meta-run dogfood recipe
 (~$0.28/pass, incl. extracting the real `OPENROUTER_API_KEY` from the k8s secret) →
-`reference/ui-and-meta-run.md`. Audit doc:
+`~/.claude/skills/auditloop/reference/ui-and-meta-run.md`. Audit doc:
 `claudedocs/design-system-audit-2026-07-19.md`.
 
 ## Conventions carried from naida (see naida CLAUDE.md)

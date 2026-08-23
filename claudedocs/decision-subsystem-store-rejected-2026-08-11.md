@@ -91,9 +91,36 @@ Recorded because each was believed, argued from, and then measured false:
 
 ## The falsifiable gate for revisiting
 
-Reopen the design when the index holds **≥5 entries outside its current single scope** or
-**≥5 entries of a non-infra type**. Both counters read zero, and have for the life of the
-store. At that point there is a corpus to design against instead of a hypothesis.
+🔴 **SUPERSEDED 2026-08-13 — the original gate TRIPPED, and it was the wrong question.**
+Both of its conditions are now met, so leaving it stated as-is would have a reader check a
+gate that has already fired and conclude nothing had changed. The original text was:
+
+> Reopen the design when the index holds **≥5 entries outside its current single scope** or
+> **≥5 entries of a non-infra type**. Both counters read zero, and have for the life of the
+> store. At that point there is a corpus to design against instead of a hypothesis.
+
+Measured by `subsystem_touch.py --census` on 2026-08-13 — **29 entries across 5 scopes**
+(`civitai` 1 · `civitai-app-starters` 1 · `datapacket-talos` 25 · `devrc` 1 ·
+`homelab-talos` 1), of which **8 carry `created_by: handoff`**. Against the anchor recorded
+before any second writer existed — **21 entries · 1 scope · 21 unstamped** — that is 4
+scopes that did not exist and 8 entries no infra-recon command could have written.
+
+**Why the original gate was the wrong question.** Its "no demand" premise was CIRCULAR: the
+only writer at the time was `/analyze-service`, an infra-recon command pointed at two
+cluster repos, so only infra entries in one scope *could* exist. "Nothing non-infra exists"
+is not evidence of no demand when nothing is able to create one. The counters were measuring
+the writer, not the demand.
+
+**The question that actually binds is COVERAGE** — does the index cover the repos where work
+happens? That was the constraint the original measurement found: of 290 path-carrying
+sessions, 12 were in the one indexed scope, and 7 of those resolved — a 58% hit rate *inside*
+covered scope, against near-total blindness outside it. Coverage has moved from 1 of ~12
+active repos to **5**. The corpus the gate was waiting for now exists.
+
+**This does not reopen the rejected design.** The narrower rejections stand on their own
+evidence and are unaffected by any of the above: no `type:` taxonomy, no dependency graph,
+no opt-in multi-verb CRUD. What is refuted is only the "no demand" half. Re-read "What the
+strain test actually found" before proposing any of the three.
 
 ## What replaced the premise: derived session association
 

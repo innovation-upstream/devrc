@@ -78,6 +78,47 @@ let
   # true on the graphical workbench (it only gates dunst/espanso there).
   isLaptop = builtins.pathExists "/sys/class/backlight/intel_backlight";
   userPackages = import ./pkgs { inherit pkgs workspace; };
+  # Dependency tree for the `clickup` skill, built from its committed
+  # package-lock.json. See nix/pkgs/clickup-node-modules.nix.
+  clickupNodeModules = pkgs.callPackage ./pkgs/clickup-node-modules.nix { };
+  # 🔴 The skills tree AS DEPLOYED — `claude/skills` with clickup's built
+  # node_modules injected. Both skill mappings below (~/.claude/skills and
+  # ~/.config/opencode/skills) use THIS, not `../claude/skills` directly.
+  #
+  # It exists because of how node resolves modules: from the REALPATH of the
+  # importing file, not the path you invoked. `home.file` deploys each skill file
+  # as a symlink into the store copy of `claude/skills`, so `lib/markdown.mjs`
+  # resolves `unified` starting at `/nix/store/<…>-hm_skills/clickup/node_modules`
+  # — a directory that does not exist. A `home.file` for
+  # `.claude/skills/clickup/node_modules` puts the tree at the DEPLOYED path,
+  # which node never looks at: MEASURED, `node ~/.claude/skills/clickup/query.mjs
+  # accounts` died with `Cannot find package 'unified' imported from
+  # /nix/store/…-hm_skills/clickup/lib/markdown.mjs` with that symlink in place
+  # and resolving correctly. node_modules has to sit in the SAME store tree as
+  # the sources, which means injecting it into the source of the mapping.
+  #
+  # 🔴 `ln -sT`, never a bare `ln -s`. If `claude/skills/clickup/node_modules`
+  # ever existed in the checkout, `cp -R` would create that directory in $out
+  # and a bare `ln -s` would then put the link INSIDE it
+  # (`$out/clickup/node_modules/node_modules`) — silently, exit 0, and the
+  # deployed skill would carry a committed tree while the nix-built one dangled
+  # one level down. `-T` treats the target as a plain name, so that case fails
+  # the build instead. (`claude/skills/.gitignore` is what makes it unlikely; a
+  # gitignore is not a guarantee, and this costs one letter.)
+  claudeSkills = pkgs.runCommandLocal "devrc-claude-skills" { } ''
+    cp -R ${../claude/skills} "$out"
+    chmod -R u+w "$out"
+    ln -sT ${clickupNodeModules}/node_modules "$out/clickup/node_modules"
+  '';
+  # opencode commands — auto-generated from skill frontmatter so that every
+  # skill appears as a /<name> command in the TUI with source="command" and
+  # non-empty hints, fixing the autocomplete gap where source="skill" entries
+  # get hints=[] and are excluded from the dropdown.
+  opencodeCommands = pkgs.runCommandLocal "devrc-opencode-commands"
+    { nativeBuildInputs = [ pkgs.python3 ]; } ''
+    mkdir -p "$out"
+    python3 ${../scripts/opencode/generate-commands.py} ${../claude/skills} "$out"
+  '';
   sessionVariables = import ./sessionVariables.nix {
     inherit pkgs;
     elixirLspPath = pkgs.vscode-extensions.elixir-lsp.vscode-elixir-ls;
@@ -89,7 +130,10 @@ in
 {
   # Graphical (i3 + i3status-rust bar) config lives in ./graphical.nix; isLaptop is
   # threaded to it as a module arg so it can branch battery/backlight vs rig/DDC.
-  imports = [ ./graphical.nix ];
+  # ./observability.nix ships host metrics + the journal to the homelab stack.
+  # BOTH hosts, deliberately: cross-host comparison is the point, and the
+  # workbench is where the ship.sh drift incidents happened.
+  imports = [ ./graphical.nix ./observability.nix ];
   _module.args.isLaptop = isLaptop;
 
   programs = programs;
@@ -116,10 +160,47 @@ in
           { trigger = ":hlt"; replace = "${workspace}/homelab-talos "; label = "homelab-talos path"; search_terms = ["infra"]; }
           { trigger = ":kuc"; replace = "${workspace}/kubeclaw "; label = "kubeclaw path"; search_terms = ["kubeclaw"]; }
 
-          # SSH connect
-          { trigger = ":sshwn"; replace = "ssh zach@10.42.0.30"; label = "SSH workbench (nebula)"; search_terms = ["ssh" "workbench" "wb" "nebula" "mesh" "remote"]; }
+          # SSH connect — 2026-08-19 /espanso-audit, CORRECTED after review.
+          # 🔴 READ THIS BEFORE TRUSTING `--lint`: an AMBIGUOUS search is NOT a
+          # failed one. espanso's search UI lists EVERY match and the user picks
+          # a row; two matches means two rows, not a dead query. What breaks on
+          # ambiguity is only `espanso_detect._attribute`, which returns None
+          # when a term hits >=2 snippets and so records the fire as
+          # UNATTRIBUTED. `--lint`'s wording ("can never fire from the search
+          # UI") describes the TELEMETRY, not espanso, and overclaims.
+          # The first pass here read that literally, concluded 'lap'/'ssh wor'
+          # "fired nothing", and STRIPPED the nebula pair's label+search_terms.
+          # That traded the user's discoverability for tidier telemetry and was
+          # strictly worse: 'nebula', 'mesh' and 'remote' went from 2 picker
+          # rows to ZERO, and with no label espanso falls back to showing the
+          # raw `ssh zach@10.42.0.30` as the row's description.
+          # So: labels stay. The nebula pair simply stops SPELLING the host
+          # word, which is what made the bare host query ambiguous — `rig` and
+          # `portable` carry the host sense instead. Net effect:
+          #   'lap' / 'ssh lap' -> :sshll, 'ssh wor' -> :sshwl   (now unique)
+          #   'nebula'/'mesh'/'remote'   -> both nebula rows     (picker, kept)
+          # All four endpoints are in live use — real `ssh` invocations in
+          # activity.events over the window were laptop-LAN 4, workbench-LAN 3,
+          # workbench-nebula 1, laptop-nebula 0 — so do NOT "simplify" by
+          # deleting either pair. An earlier pass proposed collapsing to
+          # nebula-only by reasoning from the search stream; that would have
+          # deleted the two most-used endpoints. Query the USAGE signal.
+          # Gate: build both configs and diff resolutions across the whole
+          # prefix universe, checking BOTH picker rows and attribution — a
+          # change that improves attribution while blanking picker rows is a
+          # regression, and only the two-sided diff shows it.
+          # 'rig' / 'portable' are deliberately NOT repeated in search_terms —
+          # they are already label words, and _token_matches reads labels, so a
+          # duplicate entry is dead config that only looks like a guard.
+          # They are COINED disambiguators, not measured queries: the repo says
+          # "rig" for the workbench (scripts/rig-control.sh, the rig-control bar
+          # button) but has no existing word for the laptop other than "laptop",
+          # which is the one word this snippet may not spell. Both nebula rows
+          # are found in practice via 'nebula'/'mesh'/'remote' + the picker;
+          # these words only stop the two rows reading identically.
+          { trigger = ":sshwn"; replace = "ssh zach@10.42.0.30"; label = "SSH rig via nebula mesh"; search_terms = ["nebula" "mesh" "remote"]; }
           { trigger = ":sshwl"; replace = "ssh zach@192.168.50.250"; label = "SSH workbench (LAN)"; search_terms = ["ssh" "workbench" "wb" "lan" "local"]; }
-          { trigger = ":sshln"; replace = "ssh zach@10.42.0.100"; label = "SSH laptop (nebula)"; search_terms = ["ssh" "laptop" "nebula" "mesh" "remote"]; }
+          { trigger = ":sshln"; replace = "ssh zach@10.42.0.100"; label = "SSH portable via nebula mesh"; search_terms = ["nebula" "mesh" "remote"]; }
           { trigger = ":sshll"; replace = "ssh zach@192.168.50.155"; label = "SSH laptop (LAN)"; search_terms = ["ssh" "laptop" "lan" "local"]; }
 
           # hot singles
@@ -154,7 +235,9 @@ in
           # interface — and the old search_terms (ask/clarify/questions/elicit/…)
           # contained none of the words he actually types: feedback, dispatch,
           # process. Lead the label with "feedback" and add those three terms.
-          { trigger = ":acq"; replace = "dispatch subagent to process feedback\nask clarifying questions and recommend anything useful to include before dispatching (include complete test coverage)"; label = "Process feedback: dispatch subagent + ask clarifying questions"; search_terms = ["feedback" "dispatch" "process" "ask" "clarify" "clarifying" "questions" "elicit" "scope" "include"]; }
+          { trigger = ":acq"; replace = "dispatch subagent to process feedback\nask clarifying questions and recommend improvements and anything useful to include before dispatching (include complete test coverage)"; label = "Process feedback: dispatch subagent + ask clarifying questions"; search_terms = ["feedback" "dispatch" "process" "ask" "clarify" "clarifying" "questions" "elicit" "scope" "include"]; }
+          { trigger = ":alo"; replace = "anything left outstanding from this thread?"; label = "Anything left outstanding?"; search_terms = ["anything" "left" "outstanding" "loose" ]; }
+          { trigger = ":roo"; replace = "reflect on objectives specified this session and determine if fully addressed and validated"; label = "reflect on objectives specified this session and determine if fully addressed and validated"; search_terms = ["reflect" "objectives" "addressed" ]; }
           { trigger = ":kickoff"; replace = "give me the kickoff message to copy paste to next session"; label = "Kickoff message for next session"; search_terms = ["kickoff" "kick off" "next session" "copy paste" "handoff" "message"]; }
           # Added 2026-08-05 via /espanso-audit — both are WHOLE-STANDALONE-MESSAGE
           # shaped, the one shape that has stuck (:eos 72 fires, :kickoff 38); every
@@ -184,6 +267,22 @@ in
           # queries ("in the meantime", "what can we do") tokenize onto this
           # snippet (see espanso_detect._term_matches).
           { trigger = ":mt"; replace = "tee up what we can do in the meantime: identify work that is INDEPENDENT of what is currently running — nothing touching the same files — then dispatch it in parallel with complete test coverage. if we are actually blocked until that finishes, say so plainly instead of inventing filler work."; label = "Meantime: tee up independent parallel work while that runs"; search_terms = ["meantime" "in the meantime" "while" "while that runs" "parallel" "queue" "queue up" "tee" "tee up" "wait" "blocked" "idle" "what can we do"]; }
+          # Added 2026-08-19 via /espanso-audit — all three WHOLE-STANDALONE-MESSAGE
+          # shaped, the only shape that has ever stuck here. Transcript demand over
+          # the 13-day window: "anything left open from this thread/session?" 13,
+          # "proceed, dispatch(, include complete test coverage)" 29+3, "create a
+          # /clawgate task to pick up the issues" 3.
+          # 🔴 The search_terms below are NOT free-form — `_token_matches` is a
+          # SUBSTRING test over trigger + label words + search_terms, so a new
+          # label can silently STEAL an existing snippet's searches. The obvious
+          # term for :cgt was "task", and 'ask' ⊂ 'task' would have hijacked all
+          # 58 of :acq's 'ask' fires — caught by replaying the real search stream,
+          # not by reading the list. Hence "ticket" here, and "coverage"/"proceed"
+          # rather than "dispatch" on :pdt. Re-run
+          # `espanso-usage.py --replay --config <candidate>` after ANY edit here
+          # and diff it against the deployed config: 0 regressions is the gate.
+          { trigger = ":pdt"; replace = "proceed, dispatch, include complete test coverage"; label = "Proceed with complete test coverage"; search_terms = ["proceed" "coverage" "test coverage" "complete" "tests"]; }
+          { trigger = ":cgt"; replace = "create a /clawgate task to pick up the issues"; label = "Create a clawgate ticket for the issues"; search_terms = ["clawgate" "ticket" "issues" "pick up"]; }
           # Removed 2026-07-25 via /espanso-audit — all keylog-evidence-backed:
           #  ZERO-FIRE set — 0 keylog fires + short-form hand-typing; steering already in
           #   RULES.md / slash-commands: :rnx, :pst ("proceed, dispatch" typed 40+×),
@@ -243,11 +342,25 @@ in
         # Cap the visible stack + keep a recall buffer (dunstctl history-pop).
         notification_limit = 4;
         # RECALL BUFFER sized against the MEASURED notification rate, not a guess.
-        # Audited 2026-08-11 on the workbench: ~330 notifications/day reach dunst
-        # (claude-notify ~193/day from its own log; cpu-monitor + earlyoom ~137/day
-        # combined, split by cross-checking `journalctl --user -u systembus-notify`
-        # against dunst's per-notification icon warning). At the previous value of
-        # 40 the buffer therefore held under THREE HOURS of traffic.
+        # Audited 2026-08-11 on the workbench: ~330 notifications/day reach dunst.
+        # At the previous value of 40 the buffer therefore held under THREE HOURS.
+        #
+        # RE-MEASURED 2026-08-12 (PR #409's per-producer split was partly wrong;
+        # the 300 slots are not):
+        #   claude-notify  ~174/day workbench desktop toasts (peak 386), plus
+        #                  ~150/day on the LAPTOP, which #409 never measured at
+        #                  all. Corroborated by a second, independent instrument:
+        #                  dunst's own history is 93% (workbench) / 81% (laptop)
+        #                  `claude`. This is the producer that mattered.
+        #   cpu-monitor    ~23/day workbench, ~13/day laptop — NOT the ~90/day
+        #                  #409 reported. That mean straddled a regime break:
+        #                  raising CPU_MON_THRESHOLD/RUNAWAY_PCT on 08-05 cut the
+        #                  workbench from 123-267/day to 11-32/day. Two
+        #                  instruments agree after the break.
+        #   earlyoom       415 notifications/11 days but on only THREE days
+        #                  (50/161/204); zero on the other eight.
+        # The icon-warning instrument used for the last two was calibrated, not
+        # assumed: 4 probes carrying that icon produced exactly 4 warnings.
         #
         # That is the recall path for anything DND swallowed, and it is the only
         # one: a paused notification sits in the `waiting` queue, which dunst 1.13.2
@@ -301,6 +414,45 @@ in
       # Urgent agent approvals still reach the phone via clawgate push.
       fullscreen_suppress = {
         fullscreen = "suppress";
+      };
+      # EARLYOOM BURST COALESCING — N kills in one episode collapse to ONE toast.
+      #
+      # earlyoom's `-g` kills whole process groups and systembus-notify emits one
+      # notification per killed process. Measured on the workbench: 415 kill
+      # notifications in 11 days, concentrated into THREE days (50 / 161 / 204) —
+      # 111 of them inside a single 3-minute window on 08-11, and zero on the
+      # other eight days. That burst shape is what makes it worth fixing: it is
+      # not a steady rate you can threshold away, it is an occasional wall.
+      #
+      # A shared `set_stack_tag` makes dunst REPLACE the previous toast carrying
+      # the tag rather than enqueue a new one, so an episode of any size occupies
+      # one slot showing its most recent kill.
+      #
+      # VALIDATED 2026-08-12 on the laptop — the thing PR #409 could not do. It
+      # probed twice and both runs were confounded by `fullscreen_suppress`
+      # routing the probes to history, so the tagged and untagged arms both read
+      # 0: a zero from a control that never observed anything. The re-test made
+      # the UNTAGGED arm an explicit POSITIVE CONTROL and refused to read the
+      # tagged number unless that control moved first. Result on dunst 1.13.2,
+      # no fullscreen window focused, 5 notifications per arm with DISTINCT
+      # summaries (so the global `stack_duplicates` cannot masquerade as
+      # stack-tag behaviour):
+      #     untagged (control) -> displayed = 3     [observable]
+      #     tagged             -> displayed = 1     [collapsed]
+      #
+      # WHAT IS LOST: the per-process detail of every kill but the newest, ON THE
+      # DESKTOP ONLY. `journalctl -u earlyoom` keeps every kill permanently with
+      # process, RSS and cmdline, and that is where an episode is actually read.
+      # What the toast is for — "something got OOM-killed, that's why your run
+      # died" — is one bit, and one toast carries it.
+      #
+      # SCOPE: keyed on the appname systembus-notify hard-codes. It cannot match
+      # `notify-failure` (a different appname), and it sets no `fullscreen` key,
+      # so it takes no part in the last-write-wins ordering that protects the
+      # deadman bypass below.
+      system_notify_stack = {
+        appname = "system-notify";
+        set_stack_tag = "system-notify-burst";
       };
       # DEADMAN BYPASS — the ONE class of toast that must defeat do-not-disturb.
       #
@@ -649,6 +801,13 @@ in
     source = ../scripts/tmux-task-resume.sh;
     executable = true;
   };
+  # session-created hook: names an auto-numbered session after its cwd. It
+  # SOURCES scratch-slots.sh from its own directory, so it must land beside it
+  # under ~/.config/tmux/ — the same reason that file is deployed there.
+  home.file.".config/tmux/autoname-session.sh" = {
+    source = ../scripts/tmux-autoname-session.sh;
+    executable = true;
+  };
   # Canonical scratchpad slot table (session<->hotkey<->color<->codename), sourced by
   # scratch-monitor/initiatives/status; must sit beside them under ~/.config/tmux/.
   home.file.".config/tmux/scratch-slots.sh" = {
@@ -666,17 +825,11 @@ in
     source = ../scripts/tmux-scratch-monitor.sh;
     executable = true;
   };
-  home.file.".config/tmux/claude-counters.sh" = {
-    source = ../scripts/tmux-claude-counters.sh;
-    executable = true;
-  };
-  # agent-ops "mission control" popup (prefix+A). Renders over the existing
-  # deterministic sources (bar-status cache + a live tmux/process scan + a
-  # TTL-cached initiative-scan) — see scripts/agent-ops.
-  home.file.".config/tmux/agent-ops" = {
-    source = ../scripts/agent-ops;
-    executable = true;
-  };
+  # (The `agent-ops` "mission control" popup that used to be deployed here, and
+  # bound to tmux prefix+A, is RETIRED — see nix/graphical.nix's claudeRunsBlock
+  # for where its one irreplaceable part went. Do not re-add a home.file for it:
+  # `test_the_retired_TUI_has_no_launcher_anywhere` fails if a launch surface
+  # names it again.)
 
   home.file.".config/tmux/activity-emit.sh" = {
     source = ../scripts/tmux-activity-emit.sh;
@@ -802,8 +955,18 @@ in
   # typed it. Every file under devrc/claude/skills/<name>/ (including `reference/`)
   # lands as a read-only store symlink at ~/.claude/skills/<name>/, so skills ship
   # to all hosts in lockstep. Edit in devrc/claude/skills/ then switch.
+  # 🔴 SOURCE IS `claudeSkills`, NOT `../claude/skills` — it is the same tree plus
+  # clickup's built node_modules, which has to live in the store copy for node to
+  # resolve it. Read the `claudeSkills` comment in the `let` block before changing
+  # this. node_modules is NOT committed (`claude/skills/.gitignore` pins that).
+  # 🔴 The gitignore is the ONLY thing preventing a committed node_modules — the
+  # earlier claim here, that "a path cannot be both", was false: `claudeSkills`
+  # is one derivation, so a committed tree and the injected one do not collide
+  # in home.nix at all. They collide inside `cp -R` + `ln`, which is why that
+  # link is `ln -sT` (a bare `ln -s` would nest the link inside the copied
+  # directory and succeed). See the `claudeSkills` comment in the `let` block.
   home.file.".claude/skills" = {
-    source = ../claude/skills;
+    source = claudeSkills;
     recursive = true;
     force = true;
   };
@@ -836,8 +999,13 @@ in
   # to displace a hand-placed regular file at this path — the switch returns
   # rc=0 and silently leaves it unmanaged. `dropStaleClaudeHooks` below is what
   # actually removes it; see the measurement in that comment. Registration in
-  # ~/.claude/settings.json stays per-host and needs no change — it already
-  # invokes `python3 ~/.claude/hooks/bash-guard.py`, which this symlink backs.
+  # ~/.claude/settings.json stays per-host — register-nudge-hook.py deliberately
+  # does NOT own it and will never create a bash-guard entry. What it DOES own is
+  # that entry's INTERPRETER: a bare `python3` there dies with `command not found`
+  # during the ~1s window where the switch's intermediate profile generation has
+  # no python3, and a PreToolUse hook exiting 127 is non-blocking — i.e. the guard
+  # FAILS OPEN mid-switch. The registrar rewrites the token to an absolute
+  # /nix/store python; see its module docstring.
   home.file.".claude/hooks/bash-guard.py" = {
     source = ../scripts/claude-hooks/bash-guard.py;
     force = true;
@@ -874,12 +1042,34 @@ in
     config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/scripts/browser-bridge/SKILL.md";
   home.file.".claude/skills/browser/browser".source =
     config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/scripts/browser-bridge/browser";
+  # `opencode` skill — the SAME deliberate exception as `browser`/`dl-router`
+  # above, for the same reason: its source of truth is the opencode subsystem in
+  # THIS repo (scripts/opencode/), not devrc/claude/skills/, and the CLI reads
+  # scripts/opencode/opencode.jsonc + scripts/opencode/lib/ + scripts/claude-hooks/
+  # relative to its own resolved __file__. A store copy would resolve those into
+  # /nix/store and read a FROZEN permission block — so preflight would answer
+  # from whatever config was current at the last switch, which is exactly the
+  # stale-artifact failure mode CLAUDE.md warns about. Out-of-store keeps the
+  # resolver and the config it resolves against as one live tree.
+  #
+  # 🔴 Only these two paths are symlinked; `lib/` is NOT deployed and must not
+  # be. The CLI reaches it through the repo checkout via `__file__`, which is
+  # the same way `dl-route` reaches its siblings.
+  home.file.".claude/skills/opencode/SKILL.md".source =
+    config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/scripts/opencode/SKILL.md";
+  home.file.".claude/skills/opencode/opencode-dispatch".source =
+    config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/scripts/opencode/opencode-dispatch";
+  # …and on PATH, like dl-route, so the skill body's commands are copy-pasteable.
+  home.file.".local/bin/opencode-dispatch".source =
+    config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/scripts/opencode/opencode-dispatch";
   # Claude Code hooks managed here (the script only — the settings.json
   # registration is per-host/unmanaged, as for bash-guard.py above, whose script
   # is likewise managed now). audit-pr-nudge fires
   # PostToolUse on `gh pr create` and injects context so Claude reflexively offers
   # `/audit-pr` (transcript audit: that request was hand-typed ≥14x while the skill
-  # sat unused). Registered as `python3 ~/.claude/hooks/audit-pr-nudge.py`.
+  # sat unused). Registered by register-nudge-hook.py, which writes an ABSOLUTE
+  # /nix/store interpreter into the command — never a bare `python3`, which is
+  # missing from the profile for ~1s of every switch.
   home.file.".claude/hooks/audit-pr-nudge.py" = {
     source = ../scripts/claude-hooks/audit-pr-nudge.py;
   };
@@ -911,6 +1101,257 @@ in
   home.file.".claude/hooks/claude-notify.py" = {
     source = ../scripts/claude-hooks/claude-notify.py;
   };
+  # next-step-nudge fires on Stop when the turn that just ended named no next step, and
+  # asks for one line saying what happens next. Measured over 14 days of operator
+  # prompts: `recommend*` is 216 occurrences against 542 `proceed` + 134 `yes` — roughly
+  # 1 in 3.5 approvals is a round trip that exists only because the assistant stopped
+  # without saying what it would do. Concentrated in datapacket-talos (152) and cli (33),
+  # not devrc, which is why this is a hook rather than devrc prose.
+  #
+  # 🔴 It does NOT block. It emits `hookSpecificOutput.additionalContext` on stdout and
+  # exits 0 — the model gets the line as non-error feedback and the conversation
+  # continues. An earlier revision asserted that additionalContext is unsupported on Stop
+  # and used exit 2 instead; that premise was false (checked against the installed CLI's
+  # own schema, claude-code 2.1.220), and exit 2 both blocked the turn and raised a "Stop
+  # hook error occurred" notification on every fire. Still bounded to at most ONE fire per
+  # session by an atomic claim, never twice in a row (stop_hook_active), off for subagents
+  # and for headless callers (NEXT_STEP_NUDGE_OFF), with every error path exiting 0.
+  # Measured on 11,789 real turn-final messages: fires on 0.8% of turns the operator
+  # answered with a bare approval and 10.6% of the turns where they had to ask for a
+  # recommendation.
+  #
+  # Registered on Stop (NOT SubagentStop) per-host by register-nudge-hook.py, appended
+  # alongside the three pre-existing Stop hooks it must never clobber.
+  home.file.".claude/hooks/next-step-nudge.py" = {
+    source = ../scripts/claude-hooks/next-step-nudge.py;
+  };
+  # 🔴 THE AGENT ACTIVITY LEDGER — writer 1 (Claude Code), plus the shared module
+  # it and `scripts/session-manager` BOTH read the record shape from.
+  #
+  # Why the module ships here and not only in the repo: the hook is invoked with
+  # the .claude/hooks/ copy as its script argument, and Python puts the SCRIPT's
+  # directory on sys.path — so `agent_ledger.py` must sit beside it, exactly the
+  # arrangement bash-guard.py already has with guard_core.py. Same source file as
+  # `scripts/lib/agent_ledger.py`, which session-manager loads by explicit path,
+  # so writer and reader agree on the record BY CONSTRUCTION. A second copy of
+  # the shape is how the two halves of a ledger drift apart while both look fine.
+  #
+  # What it buys: `session-manager`'s DEFAULT view lost `age_secs`, the `stale`
+  # bucket derived from it, and `claude_session_id` when #419 switched fuzzyclaw
+  # off — measured 2026-08-12, 0 rows with an age and 0 with a session id. This
+  # writer restores all three from a source this repo owns. Spec:
+  # claudedocs/spec-agent-activity-ledger.md (#428).
+  #
+  # 🔴 BOTH files are NEW, so both must be `git add`ed or the flake silently
+  # omits them and the switch succeeds with the hook absent — this repo's
+  # standing trap (CLAUDE.md).
+  home.file.".claude/hooks/agent-ledger-hook.py" = {
+    source = ../scripts/claude-hooks/agent-ledger-hook.py;
+  };
+  home.file.".claude/hooks/agent_ledger.py" = {
+    source = ../scripts/lib/agent_ledger.py;
+  };
+  # 🔴 THE BACKGROUNDED-COMMAND CAPTURE LOG — instrumentation for ClickUp
+  # 868ktvqf9, where a unit run that exits non-zero is announced as "exit code 0"
+  # and the run's output file is 0 bytes at the moment the notification arrives.
+  # Both independent things an investigator would check report green over a red
+  # run, and the ONE artifact that discriminates between the live hypotheses —
+  # the VERBATIM command string that was backgrounded — is kept nowhere the
+  # investigator can reach afterwards. This records it.
+  #
+  # It never blocks, warns or rewrites anything; it appends a line and returns 0.
+  # `bg_command_capture.py --report` is the read that puts the captured command
+  # next to the exit code the harness announced for it.
+  #
+  # 🔴 BOTH files are NEW, and the hook imports the library as a SIBLING in
+  # ~/.claude/hooks/ — deploying one without the other is a green switch and an
+  # inert hook (the #452 shape). Both must be `git add`ed or the flake silently
+  # omits them, and the switch still succeeds with the hook absent.
+  home.file.".claude/hooks/bg-command-capture.py" = {
+    source = ../scripts/claude-hooks/bg-command-capture.py;
+  };
+  home.file.".claude/hooks/bg_command_capture.py" = {
+    source = ../scripts/lib/bg_command_capture.py;
+  };
+  # 🔴 THE CLAWGATE WRITE-BACK GUARD — the deterministic replacement for a 🔴 prose
+  # rule that lost 2/2. Tasks #193 and #194 were both picked up, the work shipped as
+  # PRs, and both cards stayed `open` with ZERO comments; both were re-dispatched and
+  # paid for twice. `claude/skills/clawgate/SKILL.md` §"task pickup" already said the
+  # ritual was NOT optional. PRINCIPLES.md prefers a structural fix to prompt-tuning.
+  #
+  # 🔴 KEYED ON THE READ (`clawgatectl task get <N>` / a curl to `/api/tasks/<N>`),
+  # NOT on the `in_progress` flip. In both measured failures no status command was
+  # ever issued — the cards never left `open` — so a PreToolUse deny on the flip
+  # would have been structurally unreachable for the exact failure it was built for.
+  #
+  # Fires only when all three hold: the id was read, REAL work followed it (an
+  # Edit/Write/NotebookEdit, or a `git commit`/`git push`/`gh pr create`), and a LIVE
+  # re-read of the board shows no `claude-code` comment since that read. The middle
+  # condition is what keeps read-and-evaluate-only turns — the SKILL's own step 2 —
+  # untouched; the last is a measurement, so it self-suppresses the moment the ritual
+  # is followed, including by a subagent or a devpod agent. Escalates block, block,
+  # notice, silence per task per session, and NEVER blocks when the board could not
+  # be reached (it says so instead). Every error path exits 0.
+  #
+  # Its block message names `claude/skills/clawgate/flows/task-pickup.md`, the flow
+  # the ritual moved into — same reason as the interview gate below: a file under a
+  # skill's flows/ dir does not auto-fire the way a skill DESCRIPTION does, so the
+  # hook is the router as well as the enforcer.
+  #
+  # 🔴 A NEW file, so it must be `git add`ed or the flake silently omits it and the
+  # switch still succeeds with the hook absent — this repo's standing trap.
+  # Registered on PostToolUse (NO matcher — half of what it watches for is an Edit)
+  # and Stop, per-host, by register-nudge-hook.py.
+  home.file.".claude/hooks/clawgate-writeback-guard.py" = {
+    source = ../scripts/claude-hooks/clawgate-writeback-guard.py;
+  };
+  # 🔴 THE CLAWGATE TASK INTERVIEW GATE — the write-back guard's counterpart at the
+  # OTHER end of a task's life. That one makes a pickup report back; this one makes
+  # a CREATE say what "done" means.
+  #
+  # PreToolUse(Bash): denies `clawgatectl task create` / a curl POST to /api/tasks
+  # whose body carries no `## Acceptance criteria` heading. That heading is not a
+  # style nit — SKILL.md's status gate means a body without one forces EVERY pickup
+  # to end at `ready_for_review`, because the agent derived the criteria and may not
+  # grade an exam it wrote. The block message names
+  # `claude/skills/clawgate/flows/task-authoring.md`, because a file under a skill's
+  # flows/ dir does not auto-fire the way a skill DESCRIPTION does: the hook is the
+  # router as well as the enforcer.
+  #
+  # 🔴 It also denies a create whose body it CANNOT SEE (piped from a generator,
+  # `--body "$(…)"`). Failing open there would make the gate walkable by changing
+  # the SHAPE of the call rather than its content — a spelled guard, not a
+  # structural one. Escape hatches, both deliberate and both tested: a body that
+  # already has the heading passes SILENTLY (the operator's one-liner), and
+  # `CLAWGATE_NO_INTERVIEW=1` skips it for one call in ONE greppable spelling.
+  #
+  # Interactive sessions ONLY, for free: a PreToolUse hook sees Claude Code's Bash
+  # tool and nothing else, so repo-cos, the task-spec drafter, clickup-mirror and
+  # the browser extension — systemd/cron/extension processes — are untouched. No
+  # producer allowlist exists here, because there is no producer to allow.
+  #
+  # 🔴 A NEW file, so it must be `git add`ed or the flake silently omits it and the
+  # switch succeeds with the hook absent — this repo's standing trap. Registered on
+  # PreToolUse(Bash) per-host by register-nudge-hook.py, which is also what pins its
+  # interpreter to an absolute /nix/store path (a bare `python3` there is `command
+  # not found` for ~1s of every switch, and a PreToolUse hook exiting 127 FAILS
+  # OPEN — PR #609).
+  home.file.".claude/hooks/clawgate-task-interview-guard.py" = {
+    source = ../scripts/claude-hooks/clawgate-task-interview-guard.py;
+  };
+  # 🔴 THE BASE-CLONE STALENESS HOOK — the only hook here that fixes what the
+  # agent READS rather than what it does.
+  #
+  # Why it exists: when all work happens in throwaway worktrees + PRs, a base
+  # clone is never written to and silently falls behind. That is harmless for
+  # WRITES — `git worktree add <path> origin/<branch>` resolves the REMOTE
+  # tracking ref, so a clone 700 commits behind still yields a current worktree —
+  # but it is dangerous for READS: `CLAUDE.md` and `.claude/skills/**` load into
+  # agent context FROM THE WORKING TREE, so a stale clone serves stale,
+  # authoritative-looking instructions with nothing on screen to indicate it.
+  # Measured 2026-08-21 in the datapacket-talos hub: every dispatch-hub clone was
+  # behind (talos 33 commits, civitai-orchestration 53, civitai 18), and one of
+  # them served a skill whose retention figure had been corrected upstream five
+  # days earlier — a whole session was framed on the corrected-away claim.
+  #
+  # On SessionStart it fetches the cwd repo's upstream and `git checkout
+  # <upstream> --`s ONLY those two paths. It does NOT move HEAD (that would need
+  # a clean tree and would move the branch), never overwrites content that is
+  # absent from the upstream branch's recent history, and reports what it
+  # touched. `BASE_CLONE_NO_REFRESH=1` makes it report-only.
+  #
+  # Registration in ~/.claude/settings.json stays PER-HOST and unmanaged, exactly
+  # like bash-guard.py above: register-nudge-hook.py deliberately does NOT own
+  # it. That is structural, not an omission — the registrar's managed-command
+  # surface recognises `<python> <path>.py` commands only, and its whole rewrite
+  # half exists to normalise a python INTERPRETER token to an absolute /nix/store
+  # path. This hook is bash, so there is no interpreter hazard to fix and nothing
+  # for the registrar to match; teaching that shared component a second
+  # interpreter would widen a load-bearing surface for no benefit. Consequence,
+  # the same known gap bash-guard.py has: on any host where the entry has not
+  # been added by hand, the switch delivers the script and the hook is INERT.
+  #
+  # 🔴 A NEW file, so it must be `git add`ed or the flake silently omits it and
+  # the switch still succeeds with the hook absent — this repo's standing trap
+  # (the #452 shape, called out twice above).
+  #
+  # No `force = true` and no `dropStaleClaudeHooks` entry, for the reason the
+  # register-nudge-hook.py block below records verbatim: that treatment exists
+  # only to displace a PRE-EXISTING hand-placed regular file, and this path has
+  # never been hand-placed. MEASURED 2026-08-22 before the first switch that
+  # deploys it — `ls -la ~/.claude/hooks/` shows 14 entries on this host, ALL
+  # /nix/store symlinks, no regular files, and no base-clone-staleness.sh among
+  # them. The live copy being replaced lives in ~/.claude/local-hooks/, a
+  # different directory this attribute does not write to. If a foreign file ever
+  # does appear at this path the switch fails LOUDLY ("would be clobbered")
+  # rather than silently leaving it unmanaged — add it to dropStaleClaudeHooks
+  # then.
+  #
+  # Its regression suite is `scripts/tests/test_base_clone_staleness.sh`, run by
+  # `scripts/run-tests.sh` as a SHELL_TESTS target (24 assertions / 8 cases,
+  # offline synthetic fixtures). Every case there is a defect that actually
+  # shipped; run it before changing this script.
+  home.file.".claude/hooks/base-clone-staleness.sh" = {
+    source = ../scripts/claude-hooks/base-clone-staleness.sh;
+    executable = true;
+  };
+
+  # 🔴 THE REGISTRAR ITSELF — the hook that makes the hooks above DO anything.
+  # settings.json is per-host and unmanaged (permissions/allowlists), so a hook
+  # script landing in ~/.claude/hooks/ registers nothing by itself; this script
+  # appends the missing entries. Until 2026-08-13 it had NO home.file entry at
+  # all — only the two comments above mentioning it — and nothing ever invoked
+  # it. Measured consequence: next-step-nudge.py (#452) deployed to both hosts
+  # and sat INERT, because the switch reported success about the LAYER BELOW
+  # (the file landed) and nothing checked the layer above (it was registered).
+  # Same shape as this repo's `git add`-or-the-flake-omits-it trap.
+  #
+  # No `force = true` and no `dropStaleClaudeHooks` entry, unlike bash-guard.py:
+  # that treatment exists to displace a PRE-EXISTING hand-placed regular file,
+  # and this path has never been hand-placed. MEASURED 2026-08-13 on both hosts
+  # before the first switch that deploys it: `ls -la ~/.claude/hooks/` shows
+  # eight entries on the workbench and eight on the laptop, all store symlinks,
+  # and register-nudge-hook.py among none of them. If a foreign file ever does
+  # appear here the switch fails LOUDLY ("would be clobbered") rather than
+  # silently leaving it unmanaged — add it to dropStaleClaudeHooks then.
+  home.file.".claude/hooks/register-nudge-hook.py" = {
+    source = ../scripts/claude-hooks/register-nudge-hook.py;
+  };
+
+  # ...and RUN it, every switch. Delivering the registrar without invoking it
+  # would only move the manual step, not remove it.
+  #
+  # 🔴 SLOT: after "linkGeneration", NOT merely after "writeBoundary".
+  # linkGeneration is the step that creates the home-file symlinks, and it is
+  # itself `entryAfter ["writeBoundary"]` — so two entries that both declare
+  # only writeBoundary have NO order between them. MEASURED in this host's
+  # current generated `activate`: activityCollectorEnv and
+  # browserBridgeExtension (both writeBoundary-only) are emitted at lines 290
+  # and 300, linkGeneration at 502 — i.e. the topo sort put them BEFORE the
+  # files land. Copying that precedent here would have run the registrar
+  # before ~/.claude/hooks/register-nudge-hook.py existed on the one switch
+  # where it matters (the first one on each host), and worked on every switch
+  # after — a bug visible only on a fresh host.
+  #
+  # VERIFIED on the built artifact rather than argued: `nix build` of this
+  # config's activation-script derivation emits "registerClaudeHooks" at line
+  # 546, after "linkGeneration" at 502. (Building that derivation activates
+  # nothing — it only writes the script.)
+  #
+  # The wrapper never returns non-zero, so this cannot abort a switch under
+  # activation's `set -eu -o pipefail`; see the contract in its header.
+  # $DRY_RUN_CMD keeps `home-manager build`/dry-run read-only.
+  #
+  # 🔴 ${pkgs.python312}/bin/python3 is not merely "an interpreter that works" —
+  # the registrar writes `os.path.realpath(sys.executable)` into every managed
+  # hook command, so THIS path is what lands in settings.json and pins the hooks
+  # to an immutable, GC-rooted store closure. Swapping it for a profile path
+  # would silently reopen the mid-switch `python3: command not found` window.
+  home.activation.registerClaudeHooks =
+    lib.hm.dag.entryAfter [ "writeBoundary" "linkGeneration" ] ''
+      $DRY_RUN_CMD ${pkgs.bash}/bin/bash ${../scripts/claude-hooks/register-hooks-activation.sh} \
+        "$HOME/.claude/hooks/register-nudge-hook.py" ${pkgs.python312}/bin/python3
+    '';
 
   # ------------------------------------------------------------------------- #
   # opencode — global config, instruction file, env plugin and subagents.
@@ -920,7 +1361,8 @@ in
 
   # 🔴 GENERATED, not symlinked — and that is the whole point.
   # opencode does NOT expand `@`-imports inside AGENTS.md/CLAUDE.md (measured on
-  # v1.18.4 with an all-tools-denied agent, so no file read was possible: an
+  # v1.18.4, NOT re-derived since — it needs a live model call — with an
+  # all-tools-denied agent, so no file read was possible: an
   # imported passphrase came back NONE, the same content inline came back
   # verbatim). ~/.claude/CLAUDE.md is ~1.5 KB of `@PRINCIPLES.md` + `@RULES.md`
   # import lines, so pointing opencode at it would deliver NONE of the 32 KB of
@@ -928,9 +1370,22 @@ in
   # wins), so this is the file opencode really reads.
   #
   # Concatenating at switch time means it can never drift from the sources
-  # Claude Code reads. Measured result: 38,363 B / 37.5 KB ≈ 8.9k tokens (at the
-  # 4.31 B/token measured on this exact content) — safe. (For scale: a 331 KB
-  # AGENTS.md causes a permanent compaction loop.)
+  # Claude Code reads.
+  #
+  # COST — re-measured 2026-08-19 on engine 1.18.18 / openrouter/xiaomi/mimo-v2.5.
+  # The file is 43,676 B = 8,329 input tokens (A/B pair: one trivial prompt in an
+  # empty scratch project, under two config dirs identical in every byte except
+  # this file — 22,019 input tok with it, 13,690 without).
+  # 🔴 That is NOT a per-request tax, and the note that used to stand here
+  # implied it was. The file sits at the HEAD of the prompt prefix, which is
+  # exactly what a provider prefix-cache retains: of the 2,218 billed requests
+  # this box logged on 1.18.16+1.18.18, only 60 (2.7%) were cold, and a cached
+  # token bills ~50x under an input token. Attributed cost of this file over that
+  # window: ~$0.12 of $1.77 total spend (~7%). A COLD first request does pay the
+  # full 8,329 — that, not the steady state, is what browser-agent's isolated
+  # config dir sheds (every one of its runs is single-shot).
+  # Full working: scripts/opencode/README.md → "Size, and what it actually costs".
+  # (For scale: a 331 KB AGENTS.md causes a permanent compaction loop.)
   # scripts/tests/test_opencode_config.py pins the content and a 100 KB ceiling.
   home.file.".config/opencode/AGENTS.md".text =
     builtins.readFile ../claude/PRINCIPLES.md
@@ -1001,6 +1456,51 @@ in
   # removes the pre-existing plural-dir symlink that deploy-plugin.sh left.
   home.file.".config/opencode/plugin/activity.js".source =
     ../scripts/collector/opencode/activity-plugin.js;
+
+  # 🔴 WRITER 2 of the agent activity ledger — opencode's half of what makes a
+  # `session-manager` row carry an age, a `stale` bucket and a session id.
+  # Writer 1 is the Claude hook; without this every opencode window is a row
+  # with no age, which is the #419 shape narrowed to one runtime. Spec:
+  # claudedocs/spec-agent-activity-ledger.md §3.
+  #
+  # It holds NO schema: it shells out to `agent_ledger.py --write`, the same
+  # module session-manager reads the record shape from — so writer 2 cannot
+  # drift from writer 1. That is why the module is deployed BESIDE it here, the
+  # same arrangement guard.js has with guard_core.py. `ledger.js` looks for it
+  # at `~/.config/opencode/agent_ledger.py` first.
+  #
+  # Same deployment constraints as guard.js/env.js: directly in `plugin/`,
+  # `.js` only, non-recursive glob, and NEVER also in `plugins/` (plural) — the
+  # glob reads both and a file in each loads the plugin twice.
+  #
+  # 🔴 Both are NEW files and must be `git add`ed or the flake silently omits
+  # them: the switch succeeds and opencode simply never writes a record.
+  home.file.".config/opencode/plugin/ledger.js".source =
+    ../scripts/opencode/plugin/ledger.js;
+  home.file.".config/opencode/agent_ledger.py".source =
+    ../scripts/lib/agent_ledger.py;
+
+  # 🔴 THE OPENCODE SESSION ID, exported into every bash tool as
+  # `OPENCODE_SESSION_ID` — what gives a nested opencode run an identity of its
+  # own. Without it anything opencode shells out to sees only the OUTER Claude
+  # Code session's `CLAUDE_CODE_SESSION_ID` (opencode inherits it and hands it
+  # to its tool shells verbatim), so `browser` could do nothing but fail closed
+  # and drop the attribution. With it, `derive_session_id` emits an
+  # `opencode:<id>` tier and the bridge writes a session key that JOINS the
+  # `source='opencode'` rows activity-plugin.js emits from the SAME sessionID.
+  #
+  # 🔴 A SEPARATE FILE from activity.js on purpose. `shell.env` is in the bash
+  # tool's pre-spawn critical path; the telemetry plugin is fire-and-forget and
+  # runs after a call completes. #298 is why those failure domains stay apart —
+  # one bad edit to activity-plugin.js killed ALL opencode telemetry on both
+  # hosts for ~11 hours. The file's own header carries the full argument.
+  #
+  # Same deployment constraints as guard.js/ledger.js/env.js: directly in
+  # `plugin/`, `.js` only, non-recursive glob, and NEVER also in `plugins/`.
+  # 🔴 A NEW file — it must be `git add`ed or the flake silently omits it and
+  # the switch succeeds with the variable simply never set.
+  home.file.".config/opencode/plugin/session-env.js".source =
+    ../scripts/opencode/plugin/session-env.js;
 
   # `shell.env` plugin — the only supported seam for putting environment into
   # opencode's bash tool (there is no `env` config key; setting one is silently
@@ -1117,8 +1617,18 @@ in
   # skill-sourced command. Its `hints` array is empty for skills and populated for
   # commands, which is at least a TUI autocomplete difference; proving substitution
   # needs a live model call. See the PR for the full matrix.
+  # Same `claudeSkills` source as ~/.claude/skills above — same tree, same reason
+  # (clickup's node_modules must be in the store copy, not at the deployed path).
   home.file.".config/opencode/skills" = {
-    source = ../claude/skills;
+    source = claudeSkills;
+    recursive = true;
+    force = true;
+  };
+  # opencode commands — generated from the same skill source so /<name> in the
+  # TUI autocomplete shows every skill. Commands get source="command" and
+  # non-empty hints, which is what the autocomplete dropdown filters on.
+  home.file.".config/opencode/commands" = {
+    source = opencodeCommands;
     recursive = true;
     force = true;
   };
@@ -1145,10 +1655,15 @@ in
     config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/scripts/dl-router/SKILL.md";
   home.file.".config/opencode/skills/dl-router/dl-route".source =
     config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/scripts/dl-router/dl-route";
-  # clickup: standalone repo at ~/.claude/skills/clickup/ — symlink the directory
-  # so opencode picks it up without duplicating the checkout.
-  home.file.".config/opencode/skills/clickup".source =
-    config.lib.file.mkOutOfStoreSymlink "${home}/.claude/skills/clickup";
+  # 🔴 clickup used to need a mkOutOfStoreSymlink here, pointing opencode's copy at
+  # ~/.claude/skills/clickup — the standalone, uncommitted checkout that lived only
+  # on this host. Now that the skill is IN `claude/skills/`, the recursive mapping
+  # above covers it like every other skill, and that pointer is not merely
+  # redundant but a CYCLE: `.config/opencode/skills/clickup` -> `~/.claude/skills/
+  # clickup`, whose own links then resolve back through the opencode path. It
+  # deployed a self-referential `<hash>-hm_clickup` entry INSIDE the skill dir.
+  # node_modules needs no entry either: `claudeSkills` carries it into the tree
+  # both mappings are built from.
 
   # These hooks previously existed as PLAIN local files (claude-notify.py +
   # test_claude_notify.py on the laptop; bash-guard.py on BOTH hosts). A
@@ -1280,7 +1795,15 @@ in
         # case-insensitive substring match on the busy process's command.
         # COMMA-separated (a space gets split by systemd's Environment= parsing
         # and silently drops entries). Add more, e.g. "anno,logd,steam,lmkd".
-        "CPU_MON_IGNORE=anno,logd"
+        #
+        # 🔴 MATCH THE `comm`, NOT THE GAME'S NAME. Linux truncates comm to 15
+        # chars, so Farthest Frontier appears as "Farthest Fronti" — an entry of
+        # "frontier" would never match anything and would look like it worked.
+        # The comm also contains a SPACE, and is_ignored splits on spaces as well
+        # as commas, so a two-word entry becomes two independent substrings.
+        # Hence the single distinctive first token. Verified against 12 real
+        # alerts on the workbench, all reading "Runaway process: Farthest Fronti".
+        "CPU_MON_IGNORE=anno,logd,farthest"
       ];
       ExecStart = "${pkgs.bash}/bin/bash %h/.config/cpu-monitor/cpu-monitor.sh";
       Restart = "always";
@@ -1989,6 +2512,50 @@ in
   # remote leg contributes nothing to the exit code — so a local rc 8 with the
   # laptop shut still exits 8, still fails the unit, and still toasts.
   #
+  # 🔴 THE SECOND THING THAT DOES **NOT** TOAST: rc 16, the fuzzyclaw phase-2
+  # gate. Same hazard, arrived at from the other direction — that code means a
+  # CLEANUP became possible and stays set until somebody does the cleanup, so
+  # failing the unit on it would fire the DND-bypassing toast 4× a day forever
+  # over a run where nothing is wrong. `SuccessExitStatus = 16` on the service
+  # below; the full argument is there.
+  #
+  # 🔴 rc 17 DOES TOAST, and that is the point. It means a repo devrc BUILDS A
+  # PACKAGE FROM (`nix/pkgs/**` derivations with a `${workspace}/…` src) is not
+  # current on that host — so the binary it installs is old code under a
+  # current-looking version. Measured 2026-08-14: the laptop's homelab-talos was
+  # 24 commits behind, so its clawgatectl had no `task status`/`task comment`
+  # while devrc's version literal stamped 0.7.95 onto it; the command printed
+  # help and exited 0. This deadman was green on that host throughout. Unlike
+  # rc 13 and rc 16 this is a real divergence with a real fix (a pull plus a
+  # switch), so it must reach OnFailure like rc 8 does — it is NOT on
+  # SuccessExitStatus. It cannot become permanently red off a single run:
+  # `fetch failed`, `absent` and `detached` are all reported as UNMEASURED and
+  # set no code on the run that observes them.
+  #
+  # 🔴 rc 18 DOES TOAST TOO, and it is the gap rc 17 left. "Reported as
+  # UNMEASURED and sets no code" is correct per run and was wrong forever: a
+  # scope whose currency can NEVER be evaluated escalated never, so the run kept
+  # reading as clean while rc 17 was structurally unable to fire for it.
+  # Measured 2026-08-18 on the workbench — tmux-fuzzyclaw parked on a local
+  # branch with no upstream, `unmeasured=1`, rc 0, concealing a genuinely
+  # divergent build between the two hosts. So an unmeasured scope now carries the
+  # rc 13 ladder: reported every run, escalated only after N CONSECUTIVE runs,
+  # per (host, scope), reset the moment it measures. `repo ABSENT` is exempt at
+  # every count — a host without the checkout is a state clawgatectl.nix
+  # deliberately supports — and a failed fetch gets a longer ladder than a branch
+  # with no upstream, because only one of those two is plausibly weather. Like rc
+  # 17 it is a real divergence with a real fix, so it is NOT excused on
+  # SuccessExitStatus (which `test_only_16_is_excused_from_failing_the_unit`
+  # pins to exactly one code).
+  #
+  # 🔴 AND IT DOES NOT MOVE TimeoutStartSec. The budget below is a function of
+  # what the script FETCHES; the rc 18 ladder adds no fetch and no ssh — it reads
+  # and writes one ~16-byte counter per (host, scope) in $XDG_STATE_HOME, four
+  # files at today's scope count. Left at 420 deliberately rather than bumped
+  # "to be safe": that number is asserted against the fetch cap by
+  # `test_the_unit_start_timeout_can_absorb_every_source_repo_fetch`, and moving
+  # it for a reason the test does not model would decouple it from its own pin.
+  #
   # The service is emitted UNCONDITIONALLY (any host can run it by hand); only the
   # TIMER's timers.target wiring is gated — see enableDriftDeadman above.
   systemd.user.services.drift-check = {
@@ -2000,15 +2567,72 @@ in
     };
     Service = {
       Type = "oneshot";
-      # Two `git fetch`es plus one ssh round trip. The ConnectTimeout inside the
-      # script is 10s, so this ceiling only ever fires on a wedged fetch; the
-      # cgroup is killed and the timer re-arms on the next OnUnitActiveSec.
-      TimeoutStartSec = 180;
+      # 🔴 rc 16 IS A SUCCESS TO systemd, AND THIS LINE IS LOAD-BEARING. rc 16 is
+      # the fuzzyclaw phase-2 gate reporting that a CLEANUP became possible —
+      # ACTIONABLE, not drift, nothing broken, nothing to repair. Without this
+      # `Type = "oneshot"` fails the unit on any non-zero code, OnFailure above
+      # fires, and the toast is the ONE class deliberately wired to defeat
+      # do-not-disturb (`zz_notify_failure_bypass`, override_pause_level = 100).
+      #
+      # And it would not fire once: the gate stays open until somebody deletes
+      # the readers, and the timer runs every 6h — so the DND-bypassing alert
+      # would fire 4× a day, forever, on a run where nothing is wrong. The DND
+      # bypass is justified in this file by a MEASURED rate of ~1 firing in 9
+      # days; 4/day is three orders of magnitude past that, and it is exactly
+      # the "permanently-red gate trains you to click through the one alert that
+      # must keep its meaning" hazard the unreachable-remote note below already
+      # refuses. The script's own header refuses it for rc 13 for the same
+      # reason. Correct about a printed LINE, wrong about an EXIT CODE.
+      #
+      # NOTHING IS HIDDEN. The script still exits 16, still prints the
+      # `ACTIONABLE (not drift)` verdict plus the READY block, and a hand-run
+      # (`scripts/drift-check.sh`, or `systemctl --user start drift-check` then
+      # `journalctl --user -u drift-check`) surfaces both. 🔴 READ THE JOURNAL,
+      # NOT THE EXIT STATUS: systemd ZEROES `ExecMainStatus` for a code it has
+      # been told is a success, so `systemctl show drift-check
+      # -p ExecMainStatus` reads **0** on such a run, not 16 — measured on
+      # systemd 258.3, with the no-`SuccessExitStatus` control reading 16. An
+      # earlier revision of this comment asserted the opposite and would have
+      # led an operator to conclude the gate never opened. `journalctl --user
+      # -u drift-check | grep ACTIONABLE` is the check that works. Pinned by
+      # `test_the_unit_does_not_fail_on_the_phase2_actionable_code`.
+      SuccessExitStatus = 16;
+      # 🔴 THE BUDGET IS A FUNCTION OF WHAT THE SCRIPT FETCHES, and that grew.
+      # It was 180 for "two `git fetch`es plus one ssh round trip" — the two
+      # devrc checkouts. The source-repo leg (rc 17) fetches EVERY repo nix/pkgs
+      # builds a package from, on BOTH hosts, so the worst case is now
+      #   2 hosts x N source repos x DRIFT_SRC_FETCH_TIMEOUT (30s)
+      # on top of the devrc fetches, the ssh round trip and the 60s phase-2 cap.
+      # At today's N=2 that is 120s of new worst case, which 180 could not
+      # absorb: the cgroup would be killed mid-run and the deadman would report
+      # NOTHING, on a schedule, looking like a unit that merely takes a while.
+      # 420 leaves headroom for one more source repo without another edit.
+      #
+      # This is a SEAM — the tunable lives in the script, the ceiling lives here,
+      # and neither file's tests owned their product. Pinned by
+      # `test_drift_check.py::test_the_unit_start_timeout_can_absorb_every_source
+      # _repo_fetch`, which recomputes it from both files and fails if either
+      # moves out from under the other.
+      #
+      # The ConnectTimeout inside the script is 10s and each source fetch is
+      # capped individually, so this ceiling only ever fires on several wedges at
+      # once; the cgroup is killed and the timer re-arms on the next
+      # OnUnitActiveSec.
+      TimeoutStartSec = 420;
       Environment = [
         # iproute2 is load-bearing, not incidental: `ip -4 -o addr show` is how
         # local_ipv4s identifies WHICH host this is (both report hostname `nixos`).
         # Without it detection returns "unknown" and the script exits 6.
-        "PATH=${lib.makeBinPath [ pkgs.git pkgs.openssh pkgs.iproute2 pkgs.bash pkgs.coreutils pkgs.gawk pkgs.gnused pkgs.gnugrep ]}"
+        #
+        # 🔴 python3 AND tmux ARE FOR THE CHILD, NOT FOR drift-check.sh ITSELF.
+        # The fuzzyclaw phase-2 gate execs `scripts/session-manager`, whose
+        # shebang resolves `python3` from PATH and which shells out to `tmux
+        # list-panes`. Under systemd there is none of the login shell's PATH, so
+        # without these the gate reports COULD NOT MEASURE on every timer run
+        # forever — from a unit that looks correct, which is the exact shape the
+        # iproute2 note above records. Pinned by
+        # `test_the_phase2_child_binaries_are_on_the_unit_path`.
+        "PATH=${lib.makeBinPath [ pkgs.git pkgs.openssh pkgs.iproute2 pkgs.bash pkgs.coreutils pkgs.gawk pkgs.gnused pkgs.gnugrep pkgs.python3 pkgs.tmux ]}"
         "HOME=%h"
       ];
       ExecStart = "${pkgs.bash}/bin/bash %h/workspace/devrc/scripts/drift-check.sh";
@@ -2017,6 +2641,7 @@ in
       X-Restart-Triggers = [
         "${../scripts/drift-check.sh}"
         "${../scripts/lib/host-role.sh}"
+        "${../scripts/lib/drift_phase2.py}"
       ];
     };
   };
@@ -2057,7 +2682,7 @@ in
   # run-viewer.sh) that renders the current initiatives from `initiatives.latest`
   # (ghost-free: newest snapshot only) grouped by repo, with momentum badges,
   # next-step, open PRs, and a LIVE tmux overlay read from THIS host at render time.
-  # It is the durable, browser-viewable counterpart to the ephemeral agent-ops TUI.
+  # It is the durable, browser-viewable successor to the retired agent-ops TUI.
   #
   # WORKBENCH-ONLY (gated on serverMode), same rationale as the sync: the homelab
   # kubeconfig is direct-LAN only here, AND the viewer must run on the host whose
@@ -2531,6 +3156,170 @@ in
       OnCalendar = "hourly";
       Persistent = true;
       RandomizedDelaySec = 600;
+    };
+    Install = {
+      WantedBy = [ "timers.target" ];
+    };
+  };
+
+  # Encrypted OFF-MACHINE backup for the /analyze-service index store.
+  #
+  # WHAT THIS CLOSES, AND WHY THE AUTOCOMMIT ABOVE DOES NOT CLOSE IT. The
+  # committer gives every scope local git history. That defends against exactly
+  # one thing: an agent's Write clobbering a file a previous run had already
+  # committed. Measured on the workbench 2026-08-21: 10 scope repos, 1-65
+  # commits each, every one of them `remote = none`, and not one byte of any of
+  # them anywhere off this disk. The history lives INSIDE the thing a disk
+  # failure or an `rm -rf` of the store root destroys, so until now the store
+  # had a versioning story and no recovery story at all. The content is not
+  # re-derivable — it records gotchas, retracted theories and measurements that
+  # were true at a moment.
+  #
+  # The laptop's store is DIVERGENT CONTENT, not a copy. It is a second thing to
+  # lose, which is why this is NOT gated on serverMode (see below).
+  #
+  # 🔴 A SIBLING UNIT, NOT AN EXTENSION OF THE COMMITTER. The obvious move is to
+  # bolt an upload onto analyze-service-index-commit, and it is the wrong one.
+  # That unit's containment — `PrivateNetwork = true`, `InaccessiblePaths` on
+  # /dev/shm, both bind lists frozen at exactly one entry — IS its
+  # no-exfiltration control, arrived at over several measured rounds after three
+  # earlier attempts to make exfiltration merely DETECTABLE were each evaded a
+  # new way. Backing up needs the network by definition. Giving that unit a
+  # network is not a small edit to it; it is deleting the property it was built
+  # to have, and it would do so for a job that runs on a completely different
+  # schedule. Two units, two threat models, two failure signals.
+  #
+  # DAILY, not hourly. The committer is hourly because its cost is ~200 ms of
+  # local git and the window it narrows is the same-day write-then-clobber. This
+  # one uploads full bundles of every scope over a port-forward: the window it
+  # narrows is "the disk died", which is not a per-hour risk, and 24 full-store
+  # uploads a day would buy nothing over one. Persistent=true catches up a
+  # missed run; RandomizedDelaySec keeps it off a predictable boundary and off
+  # the same instant as the 06:00 mail archiver.
+  #
+  # 🔴 DELIBERATELY NOT GATED ON serverMode, unlike mail-actions-archive which
+  # it otherwise resembles. That gate exists because those jobs need a server
+  # role. This one needs the homelab kubeconfig — which the laptop HAS, over
+  # nebula — and gating it out would leave the laptop's divergent, equally
+  # unrecoverable store with no off-machine copy while the workbench looked
+  # healthy. Same reasoning as the committer above, and the same silent gap.
+  # `backup.py` resolves the right kubeconfig per host itself; KUBECONFIG below
+  # is the workbench's and is simply the first candidate it checks.
+  #
+  # THE STORE IS MOUNTED READ-ONLY. `backup.py` runs no git subcommand outside
+  # its own allowlist (bundle/rev-list/remote/rev-parse) and the test suite
+  # checksums a synthetic store across a full run to prove byte identity — but
+  # BindReadOnlyPaths makes it a property of the namespace too, so a future bug
+  # in the producer cannot reach the only copy of the data it is protecting.
+  # Note the contrast with the committer, which needs the store WRITABLE.
+  #
+  # 🔴 ProtectHome=tmpfs, NOT read-only. THIS UNIT HAS A NETWORK — it is the one
+  # job here that can carry bytes off the box — so what it can READ is the whole
+  # containment question, and `read-only` answers a different one. `read-only`
+  # makes $HOME unwritable and leaves it fully READABLE, which means the bind
+  # list below confers no confinement whatsoever: it is a list of things already
+  # visible. MEASURED 2026-08-22 with `systemd-run --user`, same directive set
+  # otherwise, probing readability from inside the namespace:
+  #
+  #   ProtectHome=read-only  ~/.ssh/id_ed25519 READABLE, ~/.kube/config READABLE,
+  #                          `.secrets/` listed 6 entries
+  #   ProtectHome=tmpfs      ~/.ssh ABSENT, ~/.kube/config ABSENT,
+  #                          `.secrets/` listed 1 entry — the bound key file
+  #
+  # The comment here used to say the age identity was bound "as a single FILE,
+  # not its directory: `.secrets/` also holds cluster credentials this job has
+  # no business seeing." Under `read-only` that was false in the way that
+  # matters — the job could read all six, and the sentence would have led a
+  # maintainer to believe the narrow bind was doing work.
+  #
+  # NOTHING NEEDED BINDING BACK for the switch. The list below was already
+  # exactly what the job reads, which is why the leak was invisible: measured by
+  # running `backup.py --print-plan` (pure read, writes nothing) inside the
+  # tmpfs namespace — rc=0, identity resolved, all 10 scopes discovered and
+  # commit-counted. Both kubeconfigs are self-contained (`*-data`, no external
+  # cert paths) and `_minio.py` reads nothing from $HOME beyond KUBECONFIG.
+  #
+  # 🔴 The bind list is therefore load-bearing now and pinned as an EXACT LIST by
+  # test_the_backup_unit_pins_its_CONTAINMENT_directives_exactly. Appending an
+  # entry — or widening the age key to its directory — is the one-token hole the
+  # committer unit's comment describes, and it is worse here because this unit
+  # has a route off the machine.
+  #
+  # Python comes from a pinned `withPackages` env rather than the runtime
+  # `nix-shell -p` that run-archive.sh uses. nix-shell inside a hardened unit
+  # needs the daemon, a writable cache and a NIX_PATH; a built env needs none of
+  # those and cannot drift between the two hosts.
+  systemd.user.services.analyze-service-index-backup =
+    let
+      pyEnv = pkgs.python3.withPackages (p: [ p.minio ]);
+    in
+    {
+      Unit = {
+        Description = "Encrypted off-machine backup of the /analyze-service index store";
+        After = [ "network-online.target" ];
+        Wants = [ "network-online.target" ];
+        OnFailure = [ "notify-failure@%n.service" ];
+      };
+      Service = {
+        Type = "oneshot";
+        # Ten scopes of a few hundred KB each, bundled, encrypted and uploaded
+        # over a port-forward. Generous, but a hang must not pin the timer.
+        TimeoutStartSec = 900;
+        Environment = [
+          "PATH=${lib.makeBinPath [ pkgs.git pkgs.age pkgs.kubectl pkgs.coreutils ]}"
+          "HOME=%h"
+          "KUBECONFIG=%h/workspace/homelab-talos/homelab-kubeconfig"
+          # The identity this encrypts to: the operator's EXISTING SOPS age key,
+          # the same handle the homelab repos already use. No new key is minted —
+          # a backup encrypted to a key nobody keeps alive is a backup nobody can
+          # open. See SECRETS.md.
+          "SOPS_AGE_KEY_FILE=%h/workspace/homelab-talos/.secrets/age.key"
+          # 🔴 THE TWO HOSTS MUST NOT SHARE A KEY PREFIX. Both machines are
+          # hostname `nixos` and their stores are DIVERGENT content, so a shared
+          # prefix would make each host's retention pass evict the other's
+          # backups — turning the backup into a second way to lose the data.
+          #
+          # `isLaptop` alone is not enough to rely on here. It is a backlight
+          # probe, and the note at the top of this file records that it fails
+          # OPEN: a laptop with an ACPI-only backlight evaluates `false`, which
+          # would label BOTH machines `workbench` and produce exactly the
+          # collision above — silently, and only visible as backups going
+          # missing. So the readable name is joined to `%m`, systemd's machine
+          # ID, which is distinct per host by construction and needs no probe.
+          # The name is for a human reading the bucket; the machine ID is what
+          # actually guarantees separation.
+          "ASIB_HOST=${if isLaptop then "laptop" else "workbench"}-%m"
+        ];
+        ProtectSystem = "strict";
+        ProtectHome = "tmpfs";
+        # `-` on the store: a host that has never run /analyze-service must start
+        # and no-op cleanly, which is the one empty outcome backup.py treats as a
+        # success. No `-` on the script: it ships with the repo, so its absence is
+        # a real deployment fault and the mount failure names it (measured for the
+        # committer above; the same reasoning applies unchanged).
+        BindReadOnlyPaths = [
+          "%h/workspace/devrc/scripts"
+          "-%h/.claude/analyze-service-index"
+          "-%h/workspace/homelab-talos/.secrets/age.key"
+          "-%h/workspace/homelab-talos/homelab-kubeconfig"
+          "-%h/.kube/homelab-nebula.yaml"
+        ];
+        InaccessiblePaths = [ "/dev/shm" "/dev/mqueue" ];
+        PrivateTmp = true;
+        NoNewPrivileges = true;
+        ExecStart = "${pyEnv}/bin/python3 %h/workspace/devrc/scripts/analyze-service-index/backup.py";
+        X-Restart-Triggers = [ "${../scripts/analyze-service-index/backup.py}" ];
+      };
+    };
+
+  systemd.user.timers.analyze-service-index-backup = {
+    Unit = {
+      Description = "Daily timer for the /analyze-service index off-machine backup";
+    };
+    Timer = {
+      OnCalendar = "*-*-* 04:30:00";
+      Persistent = true;
+      RandomizedDelaySec = 1800;
     };
     Install = {
       WantedBy = [ "timers.target" ];

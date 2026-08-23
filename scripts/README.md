@@ -16,7 +16,7 @@ Custom blocks for i3status-rust — each prints one block's state; the bar polls
 
 | script | purpose |
 |---|---|
-| `i3status-agent-ops` | live count of Claude-Code-in-tmux runs |
+| `i3status-claude-runs` | live count of Claude-Code-in-tmux runs (bar pill) |
 | `i3status-airvpn` | host AirVPN WireGuard tunnel state |
 | `i3status-alerts` | firing cluster-alert count |
 | `i3status-civitai` | firing civitai-prod alert count (client cluster) |
@@ -66,7 +66,6 @@ Click actions for those blocks:
 
 | script | purpose |
 |---|---|
-| `agent-ops` | tmux "mission-control" agent operations dashboard |
 | `verify-agent-work` | deterministic, repo-aware post-agent verification gate |
 | `find-session.py` | find past Claude Code sessions by keyword |
 | `memory-audit.py` | audit a project's auto-memory index (`MEMORY.md`) |
@@ -75,6 +74,7 @@ Click actions for those blocks:
 | `obs-read` | one-command, cluster-aware observability query tool |
 | `playwright-nixos` | drive Playwright with the nixpkgs Chromium matching *this project's* pin (`--list` / `--select`) |
 | `dogfood-cycle` | automate the civitai App Block "dogfood test cycle" |
+| `run3` | run a command with stdout and stderr captured to **separate** files (never merged), reporting each stream's byte count, path and the command's own exit code. Use it whenever the question is *which stream produced this* — in zsh, `cmd 2>&1 >/dev/null \| consumer` hands the consumer **stdout**, so redirection order cannot answer it |
 
 ## Network / VPN
 
@@ -104,9 +104,15 @@ Click actions for those blocks:
 | `gate.sh` | **run the gate through this.** Wraps both runners, sends their full output to a LOG FILE (not a pipe — the pipe is what destroyed the status for four agents in one day) and prints a bounded summary, so **its exit code is authoritative**. Cross-checks that status against the runner's own `RESULT:` line and exits **90 = could-not-vouch** on a disagreement, a missing verdict, or a `panic: test timed out` — a different finding from "the tests failed" |
 | `run-tests.sh` | **single source of truth** for running the Python suites. Per-target collected-test floors (`TARGET_FLOORS`, pinned two-way against the target list); the global floor is their SUM, never hand-written. `--check-targets` / `--check-floors` validate the two tables in milliseconds |
 | `run-node-tests.sh` | single source of truth for running the `.mjs` suites. Per-suite floors + a two-way discovery pin; global floor derived as their sum |
-| `ship.sh` | converge BOTH NixOS hosts (workbench + laptop) to `origin/main`, then verify |
+| `ship.sh` | converge BOTH NixOS hosts (workbench + laptop) to `origin/main`, then verify — in **three independent halves**, because each is blind to the next: git/deploy state (rc 11), every managed path RESOLVES (rc 12), and every managed path serves the content the repo is at (rc 13). rc 12 reads its manifest out of the host's OWN active generation, so an old generation is self-consistent and passes it green — measured 2026-08-19, the workbench served the pre-#611 `~/.claude/RULES.md` under "488 checked, 0 dangling, 0 absent". rc 13 compares by CONTENT with git as the oracle (blob in the working tree = current, blob elsewhere in the object store = a HISTORICAL version = stale, blob git has never seen = rendered, not copied, so excluded), which needs no manifest→repo path table to rot. `mkOutOfStoreSymlink` targets resolve back into the repo and so can never be stale: they are counted separately, never as evidence, and the EXAMINED count printed is repo-sourced only — 0 of those is RED |
 | `drift-check.sh` | **passive deadman** — is either host silently no longer receiving changes? READ-ONLY: fetches and reports, never fixes. Distinct rc per condition (8 un-pushed/diverged, 10 behind, 12 not-on-main, 3/4 cannot-evaluate, **2 checked-no-host**, **13 remote unreachable for `DRIFT_UNREACHABLE_ESCALATE` CONSECUTIVE runs**), aligned with `ship.sh`'s legend. Runs unattended as the `drift-check` systemd-user timer; drift ⇒ non-zero ⇒ the existing `notify-failure@` dunst toast. **Two rc's need their policy read, not just their name:** rc 13 is *not* "the laptop was unreachable this run" — a single miss is reported loudly and contributes **nothing** to the exit code, because the timer is workbench-only and its remote leg is a laptop that is routinely shut; it escalates only after N consecutive misses (default 4 ≈ 24h at the 6h cadence), a streak persisted under `$DRIFT_STATE_DIR` and reset the moment the host answers — *or immediately* if that streak cannot be persisted, since "how long" is then unknowable. rc 2 is usage **plus** any run that ended up observing no host at all (`--no-local --no-remote`, or `--no-local` with the remote unreachable below threshold) — a 0 there would be a green from a checker wired to nothing. Below-threshold softening applies to the remote leg only: a local rc 8 with the laptop shut still exits 8 |
 | `lib/host-role.sh` | the ONE host-identity predicate (both hosts report hostname `nixos`, so identity comes from local IPv4s). Sourced by `ship.sh` **and** `drift-check.sh` — never copied |
+| `lib/claude_sessions.py` | the ONE Claude-Code-in-tmux detector: pane list + `/proc` tree walk → live sessions, each with its task, busy flag and per-window activity age. Loaded by explicit path (never `sys.path`) from `i3status-claude-runs`, and **symlinked beside it** by `nix/graphical.nix` so the deployed pill can find it. It is strictly deeper than `session-manager`'s `pane_current_command =~ /claude/`, which cannot see a `claude` under a wrapper shell — the two are different rules on purpose, because a `/proc` walk is not reachable over SSH. Extracted from the retired `agent-ops` TUI; the importer set is pinned two-way by `tests/test_claude_sessions.py` |
+| `sync-claude-permissions.py` | apply the **reviewed baseline** `permissions.allow` to a host's `~/.claude/settings.json`. Idempotent and **strictly additive** — never removes, reorders or rewrites an existing entry, backs up before writing, refuses (distinct rc) on a missing or malformed file. Exists because that file is per-host/unmanaged, so nix cannot ship it; the laptop had **no `permissions` key at all** and prompted for operations the workbench allowed. The list is **curated, not copied** — #380 measured 38 junk entries in the workbench's 248, so a wholesale copy would replicate the accretion — and it is checked against #380's own detector before anything is written. `--dry-run` to preview |
+
+**rc 15 and the per-host allowlist.** `drift-check.sh` also reports HOST parity: **dangling managed symlinks** (rc 14) and **`settings.json` top-level key-name / `enabledPlugins` divergence** (rc 15). `settings.json` is per-host and unmanaged by design, so three keys — `theme`, `voice`, `effortLevel` — are **explicitly enumerated** as legitimately per-host, each with its reason in the source, and are reported as `IGNORED` rather than counted as drift. It is an enumeration and not a pattern **on purpose**: an unknown key is drift by default, the list is not env-overridable, and `permissions` is deliberately NOT on it (see `sync-claude-permissions.py`).
+
+**rc 17 and rc 18 — SOURCE parity, the third kind.** Some `nix/pkgs/**` derivations build from a local working tree of ANOTHER repo (`${workspace}/…`), and nothing converges those: a host can be byte-identical to `origin/main` and still compile months-old code. rc 17 fires when a package's own `srcDir` **subtree** is behind/ahead its branch's own upstream (the repo-wide numbers are printed beside it as information only — scoping is what keeps this from being a permanently-red gate). rc 18 is its ladder: a scope that could not be evaluated at all is reported every run and escalates only after N **consecutive** runs, per (host, scope), reset the moment it measures — `no upstream` on the structural ladder (`DRIFT_UNMEASURED_ESCALATE`, default 4), a failed `fetch` on a longer one (`DRIFT_UNMEASURED_FETCH_ESCALATE`, default 12), and `repo ABSENT` on **neither**, at any count. Without it a scope stayed unmeasured forever while the run read as clean, which is the same "did not look" green rc 17 exists to refuse.
 
 ## Subsystems
 

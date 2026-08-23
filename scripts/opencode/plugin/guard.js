@@ -19,7 +19,10 @@
 // irreversible action.
 //
 // 🔴 WHY `tool.execute.before` AND NOT `permission.ask` (measured on opencode
-// 1.18.4, this host, 2026-08-02):
+// 1.18.4, this host, 2026-08-02 — and STILL 1.18.4 on purpose: the 2026-08-13
+// re-derivation to 1.18.16, and the 2026-08-19 one after it, covered resolved
+// permissions, tool sets and resolver ordering, but NOT hook firing, which needs
+// a running hook to observe. Last confirmed on 1.18.4; see PINNED_VERSION in scripts/tests/test_opencode_engine.py):
 //   * `permission.ask` IS in the Hooks type and its `output.status` is typed
 //     `"ask" | "deny" | "allow"`, so returning an *ask* decision LOOKS
 //     expressible. It is not, for a guard: the hook never fired in any probe —

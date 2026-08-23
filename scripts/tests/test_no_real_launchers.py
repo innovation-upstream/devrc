@@ -28,8 +28,15 @@ What is asserted, and why each is not enough alone:
     made that deletion invisible.
   * THE SEAM    — the real hazard paths (monitor-blackout's `systemd-run`
     scheduling and its `cancel_timer` systemctl storm, rig-control's `openrgb` +
-    `notify-send`) land in the stub log. A component-scoped check would pass
-    with the fixture deleted as long as some stub file existed somewhere.
+    `notify-send`, and bar-status-poll's `fire_toast`) land in the stub log. A
+    component-scoped check would pass with the fixture deleted as long as some
+    stub file existed somewhere.
+  * THE TOAST   — `fire_toast` is driven FOR REAL, in a subprocess, with its
+    seam UNPATCHED. That is the launch that escaped to the operator's desktop
+    on 2026-08-11, and it escaped precisely because the file that owns it
+    protects itself with a monkeypatch on the seam the test exists to bypass.
+    The set of test files that LOAD the poller is pinned alongside it: each gets
+    its own module object, so a per-file patch covers exactly one of them.
   * THE LEDGER  — pinned against the TREE (`testlib.launcher_scan`), not only
     against itself. `dunstctl`, `rofi` and `yad` were all reachable while the
     self-pinned list said the set was complete.
@@ -124,20 +131,91 @@ def test_the_stubbed_launcher_set_is_pinned():
 # seven scripts named it.
 ACKNOWLEDGED_UNSTUBBED = {
     "systemctl": (
-        {"agent-ops", "airvpn-menu", "keylog-spin-capture.sh",
-         "monitor-blackout.sh"},
-        "verb-split rather than record-only — see the systemctl tests below"),
+        {"airvpn-menu", "keylog-spin-capture.sh",
+         "monitor-blackout.sh", "run-tests.sh", "sync-claude-permissions.py"},
+        "verb-split rather than record-only — see the systemctl tests below. "
+        "run-tests.sh is a THIRD case, re-justified rather than absorbed: its "
+        "only occurrences of the name are GUARD 7's accounting, which counts "
+        "`systemctl(read)` LINES IN THE LAUNCH LOG (`grep -c '^systemctl(read)'`) "
+        "and reports them per target. It never invokes systemctl — it reads the "
+        "record of calls the stub already classified. "
+        "sync-claude-permissions.py is a DIFFERENT case from the other four and "
+        "is re-justified rather than absorbed: its only occurrence of the name "
+        "is the literal string `Bash(systemctl status:*)` inside its CURATED "
+        "table of permission RULES, and the script spawns no subprocess at all — "
+        "it imports none of subprocess / os.system / os.exec* / os.popen, which "
+        "test_sync_claude_permissions.py asserts STRUCTURALLY so this "
+        "justification cannot rot into a claim about a file that has changed"),
     "home-manager": (
         {"bar-status-poll", "drift-check.sh", "keylog-spin-capture.sh",
-         "notify-failure.sh", "playwright-nixos", "ship.sh",
-         "tmux-post-save.sh"},
+         "notify-failure.sh", "playwright-nixos", "session-manager",
+         "session-resolve", "ship.sh", "tmux-post-save.sh",
+         "tmux-scratch-slots.sh"},
         "MEASURED unreachable: a whole-tier run under a recording interceptor "
-        "logged ZERO calls. Of these only notify-failure.sh is executed by "
-        "scripts/tests, and it names home-manager in a journal hint"),
+        "logged ZERO calls. TWO of these are executed by scripts/tests and "
+        "neither can reach the binary: notify-failure.sh names home-manager in "
+        "a journal hint, and session-manager (added 2026-08-13 with the agent "
+        "activity ledger) names it in ONE docstring — `_load_agent_ledger`, "
+        "explaining that the hook loads a nix-store COPY of agent_ledger.py so "
+        "writer and reader agree only at the instant of a switch. This scan is "
+        "a TEXT scan (launcher_scan.hazard_hits regexes the file body), so a "
+        "prose mention is a hit; verified by grep that the file carries no "
+        "call site, and re-justified here rather than reworded to dodge the "
+        "scanner. session-resolve (added 2026-08-19) is the THIRD of exactly "
+        "this shape and is re-justified the same way: its single occurrence "
+        "is one word of module-docstring prose, explaining that the tmux "
+        "bindings are generated from the slot table at home-manager build "
+        "time and therefore that the table must be PARSED rather than "
+        "re-hardcoded. It is not a call site. The complete set of argv[0] "
+        "literals the script can spawn is `tmux`, `git` and `gh` (plus "
+        "sys.executable for session-manager), and its tmux seam is further "
+        "narrowed by an ALLOWLIST of list-panes/list-windows/list-clients "
+        "that raises on anything else — test_session_resolve.py pins that "
+        "allowlist in both directions, so this justification cannot rot into "
+        "a claim about a file that has grown a launcher. "
+        "tmux-scratch-slots.sh (added 2026-08-19) is the FOURTH of this shape "
+        "and carries the STRONGEST form of the justification: the other three "
+        "merely lack a call site, whereas this file has no executable "
+        "statement at all. It is the slot table that session-resolve's entry "
+        "above refers to, and its entire non-comment body is a single "
+        "`SCRATCH_SLOTS=( ... )` array literal of 20 quoted "
+        "session:key:colour:name strings — measured with "
+        "`grep -vE '^\\s*#|^\\s*$'`, which returns the array and nothing else. "
+        "There is no command substitution, pipe, exec or eval anywhere in it, "
+        "and it is SOURCED rather than executed. Its single `home-manager` "
+        "occurrence is one word of comment prose at line 4, recording that the "
+        "tmux `bind -n M-<key>` popup toggles are GENERATED from this table by "
+        "nix/programs/tmux/default.nix (`builtins.readFile`) and that the "
+        "table is therefore the source of truth rather than a mirror. That "
+        "sentence was added to correct a comment which had documented the "
+        "hotkey as a `$mod+Shift+<key>` i3 chord bound to nothing; the "
+        "correction is what put the file in this scanner's sights, and it is "
+        "re-justified here rather than reworded to dodge the scanner"),
     "nixos-rebuild": (
         {"airvpn-sudo", "ship.sh"},
         "MEASURED unreachable in the same whole-tier run; both call sites are "
         "behind sudo and neither script is executed by scripts/tests"),
+    "wmctrl": (
+        {"session-write"},
+        "The FOURTH occurrence of the prose-mention shape already justified "
+        "three times under `home-manager` above, and justified here rather "
+        "than reworded away — this scan is a TEXT scan "
+        "(launcher_scan.hazard_hits regexes the file body), so naming a binary "
+        "in order to promise you never call it is indistinguishable from "
+        "calling it. session-write (added 2026-08-19) names `wmctrl` in ONE "
+        "line of module-docstring prose, in the sentence declaring that the "
+        "i3 workspace is OUT OF SCOPE for its `focus` verb: the tool is "
+        "tmux-only, so it changes a tmux client's session and a tmux session's "
+        "active window and NOTHING a window manager owns. Deleting the word to "
+        "get green would delete the guarantee. Verified by grep that the file "
+        "carries no call site: the complete set of argv[0] literals it can "
+        "spawn is `tmux` alone, and even that is narrowed by an ALLOWLIST "
+        "(send-keys / select-window / switch-client / detach-client, plus "
+        "session-resolve's three read verbs) that RAISES on anything else — "
+        "test_session_write.py pins that allowlist in both directions, so this "
+        "justification cannot rot into a claim about a file that has grown a "
+        "launcher. `i3-msg` and `xdotool` appear in the same sentence and need "
+        "no entry: both are in HOST_LAUNCHERS and therefore stubbed."),
 }
 
 
@@ -289,17 +367,26 @@ def test_autouse_is_what_protects_a_test_that_never_asks(tmp_path):
     Both halves run the real `scripts/tests/conftest.py`, so this pins the
     shipped file rather than a paraphrase of it.
     """
-    conftest_src = (SCRIPTS / "tests" / "conftest.py").read_text(encoding="utf-8")
+    # 🔴 The fixture MOVED (see conftest.py's header): the implementation now
+    # lives in testlib/nolaunch_plugin.py so that run-tests.sh can load the same
+    # module for all 17 targets with `-p`, instead of 17 conftests. This pin
+    # follows it — it must mutate the SHIPPED file, not a paraphrase, so the
+    # tree is copied rather than symlinked and the copy is what gets mutated.
+    plugin_rel = Path("testlib") / "nolaunch_plugin.py"
+    plugin_src = (SCRIPTS / plugin_rel).read_text(encoding="utf-8")
     needle = "autouse=" + "True"
-    assert conftest_src.count(needle) == 1, (
+    assert plugin_src.count(needle) == 1, (
         f"expected exactly one autouse declaration to mutate, found "
-        f"{conftest_src.count(needle)}")
+        f"{plugin_src.count(needle)}")
+    conftest_src = (SCRIPTS / "tests" / "conftest.py").read_text(encoding="utf-8")
 
-    def _probe_session(where: Path, conftest_text: str):
+    def _probe_session(where: Path, plugin_text: str):
         root = where / "scripts"
         (root / "tests").mkdir(parents=True)
-        (root / "testlib").symlink_to(SCRIPTS / "testlib")
-        (root / "tests" / "conftest.py").write_text(conftest_text, encoding="utf-8")
+        shutil.copytree(SCRIPTS / "testlib", root / "testlib",
+                        ignore=shutil.ignore_patterns("__pycache__"))
+        (root / plugin_rel).write_text(plugin_text, encoding="utf-8")
+        (root / "tests" / "conftest.py").write_text(conftest_src, encoding="utf-8")
         probe = root / "tests" / "test_probe.py"
         probe.write_text(_PROBE_TEST, encoding="utf-8")
         # `_run_nested` strips this session's stub dir from PATH — without that
@@ -308,13 +395,13 @@ def test_autouse_is_what_protects_a_test_that_never_asks(tmp_path):
         # own mutant.
         return _run_nested(str(probe), where / "basetemp")
 
-    control = _probe_session(tmp_path / "control", conftest_src)
+    control = _probe_session(tmp_path / "control", plugin_src)
     assert control.returncode == 0, (
         "a test that never requested the fixture was NOT protected — autouse is "
         f"not doing its job:\n{control.stdout}")
 
     mutant = _probe_session(tmp_path / "mutant",
-                            conftest_src.replace(needle, "autouse=" + "False"))
+                            plugin_src.replace(needle, "autouse=" + "False"))
     assert mutant.returncode != 0, (
         "with autouse removed the probe STILL passed, so nothing here observes "
         f"autouse and the protection is silently opt-in:\n{mutant.stdout}")
@@ -687,6 +774,129 @@ def test_rig_control_notify_and_rgb_reach_the_stub(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# The bar-status TOAST seam — the third real hazard path, and the one a
+# per-file fixture structurally cannot hold
+# --------------------------------------------------------------------------- #
+# Loads `scripts/bar-status-poll` the way the suite's own tests do and calls
+# `fire_toast` FOR REAL: no `runner=` injection, no patched `_toast_runner`, and
+# the session-bus precondition satisfied so the call cannot short-circuit before
+# reaching the launcher. Run as a SUBPROCESS on purpose — an in-process probe
+# could be credited to some other test's monkeypatch, and the property under
+# test is the one that survives a fresh interpreter: the PATH.
+_TOAST_PROBE = '''\
+import importlib.machinery, importlib.util, sys
+loader = importlib.machinery.SourceFileLoader("_poll_toast_seam", sys.argv[1])
+spec = importlib.util.spec_from_loader("_poll_toast_seam", loader)
+mod = importlib.util.module_from_spec(spec)
+loader.exec_module(mod)
+print("DISPATCHED=%s" % mod.fire_toast("critical", "SEAMPROBESUMMARY",
+                                       "SEAMPROBEBODY"))
+'''
+
+
+def test_the_bar_status_toast_reaches_the_stub_not_the_desktop(tmp_path):
+    """🔴 THE POSITIVE CONTROL: a test that genuinely TRIES to toast the operator.
+
+    This is the launch that actually escaped. MEASURED on the workbench, in the
+    user journal at 2026-08-11 13:14:58:
+
+        Started [systemd-run] …/bash -c "a=$(dunstify -a bar-status -u \\"$1\\"
+        \\"$2\\" \\"$3\\")" bar-status critical sum body
+
+    — the literal fixture arguments of `test_bar_status.py`'s seam test, on a
+    real desktop. It escaped because that file's protection is a monkeypatch of
+    `poll._toast_runner`, and the whole point of the seam test is to run
+    `fire_toast` in a state where it may NOT route through that attribute. A
+    patch on a seam cannot stop a launch that bypasses the seam; only something
+    below the process boundary can, which is what the PATH fixture is.
+
+    So this test does the forbidden thing deliberately and asserts the stub
+    caught it. `DISPATCHED=True` is load-bearing as its own positive control: if
+    `fire_toast` returned False it skipped at the session-bus check and never
+    reached a launcher, and an empty log would prove nothing at all.
+
+    Fails in BOTH tiers without the fixture: on the dev host the real
+    `systemd-run` takes the call and the log stays empty; in the sandbox there
+    is no `systemd-run`, `fire_toast` swallows the OSError, `DISPATCHED=False`
+    and the assertion below names that instead.
+    """
+    stub_dir = _stub_dir_from_env()
+    poller = SCRIPTS / "bar-status-poll"
+    before = len(nolaunch.recorded(stub_dir))
+
+    env = dict(os.environ)
+    # Satisfy `_borrow_desktop_env` so it returns immediately and the bus check
+    # passes — otherwise the toast is skipped and this test measures nothing.
+    env["DISPLAY"] = ":0"
+    env["DBUS_SESSION_BUS_ADDRESS"] = "unix:path=/dev/null"
+    env["XAUTHORITY"] = str(tmp_path / "xauth")
+    env["DEVRC_DIR"] = str(SCRIPTS.parent)
+    env["HOME"] = str(tmp_path)
+    p = subprocess.run([sys.executable, "-B", "-c", _TOAST_PROBE, str(poller)],
+                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                       text=True, timeout=60, env=env)
+    assert p.returncode == 0, p.stdout
+    assert "DISPATCHED=True" in p.stdout, (
+        "fire_toast did not reach a launcher at all, so an empty stub log would "
+        f"be meaningless — it returned early:\n{p.stdout}")
+
+    new = nolaunch.recorded(stub_dir)[before:]
+    launched = [ln for ln in new if ln.startswith("systemd-run ")]
+    assert len(launched) == 1, (
+        "bar-status-poll's fire_toast did not land in the stub — it reached a "
+        f"REAL systemd-run and put a toast on someone's screen. recorded: {new}")
+    assert "dunstify -a bar-status" in launched[0], launched[0]
+    assert "SEAMPROBESUMMARY" in launched[0] and "SEAMPROBEBODY" in launched[0], \
+        launched[0]
+
+
+# 🔴 A RELATIONSHIP, not a component. `test_bar_status.py`'s autouse fixture
+# patches the `_toast_runner` of the module object THAT FILE loaded; a different
+# file loading the same script gets its own module object with a live launcher
+# and inherits nothing. Two such files exist and neither patches the seam — the
+# PATH fixture is their ONLY protection, which is exactly why this set has to be
+# pinned in both directions rather than left to whoever adds the next one.
+POLLER_LOADING_TESTS = {
+    "test_bar_status.py":  "patches poll._toast_runner (autouse, whole file) AND "
+                           "is covered by the PATH fixture",
+    "test_airvpn_menu.py": "loads the poller for its airvpn parsers only; does "
+                           "NOT patch the toast seam — PATH fixture only",
+    "test_bar_url.py":     "loads the poller for _bar_url_action; does NOT patch "
+                           "the toast seam — PATH fixture only",
+}
+
+
+def test_every_test_file_that_loads_the_poller_is_pinned():
+    """A NEW file loading `bar-status-poll` is a new unprotected toast reacher.
+
+    Grows-or-shrinks, for the reason `ACKNOWLEDGED_UNSTUBBED` is bound to a file
+    set: a ledger that only says "these names are fine" absorbs the next reacher
+    silently. The fix when this goes red is to read the new file and decide
+    whether the PATH fixture is enough for it — not to append a line.
+    """
+    found = launcher_scan.module_loaders(SCRIPTS / "tests", "bar-status-poll")
+    assert set(found) == set(POLLER_LOADING_TESTS), (
+        "the set of test files that LOAD scripts/bar-status-poll changed.\n"
+        f"  pinned: {sorted(POLLER_LOADING_TESTS)}\n"
+        f"  tree:   {sorted(found)}\n"
+        "Each one gets its own module object, so test_bar_status.py's autouse "
+        "_toast_runner patch does NOT cover it; the PATH fixture is what does.")
+
+
+def test_the_module_loader_scan_can_actually_find_something(tmp_path):
+    """Positive control for the scan itself — a zero from a scan wired to
+    nothing is indistinguishable from a zero that means "no loaders"."""
+    (tmp_path / "test_decoy.py").write_text(
+        '_load("bar-status-poll", "x")\n', encoding="utf-8")
+    (tmp_path / "test_mentions_only.py").write_text(
+        'DATA = {"service": "bar-status-poll"}\n', encoding="utf-8")
+    found = launcher_scan.module_loaders(tmp_path, "bar-status-poll")
+    assert set(found) == {"test_decoy.py"}, (
+        f"the scan sees a loader but not a bare mention; got {found}")
+    assert launcher_scan.module_loaders(tmp_path, "no-such-script") == {}
+
+
+# --------------------------------------------------------------------------- #
 # The PATH-clobber sites the fixture CANNOT cover
 # --------------------------------------------------------------------------- #
 # (file, lineno-independent needle, why it is safe today)
@@ -705,6 +915,66 @@ PINNED_PATH_CLOBBERS = {
         'e["PATH"]' + ' = str(tmp_path / "empty-bin")',
         "an empty directory in tmp_path — the point of the test is that "
         "logrotate is absent; nothing else is present either"),
+    "test_standup_local_health.py": (
+        'env["PATH"]' + ' = str(self._restricted_bin())',
+        "the FIRST pinned clobber whose replacement directory is not empty, so "
+        "it is justified by ENUMERATION rather than by emptiness: "
+        "Harness.RESTRICTED_BIN lists the nine coreutils standup needs to run "
+        "at all, the harness asserts the directory's contents are a subset of "
+        "that list, and it asserts systemctl is absent — which is the point of "
+        "the test: standup.sh must skip its host-health section gracefully "
+        "when the systemctl BINARY IS NOT INSTALLED, and no amount of "
+        "PREPENDING can make a binary unfindable. 🔴 That is ALL it removes — "
+        "it says nothing about a systemctl that is present while the user "
+        "manager/bus is unreachable, which is a different condition with a "
+        "different (and once-broken) rendering; that one is covered by the "
+        "SC_FAIL_ALL/SC_FAIL_SHOW modes of the stub, with systemctl very much "
+        "on PATH. No launcher in HAZARD_VOCABULARY is reachable "
+        "from it: no systemctl, kubectl, gh, ssh, home-manager or pkill"),
+    "test_resume_state_clawgate.py": (
+        'env["PATH"]' + ' = f"{nocg}',
+        "justified by ENUMERATION, like test_standup_local_health.py above. The "
+        "replacement is two directories the test CONSTRUCTS: `nocg`, holding "
+        "copies of this suite's gh/kubectl/curl tripwire stubs and nothing "
+        "else, and `_sandbox_bin`, holding symlinks to exactly its "
+        "_SANDBOX_TOOLS list (coreutils + bash/git/jq) — which the helper "
+        "ASSERTS is a superset of the directory's real contents, so this is a "
+        "live invariant rather than prose that can rot. No HAZARD_VOCABULARY "
+        "name is reachable from either: no systemd-run, systemctl, "
+        "notify-send, rofi, yad, xdotool, i3-msg, openrgb, espanso, "
+        "home-manager or nixos-rebuild. 🔴 REPLACING is the point: the case "
+        "under test is `clawgatectl` NOT INSTALLED — resume-state.sh must emit "
+        "a `!` gap rather than a clean reconcile — and clawgatectl IS "
+        "installed on the dev host, so no amount of PREPENDING can make it "
+        "unfindable. A prepending version measured a live call to the real "
+        "board on this host while the nix sandbox (which has no clawgatectl) "
+        "measured the intended case: two tiers, opposite blind spots"),
+    "test_devshell_satisfies_required_tools.py": (
+        '{"PATH"' + ': str(stub)',
+        "a clobber justified by ENUMERATION rather than emptiness, and the "
+        "strongest of those. (It used to say \"the SECOND … of the two\": there "
+        "are THREE enumeration-justified entries, and next to the \"TWO sites\" "
+        "below the ordinal read as if it counted those instead.) 🔴 This needle "
+        "now matches TWO sites in "
+        "that file — the `emitted_fatal` fixture (`only-bash`) and "
+        "`test_guard1_classifies_by_cause_not_by_site` (`only-bash-cause`) — so "
+        "it cannot tell them apart; BOTH carry the one-entry assertion, which "
+        "is what keeps this justification live for each. In both, the "
+        "replacement directory is created by the test itself near the clobber "
+        "(`tmp_path_factory.mktemp(...)`, then one "
+        "`(stub / \"bash\").symlink_to(bash)`), so its contents are not merely "
+        "audited but CONSTRUCTED — it holds exactly one entry, a bash symlink, "
+        "and nothing else can appear in a freshly-minted tmp dir. No "
+        "HAZARD_VOCABULARY name is reachable from it: no systemd-run, "
+        "systemctl, notify-send, rofi, yad, xdotool, i3-msg, openrgb, espanso, "
+        "home-manager or nixos-rebuild. 🔴 REPLACING is the point, not an "
+        "oversight: the fixture drives run-tests.sh's tool precondition, whose "
+        "whole job is to react to binaries being ABSENT, and no amount of "
+        "PREPENDING can make a binary unfindable — inside the nix sandbox every "
+        "REQUIRED_TOOLS binary IS present, so a prepending version would "
+        "measure the environment instead of the code. The fixture ASSERTS the "
+        "one-entry contents itself, so this justification is a live invariant "
+        "rather than prose that can rot"),
 }
 
 
@@ -940,3 +1210,76 @@ def test_the_seam_assertion_is_what_makes_the_seam_test_red(tmp_path):
         "with the seam assertion neutered the test is STILL red, so it is red "
         f"for some other reason and proves nothing about this assertion.\n"
         f"{mutant.stdout}")
+
+
+# --------------------------------------------------------------------------- #
+# MUTATION: the poller ledger must not be relaxable into exempting everything
+# --------------------------------------------------------------------------- #
+_LEDGER_TEST = "test_every_test_file_that_loads_the_poller_is_pinned"
+# Self-match, assembled: spelled whole, `src.count()` below would be 2.
+_LEDGER_NEEDLE = "assert set(found) == set(POLLER_LOADING_TESTS)" + ", ("
+
+# Minimal files carrying the LOADER SHAPE the scan looks for — enough for
+# `module_loaders` to report them, without dragging in the real suites.
+_FAKE_LOADER = '_load("bar-status-poll", "m")\n'
+
+
+def _ledger_harness(tmp_path, source: str) -> Path:
+    """A tests dir holding the three pinned loaders PLUS one new reacher.
+
+    The extra file is the event the ledger exists to notice: a new test file
+    that loads the poller, and therefore does NOT inherit `test_bar_status.py`'s
+    per-file `_toast_runner` patch.
+    """
+    root = tmp_path / "scripts"
+    tests = root / "tests"
+    tests.mkdir(parents=True)
+    (root / "testlib").symlink_to(SCRIPTS / "testlib")
+    (tests / "conftest.py").write_text(_HARNESS_CONFTEST, encoding="utf-8")
+    for name in (*POLLER_LOADING_TESTS, "test_a_brand_new_reacher.py"):
+        (tests / name).write_text(_FAKE_LOADER, encoding="utf-8")
+    target = tests / "test_no_real_launchers.py"
+    target.write_text(source, encoding="utf-8")
+    return target
+
+
+def test_the_ledger_equality_is_what_makes_a_new_reacher_red(tmp_path):
+    """🔴 A ledger relaxed to a SUBSET absorbs the next reacher in silence.
+
+    MEASURED as a surviving mutant before this test existed: changing the
+    ledger's `==` to `>=` and adding a new poller-loading test file left the
+    whole guard file green — the exact "acknowledgement absorbs a new reacher"
+    failure that `ACKNOWLEDGED_UNSTUBBED` was already bound to file sets for.
+
+    Run as a PAIR, because "the mutant went green" means nothing without a
+    control that went red for the RIGHT reason:
+
+      control : `==` + an extra reacher in the tree -> RED, naming the ledger
+      mutant  : `>=` + the same tree               -> GREEN
+
+    Nothing can launch in either half: the harness conftest still puts a working
+    stub dir first on PATH, and these nested files only parse source.
+    """
+    src = Path(__file__).read_text(encoding="utf-8")
+    assert src.count(_LEDGER_NEEDLE) == 1, (
+        f"expected exactly one ledger assertion to mutate, found "
+        f"{src.count(_LEDGER_NEEDLE)} — the mutation would not land where intended")
+
+    def run(where, source):
+        target = _ledger_harness(tmp_path / where, source)
+        return _run_nested(f"{target}::{_LEDGER_TEST}",
+                           tmp_path / where / "basetemp")
+
+    control = run("control", src)
+    assert control.returncode != 0 and "1 failed" in control.stdout, (
+        "the CONTROL half did not go red, so the mutant going green would prove "
+        f"nothing.\n{control.stdout}")
+    assert "test_a_brand_new_reacher.py" in control.stdout, (
+        "the control went red without naming the new reacher, so it is red for "
+        f"some other reason.\n{control.stdout}")
+
+    mutant = run("mutant", src.replace(
+        _LEDGER_NEEDLE, "assert set(found) >= set(POLLER_LOADING_TESTS)" + ", ("))
+    assert mutant.returncode == 0, (
+        "with the ledger relaxed to a subset the test is STILL red, so it is "
+        f"red for some other reason and proves nothing.\n{mutant.stdout}")

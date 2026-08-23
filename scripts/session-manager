@@ -5,23 +5,41 @@ WHAT IT ANSWERS
 ---------------
 "Show me every tmux window on both hosts, which ones have Claude Code running,
 what they are doing, and what ClickHouse says about recent agent sessions."
-Today that requires stitching `agent-ops` (local-only popup, no JSON API),
-`tmux list-panes -a` per host, a manual `curl` at ClickHouse, and the fuzzyclaw
-task files.
+Today that requires stitching `tmux list-panes -a` per host, a manual `curl` at
+ClickHouse, and the fuzzyclaw task files.
 
-RELATIONSHIP TO agent-ops
--------------------------
-`agent-ops` is the always-on tmux popup. This is its queryable/programmatic
-counterpart: one-shot, `--json`-first, and cross-host. It deliberately does NOT
-share agent-ops' `/proc` BFS — see "HONEST LIMITS" below.
+🔴 THIS IS NOW THE ONLY SURFACE FOR THE APPROVAL QUEUE — DO NOT POINT ELSEWHERE
+------------------------------------------------------------------------------
+There used to be a second one, the `agent-ops` tmux popup, and this header used
+to say "read both, they are not substitutes". agent-ops is RETIRED, which makes
+the history below MORE binding rather than less:
+
+A dogfooding agent read an accurate cross-reference — "agent-ops has no JSON API
+and no cross-host reach" — correctly concluded this script was the better tool,
+never opened agent-ops, and so missed the ELEVEN pending clawgate approvals only
+agent-ops showed, four of them credential-exposure or cross-user-data-leak. An
+accurate cross-reference steered a reader away from the highest-stakes signal on
+the machine. The fix that survived the retirement is the one that mattered:
+
+  * the pending count is read HERE (`report["clawgate_queue"]`, and a
+    `▸ CLAWGATE QUEUE` section printed in every state including unmeasured), so
+    the headline question does not depend on remembering another tool.
+
+⚠ What agent-ops had that nothing here replaces: the ENUMERATED queue with task
+titles. When this reports a count you cannot act on, the clawgate API is the
+place to get the list — never a pointer back to the popup.
 
 ARCHITECTURE
 ------------
 Every fact-producing function is either PURE or takes an injected runner /
 client / clock, so the whole test suite is hermetic: it never runs tmux, never
 opens a socket, and never touches a real window. The impure edge is exactly
-three seams — `_default_runner` (subprocess), `make_ch_client` (HTTP), and
-`_read_text` (filesystem).
+FOUR seams — `_default_runner` (subprocess), `make_ch_client` (HTTP),
+`_read_text` (filesystem), and `_read_blocked_text` (the clawgate bar cache).
+The last is deliberately its OWN name rather than a `_read_text` call: the
+suite forbids each edge by replacing it with a raiser, and an edge that shares
+a function with a legitimate one cannot be forbidden without breaking the
+other. See `_read_blocked_text`.
 
 🔴 SILENT-ZERO DISCIPLINE (the reason for most of the shape here)
 -----------------------------------------------------------------
@@ -94,10 +112,37 @@ above implies — but not an empty one. State only what is guaranteed:
 The workbench's 400 files did carry 400 distinct ids on 2026-08-11, but that is
 a SNAPSHOT of an untrusted writer, not an invariant — do not read it forward.
 
-HONEST LIMITS (stated, not implied away)
-----------------------------------------
+🔴 A MIXED COUNT IS NEVER PUBLISHED AS A BARE NUMBER
+----------------------------------------------------
+The headline question is "is anything waiting on me", and `idle` answered it
+with 12 agent windows and 5 bare shells added together — rendered identically
+as `● idle`, with nothing on the row saying which was which. The row data was
+already right (every row carries `claude`); only the roll-up and the table
+conflated. So every status bucket now splits per CLASS plus `total` in the
+summary, and the table carries a CLASS column. The classes are `claude` and
+`shell` for a tmux row and `cluster` for a row with no pane — see `row_class`,
+and `summarize` for why all four buckets split rather than just `idle` and for
+the deliberate removal of the flat `summary["idle"]` integer.
+
+⚠ The CLASS column and the `kind` FIELD are different axes and are deliberately
+not the same word: `kind` is `tmux`/`cluster` (WHAT the entity is), `CLASS` is
+`claude`/`shell`/`cluster` (how it is COUNTED).
+
+`--claude-only` drops the shells outright — the SHELL CLASS, decided by
+`row_class` through `dropped_by_claude_only`, so a `cluster` row (an agent with
+no pane, hence `claude: null`) is KEPT rather than silently reclassified as a
+shell and deleted. The summary then describes the FILTERED set and carries
+`excluded_shells` so an empty table cannot read as an empty host, plus
+`kinds_excluded_by_filter` naming any kind the flag removed ENTIRELY — without
+which `kinds_produced` would attribute to this build an absence the filter
+caused.
+
+HONEST LIMITS (stated, not implied away — AND CARRIED IN THE OUTPUT as
+`report["caveats"]` plus ONE FOOTER LINE PER CAVEAT; see CAVEATS)
+----------------------------------------------------------------------
   * Claude detection is `pane_current_command =~ /claude/`, which is SHALLOWER
-    than agent-ops' `/proc` descendant walk. It sees `claude` running as the
+    than the `/proc` descendant walk in scripts/lib/claude_sessions.py. It
+    sees `claude` running as the
     pane's foreground command (the live shape on both hosts today) and MISSES a
     `claude` buried under a wrapper shell. It is used because `/proc` is not
     reachable over SSH, so a deeper local check would make the two hosts report
@@ -108,11 +153,115 @@ HONEST LIMITS (stated, not implied away)
     `last_activity`). Remote rows are still classified busy/idle from the pane
     title glyph.
   * `tail --stream` is NOT implemented. Only the one-shot `capture-pane` dump.
-  * `signal` / `kill` are NOT implemented — deliberately deferred.
+  * `signal` / `kill` are NOT implemented — deliberately deferred. This script
+    is READ-ONLY BY CONSTRUCTION, which is the only reason it is safe to point
+    at a live machine holding 40+ windows of real work. `waiting_probable` is a
+    READ; acting on it is not, and does not belong here.
+  * `waiting_probable` scrapes THREE enumerated signals off a TUI upstream can
+    restyle at will, on claude rows only. `false` means "these three did not
+    match", never "this window needs nothing" — measured 2026-08-12, a window
+    parked on `Press Enter to continue…` matches none of them. See
+    CAVEATS["waiting_signal"], carried in the output.
+  * `unsent_prompt` reads ONE place — the lines inside this pane's own input
+    box — so recall is bounded by that box being on screen. A modal replaces
+    it, and a draft taller than the box is not recognised; both report
+    `no_input_box`, which is UNMEASURED, never an empty draft. Shell panes are
+    never scraped at all. See CAVEATS["unsent_prompt"].
+  * PR review state, the mail queue, cluster alerts, the durable initiative
+    board and GUI windows outside tmux are NOT measured by this tool at all.
+    They are enumerated in `report["not_measured"]` with the skill that owns
+    each, because a tool that is silent about its own scope reads as complete.
+
+🔴 THE JSON SHAPE, because a consumer that has to guess it wastes a call
+--------------------------------------------------------------------------
+Window rows are NOT at the top level. They live at:
+
+    report["hosts"][<"workbench"|"laptop">]["windows"]  -> [row, ...]
+
+and the roll-ups a caller usually wants are:
+
+    report["summary"]["waiting"]        {"probable", "measured", "unmeasured",
+                                         "per_signal", "unmeasured_reasons"}
+    report["summary"]["unsent_prompt"]  {"count", "measured", "unmeasured",
+                                         "unmeasured_reasons"} — SEPARATE from
+                                        `waiting`, never summed into it
+    report["summary"]["status"][b]      class counts + "total" per bucket
+    report["summary"]["kind"]           {"tmux": N} — the entity axis
+    report["clawgate_queue"]            {"status", "count", ...}
+    report["not_measured"]              [{population, owner_skill, ...}] — the
+                                        populations this tool CANNOT see, and
+                                        which skill owns each
+
+Each row carries: kind, host, session, window_index, window_id, window_name,
+codename, label, label_source, hotkey, pane_id, path, command, task, claude,
+busy, age_secs, age_source, status, waiting_probable, waiting_signals,
+waiting_status, unsent_prompt, unsent_prompt_status, claude_session_id, runtime,
+ledger, fuzzyclaw, panes. The row ledger is pinned by a test.
+
+🔴 `waiting_probable` AND `unsent_prompt` ARE TWO SIGNALS, NOT ONE
+--------------------------------------------------------------------------
+`waiting_probable` says this window is BLOCKED and cannot proceed without you.
+`unsent_prompt` says this window has WORK PARKED in its input box — typed and
+never sent. Measured 2026-08-15 across 79 panes on both hosts: `waiting_probable`
+flagged 11 with ZERO false positives, and FIVE separate panes held a parked
+draft that no roll-up reported at all. Folding the second into the first would
+trade the first's precision for the second's recall; they are published side by
+side instead, so a consumer reads whichever question it is asking. See the
+comment block at `UNSENT_STATUSES`.
+
+🔴 WHAT THIS TOOL STRUCTURALLY CANNOT SEE IS NAMED IN THE OUTPUT
+--------------------------------------------------------------------------
+A blind dogfood found this tool "precise about what it measured, but it does not
+tell a cold reader what it did NOT measure" — while 60 open PRs, one CONFLICTING
+for eleven days, sat outside every number it prints. `report["not_measured"]`
+enumerates those populations and names the SKILL that owns each. It is DERIVED
+from the report's own keys, not written down as prose: see
+`NOT_MEASURED_POPULATIONS` and `measured_not_measured` for why a literal here
+would be the fifth constant in this file to masquerade as a measurement.
+
+🔴 `kind` IS THE ENTITY AXIS, AND IT IS WHY THE STATUS BUCKETS ARE NOT
+SIMPLY {claude, shell}.
+--------------------------------------------------------------------------
+`kind` is `tmux` on every row this build produces: a pane on a host it ssh'd
+to. `cluster` is enumerated for a dispatch with NO pane (spec §4, writer 3)
+and is NOT produced yet — `caveats.kind_scope` says so in the payload, so an
+absence of cluster rows is never readable as a measured absence of cluster
+work. Clawgate is reported instead under `clawgate_queue`, a different
+population that is never double-counted with these rows.
+
+The buckets count by `row_class`, not by `claude`-or-`shell`, because
+`row["claude"]` is `pane_current_command =~ /claude/` — a fact about a PANE.
+A row with no pane has `claude: None`, which is FALSY, so an inline
+`"claude" if row["claude"] else "shell"` would file every cluster agent as a
+BARE SHELL. That is the claude/shell conflation this summary already exists
+to prevent, one axis over. A class key is created on demand, so no `cluster: 0`
+is published while no cluster row can exist.
+
+🔴 `label` IS NOT AN ADDRESS — `session:window` still is.
+--------------------------------------------------------------------------
+`label` exists because `codename` is null for every session outside the
+scratch slot table, and on the workbench that was 9 of ~30 windows: two
+unnamed sessions (`0`, `8`) that the codename/colour/hotkey machinery could
+not name at all. It resolves in three tiers (`resolve_label`), and
+`label_source` says WHICH tier answered, because "the cwd is a repo called
+main" and "the cwd told us nothing" must not read the same.
+
+`hotkey` rides with it and is the ACTIONABLE half: a slot session is reported
+as `Gold (G)`, because the operator's question is "which key gets me there",
+which `Gold` alone does not answer. It comes from the slot table's own `key`
+field (`scratch2:G:#d79921:Gold`) — never a second copy of that mapping. It is
+`null`, never `""`, for tiers 2 and 3: no `$mod+Shift+<k>` binding EXISTS for
+a session outside the table, and a fabricated key sends the operator to press
+something and land nowhere.
+
+It is ADDITIVE. Two sessions can resolve to the SAME label — `0` and `8` are
+both sitting in one repo today — so a label alone identifies nothing. Every
+surface that renders a row shows `session` and `window_index` beside it.
 """
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import re
@@ -120,10 +269,78 @@ import shlex
 import subprocess
 import sys
 import time
+import uuid
 from datetime import datetime, timezone
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 HOME = os.path.expanduser("~")
+
+
+def _load_clawgate_tasks():
+    """Load scripts/lib/clawgate_tasks.py by EXPLICIT PATH — the ONE definition
+    of "which clawgate tasks need the operator", shared with bar-status-poll and
+    agent-ops. This file never held its own copy; it inherited both copies' blind
+    spot for free by reading the poller's cache instead of the API, which is why
+    a stuck dispatch was invisible on EVERY surface at once.
+
+    Resolved relative to THIS file (same reason as the chquery insert above:
+    $DEVRC_DIR is wrong inside a worktree and absent in the nix sandbox), with
+    $DEVRC_DIR only as a fallback.
+    """
+    import importlib.machinery
+    import importlib.util
+    devrc = os.environ.get("DEVRC_DIR") or os.path.join(HOME, "workspace", "devrc")
+    for path in (os.path.join(_HERE, "lib", "clawgate_tasks.py"),
+                 os.path.join(devrc, "scripts", "lib", "clawgate_tasks.py")):
+        if os.path.exists(path):
+            loader = importlib.machinery.SourceFileLoader("_sm_clawgate", path)
+            spec = importlib.util.spec_from_file_location("_sm_clawgate", path,
+                                                          loader=loader)
+            mod = importlib.util.module_from_spec(spec)
+            loader.exec_module(mod)
+            return mod
+    raise ImportError("scripts/lib/clawgate_tasks.py not found (tried sibling "
+                      "lib/ and $DEVRC_DIR/scripts/lib/)")
+
+
+CG = _load_clawgate_tasks()
+
+
+def _load_agent_ledger():
+    """Load `scripts/lib/agent_ledger.py` by EXPLICIT PATH — the record shape, the
+    read protocol and the live-join filter, shared with the writer hook.
+
+    Same resolution rule and the same reason as `_load_clawgate_tasks` above:
+    relative to THIS file first, `$DEVRC_DIR` only as a fallback, because
+    `$DEVRC_DIR` is wrong inside a worktree and absent in the nix build sandbox.
+
+    🔴 THE HOOK DOES NOT LOAD THIS FILE — it loads a nix-store COPY of it at
+    `~/.claude/hooks/agent_ledger.py` (a `home.file`), while this resolves the
+    repo WORKING COPY. An earlier version of this comment said "the SAME source
+    file", which is the more misleading half of a claim also corrected in
+    `agent_ledger.py`: writer and reader agree by construction only at the
+    instant of a `home-manager switch`. Between a `git pull` and that switch —
+    this repo's documented standing trap — they are running different code.
+    What keeps that from becoming a wrong value on a row is `SCHEMA`: a record
+    the reader does not recognise lands in the rendered `unparseable` count.
+    """
+    import importlib.machinery
+    import importlib.util
+    devrc = os.environ.get("DEVRC_DIR") or os.path.join(HOME, "workspace", "devrc")
+    for path in (os.path.join(_HERE, "lib", "agent_ledger.py"),
+                 os.path.join(devrc, "scripts", "lib", "agent_ledger.py")):
+        if os.path.exists(path):
+            loader = importlib.machinery.SourceFileLoader("_sm_ledger", path)
+            spec = importlib.util.spec_from_file_location("_sm_ledger", path,
+                                                          loader=loader)
+            mod = importlib.util.module_from_spec(spec)
+            loader.exec_module(mod)
+            return mod
+    raise ImportError("scripts/lib/agent_ledger.py not found (tried sibling "
+                      "lib/ and $DEVRC_DIR/scripts/lib/)")
+
+
+AL = _load_agent_ledger()
 
 # --------------------------------------------------------------------------- #
 # Shared ClickHouse client. `scripts/validation/chquery.py` is a LIBRARY
@@ -161,7 +378,8 @@ LOCAL_TIMEOUT = 5.0
 HOST_NAMES = ("workbench", "laptop")
 DEFAULT_LOCAL_HOST = "workbench"
 
-# The 8-field pipe format, IDENTICAL to agent-ops' (`list_tmux_panes_raw`).
+# The 8-field pipe format, a SUBSET of the detector's in
+# scripts/lib/claude_sessions.py (`list_tmux_panes_raw`).
 # pane_title is LAST because it carries the agent's task and may itself contain
 # '|' — parse_panes absorbs trailing pipes into it via a bounded maxsplit.
 PANE_FORMAT = ("#{pane_id}|#{pane_pid}|#{session_name}|#{window_index}|"
@@ -181,7 +399,7 @@ FUZZYCLAW_DIR = os.path.join(HOME, ".tmux", "tasks")
 SCRATCH_SLOTS_DEPLOYED = os.path.join(HOME, ".config", "tmux", "scratch-slots.sh")
 SCRATCH_SLOTS_REPO = os.path.join(_HERE, "tmux-scratch-slots.sh")
 # A SCRATCH_SLOTS entry is "scratch4:V:#83a598:Vapor" (session:key:color:name).
-# Same regex as agent-ops / initiative-scan — one table, one parser.
+# Same regex as claude_sessions / initiative-scan — one table, one parser.
 _SLOT_RE = re.compile(r'"([^":]+):([^":]+):(#[0-9a-fA-F]{6}):([^":]+)"')
 
 DEFAULT_STALE_THRESHOLD = 3600      # 1h
@@ -189,10 +407,589 @@ DEFAULT_TAIL_LINES = 100
 
 CLAUDE_RE = re.compile(r"claude", re.IGNORECASE)
 
+# --------------------------------------------------------------------------- #
+# 🔴 BLOCKED-ON-ME (the clawgate approval queue), read from the bar poller's
+# cache. `agent-ops` used to be the other surface that showed this, and a
+# dogfood agent that (correctly) rejected agent-ops for having no JSON API
+# therefore missed 11 pending approvals, four of them credential-exposure or
+# cross-user-data-leak. So the count lives here too — and now that agent-ops is
+# RETIRED, this and the bar's clawgate pill are the only two surfaces left.
+#
+# 🔴 `count` IS THE MEASUREMENT; `detail` IS NOT. Nothing here ever parses
+# `detail` for a number. Since the poller adopted schema 2 the string states its
+# own truncation (`… (+5 more)`) and the FULL sets travel structurally beside it
+# in `open` / `ready_for_review` / `stuck` — which is what this reader
+# enumerates. A schema-1 cache (written by a poller from before that change)
+# carries the old silently-truncated string, which named ~6 ids however many
+# were pending and has dropped `ready_for_review` items, i.e. finished work
+# awaiting review; that case is labelled, not parsed.
+#
+# 🔴 A SCHEMA-1 CACHE HAS NO STUCK INFORMATION AT ALL, and this reader reports
+# that as UNMEASURED rather than as zero. That is the whole bug: the poller used
+# to count only {open, ready_for_review}, so an `in_progress` task whose agent
+# had been dead for hours contributed nothing to `count` — and because this
+# script reads the cache rather than the API, the wedge was invisible here too.
+# The predicate now lives in scripts/lib/clawgate_tasks.py, which the poller,
+# and this file both import; see that module for what "stuck" means.
+#
+# The cache is written by `scripts/bar-status-poll` every 45s. Anything older
+# than MAX_AGE cannot be called a current measurement, so it is published with
+# `status: "stale"` rather than as a fresh number — and an ABSENT cache is
+# `count: None`, never 0. A missing file rendering as a measured zero is the
+# exact failure this whole script exists to refuse.
+# --------------------------------------------------------------------------- #
+BLOCKED_CACHE = os.path.join(HOME, ".cache", "bar-status", "clawgate.json")
+BLOCKED_CACHE_MAX_AGE = 300         # 5x the 45s poll interval
+BLOCKED_DETAIL_NOTE = ("`detail` TRUNCATES (it names ~6 ids however many are "
+                       "pending) and has dropped ready_for_review items — read "
+                       "`count`, or the clawgate API, for the full queue")
+BLOCKED_SCHEMA_NOTE = ("this cache predates the stuck-dispatch predicate "
+                       "(schema < %d): `stuck` is UNMEASURED here, not zero — "
+                       "an in_progress task with a dead agent is invisible in "
+                       "this count. Re-deploy and restart bar-status-poll, or "
+                       "read the clawgate API directly")
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE `waiting` SIGNAL. `status: idle` merges four states that need four
+# different actions: finished-and-awaiting-instruction, asked-a-direct-question,
+# hard-blocked-on-a-modal, and out-of-context. Only the first is idle in any
+# useful sense; a dogfood agent had to `tail` 13 of 40 windows and read English
+# prose to tell them apart, which is a sample, not a sweep.
+#
+# 🔴 IT IS `waiting_PROBABLE`, AND IT SHIPS THE MATCHED LINE. These are screen-
+# scrapes of a TUI that upstream can restyle at any time, so the row carries the
+# evidence and a consumer judges it. A bare boolean would be a verdict this
+# cannot honestly issue.
+#
+# 🔴 THE SIGNAL SET IS ENUMERATED AND CLOSED. `waiting_probable: False` means
+# "these three were looked for and none matched" — NOT "this window needs
+# nothing". Measured on 40 live panes 2026-08-12, two windows sat on `Login
+# successful. Press Enter to continue…`, a real hard block that NONE of these
+# three signals catches. Recall is deliberately partial; the enumeration is
+# published in `caveats` so a consumer knows exactly what was looked for.
+#
+# 🔴 TEXT AT THE `❯` PROMPT IS DELIBERATELY *NOT* A SIGNAL, AND THE REASON IS
+# NOT "we could not tell" — investigated 2026-08-12, and the honest answer is
+# more specific than that. Recorded here because the next person WILL want to
+# add it, and the case against is evidential, not a shrug.
+#
+#   * DIMNESS IS THE WRONG QUESTION. What separates the readings is POSITION,
+#     not colour, and `capture-pane` reports position perfectly well.
+#   * A placeholder hint CANNOT coexist with typed text — the renderer returns
+#     early on a non-empty buffer (`if(e!=="")return`). So "placeholder vs
+#     draft" is not a real ambiguity.
+#   * A QUEUED message is not in the box either: the submit handler clears the
+#     buffer on enqueue and queued messages render as their own indented block
+#     ABOVE the top border.
+#
+# 🔴 SO WHY STILL EXCLUDED? Both invariants above are read off a MINIFIED
+# bundle at ONE version (claude-code 2.1.220), and the case they rule out —
+# a live queued message — was NEVER OBSERVED: zero hits across 29 Claude panes
+# and ~250k lines of scrollback. Keying a signal on an unobserved negative
+# means its failure mode is a FALSE `waiting` row, arriving exactly when the
+# operator most trusts the output. And under that same source read, typing
+# while an agent works has THREE outcomes, not one (queue / interrupt the turn
+# / drop as `mode_not_queueable`), so "text in the box" is not even a
+# single-meaning observation.
+#
+# Excluding costs RECALL, which is the safe direction and is stated in the
+# caveat. `reference/waiting-signal.md` carries the full evidence and the exact
+# observation that would justify turning it on.
+#
+# 🔴 UPDATE 2026-08-15 — STILL EXCLUDED FROM `waiting`, NO LONGER DISCARDED.
+# Every word above stands: this is not a `waiting` signal and the reasons are
+# unchanged. What was wrong was the DISPOSAL. A blind dogfood measured five of
+# 79 panes holding a draft one Enter from running, some hours old, and this tool
+# reported none of them — the exclusion was correct and the silence was not.
+# The fact is now measured and published under its OWN name (`unsent_prompt`,
+# `summary.unsent_prompt`), never mixed into `waiting_probable` and never summed
+# into its counts, so the 11/11-true-positive precision measured on the same
+# 79 panes is untouched. See the comment block at `UNSENT_STATUSES`.
+# --------------------------------------------------------------------------- #
+# A horizontal rule. Claude Code draws the input box with box-drawing rules, so
+# this is how the CHROME at the bottom of a pane is found structurally instead
+# of by matching the words it happens to contain.
+_RULE_RE = re.compile(r"^\s*[─-╿]{20,}\s*$")   # box-drawing block
+# `❯ 1. Retitle + post nudge (Recommended)` — the SELECTED option of a modal.
+_MENU_SELECTED_RE = re.compile(r"^\s*❯\s*\d+\.\s+\S")
+# Any option line, selected or not. Requiring a SECOND one is what keeps a lone
+# `❯ 1.` in ordinary scrollback prose from reading as a live modal.
+_MENU_OPTION_RE = re.compile(r"^\s*(?:❯\s*)?\d+\.\s+\S")
+# `ctx: 0%` in the footer. Anchored on the literal 0 followed by `%`, so
+# `ctx: 10%` and `ctx: 0.4%` do not match.
+_CTX_ZERO_RE = re.compile(r"\bctx:\s*0%")
+WAITING_SIGNALS = ("selection_menu", "context_exhausted", "trailing_question")
+
+# --------------------------------------------------------------------------- #
+# 🔴 `unsent_prompt` — THE FOURTH SIGNAL, AND IT IS REPORTED SEPARATELY.
+#
+# MEASURED 2026-08-15 by a blind dogfood of this tool: of 79 panes across both
+# hosts, FIVE had text typed at the prompt and never sent — real work one Enter
+# from running, some of it hours old. The one-call answer missed all five; only
+# hand-enumerating every pane found them.
+#
+# 🔴 IT IS NOT FOLDED INTO `waiting_probable`, AND THAT IS NOT A STYLE CHOICE.
+# The same dogfood measured `waiting_probable` at 11 flagged, 11 TRUE POSITIVES,
+# ZERO false positives, verified pane by pane. That precision is the most
+# valuable property this tool has, and it is exactly what a noisier signal
+# destroys by being added to it — a reader who learns that `waiting: YES` is
+# sometimes "you typed something and wandered off" stops walking to the terminal
+# for the ones that are a real block. The exclusion documented in
+# CAVEATS["waiting_signal"] therefore STANDS, unchanged and for its original
+# reason: a window one Enter away from typing `no` must not read as "waiting on
+# you". What changes is only that the fact is no longer DISCARDED — it is
+# published under its own name, with the text, so an operator can triage without
+# opening the pane.
+#
+# The two answer different questions and a consumer should read both:
+#   waiting_probable  — this window is BLOCKED and cannot proceed without you.
+#   unsent_prompt     — this window has WORK PARKED in its input box.
+# --------------------------------------------------------------------------- #
+# The `❯` the input line begins with, plus its one following space. Deliberately
+# NOT `>` or `$`: this is only ever applied INSIDE a located Claude Code input
+# box (see `detect_unsent_prompt`), and widening it to shell-prompt characters
+# would buy nothing while making a mis-located box likelier to produce a draft.
+_PROMPT_MARK_RE = re.compile(r"^\s*❯[ \t]?")
+
+# 🔴 The status vocabulary, ENUMERATED and CLOSED, exactly like WAITING_SIGNALS.
+# Five of the six are the `waiting_status` values — the two signals share one
+# capture, so they share the reasons a capture did not happen — plus
+# `no_input_box`, which is this signal's own: the pane WAS captured and the
+# input box was not on screen (a modal replaces it, or the draft is taller than
+# the box pair), so nothing was measured. A test pins that `fold_windows` can
+# emit no status outside this tuple.
+UNSENT_STATUSES = ("ok", "no_input_box", "uncaptured", "not_claude",
+                   "skipped", "error")
+
+# 🔴 The per-pane capture batch. ONE tmux invocation per host captures every
+# Claude pane's visible screen, with a `display-message` marker between them —
+# 40 separate `capture-pane` calls over SSH would be 40 round trips.
+#
+# The marker carries a per-run NONCE because `#{pane_id}` alone is content a
+# pane could print. `%` is NOT safe in a tmux format string (it is strftime: a
+# literal `%68` expands to a width-68 month name), which is why the id arrives
+# via `#{pane_id}` and `-t`, never interpolated by us.
+CAPTURE_MARK_PREFIX = "SMCAP"
+
+# The four status buckets, in one place. Every roll-up iterates THIS tuple, so a
+# bucket cannot exist in `classify_status` and be missing from the summary.
+STATUS_BUCKETS = ("busy", "idle", "stale", "unknown")
+
+# 🔴 WHAT KIND OF THING A ROW IS — the entity axis, enumerated and CLOSED.
+#
+# Every row today is `tmux`: a pane on a host this tool ssh'd to. `cluster` is
+# the name reserved for a row with NO pane — a clawgate dispatch running in the
+# workbench cluster (spec §4). It is enumerated here BEFORE such a row exists,
+# and that is the point: the decision this constant records is that clawgate
+# rows join the SAME collection with the tmux-only fields null, rather than
+# living in a second section every consumer has to merge by hand.
+# `claudedocs/design-ledger-writer3-and-kind-2026-08-14.md` has the reasoning
+# and the measurement that says `cluster` rows are NOT built yet.
+#
+# 🔴 NO `cluster` COUNT IS PUBLISHED UNTIL A `cluster` ROW EXISTS. `summarize`
+# creates a class key on demand, never pre-seeded, because a `cluster: 0` in a
+# build that cannot produce cluster rows is indistinguishable from a reader
+# wired to nothing — the exact zero this tool exists to stop emitting. So the
+# summary of a tmux-only scan is byte-identical to what it was before `kind`.
+KINDS = ("tmux", "cluster")
+
+#: 🔴 What this build produces WITHOUT measuring — the honest answer for a
+#: caller that has no scan. Separate from `KINDS` (what exists) and from a
+#: report's measured `kinds_produced` (what a scan saw). Writer 3 updates THIS
+#: tuple, and the moment it gains `cluster` the all-produced branch of
+#: `_kind_scope_sentence` goes live under the by-construction head — which is
+#: why that branch's wording is parameterised rather than hardcoded to a scan.
+KINDS_PRODUCED_BY_CONSTRUCTION = ("tmux",)
+
+# 🔴 `kind` VS `runtime` — TWO AXES, AND NEITHER IS DERIVABLE FROM THE OTHER.
+# They will agree on almost every row, which is exactly how someone collapses
+# them later and finds out the hard way that the null semantics differ:
+#
+#   kind     WHERE the row came from — a tmux pane scan, or the clawgate API.
+#            Known with certainty when the row is built. NEVER null.
+#   runtime  WHICH agent software — from the ledger record (`claude`/`opencode`).
+#            NULL whenever no writer has recorded that window, which is the
+#            common case for a session that has not taken a turn yet.
+#
+# So `runtime is None` is a real, frequent measurement about a tmux row, and
+# `kind is None` is a bug. Do not infer one from the other.
+
+
+def row_class(row) -> str:
+    """Which class a row is counted as in the roll-ups: `claude` | `shell` |
+    `cluster`. THE ONE definition — `summarize` uses it for both the per-status
+    buckets and the top-level totals, so the two cannot disagree.
+
+    🔴 `claude`/`shell` IS A TMUX-ONLY DISTINCTION, and that is the whole reason
+    this function exists rather than an inline conditional. The old roll-up read
+    `"claude" if row.get("claude") else "shell"`, and `row["claude"]` is
+    `pane_current_command =~ /claude/` — a fact about a PANE. A row with no pane
+    has `claude: None`, which is falsy, so every cluster agent would have been
+    counted as a BARE SHELL: an agent silently added to the bucket that means
+    "nobody is working here".
+
+    That is not a hypothetical restatement of the rule — it is the identical
+    defect the claude/shell split was built to kill one axis over. Measured on
+    this host 2026-08-11, `idle: 17` was 12 agent windows + 5 bare shells
+    rendered identically, and the fix was to stop publishing the mixed integer.
+    Publishing a cluster agent inside `shell` re-opens it in a form the existing
+    tests cannot see, because every fixture in the suite is tmux-only.
+
+    Keyed on `kind`, NOT on `claude is None`. A tmux row can also carry a null
+    `claude` (a pane whose command did not parse), and that row genuinely is
+    "not a claude pane" — it belongs in `shell`. The two nulls mean different
+    things and only `kind` separates them.
+
+    🔴 A MISSING OR UNKNOWN `kind` GETS ITS OWN CLASS, and does not fall through
+    to `cluster`. Folding it into `cluster` would be the same mistake one level
+    down: "a row whose kind nobody set" and "a row measured as a cluster
+    dispatch" are different findings, and the first is a bug in whatever built
+    the row. `unknown_kind` is never pre-seeded, so it publishes a count only
+    when such a row actually exists — at which point it is loud rather than
+    absorbed into a plausible neighbour.
+    """
+    kind = row.get("kind")
+    if kind == "tmux":
+        return "claude" if row.get("claude") else "shell"
+    if kind in KINDS:
+        return kind
+    return "unknown_kind"
+
+
+def row_kind(row) -> str:
+    """A row's `kind` AS COUNTED — THE ONE definition of the `None` coercion.
+
+    `"none"` rather than `None`, because a null JSON key serialises to the
+    string `"null"` and reads as a kind called null. A `kind` of `"none"`
+    appearing at all is a bug (see `KINDS`), which is exactly why it is counted
+    rather than coerced away.
+
+    🔴 IT IS A FUNCTION BECAUSE `r.get("kind") or "none"` WAS OPEN-CODED AT
+    THREE SITES — `summarize`'s histogram, `measured_caveats`' derivation, and
+    (once the filter learned to record what it removed) `gather`. Three copies
+    of one coercion is three chances to disagree about what a kind-less row is
+    called, and the disagreement would surface as a summary histogram and a
+    caveat naming different sets. One rule, one place.
+    """
+    return row.get("kind") or "none"
+
+
+def dropped_by_claude_only(row) -> bool:
+    """Whether `--claude-only` drops `row`. THE ONE definition of that flag.
+
+    🔴 IT IS `row_class(row) == "shell"`, NOT `not row.get("claude")`.
+
+    The flag's documented intent has always been "drop the shells". While every
+    row was a tmux pane, `r.get("claude")` was a correct SPELLING of that — and
+    it stopped being one the moment `kind` arrived. `row["claude"]` is
+    `pane_current_command =~ /claude/`, a fact about a PANE, so a `cluster` row
+    (a dispatch with NO pane) carries `claude: None`, which is FALSY. The old
+    predicate therefore reclassified every cluster agent as a shell and dropped
+    it — silently filing an agent under "nobody is working here" and then
+    deleting it, which is the identical defect `row_class` exists to prevent,
+    one operation further along.
+
+    So the flag is defined against the CLASS axis, through the same classifier
+    the roll-ups use. Three consequences, each deliberate:
+
+      * a `claude` tmux row is KEPT (unchanged);
+      * a `shell` tmux row is DROPPED (unchanged) — including one whose title
+        happens to contain the word "claude";
+      * a `cluster` row is KEPT, because it is an agent. So is an
+        `unknown_kind` row: a row whose kind nobody set is a BUG, and filtering
+        it out would delete the evidence rather than surface it.
+    """
+    return row_class(row) == "shell"
+
+
+# 🔴 THE TWO LIMITS THAT CHANGE WHAT THE OUTPUT MEANS, CARRIED IN THE OUTPUT.
+# Both were documented in the skill body only. An agent that runs this script
+# cold never reads the skill, and the failure mode of each is silent: a `claude`
+# under a wrapper shell is counted as a shell, and a REMOTE row's missing
+# task/session/age reads as "measured and absent" rather than "never measured
+# here". A caveat that lives only in the docs protects only the readers who
+# already knew. Structured, so `--json` consumers branch instead of parse prose;
+# `null_fields_on_remote_rows` is a FIELD LEDGER pinned by a test against a real
+# remote row, so it cannot drift away from what the code actually nulls.
+CAVEATS = {
+    "claude_detection": {
+        "method": "pane_current_command_regex",
+        "pattern": CLAUDE_RE.pattern,
+        "note": ("`claude` must be the pane's FOREGROUND command; a claude "
+                 "under a wrapper shell is reported as a shell. Shallower than "
+                 "the /proc descendant walk in scripts/lib/claude_sessions.py, "
+                 "which is not reachable over SSH and so would make the two "
+                 "hosts report by different rules."),
+    },
+    # 🔴 THIS CAVEAT USED TO SAY A REMOTE ROW CARRIES NO `claude_session_id` AND
+    # NO `age_secs`, AND IS NEVER `stale`. That was true of fuzzyclaw and is NOT
+    # true of the tool: the agent activity ledger is read PER HOST, so a remote
+    # row now gets both fields and can be `stale`. The claim survived the change
+    # for one revision, and it is the machine-readable one — a `--json` consumer
+    # following it would discard exactly the three fields the ledger exists to
+    # add. Narrowed here to what is still true, which is a statement about
+    # fuzzyclaw ALONE, with the ledger's own scope stated separately below.
+    "fuzzyclaw_scope": {
+        "scope": "local_host_only",
+        "null_fields_on_remote_rows": ["fuzzyclaw"],
+        "note": ("fuzzyclaw task files are LOCAL state, so a row from the "
+                 "remote host carries no `fuzzyclaw` task. Do not read a "
+                 "remote row's absent task as a measured absence. It says "
+                 "NOTHING about `age_secs`/`claude_session_id`/`stale` — those "
+                 "come from the agent ledger, which IS read per host; see "
+                 "caveats.ledger_scope."),
+    },
+    # 🔴 THE SCOPE OF THE ENTITY AXIS. Without this a `--json` consumer reads a
+    # scan containing only `kind: tmux` rows as "there are no cluster
+    # dispatches", when the truth is that this build never looks for one — the
+    # zero-vs-wired-to-nothing confusion, in the one field newly added to every
+    # row. It names the source that DOES answer, so the reader is not left to
+    # conclude the tool simply cannot say.
+    "kind_scope": {
+        "kinds_enumerated": list(KINDS),
+        # 🔴 DELIBERATELY ABSENT. `kinds_produced` is a MEASUREMENT, supplied
+        # per scan by `measured_caveats`, and a literal here is a fake one: it
+        # made the bare constant render "rows in this scan are kind=tmux" when
+        # no scan had happened, and it made the honest by-construction branch
+        # in `_fmt_kind_scope` UNREACHABLE — so the fix for that sentence sat
+        # in code nothing could execute while the false sentence stayed live.
+        # A missing key is the honest representation of "not measured", which
+        # is exactly what this constant knows.
+        # 🔴 THE NOTE STATES ONLY WHAT IS DURABLY TRUE, because it sits beside
+        # a MEASURED field and ships in the same `--json` payload. It used to
+        # assert "every row is a tmux pane … cluster is ENUMERATED but NOT
+        # PRODUCED" — a standing claim that would contradict its own
+        # `kinds_produced` the day writer 3 lands, which is precisely the
+        # adjacent-fields-disagree failure `fuzzyclaw_scope` shipped in #471.
+        # What is durable is the RELATIONSHIP: which kinds exist, that an
+        # absence is not a measurement, and where clawgate actually lives.
+        # 🔴 THE NOTE NAMES `kinds_excluded_by_filter` BECAUSE `kinds_produced`
+        # ALONE IS AMBIGUOUS. Both are measured from the SURVIVING rows, so a
+        # kind a filter removed and a kind this build never emits look
+        # identical in `kinds_produced` — and the reader's whole question is
+        # which of those two happened. The relationship is durable, so it
+        # belongs here rather than in a per-scan string.
+        "note": ("`kinds_produced` is MEASURED from this scan's rows — read it "
+                 "rather than assuming. A kind that is enumerated but absent "
+                 "from `kinds_produced` was NOT LOOKED FOR by this build, so "
+                 "its absence is NOT a measured absence of that work — UNLESS "
+                 "it is named in `kinds_excluded_by_filter`, which is where a "
+                 "kind removed by a filter is reported instead of being "
+                 "silently attributed to the build. For "
+                 "clawgate use report.clawgate_queue (tasks needing the "
+                 "operator, and its `stuck_count` for wedged dispatches), a "
+                 "different population from these rows that is never "
+                 "double-counted with them."),
+    },
+    "ledger_scope": {
+        "scope": "per_host",
+        "note": ("`age_secs` and `claude_session_id` come from the agent "
+                 "activity ledger, read on EVERY scanned host, so a remote row "
+                 "carries both and CAN be `stale`. `age_source` names the "
+                 "writer that supplied the age (`ledger`/`fuzzyclaw`/null). A "
+                 "null age is not a measured zero: it means no writer has "
+                 "recorded that window — a session that has not taken a turn "
+                 "since the hook was registered has none yet. Read "
+                 "report.ledger for what was and was not measured."),
+    },
+    # 🔴 The third limit, and the one most likely to be over-read: `waiting`
+    # is a SCREEN SCRAPE of a TUI, and its signal set is CLOSED. Carried in the
+    # payload so a `--json` consumer can enumerate what was looked for instead
+    # of inferring it from a boolean.
+    "waiting_signal": {
+        "method": "capture_pane_regex",
+        "signals": list(WAITING_SIGNALS),
+        "scope": "claude_rows_only",
+        "excluded": {
+            "prompt_buffer_text": (
+                "Text at the `❯` input prompt is NOT a signal. It is "
+                "distinguishable in principle — by POSITION, not by dimness: "
+                "a placeholder cannot coexist with typed text, and a queued "
+                "message renders above the input box rather than in it. But "
+                "both invariants are read off a minified bundle at ONE version "
+                "(claude-code 2.1.220) and the queued case was never observed "
+                "live (0 hits across 29 panes), so keying on it would trust an "
+                "unobserved negative whose failure mode is a FALSE `waiting` "
+                "row. Excluded; costs recall, not precision. 🔴 STILL EXCLUDED "
+                "FROM `waiting`, but NO LONGER DISCARDED: it is measured and "
+                "published separately as the row field `unsent_prompt` (with "
+                "the text) and `summary.unsent_prompt` — read BOTH. See "
+                "caveats.unsent_prompt."),
+        },
+        "note": ("`waiting_probable: false` means these signals were looked "
+                 "for and none matched — NOT that the window needs nothing. "
+                 "Recall is partial by construction: measured on 40 live panes "
+                 "2026-08-12, a window parked on `Press Enter to continue…` "
+                 "matches none of them. `waiting_probable: null` means the "
+                 "pane was never captured; read `waiting_status` for which."),
+    },
+    # 🔴 THE FOURTH SIGNAL'S SCOPE, carried in the payload for the same reason
+    # as the three above: a `--json` consumer must be able to branch on what was
+    # looked at rather than infer it from a null. The two things a cold reader
+    # gets wrong here are (a) treating it as a kind of `waiting` and (b) reading
+    # a null as "nothing typed", so both are named structurally.
+    "unsent_prompt": {
+        "method": "capture_pane_input_box",
+        "scope": "claude_rows_only",
+        "statuses": list(UNSENT_STATUSES),
+        "separate_from": "waiting_probable",
+        "note": ("Text typed into a window's OWN input box and never sent — "
+                 "read from the lines BETWEEN the two box-drawing rules only, "
+                 "never from any matching line in the capture, so a pane "
+                 "displaying another session's transcript cannot trip it. It "
+                 "is NOT part of `waiting_probable` and is never summed into "
+                 "it: a parked draft means WORK IS PARKED HERE, not that the "
+                 "window is blocked on you. `unsent_prompt: null` is a MEASURED "
+                 "empty box ONLY when `unsent_prompt_status` is `ok`; every "
+                 "other status means it was not measured. Shell panes are never "
+                 "scraped (`not_claude`) — a half-typed shell command is a "
+                 "different and noisier thing. A draft taller than the input "
+                 "box, or a modal that replaces the box, reports "
+                 "`no_input_box`, i.e. UNMEASURED, never an empty draft."),
+    },
+}
+
+# --------------------------------------------------------------------------- #
+# 🔴 WHAT THIS TOOL STRUCTURALLY CANNOT SEE, AND WHICH SKILL OWNS EACH.
+#
+# MEASURED 2026-08-15: a blind dogfood asked this tool "what is being worked on
+# and what is waiting on me", got a precise answer, and was wrong — 60 open PRs
+# were invisible to it, one of them CONFLICTING for eleven days and one open
+# since February. Its verdict: the tool "is precise about what it MEASURED but
+# does not tell a cold reader what it did NOT measure". Every count here is
+# honest about null-vs-zero, and none of that helps a reader who does not know
+# the population exists at all — an unnamed population is not a null, it is a
+# silence, and a silence reads as coverage.
+#
+# 🔴 THIS IS A LEDGER, NOT THE OUTPUT. What ships is DERIVED — see
+# `measured_not_measured`, which emits an entry only while the report carries no
+# key for that population. THAT INDIRECTION IS THE WHOLE POINT AND IT IS PAID
+# FOR: this exact file has shipped a constant masquerading as a measurement FIVE
+# times. `kinds_produced` was a literal `["tmux"]` in `CAVEATS` that kept
+# asserting itself whatever the rows were; the third recurrence landed inside
+# the commit that fixed the second. A static list of "things we do not measure"
+# is the same defect with a longer fuse — it goes wrong on the day someone adds
+# the measurement, which is the one day a reader is most likely to trust it.
+#
+# `report_key` is the key that WOULD carry that population's measurement. It is
+# the only coupling: add PR querying that writes `report["pull_requests"]` and
+# the claim stops being made, with no edit here. `test_session_manager.py` pins
+# the relationship with an `ast` walk of `gather` — the same shape as
+# `test_drift_check.py`'s phase-2 reason-token ledger — so a new `report[...]`
+# key fails until it is accounted for.
+#
+# 🔴 THAT AST PIN GUARDS `gather`'s KEYS, NOT THIS SET'S MEMBERSHIP, and an
+# audit measured the difference: deleting the whole `cluster_alerts` entry left
+# the suite fully green, because the only count assertion was `1 +
+# len(NOT_MEASURED_POPULATIONS)` — derived from the very constant it claimed to
+# guard, the fixture-equals-the-constant trap this file has now hit six times.
+# So membership is pinned SEPARATELY, against a literal set living in the test
+# file: `test_the_not_measured_POPULATION_SET_cannot_silently_SHRINK`. Shrink
+# fails there; grow fails both there and on the AST pin.
+#
+# `owner_skill` is NOT decoration. A reader told only that a population is
+# unmeasured learns that this tool is incomplete; a reader told WHICH skill
+# answers can go get the answer in one hop. Each name is asserted by a test to
+# exist under `claude/skills/<name>/SKILL.md` — a pointer to a skill that is not
+# there is worse than no pointer, because it costs a hop to discover.
+#
+# 🔴 NOT LISTED HERE, DELIBERATELY: `opencode` panes classified as `shell`. That
+# is a MISCLASSIFICATION of a population this tool DOES measure, not a
+# population it cannot see, and it is already documented in
+# `CAVEATS["claude_detection"]` and on the row itself via `runtime`. Restating
+# it as an unmeasured population would tell a reader those windows are absent
+# from the table when they are present in it under the wrong class.
+# --------------------------------------------------------------------------- #
+NOT_MEASURED_POPULATIONS = {
+    "pull_requests": {
+        "report_key": "pull_requests",
+        "owner_skill": "standup",
+        "note": ("Open PRs, their review state and whether they CONFLICT are "
+                 "not read here at all. Measured 2026-08-15: 60 open, one "
+                 "conflicting for eleven days and one open since February, "
+                 "none of them visible in any number this tool prints. A "
+                 "window that is idle because its PR is blocked looks exactly "
+                 "like a window that is idle because the work is done."),
+    },
+    "mail_queue": {
+        "report_key": "mail_queue",
+        "owner_skill": "mailbox",
+        "note": ("Inbound mail and the extracted action-items queue are a "
+                 "separate store this tool never opens. For anything that is "
+                 "waiting on a human see `clawgate_queue` (approvals) and "
+                 "`summary.waiting.probable` (tmux panes) — two separate "
+                 "populations, never summed. Neither covers mail."),
+    },
+    "cluster_alerts": {
+        "report_key": "cluster_alerts",
+        "owner_skill": "standup",
+        "note": ("Firing alerts, in-flight deploys and rollout state on any "
+                 "cluster. A tmux pane scan cannot see work that is failing "
+                 "with nobody sitting in front of it, which is the failure "
+                 "mode that most needs a human."),
+    },
+    "initiative_board": {
+        "report_key": "initiative_board",
+        "owner_skill": "initiatives",
+        "note": ("The DURABLE record of what is in flight. These rows are live "
+                 "tmux windows only, so an initiative with no window open — "
+                 "stalled, or between sessions — contributes nothing here. "
+                 "'Nothing is running' is not 'nothing is in flight'."),
+    },
+    "gui_windows_outside_tmux": {
+        "report_key": "gui_windows",
+        "owner_skill": "i3",
+        "note": ("Browser, editor and any other GUI window. The scan is "
+                 "`tmux list-panes -a`, so anything not inside a tmux pane is "
+                 "outside this tool's reach entirely — not counted, not "
+                 "classified, and not represented by any null."),
+    },
+}
+
+
+def measured_not_measured(report, ledger=None) -> list:
+    """The populations this report does NOT cover, DERIVED from the report's own
+    keys. PURE — reads `report`, mutates nothing.
+
+    🔴 THE DERIVATION IS THE FEATURE. An entry is emitted only while the report
+    carries NO key for that population, so the day someone adds PR querying that
+    writes `report["pull_requests"]`, the claim "PRs are not measured here"
+    stops being made — automatically, in the same commit, with no chance for a
+    stale sentence to outlive the code it describes. That is the failure this
+    file has shipped five times (see `NOT_MEASURED_POPULATIONS`), and a literal
+    list here would have been the sixth.
+
+    🔴 `ledger` IS INJECTABLE FOR THE SAME REASON `measured_caveats` IS A
+    SEPARATE FUNCTION. Every real report is missing every one of these keys, so
+    a mutant that replaced this body with the module constant's own contents
+    would produce byte-identical output on every realistic fixture and SURVIVE a
+    green suite — a fixture whose value coincides with the constant cannot tell
+    "derived" from "hardcoded". The seam lets a test feed populations whose
+    names the constant does not contain, and watch the output move.
+    """
+    led = NOT_MEASURED_POPULATIONS if ledger is None else ledger
+    keys = set(report or {})
+    return [{"population": name,
+             "report_key": spec["report_key"],
+             "owner_skill": spec["owner_skill"],
+             "note": spec["note"]}
+            for name, spec in sorted(led.items())
+            if spec["report_key"] not in keys]
+
+
 # Claude Code renders a leading status glyph in the pane_title: a BRAILLE
-# spinner while working, a "sparkle" at rest. Same taxonomy as agent-ops.
+# spinner while working, a "sparkle" at rest. Same taxonomy as
+# scripts/lib/claude_sessions.py.
 _BRAILLE_LO, _BRAILLE_HI = 0x2800, 0x28FF
 _SPARKLE_GLYPHS = frozenset("✳✻✽✶✷✢✺❋✱*")
+
+# Lines Claude Code prints BELOW the last assistant text and above the input
+# box: `✻ Baked for 13m 17s`, `* Calculating… (47s · …)`, `※ recap: …`, and the
+# braille spinner. They are stripped before "the last assistant line" is taken,
+# or the trailing-question test reads a status line instead of the answer. The
+# spinner/sparkle half is the SAME taxonomy `busy_from_title` uses — one table,
+# so a glyph cannot be a spinner to one function and prose to the other.
+_STATUS_PREFIXES = _SPARKLE_GLYPHS | frozenset("※")
 
 # `tmux` says this on stderr and exits non-zero when no server is running. That
 # is a REACHABLE host with zero windows — collapsing it into "unreachable" is
@@ -328,12 +1125,19 @@ def slots_to_window_ids(live_windows) -> dict:
     return {slot: wid for wid, slot in (live_windows or {}).items()}
 
 
-def load_scratch_codenames(paths=None, reader=None) -> dict:
-    """`{session: codename}` from the SCRATCH_SLOTS table.
+def load_scratch_slots(paths=None, reader=None) -> dict:
+    """`{session: {"codename":…, "key":…, "color":…}}` from the SCRATCH_SLOTS
+    table — THE parse, which everything else here projects out of.
+
+    🔴 THE HOTKEY IS THE POINT, not a bonus field. An entry is
+    `scratch4:V:#83a598:Vapor`, and the operator's question is not "what is this
+    session called" but "which key gets me to it" — `Vapor` alone does not
+    answer that, `Vapor (V)` does. The key was parsed and thrown away into a
+    `_key` for as long as this file has existed.
 
     Tries each path in order (deployed first, then in-repo) and returns the
-    first non-empty mapping. {} on any failure — codenames are a display nicety,
-    never a hard dependency.
+    first non-empty mapping. {} on any failure — the slot table is a display
+    nicety, never a hard dependency.
     """
     reader = reader or _read_text
     for p in (paths if paths is not None
@@ -341,11 +1145,108 @@ def load_scratch_codenames(paths=None, reader=None) -> dict:
         text = reader(p)
         if text is None:
             continue
-        mapping = {session: name
-                   for session, _key, _color, name in _SLOT_RE.findall(text)}
+        mapping = {session: {"codename": name, "key": key, "color": color}
+                   for session, key, color, name in _SLOT_RE.findall(text)}
         if mapping:
             return mapping
     return {}
+
+
+def load_scratch_codenames(paths=None, reader=None) -> dict:
+    """`{session: codename}` — a PROJECTION of `load_scratch_slots`, not a
+    second parse. Kept because `codename` is its own row field and several
+    consumers only want the name."""
+    return {s: v["codename"]
+            for s, v in load_scratch_slots(paths, reader).items()}
+
+
+# --------------------------------------------------------------------------- #
+# LABEL RESOLUTION — three tiers, and the tier is carried in the output
+# --------------------------------------------------------------------------- #
+# The tier names, enumerated here rather than spelled at each return, so a
+# consumer can branch on the set and a test can assert it is exactly this.
+LABEL_SOURCES = ("codename", "path", "fallback")
+LABEL_FALLBACK = "main"
+
+
+def label_from_path(path, home=None):
+    """The leaf directory name of a pane's cwd, or None when the cwd says
+    nothing useful (`$HOME`, `/`, `~`, empty).
+
+    🔴 STATED LIMIT: this is the LEAF, not the git repo root. It equals the
+    repo name when the pane sits at the repo root, which is the common case and
+    the case that motivated the feature (a session called nothing but `8`,
+    sitting in a checkout whose name says exactly what it is). A pane parked
+    three directories deep gets
+    that directory's name instead. It is NOT resolved to a repo root here on
+    purpose: `path` is a STRING FROM ANOTHER MACHINE — half of these rows come
+    off the laptop over ssh — so a local `git rev-parse` would silently answer
+    about whatever happens to sit at that path on THIS host, or about nothing.
+    `scripts/tmux-autoname-session.sh` does resolve the repo root, because it
+    runs on the machine that owns the directory.
+
+    `home` is injectable so the test suite does not depend on the operator's
+    real `$HOME`.
+    """
+    home = HOME if home is None else home
+    p = (path or "").strip()
+    if not p:
+        return None
+    if p == "~" or p.startswith("~/"):
+        p = home + p[1:]
+    # `/w/repo/` and `/w/repo` are the same directory; basename disagrees.
+    # 🔴 There is deliberately NO `if not p: return None` here for the `/` case:
+    # a mutation sweep showed it SURVIVED removal, because `basename("")` is
+    # `""` and the final `or None` already covers it. An unreachable guard reads
+    # as a defence and is not one. `test_tier3_…[/]` is what actually pins it.
+    p = p.rstrip("/")
+    if os.path.normpath(p) == os.path.normpath(home):
+        return None
+    return os.path.basename(p) or None
+
+
+def resolve_label(session, path, slots=None, home=None) -> dict:
+    """`{"label": str, "label_source": one of LABEL_SOURCES, "hotkey": str|None}`.
+
+    Precedence, highest first:
+      1. `codename`  — the scratch slot table already names this session, and
+         that name is the one the hotkeys, colours and HUD use. Never overruled
+         by the cwd. THIS is the tier that carries a `hotkey`.
+      2. `path`      — the leaf of the pane's cwd (see `label_from_path`).
+      3. `fallback`  — `main`, and ONLY when the cwd yielded nothing. A row
+         labelled `main` from a cwd of `$HOME` and a row labelled `main`
+         because the operator really is in a directory called `main` are
+         distinguishable by `label_source`, not by the label.
+
+    🔴 `hotkey` IS `None` ON TIERS 2 AND 3, AND THAT IS LOAD-BEARING. A label
+    only answers "where is it"; the key answers "how do I get there", which is
+    the question actually being asked. But no key EXISTS for a session outside
+    the slot table — `$mod+Shift+<k>` is bound per slot in the tmux/i3 config —
+    so inventing one, or rendering it as `""`, would send the operator to press
+    something and land nowhere. `None`, never an empty string, so a consumer
+    cannot read a missing key as a real one.
+
+    Never returns a None label: a row always has something to render.
+    """
+    slot = (slots or {}).get(session) or {}
+    name = slot.get("codename")
+    if name:
+        return {"label": name, "label_source": "codename",
+                "hotkey": slot.get("key") or None}
+    base = label_from_path(path, home=home)
+    if base:
+        return {"label": base, "label_source": "path", "hotkey": None}
+    return {"label": LABEL_FALLBACK, "label_source": "fallback", "hotkey": None}
+
+
+def render_label(row) -> str:
+    """The label as an OPERATOR reads it: `Gold (G)` when a hotkey exists,
+    the bare label when none does. One writer, so the table and any other
+    surface cannot spell the parenthesis differently — or, worse, print an
+    empty `()` for a session that has no key."""
+    label = (row or {}).get("label") or "—"
+    key = (row or {}).get("hotkey")
+    return f"{label} ({key})" if key else label
 
 
 def _is_braille(ch: str) -> bool:
@@ -364,7 +1265,7 @@ def strip_status_glyph(title: str) -> str:
 
 def busy_from_title(title: str):
     """Busy tri-state from the leading glyph: spinner -> True, sparkle ->
-    False, neither -> None (unknown). Same taxonomy as agent-ops."""
+    False, neither -> None (unknown). Same taxonomy as claude_sessions."""
     t = (title or "").strip()
     if not t:
         return None
@@ -378,6 +1279,363 @@ def busy_from_title(title: str):
 def pane_is_claude(pane) -> bool:
     """Shallow, UNIFORM Claude detection — see HONEST LIMITS in the header."""
     return bool(CLAUDE_RE.search((pane or {}).get("command", "") or ""))
+
+
+# =========================================================================== #
+# PURE — the `waiting` signal (pane screen-scrape)
+# =========================================================================== #
+def capture_mark(nonce: str) -> str:
+    """The per-run marker FORMAT handed to `tmux display-message`.
+
+    🔴 `#{pane_id}` — never our own interpolation of the id. A tmux format
+    string is strftime-expanded, so a literal `%68` becomes a width-68 month
+    name ("August", right-padded to 68 columns), and the marker silently loses
+    the id it exists to carry. Verified against live tmux 2026-08-12.
+    """
+    return "%s%s#{pane_id}%s" % (CAPTURE_MARK_PREFIX, nonce, CAPTURE_MARK_PREFIX)
+
+
+def capture_mark_re(nonce: str):
+    """The matching parser for `capture_mark`. Derived from the SAME nonce and
+    prefix, so the writer and the reader cannot drift apart."""
+    p = re.escape(CAPTURE_MARK_PREFIX)
+    return re.compile(r"^%s%s(%%\d+)%s$" % (p, re.escape(nonce), p))
+
+
+def capture_argv(pane_ids, nonce) -> list:
+    """ONE tmux argv that captures EVERY given pane, marker-delimited.
+
+    40 panes over SSH is 40 round trips if each gets its own call; tmux takes a
+    `;`-separated command list in a single invocation, and `display-message -p`
+    writes to the same stdout, so the whole host costs one subprocess.
+
+    `[]` for an empty pane list — an argv of a bare `tmux` would run tmux's
+    default command, which is emphatically not a read.
+
+    The NONCE is why a pane cannot forge a marker: its own scrollback would have
+    to contain a hex string generated after it was drawn.
+    """
+    ids = [p for p in (pane_ids or ()) if p]
+    if not ids:
+        return []
+    mark = capture_mark(nonce)
+    argv = ["tmux"]
+    for i, pid in enumerate(ids):
+        if i:
+            argv.append(";")
+        argv += ["display-message", "-p", "-t", pid, mark,
+                 ";", "capture-pane", "-p", "-t", pid]
+    return argv
+
+
+def parse_captures(raw, nonce) -> dict:
+    """Split a marker-delimited capture batch into {pane_id: text}.
+
+    Text appearing BEFORE the first marker is discarded: it belongs to no pane,
+    and attributing it to one would be a guess.
+    """
+    rx = capture_mark_re(nonce)
+    out, cur = {}, None
+    for line in (raw or "").splitlines():
+        m = rx.match(line)
+        if m:
+            cur = m.group(1)
+            out.setdefault(cur, [])
+        elif cur is not None:
+            out[cur].append(line)
+    return {k: "\n".join(v) for k, v in out.items()}
+
+
+def _is_status_line(line) -> bool:
+    """A blank line, or one of Claude Code's between-turn status lines."""
+    t = (line or "").strip()
+    if not t:
+        return True
+    return t[0] in _STATUS_PREFIXES or _is_braille(t[0])
+
+
+def _input_box_span(lines):
+    """`(top_rule_index, bottom_rule_index)` of the pane's OWN input box, or
+    None when no such box is on screen.
+
+    🔴 THE ONE DEFINITION OF WHERE THE INPUT BOX IS. `last_assistant_line` cuts
+    the transcript at `top`, and `detect_unsent_prompt` reads the lines between
+    `top` and `bottom`; open-coding the rule pair at both sites would give the
+    two functions independent opinions about which lines are chrome, and the
+    first disagreement would be a draft attributed to the assistant or an
+    assistant sentence read as a draft.
+
+    The shape is Claude Code's: the input box is drawn between two box-drawing
+    rules a line or three apart. A LONE trailing rule is something else (a
+    modal's separator, and a modal REPLACES the input box), so it is not a box
+    and this returns None — which is why a modal pane reports `no_input_box`
+    rather than a measured-empty draft. `<= 3` is the pre-existing constant,
+    unchanged: it is what `last_assistant_line` has always used, and moving it
+    here is a refactor, not a retune.
+    """
+    lines = list(lines or ())
+    rules = [i for i, l in enumerate(lines) if _RULE_RE.match(l)]
+    if len(rules) >= 2 and rules[-1] - rules[-2] <= 3:
+        return rules[-2], rules[-1]
+    return None
+
+
+def last_assistant_line(text):
+    """The last line of ASSISTANT PROSE in a captured pane, or None.
+
+    🔴 STRUCTURAL, not keyword-matched. Claude Code draws its input box between
+    two box-drawing rules, so everything from that box down is chrome —
+    including the `❯` input line itself, the `ctx: NN%` footer, and
+    `⏸ manual mode on`. Finding the chrome by the WORDS it contains would break
+    the moment upstream restyles a footer, and would also let a footer that
+    happens to end in `?` (`new task? /clear to save 342.1k tokens` is on screen
+    right now) read as a question the agent asked.
+
+    So: cut at the rules, then strip the between-turn status lines
+    (`✻ Baked for 13m 17s`, `* Calculating…`, `※ recap:`) off the bottom. What
+    is left is what the agent last SAID.
+
+    A pane with no rule at all (a modal replaces the input box, and a bare shell
+    never draws one) keeps its whole body — for a modal the menu signal is the
+    one that fires anyway.
+    """
+    lines = (text or "").splitlines()
+    rules = [i for i, l in enumerate(lines) if _RULE_RE.match(l)]
+    if rules:
+        # Two rules a line or three apart are the input box, and the input line
+        # between them is chrome. A lone trailing rule is something else (a
+        # modal's separator), so only that last line is cut.
+        span = _input_box_span(lines)
+        cut = span[0] if span is not None else rules[-1]
+        lines = lines[:cut]
+    while lines and _is_status_line(lines[-1]):
+        lines.pop()
+    return lines[-1] if lines else None
+
+
+def detect_unsent_prompt(text) -> dict:
+    """Text typed into THIS pane's own input box and never sent.
+
+    Returns `{"status": "ok"|"no_input_box", "text": str|None}`. `text` is the
+    typed draft; `None` under `ok` is a MEASURED empty box, and `None` under
+    `no_input_box` is "the box was never located", which is not a measurement.
+    That pairing is the whole contract — see the roll-up in `_unsent_rollup`.
+
+    🔴 IT IS SCOPED TO THE PANE'S OWN INPUT LINE, NOT TO "ANY MATCHING LINE IN
+    THE CAPTURE", AND THAT IS THE ENTIRE DESIGN. The scrape that this signal
+    most resembles already shipped a false positive of exactly this class: a
+    pane DISPLAYING ANOTHER SESSION'S TRANSCRIPT tripped a `waiting` signal on
+    text that was not its own state. Every capture contains `❯ …` lines that are
+    not a draft — the operator's own submitted prompts echoed into scrollback,
+    an agent quoting a prompt back, a pane tailing another window's transcript —
+    and a scan for "a `❯` line with text after it" flags all of them.
+
+    So the input line is located STRUCTURALLY: `_input_box_span` finds the pair
+    of box-drawing rules Claude Code draws its input box between, and only the
+    lines BETWEEN those two rules are read. Scrollback is above the box and the
+    `ctx:` footer is below it, so neither can contribute a character. The same
+    span is what `last_assistant_line` cuts at, so the two cannot disagree about
+    where the box is.
+
+    🔴 IT FIRES ON CLAUDE ROWS ONLY, AND NOT ON SHELL PANES. Two independent
+    reasons, both deliberate:
+
+      * `gather` captures Claude panes only, so a shell pane is never scraped at
+        all and its status is `not_claude` — a verdict about a pane nobody
+        looked at would be the silent-zero failure this tool exists to refuse;
+      * a half-typed shell command is a DIFFERENT THING and a noisier one. A
+        shell prompt is not a queue: a partially typed `git rebase -i` is the
+        operator's cursor, not work parked one Enter from running, and it is
+        left on screen for hours as a matter of course. Reporting it would
+        dilute a signal whose only value is precision.
+
+    Both are stated rather than implied: `unsent_prompt_status` says
+    `not_claude`, never a bare null.
+
+    🔴 STATED LIMIT — A DRAFT TALLER THAN THE BOX PAIR READS AS UNMEASURED, NOT
+    AS EMPTY. `_input_box_span` accepts a rule pair up to three lines apart (the
+    definition `last_assistant_line` has always used), so a draft occupying more
+    than two rendered lines makes the box taller than that and the span is not
+    recognised. The answer is then `no_input_box`, i.e. NOT MEASURED — never
+    `text: None` under `ok`. Under-reporting into the unmeasured bucket is the
+    safe direction; publishing "nothing typed" about a box we could not find is
+    the one that lies. The same applies if upstream restyles the `❯` marker.
+
+    🔴 AND A MODAL IS `no_input_box` WHETHER IT IS DRAWN WITH ONE RULE OR TWO.
+    The one-rule shape is rejected by `_input_box_span`; the two-rule shape
+    reaches this body with `❯ 1. Resume …` as its interior, which is a menu's
+    SELECTED OPTION and not a draft. It is rejected below by the same
+    selected-marker-plus-a-second-option pair `detect_waiting` calls a
+    `selection_menu`.
+    """
+    lines = (text or "").splitlines()
+    span = _input_box_span(lines)
+    if span is None:
+        return {"status": "no_input_box", "text": None}
+    top, bottom = span
+    interior = lines[top + 1:bottom]
+    if not interior or not _PROMPT_MARK_RE.match(interior[0]):
+        # A box we located but whose first line is not the input line. We do not
+        # know what we are looking at, so we do not report a measurement.
+        return {"status": "no_input_box", "text": None}
+    # 🔴 A MODAL DRAWN WITH TWO RULES IS STILL A MODAL. `❯ 1. …` is the SELECTED
+    # OPTION of a menu, not a draft — and `_PROMPT_MARK_RE` cannot tell them
+    # apart, because a menu row starts with the same marker. Claude Code's
+    # resume modal is usually drawn with ONE rule, which `_input_box_span`
+    # already rejects; a two-rule variant would have been read as a parked draft
+    # whose "text" is the option label. Not observed live (both live
+    # `selection_menu` panes reported `no_input_box`), which is exactly why it
+    # needed pinning rather than assuming.
+    #
+    # The discriminant is the SAME PAIR `detect_waiting` uses for
+    # `selection_menu` — the selected marker plus a SECOND numbered option
+    # anywhere in the capture — so the two signals cannot form independent
+    # opinions about what a menu is. A lone `❯ 1.` stays a draft: it occurs in
+    # ordinary typing, a two-option list does not. Cost is a draft that really
+    # begins `1. …` beside another numbered line, under-reported as UNMEASURED,
+    # which is the safe direction this whole detector is biased towards.
+    if (_MENU_SELECTED_RE.match(interior[0])
+            and sum(1 for l in lines if _MENU_OPTION_RE.match(l)) >= 2):
+        return {"status": "no_input_box", "text": None}
+    parts = [_PROMPT_MARK_RE.sub("", interior[0], count=1)] + list(interior[1:])
+    draft = " ".join(p.strip() for p in parts if p.strip()).strip()
+    return {"status": "ok", "text": draft or None}
+
+
+def detect_waiting(text) -> dict:
+    """Screen-scrape ONE captured pane for the three `waiting` signals.
+
+    Returns `{"probable": bool, "signals": [{"signal", "line"}, ...]}`. Every
+    hit ships THE MATCHED LINE, because the caller has to be able to disagree.
+
+    The three are INDEPENDENT — each is evaluated on the full capture and none
+    short-circuits another, so a pane can (and a real one did) match a menu and
+    a question at once. An early `return` on the first hit would have made the
+    other two unreachable and their tests vacuous.
+    """
+    lines = (text or "").splitlines()
+    signals = []
+
+    # 1. HARD BLOCK ON A MODAL. `❯ 1. …` plus a second numbered option. The
+    #    second option is load-bearing: a lone `❯ 1.` occurs in ordinary prose
+    #    (an agent quoting a menu back at you), a two-option list does not.
+    selected = next((l for l in lines if _MENU_SELECTED_RE.match(l)), None)
+    if selected is not None:
+        if sum(1 for l in lines if _MENU_OPTION_RE.match(l)) >= 2:
+            signals.append({"signal": "selection_menu",
+                            "line": selected.strip()})
+
+    # 2. OUT OF CONTEXT. `ctx: 0%` — the window cannot make progress until it is
+    #    `/clear`ed, whatever its spinner says.
+    ctx = next((l for l in lines if _CTX_ZERO_RE.search(l)), None)
+    if ctx is not None:
+        signals.append({"signal": "context_exhausted", "line": ctx.strip()})
+
+    # 3. ASKED A DIRECT QUESTION. The last thing the agent SAID ends in `?`.
+    last = last_assistant_line(text)
+    if last is not None and last.rstrip().endswith("?"):
+        signals.append({"signal": "trailing_question", "line": last.strip()})
+
+    return {"probable": bool(signals), "signals": signals}
+
+
+def read_clawgate_queue(path=None, reader=None, now=None,
+                        max_age=BLOCKED_CACHE_MAX_AGE) -> dict:
+    """The clawgate approval queue's pending COUNT, status-discriminated.
+
+    🔴 FOUR outcomes, never two. `absent` / `unparseable` publish `count: None`,
+    because a queue nobody measured is not an empty queue — and this tool exists
+    to refuse exactly that substitution. `stale` publishes the number it found
+    AND says it cannot be called current: the bar poller writes every 45s, so a
+    cache older than `max_age` describes a queue that may since have changed.
+
+    🔴 `detail` IS NEVER PARSED. On a schema-1 cache it truncates to ~6 ids
+    however many are pending, and the ids it drops have included
+    `ready_for_review` work. It is carried verbatim, labelled
+    `detail_truncated`, and `count` is the only number anything reads.
+
+    🔴 THE STUCK-DISPATCH FIELDS ARE FOUR-VALUED TOO. `stuck_count` is None on
+    any cache older than `clawgate_tasks.SCHEMA`, because such a poller never
+    looked — and an `in_progress` task with a dead agent contributing 0 to a
+    count is exactly the blindness this closes. `schema_ok` says which it was,
+    and `open` / `ready_for_review` / `stuck` ENUMERATE the queue rather than
+    leaving a reader with a number and no way to learn what moved.
+    """
+    now = time.time() if now is None else now
+    path = BLOCKED_CACHE if path is None else path
+    reader = reader or _read_blocked_text
+    base = {"source": "bar_status_cache", "path": path, "count": None,
+            "detail": None, "detail_truncated": True,
+            "detail_note": BLOCKED_DETAIL_NOTE, "cache_age_secs": None,
+            "max_age_secs": max_age, "error": None,
+            # 🔴 None, not 0 / []: nothing has been read yet at this point, and
+            # every early return below inherits these.
+            "schema": None, "schema_ok": False,
+            "schema_note": BLOCKED_SCHEMA_NOTE % CG.SCHEMA,
+            "detail_shown": None, "detail_total": None,
+            "pending_count": None, "stuck_count": None,
+            "open": None, "ready_for_review": None, "stuck": None,
+            "threshold_secs": None}
+    text = reader(path)
+    if text is None:
+        base["status"] = "absent"
+        base["error"] = ("no bar-status cache at this path — the clawgate queue "
+                         "was NOT measured; this is not zero pending")
+        return base
+    try:
+        obj = json.loads(text)
+    except (ValueError, TypeError) as e:
+        base["status"] = "unparseable"
+        base["error"] = f"{type(e).__name__}: {e}"
+        return base
+    if not isinstance(obj, dict) or not isinstance(obj.get("count"), int) \
+            or isinstance(obj.get("count"), bool):
+        base["status"] = "unparseable"
+        base["error"] = ("cache carries no integer `count` — nothing here is a "
+                         "measurement of the queue")
+        return base
+    base["count"] = obj["count"]
+    base["detail"] = obj.get("detail")
+    # --- schema 2: the stuck predicate + the enumerated queue ----------------
+    # 🔴 The gate is `>=`, and everything below it stays None on a miss. An
+    # older poller wrote no `stuck` key; reading that absence as an empty list
+    # would publish "0 stuck dispatches" as a measurement nobody took.
+    schema = obj.get("schema")
+    base["schema"] = schema if isinstance(schema, int) and not isinstance(schema, bool) else None
+    # 🔴 `CG.schema_ok`, not a local spelling. This reader said `>= SCHEMA` while
+    # agent-ops said `is None`, so the same file with `schema: 1` warned here and
+    # rendered a clean all-clear there. One predicate, one verdict.
+    if CG.schema_ok(obj):
+        base["schema_ok"] = True
+        base["schema_note"] = None
+        base["pending_count"] = obj.get("pending_count")
+        base["stuck_count"] = obj.get("stuck_count")
+        base["open"] = obj.get("open")
+        base["ready_for_review"] = obj.get("ready_for_review")
+        base["stuck"] = obj.get("stuck")
+        base["threshold_secs"] = obj.get("threshold_secs")
+        # The schema-2 detail states its own cap, and the full sets are above.
+        base["detail_truncated"] = bool(obj.get("detail_truncated"))
+        base["detail_shown"] = obj.get("detail_shown")
+        base["detail_total"] = obj.get("detail_total")
+        base["detail_note"] = None
+    ts = obj.get("ts")
+    if not isinstance(ts, (int, float)) or isinstance(ts, bool):
+        # A count whose age cannot be established is not a fresh count. Saying
+        # so is the conservative direction; calling it `ok` is a guess.
+        base["status"] = "stale"
+        base["error"] = ("cache carries no numeric `ts`, so its freshness "
+                         "cannot be established")
+        return base
+    age = max(0.0, now - float(ts))
+    base["cache_age_secs"] = age
+    if age > max_age:
+        base["status"] = "stale"
+        base["error"] = (f"cache is {int(age)}s old (> {max_age}s); the poller "
+                         "writes every 45s, so this count may be out of date")
+        return base
+    base["status"] = "ok"
+    return base
 
 
 def classify_status(busy, age_secs, threshold) -> str:
@@ -400,20 +1658,13 @@ def classify_status(busy, age_secs, threshold) -> str:
     return "unknown"
 
 
-def parse_iso_epoch(value):
-    """ISO-8601 (with or without offset, `Z` accepted) -> epoch secs, else None."""
-    if not isinstance(value, str) or not value.strip():
-        return None
-    s = value.strip()
-    if s.endswith("Z"):
-        s = s[:-1] + "+00:00"
-    try:
-        dt = datetime.fromisoformat(s)
-    except ValueError:
-        return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.timestamp()
+# 🔴 ONE definition, ALIASED — not a second copy. Both sides of the ledger compare
+# timestamps this function produced, and the hook cannot import this file (it is
+# extensionless and opens a ClickHouse client on import), so the canonical parser
+# lives in `agent_ledger.py` and this name points at it. A duplicated six-line ISO
+# parser is precisely the predicate that ends up wrong at one of its two sites and
+# disagrees only on the inputs nobody wrote a test for.
+parse_iso_epoch = AL.parse_iso_epoch
 
 
 # =========================================================================== #
@@ -601,9 +1852,10 @@ def index_tasks_by_window(tasks) -> dict:
 # =========================================================================== #
 # PURE — folding panes into window rows
 # =========================================================================== #
-def fold_windows(panes, host, codenames=None, task_index=None,
+def fold_windows(panes, host, slots=None, task_index=None,
                  threshold=DEFAULT_STALE_THRESHOLD, now=None,
-                 slot_window_ids=None) -> list:
+                 slot_window_ids=None, captures=None,
+                 capture_status="skipped", ledger_index=None) -> list:
     """Collapse panes into one row per (session, window_index).
 
     A window is `claude` if ANY of its panes is; the row's task/busy/pane_id
@@ -630,16 +1882,47 @@ def fold_windows(panes, host, codenames=None, task_index=None,
     the join, NOT counted as a defence.
 
     It therefore does NOT detect the one skew that is genuinely reachable:
-    `list-panes` and `list-windows` are two non-atomic calls (gather:846-847),
-    so with `renumber-windows on` a window can move between them and a row can
-    pair one snapshot's pane data with the other's window id. The pane format
-    carries no `window_id`, so nothing here can catch that. UNGUARDED, and
-    named so no one reads the invariant above as covering it.
+    `list-panes` and `list-windows` are two non-atomic calls, so with
+    `renumber-windows on` a window can move between them and a row can pair one
+    snapshot's pane data with the other's window id. UNGUARDED, and named so no
+    one reads the invariant above as covering it.
+
+    🔴 AN EARLIER REVISION OF THIS DOCSTRING SAID "the pane format carries no
+    `window_id`, so nothing here can catch that". THAT WAS FALSE and it is
+    retracted. `PANE_FORMAT` carries no window id — a fact about the format string
+    twelve lines up, which anyone may change — but tmux supplies one for every
+    pane: measured 2026-08-13, `tmux list-panes -a -F '#{window_id}'` returned a
+    non-empty id on 47 of 47 panes. The false claim justified the whole two-key
+    guard/join design, which cost one 🔴, three fix rounds and three audits.
+    Putting `#{window_id}` in `PANE_FORMAT` would make this skew catchable and
+    collapse most of that design; it is deliberately NOT done here, because
+    changing the format touches `parse_panes` and every pane fixture in the suite,
+    and this change is already load-bearing enough. Flagged in
+    `claudedocs/spec-agent-activity-ledger.md` §2 as the follow-on.
+
+    🔴 `ledger_index` IS `{window_id: record}` FROM `agent_ledger`, AND IT WINS
+    OVER fuzzyclaw wherever both answer. It supplies `age_secs` and
+    `claude_session_id` — the two fields the default view lost in #419 — and the
+    row records WHICH source in `age_source` (`ledger` / `fuzzyclaw` / `None`), so
+    a missing age can be read as "no writer has recorded this window" rather than
+    as a bug in whichever source the reader assumed. During the supersede phase
+    both sources are live on purpose (spec §6); precedence, not a merge, because
+    two ages averaged or preferred by recency would be a number neither writer
+    ever measured.
+
+    🔴 `captures` IS `None`-VS-`{}`, and the difference is the whole point.
+    `None` means no capture batch ran on this host, so every row's
+    `waiting_probable` is `None` carrying `capture_status` (`skipped`/`error`).
+    `{}` means the batch RAN, so a row missing from it is `uncaptured` — its own
+    fact, not the host's. A non-Claude row is `not_claude`: only Claude panes are
+    captured, so `waiting_probable: False` on a bare zsh would be a verdict
+    about a pane nobody looked at.
     """
     now = time.time() if now is None else now
-    codenames = codenames or {}
+    slots = slots or {}
     task_index = task_index or {}
     slot_window_ids = slot_window_ids or {}
+    ledger_index = ledger_index or {}
     order, groups = [], {}
     for p in (panes or ()):
         key = (p.get("session"), p.get("window_index"))
@@ -654,46 +1937,338 @@ def fold_windows(panes, host, codenames=None, task_index=None,
         lead = next((p for p in members if pane_is_claude(p)), members[0])
         session, widx = key
         task = task_index.get((str(session), str(widx)))
-        age = None
-        if task is not None:
+        wid = slot_window_ids.get((str(session), str(widx)))
+        # 🔴 LEDGER FIRST, fuzzyclaw only as the fallback, and `age_source` names
+        # which one answered. `max(0.0, …)` on both: a clock skew between the
+        # writing host and this one must render as "just now", never as a
+        # negative age that `classify_status` would silently read as fresh.
+        led = ledger_index.get(wid) if wid else None
+        age, age_source = None, None
+        if led is not None:
+            last = parse_iso_epoch(led.get("last_activity_ts"))
+            if last is not None:
+                age, age_source = max(0.0, now - last), "ledger"
+        if age is None and task is not None:
             last = parse_iso_epoch(task.get("last_activity"))
             if last is not None:
-                age = max(0.0, now - last)
+                age, age_source = max(0.0, now - last), "fuzzyclaw"
         busy = busy_from_title(lead.get("title", ""))
+        is_claude = any(pane_is_claude(p) for p in members)
+        lab = resolve_label(session, lead.get("path", ""), slots)
+        # 🔴 The waiting fields, resolved through the None-vs-{} distinction
+        # above. `probable` is None on every path where nothing was scraped.
+        #
+        # 🔴 `unsent_prompt` RIDES THE SAME CAPTURE AND THE SAME FOUR
+        # NOT-MEASURED PATHS, but is resolved into its OWN pair of fields. It is
+        # NEVER mixed into `w_probable` — see the comment block at
+        # `UNSENT_STATUSES` for the measurement that makes that load-bearing.
+        if not is_claude:
+            w_status, w_probable, w_signals = "not_claude", None, None
+            u_status, u_text = "not_claude", None
+        elif captures is None:
+            w_status, w_probable, w_signals = capture_status, None, None
+            u_status, u_text = capture_status, None
+        elif lead.get("pane_id") not in captures:
+            w_status, w_probable, w_signals = "uncaptured", None, None
+            u_status, u_text = "uncaptured", None
+        else:
+            det = detect_waiting(captures[lead.get("pane_id")])
+            w_status = "ok"
+            w_probable = det["probable"]
+            w_signals = det["signals"]
+            # Its own status, because a pane that captured fine can still fail
+            # to yield an input box (`no_input_box`) while `waiting` measured
+            # that same text perfectly well.
+            uns = detect_unsent_prompt(captures[lead.get("pane_id")])
+            u_status, u_text = uns["status"], uns["text"]
         rows.append({
+            # 🔴 WHAT KIND OF ENTITY THIS ROW IS. Always `tmux` here — this
+            # function folds PANES, so by construction every row it builds has
+            # one. It is written explicitly rather than left to a default
+            # because the field's contract is that it is NEVER null (see
+            # `KINDS`). A row built somewhere else that forgets to set it does
+            # NOT quietly become a cluster row: `row_class` gives it
+            # `unknown_kind` and `summary["kind"]` counts it as `"none"`, both
+            # of which a test asserts against `KINDS`.
+            "kind": "tmux",
             "host": host,
             "session": session,
             "window_index": widx,
-            "window_id": slot_window_ids.get((str(session), str(widx))),
+            "window_id": wid,
             "window_name": lead.get("window_name", ""),
-            "codename": codenames.get(session),
+            "codename": (slots.get(session) or {}).get("codename"),
+            # 🔴 ADDITIVE to `session`/`window_index`, never a replacement:
+            # two sessions in one repo resolve to the SAME label. See the
+            # module docstring.
+            "label": lab["label"],
+            "label_source": lab["label_source"],
+            # 🔴 `null` for every non-slot session, because no hotkey EXISTS
+            # for one. Never "".
+            "hotkey": lab["hotkey"],
             "pane_id": lead.get("pane_id"),
             "path": lead.get("path", ""),
             "command": lead.get("command", ""),
             "task": strip_status_glyph(lead.get("title", "")),
-            "claude": any(pane_is_claude(p) for p in members),
+            "claude": is_claude,
             "busy": busy,
             "age_secs": age,
+            # 🔴 WHICH writer supplied `age_secs`. `None` here alongside a `None`
+            # age is "nobody has recorded this window", which is a different
+            # finding from "the ledger is broken" — and telling them apart is
+            # exactly what #419 left no way to do.
+            "age_source": age_source,
             "status": classify_status(busy, age, threshold),
-            "claude_session_id": (task or {}).get("claude_session"),
+            # 🔴 `waiting_probable` is a TRI-STATE. True/False are measurements;
+            # None means this pane was not scraped, and `waiting_status` says
+            # which of the four reasons. `waiting_signals` is None (not []) on
+            # those same paths — an empty list is "looked, found nothing".
+            "waiting_probable": w_probable,
+            "waiting_signals": w_signals,
+            "waiting_status": w_status,
+            # 🔴 THE FOURTH SIGNAL, AND THE PAIR IS THE POINT. `unsent_prompt`
+            # is the TEXT so the operator can triage without opening the pane;
+            # `unsent_prompt_status` is what makes a null readable. `null` +
+            # `ok` is a MEASURED empty input box; `null` + anything else is
+            # "not measured", and collapsing the two would publish "nothing is
+            # parked here" about a pane nobody scraped — the same substitution
+            # `waiting_status` exists to refuse, one signal over.
+            "unsent_prompt": u_text,
+            "unsent_prompt_status": u_status,
+            # Same precedence as `age_secs`, and for the same reason: this is the
+            # ONE carrier of the session id into the ClickHouse join, so a stale
+            # fuzzyclaw value overwriting a live ledger one would resolve a
+            # window's history to a session that ended days ago.
+            "claude_session_id": ((led or {}).get("session_id")
+                                  or (task or {}).get("claude_session")),
+            # 🔴 WHICH AGENT wrote the record, and it is not cosmetic. `claude`
+            # on a row is `pane_current_command =~ /claude/`, so an OPENCODE
+            # window is classified `shell` — an agent counted as a bare prompt
+            # in every bucket. That was invisible while opencode wrote no
+            # records; writer 2 makes it a row with an age, a session id and
+            # `claude: false`, which is worse than invisible unless the row can
+            # say what it is. `null` means no writer has recorded this window.
+            "runtime": (led or {}).get("runtime"),
+            "ledger": led,
             "fuzzyclaw": task,
             "panes": len(members),
         })
     return rows
 
 
-def summarize(report) -> dict:
-    rows = [r for h in report["hosts"].values() for r in h["windows"]]
-    counts = {"busy": 0, "idle": 0, "stale": 0, "unknown": 0}
-    for r in rows:
-        counts[r["status"]] = counts.get(r["status"], 0) + 1
+def _waiting_rollup(rows) -> dict:
+    """The `waiting` roll-up. Kept beside `summarize` and derived from
+    WAITING_SIGNALS so a new signal cannot be counted per-row and invisible in
+    the total.
+
+    🔴 `probable` is None when NOTHING was measured. `--no-capture`, a failed
+    capture batch, or a host of nothing but bare shells all produce zero
+    scraped panes, and publishing `probable: 0` for those says "I looked at
+    every window and none needs you" about a look that never happened. That is
+    the one sentence this tool must never emit.
+    """
+    measured = [r for r in rows if r.get("waiting_status") == "ok"]
+    per_signal = {s: 0 for s in WAITING_SIGNALS}
+    for r in measured:
+        for sig in (r.get("waiting_signals") or ()):
+            name = sig.get("signal")
+            per_signal[name] = per_signal.get(name, 0) + 1
     return {
+        "probable": (sum(1 for r in measured if r.get("waiting_probable"))
+                     if measured else None),
+        "measured": len(measured),
+        "unmeasured": sum(1 for r in rows
+                          if r.get("waiting_probable") is None),
+        "per_signal": per_signal if measured else None,
+        # WHY a row went unmeasured, so "0 waiting" can be read against what
+        # was skipped rather than against the row total.
+        #
+        # 🔴 `or "none"`, THE SAME COERCION AS `_unsent_rollup`'s, and it is
+        # here because the first version of that comment diagnosed the class
+        # ("a row built anywhere ELSE need not set the field") and then fixed
+        # exactly one of the two rollups that share the defect. Measured: a
+        # rows list holding one field-less row beside one `not_claude` row
+        # raises `TypeError: '<' not supported between instances of 'str' and
+        # 'NoneType'` in `render_table`, because a `None` key is unsortable
+        # beside the real string keys. One rule, one place — both places.
+        "unmeasured_reasons": _count_by(
+            (r.get("waiting_status") or "none") for r in rows
+            if r.get("waiting_probable") is None),
+    }
+
+
+def _unsent_rollup(rows) -> dict:
+    """The `unsent_prompt` roll-up — SEPARATE from `_waiting_rollup`, under the
+    identical null-vs-zero rule.
+
+    🔴 `count` IS None, NEVER 0, WHEN NOTHING WAS MEASURED. `--no-capture`, a
+    failed capture batch, a host of nothing but shells, or a screen full of
+    modals all produce zero measured input boxes, and publishing `count: 0` for
+    those says "I looked in every input box and none holds work" about a look
+    that never happened. That is the same sentence `_waiting_rollup` refuses,
+    and it is worth refusing twice: the dogfood that motivated this signal
+    missed five parked windows, so a fabricated zero here would re-create the
+    exact blind spot by asserting it had been checked.
+
+    `measured` counts the rows whose box was actually read (`status == "ok"`),
+    which is a STRICTER set than waiting's: a captured pane sitting on a modal
+    is `ok` for waiting and `no_input_box` here. `unmeasured_reasons` is the
+    histogram over every other status, so a small `measured` is always readable
+    against WHY.
+    """
+    measured = [r for r in rows if r.get("unsent_prompt_status") == "ok"]
+    return {
+        "count": (sum(1 for r in measured if r.get("unsent_prompt"))
+                  if measured else None),
+        "measured": len(measured),
+        "unmeasured": sum(1 for r in rows
+                          if r.get("unsent_prompt_status") != "ok"),
+        # 🔴 `or "none"`, the SAME coercion as `age_sources` and `row_kind`, and
+        # it is not cosmetic. `fold_windows` always sets this field, but a row
+        # built anywhere ELSE need not — a `cluster` row from writer 3 is the
+        # live example — and a `None` key here is two defects at once: it
+        # serialises to the string `"null"` and reads as a status called null,
+        # and it makes the histogram unsortable beside the real string keys, so
+        # the renderer raises `TypeError` on a report that is otherwise fine.
+        # Measured, not imagined: that crash is what the existing cluster-row
+        # fixtures produced before this coercion existed. A row missing the
+        # field is a BUG in whatever built it, so it is counted and named rather
+        # than dropped — loud, in the bucket that means "not measured".
+        "unmeasured_reasons": _count_by(
+            (r.get("unsent_prompt_status") or "none") for r in rows
+            if r.get("unsent_prompt_status") != "ok"),
+    }
+
+
+def _count_by(values) -> dict:
+    out = {}
+    for v in values:
+        out[v] = out.get(v, 0) + 1
+    return out
+
+
+def _summary_classes(summ) -> list:
+    """The class names this summary actually contains, in render order.
+
+    DERIVED from the status buckets, so a class cannot exist in `row_class` and
+    be missing from the human-facing lines — the same rule `age_sources` and
+    `waiting.per_signal` follow. `claude`/`shell` lead because they are the two
+    a reader has been reading for months and their order carries meaning in the
+    `claude+shell` legend; anything else is appended in sorted order so the
+    render is deterministic rather than dict-insertion dependent.
+    """
+    seen = set()
+    for cell in (summ.get("status") or {}).values():
+        seen |= {k for k in cell if k != "total"}
+    # `claude`/`shell` unconditionally: `summarize` PRE-SEEDS both in every
+    # bucket, so they are always present, and a scan containing neither must
+    # still render `claude=0 shell=0` rather than quietly dropping the columns
+    # a reader is scanning for. Only classes BEYOND these two are on-demand.
+    lead = ["claude", "shell"]
+    return lead + sorted(seen - set(lead))
+
+
+def summarize(report) -> dict:
+    """🔴 EVERY status bucket is split claude/shell. A MIXED count is never
+    published as a bare integer.
+
+    The tool's headline question is "is anything waiting on me", and the bucket
+    that answers it was contaminated: measured on this host 2026-08-11, 61
+    windows produced `idle: 17` = 12 agent windows + 5 bare shells, rendered
+    identically as `● idle`. The row data was already right — every row carries
+    `claude` — so nothing about detection changes here; only the roll-up and the
+    table stopped conflating.
+
+    The split is applied to ALL FOUR buckets, not just `idle`. `unknown` was
+    15/15 non-claude in that same measurement, which is a SNAPSHOT, not an
+    invariant: `classify_status` returns `unknown` for any row with no glyph and
+    no age — and while fuzzyclaw was the only writer, a REMOTE claude window had
+    none by construction. That is no longer true (the ledger is read per host;
+    see CAVEATS["ledger_scope"]), but the class this split kills is unchanged:
+    ANY claude row with no glyph and no recorded age lands in `unknown`, and a
+    window no writer has recorded yet is the common case for a session that has
+    not taken a turn since the hook was registered. Splitting one bucket fixes one instance; splitting
+    the tuple kills the class.
+
+    🔴 BACKWARD COMPATIBILITY, chosen deliberately in the LOUD direction. The
+    flat `summary["busy"|"idle"|"stale"|"unknown"]` integers are GONE, replaced
+    by `summary["status"][bucket]` -> one key per CLASS plus `"total"`. On a
+    tmux-only scan the classes are exactly `{"claude", "shell"}`. Those TWO are
+    pre-seeded and always present (a reader scans for them, and dropping the
+    column would be its own confusion); every class BEYOND them — `cluster`,
+    `unknown_kind` — is added on demand, so no bucket publishes a zero for a
+    class this build cannot produce. Keeping
+    the flat ints would have left every existing reader silently reading the
+    mixed number as an agent count — the exact defect — while the fix sat in
+    keys they never learned about. A KeyError is a worse morning and a better
+    outcome; `["status"]["idle"]["total"]` is the same number, and you have to
+    type `total` to get it.
+    """
+    rows = [r for h in report["hosts"].values() for r in h["windows"]]
+    counts = {b: {"claude": 0, "shell": 0} for b in STATUS_BUCKETS}
+    for r in rows:
+        bucket = counts.setdefault(r["status"], {"claude": 0, "shell": 0})
+        # 🔴 `row_class`, not an inline `claude`-or-`shell`: a row with no pane
+        # must NOT land in `shell`. See `row_class` for why that is the same
+        # defect this split was built to kill. The class key is created ON
+        # DEMAND — `cluster` appears only once a cluster row does, so a
+        # tmux-only scan never publishes a `cluster: 0` that would read as a
+        # measured absence of something this build cannot produce.
+        cls = row_class(r)
+        bucket[cls] = bucket.get(cls, 0) + 1
+    for b in counts.values():
+        # Every class key accounts for the bucket's own total, whatever class
+        # keys the rows produced. Summing `claude + shell` by name would have
+        # silently dropped any third class from the total instead of failing.
+        #
+        # No `if k != "total"` filter: `total` is assigned HERE and `counts` is
+        # rebuilt per call, so the key cannot already be present and the filter
+        # could never fire. A mutation sweep proved it — deleting the clause
+        # changed nothing and no test could tell. An unreachable guard reads as
+        # protection while providing none, so it is stated as a precondition
+        # instead of pantomimed as a check.
+        b["total"] = sum(b.values())
+    filters = report.get("filters") or {}
+    out = {
         "total_sessions": len(rows),
-        "claude": sum(1 for r in rows if r["claude"]),
-        "busy": counts["busy"],
-        "idle": counts["idle"],
-        "stale": counts["stale"],
-        "unknown": counts["unknown"],
+        # 🔴 THE SAME `row_class`, so the top-level totals and the per-status
+        # buckets cannot disagree. These read `row_class`, not `r["claude"]`
+        # directly: `shell` used to be `not r["claude"]`, which absorbs every
+        # row with a null `claude` — including a cluster row that has no pane
+        # to have a command. One predicate, one place; the version of this that
+        # is open-coded at two sites is wrong at exactly one of them.
+        "claude": sum(1 for r in rows if row_class(r) == "claude"),
+        "shell": sum(1 for r in rows if row_class(r) == "shell"),
+        "status": counts,
+        # 🔴 THE ENTITY AXIS, published as its own histogram and DERIVED from
+        # the rows — never hardcoded — so a kind cannot exist on a row and be
+        # missing from the summary. Same idiom, and same reason, as
+        # `age_sources`: the `None` coercion is `row_kind`, ONE definition
+        # shared with `measured_caveats` and the `--claude-only` filter, so the
+        # histogram and the caveat cannot disagree about what a kind-less row
+        # is called.
+        "kind": _count_by(row_kind(r) for r in rows),
+        # 🔴 The filter travels WITH the counts it changed. Under
+        # `--claude-only` every number above describes the FILTERED set (see
+        # `gather`), so a reader that does not know the filter ran would read a
+        # real "0 agent windows" and a "0 because the shells were dropped"
+        # identically. `excluded_shells` is None — not 0 — when the filter
+        # never ran: nothing was excluded because nothing was ever counted.
+        #
+        # 🔴 IT IS `excluded_shells`, NOT `excluded_non_claude`. The old name
+        # was accurate only while the predicate was `r["claude"]` and every row
+        # was a tmux pane. `--claude-only` now drops the SHELL class and keeps
+        # `cluster` (see `dropped_by_claude_only`), so "non_claude" would name a
+        # set strictly larger than the one counted — a reader would take a
+        # cluster row to be inside it. Renamed rather than redefined in place:
+        # a KeyError is a better morning than an integer that quietly means
+        # something else, the same trade this summary already made for the flat
+        # per-status ints.
+        "claude_only": bool(filters.get("claude_only")),
+        "excluded_shells": filters.get("excluded_shells"),
+        # WHICH kinds the filter removed ENTIRELY, so `summary["kind"]` cannot
+        # be read as a statement about what the scan produced when it is a
+        # statement about what survived. None — not [] — when no filter ran.
+        "kinds_excluded_by_filter": filters.get("kinds_excluded_by_filter"),
         "hosts_reachable": sorted(k for k, v in report["hosts"].items()
                                   if v["reachable"]),
         "hosts_unreachable": sorted(k for k, v in report["hosts"].items()
@@ -703,12 +2278,60 @@ def summarize(report) -> dict:
         # which of skipped / unmeasured / ok produced it.
         "fuzzyclaw_live": report["fuzzyclaw"].get("files_live"),
         "fuzzyclaw_status": report["fuzzyclaw"].get("status"),
+        # 🔴 The headline roll-up, under the SAME rule as every count above:
+        # `probable` is None when `measured` is 0, because "0 windows are
+        # waiting" and "0 windows were scraped" are different facts and the
+        # first is the one an operator will act on. `per_signal` is derived from
+        # the WAITING_SIGNALS tuple, so a signal cannot exist in
+        # `detect_waiting` and be missing from the summary.
+        "waiting": _waiting_rollup(rows),
+        # 🔴 THE FOURTH SIGNAL, AS ITS OWN ROLL-UP. Deliberately NOT a key
+        # inside `waiting`: nesting it there is one refactor away from being
+        # summed into `waiting.probable`, and that sum is the thing this design
+        # exists to prevent. `waiting_probable` measured 11/11 true positives on
+        # 79 live panes; a noisier signal must not be able to degrade it.
+        "unsent_prompt": _unsent_rollup(rows),
+        # The clawgate approval queue, count + discriminant, never one alone.
+        # 🔴 `stuck` rides along and is None (not 0) whenever the cache predates
+        # the predicate — a roll-up reader must be able to tell "no wedged
+        # dispatches" from "wedged dispatches were never looked for", which is
+        # the distinction that made a four-hour-dead agent invisible here.
+        "clawgate_queue": {
+            "count": (report.get("clawgate_queue") or {}).get("count"),
+            "status": (report.get("clawgate_queue") or {}).get("status"),
+            "stuck_count": (report.get("clawgate_queue") or {}).get("stuck_count"),
+            "schema_ok": (report.get("clawgate_queue") or {}).get("schema_ok"),
+        },
         # Hosts whose `list-windows` did not answer even though `list-panes`
         # did. Their rows carry no window_id and, if local, no fuzzyclaw join.
         "windows_unmeasured": sorted(
             k for k, v in report["hosts"].items()
             if not v.get("windows_measured")),
+        # 🔴 THE REGRESSION'S OWN METER, published on every scan. #419's damage
+        # was measurable in exactly one number — "rows with an age: 0" — and
+        # nothing in the output stated it, so the tool reported a healthy scan
+        # for weeks while three fields were dead. `age_sources` and
+        # `rows_with_session_id` are that number, split by WHICH writer supplied
+        # it, so "0 from the ledger" can never again hide behind a total.
+        # `"none"`, not `None` — a null JSON key serialises to the string
+        # `"null"` and reads as a source called null rather than as "no source".
+        "age_sources": _count_by(r.get("age_source") or "none" for r in rows),
+        "rows_with_age": sum(1 for r in rows if r.get("age_secs") is not None),
+        "rows_with_session_id": sum(1 for r in rows
+                                    if r.get("claude_session_id")),
     }
+    # 🔴 A TOP-LEVEL COUNT FOR EVERY CLASS, ON DEMAND. `claude` and `shell`
+    # are above; any further class gets its own key here rather than being
+    # left out of the whole-set totals. Without this the human summary line
+    # renders `N windows claude=3 shell=2` while N is 7 — a complete-looking
+    # accounting with rows missing and nothing saying so.
+    #
+    # On demand, for the same reason the buckets are: a `cluster: 0` at the top
+    # level of a build that cannot produce cluster rows is a measurement of
+    # nothing. So a tmux-only summary keeps exactly the integer keys it had.
+    for cls, n in _count_by(row_class(r) for r in rows).items():
+        out.setdefault(cls, n)
+    return out
 
 
 def exit_code_for(report) -> int:
@@ -729,6 +2352,22 @@ def _read_text(path):
             return fh.read()
     except OSError:
         return None
+
+
+def _read_blocked_text(path):
+    """🔴 A SEAM OF ITS OWN, not a call to `_read_text`, and that is the point.
+
+    The hermetic suite forbids each impure edge by replacing it with a raiser,
+    so an edge that shares a function with a legitimate one cannot be forbidden
+    without breaking the other. `_read_text` is used by `local_host_label` on
+    real tmp files inside tests; the blocked-cache read is the one that would
+    reach `~/.cache` on a live workbench. It was doing exactly that — a golden
+    test picked up the operator's real pending count (12) mid-run, which is a
+    non-hermetic read AND a value that changes under the suite's feet.
+
+    Separate name, separately raisable, one line of indirection.
+    """
+    return _read_text(path)
 
 
 def _default_runner(argv, timeout):
@@ -765,6 +2404,65 @@ def read_fuzzyclaw_texts(directory=FUZZYCLAW_DIR, lister=None, reader=None):
         if text is not None:
             out.append(text)
     return out
+
+
+def _host_ledger(read_result, live_windows, host) -> dict:
+    """One host's ledger read -> `{status, records, index, conflicts, counts}`.
+
+    🔴 FOUR statuses, and collapsing any two of them re-creates a fabricated zero:
+
+      * `error`       — the command never answered (host down, SSH refused, spawn
+                        failed). Nothing was measured.
+      * `no_sentinel` — it answered, but without the protocol's own positive
+                        control on the first line, so the output is not evidence
+                        about this host's ledger at all. An empty stdout from a
+                        swallowed command and a host with no records are the same
+                        bytes; only the sentinel tells them apart.
+      * `unmeasured`  — the ledger WAS read, but this host's `list-windows` was
+                        not, so no record can be intersected against a live
+                        window. Records exist and none of them is joinable.
+      * `ok`          — read and joined; counts are real measurements.
+
+    Only `ok` publishes integers. The other three publish `None`, so a reader
+    cannot mistake "did not answer" for "answered, nothing there".
+    """
+    if not read_result.get("reachable"):
+        return {"status": "error", "records": [], "index": {},
+                "conflicts": [], "tmux_pid": None,
+                "error": read_result.get("error") or "unknown error",
+                "seen": None, "live": None, "unparseable": None,
+                "not_live": None, "generation_mismatch": None,
+                "generation_unchecked": None, "no_window": None}
+    parsed = AL.parse_ledger(read_result.get("stdout"))
+    if not parsed["measured"]:
+        return {"status": "no_sentinel", "records": [], "index": {},
+                "conflicts": [], "tmux_pid": None,
+                "error": ("the ledger command answered without its sentinel "
+                          f"line on {host} — output not trusted"),
+                "seen": None, "live": None, "unparseable": None,
+                "not_live": None, "generation_mismatch": None,
+                "generation_unchecked": None, "no_window": None}
+    filt = AL.filter_live(
+        parsed["records"], live_windows, tmux_pid=parsed["tmux_pid"],
+        unmeasured_reason=("`tmux list-windows` did not answer on "
+                           f"{host}, so ledger records cannot be intersected "
+                           "against live windows"))
+    if filt["status"] != "ok":
+        return {"status": "unmeasured", "records": [], "index": {},
+                "conflicts": [], "tmux_pid": parsed["tmux_pid"],
+                "error": filt["error"], "seen": parsed["seen"],
+                "live": None, "unparseable": parsed["unparseable"],
+                "not_live": None, "generation_mismatch": None,
+                "generation_unchecked": None, "no_window": None}
+    idx = AL.index_by_window(filt["records"])
+    return {"status": "ok", "records": filt["records"], "index": idx["index"],
+            "conflicts": idx["conflicts"], "tmux_pid": parsed["tmux_pid"],
+            "error": None, "seen": parsed["seen"], "live": filt["live"],
+            "unparseable": parsed["unparseable"],
+            "not_live": filt["not_live"],
+            "generation_mismatch": filt["generation_mismatch"],
+            "generation_unchecked": filt["generation_unchecked"],
+            "no_window": filt["no_window"]}
 
 
 def run_tmux(argv, host, local_host, runner=None, timeout=None):
@@ -875,9 +2573,12 @@ def ch_query(client, sql) -> dict:
 # GATHER — the one assembly point
 # =========================================================================== #
 def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
-           use_fuzzyclaw=True, threshold=DEFAULT_STALE_THRESHOLD, now=None,
+           use_fuzzyclaw=False, threshold=DEFAULT_STALE_THRESHOLD, now=None,
            ch_client_factory=None, fuzzyclaw_texts=None,
-           codenames=None, ch_sql=SQL_RECENT_SESSIONS) -> dict:
+           slots=None, ch_sql=SQL_RECENT_SESSIONS,
+           claude_only=False, use_capture=True, capture_nonce=None,
+           clawgate_reader=None, clawgate_path=None,
+           use_ledger=True, ledger_outputs=None) -> dict:
     """Build the whole report. Every source is injectable, so this is the
     function the hermetic suite exercises end-to-end.
 
@@ -887,11 +2588,39 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
     def time, so patching the module attribute would not be honoured here — the
     test suite's "no real network" guard would have been silently bypassed on
     exactly the path (`main()` -> `gather()`) that has no injection point.
+
+    🔴 `use_fuzzyclaw` DEFAULTS TO FALSE. Measured on this host 2026-08-12: 29
+    live of 401 files, 363 stale, 9 slot-mismatched — and every one of those 29
+    live rows read `paused`, including a window demonstrably running an agent.
+    29 table rows, zero contribution to any answer, from a source `CLAUDE.md`
+    marks UNTRUSTED. Opt in with `--fuzzyclaw`; the intersection guard and all
+    of its tests are untouched and still run when you do. Off, the section's
+    status is `skipped` and every count is None, so the absence is never
+    rendered as a measured zero.
+
+    🔴 `use_ledger` DEFAULTS TO TRUE, and it is what makes the paragraph above
+    survivable. Switching fuzzyclaw off in #419 also switched off the only source
+    of AGE, the `stale` bucket and `claude_session_id`, so the shipped default view
+    has had none of them since: measured 2026-08-12, `rows with an age: 0`,
+    `claude_session_id` on 0 rows, no `stale` bucket at all. The ledger restores
+    all three from writers this repo owns.
+
+    🔴 IT IS READ PER HOST, WHICH FUZZYCLAW NEVER WAS. fuzzyclaw's task files are
+    local state, so every REMOTE row carried a null age by construction — the
+    caveat says so. The ledger read is one `sh -c` per host that goes over the same
+    SSH transport as the tmux calls, so a laptop row gets an age and a session id
+    the same way a workbench row does. `ledger_outputs` injects that stdout per
+    host for the hermetic suite.
     """
     now = time.time() if now is None else now
     local_host = local_host or local_host_label()
     hosts = [h for h in hosts if h in HOST_NAMES]
-    codenames = load_scratch_codenames() if codenames is None else codenames
+    slots = load_scratch_slots() if slots is None else slots
+    # A fresh hex nonce per run: a pane cannot print a marker built from a
+    # string that did not exist when it was drawn. Injectable so the suite is
+    # deterministic.
+    capture_nonce = (uuid.uuid4().hex if capture_nonce is None
+                     else str(capture_nonce))
 
     # --- fuzzyclaw (LOCAL host only — the task files are local state) --------
     if use_fuzzyclaw:
@@ -917,6 +2646,31 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
                       "files_seen": None, "files_live": None,
                       "files_unparseable": None, "files_stale": None,
                       "files_mismatched": None, "slot_conflicts": []},
+        # 🔴 The ledger roll-up, with the SAME null-not-zero discipline as
+        # fuzzyclaw above and one addition: `hosts` is per host, because a ledger
+        # that answered on the workbench and not on the laptop is a partial
+        # measurement, and a single flattened count would render it as a complete
+        # one. `status` is `skipped` only under `--no-ledger`.
+        "ledger": {"status": "skipped", "error": None, "hosts": {},
+                   "records_seen": None, "records_live": None,
+                   "records_unparseable": None, "conflicts": []},
+        # The row set this report describes, and how it was narrowed. Present
+        # on EVERY report, filtered or not, so a consumer branches on a field
+        # rather than on whether a key exists.
+        # 🔴 Both counters are None, never 0/[]: the filter has not run yet, so
+        # nothing has been excluded BECAUSE nothing has been counted. A `[]`
+        # here would tell `measured_caveats` a filter ran and removed no kind.
+        "filters": {"claude_only": bool(claude_only),
+                    "excluded_shells": None,
+                    "kinds_excluded_by_filter": None},
+        # 🔴 The clawgate approval queue. Filled in below; the skeleton carries
+        # a `status` from the first byte so no code path can publish a bare
+        # count. See `read_clawgate_queue` for the four outcomes.
+        "clawgate_queue": {"status": "skipped", "count": None,
+                           "stuck_count": None, "schema_ok": False},
+        # 🔴 The two limits that change what these rows MEAN, carried in the
+        # payload rather than left in the skill body. See CAVEATS.
+        "caveats": CAVEATS,
         "summary": {},
     }
 
@@ -929,10 +2683,42 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
     local_live_windows = None
     local_windows_error = None
     raw_panes, slot_ids = {}, {}
+    captures, capture_status = {}, {}
+    ledger_res = {}
     for host in hosts:
         panes_res = run_tmux(TMUX_PANES_ARGV, host, local_host, runner=runner)
         wins_res = run_tmux(TMUX_WINDOWS_ARGV, host, local_host, runner=runner)
         raw_panes[host] = panes_res["stdout"]
+
+        # --- 🔴 the capture batch: ONE tmux call per host, CLAUDE PANES ONLY --
+        # The signals are Claude Code TUI shapes, so scraping a bare zsh would
+        # only invent false positives out of whatever its scrollback happens to
+        # contain. Those rows are reported `not_claude`, never `False`.
+        #
+        # `captures[host] is None` means the batch did not run or did not
+        # answer; `{}` means it ran and this host had no Claude panes. The two
+        # are different facts and `fold_windows` renders them differently.
+        host_panes = parse_panes(panes_res["stdout"])
+        claude_ids = [p["pane_id"] for p in host_panes
+                      if pane_is_claude(p) and p.get("pane_id")]
+        if not use_capture:
+            captures[host], capture_status[host] = None, "skipped"
+        elif not panes_res["reachable"]:
+            # Nothing to capture and nothing measured — the host said nothing.
+            captures[host], capture_status[host] = None, "error"
+        elif not claude_ids:
+            # MEASURED and genuinely empty: we know every pane on this host and
+            # none of them is Claude. `{}`, not None.
+            captures[host], capture_status[host] = {}, "ok"
+        else:
+            cap_res = run_tmux(capture_argv(claude_ids, capture_nonce),
+                               host, local_host, runner=runner)
+            if cap_res["reachable"]:
+                captures[host] = parse_captures(cap_res["stdout"],
+                                                capture_nonce)
+                capture_status[host] = "ok"
+            else:
+                captures[host], capture_status[host] = None, "error"
         # 🔴 The two calls are INDEPENDENT measurements. `reachable`/`error`
         # describe list-panes; `windows_measured`/`windows_error` describe
         # list-windows. Reading one off the other is how a failed list-windows
@@ -948,7 +2734,49 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
             "windows_measured": windows_measured,
             "windows_error": wins_res["error"],
             "live_window_ids": (sorted(live) if live is not None else None),
+            # A THIRD independent measurement, reported separately from the
+            # other two for the same reason they are separate from each other:
+            # `list-panes` succeeding says nothing about whether the capture
+            # batch answered.
+            "captures_measured": captures[host] is not None,
+            "captures_status": capture_status[host],
+            "captures_seen": (len(captures[host])
+                              if captures[host] is not None else None),
         }
+        # --- the agent activity ledger, ONE `sh -c` per host -----------------
+        # 🔴 Read HERE, inside the per-host loop, and filtered against THIS
+        # host's `live` windows and THIS host's tmux server pid — the pid arrives
+        # on the ledger's own sentinel line, from the same instant as the records
+        # it validates. Reusing the local host's window set for a remote host
+        # would drop every remote record on a window-id space that has nothing to
+        # do with it, and would do so silently.
+        if not use_ledger:
+            ledger_res[host] = {"status": "skipped", "records": [],
+                                "error": None}
+        elif not (panes_res["reachable"] or wins_res["reachable"]):
+            # 🔴 NOT AN OPTIMISATION DRESSED AS A MEASUREMENT. This host answered
+            # NEITHER tmux call, so it is down; issuing a third command buys one
+            # more `ConnectTimeout=4` on every scan of an offline laptop and can
+            # only return the same failure. The status is still `error` — nothing
+            # was measured and no count is published — and the reason SAYS the
+            # read was never attempted rather than implying it was tried and
+            # failed, which are different facts about the host.
+            ledger_res[host] = _host_ledger(
+                {"reachable": False,
+                 "error": "host answered neither tmux call; the ledger read "
+                          "was not attempted"},
+                live, host)
+        else:
+            if ledger_outputs is not None:
+                raw_led = ledger_outputs.get(host)
+                led_read = {"reachable": raw_led is not None,
+                            "stdout": raw_led or "",
+                            "error": None if raw_led is not None
+                            else "no injected ledger output for this host"}
+            else:
+                led_read = run_tmux(AL.read_argv(), host, local_host,
+                                    runner=runner)
+            ledger_res[host] = _host_ledger(led_read, live, host)
         if host == local_host:
             local_live_windows = live
             local_windows_error = wins_res["error"]
@@ -970,17 +2798,120 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
     task_index = idx_res["index"]
     report["fuzzyclaw"]["slot_conflicts"] = idx_res["conflicts"]
 
+    # --- the ledger roll-up -------------------------------------------------
+    # 🔴 A SUM ONLY OVER THE HOSTS THAT ANSWERED, and `status` says which. A total
+    # built across a host whose read errored would count that host as contributing
+    # zero records, which is the same lie as `files_live: 0` under `--no-fuzzyclaw`
+    # — a real integer standing in for a measurement nobody took. `partial` is
+    # therefore its own status, not a footnote on `ok`.
+    if use_ledger:
+        per_host = {h: {k: v for k, v in blk.items()
+                        if k not in ("records", "index")}
+                    for h, blk in ledger_res.items()}
+        ok_hosts = [h for h, blk in ledger_res.items()
+                    if blk.get("status") == "ok"]
+        bad_hosts = [h for h, blk in ledger_res.items()
+                     if blk.get("status") not in ("ok", "skipped")]
+        totals = {}
+        for key in ("seen", "live", "unparseable", "not_live",
+                    "generation_mismatch", "generation_unchecked", "no_window"):
+            totals[key] = (sum((ledger_res[h].get(key) or 0) for h in ok_hosts)
+                           if ok_hosts else None)
+        report["ledger"] = {
+            "status": ("ok" if ok_hosts and not bad_hosts
+                       else "partial" if ok_hosts else "error"),
+            "error": (None if not bad_hosts else
+                      "; ".join("%s: %s" % (h, ledger_res[h].get("error"))
+                                for h in sorted(bad_hosts))),
+            "hosts": per_host,
+            "records_seen": totals["seen"],
+            "records_live": totals["live"],
+            "records_unparseable": totals["unparseable"],
+            "records_not_live": totals["not_live"],
+            "generation_mismatch": totals["generation_mismatch"],
+            "generation_unchecked": totals["generation_unchecked"],
+            "records_no_window": totals["no_window"],
+            "conflicts": [dict(c, host=h) for h in sorted(ledger_res)
+                          for c in (ledger_res[h].get("conflicts") or [])],
+        }
+
     for host in hosts:
         entry = report["hosts"][host]
         if not entry["reachable"]:
             continue
         entry["windows"] = fold_windows(
-            parse_panes(raw_panes.get(host, "")), host, codenames=codenames,
+            parse_panes(raw_panes.get(host, "")), host, slots=slots,
             # fuzzyclaw is LOCAL-only: a remote row gets no task, no session id
             # and no age. Stated, not implied away.
             task_index=(task_index if host == local_host else {}),
             threshold=threshold, now=now,
-            slot_window_ids=slot_ids.get(host))
+            slot_window_ids=slot_ids.get(host),
+            captures=captures.get(host),
+            capture_status=capture_status.get(host, "skipped"),
+            # Per host, unlike fuzzyclaw's local-only index above.
+            ledger_index=(ledger_res.get(host) or {}).get("index"))
+
+    # --- 🔴 --claude-only: drop the shells, and COUNT what was dropped -------
+    # The summary then describes the RENDERED set, which is the safe direction:
+    # counting the unfiltered set would publish `total_sessions: 20` beside zero
+    # printed rows and an EXIT_OK, i.e. "ran, found windows" over an empty
+    # table. Counting the filtered set makes that same run a real measured zero
+    # (EXIT_EMPTY) — true, because zero AGENT windows is what was asked. The
+    # dropped count keeps it from reading as "the host had nothing at all".
+    #
+    # 🔴 THE FILTER ALSO RECORDS WHICH *KINDS* IT REMOVED ENTIRELY, and that is
+    # not bookkeeping — it is the difference between two claims a reader cannot
+    # otherwise tell apart. This block runs BEFORE `summarize` and BEFORE
+    # `measured_caveats`, both of which derive from `report["hosts"][*]
+    # ["windows"]`, i.e. from the rows that SURVIVED. So on the day writer 3
+    # emits cluster rows, a run that filtered them out would publish
+    # `kinds_produced: ["tmux"]` and render "cluster is ENUMERATED but NOT
+    # PRODUCED, so no such row appears and its absence is NOT a measured zero".
+    # Every word of that sentence would be FALSE: cluster rows were produced,
+    # such rows did appear, and their absence is entirely the filter's doing.
+    # It attributes to THE BUILD what belongs to THE FILTER, and the reader most
+    # likely to be misled is the one reading that line to find out whether
+    # cluster rows exist yet.
+    #
+    # That is the same class as `fuzzyclaw_scope` in #471 — a machine-readable
+    # claim outliving the code it describes — and the `fuzzyclaw_scope` fix is
+    # what created this one, because it made `kinds_produced` measured from
+    # rows without asking WHICH rows.
+    #
+    # The fix keeps `kinds_produced` describing the RENDERED set, so the caveat
+    # line and the table above it still cannot disagree, and publishes the
+    # removed kinds as their OWN measured field. Deriving `kinds_produced` from
+    # the unfiltered rows instead would have swapped one disagreement for
+    # another: a line reading "rows in this scan are kind=cluster/tmux" printed
+    # over a table with no cluster row in it.
+    if claude_only:
+        excluded = 0
+        kinds_before, kinds_after = set(), set()
+        for host in hosts:
+            entry = report["hosts"][host]
+            kinds_before |= {row_kind(r) for r in entry["windows"]}
+            kept = [r for r in entry["windows"]
+                    if not dropped_by_claude_only(r)]
+            kinds_after |= {row_kind(r) for r in kept}
+            excluded += len(entry["windows"]) - len(kept)
+            entry["windows"] = kept
+        report["filters"]["excluded_shells"] = excluded
+        # Sorted for a deterministic render, for the same reason as
+        # `kinds_produced`. `[]` — not absent — when the filter ran and removed
+        # no whole kind: the filter DID run, so "which kinds did it remove" is a
+        # measurement whose answer is none. The key is absent only when no
+        # filter ran, which is the honest shape for "never measured" and mirrors
+        # `excluded_shells` being None rather than 0 in that case.
+        report["filters"]["kinds_excluded_by_filter"] = sorted(
+            kinds_before - kinds_after)
+
+    # --- 🔴 the clawgate approval queue ---------------------------------------
+    # A local file read, so it costs nothing and runs unconditionally. The
+    # reader is resolved AT CALL TIME (same reason as `ch_client_factory`
+    # above): binding `_read_text` as a default would make the seam unpatchable
+    # on the one path — `main()` -> `gather()` — with no injection point.
+    report["clawgate_queue"] = read_clawgate_queue(
+        path=clawgate_path, reader=clawgate_reader, now=now)
 
     # --- ClickHouse ----------------------------------------------------------
     if use_ch:
@@ -998,7 +2929,78 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
             report["clickhouse"] = res
 
     report["summary"] = summarize(report)
+    # 🔴 THE `kind_scope` CAVEAT IS A MEASUREMENT, NOT A STANDING CLAIM.
+    #
+    # `kinds_produced` used to be a literal in the CAVEATS constant, so the
+    # rendered line asserted "every row is kind=tmux" no matter what the rows
+    # actually were — it would keep saying that on the day writer 3 starts
+    # emitting cluster rows, and the reader most likely to be misled is the one
+    # reading the line to find out. That is exactly how `fuzzyclaw_scope` went
+    # stale in #471: a machine-readable claim that outlived the code it
+    # described.
+    #
+    # Derived from THIS report's rows instead, so the line cannot disagree with
+    # the table above it. Sorted for a deterministic render, and copied rather
+    # than mutated in place — `report["caveats"]` is the module-level CAVEATS
+    # dict by reference, and writing through it would leak one scan's
+    # measurement into every later caller in the process.
+    report["caveats"] = measured_caveats(report)
+    # 🔴 LAST, and that ORDER is load-bearing. This reads the report's own top
+    # level to decide which populations went unmeasured, so it must run after
+    # every section that could have added one. Computed here rather than seeded
+    # in the skeleton above for the same reason: a key present in the skeleton
+    # is not evidence anything was measured, but a key ABSENT at the end is
+    # evidence nothing was.
+    report["not_measured"] = measured_not_measured(report)
     return report
+
+
+def measured_caveats(report) -> dict:
+    """CAVEATS with `kind_scope.kinds_produced` MEASURED from `report`'s rows.
+    PURE — returns a new dict, mutates nothing.
+
+    🔴 THIS IS A SEPARATE FUNCTION SO THE DERIVATION IS REACHABLE FROM A TEST
+    WITH NON-TMUX INPUT. Inlined in `gather`, the only way to exercise it was a
+    real scan — and every real scan is tmux-only, so a mutant that replaced the
+    derivation with the literal `["tmux"]` produced byte-identical output and
+    SURVIVED a green suite. A fixture whose values coincide with the constant
+    collapses "derived" and "hardcoded" into the same observation; the fix is
+    an input where they differ, which means a seam that accepts one.
+    """
+    # 🔴 DEEP-COPIED, because a purity claim is only as true as its DEEPEST
+    # shared object. This was fixed once at depth 1 — `{k: dict(v)}` — and an
+    # audit walked straight past it into depth 2: `waiting_signal["excluded"]`
+    # is itself a dict, and `signals` / `kinds_enumerated` /
+    # `null_fields_on_remote_rows` are lists, all still the SAME objects as the
+    # module constant. Writing into any of them poisoned CAVEATS for every
+    # later caller in the process, and the contamination surfaced in a
+    # DIFFERENT scan's rendered caveat line.
+    #
+    # "One level deeper than the fix" is the shape this whole change keeps
+    # producing, so the copy is made total rather than incrementally deepened
+    # again. CAVEATS is a handful of small literals; `deepcopy` is not a cost
+    # worth trading for a claim that has now been wrong twice.
+    cav = copy.deepcopy(report.get("caveats") or CAVEATS)
+    rows = [r for h in (report.get("hosts") or {}).values()
+            for r in (h.get("windows") or [])]
+    # Sorted for a deterministic render. `"none"` rather than dropping a row
+    # with no `kind`: it is a bug, and the caveat is where it becomes visible.
+    cav["kind_scope"]["kinds_produced"] = sorted({row_kind(r) for r in rows})
+    # 🔴 WHAT A FILTER REMOVED, so `kinds_produced` cannot be read as a
+    # statement about the BUILD when it is a statement about the FILTER. See the
+    # `--claude-only` block in `gather`. Copied out of `report["filters"]`
+    # rather than recomputed here, because only the filter itself ever saw the
+    # unfiltered rows — by the time this function runs they are gone.
+    #
+    # 🔴 SET ONLY WHEN THE KEY IS PRESENT. A filter that never ran did not
+    # measure "no kinds were removed"; it measured nothing, and `[]` would be a
+    # fake measurement of exactly the kind this caveat exists to stop emitting.
+    # `_fmt_kind_scope` distinguishes the two the same way it already
+    # distinguishes a missing `kinds_produced` from an empty one.
+    excluded = (report.get("filters") or {}).get("kinds_excluded_by_filter")
+    if excluded is not None:
+        cav["kind_scope"]["kinds_excluded_by_filter"] = sorted(excluded)
+    return cav
 
 
 # =========================================================================== #
@@ -1020,10 +3022,117 @@ def _fmt_age(secs):
 _STATUS_GLYPH = {"busy": "▶ busy", "idle": "● idle",
                  "stale": "· stale", "unknown": "? unk"}
 
+# 🔴 ONE format string for the header AND every row, so the header cannot drift
+# out of alignment with the data under it — the previous version carried the
+# column widths twice (a hand-spaced header literal and a `.format` spec) and
+# any width change had to be made in both places or the frame skewed silently.
+_ROW_FMT = ("  {:<9}  {:<12}  {:<3}  {:<14}  {:<25}  {:<6}  {:<8}  {:<4}  {}")
+
 
 def _trunc(s, n):
     s = "" if s is None else str(s)
     return s if len(s) <= n else s[: n - 1] + "…"
+
+
+def _fmt_waiting(row) -> str:
+    """The WAIT cell. `?` is NOT `no` — an unscraped pane must not read as a
+    measured "nothing needed here"."""
+    p = row.get("waiting_probable")
+    if p is None:
+        return "?%s" % (row.get("waiting_status") or "unmeasured")
+    if not p:
+        return "no"
+    return "YES " + ",".join(s.get("signal", "?")
+                             for s in (row.get("waiting_signals") or ()))
+
+
+def _render_blocked_rows(b) -> list:
+    """The queue itself, ENUMERATED — not folded into the count above it.
+
+    🔴 Order is stuck -> ready_for_review -> open, and every row is printed.
+    Three finished tasks once appeared in no list on ANY surface: the count
+    moved and nothing said what had finished. A stuck row carries its idle time
+    beside the flag, because `idle 4h` and `idle 16m` are the same boolean and
+    only one of them is worth walking over to a terminal for.
+    """
+    out = []
+    if not b.get("schema_ok"):
+        # Old cache: no lists at all. Say what is missing rather than printing
+        # a shorter section that reads like a complete one.
+        out.append("  ⚠ " + _trunc(b.get("schema_note"), 160))
+        out.append("  ⚠ this is a COUNT. " + BLOCKED_DETAIL_NOTE)
+        if b.get("detail"):
+            out.append(f"  cached detail (TRUNCATED): "
+                       f"{_trunc(b.get('detail'), 100)}")
+        return out
+    # 🔴 `or []` HERE IS THE ROUND-ONE BUG ONE LAYER DOWN. The reader preserves
+    # `None` (unmeasured) distinctly from `[]` (measured empty) and is tested for
+    # it — and then this renderer collapsed the two, so a schema-2 cache missing
+    # its `stuck` key printed a clean "N task(s) needing you" with no warning at
+    # all, while the OLDER schema-1 path above correctly warned. The newer,
+    # supported shape was the silent one. `is None` is the only reading that
+    # survives: an absent list must announce itself, never render as empty.
+    stuck = b.get("stuck")
+    if stuck is None:
+        out.append("  ⚠ this cache carries NO `stuck` list — stuck dispatches "
+                   "were NOT measured; this is not zero stuck")
+    elif stuck:
+        thr = b.get("threshold_secs")
+        out.append(f"  🔴 {len(stuck)} STUCK dispatch(es) — in_progress with a "
+                   f"dead-looking agent (grace/idle threshold "
+                   f"{CG.fmt_idle(thr) if thr is not None else '?'}):")
+        for s in stuck:
+            out.append("     #%s idle %s [%s] %s" % (
+                s.get("id"), CG.fmt_idle(s.get("agent_idle_secs")),
+                ",".join(s.get("reasons") or ["?"]), _trunc(s.get("title"), 60)))
+        out.append("     ⚠ idle time cannot see progress WITHIN one in-flight "
+                   "turn, so this errs toward a false alarm, not a false calm")
+    for label, key in (("REVIEW", "ready_for_review"), ("OPEN", "open")):
+        rows = b.get(key)
+        if rows is None:
+            out.append("  ⚠ this cache carries NO `%s` list — that queue was "
+                       "NOT enumerated; this is not zero %s" % (key, label))
+            continue
+        for r in rows:
+            out.append("     #%s %-6s %s" % (r.get("id"), label,
+                                             _trunc(r.get("title"), 60)))
+    return out
+
+
+def render_clawgate_queue(queue) -> list:
+    """🔴 The clawgate queue, with the count and its discriminant on one line.
+
+    Printed unconditionally and in every state, because the failure this closes
+    is a reader who never learned the queue exists. An `absent` cache prints
+    LOUDER than a real zero, not quieter: a missing file rendering as "nothing
+    is blocked on you" is the exact substitution this script refuses everywhere
+    else.
+    """
+    b = queue or {}
+    st = b.get("status")
+    count, out = b.get("count"), []
+    if st == "ok":
+        if count:
+            out.append(f"▸ CLAWGATE QUEUE: {count} task(s) needing you")
+            out.extend(_render_blocked_rows(b))
+        else:
+            out.append("▸ CLAWGATE QUEUE: 0 tasks pending "
+                       f"(cache {int(b.get('cache_age_secs') or 0)}s old — "
+                       "a measured zero)")
+            if not b.get("schema_ok"):
+                out.append("  ⚠ " + _trunc(b.get("schema_note"), 160))
+    elif st == "stale":
+        out.append(f"▸ CLAWGATE QUEUE: UNMEASURED (stale cache) — last known "
+                   f"count {count}")
+        out.append(f"  {_trunc(b.get('error'), 110)}")
+        out.append("  (this is NOT a current count; check the clawgate API or "
+                   "the bar's clawgate pill)")
+    else:
+        out.append(f"▸ CLAWGATE QUEUE: UNMEASURED [{st}]")
+        out.append(f"  {_trunc(b.get('error') or 'unknown reason', 110)}")
+        out.append("  (this is NOT zero pending approvals — the queue was "
+                   "never read. The clawgate API has it live)")
+    return out
 
 
 def render_table(report) -> str:
@@ -1060,18 +3169,89 @@ def render_table(report) -> str:
         out.append("  (none)" if reach
                    else "  (no host answered — nothing was measured)")
     else:
-        out.append("  HOST       SESSION       WIN  CODENAME   TASK"
-                   "                              STATUS    AGE")
-        out.append("  " + "─" * 100)
+        # 🔴 CLASS is its own column. It is deliberately NOT spelled into the
+        # STATUS word: a status cell of "idle·sh" can be satisfied by anything
+        # that happens to contain those characters, while a column stating
+        # which class the row IS cannot. `● idle` on an agent and `● idle` on a
+        # bare zsh prompt were the same six characters before this.
+        #
+        # 🔴 IT WAS HEADED `KIND` AND IT IS NOT THE `kind` FIELD. The row now
+        # carries a real `kind` (`tmux`/`cluster`, the ENTITY axis), and this
+        # column renders `claude`/`shell`/`cluster` — the CLASS axis. Two
+        # vocabularies under one word, on the two surfaces a reader compares
+        # side by side (`--json` and the table), is a misread waiting to
+        # happen, so the column is `CLASS` and the field is `kind`.
+        #
+        # It also renders `row_class(r)` rather than a third open-coded
+        # `"claude" if r["claude"] else "shell"`. That inline conditional is
+        # the exact predicate `row_class` exists to consolidate, and leaving a
+        # copy here would have made the TABLE say `shell` for a cluster row
+        # while the SUMMARY it sits under said `cluster` — the one-rule-one-
+        # place failure, visible on one screen.
+        # 🔴 THE COLUMN TRADE, stated because the table did not get wider.
+        # CODENAME (9) became LABEL (14) and TASK gave up the 5 characters, so
+        # the frame is byte-for-byte the same width as before. Nothing was lost
+        # by dropping CODENAME: for a scratch session `label` IS the codename
+        # (tier 1) and the cell additionally carries the HOTKEY — `Gold (G)`,
+        # which is what the operator actually needs to reach the window — so
+        # the column says strictly more than CODENAME did, and the rows it used
+        # to render as `—` now say where they are. 14 fits the longest slot
+        # cell (`Yarrow (Y)` = 10) uncut.
+        # The cost is real and it is TASK: 30 -> 25 characters before the
+        # ellipsis. `--json` carries every field untruncated and unjoined.
+        out.append(_ROW_FMT.format("HOST", "SESSION", "WIN", "LABEL", "TASK",
+                                   "CLASS", "STATUS", "AGE", "WAIT"))
+        out.append("  " + "─" * 112)
         for r in rows:
             out.append(
-                "  {:<9}  {:<12}  {:<3}  {:<9}  {:<34}  {:<8}  {:<4}".format(
+                _ROW_FMT.format(
                     _trunc(r.get("host"), 9), _trunc(r.get("session"), 12),
                     _trunc(r.get("window_index"), 3),
-                    _trunc(r.get("codename") or "—", 9),
-                    _trunc(r.get("task") or "—", 34),
+                    _trunc(render_label(r), 14),
+                    _trunc(r.get("task") or "—", 25),
+                    row_class(r),
                     _STATUS_GLYPH.get(r.get("status"), "?"),
-                    _fmt_age(r.get("age_secs"))))
+                    _fmt_age(r.get("age_secs")),
+                    _fmt_waiting(r)))
+        # 🔴 The matched line, printed under the table for every flagged row.
+        # A boolean column tells an operator a window needs them; only the
+        # EVIDENCE tells them whether to believe it, and which of the four very
+        # different actions (answer / press a key / `/clear` / give it work) is
+        # the right one. Suppressing it would leave the plain-text reader with
+        # strictly less than the `--json` reader for no saving.
+        flagged = [r for r in rows if r.get("waiting_probable")]
+        if flagged:
+            out.append("")
+            out.append("  ⚠ WAITING — the matched line, so you can disagree "
+                       "with it:")
+            for r in flagged:
+                for sig in (r.get("waiting_signals") or ()):
+                    out.append("    {}:{}:{}  [{}]  {}".format(
+                        r.get("host"), r.get("session"),
+                        r.get("window_index"), sig.get("signal"),
+                        _trunc(sig.get("line"), 90)))
+        # 🔴 ITS OWN BLOCK, UNDER ITS OWN HEADING, never merged into the one
+        # above. Five of 79 panes held a parked draft and the one-call answer
+        # showed none of them; printing the TEXT is what lets an operator decide
+        # which of the five matters without opening five panes. Merging the two
+        # lists would re-conflate the signals at the one surface where a human
+        # actually reads them.
+        parked = [r for r in rows if r.get("unsent_prompt")]
+        if parked:
+            out.append("")
+            out.append("  ✎ UNSENT PROMPT — typed and never sent; NOT "
+                       "'waiting on you', but work parked one Enter away:")
+            for r in parked:
+                out.append("    {}:{}:{}  {}".format(
+                    r.get("host"), r.get("session"), r.get("window_index"),
+                    _trunc(r.get("unsent_prompt"), 90)))
+    out.append("")
+
+    # 🔴 CLAWGATE QUEUE — printed ALWAYS, including when it was not measured.
+    # This section exists because a dogfood agent, correctly reading that
+    # `agent-ops` has no JSON API, never opened it and so missed 11 pending
+    # approvals — four of them credential-exposure or cross-user-data-leak.
+    out.extend(render_clawgate_queue(report.get("clawgate_queue")))
     out.append("")
 
     ch = report.get("clickhouse") or {}
@@ -1098,7 +3278,11 @@ def render_table(report) -> str:
     fz = report.get("fuzzyclaw") or {}
     fz_st = fz.get("status")
     if fz_st == "skipped":
-        out.append("▸ FUZZYCLAW TASKS (skipped: --no-fuzzyclaw)")
+        # The default is now OFF, so the message names the flag that turns it
+        # ON. Saying "--no-fuzzyclaw" here told a reader a flag they never
+        # passed was responsible.
+        out.append("▸ FUZZYCLAW TASKS (skipped — opt in with --fuzzyclaw; "
+                   "every count is null, not 0)")
     elif fz_st == "unmeasured":
         # 🔴 The third zero. `files_live` is None, not 0, and must read as
         # "not measured" rather than as "measured and empty".
@@ -1134,19 +3318,576 @@ def render_table(report) -> str:
                        c.get("session"), c.get("window_index"),
                        c.get("claimants"), len(ids), ", ".join(ids)))
     out.append("")
-    out.append("  summary: {total} windows  claude={claude}  busy={busy}  "
-               "idle={idle}  stale={stale}  unknown={unknown}".format(
+    out.extend(render_ledger(report.get("ledger")))
+    out.append("")
+    # 🔴 THE HUMAN LINE IS CLASS-GENERIC TOO. `summarize` was made to total over
+    # whatever class keys exist; this render was left summing `claude`/`shell`
+    # BY NAME, so a row in any third class was silently absent from a line that
+    # still looked like a complete accounting — `7 windows claude=3 shell=2`,
+    # with two rows unmentioned and no discriminant saying so. The JSON was
+    # right and the screen was wrong, which is the harder version to notice.
+    #
+    # `_kind_classes` derives the class names from the summary itself, so a
+    # class cannot exist in `row_class` and be missing from either line.
+    classes = _summary_classes(summ)
+    out.append("  summary: {total} windows  {parts}".format(
+        total=summ.get("total_sessions", 0),
+        # 🔴 `.get(c, 0)`, and NO `if c in summ` filter. An audit called that
+        # filter dead because `classes` derives from the rows `summarize`
+        # counted — true of the `gather` path, and FALSE of `render_table`,
+        # which is also called on a bare/empty report whose summary carries
+        # neither key. Removing the guard raised `KeyError: 'claude'` in two
+        # existing tests: unreachable through one entry point is not
+        # unreachable. But the filter was still the wrong shape — it SKIPPED
+        # the class, dropping it from this line while the legend one line below
+        # still named it. `.get` renders every class, missing ones as 0.
+        parts="  ".join("{}={}".format(c, summ.get(c, 0)) for c in classes)))
+    # 🔴 Every bucket prints per class, never as one number. The legend is on
+    # the same line, so no reader has to remember which part is which — and
+    # there is no rendering of `idle` that a reader can mistake for a count of
+    # waiting AGENTS.
+    st = summ.get("status") or {}
+    out.append("  by status ({}): ".format("+".join(classes)) + "  ".join(
+        "{}={}".format(b, "+".join(str((st.get(b) or {}).get(c, 0))
+                                   for c in classes))
+        for b in STATUS_BUCKETS))
+    # 🔴 The line that would have made #419 visible on the day it shipped.
+    # `stale` is derived from an age, so a `stale=0+0` bucket means one of two
+    # completely different things — nothing is stale, or nothing has an age — and
+    # the by-status line above cannot tell them apart. This one can.
+    out.append("  ages: {with_age} of {total} row(s) have one ({by_src})"
+               "   session ids: {sid}".format(
+                   with_age=summ.get("rows_with_age", 0),
                    total=summ.get("total_sessions", 0),
-                   claude=summ.get("claude", 0), busy=summ.get("busy", 0),
-                   idle=summ.get("idle", 0), stale=summ.get("stale", 0),
-                   unknown=summ.get("unknown", 0)))
+                   by_src=", ".join(
+                       "{}={}".format(k, v) for k, v in
+                       sorted((summ.get("age_sources") or {}).items()))
+                   or "no rows",
+                   sid=summ.get("rows_with_session_id", 0)))
+    # 🔴 The headline number, and it is allowed to be "unmeasured". `probable`
+    # is None whenever no pane was scraped, and printing `waiting=0` there would
+    # answer the question this tool exists for with a measurement nobody took.
+    w = summ.get("waiting") or {}
+    if w.get("probable") is None:
+        out.append("  waiting: UNMEASURED — 0 of {} window(s) scraped ({})"
+                   .format(w.get("measured", 0) + w.get("unmeasured", 0),
+                           ", ".join("{}={}".format(k, v) for k, v in
+                                     sorted((w.get("unmeasured_reasons")
+                                             or {}).items())) or "no reason"))
+    else:
+        out.append("  waiting: {} probable of {} scraped ({} unscraped: {})"
+                   .format(w["probable"], w.get("measured", 0),
+                           w.get("unmeasured", 0),
+                           ", ".join("{}={}".format(k, v) for k, v in
+                                     sorted((w.get("unmeasured_reasons")
+                                             or {}).items())) or "none"))
+        out.append("  by signal: " + "  ".join(
+            "{}={}".format(s, (w.get("per_signal") or {}).get(s, 0))
+            for s in WAITING_SIGNALS))
+    # 🔴 ON ITS OWN LINE, ALWAYS, AND ALLOWED TO SAY UNMEASURED. Same rule as
+    # `waiting` above: `count` is None whenever no input box was read, and
+    # printing `unsent: 0` there would answer "is any work parked" with a
+    # measurement nobody took — which is precisely how five parked windows went
+    # unreported. Printed unconditionally, because a line that appears only
+    # sometimes is one a reader learns not to expect.
+    u = summ.get("unsent_prompt") or {}
+    _u_reasons = ", ".join("{}={}".format(k, v) for k, v in
+                           sorted((u.get("unmeasured_reasons") or {}).items()))
+    if u.get("count") is None:
+        out.append("  unsent prompts: UNMEASURED — 0 of {} window(s) had an "
+                   "input box read ({})".format(
+                       u.get("measured", 0) + u.get("unmeasured", 0),
+                       _u_reasons or "no reason"))
+    else:
+        out.append("  unsent prompts: {} parked of {} box(es) read ({} not "
+                   "read: {})".format(u["count"], u.get("measured", 0),
+                                      u.get("unmeasured", 0),
+                                      _u_reasons or "none"))
+    if summ.get("claude_only"):
+        # The filter is stated where the counts are, because it changed them.
+        # `shell window(s)`, not `non-claude window(s)`: the predicate drops the
+        # SHELL class and KEEPS a cluster row, so the old wording named a set
+        # wider than the one counted (see `dropped_by_claude_only`).
+        out.append("  FILTER --claude-only: {} shell window(s) excluded "
+                   "from every count above".format(
+                       summ.get("excluded_shells")
+                       if summ.get("excluded_shells") is not None
+                       else "an unmeasured number of"))
+        # 🔴 AND WHICH KINDS WENT WITH THEM, printed only when a whole kind
+        # vanished. Without this the reader has `summary["kind"]` and the
+        # `kind_scope` caveat both describing the surviving rows, and no line
+        # anywhere saying an entire kind was removed by the flag rather than
+        # never produced. `[]` prints nothing: the filter ran and removed no
+        # whole kind, which needs no sentence.
+        gone = summ.get("kinds_excluded_by_filter")
+        if gone:
+            out.append("  FILTER --claude-only: it removed EVERY kind={} row "
+                       "this scan produced — their absence above is the "
+                       "FILTER's doing, not a measured absence".format(
+                           "/".join(gone)))
     if summ.get("hosts_unreachable"):
         out.append("  UNREACHABLE HOSTS: " +
                    ", ".join(summ["hosts_unreachable"]))
     if summ.get("windows_unmeasured"):
         out.append("  WINDOW LIST UNMEASURED ON: " +
                    ", ".join(summ["windows_unmeasured"]))
+    out.extend(render_caveats(report))
+    # 🔴 LAST, and BELOW the caveats, deliberately. The caveats qualify numbers
+    # this tool DID produce; this names populations it produced nothing about.
+    # A reader who stops at the caveats has still read every qualification that
+    # applies to what is on screen — and the last thing on screen is the list of
+    # what is not.
+    out.append("")
+    out.extend(render_not_measured(report))
     return "\n".join(out)
+
+
+def render_ledger(led) -> list:
+    """The ledger section — printed ALWAYS, including when it did not answer.
+
+    🔴 It leads with the per-host line rather than the total. A total is what
+    hid #419 for weeks: `rows with an age: 0` was a true statement about a healthy
+    scan and the output had no place to say it. Here each host states its own
+    `live of seen`, so one host answering and one not cannot average into a number
+    that describes neither.
+    """
+    led = led or {}
+    st = led.get("status")
+    if st == "skipped":
+        return ["▸ AGENT LEDGER (skipped — --no-ledger; every count is null, "
+                "not 0)"]
+    if st == "error":
+        return ["▸ AGENT LEDGER — NO HOST ANSWERED",
+                "  " + _trunc(led.get("error") or "unknown error", 110),
+                "  (this is NOT zero records; the ledger was never read)"]
+    out = ["▸ AGENT LEDGER ({live} live of {seen} record(s){bad})".format(
+        live=led.get("records_live"), seen=led.get("records_seen"),
+        bad=("" if not led.get("error") else "  ⚠ PARTIAL"))]
+    if led.get("error"):
+        out.append("  ⚠ " + _trunc(led["error"], 110))
+        out.append("  (the counts above cover only the hosts that answered)")
+    for host in sorted(led.get("hosts") or {}):
+        h = (led["hosts"] or {})[host]
+        if h.get("status") != "ok":
+            out.append("  {:<10} {} — {}".format(
+                host, (h.get("status") or "?").upper(),
+                _trunc(h.get("error") or "no reason given", 80)))
+            continue
+        rejected = []
+        for key, word in (("not_live", "window gone"),
+                          ("generation_mismatch", "older tmux server"),
+                          ("unparseable", "unparseable"),
+                          ("no_window", "no window")):
+            if h.get(key):
+                rejected.append("%d %s" % (h[key], word))
+        # 🔴 `generation_unchecked` is reported SEPARATELY from the rejections,
+        # because those records were KEPT. A record whose generation could not be
+        # verified is being trusted, and a reader is entitled to know how many of
+        # the live rows rest on that.
+        out.append("  {:<10} {} live of {} (tmux pid {}){}{}".format(
+            host, h.get("live"), h.get("seen"), h.get("tmux_pid") or "unknown",
+            ("  [rejected: " + ", ".join(rejected) + "]") if rejected else "",
+            ("  [%d unverified generation]" % h["generation_unchecked"]
+             if h.get("generation_unchecked") else "")))
+    for c in (led.get("conflicts") or []):
+        # 🔴 THE RUNTIMES, not just the session ids. An audit found this line
+        # printing `[7f3a-uuid-claude, ses_9911]` — "two UUIDs a reader cannot
+        # act on", which is the exact phrase the change adding `runtimes` used
+        # to justify itself while the renderer still ignored the field. The
+        # commonest real conflict is cross-runtime (a pane that ran Claude and
+        # later opencode holds one record each, both live, both naming that
+        # window), and naming them is what turns an alarming ⚠ into a fact.
+        out.append("  ⚠ LEDGER CONFLICT {} {} claimed by {} record(s) "
+                   "[{}] — sessions [{}] — NEWEST wins".format(
+                       c.get("host"), c.get("window_id"), c.get("claimants"),
+                       ", ".join(c.get("runtimes") or ["unknown runtime"]),
+                       ", ".join(c.get("session_ids") or [])))
+    return out
+
+
+# =========================================================================== #
+# PURE — the LEAN view, for the only consumer this tool has
+# =========================================================================== #
+# 🔴 MEASURED, and it is why this exists. The operator confirmed 2026-08-14 what
+# spec §7 measured: 0 interactive shell invocations in 30 days against 55 agent
+# references. An AGENT is the only reader, and neither existing shape fits one:
+#
+#   the table   ~3,280 tokens, and LOSSY — 73 truncated cells on a 75-row scan,
+#               45 rows whose task text exceeds the 25-char column, with no way
+#               for the reader to recover what was cut.
+#   --json      lossless, ~14,013 tokens even after compaction — a large slice
+#               of a context window for one call.
+#
+# Rows are ~85% of the payload — 47,409 B of 56,068 B, re-measured on one live
+# 75-row scan 2026-08-14 — so trimming ROWS is the whole win. The single biggest
+# row field was `ledger` at ~7.5 KB: a full embedded record whose useful
+# contents (`age_secs`, `age_source`, `claude_session_id`) are ALREADY flat on
+# the row, added in the same change that added the duplication.
+#
+# 🔴 Every figure here comes from ONE scan. An earlier draft quoted
+# `52,564 B of 60,631 B` (86%) with the two halves taken from DIFFERENT scans —
+# an audit caught the same defect in the compaction comment below and it was
+# corrected there while these siblings kept the retracted number. A ratio built
+# from two measurements is a ratio of nothing.
+#
+# 🔴 WHAT THIS MUST NOT DO, and the reason it keeps more than it looks like it
+# should: a cheap payload that can LIE is worse than an expensive one. Every
+# null-vs-zero discriminator survives verbatim — `summary` (whose `waiting`
+# block carries the tri-state and `unmeasured_reasons`), `caveats` IN FULL,
+# `clawgate_queue`, `ledger`/`fuzzyclaw` section status, and per host
+# `reachable`/`windows_measured`/`captures_status`. `caveats` costs ~586 tokens
+# and is the one thing standing between a cold agent and a fabricated zero; it
+# is the LAST thing to trim, not the first. What goes is duplication and
+# human-facing identity, never a measurement's provenance.
+LEAN_ROW_FIELDS = (
+    # reach it. `label_source` rides with `label` for the same reason
+    # `age_source` rides with `age_secs`: it is PROVENANCE, and this view's own
+    # rule is that duplication and human-facing identity go while a
+    # measurement's provenance never does. `resolve_label` says a row labelled
+    # `main` from a real directory and one labelled `main` because the cwd
+    # yielded nothing "are distinguishable by `label_source`, not by the
+    # label" — dropping it made exactly that pair unreadable. An audit caught
+    # the inconsistency between the rule and the field list; the rule won.
+    # 🔴 `kind` is a DISCRIMINANT, not duplication — it is what tells a reader
+    # whether the null `session`/`window_index` on a row is "not measured" or
+    # "this entity has no such thing". Dropping it would leave a cluster row
+    # indistinguishable from a tmux row whose host went unreachable, which is
+    # the ambiguity this whole view exists to remove.
+    "kind",
+    "host", "session", "window_index", "label", "label_source", "hotkey",
+    # what it is working on, and WHICH agent is doing it
+    "path", "task", "runtime",
+    # what state it is in
+    "claude", "busy", "status", "age_secs", "age_source",
+    # whether it needs the operator — `waiting_status` is NOT optional, it is
+    # the discriminant that makes `waiting_probable: null` readable
+    "waiting_probable", "waiting_signals", "waiting_status",
+    # 🔴 whether work is PARKED here — a different question from `waiting`, and
+    # the field an agent reads to triage without opening the pane. Its status
+    # is as un-optional as `waiting_status`: it is the only thing that makes a
+    # null `unsent_prompt` readable as "measured, empty" rather than "never
+    # looked". Dropping the text to save bytes would leave the lean reader with
+    # a boolean it cannot act on, which is the LOSSY-table failure this view
+    # exists to replace.
+    "unsent_prompt", "unsent_prompt_status",
+    # the carrier into ClickHouse
+    "claude_session_id",
+)
+
+# Per-host keys the lean view keeps. `ssh_target` and `live_window_ids` are
+# dropped: the first is fixed config the caller already knows, the second is a
+# 346 B array no consumer reads. The rest are measurement provenance.
+LEAN_HOST_FIELDS = (
+    "reachable", "error", "windows_measured", "windows_error",
+    "captures_measured", "captures_status", "captures_seen",
+)
+
+
+def lean_report(report) -> dict:
+    """Project a full report onto the agent-shaped view. PURE.
+
+    Lossless for every field it keeps — values are passed through untouched and
+    untruncated, which is the property the TABLE cannot offer at any price.
+    """
+    out = {k: v for k, v in report.items() if k != "hosts"}
+    out["view"] = "lean"
+    # 🔴 The field lists travel IN the payload, and they name what this view
+    # CARRIES — so any key absent from a row was omitted BY THE VIEW, not
+    # measured as null. Without them a consumer that finds no `window_id`
+    # cannot tell those two apart, which reintroduces exactly the ambiguity the
+    # rest of this tool exists to remove.
+    #
+    # An earlier draft described these three times as naming "what was
+    # omitted", which is the inverse of what they hold. The sole documented
+    # consumer is an LLM reading the payload against that sentence, so an
+    # inverted description is not a cosmetic slip.
+    #
+    # HOSTS GET ONE TOO. The rows had a list and the hosts did not, which left
+    # the omitted-vs-null argument true of rows and false of the host entries
+    # that carry most of the measurement provenance.
+    out["lean_row_fields"] = list(LEAN_ROW_FIELDS)
+    out["lean_host_fields"] = list(LEAN_HOST_FIELDS)
+    out["hosts"] = {}
+    for name, h in (report.get("hosts") or {}).items():
+        entry = {k: h[k] for k in LEAN_HOST_FIELDS if k in h}
+        entry["windows"] = [
+            {k: r[k] for k in LEAN_ROW_FIELDS if k in r}
+            for r in (h.get("windows") or [])
+        ]
+        out["hosts"][name] = entry
+    return out
+
+
+def render_not_measured(report) -> list:
+    """The `▸ NOT MEASURED HERE` section — one line per population, naming the
+    skill that owns it.
+
+    🔴 PRINTED UNCONDITIONALLY, in every state, for the same reason
+    `render_clawgate_queue` is: the reader this exists for is the one who does
+    not know the population exists. A section that appears only sometimes is one
+    a reader learns not to expect, and the run where it would have mattered is
+    exactly the run where everything else looked clean.
+
+    🔴 AND IT IS EMPTY-SAFE IN THE HONEST DIRECTION. If every population has
+    since gained a measurement the list is empty, and the section says the axis
+    is covered rather than printing a bare heading over nothing — a heading with
+    no rows reads as a failed render, not as an all-clear.
+    """
+    pops = (report or {}).get("not_measured")
+    if pops is None:
+        # No derivation ran. Not the same as "everything is measured", and the
+        # difference is the whole discipline of this file.
+        return ["▸ NOT MEASURED HERE: UNKNOWN — this report carries no "
+                "`not_measured` key, so the scope of what was left out was "
+                "never derived (this is NOT a claim that nothing was)"]
+    if not pops:
+        return ["▸ NOT MEASURED HERE: none — every enumerated population now "
+                "has a measurement in this report"]
+    out = ["▸ NOT MEASURED HERE — these are NOT zero, they were never looked "
+           "at; the owning skill has each:"]
+    for p in pops:
+        out.append("  {:<26} -> /{}".format(p.get("population"),
+                                            p.get("owner_skill")))
+    return out
+
+
+def render_caveats(report) -> list:
+    """🔴 Every structured caveat, in the OUTPUT, unconditionally — one line
+    each, and the count is whatever CAVEATS holds (a test pins the relationship
+    rather than a literal, so adding one cannot silently drop another).
+
+    They were documented in the skill body only, and a dogfooding agent credited
+    reading that body with not mixing two different session populations — which
+    is exactly the protection an agent running the script cold does not get.
+    Printed always, not "when relevant": a caveat that appears only sometimes is
+    one a reader learns not to expect, and both apply to every scan (the
+    detection rule to every row, the fuzzyclaw scope to every remote row —
+    including the case where the remote host answered with zero rows).
+
+    ONE LINE PER ENTRY IN `CAVEATS`, after the summary, so the per-row table is
+    untouched. Deliberately NOT a number: this docstring said "two lines" for
+    months while the function emitted six, and a count restated in prose is a
+    second copy of a fact that only the code owns —
+    `test_the_caveat_footer_is_one_line_per_CAVEAT_pinned_both_ways` pins the
+    relationship instead.
+    """
+    cav = (report or {}).get("caveats") or CAVEATS
+    det = cav.get("claude_detection") or {}
+    fz = cav.get("fuzzyclaw_scope") or {}
+    led = cav.get("ledger_scope") or {}
+    wt = cav.get("waiting_signal") or {}
+    kd = cav.get("kind_scope") or {}
+    un = cav.get("unsent_prompt") or {}
+    return [
+        # 🔴 The signal set is ENUMERATED in the footer, because `WAIT: no` is
+        # the cell a reader will over-trust. Naming the three things that were
+        # looked for is what turns it from "nothing needed here" into "none of
+        # these three matched", which is all it ever meant.
+        "  caveat[waiting_signal]: `waiting_probable` is a screen-scrape for "
+        "{} ONLY, on claude rows only — `false` means none matched, NOT that "
+        "the window needs nothing; text typed at the `❯` prompt is "
+        "deliberately EXCLUDED, so a window one Enter away reads `no` here and "
+        "is reported under `unsent_prompt` instead "
+        "(reference/waiting-signal.md)".format(
+            "/".join(wt.get("signals") or WAITING_SIGNALS)),
+        # `CLASS`, matching the column header. It said `KIND`, which now names
+        # a different field with a different vocabulary.
+        "  caveat[claude_detection]: CLASS is `pane_current_command =~ /{}/` — "
+        "shallower than the /proc walk in scripts/lib/claude_sessions.py; a "
+        "claude under a wrapper shell reads as `shell`".format(
+            det.get("pattern", "claude")),
+        "  caveat[fuzzyclaw_scope]: fuzzyclaw is {} — REMOTE rows carry null "
+        "{}. This says NOTHING about age/session-id/stale".format(
+            fz.get("scope", "local_host_only"),
+            "/".join(fz.get("null_fields_on_remote_rows") or [])),
+        # 🔴 Printed beside the one it corrects, on purpose. The line above was
+        # read for months as "remote rows have no age", which stopped being true
+        # the moment the ledger shipped; leaving it alone and adding this one
+        # would have left both readings available.
+        "  caveat[ledger_scope]: age_secs/claude_session_id come from the "
+        "agent ledger, read {} — a REMOTE row has both and CAN be `stale`. A "
+        "null age means NO WRITER HAS RECORDED that window, not age 0; "
+        "`age_source` names the writer".format(led.get("scope", "per_host")),
+        # 🔴 The entity axis, printed for the same reason as the three above:
+        # `kind` is now on every row, and "only tmux rows here" must not be
+        # read as "no cluster work exists".
+        #
+        # 🔴 BOTH BRANCHES EXIST BECAUSE THE EMPTY SET IS REACHABLE. `gather`
+        # derives `kinds_produced` from the rows, so once every enumerated kind
+        # IS produced the set difference is empty and the single-sentence
+        # version rendered "—  is ENUMERATED but NOT PRODUCED": a blank subject
+        # in a sentence whose whole job is naming what is missing. A caveat
+        # that degrades into a grammatically-broken half-claim is worse than
+        # one that says nothing, because it still reads as a claim.
+        # 🔴 Printed directly under the `waiting_signal` line it completes. That
+        # line tells a reader the `❯` prompt is EXCLUDED; without this one
+        # beside it, the honest reading of the pair is "so nothing reports it",
+        # which is now false and would send an operator back to opening panes
+        # by hand — the exact cost the measurement was taken to remove.
+        "  caveat[unsent_prompt]: text typed at the `❯` prompt and never sent "
+        "IS measured, separately from `waiting` and never summed into it, on "
+        "{} — `unsent_prompt: null` is an EMPTY BOX only when "
+        "`unsent_prompt_status` is `ok` ({}); a shell pane is never scraped and "
+        "a modal reports `no_input_box`".format(
+            un.get("scope", "claude_rows_only"),
+            "/".join(un.get("statuses") or UNSENT_STATUSES)),
+        "  caveat[kind_scope]: " + _fmt_kind_scope(kd),
+    ]
+
+
+def _fmt_kind_scope(kd) -> str:
+    """The `kind_scope` caveat's sentence, split out so every branch is
+    reachable from a test without building a whole report.
+
+    🔴 `[]` IS A MEASUREMENT AND MUST NOT FALL BACK TO A LITERAL. The first
+    version read `kd.get("kinds_produced") or ["tmux"]`, and an empty list is
+    FALSY — so a scan that measured zero rows rendered `rows in this scan are
+    kind=tmux` over `summary: 0 windows`. Reachable today, with no cluster row
+    anywhere: both hosts unreachable, or `--claude-only` on a host with no
+    claude windows. That is a literal masquerading as a measurement — the exact
+    defect this caveat was made measured to kill — reintroduced one function
+    downstream by an `or` that cannot tell "not supplied" from "measured none".
+    So the two cases are separated explicitly, and only a MISSING key falls
+    back.
+
+    🔴 `kinds_excluded_by_filter` IS READ IN EVERY MEASURED BRANCH. Without it
+    this sentence attributes to the BUILD what a filter did: `--claude-only`
+    runs before the derivation, so a scan that produced cluster rows and then
+    dropped them rendered "cluster is ENUMERATED but NOT PRODUCED" — false in
+    all three of its clauses.
+
+    🔴 AND IT IS **NOT** TREATED LIKE `kinds_produced`. That distinction is
+    load-bearing and this docstring used to get it backwards, claiming a MISSING
+    key and an EMPTY list "must not collapse" three lines above an `or []` that
+    collapses them. What differs is what the two keys are ASKED:
+
+      - `kinds_produced` is asked WHICH KINDS THE SCAN SAW, and missing vs empty
+        are different answers — "no scan happened, describe the build" vs "a
+        scan measured zero rows". Different sentences, so an `or` there is the
+        literal-masquerading-as-a-measurement bug above.
+      - `kinds_excluded_by_filter` is asked ONLY WHICH WHOLE KINDS A FILTER
+        TOOK, and every clause below is guarded on `if filtered:`. Missing ("no
+        filter ran") and `[]` ("one ran and took no whole kind") agree exactly
+        on that: no kind's absence is the filter's doing, so there is nothing
+        for the filter clause to say and the head/tails are identical. Rendering
+        them differently would mean inventing a sentence about a filter that
+        removed nothing.
+
+    The distinction survives where it is actually needed — `summary` publishes
+    `None` vs `[]` verbatim, and `test_session_manager.py` pins all three states
+    as distinguishable in every JSON surface. It is collapsed HERE, in prose
+    that only ever asks the yes/no question, deliberately.
+    """
+    produced = kd.get("kinds_produced")
+    filtered = list(kd.get("kinds_excluded_by_filter") or [])
+    if produced is None:
+        # 🔴 NO MEASUREMENT SUPPLIED — reached by any caveats dict without a
+        # `kinds_produced` key, which is the bare CAVEATS constant (the key is
+        # deliberately absent there) and any report that never went through
+        # `measured_caveats`. The sentence must then describe what this tool
+        # produces BY CONSTRUCTION and must NOT say "in this scan", because no
+        # scan happened.
+        #
+        # An earlier comment here named the bare-constant caller while the
+        # constant still carried a literal `kinds_produced`, so that caller
+        # took the MEASURED branch and this one was unreachable: the comment
+        # described a path its own code could not take, and the false sentence
+        # it claimed to have fixed was still being rendered. A comment is a
+        # claim, and this one was wrong about reachability, which is the
+        # hardest kind to notice.
+        return _kind_scope_sentence(
+            "this tool produces kind={} rows by construction (no scan "
+            "measured here)", "this build",
+            list(KINDS_PRODUCED_BY_CONSTRUCTION),
+            list(kd.get("kinds_enumerated") or KINDS))
+    produced = list(produced)
+    enumerated = list(kd.get("kinds_enumerated") or KINDS)
+    if not produced:
+        # 🔴 ZERO ROWS. Naming any kind here would be inventing one. The reader
+        # most likely to hit this is the one whose hosts are unreachable, and
+        # the wrong thing to tell them is which kinds were "in this scan".
+        #
+        # 🔴 THE FILTERED ZERO IS A DIFFERENT FACT AND GETS A DIFFERENT
+        # SENTENCE. "NO rows were measured in this scan" is FALSE of a
+        # `--claude-only` run over a shell-only host: rows were measured, and
+        # then removed. Saying it anyway attributes an empty table to the hosts
+        # when it belongs to the flag — the same misattribution as the
+        # NOT-PRODUCED tail below, one branch over, and reachable TODAY with no
+        # cluster row anywhere.
+        if filtered:
+            return ("every row this scan measured was REMOVED BY A FILTER "
+                    "(kind={}), so no kind survives to be reported — rows were "
+                    "measured and dropped, NOT absent, and this says nothing "
+                    "about what an unfiltered scan holds; clawgate is reported "
+                    "separately under CLAWGATE QUEUE".format("/".join(filtered)))
+        return ("NO rows were measured in this scan, so no kind was observed — "
+                "this is NOT a claim that any kind is absent, and the enumerated "
+                "kinds ({}) say nothing about what a reachable host holds; "
+                "clawgate is reported separately under CLAWGATE QUEUE".format(
+                    "/".join(enumerated)))
+    return _kind_scope_sentence("rows in this scan are kind={}", "this scan",
+                                produced, enumerated, filtered)
+
+
+def _kind_scope_sentence(head_fmt, subject, produced, enumerated,
+                         filtered=()) -> str:
+    """Build the non-empty `kind_scope` sentence. ONE builder for both the
+    measured and the by-construction heads, so the two cannot drift into
+    saying different things about the same relationship.
+
+    🔴 `subject` EXISTS BECAUSE SHARING THE BUILDER CREATED A FALSE SENTENCE.
+    The all-produced tail hardcoded "so THIS SCAN covers the whole entity
+    axis". Under the by-construction head — which explicitly says "no scan
+    measured here" — that produced a sentence contradicting itself eight words
+    later. It was unreachable the moment the builder was shared and becomes
+    reachable the moment `KINDS_PRODUCED_BY_CONSTRUCTION` gains `cluster`,
+    i.e. exactly when writer 3 lands, which is what this caveat is FOR.
+    Consolidating two strings is only safe where they say the same thing; the
+    part that differed had to become a parameter, not a coincidence.
+
+    🔴 A KIND A FILTER REMOVED IS SUBTRACTED FROM `unproduced` BEFORE ANYTHING
+    IS SAID ABOUT IT. It is missing from `produced` for a reason that has
+    nothing to do with the build, so both of the tails below would be lies
+    about it: "ENUMERATED but NOT PRODUCED" denies rows that exist, and "every
+    enumerated kind IS produced" claims a coverage the render does not have.
+    It gets its own clause naming the filter as the cause.
+    """
+    filtered = list(filtered)
+    unproduced = [k for k in enumerated
+                  if k not in produced and k not in filtered]
+    head = head_fmt.format("/".join(produced))
+    clauses = []
+    if filtered:
+        clauses.append(
+            "a FILTER REMOVED every kind={} row this scan produced, so their "
+            "absence above is the FILTER's doing and NOT a measured absence of "
+            "that work".format("/".join(filtered)))
+    if unproduced:
+        clauses.append(
+            "{} is ENUMERATED but NOT PRODUCED, so no such row appears and its "
+            "absence is NOT a measured zero".format("/".join(unproduced)))
+    elif not filtered:
+        # Every enumerated kind is present. Saying "NOT PRODUCED" here would be
+        # false; saying nothing would drop the pointer to where clawgate lives.
+        # 🔴 GUARDED ON `not filtered` TOO. A kind a filter removed is not
+        # "produced and present", so this coverage claim would be false printed
+        # beside the filter clause — and it is the claim a reader uses to decide
+        # the axis is fully covered.
+        clauses.append(
+            "every enumerated kind IS produced, so {} covers the whole entity "
+            "axis".format(subject))
+        # The one branch that says nothing is MISSING keeps the pointer's
+        # original, longer phrasing. Not consolidated with the shorter one
+        # below: both are pinned whole by the suite, and rewording either buys
+        # nothing while breaking a machine-readable claim.
+        clauses.append("clawgate approval state is still reported separately "
+                       "under CLAWGATE QUEUE")
+        return head + " — " + "; ".join(clauses)
+    # Every other branch names something absent, and ends with the pointer to
+    # where clawgate IS reported — or the reader concludes this tool cannot say
+    # anything about cluster work at all.
+    clauses.append("clawgate is reported separately under CLAWGATE QUEUE")
+    return head + " — " + "; ".join(clauses)
 
 
 def render_session_history(hist) -> str:
@@ -1191,9 +3932,23 @@ def validate_target(target: str) -> str:
     return t
 
 
-def tail_argv(target, lines=DEFAULT_TAIL_LINES):
-    return ["tmux", "capture-pane", "-t", validate_target(target),
-            "-p", "-e", "-S", f"-{int(lines)}"]
+def tail_argv(target, lines=DEFAULT_TAIL_LINES, plain=False):
+    """🔴 `-e` (keep ANSI) is what `--plain` drops, at the SOURCE.
+
+    Every consumer of `tail` was piping the output through the same
+    `sed 's/\\x1b\\[[0-9;]*m//g'` — a strip that is easy to get subtly wrong
+    (OSC and CSI sequences that are not SGR survive that pattern) and that
+    every caller re-invented. `tmux capture-pane` without `-e` never emits the
+    escapes in the first place, so there is nothing to strip. Same defect class
+    fixed in `agent-ops` in #413; the fix did not generalise to this sibling
+    because the two do not share a capture path.
+
+    The default stays `-e` so an existing caller's bytes do not change under it.
+    """
+    argv = ["tmux", "capture-pane", "-t", validate_target(target), "-p"]
+    if not plain:
+        argv.append("-e")
+    return argv + ["-S", f"-{int(lines)}"]
 
 
 # 🔴 `tmux` says this when the HOST answered fine and the TARGET does not exist.
@@ -1207,7 +3962,7 @@ _NO_SUCH_TARGET_RE = re.compile(
 
 
 def tail_window(target, host, local_host, runner=None,
-                lines=DEFAULT_TAIL_LINES) -> dict:
+                lines=DEFAULT_TAIL_LINES, plain=False) -> dict:
     """Capture one window's scrollback.
 
     FOUR outcomes, never two: `reachable=False` (the host said nothing),
@@ -1225,7 +3980,8 @@ def tail_window(target, host, local_host, runner=None,
     exists and its scrollback is empty", the one thing that code is documented
     to mean. Two different facts, one exit code, and the doc matched neither.
     """
-    res = run_tmux(tail_argv(target, lines), host, local_host, runner=runner)
+    res = run_tmux(tail_argv(target, lines, plain=plain), host, local_host,
+                   runner=runner)
     if res.get("no_server"):
         # The host answered. There is no tmux server, so there is no such
         # window — but the reason is not a bad target, and saying so keeps the
@@ -1266,7 +4022,54 @@ def build_parser():
                    default=DEFAULT_STALE_THRESHOLD)
     p.add_argument("--no-ch", action="store_true",
                    help="skip ClickHouse entirely (the client is never built)")
-    p.add_argument("--no-fuzzyclaw", action="store_true")
+    # 🔴 fuzzyclaw is OPT-IN. See `gather`'s docstring for the measurement.
+    # `--no-fuzzyclaw` is KEPT and still means off — it is now the default, so
+    # every existing invocation keeps its exact behaviour. Passing both is not
+    # an error: the explicit "off" wins and `main` says so on stderr, because a
+    # silently-ignored flag is how a caller concludes it was honoured.
+    p.add_argument("--fuzzyclaw", action="store_true",
+                   help="opt IN to the fuzzyclaw task join (default off: "
+                        "measured 29 live of 401 files, all 29 reading "
+                        "`paused`, on a source CLAUDE.md marks UNTRUSTED)")
+    p.add_argument("--no-fuzzyclaw", action="store_true",
+                   help="explicitly off — now the DEFAULT; kept so existing "
+                        "callers keep working. Wins over --fuzzyclaw.")
+    # 🔴 The ledger is ON by default and this flag is the ESCAPE HATCH, not the
+    # switch — it exists so a scan can be run against a host whose ledger read is
+    # misbehaving, and so a test can prove the ledger is what supplies the age.
+    # Off, `report["ledger"]["status"]` is `skipped` and every count is null.
+    # 🔴 The AGENT-SHAPED view. See `lean_report` for the measurement behind it.
+    # It trims ROWS (86% of the payload) to the fields that answer "what is being
+    # worked on, what is waiting on me", untruncated — and keeps every
+    # null-vs-zero discriminator, because a cheap payload that can lie is worse
+    # than an expensive one.
+    p.add_argument("--lean", action="store_true",
+                   help="JSON only: the agent-shaped view — rows trimmed to "
+                        "the fields that answer the tool's question, "
+                        "untruncated, with every measurement discriminator and "
+                        "the caveats kept. `lean_row_fields`/`lean_host_fields` "
+                        "in the payload name what this view CARRIES, so a key "
+                        "absent from a row was omitted by the view rather than "
+                        "measured as null.")
+    p.add_argument("--no-ledger", action="store_true",
+                   help="skip the per-host agent activity ledger read. Rows "
+                        "then fall back to fuzzyclaw for age/session-id, which "
+                        "is off by default — i.e. no ages at all, the #419 "
+                        "regression, reproducible on demand.")
+    p.add_argument("--no-capture", action="store_true",
+                   help="skip the per-host pane capture. Every row's "
+                        "waiting_probable is then null (never false) and "
+                        "summary.waiting.probable is null, never 0.")
+    p.add_argument("--plain", action="store_true",
+                   help="tail: strip ANSI at the source (drops tmux's -e) "
+                        "instead of making every caller sed it out")
+    p.add_argument("--claude-only", action="store_true",
+                   help="scan/list/detail: drop the SHELL rows (CLASS=shell). "
+                        "A cluster dispatch is an agent, not a shell, so it is "
+                        "KEPT. Every summary count then describes the FILTERED "
+                        "set; summary.excluded_shells says how many were "
+                        "dropped and summary.kinds_excluded_by_filter names "
+                        "any kind removed entirely. No effect on `tail`.")
     p.add_argument("--lines", type=int, default=DEFAULT_TAIL_LINES,
                    help="tail: scrollback lines")
     return p
@@ -1277,8 +4080,26 @@ def main(argv=None):
         sys.argv[1:] if argv is None else list(argv))
     hosts = HOST_NAMES if args.host == "all" else (args.host,)
     local = local_host_label()
+    # Explicit-off WINS, and the collision is reported rather than resolved in
+    # silence — the caller asked for two incompatible things and gets told
+    # which one ran.
+    if args.fuzzyclaw and args.no_fuzzyclaw:
+        print("(--no-fuzzyclaw and --fuzzyclaw both given: OFF wins)",
+              file=sys.stderr)
+    use_fuzzyclaw = bool(args.fuzzyclaw) and not args.no_fuzzyclaw
 
     if args.subcommand == "tail":
+        # `tail` targets ONE window by name, so there is nothing to filter. A
+        # silently ignored flag is how a caller concludes it was honoured.
+        if args.claude_only:
+            print("(--claude-only has no effect on `tail`: it targets one "
+                  "named window)", file=sys.stderr)
+        # `tail` RETURNS before the shared --lean notice below, so it needs its
+        # own. Silently ignoring it here is the exact rule this flag's own
+        # justification cites, broken where the precedent sits one line up.
+        if args.lean:
+            print("(--lean has no effect on `tail`: it returns one window's "
+                  "scrollback, not rows)", file=sys.stderr)
         if not args.target:
             print("tail requires <session>:<window>", file=sys.stderr)
             return EXIT_USAGE
@@ -1293,8 +4114,12 @@ def main(argv=None):
         # names the host actually searched plus how to search the other one.
         host_defaulted = args.host not in HOST_NAMES
         host = local if host_defaulted else args.host
-        res = tail_window(args.target, host, local, lines=args.lines)
+        res = tail_window(args.target, host, local, lines=args.lines,
+                          plain=args.plain)
         res["host_defaulted"] = host_defaulted
+        # The consumer has to know whether `text` carries escapes; a JSON
+        # reader cannot tell an ANSI-free pane from a stripped one.
+        res["plain"] = bool(args.plain)
 
         def _tail_json():
             """🔴 `--json` must print on the FAILURE paths too.
@@ -1308,7 +4133,7 @@ def main(argv=None):
             stays on stderr, so a JSON reader is unaffected either way.
             """
             if args.json:
-                print(json.dumps(res, indent=2))
+                print(json.dumps(res, separators=(",", ":")))
 
         if not res["reachable"]:
             # The host said nothing at all. This is the unmeasured case.
@@ -1339,7 +4164,7 @@ def main(argv=None):
             _tail_json()
             return EXIT_USAGE
         if args.json:
-            print(json.dumps(res, indent=2))
+            print(json.dumps(res, separators=(",", ":")))
         else:
             sys.stdout.write(res["text"])
             # The defaulted host is recorded in the JSON but was INVISIBLE in
@@ -1351,10 +4176,15 @@ def main(argv=None):
                       file=sys.stderr)
         return EXIT_OK if res["text"].strip() else EXIT_EMPTY
 
+    if args.plain:
+        print("(--plain applies to `tail` only)", file=sys.stderr)
     report = gather(hosts=hosts, local_host=local,
                     use_ch=(not args.no_ch and args.subcommand != "list"),
-                    use_fuzzyclaw=not args.no_fuzzyclaw,
-                    threshold=args.stale_threshold)
+                    use_fuzzyclaw=use_fuzzyclaw,
+                    use_ledger=not args.no_ledger,
+                    use_capture=not args.no_capture,
+                    threshold=args.stale_threshold,
+                    claude_only=args.claude_only)
 
     if args.subcommand == "detail":
         if not args.target:
@@ -1369,13 +4199,38 @@ def main(argv=None):
         report["session_history"] = detail_history(report,
                                                    use_ch=not args.no_ch)
 
+    if args.lean and not args.json:
+        print("(--lean shapes the JSON payload; it has no effect without "
+              "--json)", file=sys.stderr)
+    # 🔴 COMPUTED BEFORE THE PROJECTION, deliberately. `exit_code_for` reads
+    # `hosts[*].reachable`, so running it on the LEAN report would make the exit
+    # CONTRACT silently depend on `reachable` staying in `LEAN_HOST_FIELDS` — a
+    # coupling nothing states and no test would notice, where the failure is a
+    # scan that reports success over an unreachable fleet. The code is a fact
+    # about the SCAN, not about which view was rendered.
+    code = exit_code_for(report)
     if args.json:
-        print(json.dumps(report, indent=2, sort_keys=True, default=str))
+        if args.lean:
+            report = lean_report(report)
+        # 🔴 COMPACT, NOT INDENTED, and the reason is measured. The ONLY
+        # consumer of this tool is an agent — 0 interactive shell invocations
+        # in 30 days against 55 agent references (spec §7), confirmed by the
+        # operator 2026-08-14 — and an agent pays for output by the TOKEN.
+        # Measured on ONE 75-row scan: 86,066 B indented against 56,052 B
+        # compact — 34.9% of the payload was whitespace for a reader who does
+        # not exist, ~7,500 tokens per call. (An earlier draft said 29%, from a
+        # byte pair taken across two DIFFERENT scans; an audit re-measured a
+        # single scan at 34.9%, which is what SKILL.md quotes.)
+        # `sort_keys` STAYS: it costs nothing and makes two scans diffable.
+        # A human who wants it readable can pipe it through `jq .`, which is
+        # what they would do anyway.
+        print(json.dumps(report, sort_keys=True, default=str,
+                         separators=(",", ":")))
     else:
         print(render_table(report))
         if "session_history" in report:
             print(render_session_history(report["session_history"]))
-    return exit_code_for(report)
+    return code
 
 
 DEFAULT_HISTORY_LIMIT = 10
@@ -1390,6 +4245,22 @@ def no_session_reason(report) -> str:
     UNMEASURED` and, a few lines later, a confident measured absence about that
     same unmeasured set. Only the LAST branch here is a measured absence; every
     branch above it says plainly that nothing was measured.
+
+    🔴 KNOWN INCOMPLETE, stated rather than left to be discovered. There are now
+    TWO suppliers of `claude_session_id` — the agent ledger (which WINS; see
+    `fold_windows`) and fuzzyclaw — and every branch here reasons about fuzzyclaw
+    alone. The consequence is bounded and in the SAFE direction: each branch
+    either declines to claim a measured absence, or claims one that is true of
+    fuzzyclaw while the ledger may separately have answered. So it can understate
+    what is known; it cannot assert a measured absence the data does not support,
+    which is the failure this function exists to prevent.
+
+    Making it ledger-aware means re-deciding twelve pinned branch selections
+    (including `test_the_unmeasured_reasons_are_PAIRWISE_DISTINCT`), so it is a
+    follow-up rather than a rider on the ledger PR. What DID change here is
+    wording only: the remote branch used to say "no task file was ever searched
+    for it", which reads as "nothing was searched" now that the ledger IS read
+    per host. It says "no fuzzyclaw task file" instead.
 
     Pure — it reads only facts the report already carries (`fuzzyclaw.status`,
     `fuzzyclaw.slot_conflicts`, `local_host`, and each row's `host`), so it is
@@ -1422,9 +4293,9 @@ def no_session_reason(report) -> str:
                      if r.get("host") != local})
     if remote:
         return (f"fuzzyclaw is read on the LOCAL host only ({local}) and this "
-                f"target matches a window on {', '.join(remote)}, so no task "
-                "file was ever searched for it — this is NOT a measured "
-                "absence")
+                f"target matches a window on {', '.join(remote)}, so no "
+                "fuzzyclaw task file was ever searched for it — this is NOT a "
+                "measured absence")
     if st == "unmeasured":
         return ("the fuzzyclaw intersection never ran, so no claude_session_id "
                 "could be measured for this window — this is NOT a measured "
@@ -1509,6 +4380,14 @@ def filter_report(report, session, window_index) -> dict:
                          and str(r.get("window_index")) == str(window_index)]
         out["hosts"][name] = h2
     out["summary"] = summarize(out)
+    # 🔴 THE CAVEATS ARE RE-DERIVED HERE TOO. This path re-runs `summarize` and
+    # then renders through `render_caveats`, so leaving the inherited caveats
+    # alone made `kind_scope` a claim about the FULL scan printed under a
+    # ONE-ROW table — the disagreement between the line and the table above it
+    # that measuring it was supposed to make impossible. `gather` was fixed and
+    # this second summarize call was not; a rule enforced at one of its two
+    # sites is the failure this whole change keeps re-finding.
+    out["caveats"] = measured_caveats(out)
     return out
 
 

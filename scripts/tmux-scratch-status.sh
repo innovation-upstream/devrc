@@ -1,19 +1,32 @@
 #!/usr/bin/env bash
 # Scratch slot indicator for tmux status-left.
-# Renders the 20 scratch slots as their hotkey letter, colored to match the
-# popup border color set in .tmux.conf, so the status bar acts as a legend
-# mapping popup color -> hotkey. First 6 (g/G/v/V/p/P) are excluded — the
-# original slots predate the legend and don't need visual reminder.
+# Renders the 20 scratch slots as their hotkey letter + window count, colored
+# to match the popup border color set in .tmux.conf, so the status bar acts
+# as a legend mapping popup color -> hotkey. First 6 (g/G/v/V/p/P) are
+# excluded -- the original slots predate the legend and don't need visual
+# reminder.
 #
-# A leading ● flags slots that have a window waiting for user input
-# (status="waiting" in fuzzyclaw's task state, filtered against currently
-# existing tmux windows so stale entries don't trigger).
+# 🔴 THE ● WAITING MARKER IS GONE, and this is the note that stops it coming
+# back. It keyed on fuzzyclaw's `status == "waiting"`, and that field could not
+# answer: measured 2026-08-14 across 407 task files -- 301 `done`, 87 `paused`,
+# 18 `running`, and exactly ONE `waiting`. So the marker rendered nothing while
+# `session-manager` measured FIVE windows probably waiting on the operator
+# (1 context-exhausted, 1 selection-menu, 3 trailing-question). A marker that
+# says "nothing needs you" when five things do is worse than no marker.
 #
-# Output examples:
-#   o O n N w W m M i I u U y Y     — all slots exist, nothing waiting
-#   o ●O n N w W m M i I u U y Y    — Orchid has a waiting prompt
-
-# Scratchpad slot table (session:key:color:name) — sourced from the ONE source of
+# It was NOT migrated to the agent activity ledger's waiting signal, which is
+# strictly better: the operator states they do not use this marker. A surface
+# nobody reads does not earn a 45s timer and a cache -- and the honest fix for a
+# dead lying indicator is deletion, not a better lie. See
+# claudedocs/spec-agent-activity-ledger.md §5 for the inversion this declines.
+#
+# The LEGEND is deliberately kept: it maps popup colour -> hotkey, which is a
+# different feature that never depended on fuzzyclaw.
+#
+# Output example:
+#   o2 O1 n1 N1 w3 W2 m1 M1 i5 I1 u1 U1 y1 Y1  -- letter + window count
+#
+# Scratchpad slot table (session:key:color:name) -- sourced from the ONE source of
 # truth in scratch-slots.sh, then joined for awk (the name field is ignored here).
 _d="$(dirname "$0")"
 if   [ -f "$_d/scratch-slots.sh" ];      then . "$_d/scratch-slots.sh"
@@ -21,21 +34,8 @@ elif [ -f "$_d/tmux-scratch-slots.sh" ]; then . "$_d/tmux-scratch-slots.sh"
 fi
 slots_str="$(printf '%s ' "${SCRATCH_SLOTS[@]}")"
 
-# Sessions with at least one window waiting for input, space-padded for
-# substring matching in awk. Empty if jq / task files are missing.
-waiting=""
-if command -v jq >/dev/null 2>&1 && compgen -G "$HOME/.tmux/tasks/*.json" >/dev/null; then
-    current_wids=" $(tmux list-windows -a -F '#{window_id}' 2>/dev/null | tr '\n' ' ')"
-    waiting=" $(jq -r -s --arg wids "$current_wids" '
-        map(. as $t | select($t.status == "waiting" and ($wids | contains(" " + $t.window_id + " "))))
-        | map(.tmux_session)
-        | unique
-        | join(" ")
-    ' "$HOME"/.tmux/tasks/*.json 2>/dev/null) "
-fi
-
-tmux list-sessions -F '#{session_name}' 2>/dev/null \
-  | awk -v waiting="$waiting" -v slots_str="$slots_str" '
+tmux list-sessions -F '#{session_name} #{session_windows}' 2>/dev/null \
+  | awk -v slots_str="$slots_str" '
     BEGIN {
         # session:key:color:name from scratch-slots.sh (name unused here).
         n = split(slots_str, slots, " ")
@@ -46,20 +46,18 @@ tmux list-sessions -F '#{session_name}' 2>/dev/null \
             color[p[1]]  = p[3]
         }
     }
-    { exists[$1] = 1 }
+    { counts[$1] = $2 }
     END {
         sep = ""
         for (i = 7; i <= n; i++) {
             s = sess[i]
-            if (s in exists) {
-                style  = color[s] ",bold"                              # slot color, bold
-                marker = (index(waiting, " " s " ") > 0) ? "●" : ""    # waiting indicator
+            if (s in counts) {
+                style = color[s] ",bold"                               # slot color, bold
+                printf "%s#[fg=%s]%s%d#[default]", sep, style, key[s], counts[s]
             } else {
-                style  = "#504945"                                     # dim: session not started
-                marker = ""
+                style = "#504945"                                      # dim: session not started
+                printf "%s#[fg=%s]%s#[default]", sep, style, key[s]
             }
-            # Single color-format printf for both states (deduped).
-            printf "%s#[fg=%s]%s%s#[default]", sep, style, marker, key[s]
             sep = " "
         }
     }

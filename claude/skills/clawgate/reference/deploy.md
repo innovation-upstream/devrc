@@ -14,7 +14,7 @@ because the cluster still pulls the old pinned tag. Only step 3's pin bump deplo
 Ground case: the vendored kubeclaw chart re-sync (0.7.0 → 0.7.1, PR #274) merged to `trunk` and sat
 there inert — the chart is `//go:embed`ded into the binary (`internal/agents/embed.go`), so it could
 not reach the cluster until 0.7.82 was built and pushed. **`git log` on `trunk` is NOT evidence a
-code change is live; the live pin and `/health` are.**
+code change is live; the live pin and `clawgatectl health` are.**
 
 ## 🔴 ONE commit path: a dedicated git WORKTREE off `origin/trunk`, ending on `trunk` (= live deploy)
 homelab-talos is GitOps from `trunk` — **committing deploys the manifest** (see above). Do **NOT**
@@ -55,8 +55,8 @@ make e2e   # 83 pass / 2 skip; a fresh worktree npm-installs e2e/node_modules fi
 
 # 2. build (Dockerfile builds Tailwind CSS then the static Go binary, embeds assets) + smoke + push
 docker build --build-arg VERSION=$VER -t harbor.homelab.lan/library/clawgate:$VER -t harbor.homelab.lan/library/clawgate:latest .
-docker run -d --name cg-smoke -p 8219:8104 -e CLAWGATE_INSECURE_COOKIES=1 harbor.homelab.lan/library/clawgate:$VER && sleep 3
-curl -sf http://localhost:8219/health && echo OK; docker rm -f cg-smoke
+docker run -d --name cg-smoke -p 8219:8104 harbor.homelab.lan/library/clawgate:$VER && sleep 3   # CLAWGATE_INSECURE_COOKIES is dead — no Go code reads it
+clawgatectl --api-url http://localhost:8219 health; docker rm -f cg-smoke   # rc 6 = never came up
 docker push harbor.homelab.lan/library/clawgate:$VER && docker push harbor.homelab.lan/library/clawgate:latest
 
 # 3. bump the pin, stage explicit paths, commit, rebase (clean tree → no autostash), push
@@ -70,7 +70,7 @@ git fetch origin trunk && git rebase origin/trunk && git push origin HEAD:trunk
 KC=/home/zach/workspace/homelab-infra/workbench-kubeconfig   # PER-HOST — see SKILL.md Key facts
 flux --kubeconfig $KC reconcile kustomization clawgate --with-source
 until kubectl --kubeconfig $KC -n clawgate get pod -l app=clawgate -o jsonpath='{.items[0].spec.containers[0].image}' | grep -q "$VER"; do sleep 4; done
-curl -sf http://192.168.50.250:30302/health   # confirm version
+clawgatectl health   # confirm the live version (+ a stderr skew note if it differs)
 
 # 5. clean up the worktree (force: removes gitignored build artifacts too)
 cd /home/zach/workspace/homelab-talos

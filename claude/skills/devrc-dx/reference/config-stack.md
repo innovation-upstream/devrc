@@ -80,14 +80,17 @@ sessions) at the left of status-right. Each segment dim-grays when zero. Pairs
 with the per-slot `●` flag in status-left: the slot legend tells you *which*
 scratch needs attention; the counter tells you the *magnitude* of work in flight.
 
-**agent-ops dashboard ($mod+i):** `scripts/agent-ops` is the read-only
-"mission-control" dashboard — real open PRs (`gh pr list` per repo, TTL-cached),
-live agent runs (each row = the pane's actual task from its title + scratch
-codename + a busy marker), momentum/next-step + recently-merged (initiative-scan),
-and health (bar-status caches). Launched from i3 as a floating alacritty
-(`class="float"`). It replaced the old fuzzyclaw-summary `tmux-initiatives.sh`
-Alt+i HUD. Pairs with the monitor popup: M-m shows *what's happening right now*
-(live capture-pane); agent-ops shows *what each session is working on*.
+**agent-ops dashboard — RETIRED.** `scripts/agent-ops` was the read-only
+"mission-control" TUI (open PRs, live agent runs, momentum, health), launched
+from i3 as a floating alacritty, from tmux `prefix+A`, and from the ▦ bar button.
+All three launchers are gone and the script is deleted. Where its panels went:
+live runs + the clawgate queue → `session-manager`; PRs, cluster alerts and **local
+systemd health** → `standup`; momentum → `/initiative-scan`; the counts → bar
+pills. Its `/proc` Claude-session detector — the one piece with no equivalent
+elsewhere — is now `scripts/lib/claude_sessions.py`, feeding the ▦ pill
+(`i3status-claude-runs`), which stays as an indicator with no click.
+For *what's happening right now* use the monitor popup (M-m, live capture-pane);
+for *what each session is working on* use `session-manager`.
 
 ## Task management system
 Upstream: [ZacxDev/tmux-fuzzyclaw](https://github.com/ZacxDev/tmux-fuzzyclaw).

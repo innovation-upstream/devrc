@@ -44,6 +44,7 @@ the last revision before the core/archive split.
 
 **Deterministic Over Prose**
 - [consolidation-finds-bugs](#consolidation-finds-bugs)
+- [proactivity-gate](#proactivity-gate)
 
 **Green Test Suite**
 - [merged-tree](#merged-tree)
@@ -60,8 +61,13 @@ the last revision before the core/archive split.
 - [sops-retraction](#sops-retraction) 🔴 **RETRACTED THEORY — do not re-derive**
 - [worktree-envrc](#worktree-envrc)
 - [base-clone-drift](#base-clone-drift)
+- [worktree-not-session](#worktree-not-session)
+- [cross-repo-worktree](#cross-repo-worktree)
+- [worktree-copy-git](#worktree-copy-git)
+- [sibling-agent-kill](#sibling-agent-kill)
 
 **Shell & Tooling**
+- [grep-gitignore-blind](#grep-gitignore-blind)
 - [readlink-arbiter](#readlink-arbiter)
 - [zsh-unbraced-var](#zsh-unbraced-var)
 
@@ -158,6 +164,87 @@ independent* sweep found — including a mutant that dropped one component from 
 **survived**, silently reintroducing the very bug the PR fixed, because the value-pin test
 happened to use a fixture where `pid == pgid == sid` and could not discriminate.
 
+### Fixture-equals-constant (2026-08-14)
+
+The `pid == pgid == sid` case above is a collision *between fields of one fixture*. There is a
+second, less obvious pairing that produces exactly the same blindness: a fixture whose value
+equals **the constant the assertion names**. Three in one PR:
+
+1. Asserting a derived value equals `["tmux"]`, against a fixture that could only ever produce
+   `tmux`. A mutant replacing the derivation with the hardcoded literal `["tmux"]` produced
+   byte-identical output.
+2. Using an enumerated set in the assertion that happened to **be** the module constant under
+   test, so the assertion compared the constant with itself.
+3. Pinning a by-construction constant to the same value every other assertion in the file
+   already used, so nothing in the suite could tell a computed value from a baked-in one.
+
+All three survived a fully green suite. **The third was introduced inside the commit that fixed
+the second** — which is the point worth carrying: knowing about the trap does not prevent it,
+because the fixture that makes a test readable is exactly the fixture that makes it degenerate.
+The natural fixture value *is* the constant; that is why it keeps happening.
+
+The control is mechanical and cheap, and it does not require imagining the mutant: **feed a
+value the constant cannot equal, and watch the output move.** If the output does not move, the
+lookup under test is not being exercised, whatever the assertion says.
+
+### The mutant that never ran — a stale bytecode cache (2026-08-15)
+
+Every trap above is about a mutant that RAN and was not caught. This one is worse and reads
+identically in the report: the mutant **never executed at all**, and the sweep scored it
+SURVIVED.
+
+CPython decides whether a cached `__pycache__/*.pyc` is still valid from two fields in its
+header: the source's **mtime truncated to whole seconds**, and the source's **size in bytes**.
+A mutation that changes neither is invisible. Mutations are routinely same-length by
+construction — `>` → `>=` is not, but `"AAA"` → `"BBB"`, `<` → `>`, `and` → `or`, a swapped
+identifier of equal length, and a flipped boolean all are — and a sweep loop rewrites the file
+in milliseconds, well inside the same whole second as the import that built the `.pyc`.
+
+Measured 2026-08-15, 200 trials per arm, fresh temp dir per trial, no mtime tampering of any
+kind — write `AAA`, import it in a fresh interpreter to build the `.pyc`, immediately overwrite,
+import again, and record what the second import returns:
+
+| arm | landed in the same whole second | imported the STALE module |
+|---|---|---|
+| same-length `AAA` → `BBB` | 198/200 | **198/200** |
+| different-length `AAA` → `BBBB` (negative control) | 197/200 | **0/200** |
+
+The negative control is what makes the first row mean something: the size field alone catches
+every different-length mutation, so the harness is demonstrably able to report "not stale", and
+the 198 is a real blindness rather than a broken probe. The two same-length trials that were
+caught are the two that happened to cross a second boundary.
+
+🔴 **The first framing of this was wrong in a way worth recording, because it was the narrower
+one.** It was written down as "`cp -a` preserves `__pycache__` and a same-length mutation does
+not change size, so the check misses it" — blaming the copy. Measured directly: `cp -a` followed
+by an ordinary mutation is **caught** (the write moves mtime to now, a different second). What
+is required is that mtime *not move across a second boundary*, which `cp -a` + an explicit
+`touch -r` produces, and which a fast edit loop produces **on its own, with no copying at all**.
+A session reading the `cp -a` version and thinking "I did not copy anything, so this cannot be
+me" would walk straight into it. Same shape as the `git stash` ban's first wording.
+
+Controls that actually close it, cheapest first:
+
+- run the sweep under `PYTHONDONTWRITEBYTECODE=1`, or `rm -rf` the `__pycache__` dirs between
+  mutants — either removes the mechanism rather than detecting it;
+- keep one mutant you KNOW is caught in every batch. A sweep that reports 100% survival is far
+  more likely to be a broken harness than a suite with no coverage, and this is the positive
+  control that tells the two apart (→ [positive-control](#positive-control));
+- if a SURVIVED verdict matters, confirm the mutated line actually executed — a print, a
+  coverage run, or an assertion that the mutant's own value came back.
+
+Generalises past Python: any cache keyed on a coarse timestamp has this shape. The failure is
+not "the test was weak", it is "the artifact under test was never the artifact that ran" —
+which is the same class as verifying a deploy against an orphan process still serving old code.
+
+
+**The clamp that never executed (isolate the mutation).** Deleting
+`else if x < MAX { x *= 2; if x > MAX { x = MAX } }` wholesale went red; deleting
+only the inner clamp passed the FULL suite. The test's constants
+(`min=10,max=40`) made the ladder land exactly ON the cap, so the clamp never
+executed and its own "the clamp is gone" assertion was unreachable. Production's
+values (`1s/15s`) are the shape that DOES execute it.
+
 ## nine-broken-harnesses
 *Supports: 🔴 "Validate the INSTRUMENT before you read its verdict." (negative control).*
 
@@ -186,6 +273,31 @@ realistic data, never from the vendor's own example pair.
 Ground case (2026-08-01): four consecutive "0 submits" results were treated as evidence a guard
 held; they only became evidence once one clean run submitted **exactly 1** through the same
 counter.
+
+### The control that shared the untrusted step (2026-08-21)
+
+Probing a web UI's search through a browser tool, the step that TYPED the query intermittently
+no-opped. The page kept rendering the PREVIOUS query's results, so every read came back
+well-formed and plausible — there is no error state for "your keystrokes never landed".
+
+A positive control query was run to settle it, and it went through **the same untyped step**.
+When it too came back with the wrong results that was read as *"the site's search is broken"*
+rather than *"my input never landed"*. Three confident false conclusions followed, one of which
+was nearly filed upstream against a real issue.
+
+The control was not a control: it sampled the same unknown a second time. A RED result from it
+is consistent with both hypotheses, so it discriminates nothing — which is a different defect
+from the negative/positive controls above, where the question is whether the instrument can go
+red or observe the thing AT ALL.
+
+The cure is to make the control independent of the suspect step, or to verify that step in the
+same read as the result: read the input element's `value` back and assert it equals the query,
+in the same DOM read that harvests the results. Then a mismatch is attributed to the input, not
+to the system under test.
+
+Generalises past browsers: any control assembled out of the instrument under suspicion — the
+same wrapper, the same fixture loader, the same deploy step, the same shell — inherits its
+failure modes wholesale.
 
 ## parsing-tool-output
 *Supports: 🔴 "Validate the INSTRUMENT before you read its verdict." (parsing an output format you did not pin).*
@@ -311,12 +423,13 @@ second.
 
 The wrong theory is *why the bug survived four recurrences from 2026-06-06*: every fix targeted
 stash behaviour, so nobody looked for the actual writer. Fixed in `homelab-infra` (generator
-removed, stale template deleted, `scripts/check-sops-rules.sh` gates it). A checksum guard
+removed, stale template deleted, `<homelab-infra>/scripts/check-sops-rules.sh` gates it). A checksum guard
 wrapped around the suspected operation proves nothing if the real write happens elsewhere — that
 one compared hashes around the stash while the overwrite landed on the next `cd` into the repo.
 
 ## worktree-envrc
-*Supports: 🔴 "A fresh worktree does NOT inherit the repo's dev environment."*
+*Supports: 🔴 "`.envrc` is gitignored, so it never comes with the checkout" — the ENVIRONMENT
+surface under "a worktree isolates a working DIRECTORY only".*
 
 On civitai (2026-07-31) three subagents each hard-coded a `/nix/store/…` Prisma engine path that
 `devShells.default` already exports, every gate ran on system Node 26 instead of the flake's
@@ -366,7 +479,8 @@ but identity was simply the consequence of their being **one file**, and acting 
 either an unnecessary rebuild or, worse, treating a live edit as inert.
 
 ## zsh-unbraced-var
-*Supports: 🔴 "zsh's unbraced `$var` is NOT bash's — two traps." (Shell & Tooling).*
+*Supports: 🔴 "zsh is NOT bash — four traps, all returning a confident WRONG value with no
+error." (Shell & Tooling).*
 
 **(a) No word-splitting.** `for x in $SPACE_SEPARATED` loops **once** with the whole string as
 `$x`; a following `${x%%:*}`/`${x##*:}` then silently grabs the wrong field. Bit prod: a
@@ -405,6 +519,39 @@ line, so `some` and `phrase` become **filename filters**. Playwright matched no 
 `No tests found` and **exited 0** — zero tests run, reported as success. The generalisable half:
 a wrapper that answers "nothing to do" instead of erroring is how a green gets believed; make a
 zero-selection case a non-zero exit.
+
+**(d) Redirection: `MULTIOS` clones stdout onto the pipe (2026-08-20).** The canonical
+"stderr only, discard stdout" idiom does the OPPOSITE of its intent in zsh. Measured on the
+workbench:
+
+```
+zsh  -c 'printf "PAYLOAD\n" 2>&1 >/dev/null | cat'                    ->  PAYLOAD
+bash -c 'printf "PAYLOAD\n" 2>&1 >/dev/null | cat'                    ->  (nothing)
+zsh  -c 'unsetopt multios; printf "PAYLOAD\n" 2>&1 >/dev/null | cat'  ->  (nothing)
+```
+
+zsh's `MULTIOS` option duplicates stdout to *every* destination it has, the pipe included, so
+the consumer receives **stdout** — the exact stream the idiom exists to suppress. Nothing
+errors, and the payload that arrives looks entirely plausible.
+
+**What it cost, three times in one session.** A `--json` payload correctly on **stdout** was
+read through this idiom, reported as being on **stderr**, and a subagent was dispatched to fix
+a bug that did not exist. Twice more in the same session the two streams were merged with a
+plain `2>&1` and the advisory text that surfaced was reported as "polluting stdout" — it had
+been on stderr the whole time. So the failure class is not the idiom; it is **attributing
+output to the wrong stream**, and its output is a confident, wrong bug report about correct
+code.
+
+Reasoning about redirection order cannot settle it: `2>&1 >/dev/null` is genuinely
+"dup stderr to the current stdout, then move stdout" in both shells, and `MULTIOS` changes the
+answer without changing the text. Only separate destinations settle it.
+
+**The mechanical fix** is `scripts/run3`: it runs the command with
+`"$@" >"$outf" 2>"$errf"` — two destinations, never `2>&1` — prints the exit code and each
+stream's byte count and path, and exits with the command's own status.
+`scripts/tests/test_run3.py` pins it, including a mutation control (merge the streams inside
+run3, watch 9 tests go red) and a positive control that asserts the MULTIOS behaviour above is
+still live in this environment.
 
 ## config-blind-suite
 *Supports: 🔴 "A test that skips itself, or passes by accident of the environment, is worse than
@@ -576,8 +723,39 @@ The remedy is to assert a **state**, not a spelling: an `id` plus the attribute 
 element, an ARIA role, or an enumerated set of allowed callers. Any assertion whose subject is a
 word that another feature is free to use is a coincidence waiting to be relied on.
 
+### The prose mirror image (2026-08-14)
+
+The four cases above all have a **state** available to assert instead of a spelling. When the
+artifact under test *is* prose — a rendered sentence, a legend, a status line — there is no such
+state, and every intuitive guard is a guard on words. Three were walked in a single PR:
+
+1. **A check asserting two words appeared in a rendered sentence** was satisfied by that
+   sentence's own **static** prose. Neither of the two computed slots the check existed to
+   verify was ever read; the assertion would have passed against a sentence with both computed
+   values missing entirely.
+2. **A ban on one literal phrasing** was walked by a reword — *"every row **here is** a tmux
+   pane"* — which carried the same forbidden claim in different words.
+3. **A ban on a term by name** was walked by a **synonym**: *"a terminal pane… the second
+   enumerated entity"* said the banned thing without using the banned token.
+
+Each fix made the guard tighter in the direction it was already pointing (more words, more
+phrasings, more terms) and each was walked again by the next reword. Only pinning the **whole
+normalised string** — the complete expected sentence, whitespace-normalised, compared for
+equality — ended it, because there is then no room left for a variant to occupy.
+
+The objection to the whole-string pin is real and should be accepted rather than argued with: a
+purely cosmetic reword now fails the test, and someone has to update the expected string. That
+is the cost of having a machine-readable claim about prose at all. A guard that survives every
+reword is a guard that was never checking the claim.
+
+
+**Two more walkable spellings (2026-08).** A two-word check was satisfied by the
+sentence's own STATIC prose — neither computed slot was ever read. A banned phrasing
+was walked by rewording it, and a banned term by a SYNONYM.
+
 ## worktree-not-session
-*Supports: 🔴 "A worktree isolates the REPO, not the SESSION."*
+*Supports: 🔴 "a worktree isolates a working DIRECTORY only" — the SESSION surface: "subagents
+share ONE scratchpad path and the branch namespace".*
 
 civitai/cli, 2026-08-10, one session, 12 subagents — every one dispatched with
 `isolation: "worktree"`, so the documented rule was followed exactly.
@@ -602,6 +780,184 @@ the branch. `git worktree list` is the check; `git checkout --detach` is the fix
 
 Same root cause as the `refs/stash` ban: a worktree gives you a private working directory, not a
 private repo and not a private machine.
+
+## cross-repo-worktree
+*Supports: 🔴 "the REPO it is built from is your CURRENT cwd's, not the one the task NAMES" —
+the REPO surface under "a worktree isolates a working DIRECTORY only".*
+
+Measured 2026-08-02. Two agents were dispatched with `isolation: "worktree"` at a TypeScript
+monorepo (`civit/civitai`) while the dispatching session's cwd was a **different**, unrelated Go
+repo (`civit/cli`). Both agents received worktrees of the **Go** repo. The flag resolves the
+repo from the caller's cwd; nothing in the task text redirects it, and no error is raised — the
+worktree is created successfully, of the wrong thing.
+
+The two failure modes are both worth knowing, because only one of them is loud:
+- one agent correctly refused to proceed and reported that the files in its brief did not exist —
+  **that report is the tell**, and it is the good outcome;
+- the other self-recovered by silently creating its own worktree in the right repo, which worked
+  but meant the dispatcher's mental model of where the work was happening was wrong.
+
+**For cross-repo work do not pass the flag at all.** Have the agent create its own worktree
+explicitly: `git -C <target-repo> worktree add <path> -b <branch> origin/<main>`. The target
+repo is then named in the command instead of inferred from ambient state.
+
+Not re-measured since 2026-08-02. Structural corroboration as of 2026-08-13: the `Agent` tool
+schema exposes no target-repo parameter at all, so there is no way to redirect the flag.
+
+Same shape as [worktree-not-session](#worktree-not-session): the isolation primitive is
+narrower than the word "isolation" suggests, and it fails silently at exactly the boundary you
+assumed it covered.
+
+## worktree-copy-git
+*Supports: 🔴 "any COPY you make OF it" — the fourth surface under "a worktree isolates a
+working DIRECTORY only".*
+
+Measured 2026-08-14. An auditor wanted a scratch copy of its worktree to test a mutation
+against, and did the obvious thing: `cp -a <worktree> <scratch>`. It then ran `git commit`
+inside the copy. **The commit landed on the real feature branch.** It was caught and reverted
+before any push, but nothing about the copy signalled that it was not independent.
+
+The mechanism is a detail of how linked worktrees are represented. In a normal clone `.git` is
+a **directory** holding the object store, index, refs and reflog, so `cp -a` genuinely
+duplicates all of it. In a worktree `.git` is a one-line **FILE**:
+
+    gitdir: /path/to/repo/.git/worktrees/<name>
+
+`cp -a` copies that file verbatim, so the copy points at the *original's* git dir. Every git
+operation in the scratch copy — `add`, `commit`, `checkout`, `branch`, `reflog` — reads and
+writes the parent's state. The working directory is isolated; version control is not isolated
+at all.
+
+This is the same shape as [worktree-not-session](#worktree-not-session) and
+[cross-repo-worktree](#cross-repo-worktree): an isolation primitive that is narrower than the
+word "isolation" suggests, failing silently at exactly the boundary that was assumed covered.
+It is sharpened here by the fact that the SESSION surface's own advice — "restore from `cp -a`,
+not `git checkout --`" — is what tells an agent to make these copies in the first place.
+
+**`rm -f <copy>/.git` immediately after any `cp -a` of a worktree.** The copy then has no git
+at all, which is what a scratch tree should have: `git status` inside it errors loudly instead
+of silently operating on the parent.
+
+## worktree-submodules
+*Supports: 🔴 "its SUBMODULES" (the fifth worktree surface).*
+
+`git worktree add` does not populate submodules and prints nothing about it. The directory is
+created and left **empty**, so the tree looks complete.
+
+Measured 2026-08-19 in `civitai/civitai`, fixing an unrelated dev-server bug. A fresh worktree
+had `event-engine-common/` present with 0 entries against 13 in the base clone. `pnpm typecheck`
+returned **12 errors**: 9 × `TS2307 Cannot find module '../../../event-engine-common/…'` and 3 ×
+`TS7006 … implicitly has an 'any' type` downstream of them, all in
+`src/server/services/image.service.ts` and `src/pages/api/internal/bitdex-stats.ts` — two files
+the branch never touched. `git submodule update --init event-engine-common` took it to **0
+errors**. CI was green throughout, because CI runs that init and a worktree does not.
+
+**Why it is expensive out of proportion to the fix.** The errors name files the change did not
+touch, which is exactly the signature of a broken base branch — so it was reported as one, in a
+user-facing claim and in a PR description, before anyone checked. The tell that separates the two
+is cheap and was skipped: **the module the error names EXISTS in the base clone.**
+
+🔴 **A control ran and did not catch it.** Typecheck was re-run on the base ref with the commit
+absent, in the same tree, and produced the same 12 errors — correctly answering "did I introduce
+these?" (no) and being misread as also answering "is the base red?" (it does not). Both arms
+shared the empty submodule, so the control was blind to the variable that mattered. Same shape as
+"a probe that fires identically on its own CONTROL attributes nothing".
+
+## grep-gitignore-blind
+*Supports: 🔴 "`grep` here is a FUNCTION wrapping ugrep, and `-r` HONOURS `.gitignore`."*
+
+Measured 2026-08-20 on the workbench. `type grep` resolves to a **shell function** defined in
+the Claude shell snapshot, wrapping **ugrep 7.5.0** — not GNU grep. ugrep's recursive mode
+honours `.gitignore`, so `grep -r` silently skips exactly the directories generated artefacts
+live in.
+
+Isolated with a controlled fixture rather than inferred:
+
+    mkdir -p D/sub && echo MARKER > D/sub/file.txt
+    grep -rl MARKER D            -> 1 file          # control: no .gitignore
+    printf '*\n' > D/.gitignore
+    grep -rl MARKER D            -> 0 files         # same tree, same pattern
+    find D -type f -print0 | xargs -0 grep -l MARKER -> 1 file
+
+The `.gitignore` is the whole variable; GNU grep finds it either way. Two rival theories were
+raised and **refuted**: `CACHEDIR.TAG`, and hidden-directory status — neither changes the
+result.
+
+**How it actually bit.** An agent auditing skip-lists ran `grep -r` for `.pytest_cache` and
+got a confident `0 hits` — for a directory it had *already watched a test fail on minutes
+earlier*. Every zero in that report about `.venv` / `.serena` / `.opencode` had to be
+re-measured with `find -print0 | xargs -0 grep`, using `.pytest_cache`'s non-zero count as the
+positive control.
+
+**Why it is worse than an ordinary wrong answer.** The failure is silent, directional (only
+ever under-reports), and lands precisely on the question agents ask most often about generated
+state — "is this artefact present anywhere?" It also inverts the usual advice: the more
+"correct" the invocation looks (`grep -r` over a repo), the more blind it is. A `0` here is
+indistinguishable from a real absence without a second, differently-built instrument.
+
+Related in kind: the repo's own content gates (`test_no_captured_text.py` et al.) read
+`git ls-files` and are blind to git history — same shape, different axis. An enumerator's
+blind spot is a property of the enumerator, never of the tree.
+
+## sibling-agent-kill
+*Supports: 🔴 "With parallel agents this widens: also confirm `/proc/<pid>/cwd` is your OWN
+worktree — the EXACT path."*
+
+Measured 2026-08-02. An auditor agent needed to clear **its own** hung browser/test run and
+matched `chrome-headless-shell|vitest|steam-run` **system-wide**, killing ~15 PIDs. Those PIDs
+included a sibling agent's in-flight integration test run, which died mid-suite in another
+worktree of the same repo.
+
+What makes this expensive is the misattribution downstream, not the lost run: the sibling's
+**first attempt after the kill collapsed with 0 files collected and exit 144**. Both of those
+read exactly like a code defect in the branch under test — a collection failure and a nonzero
+exit — and both were artifacts of the kill. The run had to be repeated from scratch to get an
+honest verdict.
+
+`/proc/<pid>/cwd` is the discriminator: it resolves to the worktree the process was launched
+from, so filtering resolved PIDs on it separates your own strays from every other agent's.
+
+🔴 **Two limits on that discriminator, measured on the workbench 2026-08-13 — neither was in
+the 2026-08-02 write-up.** (a) This harness creates agent worktrees at
+`<dispatching-repo>/.claude/worktrees/agent-<id>`, i.e. **nested inside** the base repo — so a
+prefix check against the repo root matches every sibling and discriminates nothing. Compare the
+**exact** worktree path. (b) Exact-path comparison **would** have prevented the incident above —
+the victim was in *another worktree*, so its cwd differs from any base-clone killer's. (The
+original does not say where the perpetrator sat; the victim-side fact carries the argument on its
+own.) What cwd cannot separate is two agents that **both** sit in the base clone, which is the
+likely case for read-only agents (the core says they don't *need* a worktree, not that they may
+not have one).
+
+Descendant-filtering by a `PPid` walk is the obvious next idea, and it is **not** a replacement —
+the two filters are incomparable, not ordered. Measured 2026-08-13 on the workbench: a `nix build`
+an agent launches does its real work in a `nix-daemon` child of **PID 1**
+(`nix-daemon 368389 ← 18717 ← 1`), so a `PPid` walk from the agent reaches only the `nix` **client
+stub** — `368350 ← 366150(zsh) ← 328364(.claude-wrapped)`, a genuine descendant — and **never the
+process doing the work**. Killing what the walk returns does not stop the build. The same holds
+for anything that genuinely daemonizes or re-parents. It is also per-tool-call: each Bash call is
+a fresh `zsh -c` (measured: seven calls, seven distinct pids), so an earlier call's strays are not
+descendants of the current one **at all** — that is where the walk truly returns EMPTY, and it is
+what orphans a `chrome-headless-shell` from an earlier call, the original pattern here (measured:
+`nix 2085612 ← 1`, exactly such a stray).
+
+🔴 **An earlier draft of this paragraph said the walk "returns the empty set" because of the
+nix-daemon fact. That was inference wearing a "Measured" label — the two grounds are different
+and only the per-tool-call one yields emptiness.** Fifth instance in one PR of the same class:
+stating a conclusion as measured when only its premise was. **Do not assume a
+browser tree orphans itself:** measured on this host, Brave's `--type=zygote` processes all have
+real parents and only `chrome_crashpad` sits at PPid 1. An earlier draft asserted the zygote
+re-parents; that was inference inside a paragraph headed "Measured", and it was wrong. Use a
+descendant walk to **narrow** a cwd-filtered set, never to build one; and note this whole
+discussion is scoped to parallel agents — hunting a genuine **orphan** (PPid 1, by construction
+never your descendant) is the deploy rule's job, not this one.
+
+🔴 **If neither filter leaves a set you are confident in, kill nothing and hand it to the
+operator.** An empty descendant set is the [empty-result](#empty-result) trap wearing a
+procedure: it cannot distinguish "no strays" from "the walk cannot see them". Note also that the
+inference "confirming `cmdline` is not sufficient" was never itself measured: the auditor never
+ran the resolve-then-confirm procedure, it pattern-matched system-wide. The widening is sound
+(identical cmdlines cannot discriminate) but it is reasoning, not an observation.
+
 ## retired-professional-honesty
 *Retired from the core 2026-08-10, verdict **NOW-NATIVE**.*
 
@@ -887,3 +1243,159 @@ one-line `opencode run` probe above is how to detect it.
     - **Verify the current date** from `<env>` before any temporal claim; never default to the knowledge cutoff. State the source. Base all time math on the verified date.
 
 </details>
+
+## screen-theft
+
+*Supports: The Operator's Screen Is Not Yours To Take.*
+
+**2026-08-19 — the run that produced the rule.** One capture subagent issued **42
+`i3-msg` calls and 14 workspace switches** during a single run and restored
+nothing. The calls were re-implementing a raise the tooling already performs:
+`browser activate` runs the host-side raise itself, and the skill the subagent
+was "helping" contains **zero** `i3-msg` invocations of its own.
+
+**The earlier occurrence, and why prose did not hold.** Browser-bridge telemetry
+caught a previous session grabbing the screen **1–5 times per minute** while the
+operator was working. That episode was diagnosed at the time as *"partly
+self-inflicted by our own docs"*. The skill's Boundaries list then carried ten
+prohibitions and none about the operator's screen — the absence read as
+permission next to its present siblings, which is why the rule now states the
+prohibition explicitly rather than relying on the general principle.
+
+**The axis that actually got taken was the WORKSPACE, not focus.** Every
+pre-existing hint in the setup said "restore focus"; none mentioned workspaces.
+
+## guards-narrower
+
+*Supports: A guard's DESCRIPTION is a claim about its COVERAGE.*
+
+Six instances surfaced across three independent audits of two PRs in one session,
+and **not one was a logic bug** — every one was a guard or a claim whose wording
+was wider than what it actually did.
+
+1. **The fictional two-way pin.** `server.py` said a tier vocabulary was "pinned
+   two-way against the CLI by tests/test_browser_session_id.py". That symbol
+   appeared nowhere in that file: each side was pinned against its own retyped
+   literal and nothing compared them. A mutant that grew the CLI vocabulary *and*
+   its own literal, leaving the server untouched, **survived 400 passed / 0 failed**.
+2. **The ledger that could not see its own field.** `test_i3_foreground_state_
+   vocabulary_is_closed` promised `result.data.i3` "keeps EXACTLY the three values
+   consumers branch on" and that a new state "fails here" — but it enumerated a
+   *different function's* returns, so a fourth value landed and the test stayed green.
+3. **The migrating badge.** A `LIVE-VERIFIED` paragraph describing the `wake` rig
+   ended up directly under a new heading about the focus gate, because 136 lines
+   were inserted above it — asserting a live verification of a path nobody had run.
+4. **Comments naming consumers that do not consume.** Shipped source and README said
+   `adoption-scan` and the deadman "read this column". Neither does: adoption-scan's
+   browser-bridge entry is `via="source"` and its query never selects `session`;
+   `deadman.py` never references it.
+5. **The query that returns nothing, forever.** A README's flagship example joined a
+   Claude uuid against `ses_`-prefixed opencode ids — measured overlap zero — and
+   failed as a silent empty result, the exact mode the surrounding prose argued against.
+6. **The regex blind at end-of-sentence.** A version-pin scanner's `(?![\d.])`
+   lookahead could not match a version terminating a sentence, hiding **five** stale
+   claims across four files — inside the very surface it existed to police.
+
+The common shape: the sentence describes a relationship; the code inspects one side.
+Each read as coverage while providing none, which is what makes them worse than an
+absent guard — a declared guard stops anyone looking.
+
+## proactivity-gate
+
+*Supports: "Default to PROCEEDING — and never ask for what you can measure yourself."*
+
+**Where the shape came from.** The rule as first proposed was three branches — *safe and
+unblocked → proceed; blocked → ask, then proceed; destructive or unsafe → block, warn, ask*.
+Four holes, all of which the shipped wording closes:
+
+1. "Safe and unblocked" is true of out-of-scope work. Writing tests nobody asked for, or
+   refactoring the file you were told to read, passes that predicate.
+2. **Unblocked ≠ unambiguous.** The step where two readings produce materially different work
+   is not blocked — the agent *can* proceed — so branch 1 licenses ship-then-rework.
+3. "Blocked" collapsed three cases with three different correct responses: blocked on
+   something you can measure yourself (go look, don't ask), blocked on something only the
+   user knows (ask), blocked on an external system (asking does not unblock it — report and
+   do the rest).
+4. It dropped **outward-facing** entirely. A push, PR, email, publish or deploy destroys
+   nothing and is locally safe, so all of them landed in branch 1.
+
+**Why the branches do not all end in "ask".** Routing every hazard to a question invites
+asking permission for things on the never-list (`git add -A`, `reset --hard`, `stash` in a
+shared repo, `pkill -f`, raising a window on the operator's screen, `sudo nixos-rebuild`).
+Those rules exist *because* a yes was already given once. Their response is stage-it or
+hand-it-over, never solicit approval.
+
+**The provenance-and-freeze clause was prompted by clawgate's task status gate**, which faces the
+same problem the proposal had — a verdict self-assessed by the party who wants to pass it. 🔴 **Be
+exact about which half of that gate is real, because an earlier draft of this entry was not, and
+got it wrong in the direction this repo had corrected ONE DAY EARLIER (#691, `b8e8843b`, whose
+title is "the deny message called a CONVENTION 'structural'").**
+
+- **Structural, and NARROWER than it looks — scope it to the ROUTE or you will get it wrong in the
+  other direction, which is what an earlier draft of this entry did.** A *dispatched devpod* agent
+  cannot set `complete`: `internal/api/agent.go` gates the two AGENT surfaces on
+  `AllowedForAgent` (`internal/taskstatus/taskstatus.go:79-81` = `Valid(s) && s != Complete`), and
+  that gate is **criteria-independent**. But the *machine* route — `PATCH /api/tasks/{id}/status`,
+  hook token, which is what `clawgatectl task status` and therefore a LOCAL Claude Code pickup
+  uses — **deliberately allows every status including `complete`** (`internal/api/notes.go`:
+  *"A hook-token producer is trusted, so ALL statuses are allowed here INCLUDING `complete`"*;
+  `taskstatus.go` says the same: *"the in-devpod agent route enforces it while the machine route
+  deliberately does not"*). 🔴 **Those are the two routes that matter here, NOT the whole set, and do not quote a
+  COUNT for the rest** — three drafts of this sentence stated one and all three were wrong. What
+  is durable: `notes.SetStatus` is the single writer; exactly **two** surfaces gate on
+  `AllowedForAgent` and both are the in-devpod AGENT tool/route (not "agent-token" — the operator
+  route is agent-token-authed and is NOT gated); and **several** other paths may set `complete`
+  deliberately, including the hook-token machine route, the operator route and its tool, the
+  losing side of `POST /tasks/merge`, and — most permissive of all — the session route
+  `PATCH /tasks/{id}/status`, whose `requireSession` is a literal `return next`, so an
+  UNAUTHENTICATED LAN request can set `complete`. Enumerate from `SetStatus`'s call sites at the moment you
+  need it; any number written here goes stale and has.
+- **Convention, not enforced SERVER-side:** the AUTHOR-SPECIFIED vs DERIVED split and the
+  freeze-at-first-read exist only in the skill's prose, read by the agent about itself — i.e.
+  self-assessed, the very property this was cited as structurally solving. The string "acceptance
+  criteria" appears in **zero** Go files. ⚠ Not *unenforced*: the `## Acceptance criteria` heading
+  is a deterministic create-time deny in devrc's `clawgate-task-interview-guard.py` PreToolUse
+  hook. Server-side is the distinction that matters, and it is the one #691 drew.
+
+So the borrowed IDEA is sound and stands on its own — classify by provenance, and freeze the
+verdict before you know whether you pass it. What is false is that clawgate enforces it. 🔴 **And
+note how this was gotten wrong TWICE in opposite directions**: first by calling the convention
+structural, then by "correcting" that into a blanket "an agent can never set `complete`" — which
+would defeat the criteria gate's whole purpose, since the local pickup path is exactly the one
+that may. #691's own message warned about this merge: *"the genuinely structural fact nearby is
+different and NARROWER … merging the two is what produced the overstatement."* Read the route,
+not the verb.
+
+**Clawgate is the transport for the ask branches, never the gate** — measured 2026-08-22
+against live `0.7.98` (deployment pin `harbor.homelab.lan/library/clawgate:0.7.98` matches
+`clawgatectl health`), `PermissionRequest` hook enabled on BOTH hosts:
+
+- It fires on **tool permission prompts only**, so it cannot carry a Fork or an Out-of-scope
+  trigger — those are semantic, and produce no `PermissionRequest`.
+- 🔴 **And its return channel is BINARY, which kills the tempting design.** An earlier draft of
+  this entry claimed `approve-with-comment` *was* the Fork branch — "answer plus proceed in one
+  tap". It is not: `clawgate-hook.sh` logs the comment and emits a bare `allow`/`deny`, so the
+  agent receives permission and never the answer, then proceeds down whichever reading it had
+  already picked while the operator believes they replied. The claim was asserted from the
+  feature's NAME, was contradicted by the hook's own source comment ("No reason/additionalContext
+  channel exists"), and was contradicted by a pre-existing line in the very file it was written
+  into (*"Never design on feeding an approver's words back into the session through this hook"*)
+  — which is what a blind audit caught and three rounds of self-review did not.
+- **Allowlisted commands never prompt**, so they never reach the phone; `bypassPermissions`
+  and `plan` mode, and `AskUserQuestion`, defer *without contacting the server*.
+- It is **fail-safe toward proceeding**: any outage or timeout defers to the terminal. A rule
+  cannot be gated on a mechanism that fails open.
+- 🔴 `internal/api/auth.go` defines `requireSession` as a literal `return next`, and
+  `server.go:364` registers `POST /api/auto-approve-all` behind it — so the LAN NodePort can
+  arm a **global** auto-approve window over every future request in every project, with no
+  app-level auth. ⚠ That posture is **deliberate, not an oversight** — `auth.go` says so: human
+  auth was removed in favour of the Authelia forward-auth edge on the public path, and the LAN is
+  treated as trusted-open. The hazard is blast radius on a trusted LAN, not a missing gate.
+  Pushing *more* decisions to the phone therefore raises the value of that lever and
+  risks notification fatigue arming it. This is the "permanently-red gate trains you to click
+  through" hazard in its mirror image: a too-noisy gate trains you to disable it globally.
+  The mitigation is `hooks.md`'s OWN one-ask-per-task budget, argued from this blast radius —
+  **not** the tree's "a Fork ANSWER buys the whole run", which is Fork-scoped and therefore
+  cannot reach a hook that carries no Forks (first bullet above). Two copies of that wrong
+  citation shipped in this PR; one was retracted a round before the other, which is the
+  "one rule, one place" bullet demonstrating itself.

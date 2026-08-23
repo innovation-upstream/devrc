@@ -44,7 +44,7 @@
 // patterns has known bypasses, which is the whole reason layer 2 exists.
 //
 // ==========================================================================
-// Mechanics of layer 1 (measured on v1.18.4 — do not re-derive)
+// Mechanics of layer 1 (measured on v1.18.18 — do not re-derive)
 // ==========================================================================
 //
 // 🔴 PERMISSION ORDERING IS LOAD-BEARING AND IS THE INVERSE OF CLAUDE CODE.
@@ -70,24 +70,98 @@
 // that fires too often on a mutation family is a far better failure than an
 // `ask` that never fires on the spelling an operator actually types.
 //
-// Other measured facts baked into this file (v1.18.4):
-//   * `opencode run` AUTO-REJECTS an `ask` (it prints "auto-rejecting"); only
-//     the interactive TUI turns one into a prompt. `opencode debug agent
+// 🔴 TWO DELIBERATE EXCEPTIONS — the only rules ever narrowed AWAY from a
+// working infix form (several rules, e.g. `*chmod -R*`, `*dd if=*`, `*sudo *`,
+// were written binary-plus-literal-flag from the start; this is not a claim
+// that every other pattern is infix). Both were narrowed for the SAME measured
+// reason, one day apart, and the second is why this heading says TWO:
+//
+//   (a) the two `age` decrypt rules, `*age -d*` / `*age --decrypt*` —
+//       leading-`*` but NOT infix. The infix form `*age*-d*` matched any text
+//       with "age" followed LATER by "-d", and "age" is a substring of package,
+//       packages, image, message, storage and manage while "-d" covers -db-,
+//       --dir, --debug and --dry-run. Measured 2026-08-21; two real dispatches
+//       died on it, one on `grep`, one on `ls`.
+//
+//   (b) the two `rm` recursive rules, `*rm -r*` / `*rm --recursive*`. The infix
+//       form `*rm*-r*` was the identical defect: "rm" is a substring of format,
+//       terraform, firmware, confirm and platform, and "-r" covers --reverse,
+//       --refresh, --reporter, --repo and --recursive. Measured 2026-08-22:
+//       `git log --format=oneline --reverse`, `terraform plan -refresh=false`,
+//       `rg '…format…' src/ --replace ''` and `pnpm run format --reporter=…`
+//       all resolved ASK. The first three are pinned as MUST_ALLOW rows in
+//       test_opencode_config.py and were watched to FAIL before the narrowing.
+//       It needed a SECOND rule, not just a narrowing: "rm --recursive" does not
+//       contain the literal "rm -r", so dropping the inner `*` alone would have
+//       released an ordinary recursive delete that the guard layer does not
+//       backstop — measured by deleting that row: it drops to plain ALLOW.
+//
+// WHY THESE TWO AND NOT THE REST. Because `opencode run` AUTO-REJECTS an ask
+// rather than prompting, an over-match on a family an agent types CONSTANTLY
+// does not "fire too often" — it KILLS the run mid-task. That inverts the trade
+// argued above, but only for patterns whose binary name is a substring of
+// ordinary English/flag text. `kubectl` and `sops` are not, which is why they
+// stay infix. (The *rules named* `*talosctl*` and `*sudoedit*` are single-token
+// wildcards with no middle `*` at all, so they are not evidence either way —
+// but do not read that as "there is no infix talosctl rule": `*talosctl*reset*`
+// in the deny block below is one.)
+//
+// 🔴 THE TRADE IS REAL, IS NOT FREE, AND THE TARGET NEED NOT BE DISPOSABLE.
+// A narrowed rule knows exactly one argument order, so `age -i k.txt -d f` and
+// `rm -f -r <path>` now resolve ALLOW. State the `rm` cost at its WORST, not its
+// mildest — the examples in the tests use `/repo/build`, but nothing restricts
+// it to a build dir. MEASURED at both layers on this config:
+//     rm -f -r ~/.ssh                        ALLOW   (was ask before the narrowing)
+//     rm -f -r /etc/nixos                    ALLOW   (was ask)
+//     rm --force --recursive /var/lib/…      ALLOW   (was ask)
+//     rm /repo/build -rf                     ALLOW   (was ask — flags AFTER the operand)
+// 🔴 But read the counterfactual before treating the narrowing as the cause:
+// `rm -fr ~/.ssh`, `rm -Rf ~/.ssh` and `rm -R ~/.ssh` were ALREADY plain ALLOW
+// at both layers BEFORE this change (measured on `main`). So this glob was never
+// a RELIABLE control for that target — three ordinary spellings already walked
+// around it — and the narrowing WIDENS an already-open hole rather than opening
+// one. Do not overstate that in either direction: the old glob DID gate
+// `rm -f -r ~/.ssh` (it is `ask` on `main`, per the table above), so this is a
+// partial control being made weaker, not a no-op being blamed. The honest
+// summary is: layer 1 does not reliably protect `$HOME` from a recursive delete
+// and never did; if you want that, it belongs in guard_core.py, per this
+// header's own rule about irreversible families.
+// guard_core.py has NO age/sops check at all, and its `rm`
+// check has a deliberately narrow TARGET set — `/`, `~`/`$HOME`, `.`/`..` and
+// top-level system dirs — that a SUBPATH like `~/.ssh` never reaches.
+// Both gaps are pinned as characterization tests —
+// `test_age_glob_misses_these_reordered_decrypt_spellings` and
+// `test_rm_glob_misses_these_recursive_spellings` — so they stay visible. Do NOT
+// "restore consistency" by re-widening any of these four rules to infix without
+// reading those tests first.
+//
+// Other measured facts baked into this file (v1.18.18, EXCEPT where a bullet
+// says otherwise — the 2026-08-19 re-derivation could not reach three of them,
+// and a claim relabelled to a version nothing measured it on is worse than a
+// stale one, because it looks fresh):
+//   * `ask` SEMANTICS (NOT re-derived at the pin — last measured on v1.18.16;
+//     observing it needs a run that EXECUTES, which the engine tests refuse to
+//     do): `opencode run` AUTO-REJECTS an `ask` (it prints "auto-rejecting");
+//     only the interactive TUI turns one into a prompt. `opencode debug agent
 //     --tool` AUTO-APPROVES it. So `ask` means "friction for a human", never
 //     "a control on an unattended agent".
 //   * only a `"*": "deny"` removes a tool from the request schema; a narrow
 //     deny does not, and `"ask"` costs exactly what `"allow"` costs.
-//   * `small_model` drives TITLE GENERATION ONLY — not compaction. The real
-//     cheap-model lever is pinning the hidden title/summary/compaction agents
-//     in the `agent` block below.
+//   * `small_model` SCOPE (NOT re-derived at the pin, v1.18.16): it drives
+//     TITLE GENERATION ONLY — not compaction. The real cheap-model lever is
+//     pinning the hidden title/summary/compaction agents in the `agent` block
+//     below.
 //   * a tool listed in this global `permission` block is re-enabled on the
 //     HIDDEN title/summary/compaction agents too, whose stock tool set is
 //     EMPTY. Hence the explicit `"*": "deny"` on each of them below.
-//   * DEPRECATED in 1.18.4, deliberately absent: agent-level `tools`, `mode`
-//     (at config level), `layout`, `autoshare`, `reference` (now `references`),
-//     `maxSteps` (now `steps`). `theme`/`keybinds`/`tui` moved to a separate
-//     ~/.config/opencode/tui.json and are NOT set here.
-//   * there is NO `list` tool and NO `websearch` tool on 1.18.4. The real set is
+//   * DEPRECATED, deliberately absent — a config-SCHEMA claim about keys this
+//     file does NOT set, which the resolved `debug agent` dumps structurally
+//     cannot see, so it was carried forward at v1.18.16 rather than relabelled:
+//     agent-level `tools`, `mode` (at config level), `layout`, `autoshare`,
+//     `reference` (now `references`), `maxSteps` (now `steps`).
+//     `theme`/`keybinds`/`tui` moved to a separate ~/.config/opencode/tui.json
+//     and are NOT set here.
+//   * there is NO `list` tool and NO `websearch` tool on 1.18.18. The real set is
 //     exactly {bash, edit, glob, grep, invalid, question, read, skill, task,
 //     todowrite, webfetch, write}. Naming a nonexistent tool here is a no-op.
 {
@@ -178,7 +252,7 @@
     // — a blanket `"read": "allow"` here lands AFTER those and silently defeats
     // the `.env` guard on every agent. The default already allows everything
     // except `.env`, so there is nothing to add.
-    // `list` and `websearch` are absent because NO SUCH TOOLS EXIST on 1.18.4.
+    // `list` and `websearch` are absent because NO SUCH TOOLS EXIST on 1.18.18.
     "glob": "allow",
     "grep": "allow",
     "edit": "allow",
@@ -191,7 +265,31 @@
     // Ask before burning a long unproductive loop, and before reaching outside
     // the project directory.
     "doom_loop": "ask",
-    "external_directory": "ask",
+
+    // 🔴 `external_directory` stays `ask` for EVERYTHING except this host's own
+    // skills tree. MEASURED 2026-08-23: a dispatch loaded the `clawgate` skill,
+    // followed the skill's OWN pointer to `reference/task-api.md`, and was
+    // auto-rejected — `~/.config/opencode/skills/` is outside `--dir` for every
+    // dispatch, by construction. The run then DIED mid-task. This is not a
+    // clawgate quirk: it hits EVERY skill that keeps detail in `reference/` or
+    // `flows/`, which is the shape `prune-skill` actively pushes skills toward.
+    //
+    // 🔴 preflight CANNOT catch this, structurally. It scans the BRIEF for
+    // external paths; the brief named none and it correctly reported
+    // "external paths: NOT EXAMINED". The offending path came from the SKILL the
+    // agent loaded, which preflight never sees. So a clean preflight is not
+    // evidence a run is safe from an `external_directory` auto-reject.
+    //
+    // The carve-out is deliberately the narrowest thing that fixes the class:
+    // read-only, devrc-managed, nix-store-backed content the agent is already
+    // meant to have — the same skill bodies opencode itself injects. It does NOT
+    // widen access to the repo, to $HOME, or to anything the operator writes.
+    // Verified by A/B on the identical read: without the map the read is
+    // auto-rejected and the run dies; with it the read succeeds.
+    "external_directory": {
+      "*": "ask",
+      "/home/zach/.config/opencode/skills/**": "allow"
+    },
 
     "bash": {
       "*": "allow",
@@ -240,22 +338,43 @@
       "*talosctl*": "ask",
 
       // --- secrets to plaintext ---
+      // sops stays INFIX on purpose, unlike its age neighbours below: "sops" is
+      // not a substring of ordinary words or paths, so the over-match that
+      // forced the age narrowing does not arise here, and the infix form buys a
+      // real spelling — `sops --config .sops.yaml -d f`, which the narrowed form
+      // would let through. That spelling is pinned as the CONTRAST case inside
+      // `test_age_glob_misses_these_reordered_decrypt_spellings` (not in
+      // MUST_ASK — do not go looking for it there), and independently by
+      // `test_every_ask_rule_is_individually_pinned`, which also goes red if
+      // these are narrowed. Do not narrow them for symmetry with age.
       "*sops*-d*": "ask",
       "*sops*--decrypt*": "ask",
       "*sops*exec-env*": "ask",
-      "*age*-d*": "ask",
-      "*age*--decrypt*": "ask",
+      // 🔴 NO `*` BETWEEN "age" AND THE FLAG — it must stay `*age -d*`, not
+      // `*age*-d*`. The inner `*` made this match any command text containing
+      // "age" followed LATER by "-d", and "age" is a substring of package,
+      // packages, image, message, storage and manage while "-d" covers -db-,
+      // --dir, --debug and --dry-run. MEASURED 2026-08-21: `ls packages/…-db-…`
+      // and `grep … packages/…-db/…` both resolved ASK, and since `opencode run`
+      // auto-rejects an ask rather than prompting, two real dispatches were
+      // killed mid-task by it. The leading `*` is still required and still
+      // correct — it catches `/nix/store/…/bin/age -d` and `FOO=1 age -d`.
+      // Pinned by three MUST_ALLOW rows in test_opencode_config.py.
+      "*age -d*": "ask",
+      "*age --decrypt*": "ask",
 
       // --- whole-system state ---
       "*nixos-rebuild*": "ask",
       "*home-manager*switch*": "ask",
       // 🔴 LOAD-BEARING — do not delete it as "already covered".
-      // `"*age*-d*"` DOES match some spellings of this command by pure
-      // coincidence ("nix-collect-gar(BAGE) … -d"), but ONLY those containing a
-      // literal `-d`. MEASURED: with this rule deleted, `nix-collect-garbage`
+      // `"*age -d*"` DOES match some spellings of this command by pure
+      // coincidence ("nix-collect-gar(BAGE) -d" CONTAINS the literal "age -d" —
+      // it need not end with it, `… -d --max-freed 1G` matches too),
+      // but ONLY those spelling the flag immediately after the word ending in
+      // "age". MEASURED: with this rule deleted, `nix-collect-garbage`
       // and `nix-collect-garbage --max-freed 1G` both resolve ALLOW at both
       // layers. Two things follow, and they point opposite ways: this rule is
-      // the real gate for the no-`-d` spellings, AND `"*age*-d*"` must not be
+      // the real gate for the no-`-d` spellings, AND `"*age -d*"` must not be
       // deleted on the reasoning that GC is separately gated for the rest.
       "*nix-collect-garbage*": "ask",
       "*nix*profile remove*": "ask",
@@ -296,7 +415,26 @@
       // --- filesystem blast radius ---
       "*chmod -R*": "ask",
       "*chown -R*": "ask",
-      "*rm*-r*": "ask",
+      // 🔴 NOT INFIX, ON PURPOSE — exception (b) in the header. `*rm*-r*` matched
+      // "rm" followed LATER by "-r" ANYWHERE in the command text — note the
+      // ORDER: the "rm" substring must come FIRST, so it took `git log
+      // --format=oneline --reverse` and `terraform plan -refresh=false` but not
+      // `grep -r 'format' src/`. That still auto-rejected ordinary read-only
+      // work wherever a format/terraform/firmware/confirm/platform token
+      // preceded a --reverse/--refresh/--reporter/--repo/--replace flag.
+      // BOTH ROWS ARE LOAD-BEARING and neither covers the other: "rm --recursive"
+      // does NOT contain the literal "rm -r", so deleting the second row releases
+      // `rm --recursive <path>` — which guard_core does not backstop on an
+      // ordinary path. Each is pinned individually in MUST_ASK.
+      // Known gap, pinned by test_rm_glob_misses_these_recursive_spellings, in
+      // THREE classes: `-R` bundles (pre-existing), any flag placed BEFORE `-r`
+      // (`rm -f -r <path>`, opened here), and flags placed AFTER the operand
+      // (`rm <path> -rf`, opened here — GNU rm permutes options, so it works).
+      // 🔴 And the target is not restricted to a build dir: `rm -f -r ~/.ssh` is
+      // ALLOW at both layers. See the header for the counterfactual — `rm -fr
+      // ~/.ssh` was already ALLOW before this change, so layer 1 never gated it.
+      "*rm -r*": "ask",
+      "*rm --recursive*": "ask",
       // `dd` stays ANCHORED / operand-scoped on purpose: a leading-`*` `"*dd *"`
       // also matches `git add src/` (…"add "…), and gating every `git add` is
       // exactly the prompt fatigue that trains an operator to click through.

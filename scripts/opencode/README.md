@@ -84,7 +84,12 @@ action is irreversible, add a check to `guard_core.py`'s `"opencode"` policy.
 
 ### Why `tool.execute.before` and not `permission.ask`
 
-Measured on 1.18.4, this host, 2026-08-02:
+Measured on 1.18.4, this host, 2026-08-02. 🔴 Still 1.18.4 on purpose: the
+2026-08-13 re-derivation to 1.18.16, and the 2026-08-19 one that followed it,
+covered the resolved permissions, tool sets and resolver ordering (see
+`PINNED_VERSION` in `scripts/tests/test_opencode_engine.py`), but **not** the two
+hook claims below — those need a running hook to observe and were not
+re-measured by either. Treat them as last confirmed on 1.18.4.
 
 - `permission.ask` **is** in the `Hooks` type and its `output.status` is typed
   `"ask" | "deny" | "allow"`, so an *ask* decision looks expressible. It is not:
@@ -149,7 +154,8 @@ spelling going ALLOW → DENY — and on **0** rows under `opencode`.
 ## Why `AGENTS.md` is generated rather than symlinked
 
 opencode does **not** expand `@`-imports inside `AGENTS.md`/`CLAUDE.md`
-(measured on v1.18.4 with an all-tools-denied agent, so no file read was
+(measured on v1.18.4, NOT re-derived since — it needs a live model call — with an
+all-tools-denied agent, so no file read was
 possible: an imported passphrase returned `NONE`, the same content inline
 returned verbatim). `~/.claude/CLAUDE.md` is ~1.5 KB consisting almost entirely
 of `@PRINCIPLES.md` / `@RULES.md` import lines — so if opencode read it, it
@@ -160,9 +166,59 @@ from the sources Claude Code reads. A project `AGENTS.md` also *suppresses*
 `CLAUDE.md` entirely (first match wins), which is why this is the file that
 matters.
 
-Size matters here: the generated file measures **38,363 B (37.5 KB) ≈ 8.9k
-tokens**, which is fine. A 331 KB `AGENTS.md` causes a permanent compaction loop.
-`scripts/tests/test_opencode_config.py` enforces a 100 KB ceiling.
+### Size, and what it actually costs
+
+Re-measured **2026-08-19** on engine **1.18.18**, model
+**`openrouter/xiaomi/mimo-v2.5`**. Instrument: opencode's own store,
+`~/.local/share/opencode/opencode-stable.db` (`session` / `message` tables carry
+`cost`, `tokens_input`, `tokens_cache_read`), read read-only.
+
+**The A/B pair.** One trivial prompt ("reply PONG, use no tools") run in an empty
+scratch project under two config dirs that were identical in every byte *except*
+this file — B was a `cp -a` of the live `~/.config/opencode` with `AGENTS.md`
+deleted, so skills, agents, plugins and `opencode.jsonc` were held constant:
+
+| run | `tokens_input` | `tokens_cache_read` | cost |
+|---|---|---|---|
+| **A** — with `AGENTS.md` | 22,019 | 1,024 | $0.0030964 |
+| **B** — without | 13,690 | 1,024 | $0.0019276 |
+
+→ the file is **8,329 input tokens** (43,676 B ÷ 8,329 = 5.24 B/token), i.e. 38%
+of a minimal prompt. `tokens_cache_read` is identical in both, so on a **cold**
+request the file really is paid in full.
+
+**But the steady state is cached, and that is the part an older note got wrong.**
+`AGENTS.md` sits at the *head* of the prompt prefix — exactly what a provider
+prefix-cache retains. Two controls:
+
+* A third run, a **fresh session with the same prompt** ~2 min after A:
+  `tokens_input` **3**, `tokens_cache_read` **23,040**, cost **$0.000074** — a
+  42x reduction, and cross-session, so the cache is not per-session.
+* Fleet-wide over engines 1.18.16+1.18.18 on this box: **2,218 billed requests,
+  of which 60 (2.7%) were cold**; 97.3% of prompt tokens arrived as cache reads.
+  Grouped by version, the cached fraction is 92.0% on 1.18.4, 93.0% on 1.18.9,
+  93.1% on 1.18.16, 97.2% on 1.18.18 — so **caching was already working on
+  1.18.4**; it was never engine-version-dependent.
+
+Prices solved from those three probe rows (three equations, three unknowns):
+input **≈$0.14/Mtok**, output **≈$0.28/Mtok**, cache read **≈$0.0028/Mtok** —
+a cached token bills **~50x under** an input token. Attributing this file across
+that 2,218-request window: 60 cold x 8,329 x $0.14/M + 2,158 warm x 8,329 x
+$0.0028/M ≈ **$0.12 of $1.77 total spend, ~7%**.
+
+**Conclusion: shrinking this file is not a token-cost lever.** The per-request
+number (8,329) is real and slightly larger than the 7.7k once measured on 1.18.4
+— the file grew — but it is not multiplied by every step of an agent loop.
+`browser-agent`'s isolated config dir is still correct *for its shape*: every one
+of its runs is single-shot with a fresh prefix, so it is the 2.7% cold case every
+time. Do not generalise that trick to normal dispatch — it also drops
+`plugin/guard.js`, the enforcement layer between an agent and an irreversible
+action.
+
+A 331 KB `AGENTS.md` causes a permanent compaction loop;
+`scripts/tests/test_opencode_config.py` enforces a 100 KB ceiling. That ceiling
+is a **context-window** guard, not a cost one, and it remains the reason to care
+about size.
 
 ## Why `plugin/env.js` is generated too
 
@@ -213,7 +269,7 @@ existence guard**, and defined a `KC_PROD` that zsh did not have. Add a handle i
   (`*.env` → ask); a blanket allow is appended after it and silently defeats it
   on every agent. The default already allows every non-`.env` read, so the
   correct configuration is to say nothing.
-- **There is no `list` tool and no `websearch` tool** on 1.18.4. The resolved set
+- **There is no `list` tool and no `websearch` tool** on 1.18.18. The resolved set
   is exactly {bash, edit, glob, grep, invalid, question, read, skill, task,
   todowrite, webfetch, write}. Naming a nonexistent tool is a silent no-op that
   reads like configuration.
@@ -238,10 +294,12 @@ existence guard**, and defined a `KC_PROD` that zsh did not have. Add a handle i
   global `"task": "allow"` is appended after it and flips it, which hands `plan`
   a shell by delegation (the `general` subagent has one). It is restated at agent
   level.
-- **Deprecated on 1.18.4, deliberately absent:** agent-level `tools`, `mode` at
-  config level, `layout`, `autoshare`, `reference` (now `references`),
-  `maxSteps` (now `steps`). `theme`/`keybinds`/`tui` live in a separate
-  `~/.config/opencode/tui.json`.
+- **Deprecated, deliberately absent** — a config-SCHEMA claim about keys this
+  repo does not set, which the resolved `debug agent` dumps cannot see, so it was
+  carried forward at the bump rather than relabelled; last measured on 1.18.16:
+  agent-level `tools`, `mode` at config level, `layout`, `autoshare`,
+  `reference` (now `references`), `maxSteps` (now `steps`).
+  `theme`/`keybinds`/`tui` live in a separate `~/.config/opencode/tui.json`.
 
 ### Known limitation: in-session "always allow"
 

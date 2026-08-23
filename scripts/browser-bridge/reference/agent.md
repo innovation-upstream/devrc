@@ -26,8 +26,9 @@ command unrunnable, which is why fixing the first didn't appear to help:
    be reached. Fixed by probing without injecting.
 
 🔴 **Every doc misattributed both symptoms to an opencode *version* problem for the
-entire arc.** They are not version-related — both hosts run opencode 1.18.4 and both
-resolve browser-only. Do not re-open that hypothesis.
+entire arc.** They are not version-related — both hosts run 1.18.18 and both
+resolve browser-only, and the same resolution was measured on 1.18.4 and 1.18.16
+before the bumps. Do not re-open that hypothesis.
 
 ✅ **The `browser agent`-first default IS shipped** (SKILL.md → `## FIRST DECISION`).
 It was held back until capability was measured rather than argued from token
@@ -173,8 +174,9 @@ browser agent "go to news.ycombinator.com and report the top 3 story titles" \
   fail-closed property is *verified at runtime* rather than trusted — on any
   opencode where the host-tool denial didn't take, `browser agent` refuses instead
   of running the model unconfined. The gate runs BEFORE the tab is opened, so a
-  gate failure leaks no tab. **Both hosts run opencode 1.18.4 and both resolve
-  browser-only** — there is no version-skew caveat.
+  gate failure leaks no tab. **Both hosts run 1.18.18 and both resolve
+  browser-only**, and it resolved identically on 1.18.4 and 1.18.16 before the
+  bumps — there is no version-skew caveat.
   - ⚠ **If you check the gate by hand, redirect to a FILE**
     (`opencode debug agent browser-agent > /tmp/gate.json`), never a pipe or
     `$(...)`: opencode doesn't reliably flush stdout before exiting into a pipe, so
@@ -188,8 +190,11 @@ browser agent "go to news.ycombinator.com and report the top 3 story titles" \
   that your `banking` profile is on chase.com, then `nav` that to an attacker.) The
   `browser whoami` CLI you run by hand is unchanged and still shows everything.
 - **No `upload` and no `activate` for the agent.** The autonomous model's op set
-  is **11 ops** (`text`/`html`/`eval`/`nav`/`screenshot`/`frames`/`click`/`type`/
-  `key`/`wake`/`whoami`). `upload` is operator-only — you can still `browser
+  is **13 ops** (`text`/`html`/`eval`/`nav`/`screenshot`/`frames`/`click`/`type`/
+  `key`/`wake`/`context`/`emulate`/`whoami`) — read off `ALLOWED_OPS_DEFAULT` in
+  `opencode/tools/browser_tool_impl.mjs`, which `tests/browser_tool.test.mjs`
+  pins; this sentence said **11** and omitted `context`/`emulate` from #321 until
+  2026-08-20, so trust the constant, not a restatement of it. `upload` is operator-only — you can still `browser
   upload` by hand; the model gets `op_not_allowed:upload`, and it is re-enabled
   only by an explicit `BROWSER_AGENT_ALLOWED_OPS` opt-in. **`activate` is stricter
   still: it is not reachable by the model at ALL**, not even via that opt-in,

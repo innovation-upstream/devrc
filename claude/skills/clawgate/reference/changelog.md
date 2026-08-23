@@ -5,6 +5,10 @@ is, or whether a behaviour you're seeing is a deliberate old decision. **Not nee
 routine operation** — the core SKILL.md carries everything you need to deploy, drive the
 machine API, or debug.
 
+⚠ **This file stops at 0.7.79 and the product runs ahead of it** (live was **0.7.85** on
+2026-08-12). An absence here is NOT evidence a feature doesn't exist — for anything newer than
+0.7.79, read `containers/clawgate/HANDOFF.md` or `git log` instead.
+
 🔑 **Never derive the next release number from this file** — always from the LIVE
 deployment pin (see the core's deploy section).
 
@@ -71,7 +75,7 @@ FAB** (per-agent unread → session); session-id-in-URL; a consolidated **auto-a
 
 ## 0.7.31–0.7.35 (2026-06-24)
 - **Usage telemetry** — Grafana **Faro RUM** + new Prometheus metrics + the `clawgate-usage`
-  dashboard. See `reference/telemetry.md`.
+  dashboard. See `~/.claude/skills/clawgate/reference/telemetry.md`.
 - RUM-surfaced **error-toast fix**: `toast` was IIFE-local, now `window.toast`.
 - **Per-project auto-approve now PERSISTS** — **migration 0013** + `internal/autoapprove`;
   survives restarts; 1h/8h/24h/indefinite windows.
@@ -133,7 +137,8 @@ FAB** (per-agent unread → session); session-id-in-URL; a consolidated **auto-a
   every platform (not an Android limit); `notificationText()`.
 - **0.7.61 — idle-task reaper.** The daily retention sweep auto-dismisses tasks untouched **>7d**
   AND tears down their linked agent pods. Env **`CLAWGATE_TASK_TTL`** (`off`/`0` disables);
-  centralized in `dismissTask`.
+  centralized in `dismissTask`. 🔴 **SUPERSEDED at 0.7.96 — the sweep now TAGS `stale` and destroys
+  nothing.** The `CLAWGATE_TASK_TTL` half still holds; see the 0.7.96 entry at the end.
 - **0.7.62** markdown chat title + status icon removed from the chat header + sticky autoscroll.
 - **0.7.63 — the SCROLL ROOT FIX.** The page is a fixed-height app shell (`h-dvh` +
   `overflow-hidden`) so **`#chat-log` is the ACTUAL scroller**.
@@ -168,10 +173,10 @@ FAB** (per-agent unread → session); session-id-in-URL; a consolidated **auto-a
 - **0.7.75 task TAGS** as a routing key + the `title` companion fix (**migration 0018**:
   `tags TEXT[]` GIN-indexed + `title TEXT`). Normalized / sorted / deduped tags;
   `GET /api/tasks?tag=` AND-filter; `GET /api/tags` vocabulary. Full grammar and the reserved
-  namespaces: `reference/internals.md`.
+  namespaces: `~/.claude/skills/clawgate/reference/internals.md`.
 - **0.7.76** machine `DELETE /api/tasks/{id}`.
 - **0.7.77** fixed the **markdown renderer re-parsing its own output** — see
-  `reference/internals.md` (the vault fix, the 33.5s→0.7s quadratic, and the rule "fix the
+  `~/.claude/skills/clawgate/reference/internals.md` (the vault fix, the 33.5s→0.7s quadratic, and the rule "fix the
   RENDERER, not the client").
 - **0.7.78** machine `POST /api/tasks/{id}/comments`.
 - **0.7.79** = two fixes. (a) `ui.taskTitle` **exported as `ui.TaskTitle`**
@@ -185,5 +190,21 @@ FAB** (per-agent unread → session); session-id-in-URL; a consolidated **auto-a
   JS leak is unfixed (0.7.79 never touched `markdown.go`) — don't trust it. Residual: a backtick
   inside a URL renders a truncated autolink plus literal text (no control byte in the href).
 
-**Live pin as of 2026-07-30: 0.7.79** (`curl -sf http://192.168.50.250:30302/health`). Zach ships
-concurrently — this line is stale by design; always re-check.
+## 0.7.90–0.7.97 (2026-08-18→20)
+- 🔴 **0.7.96 — the idle-task reaper is NO LONGER DESTRUCTIVE** (`cf529d41`). `reapIdleTasks` now
+  `AddTags`+`AddComment` (tag `stale` + a system comment) instead of calling `dismissTask`, so the
+  **7d sweep no longer soft-deletes a task or tears down its linked agent pod**. This RETRACTS the
+  0.7.61 entry above for anything ≥0.7.96 — the only remaining pod-destroying path is the manual
+  `DELETE /api/tasks/{id}`. ⚠ `internal/api/server.go:1316-1321` still carries the OLD comment
+  ("the reaper is destructive", "calls `dismissTask`") ~70 lines above the function that
+  contradicts it — don't trust it.
+- **0.7.97** repo-backed agents get the task-API guidance without touching the repo's `AGENTS.md`,
+  plus a close-out branch for blockers they cannot resolve (`790aeb09`).
+- ⏳ **NOT YET PINNED (trunk only): task↔session threads** (#357, `3c0062ea`). Migration 0023
+  `task_sessions`; `clawgatectl` sends `X-Clawgate-Session-Id` + `X-Clawgate-Host` on **every** task
+  subcommand; `sessions` embedded on task reads (`omitempty`); one new route
+  `GET /api/sessions/{id}/tasks`. When this pins, the pickup ritual's prose `session <id>` line in
+  SKILL.md is superseded by the structural link — re-read the commit before documenting it.
+
+**Live pin as of 2026-08-20: 0.7.97** (`clawgatectl health`). Zach ships concurrently — this line is
+stale by design; always re-check.

@@ -247,6 +247,81 @@ def test_positive_control_orphan_reference_counter_moves(tmp_path):
     assert a["orphan_refs"] == ["reference/orphan.md"]
 
 
+# --- a DIRECTORY routed by a VARIABLE segment ----------------------------------
+# The third routing shape. A set that is expected to keep growing (browser's
+# per-site docs) cannot afford a row per member, because the body is loaded on
+# every task. A row naming the directory with a `<placeholder>` filename routes
+# to every member, because something at RUN TIME resolves the placeholder — so
+# those members are reachable, not dead. The four tests below pin that the
+# affordance is REAL, NARROW, and cannot be used to switch the counter off.
+
+_VAR_ROUTED = """\
+---
+name: varrouted
+description: A core that routes to a directory, not to each of its members.
+---
+
+## Reference
+
+| file | load it when… |
+|---|---|
+| `reference/errors.md` | any error you don't recognise |
+| `reference/sites/<host>.md` | you are driving a site that has one |
+"""
+
+
+def _var_routed(tmp_path, name="varrouted", body=_VAR_ROUTED, members=("a.test.md",)):
+    d = tmp_path / name
+    (d / "reference" / "sites").mkdir(parents=True)
+    (d / "SKILL.md").write_text(body)
+    (d / "reference" / "errors.md").write_text("# errors\n")
+    for m in members:
+        (d / "reference" / "sites" / m).write_text(f"# {m}\n")
+    return d / "SKILL.md"
+
+
+def test_a_member_of_a_placeholder_routed_directory_is_not_an_orphan(tmp_path):
+    """`reference/sites/<host>.md` in the body routes to every file in that
+    directory without naming one. None of them is dead."""
+    a = sa.audit_one(_var_routed(tmp_path, members=("a.test.md", "b.test.md")))
+    assert a["orphan_refs"] == [], (
+        "a directory routed with a variable segment must not report its members "
+        f"as orphans: {a['orphan_refs']}")
+    assert a["missing_refs"] == []
+
+
+def test_the_affordance_does_NOT_extend_to_a_sibling_directory(tmp_path):
+    """NARROW: only the directory the placeholder row actually names. A file in
+    a DIFFERENT subdirectory is still unreachable, and still an orphan."""
+    p = _var_routed(tmp_path, name="narrow")
+    (p.parent / "reference" / "other").mkdir()
+    (p.parent / "reference" / "other" / "lost.md").write_text("# lost\n")
+    assert sa.audit_one(p)["orphan_refs"] == ["reference/other/lost.md"]
+
+
+def test_a_toplevel_placeholder_cannot_switch_the_whole_counter_off(tmp_path):
+    """🔴 THE ABUSE CASE. A row spelled `reference/<topic>.md` would, on a naive
+    prefix rule, excuse EVERY file in reference/ — turning the orphan check off
+    repo-wide with one line. It must not: the affordance applies to a real
+    SUBdirectory only, never to reference/ itself."""
+    body = _VAR_ROUTED.replace("`reference/sites/<host>.md`", "`reference/<topic>.md`")
+    p = _var_routed(tmp_path, name="abuse", body=body)
+    (p.parent / "reference" / "orphan.md").write_text("# orphan\n")
+    assert "reference/orphan.md" in sa.audit_one(p)["orphan_refs"]
+
+
+def test_without_the_placeholder_row_the_members_ARE_orphans(tmp_path):
+    """MUTATION, in-suite: delete the routing row and the same files must go
+    back to being reported. Without this, the test above cannot distinguish
+    'the affordance works' from 'the orphan check stopped looking'."""
+    body = "\n".join(l for l in _VAR_ROUTED.splitlines()
+                     if "reference/sites/" not in l) + "\n"
+    p = _var_routed(tmp_path, name="unrouted", body=body,
+                    members=("a.test.md", "b.test.md"))
+    assert sa.audit_one(p)["orphan_refs"] == [
+        "reference/sites/a.test.md", "reference/sites/b.test.md"]
+
+
 def test_positive_control_over_budget_status_moves(tmp_path):
     p = bad(tmp_path)
     a = sa.audit_one(p)
@@ -624,3 +699,444 @@ def _run(root, *extra):
                        capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
     return r.stdout
+
+
+# --- numbered-corpus integrity --------------------------------------------------
+# The numbers in a split corpus are an API: they are cited from the core, from
+# sibling reference files and from OTHER skills, so a demote that renumbers
+# per-file silently breaks every citation while leaving all PATHS valid — no path
+# gate can see it. Measured on datapacket-talos app-blocks 2026-08-17: intact at
+# 200 items / 0 dangling; renumbering its 9 shards to 1..n each produced 53
+# dangling citations, which is the mutation the reporter below must catch.
+
+def _corpus_skill(tmp_path, name, core, shards):
+    d = tmp_path / name
+    (d / "reference").mkdir(parents=True)
+    (d / "SKILL.md").write_text(core)
+    for fn, nums in shards.items():
+        body = "# shard\n\n" + "".join(f"{n}. **item {n}** body\n\n" for n in nums)
+        (d / "reference" / fn).write_text(body)
+    return d / "SKILL.md"
+
+
+# Two sparse shards of one 1..200-style sequence, as a real split corpus looks.
+# 12 apiece, so a total renumber still leaves >= CORPUS_MIN defined numbers —
+# otherwise the size gate, not the logic, is what the mutation test measures.
+SHARDS = {"a.md": [3, 17, 45, 92, 140, 155, 161, 170, 175, 182, 190, 196],
+          "b.md": [8, 23, 60, 111, 150, 158, 166, 172, 178, 185, 193, 199]}
+CORE_CITES = "# core\n\nSee gotcha #45 and gotcha #111 for detail.\n"
+
+
+def test_a_split_corpus_with_frozen_numbers_is_clean(tmp_path):
+    a = sa.audit_one(_corpus_skill(tmp_path, "ok", CORE_CITES, SHARDS))
+    assert a["corpus_n"] == 24
+    assert a["corpus_dangling"] == []
+    assert a["corpus_dupes"] == []
+
+
+def test_positive_control_renumbering_shards_breaks_citations(tmp_path):
+    """THE mutation this check exists for — and the one a ceiling-bounded
+    citation regex could not see, because renumbering drops the ceiling too."""
+    renumbered = {"a.md": list(range(1, 13)), "b.md": list(range(1, 13))}
+    a = sa.audit_one(_corpus_skill(tmp_path, "renum", CORE_CITES, renumbered))
+    assert a["corpus_dangling"] == [45, 111], (
+        "renumbering every shard to 1..n must strand both citations; got "
+        f"{a['corpus_dangling']}")
+
+
+def test_positive_control_a_duplicate_number_across_shards_is_reported(tmp_path):
+    """A PARTIAL renumber — one shard rewritten, the other left alone."""
+    clashing = {"a.md": SHARDS["a.md"], "b.md": SHARDS["a.md"][:-1] + [141]}
+    a = sa.audit_one(_corpus_skill(tmp_path, "dupe", CORE_CITES, clashing))
+    assert [n for n, *_ in a["corpus_dupes"]] == SHARDS["a.md"][:-1]
+
+
+def test_a_dense_procedure_list_is_not_a_corpus(tmp_path):
+    """1..n is a procedure. Scoring these as shards reported 15 bogus
+    collisions against app-blocks' provably-intact corpus."""
+    dense = {"a.md": [1, 2, 3, 4, 5, 6], "b.md": [1, 2, 3, 4, 5, 6]}
+    a = sa.audit_one(_corpus_skill(tmp_path, "dense", "# core\n\ngotcha #3\n", dense))
+    assert a["corpus_dupes"] == []
+
+
+def test_a_skill_citing_another_skills_corpus_is_not_policed(tmp_path):
+    """Several datapacket skills cite app-blocks' numbers ("gotchas #137" in
+    manage-design-system, one in gitops-gate). None of those is theirs to
+    resolve. The SIZE gate is what keeps them silent — they have no corpus of
+    their own — so this pins the real shape: a reference/ dir, a borrowed
+    citation, and too few numbers to be a corpus."""
+    tiny = {"a.md": [1, 2, 3]}
+    a = sa.audit_one(_corpus_skill(tmp_path, "borrow",
+                                   "# core\n\nsee gotcha #137 elsewhere\n", tiny))
+    assert a["corpus_n"] == 0 and a["corpus_dangling"] == []
+
+
+def test_a_bare_hash_number_is_not_read_as_a_citation(tmp_path):
+    """`#2319` is a PR. Across app-blocks the bare form matches 313 distinct
+    numbers, 189 of them outside the corpus entirely."""
+    a = sa.audit_one(_corpus_skill(tmp_path, "prs",
+                                   CORE_CITES + "\nShipped in #2319 and #201.\n", SHARDS))
+    assert a["corpus_dangling"] == []
+
+
+def test_a_skill_with_no_reference_dir_is_never_policed(tmp_path):
+    d = tmp_path / "flat"
+    d.mkdir()
+    (d / "SKILL.md").write_text(CORE_CITES + "".join(
+        f"{n}. **step {n}**\n\n" for n in range(1, 21)))
+    a = sa.audit_one(d / "SKILL.md")
+    assert a["corpus_n"] == 0
+
+
+# --- repo-root-relative sidecar spelling -----------------------------------------
+# A repo-local skill may route as `.claude/skills/<name>/reference/<topic>.md` — the
+# form prune-skill's sec 4 recommends, because a BARE relative path is resolved by the
+# reader against the CWD and not found. That spelling used to score as "not a sidecar",
+# so a freshly-split skill reported "no skill routes to a reference/ sidecar yet" with
+# five live routing lines, and a missing topic was reported by nobody. Measured on
+# datapacket-talos image-cacher 2026-08-17.
+
+REPO_ROOT_CORE = """# core
+
+| File | Load it when… |
+|---|---|
+| `.claude/skills/rr/reference/alpha.md` | alpha things |
+| `.claude/skills/rr/reference/beta.md` | beta things |
+"""
+
+
+def _rr_skill(tmp_path, core, refs):
+    d = tmp_path / "rr"
+    (d / "reference").mkdir(parents=True)
+    (d / "SKILL.md").write_text(core)
+    for r in refs:
+        (d / "reference" / r).write_text(f"# {r}\n")
+    return d / "SKILL.md"
+
+
+def test_a_repo_root_relative_routing_line_is_recognised(tmp_path):
+    a = sa.audit_one(_rr_skill(tmp_path, REPO_ROOT_CORE, ("alpha.md", "beta.md")))
+    assert len(a["refs"]) == 2, f"routing lines not seen as sidecars: {a['refs']}"
+    assert a["missing_refs"] == []
+    assert a["orphan_refs"] == []
+
+
+def test_positive_control_a_missing_repo_root_relative_topic_is_reported(tmp_path):
+    """THE control: before the fix this returned [] — a dead routing line, silently."""
+    a = sa.audit_one(_rr_skill(tmp_path, REPO_ROOT_CORE, ("alpha.md",)))
+    assert a["missing_refs"] == [".claude/skills/rr/reference/beta.md"], (
+        f"a dead repo-root-relative routing line went unreported: {a['missing_refs']}")
+
+
+def test_a_repo_root_relative_orphan_is_still_reported(tmp_path):
+    core = "# core\n\n| `.claude/skills/rr/reference/alpha.md` | alpha |\n"
+    a = sa.audit_one(_rr_skill(tmp_path, core, ("alpha.md", "nobody-routes-here.md")))
+    assert a["orphan_refs"] == ["reference/nobody-routes-here.md"]
+
+
+def test_another_repos_reference_path_is_still_not_a_sidecar(tmp_path):
+    """Regression guard: `apps/reference/manifest.md` is a page on a CLIENT's public
+    docs site, seen in two real datapacket skills. It names a directory that is not
+    this skill, so it must stay out — reporting it broken is a false alarm."""
+    core = "# core\n\nsee `apps/reference/manifest.md` on the docs site\n"
+    a = sa.audit_one(_rr_skill(tmp_path, core, ()))
+    assert a["refs"] == [] and a["missing_refs"] == []
+
+
+# --- deployed (`~/.claude/…`) sidecar spelling -----------------------------------
+# 🔴 THE SPELLING A DEVRC READER ACTUALLY USES. devrc skills are READ from
+# ~/.claude/skills/ (home-manager copies) by an agent whose cwd is some unrelated
+# project, so neither a bare `reference/x.md` nor a repo-relative
+# `claude/skills/<n>/reference/x.md` resolves for that reader — only this one does.
+#
+# It expands to an absolute path under the HOME deploy root rather than under the
+# SOURCE skill_dir, so `Path.relative_to(skill_dir)` raises and the resolver used
+# to give up and return None. Measured on devrc prune-skill 2026-08-19: three
+# sidecars and eleven routing lines scored as "no skill routes to a reference/
+# sidecar yet". Converting the corpus to this spelling WITHOUT this fix would have
+# traded one blindness for another.
+
+DEPLOYED_CORE = """# core
+
+| File | Load it when… |
+|---|---|
+| `~/.claude/skills/rr/reference/alpha.md` | alpha things |
+| `~/.claude/skills/rr/reference/beta.md` | beta things |
+"""
+
+
+def test_a_deployed_spelling_routing_line_is_recognised(tmp_path):
+    a = sa.audit_one(_rr_skill(tmp_path, DEPLOYED_CORE, ("alpha.md", "beta.md")))
+    assert len(a["refs"]) == 2, f"deployed routing lines not seen as sidecars: {a['refs']}"
+    assert a["missing_refs"] == []
+    assert a["orphan_refs"] == []
+
+
+def test_positive_control_a_missing_deployed_topic_is_reported(tmp_path):
+    """THE control: at the pre-fix base this returned [] — a dead routing line in
+    the ONLY spelling a devrc reader can follow, reported by nobody."""
+    a = sa.audit_one(_rr_skill(tmp_path, DEPLOYED_CORE, ("alpha.md",)))
+    assert a["missing_refs"] == ["~/.claude/skills/rr/reference/beta.md"], (
+        f"a dead deployed routing line went unreported: {a['missing_refs']}")
+
+
+def test_a_deployed_spelling_orphan_is_still_reported(tmp_path):
+    """🔴 INVARIANT GUARD, not regression coverage — VERIFIED to survive the
+    mutation (fall-through -> `return None`), because orphan detection does not
+    depend on ref RESOLUTION. Only the two tests above are killed by that mutant.
+    Kept because it pins the opposite failure: a fall-through that claimed every
+    deployed path would make the routed file itself look orphaned."""
+    core = "# core\n\n| `~/.claude/skills/rr/reference/alpha.md` | alpha |\n"
+    a = sa.audit_one(_rr_skill(tmp_path, core, ("alpha.md", "nobody-routes-here.md")))
+    assert a["orphan_refs"] == ["reference/nobody-routes-here.md"]
+
+
+def test_a_deployed_path_naming_ANOTHER_skill_is_not_this_skills_sidecar(tmp_path):
+    """The fall-through must keep (3)'s disambiguation: the marker names THIS
+    skill's own directory. A cross-skill deployed path is a real, common shape —
+    prune-skill cites other skills — and must not be scored as a local sidecar,
+    or every cross-reference becomes a phantom missing topic.
+
+    🔴 INVARIANT GUARD, not regression coverage — VERIFIED to survive the
+    mutation, and it must: a resolver that recognises NOTHING trivially claims
+    nothing. It pins the over-reach the fix could have introduced, which is the
+    failure only the FIXED resolver can reach."""
+    core = "# core\n\nsee `~/.claude/skills/OTHER/reference/alpha.md` in the other skill\n"
+    a = sa.audit_one(_rr_skill(tmp_path, core, ()))
+    assert a["refs"] == [] and a["missing_refs"] == [], (
+        f"a cross-skill deployed path was claimed as a local sidecar: {a}")
+
+
+def test_a_skill_whose_name_is_a_SUFFIX_of_another_is_not_claimed(tmp_path):
+    """🔴 THE SHAPE THAT ACTUALLY COLLIDES, and the one the test above cannot see.
+
+    `OTHER` shares no suffix with `rr`, so that case passes against a plain
+    substring `find()` too — it proves nothing about the real hazard. `mailbox`
+    and `vetr-mailbox` are BOTH real skills in this repo, and `mailbox/reference/`
+    is a substring of `vetr-mailbox/reference/`: before the segment-boundary fix,
+    resolving a `vetr-mailbox` route while auditing `mailbox` returned
+    'reference/gmail.md' — a cross-reference claimed as a local sidecar and then
+    reported as a phantom missing topic.
+
+    🔴 LATENT, NOT OBSERVED — the distinction is the point. Neither skill currently
+    references the other, and `skill-audit.py` output over the real corpus is
+    BYTE-IDENTICAL before and after the fix. This is a constructed probe of a
+    REACHABLE defect, not a field observation; an earlier revision of this
+    docstring wrote it in the past tense as if it had been seen in the corpus,
+    which is a stronger claim than the evidence supports.
+
+    Kills a `find()`-without-boundary-check mutant; the OTHER case does not.
+    """
+    d = tmp_path / "mailbox"
+    (d / "reference").mkdir(parents=True)
+    (d / "SKILL.md").write_text(
+        "# core\n\nsee `~/.claude/skills/vetr-mailbox/reference/gmail.md`\n")
+    a = sa.audit_one(d / "SKILL.md")
+    assert a["refs"] == [] and a["missing_refs"] == [], (
+        f"a sibling skill whose name is a SUFFIX of this one was claimed: {a}")
+
+
+def test_two_spellings_of_one_topic_count_once(tmp_path):
+    """app-blocks names legacy-hackathon-ops.md both ways; counting spellings
+    reported 16 "reference file(s)" for 15 files.
+
+    🔴 INVARIANT GUARD, not a regression test — it passes at the pre-fix base too,
+    for the wrong reason: there the second spelling was not recognised at all, so
+    the count was 1 by blindness rather than by deduping. Nothing expressible as a
+    baseline test separates those, so do not read this as covering the dedupe.
+    """
+    core = ("# core\n\n`reference/alpha.md` in the table, and "
+            "`.claude/skills/rr/reference/alpha.md` in the repo-layout section\n")
+    a = sa.audit_one(_rr_skill(tmp_path, core, ("alpha.md",)))
+    assert len(a["refs"]) == 1, f"same file counted {len(a['refs'])}x: {a['refs']}"
+
+
+# --- the working-margin band: the auditor must not disagree with the gate ------
+# 🔴 REGRESSION. Measured on main at 3393c60b: scripts/browser-bridge/SKILL.md was
+# 12,259 B. test_skill_size.py::test_skill_md_keeps_working_headroom was RED (29 B
+# of free space against a 250 B required margin — "RECLAIM: 221 bytes") while this
+# auditor — the tool /prune-skill documents a maintainer to run — printed
+#
+#     ✓ all 1 skill(s) within budget — no prune needed (stop; do not churn the files)
+#
+# about that same file. It compared against the CEILING only and was structurally
+# blind to the headroom floor, so the documented instrument said STOP about a file
+# the authoritative gate was rejecting. These tests pin both halves: the constants
+# are READ from the gate rather than restated, and a file in the band is a FINDING
+# — checked in BOTH directions, because a checker that always says "prune needed"
+# is as useless as one that never does.
+
+GATE_PY = SCRIPTS / "browser-bridge" / "tests" / "test_skill_size.py"
+gate = _load("browser-bridge/tests/test_skill_size.py", "browser_skill_size_gate")
+
+
+def _skill_of_size(tmp_path, name, size):
+    """A well-formed SKILL.md of EXACTLY `size` bytes and nothing else wrong.
+
+    No reference/ dir: a skill that HAS one but routes nowhere is an ORPHAN
+    finding, which would move the verdict for a reason that is not the size band
+    — red for the wrong reason, and still red with the band check deleted.
+    """
+    d = tmp_path / name
+    d.mkdir(parents=True)
+    head = (f"---\nname: {name}\ndescription: a fixture sized to the byte.\n"
+            f"---\n\n## Ops\n\n").encode()
+    assert size >= len(head) + 1, f"{size} is too small to build a valid fixture"
+    remaining = size - len(head)
+    chunks = []
+    while remaining > 80:
+        chunks.append(b"x" * 79 + b"\n")
+        remaining -= 80
+    chunks.append(b"x" * (remaining - 1) + b"\n")
+    p = d / "SKILL.md"
+    p.write_bytes(head + b"".join(chunks))
+    assert len(p.read_bytes()) == size, (
+        "the fixture builder is wrong — every size test below is void")
+    return p
+
+
+def test_the_gate_module_is_the_one_the_auditor_reads():
+    """Guard the guard: if this path is wrong, everything below measures a module
+    the auditor never loads."""
+    assert GATE_PY.is_file()
+    assert sa._BUDGET_SOURCE == GATE_PY.resolve()
+
+
+def test_the_budget_constants_come_from_the_gate_not_a_second_copy():
+    assert sa.TARGET == gate.MAX_BYTES
+    assert sa.MIN_HEADROOM == gate.MIN_HEADROOM_BYTES
+    assert sa.BUDGET == gate.MAX_BYTES - gate.MIN_HEADROOM_BYTES
+
+
+def test_no_budget_number_is_written_as_a_literal_in_the_auditor():
+    """Equality alone cannot separate a derived value from a coincidence — a
+    pasted literal satisfies it until the day the gate moves.
+
+    MIN_HEADROOM is deliberately NOT checked: it could legitimately equal an
+    unrelated constant (FAT_LINE is 500), and a false failure on a coincidence is
+    worse than the narrower pin. The mechanical control in
+    test_changing_the_gates_numbers_changes_what_the_auditor_reads covers it.
+    """
+    import ast
+    literals = {n.value for n in ast.walk(ast.parse(AUDIT_PY.read_text()))
+                if isinstance(n, ast.Constant) and isinstance(n.value, int)
+                and not isinstance(n.value, bool)}
+    assert sa.TARGET not in literals, (
+        f"{sa.TARGET} is a numeric literal in skill-audit.py — the ceiling is "
+        f"owned by {GATE_PY}, and a second hand-maintained copy is exactly how "
+        "the audit and the gate came to disagree.")
+    assert sa.BUDGET not in literals, (
+        f"{sa.BUDGET} (the ENFORCED budget) is a literal in skill-audit.py; it "
+        "must be derived as TARGET - MIN_HEADROOM.")
+
+
+def test_changing_the_gates_numbers_changes_what_the_auditor_reads(tmp_path):
+    """The mechanical control for the derivation: feed _load_budget a DIFFERENT
+    gate file and watch the numbers move. Values picked so neither can equal the
+    real ones by accident."""
+    fake = tmp_path / "fake_gate.py"
+    fake.write_text("MAX_BYTES = 9_001\nMIN_HEADROOM_BYTES = 137\n")
+    assert sa._load_budget(fake) == (9_001, 137)
+
+
+def test_a_missing_gate_file_is_a_hard_failure_not_a_fallback(tmp_path):
+    """A default literal on the missing-file path would BE the duplicate this
+    design removes — and it would apply silently, which is the worse half."""
+    with pytest.raises(SystemExit) as e:
+        sa._load_budget(tmp_path / "not-there.py")
+    assert "OWNS the ceiling" in str(e.value)
+
+
+def test_a_renamed_gate_constant_fails_loudly(tmp_path):
+    fake = tmp_path / "renamed.py"
+    fake.write_text("CEILING = 9_001\n")
+    with pytest.raises(SystemExit) as e:
+        sa._load_budget(fake)
+    assert "no longer exports the budget constants" in str(e.value)
+
+
+# --- the band itself, in BOTH directions ---------------------------------------
+
+def test_a_file_in_the_warning_band_says_prune_needed(tmp_path):
+    """THE non-vacuity test: a body inside the ceiling but past the working margin
+    is exactly what the ceiling-only check called ✓."""
+    size = sa.BUDGET + 1
+    assert size < sa.TARGET, "the band is empty — this test would prove nothing"
+    p = _skill_of_size(tmp_path, "tight", size)
+    assert sa.audit_one(p)["status"] == "NO HEADROOM"
+    out = _run(tmp_path)
+    assert "⚠ prune needed" in out, out
+    assert "no prune needed" not in out, out
+    assert "the gate REJECTS these" in out, out
+
+
+def test_a_comfortably_small_file_still_says_no_prune_needed(tmp_path):
+    p = _skill_of_size(tmp_path, "lean", 2_000)
+    assert sa.audit_one(p)["status"] == "OK"
+    out = _run(tmp_path)
+    assert "no prune needed" in out
+    assert "prune needed —" not in out
+
+
+@pytest.mark.parametrize("offset,expected", [(-1, "OK"), (0, "OK"), (1, "NO HEADROOM")])
+def test_the_enforced_budget_boundary_is_exact(tmp_path, offset, expected):
+    """Inclusive: BUDGET bytes leaves exactly MIN_HEADROOM free, which is what the
+    gate requires (>=, not >). One byte more is a finding."""
+    p = _skill_of_size(tmp_path, "b", sa.BUDGET + offset)
+    assert sa.audit_one(p)["status"] == expected
+
+
+@pytest.mark.parametrize("offset,expected",
+                         [(-1, "NO HEADROOM"), (0, "NO HEADROOM"), (1, "OVER TARGET")])
+def test_the_ceiling_boundary_is_exact(tmp_path, offset, expected):
+    p = _skill_of_size(tmp_path, "c", sa.TARGET + offset)
+    assert sa.audit_one(p)["status"] == expected
+
+
+def test_the_hard_cap_boundary_is_unchanged_by_the_new_band(tmp_path):
+    assert sa.audit_one(_skill_of_size(tmp_path / "a", "h", sa.HARD))["status"] == "OVER TARGET"
+    assert sa.audit_one(_skill_of_size(tmp_path / "b", "h", sa.HARD + 1))["status"] == "OVER HARD CAP"
+
+
+@pytest.mark.parametrize("base,delta", [
+    (None, 2_000),
+    ("BUDGET", -100), ("BUDGET", -1), ("BUDGET", 0), ("BUDGET", 1), ("BUDGET", 100),
+    ("TARGET", -1), ("TARGET", 0), ("TARGET", 1), ("TARGET", 5_000),
+])
+def test_the_auditor_and_the_gate_never_disagree(tmp_path, base, delta):
+    """The disagreement itself, pinned. For ANY size, "the auditor reports a
+    finding" must equal "the gate's headroom assertion fails" — the right-hand
+    side computed from the GATE's own constants, never from the auditor's.
+
+    This is the property the bug violated: at 12,259 B the gate said RED and the
+    auditor said ✓.
+    """
+    size = delta if base is None else {"BUDGET": sa.BUDGET, "TARGET": sa.TARGET}[base] + delta
+    p = _skill_of_size(tmp_path, "x", size)
+    gate_is_red = (gate.MAX_BYTES - size) < gate.MIN_HEADROOM_BYTES
+    auditor_reports_finding = sa.audit_one(p)["status"] != "OK"
+    assert auditor_reports_finding == gate_is_red, (
+        f"at {size:,} B the gate says {'RED' if gate_is_red else 'green'} and the "
+        f"auditor says {'finding' if auditor_reports_finding else '✓'} — that is "
+        "the exact disagreement this block exists to prevent.")
+
+
+def test_the_budget_line_states_the_ENFORCED_number_not_only_the_ceiling(tmp_path):
+    """A maintainer reads the header to learn what they must fit under. Printing
+    only the ceiling is what makes 12,2xx B look like room."""
+    _skill_of_size(tmp_path, "lean", 2_000)
+    out = _run(tmp_path)
+    assert f"budget {sa.BUDGET:,} B ENFORCED" in out, out
+    assert f"ceiling {sa.TARGET:,} B" in out, out
+    assert f"{sa.MIN_HEADROOM:,} B working margin" in out, out
+
+
+def test_the_real_browser_skill_agrees_with_its_own_gate():
+    """The live cross-check on the file the whole pattern is the exemplar for —
+    the repo's CURRENT SKILL.md, so a regrowth into the band is caught on the next
+    commit that touches it, not only in fixtures."""
+    browser = SCRIPTS / "browser-bridge" / "SKILL.md"
+    size = len(browser.read_bytes())
+    gate_is_red = (gate.MAX_BYTES - size) < gate.MIN_HEADROOM_BYTES
+    assert sa.audit_one(browser)["status"] == "OK" and not gate_is_red, (
+        f"browser SKILL.md is {size:,} B; the enforced budget is {sa.BUDGET:,} B")

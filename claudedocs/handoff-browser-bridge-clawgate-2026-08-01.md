@@ -73,5 +73,5 @@
 ## Deploy notes
 
 - **browser-bridge**: rsync extension to `~/.local/share/browser-bridge-ext/` on each host, reload in brave://extensions
-- **clawgate extension**: files live at `~/workspace/homelab-talos/containers/clawgate/extension/`, reload in brave://extensions (Default profile)
+- **clawgate extension**: ⚠ **superseded 2026-08-12** — Brave now loads it from the dedicated worktree `~/workspace/clawgate-extension/containers/clawgate/extension` (branch `clawgate-ext-local`), on **both hosts** and in **every profile that has it**, not from the `homelab-talos` base clone and not just `Default`. Deploy + verification procedure: the `clawgate` skill's `reference/extension.md`.
 - **server.py**: if updated, must kill + restart the server process (nix symlink → `~/.config/browser-bridge/server.py`)

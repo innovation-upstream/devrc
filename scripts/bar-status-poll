@@ -9,15 +9,24 @@ that the *instant* i3status-rust block scripts (i3status-clawgate / -mail /
 local file — so a slow or down source can never hang or break the bar.
 
 Fully FAIL-SAFE: a down/slow source writes a {"state":"stale"} marker (never
-crashes the poller); the block scripts render a stale/missing file as an empty
-(invisible) block, honouring the bar's CALM principle (colour == "look at me";
-steady state is neutral / invisible). After writing each file the poller signals
-i3status-rs (RTMIN+N) so the corresponding block refreshes immediately.
+crashes the poller). 🔴 EVERY block renders that marker — and a missing, corrupt
+or FROZEN cache — as its VISIBLE "not measured" pill (a trailing `?`), never as
+the empty/invisible block, which is reserved for a MEASURED all-clear. That is
+the bar's CALM principle read correctly: steady state is invisible because it
+was measured and there is nothing, so "I could not look" must not borrow those
+pixels. `scripts/bar_freshness.py` is the one predicate all seven use. After
+writing each file the poller signals i3status-rs (RTMIN+N) so the corresponding
+block refreshes immediately.
 
 Sources
-  clawgate : GET $CLAWGATE_API_URL/api/tasks with the bearer CLAWGATE_HOOK_TOKEN
-             (both from ~/.claude/clawgate.env) -> count tasks awaiting the
-             operator (status in {open, ready_for_review}).
+  clawgate : GET $CLAWGATE_API_URL/api/tasks?summary=1 with the bearer
+             CLAWGATE_HOOK_TOKEN (both from ~/.claude/clawgate.env) -> what
+             needs the operator. The predicate is NOT spelled here: it is
+             scripts/lib/clawgate_tasks.py, which all three surfaces that answer
+             this question import (this poller and session-manager).
+             It counts status-pending tasks AND `in_progress` tasks whose agent
+             looks dead — the state a wedged dispatch is stranded in, which this
+             poller used to exclude by name.
   mail     : open rows in the homelab Postgres `mail_actions` table, via
              mail-actions/_db.py (kubectl port-forward + psycopg2). That module
              is loaded by EXPLICIT PATH, never via sys.path — its sibling llm.py
@@ -30,11 +39,13 @@ Sources
              pairs have STOPPED emitting into ClickHouse `activity.events`.
              scripts/collector/deadman.py does the measuring (read its docstring
              for what "dead" means for a source that only fires on demand); this
-             poller only maps the verdict onto a pill. UNLIKE every other source
-             here, an unreachable backend does NOT render as an empty block: a
-             check whose reassuring answer is a zero must never let "cannot tell"
-             look like "all healthy", so a persistent unknown gets a visible
-             `tlm ?` pill (grace-gated, see TELEMETRY_UNKNOWN_GRACE).
+             poller only maps the verdict onto a pill. An unreachable backend
+             does NOT render as an empty block — nor does any other source's
+             now, but this is the one that carries a SECOND, narrower case: a
+             backend the poller CAN reach and which answers "cannot evaluate"
+             gets a visible `tlm ?` after a grace period (see
+             TELEMETRY_UNKNOWN_GRACE), because a check whose reassuring answer
+             is a zero must never let "cannot tell" look like "all healthy".
   civitai  : the SAME firing-alert filter, but against the civitai DataPacket
              prod cluster (a CLIENT prod cluster) via its own kubeconfig
              (CIVITAI_KUBECONFIG). Deliberately a SEPARATE block/count from the
@@ -70,10 +81,14 @@ import urllib.request
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-# clawgate task statuses that mean "the operator still has to act": a freshly
-# posted task awaiting dispatch (open) or a finished agent run awaiting review
-# (ready_for_review). in_progress = an agent is working = not on the human.
-PENDING_TASK_STATES = frozenset({"open", "ready_for_review"})
+# 🔴 The clawgate "needs the operator" predicate USED to be spelled here, as
+# `PENDING_TASK_STATES = frozenset({"open", "ready_for_review"})`, with
+# `in_progress` excluded because "an agent is working = not on the human." It
+# lives in scripts/lib/clawgate_tasks.py now, together with the two other copies
+# it was wrong alongside — see that module's header for what the exclusion cost.
+# Do not re-spell either the state set or the idle threshold here;
+# scripts/tests/test_clawgate_predicate_single_source.py fails the build if a
+# second copy reappears anywhere in the repo.
 
 # Alertmanager: only real, actionable severities count; Watchdog is the
 # always-firing dead-man's switch and InfoInhibitor is an inhibition helper.
@@ -114,30 +129,54 @@ CIVITAI_KUBECONFIG = os.environ.get("CIVITAI_KUBECONFIG") or os.path.expanduser(
     "~/workspace/civit/datapacket-talos/prod-kubeconfig")
 
 
+def _load_clawgate_tasks():
+    """Load scripts/lib/clawgate_tasks.py by EXPLICIT PATH (same idiom as
+    `_load_deadman` below — never via sys.path, so nothing in scripts/lib/ can
+    shadow a name this poller relies on).
+
+    🔴 No hardcoded fallback copy of the predicate, deliberately, unlike
+    `_deadman_unknown_states`. A fallback set is how this bug survived in the
+    first place: two copies, both stale. If this import breaks the source raises
+    and the bar renders the honest `stale` marker, which is the behaviour a
+    silent second copy would have replaced with a confident wrong number.
+
+    Tried sibling-first so the repo checkout wins, then $DEVRC_DIR, because
+    a consumer may run from a nix-store COPY where no sibling lib/ exists.
+    """
+    import importlib.machinery
+    import importlib.util
+    here = os.path.dirname(os.path.abspath(__file__))
+    for path in (os.path.join(here, "lib", "clawgate_tasks.py"),
+                 os.path.join(DEVRC_DIR, "scripts", "lib", "clawgate_tasks.py")):
+        if os.path.exists(path):
+            loader = importlib.machinery.SourceFileLoader("_bar_clawgate", path)
+            spec = importlib.util.spec_from_file_location("_bar_clawgate", path,
+                                                          loader=loader)
+            mod = importlib.util.module_from_spec(spec)
+            loader.exec_module(mod)
+            return mod
+    raise ImportError("scripts/lib/clawgate_tasks.py not found (tried sibling "
+                      "lib/ and $DEVRC_DIR/scripts/lib/)")
+
+
+CG = _load_clawgate_tasks()
+
+
 # ---------------------------------------------------------------------------
 # Pure parse functions (unit-tested against mock inputs)
 # ---------------------------------------------------------------------------
-def parse_clawgate(tasks, pending_states=PENDING_TASK_STATES) -> dict:
-    """Map the /api/tasks list to a status dict. Counts operator-pending tasks.
+def parse_clawgate(tasks, now=None) -> dict:
+    """Map the /api/tasks payload to a status dict. THIN by design.
+
+    Every judgement — which statuses need the operator, when an `in_progress`
+    dispatch counts as stuck, how the detail line truncates — is
+    `clawgate_tasks.attention`, so the bar and session-manager cannot
+    disagree about what the number means. This function only supplies the clock.
 
     Raises ValueError if the top-level payload is not a list (the caller turns
     that into a 'stale' marker); tolerates junk list *elements*.
     """
-    if not isinstance(tasks, list):
-        raise ValueError("clawgate /api/tasks payload is not a list")
-    pending = [
-        t for t in tasks
-        if isinstance(t, dict) and t.get("status") in pending_states
-    ]
-    count = len(pending)
-    if count:
-        ids = ", ".join("#%s" % t.get("id") for t in pending[:6])
-        detail = "%d task(s) awaiting: %s" % (count, ids)
-        state = "Warning"
-    else:
-        detail = "no pending tasks"
-        state = "Idle"
-    return {"count": count, "state": state, "detail": detail}
+    return CG.attention(tasks, time.time() if now is None else now)
 
 
 def parse_mail(open_count) -> dict:
@@ -518,11 +557,117 @@ def dispatch_edge_toast(name, payload, specs, evaluate=None):
 
 
 def stale(reason: str, err=None) -> dict:
-    """A neutral 'source unavailable' marker; the block renders it as empty."""
+    """A 'source unavailable' marker.
+
+    🔴 EVERY block renders it as its VISIBLE "not measured" pill — `?`, `󰀪 ?`,
+    `󰀪 civ ?`, `tlm ?`, `qBit?`, the soft-yellow airvpn icon — and none renders
+    it as the empty, invisible one, which means "measured, and there is
+    nothing". `bar_freshness.unmeasured` is the single predicate all seven ask.
+
+    ⚠ THIS COMMENT USED TO SAY THE OPPOSITE, and it was the comment a maintainer
+    would have acted on. It read: every block renders this as the empty pill
+    except `i3status-clawgate`, and `i3status-telemetry` maps it to the empty
+    pill on purpose because "the unit's `OnFailure` toast covers a fetch that
+    raised". BOTH halves were false. The first was a description of the defect
+    PR #492 fixed. The second named a control that does not exist: `source()`
+    converts every fetch exception into this marker, `main()` returns 0 and
+    `__main__` ends `except Exception: sys.exit(0)`, so the unit EXITS
+    SUCCESSFULLY on precisely the failure this marker records and `OnFailure=`
+    never fires. That is now measured rather than asserted, by
+    `test_the_poller_EXITS_ZERO_on_the_failure_the_marker_records`.
+
+    See `carry_stuck_forward` for what this marker must preserve on its way to
+    the block that shows it: the marker itself writes `count: 0` over the last
+    reading, so anything an outage should keep has to be carried onto it HERE,
+    at the writer — the renderers can only carry what a frozen FILE still holds.
+    """
     d = {"count": 0, "state": "stale", "detail": reason}
     if err is not None:
         d["error"] = str(err)[:200]
     return d
+
+
+def _load_freshness():
+    """Load the co-located `bar_freshness.py` sibling by EXPLICIT PATH.
+
+    Same idiom as `_load_clawgate_tasks` / `_load_deadman` / `_load_airvpn_menu`
+    above — and no hardcoded fallback copy, for the same reason: a second copy
+    of a predicate is how it drifts. If this raises, the poller does not start,
+    every cache stops being rewritten, and within `MAX_CACHE_AGE_SECS` all seven
+    blocks say `?`. That is the honest outcome, and (since PR #492) a visible
+    one.
+    """
+    import importlib.machinery
+    import importlib.util
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "bar_freshness.py")
+    loader = importlib.machinery.SourceFileLoader("_bar_freshness", path)
+    spec = importlib.util.spec_from_loader("_bar_freshness", loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+FRESH = _load_freshness()
+
+#: A strictly-integral reading, or None. NO coercion, and a bool is not one.
+#:
+#: 🔴 IT IS THE SAME OBJECT the blocks use, not a mirror of it. This was a
+#: hand-written copy whose docstring justified itself with "the two sit on
+#: opposite sides of an extensionless-script boundary that neither can import
+#: across" — a barrier that stopped existing the moment `bar_freshness.py` was
+#: extracted as a plain `.py`. This file already loads three siblings by
+#: explicit path, so the cited reason was checkable and false. Two copies of a
+#: no-coercion predicate cannot drift if there is one copy;
+#: `test_the_two_NO_COERCION_predicates_ARE_ONE` pins the identity.
+_strict_int = FRESH.int_or_none
+
+
+def carry_stuck_forward(payload, prev):
+    """🔴 A MEASUREMENT OUTAGE MUST NOT MAKE A KNOWN ALARM QUIETER.
+
+    `stale()` reports `count: 0` and nothing else, and `run_source` OVERWRITES
+    the cache with it — so the last thing we actually knew was destroyed by the
+    failure to learn anything new. Measured on the shipped pair:
+
+        t0  poller healthy, 2 stuck              -> `24!2`  Critical
+        t1  clawgate unreachable, stale() writes -> `?`     Warning   <- QUIETER
+
+    That is the same substitution `i3status-clawgate._unmeasured` exists to
+    refuse, arriving through the writer instead of the renderer: a dispatch does
+    not become un-stuck because clawgate stopped answering. So an unreadable
+    marker INHERITS the previous cache's `stuck_count` and the pill renders
+    `!2?` — "2 stuck as of the last readable poll, and this is not a current
+    measurement". The trailing `?` is what keeps the carry honest; the number is
+    never presented as freshly measured.
+
+    Four things it must NOT do, each a case below:
+      * touch a REAL measurement — a readable payload carries its own
+        `stuck_count`, including a measured zero, and speaks for itself;
+      * invent one on a FIRST-EVER poll, or when the previous cache is missing,
+        unparseable or was itself a marker that knew nothing (`prev is None` /
+        no usable `stuck_count`);
+      * COERCE — `2.5` and `True` are not readings (see `_strict_int`);
+      * carry a measured ZERO forward as if it were news; it renders nothing
+        either way, and not writing it keeps "we carried an alarm" legible in
+        the cache file.
+
+    Toasts are unaffected by construction: `evaluate_edge_toast` returns before
+    reading any count for a stale/error payload, so the carried number cannot
+    fire or clear a latch.
+    """
+    if not isinstance(payload, dict):
+        return payload
+    if not (payload.get("error") or payload.get("state") == "stale"):
+        return payload
+    if _strict_int(payload.get("stuck_count")) is not None:
+        return payload
+    carried = _strict_int(prev.get("stuck_count")
+                          if isinstance(prev, dict) else None)
+    if carried is None or carried <= 0:
+        return payload
+    payload["stuck_count"] = carried
+    return payload
 
 
 # ---------------------------------------------------------------------------
@@ -689,6 +834,19 @@ def _toast_specs() -> dict:
         "clawgate": {"threshold": 0, "urgency": "normal",
                      "summary": "clawgate: task awaiting",
                      "action": "xdg-open http://192.168.50.250:30302"},
+        # 🔴 A SECOND, INDEPENDENT latch over the SAME payload. `count` includes
+        # the stuck rows, so on a board that is already non-zero — the normal
+        # state; it sat at 13 when this was written — a dispatch wedging is a
+        # 13 -> 14 increment while the `clawgate` latch is ALREADY set. Same
+        # colour, no toast, and the one event worth interrupting for was the one
+        # that could not interrupt. Keying a latch of its own on `stuck_count`
+        # makes the two edges independent: the stuck toast fires on 0 -> 1 stuck
+        # whatever `count` is doing. `source` says which payload it reads (there
+        # is no `clawgate_stuck` poller) and `count_key` which number it gates on.
+        "clawgate_stuck": {"threshold": 0, "urgency": "critical",
+                           "source": "clawgate", "count_key": "stuck_count",
+                           "summary": "🔴 clawgate dispatch STUCK",
+                           "action": "xdg-open http://192.168.50.250:30302"},
         "mail": {"threshold": 0, "urgency": "low",
                  "summary": "New mail action", "action": None},
         # Rare by construction (measured 2026-08-03: 0 dead across 17 live
@@ -718,8 +876,16 @@ def evaluate_edge_toast(name, payload, spec, fire=None,
         return None
     if payload.get("state") == "stale" or payload.get("error"):
         return None
+    # 🔴 An ABSENT count key is NOT a measured zero, so it SKIPS (latch
+    # untouched) exactly like a stale payload. This matters for `stuck_count`:
+    # a cache written by a poller predating the stuck predicate carries no such
+    # key, and reading that as 0 would clear the latch and re-toast a still-stuck
+    # dispatch the moment a newer poller wrote a real number.
+    count = payload.get(spec.get("count_key", "count"))
+    if count is None or isinstance(count, bool):
+        return None
     try:
-        count = int(payload.get("count", 0))
+        count = int(count)
     except (TypeError, ValueError):
         return None
     latched = read(name)
@@ -766,22 +932,20 @@ def _http_json(url: str, headers=None, timeout: float = 3.0):
 # Fetch functions (network / cluster; wrapped by source() so failures -> stale)
 # ---------------------------------------------------------------------------
 def _clawgate_creds():
-    env = {}
-    with open(os.path.expanduser("~/.claude/clawgate.env")) as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            k, v = line.split("=", 1)
-            env[k.strip()] = v.strip()
-    url = env.get("CLAWGATE_API_URL", "http://192.168.50.250:30302").rstrip("/")
-    token = env["CLAWGATE_HOOK_TOKEN"]
-    return token, url
+    """(token, base_url), read from the env file at CALL time by the shared
+    module — one reader, so session-manager and this poller cannot disagree about
+    where the credential comes from or what the default base is."""
+    base, token = CG.read_clawgate_env()
+    return token, base
 
 
 def fetch_clawgate() -> dict:
     token, url = _clawgate_creds()
-    tasks = _http_json(url + "/api/tasks",
+    # 🔴 ?summary=1 (CG.tasks_url): the full board is ~190 KB per poll, 27x this,
+    # and the extra is almost entirely task/comment BODIES this poller never
+    # reads. The summary form keeps id/title/status and the `agent` object the
+    # stuck predicate needs. The token goes in a HEADER, never in the URL.
+    tasks = _http_json(CG.tasks_url(url),
                        headers={"Authorization": "Bearer " + token}, timeout=3)
     return parse_clawgate(tasks)
 
@@ -1171,6 +1335,15 @@ def signal_bar(name: str) -> None:
 
 def run_source(name: str, fn) -> dict:
     payload = source(name, fn)
+    # 🔴 The carry-forward lives HERE, in the function that DESTROYS the previous
+    # reading, not in `source()` — `write_status` below is the overwrite, so this
+    # is the last moment the old cache still exists. `source()` stays a pure
+    # fetch+stamp with no disk read of its own. The read is skipped entirely on
+    # the happy path (an unreadable marker is rare), so the live poll pays for it
+    # only when something is already wrong.
+    if isinstance(payload, dict) and (payload.get("error")
+                                      or payload.get("state") == "stale"):
+        carry_stuck_forward(payload, read_prev_status(name))
     write_status(name, payload)
     signal_bar(name)
     return payload
@@ -1192,10 +1365,23 @@ def _dispatch_all(payloads) -> int:
     🔴 THE ONE dispatch site. The live poll and every `--mock-*` run funnel
     through here, so the decision cannot be right in one and wrong in the other,
     and a single test that drives either one covers both.
+
+    Two passes, because a toast is not always 1:1 with a polled source. The first
+    dispatches each source against the spec of the same name; the second
+    dispatches every DERIVED spec — one carrying a `source` — against that
+    source's payload. `clawgate_stuck` is the only one today: a second latch over
+    the clawgate payload, gating on `stuck_count` instead of `count`.
     """
     specs = _toast_specs()
+    by_source = {}
     for name, payload in payloads:
+        by_source[name] = payload
         dispatch_edge_toast(name, payload, specs)
+    for spec_name, spec in specs.items():
+        src = spec.get("source")
+        if src is None or src not in by_source:
+            continue
+        dispatch_edge_toast(spec_name, by_source[src], specs)
     return 0
 
 

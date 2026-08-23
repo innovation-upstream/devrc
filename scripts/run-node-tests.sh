@@ -20,7 +20,17 @@
 #
 #    The fix is not "add two more lines to the list" — that leaves the next suite
 #    ungated the same way. Collection is now DISCOVERY (every `*.test.mjs` under
-#    `scripts/`), so a new suite is gated the moment it exists.
+#    each entry of `DISCOVERY_ROOTS`), so a new suite is gated the moment it exists.
+#
+# 🔴 DISCOVERY IS ROOTED, AND A ROOT IS THE SAME DEFECT ONE LEVEL UP.
+#    The roots were `scripts/` alone, which is exactly as blind as the old
+#    single-directory glob for anything living elsewhere: `claude/skills/clickup/`
+#    ships executable .mjs to both hosts (via nix/home.nix) and carries two gates,
+#    and a `scripts/**` glob cannot see them no matter how many suites it finds.
+#    So the root list is EXPLICIT and lives in one place (`DISCOVERY_ROOTS`), and
+#    scripts/tests/test_run_node_tests_suites.py parses it out of this file rather
+#    than restating it — a second copy of the list is how a list and its guard
+#    drift apart. Adding a new top-level home for .mjs tests means adding it HERE.
 #
 # 🔴 FOUR STRUCTURAL GUARDS — all four exist because a green exit code lies here:
 #
@@ -107,6 +117,42 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# --- GUARD 9: NO TEST MAY OPERATE ON THE REPO THE SUITE RUNS FROM -------------
+# 🔴 BEFORE the ROOT block below, not after it: with GIT_DIR set and no
+# GIT_WORK_TREE, git takes the CWD as the work tree, so
+# `rev-parse --show-toplevel` returns `<repo>/scripts` and this script dies
+# `exit 127` with no verdict. The 2026-08-21 incident, the reproduction, and the
+# reason this block is spelled in three files rather than sourced from one are
+# in `scripts/run-tests.sh`'s copy of this header. The SET is owned by
+# `scripts/testlib/gitenv.py::REPO_POINTER_VARS`; every spelling is pinned
+# two-way by `scripts/tests/test_git_repo_isolation.py`.
+DEVRC_GIT_REPO_POINTERS=(
+  GIT_DIR                            # the repository itself; beats -C
+  GIT_WORK_TREE                      # the working tree
+  GIT_COMMON_DIR                     # where refs/config actually live
+  GIT_INDEX_FILE                     # the index a `git add` writes
+  GIT_OBJECT_DIRECTORY               # where new objects are written
+  GIT_ALTERNATE_OBJECT_DIRECTORIES   # extra object stores
+  GIT_NAMESPACE                      # the ref namespace refs land in
+  GIT_PREFIX                         # hook-injected pathspec prefix
+  GIT_GRAFT_FILE                     # repo-scoped grafts
+  GIT_SHALLOW_FILE                   # repo-scoped shallow list
+  GIT_CONFIG                         # legacy: the file `git config` WRITES
+)
+# 🔴 AND GUARD 9's OWN SEAMS. `DEVRC_GITENV_PROTECT` redirects the DETECTOR at a
+# different repository and `DEVRC_GITENV_MODE` decides whether it fails or
+# merely reports; #683's audit measured `DEVRC_GITENV_PROTECT=":"` producing
+# `protected-git-dirs=0` and a GREEN run over a real escape, and
+# `=/nonexistent/x` producing a marker line that asserted coverage it did not
+# have. One inherited variable defeating every layer is the bug this guard
+# exists for. Owned by `testlib/gitenv.py::CONTROL_VARS`, pinned two-way.
+DEVRC_GITENV_CONTROL_VARS=(
+  DEVRC_GITENV_PROTECT               # which git dirs the detector watches
+  DEVRC_GITENV_MODE                  # enforce | report | auto
+)
+unset "${DEVRC_GIT_REPO_POINTERS[@]}"
+unset "${DEVRC_GITENV_CONTROL_VARS[@]}"
+
 if [ -z "$ROOT" ]; then
   ROOT="$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel 2>/dev/null || true)"
   [ -n "$ROOT" ] || ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -122,8 +168,24 @@ cd "$ROOT" || { echo "run-node-tests: cannot cd to ROOT=$ROOT" >&2; exit 2; }
 #   scripts/dl-router/tests             13 files   508 tests
 #   scripts/collector/browser-ext/tests  2 files    21 tests
 #
+# MEASURED 2026-08-13, same way:
+#   claude/skills/clickup/test           3 files    71 tests
+#   -> 92 tests on 2026-08-14: js-source.mjs split by CODE POINT and indexed by
+#      CODE UNIT, so every emoji desynced the offsets both structural guards are
+#      built on. Its controls asserted the right property and had simply never
+#      been handed a non-ASCII character; 21 of the 21 new tests are those
+#      fixtures plus the substitution brace accounting they exposed.
+#   (it peaked at 6 files / 154 tests earlier the same day. Most of that was
+#   coverage OF the webhook listener, and the listener was then deleted — it
+#   had never run on either host: no token configured, no watcher ever
+#   registered, no state files, and the forwarder it spawned was not installed.
+#   Deleting the feature deleted its three suites with it. A count going DOWN
+#   is normally the thing this file exists to catch, so the accounting entry
+#   below records why this one is a deletion and not a suite going silent.)
+#
 # Raise a floor when a suite grows. NEVER lower one to get green — that is the
 # move that turned the pytest global floor into less than half the real total.
+# A floor is a function of the measurement, not an opinion: `m - min(50, max(1, m/20))`.
 SUITES=(
   "scripts/browser-bridge/tests|15|490"
   # Ungated until 2026-08-03: `FILES=` above named browser-bridge alone, so these
@@ -132,6 +194,33 @@ SUITES=(
   # Ungated for the same reason. Small, but 21 tests reporting safety they never
   # measured is the same defect as 508 of them.
   "scripts/collector/browser-ext/tests|2|20"
+  # The clickup skill's hermetic gates (help-coverage: showUsage() is complete;
+  # state-paths: no state path resolves inside the read-only skill dir,
+  # including a structural seam walk over every module in the tree; js-source:
+  # direct controls for the scanner both structural guards are built on). They
+  # lived in a standalone, UNCOMMITTED ~/.claude/skills/clickup/ and ran only
+  # when a human remembered — ungated by anything, on either host.
+  #
+  # Was 6 files / 154 tests until the webhook listener was deleted (it had never
+  # run on either host): that removed webhook-server, listen-integration and
+  # catchup along with the feature. 71 tests measured 2026-08-13,
+  # floor 68 = 71 - min(50, max(1, 71/20)).
+  # 92 tests measured 2026-08-14 (the astral-character controls js-source.mjs
+  # never had), floor 88 = 92 - min(50, max(1, 92/20)) = 92 - 4.
+  # 122 tests / 4 files measured 2026-08-21: test/awaiting.test.mjs, the gate for
+  # the `awaiting` command (predicate, fan-out cap, pacing) and for the inbox
+  # cursor loop. Floor 116 = 122 - min(50, max(1, 122/20)) = 122 - 6.
+  "claude/skills/clickup/test|4|116"
+)
+
+# --- discovery roots -----------------------------------------------------------
+# Every top-level directory that may hold `*.test.mjs`. Read the 🔴 block in the
+# header before adding one: this list is the reason a suite outside scripts/ is
+# gated at all, and scripts/tests/test_run_node_tests_suites.py parses it FROM
+# HERE so the two cannot drift.
+DISCOVERY_ROOTS=(
+  "scripts"
+  "claude"
 )
 
 # --- GUARD 3: discovery + the two-way pin --------------------------------------
@@ -149,19 +238,54 @@ SUITES=(
 # a silent empty list: the exact "an EMPTY RESULT cannot distinguish two
 # mechanisms" trap. Globstar is a bash builtin, so it depends on no external
 # binary at all and behaves identically in every tier.
+#
+# 🔴 node_modules is EXCLUDED. `claude/skills/clickup` has a dependency tree
+# (nix/pkgs/clickup-node-modules.nix), and its own UPDATING instructions tell a
+# developer to run `npm ci` in the checkout — which materialises 51 packages,
+# several of which ship `*.test.mjs` fixtures. Discovery would then find a suite
+# directory nobody pinned and the runner would FATAL with "would run UNGATED",
+# blaming the developer for following the documented procedure. Third-party test
+# files are also not this gate's to run: they are not ours, their floors are not
+# ours, and one of them failing says nothing about this repo.
 shopt -s globstar nullglob
 DISCOVERED_DIRS=()
 _seen=""
-for f in scripts/**/*.test.mjs; do
-  [ -f "$f" ] || continue
-  d="${f%/*}"
-  case "$_seen" in
-    *"|$d|"*) continue ;;
-  esac
-  _seen="$_seen|$d|"
-  DISCOVERED_DIRS+=("$d")
+for _root in "${DISCOVERY_ROOTS[@]}"; do
+  for f in "$_root"/**/*.test.mjs; do
+    [ -f "$f" ] || continue
+    case "$f" in
+      */node_modules/*) continue ;;
+    esac
+    d="${f%/*}"
+    case "$_seen" in
+      *"|$d|"*) continue ;;
+    esac
+    _seen="$_seen|$d|"
+    DISCOVERED_DIRS+=("$d")
+  done
 done
 shopt -u globstar nullglob
+
+# A root that matches NOTHING is the empty-result trap: it cannot be told apart
+# from a root that is simply typo'd or has moved, and both read as "no suites
+# here". Every root must contribute at least one suite directory.
+root_problems=()
+for _root in "${DISCOVERY_ROOTS[@]}"; do
+  found=0
+  for d in "${DISCOVERED_DIRS[@]}"; do
+    case "$d" in
+      "$_root"/*) found=1; break ;;
+    esac
+  done
+  [ "$found" -eq 1 ] || root_problems+=("$_root  — a DISCOVERY_ROOTS entry that matched no *.test.mjs at all (typo, moved, or the suites were deleted?)")
+done
+if [ "${#root_problems[@]}" -gt 0 ]; then
+  echo "run-node-tests: FATAL — ${#root_problems[@]} discovery-root problem(s):" >&2
+  for b in "${root_problems[@]}"; do echo "    $b" >&2; done
+  echo "  A root globbing to nothing silently shrinks the gate to the OTHER roots" >&2
+  echo "  while still reporting PASS. Fix the root or remove it deliberately." >&2
+  exit 2
+fi
 
 PINNED_DIRS=()
 for entry in "${SUITES[@]}"; do

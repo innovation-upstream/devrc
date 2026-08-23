@@ -1,0 +1,17 @@
+# Runtime dependencies of scripts/signal/ — what the consumer IMAGE must install.
+#
+# 🔴 This file exists because a missing dependency here is not a crash, it is a
+# ZOMBIE: `run()` treats any failure from the stream factory as a dropped stream
+# and reconnects, so an absent `websocket-client` produced an infinite
+# "reconnecting" loop with zero rows ingested. `ws_stream_factory()` now imports
+# at build time and names this file in its error, but the real fix is the image
+# actually carrying these.
+#
+# The hermetic test suite needs NONE of these except psycopg2 (imported by
+# _signal_db) and minio (imported by _minio) — every transport is injected.
+# See flake.nix `checks.pytests` for what the gate installs.
+
+psycopg2-binary          # _signal_db: Postgres client
+minio                    # _minio: S3 client for the attachment archive
+requests                 # consumer: attachment fetch + the send POST
+websocket-client         # consumer: json-rpc ingest on /v1/receive/{number}

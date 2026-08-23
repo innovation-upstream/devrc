@@ -80,17 +80,28 @@ die() { echo "browser-agent: $*" >&2; exit 2; }
 command -v "$OPENCODE_BIN" >/dev/null 2>&1 || die "opencode not found on PATH ('$OPENCODE_BIN') — install it or set BROWSER_AGENT_OPENCODE"
 
 # --- isolated opencode CONFIG dir (token containment) ------------------------ #
-# devrc now deploys a ~37 KB global ~/.config/opencode/AGENTS.md (PRINCIPLES +
+# devrc now deploys a ~43 KB global ~/.config/opencode/AGENTS.md (PRINCIPLES +
 # RULES + addendum). MEASURED on 1.18.4: that file IS injected into a run whose
 # --dir is an unrelated scratch project — a tool-less probe in a scratch dir
 # quoted a passphrase planted at the END of the file, so it arrives in FULL.
 #
 # Cost here: 8,343 input tokens vs 631 with an isolated config dir = ~7.7k
-# EXTRA PER REQUEST. `cache.read`/`cache.write` were 0 in every run, so it is
-# not amortised — it is multiplied by the agent-loop step count ($STEPS,
-# default 12), i.e. up to ~90k tokens per browser-agent run. For an agent whose
-# every host tool is DENIED (no shell, no file access), 100% of that is rules it
-# can neither use nor act on.
+# EXTRA PER REQUEST (re-measured 2026-08-19 on 1.18.18: 8,329 — the file grew,
+# the number did not really move). It is multiplied by the agent-loop step count
+# ($STEPS, default 12), i.e. up to ~100k tokens per browser-agent run. For an
+# agent whose every host tool is DENIED (no shell, no file access), 100% of that
+# is rules it can neither use nor act on.
+#
+# 🔴 SCOPE OF THE "not amortised" CLAIM. `cache.read`/`cache.write` were 0 in
+# every run measured HERE, and that is a fact about THIS harness's shape, not
+# about the engine: browser-agent runs are single-shot against a fresh scratch
+# project, so the prefix is cold every time. It does NOT generalise — across
+# 2,218 billed requests of ordinary opencode use on this box, only 60 (2.7%)
+# were cold and cache reads bill ~50x under input tokens, which makes the same
+# file ~7% of spend there rather than a per-request tax. So this dir is the
+# right call for browser-agent and the WRONG one as a general fix (it also drops
+# plugin/guard.js). Working: scripts/opencode/README.md → "Size, and what it
+# actually costs".
 #
 # Neither mitigation that looks obvious works: OPENCODE_DISABLE_CLAUDE_CODE=1
 # had ZERO effect (byte-identical token count), and a project-local AGENTS.md
@@ -141,6 +152,26 @@ OC_CONFIG_DIR="${BROWSER_AGENT_OPENCODE_CONFIG_DIR:-${XDG_CACHE_HOME:-$HOME/.cac
 # that works and is expensive beats one that hangs. The warning goes to stderr
 # on every such run so it cannot rot silently.
 OC_WARM_TIMEOUT="${BROWSER_AGENT_WARM_TIMEOUT:-90}"
+# How long to wait for a lock somebody else is holding, IN SECONDS — the quantity
+# the comment on `_oc_lock` has always described. It used to be spelled as an
+# iteration count (`(warm + 30) * 2`), which silently encoded the 0.5 s poll:
+# change the poll and the budget moved with it, unannounced. Test seam, in the
+# same spirit as BROWSER_AGENT_READY_BACKOFF — the contention branch is otherwise
+# unreachable in under ~40 s, so nothing ever entered it.
+#
+# 🔴 VALIDATE BOTH SEAMS HERE, with the same `case` idiom `--steps`/`--timeout`
+# use. The budget is derived by ARITHMETIC at top level now, not inside the cold
+# path, so a non-numeric BROWSER_AGENT_WARM_TIMEOUT would spray a raw bash
+# arithmetic error over EVERY run (warm ones included, which previously never
+# evaluated it) and then die later on an unbound `deadline` — a misconfiguration
+# reported as an internal shell error, two steps from its cause.
+case "$OC_WARM_TIMEOUT" in (*[!0-9]*|"")
+  die "BROWSER_AGENT_WARM_TIMEOUT must be a non-negative integer of seconds (got: $OC_WARM_TIMEOUT)";;
+esac
+OC_LOCK_BUDGET="${BROWSER_AGENT_LOCK_BUDGET:-$(( OC_WARM_TIMEOUT + 30 ))}"
+case "$OC_LOCK_BUDGET" in (*[!0-9]*|"")
+  die "BROWSER_AGENT_LOCK_BUDGET must be a non-negative integer of seconds (got: $OC_LOCK_BUDGET)";;
+esac
 OC_STAMP="$OC_CONFIG_DIR/.devrc-warm-stamp"
 OC_LOCK="$OC_CONFIG_DIR.lock"
 OC_ISOLATED=0
@@ -169,13 +200,37 @@ oc_is_warm() {  # warm == node_modules present AND stamped for THIS opencode
 oc_bootstrap() {  # <version> -> 0 warm, 1 could not warm
   local ver="$1" rc=1
   mkdir -p "$OC_CONFIG_DIR" 2>/dev/null || return 1
-  _oc_lock
+  # 🔴 A lock we could not take is a REFUSAL, not a green light. It used to be
+  # called for effect and its result discarded, so an uncreatable lock path fell
+  # through to `_oc_bootstrap_locked` UNSERIALISED — after stalling for two
+  # minutes first (see `_oc_lock`).
+  _oc_lock || return 1
   _oc_bootstrap_locked "$ver"; rc=$?
   rmdir "$OC_LOCK" 2>/dev/null
   return $rc
 }
 
-_oc_lock() {
+# ONE writer for every warm-lock refusal, emitting a DECLARED TOKEN plus prose.
+#
+# 🔴 The token is a contract, not decoration. Which branch refused is otherwise
+# unobservable: both end in "no lock, fall back to the global config", identical
+# on disk and in the exit code, so the only other witness is a wall clock — and
+# on a loaded box that instrument lies (a 0.25 s run measured 125 s here under
+# four concurrent gate builds). The tests therefore read the TOKEN. Reword the
+# prose freely; changing a token is changing an interface, and a test will say so.
+#
+# Tokens:
+#   unwaitable — the path can never become a lock (ENOSPC/EACCES/EIO, or a stray
+#                regular file sitting there). Refuse IMMEDIATELY; waiting cannot
+#                clear any of those, and pretending it might is what produced a
+#                silent ~120 s stall that surfaced as an unreadable timeout.
+#   timeout    — a real holder never released it within OC_LOCK_BUDGET and the
+#                stale-lock steal also failed. We DID wait; that is legitimate.
+_oc_lock_refuse() {   # <token> <detail>
+  echo "browser-agent: warm-lock-refused:$1 — $2 Falling back to the GLOBAL opencode config." >&2
+}
+
+_oc_lock() {  # -> 0 lock HELD, 1 the lock path is unusable (caller must not bootstrap)
   # Serialise concurrent runs. Bounded wait, then proceed anyway: a stale lock
   # from a killed run must not wedge every future invocation.
   # 🔴 The wait MUST outlast the work it guards. It was a fixed 60 x 0.5 s = 30 s
@@ -184,13 +239,43 @@ _oc_lock() {
   # node_modules out from under a first process that was still writing into it,
   # which is the "half-materialised tree that fails in confusing ways" this lock
   # exists to prevent. Derive it instead: warm timeout + 30 s slack.
-  local i=0 max
-  max=$(( (OC_WARM_TIMEOUT + 30) * 2 ))
+  #
+  # 🔴 ONLY EEXIST-on-a-DIRECTORY is contention. Every other `mkdir` failure —
+  # ENOSPC, EACCES, EIO, or a stray REGULAR FILE sitting at this path — is
+  # PERMANENT, and sleeping cannot fix it. Treating them all alike turned a hard,
+  # instantly-diagnosable error into a silent stall of the FULL OC_LOCK_BUDGET
+  # (~120 s on defaults) that ended by "stealing" a lock never there. That stall is
+  # LONGER than the whole budget any caller gives this script, so it surfaces as
+  # an unreadable wall-clock timeout instead of the loud degrade-to-global-config
+  # this function is supposed to fall back to. Distinguish, and fail fast: the
+  # caller's fallback path is correct and cheap, the wait is neither.
+  local deadline=$(( SECONDS + OC_LOCK_BUDGET ))
   while ! mkdir "$OC_LOCK" 2>/dev/null; do
-    i=$((i + 1))
-    [ "$i" -ge "$max" ] && { rmdir "$OC_LOCK" 2>/dev/null; mkdir "$OC_LOCK" 2>/dev/null; break; }
+    if [ ! -d "$OC_LOCK" ]; then
+      # Not a directory ⇒ this was not contention. Retry ONCE — the holder may
+      # have released it in the instant between the mkdir and this test — and if
+      # a third party grabbed it meanwhile, fall back into the wait loop. Only a
+      # path that is STILL neither creatable nor a directory is the permanent
+      # error, and that one we refuse instead of sleeping on it.
+      mkdir "$OC_LOCK" 2>/dev/null && return 0
+      [ -d "$OC_LOCK" ] || {
+        _oc_lock_refuse unwaitable "the warm lock path '$OC_LOCK' cannot be created and is not a directory (ENOSPC/EACCES/EIO, or a stray file at that path), so waiting cannot clear it."
+        return 1
+      }
+    fi
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      # Budget spent. Steal what must be a stale lock — but if even that fails,
+      # we do NOT hold it, and the caller must not bootstrap as though we did.
+      rmdir "$OC_LOCK" 2>/dev/null
+      mkdir "$OC_LOCK" 2>/dev/null || {
+        _oc_lock_refuse timeout "waited ${OC_LOCK_BUDGET}s for the warm lock '$OC_LOCK' and could not take or clear it."
+        return 1
+      }
+      break
+    fi
     sleep 0.5
   done
+  return 0
 }
 
 _oc_bootstrap_locked() {  # <version>

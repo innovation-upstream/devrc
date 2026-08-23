@@ -84,11 +84,16 @@ the reachable return.
 
 ## What does NOT cross the wire
 
-fuzzyclaw task files are local state and are read on the local host only. A remote window
-therefore carries `fuzzyclaw: null`, `claude_session_id: null` and `age_secs: null`, and is
-classified busy/idle from its title glyph alone — never `stale`, because no age was
-measured. Joining the local host's task files onto same-named remote sessions would
-fabricate facts; a test pins that it does not happen.
+fuzzyclaw task files are local state and are read on the local host only, so a remote window
+carries `fuzzyclaw: null`. Joining the local host's task files onto same-named remote
+sessions would fabricate facts; a test pins that it does not happen.
+
+🔴 **This section used to say a remote window also carries `claude_session_id: null` and
+`age_secs: null` and is "never `stale`". That is RETRACTED.** It was true while fuzzyclaw was
+the only writer of those two fields; the agent activity ledger is read on EVERY scanned host
+over the same SSH transport, so a remote row now carries both and CAN be `stale`. The test
+that "pins it" pins `fuzzyclaw` alone. A null age means no writer has recorded that window —
+never age 0, and never a property of being remote.
 
 ## Local host identity
 

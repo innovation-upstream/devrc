@@ -58,6 +58,16 @@ floating_modifier $mod
 # Float any window explicitly launched with WM_CLASS "float" (e.g. the VPN detail
 # terminal: `alacritty --class float,float`). No such rule existed pre-migration.
 for_window [class="float"] floating enable
+# 🔴 `(?i)` IS LOAD-BEARING, not decoration. i3 criteria are PCRE and
+# CASE-SENSITIVE by default (the userguide's "case-insensitive" examples are
+# showing you how to opt IN with `(?i)`), and `class` matches the SECOND field
+# of WM_CLASS — the one toolkits conventionally capitalise. So a bare
+# `class="espanso"` fires only if espanso reports a lowercase class, and if it
+# reports `Espanso` the rule silently never matches: no error, no warning, just
+# a window that keeps tiling. Which one espanso 2.4.0 actually sets could not be
+# determined without popping its search window on a live desktop, so the rule is
+# written to match either.
+for_window [class="(?i)espanso"] floating enable
 ${rigControlFloat}
 
 # Terminal
@@ -195,8 +205,9 @@ bar {
 # Launch browser
 bindsym $mod+b exec --no-startup-id brave
 
-# agent-ops "mission control" dashboard — accessible via tmux prefix+A and the
-# bar button. Removed $mod+i to free Alt+i for tmux scratch15 (fern).
+# ($mod+i used to open the "agent-ops" mission-control dashboard; it was freed
+# for tmux scratch15 (fern) long before the dashboard itself was RETIRED, along
+# with its tmux prefix+A popup and its bar button. Nothing here launches it.)
 
 # Quick workspace switching
 bindsym $mod+Tab workspace back_and_forth

@@ -27,10 +27,25 @@ let
   alertsRedAbove = 34;
   civitaiRedAbove = 340;
 
+  # Load-pill thresholds. 🔴 `loadWarnAbove` MUST equal `CPU_MON_THRESHOLD` in
+  # nix/home.nix — the pill and cpu-monitor's toast are two renderings of ONE
+  # decision, and the same drift already bit the alerts pill (34 vs 30, see
+  # above). Pinned two-way by
+  # `test_bar_status.py::test_the_load_pill_threshold_MATCHES_cpu_monitors`.
+  #
+  # NOT the core count. cpu-monitor was deliberately raised to a flat 48 on
+  # 2026-08-05 to cut toast volume (measured: 123-267/day -> 11-32/day, see
+  # nix/home.nix:298). Keying the pill off `nproc` instead would warn at 24 on
+  # the workbench — which idles in the twenties — re-creating exactly the noise
+  # that change removed.
+  loadWarnAbove = 48;
+  loadCritAbove = 72;   # 1.5x the alert threshold: worse than "we already told you"
+
   # Floating btop for the vitals-block left-clicks (memory/cpu/temperature/gpu).
   # `float,float` matches the existing i3 float rule so it opens as a float.
   # Explicit dimensions are REQUIRED — btop refuses to render ("terminal size too
-  # small") in the default float size; matches the agentOps popup sizing idiom.
+  # small") in the default float size. (This 160x45 shape was the house idiom for
+  # every float popup, including the retired agent-ops one.)
   btopCmd = "alacritty --class float,float -o window.dimensions.columns=160 -o window.dimensions.lines=45 -e btop";
 
   # Python env for the decoupled bar-status poller (workbench systemd user timer):
@@ -86,6 +101,30 @@ let
     info_cpu = 85;
     warning_cpu = 85;
     critical_cpu = 95;
+    click = [
+      { button = "left"; cmd = btopCmd; }
+    ];
+  };
+  # load: 1-minute load average, read straight from /proc/loadavg (no cache, no
+  # poller, no `bar_freshness` sibling — nothing here can go stale). Invisible
+  # below `loadWarnAbove`; Warning at it (the SAME number cpu-monitor toasts
+  # on); Critical at `loadCritAbove`. Both come from the single source at the
+  # top of this file — see the 🔴 there for why it is not the core count.
+  # Left-click → btop.
+  #
+  # 🔴 UNCONDITIONAL on purpose, in BOTH places — this entry and the `home.file`
+  # below. /proc/loadavg exists on every host, so there is no reason to gate it;
+  # gating only ONE of the two is what ships a block pointing at a script that
+  # was never deployed. `test_bar_status.py` now enforces that pairing.
+  loadBlock = {
+    block = "custom";
+    command = "${scriptsDir}/i3status-load --warning ${toString loadWarnAbove} --critical ${toString loadCritAbove}";
+    json = true;
+    # 15s, not 5s. This spawns a python process every tick forever on every
+    # host; at 5s that is ~17k spawns/day for a value that is a ONE-MINUTE
+    # average and cannot move meaningfully faster. The sibling custom blocks
+    # are 15-30s.
+    interval = 15;
     click = [
       { button = "left"; cmd = btopCmd; }
     ];
@@ -311,30 +350,34 @@ let
       { button = "left"; cmd = "setsid -f ${home}/workspace/devrc/scripts/rig-control.sh gui"; }
     ];
   };
-  # agent-ops: workbench only. LIVE count of Claude-Code-in-tmux runs — renders
-  # `󰕮 N` (N>0) / bare `󰕮` (N==0), always neutral (running agents are steady
-  # state, not "blocked on you"). json render, recounts every 15s via a local
-  # tmux+/proc scan (reuses agent-ops's tested detector) — NO poller/cache/signal
-  # needed since it's local + cheap. The left-click still opens the mission-control
-  # dashboard in a FLOATING alacritty (the `class="float"` i3 rule floats it).
-  agentOpsBlock = {
+  # claude-runs: workbench only. LIVE count of Claude-Code-in-tmux runs — renders
+  # `󰕮 N` (N>0) / bare `󰕮` (N==0) / `󰕮 ?` (could not measure), always neutral
+  # (running agents are steady state, not "blocked on you"). json render,
+  # recounts every 15s via a local tmux+/proc scan — NO poller/cache/signal
+  # needed since it's local + cheap, so `bar_freshness` does not apply here.
+  #
+  # 🔴 IT HAS NO CLICK ANY MORE, deliberately. This block used to double as the
+  # launcher for the `agent-ops` mission-control TUI, which is RETIRED (its
+  # panels all had homes elsewhere — session-manager, standup, /initiative-scan
+  # and the bar's own pills — and its one irreplaceable part, the /proc-walking
+  # Claude detector, was extracted to scripts/lib/claude_sessions.py). A click
+  # exec'ing a path home-manager no longer deploys fails silently, so the click
+  # goes with the TUI rather than pointing at a successor that is not a TUI.
+  claudeRunsBlock = {
     block = "custom";
-    command = "${scriptsDir}/i3status-agent-ops";
+    command = "${scriptsDir}/i3status-claude-runs";
     json = true;
     interval = 15;
-    click = [
-      { button = "left"; cmd = "alacritty --class float,float -o window.dimensions.columns=130 -o window.dimensions.lines=45 -e ${home}/.config/tmux/agent-ops"; }
-    ];
   };
 
   blocks =
-    [ memoryBlock diskBlock netBlock cpuBlock temperatureBlock ]
+    [ memoryBlock diskBlock netBlock cpuBlock loadBlock temperatureBlock ]
     ++ lib.optional (!isLaptop) gpuBlock
     ++ lib.optional isLaptop batteryBlock
     ++ [ soundBlock ]
     ++ lib.optionals (!isLaptop) [ telemetryBlock alertsBlock civitaiBlock mailBlock clawgateBlock mediaBlock airvpnBlock ]
     ++ [ timeBlock ]
-    ++ lib.optionals (!isLaptop) [ agentOpsBlock rigcontrolBlock ]
+    ++ lib.optionals (!isLaptop) [ claudeRunsBlock rigcontrolBlock ]
     ++ [ notifsBlock ];
 in
 lib.mkIf isNixOS {
@@ -408,9 +451,43 @@ lib.mkIf isNixOS {
     source = ../scripts/i3blocks-rigcontrol;
     executable = true;
   };
-  home.file.".config/i3status-rust/scripts/i3status-agent-ops" = {
-    source = ../scripts/i3status-agent-ops;
+  home.file.".config/i3status-rust/scripts/i3status-claude-runs" = {
+    source = ../scripts/i3status-claude-runs;
     executable = true;
+  };
+  # load: see `loadBlock` above. UNCONDITIONAL, matching the block's presence in
+  # the unconditional half of `blocks` — a narrower gate here than there means a
+  # host renders a `custom` block whose command does not exist.
+  home.file.".config/i3status-rust/scripts/i3status-load" = {
+    source = ../scripts/i3status-load;
+    executable = true;
+  };
+  # 🔴 claude_sessions.py is a CO-LOCATED SIBLING MODULE, not a block — the same
+  # shape as bar_freshness.py BELOW (~line 470), and for the same reason: the
+  # block scripts are extensionless, so they cannot be a package and cannot
+  # import each other. It holds the ONE Claude-in-tmux detector (a /proc tree
+  # walk, strictly more accurate than session-manager's
+  # `pane_current_command =~ /claude/`), which used to live inside the retired
+  # `agent-ops` TUI and be loaded out of ~/.config/tmux/agent-ops.
+  #
+  # It MUST be symlinked beside its consumer: without this entry the pill cannot
+  # load the detector. That case now renders `󰕮 ?` rather than a bare glyph —
+  # before the extraction it was indistinguishable from "nothing is running",
+  # which on a workbench with 35 live sessions is the quietest possible lie.
+  #
+  # Both this entry and the block script above are UNGATED, while claudeRunsBlock
+  # itself is `(!isLaptop)` — so the deploy is WIDER than its consumer, never
+  # narrower. ⚠ That direction matters and is one edit from inverting:
+  # bar_freshness.py below IS `mkIf (!isLaptop)`, so the narrow shape is the
+  # local idiom. `mkIf isLaptop` here would leave the workbench — the only host
+  # carrying the block — without the module, and the pill would render `?` on
+  # the one machine that has it. The file must also be `git add`ed or the flake
+  # omits it with a perfectly green switch. All of that is asserted structurally
+  # (not by spelling this path) in
+  # `test_the_bar_block_and_EVERY_file_it_needs_deploy_on_the_SAME_hosts` +
+  # `test_the_shared_module_is_DEPLOYED_beside_the_block_that_loads_it`.
+  home.file.".config/i3status-rust/scripts/claude_sessions.py" = {
+    source = ../scripts/lib/claude_sessions.py;
   };
 
   # Decoupled status-count block scripts (workbench blocks reference these by
@@ -420,6 +497,28 @@ lib.mkIf isNixOS {
   # its sibling scripts/mail-actions/_db.py (cf. mail-actions/run-archive.sh).
   # The clawgate/mail/alerts block scripts + poller are workbench-only, so their
   # symlinks are !isLaptop-gated too (they'd be dead files on the laptop otherwise).
+  #
+  # 🔴 bar_freshness.py is a CO-LOCATED SIBLING MODULE, not a block. Every count/
+  # state block below loads it by explicit path out of its OWN directory (the
+  # scripts are extensionless, so they cannot be a package and cannot import each
+  # other) to get the one definition of "this cache is too old to present as a
+  # measurement". It MUST be symlinked beside them: a block that cannot load it
+  # falls through to its `?` pill, so a missing entry here turns every count pill
+  # on a perfectly healthy workbench into a question mark. Same !isLaptop gate as
+  # its consumers, pinned two-way against this file by
+  # `test_every_block_that_loads_the_sibling_is_DEPLOYED_beside_it`.
+  #
+  # ⚠ THAT FALLBACK IS ONLY TRUE BECAUSE THE LOAD IS DEFERRED, and it was FALSE
+  # when this comment was first written: the load ran bare at module level, so a
+  # missing sibling killed the block outright (exit 1, empty stdout) rather than
+  # producing the `?` this comment promises. The blocks now keep `fresh = None`
+  # on a failed load and fail at USE, inside `__main__`'s `except`. Measured by
+  # `test_a_block_that_cannot_load_the_SIBLING_renders_the_VISIBLE_pill`, which
+  # runs each block with no sibling present — so if that ever regresses, the
+  # failure here is a dead pill, not a question mark.
+  home.file.".config/i3status-rust/scripts/bar_freshness.py" = lib.mkIf (!isLaptop) {
+    source = ../scripts/bar_freshness.py;
+  };
   home.file.".config/i3status-rust/scripts/i3status-clawgate" = lib.mkIf (!isLaptop) {
     source = ../scripts/i3status-clawgate;
     executable = true;
@@ -544,12 +643,15 @@ lib.mkIf isNixOS {
       ];
       ExecStart = "${pollPyEnv}/bin/python3 %h/workspace/devrc/scripts/bar-status-poll";
       # Re-run the unit when the poller changes (cf. X-Restart-Triggers in home.nix).
-      # deadman.py is listed too: the poller loads it by explicit path out of the
-      # working tree, so without this entry a change to the deadman logic would
-      # leave the unit definition identical and the timer would not re-arm.
+      # deadman.py and lib/clawgate_tasks.py are listed too: the poller loads
+      # BOTH by explicit path out of the working tree, so without these entries a
+      # change to the deadman logic — or to the shared clawgate "needs the
+      # operator" predicate, which decides the pill's whole meaning — would leave
+      # the unit definition identical and the timer would not re-arm.
       X-Restart-Triggers = [
         "${../scripts/bar-status-poll}"
         "${../scripts/collector/deadman.py}"
+        "${../scripts/lib/clawgate_tasks.py}"
       ];
     };
   };

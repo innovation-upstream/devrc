@@ -37,6 +37,7 @@ Run: nix-shell -p python312Packages.pytest curl --run \\
 """
 import json
 import os
+import pty
 import shutil
 import subprocess
 import threading
@@ -122,6 +123,12 @@ def bridge(tmp_path):
         def run(*args):
             return subprocess.run(["bash", str(CLI), *args], env=env,
                                   capture_output=True, text=True, timeout=60)
+
+    # Exposed so _run_on_a_pty can launch the SAME CLI against the SAME stub with
+    # stdout on a real terminal — see that helper's docstring. Assigned AFTER the
+    # class body on purpose: a class body does not close over the enclosing
+    # function's scope, so `env = env` in there is a NameError, not a copy.
+    _Bridge.env = env
 
     try:
         yield _Bridge
@@ -1133,3 +1140,157 @@ def test_recreate_keeps_ownership_of_the_new_tab(recreate_bridge):
     assert by_op["close"] != by_op["open"], (
         "the close must use a throwaway session id, or it evicts the ownership "
         "of the tab `open` just created: " + repr(by_op))
+
+
+# --------------------------------------------------------------------------- #
+# Running the CLI on a REAL terminal
+# --------------------------------------------------------------------------- #
+def _run_on_a_pty(bridge, *args):
+    """Run the CLI with stdout attached to a real pty, so `[ -t 1 ]` is TRUE.
+
+    claude/RULES.md: "a suite whose CONFIG pins a dimension is STRUCTURALLY BLIND
+    to that dimension's bugs". The `bridge` fixture runs everything with
+    capture_output=True, which pins stdout to a PIPE — so the TTY branch of the
+    activate focus default is unreachable from it, and a mutant replacing the
+    whole test with a constant `false` would pass the pipe test alone. This
+    helper is the second measurement point.
+
+    Returns {"rc", "out", "err"}. Output is drained after the child exits; the
+    responses here are a few hundred bytes, well inside the pty buffer.
+    """
+    master, slave = pty.openpty()
+    try:
+        proc = subprocess.run(["bash", str(CLI), *args], env=bridge.env,
+                              stdin=subprocess.DEVNULL, stdout=slave,
+                              stderr=subprocess.PIPE, text=True, timeout=60)
+        os.close(slave)
+        slave = -1
+        chunks = []
+        while True:
+            try:
+                chunk = os.read(master, 65536)
+            except OSError:                  # EIO — every slave fd is closed
+                break
+            if not chunk:
+                break
+            chunks.append(chunk)
+        return {"rc": proc.returncode,
+                "out": b"".join(chunks).decode(errors="replace"),
+                "err": proc.stderr}
+    finally:
+        if slave != -1:
+            os.close(slave)
+        os.close(master)
+
+
+def test_the_pty_runner_actually_produces_a_tty(bridge):
+    """POSITIVE CONTROL for the helper above, run BEFORE anything trusts it.
+
+    If openpty() silently degraded to something `[ -t 1 ]` calls false, every
+    TTY-default test below would still pass — by asserting the PIPE behaviour
+    while claiming to assert the terminal one. So ask bash directly, through the
+    exact same launch path, and require the two ends to DISAGREE."""
+    master, slave = pty.openpty()
+    try:
+        on_pty = subprocess.run(["bash", "-c", "[ -t 1 ] && echo TTY || echo PIPE"],
+                                stdout=slave, stderr=subprocess.PIPE,
+                                stdin=subprocess.DEVNULL, text=True, timeout=30)
+        os.close(slave)
+        slave = -1
+        assert on_pty.returncode == 0
+        got = b""
+        while True:
+            try:
+                c = os.read(master, 4096)
+            except OSError:
+                break
+            if not c:
+                break
+            got += c
+        assert "TTY" in got.decode(), got
+    finally:
+        if slave != -1:
+            os.close(slave)
+        os.close(master)
+    on_pipe = subprocess.run(["bash", "-c", "[ -t 1 ] && echo TTY || echo PIPE"],
+                             capture_output=True, text=True, timeout=30)
+    assert on_pipe.stdout.strip() == "PIPE", on_pipe.stdout
+
+
+# --------------------------------------------------------------------------- #
+# `activate` — the focus-steal consent flag (#focus-steal)
+# --------------------------------------------------------------------------- #
+# `activate` is the only op that can move the operator's real WM focus (the
+# server shells out to `i3-msg` for it), and measurement over 55,003 bridge
+# commands showed it is the only op with a causal focus signature: 111/166 calls
+# have a Brave window-focus event within +/-1s, vs 1.7-7.3% for every other op.
+# All 166 came from NON-INTERACTIVE callers; 0 of the 9 interactive `browser`
+# commands in the same telemetry window were an activate.
+#
+# So the CLI decides consent from a STRUCTURAL property of its own process — is
+# stdout a TTY — and always puts an explicit boolean on the wire. These tests
+# pin the wire shape, which is the thing the server acts on.
+def _activate_body(bridge):
+    """The single recorded /cmd body, asserted to be the activate."""
+    assert len(bridge.bodies) == 1, bridge.bodies
+    body = bridge.bodies[0]
+    assert body["op"] == "activate", body
+    return body
+
+
+def test_activate_defaults_to_no_focus_when_stdout_is_not_a_tty(bridge):
+    """🔴 THE REGRESSION, CLI half. An agent runs the CLI with stdout on a pipe
+    (Claude Code's Bash tool, opencode's bash tool, any script). That call must
+    put focus:false on the wire, so the server withholds the i3 raise.
+
+    Pre-fix the body carried no `focus` field at all and the server raised
+    unconditionally — this test is red there on the KeyError."""
+    cp = bridge.run("activate")
+    assert cp.returncode == 0, cp.stderr
+    assert _activate_body(bridge)["focus"] is False
+
+
+def test_activate_focus_flag_asks_for_the_raise_explicitly(bridge):
+    """`--focus` is the escape hatch: a script that genuinely needs the real
+    foreground says so out loud, and it works from a pipe."""
+    cp = bridge.run("activate", "--focus")
+    assert cp.returncode == 0, cp.stderr
+    assert _activate_body(bridge)["focus"] is True
+
+
+def test_activate_no_focus_flag_refuses_even_on_a_tty(bridge):
+    """`--no-focus` is the other direction, and it must beat the TTY default —
+    an operator scripting inside their own terminal can still opt out."""
+    cp = _run_on_a_pty(bridge, "activate", "--no-focus")
+    assert cp["rc"] == 0, cp["out"]
+    assert _activate_body(bridge)["focus"] is False
+
+
+def test_activate_defaults_to_focus_when_stdout_IS_a_tty(bridge):
+    """The other half of the default, measured at the OTHER end of the
+    dimension: a human typing `browser activate` in a terminal gets today's
+    behaviour unchanged. Without this case the TTY branch is never executed and
+    the pipe test alone would pass against a hardcoded `false`."""
+    cp = _run_on_a_pty(bridge, "activate")
+    assert cp["rc"] == 0, cp["out"]
+    assert _activate_body(bridge)["focus"] is True
+
+
+def test_activate_focus_composes_with_the_wait_flags(bridge):
+    """Both optional fields must survive together — the consent flag is appended
+    to `extra`, which already had a waitMs in it, and a naive concatenation
+    drops one or emits invalid JSON (the stub would record __unparseable__)."""
+    cp = bridge.run("activate", "--wait", "1500", "--focus")
+    assert cp.returncode == 0, cp.stderr
+    body = _activate_body(bridge)
+    assert body["waitMs"] == 1500 and body["focus"] is True
+
+
+def test_activate_rejects_an_unknown_flag_and_names_the_focus_flags(bridge):
+    """The usage error must list the new flags, or an agent that guessed
+    `--foreground` is told only about --wait and never discovers --focus."""
+    before = len(bridge.bodies)
+    cp = bridge.run("activate", "--foreground")
+    assert cp.returncode != 0
+    assert "--focus" in cp.stderr and "--no-focus" in cp.stderr, cp.stderr
+    assert len(bridge.bodies) == before, "nothing may reach the wire on a usage error"

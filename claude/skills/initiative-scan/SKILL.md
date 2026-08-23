@@ -1,13 +1,34 @@
 ---
 name: initiative-scan
 description: "Run the on-demand cross-repo initiative scan — every initiative with its momentum (active/slowing/stalled), last-touched, commits/PRs, next-step and the live tmux session hosting it; also snapshots/restores the tmux workspace across a reboot. Use for \"what am I working on\", \"what's in flight\", \"what's stalled\", \"where did I leave X\", \"which session is X in\". The durable board is `initiatives`."
-argument-hint: "[--days N] [--repo PATH] [--json] [--tmux] | snapshot | restore [--dry-run] | show — defaults to --days 4 --tmux"
+argument-hint: "[--days N] [--repo PATH] [--json] [--tmux] | snapshot | restore [--dry-run] | show — runs scripts/session-analysis/initiative-scan.py; defaults to --days 4 --tmux"
 allowed-tools: Bash
 ---
 
 # initiative-scan — on-demand initiative + progress ledger
 
-Runs the read-only `initiative-scan` report and presents it. This is the durable, cross-session counterpart to the live **agent-ops dashboard** (`$mod+i` / tmux `prefix+A` / the ▦ bar button — `scripts/agent-ops`), which only shows sessions open right now. (The old `tmux-initiatives.sh` Alt+i HUD was removed 2026-07 — the agent-ops dashboard supersedes it.) Args: `$ARGUMENTS` (passed through to the script; default `--days 4`).
+🔴 **There is no `initiative-scan` binary — `which initiative-scan` finds nothing.** It is a
+python script, and it does **not** live under `scripts/initiatives/` (that path is the
+*durable board*, a different subsystem with its own `initiatives` skill). The one file is:
+
+```bash
+python3 ~/workspace/devrc/scripts/session-analysis/initiative-scan.py --days 4 --tmux
+```
+
+Plain `python3` is correct and sufficient — `requests` is only needed with telemetry ON (step
+1), and `nix-shell` wrapping is what makes a repo `flake.nix` shellHook print a greeting in
+front of the JSON. Use `--json` for machine-readable output.
+
+Runs the read-only report and presents it. This is the durable, cross-session view; for what is running *right now* use **`session-manager`**. (Two predecessors were removed rather than kept: the `tmux-initiatives.sh` Alt+i HUD in 2026-07, and the **agent-ops** mission-control TUI — whose momentum panel this absorbed — with all three of its launchers.) Args: `$ARGUMENTS` (passed through to the script; default `--days 4`).
+
+## 🔴 What the numbers mean before you repeat any of them
+- **`momentum: active` means the initiative's handoff doc was TOUCHED recently — not that work is moving.** It is recency of touch, never % done. An initiative can read `active` with `commits: 0` and `open_prs: []` and have had nothing happen for a week.
+- **Three flags in the report say which zeroes are measurements and which are "not wired up here". Read them before quoting a zero:**
+  - `telemetry_available: false` → ClickHouse is unset/unreachable; momentum came from handoff + git + sessions only.
+  - `gh_available: false` → **every `open_prs: []` and `merged_prs: 0` is UNMEASURED, not zero.** The PR fetch returns `[]` on any failure, so without this flag the two are identical.
+  - `tmux_enabled: false` → no `--tmux`, or no tmux server; the session-linking column is absent, not empty.
+  - `commits_unknown: true` on an initiative → its branch refs were unresolvable, so `commits: 0` there means "could not count", not "no commits".
+- The text renderer appends an explicit NOTE for the telemetry-off and gh-unavailable cases; the `--json` output carries the raw booleans.
 
 For the **durable, queryable** version of this data — the Postgres store, the 15-min sync, the
 LLM recaps, the workbench viewer/board and its `/api/ask` assistant — use the **`initiatives`**
@@ -36,11 +57,20 @@ python3 ~/workspace/devrc/scripts/tmux-session-restore.py <snapshot|restore|show
    ```
    - **Host note:** `192.168.50.94:30123` is the workbench LAN endpoint. On the **laptop** (no `~/.server-mode` marker, nebula-only) that's unreachable → the report runs **telemetry-OFF** (still useful from handoff + git). To get telemetry there, point `CLICKHOUSE_URL` at the laptop's nebula CH endpoint — see the `activity` skill.
 
-2. **Run the scan** (substitute `$ARGUMENTS`, or `--days 4 --tmux` if none):
+2. **Run the scan** (substitute `$ARGUMENTS`, or `--days 4 --tmux` if none). With step 1's
+   creds exported you need `requests`, so wrap it; **without** them run the plain `python3`
+   form at the top of this file instead — it is faster and avoids the shellHook-chatter trap.
    ```bash
    nix-shell -p 'python3.withPackages(p:[p.requests])' --run \
      'python ~/workspace/devrc/scripts/session-analysis/initiative-scan.py --days 4 --tmux'
    ```
-   - **`--tmux`** links each initiative to the live tmux session(s) hosting it — `[tmux:8,scratch7]` vs `[no session]` — by matching the claude pane's title (its session summary) against the initiative slug/title, scoped by the pane's cwd→repo. It also lists **live claude sessions with no matched initiative** (open work the ledger doesn't cover). Best-effort: on a host with no tmux server the column is silently omitted. This is the durable ledger fused with the same live-session view the agent-ops dashboard renders. Drop `--tmux` if `$ARGUMENTS` explicitly overrides.
+   - **`--tmux`** links each initiative to the live tmux session(s) hosting it — `[tmux:8,scratch7]` vs `[no session]` — by matching the claude pane's title (its session summary) against the initiative slug/title, scoped by the pane's cwd→repo. It also lists **live claude sessions with no matched initiative** (open work the ledger doesn't cover). Best-effort: on a host with no tmux server the column is silently omitted. This is the durable ledger fused with a live-session view. Drop `--tmux` if `$ARGUMENTS` explicitly overrides.
 
-3. **Present the output as-is** — it's already a ranked, skimmable report grouped by repo. Optionally lead with a one-line read: which initiatives are ●ACTIVE vs the most notable ○stalled one, and any next-step that looks owed. **Do not editorialize beyond the data** — momentum is *recency of touch, NOT % done*, and both initiative↔commit and initiative↔tmux-session linking are heuristic (see the script's honesty notes; a multi-topic pane title may attach to one of several co-hosted initiatives).
+3. **Cross-check against live state before answering "what am I working on" queries.** The initiative scan measures *historical threads* (handoff docs + git), not what's happening now. A stale answer is worse than no answer. Before presenting, merge three signals in order of freshness:
+   - **tmux sessions** (real-time) — what's running right now, which repo, what it's doing. The `--tmux` column covers matched sessions; also read the **unmatched sessions** section at the bottom — those are active work the ledger doesn't cover.
+   - **Open PRs** (real-time) — work in flight awaiting review/merge. Run `gh pr list --state open --json number,title,updatedAt -L 10` per active repo. These don't appear in the initiative scan unless an initiative's handoff doc mentions them.
+   - **Initiative scan** (lagging) — the historical thread + next-steps + momentum trend.
+   
+   If the tmux/PR picture disagrees with the scan (e.g. tmux shows heavy work in a repo the scan barely surfaces, or open PRs exist that no initiative claims), lead with the live signals and use the scan for context only.
+
+4. **Present the output** — lead with a one-line read of what's actively being worked on (from tmux + PRs), then the broader initiative landscape. Optionally note which initiatives are ●ACTIVE vs the most notable ○stalled one. **Do not editorialize beyond the data** — momentum is *recency of touch, NOT % done* (see the section above), and both initiative↔commit and initiative↔tmux-session linking are heuristic (see the script's honesty notes; a multi-topic pane title may attach to one of several co-hosted initiatives). If you quote a count, carry the flag that scopes it: "0 open PRs (gh available)" is a measurement, "0 open PRs" off a `gh_available: false` run is not.

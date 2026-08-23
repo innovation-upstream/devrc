@@ -97,6 +97,12 @@ Config (env):
                                  (default 900; 0 → disabled). See
                                  HEARTBEAT_INTERVAL_S for why the source needs a
                                  cadence at all.
+    BROWSER_BRIDGE_I3_TIMEOUT    seconds each host-side `i3-msg` call may take
+                                 (default 1.5). See I3_MSG_TIMEOUT.
+    BROWSER_BRIDGE_I3_MATCH_WAIT seconds `activate` keeps re-reading the i3 tree
+                                 waiting for the Brave window's WM_NAME to catch
+                                 up with the activated tab's title (default 1.5;
+                                 0 → one read, no wait). See I3_MATCH_WAIT.
 """
 from __future__ import annotations
 
@@ -138,9 +144,18 @@ from urllib.parse import unquote, urlsplit
 # path can take the operator's screen.
 # `activate` foregrounds the owned/target tab (chrome.tabs.update{active} +
 # chrome.windows.update{focused}) AND (host-side, below) raises the Brave window
-# via i3-msg. It is the ONE op that STEALS the operator's screen and is a LAST
+# via i3-msg. It is the ONE op that can STEAL the operator's screen and is a LAST
 # RESORT — `wake` is the answer for throttling. Tab-scoped, dispatched like the
 # other tab-scoped ops (its optional `waitMs` is a passthrough field).
+# 🔴 The host-side raise is OPT-IN (a default, NOT an authorization boundary —
+# every caller that reaches the bridge can still ask for it): it happens only
+# when the command
+# carries `focus:true` (the CLI's `--focus`, which it also defaults to when
+# stdout is a TTY, i.e. a human typed it). Without it the result reports
+# i3:"withheld" and the operator's screen is untouched. See focus_requested.
+# CAN-before-MAY: on a host with no i3 the result is "skipped", not "withheld",
+# whatever the consent flag says — there is no raise to withhold there, and the
+# withheld note's `--focus` advice would be a dead end. See the /cmd handler.
 # `upload` is a TYPED CDP op (DOM.setFileInputFiles): it populates an
 # <input type=file> with a local file whose ABSOLUTE path Chrome reads ITSELF
 # (same host) — so NO file bytes cross the bridge. It dispatches + tab-scopes
@@ -194,6 +209,20 @@ TAB_SCOPED_OPS = frozenset({"getHtml", "text", "eval", "nav", "screenshot",
 #
 # Kept as a SET rather than an `if op == "emulate"` because the next op with this
 # property must land here and not grow a second copy of the predicate.
+#
+# 🔴 THE ASYMMETRY GOT SHARPER WHEN OPENCODE SESSIONS GAINED THEIR OWN ID, and
+# the honest reading is that "degrades gracefully" is doing some work above.
+# `nav`, `click`, `type` and `key` are in TAB_SCOPED_OPS but NOT here, so with no
+# `--tab` and no owned tab they resolve to `None` and the extension drives the
+# ACTIVE tab — the one the human is looking at. Those four are not reads.
+# Until the `opencode:` tier existed, a nested opencode run inherited its Claude
+# parent's id and therefore its ownership, so it landed on the parent's tab; now
+# it owns nothing until it `open`s, and the fallback is what catches it. Nothing
+# REFUSES — "it must `open` a tab first" is the happy path, not an enforcement.
+# Recorded here rather than left implicit because it is a screen-stealing shape,
+# and widening this set is the fix if it ever bites (it would also break the
+# documented one-shot "read the tab I have open" idiom, which is why it is not
+# being widened blind).
 OWNED_TAB_ONLY_OPS = frozenset({"emulate"})
 
 # Per-op required fields (skill-supplied). Absent → 400 bad_request. NOTE: `close`
@@ -324,6 +353,124 @@ KNOWN_FORGET_S = 86400.0
 # yank a visible tab out from under the user); explicit `browser close` closes it.
 HDR_SESSION_ID = "X-Session-Id"
 
+# ---- The session id as a TELEMETRY JOIN KEY (distinct from routing) -------- #
+# X-Session-Id is a ROUTING key: any string that is stable per caller works, and
+# every tier of the CLI's fallback chain produces one. That is NOT enough to
+# record it as an activity.events `session` value, which is a JOIN key — a row
+# claiming session X asserts "this is the same session other sources call X".
+#
+# The id already carries its provenance: `derive_session_id` deliberately tags it
+# with the tier that produced it, before the FIRST colon.
+#
+#   claude:<uuid>          CLAUDE_CODE_SESSION_ID / CLAUDE_SESSION_ID — Claude
+#                          Code's own session uuid, which is EXACTLY what
+#                          `source='claude'` rows already store. JOINABLE.
+#   opencode:<id>          OPENCODE_SESSION_ID, exported per bash-tool call by
+#                          scripts/opencode/plugin/session-env.js's `shell.env`
+#                          hook. It is EXACTLY what `source='opencode'` rows
+#                          already store: activity-plugin.js emits
+#                          `session: input.sessionID` from `tool.execute.after`,
+#                          and `shell.env` receives the same sessionID for the
+#                          same call. JOINABLE.
+#   tmux:%<n>              $TMUX_PANE. A pane id is stable across MANY unrelated
+#                          sessions, so writing it into `session` would silently
+#                          merge them into one apparent session — strictly worse
+#                          than an empty column.
+#   sid:<sid>:<starttime>  the POSIX session id. No other source records it.
+#   ppid:<pid>:<rand>      the last-resort cached random token.
+#   synthetic:<...>        an id the CLI deliberately made up (its recreate-close
+#                          presents a throwaway so the close cannot evict the
+#                          mapping it just created).
+#
+# Reading that tag is NOT shape inference: it is a tag the CLI author emits on
+# purpose, not a guess from what the value happens to look like. 🔴 What WOULD be
+# shape inference — and is forbidden — is deciding from the id's FORM ("looks
+# like a uuid → claude"). The tag, or nothing.
+#
+# FAIL CLOSED. An id with no tag at all (no colon), an empty one, or a tag we do
+# not know is reported as SESSION_SRC_UNKNOWN and writes NO session key. In
+# particular an UNPREFIXED value is never treated as a bare claude id — the
+# opencode browser tool's own default is the literal "browser-agent", and a
+# version-skewed caller can send anything.
+# 🔴 A SET, NOT A SCALAR — and the scalar `SESSION_SRC_JOINABLE` it replaces is
+# DELETED rather than kept beside it. Two spellings of one predicate is how the
+# second call site gets missed: the joinability question is asked at exactly two
+# places below (`session` and `origin_session`) and both must answer the same
+# way, so they both go through `_is_joinable`.
+#
+# Membership here is a claim that the BARE half of such an id is the same string
+# another activity.events source writes into `session` — i.e. that the two
+# populations really JOIN. Adding a tier without that being true produces rows
+# that look attributable and match nothing, which is worse than the empty column
+# this mechanism exists to fill.
+SESSION_JOINABLE_TIERS = ("claude", "opencode")
+SESSION_SRC_UNKNOWN = "unknown"
+# The CLOSED vocabulary of tier tags `derive_session_id` can emit. Pinned against
+# the tags PARSED OUT OF THE CLI SOURCE by test_browser_session_id.py::
+# test_the_server_validation_set_equals_the_tags_parsed_from_the_cli, so a new
+# tier fails there until it is added here too.
+# 🔴 Against the PARSE, not against a retyped literal. This comment previously
+# claimed a two-way pin that did not exist — each side was checked against its own
+# copy of the list, so a change touching both real files passed (measured: grow
+# the CLI by an `opencode:` tier and update its ledger, leave this alone → the
+# whole suite green). The failure that hides is silent and fail-closed: the new
+# tier normalises to SESSION_SRC_UNKNOWN, loses its id, and the column empties.
+#
+# 🔴 IT IS A VALIDATION SET, not documentation. The tag arrives on a
+# caller-supplied header: without this, `sess_src` is an unbounded-cardinality
+# column filled from a string a raw token-holder chooses ("['claude", " claude",
+# "CLAUDE", "claud" were all measured landing verbatim). Anything not in here is
+# reported as SESSION_SRC_UNKNOWN and carries no id — a new tier needs a CLI
+# change, which the two-way pin already forces you to declare.
+SESSION_TIER_TAGS = ("claude", "opencode", "tmux", "sid", "ppid", "synthetic")
+
+# ---- Nested runs: the forwarded id is the PARENT, not the actor ------------ #
+# `browser agent "<goal>"` shells out to an opencode agent, and browser-agent
+# captures the id of the session that INVOKED it (`--print-session-id`) and
+# forwards it as this nested run's X-Session-Id. That is right for ROUTING and
+# for the audit trail — the nested tool drives the tab that invoker `open`ed.
+# It is WRONG for the `session` column, which means "the agent session that
+# ISSUED this command": for a nested run the issuer is the opencode agent, whose
+# own id we do not have yet. Attributing those calls to the operator's session
+# would fabricate usage in the `session` JOIN column (measured: ~581
+# nested tool-call rows in 14d, ~11% of bridge commands).
+#
+# So the nested tool declares itself. When this header is present we record the
+# forwarded id as `payload.origin_session` — the causal PARENT, somewhere nothing
+# can mistake it for the actor — and leave `session` EMPTY.
+#
+# 🔴 STATUS UPDATE, replacing "Giving the nested session an id of its own is a
+# later change": for the `opencode-inherited` population that change has LANDED
+# (the `opencode:` tier above). Those calls now normally carry the opencode
+# session's own key and never reach this path at all — the token survives only as
+# the fallback for the ways `OPENCODE_SESSION_ID` can be missing (deploy skew, an
+# opencode process started before the plugin was deployed, the PTY path, a
+# plugin-load failure), enumerated in the CLI beside the guard that emits it.
+# The `browser-agent` population is UNCHANGED and still has no id of its own: its
+# tool sends the wrapper-captured PARENT id, so suppression is still the only
+# honest answer there.
+HDR_SESSION_ORIGIN = "X-Session-Origin"
+# The CLOSED ledger of origin tokens, and the marker for a declaration that is
+# present but not one of them.
+#
+# 🔴 PRESENCE IS THE SIGNAL, NOT THE VALUE. Attribution is suppressed whenever the
+# header is THERE, whatever it says. An oversized, control-char, empty or unknown
+# value means a caller tried to disclaim authorship and we could not read it —
+# losing attribution beats fabricating it, so it fails CLOSED and is marked so the
+# case is visible in the data rather than silent. Validating the value only after
+# deciding to suppress is what keeps this from turning into the id-sanitiser bug
+# it mirrors: that one returned "" for a malformed value and fell through to
+# writing `session` with the PARENT's id — the exact fabrication this mechanism
+# exists to prevent.
+ORIGIN_TOKENS = ("browser-agent", "opencode-inherited")
+SESSION_ORIGIN_INVALID = "invalid"
+
+# Bound what a caller-supplied header can put on a telemetry row. A value that
+# fails this is dropped entirely, never truncated: a truncated join key is a
+# WRONG join key, which is the failure this whole change exists to avoid. 200 is
+# ~5x a uuid plus its tag.
+MAX_SESSION_FIELD = 200
+
 # Idle seconds after which a session's tab ownership is reclaimed (released, NOT
 # closed). Refreshed on every op the session routes through its owned tab.
 OWNER_TTL_S = float(os.environ.get("BROWSER_BRIDGE_OWNER_TTL", "900"))
@@ -371,9 +518,26 @@ HEARTBEAT_INTERVAL_S = float(os.environ.get("BROWSER_BRIDGE_HEARTBEAT_S", "900")
 # raises it + switches workspace, un-throttling the tab. Bounded by this timeout;
 # any failure is non-fatal (the Chrome-side activate result still returns).
 I3_MSG_TIMEOUT = float(os.environ.get("BROWSER_BRIDGE_I3_TIMEOUT", "1.5"))
-# Cap on the UNTRUSTED (page-controlled) tab-title fragment used in the i3
-# criteria — bounds a pathological title before it is re.escape'd.
+# Cap on the UNTRUSTED (page-controlled) tab-title fragment matched against the
+# i3 tree — bounds a pathological title before it is re.escape'd.
 I3_TITLE_MAX = 80
+# How long to keep re-reading the i3 tree waiting for the Brave window's X11
+# WM_NAME to catch up with the tab title Chrome just activated.
+#
+# 🔴 THE RACE THIS EXISTS FOR. `activate` returns the tab's title from Chrome the
+# instant the tab goes active, but the X11 window's WM_NAME is updated by the
+# browser process AFTERWARDS. Immediately after an `open` the window therefore
+# still advertises the OLD title, so a title-keyed match finds nothing. Measured
+# live 2026-08-19: activate #1 (issued right after `open`) matched no window and
+# the tab stayed `hidden`; activate #2, once the title had settled, raised it.
+# A bounded re-read turns that "unreliable by construction" first activate into a
+# normal success — and when the window genuinely is not there, the wait expires
+# and the caller is told `no_match` instead of being lied to.
+I3_MATCH_WAIT = _env_float("BROWSER_BRIDGE_I3_MATCH_WAIT", 1.5)
+# Gap between those re-reads. Each poll is one `i3-msg -t get_tree` (a READ-ONLY
+# IPC query — it cannot focus/move/switch anything), so the whole wait costs at
+# most ~I3_MATCH_WAIT/I3_MATCH_POLL cheap queries.
+I3_MATCH_POLL = 0.2
 
 # Synthetic routing key for a legacy extension that polls without a handshake
 # (no X-Bridge-Instance-Id). All such polls collapse onto one unnamed instance.
@@ -747,10 +911,42 @@ def log(event: str, **fields) -> None:
 # source from the collector's `browser` (nav/scroll) source; keep them separate.
 #
 # PRIVACY CONTRACT (do not weaken): we emit ONLY metadata — the op name, the
-# instance routing key, the outcome, the server-side latency, and (best-effort)
-# the active tab's BARE DOMAIN. We NEVER emit the eval source, page HTML,
-# screenshot bytes/data-URLs, a full URL with path/query, or any page content.
-# The payload stays tiny.
+# instance routing key, the outcome, the server-side latency, (best-effort) the
+# active tab's BARE DOMAIN, the caller's SESSION TIER, and — for the joinable
+# tier only — the caller's own agent SESSION ID. We NEVER emit the eval source,
+# page HTML, screenshot bytes/data-URLs, a full URL with path/query, or any page
+# content. The payload stays tiny.
+#
+# 🔴 THE SESSION ID IS A DELIBERATE WIDENING (2026-08-18) — read this before
+# calling it a leak. Until now the `session` column was EMPTY on every
+# browser-bridge row (measured: 0 of 6,937 over 14 days) while claude/opencode/
+# keys/tmux/zsh filled it 100%, so a browser-skill call could not be joined to
+# the agent session that made it; answering "which sessions used the browser
+# skill" meant scanning 1.5M transcript records instead of reading one column.
+# What is now emitted is the AGENT SESSION'S OWN OPAQUE HANDLE — the same
+# `CLAUDE_CODE_SESSION_ID` that `source='claude'` rows in this very table already
+# store, raw. It is NOT page content, is not derived from any page, and is not
+# derived from anything the browser saw: it is an identifier the local agent
+# harness minted for itself before any browser command existed. Storing it adds
+# no information about WHAT was browsed — only about WHO asked. It is stored RAW
+# and unhashed on purpose: a hash would make this the ONE source needing
+# hex(SHA256()) at query time, and a forgotten join silently returns zero rows,
+# which reads as a valid "no sessions matched" answer.
+# The tier gate and the origin gate are what keep this honest — see
+# SESSION_JOINABLE_TIERS and HDR_SESSION_ORIGIN.
+#
+# 🔴 WHO ACTUALLY READS `session`, STATED CORRECTLY. An earlier draft of these
+# comments said "the column adoption-scan and the deadman read". That is FALSE
+# and was checked: adoption-scan's browser-bridge entry is `via="source"`, whose
+# query selects text/payload/exit_code/duration_ms/ts/host and never `session`;
+# the deadman consumes only a row's EXISTENCE. Every shipped `GROUP BY session`
+# filters `source='claude'` (or claude+opencode). So NO shipped consumer reads
+# this column for `source='browser-bridge'` today — precisely because it has
+# always been empty.
+# That makes the harm LATENT, not live, and it is still the reason for every
+# gate here: a wrong value corrupts the FIRST consumer that reads it, silently,
+# and a fabricated session key is indistinguishable from a real one after the
+# fact. Absent data is recoverable; wrong-and-plausible data is not.
 #
 # BEST-EFFORT CONTRACT (do not weaken): emitting must never affect command
 # handling. The emitter is discovered lazily by absolute path and every failure
@@ -820,6 +1016,131 @@ def _domain_from_result(result) -> str:
         return ""
 
 
+# --------------------------------------------------------------------------- #
+# Per-site reference docs
+#
+# Some sites carry hard-won operating facts that are true of THAT SITE ONLY (an
+# identity endpoint that must be re-read, a rail that renders stale entries, a
+# route whose 404 is a cohort fact). Those do not belong in a mechanism file —
+# `reference/spa-wake.md` is about the WEB — and they must not be pushed into
+# SKILL.md, which is loaded on every browser task and has a hard byte ceiling
+# (tests/test_skill_size.py). Putting a per-site ROW in SKILL.md would make the
+# always-loaded body grow linearly with the number of sites, so SKILL.md names
+# only the DIRECTORY and the bridge names the FILE, here, when it applies.
+#
+# The emission is deterministic and free of judgement: `_domain_from_result`
+# already extracts the bare hostname of a completed command (it has been doing so
+# for telemetry), and this looks that host up in a registry. A hit adds ONE
+# string field to the result envelope; a miss adds NOTHING AT ALL — the field is
+# ABSENT, not empty or null, so the common case costs zero bytes on the wire and
+# a consumer's `"site_notes" in result` is a true predicate.
+#
+# server.py is deployed as a FLAT single-file /nix/store symlink by home-manager,
+# so Path(__file__) does NOT sit next to reference/ — this resolves the directory
+# by the same stable ABSOLUTE repo path the spool emitter above uses, for exactly
+# the same reason. BROWSER_BRIDGE_SITES_DIR overrides it (tests).
+_SITES_DIR = Path(
+    os.environ.get("BROWSER_BRIDGE_SITES_DIR")
+    or (Path.home() / "workspace" / "devrc" / "scripts" / "browser-bridge"
+        / "reference" / "sites")
+)
+# The doc path a consumer is told to read is REPO-RELATIVE, matching how every
+# other reference file is named in SKILL.md's table.
+_SITES_REL_PREFIX = "reference/sites"
+# (resolved_dir, {host_suffix: filename}) — parsed at most once per directory.
+# Keyed on the directory so a test that repoints BROWSER_BRIDGE_SITES_DIR gets a
+# fresh load without needing a reset hook, while a normal run reads the file once
+# for the life of the process.
+_site_index_cache = None
+
+
+def _load_site_index() -> dict:
+    """The host-suffix → filename registry from `<sites dir>/_index.json`.
+
+    STRICTLY BEST-EFFORT, like every other optional input this server reads: a
+    missing file, unreadable file, malformed JSON, wrong top-level shape, or a
+    junk entry degrades to "no site notes" and can never raise into a browser
+    op. A browser command must not start failing because a doc registry got a
+    trailing comma.
+
+    Entries are validated rather than trusted: the key must be a non-empty
+    lowercase-able hostname with no scheme/slash/whitespace, and the value must
+    be a BARE filename — no `/`, no `..` — so a registry can only ever name a
+    file inside this directory. Junk entries are dropped individually; one bad
+    row does not discard the good ones.
+    """
+    global _site_index_cache
+    cached = _site_index_cache
+    if cached is not None and cached[0] == _SITES_DIR:
+        return cached[1]
+    mapping = {}
+    try:
+        raw = json.loads((_SITES_DIR / "_index.json").read_text("utf-8"))
+        sites = raw.get("sites") if isinstance(raw, dict) else None
+        if isinstance(sites, dict):
+            for key, val in sites.items():
+                if not isinstance(key, str) or not isinstance(val, str):
+                    continue
+                host = key.strip().lower().rstrip(".")
+                if not host or host.startswith("."):
+                    continue
+                if any(c in host for c in "/:\\") or any(c.isspace() for c in host):
+                    continue
+                name = val.strip()
+                if not name or "/" in name or "\\" in name or ".." in name:
+                    continue
+                mapping[host] = name
+    except Exception:  # noqa: BLE001 — an absent/broken registry is not an error.
+        mapping = {}
+    _site_index_cache = (_SITES_DIR, mapping)
+    return mapping
+
+
+def _site_notes_path(host: str) -> str:
+    """The reference-doc path for `host`, or "" when the host has none.
+
+    🔴 HOST-SUFFIX matching, on LABEL BOUNDARIES — never a substring test. A key
+    A key `example.test` matches `example.test` and any subdomain of it, and
+    must NOT match `notexample.test` (a longer label ending in the same
+    characters) nor `example.test.evil.invalid` (the key as a PREFIX). A naive
+    `key in host` gets both of those wrong and hands an attacker-chosen host our
+    operating notes.
+
+    The LONGEST matching suffix wins, so a specific `sub.example.test` entry
+    beats a general `example.test` one regardless of dict order.
+    """
+    if not isinstance(host, str) or not host:
+        return ""
+    h = host.strip().lower().rstrip(".")
+    if not h:
+        return ""
+    index = _load_site_index()
+    best = ""
+    best_name = ""
+    for suffix, name in index.items():
+        if h == suffix or h.endswith("." + suffix):
+            if len(suffix) > len(best):
+                best, best_name = suffix, name
+    if not best:
+        return ""
+    return f"{_SITES_REL_PREFIX}/{best_name}"
+
+
+def _annotate_site_notes(result, host: str) -> None:
+    """Add `site_notes` to a result ENVELOPE when the host has a reference doc.
+
+    Additive and single-field, in the spirit of the extension's advisory `note:`
+    on a hidden-tab read. On a miss it does nothing whatsoever — no key, no
+    null — so every existing envelope field and every unregistered host's bytes
+    are unchanged.
+    """
+    if not isinstance(result, dict):
+        return
+    path = _site_notes_path(host)
+    if path:
+        result["site_notes"] = path
+
+
 def _session_hash(session_id) -> str:
     """A COARSE, non-reversible fingerprint of a session id: first 8 hex of its
     sha256. Used ONLY in the throttle telemetry event so a flood is attributable
@@ -829,6 +1150,77 @@ def _session_hash(session_id) -> str:
     if not session_id:
         return ""
     return hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:8]
+
+
+def _clean_session_field(value) -> str:
+    """A caller-supplied header value, made safe to put on a telemetry row.
+
+    Returns "" for anything empty, over MAX_SESSION_FIELD, or carrying a control
+    character. DROPS rather than truncates — a truncated join key is a wrong join
+    key, and a control character would be an unreadable handle in a column other
+    tools compare with `=`. (The spool line is base64'd, so this is not an
+    injection guard; it is a data-quality one.)
+    """
+    if not value:
+        return ""
+    try:
+        s = str(value)
+    except Exception:  # noqa: BLE001 — telemetry is strictly best-effort.
+        return ""
+    if len(s) > MAX_SESSION_FIELD:
+        return ""
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in s):
+        return ""
+    return s
+
+
+def _is_joinable(tier, bare) -> bool:
+    """May this (tier, bare id) pair be written into a JOIN column?
+
+    ONE predicate for the two places that ask — `session` and `origin_session`.
+    They were open-coded as `tier == SESSION_SRC_JOINABLE and bare` at both
+    sites; widening the joinable set from one tag to several is exactly the edit
+    that gets applied to one copy and not the other, and the failure is silent
+    in both directions (a tier that stops joining empties the column; a tier that
+    joins on only one of the two sites makes the same id attributable in one
+    field and not the other).
+    """
+    return tier in SESSION_JOINABLE_TIERS and bool(bare)
+
+
+def _split_session_id(session_id):
+    """`X-Session-Id` -> (tier, bare id), reading the tag the CLI put there.
+
+    The tag is everything before the FIRST colon; the rest is the id as the
+    producing source knows it (`sid:` and `ppid:` ids contain further colons, so
+    only the first one may split). Both halves must be non-empty.
+
+    Anything that carries no tag at all — including a bare uuid, which is exactly
+    the value that would be most tempting to accept — returns
+    (SESSION_SRC_UNKNOWN, ""). That is the fail-closed direction: an id whose
+    provenance is unstated must never be promoted to a join key on the strength
+    of looking like one.
+
+    The BARE half is what reaches the `session` column, because
+    `source='claude'` rows store the bare uuid (the transcript filename stem ==
+    CLAUDE_CODE_SESSION_ID). Keeping the tag would force a
+    replaceOne(session,'claude:','') at every join site, and a forgotten one
+    returns zero rows — which reads as a valid "no sessions matched" answer, the
+    same failure the raw-not-hashed decision above exists to avoid.
+    """
+    s = _clean_session_field(session_id)
+    if not s:
+        return SESSION_SRC_UNKNOWN, ""
+    tier, sep, bare = s.partition(":")
+    if not sep or not tier or not bare:
+        return SESSION_SRC_UNKNOWN, ""
+    # A tag we do not know is not reported verbatim: `sess_src` would otherwise be
+    # an unbounded column filled from a caller-supplied header. Both halves are
+    # dropped together — an unrecognised tier tells us nothing about what the
+    # remainder means, so it must not reach `session` OR `origin_session`.
+    if tier not in SESSION_TIER_TAGS:
+        return SESSION_SRC_UNKNOWN, ""
+    return tier, bare
 
 
 def _emulate_extra(body) -> dict:
@@ -864,7 +1256,8 @@ def _emulate_extra(body) -> dict:
 
 def emit_cmd_event(op: str, key: str, outcome: str, duration_ms: int,
                    domain: str = "", exit_code: int = 0, extra: dict = None,
-                   kind: str = "cmd") -> None:
+                   kind: str = "cmd", session_id=None, session_origin=None,
+                   attribute_session: bool = False) -> None:
     """Append ONE metadata-only activity event for a handled command.
 
     Best-effort + fire-and-forget: any failure is swallowed so telemetry can
@@ -872,6 +1265,26 @@ def emit_cmd_event(op: str, key: str, outcome: str, duration_ms: int,
     `extra` merges additional METADATA-ONLY keys into the payload (used by the
     throttle path for {reason, sess} — a fixed reason string + a coarse session
     hash, never page content).
+
+    SESSION ATTRIBUTION (see SESSION_JOINABLE_TIERS / HDR_SESSION_ORIGIN):
+      * `attribute_session=False` (the default) — this call site has no caller
+        session at all. Exactly ONE emit is in that category: the heartbeat,
+        which a timer produces with no request behind it. NOTHING is added.
+        🔴 /whoami and /health are NOT in this category, though this docstring
+        said they were until the audit round that moved them: they are operator
+        subcommands (`browser whoami` / `browser health`) whose requests carry
+        the ordinary session headers, so they pass attribute_session=True like
+        any other command — see _emit_diag_event.
+      * `attribute_session=True` — `payload.sess_src` ALWAYS records the tier
+        parsed off `session_id`, so every row is self-describing about why it
+        does or does not carry a key. The `session` COLUMN is filled with the
+        BARE id only when `_is_joinable` accepts that tier **and** no
+        `session_origin` was declared.
+      * `session_origin` set — a NESTED run forwarding its invoker's id. `session`
+        stays empty; the bare id is recorded as `payload.origin_session` (the
+        causal parent) beside `payload.origin`.
+      * every field this adds is written AFTER `extra` merges, so no call site can
+        overwrite an attribution with a value that did not come from a header.
 
     🔴 `kind` defaults to "cmd" and MUST stay that way for operator-driven
     commands: `kind='cmd'` is the USAGE signal downstream — session-analysis/
@@ -884,26 +1297,67 @@ def emit_cmd_event(op: str, key: str, outcome: str, duration_ms: int,
         se = _load_spool_emit()
         if se is None:
             return
-        # METADATA ONLY — op/key/outcome/(bare)domain. Never page content.
+        # METADATA ONLY — op/key/outcome/(bare)domain, plus the caller's session
+        # TIER and (joinable tier, non-nested only) its agent session id. Never
+        # page content.
         payload = {"op": op, "key": key, "outcome": outcome}
         if domain:
             payload["domain"] = domain
         if extra:
             payload.update(extra)
-        se.emit({
+        rec = {
             "source": "browser-bridge",
             "kind": kind,
             "text": domain or op,
             "duration_ms": int(duration_ms),
             "exit_code": int(exit_code),
-            "payload": json.dumps(payload, ensure_ascii=False,
-                                  separators=(",", ":")),
-        })
+        }
+        if attribute_session:
+            # These keys belong to the headers alone. Clear them first so a stale
+            # or smuggled `extra` cannot leave a claim standing that the headers
+            # did not make — "written after extra" only wins for keys we WRITE,
+            # and the origin keys are conditional.
+            for reserved in ("sess_src", "origin", "origin_session"):
+                payload.pop(reserved, None)
+            tier, bare = _split_session_id(session_id)
+            payload["sess_src"] = tier
+            # 🔴 BRANCH ON PRESENCE, NEVER ON THE CLEANED VALUE'S TRUTHINESS.
+            # `session_origin is None` means the header was absent; ANY present
+            # value — including "" — is a caller disclaiming authorship, and must
+            # suppress `session` even when we cannot make sense of it. Keying this
+            # off `if origin:` instead let a 201-char or control-char origin fall
+            # through to the `elif` and write `session` with the PARENT's id.
+            if session_origin is not None:
+                declared = _clean_session_field(session_origin)
+                # The value decides only what we RECORD, never whether to suppress.
+                payload["origin"] = (declared if declared in ORIGIN_TOKENS
+                                     else SESSION_ORIGIN_INVALID)
+                # 🔴 THE SAME TIER GATE AS `session`, and for the same reason: a
+                # pane id is stable across many unrelated sessions, so a reader who
+                # groups by `origin_session` would merge them exactly as they would
+                # on `session`. REACHABLE, not theoretical — browser-agent forwards
+                # whatever --print-session-id produced and the opencode tool
+                # declares its origin unconditionally, so a `tmux:`/`sid:` parent
+                # id genuinely arrives here. The tier is on the row either way, so
+                # the suppressed population stays measurable.
+                if _is_joinable(tier, bare):
+                    payload["origin_session"] = bare
+            elif _is_joinable(tier, bare):
+                # 🔴 THE TIER GATE. Only a tier in SESSION_JOINABLE_TIERS — it is
+                # a SET, not the single tag this comment used to name — may fill
+                # the `session` JOIN column; any other tier would merge unrelated
+                # sessions under one apparent key. Never widen this to a test on
+                # the id's form, and never let an origin-declaring caller reach it.
+                rec["session"] = bare
+        rec["payload"] = json.dumps(payload, ensure_ascii=False,
+                                    separators=(",", ":"))
+        se.emit(rec)
     except Exception:  # noqa: BLE001 — strictly best-effort.
         pass
 
 
-def _emit_diag_event(op: str, t0: float) -> None:
+def _emit_diag_event(op: str, t0: float, session_id=None,
+                     session_origin=None) -> None:
     """One metadata-only event for a read-only DIAGNOSTIC GET (/whoami, /health).
 
     A thin, deliberately narrow wrapper over emit_cmd_event: op + outcome + latency
@@ -911,10 +1365,20 @@ def _emit_diag_event(op: str, t0: float) -> None:
     they are global, describing every connected profile at once, so there is no
     single active domain to attribute and emitting per-profile domains would widen
     the privacy contract. Best-effort like every other emit: it cannot raise.
-    """
+
+    🔴 THESE ARE OPERATOR CALLS AND ARE ATTRIBUTED. `browser whoami` / `browser
+    health` are subcommands a person runs — the skill documents them as the FIRST
+    thing to run — and the CLI sends its ordinary session headers on them, because
+    `_curl` is one code path. They are NOT server-originated; only the heartbeat
+    is. Leaving them unattributed made ONE operation have TWO outcomes: `whoami`
+    reached via POST /cmd got a session, the same `whoami` via GET did not, for
+    125 rows / 2.0% of `kind='cmd'` over 14 days. That is a smaller copy of the
+    very bug this file's session work exists to fix, so they are attributed the
+    same way as any other operator command."""
     emit_cmd_event(op=op, key="", outcome="ok",
                    duration_ms=int((time.monotonic() - t0) * 1000),
-                   domain="", exit_code=0)
+                   domain="", exit_code=0, session_id=session_id,
+                   session_origin=session_origin, attribute_session=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -1993,29 +2457,40 @@ def _coerce_tab(tab):
 # then focuses THAT Brave window via `i3-msg` so i3 actually raises it + switches
 # workspace — the step that turns activation from a no-op into real visibility.
 #
+# 🔴 THE SHAPE OF THIS CODE IS DICTATED BY ONE FACT: `i3-msg [criteria] focus`
+# EXITS 0 AND REPLIES `[{"success":true}]` WHEN THE CRITERIA MATCHED NOTHING.
+# There is no way to tell a real raise from a total miss by reading the exit code
+# or that reply, and the previous implementation did exactly that — reporting
+# i3:"applied" for zero windows raised. So the flow is FIND (read-only
+# `-t get_tree`) → RAISE (focus by the STABLE X11 window id found there) →
+# VERIFY (read the tree back and require i3 to agree it is focused). See
+# i3_foreground for the state/detail table.
+#
 # SECURITY — the title is UNTRUSTED (page-controlled; a hostile page the agent
 # visited can set `document.title` to ANYTHING). The bound MUST be: the worst
 # outcome is "focuses the wrong Brave window or no window", NEVER command
 # execution and NEVER focusing a non-Brave window. That is enforced by:
 #   * subprocess with an ARGV LIST + shell=False (no shell → no `;`/`|`/`$()`/
 #     redirection surface at all). NEVER os.system / shell=True.
-#   * The i3 criteria `title=` value is a REGEX delimited by double-quotes inside
-#     the criteria. re.escape() neutralises regex metacharacters but does NOT
-#     escape the `"`/`[`/`]`/`\` that STRUCTURE an i3 criteria — a `"` could close
-#     the quoted value early and let trailing text be read as an i3 command
-#     (e.g. `exec`). So we STRIP those structural chars (and control chars) BEFORE
-#     re.escape. After that the value cannot break out of `title="..."`.
+#   * 🔴 The title is no longer interpolated into an i3 command AT ALL. It is
+#     compiled to a local Python regex (re.escape → a literal, so no ReDoS) and
+#     matched against i3's `get_tree` reply in-process. The only two argvs issued
+#     are the constant `["i3-msg","-t","get_tree"]` and a focus keyed on an
+#     INTEGER window id taken from i3's own reply. The old criteria-breakout
+#     surface (a `"` closing the `title="…"` value so trailing text is read as an
+#     i3 command such as `exec`) is therefore gone by construction — the strip of
+#     the structural chars below is kept as defence in depth.
 #   * A `class="Brave-browser"` constraint so a matched window is always Brave.
 #   * A length cap + a bounded timeout; failure/timeout is swallowed (non-fatal).
 # i3-only chars that i3 uses to delimit a criteria/value. Stripped from the
-# UNTRUSTED title BEFORE re.escape so the value cannot escape its `title="..."`
-# quoting (re.escape does not touch `"`). Removing them at worst makes the title
-# match a different window or none — never a breakout.
+# UNTRUSTED title BEFORE re.escape as belt-and-braces (see above: the title never
+# reaches a criteria any more). Removing them at worst makes the title match a
+# different window or none — never a breakout.
 _I3_STRUCTURAL = str.maketrans("", "", '"[]\\')
 
 
 def _sanitize_i3_title(title) -> str:
-    """Reduce an UNTRUSTED tab title to a safe i3 criteria fragment.
+    """Reduce an UNTRUSTED tab title to a safe match fragment.
 
     Strips control chars / newlines AND the i3-criteria structural chars
     (``"[]\\``), then caps length. The remaining text is re.escape'd by the
@@ -2029,19 +2504,106 @@ def _sanitize_i3_title(title) -> str:
     return cleaned.strip()[:I3_TITLE_MAX]
 
 
-def i3_focus_argv(title):
-    """Build the argv LIST for `i3-msg` to focus the Brave window whose title
-    matches `title`, or None when there is no usable title (→ skip).
+def i3_title_pattern(title):
+    """The REGEX used to find the Brave window for an (UNTRUSTED) tab `title`,
+    or None when nothing usable remains (→ skip).
 
-    shell=False BY CONSTRUCTION (a list, never a shell string). The criteria is
-    `[class="Brave-browser" title="<re.escape'd fragment>"] focus`, so the worst
-    case is "focuses the wrong Brave window or none" — never a non-Brave window,
-    never code execution. See the module block above for the threat model."""
+    This is `re.escape(sanitized)`, matched with `re.search` — an unanchored
+    literal substring match, which is exactly what i3's own `title="…"` criteria
+    (an unanchored PCRE) used to do. The difference is WHERE it is evaluated:
+    HERE, in-process, against i3's `get_tree` reply — never interpolated into an
+    i3 command.
+
+    🔴 That is a strict security IMPROVEMENT over the criteria this replaced. The
+    page-controlled title no longer reaches ANY argv at all: the only two commands
+    issued are a constant `-t get_tree` and a focus keyed on an INTEGER X11 window
+    id taken from i3's own reply. The structural-char strip + length cap in
+    _sanitize_i3_title are kept anyway (defence in depth), and re.escape means the
+    compiled pattern is a literal — no metacharacter survives, so no ReDoS."""
     safe = _sanitize_i3_title(title)
     if not safe:
         return None
-    criteria = '[class="Brave-browser" title="%s"] focus' % re.escape(safe)
-    return ["i3-msg", criteria]
+    return re.escape(safe)
+
+
+def i3_get_tree_argv():
+    """argv LIST for `i3-msg -t get_tree` — the READ-ONLY IPC query that tells us
+    what windows EXIST.
+
+    🔴 THIS IS THE ONLY THING THAT CAN ANSWER "DID ANYTHING MATCH?". Issuing
+    `focus` and reading its exit code CANNOT: i3 answers a criteria that matched
+    ZERO windows with `[{"success":true}]` and rc 0, byte-identical to a real
+    raise. `-t get_tree` is a query — it cannot focus, move or switch anything,
+    so calling it never touches the operator's screen."""
+    return ["i3-msg", "-t", "get_tree"]
+
+
+def i3_focus_by_id_argv(window_id):
+    """argv LIST for `i3-msg [id="<x11-window-id>"] focus`.
+
+    Keyed on the X11 window id — a STABLE handle. WM_NAME changes while the title
+    settles (that is the whole bug); a window id does not, so the window we
+    matched in the tree is provably the window we focus. `window_id` comes from
+    i3's own reply and is re-validated as an int here, so this argv can never
+    carry page-controlled text."""
+    return ["i3-msg", '[id="%d"] focus' % int(window_id)]
+
+
+# The X11 WM_CLASS i3 reports for Brave windows. A match is constrained to this
+# so the worst case stays "the wrong BRAVE window, or none" — never some other
+# application's window.
+_I3_BRAVE_CLASSES = ("Brave-browser",)
+
+
+def _i3_walk(node):
+    """Yield every node of an i3 `get_tree` reply, depth-first (tiled + floating)."""
+    if not isinstance(node, dict):
+        return
+    yield node
+    for key in ("nodes", "floating_nodes"):
+        kids = node.get(key)
+        if isinstance(kids, list):
+            for kid in kids:
+                yield from _i3_walk(kid)
+
+
+def _i3_node_class(node) -> str:
+    props = node.get("window_properties")
+    if isinstance(props, dict) and isinstance(props.get("class"), str):
+        return props["class"]
+    return ""
+
+
+def i3_find_windows(tree, pattern):
+    """Every Brave window in `tree` whose title matches `pattern`.
+
+    Returns a list of (x11_window_id, focused) tuples. An EMPTY list is the state
+    `i3-msg … focus` reports as success and this function reports as itself: i3
+    has no such window."""
+    out = []
+    try:
+        rx = re.compile(pattern)
+    except re.error:
+        return out
+    for node in _i3_walk(tree):
+        wid = node.get("window")
+        if not isinstance(wid, int) or isinstance(wid, bool):
+            continue  # containers/workspaces carry window=None
+        if _i3_node_class(node) not in _I3_BRAVE_CLASSES:
+            continue
+        name = node.get("name")
+        if not isinstance(name, str) or not rx.search(name):
+            continue
+        out.append((wid, bool(node.get("focused"))))
+    return out
+
+
+def _i3_is_focused(tree, window_id) -> bool:
+    """True when the window with X11 id `window_id` is the focused one in `tree`."""
+    for node in _i3_walk(tree):
+        if node.get("window") == window_id:
+            return bool(node.get("focused"))
+    return False
 
 
 # Well-known absolute locations for `i3-msg`, tried IN ORDER when it is not on
@@ -2085,41 +2647,124 @@ def i3_available() -> bool:
     return _resolve_i3_msg() is not None
 
 
-def i3_foreground(title, *, timeout: float = I3_MSG_TIMEOUT) -> str:
-    """Best-effort host-side i3 foregrounding of the Brave window matching the
-    (UNTRUSTED) `title`. Returns a small metadata state for the caller:
+def _i3_run(argv, *, timeout):
+    """Run an i3-msg argv (shell=False, timeout-bounded). Returns
+    (returncode, stdout_bytes), or None when it could not be run at all
+    (i3-msg unresolvable, timeout, any exception) — all non-fatal.
 
-      * "skipped" — no graphical/i3 session (i3-msg absent or no DISPLAY), or no
-        usable title. NOT an error — the Chrome-side activate still returns.
-      * "applied" — i3-msg ran and exited 0.
-      * "failed"  — i3-msg errored, timed out, or exited nonzero (non-fatal).
-
-    The title is sanitized + re.escape'd (see i3_focus_argv) and the call is
-    shell=False + timeout-bounded, so a hostile title can at worst focus the
-    wrong Brave window / none — never execute a command."""
-    if not i3_available():
-        return "skipped"
-    argv = i3_focus_argv(title)
-    if argv is None:
-        return "skipped"
-    # Resolve i3-msg to an ABSOLUTE path for argv[0] so the call works even when
-    # i3-msg is not on the (minimal systemd --user) PATH. i3_available() above
-    # already confirmed it resolves; re-check defensively. The criteria (argv[1])
-    # is built + sanitized + re.escape'd by i3_focus_argv — UNCHANGED here.
+    Resolves i3-msg to an ABSOLUTE path for argv[0] so the call works even under
+    the minimal systemd --user service PATH."""
     i3_msg = _resolve_i3_msg()
     if i3_msg is None:
-        return "skipped"
+        return None
+    argv = list(argv)
     argv[0] = i3_msg
     try:
         proc = subprocess.run(argv, shell=False, capture_output=True,
                               timeout=timeout)
     except Exception:  # noqa: BLE001 — best-effort; any failure is non-fatal.
-        log("activate_i3_failed", reason="exception")
-        return "failed"
-    if getattr(proc, "returncode", 1) == 0:
-        return "applied"
-    log("activate_i3_failed", reason="nonzero", rc=getattr(proc, "returncode", None))
-    return "failed"
+        return None
+    return getattr(proc, "returncode", 1), (getattr(proc, "stdout", b"") or b"")
+
+
+def _i3_tree(*, timeout):
+    """The parsed `i3-msg -t get_tree` reply, or None when it could not be read
+    (i3-msg missing/timed out/nonzero, or the reply was not a JSON object)."""
+    got = _i3_run(i3_get_tree_argv(), timeout=timeout)
+    if got is None:
+        return None
+    rc, out = got
+    if rc != 0:
+        return None
+    try:
+        tree = json.loads(out.decode("utf-8", "replace"))
+    except Exception:  # noqa: BLE001 — a malformed reply is "unreadable".
+        return None
+    return tree if isinstance(tree, dict) else None
+
+
+def i3_foreground(title, *, timeout: float = None, match_wait: float = None):
+    """Host-side i3 foregrounding of the Brave window matching the (UNTRUSTED)
+    `title`. Returns a **(state, detail)** pair.
+
+    🔴 `state` MUST reflect WHAT HAPPENED, not whether a command was accepted.
+    The bug this replaced: it ran `i3-msg [class="Brave-browser" title="…"] focus`
+    and reported "applied" on rc 0 — but i3 exits 0 and replies
+    `[{"success":true}]` for a criteria that matched ZERO windows, so "applied"
+    was reachable with nothing raised at all. Downstream that read as "the window
+    is up", and the only failure signal anyone had said everything was fine.
+
+    So the sequence is now FIND → RAISE → VERIFY, and every step can say no:
+
+      state       detail              meaning
+      ─────────── ─────────────────── ─────────────────────────────────────────
+      "skipped"   "unavailable"       no DISPLAY / no i3-msg (headless, non-i3)
+      "skipped"   "no_title"          nothing usable left of the tab title
+      "applied"   "focused"           matched → focused → CONFIRMED focused
+      "failed"    "no_match"          i3 has NO Brave window with that title
+      "failed"    "tree_unreadable"   `-t get_tree` failed/timed out/unparseable
+      "failed"    "focus_error"       the focus command itself errored
+      "failed"    "not_focused"       focus accepted, window still not focused
+
+    "applied" is now reachable ONLY via a get_tree that listed the window AND a
+    second get_tree that confirms it is focused. `state` keeps the exact three
+    values callers already branch on ("applied"/"skipped"/"failed"), with
+    not-raised now correctly landing in "failed"; `detail` is additive.
+
+    Non-fatal throughout — the Chrome-side activate result still returns."""
+    if timeout is None:
+        timeout = I3_MSG_TIMEOUT
+    if match_wait is None:
+        match_wait = I3_MATCH_WAIT
+    if not i3_available():
+        return "skipped", "unavailable"
+    pattern = i3_title_pattern(title)
+    if pattern is None:
+        return "skipped", "no_title"
+
+    # 1. FIND. A READ-ONLY get_tree is the only thing that can distinguish
+    #    "matched one window" from "matched nothing" — see i3_get_tree_argv.
+    #    Re-read for up to match_wait while there is no match: right after an
+    #    `open` the window's WM_NAME still holds the OLD title (see I3_MATCH_WAIT).
+    #    A tree that cannot be READ is not a race — bail immediately, no retry.
+    tree = _i3_tree(timeout=timeout)
+    if tree is None:
+        log("activate_i3_failed", reason="tree_unreadable")
+        return "failed", "tree_unreadable"
+    matches = i3_find_windows(tree, pattern)
+    deadline = time.monotonic() + max(0.0, match_wait)
+    while not matches and time.monotonic() < deadline:
+        time.sleep(min(I3_MATCH_POLL, max(0.0, deadline - time.monotonic())))
+        tree = _i3_tree(timeout=timeout)
+        if tree is None:
+            log("activate_i3_failed", reason="tree_unreadable")
+            return "failed", "tree_unreadable"
+        matches = i3_find_windows(tree, pattern)
+    if not matches:
+        # The old code's silent lie. Nothing was raised; say so.
+        log("activate_i3_failed", reason="no_match")
+        return "failed", "no_match"
+
+    # 2. RAISE by STABLE X11 window id — immune to the title settling underneath
+    #    us between the tree read and the focus.
+    window_id = matches[0][0]
+    got = _i3_run(i3_focus_by_id_argv(window_id), timeout=timeout)
+    if got is None or got[0] != 0:
+        log("activate_i3_failed", reason="focus_error",
+            rc=(got[0] if got is not None else None))
+        return "failed", "focus_error"
+
+    # 3. VERIFY. rc 0 from `focus` still proves nothing (an id that vanished
+    #    between the two calls also answers success:true), so read the tree back
+    #    and require i3 to agree the window is focused.
+    tree = _i3_tree(timeout=timeout)
+    if tree is None:
+        log("activate_i3_failed", reason="tree_unreadable")
+        return "failed", "tree_unreadable"
+    if not _i3_is_focused(tree, window_id):
+        log("activate_i3_failed", reason="not_focused")
+        return "failed", "not_focused"
+    return "applied", "focused"
 
 
 def _result_title(result) -> str:
@@ -2132,12 +2777,120 @@ def _result_title(result) -> str:
     return ""
 
 
-def _annotate_i3(result, state: str) -> None:
-    """Record the i3-foregrounding outcome as a small metadata field on the
-    activate result's data ({...,"i3":"applied"|"skipped"|"failed"}) so the
-    caller knows whether the window was actually raised. Never emits the title."""
+def _annotate_i3(result, state: str, detail: str = "") -> None:
+    """Record the i3-foregrounding outcome on the activate result's data:
+
+        {..., "i3": "applied"|"skipped"|"failed"|"withheld", "i3_detail": "<why>"}
+
+    `i3_detail` separates "I asked and nothing matched" ("no_match") from "i3 is
+    not there" ("unavailable") from a real raise ("focused"); see i3_foreground
+    for the full table.
+
+    🔴 #557 documented `i3` as keeping "EXACTLY the three values callers
+    already branch on". That is no longer true, and the sentence is corrected here
+    rather than left to rot: the consent gate adds a FOURTH, "withheld" — the host
+    could have raised and was not asked to. It is deliberately NOT folded into
+    "skipped": "skipped" means the host CANNOT raise, and collapsing the two would
+    destroy the CAN-vs-MAY distinction the gate exists to make, on the one field a
+    consumer branches on. #557's compatibility argument still holds for the three
+    it named — a consumer treating "failed" as fatal is unaffected — but an
+    EXHAUSTIVE three-way switch would now meet an unknown value, which is why this
+    is called out loudly instead of quietly.
+
+    "withheld" is the CONSENT state, not a failure: the command did not carry
+    `focus:true`, so i3_foreground was never called (see focus_requested) and no
+    get_tree round trip happened. It is reported ONLY on a host that could
+    actually have raised — where i3 is unavailable the caller gets "skipped"
+    regardless of consent, so "withheld" always means "this host could have, and
+    did not because you did not ask", which is what makes the note's `--focus`
+    advice actionable. Never emits the title."""
     if isinstance(result, dict) and isinstance(result.get("data"), dict):
         result["data"]["i3"] = state
+        result["data"]["i3_detail"] = detail
+        if state == I3_WITHHELD:
+            # Assigning `note` outright cannot clobber anything: the extension's
+            # OPS.activate returns a FIXED shape — {tabId, windowId, url, title,
+            # active, status} — and never a note (unlike the read ops, whose
+            # annotateVisibility does set one). If a future activate path starts
+            # producing its own note, MERGE here rather than letting this
+            # overwrite it: the consent guidance is the thing the agent reads.
+            result["data"]["note"] = I3_WITHHELD_NOTE
+
+
+# --- consent gate for the host-side i3 focus steal (the ONE intrusive path) -- #
+# WHY THIS GATE EXISTS (measured, 2026-08-18, activity.events over 3 weeks):
+# `activate` is the ONLY bridge op that moves the operator's real WM focus, and
+# it did so UNCONDITIONALLY on every successful call. Correlating 55,003
+# `browser-bridge` cmd events against `i3` window-focus events, `activate` is
+# also the only op with a causal signature: 111/166 activates (66.9%) have a
+# Brave window-focus event within +/-1s, versus 1.7-7.3% for every other op —
+# and its 1-5s band is empty (5/166), the shape a WM-driven raise makes and a
+# human context-switch does not. `screenshot` (7.3% at +/-1s, 8.5% in the 1-5s
+# bands, n=531) is FLAT — captureVisibleTab does NOT steal focus here, because
+# the extension only takes the fast path for a tab that is ALREADY visible.
+#
+# The previous mitigation (#225) was PROSE: reword HIDDEN_TAB_NOTE so an agent
+# learns to reach for `wake` instead. claude/RULES.md: "Prefer deterministic/
+# structural fixes over prompt-tuning, prose instructions". Measurement says the
+# prose only half-held — 166 activates still landed in three weeks. The second
+# mitigation (#180-era) removed `activate` from the sandboxed browser-agent's
+# op allowlist, which is "one rule, one place" violated: it binds exactly ONE
+# caller. Every other caller of the `browser` CLI — Claude Code's Bash tool, an
+# opencode session's bash tool, a script — walks straight past it. 14 of those
+# 166 activates are positively attributable to opencode-driven bash.
+#
+# So the rule moves HERE, to the one place the screen is actually taken: the
+# host-side raise happens only on `focus:true`. The Chrome-side tab activation
+# still happens, so `activate` keeps working as a tab-state change.
+# ⚠ "takes nothing" (an earlier wording here) OVERSTATED it. tabs.update{active}
+# alone is indeed a no-op for real visibility, but the extension also calls
+# windows.update{focused:true}, which this gate does NOT cover. Under i3's default
+# `smart` (unset in nix/i3 → default; i3 4.24 userguide §4.30) a focus request
+# from a window on an ACTIVE workspace "will receive the focus". So a withheld
+# activate may still move focus when Brave is already on the visible workspace.
+# See README "Expect a RESIDUAL" for what that means for the post-deploy check.
+I3_WITHHELD = "withheld"
+
+# The host CANNOT raise. Kept as a constant because the /cmd handler answers this
+# for the REFUSED path without calling i3_foreground (which would cost a get_tree
+# round trip we must not make when no raise was requested).
+I3_SKIPPED = "skipped"
+
+# `i3_detail` values this module emits from the CALL SITE. i3_foreground owns the
+# rest of the vocabulary (no_match / tree_unreadable / not_focused / focus_error /
+# no_title / focused). 🔴 I3_DETAIL_UNAVAILABLE MUST equal the detail
+# i3_foreground itself returns when i3 is absent — the refused path reports it
+# WITHOUT going through that function, so the two can drift. A test pins them
+# together (test_call_site_unavailable_detail_matches_i3_foreground).
+I3_DETAIL_UNAVAILABLE = "unavailable"
+I3_DETAIL_NOT_REQUESTED = "not_requested"
+
+# Emitted on the result whenever the raise is withheld. It must name BOTH the
+# non-intrusive remedy and the explicit override, because this string is what an
+# agent reads and learns from (same load-bearing-wording property as
+# protocol.js's HIDDEN_TAB_NOTE — do not make `--focus` the headline).
+I3_WITHHELD_NOTE = (
+    "the tab is now the active tab of its window, but the Brave WINDOW was NOT "
+    "raised: taking the operator's screen needs explicit consent. If you only "
+    "needed the page to render, use 'browser wake' (un-throttles via CDP, moves "
+    "no focus). Pass --focus only if something genuinely needs the real "
+    "foreground."
+)
+
+
+def focus_requested(body) -> bool:
+    """Did this command EXPLICITLY ask to take the operator's screen?
+
+    True only for a literal JSON `true` on the `focus` field. Deliberately NOT
+    Python truthiness: a caller that sends the STRING "false" (a shell that
+    interpolated a variable without quoting it as JSON) must not be read as
+    consent. Absent/None/0/""/"false"/"true" all → False. Default-deny is the
+    safe direction — a caller that wanted the screen and did not get it re-runs
+    with --focus; a caller that did NOT want it cannot un-interrupt the
+    operator."""
+    if not isinstance(body, dict):
+        return False
+    return body.get("focus") is True
 
 
 # --------------------------------------------------------------------------- #
@@ -2391,7 +3144,14 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
                 # emitting one per profile would widen the contract to "which sites
                 # are open in each of your browsers". `key` is likewise empty:
                 # these endpoints take no --instance.
-                _emit_diag_event("health", t0)
+                #
+                # The SESSION HEADERS are passed through, though: these are
+                # operator subcommands (`browser whoami` / `browser health`), not
+                # server-originated rows, so they attribute like any other command
+                # — see _emit_diag_event for why excluding them was wrong.
+                _emit_diag_event("health", t0,
+                                 self.headers.get(HDR_SESSION_ID),
+                                 self.headers.get(HDR_SESSION_ORIGIN))
                 return
             if path == "/instances":
                 insts = registry.snapshot()
@@ -2400,7 +3160,9 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
                 return
             if path == "/whoami":
                 self._send(200, self._whoami())
-                _emit_diag_event("whoami", t0)   # see the /health emit above
+                _emit_diag_event("whoami", t0,
+                                 self.headers.get(HDR_SESSION_ID),
+                                 self.headers.get(HDR_SESSION_ORIGIN))   # see the /health emit above
                 return
             if path == "/poll":
                 (instance_id, label, active, ext_version,
@@ -2460,6 +3222,13 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
             # gated this request in _guard).
             target = body.pop("target", None)
             tab = body.pop("tab", None)
+            # `focus` is the host-side consent flag for the i3 raise (see
+            # focus_requested). Read it BEFORE the pop, and pop it for the same
+            # reason as target/tab: it is a SERVER-side decision the extension
+            # has no part in. Popping it also means this fix needs no extension
+            # rebuild and no Brave restart to take effect.
+            want_focus = focus_requested(body)
+            body.pop("focus", None)
             if tab is not None:
                 # Guard a malformed `tab` from a raw token-holder (the CLI already
                 # validates --tab is numeric): a non-scalar would make an
@@ -2470,6 +3239,14 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
                     self._send(400, {"ok": False, "error": terr})
                     return
             session_id = self.headers.get(HDR_SESSION_ID) or None
+            # A nested `browser agent` run declares itself here so its forwarded
+            # invoker id is never attributed to the invoker as usage. Absent for
+            # every ordinary caller. See HDR_SESSION_ORIGIN.
+            # 🔴 NO `or None` — that would collapse a PRESENT-but-empty header
+            # into "absent" and attribute a call whose caller explicitly
+            # disclaimed it. `.get()` returns None only when the header is really
+            # missing, which is the distinction the emitter branches on.
+            session_origin = self.headers.get(HDR_SESSION_ORIGIN)
             # The upload file PATH is captured for the AUDIT log/event (see the
             # ALLOWED_OPS note). It is local metadata (never file content); logging
             # it is acceptable and required for traceability of this exfil-capable
@@ -2491,7 +3268,8 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
                 emit_cmd_event(
                     op=op, key=(target or ""), outcome="ok",
                     duration_ms=int((time.monotonic() - t0) * 1000),
-                    domain="", exit_code=0)
+                    domain="", exit_code=0, session_id=session_id,
+                    session_origin=session_origin, attribute_session=True)
                 return
             try:
                 # `ping` alone asks for the fast-fail-when-idle deadline. Named
@@ -2506,8 +3284,14 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
             except RateLimited as e:
                 # Per-instance concurrency backstop tripped. Distinct structured
                 # log + a telemetry event carrying a COARSE session hash so the
-                # NEXT storm is attributable in activity.events without storing
-                # the raw session id (the audit couldn't attribute the 44K flood).
+                # NEXT storm is attributable in activity.events (the audit
+                # couldn't attribute the 44K flood).
+                # `sess` is KEPT alongside the new `session` column, deliberately.
+                # The column is filled for the `claude` tier and non-nested calls
+                # ONLY — and a flood driven from a tmux/sid/ppid/unknown tier, or
+                # from a nested browser-agent run, is exactly the case where you
+                # still need SOME stable handle to tell one flooder from two. It
+                # is 8 hex, on the throttle path only.
                 # Returns immediately (no turnstile impact) — caller-visible 429
                 # backpressure with a Retry-After-style hint in the body.
                 sess = _session_hash(session_id)
@@ -2526,7 +3310,8 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
                 emit_cmd_event(
                     op=op, key=(target or ""), outcome="throttled",
                     duration_ms=int((time.monotonic() - t0) * 1000),
-                    domain="", exit_code=1, extra=extra)
+                    domain="", exit_code=1, extra=extra, session_id=session_id,
+                    session_origin=session_origin, attribute_session=True)
                 return
             except NoOwnedTab:
                 outcome, exit_code = "no_owned_tab", 1
@@ -2572,6 +3357,14 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
                 self._send(504, {"ok": False, "error": "timeout"})
             else:
                 domain = _domain_from_result(result)
+                # The host is already in hand — `_domain_from_result` has been
+                # computing it here for telemetry — so routing to a per-site
+                # reference doc costs one dict lookup and no extra parsing on
+                # the completion path. Adds `site_notes` ONLY when
+                # this host is registered; an unregistered host gets no field at
+                # all, which is why SKILL.md can name the directory once and
+                # never grow again as sites are added. See _annotate_site_notes.
+                _annotate_site_notes(result, domain)
                 log("cmd_ok", op=op)
                 if op == "activate":
                     # Chrome-side activate only set the tab active WITHIN its
@@ -2579,11 +3372,35 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
                     # document.hidden). Focus the matching Brave X11 WINDOW via
                     # i3-msg so i3 raises it + switches workspace → the throttled
                     # SPA un-throttles and renders. Best-effort + bounded; the
-                    # title is UNTRUSTED (page-controlled) and handled shell=False
-                    # + re.escape'd inside i3_foreground. Skipped gracefully off i3.
-                    state = i3_foreground(_result_title(result))
-                    _annotate_i3(result, state)
-                    log("activate_i3", state=state)
+                    # title is UNTRUSTED (page-controlled) and never reaches an
+                    # i3 command (see i3_title_pattern). Skipped gracefully off i3.
+                    # 🔴 `state` is EARNED, not assumed: i3-msg exits 0 even
+                    # when the criteria matched nothing, so i3_foreground confirms
+                    # the window exists and ends up focused before saying "applied".
+                    #
+                    # 🔴 CONSENT IS CHECKED FIRST, and it is the only thing
+                    # ahead of the raise. Without `focus:true` we never enter
+                    # i3_foreground AT ALL — no get_tree round trip, no focus
+                    # command, nothing that can touch the operator's screen. That is
+                    # the point of the gate, and it is why the refused branch has to
+                    # answer availability itself.
+                    #
+                    # 🔴 CAN still beats MAY, one level down. A REFUSED
+                    # activate on a host with no i3 must say "skipped", not
+                    # "withheld": there is no raise to withhold, and the withheld
+                    # note's `--focus` advice would be a dead end there. A CONSENTED
+                    # activate on that host gets the same answer from i3_foreground's
+                    # own guard ("skipped","unavailable") — which is what makes that
+                    # guard REACHABLE rather than dead code, and why i3_available()
+                    # runs at most once per request instead of twice.
+                    if want_focus:
+                        state, detail = i3_foreground(_result_title(result))
+                    elif not i3_available():
+                        state, detail = I3_SKIPPED, I3_DETAIL_UNAVAILABLE
+                    else:
+                        state, detail = I3_WITHHELD, I3_DETAIL_NOT_REQUESTED
+                    _annotate_i3(result, state, detail)
+                    log("activate_i3", state=state, detail=detail)
                 self._send(200, {"ok": True, "result": result})
             # Off the critical path: the HTTP response is already sent. Metadata-
             # only + best-effort — cannot delay or break the command (the key is
@@ -2593,12 +3410,25 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
             # dedicated structured log line — this op is exfil-capable so EVERY
             # outcome is traceable (the path is local metadata, never file content).
             extra = {"path": upload_path} if op == "upload" else emulate_extra
+            if op == "activate":
+                # `activate` alone records the CONSENT decision (a bare boolean —
+                # no page content, so the PRIVACY contract is untouched). This is
+                # what makes the gate FALSIFIABLE in production rather than only
+                # in the suite: the focus-steal rate was measured per-op out of
+                # activity.events, and without this field a post-deploy re-run
+                # cannot tell a withheld activate from a consented one, so
+                # "the steals stopped" would be unprovable from the same data
+                # that established the bug.
+                extra = dict(extra or {})
+                extra["focus"] = bool(want_focus)
             if op == "upload":
                 log("upload", outcome=outcome, domain=domain, path=upload_path,
                     key=(target or ""))
             emit_cmd_event(op=op, key=(target or ""), outcome=outcome,
                            duration_ms=int((time.monotonic() - t0) * 1000),
-                           domain=domain, exit_code=exit_code, extra=extra)
+                           domain=domain, exit_code=exit_code, extra=extra,
+                           session_id=session_id, session_origin=session_origin,
+                           attribute_session=True)
 
         def _handle_result(self):
             body, err = self._read_body(MAX_RESULT_BODY)

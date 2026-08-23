@@ -20,7 +20,7 @@ WHY THE FIXTURES ARE HAND-AUTHORED AND NOT A SNAPSHOT OF THE REAL STORE
 -----------------------------------------------------------------------
 🔴 The real corpus MUST NOT be copied in here. `~/.claude/analyze-service-index/`
 carries client-identifying infrastructure detail; all 21 live entries lack a
-`sensitivity:` field, which `analyze-service/SKILL.md` defines as fail-safe
+`sensitivity:` field, which `analyze-service/reference/index-store.md` defines as fail-safe
 `client-confidential`. This repo is PUBLIC, and `scripts/testlib/
 client_host_scan.py` exists precisely because six client subdomains had already
 leaked into fixtures once (devrc `60e6d9d` scrubbed them retroactively) — several
@@ -67,6 +67,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -81,7 +82,29 @@ MODULE_PATH = ROOT / "scripts" / "lib" / "subsystem_resolver.py"
 # actually ships.
 SKILL_DOC = ROOT / "claude" / "skills" / "analyze-service" / "SKILL.md"
 
+# 🔴 THE PINNED PROSE MOVED, AND THE PINS MOVED WITH IT — same commit, which is
+# what `claude/RULES.md` demands of a location change. `SKILL.md` loads on every
+# `/analyze-service` invocation and was 17,476 bytes; the resolver rules and the
+# entry schema are detail that a recon run does not need in context, so both
+# HASHED BLOCKS moved INTACT into `reference/index-store.md` (which ships — every
+# file under `claude/skills/<name>/` becomes a store symlink under
+# `~/.claude/skills/<name>/`, `reference/` included).
+#
+# The move is PROVEN INTACT by the hashes below being UNCHANGED: a block that
+# had been reflowed, re-indented or edited in transit could not reproduce them.
+# That is the strongest available evidence that this was a move and not a
+# rewrite, and it is why the shas are not touched in the same commit as the move.
+STORE_DOC = (ROOT / "claude" / "skills" / "analyze-service"
+             / "reference" / "index-store.md")
+WRITEBACK_DOC = (ROOT / "claude" / "skills" / "analyze-service"
+                 / "reference" / "write-back.md")
+
 sys.path.insert(0, str(ROOT / "scripts" / "lib"))
+sys.path.insert(0, str(ROOT / "scripts"))
+
+from testlib.skills_mapping import (  # noqa: E402
+    assert_skills_mapping_declared,
+)
 
 import subsystem_resolver as sr  # noqa: E402
 
@@ -151,7 +174,7 @@ ENTRIES: list[dict[str, object]] = [
         "filename": "bar-status-poll.md",
     },
     # 7 + 8. THE DELIBERATE AMBIGUITY, in a different scope so it cannot
-    #    contaminate the tests above. `analyze-service/SKILL.md`'s own example:
+    #    contaminate the tests above. The store reference doc's own example:
     #    `repo-cos.md` vs `repo-cos.process.md`.
     {
         "service": "repo-cos",
@@ -182,8 +205,10 @@ def index() -> sr.SubsystemIndex:
 
 @pytest.fixture(scope="module")
 def doc() -> str:
-    """The skill doc, read once — the other half of the one-predicate pair."""
-    return SKILL_DOC.read_text(encoding="utf-8")
+    """The STORE reference doc, read once — the other half of the one-predicate
+    pair. It was `SKILL.md` until the resolver rules and entry schema were
+    demoted out of the always-loaded body; see `STORE_DOC`."""
+    return STORE_DOC.read_text(encoding="utf-8")
 
 
 # =============================================================================
@@ -1501,7 +1526,8 @@ class TestFrontMatterParser:
 
 
 class TestCommandDocIsPinned:
-    """`claude/skills/analyze-service/SKILL.md` states these rules in prose because
+    """`claude/skills/analyze-service/reference/index-store.md` states these rules in
+    prose because
     its reader is an LLM. This module states them in Python. That is one
     predicate at two sites, which `claude/RULES.md` says regenerates the same bug
     at both — and here the drift is SILENT (a ref stops resolving, and the miss
@@ -1621,8 +1647,16 @@ class TestCommandDocIsPinned:
         ),
         (
             "entry-schema",
-            "f318b88f1712615c1711f411b34ff9d0672bee734cac62c2edcadd04e5f96f57",
-            "SubsystemEntry.from_mapping / load_index",
+            # Re-pinned when `created_by:` was added to the front-matter schema
+            # (the `/handoff` writer). Read against the code before updating, as
+            # the failure message demands: `from_mapping` does not read the new
+            # field and must not — it is PROVENANCE, not identity, and an entry
+            # is addressable without it. `parse_front_matter` preserves it (it
+            # preserves unknown keys), `from_mapping` ignores it, and
+            # `subsystem_touch.census` is what reads it. The behavioural half of
+            # that claim is `test_subsystem_touch.py::TestEntrySchemaAgreement`.
+            "66ff2115bf38226e8419abee5dc77d6dd8ff9903e0834f869e6c52e7c54f783c",
+            "SubsystemEntry.from_mapping / load_index (+ subsystem_touch.census for created_by)",
         ),
     ]
 
@@ -1631,7 +1665,8 @@ class TestCommandDocIsPinned:
     )
     def test_sentence_still_present(self, doc: str, sentence: str, why: str) -> None:
         assert sentence in doc, (
-            f"analyze-service/SKILL.md no longer contains the sentence pinning {why}.\n"
+            f"analyze-service/reference/index-store.md no longer contains the sentence\n"
+            f"pinning {why}.\n"
             f"  missing: {sentence!r}\n"
             f"  Either restore it, or change scripts/lib/subsystem_resolver.py in the SAME\n"
             f"  commit and update this pin. The two are one predicate at two sites; the\n"
@@ -1656,10 +1691,10 @@ class TestCommandDocIsPinned:
         begin = f"<!-- {name}:begin"
         end = f"<!-- {name}:end"
         i = doc.find(begin)
-        assert i != -1, f"marker {begin!r} is missing from analyze-service/SKILL.md"
+        assert i != -1, f"marker {begin!r} is missing from analyze-service/reference/index-store.md"
         i = doc.index("-->", i) + len("-->")
         j = doc.find(end, i)
-        assert j != -1, f"marker {end!r} is missing from analyze-service/SKILL.md"
+        assert j != -1, f"marker {end!r} is missing from analyze-service/reference/index-store.md"
         body = doc[i:j].strip()
         assert body, f"region {name!r} is EMPTY — the hash would guard nothing"
         return body
@@ -1674,7 +1709,8 @@ class TestCommandDocIsPinned:
     ) -> None:
         actual = hashlib.sha256(self._region(doc, name).encode("utf-8")).hexdigest()
         assert actual == expected_sha, (
-            f"\nThe `{name}` block of claude/skills/analyze-service/SKILL.md CHANGED.\n"
+            f"\nThe `{name}` block of claude/skills/analyze-service/reference/index-store.md\n"
+            f"CHANGED.\n"
             f"  expected sha256 {expected_sha}\n"
             f"  actual   sha256 {actual}\n\n"
             f"This is not a formatting nit. That block is the PROSE HALF of a\n"
@@ -1705,7 +1741,7 @@ class TestCommandDocIsPinned:
         never silently hash the empty string."""
         with pytest.raises(AssertionError) as exc:
             self._region("no markers here at all\n", "resolver-rules")
-        assert "is missing from analyze-service/SKILL.md" in str(exc.value)
+        assert "is missing from analyze-service/reference/index-store.md" in str(exc.value)
 
     def test_an_empty_region_fails_loudly(self) -> None:
         with pytest.raises(AssertionError) as exc:
@@ -1720,7 +1756,7 @@ class TestCommandDocIsPinned:
 
         Without this, a `in doc` check against a doc that happened to contain
         everything is indistinguishable from a check pointed at the wrong file."""
-        sentinel = "a sentence that is deliberately not in analyze-service/SKILL.md"
+        sentinel = "a sentence deliberately absent from analyze-service/reference/index-store.md"
         assert sentinel not in doc
 
     def test_the_doc_path_is_the_deployed_one(self) -> None:
@@ -1731,27 +1767,44 @@ class TestCommandDocIsPinned:
         load-bearing half is the `nix/home.nix` check: it is what makes this a
         claim about DEPLOYMENT rather than about this file's own spelling.
 
-        This test earned its keep — it is what went red when the commands→skills
-        migration moved the doc out from under a pin written against the old
-        `claude/commands/analyze-service.md` path.
+        This test earned its keep TWICE — it is what went red when the
+        commands→skills migration moved the doc out from under a pin written
+        against the old `claude/commands/analyze-service.md` path, and again when
+        the resolver rules were demoted from `SKILL.md` into `reference/`.
         """
         assert SKILL_DOC.exists(), f"the pinned doc is gone: {SKILL_DOC}"
         assert SKILL_DOC.name == "SKILL.md"
         assert SKILL_DOC.parent.name == "analyze-service"
         assert SKILL_DOC.parent.parent.name == "skills"
 
+        assert STORE_DOC.exists(), f"the pinned store doc is gone: {STORE_DOC}"
+        assert STORE_DOC.parent.name == "reference"
+        assert STORE_DOC.parent.parent == SKILL_DOC.parent
+
         # The non-tautological half: nix must actually deploy the directory this
         # pin lives under. A pin under a directory home-manager does not ship is
         # precisely the vacuous green this test exists to prevent.
-        home_nix = (ROOT / "nix" / "home.nix").read_text(encoding="utf-8")
-        assert 'home.file.".claude/skills"' in home_nix, (
-            "nix/home.nix no longer declares the ~/.claude/skills mapping, so the "
-            "doc this module pins may not ship at all."
-        )
-        assert "source = ../claude/skills;" in home_nix, (
-            "nix/home.nix's ~/.claude/skills mapping no longer sources "
-            "devrc/claude/skills, so SKILL_DOC is not the deployed file."
-        )
+        # One shared predicate (testlib/skills_mapping.py), and a deliberately
+        # narrow one: the mapping is declared and not switched off. Whether its
+        # source resolves to this tree is ship.sh/drift-check.sh's job.
+        assert_skills_mapping_declared(ROOT / "nix" / "home.nix")
+
+    def test_the_demoted_reference_is_REACHABLE_from_the_skill_body(self) -> None:
+        """🔴 A reference nobody is told to open is a deletion with extra steps.
+
+        Demoting prose out of an always-loaded body only works if the body still
+        ROUTES to it — otherwise the rules are technically shipped and
+        operationally gone, which is strictly worse than the bloat it replaced.
+        So the skill body must name both reference files by path.
+        """
+        body = SKILL_DOC.read_text(encoding="utf-8")
+        for ref in (STORE_DOC, WRITEBACK_DOC):
+            rel = f"reference/{ref.name}"
+            assert rel in body, (
+                f"{SKILL_DOC.name} does not point at {rel}. The prose moved there is "
+                f"then unreachable: nothing loads a reference file it was not sent to."
+            )
+            assert ref.exists(), f"the skill body points at a missing file: {rel}"
 
     # --- the behavioural half: what each sentence ASSERTS ---------------------
 
@@ -2100,3 +2153,933 @@ class TestMutationKillMatrix:
         with pytest.raises(mod.UnknownScopeError):
             mod.associate_paths(["a/b"], idx, "not-a-scope")
         assert mod.associate_paths([], idx, SCOPE_A).considered_paths == ()
+
+
+# =============================================================================
+# Entry markdown shape — the ONE parser both readers share.
+#
+# `extract_sections` and its two mutation kills MOVED here from
+# test_subsystem_recall.py when the parser itself moved down into this module:
+# `subsystem_touch` has to show a `/handoff` what an entry ALREADY records
+# before proposing an append, `subsystem_recall` already imports
+# `subsystem_touch`, and a copy in the writer would be a second parser free to
+# drift from the one measured against the real corpus.
+#
+# `parse_journal_bullets` is new here for the same reason.
+#
+# 🔴 EVERY FIXTURE BELOW IS SYNTHETIC. This repo is PUBLIC and the real store is
+# client-confidential; the SHAPES are measured from the live corpus (2026-08-12,
+# read-only: 26 entries, 110 top-level bullets all at indent 0, 250 continuation
+# lines all at indent 2, 62 bullets dated and 48 not, longest bullet 19 lines),
+# the CONTENT is invented.
+# =============================================================================
+
+HEADINGS = (sr.POINTERS_HEADING, sr.NUANCE_HEADING)
+
+# A body in the shape the corpus actually has: wrapped multi-line prose, with a
+# mixture of dated and undated bullets. NOT one-liners.
+WRAPPED_BODY = (
+    "- 2026-03-04: the retry budget is per-batch, not per-item, so a batch of\n"
+    "  400 with one poison record burns the whole budget and the other 399 are\n"
+    "  never attempted.\n"
+    "- an undated note, of the kind 48 of the corpus's 110 bullets are,\n"
+    "  and which must still be parsed and shown\n"
+    "- 2026-02-11: the flush interval is a floor, not a schedule.\n"
+)
+
+
+class TestEntryMarkdownShape:
+    """Section extraction. The parser is unchanged by the move; these are the
+    behaviours it was verified with, re-homed with it."""
+
+    def test_a_heading_inside_a_fence_does_not_end_the_section(self) -> None:
+        """🔴 Otherwise HALF an entry's nuance is surfaced while the output looks
+        like a complete read — a silent under-report."""
+        text = (
+            "## Pointers\n- p\n\n"
+            "## Nuance / work-history\n"
+            "- 2026-01-01: run this:\n```\n## not a heading\n```\n"
+            "- 2026-01-02: the SECOND bullet, after the fence\n"
+        )
+        got = sr.extract_sections(text, HEADINGS)
+        assert "the SECOND bullet, after the fence" in got[sr.NUANCE_HEADING]
+
+    def test_a_present_but_EMPTY_section_is_present_not_absent(self) -> None:
+        mid = sr.extract_sections("## Pointers\n\n## Nuance / work-history\n- x\n", HEADINGS)
+        assert sr.POINTERS_HEADING in mid and mid[sr.POINTERS_HEADING] == ""
+        end = sr.extract_sections("## Nuance / work-history\n- x\n\n## Pointers\n", HEADINGS)
+        assert sr.POINTERS_HEADING in end and end[sr.POINTERS_HEADING] == ""
+
+    def test_an_absent_section_is_absent(self) -> None:
+        assert sr.NUANCE_HEADING not in sr.extract_sections("## Pointers\n- p\n", HEADINGS)
+
+
+class TestScanHeadings:
+    """The heading INVENTORY — what `extract_sections` structurally cannot say.
+
+    `extract_sections` answers only about the headings it was asked for, so
+    "this entry has no `## Pointers`" and "the writer typed `## pointers`" are
+    the same answer there, and a heading written twice is merged before anyone
+    could see it. `scan_headings` is the other view over the same walker, and
+    it is what `subsystem_touch --validate`'s shape advisory is built on.
+    """
+
+    def test_POSITIVE_CONTROL_a_real_shaped_entry_yields_its_headings(self) -> None:
+        """A zero from this is only a reading once it has been watched to find
+        something — the same pairing `TestJournalBullets` opens with."""
+        got = sr.scan_headings(
+            "# alpha-unit\n\n## What it is\nprose\n\n## Pointers\n- p\n"
+            "\n## Nuance / work-history\n- n\n\n### A sub-heading\n"
+        )
+        assert got == (
+            "# alpha-unit",
+            "## What it is",
+            "## Pointers",
+            "## Nuance / work-history",
+            "### A sub-heading",
+        )
+
+    def test_NEGATIVE_PAIR_a_body_with_no_headings_yields_none(self) -> None:
+        assert sr.scan_headings("just prose\nand more prose\n") == ()
+        assert sr.scan_headings("") == ()
+
+    def test_a_REPEATED_heading_appears_ONCE_PER_OCCURRENCE(self) -> None:
+        """🔴 The only reason duplicate detection is possible at all. This
+        function is the sole surface on which a duplicate is still visible —
+        `extract_sections` concatenates the two blocks under one key and drops
+        whatever sat between them, silently."""
+        text = "## Pointers\n- a\n\n## Nuance / work-history\n- mid\n\n## Pointers\n- b\n"
+        assert sr.scan_headings(text).count(sr.POINTERS_HEADING) == 2
+        merged = sr.extract_sections(text, HEADINGS)
+        assert "- a" in merged[sr.POINTERS_HEADING]
+        assert "- b" in merged[sr.POINTERS_HEADING]
+        assert "- mid" not in merged[sr.POINTERS_HEADING]
+
+    def test_a_heading_inside_a_FENCE_is_not_a_heading(self) -> None:
+        """The RELATIONSHIP, not the component: the two views over the walker
+        must agree about what a heading IS. If `scan_headings` counted a fenced
+        `#` the validator would report a section that ends nowhere, while
+        `extract_sections` — reading the same file — would report it intact."""
+        text = (
+            "## Nuance / work-history\n- 2026-01-01: run this:\n"
+            "```\n## not a heading\n```\n- 2026-01-02: after the fence\n"
+        )
+        assert sr.scan_headings(text) == (sr.NUANCE_HEADING,)
+        assert "after the fence" in sr.extract_sections(text, HEADINGS)[sr.NUANCE_HEADING]
+
+    def test_a_hash_that_is_NOT_at_column_zero_is_not_a_heading(self) -> None:
+        """Same rule `extract_sections` matches on, stated where a reader of the
+        inventory will look for it. An indented `#` is a list continuation."""
+        assert sr.scan_headings("  ## indented\n\t## tabbed\n") == ()
+
+    def test_headings_are_VERBATIM_and_UNNORMALIZED(self) -> None:
+        """The caller reporting a near-miss has to print what the writer
+        actually typed. A folded form would turn "you wrote `## pointers`" back
+        into "the section is absent", which is the finding it exists to replace.
+        """
+        got = sr.scan_headings("##Pointers\n\n## Pointers:\n\n##  POINTERS  \n")
+        assert got == ("##Pointers", "## Pointers:", "##  POINTERS")
+
+    def test_the_two_views_never_disagree_about_a_heading_they_BOTH_see(self) -> None:
+        """One parser, pinned as a relationship. Every heading `extract_sections`
+        returns a body for must appear in the inventory, and the inventory must
+        contain no requested heading `extract_sections` called absent — the
+        disagreement `--validate` would render as "the section is absent"
+        directly beside "the heading is right there"."""
+        text = (
+            "---\nservice: alpha-unit\n---\n\n## What it is\nprose\n\n"
+            "## Pointers\n- p\n\n## Nuance / work-history\n```\n## fenced\n```\n- n\n"
+        )
+        inventory = sr.scan_headings(text)
+        sections = sr.extract_sections(text, HEADINGS)
+        for h in HEADINGS:
+            assert (h in sections) == (h in inventory), h
+
+
+class TestJournalBullets:
+    """🔴 THE POSITIVE CONTROL COMES FIRST, and its pair with it. An empty
+    result is indistinguishable from a parser wired to nothing, so "it found
+    nothing" is only a reading once this same parser has been watched to find
+    something."""
+
+    def test_POSITIVE_CONTROL_a_real_shaped_body_yields_its_bullets(self) -> None:
+        got = sr.parse_journal_bullets(WRAPPED_BODY)
+        assert len(got) == 3, "the parser observed no bullets in a body that has three"
+        assert [b.date for b in got] == ["2026-03-04", None, "2026-02-11"]
+
+    def test_NEGATIVE_PAIR_an_empty_body_yields_none(self) -> None:
+        """Reported WITH the count above: 3 under test, 0 on the empty body. A
+        bare 0 from a parser never shown to produce non-zero is not evidence."""
+        assert sr.parse_journal_bullets("") == ()
+        assert sr.parse_journal_bullets("\n\n") == ()
+
+    def test_a_bullet_keeps_its_CONTINUATION_LINES_verbatim(self) -> None:
+        """🔴 The corpus is wrapped prose — 110 bullets carry 250 continuation
+        lines between them. A parser that took one line per bullet would truncate
+        most real entries, and a truncated bullet is one an agent cannot
+        recognize as a near-duplicate of the line it is about to write."""
+        first = sr.parse_journal_bullets(WRAPPED_BODY)[0]
+        assert len(first.lines) == 3
+        assert first.lines[1] == (
+            "  400 with one poison record burns the whole budget and the other 399 are"
+        )
+        assert first.text.endswith("never attempted.")
+
+    def test_an_INDENTED_dash_is_a_continuation_not_a_new_bullet(self) -> None:
+        """Measured: every one of the corpus's 110 bullets is at indent 0 and
+        every one of its 250 continuation lines is at indent 2. Folding them
+        together would split one bullet into several and report a longer history
+        than the entry has."""
+        got = sr.parse_journal_bullets("- 2026-01-01: parent\n  - nested item\n  - another\n")
+        assert len(got) == 1
+        assert len(got[0].lines) == 3
+
+    def test_a_dash_inside_a_FENCE_is_not_a_bullet(self) -> None:
+        got = sr.parse_journal_bullets(
+            "- 2026-01-01: run:\n```\n- not-a-bullet\n```\n- 2026-01-02: b\n"
+        )
+        assert len(got) == 2
+        assert "- not-a-bullet" in got[0].text
+
+    def test_an_UNDATED_bullet_is_an_ordinary_reading_not_a_failure(self) -> None:
+        """44% of the real corpus. A parser that required a date would drop them
+        on the floor and call the result a complete read."""
+        got = sr.parse_journal_bullets("- no date here at all\n")
+        assert len(got) == 1 and got[0].date is None
+
+    def test_a_SHAPED_but_IMPOSSIBLE_date_is_rejected(self) -> None:
+        """`2026-13-45` matches the shape and is not a date. Returning it would
+        put a nonexistent day into a recency claim and into arithmetic on it."""
+        assert sr.parse_journal_bullets("- 2026-13-45: x\n")[0].date is None
+        assert sr.parse_journal_bullets("- 2026-02-30: x\n")[0].date is None
+
+    def test_a_date_must_START_the_bullet(self) -> None:
+        assert sr.parse_journal_bullets("- fixed on 2026-01-01 by hand\n")[0].date is None
+
+    def test_asterisk_bullets_parse_too(self) -> None:
+        got = sr.parse_journal_bullets("* 2026-01-01: a\n* 2026-01-02: b\n")
+        assert [b.date for b in got] == ["2026-01-01", "2026-01-02"]
+
+    def test_trailing_blank_lines_do_not_inflate_a_bullet(self) -> None:
+        got = sr.parse_journal_bullets("- 2026-01-01: a\n\n\n- 2026-01-02: b\n")
+        assert [len(b.lines) for b in got] == [1, 1]
+
+    def test_text_BEFORE_the_first_bullet_yields_no_bullet(self) -> None:
+        """Its own state for the caller to report — `subsystem_touch` renders it
+        as `unbulleted`, never as an empty history."""
+        assert sr.parse_journal_bullets("some prose the schema does not allow\n") == ()
+
+    def test_ORDER_IS_PRESERVED_and_no_recency_is_claimed(self) -> None:
+        """This function makes no newest-first claim; recency is derived from the
+        DATES by the caller, because newest-first is a convention a past appender
+        can have broken."""
+        got = sr.parse_journal_bullets("- 2026-01-01: old first\n- 2026-09-09: new second\n")
+        assert [b.date for b in got] == ["2026-01-01", "2026-09-09"]
+
+
+class TestEntryMarkdownMutationKills:
+    """One kill per guard in the shared parser. Two came from
+    test_subsystem_recall.py with the code; the rest are new."""
+
+    def test_kills_the_section_fence_skip(self, tmp_path: Path) -> None:
+        """Relocated. Without it a `#` inside a fence ends the section early —
+        HALF an entry's nuance, looking exactly like a complete read.
+
+        🔴 THE ANCHOR MOVED, and the anchor-uniqueness assert is what said so.
+        When `extract_sections`' inline walker became `_heading_blocks` — one
+        parser, two views — this mutant's old anchor stopped existing and the
+        test went RED with `mutation anchor occurs 0x` rather than quietly
+        passing. That is the harness working: a mutation kill re-anchored by
+        hand is a kill; one that silently stops applying is a coverage claim
+        with nothing behind it.
+        """
+        mod = _load_mutant(
+            tmp_path,
+            "m_sec_fence",
+            [(
+                "        if _is_fence(line):\n            in_fence = not in_fence\n"
+                "            blocks[-1][1].append(line)",
+                "        if False:\n            in_fence = not in_fence\n"
+                "            blocks[-1][1].append(line)",
+            )],
+        )
+        text = "## Nuance / work-history\n- a\n```\n## not a heading\n```\n- the SECOND bullet\n"
+        got = mod.extract_sections(text, HEADINGS)
+        assert "the SECOND bullet" not in got.get(sr.NUANCE_HEADING, "")
+
+    def test_kills_the_present_but_empty_tracking(self, tmp_path: Path) -> None:
+        """Relocated, then re-anchored onto `_heading_blocks`. Without it
+        presence is derived from content, so an empty section mid-file reads
+        ABSENT while the same section at EOF reads present — two answers to one
+        question."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_seen",
+            [("        seen.add(heading)\n        wanted[heading].extend(body)",
+              "        wanted[heading].extend(body)")],
+        )
+        got = mod.extract_sections(
+            "## Pointers\n- p\n## Nuance / work-history\n- n\n", HEADINGS
+        )
+        assert got == {}, "the presence tracking was not what produced the keys"
+
+    def test_kills_the_heading_REPEAT_that_makes_duplicates_visible(
+        self, tmp_path: Path
+    ) -> None:
+        """🔴 `scan_headings` keeping repeats is load-bearing, not incidental.
+
+        `extract_sections` MERGES a duplicated heading, so it is structurally
+        unable to report one; `subsystem_touch --validate`'s DUPLICATED finding
+        exists only because this walker emits a separate block per occurrence.
+        The mutant de-duplicates — the shape a reasonable refactor would reach
+        for — and the duplicate becomes invisible while `extract_sections` keeps
+        working, i.e. green everywhere except the one caller that needed it.
+        """
+        mod = _load_mutant(
+            tmp_path,
+            "m_repeat",
+            [("    return tuple(h for h, _ in _heading_blocks(text) if h is not None)",
+              "    return tuple(dict.fromkeys("
+              "h for h, _ in _heading_blocks(text) if h is not None))")],
+        )
+        text = "## Pointers\n- a\n\n## Pointers\n- b\n"
+        assert sr.scan_headings(text).count(sr.POINTERS_HEADING) == 2
+        assert mod.scan_headings(text).count(sr.POINTERS_HEADING) == 1, (
+            "the mutant must collapse the repeat this finding is built on"
+        )
+
+    def test_kills_the_bullet_fence_skip(self, tmp_path: Path) -> None:
+        """Without it a `- ` line inside a fence is promoted to a bullet and the
+        display invents history the entry does not have."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_bul_fence",
+            [(
+                "        if _is_fence(line):\n            in_fence = not in_fence\n"
+                "            if bullets:",
+                "        if False:\n            in_fence = not in_fence\n"
+                "            if bullets:",
+            )],
+        )
+        got = mod.parse_journal_bullets("- 2026-01-01: run:\n```\n- not-a-bullet\n```\n")
+        assert len(got) != 1, "the fence skip was not what kept the sample line out"
+
+    def test_kills_the_column_zero_bullet_rule(self, tmp_path: Path) -> None:
+        """Without it an indented continuation becomes its own bullet, and one
+        wrapped bullet is reported as three."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_col0",
+            [('_JOURNAL_BULLET = re.compile(r"^[-*][ \\t]+")',
+              '_JOURNAL_BULLET = re.compile(r"^\\s*[-*][ \\t]+")')],
+        )
+        got = mod.parse_journal_bullets("- 2026-01-01: parent\n  - nested item\n  - another\n")
+        assert len(got) != 1, "the column-0 rule was not what grouped the nested lines"
+
+    def test_kills_the_date_VALIDATION(self, tmp_path: Path) -> None:
+        """Without it a shaped-but-impossible date is returned as real, and every
+        recency claim built on it is arithmetic on a day that does not exist."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_date_valid",
+            [("        _date.fromisoformat(m.group(1))", "        pass")],
+        )
+        assert mod.parse_journal_bullets("- 2026-13-45: x\n")[0].date == "2026-13-45"
+
+    def test_kills_the_trailing_blank_strip(self, tmp_path: Path) -> None:
+        """Without it a blank separator inflates the preceding bullet's line
+        count, so the per-bullet display cap spends its budget on blanks."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_blank_strip",
+            [("        while group and not group[-1].strip():", "        while False:")],
+        )
+        got = mod.parse_journal_bullets("- 2026-01-01: a\n\n\n- 2026-01-02: b\n")
+        assert len(got[0].lines) != 1
+
+    def test_the_harness_produces_a_WORKING_mutant_for_these_anchors(
+        self, tmp_path: Path
+    ) -> None:
+        """Positive control on the harness for THIS section: with a no-op
+        replacement the mutant must parse exactly as the real module does."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_shape_noop",
+            [('POINTERS_HEADING = "## Pointers"', 'POINTERS_HEADING = "## Pointers"  # noqa')],
+        )
+        assert [b.date for b in mod.parse_journal_bullets(WRAPPED_BODY)] == [
+            "2026-03-04",
+            None,
+            "2026-02-11",
+        ]
+
+
+# =============================================================================
+# DEGRADING: one bad entry must not cost the whole scope.
+# =============================================================================
+#
+# 🔴 THE MEASUREMENT THAT FORCED THIS. Before the change, on a synthetic store:
+#
+#     2 good entries          -> rc=0, both listed
+#     2 good + 1 malformed    -> rc=3, good entries still listed: 0
+#
+# One `aliases:` list wrapped across two physical lines took `/resume` step 4,
+# `--list`, `--ref` and `--search` down together. `RAISE` stays the default so
+# every existing caller keeps its contract; `COLLECT` is what the READER opts
+# into, and its obligation is to REPORT — a silent skip would be strictly worse
+# than the collapse, because a dropped entry is indistinguishable from one that
+# was never written.
+
+# THE EXACT DEFECT, in shape: a flow list broken over two physical lines. The
+# front-matter parser is LINE-BASED, so line 1 is an unterminated `[` and reads
+# as a bare string. Synthetic names only — the live store is
+# client-confidential and this repo is PUBLIC.
+WRAPPED_ALIASES_ENTRY = (
+    "---\n"
+    "service: widget-index\n"
+    "scope: synth-scope\n"
+    "aliases: [widget_touch, widget_recall, widget_resolver,\n"
+    "          test_widget_touch, test_widget_recall]\n"
+    "---\n"
+    "\n"
+    "## What it is\n"
+    "The entry whose front matter the writer wrapped.\n"
+)
+
+GOOD_A = "---\nservice: alpha-unit\nscope: synth-scope\n---\n\n## What it is\nOne.\n"
+GOOD_B = "---\nservice: beta-unit\nscope: synth-scope\n---\n\n## What it is\nTwo.\n"
+
+
+def _synth_store(root: Path, files: dict, scope: str = "synth-scope") -> Path:
+    store = root / "store"
+    (store / scope).mkdir(parents=True)
+    for name, body in files.items():
+        (store / scope / name).write_text(body, encoding="utf-8")
+    return store
+
+
+class TestWrappedAliasesIsTheDefect:
+    """The reported defect, pinned as a fixture rather than described in prose."""
+
+    def test_the_wrapped_list_is_REJECTED_with_the_reported_message(
+        self, tmp_path: Path
+    ) -> None:
+        """The exact sentence the live tool printed. This pins the DIAGNOSIS: if
+        the parser ever learns multi-line flow lists, this is the test that must
+        be revisited deliberately rather than relaxed in passing."""
+        store = _synth_store(tmp_path, {"widget-index.md": WRAPPED_ALIASES_ENTRY})
+        with pytest.raises(sr.MalformedEntryError) as exc:
+            sr.load_index(store)
+        assert "`aliases:` must be a list, not a bare string" in str(exc.value)
+        assert "widget-index.md" in str(exc.value)
+
+    def test_the_WRAP_is_what_breaks_it(self, tmp_path: Path) -> None:
+        """🔴 THE CONTROL THAT MAKES THE FIXTURE A MEASUREMENT. The same aliases
+        on ONE line parse fine — so the fixture above fails because of the wrap,
+        not because of the names, the count or the underscores in it. Without
+        this, a fixture broken for an unrelated reason would look like a faithful
+        reproduction of the reported bug."""
+        one_line = WRAPPED_ALIASES_ENTRY.replace(
+            "aliases: [widget_touch, widget_recall, widget_resolver,\n"
+            "          test_widget_touch, test_widget_recall]\n",
+            "aliases: [widget_touch, widget_recall, widget_resolver, "
+            "test_widget_touch, test_widget_recall]\n",
+        )
+        store = _synth_store(tmp_path, {"widget-index.md": one_line})
+        loaded = sr.load_index(store)  # must not raise
+        entry = sr.resolve_ref("test-widget-recall", loaded, "synth-scope")
+        assert entry is not None and entry.filename == "widget-index.md"
+
+
+class TestCollectDegrades:
+    def test_two_good_and_one_bad_still_serve_the_two(self, tmp_path: Path) -> None:
+        """The blast-radius measurement, as an assertion. `RAISE` serves 0."""
+        store = _synth_store(
+            tmp_path,
+            {
+                "alpha-unit.md": GOOD_A,
+                "beta-unit.md": GOOD_B,
+                "widget-index.md": WRAPPED_ALIASES_ENTRY,
+            },
+        )
+        with pytest.raises(sr.MalformedEntryError):
+            sr.load_index(store)  # the OLD behaviour, still the default
+
+        loaded = sr.load_index(store, on_malformed=sr.ON_MALFORMED_COLLECT)
+        assert sorted(e.ref for e in loaded.entries("synth-scope")) == [
+            "alpha-unit",
+            "beta-unit",
+        ]
+        assert [m.filename for m in loaded.malformed] == ["widget-index.md"]
+        assert loaded.malformed[0].scope == "synth-scope"
+        assert "aliases:" in loaded.malformed[0].reason
+
+    def test_the_reject_is_NOT_counted_as_an_entry(self, tmp_path: Path) -> None:
+        """🔴 A collected reject must not leak into the entry count anywhere — an
+        index that said "3" and held 2 would be the silent short index this mode
+        exists to prevent, wearing a number."""
+        store = _synth_store(
+            tmp_path,
+            {
+                "alpha-unit.md": GOOD_A,
+                "beta-unit.md": GOOD_B,
+                "widget-index.md": WRAPPED_ALIASES_ENTRY,
+            },
+        )
+        loaded = sr.load_index(store, on_malformed=sr.ON_MALFORMED_COLLECT)
+        assert len(loaded) == 2
+
+    def test_a_scope_of_ONLY_rejects_still_EXISTS(self, tmp_path: Path) -> None:
+        """🔴 THE DISCRIMINATOR. If the scope went unregistered, a reader would
+        answer `UnknownScopeError` -> "nothing recorded yet" about a directory
+        full of content it merely could not parse."""
+        store = _synth_store(tmp_path, {"widget-index.md": WRAPPED_ALIASES_ENTRY})
+        loaded = sr.load_index(store, on_malformed=sr.ON_MALFORMED_COLLECT)
+        assert loaded.scopes == ("synth-scope",)
+        assert loaded.entries("synth-scope") == ()  # not a raise
+        assert len(loaded.malformed_in("synth-scope")) == 1
+
+    def test_build_index_registers_a_reject_scope_without_a_disk_load(self) -> None:
+        """The same guard reached through `build_index` directly, where
+        `extra_scopes` is not quietly doing the work. Two code paths; the test
+        above covers only one."""
+        idx = sr.build_index(
+            [{"service": "", "scope": "synth-scope", "filename": "x.md"}],
+            on_malformed=sr.ON_MALFORMED_COLLECT,
+        )
+        assert idx.scopes == ("synth-scope",)
+        assert idx.entries("synth-scope") == ()
+
+    def test_a_reject_is_attributed_to_ITS_OWN_scope(self, tmp_path: Path) -> None:
+        """A broken entry in one scope must not make another look broken."""
+        store = _synth_store(tmp_path, {"alpha-unit.md": GOOD_A})
+        (store / "other-scope").mkdir()
+        (store / "other-scope" / "widget-index.md").write_text(
+            WRAPPED_ALIASES_ENTRY.replace("scope: synth-scope", "scope: other-scope"),
+            encoding="utf-8",
+        )
+        loaded = sr.load_index(store, on_malformed=sr.ON_MALFORMED_COLLECT)
+        assert loaded.malformed_in("synth-scope") == ()
+        assert [m.filename for m in loaded.malformed_in("other-scope")] == [
+            "widget-index.md"
+        ]
+        assert [m.scope for m in loaded.malformed_outside(("synth-scope",))] == [
+            "other-scope"
+        ]
+        assert loaded.malformed_outside(("synth-scope", "other-scope")) == ()
+
+    def test_a_DUPLICATE_ref_is_collected_too_and_the_FIRST_still_serves(
+        self, tmp_path: Path
+    ) -> None:
+        """🔴 THE SECOND REJECTION SITE. It lives in `build_index`, not in
+        `from_mapping`, so collecting only the first would leave `COLLECT` able
+        to raise — a mode a caller cannot defend against because it looks
+        handled."""
+        store = _synth_store(
+            tmp_path,
+            {
+                # Two spellings of ONE slug. The filename must agree with
+                # `service:`, so a collision can only be built out of two names
+                # that NORMALIZE together — `_` folds to `-`.
+                "alpha-unit.md": GOOD_A,
+                "alpha_unit.md": "---\nservice: alpha_unit\nscope: synth-scope\n---\n",
+            },
+        )
+        loaded = sr.load_index(store, on_malformed=sr.ON_MALFORMED_COLLECT)
+        assert [e.filename for e in loaded.entries("synth-scope")] == ["alpha-unit.md"]
+        assert [m.filename for m in loaded.malformed] == ["alpha_unit.md"]
+        assert "duplicate" in loaded.malformed[0].reason
+
+    def test_an_unknown_on_malformed_value_is_REFUSED(self) -> None:
+        """Not silently treated as `raise`: a typo'd policy that quietly picks
+        fail-closed is a caller believing it degrades when it does not."""
+        with pytest.raises(ValueError) as exc:
+            sr.build_index([], on_malformed="skip")
+        assert "on_malformed must be one of" in str(exc.value)
+
+    def test_the_default_is_still_RAISE(self, tmp_path: Path) -> None:
+        """An INVARIANT GUARD, labelled as one: it pins that no existing caller's
+        contract moved. It is NOT regression coverage for the reported bug."""
+        store = _synth_store(
+            tmp_path, {"alpha-unit.md": GOOD_A, "widget-index.md": WRAPPED_ALIASES_ENTRY}
+        )
+        with pytest.raises(sr.MalformedEntryError):
+            sr.load_index(store)
+        with pytest.raises(sr.MalformedEntryError):
+            sr.build_index([{"service": "x", "scope": "s", "aliases": "not-a-list"}])
+
+    def test_an_OSError_still_fails_CLOSED_in_collect_mode(self, tmp_path: Path) -> None:
+        """🔴 THE LINE THE DEGRADATION STOPS AT, stated as a test. A malformed
+        entry is a file we READ and could not interpret; an unreadable one means
+        the store was not fully read, so the entry SET is unknown and there is
+        nothing honest to degrade to. Reached with a directory where a `.md`
+        belongs — an OSError any user hits, not a mode change a root-run sandbox
+        would silently bypass."""
+        store = _synth_store(tmp_path, {"alpha-unit.md": GOOD_A})
+        (store / "synth-scope" / "broken.md").mkdir()
+        with pytest.raises(OSError):
+            sr.load_index(store, on_malformed=sr.ON_MALFORMED_COLLECT)
+
+
+class TestMalformedEntryCarriesItsOwnFacts:
+    def test_the_row_carries_the_SENTINEL_and_the_label(self) -> None:
+        """A row is what gets copied into a report or grepped for; one that left
+        its header behind would no longer say what kind of problem it is."""
+        m = sr.MalformedEntry(scope="synth-scope", filename="x.md", reason="because")
+        assert m.label == "synth-scope/x.md"
+        assert m.line == "malformed index entry `synth-scope/x.md`: because"
+
+    def test_the_exception_carries_why_STRUCTURALLY(self) -> None:
+        """`.why` exists so a row is not assembled by re-splitting `str(exc)` on
+        `": "` — a second parser for a format nothing pins. `str(exc)` is
+        unchanged, so every existing `in`-assertion over it still holds."""
+        with pytest.raises(sr.MalformedEntryError) as exc:
+            sr.SubsystemEntry.from_mapping(
+                {"service": "x", "scope": "s", "aliases": "bare"}, source="x.md"
+            )
+        assert exc.value.source == "x.md"
+        assert exc.value.why == "`aliases:` must be a list, not a bare string"
+        assert str(exc.value).startswith("malformed index entry 'x.md': ")
+
+
+class TestEntryMappingIsShared:
+    """🔴 ONE RULE, ONE PLACE — the validator must not build its own mapping."""
+
+    def test_the_loader_builds_its_mapping_through_entry_mapping(self) -> None:
+        """STRUCTURAL: `load_index` must CALL the shared helper. A behavioural
+        test alone cannot tell "the loader uses it" from "the loader happens to
+        agree with it today", and agreement is exactly what drifts."""
+        src = MODULE_PATH.read_text(encoding="utf-8")
+        loader = src[src.index("def load_index("):]
+        assert "entry_mapping(" in loader, (
+            "load_index stopped going through entry_mapping — a validator that "
+            "reuses the helper is then checking a mapping the loader does not build"
+        )
+        for spelled_inline in ('fm["filename"] =', 'fm["scope"] ='):
+            assert spelled_inline not in loader, (
+                f"load_index re-spells {spelled_inline} instead of using entry_mapping"
+            )
+
+    def test_it_produces_exactly_what_the_loader_feeds_from_mapping(
+        self, tmp_path: Path
+    ) -> None:
+        """BEHAVIOURAL half: the mapping a caller builds for one file must be the
+        one the loader would have built for it."""
+        store = _synth_store(tmp_path, {"alpha-unit.md": GOOD_A})
+        path = store / "synth-scope" / "alpha-unit.md"
+        mapping = sr.entry_mapping(
+            path.read_text(encoding="utf-8"), filename="alpha-unit.md", scope="synth-scope"
+        )
+        built = sr.SubsystemEntry.from_mapping(mapping, source="alpha-unit.md")
+        assert built == sr.load_index(store).entries("synth-scope")[0]
+
+    def test_the_directory_beats_a_stale_scope_field(self) -> None:
+        """The one rule `entry_mapping` owns, exercised where it is now spelled."""
+        got = sr.entry_mapping(
+            "---\nservice: x\nscope: stale-name\nrepo: older-name\n---\n",
+            filename="x.md",
+            scope="the-dir",
+        )
+        assert got["scope"] == "the-dir"
+        assert "repo" not in got
+
+
+# =============================================================================
+# 🔴 MARKER REACHABILITY — the THIRD openness shape.
+#
+# REGRESSION COVERAGE, watched RED AT BASE: every test in the two classes below
+# fails at the base commit, where `JournalBullet.unreachable_markers` does not
+# exist. That AttributeError IS the pre-change behaviour — no surface in the
+# module reads past a bullet's opening line, which is the defect.
+# =============================================================================
+
+
+MARKER_SHAPES = json.loads(
+    (ROOT / "scripts" / "tests" / "fixtures" / "near_miss_shapes.json").read_text(
+        encoding="utf-8"
+    )
+)
+
+
+def _bullet_with_continuation(*continuation: str) -> sr.JournalBullet:
+    """One bullet whose OPENING line declares nothing, plus the given body lines.
+
+    The head line is deliberately inert prose: the finding under test is about
+    lines 2..n, so a head that declared anything would leave every result
+    ambiguous between the two mechanisms.
+    """
+    body = "- 2026-08-19: an ordinary head line with no marker on it\n" + "".join(
+        f"{c}\n" for c in continuation
+    )
+    (bullet,) = sr.parse_journal_bullets(body)
+    return bullet
+
+
+class TestMarkerReachability:
+    """🔴 A MARKER SPELLED CORRECTLY WHERE THE PARSER NEVER LOOKS.
+
+    Measured in the field 2026-08-20 (`claudedocs/handoff-subsystem-store.md`):
+    one bullet carried a second, correctly-spelled marker several lines into its
+    body. It showed on NO openness surface — not `OPEN`, not `NEAR-MISS` — and had
+    only ever raised a badge BY ACCIDENT through a broken `RESOLVED —` above it,
+    so repairing that broken line would have SILENCED a still-open action.
+
+    🔴 EVERY ARM IS A PAIR. A detector asserted only on its firing case is
+    indistinguishable from one that fires on everything, and this one runs over a
+    `## Nuance / work-history` section that is mostly ordinary prose.
+    """
+
+    # Pairwise distinct, and distinct from every literal any assertion names, so
+    # a mutant that hardcodes one of them cannot survive by coincidence.
+    NESTED_MARKER = "  - 2026-08-17: OPEN: rotate the credential in the other repo."
+    BARE_MARKER = "  OPEN: the sibling repo still points at the old bucket."
+
+    # --- the positive half ----------------------------------------------------
+
+    def test_THE_FIELD_SHAPE_a_nested_marker_several_lines_in_is_FOUND(self) -> None:
+        b = _bullet_with_continuation(
+            "  wrapped prose that says nothing about openness at all,",
+            "  and a second line of it,",
+            self.NESTED_MARKER,
+        )
+        (found,) = b.unreachable_markers
+        assert found.openness == sr.OPENNESS_OPEN
+        assert found.offset == 4, "the offset must be the line's place IN THE BULLET"
+        assert found.line == self.NESTED_MARKER, "quoted VERBATIM, indentation and all"
+
+    def test_a_marker_on_an_UNBULLETED_continuation_line_is_FOUND_too(self) -> None:
+        """Wrapped prose carries no `- `, so a scanner that only handled nested
+        list items would miss the commoner shape of the same defect."""
+        (found,) = _bullet_with_continuation(self.BARE_MARKER).unreachable_markers
+        assert found.openness == sr.OPENNESS_OPEN and found.offset == 2
+
+    def test_a_RESOLVED_marker_out_of_reach_carries_its_sha_normalised(self) -> None:
+        (found,) = _bullet_with_continuation(
+            "  RESOLVED B83BFB584: closed in the other repo."
+        ).unreachable_markers
+        assert found.openness == sr.OPENNESS_RESOLVED
+        assert found.resolved_by == "b83bfb584", "the same lower-casing the parser does"
+
+    def test_TWO_out_of_reach_markers_in_one_bullet_are_BOTH_reported(self) -> None:
+        got = _bullet_with_continuation(
+            self.BARE_MARKER, "  more prose here,", self.NESTED_MARKER
+        ).unreachable_markers
+        assert [m.offset for m in got] == [2, 4]
+
+    # --- the negative half, which is what makes the positive half mean anything -
+
+    def test_THE_NEGATIVE_CONTROL_a_normal_OPENING_line_marker_is_SILENT(self) -> None:
+        """🔴 The whole population this must not touch. A marker at a bullet's
+        head is REACHABLE by definition — reporting it would make the advisory
+        fire on every well-formed open action in the store."""
+        (b,) = sr.parse_journal_bullets(
+            "- 2026-08-18: OPEN: an ordinary, perfectly reachable declaration.\n"
+            "  with a continuation line under it.\n"
+        )
+        assert b.openness == sr.OPENNESS_OPEN
+        assert b.unreachable_markers == ()
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "  the open file limit is the constraint here, not the pool.",
+            "  we resolved the ticket last week and moved on.",
+            "  Open questions remain about the retry budget.",
+            "  OPENSSL_CONF must point at the vendored bundle.",
+            "  it is still OPEN to debate whether that was right.",
+        ],
+        ids=lambda s: s.strip()[:30],
+    )
+    def test_prose_that_merely_CONTAINS_the_word_is_SILENT(self, line: str) -> None:
+        assert _bullet_with_continuation(line).unreachable_markers == ()
+
+    def test_a_bullet_with_NO_continuation_lines_reports_nothing(self) -> None:
+        (b,) = sr.parse_journal_bullets("- 2026-08-18: a one-line bullet.\n")
+        assert b.unreachable_markers == ()
+
+    def test_a_marker_inside_a_FENCE_is_sample_text_not_a_declaration(self) -> None:
+        """The same rule `parse_journal_bullets` already applies to `- ` lines.
+        Reporting it would send a writer to promote a line that is quoting."""
+        assert (
+            _bullet_with_continuation(
+                "  ```", "  - OPEN: sample text in a fence", "  ```"
+            ).unreachable_markers
+            == ()
+        )
+
+    def test_a_marker_AFTER_a_closed_fence_is_still_found(self) -> None:
+        """The pair for the fence skip: without it, one fence anywhere in a bullet
+        would silence the whole remainder of that bullet."""
+        got = _bullet_with_continuation(
+            "  ```", "  sample", "  ```", self.BARE_MARKER
+        ).unreachable_markers
+        assert [m.offset for m in got] == [5]
+
+    def test_BLANK_continuation_lines_contribute_nothing(self) -> None:
+        assert _bullet_with_continuation("", "   ", "").unreachable_markers == ()
+
+    # --- the population boundary ----------------------------------------------
+
+    def test_it_changes_NO_existing_population(self) -> None:
+        """🔴 `openness_population` answers "what did this bullet DECLARE", and a
+        bullet whose only marker is out of reach declared NOTHING — which is the
+        finding. Folding this in would have silently moved every existing count."""
+        b = _bullet_with_continuation(self.NESTED_MARKER)
+        assert b.openness_population == "none"
+        assert b.near_miss_marker is False
+        assert b.openness is None and b.is_open is False
+        assert b.unreachable_markers != (), "premise gone: nothing to be distinct from"
+
+    def test_a_bullet_that_declares_AND_hides_a_second_marker_reports_both(self) -> None:
+        """Not suppressed by a good head marker: the field case was exactly a
+        bullet carrying two claims, only one of which was reachable."""
+        (b,) = sr.parse_journal_bullets(
+            "- 2026-08-18: OPEN: the first claim.\n"
+            "  - 2026-08-17: RESOLVED abc1234: the second, unreachable one.\n"
+        )
+        assert b.openness_population == "open"
+        assert [m.openness for m in b.unreachable_markers] == [sr.OPENNESS_RESOLVED]
+
+    # --- the DERIVATION pin ----------------------------------------------------
+
+    @pytest.mark.parametrize(
+        "shape",
+        MARKER_SHAPES["real"] + MARKER_SHAPES["attempts"] + MARKER_SHAPES["prose"],
+        ids=lambda s: s[:44],
+    )
+    def test_THE_TWO_CALL_SITES_AGREE_SHAPE_FOR_SHAPE(self, shape: str) -> None:
+        """🔴 THE LEDGER THAT MAKES THIS A DERIVATION AND NOT A SECOND COPY.
+
+        For every shape in the committed matrix — all three arms — the
+        continuation scanner must reach EXACTLY the verdict the real opening-line
+        parser reaches on the same text. A hand-written second vocabulary cannot
+        stay in step with `_bullet_openness`, and staying in step is the entire
+        point: this fails the moment the two disagree, in either direction, on any
+        shape anyone can re-run.
+        """
+        opening_line_verdict = sr._bullet_openness(shape)[0]
+        continuation = _bullet_with_continuation(f"  {shape.strip()}").unreachable_markers
+        assert bool(continuation) == (opening_line_verdict is not None), (
+            f"the continuation scanner and `_bullet_openness` disagree about {shape!r}"
+        )
+        if opening_line_verdict is not None:
+            assert continuation[0].openness == opening_line_verdict
+
+    def test_the_AGREEMENT_LEDGER_is_not_vacuous(self) -> None:
+        """POSITIVE CONTROL on the parametrisation above: a ledger whose shapes all
+        land on one side proves nothing. Both sides must be populated, and by more
+        than a single shape.
+
+        ⚠ INVARIANT GUARD, NOT REGRESSION COVERAGE — and it is the ONLY test in
+        these two classes that is: measured green at base `3c54918`, where it
+        reads only the committed fixture and `_bullet_openness`, neither of which
+        this change touches. It pins the ledger against becoming one-sided later;
+        it does not demonstrate the defect.
+        """
+        arms = MARKER_SHAPES["real"] + MARKER_SHAPES["attempts"] + MARKER_SHAPES["prose"]
+        verdicts = [sr._bullet_openness(s)[0] is not None for s in arms]
+        assert sum(verdicts) >= 2, "no shape in the ledger parses as a marker at all"
+        assert verdicts.count(False) >= 10, "the ledger is almost all markers"
+
+
+class TestMarkerReachabilityMutationKills:
+    """Break the NARROWEST expression that can be wrong, one at a time, and
+    require THIS guard's own symptom.
+
+    🔴 POSITIVE CONTROL FOR THE BATCH: `test_kills_the_line_slice` — a mutant that
+    is certainly caught if the harness works at all, run through the same
+    `_load_mutant`. 🔴 NEGATIVE CONTROL: `test_the_NO_OP_mutant_changes_nothing`,
+    which is what distinguishes "every mutant died" from "the loader quietly
+    handed back the real module".
+    """
+
+    NESTED = TestMarkerReachability.NESTED_MARKER
+    BARE = TestMarkerReachability.BARE_MARKER
+
+    def _bullet(self, mod, *continuation: str):
+        body = "- 2026-08-19: an ordinary head line with no marker on it\n" + "".join(
+            f"{c}\n" for c in continuation
+        )
+        (b,) = mod.parse_journal_bullets(body)
+        return b
+
+    def test_the_NO_OP_mutant_changes_nothing(self, tmp_path: Path) -> None:
+        """🔴 NEGATIVE CONTROL FOR THE BATCH. This edit cannot change behaviour,
+        and the answer must come back identical — otherwise a green batch below is
+        a fact about the loader, not about the guards."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_mr_noop",
+            [
+                (
+                    'UNREACHABLE_MARKER = "unreachable-marker"',
+                    'UNREACHABLE_MARKER = "unreachable" "-marker"',
+                )
+            ],
+        )
+        assert mod.UNREACHABLE_MARKER == sr.UNREACHABLE_MARKER
+        got = self._bullet(mod, self.NESTED).unreachable_markers
+        assert [(m.offset, m.openness) for m in got] == [(2, "open")]
+
+    def test_kills_the_line_slice(self, tmp_path: Path) -> None:
+        """POSITIVE CONTROL. `lines[1:]` -> `lines[0:]`: the scanner starts reading
+        the OPENING line, so every ordinary reachable `OPEN:` bullet in the store
+        is reported as out of reach. Only the negative control can see this."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_mr_slice",
+            [
+                (
+                    "        for offset, line in enumerate(self.lines[1:], start=2):",
+                    "        for offset, line in enumerate(self.lines[0:], start=2):",
+                )
+            ],
+        )
+        reachable = "- 2026-08-18: OPEN: an ordinary, perfectly reachable declaration.\n"
+        (b,) = mod.parse_journal_bullets(reachable)
+        assert len(b.unreachable_markers) == 1, "the mutation did not land"
+        (real,) = sr.parse_journal_bullets(reachable)
+        assert real.unreachable_markers == ()
+
+    def test_kills_the_opening_line_NORMALISATION(self, tmp_path: Path) -> None:
+        """`- ` -> nothing: an UNBULLETED continuation line no longer satisfies the
+        parser's `^[-*][ \\t]+` prefix, so wrapped prose carrying a marker goes
+        silent again — the commoner half of the defect, and silently.
+
+        Reached with a case no earlier check rejects: the line is non-blank, is not
+        a fence, and its marker parses. The NESTED shape is asserted still found in
+        the SAME mutant, so this mutation is the normalisation and nothing else."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_mr_prefix",
+            [('    return f"- {stripped}"', "    return stripped")],
+        )
+        assert self._bullet(mod, self.BARE).unreachable_markers == ()
+        assert self._bullet(mod, self.NESTED).unreachable_markers != ()
+        assert _bullet_with_continuation(self.BARE).unreachable_markers != ()
+
+    def test_kills_the_FENCE_skip(self, tmp_path: Path) -> None:
+        """Without it a `- OPEN:` inside a code fence is reported as a lost
+        declaration, and the remedy printed beside it — promote it to a bullet —
+        would edit a line that is quoting something.
+
+        Isolated to the fence half: the blank-line half of the same `if` is left
+        intact and asserted still working, so a kill here is about fences."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_mr_fence",
+            [
+                (
+                    "            if in_fence or not line.strip():",
+                    "            if not line.strip():",
+                )
+            ],
+        )
+        assert self._bullet(mod, "  ```", "  - OPEN: sample", "  ```").unreachable_markers
+        assert self._bullet(mod, "", "   ").unreachable_markers == ()
+        assert (
+            _bullet_with_continuation(
+                "  ```", "  - OPEN: sample", "  ```"
+            ).unreachable_markers
+            == ()
+        )

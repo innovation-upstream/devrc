@@ -255,8 +255,15 @@ the wake once the URL is real. See `reference/frames-cdp.md`.
 browser permission prompt, a native file picker, or verifying with your own eyes.
 **It STEALS the operator's screen** — telemetry caught a session calling it 1–5 times
 per minute, grabbing the screen on nearly every interaction. If you must, call it
-**once per TAB, never per read**, and restore focus afterward
-(`i3-msg '[id="<prev-winid>"] focus'`). It foregrounds via host-side `i3-msg`
+**once per TAB, never per read**. 🔴 RECORD both axes BEFORE the raise
+(`xdotool getactivewindow`; `i3-msg -t get_workspaces | jq -r '.[]|select(.focused).num'`)
+— by the time you want them back the values are gone — and restore BOTH afterwards,
+on failure too: `i3-msg '[id="<prev-winid>"] focus'` **and** `i3-msg workspace <n>`.
+Focusing a window that lives on another workspace switches to it, so restoring the
+recorded window usually carries the workspace back — but a criteria command silently
+no-ops if that window has closed, and there is nothing to record if the operator was
+on an empty workspace. The workspace is the axis that gets left behind, so restore it
+explicitly rather than relying on the focus command to do it. It foregrounds via host-side `i3-msg`
 (Chrome-side `tabs.update`/`windows.update` is a no-op on i3), so it is i3-gated
 (`i3:"skipped"` off a graphical i3 host) and is **not available to the autonomous
 browser-agent at all**.

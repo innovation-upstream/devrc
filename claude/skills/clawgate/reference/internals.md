@@ -6,11 +6,11 @@ unexpected status back. Not needed to merely operate it.
 ## The markdown renderer (0.7.77) — `internal/ui/markdown.go`
 
 Emitted markup goes into a **vault** keyed by a `\x00`-delimited token (`mdVaultSep`,
-`markdown.go:86`) and is restored in **ONE** `ReplaceAllStringFunc` pass — the renderer used to
+`markdown.go:88`) and is restored in **ONE** `ReplaceAllStringFunc` pass — the renderer used to
 re-parse its own output (two links in a paragraph destroyed each other's attributes, a `_`/`*` in
 a URL corrupted the href, emphasis ran inside code spans). ⚠ **Never make the restore per-item:
 it is quadratic** — 33.5s vs 0.7s on a 195 KB body (`maxTaskBodyLen` = `200_000`), on the path
-that renders **every task's full body on the LIST page** (`internal/ui/notes.go:294`). Guarded by
+that renders **every task's full body on the LIST page** (`internal/ui/notes.go:550`). Guarded by
 `internal/ui/markdown_vault_test.go` (`TestRestoreIsSinglePassAtScale`, 10s bound).
 
 🔑 **The rule that matters: if a client is working around this renderer, fix the RENDERER, not the
@@ -19,14 +19,15 @@ client.** A client-side workaround for this class was wrong three times running.
 ⚠ **Two renderers, two sentinels — don't conflate them.** The Go renderer's sentinel is `\x00`;
 the **JS mirror** in `internal/ui/agents_detail.go` uses a different one, `\uE000` (written here escaped on purpose — a literal U+E000 is invisible to `grep`).
 
-⚠ **`internal/ui/markdown.go:51-54` carries a STALE comment** claiming the JS leak is unfixed;
-0.7.79 fixed it in `agents_detail.go:843`. Residual known bug: a backtick inside a URL renders a
-truncated autolink plus literal text.
+✅ **That comment is no longer stale — this note was.** `internal/ui/markdown.go:51-56` now states
+correctly that the JS mirror's leak was **fixed in 0.7.79** (`agents_detail.go:843`). Read the
+comment, not this paragraph. Residual known bug: a backtick inside a URL renders a truncated
+autolink plus literal text.
 
 ## 🔑 NAME-COLLISION TRAP — there are TWO `taskTitle`s
 `internal/api` has its OWN `taskTitle`, and it is **NOT** `ui.TaskTitle`.
 
-| | `internal/api/push_task.go:359` `taskTitle` | `internal/ui/notes.go:502` `ui.TaskTitle` |
+| | `internal/api/push_task.go:359` `taskTitle` | `internal/ui/notes.go:767` `ui.TaskTitle` |
 |---|---|---|
 | purpose | the **Web-Push notification title** | the **display label** |
 | derives from | first non-empty line of the **body**, markdown-**flattened** through `notificationText()`, truncated | `title` → `directory`, **raw** |
@@ -87,7 +88,9 @@ should send `title` and leave `directory` for an actual directory.
 
 ## Comment authorship is structurally bounded (`POST /api/tasks/{id}/comments`, 0.7.78)
 The author is derived from the bounded `X-Clawgate-Source` allowlist
-(`{extension, api, drafter, repo-cos, claude-code}`, unknown → `api`), **NEVER from the body** —
+(`{extension, api, drafter, repo-cos, claude-code}` — plus `clickup` **in trunk source only, NOT in
+any released image**; see `task-api.md` → "comment (write)" for the source-vs-live split, which is
+the authoritative copy of this set — unknown → `api`), **NEVER from the body** —
 the decoded struct is `{body}` only, so `user` / `operator` are **structurally unreachable**
 (pinned by a `reservedCommentAuthors` map + test).
 
@@ -132,6 +135,6 @@ next number, never edit an existing one.**
 | 0012 | suggestions |
 | 0013 | persisted per-project auto-approve |
 | 0014 | per-Task dispatch config |
-| 0015 | `chat_message_parts` + `chat_messages.kind`/`tool_id`/`tool_name`/`tool_ok` — the STRUCTURED transcript (assistant turn = ordered parts; legacy rows = kind `text`) |
+| 0015 | ⚠ **no new table** — `0015_chat_message_parts.sql` only `ALTER`s `chat_messages`, adding `kind`/`tool_id`/`tool_name`/`tool_ok` for the STRUCTURED transcript (assistant turn = ordered parts; legacy rows = kind `text`). There is **no `chat_message_parts` table**; the filename is not a schema object |
 | 0017 | source provenance |
 | 0018 | `notes.tags TEXT[]` (GIN) + `notes.title TEXT` |
