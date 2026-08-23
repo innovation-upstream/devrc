@@ -67,6 +67,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -2781,3 +2782,304 @@ class TestEntryMappingIsShared:
         )
         assert got["scope"] == "the-dir"
         assert "repo" not in got
+
+
+# =============================================================================
+# 🔴 MARKER REACHABILITY — the THIRD openness shape.
+#
+# REGRESSION COVERAGE, watched RED AT BASE: every test in the two classes below
+# fails at the base commit, where `JournalBullet.unreachable_markers` does not
+# exist. That AttributeError IS the pre-change behaviour — no surface in the
+# module reads past a bullet's opening line, which is the defect.
+# =============================================================================
+
+
+MARKER_SHAPES = json.loads(
+    (ROOT / "scripts" / "tests" / "fixtures" / "near_miss_shapes.json").read_text(
+        encoding="utf-8"
+    )
+)
+
+
+def _bullet_with_continuation(*continuation: str) -> sr.JournalBullet:
+    """One bullet whose OPENING line declares nothing, plus the given body lines.
+
+    The head line is deliberately inert prose: the finding under test is about
+    lines 2..n, so a head that declared anything would leave every result
+    ambiguous between the two mechanisms.
+    """
+    body = "- 2026-08-19: an ordinary head line with no marker on it\n" + "".join(
+        f"{c}\n" for c in continuation
+    )
+    (bullet,) = sr.parse_journal_bullets(body)
+    return bullet
+
+
+class TestMarkerReachability:
+    """🔴 A MARKER SPELLED CORRECTLY WHERE THE PARSER NEVER LOOKS.
+
+    Measured in the field 2026-08-20 (`claudedocs/handoff-subsystem-store.md`):
+    one bullet carried a second, correctly-spelled marker several lines into its
+    body. It showed on NO openness surface — not `OPEN`, not `NEAR-MISS` — and had
+    only ever raised a badge BY ACCIDENT through a broken `RESOLVED —` above it,
+    so repairing that broken line would have SILENCED a still-open action.
+
+    🔴 EVERY ARM IS A PAIR. A detector asserted only on its firing case is
+    indistinguishable from one that fires on everything, and this one runs over a
+    `## Nuance / work-history` section that is mostly ordinary prose.
+    """
+
+    # Pairwise distinct, and distinct from every literal any assertion names, so
+    # a mutant that hardcodes one of them cannot survive by coincidence.
+    NESTED_MARKER = "  - 2026-08-17: OPEN: rotate the credential in the other repo."
+    BARE_MARKER = "  OPEN: the sibling repo still points at the old bucket."
+
+    # --- the positive half ----------------------------------------------------
+
+    def test_THE_FIELD_SHAPE_a_nested_marker_several_lines_in_is_FOUND(self) -> None:
+        b = _bullet_with_continuation(
+            "  wrapped prose that says nothing about openness at all,",
+            "  and a second line of it,",
+            self.NESTED_MARKER,
+        )
+        (found,) = b.unreachable_markers
+        assert found.openness == sr.OPENNESS_OPEN
+        assert found.offset == 4, "the offset must be the line's place IN THE BULLET"
+        assert found.line == self.NESTED_MARKER, "quoted VERBATIM, indentation and all"
+
+    def test_a_marker_on_an_UNBULLETED_continuation_line_is_FOUND_too(self) -> None:
+        """Wrapped prose carries no `- `, so a scanner that only handled nested
+        list items would miss the commoner shape of the same defect."""
+        (found,) = _bullet_with_continuation(self.BARE_MARKER).unreachable_markers
+        assert found.openness == sr.OPENNESS_OPEN and found.offset == 2
+
+    def test_a_RESOLVED_marker_out_of_reach_carries_its_sha_normalised(self) -> None:
+        (found,) = _bullet_with_continuation(
+            "  RESOLVED B83BFB584: closed in the other repo."
+        ).unreachable_markers
+        assert found.openness == sr.OPENNESS_RESOLVED
+        assert found.resolved_by == "b83bfb584", "the same lower-casing the parser does"
+
+    def test_TWO_out_of_reach_markers_in_one_bullet_are_BOTH_reported(self) -> None:
+        got = _bullet_with_continuation(
+            self.BARE_MARKER, "  more prose here,", self.NESTED_MARKER
+        ).unreachable_markers
+        assert [m.offset for m in got] == [2, 4]
+
+    # --- the negative half, which is what makes the positive half mean anything -
+
+    def test_THE_NEGATIVE_CONTROL_a_normal_OPENING_line_marker_is_SILENT(self) -> None:
+        """🔴 The whole population this must not touch. A marker at a bullet's
+        head is REACHABLE by definition — reporting it would make the advisory
+        fire on every well-formed open action in the store."""
+        (b,) = sr.parse_journal_bullets(
+            "- 2026-08-18: OPEN: an ordinary, perfectly reachable declaration.\n"
+            "  with a continuation line under it.\n"
+        )
+        assert b.openness == sr.OPENNESS_OPEN
+        assert b.unreachable_markers == ()
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "  the open file limit is the constraint here, not the pool.",
+            "  we resolved the ticket last week and moved on.",
+            "  Open questions remain about the retry budget.",
+            "  OPENSSL_CONF must point at the vendored bundle.",
+            "  it is still OPEN to debate whether that was right.",
+        ],
+        ids=lambda s: s.strip()[:30],
+    )
+    def test_prose_that_merely_CONTAINS_the_word_is_SILENT(self, line: str) -> None:
+        assert _bullet_with_continuation(line).unreachable_markers == ()
+
+    def test_a_bullet_with_NO_continuation_lines_reports_nothing(self) -> None:
+        (b,) = sr.parse_journal_bullets("- 2026-08-18: a one-line bullet.\n")
+        assert b.unreachable_markers == ()
+
+    def test_a_marker_inside_a_FENCE_is_sample_text_not_a_declaration(self) -> None:
+        """The same rule `parse_journal_bullets` already applies to `- ` lines.
+        Reporting it would send a writer to promote a line that is quoting."""
+        assert (
+            _bullet_with_continuation(
+                "  ```", "  - OPEN: sample text in a fence", "  ```"
+            ).unreachable_markers
+            == ()
+        )
+
+    def test_a_marker_AFTER_a_closed_fence_is_still_found(self) -> None:
+        """The pair for the fence skip: without it, one fence anywhere in a bullet
+        would silence the whole remainder of that bullet."""
+        got = _bullet_with_continuation(
+            "  ```", "  sample", "  ```", self.BARE_MARKER
+        ).unreachable_markers
+        assert [m.offset for m in got] == [5]
+
+    def test_BLANK_continuation_lines_contribute_nothing(self) -> None:
+        assert _bullet_with_continuation("", "   ", "").unreachable_markers == ()
+
+    # --- the population boundary ----------------------------------------------
+
+    def test_it_changes_NO_existing_population(self) -> None:
+        """🔴 `openness_population` answers "what did this bullet DECLARE", and a
+        bullet whose only marker is out of reach declared NOTHING — which is the
+        finding. Folding this in would have silently moved every existing count."""
+        b = _bullet_with_continuation(self.NESTED_MARKER)
+        assert b.openness_population == "none"
+        assert b.near_miss_marker is False
+        assert b.openness is None and b.is_open is False
+        assert b.unreachable_markers != (), "premise gone: nothing to be distinct from"
+
+    def test_a_bullet_that_declares_AND_hides_a_second_marker_reports_both(self) -> None:
+        """Not suppressed by a good head marker: the field case was exactly a
+        bullet carrying two claims, only one of which was reachable."""
+        (b,) = sr.parse_journal_bullets(
+            "- 2026-08-18: OPEN: the first claim.\n"
+            "  - 2026-08-17: RESOLVED abc1234: the second, unreachable one.\n"
+        )
+        assert b.openness_population == "open"
+        assert [m.openness for m in b.unreachable_markers] == [sr.OPENNESS_RESOLVED]
+
+    # --- the DERIVATION pin ----------------------------------------------------
+
+    @pytest.mark.parametrize(
+        "shape",
+        MARKER_SHAPES["real"] + MARKER_SHAPES["attempts"] + MARKER_SHAPES["prose"],
+        ids=lambda s: s[:44],
+    )
+    def test_THE_TWO_CALL_SITES_AGREE_SHAPE_FOR_SHAPE(self, shape: str) -> None:
+        """🔴 THE LEDGER THAT MAKES THIS A DERIVATION AND NOT A SECOND COPY.
+
+        For every shape in the committed matrix — all three arms — the
+        continuation scanner must reach EXACTLY the verdict the real opening-line
+        parser reaches on the same text. A hand-written second vocabulary cannot
+        stay in step with `_bullet_openness`, and staying in step is the entire
+        point: this fails the moment the two disagree, in either direction, on any
+        shape anyone can re-run.
+        """
+        opening_line_verdict = sr._bullet_openness(shape)[0]
+        continuation = _bullet_with_continuation(f"  {shape.strip()}").unreachable_markers
+        assert bool(continuation) == (opening_line_verdict is not None), (
+            f"the continuation scanner and `_bullet_openness` disagree about {shape!r}"
+        )
+        if opening_line_verdict is not None:
+            assert continuation[0].openness == opening_line_verdict
+
+    def test_the_AGREEMENT_LEDGER_is_not_vacuous(self) -> None:
+        """POSITIVE CONTROL on the parametrisation above: a ledger whose shapes all
+        land on one side proves nothing. Both sides must be populated, and by more
+        than a single shape.
+
+        ⚠ INVARIANT GUARD, NOT REGRESSION COVERAGE — and it is the ONLY test in
+        these two classes that is: measured green at base `3c54918`, where it
+        reads only the committed fixture and `_bullet_openness`, neither of which
+        this change touches. It pins the ledger against becoming one-sided later;
+        it does not demonstrate the defect.
+        """
+        arms = MARKER_SHAPES["real"] + MARKER_SHAPES["attempts"] + MARKER_SHAPES["prose"]
+        verdicts = [sr._bullet_openness(s)[0] is not None for s in arms]
+        assert sum(verdicts) >= 2, "no shape in the ledger parses as a marker at all"
+        assert verdicts.count(False) >= 10, "the ledger is almost all markers"
+
+
+class TestMarkerReachabilityMutationKills:
+    """Break the NARROWEST expression that can be wrong, one at a time, and
+    require THIS guard's own symptom.
+
+    🔴 POSITIVE CONTROL FOR THE BATCH: `test_kills_the_line_slice` — a mutant that
+    is certainly caught if the harness works at all, run through the same
+    `_load_mutant`. 🔴 NEGATIVE CONTROL: `test_the_NO_OP_mutant_changes_nothing`,
+    which is what distinguishes "every mutant died" from "the loader quietly
+    handed back the real module".
+    """
+
+    NESTED = TestMarkerReachability.NESTED_MARKER
+    BARE = TestMarkerReachability.BARE_MARKER
+
+    def _bullet(self, mod, *continuation: str):
+        body = "- 2026-08-19: an ordinary head line with no marker on it\n" + "".join(
+            f"{c}\n" for c in continuation
+        )
+        (b,) = mod.parse_journal_bullets(body)
+        return b
+
+    def test_the_NO_OP_mutant_changes_nothing(self, tmp_path: Path) -> None:
+        """🔴 NEGATIVE CONTROL FOR THE BATCH. This edit cannot change behaviour,
+        and the answer must come back identical — otherwise a green batch below is
+        a fact about the loader, not about the guards."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_mr_noop",
+            [
+                (
+                    'UNREACHABLE_MARKER = "unreachable-marker"',
+                    'UNREACHABLE_MARKER = "unreachable" "-marker"',
+                )
+            ],
+        )
+        assert mod.UNREACHABLE_MARKER == sr.UNREACHABLE_MARKER
+        got = self._bullet(mod, self.NESTED).unreachable_markers
+        assert [(m.offset, m.openness) for m in got] == [(2, "open")]
+
+    def test_kills_the_line_slice(self, tmp_path: Path) -> None:
+        """POSITIVE CONTROL. `lines[1:]` -> `lines[0:]`: the scanner starts reading
+        the OPENING line, so every ordinary reachable `OPEN:` bullet in the store
+        is reported as out of reach. Only the negative control can see this."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_mr_slice",
+            [
+                (
+                    "        for offset, line in enumerate(self.lines[1:], start=2):",
+                    "        for offset, line in enumerate(self.lines[0:], start=2):",
+                )
+            ],
+        )
+        reachable = "- 2026-08-18: OPEN: an ordinary, perfectly reachable declaration.\n"
+        (b,) = mod.parse_journal_bullets(reachable)
+        assert len(b.unreachable_markers) == 1, "the mutation did not land"
+        (real,) = sr.parse_journal_bullets(reachable)
+        assert real.unreachable_markers == ()
+
+    def test_kills_the_opening_line_NORMALISATION(self, tmp_path: Path) -> None:
+        """`- ` -> nothing: an UNBULLETED continuation line no longer satisfies the
+        parser's `^[-*][ \\t]+` prefix, so wrapped prose carrying a marker goes
+        silent again — the commoner half of the defect, and silently.
+
+        Reached with a case no earlier check rejects: the line is non-blank, is not
+        a fence, and its marker parses. The NESTED shape is asserted still found in
+        the SAME mutant, so this mutation is the normalisation and nothing else."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_mr_prefix",
+            [('    return f"- {stripped}"', "    return stripped")],
+        )
+        assert self._bullet(mod, self.BARE).unreachable_markers == ()
+        assert self._bullet(mod, self.NESTED).unreachable_markers != ()
+        assert _bullet_with_continuation(self.BARE).unreachable_markers != ()
+
+    def test_kills_the_FENCE_skip(self, tmp_path: Path) -> None:
+        """Without it a `- OPEN:` inside a code fence is reported as a lost
+        declaration, and the remedy printed beside it — promote it to a bullet —
+        would edit a line that is quoting something.
+
+        Isolated to the fence half: the blank-line half of the same `if` is left
+        intact and asserted still working, so a kill here is about fences."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_mr_fence",
+            [
+                (
+                    "            if in_fence or not line.strip():",
+                    "            if not line.strip():",
+                )
+            ],
+        )
+        assert self._bullet(mod, "  ```", "  - OPEN: sample", "  ```").unreachable_markers
+        assert self._bullet(mod, "", "   ").unreachable_markers == ()
+        assert (
+            _bullet_with_continuation(
+                "  ```", "  - OPEN: sample", "  ```"
+            ).unreachable_markers
+            == ()
+        )

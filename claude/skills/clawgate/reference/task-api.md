@@ -244,7 +244,17 @@ silently.** (4 is exempt — it reads clawgate's own secret rather than holding 
    dismissed ticket being resurrected — **it deliberately does NOT dedupe by tag**, so tasks created
    outside that ledger get duplicated on the next run. Reads `CLAWGATE_HOOK_TOKEN` from clawgate's
    **own `clawgate-secrets`** (same namespace, never copied — hence exempt from the rotation
-   coupling above). As of 2026-08-19 it ships **suspended**, dry-run, with write-back disabled.
+   coupling above). 🔴 **RE-MEASURED against the live cluster 2026-08-21: it is ON.** CronJob
+   `suspend: false` (hourly at `:17`, last run succeeded), env `CLICKUP_MIRROR_MODE=commit`, and the
+   ConfigMap's `writeback.enabled: true` — so phase 2 EXECUTES and **ClickUp may ALREADY have been
+   told** about a task you are looking at; only `writeback.allow_terminal_status` is still shut, so
+   it will not close a ticket. The older claim here — "as of 2026-08-19 it ships suspended, dry-run,
+   with write-back disabled" — was true the day it was written and is now WRONG; do not re-derive
+   it. ⚠ This is another repo's **deployment** state, which no devrc test can pin, so **verify
+   before acting on it**: `kubectl -n clawgate get cronjob clickup-mirror -o
+   jsonpath='{.spec.suspend}'`, the container's `CLICKUP_MIRROR_MODE`, and the `writeback` block of
+   `cm/clickup-mirror-config`. The four-gate ledger is kept in
+   `<homelab-talos>/clusters/workbench/apps/clickup-mirror/README.md`.
 
 ## Auth / access (0.7.37 — clawgate has NO human auth of its own)
 No magic-link `/login?token=`, no session cookie, no `CLAWGATE_AUTH_TOKEN` /

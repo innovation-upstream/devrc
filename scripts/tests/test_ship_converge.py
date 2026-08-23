@@ -2075,13 +2075,24 @@ def test_a_run_with_no_host_in_scope_is_a_usage_error(repo):
 
     `--no-local --no-remote` used to reach the verdict line and print
     "converged + verified" having touched neither machine — the vacuous green in
-    its purest form. drift-check.sh already spells this refusal as its own rc 2
-    ("a RUN THAT CHECKED NO HOST AT ALL"), and the two ladders are deliberately
-    aligned.
+    its purest form.
+
+    🔴 THE NUMBER IS 21, NOT 2, AND THE OLD DOCSTRING'S ALIGNMENT CLAIM IS DEAD.
+    It used to read "drift-check.sh already spells this refusal as its own rc 2
+    … and the two ladders are deliberately aligned." That was true when written
+    and is not any more: #716 took ship.sh's rc 2 for `SHIP_REPO` SET-but-EMPTY,
+    which ships and is deployed on both hosts, so the usage error moved up to the
+    next free code the reservation ledger itself points at.
+
+    The two ladders are therefore aligned on the RESERVATION — 21 is reserved to
+    ship.sh in `drift-check.sh`'s `RESERVED-TO-SHIP` line, and that line is
+    machine-checked by `test_the_two_rc_ladders_reserve_each_others_codes` —
+    but they are NOT aligned on rc 2, which now means different things in the two
+    scripts. Saying so beats a comment that reads as coverage it no longer has.
     """
     rc, out = repo.ship("--no-local")     # Repo.ship already passes --no-remote
 
-    assert rc == 2, f"a run over zero hosts reported {rc}\n{out}"
+    assert rc == 21, f"a run over zero hosts reported {rc}\n{out}"
     assert "NO host to converge" in out, f"the refusal is not explained\n{out}"
     assert "converged" not in out, out
 

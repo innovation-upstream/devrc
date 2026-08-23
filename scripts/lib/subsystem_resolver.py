@@ -106,6 +106,8 @@ __all__ = [
     "ON_MALFORMED_COLLECT",
     "OPENNESS_OPEN",
     "OPENNESS_RESOLVED",
+    "UNREACHABLE_MARKER",
+    "UnreachableMarker",
     "JournalBullet",
     "extract_sections",
     "scan_headings",
@@ -1276,6 +1278,71 @@ def extract_sections(text: str, headings: Sequence[str]) -> dict[str, str]:
     return {h: "\n".join(wanted[h]).strip("\n") for h in headings if h in seen}
 
 
+UNREACHABLE_MARKER = "unreachable-marker"
+"""The reason token for the third openness shape. NOT a near-miss, and the two
+counts are never added.
+
+A near-miss is a marker MIS-SPELLED where the parser looks. This is a marker
+spelled CORRECTLY where the parser never looks — so it raises neither badge, and
+its remedy is different: a near-miss is fixed by editing the line, this one by
+PROMOTING it to a top-level bullet of its own.
+"""
+
+
+@dataclass(frozen=True)
+class UnreachableMarker:
+    """One correctly-spelled openness marker sitting where NO reader looks.
+
+    🔴 THE SHAPE THAT COST A REAL OPEN ACTION ITS BADGE. Measured in the field
+    (`claudedocs/handoff-subsystem-store.md`, 2026-08-20): one bullet carried a
+    second, correctly-spelled marker several lines into its body. `_bullet_openness`
+    reads a bullet's OPENING line and the pattern is anchored at position 0, so
+    that declaration reached no surface at all — it had only ever raised a badge
+    BY ACCIDENT, through a broken `RESOLVED —` sitting above it in the same
+    section. Fixing the broken line would therefore have SILENCED a still-open
+    action, which is the failure this whole marker exists to prevent, arriving
+    through the fix for a different one.
+    """
+
+    offset: int
+    """1-based index of the line WITHIN THE BULLET. Always >= 2 — line 1 is what
+    the parser already reads, so a marker there is reachable by definition."""
+
+    line: str
+    """The continuation line, VERBATIM — indentation and all. The report quotes
+    it, and a stripped copy would send a writer looking for a line as typed."""
+
+    openness: str
+    """`open` | `resolved` — what this marker WOULD have declared had it been at
+    the head of a bullet. Derived by running the real parser, never re-spelled."""
+
+    resolved_by: str | None
+    """The sha a `RESOLVED <sha>:` names, same normalisation as the real parser."""
+
+
+def _as_opening_line(line: str) -> str:
+    """Put a CONTINUATION line into OPENING-line position, verbatim otherwise.
+
+    🔴 THIS IS THE WHOLE DERIVATION, AND IT IS DELIBERATELY THE ONLY NEW GRAMMAR.
+    The marker vocabulary is NOT restated here: the continuation scanner hands
+    each line to `_bullet_openness` — the same function `parse_journal_bullets`
+    calls for line 1 — and this normalisation exists solely because both patterns
+    require the `^[-*][ \\t]+` bullet prefix, which a wrapped prose line does not
+    have. A ledger that restated `OPEN|RESOLVED` could not catch what it was
+    written for: the point is that this stays in step with the real pattern even
+    if that pattern changes. `test_subsystem_resolver.py` pins the two call sites
+    against each other over the committed shape fixture.
+
+    A line that ALREADY opens with a bullet marker (a nested list item — the
+    field case) is passed through with only its indentation removed, so nothing
+    is manufactured; anything else is given the minimal `- ` prefix.
+    """
+    stripped = line.strip()
+    if _JOURNAL_BULLET.match(stripped):
+        return stripped
+    return f"- {stripped}"
+
+
 @dataclass(frozen=True)
 class JournalBullet:
     """One top-level bullet of a `## Nuance / work-history` section, VERBATIM.
@@ -1412,6 +1479,46 @@ class JournalBullet:
         if self.openness is not None:
             return False
         return bool(_NEAR_MISS_MARKER.match(self.first_line))
+
+    @property
+    def unreachable_markers(self) -> tuple[UnreachableMarker, ...]:
+        """Markers on lines 2..n that WOULD have parsed at the head of a bullet.
+
+        🔴 A THIRD SHAPE, AND IT IS NOT A POPULATION. `openness_population` is
+        untouched by this: that property answers "what did this bullet DECLARE",
+        and a bullet whose only marker is out of reach declared nothing — which
+        is precisely the finding. Folding this in would have changed the answer
+        to a different question and silently moved existing counts.
+
+        🔴 NOT SUPPRESSED WHEN THE BULLET ALREADY DECLARES ONE. The field case
+        was exactly a bullet carrying two markers, and the head one was broken;
+        a bullet with a good head marker AND a second one further down is two
+        claims stored as one, which is worth saying either way.
+
+        Blank lines contribute nothing, and FENCED regions are skipped for the
+        same reason `parse_journal_bullets` skips them: a `- OPEN:` inside a code
+        fence is sample text, and reporting it would send a writer to promote a
+        line that is quoting something.
+        """
+        out: list[UnreachableMarker] = []
+        in_fence = False
+        for offset, line in enumerate(self.lines[1:], start=2):
+            if _is_fence(line):
+                in_fence = not in_fence
+                continue
+            if in_fence or not line.strip():
+                continue
+            # 🔴 THE REAL PARSER, not a second copy of its vocabulary. See
+            # `_as_opening_line`.
+            openness, sha = _bullet_openness(_as_opening_line(line))
+            if openness is None:
+                continue
+            out.append(
+                UnreachableMarker(
+                    offset=offset, line=line, openness=openness, resolved_by=sha
+                )
+            )
+        return tuple(out)
 
 
 def parse_journal_bullets(body: str) -> tuple[JournalBullet, ...]:

@@ -74,6 +74,7 @@ Click actions for those blocks:
 | `obs-read` | one-command, cluster-aware observability query tool |
 | `playwright-nixos` | drive Playwright with the nixpkgs Chromium matching *this project's* pin (`--list` / `--select`) |
 | `dogfood-cycle` | automate the civitai App Block "dogfood test cycle" |
+| `run3` | run a command with stdout and stderr captured to **separate** files (never merged), reporting each stream's byte count, path and the command's own exit code. Use it whenever the question is *which stream produced this* — in zsh, `cmd 2>&1 >/dev/null \| consumer` hands the consumer **stdout**, so redirection order cannot answer it |
 
 ## Network / VPN
 

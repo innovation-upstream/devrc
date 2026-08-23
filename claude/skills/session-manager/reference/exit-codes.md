@@ -86,3 +86,27 @@ the checkout. Between a `git pull` and the switch the two genuinely disagree, an
 the stale one. Settle it by reading the emitter, never the prose:
 `git grep -n 'excluded_' scripts/session-manager`, or just run a scan and look at the key.
 Same rule for every field named here.
+
+## The consumer-facing text, moved out of the SKILL body
+
+_Moved verbatim out of `SKILL.md` on 2026-08-21, when the body was cut from 23,233 B. The core keeps every load-bearing claim below in compressed form; this is the wording it was cut from, and the evidence behind it._
+
+
+## 🔴 Read the exit code — the two zeroes are different facts
+
+| code | meaning |
+|---|---|
+| `0` | ran, found windows (**including** a partial scan where one host was unreachable) |
+| `2` | usage / bad `<session>:<window>` / **`tail`: the host answered, no such window** |
+| `3` | every requested host answered and the answer is a **real zero** |
+| `4` | **no** host could be reached — the zero is unmeasured, not measured |
+| `5` | **`tail` only**: the host answered and there is **no tmux server** on it |
+
+Rationale, and why 5 had to be split out of 3: this file, below.
+
+Same discipline inside the payload: `hosts.<n>.reachable`/`.error` describe the
+**`list-panes`** call, `.windows_measured`/`.windows_error` the **`list-windows`** call, and
+`.captures_measured`/`.captures_status` the **capture batch** — three independent
+measurements, and one succeeding says nothing about the others. `clickhouse.status` must be
+`ok` before `rows: []` is believable. **Never read a bare count without its status.**
+

@@ -186,3 +186,30 @@ that still bite after switching:
 - On some builds the dropdown's links are **not reachable** via
   `.mantine-Popover-dropdown a` even once open. **`screenshot` it** rather than
   selector-hunting — a selector that matches nothing looks exactly like missing content.
+
+## 🔴 A menu can have a SECOND VIEW — "not in the open dropdown" ≠ "not in the UI"
+
+Sibling of the trap above, and it survives everything that fixes that one: you used
+the trusted `click`, `aria-expanded` reads `true`, you settled, you read the whole
+dropdown — and the thing is still not there, because it lives behind a **drill-in**
+that swaps the menu's contents in place.
+
+Measured 2026-08-21 on civitai's header menu. The account switcher is a distinct view
+of the same popover, reached by clicking the **avatar row** (own username + a `›`
+chevron-right). Before that click its accounts are absent from `innerHTML` entirely —
+a full-document search for the username returned **false**, which read as "this
+profile does not have that account" and was recorded as a blocker. It was one click
+away. The generic tells:
+
+- a row whose only affordance is a **chevron-right** — that is a drill-in, not a link;
+- a `Back` item appearing after you click something (proof you were in view 2);
+- a dropdown that seems oddly short for the surface it belongs to.
+
+**So: before reporting a menu entry absent, click any chevron-row and re-read.** And
+prefer a `screenshot` for this judgement — a human glance settles "is there another
+view?" instantly, where a text scan cannot distinguish view 1 from the whole menu.
+
+🔴 **Related, same session: a text scan for a control's LABEL can miss it entirely
+when the control is an ICON.** Searching for `Logout` returned zero elements while a
+logout icon-button sat in the same footer. Match on `aria-label` / `role` / an icon
+class, not visible text, before concluding a control does not exist.

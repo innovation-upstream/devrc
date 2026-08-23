@@ -82,6 +82,7 @@ COLLECTOR = SCRIPTS / "collector"
 # greps the runner for it.
 _SPOOL_FLAG = "-p testlib.spool" + "_plugin"
 _NOLAUNCH_FLAG = "-p testlib.nolaunch" + "_plugin"
+_NOGIT_FLAG = "-p testlib.nogit" + "_plugin"
 
 
 # --------------------------------------------------------------------------- #
@@ -220,6 +221,9 @@ def test_the_single_pytest_invocation_loads_the_spool_plugin():
     assert _NOLAUNCH_FLAG in invocations[0], (
         "the no-real-launcher plugin was dropped from the same line — GUARD 8's "
         f"edit must not cost GUARD 7:\n  {invocations[0].strip()}")
+    assert _NOGIT_FLAG in invocations[0], (
+        "the git-isolation plugin was dropped from the same line — GUARD 8's "
+        f"edit must not cost GUARD 9 either:\n  {invocations[0].strip()}")
 
 
 def test_both_levers_are_exported_by_the_runner():

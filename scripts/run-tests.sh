@@ -38,11 +38,15 @@
 #      asserted the fix kept working, which is what this guard is for). We now
 #      check each binary UP FRONT and abort naming it, so "41 tests silently
 #      skipped" becomes "the gate says curl is missing".
-#      ⚠ This binds the pre-push tier too, which supplies only python via
-#      nix-shell and takes the rest from the ambient PATH (all 10 verified
-#      present on the workbench 2026-08-02). A host missing one now BLOCKS the
-#      push with the named tool instead of pushing a silently-thinner run;
-#      `DEVRC_SKIP_TESTS=1 git push …` is the documented override.
+#      ⚠ CORRECTED 2026-08-22 — both halves of what this said are now false.
+#      The pre-push tier used to supply only python via `nix-shell -p …` and take
+#      the rest from the ambient PATH; it now runs `nix develop`, so the devShell
+#      supplies EVERY entry from the same flake.nix `gateTools` list the flake
+#      check uses. And a host missing one no longer BLOCKS: a missing tool is an
+#      ENVIRONMENT precondition, which exits 3, which githooks/tests-on-push.sh
+#      DEGRADES on — blocking a push over a broken caller is what teaches people
+#      to reach for `DEVRC_SKIP_TESTS=1`. Repo-content guards still exit 2 and
+#      still block.
 #
 #   2. PINNED EXPECTED-SKIP SET (`EXPECTED_SKIPS`). Not a numeric ceiling: every
 #      skip must match a pinned (directory, reason-regex) entry, and the observed
@@ -131,7 +135,7 @@ set -uo pipefail
 # Because `_emit_verdict` is the ONLY writer and it is fed `$?`, the verdict and
 # the exit status cannot disagree — there is no code path that prints one and
 # returns the other. The EXIT trap is what makes that total: an abort, a kill,
-# a `set -u` unbound variable or any of the early `exit 2` preconditions now
+# a `set -u` unbound variable or any of the early `exit 3` environment preconditions now
 # ends with a verdict line too, where before they ended with silence that a
 # content-parsing consumer reads as "no failures found".
 #
@@ -176,6 +180,90 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# --- GUARD 9: NO TEST MAY OPERATE ON THE REPO THE SUITE RUNS FROM -------------
+# 🔴 THE THIRD ENFORCEMENT POINT, beside GUARDS 7 and 8 — but it has to run
+# HERE, at the top, and not down beside them.
+#
+# MEASURED 2026-08-21, on the operator's real clone and on the production
+# remote: a gate run rewrote `refs/heads/main` with fixture commits, created
+# `side`/`topic`/`trunk`/`master`/`only-branch`/`feat/behind-too`, DELETED
+# `refs/heads/main`, repointed HEAD at `trunk`, wrote `core.bare=true`,
+# `user.name=T`, a `core.hooksPath` under `pytest-0/test_install_does_not_
+# depend_o0/` and a `remote.origin.url` under `pytest-0/test_fetch_failure_is_
+# rc40/` — then pushed fixture refs to GitHub.
+#
+# 🔴 NOT ONE FIXTURE WAS SLOPPY. Every git fixture in this repo passes
+# `-C <tmp_path>/…`; several also pin HOME, GIT_CONFIG_GLOBAL and
+# GIT_CONFIG_SYSTEM. `GIT_DIR` OVERRIDES `-C`, so one inherited variable defeats
+# all of them at once — which is why this is an `unset` and not a patch in
+# fourteen test files. Reproduced on a throwaway clone: with GIT_DIR exported,
+# `git -C <tmp>/work branch -D main` DELETES the clone's main.
+#
+# 🔴 AND IT MUST PRECEDE THE ROOT BLOCK BELOW. With GIT_DIR set and no
+# GIT_WORK_TREE, git takes the CWD as the top of the work tree, so
+# `rev-parse --show-toplevel` returns `<repo>/scripts`; this script then hunts
+# for `<repo>/scripts/scripts/run-tests.sh` and dies `exit 127` with NO verdict
+# line. MEASURED — the first placement of this guard was two thirds of the way
+# down this file and the gate never reached it. Same class as the `unset CDPATH`
+# a few lines below ROOT: an inherited variable silently corrupting a resolution
+# every reader assumes is local.
+#
+# 🔴 SPELLED HERE RATHER THAN SOURCED, DELIBERATELY. `scripts/run-node-tests.sh`
+# and `scripts/gate.sh` carry the same block, and so does every COPY of this
+# runner that `testlib/runner_patch.py` writes into a tmp dir — about fifteen
+# tests drive such a copy, and a copy cannot source a sibling `lib/` that was
+# never copied with it. (The first version did source one; MEASURED, it turned
+# those fifteen into `run-tests: FATAL — cannot source lib/git-repo-pointers.sh`,
+# i.e. a permanently-red gate, which claude/RULES.md rates worse than no gate.)
+# The SET is owned once, by `scripts/testlib/gitenv.py::REPO_POINTER_VARS`, and
+# `scripts/tests/test_git_repo_isolation.py` pins all four spellings against it
+# in both directions plus the ordering above — the same treatment
+# `SPOOL_SESSION_MARKER` gets, for the same cross-process reason.
+#
+# UNCONDITIONAL, including over a deliberate ambient value: there is no workflow
+# in which the test gate should be pointed at a repository by inherited
+# environment.
+DEVRC_GIT_REPO_POINTERS=(
+  GIT_DIR                            # the repository itself; beats -C
+  GIT_WORK_TREE                      # the working tree
+  GIT_COMMON_DIR                     # where refs/config actually live
+  GIT_INDEX_FILE                     # the index a `git add` writes
+  GIT_OBJECT_DIRECTORY               # where new objects are written
+  GIT_ALTERNATE_OBJECT_DIRECTORIES   # extra object stores
+  GIT_NAMESPACE                      # the ref namespace refs land in
+  GIT_PREFIX                         # hook-injected pathspec prefix
+  GIT_GRAFT_FILE                     # repo-scoped grafts
+  GIT_SHALLOW_FILE                   # repo-scoped shallow list
+  GIT_CONFIG                         # legacy: the file `git config` WRITES
+)
+# 🔴 AND GUARD 9's OWN SEAMS, for the same reason and measured the same way.
+# `DEVRC_GITENV_PROTECT` redirects the DETECTOR at a different repository and
+# `DEVRC_GITENV_MODE` decides whether it fails or merely reports. #683's audit
+# measured the first: `DEVRC_GITENV_PROTECT=":"` gave `protected-git-dirs=0`
+# and a GREEN run while the escaping test really created its branch, and
+# `=/nonexistent/x` gave `protected-git-dirs=1` — a marker line asserting
+# healthy coverage — over the same real mutation. One inherited variable
+# defeating every layer is the bug this whole guard exists for; leaving one
+# inside the fix was not acceptable. `testlib/gitenv.py` now REFUSES an
+# unresolvable value, and no runner passes one down.
+DEVRC_GITENV_CONTROL_VARS=(
+  DEVRC_GITENV_PROTECT               # which git dirs the detector watches
+  DEVRC_GITENV_MODE                  # enforce | report | auto
+)
+# What was actually SET before we cleared it — reported below beside the
+# constant list, because "here is the list I would have cleared" and "here is
+# what was really in this environment" are different claims and only the second
+# one can tell you an incident is in progress.
+DEVRC_GITENV_FOUND=""
+for _devrc_gitenv_var in "${DEVRC_GIT_REPO_POINTERS[@]}" "${DEVRC_GITENV_CONTROL_VARS[@]}"; do
+  if [ -n "${!_devrc_gitenv_var+set}" ]; then
+    DEVRC_GITENV_FOUND="${DEVRC_GITENV_FOUND}${DEVRC_GITENV_FOUND:+,}${_devrc_gitenv_var}"
+  fi
+done
+unset _devrc_gitenv_var
+unset "${DEVRC_GIT_REPO_POINTERS[@]}"
+unset "${DEVRC_GITENV_CONTROL_VARS[@]}"
+
 if [ -z "$ROOT" ]; then
   ROOT="$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel 2>/dev/null || true)"
   [ -n "$ROOT" ] || ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -191,7 +279,37 @@ fi
 # the wrong thing entirely. The variable is inherited by every child this runner
 # starts, so unsetting it here is the one place that fixes it for all of them.
 unset CDPATH
-cd "$ROOT" || { echo "run-tests: cannot cd to ROOT=$ROOT" >&2; exit 2; }
+cd "$ROOT" || { echo "run-tests: cannot cd to ROOT=$ROOT" >&2; exit 3; }
+# 🔴 EXIT CODES: 3 = the ENVIRONMENT could not satisfy a precondition (GUARDs 1b
+# and 1c, a failed `cd $ROOT`, the spool `mkdir`, and GUARD 1 when run OUTSIDE a
+# sanctioned gate env). 2 = a REPO-CONTENT defect (target list, floor table,
+# launcher stubs, spool wiring — and GUARD 1 when DEVRC_GATE_ENV=1, because then
+# the missing tool is something the repo asked for and nothing supplies).
+# 🔴 NOTE GUARD 1 IS IN BOTH LISTS: it is the one guard whose code depends on the
+# CAUSE rather than on which guard fired, because its input (REQUIRED_TOOLS) is
+# repo content but its usual failure is environmental. The distinction is
+# load-bearing: `githooks/tests-on-push.sh`
+# DEGRADES on 3 (an env fault must not block a push over a broken caller) and
+# BLOCKS on 2. Collapsing them was a measured mistake — degrading on 2 turned
+# GUARD 5's and GUARD 3a's own warning ("do NOT delete the entry to make this
+# pass — that is how a suite stops running while the gate goes green") into
+# exactly that outcome, on the only tier that BLOCKS a push. 🔴 "The only tier
+# that RUNS" was true when this was written and is now FALSE: a Tekton PR gate
+# (`tekton/devrc-pytests`, `tekton/devrc-nodetests`) went live between #704 and
+# #714 — measured, #704 reports no checks and #714 reports both. It runs
+# `nix build .#checks.x86_64-linux.<leg>` — it does NOT enter the devShell — so
+# it is armed by checks.pytests's OWN export, not the shellHook's. (The
+# nodetests leg exports no marker and needs none: its runner has no
+# DEVRC_GATE_ENV and no exit 3.)
+#
+# What that gate does NOT do is block a merge: `main`'s branch protection does
+# NOT require status checks — `required_status_checks` returns 404 (measured
+# 2026-08-22) — though it DOES require 1 approving review. So protection EXISTS
+# and a red check is still advisory; do not restate this as "there is no branch
+# protection", which is the wrong mechanism for the right conclusion.
+# `test_ci_claim_matches_reality.py` cannot see any of this — its own scope note
+# excludes Tekton — so do not read its green as agreement.
+# A new `exit` here must pick a side deliberately.
 # --- GUARD 1: tool precondition ------------------------------------------------
 # Every binary the suites `skipif` on. Absence must be an ERROR, never a skip.
 # Sources (grep `shutil.which` under scripts/):
@@ -227,10 +345,19 @@ cd "$ROOT" || { echo "run-tests: cannot cd to ROOT=$ROOT" >&2; exit 2; }
 # scope fence). Those tests FAIL rather than skip when it is absent — a skipped
 # rotation test reports safety it never measured — so it belongs here.
 #
+# zsh:      scripts/tests/test_run3.py (2 tests). This is the sharpest case in
+#           the list, because the RULE under test is a zsh-vs-bash difference:
+#           zsh's MULTIOS makes `cmd 2>&1 >/dev/null | c` hand the consumer
+#           STDOUT where bash hands it nothing. A tier with no zsh is
+#           STRUCTURALLY blind to that whole class — the tests would skip and
+#           the gate would go green having measured the one shell the defect
+#           cannot occur in. Both hosts run zsh as the login shell, and
+#           flake.nix's `gateTools` carries it for the sandbox.
+#
 # 🔴 `python` is listed as well as `python3` because THIS SCRIPT invokes
 # `python -m pytest`, not `python3`. Asserting only `python3` checked a binary
 # the runner never calls.
-REQUIRED_TOOLS=(bash curl node rg git awk jq grep setsid python python3 nix-instantiate opencode logrotate rsync)
+REQUIRED_TOOLS=(bash curl node rg git awk jq grep setsid python python3 nix-instantiate opencode logrotate rsync zsh)
 missing_tools=()
 for t in "${REQUIRED_TOOLS[@]}"; do
   command -v "$t" >/dev/null 2>&1 || missing_tools+=("$t")
@@ -244,8 +371,78 @@ fi
 if [ "${#missing_tools[@]}" -gt 0 ]; then
   echo "run-tests: FATAL — required tool(s) missing from PATH: ${missing_tools[*]}" >&2
   echo "  The suites SKIP the tests that need these, so the run would go green while" >&2
-  echo "  testing less. This is a MISSING ENVIRONMENT, not a code failure — nothing" >&2
-  echo "  in the repo is broken and no test has run yet." >&2
+  echo "  testing less. No test has run yet." >&2
+  echo >&2
+  echo "  Do NOT drop entries from REQUIRED_TOOLS to make this pass — each one is" >&2
+  echo "  justified in the comment block directly above it." >&2
+  # 🔴 CLASSIFY BY CAUSE, NOT BY SITE. This guard reads REQUIRED_TOOLS, which is
+  # REPO CONTENT — so "GUARD 1 fired" does not by itself mean the environment is
+  # at fault, and treating it as environmental let a typo turn the gate off.
+  # MEASURED: `logrotatee` planted in REQUIRED_TOOLS aborted with rc 3, the
+  # pre-push hook DEGRADED, and the push went through with ZERO tests run — while
+  # the test that would have caught the typo never executed, because the runner
+  # aborted before pytest started. That is "a suite stops running while the gate
+  # goes green" on the only tier that BLOCKS a push — a Tekton PR gate does now
+  # run (see the EXIT CODES block above), but its red is advisory — branch
+  # protection does not require status checks — so exit 3 here still let the
+  # push land. devrc#705.
+  #
+  # The discriminator is whether we are IN a sanctioned gate env, which both the
+  # devShell and checks.pytests announce with DEVRC_GATE_ENV=1:
+  #   * set   -> the env supplies everything `gateTools` declares, so a still-
+  #              missing entry means the REPO asked for something nothing
+  #              supplies (a typo, or a gateTools omission). Repo defect: BLOCK.
+  #   * unset -> the caller is not in the gate env. Caller defect: degrade, and
+  #              the FATAL above tells them how to get in.
+  #
+  # 🔴 Deliberately NOT "is the binary declared in gateTools", which was the first
+  # design: that needs a hand-maintained nixpkgs-attr -> binary-name table
+  # (ripgrep->rg, util-linux->setsid, gnugrep->grep, nodejs->node), and this repo
+  # has already been bitten by exactly that shape once (pyyaml->yaml, #704). A
+  # table says nothing about the mapping it is missing.
+  #
+  # 🔴 The accepted value is EXACTLY "1" — not "any truthy value". A future tier
+  # writing `DEVRC_GATE_ENV=true` would fall through to the degrade arm. That is
+  # the fail-SAFE direction (a push blocks over a broken caller only if we get
+  # this wrong the other way), so it is a deliberate exact match, not an
+  # oversight: if you add a tier, export literally 1.
+  #
+  # 🔴 And the marker is a VARIABLE, so unlike the shellHook that sets it, it CAN
+  # be wrong about its environment: an operator who exports it by hand outside a
+  # gate env turns a genuine environment fault into a BLOCK whose message
+  # asserts the repo is broken. Manual paths only — every automated path
+  # re-enters `nix develop`, whose shellHook overwrites any inherited value
+  # (measured: DEVRC_GATE_ENV=0 nix develop … yields 1), so the hook tier cannot
+  # be weakened this way.
+  if [ "${DEVRC_GATE_ENV:-0}" = "1" ]; then
+    echo >&2
+    echo "  🔴 This is a REPO defect, not an environment one: you are inside a" >&2
+    echo "  sanctioned gate environment (DEVRC_GATE_ENV=1) and the tool is STILL" >&2
+    echo "  missing, so REQUIRED_TOOLS names something flake.nix \`gateTools\`" >&2
+    echo "  does not supply." >&2
+    echo >&2
+    echo "  FIX — two files must agree, but they name the tool DIFFERENTLY:" >&2
+    echo "    * $ROOT/scripts/run-tests.sh -> REQUIRED_TOOLS (the BINARY name)" >&2
+    echo "    * $ROOT/flake.nix            -> gateTools      (the NIX PACKAGE)" >&2
+    echo "  🔴 Do NOT expect to find the binary name in flake.nix — the package" >&2
+    echo "  that provides it is usually spelled differently (ripgrep provides" >&2
+    echo "  rg, nodejs provides node, util-linux provides setsid, gnugrep" >&2
+    echo "  provides grep). Finding no match there does NOT mean it is absent." >&2
+    echo "  So: correct the spelling in REQUIRED_TOOLS, or add the package that" >&2
+    echo "  PROVIDES the binary to gateTools." >&2
+    echo >&2
+    echo "  Exiting 2 so the pre-push hook BLOCKS rather than degrading." >&2
+    exit 2
+  fi
+  # The other arm. 🔴 Everything below is TRUE ONLY HERE — it says the repo is
+  # fine and tells you to enter the dev shell, and both are wrong advice for a
+  # caller who is already IN one. That is why it moved out of the shared header:
+  # it was printed unconditionally, so the exit-2 arm this change adds would have
+  # told a contributor with a REQUIRED_TOOLS typo that "nothing in the repo is
+  # broken" and to go re-run in the shell they were already standing in.
+  echo >&2
+  echo "  This is a MISSING ENVIRONMENT, not a code failure — nothing in the" >&2
+  echo "  repo is broken." >&2
   echo >&2
   echo "  FIX — enter the repo's own dev shell, which carries exactly this list," >&2
   echo "  and re-run from there:" >&2
@@ -256,10 +453,7 @@ if [ "${#missing_tools[@]}" -gt 0 ]; then
   echo "  you like). That shell is built from the SAME flake.nix \`gateTools\` list" >&2
   echo "  as the \`nix flake check\` gate, so it cannot drift out of satisfying this" >&2
   echo "  precondition." >&2
-  echo >&2
-  echo "  Do NOT drop entries from REQUIRED_TOOLS to make this pass — each one is" >&2
-  echo "  justified in the comment block directly above it." >&2
-  exit 2
+  exit 3
 fi
 
 # --- GUARD 1b: pytest ITSELF must be importable --------------------------------
@@ -288,9 +482,87 @@ if [ "$CHECK_TARGETS_ONLY" -eq 0 ] && [ "$CHECK_FLOORS_ONLY" -eq 0 ]; then
     echo "  pytest MODULE is not importable from it, so every suite would collect 0" >&2
     echo "  tests and report an unparseable summary. This is NOT a pytest output-format" >&2
     echo "  change — it is a missing dependency in the caller's environment." >&2
-    echo "  Fix the caller: flake.nix checks.pytests builds a python312.withPackages" >&2
-    echo "  env that includes pytest; the pre-push hook wraps this in a nix-shell." >&2
-    exit 2
+    echo "  Fix the caller: use the repo's own devShell, which carries pytest and" >&2
+    echo "  every other suite dep from the same flake.nix \`gateTools\` list the" >&2
+    echo "  \`nix flake check\` gate uses:" >&2
+    echo "      nix develop \"$ROOT\" --command bash \"$ROOT/scripts/run-tests.sh\" \"$ROOT\"" >&2
+    exit 3
+  fi
+
+  # --- GUARD 1c: the interpreter must carry EVERY dep the suites import --------
+  # 🔴 GUARD 1b asks "is pytest importable". Necessary, NOT sufficient: an
+  # interpreter can have pytest and still lack the deps the suites import at
+  # COLLECTION time, and the run then fails in a shape that reads as a BROKEN
+  # BRANCH rather than a broken caller.
+  #
+  # MEASURED 2026-08-21, running this suite with a cwd inside an UNRELATED repo:
+  # `python` resolved to that repo's `.venv`, pytest imported fine, and the run
+  # produced
+  #     FAIL scripts/mail-actions/tests   (collected 0 tests)
+  #     FAIL scripts/signal/tests         (collected=2 below floor 553, errors=2)
+  #     FAIL scripts/initiatives/tests    (collected=784 ... failed=9)
+  # — 13 failures, every one an artifact of missing deps. The only tell was a
+  # traceback path naming the other repo's site-packages; it took four attempts to
+  # find, and the intermediate readings were confidently wrong.
+  #
+  # 🔴 CHECK THE PROPERTY, NOT A PROXY FOR IT. The first version of this guard
+  # refused a VIRTUALENV (`sys.prefix != sys.base_prefix`), which is wrong in BOTH
+  # directions and was measured so: a nix `withPackages` env missing psycopg2 and
+  # minio — the exact shape above — PASSED it silently, while a
+  # `venv --system-site-packages` with every dep importable was REFUSED. Importing
+  # the deps costs the same, catches every wrong-interpreter shape, and needs no
+  # escape hatch: if they import, the run is sound by definition.
+  #
+  # 🔴 ACTUALLY IMPORT THEM. `find_spec` only resolves the module — it returns a
+  # spec for a package whose C extension is broken (psycopg2 against a mismatched
+  # libpq) or for an empty directory on the path, both of which then ImportError
+  # at COLLECTION time, which is the failure this guard exists to pre-empt. The
+  # first version used find_spec and its own text claimed "if they import"; the
+  # two were not the same check.
+  #
+  # 🔴 FAIL CLOSED on an unreadable probe. Anything the interpreter prints ahead
+  # of this output (a `sitecustomize.py` on PYTHONPATH will do it) shifts the
+  # parse, and a guard that then passes silently is worse than none — GUARD 4
+  # already fails the run when pytest's summary is unparseable; this matches it.
+  _dep_probe="$(python -c '
+import sys
+need = ("pytest", "requests", "psycopg2", "minio", "yaml")
+missing = []
+for m in need:
+    try:
+        __import__(m)
+    except Exception:
+        missing.append(m)
+print("DEPS:" + (",".join(missing) if missing else "OK"))
+print("EXE:" + sys.executable)
+' 2>/dev/null)"
+  _dep_line="$(printf '%s\n' "$_dep_probe" | grep -a '^DEPS:' | tail -1)"
+  _exe_line="$(printf '%s\n' "$_dep_probe" | grep -a '^EXE:' | tail -1)"
+  if [ -z "$_dep_line" ] || [ -z "$_exe_line" ]; then
+    echo "run-tests: FATAL — could not read the interpreter dependency probe." >&2
+    echo "  Expected a DEPS: and an EXE: line; got:" >&2
+    printf '%s\n' "$_dep_probe" | sed 's/^/    /' >&2
+    echo "  Refusing rather than guessing — an unreadable precondition is not a" >&2
+    echo "  satisfied one." >&2
+    exit 3
+  fi
+  # 🔴 ALWAYS print the resolved interpreter, including on the happy path. A green
+  # whose environment you cannot see is what made this expensive: the one fact
+  # that would have ended it in a single step was never in the log.
+  echo "run-tests: interpreter ${_exe_line#EXE:}" >&2
+  if [ "$_dep_line" != "DEPS:OK" ]; then
+    echo "run-tests: FATAL — the interpreter is missing suite dependencies." >&2
+    echo "  missing : ${_dep_line#DEPS:}" >&2
+    echo "  python  : ${_exe_line#EXE:}" >&2
+    echo "  pytest imports, so GUARD 1b passed — but the suites import these at" >&2
+    echo "  COLLECTION time, so the run would report collection errors and floor" >&2
+    echo "  misses that read as a broken BRANCH rather than a broken CALLER." >&2
+    echo "  A cwd inside another repo supplies ITS interpreter, and \`env -u" >&2
+    echo "  VIRTUAL_ENV\` is not enough — \`nix-shell --run\` executes the shell" >&2
+    echo "  hooks that re-activate it. Use the repo's own devShell, which is" >&2
+    echo "  immune (measured) and needs no hand-copied dependency list:" >&2
+    echo "    nix develop $ROOT --command bash $ROOT/scripts/run-tests.sh --set all $ROOT" >&2
+    exit 3
   fi
 fi
 
@@ -337,6 +609,15 @@ HERMETIC_TARGETS=(
   scripts/initiatives/tests
   scripts/repo-cos/tests
   scripts/task-spec-drafter/tests
+  # Added 2026-08-22 with the check-clickup-addressed migration out of
+  # datapacket-talos, where no gate had ever run it — the suite was invoked by
+  # hand via its own tests/run_all.py. Hermetic by construction: every ClickUp
+  # call goes through a patched `subprocess.run`, and the transcript walkers get
+  # their CLAUDE_DIR reassigned to a tmp tree, so neither the network nor the
+  # real ~/.claude/projects is touched. run_all.py stays as the skill's own
+  # runner (it purges __pycache__ and scores an import failure as a FAILURE);
+  # pytest collects the same files.
+  scripts/check-clickup-addressed/tests
   # A FILE, not a dir, and deliberately so: scripts/claude-hooks/tests/ also
   # holds hand-rolled scripts that call main() at import and sys.exit(), which
   # pytest cannot collect. Naming the one pytest-collectable file keeps them
@@ -386,6 +667,15 @@ HERMETIC_TARGETS=(
   # orphaned by the switch that deploys it. Gated here because it is the only test
   # that asserts a property ACROSS the hook modules, so no per-hook target owns it.
   scripts/claude-hooks/tests/test_on_disk_artifact_names.py
+  # Same reason again — a FILE, not the directory. The backgrounded-command
+  # capture log (ClickUp 868ktvqf9). It fires PreToolUse AND PostToolUse on every
+  # Bash call, so its fail-open contract is felt on every command the operator
+  # runs: 21 hostile inputs each asserting exit 0 with an empty stdout AND an
+  # empty stderr, plus the negative control proving that battery can go red. The
+  # marker scanner's NON-matches are the load-bearing half (14 of 28 rows expect
+  # no marker), because a scanner that marks everything would satisfy a one-way
+  # test while turning the 16 MiB bound into hours of history instead of months.
+  scripts/claude-hooks/tests/test_bg_command_capture.py
   # Writer 2 of the agent activity ledger — the OPENCODE half. A Python suite
   # driving real `node`, mirroring scripts/collector/opencode/tests/test_plugin.py
   # (this repo's established way to test an opencode plugin; there is no node
@@ -983,7 +1273,29 @@ TARGET_FLOORS=(
   #   _suggested_floor 6219 = 6219 - min(50, max(1, 310)) = 6219 - 50 = 6169
   #
   # ⚠ ZERO new skips from any contribution.
-  "scripts/tests|6169"
+  #
+  # 2026-08-21, `scripts/run3` + scripts/tests/test_run3.py (the stream-capture
+  # helper): 6483 -> 6509 collected, +26. BOTH numbers MEASURED with
+  # `--collect-only` — 6483 in a clean detached worktree of origin/main, 6509 on
+  # this branch, re-measured AFTER a rebase onto 6070161e — not inferred from
+  # the pin, and not from the pre-rebase base (main moved by 3 commits mid-work
+  # and #653 alone added 3 tests, so the pre-rebase pair would have been wrong
+  # by exactly that).
+  #
+  # 🔴 The pin this REPLACES was 6169 against a real 6483 on main alone: 314 of
+  # drift, none of it from here, exactly as the paragraph above predicted it
+  # would keep happening. Re-measure; do not trust this number either.
+  #
+  #   _suggested_floor 6509 = 6509 - min(50, max(1, 325)) = 6509 - 50 = 6459
+  #
+  # ⚠ ZERO new skips. No HERMETIC_TARGETS entry needed — scripts/tests is
+  # already a directory target, so movement on THIS line is the evidence the
+  # gate runs the new file at all. test_run3.py's two zsh tests carry a
+  # `skipif` for a bare `pytest scripts/tests`, but under THIS runner they can
+  # never fire: `zsh` is in REQUIRED_TOOLS, so a host without it aborts on
+  # GUARD 1 naming the binary rather than running two tests thinner. That is
+  # why they are not pinned in EXPECTED_SKIPS.
+  "scripts/tests|6459"
   # 2026-08-11, the session-summary changed-paths work: 230 -> 273 collected,
   # +43 for scripts/collector/tests/test_changed_paths.py (the shared
   # `changed_paths*` module). The gate printed this replacement itself —
@@ -1094,10 +1406,27 @@ TARGET_FLOORS=(
   # rots is silent: an anchor stops matching, the mutant never lands, and the
   # run prints ANCHOR-MISS, which reads like a hiccup rather than "this mutant
   # tested nothing". That has already happened here once.
-  "scripts/signal/tests|553"
+  # 2026-08-22: 717 tripped the ceiling at 691 with every test PASSING (716
+  # passed, 1 pinned skip) — the floor had fallen 164 behind, more than the
+  # 138 of slack the gate allows, so a whole suite could have vanished under it
+  # while the run stayed green. The gate printed "scripts/signal/tests|682" and
+  # that is what is below, copied not computed. Found by a run on an unrelated
+  # branch: this was already RED on origin/main, so it was blocking every push
+  # rather than only the change that noticed it.
+  "scripts/signal/tests|682"
   "scripts/initiatives/tests|745"
   "scripts/repo-cos/tests|315"
   "scripts/task-spec-drafter/tests|135"
+  # 2026-08-22, check-clickup-addressed arrives as a NEW target: 176 collected on
+  # the branch, agreeing with what its own tests/run_all.py reports (176 passed,
+  # 0 failed) — two runners, one number. Gate's own rule on the gate's own count:
+  #   _suggested_floor 176 = 176 - min(50, max(1, 176/20 = 8)) = 176 - 8 = 168.
+  # (155 came over from datapacket-talos; the +6 are the migration's own marker-path
+  # regression, the negative control that rejected the obvious directory fix, and the
+  # four an adversarial audit of the migration produced — the documented `$CCUA/...`
+  # invocation, the unmarked `--json` output, its end-to-end seam, and the
+  # header/marker single-source pin.)
+  "scripts/check-clickup-addressed/tests|168"
   "scripts/claude-hooks/tests/test_guard_core.py|1260"
   # 2026-08-13, next-step-nudge.py's suite arrives as a NEW target: 78 collected on the
   # branch. Gate's own count through the gate's own rule:
@@ -1291,6 +1620,13 @@ TARGET_FLOORS=(
   # two-sided classification guard that fails when a hook module appears or vanishes.
   #   _suggested_floor 13 = 13 - min(50, max(1, 13/20 = 0 -> 1)) = 12.
   "scripts/claude-hooks/tests/test_on_disk_artifact_names.py|12"
+  # 2026-08-21, the backgrounded-command capture log (868ktvqf9) arrives as a NEW
+  # target: 80 collected, 0 skipped, measured by this gate on this branch.
+  #   _suggested_floor 80 = 80 - min(50, max(1, 80/20 = 4)) = 76.
+  # The number is the gate's own function applied to the gate's own printed
+  # count, not arithmetic — if this line conflicts, re-run the gate on the MERGED
+  # tree and copy what it prints rather than reconciling the two sides.
+  "scripts/claude-hooks/tests/test_bg_command_capture.py|76"
   # 2026-08-14, writer 2 (opencode) arrives as a NEW target: 15 collected.
   #   _suggested_floor 15 = 15 - min(50, max(1, 15/20 = 0 -> 1)) = 14.
   #
@@ -1545,7 +1881,7 @@ if ! mkdir -p "$SPOOL_ISOLATED" "$SPOOL_TRAP"; then
   echo "  under $SPOOL_DIR. Refusing to run: without them the suites append" >&2
   echo "  real rows to ~/.local/state/activity/spool, which the collector ships" >&2
   echo "  to the production ClickHouse activity.events." >&2
-  exit 2
+  exit 3
 fi
 export ACTIVITY_SPOOL_DIR="$SPOOL_ISOLATED"
 export XDG_STATE_HOME="$SPOOL_TRAP"
@@ -1565,6 +1901,14 @@ SPOOL_ISOLATED_LOG="$SPOOL_ISOLATED/current.log"
 SPOOL_SESSION_MARKER="spool(session)"
 SPOOL_CONTROL_SOURCE="devrc-spool-guard"
 SPOOL_CONTROL_OK="emitted"
+
+# 🔴 GUARD 9's marker, the same shape and pinned the same way against
+# `scripts/testlib/gitenv.py::SESSION_MARKER`. #683 declared this marker and
+# then never counted it, which left "this target loaded the detector and saw
+# nothing" indistinguishable from "this target never loaded the detector" — the
+# reassuring zero claude/RULES.md's positive-control rule is about. It is
+# counted per pytest target in `run_pytest`, and its absence is a FAILURE.
+GITENV_SESSION_MARKER="gitenv(session)"
 
 # Where the fallback lands, asked of `spool_emit` ITSELF with the variable
 # removed — never restated here. A second copy of the "…/activity/spool" layout
@@ -1596,6 +1940,27 @@ echo "run-tests: activity telemetry isolated for this run (GUARD 8)"
 echo "  ACTIVITY_SPOOL_DIR=$ACTIVITY_SPOOL_DIR"
 echo "  fallback trap      =$SPOOL_TRAP_LOG"
 
+# --- GUARD 9's REPORTING LINE ------------------------------------------------
+# The clearing itself happens at the TOP of this file (before ROOT is resolved —
+# see the GUARD 9 header there); this is only the announcement, printed here so
+# it sits beside GUARDS 7 and 8 where a reader looks for the run's isolation
+# summary.
+#
+# 🔴 IT REPORTS A REAL PAIR NOW. It used to print two CONSTANTS under the words
+# "the PAIR" — the ledger it would clear and the flag it would pass — neither of
+# which is a measurement, so the line read identically on a poisoned environment
+# and a clean one. `found-set` is what was actually in this environment when the
+# run started (the clearing itself happens at the TOP of this file, before ROOT
+# is resolved — see the GUARD 9 header there), and `none` there is the normal
+# case. A non-empty value on a machine nobody has instrumented is the single
+# most useful line in this output: it names the variable that would have
+# redirected the suite.
+echo "run-tests: git repo pointers cleared for this run (GUARD 9)"
+echo "  ledger      =${DEVRC_GIT_REPO_POINTERS[*]} ${DEVRC_GITENV_CONTROL_VARS[*]}"
+echo "  found-set   =${DEVRC_GITENV_FOUND:-none}"
+echo "  detector    =-p testlib.gitenv_plugin (per pytest target; its own"
+echo "               '$GITENV_SESSION_MARKER' line is counted per target below)"
+
 # "<target>|<sess-from>|<sess-to>|<trap-from>|<trap-to>|<iso-from>|<iso-to>" —
 # three line ranges per target, so every count below is attributed to the target
 # that produced it rather than to the run as a whole.
@@ -1621,6 +1986,218 @@ _spool_mark_before() {
 # range it records belongs to whatever ran previously.
 _spool_account() {
   SPOOL_SEEN+=("$1|$(( SPOOL_B_S + 1 ))|$(_spool_lines "$SPOOL_SESSIONS_LOG")|$(( SPOOL_B_T + 1 ))|$(_spool_lines "$SPOOL_TRAP_LOG")|$(( SPOOL_B_I + 1 ))|$(_spool_lines "$SPOOL_ISOLATED_LOG")")
+}
+
+# --- GUARD 10: NO TEST MAY TOUCH THE OPERATOR'S GIT CONFIG OR A REAL REMOTE -----
+# 🔴 THE THIRD ENFORCEMENT POINT, attached to the same line for the same reason.
+#
+# MEASURED 2026-08-21. A test ran `githooks/install.sh` for real; that script
+# sets `core.hooksPath` **--global**, so it rewrote the operator's `~/.gitconfig`
+# to point at a pytest tmpdir. In the same window ~63 fixture commits (`base`,
+# `ahead`, `local side`, `un-pushed work stranded on main`, `autocommit: N
+# change(s) …`) were pushed to the REAL `origin/main`, whose tree became a single
+# file named `f`, and the base clone ended up `core.bare = true` on a populated
+# working tree. Everything was repaired; nothing was lost. What was missing was a
+# FLOOR — so the next such test does it again.
+#
+# GUARD 7 (#399) and GUARD 8 (#614) both started life as a conftest fixture and
+# both protected exactly ONE target, because this script runs one pytest process
+# per target. This is the same rule in one module (`scripts/testlib/
+# nogit_plugin.py`) with two entry points — `-p testlib.nogit_plugin` on the
+# single pytest line below, and an import in `scripts/tests/conftest.py` — plus
+# these exports, which are what cover the NON-pytest targets (HOOK_TESTS,
+# SHELL_TESTS) that no conftest can ever reach.
+#
+# The levers, and their limits, are documented in the plugin's header. What is
+# specific to THIS file is the accounting, and it has two halves:
+#
+#   * the CONTROLS (per pytest target): a real `git config --global` write that
+#     must land in the guard's own file, and a real `https` git operation that
+#     must be refused BY GIT. Both are "watch the number move" — a zero from a
+#     target that never ran a control is not evidence of anything.
+#   * the TRIPWIRE (every target): the operator's real config files are
+#     fingerprinted before and after each target. That is what catches the
+#     residual hazard the exports cannot close — code that REMOVES
+#     GIT_CONFIG_GLOBAL from its own environment and drops back to $HOME.
+#
+# 🔴 HOME IS DELIBERATELY NOT REASSIGNED. Several suites legitimately read
+# `~/.claude/...`, so a blanket HOME rewrite would break real tests and be
+# reverted — a durable guard traded for a temporary one. GIT_CONFIG_GLOBAL is the
+# narrow lever that closes the surface that was actually poisoned.
+
+# The protected set is computed BEFORE the exports, while the ambient
+# environment is still the operator's — afterwards `git config --global` reports
+# the guard file and the tripwire would be watching its own scratch copy.
+#
+# Two sources, unioned: what git ITSELF reports as the origin of the operator's
+# global settings (never a restatement of git's lookup rule), and the documented
+# candidate paths, INCLUDING ones that do not exist yet — a test that CREATES
+# `~/.gitconfig` where there was none is the same finding as one that edits it.
+NOGIT_PROTECTED=()
+_nogit_protect() { # $1 = path; ignore empties and duplicates
+  local p="$1" q
+  [ -n "$p" ] || return 0
+  for q in ${NOGIT_PROTECTED[@]+"${NOGIT_PROTECTED[@]}"}; do
+    [ "$q" = "$p" ] && return 0
+  done
+  NOGIT_PROTECTED+=("$p")
+}
+while IFS= read -r origin; do
+  _nogit_protect "$origin"
+done < <(git config --global --list --show-origin 2>/dev/null \
+         | grep '^file:' | sed 's/^file://' | cut -f1 | sort -u)
+_nogit_protect "${HOME:-}/.gitconfig"
+_nogit_protect "${XDG_CONFIG_HOME:-${HOME:-}/.config}/git/config"
+# `core.bare = true` on a populated working tree was the third casualty, and it
+# is a REPO-LOCAL write — GIT_CONFIG_GLOBAL does not govern it at all. The
+# tripwire is the only thing that can see it. (Absent in the nix sandbox, which
+# builds from a store copy with no `.git`; that is reported, not assumed.)
+NOGIT_REPO_GITDIR="$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+[ -n "$NOGIT_REPO_GITDIR" ] && _nogit_protect "$NOGIT_REPO_GITDIR/config"
+
+_nogit_fingerprint_of() { # $@ = paths -> one line each: "<sha256|ABSENT> <path>"
+  local f
+  for f in "$@"; do
+    if [ -f "$f" ]; then
+      printf '%s %s\n' "$(sha256sum "$f" 2>/dev/null | cut -c1-64)" "$f"
+    else
+      printf 'ABSENT %s\n' "$f"
+    fi
+  done
+}
+_nogit_fingerprint() {
+  _nogit_fingerprint_of ${NOGIT_PROTECTED[@]+"${NOGIT_PROTECTED[@]}"}
+}
+
+NOGIT_DIR="$(mktemp -d)"
+NOGIT_CONFIG="$NOGIT_DIR/gitconfig"
+NOGIT_SESSIONS_LOG="$NOGIT_DIR/sessions.log"
+NOGIT_CHANGED_LOG="$NOGIT_DIR/changed.log"
+if ! : > "$NOGIT_CONFIG" || ! : > "$NOGIT_CHANGED_LOG"; then
+  echo "run-tests: FATAL — could not create the git-isolation files under" >&2
+  echo "  $NOGIT_DIR. Refusing to run: without them a test that calls" >&2
+  echo "  'git config --global' rewrites the operator's ~/.gitconfig, and a" >&2
+  echo "  fixture repo can push to the real origin." >&2
+  exit 2
+fi
+
+# 🔴 NEGATIVE CONTROL FOR THE TRIPWIRE'S COMPARATOR — can it go red at all?
+# A fingerprint that always reported "unchanged" is indistinguishable from a
+# perfectly protected run, and it is the cheaper failure to have. So a canary
+# file is fingerprinted, modified, and fingerprinted again BEFORE anything else
+# runs; if the comparator does not notice, this runner cannot vouch for a single
+# `real-config-changed=0` it is about to print.
+NOGIT_CANARY="$NOGIT_DIR/canary"
+printf 'before\n' > "$NOGIT_CANARY"
+_nogit_canary_a="$(_nogit_fingerprint_of "$NOGIT_CANARY")"
+printf 'after\n' > "$NOGIT_CANARY"
+_nogit_canary_b="$(_nogit_fingerprint_of "$NOGIT_CANARY")"
+if [ "$_nogit_canary_a" = "$_nogit_canary_b" ]; then
+  echo "run-tests: FATAL — GUARD 9's tripwire cannot detect a file changing." >&2
+  echo "  A canary was rewritten between two fingerprints and they matched, so" >&2
+  echo "  every 'real-config-changed=0' below would be the zero of a detector" >&2
+  echo "  wired to nothing. (sha256sum missing or unreadable?)" >&2
+  exit 2
+fi
+rm -f "$NOGIT_CANARY"
+
+# THE EXPORTS. Unconditional, including over an ambient value: honouring an
+# inherited GIT_CONFIG_GLOBAL would make the isolation depend on whatever the
+# operator's shell happened to carry. Read the plugin header for what each one
+# does; `GIT_CONFIG_SYSTEM` and `GIT_CONFIG_NOSYSTEM` are BOTH set because they
+# cover different git versions, and neither substitutes for the other.
+export GIT_CONFIG_GLOBAL="$NOGIT_CONFIG"
+export GIT_CONFIG_SYSTEM=/dev/null
+export GIT_CONFIG_NOSYSTEM=1
+export GIT_ALLOW_PROTOCOL=file
+export GIT_TERMINAL_PROMPT=0
+export DEVRC_TEST_GIT_GUARD_DIR="$NOGIT_DIR"
+# A fresh RUN is the ROOT of the session-nesting chain (see the plugin's
+# NESTED_ENV) — the same reason GUARD 8 unsets its own flag here.
+unset DEVRC_TEST_GIT_IN_SESSION
+
+# The tokens shared with `scripts/testlib/nogit_plugin.py`. They are spelled on
+# both sides of a process boundary, so they are PINNED both ways by
+# `scripts/tests/test_nogit_isolation.py` — a rename on one side alone would
+# leave this accounting matching nothing and printing a clean run.
+NOGIT_SESSION_MARKER="nogit(session)"
+NOGIT_CONTROL_SECTION="devrc-nogit-guard"
+NOGIT_CONTROL_OK="emitted"
+NOGIT_PROTOCOL_OK="refused"
+
+# 🔴 VERIFY THE LEVERS GOVERN, UP FRONT — the same shape as GUARD 8's fallback
+# check. An export that does not actually change git's behaviour would leave an
+# unarmed guard reporting green all run.
+_nogit_fp_pre="$(_nogit_fingerprint)"
+if ! git config --global "$NOGIT_CONTROL_SECTION.runner-probe" armed 2>/dev/null \
+   || ! grep -q 'runner-probe' "$NOGIT_CONFIG"; then
+  echo "run-tests: FATAL — 'git config --global' does NOT write to this run's" >&2
+  echo "  isolated file ($NOGIT_CONFIG). GIT_CONFIG_GLOBAL is not governing git," >&2
+  echo "  so a test calling githooks/install.sh would rewrite the operator's" >&2
+  echo "  real ~/.gitconfig exactly as it did on 2026-08-21." >&2
+  exit 2
+fi
+if [ "$_nogit_fp_pre" != "$(_nogit_fingerprint)" ]; then
+  echo "run-tests: FATAL — the runner's own 'git config --global' probe CHANGED" >&2
+  echo "  a protected file. The redirect reported success and the write still" >&2
+  echo "  reached the operator's real configuration." >&2
+  exit 2
+fi
+NOGIT_PROTO_OUT="$(git ls-remote https://devrc-nogit-guard.invalid/refused.git 2>&1 || true)"
+case "$NOGIT_PROTO_OUT" in
+  *"not allowed"*) : ;;
+  *)
+    echo "run-tests: FATAL — a git 'https' operation was NOT refused by the" >&2
+    echo "  protocol allowlist. GIT_ALLOW_PROTOCOL=file is not governing git, so" >&2
+    echo "  a fixture repo can push to a real remote. git said:" >&2
+    printf '  %s\n' "$NOGIT_PROTO_OUT" >&2
+    exit 2
+    ;;
+esac
+
+echo "run-tests: git isolated for this run (GUARD 10)"
+echo "  GIT_CONFIG_GLOBAL=$NOGIT_CONFIG"
+echo "  GIT_ALLOW_PROTOCOL=$GIT_ALLOW_PROTOCOL  (https/ssh refused by git itself)"
+if [ "${#NOGIT_PROTECTED[@]}" -eq 0 ]; then
+  echo "  protected files: 0 — NOT MEASURED. This HOME carries no git config and" \
+       "the tree has no .git, so the tripwire has nothing to watch; the per-target" \
+       "controls are what carry this run."
+else
+  echo "  protected files: ${#NOGIT_PROTECTED[@]} (fingerprinted before/after every target)"
+  for f in "${NOGIT_PROTECTED[@]}"; do
+    if [ -f "$f" ]; then echo "    present $f"; else echo "    absent  $f"; fi
+  done
+fi
+
+# "<target>|<sess-from>|<sess-to>|<n-changed>|<control-delta>"
+NOGIT_SEEN=()
+NOGIT_B_FP=""
+NOGIT_B_CTL=0
+NOGIT_B_S=0
+
+_nogit_controls() { # how many per-session control keys the guard file holds
+  git config --file "$NOGIT_CONFIG" \
+    --get-regexp "^$NOGIT_CONTROL_SECTION\.control-" 2>/dev/null | grep -c . || true
+}
+_nogit_mark_before() {
+  NOGIT_B_FP="$(_nogit_fingerprint)"
+  NOGIT_B_CTL="$(_nogit_controls)"
+  NOGIT_B_S="$(_spool_lines "$NOGIT_SESSIONS_LOG")"
+}
+# $1 = target name. Every call MUST be preceded by the before-mark above, or the
+# range it records belongs to whatever ran previously.
+_nogit_account() {
+  local t="$1" i n=0
+  local -a B A
+  mapfile -t B <<<"$NOGIT_B_FP"
+  mapfile -t A <<<"$(_nogit_fingerprint)"
+  for ((i = 0; i < ${#A[@]}; i++)); do
+    if [ "${B[i]:-}" != "${A[i]}" ]; then
+      n=$(( n + 1 ))
+      printf '%s\t%s\n' "$t" "${A[i]#* }" >> "$NOGIT_CHANGED_LOG"
+    fi
+  done
+  NOGIT_SEEN+=("$t|$(( NOGIT_B_S + 1 ))|$(_spool_lines "$NOGIT_SESSIONS_LOG")|$n|$(( $(_nogit_controls) - NOGIT_B_CTL ))")
 }
 
 # 🔴 THE ACKNOWLEDGEMENT LEDGER — "<target>|<reason>". A target listed here is
@@ -1661,19 +2238,45 @@ _nolaunch_ack_reason() {
 # the same way TARGET_FLOORS' two-way pin is tested.
 
 # --- GUARD 2: the pinned expected-skip set -------------------------------------
-# One "<dir>|<reason-regex>" per LEGITIMATELY skipped test. Both halves must match
-# a pytest `SKIPPED [n] <path>:<line>: <reason>` line, and the skip TOTAL must
-# equal the number of entries. Adding an entry is a deliberate act of accounting
-# — do it only when the skip is genuinely unavoidable, and say why.
+# An entry is "<dir>|<reason-regex>" or "<dir>|<reason-regex>|unset:VAR" per
+# LEGITIMATELY skipped test. `dir` and `reason` must both match a pytest
+# `SKIPPED [n] <path>:<line>: <reason>` line, and the skip TOTAL must equal the
+# number of entries THAT APPLY HERE — not the raw entry count. Adding an entry is
+# a deliberate act of accounting — do it only when the skip is genuinely
+# unavoidable, and say why.
 #
-# Built AFTER $HOME is settled: an entry may be conditional, but its condition
+# Built AFTER $HOME is settled: an entry may be conditional, and its condition
 # must be the SAME predicate the test itself uses — never a blanket allowance,
 # or the pin degrades into the numeric ceiling it exists to beat.
+#
+# 🔴 The third field is what makes that promise real. Without it the accounting
+# compared the skip total against a FLAT entry count, so on a host where a pinned
+# skip legitimately RUNS the gate went red — and the advice it printed ("delete
+# its EXPECTED_SKIPS entry") is wrong for a host-conditional pin, because
+# deleting it reds every OTHER host. `unset:VAR` means "expected only where VAR
+# is unset or empty". One predicate — `_skip_entry_applies` — decides both the
+# count and the forgiveness, so the two cannot drift apart.
 EXPECTED_SKIPS=(
   # Opt-in drift check against the LIVE homelab store — needs a kubeconfig and
   # network, neither of which a hermetic gate may have. Skips everywhere unless
   # REPO_COS_LIVE_DRIFT_CHECK=1.
   "scripts/repo-cos/tests|live-store drift check is opt-in"
+  # Needs a REAL Postgres (SIGNAL_PG_DSN). Unlike the skill_audit case below —
+  # which was correctly fixed by re-pointing at tracked fixtures so it RUNS —
+  # this one cannot be made hermetic: the test exists because SQLite does not
+  # reproduce Postgres static type checking, which is the exact defect #657
+  # fixed (a COALESCE over uuid/text that had never worked on real Postgres).
+  # gateTools carries psycopg2 (the client) but no Postgres SERVER, so nothing
+  # in the hermetic tier can satisfy it.
+  # 🔴 CONSEQUENCE, stated so it is not a surprise: this test is opt-in only and
+  # never runs in the gate. The regression it guards is caught only when someone
+  # runs with SIGNAL_PG_DSN set. Pinning unbreaks main; it does not restore the
+  # coverage.
+  # CONDITIONAL: expected only where the DSN is absent. Without the third field
+  # this pin made the gate permanently RED for any developer who exports
+  # SIGNAL_PG_DSN — the test then RUNS, the skip total drops to 1, and the flat
+  # entry count still said 2.
+  "scripts/signal/tests|needs a real Postgres|unset:SIGNAL_PG_DSN"
 )
 # ⚠ REMOVED, deliberately — do not re-add. `scripts/tests/test_skill_audit.py`
 # carried two regression pins against the LIVE datapacket-talos skill corpus, a
@@ -1770,16 +2373,46 @@ run_pytest() {
   log="$(mktemp)"
   nl_before="$(_nolaunch_lines)"
   _spool_mark_before
-  # 🔴 `-p testlib.nolaunch_plugin` is GUARD 7 and `-p testlib.spool_plugin` is
-  # GUARD 8 (see each header). Both are on THIS line — the one place every
-  # target is invoked — and not in two dozen conftests.
-  python -m pytest "$d" -q -p no:cacheprovider -p testlib.nolaunch_plugin -p testlib.spool_plugin \
+  _nogit_mark_before
+  # 🔴 `-p testlib.nolaunch_plugin` is GUARD 7, `-p testlib.spool_plugin` is
+  # GUARD 8, `-p testlib.gitenv_plugin` is GUARD 9 and `-p testlib.nogit_plugin`
+  # is GUARD 10 (see each header). All FOUR are on THIS line — the one place
+  # every target is invoked — and not in two dozen conftests, which is what left
+  # GUARD 7 covering 1 target of 17 and GUARD 8 covering 1 directory of 13.
+  #
+  # 9 and 10 are two guards, not one done twice: 9 strips the repo POINTERS
+  # (GIT_DIR and friends) so a fixture cannot reach this checkout by accident;
+  # 10 refuses a WRITE to any repo outside the session tmp roots, which is the
+  # case a pointer strip cannot answer. They landed a day apart from separate
+  # branches and both claimed the number; only the numbering was reconciled.
+  python -m pytest "$d" -q -p no:cacheprovider -p testlib.nolaunch_plugin -p testlib.spool_plugin -p testlib.gitenv_plugin -p testlib.nogit_plugin \
     --no-header -rs >"$log" 2>&1
   rc=$?
   nl_after="$(_nolaunch_lines)"
   NOLAUNCH_SEEN+=("$d|$(( nl_before + 1 ))|$nl_after")
   _spool_account "$d"
+  _nogit_account "$d"
   cat "$log"
+
+  # --- GUARD 9's POSITIVE CONTROL, per target -------------------------------
+  # The detector announces itself once per pytest session. Counting it is the
+  # only thing that separates "GUARD 9 ran and this repository did not move"
+  # from "GUARD 9 was never loaded here" — two states with byte-identical
+  # output otherwise, and the second is what #399 and #614 both shipped.
+  # `>= 1` rather than `== 1`: a target whose conftest ALSO re-exports the hooks
+  # legitimately prints it twice (two plugin registrations of the same module's
+  # functions), and that is coverage, not a defect.
+  local gitenv_markers
+  gitenv_markers="$(grep -ac "^$GITENV_SESSION_MARKER" "$log" || true)"
+  if [ "${gitenv_markers:-0}" -lt 1 ]; then
+    echo "run-tests: FATAL — GUARD 9's detector never announced itself for $d." >&2
+    echo "  Expected at least one '$GITENV_SESSION_MARKER …' line. Its absence means" >&2
+    echo "  the target ran WITHOUT the git-repo isolation detector, so a clean" >&2
+    echo "  result there is a claim about nothing. Check that '-p testlib.gitenv_plugin'" >&2
+    echo "  is still on this runner's pytest line." >&2
+    RESULTS+=("FAIL  $d (GUARD 9 marker absent)")
+    fail=1
+  fi
 
   # GUARD 4: parse pytest's summary line. `-q` emits it undecorated, e.g.
   #   "660 passed, 123 skipped in 15.10s"   /   "1 failed, 2 passed in 0.1s"
@@ -1899,6 +2532,7 @@ for HOOK_TEST in "${HOOK_TESTS[@]}"; do
   echo "=== script $HOOK_TEST ==="
   nl_before="$(_nolaunch_lines)"
   _spool_mark_before
+  _nogit_mark_before
   if python "$HOOK_TEST"; then
     RESULTS+=("PASS  $HOOK_TEST (script)")
   else
@@ -1913,6 +2547,9 @@ for HOOK_TEST in "${HOOK_TESTS[@]}"; do
   # marker and no fallback control — their protection is the two env exports,
   # and what is checked is that they leaked nothing into the trap.
   _spool_account "$HOOK_TEST"
+  # GUARD 10 likewise: no plugin, so no session marker and no controls — their
+  # protection is the exports, and what is checked is the tripwire.
+  _nogit_account "$HOOK_TEST"
   echo
 done
 
@@ -1925,8 +2562,18 @@ done
 # It is here so the guard above covers it too — the stub dir is on PATH for this
 # whole script, so a stub that stopped shadowing lands in the launch log instead
 # of on the operator's desktop.
+#
+# `test_resume_state.sh` is here for the SAME reason, found the same way: it too
+# said `run: bash scripts/tests/test_resume_state.sh` and nothing ever did, so
+# it went RED on main unnoticed when `handoff_says_inflight` changed from taking
+# a PATH to taking TEXT. Worse than merely red — a helper that returns false for
+# every input satisfies every negative assertion in the file, so two of its four
+# cases passed FOR THE WRONG REASON. It asserts the pure extraction helpers that
+# the DRIFT block's whole PR-reconciliation rests on; an unrun suite is a guard
+# that reports no failures.
 SHELL_TESTS=(
   "scripts/tests/test_release_wrapper.sh"
+  "scripts/tests/test_resume_state.sh"
 )
 for SHELL_TEST in "${SHELL_TESTS[@]}"; do
   if [ ! -f "$SHELL_TEST" ]; then
@@ -1938,6 +2585,7 @@ for SHELL_TEST in "${SHELL_TESTS[@]}"; do
   echo "=== script $SHELL_TEST ==="
   nl_before="$(_nolaunch_lines)"
   _spool_mark_before
+  _nogit_mark_before
   if bash "$SHELL_TEST"; then
     RESULTS+=("PASS  $SHELL_TEST (script)")
   else
@@ -1946,6 +2594,7 @@ for SHELL_TEST in "${SHELL_TESTS[@]}"; do
   fi
   NOLAUNCH_SEEN+=("$SHELL_TEST|$(( nl_before + 1 ))|$(_nolaunch_lines)")
   _spool_account "$SHELL_TEST"
+  _nogit_account "$SHELL_TEST"
   echo
 done
 
@@ -1976,11 +2625,94 @@ else
 fi
 
 unexpected=()
+# --- CONDITIONAL LEDGER ENTRIES ------------------------------------------------
+# An entry is `dir|reason` or `dir|reason|unset:VAR`. The third field makes the
+# pin CONDITIONAL: it is expected only where VAR is unset.
+#
+# 🔴 WHY. The header above already promises this ("an entry may be conditional"),
+# and the implementation compared the skip TOTAL against a flat entry COUNT, so a
+# host where a pinned skip legitimately RUNS went red — and the runner's own
+# advice there is "delete its EXPECTED_SKIPS entry", which is WRONG for a
+# host-conditional pin: deleting it reds every other host. Measured consequence:
+# any developer with SIGNAL_PG_DSN exported had a permanently-red gate and no
+# correct way to unbreak it, i.e. the state that teaches people to pass
+# DEVRC_SKIP_TESTS=1. A permanently-red gate is worse than no gate.
+#
+# 🔴 PARSING, and why it is not `${entry#*|}`. That takes everything after the
+# FIRST `|`, so on a 3-field entry the reason would become `reason|unset:VAR` —
+# fed straight to `grep -qE`, where `|` is ALTERNATION. The matcher would then
+# accept any skip whose reason contained EITHER side, silently widening the pin
+# instead of narrowing it. Split explicitly.
+_split_skip_entry() {
+  local _e="$1" _rest
+  edir="${_e%%|*}"
+  _rest="${_e#*|}"
+  ere="${_rest%%|*}"
+  if [ "$_rest" = "$ere" ]; then econd=""; else econd="${_rest#*|}"; fi
+}
+
+# 🔴 ONE predicate, used by BOTH the counting loop and the matching loop below.
+# They previously evaluated applicability separately — counting honoured the
+# condition, matching ignored it — so a skip could be forgiven by a pin the
+# ledger said did not apply, and the totals still balanced. A rule open-coded at
+# two sites is wrong at one of them; this is the consolidation.
+#
+# Reads the `edir`/`ere`/`econd` that `_split_skip_entry` just set. Returns 0 if
+# the entry applies HERE, 1 if not. An invalid condition sets `fail` and returns
+# 1 — fail CLOSED, so a typo cannot silently widen a pin.
+_skip_entry_applies() {
+  case "$econd" in
+    "") return 0 ;;
+    unset:*)
+      local _v="${econd#unset:}"
+      # 🔴 VALIDATE BEFORE EXPANDING. `${!_v-}` on a non-identifier (a bare
+      # `unset:`, or a 4-field entry leaving `unset:FOO|typo`) raises bash's
+      # `invalid variable name`, and that error ABORTS THE ENCLOSING LOOP — every
+      # later entry goes silently unevaluated and `fail` stays 0. A typo in the
+      # pipe-delimited grammar is the LIKELIER shape than an unknown prefix, so
+      # it must not be the one that fails open.
+      if ! printf '%s' "$_v" | grep -qE '^[A-Za-z_][A-Za-z0-9_]*$'; then
+        echo "  ERROR: EXPECTED_SKIPS condition names an invalid variable: '$_v'" >&2
+        echo "         Expected 'unset:VAR' with VAR matching [A-Za-z_][A-Za-z0-9_]*." >&2
+        fail=1
+        return 1
+      fi
+      # `-z` is unset-OR-EMPTY. That is correct here — it mirrors the pinned
+      # test's own `not os.environ.get(...)` — but a future test using
+      # `"VAR" in os.environ` would disagree, so match the predicate you pin.
+      if [ -z "${!_v-}" ]; then return 0; fi
+      return 1
+      ;;
+    *)
+      echo "  ERROR: EXPECTED_SKIPS entry has an unknown condition: '$econd'" >&2
+      echo "         Supported: 'unset:VAR'." >&2
+      fail=1
+      return 1
+      ;;
+  esac
+}
+
+# Count only the entries whose condition HOLDS here.
+# NOTE (pre-existing, deliberately not changed here): this compares a count of
+# skipped TESTS against a count of ENTRIES, which assumes one test per entry.
+# Both current entries are `SKIPPED [1]`. Widening that is a separate change.
+pin_expected=0
+for entry in "${EXPECTED_SKIPS[@]}"; do
+  _split_skip_entry "$entry"
+  if _skip_entry_applies; then pin_expected=$(( pin_expected + 1 )); fi
+done
+
 for line in "${SKIP_LINES[@]}"; do
   matched=0
   for entry in "${EXPECTED_SKIPS[@]}"; do
-    edir="${entry%%|*}"
-    ere="${entry#*|}"
+    _split_skip_entry "$entry"
+    # 🔴 A pin that does NOT apply here must not forgive anything. Without this,
+    # the two halves of the accounting disagree: `pin_expected` excludes the
+    # entry while this loop still matches on it, so a skip the ledger says
+    # cannot happen here is silently absorbed and the totals still balance.
+    # Measured before the fix: with SIGNAL_PG_DSN set, the signal skip was
+    # forgiven by a pin whose own condition said it could not apply — green.
+    if ! _skip_entry_applies; then continue; fi
     # "SKIPPED [n] <path>:<line>: <reason>" — require BOTH the owning directory
     # and the reason, so a skip that migrates to another suite is not absorbed.
     if printf '%s\n' "$line" | grep -qE "\] $edir/" && printf '%s\n' "$line" | grep -qE "$ere"; then
@@ -2000,11 +2732,12 @@ if [ "${#unexpected[@]}" -gt 0 ]; then
   fail=1
 fi
 
-if [ "$TOT_SKIPPED" -ne "${#EXPECTED_SKIPS[@]}" ]; then
-  echo "  ERROR: $TOT_SKIPPED test(s) skipped, but ${#EXPECTED_SKIPS[@]} are pinned in EXPECTED_SKIPS." >&2
-  if [ "$TOT_SKIPPED" -lt "${#EXPECTED_SKIPS[@]}" ]; then
+if [ "$TOT_SKIPPED" -ne "$pin_expected" ]; then
+  echo "  ERROR: $TOT_SKIPPED test(s) skipped, but $pin_expected of ${#EXPECTED_SKIPS[@]} pinned entries apply here." >&2
+  if [ "$TOT_SKIPPED" -lt "$pin_expected" ]; then
     echo "         FEWER than pinned: a pinned skip now RUNS (good) — delete its" >&2
-    echo "         EXPECTED_SKIPS entry so the pin keeps meaning something." >&2
+    echo "         EXPECTED_SKIPS entry, or make it conditional with '|unset:VAR'" >&2
+    echo "         if it only skips where that variable is absent." >&2
   else
     echo "         MORE than pinned: tests stopped running. See the skip list above." >&2
   fi
@@ -2150,6 +2883,89 @@ if [ "${#spool_problems[@]}" -gt 0 ]; then
   fail=1
 fi
 rm -rf "$SPOOL_DIR"
+
+# --- GUARD 10 (evaluation): per-target git isolation accounting -----------------
+# One line per target, ALWAYS printed — including the zeros, and never the zero
+# ALONE. `real-config-changed=0` on its own is exactly what a guard wired to
+# nothing prints, so every pytest line carries the two CONTROLS beside it: a real
+# `git config --global` write that landed in this run's isolated file, and a real
+# `https` git operation that git itself refused. The pair is the claim — "the
+# write happened and went here; the https attempt happened and was refused; the
+# operator's files are byte-identical" — and a missing control fails the run.
+echo "  ---- git isolation (GUARD 10) ----"
+echo "    isolated-config=$NOGIT_CONFIG"
+if [ "${#NOGIT_PROTECTED[@]}" -eq 0 ]; then
+  echo "    protected-files=0 — NOT MEASURED (no global git config in this HOME," \
+       "no .git in this tree). The controls carry this run; the tripwire watched nothing."
+else
+  echo "    protected-files=${#NOGIT_PROTECTED[@]}  (fingerprinted before/after every target)"
+fi
+nogit_problems=()
+for t in "${TARGETS[@]}"; do
+  seen=0
+  for entry in ${NOGIT_SEEN[@]+"${NOGIT_SEEN[@]}"}; do
+    [ "${entry%%|*}" = "$t" ] && seen=1 && break
+  done
+  [ "$seen" -eq 1 ] || nogit_problems+=("$t  — never accounted: run_pytest returned before GUARD 10 could measure it")
+done
+
+for entry in ${NOGIT_SEEN[@]+"${NOGIT_SEEN[@]}"}; do
+  IFS='|' read -r gt gfrom gto gchanged gctl <<<"$entry"
+
+  gsess="$(_spool_slice "$NOGIT_SESSIONS_LOG" "$gfrom" "$gto")"
+  markers=$(printf '%s\n' "$gsess" | grep -c "^$NOGIT_SESSION_MARKER" || true)
+  _nogit_field() { # $1 = field name -> its value from this target's first marker
+    printf '%s\n' "$gsess" | grep "^$NOGIT_SESSION_MARKER" | head -1 \
+      | awk -F'\t' -v k="$1=" '{for(i=1;i<=NF;i++) if(index($i,k)==1) print substr($i,length(k)+1)}'
+  }
+  m_redirect="$(_nogit_field redirect)"
+  m_control="$(_nogit_field control)"
+  m_control_detail="$(_nogit_field control-detail)"
+  m_protocol="$(_nogit_field protocol)"
+  m_protocol_detail="$(_nogit_field protocol-detail)"
+  m_protocols="$(_nogit_field protocols)"
+
+  is_pytest=0
+  for t in "${TARGETS[@]}"; do [ "$t" = "$gt" ] && is_pytest=1 && break; done
+
+  echo "    $gt  real-config-changed=$gchanged/${#NOGIT_PROTECTED[@]}  config-control=$gctl  protocol=${m_protocol:-n/a}  plugin=$markers"
+
+  # 🔴 THE DAMAGE ITSELF. A protected file whose fingerprint moved is the
+  # 2026-08-21 incident happening again: `~/.gitconfig` rewritten, or
+  # `core.bare = true` written into a populated clone's `.git/config`.
+  if [ "$gchanged" -gt 0 ]; then
+    changed_names="$(grep -F "$(printf '%s\t' "$gt")" "$NOGIT_CHANGED_LOG" 2>/dev/null \
+      | cut -f2- | sed 's/^/             /' || true)"
+    nogit_problems+=("$gt  — CHANGED $gchanged of the operator's protected git config file(s) while it ran. GIT_CONFIG_GLOBAL redirects 'git config --global', so this reached them some other way (code that removes the variable from its own environment, or a repo-local write):"$'\n'"$changed_names")
+  fi
+
+  if [ "$is_pytest" -eq 1 ]; then
+    if [ "$markers" -ne 1 ]; then
+      nogit_problems+=("$gt  — the nogit plugin emitted $markers session marker(s), expected exactly 1. This target ran WITHOUT the guard, so its real-config-changed=$gchanged means nothing (see GUARD 10's header: -p testlib.nogit_plugin on the pytest line).")
+    elif [ "$m_redirect" != "$NOGIT_CONFIG" ]; then
+      nogit_problems+=("$gt  — ran with GIT_CONFIG_GLOBAL='$m_redirect', not this run's '$NOGIT_CONFIG'. Something between this script and pytest is re-pointing git's global config.")
+    elif [ "$m_control" != "$NOGIT_CONTROL_OK" ]; then
+      nogit_problems+=("$gt  — the plugin could not show its 'git config --global' write was CONTAINED (control=$m_control: $m_control_detail). Its zero is not evidence.")
+    elif [ "$gctl" -ne 1 ]; then
+      nogit_problems+=("$gt  — the isolated config gained $gctl control key(s), expected exactly 1. A real 'git config --global' write was fired and did NOT arrive here, so the redirect is not where global writes land.")
+    elif [ "$m_protocol" != "$NOGIT_PROTOCOL_OK" ]; then
+      nogit_problems+=("$gt  — a real 'https' git operation was NOT refused by the allowlist (protocol=$m_protocol, GIT_ALLOW_PROTOCOL='$m_protocols'): $m_protocol_detail. A fixture repo in this target could push to a real remote.")
+    fi
+  else
+    # Non-pytest targets load no plugin, so a marker or a control from one means
+    # the accounting slices are misaligned, not that they are better protected.
+    if [ "$markers" -ne 0 ] || [ "$gctl" -ne 0 ]; then
+      nogit_problems+=("$gt  — a NON-pytest target recorded $markers session marker(s) and $gctl control key(s); it can have neither, so the per-target slices are misattributed.")
+    fi
+  fi
+done
+
+if [ "${#nogit_problems[@]}" -gt 0 ]; then
+  echo "  ERROR: ${#nogit_problems[@]} GUARD 10 problem(s):" >&2
+  for p in "${nogit_problems[@]}"; do echo "         $p" >&2; done
+  fail=1
+fi
+rm -rf "$NOGIT_DIR"
 
 # GUARD 6. One writer, fed the same value `exit` is about to take, so the
 # printed verdict and the process status cannot disagree — including through a

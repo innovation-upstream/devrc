@@ -162,6 +162,11 @@
 # converged.
 #
 # Exit codes:
+#   2  SHIP_REPO was SET but EMPTY — a caller bug, not a request for the
+#      default. `${SHIP_REPO:-…}` cannot tell "unset" from "set to the empty
+#      string", so an empty value would silently converge the operator's own
+#      $HOME/workspace/devrc. Refused instead. UNSET still defaults, which the
+#      remote leg relies on.
 #
 # 🔴 THE LADDER IS SHARED WITH scripts/drift-check.sh, RECIPROCALLY. That script
 # is the passive deadman for the same fleet and deliberately uses the same
@@ -170,7 +175,7 @@
 # reserves them here; this script owns 5, 7, 9, 11, 19 and 20 and they are
 # reserved there. Its header says "a new DRIFT code has nowhere to go but
 # upward", which points the next one at 19 unless the reservation is written
-# down on both sides: so the next free code for THIS script is 21, and so is the
+# down on both sides: so the next free code for THIS script is 22, and so is the
 # next free code for that one.
 #
 # RESERVED-TO-DRIFT-CHECK: 10 14 15 16 17 18
@@ -182,7 +187,7 @@
 # scripts/tests/test_drift_check.py — until 2026-08-21 the alignment existed only
 # in a PR description and neither file mentioned the other's numbers.
 #
-#   2  usage error: an unknown argument, or a run asked to check NO host at all
+#   21 usage error: an unknown argument, or a run asked to check NO host at all
 #      (`--no-local --no-remote`). Raised before any host is touched, so the rc
 #      legend printed on failure is never reached on this path — it is in both
 #      ledgers anyway, because a ledger with a known hole is not a ledger.
@@ -368,6 +373,20 @@ if [ "${1:-}" = "--detect-role" ]; then
   exit 0
 fi
 
+# 🔴 SET-BUT-EMPTY IS A BUG, NOT A REQUEST FOR THE DEFAULT. `${VAR:-default}`
+# cannot tell "unset" from "set to the empty string", so a caller that computed
+# a repo path and got `""` — a failed `git rev-parse`, an unexpanded template, a
+# `SHIP_REPO=$SOME_UNSET_VAR` — silently converges the OPERATOR'S OWN CLONE
+# instead of the one it meant. UNSET must keep defaulting (the remote leg
+# deliberately does not forward this variable, and the far host's repo is at its
+# own $HOME/workspace/devrc); EMPTY must stop the run.
+if [ "${SHIP_REPO+set}" = set ] && [ -z "$SHIP_REPO" ]; then
+  echo "ship: SHIP_REPO is SET but EMPTY." >&2
+  echo "  That is a caller bug, not a request for the default — an empty value" >&2
+  echo "  would silently resolve to \$HOME/workspace/devrc and converge the" >&2
+  echo "  operator's own clone. Unset it to get the default, or give it a path." >&2
+  exit 2
+fi
 SHIP_REPO="${SHIP_REPO:-$HOME/workspace/devrc}"
 SHIP_NO_SWITCH="${SHIP_NO_SWITCH:-0}"
 DO_LOCAL=1
@@ -381,7 +400,7 @@ for a in "$@"; do
     # Print the contiguous comment block after the shebang. Range-proof: no
     # hardcoded line numbers to drift as the header grows.
     -h|--help)   awk 'NR>1 { if (/^#/) print; else exit }' "$0"; exit 0 ;;
-    *) echo "unknown arg: $a" >&2; exit 2 ;;
+    *) echo "unknown arg: $a" >&2; exit 21 ;;
   esac
 done
 
@@ -393,7 +412,7 @@ done
 if [ "$DO_LOCAL" = 0 ] && [ "$DO_REMOTE" = 0 ]; then
   echo "ship: --no-local and --no-remote together leave NO host to converge." >&2
   echo "  0 hosts in scope cannot produce a verdict about either machine." >&2
-  exit 2
+  exit 21
 fi
 
 # --- Resolve local role (detection, override-able) + derive the remote target --
@@ -646,6 +665,10 @@ ship_self_check() {
 # bash -c, remote via ssh). Single source of truth for the sequence.
 CONVERGE='
 set -uo pipefail
+if [ "${SHIP_REPO+set}" = set ] && [ -z "$SHIP_REPO" ]; then
+  echo "ship: SHIP_REPO is SET but EMPTY — refusing to fall back to \$HOME/workspace/devrc." >&2
+  exit 2
+fi
 repo="${SHIP_REPO:-$HOME/workspace/devrc}"
 no_switch="${SHIP_NO_SWITCH:-0}"
 host=$(hostname 2>/dev/null || echo local)
@@ -1300,7 +1323,8 @@ if [ "$rc" = 0 ]; then
   fi
 else
   echo "ship: incomplete (rc=$rc) — see per-host lines above."
-  echo "  rc2=usage(unknown arg, or no host in scope)"
+  echo "  rc2=ship-repo-set-but-empty(caller bug — refused rather than defaulting to \$HOME/workspace/devrc)"
+  echo "  rc21=usage(unknown arg, or no host in scope)"
   echo "  rc3=no-repo  rc4=fetch/origin-main-unavailable  rc5=skipped:conflicted-tree(merge in progress)"
   echo "  rc6=host-unidentified"
   echo "  rc7=skipped:cannot-fast-forward(local changes in the way)  rc8=skipped:diverged(needs rebase)"
