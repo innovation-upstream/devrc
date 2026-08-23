@@ -295,10 +295,14 @@ class Drained:
     most assertions want, but at least one caller asserts that a credential
     appears NOWHERE in stdout — a check that silently weakens if it is narrowed
     to the audit lines, since a token leaked on a non-audit line would then pass.
+    That caller must `wait_closed()` first: a line printed during SHUTDOWN (a
+    SIGTERM handler, an atexit hook) reaches the pipe after the last assertion
+    would otherwise have read it, and a credential leaked there must still fail.
     """
 
     def __init__(self) -> None:
         self.all: list[str] = []
+        self.closed = threading.Event()   # set when the pipe reaches EOF
 
     @property
     def audit(self) -> "list[str]":
@@ -308,6 +312,18 @@ class Drained:
     def text(self) -> str:
         """The whole stream, for `x not in out` style assertions."""
         return "\n".join(self.all)
+
+    def wait_closed(self, timeout: float = 15.0) -> bool:
+        """Block until the process's stdout reaches EOF. Returns whether it did.
+
+        Read `text` only AFTER this. Without it the reader thread may still be
+        draining, so an assertion over the whole stream is racing the very lines
+        it is meant to inspect — the same class of bug as asserting on an audit
+        line before it is printed, one layer out. It is the reason
+        `drain_output` returns something joinable at all: a helper that cannot
+        be waited on just relocates the race into every caller.
+        """
+        return self.closed.wait(timeout)
 
 
 def drain_output(proc) -> Drained:
@@ -326,7 +342,7 @@ def drain_output(proc) -> Drained:
     History, and why this is a function rather than a fourth copy: #544 found the
     race, measured it at 3/20 red locally plus two consecutive reds in the nix
     sandbox, and fixed ONE site inline. The other two kept the defect and one of
-    them duly failed in CI on 2026-08-22 (`devrc-ci-jxf5j`) with
+    them duly failed in CI at 2026-08-23T00:37Z (`devrc-ci-jxf5j`) with
     `IndexError: list index out of range` — an empty list indexed at [-1], on a
     tree whose only change was to an unrelated test. That is the open-coded
     predicate from claude/RULES.md: wrong at N-1 sites, and re-fixed one site at
@@ -335,25 +351,41 @@ def drain_output(proc) -> Drained:
     out = Drained()
 
     def _run() -> None:
-        for raw in proc.stdout:                     # ends when the pipe closes
-            out.all.append(raw.rstrip("\n"))
+        try:
+            for raw in proc.stdout:                 # ends when the pipe closes
+                out.all.append(raw.rstrip("\n"))
+        finally:
+            out.closed.set()                        # EOF, even if the read raised
 
     threading.Thread(target=_run, daemon=True).start()
     return out
 
 
 def await_audit(out: Drained, n: int, timeout: float = 15.0) -> "list[str]":
-    """Wait until at least `n` audit lines have been drained, then return them.
+    """Wait for at least `n` audit lines, then return them. RAISES if they never
+    arrive.
 
-    Waits on the OBSERVABLE condition, never on a sleep-and-hope. Returns
-    whatever it has at the deadline so the CALLER asserts — a wait helper that
-    raised its own error would report "timed out" where the caller's own
-    assertion ("expected 3 audit lines, got 2") is the useful message.
+    🔴 It raises rather than returning short, so that `[-1]` on the result is
+    always safe. Returning whatever had arrived is what produced the CI failure
+    this helper exists to prevent — `IndexError: list index out of range`, an
+    empty list indexed at [-1], which names neither the expectation nor the
+    actual. Consolidating a footgun into one place does not disarm it; this does.
+
+    Callers still assert their own EXACT count afterwards (`== 3`, `== 5`) — this
+    guarantees a floor, never a ceiling, so "more lines than expected" remains
+    the caller's to catch.
     """
     deadline = time.time() + timeout
     while len(out.audit) < n and time.time() < deadline:
+        if out.closed.is_set() and len(out.audit) < n:
+            break                                   # the pipe is done; no more coming
         time.sleep(0.02)
-    return out.audit
+    lines = out.audit
+    assert len(lines) >= n, (
+        f"expected at least {n} `{AUDIT_PREFIX}` line(s) within {timeout:g}s, got "
+        f"{len(lines)}{' (stdout closed early)' if out.closed.is_set() else ''}.\n"
+        f"full stdout:\n{out.text}")
+    return lines
 
 
 def tree_hash(root: Path) -> str:
@@ -2636,7 +2668,10 @@ class TestTheDeployedEntrypoint:
         assert "result=401" in lines[2]
         # And never a credential, on any line. 🔴 Asserted against the WHOLE
         # stream (`out.text`), not the audit subset — a token leaked on a
-        # non-audit line must still fail this.
+        # non-audit line must still fail this. `wait_closed()` first, so a line
+        # printed during SHUTDOWN is inside the stream being asserted on rather
+        # than still in flight.
+        out.wait_closed()
         assert GOOD_TOKEN not in out.text and SECOND_TOKEN not in out.text
         assert "w" * 48 not in out.text
 
@@ -3976,7 +4011,7 @@ class TestTrustedProxyOverTheRealProcess:
             # the client's return and read the corpse's stdout, so a slow handler
             # lost the line and `[...][-1]` raised `IndexError: list index out of
             # range` — an index into an empty list, not a useful assertion.
-            # MEASURED 2026-08-22 on `devrc-ci-jxf5j`, in the nix sandbox, on a
+            # MEASURED 2026-08-23T00:37Z on `devrc-ci-jxf5j`, in the nix sandbox, on a
             # tree whose only change was to an unrelated test, while the same
             # commit passed a local `nix build`.
             out = drain_output(proc)
@@ -3987,11 +4022,10 @@ class TestTrustedProxyOverTheRealProcess:
                 token=GOOD_TOKEN,
                 client_ip=SPOOF_IP,
             )
+            # `await_audit` RAISES if the line never arrives, so `[-1]` below
+            # cannot be the IndexError this whole change exists to remove.
             lines = await_audit(out, 1)
         assert code == 200, code
-        assert lines, (
-            "no `store-api audit ` line within 15s of a 200 — the audit record is "
-            f"the property under test, so this is a real failure.\nstdout:\n{out.text}")
         line = lines[-1]
         assert f"ip={UNTRUSTED_PEER}" in line, line
         assert f"ip={SPOOF_IP}" not in line, line
