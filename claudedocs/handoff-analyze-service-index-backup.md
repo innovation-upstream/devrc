@@ -1,4 +1,4 @@
-# Handoff: analyze-service index — A/B evaluation, prune surface, offsite backup — 2026-08-22
+# Handoff: analyze-service index — backup, restore-verification, key escrow — 2026-08-23
 
 ## Run this first — the index, one read-only command
 ```bash
@@ -14,76 +14,164 @@ Non-blocking: if it exits non-zero, print the stderr line and carry on.
 Evaluate whether the `/analyze-service` index store earns its upkeep, act on the findings,
 and close the one failure mode in it that is unrecoverable (no off-machine backup).
 
-## State now
+## State now — the backup loop is CLOSED
 
-**Merged and shipped to both hosts:**
-- `#637` — every entry says what it is; **no briefing path printed it** (`--search` always did).
-- `#650` — two surviving mutants + a false claim; also re-anchored `test_the_recall_step_comes_AFTER_the_handoff_is_read`, which had left `main` RED since #643.
-- `#653` — a `<<<<<<< HEAD` marker that lived in `main` **inside a docstring** (450 tests passed with it present), plus `scripts/tests/test_no_conflict_markers.py` to stop a recurrence.
-- `#668` — `prune-index` skill + `scripts/subsystem-audit.py` + the `write-back.md` lifecycle fix.
+**Merged AND shipped to both hosts** (`ship.sh`, verified by content, 0 dangling / 0 stale):
+- `#637` `#650` `#653` `#668` — earlier rounds (entry self-description, mutants, a
+  `<<<<<<< HEAD` marker living in `main` inside a docstring, the `prune-index` skill).
+- `#703` — encrypted offsite backup. Daily systemd-user timer.
+- `#681` — `skill-audit.py` headroom blindness.
+- `#737` — **the restore-verifier** (`scripts/analyze-service-index/restore-verify.py`),
+  138 tests. Squash-merged as `592eef27`; verified by CONTENT, not ancestry.
 
-**In flight:**
-- `#703` — encrypted offsite backup. **A full gate is running right now** on the merged tree in a standalone clone at `/tmp/claude-1000/-home-zach-workspace-devrc/4eaccec0-.../scratchpad/gate703`, output to `.../scratchpad/gate703.out`. Merge if `GATE: RESULT=PASS`.
-- `#681` — `skill-audit.py` headroom blindness. Ready, never gated. **Still needed**: `main` has 0 headroom-aware lines, so `prune-skill` runs still get `✓ no prune needed` about files the gate rejects.
-- `#673` — superseded, deliberately unmerged, kept as the record. Carries **four** correction comments.
+**Not merged:** `#673` — superseded, deliberately unmerged, kept as the record.
 
-**Deploy status:** #637/#650/#653/#668 merged AND shipped (`ship.sh`, both hosts, verified by content). #703/#681 not merged, not deployed.
+### The three things that were open at the last handoff, and are now closed
+
+1. 🔴 **The age key had no escrow.** DONE 2026-08-23. Escrowed into Vaultwarden as a
+   Secure Note named `age.key — SOPS + analyze-service-index backups`, and **verified
+   byte-identical** (`cmp` against the copy read back from the server after a sync —
+   189 bytes, 3 lines, trailing newline intact). Disk loss no longer takes the key with
+   the store.
+2. **The timer had never fired.** It has now, unattended: `LAST = Sun 2026-08-23
+   04:48:20 CDT, Result=success`. Schedule is `OnCalendar=04:30` +
+   `RandomizedDelaySec=1800`, so it lands 04:30–05:00 — *not* a fixed time.
+3. **Nothing verified the artifact as STORED.** `#737` does, by restoring it.
+
+### Verified live, end to end
+10 scopes, 201 commits compared, restored from the bucket → `age -d` → `git clone` →
+`fsck` → cross-checked against the live store. Store byte-identical afterwards (936
+files), zero remotes on all 10 scopes. The artifacts verified were the ones the TIMER
+produced, not a hand-triggered run.
+
+## 🔴 Two gotchas that will bite you immediately
+
+**The bare command cannot see the unit's artifacts, BY DESIGN.**
+```bash
+restore-verify.py                                    # ALWAYS rc=1 — looks under nixos/
+restore-verify.py --host workbench-<machine-id>      # the real one
+```
+The unit sets `ASIB_HOST=workbench-%m` (systemd expands `%m` to `/etc/machine-id`); a
+hand-run has `ASIB_HOST` unset and falls back to the hostname, which is `nixos` on
+**both** machines. The script now says so explicitly and names the prefix that does hold
+artifacts — it will not tell you your backups are missing. **Follow-up #1 below is to fix
+the asymmetry itself.**
+
+**`git bundle verify` does NOT detect corruption.** Re-measured this session on git
+2.55.0 with a real bundle, both controls:
+
+| bundle | `git bundle verify` | `git clone` (restore) |
+|---|---|---|
+| 1 byte flipped mid-packfile | **rc=0**, *"records a complete history"* | **rc=128**, `inflate returned -5` |
+| intact | rc=0 | rc=0 |
+
+The intact row is the positive control — it proves `clone` *can* succeed, so rc=128
+discriminates rather than a harness that always fails. Both halves are pinned by tests,
+and `bundle` is absent from the script's read-only allowlist, so substituting it back
+fails at the call site.
+
+## Ranked follow-ups (none blocking)
+
+1. 🔴 **The host-label asymmetry itself.** `backup.py --print-plan` by hand also reports
+   `host: nixos`, so a hand-run of the *backup* would write a phantom second host prefix.
+   Deliberately out of scope for #737 — changing labelling affects artifacts already in
+   the bucket and retention pruning.
+2. **Nothing runs the verifier on a schedule.** A timer is the obvious follow-up; it needs
+   network *and* the age key, and the backup unit's containment took several measured
+   `systemd-run --user` rounds. Not attempted rather than claimed.
+3. **F5** — a wrong/absent `--store` exits **0** with everything "self-consistency only".
+   Exit code is all a timer reads, so close this *before* (2).
+4. **F4** — a structurally truncated artifact (1 of 40 commits) verifies green;
+   `--max-lag-days` reads the key stamp, never the content.
+5. **F9** — no SIGTERM handling around the plaintext window (Python runs no `finally` on
+   SIGTERM). Matters precisely because (2) is a timer.
+6. **F6** — "no local store" is printed for a store that exists but has no scope repos.
+7. **F7** — `MinioDownloader` inherits `put()`/`remove()` from the producer, unrefused.
+8. **F8** — `kubectl port-forward` leaks if `MinioArchive.__enter__` itself times out
+   (pre-existing; `backup.py:646` is identical).
+9. **B-10** — `uncovered_local_scopes`'s `>` vs `>=` boundary is a **known-unpinned
+   boundary**, same shape as the staleness one that WAS closed. Labelled, not hidden.
+10. B-5, B-7, B-8, B-9 — cosmetic; listed in the #737 body.
+11. **Run `prune-index` against the store.** Built, shipped, validated, and **still never
+    used for its purpose.** Last verdict: 5 entries over the 12,288 B hard cap, 11 over
+    target, 32 evictable `RESOLVED`, 1 `NO HOME`, 22 broken pointers, 5 scopes with no
+    README, 31 OPEN bullets protected.
+12. Second A/B against a doc-poor repo (tests whether "selection, not knowledge"
+    generalises past n=1).
 
 ## The A/B result — what the index is actually worth
-
-Controlled A/B on `datapacket-talos/storage-resolver`, pre-registered 10-question answer key, both arms on a clean `origin/trunk` worktree.
-
-- **~90% of the entry is recoverable from the repo itself.** Sampled 10 load-bearing facts; only `kubectl wait -l app=storage-resolver` hangs was index-only.
+Controlled A/B on `datapacket-talos/storage-resolver`, pre-registered 10-question answer
+key, both arms on a clean `origin/trunk` worktree.
+- **~90% of the entry is recoverable from the repo itself.** Only `kubectl wait -l
+  app=storage-resolver` hangs was index-only.
 - The control arm **matched or beat** the index arm on 6 of 10 questions.
-- **The index's one clean win was recency-ordered SELECTION**: the control confidently asserted the pre-2026-08-20 auth control (`401`) because it read the 08-19 docs and stopped. The correction (`403 SignatureDoesNotMatch`) is in the repo — in two docs dated 08-20 it never opened.
+- **The index's one clean win was recency-ordered SELECTION**: the control confidently
+  asserted the pre-2026-08-20 auth control (`401`) because it read the 08-19 docs and
+  stopped. The correction (`403 SignatureDoesNotMatch`) is in the repo, in two 08-20 docs
+  it never opened.
 - Cost: 25 vs 26 tool calls, 123k vs 148k tokens (~17% saved). Not a step change.
-- 🔴 **n=1.** One subsystem in an unusually doc-rich repo. A second A/B against a doc-poor repo is the outstanding measurement.
+- 🔴 **n=1.** One subsystem in an unusually doc-rich repo.
+- **My own answer key was wrong in two places** — it repeated the entry's incomplete
+  `CLEANED=` advice. The artifact under test corrupted the instrument measuring it.
 
-**My own answer key was wrong in two places** (one image-pin site vs three; it repeated the entry's incomplete `CLEANED=` advice). The artifact under test corrupted the instrument measuring it.
+## Still open — the fixture-wipe incident
+Diagnosed and repaired, NOT closed.
+- **Mechanism, reproduced on git 2.55.0:** `GIT_DIR=<victim>/.git git -C <innocent> branch
+  -m PWNED` renames the **victim's** branch. **`GIT_DIR` silently overrides an explicit
+  `git -C`.** Every fixture binds `-C`/`cwd=` correctly — audited twice — and that
+  property confers no safety.
+- **`git rev-parse --git-common-dir` from a linked worktree resolves to the real clone's
+  `.git`. A worktree is not containment.**
+- **Isolation means a standalone clone with `origin` removed.** The single most useful
+  sentence from the whole incident, and it was used all session with zero damage.
+- **Still open:** sessions keep starting tier runs in trees that share the base clone.
+- Probe: `for p in $(pgrep -f 'run-tests.sh|gate.sh'); do git -C "$(readlink /proc/$p/cwd)"
+  rev-parse --path-format=absolute --git-common-dir; done` — anything equal to
+  `~/workspace/devrc/.git` is the hazard.
 
-## Open investigations — live diagnosis state
+## Lessons from #737 worth keeping (four rounds, three carried the next defect)
 
-### The fixture-wipe incident — diagnosed, repaired, NOT closed
-- **Symptom:** `origin/main` tree became a single file `f`; 63 fixture commits pushed over it in a 26-second burst; the operator's base clone got `core.bare=true`, `core.hooksPath` re-armed, `main`→`trunk` renamed, identity rewritten to `T <t@example.com>`.
-- **Observed (mechanism, reproduced by me on git 2.55.0):**
-  ```
-  GIT_DIR=<victim>/.git git -C <innocent> branch -m PWNED
-    innocent: unchanged        victim: branch -> PWNED
-  ```
-  **`GIT_DIR` silently overrides an explicit `git -C`.** Every fixture in the tree binds `-C` or `cwd=` correctly — audited mechanically, twice — and that property confers no safety.
-- **Second half:** `git rev-parse --git-common-dir` from a **linked worktree** resolves to the real clone's `.git`. **A worktree is not containment.** Every session that "isolated" itself in a worktree was writing to the operator's clone.
-- **Ruled out:** `-C` discipline (audited clean, irrelevant); a repo-local `core.hooksPath` as the cause (it was `.git/hooks`, sample-only, benign).
-- **Repaired by me, all five fields measured together:** `core.bare` unset, `core.hooksPath` unset (local+global), `remote.origin.url` intact, identity restored to `Zach Lowden <zachlowden1@gmail.com>` (evidence: `86405705`, a `commit:` entry in this clone's OWN reflog), HEAD reattached. Evidence preserved at `scratchpad/incident-evidence/`.
-- **Still open:** sessions keep starting tier runs in trees that share the base clone. HEAD has been re-detached since. `main` is periodically pinned by other sessions' worktrees.
-- **Next probe:** `for p in $(pgrep -f 'run-tests.sh|gate.sh'); do git -C "$(readlink /proc/$p/cwd)" rev-parse --path-format=absolute --git-common-dir; done` — anything equal to `~/workspace/devrc/.git` is the hazard.
+- 🔴 **The suite is hermetic BY CONSTRUCTION and therefore blind to environment binding.**
+  Every test injects `this_host`/`this_machine_id`, so `main()`'s *derivation* of them is
+  never exercised — and that is exactly where two consecutive fixes were wrong. Both left
+  the suite fully green while silently suppressing all 10 cross-checks at rc=0. **Only the
+  live run caught them.** Now closed by two in-process `main()` tests, each built so only
+  one half of the predicate can pass it.
+- 🔴 **A substring assertion cannot tell a true message from a confident wrong one.** A
+  `--keep-work-dir` test asserted `"PLAINTEXT history" in stderr` and **passed**, certifying
+  a sentence that was false on the very run it tested. Pin kind and count, not a phrase.
+- 🔴 **An EMPTY RESULT cannot distinguish two mechanisms.** The empty-prefix message
+  enumerated three causes and omitted the real one; the exit-**0** variant said *"this host
+  has never run the backup"* while every artifact sat one prefix over — a green all-clear at
+  the worst possible moment. Name the rival mechanism, or say you have not diagnosed it.
+- **Bound your re-gating.** `main` moved 9 commits during one round. Gate once against a
+  **named SHA**, then judge whether what landed can *interact*; do not chase the tip. A gate
+  result is always a claim about the tree it ran on.
+- 🔴 **`ProtectHome = "read-only"` makes `$HOME` READABLE**, not inaccessible. Fixed to
+  `tmpfs` in #703; measured.
 
-### The index store has no backup — the reason #703 exists
-- **Observed:** 10 scopes, all git repos, **`remote = none` on every one**, no off-machine copy, `ship.sh` rsyncs only `~/.claude/skills/`. The laptop's store is divergent content, not a backup.
-- **Consequence:** local git history covers an agent clobbering a file and nothing else. Disk failure or `rm -rf` of the store root loses it permanently, and the content is **not re-derivable**.
-- 🔴 **Unresolved and NOT a code problem: the age key has no escrow.** `~/workspace/homelab-talos/.secrets/age.key` is gitignored and untracked; it exists only on the two machines being backed up. Lose the disk and you lose the store *and* the key. Encryption is what makes the backup safe to store off-box and simultaneously a single point of failure. **Operator decision: where a second copy of that key lives.**
-
-## Next steps (ranked)
-1. **Read `scratchpad/gate703.out`.** If `GATE: RESULT=PASS exit=0` → merge #703, then `ship.sh`. If not, read the log; do not merge on a summary line.
-2. **Gate and merge #681** the same way — standalone clone, merged tree.
-3. **Decide the age-key escrow.** #703 is not really done until a second copy of that key exists somewhere the disk failing doesn't reach.
-4. **Run `prune-index` against the store.** Built, shipped, validated on synthetic and live input, and **never used for its purpose**. Latest verdict: 5 entries over the 12,288 B hard cap, 11 over target, 32 evictable `RESOLVED`, 1 `NO HOME`, 22 broken pointers, 5 scopes with no README, 31 OPEN bullets protected.
-5. Second A/B against a doc-poor repo (tests whether "selection, not knowledge" generalises past n=1).
-6. Backlog: the 08-19 "two defects" bullet needs a durable record before it can be pruned; `created_by` is 48 `handoff` : 3 `analyze-service` and `claudedocs/decision-subsystem-store-rejected-2026-08-11.md` is stale against it.
-
-## Gotchas / decisions / dead-ends
-- 🔴 **`git bundle verify` does NOT detect corruption.** Measured: one byte flipped mid-packfile → `rc=0`, *"The bundle records a complete history."* A clone of the same bundle dies `index-pack died`. **Verify a bundle by restoring from it**, never by asking git whether it would work. I specified `verify` in the #703 brief; it was wrong.
-- 🔴 **`ProtectHome = "read-only"` makes `$HOME` READABLE**, not inaccessible. #703 shipped it on a *networked* unit whose comment claimed `.secrets/` was hidden. Fixed to `tmpfs`; measured: read-only → `~/.ssh/id_ed25519` and `~/.kube/config` READABLE; tmpfs → ABSENT.
-- **Isolation means a standalone clone with `origin` removed** — not a worktree. This is the single most useful sentence from the whole incident.
-- **The "freeze"** on running the tier was an inter-session agreement, not an operator instruction. It is over-broad: the hazard is *where* you run, not *whether*. Standalone clones are provably safe and were used all session with zero damage.
-- **Three of my own controls were vacuous this session** and I caught each only by checking the input: a `GIT_ALLOW_PROTOCOL` control against an unreachable host (could only ever fail); a `git init` default-branch fixture already at the asserted end state; a `git show | grep` returning 0 because the pipeline was empty, not the file.
-- **`skill-audit.py` says `✓ no prune needed` for files the gate rejects** — it checks the hard ceiling and is blind to the 250 B headroom floor. #681 fixes it; until that merges, do not trust its ✓.
-- Peer sessions carry the guard work: `#689`/`#676`/`#683`. My `nogit_plugin` (#673) was open on `GIT_WORK_TREE`, `GIT_CONFIG_COUNT`, and its own claim was wider than its reach. Superseded on purpose.
+## Repo/CI facts re-measured 2026-08-23 (these churn — re-verify, don't trust this doc)
+- `required_status_checks.contexts = ["tekton/devrc-nodetests"]`, `enforce_admins: true`,
+  **0 rulesets**. So one check now BLOCKS a merge — but it is the **node** tier.
+  `devrc-pytests` is **not** required, meaning the only blocking check cannot see a line of
+  a Python-only PR. **Run the gate yourself and say which command.**
+- A repo-local `core.hooksPath` reappeared mid-session pointing at `githooks/` (the #322
+  precondition). Re-measure `git config --local --get core.hooksPath` at the moment you act.
+- Pushes died `SIGPIPE 141` twice *after* the pre-push hook printed `RESULT: PASS`, remote
+  unchanged both times — caught only by `git ls-remote`, not by the ✅.
+- ~130 stale agent worktrees are accumulating under `.claude/worktrees/` and `/tmp`. Some
+  may hold unpushed work; **diff before removing any.**
 
 ## How to verify
 ```bash
-# the backup round-trip, end to end (what #703 actually promises)
-nix-shell -p age --run 'age -d -i ~/workspace/homelab-talos/.secrets/age.key -o /tmp/rt.bundle <artifact>.age'
-git clone /tmp/rt.bundle /tmp/rt && git -C /tmp/rt rev-list --all | sort | sha256sum   # must equal the source
+# the restore path, for real (10 scopes, from the bucket)
+nix-shell -p 'python3.withPackages(p:[p.minio])' --run \
+  "python3 ~/workspace/devrc/scripts/analyze-service-index/restore-verify.py \
+   --host workbench-\$(cat /etc/machine-id)"
+
+# the timer actually fired
+systemctl --user list-timers analyze-service-index-backup.timer --all
+systemctl --user show analyze-service-index-backup.service -p Result
 
 # the index store's own verdict
 python3 ~/workspace/devrc/scripts/subsystem-audit.py
@@ -93,3 +181,14 @@ for p in $(pgrep -f 'run-tests.sh|gate.sh'); do
   git -C "$(readlink /proc/$p/cwd)" rev-parse --path-format=absolute --git-common-dir
 done   # none may equal ~/workspace/devrc/.git
 ```
+
+## The one link still untested
+The escrowed key was verified through the `bw` CLI **on this machine**. In a real disaster
+you would read that note from the **web vault on another device** and paste it into a file —
+a path that can silently mangle whitespace. Worth doing once at leisure: open the note at
+`https://vw.zacx.dev`, paste it into a scratch file, confirm 189 bytes / 3 lines.
+
+⚠ The `bw` CLI now points at `https://vw.zacx.dev`, not `vault.homelab.lan` — that LAN
+endpoint serves a cert-manager **self-signed placeholder** (`CN=selfsigned-ca`, empty
+subject) that Node rejects outright (`UNABLE_TO_VERIFY_LEAF_SIGNATURE`). Fixing the LAN
+cert is separate homelab breakage, unrelated to this work.
