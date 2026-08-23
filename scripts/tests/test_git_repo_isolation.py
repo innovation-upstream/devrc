@@ -87,7 +87,7 @@ CONFTEST = SCRIPTS / "tests" / "conftest.py"
 # the `git push` path — the path the incident travelled — and resolves
 # `REPO_ROOT` with exactly the vulnerable expression.
 #
-# 🔴 FOUR SPELLINGS RATHER THAN ONE SOURCED FILE, and the reason is measured,
+# 🔴 FIVE SPELLINGS RATHER THAN ONE SOURCED FILE, and the reason is measured,
 # not aesthetic: `testlib/runner_patch.py` writes a patched COPY of
 # `run-tests.sh` into a tmp dir and about fifteen tests drive that copy. A copy
 # cannot source a sibling `lib/` that was never copied with it — the first
@@ -110,7 +110,7 @@ RUNNERS = (SCRIPTS / "run-tests.sh",
 # by a route no test tier covers.
 #
 # It is kept OUT of `RUNNERS` deliberately rather than folded in: the ordering
-# test below is about the ROOT resolution these three share and commit.sh has
+# test below is about the ROOT resolution those four share and commit.sh has
 # none, so a single list would have to weaken that assertion to accommodate it.
 COMMIT_SH = SCRIPTS / "analyze-service-index" / "commit.sh"
 
@@ -145,6 +145,13 @@ from testlib.gitenv import (  # noqa: E402
     snapshot,
     strip_repo_pointers,
 )
+
+# 🔴 IMPORTED, not re-implemented. `repo_files` prefers `git ls-files` and falls
+# back to a filesystem walk when there is no `.git` — which is exactly the nix
+# build sandbox, where `checks.pytests` runs off `cp -r ${./.} src`.
+# `captured_text_scan.py` carries a "ONE RULE, ONE PLACE … a third copy of it
+# would be a third place for that trap to come back" banner over this helper.
+from testlib.public_ip_scan import repo_files  # noqa: E402
 
 # 🔴 NOT a shebang and NOT a bare "bash". Section 6 drives run-tests.sh as a
 # subprocess; an unnarrowed `shutil.which` result would surface as a TypeError
@@ -228,7 +235,7 @@ def test_every_file_the_ledgers_read_exists():
 
 
 # --------------------------------------------------------------------------- #
-# 1. THE LEDGERS — one owner (gitenv.py), four spellings, pinned both ways
+# 1. THE LEDGERS — one owner (gitenv.py), five spellings, pinned both ways
 # --------------------------------------------------------------------------- #
 def _unset_line_number(text: str, array: str) -> int:
     """The 1-based line that RUNS `unset "${<array>[@]}"`, or -1.
@@ -283,7 +290,7 @@ def test_the_shell_and_python_pointer_ledgers_agree(runner):
     resolvable only by luck; a name in a runner and not in Python leaves a bare
     `pytest` exposed. Either way the guard claims coverage it does not have.
 
-    `commit.sh` is in this list for a different reason from the three runners:
+    `commit.sh` is in this list for a different reason from the four runners:
     nothing there resolves a ROOT, but it is the file that COMMITS, so a name
     missing from its copy is a repository somebody else's content can land in.
     """
@@ -373,41 +380,79 @@ def test_the_runner_and_python_session_markers_agree():
         "positive control that is never read is the reassuring zero itself: "
         "'loaded and saw nothing' and 'never loaded' print identically."
     )
+
+
+# 🔴 ASSEMBLED, never spelled literally. If this module's own text contained the
+# array-opening string, the sweep below would match THIS FILE the moment anyone
+# widened its suffix filter — a red for a reason that has nothing to do with the
+# guard. Assembling it makes self-exclusion a property of the MARKER rather than
+# an accident of the filter, so the filter is free to say only what it means:
+# WHERE a bash array can live.
+#
+# Which is why the sentence above describes the string instead of quoting it.
+# The first draft of this very comment spelled it out and put the literal right
+# back into the file — `test_this_file_never_spells_the_marker_literally` below
+# pins that, because a comment is a claim like any other.
+_ARRAY_MARKER = "DEVRC_GIT_REPO_POINTERS" + "=("
+
+
+def _could_hold_a_shell_array(path: Path) -> bool:
+    """SCOPE ONLY — which files could carry a bash array at all.
+
+    `.sh`, or extensionless (the `githooks/` hooks). This is deliberately NOT
+    doing double duty as self-exclusion; see `_ARRAY_MARKER`.
+    """
+    return path.suffix in (".sh", "")
+
+
 def test_POINTER_CLEARERS_is_every_file_that_declares_the_array():
     """🔴 THE FILE LIST IS DERIVED, NOT TRUSTED — both directions.
 
     `POINTER_CLEARERS` is hand-maintained. Every pin above is parametrised over
-    it, so a FIFTH file that grows a `DEVRC_GIT_REPO_POINTERS` array is silently
-    unpinned: its copy could drift from the owner, or spell `unset` wrong, and
-    nothing here would notice. That is the "a count of DECLARATIONS is not a
-    count of INSTANCES" shape.
+    it, so a SIXTH file that grows the array is silently unpinned: its copy could
+    drift from the owner, or spell `unset` wrong, and nothing here would notice.
+    That is the "a count of DECLARATIONS is not a count of INSTANCES" shape.
 
-    So sweep the tracked tree and require the sets to be EQUAL. Growing fails
-    (a new clearer must be pinned); shrinking fails too (a clearer that lost its
-    array must be removed here deliberately, not discovered later).
+    So sweep the tree and require the sets to be EQUAL. Growing fails (a new
+    clearer must be pinned); shrinking fails too (a clearer that lost its array
+    must be removed here deliberately, not discovered later).
 
-    Mirrors the precedent in `drift-check.sh`, whose covered package set is
-    derived from `nix/pkgs/` at scan time and pinned two-way.
+    🔴 THE SWEEP MUST WORK IN BOTH TIERS, and the first version did not. It ran a
+    bare `git ls-files` and asserted rc 0 — but `flake.nix` builds
+    `checks.pytests` from `cp -r ${./.} src`, which has NO `.git`, so the
+    authoritative hermetic tier died `fatal: not a git repository … assert 128
+    == 0`. The dev-host `--set all` run could not see it: RULES.md's two-tiers
+    rule, exactly as written.
+
+    The repo already owns the fix and it is an IMPORT, not a new helper:
+    `testlib.public_ip_scan.repo_files` prefers `git ls-files` and falls back to
+    a filesystem walk in the sandbox. `captured_text_scan.py` carries a "ONE
+    RULE, ONE PLACE — a third copy of it would be a third place for that trap to
+    come back" banner over the same helper; a hand-rolled fallback here would
+    have been that third copy.
     """
-    tracked = subprocess.run(["git", "-C", str(ROOT), "ls-files", "-z"],
-                             capture_output=True, text=True)
-    assert tracked.returncode == 0, f"git ls-files failed: {tracked.stderr}"
-    names = [n for n in tracked.stdout.split("\0") if n]
+    names = repo_files(ROOT)
+    # A fallback that silently returned nothing would make `found == declared`
+    # true by vacuum — the empty-result-reads-as-clean failure this whole PR is
+    # about. Floor first, agreement second.
     assert len(names) > 100, (
-        f"the tracked-file sweep found only {len(names)} files — it is not "
-        "walking the repo, so its agreement below would be vacuous")
+        f"the repo-file sweep found only {len(names)} files under {ROOT} — it is "
+        "not walking the repo, so the agreement below would be vacuous")
+    shell = [p for p in names if _could_hold_a_shell_array(p)]
+    assert len(shell) > 10, (
+        f"the sweep saw {len(shell)} shell files — the walk is not reaching "
+        "`scripts/` or `githooks/`, where every clearer lives")
 
     found: set[Path] = set()
-    for rel in names:
-        p = ROOT / rel
-        if p.suffix not in (".sh", "") or not p.is_file():
+    for path in shell:
+        if not path.is_file():
             continue
         try:
-            text = p.read_text(encoding="utf-8")
+            text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             continue
-        if "DEVRC_GIT_REPO_POINTERS=(" in text:
-            found.add(p)
+        if _ARRAY_MARKER in text:
+            found.add(path)
 
     declared = set(POINTER_CLEARERS)
     assert found == declared, (
@@ -420,16 +465,57 @@ def test_POINTER_CLEARERS_is_every_file_that_declares_the_array():
     )
 
 
+def test_this_file_never_spells_the_marker_literally():
+    """🔴 SELF-EXCLUSION MUST STAY A PROPERTY OF THE MARKER, not of the filter.
+
+    `_could_hold_a_shell_array` currently admits only `.sh` and extensionless
+    files, so this `.py` module is out of scope anyway — today. The moment
+    someone widens that filter (to catch a clearer in a `.bash` file, say), any
+    literal occurrence of the array-opening string in THIS file makes the sweep
+    match itself and go red for a reason unrelated to the guard.
+
+    Measured: the first draft of the comment above defeated the assembly by
+    quoting the very string it was explaining.
+    """
+    src = Path(__file__).read_text(encoding="utf-8")
+    assert src.count(_ARRAY_MARKER) == 0, (
+        f"this file spells the array marker literally {src.count(_ARRAY_MARKER)} "
+        "time(s). Assemble it, or describe it in prose without quoting it — "
+        "otherwise widening `_could_hold_a_shell_array` makes the sweep match "
+        "itself.")
+
+
 def test_the_clearer_sweep_can_actually_find_one():
-    """🔴 POSITIVE CONTROL for the sweep. `found == declared` is also what a
-    walker that matched NOTHING produces on an empty `POINTER_CLEARERS` — and
-    more to the point, a typo'd marker string would make the sweep return an
-    empty set that silently agreed with nothing. Prove it matches a real file."""
+    """🔴 POSITIVE CONTROL for the sweep, and it must hold IN BOTH TIERS.
+
+    `found == declared` is also what a walker that matched NOTHING produces
+    against an empty `POINTER_CLEARERS`, and a typo'd marker would make the
+    sweep return an empty set that silently agreed with nothing.
+
+    Everything below is filesystem-only — no `git` — so it measures the same
+    thing inside the nix sandbox, where the sweep now takes its fallback path.
+    """
+    # 1. the marker really is in a real clearer, read off disk
     text = (SCRIPTS / "run-tests.sh").read_text(encoding="utf-8")
-    assert "DEVRC_GIT_REPO_POINTERS=(" in text, (
+    assert _ARRAY_MARKER in text, (
         "the marker the sweep greps for is not in run-tests.sh — the sweep is "
         "looking for a string that no longer exists, so it can only ever "
         "return an empty set")
+
+    # 2. the file-list source itself is non-empty and reaches shell files
+    names = repo_files(ROOT)
+    assert len(names) > 100, f"repo_files({ROOT}) returned {len(names)} files"
+    assert any(_could_hold_a_shell_array(p) and p.name == "run-tests.sh"
+               for p in names), (
+        "repo_files did not return run-tests.sh, so the sweep cannot have "
+        "matched it — in this tier the sweep is wired to nothing")
+
+    # 3. and the scope filter admits every shape a clearer takes: a `.sh` file
+    #    and an extensionless githooks hook.
+    assert _could_hold_a_shell_array(Path("x/run-tests.sh"))
+    assert _could_hold_a_shell_array(Path("githooks/tests-on-push"))
+    assert not _could_hold_a_shell_array(Path("x/test_thing.py"))
+
 
 
 def _root_line(text: str) -> int:
@@ -1280,6 +1366,10 @@ def test_the_module_root_is_load_bearing(tmp_path, monkeypatch):
     outside = tmp_path / "not-a-repo"
     outside.mkdir()
     monkeypatch.chdir(outside)
+    assert resolve_git_dir(Path.cwd()) is None, (
+        "the tmp cwd resolved to a repository, so this test could pass via the "
+        "cwd root and would not kill the mutant it exists for")
+
     dirs = protected_git_dirs()
     home_git_dir = resolve_git_dir(home)
     assert home_git_dir is not None, "the fixture repo has no git dir (test rig issue)"
@@ -1287,6 +1377,45 @@ def test_the_module_root_is_load_bearing(tmp_path, monkeypatch):
         "the module's own repository was not discovered from a cwd outside any "
         "repository — dropping Path(__file__) from `starts` would be "
         f"invisible.\nfound: {dirs}")
+
+
+def test_the_module_root_pin_does_not_depend_on_this_tree_being_a_checkout():
+    """🔴 THE REGRESSION GUARD FOR THE FIX ABOVE, and it is not a tautology.
+
+    The bug was an environmental assumption hiding inside a behavioural test, and
+    the only reason it survived review is that nobody ran the tier that lacks the
+    environment. So assert the property directly: the module-root pin must build
+    its own repository and must not interrogate the ambient one.
+
+    🔴 CODE ONLY, docstrings and comments STRIPPED. The first version of this
+    guard grepped the raw source and matched the PROSE in the test above — which
+    quotes the old failure message on purpose — so it failed on a correct tree.
+    `_root_line` in this same file carries the identical warning: a parser that
+    cannot tell code from prose is measuring the wrong thing.
+    """
+    import ast
+
+    src = Path(__file__).read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    fn = next(n for n in tree.body
+              if isinstance(n, ast.FunctionDef)
+              and n.name == "test_the_module_root_is_load_bearing")
+    body = fn.body[1:] if ast.get_docstring(fn) is not None else fn.body
+    code = "\n".join(ast.get_source_segment(src, stmt) or "" for stmt in body)
+    assert code.strip(), "could not extract the pinned test's code"
+
+    assert 'monkeypatch.setattr(gitenv, "__file__"' in code, (
+        "test_the_module_root_is_load_bearing no longer rebinds the module root, "
+        "so it is measuring the ambient tree again — which is exactly what made "
+        f"the nix sandbox permanently red.\ncode was:\n{code}")
+    assert "_mkrepo(" in code, (
+        "the pinned test no longer builds its own repository, so it depends on "
+        "the ambient tree being a checkout")
+    residual = code.replace('monkeypatch.setattr(gitenv, "__file__"', "")
+    assert "gitenv.__file__" not in residual, (
+        "the pinned test reads the REAL module location again. That is the "
+        "environmental assumption which is false by construction in the nix "
+        "sandbox (`cp -r ${./.} src`, no .git)")
 
 
 # --------------------------------------------------------------------------- #

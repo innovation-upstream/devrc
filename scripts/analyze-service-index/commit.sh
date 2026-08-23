@@ -218,7 +218,7 @@ command -v git >/dev/null 2>&1 ||
 #
 # THE SET IS NOT CHOSEN HERE. `scripts/testlib/gitenv.py::REPO_POINTER_VARS` owns
 # it and test_git_repo_isolation.py pins this spelling against it in BOTH
-# directions, exactly as it does for the three runners. Every name below can make
+# directions, exactly as it does for the four other clearers. Every name below can make
 # git resolve a DIFFERENT repository, index or object store than the `-C` says.
 #
 # UNCONDITIONAL: there is no workflow in which this unit should be aimed at a

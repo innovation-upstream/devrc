@@ -2417,6 +2417,7 @@ def test_the_bind_list_parser_sees_an_appended_entry():
 #   GIT_INDEX_FILE             the foreign worktree's index, overwritten
 #   GIT_COMMON_DIR             the foreign config (the identity seeding)
 #   GIT_OBJECT_DIRECTORY       the foreign OBJECT STORE — see below
+#   GIT_CONFIG                 the foreign repo's config (the gpgsign pin)
 #
 # 🔴 A CORRECTION, AND THE REASON IT WAS WRONG. An earlier revision of this
 # comment said GIT_OBJECT_DIRECTORY "alone left the foreign repo byte-identical
@@ -2440,12 +2441,36 @@ def test_the_bind_list_parser_sees_an_appended_entry():
 # of the five, and the false comment was instructing the next maintainer not to
 # cover it. `_fingerprint` now walks `objects/`; see its docstring.
 #
-# DELIBERATELY NOT PARAMETRISED OVER, and re-measured with the WIDENED
-# fingerprint so this claim is not the previous one's mistake again:
-# GIT_NAMESPACE alone left the foreign repo byte-identical on the pre-fix tree,
-# and GIT_WORK_TREE alone made the pre-fix run FAIL (rc 1) rather than misdirect
-# it. They are on the ledger because they redirect git in general; a test over
-# them here would be an invariant guard wearing a regression test's name.
+# 🔴 ALL ELEVEN LEDGER NAMES ARE MEASURED, not six of them with the rest left to
+# inference. An earlier revision listed only the damaging ones and read as
+# exhaustive while five names had never been tried — the same unstated-scope
+# shape as the GIT_OBJECT_DIRECTORY correction above, one level up. Each was run
+# ALONE against the pre-fix script with the WIDENED fingerprint:
+#
+#   variable                          rc   foreign repo moved?
+#   GIT_DIR                            0   YES  (both the worktree and main gitdir)
+#   GIT_COMMON_DIR                     0   YES  config
+#   GIT_INDEX_FILE                     0   YES  index
+#   GIT_OBJECT_DIRECTORY               0   YES  objects + an unusable backup
+#   GIT_CONFIG                         0   YES  config  <-- found BY this sweep
+#   GIT_WORK_TREE                      1   no — the run FAILED instead
+#   GIT_ALTERNATE_OBJECT_DIRECTORIES   0   no
+#   GIT_NAMESPACE                      0   no
+#   GIT_PREFIX                         0   no
+#   GIT_GRAFT_FILE                     0   no
+#   GIT_SHALLOW_FILE                   0   no
+#
+# The five YES names are parametrised below (six cases — GIT_DIR gets two). The
+# six others are NOT, and that is the honest label: they are on the ledger
+# because they redirect git in general, but a test over them here would be an
+# invariant guard wearing a regression test's name. Post-fix, all eleven leave
+# the foreign repo byte-identical and the scope backed up correctly.
+#
+# GIT_CONFIG is the one this sweep turned up: it makes the per-repo
+# `commit.gpgsign false` pin write into the FOREIGN repository's config
+# (`+[commit]\n\tgpgsign = false` measured in the decoy) — configuration damage
+# to somebody else's checkout, the same class as the `core.hooksPath` and
+# `remote.origin.url` writes in the 2026-08-21 incident.
 #
 # ⚠ AND TWO THAT ARE NOT ON THE SHARED LEDGER AT ALL, covered separately below:
 # GIT_CEILING_DIRECTORIES and GIT_TEMPLATE_DIR cannot redirect git, so GUARD 9
@@ -2494,7 +2519,7 @@ def _foreign_git_dirs(wt):
     """The per-worktree gitdir AND the common dir where refs/config really live.
 
     Watching only the per-worktree dir would miss every ref and config write —
-    two of the four measured damage shapes.
+    three of the measured damage shapes (config, refs, index).
     """
     git_dir = resolve_git_dir(wt)
     assert git_dir is not None, f"could not resolve a git dir for {wt}"
@@ -2548,7 +2573,7 @@ def _fingerprint(dirs):
 
 
 _SPOOF_SHAPES = ("GIT_DIR_worktree", "GIT_DIR_main", "GIT_INDEX_FILE",
-                 "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY")
+                 "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY", "GIT_CONFIG")
 
 
 def _spoof_env(shape, work, gitdir):
@@ -2558,12 +2583,13 @@ def _spoof_env(shape, work, gitdir):
         "GIT_INDEX_FILE": {"GIT_INDEX_FILE": str(gitdir / "index")},
         "GIT_COMMON_DIR": {"GIT_COMMON_DIR": str(work / ".git")},
         "GIT_OBJECT_DIRECTORY": {"GIT_OBJECT_DIRECTORY": str(work / ".git" / "objects")},
+        "GIT_CONFIG": {"GIT_CONFIG": str(work / ".git" / "config")},
     }[shape]
 
 
 @pytest.mark.parametrize("shape", _SPOOF_SHAPES)
 def test_a_leaked_repo_pointer_cannot_aim_the_committer_at_a_foreign_repo(tmp_path, shape):
-    """🔴 THE REGRESSION. Red on the pre-fix tree for all FIVE shapes.
+    """🔴 THE REGRESSION. Red on the pre-fix tree for all SIX cases.
 
     TWO independent claims, because GIT_OBJECT_DIRECTORY broke both at once and
     either one alone would have passed it:
@@ -2627,7 +2653,7 @@ def test_a_leaked_repo_pointer_cannot_aim_the_committer_at_a_foreign_repo(tmp_pa
 
 
 def test_the_foreign_repo_fixture_would_actually_record_a_write(tmp_path):
-    """🔴 POSITIVE CONTROL. The four assertions above are ZEROES — "nothing
+    """🔴 POSITIVE CONTROL. The six assertions above are ZEROES — "nothing
     moved" — and a zero is indistinguishable from a fingerprint wired to nothing.
 
     So do the damaging thing on purpose, with the same fixture and the same
@@ -2658,6 +2684,23 @@ def test_the_foreign_repo_fixture_would_actually_record_a_write(tmp_path):
         "detector every assertion above relies on is not wired up")
     assert any("refs/heads/decoy/target" in d for d in deltas), (
         "the branch write was invisible to the fingerprint:\n" + "\n".join(deltas))
+    # 🔴 THE `objects/` COMPONENT, PINNED BY A DELTA ONLY IT CAN SEE.
+    #
+    # Without this line the component added in this very round is itself
+    # unpinned: `_objects_files` could `return []` unconditionally and this
+    # control stays green, because the ref delta above already satisfies
+    # `assert deltas`. That is one level up from the defect this section exists
+    # to correct — a silent empty from the instrument reading as a clean repo —
+    # and it is the treatment this file's own docstring promises for every
+    # fingerprint entry: a mutation ONLY that entry can observe.
+    #
+    # MEASURED: with `_objects_files` stubbed to `[]`, the suite was 99 passed /
+    # 0 red before this assertion existed.
+    assert any("/objects/" in d for d in deltas), (
+        "the commit's OBJECTS were invisible to the fingerprint — `_fingerprint` "
+        "is not watching `objects/`, so the GIT_OBJECT_DIRECTORY shape above "
+        "would report a clean repo while the store's content sat in it:\n"
+        + "\n".join(deltas))
 
 
 def test_a_leaked_pointer_does_not_defeat_the_nested_scope_refusal(tmp_path):
