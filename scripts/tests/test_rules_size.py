@@ -244,7 +244,9 @@ ARCHIVE_MD = REPO_ROOT / "claude" / "RULES-ARCHIVE.md"
 #
 # The +400 matches the 2026-08-11 precedent's modesty rather than the sizing
 # formula above, which would give ~41,500 and make the gate decorative. It
-# leaves 1,208 B of headroom, i.e. one large rule above the floor.
+# leaves 1,208 B of headroom CEILING-relative -- 308 B above the FLOOR, i.e.
+# about a third of a large rule, not one. (Labelled retroactively; see the
+# MIND THE BASE note in the 2026-08-21 entry below.)
 #
 # 2026-08-21: 38,800 -> 39,200 (+400). The rule that would not fit was "a
 # control that SHARES the step you doubt is a second sample of the same
@@ -278,9 +280,15 @@ ARCHIVE_MD = REPO_ROOT / "claude" / "RULES-ARCHIVE.md"
 # two different methods, and returned 24 B against a 324 B rule.
 #
 # +400 rather than the +300 that would just clear MIN_HEADROOM_BYTES: +300
-# leaves 34 B of slack above the floor, which is the exact mistake the
-# 2026-08-20 entry diagnosed (32 B of slack -> "the next contributor got the
-# surprise, not the warning"). +400 leaves 1,010 B, i.e. one large rule.
+# leaves single-digit-to-low-tens bytes above the floor. (The "34" this line
+# carried was computed against a 300 B DRAFT of a rule that shipped at 324 B;
+# at the committed size it is 10 B. The point holds at either value -- which is
+# why the number should not have been here at all.) That is the exact mistake
+# diagnosed by the UNDATED 35,200 -> 38,400 block above (32 B of slack -> "the
+# next contributor got the surprise, not the warning"). ⚠ That block is
+# 2026-08-15, `d8ffb466`; it carries no date header, which is what made this
+# line misattribute it to the 2026-08-20 entry. +400 leaves 1,010 B
+# CEILING-relative, i.e. one large rule.
 #
 # 2026-08-21 (later, #661): the zsh MULTIOS redirection trap cost 106 B and
 # RULES.md reached 38,296. 🔴 MIND THE BASE -- the two slack figures in this

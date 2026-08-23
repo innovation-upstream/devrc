@@ -1331,20 +1331,31 @@ exact about which half of that gate is real, because an earlier draft of this en
 got it wrong in the direction this repo had corrected ONE DAY EARLIER (#691, `b8e8843b`, whose
 title is "the deny message called a CONVENTION 'structural'").**
 
-- **Structural, enforced in Go:** an agent can never mark its own work `complete`.
-  `internal/taskstatus/taskstatus.go:79-81` is `AllowedForAgent(s) = Valid(s) && s != Complete`.
-  Note it is **criteria-INDEPENDENT** — every agent pickup caps at `ready_for_review`, heading or
-  no heading.
-- **Convention, enforced by nothing:** the AUTHOR-SPECIFIED vs DERIVED distinction, the
-  `## Acceptance criteria` heading that selects between them, and the freeze-at-first-read. The
-  string "acceptance criteria" appears in **zero** Go files; the table lives in the skill, is read
-  by the agent about itself, and `flows/task-authoring.md` says in bold *"That lever is a
-  CONVENTION, not a server check — do not oversell it."*
+- **Structural, and NARROWER than it looks — scope it to the ROUTE or you will get it wrong in the
+  other direction, which is what an earlier draft of this entry did.** A *dispatched devpod* agent
+  cannot set `complete`: `internal/api/agent.go` gates the two agent-token surfaces on
+  `AllowedForAgent` (`internal/taskstatus/taskstatus.go:79-81` = `Valid(s) && s != Complete`), and
+  that gate is **criteria-independent**. But the *machine* route — `PATCH /api/tasks/{id}/status`,
+  hook token, which is what `clawgatectl task status` and therefore a LOCAL Claude Code pickup
+  uses — **deliberately allows every status including `complete`** (`internal/api/notes.go`:
+  *"A hook-token producer is trusted, so ALL statuses are allowed here INCLUDING `complete`"*;
+  `taskstatus.go` says the same: *"the in-devpod agent route enforces it while the machine route
+  deliberately does not"*).
+- **Convention, not enforced SERVER-side:** the AUTHOR-SPECIFIED vs DERIVED split and the
+  freeze-at-first-read exist only in the skill's prose, read by the agent about itself — i.e.
+  self-assessed, the very property this was cited as structurally solving. The string "acceptance
+  criteria" appears in **zero** Go files. ⚠ Not *unenforced*: the `## Acceptance criteria` heading
+  is a deterministic create-time deny in devrc's `clawgate-task-interview-guard.py` PreToolUse
+  hook. Server-side is the distinction that matters, and it is the one #691 drew.
 
 So the borrowed IDEA is sound and stands on its own — classify by provenance, and freeze the
-verdict before you know whether you pass it. The claim that clawgate implements it *structurally*
-is false, and asserting it from a document rather than the code is the same failure as the
-`approve-with-comment` claim two bullets down.
+verdict before you know whether you pass it. What is false is that clawgate enforces it. 🔴 **And
+note how this was gotten wrong TWICE in opposite directions**: first by calling the convention
+structural, then by "correcting" that into a blanket "an agent can never set `complete`" — which
+would defeat the criteria gate's whole purpose, since the local pickup path is exactly the one
+that may. #691's own message warned about this merge: *"the genuinely structural fact nearby is
+different and NARROWER … merging the two is what produced the overstatement."* Read the route,
+not the verb.
 
 **Clawgate is the transport for the ask branches, never the gate** — measured 2026-08-22
 against live `0.7.98` (deployment pin `harbor.homelab.lan/library/clawgate:0.7.98` matches
