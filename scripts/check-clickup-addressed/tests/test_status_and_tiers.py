@@ -212,7 +212,7 @@ def test_include_self_runs_is_forwarded_to_both_subscripts():
 
     orig_run, orig_argv, orig_stdout = check_addressed.run_script, sys.argv, sys.stdout
     check_addressed.run_script = fake
-    sys.argv = ["check-addressed.py", "--include-self-runs", "--no-resolve-prs"]
+    sys.argv = ["check-addressed.py", "--transcripts", "--include-self-runs", "--no-resolve-prs"]
     sys.stdout = io.StringIO()
     try:
         check_addressed.main()
@@ -244,7 +244,7 @@ def test_self_run_guard_is_on_by_default():
 
     orig_run, orig_argv, orig_stdout = check_addressed.run_script, sys.argv, sys.stdout
     check_addressed.run_script = fake
-    sys.argv = ["check-addressed.py", "--no-resolve-prs"]
+    sys.argv = ["check-addressed.py", "--transcripts", "--no-resolve-prs"]
     sys.stdout = io.StringIO()
     try:
         check_addressed.main()

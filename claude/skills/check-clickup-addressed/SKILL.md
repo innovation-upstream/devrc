@@ -34,11 +34,26 @@ The scripts live in **devrc**, not in this deployed skill dir — `~/.claude/ski
 read-only nix-store copy of `claude/skills/`, and only the docs ship there. Run them from
 the repo:
 
+🔴 **Transcript scanning is OPT-IN since 2026-08-22 (`--transcripts`).** Measured upstream
+over the three tickets in that day's report, the four evidence sources scored: ClickUp
+status **3/3** useful; newest comment **3/3 and decisive in every case**; transcript scan
+**0/3**, one of them actively misleading (a `✓ PR merged` whose own snippet said the bug was
+still unfixed); cited-PR resolution **0/3 resolved, 2/3 with FALSE explanations**. The scan
+is also ~60s of the ~90s runtime and the origin of every false verdict this tool has
+shipped. The ClickUp-side default runs in **~21s** and produced only correct output on the
+same input.
+
 ```bash
 CCUA=~/workspace/devrc/scripts/check-clickup-addressed
 
-# Default: top 3 most recent comments (~30s)
+# Default: top 3 comments, ClickUp status + newest comment (~21s). NOT the FOUR
+# transcript-dependent flags — the run names every one of them and says it skipped
+# them. `--since`/`--include-self-runs`/`--no-resolve-prs`/`--verbose` are inert
+# here and warn on stderr rather than being silently ignored.
 python3 "$CCUA/check-addressed.py"
+
+# Add the transcript scan and completion verdicts (~90s; read every snippet)
+python3 "$CCUA/check-addressed.py" --transcripts
 
 # Fast mode: samples only the 10 most recently updated tasks (~10s)
 python3 "$CCUA/check-addressed.py" --fast
@@ -120,6 +135,7 @@ process per task, so lookups dedupe within a task, not across the run.
 | `unclear` | Sessions mention the task, but no signal of either kind is attributable to it |
 | `no_sessions_found` | No session transcript mentions this task at all |
 | `no_mentions_found` | Sessions were read, but the task ID appears in none of them — **no evidence either way**, never an implied "partly done" |
+| `not_scanned` | **The DEFAULT since 2026-08-22.** No transcript was read at all, so no verdict was formed. Distinct from every row above: those are *searched* outcomes, this is the absence of a search. The record also **omits `mentions_found` and `sessions_searched`** rather than reporting `0` — an unsearched zero is not a searched one. `--transcripts` is what produces the other rows |
 
 🔴 **`partially_addressed` is the status to be most suspicious of** — it was, until
 2026-08-19, the state an unmatched task fell into *by construction* (see Limitations).
@@ -158,6 +174,23 @@ Round 5, the same day, fixed a **false explanation** (a named-but-unknown repo r
 that new flag's own blind spot — it could not see **your** replies, so a ticket you had
 already answered was reported unanswered forever. What remains is listed under "Still weak".
 
+🔴 **A fix for the self-run guard was TRIED and REVERTED (2026-08-22) — recorded so nobody
+re-derives it.** The guard drops any transcript containing this skill's markers, which
+measured as **67% / 80% / 100%** of matching transcripts on three live tickets. That looks
+like catastrophic evidence loss, so the guard was rewritten to redact the checker's *output
+messages* and keep the session. It **recovered** the transcripts (3→8, 2→9, 0→8) **and made
+every verdict worse**: all three tickets went to `partially_addressed` on completion signals
+mined from sessions that were *working on this checker*. One such snippet was literally a
+test-corpus example — a sentence of the form *"the fix landed in #NNNN and is live"* — scored
+as completion evidence for an unrelated infrastructure ticket. Every recovered session for
+one of the three opened with either `/check-clickup-addressed` or *"read and evaluate the
+check-clickup-addressed skill"*. **The crude guard was reaching the right outcome by the
+wrong mechanism, and the ~81% it discards is overwhelmingly noise.** The real lesson is the
+one that made the scan opt-in: **lexical proximity cannot separate a session that WORKED the
+ticket from a session that TALKED ABOUT it**, and no amount of guard-tuning changes that.
+*(Ticket ids and the client's stack are omitted here — this repo is public. The measurement
+is what carries; the identifiers were the client's.)*
+
 🔴 **Every round so far has been found by RUNNING the tool and checking its verdict against
 reality, never by reading the code.** Round 6's defect shipped *with* a fresh adversarial
 test suite that had five controls on the very function that was wrong — all five green, all
@@ -179,15 +212,22 @@ five scoped to one side of a seam. If you are about to trust a verdict here, ope
   `868gx0aaa`, because the merge sentence really is adjacent to it. **Read the snippet.**
 - **A PR reference the tool cannot pin to a repo is reported `unresolved`, not guessed** —
   a snippet-wide scan was tried and attributed every bare `#N` to `civitai/civitai`,
-  returning a real but unrelated PR ("merged 2024-03-18"). 🔴 **Three distinct ways to fail,
-  and the message now says which** (until 2026-08-21 all three printed `repo not named`,
-  true of only one): `repo not named` — nothing repo-ish within `REPO_LOOKBEHIND`=30 chars;
-  `repo 'X' is not in KNOWN_REPOS` — a repo **was** named, *go add it*; `ambiguous — A, B
-  both in range`. The word on the `#` is reported as written and **not classified** —
-  nothing short of enumerating the world separates `devrc` from `landed`, and a reader
-  separates them at a glance. `KNOWN_REPOS` is a closed vocabulary, so **widening it is not
-  the fix** (same shape as the status sets below); verify owners with `gh repo view` —
-  `devrc` is **innovation-upstream**/devrc, and `civitai/devrc` does not exist.
+  returning a real but unrelated PR ("merged 2024-03-18"). 🔴 **Round 5 split the failure
+  into three precise messages; round 7 (2026-08-22) COLLAPSED two of them back, on
+  measurement.** `repo 'X' is not in KNOWN_REPOS` asserts that a repo was named and is
+  spelled `X` — and on a live upstream run **2 of the 3 cited PRs** rendered as `repo
+  'their' …` and `repo 'which' …`, the lookbehind having captured the preceding *English
+  word* while the comment plainly named a repo. The precise message was wrong more often
+  than the vague one it replaced, and it sends the reader to add an English word to a repo
+  table. `word` is simply whatever token precedes the `#`, and nothing short of enumerating
+  the world separates `devrc` from `landed` — so the tool no longer claims to know. Both now
+  render `unresolved (could not determine the repo; if one is named here, add it to
+  KNOWN_REPOS…)` — a **conditional**, true either way, which keeps the affordance without
+  the false premise. `ambiguous — A, B both in range` survives: repos genuinely *were* named
+  there, so naming them is a true diagnosis. `KNOWN_REPOS` is a closed vocabulary, so
+  **widening it is not the fix** (same shape as the status sets below); verify owners with
+  `gh repo view` — `devrc` is **innovation-upstream**/devrc, and `civitai/devrc` does not
+  exist.
 - **`--fast` only inspects the 10 most recently updated tasks**, so a stale-but-important
   task is invisible to it. That is a sampling window, not a full check.
 
@@ -319,6 +359,34 @@ plus one state where nothing disagrees and that is exactly the problem (4):
    comment and PR rules never read it and can each still flag the ticket.) Bounded only by a
    *newer* colleague comment re-firing it. Acknowledging is not doing.
 
+🔴 **FOUR of these checks NEED the transcript scan, and it is OFF by default — the run names
+every one of them.** The cited-PR resolution (source 3), the waiting flag (source 4),
+*"ClickUp `<done>` but open signals remain"*, and *"transcripts read as done while ClickUp is
+still open"*. The first two of those are gated on a **SEARCHED** zero; the other two need a
+completion verdict and an evidence list that a scan-less run never builds. Since the scan
+became opt-in the scan-less record carries **no**
+`mentions_found` at all — deliberately, because an unsearched zero is not a searched one —
+so in the default invocation those rules are *structurally unable to fire*. Upstream that
+was **silent**, and when nothing else disagreed the **Needs a decision** heading was not
+printed at all: measured by driving the tool, an empty block reading as *checked, nothing
+disagrees* when it meant *rules never ran*. Exactly the failure round 4's unknown-status
+announcement exists for, one axis over, and it arrived with a change that was individually
+correct. A default run now prints **one** line naming every such rule and how to enable them.
+Pass `--transcripts` and the line disappears.
+🔴 **The list is BUILT from a ledger (`SCAN_ONLY_RULES`), not restated in prose, because the
+first version of that announcement named TWO of the four.** Naming a subset is worse than
+naming none — it implies the unnamed ones ran, which is the same defect one axis further
+over. The ledger pairs each rule with its flag's own unique tail, and a test diffs a
+fully-armed fixture across both modes: it fails when a fifth scan-dependent rule is ADDED and
+when one is REMOVED. A second test forbids a rule's announcement NAME from containing its own
+TAIL, so `"<tail>" in output` can never be true in a run where that flag did not fire — the
+instrument-matching-its-own-announcement trap that cost upstream a false failure.
+🔴 The two guards deliberately key on **different** facts, and neither is a typo: the flags
+gate on the STATE (`"mentions_found" in r`) because they ACT on evidence and a renamed status
+sentinel must not be able to fire them; the announcement keys on the run's own declaration
+(`status == "not_scanned"`) because it DESCRIBES the run, and a record merely missing the key
+(a stale producer, a partial write) is not evidence that the whole scan was skipped.
+
 🔴 **Sources 1 and 2 are gated on a hardcoded nine-word status vocabulary, and ClickUp
 statuses are per-list and arbitrary.** Until 2026-08-21 a miss was **silent**: measured,
 `in review` / `blocked` / `needs qa` / `review` each disabled every ticket/comment check
@@ -383,16 +451,20 @@ announcement.
 | Mode | Time | Notes |
 |------|------|-------|
 | `--fast` | ~10s | Samples only the 10 most recently updated tasks |
-| `--limit 5` | **~85–100s** | All assigned tasks; one transcript search per task |
+| default (no `--transcripts`) | **~21s** | ClickUp only; no per-task transcript sweep |
+| `--limit 5 --transcripts` | **~85–100s** | All assigned tasks; one transcript search per task |
 
-Re-measured 2026-08-21: **98.5s** and **85.4s** wall (two runs). The `~41s` quoted until
-then was a 2026-08-19 figure that had silently doubled as the transcript corpus grew — the
-ClickUp fetch dominates, but the per-task sweep scales with `~/.claude/projects`, so expect
-further drift. **Re-time it rather than quoting it.**
+⚠️ **Every figure in this table is upstream's, and the two `--transcripts` rows were measured
+before the scan became opt-in.** Re-measured upstream 2026-08-21: **98.5s** and **85.4s**
+wall (two runs); the `~41s` quoted until then was a 2026-08-19 figure that had silently
+doubled as the transcript corpus grew. The ~21s default is upstream's single measurement of
+the same day. The ClickUp fetch dominates the cheap path, but the per-task sweep scales with
+`~/.claude/projects`, so expect drift on both — and this host's corpus is not upstream's.
+**Re-time it rather than quoting it.**
 
 ## Tests
 
-Run all tests (**213** collected, measured 2026-08-22). `run_all.py` exits non-zero on
+Run all tests (**226** collected, measured 2026-08-22). `run_all.py` exits non-zero on
 failure — but read the `Total: N passed, M failed` line, not a piped exit code. 🔴 **If that
 line is missing at all, the run died — treat it as a failure, never as "no output".** A
 `sys.exit()` from code under test is a `SystemExit`, which a bare `except Exception` does
@@ -406,7 +478,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 "$CCUA/tests/run_all.py"
 
 The same files are a **pytest** target of devrc's gate — `scripts/check-clickup-addressed/tests`
 in `HERMETIC_TARGETS`, with its collected-count floor in `TARGET_FLOORS`
-(`scripts/run-tests.sh`). Both runners see the same 213; `run_all.py` survives because it
+(`scripts/run-tests.sh`). Both runners see the same 226; `run_all.py` survives because it
 purges `__pycache__` and reports an import failure as a FAILURE, which pytest's summary
 line does not distinguish as loudly. **Raise the floor when you add tests.**
 
@@ -416,11 +488,17 @@ Earlier rounds each ran a sweep, reported "0 survived", and threw the driver awa
 number was then unreproducible from the repo, and the next round re-invented the list and
 re-discovered the same sites. A blind re-audit of one such "51 mutants, 0 non-killed" found
 **seven more at the same delta sites**, one of which reverted that round's headline fix.
-**Extend the list; do not start a new one.** Currently **59 mutants + a positive control + a
-NULL CONTROL, 0 non-killed.** 🔴 That null control is not decoration: it copies the skill,
-mutates NOTHING and must report SURVIVED. On this battery's first run every mutant scored
-KILLED *because* `test_no_real_identifiers.py` cannot resolve the repo root from a temp copy
-and reddened all 59 for free. Read the killer NAME, not just the verdict.
+**Extend the list; do not start a new one.** Currently **82 rows (81 mutants + a positive
+control) + a NULL CONTROL, 0 non-KILLED** — the driver prints `82 mutant(s); non-KILLED: 0`.
+🔴 **`--check`'s other job is catching a mutant whose ANCHOR you moved.** Measured
+2026-08-23: one edit to `suppressed_notes` silently stranded `M49` and `M-SCOPE` at
+`NOT APPLIED` — and `M-SCOPE` is the mutant a blind re-audit once found surviving a green
+sweep. `--check` went red and named both. A `NOT APPLIED` row reads exactly like a pass in a
+long list; only the exit code tells them apart.
+🔴 That null control is not decoration: it copies the skill, mutates NOTHING and must report
+SURVIVED. On this battery's first run every mutant scored KILLED *because*
+`test_no_real_identifiers.py` cannot resolve the repo root from a temp copy and reddened
+them all for free. Read the killer NAME, not just the verdict.
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 python3 "$CCUA/tests/mutation_sweep.py" --check
@@ -459,13 +537,16 @@ Test files:
   `ANNOUNCE` / `UNREADABLE` / `ANSWERED` / `SILENT`), never off whether something fired.
   Pre-port scores 10/21, shipped 21/21. Same rule as the other corpus: **add your motivating
   case, with the verdict a human would give, BEFORE you change code.**
-- `test_bounds_and_parsing.py` — the round-8 set: the other-coverage sentence's SCOPING, the
-  DISPLAY half of the two-ages split, and `UNANSWERED_COMMENT_DAYS` pinned ON its boundary
-  (14.0) and at a NON-multiple overshoot (20) — the old fixtures sat at 13 and 30, and 30 is
-  more than 2×14, so a doubling mutant passed straight through the gap. ⚠️ These are
-  **mutation-coverage guards, not regression coverage**: each SURVIVED a full green battery
-  on a tree where the behaviour was already right. The file says so, and says why its red
-  against pre-port `main` does not count.
+- `test_bounds_and_parsing.py` — the round-8 set. **Section 1 IS regression coverage**: the
+  scan-less announcement, its one-line-per-run bound, the state-gated open-signals flag, and
+  an end-to-end `main()` drive in BOTH modes — red before the transcript opt-in landed.
+  Everything after it is the other-coverage sentence's SCOPING, the DISPLAY half of the
+  two-ages split, and `UNANSWERED_COMMENT_DAYS` pinned ON its boundary (14.0) and at a
+  NON-multiple overshoot (20) — the old fixtures sat at 13 and 30, and 30 is more than 2×14,
+  so a doubling mutant passed straight through the gap. ⚠️ Those are **mutation-coverage
+  guards, not regression coverage**: each SURVIVED a full green battery on a tree where the
+  behaviour was already right. The file says so, and says why its red against pre-port
+  `main` does not count.
 - `test_check_completion.py` — windowed signal extraction. ⚠️ Its two proximity tests hand
   `extract_signals_from_windows` a non-zero `distance`, which no production producer emits;
   they cover the formula, not any reachable path. The reachable premise is pinned in

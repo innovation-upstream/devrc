@@ -148,14 +148,15 @@ def _repo_for_ref(clean_snippet, match_start, word, default_repo):
     vague one because it stops the reader looking:
 
       "not_named"   nothing repo-ish before the '#' and no known repo within
-                    REPO_LOOKBEHIND. The message is correct; the refusal to guess is the
-                    round-2 fix and stays.
-      "unknown"     a word IS sitting on the '#' but is absent from KNOWN_REPOS. The repo
-                    was named. Saying it was not sends the reader nowhere; naming it sends
-                    them to the table. (This word is reported as-written, with no attempt
-                    to classify it as repo-shaped — 'devrc' and 'landed' are
-                    indistinguishable to any rule that does not enumerate the world, and a
-                    reader can tell them apart at a glance where a heuristic cannot.)
+                    REPO_LOOKBEHIND. The refusal to guess is the round-2 fix and stays.
+      "unknown"     a word IS sitting on the '#' but is absent from KNOWN_REPOS. 🔴 Round 5
+                    reported that word back ("repo 'X' is not in KNOWN_REPOS") on the
+                    reasoning that a repo WAS named; round 7 retracted that on measurement —
+                    'devrc' and 'landed' are indistinguishable to any rule that does not
+                    enumerate the world, and the captured token was an ENGLISH word in 2 of
+                    3 live cases. So this reason and "not_named" now RENDER identically. The
+                    distinction is still carried as DATA; the render just no longer claims
+                    to know what the token means. See `_unresolved_state`.
       "ambiguous"   two or more KNOWN repos in range and none adjacent. Repos were named;
                     the problem is that more than one was. Naming the candidates is what
                     lets the reader disambiguate by eye.
@@ -184,17 +185,31 @@ def _repo_for_ref(clean_snippet, match_start, word, default_repo):
 def _unresolved_state(reason):
     """Render a resolution failure as the operator-facing string.
 
-    Each variant says what is actually wrong AND what to do about it. The unknown-repo
-    variant names KNOWN_REPOS explicitly: D6's lesson is that the announcement, not the
-    widened vocabulary, is what makes the next miss visible.
+    TWO strings, not three. `ambiguous` keeps its own message because it is the one failure
+    whose diagnosis is TRUE. `unknown` and `not_named` render identically, deliberately: the
+    tool cannot tell them apart on real input, so claiming to is the defect. Both still name
+    KNOWN_REPOS — D6's lesson is that the announcement, not the widened vocabulary, is what
+    makes the next miss visible — but as a CONDITIONAL, never as an assertion that a repo was
+    named. See the comment in the body for the measurement that reversed round 5.
     """
     kind, detail = reason
-    if kind == "unknown":
-        return (f"unresolved (repo {detail!r} is not in KNOWN_REPOS — add it to "
-                f"check-completion.py, owner verified, if it is a real repo)")
     if kind == "ambiguous":
+        # The only failure that carries a TRUE diagnosis: repos really were named, and the
+        # problem is that more than one was. Naming them lets the reader disambiguate by eye.
         return f"unresolved (ambiguous — {', '.join(detail)} both in range, neither adjacent)"
-    return "unresolved (repo not named)"
+    # 🔴 "unknown" and "not_named" now render IDENTICALLY, and neither names the captured
+    # word. Measured upstream 2026-08-22 on a live run: 2 of 3 cited PRs produced
+    # `repo 'their' is not in KNOWN_REPOS` and `repo 'which' is not in KNOWN_REPOS` — the
+    # lookbehind had captured the preceding ENGLISH word while the comment plainly named a
+    # repo and a number. That message asserts a premise ("a repo was named, and it is spelled
+    # 'their'") that is false, and sends the reader on an errand to add an English word to a
+    # repo table. Round 5 introduced the split to replace one wrong message with three
+    # precise ones; on real input the precise version was wrong more often, because `word` is
+    # whatever token precedes the '#' and nothing short of enumerating the world tells
+    # `devrc` from `landed`. The affordance survives as a CONDITIONAL — true whether or not a
+    # repo was named — instead of an assertion that one was.
+    return ("unresolved (could not determine the repo; if one is named here, add it to "
+            "KNOWN_REPOS in check-completion.py)")
 
 
 def annotate_pr_refs(signals, default_repo=None):

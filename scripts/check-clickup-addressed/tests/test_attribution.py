@@ -245,7 +245,9 @@ def test_blocked_on_credential_is_detected():
 def test_pr_ref_without_a_repo_is_not_guessed():
     sig = [{"signal": "PR merged", "snippet": "PR #1100 merged, verified by content"}]
     check_completion.annotate_pr_refs(sig, default_repo=None)
-    assert sig[0]["pr_refs"] == [{"ref": "#1100", "state": "unresolved (repo not named)"}], \
+    assert sig[0]["pr_refs"] == [{"ref": "#1100", "state": (
+        "unresolved (could not determine the repo; if one is named here, add it to "
+        "KNOWN_REPOS in check-completion.py)")}], \
         f"a repo-less PR reference was guessed: {sig[0].get('pr_refs')}"
 
 
@@ -360,14 +362,16 @@ def test_distant_repo_name_does_not_claim_a_bare_ref():
     finally:
         check_completion.resolve_pr = orig
     assert called == [], f"a distant repo name claimed a bare ref: {called}"
-    # Round 5 (D9): the word sitting on this '#' is "landed", which is reported as-written.
-    # No rule short of enumerating the world separates 'landed' from 'devrc', and a reader
-    # separates them at a glance — so the message names the word and refuses to classify
-    # it. What matters, and is unchanged, is that nothing was resolved.
+    # Round 7 (2026-08-22): the word sitting on this '#' is "landed". Round 5 reported it
+    # as-written — which on live input rendered as `repo 'landed' is not in KNOWN_REPOS`,
+    # asserting a premise that is false and sending the reader to add an English word to a
+    # repo table. The message no longer quotes the token at all. What matters, and is
+    # unchanged across both rounds, is that NOTHING WAS RESOLVED (`called == []` above).
     assert sig[0]["pr_refs"][0]["state"].startswith("unresolved ("), \
         f"a distant repo name claimed a bare ref: {sig[0]['pr_refs']}"
-    assert "'landed'" in sig[0]["pr_refs"][0]["state"], \
-        f"the word on the '#' is not reported: {sig[0]['pr_refs']}"
+    assert "landed" not in sig[0]["pr_refs"][0]["state"], \
+        ("the captured token is quoted back as if it were a repo — the false-premise "
+         f"message round 7 removed: {sig[0]['pr_refs'][0]['state']!r}")
 
 
 # ----------------------------------------------------------------- disagreements

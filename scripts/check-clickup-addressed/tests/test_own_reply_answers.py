@@ -755,10 +755,11 @@ def test_main_actually_PRINTS_both_blocks_end_to_end():
     honest shape of an end-to-end test here, and 2 days ago is inside the 14-day bound on
     every day it can run.
 
-    ⚠️ NOT PORTED from the upstream copy: its second half drives `main()` with the transcript
-    scan OFF and asserts both blocks vanish. This tool has no such flag — `main()` always runs
-    search-sessions.py and check-completion.py — so that half would assert a state that cannot
-    occur here. If a `--transcripts` opt-in ever lands, restore it.
+    🔴 The second half drives `main()` with the scan OFF (the DEFAULT since the 2026-08-22
+    opt-in port) and asserts that both transcript-dependent verdicts go quiet while the
+    decision heading still appears, carrying the announcement that they could not run. It was
+    deliberately not ported when this repo had no `--transcripts` flag; that flag now exists,
+    which is the restore condition the omission named.
     """
     now = datetime.now(timezone.utc)
     fmt = lambda dt: dt.strftime("%Y-%m-%d %H:%M")
@@ -802,7 +803,7 @@ def test_main_actually_PRINTS_both_blocks_end_to_end():
             check_addressed.run_script, sys.argv = orig_run, orig_argv
         return buf.getvalue()
 
-    out = drive()
+    out = drive("--transcripts")
 
     assert check_addressed.DECISION_HEADING in out, \
         f"main() printed no decision block at all:\n{out[-1500:]}"
@@ -816,6 +817,28 @@ def test_main_actually_PRINTS_both_blocks_end_to_end():
     # ORDER on the real output, not just in `report_blocks`' return value.
     assert out.index(check_addressed.DECISION_HEADING) < out.index(check_addressed.ANSWERED_HEADING), \
         "the no-action block was printed before the act-on-this block"
+
+    # 🔴 THE SAME SEAM IN THE DEFAULT MODE, restored now that `--transcripts` exists. The
+    # scan-less record omits `mentions_found`, so both transcript-dependent verdicts must go
+    # quiet — and the suppression note inherits that gate for free, which is a claim about the
+    # two changes TOGETHER and so is asserted here rather than assumed from either side.
+    scanless = drive()
+    # ⚠️ Match the FLAG's own unique tail, never the rule's NAME: the scan-less announcement
+    # NAMES both rules it could not run, so `"open signals remain" in out` is TRUE in a run
+    # where the flag never fired. An instrument that matches the announcement instead of the
+    # thing announced reports a false positive, and upstream's did.
+    assert "is WAITING" not in scanless and "verify before trusting the close" not in scanless, (
+        "a run that never scanned transcripts still emitted a transcript-dependent flag — an "
+        f"unsearched zero was read as a searched one:\n{scanless[-800:]}")
+    # The heading IS printed, carrying the announcement that those two rules could not run.
+    # An absent heading was the defect — it read as "checked, nothing disagrees" when it
+    # meant "two rules never ran".
+    assert check_addressed.DECISION_HEADING in scanless and "DID NOT RUN" in scanless, (
+        "the scan-less run left no trace of the two checks it could not perform:"
+        f"\n{scanless[-800:]}")
+    assert check_addressed.ANSWERED_HEADING not in scanless, (
+        "a run that never scanned transcripts emitted suppression notes, which would be "
+        f"reporting on a waiting check that never ran:\n{scanless[-800:]}")
 
 
 def test_report_blocks_passes_its_now_through_to_BOTH_producers():
@@ -951,3 +974,39 @@ def test_a_raw_ms_without_its_formatted_date_does_not_decide_the_question():
     assert flags and "not reported" in " ".join(flags).lower(), (
         "a record whose reply was never reported did not reach the announce branch once a "
         f"stray ms was present: {flags}")
+
+
+# ------------------------------------------- transcripts opt-in (2026-08-22, round 7)
+
+def test_a_scanless_run_does_not_flag_every_open_ticket_as_abandoned():
+    """🔴 The failure mode that makes `--transcripts` opt-in dangerous if done carelessly.
+
+    The waiting flag fires on `mentions_found == 0`. When the transcript scan does not run,
+    every task trivially has zero mentions — so emitting `mentions_found: 0` would fire
+    "nobody is on it and someone is waiting" on EVERY open ticket with a recent comment,
+    turning the one high-signal block in the report into pure noise. The scan-less record
+    therefore OMITS the key: absent means "not gathered", 0 means "searched and found none".
+    Same absent-vs-null discipline as `my_latest_reply`, and the third time this distinction
+    has been load-bearing in this file.
+    """
+    r = _rec(comment_days_ago=1)          # open ticket, recent colleague comment, no reply
+    r.pop("mentions_found", None)         # exactly what the scan-less path builds
+    r["status"] = "not_scanned"
+    assert _waiting_flags(r) == [], (
+        "a run that never scanned transcripts claimed no work exists anywhere — the flag "
+        f"must require a SEARCHED zero, not an unsearched one: {_waiting_flags(r)}")
+
+    # Positive control: the same record WITH a searched zero must still flag, or the
+    # assertion above would pass for the wrong reason (a flag that never fires at all).
+    r["mentions_found"] = 0
+    r["status"] = "no_mentions_found"
+    assert _waiting_flags(r), \
+        "the waiting flag stopped firing on a genuinely searched zero — control failed"
+
+
+def test_transcripts_flag_parses_both_ways():
+    """The flag has to be readable in both directions or the default cannot be overridden."""
+    assert check_addressed.parse_args([])["transcripts"] is False, \
+        "transcript scanning is opt-in; the default must be off"
+    assert check_addressed.parse_args(["--transcripts"])["transcripts"] is True
+    assert check_addressed.parse_args(["--transcripts", "--no-transcripts"])["transcripts"] is False
