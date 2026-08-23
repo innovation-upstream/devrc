@@ -70,24 +70,70 @@
 // that fires too often on a mutation family is a far better failure than an
 // `ask` that never fires on the spelling an operator actually types.
 //
-// 🔴 ONE DELIBERATE EXCEPTION — the only rule ever narrowed AWAY from a
+// 🔴 TWO DELIBERATE EXCEPTIONS — the only rules ever narrowed AWAY from a
 // working infix form (several rules, e.g. `*chmod -R*`, `*dd if=*`, `*sudo *`,
 // were written binary-plus-literal-flag from the start; this is not a claim
-// that every other pattern is infix): the two `age` decrypt
-// rules are `*age -d*` / `*age --decrypt*` — leading-`*` but NOT infix. The
-// infix form `*age*-d*` matched any text with "age" followed LATER by "-d",
-// and "age" is a substring of package, packages, image, message, storage and
-// manage while "-d" covers -db-, --dir, --debug and --dry-run. Because
-// `opencode run` AUTO-REJECTS an ask rather than prompting, that over-match did
-// not "fire too often" — it KILLED runs on `ls packages/…-db-…` and
-// `grep … packages/…`. Measured 2026-08-21; two real dispatches died on it.
-// The trade is real and is NOT free: the narrowed rules know exactly one
-// argument order, so reordered spellings like `age -i k.txt -d f` now resolve
-// ALLOW, and guard_core.py has NO age/sops check to catch them. That gap is
-// pinned as a characterization test —
-// `test_age_glob_misses_these_reordered_decrypt_spellings` — so it stays
-// visible. Do NOT "restore consistency" by re-widening these to infix without
-// reading that test first.
+// that every other pattern is infix). Both were narrowed for the SAME measured
+// reason, one day apart, and the second is why this heading says TWO:
+//
+//   (a) the two `age` decrypt rules, `*age -d*` / `*age --decrypt*` —
+//       leading-`*` but NOT infix. The infix form `*age*-d*` matched any text
+//       with "age" followed LATER by "-d", and "age" is a substring of package,
+//       packages, image, message, storage and manage while "-d" covers -db-,
+//       --dir, --debug and --dry-run. Measured 2026-08-21; two real dispatches
+//       died on it, one on `grep`, one on `ls`.
+//
+//   (b) the two `rm` recursive rules, `*rm -r*` / `*rm --recursive*`. The infix
+//       form `*rm*-r*` was the identical defect: "rm" is a substring of format,
+//       terraform, firmware, confirm and platform, and "-r" covers --reverse,
+//       --refresh, --reporter, --repo and --recursive. Measured 2026-08-22:
+//       `git log --format=oneline --reverse`, `terraform plan -refresh=false`,
+//       `rg '…format…' src/ --replace ''` and `pnpm run format --reporter=…`
+//       all resolved ASK. The first three are pinned as MUST_ALLOW rows in
+//       test_opencode_config.py and were watched to FAIL before the narrowing.
+//       It needed a SECOND rule, not just a narrowing: "rm --recursive" does not
+//       contain the literal "rm -r", so dropping the inner `*` alone would have
+//       released an ordinary recursive delete that the guard layer does not
+//       backstop — measured by deleting that row: it drops to plain ALLOW.
+//
+// WHY THESE TWO AND NOT THE REST. Because `opencode run` AUTO-REJECTS an ask
+// rather than prompting, an over-match on a family an agent types CONSTANTLY
+// does not "fire too often" — it KILLS the run mid-task. That inverts the trade
+// argued above, but only for patterns whose binary name is a substring of
+// ordinary English/flag text. `kubectl` and `sops` are not, which is why they
+// stay infix. (The *rules named* `*talosctl*` and `*sudoedit*` are single-token
+// wildcards with no middle `*` at all, so they are not evidence either way —
+// but do not read that as "there is no infix talosctl rule": `*talosctl*reset*`
+// in the deny block below is one.)
+//
+// 🔴 THE TRADE IS REAL, IS NOT FREE, AND THE TARGET NEED NOT BE DISPOSABLE.
+// A narrowed rule knows exactly one argument order, so `age -i k.txt -d f` and
+// `rm -f -r <path>` now resolve ALLOW. State the `rm` cost at its WORST, not its
+// mildest — the examples in the tests use `/repo/build`, but nothing restricts
+// it to a build dir. MEASURED at both layers on this config:
+//     rm -f -r ~/.ssh                        ALLOW   (was ask before the narrowing)
+//     rm -f -r /etc/nixos                    ALLOW   (was ask)
+//     rm --force --recursive /var/lib/…      ALLOW   (was ask)
+//     rm /repo/build -rf                     ALLOW   (was ask — flags AFTER the operand)
+// 🔴 But read the counterfactual before treating the narrowing as the cause:
+// `rm -fr ~/.ssh`, `rm -Rf ~/.ssh` and `rm -R ~/.ssh` were ALREADY plain ALLOW
+// at both layers BEFORE this change (measured on `main`). So this glob was never
+// a RELIABLE control for that target — three ordinary spellings already walked
+// around it — and the narrowing WIDENS an already-open hole rather than opening
+// one. Do not overstate that in either direction: the old glob DID gate
+// `rm -f -r ~/.ssh` (it is `ask` on `main`, per the table above), so this is a
+// partial control being made weaker, not a no-op being blamed. The honest
+// summary is: layer 1 does not reliably protect `$HOME` from a recursive delete
+// and never did; if you want that, it belongs in guard_core.py, per this
+// header's own rule about irreversible families.
+// guard_core.py has NO age/sops check at all, and its `rm`
+// check has a deliberately narrow TARGET set — `/`, `~`/`$HOME`, `.`/`..` and
+// top-level system dirs — that a SUBPATH like `~/.ssh` never reaches.
+// Both gaps are pinned as characterization tests —
+// `test_age_glob_misses_these_reordered_decrypt_spellings` and
+// `test_rm_glob_misses_these_recursive_spellings` — so they stay visible. Do NOT
+// "restore consistency" by re-widening any of these four rules to infix without
+// reading those tests first.
 //
 // Other measured facts baked into this file (v1.18.18, EXCEPT where a bullet
 // says otherwise — the 2026-08-19 re-derivation could not reach three of them,
@@ -345,7 +391,26 @@
       // --- filesystem blast radius ---
       "*chmod -R*": "ask",
       "*chown -R*": "ask",
-      "*rm*-r*": "ask",
+      // 🔴 NOT INFIX, ON PURPOSE — exception (b) in the header. `*rm*-r*` matched
+      // "rm" followed LATER by "-r" ANYWHERE in the command text — note the
+      // ORDER: the "rm" substring must come FIRST, so it took `git log
+      // --format=oneline --reverse` and `terraform plan -refresh=false` but not
+      // `grep -r 'format' src/`. That still auto-rejected ordinary read-only
+      // work wherever a format/terraform/firmware/confirm/platform token
+      // preceded a --reverse/--refresh/--reporter/--repo/--replace flag.
+      // BOTH ROWS ARE LOAD-BEARING and neither covers the other: "rm --recursive"
+      // does NOT contain the literal "rm -r", so deleting the second row releases
+      // `rm --recursive <path>` — which guard_core does not backstop on an
+      // ordinary path. Each is pinned individually in MUST_ASK.
+      // Known gap, pinned by test_rm_glob_misses_these_recursive_spellings, in
+      // THREE classes: `-R` bundles (pre-existing), any flag placed BEFORE `-r`
+      // (`rm -f -r <path>`, opened here), and flags placed AFTER the operand
+      // (`rm <path> -rf`, opened here — GNU rm permutes options, so it works).
+      // 🔴 And the target is not restricted to a build dir: `rm -f -r ~/.ssh` is
+      // ALLOW at both layers. See the header for the counterfactual — `rm -fr
+      // ~/.ssh` was already ALLOW before this change, so layer 1 never gated it.
+      "*rm -r*": "ask",
+      "*rm --recursive*": "ask",
       // `dd` stays ANCHORED / operand-scoped on purpose: a leading-`*` `"*dd *"`
       // also matches `git add src/` (…"add "…), and gating every `git add` is
       // exactly the prompt fatigue that trains an operator to click through.
