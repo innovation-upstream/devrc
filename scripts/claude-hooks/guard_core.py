@@ -1962,6 +1962,50 @@ def _commit_to_main_reason(repo_dir):
     )
 
 
+def _unresolvable_dash_c_note(token):
+    """Explain WHY a `-C` target could not be resolved — branched on the CAUSE.
+
+    🔴 THERE ARE TWO CAUSES AND THEY NEED DIFFERENT ADVICE. This note used to
+    assert the variable one for BOTH, so an operator whose `-C` named a literal
+    path that simply did not exist yet was sent hunting for a shell variable that
+    appears nowhere in their command. Measured on the shipped guard:
+
+        git -C /tmp/no-such-dir-xyz123 commit -m x
+        -> "… it is a shell variable whose value the command text does not carry"
+
+    which is flatly wrong, and cost a session two rounds of misdirected debugging.
+
+    The literal-path cause is the non-obvious one, because it is a consequence of
+    WHEN this runs: the guard is a PreToolUse hook, so it parses the command TEXT
+    before any of that command executes. A block that creates a directory and
+    THEN runs `git -C <that-dir>` is therefore always judged against the cwd —
+    at parse time the target does not exist. The remedy is a different tool call,
+    not a different spelling, which is why sharing one message was expensive.
+
+    `$` is the discriminator: `_resolve_dir` runs `expandvars` first, so a handle
+    the hook's own environment carries (`$DEVRC`) resolves and never reaches here.
+    A token still holding a `$` is one the environment did not carry.
+
+    Message-only. The fallback to the cwd is deliberate and documented in
+    `_dash_c_dir` — it errs toward denying, and nothing here changes any verdict.
+    """
+    if "$" in token:
+        cause = ("it is a shell variable whose value the command text does not "
+                 "carry")
+        remedy = ("pass `-C` an ABSOLUTE path, or assign the variable in this "
+                  "same command so the value is visible")
+    else:
+        cause = ("no directory exists at that path; this guard runs BEFORE the "
+                 "command does, so a directory the command is about to CREATE "
+                 "does not exist yet when the command text is parsed")
+        remedy = ("create the directory in an EARLIER tool call so it exists by "
+                  "the time this command is parsed, or pass `-C` a path that "
+                  "already exists")
+    return (f"\n(The `-C {token}` in this command names a path this guard could "
+            f"not resolve — {cause} — so the caller's own directory was judged "
+            f"instead. If that is the wrong repo, {remedy}.)")
+
+
 @_wants_cwd
 def check_git_commit_to_main(cmd, cwd=None):
     """🔴 Never commit to main/master/trunk — the rule prose demonstrably failed to hold.
@@ -2059,12 +2103,7 @@ def check_git_commit_to_main(cmd, cwd=None):
             reason = _commit_to_main_reason(repo_dir)
             if reason:
                 if unresolved and repo_dir == eff_cwd:
-                    reason += (
-                        f"\n(The `-C {unresolved[0]}` in this command names a path this guard "
-                        f"could not resolve — it is a shell variable whose value the command "
-                        f"text does not carry — so the caller's own directory was judged "
-                        f"instead. If that is the wrong repo, pass `-C` an ABSOLUTE path, or "
-                        f"assign the variable in this same command so the value is visible.)")
+                    reason += _unresolvable_dash_c_note(unresolved[0])
                 elif not_worktrees and repo_dir == eff_cwd:
                     reason += (
                         f"\n(This command names `{not_worktrees[0]}` as its repo, but that path "
