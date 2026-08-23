@@ -4645,3 +4645,109 @@ def test_a_non_integer_unmeasured_threshold_is_rejected(fleet, var):
     rc, out = fleet.check("--no-remote", **{var: "4; touch /tmp/pwned"})
     assert rc == 2, out
     assert "must be a non-negative integer" in out, out
+
+
+# --------------------------------------------------------------------------- #
+# THE TWO RC LADDERS
+#
+# 🔴 drift-check.sh and ship.sh publish ONE numbering between them, and until
+# 2026-08-21 that fact lived only in a PR description. Neither file named a
+# single one of the other's codes, while this file's own header said "a new DRIFT
+# code has nowhere to go but upward" — pointing the next one straight at 19,
+# which ship.sh had just taken for hosts-disagree. A collision one increment
+# away, invisible to every test in either suite.
+# --------------------------------------------------------------------------- #
+def _codes_ship_can_return():
+    """ship.sh's non-zero statuses: `exit N` and `rc=N` outside comments.
+
+    The same two spellings ship.sh's own ledger test uses — it writes rc 19 only
+    as an assignment, never as `exit 19`.
+    """
+    code = "\n".join(
+        ln for ln in SHIP.read_text().splitlines() if not ln.strip().startswith("#")
+    )
+    c = {int(m) for m in re.findall(r"\bexit (\d+)", code)}
+    c |= {int(m) for m in re.findall(r"\b[a-z_]*rc=(\d+)", code)}
+    c.discard(0)
+    return c
+
+
+def _codes_drift_can_return():
+    """drift-check.sh's codes, read off severity()'s case labels.
+
+    Not a grep for assignments: this script sets its codes through several
+    per-scope variables (`p_rc`, `s_rc`, streak ladders) and an assignment scan
+    misses 13, 16 and 18. severity() is the authoritative table — the header says
+    so ("its rank is stated in severity() and here") — and every code that can be
+    returned has to be ranked there or it falls into the unknown-code slot.
+    """
+    body = DRIFT.read_text().split("severity() {", 1)[1].split("\n}", 1)[0]
+    body = "\n".join(ln for ln in body.splitlines() if not ln.strip().startswith("#"))
+    c = {int(m) for m in re.findall(r"^\s*(\d+)\)", body, re.M)}
+    c.discard(0)
+    # rc 2 exits directly, before any per-host leg, so it is never ranked.
+    c.add(2)
+    return c
+
+
+def _reserved_ledger(path, tag):
+    """The `# RESERVED-TO-<X>: n n n` line out of a script's header."""
+    m = re.search(rf"^#\s*RESERVED-TO-{tag}:\s*([0-9 ]+)$", path.read_text(), re.M)
+    assert m, (
+        f"{path.name} has no `# RESERVED-TO-{tag}:` ledger line — the reciprocal "
+        f"reservation is back to living outside both files"
+    )
+    return {int(n) for n in m.group(1).split()}
+
+
+def test_the_two_rc_ladders_reserve_each_others_codes():
+    """🔴 A LEDGER of the shared numbering, failing when either side moves.
+
+    Both halves are asserted as SETS, so this goes red when a code is added on
+    either side without being reserved on the other — not merely when 19 or 20 is
+    taken. And the "next free code" both headers publish is DERIVED here from the
+    two measured sets, so a stale number in the prose is a failure rather than a
+    thing a reader has to notice.
+    """
+    ship_codes = _codes_ship_can_return()
+    drift_codes = _codes_drift_can_return()
+
+    # 🔴 POSITIVE CONTROL for both parsers. A ledger computed from an empty set
+    # is satisfied by an empty reservation line, in silence.
+    assert {2, 19, 20} <= ship_codes, (
+        f"the ship.sh parser is reading almost nothing: {sorted(ship_codes)}"
+    )
+    assert {8, 10, 14, 18} <= drift_codes, (
+        f"the drift-check.sh parser is reading almost nothing: {sorted(drift_codes)}"
+    )
+
+    ship_only = ship_codes - drift_codes
+    drift_only = drift_codes - ship_codes
+
+    assert _reserved_ledger(SHIP, "DRIFT-CHECK") == drift_only, (
+        f"ship.sh reserves {sorted(_reserved_ledger(SHIP, 'DRIFT-CHECK'))} to "
+        f"drift-check.sh, but drift-check.sh alone can return "
+        f"{sorted(drift_only)}. A code missing from that ledger is a code ship.sh "
+        f"may take next."
+    )
+    assert _reserved_ledger(DRIFT, "SHIP") == ship_only, (
+        f"drift-check.sh reserves {sorted(_reserved_ledger(DRIFT, 'SHIP'))} to "
+        f"ship.sh, but ship.sh alone can return {sorted(ship_only)}."
+    )
+
+    # ...and neither script actually emits a code it has reserved to the other.
+    assert not (drift_codes & _reserved_ledger(DRIFT, "SHIP")), (
+        "drift-check.sh returns a code it reserves to ship.sh"
+    )
+    assert not (ship_codes & _reserved_ledger(SHIP, "DRIFT-CHECK")), (
+        "ship.sh returns a code it reserves to drift-check.sh"
+    )
+
+    next_free = max(ship_codes | drift_codes) + 1
+    for path in (SHIP, DRIFT):
+        header = path.read_text().split("\n{\n", 1)[0].split("\nset -", 1)[0]
+        assert re.search(rf"next free[^.]*\b{next_free}\b", header), (
+            f"{path.name}'s header does not publish {next_free} as the next free "
+            f"code. The two ladders now reach {max(ship_codes | drift_codes)}, so "
+            f"'nowhere to go but upward' points at a number that is already taken."
+        )
