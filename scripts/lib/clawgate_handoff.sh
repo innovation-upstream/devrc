@@ -361,6 +361,42 @@ clawgate_drift_lines(){
 # when a silent "that is not `worked`" would be wrong. Same reasoning as
 # `clawgate_known_status` above: a state nobody here has heard of must not
 # render like a healthy one.
+# `clawgate_usable_id <text>` — is this ONE bare task id, fit to be written into
+# a doc? Prints the refusal and returns 1 when it is not.
+#
+# 🔴 THIS GUARD WAS ARGUED AWAY ONCE, ON A REACHABILITY CLAIM THAT WAS FALSE.
+# The reasoning was: the `n_id -ne n` branch above already proved every row
+# carries a usable id, and the tally says exactly one row matches, so the re-read
+# below cannot come back empty. That is true of the PAYLOAD and says nothing
+# about the PASS — kill the jq invocation that performs the re-read and the
+# substitution yields "" while every count stays valid. An audit measured it:
+# `clawgate: 1 WORKED task of 2 link(s) … record it as front matter:
+# clawgate-task:` — rc 0, blank value.
+#
+# 🔴 PRICED FROM THE CONSUMER, WHICH IS WHY IT IS rc 4 AND NOT A COSMETIC NOTE.
+# `claude/skills/handoff/SKILL.md` tells the executor to act on the exit code and
+# nothing else, so rc 0 means it writes `clawgate-task:` with no value. That is
+# not a blank field: `clawgate_task_field_raw` classifies it present-and-
+# UNREADABLE, so `resume-state.sh` prints an UNRECONCILED gap on every future
+# /resume of that document, forever. A one-line refusal here is cheaper than a
+# permanent gap in a file nobody will connect back to this function.
+#
+# Both callers ask the identical question, so it is asked in one place —
+# `claude/RULES.md` -> "One rule, one place": a predicate open-coded at two sites
+# is wrong at one of them in the same direction.
+clawgate_usable_id(){
+  case "${1:-}" in
+    # Empty, or anything that is not a pure run of digits — which also rejects a
+    # MULTI-LINE value (a newline is not a digit), i.e. a re-read that matched
+    # more rows than the tally said it would.
+    ''|*[!0-9]*)
+      echo "clawgate: DID NOT ANSWER USABLY — the pass that RE-READS the resolved task's id produced '${1:-}', which is not one bare id. Recording that would write an UNREADABLE \`$CLAWGATE_FIELD_KEY:\` field and gap every future /resume of the doc. UNKNOWN, not empty; record nothing."
+      return 1
+      ;;
+  esac
+  return 0
+}
+
 clawgate_rank_rows(){
   local body="${1:-}"
 
@@ -449,9 +485,25 @@ clawgate_rank_rows(){
   # role-carrying payload into exactly that confident zero. That instance is
   # fixed; without this, the next one reads the same way.
   #
-  # So: the tally must be SEVEN NUMERIC FIELDS or the pass did not answer. Both
-  # halves matter — a short/long field count catches a filter that emitted the
-  # wrong shape, and the per-field digit test catches one that emitted text.
+  # So: the tally must be SEVEN NUMERIC FIELDS ON EXACTLY ONE LINE, or the pass
+  # did not answer. THREE halves, and each catches a different broken filter:
+  #
+  #   * the LINE COUNT — 🔴 `read -r -a` CONSUMES ONE LINE AND DISCARDS THE REST,
+  #     so a filter emitting MULTIPLE outputs (an edit dropping the `[ … ]`
+  #     wrapper, or adding a `.[]`) satisfies the two checks below on line 1 while
+  #     every later line vanishes. Measured against two `created` rows: it printed
+  #     "1 WORKED task of 1 link(s) (0 created, 0 read)" and returned rc 0 with a
+  #     BLANK id — fabricated counts, from a tally that was never read.
+  #   * the FIELD COUNT — a filter that emitted the wrong shape. Both directions:
+  #     six fields leave `n_absent` unset, eight mean the array grew and every
+  #     index below now names the wrong quantity.
+  #   * the per-field DIGIT test — a filter that emitted text.
+  case "$counts" in
+    *$'\n'*)
+      echo "clawgate: DID NOT ANSWER USABLY — the pass that COUNTS the \`tasks\` array emitted MORE THAN ONE LINE, so any tally read from it is a fragment. That is a broken read, NOT an empty board. UNKNOWN, not empty; record nothing."
+      return 4
+      ;;
+  esac
   local -a fields=()
   IFS=' ' read -r -a fields <<<"$counts"
   local tally_ok=1 f
@@ -494,7 +546,21 @@ clawgate_rank_rows(){
            s: ("  #\(.value.id // "?") role=\(.value | rolestr) status=\(.value.status // "?") "
                + ((.value.title // "") | tostring | gsub("\\s+"; " ")))})
     | sort_by([.k, .i]) | .[] | .s' 2>/dev/null)
-  [ -n "$rows" ] && printf '%s\n' "$rows"
+  # 🔴 AN EMPTY RENDER IS A FAILED RENDER HERE, NOT "nothing to show". `n` is
+  # already known to be >= 1, so this pass owes exactly `n` lines; a `[ -n
+  # "$rows" ] &&` that silently swallows the empty case made the function
+  # CONTRADICT ITSELF — "ROLES UNAVAILABLE … Read the rows yourself" printed with
+  # no rows beneath it, and rc 6's "ASK which one" printed with no candidates,
+  # which is precisely the question this output exists to make answerable. The
+  # verdict below is still computed from the tally and is still trustworthy, so
+  # this REPORTS and continues rather than returning: losing the display is not
+  # losing the answer, and turning a cosmetic failure into rc 4 would throw away
+  # a resolution the counts fully support.
+  if [ -n "$rows" ]; then
+    printf '%s\n' "$rows"
+  else
+    echo "clawgate: (the pass that RENDERS the candidate rows produced nothing for $n row(s) — the verdict below still comes from the counting pass, but the candidates could not be shown. Read the board directly before answering any question it asks.)"
+  fi
 
   if [ "$n_id" -ne "$n" ]; then
     echo "clawgate: DID NOT ANSWER USABLY — $n task(s) came back but only $n_id carry a usable id. UNKNOWN, not empty; record nothing."
@@ -525,6 +591,7 @@ clawgate_rank_rows(){
     local ids
     ids=$(printf '%s' "$body" | jq -r "$jqdefs"'
       [ .tasks[]? | norm | .id | usable ] | map(tostring) | .[]' 2>/dev/null)
+    clawgate_usable_id "$ids" || return 4
     echo "clawgate: 1 task resolved — record it as front matter: $CLAWGATE_FIELD_KEY: $ids"
     return 0
   fi
@@ -533,18 +600,12 @@ clawgate_rank_rows(){
     echo "clawgate: $n_absent of $n row(s) carried no \`role\` — ranked as NOT worked, not as unknown."
   fi
 
-  # 🔴 THE ID CANNOT COME OUT BLANK HERE, and that is an invariant rather than a
-  # check: the `n_id -ne n` branch above already returned 4 unless EVERY row
-  # carries a usable id, and `n_worked` is 1, so this re-read selects exactly one
-  # of them. Written down instead of guarded because a guard nothing can reach is
-  # decoration that reads as coverage — if that branch ever moves below this one,
-  # `clawgate-task:` with no value ships again (a permanent `!` gap on every
-  # future /resume of the doc), so move them back or add the guard then.
   if [ "$n_worked" -eq 1 ]; then
     local worked_ids
     worked_ids=$(printf '%s' "$body" | jq -r "$jqdefs"'
       [ .tasks[]? | norm | select(.role == "worked") | .id | usable ]
       | map(tostring) | .[]' 2>/dev/null)
+    clawgate_usable_id "$worked_ids" || return 4
     echo "clawgate: 1 WORKED task of $n link(s) ($n_created created, $n_read read) — record it as front matter: $CLAWGATE_FIELD_KEY: $worked_ids"
     return 0
   fi

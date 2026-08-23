@@ -1633,6 +1633,105 @@ class TestResolve:
         assert "carried no `tasks` array" in r.stdout
         assert "no usable tally" not in r.stdout
 
+    def test_a_counting_pass_emitting_TOO_MANY_fields_is_a_gap(self, resolver):
+        """🔴 THE FIELD-COUNT GUARD DRIVEN UPWARD. An audit's `-ne 7` -> `-lt 7`
+        mutant SURVIVED: the code caught a long tally, but every test drove the
+        short side, so the guard's own comment ("a short/long field count") was
+        wider than its coverage. Eight fields means the array GREW and every
+        index below now names a different quantity."""
+        r = resolver(rpayload(rrow(WORKED_ID, "worked")),
+                     jq_fail_on=2, jq_fail_out="1 1 1 1 1 1 1 1")
+        assert r.returncode == 4, r.stdout
+        assert "no usable tally" in r.stdout
+        assert "NOTHING RESOLVED" not in r.stdout
+
+    def test_a_counting_pass_emitting_MULTIPLE_LINES_is_a_gap(self, resolver):
+        """🔴 `read -r -a` CONSUMES ONE LINE AND DISCARDS THE REST, so a filter
+        that lost its `[ … ]` wrapper satisfies seven-numeric-fields on line 1
+        while the rest vanishes. Measured before the fix: a two-row payload
+        printed "1 WORKED task of 1 link(s) (0 created, 0 read)" and returned
+        rc 0 with a BLANK id — counts fabricated from a fragment.
+
+        The fixture's first line is DELIBERATELY VALID and DELIBERATELY WRONG for
+        the payload: a guard that only rejected malformed line 1 would pass this,
+        and the counts it names (1 link) contradict the two rows sent."""
+        r = resolver(rpayload(rrow(CREATED_ID, "created"), rrow(CREATED_ID2, "created")),
+                     jq_fail_on=2, jq_fail_out="1 1 1 0 0 0 0\n2 2 0 0 2 0 0")
+        assert r.returncode == 4, r.stdout
+        assert "MORE THAN ONE LINE" in r.stdout
+        assert recorded(r.stdout) == [], r.stdout
+        assert "WORKED task" not in r.stdout, r.stdout
+
+    def test_a_DEAD_id_reread_on_the_WORKED_branch_is_a_gap_not_a_blank_field(self, resolver):
+        """🔴 THE GUARD I ARGUED AWAY, AND THE ARGUMENT WAS WRONG. I reasoned the
+        id could never come back blank because the tally proves every row carries
+        a usable id — true of the PAYLOAD, silent about the PASS. Killing the jq
+        call that performs the re-read leaves every count valid and the
+        substitution empty. Measured before the fix: rc 0 and `clawgate-task:`
+        with no value.
+
+        jq call #4 is the worked-branch re-read: 1=shape, 2=counts, 3=rows,
+        4=this. The consumer cost is what makes it rc 4 — SKILL.md says act on
+        the exit code and nothing else, so rc 0 writes an unreadable field and
+        gaps every future /resume of that document."""
+        r = resolver(rpayload(rrow(CREATED_ID, "created"), rrow(WORKED_ID, "worked")),
+                     jq_fail_on=4)
+        assert r.returncode == 4, r.stdout
+        assert "RE-READS the resolved task's id" in r.stdout
+        assert recorded(r.stdout) == [], r.stdout
+        # 🔴 the exact shape the doc must never receive
+        assert not re.search(r"clawgate-task:\s*$", r.stdout, re.M), r.stdout
+
+    def test_a_DEAD_id_reread_on_the_ROLES_UNAVAILABLE_branch_is_also_a_gap(self, resolver):
+        """🔴 THE SECOND SITE. Two branches re-read the id and both were
+        unguarded; fixing only the one an audit happened to name would leave the
+        identical bug one branch away — the shape `claude/RULES.md` calls a
+        predicate open-coded at N sites being wrong at N-1 of them. Here the
+        re-read is jq call #4 as well (no unknown-role pass runs)."""
+        r = resolver(rpayload(rrow(WORKED_ID)), jq_fail_on=4)
+        assert r.returncode == 4, r.stdout
+        assert "RE-READS the resolved task's id" in r.stdout
+        assert recorded(r.stdout) == [], r.stdout
+        assert not re.search(r"clawgate-task:\s*$", r.stdout, re.M), r.stdout
+
+    def test_BOTH_id_rereads_refuse_through_the_SAME_predicate(self):
+        """SEAM, not component. The two branches must not drift into disagreeing
+        about what a usable id is — the ledger fails if a third re-read appears
+        unguarded, or if either stops calling the shared predicate."""
+        src = LIB.read_text(encoding="utf-8")
+        rereads = re.findall(r"^\s*(\w+)=\$\(printf '%s' \"\$body\" \| jq -r \"\$jqdefs\"'\n"
+                             r"\s*\[ \.tasks\[\]\? \| norm[^\n]*\| \.id \| usable \]",
+                             src, re.M)
+        assert sorted(rereads) == ["ids", "worked_ids"], rereads
+        for var in rereads:
+            assert re.search(rf'clawgate_usable_id "\${var}" \|\| return 4', src), \
+                f"the {var} re-read does not route through clawgate_usable_id"
+
+    def test_a_DEAD_row_render_is_REPORTED_not_silently_empty(self, resolver):
+        """🔴 SELF-CONTRADICTING OUTPUT. `[ -n "$rows" ] &&` swallowed a failed
+        render, so the function printed "Read the rows yourself" with no rows,
+        and rc 6's "ASK which one" with no candidates — defeating the one thing
+        that output exists for. `n` is already >= 1 here, so empty means FAILED,
+        never "nothing to show". jq call #3 is the row render."""
+        r = resolver(rpayload(rrow(CREATED_ID, "created"), rrow(CREATED_ID2, "created")),
+                     jq_fail_on=3)
+        assert "RENDERS the candidate rows produced nothing" in r.stdout, r.stdout
+        assert role_order(r.stdout) == [], "the render did fail, so no rows may appear"
+        # the VERDICT still comes from the tally and is still correct
+        assert r.returncode == 6, r.stdout
+        assert "NONE of them WORKED" in r.stdout
+
+    def test_a_dead_row_render_does_NOT_downgrade_a_good_resolution(self, resolver):
+        """🔴 THE DELIBERATE NON-ESCALATION, pinned so nobody "fixes" it into an
+        rc 4. Losing the DISPLAY is not losing the ANSWER: the verdict is
+        computed from the counting pass, which answered. Returning 4 here would
+        throw away a resolution the counts fully support."""
+        r = resolver(rpayload(rrow(CREATED_ID, "created"), rrow(WORKED_ID, "worked")),
+                     jq_fail_on=3)
+        assert r.returncode == 0, r.stdout
+        assert recorded(r.stdout) == [str(WORKED_ID)], r.stdout
+        assert "RENDERS the candidate rows produced nothing" in r.stdout
+
     def test_the_role_vocabulary_is_exactly_what_this_file_drives(self):
         """🔴 LEDGER, both directions — the same discipline as the preflight
         list below. A role added to the lib and not driven here fails, and one
