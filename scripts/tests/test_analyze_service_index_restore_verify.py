@@ -1226,6 +1226,166 @@ def test_the_coverage_check_is_SKIPPED_when_the_question_was_NARROWED(
                    explicit=True, max_lag_days=3.0, now=now)
 
 
+def test_ANOTHER_HOSTS_artifacts_are_NOT_compared_to_THIS_HOSTS_store(
+        tmp_path, identity):
+    """🔴 THE FALSE DATA-LOSS ALARM on the exact command SECRETS.md documents.
+
+    `backup.py` states the two machines' stores are DIVERGENT CONTENT, and they
+    share scope NAMES — `devrc` and `homelab-talos` exist on both. So
+    `restore-verify.py --host <other>` restores the OTHER host's `devrc`
+    artifact and would compare it against THIS host's `devrc` repository: two
+    histories that were never the same one. Before this fix that produced
+
+        CROSS-CHECK FAILED … 3 of 3 commit(s) in the RESTORED artifact do not
+        exist in the live scope … history was rewritten
+
+    — a permanently-red gate reporting DATA LOSS for a healthy backup, on the
+    one command an operator runs to check the other machine.
+
+    🔴 THE FIXTURE IS THE WHOLE POINT: the artifact is built from a store
+    that is NOT the one it is cross-checked against. The sibling test
+    `test_the_coverage_check_is_SKIPPED_when_the_question_was_NARROWED` cannot
+    catch this — its artifacts come from the same store it compares against, so
+    the comparison succeeds either way and the bug is invisible to it.
+    """
+    now = datetime.now(timezone.utc)
+    # THIS host's store: a scope named `scope-alpha` with its own history.
+    this_host = tmp_path / "store"
+    _make_scope(this_host, "scope-alpha", {"e.md": "this host's content"},
+                commits=4)
+    # ANOTHER host's store: the SAME scope name, unrelated history.
+    other_host = tmp_path / "other-host-store"
+    other = _make_scope(other_host, "scope-alpha",
+                        {"e.md": "other host's content"}, commits=3)
+    objects = {_key("scope-alpha", now - timedelta(hours=2), host="other-host"):
+               _make_artifact(other, identity, tmp_path)}
+
+    verdicts = _verify(this_host, tmp_path / "work", FakeDownloader(objects),
+                       identity, prefix="other-host", explicit=True,
+                       max_lag_days=3.0, now=now)
+
+    assert len(verdicts) == 1, verdicts
+    v = verdicts[0]
+    assert v.cross_checked is False, (
+        "the OTHER host's artifact was cross-checked against THIS host's store "
+        "— the two are divergent content sharing a scope name, so this reports "
+        "data loss for a healthy backup, forever")
+    assert v.commits_restored == 3, v.commits_restored
+    assert "ANOTHER host" in (v.no_cross_check_reason or ""), (
+        f"the reason does not say WHY it was not cross-checked, so an operator "
+        f"cannot tell it from a missing store: {v.no_cross_check_reason!r}")
+    assert "NOT CROSS-CHECKED" in v.line(), v.line()
+    assert "VERIFIED AGAINST LIVE" not in v.line(), v.line()
+
+
+def test_the_cross_host_fixture_WOULD_have_gone_red_when_compared(
+        tmp_path, identity):
+    """🔴 POSITIVE CONTROL — WITHOUT IT THE TEST ABOVE IS VACUOUS.
+
+    If the two synthetic stores happened to share history, skipping the
+    comparison would be indistinguishable from doing it. This drives the SAME
+    fixture down the non-foreign path and watches it fail exactly the way the
+    bug reported it, so the test above is measuring a suppression that matters.
+    """
+    now = datetime.now(timezone.utc)
+    this_host = tmp_path / "store"
+    _make_scope(this_host, "scope-alpha", {"e.md": "this host's content"},
+                commits=4)
+    other_host = tmp_path / "other-host-store"
+    other = _make_scope(other_host, "scope-alpha",
+                        {"e.md": "other host's content"}, commits=3)
+    objects = {_key("scope-alpha", now - timedelta(hours=2)):
+               _make_artifact(other, identity, tmp_path)}
+
+    with pytest.raises(RV.RestoreVerifyError) as exc:
+        _verify(this_host, tmp_path / "work", FakeDownloader(objects), identity,
+                explicit=False, max_lag_days=3.0, now=now)
+    assert "do not exist in the live scope" in str(exc.value), (
+        f"the two synthetic stores are NOT divergent, so the test above would "
+        f"pass whether or not the comparison was skipped: {exc.value}")
+
+
+def test_a_SCOPE_FILTER_alone_still_cross_checks(tmp_path, identity):
+    """🔴 THE PREDICATES ARE DELIBERATELY NOT THE SAME BOOLEAN.
+
+    Narrowing to one scope of THIS host's artifacts leaves the comparison
+    perfectly valid — only an explicit PREFIX means "another machine". A fix
+    that suppressed the cross-check for `--scope` too would silently turn every
+    single-scope run into self-consistency-only, which reads as success.
+    """
+    now = datetime.now(timezone.utc)
+    store = tmp_path / "store"
+    alpha = _make_scope(store, "scope-alpha", {"e.md": "a"}, commits=3)
+    objects = {_key("scope-alpha", now - timedelta(hours=2)):
+               _make_artifact(alpha, identity, tmp_path)}
+
+    v = _verify(store, tmp_path / "work", FakeDownloader(objects), identity,
+                scope_filter="scope-alpha", max_lag_days=3.0, now=now)[0]
+    assert v.cross_checked is True, (
+        "--scope suppressed the live comparison; only --host/--prefix may")
+    assert v.commits_compared == 3, v.commits_compared
+
+
+def test_the_two_NO_CROSS_CHECK_reasons_are_DISTINGUISHABLE(tmp_path, identity):
+    """"No live scope here" and "these are another machine's" are different
+    findings. An operator reading NOT CROSS-CHECKED must be able to tell which,
+    because one of them is the disaster case and the other is routine."""
+    now = datetime.now(timezone.utc)
+    elsewhere = _make_scope(tmp_path / "elsewhere", "scope-alpha", {"e.md": "x"},
+                            commits=2)
+    data = _make_artifact(elsewhere, identity, tmp_path)
+    key_own = _key("scope-alpha", now - timedelta(hours=2))
+    key_foreign = _key("scope-alpha", now - timedelta(hours=2), host="other-host")
+
+    empty_store = tmp_path / "store"
+    empty_store.mkdir()
+    missing = _verify(empty_store, tmp_path / "w1",
+                      FakeDownloader({key_own: data}), identity,
+                      max_lag_days=3.0, now=now)[0]
+    foreign = _verify(empty_store, tmp_path / "w2",
+                      FakeDownloader({key_foreign: data}), identity,
+                      prefix="other-host", explicit=True, max_lag_days=3.0,
+                      now=now)[0]
+
+    assert "no live scope repository at" in (missing.no_cross_check_reason or "")
+    assert "ANOTHER host" in (foreign.no_cross_check_reason or "")
+    assert missing.no_cross_check_reason != foreign.no_cross_check_reason, (
+        "the two findings share a sentence, so the disaster case and the "
+        "routine one are indistinguishable in the output")
+
+
+def test_the_cross_check_target_helper_is_the_SINGLE_source_of_the_rule():
+    """🔴 ONE RULE, ONE PLACE. The predicate was open-coded at two sites
+    and was wrong at one; a third site must not be able to regrow it.
+
+    Pins that `run()` asks the helper rather than calling `live_scope_path`
+    directly — the exact shape of the bug.
+    """
+    src = SCRIPT.read_text(encoding="utf-8")
+    body = src.split("def run(", 1)[1]
+    assert "cross_check_target(" in body, (
+        "run() no longer routes through cross_check_target()")
+    assert "live_scope_path(store, scope)" not in body, (
+        "run() calls live_scope_path() directly again — that is the open-coded "
+        "site that skipped the foreign-artifact check")
+
+
+def test_latest_only_and_all_CANNOT_be_combined(tmp_path, identity):
+    """`--latest-only` names the default; its ONE real behaviour is refusing
+    `--all`, so that is what gets pinned. A flag whose only effect is untested
+    is a flag nobody can tell is dead."""
+    src = _dir_store(tmp_path / "objects", {})
+    both = _cli("--latest-only", "--all", "--from-dir", str(src),
+                "--store", str(tmp_path / "gone"), identity=identity)
+    assert both.returncode == 2, f"rc={both.returncode}\n{both.stderr}"
+    assert "not allowed with argument" in both.stderr, both.stderr
+
+    # POSITIVE CONTROL: alone it is accepted and behaves as the default.
+    alone = _cli("--latest-only", "--from-dir", str(src),
+                 "--store", str(tmp_path / "gone"), identity=identity)
+    assert alone.returncode == 0, f"rc={alone.returncode}\n{alone.stderr}"
+
+
 # --------------------------------------------------------------------------- #
 # 7. 🔴 STALENESS — an artifact that stopped advancing
 # --------------------------------------------------------------------------- #
@@ -1250,18 +1410,28 @@ def test_an_artifact_PAST_max_lag_days_FAILS(tmp_path, identity):
 @pytest.mark.parametrize("hours,stale", [
     (17, False),      # well inside — a healthy daily backup
     (67, False),      # 2.79d, just under a 3d threshold
+    (72, False),      # EXACTLY 3d — the only point that separates `>` from `>=`
     (77, True),       # 3.21d, just over it
     (223, True),      # 9.29d — a timer that stopped
 ])
-def test_the_staleness_threshold_is_measured_at_FOUR_points(
+def test_the_staleness_threshold_is_measured_at_FIVE_points(
         tmp_path, identity, hours, stale):
-    """🔴 MEASURED AT A BOUNDARY AND A MIDDLE, ON BOTH SIDES.
+    """🔴 MEASURED ON BOTH SIDES, AT THE BOUNDARY, AND EXACTLY ON IT.
 
-    One measurement is not a general claim. A guard using `>=` instead of `>`,
-    or comparing seconds against days, passes a single well-inside case and a
-    single far-outside one — the two points anybody would pick. The 67h/77h pair
-    straddles the threshold by four hours in each direction, and neither is a
-    round multiple of it.
+    One measurement is not a general claim. The 67h/77h pair straddles the
+    threshold by four hours in each direction, which kills a wrong UNIT
+    (seconds compared against days) and a grossly wrong threshold.
+
+    🔴 IT DOES NOT, HOWEVER, SEPARATE `>` FROM `>=` — and an earlier version of
+    this docstring claimed it did. Both operators agree everywhere except at the
+    boundary itself, so only a point EXACTLY at 72h can tell them apart: `>`
+    leaves it fresh, `>=` calls it stale. That case now exists and expects
+    fresh, which is also the right policy — an artifact exactly at the limit has
+    not yet exceeded it.
+
+    Claiming a discrimination the cases cannot deliver is the same failure this
+    whole file argues against, one level up: a test docstring that reads as
+    coverage while providing none.
     """
     store = tmp_path / "store"
     scope = _make_scope(store, "scope-alpha", {"e.md": "x"}, commits=2)
@@ -1622,6 +1792,129 @@ def test_the_work_dir_and_its_files_are_not_readable_by_anyone_else(
     assert modes["dir"] & 0o077 == 0, f"work dir is {oct(modes['dir'])}, not 0700"
     assert modes["bundle"] & 0o077 == 0, f"bundle is {oct(modes['bundle'])}, not 0600"
     assert modes["cipher"] & 0o077 == 0, f"ciphertext is {oct(modes['cipher'])}, not 0600"
+
+
+def test_the_RESTORED_REPOSITORY_is_not_readable_by_anyone_else(
+        tmp_path, identity):
+    """🔴 THE OTHER COMPLETE PLAINTEXT COPY, and it was created at the umask.
+
+    The decrypted bundle is unlinked immediately; the restored repository is the
+    one that survives under `--keep-work-dir`, in a directory the operator
+    chose. MEASURED under umask 022 before this fix: 0755 directories, 0644
+    files, a 0444 packfile — 31 entries readable by group and other.
+
+    The 0700 work dir bounded it, so this was never an active leak. It is fixed
+    because the module docstring says "everything created here is mode 0600
+    inside a 0700 directory", and the sibling test's TITLE said "the work dir
+    and ITS FILES" while its body inspected only the bundle and the ciphertext —
+    a name wider than the body, which is why this survived.
+    """
+    store = tmp_path / "store"
+    s = _make_scope(store, "scope-alpha", {"e.md": "x"}, commits=3)
+    work = tmp_path / "work"
+    _verify(store, work, FakeDownloader({_key("scope-alpha"):
+                                         _make_artifact(s, identity, tmp_path)}),
+            identity, keep_work_dir=True)
+
+    restored = [p for p in work.iterdir() if p.name.endswith(".restored.git")]
+    assert len(restored) == 1, f"no restored repository was kept: {list(work.iterdir())}"
+
+    loose = []
+    checked = 0
+    for p in [restored[0], *restored[0].rglob("*")]:
+        if p.is_symlink():
+            continue
+        checked += 1
+        if p.stat().st_mode & 0o077:
+            loose.append(f"{p.relative_to(work)} {oct(p.stat().st_mode & 0o777)}")
+    assert checked > 10, (
+        f"only {checked} entries walked — a restored git repository has dozens, "
+        f"so this assertion is not looking at what it claims")
+    assert loose == [], (
+        f"{len(loose)} of {checked} entries in the restored repository are "
+        f"readable by group or other: {loose[:8]}")
+
+
+def test_the_restored_tree_tightener_can_SEE_a_loose_tree(tmp_path):
+    """POSITIVE CONTROL for the walk above: it must be able to report a loose
+    entry. A checker that always finds zero is indistinguishable from one wired
+    to nothing — and the umask on the gate host is not something this test may
+    assume."""
+    root = tmp_path / "tree"
+    (root / "sub").mkdir(parents=True)
+    f = root / "sub" / "loose"
+    f.write_text("x", encoding="utf-8")
+    os.chmod(root, 0o755)
+    os.chmod(root / "sub", 0o755)
+    os.chmod(f, 0o644)
+
+    loose = [p for p in [root, *root.rglob("*")] if p.stat().st_mode & 0o077]
+    assert len(loose) == 3, f"the walk cannot see loose modes: {loose}"
+
+    RV._tighten_tree(root)
+    still = [p for p in [root, *root.rglob("*")] if p.stat().st_mode & 0o077]
+    assert still == [], f"_tighten_tree left {still} readable"
+
+
+def test_keep_work_dir_WARNS_on_a_FAILING_run_not_just_a_successful_one(
+        tmp_path, identity):
+    """🔴 THE PATH THE FLAG EXISTS FOR. You keep the work dir BECAUSE
+    something went wrong and you want to look at it.
+
+    The warning used to print after `summarise()` — the success path only — so a
+    failing run left restored plaintext history on disk and said nothing, while
+    the module docstring claimed the flag "prints what it left behind".
+    """
+    store = tmp_path / "store"
+    scope = _make_scope(store, "scope-alpha", {"e.md": "x"}, commits=3)
+    data = _make_artifact(scope, identity, tmp_path, mangle=_flip_middle_byte)
+    src = _dir_store(tmp_path / "objects", {_key("scope-alpha"): data})
+    work = tmp_path / "work"
+
+    r = _cli("--from-dir", str(src), "--prefix", HOST, "--store", str(store),
+             "--max-lag-days", "100000", "--work-dir", str(work),
+             "--keep-work-dir", identity=identity)
+
+    assert r.returncode == 1, f"the corrupted artifact did not fail: {r.stderr}"
+    assert "--keep-work-dir left" in r.stderr, (
+        f"a FAILING run left the work dir behind and never said so:\n{r.stderr}")
+    assert "PLAINTEXT history" in r.stderr, r.stderr
+
+
+def test_keep_work_dir_WARNS_on_a_SUCCESSFUL_run_too(tmp_path, identity):
+    """POSITIVE CONTROL for the test above: moving the warning into a `finally`
+    must not have moved it OFF the success path."""
+    now = datetime.now(timezone.utc)
+    store = tmp_path / "store"
+    scope = _make_scope(store, "scope-alpha", {"e.md": "x"}, commits=3)
+    src = _dir_store(tmp_path / "objects",
+                     {_key("scope-alpha", now - timedelta(hours=2)):
+                      _make_artifact(scope, identity, tmp_path)})
+
+    r = _cli("--from-dir", str(src), "--prefix", HOST, "--store", str(store),
+             "--work-dir", str(tmp_path / "work"), "--keep-work-dir",
+             identity=identity)
+    assert r.returncode == 0, f"rc={r.returncode}\n{r.stdout}\n{r.stderr}"
+    assert "--keep-work-dir left" in r.stderr, r.stderr
+
+
+def test_the_keep_work_dir_REFUSAL_does_not_warn_about_a_dir_it_never_made(
+        tmp_path, identity):
+    """The warning is armed only once a work dir actually exists. `--print-plan`
+    and the `--keep-work-dir requires --work-dir` refusal both leave nothing
+    behind, so a warning there would be a false claim in the other direction."""
+    src = _dir_store(tmp_path / "objects", {})
+    r = _cli("--keep-work-dir", "--from-dir", str(src),
+             "--store", str(tmp_path / "gone"), identity=identity)
+    assert r.returncode == 1
+    assert "--keep-work-dir requires --work-dir" in r.stderr
+    assert "--keep-work-dir left" not in r.stderr, (
+        f"it warned about artifacts it never created:\n{r.stderr}")
+
+    plan = _cli("--print-plan", "--store", str(tmp_path / "gone"),
+                identity=identity)
+    assert plan.returncode == 0
+    assert "--keep-work-dir left" not in plan.stderr, plan.stderr
 
 
 def test_the_permission_check_can_SEE_a_loose_mode(tmp_path):

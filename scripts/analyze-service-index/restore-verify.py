@@ -73,15 +73,34 @@ corruption, truncation and staleness:
      bucket whose newest object is a week old is a backup that stopped, and it
      looks identical to a healthy one from every other angle.
 
-🔴 AN ABSENT LIVE SCOPE IS THE ACTUAL DISASTER CASE, AND IT IS NOT A FAILURE
----------------------------------------------------------------------------
-If the store is gone, there is nothing to cross-check against — that is the
-scenario these backups exist for, and failing there would make the verifier
-useless at the exact moment it is needed. So a scope with no live counterpart is
-verified for SELF-CONSISTENCY only (restore + `git fsck` + a non-zero commit
-count) and reported as `NOT CROSS-CHECKED`, never folded into the same word as a
-scope that was checked against live. "Verified" and "verified against what" are
-two facts; printing one of them is how a partial answer gets read as a whole one.
+🔴 TWO REASONS THERE MAY BE NOTHING TO COMPARE AGAINST, AND NEITHER IS A FAILURE
+------------------------------------------------------------------------------
+`cross_check_target()` owns both, so they cannot drift apart, and they get
+DIFFERENT sentences because one is the disaster case and the other is routine.
+
+  1. THE LIVE SCOPE IS GONE. That is the scenario these backups exist for, and
+     failing there would make the verifier useless at the exact moment it is
+     needed.
+  2. THE ARTIFACTS BELONG TO ANOTHER HOST (`--host` / `--prefix`). The two
+     machines' stores are DIVERGENT CONTENT that merely SHARE SCOPE NAMES —
+     `devrc` and `homelab-talos` exist on both. Comparing the laptop's `devrc`
+     artifact against the workbench's `devrc` repository compares two histories
+     that were never the same one, and reports "N of N commits do not exist in
+     the live scope — history was rewritten": a false DATA-LOSS alarm,
+     permanently red, on the exact command SECRETS.md tells an operator to run.
+     Measured; it was invisible only because the other host has no objects in
+     the bucket yet, so such a run hit the ZERO-objects refusal first.
+
+Either way the artifact is verified for SELF-CONSISTENCY (restore + `git fsck` +
+a non-zero commit count) and reported as `NOT CROSS-CHECKED` WITH ITS REASON,
+never folded into the same word as a scope that was checked against live.
+"Verified" and "verified against what" are two facts; printing one of them is
+how a partial answer gets read as a whole one.
+
+Note the flag is the PREFIX being explicit, not `--scope`: narrowing to one
+scope of THIS host's artifacts leaves the comparison perfectly valid. The
+coverage check below adds the `--scope` condition on top of the shared one; they
+are deliberately not the same boolean.
 
 🔴 EVERY EMPTY OUTCOME IS LOUD
 ------------------------------
@@ -108,11 +127,16 @@ It exists only between `age -d` and `git clone`, and it is unlinked on EVERY
 path out of that window including the failure paths — a failed restore is
 exactly when a plaintext copy is most likely to be left behind and least likely
 to be noticed. The restored repository is plaintext history too, and dies with
-it. Everything created here is mode 0600 inside a 0700 directory.
+it. Everything created here ends up mode 0600 inside a 0700 directory —
+INCLUDING the restored repository, which `git clone` creates at the process
+umask (measured: 0755 dirs, 0644 files, a 0444 packfile, 31 group/other-readable
+entries) and `_tighten_tree()` repairs before anything else touches it.
 
 `--keep-work-dir` is the one way to keep the restored repositories, and it
-REQUIRES `--work-dir` (an option that silently does nothing is a lie) and prints
-what it left behind. The decrypted bundle dies even then.
+REQUIRES `--work-dir` (an option that silently does nothing is a lie). It prints
+what it left behind on EVERY path out including the failure paths — which is the
+path it exists for, since you keep the work dir precisely BECAUSE something went
+wrong and you want to look at it. The decrypted bundle dies even then.
 
 Usage:
     restore-verify.py [--bucket B | --from-dir DIR] [--host H | --prefix P]
@@ -158,15 +182,10 @@ DEFAULT_IDENTITY = B.DEFAULT_IDENTITY
 # timer is caught inside a working week rather than at recovery time.
 DEFAULT_MAX_LAG_DAYS = 3.0
 
-# 🔴 THERE IS DELIBERATELY NO LOCAL DIR-MODE CONSTANT. The work directory is
-# created 0700 by `B._private_dir()`, which owns that number and chmods
-# unconditionally (an existing directory keeps its mode through
-# `mkdir(exist_ok=True)`, which is every run after the first with an
-# explicit --work-dir). A second copy of the constant here would be an
-# unused alias that reads like the thing enforcing the mode while the
-# enforcement lived elsewhere — and would keep reading that way if the
-# `_private_dir` call were ever dropped. The FILE mode is aliased because
-# this module really does chmod files itself.
+# The work directory itself is created 0700 by `B._private_dir()`, which owns
+# that number. These two are used by `_tighten_tree()` below, which has to
+# repair what `git clone` creates at the process umask.
+_DIR_MODE = B._DIR_MODE      # 0700
 _FILE_MODE = B._FILE_MODE    # 0600
 
 # 🔴 THE READ-ONLY ALLOWLIST, the same guard `backup.py` carries and for the same
@@ -533,6 +552,34 @@ def decrypt(cipher: Path, plain: Path, identity: Path) -> None:
     os.chmod(plain, _FILE_MODE)
 
 
+def _tighten_tree(root: Path) -> None:
+    """chmod every directory 0700 and every file 0600 under `root`.
+
+    🔴 `git clone` CREATES THE RESTORED REPOSITORY AT THE PROCESS UMASK, and the
+    restored repository is the OTHER complete plaintext copy of a
+    client-confidential scope — the decrypted bundle is the first, and it is
+    already unlinked immediately. MEASURED under umask 022, on a real restore:
+
+        directories 0755, files 0644, the packfile 0444
+        -> 31 entries readable by group and other
+
+    The 0700 work directory bounds all of it today, so this is defence in depth
+    rather than a fix for an active leak. It is here because the module
+    docstring says "everything created here is mode 0600 inside a 0700
+    directory", and a sentence wider than the code is the exact failure this
+    file exists to argue against — the honest options were to tighten the modes
+    or to narrow the claim, and tightening is the one that leaves the guarantee
+    true if the work dir is ever created by something other than
+    `_private_dir()`. It also matters under `--keep-work-dir`, where this tree
+    outlives the run in a directory the operator chose.
+    """
+    os.chmod(root, _DIR_MODE)
+    for p in root.rglob("*"):
+        if p.is_symlink():          # chmod would follow it out of the tree
+            continue
+        os.chmod(p, _DIR_MODE if p.is_dir() else _FILE_MODE)
+
+
 def restore(bundle: Path, dest: Path, work_dir: Path, forbidden: Path) -> None:
     """THE verification: clone the bundle, then `git fsck` what came out.
 
@@ -558,6 +605,10 @@ def restore(bundle: Path, dest: Path, work_dir: Path, forbidden: Path) -> None:
             f"like. Note that `git bundle verify` PASSES such a bundle at rc=0 "
             f"printing 'complete history' — which is precisely why this "
             f"verifier restores instead of asking it.")
+
+    # Before ANYTHING else touches it, and before it can outlive the run under
+    # `--keep-work-dir`. See `_tighten_tree`'s measurement.
+    _tighten_tree(dest)
 
     f = _scratch(dest, "fsck", "--no-progress", forbidden=forbidden)
     if f.returncode != 0:
@@ -668,7 +719,8 @@ def cross_check(scope_repo: Path, restored_refs: dict[str, str],
 def verify_artifact(downloader, key: str, *, scope: str, stamp: datetime,
                     identity: Path, work_dir: Path, store: Path,
                     keep: bool, now: datetime,
-                    live_scope: Path | None) -> ArtifactVerdict:
+                    live_scope: Path | None,
+                    no_live_reason: str | None = None) -> ArtifactVerdict:
     """Bucket bytes -> reconstructed git history, for exactly one object."""
     data = downloader.get(key)
     if not data:
@@ -713,8 +765,14 @@ def verify_artifact(downloader, key: str, *, scope: str, stamp: datetime,
             cross_checked=False, age_days=age_days, ref_names=sorted(refs),
         )
         if live_scope is None:
+            # 🔴 The REASON is passed in, not re-derived here. "No live scope on
+            # this machine" and "these artifacts are another machine's" are
+            # different findings, and an operator reading `NOT CROSS-CHECKED`
+            # needs to know which one they are looking at — re-deriving it here
+            # could only ever produce the first sentence, including for the
+            # second case.
             verdict.no_cross_check_reason = (
-                f"no live scope repository at {store / scope}")
+                no_live_reason or f"no live scope repository at {store / scope}")
             return verdict
         compared, lag = cross_check(live_scope, refs, commits)
         verdict.cross_checked = True
@@ -749,6 +807,48 @@ def live_scope_path(store: Path, scope: str) -> Path | None:
     if p.is_symlink() or not p.is_dir() or not (p / ".git").exists():
         return None
     return p
+
+
+def cross_check_target(store: Path, scope: str, *, artifacts_are_foreign: bool
+                       ) -> tuple[Path | None, str | None]:
+    """The live repo to compare `scope`'s artifact against, or `(None, reason)`.
+
+    🔴 ONE PLACE OWNS "IS THERE ANYTHING TO COMPARE AGAINST", because the
+    predicate used to be open-coded at two sites and was WRONG AT ONE of them —
+    the shape RULES.md describes, where a duplicated predicate is wrong at N−1
+    sites in the same direction and consolidating is what makes the disagreement
+    audible. The coverage check was correctly skipped for another host's
+    artifacts; this one was not.
+
+    🔴 FOREIGN ARTIFACTS MUST NOT BE COMPARED TO THIS HOST'S STORE. `backup.py`
+    states that the two machines' stores are DIVERGENT CONTENT, and they share
+    scope NAMES — `devrc` and `homelab-talos` exist on both. So cross-checking
+    the laptop's `devrc` artifact against the workbench's `devrc` repository
+    compares two histories that were never the same one, and reports
+
+        CROSS-CHECK FAILED … 3 of 3 commit(s) in the RESTORED artifact do not
+        exist in the live scope … history was rewritten
+
+    which is a false DATA-LOSS alarm, permanently red, on the exact command
+    SECRETS.md tells an operator to run (`restore-verify.py --host <label>`).
+    It is invisible today only because the other host has no objects in the
+    bucket yet, so such a run hits the ZERO-objects refusal first — i.e. the bug
+    was scheduled to appear the day the feature started working.
+
+    Note this is keyed on the PREFIX being explicit, NOT on `--scope`: narrowing
+    to one scope of THIS host's artifacts leaves the comparison perfectly valid,
+    so the two call sites share this reason and only the coverage check adds the
+    `--scope` condition on top. They are deliberately not the same boolean.
+    """
+    if artifacts_are_foreign:
+        return None, ("the artifacts belong to ANOTHER host (--host/--prefix) "
+                      "and this machine's store is DIVERGENT content that only "
+                      "shares scope NAMES — comparing them would report a false "
+                      "data-loss alarm")
+    live = live_scope_path(store, scope)
+    if live is None:
+        return None, f"no live scope repository at {store / scope}"
+    return live, None
 
 
 def uncovered_local_scopes(store: Path, covered: set[str], now: datetime,
@@ -871,12 +971,21 @@ def run(*, bucket: str, prefix: str, store: Path, identity: Path,
 
         verdicts: list[ArtifactVerdict] = []
         failures: list[str] = []
+
+        # 🔴 ONE NAME for "these artifacts are not this machine's", read by both
+        # the coverage check below and `cross_check_target()` in the loop. The
+        # two sites had this open-coded and only one of them got it right; the
+        # reason now lives in exactly one docstring.
+        artifacts_are_foreign = prefix_was_explicit
+
         # 🔴 THE OTHER DIRECTION, and it runs BEFORE the per-artifact loop so it
         # is reported even if every artifact that IS there fails. Skipped when
         # the question was narrowed: with `--scope` you asked about one scope,
         # and with an explicit `--host`/`--prefix` you are asking about ANOTHER
-        # machine, whose scope list this host's store does not describe.
-        if scope_filter is None and not prefix_was_explicit:
+        # machine, whose scope list this host's store does not describe. This
+        # site carries the EXTRA `--scope` condition; the foreign-artifact half
+        # is shared.
+        if scope_filter is None and not artifacts_are_foreign:
             for msg in uncovered_local_scopes(store, set(by_scope), now,
                                               max_lag_days):
                 failures.append(msg)
@@ -892,13 +1001,15 @@ def run(*, bucket: str, prefix: str, store: Path, identity: Path,
             # stamp is fixed-width UTC), so the last entry is the newest.
             newest_stamp = entries[-1][0]
             chosen = entries if verify_all else [entries[-1]]
-            live = live_scope_path(store, scope)
+            live, no_live_reason = cross_check_target(
+                store, scope, artifacts_are_foreign=artifacts_are_foreign)
             for stamp, key in chosen:
                 try:
                     v = verify_artifact(
                         downloader, key, scope=scope, stamp=stamp,
                         identity=identity, work_dir=work_dir, store=store,
-                        keep=keep_work_dir, now=now, live_scope=live)
+                        keep=keep_work_dir, now=now, live_scope=live,
+                        no_live_reason=no_live_reason)
                     verdicts.append(v)
                     print(f"{PROG}: {v.line()}")
                 except Exception as exc:  # noqa: BLE001 — see backup.py: the point
@@ -1024,8 +1135,16 @@ def main(argv: list[str] | None = None) -> int:
                     help="the LIVE store to cross-check against; an absent one "
                          "is the disaster case, not an error")
     group = ap.add_mutually_exclusive_group()
-    group.add_argument("--latest-only", action="store_true", default=True,
-                       help="verify only the newest artifact per scope (default)")
+    # 🔴 `--latest-only` NAMES THE DEFAULT and does not otherwise drive anything
+    # — `verify_all` is what the run reads. Its one real behaviour is being in
+    # this mutually-exclusive group, so `--latest-only --all` is an ERROR rather
+    # than a silent win for whichever argparse saw last. `default=False` (not
+    # True) so the parsed value reflects whether the operator actually typed it;
+    # it read `True` unconditionally before, which is a value that answers no
+    # question. Pinned by test_latest_only_and_all_CANNOT_be_combined.
+    group.add_argument("--latest-only", action="store_true", default=False,
+                       help="verify only the newest artifact per scope (the "
+                            "default; explicit spelling, and refuses --all)")
     group.add_argument("--all", dest="verify_all", action="store_true",
                        help="verify EVERY retained artifact per scope")
     ap.add_argument("--max-lag-days", type=float,
@@ -1060,6 +1179,11 @@ def main(argv: list[str] | None = None) -> int:
     factory = ((lambda: DirectoryStore(args.from_dir))
                if args.from_dir is not None else None)
 
+    # None until a work dir has actually been created AND --keep-work-dir asked
+    # for it to survive. Neither --print-plan nor the --keep-work-dir refusal
+    # leaves anything behind, so neither may warn about it.
+    kept_work_dir: Path | None = None
+
     try:
         if args.print_plan:
             print_plan(bucket=bucket, prefix=prefix, store=args.store,
@@ -1089,6 +1213,14 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.work_dir is not None:
             B._private_dir(args.work_dir)
+            # 🔴 ARMED BEFORE THE RUN, WARNED IN A `finally`. This warning used
+            # to print after `summarise()` — the SUCCESS PATH ONLY — so a run
+            # that failed left restored plaintext history on disk and said
+            # nothing, which is precisely the path `--keep-work-dir` exists for:
+            # you keep the work dir BECAUSE something went wrong and you want to
+            # look at it. The module docstring claimed the flag "prints what it
+            # left behind"; on the path people actually use it, that was false.
+            kept_work_dir = args.work_dir if args.keep_work_dir else None
             verdicts = _go(args.work_dir)
         else:
             with tempfile.TemporaryDirectory(prefix="asi-restore-verify.") as td:
@@ -1097,11 +1229,6 @@ def main(argv: list[str] | None = None) -> int:
         if not verdicts:
             return 0        # the documented never-ran-here no-op; reason on stderr
         print(summarise(verdicts))
-        if args.keep_work_dir:
-            print(f"{PROG}: --keep-work-dir left restored repositories under "
-                  f"{args.work_dir}. They hold PLAINTEXT history of "
-                  f"client-confidential scopes; remove them when you are done.",
-                  file=sys.stderr)
         return 0
     except B.BackupError as exc:
         print(f"{PROG}: {exc}", file=sys.stderr)
@@ -1118,6 +1245,16 @@ def main(argv: list[str] | None = None) -> int:
               f"treat this as NO verification and read the traceback above.",
               file=sys.stderr)
         return 1
+    finally:
+        # EVERY path out: success, BackupError, and an unexpected exception. A
+        # failing run is the one most likely to have left a partly-restored
+        # repository behind, and the least likely to have anyone re-reading the
+        # flag's documentation to find out.
+        if kept_work_dir is not None:
+            print(f"{PROG}: --keep-work-dir left decrypted artifacts and "
+                  f"restored repositories under {kept_work_dir}. They hold "
+                  f"PLAINTEXT history of client-confidential scopes; remove "
+                  f"them when you are done.", file=sys.stderr)
 
 
 if __name__ == "__main__":
