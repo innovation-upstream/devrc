@@ -70,24 +70,48 @@
 // that fires too often on a mutation family is a far better failure than an
 // `ask` that never fires on the spelling an operator actually types.
 //
-// 🔴 ONE DELIBERATE EXCEPTION — the only rule ever narrowed AWAY from a
+// 🔴 TWO DELIBERATE EXCEPTIONS — the only rules ever narrowed AWAY from a
 // working infix form (several rules, e.g. `*chmod -R*`, `*dd if=*`, `*sudo *`,
 // were written binary-plus-literal-flag from the start; this is not a claim
-// that every other pattern is infix): the two `age` decrypt
-// rules are `*age -d*` / `*age --decrypt*` — leading-`*` but NOT infix. The
-// infix form `*age*-d*` matched any text with "age" followed LATER by "-d",
-// and "age" is a substring of package, packages, image, message, storage and
-// manage while "-d" covers -db-, --dir, --debug and --dry-run. Because
-// `opencode run` AUTO-REJECTS an ask rather than prompting, that over-match did
-// not "fire too often" — it KILLED runs on `ls packages/…-db-…` and
-// `grep … packages/…`. Measured 2026-08-21; two real dispatches died on it.
-// The trade is real and is NOT free: the narrowed rules know exactly one
-// argument order, so reordered spellings like `age -i k.txt -d f` now resolve
-// ALLOW, and guard_core.py has NO age/sops check to catch them. That gap is
-// pinned as a characterization test —
-// `test_age_glob_misses_these_reordered_decrypt_spellings` — so it stays
-// visible. Do NOT "restore consistency" by re-widening these to infix without
-// reading that test first.
+// that every other pattern is infix). Both were narrowed for the SAME measured
+// reason, one day apart, and the second is why this heading says TWO:
+//
+//   (a) the two `age` decrypt rules, `*age -d*` / `*age --decrypt*` —
+//       leading-`*` but NOT infix. The infix form `*age*-d*` matched any text
+//       with "age" followed LATER by "-d", and "age" is a substring of package,
+//       packages, image, message, storage and manage while "-d" covers -db-,
+//       --dir, --debug and --dry-run. Measured 2026-08-21; two real dispatches
+//       died on it, one on `grep`, one on `ls`.
+//
+//   (b) the two `rm` recursive rules, `*rm -r*` / `*rm --recursive*`. The infix
+//       form `*rm*-r*` was the identical defect: "rm" is a substring of format,
+//       terraform, firmware, confirm and platform, and "-r" covers --reverse,
+//       --refresh, --reporter, --repo and --recursive. Measured 2026-08-22:
+//       `git log --format=oneline --reverse`, `terraform plan -refresh=false`,
+//       `rg '…format…' src/ --replace ''` and `pnpm run format --reporter=…`
+//       all resolved ASK. The first three are pinned as MUST_ALLOW rows in
+//       test_opencode_config.py and were watched to FAIL before the narrowing.
+//       It needed a SECOND rule, not just a narrowing: "rm --recursive" does not
+//       contain the literal "rm -r", so dropping the inner `*` alone would have
+//       released an ordinary recursive delete that the guard layer does not
+//       backstop — measured by deleting that row: it drops to plain ALLOW.
+//
+// WHY THESE TWO AND NOT THE REST. Because `opencode run` AUTO-REJECTS an ask
+// rather than prompting, an over-match on a family an agent types CONSTANTLY
+// does not "fire too often" — it KILLS the run mid-task. That inverts the trade
+// argued above, but only for patterns whose binary name is a substring of
+// ordinary English/flag text. `kubectl`, `talosctl`, `sops`, `sudoedit` are not,
+// which is why they stay infix.
+//
+// THE TRADE IS REAL AND IS NOT FREE, in the same way for both: a narrowed rule
+// knows exactly one argument order, so `age -i k.txt -d f` and `rm -f -r <path>`
+// now resolve ALLOW. guard_core.py has NO age/sops check at all, and its `rm`
+// check has a deliberately narrow TARGET set that an ordinary project path never
+// reaches. Both gaps are pinned as characterization tests —
+// `test_age_glob_misses_these_reordered_decrypt_spellings` and
+// `test_rm_glob_misses_these_recursive_spellings` — so they stay visible. Do NOT
+// "restore consistency" by re-widening any of these four rules to infix without
+// reading those tests first.
 //
 // Other measured facts baked into this file (v1.18.18, EXCEPT where a bullet
 // says otherwise — the 2026-08-19 re-derivation could not reach three of them,
@@ -345,7 +369,21 @@
       // --- filesystem blast radius ---
       "*chmod -R*": "ask",
       "*chown -R*": "ask",
-      "*rm*-r*": "ask",
+      // 🔴 NOT INFIX, ON PURPOSE — exception (b) in the header. `*rm*-r*` matched
+      // "rm" followed LATER by "-r" ANYWHERE in the command text — note the
+      // ORDER: the "rm" substring must come FIRST, so it took `git log
+      // --format=oneline --reverse` and `terraform plan -refresh=false` but not
+      // `grep -r 'format' src/`. That still auto-rejected ordinary read-only
+      // work wherever a format/terraform/firmware/confirm/platform token
+      // preceded a --reverse/--refresh/--reporter/--repo/--replace flag.
+      // BOTH ROWS ARE LOAD-BEARING and neither covers the other: "rm --recursive"
+      // does NOT contain the literal "rm -r", so deleting the second row releases
+      // `rm --recursive <path>` — which guard_core does not backstop on an
+      // ordinary path. Each is pinned individually in MUST_ASK.
+      // Known gap, pinned by test_rm_glob_misses_these_recursive_spellings:
+      // `-R` bundles and any flag placed BEFORE `-r` (`rm -f -r <path>`).
+      "*rm -r*": "ask",
+      "*rm --recursive*": "ask",
       // `dd` stays ANCHORED / operand-scoped on purpose: a leading-`*` `"*dd *"`
       // also matches `git add src/` (…"add "…), and gating every `git add` is
       // exactly the prompt fatigue that trains an operator to click through.

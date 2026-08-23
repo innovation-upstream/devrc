@@ -37,7 +37,9 @@ WHAT IS UNDER TEST (see scripts/opencode/README.md for the measurements):
      fully green** — 17 of them real holes where a realistic command dropped to
      plain `allow` at BOTH layers (`*git*commit*`, `*kubectl*drain*`,
      `*helm*upgrade*`, all four mutating `systemctl` verbs, the anchored
-     `sudo*`, `*rm*-r*`, …). The aggregate `len(asks) >= 40` floor could not see
+     `sudo*`, `*rm*-r*` (the recursive-`rm` rule, spelled infix at that ref and
+     narrowed to `*rm -r*` + `*rm --recursive*` on 2026-08-22), …). The
+     aggregate `len(asks) >= 40` floor could not see
      it: deleting exactly ten ask rules left exactly 40 and reported
      480 passed, 0 failed while ten dangerous families ran unprompted.
      `test_every_ask_rule_is_individually_pinned` and its deny twin turn that
@@ -612,13 +614,18 @@ MUST_ASK = [
     # check_rm_rf_critical deliberately does NOT fire here (its fatal-target set
     # is `/`, `~`/`$HOME`, `.`/`..` and the top-level system dirs only — see
     # test_guard_core_catches_recursive_rm_without_the_force_flag below), so
-    # this glob is the only thing gating these two SPELLINGS.
-    # 🔴 NOT the family: the glob is spelled, and `-R`, `-Rf` and `-fr` all
-    # resolve ALLOW today. That live gap is pinned, deliberately, by
+    # these globs are the only thing gating these two SPELLINGS.
+    # 🔴 TWO ROWS, TWO RULES, NEITHER REDUNDANT. Since the 2026-08-22 narrowing
+    # of `*rm*-r*` to `*rm -r*`, the long spelling is held by its OWN rule:
+    # "rm --recursive" does not contain the literal "rm -r", so each row below
+    # is the sole decider for exactly one rule.
+    # 🔴 NOT the family: the globs are spelled, so `-R`, `-Rf`, `-fr` AND any
+    # flag placed before `-r` (`rm -f -r <path>`) all resolve ALLOW today. That
+    # live gap is pinned, deliberately, by
     # test_rm_glob_misses_these_recursive_spellings below — do not read this
     # pair as "recursive delete is covered".
-    "rm -r /repo/build",                                         # *rm*-r*
-    "rm --recursive /repo/node_modules",                         # *rm*-r*
+    "rm -r /repo/build",                                         # *rm -r*
+    "rm --recursive /repo/node_modules",                         # *rm --recursive*
     # A leading `dd` with neither an `if=` nor an `of=` operand — the one shape
     # the operand-scoped `*dd if=*`/`*dd of=*` rules structurally cannot see.
     # Stated honestly: this spelling is the least dangerous of the dd family
@@ -760,6 +767,21 @@ MUST_ALLOW = [
     "ls packages/civitai-db-schema/src/",
     "grep -n REPLICATION_LAG_DELAY packages/civitai-db/src/lag.test.ts",
     "rg 'storage' src/ --debug",
+    # 🔴 THE SAME REGRESSION, SAME CLASS, ONE DAY LATER — measured 2026-08-22.
+    # `"*rm*-r*"` had a `*` BETWEEN "rm" and "-r", so it matched any command text
+    # containing "rm" followed LATER by "-r". "rm" is a substring of format,
+    # terraform, firmware, confirm and platform; "-r" covers --reverse,
+    # --refresh, --reporter, --repo and --recursive. All three below resolved
+    # ASK on the primary agent before the narrowing — watched to fail — and
+    # `opencode run` auto-rejects an ask, so each one kills a run mid-task.
+    # The fix is `"*rm -r*"` (drop the inner `*`) plus a second rule
+    # `"*rm --recursive*"`, because the long spelling does not contain "rm -r".
+    # Third row deliberately mirrors `rg 'storage' src/ --debug` above: same
+    # binary, different substring pair. `rg --replace` rewrites only the OUTPUT,
+    # never a file, so this list stays honestly read-only.
+    "git log --format=oneline --reverse",
+    "terraform plan -refresh=false",
+    "rg 'formatBytes' src/ --replace ''",
 ]
 
 # Every agent that ships, plus the implicit primary. `None` == no agent block.
@@ -988,9 +1010,10 @@ def test_all_asks_precede_all_denies():
     """
     items = list(load_config()["permission"]["bash"].items())[1:]
     asks = [k for k, v in items if v == "ask"]
-    assert len(asks) == 51, (
-        f"{len(asks)} `ask` rules in the bash block, pinned at 51 (50 after the "
-        f"1fb8c2b restoration, +1 for `*sudoedit*`). This is `==`, not `>=`, on "
+    assert len(asks) == 52, (
+        f"{len(asks)} `ask` rules in the bash block, pinned at 52 (50 after the "
+        f"1fb8c2b restoration, +1 for `*sudoedit*`, +1 for `*rm --recursive*` "
+        f"when `*rm*-r*` was narrowed to `*rm -r*`). This is `==`, not `>=`, on "
         f"purpose — see the docstring: a one-sided floor lets the cushion regrow "
         f"silently until it is the same slack that let ten dangerous families be "
         f"deleted with the gate green.\n"
@@ -1454,7 +1477,8 @@ def test_guard_core_catches_recursive_rm_without_the_force_flag():
 
     The complement is the part that IS regression coverage, and it lives in
     MUST_ASK: an ordinary recursive delete (`rm -r /repo/build`) is deliberately
-    NOT in the guard's fatal-target set, so the `*rm*-r*` glob is its only gate.
+    NOT in the guard's fatal-target set, so the `*rm -r*` / `*rm --recursive*`
+    globs are its only gate.
     """
     for cmd in ["rm -r /", "rm --recursive /", "rm -R /", "rm -r $HOME",
                 "rm --recursive $HOME", "rm -r ~", "rm -r .", "rm -r /etc",
@@ -1475,23 +1499,42 @@ def test_rm_glob_misses_these_recursive_spellings():
       * guard_core's flag test is STRUCTURAL (`--recursive`, or any short bundle
         containing r/R), but its TARGET set is deliberately narrow — `/`, `~`,
         `.`/`..`, top-level system dirs — so an ordinary path never reaches it;
-      * the `"*rm*-r*"` glob covers any target but is SPELLED, and knows exactly
-        one flag spelling.
+      * the `"*rm -r*"` / `"*rm --recursive*"` globs cover any target but are
+        SPELLED, and know exactly two flag spellings, each with the flag
+        IMMEDIATELY after the binary.
     Their intersection is a recursive delete of a project directory written with
     `-R`, `-Rf` or `-fr`: ALLOW at both layers, no prompt.
 
+    🔴 THE LAST THREE ROWS ARE NEWLY OPEN, and they are the price of the
+    2026-08-22 narrowing. `"*rm*-r*"` matched "rm" followed LATER by "-r"
+    anywhere in the text, so it DID hold `rm -f -r <path>` — at the cost of
+    auto-rejecting `git log --format=… --reverse`, `terraform plan
+    -refresh=false` and any other text where a format/terraform/firmware/
+    confirm/platform token PRECEDES a `-r` flag (see the three MUST_ALLOW rows
+    added with this change; the order matters — `grep -r 'format' src/` was
+    never matched, because there the "rm" comes second). Requiring the literal
+    "rm -r"
+    removes that false-positive class and gives up every spelling that puts
+    another flag first. This is the same trade, and the same shape of loss, as
+    `test_age_glob_misses_these_reordered_decrypt_spellings` records for `age`.
+
     NOT closed here, deliberately. Widening the glob is whack-a-mole — `-R`
-    needs its own rule, then `-fR`, then `-vr`; and a candidate that looked like
-    it generalised (`"*rm*-*r*"`) matched `rm -R /repo/build` only because the
-    PATH contains an "r", so it fails on `rm -R /x`. The structural fix is to
-    widen guard_core's target set, which its own docstring records as an
-    operator decision needing a measurement of how often it would fire on real
-    sessions — not a change to smuggle into a test-coverage PR.
+    needs its own rule, then `-fR`, then `-vr`, then `-f -r`; and a candidate
+    that looked like it generalised (`"*rm*-*r*"`) matched `rm -R /repo/build`
+    only because the PATH contains an "r", so it fails on `rm -R /x`. Re-widening
+    to `"*rm*-r*"` closes three of these rows and reopens the auto-reject class
+    the narrowing was made to remove — that trade was already measured and
+    rejected. The structural fix is to widen guard_core's target set, which its
+    own docstring records as an operator decision needing a measurement of how
+    often it would fire on real sessions — not a change to smuggle into a
+    test-coverage PR.
 
     🔴 If this test FAILS because a verdict became `ask`/`deny`, the gap was
     CLOSED: delete that row from here and add the command to MUST_ASK.
     """
-    for cmd in ["rm -R /repo/build", "rm -Rf /repo/build", "rm -fr /repo/build"]:
+    for cmd in ["rm -R /repo/build", "rm -Rf /repo/build", "rm -fr /repo/build",
+                "rm -f -r /repo/build", "rm -v -r /repo/build",
+                "rm --force --recursive /repo/build"]:
         assert layered_verdict(cmd, None) == "allow", (
             f"{cmd!r} no longer resolves 'allow'. If you closed this gap, move "
             f"it into MUST_ASK and delete it here — do not relax the assertion."
