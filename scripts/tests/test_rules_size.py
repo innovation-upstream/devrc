@@ -282,12 +282,18 @@ ARCHIVE_MD = REPO_ROOT / "claude" / "RULES-ARCHIVE.md"
 # 2026-08-20 entry diagnosed (32 B of slack -> "the next contributor got the
 # surprise, not the warning"). +400 leaves 1,010 B, i.e. one large rule.
 #
-# 2026-08-21 (later, #661): that 1,010 B was SPENT, not eroded -- the zsh
-# MULTIOS redirection trap cost 106 B and RULES.md reached 38,296, leaving 4 B
-# of slack above the floor. Recorded because it is the gate working exactly as
-# designed: the next author got the WARNING at 4 B rather than the surprise at
-# -1, which is the whole reason MIN_HEADROOM_BYTES exists. No bump was needed
-# or taken for it.
+# 2026-08-21 (later, #661): the zsh MULTIOS redirection trap cost 106 B and
+# RULES.md reached 38,296. 🔴 MIND THE BASE -- the two slack figures in this
+# module are measured from DIFFERENT points and subtracting one from the other
+# is meaningless: "1,010 B" above is CEILING-relative (MAX_BYTES - size), while
+# "4 B" here is FLOOR-relative (MAX_BYTES - size - MIN_HEADROOM_BYTES), and the
+# bases differ by MIN_HEADROOM_BYTES. Floor-relative, #642 left 110 B and #661
+# spent 106 of it, leaving 4. A draft of this PR's body did that subtraction
+# and reported the 106 B rule as having cost 1,006 B.
+#
+# Recorded because it is the gate working exactly as designed: the next author
+# got the WARNING at 4 B rather than the surprise at -1, which is the whole
+# reason MIN_HEADROOM_BYTES exists. No bump was needed or taken for it.
 #
 # 2026-08-22: 39,200 -> 40,300 (+1,100, in TWO steps -- see the bump note
 # below for why the second was forced). The rule that would not fit is the
@@ -296,8 +302,8 @@ ARCHIVE_MD = REPO_ROOT / "claude" / "RULES-ARCHIVE.md"
 # It is the THIRD-largest bullet in the file, behind "Validate the INSTRUMENT"
 # and "Mutation-test a guard"; an earlier draft called it the largest, which
 # the 2026-08-11 entry above already contradicted. Its byte size is NOT stated
-# here -- see this entry's closing note on derived measurements for why. It is over the
-# ~900 B the MIN_HEADROOM_BYTES comment calls a large rule, and that is
+# here -- see this entry's closing note on derived measurements for why. It is
+# over the ~900 B the MIN_HEADROOM_BYTES comment calls a large rule, and that is
 # deliberate: it is one decision tree with four branches, and splitting it
 # into four bullets costs MORE because each would restate the frame ("stop
 # only on a named trigger; each has its own response").

@@ -1325,14 +1325,26 @@ shared repo, `pkill -f`, raising a window on the operator's screen, `sudo nixos-
 Those rules exist *because* a yes was already given once. Their response is stage-it or
 hand-it-over, never solicit approval.
 
-**The provenance-and-freeze clause is borrowed from clawgate's task status gate**, which is a
-worked solution to the same problem the proposal had — a verdict self-assessed by the party
-who wants to pass it. Clawgate answers it structurally: criteria are AUTHOR-SPECIFIED only
-when the task body carries a `## Acceptance criteria` heading, anything else is DERIVED and
-caps the outcome at `ready_for_review` ("you must not grade an exam you wrote"), and the
-verdict is **frozen at first read** — decided before the agent knows whether it will pass.
-Hence: classify blast radius before starting, and weight a derived safety claim below a
-stated one.
+**The provenance-and-freeze clause was prompted by clawgate's task status gate**, which faces the
+same problem the proposal had — a verdict self-assessed by the party who wants to pass it. 🔴 **Be
+exact about which half of that gate is real, because an earlier draft of this entry was not, and
+got it wrong in the direction this repo had corrected ONE DAY EARLIER (#691, `b8e8843b`, whose
+title is "the deny message called a CONVENTION 'structural'").**
+
+- **Structural, enforced in Go:** an agent can never mark its own work `complete`.
+  `internal/taskstatus/taskstatus.go:79-81` is `AllowedForAgent(s) = Valid(s) && s != Complete`.
+  Note it is **criteria-INDEPENDENT** — every agent pickup caps at `ready_for_review`, heading or
+  no heading.
+- **Convention, enforced by nothing:** the AUTHOR-SPECIFIED vs DERIVED distinction, the
+  `## Acceptance criteria` heading that selects between them, and the freeze-at-first-read. The
+  string "acceptance criteria" appears in **zero** Go files; the table lives in the skill, is read
+  by the agent about itself, and `flows/task-authoring.md` says in bold *"That lever is a
+  CONVENTION, not a server check — do not oversell it."*
+
+So the borrowed IDEA is sound and stands on its own — classify by provenance, and freeze the
+verdict before you know whether you pass it. The claim that clawgate implements it *structurally*
+is false, and asserting it from a document rather than the code is the same failure as the
+`approve-with-comment` claim two bullets down.
 
 **Clawgate is the transport for the ask branches, never the gate** — measured 2026-08-22
 against live `0.7.98` (deployment pin `harbor.homelab.lan/library/clawgate:0.7.98` matches

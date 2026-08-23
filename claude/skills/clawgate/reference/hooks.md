@@ -124,7 +124,7 @@ worse, not better — and this hook is not that change.
 
 | trigger | reaches the phone? |
 |---|---|
-| Out of scope | **No** — semantic, produces no `PermissionRequest`. File a task instead (`flows/task-authoring.md`; the hook denies a criteria-less create, and criteria you derived cap the result at `ready_for_review`). |
+| Out of scope | **No** — semantic, produces no `PermissionRequest`. File a task instead (`flows/task-authoring.md` — note the criteria-less-create denial comes from a devrc PreToolUse hook, `clawgate-task-interview-guard.py`, NOT this one; and an agent caps at `ready_for_review` regardless of criteria, `taskstatus.go:79-81`). |
 | Fork | **No.** A design fork raises no `PermissionRequest` at all; and even when one does surface, the return channel is binary — see the 🔴 above. Never route a Fork here. |
 | Outward-facing / irreversible | **Partially** — an allowlisted command never prompts, so it never reaches the phone at all. |
 | Named hazard | **No, and must not** — a named hazard's response is stage-it or hand-it-over, never solicit approval. |
