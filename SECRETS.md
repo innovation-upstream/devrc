@@ -121,6 +121,35 @@ rehearsal is a `--mirror` clone for exactly this reason. If the scope carried
 non-branch refs, restore with `git clone --mirror restore.bundle <scope>.git`
 instead — or check with `git bundle list-heads restore.bundle` first.
 
+**Rehearsing it, without doing any of the above by hand** —
+`scripts/analyze-service-index/restore-verify.py` runs that whole path for every
+scope and reports what it proved:
+
+```sh
+# every scope of THIS host, straight from the bucket (read-only throughout)
+KUBECONFIG=$KC_HOMELAB nix-shell -p 'python3.withPackages(p:[p.minio])' age --run \
+  'python3 scripts/analyze-service-index/restore-verify.py'
+
+KUBECONFIG=$KC_HOMELAB … restore-verify.py --host <other-host-label>   # the laptop's
+… restore-verify.py --from-dir ./objects        # artifacts already fetched, offline
+… restore-verify.py --print-plan                # what it would do; writes nothing
+```
+
+It downloads → `age -d` → **`git clone --mirror`** → `git fsck`, then checks the
+restored history against the live scope: every restored commit must still exist
+there and every restored tip must be an **ancestor of** the live tip (never an
+equality — the store advances hourly, and an equality check would be a
+permanently-red gate). It reports the lag in commits, fails on an artifact older
+than `--max-lag-days`, and prints `NOT CROSS-CHECKED` — never the word used for
+a verified scope — when there is no live scope to compare against.
+
+🔴 **It never runs `git bundle verify`, and neither should you.** Measured: a
+bundle with one byte flipped mid-packfile passes it at **rc=0** printing *"The
+bundle records a complete history."*, while a clone of the same bundle dies at
+rc=128 with `error: index-pack died`. `bundle verify` reads the header and the
+prerequisites; it does not walk the pack. The only evidence a backup is
+restorable is having restored it.
+
 ---
 
 ## Kubeconfigs (`$KC_*` handles from `nix/programs/zsh/default.nix`)

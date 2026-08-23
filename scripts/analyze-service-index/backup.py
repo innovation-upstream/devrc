@@ -953,6 +953,13 @@ def print_plan(store: Path, bucket: str, keep: int) -> None:
     print("verify:    bundle verify, then a RESTORE REHEARSAL (bare clone + ref")
     print("           comparison) — `git bundle verify` alone passes a corrupted")
     print("           bundle at rc=0; then a read-back of size/etag after upload")
+    # 🔴 Every check above is UPSTREAM of encryption and upload. Say so, and say
+    # what closes the other half — a reader deciding whether these backups are
+    # trustworthy stops at this output, and "verified" here means "the bundle I
+    # built restores", never "the object in the bucket does".
+    print("after:     everything above happens BEFORE encryption and upload.")
+    print("           The artifact AS STORED is verified by a separate run of")
+    print("           scripts/analyze-service-index/restore-verify.py")
     identity = resolve_identity()
     print(f"identity:  {identity} ({'present' if identity.is_file() else 'MISSING'})")
     if not store.exists():
