@@ -127,13 +127,39 @@ TEXT_CHARS = 4000
 UNIDENTIFIED = object()
 
 
-def latest_reply_by(comments, my_id):
-    """Formatted date of the newest comment authored by `my_id`, or None if there is none.
+def _epoch_ms(value):
+    """ClickUp's raw millisecond timestamp as an int, or None if it cannot be read.
 
-    The loop below drops every comment of mine, which is right for a report about what
-    OTHER people said — and it is exactly why the downstream "nobody has answered" flag
-    was blind: the evidence that would refute it is removed before the flag ever runs.
-    This carries the one fact across that seam.
+    Tolerant of the string form because that is what the API returns (`"1755800000000"`).
+    The CONSUMER's parse is deliberately stricter — see `_ms` in check-addressed.py — because
+    it reads a field this file wrote, where anything but an int means a drifted producer.
+    """
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        return None
+
+
+def latest_reply_ts_by(comments, my_id):
+    """Raw epoch-ms of the newest comment authored by `my_id`.
+
+    Three return values, and the third is the point:
+      * an int — my newest reply,
+      * `None` — I looked at every comment and none is mine ("you never replied"),
+      * `UNIDENTIFIED` — one of MY comments carries a date this function cannot read, so
+        which of my comments is newest is UNKNOWABLE.
+
+    🔴 That third case used to `continue`, and it restored the exact false positive round 6
+    fixed. An unreadable date on my NEWEST comment made the loop skip it and return either
+    an OLDER reply of mine or `None` — and `None` is the POSITIVE claim "I looked; you
+    never replied", so the waiting flag says "nobody has answered" about a ticket that was
+    answered. `UNIDENTIFIED`'s own comment above states that property; this is that
+    property defeated on a different input, which is why the sentinel is reused here rather
+    than a second, weaker signal being invented.
+
+    It is deliberately ANY of my comments, not "the newest one": an unreadable date has no
+    position in the ranking, so there is no way to establish that it is not the newest. The
+    conservative reading — we cannot rank my comments — is the only one that is true.
 
     Ranked on the raw epoch-ms, never on the formatted string: `format_date` falls back to
     `str(ts_ms)` for an unparseable value, so a max() over formatted dates can rank garbage
@@ -143,16 +169,40 @@ def latest_reply_by(comments, my_id):
     for c in comments:
         if str(c.get("user", {}).get("id", "")) != my_id:
             continue
-        try:
-            ts = int(c.get("date", ""))
-        except (ValueError, TypeError):
-            continue
+        ts = _epoch_ms(c.get("date", ""))
+        if ts is None:
+            return UNIDENTIFIED
         if best is None or ts > best:
             best = ts
-    return format_date(best) if best is not None else None
+    return best
 
 
-def build_record(tid, tname, task, comment, text, my_latest_reply):
+def _formatted_reply(ts):
+    """Display form of `latest_reply_ts_by`'s answer, passing both non-int states through.
+
+    One function rather than two parallel expressions: `_collect` needs the raw ms AND the
+    formatted string for the same reply, and deriving them at two sites is how they drift
+    apart. `format_date(UNIDENTIFIED)` would return the repr of an `object()` — a string,
+    truthy, and indistinguishable downstream from a real date.
+    """
+    if ts is None or ts is UNIDENTIFIED:
+        return ts
+    return format_date(ts)
+
+
+def latest_reply_by(comments, my_id):
+    """Formatted date of my newest comment, `None` if I never replied, `UNIDENTIFIED` if
+    my comments cannot be ranked. See `latest_reply_ts_by` for why the third state exists.
+
+    The loop there drops every comment that is not mine — the mirror of the filter in
+    `_collect`, which is right for a report about what OTHER people said and is exactly why
+    the downstream "nobody has answered" flag was blind: the evidence that would refute it
+    is removed before the flag ever runs. This carries the one fact across that seam.
+    """
+    return _formatted_reply(latest_reply_ts_by(comments, my_id))
+
+
+def build_record(tid, tname, task, comment, text, my_latest_reply, my_latest_reply_ms):
     """One comment row.
 
     A function, not an inline dict, so the `snippet`/`text` split is pinned by a test. Both
@@ -163,7 +213,10 @@ def build_record(tid, tname, task, comment, text, my_latest_reply):
 
     `my_latest_reply` is a REQUIRED positional argument rather than a defaulted one. A
     default would let a caller omit it and get the pre-fix behaviour silently; this way the
-    omission is a TypeError at the only call site.
+    omission is a TypeError at the only call site. `my_latest_reply_ms` is required for the
+    same reason and it is the stronger case: omitting it degrades silently to the
+    minute-resolution comparison, which is the pre-change behaviour and looks like a
+    working tool.
     """
     rec = {
         "task_id": tid,
@@ -178,6 +231,20 @@ def build_record(tid, tname, task, comment, text, my_latest_reply):
         "snippet": text[:SNIPPET_CHARS],
         "text": text[:TEXT_CHARS],
     }
+    # 🔴 The RAW millisecond, beside the display string it was formatted from — because
+    # `format_date` throws the seconds away and the consumer's "have I already answered
+    # this?" comparison then runs at MINUTE resolution, where a reply written 20 seconds
+    # BEFORE the question compares EQUAL to it. At minute resolution "equal counts as
+    # answered" is a judgement call that has been argued both ways; carrying the ms makes it
+    # a question of fact instead, and a tie a real tie.
+    #
+    # Emitted only when it PARSES. An unreadable date must not become a `0` (1970, so every
+    # reply looks newer) nor a `None` (a JSON null the consumer would have to special-case
+    # anyway) — it is ABSENT, and the consumer falls back to the age comparison it already
+    # had. Absent-vs-present is the same discipline `my_latest_reply` gets below.
+    date_ms = _epoch_ms(comment.get("date", ""))
+    if date_ms is not None:
+        rec["date_ms"] = date_ms
     # Present-and-null ("I looked; you never replied") is a different fact from absent
     # ("nobody could look"). The consumer branches on which, so the key is emitted for every
     # value EXCEPT the UNIDENTIFIED sentinel, whose whole purpose is to reach the absent
@@ -185,6 +252,14 @@ def build_record(tid, tname, task, comment, text, my_latest_reply):
     # confident false negative.
     if my_latest_reply is not UNIDENTIFIED:
         rec["my_latest_reply"] = my_latest_reply
+        # Nested, so the ms can never appear without the formatted date it refines: one is
+        # EVIDENCE (did the producer look?), the other is only PRECISION. The evidence
+        # distinction lives in `my_latest_reply` alone and is deliberately NOT duplicated
+        # here — two fields carrying the same fact is two chances to disagree — so this key
+        # is simply absent for "no reply" and for "unreadable", and its absence is never
+        # read as a claim about anything.
+        if isinstance(my_latest_reply_ms, int) and not isinstance(my_latest_reply_ms, bool):
+            rec["my_latest_reply_ms"] = my_latest_reply_ms
     return rec
 
 
@@ -210,9 +285,12 @@ def _collect(limit, fast, as_json):
         # see UNIDENTIFIED. Loud on stderr too: a report whose author id is missing cannot
         # tell your comments from anyone else's, and silence there reads as a normal run.
         if my_id:
-            my_reply = latest_reply_by(comments, my_id)
+            my_reply_ts = latest_reply_ts_by(comments, my_id)
         else:
-            my_reply = UNIDENTIFIED
+            my_reply_ts = UNIDENTIFIED
+        # The raw ms and its display string come from ONE lookup, so they cannot describe
+        # two different comments.
+        my_reply = _formatted_reply(my_reply_ts)
         for c in comments:
             user_id = str(c.get("user", {}).get("id", ""))
             if user_id == my_id:
@@ -220,7 +298,8 @@ def _collect(limit, fast, as_json):
             text = extract_text(c)
             if not text:
                 continue
-            results.append(build_record(tid, tname, task, c, text, my_reply))
+            results.append(
+                build_record(tid, tname, task, c, text, my_reply, my_reply_ts))
 
     # Sort newest first, take top N
     results.sort(key=lambda x: x["date"], reverse=True)

@@ -347,7 +347,25 @@ def _comment_age_days(date_str, now):
 
     `recent-comments.py` formats these itself, so an unreadable one means that formatter
     changed — which must not silently turn into "not recent". None is propagated to the
-    caller and surfaced, never swallowed.
+    caller rather than coerced.
+
+    🔴 THE ROUND-5 GUARANTEE WAS NARROWED, DELIBERATELY, AND THIS SENTENCE IS THE RECORD OF
+    IT. It used to read "surfaced, never swallowed", and that is no longer true in one case:
+    when the display date is unreadable but `date_ms` dates the comment PAST the recency
+    bound, the record is now SILENT rather than flagged. Nobody decided that on purpose —
+    it fell out of `bound_age` — so it is decided here, in favour of the new behaviour:
+
+      * the guarantee's purpose was that a formatter drift must not silently turn a RECENT
+        comment into a stale one. When `date_ms` is readable the age is not unknown, and
+        surfacing "age unknown" over a comment we can date to the millisecond would be a
+        false claim of ignorance — the mirror of the defect the guarantee was written for.
+      * when NO field can date it, the flag still fires and still says the date was
+        unreadable. That is the case the guarantee was actually about, and it is intact.
+
+    ⚠️ The residual gap, stated rather than papered over: in that one narrowed case the
+    formatter drift itself now goes unannounced. It is not re-added to the decision block
+    because it would be an unbounded line about tool health in the one block whose value
+    depends on being short — the same trade round 5 made for the flag itself.
     """
     try:
         dt = datetime.strptime((date_str or "").strip(), COMMENT_DATE_FMT).replace(
@@ -357,8 +375,129 @@ def _comment_age_days(date_str, now):
     return (now - dt).total_seconds() / 86400.0
 
 
-def _waiting_on_a_human(r, now):
-    """A colleague asked something recently and NO work exists anywhere. Returns a flag or None.
+def _ms(value):
+    """A raw epoch-ms field as an int, or None if it is not one.
+
+    STRICTER than the producer's own `_epoch_ms`, on purpose: these two keys are written by
+    `recent-comments.py` as ints and by nothing else, so a string here means a producer that
+    drifted and the right answer is to fall back to the age comparison rather than to guess.
+
+    `bool` is excluded explicitly because `isinstance(True, int)` is True in Python and a
+    JSON `true` would otherwise compare as 1 ms — 1970 — making every reply look newer than
+    every question. ⚠️ BY-CONSTRUCTION, not an observed input: no producer writes a bool
+    here. It is kept because the failure it prevents is silent and wrong rather than loud,
+    and it is pinned directly at this function rather than through a record fixture.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
+
+
+def _age_days_from_ms(ms, now):
+    """Age in days computed from a raw epoch-ms, or None if it is absent or out of range.
+
+    🔴 This exists so the RECENCY BOUND cannot go dead when the display date is unreadable.
+    The bound reads `_comment_age_days`, which parses the FORMATTED string — and the producer's
+    `format_date` falls back to `str(ts_ms)` for anything `datetime.fromtimestamp` refuses,
+    which includes an out-of-range epoch. 🔴 The mechanism is that `_epoch_ms` NEVER RANGE-CHECKS
+    at all: it is `int()` plus an except, so it accepts any integer, while `fromtimestamp`
+    raises **`ValueError`** ("year … is out of range") on the same value. (An earlier version of
+    this sentence blamed `OSError`, which `_epoch_ms` supposedly did not catch — wrong on both
+    halves: the exception is `ValueError`, and `_epoch_ms` catches `ValueError` too. The
+    `except` clause below is correctly wide; only the explanation was false, which is the worse
+    kind of error because it sends the next reader after the wrong divergence.) So a record
+    could carry a perfectly good `date_ms` beside an unformattable `date`: age unknown, bound
+    skipped, and the ms path still deciding the verdict. Measured while porting this round — a
+    2019 ticket printed a suppression note with no bound at all, permanently, because an
+    answered ticket never changes an input.
+
+    The exotic case matters less than the systemic one: if `format_date` ever drifts, the
+    bound goes dead for EVERY record while the ms path keeps deciding. A bound that silently
+    stops bounding is the failure this whole block was designed against.
+    """
+    if ms is None:
+        return None
+    try:
+        dt = datetime.fromtimestamp(ms / 1000, tz=timezone.utc)
+    # `TypeError` because `ms / 1000` is the first thing that touches the value: drop the
+    # `_ms()` call at the caller — a one-token edit that survived the suite — and a STRING
+    # `date_ms` from a drifted producer reaches this line and raises an exception that was
+    # not in this tuple, crashing the whole report. A robust parser is the right place for
+    # that, not a second type check at the call site: one rule, one place.
+    except (ValueError, TypeError, OSError, OverflowError):
+        return None
+    return (now - dt).total_seconds() / 86400.0
+
+
+# The waiting flag's two outcomes. `_waiting_verdict` returns one of these with its line, so
+# the report can put them in DIFFERENT blocks: WAITING is an instruction to act, ANSWERED is
+# a note about a check that ran and found nothing to do. Merging them would put a line that
+# needs no action into the one block the reader is told to act on.
+WAITING, ANSWERED = "waiting", "answered"
+
+# 🔴 ClickUp has NO bot identity. Measured independently 2026-08-22 in a sibling tool
+# implementing this same predicate: every comment posted through a `pk_` personal token comes
+# back authored as the token's OWNER, whoever actually typed it. So "the owner answered" and
+# "a machine answered on the owner's behalf" are the SAME observable — there is no field that
+# separates them, and no amount of care in this file can recover one.
+#
+# That matters here specifically because an agent-posted comment sets `my_latest_reply` and
+# therefore SUPPRESSES this flag. Suppression printed nothing at all, so a genuinely-waiting
+# colleague was dropped with no trace and the caveat had nowhere to live.
+#
+# Printed ONCE, as the block's first line, not per note. It is 199 characters and repeating it
+# on every line put ~11 KB of identical no-action text in a `--limit 20` report — and this
+# block's own justification is that VOLUME is how a block stops being read, so repeating the
+# caveat to make sure it is seen is self-defeating. Each note carries only its own consequence.
+BOT_IDENTITY_CAVEAT = (
+    "ClickUp has NO bot identity — every comment posted through the `pk_` token comes back "
+    "authored as you, whoever typed it — so \"you answered\" and \"an agent answered as you\" "
+    "are the same observable, and EVERY line below rests on that.")
+
+
+def _reply_answers_the_comment(nc, now):
+    """Did my newest reply land at or after the colleague's comment? True / False / None.
+
+    None means the question is UNDECIDABLE from this record — a malformed value on either
+    side — and the caller must not read that as either answer. Round 6's rule holds: never
+    silently drop a waiting human because a date would not parse.
+
+    🔴 TWO resolutions, and the raw one wins when it is available on BOTH sides. `date_ms`
+    and `my_latest_reply_ms` are the epoch-ms `recent-comments.py` formatted the display
+    dates FROM; the display dates are minute-resolution, so a reply written 20 seconds
+    BEFORE the question renders identical to it and the minute comparison calls it an
+    answer. That boundary was a judgement call argued in both directions (round 6 shipped "a
+    tie counts as answered" because the minute rendering makes ties common; a parallel review
+    argued the opposite from the same evidence). Comparing the ms retires the argument: the
+    tie is now a real tie — two comments in the same MILLISECOND — and the sub-minute cases
+    decide themselves on the fact.
+    `>=` rather than `>` is kept for that genuine tie, so this change can only ever move
+    sub-minute cases; it cannot flip the shape round 6 measured.
+
+    The age fallback is UNCHANGED and is not a legacy path: a record from a producer that
+    predates the ms fields, or one whose date would not parse, must still get the round-6
+    behaviour rather than losing suppression entirely — which would resurrect D12's false
+    positive on every such record.
+    """
+    mine_ms, theirs_ms = _ms(nc.get("my_latest_reply_ms")), _ms(nc.get("date_ms"))
+    if mine_ms is not None and theirs_ms is not None:
+        return mine_ms >= theirs_ms
+    mine = _comment_age_days(nc.get("my_latest_reply"), now)
+    theirs = _comment_age_days(nc.get("date"), now)
+    if mine is None or theirs is None:
+        return None
+    # Smaller age = more recent.
+    return mine <= theirs
+
+
+def _waiting_verdict(r, now):
+    """A colleague asked something recently and NO work exists anywhere. Returns (kind, line).
+
+    `kind` is WAITING (a human is waiting and nothing exists), ANSWERED (every condition
+    held EXCEPT that a reply of mine already answers it — reported, quietly, in its own
+    block) or None (nothing to say). One function, two outcomes, because the two verdicts
+    share every condition but the last: re-deriving the preconditions in a second function
+    is how a predicate ends up wrong at one of its sites.
 
     This is the highest-signal state the tool can reach and no existing rule produced it:
     nothing "disagrees" — the ticket is open, the transcripts are empty, and they agree.
@@ -405,38 +544,32 @@ def _waiting_on_a_human(r, now):
        `my_latest_reply` is a stale producer that never gathered the fact, so the flag
        fires but says the check did not run — the same treatment an unreadable date gets,
        and the reason it cannot be silently disabled by dropping one dict key.
+
+    🔴 And suppression is REPORTED (ANSWERED), because a suppressed flag printed NOTHING and
+    that is where the bot-identity caveat had to live. ClickUp cannot tell a comment I typed
+    from one an agent posted with my token (`BOT_IDENTITY_CAVEAT`), so condition 4 can be
+    satisfied by a machine — and the silent version of that is a waiting colleague dropped
+    with no trace at all. The note carries the SAME recency bound as the flag, so it cannot
+    become the permanent noise the bound exists to prevent.
     """
     # PRESENT and zero, not `get(..., 0)`. An absent key is a record that never reported a
     # mention count — inferring "no work exists anywhere", the strongest claim this flag
     # makes, from a field that is simply missing is the same mistake as reading a declared
     # field as a code path. Caught by an existing round-2 control whose fixture omits it.
     if r.get("mentions_found") != 0:
-        return None
+        return None, None
     cu = (r.get("clickup_status") or "").lower()
     if cu in DONE_STATUSES:
-        return None
+        return None, None
 
     nc = r.get("newest_comment") or {}
     if not (nc.get("snippet") or "").strip():
-        return None
+        return None, None
     # An ABSENT date and a MALFORMED one are different facts. Absent = no interaction to be
     # recent about, so there is nothing to claim. Malformed = recent-comments.py's own
     # formatter drifted, which must announce itself rather than quietly read as "stale".
     if not (nc.get("date") or "").strip():
-        return None
-
-    # Answered already? Compare instants, not existence. Equal counts as answered: ClickUp
-    # renders to the MINUTE, so a reply written in the same minute as the comment reads as
-    # equal, and a strict `>` would report it unanswered.
-    reply_unreported = "my_latest_reply" not in nc
-    if not reply_unreported:
-        mine = _comment_age_days(nc.get("my_latest_reply"), now)
-        theirs = _comment_age_days(nc.get("date"), now)
-        # Smaller age = more recent. A malformed value on either side falls through to the
-        # flag rather than suppressing it — never silently drop a waiting human because a
-        # date would not parse.
-        if mine is not None and theirs is not None and mine <= theirs:
-            return None
+        return None, None
 
     age = _comment_age_days(nc.get("date"), now)
     # 🔴 The recency bound runs BEFORE any reporting caveat, and the caveats COMPOSE rather
@@ -445,10 +578,66 @@ def _waiting_on_a_human(r, now):
     # backlog comment was flagged forever (the exact unbounded-noise failure the recency bound
     # exists to prevent) and an unreadable date stopped being surfaced. A condition that
     # returns its own string is a condition that silently owns every condition after it.
-    if age is not None and age > UNANSWERED_COMMENT_DAYS:
-        return None
+    #
+    # It now also runs before the ANSWERED branch, which is what bounds the suppression note.
+    # Moving it earlier changed no flag outcome AT THE TIME — a stale comment returned None at
+    # this line instead of at the answered branch, the same None — but a note that outlived
+    # the flag would be exactly the unbounded block the bound was chosen against.
+    #
+    # ⚠️ That "changes NO flag outcome" claim is no longer true and the correction is kept
+    # here rather than the sentence quietly deleted: `bound_age` (below) made this bound
+    # reachable on records whose display date is unreadable, and measured base-vs-HEAD it now
+    # changes exactly one — an unformattable `date` beside a valid 90-day-old `date_ms`
+    # printed a WAITING flag before and is SILENT now. That is the narrowing decided in
+    # `_comment_age_days`' docstring, and it is pinned by a corpus case rather than argued.
+    #
+    # 🔴 TWO ages, deliberately. `age` is what the report DISPLAYS and must stay `None` when
+    # the `date` field itself is unreadable — that is a fact about the producer's formatter and
+    # the head says so. `bound_age` is what the bound DECIDES on, and it falls back to the raw
+    # ms, because the ms path below will happily decide the verdict from `date_ms` while `age`
+    # is None: measured while porting, a 2019 ticket printed an unbounded suppression note.
+    # A decision and a display are different jobs and reading one field for both is what let
+    # the bound go dead. See `_age_days_from_ms`.
+    bound_age = age if age is not None else _age_days_from_ms(_ms(nc.get("date_ms")), now)
+    if bound_age is not None and bound_age > UNANSWERED_COMMENT_DAYS:
+        return None, None
 
     who = nc.get("author") or "someone"
+
+    # Answered already? Compare instants, not existence — and at millisecond resolution when
+    # the producer reported it. A malformed value on either side (`None` here) falls through
+    # to the flag rather than suppressing it: never silently drop a waiting human because a
+    # date would not parse.
+    reply_unreported = "my_latest_reply" not in nc
+    # 🔴 `bound_age is not None` is a condition of the NOTE, not of the flag, and the asymmetry
+    # is the point. A note is a "no action needed" line: if its recency bound could not be
+    # evaluated at all it can never expire, and a permanent no-action line is precisely the
+    # noise the bound exists to prevent — so the record falls through to the FLAG instead,
+    # which surfaces the unreadable date rather than silently suppressing a colleague.
+    #
+    # This is the tail of the bound fix above, and without it the fix is only half applied:
+    # `_age_days_from_ms` returning None (an out-of-range `date_ms`, which `_epoch_ms` accepts
+    # and `format_date` rejects) left the note unbounded by the same mechanism one layer down.
+    # It is also what makes that None DISTINGUISHABLE — with the note unguarded, returning
+    # `None` and returning `0` from that function produce identical output, so the honest
+    # value was doing no work and a mutant swapping it survived.
+    if (not reply_unreported and bound_age is not None
+            and _reply_answers_the_comment(nc, now) is True):
+        when = nc.get("my_latest_reply")
+        seen = f"{age:.0f}d ago" if age is not None else f"at {nc.get('date')!r} (unreadable)"
+        # 🔴 The line claims only what THIS check did. It used to add "nothing was printed
+        # above about this ticket, and `mentions_found` is 0 so no other rule covers it
+        # either" — false in four reproduced shapes (an unknown ClickUp status, a
+        # RESOLVED-reading comment, a keep-open veto, an open cited PR), each of which puts a
+        # line about the SAME ticket directly above this one. And the reason given was a
+        # non-sequitur on top of that: not one of those four rules reads `mentions_found`.
+        # Whether anything else covers the ticket is a fact `suppressed_notes` can COMPUTE, so
+        # it appends that sentence rather than this one asserting it.
+        return ANSWERED, (
+            f"{r['task_id']}: @{who} commented {seen} and a reply from you at {when} is not "
+            f"older, so the WAITING flag is SUPPRESSED. If that reply was an agent's, @{who} "
+            f"is still waiting for a human — read the thread before treating this as handled.")
+
     head = (f"{r['task_id']}: @{who} is WAITING — the ticket is `{cu or 'unknown status'}`, "
             f"and the task ID appears in NO transcript, so no work exists anywhere.")
     if age is None:
@@ -462,7 +651,100 @@ def _waiting_on_a_human(r, now):
         head += (" NOTE: your own replies were not reported by recent-comments.py, so whether "
                  "you already answered could not be checked — read the thread before treating "
                  "this as unanswered.")
-    return head
+    return WAITING, head
+
+
+def _waiting_on_a_human(r, now):
+    """The WAITING flag alone, or None. A thin view over `_waiting_verdict`.
+
+    Kept as its own name because it is what `disagreements` appends to the act-on-this block
+    and what four rounds of tests and mutants address. The ANSWERED verdict deliberately does
+    NOT come out of here: it would land in "Needs a decision", which is the one block a
+    reader is told to act on, and a line saying "no action needed" belongs somewhere else.
+    """
+    kind, line = _waiting_verdict(r, now)
+    return line if kind == WAITING else None
+
+
+def suppressed_notes(results, now=None):
+    """One line per task whose WAITING flag was suppressed by a reply of mine.
+
+    A SIBLING of `disagreements`, not part of it — its lines report a check that ran and
+    found nothing to do, which is a different kind of claim from a disagreement and belongs
+    in a different block of the report. Both call `_waiting_verdict`, so the preconditions
+    exist once.
+
+    🔴 It exists because the alternative is silence, and silence is what this whole skill
+    polices. A suppressed flag printed NOTHING, so the ticket vanished from the report
+    entirely — no line to carry `BOT_IDENTITY_CAVEAT`, and an agent-posted reply (which
+    ClickUp reports as mine, indistinguishably) dropped a genuinely-waiting colleague with
+    no trace. Bounded by the same recency window as the flag itself, inside
+    `_waiting_verdict`, so it cannot become permanent noise.
+
+    🔴 Each line ends with a COMPUTED statement of whether anything else in "Needs a decision"
+    names the same ticket, never an asserted one. The first version asserted that nothing did,
+    and four shapes were reproduced where a line about the same ticket sits directly above it —
+    an unknown ClickUp status, a RESOLVED-reading comment, a keep-open veto, an open cited PR.
+    Running `disagreements` on the single record is what makes the sentence true: the waiting
+    flag is suppressed for these records by definition, so whatever comes back is another
+    rule's line. One predicate, asked rather than assumed. 🔴 `[r]` and not `results` — the
+    sentence is about THIS ticket, and a mutant widening it to the whole report survived a
+    green suite because every fixture written for the sentence passed a single-record list.
+
+    The `BOT_IDENTITY_CAVEAT` is NOT repeated per line — `report_blocks` prints it once as the
+    block's first line. See the constant for why repeating it defeated its own purpose.
+    """
+    now = now or datetime.now(timezone.utc)
+    out = []
+    for r in results:
+        kind, line = _waiting_verdict(r, now)
+        if kind != ANSWERED:
+            continue
+        others = disagreements([r], now)
+        if others:
+            line += (" ⚠️  'Needs a decision' above ALSO carries a line about this ticket — "
+                     "this note is only about the waiting check.")
+        else:
+            line += (" No other flag names this ticket, so nothing else in this report is "
+                     "asking you to look at it.")
+        out.append(line)
+    return out
+
+
+DECISION_HEADING = "## Needs a decision"
+ANSWERED_HEADING = "## Answered already — no action, but check who answered"
+
+
+def report_blocks(results, now=None):
+    """The report's trailing blocks, as (heading, lines) in print order. Empty ones omitted.
+
+    Extracted from `main()` so the WIRING is testable. Both producers below are correct in
+    isolation and pinned in isolation, and a producer `main()` never calls is inert with a
+    fully green suite — this skill's own headline defect class, twice over already. 🔴 That
+    extraction is NOT the test: measured, replacing `main()`'s whole print loop with `pass`
+    left the suite green, so `test_main_actually_PRINTS_both_blocks_end_to_end` drives
+    `main()` and asserts on STDOUT. A function extracted to make a seam testable and then not
+    tested THROUGH has moved the seam rather than closed it.
+
+    🔴 TWO blocks, not one list. The suppression notes report a flag that DID NOT fire and
+    ask for no action; "Needs a decision" is the one block the reader is told to act on, and
+    diluting it is how a block stops being read. That reasoning is the same one that bounded
+    the waiting flag by recency in the first place.
+    """
+    now = now or datetime.now(timezone.utc)
+    blocks = []
+    flags = disagreements(results, now)
+    if flags:
+        blocks.append((DECISION_HEADING, [f"⚠️  {f}" for f in flags]))
+    notes = suppressed_notes(results, now)
+    if notes:
+        # The caveat leads the block ONCE. It applies to every line under it, it is 199
+        # characters, and repeating it per line put ~11 KB of identical text in a `--limit 20`
+        # report — in the one block whose whole justification is that volume is how a block
+        # stops being read.
+        blocks.append((ANSWERED_HEADING,
+                       [f"🔴 {BOT_IDENTITY_CAVEAT}"] + [f"ℹ️  {n}" for n in notes]))
+    return blocks
 
 
 def disagreements(results, now=None):
@@ -631,6 +913,15 @@ def build_newest_comment(meta):
     # must tell them apart — one is evidence, the other is a gap to announce.
     if "my_latest_reply" in meta:
         nc["my_latest_reply"] = meta["my_latest_reply"]
+    # The raw epoch-ms the two display dates were formatted from, carried across the same
+    # hand-off and by the same rule. Absent here means the producer could not read that date
+    # (or predates the fields), and `_reply_answers_the_comment` falls back to the
+    # minute-resolution ages — so DROPPING either key silently reverts the precision fix and
+    # nothing about the report looks different. Both are pinned by a test for that reason,
+    # the same way `text` and `my_latest_reply` are.
+    for key in ("date_ms", "my_latest_reply_ms"):
+        if key in meta:
+            nc[key] = meta[key]
     return nc
 
 
@@ -834,11 +1125,10 @@ def main():
                       if r["status"] in ("unclear", "no_sessions_found", "no_mentions_found"))
         print(f"## Summary: {addressed} addressed, {partial} partial, {open_count} open, {unclear} unclear")
 
-        flags = disagreements(results)
-        if flags:
-            print("\n## Needs a decision\n")
-            for f in flags:
-                print(f"⚠️  {f}")
+        for heading, lines in report_blocks(results):
+            print(f"\n{heading}\n")
+            for line in lines:
+                print(line)
 
 
 if __name__ == "__main__":
