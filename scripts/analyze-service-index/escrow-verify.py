@@ -72,12 +72,20 @@ send the operator hunting for corruption that is not there.
   * `bw`'s stdout is NEVER quoted in an error message. Every subprocess result
     here is handled as redacted by construction — `_run()` has no path that
     interpolates output into an exception.
-  * the throwaway identity written by `--decrypt-check` is 0600 inside a 0700
-    directory, is overwritten and unlinked in a `finally` that covers success,
-    every early return, every refusal and every unexpected exception, and its
-    directory is removed after it. The overwrite is best-effort — on a
-    journalling or copy-on-write filesystem it is not a guarantee and this file
-    does not claim it is; the UNLINK is the part that is tested.
+  * the throwaway identity written by `--decrypt-check` is created FRESH at
+    0600 inside a 0700 directory — `O_EXCL|O_NOFOLLOW` plus an `fchmod` on the
+    fd, because `O_CREAT|O_TRUNC` applies its mode only when it creates and
+    follows a symlink otherwise (measured: a pre-existing 0666 file stayed
+    0666, and a symlink got the key written THROUGH it to a 0644 file outside
+    the 0700 dir). It is overwritten and unlinked in a `finally` that covers
+    success, every early return, every refusal and every unexpected exception,
+    and — since the signal handlers below make SIGTERM/SIGINT/SIGHUP unwind
+    rather than kill — the timer-driven stop path too. The overwrite is
+    best-effort: on a journalling or copy-on-write filesystem it is not a
+    guarantee and this file does not claim it is; the UNLINK is what is tested.
+    ⚠ The WORK DIRECTORY is removed only when this script created it. Under an
+    explicit `--work-dir` the operator's directory is left in place — emptied,
+    not deleted.
 
 🔴 THE ENDPOINT IS NEVER HARDCODED. devrc is a public repo. The server is read
 from `bw config server` at run time. It is cross-checked against the
@@ -85,6 +93,10 @@ authenticated session's own `serverUrl` (a repointed CLI with a stale session is
 a real state this vault has been in), and against `--expect-server` when the
 operator pins one. With no pin the configured server is reported as INFORMATION
 and the run says the pin was absent, rather than implying it checked.
+⚠ The session cross-check CANNOT ALWAYS BE MADE — `bw status` may report
+`serverUrl: null`. When that happens the verdict says `session cross-check NOT
+COMPARED (<reason>)`. It is never silently skipped behind a sentence claiming it
+matched, which is exactly what the first version did.
 
 🔴 THE MASTER PASSWORD CANNOT BE AUTOMATED, so this never tries. `bw status` is
 the authority; a vault that is not `unlocked` ends the run with a distinct code
@@ -103,10 +115,12 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import importlib.util
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -187,6 +201,12 @@ EXIT_CODES: dict[str, int] = {
     "ITEM-AMBIGUOUS": 18,
     "ITEM-WRONG-TYPE": 19,
     "NOTE-EMPTY": 20,
+    # 🔴 SEPARATE FROM `NOTE-EMPTY`, and the split matters. `NOTE-EMPTY` says
+    # "the escrow was emptied" and sends the operator to re-escrow. If `bw` ever
+    # OMITS the field rather than returning "", that is a CLI/schema surprise and
+    # the note may be perfectly intact — re-escrowing on that advice would
+    # overwrite a good copy on the strength of a parsing accident.
+    "NOTE-MISSING": 32,
     # the comparison
     "BYTES-DIFFER-TRAILING-NEWLINE": 21,
     "BYTES-DIFFER-MATERIALLY": 22,
@@ -194,8 +214,29 @@ EXIT_CODES: dict[str, int] = {
     "IDENTITY-MISSING": 23,
     "IDENTITY-EMPTY": 24,
     # --decrypt-check
-    "DECRYPT-FAILED": 25,
-    "RESTORE-FAILED": 26,
+    #
+    # 🔴 FIVE OUTCOMES, NOT TWO, AND THE SPLIT IS DERIVED FROM AN OBSERVED PHASE
+    # rather than from the absence of a substring in somebody else's message.
+    # The first version had only DECRYPT-FAILED/RESTORE-FAILED, chosen by
+    # `"DECRYPT FAILED" in str(exc)`, and it was WRONG in three measured cases:
+    #
+    #   * `age` not on PATH          -> RESTORE-FAILED, asserting the escrowed
+    #                                   key "works" and the ARTIFACT is at fault;
+    #   * a zero-BYTE object         -> RESTORE-FAILED, asserting bytes
+    #                                   "DECRYPTED" on a path where the decrypt
+    #                                   step was never reached at all;
+    #   * a valid encryption of NOTHING -> DECRYPT-FAILED, "not a working
+    #                                   identity" — for a key that worked
+    #                                   perfectly. That verdict gets a good
+    #                                   disaster-recovery key ROTATED.
+    #
+    # Two of the three blame the escrow for a fault that is not the escrow's, in
+    # the direction that makes someone act destructively.
+    "AGE-MISSING": 29,          # precondition: the tool is not installed
+    "ARTIFACT-UNREADABLE": 30,  # the pipeline failed BEFORE decrypt was reached
+    "DECRYPT-FAILED": 25,       # age RAN and REFUSED: the escrowed key is wrong
+    "ARTIFACT-EMPTY": 31,       # age SUCCEEDED on nothing: the key is FINE
+    "RESTORE-FAILED": 26,       # decrypt returned: the key WORKS, data is bad
     "STORE-UNREACHABLE": 27,
     "NO-ARTIFACT": 28,
 }
@@ -390,7 +431,19 @@ def _shred(path: Path) -> None:
     milliseconds inside a 0700 directory under the process's own temp root.
     Claiming "securely erased" would be a comment the code cannot support, which
     is the failure this subsystem's rules are most emphatic about.
+
+    🔴 A SYMLINK IS UNLINKED, NEVER FOLLOWED. `open(path, "r+b")` follows one,
+    so the previous version would ZERO THE TARGET and then remove only the link
+    — a truncate-in-place primitive aimed at any path the user can write, left
+    behind as a zero-filled decoy. Measured via `--work-dir`. The link itself is
+    the only thing this function may destroy.
     """
+    try:
+        if path.is_symlink():
+            path.unlink(missing_ok=True)
+            return
+    except OSError:
+        pass
     try:
         size = path.stat().st_size
         with open(path, "r+b") as fh:
@@ -403,6 +456,35 @@ def _shred(path: Path) -> None:
         path.unlink(missing_ok=True)
     except OSError:
         pass
+
+
+def _create_private_file(path: Path) -> int:
+    """Open `path` as a FRESH 0600 regular file. Returns the fd.
+
+    🔴 `O_CREAT|O_TRUNC` APPLIES THE MODE ONLY ON CREATE, and follows a symlink.
+    That made the module's "0600 inside a 0700 directory" claim true only on the
+    path where nothing was there already — and `--work-dir` is precisely the
+    option that hands this a directory somebody else populated. MEASURED:
+
+      * a pre-existing 0666 file RECEIVED the escrowed key and STAYED 0666;
+      * a pre-existing SYMLINK had the key written THROUGH it to a 0644 file
+        OUTSIDE the 0700 directory.
+
+    So: unlink whatever is there (`_shred` above refuses to follow a link),
+    then create with `O_EXCL|O_NOFOLLOW` so the open FAILS rather than reusing
+    or following anything, and `fchmod` the fd we actually hold — the umask can
+    still mask the `os.open` mode argument, and fchmod cannot be redirected.
+    """
+    _shred(path)
+    fd = os.open(path,
+                 os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                 _FILE_MODE)
+    try:
+        os.fchmod(fd, _FILE_MODE)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
 
 
 # --------------------------------------------------------------------------- #
@@ -442,6 +524,64 @@ def _rv():
     return mod
 
 
+# 🔴 WHAT THE PROBE BELOW OBSERVES, AND WHY IT IS SOUND — MEASURED, age v1.3.1.
+# `age --decrypt --output PLAIN` was run across every outcome that matters:
+#
+#   wrong key, real payload      rc=1  PLAIN absent
+#   wrong key, empty payload     rc=1  PLAIN absent
+#   corrupt ciphertext           rc=1  PLAIN absent
+#   right key, EMPTY payload     rc=0  PLAIN present, size 0
+#   right key, real payload      rc=0  PLAIN present, size 12
+#
+# So the PRESENCE of the output file at the moment `decrypt()` raises separates
+# the two failures that were previously conflated: age REFUSED (no file — the
+# escrowed key is wrong) versus age SUCCEEDED on nothing (file present, empty —
+# the key is FINE and the artifact is an encryption of nothing, which is exactly
+# what restore-verify's own comment at its zero-byte branch says).
+#
+# ⚠ The inference "no file ⇒ age ran and refused" holds ONLY because
+# `decrypt_check` refuses up front when `age` is not on PATH: without that
+# precondition, restore-verify's own age-missing guard raises before touching
+# PLAIN and would be indistinguishable from a refusal. The two halves are one
+# argument; do not remove either alone.
+@contextlib.contextmanager
+def _decrypt_phase_probe(RV):
+    """Observe HOW FAR restore-verify's decrypt step got. Yields a state dict.
+
+    🔴 THIS IS A PROBE, NOT A REIMPLEMENTATION. It calls the real `decrypt()`
+    and adds nothing to it; all it does is record whether the call was reached,
+    whether it returned, and — at the instant it raises, before
+    `verify_artifact`'s own `finally` unlinks the plaintext — whether `age` left
+    an output file behind. Classification is then derived from an OBSERVED
+    PHASE rather than from a substring of a message this module does not own.
+
+    ⚠ It swaps a module global for the duration, so it is not safe against
+    concurrent use of `restore_verify` in the same process. This is a
+    single-shot CLI that owns its own import; the swap is restored in a
+    `finally`.
+    """
+    state = {"reached": False, "returned": False, "plain_present": None}
+    real = RV.decrypt
+
+    def probe(cipher, plain, identity):
+        state["reached"] = True
+        try:
+            real(cipher, plain, identity)
+        except BaseException:
+            try:
+                state["plain_present"] = Path(plain).exists()
+            except OSError:
+                state["plain_present"] = None
+            raise
+        state["returned"] = True
+
+    RV.decrypt = real if real is None else probe
+    try:
+        yield state
+    finally:
+        RV.decrypt = real
+
+
 # --------------------------------------------------------------------------- #
 # verdict
 # --------------------------------------------------------------------------- #
@@ -455,6 +595,10 @@ class EscrowVerdict:
     disk_bytes: int
     classification: str
     identity: Path
+    # None means the CLI's configured server really WAS compared against the
+    # authenticated session's; a string is the reason it could not be. See
+    # `check_server` — a skipped comparison used to be reported as a passing one.
+    server_session_reason: str | None = None
     decrypt_checked: bool = False
     decrypt_scope: str | None = None
     decrypt_key: str | None = None
@@ -465,10 +609,20 @@ class EscrowVerdict:
         head = (f"{PROG}: escrow OK — the Secure Note matches {self.identity} "
                 f"{self.classification} ({self.escrow_bytes} escrowed bytes vs "
                 f"{self.disk_bytes} on disk)")
-        pin = ("server pinned and matched" if self.server_pinned
+        # 🔴 TWO INDEPENDENT FACTS, NEVER MERGED INTO ONE SENTENCE: whether the
+        # operator PINNED a server, and whether the session cross-check could be
+        # made at all. The old line asserted the second unconditionally while
+        # the code skipped it silently.
+        pin = ("server PINNED and matched" if self.server_pinned
                else "server NOT PINNED (--expect-server / ASIB_ESCROW_SERVER "
-                    "unset) — the CLI's configured server matched the session's, "
-                    "which is all that was checked")
+                    "unset)")
+        if self.server_session_reason is None:
+            session = ("session cross-check RAN: the CLI's configured server "
+                       "matched the authenticated session's")
+        else:
+            session = (f"session cross-check NOT COMPARED "
+                       f"({self.server_session_reason})")
+        pin = f"{pin}; {session}"
         if not self.decrypt_checked:
             return (f"{head}; {pin}; NOT DECRYPT-CHECKED — byte equality proves "
                     f"the two copies agree, NOT that either of them opens an "
@@ -541,19 +695,35 @@ def check_vault_state(bw: BitwardenCLI) -> dict:
         f"clean escrow it never read.")
 
 
-def check_server(bw: BitwardenCLI, status: dict, expect: str | None) -> tuple[str, bool]:
-    """`(configured server, was it pinned)`, or a classified refusal.
+def check_server(bw: BitwardenCLI, status: dict,
+                 expect: str | None) -> tuple[str, bool, str | None]:
+    """`(configured server, was it pinned, why the session was NOT compared)`.
 
     🔴 THE ENDPOINT IS READ, NEVER HARDCODED — devrc is public. Two checks:
 
-      * the CLI's configured server must agree with the AUTHENTICATED SESSION's
-        own `serverUrl`. This vault has actually been repointed once, and a
-        session left over from the old endpoint is a state where every answer
-        below comes from a server the operator no longer thinks they are using.
-        This half needs no pin and always runs.
+      * the CLI's configured server against the AUTHENTICATED SESSION's own
+        `serverUrl`. This vault has actually been repointed once, and a session
+        left over from the old endpoint is a state where every answer below
+        comes from a server the operator no longer thinks they are using.
       * `--expect-server` / `ASIB_ESCROW_SERVER`, when the operator sets one.
-        Absent, the run reports NOT PINNED rather than implying it checked —
-        `server_pinned` is returned so the verdict line can say which.
+        Absent, the run reports NOT PINNED rather than implying it checked.
+
+    🔴 THE SESSION COMPARISON CAN BE UNAVAILABLE, AND SAYING SO IS THE WHOLE
+    POINT. `bw status` may omit `serverUrl` or return `null` (that is what it
+    prints for the official cloud). The first version did
+    `if session_server and …`, which SKIPPED the comparison with no signal
+    whatsoever — while the success verdict went on to print "the CLI's
+    configured server matched the session's, which is all that was checked".
+    Measured twice, exit 0 both times: a check that did not run, reported as a
+    check that passed. The docstring above it even said "this half needs no pin
+    and ALWAYS RUNS", which was simply false.
+
+    So the third return value is the REASON it could not be compared, or None
+    when it really was. `EscrowVerdict.line()` prints the distinction, the same
+    way `restore-verify.py` prints `NOT CROSS-CHECKED (<reason>)` rather than
+    folding an unmeasured scope into the word used for a measured one. It is
+    NOT a hard failure: a vault legitimately reachable without a `serverUrl` in
+    `bw status` must not be a permanently-red gate.
     """
     configured = bw.config_server()
     if not configured:
@@ -562,8 +732,21 @@ def check_server(bw: BitwardenCLI, status: dict, expect: str | None) -> tuple[st
             "`bw config server` printed nothing, so which server answered "
             "cannot be determined. An escrow verified against an unknown server "
             "is an escrow verified against no server in particular.")
-    session_server = (status.get("serverUrl") or "").strip()
-    if session_server and _norm_url(session_server) != _norm_url(configured):
+    raw_session = status.get("serverUrl")
+    session_server = (raw_session or "").strip()
+    if not session_server:
+        why = ("`bw status` reported serverUrl="
+               + ("null" if raw_session is None else "empty")
+               + " — the CLI's configured server could NOT be cross-checked "
+                 "against the authenticated session's")
+        if expect is not None and _norm_url(expect) != _norm_url(configured):
+            raise EscrowError(
+                "SERVER-MISMATCH",
+                "the configured server does not match the one pinned by "
+                "--expect-server / ASIB_ESCROW_SERVER. URLs withheld — this "
+                "repo is public; compare them by hand with `bw config server`.")
+        return configured, expect is not None, why
+    if _norm_url(session_server) != _norm_url(configured):
         raise EscrowError(
             "SERVER-MISMATCH",
             "the CLI's CONFIGURED server and the AUTHENTICATED SESSION's server "
@@ -580,8 +763,8 @@ def check_server(bw: BitwardenCLI, status: dict, expect: str | None) -> tuple[st
                 "--expect-server / ASIB_ESCROW_SERVER. Refusing to report an "
                 "escrow found on a server that is not the one you named — URLs "
                 "withheld, compare them by hand with `bw config server`.")
-        return configured, True
-    return configured, False
+        return configured, True, None
+    return configured, False, None
 
 
 def _norm_url(u: str) -> str:
@@ -637,15 +820,31 @@ def find_escrow_item(bw: BitwardenCLI, item_name: str) -> dict:
 
 
 def read_note(item: dict, item_name: str) -> bytes:
-    """The note body as bytes, or a classified refusal. Never logged."""
-    notes = item.get("notes")
+    """The note body as bytes, or a classified refusal. Never logged.
+
+    🔴 AN ABSENT FIELD IS NOT AN EMPTY VALUE. `item.get("notes")` collapses the
+    two, and they lead to OPPOSITE actions: `NOTE-EMPTY` tells the operator the
+    escrow was emptied and to re-escrow, which — if `bw` merely OMITTED the key
+    for an intact note — overwrites a good copy on the strength of a parsing
+    accident. `"notes" in item` is the whole fix.
+    """
+    if "notes" not in item:
+        raise EscrowError(
+            "NOTE-MISSING",
+            f"the vault item {item_name!r} exists but its payload carries NO "
+            f"`notes` FIELD AT ALL — not an empty one, an absent one. That is a "
+            f"`bw` output-schema surprise, not evidence the escrow was emptied, "
+            f"and the note may be perfectly intact. Do NOT re-escrow on this: "
+            f"read the item in the web vault first.")
+    notes = item["notes"]
     if not isinstance(notes, str) or not notes.strip():
         raise EscrowError(
             "NOTE-EMPTY",
-            f"the vault item {item_name!r} exists but its note body is EMPTY. "
-            f"An empty note lists, syncs and exports exactly like a full one, so "
-            f"this is the quiet way for an escrow to be gone while every count "
-            f"still says it is there.")
+            f"the vault item {item_name!r} exists and its note body is EMPTY "
+            f"(the field is PRESENT and carries nothing). An empty note lists, "
+            f"syncs and exports exactly like a full one, so this is the quiet "
+            f"way for an escrow to be gone while every count still says it is "
+            f"there.")
     return notes.encode("utf-8")
 
 
@@ -678,6 +877,33 @@ def decrypt_check(*, escrow_bytes: bytes, work_dir: Path, bucket: str,
     """
     RV = _rv()
     prefix = RV.normalise_prefix(prefix)
+
+    # 🔴 A PRECONDITION, CHECKED BEFORE THE STORE IS EVEN OPENED, AND IT IS
+    # LOAD-BEARING TWICE.
+    #
+    #   1. `age` missing is an ENVIRONMENT fault. Left to fall through, it
+    #      surfaced as RESTORE-FAILED — "the escrowed key works, the artifact is
+    #      at fault" — three false claims in one sentence, sending the operator
+    #      to `restore-verify.py`, where it fails identically for the same
+    #      reason nobody has named yet.
+    #   2. It is what makes the phase probe's inference sound. restore-verify's
+    #      `decrypt()` checks `age` on PATH FIRST and raises before touching the
+    #      output file, so without this an age-missing failure would be
+    #      indistinguishable from "age ran and refused" — the two would share
+    #      DECRYPT-FAILED and blame the escrow for a missing package.
+    #
+    # This duplicates restore-verify's own check by design: the point is not to
+    # guard the call (it guards itself) but to CLASSIFY the cause here, where
+    # the exit code is chosen.
+    if shutil.which("age") is None:
+        raise EscrowError(
+            "AGE-MISSING",
+            "`age` is not on PATH, so the escrowed key cannot be tested against "
+            "anything. This is an ENVIRONMENT fault and says NOTHING about the "
+            "escrow — do not read it as a verdict on the key or on the "
+            "artifacts. age is declared in nix/pkgs/default.nix and in "
+            "flake.nix `gateTools`; add it there, or run this whole command "
+            "under nix.")
 
     if downloader_factory is not None:
         factory = downloader_factory
@@ -741,46 +967,66 @@ def decrypt_check(*, escrow_bytes: bytes, work_dir: Path, bucket: str,
         restore_dir = B._private_dir(work_dir / RESTORE_SUBDIR)
         identity = work_dir / ESCROW_IDENTITY_FILENAME
         try:
-            # 🔴 0600 BEFORE THE BYTES. `os.open` with the mode is the only
-            # ordering with no window: `write_bytes()` then `chmod()` leaves the
-            # key world-readable for however long the write takes. The 0700
-            # directory bounds it either way; this makes the file's own mode
-            # true from its first byte rather than shortly after.
-            fd = os.open(identity, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, _FILE_MODE)
-            with os.fdopen(fd, "wb") as fh:
+            # 🔴 0600 BEFORE THE BYTES, on a file that cannot be a pre-existing
+            # one or a symlink. See `_create_private_file` for the two measured
+            # ways the previous `O_CREAT|O_TRUNC` spelling left the mode claim
+            # false.
+            with os.fdopen(_create_private_file(identity), "wb") as fh:
                 fh.write(escrow_bytes)
 
             try:
-                v = RV.verify_artifact(
-                    downloader, key, scope=scope, stamp=stamp,
-                    identity=identity, work_dir=restore_dir, store=store,
-                    keep=False, now=now, live_scope=live,
-                    no_live_reason=no_live_reason)
+                with _decrypt_phase_probe(RV) as phase:
+                    v = RV.verify_artifact(
+                        downloader, key, scope=scope, stamp=stamp,
+                        identity=identity, work_dir=restore_dir, store=store,
+                        keep=False, now=now, live_scope=live,
+                        no_live_reason=no_live_reason)
             except RV.RestoreVerifyError as exc:
-                # 🔴 TWO OUTCOMES, TWO TOKENS. "the escrowed key does not open
-                # it" is a KEY fault; "the bytes do not reconstruct" is DATA
-                # loss, and it would be reported identically by a run using the
-                # on-disk key. Only the first says anything about the escrow.
-                #
-                # The discriminator is the restore verifier's OWN literal token,
-                # `DECRYPT FAILED`, which it emits from `decrypt()` and nowhere
-                # else and which its test suite pins. Both branches are measured
-                # here by the test suite too — a corrupted KEY and a corrupted
-                # ARTIFACT, at two points, so the classifier is shown to
-                # discriminate rather than assumed to.
-                if "DECRYPT FAILED" in str(exc):
+                # 🔴 CLASSIFIED BY THE PHASE THAT WAS OBSERVED, NOT BY A
+                # SUBSTRING. Each branch asserts only what `phase` actually
+                # witnessed; nothing here says "DECRYPTED" on a path where
+                # `decrypt()` was not reached, and nothing blames the escrow for
+                # a fault the escrow cannot have caused.
+                if not phase["reached"]:
+                    raise EscrowError(
+                        "ARTIFACT-UNREADABLE",
+                        f"the pipeline failed BEFORE the escrowed key was ever "
+                        f"used, on {key}: {exc} — an empty or unreadable object, "
+                        f"not a fact about the escrow. NOTHING here decrypted, "
+                        f"and nothing here is evidence for or against the "
+                        f"escrowed key. Run `restore-verify.py` to diagnose the "
+                        f"object.")
+                if not phase["returned"]:
+                    if phase["plain_present"]:
+                        # age exited 0 and produced an EMPTY plaintext. Measured:
+                        # a refusal leaves NO output file, so a file that exists
+                        # means the key opened it. restore-verify's own comment
+                        # at that branch says the same: "age reported success, so
+                        # this is not damage — it is a valid encryption of
+                        # nothing."
+                        raise EscrowError(
+                            "ARTIFACT-EMPTY",
+                            f"the ESCROWED key OPENED {key} and the artifact "
+                            f"contains NOTHING: {exc}. 🔴 THE ESCROW IS FINE — "
+                            f"age reported success and produced an output file, "
+                            f"which a wrong key cannot do. Do NOT re-escrow or "
+                            f"rotate on the strength of this; the fault is a "
+                            f"valid encryption of an empty payload. Run "
+                            f"`restore-verify.py` to diagnose the artifact.")
                     raise EscrowError(
                         "DECRYPT-FAILED",
-                        f"the ESCROWED bytes do NOT open {key}: {exc} — the "
+                        f"the ESCROWED bytes do NOT open {key}: {exc} — age ran "
+                        f"and REFUSED it, leaving no plaintext at all. The "
                         f"escrow is present but it is not (or no longer) a "
                         f"working identity for these artifacts. Nothing here "
                         f"says the artifacts are damaged; the on-disk key was "
                         f"not used.")
                 raise EscrowError(
                     "RESTORE-FAILED",
-                    f"the ESCROWED bytes DECRYPTED {key} and the restore then "
-                    f"failed: {exc} — this is a fault in the ARTIFACT, not in "
-                    f"the escrow. The escrowed key works; run "
+                    f"the ESCROWED bytes DECRYPTED {key} — `decrypt()` RETURNED, "
+                    f"which is what makes that claim observable — and the "
+                    f"restore then failed: {exc}. This is a fault in the "
+                    f"ARTIFACT, not in the escrow. The escrowed key works; run "
                     f"`restore-verify.py` to diagnose the artifact.")
             return scope, key, v.commits_restored, v.refs_restored
         finally:
@@ -815,7 +1061,7 @@ def run(*, bw: BitwardenCLI, identity: Path, item_name: str,
 
     bw.require_available()
     status = check_vault_state(bw)
-    server, pinned = check_server(bw, status, expect_server)
+    server, pinned, session_reason = check_server(bw, status, expect_server)
     item = find_escrow_item(bw, item_name)
     escrow = read_note(item, item_name)
 
@@ -845,6 +1091,7 @@ def run(*, bw: BitwardenCLI, identity: Path, item_name: str,
 
     verdict = EscrowVerdict(
         item_name=item_name, server=server, server_pinned=pinned,
+        server_session_reason=session_reason,
         escrow_bytes=len(escrow), disk_bytes=len(disk),
         classification=verdict_class, identity=identity,
     )
@@ -917,7 +1164,51 @@ def print_plan(*, identity: Path, item_name: str, expect_server: str | None,
     print(f"exit codes: {', '.join(f'{t}={c}' for t, c in sorted(EXIT_CODES.items(), key=lambda kv: kv[1]))}")
 
 
+# 🔴 SIGNALS THAT MUST NOT SKIP THE SHRED. Python's DEFAULT SIGTERM handling
+# terminates the process WITHOUT unwinding, so every `finally` in this file is
+# bypassed. MEASURED: SIGTERM during `--decrypt-check` left
+# `escrowed-identity.key` on disk at full size, byte-identical to the operator's
+# real age identity, and `TemporaryDirectory` did not clean up either.
+#
+# That is not a theoretical window. SECRETS.md proposes running this from a
+# systemd timer, and systemd's stop/timeout path IS SIGTERM — so the documented
+# deployment is the one that leaks.
+#
+# Turning the signal into `SystemExit` makes the interpreter unwind normally, so
+# the `finally` that shreds the throwaway identity runs. The exit status keeps
+# the shell convention (128 + signal number) rather than colliding with a
+# classified escrow verdict.
+_FATAL_SIGNALS = ("SIGTERM", "SIGINT", "SIGHUP")
+
+
+def install_signal_handlers() -> list[str]:
+    """Make fatal signals unwind instead of killing. Returns the names installed.
+
+    Returns the list so a caller — and the test suite — can assert WHICH signals
+    were covered rather than that the function was called. A signal missing from
+    `_FATAL_SIGNALS` is a path where the key survives.
+    """
+    installed: list[str] = []
+
+    def _raise(signum, _frame):
+        raise SystemExit(128 + signum)
+
+    for name in _FATAL_SIGNALS:
+        sig = getattr(signal, name, None)
+        if sig is None:                      # not on this platform
+            continue
+        try:
+            signal.signal(sig, _raise)
+        except (OSError, ValueError):        # not the main thread, or blocked
+            continue
+        installed.append(name)
+    return installed
+
+
 def main(argv: list[str] | None = None) -> int:
+    # BEFORE any work: the window this closes opens the moment a throwaway
+    # identity exists, and argument parsing can itself be interrupted.
+    install_signal_handlers()
     ap = argparse.ArgumentParser(prog=PROG, description=__doc__)
     ap.add_argument("--identity", type=Path, default=None,
                     help=f"age identity to compare against (default: "

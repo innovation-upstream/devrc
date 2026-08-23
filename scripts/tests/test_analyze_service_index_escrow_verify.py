@@ -34,6 +34,7 @@ import json
 import os
 import shlex
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -302,7 +303,28 @@ def test_the_exit_code_table_is_pinned_EXACTLY_both_ways():
         "RESTORE-FAILED": 26,
         "STORE-UNREACHABLE": 27,
         "NO-ARTIFACT": 28,
+        "AGE-MISSING": 29,
+        "ARTIFACT-UNREADABLE": 30,
+        "ARTIFACT-EMPTY": 31,
+        "NOTE-MISSING": 32,
     }
+
+
+def test_the_five_decrypt_outcomes_are_FIVE_DISTINCT_codes():
+    """🔴 THE HEADLINE SPLIT, pinned as a set of distinct integers.
+
+    An audit found the original two-way split wrong in three measured cases,
+    every one of them blaming the escrow for a fault the escrow could not have
+    caused. These five must never collapse back: `age` absent is an ENVIRONMENT
+    fault, "failed before decrypt ran" is an OBJECT fault, "age refused" is a
+    KEY fault, "age succeeded on nothing" is a DATA fault where the key is
+    FINE, and "decrypt returned, restore failed" is a DATA fault too.
+    """
+    names = ["AGE-MISSING", "ARTIFACT-UNREADABLE", "DECRYPT-FAILED",
+             "ARTIFACT-EMPTY", "RESTORE-FAILED"]
+    codes = [EV.EXIT_CODES[n] for n in names]
+    assert codes == [29, 30, 25, 31, 26]
+    assert len(set(codes)) == 5
 
 
 def test_every_exit_code_is_DISTINCT_and_never_collides_with_success_or_crash():
@@ -348,6 +370,36 @@ def test_classify_calls_a_CRLF_rewrite_MATERIAL_not_a_trailing_newline():
 
 def test_classify_does_not_confuse_a_leading_newline_with_a_trailing_one():
     assert EV.classify(b"\nabc\n", b"abc\n") == "DIFFERS-MATERIALLY"
+
+
+@pytest.mark.parametrize("suffix,name", [
+    (b" ", "space"), (b"\t", "tab"), (b"\r", "carriage return"),
+    (b"\n \n", "newline-space-newline"), (b"  \n", "two spaces then newline"),
+])
+def test_only_NEWLINES_count_as_a_trailing_newline_difference(suffix, name):
+    """🔴 THE NARROWNESS IS THE CLAIM, so it gets measured.
+
+    `classify`'s docstring calls the rule "narrow on purpose" — trailing `\\n`
+    and nothing else. Widening it to a bare `rstrip()` would fold trailing
+    SPACES and TABS into "differs by trailing newline only", i.e. into the
+    verdict that means "probably still usable, one `printf` fixes it". A key
+    with trailing whitespace is a different object and the operator would be
+    told the wrong thing.
+
+    Measured here, not asserted: an audit's independent sweep found
+    `rstrip(b"\\n") -> rstrip()` SURVIVED the suite before these cases existed.
+    """
+    base = b"AGE-SECRET-KEY-1SYNTHETICFIXTUREVALUE\n"
+    assert EV.classify(base + suffix, base) == "DIFFERS-MATERIALLY", name
+
+
+def test_a_PURE_trailing_newline_difference_is_STILL_its_own_class():
+    """The positive half of the pair above: narrowing must not narrow to
+    nothing. Without this, `rstrip(b"\\n") -> (no strip at all)` would pass every
+    case above while destroying the classification that matters."""
+    base = b"AGE-SECRET-KEY-1SYNTHETICFIXTUREVALUE"
+    assert EV.classify(base + b"\n", base) == "DIFFERS-TRAILING-NEWLINE-ONLY"
+    assert EV.classify(base, base + b"\n\n") == "DIFFERS-TRAILING-NEWLINE-ONLY"
 
 
 # --------------------------------------------------------------------------- #
@@ -522,9 +574,29 @@ def test_a_WHITESPACE_ONLY_note_is_EMPTY_not_a_mismatch(tmp_path):
     assert ei.value.token == "NOTE-EMPTY"
 
 
-def test_a_MISSING_notes_field_is_EMPTY_not_a_crash(tmp_path):
+def test_an_ABSENT_notes_FIELD_is_NOT_the_same_finding_as_an_EMPTY_one(tmp_path):
+    """🔴 OPPOSITE ACTIONS. `NOTE-EMPTY` says the escrow was emptied and sends
+    the operator to re-escrow — which, if `bw` merely OMITTED the field for an
+    INTACT note, overwrites a good copy on the strength of a parsing accident.
+
+    `_item(notes=None)` builds a payload with no `notes` key at all, which is
+    the shape being distinguished."""
+    item = _item(notes=None)
+    assert "notes" not in item, "the fixture must omit the field, not empty it"
     with pytest.raises(EV.EscrowError) as ei:
-        _run(tmp_path, FakeBw(items=[_item(notes=None)]))
+        _run(tmp_path, FakeBw(items=[item]))
+    assert ei.value.token == "NOTE-MISSING"
+    assert ei.value.exit_code == 32
+    assert ei.value.exit_code != EV.EXIT_CODES["NOTE-EMPTY"]
+    assert "Do NOT re-escrow" in str(ei.value)
+
+
+def test_a_notes_field_present_but_NOT_A_STRING_is_NOTE_EMPTY(tmp_path):
+    """The field is there, so this is not the absent case; it carries nothing
+    usable, so it is the empty one."""
+    with pytest.raises(EV.EscrowError) as ei:
+        _run(tmp_path, FakeBw(items=[{"id": "x", "name": ITEM,
+                                      "type": SECURE_NOTE, "notes": 17}]))
     assert ei.value.token == "NOTE-EMPTY"
 
 
@@ -783,11 +855,124 @@ def test_a_PINNED_server_that_agrees_PASSES_and_the_verdict_SAYS_it_was_pinned(t
     f = FakeBw(items=[_item()])
     v = _run(tmp_path, f, expect_server=SERVER + "/")   # trailing slash tolerated
     assert v.server_pinned is True
-    assert "server pinned and matched" in v.line()
+    assert v.server_session_reason is None
 
     v2 = _run(tmp_path, FakeBw(items=[_item()]))
     assert v2.server_pinned is False
-    assert "NOT PINNED" in v2.line()
+    assert v2.server_session_reason is None
+
+
+# --------------------------------------------------------------------------- #
+# 10b. 🔴 THE SESSION CROSS-CHECK CANNOT SILENTLY NO-OP
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("status_doc,expect_word", [
+    ({"serverUrl": None, "status": "unlocked"}, "null"),
+    ({"serverUrl": "", "status": "unlocked"}, "empty"),
+    ({"serverUrl": "   ", "status": "unlocked"}, "empty"),
+    ({"status": "unlocked"}, "null"),              # field absent entirely
+])
+def test_an_UNAVAILABLE_session_server_is_reported_NOT_COMPARED_never_as_matched(
+        tmp_path, status_doc, expect_word):
+    """🔴 THE AUDIT'S SECOND 🔴. `bw status` returns `serverUrl: null` for the
+    official cloud, and the guard read `if session_server and …` — so the
+    comparison was SKIPPED with no signal while the success verdict went on to
+    print "the CLI's configured server matched the session's, which is all that
+    was checked". A check that did not run, reported as one that passed.
+
+    It is not a hard failure — a vault legitimately reachable without a
+    serverUrl must not be a permanently-red gate — so the requirement is that
+    the verdict SAYS SO, with the reason, exactly as `restore-verify.py` prints
+    `NOT CROSS-CHECKED (<reason>)`.
+    """
+    v = _run(tmp_path, FakeBw(status=status_doc, items=[_item()]))
+    assert v.server_session_reason is not None
+    assert expect_word in v.server_session_reason
+    line = v.line()
+    assert "session cross-check NOT COMPARED" in line
+    assert "session cross-check RAN" not in line
+    assert "matched the authenticated session's" not in line
+
+
+def test_the_verdict_line_is_pinned_WHOLE_for_every_server_combination(tmp_path):
+    """🔴 PIN THE WHOLE NORMALISED STRING, not a word inside it.
+
+    The previous assertion here was `"NOT PINNED" in v2.line()` — a bare
+    substring on a sentence that was, at that moment, ALREADY FALSE about the
+    session cross-check. An audit's mutant rewrote the entire sentence into a
+    flat lie and SURVIVED all 87 tests, because the two words it kept were the
+    two words being asserted.
+
+    A substring cannot tell a true sentence from a confident wrong one. So each
+    of the four combinations pins its complete line. A cosmetic reword fails
+    this test — that is the price of a machine-readable claim, and it is worth
+    paying for the one sentence an operator reads to decide the escrow is fine.
+    """
+    ident = _identity(tmp_path, ESCROW_NOTE, name="whole-line.key")
+    reason = "SYNTHETIC-REASON"
+
+    def mk(**kw):
+        return EV.EscrowVerdict(
+            item_name=ITEM, server=SERVER, escrow_bytes=ESCROW_NOTE_BYTES,
+            disk_bytes=ESCROW_NOTE_BYTES, classification=EV.CLASS_IDENTICAL,
+            identity=ident, **kw)
+
+    head = (f"analyze-service-index-escrow-verify: escrow OK — the Secure Note "
+            f"matches {ident} IDENTICAL (179 escrowed bytes vs 179 on disk)")
+    tail = ("NOT DECRYPT-CHECKED — byte equality proves the two copies agree, "
+            "NOT that either of them opens an artifact. Re-run with "
+            "--decrypt-check for that claim.")
+    ran = ("session cross-check RAN: the CLI's configured server matched the "
+           "authenticated session's")
+    notrun = f"session cross-check NOT COMPARED ({reason})"
+
+    assert mk(server_pinned=False, server_session_reason=None).line() == (
+        f"{head}; server NOT PINNED (--expect-server / ASIB_ESCROW_SERVER "
+        f"unset); {ran}; {tail}")
+    assert mk(server_pinned=True, server_session_reason=None).line() == (
+        f"{head}; server PINNED and matched; {ran}; {tail}")
+    assert mk(server_pinned=False, server_session_reason=reason).line() == (
+        f"{head}; server NOT PINNED (--expect-server / ASIB_ESCROW_SERVER "
+        f"unset); {notrun}; {tail}")
+    assert mk(server_pinned=True, server_session_reason=reason).line() == (
+        f"{head}; server PINNED and matched; {notrun}; {tail}")
+
+
+def test_the_DECRYPT_CHECKED_verdict_line_is_pinned_WHOLE(tmp_path):
+    """The fifth combination, for the same reason. This is the sentence that
+    claims the escrowed key OPENED something."""
+    ident = _identity(tmp_path, ESCROW_NOTE, name="whole-line-2.key")
+    v = EV.EscrowVerdict(
+        item_name=ITEM, server=SERVER, server_pinned=False,
+        escrow_bytes=ESCROW_NOTE_BYTES, disk_bytes=ESCROW_NOTE_BYTES,
+        classification=EV.CLASS_IDENTICAL, identity=ident,
+        server_session_reason=None, decrypt_checked=True,
+        decrypt_scope="scope-delta", decrypt_key=KEY_DELTA_NEW,
+        decrypt_commits=3, decrypt_refs=1)
+    assert v.line() == (
+        f"analyze-service-index-escrow-verify: escrow OK — the Secure Note "
+        f"matches {ident} IDENTICAL (179 escrowed bytes vs 179 on disk); "
+        f"server NOT PINNED (--expect-server / ASIB_ESCROW_SERVER unset); "
+        f"session cross-check RAN: the CLI's configured server matched the "
+        f"authenticated session's; DECRYPT-CHECKED: the ESCROWED bytes "
+        f"decrypted {KEY_DELTA_NEW} (scope scope-delta) and restored 3 "
+        f"commit(s) over 1 ref(s)")
+
+
+def test_an_unavailable_session_server_STILL_enforces_an_explicit_PIN(tmp_path):
+    """🔴 REACHABILITY: the new early-return must not become an escape hatch.
+    With no session serverUrl to compare against, a WRONG pinned server must
+    still fail — otherwise the fix for one silent skip introduces another."""
+    f = FakeBw(status={"serverUrl": None, "status": "unlocked"},
+               server="https://actual.invalid.example", items=[_item()])
+    with pytest.raises(EV.EscrowError) as ei:
+        _run(tmp_path, f, expect_server="https://expected.invalid.example")
+    assert ei.value.token == "SERVER-MISMATCH"
+    # ...and a MATCHING pin passes, so the branch above is not simply always-red.
+    f2 = FakeBw(status={"serverUrl": None, "status": "unlocked"},
+                server="https://actual.invalid.example", items=[_item()])
+    v = _run(tmp_path, f2, expect_server="https://actual.invalid.example")
+    assert v.server_pinned is True
+    assert v.server_session_reason is not None
 
 
 def test_url_comparison_ignores_case_and_a_trailing_slash_only(tmp_path):
@@ -1037,6 +1222,120 @@ def test_a_CORRUPTED_ARTIFACT_is_RESTORE_FAILED_not_DECRYPT_FAILED(escrow_world,
     assert ei.value.exit_code == 26
 
 
+def test_a_ZERO_BYTE_object_is_ARTIFACT_UNREADABLE_and_never_claims_it_DECRYPTED(
+        escrow_world):
+    """🔴 AUDIT CASE 3. `verify_artifact` refuses a 0-byte object BEFORE calling
+    `decrypt()`, so the old classifier — which read the absence of a substring —
+    reported RESTORE-FAILED and asserted the bytes "DECRYPTED".
+
+    The message must not contain that word in the past tense about this run, and
+    the token must say the pipeline never reached the key.
+    """
+    objects = dict(escrow_world["objects"])
+    objects[KEY_DELTA_NEW] = b""
+    with pytest.raises(EV.EscrowError) as ei:
+        _decrypt_run(escrow_world, objects=objects)
+    assert ei.value.token == "ARTIFACT-UNREADABLE"
+    assert ei.value.exit_code == 30
+    msg = str(ei.value)
+    assert "DECRYPTED" not in msg
+    assert "The escrowed key works" not in msg
+    # It says the opposite, and says it explicitly.
+    assert "NOTHING here decrypted" in msg
+
+
+def test_a_valid_encryption_of_NOTHING_says_the_ESCROW_IS_FINE(escrow_world, tmp_path):
+    """🔴 AUDIT CASE 2 — THE ONE THAT GETS A GOOD DR KEY ROTATED.
+
+    `age` encrypts a zero-byte payload to a perfectly valid ~200-byte
+    ciphertext and decrypts it back at rc=0. The old classifier saw
+    restore-verify's `DECRYPT FAILED … decrypted to ZERO bytes` and reported
+    DECRYPT-FAILED — "not (or no longer) a working identity" — for a key that
+    had just worked. Acting on that verdict destroys the escrow.
+
+    The discriminator is MEASURED, not guessed (age v1.3.1): a refusal leaves NO
+    output file, a success-on-empty leaves one at size 0. `_decrypt_phase_probe`
+    reads exactly that.
+    """
+    empty = tmp_path / "empty-payload"
+    empty.write_bytes(b"")
+    cipher = tmp_path / "empty-payload.age"
+    B.encrypt(empty, cipher, _recipient(escrow_world["identity"]))
+    blob = cipher.read_bytes()
+    assert blob.startswith(b"age-encryption.org/") and len(blob) > 100
+
+    objects = dict(escrow_world["objects"])
+    objects[KEY_DELTA_NEW] = blob
+    with pytest.raises(EV.EscrowError) as ei:
+        _decrypt_run(escrow_world, objects=objects)
+    assert ei.value.token == "ARTIFACT-EMPTY"
+    assert ei.value.exit_code == 31
+    # 🔴 DISCRIMINATING, not a substring presence check: it must NOT be the
+    # token that means "the escrowed key is wrong", and it must say so in words
+    # the operator would act on.
+    assert ei.value.exit_code != EV.EXIT_CODES["DECRYPT-FAILED"]
+    msg = str(ei.value)
+    assert "THE ESCROW IS FINE" in msg
+    assert "Do NOT re-escrow or rotate" in msg
+
+
+def test_age_ABSENT_is_an_ENVIRONMENT_fault_not_a_verdict_on_the_escrow(
+        escrow_world, monkeypatch):
+    """🔴 AUDIT CASE 1. With `age` off PATH the old code reported RESTORE-FAILED,
+    asserting in one sentence that the escrowed key WORKED, that the artifact was
+    at fault, and that `restore-verify.py` would diagnose it — three false
+    claims, the last of which sends the operator to a tool that fails
+    identically for the same unnamed reason."""
+    monkeypatch.setattr(EV.shutil, "which",
+                        lambda name: None if name == "age" else "/usr/bin/" + name)
+    with pytest.raises(EV.EscrowError) as ei:
+        _decrypt_run(escrow_world)
+    assert ei.value.token == "AGE-MISSING"
+    assert ei.value.exit_code == 29
+    msg = str(ei.value)
+    assert "says NOTHING about the escrow" in msg
+    assert "The escrowed key works" not in msg
+
+
+def test_the_age_precondition_runs_BEFORE_the_store_is_opened(escrow_world,
+                                                              monkeypatch):
+    """REACHABILITY for the precondition, and it is load-bearing twice: it also
+    makes the phase probe's "no plaintext ⇒ age refused" inference sound."""
+    monkeypatch.setattr(EV.shutil, "which",
+                        lambda name: None if name == "age" else "/usr/bin/" + name)
+    d = FakeDownloader(escrow_world["objects"])
+    with pytest.raises(EV.EscrowError) as ei:
+        EV.run(bw=_cli(FakeBw(items=[_item(notes=escrow_world["note"])])),
+               identity=escrow_world["identity"], item_name=ITEM, decrypt=True,
+               prefix=PREFIX, store=escrow_world["store"],
+               work_dir=escrow_world["work"], now=NOW,
+               downloader_factory=lambda: d)
+    assert ei.value.token == "AGE-MISSING"
+    assert d.gets == [], "the store was opened before the precondition was checked"
+
+
+def test_the_phase_probe_OBSERVES_rather_than_reimplements(escrow_world):
+    """🔴 THE PROBE MUST BE TRANSPARENT. It wraps restore-verify's `decrypt` for
+    the duration of one call; if it changed behaviour, or failed to restore the
+    original, every later run in the same process would be wrong.
+
+    Watch it: the module attribute is the same object before and after, and a
+    successful run still reports `returned`."""
+    RVmod = EV._rv()
+    before = RVmod.decrypt
+    seen = {}
+    with EV._decrypt_phase_probe(RVmod) as state:
+        assert RVmod.decrypt is not before, "the probe never installed itself"
+        seen["state"] = state
+    assert RVmod.decrypt is before, "the probe did not restore the original"
+    assert seen["state"] == {"reached": False, "returned": False,
+                             "plain_present": None}
+    # And on a real run it records the success phase.
+    v, _ = _decrypt_run(escrow_world)
+    assert v.decrypt_checked is True
+    assert RVmod.decrypt is before
+
+
 def test_ZERO_artifacts_under_the_prefix_is_NO_ARTIFACT_not_a_clean_check(escrow_world):
     """🔴 A key that was never asked to decrypt anything has not been shown to
     work. An empty bucket must not read as a successful decrypt check."""
@@ -1226,6 +1525,142 @@ def test_the_throwaway_identity_is_0600_inside_a_0700_dir_WHILE_IT_EXISTS(escrow
     assert not seen["path"].exists()
 
 
+def test_a_PREEXISTING_loose_file_at_the_identity_path_does_not_keep_its_mode(
+        escrow_world, monkeypatch):
+    """🔴 `O_CREAT|O_TRUNC` APPLIES ITS MODE ONLY ON CREATE.
+
+    Measured by an audit via `--work-dir`: a pre-existing 0666 file RECEIVED the
+    escrowed key and STAYED 0666 for the whole time it held it. The 0700
+    directory bounded the damage, but the module's own "0600" sentence was false
+    on exactly the option that hands this a directory somebody else populated.
+    """
+    work = escrow_world["work"]
+    victim = work / EV.ESCROW_IDENTITY_FILENAME
+    victim.write_bytes(b"pre-existing decoy content")
+    victim.chmod(0o666)
+    assert stat.S_IMODE(victim.stat().st_mode) == 0o666
+
+    seen = {}
+    RVmod = EV._rv()
+    real = RVmod.verify_artifact
+
+    def spy(downloader, key, **kw):
+        p = Path(kw["identity"])
+        seen["mode"] = stat.S_IMODE(p.stat().st_mode)
+        seen["bytes"] = p.read_bytes()
+        return real(downloader, key, **kw)
+
+    monkeypatch.setattr(RVmod, "verify_artifact", spy)
+    _decrypt_run(escrow_world)
+    assert seen["mode"] == 0o600, oct(seen["mode"])
+    assert seen["bytes"] == escrow_world["note"].encode("utf-8")
+    assert _work_contents(work) == []
+
+
+def test_a_SYMLINK_at_the_identity_path_is_NOT_followed_and_its_target_survives(
+        escrow_world, tmp_path):
+    """🔴 THE WORST SHAPE THE AUDIT FOUND: a truncate-in-place primitive.
+
+    With `O_CREAT|O_TRUNC` plus the old `_shred`, a symlink planted at the
+    identity path got the escrowed key written THROUGH it to a 0644 file
+    OUTSIDE the 0700 directory — and `_shred` then ZEROED that target while
+    unlinking only the link, leaving a zero-filled decoy on any path the user
+    can write.
+
+    Both halves are asserted: the target keeps its original bytes and its
+    original mode, and the link itself is gone.
+    """
+    work = escrow_world["work"]
+    outside = tmp_path / "innocent-bystander.txt"
+    outside.write_text("do not touch me\n", encoding="utf-8")
+    outside.chmod(0o644)
+    before = outside.read_bytes()
+
+    link = work / EV.ESCROW_IDENTITY_FILENAME
+    link.symlink_to(outside)
+    assert link.is_symlink()
+
+    v, _ = _decrypt_run(escrow_world)
+    assert v.decrypt_checked is True
+    assert outside.read_bytes() == before, "the symlink target was written through"
+    assert stat.S_IMODE(outside.stat().st_mode) == 0o644
+    assert not link.exists() and not link.is_symlink()
+    assert _work_contents(work) == []
+
+
+def test_shred_unlinks_a_SYMLINK_without_touching_its_target(tmp_path):
+    """The unit-level half of the case above. `open(path, "r+b")` follows a
+    link; the link is the only thing `_shred` may destroy."""
+    target = tmp_path / "target.txt"
+    target.write_text("keep me\n", encoding="utf-8")
+    link = tmp_path / "link"
+    link.symlink_to(target)
+    EV._shred(link)
+    assert not link.is_symlink() and not link.exists()
+    assert target.read_text(encoding="utf-8") == "keep me\n"
+
+
+def test_create_private_file_REFUSES_to_follow_a_symlink_it_cannot_remove(tmp_path):
+    """A directory in the way is the case `O_EXCL` must turn into an error
+    rather than a silent reuse — `_shred` cannot unlink a directory."""
+    blocked = tmp_path / "blocked"
+    blocked.mkdir()
+    with pytest.raises(OSError):
+        EV._create_private_file(blocked)
+
+
+@pytest.mark.parametrize("plant", ["symlink", "regular-file"])
+def test_the_OPEN_flags_defend_the_path_EVEN_IF_the_unlink_layer_fails(tmp_path,
+                                                                       monkeypatch,
+                                                                       plant):
+    """🔴 MEASURE THE SECOND LAYER ON ITS OWN, or it is not defence in depth.
+
+    `_create_private_file` has two independent defences: `_shred` removes
+    whatever is at the path, and `O_EXCL|O_NOFOLLOW` refuses to create over or
+    follow anything that is still there. A mutation sweep scored
+    `O_EXCL|O_NOFOLLOW -> O_TRUNC` as SURVIVED — correctly, because the unlink
+    always got there first, so the flags were never the thing being tested.
+    A layer nobody can observe failing is a layer nobody knows is gone.
+
+    So: neuter the unlink (that is the layer failing — a race, or a future
+    regression in `_shred`) and watch the OPEN refuse. With `O_TRUNC` this test
+    goes red, which is what makes the flags load-bearing rather than decorative.
+    """
+    monkeypatch.setattr(EV, "_shred", lambda p: None)
+    outside = tmp_path / "target.txt"
+    outside.write_text("original\n", encoding="utf-8")
+    outside.chmod(0o644)
+    victim = tmp_path / "victim"
+    if plant == "symlink":
+        victim.symlink_to(outside)
+    else:
+        victim.write_text("pre-existing\n", encoding="utf-8")
+        victim.chmod(0o666)
+
+    with pytest.raises(FileExistsError):
+        EV._create_private_file(victim)
+
+    # Nothing was written through, truncated, or re-moded.
+    assert outside.read_text(encoding="utf-8") == "original\n"
+    assert stat.S_IMODE(outside.stat().st_mode) == 0o644
+    if plant == "symlink":
+        assert victim.is_symlink()
+    else:
+        assert victim.read_text(encoding="utf-8") == "pre-existing\n"
+
+
+def test_create_private_file_makes_a_fresh_0600_regular_file(tmp_path):
+    """POSITIVE CONTROL: the helper must actually produce a usable fd, or every
+    assertion above is about a function that only ever raises."""
+    p = tmp_path / "fresh.key"
+    fd = EV._create_private_file(p)
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(b"synthetic")
+    assert stat.S_IMODE(p.stat().st_mode) == 0o600
+    assert p.read_bytes() == b"synthetic"
+    assert not p.is_symlink()
+
+
 def test_shred_removes_the_file_and_never_raises_on_an_absent_one(tmp_path):
     p = tmp_path / "k"
     p.write_bytes(b"synthetic-shred-fixture-0123456789")
@@ -1233,6 +1668,107 @@ def test_shred_removes_the_file_and_never_raises_on_an_absent_one(tmp_path):
     assert not p.exists()
     EV._shred(p)          # idempotent; a cleanup that raises defeats its finally
     EV._shred(tmp_path / "never-existed")
+
+
+# --------------------------------------------------------------------------- #
+# 12b. 🔴 A SIGNAL MUST NOT SKIP THE SHRED
+# --------------------------------------------------------------------------- #
+def test_the_signal_handlers_cover_the_signals_a_TIMER_actually_sends():
+    """Assert the SET, not that the installer was called.
+
+    systemd's stop and timeout paths send SIGTERM, and `SECRETS.md` proposes
+    timer-driven use — so a signal missing from this list is a path where a copy
+    of the age key survives on disk."""
+    installed = EV.install_signal_handlers()
+    try:
+        assert set(installed) == {"SIGTERM", "SIGINT", "SIGHUP"}
+        assert list(EV._FATAL_SIGNALS) == ["SIGTERM", "SIGINT", "SIGHUP"]
+    finally:
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        signal.signal(signal.SIGINT, signal.default_int_handler)
+        signal.signal(signal.SIGHUP, signal.SIG_DFL)
+
+
+def test_SIGTERM_unwinds_so_a_finally_RUNS_instead_of_being_skipped():
+    """🔴 THE MECHANISM. Python's DEFAULT SIGTERM disposition terminates without
+    unwinding, so every `finally` in the module is bypassed. Measured by an
+    audit: rc 143 with `escrowed-identity.key` surviving at full size,
+    byte-identical to the real identity.
+
+    Here the signal is REAL — delivered to this process — and the assertion is
+    that the `finally` ran and the exception is `SystemExit(143)`."""
+    ran = []
+    EV.install_signal_handlers()
+    try:
+        with pytest.raises(SystemExit) as ei:
+            try:
+                os.kill(os.getpid(), signal.SIGTERM)
+                # The handler raises on the next bytecode boundary; give it one.
+                for _ in range(1000):
+                    pass
+            finally:
+                ran.append("finally")
+        assert ran == ["finally"], "the finally block was skipped"
+        assert ei.value.code == 128 + int(signal.SIGTERM) == 143
+    finally:
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        signal.signal(signal.SIGINT, signal.default_int_handler)
+        signal.signal(signal.SIGHUP, signal.SIG_DFL)
+
+
+def test_a_REAL_SIGTERM_mid_pipeline_still_SHREDS_the_throwaway_identity(
+        escrow_world):
+    """🔴 THE END-TO-END CLAIM, with a real signal delivered at the exact moment
+    the key exists on disk.
+
+    The downloader signals this process from inside `get()` — which
+    `verify_artifact` calls AFTER the throwaway identity has been written and
+    BEFORE anything else. So the interrupt lands inside the window the shred
+    exists for, and the identity is asserted gone afterwards.
+    """
+    work = escrow_world["work"]
+    saw = {}
+
+    class SignallingDownloader(FakeDownloader):
+        def get(self, key):
+            saw["identity_existed"] = (work / EV.ESCROW_IDENTITY_FILENAME).is_file()
+            os.kill(os.getpid(), signal.SIGTERM)
+            for _ in range(1000):
+                pass
+            return super().get(key)          # pragma: no cover - handler fires first
+
+    d = SignallingDownloader(escrow_world["objects"])
+    EV.install_signal_handlers()
+    try:
+        with pytest.raises(SystemExit) as ei:
+            EV.run(bw=_cli(FakeBw(items=[_item(notes=escrow_world["note"])])),
+                   identity=escrow_world["identity"], item_name=ITEM,
+                   decrypt=True, prefix=PREFIX, store=escrow_world["store"],
+                   work_dir=work, now=NOW, downloader_factory=lambda: d)
+        assert ei.value.code == 143
+    finally:
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        signal.signal(signal.SIGINT, signal.default_int_handler)
+        signal.signal(signal.SIGHUP, signal.SIG_DFL)
+
+    # 🔴 POSITIVE CONTROL: the key really was on disk when the signal landed, so
+    # "it is gone now" is a claim about a file that existed.
+    assert saw["identity_existed"] is True
+    assert not (work / EV.ESCROW_IDENTITY_FILENAME).exists()
+    assert _work_contents(work) == []
+
+
+def test_main_installs_the_handlers_BEFORE_doing_any_work(monkeypatch, tmp_path):
+    """The wiring, separately from the mechanism: a handler that is never
+    installed protects nothing, and `main()` is the only installer."""
+    order = []
+    monkeypatch.setattr(EV, "install_signal_handlers",
+                        lambda: order.append("installed") or ["SIGTERM"])
+    monkeypatch.setattr(EV, "read_identity",
+                        lambda p: order.append("work") or b"x")
+    ident = _identity(tmp_path, ESCROW_NOTE, name="sig.key")
+    EV.main(["--identity", str(ident), "--bw", str(tmp_path / "no-such-bw")])
+    assert order[0] == "installed", order
 
 
 # --------------------------------------------------------------------------- #
@@ -1368,6 +1904,55 @@ def test_the_CLI_reports_a_MISSING_bw_with_the_nix_shell_command(tmp_path):
     assert p.returncode == 10
     assert "BW-MISSING" in p.stderr
     assert "nix-shell -p bitwarden-cli jq" in p.stderr
+
+
+def test_the_CLI_work_dir_branch_HARDENS_a_directory_it_did_not_create(tmp_path):
+    """🔴 THE ONLY BRANCH THAT RECEIVES A NON-FRESH DIRECTORY, and no test
+    reached it: every other test passes `work_dir` as a library kwarg, so an
+    audit's mutant dropping `B._private_dir(...)` from this branch SURVIVED the
+    whole suite. It is also exactly where the mode hazards above bite.
+
+    A pre-existing world-readable directory must come out 0700, and must be
+    EMPTY afterwards — but still EXIST, because it is the operator's.
+    """
+    wd = tmp_path / "operator-work-dir"
+    wd.mkdir(mode=0o777)
+    os.chmod(wd, 0o777)
+    assert stat.S_IMODE(wd.stat().st_mode) == 0o777
+
+    empty_src = tmp_path / "cli-wd-empty"
+    empty_src.mkdir()
+    p = _run_cli(tmp_path, _plan(items=[_item()]),
+                 "--decrypt-check", "--from-dir", str(empty_src),
+                 "--host", HOST, "--store", str(tmp_path / "cli-wd-no-store"),
+                 "--work-dir", str(wd))
+    # It got far enough to build the work dir, then refused for want of an
+    # artifact — the refusal is what proves the branch ran at all.
+    assert p.returncode == EV.EXIT_CODES["NO-ARTIFACT"], (p.stdout, p.stderr)
+    assert stat.S_IMODE(wd.stat().st_mode) == 0o700, oct(
+        stat.S_IMODE(wd.stat().st_mode))
+    assert wd.is_dir(), "the operator's own directory must not be deleted"
+    assert sorted(x.name for x in wd.iterdir()) == []
+
+
+def test_the_CLI_leaves_NO_key_material_in_an_operator_supplied_work_dir(tmp_path):
+    """The same branch on a run that actually writes the throwaway identity."""
+    wd = tmp_path / "wd2"
+    wd.mkdir()
+    fetched = tmp_path / "wd2-fetched"
+    fetched.mkdir()
+    # A well-formed prefix with a single unreadable (zero-byte) object: the run
+    # reaches the identity write, then fails.
+    obj = fetched / HOST / "scope-omega" / "20260309T164205Z.bundle.age"
+    obj.parent.mkdir(parents=True)
+    obj.write_bytes(b"")
+    p = _run_cli(tmp_path, _plan(items=[_item()]),
+                 "--decrypt-check", "--from-dir", str(fetched),
+                 "--host", HOST, "--store", str(tmp_path / "wd2-no-store"),
+                 "--work-dir", str(wd))
+    assert p.returncode == EV.EXIT_CODES["ARTIFACT-UNREADABLE"], (p.stdout, p.stderr)
+    assert sorted(x.name for x in wd.iterdir()) == []
+    assert "AGE-SECRET-KEY" not in (p.stdout + p.stderr)
 
 
 def test_print_plan_runs_NO_bw_and_reads_NO_key(tmp_path):
