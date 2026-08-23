@@ -76,11 +76,12 @@ Behaviour, all failing in the **safe direction**:
   the devShell, so it is armed by `checks.pytests`'s own `DEVRC_GATE_ENV`
   export rather than the `shellHook` this hook uses — the two are not
   redundant. (The `nodetests` leg carries no marker and needs none.)
-  Its red is advisory (`main`'s protection requires a review but **not** status
-  checks — `required_status_checks` → 404, measured 2026-08-22) — which is why
-  this hook remains the only tier that blocks **a push**. (`main` also requires
-  1 approving review, which blocks a *merge* — so the unqualified "only tier
-  that blocks" would be wrong.)
+  Its red is **no longer advisory**: measured 2026-08-23, `main`'s
+  `required_status_checks.contexts` lists BOTH legs (`strict: false`,
+  `enforce_admins: true`), so either one red blocks a *merge*. This hook is
+  still the only tier that blocks **a push** — that qualifier is what keeps the
+  claim true; unqualified "only tier that blocks" was already wrong (`main`
+  requires 1 approving review too) and is now wrong twice over.
 - **Escape hatch** — `DEVRC_SKIP_TESTS=1 git push …` skips the gate for one push
   regardless of mode (the flake check / CI still enforce the hermetic subset).
 

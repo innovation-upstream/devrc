@@ -424,10 +424,12 @@ def test_the_hook_degrades_on_ENV_faults_and_BLOCKS_on_repo_content():
     spelling. (b) "The ONLY tier that runs automatically: no CI and no branch
     protection" -- a Tekton PR gate now runs (`tekton/devrc-pytests`,
     `tekton/devrc-nodetests`); measured, #704 reports no checks and #714 reports
-    both. Its red is advisory -- `main`'s protection requires a review but NOT
-    status checks (`required_status_checks` -> 404, measured 2026-08-22) -- so
-    the accurate claim is "the only tier that BLOCKS", not "the only tier that
-    runs", and NOT "there is no branch protection".
+    both. Its red is NOT advisory any more: measured 2026-08-23, `main`'s
+    `required_status_checks.contexts` lists BOTH legs, so either red blocks a
+    MERGE. This hook is still the only tier that blocks a PUSH -- so the
+    accurate claim is "the only tier that blocks a push", not "the only tier
+    that runs", not "the only tier that blocks", and NOT "there is no branch
+    protection".
 
     🔴 GUARD 1 is now in BOTH lists: since devrc#705 it classifies by CAUSE
     (DEVRC_GATE_ENV=1 -> repo defect -> 2; unset -> caller defect -> 3), so the
