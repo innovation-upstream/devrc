@@ -31,14 +31,28 @@ decidable, and only those are asserted:
   2. no entry breaches the per-entry cap -- past it the description is truncated
      or dropped silently;
   3. `clickup` names its disambiguating siblings, AND each name it uses is a
-     skill that actually exists.
+     skill that actually exists, AND the ledger of them cannot drift from the
+     sentence in EITHER direction.
 
-(3) is a RELATIONSHIP, not a word: renaming or deleting `clawgate`,
-`initiatives` or `mailbox` turns it red, so the disambiguation cannot rot into a
-pointer at nothing. The DECLARED gap: the sibling ledger below is a judgement
-call and is checked in one direction only -- a name in it must exist and must be
-named, but nothing here can know that a FOURTH task-shaped skill has appeared.
-Add it here when one does.
+(3) is a RELATIONSHIP, not a word: renaming or deleting any ledgered sibling
+turns it red, so the disambiguation cannot rot into a pointer at nothing. The
+DECLARED gap: the sibling ledger below is a judgement call. It is pinned EQUAL to
+the sentence, so it can no longer silently shrink (that hole was real, and is
+measured in the docstring of the test that closes it), and every name in it must
+resolve to a real skill -- but nothing here can know that a FIFTH task-shaped
+skill has appeared. Add it here when one does.
+
+A FOURTH did, which is why that sentence now reads FIFTH.
+`check-clickup-addressed` was migrated into devrc after this gate was written,
+and it is the most confusable sibling yet: it works the SAME ClickUp tasks and
+asks the opposite question -- not "what is on this ticket" but "was the work
+actually done", answered by reading session transcripts. The overlap has a cheap
+half and an expensive half, and only the expensive half is a listing entry:
+`node query.mjs awaiting` (in `clickup`) is the ~45s triage pass answering WHICH
+tasks have someone else's comment last, and `check-clickup-addressed` is the
+transcript-reading verdict on WHETHER each is done. `awaiting` is a CLI command,
+not a skill, so it costs the listing nothing and must NOT be added to the ledger
+below -- every key there is asserted to be a real skill directory.
 
 NOT asserted: a minimum description length. Measured when this was written, the
 defect was 175 chars and the next-shortest entry was 181 (`espanso-audit`), so
@@ -51,6 +65,7 @@ from __future__ import annotations
 
 import importlib.machinery
 import importlib.util
+import re
 from pathlib import Path
 
 import pytest
@@ -88,15 +103,20 @@ CLICKUP_SIBLINGS = {
     "clawgate": "the self-hosted approval UI, which has its own Tasks",
     "initiatives": "the durable cross-repo initiative board",
     "mailbox": "the email action-items queue",
+    "check-clickup-addressed": (
+        "verifies from session transcripts whether work on a ClickUp task was "
+        "actually completed -- the same tasks, the opposite question"
+    ),
 }
 
 # The disambiguating sentence, pinned WHOLE and built from the sibling names.
 #
 # 🔴 Deliberately not a per-name substring check. `claude/RULES.md`: "When the
 # artifact under test IS prose, a guard on WORDS is walkable by REWORDING -- pin
-# the WHOLE normalised string." A description could name all three siblings in
-# passing ("see also clawgate, initiatives, mailbox") and satisfy a word check
-# while telling the router nothing about which one owns which case. The stated
+# the WHOLE normalised string." A description could name EVERY sibling in
+# passing ("see also clawgate, initiatives, mailbox and check-clickup-addressed")
+# and satisfy a word check while telling the router nothing about which one owns
+# which case -- that exact walk is a control below. The stated
 # cost, accepted: a cosmetic reword of this ONE sentence fails this test. The
 # routing keywords in the rest of the description are deliberately left free to
 # change -- rigidifying those would make the gate fight the very tuning it exists
@@ -104,7 +124,9 @@ CLICKUP_SIBLINGS = {
 CLICKUP_DISAMBIGUATION = (
     "This is the EXTERNAL ClickUp workspace — the self-hosted approval UI and "
     "ITS Tasks are `clawgate`, the durable cross-repo board is `initiatives`, "
-    "and the email action-items queue is `mailbox`."
+    "the email action-items queue is `mailbox`, and verifying from session "
+    "transcripts whether work on a task was actually done is "
+    "`check-clickup-addressed`."
 )
 
 
@@ -229,6 +251,33 @@ def test_no_listing_entry_breaches_the_per_entry_cap():
     )
 
 
+def test_the_sibling_ledger_and_the_pinned_sentence_name_the_SAME_skills():
+    """🔴 Two-way, so the ledger cannot silently SHRINK.
+
+    Everything else here that iterates siblings iterates the LEDGER, so deleting
+    an entry deletes its assertions along with it: the gate keeps passing while
+    checking strictly less than its docstring claims -- a guard reading as
+    coverage while providing none (`claude/RULES.md`). MEASURED, not reasoned:
+    dropping `check-clickup-addressed` from CLICKUP_SIBLINGS left this whole
+    module GREEN at 14 passed -- one quieter parametrised case than before, and
+    no failure anywhere.
+
+    Pinning the two sets EQUAL fails in both directions -- a name added to the
+    sentence without a ledger entry (so its skill is never proved to exist), and
+    a ledger entry deleted while the sentence still routes at it.
+    """
+    named = set(re.findall(r"`([a-z0-9][a-z0-9-]*)`", CLICKUP_DISAMBIGUATION))
+    assert named == set(CLICKUP_SIBLINGS), (
+        "the pinned disambiguation sentence and CLICKUP_SIBLINGS have drifted "
+        "apart.\n  named in the sentence but not in the ledger (so nothing "
+        f"proves the skill exists): {sorted(named - set(CLICKUP_SIBLINGS))}"
+        "\n  in the ledger but not named in the sentence (so the ledger "
+        "describes routing the listing does not carry): "
+        f"{sorted(set(CLICKUP_SIBLINGS) - named)}"
+        "\nUpdate both, plus clickup's description, in the same commit."
+    )
+
+
 @pytest.mark.parametrize("sibling", sorted(CLICKUP_SIBLINGS))
 def test_each_clickup_sibling_is_a_real_skill(sibling):
     """The disambiguation must point at something that EXISTS. A renamed or
@@ -254,13 +303,6 @@ def test_clickup_disambiguates_from_its_task_shaped_siblings():
     entries = {name: desc for _, name, desc in _entries()}
     assert "clickup" in entries, "the clickup skill is not in the listing at all"
     normalised = " ".join(entries["clickup"].split())
-
-    for sibling in sorted(CLICKUP_SIBLINGS):
-        assert sibling in CLICKUP_DISAMBIGUATION, (
-            f"`{sibling}` is in the sibling ledger but the pinned "
-            "disambiguation sentence does not mention it -- the ledger and the "
-            "pin have drifted apart, so this gate is checking less than it says."
-        )
 
     assert normalised.count(CLICKUP_DISAMBIGUATION) == 1, (
         "clickup's description no longer carries its disambiguation sentence "
@@ -348,7 +390,7 @@ def test_control_a_passing_mention_of_every_sibling_still_fails_the_pin():
     disambiguate from none of them. A per-name substring check passes this."""
     walked = (
         "Interact with ClickUp tasks and documents. See also clawgate, "
-        "initiatives and mailbox."
+        "initiatives, mailbox and check-clickup-addressed."
     )
     for sibling in CLICKUP_SIBLINGS:
         assert sibling in walked, "fixture broken: it must name every sibling"

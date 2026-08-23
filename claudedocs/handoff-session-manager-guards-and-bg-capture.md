@@ -124,16 +124,16 @@ Both converged on the same field name, `my_latest_reply`, and the same three-sta
 - **Symptom + exact repro:**
   `python3 $DATAPACKET/.claude/skills/check-clickup-addressed/scripts/check-addressed.py --limit 5`
   emitted, in **Needs a decision**:
-  `868kuam02: @Ellie King is WAITING — the ticket is to do, and the task ID appears in NO
+  `868kuam02: @<colleague> is WAITING — the ticket is to do, and the task ID appears in NO
   transcript, so no work exists anywhere. Commented 2d ago; nobody has answered. Read it.`
 - **Observed (with values):** `node ~/.claude/skills/clickup/query.mjs comments 868kuam02 --threads`
-  shows three comments — Ellie King **Aug 19 09:10 PM** and **Aug 19 09:18 PM**, then
-  **Zachary Lowden Aug 21 01:52 PM**, a long substantive reply answering her decision
-  question. The newest comment on the ticket is the operator's own, ~2 days *after* Ellie.
+  shows three comments — the colleague **Aug 19 09:10 PM** and **Aug 19 09:18 PM**, then
+  **the operator, Aug 21 01:52 PM**, a long substantive reply answering her decision
+  question. The newest comment on the ticket is the operator's own, ~2 days *after* theirs.
   The checker's own report line reads
-  `newest comment [2026-08-20 02:18] @Ellie King` — i.e. it named Ellie's as newest.
+  `newest comment [2026-08-20 02:18] @<colleague>` — i.e. it named the colleague's as newest.
 - **Ruled out:** *not* a timezone artifact — Aug 19 21:18 local == Aug 20 02:18 UTC, which is
-  the timestamp the tool printed, so the two agree on Ellie's comment and simply never
+  the timestamp the tool printed, so the two agree on that comment and simply never
   consider the later one. *Not* the prior-run exclusion (that drops transcripts, not
   comments). *Not* a stale cache — reproduced against a live API read minutes later.
 - **Leading hypothesis:** `recent-comments.py` filters out the operator's own comments by

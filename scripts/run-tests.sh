@@ -1426,7 +1426,19 @@ TARGET_FLOORS=(
   # four an adversarial audit of the migration produced — the documented `$CCUA/...`
   # invocation, the unmarked `--json` output, its end-to-end seam, and the
   # header/marker single-source pin.)
-  "scripts/check-clickup-addressed/tests|168"
+  #
+  # 2026-08-22, re-pinned when upstream rounds 7+8 were ported in: 213 collected,
+  # from this gate's own line `PASS scripts/check-clickup-addressed/tests
+  # (collected=213 passed=213 skipped=0 floor=168)`, again agreeing with
+  # tests/run_all.py (213 passed, 0 failed) — two runners, one number.
+  #   _suggested_floor 213 = 213 - min(50, max(1, 213/20 = 10)) = 213 - 10 = 203.
+  # 🔴 The gate did NOT force this: 213 is under the drift ceiling (floor 168 +
+  # max(60, 168/4) = 228), so it passed and printed no replacement number. Re-pinned
+  # anyway, because 45 tests of slack is most of what this port ADDED — the whole
+  # waiting corpus (8) plus the bounds/parsing set (5) plus the round-7 additions
+  # could have vanished with the gate still green, which is the exact staleness the
+  # header above says a per-target floor exists to prevent.
+  "scripts/check-clickup-addressed/tests|203"
   "scripts/claude-hooks/tests/test_guard_core.py|1260"
   # 2026-08-13, next-step-nudge.py's suite arrives as a NEW target: 78 collected on the
   # branch. Gate's own count through the gate's own rule:
@@ -2019,6 +2031,9 @@ _spool_account() {
 #     fingerprinted before and after each target. That is what catches the
 #     residual hazard the exports cannot close — code that REMOVES
 #     GIT_CONFIG_GLOBAL from its own environment and drops back to $HOME.
+#     🔴 IT WATCHES TWO CLASSES AND ENFORCES THEM DIFFERENTLY (#730) — GLOBAL
+#     files always, the repo-local `<git-common-dir>/config` only while this run
+#     can still attribute a change to a target. See the class split below.
 #
 # 🔴 HOME IS DELIBERATELY NOT REASSIGNED. Several suites legitimately read
 # `~/.claude/...`, so a blanket HOME rewrite would break real tests and be
@@ -2052,8 +2067,65 @@ _nogit_protect "${XDG_CONFIG_HOME:-${HOME:-}/.config}/git/config"
 # is a REPO-LOCAL write — GIT_CONFIG_GLOBAL does not govern it at all. The
 # tripwire is the only thing that can see it. (Absent in the nix sandbox, which
 # builds from a store copy with no `.git`; that is reported, not assumed.)
+#
+# 🔴 BUT IT IS A DIFFERENT CLASS FROM THE OTHERS, AND #730 IS WHAT MEASURED IT.
+# The two files above are the OPERATOR'S: no concurrent worktree operation
+# writes `~/.gitconfig`, so a change there is still attributable to whatever was
+# running. `<git-common-dir>/config` is SHARED BY EVERY WORKTREE OF THE CLONE —
+# `git worktree add`, `git branch --track` and any `git config` in any of them
+# rewrite it. On the operator's box that clone carries ~90 worktrees and ~15
+# concurrent sessions, so it changes continuously and GUARD 10 blamed whichever
+# target happened to be running.
+#
+# MEASURED, same commit, two environments:
+#   isolated clone (own .git)  -> real-config-changed=0/3 everywhere, PASS
+#   shared clone (~90 wts)     -> .git/config CHANGED on 2 targets, FAIL,
+#                                 with failed=0: every test passed.
+# In that same shared run GUARD 9 (#720) independently PROVED co-tenancy and
+# downgraded itself to report mode. Two guards over an overlapping file set,
+# one of them attributing and one of them not.
+#
+# So the repo-local member is tracked SEPARATELY and enforced CONDITIONALLY: it
+# fails the run exactly as before UNLESS another writer is PROVEN, in which case
+# the change is REPORTED (printed, counted, named, with the reason) and does not
+# fail. The proof is GUARD 9's own already-audited evidence — see
+# `_nogit_cotenancy_probe` below — not a second heuristic. With no proven
+# co-tenant it still fails.
+#
+# 🔴 BE PRECISE ABOUT WHERE THAT REMAINING ENFORCEMENT ACTUALLY LIVES — an
+# earlier wording here claimed the `core.bare = true` casualty "stays covered on
+# a clean machine and in CI", and the CI half is FALSE. The nix tier builds from
+# `cp -r ${./.} src` (`flake.nix`), a store copy with NO `.git` — which is what
+# the parenthesis above already says — so `NOGIT_REPO_LOCAL` is EMPTY there and
+# there is nothing for this class to enforce, downgrade or not. And on the
+# operator's box co-tenancy is provable essentially always. So repo-local
+# enforcement really survives in exactly one place: an isolated, single-writer
+# clone — which nothing currently schedules. It is a floor for the machine that
+# has one writer, not a gate that runs on every merge. The GLOBAL class above is
+# unaffected and is enforced everywhere, including in the sandbox.
+#
+# 🔴 AND THE EVIDENCE HAS A BLIND SPOT WORTH NAMING, because it is the writer
+# this change exists to excuse. `live_cotenants` roots at a git dir and its
+# PARENT, so for a linked worktree the roots are `<common>/.git` and the MAIN
+# clone's work tree. A session sitting in a SIBLING worktree
+# (`…/devrc-<topic>/`) is outside both and is NOT counted — MEASURED, all 35
+# co-tenant hits on the operator's box were cwd=`…/devrc` itself, zero from any
+# sibling. Widening those roots would be the second heuristic #730 says not to
+# invent, so this is a documented limit, not a TODO: absence of evidence leaves
+# the guard ENFORCING, which is the safe direction.
+NOGIT_REPO_LOCAL=()
 NOGIT_REPO_GITDIR="$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
-[ -n "$NOGIT_REPO_GITDIR" ] && _nogit_protect "$NOGIT_REPO_GITDIR/config"
+if [ -n "$NOGIT_REPO_GITDIR" ]; then
+  _nogit_protect "$NOGIT_REPO_GITDIR/config"
+  NOGIT_REPO_LOCAL+=("$NOGIT_REPO_GITDIR/config")
+fi
+_nogit_is_repo_local() { # $1 = path -> 0 when it is the shared repo-local config
+  local p="$1" q
+  for q in ${NOGIT_REPO_LOCAL[@]+"${NOGIT_REPO_LOCAL[@]}"}; do
+    [ "$q" = "$p" ] && return 0
+  done
+  return 1
+}
 
 _nogit_fingerprint_of() { # $@ = paths -> one line each: "<sha256|ABSENT> <path>"
   local f
@@ -2073,7 +2145,11 @@ NOGIT_DIR="$(mktemp -d)"
 NOGIT_CONFIG="$NOGIT_DIR/gitconfig"
 NOGIT_SESSIONS_LOG="$NOGIT_DIR/sessions.log"
 NOGIT_CHANGED_LOG="$NOGIT_DIR/changed.log"
-if ! : > "$NOGIT_CONFIG" || ! : > "$NOGIT_CHANGED_LOG"; then
+NOGIT_EVIDENCE_LOG="$NOGIT_DIR/evidence.log"
+# 🔴 THE EVIDENCE LOG IS IN THIS CHECK, not just in the list above. It is the
+# only record of WHY anything was downgraded, there is no `set -e` here, and an
+# unwritable one would silently produce downgrades with no stated cause.
+if ! : > "$NOGIT_CONFIG" || ! : > "$NOGIT_CHANGED_LOG" || ! : > "$NOGIT_EVIDENCE_LOG"; then
   echo "run-tests: FATAL — could not create the git-isolation files under" >&2
   echo "  $NOGIT_DIR. Refusing to run: without them a test that calls" >&2
   echo "  'git config --global' rewrites the operator's ~/.gitconfig, and a" >&2
@@ -2165,11 +2241,114 @@ if [ "${#NOGIT_PROTECTED[@]}" -eq 0 ]; then
 else
   echo "  protected files: ${#NOGIT_PROTECTED[@]} (fingerprinted before/after every target)"
   for f in "${NOGIT_PROTECTED[@]}"; do
-    if [ -f "$f" ]; then echo "    present $f"; else echo "    absent  $f"; fi
+    # The CLASS is printed beside every path, at every site, because the two are
+    # enforced differently and a reader must never have to infer which is which.
+    if _nogit_is_repo_local "$f"; then
+      _nogit_cls="repo-local, enforcing unless another writer is PROVEN"
+    else
+      _nogit_cls="global, always enforcing"
+    fi
+    if [ -f "$f" ]; then echo "    present $f  [$_nogit_cls]"
+    else echo "    absent  $f  [$_nogit_cls]"; fi
   done
+  unset _nogit_cls
 fi
 
-# "<target>|<sess-from>|<sess-to>|<n-changed>|<control-delta>"
+# 🔴 THE EVIDENCE, BORROWED WHOLE FROM GUARD 9 — NOT A SECOND HEURISTIC.
+# `scripts/testlib/gitenv.py` already owns "can this session attribute a change
+# to a test?", it was audited for #683/#720, and it answers with POSITIVE
+# evidence: a live process, not one of our own ancestors, whose CWD sits inside
+# the work tree of a protected repository. That is the only question GUARD 10
+# needs, so it is asked THERE — one rule, one place. A bash re-implementation
+# would be a second policy that drifts from the first.
+#
+# `$ROOT` is passed EXPLICITLY rather than left to the default cwd discovery:
+# `protected_git_dirs()` also probes the module's own directory, which resolves
+# to whatever clone `scripts/testlib` lives in. That is right for GUARD 9's
+# in-process detector and wrong here — the question is about the repository
+# whose `<git-common-dir>/config` this runner is fingerprinting, and nothing
+# else. (It is the same argument the runner already `cd`'d to.)
+#
+# 🔴 FAIL TOWARD ENFORCING. A probe that cannot run (no python, an import error,
+# a helper that raises, a repo it cannot resolve, a hang) must NEVER read as
+# "another writer was found" — that is a broken instrument silently switching
+# the guard off, which claude/RULES.md rates worse than no guard. Any non-zero
+# exit, any empty git-dir set, and any output that does not carry the token
+# below comes back as `probe-failed`/`none`, and the change is enforced exactly
+# as it was before this change existed.
+#
+# 🔴 THE TOKEN IS THE FIX FOR A MEASURED FAIL-OPEN. This used to decide `proven`
+# from `[ -s "$out" ]` — output PRESENCE, not content — while the probe inherits
+# the ambient `PYTHONPATH`. So ANY stdout on that path counted as evidence:
+# MEASURED with NO co-tenant present, a single `print()` added to
+# `scripts/testlib/__init__.py` produced `repo-local-reported=1` and downgraded
+# a genuinely attributable write, rendering the stray line as GUARD 9 evidence.
+# A package that chatters at import, a `.pth`, a `sitecustomize` — all reach it.
+# Now only lines the probe itself stamps are accepted, and `proven` requires at
+# least one ACCEPTED reason, so whitespace-only or unstamped stdout is `none`.
+NOGIT_EVIDENCE_TOKEN="DEVRC-NOGIT-EVIDENCE"
+# `timeout` keeps a hung probe from wedging the whole run — "fails toward
+# enforcing" says nothing about a `/proc` stat that never returns. Absent
+# `timeout` is not fatal: the probe runs bare, exactly as before.
+if command -v timeout >/dev/null 2>&1; then
+  NOGIT_PROBE_TIMEOUT=(timeout 60)
+else
+  NOGIT_PROBE_TIMEOUT=()
+fi
+NOGIT_EV_STATUS=""    # proven | none | probe-failed
+_nogit_cotenancy_probe() { # $1 = target -> sets NOGIT_EV_STATUS, logs the reason
+  local t="$1" out="$NOGIT_DIR/evidence.out" err="$NOGIT_DIR/evidence.err"
+  local rc=0 n=0 line reason
+  : > "$out"; : > "$err"
+  PYTHONPATH="$ROOT/scripts${PYTHONPATH:+:$PYTHONPATH}" \
+  ${NOGIT_PROBE_TIMEOUT[@]+"${NOGIT_PROBE_TIMEOUT[@]}"} python -c '
+import sys
+from pathlib import Path
+from testlib.gitenv import attribution_evidence, protected_git_dirs
+token, starts = sys.argv[1], sys.argv[2:]
+dirs = protected_git_dirs([Path(p) for p in starts])
+if not dirs:
+    # No repository resolved, yet a repo-local config just changed. The two
+    # cannot both be true, so this is a broken probe, not an absence of writers.
+    sys.exit(3)
+for reason in attribution_evidence(dirs):
+    reason = " ".join(str(reason).split())   # one line, so one accepted reason
+    if reason:
+        sys.stdout.write(f"{token}\t{reason}\n")
+' "$NOGIT_EVIDENCE_TOKEN" "$ROOT" >"$out" 2>"$err" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    NOGIT_EV_STATUS="probe-failed"
+    printf '%s\t%s\t%s\n' "$t" "probe-failed" \
+      "the co-tenancy probe exited $rc (124 = timed out), so no writer was PROVEN and this change is ENFORCED: $(tr '\n' ' ' < "$err" | cut -c1-300)" \
+      >> "$NOGIT_EVIDENCE_LOG"
+    return 0
+  fi
+  # Only the probe's OWN stamped lines are evidence. Anything else on stdout
+  # belongs to somebody else's import and is not a fact about co-tenancy.
+  while IFS= read -r line; do
+    case "$line" in
+      "$NOGIT_EVIDENCE_TOKEN"$'\t'*) : ;;
+      *) continue ;;
+    esac
+    reason="${line#"$NOGIT_EVIDENCE_TOKEN"$'\t'}"
+    [ -n "$reason" ] || continue
+    n=$(( n + 1 ))
+    printf '%s\t%s\t%s\n' "$t" "proven" "$reason" >> "$NOGIT_EVIDENCE_LOG"
+  done < "$out"
+  # 🔴 SET *AFTER* THE LOOP, deliberately. Setting it before meant
+  # whitespace-only stdout produced `proven` with ZERO logged reasons — a
+  # downgrade whose stated cause was the empty string.
+  if [ "$n" -gt 0 ]; then
+    NOGIT_EV_STATUS="proven"
+  else
+    NOGIT_EV_STATUS="none"
+    printf '%s\t%s\t%s\n' "$t" "none" \
+      "the co-tenancy probe returned no evidence, so this change IS attributable to the target and is ENFORCED" \
+      >> "$NOGIT_EVIDENCE_LOG"
+  fi
+}
+
+# "<target>|<sess-from>|<sess-to>|<n-enforced>|<control-delta>|<n-reported>"
 NOGIT_SEEN=()
 NOGIT_B_FP=""
 NOGIT_B_CTL=0
@@ -2186,18 +2365,44 @@ _nogit_mark_before() {
 }
 # $1 = target name. Every call MUST be preceded by the before-mark above, or the
 # range it records belongs to whatever ran previously.
+#
+# Two counters out, not one: ENFORCED changes (every global one, plus every
+# repo-local one this run could still attribute) and REPORTED ones (repo-local,
+# with another writer proven). A reported change is never dropped — it is
+# written to the changed log with its class, its reason is written to the
+# evidence log, and both are printed in the accounting below.
 _nogit_account() {
-  local t="$1" i n=0
-  local -a B A
+  local t="$1" i n=0 rep=0 path cls repo_hits=0 proven=0
+  local -a B A CHANGED=()
   mapfile -t B <<<"$NOGIT_B_FP"
   mapfile -t A <<<"$(_nogit_fingerprint)"
   for ((i = 0; i < ${#A[@]}; i++)); do
     if [ "${B[i]:-}" != "${A[i]}" ]; then
-      n=$(( n + 1 ))
-      printf '%s\t%s\n' "$t" "${A[i]#* }" >> "$NOGIT_CHANGED_LOG"
+      path="${A[i]#* }"
+      CHANGED+=("$path")
+      _nogit_is_repo_local "$path" && repo_hits=$(( repo_hits + 1 ))
     fi
   done
-  NOGIT_SEEN+=("$t|$(( NOGIT_B_S + 1 ))|$(_spool_lines "$NOGIT_SESSIONS_LOG")|$n|$(( $(_nogit_controls) - NOGIT_B_CTL ))")
+  # Asked once per target and only when it can change an outcome — the evidence
+  # is contemporaneous with the delta it explains, which is the whole point of
+  # asking it here rather than once at startup.
+  if [ "$repo_hits" -gt 0 ]; then
+    _nogit_cotenancy_probe "$t"
+    [ "$NOGIT_EV_STATUS" = "proven" ] && proven=1
+  fi
+  for path in ${CHANGED[@]+"${CHANGED[@]}"}; do
+    if _nogit_is_repo_local "$path"; then
+      if [ "$proven" -eq 1 ]; then
+        cls="repo-local-reported"; rep=$(( rep + 1 ))
+      else
+        cls="repo-local-enforced"; n=$(( n + 1 ))
+      fi
+    else
+      cls="global-enforced"; n=$(( n + 1 ))
+    fi
+    printf '%s\t%s\t%s\n' "$t" "$cls" "$path" >> "$NOGIT_CHANGED_LOG"
+  done
+  NOGIT_SEEN+=("$t|$(( NOGIT_B_S + 1 ))|$(_spool_lines "$NOGIT_SESSIONS_LOG")|$n|$(( $(_nogit_controls) - NOGIT_B_CTL ))|$rep")
 }
 
 # 🔴 THE ACKNOWLEDGEMENT LEDGER — "<target>|<reason>". A target listed here is
@@ -2571,9 +2776,25 @@ done
 # cases passed FOR THE WRONG REASON. It asserts the pure extraction helpers that
 # the DRIFT block's whole PR-reconciliation rests on; an unrun suite is a guard
 # that reports no failures.
+#
+# `test_base_clone_staleness.sh` is here from birth rather than being found
+# ungated later, which is the only difference between it and the two above. It
+# covers `scripts/claude-hooks/base-clone-staleness.sh`, a SessionStart hook that
+# WRITES to a clone's working tree (`git checkout <upstream> -- CLAUDE.md
+# .claude/skills/`), so an unrun suite here is an unguarded write path, not just
+# an unmeasured helper. Hermetic: its fixtures are local bare repos under a
+# mktemp dir — no network, no real remote, and every commit carries its identity
+# via `git -c user.email=…`, so it needs nothing from the operator's gitconfig
+# and stays inside GUARD 10's isolation.
+#
+# 🔴 Its HOOK default resolves the hook RELATIVE TO THE SUITE (../claude-hooks/),
+# not a deployed ~/.claude/ path. That is what makes this gate grade the tracked
+# file; a default pointing at a per-host copy would be green about something that
+# is not in the commit. Do not "simplify" it back.
 SHELL_TESTS=(
   "scripts/tests/test_release_wrapper.sh"
   "scripts/tests/test_resume_state.sh"
+  "scripts/tests/test_base_clone_staleness.sh"
 )
 for SHELL_TEST in "${SHELL_TESTS[@]}"; do
   if [ ! -f "$SHELL_TEST" ]; then
@@ -2899,8 +3120,12 @@ if [ "${#NOGIT_PROTECTED[@]}" -eq 0 ]; then
        "no .git in this tree). The controls carry this run; the tripwire watched nothing."
 else
   echo "    protected-files=${#NOGIT_PROTECTED[@]}  (fingerprinted before/after every target)"
+  echo "    classes=global:$(( ${#NOGIT_PROTECTED[@]} - ${#NOGIT_REPO_LOCAL[@]} ))" \
+       "(always enforcing)  repo-local:${#NOGIT_REPO_LOCAL[@]}" \
+       "(enforcing unless another writer is PROVEN — see #730)"
 fi
 nogit_problems=()
+nogit_reported_total=0
 for t in "${TARGETS[@]}"; do
   seen=0
   for entry in ${NOGIT_SEEN[@]+"${NOGIT_SEEN[@]}"}; do
@@ -2910,7 +3135,9 @@ for t in "${TARGETS[@]}"; do
 done
 
 for entry in ${NOGIT_SEEN[@]+"${NOGIT_SEEN[@]}"}; do
-  IFS='|' read -r gt gfrom gto gchanged gctl <<<"$entry"
+  IFS='|' read -r gt gfrom gto gchanged gctl greported <<<"$entry"
+  greported="${greported:-0}"
+  nogit_reported_total=$(( nogit_reported_total + greported ))
 
   gsess="$(_spool_slice "$NOGIT_SESSIONS_LOG" "$gfrom" "$gto")"
   markers=$(printf '%s\n' "$gsess" | grep -c "^$NOGIT_SESSION_MARKER" || true)
@@ -2928,15 +3155,38 @@ for entry in ${NOGIT_SEEN[@]+"${NOGIT_SEEN[@]}"}; do
   is_pytest=0
   for t in "${TARGETS[@]}"; do [ "$t" = "$gt" ] && is_pytest=1 && break; done
 
-  echo "    $gt  real-config-changed=$gchanged/${#NOGIT_PROTECTED[@]}  config-control=$gctl  protocol=${m_protocol:-n/a}  plugin=$markers"
+  # `repo-local-reported` is printed on EVERY line, including its zero. It is not
+  # a detector's zero — it is a count of deltas this run declined to attribute —
+  # and printing it always is what makes a non-zero one impossible to miss.
+  echo "    $gt  real-config-changed=$gchanged/${#NOGIT_PROTECTED[@]}  config-control=$gctl  protocol=${m_protocol:-n/a}  plugin=$markers  repo-local-reported=$greported"
 
   # 🔴 THE DAMAGE ITSELF. A protected file whose fingerprint moved is the
   # 2026-08-21 incident happening again: `~/.gitconfig` rewritten, or
   # `core.bare = true` written into a populated clone's `.git/config`.
+  #
+  # `$gchanged` counts only the ENFORCED classes. A repo-local delta with a
+  # proven external writer is in `$greported` instead and is rendered below,
+  # never here and never silently.
   if [ "$gchanged" -gt 0 ]; then
-    changed_names="$(grep -F "$(printf '%s\t' "$gt")" "$NOGIT_CHANGED_LOG" 2>/dev/null \
-      | cut -f2- | sed 's/^/             /' || true)"
-    nogit_problems+=("$gt  — CHANGED $gchanged of the operator's protected git config file(s) while it ran. GIT_CONFIG_GLOBAL redirects 'git config --global', so this reached them some other way (code that removes the variable from its own environment, or a repo-local write):"$'\n'"$changed_names")
+    changed_names="$(awk -F'\t' -v t="$gt" \
+      '$1 == t && $2 != "repo-local-reported" { printf "             %s  [%s]\n", $3, $2 }' \
+      "$NOGIT_CHANGED_LOG" 2>/dev/null || true)"
+    # The cause differs by class, and the old single sentence was a confident
+    # misdiagnosis for the repo-local one: it sent the reader to audit a target
+    # that had done nothing (#730).
+    if printf '%s' "$changed_names" | grep -q 'repo-local-enforced'; then
+      # 🔴 STATE WHAT THE PROBE MEASURED, NOT AN INFERENCE FROM IT. This used to
+      # read "no live process outside its own lineage sits in that repository",
+      # which the probe cannot support: `live_cotenants` roots at the git dir
+      # and its PARENT, so a session in a SIBLING worktree is never counted.
+      # Telling a reader no other writer exists, when the writer this guard
+      # exists for is structurally invisible, is the same class of confident
+      # misdiagnosis #730 was filed about.
+      nogit_why="A repo-local one is a write to <git-common-dir>/config, which GIT_CONFIG_GLOBAL does not govern at all — and this run FOUND NO PROOF of another writer, so the change is attributed to this target. What was actually checked: no live process outside this run's own lineage had its cwd inside the git dir or its parent. That does NOT cover a session sitting in a SIBLING worktree of the same clone, which is invisible to this probe — if that is what wrote here, 'git reflog' and the file's mtime will say so. A global one reached the operator's file some other way: code that removes GIT_CONFIG_GLOBAL from its own environment."
+    else
+      nogit_why="GIT_CONFIG_GLOBAL redirects 'git config --global', so this reached them some other way — code that removes the variable from its own environment."
+    fi
+    nogit_problems+=("$gt  — CHANGED $gchanged of the operator's protected git config file(s) while it ran. $nogit_why"$'\n'"$changed_names")
   fi
 
   if [ "$is_pytest" -eq 1 ]; then
@@ -2960,9 +3210,42 @@ for entry in ${NOGIT_SEEN[@]+"${NOGIT_SEEN[@]}"}; do
   fi
 done
 
+# 🔴 A DOWNGRADE IS NOT A DROP. Everything this run declined to attribute is
+# rendered in full — the target, the file, its class, and the EVIDENCE that
+# licensed the downgrade, worded the way GUARD 9 words it. A guard that quietly
+# stopped failing would be indistinguishable from a guard that stopped looking;
+# these lines are the difference, and they are on stdout beside the counts.
+echo "    repo-local-reported-total=$nogit_reported_total  (deltas to <git-common-dir>/config this run could NOT attribute)"
+if [ "$nogit_reported_total" -gt 0 ]; then
+  echo "    ---- repo-local git config: REPORTED, not enforced (#730) ----"
+  awk -F'\t' '$2 == "repo-local-reported" { printf "      %s\n        changed: %s\n", $1, $3 }' \
+    "$NOGIT_CHANGED_LOG" 2>/dev/null || true
+  awk -F'\t' '$2 == "proven" { printf "      %s\n        cannot attribute: %s\n", $1, $3 }' \
+    "$NOGIT_EVIDENCE_LOG" 2>/dev/null || true
+  echo "      This file is the git COMMON dir's config, shared by every worktree of"
+  echo "      the clone; 'git worktree add', 'git branch --track' and any 'git config'"
+  echo "      in any of them rewrite it. GUARD 10's PREVENTION half is unaffected and"
+  echo "      still in force; only ATTRIBUTION is impossible here. Re-run in a clone"
+  echo "      with one writer to enforce it — an isolated clone still fails on this."
+fi
+# The same rendering for the two states that did NOT downgrade. A repo-local
+# delta that was enforced, or a probe that could not run, must say WHY beside
+# the failure it caused — otherwise the reader is back to guessing.
+if [ -s "$NOGIT_EVIDENCE_LOG" ]; then
+  awk -F'\t' '$2 == "none" || $2 == "probe-failed" { printf "    %s  evidence=%s: %s\n", $1, $2, $3 }' \
+    "$NOGIT_EVIDENCE_LOG" 2>/dev/null || true
+fi
+
 if [ "${#nogit_problems[@]}" -gt 0 ]; then
+  # 🔴 THE BLOCK IS DELIMITED so a test can assert a path appears IN THE
+  # FAILURE, not merely somewhere in the run. MEASURED: without the end marker,
+  # `str(path) in out` was satisfied by the startup `present <path> [<class>]`
+  # listing, which prints unconditionally — suppressing the path here left the
+  # negative controls GREEN. Same shape as the reason assertion inside the
+  # downgrade block; the remedy just had not been applied here.
   echo "  ERROR: ${#nogit_problems[@]} GUARD 10 problem(s):" >&2
   for p in "${nogit_problems[@]}"; do echo "         $p" >&2; done
+  echo "  ---- end GUARD 10 problems ----" >&2
   fail=1
 fi
 rm -rf "$NOGIT_DIR"

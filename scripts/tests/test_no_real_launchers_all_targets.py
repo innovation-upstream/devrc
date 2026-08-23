@@ -191,9 +191,17 @@ def test_the_non_pytest_targets_are_covered_and_named():
     # split between "fails" and "passes because the helper returns false for
     # every input". It touches no launcher and no spool — it sources
     # resume-state.sh and asserts pure extraction helpers on fixture strings.
+    # Third entry: `test_base_clone_staleness.sh`, registered when the suite
+    # LANDED rather than after being found ungated — the only difference between
+    # it and the two above. It touches no launcher: it drives
+    # `scripts/claude-hooks/base-clone-staleness.sh` against local bare-repo
+    # fixtures under a mktemp dir, and every fixture commit carries its identity
+    # via `git -c user.email=…`, so it reaches no real remote and needs nothing
+    # from the operator's gitconfig.
     assert shells == [
         "scripts/tests/test_release_wrapper.sh",
         "scripts/tests/test_resume_state.sh",
+        "scripts/tests/test_base_clone_staleness.sh",
     ], shells
     for rel in hooks + shells:
         assert (REPO_ROOT / rel).is_file(), f"{rel} is listed but does not exist"

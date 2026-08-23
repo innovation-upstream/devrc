@@ -7,8 +7,14 @@ consecutive rounds shipping a regression. What ended that was scoring every cand
 the SAME labelled set: trunk 24/42, the first tiering attempt 28/42, the version that shipped
 39/42. "Better" became a number instead of an argument.
 
-Every case came from a MEASUREMENT — the round-8 table, two blind audits, and the real
-ClickUp comment on 868ktt2ct. None was invented to make a rule look good.
+Every case came from a MEASUREMENT — the round-8 table, two blind audits, and a live
+ClickUp comment on 868gy0fff. None was invented to make a rule look good.
+
+🔴 The task IDs, author names and comment wording here are SYNTHETIC (this repo is public;
+see `tests/test_no_real_identifiers.py`). What is preserved is the SHAPE each case was
+chosen for — negator position, clause boundaries, closure vocabulary — because that is the
+whole content of a label. Paraphrase, never flatten: a case reworded into a simpler sentence
+scores the same and tests nothing.
 
 **When you change the veto, run this first.** A candidate that scores lower is worse, however
 good its reasoning sounds. Add the case that motivated your change, with the verdict a human
@@ -54,10 +60,10 @@ CORPUS = [
     (VETO, "This is not (yet) resolved."),
     (VETO, "This is not, in my view, resolved."),   # known failure: see KNOWN_FAILURES
     (VETO, "Status check during ClickUp triage — staying open, and mostly not verifiable "
-           "from this repo. Per the thread: R1 shipped via talos-infra #1093."),
+           "from this repo. Per the thread: part one shipped via a sibling repo, #1093."),
 
     # --- B: the work is finished. Must produce the close-it flag.
-    (CLOSE, "Resolved on both counts. Recommend closing."),
+    (CLOSE, "Resolved end to end. Recommend closing."),
     (CLOSE, "Resolved, no further action needed."),
     (CLOSE, "Recommend closing, no further work planned."),
     (CLOSE, "Confirmed resolved, no repro since Tuesday."),
@@ -71,14 +77,14 @@ CORPUS = [
     (CLOSE, "The root cause (never reproduced in staging) is resolved."),
 
     # --- C: the comment genuinely says both. Must refuse to instruct.
-    (READ, "Resolved on both counts, recommend closing. (The follow-up PR is still open "
+    (READ, "Resolved end to end, recommend closing. (The follow-up PR is still open "
            "but unrelated.)"),
     (READ, "One review thread is not resolved on the PR, but the ticket itself is done. "
            "Recommend closing."),
     (READ, "The alert fired and was not resolved automatically. Ticket work is done — "
            "recommend closing."),
     (READ, "The fix landed in #1234 and is live. The follow-up PR is still open but unrelated."),
-    (READ, "Resolved on both counts, recommend closing. The upstream task is still open "
+    (READ, "Resolved end to end, recommend closing. The upstream task is still open "
            "but that is tracked separately."),
     (READ, "Fix merged. The duplicate task is still open, closing this one."),
 
