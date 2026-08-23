@@ -809,6 +809,67 @@ def live_scope_path(store: Path, scope: str) -> Path | None:
     return p
 
 
+# Where `%m` comes from. A module-level tuple so the test suite can point the
+# reader at synthetic files and exercise the REAL function, rather than
+# re-implementing its shape check in the test — which would only ever prove the
+# test agrees with itself.
+_MACHINE_ID_FILES = ("/etc/machine-id", "/var/lib/dbus/machine-id")
+
+
+def machine_id() -> str | None:
+    """systemd's `%m` — the token the backup unit stamps into every object key.
+
+    🔴 THIS IS THE ONLY RELIABLE "WHICH MACHINE AM I" SIGNAL HERE, and the
+    design already knew it: the unit sets `ASIB_HOST=<name>-%m` precisely
+    BECAUSE both hosts are hostname `nixos` and `isLaptop` is a backlight probe
+    that fails OPEN, so a readable name alone can collide silently.
+
+    `host_label()` cannot reproduce that label outside the unit — MEASURED: the
+    unit writes `workbench-d48f…` while a hand-run of `host_label()` returns
+    `nixos`, because `%m` is expanded by systemd and `ASIB_HOST` is unset in an
+    interactive shell. So a label comparison alone declares this host's OWN
+    artifacts foreign on every hand-run, which is the silent-weakening failure.
+    The machine id is exact, needs no systemd, and is the same token already in
+    the key.
+    """
+    for p in _MACHINE_ID_FILES:
+        try:
+            v = Path(p).read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        # \U0001f534 SHAPE-CHECKED, not just non-empty. Returning whatever junk a
+        # file happened to hold would make `prefix_belongs_to_this_host` answer
+        # True for any prefix containing it — an error in the FALSE DATA-LOSS
+        # direction, which is the one that gets someone to act destructively.
+        if re.fullmatch(r"[0-9a-f]{32}", v):
+            return v
+    return None
+
+
+def prefix_belongs_to_this_host(prefix: str, this_host: str,
+                                this_machine_id: str | None) -> bool:
+    """Are the artifacts under `prefix` THIS machine's?
+
+    Two independent ways to say yes, because neither alone covers both how the
+    verifier gets run:
+
+      * the prefix IS this host's label — true under the unit, where `ASIB_HOST`
+        is set, and in the tests;
+      * the prefix CONTAINS this machine's id — true for a hand-run, where
+        `ASIB_HOST` is unset and `host_label()` degrades to the (shared)
+        hostname, but the KEY still carries `%m`.
+
+    🔴 IT FAILS TOWARDS "FOREIGN", and that is deliberate. Being wrong in
+    that direction means declining to compare and SAYING SO per artifact; being
+    wrong the other way means reporting `history was rewritten` for a healthy
+    backup. One is a visible gap in coverage, the other is a false data-loss
+    alarm — and only the second gets someone to do something destructive.
+    """
+    if normalise_prefix(this_host) == normalise_prefix(prefix):
+        return True
+    return bool(this_machine_id) and this_machine_id in prefix
+
+
 def cross_check_target(store: Path, scope: str, *, artifacts_are_foreign: bool
                        ) -> tuple[Path | None, str | None]:
     """The live repo to compare `scope`'s artifact against, or `(None, reason)`.
@@ -835,10 +896,16 @@ def cross_check_target(store: Path, scope: str, *, artifacts_are_foreign: bool
     bucket yet, so such a run hits the ZERO-objects refusal first — i.e. the bug
     was scheduled to appear the day the feature started working.
 
-    Note this is keyed on the PREFIX being explicit, NOT on `--scope`: narrowing
-    to one scope of THIS host's artifacts leaves the comparison perfectly valid,
-    so the two call sites share this reason and only the coverage check adds the
-    `--scope` condition on top. They are deliberately not the same boolean.
+    🔴 `artifacts_are_foreign` IS A LABEL COMPARISON, NOT "WAS A FLAG
+    TYPED". Keying it on the flag made `--prefix <this host's own label>`
+    suppress the cross-check for all 10 real scopes — caught on the first live
+    run after that fix, and it is the worse failure of the two, because it makes
+    the verification quietly weaker rather than loudly wrong.
+
+    Note it is also not keyed on `--scope`: narrowing to one scope of THIS
+    host's artifacts leaves the comparison perfectly valid, so the two call
+    sites share this reason and only the coverage check adds the `--scope`
+    condition on top. They are deliberately not the same boolean.
     """
     if artifacts_are_foreign:
         return None, ("the artifacts belong to ANOTHER host (--host/--prefix) "
@@ -905,7 +972,8 @@ def uncovered_local_scopes(store: Path, covered: set[str], now: datetime,
     return out
 
 
-def run(*, bucket: str, prefix: str, store: Path, identity: Path,
+def run(*, bucket: str, prefix: str, this_host: str,
+        this_machine_id: str | None, store: Path, identity: Path,
         scope_filter: str | None, verify_all: bool, max_lag_days: float,
         work_dir: Path, keep_work_dir: bool, prefix_was_explicit: bool,
         downloader_factory=None, now: datetime | None = None,
@@ -972,11 +1040,29 @@ def run(*, bucket: str, prefix: str, store: Path, identity: Path,
         verdicts: list[ArtifactVerdict] = []
         failures: list[str] = []
 
-        # 🔴 ONE NAME for "these artifacts are not this machine's", read by both
-        # the coverage check below and `cross_check_target()` in the loop. The
-        # two sites had this open-coded and only one of them got it right; the
-        # reason now lives in exactly one docstring.
-        artifacts_are_foreign = prefix_was_explicit
+        # 🔴 ONE NAME for "these artifacts are not this machine's", read by
+        # both the coverage check below and `cross_check_target()` in the loop.
+        # The two sites had this open-coded and only one of them got it right;
+        # the reason now lives in exactly one docstring.
+        #
+        # 🔴 IT IS A PROPERTY OF THE PREFIX, NOT "DID YOU TYPE A FLAG" —
+        # and it took TWO live runs to get right, each one caught by actually
+        # running it rather than by reasoning about it.
+        #
+        #   v1  `prefix_was_explicit`      -> `--prefix <our own>` suppressed
+        #                                     all 10 scopes' cross-checks.
+        #   v2  label comparison alone     -> STILL suppressed all 10: the unit
+        #                                     writes `workbench-%m` while a
+        #                                     hand-run's `host_label()` is
+        #                                     `nixos`, so they never match
+        #                                     outside systemd.
+        #   v3  label OR machine id        -> what ships. See
+        #                                     `prefix_belongs_to_this_host`.
+        #
+        # Both wrong versions failed the SAME way: quietly doing less
+        # verification while still exiting 0.
+        artifacts_are_foreign = not prefix_belongs_to_this_host(
+            prefix, this_host, this_machine_id)
 
         # 🔴 THE OTHER DIRECTION, and it runs BEFORE the per-artifact loop so it
         # is reported even if every artifact that IS there fails. Skipped when
@@ -1068,7 +1154,8 @@ def summarise(verdicts: list[ArtifactVerdict]) -> str:
     lag = sum(v.lag_commits or 0 for v in live)
     return (f"{PROG}: verified {len(verdicts)} artifact(s): {len(live)} against "
             f"the live store ({compared} commit(s) compared, {lag} commit(s) of "
-            f"lag in total), {len(alone)} self-consistency only (no live scope)")
+            f"lag in total), {len(alone)} self-consistency only (NOT "
+            f"cross-checked — see the per-artifact reason)")
 
 
 def print_plan(*, bucket: str, prefix: str, store: Path, identity: Path,
@@ -1083,6 +1170,12 @@ def print_plan(*, bucket: str, prefix: str, store: Path, identity: Path,
     print(f"prefix:    {prefix}")
     print(f"store:     {store}")
     print(f"identity:  {identity} ({'present' if identity.is_file() else 'MISSING'})")
+    mid = machine_id()
+    ours = prefix_belongs_to_this_host(prefix, B.host_label(), mid)
+    print(f"host:      {B.host_label()} (machine-id "
+          f"{mid or 'UNREADABLE'}) -> these artifacts are "
+          f"{'THIS host\'s: they WILL be cross-checked' if ours else
+             'ANOTHER host\'s: NOT cross-checked, self-consistency only'}")
     print(f"scope:     {scope_filter or '(every scope found under the prefix)'}")
     print(f"artifacts: {'ALL per scope' if verify_all else 'newest per scope'}")
     print(f"max lag:   {max_lag_days} day(s) — older than this is a FAILURE")
@@ -1203,9 +1296,10 @@ def main(argv: list[str] | None = None) -> int:
                 "behind where nobody looks.")
 
         def _go(work: Path) -> list[ArtifactVerdict]:
-            return run(bucket=bucket, prefix=prefix, store=args.store,
-                       identity=identity, scope_filter=args.scope,
-                       verify_all=args.verify_all,
+            return run(bucket=bucket, prefix=prefix, this_host=B.host_label(),
+                       this_machine_id=machine_id(),
+                       store=args.store, identity=identity,
+                       scope_filter=args.scope, verify_all=args.verify_all,
                        max_lag_days=args.max_lag_days, work_dir=work,
                        keep_work_dir=args.keep_work_dir,
                        prefix_was_explicit=explicit,

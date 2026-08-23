@@ -242,12 +242,21 @@ class FakeDownloader:
 
 
 def _verify(store: Path, work: Path, downloader, identity: Path, *,
-            prefix: str = HOST, scope_filter=None, verify_all=False,
+            prefix: str = HOST, this_host: str | None = None,
+            this_machine_id: str | None = None,
+            scope_filter=None, verify_all=False,
             max_lag_days: float = 3.0, explicit: bool = False,
             keep_work_dir: bool = False, now: datetime | None = None):
-    """Drive the real `run()` with the object store faked."""
-    return RV.run(bucket="test-bucket", prefix=prefix, store=store,
-                  identity=identity, scope_filter=scope_filter,
+    """Drive the real `run()` with the object store faked.
+
+    `this_host` defaults to the PREFIX under test, i.e. "these artifacts are
+    this machine's" — the ordinary case. A cross-host test passes the two
+    apart, which is the only thing that makes the artifacts foreign.
+    """
+    return RV.run(bucket="test-bucket", prefix=prefix,
+                  this_host=prefix if this_host is None else this_host,
+                  this_machine_id=this_machine_id,
+                  store=store, identity=identity, scope_filter=scope_filter,
                   verify_all=verify_all, max_lag_days=max_lag_days,
                   work_dir=work, keep_work_dir=keep_work_dir,
                   prefix_was_explicit=explicit,
@@ -1221,9 +1230,12 @@ def test_the_coverage_check_is_SKIPPED_when_the_question_was_NARROWED(
     # --scope: narrowed to one scope, which does have an artifact.
     assert _verify(store, tmp_path / "work-s", FakeDownloader(objects), identity,
                    scope_filter="scope-alpha", max_lag_days=3.0, now=now)
-    # explicit prefix: asking about another host.
-    assert _verify(store, tmp_path / "work-p", FakeDownloader(objects), identity,
-                   explicit=True, max_lag_days=3.0, now=now)
+    # ANOTHER host's prefix: this store does not describe the question.
+    other_objects = {_key("scope-alpha", now - timedelta(hours=2),
+                          host="other-host"): next(iter(objects.values()))}
+    assert _verify(store, tmp_path / "work-p", FakeDownloader(other_objects),
+                   identity, prefix="other-host", this_host=HOST, explicit=True,
+                   max_lag_days=3.0, now=now)
 
 
 def test_ANOTHER_HOSTS_artifacts_are_NOT_compared_to_THIS_HOSTS_store(
@@ -1261,8 +1273,8 @@ def test_ANOTHER_HOSTS_artifacts_are_NOT_compared_to_THIS_HOSTS_store(
                _make_artifact(other, identity, tmp_path)}
 
     verdicts = _verify(this_host, tmp_path / "work", FakeDownloader(objects),
-                       identity, prefix="other-host", explicit=True,
-                       max_lag_days=3.0, now=now)
+                       identity, prefix="other-host", this_host=HOST,
+                       explicit=True, max_lag_days=3.0, now=now)
 
     assert len(verdicts) == 1, verdicts
     v = verdicts[0]
@@ -1305,6 +1317,189 @@ def test_the_cross_host_fixture_WOULD_have_gone_red_when_compared(
         f"pass whether or not the comparison was skipped: {exc.value}")
 
 
+def test_naming_THIS_HOSTS_OWN_PREFIX_still_cross_checks(tmp_path, identity):
+    """🔴 THE REGRESSION THE FIRST LIVE RUN CAUGHT, pinned.
+
+    The first version of the cross-host fix keyed "foreign" on
+    `prefix_was_explicit` — on whether a FLAG WAS TYPED. But
+    `--prefix workbench-<machine-id>` is THIS host's own prefix, so naming it
+    explicitly turned all 10 real scopes into `NOT CROSS-CHECKED …
+    self-consistency only`: the verification got quietly WEAKER because of how
+    the operator spelled the request. That is worse than the bug it replaced,
+    because nothing goes red — it just stops checking.
+
+    What makes artifacts foreign is whose LABEL is on them. Measured here at
+    both points: same label -> cross-checked; different label -> not.
+    """
+    now = datetime.now(timezone.utc)
+    store = tmp_path / "store"
+    alpha = _make_scope(store, "scope-alpha", {"e.md": "a"}, commits=3)
+    objects = {_key("scope-alpha", now - timedelta(hours=2)):
+               _make_artifact(alpha, identity, tmp_path)}
+
+    # Explicit, and it is OUR OWN label — the live-run shape.
+    own = _verify(store, tmp_path / "w-own", FakeDownloader(objects), identity,
+                  prefix=HOST, this_host=HOST, explicit=True,
+                  max_lag_days=3.0, now=now)[0]
+    assert own.cross_checked is True, (
+        "naming this host's OWN prefix suppressed the cross-check — the "
+        "verification is weaker for a spelling, and nothing goes red")
+    assert own.commits_compared == 3, own.commits_compared
+
+    # NEGATIVE CONTROL, same fixture: a DIFFERENT label is foreign.
+    foreign_objects = {_key("scope-alpha", now - timedelta(hours=2),
+                            host="other-host"): next(iter(objects.values()))}
+    far = _verify(store, tmp_path / "w-far", FakeDownloader(foreign_objects),
+                  identity, prefix="other-host", this_host=HOST, explicit=True,
+                  max_lag_days=3.0, now=now)[0]
+    assert far.cross_checked is False, (
+        "a different host's label was still compared against this store")
+
+
+def test_the_DEFAULT_run_is_never_treated_as_foreign(tmp_path, identity):
+    """POSITIVE CONTROL for the predicate's other end: with no flags at all the
+    prefix IS `host_label()`, so a plain run must cross-check everything. A
+    predicate that got this wrong would make the DEFAULT invocation — the one
+    the timer would use — silently self-consistency-only."""
+    now = datetime.now(timezone.utc)
+    store = tmp_path / "store"
+    alpha = _make_scope(store, "scope-alpha", {"e.md": "a"}, commits=4)
+    objects = {_key("scope-alpha", now - timedelta(hours=2)):
+               _make_artifact(alpha, identity, tmp_path)}
+    v = _verify(store, tmp_path / "work", FakeDownloader(objects), identity,
+                prefix=HOST, this_host=HOST, explicit=False,
+                max_lag_days=3.0, now=now)[0]
+    assert v.cross_checked is True and v.commits_compared == 4
+
+
+def test_the_foreign_predicate_tolerates_a_TRAILING_SLASH_difference(
+        tmp_path, identity):
+    """`--prefix workbench-x/` and `--prefix workbench-x` name the same host.
+    Comparing the raw strings would call one of them foreign, which is the
+    silent-weakening failure again in a different spelling."""
+    now = datetime.now(timezone.utc)
+    store = tmp_path / "store"
+    alpha = _make_scope(store, "scope-alpha", {"e.md": "a"}, commits=2)
+    objects = {_key("scope-alpha", now - timedelta(hours=2)):
+               _make_artifact(alpha, identity, tmp_path)}
+    v = _verify(store, tmp_path / "work", FakeDownloader(objects), identity,
+                prefix=HOST + "/", this_host=HOST, explicit=True,
+                max_lag_days=3.0, now=now)[0]
+    assert v.cross_checked is True, (
+        "a trailing slash made this host's own artifacts look foreign")
+
+
+SYNTH_MACHINE_ID = "0123456789abcdef0123456789abcdef"
+
+
+@pytest.mark.parametrize("prefix,this_host,mid,ours,why", [
+    # The unit's shape: ASIB_HOST is set, so the labels match outright.
+    ("workbench-" + SYNTH_MACHINE_ID, "workbench-" + SYNTH_MACHINE_ID,
+     SYNTH_MACHINE_ID, True, "labels match under the unit"),
+    # 🔴 THE HAND-RUN, which two earlier versions got wrong: ASIB_HOST is
+    # unset so host_label() degrades to the shared hostname, and only the
+    # machine id in the KEY can still identify the machine.
+    ("workbench-" + SYNTH_MACHINE_ID, "nixos", SYNTH_MACHINE_ID, True,
+     "machine id present in the prefix"),
+    # The other host, from a hand-run: different id, so foreign.
+    ("laptop-ffffffffffffffffffffffffffffffff", "nixos", SYNTH_MACHINE_ID,
+     False, "a different machine's id"),
+    # No machine id readable and labels differ -> foreign (fails SAFE).
+    ("laptop-ffffffffffffffffffffffffffffffff", "nixos", None, False,
+     "cannot tell, so it declines to compare"),
+    # A trailing slash is a spelling, not a different host.
+    ("workbench-" + SYNTH_MACHINE_ID + "/", "workbench-" + SYNTH_MACHINE_ID,
+     None, True, "trailing slash normalised"),
+])
+def test_which_prefixes_count_as_THIS_HOSTS(prefix, this_host, mid, ours, why):
+    """🔴 THE PREDICATE, AT FIVE POINTS — it took two live runs to get right.
+
+    Both wrong versions failed the same way: quietly doing LESS verification
+    while still exiting 0.
+
+      v1  keyed on `prefix_was_explicit`  -> naming our OWN prefix suppressed
+                                             all 10 real scopes.
+      v2  label comparison alone          -> STILL suppressed all 10, because
+                                             the unit writes `workbench-%m`
+                                             while a hand-run's `host_label()`
+                                             is `nixos`.
+
+    The rows below are the two spellings of "ours", the two of "theirs", and the
+    unreadable-id case, so neither wrong version can pass this table.
+    """
+    got = RV.prefix_belongs_to_this_host(prefix, this_host, mid)
+    assert got is ours, f"{prefix!r} vs {this_host!r}/{mid!r}: expected {ours} ({why})"
+
+
+def test_the_machine_id_reader_accepts_only_a_REAL_id(tmp_path, monkeypatch):
+    """VALIDATE THE INSTRUMENT, through the REAL function.
+
+    A reader that returned whatever a file happened to hold would make
+    `prefix_belongs_to_this_host` answer True for any prefix containing that
+    junk — an error in the FALSE DATA-LOSS direction, which is the one that
+    gets someone to act destructively. So the shape check is exercised, not
+    described: `_MACHINE_ID_FILES` is a module-level seam and the test points it
+    at synthetic files.
+    """
+    good = tmp_path / "good"
+    good.write_text(SYNTH_MACHINE_ID + "\n", encoding="utf-8")
+    bad = tmp_path / "bad"
+    bad.write_text("not-a-machine-id\n", encoding="utf-8")
+    missing = tmp_path / "missing"
+
+    # POSITIVE CONTROL: it reads a well-formed id.
+    monkeypatch.setattr(RV, "_MACHINE_ID_FILES", (str(good),))
+    assert RV.machine_id() == SYNTH_MACHINE_ID
+
+    # NEGATIVE CONTROLS, each on its own: malformed, and absent.
+    monkeypatch.setattr(RV, "_MACHINE_ID_FILES", (str(bad),))
+    assert RV.machine_id() is None, "a malformed machine id was accepted"
+    monkeypatch.setattr(RV, "_MACHINE_ID_FILES", (str(missing),))
+    assert RV.machine_id() is None, "a missing file did not read as unknown"
+
+    # \U0001f534 FALLTHROUGH, AT BOTH KINDS OF "UNUSABLE" — they are different
+    # code paths and a mutation sweep proved it: an earlier version of this test
+    # only fed a MALFORMED first candidate, which exercises the shape check's
+    # fallthrough. A mutant that turned the `except OSError: continue` into
+    # `return None` — i.e. gave up on an ABSENT first candidate — SURVIVED,
+    # because nothing here ever made the first file missing. `/etc/machine-id`
+    # absent with the dbus copy present is the realistic shape on non-systemd
+    # hosts, and it is exactly the case that was uncovered.
+    monkeypatch.setattr(RV, "_MACHINE_ID_FILES", (str(bad), str(good)))
+    assert RV.machine_id() == SYNTH_MACHINE_ID, (
+        "a MALFORMED first candidate stopped the search instead of falling "
+        "through to the next")
+    monkeypatch.setattr(RV, "_MACHINE_ID_FILES", (str(missing), str(good)))
+    assert RV.machine_id() == SYNTH_MACHINE_ID, (
+        "an ABSENT first candidate stopped the search instead of falling "
+        "through — /etc/machine-id is absent on some systems and the dbus copy "
+        "is the whole reason there is a second candidate")
+
+
+
+def test_naming_THIS_HOSTS_OWN_PREFIX_by_MACHINE_ID_still_cross_checks(
+        tmp_path, identity):
+    """🔴 THE LIVE SHAPE, end to end: `--prefix workbench-<machine-id>` with
+    `ASIB_HOST` unset, which is every hand-run and is how the two earlier
+    versions were caught. It must cross-check, not degrade to
+    self-consistency-only."""
+    now = datetime.now(timezone.utc)
+    host_prefix = "workbench-" + SYNTH_MACHINE_ID
+    store = tmp_path / "store"
+    alpha = _make_scope(store, "scope-alpha", {"e.md": "a"}, commits=5)
+    objects = {_key("scope-alpha", now - timedelta(hours=2), host=host_prefix):
+               _make_artifact(alpha, identity, tmp_path)}
+
+    v = _verify(store, tmp_path / "work", FakeDownloader(objects), identity,
+                prefix=host_prefix, this_host="nixos",
+                this_machine_id=SYNTH_MACHINE_ID, explicit=True,
+                max_lag_days=3.0, now=now)[0]
+    assert v.cross_checked is True, (
+        "a hand-run naming this host's own prefix degraded to "
+        "self-consistency-only — less verification, still exit 0")
+    assert v.commits_compared == 5, v.commits_compared
+
+
 def test_a_SCOPE_FILTER_alone_still_cross_checks(tmp_path, identity):
     """🔴 THE PREDICATES ARE DELIBERATELY NOT THE SAME BOOLEAN.
 
@@ -1344,8 +1539,8 @@ def test_the_two_NO_CROSS_CHECK_reasons_are_DISTINGUISHABLE(tmp_path, identity):
                       max_lag_days=3.0, now=now)[0]
     foreign = _verify(empty_store, tmp_path / "w2",
                       FakeDownloader({key_foreign: data}), identity,
-                      prefix="other-host", explicit=True, max_lag_days=3.0,
-                      now=now)[0]
+                      prefix="other-host", this_host=HOST, explicit=True,
+                      max_lag_days=3.0, now=now)[0]
 
     assert "no live scope repository at" in (missing.no_cross_check_reason or "")
     assert "ANOTHER host" in (foreign.no_cross_check_reason or "")
