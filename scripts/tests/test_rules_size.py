@@ -390,10 +390,12 @@ ARCHIVE_MD = REPO_ROOT / "claude" / "RULES-ARCHIVE.md"
 # two the deleted bullet named, so no scope was lost.
 #
 # 🔴 THE BUMP WAS +900 AND HAD TO BECOME +1,100 WITHIN THE SAME PR, WHICH IS
-# ITSELF THE FINDING. +900 left 186 B of slack. A blind adversarial audit then
+# ITSELF THE FINDING. Every slack figure in this entry is FLOOR-relative.
+# +900 left 186 B. A blind adversarial audit then
 # found three scope losses in the consolidation (below), and restoring them
-# cost 130 B -- taking slack to 56 B, i.e. the "34 B of slack" mistake this
-# module's 2026-08-21 entry diagnosed, reproduced by the very round that was
+# cost 130 B -- taking slack to 56 B (FLOOR-relative), i.e. the sub-one-bullet
+# slack mistake the UNDATED 2026-08-15 block (`d8ffb466`) diagnosed at 32 B,
+# reproduced by the very round that was
 # fixing a different narrowing. So: a ceiling sized to leave less than one
 # bullet is not merely tight, it cannot absorb its OWN review round. Size the
 # margin to survive the audit, not to clear the floor.
@@ -410,8 +412,10 @@ ARCHIVE_MD = REPO_ROOT / "claude" / "RULES-ARCHIVE.md"
 # size + 3,900, and two drafts carried a stale absolute forward rather than
 # recomputing it.
 #
-# What IS durable: the slack after +1,100 is still under one bullet, so the
-# next real rule pays ceiling; when it does, the answer is the consolidation
+# What IS durable: the slack after +1,100 is under one bullet FLOOR-relative
+# (it is over one ceiling-relative -- the bases disagree about this very claim,
+# which is why the sentence must name one), so the next real rule pays ceiling.
+# When it does, the answer is the consolidation
 # this entry demonstrated, applied to the Verification Honesty cluster -- the
 # largest section in the file and the one with the most sibling bullets
 # sharing a frame -- not another bump.
