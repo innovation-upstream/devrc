@@ -49,7 +49,7 @@ Populate the password from SOPS (homelab-talos trunk):
       sops -d --extract '["stringData"]["reader-password"]' /tmp/s.yaml); rm -f /tmp/s.yaml
 
 Usage:
-  initiative-scan.py [--days N] [--json] [--repo PATH] [--tmux]
+  initiative-scan.py [--days N] [--json] [--repo PATH] [--tmux] [--exclude-slugs S1,S2,...]
   --days   trailing window in days (default 5)
   --json   machine-readable output (the raw per-initiative data)
   --repo   restrict to a single repo path (default: auto-discover under ~/workspace)
@@ -57,6 +57,9 @@ Usage:
            claude pane title against the initiative slug/title, scoped by the pane's
            cwd→repo); also lists live claude sessions with no matched initiative.
            Best-effort: no tmux server -> initiatives simply show [no session].
+  --exclude-slugs  comma-separated list of initiative slugs to suppress from output
+           (e.g. "evaluate-script-then-validate,observability-gaps-audit"). A slug
+           matches the base slug derived from the handoff filename.
 
 HONESTY NOTE: this measures ACTIVITY, RECENCY, and EFFORT (commits / sessions /
 telemetry events / handoff freshness) plus the human-written "Next steps" line —
@@ -427,6 +430,39 @@ def parse_summary(text: str) -> str | None:
     return _cap_summary(_flatten_md(para)) if para else None
 
 
+# Markers that indicate an initiative is resolved/done and should be excluded by default.
+_RESOLVED_MARKERS = re.compile(
+    r"(?:^|\b)(?:RESOLVED|DONE|COMPLETED|CLOSED|ARCHIVED|NOTHING\s+REQUIRED)\b", re.I)
+
+
+def parse_resolved(text: str) -> bool:
+    """Detect if a handoff doc marks its initiative as resolved/done.
+
+    Checks `## Status` headings, inline `Status:` markers, and the summary text
+    for explicit resolution keywords. A handoff that says "Status: RESOLVED" or
+    "## Status: DONE" is resolved; one that says "Status: in progress" is not.
+    """
+    lines = text.splitlines()
+    for line in lines:
+        # Check Status heading content: "## Status: RESOLVED" or "## Status\nRESOLVED"
+        m = re.match(r"^#{1,6}\s+Status\s*:\s*(.*)$", line, re.I)
+        if m and _RESOLVED_MARKERS.search(m.group(1)):
+            return True
+        # Check inline Status marker: "- **Status:** RESOLVED"
+        m = SUMMARY_INLINE_RE.match(line)
+        if m and "status" in line.lower() and _RESOLVED_MARKERS.search(m.group(1)):
+            return True
+        # Check for a standalone resolved marker in headings:
+        # "## RESOLVED" or "## DONE" or "## COMPLETED"
+        if re.match(r"^#{1,6}\s+(?:RESOLVED|DONE|COMPLETED|CLOSED|ARCHIVED)\b", line, re.I):
+            return True
+    # Check summary text for resolution keywords
+    summary = parse_summary(text)
+    if summary and _RESOLVED_MARKERS.search(summary):
+        return True
+    return False
+
+
 # Ultra-common tokens that would over-match if used as an initiative fingerprint.
 STOP_TOKENS = {"the", "and", "for", "wip", "tmp", "fix", "feat", "v2", "ha"}
 
@@ -708,6 +744,7 @@ def _new_initiative(repo: str, slug: str, title: str | None, *,
         "open_investigations": list(open_investigations or []),
         "current_doc": current_doc,
         "docs": list(docs or []),
+        "resolved": False,  # overwritten by cluster_handoffs / session groups
         # attribution defaults — overwritten unconditionally by attribute_* / momentum,
         # but pre-set so an initiative that skips a pass never lacks a contract key.
         "momentum": "unknown",
@@ -747,12 +784,14 @@ def cluster_handoffs(docs: list[dict]) -> list[dict]:
     for (repo, slug), members in groups.items():
         members.sort(key=_doc_sort_key, reverse=True)
         cur = members[0]
-        initiatives.append(_new_initiative(
+        ini = _new_initiative(
             repo=repo, slug=slug, title=cur["title"], summary=cur["summary"],
             date=cur["date"], doc_mtime=cur["mtime"], next_step=cur["next_step"],
             open_investigations=cur["open_investigations"], current_doc=cur["path"],
             docs=[{"path": m["path"], "date": m["date"]} for m in members],
-            source="doc"))
+            source="doc")
+        ini["resolved"] = cur["resolved"]
+        initiatives.append(ini)
     return initiatives
 
 
@@ -1154,6 +1193,7 @@ def read_handoff(path: str) -> dict:
         "open_investigations": parse_open_investigations(text),
         "is_handoff": is_handoff,
         "handoff_structured": _doc_is_handoff_structured(text, is_handoff),
+        "resolved": parse_resolved(text),
     }
 
 
@@ -1186,6 +1226,7 @@ def _doc_to_initiative(d: dict, source: str = "doc") -> dict:
         open_investigations=d["open_investigations"], current_doc=d["path"],
         docs=[{"path": d["path"], "date": d["date"]}], source=source)
     ini["handoff_structured"] = bool(d.get("handoff_structured"))
+    ini["resolved"] = bool(d.get("resolved"))
     return ini
 
 
@@ -2266,7 +2307,9 @@ def build_report(days: int, repos: list[str] | None = None,
                  client=None, projects_root: str = PROJECTS_ROOT,
                  now: float | None = None, include_tmux: bool = False,
                  panes: list[dict] | None = None,
-                 gh_ok: bool | None = None) -> dict:
+                 gh_ok: bool | None = None,
+                 exclude_slugs: set[str] | None = None,
+                 include_resolved: bool = False) -> dict:
     """Fuse the three sources into a ranked, per-repo report dict.
 
     `client` may be None (telemetry skipped). `repos` None -> auto-discover from the
@@ -2358,6 +2401,15 @@ def build_report(days: int, repos: list[str] | None = None,
     initiatives = [i for i in initiatives
                    if i.get("last_touch") is not None and i["last_touch"] >= cutoff]
 
+    # Resolved filter: exclude initiatives whose handoff marks them as RESOLVED/DONE/etc.
+    # unless --include-resolved is set.
+    if not include_resolved:
+        initiatives = [i for i in initiatives if not i.get("resolved")]
+
+    # Exclude-slug filter: skip initiatives whose slug matches any in the exclude set.
+    if exclude_slugs:
+        initiatives = [i for i in initiatives if i.get("slug") not in exclude_slugs]
+
     initiatives = sort_initiatives(initiatives)
 
     # Sets aren't JSON-serializable and the renderer wants a stable order.
@@ -2381,6 +2433,7 @@ def build_report(days: int, repos: list[str] | None = None,
     return {
         "days": days,
         "telemetry_available": telemetry_available,
+        "include_resolved": include_resolved,
         # Says which zeroes are MEASURED and which are "not wired up here":
         # False means every `open_prs: []` / `merged_prs: 0` in this report is
         # an absence of data, not an absence of PRs.
@@ -2451,6 +2504,8 @@ def render(report: dict, now: float | None = None) -> str:
                     f"   sess:{ini.get('session_count', 0)}"
                     f"   commits:{commits_str}"
                     f"   merged-PR:{ini.get('merged_prs', 0)}")
+            if ini.get("resolved"):
+                head += "   ✓RESOLVED"
             if report["telemetry_available"]:
                 head += f"   ev:{ini.get('telem_events', 0)}"
             if report.get("tmux_enabled"):
@@ -2537,6 +2592,10 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--repo", default=None, help="restrict to a single repo path")
     p.add_argument("--tmux", action="store_true",
                    help="link each initiative to the live tmux session(s) hosting it")
+    p.add_argument("--exclude-slugs", default=None,
+                   help="comma-separated list of initiative slugs to exclude from output")
+    p.add_argument("--include-resolved", action="store_true",
+                   help="show initiatives whose handoff marks them RESOLVED/DONE/etc.")
     return p.parse_args(argv)
 
 
@@ -2566,7 +2625,10 @@ def main(argv=None) -> int:
     except RuntimeError:
         client = None  # telemetry optional — degrade gracefully
 
-    report = build_report(a.days, repos=repos, client=client, include_tmux=a.tmux)
+    report = build_report(a.days, repos=repos, client=client, include_tmux=a.tmux,
+                          exclude_slugs=set(a.exclude_slugs.split(","))
+                          if a.exclude_slugs else None,
+                          include_resolved=a.include_resolved)
 
     if a.json:
         print(json.dumps(report, indent=2, default=str))
