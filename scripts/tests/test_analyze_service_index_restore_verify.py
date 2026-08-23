@@ -1233,6 +1233,249 @@ def test_the_directory_store_exit_PROPAGATES_rather_than_swallowing(tmp_path):
             raise ValueError("propagated")
 
 
+def _cli_fixture(tmp_path, identity, host_prefix, *, commits=4):
+    """A `--from-dir` object store plus the matching live scope.
+
+    Returns `(objects_dir, store)`. Used by the `main()` derivation tests, which
+    must go all the way to `VERIFIED AGAINST LIVE` — anything less would pass
+    while the cross-check was silently suppressed, which is the exact defect.
+    """
+    store = tmp_path / "store"
+    scope = _make_scope(store, "scope-alpha", {"e.md": "a"}, commits=commits)
+    now = datetime.now(timezone.utc)
+    key = B.object_key(host_prefix.rstrip("/"), "scope-alpha",
+                       now - timedelta(hours=2))
+    return _dir_store(tmp_path / "objects",
+                      {key: _make_artifact(scope, identity, tmp_path)}), store
+
+
+def test_main_DERIVES_the_machine_id_and_cross_checks(tmp_path, identity,
+                                                      monkeypatch, capsys):
+    """🔴 THE SEAM THAT FAILED TWICE, AND WAS UNPINNED UNTIL NOW.
+
+    Every other test in this file INJECTS `this_host`/`this_machine_id`, so none
+    of them exercises `main()`'s own derivation — which is precisely where both
+    wrong versions of the foreign predicate lived. Measured by an auditor
+    against a 130/130 green suite: mutating `this_machine_id=machine_id()` to
+    `None` SURVIVED, and end-to-end it reproduced the v2 defect exactly
+    (`--host workbench-<mid>` -> NOT CROSS-CHECKED, rc=0, false cause printed).
+
+    So this drives the REAL `main()` in-process with `ASIB_HOST` UNSET — the
+    hand-run shape — and a synthetic machine-id file. In-process rather than as
+    a subprocess so `_MACHINE_ID_FILES` can be pointed at a fixture; everything
+    under test (`host_label()`, `machine_id()`, the predicate) still runs for
+    real. The ONLY thing that can make this pass is the machine-id half of the
+    predicate, because the label half cannot match.
+    """
+    mid_file = tmp_path / "machine-id"
+    mid_file.write_text(SYNTH_MACHINE_ID + "\n", encoding="utf-8")
+    monkeypatch.setattr(RV, "_MACHINE_ID_FILES", (str(mid_file),))
+    monkeypatch.delenv("ASIB_HOST", raising=False)
+    monkeypatch.delenv("ACTIVITY_HOST", raising=False)
+    monkeypatch.setenv("ASIB_AGE_IDENTITY", str(identity))
+
+    host_prefix = "workbench-" + SYNTH_MACHINE_ID
+    objects, store = _cli_fixture(tmp_path, identity, host_prefix, commits=4)
+
+    # POSITIVE CONTROL on the fixture: the label half genuinely CANNOT match,
+    # so a pass here can only come from the machine id.
+    assert RV.normalise_prefix(B.host_label()) != RV.normalise_prefix(host_prefix)
+
+    rc = RV.main(["--from-dir", str(objects), "--host", host_prefix,
+                  "--store", str(store), "--max-lag-days", "3"])
+    out = capsys.readouterr().out
+    assert rc == 0, f"rc={rc}\n{out}"
+    assert "VERIFIED AGAINST LIVE" in out, (
+        f"main() did not cross-check: the machine-id half of the predicate is "
+        f"not wired up, which is the v2 defect verbatim.\n{out}")
+    assert "4 commit(s) compared" in out, out
+    assert "NOT CROSS-CHECKED" not in out, out
+
+
+def test_main_DERIVES_the_host_label_and_cross_checks(tmp_path, identity,
+                                                      monkeypatch, capsys):
+    """🔴 THE OTHER HALF, pinned the same way. Mutating `this_host=B.host_label()`
+    to `''` also SURVIVED the 130-test suite.
+
+    Here the MACHINE ID is unreadable, so only the label half can match — the
+    mirror of the test above, and between them neither half can be deleted.
+    """
+    monkeypatch.setattr(RV, "_MACHINE_ID_FILES", (str(tmp_path / "absent"),))
+    monkeypatch.setenv("ASIB_HOST", "declared-host")
+    monkeypatch.setenv("ASIB_AGE_IDENTITY", str(identity))
+    assert RV.machine_id() is None, "the fixture must make the id unreadable"
+
+    objects, store = _cli_fixture(tmp_path, identity, "declared-host", commits=3)
+    rc = RV.main(["--from-dir", str(objects), "--host", "declared-host",
+                  "--store", str(store), "--max-lag-days", "3"])
+    out = capsys.readouterr().out
+    assert rc == 0, f"rc={rc}\n{out}"
+    assert "VERIFIED AGAINST LIVE" in out, (
+        f"main() did not cross-check via the LABEL half.\n{out}")
+    assert "3 commit(s) compared" in out, out
+
+
+def test_the_COVERAGE_check_keys_on_FOREIGN_not_on_the_flag(tmp_path, identity):
+    """🔴 THE OTHER SITE OF THE CONSOLIDATION, unpinned until now.
+
+    Reverting `not artifacts_are_foreign` to `not prefix_was_explicit` at the
+    coverage-check call site SURVIVED the suite. Under that mutant, naming this
+    host's OWN prefix silently stops running the uncovered-scope detector — a
+    whole class of "a scope stopped being backed up" going unreported, quietly,
+    behind a green exit. Same failure shape as the cross-check half.
+
+    So: explicit prefix, OUR OWN label, one covered scope and one uncovered.
+    """
+    now = datetime.now(timezone.utc)
+    store = tmp_path / "store"
+    alpha = _make_scope(store, "scope-alpha", {"e.md": "a"}, commits=3)
+    forgotten = _make_scope(store, "scope-beta", {"e.md": "b"}, commits=2)
+    _backdate_root_commit(forgotten, days=31)
+    objects = {_key("scope-alpha", now - timedelta(hours=2)):
+               _make_artifact(alpha, identity, tmp_path)}
+
+    with pytest.raises(RV.RestoreVerifyError) as exc:
+        _verify(store, tmp_path / "work", FakeDownloader(objects), identity,
+                prefix=HOST, this_host=HOST, explicit=True,
+                max_lag_days=3.0, now=now)
+    assert "NO ARTIFACT IN THE BUCKET" in str(exc.value), (
+        f"the coverage check was skipped for this host's OWN prefix just "
+        f"because the flag was typed: {exc.value}")
+
+
+def test_an_EXPLICIT_host_with_no_backups_gets_ITS_OWN_answer(tmp_path, identity):
+    """🔴 B-1: A PREFIX THE OPERATOR TYPED IS A QUESTION, NOT A TYPO.
+
+    This round's own fix re-created this round's own bug one branch over: with
+    `ours` checked first, `--host laptop-ffff…` on the workbench answered "you
+    looked in the wrong place, the bucket DOES hold artifacts" and pointed at
+    the WORKBENCH's prefix — because a sibling of ours is ALWAYS present here.
+    The true and important answer, "the laptop has no off-machine backups at
+    all", became unreachable on the exact command SECRETS.md documents.
+
+    🔴 THE FIXTURE MUST HAVE A SIBLING PREFIX PRESENT. The existing explicit
+    test uses a totally empty bucket, where `ours` cannot fire, so it is
+    structurally unable to see this.
+    """
+    store = tmp_path / "store"
+    scope = _make_scope(store, "scope-alpha", {"e.md": "x"}, commits=2)
+    objects = {"workbench-" + SYNTH_MACHINE_ID + "/scope-alpha/"
+               "20260822T234650Z.bundle.age":
+               _make_artifact(scope, identity, tmp_path)}
+
+    with pytest.raises(RV.RestoreVerifyError) as exc:
+        _verify(store, tmp_path / "work", FakeDownloader(objects), identity,
+                prefix="laptop-ffffffffffffffffffffffffffffffff",
+                this_host="workbench-" + SYNTH_MACHINE_ID,
+                this_machine_id=SYNTH_MACHINE_ID, explicit=True,
+                now=datetime.now(timezone.utc))
+    msg = str(exc.value)
+    assert "named explicitly" in msg, f"wrong branch: {msg}"
+    assert "no off-machine backups at all" in msg, (
+        f"the honest answer about the host actually asked about is missing: {msg}")
+    assert "looked in the wrong place" not in msg, (
+        f"a deliberate question was answered as if it were a typo: {msg}")
+    # The sibling is still surfaced — as INFORMATION, not as the answer.
+    assert "FYI" in msg and "this host's own backup" in msg, msg
+
+
+def test_an_UNREADABLE_machine_id_is_reported_as_UNKNOWN_not_as_foreign(
+        tmp_path, identity, capsys):
+    """🔴 B-4: TWO WAYS TO BE FOREIGN, ONE HARDCODED REASON.
+
+    `prefix_belongs_to_this_host` returns False both for "genuinely another
+    machine" and for "machine id unreadable and the labels differ". On a host
+    where neither candidate parses, `--host workbench-<mid>` printed a confident
+    false cause and dropped every cross-check at rc=0 — the same conflation,
+    one branch over.
+    """
+    now = datetime.now(timezone.utc)
+    store = tmp_path / "store"
+    scope = _make_scope(store, "scope-alpha", {"e.md": "a"}, commits=3)
+    objects = {_key("scope-alpha", now - timedelta(hours=2), host="workbench-x"):
+               _make_artifact(scope, identity, tmp_path)}
+
+    v = _verify(store, tmp_path / "work", FakeDownloader(objects), identity,
+                prefix="workbench-x", this_host="nixos", this_machine_id=None,
+                explicit=True, max_lag_days=3.0, now=now)[0]
+    assert v.cross_checked is False
+    reason = v.no_cross_check_reason or ""
+    assert "could NOT BE READ" in reason, f"wrong reason: {reason}"
+    assert "UNKNOWN, not decided" in reason, reason
+    assert "belong to ANOTHER host" not in reason, (
+        f"an UNKNOWN was reported as a decision: {reason}")
+    assert "UNREADABLE" in RV.summarise([v]), (
+        "the summary hides it; ten per-artifact reasons scroll past and the "
+        "summary is what gets read")
+
+
+def test_a_KNOWN_foreign_host_still_says_ANOTHER_HOST(tmp_path, identity):
+    """POSITIVE CONTROL for the test above: with a readable id the reason is the
+    decided one, not the UNKNOWN one. Without this, collapsing both branches
+    into the UNKNOWN wording would pass."""
+    now = datetime.now(timezone.utc)
+    store = tmp_path / "store"
+    scope = _make_scope(store, "scope-alpha", {"e.md": "a"}, commits=3)
+    objects = {_key("scope-alpha", now - timedelta(hours=2), host="other-host"):
+               _make_artifact(scope, identity, tmp_path)}
+
+    v = _verify(store, tmp_path / "work", FakeDownloader(objects), identity,
+                prefix="other-host", this_host="nixos",
+                this_machine_id=SYNTH_MACHINE_ID, explicit=True,
+                max_lag_days=3.0, now=now)[0]
+    reason = v.no_cross_check_reason or ""
+    assert "belong to ANOTHER host" in reason, reason
+    assert "could NOT BE READ" not in reason, reason
+    assert "UNREADABLE" not in RV.summarise([v]), RV.summarise([v])
+
+
+def test_keep_work_dir_does_NOT_warn_when_it_left_NOTHING(tmp_path, identity):
+    """🔴 B-3: the mirror of the bug I fixed last round.
+
+    Arming the warning before the run cured the silence on failures and made it
+    unconditional, so a clean refusal with `--work-dir W --keep-work-dir`
+    announced "decrypted artifacts and restored repositories" holding "PLAINTEXT
+    history" while W was EMPTY. A warning that fires when nothing was created is
+    the same class of false claim as one that stays silent when something was.
+    """
+    src = _dir_store(tmp_path / "objects", {})
+    work = tmp_path / "work"
+    r = _cli("--from-dir", str(src), "--store", str(tmp_path / "gone"),
+             "--work-dir", str(work), "--keep-work-dir", identity=identity)
+    assert r.returncode == 0, f"rc={r.returncode}\n{r.stderr}"
+    assert list(work.iterdir()) == [], f"the run DID leave something: {list(work.iterdir())}"
+    assert "--keep-work-dir left" not in r.stderr, (
+        f"it warned about PLAINTEXT history in an EMPTY directory:\n{r.stderr}")
+
+
+def test_the_keep_work_dir_warning_NAMES_what_is_actually_there(
+        tmp_path, identity):
+    """🔴 B-3, the other half: on the failing path W holds ONE ciphertext and NO
+    restored repository, so "decrypted artifacts and restored repositories"
+    misnamed the one thing this file is emphatic never survives.
+
+    Asserted on the COUNT and the KIND, not on the string appearing.
+    """
+    store = tmp_path / "store"
+    scope = _make_scope(store, "scope-alpha", {"e.md": "x"}, commits=3)
+    data = _make_artifact(scope, identity, tmp_path, mangle=_flip_middle_byte)
+    src = _dir_store(tmp_path / "objects", {_key("scope-alpha"): data})
+    work = tmp_path / "work"
+
+    r = _cli("--from-dir", str(src), "--prefix", HOST, "--store", str(store),
+             "--max-lag-days", "100000", "--work-dir", str(work),
+             "--keep-work-dir", identity=identity)
+    assert r.returncode == 1, r.stderr
+    left = sorted(p.name for p in work.iterdir())
+    assert len(left) == 1 and left[0].endswith(".bundle.age"), left
+    assert "1 age ciphertext(s)" in r.stderr, (
+        f"the warning does not name what is actually there:\n{r.stderr}")
+    assert "restored repositor" not in r.stderr, (
+        f"it claims a restored repository that does not exist: {left}\n{r.stderr}")
+    assert "PLAINTEXT history" not in r.stderr, (
+        f"it calls a 0600 age ciphertext plaintext history:\n{r.stderr}")
+
+
 def test_a_SELECTED_scope_with_zero_objects_is_a_FAILURE(tmp_path, identity):
     store = tmp_path / "store"
     alpha = _make_scope(store, "scope-alpha", {"e.md": "a"}, commits=2)
@@ -1436,8 +1679,13 @@ def test_ANOTHER_HOSTS_artifacts_are_NOT_compared_to_THIS_HOSTS_store(
     objects = {_key("scope-alpha", now - timedelta(hours=2), host="other-host"):
                _make_artifact(other, identity, tmp_path)}
 
+    # 🔴 A READABLE machine id, so this is a DECIDED foreign verdict and
+    # not the "id unreadable, so unknown" one. The earlier version of this test
+    # passed None and asserted the decided reason anyway — it was asserting a
+    # measurement the fixture had not made.
     verdicts = _verify(this_host, tmp_path / "work", FakeDownloader(objects),
                        identity, prefix="other-host", this_host=HOST,
+                       this_machine_id=SYNTH_MACHINE_ID,
                        explicit=True, max_lag_days=3.0, now=now)
 
     assert len(verdicts) == 1, verdicts
@@ -1700,7 +1948,8 @@ def test_the_two_NO_CROSS_CHECK_reasons_are_DISTINGUISHABLE(tmp_path, identity):
                       max_lag_days=3.0, now=now)[0]
     foreign = _verify(empty_store, tmp_path / "w2",
                       FakeDownloader({key_foreign: data}), identity,
-                      prefix="other-host", this_host=HOST, explicit=True,
+                      prefix="other-host", this_host=HOST,
+                      this_machine_id=SYNTH_MACHINE_ID, explicit=True,
                       max_lag_days=3.0, now=now)[0]
 
     assert "no live scope repository at" in (missing.no_cross_check_reason or "")
@@ -2234,7 +2483,14 @@ def test_keep_work_dir_WARNS_on_a_FAILING_run_not_just_a_successful_one(
     assert r.returncode == 1, f"the corrupted artifact did not fail: {r.stderr}"
     assert "--keep-work-dir left" in r.stderr, (
         f"a FAILING run left the work dir behind and never said so:\n{r.stderr}")
-    assert "PLAINTEXT history" in r.stderr, r.stderr
+    # 🔴 This assertion used to read `"PLAINTEXT history" in r.stderr` —
+    # and it PASSED, certifying a sentence that was false on the very run it
+    # tests: this path leaves one 0600 age ciphertext and NO restored
+    # repository. A test that asserts a string appears cannot tell a true
+    # message from a confident wrong one. What is actually there is pinned by
+    # test_the_keep_work_dir_warning_NAMES_what_is_actually_there; this test
+    # owns only "it speaks at all on a failure".
+    assert "age ciphertext(s)" in r.stderr, r.stderr
 
 
 def test_keep_work_dir_WARNS_on_a_SUCCESSFUL_run_too(tmp_path, identity):

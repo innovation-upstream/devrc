@@ -126,14 +126,26 @@ instead — or check with `git bundle list-heads restore.bundle` first.
 scope and reports what it proved:
 
 ```sh
-# every scope of THIS host, straight from the bucket (read-only throughout)
+# 🔴 PASS --host. A BARE RUN CANNOT FIND THIS HOST'S ARTIFACTS — the unit writes
+# ASIB_HOST=<name>-%m (systemd expands %m to the machine id) while a hand-run has
+# ASIB_HOST unset and the label falls back to the hostname, which is `nixos` on
+# BOTH machines. So a bare run searches `nixos/`, finds nothing, and exits 1. It
+# says so and names the right prefix — but it is not the command you want.
 KUBECONFIG=$KC_HOMELAB nix-shell -p 'python3.withPackages(p:[p.minio])' age --run \
-  'python3 scripts/analyze-service-index/restore-verify.py'
+  "python3 scripts/analyze-service-index/restore-verify.py --host $(hostname)-$(cat /etc/machine-id)"
 
-KUBECONFIG=$KC_HOMELAB … restore-verify.py --host <other-host-label>   # the laptop's
+# …or let a bare run tell you the prefix, then paste it back:
+… restore-verify.py                             # exits 1, NAMES the right --host
+… restore-verify.py --host <other-host-label>   # the laptop's: "no off-machine
+                                                #   backups at all" if it has none
 … restore-verify.py --from-dir ./objects        # artifacts already fetched, offline
 … restore-verify.py --print-plan                # what it would do; writes nothing
 ```
+
+⚠ `$(hostname)` is the readable half only; the unit's is `workbench`/`laptop` from
+a `isLaptop` probe, so if the two disagree take the prefix from the bare run's
+message rather than from the line above. Resolving that asymmetry properly is a
+tracked follow-up — until then, **`--host` is how you run this**.
 
 It downloads → `age -d` → **`git clone --mirror`** → `git fsck`, then checks the
 restored history against the live scope: every restored commit must still exist
@@ -141,7 +153,12 @@ there and every restored tip must be an **ancestor of** the live tip (never an
 equality — the store advances hourly, and an equality check would be a
 permanently-red gate). It reports the lag in commits, fails on an artifact older
 than `--max-lag-days`, and prints `NOT CROSS-CHECKED` — never the word used for
-a verified scope — when there is no live scope to compare against.
+a verified scope — whenever it did not compare against live, **with the reason**.
+There are three such reasons and they are different findings: there is no live
+scope (the disaster case), the artifacts belong to ANOTHER host (routine — the
+two stores are divergent content that merely share scope names, so comparing
+them would raise a false data-loss alarm), or this machine's id could not be
+read, which makes "another host's" an assumption rather than a measurement.
 
 🔴 **It never runs `git bundle verify`, and neither should you.** Measured: a
 bundle with one byte flipped mid-packfile passes it at **rc=0** printing *"The

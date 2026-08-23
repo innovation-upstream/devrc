@@ -870,7 +870,8 @@ def prefix_belongs_to_this_host(prefix: str, this_host: str,
     return bool(this_machine_id) and this_machine_id in prefix
 
 
-def cross_check_target(store: Path, scope: str, *, artifacts_are_foreign: bool
+def cross_check_target(store: Path, scope: str, *, artifacts_are_foreign: bool,
+                       machine_id_unreadable: bool = False,
                        ) -> tuple[Path | None, str | None]:
     """The live repo to compare `scope`'s artifact against, or `(None, reason)`.
 
@@ -908,6 +909,21 @@ def cross_check_target(store: Path, scope: str, *, artifacts_are_foreign: bool
     condition on top. They are deliberately not the same boolean.
     """
     if artifacts_are_foreign:
+        # 🔴 TWO WAYS TO BE FOREIGN, AND THEY ARE NOT THE SAME FINDING.
+        # `prefix_belongs_to_this_host` returns False both for "this really is
+        # another machine" and for "I could not read a machine id and the labels
+        # differ" — and the reason string used to assert only the first. On a
+        # host where neither /etc/machine-id nor the dbus copy parses, that
+        # printed a confident false cause and dropped every cross-check at
+        # rc=0: the same conflation B-1 was about, one branch over.
+        if machine_id_unreadable:
+            return None, (
+                "this machine's id could NOT BE READ (neither /etc/machine-id "
+                "nor the dbus copy parsed), and the prefix does not match this "
+                "host's label — so whether these artifacts are this machine's "
+                "is UNKNOWN, not decided. Declining to cross-check rather than "
+                "risk a false data-loss alarm; re-run with a matching --host, "
+                "or fix the machine id")
         return None, ("the artifacts belong to ANOTHER host (--host/--prefix) "
                       "and this machine's store is DIVERGENT content that only "
                       "shares scope NAMES — comparing them would report a false "
@@ -1018,6 +1034,33 @@ def diagnose_empty_prefix(*, bucket: str, prefix: str, siblings: list[str],
     ours = [p for p in siblings
             if prefix_belongs_to_this_host(p, this_host, this_machine_id)]
 
+    # 🔴 A PREFIX THE OPERATOR TYPED IS A QUESTION, NOT A TYPO — and this
+    # round's own fix re-created this round's own bug one branch over. With
+    # `ours` checked first, `--host laptop-ffff…` on the workbench answered
+    # "you looked in the wrong place, the bucket DOES hold artifacts" and
+    # pointed at the WORKBENCH's prefix, because a sibling of ours is always
+    # present here. The true and important answer — "the laptop has no
+    # off-machine backups at all" — became unreachable, on the exact command
+    # SECRETS.md documents for checking the other machine.
+    #
+    # The "wrong place" diagnosis only makes sense when the prefix was DERIVED
+    # rather than STATED. So explicit wins, and the sibling list is folded in as
+    # INFORMATION instead of replacing the answer.
+    if prefix_was_explicit:
+        where = ""
+        if ours:
+            where = (f" (FYI: the bucket does hold artifacts under {ours}, "
+                     f"which carries THIS machine's id — that is this host's "
+                     f"own backup, not the one you asked about)")
+        elif siblings:
+            where = (f" (FYI: the bucket holds artifacts under {siblings}, "
+                     f"none carrying this machine's id)")
+        return True, (
+            f"ZERO objects under {bucket}/{prefix}. The prefix was named "
+            f"explicitly, so this is an answer about a host you asked about: "
+            f"it has no off-machine backups at all.{where} Refusing to report "
+            f"a successful verification of nothing.")
+
     if ours:
         return True, (
             f"ZERO objects under {bucket}/{prefix} — BUT THE BUCKET DOES HOLD "
@@ -1030,11 +1073,11 @@ def diagnose_empty_prefix(*, bucket: str, prefix: str, siblings: list[str],
             f"--host {ours[0].rstrip('/')}. NOTHING HERE SAYS YOUR BACKUPS ARE "
             f"MISSING.")
 
-    if prefix_was_explicit or local_scopes(store):
-        why = (f"The prefix was named explicitly, so this is an answer about a "
-               f"host you asked about: it has no off-machine backups at all."
-               if prefix_was_explicit else
-               f"The local store at {store} holds {len(local_scopes(store))} "
+    # NOTE: `prefix_was_explicit` is handled above and returns, so this branch
+    # is reached only for a DERIVED prefix. The explicit half of the old
+    # condition is gone rather than left as an unreachable arm.
+    if local_scopes(store):
+        why = (f"The local store at {store} holds {len(local_scopes(store))} "
                f"scope(s), so /analyze-service HAS run here and there should be "
                f"artifacts.")
         # 🔴 THE CAUSES ARE ONLY ASSERTED WHEN THE BUCKET IS GENUINELY
@@ -1167,7 +1210,8 @@ def run(*, bucket: str, prefix: str, this_host: str,
             newest_stamp = entries[-1][0]
             chosen = entries if verify_all else [entries[-1]]
             live, no_live_reason = cross_check_target(
-                store, scope, artifacts_are_foreign=artifacts_are_foreign)
+                store, scope, artifacts_are_foreign=artifacts_are_foreign,
+                machine_id_unreadable=(this_machine_id is None))
             for stamp, key in chosen:
                 try:
                     v = verify_artifact(
@@ -1231,10 +1275,16 @@ def summarise(verdicts: list[ArtifactVerdict]) -> str:
     alone = [v for v in verdicts if not v.cross_checked]
     compared = sum(v.commits_compared for v in live)
     lag = sum(v.lag_commits or 0 for v in live)
-    return (f"{PROG}: verified {len(verdicts)} artifact(s): {len(live)} against "
+    line = (f"{PROG}: verified {len(verdicts)} artifact(s): {len(live)} against "
             f"the live store ({compared} commit(s) compared, {lag} commit(s) of "
             f"lag in total), {len(alone)} self-consistency only (NOT "
             f"cross-checked — see the per-artifact reason)")
+    # 🔴 An UNKNOWN must not be summarised as a decision. Ten
+    # per-artifact reasons scroll past; the summary is what gets read.
+    if any("could NOT BE READ" in (v.no_cross_check_reason or "") for v in alone):
+        line += ("  ⚠ this machine's id was UNREADABLE, so 'not this "
+                 "host's artifacts' is an ASSUMPTION here, not a measurement")
+    return line
 
 
 def print_plan(*, bucket: str, prefix: str, store: Path, identity: Path,
@@ -1423,11 +1473,35 @@ def main(argv: list[str] | None = None) -> int:
         # failing run is the one most likely to have left a partly-restored
         # repository behind, and the least likely to have anyone re-reading the
         # flag's documentation to find out.
+        # 🔴 WARN ABOUT WHAT IS ACTUALLY THERE, NOT ABOUT WHAT THE FLAG
+        # COULD HAVE LEFT. Armed-before-the-run fixed the silence on failures
+        # and introduced the mirror defect: the warning fired unconditionally,
+        # so a clean refusal with `--work-dir W --keep-work-dir` announced
+        # "decrypted artifacts and restored repositories" holding "PLAINTEXT
+        # history" while W was EMPTY — and on the corrupted-artifact path W
+        # holds one 0600 ciphertext and NO restored repository, so "decrypted
+        # artifacts" misnamed the one thing this file is emphatic never
+        # survives. A test that asserts only that the string appears certifies
+        # a message that is false on the run it tests.
         if kept_work_dir is not None:
-            print(f"{PROG}: --keep-work-dir left decrypted artifacts and "
-                  f"restored repositories under {kept_work_dir}. They hold "
-                  f"PLAINTEXT history of client-confidential scopes; remove "
-                  f"them when you are done.", file=sys.stderr)
+            kept = sorted(p.name for p in kept_work_dir.iterdir()) \
+                if kept_work_dir.is_dir() else []
+            if kept:
+                repos = [n for n in kept if n.endswith(".restored.git")]
+                ciphers = [n for n in kept if n.endswith(".bundle.age")]
+                what = []
+                if repos:
+                    what.append(f"{len(repos)} restored repositor"
+                                f"{'y' if len(repos) == 1 else 'ies'} "
+                                f"(PLAINTEXT history)")
+                if ciphers:
+                    what.append(f"{len(ciphers)} age ciphertext(s)")
+                other = [n for n in kept if n not in repos and n not in ciphers]
+                if other:
+                    what.append(f"{len(other)} other file(s): {other}")
+                print(f"{PROG}: --keep-work-dir left {', '.join(what)} under "
+                      f"{kept_work_dir}. Remove them when you are done.",
+                      file=sys.stderr)
 
 
 if __name__ == "__main__":
