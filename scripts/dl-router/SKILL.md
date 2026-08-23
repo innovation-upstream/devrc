@@ -1,6 +1,6 @@
 ---
 name: dl-router
-description: Operate the media download router — a loopback sidecar + Brave extension that files downloads by PAGE CONTEXT, not the filename. Fix a wrong route, add a site rule, run the backfill, restart/debug the sidecar or extension. Use for: the download router, dl-route, downloads landing in the wrong folder, auto-filing downloads, the download picker/toast, backfilling loose files.
+description: Operate the media download router — it files downloads by PAGE CONTEXT, not the filename. Use for: the download router, dl-route, downloads landing in the wrong folder, auto-filing downloads, the download picker/toast, a wrong route or a new site rule, backfilling loose files, the sidecar or extension.
 ---
 
 # dl-router

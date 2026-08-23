@@ -38,7 +38,7 @@ decidable, and only those are asserted:
 WHY (4) EXISTS, AND WHAT IT DELIBERATELY DOES NOT CLAIM
 -------------------------------------------------------
 (2) is a PER-ENTRY cap; nothing measured the SUM, and the sum is what the 1%
-budget is spent against. Measured 2026-08-23 on the live workbench.
+budget is spent against. Re-measured 2026-08-23 on the live workbench.
 
 🔴 CHARS ARE THE UNIT HERE, and they are exact -- the token column is an
 ESTIMATE and is labelled as one. It was produced with `tiktoken` cl100k_base,
@@ -47,22 +47,32 @@ this host. Do not quote it as a Claude token count. It is carried only because
 it supplies the chars/token divisor, and the verdict below does not depend on
 that divisor being right:
 
-    devrc's 39 entries            14,792 chars   ~3,481 est. tok
-    the cloudflare plugin's 13      5,221 chars   ~1,132 est. tok  (NOT ours)
+    devrc's 39 entries            13,491 chars   ~3,109 est. tok
+    the cloudflare plugin's 13         0 chars        0 est. tok  (see below)
     ---------------------------------------------------------------
-    disk-readable total            20,013 chars   ~4,613 est. tok
-    implied divisor                              4.34 chars/token (estimate)
+    disk-readable total            13,491 chars   ~3,109 est. tok
+    divisor used                                 4.34 chars/token (estimate)
+
+The cloudflare plugin cost 5,221 chars of listing until it was removed from
+`enabledPlugins` in `~/.claude/settings.json`. 🔴 That file is PER-HOST and
+unmanaged by design (`CLAUDE.md` -> Git discipline), so the zero above is a
+measurement of THE WORKBENCH, not a devrc fact and not a claim about the laptop.
+Nothing in this repo can hold it there -- if the plugin comes back, so does the
+5,221, and no assertion here will notice. It is stated to explain the drop from
+20,013, not relied on.
 
 THE VERDICT IS TOKENIZER-INDEPENDENT, which is why it is stated as a break-even
 rather than as a token count. 1% of a 200,000-token context is 2,000 tokens, so
-fitting 20,013 exact chars into it requires a divisor of >10.0 chars/token. No
-tokenizer of natural language reaches half that -- real prose runs 3.5-4.5, and
-the estimate above lands mid-range at 4.34. So on a 200k context the listing is
-~2.3x over budget and CANNOT be re-tokenised into fitting: descriptions are
-being silently DROPPED today, starting with the skills invoked least. On a 1M
-context (10,000 tokens) the break-even runs the other way -- overflow would need
-a divisor BELOW 2.0 -- so it fits with room to spare. Built-in skills are not
-readable from disk and are ADDITIONAL, so 52 entries is a FLOOR, not the count.
+fitting 13,491 exact chars into it requires a divisor of >6.7 chars/token. No
+tokenizer of natural language reaches that -- real prose runs 3.5-4.5, and the
+estimate above lands mid-range at 4.34. So on a 200k context the listing is
+still ~1.6x over budget and CANNOT be re-tokenised into fitting: descriptions
+are being silently DROPPED today, starting with the skills invoked least. Two
+rounds of trimming have narrowed the overshoot (2.3x -> 1.6x) without closing
+it. On a 1M context (10,000 tokens) the break-even runs the other way --
+overflow would need a divisor BELOW 1.35 -- so it fits with room to spare.
+Built-in skills are not readable from disk and are ADDITIONAL, so 39 entries is
+a FLOOR, not the count.
 
 🔴 So this ceiling is NOT "the listing fits" -- it demonstrably does not on 200k,
 and a gate pinned at the real 200k budget would be permanently red, which
@@ -123,16 +133,19 @@ PER_ENTRY_CAP_CHARS = 1_536
 MIN_LISTING_ENTRIES = 30
 
 # 🔴 THE RATCHET. devrc's listing entries summed to 14,792 chars at
-# 99b2636f; this PR's trims took it to 13,925 without dropping a trigger phrase
-# or a disambiguation clause. The ceiling sits ~250 chars above that measurement
-# -- deliberately less than one average entry (13,925 / 39 = 357), so a NEW skill
+# 99b2636f; #749's trims took it to 13,925, and the six description shrinks in
+# this commit take it to 13,491 -- none of them dropping a trigger phrase or a
+# disambiguation clause. The ceiling sits ~250 chars above that measurement
+# -- deliberately less than one average entry (13,491 / 39 = 345), so a NEW skill
 # cannot be added without an eviction in the SAME commit. That is the same rule
 # `claude/RULES.md` and `scripts/browser-bridge/tests/test_skill_size.py` already
 # apply to the other two always-on documents.
 #
-# LOWER it when you cut; do NOT raise it to make a new description fit. The
+# LOWER it when you cut; do NOT raise it to make a new description fit. A ceiling
+# left at the previous, larger number licenses exactly the regrowth this constant
+# exists to catch, so re-pinning it is part of the cut, not follow-up work. The
 # eviction playbook is printed by the failing assertion below.
-LISTING_TOTAL_CEILING_CHARS = 14_175
+LISTING_TOTAL_CEILING_CHARS = 13_741
 
 # The skills deployed by `mkOutOfStoreSymlink` from `scripts/` instead of by the
 # recursive `claude/skills` mapping (`nix/home.nix`). They are listing entries
@@ -365,7 +378,7 @@ def test_the_listing_total_does_not_regrow_past_its_ratchet():
     """🔴 The SUM, which the per-entry cap above structurally cannot see.
 
     39 entries each comfortably under the 1,536-char per-entry cap still overrun
-    the 1%-of-context budget by ~2.3x on a 200k window -- so the per-entry check
+    the 1%-of-context budget by ~1.6x on a 200k window -- so the per-entry check
     can be green while descriptions are being dropped. See this module's
     docstring for the measurement and for why this is a ratchet rather than a
     gate on the real budget.
