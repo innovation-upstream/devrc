@@ -2566,14 +2566,27 @@ def test_every_git_invocation_takes_its_environment_from_git_env():
     """
     import ast
     tree = ast.parse(SCRIPT.read_text(encoding="utf-8"))
-    git_sites = [(node.lineno, _env_is_git_env(node))
-                 for node in ast.walk(tree) if _is_git_subprocess(node)]
+    classified = [_classify_subprocess(n) for n in ast.walk(tree)]
+    git_sites = [c for c in classified if c and c[1] == _KIND_GIT]
+    unknown = [c for c in classified if c and c[1] == _KIND_UNRECOGNISED]
 
     assert len(git_sites) >= 2, (
         f"the AST walk found {len(git_sites)} git subprocess site(s) in "
         f"{SCRIPT.name}; it should see at least `_git` and `_git_scratch`. A "
         f"walker that finds nothing would make this pass vacuously.")
-    bad = [ln for ln, ok in git_sites if not ok]
+
+    # 🔴 AN UNRECOGNISED SHAPE IS A FAILURE, NOT A PASS. `subprocess.run(argv)`
+    # or `subprocess.run([_GITBIN, …])` cannot be read statically, so the walker
+    # cannot say whether it is a git site — and "cannot say" must never render
+    # as compliant. Widen the classifier deliberately, or hoist the literal.
+    assert not unknown, (
+        f"{SCRIPT.name} has subprocess call(s) at line(s) "
+        f"{[ln for ln, _k, _ok in unknown]} whose argv[0] is not a literal, so "
+        f"this guard CANNOT tell whether they invoke git. It refuses to read "
+        f"that as compliant. Either spell argv[0] as a literal, or widen "
+        f"`_classify_subprocess` in the same commit.")
+
+    bad = [ln for ln, _k, ok in git_sites if not ok]
     assert not bad, (
         f"{SCRIPT.name} invokes git at line(s) {bad} with an environment that "
         f"did not come from `_git_env()`. That site does not get the "
@@ -2581,49 +2594,257 @@ def test_every_git_invocation_takes_its_environment_from_git_env():
         f"repository — the whole of clawgate #343.")
 
 
-def _is_git_subprocess(node) -> bool:
-    """`subprocess.run(["git", …], …)` — the shape both git helpers use."""
+_KIND_GIT = "git"
+_KIND_OTHER = "other"
+_KIND_UNRECOGNISED = "unrecognised"
+
+
+def _classify_subprocess(node):
+    """`(lineno, kind, env_ok)` for any `subprocess.*` call, else None.
+
+    🔴 WIDENED AFTER AN AUDIT MEASURED IT NARROWER THAN THE SENTENCE BESIDE IT.
+    The first version matched only `subprocess.run` whose argv[0] was the
+    literal `"git"`, while `backup.py`'s docstring told the next maintainer that
+    EVERY git subprocess in the file is pinned by this test. Two realistic
+    third-site shapes survived a fully green 139-test run:
+
+        subprocess.check_output(["git", "--version"], env=dict(os.environ))
+        subprocess.run([_GITBIN, ...], env=dict(os.environ))
+
+    Both are exactly the "third site added later" this guard exists for. So:
+
+      * ANY attribute on the `subprocess` module counts, not just `run` —
+        `check_output`, `check_call`, `call`, `Popen`, whatever arrives next.
+      * a non-literal argv, or a non-literal argv[0], is `_KIND_UNRECOGNISED`
+        and the caller FAILS on it. A guard that cannot read a call must not
+        report it as fine; that is the same "wider description than
+        implementation" defect one level up.
+      * `env=` is accepted as `_git_env()` or `<module>._git_env()`, because
+        `restore-verify.py` reaches it as `B._git_env()`.
+    """
     import ast
     if not isinstance(node, ast.Call):
-        return False
+        return None
     fn = node.func
-    if not (isinstance(fn, ast.Attribute) and fn.attr == "run"
+    if not (isinstance(fn, ast.Attribute)
             and isinstance(fn.value, ast.Name) and fn.value.id == "subprocess"):
-        return False
-    if not node.args or not isinstance(node.args[0], ast.List):
-        return False
-    elts = node.args[0].elts
-    first = elts[0] if elts else None
-    return isinstance(first, ast.Constant) and first.value == "git"
+        return None
+
+    env_ok = _env_is_git_env(node)
+    if not node.args:
+        return (node.lineno, _KIND_UNRECOGNISED, env_ok)
+    argv = node.args[0]
+    if not isinstance(argv, (ast.List, ast.Tuple)):
+        return (node.lineno, _KIND_UNRECOGNISED, env_ok)
+    if not argv.elts:
+        return (node.lineno, _KIND_UNRECOGNISED, env_ok)
+    first = argv.elts[0]
+    if not isinstance(first, ast.Constant) or not isinstance(first.value, str):
+        return (node.lineno, _KIND_UNRECOGNISED, env_ok)
+    kind = _KIND_GIT if Path(first.value).name == "git" else _KIND_OTHER
+    return (node.lineno, kind, env_ok)
 
 
 def _env_is_git_env(node) -> bool:
+    """`env=_git_env()` or `env=<module>._git_env()`."""
     import ast
     env = {k.arg: k.value for k in node.keywords}.get("env")
-    return (isinstance(env, ast.Call) and isinstance(env.func, ast.Name)
-            and env.func.id == "_git_env")
+    if not isinstance(env, ast.Call):
+        return False
+    f = env.func
+    if isinstance(f, ast.Name):
+        return f.id == "_git_env"
+    return isinstance(f, ast.Attribute) and f.attr == "_git_env"
+
+
+_SEAM_CONTROL_SRC = """
+import subprocess, os
+def _git_env():
+    return {}
+def compliant_run():
+    return subprocess.run(['git', 'status'], env=_git_env())
+def compliant_via_module():
+    return subprocess.run(['git', 'status'], env=B._git_env())
+def compliant_abs_path():
+    return subprocess.run(['/usr/bin/git', 'status'], env=_git_env())
+def offending_run():
+    return subprocess.run(['git', 'log'], env=dict(os.environ))
+def offending_check_output():
+    return subprocess.check_output(['git', '--version'], env=dict(os.environ))
+def offending_popen():
+    return subprocess.Popen(['git', 'fsck'], env=dict(os.environ))
+def not_git():
+    return subprocess.run(['age', '-e'], env=dict(os.environ))
+def unreadable_name():
+    return subprocess.run([_GITBIN, 'log'], env=dict(os.environ))
+def unreadable_argv(argv):
+    return subprocess.run(argv, env=dict(os.environ))
+"""
 
 
 def test_the_git_env_seam_guard_can_go_RED():
-    """Negative control for the walker above: hand it the pre-fix shape and
-    watch it refuse. Without this, "0 bad sites" is indistinguishable from a
-    walker wired to nothing — the reassuring zero RULES.md's positive-control
-    rule is about."""
+    """🔴 NEGATIVE CONTROL, REBUILT AFTER AN AUDIT WALKED THE OLD ONE.
+
+    The previous control fed exactly two shapes — a compliant `subprocess.run`
+    and an offending one — so it proved the walker could tell those two apart
+    and nothing else. An audit then measured two realistic third-site mutants
+    surviving a fully green run: `subprocess.check_output(["git", …])` and
+    `subprocess.run([_GITBIN, …])`. Both are now in the fixture, alongside the
+    module-qualified `env=B._git_env()` that `restore-verify.py` uses and an
+    absolute-path `argv[0]`.
+
+    The unreadable shapes must classify as UNRECOGNISED — not as compliant, and
+    not as non-git. That distinction is the whole point: "I cannot read this"
+    and "this is fine" must not produce the same verdict.
+    """
     import ast
-    tree = ast.parse(
-        "import subprocess, os\n"
-        "def _git_env():\n    return {}\n"
-        "def a():\n"
-        "    return subprocess.run(['git', 'status'], env=_git_env())\n"
-        "def b():\n"
-        "    return subprocess.run(['git', 'log'], env=dict(os.environ))\n"
-        "def c():\n"
-        "    return subprocess.run(['age', '-e'], env=dict(os.environ))\n"
-    )
-    verdicts = [_env_is_git_env(n) for n in ast.walk(tree) if _is_git_subprocess(n)]
-    assert verdicts == [True, False], (
-        f"the seam walker cannot tell the two git shapes apart, or counted the "
-        f"non-git `age` call: {verdicts}")
+    tree = ast.parse(_SEAM_CONTROL_SRC)
+    by_func = {}
+    for fn in [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]:
+        for n in ast.walk(fn):
+            c = _classify_subprocess(n)
+            if c is not None:
+                by_func[fn.name] = (c[1], c[2])
+
+    assert by_func == {
+        "compliant_run": (_KIND_GIT, True),
+        "compliant_via_module": (_KIND_GIT, True),
+        "compliant_abs_path": (_KIND_GIT, True),
+        "offending_run": (_KIND_GIT, False),
+        "offending_check_output": (_KIND_GIT, False),
+        "offending_popen": (_KIND_GIT, False),
+        "not_git": (_KIND_OTHER, False),
+        "unreadable_name": (_KIND_UNRECOGNISED, False),
+        "unreadable_argv": (_KIND_UNRECOGNISED, False),
+    }, (
+        "the seam walker misclassified one of the shapes it exists to catch:\n"
+        f"{by_func}\n"
+        "Every `offending_*` must be (git, False) so the guard fails on it; "
+        "every `unreadable_*` must be UNRECOGNISED so the guard refuses rather "
+        "than passing it.")
+
+
+def _transplant(root: Path, with_ledger: bool) -> Path:
+    """A copy of `backup.py` at the same depth, with or without `testlib/`.
+
+    Same depth matters: the producer resolves the ledger as
+    `Path(__file__).resolve().parents[1] / "testlib"`, so the copy has to sit
+    one level under a scripts-like root for either outcome to mean anything.
+    """
+    area = root / "analyze-service-index"
+    area.mkdir(parents=True)
+    shutil.copy(SCRIPT, area / SCRIPT.name)
+    if with_ledger:
+        shutil.copytree(SCRIPTS / "testlib", root / "testlib")
+    return area / SCRIPT.name
+
+
+def _bare_env() -> dict:
+    """PATH and HOME only — no PYTHONPATH to smuggle the ledger back in."""
+    return {"PATH": os.environ["PATH"], "HOME": os.environ.get("HOME", "/tmp")}
+
+
+def test_a_MISSING_pointer_ledger_STOPS_the_program(tmp_path):
+    """🔴 THE ONE CLAIM NO OTHER TEST CAN SEE — measured, not asserted.
+
+    `backup.py`'s import banner says the ledger import is "A HARD FAILURE, NEVER
+    A SILENT DEGRADE". An audit measured that replacing the `raise` with
+
+        except ImportError:
+            REPO_POINTER_VARS = ()
+            def strip_repo_pointers(env=None): return {}
+
+    leaves the whole suite GREEN — 139/139. That degrade is precisely the
+    false all-clear this program exists to prevent: a backup that silently
+    re-acquires clawgate #343 and still reports success, on a daily timer,
+    uploading off-box. Every other test here runs where `testlib/` is present,
+    so none of them can distinguish the two.
+
+    So: transplant the producer somewhere the ledger is NOT, and require it to
+    refuse. Paired with `test_the_transplant_control_RUNS_when_the_ledger_is_
+    there`, without which "non-zero exit" could be any other cause.
+    """
+    script = _transplant(tmp_path / "noledger", with_ledger=False)
+    p = subprocess.run([sys.executable, str(script), "--print-plan"],
+                       capture_output=True, text=True, env=_bare_env())
+
+    assert p.returncode != 0, (
+        "backup.py STARTED with no repo-pointer ledger reachable. The import "
+        "degraded instead of raising, so this run has no strip at all and would "
+        "bundle and upload whatever a leaked GIT_DIR pointed it at — while "
+        f"reporting success.\nstdout:\n{p.stdout[-800:]}")
+    assert "cannot import the git repo-pointer ledger" in p.stderr, (
+        f"it failed, but not with the message that tells an operator WHY — so "
+        f"the failure is indistinguishable from an unrelated crash:\n"
+        f"{p.stderr[-1200:]}")
+
+
+def test_the_transplant_control_RUNS_when_the_ledger_is_there(tmp_path):
+    """The other half of the pair, and it is not optional.
+
+    A transplanted copy could exit non-zero for a dozen reasons that have
+    nothing to do with the ledger — a missing sibling, a bad path, an unrelated
+    import. Unless the SAME transplant with `testlib/` present exits 0, the test
+    above is measuring the transplant, not the guard.
+    """
+    script = _transplant(tmp_path / "withledger", with_ledger=True)
+    p = subprocess.run([sys.executable, str(script), "--print-plan"],
+                       capture_output=True, text=True, env=_bare_env())
+    assert p.returncode == 0, (
+        f"the transplant itself is broken, so the missing-ledger test above "
+        f"proves nothing:\nstderr:\n{p.stderr[-1200:]}")
+    assert "remote:    NONE" in p.stdout, p.stdout[:400]
+
+
+def test_the_announcement_is_ONCE_PER_NAME_not_once_per_git_call(leak_bed):
+    """🟢 The dedupe is a claim in the docstring, so it gets a pin.
+
+    A full run calls `_git_env()` many times per scope (`rev-list`, `bundle
+    create`, `bundle verify`, the rehearsal clone, `for-each-ref`), so a missing
+    `continue` turns one useful line into a wall that buries the backup's own
+    output. Measured across a SUBPROCESS boundary on purpose —
+    `_POINTERS_ANNOUNCED` is process-global and never reset, so an in-process
+    assertion would depend on which test ran first.
+    """
+    p = _run_isolated(leak_bed["store"], leak_bed["work"], leak_bed["home"],
+                      leak_bed["identity"],
+                      leak={"GIT_DIR": str(leak_bed["decoy"] / ".git")})
+    assert p.returncode == 0, p.stderr
+    n = p.stderr.count("STRIPPED GIT_DIR=")
+    assert n == 1, (
+        f"the leak was announced {n} times in one run; it must be once per "
+        f"variable. `_git_env()` is rebuilt for every git invocation, so a "
+        f"per-call line buries the run's own output.")
+
+
+def test_the_announcement_names_the_PROGRAM_THAT_IS_RUNNING(monkeypatch):
+    """🟢 `_git_env()` is SHARED — `restore-verify.py` calls it directly.
+
+    Hardcoding `PROG` announced a leak hit during a restore VERIFICATION under
+    the BACKUP's name, pointing whoever read the journal at the wrong program
+    and the wrong systemd unit.
+
+    Snapshot/restore `_POINTERS_ANNOUNCED` because it is process-global by
+    design; see its note in the producer.
+    """
+    saved = set(B._POINTERS_ANNOUNCED)
+    try:
+        B._POINTERS_ANNOUNCED.clear()
+        monkeypatch.setattr(sys, "argv", ["/somewhere/restore-verify.py", "--x"])
+        import io
+        import contextlib
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            B._announce_stripped_pointers({"GIT_DIR": "/tmp/foreign/x"})
+        out = buf.getvalue()
+        assert out.startswith("restore-verify.py: STRIPPED GIT_DIR="), (
+            f"the announcement does not name the running program: {out!r}")
+        assert B.PROG not in out, (
+            f"the announcement still hardcodes the BACKUP's name while "
+            f"restore-verify.py is what ran: {out!r}")
+    finally:
+        B._POINTERS_ANNOUNCED.clear()
+        B._POINTERS_ANNOUNCED.update(saved)
 
 
 def test_scope_remotes_has_no_production_call_site():
@@ -2634,17 +2855,47 @@ def test_scope_remotes_has_no_production_call_site():
     stops a future reader citing it as the control that ENFORCES the no-remote
     invariant when it enforces nothing. Wire it in and this goes red, which is
     the point: the docstring has to change in the same commit.
+
+    🔴 SCANS EVERY PRODUCTION MODULE IN THE DIRECTORY, not just `backup.py`.
+    An audit noted the first version parsed one file while the docstring it
+    protects makes an UNQUALIFIED claim ("there is no production call site").
+    `restore-verify.py` imports `backup` as `B`, so `B.scope_remotes(scope)`
+    there would be a production call the narrow version could not see — the
+    same "description wider than the implementation" defect the guard exists to
+    prevent, one level up. Both the bare name and any attribute access on it
+    count. Derived from the directory at scan time, so a third program is
+    covered the day it appears.
     """
     import ast
-    tree = ast.parse(SCRIPT.read_text(encoding="utf-8"))
-    defs = [n for n in ast.walk(tree)
-            if isinstance(n, ast.FunctionDef) and n.name == "scope_remotes"]
-    assert len(defs) == 1, f"expected exactly one definition, found {len(defs)}"
-    calls = [n.lineno for n in ast.walk(tree)
-             if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
-             and n.func.id == "scope_remotes"]
+    modules = sorted((SCRIPTS / "analyze-service-index").glob("*.py"))
+    assert len(modules) >= 2, (
+        f"the production-module sweep found {len(modules)} file(s) in "
+        f"scripts/analyze-service-index/; it must see at least backup.py and "
+        f"restore-verify.py, or this scan is vacuous: "
+        f"{[m.name for m in modules]}")
+    assert {m.name for m in modules} >= {"backup.py", "restore-verify.py"}, (
+        f"{[m.name for m in modules]} — the two known producers must both be in "
+        f"the swept set")
+
+    defs, calls = [], []
+    for mod in modules:
+        tree = ast.parse(mod.read_text(encoding="utf-8"))
+        for n in ast.walk(tree):
+            if isinstance(n, ast.FunctionDef) and n.name == "scope_remotes":
+                defs.append(f"{mod.name}:{n.lineno}")
+            if not isinstance(n, ast.Call):
+                continue
+            f = n.func
+            named = ((isinstance(f, ast.Name) and f.id == "scope_remotes")
+                     or (isinstance(f, ast.Attribute) and f.attr == "scope_remotes"))
+            if named:
+                calls.append(f"{mod.name}:{n.lineno}")
+
+    assert len(defs) == 1 and defs[0].startswith("backup.py:"), (
+        f"expected exactly one `scope_remotes` definition, in backup.py; "
+        f"found {defs}")
     assert not calls, (
-        f"scope_remotes() now HAS a production call site (line(s) {calls}). Its "
+        f"scope_remotes() now HAS a production call site ({calls}). Its "
         f"docstring says it has none and that no future reader may cite it as a "
         f"run-path control. Update that docstring in this commit — and note "
         f"that a post-hoc no-remote assertion on the run path would be "

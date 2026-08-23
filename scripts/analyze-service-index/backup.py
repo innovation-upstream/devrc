@@ -218,6 +218,14 @@ def _private_dir(d: Path) -> Path:
 # --------------------------------------------------------------------------- #
 # git — read-only by construction
 # --------------------------------------------------------------------------- #
+# 🔴 PROCESS-GLOBAL, AND DELIBERATELY NEVER RESET. `_git_env()` is rebuilt for
+# every git invocation, so without this the announcement below would print once
+# per call and bury the backup's own output. The consequence for TESTS is the
+# part worth naming: an in-process assertion on the announcement is
+# ORDER-DEPENDENT — whichever test runs first consumes the one line for that
+# name. So the behavioural pins on it (`test_the_leak_is_ANNOUNCED_…`,
+# `test_the_announcement_is_ONCE_PER_NAME_…`) drive a SUBPROCESS, where the set
+# starts empty by construction. A unit-level test must snapshot and restore it.
 _POINTERS_ANNOUNCED: set[str] = set()
 
 
@@ -303,6 +311,24 @@ def _git_env() -> dict:
     return env
 
 
+def _announcing_program() -> str:
+    """The program actually running, for the announcement's prefix.
+
+    🔴 NOT `PROG`. `_git_env()` is SHARED: `restore-verify.py` imports this
+    module and calls `_git_env()` / `_git_scratch` directly (it deliberately
+    reuses them rather than copying the guards). Hardcoding `PROG` therefore
+    announced a leak hit during a RESTORE VERIFICATION under the BACKUP's name,
+    sending whoever read the journal to the wrong program and the wrong unit.
+    `sys.argv[0]`'s basename distinguishes them without either program having to
+    register anything.
+    """
+    try:
+        name = Path(sys.argv[0]).name
+    except (IndexError, TypeError, ValueError):  # pragma: no cover - argv is a list
+        return PROG
+    return name or PROG
+
+
 def _announce_stripped_pointers(stripped: dict) -> None:
     """Say ONCE per variable that the caller's environment was aimed elsewhere.
 
@@ -311,18 +337,19 @@ def _announce_stripped_pointers(stripped: dict) -> None:
     and the strip fixes this program's behaviour without fixing theirs. Printing
     it makes the leak visible in the journal instead of only in a diff nobody
     reads. Once per name, because `_git_env()` is rebuilt for every invocation
-    and a per-call line would bury the backup's own output.
+    and a per-call line would bury the run's own output — see the note on
+    `_POINTERS_ANNOUNCED` for what that costs a test.
     """
     for name in sorted(stripped):
         if name in _POINTERS_ANNOUNCED:
             continue
         _POINTERS_ANNOUNCED.add(name)
         print(
-            f"{PROG}: STRIPPED {name}={stripped[name]!r} from the git "
-            f"environment. It decides WHICH repository a git command lands in "
-            f"and it OVERRIDES `git -C`; inherited here it would have aimed this "
-            f"backup at that repository and uploaded it. Fix the caller — "
-            f"nothing in this program's normal operation sets it.",
+            f"{_announcing_program()}: STRIPPED {name}={stripped[name]!r} from "
+            f"the git environment. It decides WHICH repository a git command "
+            f"lands in and it OVERRIDES `git -C`; inherited here it would have "
+            f"aimed this program at that repository. Fix the caller — nothing "
+            f"in normal operation sets it.",
             file=sys.stderr,
         )
 
