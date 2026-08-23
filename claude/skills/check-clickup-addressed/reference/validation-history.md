@@ -1398,3 +1398,123 @@ not have in mind.**
 🔴 **And a false SURVIVED nearly shipped from the sweep's own harness**: the first sweep filtered
 runner output through a `grep -E` alternation that omitted the killing test's name, so a mutant
 that *was* caught printed nothing and scored SURVIVED. Read the whole failure list.
+
+---
+
+# Rounds 7 + 8 — ported from the upstream copy (2026-08-22)
+
+This skill was migrated out of a private client repo earlier the same day. Two rounds of work
+landed there AFTER the migration and are ported here. **It is a PORT, not a copy**: every real
+ClickUp id, real person's name and verbatim third-party comment body in the upstream hunks was
+replaced with a synthetic equivalent registered in `tests/test_no_real_identifiers.py`. This
+repo is PUBLIC; the upstream one is not.
+
+## What was NOT ported, and why
+
+Upstream round 8's headline finding is a **scan-less-run announcement**: one line per run
+saying that the waiting flag and *"ClickUp `<done>` but open signals remain"* could not fire,
+because a parallel upstream change made the transcript scan **opt-in** and its scan-less
+record omits `mentions_found` rather than reporting `0`.
+
+**That opt-in does not exist here.** Measured: `check-addressed.py` has no `--transcripts`
+flag (`parse_args` rejects it), `main()` always runs `search-sessions.py` and
+`check-completion.py`, and `check-completion.py` emits `mentions_found` on all three of its
+exit paths. No record here can carry a `not_scanned` status or omit the mention count, so the
+announcement would guard a state no input can reach — and an unreachable guard reads as
+protection while providing none. Not ported, together with the `"mentions_found" in r` gate
+its sibling puts on the open-signals flag (same premise), the SKILL.md correction about the
+default invocation (this tool's default DOES run the decision flags), and mutants N1–N5.
+Every one of those omissions is written down at the site that would carry it, with the
+condition for restoring it: **a `--transcripts` opt-in landing here.**
+
+## Round 7 — three follow-ups to D12
+
+* **F1 — an unreadable date on MY OWN comment restored the exact false positive D12 fixed.**
+  `latest_reply_by` skipped a comment of mine whose date would not parse. If that was my
+  NEWEST, it returned an OLDER reply of mine — or `None`, which is the POSITIVE claim *"I
+  looked; you never replied"*. `latest_reply_ts_by` now returns the `UNIDENTIFIED` sentinel,
+  `build_record` omits the key, and the consumer announces rather than deciding. It is ANY of
+  my comments, not "the newest": an unreadable date has no position in the ordering.
+* **F2 — the tie boundary was a judgement call and the data to settle it was being thrown
+  away.** Minute-resolution ages made a reply written **20 seconds BEFORE** the question
+  compare EQUAL to it and count as an answer — a waiting colleague dropped from the report.
+  `date_ms` / `my_latest_reply_ms` now ride beside the display fields, used **only when BOTH**
+  are present; an unreadable date yields an ABSENT ms, never a `0` (1970 makes every reply
+  look newer than every question).
+* **F3 — ClickUp has no bot identity, and the suppression path printed NOTHING.** Every
+  comment posted through a `pk_` token comes back authored as the token's owner, so *"you
+  answered"* and *"an agent answered as you"* are the same observable. `suppressed_notes`
+  emits one line per suppressed task into its own `## Answered already` block, with the
+  caveat leading the block once.
+* **The instrument**: `tests/test_waiting_corpus.py`, 21 labelled RECORDS. `test_corpus.py`
+  scores comment TEXT; this flag reads FIELDS, so all 49 of its cases are blind to it. The
+  verdict is read off the CLAIM, never off whether something fired.
+* Round 7b's audit fixes are folded in: the computed other-coverage sentence, the
+  display-vs-bound age split, the note requiring a bound that was actually EVALUATED, and
+  `report_blocks` being driven THROUGH `main()` rather than merely extracted.
+
+## Round 8 — three invariants the prose guaranteed and nothing pinned
+
+All three SURVIVED upstream's full battery. `tests/test_bounds_and_parsing.py` closes them:
+per-record `disagreements([r])` scoping, the DISPLAY half of the two-ages split, and
+`UNANSWERED_COMMENT_DAYS` pinned ON its boundary (14.0) and at a NON-multiple overshoot (20).
+🔴 **The reusable lesson is the third: 30 is more than 2×14, so a DOUBLING mutant passed
+straight through the gap between fixtures at 13 and 30.** A bound needs a case exactly on it
+and an overshoot that is not a multiple of the step.
+
+Also ported: `TypeError` added to `_age_days_from_ms`' except tuple (dropping the `_ms()` call
+at the caller is a one-token edit that let a string `date_ms` crash the whole report), and
+three comment corrections — the `OSError` blame in `_age_days_from_ms` (the exception is
+`ValueError`; the real mechanism is that `_epoch_ms` never range-checks), the "changes NO flag
+outcome" claim about moving the recency bound (it now changes exactly one case), and the
+retracted *"`mentions_found == 0` means no other rule covers the ticket"* non-sequitur
+wherever it appeared.
+
+## 🔴 The battery is in the repo — `tests/mutation_sweep.py`
+
+Mutants as DATA plus a runner (`--list`, an id filter, `--check` which fails on a stale
+`NOT APPLIED`). **59 mutants + a positive control + a NULL CONTROL, non-KILLED: 0.**
+
+🔴 **And the null control earned its place on the first run.** All 59 mutants reported KILLED,
+and every killer list opened with `test_the_scan_actually_walks_files_and_can_see_an_id`:
+`test_no_real_identifiers.py` resolves `<repo>/scripts` and `<repo>/claude` from `__file__`,
+which cannot exist inside the sweep's temp copy, so its four tests failed in **every** run and
+a mutant that changed nothing would have scored KILLED too. That is a fully green sweep
+proving nothing — the exact "dying to a different guard's assertion is a green you cannot
+spend" failure, hit by the file that warns about it. Fixed two ways: that gate is dropped from
+each mutant copy (no code mutant can ever be caught by a tree-hygiene check), and the sweep
+now runs an unmutated copy FIRST and aborts unless it reports SURVIVED.
+
+## Red at base / green at HEAD
+
+Measured with `test_no_real_identifiers.py` excluded from all three trees — it is a
+repo-hygiene gate that cannot resolve the repo from a temp copy, so it would fail identically
+everywhere and inflate each row by the same 4:
+
+| tree | result |
+|---|---|
+| pre-port scripts + pre-port tests (baseline) | **176 passed, 0 failed** |
+| pre-port scripts + **HEAD tests** | **178 passed, 31 failed** |
+| HEAD scripts + HEAD tests | **209 passed, 0 failed** |
+
+In-repo, with that gate included: **180 → 213 collected.** Corpus **10/21 pre-port → 21/21**.
+
+⚠️ Four of the five round-8 guards are among those 31 reds, and they are **not** regression
+coverage: they go red with `AttributeError` because `suppressed_notes` / `_age_days_from_ms`
+do not exist pre-port, not because pre-port got those cases wrong. The file says so at the
+top. Counting them would overstate the port's regression matrix by four.
+
+## 🔴 What was NOT verified
+
+**No live ClickUp run**, in any round of this line of work, upstream or here. Every claim
+above is measured against the suite, the corpus and the sweep. The bot-identity finding is
+carried over from an independent measurement in a sibling tool and was not re-measured.
+
+The **threaded-comment blind spot is unchanged**: `recent-comments.py` still fetches
+top-level comments only, so a reply written inside a comment thread is invisible to
+`my_latest_reply` and the ticket still reads as unanswered.
+
+Found and deliberately NOT fixed: `_collect` still sorts on the FORMATTED `date` string. That
+is lexicographically correct for `%Y-%m-%d %H:%M`, and `date_ms` now exists so the sort could
+read it — but it would change which comments the report samples, and nothing measured says
+the current order is wrong.

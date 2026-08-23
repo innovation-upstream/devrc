@@ -1426,7 +1426,19 @@ TARGET_FLOORS=(
   # four an adversarial audit of the migration produced — the documented `$CCUA/...`
   # invocation, the unmarked `--json` output, its end-to-end seam, and the
   # header/marker single-source pin.)
-  "scripts/check-clickup-addressed/tests|168"
+  #
+  # 2026-08-22, re-pinned when upstream rounds 7+8 were ported in: 213 collected,
+  # from this gate's own line `PASS scripts/check-clickup-addressed/tests
+  # (collected=213 passed=213 skipped=0 floor=168)`, again agreeing with
+  # tests/run_all.py (213 passed, 0 failed) — two runners, one number.
+  #   _suggested_floor 213 = 213 - min(50, max(1, 213/20 = 10)) = 213 - 10 = 203.
+  # 🔴 The gate did NOT force this: 213 is under the drift ceiling (floor 168 +
+  # max(60, 168/4) = 228), so it passed and printed no replacement number. Re-pinned
+  # anyway, because 45 tests of slack is most of what this port ADDED — the whole
+  # waiting corpus (8) plus the bounds/parsing set (5) plus the round-7 additions
+  # could have vanished with the gate still green, which is the exact staleness the
+  # header above says a per-target floor exists to prevent.
+  "scripts/check-clickup-addressed/tests|203"
   "scripts/claude-hooks/tests/test_guard_core.py|1260"
   # 2026-08-13, next-step-nudge.py's suite arrives as a NEW target: 78 collected on the
   # branch. Gate's own count through the gate's own rule:
