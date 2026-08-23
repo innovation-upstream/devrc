@@ -39,6 +39,24 @@ debugging, changing or copying a specific pipeline.
    walk-gate **cold 3m04s → warm 1m15s** (~1m50s saved) — the old "~2–15 min cold" figure was
    **wrong** (cache.nixos.org is fast here; cold ≈ 3 min). Tradeoff: if `talos-xr6-r7p` is
    down, runs Pend.
+   🔴 **AND PUSHING N BRANCHES IS NOT N INDEPENDENT ACTIONS — IT IS ONE BLAST-RADIUS ACTION.**
+   Node-pinning means every run lands on `talos-xr6-r7p`, so a burst of pushes stacks full
+   pipeline runs onto one node with **no concurrency control** (the known-open issue below).
+   Measured 2026-08-23: five branches pushed in quick succession took that node to 77% CPU
+   requests / 237% limits with 424 Completed + 97 Error pods resident, the cluster began
+   emitting `ExceededNodeResources: Insufficient resources to schedule pod`, and steps were
+   **killed with exit 255**. The rate moved **2/54 (4%) → 8/34 (24%)**. It is not your branch:
+   **anyone else's PR checks in that window die too.** Push, wait for the queue to drain, push.
+   🔴 **`exited with code 255` is the CONGESTION signature, and it names whichever step was
+   running** — it appeared in `step-clone` AND `step-pytests` in the same burst, which reads as
+   two unrelated bugs and is one. The check then posts `NOT RUN: <leg> — the gate stopped
+   before this leg reported`: **a broken gate, not a bad change — do not debug your diff
+   against it.** The tell that it is congestion rather than code: it heals when the queue
+   drains, and a code cause does not.
+   🔴 **Do NOT measure a flake rate from inside a burst you are causing.** That mistake was
+   made here and written into a handoff as a property of the CI tier before it was caught —
+   `claude/RULES.md` → *"a control that SHARES the step you doubt"*. Take the baseline from a
+   window with no pushes of your own in it.
 4. **Placeholder imagePullSecret breaks ALL pulls.** A `harbor-cred` dockerconfigjson with a
    non-base64 `auth` placeholder makes every pod fail image pull ("illegal base64 data").
    **Do NOT attach a placeholder imagePullSecret** to the pipeline SA — public images
