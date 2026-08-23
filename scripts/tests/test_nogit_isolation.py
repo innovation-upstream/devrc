@@ -108,6 +108,28 @@ EXPECTED_PLUGINS = {"testlib.nolaunch" + "_plugin",
 # --------------------------------------------------------------------------- #
 # Helpers
 # --------------------------------------------------------------------------- #
+def _guard10_failure_block(out: str) -> str:
+    """Just GUARD 10's `ERROR:` block, so a path assertion means what it says.
+
+    🔴 WHY THIS EXISTS, MEASURED. `assert str(path) in out` looks like "the
+    failure named the file" and is not: `run-tests.sh` prints
+    `present <path>  [<class>]` for EVERY protected file at startup,
+    unconditionally, whether or not anything fails. An audit mutant that
+    suppressed the path in GUARD 10's failure message left the negative controls
+    at `9 passed` — SURVIVED. The same shape as the reason assertion inside the
+    downgrade block, which had already been scoped for exactly this reason.
+
+    Returns "" when the block is absent, so a caller asserting into it fails
+    rather than silently searching an empty string it mistook for the run.
+    """
+    head = "ERROR:"
+    tail = "---- end GUARD 10 problems ----"
+    if "GUARD 10 problem(s):" not in out or tail not in out:
+        return ""
+    after = out.split("GUARD 10 problem(s):", 1)[1]
+    return head + after.split(tail, 1)[0]
+
+
 def _pytest_invocations(src: str) -> list[str]:
     """The lines that actually RUN pytest — not the ones that talk about it."""
     return [ln for ln in src.splitlines()
@@ -736,9 +758,15 @@ def test_a_target_that_rewrites_the_home_config_is_named_and_red(tmp_path):
         f"a planted write to the home git config produced a PASSING run:\n{out}")
     assert "GUARD 10 problem" in out, (
         f"the run failed, but not for the git-config reason:\n{out}")
-    assert str(target) in out, f"the failure did not NAME the target:\n{out}"
-    assert str(home / ".gitconfig") in out, (
-        f"the failure did not NAME the file that changed:\n{out}")
+    # 🔴 Read out of GUARD 10's FAILURE block, not the whole run — the startup
+    # `present <path>` listing satisfies a bare `in out` even when the failure
+    # names nothing (see `_guard10_failure_block`).
+    block = _guard10_failure_block(out)
+    assert block, f"GUARD 10's failure block was not printed at all:\n{out}"
+    assert str(target) in block, (
+        f"the failure did not NAME the target:\n{block}\n---\n{out}")
+    assert str(home / ".gitconfig") in block, (
+        f"the failure did not NAME the file that changed:\n{block}\n---\n{out}")
     # The positive control for the assertion above: the write really happened.
     assert "planted-by-a-test" in (home / ".gitconfig").read_text(encoding="utf-8")
 
@@ -921,10 +949,15 @@ def test_a_repo_local_change_is_REPORTED_when_a_cotenant_is_PROVEN(tmp_path):
         "the planted repo-local write never landed, so this run proves nothing")
     assert f"{name}  real-config-changed=0/" in out, (
         f"the accounting did not record the change as non-enforcing:\n{out}")
-    assert "repo-local-reported=1" in out, (
-        f"the downgraded change was not COUNTED on the target's line:\n{out}")
-    assert "repo-local-reported-total=1" in out, (
-        f"the downgraded change is missing from the run's summary:\n{out}")
+    # 🔴 TRAILING BOUNDARY PINNED. A bare `"repo-local-reported=1" in out` is a
+    # PREFIX match: it is equally satisfied by `=10` … `=19`, so a count that
+    # ran away by an order of magnitude reads as the expected 1.
+    assert re.search(r"repo-local-reported=1(?![0-9])", out), (
+        f"the downgraded change was not COUNTED as exactly 1 on the target's "
+        f"line:\n{out}")
+    assert re.search(r"repo-local-reported-total=1(?![0-9])", out), (
+        f"the downgraded change is missing from the run's summary, or the total "
+        f"is not exactly 1:\n{out}")
 
     # 🔴 SCOPED TO GUARD 10's OWN BLOCK, and the mutation sweep is why.
     # `cannot attribute: live processes are sitting inside …` is also printed by
@@ -979,10 +1012,18 @@ def test_a_repo_local_change_still_FAILS_when_no_cotenant_is_proven(tmp_path):
         f"the failure did not classify the change as repo-local-ENFORCED:\n{out}")
     assert "repo-local-reported-total=0" in out, (
         f"nothing should have been downgraded in this run:\n{out}")
-    assert "FOUND NO OTHER WRITER" in out, (
-        f"the failure did not say WHY it was attributable:\n{out}")
-    assert str(scratch / ".git" / "config") in out, (
-        f"the failure did not NAME the file that changed:\n{out}")
+    block = _guard10_failure_block(out)
+    assert block, f"GUARD 10's failure block was not printed at all:\n{out}"
+    assert "FOUND NO PROOF of another writer" in block, (
+        f"the failure did not say WHY it was attributable:\n{block}")
+    # 🔴 The message must not overstate the probe: it checks cwd against the git
+    # dir and its parent, so a SIBLING worktree is invisible. Saying "no other
+    # writer exists" would be the #730 misdiagnosis in a new place.
+    assert "SIBLING worktree" in block, (
+        f"the failure claimed more than the probe measured — the sibling-worktree "
+        f"blind spot is not named:\n{block}")
+    assert str(scratch / ".git" / "config") in block, (
+        f"the failure did not NAME the file that changed:\n{block}\n---\n{out}")
 
 
 def test_a_global_change_FAILS_even_with_a_cotenant_PROVEN(tmp_path):
@@ -1016,8 +1057,10 @@ def test_a_global_change_FAILS_even_with_a_cotenant_PROVEN(tmp_path):
         f"the run failed, but not for the git-config reason:\n{out}")
     assert "global-enforced" in out, (
         f"the failure did not classify the change as GLOBAL:\n{out}")
-    assert str(home / ".gitconfig") in out, (
-        f"the failure did not NAME the file that changed:\n{out}")
+    block = _guard10_failure_block(out)
+    assert block, f"GUARD 10's failure block was not printed at all:\n{out}"
+    assert str(home / ".gitconfig") in block, (
+        f"the failure did not NAME the file that changed:\n{block}\n---\n{out}")
     # The positive control for the assertion above: the write really happened.
     assert "planted-by-a-test" in (home / ".gitconfig").read_text(encoding="utf-8")
 
@@ -1057,5 +1100,197 @@ def test_a_broken_evidence_probe_fails_TOWARD_enforcing(tmp_path):
         f"switched off by an import error:\n{out}")
     assert "evidence=probe-failed" in out, (
         f"the run failed, but not because the probe could not run:\n{out}")
+    # Its two siblings pin this; without it "the run went red" is satisfied by
+    # the runner being red about anything at all.
+    assert "GUARD 10 problem" in out, (
+        f"the run failed, but not for the git-config reason:\n{out}")
     assert "repo-local-reported-total=0" in out, (
         f"a failed probe must downgrade NOTHING:\n{out}")
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE PROBE'S OUTPUT IS EVIDENCE ONLY IF THE PROBE WROTE IT
+# --------------------------------------------------------------------------- #
+# The downgrade used to be decided by `[ -s "$out" ]` — output PRESENCE. The
+# probe inherits the ambient `PYTHONPATH`, so ANY stdout on that path counted:
+# a package that prints at import, a `.pth`, a `sitecustomize`. Measured with NO
+# co-tenant present, a single `print()` in `scripts/testlib/__init__.py`
+# produced `repo-local-reported=1` and downgraded a genuinely attributable
+# write, rendering the stray line as GUARD 9 evidence. That is a downgrade
+# WITHOUT PROOF, which is the one thing this design promises cannot happen.
+#
+# Both tests below run with NO co-tenant, so the correct verdict is FAIL in
+# each; a PASS means the guard was switched off by somebody else's print().
+def _plant_chatty_import(tmp_path: Path, text: str) -> tuple[Path, Path]:
+    """A real `sitecustomize` on `PYTHONPATH` that writes `text` to stdout.
+
+    Injected via `PYTHONPATH`, never by editing this repo's `scripts/testlib/`:
+    the probe prepends `$ROOT/scripts` and KEEPS whatever it inherited, and that
+    inherited half is precisely the surface under test. `sitecustomize` is
+    imported by `site` at interpreter startup, so this is a genuine
+    print-at-import, not a stub of one.
+
+    🔴 SCOPED TO THE PROBE by `sys.argv`, deliberately. Printing from EVERY
+    python the runner starts would corrupt GUARD 8's captured
+    `SPOOL_TRAP_LOG` command substitution and abort the run `exit 2` — the test
+    would then be red for a NEIGHBOUR's reason while asserting this one's, which
+    is the failure mode this whole file exists to avoid.
+
+    Returns `(pythonpath_dir, witness)`. The witness is the positive control:
+    it proves the module actually loaded INSIDE the probe process, so a red
+    verdict cannot be scored as "the token worked" when nothing ever printed.
+    """
+    noisy = tmp_path / "noisy-pythonpath"
+    noisy.mkdir(parents=True, exist_ok=True)
+    witness = tmp_path / "noise-witness.txt"
+    (noisy / "sitecustomize.py").write_text(
+        "import os, sys\n"
+        "if any('DEVRC-NOGIT-EVIDENCE' in a for a in sys.argv):\n"
+        f"    open({str(witness)!r}, 'a').write('fired\\n')\n"
+        f"    sys.stdout.write({text!r})\n",
+        encoding="utf-8")
+    return noisy, witness
+
+
+def _run_at_with_env(runner: Path, scratch: Path, tmp_path: Path,
+                     extra: dict) -> subprocess.CompletedProcess:
+    env = {**os.environ, **_unguarded_home(tmp_path), **extra}
+    for k, v in list(env.items()):
+        if v is None:
+            del env[k]
+    return subprocess.run(["bash", str(runner), str(scratch)], capture_output=True,
+                          text=True, timeout=900, cwd=str(REPO_ROOT), env=env)
+
+
+def test_a_stray_print_on_the_probes_pythonpath_is_NOT_evidence(tmp_path):
+    """🔴 REGRESSION for the measured fail-open. Not a stub: a real module on a
+    real `PYTHONPATH`, printing at import, exactly as the audit reproduced it.
+
+    With no co-tenant, the repo-local write is attributable and MUST fail. If
+    the stray line is accepted as evidence, the run goes green instead.
+    """
+    scratch = _scratch_root(tmp_path)
+    name = _plant_repo_local_write(scratch)
+    runner = _runner_over(tmp_path, scratch, [name])
+    # The text is deliberately the EXACT wording GUARD 9 uses, so nothing but
+    # the token can distinguish it from real evidence.
+    noisy, witness = _plant_chatty_import(
+        tmp_path,
+        "live processes are sitting inside a protected repository (cwd), "
+        "and none of them is ours: 1:fake\n")
+
+    assert not live_cotenants([scratch / ".git"]), (
+        "something is already sitting in this scratch root, so the 'no proven "
+        "writer' premise of this test does not hold")
+    proc = _run_at_with_env(runner, scratch, tmp_path,
+                            {"PYTHONPATH": str(noisy)})
+    out = proc.stdout + proc.stderr
+
+    # 🔴 POSITIVE CONTROL FOR THE FIXTURE ITSELF — the noise really loaded
+    # inside the probe process. Without this, a run that went red because the
+    # module never imported would be scored as "the token rejected it".
+    assert witness.exists() and witness.read_text(encoding="utf-8").strip(), (
+        "the chatty sitecustomize never ran inside the probe, so this test "
+        f"measured nothing:\n{out}")
+    assert proc.returncode != 0, (
+        "a stray print() on the probe's PYTHONPATH was accepted as co-tenancy "
+        f"evidence and downgraded an ATTRIBUTABLE write:\n{out}")
+    assert "GUARD 10 problem" in out, (
+        f"the run failed, but not for the git-config reason:\n{out}")
+    assert "repo-local-reported-total=0" in out, (
+        f"an unstamped line must downgrade NOTHING:\n{out}")
+    assert "evidence=none" in out, (
+        f"the run did not record the probe as having returned no evidence:\n{out}")
+
+
+def test_whitespace_only_probe_stdout_is_NOT_evidence(tmp_path):
+    """🔴 The second half of the same site: `NOGIT_EV_STATUS` used to be set
+    BEFORE the loop that skips blank lines, so whitespace-only stdout produced
+    `proven` with ZERO logged reasons — a downgrade whose stated cause was the
+    empty string.
+    """
+    scratch = _scratch_root(tmp_path)
+    name = _plant_repo_local_write(scratch)
+    runner = _runner_over(tmp_path, scratch, [name])
+    noisy, witness = _plant_chatty_import(tmp_path, "   \n\t\n\n")
+
+    assert not live_cotenants([scratch / ".git"])
+    proc = _run_at_with_env(runner, scratch, tmp_path,
+                            {"PYTHONPATH": str(noisy)})
+    out = proc.stdout + proc.stderr
+
+    assert witness.exists() and witness.read_text(encoding="utf-8").strip(), (
+        f"the whitespace-emitting sitecustomize never ran in the probe:\n{out}")
+    assert proc.returncode != 0, (
+        f"whitespace-only probe stdout was accepted as evidence:\n{out}")
+    assert "GUARD 10 problem" in out, (
+        f"the run failed, but not for the git-config reason:\n{out}")
+    assert "repo-local-reported-total=0" in out, (
+        f"blank lines must downgrade NOTHING:\n{out}")
+    assert "evidence=none" in out, (
+        f"the run did not record the probe as having returned no evidence:\n{out}")
+
+
+def test_a_LINKED_WORKTREE_protects_the_COMMON_config(tmp_path):
+    """🔴 THE PRODUCTION SHAPE, which every other test here approximates.
+
+    #730 is about a clone with ~122 linked worktrees; the suite normally runs
+    from one of them, not from the main clone. In that shape
+    `rev-parse --git-common-dir` resolves to the MAIN clone's `.git`, so the
+    protected repo-local file is the SHARED config — the one with other writers
+    — and not anything under `.git/worktrees/<name>/`.
+
+    This pins that the classifier and the evidence probe agree about which file
+    that is. Without it, the whole class could be keyed on a path that only
+    exists in the non-worktree shape and every test here would still pass.
+    """
+    main = _scratch_root(tmp_path)
+    # A worktree needs a commit to check out.
+    for cmd in (["git", "-C", str(main), "commit", "-q", "--allow-empty",
+                 "-m", "base", "--no-gpg-sign"],):
+        done = subprocess.run(cmd, capture_output=True, text=True, timeout=120,
+                              env={**os.environ, "GIT_AUTHOR_NAME": "t",
+                                   "GIT_AUTHOR_EMAIL": "t@example.invalid",
+                                   "GIT_COMMITTER_NAME": "t",
+                                   "GIT_COMMITTER_EMAIL": "t@example.invalid"})
+        assert done.returncode == 0, f"could not seed the scratch repo:\n{done.stderr}"
+
+    linked = tmp_path / "linked-wt"
+    add = subprocess.run(["git", "-C", str(main), "worktree", "add", "--detach",
+                          "-q", str(linked)], capture_output=True, text=True,
+                         timeout=180)
+    assert add.returncode == 0, f"could not create the linked worktree:\n{add.stderr}"
+    # The runner needs `$ROOT/scripts` to resolve; the worktree holds only the
+    # (empty) commit, so the same symlink farm is laid over it.
+    for entry in REPO_ROOT.iterdir():
+        if entry.name == ".git" or (linked / entry.name).exists():
+            continue
+        (linked / entry.name).symlink_to(entry)
+
+    common = main / ".git" / "config"
+    writer = "g10-write-common.sh"
+    (linked / writer).write_text(
+        "set -euo pipefail\n"
+        f'git -C "{linked}" config devrc-g10.planted yes\n',
+        encoding="utf-8")
+    target = tmp_path / "plain_tests"
+    write_pytest_suite(target, 2, prefix="test_plain")
+    runner = runner_with_targets(tmp_path, [str(target)], {str(target): 1},
+                                 hook_tests=[], shell_tests=[writer])
+
+    with _cotenant(main):                      # the co-tenant sits in the MAIN tree
+        proc = _run_at(runner, linked, tmp_path)
+    out = proc.stdout + proc.stderr
+
+    # The write landed in the COMMON config, not in the worktree's own git dir.
+    assert "planted" in common.read_text(encoding="utf-8"), (
+        "the planted write did not reach the common config — this test's "
+        "premise about `git config` in a linked worktree is wrong")
+    assert f"present {common}  [repo-local" in out, (
+        f"the common config was not classified repo-local from a linked "
+        f"worktree:\n{out}")
+    assert proc.returncode == 0, (
+        f"a repo-local change in a LINKED WORKTREE, with a proven co-tenant in "
+        f"the main tree, still failed the run:\n{out}")
+    assert re.search(r"repo-local-reported-total=1(?![0-9])", out), (
+        f"the linked-worktree downgrade was not counted:\n{out}")
