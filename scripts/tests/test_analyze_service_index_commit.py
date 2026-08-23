@@ -2438,7 +2438,7 @@ def test_the_bind_list_parser_sees_an_appended_entry():
 # That is BOTH hazards at once — client-identifying content into a foreign
 # repository AND a backup that does not exist while the unit prints ok — and it
 # never self-heals, because every later run repeats it. It is arguably the worst
-# of the five, and the false comment was instructing the next maintainer not to
+# of the six, and the false comment was instructing the next maintainer not to
 # cover it. `_fingerprint` now walks `objects/`; see its docstring.
 #
 # 🔴 ALL ELEVEN LEDGER NAMES ARE MEASURED, not six of them with the rest left to
@@ -2447,12 +2447,19 @@ def test_the_bind_list_parser_sees_an_appended_entry():
 # shape as the GIT_OBJECT_DIRECTORY correction above, one level up. Each was run
 # ALONE against the pre-fix script with the WIDENED fingerprint:
 #
+# 🔴 AND WITH NO GIT IDENTITY IN THE ENVIRONMENT, which is how the unit actually
+# runs (a systemd timer has no GIT_AUTHOR_*/GIT_COMMITTER_*). The first version
+# of this table was measured with them exported and recorded `GIT_CONFIG rc=0`;
+# that number was an artifact of the probe FIXING a dimension the unit does not
+# have. Re-measured both ways — identity in env flips GIT_CONFIG from rc 1 to
+# rc 0 and nothing else — so the honest column is the one without it.
+#
 #   variable                          rc   foreign repo moved?
-#   GIT_DIR                            0   YES  (both the worktree and main gitdir)
+#   GIT_DIR                            0   YES  silent: no own repo, commits land foreign
 #   GIT_COMMON_DIR                     0   YES  config
 #   GIT_INDEX_FILE                     0   YES  index
 #   GIT_OBJECT_DIRECTORY               0   YES  objects + an unusable backup
-#   GIT_CONFIG                         0   YES  config  <-- found BY this sweep
+#   GIT_CONFIG                         1   YES  config AND a loud failure  <-- see below
 #   GIT_WORK_TREE                      1   no — the run FAILED instead
 #   GIT_ALTERNATE_OBJECT_DIRECTORIES   0   no
 #   GIT_NAMESPACE                      0   no
@@ -2464,13 +2471,27 @@ def test_the_bind_list_parser_sees_an_appended_entry():
 # six others are NOT, and that is the honest label: they are on the ledger
 # because they redirect git in general, but a test over them here would be an
 # invariant guard wearing a regression test's name. Post-fix, all eleven leave
-# the foreign repo byte-identical and the scope backed up correctly.
+# the foreign repo byte-identical and the scope backed up correctly, rc 0.
 #
-# GIT_CONFIG is the one this sweep turned up: it makes the per-repo
-# `commit.gpgsign false` pin write into the FOREIGN repository's config
-# (`+[commit]\n\tgpgsign = false` measured in the decoy) — configuration damage
-# to somebody else's checkout, the same class as the `core.hooksPath` and
-# `remote.origin.url` writes in the 2026-08-21 incident.
+# 🔴 THE rc COLUMN IS A DISCRIMINATOR, NOT DECORATION — it is the whole reason
+# GIT_WORK_TREE sits in the excluded half ("the run FAILED rather than misdirect
+# it"). So GIT_CONFIG's rc matters: it is a THIRD shape, not a copy of either
+# neighbour.
+#
+#   GIT_DIR        rc 0  foreign write, silent — the script reports ok
+#   GIT_WORK_TREE  rc 1  loud failure, nothing foreign touched
+#   GIT_CONFIG     rc 1  loud failure AND a foreign write AND no usable backup
+#
+# MEASURED for GIT_CONFIG against the pre-fix script: the per-repo
+# `commit.gpgsign false` pin AND the identity seeding both land in the FOREIGN
+# repository's config (`+[commit]\n\tgpgsign = false` in the decoy), after which
+# the scope's own commit cannot resolve an author —
+#     "seeded a local commit identity (analyze-service index …)"
+#     "git commit failed (rc=128): Author identity unknown"
+# so the scope IS bootstrapped, the foreign config IS rewritten, and the backup
+# is still not made. Configuration damage to somebody else's checkout is the
+# same class as the `core.hooksPath` / `remote.origin.url` writes in the
+# 2026-08-21 incident; the loud exit is what stops it being the silent one.
 #
 # ⚠ AND TWO THAT ARE NOT ON THE SHARED LEDGER AT ALL, covered separately below:
 # GIT_CEILING_DIRECTORIES and GIT_TEMPLATE_DIR cannot redirect git, so GUARD 9
@@ -2574,6 +2595,69 @@ def _fingerprint(dirs):
 
 _SPOOF_SHAPES = ("GIT_DIR_worktree", "GIT_DIR_main", "GIT_INDEX_FILE",
                  "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY", "GIT_CONFIG")
+
+#: The ledger names each parametrised case above actually leaks. Spelled
+#: separately from `_SPOOF_SHAPES` because two cases share `GIT_DIR`.
+_SHAPES_COVER = {
+    "GIT_DIR", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY",
+    "GIT_CONFIG",
+}
+
+#: Measured NOT to damage the foreign repo on their own, with their reason. This
+#: is the other half of the eleven, enumerated rather than implied — see
+#: `test_the_measured_table_covers_every_ledger_name`.
+_SHAPES_EXCLUDED = {
+    "GIT_WORK_TREE": "rc 1 — the pre-fix run FAILED rather than misdirect it",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES": "foreign repo byte-identical",
+    "GIT_NAMESPACE": "foreign repo byte-identical",
+    "GIT_PREFIX": "foreign repo byte-identical",
+    "GIT_GRAFT_FILE": "foreign repo byte-identical",
+    "GIT_SHALLOW_FILE": "foreign repo byte-identical",
+}
+
+
+def test_the_measured_table_covers_every_ledger_name():
+    """🔴 THE TABLE ABOVE SAYS "ALL ELEVEN" — MAKE THAT ENFORCED, NOT ASSERTED.
+
+    A twelfth name added to `REPO_POINTER_VARS` is forced into `commit.sh`'s
+    array by `test_the_shell_and_python_pointer_ledgers_agree`, so the FIX would
+    cover it automatically. Nothing forces it into this file, though: the
+    sentence "all eleven ledger names are measured" would silently become false
+    and a damage class would go untried — which is precisely the unstated-scope
+    defect this section already had to correct twice.
+
+    So pin it BOTH WAYS. Growing fails (a new name must be measured and then
+    either parametrised or excluded with a reason); shrinking fails too (a name
+    that leaves the ledger must leave this file deliberately, not linger as a
+    case testing something the guard no longer claims).
+
+    Same shape as `test_POINTER_CLEARERS_is_every_file_that_declares_the_array`
+    one file over — this was a consistency gap, not a missing idea.
+    """
+    from testlib.gitenv import REPO_POINTER_VARS
+
+    ledger = set(REPO_POINTER_VARS)
+    accounted = _SHAPES_COVER | set(_SHAPES_EXCLUDED)
+
+    assert not (_SHAPES_COVER & set(_SHAPES_EXCLUDED)), (
+        "a name is both parametrised and excluded: "
+        f"{sorted(_SHAPES_COVER & set(_SHAPES_EXCLUDED))}")
+    assert accounted == ledger, (
+        "the measured table disagrees with REPO_POINTER_VARS:\n"
+        f"  on the ledger, NOT measured here: {sorted(ledger - accounted)}\n"
+        f"  measured here, NOT on the ledger: {sorted(accounted - ledger)}\n"
+        "Measure the new name against the PRE-FIX script and then either add it "
+        "to _SHAPES_COVER with a parametrised case, or to _SHAPES_EXCLUDED with "
+        "the reason it is harmless alone. Do not just edit this set.")
+
+    # Every covered name must actually be leaked by some case — otherwise the
+    # set could claim coverage that `_spoof_env` never produces.
+    leaked = set()
+    for shape in _SPOOF_SHAPES:
+        leaked |= set(_spoof_env(shape, Path("/w"), Path("/w/.git/worktrees/wt")))
+    assert leaked == _SHAPES_COVER, (
+        "_SHAPES_COVER does not match what the parametrised cases actually "
+        f"export:\n  claimed: {sorted(_SHAPES_COVER)}\n  exported: {sorted(leaked)}")
 
 
 def _spoof_env(shape, work, gitdir):

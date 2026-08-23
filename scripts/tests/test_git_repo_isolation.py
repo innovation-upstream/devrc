@@ -151,7 +151,7 @@ from testlib.gitenv import (  # noqa: E402
 # build sandbox, where `checks.pytests` runs off `cp -r ${./.} src`.
 # `captured_text_scan.py` carries a "ONE RULE, ONE PLACE … a third copy of it
 # would be a third place for that trap to come back" banner over this helper.
-from testlib.public_ip_scan import repo_files  # noqa: E402
+from testlib.public_ip_scan import _is_skipped, repo_files  # noqa: E402
 
 # 🔴 NOT a shebang and NOT a bare "bash". Section 6 drives run-tests.sh as a
 # subprocess; an unnarrowed `shutil.which` result would surface as a TypeError
@@ -405,6 +405,30 @@ def _could_hold_a_shell_array(path: Path) -> bool:
     return path.suffix in (".sh", "")
 
 
+def _sweep_candidates() -> list[Path]:
+    """The files the clearer sweep looks at, filtered the way this repo's other
+    `repo_files` consumers filter theirs.
+
+    🔴 `_is_skipped` is RE-APPLIED after `repo_files`, for the reason
+    `captured_text_scan._candidates` and `public_ip_scan.scan_repo` both spell
+    out: `repo_files` only filters on the FILESYSTEM-WALK tier, so on the
+    `git ls-files` tier a tracked path under a skip dir comes back. MEASURED
+    zero such paths today — this closes a DIVERGENCE between the two tiers, not
+    a live miss, and a divergence here would surface as a red in one tier only,
+    which is the shape this whole PR keeps being about.
+
+    ⚠ MEASURED, and stated because the honest version is less flattering:
+    deleting the `_is_skipped` call kills NO test. There are no tracked files
+    under a `SKIP_DIRS` name today, so nothing can observe its absence. It is
+    defence-in-depth and consistency with the two established `repo_files`
+    consumers — NOT coverage, and it must not be counted as any. The same
+    labelling as the "backup is readable" assertions in
+    `test_analyze_service_index_commit.py`.
+    """
+    return [p for p in repo_files(ROOT)
+            if _could_hold_a_shell_array(p) and not _is_skipped(p, ROOT)]
+
+
 def test_POINTER_CLEARERS_is_every_file_that_declares_the_array():
     """🔴 THE FILE LIST IS DERIVED, NOT TRUSTED — both directions.
 
@@ -438,7 +462,7 @@ def test_POINTER_CLEARERS_is_every_file_that_declares_the_array():
     assert len(names) > 100, (
         f"the repo-file sweep found only {len(names)} files under {ROOT} — it is "
         "not walking the repo, so the agreement below would be vacuous")
-    shell = [p for p in names if _could_hold_a_shell_array(p)]
+    shell = _sweep_candidates()
     assert len(shell) > 10, (
         f"the sweep saw {len(shell)} shell files — the walk is not reaching "
         "`scripts/` or `githooks/`, where every clearer lives")
@@ -515,7 +539,6 @@ def test_the_clearer_sweep_can_actually_find_one():
     assert _could_hold_a_shell_array(Path("x/run-tests.sh"))
     assert _could_hold_a_shell_array(Path("githooks/tests-on-push"))
     assert not _could_hold_a_shell_array(Path("x/test_thing.py"))
-
 
 
 def _root_line(text: str) -> int:
