@@ -242,6 +242,44 @@ operator token as `approve`):
 `--sent` refuses a missing or unusable timestamp rather than guessing, and
 `reconcile` refuses any draft that is not `sending` — it is not a state editor.
 
+🔴 **The timestamp is recoverable WITHOUT reading the phone — but only for 24 HOURS.**
+`signal-cli` keeps its own resend cache, `message_send_log_content`, in the account
+SQLite store inside the `signal-api` pod, and it records the minted server timestamp
+**plus the destination group's binary id**:
+
+```bash
+POD=$(kubectl -n signal get pods -l app=signal-api -o name | head -1 | cut -d/ -f2)
+kubectl -n signal exec "$POD" -- python3 -c "
+import sqlite3, base64, datetime
+c = sqlite3.connect('file:/home/.local/share/signal-cli/data/<acct>.d/account.db?mode=ro', uri=True)
+for _id, ts, gid, n in c.execute(
+        'select _id, timestamp, group_id, length(content) from message_send_log_content order by timestamp'):
+    print(_id, ts, datetime.datetime.fromtimestamp(ts/1000, datetime.UTC).isoformat(),
+          base64.b64encode(gid).decode() if gid else '(DM)', n)"
+```
+
+Rows line up 1:1 with the POSTs in the signal-api access log, so a send's row is
+identifiable by time, size and — for a group — the group id, which you can cross-check
+against `signal.groups` and against the draft's own stored `recipient`.
+
+⚠ **Retention is exactly one day**, not approximately: `LOG_DURATION = Duration.ofDays(1)`
+in `MessageSendLogStore.java`, swept by an `msl-cleanup` daemon thread every hour and
+opportunistically on every send and every retry lookup (read at tag `v0.14.7`). **So
+reconcile a stranded send the SAME DAY or the timestamp is gone for real.** It is not an
+archive — it exists to answer retry receipts when a recipient cannot decrypt (routine
+with sealed sender and sender-key group fan-out), which is also why it holds sendable
+content and therefore cannot be kept.
+
+🔴 **Confirm the row is YOUR send before storing it.** Storing another message's timestamp
+breaks sync-echo dedupe and files the message twice under two identities. A blind audit
+once attributed the wrong row to a draft — a note-to-self probe five minutes later —
+and it survived into a PR comment before an epoch decode caught it. Cross-check at least
+two of: the group id, the byte length, and the access-log time. Anchoring on a value you
+have already ruled out is a free positive control that the table is being read correctly.
+
+If the timestamp genuinely cannot be established, **leave the draft in `sending`** — it is
+inert and cannot resend itself. Guessing is the one thing that is not safe.
+
 ## Event kinds the consumer emits
 
 | Kind | Meaning |
