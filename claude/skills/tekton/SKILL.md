@@ -77,7 +77,14 @@ debugging, changing or copying a specific pipeline.
   EventListener, PipelineRuns).
 - GitOps via **Flux**, repo **`ZacxDev/homelab-infra`** branch **`trunk`**, under
   `clusters/homelab/apps/tekton-pipelines/`.
-- Kubeconfig: `~/workspace/homelab-infra/homelab-kubeconfig`.
+- Kubeconfig: `~/workspace/homelab-talos/homelab-kubeconfig` (handle: `$KC_HOMELAB`).
+  🔴 **`homelab-talos`, NOT `homelab-infra`** — the line above names the GitOps *repo*
+  (`homelab-infra`), and this file used to reuse that name for the *kubeconfig*, giving a
+  path that does not exist on disk. `kubectl` then falls back to `localhost:8080` and every
+  read dies with `connection refused` — an error that names a port appearing nowhere in the
+  skill, so it reads as a cluster outage rather than a bad path. Measured 2026-08-23 while
+  debugging the devrc gate. Six sibling skills (`signal`, `activity`, `mailbox`, `sglang`,
+  `standup`) all spell `homelab-talos`; this was the only file that did not.
 
 ## GitHub App — `tekton-homelab`
 
