@@ -2362,6 +2362,88 @@ TRUSTED_PEER = "127.0.0.1"
 UNTRUSTED_PEER = "127.0.0.2"
 
 
+AUDIT_PREFIX = "store-api audit "
+
+
+class AuditStream:
+    """Drain a spawned server's stdout on a thread, so a test can WAIT for an
+    audit line instead of assuming the HTTP response implies one.
+
+    🔴 THE RESPONSE DOES NOT IMPLY THE LINE. Every handler responds first and
+    audits second — `server.py` calls `self._respond(...)` and only then
+    `self._audit(...)` (see e.g. the 200 path). This is a `ThreadingHTTPServer`,
+    so `fetch`/`fetch_from` returning means the response was *written*, never
+    that the handler thread reached its `print`. A test that terminates the
+    process on the client's return therefore races the emission and sometimes
+    kills the server before the line exists — the assertion then fails on a
+    missing line rather than on the property it is about.
+
+    Measured: `test_a_VALID_token_from_an_untrusted_peer_is_SERVED_but_bucketed_
+    under_the_PEER` failed in CI with `IndexError: list index out of range` on
+    exactly that read, then PASSED on a re-run of the identical revision
+    (`devrc-ci-jxf5j` FAILED / `devrc-ci-vl88r` SUCCEEDED, both `ba97a9d7`).
+    Non-deterministic, and re-running was the wrong answer — an intermittently
+    red gate is what teaches everyone to click through a red run.
+
+    🔴 IT IS NOT A BUFFERING BUG, and that matters because the two produce an
+    identical symptom. `_child_env` sets `PYTHONUNBUFFERED=1`, so there is
+    nothing sitting in a buffer: on the losing schedule the line is never
+    WRITTEN. A fix aimed at flushing would have changed nothing.
+
+    Draining continuously also stops the pipe buffer from becoming a second
+    timing dependency on the tests that emit many lines.
+
+    Teardown stays with `running_subprocess`, which terminates and waits; this
+    class never terminates anything.
+    """
+
+    def __init__(self, proc: subprocess.Popen) -> None:
+        self._lines: list[str] = []
+        self._proc = proc
+        self._reader = threading.Thread(target=self._drain, daemon=True)
+        self._reader.start()
+
+    def _drain(self) -> None:
+        assert self._proc.stdout is not None, "the process was spawned without stdout=PIPE"
+        for raw in self._proc.stdout:  # ends when the pipe closes
+            self._lines.append(raw.rstrip("\n"))
+
+    @property
+    def audit(self) -> list[str]:
+        """Only the audit records, in emission order."""
+        return [ln for ln in self._lines if ln.startswith(AUDIT_PREFIX)]
+
+    @property
+    def text(self) -> str:
+        """Everything the process has written so far.
+
+        For a whole-stream claim — "no credential appears anywhere" — call
+        `join()` first, or the claim is only about what had arrived by then.
+        """
+        return "\n".join(self._lines)
+
+    def wait_for(self, count: int, *, timeout: float = 15.0) -> list[str]:
+        """Block until at least `count` audit lines have arrived, or `timeout`.
+
+        🔴 Returns whatever it has rather than raising. The CALLER's assertion
+        must be the one that fails, naming the count it expected and the lines
+        it got — a helper that raised its own error here would kill the test
+        with a different guard's message and hide which property broke.
+        """
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if len(self.audit) >= count:
+                break
+            time.sleep(0.02)
+        return self.audit
+
+    def join(self, timeout: float = 10.0) -> None:
+        """Wait for the drain thread to finish. Only meaningful once the process
+        is dead (its stdout is then at EOF) — i.e. after `running_subprocess`
+        has exited."""
+        self._reader.join(timeout)
+
+
 def fetch_from(
     source_ip: str,
     base: str,
@@ -2546,13 +2628,18 @@ class TestTheDeployedEntrypoint:
         which is the one fact that makes retiring the old one safe.
         """
         with running_subprocess(store, rotating_token_file) as (base, proc):
+            stream = AuditStream(proc)
             fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)
             fetch(f"{base}/api/v1/recall/{SCOPE}", token=SECOND_TOKEN)
             fetch(f"{base}/api/v1/recall/{SCOPE}", token="w" * 48)
-            proc.terminate()
-            stdout, _stderr = proc.communicate(timeout=15)
+            lines = stream.wait_for(3)
+        # The whole-stream claims below are about EVERYTHING the process wrote,
+        # so they need the drain to have finished — not just three lines to have
+        # arrived. `running_subprocess` has terminated it by here, so the pipe is
+        # at EOF and this returns promptly.
+        stream.join()
+        stdout = stream.text
 
-        lines = [ln for ln in stdout.splitlines() if ln.startswith("store-api audit ")]
         assert len(lines) == 3, f"expected 3 audit lines, got {len(lines)}: {stdout}"
         assert f"token={api.token_id(GOOD_TOKEN)}" in lines[0]
         assert f"token={api.token_id(SECOND_TOKEN)}" in lines[1]
@@ -3745,41 +3832,24 @@ class TestTrustedProxyOverTheRealProcess:
         failed auth and gets a real lockout — of ITSELF. The property is only
         ever about WHOSE bucket.
         """
-        import time
-
         # 🔴 WAIT FOR THE AUDIT LINES; DO NOT ASSUME THE RESPONSE IMPLIES THEM.
-        # `_reject()` calls `self._unauthorized()` and only THEN `self._audit()`,
-        # and this is a ThreadingHTTPServer — so `fetch_from` returning means the
-        # response was written, NOT that the handler thread has reached its
-        # `print`. Terminating on the client's return therefore raced the 5th
-        # line and killed the process before it was emitted.
+        # This test was written against a measured flake — 3/20 red locally and
+        # two consecutive reds in the nix sandbox, always `assert 4 == 5` with
+        # four identical lines — and it carried its own inline drain loop. That
+        # loop was correct and was the ONLY correct one: two sibling tests kept
+        # the racy terminate-then-read shape and one of them went red in CI a
+        # while later, on the same mechanism, with a different symptom
+        # (`IndexError` instead of a short count).
         #
-        # Measured before this fix, on an UNMODIFIED tree: 3/20 red locally and
-        # two consecutive reds in the nix sandbox, always the same
-        # `assert 4 == 5` with four identical audit lines. It is a real race in
-        # the TEST, not in the server, and re-running it was the wrong answer:
-        # a ~15% flaky gate is the thing that teaches everyone to click through
-        # a red run.
-        #
-        # A reader thread drains stdout while the process runs, so the wait is
-        # on the OBSERVABLE condition. Draining also stops the pipe buffer from
-        # ever becoming a second timing dependency. Teardown in
-        # `running_subprocess` does the terminate/wait.
-        lines: list[str] = []
-
-        def _drain() -> None:
-            for raw in proc.stdout:                     # ends when the pipe closes
-                if raw.startswith("store-api audit "):
-                    lines.append(raw.rstrip("\n"))
-
+        # So the wait now lives in `AuditStream`, once, and every site uses it.
+        # See that class for the mechanism and the CI evidence.
         with running_subprocess(
             store,
             token_file,
             trusted_proxies=f"{TRUSTED_PEER}/32",
             host=TRUSTED_PEER,
         ) as (base, proc):
-            reader = threading.Thread(target=_drain, daemon=True)
-            reader.start()
+            stream = AuditStream(proc)
             for _ in range(5):
                 fetch_from(
                     UNTRUSTED_PEER,
@@ -3788,9 +3858,7 @@ class TestTrustedProxyOverTheRealProcess:
                     token="w" * 48,
                     client_ip=SPOOF_IP,
                 )
-            deadline = time.time() + 15
-            while len(lines) < 5 and time.time() < deadline:
-                time.sleep(0.02)
+            lines = stream.wait_for(5)
         assert len(lines) == 5, lines
         # 🔴 THE ASSERTION THAT IS THE WHOLE DEFECT: the forged address never
         # becomes an identity. A fix that recorded the spoofed value but declined
@@ -3921,6 +3989,7 @@ class TestTrustedProxyOverTheRealProcess:
             trusted_proxies=f"{TRUSTED_PEER}/32",
             host=TRUSTED_PEER,
         ) as (base, proc):
+            stream = AuditStream(proc)
             code = fetch_from(
                 UNTRUSTED_PEER,
                 base,
@@ -3928,10 +3997,14 @@ class TestTrustedProxyOverTheRealProcess:
                 token=GOOD_TOKEN,
                 client_ip=SPOOF_IP,
             )
-            proc.terminate()
-            stdout, _err = proc.communicate(timeout=15)
+            lines = stream.wait_for(1)
         assert code == 200, code
-        line = [ln for ln in stdout.splitlines() if ln.startswith("store-api audit ")][-1]
+        # 🔴 Asserted, not indexed. The old shape was `[…][-1]`, which turns a
+        # missing line into `IndexError: list index out of range` — a message
+        # about Python, not about the property. That is exactly how this read
+        # failed in CI.
+        assert lines, "the request was served but no audit line was ever emitted"
+        line = lines[-1]
         assert f"ip={UNTRUSTED_PEER}" in line, line
         assert f"ip={SPOOF_IP}" not in line, line
         assert "peer=untrusted" in line, line
@@ -4029,6 +4102,94 @@ class TestTrustedProxyOverTheRealProcess:
             proc.terminate()
             stdout, _err = proc.communicate(timeout=15)
         assert f"trusted-proxies={NOT_LOOPBACK_PROXY}" in stdout, stdout
+
+
+def test_no_test_reads_an_AUDIT_LINE_from_a_process_it_just_terminated():
+    """🔴 THE SEAM GUARD FOR THE RACE `AuditStream` EXISTS TO CLOSE.
+
+    The hazard is a RELATIONSHIP between two things inside one function, not a
+    word: reading audit records out of a stream while also being the thing that
+    killed the process producing them. `_respond` runs before `_audit`, so the
+    client's return proves nothing about the line, and terminating on it races
+    the emission. That shape was fixed once inline and immediately regrew at two
+    sibling call sites — which is why the wait now lives in one class and this
+    guard watches for the shape rather than for a spelling.
+
+    Walked over the AST rather than grepped, so renaming `proc`, aliasing
+    `communicate`, or splitting the read across statements does not evade it.
+
+    🔴 WHAT IT DELIBERATELY PERMITS, and why the ban is not blanket:
+    `test_the_startup_line_NAMES_the_trusted_proxies` terminates and reads
+    stdout too, but reads the STARTUP line — which `running_subprocess` has
+    already synchronised on by waiting for `/healthz` before it yields. It is
+    not racy, and a blanket ban would have flagged it and taught the next
+    reader that this guard cries wolf.
+
+    🔴 WHAT IT CANNOT SEE: a racy read that never mentions the prefix — e.g. one
+    that slices stdout positionally, or matches a substring of a record. This
+    guard is about the shape that has actually occurred twice, and says so
+    rather than implying it covers the class.
+    """
+    tree = ast.parse(Path(__file__).read_text())
+
+    def _kills_the_process(fn: ast.AST) -> list[str]:
+        hits = []
+        for node in ast.walk(fn):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr in ("terminate", "kill", "communicate")
+            ):
+                hits.append(node.func.attr)
+        return hits
+
+    def _reads_audit_records(fn: ast.AST) -> bool:
+        for node in ast.walk(fn):
+            if isinstance(node, ast.Constant) and node.value == AUDIT_PREFIX:
+                return True
+            if isinstance(node, ast.Name) and node.id == "AUDIT_PREFIX":
+                return True
+        return False
+
+    offenders = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if node.name in ("running_subprocess", "_drain"):
+            continue  # teardown and the drain itself are where these belong
+        killed = _kills_the_process(node)
+        if killed and _reads_audit_records(node):
+            offenders.append(f"{node.name} (line {node.lineno}) calls {sorted(set(killed))}")
+
+    assert not offenders, (
+        "these functions both terminate the server and read its audit records — "
+        "the response does not imply the line was written. Use "
+        "`AuditStream(proc).wait_for(n)` and leave teardown to "
+        "`running_subprocess`:\n  " + "\n  ".join(offenders)
+    )
+
+
+def test_the_audit_stream_helper_is_what_every_audit_reader_uses():
+    """The other half of the guard above: it would pass vacuously if the tests
+    had simply stopped reading audit records. This asserts they still do, and
+    through the one helper — so the pair fails when the coverage SHRINKS as well
+    as when the hazard returns.
+    """
+    tree = ast.parse(Path(__file__).read_text())
+    users = {
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        for sub in ast.walk(node)
+        if isinstance(sub, ast.Call)
+        and isinstance(sub.func, ast.Name)
+        and sub.func.id == "AuditStream"
+    }
+    assert len(users) >= 3, (
+        f"only {len(users)} test(s) still read the audit stream via AuditStream: "
+        f"{sorted(users)}. If a reader was deleted, the guard above went vacuous "
+        "with it."
+    )
 
 
 class TestTrustedProxyAllowlistParsing:
