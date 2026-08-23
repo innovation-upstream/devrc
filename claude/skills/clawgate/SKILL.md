@@ -145,6 +145,15 @@ create** — a load-bearing wire contract producers key their retry on.
 ⚠ **A task body may carry extension-picked element references** — never search the selector first
 (`element-references.md`).
 
+⚠ **Task ↔ session THREADS exist, but the query is ONE-WAY.** Since #357 (0.7.98) each task records
+which sessions touched it (`task_sessions`; roles `created` / `worked` / `read`) and `/ui/tasks`
+renders a `👥 N session(s)` chip. **There is NO task→sessions route** — `GET /api/tasks/{id}/sessions`
+404s and is absent from `routes.golden`; only the REVERSE lookup `GET /api/sessions/{id}/tasks` is
+callable, and `clawgatectl` has a subcommand for neither. So *"which sessions worked task N"* is
+answerable **only by reading the UI**. 🔴 Membership OVER-reports and never downgrades: a
+**400-rejected** PATCH still records `worked` (card #306), and a **subagent inherits the parent's
+session id**, so a subagent's mere read links the PARENT to a task nobody worked.
+
 **Writing/debugging a producer? Load `task-api.md`** — per-op semantics + status codes,
 409/immutability, the author allowlist, provenance, tag grammar, the route×auth inventory.
 
