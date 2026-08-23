@@ -25,39 +25,36 @@ deliberately not fixed here"*.
 
 ## State now
 
-- **Branch / PR:** `zach/opencode-rm-glob-narrow` → **[PR #744](https://github.com/innovation-upstream/devrc/pull/744)**,
-  `OPEN / MERGEABLE / CLEAN`, based on `main` @ `99b2636f`. Three commits:
+**SHIPPED AND LIVE.** Both PRs merged 2026-08-23T20:04Z and the change is verified in the
+running engine, not just deployed.
 
-  | sha | what |
-  |---|---|
-  | `a08ac952` | the narrowing: `"*rm*-r*"` → `"*rm -r*"` + `"*rm --recursive*"` |
-  | `20988f91` | audit round — disclosure fixes, target-first class pinned |
-  | `360b54cf` | delta round — two sentences the audit round itself falsified |
+| PR | squash | state |
+|---|---|---|
+| **#744** the fix | `53cd03cc` | MERGED — verified by CONTENT on `origin/main` (squash makes ancestry permanently false) |
+| **#753** this doc | `a9333c23` | MERGED |
 
-- **CI: GREEN on the head `360b54cf`** — `tekton/devrc-pytests` 15,199 passed / 0 failed
-  (floor 13,732), `tekton/devrc-nodetests` 1,149 pass / 0 fail (floor 1,126).
-- **Two adversarial audits ran**, the second re-auditing the first's fixes. Verdict:
-  **safe to merge, no 🔴**. A public correction comment is on the PR
-  ([#issuecomment-5384694287](https://github.com/innovation-upstream/devrc/pull/744#issuecomment-5384694287)) —
-  the original PR body understated the change's cost and was corrected in a comment rather
-  than silently edited.
-- **NOT merged, NOT live.** `main` requires an approving review. And merging alone changes
-  nothing in the running engine — see "How to verify".
-- Worktrees still on disk: `/tmp/wt-devrc-rmglob` (the PR branch, keep until merge) and
-  `/tmp/wt-devrc-handoff` (this doc).
-
-### What the change actually is
-
-`"*rm*-r*"` had a `*` **between** "rm" and "-r", matching any command text containing "rm"
-followed *later* by "-r". "rm" is a substring of fo**rm**at, terrafo**rm**, fi**rm**ware,
-confi**rm**, platfo**rm**; "-r" covers `--reverse`, `--refresh`, `--reporter`, `--repo`,
-`--replace`, `--recursive`. `opencode run` **auto-rejects** an ask, so a match killed the
-run mid-task rather than costing a prompt.
-
-🔴 **It is not the one-character fix the queueing handoff described.** `"rm --recursive"`
-does not contain the literal `"rm -r"`, so dropping the inner `*` alone would have released
-`rm --recursive <path>` — measured, plain `allow` at both layers. Hence **two** rules, each
-pinned individually in `MUST_ASK`, each proven sole-decider for its own row.
+- **Live, verified against the real consumer.** `opencode debug agent build --pure` on the
+  running v1.18.18 engine resolves `"*rm -r*"` and `"*rm --recursive*"`, with **0** matches
+  for `rm*-r`. Deployed store path moved `jaji6qnz…` → `afbiggmm…`.
+- **Original symptom reproduced and gone:** `git log --format=oneline --reverse` and
+  `terraform plan -refresh=false` now `allow` (were `ask` → auto-reject → dead run);
+  `rm -r /repo/build` and `rm --recursive /repo/x` still `ask`.
+- **`home-manager switch` exited 0** — but that is a claim about the DEPLOY. The check that
+  settles it is the resolved array above, because this config is a `/nix/store` `home.file`
+  COPY: a stale base clone would have deployed the old rules while every signal said success.
+  The base clone was fast-forwarded (2 behind) BEFORE the switch for exactly that reason.
+- **CI green on both heads** — `tekton/devrc-pytests` 15,199 passed / 0 failed,
+  `tekton/devrc-nodetests` 1,149 pass / 0 fail.
+- **Two adversarial audits ran**, the second re-auditing the first's fixes; both *safe to
+  merge*. The public correction recording that the original PR body understated the change's
+  cost is [#issuecomment-5384694287](https://github.com/innovation-upstream/devrc/pull/744#issuecomment-5384694287).
+- Pre-squash history, since the squash flattens it: `a08ac952` the narrowing · `20988f91`
+  audit round (disclosure fixes, target-first class pinned) · `360b54cf` delta round (two
+  sentences the audit round itself falsified).
+- **Cleanup done:** worktrees `/tmp/wt-devrc-rmglob`, `/tmp/wt-devrc-handoff`,
+  `/tmp/wt744-base` removed by exact path; both branches deleted on merge.
+- **Subsystem store:** `devrc/opencode.md` bullet flipped `OPEN:` → `RESOLVED 53cd03cc`
+  once the merge+switch landed. `devrc/tests.md` keeps its `OPEN:` — that one is still open.
 
 ## Open investigations — live diagnosis state
 
@@ -122,15 +119,11 @@ pinned individually in `MUST_ASK`, each proven sole-decider for its own row.
 
 ## Next steps (ranked)
 
-1. **Review and merge PR #744.** Needs one approving review; I am the author. Note
-   `27fa67f9` — a merge is now blocked by `tekton/devrc-nodetests`, which is green here.
-2. **`home-manager switch`, then verify against the real engine.** Until then the change is
-   inert. See "How to verify".
-3. **`git -C $DEVRC worktree remove --force /tmp/wt-devrc-rmglob`** once merged.
-4. **Fix the pre-push gate** (investigation 1). It is currently unpassable, and every push
-   from this repo requires the bypass flag.
-5. **`guard_core` `$HOME`-subpath widening** (investigation 2), as its own PR with its own
-   measurement.
+1. **Fix the pre-push gate** — see the investigation below. It cannot pass a push; every
+   push in this arc needed `DEVRC_SKIP_TESTS=1`. This is the highest-value item left.
+2. **`guard_core` `$HOME`-subpath widening** — its own PR, with the firing-rate measurement
+   the deferral was predicated on.
+3. Nothing else. The narrowing is shipped, live and verified.
 
 ## Gotchas / decisions / dead-ends
 
@@ -165,22 +158,63 @@ pinned individually in `MUST_ASK`, each proven sole-decider for its own row.
   both directions (missed that `"*rm --recursive*"` carries its own surviving false-positive
   class — `pnpm --filter form --recursive build` is still `ask`).
 
+### What the change actually is — moved here from `State now`, which is REPLACE-on-update
+
+`"*rm*-r*"` had a `*` **between** "rm" and "-r", matching any command text containing "rm"
+followed *later* by "-r". "rm" is a substring of fo**rm**at, terrafo**rm**, fi**rm**ware,
+confi**rm**, platfo**rm**; "-r" covers `--reverse`, `--refresh`, `--reporter`, `--repo`,
+`--replace`, `--recursive`. `opencode run` **auto-rejects** an ask, so a match killed the
+run mid-task rather than costing a prompt.
+
+🔴 **It is not the one-character fix the queueing handoff described.** `"rm --recursive"`
+does not contain the literal `"rm -r"`, so dropping the inner `*` alone would have released
+`rm --recursive <path>` — measured, plain `allow` at both layers. Hence **two** rules, each
+pinned individually in `MUST_ASK`, each proven sole-decider for its own row.
+
+(This block lived under `State now` in the original doc. `State now` is REPLACED on every
+update, so a durable explanation there is deleted the first time anyone refreshes the status
+— which this very update would have done. It is durable, so it belongs under an APPEND
+heading. The tool's drop-detector did **not** flag it; that check is a floor, not proof.)
+
+- 🔴 **A `/handoff` OPEN: marker written mid-session goes stale within the hour.** This
+  session wrote `OPEN: PR #744 (unmerged)` into `devrc/opencode.md`, then merged and switched
+  ~40 min later. Caught and flipped to `RESOLVED 53cd03cc` only because the next question
+  prompted a re-check. The store's own docs record a 22-day instance of this. **If you write
+  an `OPEN:` marker and then finish the work in the same session, go back and flip it.**
+- 🔴 **`home-manager switch --flake` builds from the WORKING TREE, so merging is not enough.**
+  The base clone was 2 commits behind after the merges; a switch at that point would have
+  deployed the OLD glob and exited 0. `git -C <repo> merge --ff-only origin/main` first, then
+  switch, then verify the resolved array — three separate claims, all of which must hold.
+- **An empty `grep` over the engine dump is not evidence.** `grep '"pattern": "\*rm'` returned
+  nothing after a successful switch and looked like "the rule is gone"; the pattern was simply
+  wrong. The positive control — 238 `"pattern"` matches in a 32 KB dump — is what distinguished
+  a real absence from a bad query. Never read a reassuring zero without one.
+- **Merge order note:** #753 (the doc) was merged before #744 (the fix) as asked. Neither was
+  stacked — both branched off `main` directly and touched disjoint files — so `--delete-branch`
+  was safe on both. Had they been stacked, deleting the parent's branch would have auto-closed
+  the child PR with no way to reopen it.
+
 ## How to verify
 
 ```bash
-# 1. the two rules are on the PR head, and the infix form is gone
-git -C /home/zach/workspace/devrc show 360b54cf:scripts/opencode/opencode.jsonc | grep -n '"\*rm'
+# 1. LIVE — the resolved array in the running engine. This is the authoritative check.
+opencode debug agent build --pure 2>/dev/null | grep -a '"pattern"' | grep -a rm
+#    want: "*rm -r*", "*rm --recursive*", the three "*rm -rf …*" denies — and NO "*rm*-r*"
 
-# 2. the fast, deterministic gate (both targets)
-cd /tmp/wt-devrc-rmglob && PYTHONDONTWRITEBYTECODE=1 \
-  python3 -m pytest scripts/tests/test_opencode_config.py scripts/opencode/tests -q   # 736 passed
+# 2. the original failing symptom, against the deployed config
+python3 - <<'PY'
+import sys; sys.path.insert(0, '/home/zach/workspace/devrc/scripts/tests')
+import test_opencode_config as T
+for c in ['git log --format=oneline --reverse', 'terraform plan -refresh=false',
+          'rm -r /repo/build', 'rm --recursive /repo/x']:
+    print(f'{T.effective_bash_action(c, None):>5}  {c}')
+PY
+#    want: allow, allow, ask, ask
 
-# 3. the control — re-widening to the infix form must fail exactly 5 tests by name
-#    (edit "*rm -r*"+"*rm --recursive*" back to a single "*rm*-r*", re-run, then restore)
+# 3. the merges, BY CONTENT — ancestry is permanently false after a squash
+git -C /home/zach/workspace/devrc show origin/main:scripts/opencode/opencode.jsonc | grep -n '^      "\*rm'
 
-# 4. 🔴 LIVE, and the one that actually matters — merging changes NOTHING until a switch.
-#    ~/.config/opencode/opencode.jsonc resolves into /nix/store (a home.file copy).
-readlink -f ~/.config/opencode/opencode.jsonc          # -> /nix/store/...-hm_opencode.jsonc
-# after `home-manager switch`:
-opencode debug agent build --pure | grep -a '"\*rm'    # want "*rm -r*" + "*rm --recursive*", NO "*rm*-r*"
+# 4. the suite
+cd /home/zach/workspace/devrc && PYTHONDONTWRITEBYTECODE=1 \
+  python3 -m pytest scripts/tests/test_opencode_config.py scripts/opencode/tests -q
 ```
