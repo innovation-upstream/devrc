@@ -1333,7 +1333,7 @@ title is "the deny message called a CONVENTION 'structural'").**
 
 - **Structural, and NARROWER than it looks — scope it to the ROUTE or you will get it wrong in the
   other direction, which is what an earlier draft of this entry did.** A *dispatched devpod* agent
-  cannot set `complete`: `internal/api/agent.go` gates the two agent-token surfaces on
+  cannot set `complete`: `internal/api/agent.go` gates the two AGENT surfaces on
   `AllowedForAgent` (`internal/taskstatus/taskstatus.go:79-81` = `Valid(s) && s != Complete`), and
   that gate is **criteria-independent**. But the *machine* route — `PATCH /api/tasks/{id}/status`,
   hook token, which is what `clawgatectl task status` and therefore a LOCAL Claude Code pickup
@@ -1345,8 +1345,10 @@ title is "the deny message called a CONVENTION 'structural'").**
   is durable: `notes.SetStatus` is the single writer; exactly **two** surfaces gate on
   `AllowedForAgent` and both are the in-devpod AGENT tool/route (not "agent-token" — the operator
   route is agent-token-authed and is NOT gated); and **several** other paths may set `complete`
-  deliberately, including the hook-token machine route, the operator route and its tool, and the
-  losing side of `POST /tasks/merge`. Enumerate from `SetStatus`'s call sites at the moment you
+  deliberately, including the hook-token machine route, the operator route and its tool, the
+  losing side of `POST /tasks/merge`, and — most permissive of all — the session route
+  `PATCH /tasks/{id}/status`, whose `requireSession` is a literal `return next`, so an
+  UNAUTHENTICATED LAN request can set `complete`. Enumerate from `SetStatus`'s call sites at the moment you
   need it; any number written here goes stale and has.
 - **Convention, not enforced SERVER-side:** the AUTHOR-SPECIFIED vs DERIVED split and the
   freeze-at-first-read exist only in the skill's prose, read by the agent about itself — i.e.
