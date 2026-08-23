@@ -25,21 +25,33 @@ the natural next step -- not a single shared constant.
 
 WHAT THE CEILING PROTECTS -- AND WHAT IT MUST NOT DO
 ----------------------------------------------------
-🔴 This gate must NEVER be satisfied by deleting an instruction. Step 4 alone
-carries ~70 sentences pinned verbatim by `TestSkillDocsArePinned` in
-`scripts/tests/test_subsystem_touch.py`, and the comments there record that
-pinning only a headline clause left the surrounding paragraph "deletable green"
--- 1,513 chars -> 100 with the suite passing, silently taking the doc's only
-mention of a tool block, a fallback search and an UNFILED instruction with it.
+🔴 This gate must NEVER be satisfied by deleting an instruction. The skill's
+prose is pinned verbatim by two lists -- `HANDOFF_SENTENCES` (77 entries, in
+`TestSkillDocsArePinned`, `scripts/tests/test_subsystem_touch.py`; that list
+covers two skills, not only this one) and `SKILL_PINS` (14 entries, in
+`scripts/tests/test_handoff_doc.py`). Counts measured 2026-08-23 -- re-count
+rather than trusting them. The comments in the first record that pinning only a
+headline clause left the surrounding paragraph "deletable green" -- 1,513 chars
+-> 100 with the suite passing, silently taking the doc's only mention of a tool
+block, a fallback search and an UNFILED instruction with it.
 
 MEASURED, so the next person sizing this up does not repeat the estimate: a full
 eviction pass over step 4 on 2026-08-23 -- moving every dated measurement and
 incident narrative into `reference/index-write.md` §7 while keeping every
-imperative and every pinned phrase -- yielded **~2.0 KB out of 28.3 KB**. The
-step is mostly imperative and procedure, not narrative. So the lever this gate
-provides is NOT "cut step 4 again"; it is "do not add without evicting", and
-where a real cut is available it is a TOOL change (guidance the tool prints at
-the moment it applies costs nothing when it does not fire), never a prose trim.
+imperative and every pinned phrase -- yielded **1,993 bytes out of 28,589**
+(step 4, base -> head).
+
+⚠ THOSE ARE BYTES, which is the unit this gate measures. Characters run ~5%
+lower on this file, and an audit reported the same eviction as "1,890" that way.
+The two are not in conflict -- they are different units -- but a size claim that
+says only "~2 KB" cannot be checked against either, which is the same ambiguity
+`test_the_gate_measures_BYTES_not_characters` exists to kill in the code.
+
+The step is mostly imperative and procedure, not narrative. So the lever this
+gate provides is NOT "cut step 4 again"; it is "do not add without evicting",
+and where a real cut is available it is a TOOL change (guidance the tool prints
+at the moment it applies costs nothing when it does not fire), never a prose
+trim.
 
 The numbers below are the SINGLE source of truth. Any other mention of them
 (CLAUDE.md, handoff docs, PR bodies) must cross-reference this module rather
@@ -71,11 +83,21 @@ REFERENCE_DIR = SKILL_MD.parent / "reference"
 # free / budget / RECLAIM; that is the authority.
 #
 # What IS durable, and is why the ceiling sits where it does: the 2026-08-23 pass
-# that set it evicted ~2.2 KB of dated narrative from step 4 into
-# reference/index-write.md §7 and spent ~2.0 KB of that back on the step-2/step-5
-# fix that made step 5 the doc's only writer. NET ~250 B. Do not read this gate
-# as evidence the body was cut -- it was not, materially. It was stopped from
-# growing.
+# that set it evicted 1,993 B of dated narrative from step 4 into
+# reference/index-write.md §7, and spent MORE than that back -- on the
+# step-2/step-5 fix that made step 5 the doc's only writer, and then on the rules
+# an adversarial audit of that fix produced (exit-3 handling, where the scratch
+# file lives, `--exclude` on all three command blocks).
+#
+# 🔴 NET THE BODY GREW: 46,263 -> 46,784 B, +521. An earlier draft of this
+# comment said "NET ~250 B" in the SHRINKING direction, which was true of an
+# intermediate tree and false by the time it shipped -- the exact failure
+# test_rules_size.py records three times, a derived measurement written into
+# prose that the same commit keeps editing. Do not read this gate as evidence
+# the body was cut. It was not. It was stopped from growing further, and the
+# audit round is what proved the gate can bind: SKILL.md landed 316 B above the
+# floor, and paying for those rules meant finding evictions rather than raising
+# the number.
 #
 # Sized in units of a REAL edit rather than picked round, the way
 # test_rules_size.py and test_skill_size.py both size theirs. Measured over the
@@ -218,9 +240,10 @@ def test_the_gate_can_report_a_breach(tmp_path, monkeypatch):
     inverted, or if SKILL_MD pointed at an empty file. `claude/RULES.md` calls
     that a harness that has not been shown it can go red.
 
-    So: repoint the module at an oversized file and watch BOTH assertions fail
-    with their own messages -- then repoint it at a tiny one and watch both pass,
-    which is the positive half (a gate that always fails is equally useless).
+    So: repoint the module at an oversized file and watch it fail with its own
+    message, then at a tiny one and watch it pass (a gate that always fails is
+    equally useless). The HEADROOM half has its own control below -- it must
+    not be certified from this one; see that test's docstring for why.
     """
     fat = tmp_path / "fat.md"
     fat.write_bytes(b"x" * (MAX_BYTES + 1))
@@ -230,18 +253,93 @@ def test_the_gate_can_report_a_breach(tmp_path, monkeypatch):
         test_handoff_skill_under_hard_ceiling()
     assert "OVER BY:  1 bytes" in str(ceiling.value)
 
-    with pytest.raises(AssertionError) as headroom:
-        test_handoff_skill_keeps_working_headroom()
-    assert "RECLAIM:" in str(headroom.value)
-
-    # The playbook rendered into those failures must name a real destination --
+    # The playbook rendered into that failure must name a real destination --
     # a maintainer over budget who is given no topic deletes text instead.
     assert "index-write" in str(ceiling.value)
 
-    # POSITIVE HALF: the same functions pass on a compliant file, so the red
+    # POSITIVE HALF: the same function passes on a compliant file, so the red
     # above is a fact about the size and not about the harness.
     thin = tmp_path / "thin.md"
     thin.write_bytes(b"x" * 10)
     monkeypatch.setattr("test_handoff_skill_size.SKILL_MD", thin)
     test_handoff_skill_under_hard_ceiling()
     test_handoff_skill_keeps_working_headroom()
+
+
+def test_the_headroom_half_fires_on_its_OWN_condition(tmp_path, monkeypatch):
+    """🔴 MIN_HEADROOM_BYTES WAS A DEAD CONSTANT, and this is what killed it.
+
+    MEASURED: setting `MIN_HEADROOM_BYTES = 0` left all five tests GREEN. The
+    whole band `[0, MAX_BYTES - current size]` survived as a mutant, so the
+    early-warning half of this gate -- the half whose entire purpose is to
+    arrive BEFORE the surprise -- was certified by nothing.
+
+    The cause is the exact shape `claude/RULES.md` names: "a mutant that removes
+    a guard TOGETHER WITH ITS ENCLOSING CONDITION proves nothing about the
+    guard, and dies for the wrong reason." The control above uses a fixture of
+    `MAX_BYTES + 1`, which makes `headroom == -1`. That is over the CEILING, so
+    the headroom assertion fired for the ceiling's reason and its own comparison
+    was never the thing under test -- it would have fired at any floor value,
+    including zero.
+
+    So this control lands the size squarely INSIDE the warning band, where the
+    ceiling is satisfied and only the floor can object:
+
+        MAX_BYTES - MIN_HEADROOM_BYTES + 1  ->  headroom == MIN_HEADROOM_BYTES - 1
+
+    and asserts BOTH directions -- the ceiling test PASSES while the headroom
+    test FAILS. Lower MIN_HEADROOM_BYTES by one byte and this goes red.
+    """
+    in_band = tmp_path / "in-band.md"
+    in_band.write_bytes(b"x" * (MAX_BYTES - MIN_HEADROOM_BYTES + 1))
+    monkeypatch.setattr("test_handoff_skill_size.SKILL_MD", in_band)
+
+    # The ceiling is NOT breached -- this is the half that makes the assertion
+    # below a statement about MIN_HEADROOM_BYTES rather than about MAX_BYTES.
+    test_handoff_skill_under_hard_ceiling()
+
+    with pytest.raises(AssertionError) as headroom:
+        test_handoff_skill_keeps_working_headroom()
+    msg = str(headroom.value)
+    assert "RECLAIM:   1 bytes" in msg, msg
+    assert "index-write" in msg
+
+    # And one byte the other way is clean, so the boundary is pinned on both
+    # sides rather than "big enough fails".
+    at_floor = tmp_path / "at-floor.md"
+    at_floor.write_bytes(b"x" * (MAX_BYTES - MIN_HEADROOM_BYTES))
+    monkeypatch.setattr("test_handoff_skill_size.SKILL_MD", at_floor)
+    test_handoff_skill_under_hard_ceiling()
+    test_handoff_skill_keeps_working_headroom()
+
+
+def test_the_gate_measures_BYTES_not_characters(tmp_path, monkeypatch):
+    """🔴 THE UNIT WAS UNPINNED, and it is worth ~561 bytes of silent budget.
+
+    MEASURED: mutating `_size()` from `read_bytes()` to `read_text("utf-8")`
+    left every test GREEN while granting the real file 561 bytes of extra
+    allowance -- it is 46,014 bytes but 45,453 characters.
+
+    The cause is `claude/RULES.md`'s fixture rule: every control above writes
+    `b"x" * N`, pure ASCII, where bytes and characters are the same number. A
+    fixture that CANNOT distinguish two implementations does not test between
+    them. "Feed a value the constant cannot equal and watch the output move."
+
+    So this one is multibyte, sized so the two readings land on OPPOSITE sides
+    of the ceiling: over it in bytes, far under it in characters. A byte-reading
+    `_size()` fails here; a character-reading one passes, and the `pytest.raises`
+    turns that pass into a red test.
+    """
+    # "é" is 2 bytes, 1 character in UTF-8.
+    chars = MAX_BYTES // 2 + 1
+    multibyte = tmp_path / "multibyte.md"
+    multibyte.write_text("é" * chars, encoding="utf-8")
+    assert len(multibyte.read_bytes()) > MAX_BYTES, "fixture is not over in bytes"
+    assert chars < MAX_BYTES, "fixture is not under in characters"
+
+    monkeypatch.setattr("test_handoff_skill_size.SKILL_MD", multibyte)
+    with pytest.raises(AssertionError) as breach:
+        test_handoff_skill_under_hard_ceiling()
+    # Name the unit in the failure, so a future reader of a red run is not left
+    # inferring which number the gate meant.
+    assert f"{len(multibyte.read_bytes()):,} bytes" in str(breach.value)

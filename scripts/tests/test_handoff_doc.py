@@ -2314,9 +2314,19 @@ class TestTheNewDocPathReachesTheGate:
         gate = doc.find("5. **Land the handoff doc")
         assert draft < kickoff < gate
 
-    def test_the_assertion_can_report_absence(self) -> None:
-        """NEGATIVE CONTROL: a substring check against a 45 KB file passes by
-        accident often enough that the inverse has to be exercised."""
+    def test_both_directions_of_the_swap_are_asserted(self) -> None:
+        """⚠ NOT a negative control, and it was mislabelled as one until an
+        audit said so. It re-states the same two assertions against the same
+        real file as the tests above; it never shows the negative assertion CAN
+        go red, so it proves nothing they do not.
+
+        It survives as a cheap statement of the pair -- the old sentence is gone
+        AND the new one is present -- because a rewrite that satisfies only one
+        half is the plausible regression. The evidence that these can report a
+        difference is external and was run by hand: all three assertions in this
+        class are RED against `git show origin/main:claude/skills/handoff/SKILL.md`.
+        `claude/RULES.md`: "a guard's DESCRIPTION claims COVERAGE."
+        """
         doc = self._skill()
         assert "**Write the handoff doc** to `claudedocs/" not in doc
         assert "**Draft the handoff doc into a SCRATCH FILE" in doc

@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
-"""Merge an UPDATE into an existing session-handoff doc, behind a real gate.
+"""Write a session-handoff doc — first time or update — behind a real gate.
 
-The write half of `/handoff` when a handoff doc for this topic ALREADY EXISTS —
-step 2 of the skill writes a doc from scratch, and this is what runs the second
-and every later time. (A missing base is handled rather than refused: the update
-simply becomes the whole doc, so nothing here breaks if the skill ever routes a
-first write through it too.) It exists because of a measured incident:
+🔴 THE SOLE WRITER of `claudedocs/handoff-<topic>.md`, as of 2026-08-23. This
+paragraph used to say the opposite ("the write half … when a doc ALREADY
+EXISTS"), because step 2 of the skill wrote a first doc itself and only later
+runs came here. That was the bug: this module is the only step that COMMITS, and
+against an already-written doc it returns `no-change` (exit 5), whose documented
+instruction is to stop — so a brand-new handoff was never committed and ended
+the session untracked. The skill now drafts into a scratch file in BOTH cases
+and routes every write here. The missing-base path was always handled (the
+update simply becomes the whole doc); what changed is that it is now the normal
+first run, not a hypothetical. It exists because of a measured incident:
 
   A session re-entered work from a handoff, did ten minutes of genuinely
   valuable analysis — it answered the doc's open question AND corrected a prior
@@ -1504,14 +1509,18 @@ def git(repo: Path, *args: str) -> str:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="handoff_doc.py",
-        description="merge an update into an existing handoff doc, behind a confirm gate",
+        description="write or update a handoff doc behind a confirm gate — the "
+        "doc's only writer, whether or not it already exists",
     )
     p.add_argument("--repo", required=True, help="repo root the handoff lives in")
     p.add_argument("--topic", required=True, help="handoff topic slug")
     p.add_argument(
         "--update",
         required=True,
-        help="file holding the proposed sections (## headings, a delta not a whole doc)",
+        help="file holding the proposed sections (## headings). A DELTA when the "
+        "doc exists — omit a section and it is left alone. The WHOLE doc when it "
+        "does not: with no base the file becomes the doc verbatim, front matter "
+        "included, so its line 1 is the doc's line 1.",
     )
     p.add_argument(
         "--advanced",

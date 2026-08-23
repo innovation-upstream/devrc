@@ -182,3 +182,9 @@ MEASURED 2026-08-16. The session that designed, built, tested and deployed the `
 ### 7.6 The worktree/PR discriminator, and the `OPEN:` timing
 
 Both already have fuller treatments above — §3 case 3 for the worktree measurement (144 of 200 mainline commits with no `(#N)`; the 2026-08-14 session that read "worktree" as `--commit`, ran five base-clone shas and reported a real-but-wrong zero), and §5 for the entry written at 15:00:18 whose remedy landed at 15:02:21 and was served as outstanding for 22 days. `SKILL.md` states each imperative and points here rather than carrying the numbers twice.
+
+### 7.7 "It belongs in a skill", routed to a skill that did not exist
+
+MEASURED 2026-08-14. A session declined both windows correctly, concluded correctly that its gotchas belonged in a skill, named `.claude/skills/pyroscope/SKILL.md`, and stopped. **That skill does not exist** — `obs-read` already owns Pyroscope in its description, so acting on the note later would have created a duplicate and split the domain. The gotcha it carried (Pyroscope's `max_query_length: 1d`) was recorded nowhere by that session; it survives today only because it was later written into `subsystem_touch.py`'s own source.
+
+That is why `SKILL.md` says to take the owning skill from the tool's `SKILL HOMES` block rather than from memory, and why an unroutable item must say **UNFILED** and name the term it searched: an unfiled item that names its search is recoverable, and "belongs in a skill" is not.
