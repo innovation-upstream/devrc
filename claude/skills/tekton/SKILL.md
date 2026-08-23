@@ -57,6 +57,19 @@ debugging, changing or copying a specific pipeline.
    made here and written into a handoff as a property of the CI tier before it was caught —
    `claude/RULES.md` → *"a control that SHARES the step you doubt"*. Take the baseline from a
    window with no pushes of your own in it.
+   🔴 **THE CLEAN COUNTER-DATAPOINT — read it before treating the 24% above as expected
+   behaviour.** 2026-08-23 22:11Z, observed from OUTSIDE (someone else's branch series, none
+   of the SHAs ours): **10 `devrc-ci` runs, 6 within 12 seconds** — a *larger* burst than the
+   5-branch incident — against a node at 86% CPU / **94% memory** requests. Outcome:
+   `ExceededNodeResources` on 4 gate TaskRuns, **3 pods Pending ~4 min, ZERO exit-255 kills**,
+   and a full drain to 55% CPU / 0 pending within minutes. So the system **queued and
+   recovered**; it did not eat anyone's checks. The 4%→24% figure is the contaminated one and
+   the only evidence that a burst *kills* runs, so **do not build concurrency control on the
+   strength of it** — Tekton 1.12 has no native limit, and a `ResourceQuota` is the wrong tool
+   here (it converts queueing into hard pod-creation failures, i.e. it manufactures the
+   outcome you are trying to prevent; `tekton-ci` deliberately has neither a quota nor a
+   LimitRange). Re-measure from outside a self-caused window first. **Memory, not CPU, is the
+   binding constraint** on the pinned node — that is the number to watch.
 4. **Placeholder imagePullSecret breaks ALL pulls.** A `harbor-cred` dockerconfigjson with a
    non-base64 `auth` placeholder makes every pod fail image pull ("illegal base64 data").
    **Do NOT attach a placeholder imagePullSecret** to the pipeline SA — public images
@@ -94,9 +107,19 @@ debugging, changing or copying a specific pipeline.
    task-level `timeout: 40s` → `Failed`, children `[slow,reporter]`, **finally RAN**. The
    reserved `timeouts.finally` is **not honoured** on the budget-expiry path — reserving it
    looks like protection and is not. Across 447 retained PipelineRuns: **25 timeouts, 0 ran
-   their report.** ⚠ **Still unfixed on `gitops-validate`, `auditloop`, `naida`, `remix` and
-   `clawgate-ci`** — devrc alone was fixed (homelab-infra #385). `clawgate-ci` first: busiest
-   pipeline on the cluster. 🔴 Bound EVERY task, not just the slow one — the task deadline is
+   their report.** devrc was fixed in homelab-infra **#385**; the remaining five are in **#386**
+   (`fix/finally-on-timeout-five-pipelines`) — OPEN + MERGEABLE 2026-08-23, so **check whether it
+   landed before re-doing this work.**
+   🔴 **#386 KEEPS the outer `timeouts.*` budgets and adds task-level ones INSIDE them** — a
+   backstop plus a bound that fires first. Safe only while the arithmetic holds, so verify it
+   rather than eyeballing the diff: **Σ(`spec.tasks[].timeout`) < `timeouts.tasks`** (else the
+   budget wins and `finally` is skipped again) **and `tasks + finally ≤ pipeline`**. Verified on
+   #386 across all six: 5-minute margin each, envelope closed.
+   🔴 **The `finally` reporter is deliberately left UNBOUND — not an oversight.** `7038c77d`
+   raised its budget after finding the reporter is slow to **SCHEDULE**, not slow to run (node
+   congestion, gotcha #3). Strangling it re-creates the exact "posts NOTHING" bug the fix exists
+   to close. Bound every `spec.tasks[]`; leave the reporter room.
+   🔴 Bound EVERY task, not just the slow one — the task deadline is
    `taskStart + timeout` while the budget is `runStart + tasks`, so an unbounded early task
    (devrc's `notify` inherited the cluster's 1h default) lets them cross and re-opens this.
 9. ⚠ **Gotcha 6 is scoped to `homelab-infra`, not to Tekton.** `innovation-upstream/devrc` is a
@@ -111,6 +134,19 @@ debugging, changing or copying a specific pipeline.
 
 - **Tekton Operator v0.80.0** → Pipelines **1.12.2** / Triggers **0.36.0** / Dashboard
   **0.68.0**. **Chains + Results OFF.** Pruner keep-**100**, daily. Dashboard **read-only**.
+  🔴 **`prune-per-resource: true`, so keep-100 is PER Pipeline/Task — NOT per namespace.**
+  With 6 pipelines the designed steady state is **~600 PipelineRuns**, and a raw namespace
+  count in the hundreds is the pruner WORKING, not falling behind. This was written up once
+  as a backlog item ("451 PipelineRuns against a keep:100 pruner") and re-investigated a day
+  later; both times the count was inside its envelope. **The positive control is a pipeline
+  sitting at EXACTLY 100** — `remix-ux-audit` did, on both measurements, which is what proves
+  the cron runs and hits its target. Measure per-pipeline before concluding anything:
+  `kubectl -n tekton-ci get pipelineruns -o jsonpath='{range .items[*]}{.spec.pipelineRef.name}{"\n"}{end}' | sort | uniq -c | sort -rn`
+  🔴 **And terminal pods are NOT the pressure.** 2026-08-23: `talos-xr6-r7p` held **676**
+  Completed/Error pods against **76** non-terminated. Terminal pods hold no CPU and no memory
+  (`Allocated resources` counts non-terminated only) and do not count toward `max-pods`
+  (110 → 34 free). Deleting them cuts apiserver/etcd load and makes `kubectl get pods`
+  usable — it relieves **zero** scheduling pressure. Do not reach for it as remediation.
 - Namespaces: **`tekton-pipelines`** (control plane) + **`tekton-ci`** (CI workloads,
   EventListener, PipelineRuns).
 - GitOps via **Flux**, repo **`ZacxDev/homelab-infra`** branch **`trunk`**, under
