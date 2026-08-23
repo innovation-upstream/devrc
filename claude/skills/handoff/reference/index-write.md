@@ -139,3 +139,46 @@ If it fires: reword the copy with **invented** content that preserves only the S
 ## 6. Why this step exists at all
 
 `/analyze-service` was the store's only writer, so entries accumulated for infra services inside a single scope while the work being recorded spans ~12 repos. `/handoff` is the second writer, and the one that runs at the end of every session rather than only when someone asks for a recon.
+
+## 7. Evidence demoted out of the step body
+
+Each subsection below is the measurement behind a rule whose imperative stays in `SKILL.md` step 4 and now cites this section. **The rules did not change; only the narrative moved.** 🔴 Nothing here relaxes a rule, and nothing here needs reading before running the read-only probe.
+
+### 7.1 A PR landed in another repo is usually left unscoped
+
+MEASURED over the 40 most recent `datapacket-talos` sessions: 13 ran a window, and **7 of them left at least one PR's repo unscoped** — PRs in four separate repos, filed against the wrong scope or against no scope at all. That is more than half of the sessions that used the step correctly in every other respect, which is why `SKILL.md` calls the cross-repo run the normal shape rather than an exception.
+
+### 7.2 A tooling lesson recorded only in a client's `claudedocs/`
+
+Measured 2026-08-17. Three generic gotchas with zero client content were recorded **only** in a client-confidential handoff doc that no `devrc` session will ever read:
+
+- `git diff --quiet <ref> -- <path>` exits 0 when the path exists on NEITHER side;
+- `stat` reports a home-manager symlink's *size* rather than its content;
+- `devrc`'s own pre-existing-failure test baseline.
+
+All three are about the toolchain, not about the client. The question that routes them correctly is which repo the lesson is *about*, never which one the session was standing in.
+
+### 7.3 What an index entry actually costs
+
+MEASURED 2026-08-13. Entries load on demand — read only by `/resume` step 4, never at session start. What loads every session is the skill *listing* (name + `description`), not entries and not skill bodies. On the largest real scope the whole digest is ~914 tokens, because it prints **one** body and indexes the rest; an additional entry therefore adds **one ~56-byte index row, ~14 tokens**, to a `/resume` that chooses to read it.
+
+A session once declined a write reasoning that a bullet "would restate them at per-session cost". That premise is false. It matters because suppressing writes on a cost that does not exist is how the store stays empty, and the emptiness then gets read as nobody wanting it — the exact circular argument `claudedocs/decision-subsystem-store-rejected-2026-08-11.md` had to retract.
+
+### 7.4 The subsystem with no file footprint
+
+MEASURED 2026-08-14: a session did every step of the write protocol right and closed with *"the work happened in the production database, which no path window can see."* Every window reads file paths, so there was nothing to resolve and nothing to nominate.
+
+Two further facts about the `--template` route out:
+
+- **It is not permanently unresolvable.** Verified: an entry written with zero paths gained normal path resolution as soon as a matching path appeared. Hence "prefer a slug a future path would carry".
+- **Most dead ends still nominate something** — estimated ~65%, a proxy measured over 287 commits rather than over the real windows — because a nomination is path-derived and names the directory you touched rather than the database you worked on. That is why the `NO ENTRY` block carries the same offer as the no-nomination block.
+
+### 7.5 The escalation: nine PRs invisible to the session window
+
+MEASURED 2026-08-16. The session that designed, built, tested and deployed the `subsystem-store-api` service across **nine merged PRs** got **1 path under the cwd and 5 outside** from `--session` ⇒ `no-match` ⇒ "Propose no write". `--pr` over those same nine PRs saw **17 paths** and nominated `subsystem-store-api` at 7, well above threshold.
+
+**~94% of the work was invisible to the preferred window**, and the store went without an entry for the largest thing that session produced. The stop condition in `SKILL.md` — *a second window was read and also came back empty* — is sized directly off this.
+
+### 7.6 The worktree/PR discriminator, and the `OPEN:` timing
+
+Both already have fuller treatments above — §3 case 3 for the worktree measurement (144 of 200 mainline commits with no `(#N)`; the 2026-08-14 session that read "worktree" as `--commit`, ran five base-clone shas and reported a real-but-wrong zero), and §5 for the entry written at 15:00:18 whose remedy landed at 15:02:21 and was served as outstanding for 22 days. `SKILL.md` states each imperative and points here rather than carrying the numbers twice.

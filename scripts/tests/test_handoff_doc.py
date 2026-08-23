@@ -1395,6 +1395,27 @@ SKILL_PINS: list[tuple[str, str]] = [
         "buckets:",
         "rule (g): the executor is told the bucket line exists and to read it",
     ),
+    # 🔴 THE NEW-DOC PATH. MEASURED 2026-08-23: the skill told step 2 to `Write`
+    # a brand-new handoff doc directly, and step 5 -- the only step that commits
+    # -- then returned `status=no-change` (exit 5) against it, whose documented
+    # instruction is "report the line and stop". Following the skill literally,
+    # a NEW handoff was never committed and ended the session untracked, which
+    # `claude/RULES.md` calls unsaved work one routine `checkout` from silent
+    # deletion. The module already handled the no-base case correctly (see
+    # `base_text = ... if doc.exists() else ""` and the MergeReport branch under
+    # it); the skill routed around it.
+    (
+        "is written by step 5 and by nothing else",
+        "🔴 the doc has exactly ONE writer, whether or not it already exists",
+    ),
+    (
+        "Never `Write` the doc yourself",
+        "🔴 …stated as a prohibition at the step that used to do it",
+    ),
+    (
+        "This step CREATES the doc as well as updating it",
+        "🔴 …and the gate step claims the new-doc case, so it is not left orphaned",
+    ),
 ]
 
 
@@ -2238,6 +2259,113 @@ class TestSkillAndModuleAgree:
             "scripts/lib/handoff_doc.py is not tracked by git, so the flake will "
             "omit it from the deploy and `home-manager switch` will succeed with "
             "the file simply absent."
+        )
+
+
+class TestTheNewDocPathReachesTheGate:
+    """🔴 A brand-new handoff doc must reach step 5, not be `Write`n in step 2.
+
+    MEASURED 2026-08-23, in a throwaway repo, following the skill literally:
+    step 2 wrote `claudedocs/handoff-t.md` in full, then step 5 -- the only step
+    that commits -- was run with that content as its delta and returned
+
+        status=no-change   (exit 5)
+
+    whose documented instruction is "report the line and stop". Nothing was
+    committed. The doc ended the session untracked, which `claude/RULES.md`
+    names as unsaved work one routine `checkout` away from silent deletion. Two
+    untracked handoff docs were sitting in the devrc working tree at the time,
+    the older one two days old, against 52 tracked ones -- consistent with the
+    update path landing and the new-doc path leaking.
+
+    The module was never the problem: `main()` reads `base_text = "" if not
+    doc.exists()` and the MergeReport branch under it makes the delta the doc
+    verbatim. The skill routed around a path the tool already had.
+
+    Both halves are asserted here, because either alone is walkable: the PROSE
+    contract (step 2 no longer instructs a direct write) and the BEHAVIOUR the
+    prose now promises (the tool creates, gates and commits a doc with no base).
+    """
+
+    def _skill(self) -> str:
+        return HANDOFF_SKILL.read_text(encoding="utf-8")
+
+    def test_step_2_no_longer_instructs_a_direct_write(self) -> None:
+        """🔴 THE REGRESSION ASSERTION. Watched to fail against the pre-change
+        file: `git show origin/main:claude/skills/handoff/SKILL.md` opens step 2
+        with exactly this sentence."""
+        doc = self._skill()
+        assert "**Write the handoff doc** to `claudedocs/" not in doc, (
+            "step 2 instructs the executor to write claudedocs/handoff-<topic>.md "
+            "directly. That path never reaches a commit: step 5 is the only step "
+            "that commits, and against an already-written doc it returns "
+            "status=no-change (exit 5), whose instruction is to stop. The doc is "
+            "then left untracked. Draft into a scratch file and let step 5 land "
+            "it -- handoff_doc.py handles the no-base case."
+        )
+
+    def test_the_scratch_instruction_precedes_the_kickoff(self) -> None:
+        """Structural, not a phrase: the drafting instruction is useless if it
+        arrives after the step that consumes the doc's path."""
+        doc = self._skill()
+        draft = doc.find("**Draft the handoff doc into a SCRATCH FILE")
+        assert draft >= 0, "step 2's drafting instruction is gone"
+        kickoff = doc.find("**Output a kickoff block**")
+        gate = doc.find("5. **Land the handoff doc")
+        assert draft < kickoff < gate
+
+    def test_the_assertion_can_report_absence(self) -> None:
+        """NEGATIVE CONTROL: a substring check against a 45 KB file passes by
+        accident often enough that the inverse has to be exercised."""
+        doc = self._skill()
+        assert "**Write the handoff doc** to `claudedocs/" not in doc
+        assert "**Draft the handoff doc into a SCRATCH FILE" in doc
+
+    def test_the_module_creates_a_doc_that_does_not_exist(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """The BEHAVIOUR the prose now promises: with no base the run offers the
+        ordinary gate -- a diff, `status=proposed`, nothing written.
+
+        ⚠ AN INVARIANT GUARD, NOT REGRESSION COVERAGE, and labelled as one. The
+        module already behaved this way; the defect was that the skill never
+        routed here, so this was green before the change and never caught the
+        bug. It is here because the prose contract above now DEPENDS on this
+        behaviour, and nothing else asserts it."""
+        doc = repo / "claudedocs" / "handoff-sample-topic.md"
+        doc.unlink()
+        res = run_tool(repo, update=update_file)
+        assert res.returncode == 0, (res.returncode, res.stdout, res.stderr)
+        assert "status=proposed" in res.stdout + res.stderr
+        assert "+++ b/claudedocs/handoff-sample-topic.md" in res.stdout
+        assert not doc.exists(), "the proposal wrote the doc — the gate is bypassed"
+
+    def test_the_no_base_run_confirms_into_exactly_one_commit(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """…and `--confirm` lands it, so the new-doc case ends the session
+        COMMITTED rather than untracked -- the property whose absence is the
+        whole finding.
+
+        ⚠ Also an INVARIANT GUARD on the module (green before the change). What
+        regressed was the ROUTE to it, asserted by the prose tests above."""
+        doc = repo / "claudedocs" / "handoff-sample-topic.md"
+        doc.unlink()
+        before = commit_shas(repo)
+        res = run_tool(repo, "--confirm", update=update_file)
+        assert res.returncode == 0, (res.returncode, res.stdout, res.stderr)
+        assert doc.exists(), "the doc was not created"
+        after = commit_shas(repo)
+        assert len(after) == len(before) + 1, "expected exactly one commit"
+        tracked = subprocess.run(
+            ["git", "-C", str(repo), "ls-files", "--",
+             "claudedocs/handoff-sample-topic.md"],
+            capture_output=True, text=True, env=dict(os.environ, **GIT_ENV),
+        ).stdout.strip()
+        assert tracked == "claudedocs/handoff-sample-topic.md", (
+            "the new doc is not tracked after --confirm — it would end the "
+            "session as untracked working-tree content, which is the failure "
+            "this class exists for"
         )
 
 
