@@ -167,6 +167,14 @@ Repo-level facts that are NOT in any skill — they live here on purpose:
   RUNNING`. Both were false at some point, in **opposite** directions — the exact kind of
   claim nobody re-checks: an agent reads it, believes the merge is protected (or that no
   check exists), and skips the run either way.
+  🔴 **`error` is not `failure`.** A check posted as `error` with `COULD NOT RUN: <leg>`
+  means the gate stopped before that leg reported — a broken gate, not a bad change. Do not
+  debug your diff against it.
+  🔴 **Before making a check REQUIRED, know this failure mode:** when a run hits
+  `timeouts.tasks` the `finally` report task never runs, so **nothing is posted and the PR's
+  checks stay `pending` forever** — measured on `devrc-ci-nnt6f` and `devrc-ci-9p6mf`,
+  `childReferences` `[notify, gate]` only, still `pending` hours later. A required check in
+  that state is unsatisfiable and no re-run clears it; only a fresh push does.
   🔴 **But a gate SHIPS IN THIS REPO, and whether it is INSTALLED is not a fact this file can
   state** — `githooks/` (`install.sh`, `pre-push`, `tests-on-push.sh`) is a real blocking
   pre-push test gate, and `scripts/run-tests.sh` treats it as a first-class consumer.

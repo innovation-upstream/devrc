@@ -174,7 +174,7 @@ def test_comment_record_carries_full_text_and_a_truncated_snippet():
     long_text = "y" * 4200 + " do not close"
     rec = recent_comments.build_record(
         "868aaa111", "a task", {}, {"date": "1700000000000", "user": {"username": "x"}},
-        long_text, None)
+        long_text, None, None)
     assert len(rec["snippet"]) == 200, f"display snippet cap moved: {len(rec['snippet'])}"
     assert len(rec["text"]) == 4000, f"analysis cap moved: {len(rec['text'])}"
     assert rec["text"] == long_text[:4000]
