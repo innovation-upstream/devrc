@@ -140,6 +140,52 @@ def laundered_readers(src: list[str]) -> list[tuple[str, list[str]]]:
             out.append((name, hits))
     return out
 
+
+def shell_fn_body(src: str, name: str) -> str:
+    """The source text BETWEEN `name(){` and its closing `}` in column 0.
+
+    Scoping every scan below to one function is what makes them STATE
+    assertions rather than file-wide word searches: a `jq` call that moves out
+    of `clawgate_rank_rows` leaves the ledger, and one that moves in joins it.
+    """
+    m = re.search(rf"^{re.escape(name)}\(\)\{{\n(.*?)^\}}\s*$", src, re.M | re.S)
+    assert m, f"{name}() is no longer a top-level `name(){{ … }}` block"
+    return m.group(1)
+
+
+def _decommented(code: str) -> str:
+    """`code` with whole-line comments blanked, offsets preserved.
+
+    Whole-line only, on purpose: the jq filters here contain `#` inside quoted
+    strings (`"  #\\(.value.id …)"`), so stripping from the first `#` on a line
+    would eat live code. Blanking rather than deleting keeps every offset below
+    comparable against the original text.
+    """
+    return "\n".join("" if re.match(r"\s*#", ln) else ln for ln in code.splitlines())
+
+
+def cmd_subst_assignments(code: str) -> list[tuple[str, int, int, str]]:
+    """Every `VAR=$( … )` in `code` as (var, name_offset, close_offset, text).
+
+    The closing paren is found by BALANCING, not by a regex — `$(printf … | jq
+    … 2>/dev/null)` contains no nested parens today, but a filter that grew one
+    would silently truncate a lazy match and shrink the ledger without failing
+    it.
+    """
+    out: list[tuple[str, int, int, str]] = []
+    for m in re.finditer(r"(?:^|[;&|]\s*)\s*(?:local\s+)?([A-Za-z_]\w*)=\$\(", code, re.M):
+        i, depth = m.end() - 1, 0
+        for j in range(i, len(code)):
+            if code[j] == "(":
+                depth += 1
+            elif code[j] == ")":
+                depth -= 1
+                if depth == 0:
+                    out.append((m.group(1), m.start(1), j, code[i:j]))
+                    break
+    return out
+
+
 pytestmark = pytest.mark.skipif(
     shutil.which("bash") is None
     or shutil.which("git") is None
@@ -1258,8 +1304,31 @@ def resolver(tmp_path):
         'exit "${STUB_RC:-0}"\n'
     ))
 
+    # 🔴 A PASS-THROUGH `jq` THAT CAN BE MADE TO DIE ON ONE SPECIFIC CALL.
+    # `resolve` runs several jq passes and they are NOT interchangeable: the
+    # shape check deliberately avoids the shared prelude so it still answers when
+    # that prelude is broken, which means only a LATER pass can carry the
+    # broken-read failure. Killing "jq" wholesale (the preflight test's approach)
+    # cannot express that — it never gets past the preflight. Counting
+    # invocations is what lets a test say "the COUNTING pass died", which is the
+    # distinction between rc 4 and a reassuring rc 5. Inert unless
+    # STUB_JQ_FAIL_ON is set, so every other test keeps the real jq.
+    real_jq = shutil.which("jq") or "jq"
+    jq_calls = tmp_path / "jq-calls"
+    write_exec(binp / "jq", (
+        'n=0\n'
+        '[ -f "$STUB_JQ_CALLS" ] && n=$(cat "$STUB_JQ_CALLS")\n'
+        'n=$((n+1)); printf "%s" "$n" > "$STUB_JQ_CALLS"\n'
+        'if [ -n "${STUB_JQ_FAIL_ON:-}" ] && [ "$n" = "$STUB_JQ_FAIL_ON" ]; then\n'
+        '  printf "%s" "${STUB_JQ_FAIL_OUT:-}"\n'
+        '  exit 5\n'
+        'fi\n'
+        f'exec {real_jq} "$@"\n'
+    ))
+
     def go(payload=None, *, session=SESSION_VAR, session_id="sess-abc-123",
-           code="200", rc="0", env_file: str | None = None):
+           code="200", rc="0", env_file: str | None = None,
+           jq_fail_on: int | None = None, jq_fail_out: str = ""):
         env = _base_env()
         env["HOME"] = str(home)
         env["PATH"] = f"{binp}{os.pathsep}{env['PATH']}"
@@ -1273,6 +1342,12 @@ def resolver(tmp_path):
         env["TMPDIR"] = str(tmpdir)
         env["STUB_CODE"] = code
         env["STUB_RC"] = rc
+        env["STUB_JQ_CALLS"] = str(jq_calls)
+        if jq_calls.exists():
+            jq_calls.unlink()          # the counter is PER CALL, not per fixture
+        if jq_fail_on is not None:
+            env["STUB_JQ_FAIL_ON"] = str(jq_fail_on)
+            env["STUB_JQ_FAIL_OUT"] = jq_fail_out
         if payload is not None:
             body = tmp_path / "body.json"
             body.write_text(payload if isinstance(payload, str) else json.dumps(payload))
@@ -1295,6 +1370,50 @@ ONE = {"sessionId": "sess-abc-123", "tasks": [{"id": 193, "status": "open", "tit
 NONE = {"sessionId": "sess-abc-123", "tasks": []}
 TWO = {"sessionId": "s", "tasks": [{"id": 12, "status": "open", "title": "a"},
                                    {"id": 34, "status": "in_progress", "title": "b"}]}
+
+#: 🔴 THE LINK-ROLE VOCABULARY, spelled HERE so the ledger below is a real
+#: two-way check rather than a mirror of whatever the subject happens to say.
+#: The authority is clawgate's own `internal/notes/threads.go` (`RoleRead` /
+#: `RoleWorked` / `RoleCreated`), in a different repository — see the lib's own
+#: header for what sets each, and for why `worked` is a strong signal (the
+#: pickup flow's comment/status write-back is mandated and hook-enforced) while
+#: `created` is TERMINAL and outranks it.
+ROLE_VOCAB = ("read", "worked", "created")
+
+#: 🔴 IDS CHOSEN SO THEY CANNOT COLLIDE WITH A COUNT. Every verdict line in the
+#: subject prints numbers — "1 WORKED task of 3 link(s) (2 created, 0 read)" —
+#: and an assertion looking for an id among them is only meaningful if no id can
+#: be mistaken for one. Three digits each, pairwise distinct, none of them a
+#: plausible tally. `claude/RULES.md` -> "a fixture that can only ever produce
+#: the constant's own value cannot see a mutant that hardcodes the literal".
+WORKED_ID, WORKED_ID2 = 771, 772
+CREATED_ID, CREATED_ID2 = 552, 663
+READ_ID = 884
+
+
+def rrow(task_id, role=None, *, status="open", title="t"):
+    """One task row. `role=None` means the KEY IS ABSENT — not `null`, and not
+    an empty string: an older server simply does not emit it, and that is the
+    case the fallback exists for."""
+    row = {"id": task_id, "status": status, "title": title}
+    if role is not None:
+        row["role"] = role
+    return row
+
+
+def rpayload(*rows):
+    return {"sessionId": "sess-abc-123", "tasks": list(rows)}
+
+
+def recorded(stdout: str) -> list[str]:
+    """Every id the subject told the writer to record. The one thing that must
+    never be wrong, read structurally rather than by eyeballing a phrase."""
+    return re.findall(r"^clawgate: .*\bclawgate-task: (\S+)\s*$", stdout, re.M)
+
+
+def role_order(stdout: str) -> list[str]:
+    """The `role=` annotations, in the order the candidate rows were printed."""
+    return re.findall(r"^\s+#\S+ role=(\S+) ", stdout, re.M)
 
 
 class TestResolve:
@@ -1321,6 +1440,443 @@ class TestResolve:
         assert r.returncode == 6
         assert "ASK which one" in r.stdout
         assert "#12" in r.stdout and "#34" in r.stdout
+
+    # ---------------------------------------------------- ranking by role ----
+    # 🔴 WHY THESE EXIST. The endpoint has always returned `role` beside
+    # `id`/`status`/`title`; `resolve` discarded it and counted links, so every
+    # link weighed the same. Measured on the live board 2026-08-22 (138 tasks,
+    # 43 links, 12 linked sessions): 6 of 12 sessions were multi-task and got
+    # "ASK which one", while only 1 had more than one WORKED task — five of the
+    # six questions had an answer the response already carried. Worst case was a
+    # session linked to 19 tasks, 18 `created` + 1 `read`, where asking is not
+    # merely noisy: EVERY answer is wrong, because that session did nobody's
+    # work. Each test below drives one verdict of the replacement rule.
+
+    def test_one_WORKED_task_among_many_created_resolves_to_the_WORKED_one(self, resolver):
+        """🔴 THE POINT OF THE CHANGE, and the one assertion that must never be
+        wrong: the id handed to the writer is the WORKED row's, not a created
+        one's and not "the only one" — there are three."""
+        r = resolver(rpayload(rrow(CREATED_ID, "created"),
+                              rrow(WORKED_ID, "worked"),
+                              rrow(CREATED_ID2, "created")))
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert recorded(r.stdout) == [str(WORKED_ID)], r.stdout
+        assert "1 WORKED task" in r.stdout
+        # the other two are still SHOWN — the operator can see what was passed over
+        assert f"#{CREATED_ID}" in r.stdout and f"#{CREATED_ID2}" in r.stdout
+
+    def test_two_WORKED_tasks_are_genuinely_ambiguous_and_are_ASKED_about(self, resolver):
+        r = resolver(rpayload(rrow(WORKED_ID, "worked"),
+                              rrow(WORKED_ID2, "worked"),
+                              rrow(CREATED_ID, "created")))
+        assert r.returncode == 6, r.stdout
+        assert "2 WORKED tasks" in r.stdout
+        assert "ASK which one" in r.stdout
+        assert recorded(r.stdout) == [], r.stdout
+
+    def test_zero_WORKED_beside_several_created_says_it_belongs_to_NONE(self, resolver):
+        """🔴 The rc 6 message has to say WHICH rc 6 this is. "several tasks —
+        pick one" is actively wrong here: the honest report is that none of them
+        is this document's work, so every answer to that question is wrong."""
+        r = resolver(rpayload(rrow(CREATED_ID, "created"),
+                              rrow(CREATED_ID2, "created"),
+                              rrow(READ_ID, "read")))
+        assert r.returncode == 6, r.stdout
+        assert "NONE of them WORKED" in r.stdout
+        assert "(2 created, 1 read)" in r.stdout
+        assert "belongs to NONE of them" in r.stdout
+        assert recorded(r.stdout) == [], r.stdout
+
+    def test_a_LONE_created_row_is_ASKED_about_rather_than_recorded(self, resolver):
+        """🔴 THE DELIBERATE BEHAVIOUR CHANGE. The old count rule returned 0 for
+        this — one row, one id, record it. "I filed this ticket" and "this
+        document describes that work" are different claims, and recording the
+        first as the second gives the doc a task it is then reconciled against
+        for its whole life."""
+        r = resolver(rpayload(rrow(CREATED_ID, "created")))
+        assert r.returncode == 6, r.stdout
+        assert recorded(r.stdout) == [], r.stdout
+        assert "NONE of them WORKED" in r.stdout
+        assert "(1 created, 0 read)" in r.stdout
+
+    def test_a_lone_READ_row_is_also_asked_about(self, resolver):
+        """`read` is `task-pickup.md` step 1 firing the write-back guard — the
+        session looked at the board, nothing more."""
+        r = resolver(rpayload(rrow(READ_ID, "read")))
+        assert r.returncode == 6, r.stdout
+        assert recorded(r.stdout) == [], r.stdout
+        assert "NONE of them WORKED" in r.stdout
+
+    def test_a_lone_WORKED_row_still_resolves(self, resolver):
+        """POSITIVE CONTROL on the rule's cheapest case — without it the three
+        rc 6 tests above are equally satisfied by a subject that never returns
+        0 at all."""
+        r = resolver(rpayload(rrow(WORKED_ID, "worked")))
+        assert r.returncode == 0, r.stdout
+        assert recorded(r.stdout) == [str(WORKED_ID)], r.stdout
+
+    def test_the_nineteen_row_real_world_shape_asks_and_names_the_split(self, resolver):
+        """The measured worst case, at its measured size: a backlog-filling
+        session linked to 19 tasks, 18 `created` + 1 `read`. The old rule said
+        "19 tasks resolved — ASK which one"; the answer to that question does
+        not exist."""
+        rows = [rrow(400 + i, "created", title=f"filed {i}") for i in range(18)]
+        rows.append(rrow(READ_ID, "read", title="glanced at"))
+        r = resolver(rpayload(*rows))
+        assert r.returncode == 6, r.stdout
+        assert "19 task(s) linked to this session" in r.stdout
+        assert "(18 created, 1 read)" in r.stdout
+        assert recorded(r.stdout) == [], r.stdout
+
+    def test_the_candidates_are_printed_WORKED_FIRST(self, resolver):
+        """The rc 6 question has to be answerable from THIS output — a second
+        command to find out which row was which defeats the point. Ordering is
+        asserted from a fixture whose input order is the REVERSE of the expected
+        one, so a subject that merely echoes the server's order fails."""
+        r = resolver(rpayload(rrow(READ_ID, "read"),
+                              rrow(CREATED_ID, "created"),
+                              rrow(WORKED_ID, "worked"),
+                              rrow(WORKED_ID2, "worked")))
+        assert role_order(r.stdout) == ["worked", "worked", "created", "read"], r.stdout
+
+    def test_roles_absent_on_EVERY_row_falls_back_to_counting_and_says_so(self, resolver):
+        """🔴 A MISSING FIELD MUST NOT BECOME "ZERO WORKED". An older server, or
+        the field being dropped, makes every count 0 — and the role rule would
+        then answer "none of them worked" about a board that was never asked.
+        One row falls back to the old rc 0, and the output says the ranking did
+        not happen."""
+        r = resolver(rpayload(rrow(WORKED_ID)))
+        assert r.returncode == 0, r.stdout
+        assert recorded(r.stdout) == [str(WORKED_ID)], r.stdout
+        assert "ROLES UNAVAILABLE" in r.stdout
+        assert "WORKED" not in r.stdout.replace("ROLES UNAVAILABLE", "")
+
+    def test_roles_absent_on_every_row_keeps_the_old_MULTI_task_question(self, resolver):
+        r = resolver(rpayload(rrow(CREATED_ID), rrow(WORKED_ID)))
+        assert r.returncode == 6, r.stdout
+        assert "ROLES UNAVAILABLE" in r.stdout
+        assert "2 tasks resolved" in r.stdout and "ASK which one" in r.stdout
+        assert recorded(r.stdout) == [], r.stdout
+
+    def test_a_NULL_role_counts_as_absent_not_as_unrecognised(self, resolver):
+        """`role: null` and no `role` key at all are the same claim — the server
+        emits neither today, but `omitempty` and an explicit null are one field
+        change apart, and treating null as a strange VALUE would fire the
+        unrecognised-role alarm on a healthy board."""
+        r = resolver({"tasks": [{"id": READ_ID, "status": "open", "title": "a", "role": None}]})
+        assert r.returncode == 0, r.stdout
+        assert "ROLES UNAVAILABLE" in r.stdout
+        assert "UNRECOGNISED" not in r.stdout
+
+    def test_PARTIAL_role_absence_is_data_not_a_fallback(self, resolver):
+        """🔴 THE BOUNDARY BETWEEN THE TWO RULES, and it is not "any absence".
+        One row carrying a role means the board CAN answer, so the ranking runs;
+        the row that carried none is reported and counts as not worked. A
+        subject that fell back here would record the wrong id whenever the
+        absent row was the only other one."""
+        r = resolver(rpayload(rrow(CREATED_ID), rrow(WORKED_ID, "worked")))
+        assert r.returncode == 0, r.stdout
+        assert recorded(r.stdout) == [str(WORKED_ID)], r.stdout
+        assert "ROLES UNAVAILABLE" not in r.stdout
+        assert "1 of 2 row(s) carried no `role`" in r.stdout
+
+    def test_an_UNRECOGNISED_role_is_REPORTED_never_folded_into_not_worked(self, resolver):
+        """🔴 The same reasoning as `clawgate_known_status`: a vocabulary this
+        tool has never heard of must not render like a healthy one. It is not a
+        permanently-red gate — the server's CHECK constraint means today's board
+        cannot emit one — which is exactly why a silent verdict here would be
+        wrong on the one day it fires."""
+        r = resolver(rpayload(rrow(WORKED_ID, "worked"),
+                              rrow(CREATED_ID, "reviewed")))
+        assert r.returncode == 6, r.stdout
+        assert "UNRECOGNISED ROLE" in r.stdout
+        assert "reviewed" in r.stdout, "the value itself has to be named"
+        assert recorded(r.stdout) == [], r.stdout
+
+    def test_an_unrecognised_role_is_NOT_silently_treated_as_worked(self, resolver):
+        """NEGATIVE CONTROL on the one guess that would look right: a lone
+        unknown role must not become the recorded task."""
+        r = resolver(rpayload(rrow(CREATED_ID, "definitely-worked-on-it")))
+        assert r.returncode == 6, r.stdout
+        assert recorded(r.stdout) == [], r.stdout
+        assert "UNRECOGNISED ROLE" in r.stdout
+
+    @pytest.mark.parametrize("bad_role", [7, 1.5, True, ["worked"], {"role": "worked"}])
+    def test_no_shape_of_non_string_role_is_read_as_a_role(self, resolver, bad_role):
+        r = resolver(rpayload(rrow(WORKED_ID, bad_role)))
+        assert r.returncode == 6, r.stdout
+        assert "UNRECOGNISED ROLE" in r.stdout
+        assert recorded(r.stdout) == [], r.stdout
+
+    def test_a_row_with_no_usable_id_still_wins_over_the_role_verdict(self, resolver):
+        """ORDERING GUARD. A payload can be BOTH id-broken and role-rich; the
+        gap has to win, or a schema break gets a confident resolution."""
+        r = resolver({"tasks": [{"status": "open", "title": "no id", "role": "worked"}]})
+        assert r.returncode == 4, r.stdout
+        assert "only 0 carry a usable id" in r.stdout
+        assert recorded(r.stdout) == [], r.stdout
+
+    # ------------------------------------- a broken READ is never an empty board
+    # 🔴 THE CLASS THIS WHOLE FUNCTION KEEPS PRODUCING. Writing the ranking,
+    # `$known | index(.role)` aborted jq and every role-carrying payload rendered
+    # as "NOTHING RESOLVED — 0 tasks" — rc 5, a claim ABOUT THE BOARD, from a
+    # pass that never ran. Defaulting the tally to zeros is what made it
+    # invisible. These drive the ROUTING, so the next such edit is rc 4.
+
+    def test_a_DEAD_counting_pass_is_a_gap_not_an_empty_board(self, resolver):
+        """The counting pass is jq call #2 (#1 is the shape check, which
+        deliberately avoids the shared prelude so it survives a broken one).
+        Killing exactly #2 is the observable a `$jqdefs` syntax error produces."""
+        r = resolver(rpayload(rrow(WORKED_ID, "worked"), rrow(CREATED_ID, "created")),
+                     jq_fail_on=2)
+        assert r.returncode == 4, r.stdout
+        assert "DID NOT ANSWER USABLY" in r.stdout
+        assert "no usable tally" in r.stdout
+        assert "UNKNOWN, not empty" in r.stdout
+        # 🔴 THE POINT: it must NOT claim the board resolved nothing.
+        assert "NOTHING RESOLVED" not in r.stdout, r.stdout
+        assert recorded(r.stdout) == [], r.stdout
+
+    def test_a_counting_pass_that_emits_TEXT_is_also_a_gap(self, resolver):
+        """A filter can fail by printing the WRONG THING rather than nothing —
+        an error object, a partial tally. Seven-numeric-fields is the contract;
+        neither half of it may be dropped."""
+        r = resolver(rpayload(rrow(WORKED_ID, "worked")),
+                     jq_fail_on=2, jq_fail_out="null null null null null null null")
+        assert r.returncode == 4, r.stdout
+        assert "no usable tally" in r.stdout
+        assert "NOTHING RESOLVED" not in r.stdout
+
+    def test_a_counting_pass_emitting_the_WRONG_FIELD_COUNT_is_a_gap(self, resolver):
+        """The field-count half specifically: six integers parse as integers and
+        would sail past a per-field digit test alone, leaving `n_absent` unset."""
+        r = resolver(rpayload(rrow(WORKED_ID, "worked")),
+                     jq_fail_on=2, jq_fail_out="1 1 1 0 0 0")
+        assert r.returncode == 4, r.stdout
+        assert "no usable tally" in r.stdout
+
+    def test_the_SAME_payload_resolves_when_jq_works(self, resolver):
+        """🔴 POSITIVE CONTROL for the three above — without it they are equally
+        satisfied by a subject that returns 4 for this payload always, and the
+        stub itself is unproven (an inert `jq` stub would make them pass by
+        never running jq at all)."""
+        r = resolver(rpayload(rrow(WORKED_ID, "worked"), rrow(CREATED_ID, "created")))
+        assert r.returncode == 0, r.stdout
+        assert recorded(r.stdout) == [str(WORKED_ID)], r.stdout
+
+    def test_the_jq_stub_really_passes_through_when_not_armed(self, resolver):
+        """GUARD ON THE HARNESS. The stub sits on PATH for every resolver test;
+        if it silently broke jq, the whole §5 block would be testing the stub."""
+        r = resolver(ONE)
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "clawgate-task: 193" in r.stdout
+
+    def test_killing_the_SHAPE_pass_is_still_the_no_tasks_array_gap(self, resolver):
+        """The two passes fail into DIFFERENT messages, which is what makes the
+        rc 4 report say where the read broke rather than just that it did."""
+        r = resolver(ONE, jq_fail_on=1)
+        assert r.returncode == 4, r.stdout
+        assert "carried no `tasks` array" in r.stdout
+        assert "no usable tally" not in r.stdout
+
+    def test_a_counting_pass_emitting_TOO_MANY_fields_is_a_gap(self, resolver):
+        """🔴 THE FIELD-COUNT GUARD DRIVEN UPWARD. An audit's `-ne 7` -> `-lt 7`
+        mutant SURVIVED: the code caught a long tally, but every test drove the
+        short side, so the guard's own comment ("a short/long field count") was
+        wider than its coverage. Eight fields means the array GREW and every
+        index below now names a different quantity."""
+        r = resolver(rpayload(rrow(WORKED_ID, "worked")),
+                     jq_fail_on=2, jq_fail_out="1 1 1 1 1 1 1 1")
+        assert r.returncode == 4, r.stdout
+        assert "no usable tally" in r.stdout
+        assert "NOTHING RESOLVED" not in r.stdout
+
+    def test_a_counting_pass_emitting_MULTIPLE_LINES_is_a_gap(self, resolver):
+        """🔴 `read -r -a` CONSUMES ONE LINE AND DISCARDS THE REST, so a filter
+        that lost its `[ … ]` wrapper satisfies seven-numeric-fields on line 1
+        while the rest vanishes. Measured before the fix: a two-row payload
+        printed "1 WORKED task of 1 link(s) (0 created, 0 read)" and returned
+        rc 0 with a BLANK id — counts fabricated from a fragment.
+
+        The fixture's first line is DELIBERATELY VALID and DELIBERATELY WRONG for
+        the payload: a guard that only rejected malformed line 1 would pass this,
+        and the counts it names (1 link) contradict the two rows sent."""
+        r = resolver(rpayload(rrow(CREATED_ID, "created"), rrow(CREATED_ID2, "created")),
+                     jq_fail_on=2, jq_fail_out="1 1 1 0 0 0 0\n2 2 0 0 2 0 0")
+        assert r.returncode == 4, r.stdout
+        assert "MORE THAN ONE LINE" in r.stdout
+        assert recorded(r.stdout) == [], r.stdout
+        assert "WORKED task" not in r.stdout, r.stdout
+
+    def test_a_DEAD_id_reread_on_the_WORKED_branch_is_a_gap_not_a_blank_field(self, resolver):
+        """🔴 THE GUARD I ARGUED AWAY, AND THE ARGUMENT WAS WRONG. I reasoned the
+        id could never come back blank because the tally proves every row carries
+        a usable id — true of the PAYLOAD, silent about the PASS. Killing the jq
+        call that performs the re-read leaves every count valid and the
+        substitution empty. Measured before the fix: rc 0 and `clawgate-task:`
+        with no value.
+
+        jq call #4 is the worked-branch re-read: 1=shape, 2=counts, 3=rows,
+        4=this. The consumer cost is what makes it rc 4 — SKILL.md says act on
+        the exit code and nothing else, so rc 0 writes an unreadable field and
+        gaps every future /resume of that document."""
+        r = resolver(rpayload(rrow(CREATED_ID, "created"), rrow(WORKED_ID, "worked")),
+                     jq_fail_on=4)
+        assert r.returncode == 4, r.stdout
+        assert "RE-READS the resolved task's id" in r.stdout
+        assert recorded(r.stdout) == [], r.stdout
+        # 🔴 the exact shape the doc must never receive
+        assert not re.search(r"clawgate-task:\s*$", r.stdout, re.M), r.stdout
+
+    def test_a_DEAD_id_reread_on_the_ROLES_UNAVAILABLE_branch_is_also_a_gap(self, resolver):
+        """🔴 THE SECOND SITE. Two branches re-read the id and both were
+        unguarded; fixing only the one an audit happened to name would leave the
+        identical bug one branch away — the shape `claude/RULES.md` calls a
+        predicate open-coded at N sites being wrong at N-1 of them. Here the
+        re-read is jq call #4 as well (no unknown-role pass runs)."""
+        r = resolver(rpayload(rrow(WORKED_ID)), jq_fail_on=4)
+        assert r.returncode == 4, r.stdout
+        assert "RE-READS the resolved task's id" in r.stdout
+        assert recorded(r.stdout) == [], r.stdout
+        assert not re.search(r"clawgate-task:\s*$", r.stdout, re.M), r.stdout
+
+    #: 🔴 THE EXTRACTION LEDGER — every jq pass inside `clawgate_rank_rows`, in
+    #: source order, named by the variable it fills. `ids` and `worked_ids` are
+    #: the two whose answer can become the RECORDED id — the adjacency test
+    #: below is what gates those; `shape`, `counts`, `rows` and `unknown_vals`
+    #: never reach the writer. Compared as an ORDERED list, so a second `ids=`
+    #: fails it exactly as a new name does.
+    RANK_ROWS_JQ_PASSES = ["shape", "counts", "rows", "unknown_vals", "ids", "worked_ids"]
+
+    def test_every_jq_pass_in_rank_rows_is_LEDGERED(self):
+        """🔴 STATE, NOT SPELLING — and this replaces a ledger that was neither.
+
+        The previous version matched one exact two-line textual shape of the id
+        re-read. An audit injected a THIRD, UNGUARDED re-read and it stayed
+        green three ways: the identical jq filter reformatted onto one line, a
+        different extraction (`jq -r '.tasks[0].id'`), and a guard relocated
+        BELOW the echo that records its value. A guard that reads as coverage
+        while providing none is worse than none — `claude/RULES.md` -> "A guard
+        can be SPELLED rather than STRUCTURAL".
+
+        So this asserts the SET of extraction sites instead, and fails when it
+        GROWS or SHRINKS. No filter text is matched at all: a jq pass is a
+        `VAR=$( … jq … )` inside the function, whatever it extracts and however
+        it is wrapped. The token count is the catch-all for the shape the
+        assignment scan cannot see — a jq invoked in a pipeline, a here-doc or
+        an `if VAR=$(…)` header — so a pass can neither hide from the ledger nor
+        join it silently.
+
+        WHAT IT DOES NOT CATCH: a jq whose command word is assembled at runtime
+        (`$JQ -r …`), and a second writer of the recorded value that is not a jq
+        pass at all. The adjacency half below covers the second; the first would
+        need a shell parser and is deliberately not attempted."""
+        body = _decommented(shell_fn_body(LIB.read_text(encoding="utf-8"), "clawgate_rank_rows"))
+        passes = [v for (v, _, _, text) in cmd_subst_assignments(body) if re.search(r"\bjq\b", text)]
+        assert passes == self.RANK_ROWS_JQ_PASSES, passes
+        # every `jq` in the function is accounted for by exactly one ledger entry
+        assert len(re.findall(r"\bjq\b", body)) == len(self.RANK_ROWS_JQ_PASSES), \
+            "a jq invocation in clawgate_rank_rows is not a ledgered `VAR=$( … )` pass"
+
+    def test_every_RECORDED_id_passes_through_the_predicate_FIRST(self):
+        """🔴 SEAM, and an ORDERING one. The hazard is not "a jq call exists
+        somewhere unguarded" — it is a value reaching the front-matter field
+        without having been judged, so the ledger is built from the WRITERS.
+
+        Every `$CLAWGATE_FIELD_KEY: $var` in the function must have
+        `clawgate_usable_id "$var" || return 4` between that variable's
+        assignment and the echo. Positional, because the old ledger's
+        `re.search` over the whole file made the guard's LOCATION irrelevant:
+        moving it below the recording echo left it silent. The `CLAWGATE_FIELD_KEY`
+        mention count is pinned too, so a third recording site cannot appear
+        without this test moving."""
+        body = _decommented(shell_fn_body(LIB.read_text(encoding="utf-8"), "clawgate_rank_rows"))
+        assigned = {v: n for (v, n, _, _) in cmd_subst_assignments(body)}
+        sites = [(m.group(1), m.start())
+                 for m in re.finditer(r"\$\{?CLAWGATE_FIELD_KEY\}?:\s*\$\{?(\w+)\}?", body)]
+        assert [v for v, _ in sites] == ["ids", "worked_ids"], sites
+        assert len(re.findall(r"CLAWGATE_FIELD_KEY", body)) == len(sites), \
+            "clawgate_rank_rows names CLAWGATE_FIELD_KEY somewhere this ledger does not read"
+        for var, echo_at in sites:
+            assert var in assigned, f"{var} is recorded but never assigned in this function"
+            guards = [m.start() for m in re.finditer(
+                rf'clawgate_usable_id\s+"\$\{{?{var}\}}?"\s*\|\|\s*return\s+4', body)]
+            assert any(assigned[var] < g < echo_at for g in guards), (
+                f"the value recorded as `{var}` is not gated by clawgate_usable_id "
+                f"BETWEEN its assignment and the echo that writes it "
+                f"(assigned@{assigned[var]}, echo@{echo_at}, guards@{guards})")
+
+    def test_the_predicate_REFUSES_a_MULTI_LINE_value(self):
+        """🔴 A COMMENT IS A CLAIM TOO — and this one was untested. The
+        `''|*[!0-9]*` pattern's comment says it "also rejects a MULTI-LINE
+        value"; nothing drove that direction, and the mutant widening the class
+        to `''|*[!0-9$'\\n']*` (which ACCEPTS `11\\n22`) SURVIVED the whole file.
+
+        COVERAGE-GAP FIX, NOT REGRESSION COVERAGE: the behaviour was already
+        correct, so this is green at the base commit.
+
+        Driven at the predicate, not through a payload, because no payload can
+        reach it: the tally and the re-read run the same filter over the same
+        rows, so a two-line answer to a one-row tally means the PASS broke, not
+        the board — which is the case the predicate exists for."""
+        r = call_fn("clawgate_usable_id", "11\n22")
+        assert r.returncode == 1, r.stdout
+        assert "RE-READS the resolved task's id" in r.stdout
+
+    def test_the_predicate_ACCEPTS_one_bare_id(self):
+        """POSITIVE CONTROL on every refusal above: a predicate that said NO to
+        everything would satisfy all of them for free, and would take rc 4 on a
+        perfectly good resolution."""
+        r = call_fn("clawgate_usable_id", "11")
+        assert r.returncode == 0, r.stdout
+        assert r.stdout == "", r.stdout
+
+    def test_a_DEAD_row_render_is_REPORTED_not_silently_empty(self, resolver):
+        """🔴 SELF-CONTRADICTING OUTPUT. `[ -n "$rows" ] &&` swallowed a failed
+        render, so the function printed "Read the rows yourself" with no rows,
+        and rc 6's "ASK which one" with no candidates — defeating the one thing
+        that output exists for. `n` is already >= 1 here, so empty means FAILED,
+        never "nothing to show". jq call #3 is the row render."""
+        r = resolver(rpayload(rrow(CREATED_ID, "created"), rrow(CREATED_ID2, "created")),
+                     jq_fail_on=3)
+        assert "RENDERS the candidate rows produced nothing" in r.stdout, r.stdout
+        assert role_order(r.stdout) == [], "the render did fail, so no rows may appear"
+        # the VERDICT still comes from the tally and is still correct
+        assert r.returncode == 6, r.stdout
+        assert "NONE of them WORKED" in r.stdout
+
+    def test_a_dead_row_render_does_NOT_downgrade_a_good_resolution(self, resolver):
+        """🔴 THE DELIBERATE NON-ESCALATION, pinned so nobody "fixes" it into an
+        rc 4. Losing the DISPLAY is not losing the ANSWER: the verdict is
+        computed from the counting pass, which answered. Returning 4 here would
+        throw away a resolution the counts fully support."""
+        r = resolver(rpayload(rrow(CREATED_ID, "created"), rrow(WORKED_ID, "worked")),
+                     jq_fail_on=3)
+        assert r.returncode == 0, r.stdout
+        assert recorded(r.stdout) == [str(WORKED_ID)], r.stdout
+        assert "RENDERS the candidate rows produced nothing" in r.stdout
+
+    def test_the_role_vocabulary_is_exactly_what_this_file_drives(self):
+        """🔴 LEDGER, both directions — the same discipline as the preflight
+        list below. A role added to the lib and not driven here fails, and one
+        dropped from the lib fails too. It cannot check the CROSS-REPO half
+        (clawgate's `threads.go` is in another repository and no test here can
+        see it); it only keeps this file and the subject honest about the same
+        three, which is why the lib's header records the hand verification."""
+        src = LIB.read_text(encoding="utf-8")
+        m = re.search(r'^CLAWGATE_TASK_ROLES="([a-z ]+)"\s*$', src, re.M)
+        assert m, "CLAWGATE_TASK_ROLES is no longer a plain space-separated literal"
+        assert tuple(m.group(1).split()) == ROLE_VOCAB, m.group(1)
+
+    def test_the_ranking_lives_above_the_IO_line(self):
+        """🔴 THE PURE/IO CONTRACT the file's header states, checked rather than
+        trusted. New logic on the wrong side of that line is untestable without
+        a server, which is how the whole verdict became one 50-line block inside
+        the curl call in the first place."""
+        src = LIB.read_text(encoding="utf-8")
+        io_line = src.index("# I/O — everything below this line")
+        assert src.index("clawgate_rank_rows(){") < io_line
+        assert src.index("clawgate_resolve(){") > io_line
 
     # ------------------------------------------- the variable name itself ----
     def test_the_session_id_is_read_from_the_exact_variable_name(self, resolver):
@@ -1575,6 +2131,9 @@ HANDOFF_PINS: list[tuple[str, str]] = [
     ("clawgate-task: 193", "the front-matter SHAPE is shown, not described"),
     ("NEVER create a task", "🔴 a task is never minted to fill a blank field"),
     ("ASK the user which one", "several resolved => a question, not a guess"),
+    ("one WORKED task", "🔴 rc 0 means ONE WORKED task now, never just one link"),
+    ("no worked task at all", "🔴 the rc 6 the executor must NOT answer by picking"),
+    ("ROLES UNAVAILABLE", "the roles-missing fallback is named, so it is legible"),
     ("EMPTY ARRAY", "🔴 the 200-with-[] caveat reaches the executor"),
     ("field <doc>", "the no-double-add check is spelled out"),
 ]
@@ -1749,8 +2308,13 @@ class TestSkillsAndCodeAgree:
             # resolves `rel` for the ref comparison
             "handoff_freshness": 1,
             # derives $REPO from the path when an explicit doc is passed (twice:
-            # `git -C $(dirname …)` and the plain-dirname fallback)
-            "resolve": 2,
+            # `git -C $(dirname …)` and the plain-dirname fallback), plus the
+            # `basename` naming the doc it FELL BACK to in the #684 gap line —
+            # a use of the name only, and it must stay one: that message is
+            # emitted from resolve(), before handoff_freshness has run, so
+            # $HANDOFF_TEXT does not exist yet and any CONTENT read here would
+            # necessarily be of the unchosen copy.
+            "resolve": 3,
         }, sorted(path_hits)
 
     def test_the_laundered_read_scan_can_actually_find_one(self):

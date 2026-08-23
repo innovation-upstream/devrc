@@ -1,6 +1,6 @@
 ---
 name: clickup
-description: Interact with ClickUp tasks and documents - get task details, view comments, create and manage tasks, create and edit docs. Use when working with ClickUp task/doc URLs or IDs.
+description: "Read and act on ClickUp tickets and docs — comments and threads, status / assignee / due date / priority, workspace search, create tasks and subtasks, doc pages, attachments. Use for: a pasted app.clickup.com/t/ link or a bare ClickUp id, my ClickUp tickets, what ClickUp has assigned to me, comment on / update / close a ticket, mark it in progress, set a due date, a ClickUp doc or page. This is the EXTERNAL ClickUp workspace — the self-hosted approval UI and ITS Tasks are `clawgate`, the durable cross-repo board is `initiatives`, the email action-items queue is `mailbox`, and verifying from session transcripts whether work on a task was actually done is `check-clickup-addressed`."
 ---
 
 # ClickUp
@@ -61,6 +61,14 @@ node query.mjs edit-page <doc_id> <page_id> --file /tmp/page.md
   `--all-spaces` (includes archived) and `--all-time` have **no server-side filter** —
   they pull full history and are slow. `--me` / `--assignee` narrows server-side and
   stays near-instant at any window.
+- **`awaiting` measures ONE thing: the newest comment on a task is not the token
+  owner's.** Comment-level `resolved` is not readable through the API and ClickUp has
+  no bot identity, so "unresolved" is not computable and *anything* this token posts
+  reads as the owner answering. It fans out one request per task — hence `--max`, and
+  hence the examined/matched/truncated counts it always prints. It is the cheap TRIAGE
+  half: it says WHICH tasks have someone else's comment last, never whether the work got
+  done. That verdict is the `check-clickup-addressed` skill, which reads the session
+  transcripts — run `awaiting` first, then hand it only the tasks that matter.
 - **`claim <task>`** links the current session to a task via the Session ID custom
   field, so work is resumable later. Non-obvious and easy to forget.
 - **`--account <name>`** targets a non-default identity on any command

@@ -67,7 +67,7 @@
       # ---------------------------------------------------------------------
       # THE GATE'S TOOLCHAIN — ONE list, TWO consumers.
       #
-      # `scripts/run-tests.sh` asserts a REQUIRED_TOOLS precondition and exits 2
+      # `scripts/run-tests.sh` asserts a REQUIRED_TOOLS precondition and exits 3
       # when a binary is missing, because the suites `skipif` on these and a
       # missing one would take the run GREEN while testing less. That
       # precondition is correct and stays. What it lacked was a discoverable way
@@ -95,10 +95,18 @@
       ]);
       # Read the per-entry justifications on checks.pytests' nativeBuildInputs
       # below before adding or removing anything here.
+      # age: scripts/tests/test_analyze_service_index_backup.py resolves `age` and
+      # `age-keygen` at IMPORT and raises rather than skipping — deliberately, and
+      # for the same reason test_analyze_service_index_commit.py does: a skipped
+      # backup test reports safety it never measured, which for a disaster-recovery
+      # feature is quiet exactly when it is wrong. That suite runs the real
+      # encrypt/decrypt round trip (it generates its own throwaway identity; the
+      # operator's key is never touched), so without age here the whole file is an
+      # import error inside the sandbox rather than a green-with-skips.
       gateTools = [
         gatePyEnv pkgs.bash pkgs.ripgrep pkgs.git pkgs.util-linux pkgs.jq
         pkgs.gnugrep pkgs.curl pkgs.nodejs pkgs.nix pkgs.opencode pkgs.logrotate
-        pkgs.rsync pkgs.zsh
+        pkgs.rsync pkgs.zsh pkgs.age
       ];
     in
     {
@@ -171,6 +179,14 @@
         name = "devrc-gate";
         packages = gateTools;
         shellHook = ''
+          # 🔴 Marks a SANCTIONED gate environment. run-tests.sh GUARD 1 uses it to
+          # tell a REPO defect from a CALLER defect: a REQUIRED_TOOLS entry missing
+          # while this is set means the repo asked for something `gateTools` does
+          # not supply (or the entry is a typo) — that BLOCKS. Missing while it is
+          # unset means the caller is simply not in the gate env — that degrades.
+          # Set in BOTH tiers (here and checks.pytests) or the sandbox would
+          # misclassify its own repo defects as environment faults.
+          export DEVRC_GATE_ENV=1
           echo "devrc: gate toolchain ready — bash scripts/run-tests.sh ." >&2
         '';
       };
@@ -321,6 +337,8 @@
             # sandbox (no /usr/bin/env). Rewrite shebangs to store paths so those
             # legitimately-hermetic tests can run. (Does NOT touch test logic.)
             patchShebangs src/scripts
+            # Same marker the devShell sets — see its shellHook for why.
+            export DEVRC_GATE_ENV=1
             export HOME="$TMPDIR/home"
             mkdir -p "$HOME"
             cd src

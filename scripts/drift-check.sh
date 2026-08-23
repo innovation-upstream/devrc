@@ -82,11 +82,37 @@
 # take (5 conflicted-tree, 7 cannot-ff, 9 switch-failed, 11 verify-failed) are
 # left UNUSED rather than repurposed.
 #
-#   2   usage error (unknown flag, non-integer tunable), or a RUN THAT CHECKED
+# 🔴 THE RESERVATION IS RECIPROCAL, AND THE UPWARD DIRECTION IS NOT FREE.
+# ship.sh owns 19 (the two hosts landed on DIFFERENT commits), 20 (ship.sh was
+# replaced by its own run and the new copy could not be run) and 21 (usage error:
+# an unknown argument, or a run asked to check NO host at all). All three are
+# ABOVE this script's current ceiling of 18, which is exactly where the note
+# further down ("a new DRIFT code has nowhere to go but upward") points the next
+# one. So:
+#   * 19, 20 and 21 are RESERVED to ship.sh here and must not be taken as DRIFT
+#     codes — the next free code for this script is 22.
+#   * anything this script adds above 21 is reserved back the other way; ship.sh
+#     documents this in its own header for the same reason.
+#
+# RESERVED-TO-SHIP: 5 7 9 11 19 20 21
+#
+# That line is a LEDGER, machine-read, not a comment: it must equal exactly the
+# set of codes ship.sh can return and this script cannot, so it fails when the
+# set grows (ship.sh gains a code) or shrinks.
+# The two ladders are pinned to each other by
+# test_the_two_rc_ladders_reserve_each_others_codes in
+# scripts/tests/test_drift_check.py, because the alignment lived only in a PR
+# description until 2026-08-21 and neither file mentioned the other's codes.
+#
+#   2   usage error (unknown flag, non-integer tunable), a RUN THAT CHECKED
 #       NO HOST AT ALL — either because the flags asked for none (`--no-local
 #       --no-remote`) or because the only host it was asked to look at could not
-#       be reached. rc 0 from a run that observed nothing is the vacuous green
-#       this whole subsystem exists to prevent, so it is never emitted.
+#       be reached (rc 0 from a run that observed nothing is the vacuous green
+#       this whole subsystem exists to prevent, so it is never emitted) — or
+#       DRIFT_REPO SET BUT EMPTY, which is a caller bug: `${VAR:-default}`
+#       cannot tell unset from empty, so an empty value would silently resolve
+#       to $HOME/workspace/devrc and fetch into the operator's own clone. UNSET
+#       still defaults, deliberately: the remote leg does not forward it.
 #   3   repo missing on that host
 #   4   git fetch failed, or origin/main is missing / HEAD unborn
 #   6   local host could not be identified (see detect_role)
@@ -355,15 +381,19 @@
 # is reading a timer's output, so the single number it hands to systemd must be
 # the worst thing found, or an un-pushed workbench could hide behind a merely
 # behind laptop. Severity order (worst first):
-#     8 > 17 > 14 > 13 > 18 > 6 > 4 > 3 > 12 > 15 > 10 > 16
+#     8 > 17 > 14 > 13 > 18 > 6 > 2 > 4 > 3 > 12 > 15 > 10 > 16
 # 🔴 THAT ORDER IS THE severity() TABLE, NOT THE DIGITS — it never was monotonic
 # (14 outranks 13 outranks 18 outranks 6 outranks 4), and 17 is not "less severe
 # than 16" because it is larger. Every code below 16 that is still free (5, 7, 9, 11) is
 # reserved to a ship.sh meaning this script does not take, so a new DRIFT code
 # has nowhere to go but upward; its rank is stated in severity() and here.
-# (6 is unreachable through this path today — the script exits 6 directly before
-# any per-host leg runs — but the order is documented for every code it owns,
-# and severity() ranks it rather than falling through to the unknown-code slot.)
+# 🔴 UPWARD IS NOT EMPTY EITHER: ship.sh owns 19 (hosts-disagree) and 20
+# (superseded), so the next free DRIFT code is 22, not 19. See the reciprocal
+# reservation under EXIT CODES above — that collision was one increment away.
+# (6 and 2 are both unreachable through this path today — the script exits each
+# directly, before any per-host leg runs — but the order is documented for every
+# code it owns, and severity() ranks them rather than letting them fall through
+# to the unknown-code slot, which would rank them 99, ABOVE rc 8.)
 # Per-host lines are ALWAYS printed for every host, whatever the code.
 #
 # Untracked files are counted and listed per host as INFORMATION only — they
@@ -441,6 +471,19 @@ if [ "${1:-}" = "--detect-role" ]; then
   exit 0
 fi
 
+# 🔴 SET-BUT-EMPTY IS A BUG, NOT A REQUEST FOR THE DEFAULT. `${VAR:-default}`
+# cannot tell "unset" from "set to the empty string", so a caller that computed
+# a repo path and got `""` silently checks — and `git fetch`es — the OPERATOR'S
+# OWN CLONE instead of the one it meant. UNSET must keep defaulting (this
+# variable is deliberately NOT forwarded over ssh, and the remote host's repo
+# lives at its own $HOME/workspace/devrc); EMPTY must stop the run.
+if [ "${DRIFT_REPO+set}" = set ] && [ -z "$DRIFT_REPO" ]; then
+  echo "drift-check: DRIFT_REPO is SET but EMPTY." >&2
+  echo "  That is a caller bug, not a request for the default — an empty value" >&2
+  echo "  would silently resolve to \$HOME/workspace/devrc and fetch into the" >&2
+  echo "  operator's own clone. Unset it to get the default, or give it a path." >&2
+  exit 2
+fi
 DRIFT_REPO="${DRIFT_REPO:-$HOME/workspace/devrc}"
 DRIFT_UNTRACKED_MAX="${DRIFT_UNTRACKED_MAX:-10}"
 DRIFT_DANGLING_MAX="${DRIFT_DANGLING_MAX:-10}"
@@ -558,6 +601,18 @@ severity() {
     # 99 — above rc 8 — which is the wrong answer for "I could not identify the
     # local host" versus "a host has un-pushed commits".
     6)  echo 58 ;;
+    # 2 (DRIFT_REPO set-but-EMPTY) is the same shape as 6 above: today it cannot
+    # reach here — the top-level guard exits before any host leg, and the CHECK /
+    # SRCREPO payload copies only fire if a caller forwards an empty DRIFT_REPO,
+    # which neither leg does. But it is a code this file now OWNS and emits, and
+    # per the rc 6 note an owned code with no case ranks 99, ABOVE rc 8 — wrong
+    # for a caller bug versus a host holding un-pushed commits.
+    #   BELOW 6, because 6 means the run could not even identify what it was
+    #   looking at, whereas this one knows exactly what is wrong and who to tell.
+    #   ABOVE 4/3, because those are single-run "could not evaluate" outcomes
+    #   that may simply be gone next run, whereas an empty override is
+    #   DETERMINISTIC — re-running changes nothing until the caller is fixed.
+    2)  echo 57 ;;
     4)  echo 55 ;;
     3)  echo 50 ;;
     12) echo 40 ;;
@@ -589,6 +644,10 @@ severity() {
 # remote-tracking refs only.
 CHECK='
 set -uo pipefail
+if [ "${DRIFT_REPO+set}" = set ] && [ -z "$DRIFT_REPO" ]; then
+  echo "[${DRIFT_LABEL:-host}] DRIFT_REPO is SET but EMPTY — refusing to fall back to \$HOME/workspace/devrc." >&2
+  exit 2
+fi
 repo="${DRIFT_REPO:-$HOME/workspace/devrc}"
 label="${DRIFT_LABEL:-host}"
 maxu="${DRIFT_UNTRACKED_MAX:-10}"
@@ -970,6 +1029,10 @@ echo "[$label] PARITY-RC=$p_rc"
 SRCREPO='
 set -uo pipefail
 label="${DRIFT_LABEL:-host}"
+if [ "${DRIFT_REPO+set}" = set ] && [ -z "$DRIFT_REPO" ]; then
+  echo "[$label] DRIFT_REPO is SET but EMPTY — refusing to fall back to \$HOME/workspace/devrc." >&2
+  exit 2
+fi
 repo="${DRIFT_REPO:-$HOME/workspace/devrc}"
 sfto="${DRIFT_SRC_FETCH_TIMEOUT:-30}"
 ssay() { echo "[$label] $*"; }

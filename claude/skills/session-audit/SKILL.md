@@ -1,6 +1,6 @@
 ---
 name: session-audit
-description: "Analyze recent Claude Code session transcripts for this repo, then propose (and optionally implement) improvements to CLAUDE.md, the skills, token efficiency and the permission allowlist. Use when the user wants to audit how Claude has been working in a repo and harden the setup for future sessions."
+description: "Audit this repo's recent Claude Code session transcripts and propose fixes to CLAUDE.md, the skills, token efficiency and the permission allowlist. Use for: audit how Claude has been working in this repo, harden the setup for future sessions."
 ---
 
 # /session-audit — Repo session retrospective

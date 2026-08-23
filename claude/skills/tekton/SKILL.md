@@ -39,6 +39,24 @@ debugging, changing or copying a specific pipeline.
    walk-gate **cold 3m04s → warm 1m15s** (~1m50s saved) — the old "~2–15 min cold" figure was
    **wrong** (cache.nixos.org is fast here; cold ≈ 3 min). Tradeoff: if `talos-xr6-r7p` is
    down, runs Pend.
+   🔴 **AND PUSHING N BRANCHES IS NOT N INDEPENDENT ACTIONS — IT IS ONE BLAST-RADIUS ACTION.**
+   Node-pinning means every run lands on `talos-xr6-r7p`, so a burst of pushes stacks full
+   pipeline runs onto one node with **no concurrency control** (the known-open issue below).
+   Measured 2026-08-23: five branches pushed in quick succession took that node to 77% CPU
+   requests / 237% limits with 424 Completed + 97 Error pods resident, the cluster began
+   emitting `ExceededNodeResources: Insufficient resources to schedule pod`, and steps were
+   **killed with exit 255**. The rate moved **2/54 (4%) → 8/34 (24%)**. It is not your branch:
+   **anyone else's PR checks in that window die too.** Push, wait for the queue to drain, push.
+   🔴 **`exited with code 255` is the CONGESTION signature, and it names whichever step was
+   running** — it appeared in `step-clone` AND `step-pytests` in the same burst, which reads as
+   two unrelated bugs and is one. The check then posts `NOT RUN: <leg> — the gate stopped
+   before this leg reported`: **a broken gate, not a bad change — do not debug your diff
+   against it.** The tell that it is congestion rather than code: it heals when the queue
+   drains, and a code cause does not.
+   🔴 **Do NOT measure a flake rate from inside a burst you are causing.** That mistake was
+   made here and written into a handoff as a property of the CI tier before it was caught —
+   `claude/RULES.md` → *"a control that SHARES the step you doubt"*. Take the baseline from a
+   window with no pushes of your own in it.
 4. **Placeholder imagePullSecret breaks ALL pulls.** A `harbor-cred` dockerconfigjson with a
    non-base64 `auth` placeholder makes every pod fail image pull ("illegal base64 data").
    **Do NOT attach a placeholder imagePullSecret** to the pipeline SA — public images
@@ -68,6 +86,26 @@ debugging, changing or copying a specific pipeline.
    live object — `kubectl -n tekton-ci get task gitops-validate -o jsonpath='{range
    .spec.steps[*]}{.name}{"\n"}{end}'` — and then watch the **first run after** the reconcile.
    A green check on the PR that adds a leg is not evidence about the leg.
+8. 🔴 **A pipeline-level timeout SKIPS `finally` — so a timed-out run posts NOTHING and the PR
+   sits on `pending` forever.** Put the limit on the **PipelineTask** (`spec.tasks[].timeout`),
+   never on `timeouts.tasks`/`timeouts.pipeline`. Measured three ways on v1.12.0 (a `sleep 300`
+   task + a `finally` echoing a marker): `timeouts.tasks: 40s` → `PipelineRunTimeout`,
+   children `[slow]`, **reporter TaskRun never CREATED**; `timeouts.pipeline: 40s` → identical;
+   task-level `timeout: 40s` → `Failed`, children `[slow,reporter]`, **finally RAN**. The
+   reserved `timeouts.finally` is **not honoured** on the budget-expiry path — reserving it
+   looks like protection and is not. Across 447 retained PipelineRuns: **25 timeouts, 0 ran
+   their report.** ⚠ **Still unfixed on `gitops-validate`, `auditloop`, `naida`, `remix` and
+   `clawgate-ci`** — devrc alone was fixed (homelab-infra #385). `clawgate-ci` first: busiest
+   pipeline on the cluster. 🔴 Bound EVERY task, not just the slow one — the task deadline is
+   `taskStart + timeout` while the budget is `runStart + tasks`, so an unbounded early task
+   (devrc's `notify` inherited the cluster's 1h default) lets them cross and re-opens this.
+9. ⚠ **Gotcha 6 is scoped to `homelab-infra`, not to Tekton.** `innovation-upstream/devrc` is a
+   DIFFERENT repo on a plan where protection works, and since 2026-08-23 it requires
+   `tekton/devrc-nodetests` — verified behaviourally: nodetests `ERROR`/`PENDING` ⇒
+   `mergeStateStatus=BLOCKED`, `SUCCESS` ⇒ `CLEAN`, pytests red + nodetests green ⇒ `UNSTABLE`.
+   So on devrc a Tekton check **is** a gate. 🔴 `enforce_admins: true` there means a wedged
+   Tekton blocks everyone with no override; the escape hatch is
+   `gh api -X DELETE /repos/innovation-upstream/devrc/branches/main/protection/required_status_checks`.
 
 ## What / where
 
@@ -77,7 +115,14 @@ debugging, changing or copying a specific pipeline.
   EventListener, PipelineRuns).
 - GitOps via **Flux**, repo **`ZacxDev/homelab-infra`** branch **`trunk`**, under
   `clusters/homelab/apps/tekton-pipelines/`.
-- Kubeconfig: `~/workspace/homelab-infra/homelab-kubeconfig`.
+- Kubeconfig: `~/workspace/homelab-talos/homelab-kubeconfig` (handle: `$KC_HOMELAB`).
+  🔴 **`homelab-talos`, NOT `homelab-infra`** — the line above names the GitOps *repo*
+  (`homelab-infra`), and this file used to reuse that name for the *kubeconfig*, giving a
+  path that does not exist on disk. `kubectl` then falls back to `localhost:8080` and every
+  read dies with `connection refused` — an error that names a port appearing nowhere in the
+  skill, so it reads as a cluster outage rather than a bad path. Measured 2026-08-23 while
+  debugging the devrc gate. Six sibling skills (`signal`, `activity`, `mailbox`, `sglang`,
+  `standup`) all spell `homelab-talos`; this was the only file that did not.
 
 ## GitHub App — `tekton-homelab`
 

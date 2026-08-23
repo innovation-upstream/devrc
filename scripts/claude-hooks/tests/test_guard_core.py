@@ -2651,10 +2651,12 @@ def test_S6d_the_deny_explains_WHY_it_judged_the_cwd_instead(tmp_path):
     """Falling back to the cwd produces a deny naming a repo the user never wrote
     in the command — unreadable unless it says why. The two fallbacks have
     DIFFERENT causes and must not share one message: `unresolved` is a path the
-    guard could not turn into a directory (a shell variable), this one is a path
-    that resolved fine and simply is not a repo. Asserted on the STATE (the named
-    path appears, and the not-a-worktree wording) rather than on any single word
-    another branch could also spell.
+    guard could not turn into a directory (a shell variable it could not expand,
+    or a literal path that does not exist yet — themselves two causes with two
+    messages, pinned in S6e/S6f/S6g), this one is a path that resolved fine and
+    simply is not a repo. Asserted on the STATE (the named path appears, and the
+    not-a-worktree wording) rather than on any single word another branch could
+    also spell.
     """
     cwd = _mkrepo(tmp_path / "cwd-trunk", branch="trunk")
     plain = tmp_path / "just-a-directory"
@@ -2665,6 +2667,98 @@ def test_S6d_the_deny_explains_WHY_it_judged_the_cwd_instead(tmp_path):
     assert "not a git worktree" in reason
     # …and it must NOT claim the path was unresolvable — that is the other cause.
     assert "could not resolve" not in reason
+
+
+# --- S6e/f/g. 🔴 THE TWO CAUSES OF AN UNRESOLVABLE `-C` ---------------------- #
+#
+# The note appended for an unresolvable `-C` is PROSE, and a guard on words is
+# walkable by rewording — so these pin the WHOLE normalised note string, not the
+# presence of a keyword. A cosmetic reword costs a test update here; that is the
+# deliberate trade for a machine-checkable claim about what the operator is told.
+
+def _tail_note(reason):
+    """The parenthetical the check appends, normalised to one whitespace run.
+
+    The note is appended as a single `\\n(...)` segment carrying no newlines of
+    its own, so it is exactly the last line of the reason.
+    """
+    assert reason is not None
+    return " ".join(reason.splitlines()[-1].split())
+
+
+def test_S6e_an_unresolvable_LITERAL_path_is_NOT_reported_as_a_variable(tmp_path):
+    """🔴 THE REGRESSION. A `-C` naming a literal path that does not exist yet was
+    reported as "a shell variable whose value the command text does not carry" —
+    flatly wrong, and it sent a session hunting for a variable its command never
+    contained, for two rounds.
+
+    The real cause is WHEN this runs: PreToolUse parses the command TEXT before
+    the command executes, so a directory the block is about to CREATE does not
+    exist at parse time. The remedy is therefore a different TOOL CALL, not a
+    different spelling — which is why the two causes could not share one message.
+    """
+    cwd = _mkrepo(tmp_path / "cwd-trunk", branch="trunk")
+    missing = tmp_path / "not-created-yet"          # deliberately never mkdir'd
+    assert not missing.exists()
+    reason = gc.check_git_commit_to_main(f"git -C {missing} commit -m x", str(cwd))
+    assert _tail_note(reason) == (
+        f"(The `-C {missing}` in this command names a path this guard could not "
+        f"resolve — no directory exists at that path; this guard runs BEFORE "
+        f"the command does, so a directory the command is about to CREATE does "
+        f"not exist yet when the command text is parsed — so the caller's own "
+        f"directory was judged instead. If that is the wrong repo, create the "
+        f"directory in an EARLIER tool call so it exists by the time this "
+        f"command is parsed, or pass `-C` a path that already exists.)")
+
+
+def test_S6f_an_unresolvable_VARIABLE_still_reports_the_variable_cause(
+        tmp_path, monkeypatch):
+    """An INVARIANT GUARD, not regression coverage: this wording is correct today
+    and is left byte-identical by the S6e fix. It is here so a later edit cannot
+    "fix" the literal-path message by flattening both branches back into one —
+    the failure mode that would make S6e pass while re-breaking this half.
+
+    Green on both sides of the fix, by construction. Do not count it as evidence
+    the fix works; S6e and S6g carry that.
+    """
+    monkeypatch.delenv(_UNSET_HANDLE, raising=False)
+    cwd = _mkrepo(tmp_path / "cwd-trunk", branch="trunk")
+    reason = gc.check_git_commit_to_main(
+        f"git -C ${_UNSET_HANDLE}/work commit -m x", str(cwd))
+    assert _tail_note(reason) == (
+        f"(The `-C ${_UNSET_HANDLE}/work` in this command names a path this "
+        f"guard could not resolve — it is a shell variable whose value the "
+        f"command text does not carry — so the caller's own directory was "
+        f"judged instead. If that is the wrong repo, pass `-C` an ABSOLUTE "
+        f"path, or assign the variable in this same command so the value is "
+        f"visible.)")
+
+
+def test_S6g_the_two_unresolvable_causes_do_not_share_a_message(
+        tmp_path, monkeypatch):
+    """The RELATIONSHIP between the two notes, which neither one alone pins.
+
+    Compared with the `-C` TOKEN substituted out, so the difference this asserts
+    is the explanation itself and not merely the path echoed back — pre-fix the
+    two notes are identical once the token is removed, which is the whole defect.
+    """
+    monkeypatch.delenv(_UNSET_HANDLE, raising=False)
+    cwd = _mkrepo(tmp_path / "cwd-trunk", branch="trunk")
+    missing = tmp_path / "not-created-yet"
+    var = f"${_UNSET_HANDLE}/work"
+
+    lit_note = _tail_note(gc.check_git_commit_to_main(
+        f"git -C {missing} commit -m x", str(cwd))).replace(str(missing), "<T>")
+    var_note = _tail_note(gc.check_git_commit_to_main(
+        f"git -C {var} commit -m x", str(cwd))).replace(var, "<T>")
+
+    assert lit_note != var_note, (
+        "both causes produced the same explanation once the path was removed — "
+        "the literal-path case is being reported as a shell variable again")
+    # …and each names ITS OWN cause, not the other's.
+    assert "shell variable" in var_note
+    assert "shell variable" not in lit_note
+    assert "does not exist yet" in lit_note
 
 
 def test_S6c_failing_closed_does_not_block_a_harmless_cwd(tmp_path):
