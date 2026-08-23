@@ -285,12 +285,13 @@ ARCHIVE_MD = REPO_ROOT / "claude" / "RULES-ARCHIVE.md"
 # -1, which is the whole reason MIN_HEADROOM_BYTES exists. No bump was needed
 # or taken for it.
 #
-# 2026-08-22: 39,200 -> 40,100 (+900). The rule that would not fit is the
+# 2026-08-22: 39,200 -> 40,300 (+1,100, in TWO steps -- see the bump note
+# below for why the second was forced). The rule that would not fit is the
 # proactivity gate -- "Default to PROCEEDING -- and never ask for what you can
 # measure yourself", a four-branch trigger tree in Push Back Before Acting,
 # 1,336 B. That is the THIRD-largest bullet in the file -- "Validate the
 # INSTRUMENT" (2,183 B) and "Mutation-test a guard" (1,985 B) are bigger, and
-# an earlier draft of this entry called it the largest, which line 96 of this
+# an earlier draft of this entry called it the largest, which line 84 of this
 # same module already contradicted. Recompute; do not restate. It is over the
 # ~900 B the MIN_HEADROOM_BYTES comment calls a large rule, and that is
 # deliberate: it is one decision tree with four branches, and splitting it
@@ -307,8 +308,10 @@ ARCHIVE_MD = REPO_ROOT / "claude" / "RULES-ARCHIVE.md"
 # verbatim as the Fork branch's parenthetical, and "don't ship-then-rework"
 # with it). That is 487 B of bullet text absorbed -- 489 B counting their
 # newlines, which is the convention the net is computed in -- so the NET cost
-# of the 1,336 B rule is 848 B, and that figure equals the real `git` delta on
-# the file. An earlier draft wrote "488", which is neither convention.
+# of the rule is 848 B, and that figure equals the real `git` delta on the
+# file. Mind the convention on BOTH sides: the bullet is 1,336 B of text and
+# 1,337 B with its newline, so 1,337 - 489 = 848; 1,336 - 489 = 847 is the
+# text-only pair. An earlier draft wrote "488", which is neither.
 #
 # 🔴 A COLD READ CAUGHT ONE SCOPE LOSS; A BLIND AUDIT THEN CAUGHT THREE MORE.
 # That ratio is the reusable part -- the cold read is necessary and was not
@@ -379,7 +382,9 @@ ARCHIVE_MD = REPO_ROOT / "claude" / "RULES-ARCHIVE.md"
 # demonstrated, applied to the Verification Honesty cluster -- the largest
 # section in the file and the one with the most sibling bullets sharing a
 # frame -- not another bump. The formula in the MIN_HEADROOM_BYTES-sizing
-# paragraph above would give ~41,900 and make the gate decorative.
+# paragraph above would give ~43,000 at the current size and make the gate
+# decorative -- recompute it as size + 3,900 rather than reusing that figure,
+# which two drafts of this entry carried forward stale.
 MAX_BYTES = 40_300
 
 # Required working margin below the ceiling.

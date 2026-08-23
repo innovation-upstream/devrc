@@ -102,8 +102,9 @@ observable as an outage, and `log`-lines in the hook (`permission_mode=…; defe
 
 ## What clawgate can and cannot carry for the proactivity gate
 
-RULES.md's "Default to PROCEEDING" tree names four triggers, three of which can end in a
-question. Clawgate is the **transport** for those questions when Zach is not at the tmux
+RULES.md's "Default to PROCEEDING" tree names four triggers, only TWO of which can end in a
+question (Fork, and Outward-facing/irreversible/high-blast-radius — Out of scope and Named
+hazard both route to "don't ask"). Clawgate is the **transport** for those questions when Zach is not at the tmux
 window — it is **not** the gate. Verified 2026-08-22 against live `0.7.98`.
 
 🔴 **`approve-with-comment` is NOT the Fork branch, however much it looks like one.** The
