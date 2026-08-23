@@ -1,6 +1,6 @@
 ---
 name: repo-cos
-description: "READ the weekly repo chief-of-staff proposals and evaluate them WITH Zach (which to act on -> dispatch/PR); also re-run the scan, tune the signals/model/repo-list, manage the timer. Use for: repo proposals, the repo chief-of-staff, \"the ideas the agent emailed me\", triaging the weekly repo suggestions, repo-cos."
+description: "READ the weekly repo chief-of-staff proposals and evaluate them WITH Zach; also re-run the scan, tune the signals/model/repo-list, manage the timer. Use for: repo proposals, the repo chief-of-staff, \"the ideas the agent emailed me\", triaging the weekly repo suggestions, repo-cos."
 ---
 
 # repo-cos — repo chief-of-staff
