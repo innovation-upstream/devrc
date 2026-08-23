@@ -34,11 +34,25 @@ The scripts live in **devrc**, not in this deployed skill dir — `~/.claude/ski
 read-only nix-store copy of `claude/skills/`, and only the docs ship there. Run them from
 the repo:
 
+🔴 **Transcript scanning is OPT-IN since 2026-08-22 (`--transcripts`).** Measured upstream
+over the three tickets in that day's report, the four evidence sources scored: ClickUp
+status **3/3** useful; newest comment **3/3 and decisive in every case**; transcript scan
+**0/3**, one of them actively misleading (a `✓ PR merged` whose own snippet said the bug was
+still unfixed); cited-PR resolution **0/3 resolved, 2/3 with FALSE explanations**. The scan
+is also ~60s of the ~90s runtime and the origin of every false verdict this tool has
+shipped. The ClickUp-side default runs in **~21s** and produced only correct output on the
+same input.
+
 ```bash
 CCUA=~/workspace/devrc/scripts/check-clickup-addressed
 
-# Default: top 3 most recent comments (~30s)
+# Default: top 3 comments, ClickUp status + newest comment (~21s). NOT the two
+# transcript-dependent flags — they need a SEARCHED zero, so the run announces that
+# they did not run.
 python3 "$CCUA/check-addressed.py"
+
+# Add the transcript scan and completion verdicts (~90s; read every snippet)
+python3 "$CCUA/check-addressed.py" --transcripts
 
 # Fast mode: samples only the 10 most recently updated tasks (~10s)
 python3 "$CCUA/check-addressed.py" --fast
@@ -179,15 +193,22 @@ five scoped to one side of a seam. If you are about to trust a verdict here, ope
   `868gx0aaa`, because the merge sentence really is adjacent to it. **Read the snippet.**
 - **A PR reference the tool cannot pin to a repo is reported `unresolved`, not guessed** —
   a snippet-wide scan was tried and attributed every bare `#N` to `civitai/civitai`,
-  returning a real but unrelated PR ("merged 2024-03-18"). 🔴 **Three distinct ways to fail,
-  and the message now says which** (until 2026-08-21 all three printed `repo not named`,
-  true of only one): `repo not named` — nothing repo-ish within `REPO_LOOKBEHIND`=30 chars;
-  `repo 'X' is not in KNOWN_REPOS` — a repo **was** named, *go add it*; `ambiguous — A, B
-  both in range`. The word on the `#` is reported as written and **not classified** —
-  nothing short of enumerating the world separates `devrc` from `landed`, and a reader
-  separates them at a glance. `KNOWN_REPOS` is a closed vocabulary, so **widening it is not
-  the fix** (same shape as the status sets below); verify owners with `gh repo view` —
-  `devrc` is **innovation-upstream**/devrc, and `civitai/devrc` does not exist.
+  returning a real but unrelated PR ("merged 2024-03-18"). 🔴 **Round 5 split the failure
+  into three precise messages; round 7 (2026-08-22) COLLAPSED two of them back, on
+  measurement.** `repo 'X' is not in KNOWN_REPOS` asserts that a repo was named and is
+  spelled `X` — and on a live upstream run **2 of the 3 cited PRs** rendered as `repo
+  'their' …` and `repo 'which' …`, the lookbehind having captured the preceding *English
+  word* while the comment plainly named a repo. The precise message was wrong more often
+  than the vague one it replaced, and it sends the reader to add an English word to a repo
+  table. `word` is simply whatever token precedes the `#`, and nothing short of enumerating
+  the world separates `devrc` from `landed` — so the tool no longer claims to know. Both now
+  render `unresolved (could not determine the repo; if one is named here, add it to
+  KNOWN_REPOS…)` — a **conditional**, true either way, which keeps the affordance without
+  the false premise. `ambiguous — A, B both in range` survives: repos genuinely *were* named
+  there, so naming them is a true diagnosis. `KNOWN_REPOS` is a closed vocabulary, so
+  **widening it is not the fix** (same shape as the status sets below); verify owners with
+  `gh repo view` — `devrc` is **innovation-upstream**/devrc, and `civitai/devrc` does not
+  exist.
 - **`--fast` only inspects the 10 most recently updated tasks**, so a stale-but-important
   task is invisible to it. That is a sampling window, not a full check.
 
@@ -319,6 +340,23 @@ plus one state where nothing disagrees and that is exactly the problem (4):
    comment and PR rules never read it and can each still flag the ticket.) Bounded only by a
    *newer* colleague comment re-firing it. Acknowledging is not doing.
 
+🔴 **TWO of these checks NEED the transcript scan, and it is OFF by default — the run says
+so.** The waiting flag (source 4) and *"ClickUp `<done>` but open signals remain"* are gated
+on a **SEARCHED** zero. Since the scan became opt-in the scan-less record carries **no**
+`mentions_found` at all — deliberately, because an unsearched zero is not a searched one —
+so in the default invocation those rules are *structurally unable to fire*. Upstream that
+was **silent**, and when nothing else disagreed the **Needs a decision** heading was not
+printed at all: measured by driving the tool, an empty block reading as *checked, nothing
+disagrees* when it meant *two rules never ran*. Exactly the failure round 4's unknown-status
+announcement exists for, one axis over, and it arrived with a change that was individually
+correct. A default run now prints **one** line naming both rules and how to enable them.
+Pass `--transcripts` and the line disappears.
+🔴 The two guards deliberately key on **different** facts, and neither is a typo: the flags
+gate on the STATE (`"mentions_found" in r`) because they ACT on evidence and a renamed status
+sentinel must not be able to fire them; the announcement keys on the run's own declaration
+(`status == "not_scanned"`) because it DESCRIBES the run, and a record merely missing the key
+(a stale producer, a partial write) is not evidence that the whole scan was skipped.
+
 🔴 **Sources 1 and 2 are gated on a hardcoded nine-word status vocabulary, and ClickUp
 statuses are per-list and arbitrary.** Until 2026-08-21 a miss was **silent**: measured,
 `in review` / `blocked` / `needs qa` / `review` each disabled every ticket/comment check
@@ -383,16 +421,20 @@ announcement.
 | Mode | Time | Notes |
 |------|------|-------|
 | `--fast` | ~10s | Samples only the 10 most recently updated tasks |
-| `--limit 5` | **~85–100s** | All assigned tasks; one transcript search per task |
+| default (no `--transcripts`) | **~21s** | ClickUp only; no per-task transcript sweep |
+| `--limit 5 --transcripts` | **~85–100s** | All assigned tasks; one transcript search per task |
 
-Re-measured 2026-08-21: **98.5s** and **85.4s** wall (two runs). The `~41s` quoted until
-then was a 2026-08-19 figure that had silently doubled as the transcript corpus grew — the
-ClickUp fetch dominates, but the per-task sweep scales with `~/.claude/projects`, so expect
-further drift. **Re-time it rather than quoting it.**
+⚠️ **Every figure in this table is upstream's, and the two `--transcripts` rows were measured
+before the scan became opt-in.** Re-measured upstream 2026-08-21: **98.5s** and **85.4s**
+wall (two runs); the `~41s` quoted until then was a 2026-08-19 figure that had silently
+doubled as the transcript corpus grew. The ~21s default is upstream's single measurement of
+the same day. The ClickUp fetch dominates the cheap path, but the per-task sweep scales with
+`~/.claude/projects`, so expect drift on both — and this host's corpus is not upstream's.
+**Re-time it rather than quoting it.**
 
 ## Tests
 
-Run all tests (**213** collected, measured 2026-08-22). `run_all.py` exits non-zero on
+Run all tests (**220** collected, measured 2026-08-22). `run_all.py` exits non-zero on
 failure — but read the `Total: N passed, M failed` line, not a piped exit code. 🔴 **If that
 line is missing at all, the run died — treat it as a failure, never as "no output".** A
 `sys.exit()` from code under test is a `SystemExit`, which a bare `except Exception` does
@@ -406,7 +448,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 "$CCUA/tests/run_all.py"
 
 The same files are a **pytest** target of devrc's gate — `scripts/check-clickup-addressed/tests`
 in `HERMETIC_TARGETS`, with its collected-count floor in `TARGET_FLOORS`
-(`scripts/run-tests.sh`). Both runners see the same 213; `run_all.py` survives because it
+(`scripts/run-tests.sh`). Both runners see the same 220; `run_all.py` survives because it
 purges `__pycache__` and reports an import failure as a FAILURE, which pytest's summary
 line does not distinguish as loudly. **Raise the floor when you add tests.**
 
@@ -416,11 +458,12 @@ Earlier rounds each ran a sweep, reported "0 survived", and threw the driver awa
 number was then unreproducible from the repo, and the next round re-invented the list and
 re-discovered the same sites. A blind re-audit of one such "51 mutants, 0 non-killed" found
 **seven more at the same delta sites**, one of which reverted that round's headline fix.
-**Extend the list; do not start a new one.** Currently **59 mutants + a positive control + a
-NULL CONTROL, 0 non-killed.** 🔴 That null control is not decoration: it copies the skill,
-mutates NOTHING and must report SURVIVED. On this battery's first run every mutant scored
-KILLED *because* `test_no_real_identifiers.py` cannot resolve the repo root from a temp copy
-and reddened all 59 for free. Read the killer NAME, not just the verdict.
+**Extend the list; do not start a new one.** Currently **76 rows (75 mutants + a positive
+control) + a NULL CONTROL, 0 non-KILLED** — the driver prints `76 mutant(s); non-KILLED: 0`.
+🔴 That null control is not decoration: it copies the skill, mutates NOTHING and must report
+SURVIVED. On this battery's first run every mutant scored KILLED *because*
+`test_no_real_identifiers.py` cannot resolve the repo root from a temp copy and reddened
+them all for free. Read the killer NAME, not just the verdict.
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 python3 "$CCUA/tests/mutation_sweep.py" --check
@@ -459,13 +502,16 @@ Test files:
   `ANNOUNCE` / `UNREADABLE` / `ANSWERED` / `SILENT`), never off whether something fired.
   Pre-port scores 10/21, shipped 21/21. Same rule as the other corpus: **add your motivating
   case, with the verdict a human would give, BEFORE you change code.**
-- `test_bounds_and_parsing.py` — the round-8 set: the other-coverage sentence's SCOPING, the
-  DISPLAY half of the two-ages split, and `UNANSWERED_COMMENT_DAYS` pinned ON its boundary
-  (14.0) and at a NON-multiple overshoot (20) — the old fixtures sat at 13 and 30, and 30 is
-  more than 2×14, so a doubling mutant passed straight through the gap. ⚠️ These are
-  **mutation-coverage guards, not regression coverage**: each SURVIVED a full green battery
-  on a tree where the behaviour was already right. The file says so, and says why its red
-  against pre-port `main` does not count.
+- `test_bounds_and_parsing.py` — the round-8 set. **Section 1 IS regression coverage**: the
+  scan-less announcement, its one-line-per-run bound, the state-gated open-signals flag, and
+  an end-to-end `main()` drive in BOTH modes — red before the transcript opt-in landed.
+  Everything after it is the other-coverage sentence's SCOPING, the DISPLAY half of the
+  two-ages split, and `UNANSWERED_COMMENT_DAYS` pinned ON its boundary (14.0) and at a
+  NON-multiple overshoot (20) — the old fixtures sat at 13 and 30, and 30 is more than 2×14,
+  so a doubling mutant passed straight through the gap. ⚠️ Those are **mutation-coverage
+  guards, not regression coverage**: each SURVIVED a full green battery on a tree where the
+  behaviour was already right. The file says so, and says why its red against pre-port
+  `main` does not count.
 - `test_check_completion.py` — windowed signal extraction. ⚠️ Its two proximity tests hand
   `extract_signals_from_windows` a non-zero `distance`, which no production producer emits;
   they cover the formula, not any reachable path. The reachable premise is pinned in

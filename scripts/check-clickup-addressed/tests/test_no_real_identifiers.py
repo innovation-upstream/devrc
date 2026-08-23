@@ -54,11 +54,16 @@ SEPARATED_ID_RE = re.compile(r"\b868[a-z0-9]{2}[-_][a-z0-9]{4}\b")
 #   868gx1ccc                          shares five with that group
 #   868gy0ddd / 868gy0eee / 868gy0fff              a second family
 #   868gz0hhh / 868gw0zzz / 868aaa111 / 868zzz111 / 868test01   isolated fixtures
+#   868qw0e2e                          the scan-less end-to-end drive in
+#                                      test_bounds_and_parsing.py; invented, and deliberately
+#                                      NOT sharing a prefix with any window fixture so it
+#                                      cannot perturb the prefix-matching tests
 ALLOWED_TASK_IDS = frozenset({
     "868gx0aaa", "868gx0bbb", "868gx0zzz", "868gx1ccc",
     "868gy0ddd", "868gy0eee", "868gy0fff",
     "868gz0hhh", "868gw0zzz",
     "868aaa111", "868zzz111", "868test01",
+    "868qw0e2e",
 })
 ALLOWED_SEPARATED_IDS = frozenset({"868gy-0ddd", "868gy_0ddd"})
 

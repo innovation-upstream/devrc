@@ -834,7 +834,16 @@ def disagreements(results, now=None):
         elif r["status"] == "likely_addressed" and cu in OPEN_STATUSES:
             out.append(f"{tid}: transcripts read as done, ClickUp still `{cu}` — close it or re-check.")
 
-        if r["status"] in ("open", "no_mentions_found") and cu in DONE_STATUSES:
+        # 🔴 `"mentions_found" in r` is the STATE — a transcript scan actually ran — and the
+        # status words are only how that state is spelled. Without it this branch is a
+        # SPELLED guard: the scan-less record's `not_scanned` sentinel is the only thing
+        # keeping it quiet, and renaming that sentinel to `no_mentions_found` fires "open
+        # signals remain" off a scan that never happened. That mutant SURVIVED the whole
+        # suite upstream. The waiting flag already gates on the state for exactly this
+        # reason; a searched zero and an unsearched one are different facts, and only one of
+        # them is evidence.
+        if ("mentions_found" in r and r["status"] in ("open", "no_mentions_found")
+                and cu in DONE_STATUSES):
             out.append(f"{tid}: ClickUp `{cu}` but open signals remain — verify before trusting the close.")
 
         # A separate `if`, not part of the chain above: nothing DISAGREES here, so it is
@@ -850,6 +859,42 @@ def disagreements(results, now=None):
                     if ref["state"] == "open":
                         out.append(f"{tid}: cited {ref['ref']} is still OPEN, not merged — "
                                    f"the signal that quoted it reads as done.")
+
+    # 🔴 ANNOUNCE THE RULES THAT COULD NOT RUN. The transcript scan is opt-in, and the two
+    # checks named below are gated on a SEARCHED zero (`mentions_found == 0`), which the
+    # scan-less record does not carry. So in the DEFAULT invocation they are structurally
+    # unable to fire — and nothing said so. Worse, when nothing else disagrees the whole
+    # "Needs a decision" heading is not printed at all, which reads as *checked, nothing
+    # disagrees* when it means *two rules never ran*. That is verbatim the failure this
+    # function's own docstring names three paragraphs up, and the reason round 4's
+    # unknown-status announcement exists — the same defect one axis over, and it arrived
+    # with a change that was individually correct.
+    #
+    # ONE line per run, not per ticket: the scan is skipped for the whole invocation, so a
+    # per-record line would put N identical sentences in the one block whose value depends
+    # on being short. Round 4's announcement is per-record because the STATUS varies per
+    # record; this fact does not.
+    #
+    # 🔴 Keyed on `status == "not_scanned"` and NOT on `"mentions_found" not in r`, which is
+    # the opposite choice from the guard above — because they answer different questions and
+    # the first version of this got it wrong upstream. A missing mention count is a
+    # RECORD-level absence with several causes (a stale producer, a hand-built fixture, a
+    # partial write); announcing "the scan was skipped for this RUN" from it is an
+    # over-claim, and it fired on existing tests whose fixtures omit the key precisely to
+    # exercise absent-vs-zero. `not_scanned` is the transcript verdict's OWN value for "no
+    # verdict was formed", written by exactly the one code path that skips the scan. That is
+    # the narrower and truer signal.
+    #
+    # The guard above must NOT use it, and this must not use the guard's: a flag that ACTS on
+    # evidence needs the state (is there a searched zero?), while an announcement that
+    # DESCRIBES the run needs the run's own declaration. Same two facts, opposite directions.
+    if any(r.get("status") == "not_scanned" for r in results):
+        out.append(
+            "transcripts were NOT scanned (this is the default; pass `--transcripts` to "
+            "enable), so TWO checks in this block DID NOT RUN for any ticket: 'nobody is on "
+            "it and someone is waiting', and 'ClickUp `<done>` but open signals remain'. "
+            "Both require a SEARCHED zero and an unsearched one is not the same fact, so "
+            "their silence here is not evidence of anything.")
     return out
 
 
@@ -940,6 +985,14 @@ def parse_args(args):
         "fast": False,
         # PR resolution defaults ON; results are cached and deduped within a task.
         "resolve_prs": True, "include_self_runs": False,
+        # 🔴 Transcript scanning is OPT-IN as of 2026-08-22. Measured upstream over the three
+        # tickets in that day's report, the four evidence sources scored: ClickUp status 3/3
+        # useful, newest-comment 3/3 and decisive in every case, transcript scan 0/3 (one
+        # actively misleading — a `✓ PR merged` whose own snippet read "the race is still
+        # unfixed"), cited-PR resolution 0/3 resolved with 2/3 FALSE explanations. The scan is
+        # also ~60s of the ~90s runtime and the origin of every false verdict this tool has
+        # shipped. It stays available, it is no longer the default.
+        "transcripts": False,
     }
     i = 0
     while i < len(args):
@@ -948,6 +1001,10 @@ def parse_args(args):
             opts["limit"] = int(args[i + 1]); i += 2
         elif a == "--since" and i + 1 < len(args):
             opts["since"] = args[i + 1]; i += 2
+        elif a == "--transcripts":
+            opts["transcripts"] = True; i += 1
+        elif a == "--no-transcripts":
+            opts["transcripts"] = False; i += 1
         elif a == "--json":
             opts["as_json"] = True; i += 1
         elif a == "--verbose":
@@ -961,7 +1018,8 @@ def parse_args(args):
         else:
             print(f"check-addressed.py: unknown argument {a!r}\n"
                   f"Usage: check-addressed.py [--limit N] [--since YYYY-MM-DD] [--json] "
-                  f"[--verbose] [--fast] [--no-resolve-prs] [--include-self-runs]",
+                  f"[--verbose] [--fast] [--transcripts] [--no-transcripts] "
+                  f"[--no-resolve-prs] [--include-self-runs]",
                   file=sys.stderr)
             sys.exit(2)
     return opts
@@ -976,6 +1034,7 @@ def main():
     since = opts["since"]
     resolve_prs = opts["resolve_prs"]
     include_self_runs = opts["include_self_runs"]
+    transcripts = opts["transcripts"]
 
     # Step 1: Get recent comments
     recent_args = ["--limit", str(limit), "--json"]
@@ -1009,6 +1068,24 @@ def main():
     sessions_by_task = {}
     results = []
     for tid in task_ids:
+        if not transcripts:
+            # 🔴 `mentions_found` is deliberately ABSENT, not 0. Absent means "not gathered";
+            # 0 is the positive claim "searched, and this task appears nowhere". The waiting
+            # flag fires on `mentions_found == 0` and `r.get(...) != 0` already sends an
+            # absent key down the no-claim path — so a scan-less run cannot flag every open
+            # ticket as abandoned. Pinned by a test; emitting 0 here would fire it on all.
+            meta = next((c for c in comments if c["task_id"] == tid), {})
+            results.append({
+                "task_id": tid,
+                "status": "not_scanned",
+                "sessions_searched": 0,
+                "completion": [], "open": [], "sessions": [],
+                "clickup_status": meta.get("task_status"),
+                "clickup_priority": meta.get("task_priority"),
+                "newest_comment": build_newest_comment(meta),
+            })
+            continue
+
         search_args = ["--limit", "5", "--json"]
         if since:
             search_args.extend(["--since", since])
@@ -1093,13 +1170,21 @@ def main():
                 print()
 
         print(f"\n{SELF_RUN_HEADER}\n")
-        print(f"{MARKER_LEGEND}\n")
+        if transcripts:
+            print(f"{MARKER_LEGEND}\n")
+        else:
+            print("Transcripts were NOT scanned (`--transcripts` to enable). Everything below "
+                  "comes from ClickUp: the ticket's own status and its newest comment. That is "
+                  "not a claim that no work exists — it is the absence of a claim.\n")
         for r in results:
-            status_icon = {"likely_addressed": "✅", "partially_addressed": "⚠️", "open": "🔴", "unclear": "❓", "no_sessions_found": "🔍", "no_mentions_found": "🔍"}.get(r["status"], "?")
+            status_icon = {"likely_addressed": "✅", "partially_addressed": "⚠️", "open": "🔴", "unclear": "❓", "no_sessions_found": "🔍", "no_mentions_found": "🔍", "not_scanned": "—"}.get(r["status"], "?")
             cu = r.get("clickup_status") or "?"
             prio = r.get("clickup_priority") or "-"
-            print(f"{status_icon} **{r['task_id']}** — transcripts say `{r['status']}` "
-                  f"(searched {r['sessions_searched']} sessions, {r.get('mentions_found', 0)} mentions)")
+            if r["status"] == "not_scanned":
+                print(f"{status_icon} **{r['task_id']}** — transcripts not scanned")
+            else:
+                print(f"{status_icon} **{r['task_id']}** — transcripts say `{r['status']}` "
+                      f"(searched {r['sessions_searched']} sessions, {r.get('mentions_found', 0)} mentions)")
             print(f"     ClickUp says: **{cu}** / prio {prio}")
             note = skip_note(r)
             if note:
@@ -1123,7 +1208,13 @@ def main():
         open_count = sum(1 for r in results if r["status"] == "open")
         unclear = sum(1 for r in results
                       if r["status"] in ("unclear", "no_sessions_found", "no_mentions_found"))
-        print(f"## Summary: {addressed} addressed, {partial} partial, {open_count} open, {unclear} unclear")
+        if transcripts:
+            print(f"## Summary: {addressed} addressed, {partial} partial, {open_count} open, {unclear} unclear")
+        else:
+            # A tally of transcript verdicts nobody computed reads as "we looked and found
+            # nothing addressed" — four zeroes that look like a finding. Say what happened.
+            print(f"## Summary: {len(results)} ticket(s) read from ClickUp; transcripts not "
+                  f"scanned, so no completion verdict was formed for any of them.")
 
         for heading, lines in report_blocks(results):
             print(f"\n{heading}\n")

@@ -32,12 +32,11 @@ the same second imports the ORIGINAL bytecode and scores SURVIVED without ever r
 here the scripts sit at the skill root and the suite in `tests/`. `run_one` below is written
 against THIS layout — if you copy a mutant across, copy the paths too.
 
-⚠️ FIVE UPSTREAM MUTANTS ARE DELIBERATELY ABSENT (N1-N5). They cover a scan-less-run
-announcement and the `"mentions_found" in r` gate that goes with it, both of which exist
-because upstream made the transcript scan opt-in. This tool always scans — `check-completion.py`
-emits `mentions_found` on every exit path and nothing writes a `not_scanned` status — so those
-mutants would target code that is not here and score NOT APPLIED forever. Restore them in the
-same commit as any `--transcripts` opt-in.
+🔴 N1-N5 (the scan-less announcement and the `"mentions_found" in r` gate that goes with it)
+were deliberately ABSENT while this tool always scanned. The `--transcripts` opt-in landed
+2026-08-22, which is the restore condition that omission named, and they are back — together
+with T1-T9 for the opt-in's own parsing, its scan-less record, its three renderings and its
+CALL SITES in `main()`, and U1-U3 for the retracted false-premise repo message.
 """
 import os
 import re
@@ -50,6 +49,7 @@ from pathlib import Path
 SKILL = Path(__file__).resolve().parent.parent
 RC = "recent-comments.py"
 CA = "check-addressed.py"
+CC = "check-completion.py"
 
 # 🔴 REMOVED FROM EVERY MUTANT COPY, and this is the instrument's own correctness, not tidiness.
 # `test_no_real_identifiers.py` is a REPO-HYGIENE gate: it walks `<repo>/scripts/…` and
@@ -230,6 +230,62 @@ MUTANTS = [
     ("N12", CA, "    except (ValueError, TypeError, OSError, OverflowError):",
      "    except (ValueError, OSError, OverflowError):",
      "a string raw-ms raises an uncaught TypeError"),
+
+    # ---------- round 7/8: the transcript opt-in, its scan-less record, and the announcement
+    # + state gate that only became reachable once the opt-in existed. N1-N5 are upstream's,
+    # restored per the condition their omission named; T1-T9 are this port's own, and half of
+    # them target CALL SITES rather than function bodies, because a correct scan-less record
+    # that `main()` never builds is inert with a fully green suite — this skill's own headline
+    # defect class.
+    ("N1", CA, "    if any(r.get(\"status\") == \"not_scanned\" for r in results):",
+     "    if False:", "delete the scan-less announcement"),
+    ("N2", CA, "    if any(r.get(\"status\") == \"not_scanned\" for r in results):",
+     "    if any(\"mentions_found\" not in r for r in results):",
+     "announce from a RECORD-level absence instead of the run's own declaration"),
+    ("N3", CA, "    if any(r.get(\"status\") == \"not_scanned\" for r in results):",
+     "    for _r in results:\n     if _r.get(\"status\") == \"not_scanned\":",
+     "announce once per TICKET instead of once per run"),
+    ("N4", CA, "        if (\"mentions_found\" in r and r[\"status\"] in (\"open\", \"no_mentions_found\")",
+     "        if ((True) and r[\"status\"] in (\"open\", \"no_mentions_found\")",
+     "open-signals flag stops requiring a SEARCHED zero"),
+    ("N5", CA, "                \"status\": \"not_scanned\",", "                \"status\": \"no_mentions_found\",",
+     "rename the scan-less sentinel (SURVIVED the round-7c suite upstream)"),
+    ("T1", CA, '        "transcripts": False,', '        "transcripts": True,',
+     "the scan is on by default again"),
+    ("T2", CA, "        elif a == \"--transcripts\":\n            opts[\"transcripts\"] = True; i += 1",
+     "        elif a == \"--transcripts\":\n            opts[\"transcripts\"] = False; i += 1",
+     "`--transcripts` parses to a no-op — the opt-in cannot be taken"),
+    ("T3", CA, "        elif a == \"--no-transcripts\":\n            opts[\"transcripts\"] = False; i += 1",
+     "        elif a == \"--no-transcripts\":\n            opts[\"transcripts\"] = True; i += 1",
+     "`--no-transcripts` turns the scan ON"),
+    ("T4", CA, "    transcripts = opts[\"transcripts\"]", "    transcripts = False",
+     "CALL SITE: main() ignores the parsed flag and never scans"),
+    ("T5", CA, "        if not transcripts:", "        if False:",
+     "CALL SITE: main() always scans, whatever the flag said"),
+    ("T6", CA, "                \"sessions_searched\": 0,",
+     "                \"sessions_searched\": 0, \"mentions_found\": 0,",
+     "the scan-less record emits an UNSEARCHED zero as a searched one"),
+    ("T7", CA, "        if transcripts:\n            print(f\"{MARKER_LEGEND}\\n\")",
+     "        if True:\n            print(f\"{MARKER_LEGEND}\\n\")",
+     "the evidence-marker legend heads a report with no evidence"),
+    ("T8", CA, "        if transcripts:\n            print(f\"## Summary: {addressed} addressed",
+     "        if True:\n            print(f\"## Summary: {addressed} addressed",
+     "a tally of verdicts nobody computed — four zeroes that read as a finding"),
+    ("T9", CA, "            if r[\"status\"] == \"not_scanned\":", "            if False:",
+     "a scan-less record prints a searched-sessions/mentions count"),
+
+    # ---------- round 7: the retracted false-premise message in `_unresolved_state`. Round 5
+    # replaced one vague failure with three precise ones; measured on live input the precise
+    # version was wrong MORE often, because the token on the '#' is whatever word precedes it.
+    ("U1", CC, "    return (\"unresolved (could not determine the repo; if one is named here, add it to \"",
+     "    if kind == \"unknown\":\n        return f\"unresolved (repo {detail!r} is not in KNOWN_REPOS)\"\n"
+     "    return (\"unresolved (could not determine the repo; if one is named here, add it to \"",
+     "reinstate the false premise: quote the captured token back as a repo"),
+    ("U2", CC, "            \"KNOWN_REPOS in check-completion.py)\")",
+     "            \"the repo table in check-completion.py)\")",
+     "drop the affordance — the reader is told nothing to do"),
+    ("U3", CC, "    if kind == \"ambiguous\":", "    if False:",
+     "collapse the one failure whose diagnosis is TRUE into the generic message"),
 
     # ---------- POSITIVE CONTROL. A mutant round 6 proved is caught; if this ever reports
     # SURVIVED the harness is broken, not the code.
