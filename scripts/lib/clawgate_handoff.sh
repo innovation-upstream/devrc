@@ -44,7 +44,9 @@
 #      With no `role` on any row it falls back to "exactly one task", and says so.
 #   3  no session id — nothing was asked
 #   4  clawgate did NOT answer (no token, a missing tool, unreachable, non-200,
-#      no `tasks` array, or a row carrying no usable id)
+#      no `tasks` array, a row carrying no usable id, or a counting pass that
+#      produced no usable tally — a broken READ is never reported as an empty
+#      board)
 #   5  the board answered and resolved NOTHING — see the caveat printed with it
 #   6  ASK; this command will not pick one. FOUR distinguishable causes, each
 #      named in the output: several WORKED tasks, NO worked task beside one or
@@ -397,6 +399,11 @@ clawgate_rank_rows(){
                        or (type == "string" and test("^[0-9]+$")));
   '
 
+  # 🔴 THIS CHECK DELIBERATELY DOES NOT USE `$jqdefs`, and the asymmetry is
+  # load-bearing rather than an oversight: it is the one pass that must still
+  # answer when the prelude itself is broken. A syntax error inside `$jqdefs`
+  # therefore leaves the shape check green and lands on the counting pass below,
+  # which is where it is caught — see the tally guard there.
   local shape
   shape=$(printf '%s' "$body" | jq -r '(.tasks | type)' 2>/dev/null)
   if [ "$shape" != "array" ]; then
@@ -428,16 +435,45 @@ clawgate_rank_rows(){
         ($b | map(select(. == "unknown")) | length),
         ($b | map(select(. == "absent"))  | length) ]
     | map(tostring) | join(" ")' 2>/dev/null)
-  # 🔴 EVERY ONE OF THE SEVEN IS RE-VALIDATED AS A NUMBER. jq printing nothing
-  # (a syntax error, a jq that died) must land as 0 and reach the NOTHING
-  # RESOLVED / usable-id branches, never as an empty string an arithmetic
-  # comparison would abort on — the same defence the old `case` on `$n` carried,
-  # now applied to all seven rather than the two anybody remembered.
-  IFS=' ' read -r n n_id n_worked n_read n_created n_unknown n_absent <<<"$counts"
-  local v
-  for v in n n_id n_worked n_read n_created n_unknown n_absent; do
-    case "${!v:-}" in ''|*[!0-9]*) printf -v "$v" '%s' 0 ;; esac
-  done
+  # 🔴 A DEAD COUNTING PASS IS rc 4, NOT rc 5, AND NOTHING BUT THIS SAYS SO.
+  # Defaulting each field to 0 on garbage — the obvious defence, and the one this
+  # function shipped with — is what makes the failure INVISIBLE: seven zeros walk
+  # straight into the `n -eq 0` branch and print "NOTHING RESOLVED — 0 tasks for
+  # this session", which is a claim ABOUT THE BOARD. rc 5 means the board
+  # answered and resolved nothing; a jq that died answered nothing at all, which
+  # is rc 4's entire job.
+  #
+  # 🔴 IT IS NOT PAYLOAD-REACHABLE TODAY — `norm` guards every field access — so
+  # this guards the NEXT EDIT to `$jqdefs`, which is not hypothetical: writing
+  # this function, `$known | index(.role)` aborted jq and turned every
+  # role-carrying payload into exactly that confident zero. That instance is
+  # fixed; without this, the next one reads the same way.
+  #
+  # So: the tally must be SEVEN NUMERIC FIELDS or the pass did not answer. Both
+  # halves matter — a short/long field count catches a filter that emitted the
+  # wrong shape, and the per-field digit test catches one that emitted text.
+  local -a fields=()
+  IFS=' ' read -r -a fields <<<"$counts"
+  local tally_ok=1 f
+  if [ "${#fields[@]}" -ne 7 ]; then
+    tally_ok=0
+  else
+    for f in "${fields[@]}"; do
+      case "$f" in ''|*[!0-9]*) tally_ok=0 ;; esac
+    done
+  fi
+  if [ "$tally_ok" -ne 1 ]; then
+    echo "clawgate: DID NOT ANSWER USABLY — the pass that COUNTS the \`tasks\` array produced no usable tally (wanted 7 integers, got: '${counts}'). That is a broken read, NOT an empty board. UNKNOWN, not empty; record nothing."
+    return 4
+  fi
+  # Every field is now known to be a non-empty run of digits, so the assignments
+  # below cannot produce a value an arithmetic comparison would abort on. There
+  # is deliberately NO second per-field defaulting here: after the guard above it
+  # could never fire, and an unreachable fallback reads as coverage while
+  # providing none (`claude/RULES.md` -> "prove it REACHABLE").
+  n="${fields[0]}"; n_id="${fields[1]}"; n_worked="${fields[2]}"
+  n_read="${fields[3]}"; n_created="${fields[4]}"
+  n_unknown="${fields[5]}"; n_absent="${fields[6]}"
 
   if [ "$n" -eq 0 ]; then
     echo "clawgate: NOTHING RESOLVED — 0 tasks for this session."

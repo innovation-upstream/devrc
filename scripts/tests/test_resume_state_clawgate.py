@@ -1258,8 +1258,31 @@ def resolver(tmp_path):
         'exit "${STUB_RC:-0}"\n'
     ))
 
+    # 🔴 A PASS-THROUGH `jq` THAT CAN BE MADE TO DIE ON ONE SPECIFIC CALL.
+    # `resolve` runs several jq passes and they are NOT interchangeable: the
+    # shape check deliberately avoids the shared prelude so it still answers when
+    # that prelude is broken, which means only a LATER pass can carry the
+    # broken-read failure. Killing "jq" wholesale (the preflight test's approach)
+    # cannot express that — it never gets past the preflight. Counting
+    # invocations is what lets a test say "the COUNTING pass died", which is the
+    # distinction between rc 4 and a reassuring rc 5. Inert unless
+    # STUB_JQ_FAIL_ON is set, so every other test keeps the real jq.
+    real_jq = shutil.which("jq") or "jq"
+    jq_calls = tmp_path / "jq-calls"
+    write_exec(binp / "jq", (
+        'n=0\n'
+        '[ -f "$STUB_JQ_CALLS" ] && n=$(cat "$STUB_JQ_CALLS")\n'
+        'n=$((n+1)); printf "%s" "$n" > "$STUB_JQ_CALLS"\n'
+        'if [ -n "${STUB_JQ_FAIL_ON:-}" ] && [ "$n" = "$STUB_JQ_FAIL_ON" ]; then\n'
+        '  printf "%s" "${STUB_JQ_FAIL_OUT:-}"\n'
+        '  exit 5\n'
+        'fi\n'
+        f'exec {real_jq} "$@"\n'
+    ))
+
     def go(payload=None, *, session=SESSION_VAR, session_id="sess-abc-123",
-           code="200", rc="0", env_file: str | None = None):
+           code="200", rc="0", env_file: str | None = None,
+           jq_fail_on: int | None = None, jq_fail_out: str = ""):
         env = _base_env()
         env["HOME"] = str(home)
         env["PATH"] = f"{binp}{os.pathsep}{env['PATH']}"
@@ -1273,6 +1296,12 @@ def resolver(tmp_path):
         env["TMPDIR"] = str(tmpdir)
         env["STUB_CODE"] = code
         env["STUB_RC"] = rc
+        env["STUB_JQ_CALLS"] = str(jq_calls)
+        if jq_calls.exists():
+            jq_calls.unlink()          # the counter is PER CALL, not per fixture
+        if jq_fail_on is not None:
+            env["STUB_JQ_FAIL_ON"] = str(jq_fail_on)
+            env["STUB_JQ_FAIL_OUT"] = jq_fail_out
         if payload is not None:
             body = tmp_path / "body.json"
             body.write_text(payload if isinstance(payload, str) else json.dumps(payload))
@@ -1540,6 +1569,69 @@ class TestResolve:
         assert r.returncode == 4, r.stdout
         assert "only 0 carry a usable id" in r.stdout
         assert recorded(r.stdout) == [], r.stdout
+
+    # ------------------------------------- a broken READ is never an empty board
+    # 🔴 THE CLASS THIS WHOLE FUNCTION KEEPS PRODUCING. Writing the ranking,
+    # `$known | index(.role)` aborted jq and every role-carrying payload rendered
+    # as "NOTHING RESOLVED — 0 tasks" — rc 5, a claim ABOUT THE BOARD, from a
+    # pass that never ran. Defaulting the tally to zeros is what made it
+    # invisible. These drive the ROUTING, so the next such edit is rc 4.
+
+    def test_a_DEAD_counting_pass_is_a_gap_not_an_empty_board(self, resolver):
+        """The counting pass is jq call #2 (#1 is the shape check, which
+        deliberately avoids the shared prelude so it survives a broken one).
+        Killing exactly #2 is the observable a `$jqdefs` syntax error produces."""
+        r = resolver(rpayload(rrow(WORKED_ID, "worked"), rrow(CREATED_ID, "created")),
+                     jq_fail_on=2)
+        assert r.returncode == 4, r.stdout
+        assert "DID NOT ANSWER USABLY" in r.stdout
+        assert "no usable tally" in r.stdout
+        assert "UNKNOWN, not empty" in r.stdout
+        # 🔴 THE POINT: it must NOT claim the board resolved nothing.
+        assert "NOTHING RESOLVED" not in r.stdout, r.stdout
+        assert recorded(r.stdout) == [], r.stdout
+
+    def test_a_counting_pass_that_emits_TEXT_is_also_a_gap(self, resolver):
+        """A filter can fail by printing the WRONG THING rather than nothing —
+        an error object, a partial tally. Seven-numeric-fields is the contract;
+        neither half of it may be dropped."""
+        r = resolver(rpayload(rrow(WORKED_ID, "worked")),
+                     jq_fail_on=2, jq_fail_out="null null null null null null null")
+        assert r.returncode == 4, r.stdout
+        assert "no usable tally" in r.stdout
+        assert "NOTHING RESOLVED" not in r.stdout
+
+    def test_a_counting_pass_emitting_the_WRONG_FIELD_COUNT_is_a_gap(self, resolver):
+        """The field-count half specifically: six integers parse as integers and
+        would sail past a per-field digit test alone, leaving `n_absent` unset."""
+        r = resolver(rpayload(rrow(WORKED_ID, "worked")),
+                     jq_fail_on=2, jq_fail_out="1 1 1 0 0 0")
+        assert r.returncode == 4, r.stdout
+        assert "no usable tally" in r.stdout
+
+    def test_the_SAME_payload_resolves_when_jq_works(self, resolver):
+        """🔴 POSITIVE CONTROL for the three above — without it they are equally
+        satisfied by a subject that returns 4 for this payload always, and the
+        stub itself is unproven (an inert `jq` stub would make them pass by
+        never running jq at all)."""
+        r = resolver(rpayload(rrow(WORKED_ID, "worked"), rrow(CREATED_ID, "created")))
+        assert r.returncode == 0, r.stdout
+        assert recorded(r.stdout) == [str(WORKED_ID)], r.stdout
+
+    def test_the_jq_stub_really_passes_through_when_not_armed(self, resolver):
+        """GUARD ON THE HARNESS. The stub sits on PATH for every resolver test;
+        if it silently broke jq, the whole §5 block would be testing the stub."""
+        r = resolver(ONE)
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "clawgate-task: 193" in r.stdout
+
+    def test_killing_the_SHAPE_pass_is_still_the_no_tasks_array_gap(self, resolver):
+        """The two passes fail into DIFFERENT messages, which is what makes the
+        rc 4 report say where the read broke rather than just that it did."""
+        r = resolver(ONE, jq_fail_on=1)
+        assert r.returncode == 4, r.stdout
+        assert "carried no `tasks` array" in r.stdout
+        assert "no usable tally" not in r.stdout
 
     def test_the_role_vocabulary_is_exactly_what_this_file_drives(self):
         """🔴 LEDGER, both directions — the same discipline as the preflight
