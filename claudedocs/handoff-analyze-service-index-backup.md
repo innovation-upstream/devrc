@@ -23,8 +23,14 @@ and close the one failure mode in it that is unrecoverable (no off-machine backu
 - `#681` — `skill-audit.py` headroom blindness.
 - `#737` — **the restore-verifier** (`scripts/analyze-service-index/restore-verify.py`),
   138 tests. Squash-merged as `592eef27`; verified by CONTENT, not ancestry.
+- `#673` — **MERGED** (`4dd14e68`), GUARD 9 / `scripts/testlib/nogit_plugin.py`. It is in
+  `origin/main` and its banner prints on every pytest run
+  (`gitenv(session) … mode=enforce(auto)`). 🔴 An earlier revision of this doc called it
+  "deliberately unmerged" — that was true when first written and false ~28 h later. It is
+  the load-bearing safety fact behind the fixture-wipe section below, so check it by
+  content (`git log --diff-filter=A -- scripts/testlib/nogit_plugin.py`), never from prose.
 
-**Not merged:** `#673` — superseded, deliberately unmerged, kept as the record.
+**Closed WITHOUT merging:** `#689`, `#676` — superseded, kept as the record.
 
 ### The three things that were open at the last handoff, and are now closed
 
@@ -40,9 +46,12 @@ and close the one failure mode in it that is unrecoverable (no off-machine backu
 
 ### Verified live, end to end
 10 scopes, 201 commits compared, restored from the bucket → `age -d` → `git clone` →
-`fsck` → cross-checked against the live store. Store byte-identical afterwards (936
-files), zero remotes on all 10 scopes. The artifacts verified were the ones the TIMER
-produced, not a hand-triggered run.
+`fsck` → cross-checked against the live store. Store **byte-identical afterwards** — a
+sha256 over a `path size mtime` manifest, identical before and after a full run — and zero
+remotes on all 10 scopes. The artifacts verified were the ones the **TIMER** produced
+(object stamp `20260823T094821Z`, one second after its `LastTrigger`), not a hand-triggered
+run. The commit count and the store's file count both advance hourly; the *byte-identity*
+and *zero-remotes* claims are the durable ones.
 
 ## 🔴 Two gotchas that will bite you immediately
 
@@ -51,19 +60,26 @@ produced, not a hand-triggered run.
 restore-verify.py                                    # ALWAYS rc=1 — looks under nixos/
 restore-verify.py --host workbench-<machine-id>      # the real one
 ```
-The unit sets `ASIB_HOST=workbench-%m` (systemd expands `%m` to `/etc/machine-id`); a
-hand-run has `ASIB_HOST` unset and falls back to the hostname, which is `nixos` on
-**both** machines. The script now says so explicitly and names the prefix that does hold
-artifacts — it will not tell you your backups are missing. **Follow-up #1 below is to fix
-the asymmetry itself.**
+The unit sets `ASIB_HOST=workbench-%m` (systemd expands `%m` to `/etc/machine-id`). A
+hand-run resolves `host_label()` through `ASIB_HOST` → **`ACTIVITY_HOST`** →
+`socket.gethostname()` — and the hostname is `nixos` on **both** machines (measured on
+each, not inferred from one). So with neither env var set it always lands on a
+permanently-empty prefix; "ALWAYS rc=1" is a claim about that clean environment, not an
+absolute. The script now says so explicitly and names the prefix that does hold artifacts —
+it will not tell you your backups are missing. **Follow-up #1 below is to fix the asymmetry
+itself.**
 
 **`git bundle verify` does NOT detect corruption.** Re-measured this session on git
 2.55.0 with a real bundle, both controls:
 
 | bundle | `git bundle verify` | `git clone` (restore) |
 |---|---|---|
-| 1 byte flipped mid-packfile | **rc=0**, *"records a complete history"* | **rc=128**, `inflate returned -5` |
+| 1 byte flipped mid-packfile | **rc=0**, *"records a complete history"* | **rc=128**, `error: index-pack died` |
 | intact | rc=0 | rc=0 |
+
+Pin `index-pack died`, **not** the `inflate returned -N` detail: flipping a byte at 10
+different mid-packfile offsets gave `index-pack died` at 10/10 but `-5` at only 2/10
+(`-3` at 8/10). The specific inflate code is position-dependent; the death is not.
 
 The intact row is the positive control — it proves `clone` *can* succeed, so rc=128
 discriminates rather than a harness that always fails. Both halves are pinned by tests,
@@ -76,11 +92,13 @@ fails at the call site.
    `host: nixos`, so a hand-run of the *backup* would write a phantom second host prefix.
    Deliberately out of scope for #737 — changing labelling affects artifacts already in
    the bucket and retention pruning.
-2. **Nothing runs the verifier on a schedule.** A timer is the obvious follow-up; it needs
+2. **F5** — a wrong/absent `--store` exits **0** with everything "self-consistency only".
+   Reproduced live: `--store <empty dir>` → rc=0, "10 self-consistency only". **Exit code
+   is all a timer reads, so this MUST land before (3)** — shipping the timer first is
+   exactly the harm F5 describes.
+3. **Nothing runs the verifier on a schedule.** A timer is the obvious follow-up; it needs
    network *and* the age key, and the backup unit's containment took several measured
-   `systemd-run --user` rounds. Not attempted rather than claimed.
-3. **F5** — a wrong/absent `--store` exits **0** with everything "self-consistency only".
-   Exit code is all a timer reads, so close this *before* (2).
+   `systemd-run --user` rounds. Not attempted rather than claimed. **Blocked on (2).**
 4. **F4** — a structurally truncated artifact (1 of 40 commits) verifies green;
    `--max-lag-days` reads the key stamp, never the content.
 5. **F9** — no SIGTERM handling around the plaintext window (Python runs no `finally` on
@@ -93,17 +111,22 @@ fails at the call site.
    boundary**, same shape as the staleness one that WAS closed. Labelled, not hidden.
 10. B-5, B-7, B-8, B-9 — cosmetic; listed in the #737 body.
 11. **Run `prune-index` against the store.** Built, shipped, validated, and **still never
-    used for its purpose.** Last verdict: 5 entries over the 12,288 B hard cap, 11 over
-    target, 32 evictable `RESOLVED`, 1 `NO HOME`, 22 broken pointers, 5 scopes with no
-    README, 31 OPEN bullets protected.
+    used for its purpose.** Verdict **measured 2026-08-23** (88 entries / 10 scopes): 2
+    over the 12,288 B hard cap, 14 over the 6,144 B target, 30 evictable `RESOLVED`, 11
+    broken pointers, 0 scopes without a README, every ref resolving to exactly one entry,
+    41 OPEN bullets in 31 entries protected — plus 5 `ACKNOWLEDGED` over cap, excluded from
+    the verdict but not from the store. 🔴 **These drift within a day** (the store
+    autocommits hourly); an earlier revision of this doc carried a set that was wrong in
+    *both* directions on all seven figures. Re-run `scripts/subsystem-audit.py` and read
+    its numbers — never quote these.
 12. Second A/B against a doc-poor repo (tests whether "selection, not knowledge"
     generalises past n=1).
 
 ## The A/B result — what the index is actually worth
 Controlled A/B on `datapacket-talos/storage-resolver`, pre-registered 10-question answer
 key, both arms on a clean `origin/trunk` worktree.
-- **~90% of the entry is recoverable from the repo itself.** Only `kubectl wait -l
-  app=storage-resolver` hangs was index-only.
+- **~90% of the entry is recoverable from the repo itself** — sampled 10 load-bearing
+  facts; only `kubectl wait -l app=storage-resolver` hangs was index-only.
 - The control arm **matched or beat** the index arm on 6 of 10 questions.
 - **The index's one clean win was recency-ordered SELECTION**: the control confidently
   asserted the pre-2026-08-20 auth control (`401`) because it read the 08-19 docs and
@@ -111,8 +134,9 @@ key, both arms on a clean `origin/trunk` worktree.
   it never opened.
 - Cost: 25 vs 26 tool calls, 123k vs 148k tokens (~17% saved). Not a step change.
 - 🔴 **n=1.** One subsystem in an unusually doc-rich repo.
-- **My own answer key was wrong in two places** — it repeated the entry's incomplete
-  `CLEANED=` advice. The artifact under test corrupted the instrument measuring it.
+- **My own answer key was wrong in two places** — it said one image-pin site where there
+  are three, and it repeated the entry's incomplete `CLEANED=` advice. The artifact under
+  test corrupted the instrument measuring it.
 
 ## Still open — the fixture-wipe incident
 Diagnosed and repaired, NOT closed.
@@ -124,10 +148,19 @@ Diagnosed and repaired, NOT closed.
   `.git`. A worktree is not containment.**
 - **Isolation means a standalone clone with `origin` removed.** The single most useful
   sentence from the whole incident, and it was used all session with zero damage.
-- **Still open:** sessions keep starting tier runs in trees that share the base clone.
-- Probe: `for p in $(pgrep -f 'run-tests.sh|gate.sh'); do git -C "$(readlink /proc/$p/cwd)"
-  rev-parse --path-format=absolute --git-common-dir; done` — anything equal to
-  `~/workspace/devrc/.git` is the hazard.
+- 🔴 **Still open, and measured live 2026-08-23:** the corrected probe found **7 processes**
+  whose git-common-dir is `~/workspace/devrc/.git` — including another session running
+  `./scripts/gate.sh --tier both` from `.claude/worktrees/agent-…`, and a second from a
+  scratchpad worktree. Both *thought* they were isolated. This is not historical; it is
+  happening while you read this.
+  ⚠ **Do not kill what the probe finds.** Those are other sessions' agents, and the damage
+  from killing one reads exactly like a code defect in whatever branch it was testing. Report
+  it, or fix the tree you control.
+- Probe: see "How to verify" below. 🔴 It must skip `$$` — `pgrep -f` matches the probe's
+  OWN shell, so the naive form reports a guaranteed hit from inside the repo and the real
+  offender becomes indistinguishable from the artefact. Measured 2026-08-23: the corrected
+  probe found **one genuine foreign `run-tests.sh`** whose common-dir was
+  `~/workspace/devrc/.git`, so this is live, not theoretical.
 
 ## Lessons from #737 worth keeping (four rounds, three carried the next defect)
 
@@ -159,8 +192,11 @@ Diagnosed and repaired, NOT closed.
   precondition). Re-measure `git config --local --get core.hooksPath` at the moment you act.
 - Pushes died `SIGPIPE 141` twice *after* the pre-push hook printed `RESULT: PASS`, remote
   unchanged both times — caught only by `git ls-remote`, not by the ✅.
-- ~130 stale agent worktrees are accumulating under `.claude/worktrees/` and `/tmp`. Some
-  may hold unpushed work; **diff before removing any.**
+- ~125 registered agent worktrees are accumulating, in **three** places: `.claude/worktrees/`
+  (~69), `/tmp` (~35) and **`~/workspace/devrc-*` (~20)** — the last is easy to miss. The
+  count moves by the hour. "Stale" is asserted, not measured: `git worktree list --porcelain`
+  reports **0 prunable**, so git considers all of them live. Some may hold unpushed work;
+  **diff before removing any.**
 
 ## How to verify
 ```bash
@@ -176,19 +212,30 @@ systemctl --user show analyze-service-index-backup.service -p Result
 # the index store's own verdict
 python3 ~/workspace/devrc/scripts/subsystem-audit.py
 
-# nobody is running the tier against the real clone
-for p in $(pgrep -f 'run-tests.sh|gate.sh'); do
-  git -C "$(readlink /proc/$p/cwd)" rev-parse --path-format=absolute --git-common-dir
+# nobody is running the tier against the real clone.
+# `| while read` — NOT `for p in $(...)`: zsh does not word-split, so the for-loop
+# form iterates ONCE over the whole PID list and silently checks nothing.
+# `[ "$p" = "$$" ]` — pgrep -f matches this very shell; without the skip the probe
+# always reports a hit from inside the repo and can never come back clean.
+pgrep -f 'run-tests.sh|gate.sh' | while read -r p; do
+  [ "$p" = "$$" ] && continue
+  cwd=$(readlink "/proc/$p/cwd" 2>/dev/null) || continue
+  printf '%s %s\n' "$p" "$(git -C "$cwd" rev-parse --path-format=absolute \
+                            --git-common-dir 2>/dev/null)"
 done   # none may equal ~/workspace/devrc/.git
 ```
 
 ## The one link still untested
 The escrowed key was verified through the `bw` CLI **on this machine**. In a real disaster
 you would read that note from the **web vault on another device** and paste it into a file —
-a path that can silently mangle whitespace. Worth doing once at leisure: open the note at
-`https://vw.zacx.dev`, paste it into a scratch file, confirm 189 bytes / 3 lines.
+a path that can silently mangle whitespace. Worth doing once at leisure: open the note in
+the web vault, paste it into a scratch file, confirm 189 bytes / 3 lines.
 
-⚠ The `bw` CLI now points at `https://vw.zacx.dev`, not `vault.homelab.lan` — that LAN
-endpoint serves a cert-manager **self-signed placeholder** (`CN=selfsigned-ca`, empty
-subject) that Node rejects outright (`UNABLE_TO_VERIFY_LEAF_SIGNATURE`). Fixing the LAN
-cert is separate homelab breakage, unrelated to this work.
+⚠ `bw` is **not installed** — run it as `nix-shell -p bitwarden-cli jq --run '…'`. Its
+server was repointed from the internal LAN name to the externally-trusted one
+(`bw config server` shows the current value; the old one survives as a historical
+`byServer` entry). The LAN endpoint serves a cert-manager **self-signed placeholder**
+(`CN=selfsigned-ca`, empty subject) that Node rejects outright
+(`UNABLE_TO_VERIFY_LEAF_SIGNATURE`), so the CLI cannot talk to it at all. Fixing that cert
+is separate homelab breakage, unrelated to this work. Endpoints deliberately not named
+here — this repo is public.
