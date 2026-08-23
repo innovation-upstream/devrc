@@ -169,7 +169,10 @@ DEFAULT_TIMEOUT = 60.0
 # the failure message can hand it over instead of dying on FileNotFoundError.
 NIX_SHELL_HINT = "nix-shell -p bitwarden-cli jq --run '<command>'"
 
-_DIR_MODE = B._DIR_MODE      # 0700
+# 🔴 THERE IS DELIBERATELY NO `_DIR_MODE` ALIAS HERE. Directory mode is enforced
+# by `B._private_dir()`, which owns the number; re-exporting it would be a second
+# name for one constant, and an unused one at that. `_FILE_MODE` earns its keep
+# because `_create_private_file()` passes it to `os.open` and `os.fchmod`.
 _FILE_MODE = B._FILE_MODE    # 0600
 
 # --------------------------------------------------------------------------- #
@@ -974,61 +977,74 @@ def decrypt_check(*, escrow_bytes: bytes, work_dir: Path, bucket: str,
             with os.fdopen(_create_private_file(identity), "wb") as fh:
                 fh.write(escrow_bytes)
 
-            try:
-                with _decrypt_phase_probe(RV) as phase:
+            # 🔴 THE HANDLER LIVES INSIDE THE `with`, NOT AFTER IT — so `phase`
+            # is bound before the `try` is ever entered and CANNOT be read
+            # unbound. Written the other way round (handler outside the `with`)
+            # the only unbound path needed `__enter__` to raise
+            # `RestoreVerifyError`, which its setup cannot do — unreachable, and
+            # left alone it would have been an `UnboundLocalError` MASKING the
+            # real exception in the one classifier whose whole purpose is to stop
+            # confidently-wrong verdicts. A context manager's `__enter__` is a
+            # recurring blind spot in this subsystem (the sibling file's
+            # `MinioArchive.__enter__` was the same shape), so the class is
+            # removed by structure rather than argued away as unreachable.
+            with _decrypt_phase_probe(RV) as phase:
+                try:
                     v = RV.verify_artifact(
                         downloader, key, scope=scope, stamp=stamp,
                         identity=identity, work_dir=restore_dir, store=store,
                         keep=False, now=now, live_scope=live,
                         no_live_reason=no_live_reason)
-            except RV.RestoreVerifyError as exc:
-                # 🔴 CLASSIFIED BY THE PHASE THAT WAS OBSERVED, NOT BY A
-                # SUBSTRING. Each branch asserts only what `phase` actually
-                # witnessed; nothing here says "DECRYPTED" on a path where
-                # `decrypt()` was not reached, and nothing blames the escrow for
-                # a fault the escrow cannot have caused.
-                if not phase["reached"]:
-                    raise EscrowError(
-                        "ARTIFACT-UNREADABLE",
-                        f"the pipeline failed BEFORE the escrowed key was ever "
-                        f"used, on {key}: {exc} — an empty or unreadable object, "
-                        f"not a fact about the escrow. NOTHING here decrypted, "
-                        f"and nothing here is evidence for or against the "
-                        f"escrowed key. Run `restore-verify.py` to diagnose the "
-                        f"object.")
-                if not phase["returned"]:
-                    if phase["plain_present"]:
-                        # age exited 0 and produced an EMPTY plaintext. Measured:
-                        # a refusal leaves NO output file, so a file that exists
-                        # means the key opened it. restore-verify's own comment
-                        # at that branch says the same: "age reported success, so
-                        # this is not damage — it is a valid encryption of
-                        # nothing."
+                except RV.RestoreVerifyError as exc:
+                    # 🔴 CLASSIFIED BY THE PHASE THAT WAS OBSERVED, NOT BY A
+                    # SUBSTRING. Each branch asserts only what `phase` actually
+                    # witnessed; nothing here says "DECRYPTED" on a path where
+                    # `decrypt()` was not reached, and nothing blames the escrow
+                    # for a fault the escrow cannot have caused.
+                    if not phase["reached"]:
                         raise EscrowError(
-                            "ARTIFACT-EMPTY",
-                            f"the ESCROWED key OPENED {key} and the artifact "
-                            f"contains NOTHING: {exc}. 🔴 THE ESCROW IS FINE — "
-                            f"age reported success and produced an output file, "
-                            f"which a wrong key cannot do. Do NOT re-escrow or "
-                            f"rotate on the strength of this; the fault is a "
-                            f"valid encryption of an empty payload. Run "
-                            f"`restore-verify.py` to diagnose the artifact.")
+                            "ARTIFACT-UNREADABLE",
+                            f"the pipeline failed BEFORE the escrowed key was "
+                            f"ever used, on {key}: {exc} — an empty or "
+                            f"unreadable object, not a fact about the escrow. "
+                            f"NOTHING here decrypted, and nothing here is "
+                            f"evidence for or against the escrowed key. Run "
+                            f"`restore-verify.py` to diagnose the object.")
+                    if not phase["returned"]:
+                        if phase["plain_present"]:
+                            # age exited 0 and produced an EMPTY plaintext.
+                            # Measured: a refusal leaves NO output file, so a
+                            # file that exists means the key opened it.
+                            # restore-verify's own comment at that branch says
+                            # the same: "age reported success, so this is not
+                            # damage — it is a valid encryption of nothing."
+                            raise EscrowError(
+                                "ARTIFACT-EMPTY",
+                                f"the ESCROWED key OPENED {key} and the artifact "
+                                f"contains NOTHING: {exc}. 🔴 THE ESCROW IS FINE "
+                                f"— age reported success and produced an output "
+                                f"file, which a wrong key cannot do. Do NOT "
+                                f"re-escrow or rotate on the strength of this; "
+                                f"the fault is a valid encryption of an empty "
+                                f"payload. Run `restore-verify.py` to diagnose "
+                                f"the artifact.")
+                        raise EscrowError(
+                            "DECRYPT-FAILED",
+                            f"the ESCROWED bytes do NOT open {key}: {exc} — age "
+                            f"ran and REFUSED it, leaving no plaintext at all. "
+                            f"The escrow is present but it is not (or no longer) "
+                            f"a working identity for these artifacts. Nothing "
+                            f"here says the artifacts are damaged; the on-disk "
+                            f"key was not used.")
                     raise EscrowError(
-                        "DECRYPT-FAILED",
-                        f"the ESCROWED bytes do NOT open {key}: {exc} — age ran "
-                        f"and REFUSED it, leaving no plaintext at all. The "
-                        f"escrow is present but it is not (or no longer) a "
-                        f"working identity for these artifacts. Nothing here "
-                        f"says the artifacts are damaged; the on-disk key was "
-                        f"not used.")
-                raise EscrowError(
-                    "RESTORE-FAILED",
-                    f"the ESCROWED bytes DECRYPTED {key} — `decrypt()` RETURNED, "
-                    f"which is what makes that claim observable — and the "
-                    f"restore then failed: {exc}. This is a fault in the "
-                    f"ARTIFACT, not in the escrow. The escrowed key works; run "
-                    f"`restore-verify.py` to diagnose the artifact.")
-            return scope, key, v.commits_restored, v.refs_restored
+                        "RESTORE-FAILED",
+                        f"the ESCROWED bytes DECRYPTED {key} — `decrypt()` "
+                        f"RETURNED, which is what makes that claim observable — "
+                        f"and the restore then failed: {exc}. This is a fault in "
+                        f"the ARTIFACT, not in the escrow. The escrowed key "
+                        f"works; run `restore-verify.py` to diagnose the "
+                        f"artifact.")
+                return scope, key, v.commits_restored, v.refs_restored
         finally:
             # 🔴 EVERY PATH OUT: success, either classified failure, and any
             # unexpected exception from the pipeline. A failed run is exactly
