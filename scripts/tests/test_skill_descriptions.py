@@ -23,7 +23,7 @@ WHAT IS AND IS NOT MACHINE-CHECKABLE HERE
 -----------------------------------------
 "Is this description good routing surface?" is a judgement, and pretending
 otherwise would produce a guard that reads as coverage while providing none
-(`claude/RULES.md` -> "A guard's DESCRIPTION claims COVERAGE"). Three things ARE
+(`claude/RULES.md` -> "A guard's DESCRIPTION claims COVERAGE"). Four things ARE
 decidable, and only those are asserted:
 
   1. every shipped skill still HAS a parseable, non-empty description -- an entry
@@ -32,7 +32,44 @@ decidable, and only those are asserted:
      or dropped silently;
   3. `clickup` names its disambiguating siblings, AND each name it uses is a
      skill that actually exists, AND the ledger of them cannot drift from the
-     sentence in EITHER direction.
+     sentence in EITHER direction;
+  4. devrc's TOTAL listing cost does not regrow past a ratchet.
+
+WHY (4) EXISTS, AND WHAT IT DELIBERATELY DOES NOT CLAIM
+-------------------------------------------------------
+(2) is a PER-ENTRY cap; nothing measured the SUM, and the sum is what the 1%
+budget is spent against. Measured 2026-08-23 on the live workbench.
+
+🔴 CHARS ARE THE UNIT HERE, and they are exact -- the token column is an
+ESTIMATE and is labelled as one. It was produced with `tiktoken` cl100k_base,
+which is OPENAI's tokenizer, NOT Claude's; no Claude tokenizer is available on
+this host. Do not quote it as a Claude token count. It is carried only because
+it supplies the chars/token divisor, and the verdict below does not depend on
+that divisor being right:
+
+    devrc's 39 entries            14,792 chars   ~3,481 est. tok
+    the cloudflare plugin's 13      5,221 chars   ~1,132 est. tok  (NOT ours)
+    ---------------------------------------------------------------
+    disk-readable total            20,013 chars   ~4,613 est. tok
+    implied divisor                              4.34 chars/token (estimate)
+
+THE VERDICT IS TOKENIZER-INDEPENDENT, which is why it is stated as a break-even
+rather than as a token count. 1% of a 200,000-token context is 2,000 tokens, so
+fitting 20,013 exact chars into it requires a divisor of >10.0 chars/token. No
+tokenizer of natural language reaches half that -- real prose runs 3.5-4.5, and
+the estimate above lands mid-range at 4.34. So on a 200k context the listing is
+~2.3x over budget and CANNOT be re-tokenised into fitting: descriptions are
+being silently DROPPED today, starting with the skills invoked least. On a 1M
+context (10,000 tokens) the break-even runs the other way -- overflow would need
+a divisor BELOW 2.0 -- so it fits with room to spare. Built-in skills are not
+readable from disk and are ADDITIONAL, so 52 entries is a FLOOR, not the count.
+
+🔴 So this ceiling is NOT "the listing fits" -- it demonstrably does not on 200k,
+and a gate pinned at the real 200k budget would be permanently red, which
+`claude/RULES.md` says is worse than no gate. It is a RATCHET on the one number
+devrc controls: having paid to cut the total, we do not silently pay it back.
+Closing the remaining gap needs skills RETIRED or MERGED and/or the cloudflare
+plugin disabled -- operator calls, not something a test can make.
 
 (3) is a RELATIONSHIP, not a word: renaming or deleting any ledgered sibling
 turns it red, so the disambiguation cannot rot into a pointer at nothing. The
@@ -85,14 +122,42 @@ PER_ENTRY_CAP_CHARS = 1_536
 # high enough that a broken discovery path cannot pass.
 MIN_LISTING_ENTRIES = 30
 
-# The two skills deployed by `mkOutOfStoreSymlink` from `scripts/` instead of the
-# recursive `claude/skills` mapping (`nix/home.nix`; the same pair
-# `test_doc_path_rot.py` maps). They are listing entries like any other, so a
-# scan of `claude/skills/` alone measures 34 of 36 -- a count of DECLARATIONS
+# 🔴 THE RATCHET. devrc's listing entries summed to 14,792 chars at
+# 99b2636f; this PR's trims took it to 13,925 without dropping a trigger phrase
+# or a disambiguation clause. The ceiling sits ~250 chars above that measurement
+# -- deliberately less than one average entry (13,925 / 39 = 357), so a NEW skill
+# cannot be added without an eviction in the SAME commit. That is the same rule
+# `claude/RULES.md` and `scripts/browser-bridge/tests/test_skill_size.py` already
+# apply to the other two always-on documents.
+#
+# LOWER it when you cut; do NOT raise it to make a new description fit. The
+# eviction playbook is printed by the failing assertion below.
+LISTING_TOTAL_CEILING_CHARS = 14_175
+
+# The skills deployed by `mkOutOfStoreSymlink` from `scripts/` instead of by the
+# recursive `claude/skills` mapping (`nix/home.nix`). They are listing entries
+# like any other, so a scan of `claude/skills/` alone is a count of DECLARATIONS
 # rather than of INSTANCES. Their absence is a failure below, not a skip.
+#
+# 🔴 This list SHRANK silently once already: `scripts/opencode/SKILL.md` is
+# deployed to `~/.claude/skills/opencode/SKILL.md` by the same idiom and was
+# missing here, so this module measured 38 of 39 entries -- opencode's per-entry
+# cap and its parseability were never checked, and it was invisible to the total
+# below. Nothing failed; the gate simply covered less than its docstring claimed.
+# `test_the_out_of_tree_ledger_matches_nix_home` now pins the set two-way against
+# `nix/home.nix`, so a fourth one cannot arrive unmeasured.
 OUT_OF_TREE_SKILLS = (
     REPO_ROOT / "scripts" / "browser-bridge" / "SKILL.md",
     REPO_ROOT / "scripts" / "dl-router" / "SKILL.md",
+    REPO_ROOT / "scripts" / "opencode" / "SKILL.md",
+)
+
+# `nix/home.nix` is the only place that decides which out-of-tree files become
+# `~/.claude/skills/<x>/SKILL.md`. Read, never restated.
+HOME_NIX = REPO_ROOT / "nix" / "home.nix"
+HOME_NIX_SKILL_SOURCE = re.compile(
+    r'home\.file\."\.claude/skills/[^"]+/SKILL\.md"\.source\s*=\s*'
+    r'config\.lib\.file\.mkOutOfStoreSymlink\s*"\$\{workspace\}/devrc/([^"]+)"',
 )
 
 # The task-shaped siblings a bare "task"/"ticket" prompt could route to instead
@@ -199,6 +264,21 @@ def entry_chars(name: str, description: str) -> int:
     return len(name) + len(description)
 
 
+def listing_total_chars(entries) -> int:
+    """Direction 4: what the WHOLE listing costs, every session.
+
+    Factored out for the same reason as `over_cap` -- the controls below grade
+    THE GATE, not a second implementation of it.
+    """
+    return sum(entry_chars(name, desc) for _, name, desc in entries)
+
+
+def costliest(entries, n: int = 10) -> list[tuple[str, int]]:
+    """The n most expensive entries, largest first -- the eviction shortlist."""
+    return sorted(((name, entry_chars(name, desc)) for _, name, desc in entries),
+                  key=lambda pair: (-pair[1], pair[0]))[:n]
+
+
 def over_cap(entries) -> list[tuple[str, int]]:
     """Direction 1 of the gate, factored out so the controls below grade THE
     GATE rather than a re-implementation of it."""
@@ -248,6 +328,76 @@ def test_no_listing_entry_breaches_the_per_entry_cap():
         "taking its trigger keywords with it. Cut the description -- move the "
         "narrative into the body, which costs 0 until the skill is invoked. Do "
         "NOT raise PER_ENTRY_CAP_CHARS; it is an upstream limit, not our choice."
+    )
+
+
+def test_the_out_of_tree_ledger_matches_nix_home():
+    """🔴 SEAM guard, pinned two-way. The defect it closes was real and silent.
+
+    `OUT_OF_TREE_SKILLS` is a hand-maintained list of files that `nix/home.nix`
+    deploys into `~/.claude/skills/`. Nothing connected the two, so the list
+    could -- and did -- fall behind by one, leaving `opencode` unmeasured by
+    every check in this module while all of them stayed green.
+
+    Fails when the set GROWS (a new mkOutOfStoreSymlink skill nobody ledgered)
+    and when it SHRINKS (a ledger entry whose nix line is gone).
+    """
+    nix = HOME_NIX.read_text(encoding="utf-8")
+    from_nix = set(HOME_NIX_SKILL_SOURCE.findall(nix))
+    assert from_nix, (
+        f"the mkOutOfStoreSymlink pattern matched NOTHING in {HOME_NIX}. An "
+        "empty match set is not evidence of an empty ledger -- the deploy idiom "
+        "in home.nix has changed shape. Re-derive HOME_NIX_SKILL_SOURCE; do not "
+        "let this pass on a zero."
+    )
+    ledgered = {str(p.relative_to(REPO_ROOT)) for p in OUT_OF_TREE_SKILLS}
+    assert from_nix == ledgered, (
+        "OUT_OF_TREE_SKILLS and nix/home.nix disagree about which files ship as "
+        "~/.claude/skills/*/SKILL.md.\n"
+        f"  deployed by home.nix but NOT ledgered here (so this whole module "
+        f"silently skips them): {sorted(from_nix - ledgered)}\n"
+        f"  ledgered here but no longer deployed: {sorted(ledgered - from_nix)}\n"
+        "Update OUT_OF_TREE_SKILLS in the same commit."
+    )
+
+
+def test_the_listing_total_does_not_regrow_past_its_ratchet():
+    """🔴 The SUM, which the per-entry cap above structurally cannot see.
+
+    39 entries each comfortably under the 1,536-char per-entry cap still overrun
+    the 1%-of-context budget by ~2.3x on a 200k window -- so the per-entry check
+    can be green while descriptions are being dropped. See this module's
+    docstring for the measurement and for why this is a ratchet rather than a
+    gate on the real budget.
+    """
+    entries = _entries()
+    total = listing_total_chars(entries)
+    assert total <= LISTING_TOTAL_CEILING_CHARS, (
+        f"devrc's skill listing costs {total:,} chars across {len(entries)} "
+        f"entries, over the {LISTING_TOTAL_CEILING_CHARS:,}-char ratchet by "
+        f"{total - LISTING_TOTAL_CEILING_CHARS:,}.\n"
+        "This loads on EVERY session and overflows SILENTLY -- Claude Code drops "
+        "descriptions starting with the skills invoked LEAST, taking their "
+        "trigger keywords with them, with no error.\n"
+        "\nEVICTION PLAYBOOK -- do these in order, in THIS commit:\n"
+        "  1. Cut mechanism/implementation prose out of the costliest "
+        "descriptions below. A description is ROUTING SURFACE: the key use case, "
+        "the literal phrases Zach says, and the clause disambiguating it from a "
+        "sibling skill. How it works belongs in the body, which costs 0 until "
+        "the skill is invoked.\n"
+        "  2. Do NOT drop a trigger phrase or a disambiguation clause to fit -- "
+        "that trades a silent overflow for a silent mis-route.\n"
+        "  3. If you are ADDING a skill, pay for it by retiring one. Rank "
+        "candidates by cost-per-invocation, not by size: "
+        "`scripts/session-analysis/adoption-scan.py` for the tracked tools, and "
+        "the `claude`/`command` rows of `activity.events` for typed slash "
+        "commands. A skill nobody has invoked is the eviction; a skill invoked "
+        "constantly is not, however long its entry.\n"
+        "  4. Only when 1-3 are exhausted, LOWER nothing here -- raising "
+        "LISTING_TOTAL_CEILING_CHARS pays the cost back and is what this "
+        "constant exists to prevent.\n"
+        "\ncostliest entries now:\n"
+        + "\n".join(f"  {name:26} {n:,} chars" for name, n in costliest(entries))
     )
 
 
@@ -410,11 +560,67 @@ def test_control_a_skill_without_frontmatter_is_reported_not_skipped(tmp_path):
     assert parse_skill(no_desc) is None
 
 
+def test_control_the_total_ratchet_can_go_red():
+    """Can `listing_total_chars` see a regrowth at all?
+
+    Built from the REAL live entries plus ONE realistically-sized new skill --
+    not a synthetic wall of text -- because "someone adds a skill" is the exact
+    way this ceiling gets breached. The mutation is ISOLATED to the thing under
+    test: one extra entry, nothing else touched.
+    """
+    entries = _entries()
+    live_total = listing_total_chars(entries)
+    assert live_total <= LISTING_TOTAL_CEILING_CHARS, "live tree already red"
+
+    # A new entry the size of the current mean. It must be enough on its own to
+    # breach the ceiling -- if it is not, the ratchet has been left so slack that
+    # a whole skill can be added for free, which is the failure mode it exists
+    # to prevent.
+    mean = live_total // len(entries)
+    newcomer = ("fixture/SKILL.md", "a-new-skill", "x" * (mean - len("a-new-skill")))
+    assert entry_chars(newcomer[1], newcomer[2]) == mean
+    assert listing_total_chars(entries + [newcomer]) > LISTING_TOTAL_CEILING_CHARS, (
+        f"the ceiling has {LISTING_TOTAL_CEILING_CHARS - live_total} chars of "
+        f"headroom, enough to absorb a whole {mean}-char entry unnoticed. "
+        "Re-tighten LISTING_TOTAL_CEILING_CHARS to the current measurement plus "
+        "less than one average entry."
+    )
+
+
+def test_control_the_total_is_a_SUM_not_a_max():
+    """ISOLATED mutation guard. Every entry here is under the per-entry cap, so
+    `over_cap` stays empty -- only a real sum moves. Fixture values are pairwise
+    distinct AND distinct from the cap, so a mutant returning `max(...)`, the
+    count, or the cap constant cannot coincide with the right answer."""
+    fixture = [
+        ("a/SKILL.md", "aa", "x" * 300),
+        ("b/SKILL.md", "bbb", "x" * 500),
+        ("c/SKILL.md", "cccc", "x" * 700),
+    ]
+    assert over_cap(fixture) == []
+    assert listing_total_chars(fixture) == 302 + 503 + 704
+    assert listing_total_chars([]) == 0
+
+
+def test_control_costliest_ranks_by_cost_largest_first():
+    """The eviction shortlist must actually be the expensive end. Fixture is
+    supplied out of order and with a name long enough to change the ranking on
+    its own, so a mutant sorting by description length or by insertion order
+    lands on a different answer."""
+    fixture = [
+        ("mid/SKILL.md", "m", "x" * 400),
+        ("big/SKILL.md", "a-very-long-skill-name", "x" * 390),
+        ("small/SKILL.md", "s", "x" * 100),
+    ]
+    assert costliest(fixture, 2) == [("a-very-long-skill-name", 412), ("m", 401)]
+
+
 def test_control_the_module_measures_the_real_tree_not_a_fixture():
     """Cheap tripwire against this file drifting into self-referential green:
     the live entries must include skills this module never names."""
     names = {name for _, name, _ in _entries()}
-    for expected in ("clickup", "browser", "dl-router", "session-manager"):
+    for expected in ("clickup", "browser", "dl-router", "opencode",
+                     "session-manager"):
         assert expected in names, (
             f"`{expected}` is not in the scanned listing -- discovery is reading "
             "the wrong tree, or an out-of-tree skill stopped being picked up"

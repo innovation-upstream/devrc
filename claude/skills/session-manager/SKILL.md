@@ -1,6 +1,6 @@
 ---
 name: session-manager
-description: "Live cross-host view of every tmux window on workbench + laptop — which have Claude Code running, what each is doing, which ones are WAITING ON A HUMAN (asked a question / blocked on a modal / out of context), how stale it is, plus the clawgate approval queue and recent agent sessions from ClickHouse. JSON-first, read-only. Also reports UNSENT PROMPTS — text typed into a window and never sent — separately from the waiting signal. Use for: is anything waiting on me, active sessions, what's running where, tmux state across both hosts, cross-host session status, tail a tmux window, which windows are stale/idle/busy/blocked, did I leave anything half-typed / unsent."
+description: "Live cross-host view of every tmux window on workbench + laptop — which have Claude Code running, what each is doing, which ones are WAITING ON A HUMAN (asked a question / blocked on a modal / out of context), how stale it is, plus the clawgate approval queue, recent agent sessions, and UNSENT PROMPTS — text typed into a window and never sent. Use for: is anything waiting on me, active sessions, what's running where, tmux state across both hosts, cross-host session status, tail a tmux window, which windows are stale/idle/busy/blocked, did I leave anything half-typed / unsent."
 ---
 
 # session-manager — cross-host tmux + agent activity
