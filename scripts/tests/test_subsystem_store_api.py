@@ -285,6 +285,77 @@ def _comparable(headers: dict) -> tuple:
     )
 
 
+AUDIT_PREFIX = "store-api audit "
+
+
+class Drained:
+    """Everything a running store-api process has printed so far.
+
+    🔴 Keeps the FULL output, not just the audit lines. The audit subset is what
+    most assertions want, but at least one caller asserts that a credential
+    appears NOWHERE in stdout — a check that silently weakens if it is narrowed
+    to the audit lines, since a token leaked on a non-audit line would then pass.
+    """
+
+    def __init__(self) -> None:
+        self.all: list[str] = []
+
+    @property
+    def audit(self) -> "list[str]":
+        return [ln for ln in self.all if ln.startswith(AUDIT_PREFIX)]
+
+    @property
+    def text(self) -> str:
+        """The whole stream, for `x not in out` style assertions."""
+        return "\n".join(self.all)
+
+
+def drain_output(proc) -> Drained:
+    """Start draining a RUNNING process's stdout; returns the growing record.
+
+    🔴 THE RESPONSE DOES NOT IMPLY THE LOG LINE, and every test that reads audit
+    output has to be written around that. A handler writes its response and only
+    THEN calls `_audit()`, on a ThreadingHTTPServer — so `fetch`/`fetch_from`
+    returning means the response was written, not that the handler thread has
+    reached its `print`. Any test that calls `proc.terminate()` on the client's
+    return is racing the line it is about to assert on.
+
+    Draining also keeps the pipe buffer from becoming a SECOND timing
+    dependency. Teardown stays with `running_subprocess`.
+
+    History, and why this is a function rather than a fourth copy: #544 found the
+    race, measured it at 3/20 red locally plus two consecutive reds in the nix
+    sandbox, and fixed ONE site inline. The other two kept the defect and one of
+    them duly failed in CI on 2026-08-22 (`devrc-ci-jxf5j`) with
+    `IndexError: list index out of range` — an empty list indexed at [-1], on a
+    tree whose only change was to an unrelated test. That is the open-coded
+    predicate from claude/RULES.md: wrong at N-1 sites, and re-fixed one site at
+    a time until it is consolidated.
+    """
+    out = Drained()
+
+    def _run() -> None:
+        for raw in proc.stdout:                     # ends when the pipe closes
+            out.all.append(raw.rstrip("\n"))
+
+    threading.Thread(target=_run, daemon=True).start()
+    return out
+
+
+def await_audit(out: Drained, n: int, timeout: float = 15.0) -> "list[str]":
+    """Wait until at least `n` audit lines have been drained, then return them.
+
+    Waits on the OBSERVABLE condition, never on a sleep-and-hope. Returns
+    whatever it has at the deadline so the CALLER asserts — a wait helper that
+    raised its own error would report "timed out" where the caller's own
+    assertion ("expected 3 audit lines, got 2") is the useful message.
+    """
+    deadline = time.time() + timeout
+    while len(out.audit) < n and time.time() < deadline:
+        time.sleep(0.02)
+    return out.audit
+
+
 def tree_hash(root: Path) -> str:
     """Content + relative-path digest of a whole tree. Order-stable."""
     h = hashlib.sha256()
@@ -2545,15 +2616,16 @@ class TestTheDeployedEntrypoint:
         overlap it cannot tell you which credential a client actually used,
         which is the one fact that makes retiring the old one safe.
         """
+        # Drain and WAIT — a returned response does not imply its audit line.
+        # See `drain_output`.
         with running_subprocess(store, rotating_token_file) as (base, proc):
+            out = drain_output(proc)
             fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)
             fetch(f"{base}/api/v1/recall/{SCOPE}", token=SECOND_TOKEN)
             fetch(f"{base}/api/v1/recall/{SCOPE}", token="w" * 48)
-            proc.terminate()
-            stdout, _stderr = proc.communicate(timeout=15)
+            lines = await_audit(out, 3)
 
-        lines = [ln for ln in stdout.splitlines() if ln.startswith("store-api audit ")]
-        assert len(lines) == 3, f"expected 3 audit lines, got {len(lines)}: {stdout}"
+        assert len(lines) == 3, f"expected 3 audit lines, got {len(lines)}: {out.text}"
         assert f"token={api.token_id(GOOD_TOKEN)}" in lines[0]
         assert f"token={api.token_id(SECOND_TOKEN)}" in lines[1]
         assert api.token_id(GOOD_TOKEN) != api.token_id(SECOND_TOKEN)
@@ -2562,9 +2634,11 @@ class TestTheDeployedEntrypoint:
         assert "auth=fail" in lines[2] and "token=-" in lines[2]
         assert f"ip={CLIENT_IP}" in lines[2]
         assert "result=401" in lines[2]
-        # And never a credential, on any line.
-        assert GOOD_TOKEN not in stdout and SECOND_TOKEN not in stdout
-        assert "w" * 48 not in stdout
+        # And never a credential, on any line. 🔴 Asserted against the WHOLE
+        # stream (`out.text`), not the audit subset — a token leaked on a
+        # non-audit line must still fail this.
+        assert GOOD_TOKEN not in out.text and SECOND_TOKEN not in out.text
+        assert "w" * 48 not in out.text
 
 
 # =============================================================================
@@ -3745,41 +3819,20 @@ class TestTrustedProxyOverTheRealProcess:
         failed auth and gets a real lockout — of ITSELF. The property is only
         ever about WHOSE bucket.
         """
-        import time
-
         # 🔴 WAIT FOR THE AUDIT LINES; DO NOT ASSUME THE RESPONSE IMPLIES THEM.
-        # `_reject()` calls `self._unauthorized()` and only THEN `self._audit()`,
-        # and this is a ThreadingHTTPServer — so `fetch_from` returning means the
-        # response was written, NOT that the handler thread has reached its
-        # `print`. Terminating on the client's return therefore raced the 5th
-        # line and killed the process before it was emitted.
-        #
-        # Measured before this fix, on an UNMODIFIED tree: 3/20 red locally and
-        # two consecutive reds in the nix sandbox, always the same
-        # `assert 4 == 5` with four identical audit lines. It is a real race in
-        # the TEST, not in the server, and re-running it was the wrong answer:
-        # a ~15% flaky gate is the thing that teaches everyone to click through
-        # a red run.
-        #
-        # A reader thread drains stdout while the process runs, so the wait is
-        # on the OBSERVABLE condition. Draining also stops the pipe buffer from
-        # ever becoming a second timing dependency. Teardown in
-        # `running_subprocess` does the terminate/wait.
-        lines: list[str] = []
-
-        def _drain() -> None:
-            for raw in proc.stdout:                     # ends when the pipe closes
-                if raw.startswith("store-api audit "):
-                    lines.append(raw.rstrip("\n"))
-
+        # The measurement that found this race (#544): 3/20 red locally and two
+        # consecutive reds in the nix sandbox, always `assert 4 == 5` with four
+        # identical audit lines. Re-running was the wrong answer — a ~15% flaky
+        # gate is the thing that teaches everyone to click through a red run.
+        # The mechanism and the reason this is now shared rather than copied are
+        # on `drain_output`.
         with running_subprocess(
             store,
             token_file,
             trusted_proxies=f"{TRUSTED_PEER}/32",
             host=TRUSTED_PEER,
         ) as (base, proc):
-            reader = threading.Thread(target=_drain, daemon=True)
-            reader.start()
+            out = drain_output(proc)
             for _ in range(5):
                 fetch_from(
                     UNTRUSTED_PEER,
@@ -3788,9 +3841,7 @@ class TestTrustedProxyOverTheRealProcess:
                     token="w" * 48,
                     client_ip=SPOOF_IP,
                 )
-            deadline = time.time() + 15
-            while len(lines) < 5 and time.time() < deadline:
-                time.sleep(0.02)
+            lines = await_audit(out, 5)
         assert len(lines) == 5, lines
         # 🔴 THE ASSERTION THAT IS THE WHOLE DEFECT: the forged address never
         # becomes an identity. A fix that recorded the spoofed value but declined
@@ -3921,6 +3972,14 @@ class TestTrustedProxyOverTheRealProcess:
             trusted_proxies=f"{TRUSTED_PEER}/32",
             host=TRUSTED_PEER,
         ) as (base, proc):
+            # 🔴 THIS SITE IS WHY `drain_output` EXISTS. It used to terminate on
+            # the client's return and read the corpse's stdout, so a slow handler
+            # lost the line and `[...][-1]` raised `IndexError: list index out of
+            # range` — an index into an empty list, not a useful assertion.
+            # MEASURED 2026-08-22 on `devrc-ci-jxf5j`, in the nix sandbox, on a
+            # tree whose only change was to an unrelated test, while the same
+            # commit passed a local `nix build`.
+            out = drain_output(proc)
             code = fetch_from(
                 UNTRUSTED_PEER,
                 base,
@@ -3928,10 +3987,12 @@ class TestTrustedProxyOverTheRealProcess:
                 token=GOOD_TOKEN,
                 client_ip=SPOOF_IP,
             )
-            proc.terminate()
-            stdout, _err = proc.communicate(timeout=15)
+            lines = await_audit(out, 1)
         assert code == 200, code
-        line = [ln for ln in stdout.splitlines() if ln.startswith("store-api audit ")][-1]
+        assert lines, (
+            "no `store-api audit ` line within 15s of a 200 — the audit record is "
+            f"the property under test, so this is a real failure.\nstdout:\n{out.text}")
+        line = lines[-1]
         assert f"ip={UNTRUSTED_PEER}" in line, line
         assert f"ip={SPOOF_IP}" not in line, line
         assert "peer=untrusted" in line, line
