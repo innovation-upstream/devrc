@@ -531,7 +531,7 @@ again.
 | | flake | evidence | owner |
 |---|---|---|---|
 | 1 | the audit line does not exist yet when the client's response arrives | 9 fails / 43 runs under load, all the same `IndexError`; `devrc-ci-jxf5j` FAILED vs `devrc-ci-vl88r` SUCCEEDED on the **identical** revision `ba97a9d7` | **#740** |
-| 2 | `step-clone` exits 255 — no test runs at all | **4 of 75** gate taskruns (5.3%); check reads `fail` with `COULD NOT RUN: the gate stopped before this leg reported` | 🔴 **UNOWNED** |
+| 2 | a gate STEP is killed with exit 255 — no verdict is produced | **2 of 54** gate taskruns (4%) in an unperturbed window; check reads `fail` with `NOT RUN: the gate stopped before this leg reported` | 🟡 **UNOWNED, and smaller than first reported** |
 | 3 | `tree_hash` reads `.git/objects/maintenance.lock` after git deletes it | `devrc-ci-x9zkh`, on a PR touching neither the test nor the tool | **#743** |
 
 🔴 **They are one shape, not three accidents: a test observing a system that is
@@ -543,21 +543,47 @@ you doubt"*. Worth one deliberate sweep of the suite for that shape rather than
 finding them one CI run at a time; **not done**, and nobody should read this table
 as the closed set.
 
-🔴 **#2 is written up rather than chased, deliberately.** Its pod logs are
-garbage-collected by the time the failure is noticed, so there is no evidence left
-to diagnose; a Tekton retry would paper over it and the root cause would stay
-unknown. What matters is the number: **~5% of runs fail for reasons unrelated to
-the code.** Adding a retry is the obvious workaround and is NOT recommended
-without first learning why the clone dies.
+🔴 **RETRACTED, AND THE RETRACTION IS THE USEFUL PART. #2's rate was first written
+here as "4 of 75 (5.3%)". That number was measured over a window this session was
+itself saturating, and MOST of those failures were self-inflicted.**
 
-🔴 **What this does to the "make the checks REQUIRED" step — read this before
-running the branch-protection command.** Arming a check that fails ~1 run in 20 on
-infrastructure means roughly one PR in twenty is blocked by nothing, needing a
-manual re-run each time. That is the same mechanism as a permanently-red gate,
-intermittent instead of constant: it teaches everyone to click through a red run.
-It does **not** argue against arming them — it argues that "red" will not mean
-"broken code" until #740 and #743 land and #2 has an owner, and that whoever arms
-them should expect to want a re-run affordance on day one.
+```
+                        gate runs   steps killed with exit 255
+before this session's
+  push burst (03:20Z)       54          2   (4%)   <- the real background rate
+during / after it           34          8   (24%)  <- congestion, caused here
+```
+
+**Mechanism, measured not guessed:** every `devrc-ci` gate pod is pinned to ONE
+node by Tekton's affinity assistant (a shared workspace PVC). Five branches pushed
+in quick succession put five full pipeline runs on that one node — at 77% CPU
+requests / 237% limits, with 424 Completed and 97 Error pods resident — and the
+cluster began emitting `ExceededNodeResources: Insufficient resources to schedule
+pod`. Steps were then killed with exit 255, in `step-clone` AND `step-pytests`
+alike, which is why one signature appeared in two different places and read as two
+bugs. The queue drained; #632 immediately went green on both tiers. That recovery
+is itself the control: a code cause would not heal when the node emptied.
+
+🔴 **Two lessons, and the second is the transferable one.**
+  * *A rate measured over a window you are perturbing is a fact about you, not the
+    system* — `claude/RULES.md` → "a control that SHARES the step you doubt". The
+    load was mine and I reported it as a property of the CI tier.
+  * *Pushing N branches at once is not N independent actions here.* They serialise
+    onto one node, so a burst is a blast-radius action like `pkill -f`: **anyone
+    else's PR checks in that window were killed too.** Push, wait, push.
+
+**What survives:** a real background rate of ~4%, unowned, cause unknown — its pod
+logs are garbage-collected before anyone looks, so there is no evidence left to
+diagnose. A Tekton retry would hide it with the cause still unknown; named as a
+workaround, not recommended.
+
+🟡 **What this does to the "make the checks REQUIRED" step.** The earlier version of
+this paragraph argued against arming them on the strength of the inflated 5.3%.
+**That argument is withdrawn.** At ~4% background — roughly 1 PR in 25 needing a
+re-run — the case for arming the checks is materially stronger than this doc first
+claimed. It remains true that "red" will not mean "broken code" until #740 and
+#743 land, and that whoever arms them wants a re-run affordance on day one; it is
+no longer true that the flake rate is a reason to wait.
 
 ## Next steps (ranked) — rewritten 2026-08-22 after the four above were worked
 
