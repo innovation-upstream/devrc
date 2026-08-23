@@ -9,6 +9,25 @@ Deterministic check: given the N most recent comments not from you on your assig
 tasks, find the sessions that worked on those tasks, read the transcripts, and report
 what's done vs what's still open.
 
+## Run the cheap pass first — `clickup`'s `awaiting`
+
+🔴 **If the question is *which* tasks are waiting on you, this is the wrong tool.** The
+`clickup` skill answers that on its own, with no transcript reads:
+
+```bash
+node query.mjs awaiting        # from the clickup skill dir; --max bounds the fan-out
+```
+
+`awaiting` decides on ONE predicate — the newest comment on the task was not authored by
+the token owner — and sweeps the whole assigned queue in ~45s at one API request per
+task. It cannot tell you whether anything got *done*; that is the question this skill
+exists for, and answering it costs a transcript read per task.
+
+So: `awaiting` to get the list, this skill on the few entries that matter. The two are
+complementary, not alternatives, and the split is by QUESTION (which vs whether), not by
+speed. Running both does duplicate one ClickUp fan-out — step 1 below makes its own pass —
+which is cheap for a handful of tasks and wasteful across the whole queue.
+
 ## Quick start
 
 The scripts live in **devrc**, not in this deployed skill dir — `~/.claude/skills/` is a
