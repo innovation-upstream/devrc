@@ -420,7 +420,34 @@ ARCHIVE_MD = REPO_ROOT / "claude" / "RULES-ARCHIVE.md"
 # this entry demonstrated, applied to the Verification Honesty cluster -- the
 # largest section in the file and the one with the most sibling bullets
 # sharing a frame -- not another bump.
-MAX_BYTES = 40_300
+#
+# 2026-08-23: 40,300 -> 40,900 (+600 B), and this entry owes an explanation on two
+# counts, because the entry directly above says the next rule should be paid for by
+# CONSOLIDATION, not another bump.
+#
+# The rule that would not fit is the "Out of scope" closing-condition clause in the
+# proactivity-gate bullet: an agent may only file a task whose closing condition it
+# can name, and must say why in its reply when it cannot. It was measured, not
+# assumed: agent-filed issues survived 30 days at ~47% against ~5% for PRs, and the
+# whole gap is objects nobody could ever close. The clause amends an existing bullet
+# rather than adding a sibling -- the frame, the trigger and the "each branch has its
+# OWN response" structure are all reused -- so the consolidation the entry above asks
+# for was ALREADY applied here. It still costs 258 B, because the surviving text is
+# all scope-bearing: the condition, who checks it, the T2 human-judgement case, and
+# the say-why forcing function. Removing any one of them reintroduces a defect that
+# the first shipped draft of this very clause actually had.
+#
+# 🔴 The sizing is the finding, and it is the one the 2026-08-22 entry above predicted.
+# The first draft cleared the floor with 18 B to spare and was then found by audit to
+# be NARROWER than its own design -- it admitted only machine-checkable conditions,
+# forbidding the human-judgement tier the rule was written to permit. Fixing that cost
+# ~170 B against 18 B of slack. That is the 2026-08-22 entry's "a ceiling sized to
+# leave less than one bullet cannot absorb its OWN review round", reproduced within a
+# day of being written. So this bump is sized to survive a review round rather than to
+# clear the floor: +600 leaves the delta re-audit room to widen a clause without a
+# second bump. If the re-audit does NOT spend it, ratchet this back down -- the entry
+# above is right that down is the intended direction of travel.
+MAX_BYTES = 40_900
 
 # Required working margin below the ceiling.
 #

@@ -37,6 +37,7 @@ the last revision before the core/archive split.
 - [parsing-tool-output](#parsing-tool-output)
 - [isolation-seam](#isolation-seam)
 - [spelled-guards](#spelled-guards)
+- [dto-field-not-a-guard](#dto-field-not-a-guard)
 
 **Memory / Failure Investigation**
 - [stale-observation](#stale-observation)
@@ -45,6 +46,7 @@ the last revision before the core/archive split.
 **Deterministic Over Prose**
 - [consolidation-finds-bugs](#consolidation-finds-bugs)
 - [proactivity-gate](#proactivity-gate)
+- [object-leak](#object-leak)
 
 **Green Test Suite**
 - [merged-tree](#merged-tree)
@@ -1399,3 +1401,91 @@ against live `0.7.98` (deployment pin `harbor.homelab.lan/library/clawgate:0.7.9
   cannot reach a hook that carries no Forks (first bullet above). Two copies of that wrong
   citation shipped in this PR; one was retracted a round before the other, which is the
   "one rule, one place" bullet demonstrating itself.
+
+## dto-field-not-a-guard
+
+*Supports: "A field that exists in a DTO is not a guard — only a BRANCH on it is."*
+
+One payload's `notOwned` was declared in the consumer's own TypeScript type and never read.
+The not-owned case therefore rendered a full **zeroed dashboard presented as measured data** —
+every tile showing a real-looking 0 rather than an empty state. The trap is what the obvious
+fix would have bought: "just set the field correctly" upstream **would have changed nothing on
+screen**, because no code branched on it. A reviewer reading the type definition sees the case
+handled; only `git grep` over the consumers shows it is not.
+
+## object-leak
+
+*Supports: the "Out of scope" branch of "Default to PROCEEDING" — file the rest as a task only
+once you can name the closing condition that ends it and who or what checks it.*
+
+🔴 **This entry is deliberately RATIO-ONLY.** This repo is PUBLIC. The measurement was taken over
+a client's issue trackers, so the absolute volumes — backlog sizes, repo counts, per-repo names,
+PR throughput — are the client's operational data and are **not** reproduced here. They live in
+the private measurement record. Ratios and the shape of the finding are what the rule needs, and
+they are what is kept. Do not "restore" the raw figures into this file.
+
+**The measurement (2026-08-23).** Complete enumeration — not sampled — of every open issue and
+PR across the tracked GitHub org and the linked ClickUp workspace. Two instruments (paginated
+enumeration vs the search API) agreed exactly on all four GitHub probes.
+
+**The leak is ISSUES, not PRs.** 30-day survival — created in the window, still open — was
+**~47%** for issues against **~5%** for PRs: a **9× gap**, reaching ~69% in the worst single
+repo. PRs close fine; each merged PR then spawns follow-up issues that never close. Of the open
+issues carrying an in-repo `#N`, **42%** pointed at an **already-merged** PR — and reading the
+bodies showed the reference is *provenance* ("Follow-up from PR #186, merged as 56ddc64a"), not
+fix-linkage. Under **3%** of open issues used closing language at all.
+
+⚠ **State the growth claim precisely — an imprecise version of it shipped and was caught in
+audit.** **96% of the 90-day NET GROWTH in open issues landed in the last 30 days.** That is a
+claim about *growth*, NOT about the standing backlog: the 30-day cohort is only ~36% of open
+issues. "Nearly the whole backlog appeared in a month" is the wrong sentence and was retracted.
+
+**Duplication was NOT the channel, against expectation.** ~2% near-duplicate titles on GitHub
+once one release-bot loop is excluded (that loop is in a *different* owner's namespace, so it
+does not touch the survival denominators above), 2.6% on the ClickUp engineering board, and
+**zero** exact duplicate titles anywhere. A dedup-first design had been drafted and was cut on
+this measurement. Cross-system linkage was effectively absent in both directions — well under 1%
+of open objects on each side referenced the other.
+
+**Why the rule is prose rather than a hook.** There is no codified session `gh issue create`
+path to instrument — zero occurrences across the deployed skills and scripts of either repo;
+the only hits are a permission-deny list and a hook test fixture. Session-filed issues come from
+ad-hoc agent behaviour, so **the reader of this rule IS the producer**. The one existing
+client-side gate of this shape (clawgate's `## Acceptance criteria` PreToolUse hook) was tested
+with positive *and* negative controls: it classifies only ONE of the several producer paths that
+can create a task, has **zero** server-side enforcement, and is walked around by ordinary HTTP
+clients other than the one it recognises. (The specific bypass set is deliberately not enumerated
+here — public repo.) A hook is a backstop for this class, never the mechanism.
+
+**The tiers, for deciding what a condition buys — and note the rule admits T1 AND T2.** T1
+deterministic (a merged PR, a cleared alert, a command exiting 0, a metric under threshold) —
+auto-closable by a reconciler. T2 evidential (needs a transcript or diff read, i.e. a *named human
+judgement*) — filed, then proposed for approval, never auto-closed. T3 none — **may not create an
+object at all**; T3 is the only tier the rule forbids, and where most of the leak stops.
+🔴 The first shipped draft of the rule said "machine-checkable", which forbids T2 as well, and an
+audit caught it. If the core rule ever narrows back to mechanical checks only, it has re-acquired
+that defect — the archive is not consulted to decide whether a rule applies, so the core's own
+wording has to carry the T2 case.
+
+**Stamping — IN FLIGHT, not shipped.** An `agent/<producer>` label plus a body marker are proposed
+for the in-cluster GitHub producers and the single ClickUp create choke point (PRs open, not
+merged, at time of writing; the marker grammar lands with the ClickUp one). Until they merge there
+is no format an agent can follow, which is why the core rule does **not** instruct anyone to stamp.
+Before that work, **3** open GitHub objects carried any fingerprint marker — all three from one
+producer — and **zero** ClickUp tasks did, a zero validated against a synthetic control (the same
+pattern matched a planted marker, and descriptions do carry a literal `<`, so a real one would
+have been visible).
+
+**What is NOT established, and bounds how far this goes.** Agent authorship of *issues* is
+bounded, not measured: the Claude Code footer lands on PR bodies (93 of 97 hits) and essentially
+never on issue bodies (4 of 97), and the ClickUp API token resolves to a *human* identity, so
+agent-filed tasks are indistinguishable from hand-typed ones. A structural fingerprint was tried
+and discarded — it flagged 31 of 74 known-human bug reports, ~42% false positive against a
+known-human control. Linkage rates are **upper bounds**: bodies only, with comments, timeline
+cross-reference events and the sidebar Development link unread. And the regime is ~1 month old,
+so any cohort deeper than 30 days describes a different system than the one running now.
+
+🔴 **A retracted reading, recorded so it is not re-derived.** Those 46 issues referencing a
+merged PR were first read as "done but never closed". That was **wrong** — reading the bodies
+showed the references are provenance. Whether any open object is still *relevant* was never
+measured; this work measured age and linkage only, never staleness of content.
