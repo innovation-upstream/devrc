@@ -58,11 +58,14 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
 import time
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = REPO_ROOT / "scripts"
@@ -1055,10 +1058,17 @@ def _plant_repo_local_keys(scratch: Path, *pairs: tuple[str, str]) -> str:
 
     Same no-shebang convention as `_plant_repo_local_write` above, and for the
     same reason: `run-tests.sh` invokes SHELL_TESTS as `bash "$SHELL_TEST"`.
+
+    🔴 BOTH SIDES GO THROUGH `shlex.quote`. They were interpolated bare, which
+    was correct for the values in use and silently wrong for anything carrying
+    a space, a glob or a `!` — the planter would then write something other
+    than what its caller asked for and the test would pass or fail for a reason
+    nobody could see. `submodule.<n>.update = !cmd` is exactly such a value.
     """
     name = "g10-write-keys.sh"
     body = "set -euo pipefail\n" + "".join(
-        f'git -C "{scratch}" config {k} {v}\n' for k, v in pairs)
+        f'git -C {shlex.quote(str(scratch))} config {shlex.quote(k)} '
+        f'{shlex.quote(v)}\n' for k, v in pairs)
     (scratch / name).write_text(body, encoding="utf-8")
     return name
 
@@ -1244,6 +1254,326 @@ def test_the_DOWNGRADED_block_also_carries_the_key_delta(tmp_path):
         f"the downgrade block did not say WHICH key moved:\n{block}")
     assert "SHAPE: ORDINARY GIT" in block, (
         f"the downgrade block did not classify the delta's shape:\n{block}")
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE #773 AUDIT ROUND — the reassuring lead was reachable from three states
+# --------------------------------------------------------------------------- #
+# The first cut of the lead selection branched on `hazard` alone, so BOTH other
+# states fell through to "THE TARGET NAMED HERE IS THE WINDOW, NOT A CULPRIT":
+#
+#   * a MIXED run, where a GLOBAL file also changed. `_nogit_shape_for` returns
+#     `none` for a global file — there are no key rows for one — so the shape
+#     aggregation structurally could not see it, and the one class that is
+#     ALWAYS attributable got the excuse. The comment above the loop claimed the
+#     opposite of what the code did.
+#   * an UNRECOGNISED delta, which the classifier's own header says must be
+#     "ranked as NEITHER". It fired on `devrc-g10.planted` — this file's own
+#     fixture for a test escaping isolation — printing "NOT A CULPRIT" directly
+#     above "this run cannot rank the two hypotheses".
+#
+# The audit's mutation sweep also found two advertised arms unpinned: deleting
+# the whole `remote.*.url|pushurl` hazard clause SURVIVED, and flipping the
+# `unrecognised` fall-through to `ordinary` SURVIVED. Both are covered below.
+
+def test_a_MIXED_global_and_repo_local_delta_leads_with_the_GLOBAL_class(tmp_path):
+    """🔴 REGRESSION for #773's first audit finding. RED at a7499d67.
+
+    A target that writes `core.hooksPath` into a scratch `~/.gitconfig` AND one
+    `branch.*` key into the clone. The global write is attributable by
+    construction — no concurrent worktree operation touches the operator's
+    global config — so the lead must send the reader at the target, not excuse
+    it. Before this round the very same run led with NOT A CULPRIT.
+    """
+    scratch = _scratch_root(tmp_path)
+    home = tmp_path / "scratch-home"
+    home.mkdir(parents=True, exist_ok=True)
+    (home / ".gitconfig").write_text("[user]\n\tname = before\n", encoding="utf-8")
+    name = "g10-mixed.sh"
+    (scratch / name).write_text(
+        "set -euo pipefail\n"
+        f'git -C "{scratch}" config branch.topic-m.remote origin\n'
+        "env -u GIT_CONFIG_GLOBAL -u GIT_CONFIG_SYSTEM -u GIT_CONFIG_NOSYSTEM "
+        f'HOME="{home}" git config --global core.hooksPath /tmp/planted-by-a-test\n',
+        encoding="utf-8")
+    runner = _runner_over(tmp_path, scratch, [name])
+
+    env = {**os.environ, **_unguarded_home(tmp_path), "HOME": str(home)}
+    for k, v in list(env.items()):
+        if v is None:
+            del env[k]
+    proc = subprocess.run(["bash", str(runner), str(scratch)], capture_output=True,
+                          text=True, timeout=900, cwd=str(REPO_ROOT), env=env)
+    out = proc.stdout + proc.stderr
+    assert proc.returncode != 0, f"a mixed global + repo-local run PASSED:\n{out}"
+
+    block = _guard10_failure_block(out)
+    assert block, f"GUARD 10's failure block was not printed at all:\n{out}"
+    # Positive control: BOTH classes really are in this failure. Without it a
+    # green here could just mean the global write never landed.
+    assert "global-enforced" in block, (
+        f"the global write never reached the failure — this run is not the "
+        f"mixed case it claims to measure:\n{block}")
+    assert "repo-local-enforced" in block, (
+        f"the repo-local write never reached the failure:\n{block}")
+    assert "GLOBAL ONE, WHICH *IS* ATTRIBUTABLE" in block, (
+        f"the mixed run did not lead with the attributable class:\n{block}")
+    assert "AUDIT THIS TARGET FIRST" in block, (
+        f"the mixed run did not send the reader at the target:\n{block}")
+    assert "WINDOW, NOT A CULPRIT" not in block, (
+        f"the mixed run excused the target while the operator's GLOBAL config "
+        f"was being rewritten — this is #773's first audit finding:\n{block}")
+
+
+def test_an_UNRECOGNISED_delta_is_ranked_as_NEITHER_in_the_HEADLINE(tmp_path):
+    """🔴 REGRESSION for #773's second audit finding. RED at a7499d67.
+
+    `_nogit_delta_shape`'s header says an unknown key "must not be laundered
+    into 'probably concurrent'". The per-file line honoured that; the HEADLINE
+    did not, so the two contradicted each other on the same screen — and the
+    key that triggers it here is `devrc-g10.planted`, this file's own model of a
+    fixture write escaping isolation.
+    """
+    scratch = _scratch_root(tmp_path)
+    name = _plant_repo_local_write(scratch)          # writes devrc-g10.planted
+    runner = _runner_over(tmp_path, scratch, [name])
+
+    proc = _run_at(runner, scratch, tmp_path)
+    out = proc.stdout + proc.stderr
+    assert proc.returncode != 0, f"an unrecognised repo-local delta PASSED:\n{out}"
+
+    block = _guard10_failure_block(out)
+    assert block, f"GUARD 10's failure block was not printed at all:\n{out}"
+    assert "+ devrc-g10.planted" in block, (
+        f"the failure did not name the key that moved:\n{block}")
+    assert "SHAPE: UNRECOGNISED" in block, (
+        f"an unknown key was classified rather than declined:\n{block}")
+    assert "CANNOT RANK THE TWO HYPOTHESES" in block, (
+        f"the headline ranked a delta the classifier declined to rank:\n{block}")
+    assert "WINDOW, NOT A CULPRIT" not in block, (
+        f"the headline handed the reader the reassuring lead over an "
+        f"unrecognised key — this is #773's second audit finding:\n{block}")
+
+
+@pytest.mark.parametrize("key,value", [
+    ("remote.origin.url", "https://example.invalid/x"),
+    ("remote.origin.pushurl", "https://example.invalid/y"),
+    ("remote.origin.uploadpack", "/tmp/planted-uploadpack"),
+    ("remote.origin.receivepack", "/tmp/planted-receivepack"),
+    ("submodule.mod.update", "!/tmp/planted-update"),
+])
+def test_remote_and_submodule_COMMAND_and_URL_keys_rank_HAZARD(tmp_path, key, value):
+    """🔴 THE ARM THE AUDIT'S SWEEP FOUND UNPINNED — one case per key.
+
+    🔴 THE PARAMS SPLIT INTO TWO DIFFERENT CLAIMS AND THE LABEL MATTERS.
+    MEASURED at a7499d67: `url` and `pushurl` PASS there, the other three FAIL.
+
+      * `uploadpack`, `receivepack`, `submodule.<n>.update` are REGRESSION
+        coverage. They ranked ORDINARY at a7499d67 — the reassuring arm — while
+        being exactly the arbitrary-command-execution keys a test escaping
+        isolation would write. `remote.*` was an unanchored prefix.
+      * `url` and `pushurl` are MUTATION coverage, NOT regression coverage. The
+        hazard clause already covered them; deleting it whole nonetheless
+        SURVIVED the previous round's suite, because the only test that wrote
+        such a key asserted the key name and the redaction and never the shape.
+        Counting these two as regression coverage would be a coverage claim
+        nobody measured.
+
+    Parametrized so a single surviving key cannot hide behind its siblings.
+    """
+    scratch = _scratch_root(tmp_path)
+    name = _plant_repo_local_keys(scratch, (key, value))
+    runner = _runner_over(tmp_path, scratch, [name])
+
+    proc = _run_at(runner, scratch, tmp_path)
+    out = proc.stdout + proc.stderr
+    assert proc.returncode != 0, f"a {key} write PASSED:\n{out}"
+
+    block = _guard10_failure_block(out)
+    assert block, f"GUARD 10's failure block was not printed at all:\n{out}"
+    assert f"+ {key}" in block, (
+        f"the failure did not name {key}:\n{block}")
+    assert "SHAPE: HAZARD" in block, (
+        f"{key} was not ranked as a hazard — it names a remote or executes a "
+        f"command, and nothing routine writes it into an existing clone:\n{block}")
+    assert "WINDOW, NOT A CULPRIT" not in block, (
+        f"{key} got the reassuring lead:\n{block}")
+
+
+def test_a_key_with_a_SPACE_survives_the_fold_and_still_ranks_HAZARD(tmp_path):
+    """🔴 A git key can contain a SPACE, and the fold used to eat it.
+
+    `[remote "my name"]` is legal — `git config 'remote.my name.url' <u>` exits
+    0 — and `git submodule add <url> "my dir"` produces the same shape. Folding
+    the `--list -z` output on a SPACE truncated the key to `remote.my`: a key
+    that does not exist, ungreppable, and one the `remote\\..*\\.url$` hazard
+    clause cannot match. The single key this guard names as the token-bearing
+    hazard was the one a space defeated.
+    """
+    scratch = _scratch_root(tmp_path)
+    name = "g10-spacekey.sh"
+    (scratch / name).write_text(
+        "set -euo pipefail\n"
+        f"git -C \"{scratch}\" config 'remote.my name.url' "
+        "'https://example.invalid/spaced'\n",
+        encoding="utf-8")
+    runner = _runner_over(tmp_path, scratch, [name])
+
+    proc = _run_at(runner, scratch, tmp_path)
+    out = proc.stdout + proc.stderr
+    # Positive control: git really accepted the spaced subsection, so a pass
+    # below is about the fold and not about a write that never happened.
+    assert "my name" in (scratch / ".git" / "config").read_text(encoding="utf-8"), (
+        "git did not write the spaced subsection — this run proves nothing")
+    assert proc.returncode != 0, f"a spaced-key write PASSED:\n{out}"
+
+    block = _guard10_failure_block(out)
+    assert block, f"GUARD 10's failure block was not printed at all:\n{out}"
+    assert "+ remote.my name.url" in block, (
+        f"the key was truncated at its space instead of printed whole:\n{block}")
+    assert "SHAPE: HAZARD" in block, (
+        f"a spaced remote URL key escaped the hazard rule:\n{block}")
+
+
+def test_a_LARGE_delta_still_reaches_the_hazard_arm(tmp_path):
+    """🔴 SIGPIPE + `set -o pipefail` silently sent every large delta to the
+    REASSURING arm. RED at a7499d67.
+
+    `printf '%s\\n' "$delta" | grep -q …`: `grep -q` exits on the first match,
+    `printf` then takes SIGPIPE (141), and `pipefail` reports the PIPELINE as
+    141 — so the `if` goes FALSE even though the pattern matched. Both greps
+    fell through and `_nogit_delta_shape` returned `ordinary`. The audit
+    measured the cliff between 5001 lines (still correct) and 8001 (wrong),
+    reproducible 10/10; herestrings remove the pipeline entirely.
+
+    🔴 THE HAZARD KEY MUST SORT EARLY, and getting that wrong is how this test
+    first shipped green at base while proving nothing. `_nogit_key_delta` ends
+    in `sort -k2`, so a `core.*` key lands AFTER 15000 `bigsect.*` lines —
+    `grep -q` then reads almost the whole input, never exits early, and the
+    SIGPIPE never happens. Measured: that version PASSED at a7499d67. The key
+    here is `alias.*` — also in the hazard set, and it sorts before everything
+    else in the fixture, so `grep -q` matches on the first line and abandons
+    ~300 KB of unread input. That is the shape the bug needs.
+    """
+    scratch = _scratch_root(tmp_path)
+    name = "g10-bigdelta.sh"
+    cfg = scratch / ".git" / "config"
+    (scratch / name).write_text(
+        "set -euo pipefail\n"
+        f'cfg={shlex.quote(str(cfg))}\n'
+        '{ echo "[alias]"; echo "\tplantedcmd = !/tmp/planted-by-a-test"\n'
+        '  echo "[bigsect]"\n'
+        '  i=0; while [ "$i" -lt 15000 ]; do echo "\tkey$i = v$i"; i=$((i+1)); done\n'
+        '} >> "$cfg"\n',
+        encoding="utf-8")
+    runner = _runner_over(tmp_path, scratch, [name])
+
+    proc = _run_at(runner, scratch, tmp_path)
+    out = proc.stdout + proc.stderr
+    # Positive control: the delta really is past the cliff, so a pass below is
+    # about the pipeline and not about a fixture that stayed small.
+    entries = cfg.read_text(encoding="utf-8").count("key")
+    assert entries >= 15000, (
+        f"the fixture only produced {entries} keys — too small to reach the "
+        f"measured SIGPIPE cliff, so this run proves nothing")
+    assert proc.returncode != 0, f"a 15000-key config delta PASSED:\n{out[-3000:]}"
+
+    block = _guard10_failure_block(out)
+    assert block, f"GUARD 10's failure block was not printed at all:\n{out[-3000:]}"
+    assert "+ alias.plantedcmd" in block, (
+        f"the hazard key was not listed among the 15000:\n{block[:2000]}")
+    assert "SHAPE: HAZARD" in block, (
+        f"an alias.* write at the head of a large delta was ranked as "
+        f"something other than a hazard — SIGPIPE swallowed the match:"
+        f"\n{block[:2000]}")
+    assert "WINDOW, NOT A CULPRIT" not in block, (
+        f"a large delta carrying an alias.* command got the reassuring lead:"
+        f"\n{block[:2000]}")
+
+
+def test_a_LARGE_unrecognised_delta_is_not_flattened_to_ORDINARY(tmp_path):
+    """🔴 THE MIRROR OF THE TEST ABOVE, AND THE SWEEP IS WHY IT EXISTS.
+
+    `_nogit_delta_shape` has TWO `grep -q` calls and the test above only reaches
+    the first. Mutating the SECOND back to `printf | grep -q` SURVIVED a fully
+    green run: nothing exercised a large delta that gets PAST the hazard arm.
+
+    That path is the more dangerous one. `grep -qv ORDINARY` matches on the
+    first non-ordinary line, `printf` takes SIGPIPE, `pipefail` reports 141, the
+    `if` goes false and the function falls through to `ordinary` — so a delta of
+    15000 keys the classifier does not recognise would be announced as ordinary
+    git activity with the target ranked SECOND. Unknown keys laundered into the
+    reassuring arm, in bulk.
+
+    `aaasect.*` is neither ordinary nor hazard and sorts first, so the `-qv`
+    match happens on line one and abandons the rest.
+    """
+    scratch = _scratch_root(tmp_path)
+    name = "g10-bigunknown.sh"
+    cfg = scratch / ".git" / "config"
+    (scratch / name).write_text(
+        "set -euo pipefail\n"
+        f'cfg={shlex.quote(str(cfg))}\n'
+        '{ echo "[aaasect]"\n'
+        '  i=0; while [ "$i" -lt 15000 ]; do echo "\tkey$i = v$i"; i=$((i+1)); done\n'
+        '} >> "$cfg"\n',
+        encoding="utf-8")
+    runner = _runner_over(tmp_path, scratch, [name])
+
+    proc = _run_at(runner, scratch, tmp_path)
+    out = proc.stdout + proc.stderr
+    entries = cfg.read_text(encoding="utf-8").count("key")
+    assert entries >= 15000, (
+        f"the fixture only produced {entries} keys — too small to reach the "
+        f"measured SIGPIPE cliff, so this run proves nothing")
+    assert proc.returncode != 0, f"a 15000-key config delta PASSED:\n{out[-3000:]}"
+
+    block = _guard10_failure_block(out)
+    assert block, f"GUARD 10's failure block was not printed at all:\n{out[-3000:]}"
+    assert "+ aaasect.key0" in block, (
+        f"the unknown keys were not listed:\n{block[:2000]}")
+    assert "SHAPE: UNRECOGNISED" in block, (
+        f"15000 unknown keys were classified as something the runner claims to "
+        f"recognise — the ordinary grep's match was swallowed:\n{block[:2000]}")
+    assert "CANNOT RANK THE TWO HYPOTHESES" in block, (
+        f"the headline ranked a delta of unknown keys:\n{block[:2000]}")
+
+
+def test_the_shape_ledger_is_pinned_two_way():
+    """🔴 THE CLASSIFIER'S TWO SETS ARE A LEDGER, not prose plus a regex.
+
+    Same shape this repo already uses for `EXPECTED_PLUGINS`, `TARGET_FLOORS`
+    and drift-check's phase-2 reason tokens. The sets decide which writes get
+    the reassuring headline, so silently widening `ordinary` — or narrowing
+    `hazard` — must fail the suite, not merely change a message nobody reads
+    until the next incident.
+
+    Both directions: a token added to the runner and not here fails, and a
+    token removed from the runner while still listed here fails.
+    """
+    src = RUN_TESTS.read_text(encoding="utf-8")
+
+    def _assignment(name: str) -> str:
+        m = re.search(rf"^{name}='([^']*)'$", src, re.M)
+        assert m, (
+            f"{name} is not a single-quoted one-line assignment in "
+            f"run-tests.sh any more — this ledger cannot read it, so it is "
+            f"pinning nothing. Re-point it or restore the shape.")
+        return m.group(1)
+
+    assert _assignment("NOGIT_HAZARD_KEYS") == (
+        r"^[+~-] (core|user|url|http|credential|include|includeif|alias)\."
+        r"|^[+~-] (remote|submodule)\..*\.(url|pushurl|uploadpack|receivepack|proxy|update)$"
+    ), ("the HAZARD key set moved. Every key it drops starts getting the "
+        "'concurrent writer is the leading hypothesis' headline instead of "
+        "'AUDIT THIS TARGET FIRST'. Update this ledger in the SAME commit, and "
+        "add a behavioural case for the new key.")
+
+    assert _assignment("NOGIT_ORDINARY_KEYS") == (
+        r"^[+~-] (branch|remote|worktree|submodule|maintenance)\."
+        r"|^[+~-] extensions\.worktreeconfig$"
+    ), ("the ORDINARY key set moved. Every key it gains gets the reassuring "
+        "headline. Update this ledger in the SAME commit.")
 
 
 def test_a_global_change_FAILS_even_with_a_cotenant_PROVEN(tmp_path):

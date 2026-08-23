@@ -152,7 +152,20 @@ _emit_verdict() {
     echo "RESULT: FAIL (exit=$rc)"
   fi
 }
-_on_exit() { _emit_verdict "$?"; }
+# 🔴 THE VERDICT FIRST, THEN THE SHREDDER. `NOGIT_DIR` holds GUARD 10's
+# key snapshots, which are full `key<TAB>value` dumps of the operator's REAL git
+# config — `remote.origin.url` included, which can carry a token. The normal
+# path removes it at the end of the accounting; this covers the paths that never
+# reach there (TERM, INT, an unset-variable abort under `set -u`). It is guarded
+# on the variable being set because the trap is installed long before it exists,
+# and `|| true` because a cleanup failure must never change the exit status the
+# verdict just announced.
+_on_exit() {
+  local rc=$?
+  _emit_verdict "$rc"
+  [ -n "${NOGIT_DIR:-}" ] && rm -rf "$NOGIT_DIR" 2>/dev/null || true
+  return 0
+}
 trap '_on_exit' EXIT
 # Without these, a TERM/INT (a `timeout`, a Ctrl-C, an OOM kill) bypasses the
 # EXIT trap in bash and the run ends with no verdict at all — the truncation
@@ -2153,16 +2166,34 @@ _nogit_repo_local_index() { # $1 = path -> its slot in NOGIT_REPO_LOCAL, or noth
 # `<git-common-dir>/config` legitimately holds `remote.origin.url`, which on some
 # clones carries a token, and this output lands in CI logs. The rendering below
 # prints the left-hand side of each entry and nothing else; a VALUE-ONLY change
-# still surfaces, as `~ <key>`, with the value itself never leaving this file.
+# still surfaces, as `~ <key>`, with the value never reaching stdout or stderr.
+#
+# 🔴 BE PRECISE ABOUT WHERE THE VALUES DO GO — an earlier wording here said "the
+# value itself never leaving this file", which was not true. The before/after
+# SNAPSHOTS under `$NOGIT_DIR` are full `key<TAB>value` dumps of the operator's
+# real config. They are 0700 (`mktemp -d`), they are never read except by the
+# key diff, and they are removed by the EXIT trap — which is where the cleanup
+# had to move, because the normal-path `rm -rf` alone left them behind on every
+# TERM/INT/abort. Not printed is not the same claim as not written down.
 #
 # `--list -z` rather than plain `--list`: with `-z` git separates ENTRIES with
 # NUL and key from value with a newline, so a multi-line config value cannot
 # masquerade as extra entries. Folding it back to one line per entry keeps the
 # diff a line diff.
-_nogit_config_entries() { # $1 = path -> "<key> <value…>", one per entry, sorted
+# 🔴 THE FOLD SEPARATOR IS A TAB, NOT A SPACE, AND THAT IS LOAD-BEARING. A git
+# key can legally contain a SPACE — `[remote "my name"]` gives `remote.my
+# name.url`, and `git submodule add <url> "my dir"` writes `submodule.my
+# dir.url`. Splitting the key off at the first SPACE truncated those to
+# `remote.my`: a key that does not exist, ungreppable, and — worse — one the
+# hazard rule's `remote\..*\.url$` clause cannot match, so the single key this
+# guard names as the token-bearing hazard was the one a space defeated. Found by
+# the #773 audit, measured end to end. A TAB cannot appear in the key here
+# because that is what we split on; a subsection containing a literal tab would
+# truncate, which is noted and not defended against.
+_nogit_config_entries() { # $1 = path -> "<key>\t<value…>", one per entry, sorted
   [ -f "$1" ] || return 0
   git config --file "$1" --list -z 2>/dev/null \
-    | tr '\n' ' ' | tr '\0' '\n' | LC_ALL=C sort
+    | tr '\n' '\t' | tr '\0' '\n' | LC_ALL=C sort
 }
 # $1 = before-snapshot file, $2 = after-snapshot file -> "<sign> <key>" lines.
 #   +  the key is new       -  the key is gone       ~  its value moved
@@ -2171,7 +2202,7 @@ _nogit_config_entries() { # $1 = path -> "<key> <value…>", one per entry, sort
 # what decides whether anything changed at all, and it saw the bytes.
 _nogit_key_delta() {
   LC_ALL=C awk '
-    function key(l) { sub(/ .*$/, "", l); return l }
+    function key(l) { sub(/\t.*$/, "", l); return l }
     NR == FNR { b[$0] = 1; next }
     { a[$0] = 1 }
     END {
@@ -2186,33 +2217,58 @@ _nogit_key_delta() {
 # 🔴 THE SHAPE VERDICT RANKS TWO HYPOTHESES; IT NEVER CLEARS THE TARGET.
 # $1 = the "<sign> <key>" lines -> one of: ordinary | hazard | unrecognised
 #
-#   hazard   any `core.*` / `user.*` / `url.*` / `http.*` / `credential.*` /
-#            `include*` / `alias.*` key, PLUS `remote.<name>.url|pushurl`. That
-#            is the 2026-08-21 incident's own shape (`core.hooksPath` --global,
-#            `core.bare = true` on a populated tree, ~63 fixture commits pushed
-#            to the REAL origin); nothing routine rewrites these in an existing
-#            clone. Hazard WINS over ordinary in a mixed delta — the safe
-#            direction, and the reason `remote.<name>.url` is HERE while the
-#            rest of `remote.*` is below: `git remote add` in a test is how a
-#            fixture reaches a real remote, and no ordinary session rewrites an
-#            established clone's origin URL mid-run.
-#   ordinary `branch.*` / `remote.*` (except the two above) / `worktree.*` /
+#   hazard   `core.*` / `user.*` / `url.*` / `http.*` / `credential.*` /
+#            `include*` / `alias.*`, PLUS any `remote.*`/`submodule.*` key
+#            ending in `url` / `pushurl` / `uploadpack` / `receivepack` /
+#            `proxy` / `update`. Two families, one reason. The first is the
+#            2026-08-21 incident's own shape (`core.hooksPath` --global,
+#            `core.bare = true` on a populated tree). The second is every
+#            `remote.*`/`submodule.*` key that names a REMOTE or a COMMAND —
+#            `uploadpack`, `receivepack`, `proxy` and `submodule.<n>.update`
+#            all execute a command, and the URL pair is how a fixture reaches a
+#            real remote. Nothing routine rewrites any of them in an existing
+#            clone. Hazard WINS over ordinary in a mixed delta.
+#   ordinary `branch.*` / the rest of `remote.*` / `worktree.*` / the rest of
 #            `submodule.*` / `maintenance.*` / `extensions.worktreeconfig`, and
 #            nothing else. These are what `git branch`, `checkout -b`,
-#            `push -u`, `worktree add` and `maintenance start` write. A hermetic
-#            test works under a tmpdir and has no route to them in the
-#            operator's real clone.
+#            `push -u`, `worktree add` and `maintenance start` write.
+#            ⚠ NOT A CLEAN SET, and the ORDINARY text printed to the reader says
+#            so: `push -u` writes `branch.<n>.remote`/`.merge`, and pushing ~63
+#            fixture commits to the real origin was HALF of the 2026-08-21
+#            incident. The two windows can land in different targets, so a
+#            `branch.*` row elsewhere in the same run is not independent of a
+#            `core.*` row here.
 #   unrecognised  anything else, including an empty delta. Ranked as NEITHER —
-#            an unknown key must not be laundered into "probably concurrent".
+#            an unknown key must not be laundered into "probably concurrent",
+#            and the HEADLINE honours that too (see `_tshape` below; it did not
+#            in the first cut, which is what the #773 audit caught).
+#
+# 🔴 HERESTRINGS, NOT `printf | grep -q` — MEASURED, 10/10 REPRODUCIBLE.
+# `grep -q` exits on the first match, `printf` then takes SIGPIPE (141), and
+# `set -o pipefail` reports the PIPELINE as 141, so the `if` goes FALSE. Above
+# ~5000 delta lines both greps fell through and every large delta scored
+# `ordinary` — the reassuring arm, always in the wrong direction. Latent rather
+# than live (the operator's clone holds ~590 entries), and one character to fix.
+#
+# 🔴 THE TWO SETS ARE A LEDGER, PINNED TWO-WAY by
+# `test_nogit_isolation.py::test_the_shape_ledger_is_pinned_two_way`. They are
+# the ONLY definition — the prose above describes them and does not duplicate
+# them. Editing either regex without editing the test fails the suite, which is
+# the point: a classifier that silently widens its `ordinary` set widens the
+# set of writes that get the reassuring headline.
+NOGIT_HAZARD_KEYS='^[+~-] (core|user|url|http|credential|include|includeif|alias)\.|^[+~-] (remote|submodule)\..*\.(url|pushurl|uploadpack|receivepack|proxy|update)$'
+NOGIT_ORDINARY_KEYS='^[+~-] (branch|remote|worktree|submodule|maintenance)\.|^[+~-] extensions\.worktreeconfig$'
 _nogit_delta_shape() {
   local delta="$1"
   [ -n "$delta" ] || { printf 'unrecognised'; return 0; }
-  if printf '%s\n' "$delta" \
-     | grep -qiE '^[+~-] (core|user|url|http|credential|include|includeif|alias)\.|^[+~-] remote\..*\.(url|pushurl)$'; then
+  # `-i` on the hazard grep and not on the ordinary one is deliberate, not an
+  # oversight: git lower-cases section and variable names in `--list` output, so
+  # neither NEEDS it — but the two arms fail in opposite directions, and the one
+  # that must not miss is the hazard arm.
+  if grep -qiE "$NOGIT_HAZARD_KEYS" <<<"$delta"; then
     printf 'hazard'; return 0
   fi
-  if printf '%s\n' "$delta" \
-     | grep -qvE '^[+~-] (branch|remote|worktree|submodule|maintenance)\.|^[+~-] extensions\.worktreeconfig$'; then
+  if grep -qvE "$NOGIT_ORDINARY_KEYS" <<<"$delta"; then
     printf 'unrecognised'; return 0
   fi
   printf 'ordinary'
@@ -2509,7 +2565,15 @@ _nogit_account() {
     _nogit_cotenancy_probe "$t"
     [ "$NOGIT_EV_STATUS" = "proven" ] && proven=1
   fi
-  local idx delta
+  # 🔴 THE KEY DELTA'S WINDOW IS WIDER THAN THE FINGERPRINT'S, and on the box
+  # this change exists for that gap is not theoretical. `keys-before` is taken
+  # just AFTER the before-fingerprint, and `keys-after` just after the
+  # after-fingerprint AND after `_nogit_cotenancy_probe` (bounded by
+  # `timeout 60`). A concurrent write landing inside either gap is therefore
+  # either invisible to the diff — rendering as the `?` row below, which is why
+  # that row exists — or folded into it. Measured sub-second in practice; worst
+  # case 60s. It cannot affect the VERDICT, only which keys are named.
+  local idx delta line
   for path in ${CHANGED[@]+"${CHANGED[@]}"}; do
     if _nogit_is_repo_local "$path"; then
       if [ "$proven" -eq 1 ]; then
@@ -3307,6 +3371,10 @@ _nogit_render_keys() {
       printf '%s  real clone, so the LEADING hypothesis is a concurrent git command in\n' "$pad"
       printf '%s  another worktree or session, and the target above is the SECOND. This\n' "$pad"
       printf '%s  is a RANKING, not a verdict — this run proved neither.\n' "$pad"
+      printf '%s  ⚠ NOT A CLEAN SET: "push -u" writes branch.<n>.remote/.merge too, and\n' "$pad"
+      printf '%s    pushing fixture commits to the real origin was HALF of 2026-08-21.\n' "$pad"
+      printf '%s    If any OTHER target in this run shows a core.*/user.*/url.* row,\n' "$pad"
+      printf '%s    read the two together — they can land in different windows.\n' "$pad"
       ;;
     hazard)
       printf '%s→ SHAPE: HAZARD. At least one key above is the 2026-08-21 incident'"'"'s own\n' "$pad"
@@ -3316,8 +3384,16 @@ _nogit_render_keys() {
       printf '%s  AUDIT THE TARGET FIRST. Still a ranking, not a verdict.\n' "$pad"
       ;;
     *)
-      printf '%s→ SHAPE: UNRECOGNISED. The keys above match neither the ordinary-git set\n' "$pad"
-      printf '%s  nor the known-hazard set, so this run cannot rank the two hypotheses.\n' "$pad"
+      if [ -n "$delta" ]; then
+        printf '%s→ SHAPE: UNRECOGNISED. The keys above match neither the ordinary-git set\n' "$pad"
+        printf '%s  nor the known-hazard set, so this run cannot rank the two hypotheses.\n' "$pad"
+      else
+        # "The keys above" was printed over a listing with no keys in it — only
+        # the NOT VISIBLE line. Small, and exactly the kind of sentence a reader
+        # scrolls back up to look for.
+        printf '%s→ SHAPE: UNRECOGNISED. There is no key delta to classify at all (see the\n' "$pad"
+        printf '%s  NOT VISIBLE line above), so this run cannot rank the two hypotheses.\n' "$pad"
+      fi
       printf '%s  Do not read that as either one.\n' "$pad"
       ;;
   esac
@@ -3373,9 +3449,20 @@ for entry in ${NOGIT_SEEN[@]+"${NOGIT_SEEN[@]}"}; do
   if [ "$gchanged" -gt 0 ]; then
     changed_names=""
     _tshape="none"
+    _thas_global=0
     while IFS=$'\t' read -r _ct _ccls _cpath; do
       [ -n "$_cpath" ] || continue
       changed_names+="             $_cpath  [$_ccls]"$'\n'
+      # 🔴 THE GLOBAL CLASS IS TRACKED SEPARATELY, AND THE #773 AUDIT IS WHY.
+      # `_nogit_shape_for` returns `none` for a global file — there are no key
+      # rows for one — so the shape aggregation below CANNOT see it. The first
+      # cut of this loop therefore let a mixed run (a `core.hooksPath` write to
+      # `~/.gitconfig` PLUS one `branch.*` key in the clone) print "THE TARGET
+      # NAMED HERE IS THE WINDOW, NOT A CULPRIT" over the one class that is
+      # ALWAYS attributable — and over the 2026-08-21 incident's own file. The
+      # comment here claimed the opposite of what the code did. Measured end to
+      # end by the audit; this flag is the fix.
+      [ "$_ccls" = "global-enforced" ] && _thas_global=1
       # Aggregate the worst shape across this target's changed files, hazard
       # first. It picks the LEAD SENTENCE below, so a mixed run must lead with
       # the accusatory one — under-warning is the expensive direction here.
@@ -3397,7 +3484,13 @@ for entry in ${NOGIT_SEEN[@]+"${NOGIT_SEEN[@]}"}; do
     # The cause differs by class, and the old single sentence was a confident
     # misdiagnosis for the repo-local one: it sent the reader to audit a target
     # that had done nothing (#730).
-    if printf '%s' "$changed_names" | grep -q 'repo-local-enforced'; then
+    # 🔴 A HERESTRING, and `-F` on a fixed token. `printf | grep -q` takes
+    # SIGPIPE under `pipefail` on a large input and reports the pipeline as 141
+    # — see the measurement in `_nogit_delta_shape`'s header — and this string
+    # grew by the whole key rendering in this change, so it moved closer to that
+    # cliff. Getting it wrong here swaps the repo-local message for the global
+    # one, which is the same misdiagnosis in a third place.
+    if grep -qF 'repo-local-enforced' <<<"$changed_names"; then
       # 🔴 STATE WHAT THE PROBE MEASURED, NOT AN INFERENCE FROM IT. This used to
       # read "no live process outside its own lineage sits in that repository",
       # which the probe cannot support: `live_cotenants` roots at the git dir
@@ -3420,10 +3513,24 @@ for entry in ${NOGIT_SEEN[@]+"${NOGIT_SEEN[@]}"}; do
       # both with "not a culprit" would under-warn on the one that IS the
       # incident. The window caveat is stated in every arm regardless — it is a
       # fact about the file, not about the shape.
-      if [ "$_tshape" = "hazard" ]; then
+      #
+      # 🔴 FOUR ARMS, NOT TWO, AND THE #773 AUDIT IS WHY. The first cut branched
+      # on `hazard` alone, so BOTH remaining states fell into the reassuring
+      # lead: a run that also touched a GLOBAL file (always attributable), and a
+      # delta this classifier explicitly declined to rank. The second was the
+      # sharper failure — it fired on `devrc-g10.planted`, which is this repo's
+      # OWN fixture for a test escaping isolation, and printed "NOT A CULPRIT"
+      # directly above "this run cannot rank the two hypotheses". The reassuring
+      # lead is now reachable ONLY from `ordinary` with no global file present;
+      # every other state gets a lead that ranks the target or ranks nothing.
+      if [ "$_thas_global" -eq 1 ]; then
+        nogit_lead="🔴 AND ONE OF THE FILES BELOW IS A GLOBAL ONE, WHICH *IS* ATTRIBUTABLE: no concurrent worktree operation writes the operator's global git config, so whatever reached it did so from inside this run. AUDIT THIS TARGET FIRST, starting with the [global-enforced] file. The window caveat below applies to the repo-local file only."
+      elif [ "$_tshape" = "hazard" ]; then
         nogit_lead="🔴 AND THE KEY DELTA BELOW POINTS AT THIS TARGET: it carries a key of the 2026-08-21 incident's own shape, which nothing routine writes into an existing clone. AUDIT THIS TARGET FIRST. The window caveat still applies and is stated below, but do not start there."
-      else
+      elif [ "$_tshape" = "ordinary" ]; then
         nogit_lead="🔴 THE TARGET NAMED HERE IS THE WINDOW, NOT A CULPRIT: that file is shared by every worktree of the clone, and any concurrent 'git branch' / 'checkout -b' / 'push -u' / 'worktree add' / 'maintenance start' in ANY of them rewrites it while this run is going."
+      else
+        nogit_lead="🔴 AND THIS RUN CANNOT RANK THE TWO HYPOTHESES: the key delta below matches neither the ordinary-git set nor the known-hazard set (or no key-level delta was visible at all), so DO NOT read the target as excused and DO NOT read it as accused. Start with the discriminators printed beside the file."
       fi
       nogit_why="A repo-local one is a write to <git-common-dir>/config, which GIT_CONFIG_GLOBAL does not govern at all. $nogit_lead This run FOUND NO PROOF of another writer, so the delta is REPORTED AGAINST whatever happened to be running — the probe only asks whether a live process outside this run's own lineage has its cwd inside the git dir or its parent, so a session sitting in a SIBLING worktree of the same clone is invisible to it. Read the key delta beside the file below BEFORE auditing any test. A global one is different and IS attributable: it reached the operator's file some other way — code that removes GIT_CONFIG_GLOBAL from its own environment."
     else
