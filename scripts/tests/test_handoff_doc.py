@@ -117,7 +117,36 @@ UPDATE_DOC = f"""## State now
 # Hermetic git: the sandbox and the dev host must behave the same, so no global
 # or system config (a stray `core.hooksPath` or `commit.gpgsign` would otherwise
 # decide whether these tests can commit at all).
-GIT_ENV = {"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null"}
+# 🔴 BACKGROUND GIT MAINTENANCE IS PINNED OFF, AND THAT IS WHAT MAKES
+# `tree_hash` HONEST. That function hashes every file under the repo root
+# INCLUDING `.git`, deliberately — a stray lockfile is signal, not noise, because
+# it is how you catch the tool writing something it should not. But git also
+# creates and deletes `.git/objects/maintenance.lock` on its own, from a
+# `gc --auto` fired by an ordinary command; when that happened between
+# `rglob` listing the file and `read_bytes` reading it, the walk died on
+#
+#     FileNotFoundError: …/work/.git/objects/maintenance.lock
+#
+# Measured in CI (`devrc-ci-x9zkh`, on a PR touching neither this file nor the
+# tool). Filtering `.git` out of the hash would have "fixed" it by deleting the
+# guard's whole point, so the SOURCE of the transience is removed instead: with
+# maintenance and gc pinned off, the only lock that can ever appear under a
+# fixture repo is one the code under test created — which is exactly what
+# `tree_hash` is watching for.
+#
+# It lives in GIT_ENV rather than in each `git init` because there are five of
+# those and the next fixture would silently be the sixth. Both `_sh` and
+# `run_tool` pass this env, so it reaches the TOOL's git calls too, not just the
+# fixtures' — and env vars are inherited, so any git the tool spawns gets it.
+GIT_ENV = {
+    "GIT_CONFIG_GLOBAL": "/dev/null",
+    "GIT_CONFIG_SYSTEM": "/dev/null",
+    "GIT_CONFIG_COUNT": "2",
+    "GIT_CONFIG_KEY_0": "maintenance.auto",
+    "GIT_CONFIG_VALUE_0": "false",
+    "GIT_CONFIG_KEY_1": "gc.auto",
+    "GIT_CONFIG_VALUE_1": "0",
+}
 
 
 def _sh(*args: str, cwd: Path) -> str:
@@ -142,6 +171,49 @@ def tree_hash(root: Path) -> str:
         h.update(path.read_bytes())
         h.update(b"\0")
     return h.hexdigest()
+
+
+def test_git_maintenance_cannot_fire_inside_a_fixture_repo(repo: Path):
+    """🔴 THE REGRESSION GUARD FOR `tree_hash`'s FileNotFoundError.
+
+    `tree_hash` hashes `.git` on purpose, so it can only stay honest if git is
+    not concurrently creating and deleting lock files under it. This asserts the
+    pin is REACHING a real git process launched the way this module launches
+    them — not merely that the constant is spelled correctly, which a dict
+    literal cannot get wrong in an interesting way.
+
+    The negative control is the load-bearing half: it re-runs the same query with
+    ONLY the `GIT_CONFIG_COUNT` injection removed — `GIT_CONFIG_GLOBAL` and
+    `GIT_CONFIG_SYSTEM` stay pinned at `/dev/null`, so exactly one variable
+    moves. If git defaulted these off by itself, the assertions above would pass
+    while proving nothing, and this control is what tells them apart.
+    """
+    # `--default ''` so an UNSET key exits 0 and returns empty, instead of exit 1
+    # killing the call inside `_sh`'s own `returncode == 0` assert. Without it a
+    # broken pin fails with "('git','config',…) failed:" — a message about the
+    # helper, not about maintenance being armed.
+    def _cfg(key: str) -> str:
+        return _sh("git", "config", "--get", "--default", "", key, cwd=repo).strip()
+
+    assert _cfg("maintenance.auto") == "false", (
+        "background git maintenance is NOT pinned off in a fixture repo, so "
+        "`gc --auto` can create and delete .git/objects/maintenance.lock mid-walk "
+        "and `tree_hash` will die on FileNotFoundError"
+    )
+    assert _cfg("gc.auto") == "0", "gc.auto is not pinned off in a fixture repo"
+
+    without_injection = {
+        k: v for k, v in dict(os.environ, **GIT_ENV).items()
+        if not k.startswith(("GIT_CONFIG_COUNT", "GIT_CONFIG_KEY", "GIT_CONFIG_VALUE"))
+    }
+    probe = subprocess.run(
+        ["git", "-C", str(repo), "config", "--get", "maintenance.auto"],
+        capture_output=True, text=True, env=without_injection,
+    )
+    assert probe.returncode != 0, (
+        "git reports maintenance.auto without our injection, so the assertions "
+        f"above are about a git default rather than about GIT_ENV: {probe.stdout!r}"
+    )
 
 
 @pytest.fixture()
