@@ -972,10 +972,15 @@ def main(argv: list[str] | None = None) -> int:
 
     bw = BitwardenCLI(bw=args.bw, timeout=args.timeout)
 
+    # `source`, not `bucket`: with `--from-dir` it is a local directory, and a
+    # NO-ARTIFACT message naming a bucket nobody queried would send the reader
+    # to look in the wrong place. Same convention as restore-verify.py.
+    source = str(args.from_dir) if args.from_dir is not None else args.bucket
+
     def _go(work: Path | None) -> EscrowVerdict:
         return run(bw=bw, identity=identity, item_name=args.item_name,
                    expect_server=args.expect_server, decrypt=args.decrypt,
-                   bucket=args.bucket, prefix=prefix, store=args.store,
+                   bucket=source, prefix=prefix, store=args.store,
                    scope_filter=args.scope, from_dir=args.from_dir,
                    work_dir=work)
 

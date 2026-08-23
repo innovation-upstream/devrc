@@ -32,6 +32,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import shlex
 import shutil
 import stat
 import subprocess
@@ -50,6 +51,11 @@ sys.path.insert(0, str(SCRIPTS / "analyze-service-index"))
 sys.path.insert(0, str(SCRIPTS))
 
 import backup as B  # noqa: E402
+
+# 🔴 ONE PLACE OWNS THE RUNTIME SHEBANG. See `_bw_stub` — and
+# `scripts/tests/test_runtime_shebangs.py`, which fails the suite if this file
+# writes one of its own.
+from testlib import mockbin  # noqa: E402
 
 
 def _load(name: str, path: Path):
@@ -1046,6 +1052,60 @@ def test_a_NAMED_scope_with_no_artifacts_is_NO_ARTIFACT(escrow_world):
     assert ei.value.token == "NO-ARTIFACT"
 
 
+def test_decrypt_check_works_against_a_LOCAL_DIRECTORY_of_artifacts(escrow_world,
+                                                                    tmp_path):
+    """SECRETS.md's restore recipe fetches objects to disk first, so verifying
+    what is on disk is the natural next step — and it is the only decrypt-check
+    path that can be exercised without a cluster.
+
+    No `downloader_factory` here: this drives the REAL `--from-dir` reader
+    (`restore_verify.DirectoryStore`), so the wiring is measured rather than
+    stubbed out by the same seam every other test uses.
+    """
+    root = tmp_path / "fetched"
+    for k, v in escrow_world["objects"].items():
+        p = root / k
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(v)
+    v = EV.run(bw=_cli(FakeBw(items=[_item(notes=escrow_world["note"])])),
+               identity=escrow_world["identity"], item_name=ITEM, decrypt=True,
+               bucket=str(root), prefix=PREFIX, store=escrow_world["store"],
+               from_dir=root, work_dir=escrow_world["work"], now=NOW)
+    assert v.decrypt_key == KEY_DELTA_NEW
+    assert v.decrypt_commits == 3
+    assert _work_contents(escrow_world["work"]) == []
+
+
+def test_a_from_dir_NO_ARTIFACT_message_names_the_DIRECTORY_not_a_bucket(escrow_world,
+                                                                        tmp_path):
+    """🔴 A MESSAGE THAT NAMES THE WRONG PLACE SENDS THE READER TO THE WRONG
+    PLACE. Under `--from-dir` the source is a local directory; printing the
+    default bucket name would describe a query nobody made."""
+    empty = tmp_path / "fetched-empty"
+    empty.mkdir()
+    with pytest.raises(EV.EscrowError) as ei:
+        EV.run(bw=_cli(FakeBw(items=[_item(notes=escrow_world["note"])])),
+               identity=escrow_world["identity"], item_name=ITEM, decrypt=True,
+               bucket=str(empty), prefix=PREFIX, store=escrow_world["store"],
+               from_dir=empty, work_dir=escrow_world["work"], now=NOW)
+    assert ei.value.token == "NO-ARTIFACT"
+    assert str(empty) in str(ei.value)
+    assert EV.DEFAULT_BUCKET not in str(ei.value)
+
+
+def test_the_CLI_passes_the_from_dir_through_as_the_SOURCE(tmp_path):
+    """The same fact through `main()`'s own argument plumbing — the place the
+    bucket-vs-directory substitution actually lives."""
+    empty = tmp_path / "cli-fetched-empty"
+    empty.mkdir()
+    p = _run_cli(tmp_path, _plan(items=[_item()]),
+                 "--decrypt-check", "--from-dir", str(empty),
+                 "--host", HOST, "--store", str(tmp_path / "no-store"))
+    assert p.returncode == EV.EXIT_CODES["NO-ARTIFACT"], (p.stdout, p.stderr)
+    assert str(empty) in p.stderr
+    assert EV.DEFAULT_BUCKET not in p.stderr
+
+
 def test_a_store_that_cannot_be_OPENED_is_STORE_UNREACHABLE(escrow_world):
     """Classified by PHASE, not by parsing somebody else's error text."""
     class Boom:
@@ -1178,8 +1238,11 @@ def test_shred_removes_the_file_and_never_raises_on_an_absent_one(tmp_path):
 # --------------------------------------------------------------------------- #
 # 13. the CLI — real argv, real exit codes, a real `bw` process
 # --------------------------------------------------------------------------- #
-BW_STUB = '''#!/usr/bin/env python3
-"""A synthetic `bw`. Answers from a JSON script; never touches a real vault."""
+BW_STUB_BODY = '''
+"""A synthetic `bw`. Answers from a JSON plan; never touches a real vault.
+
+Deliberately carries NO shebang of its own — see `_bw_stub` below.
+"""
 import json, os, sys
 plan = json.load(open(os.environ["FAKE_BW_PLAN"]))
 args = [a for a in sys.argv[1:] if a != "--nointeraction"]
@@ -1194,13 +1257,45 @@ sys.exit(entry["rc"])
 
 
 def _bw_stub(tmp_path: Path, plan: dict) -> tuple[Path, Path]:
+    """An executable synthetic `bw` on disk, plus the JSON plan it answers from.
+
+    🔴 THE SHEBANG IS `testlib.mockbin`'s, NOT THIS FILE'S. A stub written at
+    runtime with `#!/usr/bin/env python3` execs fine on the NixOS dev host and
+    ENOENTs inside the nix build sandbox, which is the AUTHORITATIVE tier — the
+    two-tier hazard, and the reason `mockbin` exists at all rather than a sixth
+    hand-rolled copy of the rule. So the Python body is a plain `.py` file with
+    no shebang, and the executable is a POSIX-sh shim that execs the RUNNING
+    interpreter by absolute path.
+    """
+    body = tmp_path / "bw_stub_body.py"
+    body.write_text(BW_STUB_BODY, encoding="utf-8")
     stub = tmp_path / "bw-stub" / "bw"
     stub.parent.mkdir(parents=True, exist_ok=True)
-    stub.write_text(BW_STUB, encoding="utf-8")
-    stub.chmod(0o755)
+    mockbin.write_exec(
+        stub,
+        f"exec {shlex.quote(sys.executable)} {shlex.quote(str(body))} \"$@\"\n")
     planfile = tmp_path / "bw-plan.json"
     planfile.write_text(json.dumps(plan), encoding="utf-8")
     return stub, planfile
+
+
+def test_the_bw_STUB_really_execs_and_can_REFUSE(tmp_path):
+    """POSITIVE + NEGATIVE CONTROL for the stub every CLI test below runs.
+
+    A stub that cannot exec would make each CLI assertion a statement about a
+    process that never started — and in the nix sandbox that is exactly how a
+    `/usr/bin/env` shebang fails. So: it runs, it answers a modelled command,
+    and it exits 99 on one it does not model instead of inventing a reply."""
+    stub, planfile = _bw_stub(tmp_path, _plan(items=[_item()]))
+    env = dict(os.environ)
+    env["FAKE_BW_PLAN"] = str(planfile)
+    good = subprocess.run([str(stub), "--nointeraction", "status"],
+                          capture_output=True, text=True, env=env)
+    assert good.returncode == 0, good.stderr
+    assert json.loads(good.stdout)["status"] == "unlocked"
+    bad = subprocess.run([str(stub), "--nointeraction", "sync"],
+                         capture_output=True, text=True, env=env)
+    assert bad.returncode == 99, (bad.returncode, bad.stdout, bad.stderr)
 
 
 def _plan(*, status: str = "unlocked", items: list | None = None,
