@@ -1,6 +1,6 @@
 ---
 name: ux-audit-loops
-description: "Run the re-runnable naida + vetr UX-audit harnesses — walk the app's funnel, screenshot every view, capture console/network/axe findings, optionally draft vision-LLM UX notes, then re-run to verify. Local-only. Use for: UX-audit or QA-sweep naida or vetr, \"make ux-audit\", the funnel review, the hermetic vetr e2e stack. One-off sweep of any app -> `ux-sweep`; hosted crawler -> `auditloop`."
+description: "Run the re-runnable naida + vetr UX-audit harnesses — walk the app's funnel, screenshot every view, capture console/network/axe findings, then re-run to verify. Local-only. Use for: UX-audit or QA-sweep naida or vetr, \"make ux-audit\", the funnel review, the hermetic vetr e2e stack. One-off sweep of any app -> `ux-sweep`; hosted crawler -> `auditloop`."
 ---
 
 # UX-audit loops (naida + vetr)

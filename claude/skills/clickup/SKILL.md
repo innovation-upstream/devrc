@@ -1,6 +1,6 @@
 ---
 name: clickup
-description: "Read and act on ClickUp tickets and docs: its comments and threads, status / assignee / due date / priority, workspace search, create tasks and subtasks, read and edit doc pages, attachments. Use for: a pasted app.clickup.com/t/ link or a bare ClickUp id, my ClickUp tickets, what ClickUp has assigned to me, comment on / update / close a ticket, mark it in progress, set a due date, a ClickUp doc or page. This is the EXTERNAL ClickUp workspace — the self-hosted approval UI and ITS Tasks are `clawgate`, the durable cross-repo board is `initiatives`, the email action-items queue is `mailbox`, and verifying from session transcripts whether work on a task was actually done is `check-clickup-addressed`."
+description: "Read and act on ClickUp tickets and docs — comments and threads, status / assignee / due date / priority, workspace search, create tasks and subtasks, doc pages, attachments. Use for: a pasted app.clickup.com/t/ link or a bare ClickUp id, my ClickUp tickets, what ClickUp has assigned to me, comment on / update / close a ticket, mark it in progress, set a due date, a ClickUp doc or page. This is the EXTERNAL ClickUp workspace — the self-hosted approval UI and ITS Tasks are `clawgate`, the durable cross-repo board is `initiatives`, the email action-items queue is `mailbox`, and verifying from session transcripts whether work on a task was actually done is `check-clickup-addressed`."
 ---
 
 # ClickUp

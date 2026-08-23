@@ -1,6 +1,6 @@
 ---
 name: signal
-description: "Query and operate the self-hosted Signal chat pipeline (Zach's phone -> signal-cli-rest-api -> homelab Postgres `signal` schema + MinIO attachments), and DRAFT outbound replies for clawgate approval. Use for: my Signal messages, signal chat, who messaged me on Signal, search my Signal history, Signal conversations/groups/reactions/attachments, the signal-consumer or signal-api pod, \"draft a Signal reply\", \"text someone on Signal\". Email and the mail inbox are the sibling `mailbox` skill, not this one."
+description: "Query and operate the self-hosted Signal chat pipeline (phone -> signal-cli-rest-api -> homelab Postgres + MinIO attachments), and DRAFT outbound replies for clawgate approval. Use for: my Signal messages, signal chat, who messaged me on Signal, search my Signal history, Signal conversations/groups/reactions/attachments, the signal-consumer or signal-api pod, \"draft a Signal reply\", \"text someone on Signal\". Email and the mail inbox are the sibling `mailbox` skill, not this one."
 ---
 
 # Signal chat operations

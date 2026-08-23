@@ -1,6 +1,6 @@
 ---
 name: activity
-description: "Operate the personal activity-telemetry pipeline: 9 sources -> per-host collector -> homelab ClickHouse activity.events -> Grafana + a per-source deadman. Query the data, revive a stalled or silently DEAD source, deploy, validate. Use for: activity tracking, the keylogger, \"where my time goes\", the activity dashboard, activity.events, the collector, a stale telemetry source, the `tlm` bar pill."
+description: "Operate the personal activity-telemetry pipeline: 9 sources -> collector -> homelab ClickHouse activity.events -> Grafana + a per-source deadman. Query it, revive a stalled or DEAD source, deploy, validate. Use for: activity tracking, the keylogger, \"where my time goes\", the activity dashboard, activity.events, the collector, a stale telemetry source, the `tlm` bar pill."
 ---
 
 # activity-telemetry operations

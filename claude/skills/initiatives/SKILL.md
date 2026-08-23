@@ -1,6 +1,6 @@
 ---
 name: initiatives
-description: "Operate the DURABLE initiatives board — the Postgres store, the 15-min sync, LLM recaps, the workbench viewer at 192.168.50.250:8899, the signal->initiative router and the read-only /api/ask assistant. Use for: the initiatives viewer/board, initiatives.current/latest, the initiative store/sync, initiative recaps, the vllm-recap model, the initiatives assistant/chat, \"what's on my board\" as a durable page. The one-off scan is `initiative-scan`."
+description: "Operate the DURABLE initiatives board — the Postgres store, the sync, LLM recaps, the workbench viewer, the signal->initiative router and the /api/ask assistant. Use for: the initiatives viewer/board, initiatives.current/latest, the initiative store/sync, initiative recaps, the vllm-recap model, the initiatives assistant/chat, \"what's on my board\" as a durable page. The one-off scan is `initiative-scan`."
 ---
 
 # initiatives subsystem operations
