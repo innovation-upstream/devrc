@@ -157,71 +157,62 @@ that incident, the two guards written against it, and two PRs parked by the free
 
 ## State now
 
-**Branch:** base clone on `main` @ `a0fb39c7`, clean except one other session's
-`M scripts/session-analysis/initiative-scan.py` and five untracked files (not mine).
+**Branch:** base clone on `main` @ `f3f2312e`, fast-forwarded this session. Working tree
+carries one other session's `M scripts/session-analysis/initiative-scan.py` and three
+untracked docs that are not mine.
 
-🔴 **THE GUARD-STRATEGY QUESTION IS CLOSED. Both surviving guards are ON `main`.**
+🔴 **THE MERGE GATE IS NOW LIVE AND BLOCKING — but on ONE tier only.** Re-measured, not
+carried from prose: `required_status_checks.contexts = ["tekton/devrc-nodetests"]`,
+`strict: false`, `enforce_admins: true`, 0 rulesets. **`devrc-pytests` REPORTS; it does not
+gate.** Someone armed this mid-session and chose the narrower half, which is the better call
+than the both-tiers script this doc previously carried: pytests is the tier holding the
+flakes below, so gating on it would have blocked merges on exactly the noise.
+🔴 **The `scripts/arm-the-gate.sh` handed over earlier in this thread is now WRONG — do not
+run it.** It would widen the requirement to `devrc-pytests`. Deleted from the plan, not from
+history, so nobody re-derives it.
+🔴 `enforce_admins: true` is live with no admin override. If Tekton wedges, nothing merges.
+Escape hatch: `gh api -X DELETE /repos/innovation-upstream/devrc/branches/main/protection/required_status_checks`.
 
-| PR | verdict | landed |
+**Merged this session — 7 PRs, every one verified by CONTENT on `origin/main`, never by the
+merge notification (a squash makes ancestry permanently false):**
+
+| PR | squash | what |
 |---|---|---|
-| **#683** GUARD 9 — strip the 11 repo-pointer env vars + fingerprint detector | ✅ MERGED | `dfd2d203` |
-| **#673** GUARD 10 — `GIT_CONFIG_GLOBAL` throwaway + `GIT_ALLOW_PROTOCOL=file` | ✅ MERGED | `4dd14e68` |
-| **#720** audit follow-ups on #683 | ✅ MERGED | closes the seam below |
-| **#676** interceptor (`nogit.py`, 1758 lines) | 🔴 CLOSED | superseded |
-| **#689** interceptor (`norepo.py`, 1358 lines) | 🔴 CLOSED | superseded |
-| **#716** the `${VAR:-default}` guards salvaged out of #689 | ✅ MERGED | `3be3d048` |
-| **#718** the CI-claim guard's own docstring had gone stale | ✅ MERGED | `b0afd63f` |
+| #632 | `f97bc642` | the rc-2 collision resolved — usage error moved to **21** |
+| #701 | `cdcc61f8` | this doc's prior update, incl. a retraction |
+| #743 | `6576cd3a` | `tree_hash` raced git's own maintenance lock |
+| #493 | `06597151` | `nix-shell.*` glob + the per-rule skip that made it deliverable |
+| #759 | `cd611642` | the burst-push gotcha, into the `tekton` skill |
+| #752 | `09edf783` | the audit-race guards, hardened against 5 measured evasions |
+| #762 | `e0c7c8ab` | the stranded nvidia fix rescued; the leaking artifact dropped |
 
-**The decision, and it is not "one guard won":** converge on the ENV-LEVER architecture,
-close the INTERCEPTOR family. #683 and #673 are complementary and both shipped — #683 owns
-*which repo git lands in*, #673 owns *which config git writes* and *whether git can reach
-the network*. Those are the two phases of the 2026-08-21 incident (local corruption 19:21,
-remote push storm 19:28). **`main` now closes both.**
+**#740 CLOSED, not merged** — redundant with **#735** (`2cd378a8`), which fixed the same
+race at the same three sites and merged **11 minutes** after #740 opened. #740 was
+`CONFLICTING`, so force-resolving it would have DELETED main's better helper and substituted
+a weaker one. The handoff warned *"check whether someone has already opened your PR"*; it was
+not checked.
 
-**Why the interceptors lost — an UNBOUNDED surface, not effort.** Measured: **14 of git's
-181 dispatch names take a repository POSITIONALLY** by synopsis alone (`upload-pack`,
-`receive-pack`, `fetch-pack`, `send-pack`, `upload-archive`, `clone`, `init`, `init-db`,
-`archive`, `fetch`, `pull`, `push`, `ls-remote`, `mailsplit`), plus an open-ended set of
-destination-bearing *options* across all 181 — #676's `collect_extra_dests` covered 4 verbs
-and missed 3. Every bounded formulation fails: enumerating verbs buys the next audit round;
-default-deny false-refuses 167 verbs (permanently red); resolving with real git *is* the
-measured 8.85× overhead and still cannot see `git-upload-pack <dir>`. 🔴 **This SUPERSEDES
-this doc's earlier "SPLIT recommendation" that #689 continue if someone took the positional
-problem knowingly** — the positional problem was the cheapest part of that surface.
-
-**Gate evidence, standalone clones with `origin` removed:**
+**Deploy: ✅ SHIPPED, and verified by something other than the tool that did it.**
+`drift-check.sh` rc 0 first (read-only), then `ship.sh` rc 0. Per-host lines read
+individually:
 
 ```
-control  pristine main a34d695d       14689 collected /  0 failed   scripts/tests 687.7s  PASS
-main + #683                           14721 collected /  0 failed   scripts/tests 699.6s  PASS   (+1.7%)
-main + #683 + #673 (hand-merged)      14766 collected / 39 failed                        FAIL   <- the seam
-main f3244aa8 + #716 + #718           15080 collected /  0 failed                        PASS
+workbench  already at origin/main · 527 artifacts resolve 0 dangling · 374 examined 0 stale · VERIFIED + switched
+           NOTE: tree DIRTY — built = origin/main + another session's WIP
+laptop     already at origin/main · 488 artifacts resolve 0 dangling · 359 examined 0 stale · VERIFIED + switched (clean tree)
+ship: self-check — 2 files compared, 0 superseded
+ship: converged + verified — 2 hosts compared, both at 7a586463
 ```
 
-🔴 **`main` is GREEN.** Every "main is RED" claim in this doc's earlier sections, and in
-PRs #708/#710/#713, is STALE — #708 fixed the signal floor and #722 fixed the CI red.
+🔴 **The independent check, because `managed artifacts CURRENT` is `ship.sh`'s claim about
+itself:** `~/.claude/RULES.md` `readlink -f`s into `/nix/store` (git-immune — a `git pull`
+changes it never), and its sha256 **equals `origin/main`'s** `219885f0800a1311`, against a
+control that differs. That is what proves the *switch* delivered.
 
-**Deploy status: ✅ SHIPPED 2026-08-22.** `scripts/ship.sh` converged **both** hosts from
-`b8f1e996` to `ec4fc008`, rc 0. Per-host lines read individually, not the final verdict:
-
-```
-workbench  fast-forwarded · 526 artifacts checked / 0 dangling / 0 absent · 373 examined / 0 stale · VERIFIED + switched
-           NOTE: tree DIRTY — what was built is origin/main + another session's local WIP
-laptop     fast-forwarded · 487 artifacts checked / 0 dangling / 0 absent · 358 examined / 0 stale · VERIFIED + switched (clean tree)
-```
-
-Payload confirmed present on both machines by content, not by the rc: `scripts/testlib/gitenv.py`
-(GUARD 9), `nogit_plugin.py` (GUARD 10), and #716's two `SHIP_REPO+set` guards in `ship.sh`.
-🔴 The **workbench** built from a dirty tree, so only the **laptop** is an honest witness that
-`origin/main` alone builds. Incident aftermath re-checked at deploy time and still clean:
-`core.bare` unset, `core.hooksPath` unset both `--local` and effective (**re-measured then, not
-carried from earlier in the session — that value is volatile**), newest fixture-shaped reflog
-entry on `main` still `2026-08-21 14:42:12 commit: seed`.
-
-🔴 **And already 1 behind again.** `origin/main` moved to `a689441f` (#731, #733) within the
-hour, from other sessions. The hosts are at `ec4fc008`. That is not a deploy failure — it is
-what "merged ≠ deployed" costs in a repo this concurrent, and it is why the passive deadman
-(`scripts/drift-check.sh`, the `drift-check` timer) exists rather than a one-shot claim here.
+🔴 **`#632`'s HEADLINE FEATURE DID NOT RUN.** The self-check reported `0 superseded` because
+`drift-check` had already shown both hosts converged, so there was nothing to supersede. It
+executed its happy path. **The first deploy that actually carries a `ship.sh` change is the
+real first test** — treat that run as unproven, not as a repeat.
 
 ## Open investigations — live diagnosis state
 
@@ -585,6 +576,75 @@ claimed. It remains true that "red" will not mean "broken code" until #740 and
 #743 land, and that whoever arms them wants a re-run affordance on day one; it is
 no longer true that the flake rate is a reason to wait.
 
+### 🔴 FOUR CI flakes, and they are ONE SHAPE — the sweep was NOT done
+
+Found across one session; only the first was on anybody's list. Each was a red check on a PR
+whose diff could not have caused it, and each was diagnosed by reading the **step log**, not
+the verdict line — twice the totals coincided with a *different* failure.
+
+| | flake | evidence | state |
+|---|---|---|---|
+| 1 | the audit line does not exist yet when the client's response arrives | 9 fails / 43 runs under load, all the same `IndexError`; `devrc-ci-jxf5j` FAILED vs `devrc-ci-vl88r` SUCCEEDED on the **identical** revision `ba97a9d7` | fixed by **#735**, guarded by **#752** |
+| 2 | a gate STEP killed with exit 255, no verdict produced | **2 of 54** gate taskruns (4%) in an unperturbed window | 🟡 **UNOWNED, cause unknown** |
+| 3 | `tree_hash` reads `.git/objects/maintenance.lock` after git deletes it | `devrc-ci-x9zkh`, on a PR touching neither test nor tool | fixed **#743** |
+| 4 | dl-router `test_a_re_signed_media_url_still_answers_the_badge` — `TimeoutError` on an HTTP call | `devrc-ci-7xfdm`, on a PR touching no dl-router code; passed on re-run | 🔴 **UNOWNED, UNFIXED** |
+
+🔴 **They are one shape: a test taking an observation as proof of a LATER state.** A response
+does not imply the log line; an `rglob` listing does not imply the file is still readable; a
+clone step reporting does not imply a checkout; an HTTP call returning does not imply the
+server finished. Same error as `claude/RULES.md` → *"a control that SHARES the step you
+doubt"*.
+
+- **Ruled out:** that #4 is caused by #752 (its diff touches no dl-router file; a re-run of
+  the identical branch went green). That #2 is a code failure (it heals when the queue
+  drains; a code cause does not).
+- **Next probe for #4, verbatim:** re-run the dl-router test under load and count, the same
+  way flake 1 was pinned —
+  `for i in $(seq 1 25); do (cd <clone> && python -m pytest scripts/dl-router/tests/test_server.py -k re_signed_media_url -q); done` under CPU pressure, then read whether the server or the client owns the timeout.
+- 🔴 **NOBODY HAS SWEPT FOR A FIFTH.** Four is the number found incidentally, not the number
+  that exists. The sweep for this shape across the suite is **not done** and this table must
+  not be read as closed.
+
+### 🟡 `#752`'s guards resist the five evasions someone THOUGHT OF
+
+An adversarial audit walked the first version of those guards **five** ways — helper
+indirection, a second module constant holding the prefix, `send_signal`, a bound-method
+alias (`_c = proc.communicate`, an `Attribute` in an `Assign`, never a `Call`), and a racy
+function merely NAMED `_drain` exploiting an exclusion list that was **also dead code**.
+All five are now caught, with a verbatim racy shape as the positive control.
+
+- **Ruled out:** that the exclusion list bought anything — removing it entirely left the
+  guard green, so it granted a permanent bypass for nothing.
+- 🔴 **Leading concern, unresolved:** there is no reason to think five is the number. The
+  guard's docstring states what it cannot see (a racy read that never reaches the prefix,
+  `.audit` or `await_audit`; a kill outside `_KILLERS`) rather than implying coverage.
+- **Next probe:** a blind audit — not a delta one. A framed audit verifies the frame.
+
+### 🟡 `server.py` drops audit records on SIGTERM — production, not tests
+
+`_respond` (`:1677`) runs before `_audit` (`:1687`) on a `ThreadingHTTPServer` with no
+SIGTERM handler, so a pod taking SIGTERM loses audit records for requests it **already
+served**. That undercuts the `token=` fingerprint's role as the evidence a credential is safe
+to retire.
+
+- **Ruled out:** that it is a buffering problem — `_child_env` sets `PYTHONUNBUFFERED=1`, so
+  on the losing schedule the line is never WRITTEN. A flush-oriented fix changes nothing.
+- 🔴 **Second-order cost of the test fix:** now that the tests wait properly, **nothing in
+  the suite exercises "audit records survive shutdown"**. The production gap has zero test
+  pressure.
+- **Next probe:** decide whether to audit-before-respond (changes semantics — you would log a
+  200 you have not sent) or install a SIGTERM handler that drains. Not attempted.
+
+### 🟢 RESOLVED — the nvidia script was never unrunnable
+
+`handoff-guards-and-gates.md` says of `apply-nvidia-kernel-7.2.sh`: *"it is `chmod 644`, so
+it cannot be run as written."* **False**, and it is plausibly why a fix for a broken
+`nixos-rebuild` sat 17 days. Its own header documents `sudo bash <file>`, and `bash <file>`
+needs no execute bit. Measured: mode 0644 + `bash <file>` → **rc 0, runs**; mode 0644 +
+direct exec → `permission denied`. `apply-freeze-instrumentation.sh` is committed at
+`100644` today, so 644 is not even anomalous. Rescued in #762 at 755 for consistency only.
+🔴 **Still staged, NOT applied, and UNAUDITED** — it edits `/etc/nixos` as root.
+
 ## Next steps (ranked) — rewritten 2026-08-22 after the four above were worked
 
 0. ✅ **DONE — main's red is closed.** #732 merged (`5a2a7b21`, by a concurrent session).
@@ -743,29 +803,88 @@ no longer true that the flake rate is a reason to wait.
 - **`/tmp/claude-1000` is 52.7 GiB** of agent scratchpads across sessions, and several
   `/tmp/wt-*` worktrees persist. Untouched — other sessions' state.
 
+- 🔴 **THE CONTENT GATE CAUGHT A REAL LEAK, IN MY OWN CHANGE.** #762's first revision
+  committed `apply-nebula-443.sh.LOCAL-preserved-2026-08-02`, which carries `5.161.118.55`
+  (the prod lighthouse) **six times**, into a **PUBLIC** repo. The PR body asserted the file
+  was worth preserving — written **without reading it**.
+  `test_no_unallowlisted_public_ip_literal_is_committed` failed it, correctly.
+  🔴 **Investigating instead of allowlisting INVERTED the premise.** The tracked
+  `apply-nebula-443.sh` deliberately takes the IP at runtime
+  (`LH="${NEBULA_LIGHTHOUSE:?…}"`, with `# This repo is PUBLIC` above it), so the
+  `.LOCAL-preserved` file is the **pre-scrub side of a merge whose resolution WAS removing
+  that literal**. It is not stranded work — its entire delta is the leak. An `ALLOWLIST`
+  entry would have made the gate green and the repo worse, and a waiver reads as
+  "considered and cleared" forever.
+- 🔴 **A rate measured over a window you are PERTURBING is a fact about you.** Flake 2's rate
+  was first written into this doc as "4 of 75 (5.3%), unowned infrastructure". Both halves
+  were wrong: **2/54 (4%) before this session's push burst, 8/34 (24%) during it.** Five
+  branches pushed in quick succession stacked five pipeline runs onto the ONE node Tekton
+  pins them to (77% CPU requests / 237% limits, `ExceededNodeResources`), and steps died with
+  exit 255 in `step-clone` AND `step-pytests` alike — one signature in two places, reading as
+  two bugs. **The inflated number was then used to argue against arming the required checks.**
+  Retracted; the lesson is now in the `tekton` skill (#759) where it fires before a push.
+- 🔴 **`exit 255` / `NOT RUN: <leg>` is a BROKEN GATE, not a bad change.** Do not debug your
+  diff against it. The tell: it heals when the queue drains.
+- 🔴 **A red check's `revision` param is the authority on staleness.** #732's failing check
+  *looked* stale; its PipelineRun had run against the current head. Acting on the first read
+  would have merged believing a fix was confirmed by a run that never tested it.
+- 🔴 **Two coinciding `failed=1` totals are not the same failure — twice.** #732's remaining
+  red was `test_subsystem_store_api`, not the module-root test it fixed; the totals matched
+  because both trees had exactly one failure.
+- 🔴 **A `grep` zero is a claim about the PATTERN.** Verifying #701 landed, `quiescent by
+  teardown` returned 0 — the doc says `quiescent-by-teardown`, hyphenated. Separately, a
+  `for-each-ref 'refs/remotes/origin/*'` audit matched `origin/HEAD` and reported a file as
+  being on no branch when it was on #667's.
+- **`ship.sh` self-supersession did NOT get exercised** — see State now. `0 superseded`
+  because nothing needed superseding.
+- **A ff-only can be blocked by an UNTRACKED file your own PR just made tracked.** #762
+  committed `apply-nvidia-kernel-7.2.sh`; the untracked local copy then blocked
+  `merge --ff-only`. Verified byte-identical (`98725f07c5c5ef27` both sides), preserved a
+  copy, removed, ff'd. **Hash before removing** — identical to what landed proves supersession;
+  differing would have meant unique content.
+
 ## How to verify
 
 ```bash
-# both guards are on main, by CONTENT (a squash merge breaks ancestry forever)
-git -C ~/workspace/devrc cat-file -e origin/main:scripts/testlib/gitenv.py      && echo "GUARD 9  present"
-git -C ~/workspace/devrc cat-file -e origin/main:scripts/testlib/nogit_plugin.py && echo "GUARD 10 present"
-git -C ~/workspace/devrc show origin/main:scripts/run-tests.sh | grep -c 'gitenv_plugin\|nogit_plugin'   # expect 2+
+# the gate is REQUIRED — and on which tier (re-measure; this is volatile)
+gh api /repos/innovation-upstream/devrc/branches/main/protection \
+  --jq '{required: .required_status_checks.contexts, strict: .required_status_checks.strict, admins: .enforce_admins.enabled}'
+# expect: required=["tekton/devrc-nodetests"] strict=false admins=true
 
-# the seam is closed on the merged tree, not just in one PR
-git -C ~/workspace/devrc show origin/main:scripts/testlib/gitenv.py | grep -A2 'REDIRECT BY THE HARNESS'
+# the 7 merges, by CONTENT (a squash makes ancestry permanently false)
+git -C ~/workspace/devrc show origin/main:scripts/ship.sh        | grep -c 'exit 21'          # 2
+git -C ~/workspace/devrc show origin/main:scripts/drift-check.sh | grep -F 'RESERVED-TO-SHIP:' # …19 20 21
+git -C ~/workspace/devrc show origin/main:scripts/tests/test_handoff_doc.py | grep -c GIT_CONFIG_COUNT  # 3
+git -C ~/workspace/devrc show origin/main:nix/system/apply-tmp-churn-retention.sh | grep -c 'e /tmp/nix-shell\.\*'  # 2
+git -C ~/workspace/devrc show origin/main:scripts/tests/test_subsystem_store_api.py | grep -c '_transitive'  # 3
+git -C ~/workspace/devrc cat-file -e origin/main:nix/system/apply-nvidia-kernel-7.2.sh && echo present
 
-# #716's six guards
-git -C ~/workspace/devrc show origin/main:scripts/ship.sh        | grep -c 'SHIP_REPO+set'    # 2
-git -C ~/workspace/devrc show origin/main:scripts/drift-check.sh | grep -c 'DRIFT_REPO+set'   # 3
+# the leak did NOT land — verify the ABSENCE, it is the half that matters
+git -C ~/workspace/devrc cat-file -e origin/main:nix/system/apply-nebula-443.sh.LOCAL-preserved-2026-08-02 \
+  && echo "🔴 IT LANDED" || echo "correctly absent"
 
-# gate — ALWAYS in a standalone clone with origin REMOVED (the freeze still applies)
-git clone --no-hardlinks -q ~/workspace/devrc /tmp/hchk && git -C /tmp/hchk remote remove origin
-git -C /tmp/hchk remote -v          # MUST print nothing before anything runs
-nix develop /tmp/hchk --command bash /tmp/hchk/scripts/gate.sh --tier both --set hermetic
+# the deploy delivered — independent of ship.sh's own claim
+readlink -f ~/.claude/RULES.md   # must terminate in /nix/store => git-immune
+diff <(git -C ~/workspace/devrc show origin/main:claude/RULES.md) ~/.claude/RULES.md && echo "switch delivered"
 
-# incident aftermath still clean
-git -C ~/workspace/devrc config --get core.bare       # <unset>
-git -C ~/workspace/devrc config --get core.hooksPath  # <unset>
-git -C ~/workspace/devrc reflog show main --date=iso | grep -E 'commit: (c|seed)$' | head -1
-# newest must remain 2026-08-21 14:42:12 — anything later is a recurrence
+# rc 21 vs rc 2 both live, without touching a host
+SHIP_REPO=/nonexistent bash ~/workspace/devrc/scripts/ship.sh --definitely-not-a-flag; echo "expect 21, got $?"
+SHIP_REPO= bash ~/workspace/devrc/scripts/ship.sh --no-remote;                          echo "expect 2,  got $?"
 ```
+## Next steps (ranked) — rewritten 2026-08-23
+
+1. 🔴 **Flake 4 (dl-router HTTP timeout) has no owner.** It is the last of the four still
+   able to redden an unrelated PR. Probe above.
+2. 🔴 **Sweep the suite for the shared shape** — a test treating an observation as proof of a
+   later state. Four instances is a pattern, not an inventory.
+3. **Decide the `server.py` SIGTERM audit-loss question** (block above). It is the only one
+   of these that is a production defect rather than a test defect.
+4. **`sudo bash nix/system/apply-nvidia-kernel-7.2.sh`** — rescued and committed, unaudited,
+   fixes a broken `nixos-rebuild`. Claude cannot run it. Consider auditing the script first.
+5. **Delete `nix/system/apply-nebula-443.sh.LOCAL-preserved-2026-08-02`** from the working
+   tree. Its ONLY delta from the tracked `apply-nebula-443.sh` is a hardcoded public IP that
+   a past fix deliberately removed. Recommended on #762; not done, because it lives in a tree
+   this session did not own.
+6. **Flake 2 (`exit 255`) stays unowned by choice** — its pod logs are garbage-collected
+   before anyone looks. A Tekton retry would hide it with the cause unknown; named as a
+   workaround and NOT recommended.
