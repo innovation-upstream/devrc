@@ -488,8 +488,8 @@ Earlier rounds each ran a sweep, reported "0 survived", and threw the driver awa
 number was then unreproducible from the repo, and the next round re-invented the list and
 re-discovered the same sites. A blind re-audit of one such "51 mutants, 0 non-killed" found
 **seven more at the same delta sites**, one of which reverted that round's headline fix.
-**Extend the list; do not start a new one.** Currently **81 rows (80 mutants + a positive
-control) + a NULL CONTROL, 0 non-KILLED** — the driver prints `81 mutant(s); non-KILLED: 0`.
+**Extend the list; do not start a new one.** Currently **82 rows (81 mutants + a positive
+control) + a NULL CONTROL, 0 non-KILLED** — the driver prints `82 mutant(s); non-KILLED: 0`.
 🔴 **`--check`'s other job is catching a mutant whose ANCHOR you moved.** Measured
 2026-08-23: one edit to `suppressed_notes` silently stranded `M49` and `M-SCOPE` at
 `NOT APPLIED` — and `M-SCOPE` is the mutant a blind re-audit once found surviving a green

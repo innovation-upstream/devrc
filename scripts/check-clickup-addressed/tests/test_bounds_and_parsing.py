@@ -146,20 +146,26 @@ def _notes(*recs):
 # where a scan-less run emits nothing at all. Everything below this section is the mutation
 # set the module docstring describes.
 
-def test_a_scanless_run_ANNOUNCES_the_two_rules_it_could_not_run():
-    """🔴 THE REGRESSION. An empty block reads as "checked, nothing disagrees". Two of the
-    checks this block is trusted for did not run, and only the run itself knows that.
+def test_a_scanless_run_ANNOUNCES_the_rules_it_could_not_run():
+    """🔴 THE REGRESSION. An empty block reads as "checked, nothing disagrees". Checks this
+    block is trusted for did not run, and only the run itself knows that.
+
+    ⚠️ This test was named `..._the_two_rules_...` and asserted on two hardcoded substrings.
+    FOUR rules go quiet, so the name was a false coverage claim and the body would have
+    stayed green while the announcement dropped the other two. It now reads the LEDGER — a
+    name is a claim like any other.
     """
     out = _flags(_rec(scanned=False, transcript_status="not_scanned"))
     assert out, "a scan-less run produced NO output at all — silence reading as a clean check"
-    joined = " ".join(out).lower()
+    joined = " ".join(out)
     assert "--transcripts" in joined, \
         f"the announcement does not say how to enable the checks it names: {out}"
-    assert "did not run" in joined, \
+    assert "DID NOT RUN" in joined, \
         f"the announcement does not say the checks DID NOT RUN: {out}"
-    assert "waiting" in joined and "open signals remain" in joined, (
-        "the announcement does not NAME the two rules that could not fire, so a reader cannot "
-        f"tell which coverage is missing: {out}")
+    missing = [n for n, _t in check_addressed.SCAN_ONLY_RULES if n not in joined]
+    assert not missing, (
+        "the announcement does not NAME every rule that could not fire, so a reader cannot "
+        f"tell which coverage is missing: {missing}")
 
 
 def test_the_scanless_ledger_matches_what_actually_goes_quiet():
@@ -188,6 +194,19 @@ def test_the_scanless_ledger_matches_what_actually_goes_quiet():
              if any(tail in f for f in _flags(quiet))}
     assert after == set(), \
         f"a ledger rule still fired on a record with no transcript evidence: {sorted(after)}"
+
+    # 🔴 THE *GROWS* DIRECTION, and it is the half that is easy to fake. Both sets above are
+    # derived FROM the ledger, so a fifth scan-dependent rule added to `disagreements` and
+    # not to the ledger would be invisible to them — a two-way claim that is really one-way.
+    # So: take the flags that ACTUALLY disappear between the two modes, and require every one
+    # of them to be a ledger entry. A new rule that goes quiet now fails here, naming itself.
+    quiet_flags = set(_flags(quiet))
+    disappeared = [f for f in _flags(scanned) if f not in quiet_flags]
+    unledgered = [f for f in disappeared
+                  if not any(tail in f for _n, tail in check_addressed.SCAN_ONLY_RULES)]
+    assert not unledgered, (
+        "a rule goes quiet without the transcript scan and is NOT in SCAN_ONLY_RULES, so the "
+        f"announcement does not name it and a reader is told the coverage ran: {unledgered}")
 
     named = " ".join(f for f in _flags(quiet) if f.startswith(check_addressed.SCANLESS_LEAD))
     for name, _tail in check_addressed.SCAN_ONLY_RULES:

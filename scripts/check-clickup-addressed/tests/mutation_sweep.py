@@ -300,6 +300,12 @@ MUTANTS = [
     ("Z5", CA, "        others = [f for f in disagreements([r], now) if not f.startswith(SCANLESS_LEAD)]",
      "        others = disagreements([r], now)",
      "the RUN-level announcement counts as a per-TICKET flag in the note"),
+    # 🔴 The LEDGER shrinking, which is the half a ledger-derived assertion cannot see —
+    # both of the obvious checks are computed FROM `SCAN_ONLY_RULES`, so dropping an entry
+    # keeps them consistent with each other and silently stops announcing a rule that still
+    # goes quiet. Only the flags-that-actually-disappeared diff catches this.
+    ("Z6", CA, "    (\"a PR the transcripts cited is still open\", \"the signal that quoted it reads as done\"),\n)",
+     ")", "drop a rule from the ledger: it goes quiet and nothing announces it"),
 
     # ---------- round 7: the retracted false-premise message in `_unresolved_state`. Round 5
     # replaced one vague failure with three precise ones; measured on live input the precise
