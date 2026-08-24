@@ -22,29 +22,45 @@ the homelab Tekton platform. Secondary: land the subsystem-store hosted-vs-local
 
 ## State now
 
-🔴 **THE GATE IS REAL AND BLOCKING as of 2026-08-23.** devrc went from
+🔴 **THE GATE IS REAL AND BLOCKING — AND BOTH TIERS ARE REQUIRED NOW.** Carried
+forward, because it is the origin story of this whole effort: devrc went from
 `<!-- merge-gate: none -->` and a trigger that had **never fired once** (0 of 370
-pipelineruns) to a required, enforced pre-merge check.
+pipelineruns) to a required, enforced pre-merge check, first proven end-to-end on
+`#748` (BLOCKED → green → CLEAN → merged `27fa67f9`).
 
-- **`required_status_checks.contexts = ["tekton/devrc-nodetests"]`** on `main`,
-  `enforce_admins: true`, `strict: false`.
-- **Verified behaviourally, not from the setting:** nodetests `ERROR`/`PENDING` ⇒
-  `mergeStateStatus=BLOCKED`; `SUCCESS` ⇒ `CLEAN`; pytests red + nodetests green ⇒
-  `UNSTABLE` (mergeable). pytests **reports**, nodetests **gates**.
-- **Proven end-to-end on a live PR:** `#748` went `BLOCKED` → gate green → `CLEAN` →
-  merged (`27fa67f9`). First merge in this repo held by anything but a human choosing
-  to wait.
+The line that used to sit here said `contexts = ["tekton/devrc-nodetests"]` and
+"pytests **reports**, nodetests **gates**". That is **FALSE as of 2026-08-24**:
 
-**Merged this session** — devrc `#706` (df8d0319), `#732` (5a2a7b21), `#735`
-(2cd378a8), `#748` (27fa67f9); homelab-infra `#378` (0740ad10), `#383` (b340bd26),
-`#385` (15092256). Closed deliberately: `#380` (node choice refuted by audit),
-`#713` (superseded by `#708`).
+- `required_status_checks.contexts = ["tekton/devrc-nodetests","tekton/devrc-pytests"]`
+  on `main`, `enforce_admins: true`, `strict: false` — re-read from the API, not
+  from this doc. A Python-only change is now genuinely gated.
+- ⚠ **This flipped twice in ~24h.** Re-measure rather than trusting any prose:
+  `gh api /repos/innovation-upstream/devrc/branches/main/protection --jq .required_status_checks`
+- 🔴 Consequence now live: a wedged Tekton blocks every merge with no admin
+  override. Escape hatch, written down because you will want it under pressure:
+  `gh api -X DELETE /repos/innovation-upstream/devrc/branches/main/protection/required_status_checks`
 
-**Deploy/verify status, stated separately:** all homelab-infra changes reconciled via
-`flux reconcile kustomization tekton-triggers` and verified **at the consumer** —
-live `Pipeline devrc-ci-pipeline` shows `notify timeout=2m0s`, `gate timeout=45m0s`;
-`PriorityClass ci-bulk` exists at `-10000/Never`; a real gate pod carries
-`prio=-10000 class=ci-bulk`.
+**Merged + shipped this session** — homelab-infra `#386` (54387c67, the
+finally-on-timeout rollout for the remaining five pipelines); devrc `#775`
+(tekton skill), `#781` (this doc), `#793` (the collision fix). All three devrc PRs
+shipped to **both hosts** via `ship.sh` and verified **at the consumer** — store
+path moved, both hosts on one path, deployed file byte-identical to `origin/main`.
+
+**Closed deliberately** — homelab-infra `#388` (right-sizing gitops-validate),
+**superseded by `#389` from another session**. See Gotchas.
+
+**Deploy/verify status, stated separately:**
+- `#386` verified on the **LIVE Pipeline objects**, not the files (a run executes
+  the DEPLOYED Pipeline): `clawgate-ci 25m · gitops-validate 20m · auditloop-ci
+  40m · remix 40m · naida 40m`, `finally: 10m` on all five.
+- 🔴 **The `finally`-on-timeout path has now been EXERCISED FOR REAL, once.**
+  `devrc-ci-d54mx` failed (a genuine test failure, not a timeout) and its
+  `report` child **ran and posted the verdict** — `childReferences [notify, gate,
+  report]`. Previously this was mechanism-established-by-probe only.
+  ⚠ Still **zero timeouts** since deploy, so the *timeout* branch specifically
+  remains unexercised: 40+ runs, 0 `PipelineRunTimeout`, 0 cancelled TaskRuns.
+- `#389` (not mine) is live: gitops-validate now reserves **2.40 CPU / 2624Mi**,
+  down from 4.65 / 4800Mi.
 
 ## Open investigations — live diagnosis state
 
@@ -266,45 +282,68 @@ longer true, and a permanently-red gate is no longer the expected outcome. See s
   self-contradicting max, and a deleted caveat that still applied. Round 3: a corrected
   figure contradicted a sibling file **in the same PR**. Budget for this shape.
 
+### Did right-sizing actually reduce gitops-validate's pod-start latency? UNRESOLVED — needs a few days
+- **Why it matters:** it decides whether the *whole* resource-reservation theory
+  behind `#378`/`#388`/`#389` was the right lever. If latency does not fall, the
+  next suspect is the `nodeSelector` pin itself.
+- **Symptom being tracked:** gitops-validate lost **21 of 113** retained runs
+  (18.6%) to pod-start latency against its 20m ceiling — the worst on the cluster
+  (devrc: 2). Five of the 21 had actually started running; one got through **10 of
+  13 steps**. The delay is **~100% scheduler queue time**
+  (`kube_pod_status_scheduled_time − kube_pod_created` = 1145s of a 1151s wait on
+  `lhcs8`), not image pull or PVC bind.
+- **Observed (values), pod-start latency = (earliest step `terminated.startedAt` −
+  TaskRun `startTime`), nearest-rank:**
+  | window | n | p50 | p90 | max |
+  |---|---|---|---|---|
+  | before `#389` | 98 | 75s | 669s | 1151s |
+  | since `#389` (early) | 20 | **48s** | 740s | 868s |
+- **Ruled out:** that the pods never started (14 of 21 never created a container,
+  but 5 ran real steps — an earlier revision of this doc's claim that *none* did
+  was generalised from two sampled runs and was wrong).
+- **Leading hypothesis:** none yet — n=20 is noise-dominated. p50 halved, p90 flat.
+  **This is not evidence either way.**
+- **Next probe**, verbatim:
+  ```bash
+  KUBECONFIG=$KC_HOMELAB kubectl -n tekton-ci get taskruns -o json \
+    | python3 -c 'import json,sys,datetime;f=lambda x:datetime.datetime.strptime(x,"%Y-%m-%dT%H:%M:%SZ");d=json.load(sys.stdin);v=sorted(((min(f(y) for y in [ (s.get("terminated") or {}).get("startedAt") for s in i["status"]["steps"]] if y)-f(i["status"]["startTime"])).total_seconds()) for i in d["items"] if i["metadata"].get("labels",{}).get("tekton.dev/pipelineTask")=="gitops-validate" and i.get("status",{}).get("startTime") and any((s.get("terminated") or {}).get("startedAt") for s in i["status"].get("steps",[])));print("n=%d p50=%.0f p90=%.0f max=%.0f"%(len(v),v[len(v)//2],v[int(.9*len(v))],max(v)))'
+  ```
+  Compare p90 against **669s**. If it has not fallen materially, investigate the
+  `nodeSelector` pin — `clawgate-ci`, the one pipeline with **no** pin, has a
+  pod-start max of **18s** against this one's 19 minutes.
+
 ## Next steps (ranked)
 
-1. ✅ **DONE — homelab-infra `#386`, merged + deployed + verified live.** See the resolved
-   section above for what it covers and, more importantly, what it does not.
-2. ⚠️ **OVERTAKEN — `tekton/devrc-pytests` IS required now, and this doc advised against
-   it.** Measured 2026-08-24:
-   `required_status_checks.contexts = ["tekton/devrc-nodetests","tekton/devrc-pytests"]`
-   with `enforce_admins: true`. Someone made it required anyway; recorded here because the
-   advice below was not withdrawn, it was simply overrun, and the reasoning still stands as
-   the risk that was accepted:
-   > it first reached `BOTH TIERS PASS` (pytests 15150/0, nodetests 1149/0) on
-   > `devrc-ci-vl88r` at 2026-08-23T04:00Z — but it was red for **four independent reasons**
-   > on day one. That wants a stretch of consecutive greens, not one observation.
-
-   🔴 **The consequence is now live and worth knowing before you need it:** with both tiers
-   required and `enforce_admins: true`, a wedged Tekton blocks every merge with no admin
-   override. The escape hatch is
-   `gh api -X DELETE /repos/innovation-upstream/devrc/branches/main/protection/required_status_checks`.
-   ✅ The specific unsatisfiable case this doc flagged as the blocker on requiring anything —
-   a timed-out run posting NOTHING and sitting `pending` forever — **is the thing `#385`/`#386`
-   fixed**, so requiring both tiers is far safer now than when this was written. That is
-   probably why it happened.
-3. **Revisit the 45m gate timeout.** Headroom over the observed max is **3m32s (8.5%)**,
-   and every measured run had a WARM nix cache — the budget's own stated worst case (a
-   cold run after a nixpkgs bump) is absent from the evidence.
-4. **Right-size the other pipelines' requests.** `gitops-validate` alone asks
-   **4.65 CPU / 4.688Gi across 8 SEQUENTIAL steps** — the same inflation `#378` fixed
-   for devrc, and Tekton sums them into the pod request.
-5. **Watch for a `Preempted` event.** `ci-bulk` is live but has **never fired**, so its
-   mechanism is verified as *configured*, not as *working*:
-   `kubectl -n tekton-ci get events --field-selector reason=Preempted`.
-6. **CARRIED FORWARD, still open — 1 fixture-author commit.** `zach/requires-env-skip-pins`
-   still exists on origin with a commit authored `T <t@example.com>`; one
-   `git commit --amend --author=…` + force-push, **by its owner**. (The other two branches
-   named in the previous revision are gone from origin — re-measure before acting.) 26 more
-   are on the preserved incident branch and are *supposed* to carry it.
-7. **CARRIED FORWARD, still open — `check-tekton-app-install.sh`'s `CDPATH` bug**
-   (homelab-infra): `HERE="$(cd -- … && pwd)"` returns TWO lines when `CDPATH` is set,
-   because bash's `cd` echoes the target. Use `cd -- "$d" >/dev/null && pwd`.
+1. ⏳ **TIME-GATED — re-measure the latency verifier above** (a few days after
+   2026-08-24). It gates whether any further resource work is the right lever at
+   all, so do it before item 2. Repo: none — a read-only cluster query.
+2. **`auditloop-ci` is now the largest single reserver on `talos-xr6-r7p`** —
+   5.50 CPU / 9728Mi, untouched by `#386`/`#388`/`#389`.
+   Measured peaks from the **direct pod-cgroup gauge** (`container=""`), method
+   quoted because it matters: CPU `rate[30s]` **3.72** / `rate[1m]` **3.18**;
+   memory **983Mi** at 7d and **996Mi** at 30d.
+   ⚠ `step-build` peaks at **3.97 against its 4-CPU limit** — censored, so its
+   true CPU demand is unknown. **Cut memory, leave CPU alone.** Only ~13 of 508
+   retained runs are auditloop, so impact is real but infrequent.
+   Repo/files: `homelab-infra` →
+   `clusters/homelab/apps/tekton-pipelines/triggers/auditloop-ci-pipeline.yaml`.
+3. **The execution margin against the 20m task timeout is ~1.1×, and nobody owns
+   it.** Over 57 succeeded gitops-validate TaskRuns: sum-of-steps p50 264s / p90
+   398s / p95 485s / **max 1045s**; TaskRun wall p95 1026s / max 1086s. Against
+   1200s that is **1.10–1.15×**. Pre-existing, unrelated to either PR's changes —
+   but `#389` also lowered `cpu.weight` 4.65→2.40. Decide deliberately: accept,
+   raise the ceiling (which re-opens `#386`'s budget arithmetic), or attack
+   `warm-tools`' 963s outlier.
+4. **Pick a metric convention and write it into the tekton skill.** See Gotchas —
+   `max_usage` vs `working_set` is a ~30% swing on every sizing decision in that
+   directory, and two sessions used different ones without noticing. Cheapest item
+   here. Repo/files: `devrc` → `claude/skills/tekton/SKILL.md`.
+5. **Reporter robustness (LOW).** All six report tasks `apk add` then make 2–3
+   `curl` calls with **no `--max-time`**, so a status post needs a package mirror.
+   ⚠ This is NOT what costs verdicts — max reporter step execution is **28s**
+   across ~490 TaskRuns. Do it only when touching those files anyway.
+6. **CARRIED FORWARD** — 1 fixture-author commit (`zach/requires-env-skip-pins`)
+   and `check-tekton-app-install.sh`'s `CDPATH` bug. Unchanged this session.
 
 ## Gotchas / decisions / dead-ends
 
@@ -441,27 +480,85 @@ longer true, and a permanently-red gate is no longer the expected outcome. See s
   `#735`). **Read the step log before believing a red devrc check** — three of the four
   were only diagnosable that way.
 
+- ⚠ **`tekton/devrc-pytests` WAS MADE REQUIRED ANYWAY — this doc advised against it
+  and was simply overrun.** Carried out of `Next steps`, where it was about to be
+  dropped, because the *reasoning* is durable even though the recommendation lost:
+  pytests first reached `BOTH TIERS PASS` (pytests 15150/0, nodetests 1149/0) on
+  `devrc-ci-vl88r` at 2026-08-23T04:00Z — **but it had been red for four
+  independent reasons on day one**, none of them in any PR being gated. That
+  wanted a stretch of consecutive greens, not one observation. It was never
+  withdrawn; it was overtaken. ✅ The specific unsatisfiable case this doc called
+  *the* blocker on requiring anything — a timed-out run posting NOTHING and sitting
+  `pending` forever — is what `#385`/`#386` fixed, which is probably why it became
+  safe to do.
+- 🔴 **`#388` WAS SUPERSEDED MID-AUDIT BY `#389` — and the diagnosis of WHY is now
+  shipped as `/resume` step 6 + `/handoff` (devrc `#793`).** Three sessions
+  collided in one day. Cause: this doc's own ranked next-steps list is a work
+  queue every `/resume` draws from with nothing marking an item taken — next-step
+  1 → `#386`, next-step **4 → BOTH `#388` and `#389`**. Worktrees do NOT prevent
+  it (every colliding session used one; no file was ever clobbered — it is a
+  task-allocation collision, and isolation is what *hides* it). The measured fix
+  is two-part: check open PRs before starting **and** immediately before
+  `gh pr create`, **and push the branch the moment you create it** — the only half
+  that protects whoever moves FIRST. 📖 `~/.claude/skills/handoff/reference/shared-queue.md`.
+- 🔴 **`working_set` vs `max_usage` is a ~30% swing, and it silently split two
+  sessions.** `#389` quoted `step-render-diff` at **287 MiB**; I measured **221Mi**.
+  Neither sample was wrong — `container_memory_max_usage_bytes` (287) is a cgroup
+  high-water mark including reclaimable page cache; `container_memory_working_set_bytes`
+  (221) is what the **kubelet actually evicts on**; `container_memory_rss` is 182.
+  Retention here is **30d** and 7d≡30d for these series, so window was never the
+  issue. I publicly blamed sample width first and had to retract it on two PRs.
+- 🔴 **A `sum by(pod)` SUBQUERY under-samples against the direct pod-cgroup gauge.**
+  gitops-validate: subquery **1.21 cores / 662Mi**; direct `container=""` gauge
+  **2.00 cores (`rate[30s]`) / 1150Mi**. The rate *window* moves it again
+  (`step-kustomize`: 0.028 at `[5m]`, 0.148 at `[1m]`), and so does the subquery
+  *step*. cAdvisor scrapes at **10s**, so `[30s]` is the tightest legitimate
+  window. ⚠ I quoted the subquery figure inside a comment condemning subqueries,
+  then repeated the same mistake in a sibling file **in the commit that fixed it**.
+  Quote the form, the window AND the step.
+- 🔴 **Nothing enforces the timeout arithmetic.** A dry-run accepts `timeout: 99m`
+  under `tasks: 30m`. Tekton *does* validate `tasks + finally <= pipeline` — but
+  **not on a TriggerTemplate's `resourcetemplates`**, which is where these budgets
+  live, so an invalid budget applies cleanly and fails only at EventListener time
+  ⇒ no status posted, i.e. the same bug by another door. To validate one, lift the
+  `timeouts` block into a standalone PipelineRun and `--dry-run=server` **that**.
+  Also: `retries:` restarts the clock per ATTEMPT, so the invariant is
+  `Σ(attempts × timeout) + startOffset < tasks`.
+- ⚠ **Selecting local tests by NAME-GUESSING is not a gate.** An 8-file local run
+  reported `507 passed` while CI failed on `test_handoff_skill_keeps_working_
+  headroom`, a per-skill byte-ceiling test I did not know existed. Run the whole
+  matching set (`-k`) or `scripts/gate.sh`, and expect the skill byte ceiling to
+  bite any addition to `claude/skills/*/SKILL.md` — the remedy is to demote the
+  narrative to `reference/<topic>.md` and leave the imperative with a `📖` pointer,
+  never to narrow the rule.
+- ⚠ **Grepping a CI step log for `FAILED` gave a confidently WRONG read.** The
+  first hit was a sub-runner's `PASS  no FAILED bucket` / `RESULT: all good`; the
+  real verdict was 8 lines later (`FAIL scripts/tests (… failed=1)` /
+  `RESULT: FAIL (exit=1)`). Count the per-target lines; do not trust the first hit.
+- ⚠ **Three audit rounds on `#386` each found a real defect — every one in the
+  fix's own COMMENTS, not its values.** Round 1: two wrong diagnoses baked into
+  config, one of which had *reversed the fix* (the reporter is slow to SCHEDULE —
+  pod-start to 282s — never slow to run, max step execution **28s** across ~490
+  TaskRuns; bounding its curls would have saved neither lost verdict). Round 2:
+  ten comments misstating the change itself. Round 3: a corrected figure
+  contradicting a sibling file in the same PR. Budget for that shape.
+
 ## How to verify
 
 ```bash
-# the requirement is live AND enforced (read it, don't assume)
-gh api /repos/innovation-upstream/devrc/branches/main/protection \
-  --jq '{required:.required_status_checks.contexts, strict:.required_status_checks.strict,
-         enforce_admins:.enforce_admins.enabled}'
-#   want: ["tekton/devrc-nodetests"], strict=false, enforce_admins=true
+# the finally-on-timeout fix, on the LIVE objects (a run executes the DEPLOYED Pipeline)
+KUBECONFIG=$KC_HOMELAB kubectl -n tekton-ci get pipeline clawgate-ci-pipeline \
+  -o jsonpath='{.spec.tasks[0].timeout}{"\n"}'                      # want: 25m0s
+for t in clawgate-ci gitops-validate auditloop-ci remix-ux-audit naida-ux-audit; do
+  KUBECONFIG=$KC_HOMELAB kubectl -n tekton-ci get triggertemplate ${t}-template \
+    -o jsonpath="{.spec.resourcetemplates[0].spec.timeouts.finally}{'\n'}"   # want: 10m
+done
 
-# it actually BLOCKS — the only check that matters
-gh pr list --repo innovation-upstream/devrc --state open \
-  --json number,mergeStateStatus,statusCheckRollup \
-  --jq '.[]|"#\(.number) \(.mergeStateStatus) [\([.statusCheckRollup[]?|"\(.context)=\(.state)"]|join(" "))]"'
-#   want: nodetests ERROR/PENDING => BLOCKED ; SUCCESS => CLEAN ;
-#         pytests red + nodetests green => UNSTABLE (mergeable)
+# branch protection — re-read it, this flipped twice in 24h
+gh api /repos/innovation-upstream/devrc/branches/main/protection --jq .required_status_checks
 
-# the timeout fix is live at the CONSUMER (merged != deployed)
-KUBECONFIG=$KC_HOMELAB kubectl -n tekton-ci get pipeline devrc-ci-pipeline \
-  -o jsonpath='{range .spec.tasks[*]}{.name}={.timeout}{"\n"}{end}'
-#   want: notify=2m0s  gate=45m0s
-
-# 🔴 ESCAPE HATCH if Tekton is down — enforce_admins:true means NO admin override
-gh api -X DELETE /repos/innovation-upstream/devrc/branches/main/protection/required_status_checks
+# the collision fix is deployed on both hosts (readlink is the arbiter, not a diff)
+readlink -f ~/.claude/skills/handoff/SKILL.md          # must terminate in /nix/store
+grep -c 'WORK QUEUE WITH NO LOCK' ~/.claude/skills/handoff/SKILL.md   # want: 1
+test -f ~/.claude/skills/handoff/reference/shared-queue.md && echo present
 ```
