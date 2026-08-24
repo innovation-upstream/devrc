@@ -39,9 +39,17 @@ shells out is covered too. (No test does today: nothing here spawns `server.py`,
 and neither the `browser` CLI nor `browser-agent` touches the spool at all.)
 
 TWO FIXTURES, TWO DIFFERENT HAZARDS — see each one's own docstring. The
-per-test one gives each test its own spool so tests cannot read each other's
-rows; the session-scoped backstop exists because the per-test one's TEARDOWN is
-itself a hole.
+per-test one gives each test its own spool DIRECTORY; the session-scoped
+backstop exists because the per-test one's TEARDOWN is itself a hole.
+
+🔴 A PER-TEST DIRECTORY IS NOT A PER-TEST WRITER SET, and this sentence used to
+claim it was ("so tests cannot read each other's rows"). `ACTIVITY_SPOOL_DIR` is
+process-global and re-pointed per test, so a thread still ALIVE from an earlier
+test emits into the CURRENT test's dir. Corrected in the same change that fixed
+the assertions it broke — see `_isolate_activity_spool` below for the
+measurement. The correction lived only on that fixture at first, leaving this
+paragraph contradicting it 70 lines higher in the same file; a reader who stops
+here would still get the false guarantee, which is the whole failure mode.
 
 `scripts/browser-bridge/tests/test_spool_isolation.py` is the regression guard,
 and it is a SEPARATE FILE on purpose: its first two tests are only meaningful as

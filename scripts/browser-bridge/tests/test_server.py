@@ -124,8 +124,10 @@ def _wait_events(spool_dir, n=1, timeout=10.0, until=None) -> list:
     `{"event":"throttled","op":"tabs","reason":"rate_limited"}` is in that run's
     captured stderr — but only the `cmd` event had reached the spool inside the
     deadline, so the filter found nothing and the assertion failed as
-    `assert 0 == 1`, reading like a defect in rate limiting. 16 of the 52 call
-    sites in this module use a count this way. Pass `until=` whenever you are
+    `assert 0 == 1`, reading like a defect in rate limiting. A count is still
+    how MOST call sites here wait — see `_wait_ops` below for the positional
+    half of the same problem. (A previous revision quoted an exact site count;
+    it was stale within a day, twice. Counts in prose rot — measure it.) Pass `until=` whenever you are
     waiting for a SPECIFIC event; the count is only right when any N will do.
 
     🔴 AND A TIMEOUT IS NOW LOUD. This used to return a SHORT list silently, so
@@ -162,12 +164,23 @@ def _wait_events(spool_dir, n=1, timeout=10.0, until=None) -> list:
 
 def _payload_op(e) -> str | None:
     """The `op` inside a spooled event's payload, or None if it has no readable
-    one. Deliberately total: a row written by something other than the bridge
+    one.
+
+    Total by construction — a row written by something other than the bridge
     must not raise here, because the whole point of the helpers below is to walk
-    PAST such a row rather than trip on it."""
+    PAST such a row rather than trip on it.
+
+    🔴 `AttributeError` IS IN THE TUPLE ON PURPOSE, and the #807 audit is why:
+    an earlier version claimed to be total and was not. A payload that is valid
+    JSON but not an OBJECT — `null`, `123`, `"str"`, `[1,2]` — decodes fine and
+    then has no `.get`, so all four raised. Only malformed JSON, a missing
+    `payload` key and a `None` payload were actually covered. A non-bridge
+    writer emitting a scalar payload is exactly the named case, so the claim and
+    the code disagreed precisely where it mattered.
+    """
     try:
         return json.loads(e["payload"]).get("op")
-    except (KeyError, TypeError, ValueError):
+    except (KeyError, TypeError, ValueError, AttributeError):
         return None
 
 
@@ -183,15 +196,30 @@ def _wait_ops(spool_dir, op, n=1, **kw) -> list:
     `monkeypatch.setenv`. A thread still alive from an EARLIER test therefore
     emits into the CURRENT test's spool — so `[0]` is whichever row landed
     first, not whichever row this test caused. Seen in CI as
-    `assert 'getHtml' == 'frames'` and `assert 'getHtml' == 'type'`, both with a
-    pair of `{"event":"cmd_timeout","op":"getHtml"}` rows from a neighbour
-    sitting ahead of the test's own event. Neither PR could reach browser-bridge
+    `assert 'getHtml' == 'frames'` and `assert 'getHtml' == 'type'`. The visible
+    artifact was a pair of `{"event":"cmd_timeout","op":"getHtml"}` lines in the
+    failing test's captured STDERR — those are the server's structured log, NOT
+    spool rows; do not grep the spool for that string. The corresponding spool
+    payload reads `{"op":"getHtml", …, "outcome":"timeout"}`. The stderr is
+    still good evidence because capture is per-test-phase, so a neighbour's
+    timeout demonstrably fired inside the failing test's window. Neither PR could reach browser-bridge
     — one changed `scripts/run-tests.sh`, the other changed only a `.md`.
 
     This is the positional sibling of the COUNT problem `_wait_events`'s own
     docstring describes: that one waits for the wrong NUMBER, this one reads the
     wrong ROW. `until=` fixes both, and this wraps the idiom so each call site
     does not re-derive it.
+
+    🔴 WHAT THIS DOES **NOT** COVER — it narrows the class, it does not close it.
+    Discrimination is on `op` ALONE, so a neighbour emitting the SAME op is
+    still selected. The exposed shape is a caller asking for N rows of a common
+    op where their ORDER carries the signal — `_wait_ops(…, "tabs", 2)` below is
+    the one such site. Measured for the #807 audit: no current test leaves a
+    `tabs` command in flight to time out (the two candidates call
+    `registry.submit` directly and never reach `emit_cmd_event`), so today's
+    residual is far smaller than the `getHtml`-timeout shape that caused the
+    incident. If that ever changes, the rows already carry `session` and a
+    payload `sess_src`, which would discriminate further.
     """
     def _seen(evs):
         return len([e for e in evs if _payload_op(e) == op]) >= n
@@ -223,10 +251,11 @@ def test_a_neighbours_late_row_does_not_become_this_tests_event(telemetry):
     """
     spool_dir = telemetry
     spool_dir.mkdir(parents=True, exist_ok=True)
-    # A neighbour's late `cmd_timeout`, in the exact shape CI produced, written
-    # as a v1 spool line. The format lives in `_parse_spool_line` above; if it
-    # ever changes, this planting breaks LOUDLY (that reader asserts `v1`)
-    # rather than silently planting a row nothing can decode.
+    # A neighbour's late `cmd_timeout`, written as a v1 spool line. The format
+    # lives in `_parse_spool_line` above. Drift breaks this LOUDLY either way,
+    # but be precise about which guard catches what: a VERSION-TAG change trips
+    # that reader's `v1` assert, while a same-version KEY RENAME is caught by
+    # this test's own control below (verified by simulating both).
     foreign_payload = json.dumps({"op": "getHtml", "outcome": "timeout"})
     _log_file(spool_dir).write_text("\t".join([
         "v1", "source=browser-bridge", "kind=cmd",
@@ -3179,7 +3208,9 @@ def test_only_the_heartbeat_is_server_originated(telemetry):
     """
     spool_dir = telemetry
     S.emit_heartbeat_event(S.Registry())
-    e = _wait_events(spool_dir, 1)[0]
+    # Selected by op, then cross-checked against `kind` — selection is on the
+    # PAYLOAD op, so this assertion is not tautological.
+    e = _wait_ops(spool_dir, "heartbeat", 1)[0]
     assert e["kind"] == "heartbeat"
     assert "session" not in e, e
     p = json.loads(e["payload"])
@@ -5819,7 +5850,9 @@ def test_type_telemetry_no_typed_text(telemetry):
                      {"op": "type", "text": "SECRET_PROMPT_cafef00d"})
         assert st == 200
         # Selected by op, not by position: a neighbour's late row can sit at [0].
-        assert _wait_payload(spool_dir, "type")["op"] == "type"
+        # No `== "type"` assertion here — selecting on op then asserting it is
+        # tautological; `_wait_ops` already raises if no `type` row lands.
+        _wait_payload(spool_dir, "type")
         raw = _log_file(spool_dir).read_text()
         assert "SECRET_PROMPT" not in raw, "typed text leaked into telemetry"
     finally:
@@ -8635,7 +8668,13 @@ def test_heartbeat_is_not_counted_as_operator_usage(telemetry):
 
     spool_dir = telemetry
     S.emit_heartbeat_event(_FakeRegistry())
-    e = _wait_events(spool_dir, 1)[0]
+    # 🔴 SELECTED BY OP, and this site is why the #807 audit called it urgent.
+    # With positional indexing a neighbour's `kind="cmd"` row at [0] failed this
+    # with "the heartbeat is being counted as operator usage by adoption-scan" —
+    # a confident, FALSE diagnosis about a seam that is fine. That is strictly
+    # worse than the failure that prompted the fix (`'getHtml' == 'frames'`),
+    # which at least names its own confusion.
+    e = _wait_ops(spool_dir, "heartbeat", 1)[0]
     assert e["kind"] not in counted_kinds, \
         ("the heartbeat is being counted as operator usage by adoption-scan — "
          f"emitted kind={e['kind']!r}, counted={counted_kinds}")
