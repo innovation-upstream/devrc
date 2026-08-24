@@ -60,6 +60,13 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 MODULE_PATH = ROOT / "scripts" / "lib" / "subsystem_touch.py"
 HANDOFF_DOC = ROOT / "claude" / "skills" / "handoff" / "SKILL.md"
+# 🔴 THE PROTOCOL MOVED 2026-08-24. `/handoff` step 4 was ~26 KB of index
+# protocol inside a skill about writing handoffs; it is now the `subsystem-index`
+# skill, which `/handoff` and `/analyze-service` both follow. The pins below
+# assert against THAT file: they pin the PROTOCOL, and the protocol has a home of
+# its own now. `HANDOFF_DOC` stays because two pins are about /handoff itself —
+# that it still routes here, and that the kickoff block precedes both writes.
+INDEX_DOC = ROOT / "claude" / "skills" / "subsystem-index" / "SKILL.md"
 ANALYZE_DOC = ROOT / "claude" / "skills" / "analyze-service" / "SKILL.md"
 # 🔴 THE PINNED PROSE MOVED OUT OF THE ALWAYS-LOADED BODY, and these pins moved
 # with it in the SAME commit. `SKILL.md` was 17,476 bytes and loads on every
@@ -1551,10 +1558,7 @@ class TestSkillDocsArePinned:
             "use `Edit` anchored on `## Nuance / work-history`, not `Write`",
             "no whole-file retype of a curated unbacked-up entry",
         ),
-        (
-            "Emit this BEFORE step 4's confirm gate, unconditionally",
-            "the kickoff block is the deliverable and must not sit behind a y/N",
-        ),
+
         ("--exclude claudedocs/handoff-", "the ritual does not nominate its own artifact"),
         (
             "in particular the `test_<slug>` stem",
@@ -1774,7 +1778,7 @@ class TestSkillDocsArePinned:
         agent to improvise at exactly the moment it is about to write into a
         client-confidential store. Derived from `STATUS_PRECEDENCE` rather than
         hand-listed, so a status added later cannot quietly go uncovered."""
-        doc = HANDOFF_DOC.read_text(encoding="utf-8")
+        doc = INDEX_DOC.read_text(encoding="utf-8")
         for status in st.STATUS_PRECEDENCE:
             assert f"`{status}`" in doc, (
                 f"claude/skills/handoff/SKILL.md never mentions the `{status}` status, "
@@ -1790,7 +1794,12 @@ class TestSkillDocsArePinned:
         prompts are retired (index write 2026-08-15, push 2026-08-23), so the
         reason is now that everything after the kickoff can REFUSE: step 4 can
         dead-end and step 5 can exit without writing on four separate statuses.
-        The ordering requirement did not change; only why it matters."""
+        The ordering requirement did not change; only why it matters.
+
+        🔴 Reads HANDOFF_DOC, not INDEX_DOC: this is a claim about /handoff's own
+        step order. The index PROTOCOL moved to `subsystem-index` (2026-08-24);
+        the fact that /handoff hands over the deliverable before invoking it did
+        not."""
         doc = HANDOFF_DOC.read_text(encoding="utf-8")
 
         def at(needle: str) -> int:
@@ -1820,7 +1829,7 @@ class TestSkillDocsArePinned:
         "sentence,why", HANDOFF_SENTENCES, ids=[w for _, w in HANDOFF_SENTENCES]
     )
     def test_handoff_step_sentence(self, sentence: str, why: str) -> None:
-        doc = HANDOFF_DOC.read_text(encoding="utf-8")
+        doc = INDEX_DOC.read_text(encoding="utf-8")
         assert sentence in doc, (
             f"claude/skills/handoff/SKILL.md no longer contains the sentence pinning {why}.\n"
             f"  missing: {sentence!r}\n"
@@ -1829,11 +1838,37 @@ class TestSkillDocsArePinned:
             f"  following, and the drift is silent: the step simply stops happening."
         )
 
+    def test_handoff_still_routes_to_the_index_skill(self) -> None:
+        """🔴 THE SEAM the 2026-08-24 extraction created. The protocol moved to
+        `subsystem-index`; if /handoff stops naming it, the whole step silently
+        stops happening and every pin above still passes — they assert the
+        protocol EXISTS, not that anyone runs it.
+
+        This is the one assertion that fails if the two halves come apart."""
+        doc = HANDOFF_DOC.read_text(encoding="utf-8")
+        assert "`subsystem-index`" in doc, (
+            "claude/skills/handoff/SKILL.md no longer names the `subsystem-index` "
+            "skill. The index protocol moved out of step 4 on 2026-08-24; without "
+            "this reference nothing invokes it and the store stops accruing."
+        )
+        assert "--exclude claudedocs/handoff-" in doc, (
+            "/handoff must still pass --exclude for its own doc — that is caller "
+            "knowledge the index skill cannot supply."
+        )
+
+    def test_the_kickoff_precedes_both_writes(self) -> None:
+        """Replaces the pin on `Emit this BEFORE step 4's confirm gate` — that
+        gate was retired 2026-08-15 and step 4 is now a pointer, so the sentence
+        named something that no longer exists. Asserted here against the handoff
+        doc with its current wording."""
+        doc = HANDOFF_DOC.read_text(encoding="utf-8")
+        assert "Emit this BEFORE steps 4 and 5, unconditionally" in doc
+
     def test_the_pin_can_report_absence(self) -> None:
         """Negative control on the pin itself: a check against a doc that happens
         to contain everything is indistinguishable from one pointed at the wrong
         file."""
-        doc = HANDOFF_DOC.read_text(encoding="utf-8")
+        doc = INDEX_DOC.read_text(encoding="utf-8")
         assert "a sentence deliberately absent from the handoff skill" not in doc
 
     def test_the_pinned_docs_are_the_DEPLOYED_ones(self) -> None:
@@ -10553,7 +10588,7 @@ class TestStep4IsTOLDToReadTheShapeBlock:
         assert emitted == set(self.KINDS)
 
     def test_step_4_names_every_kind_the_scanner_can_emit(self) -> None:
-        doc = HANDOFF_DOC.read_text(encoding="utf-8")
+        doc = INDEX_DOC.read_text(encoding="utf-8")
         for kind in self.KINDS:
             assert kind.upper() in doc, (
                 f"`{kind}` can be reported by --validate and step 4 never mentions it; "
@@ -10563,7 +10598,7 @@ class TestStep4IsTOLDToReadTheShapeBlock:
     def test_step_4_names_the_headings_the_shape_block_CHECKS(self) -> None:
         """And only those: a writer told the spine is checked would read the
         zero as a claim about `## What it is`, which nothing examines."""
-        doc = HANDOFF_DOC.read_text(encoding="utf-8")
+        doc = INDEX_DOC.read_text(encoding="utf-8")
         for heading in st.SHAPE_HEADINGS:
             assert heading in doc, heading
 
@@ -10571,7 +10606,7 @@ class TestStep4IsTOLDToReadTheShapeBlock:
         """The one fact that makes the instruction necessary rather than
         redundant. Without it "run --validate and read the output" is advice a
         reader discharges by checking `rc == 0`."""
-        doc = " ".join(HANDOFF_DOC.read_text(encoding="utf-8").split())
+        doc = " ".join(INDEX_DOC.read_text(encoding="utf-8").split())
         assert "advisory and deliberately does **not** move the verdict" in doc
         assert "still exits 0" in doc
 

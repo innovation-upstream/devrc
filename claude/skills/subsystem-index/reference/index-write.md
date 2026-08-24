@@ -2,7 +2,7 @@
 
 **Rationale only. Every rule you must follow is in `SKILL.md` step 4 and is complete there** — nothing in this file needs to be read before running the read-only probe, and nothing here relaxes a rule. Read it when a rule looks arbitrary, when you are tempted to work around one, or before proposing a change to one.
 
-Source: `~/workspace/devrc/claude/skills/handoff/reference/index-write.md` (deployed at `~/.claude/skills/handoff/reference/index-write.md`).
+Source: `~/workspace/devrc/claude/skills/subsystem-index/reference/index-write.md` (deployed at `~/.claude/skills/subsystem-index/reference/index-write.md`).
 
 🔴 **Long lines are deliberate.** Several sentences below are pinned verbatim by `scripts/tests/test_subsystem_recall.py`; hard-wrapping one puts a newline inside the pinned string and the guard goes red. Do not reflow this file.
 
