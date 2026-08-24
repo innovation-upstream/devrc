@@ -1,0 +1,120 @@
+{
+  "_doc": [
+    "THE SKILL-LISTING TIER LEDGER. devrc-owned; the single source of truth for",
+    "which skills spend always-on listing budget on a full description (tier A)",
+    "and which ship as `name-only` (tier B, ~12 chars, still /name-invocable and",
+    "still callable by the Skill tool -- what it loses is the ROUTING PROSE that",
+    "makes it fire from a described symptom).",
+    "",
+    "APPLIED BY `scripts/sync-skill-tiers.py`, which writes `skillOverrides` into",
+    "a host's ~/.claude/settings.json. It DEFAULTS TO DRY-RUN. This file being in",
+    "git says nothing about any host having it applied -- ~/.claude/settings.json",
+    "is per-host and unmanaged by design. `scripts/drift-check.sh` reports a host",
+    "whose deployed overrides disagree with this ledger (rc 22), and reports NOT",
+    "ADOPTED -- with no rc -- for a host that has never had it applied.",
+    "",
+    "THIS FILE IS NOT DEPLOYED ANYWHERE. `nix/home.nix` maps named paths under",
+    "claude/, not the directory, so nothing symlinks this into ~/.claude/.",
+    "",
+    "HOW TO TIER A SKILL -- the question is NOT how often it is used.",
+    "Ask: must this fire when Zach describes a SYMPTOM rather than naming the",
+    "tool? If yes it is A. If he reaches for it by name (or types /name), it is B.",
+    "Two skills here are LIVE with zero recorded skill invocations -- `dl-router`",
+    "runs as a systemd service and `adoption-scan` has 20,494 tool-invocation",
+    "events -- so the usage counter cannot decide this and is not consulted.",
+    "",
+    "THE TIE-BREAK, applied to the two entries below that were genuinely close:",
+    "tier B when a mis-route DEGRADES the answer; tier A when a mis-route takes a",
+    "WRONG ACTION. That is why `vetr-mailbox` is A despite 0 uses and being the",
+    "second-cheapest entry in the whole listing: name-only, an 'email them on my",
+    "behalf' prompt routes to `mailbox`, which claims the same phrase and sends",
+    "from a different account.",
+    "",
+    "THIS SET IS DELIBERATELY CONSERVATIVE. Measured 2026-08-24: the whole listing",
+    "is 20,708 chars against a 30,000 budget on claude-opus-5 @1M -- 0.69x, so",
+    "NOTHING is being truncated today. A wide tier B would cost real routing now",
+    "for a benefit ~1.8 months out. Flipping one skill is a one-line edit here;",
+    "the ratchet in scripts/tests/test_skill_tiers.py re-measures on every run.",
+    "",
+    "Every tier-B entry carries a one-line `why` so the call is auditable. Tier-A",
+    "entries carry none: A is the default, and a rationale for a default is noise."
+  ],
+  "skills": {
+    "activity": { "tier": "A" },
+    "adoption-scan": {
+      "tier": "B",
+      "why": "asked for by name ('is anyone using X', 'which tools are dead'); its 20,494 tool-invocation events are invisible to the skill counter, and no symptom routes here"
+    },
+    "analyze-service": { "tier": "A" },
+    "audit-pr": { "tier": "A" },
+    "auditloop": {
+      "tier": "B",
+      "why": "the trigger IS the product name (auditloop / auditloop.zacx.dev) -- there is no symptom phrasing for it"
+    },
+    "bar": { "tier": "A" },
+    "browser": { "tier": "A" },
+    "check-clickup-addressed": { "tier": "A" },
+    "clawgate": { "tier": "A" },
+    "clickup": { "tier": "A" },
+    "close-the-loop": {
+      "tier": "B",
+      "why": "a deliberate ritual Zach opens by name; nothing he says by accident should start it"
+    },
+    "devrc-dx": { "tier": "A" },
+    "dl-router": { "tier": "A" },
+    "espanso-audit": {
+      "tier": "B",
+      "why": "invoked as /espanso-audit; the skill name IS the phrase he types"
+    },
+    "find-session": { "tier": "A" },
+    "handoff": { "tier": "A" },
+    "i3": { "tier": "A" },
+    "initiative-scan": {
+      "tier": "B",
+      "why": "CLOSEST CALL in this ledger -- 'what's stalled' IS a symptom, but the mis-route lands on `initiatives` (the durable board), a degraded answer rather than a wrong action; flip to A the first time that costs anything"
+    },
+    "initiatives": { "tier": "A" },
+    "mailbox": { "tier": "A" },
+    "obs-read": { "tier": "A" },
+    "opencode": { "tier": "A" },
+    "prune-index": {
+      "tier": "B",
+      "why": "'prune the analyze-service index' -- named, not described; and the three prune-* siblings spend most of their prose disambiguating each other, which name-only makes moot"
+    },
+    "prune-memory": {
+      "tier": "B",
+      "why": "'prune memory' / MEMORY.md is named explicitly whenever this is wanted"
+    },
+    "prune-skill": {
+      "tier": "B",
+      "why": "'prune/shrink this skill' -- named, not described"
+    },
+    "repo-cos": {
+      "tier": "B",
+      "why": "a weekly ritual opened by name or as /repo-cos; the email that prompts it names it"
+    },
+    "resume": { "tier": "A" },
+    "session-manager": { "tier": "A" },
+    "sglang": {
+      "tier": "B",
+      "why": "named by the thing it operates (sglang / sglang-server); GPU-contention symptoms route to obs-read first anyway"
+    },
+    "signal": { "tier": "A" },
+    "standup": { "tier": "A" },
+    "subsystem-index": {
+      "tier": "B",
+      "why": "invoked BY `/handoff`, which names it in its own body; its own description says 'rarely run directly', so no symptom needs to route to it"
+    },
+    "tekton": { "tier": "A" },
+    "ux-audit-loops": {
+      "tier": "B",
+      "why": "named alongside its sibling `auditloop`; tiering BOTH keeps neither winning the other's prompts by default"
+    },
+    "verify-agent": {
+      "tier": "B",
+      "why": "CLOSE CALL -- run as a gate immediately after an agent reports done, and named when it is; flip to A if a 'done' claim ever gets believed because this did not fire"
+    },
+    "vetr-mailbox": { "tier": "A" },
+    "window-triage": { "tier": "A" }
+  }
+}

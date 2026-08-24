@@ -2632,7 +2632,7 @@ in
         # local_ipv4s identifies WHICH host this is (both report hostname `nixos`).
         # Without it detection returns "unknown" and the script exits 6.
         #
-        # 🔴 python3 AND tmux ARE FOR THE CHILD, NOT FOR drift-check.sh ITSELF.
+        # 🔴 tmux IS FOR THE CHILD; python3 IS NOW FOR BOTH.
         # The fuzzyclaw phase-2 gate execs `scripts/session-manager`, whose
         # shebang resolves `python3` from PATH and which shells out to `tmux
         # list-panes`. Under systemd there is none of the login shell's PATH, so
@@ -2640,6 +2640,12 @@ in
         # forever — from a unit that looks correct, which is the exact shape the
         # iproute2 note above records. Pinned by
         # `test_the_phase2_child_binaries_are_on_the_unit_path`.
+        # ⚠ This block used to say python3 was for the child ONLY. That stopped
+        # being true when the skill-tier arm (rc 22) landed: drift-check.sh now
+        # runs `python3 lib/skill_tier_facts.py` itself, in the driver, to read
+        # `claude/skill-tiers.json` through the ledger's own parser instead of a
+        # second sed. Without python3 that arm reports COULD NOT MEASURE — no rc,
+        # but also no coverage.
         "PATH=${lib.makeBinPath [ pkgs.git pkgs.openssh pkgs.iproute2 pkgs.bash pkgs.coreutils pkgs.gawk pkgs.gnused pkgs.gnugrep pkgs.python3 pkgs.tmux ]}"
         "HOME=%h"
       ];
@@ -2650,6 +2656,12 @@ in
         "${../scripts/drift-check.sh}"
         "${../scripts/lib/host-role.sh}"
         "${../scripts/lib/drift_phase2.py}"
+        # The rc-22 skill-tier arm: the reader, the parser it delegates to, and
+        # the ledger itself. The ledger is listed because a re-tiering changes
+        # what the unit would REPORT without any script changing at all.
+        "${../scripts/lib/skill_tier_facts.py}"
+        "${../scripts/lib/skill_tiers.py}"
+        "${../claude/skill-tiers.json}"
       ];
     };
   };

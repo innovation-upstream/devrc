@@ -99,6 +99,15 @@ there. Only what's specific to this repo, where a working tree is also a **deplo
   its absence a token fails the suite. It exists because the prose version was false for
   three days — `summary.age_sources` was read with no presence check, and a report
   missing it printed a `READY` byte-identical to a real one.
+  🔴 **rc 22 — a host's deployed `skillOverrides` disagree with `claude/skill-tiers.json`.**
+  A host with NO overrides prints **NOT ADOPTED and sets no rc**: the tier mechanism
+  shipped applied to zero hosts on purpose (nothing is being truncated today), and
+  counting an unapplied host as drift would have made this arm red on every run from
+  the day it landed. rc 22 is **adopted-then-drifted** only. It ranks just under rc 10
+  because a BEHIND host carries a stale ledger — ship it first, then re-run
+  `scripts/sync-skill-tiers.py`. The expectation is read through the ledger's own
+  parser, never a second sed; a ledger it cannot read prints COULD NOT MEASURE and
+  sets no rc, because an empty expectation would make every host look compliant.
 - **Recovering a diverged host** — preserve, verify, *then* move the pointer:
   `git branch <topic> HEAD && git push -u origin <topic>` on that host → confirm the shas are
   on origin **from a different host** → `git reset --keep origin/main` (`--keep` refuses
@@ -121,6 +130,7 @@ there. Only what's specific to this repo, where a working tree is also a **deplo
   does — something must NAME it, so give each one a router (a SKILL.md table row, and where it
   matters a hook that names the path in its message; see `clawgate/flows/task-authoring.md`).
 - 🔴 **The skill LISTING is a third always-on cost, and it fails SILENTLY.** Every skill's name + `description` (+ `when_to_use`) loads on **every session** under a budget of **1% of the context window** (per-entry cap 1,536 chars); on overflow Claude Code DROPS descriptions starting with the skills you invoke least — stripping the very trigger keywords that make a skill auto-fire, with no error. So a description is **routing surface, not documentation**: key use case first, then the literal phrases Zach says, then disambiguation from a sibling skill. Narrative goes in the body (0 until invoked). 🔴 **Measured 2026-08-23: the listing does NOT fit a 200k context and cannot be made to — it fits 1M.** The TOTAL is now ratcheted by `scripts/tests/test_skill_descriptions.py`, which owns the constants, the measurement, the break-even argument and the eviction playbook — **read them there, never restate them.** Any addition needs an eviction in the SAME commit; closing the remaining gap means retiring or merging skills, or disabling the cloudflare plugin (a quarter of the total, and not devrc's to edit). ⚠ `claude doctor` (the CLI) reports no listing cost; the interactive `/doctor` reportedly does — unverified.
+  🔴 **The cost is now per-skill opt-in, and ADDING A SKILL MEANS TIERING IT.** `claude/skill-tiers.json` assigns every skill tier A (full description) or tier B (`name-only`, ~12 chars, still `/name`-invocable, no routing prose). `scripts/tests/test_skill_tiers.py` pins it **two-way** — a skill with no entry, or an entry naming no skill, fails the suite — and owns the tier-A ratchet, the real charging formula and the playbook: **read them there, never restate them.** Tier by whether the skill must **AUTO-FIRE from a symptom Zach describes**, never by an invocation counter (`dl-router` runs as a live systemd service and `adoption-scan` has 20,494 tool events; Claude Code's counter says 0 for both). 🔴 **The ledger is applied to NO host by default** — `~/.claude/settings.json` is per-host and unmanaged, so `scripts/sync-skill-tiers.py` (dry-run unless `--apply`) is an operator act, and `drift-check.sh` reports an unapplied host as **NOT ADOPTED, not drift**. Full argument: `claudedocs/proposal-skill-listing-tiers.md`.
 - `.zshrc`, `.tmux.conf` etc. are read by the nix modules — read with offset/limit, they're large.
 
 ### Subsystems — operate each via its SKILL, not from here

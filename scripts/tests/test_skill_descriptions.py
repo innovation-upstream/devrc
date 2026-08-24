@@ -78,22 +78,32 @@ Entry cost, from the binary: `"- " + name + ": " + description`, i.e.
 **name + 4 + min(len(desc), 1536)**; a name-only entry costs `name + 2`; the
 entries are newline-joined, so the total carries a further **(n - 1)**.
 
-    devrc's 36 entries, as this module measures  12,679 chars
-    + 4 per entry (144) + 35 separators             179 chars
+    devrc's 37 entries, as this module measures  12,861 chars
+    + 4 per entry (148) + 36 separators             184 chars
     ---------------------------------------------------------
-    what Claude Code actually charges            12,858 chars
+    what Claude Code actually charges            13,045 chars
 
-      vs a claude-3.x..4.6 200k budget (8,000)      1.61x over
-      vs a claude-opus-5   200k budget (6,000)      2.14x over
+      vs a claude-3.x..4.6 200k budget (8,000)      1.63x over
+      vs a claude-opus-5   200k budget (6,000)      2.17x over
       vs either 1M budget (40,000 / 30,000)         fits, with room
 
+⚠ RE-MEASURED at 37 entries. This block read 36 / 12,679 / 12,858 until
+`subsystem-index` landed in #790, AFTER #785 wrote those numbers -- so the
+figures were stale within a day and nothing said so. `test_skill_tiers.py` now
+pins its own copies of the same measurements against the live tree for exactly
+that reason; the numbers here are still prose, so re-derive rather than trust
+them (`listing_total_chars(_entries())` is the one this module owns).
+
 🔴 THIS MODULE DELIBERATELY MEASURES THE SMALLER NUMBER. `listing_total_chars`
-sums `len(name) + len(desc)` and so UNDERCOUNTS the real charge by 179 chars at
-36 entries (the per-entry 4 plus the separators; the general form is 5n - 1).
+sums `len(name) + len(desc)` and so UNDERCOUNTS the real charge by 184 chars at
+37 entries (the per-entry 4 plus the separators; the general form is 5n - 1 --
+quote the FORM, not the figure, which is what went stale above).
 That is the conservative direction -- the gate can only ever be stricter than
-reality -- and it is left alone ON PURPOSE: re-pointing the ratchet at the real
-formula belongs with the tiering work, not with a retirement. Do not "fix" it
-here without moving the ceiling in the same commit.
+reality -- and it is left alone ON PURPOSE: the tiering work in
+`test_skill_tiers.py` measures with the REAL formula, and having the two modules
+disagree by exactly 5n - 1 is the intended arrangement, pinned there by
+`test_the_real_formula_exceeds_the_older_gate_measure_by_5n_minus_1`. Do not
+"fix" it here without moving the ceiling in the same commit.
 
 ⚠ Two overrides sit ABOVE all of this. `SLASH_COMMAND_TOOL_CHAR_BUDGET`
 short-circuits the whole computation before the fraction or the context window
@@ -108,7 +118,8 @@ this gate from what Claude Code actually charges. No devrc skill defines
 `when_to_use`, so the `description - when_to_use` concatenation contributes
 nothing today either.
 
-The 36 is down from 39: `ux-sweep`, `gpu-operator-check` and `session-audit`
+The 37 is 39 minus three retirements plus one addition. `ux-sweep`,
+`gpu-operator-check` and `session-audit`
 were RETIRED on 2026-08-23 after measuring near-zero use of each -- no direct
 script/service use and no genuine prompt demand across 5,582 transcript files.
 Claude Code's own `skillUsage` counter recorded 0 for `ux-sweep` and
@@ -116,7 +127,7 @@ Claude Code's own `skillUsage` counter recorded 0 for `ux-sweep` and
 fired 2026-05-30. That is the eviction the playbook below asks for, and it is
 why the total moved without any description being trimmed.
 
-The 12,679 counts devrc's entries ONLY. The cloudflare plugin cost a further
+The 12,861 counts devrc's entries ONLY. The cloudflare plugin cost a further
 5,221 chars of listing until it was removed from `enabledPlugins` in
 `~/.claude/settings.json`, and it currently contributes nothing. 🔴 That file is
 PER-HOST and unmanaged by design (`CLAUDE.md` -> Git discipline), so that zero
@@ -139,17 +150,21 @@ SEPARATE `"builtin"` arm -- `init`, `statusline`, `security-review`,
 skills are not protected either. So the earlier claim in this docstring that
 built-in skills are merely "ADDITIONAL" had the direction wrong twice: bundled
 entries are SENIOR (they spend the budget first and never lose their
-descriptions, so devrc's 36 compete for the remainder), while builtin and plugin
+descriptions, so devrc's 37 compete for the remainder), while builtin and plugin
 entries are ordinary competitors like devrc's own.
 
-devrc's 36 entries are therefore a FLOOR on the listing, never the count: the
+devrc's 37 entries are therefore a FLOOR on the listing, never the count: the
 non-devrc entries are real, they are not readable from this repo, and no
 assertion here can see them.
 
-Two rounds of trimming plus one retirement round have narrowed devrc's share
+Two rounds of trimming plus one retirement round narrowed devrc's share
 (14,792 -> 13,925 -> 13,491 -> 12,679 as measured here) without ever closing the
 200k gap -- and retiring three whole unused skills bought only 812 chars, which
-is the honest measurement of how far this approach goes.
+is the honest measurement of how far this approach goes. ONE ADDITION
+(`subsystem-index`, #790) then put 182 of that back, taking the measure to
+12,861: the trimming approach is not merely slow, it is reversed by a single
+new skill. That is the argument the tier ledger exists to answer -- see
+`claude/skill-tiers.json` and `scripts/tests/test_skill_tiers.py`.
 
 🔴 So this ceiling is NOT "the listing fits" -- it demonstrably does not on 200k,
 and a gate pinned at the real 200k budget would be permanently red, which
@@ -202,7 +217,7 @@ SKILLS_DIR = REPO_ROOT / "claude" / "skills"
 # to make a description fit; cut the description.
 PER_ENTRY_CAP_CHARS = 1_536
 
-# Vacuity floor on the scan itself. 36 entries were measured at the time this
+# Vacuity floor on the scan itself. 37 entries were measured at the time this
 # gate was written; a glob that silently matches nothing would otherwise report a
 # clean sweep of an empty set -- the "reassuring zero" `claude/RULES.md` names.
 # Set below the measurement so adding or retiring a skill does not red the gate,
@@ -214,13 +229,28 @@ MIN_LISTING_ENTRIES = 30
 # 13,491 -- none of them dropping a trigger phrase or a disambiguation clause --
 # and retiring the three effectively-unused skills (`ux-sweep`,
 # `gpu-operator-check`, `session-audit` -- 0/0/1 recorded invocations, see the
-# docstring; plus ux-audit-loops' now-dangling pointer at the first) takes
-# it to 12,679 across 36 entries. The ceiling sits ~250 chars above that
-# measurement -- deliberately less than one average entry (12,679 / 36 = 352),
-# so a NEW skill cannot be added without an eviction in the SAME commit. That is
-# the same rule `claude/RULES.md` and
-# `scripts/browser-bridge/tests/test_skill_size.py` already apply to the other
-# two always-on documents.
+# docstring; plus ux-audit-loops' now-dangling pointer at the first) took
+# it to 12,679 across 36 entries, which is where this ceiling was set.
+#
+# 🔴 THE MEASURE IS NOW 12,861 ACROSS 37 ENTRIES, SO HEADROOM IS 68 -- NOT ~250.
+# `subsystem-index` (#790) arrived at 182 chars as this module measures and slid
+# straight through, because 182 < 250. That is not a bug in this constant; it is
+# the constant's actual contract, and the sentence that used to sit here --
+# "so a NEW skill cannot be added without an eviction in the SAME commit" --
+# CLAIMED COVERAGE THIS CODE DOES NOT PROVIDE. `claude/RULES.md` calls that worse
+# than no guard, because reading as coverage is what stops anyone looking.
+#
+# What it really does: headroom is set below the MEAN entry (12,679 / 36 = 352 at
+# the time), so it forces the eviction conversation for a TYPICAL new skill and
+# lets a small one through until the accumulated slack is gone. At 68 chars the
+# slack IS gone: the next addition of ANY size reds this gate. Do not read that
+# as the guard having tightened -- it is the same guard, at the end of its rope.
+#
+# 🔴 DO NOT "re-pin to the current measurement plus 250" -- that would RAISE this
+# number, which is the one thing the paragraph below forbids. Leave it at 12_929.
+# The structural answer to a listing that keeps regrowing is the tier ledger
+# (`claude/skill-tiers.json`, gated by `scripts/tests/test_skill_tiers.py`):
+# demote a skill to `name-only` and its entry stops being charged here at all.
 #
 # LOWER it when you cut; do NOT raise it to make a new description fit. A ceiling
 # left at the previous, larger number licenses exactly the regrowth this constant
@@ -458,7 +488,7 @@ def test_the_out_of_tree_ledger_matches_nix_home():
 def test_the_listing_total_does_not_regrow_past_its_ratchet():
     """🔴 The SUM, which the per-entry cap above structurally cannot see.
 
-    36 entries each comfortably under the 1,536-char per-entry cap still overrun
+    37 entries each comfortably under the 1,536-char per-entry cap still overrun
     the listing budget on a 200k window -- 1.61x on a claude-3.x..4.6 model,
     2.14x on claude-opus-5, because the budget's chars-per-token multiplier is
     model-dependent (4 vs 3). So the per-entry check can be green while
@@ -668,18 +698,23 @@ def test_control_the_total_ratchet_can_go_red():
     live_total = listing_total_chars(entries)
     assert live_total <= LISTING_TOTAL_CEILING_CHARS, "live tree already red"
 
-    # A new entry the size of the current mean. It must be enough on its own to
-    # breach the ceiling -- if it is not, the ratchet has been left so slack that
-    # a whole skill can be added for free, which is the failure mode it exists
-    # to prevent.
+    # A new entry the size of the current MEAN. It must be enough on its own to
+    # breach the ceiling -- if it is not, the ratchet has been left slack enough
+    # to absorb a typical whole skill unnoticed.
+    #
+    # 🔴 THIS PROVES NOTHING ABOUT A SMALL ENTRY, and that is not a hypothetical
+    # gap: `subsystem-index` (#790) was 182 chars and landed inside ~250 of
+    # headroom with no eviction, which is how headroom reached 68. The fixture is
+    # the mean ON PURPOSE -- building it from the smallest possible entry would
+    # grade a property this ceiling does not have and would be permanently red.
     mean = live_total // len(entries)
     newcomer = ("fixture/SKILL.md", "a-new-skill", "x" * (mean - len("a-new-skill")))
     assert entry_chars(newcomer[1], newcomer[2]) == mean
     assert listing_total_chars(entries + [newcomer]) > LISTING_TOTAL_CEILING_CHARS, (
         f"the ceiling has {LISTING_TOTAL_CEILING_CHARS - live_total} chars of "
         f"headroom, enough to absorb a whole {mean}-char entry unnoticed. "
-        "Re-tighten LISTING_TOTAL_CEILING_CHARS to the current measurement plus "
-        "less than one average entry."
+        "Cut descriptions, retire a skill, or demote one to tier B in "
+        "claude/skill-tiers.json -- do NOT raise LISTING_TOTAL_CEILING_CHARS."
     )
 
 
