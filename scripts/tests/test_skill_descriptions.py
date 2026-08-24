@@ -37,50 +37,119 @@ decidable, and only those are asserted:
 
 WHY (4) EXISTS, AND WHAT IT DELIBERATELY DOES NOT CLAIM
 -------------------------------------------------------
-(2) is a PER-ENTRY cap; nothing measured the SUM, and the sum is what the 1%
-budget is spent against. Re-measured 2026-08-23 on the live workbench.
+(2) is a PER-ENTRY cap; nothing measured the SUM, and the sum is what the
+listing budget is spent against. Re-measured 2026-08-23 on the live workbench;
+the budget MODEL below re-derived from the shipped binary 2026-08-24.
 
-🔴 CHARS ARE THE UNIT HERE, and they are exact -- the token column is an
-ESTIMATE and is labelled as one. It was produced with `tiktoken` cl100k_base,
-which is OPENAI's tokenizer, NOT Claude's; no Claude tokenizer is available on
-this host. Do not quote it as a Claude token count. It is carried only because
-it supplies the chars/token divisor, and the verdict below does not depend on
-that divisor being right:
+🔴 CHARS ARE THE UNIT -- LITERALLY, NOT AS AN APPROXIMATION OF TOKENS.
+🔴 DO-NOT-RE-DERIVE: the chars/token divisor and the "no tokenizer reaches 6.7"
+break-even argument this docstring used to carry (inherited from
+`claudedocs/handoff-skill-listing-budget.md`) are MOOT. Claude Code never
+tokenizes the listing. Read the model below instead of re-deriving that one.
 
-    devrc's 36 entries            12,679 chars   ~2,921 est. tok
-    the cloudflare plugin's 13         0 chars        0 est. tok  (see below)
-    ---------------------------------------------------------------
-    disk-readable total            12,679 chars   ~2,921 est. tok
-    divisor used                                 4.34 chars/token (estimate)
+Decompiled 2026-08-24 from the live binary -- `claude --version` 2.1.232,
+`/nix/store/43fmrchzsg9g110qqk9n7a5z0icsf0qh-claude-code-2.1.232/bin/
+.claude-wrapped`. ⚠ `bin/claude` beside it is a 20 KB wrapper STUB: grepping it
+returns a confident 0 for keys that DO exist in the real bundle (measured --
+`skillListingBudgetFraction` is 0 in the stub, 4 in the wrapped binary, while
+`enabledPlugins` is 30 as a positive control). Grep the wrapped file, always
+beside a control.
+
+    budget_chars = floor(contextWindow * zx(model) * skillListingBudgetFraction)
+
+with `skillListingBudgetFraction` defaulting to 0.01 and documented in the
+binary's own settings schema as "Fraction of the context window (IN CHARACTERS)
+reserved for the skill listing".
+
+🔴 `zx(model)` IS NOT A CONSTANT -- it is 4 for a 14-model set (`claude-3-*`
+through `claude-opus-4-6` / `claude-sonnet-4-6` / `claude-haiku-4-5`) and **3
+for anything newer, including `claude-opus-5`**. The `=4` default in the
+budget function is dead code: both real call sites pass `zx(mainLoopModel)`.
+
+    model class          200k ctx    1M ctx
+    claude-3.x .. 4.6      8,000      40,000
+    claude-opus-5+         6,000      30,000
+
+🔴 SO A SINGLE RATIO IS MEANINGLESS WITHOUT ITS MODEL. Quoting one bare number
+here is the exact defect this paragraph replaced -- do not swap one
+model-specific figure for another.
+
+Entry cost, from the binary: `"- " + name + ": " + description`, i.e.
+**name + 4 + min(len(desc), 1536)**; a name-only entry costs `name + 2`; the
+entries are newline-joined, so the total carries a further **(n - 1)**.
+
+    devrc's 36 entries, as this module measures  12,679 chars
+    + 4 per entry (144) + 35 separators             179 chars
+    ---------------------------------------------------------
+    what Claude Code actually charges            12,858 chars
+
+      vs a claude-3.x..4.6 200k budget (8,000)      1.61x over
+      vs a claude-opus-5   200k budget (6,000)      2.14x over
+      vs either 1M budget (40,000 / 30,000)         fits, with room
+
+🔴 THIS MODULE DELIBERATELY MEASURES THE SMALLER NUMBER. `listing_total_chars`
+sums `len(name) + len(desc)` and so UNDERCOUNTS the real charge by 179 chars at
+36 entries (the per-entry 4 plus the separators; the general form is 5n - 1).
+That is the conservative direction -- the gate can only ever be stricter than
+reality -- and it is left alone ON PURPOSE: re-pointing the ratchet at the real
+formula belongs with the tiering work, not with a retirement. Do not "fix" it
+here without moving the ceiling in the same commit.
+
+⚠ Two overrides sit ABOVE all of this. `SLASH_COMMAND_TOOL_CHAR_BUDGET`
+short-circuits the whole computation before the fraction or the context window
+are read; `skillListingMaxDescChars` raises the 1,536 per-entry cap. And the
+context-window lookup does not always return 1e6 for a 1M-capable model -- a
+session that cannot get 1M silently computes against 200,000 instead.
+
+⚠ LATENT TRAP: the budget pass measures with `.length` while the renderer uses
+`Bun.stringWidth`. They agree today because the only non-ASCII characters
+across all descriptions are `—` and `…`. ONE EMOJI in a description desyncs
+this gate from what Claude Code actually charges. No devrc skill defines
+`when_to_use`, so the `description - when_to_use` concatenation contributes
+nothing today either.
 
 The 36 is down from 39: `ux-sweep`, `gpu-operator-check` and `session-audit`
-were RETIRED on 2026-08-23 after measuring zero use of each -- no Skill-tool
-invocation, no direct script/service use, and no genuine prompt demand across
-5,582 transcript files. That is the eviction the playbook below asks for, and it
-is why the total moved without any description being trimmed.
+were RETIRED on 2026-08-23 after measuring near-zero use of each -- no direct
+script/service use and no genuine prompt demand across 5,582 transcript files.
+Claude Code's own `skillUsage` counter recorded 0 for `ux-sweep` and
+`gpu-operator-check` (absent entirely) and exactly 1 for `session-audit`, last
+fired 2026-05-30. That is the eviction the playbook below asks for, and it is
+why the total moved without any description being trimmed.
 
-The cloudflare plugin cost 5,221 chars of listing until it was removed from
-`enabledPlugins` in `~/.claude/settings.json`. 🔴 That file is PER-HOST and
-unmanaged by design (`CLAUDE.md` -> Git discipline), so the zero above is a
-measurement of THE WORKBENCH, not a devrc fact and not a claim about the laptop.
-Nothing in this repo can hold it there -- if the plugin comes back, so does the
-5,221, and no assertion here will notice. It is stated to explain the drop from
-20,013, not relied on.
+The 12,679 counts devrc's entries ONLY. The cloudflare plugin cost a further
+5,221 chars of listing until it was removed from `enabledPlugins` in
+`~/.claude/settings.json`, and it currently contributes nothing. 🔴 That file is
+PER-HOST and unmanaged by design (`CLAUDE.md` -> Git discipline), so that zero
+is a measurement of THE WORKBENCH, not a devrc fact and not a claim about the
+laptop. Nothing in this repo can hold it there -- if the plugin comes back, so
+does the 5,221, and no assertion here will notice. It is stated to explain the
+drop from 20,013, not relied on.
 
-THE VERDICT IS TOKENIZER-INDEPENDENT, which is why it is stated as a break-even
-rather than as a token count. 1% of a 200,000-token context is 2,000 tokens, so
-fitting 12,679 exact chars into it requires a divisor of >6.3 chars/token. No
-tokenizer of natural language reaches that -- real prose runs 3.5-4.5, and the
-estimate above lands mid-range at 4.34. So on a 200k context the listing is
-still ~1.46x over budget and CANNOT be re-tokenised into fitting: descriptions
-are being silently DROPPED today, starting with the skills invoked least. Two
-rounds of trimming plus one retirement round have narrowed the overshoot
-(2.3x -> 1.55x -> 1.46x) without closing it -- and retiring three unused skills
-outright moved it by only 0.09x, which is the measurement of how far this
-approach can go. On a 1M context (10,000 tokens) the break-even runs the other
-way -- overflow would need a divisor BELOW 1.27 -- so it fits with room to
-spare. Built-in skills are not readable from disk and are ADDITIONAL, so 36
-entries is a FLOOR, not the count.
+WHAT HAPPENS ON OVERFLOW, AND WHO SURVIVES IT
+---------------------------------------------
+Over budget, Claude Code does NOT trim evenly. It builds an exempt set, then
+decays every OTHER entry toward its bare `- name` form, cheapest-to-keep first,
+which is what "descriptions are dropped starting with the skills invoked least"
+means concretely -- the trigger keywords go, the name stays.
+
+🔴 The exemption is `type === "prompt" && source === "bundled"` (plus entries
+that are name-only already). **"bundled" is NOT "built-in".** `source` has a
+SEPARATE `"builtin"` arm -- `init`, `statusline`, `security-review`,
+`team-onboarding`, `commit-push-pr` are `builtin` and are NOT protected. Plugin
+skills are not protected either. So the earlier claim in this docstring that
+built-in skills are merely "ADDITIONAL" had the direction wrong twice: bundled
+entries are SENIOR (they spend the budget first and never lose their
+descriptions, so devrc's 36 compete for the remainder), while builtin and plugin
+entries are ordinary competitors like devrc's own.
+
+devrc's 36 entries are therefore a FLOOR on the listing, never the count: the
+non-devrc entries are real, they are not readable from this repo, and no
+assertion here can see them.
+
+Two rounds of trimming plus one retirement round have narrowed devrc's share
+(14,792 -> 13,925 -> 13,491 -> 12,679 as measured here) without ever closing the
+200k gap -- and retiring three whole unused skills bought only 812 chars, which
+is the honest measurement of how far this approach goes.
 
 🔴 So this ceiling is NOT "the listing fits" -- it demonstrably does not on 200k,
 and a gate pinned at the real 200k budget would be permanently red, which
@@ -143,8 +212,9 @@ MIN_LISTING_ENTRIES = 30
 # 🔴 THE RATCHET. devrc's listing entries summed to 14,792 chars at
 # 99b2636f; #749's trims took it to 13,925, six description shrinks took it to
 # 13,491 -- none of them dropping a trigger phrase or a disambiguation clause --
-# and retiring the three zero-use skills (`ux-sweep`, `gpu-operator-check`,
-# `session-audit`, plus ux-audit-loops' now-dangling pointer at the first) takes
+# and retiring the three effectively-unused skills (`ux-sweep`,
+# `gpu-operator-check`, `session-audit` -- 0/0/1 recorded invocations, see the
+# docstring; plus ux-audit-loops' now-dangling pointer at the first) takes
 # it to 12,679 across 36 entries. The ceiling sits ~250 chars above that
 # measurement -- deliberately less than one average entry (12,679 / 36 = 352),
 # so a NEW skill cannot be added without an eviction in the SAME commit. That is
@@ -389,10 +459,12 @@ def test_the_listing_total_does_not_regrow_past_its_ratchet():
     """🔴 The SUM, which the per-entry cap above structurally cannot see.
 
     36 entries each comfortably under the 1,536-char per-entry cap still overrun
-    the 1%-of-context budget by ~1.46x on a 200k window -- so the per-entry check
-    can be green while descriptions are being dropped. See this module's
-    docstring for the measurement and for why this is a ratchet rather than a
-    gate on the real budget.
+    the listing budget on a 200k window -- 1.61x on a claude-3.x..4.6 model,
+    2.14x on claude-opus-5, because the budget's chars-per-token multiplier is
+    model-dependent (4 vs 3). So the per-entry check can be green while
+    descriptions are being dropped. See this module's docstring for the
+    decompiled formula, for why a ratio quoted without its model is meaningless,
+    and for why this is a ratchet rather than a gate on the real budget.
     """
     entries = _entries()
     total = listing_total_chars(entries)
