@@ -66,6 +66,16 @@ Good uses of a question — roughly in order of value:
 
 1. **What does DONE look like?** (this is the acceptance criteria; if you get
    nothing else, get this)
+
+   🔴 **THIS IS THE ONE DEFINITION. `## Acceptance criteria` is where the CLOSING
+   CONDITION lives — they are one thing under two names, not two requirements.** It
+   must name either a mechanical check (a merged PR, a cleared alert, a command
+   exiting 0) or a human judgement over NAMED EVIDENCE ("X reads the transcript" —
+   never "someone will decide"). **If neither can be named, do not create the task
+   at all**: say so in your reply, and why. Everywhere else that mentions the
+   requirement — the core rule, the hook, `claude/skills/clawgate/reference/hooks.md` — points here rather
+   than restating it, because a predicate open-coded at N sites is wrong at N−1 of
+   them. Do not add a sixth phrasing.
 2. **Scope boundary** — the smallest version that is still worth doing vs the full
    one, offered as concrete options
 3. **A decision only Zach can make** — a user-facing micro-decision, a naming
