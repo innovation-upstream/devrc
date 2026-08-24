@@ -1539,6 +1539,96 @@ def test_a_LARGE_unrecognised_delta_is_not_flattened_to_ORDINARY(tmp_path):
         f"the headline ranked a delta of unknown keys:\n{block[:2000]}")
 
 
+def test_the_hazard_message_NAMES_the_family_the_key_belongs_to(tmp_path):
+    """🔴 THE PROSE-CONTRADICTS-CODE BUG, RE-INSTATED BY THE FIX ROUND ITSELF.
+
+    After the hazard regex widened to cover `remote.*.uploadpack` and friends,
+    the sentence the operator READS still enumerated the pre-widening families,
+    so a real finding was explained by a list that excluded it. The ledger test
+    pins the string; this pins that the string is what actually gets PRINTED
+    beside the key — a ledger nobody renders is still a ledger nobody reads.
+    """
+    scratch = _scratch_root(tmp_path)
+    name = _plant_repo_local_keys(
+        scratch, ("remote.origin.uploadpack", "/tmp/planted-uploadpack"))
+    runner = _runner_over(tmp_path, scratch, [name])
+
+    proc = _run_at(runner, scratch, tmp_path)
+    out = proc.stdout + proc.stderr
+    block = _guard10_failure_block(out)
+    assert block, f"GUARD 10's failure block was not printed at all:\n{out}"
+    assert "SHAPE: HAZARD" in block, f"the key was not ranked hazard:\n{block}"
+    assert "uploadpack" in block.split("SHAPE: HAZARD", 1)[1], (
+        f"the HAZARD explanation does not name the family the key that "
+        f"triggered it belongs to — the reader is handed a list that excludes "
+        f"their own finding:\n{block}")
+    # The routine writer of the one hazard key an ordinary git command produces.
+    assert "git submodule init" in block, (
+        f"the hazard arm does not name the routine writer of "
+        f"submodule.<n>.url/.update, so a submodule-bearing repo gets "
+        f"'AUDIT THIS TARGET FIRST' with no way to discriminate:\n{block}")
+
+
+def test_an_ABORTED_run_still_shreds_the_config_snapshots(tmp_path):
+    """🔴 THE SNAPSHOTS HOLD REAL CONFIG VALUES; A KILLED RUN USED TO KEEP THEM.
+
+    `$NOGIT_DIR/keys-{before,after}.N` are full `key<TAB>value` dumps of the
+    operator's real `<git-common-dir>/config` — `remote.origin.url` included.
+    Cleanup lived only on the normal path, so every TERM/INT/abort left them on
+    disk. Moving it into the EXIT trap fixed that, and the delta re-audit then
+    showed the fix was UNPINNED: deleting the `rm -rf` left the whole file
+    green. A guard nobody can break is a guard nobody is testing.
+
+    🔴 THE MATRIX, STATED SO THE LABEL IS NOT INFERRED. RED at `a7499d67`
+    (measured: the dir "survived a TERM"), GREEN at `089883d8` — because the
+    trap fix already landed there. So against 089883d8 this is MUTATION
+    coverage for an unpinned fix, not regression coverage; it is regression
+    coverage only relative to a7499d67.
+
+    Also asserts the verdict still prints and rc is still 143 — the cleanup runs
+    AFTER `_emit_verdict` precisely so it cannot swallow either.
+    """
+    scratch = _scratch_root(tmp_path)
+    name = _plant_repo_local_keys(scratch, ("branch.topic-abort.remote", "origin"))
+    runner = _runner_over(tmp_path, scratch, [name])
+
+    env = {**os.environ, **_unguarded_home(tmp_path)}
+    for k, v in list(env.items()):
+        if v is None:
+            del env[k]
+    proc = subprocess.Popen(["bash", str(runner), str(scratch)],
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True, cwd=str(REPO_ROOT), env=env)
+    nogit_dir = None
+    assert proc.stdout is not None
+    captured = []
+    for line in proc.stdout:                      # read until the dir is named
+        captured.append(line)
+        if "GIT_CONFIG_GLOBAL=" in line:
+            nogit_dir = Path(line.split("GIT_CONFIG_GLOBAL=", 1)[1].strip()).parent
+            break
+    assert nogit_dir is not None, (
+        "the runner never announced its isolated config, so this test never "
+        "learned which directory to watch:\n" + "".join(captured))
+    # Positive control: the thing we are about to assert is GONE must first be
+    # THERE. Without it a passing test is indistinguishable from watching a
+    # directory that was never created.
+    assert nogit_dir.is_dir(), f"{nogit_dir} does not exist to begin with"
+
+    proc.terminate()
+    rest = proc.stdout.read()
+    proc.wait(timeout=120)
+    out = "".join(captured) + rest
+
+    assert not nogit_dir.exists(), (
+        f"{nogit_dir} survived a TERM. It holds key<TAB>value dumps of the "
+        f"operator's real git config:\n{sorted(p.name for p in nogit_dir.iterdir())}")
+    assert "RESULT: FAIL (exit=143)" in out, (
+        f"the cleanup ran but the verdict did not survive it:\n{out[-1500:]}")
+    assert proc.returncode == 143, (
+        f"the EXIT trap changed the process status: {proc.returncode}")
+
+
 def test_the_shape_ledger_is_pinned_two_way():
     """🔴 THE CLASSIFIER'S TWO SETS ARE A LEDGER, not prose plus a regex.
 
@@ -1574,6 +1664,33 @@ def test_the_shape_ledger_is_pinned_two_way():
         r"|^[+~-] extensions\.worktreeconfig$"
     ), ("the ORDINARY key set moved. Every key it gains gets the reassuring "
         "headline. Update this ledger in the SAME commit.")
+
+    # 🔴 THE READER-FACING RENDERING IS PART OF THE LEDGER, and the #773 delta
+    # re-audit is why. The hazard message used to RETYPE the family list, and
+    # after the regex widened it still named the pre-widening set: a
+    # `remote.origin.uploadpack` finding was explained as "core.* / user.* /
+    # url.* / …", none of which it is. Prose contradicting the code it describes
+    # is the defect class this whole branch exists to close.
+    families = _assignment("NOGIT_HAZARD_FAMILIES")
+    assert families == (
+        "core.* / user.* / url.* / http.* / credential.* / include* / alias.*, "
+        "or any remote.*/submodule.* key whose last component is url / pushurl "
+        "/ uploadpack / receivepack / proxy / update"
+    ), ("the hazard set's READER-FACING rendering moved. It is what the operator "
+        "is shown when a run fails; keep it in step with NOGIT_HAZARD_KEYS.")
+
+    # And the half that catches real drift rather than an edit to this file:
+    # every family the prose NAMES must actually occur in the regex. A widened
+    # regex with a stale sentence passes the literal pin above (nobody touched
+    # the sentence) and fails here only if the sentence names something the
+    # regex dropped — so this is the direction that decays silently.
+    connectives = {"or", "any", "key", "whose", "last", "component", "is"}
+    named = {w for w in re.findall(r"[a-z]+", families)} - connectives
+    missing = sorted(w for w in named if w not in _assignment("NOGIT_HAZARD_KEYS"))
+    assert not missing, (
+        f"NOGIT_HAZARD_FAMILIES names {missing}, which NOGIT_HAZARD_KEYS does "
+        f"not match. The operator is being told this guard catches a key family "
+        f"it does not catch.")
 
 
 def test_a_global_change_FAILS_even_with_a_cotenant_PROVEN(tmp_path):

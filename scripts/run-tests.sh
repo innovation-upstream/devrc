@@ -2218,9 +2218,11 @@ _nogit_key_delta() {
 # $1 = the "<sign> <key>" lines -> one of: ordinary | hazard | unrecognised
 #
 #   hazard   `core.*` / `user.*` / `url.*` / `http.*` / `credential.*` /
-#            `include*` / `alias.*`, PLUS any `remote.*`/`submodule.*` key
-#            ending in `url` / `pushurl` / `uploadpack` / `receivepack` /
-#            `proxy` / `update`. Two families, one reason. The first is the
+#            `include*` / `alias.*`, PLUS any `remote.*`/`submodule.*` key whose
+#            LAST DOT-COMPONENT is `url` / `pushurl` / `uploadpack` /
+#            `receivepack` / `proxy` / `update` — the regex requires the literal
+#            `.` before the suffix, so `remote.origin.skipdefaultupdate` does
+#            NOT match, and saying "ending in" over-stated it. The first is the
 #            2026-08-21 incident's own shape (`core.hooksPath` --global,
 #            `core.bare = true` on a populated tree). The second is every
 #            `remote.*`/`submodule.*` key that names a REMOTE or a COMMAND —
@@ -2258,6 +2260,14 @@ _nogit_key_delta() {
 # set of writes that get the reassuring headline.
 NOGIT_HAZARD_KEYS='^[+~-] (core|user|url|http|credential|include|includeif|alias)\.|^[+~-] (remote|submodule)\..*\.(url|pushurl|uploadpack|receivepack|proxy|update)$'
 NOGIT_ORDINARY_KEYS='^[+~-] (branch|remote|worktree|submodule|maintenance)\.|^[+~-] extensions\.worktreeconfig$'
+# 🔴 THE READER-FACING RENDERING OF THE HAZARD SET — THE ONLY ONE. The message
+# below used to retype this list, and the #773 delta re-audit caught it still
+# naming the pre-widening families while the regex matched more: a
+# `remote.origin.uploadpack` finding was explained as "core.* / user.* / url.*
+# / …", none of which it is. `test_the_shape_ledger_is_pinned_two_way` pins this
+# string AND checks every family it names really occurs in the regex, so the two
+# cannot drift apart again in the direction that bit us.
+NOGIT_HAZARD_FAMILIES='core.* / user.* / url.* / http.* / credential.* / include* / alias.*, or any remote.*/submodule.* key whose last component is url / pushurl / uploadpack / receivepack / proxy / update'
 _nogit_delta_shape() {
   local delta="$1"
   [ -n "$delta" ] || { printf 'unrecognised'; return 0; }
@@ -3377,11 +3387,22 @@ _nogit_render_keys() {
       printf '%s    read the two together — they can land in different windows.\n' "$pad"
       ;;
     hazard)
-      printf '%s→ SHAPE: HAZARD. At least one key above is the 2026-08-21 incident'"'"'s own\n' "$pad"
-      printf '%s  shape (core.* / user.* / url.* / http.* / credential.* / include* /\n' "$pad"
-      printf '%s  alias.*). Nothing routine rewrites those in an existing clone, so the\n' "$pad"
-      printf '%s  LEADING hypothesis is a test in the target above escaping isolation.\n' "$pad"
+      # 🔴 THE FAMILY LIST IS READ FROM THE LEDGER, NOT RETYPED HERE. The delta
+      # re-audit of #773 found this sentence still enumerating the OLD set after
+      # the regex had widened: a `remote.origin.uploadpack` finding printed
+      # "(core.* / user.* / url.* / …)", naming none of the families the key
+      # actually belongs to. That is the prose-contradicts-code defect this
+      # whole branch exists to close, re-instated by its own fix round — so the
+      # duplication is gone rather than corrected.
+      printf '%s→ SHAPE: HAZARD. At least one key above is in the set this guard treats\n' "$pad"
+      printf '%s  as hazardous: %s.\n' "$pad" "$NOGIT_HAZARD_FAMILIES"
+      printf '%s  Nothing routine rewrites those in an existing clone, so the LEADING\n' "$pad"
+      printf '%s  hypothesis is a test in the target above escaping isolation.\n' "$pad"
       printf '%s  AUDIT THE TARGET FIRST. Still a ranking, not a verdict.\n' "$pad"
+      printf '%s  ⚠ ONE EXCEPTION WORTH CHECKING FIRST: `git submodule init` and\n' "$pad"
+      printf '%s    `git submodule update --init` write submodule.<n>.url and .update\n' "$pad"
+      printf '%s    into this same shared config, routinely. If the key above is one of\n' "$pad"
+      printf '%s    those and this repo has submodules, look there before any test.\n' "$pad"
       ;;
     *)
       if [ -n "$delta" ]; then
@@ -3526,7 +3547,7 @@ for entry in ${NOGIT_SEEN[@]+"${NOGIT_SEEN[@]}"}; do
       if [ "$_thas_global" -eq 1 ]; then
         nogit_lead="🔴 AND ONE OF THE FILES BELOW IS A GLOBAL ONE, WHICH *IS* ATTRIBUTABLE: no concurrent worktree operation writes the operator's global git config, so whatever reached it did so from inside this run. AUDIT THIS TARGET FIRST, starting with the [global-enforced] file. The window caveat below applies to the repo-local file only."
       elif [ "$_tshape" = "hazard" ]; then
-        nogit_lead="🔴 AND THE KEY DELTA BELOW POINTS AT THIS TARGET: it carries a key of the 2026-08-21 incident's own shape, which nothing routine writes into an existing clone. AUDIT THIS TARGET FIRST. The window caveat still applies and is stated below, but do not start there."
+        nogit_lead="🔴 AND THE KEY DELTA BELOW POINTS AT THIS TARGET: it carries a key from the set this guard treats as hazardous — the per-file line below names WHICH, and the set it belongs to. Nothing routine writes those into an existing clone. AUDIT THIS TARGET FIRST. The window caveat still applies and is stated below, but do not start there."
       elif [ "$_tshape" = "ordinary" ]; then
         nogit_lead="🔴 THE TARGET NAMED HERE IS THE WINDOW, NOT A CULPRIT: that file is shared by every worktree of the clone, and any concurrent 'git branch' / 'checkout -b' / 'push -u' / 'worktree add' / 'maintenance start' in ANY of them rewrites it while this run is going."
       else
