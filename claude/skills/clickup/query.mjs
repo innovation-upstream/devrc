@@ -342,7 +342,7 @@ Options:
                allowlist (gh_pr_merged:<owner>/<repo>#<n>, alert_cleared:<name>,
                cmd_exit_zero:<id>, metric_below:<id>, manual). Recorded in the
                task body so a later reconciler can close it. Defaults to
-               `manual`; anything off-allowlist is REJECTED, not stored.
+               'manual'; anything off-allowlist is REJECTED, not stored.
 
 Bulk Operations (comma-separated IDs):
   node query.mjs get id1,id2,id3              Fetch multiple tasks at once
