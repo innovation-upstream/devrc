@@ -145,6 +145,26 @@ DEFAULT_MAX_AGE = 7 * 86400
 # threshold `classify_status` uses.
 DEFAULT_THROTTLE = 30
 
+# How long a writer may wait for tmux to answer `display-message`. Deliberately
+# SHORT: both writers sit on an agent's hot path (`PostToolUse` for the Claude
+# hook, every opencode tool call for the CLI), so a wedged or restarting tmux
+# server must cost the agent ~nothing. Missing it is not an error — see
+# `filename_for`, which keys the record on the SESSION when the window id is
+# unknown precisely so this degradation stays lossless.
+#
+# 🔴 IT IS A CONSTANT HERE AND A PARAMETER EVERYWHERE ELSE, and that is the
+# whole point. A caller that needs the tmux answer to be RELIABLE rather than
+# CHEAP — a test asserting the pane-keyed filename, say — must be able to buy
+# more time, because otherwise its assertion silently depends on how loaded the
+# machine is. MEASURED 2026-08-24: this stub-tmux call takes 0.003s (p50) idle
+# and 0.197s worst at a 20x CPU stall (`systemd-run -p CPUQuota=5%`) on a
+# 24-core workbench — but the `devrc-ci` pytest leg runs in a container capped
+# at 4 CPUs / 8Gi beside ~15.8k other tests, several such pods to a 16-core
+# node, and `tekton/devrc-pytests` went red on exactly this: the CLI wrote
+# `opencode-s-oc-4.json` where the test expected `opencode-p77.json`
+# (devrc-ci-wwj4d). Reproduced end-to-end by making the stub sleep 2.5s.
+DEFAULT_TMUX_TIMEOUT_S = 2.0
+
 RUNTIMES = ("claude", "opencode", "clawgate")
 
 # `@41` -> `41`, matching the naming `tmux-task-hook.sh` used (`${WIN_ID//[@%]/}`).
@@ -628,7 +648,7 @@ def index_by_window(records) -> dict:
 # =========================================================================== #
 # TMUX + the CLI — the two IMPURE edges, both shared by every writer
 # =========================================================================== #
-def tmux_context(runner=None, pane=None):
+def tmux_context(runner=None, pane=None, timeout=None):
     """`(window_id, tmux_pid)` for this pane, or `(None, None)`.
 
     ONE tmux call for both fields: they come from the same server and asking twice
@@ -638,14 +658,19 @@ def tmux_context(runner=None, pane=None):
 
     TWO callers: the Claude hook and the `--write` CLI. It is here so there is
     one resolver rather than one per writer.
+
+    `timeout` is the seconds to allow tmux, defaulting to
+    `DEFAULT_TMUX_TIMEOUT_S` — read that constant for why the default is short
+    and why a caller must be able to raise it.
     """
     pane = os.environ.get("TMUX_PANE") if pane is None else pane
     if not pane:
         return None, None
+    budget = DEFAULT_TMUX_TIMEOUT_S if timeout is None else float(timeout)
     argv = ["tmux", "display-message", "-t", pane, "-p", "#{window_id}|#{pid}"]
     try:
         run = runner or (lambda a: subprocess.run(
-            a, capture_output=True, text=True, timeout=2.0))
+            a, capture_output=True, text=True, timeout=budget))
         proc = run(argv)
         if proc.returncode != 0:
             return None, None
@@ -679,11 +704,24 @@ def main(argv=None) -> int:
     p.add_argument("--session", required=True)
     p.add_argument("--transcript-path", default=None)
     p.add_argument("--throttle", type=float, default=DEFAULT_THROTTLE)
+    p.add_argument("--tmux-timeout", type=float, default=DEFAULT_TMUX_TIMEOUT_S,
+                   help="seconds to allow tmux to answer (default %(default)s). "
+                        "Raise it when the pane-keyed filename must be RELIABLE "
+                        "rather than cheap — see DEFAULT_TMUX_TIMEOUT_S.")
     p.add_argument("--prune", action="store_true",
                    help="also reap records past the retention window; the "
                         "caller does this on a session boundary, not per call")
     p.add_argument("--directory", default=LEDGER_DIR)
     args = p.parse_args(sys.argv[1:] if argv is None else list(argv))
+    # 🔴 FAIL CLOSED on a junk budget rather than falling back to the default.
+    # `--tmux-timeout 0` is not "no limit" — `subprocess.run(timeout=0)` expires
+    # immediately, so a typo would silently force the DEGRADED session-keyed
+    # path on every write while the CLI still exited 0. argparse's own exit
+    # code (2) is the right one: this is a bad invocation, not a failed write.
+    if not args.tmux_timeout > 0 or args.tmux_timeout == float("inf"):
+        p.error("--tmux-timeout must be a positive, finite number of seconds "
+                "(got %r); it bounds the tmux lookup, and a non-positive value "
+                "silently forces the session-keyed fallback" % args.tmux_timeout)
 
     try:
         pane = os.environ.get("TMUX_PANE") or None
@@ -694,7 +732,7 @@ def main(argv=None) -> int:
                                 pane_filename(args.runtime, pane))
             if is_throttled(path, args.session, args.throttle):
                 return 0
-        wid, pid = tmux_context(pane=pane or "")
+        wid, pid = tmux_context(pane=pane or "", timeout=args.tmux_timeout)
         rec = build_record(
             runtime=args.runtime, session_id=args.session,
             last_activity_ts=now_iso(), window_id=wid, pane_id=pane,

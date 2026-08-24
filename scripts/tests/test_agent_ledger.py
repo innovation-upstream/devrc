@@ -651,7 +651,7 @@ def test_the_tie_break_resolves_on_the_record_read_FIRST():
 # =========================================================================== #
 # the --write CLI, and writer 2 (opencode)
 # =========================================================================== #
-def _stub_tmux(bindir, answer="@41|4025325"):
+def _stub_tmux(bindir, answer="@41|4025325", delay=None):
     """A stub `tmux` on PATH so the CLI can resolve a window hermetically.
 
     🔴 Without one the CLI takes the DEGRADED path — `$TMUX_PANE` set, tmux
@@ -660,21 +660,85 @@ def _stub_tmux(bindir, answer="@41|4025325"):
     job, and it is why a fixture that fakes only the pane tests the wrong path.
     Via `testlib.mockbin`, which owns the shebang (`#!/usr/bin/env bash` is dead
     in the nix sandbox).
+
+    `delay` seconds makes it answer SLOWLY. That is how the budget below is
+    exercised without waiting for the HOST to be slow — which is the very
+    dependency this file exists to stop having.
     """
+    body = "" if delay is None else "sleep %s\n" % delay
     return str(mockbin.write_exec(Path(str(bindir)) / "tmux",
-                                  "printf '%s\\n'\n" % answer))
+                                  body + "printf '%s\\n'\n" % answer))
 
 
-def _cli(*args, env=None, directory=None):
-    """Drive the REAL CLI as `ledger.js` does — argv, no shell."""
+# 🔴 THE BUDGETS THIS FILE ASSERTS UNDER, IN ONE PLACE, BECAUSE A TEST MUST NOT
+# INHERIT A PRODUCTION DEADLINE IT DOES NOT CONTROL.
+#
+# `AL.DEFAULT_TMUX_TIMEOUT_S` is 2.0s deliberately: both writers sit on an
+# agent's hot path, so a wedged tmux must cost ~nothing. That is right for
+# PRODUCTION and wrong for a test whose subject is "when tmux answers, the
+# record is pane-keyed" — under that default the assertion also, silently,
+# depends on the machine finishing a `/bin/sh` exec inside 2s.
+#
+# It does not, in the tier that gates a merge. MEASURED on `devrc-ci-wwj4d`
+# (2026-08-24): the CLI wrote `opencode-s-oc-4.json` where this file expects
+# `opencode-p77.json` — `filename_for`'s documented DEGRADED path, taken when
+# `tmux_context` returns (None, None). Reproduced end-to-end on the dev host by
+# giving the stub a 2.5s `sleep`: same signature, and the CLI still exits 0.
+# The `devrc-ci` pytest leg runs in a container capped at 4 CPUs / 8Gi beside
+# ~15.8k other tests, several such pods to a 16-core node.
+#
+# These are CEILINGS, not sleeps — a passing call returns in ~3ms, so a
+# generous number costs nothing and buys an assertion that measures the record
+# shape instead of the host's spare capacity. The stub call measured 0.003s at
+# p50 idle and 0.197s worst at a 20x CPU stall, so 60s is ~300x the worst
+# contended observation.
+_TMUX_BUDGET_S = 60.0
+#: The whole `--write` subprocess. Same disease, same treatment: it was 30s,
+#: which under the same stall would have turned the degraded-path failure into a
+#: `TimeoutExpired` — a different wrong answer, not a right one. Must exceed
+#: `_TMUX_BUDGET_S` or the inner budget is unreachable and this file would be
+#: asserting against the outer one.
+_CLI_BUDGET_S = 300.0
+
+
+def _cli(*args, env=None, directory=None, tmux_timeout=None):
+    """Drive the REAL CLI as `ledger.js` does — argv, no shell.
+
+    `tmux_timeout` is passed through as `--tmux-timeout`; pass
+    `_TMUX_BUDGET_S` from any test that asserts the PANE-keyed filename.
+    """
     e = dict(os.environ)
     e.pop("TMUX_PANE", None)
     e.update(env or {})
     argv = [sys.executable, _MODULE, "--write", *args]
+    if tmux_timeout is not None:
+        argv += ["--tmux-timeout", str(tmux_timeout)]
     if directory:
         argv += ["--directory", str(directory)]
-    return subprocess.run(argv, capture_output=True, text=True, timeout=30,
-                          env=e)
+    return subprocess.run(argv, capture_output=True, text=True,
+                          timeout=_CLI_BUDGET_S, env=e)
+
+
+def _assert_pane_keyed(directory, expected):
+    """The stub answered and the record is PANE-keyed — said in one sentence.
+
+    🔴 DIAGNOSIS, NOT COVERAGE. Without it the degraded path surfaces as
+    `FileNotFoundError: …/opencode-p77.json` or as a list-vs-list diff of two
+    strings that differ mid-name, both of which read as "the CLI wrote nothing"
+    / "the naming is wrong" rather than as "tmux did not answer in time". That
+    misreading is what made this class expensive: `devrc-ci-wwj4d` was
+    diagnosed from the filename, not from the deadline.
+    """
+    names = sorted(n for n in os.listdir(str(directory)) if n.endswith(".json"))
+    degraded = [n for n in names if "-s-" in n]
+    assert expected in names, (
+        f"expected the PANE-keyed record {expected!r}, got {names}. "
+        + (f"{degraded} is `filename_for`'s DEGRADED path: $TMUX_PANE was set "
+           f"but `tmux_context` returned (None, None), i.e. the stub tmux did "
+           f"not answer inside --tmux-timeout. That is the record shape doing "
+           f"its job — raise the budget, do not relax the assertion."
+           if degraded else
+           "no session-keyed record either, so this is not the tmux deadline."))
 
 
 def test_the_CLI_writes_a_record_a_runtime_that_cannot_IMPORT_us_can_reach(
@@ -727,13 +791,14 @@ def test_the_CLI_throttles_on_a_repeat_from_the_SAME_session(tmp_path):
     env = {"TMUX_PANE": "%77",
            "PATH": "%s:%s" % (bindir, os.environ["PATH"])}
     first = _cli("--runtime", "opencode", "--session", "oc-3", env=env,
-                 directory=tmp_path)
+                 directory=tmp_path, tmux_timeout=_TMUX_BUDGET_S)
     assert first.returncode == 0
     path = os.path.join(str(tmp_path), "opencode-p77.json")
+    _assert_pane_keyed(tmp_path, "opencode-p77.json")
     before = os.stat(path)
 
     second = _cli("--runtime", "opencode", "--session", "oc-3", env=env,
-                  directory=tmp_path)
+                  directory=tmp_path, tmux_timeout=_TMUX_BUDGET_S)
     assert second.returncode == 0
     after = os.stat(path)
 
@@ -761,11 +826,97 @@ def test_TWO_RUNTIMES_in_one_pane_do_not_overwrite_each_other(tmp_path):
     env = {"TMUX_PANE": "%77",
            "PATH": "%s:%s" % (bindir, os.environ["PATH"])}
     _cli("--runtime", "opencode", "--session", "oc-4", env=env,
-         directory=tmp_path)
+         directory=tmp_path, tmux_timeout=_TMUX_BUDGET_S)
+    _assert_pane_keyed(tmp_path, "opencode-p77.json")
     AL.write_record(rec(runtime="claude", pane_id="%77", session_id="cl-4"),
                     directory=str(tmp_path))
     assert sorted(n for n in os.listdir(tmp_path) if n.endswith(".json")) == [
         "claude-p77.json", "opencode-p77.json"]
+
+
+# --------------------------------------------------------------------------- #
+# `--tmux-timeout` — the budget the two tests above assert under
+# --------------------------------------------------------------------------- #
+def _slow_tmux_env(tmp_path, delay):
+    """A stub tmux that answers only after `delay` seconds, plus the env."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    _stub_tmux(bindir, delay=delay)
+    return {"TMUX_PANE": "%77",
+            "PATH": "%s:%s" % (bindir, os.environ["PATH"])}
+
+
+def test_the_tmux_budget_is_what_decides_pane_keyed_vs_session_keyed(tmp_path):
+    """🔴 THE REGRESSION GUARD FOR `devrc-ci-wwj4d`, and its own control.
+
+    One stub, slower than `AL.DEFAULT_TMUX_TIMEOUT_S`, run twice with the ONLY
+    difference being the budget. Asserting both arms in one test is deliberate:
+    the wide arm alone would pass just as well if `--tmux-timeout` were ignored
+    and something else had made the call fast, and the narrow arm alone proves
+    nothing about the fix. Together they say the budget — not the flag's mere
+    presence, and not the host's spare capacity — decides the record shape.
+
+    RED at base for the wide arm: `--tmux-timeout` did not exist, so argparse
+    exits 2 and no record is written at all.
+    """
+    delay = AL.DEFAULT_TMUX_TIMEOUT_S + 0.5
+    wide, narrow = tmp_path / "wide", tmp_path / "narrow"
+    wide.mkdir(); narrow.mkdir()
+
+    env = _slow_tmux_env(tmp_path, delay)
+    # WIDE — the budget covers the slow answer, so the window resolves.
+    got = _cli("--runtime", "opencode", "--session", "oc-slow", env=env,
+               directory=wide, tmux_timeout=_TMUX_BUDGET_S)
+    assert got.returncode == 0, got.stderr
+    _assert_pane_keyed(wide, "opencode-p77.json")
+
+    # NARROW — same stub, same everything, a budget it cannot meet. The write
+    # still SUCCEEDS; it just lands in the session-keyed file. That losslessness
+    # is the property `filename_for` exists for, so pin it here rather than
+    # only asserting the absence of the pane file.
+    got = _cli("--runtime", "opencode", "--session", "oc-slow", env=env,
+               directory=narrow, tmux_timeout=delay / 4)
+    assert got.returncode == 0, got.stderr
+    assert sorted(os.listdir(str(narrow))) == ["opencode-s-oc-slow.json"], (
+        "a budget shorter than the stub's own delay must produce the DEGRADED "
+        "session-keyed record; if it produced the pane-keyed one, "
+        "--tmux-timeout is not reaching `subprocess.run`")
+
+
+@pytest.mark.parametrize("junk", ["0", "-1", "nan", "inf"])
+def test_a_junk_tmux_timeout_FAILS_CLOSED_rather_than_silently_degrading(
+        tmp_path, junk):
+    """🔴 A knob that ignores what it cannot read is a knob that switches the
+    check off on a typo. `subprocess.run(timeout=0)` expires immediately, so
+    `--tmux-timeout 0` would force the degraded path on EVERY write while the
+    CLI still exited 0 — the failure this whole change exists to make visible,
+    reintroduced as a silent default.
+
+    🔴 The assertion is on the MESSAGE, not on the exit code. At base an
+    unrecognised `--tmux-timeout` also exits 2 writing nothing, so an exit-code
+    assertion would be green for the wrong reason on a tree with no fix in it.
+    """
+    proc = _cli("--runtime", "opencode", "--session", "oc-junk",
+                directory=tmp_path, tmux_timeout=junk)
+    assert proc.returncode != 0
+    assert "--tmux-timeout must be a positive, finite number" in proc.stderr, (
+        f"expected the budget validator to reject {junk!r}; got:\n{proc.stderr}")
+    assert os.listdir(str(tmp_path)) == []
+
+
+def test_the_CLI_default_budget_IS_the_module_constant(tmp_path):
+    """INVARIANT GUARD, labelled as one — not regression coverage.
+
+    Two spellings of one budget is how the hook and the CLI end up disagreeing
+    about how long tmux gets. Read out of `--help` so it measures the parser's
+    real default rather than re-reading the constant this file already imported.
+    """
+    out = subprocess.run(
+        [sys.executable, _MODULE, "--write", "--runtime", "x", "--session", "y",
+         "--help"], capture_output=True, text=True, timeout=_CLI_BUDGET_S).stdout
+    assert "default %s" % AL.DEFAULT_TMUX_TIMEOUT_S in " ".join(out.split()), (
+        f"--tmux-timeout's default has drifted from DEFAULT_TMUX_TIMEOUT_S="
+        f"{AL.DEFAULT_TMUX_TIMEOUT_S}:\n{out}")
 
 
 def test_a_cross_runtime_conflict_NAMES_THE_RUNTIMES():
