@@ -312,38 +312,80 @@ longer true, and a permanently-red gate is no longer the expected outcome. See s
   `nodeSelector` pin — `clawgate-ci`, the one pipeline with **no** pin, has a
   pod-start max of **18s** against this one's 19 minutes.
 
+### 🔴 ANSWERED FASTER THAN EXPECTED — right-sizing did NOT stop preemption; the binding term is ARRIVAL RATE
+- **Supersedes the "needs a few days" investigation above.** It predicted a
+  latency re-measure in a few days. The cluster answered in four hours, and the
+  answer is about *preemption*, not latency.
+- **Observed (values), 2026-08-24 ~20:00–21:00Z, with `#389` live** (gitops-validate
+  confirmed at 2.40 CPU on the live Task, down from 4.65):
+  - **8 devrc gate pods preempted in one hour**, EVENT-confirmed, not inferred:
+    `Preempted pod/devrc-ci-sgdr8-gate-pod ... on node talos-xr6-r7p`.
+    `sgdr8` was **this doc's own PR** (`#800`) — its gate died `step-pytests`
+    exit **255**, then nodetests/verdict exit 2, posting `COULD NOT RUN` on BOTH
+    tiers. `error`, not `failure` — a broken gate, not a bad change.
+  - Node reached **94% CPU requests** with **8 gitops-validate runs concurrent**,
+    from **17 distinct revisions in 40 minutes**.
+  - 🔴 **Arrivals are BURSTS OF FIVE, not a rate** — five runs in 20s at 19:54Z
+    (all base `acc04a9b`), five in 19s at 20:29Z (all base `21889d7f`). Five
+    branches sharing one base, twice.
+- **Ruled out — per-run reservation size as the binding term.** `#378` right-sized
+  devrc, `#389` right-sized gitops-validate 4.65→2.40 CPU, and preemption
+  continued at 8/hour within four hours. Halving each run does not help when a
+  dozen arrive at once.
+- **Leading hypothesis:** the cause is a **push pattern**, not a scheduling
+  parameter — the `tekton` skill's gotcha #3 recurring verbatim (*"pushing N
+  branches is not N independent actions, it is one blast-radius action … anyone
+  else's PR checks in that window die too"*). That rule is already written down
+  and did not bind — the same shape as the next-steps collision (`#793`).
+- ⚠ **`#389` rejected a `ResourceQuota` and was RIGHT about the mechanism**: a
+  queued run **burns its own deadline** (TaskRun clock starts at CREATION, not pod
+  start — verified there on `devrc-ci-p8mqt-gate`), and a quota scoped to
+  `ci-bulk` would reject the request-less `notify`/`report`/affinity-assistant
+  pods, losing the `report` pod — this platform's worst failure. **That mechanism
+  is dead; whether SOME limiter is viable is not settled.**
+  ⚠ Its own cap table reads cap 8 → 3/106 (3%) against 14/106 (13%) today, which
+  looks like a 4× win rather than "worse"; the prose scopes "worse" to caps ≤4.
+  Raised on the PR — do not re-derive it, read the thread.
+- **Next probe**, verbatim — establish whether bursts are the whole story:
+  ```bash
+  KUBECONFIG=$KC_HOMELAB kubectl -n tekton-ci get events \
+    --field-selector reason=Preempted --no-headers | wc -l   # per hour
+  KUBECONFIG=$KC_HOMELAB kubectl -n tekton-ci get pipelineruns -o json \
+    | python3 -c 'import json,sys,collections;d=json.load(sys.stdin);print(collections.Counter(i["status"]["startTime"][11:16] for i in d["items"] if i["spec"].get("pipelineRef",{}).get("name")=="gitops-validate-pipeline" and i.get("status",{}).get("startTime")).most_common(10))'
+  ```
+  A minute with ≥4 arrivals is a burst. Correlate those minutes against the
+  `Preempted` events.
+
 ## Next steps (ranked)
 
-1. ⏳ **TIME-GATED — re-measure the latency verifier above** (a few days after
-   2026-08-24). It gates whether any further resource work is the right lever at
-   all, so do it before item 2. Repo: none — a read-only cluster query.
-2. **`auditloop-ci` is now the largest single reserver on `talos-xr6-r7p`** —
-   5.50 CPU / 9728Mi, untouched by `#386`/`#388`/`#389`.
-   Measured peaks from the **direct pod-cgroup gauge** (`container=""`), method
-   quoted because it matters: CPU `rate[30s]` **3.72** / `rate[1m]` **3.18**;
-   memory **983Mi** at 7d and **996Mi** at 30d.
-   ⚠ `step-build` peaks at **3.97 against its 4-CPU limit** — censored, so its
-   true CPU demand is unknown. **Cut memory, leave CPU alone.** Only ~13 of 508
-   retained runs are auditloop, so impact is real but infrequent.
-   Repo/files: `homelab-infra` →
-   `clusters/homelab/apps/tekton-pipelines/triggers/auditloop-ci-pipeline.yaml`.
-3. **The execution margin against the 20m task timeout is ~1.1×, and nobody owns
-   it.** Over 57 succeeded gitops-validate TaskRuns: sum-of-steps p50 264s / p90
-   398s / p95 485s / **max 1045s**; TaskRun wall p95 1026s / max 1086s. Against
-   1200s that is **1.10–1.15×**. Pre-existing, unrelated to either PR's changes —
-   but `#389` also lowered `cpu.weight` 4.65→2.40. Decide deliberately: accept,
-   raise the ceiling (which re-opens `#386`'s budget arithmetic), or attack
-   `warm-tools`' 963s outlier.
-4. **Pick a metric convention and write it into the tekton skill.** See Gotchas —
-   `max_usage` vs `working_set` is a ~30% swing on every sizing decision in that
-   directory, and two sessions used different ones without noticing. Cheapest item
-   here. Repo/files: `devrc` → `claude/skills/tekton/SKILL.md`.
-5. **Reporter robustness (LOW).** All six report tasks `apk add` then make 2–3
-   `curl` calls with **no `--max-time`**, so a status post needs a package mirror.
-   ⚠ This is NOT what costs verdicts — max reporter step execution is **28s**
-   across ~490 TaskRuns. Do it only when touching those files anyway.
-6. **CARRIED FORWARD** — 1 fixture-author commit (`zach/requires-env-skip-pins`)
-   and `check-tekton-app-install.sh`'s `CDPATH` bug. Unchanged this session.
+1. 🔴 **CONCURRENCY, NOT SIZE — the ranking changed 2026-08-24.** Preemption
+   survived both right-sizing PRs; arrivals come in bursts of five. Decide between
+   (a) making the push pattern bind — a rule already exists and does not, so it
+   needs a mechanism, not more prose; (b) a limiter that does not burn the
+   queued run's deadline (a `ResourceQuota` is ruled out — see Open
+   investigations); (c) giving devrc's gate its own node, which `#380` proposed
+   and an audit refuted — re-read that before re-proposing it.
+   Repo: `homelab-infra`. Read `#389`'s comment thread first.
+2. ⏳ **Re-measure the latency verifier** (p90 vs the **669s** pre-`#389`
+   baseline, probe in Open investigations). Still worth doing, but it is now a
+   *secondary* question — preemption, not queue latency, is what kills runs.
+3. ⬇️ **DEMOTED — `auditloop-ci` right-sizing.** It is still the largest single
+   reserver (5.50 CPU / 9728Mi vs measured 3.72 CPU `rate[30s]` / 983Mi, with
+   `step-build` censored at its 4-CPU limit), but per-run size is now the
+   *refuted* lever. Only ~13 of 508 retained runs are auditloop. Do item 1 first.
+4. **The execution margin against the 20m task timeout is ~1.1×** — 57 succeeded
+   gitops-validate TaskRuns: sum-of-steps max **1045s**, wall max 1086s, against
+   1200s. Pre-existing; nobody owns it. Note this interacts with item 1: anything
+   that makes a run wait longer eats this margin, because the TaskRun clock starts
+   at CREATION.
+5. **Pick a metric convention and write it into the tekton skill** — `max_usage`
+   vs `working_set` is a ~30% swing that silently split two sessions. Cheapest
+   item here. Repo: `devrc` → `claude/skills/tekton/SKILL.md`.
+6. **Reporter robustness (LOW).** All six report tasks `apk add` then `curl` with
+   no `--max-time`. NOT what costs verdicts (max reporter step execution 28s
+   across ~490 TaskRuns). Do it only when touching those files anyway.
+7. **CARRIED FORWARD** — 1 fixture-author commit (`zach/requires-env-skip-pins`)
+   and `check-tekton-app-install.sh`'s `CDPATH` bug. Unchanged.
 
 ## Gotchas / decisions / dead-ends
 
@@ -542,6 +584,16 @@ longer true, and a permanently-red gate is no longer the expected outcome. See s
   TaskRuns; bounding its curls would have saved neither lost verdict). Round 2:
   ten comments misstating the change itself. Round 3: a corrected figure
   contradicting a sibling file in the same PR. Budget for that shape.
+
+- 🔴 **A `COULD NOT RUN` / exit-255 gate failure is COLLATERAL DAMAGE, not your
+  diff — and this doc's own PR proved it.** `#800`'s gate (`devrc-ci-sgdr8`) died
+  with `step-pytests` exit 255 on a one-markdown-file change, posting `error` on
+  both required tiers. The `Preempted` event names that exact pod. With
+  `enforce_admins: true` there is **no admin override**, so the only ways to merge
+  are to wait for a quiet node and re-push, or to delete the required-checks
+  protection — and deleting it to land a docs PR is merging through a gate you
+  just made trustworthy. **Wait and re-push.** The commit is safe on origin
+  meanwhile.
 
 ## How to verify
 
