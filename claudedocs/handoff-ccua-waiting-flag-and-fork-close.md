@@ -67,12 +67,36 @@ there is the pointer.
 Nothing is mid-diagnosis. The three items below are **known and unstarted**, not unresolved.
 
 ## Next steps (ranked)
-1. **`GUARD 10` misattributes concurrent git writes** — highest value on this session's
-   evidence. It flagged `devrc/.git/config` changing mid-run and blamed whichever test was in
-   teardown, **four separate times today**, costing one agent a four-run experiment and me a
-   diagnosis pass. It already knows the changed paths: a real branch ref or `branch.*` config
-   change in the operator's checkout is structurally distinguishable from a fixture write
-   under a tmpdir. **The fix is the message, not the detection.**
+1. ~~**`GUARD 10` misattributes concurrent git writes**~~ — ✅ **DONE 2026-08-24, devrc #773,
+   squash `8ecde026`.** Three rounds, and the detection is byte-for-byte unchanged: the guard
+   now prints the KEY NAMES that moved in `<git-common-dir>/config` (`+` new, `-` gone, `~`
+   value moved), ranks them (`ORDINARY GIT` → concurrent writer leads, target second;
+   `HAZARD` → *audit this target first*; `UNRECOGNISED` → ranks neither), and prints the
+   discriminators beside the file. **Key names only, never values** — that file holds
+   `remote.<n>.url`, which can carry a token, and this lands in CI logs.
+   🔴 **It caught the real thing three times while being built**, in the gate runs for its own
+   PR: `branch.zach/t3-closing-condition`, `branch.integ/handoff-764` +
+   `branch.zach/tekton-pruner-and-burst-facts`, and a *deletion* of
+   `branch.zach/ci-claims-both-tiers` — every one a concurrent session, none a test.
+   🔴 **DEPLOY IS PARTIAL.** `ship.sh` rc=7: the **laptop is verified at `8ecde026`**; the
+   **workbench was SKIPPED** because `scripts/run-node-tests.sh` carried another session's
+   uncommitted line registering `scripts/discord-embed-ext/tests`. Nothing was stashed. Once
+   that lands: `git -C ~/workspace/devrc commit scripts/run-node-tests.sh` then
+   `scripts/ship.sh --no-laptop`. Until then the workbench runs the OLD message.
+   ⚠ **Two follow-ons opened, neither closed:**
+   **#778** (draft) rescues a day-old uncommitted `initiative-scan.py` WIP — its resolved-filter
+   is ON BY DEFAULT and scans the handoff's free-text SUMMARY, so it hides **11 of 55**
+   handoffs including *this one* (it trips on "It closed — and then kept going"). Not
+   mergeable as-is; its author decides.
+   **#783** is a real browser-bridge flake — `test_frames_telemetry_metadata_only` does
+   `_wait_events(spool, 1)[0]` and asserts the first event is its own; under load it is a
+   previous test's late `getHtml` timeout. Both Tekton legs are required now, so this family
+   is a hard merge block for everyone until fixed.
+   **Lesson worth keeping**: the first cut passed a green gate AND a mutation sweep and still
+   shipped two 🔴s — a mixed global+repo-local delta and an UNRECOGNISED one both reached the
+   *reassuring* lead. The second round then re-instated the very prose-contradicts-code defect
+   the branch existed to close. Budget for several audit rounds on anything whose output is
+   prose, and prefer deleting a duplicated sentence over correcting it.
 2. **Test floor 203 vs 226 collected** (`scripts/run-tests.sh:1441`) — 23 tests of slack on a
    suite that grew ~50 today. The gate does not force it (under the drift ceiling) but
    `SKILL.md` says raise it when you add tests.
