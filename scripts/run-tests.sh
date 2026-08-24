@@ -302,13 +302,22 @@ cd "$ROOT" || { echo "run-tests: cannot cd to ROOT=$ROOT" >&2; exit 3; }
 # nodetests leg exports no marker and needs none: its runner has no
 # DEVRC_GATE_ENV and no exit 3.)
 #
-# What that gate does NOT do is block a merge: `main`'s branch protection does
-# NOT require status checks — `required_status_checks` returns 404 (measured
-# 2026-08-22) — though it DOES require 1 approving review. So protection EXISTS
-# and a red check is still advisory; do not restate this as "there is no branch
-# protection", which is the wrong mechanism for the right conclusion.
+# 🔴 AND THAT CLAIM DRIFTED IN THE REASSURING DIRECTION — corrected in place,
+# because the drift is the lesson. It used to read: "What that gate does NOT do
+# is block a merge: `main`'s branch protection does NOT require status checks —
+# `required_status_checks` returns 404 (measured 2026-08-22)." True when written.
+# Measured 2026-08-23T22:55Z that endpoint returns BOTH legs:
+#     contexts: ["tekton/devrc-nodetests", "tekton/devrc-pytests"]
+#     strict: false, enforce_admins: true
+# So a red Tekton check on EITHER leg now BLOCKS the merge. An intermediate
+# revision of this comment said only `nodetests` was required and `pytests` was
+# not; `pytests` was added the same day, so do not restate that version either.
+# Re-measure rather than trusting this line:
+#   gh api repos/innovation-upstream/devrc/branches/main/protection/required_status_checks
+# Do not restate any of it as "there is no branch protection" — that was always
+# the wrong mechanism for the right conclusion, and the conclusion has flipped.
 # `test_ci_claim_matches_reality.py` cannot see any of this — its own scope note
-# excludes Tekton — so do not read its green as agreement.
+# excludes Tekton AND branch protection — so do not read its green as agreement.
 # A new `exit` here must pick a side deliberately.
 # --- GUARD 1: tool precondition ------------------------------------------------
 # Every binary the suites `skipif` on. Absence must be an ERROR, never a skip.
@@ -382,10 +391,11 @@ if [ "${#missing_tools[@]}" -gt 0 ]; then
   # pre-push hook DEGRADED, and the push went through with ZERO tests run — while
   # the test that would have caught the typo never executed, because the runner
   # aborted before pytest started. That is "a suite stops running while the gate
-  # goes green" on the only tier that BLOCKS a push — a Tekton PR gate does now
-  # run (see the EXIT CODES block above), but its red is advisory — branch
-  # protection does not require status checks — so exit 3 here still let the
-  # push land. devrc#705.
+  # goes green" on the only tier that BLOCKS a push. A Tekton PR gate does now
+  # run (see the EXIT CODES block above), and since 2026-08-23 BOTH its legs are
+  # required status checks, so a red check blocks the MERGE — but it still does
+  # not block the PUSH, which is what this exit code governs. So exit 3 here let
+  # the push land exactly as described. devrc#705.
   #
   # The discriminator is whether we are IN a sanctioned gate env, which both the
   # devShell and checks.pytests announce with DEVRC_GATE_ENV=1:

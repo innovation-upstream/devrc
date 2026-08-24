@@ -291,11 +291,25 @@ fi
 # by the shellHook this hook relies on. The two exports are not redundant.
 # (The nodetests leg carries no marker and needs none: no DEVRC_GATE_ENV, no
 # exit 3 in its runner.)
-# Its red is advisory — `main`'s protection requires a review but NOT status
-# checks (`required_status_checks` -> 404, measured 2026-08-22) — which is why
-# this hook is still the only tier that blocks A PUSH. (Precisely: `main` also
-# requires 1 approving review, which blocks a MERGE — so "the only tier that
-# blocks" unqualified is wrong. The push is what this hook governs.)
+# 🔴 ITS RED IS NO LONGER ADVISORY — corrected in place, because the drift is the
+# lesson. This used to read: "Its red is advisory — `main`'s protection requires
+# a review but NOT status checks (`required_status_checks` -> 404, measured
+# 2026-08-22)". Measured 2026-08-23T22:55Z, protection requires BOTH legs:
+#     contexts: ["tekton/devrc-nodetests", "tekton/devrc-pytests"]
+#     strict: false, enforce_admins: true
+# so a red check on EITHER leg now BLOCKS a MERGE. An intermediate revision named
+# only `nodetests`; `pytests` was added the same day. Re-measure, do not restate:
+#   gh api repos/innovation-upstream/devrc/branches/main/protection/required_status_checks
+#
+# ⚠ The REVIEW half of the old sentence is UNRESOLVED and is deliberately left
+# unasserted here: the top-level protection object omits
+# `required_pull_request_reviews` entirely, while the sub-endpoint returns
+# `required_approving_review_count: 1`. Two API surfaces disagree and nobody has
+# settled which is authoritative — so this comment claims nothing about reviews.
+#
+# What survives unchanged: this hook is still the only tier that blocks A PUSH.
+# The Tekton gate blocks a MERGE, never a push, and the push is what this hook
+# governs — so the distinction the old parenthetical drew is still the right one.
 #
 # Verified in the other direction too: `fail` is only ever assigned 0 or 1 and the
 # script ends `exit "$fail"`, so a genuine pytest failure can never surface as 2
