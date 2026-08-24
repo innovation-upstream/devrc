@@ -255,10 +255,6 @@ EXIT_CODES: dict[str, int] = {
 
 # The three answers a byte comparison may give. Named constants because the test
 # suite pins the literal strings and a verdict is a machine-readable claim.
-# A sentinel distinct from None, so "the key is absent" and "the key is present
-# and null" can be told apart where that matters.
-_ABSENT = object()
-
 CLASS_IDENTICAL = "IDENTICAL"
 CLASS_TRAILING_NEWLINE = "DIFFERS-TRAILING-NEWLINE-ONLY"
 CLASS_MATERIAL = "DIFFERS-MATERIALLY"
@@ -626,9 +622,23 @@ def _decrypt_phase_probe(RV):
         try:
             real(cipher, plain, identity)
         except BaseException as exc:
-            # `Path.exists()` swallows OSError internally and returns False, so
-            # there is deliberately no try/except here — one would be dead.
-            state["plain_present"] = Path(plain).exists()
+            # 🔴 `Path.exists()` CAN RAISE ON THIS INTERPRETER, and an earlier
+            # comment here asserted the opposite. MEASURED on the flake's pinned
+            # CPython 3.12.14: a parent directory without `+x` makes
+            # `exists()` raise `PermissionError`, because 3.12's
+            # `pathlib._ignore_error` ignores only ENOENT/ENOTDIR/EBADF/ELOOP.
+            # (It becomes true on >= 3.13, which widened that set — so the claim
+            # was version-dependent and stated as absolute.)
+            #
+            # Unhandled, it would replace the REAL exception mid-`except` — the
+            # same masking class removed for `phase` — and the run would report a
+            # permissions error instead of whatever age actually did. An
+            # unreadable path is simply an unobservable one: None, never False,
+            # so no branch downstream can mistake it for "age wrote nothing".
+            try:
+                state["plain_present"] = Path(plain).exists()
+            except OSError:
+                state["plain_present"] = None
             # The rc==0-vs-rc!=0 split, taken as a VALUE from the module that
             # owns it. `getattr` because a non-RestoreVerifyError has no cause;
             # None then means "no published cause", never a default one.
@@ -893,13 +903,19 @@ def read_note(item: dict, item_name: str) -> bytes:
     for an intact note — overwrites a good copy on the strength of a parsing
     accident. `"notes" in item` is the whole fix.
     """
-    # 🔴 ABSENT **OR** NULL. JSON's shape for "this item has no notes" is almost
-    # certainly `{"notes": null}`, not an omitted key — the very shape this
-    # module already handles for `serverUrl` in `check_server`. Splitting on
-    # `"notes" not in item` alone let a null fall through to `NOTE-EMPTY`, i.e.
-    # straight back to the "re-escrow over a good copy" advice this token was
-    # created to prevent.
-    if item.get("notes", _ABSENT) is _ABSENT or item.get("notes") is None:
+    # 🔴 ABSENT AND NULL ARE THE SAME FINDING HERE, DELIBERATELY. JSON's shape
+    # for "this item has no notes" is almost certainly `{"notes": null}`, not an
+    # omitted key — the very shape this module already handles for `serverUrl`
+    # in `check_server`. Splitting on `"notes" not in item` alone let a null fall
+    # through to `NOTE-EMPTY`, i.e. straight back to the "re-escrow over a good
+    # copy" advice this token was created to prevent.
+    #
+    # `.get(...) is None` covers both, so there is no sentinel: an earlier
+    # version carried one whose comment claimed the two cases "can be told apart
+    # where that matters" while its only consumer merged them. They are merged
+    # because the REMEDY is the same — read the item in the web vault before
+    # touching the escrow.
+    if item.get("notes") is None:
         raise EscrowError(
             "NOTE-MISSING",
             f"the vault item {item_name!r} exists but its payload carries NO "
@@ -1111,7 +1127,30 @@ def decrypt_check(*, escrow_bytes: bytes, work_dir: Path, bucket: str,
                                 f"strength of this. Run `restore-verify.py` to "
                                 f"diagnose the artifact.",
                                 detail=str(exc))
-                        if phase["plain_present"]:
+                        if (phase["cause"] == RV.DECRYPT_AGE_REFUSED
+                                and phase["plain_present"]):
+                            # 🔴 THE CAUSE IS PART OF THE CONDITION, not decoration.
+                            # This branch makes the strongest claim in the file —
+                            # "the key worked, the BACKUP is tampered" — and it was
+                            # keyed on `plain_present` ALONE, treating a `cause` of
+                            # None identically to `age-refused`. A sweep confirmed
+                            # it: dropping `cause=DECRYPT_AGE_REFUSED` from
+                            # restore-verify's raise survived the whole suite, so
+                            # the published set was 2-for-3 load-bearing plus a
+                            # claim. Now it is 3-for-3 — and it is the RAISE-SIDE
+                            # mutant that proves it, because that one is killed.
+                            #
+                            # ⚠ Deleting the cause test HERE is currently an
+                            # EQUIVALENT mutant and the sweep reports it as a
+                            # labelled survivor: the two branches above consume
+                            # `empty-plaintext` and `age-missing`, so the only
+                            # cause that can still reach this line is
+                            # `age-refused`. It is kept because that is a
+                            # property of the branches above it, not of this
+                            # condition — publish a fourth cause and this line is
+                            # the one that stops the strongest claim in the file
+                            # being made about it by default.
+                            #
                             # age exited NON-ZERO having already written output.
                             # Measured across 8 offsets x 4 sizes plus 3
                             # truncations: reaching the payload at all means age
@@ -1136,11 +1175,14 @@ def decrypt_check(*, escrow_bytes: bytes, work_dir: Path, bucket: str,
                             f"all. TWO CAUSES PRODUCE THIS AND THEY ARE NOT "
                             f"SEPARABLE FROM HERE: the escrowed identity does not "
                             f"match this artifact's recipients, or the artifact's "
-                            f"HEADER is damaged. Neither is asserted. To tell "
-                            f"them apart, run `restore-verify.py` with the "
-                            f"ON-DISK identity: if that fails too the artifact is "
-                            f"the problem, not the escrow. Do NOT rotate the key "
-                            f"before doing that.",
+                            f"HEADER is damaged. Neither is asserted. To tell them "
+                            f"apart, try a DIFFERENT artifact with this same "
+                            f"escrowed copy — `--scope <another scope>`, or "
+                            f"`restore-verify.py --all` for an older stamp: if "
+                            f"another artifact OPENS, the escrowed key is fine and "
+                            f"THIS object's header is damaged; if none open, the "
+                            f"key is the likely cause. Do NOT rotate the key "
+                            f"before running that.",
                             detail=str(exc))
                     raise EscrowError(
                         "RESTORE-FAILED",
@@ -1198,7 +1240,11 @@ def run(*, bw: BitwardenCLI, identity: Path, item_name: str,
             f"identity still decrypts without its final newline, so the escrow "
             f"is very likely USABLE — but it is no longer a byte-for-byte copy, "
             f"and 'very likely' is not what a disaster-recovery artifact gets to "
-            f"be. Re-escrow the file, or confirm with --decrypt-check.")
+            f"be. Re-escrow the file. 🔴 --decrypt-check CANNOT confirm this: "
+            f"this refusal is raised BEFORE the decrypt step runs, so the flag "
+            f"produces the identical message and tests nothing. To check the "
+            f"trimmed bytes by hand, write them to a 0600 file yourself and pass "
+            f"it as --identity to `restore-verify.py`.")
     if verdict_class == CLASS_MATERIAL:
         raise EscrowError(
             "BYTES-DIFFER-MATERIALLY",

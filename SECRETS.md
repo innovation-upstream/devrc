@@ -201,18 +201,24 @@ materially. It reports **byte counts and a classification only, never the
 differing content**, and it reads the server from `bw config server` at run time
 rather than carrying an endpoint into a public repo.
 
-🔴 **Under `--decrypt-check` the six outcomes mean different things, and only one
-of them is about the KEY.** Reading these wrong is how a working
+🔴 **Under `--decrypt-check` the eight outcomes mean different things, and only
+one of them is about the KEY.** Reading these wrong is how a working
 disaster-recovery key gets rotated, or a tampered backup gets waved through:
 
 | code | meaning | what to do |
 |---|---|---|
+| `27` `STORE-UNREACHABLE` | could not open the bucket at all | cluster/route fault; nothing was tested |
+| `28` `NO-ARTIFACT` | zero objects under the prefix | wrong `--host`/prefix, or the backups are gone — `restore-verify.py` diagnoses which |
 | `29` `AGE-MISSING` | `age` is not on PATH | environment fault; says nothing about the escrow |
 | `30` `ARTIFACT-UNREADABLE` | failed before the key was used | diagnose the object, not the key |
-| `25` `DECRYPT-FAILED` | age wrote **nothing**: wrong key **or** damaged header — **not separable** | re-run `restore-verify.py` with the **on-disk** key; if it also fails, the artifact is the problem. **Do not rotate first.** |
+| `25` `DECRYPT-FAILED` | age wrote **nothing**: wrong key **or** damaged header — **not separable** | try a **different** artifact (`--scope <other>`) with the same escrowed copy: if another opens, the key is fine and this object's header is damaged. **Do not rotate first.** |
 | `33` `ARTIFACT-CORRUPT` | age authenticated the header (**the key worked**) then failed the payload | 🔴 **the backup is TAMPERED/CORRUPT/TRUNCATED.** Check the other retained objects. Do not rotate. |
 | `31` `ARTIFACT-EMPTY` | age exited **zero** on an empty payload (**the key worked**) | the artifact holds nothing; do not rotate |
 | `26` `RESTORE-FAILED` | decrypted fine, the git bundle is bad | artifact fault; do not rotate |
+
+⚠ `27` and `28` are the two most likely to fire in practice (a bucket outage, or
+the `--host` prefix trap `restore-verify.py` documents), and neither is a verdict
+on the escrow.
 
 Measured (age v1.3.1, many offsets and sizes): a wrong key or a damaged header
 leaves **no** plaintext file, while payload corruption and truncation leave one —

@@ -503,6 +503,32 @@ def test_a_TRAILING_NEWLINE_difference_is_its_OWN_classification(tmp_path):
     assert ei.value.exit_code == 21
     assert ei.value.exit_code != EV.EXIT_CODES["BYTES-DIFFER-MATERIALLY"]
     assert ei.value.exit_code != EV.EXIT_OK
+    # 🔴 IT MUST NOT OFFER A CHECK IT CANNOT PERFORM. This refusal is raised
+    # BEFORE the `if not decrypt` return, so `--decrypt-check` produces the
+    # identical message and can never confirm anything — the message used to
+    # say "or confirm with --decrypt-check", which is advice to run the same
+    # command again.
+    assert "confirm with --decrypt-check" not in ei.value.verdict
+    assert "--decrypt-check CANNOT confirm this" in ei.value.verdict
+
+
+def test_the_trailing_newline_refusal_is_IDENTICAL_with_and_without_decrypt_check(
+        tmp_path, escrow_world):
+    """The measurement behind the sentence above: the flag changes nothing here,
+    because the byte check refuses first. Both runs, same token, same verdict."""
+    trimmed = ESCROW_NOTE.rstrip("\n")
+    ident = _identity(tmp_path, ESCROW_NOTE, name="tn.key")
+    seen = []
+    for decrypt in (False, True):
+        d = FakeDownloader(escrow_world["objects"])
+        with pytest.raises(EV.EscrowError) as ei:
+            EV.run(bw=_cli(FakeBw(items=[_item(notes=trimmed)])), identity=ident,
+                   item_name=ITEM, decrypt=decrypt, prefix=PREFIX,
+                   store=escrow_world["store"], work_dir=escrow_world["work"],
+                   now=NOW, downloader_factory=lambda: d)
+        seen.append((ei.value.token, ei.value.verdict))
+        assert d.gets == [], "the artifact store was reached on a byte-mismatch"
+    assert seen[0] == seen[1], "the flag changed the outcome after all"
 
 
 def test_the_trailing_newline_case_is_NOT_reported_as_a_pass(tmp_path):
@@ -1379,9 +1405,15 @@ def test_age_ABSENT_is_an_ENVIRONMENT_fault_not_a_verdict_on_the_escrow(
         _decrypt_run(escrow_world)
     assert ei.value.token == "AGE-MISSING"
     assert ei.value.exit_code == 29
-    msg = str(ei.value)
-    assert "says NOTHING about the escrow" in msg
-    assert "The escrowed key works" not in msg
+    # The owned sentence, WHOLE — a substring here would pass on a reworded
+    # message that had stopped saying the thing that matters.
+    assert ei.value.verdict == (
+        "`age` is not on PATH, so the escrowed key cannot be tested against "
+        "anything. This is an ENVIRONMENT fault and says NOTHING about the "
+        "escrow — do not read it as a verdict on the key or on the artifacts. "
+        "age is declared in nix/pkgs/default.nix and in flake.nix `gateTools`; "
+        "add it there, or run this whole command under nix.")
+    assert ei.value.detail is None
 
 
 def test_the_age_precondition_runs_BEFORE_the_store_is_opened(escrow_world,
@@ -1402,7 +1434,17 @@ def test_the_age_precondition_runs_BEFORE_the_store_is_opened(escrow_world,
 
 
 def test_every_decrypt_family_VERDICT_is_pinned_WHOLE(escrow_world, tmp_path):
-    """🔴 ALL FIVE OWNED SENTENCES, BY EXACT EQUALITY, IN ONE PLACE.
+    """🔴 FOUR OWNED SENTENCES, BY EXACT EQUALITY, IN ONE PLACE.
+
+    The other two decrypt-family verdicts are pinned whole beside the cases they
+    belong to — `ARTIFACT-EMPTY` in
+    `test_a_valid_encryption_of_NOTHING_says_the_ESCROW_IS_FINE`, and the
+    in-classifier `AGE-MISSING` in
+    `test_the_in_classifier_AGE_MISSING_belt_is_REACHED_and_pinned`. Six
+    verdicts, six exact pins, three files' worth of context; this docstring used
+    to say "all five" while the body pinned four, which is the same
+    wider-than-the-code sentence this suite exists to catch.
+
 
     The verdict LINES were already pinned whole; the refusal MESSAGES were not,
     and that is where the false sentence survived a green suite. `verdict` holds
@@ -1450,10 +1492,12 @@ def test_every_decrypt_family_VERDICT_is_pinned_WHOLE(escrow_world, tmp_path):
         f"age REFUSED {KEY_DELTA_NEW} without writing any plaintext at all. TWO "
         f"CAUSES PRODUCE THIS AND THEY ARE NOT SEPARABLE FROM HERE: the escrowed "
         f"identity does not match this artifact's recipients, or the artifact's "
-        f"HEADER is damaged. Neither is asserted. To tell them apart, run "
-        f"`restore-verify.py` with the ON-DISK identity: if that fails too the "
-        f"artifact is the problem, not the escrow. Do NOT rotate the key before "
-        f"doing that.")
+        f"HEADER is damaged. Neither is asserted. To tell them apart, try a "
+        f"DIFFERENT artifact with this same escrowed copy — `--scope <another "
+        f"scope>`, or `restore-verify.py --all` for an older stamp: if another "
+        f"artifact OPENS, the escrowed key is fine and THIS object's header is "
+        f"damaged; if none open, the key is the likely cause. Do NOT rotate the "
+        f"key before running that.")
 
     # 4. RESTORE-FAILED — decrypt returns, the BUNDLE inside is damaged.
     scope = escrow_world["store"] / "scope-delta"
@@ -1487,9 +1531,17 @@ def test_a_HEADER_corrupt_artifact_lands_on_the_NOT_SEPARABLE_verdict(escrow_wor
         _decrypt_run(escrow_world, objects=objects)
     assert ei.value.token == "DECRYPT-FAILED"
     assert "NOT SEPARABLE FROM HERE" in ei.value.verdict
-    assert "Do NOT rotate the key before doing that" in ei.value.verdict
+    assert "Do NOT rotate the key before running that" in ei.value.verdict
     # It must not claim the escrow is the fault, which the old wording did.
     assert "not (or no longer) a working identity" not in ei.value.verdict
+    # 🔴 AND THE HANDOVER MUST BE A CONTROL, NOT A SECOND SAMPLE. `decrypt_check`
+    # only runs when the escrowed bytes are byte-IDENTICAL to the on-disk
+    # identity, so "re-run with the ON-DISK identity" was the same experiment
+    # with the same input — guaranteed to fail identically, and the conclusion
+    # ("the artifact is the problem") unsound, since both copies can be a stale
+    # key while the artifact is fine. The check offered must vary the ARTIFACT.
+    assert "ON-DISK identity" not in ei.value.verdict
+    assert "DIFFERENT artifact" in ei.value.verdict
 
 
 def test_the_decrypt_CAUSE_is_a_published_VALUE_not_a_substring():
@@ -1508,6 +1560,110 @@ def test_the_decrypt_CAUSE_is_a_published_VALUE_not_a_substring():
         RV.RestoreVerifyError("x", cause="not-a-published-cause")
     # A failure with no published cause reads as None, never as a default one.
     assert RV.RestoreVerifyError("x").cause is None
+
+
+def test_the_in_classifier_AGE_MISSING_belt_is_REACHED_and_pinned(escrow_world,
+                                                                  monkeypatch):
+    """🔴 F2: THE BELT BRANCH HAD ZERO COVERAGE.
+
+    A sweep found `if phase["cause"] == RV.DECRYPT_AGE_MISSING:` -> `if False:`
+    SURVIVED the whole suite. With the branch gone, control falls through to
+    `plain_present == False` and reports `DECRYPT-FAILED` — "age REFUSED {key}"
+    — which is exactly the environment-fault-blamed-on-the-escrow
+    misclassification the token exists to prevent.
+
+    The branch is for `age` vanishing BETWEEN the precondition and the call, so
+    the test injects precisely that: `which` still answers (precondition
+    passes), and the decrypt step raises with the published age-missing cause.
+    """
+    monkeypatch.setattr(EV.shutil, "which", lambda name: "/usr/bin/" + name)
+    RVmod = EV._rv()
+
+    def gone(cipher, plain, identity):
+        raise RVmod.RestoreVerifyError(
+            "age is not on PATH", cause=RVmod.DECRYPT_AGE_MISSING)
+
+    monkeypatch.setattr(RVmod, "decrypt", gone)
+    with pytest.raises(EV.EscrowError) as ei:
+        _decrypt_run(escrow_world)
+    assert ei.value.token == "AGE-MISSING"
+    assert ei.value.exit_code == 29
+    assert ei.value.exit_code != EV.EXIT_CODES["DECRYPT-FAILED"]
+    assert ei.value.verdict == (
+        "`age` vanished between the precondition check and the decrypt call, so "
+        "the escrowed key was never tested. This is an ENVIRONMENT fault and "
+        "says NOTHING about the escrow or the artifacts.")
+    assert _work_contents(escrow_world["work"]) == []
+
+
+def test_a_STALE_plaintext_cannot_turn_a_WRONG_KEY_into_ARTIFACT_CORRUPT(tmp_path):
+    """🔴 F3: THE HEADLINE DEFECT, RECREATED ONE FILE OVER.
+
+    `plain_present` is a sound witness only if the output path cannot
+    pre-exist. MEASURED: on BOTH the wrong-key and damaged-header paths age
+    leaves a PRE-EXISTING `--output` file completely untouched (rc=1, present,
+    original bytes intact) — it creates the file only after authenticating the
+    header. `work_dir` is routinely REUSED, so a leftover from a run aborted
+    mid-decrypt makes a WRONG KEY read as `ARTIFACT-CORRUPT` — "THE ESCROW IS
+    FINE; THE BACKUP IS NOT … do NOT rotate the key."
+
+    Driven through `restore_verify.decrypt` directly, which is where the unlink
+    lives, with a positive control that the stale file really was there first.
+    """
+    ident_a = _new_identity(tmp_path, "stale-a.key")
+    ident_b = _new_identity(tmp_path, "stale-b.key")
+    src = tmp_path / "payload.bin"
+    src.write_bytes(b"synthetic payload for the stale-plaintext case\n" * 64)
+    cipher = tmp_path / "payload.age"
+    B.encrypt(src, cipher, _recipient(ident_a))
+
+    plain = tmp_path / "leftover.bundle"
+    plain.write_bytes(b"STALE-LEFTOVER-FROM-AN-ABORTED-RUN")
+    assert plain.is_file(), "positive control: the stale file must exist first"
+
+    with pytest.raises(RV.RestoreVerifyError) as ei:
+        RV.decrypt(cipher, plain, ident_b)          # ident_b cannot open it
+    assert ei.value.cause == RV.DECRYPT_AGE_REFUSED
+    # 🔴 THE ASSERTION THAT MATTERS: the stale file is GONE, so a consumer
+    # reading `plain.exists()` gets the truth — age wrote nothing.
+    assert not plain.exists(), (
+        "the stale plaintext survived a failed decrypt; `plain_present` would "
+        "report a wrong key as a corrupt artifact")
+
+
+def test_the_probe_reports_an_UNREADABLE_plaintext_path_as_UNKNOWN(tmp_path,
+                                                                  monkeypatch):
+    """🔴 `Path.exists()` RAISES ON THIS INTERPRETER — measured, CPython 3.12.14,
+    parent directory without `+x`. Unhandled inside the probe's `except`, it
+    would REPLACE the real exception, and the run would report a permissions
+    error instead of whatever age actually did.
+
+    Unreadable must read as None (unobservable), never False (which downstream
+    would take for "age wrote nothing")."""
+    if os.geteuid() == 0:
+        pytest.skip("root traverses a directory without +x; the arm is "
+                    "unreachable as root and a skip here is honest")
+    RVmod = EV._rv()
+    holder = tmp_path / "noexec"
+    holder.mkdir()
+    plain = holder / "p.bundle"
+    plain.write_text("x", encoding="utf-8")
+
+    def raiser(cipher, p, identity):
+        os.chmod(holder, 0o600)                 # rw- : traversal denied
+        raise RVmod.RestoreVerifyError("synthetic", cause=RVmod.DECRYPT_AGE_REFUSED)
+
+    monkeypatch.setattr(RVmod, "decrypt", raiser)
+    try:
+        with EV._decrypt_phase_probe(RVmod) as state:
+            with pytest.raises(RVmod.RestoreVerifyError):
+                RVmod.decrypt(tmp_path / "c.age", plain, tmp_path / "k")
+        # POSITIVE CONTROL: without the handler this line is never reached,
+        # because `exists()` raises out of the `except` block.
+        assert state["plain_present"] is None
+        assert state["cause"] == RVmod.DECRYPT_AGE_REFUSED
+    finally:
+        os.chmod(holder, 0o700)
 
 
 def test_the_phase_probe_OBSERVES_rather_than_reimplements(escrow_world):
@@ -1890,10 +2046,10 @@ def test_the_fchmod_is_LOAD_BEARING_under_a_hostile_umask(tmp_path):
     tests while a positive control (`fchmod(fd, 0o666)`) was killed, proving the
     assertions COULD see it and simply never exercised the case.
 
-    A umask of 0o377 clears owner-write from the `os.open` mode, leaving 0o200
-    masked to 0o000 — so without the fchmod the key file would be created
-    unreadable-and-unwritable by its owner, and with it the mode is 0600
-    regardless. The umask is restored in a `finally`; it is process-global.
+    A umask of 0o377 clears owner-WRITE (and all group/other bits) from the
+    `os.open` mode: `0o600 & ~0o377 == 0o400`, i.e. the key file would be
+    created owner-READ-ONLY. With the fchmod the mode is 0o600 regardless. The
+    umask is restored in a `finally`; it is process-global.
     """
     p = tmp_path / "hostile.key"
     old = os.umask(0o377)

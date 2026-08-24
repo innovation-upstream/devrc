@@ -561,6 +561,25 @@ def decrypt(cipher: Path, plain: Path, identity: Path) -> None:
             "artifact this cannot verify, and skipping it would report safety "
             "that was never measured.",
             cause=DECRYPT_AGE_MISSING)
+    # 🔴 A STALE OUTPUT FILE MAKES age's OWN FAILURE UNREADABLE. MEASURED: on
+    # BOTH the wrong-key and damaged-header paths age leaves a PRE-EXISTING
+    # `--output` file completely untouched (rc=1, file present, original 34-byte
+    # content intact) — it only creates the file once it has authenticated the
+    # header. Consumers therefore read the PRESENCE of `plain` as "age got past
+    # the header", and a leftover from an aborted earlier run turns that into a
+    # lie: a WRONG KEY reads as a corrupt artifact.
+    #
+    # `work_dir` is routinely REUSED — `B._private_dir` documents the
+    # already-exists case as "every run after the first with an explicit
+    # --work-dir" — so this is an ordinary sequence, not an exotic one: abort a
+    # run mid-decrypt, re-run with the same --work-dir, get a confident wrong
+    # answer.
+    #
+    # One unlink removes the whole class. The same reasoning already guards the
+    # throwaway identity in `escrow-verify.py::_create_private_file`; it was
+    # applied there and not here, which is a predicate that was right at one of
+    # its two sites.
+    plain.unlink(missing_ok=True)
     p = subprocess.run(
         ["age", "--decrypt", "--identity", str(identity),
          "--output", str(plain), str(cipher)],
