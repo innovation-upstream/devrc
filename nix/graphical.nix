@@ -12,8 +12,7 @@
 # The i3 config is written verbatim via xdg.configFile."i3/config".text (raw string
 # from ./i3/config.nix) rather than the HM i3 DSL — Zach hand-maintains it.
 # NOTE: writing ~/.config/i3/config is INERT until the system stops forcing
-# `i3 -c /etc/i3.conf` (that cutover is a separate sudo nixos-rebuild step,
-# staged in nix/system/apply-i3-to-hm.sh).
+# `i3 -c /etc/i3.conf` — run `sudo bash nix/system/apply-i3-to-hm.sh` to cutover.
 { config, pkgs, lib, isNixOS ? false, isLaptop ? false, ... }:
 
 let
@@ -412,7 +411,7 @@ lib.mkIf isNixOS {
     '');
   fonts.fontconfig.enable = true;
 
-  # i3 config — raw string. INERT until the system cutover stops forcing /etc/i3.conf.
+  # i3 config — raw string. INERT until the system cutover (apply-i3-to-hm.sh).
   xdg.configFile."i3/config".text = import ./i3/config.nix { inherit isLaptop; };
 
   # Host AirVPN block scripts (workbench-only), symlinked beside the generated TOML.
