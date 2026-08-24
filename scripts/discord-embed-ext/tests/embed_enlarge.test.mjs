@@ -342,6 +342,11 @@ test("REGRESSION: a PERCENTAGE max-width is not a pixel cap", () => {
   assert.ok(Number.isNaN(DEE.cssPx("")));
   assert.equal(DEE.cssPx("400px"), 400);
   assert.equal(DEE.cssPx(" 350px "), 350);
+  // A FRACTIONAL px is a real computed value (calc(), flex layout) and must
+  // still count. Tightening the regex to integers-only used to survive, so a
+  // later "tidy-up" could silently stop treating a real cap as a cap.
+  assert.equal(DEE.cssPx("399.5px"), 399.5);
+  assert.equal(DEE.cssPx("0px"), 0);
 });
 
 test("REGRESSION: an ancestor capped in PERCENT is not treated as a constrainer", () => {
@@ -392,7 +397,8 @@ function withFakeObserverAndTimers(fn) {
   var realST = globalThis.setTimeout;
   var realCT = globalThis.clearTimeout;
   var timers = [];
-  var captured = { cb: null, observedWith: null };
+  var cleared = [];
+  var captured = { cb: null, observedWith: null, disconnected: false };
   globalThis.MutationObserver = function (cb) {
     captured.cb = cb;
     return {
@@ -401,7 +407,8 @@ function withFakeObserverAndTimers(fn) {
     };
   };
   globalThis.setTimeout = function (fn2) { timers.push(fn2); return timers.length; };
-  globalThis.clearTimeout = function (id) { if (id) timers[id - 1] = null; };
+  globalThis.clearTimeout = function (id) { if (id) { cleared.push(id); timers[id - 1] = null; } };
+  captured.cleared = cleared;
   try {
     return fn(captured, function flush() {
       var pending = timers.slice();
@@ -415,54 +422,159 @@ function withFakeObserverAndTimers(fn) {
   }
 }
 
-test("REGRESSION: observe() actually subscribes to the document body", () => {
+// 🔴 THE NODES MUST BE ATTACHED TO A DOCUMENT. With detached fixtures,
+// `node.ownerDocument` is null, so the mutant `scan(node.ownerDocument || node)`
+// — i.e. reverting the observer's call site to a whole-document rescan — was
+// INERT and survived. The `outsider` below is media that is in the document but
+// in no batch: a whole-document rescan marks it, a correctly scoped scan does not.
+function observerFixture() {
   DEE.forget();
-  var doc = makeDiscordDoc("<div class='message'></div>");
+  var doc = makeDiscordDoc(
+    "<div id='outside'><img src='https://cdn.discordapp.com/attachments/9/9/out.png' /></div>" +
+    "<div id='live'></div>");
+  return { doc: doc, outsider: doc.querySelector("#outside img"), live: doc.getElementById("live") };
+}
+
+function batchInto(fx, id, src) {
+  var wrap = fx.doc.createElement("div");
+  wrap.setAttribute("id", id);
+  var img = fx.doc.createElement("img");
+  img.setAttribute("src", src);
+  wrap.appendChild(img);
+  fx.live.appendChild(wrap);
+  return { addedNodes: [wrap], img: img };
+}
+
+test("REGRESSION: observe() actually subscribes to the document body", () => {
+  var fx = observerFixture();
   withFakeObserverAndTimers(function (cap) {
-    DEE.observe(doc);
-    assert.ok(cap.observedWith, "replacing observer.observe with a no-op used to survive " +
-      "a green 60/60 suite — and this is the ONLY path that sees Discord's late render");
-    assert.equal(cap.observedWith.target, doc.body);
-    assert.deepEqual(cap.observedWith.opts, { childList: true, subtree: true });
+    DEE.observe(fx.doc);
+    assert.ok(cap.observedWith, "replacing observer.observe with a no-op used to survive a " +
+      "green suite — and this is the ONLY path that sees Discord's late render");
+    assert.equal(cap.observedWith.target, fx.doc.body);
+    assert.equal(cap.observedWith.opts.childList, true);
+    assert.equal(cap.observedWith.opts.subtree, true);
+    assert.equal(cap.observedWith.opts.attributes, true);
+    assert.deepEqual(cap.observedWith.opts.attributeFilter, ["src"],
+      "an <img> whose src is set AFTER insertion is invisible to childList alone");
   });
 });
 
-test("REGRESSION: batches arriving inside the debounce window are NOT discarded", () => {
-  DEE.forget();
-  var doc = makeDiscordDoc("<div class='message'></div>");
+test("REGRESSION: batches inside the debounce window are NOT discarded, and stay SCOPED", () => {
+  var fx = observerFixture();
   withFakeObserverAndTimers(function (cap, flush) {
-    DEE.observe(doc);
-    function batch(id, src) {
-      var wrap = new FakeElement("div", { id: id });
-      var img = new FakeElement("img", { src: src });
-      wrap.appendChild(img);
-      return { addedNodes: [wrap], img: img };
-    }
-    var first = batch("b1", "https://cdn.discordapp.com/attachments/1/1/one.png");
-    var second = batch("b2", "https://cdn.discordapp.com/attachments/2/2/two.png");
+    var first = batchInto(fx, "b1", "https://cdn.discordapp.com/attachments/1/1/one.png");
+    var second = batchInto(fx, "b2", "https://cdn.discordapp.com/attachments/2/2/two.png");
+    DEE.observe(fx.doc);
     cap.cb([{ addedNodes: first.addedNodes }]);
     cap.cb([{ addedNodes: second.addedNodes }]);   // arrives before the debounce fires
     flush();
     assert.equal(first.img.getAttribute("data-dee-enlarged"), "1",
-      "the FIRST batch used to be silently dropped: the callback closed over only " +
-      "the newest `mutations` and clearTimeout'd the pending run");
+      "the FIRST batch used to be dropped: the callback closed over only the newest " +
+      "`mutations` and clearTimeout'd the pending run");
     assert.equal(second.img.getAttribute("data-dee-enlarged"), "1");
+    assert.equal(fx.outsider.getAttribute("data-dee-enlarged"), null,
+      "and the scan stays inside the batch — a whole-document rescan would mark this");
   });
 });
 
-test("REGRESSION: forget() cancels a debounce already in flight", () => {
-  DEE.forget();
-  var doc = makeDiscordDoc("<div class='message'></div>");
+test("REGRESSION: the pending list DRAINS after a flush", () => {
+  var fx = observerFixture();
   withFakeObserverAndTimers(function (cap, flush) {
-    DEE.observe(doc);
-    var wrap = new FakeElement("div", {});
-    var img = new FakeElement("img", { src: "https://cdn.discordapp.com/attachments/1/1/x.png" });
-    wrap.appendChild(img);
-    cap.cb([{ addedNodes: [wrap] }]);
-    DEE.forget(doc);
+    var first = batchInto(fx, "b1", "https://cdn.discordapp.com/attachments/1/1/one.png");
+    DEE.observe(fx.doc);
+    cap.cb([{ addedNodes: first.addedNodes }]);
     flush();
-    assert.equal(img.getAttribute("data-dee-enlarged"), null,
-      "disconnect() stops NEW batches; a pending timer still fired and re-marked " +
-      "elements after forget()");
+    assert.equal(first.img.getAttribute("data-dee-enlarged"), "1");
+    first.img.removeAttribute("data-dee-enlarged");     // prove it is not re-scanned
+    var second = batchInto(fx, "b2", "https://cdn.discordapp.com/attachments/2/2/two.png");
+    cap.cb([{ addedNodes: second.addedNodes }]);
+    flush();
+    assert.equal(second.img.getAttribute("data-dee-enlarged"), "1", "the new batch ran");
+    assert.equal(first.img.getAttribute("data-dee-enlarged"), null,
+      "dropping `pendingNodes = []` used to survive: the list would grow without " +
+      "bound on a long-lived tab and every debounce would rescan everything ever added");
   });
+});
+
+test("REGRESSION: an <img> whose src is set AFTER insertion is still picked up", () => {
+  var fx = observerFixture();
+  withFakeObserverAndTimers(function (cap, flush) {
+    var img = fx.doc.createElement("img");        // inserted with NO src
+    fx.live.appendChild(img);
+    DEE.observe(fx.doc);
+    cap.cb([{ addedNodes: [img] }]);
+    flush();
+    assert.equal(img.getAttribute("data-dee-enlarged"), null, "nothing to match yet");
+    img.setAttribute("src", "https://cdn.discordapp.com/attachments/3/3/late.png");
+    cap.cb([{ type: "attributes", attributeName: "src", target: img, addedNodes: [] }]);
+    flush();
+    assert.equal(img.getAttribute("data-dee-enlarged"), "1",
+      "the scoped scan gave up the old whole-document rescan's accidental " +
+      "self-healing; the attributeFilter restores it deliberately");
+  });
+});
+
+// 🔴 forget() HAS TWO HALVES AND THEY MASK EACH OTHER. Dropping either one alone
+// leaves behaviour unchanged, so a single outcome-shaped test pins neither. These
+// two isolate them: one reads the timer directly, the other proves the list is
+// empty by sending a LATER batch and checking the old node is not swept in.
+
+test("REGRESSION: forget() clears the pending debounce TIMER", () => {
+  var fx = observerFixture();
+  withFakeObserverAndTimers(function (cap) {
+    var first = batchInto(fx, "b1", "https://cdn.discordapp.com/attachments/1/1/one.png");
+    DEE.observe(fx.doc);
+    cap.cb([{ addedNodes: first.addedNodes }]);
+    var clearedBefore = cap.cleared.length;
+    DEE.forget(fx.doc);
+    assert.ok(cap.cleared.length > clearedBefore,
+      "forget() must clearTimeout the in-flight debounce, not merely disconnect");
+    assert.equal(cap.disconnected, true, "and disconnect the observer");
+  });
+});
+
+test("REGRESSION: forget() empties the pending NODE LIST", () => {
+  var fx = observerFixture();
+  withFakeObserverAndTimers(function (cap, flush) {
+    var first = batchInto(fx, "b1", "https://cdn.discordapp.com/attachments/1/1/one.png");
+    DEE.observe(fx.doc);
+    cap.cb([{ addedNodes: first.addedNodes }]);
+    DEE.forget(fx.doc);
+    var second = batchInto(fx, "b2", "https://cdn.discordapp.com/attachments/2/2/two.png");
+    cap.cb([{ addedNodes: second.addedNodes }]);   // a LATER batch drains the list
+    flush();
+    assert.equal(second.img.getAttribute("data-dee-enlarged"), "1");
+    assert.equal(first.img.getAttribute("data-dee-enlarged"), null,
+      "a node queued before forget() must not ride along on the next flush");
+  });
+});
+
+
+test("the size thresholds are pinned from BOTH sides", () => {
+  // Lowering them died already; RAISING them did not, and that direction is the
+  // hazard: a bigger threshold means overriding ancestors that were never a
+  // media cap at all — the same class of bug as reading "100%" as 100px.
+  function capped(px) {
+    var wrap = new FakeElement("div", { class: "c" });
+    wrap.style.setProperty("max-width", px);
+    var img = new FakeElement("img", { src: "https://cdn.discordapp.com/attachments/1/2/p.png" });
+    wrap.appendChild(img);
+    return DEE.findContainer(img);
+  }
+  assert.ok(capped("500px"), "500px is exactly at the limit and IS a cap");
+  assert.equal(capped("501px"), null, "just past the limit is NOT a cap");
+  assert.equal(capped("900px"), null,
+    "a wide ancestor must never be treated as a media cap (threshold 500 -> 900 used to survive)");
+
+  function cappedH(px) {
+    var wrap = new FakeElement("div", { class: "c" });
+    wrap.style.setProperty("max-height", px);
+    var img = new FakeElement("img", { src: "https://cdn.discordapp.com/attachments/1/2/p.png" });
+    wrap.appendChild(img);
+    return DEE.findContainer(img);
+  }
+  assert.ok(cappedH("400px"), "400px height is at the limit and IS a cap");
+  assert.equal(cappedH("401px"), null, "just past it is NOT");
+  assert.equal(cappedH("900px"), null, "and a tall ancestor is never a cap");
 });

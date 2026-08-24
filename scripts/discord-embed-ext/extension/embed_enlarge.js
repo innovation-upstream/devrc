@@ -172,7 +172,19 @@
     // scan(document) — is the production path, and it was dropping work.
     observer = new MutationObserver(function (mutations) {
       for (var i = 0; i < mutations.length; i++) {
-        var added = mutations[i].addedNodes;
+        var m = mutations[i];
+        // 🔴 AN `src` SET AFTER INSERTION MUST STILL BE SEEN. Scoping scan() to
+        // the mutated subtree (correct, and what makes the debounce cheap) gave
+        // up a property the old whole-document rescan had by accident: an <img>
+        // inserted BEFORE its CDN src is assigned matched nothing on insertion,
+        // and used to be picked up by the next unrelated mutation. With a
+        // childList-only observer it would be missed permanently. Watching the
+        // attribute restores it deliberately instead of by accident.
+        if (m.type === "attributes") {
+          if (m.target && m.target.nodeType === 1) pendingNodes.push(m.target);
+          continue;
+        }
+        var added = m.addedNodes || [];
         for (var j = 0; j < added.length; j++) {
           if (added[j] && added[j].nodeType === 1) pendingNodes.push(added[j]);
         }
@@ -185,7 +197,8 @@
         for (var k = 0; k < batch.length; k++) scan(batch[k]);
       }, DEBOUNCE_MS);
     });
-    observer.observe(body, { childList: true, subtree: true });
+    observer.observe(body, { childList: true, subtree: true,
+                            attributes: true, attributeFilter: ["src"] });
     return observer;
   }
 

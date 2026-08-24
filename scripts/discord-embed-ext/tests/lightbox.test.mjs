@@ -558,7 +558,11 @@ test("REGRESSION: a modified click is left to the browser", () => {
   var img = doc.querySelector("img");
   img.setAttribute("data-dee-enlarged", "1");
   LB.installAutoStart(doc);
-  for (var mod of [{ ctrlKey: true }, { metaKey: true }, { shiftKey: true }, { button: 1 }]) {
+  // altKey included: the guard checks FIVE modifiers and this loop used to
+  // exercise four, so dropping altKey survived a test whose name claims the
+  // whole guard. button:2 is the context menu.
+  for (var mod of [{ ctrlKey: true }, { metaKey: true }, { shiftKey: true },
+                   { altKey: true }, { button: 1 }, { button: 2 }]) {
     LB.forget();
     var ev = makeClickEvent(img, mod);
     doc.dispatchEvent(ev);
@@ -585,4 +589,31 @@ test("close() removes its document listeners", () => {
   LB.close(doc);
   assert.equal(doc.listenerCount("keydown"), before,
     "close must remove it — leaking one per open used to survive");
+});
+
+test("arrow DIRECTION is pinned (a 2-image fixture cannot tell +1 from -1)", () => {
+  LB.forget();
+  var doc = makeDiscordDoc(
+    "<div class='message'><div class='embed'>" +
+    "<img src='" + A1 + "' /><img src='" + A2 + "' /><img src='" + B1 + "' />" +
+    "</div></div>");
+  LB.open(doc, doc.querySelector("img"));
+  assert.equal(LB.siblingCount(), 3, "three siblings make the two directions distinct");
+  LB.handleKey(doc, { key: "ArrowRight", preventDefault: function () {} });
+  assert.equal(LB.currentSrc(), A2, "right goes FORWARD");
+  LB.forget();
+  LB.open(doc, doc.querySelector("img"));
+  LB.handleKey(doc, { key: "ArrowLeft", preventDefault: function () {} });
+  assert.equal(LB.currentSrc(), B1, "left wraps BACKWARD to the last, not forward to A2");
+});
+
+test("the row id must START with chat-messages-, not merely contain it", () => {
+  LB.forget();
+  // `=== 0` -> `!== -1` survived: no fixture had an id where the two differ.
+  var doc = makeDiscordDoc(
+    "<div id='not-a-chat-messages-row'><div class='inner'>" +
+    "<img src='" + A1 + "' /><img src='" + A2 + "' /></div></div>");
+  LB.open(doc, doc.querySelector("img"));
+  assert.equal(LB.siblingCount(), 1,
+    "an id that merely CONTAINS the prefix is not a message row");
 });

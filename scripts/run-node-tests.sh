@@ -225,8 +225,8 @@ SUITES=(
   # and lightbox (open/close, zoom, pan, per-message navigation, the wiring of
   # every on-screen control).
   #
-  # 83 tests / 2 files measured 2026-08-24 on the tree that added it.
-  # Floor 79 = 83 - min(50, max(1, 83/20)) = 83 - 4.
+  # 89 tests / 2 files measured 2026-08-24 on the tree that added it.
+  # Floor 85 = 89 - min(50, max(1, 89/20)) = 89 - 4.
   #
   # 🔴 THIS COMMENT PREVIOUSLY CLAIMED SIX REGRESSION TESTS. IT WAS FIVE.
   # The six original defects were re-introduced ONE AT A TIME by an adversarial
@@ -243,12 +243,19 @@ SUITES=(
   # reach at all: the MutationObserver, installAutoStart's document click path,
   # event propagation, and both sides of each walk-depth constant.
   #
-  # Mutation sweep on this tree: 25 semantic mutants (operand swaps, branch
-  # inversions, constant moves in BOTH directions, guard removals), 24 killed.
-  # The one survivor is EQUIVALENT, not a gap: leaving forget()'s debounce timer
-  # running changes no observable behaviour because forget() also empties the
-  # pending-node list, so the timer fires over an empty batch. A positive control
-  # (reverting the media regex to host-only) dies, so the harness can go red.
+  # 🔴 THE SWEEP NUMBER IS A CLAIM ABOUT THE MUTANTS SOMEBODY IMAGINED, NEVER
+  # ABOUT THE SUITE. This comment first said "25 mutants, 24 killed, the survivor
+  # is equivalent" — and an independent audit, constructing its OWN battery
+  # against the same tree, found EIGHT more that were not equivalent at all
+  # (altKey, fractional px, both thresholds raised, the pending list never
+  # draining, the observer's call site, forget()'s two halves masking each other,
+  # and arrow direction — the last invisible because a 2-image fixture cannot
+  # tell +1 from -1). That is the same defect as the miscount above, one level up:
+  # a number stated wider than what was measured. So: 36 mutants, 25 mine and 11
+  # from that audit, ALL killed as of this tree — and the honest reading of "36"
+  # is "nobody has yet imagined a 37th", not "the suite is sound".
+  # A positive control (reverting the media regex to host-only) dies, so the
+  # harness can go red; every verdict is read from `ℹ fail N`, never an exit code.
   #
   # The media-URL tests are pinned to a MEASUREMENT, not to a guess: run against
   # two real logged-in channels on 2026-08-24, the original host-only pattern
@@ -257,7 +264,7 @@ SUITES=(
   # zero attachments. The narrowed pattern matched 0 there and 1 in the second
   # channel — a real attachment, in a container capped at max-height 350px, which
   # is the positive control proving it is not simply matching nothing.
-  "scripts/discord-embed-ext/tests|2|79"
+  "scripts/discord-embed-ext/tests|2|85"
 )
 
 # --- discovery roots -----------------------------------------------------------
