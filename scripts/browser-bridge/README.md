@@ -1287,7 +1287,26 @@ Two changes close it:
    `OPS[cmd.op](cmd)` against `EXEC_OP_BUDGET_MS` (18s). `frames`/`screenshot`
    are deliberately **not** patched individually — one rule, one place, or the bug
    regenerates at the next op added (`targetTab()` alone is on the path of every
-   op). Every *other* await in the loop body is bounded too: the poll fetch
+   op).
+
+   🔴 **ONE DOCUMENTED EXCEPTION, and it is not a weakening of that rule.**
+   `screenshot`'s **fast path** carries its own `FAST_CAPTURE_BUDGET_MS` bound.
+   The choke point above can only *end* an op; it cannot make a hung sub-step
+   FALL THROUGH to a working alternative. `chrome.tabs.captureVisibleTab` can
+   hang rather than reject, and the fast path's `catch` — which exists precisely
+   to fall through to the CDP path — can only see a rejection, so the op burned
+   all 18s and failed on a tab CDP captures fine. A bound that converts "never
+   settles" into a rejection is the only shape that restores the fallthrough.
+   The rule still holds for *terminating* an op; it simply cannot express
+   "recover from this step". ⚠ Its cost is a real constraint, pinned by a test in
+   `tests/cdp_protocol.test.mjs`: whatever the fast path spends comes out of the
+   CDP attach-hang margin below, so `FAST_CAPTURE_BUDGET_MS + 16s <= 18s`.
+
+   ⚠ The predicted regeneration is already present: `open`'s
+   `await chrome.tabs.get(cmd.reuseTabId)` sits in a `catch` that promises a
+   fall-through it cannot deliver if that call hangs. Same class, not yet fixed.
+
+   Every *other* await in the loop body is bounded too: the poll fetch
    (`POLL_BUDGET_MS` 40s), the result POST (`RESULT_BUDGET_MS` 10s), and the
    `chrome.storage.local` reads in `config()`/`clearSuperseded()`
    (`STORAGE_BUDGET_MS` 5s) — the last of which runs on *every* healthy iteration,
