@@ -427,9 +427,15 @@ ARCHIVE_MD = REPO_ROOT / "claude" / "RULES-ARCHIVE.md"
 #
 # The rule that would not fit is the "Out of scope" closing-condition clause in the
 # proactivity-gate bullet: an agent may only file a task whose closing condition it
-# can name, and must say why in its reply when it cannot. It was measured, not
-# assumed: agent-filed issues survived 30 days at ~47% against ~5% for PRs, and the
-# whole gap is objects nobody could ever close. The clause amends an existing bullet
+# can name, and must say why in its reply when it cannot. It rests on a measurement
+# rather than an intuition: issues survived 30 days at ~47% against ~5% for PRs.
+# 🔴 State that claim no more strongly than the evidence does, because an earlier
+# draft of THIS comment did and was caught in re-audit. Two things it must not say.
+# (1) NOT "agent-filed" -- authorship was bounded, never measured, so the ~47% is
+# over ALL issues (claude/RULES-ARCHIVE.md, anchor `object-leak`). (2) NOT "the whole
+# gap is objects nobody could close" -- that specific reading was tried and RETRACTED;
+# whether an open object is still relevant was never measured at all.
+# The clause amends an existing bullet
 # rather than adding a sibling -- the frame, the trigger and the "each branch has its
 # OWN response" structure are all reused -- so the consolidation the entry above asks
 # for was ALREADY applied here. It still costs 258 B, because the surviving text is
@@ -444,9 +450,13 @@ ARCHIVE_MD = REPO_ROOT / "claude" / "RULES-ARCHIVE.md"
 # ~170 B against 18 B of slack. That is the 2026-08-22 entry's "a ceiling sized to
 # leave less than one bullet cannot absorb its OWN review round", reproduced within a
 # day of being written. So this bump is sized to survive a review round rather than to
-# clear the floor: +600 leaves the delta re-audit room to widen a clause without a
-# second bump. If the re-audit does NOT spend it, ratchet this back down -- the entry
-# above is right that down is the intended direction of travel.
+# clear the floor. NAME THE BASE, per the entry above: post-bump slack is 1,348 B
+# ceiling-relative and 448 B FLOOR-relative. Floor-relative that is still under the
+# ~500 B mean bullet -- i.e. the bump buys room to WIDEN an existing clause (the delta
+# re-audit spent ~30 B of it doing exactly that) but not room for a whole new rule.
+# Said the other way: the next new rule still pays ceiling, exactly as the entry above
+# insists. If a later round does NOT spend this, ratchet it back down -- that entry is
+# right that down is the intended direction of travel.
 MAX_BYTES = 40_900
 
 # Required working margin below the ceiling.

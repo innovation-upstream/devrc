@@ -1419,10 +1419,16 @@ handled; only `git grep` over the consumers shows it is not.
 once you can name the closing condition that ends it and who or what checks it.*
 
 🔴 **This entry is deliberately RATIO-ONLY.** This repo is PUBLIC. The measurement was taken over
-a client's issue trackers, so the absolute volumes — backlog sizes, repo counts, per-repo names,
-PR throughput — are the client's operational data and are **not** reproduced here. They live in
-the private measurement record. Ratios and the shape of the finding are what the rule needs, and
-they are what is kept. Do not "restore" the raw figures into this file.
+a client's issue trackers, so the absolute VOLUMES — backlog sizes, repo counts, per-repo names,
+PR throughput — are the client's operational data and are **not** reproduced here. Ratios and the
+shape of the finding are what the rule needs, and they are what is kept. Do not "restore" the raw
+figures into this file.
+
+**Where the raw figures live**, because redacting to an unnamed destination would defeat this
+entry's own purpose: the private measurement record is the session handoff + published report in
+the client infra repo's `claudedocs/` (private), cross-referenced from the two Phase 0 PRs linked
+on this branch's own PR. If you need the denominators to re-derive or refute anything, they are there —
+do not re-run the enumeration from scratch and do not paste its output back into this file.
 
 **The measurement (2026-08-23).** Complete enumeration — not sampled — of every open issue and
 PR across the tracked GitHub org and the linked ClickUp workspace. Two instruments (paginated
@@ -1432,7 +1438,7 @@ enumeration vs the search API) agreed exactly on all four GitHub probes.
 **~47%** for issues against **~5%** for PRs: a **9× gap**, reaching ~69% in the worst single
 repo. PRs close fine; each merged PR then spawns follow-up issues that never close. Of the open
 issues carrying an in-repo `#N`, **42%** pointed at an **already-merged** PR — and reading the
-bodies showed the reference is *provenance* ("Follow-up from PR #186, merged as 56ddc64a"), not
+bodies showed the reference is *provenance* ("Follow-up from PR #NNN, merged as `&lt;sha&gt;`"), not
 fix-linkage. Under **3%** of open issues used closing language at all.
 
 ⚠ **State the growth claim precisely — an imprecise version of it shipped and was caught in
@@ -1440,9 +1446,17 @@ audit.** **96% of the 90-day NET GROWTH in open issues landed in the last 30 day
 claim about *growth*, NOT about the standing backlog: the 30-day cohort is only ~36% of open
 issues. "Nearly the whole backlog appeared in a month" is the wrong sentence and was retracted.
 
+🔴 **The survival denominators are ORG-SCOPED; the duplicate scan was not — and an earlier draft
+of this entry got the reason wrong.** The enumeration and the duplicate scan spanned two GitHub
+owners; the survival figures above are the org owner alone. That is why the release-bot loop
+mentioned below does not appear in the PR denominator — **not**, as an earlier draft claimed,
+because the loop sits in "a different owner's namespace"; it sits in the second owner the
+enumeration itself covered. The exclusion is not neutral and it favours the finding: folding that
+loop into the PR denominator moves PR survival from ~5% to ~7% and the headline gap from **9× to
+about 7×**. The gap survives; state it with the scope attached.
+
 **Duplication was NOT the channel, against expectation.** ~2% near-duplicate titles on GitHub
-once one release-bot loop is excluded (that loop is in a *different* owner's namespace, so it
-does not touch the survival denominators above), 2.6% on the ClickUp engineering board, and
+once one release-bot loop is excluded, 2.6% on the ClickUp engineering board, and
 **zero** exact duplicate titles anywhere. A dedup-first design had been drafted and was cut on
 this measurement. Cross-system linkage was effectively absent in both directions — well under 1%
 of open objects on each side referenced the other.
@@ -1485,7 +1499,7 @@ known-human control. Linkage rates are **upper bounds**: bodies only, with comme
 cross-reference events and the sidebar Development link unread. And the regime is ~1 month old,
 so any cohort deeper than 30 days describes a different system than the one running now.
 
-🔴 **A retracted reading, recorded so it is not re-derived.** Those 46 issues referencing a
-merged PR were first read as "done but never closed". That was **wrong** — reading the bodies
+🔴 **A retracted reading, recorded so it is not re-derived.** Those open issues referencing an
+already-merged PR were first read as "done but never closed". That was **wrong** — reading the bodies
 showed the references are provenance. Whether any open object is still *relevant* was never
 measured; this work measured age and linkage only, never staleness of content.
