@@ -160,6 +160,105 @@ def _wait_events(spool_dir, n=1, timeout=10.0, until=None) -> list:
     return evs
 
 
+def _payload_op(e) -> str | None:
+    """The `op` inside a spooled event's payload, or None if it has no readable
+    one. Deliberately total: a row written by something other than the bridge
+    must not raise here, because the whole point of the helpers below is to walk
+    PAST such a row rather than trip on it."""
+    try:
+        return json.loads(e["payload"]).get("op")
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _wait_ops(spool_dir, op, n=1, **kw) -> list:
+    """The first `n` spooled events whose payload op is `op`, waiting for them.
+
+    🔴 USE THIS INSTEAD OF `_wait_events(spool_dir, n)[i]` WHENEVER YOU WANT A
+    SPECIFIC OP — indexing by POSITION assumes every row in the spool is yours,
+    and that assumption is false.
+
+    MEASURED 2026-08-24. `ACTIVITY_SPOOL_DIR` is a process-global env var that
+    `conftest._isolate_activity_spool` re-points per test with
+    `monkeypatch.setenv`. A thread still alive from an EARLIER test therefore
+    emits into the CURRENT test's spool — so `[0]` is whichever row landed
+    first, not whichever row this test caused. Seen in CI as
+    `assert 'getHtml' == 'frames'` and `assert 'getHtml' == 'type'`, both with a
+    pair of `{"event":"cmd_timeout","op":"getHtml"}` rows from a neighbour
+    sitting ahead of the test's own event. Neither PR could reach browser-bridge
+    — one changed `scripts/run-tests.sh`, the other changed only a `.md`.
+
+    This is the positional sibling of the COUNT problem `_wait_events`'s own
+    docstring describes: that one waits for the wrong NUMBER, this one reads the
+    wrong ROW. `until=` fixes both, and this wraps the idiom so each call site
+    does not re-derive it.
+    """
+    def _seen(evs):
+        return len([e for e in evs if _payload_op(e) == op]) >= n
+    evs = _wait_events(spool_dir, until=_seen, **kw)
+    return [e for e in evs if _payload_op(e) == op][:n]
+
+
+def _wait_payload(spool_dir, op, **kw) -> dict:
+    """The decoded payload of the first spooled event whose op is `op`."""
+    return json.loads(_wait_ops(spool_dir, op, 1, **kw)[0]["payload"])
+
+
+def test_a_neighbours_late_row_does_not_become_this_tests_event(telemetry):
+    """🔴 REGRESSION for the CI flake that blocked two unrelated PRs.
+
+    `ACTIVITY_SPOOL_DIR` is a process-global env var re-pointed per test, so a
+    thread still alive from an EARLIER test emits into THIS test's spool. Then
+    `_wait_events(spool_dir, 1)[0]` returns the neighbour's row and the test
+    asserts against someone else's op.
+
+    Observed twice in CI, on diffs that cannot reach browser-bridge:
+    `assert 'getHtml' == 'frames'` (#773, a change to `scripts/run-tests.sh`)
+    and `assert 'getHtml' == 'type'` (#770, a change to one `.md` file).
+
+    The foreign row is planted directly rather than raced into place: the defect
+    is "a row this test did not cause is sitting in the spool", and how it got
+    there is the neighbour's business. Planting it makes the test deterministic
+    instead of load-dependent — the whole complaint about the original.
+    """
+    spool_dir = telemetry
+    spool_dir.mkdir(parents=True, exist_ok=True)
+    # A neighbour's late `cmd_timeout`, in the exact shape CI produced, written
+    # as a v1 spool line. The format lives in `_parse_spool_line` above; if it
+    # ever changes, this planting breaks LOUDLY (that reader asserts `v1`)
+    # rather than silently planting a row nothing can decode.
+    foreign_payload = json.dumps({"op": "getHtml", "outcome": "timeout"})
+    _log_file(spool_dir).write_text("\t".join([
+        "v1", "source=browser-bridge", "kind=cmd",
+        "b64:payload=" + base64.b64encode(foreign_payload.encode()).decode(),
+    ]) + "\n")
+
+    srv, _ = _serve()
+    ext = FakeExtension(srv, executor=lambda c: {"url": "https://civitai.com/",
+                                                 "frames": []})
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        assert _req(srv, "POST", "/cmd", {"op": "frames"})[0] == 200
+
+        # THE FIX: selected by op, so the neighbour is walked past.
+        assert _wait_payload(spool_dir, "frames")["op"] == "frames"
+
+        # 🔴 THE CONTROL, in the same test so it cannot rot separately: the OLD
+        # idiom really does pick the wrong row here. Without this the assertion
+        # above would pass just as happily if the spool held only our own event,
+        # and the test would be pinning nothing.
+        evs = _wait_events(spool_dir, 1)
+        assert _payload_op(evs[0]) == "getHtml", (
+            "the planted neighbour row is not at position 0, so this test is "
+            "not reproducing the flake it claims to cover")
+        assert len(evs) >= 2, (
+            "this test's own event never landed — the control is measuring an "
+            "empty spool, not a contested one")
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
 def test_wait_events_reports_a_timeout_instead_of_returning_short(tmp_path):
     """🔴 NEGATIVE CONTROL on the harness. `_wait_events` used to return a SHORT
     list silently on timeout, so the caller's next line failed with a message
@@ -3053,7 +3152,9 @@ def test_an_absent_origin_header_is_not_the_same_as_an_empty_one(telemetry):
         assert _wait_connected(srv, want=True)
         assert _cmd_sess(srv, {"op": "tabs"}, sid=LEAKED_ID)[0] == 200
         assert _cmd_sess(srv, {"op": "tabs"}, sid=LEAKED_ID, origin="")[0] == 200
-        absent, empty = _wait_events(spool_dir, 2)
+        # Both rows are `tabs`, so ORDER between them is the signal and must be
+        # preserved — but a neighbour's row must not be counted as one of them.
+        absent, empty = _wait_ops(spool_dir, "tabs", 2)
         assert absent["session"] == LEAKED_UUID, absent
         assert "origin" not in json.loads(absent["payload"])
         assert "session" not in empty, empty
@@ -5693,9 +5794,8 @@ def test_frames_telemetry_metadata_only(telemetry):
         assert st == 200
         # round-trip sanity: the caller DOES get the frame list back.
         assert body["result"]["data"]["frames"][1]["frameId"] == "F1"
-        e = _wait_events(spool_dir, 1)[0]
-        p = json.loads(e["payload"])
-        assert p["op"] == "frames"
+        # Selected by op, not by position: a neighbour's late row can sit at [0].
+        p = _wait_payload(spool_dir, "frames")
         assert p["outcome"] == "ok"
         assert p["domain"] == "civitai.com"       # bare TOP-LEVEL domain only
         raw = _log_file(spool_dir).read_text()
@@ -5718,8 +5818,8 @@ def test_type_telemetry_no_typed_text(telemetry):
         st, _ = _req(srv, "POST", "/cmd",
                      {"op": "type", "text": "SECRET_PROMPT_cafef00d"})
         assert st == 200
-        e = _wait_events(spool_dir, 1)[0]
-        assert json.loads(e["payload"])["op"] == "type"
+        # Selected by op, not by position: a neighbour's late row can sit at [0].
+        assert _wait_payload(spool_dir, "type")["op"] == "type"
         raw = _log_file(spool_dir).read_text()
         assert "SECRET_PROMPT" not in raw, "typed text leaked into telemetry"
     finally:
