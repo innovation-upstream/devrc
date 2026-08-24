@@ -43,6 +43,7 @@ import collections
 import hashlib
 import importlib.util
 import json
+from testlib import hermetic_git  # noqa: E402
 import subprocess
 import sys
 from pathlib import Path
@@ -2955,6 +2956,9 @@ class TestSharedPrimitivesAreReused:
             "HOME": str(tmp_path),
             "GIT_CONFIG_GLOBAL": "/dev/null",
             "GIT_CONFIG_SYSTEM": "/dev/null",
+            # 🔴 maintenance OFF: `_tree_hash` hashes `.git`, so a transient
+            # maintenance.lock reads as a repo change (testlib/hermetic_git.py).
+            **hermetic_git.MAINTENANCE_OFF,
             "PATH": __import__("os").environ.get("PATH", ""),
         }
         subprocess.run(["git", "-C", str(repo), "init", "-q", "-b", "main"], env=env, check=True)
@@ -3116,6 +3120,9 @@ class TestCli:
             "HOME": str(tmp_path),
             "GIT_CONFIG_GLOBAL": "/dev/null",
             "GIT_CONFIG_SYSTEM": "/dev/null",
+            # 🔴 maintenance OFF: `_tree_hash` hashes `.git`, so a transient
+            # maintenance.lock reads as a repo change (testlib/hermetic_git.py).
+            **hermetic_git.MAINTENANCE_OFF,
             "PATH": __import__("os").environ.get("PATH", ""),
         }
         subprocess.run(["git", "-C", str(repo), "init", "-q", "-b", "main"], env=env, check=True)
@@ -3453,6 +3460,9 @@ class TestAppendConcurrency:
             "HOME": str(tmp_path),
             "GIT_CONFIG_GLOBAL": "/dev/null",
             "GIT_CONFIG_SYSTEM": "/dev/null",
+            # 🔴 maintenance OFF: `_tree_hash` hashes `.git`, so a transient
+            # maintenance.lock reads as a repo change (testlib/hermetic_git.py).
+            **hermetic_git.MAINTENANCE_OFF,
             "GIT_AUTHOR_NAME": "T",
             "GIT_AUTHOR_EMAIL": "t@example.invalid",
             "GIT_COMMITTER_NAME": "T",

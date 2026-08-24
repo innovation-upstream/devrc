@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+from testlib import hermetic_git  # noqa: E402
 import os
 import shutil
 import subprocess
@@ -162,11 +163,7 @@ def _git_env() -> dict:
         "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@localhost",
         "GIT_TERMINAL_PROMPT": "0",
         "GIT_ALLOW_PROTOCOL": "file",
-        "GIT_CONFIG_COUNT": "2",
-        "GIT_CONFIG_KEY_0": "maintenance.auto",
-        "GIT_CONFIG_VALUE_0": "false",
-        "GIT_CONFIG_KEY_1": "gc.auto",
-        "GIT_CONFIG_VALUE_1": "0",
+        **hermetic_git.MAINTENANCE_OFF,
     })
     return e
 

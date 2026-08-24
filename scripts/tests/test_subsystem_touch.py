@@ -83,6 +83,7 @@ ANALYZE_WRITEBACK_DOC = (ROOT / "claude" / "skills" / "analyze-service"
 sys.path.insert(0, str(ROOT / "scripts" / "lib"))
 sys.path.insert(0, str(ROOT / "scripts"))
 
+from testlib import hermetic_git  # noqa: E402
 from testlib.skills_mapping import (  # noqa: E402
     assert_skills_mapping_declared,
 )
@@ -189,6 +190,10 @@ def _git_env(home: Path) -> dict:
             "GIT_COMMITTER_EMAIL": "test@example.invalid",
         }
     )
+    # 🔴 Background maintenance OFF — `_tree_hash` hashes `.git`, so a transient
+    # `.git/objects/maintenance.lock` reads as a repository change. See
+    # scripts/testlib/hermetic_git.py; the /dev/null pins above do NOT cover it.
+    env.update(hermetic_git.MAINTENANCE_OFF)
     return env
 
 

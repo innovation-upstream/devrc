@@ -48,6 +48,7 @@ import ast
 import hashlib
 import http.client
 import importlib.util
+from testlib import hermetic_git  # noqa: E402
 import os
 import re
 import secrets
@@ -964,7 +965,8 @@ class TestScopeRevision:
             ["git", "-C", str(path), *args],
             check=True,
             capture_output=True,
-            env={**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null", "HOME": str(path)},
+            env={**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null", "HOME": str(path),
+                 **hermetic_git.MAINTENANCE_OFF},
         )
 
     def test_a_real_scope_repo_yields_its_HEAD_sha(self, store: Path):
@@ -1396,7 +1398,8 @@ class TestSeedNeverAddsARemote:
         self, store: Path, tmp_path: Path
     ):
         scope_dir = store / SCOPE
-        env = {**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null", "HOME": str(tmp_path)}
+        env = {**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null", "HOME": str(tmp_path),
+               **hermetic_git.MAINTENANCE_OFF}
         for args in (
             ["init", "-q", "-b", "main"],
             ["config", "user.email", "t@example.invalid"],
@@ -1420,7 +1423,8 @@ class TestSeedNeverAddsARemote:
         """Positive control: an empty `git remote` from a probe that never works
         is indistinguishable from a repo with no remotes."""
         scope_dir = store / OTHER_SCOPE
-        env = {**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null", "HOME": str(tmp_path)}
+        env = {**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null", "HOME": str(tmp_path),
+               **hermetic_git.MAINTENANCE_OFF}
         subprocess.run(
             ["git", "-C", str(scope_dir), "init", "-q", "-b", "main"],
             check=True, capture_output=True, env=env,
