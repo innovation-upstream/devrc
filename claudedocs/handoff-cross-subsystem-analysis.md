@@ -19,10 +19,12 @@ which do not survive verification**. They were produced by tracing/reading only 
 that revision was measured against live state, and the doc did not say so. This revision
 replaces them with measured results.
 
-**Nothing from the original recommendation list was implemented, and none of it should be.**
-Two were factually wrong about the code, one recommended a feature that already ships, and
-one recommended a change the source explicitly considered and rejected. Details below, each
-with the command or file:line that settles it.
+**Four of the six should not be implemented, and were not.** Two were factually wrong about the
+code, one recommended a feature that already ships, and one recommended a change the source
+explicitly considered and rejected. Of the remaining two: Rec 4 is **resolved in this PR** (half
+of it had already shipped and the archive line was stale), and Rec 5 is deliberately **not
+filed** — it has no closing condition. Details below, each with the command or file:line that
+settles it.
 
 ## Goal
 Comprehensive identification, tracing, and analysis of five subsystems: subsystem-index,
@@ -101,12 +103,28 @@ cannot mistake a scan-less run for a scanned one, which was the actual hazard.
 
 The original doc's "cross-scope query gap identified" was a reading error, not a gap.
 
-### 🟡 Rec 4 "Ship object-leak stamping or retract the proposal"
-**Legitimate, and still open.** `claude/RULES-ARCHIVE.md:1484` reads "**Stamping — IN FLIGHT,
-not shipped.**" A deferred promise in an archive nobody re-reads is exactly the object-leak
-shape the section itself describes.
-Closing condition: either the `agent/<producer>` label mechanism exists and the line names
-it, or the line is deleted. Mechanical, checkable by reading that one line.
+### ✅ Rec 4 "Ship object-leak stamping or retract the proposal" — RESOLVED in this PR
+**Half of it had already shipped; the archive line was stale in both directions.** Fixed here.
+
+- **ClickUp — shipped.** devrc **#768** (merged 2026-08-24) put the `agent/<producer>` tag and
+  body marker at the create choke point: `claude/skills/clickup/lib/agent-marker.mjs` holds the
+  grammar, `applyAgentStamp()` in `claude/skills/clickup/api/tasks.mjs` applies it, and
+  `createTask`/`createSubtask` spread the body and attach the tag. It is *branched on*, not a
+  dormant field, and covered by `test/agent-marker.test.mjs`.
+- **GitHub — dropped, no producer left.** Never implemented, no open PR, and the producer it
+  targeted is gone: `scripts/task-spec-drafter/drafter.sh` now denies `gh issue create`
+  (`DRAFTER_DENY_GH`), and `clank-resolver/bot.py` makes no GitHub API calls at all.
+
+`RULES-ARCHIVE.md` is corrected in this PR to say both, so the closing condition is met.
+
+🔴 **How this one was gotten wrong, twice.** The first revision of this doc asserted stamping
+was unshipped by *quoting the archive line* rather than checking the mechanism — the same
+trace-and-report failure this doc was written to correct, reproduced inside the correction. The
+check that settled it was one grep for the label constant. Then, verifying the GitHub half, a
+`gh pr list --repo ZacxDev/homelab-talos` returned `[]` — **wrong slug**; the repo is
+`ZacxDev/homelab-infra` and `homelab-talos` is only the local directory name. An empty PR list
+from a bad slug is byte-identical to "nothing was ever proposed". Re-run with the slug from
+`git remote get-url`, never from the directory name.
 
 ### 🟡 Rec 5 "Reconciliation signal between the clawgate ClickUp mirror and check-clickup-addressed"
 Net-new feature, no measured need behind it. Not a gap — no evidence was gathered that the
@@ -155,7 +173,10 @@ recommending a feature without grepping for its flag. Both are one command away.
 - `scripts/check-clickup-addressed/` — 5 files; `check-addressed.py` is the orchestrator
 - clawgate — Go + htmx PWA in `homelab-talos/containers/clawgate/`; GitOps from `trunk`
   deploys the **manifest, not the code**, so `git log` is not evidence code is live
-- object-leak — not a file; anchor section in `claude/RULES-ARCHIVE.md` (~1416–1505)
+- object-leak — not a file; the `## object-leak` anchor section in `claude/RULES-ARCHIVE.md`
+  (currently the last section, running to EOF). **Cite the anchor, not a line range** — this
+  PR's own edit shifted every number after 1484, and `test_rules_size.py` pins the anchor
+  while nothing pins the lines.
 
 Structural observations from the original pass that no verification contradicted: the
 "library layer never writes" invariant, silent-zero discipline (classified empties rather
@@ -169,10 +190,24 @@ scan off, stamping openly marked unshipped.
 - Cross-scope search exists: `grep -n "all_scopes" scripts/lib/subsystem_recall.py scripts/subsystem-store-api/server.py`
 - Transcript mode is opt-in, not absent: `python3 scripts/check-clickup-addressed/check-addressed.py --help | grep transcripts`
 - Writeback guard's rejection of `--rearm`: `sed -n '348,357p' scripts/claude-hooks/clawgate-writeback-guard.py`
-- Stamping still unshipped: `grep -n "IN FLIGHT" claude/RULES-ARCHIVE.md`
+- ClickUp stamping is real and wired: `grep -n "applyAgentStamp" claude/skills/clickup/api/tasks.mjs`
+  — **expect a definition AND a call site**. A definition alone is a dormant field, not a stamp.
+- No GitHub producer to stamp: `grep -c "gh issue create" scripts/task-spec-drafter/drafter.sh`
+  returns a hit **inside `DRAFTER_DENY_GH`** (a denial, not a use); `grep -c github
+  ~/workspace/homelab-talos/clusters/workbench/apps/clank-resolver/bot.py` → 0.
 
 ## Next steps, ranked
-1. **Rec 4** — resolve the `agent/<producer>` stamping promise in `RULES-ARCHIVE.md:1484`:
-   ship the label or delete the sentence. Smallest real item here.
-2. Nothing else from the original list. Recs 1, 2, 3 and 6 are closed as **not actionable**
-   for the reasons above; re-opening any of them needs new evidence, not a re-reading.
+**None.** All six are closed:
+
+- Recs 1, 2, 3, 6 — **not actionable**; the premises are wrong (see above). Re-opening any of
+  them needs new evidence, not a re-reading.
+- Rec 4 — **resolved in this PR** (ClickUp shipped, GitHub dropped, archive corrected).
+- Rec 5 — **not filed as work.** Per RULES.md's proactivity gate, an item with no named closing
+  condition is not a work object. Nobody has measured whether the clawgate ClickUp mirror and
+  check-clickup-addressed ever actually disagree, so "add a reconciliation signal" has no
+  condition that could end it and would ship a report that always prints zero. If it is ever
+  picked up, the first step is measuring the disagreement rate — that has a closing condition;
+  the report does not.
+
+Recording this so the list is not mistaken for a queue: this doc mints **no** open objects,
+which is the object-leak rule applied to itself.
