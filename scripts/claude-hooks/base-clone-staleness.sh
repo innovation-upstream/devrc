@@ -111,7 +111,26 @@ if [ -n "$DIFFERING" ]; then
       if ! git -C "$ROOT" cat-file -e "$UP:$p" 2>/dev/null; then
         deleted=yes
       fi
-      if [ "$cur" = "$(git -C "$ROOT" rev-parse "HEAD:$p" 2>/dev/null || echo none)" ]; then
+      # 🔴 `cat-file -e` answers "is this path ABSENT upstream", which is NOT the
+      # same question as "was it DELETED upstream" -- they differ for a path
+      # upstream NEVER HAD. So `deleted=yes` alone must never authorise a removal.
+      #
+      # The `HEAD:$p` shortcut below is what made that difference dangerous. For a
+      # REFRESH it is correct: matching HEAD means the file was never touched
+      # locally, so overwriting it with a newer upstream version loses nothing. For
+      # a PRUNE it proves only that the content is committed HERE -- which is
+      # exactly what a skill authored on this branch and not yet pushed looks like.
+      # Left ungated it deleted: a locally-committed skill, a locally-committed
+      # CLAUDE.md, and on a branch with no upstream (so `$UP` falls back to
+      # `origin/HEAD`) every `.claude/skills/**` file the branch adds -- re-deleting
+      # them on every session, while the report said "GONE upstream on purpose ...
+      # find where it moved rather than restoring it". Caught in review, 2026-08-24.
+      #
+      # So a prune must clear the HIGHER bar: the blob has to appear in $UP's own
+      # history FOR THIS PATH. A never-upstream path has no such history (the
+      # rev-list below yields nothing), so it stays `known=no` and is protected.
+      if [ "$deleted" = no ] \
+         && [ "$cur" = "$(git -C "$ROOT" rev-parse "HEAD:$p" 2>/dev/null || echo none)" ]; then
         known=yes
       else
         while IFS= read -r c; do
@@ -170,29 +189,53 @@ if [ "${#approved[@]}" -gt 0 ]; then
   fi
 fi
 
-# Deliver upstream DELETIONS. This is the only place the hook removes anything, and
-# it is deliberately the narrowest operation that can work:
-#   * `rm -f` on a single FILE, never `rm -r`, so a directory can never be destroyed
-#     even if a path were somehow wrong;
+# Deliver upstream DELETIONS. This is the only place the hook removes anything:
+#   * `rm -f` on a single FILE for the content itself, plus `rmdir` (empty
+#     directories ONLY, it refuses a non-empty one) to clear the shell left behind;
 #   * only paths git itself named, from a diff already restricted to REFRESH_PATHS;
-#   * only after the same recoverability test that protects an overwrite -- a local
-#     copy whose blob appears NOWHERE in upstream history is unique work and was
-#     already routed to `skipped` above, so it is never reached here;
+#   * only for a path whose blob appears in $UP's OWN history for that path, so a
+#     never-upstream or locally-authored file is routed to `skipped` above and is
+#     never reached here;
 #   * `BASE_CLONE_NO_REFRESH=1` opts out of this exactly as it does a refresh.
-# 🔴 A `..` or absolute component would escape REFRESH_PATHS, so reject rather than
-# resolve it: git will not emit one, and if that ever changes this must fail loudly
-# rather than delete outside the tree.
-for p in "${to_prune[@]}"; do
+#
+# ⚠️ Two of those are UNREACHABLE BACKSTOPS today, and are labelled rather than
+# claimed as tested: the `rm -f`-not-`rm -r` choice and the escape guard below both
+# survive mutation, because `hash-object` fatals on a directory (so one never
+# reaches here) and `git diff --name-only` never emits a `..` component. They are
+# defence in depth against a future change upstream of this loop, NOT pinned
+# behaviour. The `rmdir` bound IS pinned -- widening it to `rm -rf` is caught.
+#
+# 🔴 An absolute path or a `..` COMPONENT would escape REFRESH_PATHS, so reject
+# rather than resolve it. Match the component, not the substring: `*..*` also
+# rejects an ordinary filename like `v1..v2.md`, sending it to the FAILED bucket
+# forever -- the exact misclassification this whole change exists to remove.
+for p in "${to_prune[@]:-}"; do
+  [ -n "$p" ] || continue
+  case "/$p/" in
+    /) failed+=("$p"); continue ;;
+    */../*) failed+=("$p"); continue ;;
+  esac
   case "$p" in
-    /*|*..*) failed+=("$p"); continue ;;
+    /*) failed+=("$p"); continue ;;
   esac
   if rm -f "$ROOT/$p" 2>/dev/null && [ ! -e "$ROOT/$p" ]; then
     pruned+=("$p")
-    # `rmdir` removes ONLY empty directories, so this cannot destroy content. It
-    # stops a hollow `.claude/skills/<name>/` shell being left behind looking like
-    # a skill that is still installed.
+    # Clear the hollow `.claude/skills/<name>/` shell so a removed skill does not
+    # keep LOOKING installed. `rmdir` refuses a non-empty directory, so this cannot
+    # destroy content -- an untracked sibling (build cache, local scratch) both
+    # survives and stops the climb.
+    #
+    # 🔴 Bounded at the REFRESH_PATHS roots. Unbounded it walked past its own scope:
+    # on a repo whose only skill was deleted upstream it removed `.claude/skills`
+    # AND `.claude` -- empty and harmless, but `.claude` is not a path this hook is
+    # allowed to touch, and anything probing `[ -d .claude ]` would see it vanish.
     d="$(dirname "$p")"
     while [ "$d" != "." ] && [ "$d" != "/" ]; do
+      _bounded=no
+      for _r in "${REFRESH_PATHS[@]}"; do
+        [ "$d" = "$_r" ] && _bounded=yes && break
+      done
+      [ "$_bounded" = yes ] && break
       rmdir "$ROOT/$d" 2>/dev/null || break
       d="$(dirname "$d")"
     done
@@ -230,12 +273,13 @@ $(printf '    %s\n' "${refreshed[@]}")"
 fi
 if [ "$n_prune" -gt 0 ]; then
   ctx="$ctx
-- PRUNED: deleted upstream, so removed here too. Only the file was removed (never a
-  directory), only after confirming its content is recoverable from $UP's history,
-  and HEAD was not moved -- so these show as deleted-in-worktree in git status until
-  this clone's branch catches up. Nothing unique to this machine was touched.
-  If you were relying on one of these, it is GONE upstream on purpose -- find where
-  it moved rather than restoring it:
+- PRUNED: deleted upstream, so removed here too. Each file was removed only after
+  confirming that exact content appears in $UP's own history for that path, so
+  nothing authored locally was touched; a directory left empty by the removal is
+  then cleared with rmdir, which refuses a non-empty one. HEAD was NOT moved, so
+  these show as deleted-in-worktree in git status until this clone's branch catches
+  up. If you were relying on one of these, it is GONE upstream on purpose -- find
+  where it moved rather than restoring it:
 $(printf '    %s\n' "${pruned[@]}")"
 fi
 if [ "$n_skip" -gt 0 ]; then

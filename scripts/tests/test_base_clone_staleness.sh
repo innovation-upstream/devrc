@@ -21,19 +21,25 @@
 # have never watched fail is a claim about your shell, not about the code. The
 # documented mutation control:
 #
-#   sed 's/rev-list -n 100/rev-list -n 0/' scripts/claude-hooks/base-clone-staleness.sh > /tmp/m.sh
-#   HOOK=/tmp/m.sh bash scripts/tests/test_base_clone_staleness.sh   # must report FAIL 5
+#   bash scripts/tests/mutants-base-clone.sh
 #
-# ⚠️ That count was FAIL 1 until case 9 was added (2026-08-24). Breaking the
-# recoverability scan also strands the prune cases, which depend on phase 1 having
-# refreshed the file first. The kills are: case 2 "second refresh landed v3", and
-# four in case 9/9c. If you add cases, RE-RUN this control and update the number --
-# a stale expected count makes the next reader distrust a working harness.
-# A second mutant, aimed at the prune specifically (must report FAIL 5, all in 9/9c):
-#   sed 's/if ! git -C "$ROOT" cat-file -e "$UP:$p" 2>\/dev\/null; then/if false; then/' \
-#     scripts/claude-hooks/base-clone-staleness.sh > /tmp/mA.sh
-# 🔴 Confirm the sed ACTUALLY matched before believing a red -- a mutation that
-# silently fails to apply reports the unmutated hook's result.
+# That is the battery, in-tree, with each mutant's EXPECTED verdict beside it so a
+# regression in the suite's own strength is visible rather than inferred. It also
+# diffs every mutant against the original before running it: a `sed` that silently
+# fails to match reports the UNMUTATED file's behaviour, which reads as "the guard
+# held" -- the most flattering possible wrong answer, and one that actually happened
+# during authoring.
+#
+# ⚠️ This comment used to hardcode "must report FAIL 1", then "FAIL 5". Both went
+# stale within a day as cases were added, and a stale expected count makes the next
+# reader distrust a working harness. Do not reintroduce a number here -- the battery
+# owns the expectations.
+#
+# 🔴 Two mutants are expected to SURVIVE, and the battery says so out loud: `rm -f`
+# -> `rm -rf` on the file, and dropping the absolute-path guard. Both are
+# unreachable by construction today. Labelling them beats pretending they are
+# pinned -- and note that bounding the rmdir climb once took `rmdir` -> `rm -rf`
+# OFF the board silently, which is why case 9g exists.
 #
 # 🔴 HOOK defaults to the REPO copy, resolved relative to THIS FILE — never to a
 # deployed per-host path under ~/.claude/. A default pointing at the deployed
@@ -336,6 +342,120 @@ check "opt-out: no false 'pruned' claim" \
 OUT=$(run_hook "$W")
 check "POSITIVE CONTROL: prunes without the flag" \
       "$([ -e "$W/.claude/skills/optout/SKILL.md" ] && echo yes || echo no)" "no"
+
+say "9d. a path the LOCAL branch ADDED (never upstream) is NEVER pruned"
+# 🔴 The defect this case exists for shipped in the first cut of the prune and was
+# caught in review. `cat-file -e "$UP:$p"` answers "is this ABSENT upstream", not
+# "was it DELETED upstream" -- and those differ for a path upstream never had.
+# Combined with the `cur = HEAD:$p` recoverability shortcut (correct for a refresh,
+# where matching HEAD means untouched-locally; WRONG for a prune, where it means
+# only "committed here"), a skill authored on this branch and not yet pushed was
+# deleted -- and re-deleted every session, while the report said it was "GONE
+# upstream on purpose ... find where it moved rather than restoring it".
+#
+# 🔴 EVERY other case 9 fixture reaches the absent-upstream state via
+# `advance_delete`, so all of them are indistinguishable to `cat-file -e` and the
+# suite was STRUCTURALLY BLIND to this. The fixture below is the only one that
+# creates the path locally and never pushes it, which is what makes it able to see.
+W=$(mkfixture t9d)
+mkdir -p "$W/.claude/skills/homegrown"
+printf 'authored here, never pushed\n' > "$W/.claude/skills/homegrown/SKILL.md"
+git -C "$W" add .claude/skills/homegrown/SKILL.md
+git -C "$W" "${GIT_ID[@]}" commit -qm "local-only skill"
+advance t9d "CLAUDE v2"        # upstream moves for an unrelated reason
+git -C "$W" fetch -q origin fixture
+pre "local-only skill is absent upstream" \
+    "$(git -C "$W" cat-file -e "origin/fixture:.claude/skills/homegrown/SKILL.md" 2>/dev/null && echo yes || echo no)" "no" && {
+  OUT=$(run_hook "$W")
+  vecho "$OUT"
+  check "locally-authored skill SURVIVES" \
+        "$([ -e "$W/.claude/skills/homegrown/SKILL.md" ] && echo yes || echo no)" "yes"
+  check "content untouched" \
+        "$(cat "$W/.claude/skills/homegrown/SKILL.md" 2>/dev/null)" "authored here, never pushed"
+  check "not reported as pruned" \
+        "$(jq -r '.systemMessage' <<<"$OUT" 2>/dev/null | grep -c 'pruned')" "0"
+  # ...and it must stay gone-proof across repeated session starts, which is how the
+  # original defect presented: restoring the file just got it deleted again.
+  run_hook "$W" >/dev/null 2>&1; run_hook "$W" >/dev/null 2>&1
+  check "still present after 3 session starts" \
+        "$([ -e "$W/.claude/skills/homegrown/SKILL.md" ] && echo yes || echo no)" "yes"
+}
+
+say "9e. the rmdir climb stops at the REFRESH_PATHS root"
+# Unbounded, the climb walked out of its own scope: with the only skill deleted
+# upstream it removed `.claude/skills` AND `.claude`. Empty and harmless, but
+# `.claude` is not a path this hook may touch.
+#
+# ⚠️ FIXTURE TRAP, hit while writing this: deleting the `demo` skill only in the
+# WORK TREE does not empty `.claude/skills` -- `demo` is still upstream, so the same
+# hook run REFRESHES it straight back, the directory stays non-empty, the climb
+# stops one level early and the case PASSES on the broken hook for the wrong
+# reason. Every skill must be deleted UPSTREAM, and the precondition below asserts
+# the directory really is empty before the two root checks mean anything.
+W=$(mkfixture t9e)
+advance t9e "CLAUDE v2" ".claude/skills/solo/SKILL.md"
+git -C "$W" fetch -q origin fixture
+run_hook "$W" >/dev/null 2>&1
+advance_delete t9e ".claude/skills/solo/SKILL.md"
+advance_delete t9e ".claude/skills/demo/SKILL.md"
+git -C "$W" fetch -q origin fixture
+run_hook "$W" >/dev/null 2>&1
+pre "skills tree really is empty of files" \
+    "$(find "$W/.claude/skills" -type f 2>/dev/null | wc -l)" "0" && {
+  check "emptied skill dir removed"    "$([ -d "$W/.claude/skills/solo" ] && echo yes || echo no)" "no"
+  check ".claude/skills root survives" "$([ -d "$W/.claude/skills" ] && echo yes || echo no)" "yes"
+  check ".claude survives"             "$([ -d "$W/.claude" ] && echo yes || echo no)" "yes"
+}
+
+say "9g. an UNTRACKED sibling is never deleted, and it stops the directory cleanup"
+# The prune removes tracked files git named; it must never touch untracked local
+# content (build cache, scratch notes). `rmdir` is what enforces that -- it refuses
+# a non-empty directory -- and this is the case that PINS the choice.
+#
+# 🔴 This case exists because bounding the climb at the REFRESH_PATHS root (9e)
+# SILENTLY REMOVED the coverage that used to kill `rmdir` -> `rm -rf`: with the
+# bound in place that mutant can no longer reach a sibling SKILL dir, so it
+# survived a fully green suite. A fix round taking a mutant off the board is
+# exactly the regression an audit round is for. The distinguishing case has to sit
+# INSIDE the bound -- an untracked file in the pruned skill's own directory.
+#
+# It is also the real-world shape: on the clone that motivated this change the
+# retired skill dir held .pytest_cache/ and __pycache__/, which correctly survived.
+W=$(mkfixture t9g)
+advance t9g "CLAUDE v2" ".claude/skills/withjunk/SKILL.md"
+git -C "$W" fetch -q origin fixture
+run_hook "$W" >/dev/null 2>&1
+printf 'local scratch, never committed\n' > "$W/.claude/skills/withjunk/NOTES.local"
+advance_delete t9g ".claude/skills/withjunk/SKILL.md"
+git -C "$W" fetch -q origin fixture
+pre "untracked sibling is genuinely untracked" \
+    "$(git -C "$W" status --porcelain --untracked-files=all -- .claude/skills/withjunk/NOTES.local | cut -c1-2)" "??" && {
+  OUT=$(run_hook "$W")
+  vecho "$OUT"
+  check "tracked file pruned"          "$([ -e "$W/.claude/skills/withjunk/SKILL.md" ] && echo yes || echo no)" "no"
+  check "UNTRACKED sibling SURVIVES"   "$([ -e "$W/.claude/skills/withjunk/NOTES.local" ] && echo yes || echo no)" "yes"
+  check "its content is intact"        "$(cat "$W/.claude/skills/withjunk/NOTES.local" 2>/dev/null)" "local scratch, never committed"
+  check "non-empty dir NOT removed"    "$([ -d "$W/.claude/skills/withjunk" ] && echo yes || echo no)" "yes"
+}
+
+say "9f. a filename containing '..' is not misclassified as an escape attempt"
+# `*..*` as a substring match rejects an ordinary `v1..v2.md`, sending it to the
+# FAILED bucket forever -- the exact misclassification this change exists to fix.
+# Only a `..` COMPONENT can escape.
+W=$(mkfixture t9f)
+advance t9f "CLAUDE v2" ".claude/skills/dotty/v1..v2.md"
+git -C "$W" fetch -q origin fixture
+run_hook "$W" >/dev/null 2>&1
+pre "dotted file arrived" "$([ -e "$W/.claude/skills/dotty/v1..v2.md" ] && echo yes || echo no)" "yes" && {
+  advance_delete t9f ".claude/skills/dotty/v1..v2.md"
+  git -C "$W" fetch -q origin fixture
+  OUT=$(run_hook "$W")
+  vecho "$OUT"
+  check "dotted filename pruned, not FAILED" \
+        "$([ -e "$W/.claude/skills/dotty/v1..v2.md" ] && echo yes || echo no)" "no"
+  check "no FAILED bucket for a dotted name" \
+        "$(jq -r '.systemMessage' <<<"$OUT" 2>/dev/null | grep -c 'FAILED')" "0"
+}
 
 printf '\n=====================================\n'
 printf 'PASS %d   FAIL %d\n' "$PASS" "$FAIL"
