@@ -1781,7 +1781,7 @@ class TestSkillDocsArePinned:
         doc = INDEX_DOC.read_text(encoding="utf-8")
         for status in st.STATUS_PRECEDENCE:
             assert f"`{status}`" in doc, (
-                f"claude/skills/handoff/SKILL.md never mentions the `{status}` status, "
+                f"claude/skills/subsystem-index/SKILL.md never mentions the `{status}` status, "
                 f"which subsystem_touch.build_report can emit."
             )
 
@@ -1831,7 +1831,7 @@ class TestSkillDocsArePinned:
     def test_handoff_step_sentence(self, sentence: str, why: str) -> None:
         doc = INDEX_DOC.read_text(encoding="utf-8")
         assert sentence in doc, (
-            f"claude/skills/handoff/SKILL.md no longer contains the sentence pinning {why}.\n"
+            f"claude/skills/subsystem-index/SKILL.md no longer contains the sentence pinning {why}.\n"
             f"  missing: {sentence!r}\n"
             f"  Either restore it or change scripts/lib/subsystem_touch.py in the SAME\n"
             f"  commit. The module cannot enforce a protocol its only caller stopped\n"
@@ -1872,8 +1872,14 @@ class TestSkillDocsArePinned:
         assert "a sentence deliberately absent from the handoff skill" not in doc
 
     def test_the_pinned_docs_are_the_DEPLOYED_ones(self) -> None:
-        """Pinning a file that does not ship would be a vacuous green."""
-        for d in (HANDOFF_DOC, ANALYZE_DOC):
+        """Pinning a file that does not ship would be a vacuous green.
+
+        🔴 INDEX_DOC is in this tuple since 2026-08-24 and that is the point of
+        the entry: every one of the pins in this class now targets it, so if it
+        failed to deploy the whole battery would be green about a file no host
+        has. It was missed when the protocol moved — the guard's sentence stayed
+        wide while its body narrowed to the two files it happened to name."""
+        for d in (HANDOFF_DOC, ANALYZE_DOC, INDEX_DOC):
             assert d.exists(), f"the pinned doc is gone: {d}"
             assert d.name == "SKILL.md"
             assert d.parent.parent.name == "skills"
@@ -1888,6 +1894,21 @@ class TestSkillDocsArePinned:
             assert f"reference/{d.name}" in body, (
                 f"analyze-service/SKILL.md no longer points at reference/{d.name}"
             )
+        # 🔴 TRACKED, not merely present: the flake source contains only tracked
+        # files, so an untracked SKILL.md deploys as an ABSENCE while every test
+        # here passes against the working copy. The sidecar already had this
+        # check; the SKILL.md carrying 77 pins did not.
+        if (ROOT / ".git").exists():
+            for d in (HANDOFF_DOC, ANALYZE_DOC, INDEX_DOC):
+                rel = d.relative_to(ROOT).as_posix()
+                out = subprocess.run(
+                    ["git", "-C", str(ROOT), "ls-files", "--error-unmatch", "--", rel],
+                    capture_output=True, text=True,
+                )
+                assert out.returncode == 0, (
+                    f"{rel} is not tracked by git, so the flake omits it from the "
+                    f"deploy and every pin against it is vacuous.\n{out.stderr}"
+                )
         # Shared predicate — declared-and-not-switched-off only; see
         # testlib/skills_mapping.py for what it does NOT check, and why.
         assert_skills_mapping_declared(ROOT / "nix" / "home.nix")

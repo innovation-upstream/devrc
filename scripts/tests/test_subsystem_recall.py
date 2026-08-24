@@ -3910,8 +3910,17 @@ class TestSkillDocsArePinned:
     def test_the_retracted_claim_is_NOT_still_asserted(self) -> None:
         """The half that had to GO. A correction that only adds text leaves the
         false sentence in front of the executor — and after the split it must be
-        absent from BOTH files, or moving the rationale would have reopened it."""
-        for path in (HANDOFF_DOC, HANDOFF_REFERENCE):
+        absent from EVERY file that could reassert it, or moving the rationale
+        would have reopened it.
+
+        🔴 INDEX_DOC WAS MISSING FROM THIS TUPLE AFTER THE 2026-08-24 EXTRACTION,
+        and an audit proved it by mutation: appending the retracted sentence to
+        `subsystem-index/SKILL.md` SURVIVED a full green suite. The guard kept
+        checking the file the prose had LEFT. That is `claude/RULES.md`'s
+        "a guard's DESCRIPTION claims COVERAGE" arriving through a file move
+        rather than an edit — the docstring already said BOTH/EVERY; the body
+        had silently narrowed to the wrong two."""
+        for path in (HANDOFF_DOC, HANDOFF_REFERENCE, INDEX_DOC):
             assert "fails loudly rather than clobbering" not in path.read_text(
                 encoding="utf-8"
             ), f"the retracted wording is back in {path}"

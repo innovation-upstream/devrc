@@ -1,20 +1,30 @@
 ---
 name: subsystem-index
-description: "Record what a session touched in the durable subsystem index store, and write or validate an entry. Called BY /handoff and /analyze-service; rarely run directly."
+description: "Record what a session touched in the analyze-service index store, and write or validate an entry. The protocol /handoff follows at end of session; rarely run directly."
 allowed-tools: Bash, Read, Write, Edit, Grep, Glob
 ---
 
 # subsystem-index — record what a session touched
 
 The store is the terse **pointer sheet** that OUTLIVES a handoff doc: handoff docs
-are per-topic and get overwritten, this does not. Two skills write it —
-`/handoff` at the end of every session, `/analyze-service` when someone asks for
-a recon — and this file is the protocol both follow.
+are per-topic and get overwritten, this does not.
+
+🔴 **THIS IS `/handoff`'s PROTOCOL. `/analyze-service` ALSO WRITES THE STORE AND
+DOES NOT FOLLOW IT** — it follows `claude/skills/analyze-service/reference/write-back.md`,
+and the two MATERIALLY CONFLICT: that one gates the append behind an explicit
+`append this to the index? (y/N)` which this file declares retired, and uses
+`Write` where this file mandates `Edit` anchored on `## Nuance / work-history`
+(measured: a whole-file retype silently loses a concurrent append). An earlier
+draft of this line claimed both skills follow this file. They do not, and saying
+so would send an `/analyze-service` run down the wrong protocol. **Reconciling
+them is open work, not something to assume has happened.** Concretely: the
+template below hardcodes `created_by: handoff`, which is correct only while this
+file has one caller.
 
 🔴 **This lived inside `/handoff` step 4 until 2026-08-24, and that was the wrong
 home in a way worth stating.** It is a separate subsystem: its own tool
 (`scripts/lib/subsystem_touch.py`), its own store outside every repo, its own
-reference doc, and ~72 sentences pinned verbatim by
+reference doc, and the sentences below pinned verbatim by
 `scripts/tests/test_subsystem_touch.py`. It made a skill about writing handoffs
 56% index protocol by weight, paid in full every time `/handoff` ran — which is
 at the END of a session, when the window is already tight. Nothing about the
@@ -25,7 +35,7 @@ says to, and hand its outcome back — do not re-litigate whether to write.
 
 ---
 
-**Record what a session touched in the subsystem index** — a read-only probe, then an opt-in write. The index is the terse *pointer sheet* that outlives this handoff doc, and this step is its second writer.
+**Record what a session touched in the subsystem index** — a read-only probe, then an opt-in write.
 
 ✅ **Run the probe FIRST, unconditionally — do not research anything before running it.** It **never writes**; it resolves the changed paths against the store and reports. Its first two output lines state the `scope=` it derived and the `store:` path it read, **so the two facts you would otherwise go looking up are printed by the command you are deciding whether to run.** Nothing below needs to be settled beforehand. The write half is at the END of this step, and it asks nothing — see the write rule there.
 
@@ -43,7 +53,7 @@ python3 /home/zach/workspace/devrc/scripts/lib/subsystem_touch.py --repo <repo> 
 
 🔴 **Which fallback is right depends on WHICH validation failed — and the wrong choice is a second dead source.** A missing, stale, unreadable or simply wrong UUID ⇒ drop `--session` and use the git window instead. But **`transcript cwd does not match` ⇒ do NOT fall back to the git window**: that session ran in a *different* repo *and named nothing absolute under this one*, so this repo's branch window is empty too, and you would be reading a second source that structurally cannot answer. Go to `--pr`/`--commit` over what you landed here. Never work around the cwd guard — a **relative** path in a transcript is relative to its own session's cwd, so re-anchoring one here would file another repo's work under this one.
 
-`--exclude` drops **the handoff doc itself** — this step runs BEFORE step 5 lands it, so on a first run it is usually not there yet, but a `--pr`/`--commit` window over work that already carried one will list it, and a repeat run finds the copy the earlier run committed. Without it `claudedocs` is a nomination on every single run. 🔴 **Scope follows `--repo`, NOT where the work happened** — those coincide only when you worked in the repo you are sitting in. See the cross-repo rule below before you conclude anything from a single run.
+`--exclude` drops **the handoff doc itself** — the caller runs this BEFORE landing its handoff doc, so on a first run it is usually not there yet, but a `--pr`/`--commit` window over work that already carried one will list it, and a repeat run finds the copy the earlier run committed. Without it `claudedocs` is a nomination on every single run. 🔴 **Scope follows `--repo`, NOT where the work happened** — those coincide only when you worked in the repo you are sitting in. See the cross-repo rule below before you conclude anything from a single run.
 
 **Read the `caveat:` line before you write anything** — it states what the chosen window structurally cannot see, and the sources are blind in *opposite* directions. The session window in particular does **not** include what a **subagent** edited, or files written by a `Bash` command; if the session's real work happened in a dispatched subagent, expect a thin path set and say so rather than inventing entries.
 
@@ -130,7 +140,7 @@ It exits 0 with `OK — N of N entry file(s) parse`, or **3** with a `malformed 
 
 🔴 **Write it — no question. SHOW the diff, then Edit.** Operator decision: the y/N here was always answered `y`, so it bought a round trip and no safety. What it never was is the content filter — that is the `already there` comparison above, which still decides whether a bullet is written at all. **Declining on content stays a normal, frequent outcome; declining by prompt is gone.**
 
-🔴 **`/handoff` ASKS NOTHING, at either write — retired here 2026-08-15, at step 5 on 2026-08-23, both by operator decision on the same evidence: the answer was always `y`.** What survived is the part that was doing the work. Here it is the `already there` comparison, which still decides whether a bullet is written at all; at step 5 it is the four refusing statuses and the warnings above the diff. **Both steps still SHOW the diff before writing** — that was never the prompt's job, and the transcript is the only record of what landed. 🔴 So a *decline* is still a normal, frequent outcome; declining **by prompt** is what is gone. Blast radius earns a REFUSAL, not a question.
+🔴 **`/handoff` ASKS NOTHING, at either write — retired here 2026-08-15, at step 5 on 2026-08-23, both by operator decision on the same evidence: the answer was always `y`.** What survived is the part that was doing the work. Here it is the `already there` comparison, which still decides whether a bullet is written at all; in `/handoff` step 5 it is the four refusing statuses and the warnings above the diff. **Both steps still SHOW the diff before writing** — that was never the prompt's job, and the transcript is the only record of what landed. 🔴 So a *decline* is still a normal, frequent outcome; declining **by prompt** is what is gone. Blast radius earns a REFUSAL, not a question.
 
 **Still print the unified diff before writing** — the transcript is the only record of what landed, and a reader scanning it later needs to see the bullet without opening the store. Then: **re-read the file and re-apply to current bytes** so a concurrent append isn't clobbered, and **use `Edit` anchored on `## Nuance / work-history`, not `Write`** — a whole-file retype of a curated, unbacked-up entry risks losing content the diff never showed. (`Write` only for a first-ever file, which has no prior content to lose.) 🔴 **The re-read is the actual safeguard, not the anchor: do it every time, and do not treat "no error" as evidence you were alone** — a concurrent append on this anchor is measured to land silently.
 

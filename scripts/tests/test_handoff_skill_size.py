@@ -184,10 +184,17 @@ REFERENCE_DIR = SKILL_MD.parent / "reference"
 # index protocol is needed only on the runs that actually reach a write.
 #
 # Sized as before, in units of a real edit: mean paragraph ~486 B, mean 🔴 rule
-# ~572 B. 24,000 leaves ~2.3 KB over the post-extraction size — about four mean
-# rules — which is a working margin without re-inviting the regrowth this gate
-# exists to price. The eviction playbook's first lever is unchanged and is now
-# the demonstrated one: move a coherent block to a home of its own.
+# ~572 B. 🔴 MIND THE BASE — the mistake test_rules_size.py records three times.
+# The ENFORCED budget is MAX_BYTES - MIN_HEADROOM_BYTES, so the usable margin is
+# FLOOR-relative and is roughly TWO mean rules, not the four a ceiling-relative
+# reading gives. An earlier draft of this comment said four. Do not restate
+# either figure: the failure messages print current / ceiling / free / budget,
+# and that is the authority.
+#
+# ⚠ THE LEVER WAS 2, NOT 1. This is the playbook's "demote a whole coherent
+# block" taken one step further — the block got a SKILL of its own rather than a
+# reference/ file. An earlier draft called it lever 1, which is "move guidance
+# INTO the tool"; that is not what happened.
 MAX_BYTES = 24_000
 
 # Required working margin below the ceiling.
@@ -263,8 +270,13 @@ def _pin_counts() -> str:
         )
     parts = ", ".join(f"{n} in {k}" for k, n in sorted(counts.items()))
     return (
-        f"The skill's prose is pinned verbatim, phrase by phrase: {parts}. "
-        f"Deleting any one of them is a test failure, not a silent loss."
+        f"⚠ MOST OF THOSE PINS TARGET `claude/skills/subsystem-index/SKILL.md`, "
+        f"NOT THIS FILE, since the 2026-08-24 extraction: {parts}. They protect "
+        f"the INDEX protocol; trimming handoff/SKILL.md is largely NOT caught by "
+        f"them. An audit found this block telling a maintainer under budget "
+        f"pressure the opposite. What guards THIS file: the handoff-scoped "
+        f"SKILL_PINS entries and the seam test in test_subsystem_touch.py. Read "
+        f"the step cold — the pin count is not your safety net here."
     )
 
 
