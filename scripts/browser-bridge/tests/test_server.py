@@ -131,12 +131,29 @@ def _wait_events(spool_dir, n=1, timeout=10.0, until=None) -> list:
 
     So `until=` and the loud timeout below are still worth having, but for the
     ORDINARY reason — a count is a proxy for "the event I want landed", and the
-    proxy is only exact when any N will do. Measured over the 56 call sites here:
-    43 pass n=1 after a single command (exact, not a proxy), 4 pass `until=`, and
-    9 pass n>=2. Of those 9, all but one either wait for the earlier event before
-    issuing the next request or assert something order-independent; the exception
-    is the `absent, empty = _wait_events(spool_dir, 2)` unpack, which does depend
-    on file order. Pass `until=` whenever you are waiting for a SPECIFIC event.
+    proxy is only exact when any N will do.
+
+    DERIVED BY AST OVER THIS FILE, not by grep, and the difference was a real
+    error: a line-oriented regex for the count reads the POSITIONAL form and
+    misses the KEYWORD one, so `_wait_events(tmp_path, n=2, …)` was silently
+    filed under n=1 while its sibling on the next line (`until=lambda evs:
+    False`) was filed under `until=` — one function, one test, two buckets, and
+    a total that still added to 56. Rule used, stated because it is a judgement
+    call: bucket by what the call ASKS FOR, and **`_wait_events`' own control
+    tests are classified like every other site — no self-test exemption**, since
+    exempting one of a pair and not the other is what produced the wrong number.
+
+        56 total  =  42 n=1  +  4 until=  +  10 n>=2
+
+    n=1 after a single command is exact, not a proxy. Of the 10 n>=2, one is this
+    harness's own negative control below (it asserts the timeout fires; no real
+    events are involved). Of the 9 remaining real waits, 8 are order-safe —
+    either they wait for the earlier event before issuing the next request, so
+    file order is pinned structurally, or they assert something
+    order-independent. The exception is the `absent, empty =
+    _wait_events(spool_dir, 2)` unpack, which does depend on file order.
+
+    Pass `until=` whenever you are waiting for a SPECIFIC event.
 
     🔴 AND A TIMEOUT IS NOW LOUD. This used to return a SHORT list silently, so
     every caller's next line — `[0]`, or a filter — failed with a message about
@@ -2231,6 +2248,49 @@ def test_load_spool_emit_missing_path_returns_none(monkeypatch, tmp_path):
     monkeypatch.setattr(S, "_spool_emit_mod", None)
     monkeypatch.setattr(S, "_spool_emit_tried", False)
     assert S._load_spool_emit() is None
+    # 🔴 "TRIED" MEANS TRIED, NOT "SUCCEEDED". The flag must be set even on the
+    # failure path — see the behavioural guard below for what goes wrong if a
+    # later edit tucks it into the success branch.
+    assert S._spool_emit_tried is True, (
+        "a FAILED import left `_spool_emit_tried` False, so the next emit will "
+        "retry it — under `_spool_emit_lock`, on every request")
+
+
+def test_a_failed_emitter_import_is_never_retried(monkeypatch, tmp_path):
+    """🔴 THE FAILURE PATH LATCHES — and without this nothing said so.
+
+    `_spool_emit_tried` is set unconditionally, so an emitter that cannot be
+    imported disables telemetry once and stays disabled. That is the documented
+    supported configuration: "collector not checked out -> telemetry simply off".
+
+    UNPINNED UNTIL NOW, and measured: the mutant `_spool_emit_tried = mod is not
+    None` — tucking the flag into the success branch — SURVIVED all 785 tests in
+    this directory. Under it every single emit re-attempts a failing import, and
+    since this PR each of those attempts serializes on `_spool_emit_lock`. That
+    makes a lock added to stop dropped events strictly WORSE than no lock, on a
+    configuration the code says it supports, with no test to say so.
+
+    Pinned BEHAVIOURALLY — the number of import ATTEMPTS — not by reading the
+    flag, because the flag is the proxy and the retry is the harm.
+    """
+    attempts = tmp_path / "import-attempts"
+    emitter = tmp_path / "broken_spool_emit.py"
+    emitter.write_text(
+        f"with open({str(attempts)!r}, 'a') as _f:\n"
+        "    _f.write('x')\n"
+        "raise RuntimeError('emitter is broken')\n",
+        encoding="utf-8")
+    monkeypatch.setattr(S, "_SPOOL_EMIT_PATH", emitter)
+    monkeypatch.setattr(S, "_spool_emit_mod", None)
+    monkeypatch.setattr(S, "_spool_emit_tried", False)
+
+    assert S._load_spool_emit() is None
+    assert attempts.read_text() == "x", "positive control: the import never ran"
+    for _ in range(3):
+        assert S._load_spool_emit() is None
+    assert attempts.read_text() == "x", (
+        f"the broken emitter was imported {len(attempts.read_text())} times — a "
+        "failed import must latch, not retry on every emit")
 
 
 # --------------------------------------------------------------------------- #

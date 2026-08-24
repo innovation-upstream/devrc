@@ -972,13 +972,19 @@ _spool_emit_mod = None
 _spool_emit_tried = False
 # 🔴 THE LAZY LOAD RUNS ON A HANDLER THREAD, SO IT NEEDS A LOCK. ThreadingHTTPServer
 # gives every /cmd its own thread and each one emits after its response is sent, so
-# two commands in flight reach `_load_spool_emit` CONCURRENTLY — routinely, because
-# request N's emit fires exactly while request N+1 is being handled. Without this
-# lock the flag was published BEFORE the module: the loser thread read
-# `_spool_emit_tried is True`, was handed a still-None `_spool_emit_mod`, and
-# `emit_cmd_event` returned at its `if se is None` guard. That event was DROPPED —
-# not delayed, not retried, gone — for the whole life of the process on the losing
-# call, and the row simply never appears in activity.events.
+# request N's emit fires exactly while request N+1 is being handled: the handlers
+# OVERLAP routinely. Without this lock the flag was published BEFORE the module, so
+# any handler arriving during the FIRST import read `_spool_emit_tried is True`, was
+# handed a still-None `_spool_emit_mod`, and `emit_cmd_event` returned at its
+# `if se is None` guard. That event was DROPPED — not delayed, not retried, gone —
+# and its row never appears in activity.events.
+#
+# 🔴 SCOPE, because the overlap is routine and the LOSS is not: the window is the
+# FIRST import only, once per process. After it, `_spool_emit_tried` is latched and
+# every later emit takes the unlocked fast path. So the exposure is the handful of
+# commands concurrent with a server's first emit — real, and bounded. It is the
+# TEST suite that meets it constantly, because the `telemetry` fixture resets the
+# cache per test and re-arms the first import every time.
 #
 # MEASURED, not reasoned, and stated at the scope it was measured: two threads
 # reaching this function with the cache cold, 40 trials per point, on the 24-core
