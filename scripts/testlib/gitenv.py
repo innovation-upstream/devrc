@@ -143,6 +143,22 @@ NOT here — widening a shared ledger on the strength of one consumer's defect
 changes GUARD 9 for every runner. Read this list as "cannot redirect git",
 never as "safe to inherit".
 
+🔴 THIS MODULE IS ON THE DEPLOYED PATH — IT IS NOT TEST-ONLY, DESPITE LIVING IN
+`testlib/`. `scripts/analyze-service-index/backup.py` imports `REPO_POINTER_VARS`
+and `strip_repo_pointers` from here AT RUNTIME, under a systemd timer, and
+`restore-verify.py` inherits that through it. Both encrypt and upload off-box, so
+the import is a HARD failure there rather than a degrade: a missing ledger stops
+the backup instead of silently running without the strip. Three consequences for
+anyone editing this file:
+
+  * keep it STDLIB-ONLY (today: `hashlib`, `os`, `pathlib`). The unit's python
+    env carries `minio` and nothing else; a pytest import here would break the
+    4:30am backup and nothing in the suite would notice.
+  * moving or renaming it is a PRODUCTION change. The unit reaches it only
+    because `BindReadOnlyPaths` mounts the whole `scripts/` tree.
+  * a name added to `REPO_POINTER_VARS` reaches that program with no edit there
+    — which is the point, and why it imports the object instead of copying it.
+
 🔴 FIFTH SPELLING, 2026-08-22. `scripts/analyze-service-index/commit.sh` also
 carries the array. It is not a runner — it resolves no ROOT and no test tier
 reaches it (systemd timer, operator shell) — but it is the one program here
