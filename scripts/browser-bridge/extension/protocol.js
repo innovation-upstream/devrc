@@ -1630,6 +1630,13 @@ export function promiseWithTimeout(promise, ms, label, timers = {},
 //     `cdp_timeout:<method>`). Anyone lowering EXEC_OP_BUDGET_MS below 16s, or
 //     raising CDP_ATTACH_TIMEOUT_MS / CDP_COMMAND_TIMEOUT_MS, converts the
 //     attach case into a generic `op_timeout` — re-measure before touching either.
+//     🔴 A THIRD WAY TO SPEND THAT MARGIN, and it is not on this line's face:
+//     `screenshot`'s fast path can now burn FAST_CAPTURE_BUDGET_MS *before* the
+//     CDP path even starts, so on a fallthrough the real figure is
+//     1500 + 16000 = 17500 and the headroom is **500ms, not 2000ms**. That sum is
+//     pinned by a test (cdp_protocol.test.mjs) rather than by this comment,
+//     because the first draft of that constant was 5000 — which made it 21000,
+//     silently over this bound, and green under every other test in the repo.
 // Known cost: a slow-but-SUCCESSFUL CDP op in the 18–20s band is now killed at 18s
 // where it previously had until the server's 20s. That band was already mostly
 // lost to the server, so the trade is small and deliberate.
@@ -1651,6 +1658,84 @@ export const EXEC_OP_BUDGET_MS = 18000;
 // `frames`/`screenshot` ever did. Bounded so "every await in the loop body is
 // bounded" is literally true rather than nearly true.
 export const STORAGE_BUDGET_MS = 5000;
+// 🔴 THE `screenshot` FAST PATH NEEDS ITS OWN, MUCH SMALLER BOUND — because
+// `chrome.tabs.captureVisibleTab` can HANG rather than reject, and a hang is
+// invisible to the `catch` that is supposed to fall through to CDP.
+//
+// The fast path's own comment promises "any failure there falls through to the
+// CDP path". That was only ever true of a REJECTION: captureWithRetry awaits the
+// call, so a promise that never settles never reaches the catch, and the op dies
+// at EXEC_OP_BUDGET_MS instead of taking the CDP path that would have worked.
+//
+// Measured 2026-08-24 (app-capture arc, an active tab on a non-visible
+// workspace): 3/3 `op_timeout:screenshot` pinned at 18.07-18.11s — the ceiling,
+// not a natural error latency — while the SAME tab captured fine via CDP 3/3 in
+// 381-3084ms once it was no longer its window's active tab. One arm returned via
+// captureVisibleTab at 17.97s, i.e. it can eventually settle; it is far too slow,
+// not permanently stuck. Occlusion is NOT the discriminator: the hang reproduces
+// with nothing drawn on top. Record:
+// <datapacket-talos>/claudedocs/app-capture-occlusion-refutation-2026-08-24.md
+//
+// 🔴 THE CEILING ON THIS NUMBER IS THE CDP FALLTHROUGH'S OWN BUDGET, NOT TASTE.
+// Whatever the fast path spends is spent BEFORE the CDP path starts, and it comes
+// straight out of the attach-hang margin documented at EXEC_OP_BUDGET_MS above: a
+// hung attach costs CDP_ATTACH_TIMEOUT_MS(8s) + an awaited safeDetach bounded by
+// CDP_COMMAND_TIMEOUT_MS(8s) = 16s, and that comment explicitly warns that
+// leaving it under 16s "converts the attach case into a generic op_timeout".
+// So the invariant is:
+//
+//     FAST_CAPTURE_BUDGET_MS + CDP_ATTACH_TIMEOUT_MS + CDP_COMMAND_TIMEOUT_MS
+//         <= EXEC_OP_BUDGET_MS
+//     1500 + 8000 + 8000 = 17500 <= 18000
+//
+// It is PINNED BY A TEST (cdp_protocol.test.mjs), not by this comment — an
+// earlier draft of this constant was 5000, which silently blew the sum to 21000
+// and would have mislabelled a post-fallthrough attach hang as `op_timeout`,
+// destroying the very phase attribution `fast_capture_timeout` exists to give.
+// ⚠ Be honest about what is left: 500ms of headroom, DOWN from the 2000ms that
+// comment describes. Raising this constant, CDP_ATTACH_TIMEOUT_MS or
+// CDP_COMMAND_TIMEOUT_MS without re-deriving the sum fails that test.
+//
+// 1500ms clears the ORDINARY healthy-capture band (control arm n=3: 292-1365ms;
+// arm A n=2: ~280ms) and cuts the pathological hang off ~16.5s before the op
+// would have died outright. ⚠ NOT "clears a healthy capture" — the same run
+// recorded a healthy capture at 17.97s (arm A′, noted above). Sacrificing that
+// 1.5-18s tail to CDP is the POINT of the bound, not an oversight.
+//
+// 🔴 DELIBERATE CONSEQUENCE, corrected from an earlier draft that claimed the
+// opposite: a genuine QUOTA STORM now falls through to CDP rather than riding out
+// the retry ladder. captureWithRetry can legitimately spend CAPTURE_MAX_ATTEMPTS(3)
+// tries spaced by max(CAPTURE_RETRY_BASE_MS(700)·attempt, CAPTURE_QUOTA_WAIT_MS
+// (1000)) = 1000 + 1400 = 2400ms of backoff PLUS the calls themselves — up to
+// ~6.5s at the top of the measured band, i.e. over this bound at any plausible
+// value that also satisfies the invariant above. That is the right trade rather
+// than a regression: CDP has NO captureVisibleTab quota, so the fallthrough is
+// exactly what a quota storm wants. It costs a debugger banner and returns the
+// SAME image — both paths measured identical 1709x1314 geometry (the "CDP changes
+// the image" caveat is about --fullpage, a different clip). ⚠ That geometry
+// equality is n=1, at one zoom/deviceScaleFactor, and the fallthrough is now
+// ROUTINE rather than rare — so a divergence at non-100% zoom would be routine too.
+//
+// 🔴 WHAT THE NARROW BOUND COSTS. Stated rather than discovered later; none of it
+// is fatal, and no value satisfying the invariant above avoids (a):
+//   (a) The retry ladder is largely CUT OFF for the OTHER transient class it was
+//       built for — `image readback failed`, the GPU/paint race behind #181's
+//       spacing invariant. Attempt 2 starts at T+700ms and must finish inside the
+//       bound; attempt 3 needs >=2100ms (700·1 + 700·2; probed at 2106ms) and can
+//       NEVER run. (At 2000ms — the maximum the invariant allows — attempt 3 is
+//       still unreachable, so this is structural, not a tuning error.) Such a capture now takes CDP instead of retrying.
+//   (b) A merely SLOW-but-successful capture in the 1.5-18s band now falls through
+//       where it previously succeeded, and CDP is not a universal substitute:
+//       chrome.debugger.attach fails on a tab that already has DevTools attached,
+//       which is a case where the fast path was the ONLY working path. Sacrificing
+//       that tail is the intent — but it is a real behaviour change, not free.
+//   (c) The abandoned ladder keeps firing captureVisibleTab in the background
+//       CONCURRENTLY with the CDP capture, consuming the ~2/sec quota. There is no
+//       abort primitive for captureVisibleTab (contrast the bounded fetch, which
+//       has a signal that tears the request down), so this cannot be fixed here.
+//       At 5000ms abandonment was rare; at 1500ms it is routine. Self-healing —
+//       the next op's own retry absorbs it.
+export const FAST_CAPTURE_BUDGET_MS = 1500;
 // A /poll blocks server-side for BROWSER_BRIDGE_POLL_TIMEOUT (default 25s) before
 // its 204. 40s leaves generous headroom for a slow loopback round-trip plus the
 // activeTabSnapshot() that precedes the fetch, while still being a bound.

@@ -210,6 +210,30 @@ contentArg = unescapeText(contentArg);
 descriptionArg = unescapeText(descriptionArg);
 arg2 = unescapeText(arg2);
 
+// Agent-object hygiene: fold --cond into a create's options, validated.
+//
+// 🔴 ONE PLACE, because there is more than one creating command. `create` and
+// `subtask` both stamp (api/tasks.mjs), so both must be able to NAME the closing
+// condition — a creator that structurally cannot is a creator whose objects are
+// all `cond=unstated` no matter how diligent the author, which turns the
+// `unstated` count from a measure of authorial omission into a measure of an
+// interface gap. Validated HERE so an off-allowlist value fails loudly at the
+// CLI instead of degrading somewhere deeper: a wrong condition that reads as
+// accepted is how an object ends up believed-tracked and actually immortal.
+// Omitting --cond is NOT an error: it records cond=unstated and warns.
+function withAgentCond(options) {
+  if (!condArg) return options;
+  try {
+    options.agentCond = validateCond(condArg);
+  } catch (e) {
+    console.error(`Error: ${e.message}`);
+    console.error(`Allowed --cond kinds: ${[...COND_KINDS].sort().join(', ')}`);
+    console.error('Every kind takes an argument; manual takes the NAME of who checks it.');
+    process.exit(1);
+  }
+  return options;
+}
+
 // --file overrides --content: read file contents as the content/text argument
 if (fileArg) {
   const filePath = resolve(fileArg);
@@ -338,11 +362,18 @@ Options:
   --attach     File path to upload as attachment (repeatable, for attach/comment)
   --page       Page ID for doc-reply (identifies which page the thread is on)
   --space      Space ID for create-doc (places doc in that space)
-  --cond       Close-condition for a task an agent files, from the enumerated
-               allowlist (gh_pr_merged:<owner>/<repo>#<n>, alert_cleared:<name>,
-               cmd_exit_zero:<id>, metric_below:<id>, manual). Recorded in the
-               task body so a later reconciler can close it. Defaults to
-               'manual'; anything off-allowlist is REJECTED, not stored.
+  --cond       Close-condition for a task an agent files (create AND subtask),
+               from the enumerated allowlist (gh_pr_merged:<owner>/<repo>#<n>,
+               alert_cleared:<name>, cmd_exit_zero:<id>, metric_below:<id>,
+               manual:<who>). Recorded in the task body so a later reconciler
+               can close it. 'manual' MUST name who checks it - a bare 'manual'
+               names nobody and is REJECTED, as is anything off-allowlist.
+               'unstated' is REJECTED too: it is what the code records when you
+               named nothing, never something you may claim. Omitting --cond
+               records cond=unstated and warns on stderr, so a task filed with
+               no condition stays countable instead of looking compliant.
+               batch-create takes the same value per task as a 'cond' key (and
+               per subtask), validated before ANY task is created.
 
 Bulk Operations (comma-separated IDs):
   node query.mjs get id1,id2,id3              Fetch multiple tasks at once
@@ -1093,19 +1124,9 @@ async function main() {
           options.markdown_description = descriptionArg;
         }
         // Agent-object hygiene: an explicit close-condition for the marker
-        // createTask() stamps. Validated HERE so an off-allowlist value fails
-        // loudly at the CLI instead of silently degrading to `manual` deep
-        // inside the stamp — a wrong condition that reads as accepted is how an
-        // object ends up believed-tracked and actually immortal.
-        if (condArg) {
-          try {
-            options.agentCond = validateCond(condArg);
-          } catch (e) {
-            console.error(`Error: ${e.message}`);
-            console.error(`Allowed --cond kinds: ${[...COND_KINDS].sort().join(', ')}`);
-            process.exit(1);
-          }
-        }
+        // createTask() stamps. See withAgentCond() — one validator, both
+        // creating commands.
+        withAgentCond(options);
         if (dueArg) {
           const dueDate = parseDateInput(dueArg);
           options.due_date = dueDate.getTime();
@@ -1328,7 +1349,10 @@ async function main() {
           console.error('Usage: node query.mjs subtask <task> "Subtask title"');
           process.exit(1);
         }
-        const subtask = await createSubtask(taskId, arg2);
+        // A subtask is a created object like any other: it gets stamped, so it
+        // must be able to name what closes it. Without --cond here every
+        // subtask this CLI files is `cond=unstated` by construction.
+        const subtask = await createSubtask(taskId, arg2, withAgentCond({}));
         if (jsonOutput) {
           console.log(JSON.stringify(subtask, null, 2));
         } else {
