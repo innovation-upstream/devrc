@@ -240,8 +240,8 @@ SUITES=(
   # and lightbox (open/close, zoom, pan, per-message navigation, the wiring of
   # every on-screen control).
   #
-  # 99 tests / 2 files measured 2026-08-24 on the tree that added it.
-  # Floor 95 = 99 - min(50, max(1, 99/20)) = 99 - 4.
+  # 102 tests / 2 files measured 2026-08-24 on the tree that added it.
+  # Floor 98 = 102 - min(50, max(1, 102/20)) = 102 - 5.
   #
   # 🔴 THIS COMMENT PREVIOUSLY CLAIMED SIX REGRESSION TESTS. IT WAS FIVE.
   # The six original defects were re-introduced ONE AT A TIME by an adversarial
@@ -280,14 +280,18 @@ SUITES=(
   #
   # A FOURTH audit then found the 47th, and a whole VACUOUS CLASS: the fake DOM
   # lowercased `tagName`, while a real HTML document reports it UPPERCASE. That
-  # silently voided all four `.toLowerCase()` guards in the extension — each one
-  # deletable with the suite fully green, and each deletion making the extension
-  # COMPLETELY INERT in Brave. A fixture that normalises away the thing the code
+  # silently voided SEVEN `.toLowerCase()` guards across BOTH content scripts —
+  # each one deletable with the suite fully green, and each deletion making the
+  # extension COMPLETELY INERT in Brave. (This comment said "four" for one round:
+  # audit 5 counted the three in lightbox.js that audit 4 and I both missed. A
+  # count of the sites you happened to look at is not a count of the sites.) A fixture that normalises away the thing the code
   # normalises is not a test of that code. The fake now reports uppercase.
   #
   # Sweep as of this tree: 56 mutants (25 mine, 11 from audit 2, 10 from audit 3,
   # 10 from audit 4), 55 killed, 0 unapplied. The single survivor is EQUIVALENT
-  # BY CONSTRUCTION, and audit 4 verified that independently:
+  # BY CONSTRUCTION, and audit 4 verified that independently — audit 5 adds that
+  # it is really TWO instances of one equivalence class (the childList arm and the
+  # attributes arm), not a single mutant:
   # scan() now returns 0 for any root it cannot query, so the observer's
   # `nodeType === 1` filter became defence in depth rather than the only thing
   # between a text node and a whole-page sweep. A positive control (reverting the
@@ -301,7 +305,7 @@ SUITES=(
   # zero attachments. The narrowed pattern matched 0 there and 1 in the second
   # channel — a real attachment, in a container capped at max-height 350px, which
   # is the positive control proving it is not simply matching nothing.
-  "scripts/discord-embed-ext/tests|2|95"
+  "scripts/discord-embed-ext/tests|2|98"
 )
 
 # --- discovery roots -----------------------------------------------------------

@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 
 import { FakeElement, makeDiscordDoc, makeClickEvent, openShadow } from "./fake_discord_dom.mjs";
 
@@ -511,7 +512,7 @@ test("REGRESSION: the message match is a SUBSTRING, so Discord's hashed classes 
   // This is the anti-rot property the source comment and the README both claim.
   // `cls === "message"` used to survive, because no fixture shipped a hashed class.
   var doc = makeDiscordDoc(
-    "<div class='message__74e4d cozy__1f3a'><div class='embed'>" +
+    "<div class='cozy__1f3a message__74e4d'><div class='embed'>" +
     "<img src='" + A1 + "' /><img src='" + A2 + "' /></div></div>");
   LB.open(doc, doc.querySelector("img"));
   assert.equal(LB.siblingCount(), 2, "a hashed class must still bound the message");
@@ -665,4 +666,77 @@ test("the row id must START with chat-messages-, not merely contain it", () => {
   LB.open(doc, doc.querySelector("img"));
   assert.equal(LB.siblingCount(), 1,
     "an id that merely CONTAINS the prefix is not a message row");
+});
+
+// ===========================================================================
+// Round 5.
+// ===========================================================================
+
+test("SEAM: importing lightbox.js WITHOUT the flag installs the click handler", () => {
+  // 🔴 THE SAME DEFECT AT A THIRD LEVEL. Round 3 pinned autoStart()'s two halves;
+  // round 4 pinned embed_enlarge's module-scope CALL; this is the other content
+  // script's call, and deleting `installAutoStart(document);` left the suite
+  // 99/99 green with the ENTIRE lightbox inert in Brave — images still enlarge,
+  // clicking one does nothing. Every test here sets DEE_NO_AUTOSTART before
+  // importing, so module scope never reaches that line. Subprocess, no flag.
+  var extDir = new URL("../extension/", import.meta.url).pathname;
+  var fakeDom = new URL("./fake_discord_dom.mjs", import.meta.url).pathname;
+  var probe = [
+    'import { makeDiscordDoc, makeClickEvent } from ' + JSON.stringify(fakeDom) + ';',
+    'const doc = makeDiscordDoc(',
+    '  "<div class=\'message\'><div class=\'embed\'>" +',
+    '  "<img src=\'https://cdn.discordapp.com/attachments/1/2/auto.png\' /></div></div>");',
+    'globalThis.document = doc;',
+    'globalThis.MutationObserver = function () {',
+    '  return { observe: function () {}, disconnect: function () {} };',
+    '};',
+    // deliberately NOT setting DEE_NO_AUTOSTART, and in manifest order
+    'await import(' + JSON.stringify(extDir + "embed_enlarge.js") + ');',
+    'await import(' + JSON.stringify(extDir + "lightbox.js") + ');',
+    'const img = doc.querySelector("img");',
+    'doc.dispatchEvent(makeClickEvent(img));',
+    'process.stdout.write(JSON.stringify({',
+    '  marked: img.getAttribute("data-dee-enlarged"),',
+    '  opened: globalThis.__DEE_LIGHTBOX__.isOpen(),',
+    '}));',
+  ].join("\n");
+  var out = execFileSync(process.execPath,
+    ["--input-type=module", "-e", probe], { encoding: "utf8", timeout: 30000 });
+  var res = JSON.parse(out);
+  assert.equal(res.marked, "1", "positive control: the media really was enlarged");
+  assert.equal(res.opened, true,
+    "and clicking it must open the lightbox — the whole feature rides on this line");
+});
+
+test("REGRESSION: the arrow BUTTONS' direction is pinned (needs 3 siblings, not 2)", () => {
+  LB.forget();
+  // The keyboard test at the top of this file already carries this warning; the
+  // BUTTON test did not inherit it. With makeTwoMessageDoc's two images, wiring
+  // prevBtn to navigate(+1) — both arrows forward — survived.
+  var doc = makeDiscordDoc(
+    "<div class='message'><div class='embed'>" +
+    "<img src='" + A1 + "' /><img src='" + A2 + "' /><img src='" + B1 + "' />" +
+    "</div></div>");
+  LB.open(doc, doc.querySelector("img"));
+  var shadow = shadowOf(doc);
+  clickOn(shadow.querySelector(".nav-next"));
+  assert.equal(LB.currentSrc(), A2, "the ▶ button goes FORWARD");
+  LB.forget();
+  LB.open(doc, doc.querySelector("img"));
+  clickOn(shadowOf(doc).querySelector(".nav-prev"));
+  assert.equal(LB.currentSrc(), B1, "and the ◀ button wraps BACKWARD to the last");
+});
+
+test("REGRESSION: a <video src=...> with no <source> keeps its src in the clone", () => {
+  LB.forget();
+  // isMediaElement supports that form, and embed_enlarge's tests exercise it —
+  // but every LIGHTBOX video fixture used <video><source>, so deleting the
+  // clone's own `src` copy survived. The overlay would show a blank video.
+  var VID = "https://media.discordapp.net/attachments/1/2/direct.mp4";
+  var doc = makeDiscordDoc(
+    "<div class='message'><div class='embed'><video src='" + VID + "'></video></div></div>");
+  LB.open(doc, doc.querySelector("video"));
+  var clone = shadowOf(doc).querySelector(".media-container video");
+  assert.ok(clone, "video cloned");
+  assert.equal(clone.getAttribute("src"), VID, "and it carries the url");
 });
