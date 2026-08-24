@@ -106,20 +106,29 @@ export function labelFor(producer) {
 // 🔴 TWO OPT-INS, both narrow, both named — never a bare boolean:
 //
 //   allowUnstated    `unstated` is the value the MISSING-cond fallback produces
-//                    (agentIdentity / applyAgentStamp). buildMarker and
-//                    parseMarker must be able to handle it; a CALLER must never
-//                    be able to pass it, because "I have no condition" is a fact
-//                    the code observes, not a condition anyone may claim.
-//   allowBareManual  parse-side only, and it is a CROSS-LANGUAGE fact rather
-//                    than a legacy allowance: talos-infra's
-//                    `scripts/lib/agent_obj_marker.py` is the other half of this
-//                    one grammar and it still emits a bare `manual` (measured
-//                    2026-08-24). Rejecting that on the READ path would blind a
-//                    JS reconciler to every object the Python producers stamp —
-//                    which is the exact invisibility this whole marker exists to
-//                    end. So: this side REFUSES TO EMIT one and still READS one.
-//                    A bare `manual` parses with condArg === null, which is how a
-//                    consumer counts the ones that name nobody.
+//                    (agentIdentity → applyAgentStamp). parseMarker must handle
+//                    it unconditionally (a reconciler has to READ what we stamp)
+//                    and buildMarker handles it only when the caller declares the
+//                    fallback. A CALLER must never be able to pass it, because
+//                    "I have no condition" is a fact the code observes, not a
+//                    condition anyone may claim — enforced at the create seam
+//                    (api/tasks.mjs `validateCallerCond`) and, one layer down, by
+//                    buildMarker's `allowUnstated: false` default.
+//   allowBareManual  parse-side only, and it is a LEGACY-CORPUS allowance:
+//                    objects stamped before the arity rule carry `cond=manual`
+//                    and are live right now. Rejecting that on the READ path
+//                    would make every one of them unparseable and therefore
+//                    invisible — the exact invisibility this marker exists to
+//                    end. So: REFUSE TO EMIT, STILL READ. A bare `manual` parses
+//                    with condArg === null, which is how a consumer counts the
+//                    ones that name nobody. `manual:` — a colon with an empty
+//                    argument — is NOT covered: that is malformed, not legacy.
+//                    🔴 The other half of this grammar,
+//                    `<talos-infra>/scripts/lib/agent_obj_marker.py`, takes the
+//                    SAME position (measured at commit `9e21058fc`, 2026-08-24) —
+//                    an earlier version of this comment said Python "still emits"
+//                    a bare `manual`, which stopped being true with
+//                    civitai/talos-infra#1286.
 export function validateCond(cond, { allowUnstated = false, allowBareManual = false } = {}) {
   if (typeof cond !== 'string' || cond === '') {
     throw new MarkerError('cond is required');

@@ -32,12 +32,10 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'fs';
+import { createHash } from 'node:crypto';
+import { existsSync, readFileSync } from 'fs';
 import { dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
-
-import { createHash } from 'node:crypto';
-import { existsSync } from 'fs';
 
 import {
   MARKER_VERSION,
@@ -95,10 +93,12 @@ const VECTORS = Object.freeze({
     [{ producer: 'reliability-sweep-advisor', claim: 'index-candidates' }, '633d2c372bd0'],
   ],
   condKinds: ['alert_cleared', 'cmd_exit_zero', 'gh_pr_merged', 'manual', 'metric_below'],
-  // A Python-produced marker carrying the bare `manual` this side no longer
-  // EMITS but must still READ. Generated 2026-08-24 from
-  // talos-infra scripts/lib/agent_obj_marker.py at origin/trunk.
-  pythonBareManual: '<!-- claw:obj v=1 src=capacity-sweep/run-1 cond=manual -->',
+  // A LEGACY marker carrying the bare `manual` NEITHER side emits any more but
+  // both must still READ — objects stamped before the arity rule carry it and are
+  // live right now. (An earlier note called this "Python-produced": Python stopped
+  // emitting it in civitai/talos-infra#1286, which merges before this. The corpus,
+  // not the producer, is what keeps the read path open.)
+  legacyBareManual: '<!-- claw:obj v=1 src=capacity-sweep/run-1 cond=manual -->',
 });
 
 // ── The Python half: WHAT was measured, and FROM WHAT ───────────────────────
@@ -426,7 +426,7 @@ test('CROSS-LANGUAGE: bare `manual` — both sides refuse to EMIT it and both st
     `this side must not emit a bare \`manual\`; neither does ${PY}`);
 
   assert.equal(PYTHON_DIVERGENCE.bothStillParseBareManual, true);
-  const legacy = parseMarker(VECTORS.pythonBareManual);
+  const legacy = parseMarker(VECTORS.legacyBareManual);
   assert.ok(legacy,
     'a legacy bare `manual` MUST still parse — rejecting it on the READ path would blind '
     + 'a JS reconciler to every already-stamped object carrying one, which is the invisibility this '
