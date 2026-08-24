@@ -9,6 +9,13 @@ Everything below was measured against `claude-code-2.1.232` as installed
 (`/nix/store/43fmrchzsg9g110qqk9n7a5z0icsf0qh-claude-code-2.1.232/bin/.claude-wrapped`) and
 against the live usage counters in `~/.claude.json`. Nothing here is from documentation alone.
 
+⚠ **Every total here measures the tree BEFORE PR #785** (which retires `ux-sweep`,
+`gpu-operator-check` and `session-audit`): **39 entries, 13,491 by the gate / 13,685 real.**
+After #785 that becomes **36 entries, 12,679 by the gate**, ratchet `12_929`. The four findings
+below — the ×4 char budget, the 194-char undercount, protected built-ins, and `skillOverrides`
+— are unaffected; only the totals move. The §4 table keeps its 39 rows deliberately, because the
+three retired rows are the evidence for how little retirement buys.
+
 ---
 
 ## 1. Corrections to the handoff's model
