@@ -36,6 +36,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
+from testlib import hermetic_git  # noqa: E402
 from testlib.mockbin import write_exec  # noqa: E402
 
 TOOL = REPO_ROOT / "scripts" / "lib" / "handoff_doc.py"
@@ -141,11 +142,11 @@ UPDATE_DOC = f"""## State now
 GIT_ENV = {
     "GIT_CONFIG_GLOBAL": "/dev/null",
     "GIT_CONFIG_SYSTEM": "/dev/null",
-    "GIT_CONFIG_COUNT": "2",
-    "GIT_CONFIG_KEY_0": "maintenance.auto",
-    "GIT_CONFIG_VALUE_0": "false",
-    "GIT_CONFIG_KEY_1": "gc.auto",
-    "GIT_CONFIG_VALUE_1": "0",
+    # 🔴 CONSOLIDATED 2026-08-24. These five keys were spelled out here, again
+    # in restore-verify, and nowhere in five other modules that need them — the
+    # N-sites-wrong-at-N-1 shape. One copy now: testlib/hermetic_git.py, whose
+    # ledger test fails when a new module joins the class without them.
+    **hermetic_git.MAINTENANCE_OFF,
 }
 
 

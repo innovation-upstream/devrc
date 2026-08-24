@@ -28,6 +28,7 @@ wrong reason and stays green with the guard it claims to test deleted.
 """
 from __future__ import annotations
 
+from testlib import hermetic_git  # noqa: E402
 import os
 import re
 import shutil
@@ -65,6 +66,12 @@ def _run(store, *args, **env):
     """Invoke the committer. bash is resolved to an absolute path — never via a
     shebang and never through an interpreter that may be absent in the sandbox."""
     e = dict(os.environ)
+    # 🔴 Maintenance OFF BEFORE the caller's overrides, never after: several
+    # tests here pass their own GIT_CONFIG_* to prove the committer neutralises
+    # ambient config, and those must still win. `_fingerprint` walks `objects/`,
+    # which is where `.git/objects/maintenance.lock` lands, so this module is a
+    # member of the class by construction. See scripts/testlib/hermetic_git.py.
+    e.update(hermetic_git.MAINTENANCE_OFF)
     e.update({k: str(v) for k, v in env.items()})
     return subprocess.run(
         [BASH, str(SCRIPT), *[str(a) for a in args], str(store)],
