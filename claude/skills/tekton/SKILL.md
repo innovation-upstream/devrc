@@ -53,6 +53,23 @@ debugging, changing or copying a specific pipeline.
    before this leg reported`: **a broken gate, not a bad change — do not debug your diff
    against it.** The tell that it is congestion rather than code: it heals when the queue
    drains, and a code cause does not.
+   🔴 **But 255 is NOT the same claim as "no test failed" — READ WHETHER THE STEP PRINTED A
+   VERDICT.** "It heals when the queue drains" is a true tell and a slow one; the log answers
+   in one read. Measured 2026-08-24 over all completed `devrc-ci` gate TaskRuns (classified by
+   which step died and with what code, NOT by the PipelineRun verdict): the failures split
+   **~27 KILLED steps** — 25× `step-pytests` 255, 1× `step-nodetests` 255, 1× `137`/OOMKilled,
+   which reported no test result at all — against **~27 GENUINE single-test failures**, ~1 test
+   in ~15,500, surfacing as `verdict exit=1`. The genuine ones do **NOT** correlate cleanly
+   with concurrency (several ran with ≤1 overlap), so congestion is an **amplifier, not the
+   cause**, and "the gate is just flaky under load" will walk you straight past a real bug.
+   Discriminator: a step that emitted `RESULT:` / `<leg> verdict=` **failed a test**; one that
+   emitted neither was **killed**. 25 of the 27 kills had ≥4 gate TaskRuns overlapping.
+   🔴 **The kills are a RESOURCE MISMATCH, not bad luck.** `step-pytests` requests
+   **1 CPU / 2Gi** but limits at **4 CPU / 8Gi**, against a node already committed to ~**290%
+   CPU / 270% memory** limits (measured 2026-08-24) — the scheduler packs on requests, then the
+   step is killed on limits. Closing it is an edit to the `devrc-ci-gate` Task that moves
+   **every** CI run: flag it before doing it, and re-measure rather than trusting these
+   numbers, which move hourly.
    🔴 **Do NOT measure a flake rate from inside a burst you are causing.** That mistake was
    made here and written into a handoff as a property of the CI tier before it was caught —
    `claude/RULES.md` → *"a control that SHARES the step you doubt"*. Take the baseline from a
@@ -221,9 +238,13 @@ Path: GitHub → Cloudflare → **prod Traefik** → prod nginx `0.0.0.0:19100` 
 repo-wide, so **red Actions checks on `homelab-infra` are noise, not signal** — don't debug
 them and don't read them as a gate. Four known-open 🟡 issues (branch-creation over-match,
 unpinned PVC, no concurrency control, `error`-vs-`fail` on the CSS path only) are in the
-reference file. Six triggers share `el-github-listener`: `naida-push-main`,
+reference file. **Seven** triggers share `el-github-listener`: `naida-push-main`,
 `remix-push-trunk`, `gitops-validate-pr`, `gitops-validate-push-trunk`, `clawgate-ci-push`,
-`auditloop-push-main`.
+`auditloop-push-main`, `devrc-ci-pr`. 🔴 **`devrc-ci-pr` is the only one whose check actually
+BLOCKS a merge** (gotcha #9) — the rest are detectors, because their repos cannot configure a
+required check at all. Read the count off the CR, never off this line:
+`kubectl -n tekton-ci get eventlistener github-listener -o jsonpath='{.spec.triggers[*].name}'`
+— this file said "six" for the whole period `devrc-ci-pr` was live and gating.
 
 ### `gitops-validate` — the gitleaks leg (hardened #265)
 
