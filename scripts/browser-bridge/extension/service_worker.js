@@ -50,7 +50,7 @@ import {
   // body is raced against a wall-clock budget (see protocol.js for why and for
   // the CDP < exec < server-cmd_timeout ordering).
   promiseWithTimeout, EXEC_OP_BUDGET_MS, POLL_BUDGET_MS, RESULT_BUDGET_MS,
-  LOOP_STALL_MS, STORAGE_BUDGET_MS,
+  LOOP_STALL_MS, STORAGE_BUDGET_MS, FAST_CAPTURE_BUDGET_MS,
   // `emulate` op: device emulation (viewport/touch/UA+UA-CH/media/geo/tz) that is
   // STICKY per tab because CDP overrides die at detach — see the EMULATION section
   // in protocol.js for the central problem and the safety property it buys.
@@ -973,7 +973,8 @@ const OPS = {
   // it fixes the captureVisibleTab "can only grab the foreground tab" limitation,
   // and lets two profiles each screenshot their own tab). A FAST path keeps the
   // cheap, banner-free captureVisibleTab for a tab that IS already visible (and not
-  // --fullpage); any failure there falls through to the CDP path. `--fullpage`
+  // --fullpage); any failure there — INCLUDING A HANG, which is why the fast path
+  // carries its own bound — falls through to the CDP path. `--fullpage`
   // captures the whole scrollable document (CDP only). Attach is REFUSED on a
   // privileged tab (assertCdpAttachable inside withCdp) before any attach.
   //
@@ -992,11 +993,43 @@ const OPS = {
     if (tab.active && !fullpage && !emulated) {
       // Fast path — no debugger attach/banner. Chrome throttles captureVisibleTab to
       // ~2/sec; captureWithRetry spaces the (rare) retry ≥ the quota window.
+      // 🔴 BOUNDED, because captureVisibleTab can HANG instead of rejecting, and
+      // a hang is invisible to the catch below. Unbounded, this `await` simply
+      // never returned and the op died at EXEC_OP_BUDGET_MS (18s) — so the
+      // fall-through this catch promises never happened, on exactly the tab the
+      // CDP path would have captured fine. Measured 2026-08-24: 3/3 timeouts
+      // pinned at 18.07-18.11s here vs 3/3 CDP successes in 381-3084ms.
+      // The bound turns "never settles" into a rejection, which is the ONLY
+      // shape this catch can see. See FAST_CAPTURE_BUDGET_MS for the 1500ms choice
+      // and, more importantly, for the budget invariant that CAPS it.
       try {
-        const dataUrl = await captureWithRetry(() =>
-          chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" }));
+        const dataUrl = await promiseWithTimeout(
+          captureWithRetry(() =>
+            chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" })),
+          loopTiming().fastCaptureMs, "screenshot.fast", {},
+          "fast_capture_timeout");
         return { url: tab.url, dataUrl, via: "captureVisibleTab" };
-      } catch (e) { /* fall through to the CDP path (works off-screen) */ }
+      } catch (e) {
+        // Leave a trace — a silently swallowed `e` makes this path invisible.
+        // Nothing else distinguishes "the fast path was bounded out" from "the
+        // tab was not active" or "--fullpage". Same rolling slot as execute()'s
+        // breadcrumbs, so it cannot grow. Fire-and-forget, like every other one.
+        //
+        // 🔴 BE HONEST ABOUT WHAT THIS BUYS, because an earlier draft of this
+        // comment claimed production measurement it does not deliver: the slot
+        // is SINGLE and execute() overwrites it with `done` as soon as the CDP
+        // fallthrough succeeds — the normal outcome. Measured write sequence
+        // with a hung fast path: ["start", "screenshot_fast_timeout", "done"],
+        // final slot `done`. So this crumb survives only when the op ALSO wedges
+        // in CDP or the worker dies mid-capture; there, it is strictly more
+        // informative than a bare `start`. It is NOT an answer to "is 1500ms the
+        // right number in production" — that needs a separate counter key that
+        // execute() does not clobber, deliberately not added here.
+        breadcrumb("screenshot", (cmd && cmd.id) || null,
+                   String((e && e.message) || e).startsWith("fast_capture_timeout")
+                     ? "screenshot_fast_timeout" : "screenshot_fast_failed");
+        /* fall through to the CDP path (works off-screen) */
+      }
     }
     const dataUrl = await withCdp(tab.id, tab.url, async (send) => {
       const params = { format: "png" };
@@ -1486,6 +1519,11 @@ function loopTiming() {
     resultMs: t.resultMs == null ? RESULT_BUDGET_MS : t.resultMs,
     stallMs: t.stallMs == null ? LOOP_STALL_MS : t.stallMs,
     storageMs: t.storageMs == null ? STORAGE_BUDGET_MS : t.storageMs,
+    // The `screenshot` fast path's own bound — see FAST_CAPTURE_BUDGET_MS. It is
+    // NOT a loop budget, but it lives here so a unit test can drive a 20ms bound
+    // through the same injection point instead of waiting 1500 real ms.
+    fastCaptureMs: t.fastCaptureMs == null
+      ? FAST_CAPTURE_BUDGET_MS : t.fastCaptureMs,
   };
 }
 
@@ -1505,6 +1543,13 @@ function breadcrumb(op, id, phase) {
 }
 
 // execute — THE choke point where every op is bounded.
+//
+// 🔴 ONE DOCUMENTED EXCEPTION EXISTS — see README "one rule, one place" and
+// FAST_CAPTURE_BUDGET_MS. `screenshot`'s FAST PATH carries its own bound, because
+// this choke point can only END an op; it cannot make a hung sub-step FALL
+// THROUGH to a working alternative, and `captureVisibleTab` hangs rather than
+// rejecting. That is a different job from the one below, not a weakening of it.
+// The paragraph that follows is still the rule for TERMINATING an op.
 //
 // The bound lives here and NOWHERE else on purpose. Patching `frames` and
 // `screenshot` individually (the two ops the journal caught wedging) would fix
@@ -1797,8 +1842,15 @@ if (!(typeof globalThis !== "undefined" && globalThis.BROWSER_BRIDGE_NO_AUTOSTAR
 // `emulationState` is exported for TESTS only — it is the sticky-emulation Map, and
 // asserting "close cleared it" / "a vanished tab dropped it" requires seeing it.
 // Nothing in production reads it from outside this module.
+// `loopTiming` is exported for TESTS only — it is the seam between the protocol.js
+// budget constants and the code that actually reads them. Pinning the CONSTANT is
+// not the same claim as pinning that production USES it: a re-audit mutated this
+// function's `fastCaptureMs` default to a literal 600000 and the whole 501-test
+// suite stayed green, because the relationship test reads the constant while the
+// behavioural tests inject an override. Exporting it lets one assertion close that
+// gap without a 1.5s timing test.
 export { execute, OPS, ALLOWED_OPS, cdpAttached, loop, emulationState,
-         documentEmulation };
+         documentEmulation, loopTiming };
 
 // A read/reset window onto the loop's private liveness state, for tests.
 export const loopState = {
