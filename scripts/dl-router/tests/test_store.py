@@ -3,15 +3,18 @@ log. Uses temp SQLite files; no shared state between tests.
 """
 from __future__ import annotations
 
+import ast
+import sqlite3
 import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from store import SCHEMA_VERSION, Store  # noqa: E402
+from store import SCHEMA_VERSION, Store, is_busy_error  # noqa: E402
 
 
 # --- schema ---------------------------------------------------------------- #
@@ -115,6 +118,283 @@ def test_concurrent_upserts_of_the_same_key_converge(tmp_path):
     row = st.conn.execute("SELECT hits FROM aliases WHERE key='shared'").fetchone()
     assert row["hits"] == 120
     st.close()
+
+
+# --- SQLITE_BUSY durability ------------------------------------------------- #
+#
+# The two tests above are the ones that FOUND this: they went red in CI with
+# `OperationalError: database is locked`, and the row counts said what that
+# error costs — a writer whose `busy_timeout` expires does not retry, so its
+# thread dies and every remaining write it owed is silently never made. On the
+# pre-fix store, 6 threads x 25 upserts with the busy_timeout dialled down lost
+# 25 rows at 0.5s and 125 rows at 0.05s and below.
+#
+# The tests below pin that as a CONTRACT rather than a race. They hold SQLite's
+# write lock from a second connection for a fixed span, so "the write was
+# blocked past its busy_timeout" is arranged, not hoped for.
+
+def _hold_write_lock(path, hold_seconds, acquired, released):
+    """Hold SQLite's write lock on `path` for `hold_seconds`, then let go.
+
+    `BEGIN IMMEDIATE` takes the write lock at once (rather than on first write),
+    which is what makes the block deterministic instead of timing-dependent.
+    `acquired` fires only once the lock is genuinely held, so the test never
+    races the blocker.
+    """
+    conn = sqlite3.connect(str(path), timeout=30.0)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        acquired.set()
+        time.sleep(hold_seconds)
+        conn.rollback()
+    finally:
+        conn.close()
+        released.set()
+
+
+def test_a_write_blocked_past_its_busy_timeout_still_lands(tmp_path):
+    """THE durability contract: a contended write COMPLETES, never vanishes.
+
+    busy_timeout is 20ms and the lock is held for 400ms — twenty times longer,
+    so the first attempt is guaranteed to raise SQLITE_BUSY. Pre-fix that error
+    reached the caller and the row was never written; the retry makes the write
+    wait for the lock and land.
+    """
+    path = tmp_path / "held.sqlite3"
+    st = Store(path, timeout=0.02)
+    acquired, released = threading.Event(), threading.Event()
+    blocker = threading.Thread(target=_hold_write_lock,
+                               args=(path, 0.4, acquired, released))
+    blocker.start()
+    try:
+        assert acquired.wait(10), "the blocker never took the write lock"
+        st.upsert_alias("contended", "Jane Doe")
+    finally:
+        blocker.join(30)
+    assert st.alias("contended") == "Jane Doe"
+    assert st.alias_count() == 1
+    st.close()
+
+
+def test_without_the_retry_that_same_write_is_lost(tmp_path):
+    """POSITIVE CONTROL for the test above — this harness CAN see the loss.
+
+    `write_attempts=1` is exactly the pre-fix code path: one attempt, no retry.
+    Same lock, same timeout, and the write is gone — so a green result in the
+    previous test is the retry working, not the contention failing to happen.
+    """
+    path = tmp_path / "held-no-retry.sqlite3"
+    st = Store(path, timeout=0.02, write_attempts=1)
+    acquired, released = threading.Event(), threading.Event()
+    blocker = threading.Thread(target=_hold_write_lock,
+                               args=(path, 0.4, acquired, released))
+    blocker.start()
+    try:
+        assert acquired.wait(10), "the blocker never took the write lock"
+        with pytest.raises(sqlite3.OperationalError) as excinfo:
+            st.upsert_alias("contended", "Jane Doe")
+    finally:
+        blocker.join(30)
+    assert "locked" in str(excinfo.value)
+    assert st.alias_count() == 0      # the row is GONE, not merely delayed
+    st.close()
+
+
+def test_six_writers_with_a_tiny_busy_timeout_still_land_every_row(tmp_path):
+    """The CI failure, reproduced by shrinking the timeout instead of the box.
+
+    Identical to `test_concurrent_writers_do_not_lose_rows` except that the
+    busy_timeout is 5ms rather than 10s. On the pre-fix store this failed 3/3
+    with 5 errors and 25 of 150 rows; the CI failure is the same shape with a
+    10-second threshold and an I/O-stalled node supplying the contention.
+    """
+    st = Store(tmp_path / "tiny-timeout.sqlite3", timeout=0.005)
+    errors = []
+
+    def writer(n):
+        try:
+            for i in range(25):
+                st.upsert_alias(f"key{n}-{i}", "Jane Doe")
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=writer, args=(n,)) for n in range(6)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert errors == []
+    assert st.alias_count() == 150
+    st.close()
+
+
+def test_a_permanent_error_propagates_instead_of_being_retried(store):
+    """🔴 The control that matters more than the happy path.
+
+    A retry that cannot tell BUSY from a real defect turns an immediate
+    traceback into a 30-second hang and then the same traceback — with the real
+    error dressed up as contention. `no such table` must come straight back.
+    """
+    # Without this the timing bound below could pass vacuously.
+    assert store._write_deadline >= 5.0
+    store._write(lambda conn: conn.execute("DROP TABLE aliases"))
+    started = time.monotonic()
+    with pytest.raises(sqlite3.OperationalError) as excinfo:
+        store.upsert_alias("jd", "Jane Doe")
+    elapsed = time.monotonic() - started
+    assert "no such table" in str(excinfo.value)
+    assert elapsed < 1.0, f"a permanent error was retried for {elapsed:.2f}s"
+
+
+def test_is_busy_error_reads_the_code_sqlite_set(store, tmp_path):
+    """Both branches of the predicate, against REAL sqlite3 exceptions.
+
+    Hand-built `OperationalError`s carry no `sqlite_errorcode`, so they would
+    exercise the pre-3.11 message fallback rather than the structural path this
+    interpreter actually takes.
+    """
+    with pytest.raises(sqlite3.OperationalError) as permanent:
+        store.conn.execute("SELECT * FROM no_such_table")
+    assert permanent.value.sqlite_errorcode == 1        # SQLITE_ERROR
+    assert is_busy_error(permanent.value) is False
+
+    path = tmp_path / "codes.sqlite3"
+    st = Store(path, timeout=0.02, write_attempts=1)
+    acquired, released = threading.Event(), threading.Event()
+    blocker = threading.Thread(target=_hold_write_lock,
+                               args=(path, 0.3, acquired, released))
+    blocker.start()
+    try:
+        assert acquired.wait(10), "the blocker never took the write lock"
+        with pytest.raises(sqlite3.OperationalError) as busy:
+            st.upsert_alias("k", "Jane Doe")
+    finally:
+        blocker.join(30)
+    assert busy.value.sqlite_errorcode == 5             # SQLITE_BUSY
+    assert is_busy_error(busy.value) is True
+    st.close()
+
+
+def test_an_exhausted_retry_re_raises_rather_than_going_quiet(tmp_path):
+    """A write that truly cannot land must still be LOUD.
+
+    The retry is bounded; the whole point is that it turns a *transient* block
+    into a completed write, not that it hides a permanent one. When the bounds
+    run out the last BUSY error is re-raised — swallowing it would recreate the
+    original bug with the error message removed as well as the row.
+    """
+    path = tmp_path / "never-free.sqlite3"
+    st = Store(path, timeout=0.01, write_deadline=0.1)
+    acquired, released = threading.Event(), threading.Event()
+    blocker = threading.Thread(target=_hold_write_lock,
+                               args=(path, 3.0, acquired, released))
+    blocker.start()
+    try:
+        assert acquired.wait(10), "the blocker never took the write lock"
+        started = time.monotonic()
+        with pytest.raises(sqlite3.OperationalError):
+            st.upsert_alias("doomed", "Jane Doe")
+        elapsed = time.monotonic() - started
+    finally:
+        blocker.join(30)
+    # Bounded on both sides: it kept retrying for roughly the deadline (so it
+    # did not give up on the first attempt), and it gave up well before the
+    # 3-second hold ended (so it is not simply waiting the blocker out).
+    assert 0.05 <= elapsed < 1.5, f"gave up after {elapsed:.3f}s"
+    assert st.alias_count() == 0
+    st.close()
+
+
+def test_write_attempts_bounds_the_number_of_attempts_made(tmp_path):
+    """`write_attempts=N` must mean exactly N attempts.
+
+    Counted rather than timed: an off-by-one here shows up as a few tens of
+    milliseconds, which no wall-clock assertion can separate from noise, and it
+    silently widens or narrows the bound the sidecar's write latency rests on.
+    The failures are real SQLITE_BUSY errors — the lock is genuinely held for
+    the whole test.
+    """
+    path = tmp_path / "count.sqlite3"
+    st = Store(path, timeout=0.01, write_deadline=30.0, write_attempts=3)
+    attempts = []
+
+    def work(conn):
+        attempts.append(1)
+        conn.execute("INSERT INTO host_prior (site, dir, ts) "
+                     "VALUES ('example-site.test', 'Jane Doe', 0)")
+
+    acquired, released = threading.Event(), threading.Event()
+    blocker = threading.Thread(target=_hold_write_lock,
+                               args=(path, 3.0, acquired, released))
+    blocker.start()
+    try:
+        assert acquired.wait(10), "the blocker never took the write lock"
+        with pytest.raises(sqlite3.OperationalError):
+            st._write(work)
+    finally:
+        blocker.join(30)
+    assert len(attempts) == 3
+    st.close()
+
+
+def test_a_retry_rolls_back_the_partial_transaction_first(store):
+    """A multi-statement write must not apply its first statement TWICE.
+
+    `record_screened` already does insert-then-read inside one transaction, and
+    a write with two INSERTs is one commit away. Without the rollback the first
+    statement's work survives into the retry and lands a second time — silent
+    duplication, which is the same class of damage as the lost row this whole
+    change is about, in the opposite direction.
+    """
+    class _Busy(sqlite3.OperationalError):
+        # A real BUSY as far as `is_busy_error` is concerned: it reads
+        # `sqlite_errorcode`, and a class attribute answers that. Arranging a
+        # genuine mid-transaction BUSY is not something a test can schedule.
+        sqlite_errorcode = 5
+
+    raised = []
+
+    def work(conn):
+        conn.execute("INSERT INTO routes (ts, dir) VALUES (1, 'Jane Doe')")
+        if not raised:
+            raised.append(1)
+            raise _Busy("database is locked")
+
+    store._write(work)
+    assert raised == [1], "the retry path was never exercised"
+    assert len(store.recent_routes()) == 1
+
+
+def test_every_mutating_method_routes_through_the_write_helper():
+    """One rule, one place — an asserted ledger, not a pinned example.
+
+    A new write method that does its own `conn.execute` + `commit()` would
+    reintroduce exactly this bug at one site while every other site stays
+    correct, and nothing else in the suite would notice. This fails when the
+    set of mutating methods GROWS past the set that goes through `_write`.
+    """
+    source = (Path(__file__).resolve().parent.parent / "store.py").read_text(
+        encoding="utf-8")
+    tree = ast.parse(source)
+    store_cls = next(node for node in tree.body
+                     if isinstance(node, ast.ClassDef) and node.name == "Store")
+    # `_write` IS the helper; `_run_migration_step` only ever runs inside one
+    # (see `migrate`), and takes its connection as an argument for that reason.
+    exempt = {"_write", "_run_migration_step"}
+    mutating = ("INSERT INTO", "UPDATE ", "DELETE FROM", "ALTER TABLE",
+                "DROP TABLE", "PRAGMA USER_VERSION=")
+    offenders = []
+    for node in store_cls.body:
+        if not isinstance(node, ast.FunctionDef) or node.name in exempt:
+            continue
+        body = ast.get_source_segment(source, node) or ""
+        statements = "".join(
+            n.value for n in ast.walk(ast.parse(body))
+            if isinstance(n, ast.Constant) and isinstance(n.value, str)).upper()
+        if any(kw in statements for kw in mutating) \
+                and "self._write(" not in body:
+            offenders.append(node.name)
+    assert offenders == []
 
 
 # --- examples + routes ----------------------------------------------------- #

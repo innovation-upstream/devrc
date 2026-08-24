@@ -6,8 +6,10 @@ confusing qBittorrent and media scanners.
 
 Concurrency: the sidecar is threaded (one thread per HTTP request) and the CLI
 runs out-of-process against the same file, so WAL + a busy timeout + one
-connection per thread is the required shape. Schema changes go through
-`MIGRATIONS`; `user_version` is the version marker.
+connection per thread is the required shape. That shape is necessary and NOT
+sufficient — see `Store._write` for the durability hole a busy timeout alone
+leaves open. Schema changes go through `MIGRATIONS`; `user_version` is the
+version marker.
 """
 from __future__ import annotations
 
@@ -19,6 +21,61 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 SCHEMA_VERSION = 6
+
+# --- SQLITE_BUSY retry ------------------------------------------------------ #
+#
+# `busy_timeout` bounds how long ONE statement waits for the write lock. When it
+# expires SQLite raises `OperationalError: database is locked` and the caller's
+# write is simply GONE — in the sidecar the thread serving that request dies and
+# the routing decision is never recorded. Measured on the pre-fix tree, 6
+# threads x 25 upserts against one file, expecting 150 rows:
+#
+#     busy_timeout=10.0    errors=0   rows=150
+#     busy_timeout=0.5     errors=1   rows=125   ROWS LOST
+#     busy_timeout=0.05    errors=5   rows=25    ROWS LOST
+#     busy_timeout=0.005   errors=5   rows=25    ROWS LOST
+#
+# Raising the default timeout is NOT the fix: it moves the threshold and leaves
+# the write lossy past it. Every mutating statement therefore goes through
+# `Store._write`, which retries the whole transaction while SQLite says BUSY.
+SQLITE_BUSY = 5
+SQLITE_LOCKED = 6
+
+# Total wall clock the retry loop may spend on one write. It bounds the RETRIES,
+# not a single statement's own busy wait — with the default 10s busy_timeout a
+# contended write blocks inside SQLite first and this only decides whether it
+# gets another go. Chosen against the alternative it replaces: the sidecar
+# previously answered fast and silently dropped the row.
+WRITE_DEADLINE = 30.0
+# Belt to the deadline's braces: caps churn when busy_timeout is tiny and each
+# attempt returns in microseconds.
+WRITE_ATTEMPTS = 64
+RETRY_BASE = 0.005      # first backoff, seconds
+RETRY_CAP = 0.2         # backoff ceiling, seconds
+
+
+def is_busy_error(exc: BaseException) -> bool:
+    """True ONLY for SQLITE_BUSY / SQLITE_LOCKED — the retryable failures.
+
+    Structural rather than a message match: `sqlite_errorcode` is what SQLite
+    itself set, and the low byte strips any extended-code suffix.
+
+    This predicate is the whole safety of the retry. A malformed statement, a
+    closed database, a missing table or a constraint violation is PERMANENT —
+    retrying it would turn an immediate traceback into a 30-second hang and then
+    the same traceback, while hiding the real error behind a timeout. Everything
+    that is not BUSY/LOCKED must propagate on the first attempt.
+    """
+    code = getattr(exc, "sqlite_errorcode", None)
+    if code is None:
+        # Only reachable on a pre-3.11 interpreter, which has no error code to
+        # read. The message is the last resort, and is deliberately NOT consulted
+        # when a code is available.
+        text = str(exc)
+        return ("database is locked" in text
+                or "database table is locked" in text)
+    return (int(code) & 0xFF) in (SQLITE_BUSY, SQLITE_LOCKED)
+
 
 MIGRATIONS = {
     1: [
@@ -244,10 +301,14 @@ def source_url_key(url) -> str:
 class Store:
     """Thread-safe SQLite wrapper (one connection per thread)."""
 
-    def __init__(self, path, *, clock=time.time, timeout: float = 10.0):
+    def __init__(self, path, *, clock=time.time, timeout: float = 10.0,
+                 write_deadline: float = WRITE_DEADLINE,
+                 write_attempts: int = WRITE_ATTEMPTS):
         self.path = Path(path)
         self._clock = clock
         self._timeout = timeout
+        self._write_deadline = float(write_deadline)
+        self._write_attempts = max(1, int(write_attempts))
         self._local = threading.local()
         if str(self.path) != ":memory:":
             self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -284,38 +345,88 @@ class Store:
         self._shared = None
         self._local.conn = None
 
+    # --- writes ------------------------------------------------------------- #
+    def _write(self, work):
+        """Run `work(conn)` as ONE transaction, retrying while SQLite is BUSY.
+
+        EVERY mutating statement in this class goes through here — one rule, one
+        place. `busy_timeout` is not durability: when it expires the write is
+        dropped and the calling thread dies with it, which is how 125 of 150
+        rows went missing in the measurement at the top of this file. A bounded
+        retry makes a contended write COMPLETE instead of vanishing.
+
+        Retrying the WHOLE transaction is safe because a BUSY failure commits
+        nothing and the rollback below discards any partial work — so the
+        non-idempotent parts (`hits = aliases.hits + 1`) still apply exactly
+        once. This is also why the retry lives here and not at the call sites:
+        the unit that must be re-run is the transaction, which only this method
+        owns.
+
+        Bounded on both axes, and ONLY for BUSY/LOCKED: any other
+        `OperationalError` propagates on the first attempt (see
+        `is_busy_error`). Exhausting the bounds re-raises the last BUSY error —
+        a lossy write must still be loud, never swallowed.
+        """
+        conn = self.conn
+        deadline = time.monotonic() + self._write_deadline
+        delay = RETRY_BASE
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                result = work(conn)
+                conn.commit()
+                return result
+            except sqlite3.OperationalError as exc:
+                if not is_busy_error(exc):
+                    raise
+                try:
+                    conn.rollback()
+                except sqlite3.Error:
+                    pass
+                left = deadline - time.monotonic()
+                if attempt >= self._write_attempts or left <= 0:
+                    raise
+                time.sleep(min(delay, left))
+                delay = min(delay * 2, RETRY_CAP)
+
     # --- schema ------------------------------------------------------------ #
     def _has_column(self, table: str, column: str) -> bool:
         return any(row[1] == column
                    for row in self.conn.execute(f"PRAGMA table_info({table})"))
 
-    def _run_migration_step(self, step) -> None:
+    def _run_migration_step(self, conn, step) -> None:
         """Apply one migration step. Every step must be RE-RUNNABLE.
 
         sqlite3 autocommits DDL, so there is no transaction wrapping a
         migration and a crash can leave it half-applied. Each statement is
-        therefore either `IF NOT EXISTS` or guarded here.
+        therefore either `IF NOT EXISTS` or guarded here. That same re-runnability
+        is what makes `_write`'s retry safe over a migration: a BUSY part-way
+        through simply replays the step list.
         """
         if isinstance(step, tuple):
             kind = step[0]
             if kind == "ADD_COLUMN_IF_MISSING":
                 _, table, column, decl = step
                 if not self._has_column(table, column):
-                    self.conn.execute(
+                    conn.execute(
                         f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
                 return
             raise RuntimeError(f"unknown migration step: {kind}")
-        self.conn.execute(step)
+        conn.execute(step)
 
     def migrate(self) -> int:
-        conn = self.conn
-        cur = conn.execute("PRAGMA user_version")
+        # Retried like every other write: `server.py` constructs the Store
+        # unguarded, so a BUSY here is a `Restart=always` crash loop rather than
+        # one lost row.
+        cur = self.conn.execute("PRAGMA user_version")
         version = int(cur.fetchone()[0])
         for target in range(version + 1, SCHEMA_VERSION + 1):
-            for step in MIGRATIONS[target]:
-                self._run_migration_step(step)
-            conn.execute(f"PRAGMA user_version={target}")
-            conn.commit()
+            def _apply(conn, target=target):
+                for step in MIGRATIONS[target]:
+                    self._run_migration_step(conn, step)
+                conn.execute(f"PRAGMA user_version={target}")
+            self._write(_apply)
         return SCHEMA_VERSION
 
     def version(self) -> int:
@@ -334,7 +445,7 @@ class Store:
         re-derived from whatever the LATEST correction saw.
         """
         now = self._clock()
-        self.conn.execute(
+        self._write(lambda conn: conn.execute(
             """INSERT INTO aliases (key, site, dir, hits, created_at,
                                     updated_at, source, evidence)
                VALUES (?, ?, ?, 1, ?, ?, ?, ?)
@@ -345,8 +456,7 @@ class Store:
                  source = excluded.source,
                  evidence = excluded.evidence""",
             (key, site or "", dir_name, now, now, str(source or ""),
-             str(evidence or "")))
-        self.conn.commit()
+             str(evidence or ""))))
 
     def alias_rows(self) -> list:
         """Every alias with its provenance, most recently written first."""
@@ -372,20 +482,18 @@ class Store:
             "SELECT COUNT(*) AS n FROM aliases").fetchone()["n"])
 
     def delete_alias(self, key: str, site: str = "") -> None:
-        self.conn.execute("DELETE FROM aliases WHERE key=? AND site=?",
-                          (key, site or ""))
-        self.conn.commit()
+        self._write(lambda conn: conn.execute(
+            "DELETE FROM aliases WHERE key=? AND site=?", (key, site or "")))
 
     # --- labelled examples ------------------------------------------------- #
     def add_example(self, context: dict, chosen_dir: str, auto_dir=None,
                     created_new: bool = False) -> int:
-        cur = self.conn.execute(
+        cur = self._write(lambda conn: conn.execute(
             """INSERT INTO examples (ts, context, chosen_dir, auto_dir, created_new)
                VALUES (?, ?, ?, ?, ?)""",
             (self._clock(), json.dumps(context, ensure_ascii=False,
                                        separators=(",", ":")),
-             chosen_dir, auto_dir, 1 if created_new else 0))
-        self.conn.commit()
+             chosen_dir, auto_dir, 1 if created_new else 0)))
         return int(cur.lastrowid)
 
     def examples(self, limit: int = 100) -> list:
@@ -464,22 +572,26 @@ class Store:
         trains the operator to dismiss it.
         """
         now = self._clock()
-        cur = self.conn.execute(
-            """INSERT INTO screened (key, site, dir, source, why, hits,
-                                     first_ts, last_ts)
-               VALUES (?, ?, ?, ?, ?, 1, ?, ?)
-               ON CONFLICT(key, site, dir) DO UPDATE SET
-                 hits = screened.hits + 1,
-                 why = excluded.why,
-                 last_ts = excluded.last_ts""",
-            (key, site or "", dir_name, str(source or ""), str(why or ""),
-             now, now))
-        # `rowcount` is 1 for both branches, so ask the row itself.
-        row = self.conn.execute(
-            "SELECT hits FROM screened WHERE key=? AND site=? AND dir=?",
-            (key, site or "", dir_name)).fetchone()
-        self.conn.commit()
-        del cur
+
+        def _do(conn):
+            conn.execute(
+                """INSERT INTO screened (key, site, dir, source, why, hits,
+                                         first_ts, last_ts)
+                   VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+                   ON CONFLICT(key, site, dir) DO UPDATE SET
+                     hits = screened.hits + 1,
+                     why = excluded.why,
+                     last_ts = excluded.last_ts""",
+                (key, site or "", dir_name, str(source or ""), str(why or ""),
+                 now, now))
+            # `rowcount` is 1 for both branches, so ask the row itself. Read
+            # inside the SAME transaction as the insert, so a retry re-reads the
+            # count it actually wrote.
+            return conn.execute(
+                "SELECT hits FROM screened WHERE key=? AND site=? AND dir=?",
+                (key, site or "", dir_name)).fetchone()
+
+        row = self._write(_do)
         return bool(row) and int(row["hits"]) == 1
 
     def screened_rows(self, limit: int = 200) -> list:
@@ -489,22 +601,20 @@ class Store:
         return [dict(r) for r in rows]
 
     def clear_screened(self, key: str, site: str = "") -> int:
-        cur = self.conn.execute("DELETE FROM screened WHERE key=? AND site=?",
-                                (key, site or ""))
-        self.conn.commit()
+        cur = self._write(lambda conn: conn.execute(
+            "DELETE FROM screened WHERE key=? AND site=?", (key, site or "")))
         return int(cur.rowcount)
 
     # --- directory kinds ---------------------------------------------------- #
     def set_dir_kind(self, name: str, kind: str, source: str = "") -> None:
-        self.conn.execute(
+        self._write(lambda conn: conn.execute(
             """INSERT INTO dir_kinds (name, kind, source, ts)
                VALUES (?, ?, ?, ?)
                ON CONFLICT(name) DO UPDATE SET
                  kind = excluded.kind,
                  source = excluded.source,
                  ts = excluded.ts""",
-            (str(name), str(kind), str(source or ""), self._clock()))
-        self.conn.commit()
+            (str(name), str(kind), str(source or ""), self._clock())))
 
     def dir_kind_map(self) -> dict:
         rows = self.conn.execute("SELECT name, kind FROM dir_kinds").fetchall()
@@ -514,15 +624,14 @@ class Store:
     def log_route(self, *, url="", site="", filename="", dir_name="",
                   confidence=0.0, reason="", auto=False, dup=None,
                   download_id="") -> int:
-        cur = self.conn.execute(
+        cur = self._write(lambda conn: conn.execute(
             """INSERT INTO routes (ts, url, site, filename, dir, confidence,
                                    reason, auto, dup, download_id)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (self._clock(), url, site, filename, dir_name, float(confidence),
              reason, 1 if auto else 0,
              json.dumps(dup, separators=(",", ":")) if dup else None,
-             str(download_id or "")))
-        self.conn.commit()
+             str(download_id or ""))))
         return int(cur.lastrowid)
 
     def route_for_download(self, download_id):
@@ -544,15 +653,14 @@ class Store:
     def record_routed_file(self, rel_path: str, download_id: str,
                            dir_name: str) -> None:
         """Remember that `rel_path` is a file this router created."""
-        self.conn.execute(
+        self._write(lambda conn: conn.execute(
             """INSERT INTO routed_files (rel_path, download_id, dir, ts)
                VALUES (?, ?, ?, ?)
                ON CONFLICT(rel_path) DO UPDATE SET
                  download_id = excluded.download_id,
                  dir = excluded.dir,
                  ts = excluded.ts""",
-            (rel_path, str(download_id or ""), dir_name, self._clock()))
-        self.conn.commit()
+            (rel_path, str(download_id or ""), dir_name, self._clock())))
 
     def routed_file(self, rel_path: str):
         row = self.conn.execute(
@@ -566,9 +674,8 @@ class Store:
         provenance for it."""
         row = self.routed_file(old_rel)
         download_id = row["download_id"] if row else ""
-        self.conn.execute("DELETE FROM routed_files WHERE rel_path=?",
-                          (old_rel,))
-        self.conn.commit()
+        self._write(lambda conn: conn.execute(
+            "DELETE FROM routed_files WHERE rel_path=?", (old_rel,)))
         self.record_routed_file(new_rel, download_id, dir_name)
 
     def forget_routed_file(self, rel_path: str) -> int:
@@ -579,9 +686,8 @@ class Store:
         short-circuits on exactly that claim, so a later file arriving at the
         same path would inherit a proof it never earned.
         """
-        cur = self.conn.execute("DELETE FROM routed_files WHERE rel_path=?",
-                                (rel_path,))
-        self.conn.commit()
+        cur = self._write(lambda conn: conn.execute(
+            "DELETE FROM routed_files WHERE rel_path=?", (rel_path,)))
         return int(cur.rowcount)
 
     def routed_file_count(self) -> int:
@@ -627,14 +733,13 @@ class Store:
         download_id = str(download_id or "")
         if not download_id:
             return False
-        cur = self.conn.execute(
+        cur = self._write(lambda conn: conn.execute(
             """INSERT INTO discards (download_id, rel_path, kept_rel,
                                      trash_rel, mode, ts)
                VALUES (?, ?, ?, ?, ?, ?)
                ON CONFLICT(download_id) DO NOTHING""",
             (download_id, str(rel_path), str(kept_rel or ""),
-             str(trash_rel or ""), str(mode or ""), self._clock()))
-        self.conn.commit()
+             str(trash_rel or ""), str(mode or ""), self._clock())))
         return int(cur.rowcount) == 1
 
     def set_discard_trash(self, download_id: str, trash_rel: str) -> int:
@@ -647,10 +752,9 @@ class Store:
         never delivered it. The uniquified `(N)` name in the trash is exactly
         what someone needs to undo a wrong discard.
         """
-        cur = self.conn.execute(
+        cur = self._write(lambda conn: conn.execute(
             "UPDATE discards SET trash_rel=? WHERE download_id=?",
-            (str(trash_rel or ""), str(download_id or "")))
-        self.conn.commit()
+            (str(trash_rel or ""), str(download_id or ""))))
         return int(cur.rowcount)
 
     def release_discard(self, download_id: str) -> int:
@@ -664,9 +768,9 @@ class Store:
         for that download AND leaves the table claiming a file was removed
         that is still on disk.
         """
-        cur = self.conn.execute("DELETE FROM discards WHERE download_id=?",
-                                (str(download_id or ""),))
-        self.conn.commit()
+        cur = self._write(lambda conn: conn.execute(
+            "DELETE FROM discards WHERE download_id=?",
+            (str(download_id or ""),)))
         return int(cur.rowcount)
 
     def recent_discards(self, limit: int = 50) -> list:
@@ -693,7 +797,7 @@ class Store:
         if not key:
             return ""
         now = self._clock()
-        self.conn.execute(
+        self._write(lambda conn: conn.execute(
             """INSERT INTO source_urls (url_key, url, site, dir, rel_path,
                                         download_id, hits, first_ts, last_ts)
                VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
@@ -711,8 +815,7 @@ class Store:
                                     THEN excluded.download_id
                                     ELSE source_urls.download_id END""",
             (key, str(url), str(site or ""), str(dir_name or ""),
-             str(rel_path or ""), str(download_id or ""), now, now))
-        self.conn.commit()
+             str(rel_path or ""), str(download_id or ""), now, now)))
         return key
 
     def source_url(self, url):
@@ -736,13 +839,12 @@ class Store:
         download_id = str(download_id or "")
         if not download_id:
             return 0
-        cur = self.conn.execute(
+        cur = self._write(lambda conn: conn.execute(
             """UPDATE source_urls SET dir=?, rel_path=CASE WHEN ?!='' THEN ?
                                                       ELSE rel_path END
                WHERE download_id=?""",
             (str(dir_name or ""), str(rel_path or ""), str(rel_path or ""),
-             download_id))
-        self.conn.commit()
+             download_id)))
         return int(cur.rowcount)
 
     def source_url_count(self) -> int:
@@ -753,12 +855,11 @@ class Store:
     def set_host_prior(self, site: str, dir_name: str) -> None:
         if not site:
             return
-        self.conn.execute(
+        self._write(lambda conn: conn.execute(
             """INSERT INTO host_prior (site, dir, ts) VALUES (?, ?, ?)
                ON CONFLICT(site) DO UPDATE SET
                  dir = excluded.dir, ts = excluded.ts""",
-            (site, dir_name, self._clock()))
-        self.conn.commit()
+            (site, dir_name, self._clock())))
 
     def host_prior(self, site: str):
         if not site:
