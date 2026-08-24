@@ -1633,17 +1633,56 @@ def test_a_STALE_plaintext_cannot_turn_a_WRONG_KEY_into_ARTIFACT_CORRUPT(tmp_pat
 
 def test_the_probe_reports_an_UNREADABLE_plaintext_path_as_UNKNOWN(tmp_path,
                                                                   monkeypatch):
-    """🔴 `Path.exists()` RAISES ON THIS INTERPRETER — measured, CPython 3.12.14,
-    parent directory without `+x`. Unhandled inside the probe's `except`, it
-    would REPLACE the real exception, and the run would report a permissions
-    error instead of whatever age actually did.
+    """🔴 THIS TEST IS INTERPRETER-DEPENDENT, AND THAT IS THE MECHANISM.
 
-    Unreadable must read as None (unobservable), never False (which downstream
-    would take for "age wrote nothing")."""
+    A parent directory without `+x` makes `Path.exists()` raise `PermissionError`
+    — or not — depending on the CPython version. MEASURED, three interpreters,
+    twice each (behaviour, and whether `Path.exists`'s source still calls
+    `pathlib._ignore_error`):
+
+        3.12.14 (the flake's pin)  raises PermissionError   _ignore_error: yes
+        3.13.15                    raises PermissionError   _ignore_error: yes
+        3.14.7                     returns False            _ignore_error: no
+
+    `_ignore_error` swallows only ENOENT/ENOTDIR/EBADF/ELOOP, so EACCES
+    propagates; 3.14 dropped that helper from `exists()` and swallows
+    unconditionally.
+
+    🔴 THE BOUNDARY IS 3.14, NOT 3.13. An earlier revision of the source comment
+    said 3.13; a version guard written to that number would have gone RED on 3.13
+    for a reason nobody could find, in a test whose name reads like a logic bug —
+    exactly the failure this guard exists to prevent, reintroduced by the guard.
+    So the expectation is NOT keyed on a version literal at all: it is taken from
+    an INDEPENDENT probe of the interpreter, on its own path, not through the
+    module under test. The version table above is documentation; the probe is the
+    control.
+
+    Either way the requirement is the same and is what is asserted: no OSError
+    escapes the handler, and an unreadable path reads as None (unobservable) —
+    never False, which downstream would take for "age wrote nothing".
+    """
     if os.geteuid() == 0:
         pytest.skip("root traverses a directory without +x; the arm is "
                     "unreachable as root and a skip here is honest")
     RVmod = EV._rv()
+
+    # INDEPENDENT REGIME PROBE: same hazard, its own directory, no involvement
+    # from the module under test. This is what makes the assertion below
+    # meaningful on an interpreter nobody has run this suite on yet.
+    canary_dir = tmp_path / "regime"
+    canary_dir.mkdir()
+    canary = canary_dir / "c"
+    canary.write_text("x", encoding="utf-8")
+    os.chmod(canary_dir, 0o600)
+    try:
+        try:
+            canary.exists()
+            exists_raises = False
+        except OSError:
+            exists_raises = True
+    finally:
+        os.chmod(canary_dir, 0o700)
+
     holder = tmp_path / "noexec"
     holder.mkdir()
     plain = holder / "p.bundle"
@@ -1658,9 +1697,22 @@ def test_the_probe_reports_an_UNREADABLE_plaintext_path_as_UNKNOWN(tmp_path,
         with EV._decrypt_phase_probe(RVmod) as state:
             with pytest.raises(RVmod.RestoreVerifyError):
                 RVmod.decrypt(tmp_path / "c.age", plain, tmp_path / "k")
-        # POSITIVE CONTROL: without the handler this line is never reached,
-        # because `exists()` raises out of the `except` block.
-        assert state["plain_present"] is None
+        # 🔴 The real exception got out INTACT on every interpreter — that is the
+        # part that must never regress, and it is asserted above by
+        # `pytest.raises(RestoreVerifyError)` rather than PermissionError.
+        if exists_raises:
+            # Handler LIVE: without it this line is never reached, because
+            # `exists()` raises out of the probe's `except` block.
+            assert state["plain_present"] is None, (
+                "the OSError handler did not run on an interpreter whose "
+                "Path.exists() raises")
+        else:
+            # Handler DEAD on this interpreter: `exists()` answered False by
+            # itself. Asserted rather than skipped, so the test still covers the
+            # probe's behaviour instead of quietly covering nothing.
+            assert state["plain_present"] is False, (
+                "Path.exists() returned rather than raising, so the probe should "
+                "have recorded its answer verbatim")
         assert state["cause"] == RVmod.DECRYPT_AGE_REFUSED
     finally:
         os.chmod(holder, 0o700)

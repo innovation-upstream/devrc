@@ -623,12 +623,20 @@ def _decrypt_phase_probe(RV):
             real(cipher, plain, identity)
         except BaseException as exc:
             # 🔴 `Path.exists()` CAN RAISE ON THIS INTERPRETER, and an earlier
-            # comment here asserted the opposite. MEASURED on the flake's pinned
-            # CPython 3.12.14: a parent directory without `+x` makes
-            # `exists()` raise `PermissionError`, because 3.12's
-            # `pathlib._ignore_error` ignores only ENOENT/ENOTDIR/EBADF/ELOOP.
-            # (It becomes true on >= 3.13, which widened that set — so the claim
-            # was version-dependent and stated as absolute.)
+            # comment here asserted the opposite. MEASURED on a directory without
+            # `+x`, three interpreters, twice each (behaviour, and whether
+            # `Path.exists`'s source still calls `_ignore_error`):
+            #
+            #     3.12.14 (the flake's pin)  raises PermissionError   _ignore_error: yes
+            #     3.13.15                    raises PermissionError   _ignore_error: yes
+            #     3.14.7                     returns False            _ignore_error: no
+            #
+            # `_ignore_error` swallows only ENOENT/ENOTDIR/EBADF/ELOOP, so EACCES
+            # propagates; 3.14 dropped that helper from `exists()` and swallows
+            # unconditionally. 🔴 THE BOUNDARY IS 3.14, NOT 3.13 — an earlier
+            # revision of this comment said 3.13 and was wrong, and a test written
+            # to that boundary would have gone red on 3.13 for no reason anyone
+            # could find. Measure the interpreter, do not reason about it.
             #
             # Unhandled, it would replace the REAL exception mid-`except` — the
             # same masking class removed for `phase` — and the run would report a
