@@ -240,8 +240,8 @@ SUITES=(
   # and lightbox (open/close, zoom, pan, per-message navigation, the wiring of
   # every on-screen control).
   #
-  # 108 tests / 2 files measured 2026-08-24 on the tree that added it.
-  # Floor 103 = 108 - min(50, max(1, 108/20)) = 108 - 5.
+  # 114 tests / 2 files measured 2026-08-24 on the tree that added it.
+  # Floor 109 = 114 - min(50, max(1, 114/20)) = 114 - 5.
   #
   # 🔴 THIS COMMENT PREVIOUSLY CLAIMED SIX REGRESSION TESTS. IT WAS FIVE.
   # The six original defects were re-introduced ONE AT A TIME by an adversarial
@@ -288,8 +288,9 @@ SUITES=(
   # A fixture that normalises away the thing the code normalises is not a test of
   # that code. The fake now reports uppercase.
   #
-  # Sweep as of this tree: 69 mutants (25 mine, 11 from audit 2, 10 from audit 3,
-  # 10 from audit 4, 6 from audit 5, 7 from audit 6), 67 killed, 0 unapplied.
+  # Sweep as of this tree: 80 mutants (25 mine, 11 from audit 2, 10 from audit 3,
+  # 10 from audit 4, 6 from audit 5, 7 from audit 6, 11 from audit 7), 78 killed,
+  # 0 unapplied.
   # TWO survivors,
   # and they are ONE equivalence class counted properly: the `nodeType === 1`
   # filter on the childList arm and on the attributes arm. Both are defence in
@@ -298,6 +299,14 @@ SUITES=(
   # independently. A positive control (reverting the media regex to host-only)
   # dies, so the harness can go red. The sweep's verdicts are read from the
   # runner's own failure count, never an exit code.
+  #
+  # 🔴 AND READ THAT TOTAL THE WAY README.md TELLS YOU TO: it is a claim about
+  # the 80 mutants somebody CONSTRUCTED, never about the suite. An independent
+  # 150-mutant battery against this same tree found 33 survivors — most
+  # equivalent, several genuine coverage gaps that are now pinned above. The
+  # caveat lived only in README.md for a round, which is the same defect as the
+  # rest of this list: a figure is not safer for being quoted in two places, it
+  # is only safer if BOTH copies carry what it does not cover.
   #
   # 🔴 THIS BLOCK ITSELF CARRIED TWO WRONG NUMBERS FOR ONE ROUND: "56 mutants,
   # 55 killed" while README.md said 62/61, and "the single survivor" beside a
@@ -312,7 +321,7 @@ SUITES=(
   # zero attachments. The narrowed pattern matched 0 there and 1 in the second
   # channel — a real attachment, in a container capped at max-height 350px, which
   # is the positive control proving it is not simply matching nothing.
-  "scripts/discord-embed-ext/tests|2|103"
+  "scripts/discord-embed-ext/tests|2|109"
 )
 
 # --- discovery roots -----------------------------------------------------------

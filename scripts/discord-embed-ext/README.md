@@ -110,7 +110,7 @@ from a RED control that carried all six defects at once, so it failed on a
 different assertion in the same test. Isolate a mutant before claiming it is
 pinned. The transform is genuinely pinned now.
 
-The suite is mutation-swept: **69 semantic mutants, 67 killed** — operand swaps,
+The suite is mutation-swept: **80 semantic mutants, 78 killed** — operand swaps,
 branch inversions, constants moved in **both** directions, guard removals. A
 positive control (reverting the media pattern to host-only) dies, so the harness
 can go red. The two survivors are ONE equivalence class counted properly — the
@@ -118,14 +118,16 @@ can go red. The two survivors are ONE equivalence class counted properly — the
 defence in depth: `scan()` returns 0 for any root it cannot query, and an
 attribute record only ever targets an Element.
 
-🔴 **Read that number correctly.** It is a claim about the 69 mutants somebody
+🔴 **Read that number correctly.** It is a claim about the 80 mutants somebody
 constructed, never about the suite — and this file has been wrong about it
 **four times**. It said "25 mutants, 24 killed, the survivor is equivalent"; an
 independent audit found **eight** more survivors, none equivalent. Corrected to
 36 — a third audit, with 163 mutants, found a 37th. Corrected to 46 — a fourth
 found a 47th *and* a whole vacuous class (below); a fifth found the same
 module-scope entry-point gap in the OTHER content script, and corrected "four"
-voided guards to seven. If you change this code, add
+voided guards to seven; a sixth found four checked-in numbers disagreeing with
+each other; a seventh found the `didDrag` latch pinned on its SET and not its
+RELEASE — which reads as fully pinned. If you change this code, add
 the mutant for the failure mode you are introducing. A passing sweep only means
 nobody has imagined the next one yet.
 

@@ -631,16 +631,6 @@ test("a click on a CHILD of enlarged media still opens it (the walk-up works)", 
   assert.equal(LB.isOpen(), true, "the handler walks up from e.target");
 });
 
-test("close() removes its document listeners", () => {
-  var doc = makeDocWithImage(DISCORD_IMG);
-  var before = doc.listenerCount("keydown");
-  LB.open(doc, doc.querySelector("img"));
-  assert.equal(doc.listenerCount("keydown"), before + 1, "open registers one");
-  LB.close(doc);
-  assert.equal(doc.listenerCount("keydown"), before,
-    "close must remove it — leaking one per open used to survive");
-});
-
 test("arrow DIRECTION is pinned (a 2-image fixture cannot tell +1 from -1)", () => {
   LB.forget();
   var doc = makeDiscordDoc(
@@ -774,9 +764,14 @@ test("REGRESSION: a VERTICAL-only pan latches too", () => {
 
 test("close() removes EVERY document listener it added, not just keydown", () => {
   var doc = makeDocWithImage(DISCORD_IMG);
-  // The old test's title was plural and its body checked `keydown` alone, so
-  // deleting the mousemove or mouseup removal survived. close() registers three
-  // on the document; this is a ledger over all of them.
+  // A superseded test here had a plural title and a body that checked `keydown`
+  // alone, so deleting the mousemove or mouseup removal survived; it has been
+  // removed rather than left 140 lines from its corrective twin.
+  // 🔴 PRECISION, because this file is full of guards that read wider than they
+  // are: `open()` REGISTERS the three document listeners and `close()` REMOVES
+  // them. And this is an enumeration, not a true ledger — it fails if the set
+  // SHRINKS but not if it GROWS, so a fourth listener added later is not caught
+  // here. The fake's `docListeners` map holds what a real ledger would read.
   var before = {
     keydown: doc.listenerCount("keydown"),
     mousemove: doc.listenerCount("mousemove"),
@@ -802,4 +797,88 @@ test("arrow keys on a SINGLE-image message change nothing at all", () => {
   LB.handleKey(doc, { key: "ArrowRight", preventDefault: function () {} });
   assert.equal(LB.zoomLevel(), 2, "no siblings to move to means no state change");
   assert.equal(LB.currentSrc(), DISCORD_IMG);
+});
+
+// ===========================================================================
+// Round 7 — the didDrag latch was pinned on its SET and not on its RELEASE,
+// which reads as fully pinned. Removing both resets left the suite green.
+// ===========================================================================
+
+test("REGRESSION: the didDrag latch is RELEASED, so the lightbox stays closable", () => {
+  var doc = makeDocWithImage(DISCORD_IMG);
+  LB.open(doc, doc.querySelector("img"));
+  var backdrop = shadowOf(doc).querySelector(".backdrop");
+  // Pan once — the latch must swallow exactly ONE backdrop click, then clear.
+  LB.handleMouseDown(doc, { clientX: 100, clientY: 100 });
+  LB.handleMouseMove(doc, { clientX: 260, clientY: 180 });
+  LB.handleMouseUp(doc, { clientX: 260, clientY: 180 });
+  clickOn(backdrop);
+  assert.equal(LB.isOpen(), true, "the click that ends the drag is swallowed");
+  // 🔴 AND THE NEXT ONE MUST NOT BE. Deleting both resets (the one in
+  // handleMouseDown and the one in handleBackdropClick) survived a green suite:
+  // after a single pan the lightbox became un-closable by clicking, forever.
+  clickOn(backdrop);
+  assert.equal(LB.isOpen(), false, "a genuine click afterwards must still close it");
+});
+
+test("REGRESSION: a fresh mousedown clears a stale latch", () => {
+  var doc = makeDocWithImage(DISCORD_IMG);
+  LB.open(doc, doc.querySelector("img"));
+  var backdrop = shadowOf(doc).querySelector(".backdrop");
+  LB.handleMouseDown(doc, { clientX: 0, clientY: 0 });
+  LB.handleMouseMove(doc, { clientX: 50, clientY: 50 });      // latch set
+  LB.handleMouseUp(doc, { clientX: 50, clientY: 50 });
+  // A NEW press with no movement is a click, not a drag — the previous drag's
+  // latch must not leak into it. This pins the reset in handleMouseDown.
+  LB.handleMouseDown(doc, { clientX: 90, clientY: 90 });
+  LB.handleMouseUp(doc, { clientX: 90, clientY: 90 });
+  clickOn(backdrop);
+  assert.equal(LB.isOpen(), false, "the second press was a click and must close");
+});
+
+test("REGRESSION: a ZERO-delta mousemove is not a drag", () => {
+  var doc = makeDocWithImage(DISCORD_IMG);
+  LB.open(doc, doc.querySelector("img"));
+  var backdrop = shadowOf(doc).querySelector(".backdrop");
+  // Browsers really do fire mousemove with identical coordinates. Latching
+  // unconditionally survived, and would stop a plain backdrop click closing.
+  LB.handleMouseDown(doc, { clientX: 120, clientY: 120 });
+  LB.handleMouseMove(doc, { clientX: 120, clientY: 120 });
+  LB.handleMouseUp(doc, { clientX: 120, clientY: 120 });
+  clickOn(backdrop);
+  assert.equal(LB.isOpen(), false, "no movement means it was a click all along");
+});
+
+test("REGRESSION: a multi-move drag re-bases, it does not accumulate from the start", () => {
+  var doc = makeDocWithImage(DISCORD_IMG);
+  LB.open(doc, doc.querySelector("img"));
+  // Every other pan fixture uses ONE mousemove, so deleting the dragStartX/Y
+  // re-base survived. A real drag is many moves: without re-basing, each move
+  // adds the delta from the ORIGINAL mousedown instead of from the last point.
+  LB.handleMouseDown(doc, { clientX: 0, clientY: 0 });
+  LB.handleMouseMove(doc, { clientX: 10, clientY: 0 });
+  LB.handleMouseMove(doc, { clientX: 20, clientY: 0 });
+  LB.handleMouseMove(doc, { clientX: 30, clientY: 0 });
+  var clone = shadowOf(doc).querySelector(".media-container img");
+  assert.equal(clone.style.transform, "scale(1) translate(30px, 0px)",
+    "three 10px steps are 30px total, not 10+20+30=60");
+});
+
+test("MESSAGE_WALK_DEPTH is pinned exactly, not merely banded", () => {
+  // README lists "constants moved in BOTH directions" among the operators
+  // applied; this constant moved either way with the suite green, so that
+  // phrase read wider than what had been measured.
+  function atDepth(n) {
+    LB.forget();
+    var open = "", close = "";
+    for (var i = 1; i <= n; i++) { open += "<div class='d" + i + "'>"; close += "</div>"; }
+    var doc = makeDiscordDoc(
+      "<div class='message'>" + open +
+      "<img src='" + A1 + "' /><img src='" + A2 + "' />" + close + "</div>");
+    LB.open(doc, doc.querySelector("img"));
+    return LB.siblingCount();
+  }
+  // img -> embed-less chain of n divs -> .message is ancestor n+1.
+  assert.equal(atDepth(14), 2, "a row at ancestor 15 is the last one in range");
+  assert.equal(atDepth(15), 1, "ancestor 16 is out of range and must fall back");
 });

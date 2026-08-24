@@ -407,7 +407,13 @@ function withFakeObserverAndTimers(fn) {
       disconnect: function () { captured.disconnected = true; },
     };
   };
-  globalThis.setTimeout = function (fn2) { timers.push(fn2); return timers.length; };
+  var scheduled = [];
+  globalThis.setTimeout = function (fn2, delay) {
+    timers.push(fn2);
+    scheduled.push({ delay: delay });
+    return timers.length;
+  };
+  captured.scheduled = scheduled;
   globalThis.clearTimeout = function (id) { if (id) { cleared.push(id); timers[id - 1] = null; } };
   captured.cleared = cleared;
   try {
@@ -774,4 +780,54 @@ test("MEDIA_URL_RE is case-insensitive, as a real url may be", () => {
     "HTTPS://CDN.DISCORDAPP.COM/ATTACHMENTS/1/2/P.PNG"), true);
   assert.equal(DEE.MEDIA_URL_RE.test(
     "https://CDN.discordapp.com/Attachments/1/2/p.png"), true);
+});
+
+// ===========================================================================
+// Round 7.
+// ===========================================================================
+
+test("REGRESSION: cssPx returns NaN for a non-string, never 0", () => {
+  // `return NaN` -> `return 0` survived, and 0 <= WIDTH_THRESHOLD, so
+  // findContainer would latch the FIRST ancestor and write four !important
+  // overrides onto it with no undo — the exact hazard cssPx's own comment
+  // describes. Nothing fed it a non-string.
+  for (var v of [null, undefined, 400, {}, [], NaN]) {
+    assert.ok(Number.isNaN(DEE.cssPx(v)), "cssPx(" + String(v) + ") must be NaN");
+  }
+  // and the consequence, not just the return value
+  var wrap = new FakeElement("div", { class: "no-cap" });
+  var img = new FakeElement("img", { src: "https://cdn.discordapp.com/attachments/1/2/p.png" });
+  wrap.appendChild(img);
+  var realGet = globalThis.__DEE_GET_COMPUTED_STYLE__;
+  globalThis.__DEE_GET_COMPUTED_STYLE__ = function () {
+    return { getPropertyValue: function () { return undefined; } };   // non-string
+  };
+  try {
+    assert.equal(DEE.findContainer(img), null,
+      "an ancestor whose computed value is not a string is not a cap");
+  } finally {
+    globalThis.__DEE_GET_COMPUTED_STYLE__ = realGet;
+  }
+});
+
+test("REGRESSION: the debounce actually debounces, at the stated delay", () => {
+  DEE.forget();
+  var doc = makeDiscordDoc("<div class='message'></div>");
+  withFakeObserverAndTimers(function (cap, flush) {
+    DEE.observe(doc);
+    var w1 = new FakeElement("div", {});
+    var w2 = new FakeElement("div", {});
+    cap.cb([{ addedNodes: [w1] }]);
+    cap.cb([{ addedNodes: [w2] }]);
+    // Two batches inside the window must leave ONE pending timer, not two —
+    // deleting the clearTimeout survived, and the debounce stopped debouncing:
+    // every batch scheduled its own full scan. The comment calls this "what
+    // makes the debounce cheap", so it is a claim that needs a guard.
+    assert.equal(cap.cleared.length, 1, "the first timer must be cancelled");
+    assert.equal(cap.scheduled.length, 2, "two scheduled, one of them cancelled");
+    // and the delay is the stated constant, pinned in BOTH directions
+    assert.equal(cap.scheduled[cap.scheduled.length - 1].delay, 100,
+      "DEBOUNCE_MS moved either way with the suite green before this");
+    flush();
+  });
 });
