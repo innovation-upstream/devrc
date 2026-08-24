@@ -1651,6 +1651,34 @@ export const EXEC_OP_BUDGET_MS = 18000;
 // `frames`/`screenshot` ever did. Bounded so "every await in the loop body is
 // bounded" is literally true rather than nearly true.
 export const STORAGE_BUDGET_MS = 5000;
+// 🔴 THE `screenshot` FAST PATH NEEDS ITS OWN, MUCH SMALLER BOUND — because
+// `chrome.tabs.captureVisibleTab` can HANG rather than reject, and a hang is
+// invisible to the `catch` that is supposed to fall through to CDP.
+//
+// The fast path's own comment promises "any failure there falls through to the
+// CDP path". That was only ever true of a REJECTION: captureWithRetry awaits the
+// call, so a promise that never settles never reaches the catch, and the op dies
+// at EXEC_OP_BUDGET_MS instead of taking the CDP path that would have worked.
+//
+// Measured 2026-08-24 (app-capture arc, an active tab on a non-visible
+// workspace): 3/3 `op_timeout:screenshot` pinned at 18.07-18.11s — the ceiling,
+// not a natural error latency — while the SAME tab captured fine via CDP 3/3 in
+// 381-3084ms once it was no longer its window's active tab. One arm returned via
+// captureVisibleTab at 17.97s, i.e. it can eventually settle; it is far too slow,
+// not permanently stuck. Occlusion is NOT the discriminator: the hang reproduces
+// with nothing drawn on top. Record:
+// <datapacket-talos>/claudedocs/app-capture-occlusion-refutation-2026-08-24.md
+//
+// 5s is chosen to sit ABOVE the legitimate retry ladder and far BELOW the op
+// ceiling: captureWithRetry can legitimately spend CAPTURE_MAX_ATTEMPTS(3) tries
+// spaced by max(CAPTURE_RETRY_BASE_MS(700)·attempt, CAPTURE_QUOTA_WAIT_MS(1000))
+// = 1000 + 1400 ≈ 2.4s of backoff on a real quota hit, plus the calls themselves
+// (healthy captures measured 192-1365ms). So a quota storm still RETRIES rather
+// than being pushed onto CDP, while the pathological hang is cut off ~13s before
+// the op would have failed outright. Falling through costs a debugger banner and
+// returns the SAME image: both paths measured identical 1709x1314 geometry (the
+// "CDP changes the image" caveat is about --fullpage, which is a different clip).
+export const FAST_CAPTURE_BUDGET_MS = 5000;
 // A /poll blocks server-side for BROWSER_BRIDGE_POLL_TIMEOUT (default 25s) before
 // its 204. 40s leaves generous headroom for a slow loopback round-trip plus the
 // activeTabSnapshot() that precedes the fetch, while still being a bound.

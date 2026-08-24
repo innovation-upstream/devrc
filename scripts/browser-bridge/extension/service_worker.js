@@ -50,7 +50,7 @@ import {
   // body is raced against a wall-clock budget (see protocol.js for why and for
   // the CDP < exec < server-cmd_timeout ordering).
   promiseWithTimeout, EXEC_OP_BUDGET_MS, POLL_BUDGET_MS, RESULT_BUDGET_MS,
-  LOOP_STALL_MS, STORAGE_BUDGET_MS,
+  LOOP_STALL_MS, STORAGE_BUDGET_MS, FAST_CAPTURE_BUDGET_MS,
   // `emulate` op: device emulation (viewport/touch/UA+UA-CH/media/geo/tz) that is
   // STICKY per tab because CDP overrides die at detach — see the EMULATION section
   // in protocol.js for the central problem and the safety property it buys.
@@ -973,7 +973,8 @@ const OPS = {
   // it fixes the captureVisibleTab "can only grab the foreground tab" limitation,
   // and lets two profiles each screenshot their own tab). A FAST path keeps the
   // cheap, banner-free captureVisibleTab for a tab that IS already visible (and not
-  // --fullpage); any failure there falls through to the CDP path. `--fullpage`
+  // --fullpage); any failure there — INCLUDING A HANG, which is why the fast path
+  // carries its own bound — falls through to the CDP path. `--fullpage`
   // captures the whole scrollable document (CDP only). Attach is REFUSED on a
   // privileged tab (assertCdpAttachable inside withCdp) before any attach.
   //
@@ -992,9 +993,20 @@ const OPS = {
     if (tab.active && !fullpage && !emulated) {
       // Fast path — no debugger attach/banner. Chrome throttles captureVisibleTab to
       // ~2/sec; captureWithRetry spaces the (rare) retry ≥ the quota window.
+      // 🔴 BOUNDED, because captureVisibleTab can HANG instead of rejecting, and
+      // a hang is invisible to the catch below. Unbounded, this `await` simply
+      // never returned and the op died at EXEC_OP_BUDGET_MS (18s) — so the
+      // fall-through this catch promises never happened, on exactly the tab the
+      // CDP path would have captured fine. Measured 2026-08-24: 3/3 timeouts
+      // pinned at 18.07-18.11s here vs 3/3 CDP successes in 381-3084ms.
+      // The bound turns "never settles" into a rejection, which is the ONLY
+      // shape this catch can see. See FAST_CAPTURE_BUDGET_MS for the 5s choice.
       try {
-        const dataUrl = await captureWithRetry(() =>
-          chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" }));
+        const dataUrl = await promiseWithTimeout(
+          captureWithRetry(() =>
+            chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" })),
+          loopTiming().fastCaptureMs, "screenshot.fast", {},
+          "fast_capture_timeout");
         return { url: tab.url, dataUrl, via: "captureVisibleTab" };
       } catch (e) { /* fall through to the CDP path (works off-screen) */ }
     }
@@ -1486,6 +1498,11 @@ function loopTiming() {
     resultMs: t.resultMs == null ? RESULT_BUDGET_MS : t.resultMs,
     stallMs: t.stallMs == null ? LOOP_STALL_MS : t.stallMs,
     storageMs: t.storageMs == null ? STORAGE_BUDGET_MS : t.storageMs,
+    // The `screenshot` fast path's own bound — see FAST_CAPTURE_BUDGET_MS. It is
+    // NOT a loop budget, but it lives here so a unit test can drive a 20ms bound
+    // through the same injection point instead of waiting 5 real seconds.
+    fastCaptureMs: t.fastCaptureMs == null
+      ? FAST_CAPTURE_BUDGET_MS : t.fastCaptureMs,
   };
 }
 

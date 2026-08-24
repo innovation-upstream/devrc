@@ -246,6 +246,62 @@ test("screenshot STILL uses the chrome.debugger (CDP) path — not regressed to 
 });
 
 // --------------------------------------------------------------------------- //
+// 🔴 THE FAST PATH MUST SURVIVE A HANG, NOT ONLY A REJECTION.
+//
+// `chrome.tabs.captureVisibleTab` can simply never settle. Before the fast-path
+// bound, the `catch` that is supposed to fall through to CDP could not see that:
+// the await never returned, and the whole op died at EXEC_OP_BUDGET_MS (18s) —
+// on a tab CDP would have captured in well under a second. Measured 2026-08-24,
+// 3/3 `op_timeout:screenshot` at 18.07-18.11s vs 3/3 CDP successes 381-3084ms.
+//
+// RED WITHOUT THE FIX: with the bound removed this test does not fail with an
+// assertion, it HANGS until the runner's own timeout kills it — which is exactly
+// the production symptom, so the test is a faithful reproduction rather than a
+// restatement of the patch.
+test("screenshot fast path: a HUNG captureVisibleTab falls through to CDP", async () => {
+  resetCalls();
+  const realCapture = chrome.tabs.captureVisibleTab;
+  const realTiming = globalThis.BROWSER_BRIDGE_LOOP_TIMING;
+  // 20ms bound instead of the real 5s, via the same injection point the loop
+  // budgets already use.
+  globalThis.BROWSER_BRIDGE_LOOP_TIMING = { ...(realTiming || {}), fastCaptureMs: 20 };
+  chrome.tabs.captureVisibleTab = () => new Promise(() => {});   // never settles
+  state.tab.active = true;                                        // → fast path
+  try {
+    const started = Date.now();
+    const out = await OPS.screenshot({ tabId: TAB_ID });
+    assert.equal(out.via, "cdp", "a hung fast path must fall through to CDP");
+    assert.match(out.dataUrl, /^data:image\/png;base64,/);
+    assert.ok(state.calls.debugger.includes("Page.captureScreenshot"),
+              "the CDP path actually ran");
+    assert.ok(state.calls.debugger.includes("detach"), "always detaches");
+    // Bounded, not merely eventual: nowhere near the 18s op ceiling.
+    assert.ok(Date.now() - started < 5000,
+              "must be cut off by the fast-path bound, not by the op budget");
+  } finally {
+    chrome.tabs.captureVisibleTab = realCapture;
+    globalThis.BROWSER_BRIDGE_LOOP_TIMING = realTiming;
+    state.tab.active = false;
+  }
+});
+
+// ATTRIBUTION CONTROL for the test above: the bound must not simply push every
+// capture onto CDP. A healthy fast path is still the fast path — otherwise the
+// test above would pass just as well with the fast path deleted outright, and
+// would be recording coverage it does not have.
+test("screenshot fast path: a HEALTHY captureVisibleTab is still used", async () => {
+  resetCalls();
+  state.tab.active = true;
+  try {
+    const out = await OPS.screenshot({ tabId: TAB_ID });
+    assert.equal(out.via, "captureVisibleTab", "healthy fast path must NOT go to CDP");
+    assert.equal(state.calls.debugger.length, 0, "no debugger attach on the fast path");
+  } finally {
+    state.tab.active = false;
+  }
+});
+
+// --------------------------------------------------------------------------- //
 // `activate` op: foreground the tab (tabs.update{active} + windows.update{focused})
 // then bounded wait-for-load. Wiring only — the wait LOGIC is unit-tested in
 // protocol.test.mjs. No CDP/debugger, no executeScript, no new permission.
