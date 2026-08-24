@@ -118,15 +118,42 @@ def _wait_events(spool_dir, n=1, timeout=10.0, until=None) -> list:
     The emit runs off the critical path, after the HTTP response, so it lands
     slightly after /cmd returns — hence the poll rather than a bare read.
 
-    🔴 A COUNT IS A PROXY, AND `until=` EXISTS BECAUSE THE PROXY IS WRONG UNDER
-    LOAD. MEASURED in CI 2026-08-24 on `devrc-ci-dhsn6`: a throttling test asked
-    for `n=2` and filtered for the `throttled` event. The server HAD throttled —
-    `{"event":"throttled","op":"tabs","reason":"rate_limited"}` is in that run's
-    captured stderr — but only the `cmd` event had reached the spool inside the
-    deadline, so the filter found nothing and the assertion failed as
-    `assert 0 == 1`, reading like a defect in rate limiting. 16 of the 52 call
-    sites in this module use a count this way. Pass `until=` whenever you are
-    waiting for a SPECIFIC event; the count is only right when any N will do.
+    🔴 THE FLAKE THIS WAS BUILT FOR WAS NOT A WAIT PROBLEM AT ALL — DO NOT REACH
+    FOR THE DEADLINE. The throttling test that failed on 3 of the 29 `devrc-ci`
+    runs after 2026-08-24 was losing its `throttled` row to a DATA RACE in
+    server.py's lazy emitter load: two /cmd handler threads reached
+    `_load_spool_emit` together, the flag was published before the module, and
+    the loser was handed None and dropped its event. DROPPED, not delayed — no
+    deadline could ever have recovered it, and raising this one 3s -> 10s did
+    not. Fixed at the root (`_spool_emit_lock`, and the ordering the flag is
+    published in); pinned by
+    `test_a_second_command_emitting_during_the_emitter_load_still_spools`.
+
+    So `until=` and the loud timeout below are still worth having, but for the
+    ORDINARY reason — a count is a proxy for "the event I want landed", and the
+    proxy is only exact when any N will do.
+
+    DERIVED BY AST OVER THIS FILE, not by grep, and the difference was a real
+    error: a line-oriented regex for the count reads the POSITIONAL form and
+    misses the KEYWORD one, so `_wait_events(tmp_path, n=2, …)` was silently
+    filed under n=1 while its sibling on the next line (`until=lambda evs:
+    False`) was filed under `until=` — one function, one test, two buckets, and
+    a total that still added to 56. Rule used, stated because it is a judgement
+    call: bucket by what the call ASKS FOR, and **`_wait_events`' own control
+    tests are classified like every other site — no self-test exemption**, since
+    exempting one of a pair and not the other is what produced the wrong number.
+
+        56 total  =  42 n=1  +  4 until=  +  10 n>=2
+
+    n=1 after a single command is exact, not a proxy. Of the 10 n>=2, one is this
+    harness's own negative control below (it asserts the timeout fires; no real
+    events are involved). Of the 9 remaining real waits, 8 are order-safe —
+    either they wait for the earlier event before issuing the next request, so
+    file order is pinned structurally, or they assert something
+    order-independent. The exception is the `absent, empty =
+    _wait_events(spool_dir, 2)` unpack, which does depend on file order.
+
+    Pass `until=` whenever you are waiting for a SPECIFIC event.
 
     🔴 AND A TIMEOUT IS NOW LOUD. This used to return a SHORT list silently, so
     every caller's next line — `[0]`, or a filter — failed with a message about
@@ -2221,6 +2248,49 @@ def test_load_spool_emit_missing_path_returns_none(monkeypatch, tmp_path):
     monkeypatch.setattr(S, "_spool_emit_mod", None)
     monkeypatch.setattr(S, "_spool_emit_tried", False)
     assert S._load_spool_emit() is None
+    # 🔴 "TRIED" MEANS TRIED, NOT "SUCCEEDED". The flag must be set even on the
+    # failure path — see the behavioural guard below for what goes wrong if a
+    # later edit tucks it into the success branch.
+    assert S._spool_emit_tried is True, (
+        "a FAILED import left `_spool_emit_tried` False, so the next emit will "
+        "retry it — under `_spool_emit_lock`, on every request")
+
+
+def test_a_failed_emitter_import_is_never_retried(monkeypatch, tmp_path):
+    """🔴 THE FAILURE PATH LATCHES — and without this nothing said so.
+
+    `_spool_emit_tried` is set unconditionally, so an emitter that cannot be
+    imported disables telemetry once and stays disabled. That is the documented
+    supported configuration: "collector not checked out -> telemetry simply off".
+
+    UNPINNED UNTIL NOW, and measured: the mutant `_spool_emit_tried = mod is not
+    None` — tucking the flag into the success branch — SURVIVED all 785 tests in
+    this directory. Under it every single emit re-attempts a failing import, and
+    since this PR each of those attempts serializes on `_spool_emit_lock`. That
+    makes a lock added to stop dropped events strictly WORSE than no lock, on a
+    configuration the code says it supports, with no test to say so.
+
+    Pinned BEHAVIOURALLY — the number of import ATTEMPTS — not by reading the
+    flag, because the flag is the proxy and the retry is the harm.
+    """
+    attempts = tmp_path / "import-attempts"
+    emitter = tmp_path / "broken_spool_emit.py"
+    emitter.write_text(
+        f"with open({str(attempts)!r}, 'a') as _f:\n"
+        "    _f.write('x')\n"
+        "raise RuntimeError('emitter is broken')\n",
+        encoding="utf-8")
+    monkeypatch.setattr(S, "_SPOOL_EMIT_PATH", emitter)
+    monkeypatch.setattr(S, "_spool_emit_mod", None)
+    monkeypatch.setattr(S, "_spool_emit_tried", False)
+
+    assert S._load_spool_emit() is None
+    assert attempts.read_text() == "x", "positive control: the import never ran"
+    for _ in range(3):
+        assert S._load_spool_emit() is None
+    assert attempts.read_text() == "x", (
+        f"the broken emitter was imported {len(attempts.read_text())} times — a "
+        "failed import must latch, not retry on every emit")
 
 
 # --------------------------------------------------------------------------- #
@@ -2618,8 +2688,11 @@ def test_the_throttle_path_carries_both_the_hash_and_the_join_key(telemetry):
         assert _wait_connected(srv, want=True)
         assert _cmd_sess(srv, {"op": "tabs"}, sid=JOINABLE_ID)[0] == 200
         assert _cmd_sess(srv, {"op": "tabs"}, sid=JOINABLE_ID)[0] == 429
-        # 🔴 `until=` not `n=2`: the count was a proxy for "the throttled event
-        # landed", and CI proved the proxy wrong (see `_wait_events`).
+        # `until=` not `n=2` — the count is a proxy for "the throttled event
+        # landed". 🔴 But the CI failure this test kept producing was NOT a slow
+        # wait: the row was being DROPPED by the emitter-load race (see
+        # `_wait_events` and server.py's `_spool_emit_lock`). Do not widen the
+        # deadline if this reds again — read the spool for what is MISSING.
         def _has_throttle(evs):
             return any(json.loads(e["payload"]).get("outcome") == "throttled"
                        for e in evs)
@@ -2632,6 +2705,164 @@ def test_the_throttle_path_carries_both_the_hash_and_the_join_key(telemetry):
         assert p["sess"] == hashlib.sha256(JOINABLE_ID.encode()).hexdigest()[:8]
         assert p["sess_src"] == "claude"
         assert thr[0]["session"] == JOINABLE_UUID
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+# --------------------------------------------------------------------------- #
+# The lazy emitter load is CONCURRENT — see server.py's `_spool_emit_lock`.
+# --------------------------------------------------------------------------- #
+def _gated_emitter(tmp_path):
+    """A copy of the REAL spool emitter whose IMPORT blocks until released.
+
+    Returns `(path, release, counts)`. The gate is APPENDED to the genuine
+    `spool_emit.py` source — so `emit` behaves identically, and so the real file's
+    `from __future__` line keeps its mandatory first-statement position. It
+    records one character per import in `counts` and then blocks. That turns
+    "another caller arrives while the emitter is still loading" from a scheduling
+    accident into an ORDER THE TEST CHOOSES, which is the only way to pin this
+    without a wall-clock dependency.
+
+    The wait is capped so a regression can never hang the suite: it gives up and
+    lets the import finish, and the assertion (not a timeout) is what reports.
+    """
+    go = tmp_path / "emitter-go"
+    counts = tmp_path / "emitter-imports"
+    src = SPOOL_EMIT_PY.read_text(encoding="utf-8") + (
+        "\n\n# --- test gate (appended by _gated_emitter) ---\n"
+        "import time as _t\n"
+        f"with open({str(counts)!r}, 'a') as _f:\n"
+        "    _f.write('x')\n"
+        f"_gate = Path({str(go)!r})\n"
+        "_deadline = _t.time() + 30\n"
+        "while not _gate.exists() and _t.time() < _deadline:\n"
+        "    _t.sleep(0.005)\n"
+    )
+    path = tmp_path / "gated_spool_emit.py"
+    path.write_text(src, encoding="utf-8")
+    return path, (lambda: go.write_text("go", encoding="utf-8")), counts
+
+
+def test_the_emitter_load_publishes_the_module_before_it_claims_to_have_tried(
+        telemetry, tmp_path, monkeypatch):
+    """🔴 THE ORDERING CONTRACT, and the root cause of the #1 CI failure.
+
+    `_load_spool_emit`'s unlocked fast path is `if _spool_emit_tried: return
+    _spool_emit_mod`. It used to set `_spool_emit_tried = True` BEFORE running the
+    import, so for the whole duration of that import a second caller read
+    "already tried" and was handed a still-`None` module — and `emit_cmd_event`
+    returned at its `if se is None` guard. The event was DROPPED, permanently.
+    Not delayed: no deadline could ever have recovered it.
+
+    That is not a rare interleave. Every /cmd emits AFTER its response is sent,
+    so request N's load overlaps request N+1's handler by construction. A probe
+    of two threads reaching the cold function together lost the event in 35 of 40
+    trials at zero stagger and 1 of 40 at a 0.5ms stagger (24-core workbench,
+    load average ~42-49); 0 of 40 at every point after the fix. The full paired
+    numbers are in server.py beside `_spool_emit_lock`.
+
+    Pinned as STATE, not as a word: while the import is provably in flight,
+    `_spool_emit_tried` must still be False.
+    """
+    emitter, release, counts = _gated_emitter(tmp_path)
+    monkeypatch.setattr(S, "_SPOOL_EMIT_PATH", emitter)
+    monkeypatch.setattr(S, "_spool_emit_mod", None)
+    monkeypatch.setattr(S, "_spool_emit_tried", False)
+
+    got = {}
+    t = threading.Thread(target=lambda: got.update(mod=S._load_spool_emit()))
+    t.start()
+    try:
+        # Deterministic handshake: the counts file is written by the gate at the
+        # END of the module body, immediately before it blocks — so its existence
+        # proves the loader is inside exec_module and has NOT returned.
+        assert _wait_until(counts.exists, timeout=30), (
+            "the gated import never started")
+        assert S._spool_emit_tried is False, (
+            "`_spool_emit_tried` was published while `_spool_emit_mod` is still "
+            f"{S._spool_emit_mod!r} — a concurrent caller reading the fast path "
+            "here is handed None and silently drops its event")
+    finally:
+        release()
+        t.join(timeout=30)
+    assert not t.is_alive()
+    assert got["mod"] is not None
+    assert S._spool_emit_tried is True and S._spool_emit_mod is got["mod"]
+
+
+def test_a_second_command_emitting_during_the_emitter_load_still_spools(
+        telemetry, tmp_path, monkeypatch):
+    """🔴 THE CI FAILURE ITSELF, made deterministic.
+
+    `test_the_throttle_path_carries_both_the_hash_and_the_join_key` failed on 3
+    of the 29 `devrc-ci` runs after 2026-08-24 — the single most frequent red in
+    that window — always the same way: the `throttled` row absent from the spool
+    while the server's captured stderr proved it HAD throttled. The two /cmd
+    handler threads were racing the lazy emitter load, and the loser's event was
+    dropped.
+
+    Here the race is SCHEDULED rather than hoped for: the emitter's import blocks,
+    and the second command is not issued until the first command's load is
+    provably in flight and the second's emit is provably inside the loader. So
+    this is red at the pre-fix ordering EVERY run, not one in ten.
+
+    Note what is NOT weakened: the wait is the same `until=_has_throttle`, and the
+    row must still carry its payload. A fix that made this pass by asserting less
+    would be worse than the flake.
+    """
+    spool_dir = telemetry
+    emitter, release, counts = _gated_emitter(tmp_path)
+    monkeypatch.setattr(S, "_SPOOL_EMIT_PATH", emitter)
+    monkeypatch.setattr(S, "_spool_emit_mod", None)
+    monkeypatch.setattr(S, "_spool_emit_tried", False)
+
+    real_load = S._load_spool_emit
+    entered = threading.Semaphore(0)
+
+    def _counting_load():
+        # Recorded BEFORE the call so "the second emitter has reached the loader"
+        # is observable from the test thread. The RESULT still comes from the
+        # real function — this wrapper orchestrates, it never answers.
+        entered.release()
+        return real_load()
+
+    monkeypatch.setattr(S, "_load_spool_emit", _counting_load)
+
+    reg = S.Registry(rate_per_sec=0.001, burst=1, max_queue=1000)
+    srv, _ = _serve(registry=reg)
+    ext = FakeExtension(srv)
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        assert _cmd_sess(srv, {"op": "tabs"}, sid=JOINABLE_ID)[0] == 200
+        # The ok-command's emit is the one that performs the load. Wait until it
+        # is inside the (blocked) import before provoking the throttle.
+        assert entered.acquire(timeout=30), "the first emit never reached the loader"
+        assert _wait_until(counts.exists, timeout=30), (
+            "the gated import never started")
+
+        assert _cmd_sess(srv, {"op": "tabs"}, sid=JOINABLE_ID)[0] == 429
+        assert entered.acquire(timeout=30), "the throttled emit never reached the loader"
+    finally:
+        release()
+
+    def _has_throttle(evs):
+        return any(json.loads(e["payload"]).get("outcome") == "throttled"
+                   for e in evs)
+
+    try:
+        evs = _wait_events(spool_dir, until=_has_throttle)
+        thr = [e for e in evs
+               if json.loads(e["payload"]).get("outcome") == "throttled"]
+        assert len(thr) == 1, evs
+        p = json.loads(thr[0]["payload"])
+        assert p["sess"] == hashlib.sha256(JOINABLE_ID.encode()).hexdigest()[:8]
+        assert thr[0]["session"] == JOINABLE_UUID
+        # ONCE-ONLY under a race is the lock's own job — the ordering alone would
+        # let the second caller redo the import.
+        assert counts.read_text() == "x", (
+            f"the emitter was imported {len(counts.read_text())} times under a "
+            "concurrent first load; `_spool_emit_lock` is not holding")
     finally:
         ext.stop(); srv.shutdown(); srv.server_close()
 
