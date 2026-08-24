@@ -1432,7 +1432,14 @@ class TestSkillDocsArePinned:
         ("scripts/lib/subsystem_touch.py", "the step actually calls this module"),
         ("It **never writes**", "the helper's read-only contract, stated to its caller"),
         ("Write it — no question", "the index write is deliberately ungated"),
-        ("Step 5 keeps its y/N", "the PUSH gate survives; blast radius earns a gate"),
+        # 🔴 SUPERSEDES `("Step 5 keeps its y/N", …)`. Operator decision
+        # 2026-08-23 retired step 5's prompt too, on the same evidence that
+        # retired this step's on 2026-08-15: it was always answered `y`. The
+        # asymmetry that pin protected is GONE — what must survive is that
+        # neither write asks, and that the diff is still shown before both.
+        ("declining **by prompt** is what is gone", "the prompt went; declining did not"),
+        ("Both steps still SHOW the diff before writing",
+         "🔴 the half the prompt was never doing, kept at BOTH writes"),
         ("re-read the file and re-apply to current bytes", "no concurrent append is clobbered"),
         ("Never silent-mutate.", "the invariant carried over from analyze-service"),
         ("pointers, not copies", "the bloat rule"),
@@ -1533,7 +1540,13 @@ class TestSkillDocsArePinned:
             "It appears alongside `resolved` too",
             "why: entries must still accrue when something already matches",
         ),
-        ("on decline, discard", "the analyze-service clause that was dropped"),
+        # 🔴 WAS `("on decline, discard", …)`, which came from the
+        # analyze-service gate. Both prompts are retired (2026-08-15, then
+        # 2026-08-23), so the SKILL HOMES append follows the index write's
+        # current rule — show the diff, then edit — and pinning the old clause
+        # would require prose describing a prompt nothing asks.
+        ("show one compact diff, then edit; no question",
+         "the SKILL HOMES append follows the index write's CURRENT rule"),
         (
             "use `Edit` anchored on `## Nuance / work-history`, not `Write`",
             "no whole-file retype of a curated unbacked-up entry",
@@ -1769,9 +1782,15 @@ class TestSkillDocsArePinned:
             )
 
     def test_the_kickoff_block_precedes_the_confirm_gate(self) -> None:
-        """Structural, not a phrase: a user who walks away from the y/N must
-        still have the deliverable. Asserted on ORDER in the file, because the
-        pin above only proves the sentence exists somewhere."""
+        """Structural, not a phrase: a run that never reaches the end must
+        still have handed over the deliverable. Asserted on ORDER in the file,
+        because the pin above only proves the sentence exists somewhere.
+
+        ⚠ The original reason was "a user who walks away from the y/N" — both
+        prompts are retired (index write 2026-08-15, push 2026-08-23), so the
+        reason is now that everything after the kickoff can REFUSE: step 4 can
+        dead-end and step 5 can exit without writing on four separate statuses.
+        The ordering requirement did not change; only why it matters."""
         doc = HANDOFF_DOC.read_text(encoding="utf-8")
 
         def at(needle: str) -> int:
@@ -1791,7 +1810,10 @@ class TestSkillDocsArePinned:
         # The index write is no longer gated (2026-08-15, operator decision), so
         # the ordering anchor is step 5's PUSH gate — still the last thing that
         # can block, and still after the deliverable.
-        gate = at("update the handoff doc and push it? (y/N)")
+        # 🔴 The anchor moved when the y/N was retired 2026-08-23. It is still
+        # the last thing in step 5 that can stop the doc landing — now a refusal
+        # rather than a question — so the ordering claim is unchanged.
+        gate = at("Land it — no question. SHOW the diff, then push")
         assert kickoff < index_step < gate
 
     @pytest.mark.parametrize(
