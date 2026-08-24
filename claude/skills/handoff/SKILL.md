@@ -90,6 +90,12 @@ Topic argument (optional): `$ARGUMENTS`. If empty, infer a short kebab-case topi
    ## Next steps (ranked)
    1. ...
    2. ...
+   🔴 **This list is a WORK QUEUE WITH NO LOCK** — every `/resume` session draws
+   from it, so a *better* ranked list produces *more* duplicate work, not less.
+   Make each item cheap to check: name the repo and the files it will touch, and
+   **mark anything in flight `IN FLIGHT: <repo>#<pr>`** rather than leaving it
+   looking unclaimed. Worktrees do NOT prevent this. 📖 the measurements and the
+   refutation: `~/.claude/skills/handoff/reference/shared-queue.md`.
 
    ## Gotchas / decisions / dead-ends
    - Things already tried that didn't work; constraints; why X over Y.

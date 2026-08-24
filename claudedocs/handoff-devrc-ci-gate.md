@@ -344,6 +344,29 @@ longer true, and a permanently-red gate is no longer the expected outcome. See s
 - **Concurrency is the dominant cost.** `main` moved 11+ times during this session; two of
   my PRs were superseded mid-flight by better fixes from other sessions. Check whether
   someone is already on a defect before dispatching an agent at it.
+  🔴 **DIAGNOSED 2026-08-24 — THE CAUSE IS *THIS DOC'S OWN* NEXT-STEPS LIST, and the
+  fix is not worktrees.** The ranked list is a work queue that every `/resume`
+  session draws from, with nothing marking an item as taken. It maps onto the PR
+  series nearly 1:1: next-step 1 → homelab-infra `#386`; next-step 4 (*"right-size
+  the other pipelines' requests — gitops-validate alone asks 4.65 CPU"*) → **BOTH
+  `#388` and `#389`**; next-step 5 → `#389` as well. `#388` was closed after two
+  audit rounds of work. A *better* ranked list produces *more* of this, not less.
+  🔴 **Worktree isolation is REFUTED as the explanation.** Every other session was
+  using one (`hi-finally-fix`, `homelab-renderdiff`, `tekton-devrc` were all live
+  worktrees on their own branches) and **no file was ever clobbered** — each
+  colliding PR was internally clean. Worktrees prevent a FILESYSTEM collision;
+  this is a TASK-ALLOCATION collision, and isolation is what *hides* it, since a
+  shared tree would have shown the other branch.
+  **The measured timing, which is what makes it fixable:** each collision had a
+  window where the other PR was already PUBLIC — `#774` by **22 min** before its
+  duplicate was opened, `#388` by **18 min** before the other side's first commit.
+  Both were visible; neither was checked.
+  ⚠ **But a pre-flight check cannot protect the FIRST mover** — in `#388`/`#389`
+  nothing on my side could have seen a session that had not started yet. Hence two
+  halves, both now written into the skills: `/resume` step 6 (check open PRs before
+  starting **and** again immediately before `gh pr create`) and **push the branch
+  the moment you create it**, which is the only half that protects whoever moves
+  first. `/handoff` now asks that in-flight items be marked `IN FLIGHT: <repo>#<pr>`.
 
 - 📌 **CARRIED FORWARD from the previous revision's `Next steps`, which this update replaces.**
   These are durable *findings*, not pending actions, and would otherwise have been deleted —
