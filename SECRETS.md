@@ -221,6 +221,49 @@ Do these **in order** relative to the first `home-manager switch`:
 
 ---
 
+## Third-party names + ticket ids in reachable history — ALREADY ADJUDICATED, do not re-raise
+
+> **Read this before proposing a history rewrite of `check-clickup-addressed`.**
+> The exposure below is real, the current tree is clean, and the decision NOT to
+> rewrite was made deliberately on 2026-08-23. Re-deriving it costs a session.
+
+**What is there.** A skill migrated into this PUBLIC repo on 2026-08-22 carried
+fixtures and a validation history across from a PRIVATE client repo. In reachable
+history (not HEAD) that leaves: **two colleagues' real names**, ~**40 real ClickUp
+ticket ids**, several **verbatim third-party comment bodies**, and one client
+**alert name + threshold**. It is reachable in `git log -p`, in the migration
+commits, and in PR diffs on github.com.
+
+**What was done.** HEAD is clean, verified repo-wide: `#731` replaced the fixtures
+with synthetic equivalents and added a **ledger gate**
+(`scripts/check-clickup-addressed/tests/test_no_real_identifiers.py`) that fails on
+any unregistered id-shaped token or fixture author — going green requires writing
+the value down and asserting it is invented. `#733` replaced the one remaining name
+in `claudedocs/` with roles.
+
+**Why the history is NOT being rewritten.**
+
+- **A rewrite cannot undisclose.** The content was public and fetchable; `filter-repo`
+  + force-push + a GitHub support request to expire cached PR views changes what is
+  *convenient* to find, not what is out. Treat the values as disclosed.
+- **The blast radius is larger than the exposure.** `main` is protected
+  (`enforce_admins: true`, `allow_force_pushes: false`), so a rewrite means
+  unprotecting it — and this repo routinely carries **200+ worktrees**, two host
+  checkouts, and several concurrent agent sessions. Every one would be anchored to
+  commits that no longer exist. Concurrent *reads and writes* in this shared clone
+  already caused four false gate attributions in a single day.
+- **The class is low severity**: no credential, no personal-life detail — colleagues'
+  names, opaque ticket ids, and paraphrasable comments about infrastructure work.
+  The identifying **pairing** (a name beside a ticket beside their words) is what
+  mattered, and that is gone from HEAD.
+
+🔴 **The revisit condition is a DIFFERENT class, not more of this one.** If a
+credential, key, or token is found in reachable history, this determination does not
+apply — see the Linkerd section above for how that case is handled, and note the
+structural gap below: **every content gate reads HEAD only**, so nobody has actually
+scanned history for this repo. That scan is worth doing on its own merits; its result
+does not change the decision recorded here.
+
 ## Dead credentials in reachable history — ALREADY ADJUDICATED, do not re-raise
 
 > **Read this before opening a 🔴 on `cmd/cluster/certs/`.** A credential-shaped

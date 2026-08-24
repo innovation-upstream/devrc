@@ -265,7 +265,31 @@
     // Ask before burning a long unproductive loop, and before reaching outside
     // the project directory.
     "doom_loop": "ask",
-    "external_directory": "ask",
+
+    // 🔴 `external_directory` stays `ask` for EVERYTHING except this host's own
+    // skills tree. MEASURED 2026-08-23: a dispatch loaded the `clawgate` skill,
+    // followed the skill's OWN pointer to `reference/task-api.md`, and was
+    // auto-rejected — `~/.config/opencode/skills/` is outside `--dir` for every
+    // dispatch, by construction. The run then DIED mid-task. This is not a
+    // clawgate quirk: it hits EVERY skill that keeps detail in `reference/` or
+    // `flows/`, which is the shape `prune-skill` actively pushes skills toward.
+    //
+    // 🔴 preflight CANNOT catch this, structurally. It scans the BRIEF for
+    // external paths; the brief named none and it correctly reported
+    // "external paths: NOT EXAMINED". The offending path came from the SKILL the
+    // agent loaded, which preflight never sees. So a clean preflight is not
+    // evidence a run is safe from an `external_directory` auto-reject.
+    //
+    // The carve-out is deliberately the narrowest thing that fixes the class:
+    // read-only, devrc-managed, nix-store-backed content the agent is already
+    // meant to have — the same skill bodies opencode itself injects. It does NOT
+    // widen access to the repo, to $HOME, or to anything the operator writes.
+    // Verified by A/B on the identical read: without the map the read is
+    // auto-rejected and the run dies; with it the read succeeds.
+    "external_directory": {
+      "*": "ask",
+      "/home/zach/.config/opencode/skills/**": "allow"
+    },
 
     "bash": {
       "*": "allow",

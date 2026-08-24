@@ -15,19 +15,36 @@ no ruleset, no Tekton trigger, and `statusCheckRollup` is empty on every PR."
 carry branch protection, and `statusCheckRollup` is non-empty. Still true: no
 `.github/workflows`, and no ruleset.
 
-None of that changed the marker to `github-actions`, because the protection
-carries **no `required_status_checks`**: checks RUN, nothing BLOCKS. Measured
-behaviourally, not inferred — #707 merged **28 minutes** after its
-`devrc-pytests` went RED, #711 two minutes after. The marker is `other` because
-something this test cannot see (Tekton) now reports; it would become
-`github-actions` only if a `pull_request` workflow appeared here.
+🔴 AND IT DRIFTED AGAIN, this time in the REASSURING direction. This paragraph
+used to continue: "the protection carries **no `required_status_checks`**:
+checks RUN, nothing BLOCKS", evidenced by #707 merging **28 minutes** after its
+`devrc-pytests` went RED and #711 two minutes after. **Measured FALSE on
+2026-08-23**: `required_status_checks.contexts` is
+`["tekton/devrc-nodetests","tekton/devrc-pytests"]`, `strict: false`,
+`enforce_admins: true` — BOTH tiers block, so a Python-only change is gated too.
+
+⚠ It briefly listed nodetests ALONE (same day, corrected within the hour), and
+that one-element state is worth remembering rather than deleting: nodetests
+collects `*.test.mjs` ONLY, so a Python-only change could not fail the required
+check at all, yet the setting read as "protected". "Partially blocked" is the
+shape that reads as "blocked" — which is why the re-measure below says to read
+the LIST, not whether the key exists.
+
+The marker was `other` before that change and is `other` after, because it
+encodes what REPORTS, not what BLOCKS: something this test cannot see (Tekton)
+runs here, and it would become `github-actions` only if a `pull_request`
+workflow appeared. Branch protection is invisible to this test in BOTH states —
+see SCOPE below — so nothing in this file verifies the paragraph above, and a
+green run here is not evidence for it. Re-measure it.
 
 Re-measure both surfaces rather than quoting any of the above:
     gh api repos/innovation-upstream/devrc/branches/main/protection   # required_status_checks?
     gh api repos/innovation-upstream/devrc/rules/branches/main        # org+repo+enterprise rulesets
-On the first, an ABSENT key reads as clean unless you look for it by name; on
-the second the answer is an empty array. Positive-control the `[]` before
-believing it — the same call against a repo with rulesets returns non-empty.
+On the first the key is PRESENT today, so read the `contexts` LIST and `strict`,
+not merely whether the key exists — a one-element list is a PARTIAL gate, and an
+absent key would read as clean unless you looked for it by name. On the second
+the answer is an empty array. Positive-control the `[]` before believing it —
+the same call against a repo with rulesets returns non-empty.
 
 That is the worst shape a false claim can take. It lives in the always-loaded
 project instructions, it is reassuring, and it is exactly the sort of sentence

@@ -148,13 +148,15 @@ Repo-level facts that are NOT in any skill — they live here on purpose:
 - **Several docs have enforced byte ceilings, each gated by its own test that OWNS the constants and prints an eviction playbook on failure** — `claude/RULES.md` (the only always-on one) plus the skill bodies `browser`, `prune-skill`, `session-manager` and `handoff`. 🔴 **Read the numbers in the tests, never restate them, and do not restate the LIST either** — `git grep -l MIN_HEADROOM_BYTES scripts/` answers it. This bullet has twice carried a count that was wrong within a day. Any addition needs an eviction in the SAME commit; raising a ceiling needs the commit message to say which instruction would not fit.
 - **Run the gate with `scripts/gate.sh`** (`--tier pytest|node|both`, `--set hermetic|all`). It sends the full output to a LOG FILE and prints only a bounded summary, so there is no reason to pipe it — and **its exit status is authoritative**. It also cross-checks that status against the runners' own `RESULT:` line and exits **90 = could-not-vouch** when they disagree, when a run printed no verdict, or when `panic: test timed out` appears. 90 is not "the tests failed"; it means read the log.
 - **The runners' verdict line carries their exit code** (`RESULT: FAIL (exit=1)`), emitted from one writer behind an EXIT trap, so it survives a pipe and a killed run still says so. Historically the status was destroyed by `… | tail; echo "rc=$?"` — four agents reported `exit 0` over `RESULT: FAIL` on 2026-08-11 — which is why counting `PASSED`/`FAILED` lines used to be mandatory. Still a fine cross-check; no longer the only thing you can trust.
-- 🔴 **A MERGE IS NOW BLOCKED BY `tekton/devrc-nodetests`. `devrc-pytests` is NOT.** <!-- merge-gate: other -->
-  Since 2026-08-23 `required_status_checks.contexts = ["tekton/devrc-nodetests"]` on `main`,
-  with `enforce_admins: true`. Verified behaviourally, not from the setting: PRs with
-  nodetests `ERROR` or `PENDING` read `mergeStateStatus=BLOCKED`, green ones read `CLEAN`,
-  and a PR with pytests red but nodetests green reads `UNSTABLE` — mergeable. That split is
-  deliberate: pytests reports, nodetests gates. There is still no `.github/workflows`, so
-  the marker stays `other`.
+- 🔴 **A MERGE IS BLOCKED BY BOTH TIERS — `tekton/devrc-pytests` AND `tekton/devrc-nodetests`.** <!-- merge-gate: other -->
+  Measured 2026-08-23: `required_status_checks.contexts =
+  ["tekton/devrc-nodetests","tekton/devrc-pytests"]` on `main`, `enforce_admins: true`. A
+  Python-only change is now genuinely gated. ⚠ **It was not, earlier the same day** —
+  `contexts` held nodetests ALONE, which collects `*.test.mjs` ONLY, so a Python-only PR
+  could not fail it and read `UNSTABLE` (mergeable) with pytests red. **That observation is
+  OBSOLETE**; it reads `BLOCKED` today. Kept because a one-element `contexts` list reads as
+  "blocked" at a glance — check the LIST, not that the key exists. There is still no
+  `.github/workflows`, so the marker stays `other`.
   🔴 **`enforce_admins: true` is LIVE now** — it protected nothing while nothing was
   required. If Tekton is down or wedged, NOTHING merges and there is no admin override.
   The escape hatch, deliberately written down because you will want it under pressure:
@@ -178,7 +180,7 @@ Repo-level facts that are NOT in any skill — they live here on purpose:
   🔴 **`error` is not `failure`.** A check posted as `error` with `COULD NOT RUN: <leg>`
   means the gate stopped before that leg reported — a broken gate, not a bad change. Do not
   debug your diff against it.
-  🔴 **Before making a check REQUIRED, know this failure mode:** when a run hits
+  🔴 **Both checks are REQUIRED, so this failure mode is LIVE:** when a run hits
   `timeouts.tasks` the `finally` report task never runs, so **nothing is posted and the PR's
   checks stay `pending` forever** — measured on `devrc-ci-nnt6f` and `devrc-ci-9p6mf`,
   `childReferences` `[notify, gate]` only, still `pending` hours later. A required check in
@@ -222,9 +224,9 @@ Repo-level facts that are NOT in any skill — they live here on purpose:
   see (Tekton — which is why it reads `other` today — or an installed `githooks/` pre-push
   gate); `other` exists so the test can never force you to write a false `none`.
   🔴 **The marker records that something RUNS, never that it BLOCKS.** Those are different
-  facts, and the marker cannot tell them apart: it read `other` both while nothing blocked
-  (2026-08-22) and now that `tekton/devrc-nodetests` is required (2026-08-23) — the value
-  did not move, because what changed was branch protection, which this test cannot see.
+  facts, and the marker cannot tell them apart: it read `other` while nothing blocked
+  (2026-08-22), while one tier blocked, and now that both do (2026-08-23) — the value never
+  moved, because what changed each time was branch protection, which this test cannot see.
   So `other` never licenses "the merge is protected". Whether a run blocks is branch
   protection, which — along with Tekton and git hooks — is named above but NOT
   machine-checked from here. Re-verify by hand rather than trusting this paragraph's age:

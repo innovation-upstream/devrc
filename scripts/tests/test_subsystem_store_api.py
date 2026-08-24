@@ -371,9 +371,17 @@ def await_audit(out: Drained, n: int, timeout: float = 15.0) -> "list[str]":
     empty list indexed at [-1], which names neither the expectation nor the
     actual. Consolidating a footgun into one place does not disarm it; this does.
 
-    Callers still assert their own EXACT count afterwards (`== 3`, `== 5`) — this
-    guarantees a floor, never a ceiling, so "more lines than expected" remains
-    the caller's to catch.
+    🔴 IT GUARANTEES A FLOOR, AND THE CEILING IS NOT WHERE IT LOOKS. This used to
+    say "more lines than expected remains the caller's to catch", which is only
+    half true and the misleading half. The value returned is a SNAPSHOT taken
+    while the process is still running, so a caller's `== 3` against it cannot
+    see a fourth record emitted afterwards — during shutdown, for instance.
+    Measured: with the server patched to emit one extra audit line at SIGTERM,
+    the racy pre-helper code FAILED and the snapshot check PASSES.
+
+    A caller that means "exactly N, ever" must re-read `out.audit` after
+    `out.wait_closed()`. `test_the_STDOUT_audit_stream_names_the_matched_
+    fingerprint` does both and is the worked example.
     """
     deadline = time.time() + timeout
     while len(out.audit) < n and time.time() < deadline:
@@ -2674,6 +2682,15 @@ class TestTheDeployedEntrypoint:
         out.wait_closed()
         assert GOOD_TOKEN not in out.text and SECOND_TOKEN not in out.text
         assert "w" * 48 not in out.text
+        # 🔴 AND THE CEILING, AFTER THE STREAM IS CLOSED. `lines` above is a
+        # SNAPSHOT taken while the process was still running, so `== 3` on it
+        # cannot see a FOURTH record emitted later — during shutdown, say. That
+        # gap is real: with the server patched to emit one extra audit line at
+        # SIGTERM, the pre-helper code failed and the snapshot check passes.
+        # Three requests must produce three records, not "at least three".
+        assert len(out.audit) == 3, (
+            f"the closed stream holds {len(out.audit)} audit records for 3 "
+            f"requests — an extra one was emitted after the snapshot:\n{out.text}")
 
 
 # =============================================================================
@@ -4124,6 +4141,264 @@ class TestTrustedProxyOverTheRealProcess:
             proc.terminate()
             stdout, _err = proc.communicate(timeout=15)
         assert f"trusted-proxies={NOT_LOOPBACK_PROXY}" in stdout, stdout
+
+
+# =============================================================================
+# THE SEAM GUARDS for the audit-line race that `drain_output`/`await_audit` close.
+#
+# 🔴 THESE WALK THE AST INTERPROCEDURALLY, AND THAT IS NOT GOLD-PLATING — an
+# earlier, single-function version of this guard was walked FIVE ways in an
+# adversarial audit, each verified against the real guard with a verbatim racy
+# shape as the positive control:
+#
+#   E1  terminate/communicate moved into a module-level helper   -> passed
+#   E2  the prefix read via a different module constant          -> passed
+#   E3  proc.send_signal(SIGTERM) instead of terminate           -> passed
+#   E4  _c = proc.communicate; _c()   (bound-method alias)       -> passed
+#   E5  a racy function merely NAMED `_drain` (an exclusion)     -> passed
+#
+# E4 is the instructive one: binding the method makes `proc.communicate` an
+# `Attribute` inside an `Assign`, never a `Call`, so a walker looking for calls
+# never sees it. E5 is worse than a hole — the exclusion list it exploited was
+# also DEAD CODE (removing it entirely left the guard green), so it bought
+# nothing and granted a permanent bypass. It is gone; the sanctioned helpers are
+# not excluded by NAME, they simply never both kill and read.
+#
+# A guard that reads as coverage while providing little is worse than none,
+# because it stops the next person looking.
+# =============================================================================
+
+_KILLERS = ("terminate", "kill", "communicate", "send_signal", "wait")
+
+# 🔴 THE ONE SANCTIONED KILLER, AND WHY THIS IS NOT E5's BYPASS IN A NEW COAT.
+# `running_subprocess` terminates in its `finally` — that IS the design, and every
+# correct call site delegates teardown to it. So its kills must not propagate to
+# its callers, or the guard flags exactly the three tests that are RIGHT.
+#
+# The difference from the exclusion list this replaces: that one skipped functions
+# by NAME, so any function called `_drain` inherited a permanent exemption it had
+# not earned. This names the context manager whose whole contract is teardown, and
+# `test_the_teardown_owner_really_is_one` below FAILS if the named function stops
+# being a killer or stops being a context manager — so the entry cannot rot into a
+# free pass for something that no longer does the job.
+_TEARDOWN_OWNERS = frozenset({"running_subprocess"})
+
+
+def _module_tree() -> ast.Module:
+    return ast.parse(Path(__file__).read_text())
+
+
+def _audit_prefix_names(tree: ast.Module) -> set[str]:
+    """Every module-level name bound to a string that IS the audit prefix.
+
+    Closes E2. Reading the prefix through a second constant is reading the
+    prefix; the guard must not care which name you spell it with.
+    """
+    names = {"AUDIT_PREFIX"}
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant):
+            if isinstance(node.value.value, str) and node.value.value == AUDIT_PREFIX:
+                names |= {t.id for t in node.targets if isinstance(t, ast.Name)}
+    return names
+
+
+def _direct_kills(fn: ast.AST) -> set[str]:
+    """Killer verbs reached directly in this function body.
+
+    Counts a CALL (`proc.terminate()`) and also a bare ATTRIBUTE reference
+    (`_c = proc.communicate`) — closing E4, where the alias is never a Call.
+    """
+    hits: set[str] = set()
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Attribute) and node.attr in _KILLERS:
+            hits.add(node.attr)
+    return hits
+
+
+def _direct_reads(fn: ast.AST, prefix_names: set[str]) -> bool:
+    """Does this function body reach the audit records directly?"""
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Constant) and node.value == AUDIT_PREFIX:
+            return True
+        if isinstance(node, ast.Name) and node.id in prefix_names:
+            return True
+        # `.audit` on the drained record, and the helper that returns it
+        if isinstance(node, ast.Attribute) and node.attr == "audit":
+            return True
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
+                and node.func.id == "await_audit":
+            return True
+    return False
+
+
+def _called_names(fn: ast.AST) -> set[str]:
+    return {
+        n.func.id for n in ast.walk(fn)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+    }
+
+
+def _functions(tree: ast.Module) -> dict:
+    return {
+        n.name: n for n in ast.walk(tree)
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+
+
+def _transitive(seed: dict, funcs: dict) -> dict:
+    """Propagate a per-function property through the call graph to a fixed point.
+
+    Closes E1 and E5: moving the terminate into a helper, or naming the helper
+    something the guard used to skip, no longer hides it — the property follows
+    the calls rather than the spelling.
+    """
+    prop = dict(seed)
+    for _ in range(len(funcs) + 1):
+        changed = False
+        for name, node in funcs.items():
+            if prop.get(name):
+                continue
+            if any(prop.get(c) for c in _called_names(node)):
+                prop[name] = True
+                changed = True
+        if not changed:
+            break
+    return prop
+
+
+def test_no_test_reads_an_AUDIT_LINE_from_a_process_it_just_terminated():
+    """🔴 THE SEAM GUARD. The hazard is a RELATIONSHIP inside one test — reading
+    audit records out of a stream while also being the thing that killed the
+    process producing them. `_respond` runs before `_audit`, so the client's
+    return proves nothing about the line, and terminating on it races the
+    emission.
+
+    🔴 WHAT IT DELIBERATELY PERMITS:
+    `test_the_startup_line_NAMES_the_trusted_proxies` terminates and reads stdout
+    too, but reads the STARTUP line — which `running_subprocess` has already
+    synchronised on, because a `/healthz` ANSWER requires `serve_forever()` and
+    the startup `print(..., flush=True)` runs before it. Verified in `server.py`,
+    not assumed. It is permitted by the READ condition (it never touches the
+    audit records), not by a name exclusion — so the permission cannot rot into
+    a bypass the way E5's exclusion list did.
+
+    🔴 WHAT IT STILL CANNOT SEE, stated so it is not read as more than it is: a
+    racy read that never reaches the prefix, `.audit` or `await_audit` — slicing
+    stdout positionally, or matching a substring of a record. Killing via a
+    non-`_KILLERS` route (`os.kill(proc.pid, ...)`) is also unseen.
+    """
+    tree = _module_tree()
+    funcs = _functions(tree)
+    prefix_names = _audit_prefix_names(tree)
+
+    kills_seed = {n: bool(_direct_kills(f)) for n, f in funcs.items()}
+    reads_seed = {n: _direct_reads(f, prefix_names) for n, f in funcs.items()}
+
+    # Positive control BEFORE the teardown owner is removed — the detectors must
+    # be able to see the real thing, or every result below is a vacuous zero.
+    assert reads_seed["await_audit"], "the read detector sees nothing — it is broken"
+    assert kills_seed["running_subprocess"], "the kill detector sees nothing — it is broken"
+
+    # Teardown owners neither kill (for propagation) nor pass killing to callers.
+    graph = {n: f for n, f in funcs.items() if n not in _TEARDOWN_OWNERS}
+    kills = _transitive({n: v for n, v in kills_seed.items() if n in graph}, graph)
+    reads = _transitive({n: v for n, v in reads_seed.items() if n in graph}, graph)
+
+    offenders = sorted(
+        f"{n} (line {funcs[n].lineno}) kills via "
+        f"{sorted(_direct_kills(funcs[n])) or 'a callee'}"
+        for n in graph
+        if kills.get(n) and reads.get(n) and n != "await_audit"
+    )
+    assert not offenders, (
+        "these functions both terminate the server and read its audit records — "
+        "the response does not imply the line was written. Use "
+        "`drain_output(proc)` + `await_audit(out, n)` and leave teardown to "
+        "`running_subprocess`:\n  " + "\n  ".join(offenders)
+    )
+
+
+def test_the_teardown_owner_really_is_one():
+    """🔴 The entry in `_TEARDOWN_OWNERS` is an exemption, and an exemption that
+    stops being earned is exactly how the previous version of this guard was
+    walked (E5: a racy function merely NAMED `_drain` inherited a skip).
+
+    So the exemption is checked rather than trusted: each named function must
+    still (a) exist, (b) actually kill the process, and (c) be a context manager,
+    which is what makes "teardown belongs to it" true. If someone empties its
+    `finally`, or the name goes stale, this fails instead of silently widening
+    the guard's blind spot.
+    """
+    tree = _module_tree()
+    funcs = _functions(tree)
+
+    for name in _TEARDOWN_OWNERS:
+        assert name in funcs, f"_TEARDOWN_OWNERS names {name!r}, which does not exist"
+        node = funcs[name]
+        assert _direct_kills(node), (
+            f"{name} is exempted as the teardown owner but no longer kills the "
+            "process — the exemption is now a free pass for nothing"
+        )
+        decorators = {
+            d.id if isinstance(d, ast.Name) else getattr(d, "attr", "")
+            for d in node.decorator_list
+        }
+        assert "contextmanager" in decorators, (
+            f"{name} is exempted as the teardown owner but is not a context "
+            f"manager (decorators: {sorted(decorators)}), so callers are not "
+            "actually delegating teardown to it"
+        )
+
+
+def test_every_audit_reading_test_goes_through_the_shared_helper():
+    """The anti-vacuity half: the guard above passes trivially if the tests stop
+    reading audit records altogether, so this fails when the coverage SHRINKS.
+
+    🔴 IT COUNTS CALL SITES, NOT FUNCTION NAMES. The earlier version counted the
+    names of functions containing a call, and an audit showed one site inside a
+    nested `def` contributed TWO — so two real sites could satisfy a threshold of
+    three. The count is now `drain_output(...)` call expressions.
+
+    🔴 THE THRESHOLD IS EXERCISED BY ITS OWN MUTANT. A sweep that only ever
+    deletes the helper drives the count to 0, which kills `>= 1`, `>= 2` and
+    `>= 3` identically — so the threshold looks verified while a `>= 1` mutant
+    survives and permits two of the three sites to regress. The companion test
+    below removes exactly ONE site and requires this to go red.
+    """
+    assert _drain_output_call_sites() == 3, (
+        f"expected exactly 3 `drain_output(...)` call sites, found "
+        f"{_drain_output_call_sites()}. A reader was added or deleted; if that is "
+        "intended, update this count AND check the guard above still has teeth."
+    )
+
+
+def _drain_output_call_sites(source: "str | None" = None) -> int:
+    """`drain_output(...)` CALL expressions — not the functions containing them."""
+    tree = ast.parse(source if source is not None else Path(__file__).read_text())
+    return sum(
+        1 for n in ast.walk(tree)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+        and n.func.id == "drain_output"
+    )
+
+
+def test_the_call_site_THRESHOLD_is_load_bearing_not_decorative():
+    """🔴 The mutant the threshold's own sweep cannot supply.
+
+    Deleting the helper everywhere drives the count to 0 and kills every
+    threshold equally. This removes ONE site from a COPY of the source and
+    asserts the count actually moves to 2 — the case that separates `>= 3` from
+    `>= 1`, and the reason the assertion above is `== 3` rather than a floor.
+    """
+    src = Path(__file__).read_text()
+    assert _drain_output_call_sites(src) == 3, "fixture drift: the real count moved"
+
+    one_removed = src.replace("out = drain_output(proc)", "out = None  # mutant", 1)
+    assert one_removed != src, "the mutation did not apply — this test is vacuous"
+    assert _drain_output_call_sites(one_removed) == 2, (
+        "removing one call site did not move the count, so the threshold cannot "
+        "distinguish three readers from two"
+    )
 
 
 class TestTrustedProxyAllowlistParsing:

@@ -1694,7 +1694,18 @@ EXPECTED_TOOL_PERMISSIONS = {
     "task": "allow",
     "skill": "allow",
     "doom_loop": "ask",
-    "external_directory": "ask",
+    # 🔴 NOT a scalar any more, and the change was a reviewed decision — see the
+    # comment block in opencode.jsonc. `ask` still applies to EVERYTHING except
+    # this host's own skills tree, which is read-only nix-store content the agent
+    # already loads. Rationale, measured 2026-08-23: a skill that keeps detail in
+    # `reference/` was HALF-USABLE under dispatch — the agent followed the skill's
+    # own pointer, hit an auto-reject, and the run died. Pinned in full below so
+    # that widening the glob, adding a second entry, or flipping `*` to `allow`
+    # all fail here rather than silently.
+    "external_directory": {
+        "*": "ask",
+        "/home/zach/.config/opencode/skills/**": "allow",
+    },
 }
 
 

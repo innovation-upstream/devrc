@@ -92,6 +92,12 @@ Registers (APPEND surface):
     notifier — a best-effort side-effect hook, appended alongside any existing
     Stop/clawgate-stop/tmux hooks).
   * Stop: next-step-nudge.py
+  * SessionStart: base-clone-staleness.sh — THE ONLY NON-PYTHON HOOK REGISTERED
+    HERE, and the reason there are two recognisers below. It refreshes CLAUDE.md
+    and .claude/skills/** in the repo at cwd from that repo's upstream branch,
+    because those two surfaces load into agent context FROM THE WORKING TREE, so
+    a base clone that has fallen behind serves stale, authoritative-looking
+    instructions with nothing on screen to indicate it.
   * SessionStart / UserPromptSubmit / PostToolUse / Stop: agent-ledger-hook.py
   * PostToolUse / Stop: clawgate-writeback-guard.py (the hook that makes the clawgate
     task write-back non-optional — PostToolUse watches for a read of a specific task
@@ -217,6 +223,41 @@ MANAGED_HOOK_SCRIPTS = frozenset({
     "shell-env-nudge.py",
 })
 
+# --------------------------------------------------------------------------- #
+# THE SHELL-HOOK LEDGER — a SEPARATE set, and the separation is the whole design.
+#
+# 🔴 MANAGED_HOOK_SCRIPTS above is the REWRITE surface's ledger: "scripts whose
+# INTERPRETER TOKEN this script may replace with an absolute /nix/store python".
+# A bash hook has no business there. Adding `base-clone-staleness.sh` to that set
+# would hand it to `normalized_command`, which rewrites the first token
+# unconditionally — turning the hook's leading `bash` into an absolute python,
+# i.e. a SyntaxError on every session start. The recogniser's third condition
+# (basename starts with `python`) is what stands between those two facts, so it
+# is never relaxed.
+#
+# 🔴 The path is deliberately NOT spelled with its hooks-dir prefix anywhere in
+# this comment. test_registrar_activation.py parses this file for that exact
+# pattern and reads every hit as a REGISTRATION — the warning above the command
+# tables says so — and a prefixed path in prose is therefore a phantom
+# registration that keeps the delivery-seam test green after the real table
+# entry is gone. Measured: with this comment written the long way, deleting the
+# SessionStart registration outright left that suite fully green.
+#
+# This set feeds only the IDENTITY question — "which hook script does this command
+# invoke", used by the append and de-dup surfaces. Identity is about WHICH SCRIPT;
+# the rewrite is about WHICH INTERPRETER. They were one function while every hook
+# was python; a non-python hook is what forces them apart.
+#
+# 🔴 It must be non-empty for the append pass to be safe: a command this script
+# WRITES but cannot READ BACK is re-appended on every run — measured on the
+# python side at 14 -> 27 -> 40 commands over three runs, +13 every time, silent
+# and unbounded. `with_bash` re-proves that round-trip for the strings actually
+# written, exactly as `with_python` does.
+# --------------------------------------------------------------------------- #
+MANAGED_SHELL_HOOK_SCRIPTS = frozenset({
+    "base-clone-staleness.sh",
+})
+
 HOOK_LIBRARY_MODULES = frozenset({"agent_ledger.py", "bg_command_capture.py",
                                   "guard_core.py"})
 
@@ -271,8 +312,68 @@ def managed_match(cmd):
 
 
 def managed_script_of(cmd):
-    """The devrc-managed hook script this command invokes, or None."""
+    """The devrc-managed hook script this command invokes, or None.
+
+    🔴 PYTHON ONLY, and every caller that keys on it is making a claim about the
+    INTERPRETER, not about identity. For "which hook script is this", use
+    `hook_script_of` — see MANAGED_SHELL_HOOK_SCRIPTS for why the two are
+    separate functions.
+    """
     m = managed_match(cmd)
+    return None if m is None else m.group("base")
+
+
+# <bash> <hooks-dir><basename.sh>[ <args>] — the shell mirror of _MANAGED_CMD_RE,
+# anchored identically so a leading env assignment or any other prefix does not
+# match. The interpreter condition is `bash` rather than `python*`; it is checked
+# in `shell_match` for the same reason its sibling checks it, so that a
+# hypothetical `python3 <hooks-dir>x.sh` is not mistaken for one of ours.
+_SHELL_CMD_RE = re.compile(
+    r"^(?P<interp>\S+)[ \t]+(?:%s)(?P<base>[A-Za-z0-9_.+-]+\.sh)(?=$|[ \t])"
+    % "|".join(re.escape(p) for p in HOOK_DIR_PREFIXES)
+)
+
+
+def shell_match(cmd):
+    """The regex match for a devrc-managed SHELL hook invocation, or None.
+
+    Same three conservative conditions as `managed_match`, with `bash` in place of
+    `python*`. Deliberately does NOT accept `sh`, `zsh` or a bare `./path`: the
+    hook is a bash script (it uses arrays and `[[`), home.nix's activation and the
+    tables below both spell it `bash`, and widening the accepted spellings here
+    would let this script claim ownership of an entry somebody else wrote
+    differently on purpose.
+    """
+    if not isinstance(cmd, str):
+        return None
+    m = _SHELL_CMD_RE.match(cmd)
+    if not m:
+        return None
+    if m.group("base") not in MANAGED_SHELL_HOOK_SCRIPTS:
+        return None
+    if os.path.basename(m.group("interp")) != "bash":
+        return None
+    return m
+
+
+def hook_script_of(cmd):
+    """THE IDENTITY RECOGNISER — which managed hook script this command invokes.
+
+    🔴 The union of the python and shell recognisers, and the single answer to
+    "is this hook already registered on this event". Every append-surface
+    membership test and the whole de-dup identity key go through here, so the two
+    surfaces cannot disagree about what "already registered" means — the same
+    property `registered_scripts` documents for the cross-spelling case, now
+    holding across interpreters too.
+
+    NOT used by the rewrite pass. `normalized_command` keys on `managed_match`
+    alone, because rewriting the interpreter of a bash hook to a python one is
+    precisely the damage MANAGED_SHELL_HOOK_SCRIPTS exists to prevent.
+    """
+    base = managed_script_of(cmd)
+    if base is not None:
+        return base
+    m = shell_match(cmd)
     return None if m is None else m.group("base")
 
 
@@ -282,8 +383,12 @@ def bare_managed_command(cmd):
     The de-dup surface removes only these. `<interp> <path> --flag` names the same
     script but is a DIFFERENT configuration — somebody typed those arguments — and
     deleting it would be this script overwriting a decision it did not make.
+
+    Covers BOTH interpreters, because the de-dup surface it serves keys on
+    `hook_script_of`. A shell hook registered with an argument is somebody's
+    configuration in exactly the way a python one is.
     """
-    m = managed_match(cmd)
+    m = managed_match(cmd) or shell_match(cmd)
     return m is not None and m.end() == len(cmd)
 
 
@@ -416,6 +521,35 @@ def with_python(path):
     return cmd
 
 
+def with_bash(path):
+    """Build a SHELL hook command for the append tables — same round-trip proof.
+
+    🔴 `bash` is spelled bare and PATH-resolved, unlike the python interpreter,
+    and that asymmetry is deliberate rather than an oversight:
+
+      * the python pinning exists to close a specific window — during ~1s of every
+        home-manager switch the intermediate profile generation has no `python3`
+        on PATH, so a hook firing then dies with `command not found`, and
+        bash-guard FAILS OPEN when it does. `bash` is not on that profile; it
+        comes from the system, so the window does not exist for it.
+      * settings.json is read by the CLI, which runs hook commands through a
+        shell — a shell that, by definition, already exists.
+      * and this hook is a SessionStart reporter with no verdict: if it somehow
+        failed to launch, the cost is a missing banner, not a guard that fails
+        open.
+
+    Pinning it would also mean writing a /nix/store bash path that a
+    `home-manager rollback` would leave dangling, which is a live hazard the
+    de-dup surface exists to recover from. Bare is the safer end of that trade.
+    """
+    cmd = "bash " + path
+    if hook_script_of(cmd) is None:
+        raise AssertionError(
+            "register-nudge-hook.py would write a shell command its own recogniser "
+            "does not recognise, so every run would re-append it: %r" % cmd)
+    return cmd
+
+
 # --------------------------------------------------------------------------- #
 # THE APPEND SURFACE: the command tables. Unchanged in width — only the
 # interpreter half of each string moved.
@@ -485,8 +619,19 @@ PRE_BASH_CMDS = [
 ]
 
 # Hooks registered on exactly one event each: {event: [command, ...]}.
+#
+# 🔴 The SessionStart entry is the first NON-PYTHON registration this script makes.
+# It is appended in the bare `{"type","command"}` shape like every other — NOT with
+# a `timeout` — even though the host that pioneered this hook by hand carries
+# `timeout: 20`. Two reasons, both load-bearing: `removable_duplicate` treats any
+# extra hook-level key as somebody else's configuration, so a timeout this script
+# wrote would be a duplicate it could never heal after a rollback; and that
+# hand-placed entry is exactly what the append surface must LEAVE ALONE. It does —
+# `registered_scripts` keys on the script, so the richer entry counts as registered
+# and nothing is added beside it.
 SINGLE_EVENT_CMDS = {
     "Stop": [with_python("~/.claude/hooks/next-step-nudge.py")],
+    "SessionStart": [with_bash("~/.claude/hooks/base-clone-staleness.sh")],
 }
 
 # 🔴 THE OWNERSHIP BOUNDARY OF THE DE-DUP SURFACE, derived from the tables above
@@ -496,10 +641,17 @@ SINGLE_EVENT_CMDS = {
 # a doubled bash-guard entry came from something else and is not this script's to
 # remove. It is reported instead — see the end of the de-dup pass.
 REGISTERED_SCRIPTS = frozenset(
-    managed_script_of(c)
+    hook_script_of(c)
     for c in POST_BASH_CMDS + PRE_BASH_CMDS + [NOTIFY_CMD, LEDGER_CMD, WRITEBACK_CMD]
     + [c for cmds in SINGLE_EVENT_CMDS.values() for c in cmds]
 )
+
+# 🔴 A None in there would mean a table command the recogniser cannot read back —
+# the unbounded re-append defect — reaching the ownership boundary as a wildcard
+# that matches every unrecognised entry. `with_python`/`with_bash` each raise on
+# their own output, so this is a second, cheaper net across the COMBINED set.
+assert None not in REGISTERED_SCRIPTS, (
+    "a command table entry is unreadable by this script's own identity recogniser")
 
 with open(SETTINGS) as f:
     data = json.load(f)
@@ -511,7 +663,11 @@ deduped = []
 
 
 def registered_scripts(event_arrays):
-    """Which MANAGED hook scripts an event's entry list already invokes.
+    """Which managed hook scripts an event's entry list already invokes.
+
+    Keyed on `hook_script_of`, so a shell hook counts as registered exactly the
+    way a python one does — see MANAGED_SHELL_HOOK_SCRIPTS for why identity and
+    interpreter are two questions.
 
     🔴 The append surface keys on the SCRIPT, not on the exact command string.
     Exact-string keying was already fragile — a host spelling the hooks dir
@@ -527,7 +683,7 @@ def registered_scripts(event_arrays):
     silently duplicated. That is the right failure — the append surface never
     rewrites what it does not own.
     """
-    found = {managed_script_of(h.get("command"))
+    found = {hook_script_of(h.get("command"))
              for entry in event_arrays for h in entry.get("hooks", [])}
     found.discard(None)
     return found
@@ -667,7 +823,7 @@ def entry_identity_list(entry, event):
             scope = ("<non-str matcher>", repr(scope))
     else:
         scope = None
-    ids = [(scope, managed_script_of(h.get("command")))
+    ids = [(scope, hook_script_of(h.get("command")))
            for h in _entry_hook_dicts(entry)]
     return [i for i in ids if i[1] is not None]
 
@@ -725,7 +881,7 @@ def removable_duplicate(entry):
         return False
     if not bare_managed_command(h.get("command")):
         return False
-    return managed_script_of(h.get("command")) in REGISTERED_SCRIPTS
+    return hook_script_of(h.get("command")) in REGISTERED_SCRIPTS
 
 
 # --- PASS 1: heal a file an OLDER registrar double-registered ----------------
@@ -877,7 +1033,7 @@ for _event in sorted(hooks):
 pre = hooks.setdefault("PreToolUse", [])
 pre_registered = registered_scripts(pre)
 for cmd in PRE_BASH_CMDS:
-    if managed_script_of(cmd) in pre_registered:
+    if hook_script_of(cmd) in pre_registered:
         continue
     pre.append({"matcher": "Bash", "hooks": [{"type": "command", "command": cmd}]})
     added.append("PreToolUse(Bash): " + cmd)
@@ -886,7 +1042,7 @@ for cmd in PRE_BASH_CMDS:
 post = hooks.setdefault("PostToolUse", [])
 post_registered = registered_scripts(post)
 for cmd in POST_BASH_CMDS:
-    if managed_script_of(cmd) in post_registered:
+    if hook_script_of(cmd) in post_registered:
         continue
     post.append({"matcher": "Bash", "hooks": [{"type": "command", "command": cmd}]})
     added.append("PostToolUse(Bash): " + cmd)
@@ -896,7 +1052,7 @@ for cmd in POST_BASH_CMDS:
 # a tmux Stop hook) — only add claude-notify where it's missing.
 for event in NOTIFY_EVENTS:
     arr = hooks.setdefault(event, [])
-    if managed_script_of(NOTIFY_CMD) in registered_scripts(arr):
+    if hook_script_of(NOTIFY_CMD) in registered_scripts(arr):
         continue
     arr.append({"hooks": [{"type": "command", "command": NOTIFY_CMD}]})
     added.append("%s: %s" % (event, NOTIFY_CMD))
@@ -910,7 +1066,7 @@ for event in NOTIFY_EVENTS:
 # misconfiguration; `tests/test_register_nudge_hook.py` pins the shape it writes.
 for event in LEDGER_EVENTS:
     arr = hooks.setdefault(event, [])
-    if managed_script_of(LEDGER_CMD) in registered_scripts(arr):
+    if hook_script_of(LEDGER_CMD) in registered_scripts(arr):
         continue
     arr.append({"hooks": [{"type": "command", "command": LEDGER_CMD}]})
     added.append("%s: %s" % (event, LEDGER_CMD))
@@ -922,7 +1078,7 @@ for event in LEDGER_EVENTS:
 # consecutive blocks per task — well inside the CLI's own cap of 8.
 for event in WRITEBACK_EVENTS:
     arr = hooks.setdefault(event, [])
-    if managed_script_of(WRITEBACK_CMD) in registered_scripts(arr):
+    if hook_script_of(WRITEBACK_CMD) in registered_scripts(arr):
         continue
     arr.append({"hooks": [{"type": "command", "command": WRITEBACK_CMD}]})
     added.append("%s: %s" % (event, WRITEBACK_CMD))
@@ -932,7 +1088,7 @@ for event, cmds in SINGLE_EVENT_CMDS.items():
     arr = hooks.setdefault(event, [])
     present = registered_scripts(arr)
     for cmd in cmds:
-        if managed_script_of(cmd) in present:
+        if hook_script_of(cmd) in present:
             continue
         arr.append({"hooks": [{"type": "command", "command": cmd}]})
         added.append("%s: %s" % (event, cmd))

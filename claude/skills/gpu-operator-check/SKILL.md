@@ -1,6 +1,6 @@
 ---
 name: gpu-operator-check
-description: "Check the NVIDIA GPU Operator across the GPU-fleet clusters: deployed version and per-cluster overlays, the latest upstream release, and the breaking changes between them. Use for: the GPU operator version or upgrade path, a newer GPU operator release, a pre-upgrade risk review of the GPU fleet."
+description: "Check the NVIDIA GPU Operator across the GPU-fleet clusters: deployed vs latest upstream version, and the breaking changes between. Use for: the GPU operator version or upgrade path, a newer GPU operator release, a pre-upgrade risk review of the GPU fleet."
 argument-hint: "[current | latest | upgrade-plan] — defaults to the full analysis"
 allowed-tools: Bash, Read, Grep, Glob
 ---
