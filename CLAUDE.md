@@ -206,11 +206,22 @@ Repo-level facts that are NOT in any skill — they live here on purpose:
   agent-worktree creation, is NOT a devrc setting, and `git config --local --get
   core.hooksPath` per clone is the only answer.
   **Until then: run the gate yourself before you merge, and say which command you ran.**
-  `nix build .#checks.x86_64-linux.pytests` / `.#checks.x86_64-linux.nodetests` (or
-  `scripts/gate.sh`) are authoritative — they assert collected-test FLOORS and parse structured
-  output rather than reading an exit code, because `node --test <dir>` silently yields a bogus
-  `# tests 1` and a pytest suite can collect 0 with a zero exit. Gate on the MERGED tree, not
-  the PR branch.
+  Both of these assert collected-test FLOORS and parse structured output rather than reading
+  an exit code, because `node --test <dir>` silently yields a bogus `# tests 1` and a pytest
+  suite can collect 0 with a zero exit. Gate on the MERGED tree, not the PR branch.
+  🔴 **BUT THEY ARE TWO DIFFERENT TIERS, NOT TWO SPELLINGS OF ONE — this line used to join
+  them with "or", and that word cost a required check.** `scripts/gate.sh` runs
+  `scripts/run-tests.sh` + `scripts/run-node-tests.sh` **on the dev host** (see its
+  `PYTEST_RUNNER`/`NODE_RUNNER`); it does **not** invoke `nix build` at all.
+  `nix build .#checks.x86_64-linux.{pytests,nodetests}` builds from a `cp -r ${./.}` **store
+  copy with NO `.git`**, and that is the tier **Tekton runs and the merge is gated on**.
+  Measured 2026-08-23 on #773: four consecutive `GATE: RESULT=PASS` runs, then
+  `tekton/devrc-pytests` red — the sandbox tier had never been run. The dev-host tier is also
+  structurally blind to anything keyed on the repo being a git checkout: GUARD 10's
+  `NOGIT_REPO_LOCAL` is EMPTY in the sandbox, so its whole repo-local class evaluates
+  differently there. **Run BOTH before you claim a merge is safe, and name the tier and the
+  base sha in the claim** — "the gate passed" is true of one run, one tier, one base, and
+  reads as a property of the change.
   🔴 **The `<!-- merge-gate: … -->` marker above is LOAD-BEARING, not decoration.**
   `scripts/tests/test_ci_claim_matches_reality.py` parses it and fails when it disagrees with
   the repo. **Reword this prose freely — but keep a sentence on the marker's line and do not
