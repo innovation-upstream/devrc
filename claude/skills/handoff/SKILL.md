@@ -90,6 +90,20 @@ Topic argument (optional): `$ARGUMENTS`. If empty, infer a short kebab-case topi
    ## Next steps (ranked)
    1. ...
    2. ...
+   <!-- 🔴 THIS SECTION IS A WORK QUEUE, AND IT HAS NO LOCK. Every session that
+   /resumes this doc draws from this list, so a well-written ranked list is
+   exactly what makes two sessions pick the same item. Measured 2026-08-24 on
+   one handoff: next-step 1 became homelab-infra #386, and next-step 4 became
+   BOTH #388 and #389 — one of them abandoned after two audit rounds.
+   So when you WRITE an item here, make it cheap to tell whether it is already
+   taken: name the repo and the files it will touch, and where a branch or PR
+   already exists, name it. `/resume` step 6 carries the consuming half (check
+   open PRs, push the branch early to stake the claim). -->
+   <!-- ⚠ Worktree isolation does NOT prevent this — both colliding sessions
+   isolated correctly and no file was clobbered. It is a task-allocation
+   collision, not a filesystem one, and isolation is what HIDES it. -->
+   ⚠ **Mark an item that is already in flight** — `IN FLIGHT: <repo>#<pr>` or
+   `BRANCH: <name>` — rather than leaving it looking unclaimed.
 
    ## Gotchas / decisions / dead-ends
    - Things already tried that didn't work; constraints; why X over Y.
