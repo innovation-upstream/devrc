@@ -149,13 +149,16 @@ def _wait_events(spool_dir, n=1, timeout=10.0, until=None) -> list:
     moved every bucket and a stale count is what the rule above exists to
     prevent. The 7 op-selected calls are `_wait_ops`/`_wait_payload`.
 
-    n=1 after a single command is exact, not a proxy. Of the 10 n>=2, one is this
+    n=1 after a single command is exact, not a proxy. Of the 9 n>=2, one is this
     harness's own negative control below (it asserts the timeout fires; no real
-    events are involved). Of the 9 remaining real waits, 8 are order-safe —
-    either they wait for the earlier event before issuing the next request, so
-    file order is pinned structurally, or they assert something
-    order-independent. The exception is the `absent, empty =
-    _wait_events(spool_dir, 2)` unpack, which does depend on file order.
+    events are involved). All 8 remaining real waits are order-safe — either
+    they wait for the earlier event before issuing the next request, so file
+    order is pinned structurally, or they assert something order-independent.
+
+    (Both numbers moved by one: the single order-DEPENDENT site this paragraph
+    used to name — the `absent, empty = _wait_events(spool_dir, 2)` unpack — is
+    the one #807 migrated, so it is no longer an n>=2 `_wait_events` call and no
+    longer the exception. Re-checked, not assumed.)
 
     Pass `until=` whenever you are waiting for a SPECIFIC event.
 
