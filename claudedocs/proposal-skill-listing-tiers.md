@@ -57,9 +57,12 @@ as `description - whenToUse` and counts toward the same cap. **[R] 0 of 39 devrc
 it**, checked across all spellings (the key normalizer collapses `when_to_use` / `when-to-use` /
 `whenToUse`), so it adds nothing here.
 
-🔴 **The gate undercounts by 194 chars.** `test_skill_descriptions.py` measures
-`len(name) + len(desc)`, missing 4/entry + 38 separators: **13,491 measured vs 13,685 real.**
-Conservative direction, but the docstring states a number that is not the one the harness uses.
+🔴 **The gate undercounts.** `test_skill_descriptions.py` measures `len(name) + len(desc)`,
+missing the per-entry 4 plus the newline separators — **the general form is `5n − 1`**, so
+**194 at 39 entries** (13,491 measured vs 13,685 real) and **179 at 36**, post-#785
+(12,679 vs 12,858). Quote the form, not the figure: an earlier draft of this document carried
+`194` into a 36-entry context, where it is wrong. Conservative direction either way — the gate
+can only ever be stricter than reality.
 
 ⚠ **[R] A latent desync:** the budget pass measures with `.length`, the renderer with
 `Bun.stringWidth`. They agree today (the only non-ASCII across 39 descriptions is `—`×30 and
