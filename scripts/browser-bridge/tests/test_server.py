@@ -112,16 +112,76 @@ def _read_events(spool_dir) -> list:
             if ln.strip()]
 
 
-def _wait_events(spool_dir, n=1, timeout=3.0) -> list:
-    """Poll the spool for >=n events (the emit runs off the critical path, after
-    the HTTP response, so it lands slightly after /cmd returns)."""
+def _wait_events(spool_dir, n=1, timeout=10.0, until=None) -> list:
+    """Poll the spool until `until(evs)` holds, or >=n events have landed.
+
+    The emit runs off the critical path, after the HTTP response, so it lands
+    slightly after /cmd returns — hence the poll rather than a bare read.
+
+    🔴 A COUNT IS A PROXY, AND `until=` EXISTS BECAUSE THE PROXY IS WRONG UNDER
+    LOAD. MEASURED in CI 2026-08-24 on `devrc-ci-dhsn6`: a throttling test asked
+    for `n=2` and filtered for the `throttled` event. The server HAD throttled —
+    `{"event":"throttled","op":"tabs","reason":"rate_limited"}` is in that run's
+    captured stderr — but only the `cmd` event had reached the spool inside the
+    deadline, so the filter found nothing and the assertion failed as
+    `assert 0 == 1`, reading like a defect in rate limiting. 16 of the 52 call
+    sites in this module use a count this way. Pass `until=` whenever you are
+    waiting for a SPECIFIC event; the count is only right when any N will do.
+
+    🔴 AND A TIMEOUT IS NOW LOUD. This used to return a SHORT list silently, so
+    every caller's next line — `[0]`, or a filter — failed with a message about
+    the assertion rather than about the wait. Nothing in this module treats a
+    short read as valid (checked before changing it), so a miss is always a bug
+    or a race, and it now says which.
+
+    The deadline is 10s, up from 3s: CI is far slower than a workstation (that
+    suite ran 244s there against ~35s locally), and 3s was tuned on the fast
+    machine. It is a ceiling, not a sleep — a passing wait still returns as soon
+    as the condition holds.
+    """
     deadline = time.time() + timeout
+    evs = []
     while time.time() < deadline:
         evs = _read_events(spool_dir)
-        if len(evs) >= n:
+        if until(evs) if until else len(evs) >= n:
             return evs
         time.sleep(0.02)
-    return _read_events(spool_dir)
+    evs = _read_events(spool_dir)
+    if until is not None:
+        assert until(evs), (
+            f"spool never satisfied the wait condition in {timeout}s; "
+            f"got {len(evs)} event(s): {evs}"
+        )
+    else:
+        assert len(evs) >= n, (
+            f"spool never reached {n} event(s) in {timeout}s; "
+            f"got {len(evs)}: {evs}"
+        )
+    return evs
+
+
+def test_wait_events_reports_a_timeout_instead_of_returning_short(tmp_path):
+    """🔴 NEGATIVE CONTROL on the harness. `_wait_events` used to return a SHORT
+    list silently on timeout, so the caller's next line failed with a message
+    about its own assertion rather than about the wait — which is how a CI race
+    read as `assert 0 == 1` in a rate-limiting test.
+
+    Uses a tiny timeout so the control costs no wall clock."""
+    with pytest.raises(AssertionError, match=r"never reached 2 event\(s\)"):
+        _wait_events(tmp_path, n=2, timeout=0.05)
+
+    with pytest.raises(AssertionError, match=r"never satisfied the wait condition"):
+        _wait_events(tmp_path, timeout=0.05, until=lambda evs: False)
+
+
+def test_wait_events_returns_as_soon_as_the_condition_holds(tmp_path):
+    """POSITIVE CONTROL: the raised deadline is a CEILING, not a sleep. Without
+    this, `timeout=10.0` could be silently turning every wait into a 10s pause
+    and the suite would still be green — just 50x slower."""
+    started = time.time()
+    got = _wait_events(tmp_path, timeout=30.0, until=lambda evs: True)
+    assert got == []
+    assert time.time() - started < 1.0, "the wait slept instead of returning early"
 
 
 # NOTE: `_isolate_activity_spool` — the autouse fixture that points
@@ -2558,7 +2618,13 @@ def test_the_throttle_path_carries_both_the_hash_and_the_join_key(telemetry):
         assert _wait_connected(srv, want=True)
         assert _cmd_sess(srv, {"op": "tabs"}, sid=JOINABLE_ID)[0] == 200
         assert _cmd_sess(srv, {"op": "tabs"}, sid=JOINABLE_ID)[0] == 429
-        evs = _wait_events(spool_dir, 2)
+        # 🔴 `until=` not `n=2`: the count was a proxy for "the throttled event
+        # landed", and CI proved the proxy wrong (see `_wait_events`).
+        def _has_throttle(evs):
+            return any(json.loads(e["payload"]).get("outcome") == "throttled"
+                       for e in evs)
+
+        evs = _wait_events(spool_dir, until=_has_throttle)
         thr = [e for e in evs
                if json.loads(e["payload"]).get("outcome") == "throttled"]
         assert len(thr) == 1, evs
