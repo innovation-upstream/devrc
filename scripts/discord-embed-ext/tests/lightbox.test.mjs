@@ -740,3 +740,66 @@ test("REGRESSION: a <video src=...> with no <source> keeps its src in the clone"
   assert.ok(clone, "video cloned");
   assert.equal(clone.getAttribute("src"), VID, "and it carries the url");
 });
+
+// ===========================================================================
+// Round 6.
+// ===========================================================================
+
+test("REGRESSION: a ONE-AXIS pan still latches didDrag (the 63rd)", () => {
+  var doc = makeDocWithImage(DISCORD_IMG);
+  LB.open(doc, doc.querySelector("img"));
+  var backdrop = shadowOf(doc).querySelector(".backdrop");
+  // 🔴 EVERY OTHER PAN FIXTURE MOVES BOTH AXES, so `dx !== 0 || dy !== 0` could
+  // be mutated to `&&` and survive a fully green suite. A purely horizontal drag
+  // — the common gesture on a wide image — would then leave didDrag false, and
+  // the mouseup-click over the backdrop CLOSES the lightbox: exactly what the
+  // sibling test below exists to prevent. Fixture shape, not a missing test.
+  LB.handleMouseDown(doc, { clientX: 100, clientY: 100 });
+  LB.handleMouseMove(doc, { clientX: 260, clientY: 100 });   // dy === 0
+  LB.handleMouseUp(doc, { clientX: 260, clientY: 100 });
+  clickOn(backdrop);
+  assert.equal(LB.isOpen(), true, "a horizontal-only pan is still a pan, not a click");
+});
+
+test("REGRESSION: a VERTICAL-only pan latches too", () => {
+  var doc = makeDocWithImage(DISCORD_IMG);
+  LB.open(doc, doc.querySelector("img"));
+  var backdrop = shadowOf(doc).querySelector(".backdrop");
+  LB.handleMouseDown(doc, { clientX: 100, clientY: 100 });
+  LB.handleMouseMove(doc, { clientX: 100, clientY: 240 });   // dx === 0
+  LB.handleMouseUp(doc, { clientX: 100, clientY: 240 });
+  clickOn(backdrop);
+  assert.equal(LB.isOpen(), true, "and so is a vertical-only one");
+});
+
+test("close() removes EVERY document listener it added, not just keydown", () => {
+  var doc = makeDocWithImage(DISCORD_IMG);
+  // The old test's title was plural and its body checked `keydown` alone, so
+  // deleting the mousemove or mouseup removal survived. close() registers three
+  // on the document; this is a ledger over all of them.
+  var before = {
+    keydown: doc.listenerCount("keydown"),
+    mousemove: doc.listenerCount("mousemove"),
+    mouseup: doc.listenerCount("mouseup"),
+  };
+  LB.open(doc, doc.querySelector("img"));
+  for (var t of ["keydown", "mousemove", "mouseup"]) {
+    assert.equal(doc.listenerCount(t), before[t] + 1, "open registers one " + t);
+  }
+  LB.close(doc);
+  for (var t2 of ["keydown", "mousemove", "mouseup"]) {
+    assert.equal(doc.listenerCount(t2), before[t2],
+      "close must remove its " + t2 + " listener — one leaks per open/close cycle otherwise");
+  }
+});
+
+test("arrow keys on a SINGLE-image message change nothing at all", () => {
+  var doc = makeDocWithImage(DISCORD_IMG);
+  LB.open(doc, doc.querySelector("img"));
+  LB.setZoom(2);
+  // `siblings.length <= 1` -> `< 1` survived: with one sibling the guard would
+  // stop firing and navigate() would reset the zoom to 100% on every arrow press.
+  LB.handleKey(doc, { key: "ArrowRight", preventDefault: function () {} });
+  assert.equal(LB.zoomLevel(), 2, "no siblings to move to means no state change");
+  assert.equal(LB.currentSrc(), DISCORD_IMG);
+});

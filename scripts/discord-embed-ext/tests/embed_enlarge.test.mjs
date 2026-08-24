@@ -702,9 +702,9 @@ test("REGRESSION: a <video> arriving as the scan root is marked (the 47th mutant
 
 test("REGRESSION: tagName is matched case-insensitively, as a real document reports it", () => {
   // A real HTML document returns UPPERCASE tagName. The fake used to lowercase,
-  // which made every `.toLowerCase()` in the extension vacuous: four guards could
-  // each be deleted with the suite green, and each deletion makes the extension
-  // completely inert in Brave. The fixture is now faithful; this asserts it.
+  // which made every `.toLowerCase()` in the extension vacuous: SEVEN guards
+  // across both content scripts could each be deleted with the suite green, and
+  // each deletion makes the extension completely inert in Brave. The fixture is now faithful; this asserts it.
   var img = new FakeElement("img", { src: "https://cdn.discordapp.com/attachments/1/2/p.png" });
   assert.equal(img.tagName, "IMG", "the fixture must report what the browser does");
   assert.equal(DEE.isMediaElement(img).isMedia, true, "and detection must still work");
@@ -755,4 +755,23 @@ test("SEAM: importing the script WITHOUT the autostart flag actually starts it",
     "importing the content script must enlarge what is already on the page");
   assert.equal(res.observed, true,
     "and must subscribe the observer for everything rendered later");
+});
+
+test("MEDIA_URL_RE is ANCHORED — a matching substring inside another url is not media", () => {
+  // Losing the `^` survived. The anchor is what makes "message media only" a
+  // PREFIX test rather than a containment test; without it any url that merely
+  // embeds the pattern would match.
+  assert.equal(DEE.MEDIA_URL_RE.test(
+    "https://evil.example.com/?x=https://cdn.discordapp.com/attachments/1/2/p.png"), false);
+  assert.equal(DEE.MEDIA_URL_RE.test(
+    "  https://cdn.discordapp.com/attachments/1/2/p.png"), false, "leading space too");
+});
+
+test("MEDIA_URL_RE is case-insensitive, as a real url may be", () => {
+  // The `/i` flag survived. Same case-fold class as the tagName fixture bug,
+  // one level out — a host is case-insensitive per RFC 3986.
+  assert.equal(DEE.MEDIA_URL_RE.test(
+    "HTTPS://CDN.DISCORDAPP.COM/ATTACHMENTS/1/2/P.PNG"), true);
+  assert.equal(DEE.MEDIA_URL_RE.test(
+    "https://CDN.discordapp.com/Attachments/1/2/p.png"), true);
 });

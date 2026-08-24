@@ -26,8 +26,9 @@ class FakeComputedStyle {
 class FakeElement {
   constructor(tagName, attrs) {
     // 🔴 UPPERCASE, LIKE A REAL HTML DOCUMENT. This used to lowercase, which
-    // silently voided every `.toLowerCase()` in the extension: four separate
-    // guards could be deleted with the suite still fully green, and each deletion
+    // silently voided every `.toLowerCase()` in the extension: SEVEN separate
+    // guards across both content scripts could be deleted with the suite still
+    // fully green (four here, three in lightbox.js), and each deletion
     // makes the extension COMPLETELY INERT in Brave, where tagName really is
     // "IMG"/"VIDEO"/"SOURCE". A fixture that normalises away the thing the code
     // normalises is not a test of that code. Node names beginning with "#"

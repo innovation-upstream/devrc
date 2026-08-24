@@ -240,8 +240,8 @@ SUITES=(
   # and lightbox (open/close, zoom, pan, per-message navigation, the wiring of
   # every on-screen control).
   #
-  # 102 tests / 2 files measured 2026-08-24 on the tree that added it.
-  # Floor 98 = 102 - min(50, max(1, 102/20)) = 102 - 5.
+  # 108 tests / 2 files measured 2026-08-24 on the tree that added it.
+  # Floor 103 = 108 - min(50, max(1, 108/20)) = 108 - 5.
   #
   # 🔴 THIS COMMENT PREVIOUSLY CLAIMED SIX REGRESSION TESTS. IT WAS FIVE.
   # The six original defects were re-introduced ONE AT A TIME by an adversarial
@@ -284,19 +284,26 @@ SUITES=(
   # each one deletable with the suite fully green, and each deletion making the
   # extension COMPLETELY INERT in Brave. (This comment said "four" for one round:
   # audit 5 counted the three in lightbox.js that audit 4 and I both missed. A
-  # count of the sites you happened to look at is not a count of the sites.) A fixture that normalises away the thing the code
-  # normalises is not a test of that code. The fake now reports uppercase.
+  # count of the sites you happened to look at is not a count of the sites.)
+  # A fixture that normalises away the thing the code normalises is not a test of
+  # that code. The fake now reports uppercase.
   #
-  # Sweep as of this tree: 56 mutants (25 mine, 11 from audit 2, 10 from audit 3,
-  # 10 from audit 4), 55 killed, 0 unapplied. The single survivor is EQUIVALENT
-  # BY CONSTRUCTION, and audit 4 verified that independently — audit 5 adds that
-  # it is really TWO instances of one equivalence class (the childList arm and the
-  # attributes arm), not a single mutant:
-  # scan() now returns 0 for any root it cannot query, so the observer's
-  # `nodeType === 1` filter became defence in depth rather than the only thing
-  # between a text node and a whole-page sweep. A positive control (reverting the
-  # media regex to host-only) dies, so the harness can go red. The sweep's
-  # verdicts are read from the runner's own failure count, never an exit code.
+  # Sweep as of this tree: 69 mutants (25 mine, 11 from audit 2, 10 from audit 3,
+  # 10 from audit 4, 6 from audit 5, 7 from audit 6), 67 killed, 0 unapplied.
+  # TWO survivors,
+  # and they are ONE equivalence class counted properly: the `nodeType === 1`
+  # filter on the childList arm and on the attributes arm. Both are defence in
+  # depth — scan() returns 0 for any root it cannot query, and an attribute record
+  # only ever targets an Element — and audit 4 verified that argument
+  # independently. A positive control (reverting the media regex to host-only)
+  # dies, so the harness can go red. The sweep's verdicts are read from the
+  # runner's own failure count, never an exit code.
+  #
+  # 🔴 THIS BLOCK ITSELF CARRIED TWO WRONG NUMBERS FOR ONE ROUND: "56 mutants,
+  # 55 killed" while README.md said 62/61, and "the single survivor" beside a
+  # sentence saying it was really two. Two checked-in numbers for one measurement
+  # is the same defect as everything else on this list. Derive both from one
+  # sweep, or state neither.
   #
   # The media-URL tests are pinned to a MEASUREMENT, not to a guess: run against
   # two real logged-in channels on 2026-08-24, the original host-only pattern
@@ -305,7 +312,7 @@ SUITES=(
   # zero attachments. The narrowed pattern matched 0 there and 1 in the second
   # channel — a real attachment, in a container capped at max-height 350px, which
   # is the positive control proving it is not simply matching nothing.
-  "scripts/discord-embed-ext/tests|2|98"
+  "scripts/discord-embed-ext/tests|2|103"
 )
 
 # --- discovery roots -----------------------------------------------------------

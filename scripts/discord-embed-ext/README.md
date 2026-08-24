@@ -110,14 +110,15 @@ from a RED control that carried all six defects at once, so it failed on a
 different assertion in the same test. Isolate a mutant before claiming it is
 pinned. The transform is genuinely pinned now.
 
-The suite is mutation-swept: **62 semantic mutants, 61 killed** — operand swaps,
+The suite is mutation-swept: **69 semantic mutants, 67 killed** — operand swaps,
 branch inversions, constants moved in **both** directions, guard removals. A
 positive control (reverting the media pattern to host-only) dies, so the harness
-can go red. The one survivor is equivalent by construction: `scan()` returns 0
-for any root it cannot query, so the observer's `nodeType === 1` filter is
-defence in depth rather than load-bearing.
+can go red. The two survivors are ONE equivalence class counted properly — the
+`nodeType === 1` filter on the childList arm and on the attributes arm. Both are
+defence in depth: `scan()` returns 0 for any root it cannot query, and an
+attribute record only ever targets an Element.
 
-🔴 **Read that number correctly.** It is a claim about the 62 mutants somebody
+🔴 **Read that number correctly.** It is a claim about the 69 mutants somebody
 constructed, never about the suite — and this file has been wrong about it
 **four times**. It said "25 mutants, 24 killed, the survivor is equivalent"; an
 independent audit found **eight** more survivors, none equivalent. Corrected to
