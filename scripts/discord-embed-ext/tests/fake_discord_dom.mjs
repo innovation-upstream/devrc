@@ -26,6 +26,10 @@ class FakeComputedStyle {
 class FakeElement {
   constructor(tagName, attrs) {
     this.tagName = String(tagName).toLowerCase();
+    // Real element nodes are nodeType 1. Its absence here meant the extension's
+    // `node.nodeType === 1` filter silently rejected every fake node, so an
+    // observer test could never have marked anything.
+    this.nodeType = 1;
     this.attrs = attrs ? Object.assign({}, attrs) : {};
     this.children = [];
     this.parentElement = null;
@@ -130,8 +134,13 @@ class FakeElement {
     return root;
   }
 
+  // 🔴 FAITHFUL TO THE REAL DOM: a CLOSED shadow root is not reachable from the
+  // host. Returning it made every shadow-inspecting assertion pass for a reason
+  // the browser would not reproduce. Tests reach it through `openShadow(host)`,
+  // which is explicitly a test-only back door.
   get shadowRoot() {
-    return this._shadowRoot;
+    return this._shadowRoot && this._shadowRoot.mode === "closed"
+      ? null : this._shadowRoot;
   }
 
   get isConnected() {
@@ -347,6 +356,7 @@ function queryAll(root, selector) {
 }
 
 function makeDiscordDoc(html) {
+  var docListeners = new Map();
   var root = parseHTML(html);
   var body = null;
   walk(root, function (node) {
@@ -377,12 +387,64 @@ function makeDiscordDoc(html) {
       el._ownerDocument = doc;
       return el;
     },
-    addEventListener: function () {},
-    removeEventListener: function () {},
+    // 🔴 A REAL LISTENER REGISTRY. These used to be no-ops, which made the
+    // extension's production entry point — installAutoStart's document click
+    // handler — structurally untestable: mutants removing the attribute check,
+    // the preventDefault or the whole listener all survived a green suite.
+    addEventListener: function (type, fn) {
+      if (!docListeners.has(type)) docListeners.set(type, []);
+      docListeners.get(type).push(fn);
+    },
+    removeEventListener: function (type, fn) {
+      var arr = docListeners.get(type);
+      if (!arr) return;
+      var i = arr.indexOf(fn);
+      if (i >= 0) arr.splice(i, 1);
+    },
+    // Bubble from `event.target` up to the document, the way a real click does,
+    // so a handler that walks up from e.target is exercised for real.
+    dispatchEvent: function (event) {
+      var path = [];
+      var n = event && event.target;
+      while (n) { path.push(n); n = n.parentElement; }
+      for (var p = 0; p < path.length; p++) {
+        var arr = (path[p]._listeners && path[p]._listeners.get(event.type)) || [];
+        for (var i = 0; i < arr.length && !event.__stopped; i++) arr[i](event);
+        if (event.__stopped) return !event.defaultPrevented;
+      }
+      var darr = docListeners.get(event.type) || [];
+      for (var j = 0; j < darr.length && !event.__stopped; j++) darr[j](event);
+      return !event.defaultPrevented;
+    },
+    listenerCount: function (type) { return (docListeners.get(type) || []).length; },
     _root: root,
   };
   walk(root, function (node) { node._ownerDocument = doc; });
   return doc;
+}
+
+// A click that behaves like the real thing for the three properties the
+// extension actually branches on. `__stopped` is what dispatchEvent above reads,
+// so a handler calling stopPropagation genuinely halts the walk.
+function makeClickEvent(target, opts) {
+  var o = opts || {};
+  var ev = {
+    type: "click",
+    target: target,
+    button: o.button === undefined ? 0 : o.button,
+    ctrlKey: !!o.ctrlKey, metaKey: !!o.metaKey,
+    shiftKey: !!o.shiftKey, altKey: !!o.altKey,
+    defaultPrevented: false,
+    __stopped: false,
+    preventDefault: function () { ev.defaultPrevented = true; },
+    stopPropagation: function () { ev.__stopped = true; },
+  };
+  return ev;
+}
+
+// Test-only: reach a CLOSED shadow root that the host correctly hides.
+function openShadow(host) {
+  return host ? host._shadowRoot : null;
 }
 
 export {
@@ -392,4 +454,6 @@ export {
   queryAll,
   matchesSelector,
   makeDiscordDoc,
+  makeClickEvent,
+  openShadow,
 };

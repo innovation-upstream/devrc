@@ -30,6 +30,19 @@ The last one is a heuristic and the most likely thing to rot. It has a
 `MESSAGE_WALK_DEPTH` of 15 and falls back to treating the media as its own only
 sibling, so the failure mode is "navigation does nothing", never a crash.
 
+Each of those three properties is pinned by a test that was watched to fail
+without it — the substring match against a hashed class (`message__74e4d`), the
+`chat-messages-` row id, and both sides of each walk-depth constant. An earlier
+version of this file asserted the anti-rot property in prose while no test
+pinned it: `cls === "message"` passed the whole suite.
+
+🔴 **A cap is only a cap if it is a `px` length.** `getComputedStyle().maxWidth`
+returns the string `"100%"` for a percentage cap, and `parseFloat("100%")` is
+`100` — under the 500px threshold. Reading it that way made the walk latch the
+first ancestor with `max-width:100%`, which is ubiquitous and often shared
+layout, and write `!important` overrides onto it with no undo. Only `^\d+px$`
+counts.
+
 🔴 **The path prefix is load-bearing, not tidiness.** The same CDN host serves
 avatars, server icons, emojis, stickers, banners, role icons, clan badges and
 48×48 `/media/` decorations. Measured against two real logged-in channels on
@@ -72,8 +85,22 @@ Gated by `scripts/run-node-tests.sh` (suite `scripts/discord-embed-ext/tests`),
 which is one of the two required merge tiers. Note `node --test <dir>` does
 **not** work — pass the files.
 
-Six lightbox tests are labelled `REGRESSION`; each was watched to fail against
-the pre-fix build before the fix landed. The rest are invariant guards.
+Tests labelled `REGRESSION` were each watched to fail against the build that
+lacked the fix. The rest are invariant guards — do not count them as regression
+coverage.
+
+🔴 **An earlier version of this file claimed six such tests for the lightbox.
+There were five.** The sixth ("navigating re-applies the transform") was credited
+from a RED control that carried all six defects at once, so it failed on a
+different assertion in the same test. Isolate a mutant before claiming it is
+pinned. The transform is genuinely pinned now.
+
+The suite is mutation-swept: 25 semantic mutants — operand swaps, branch
+inversions, constants moved in **both** directions, guard removals — of which 24
+are killed. The survivor is equivalent, not a gap (leaving `forget()`'s debounce
+timer running changes nothing observable, because `forget()` also empties the
+pending list). A positive control, reverting the media pattern to host-only,
+dies — so the harness can go red.
 
 ## What was deliberately dropped
 

@@ -379,11 +379,25 @@
   function installAutoStart(doc) {
     if (typeof doc.addEventListener !== "function") return;
     doc.addEventListener("click", function (e) {
+      // A modified click is the user asking the BROWSER for something (open in a
+      // new tab, save, the context menu). Hijacking it is a regression, not a
+      // feature.
+      if (e && (e.ctrlKey || e.metaKey || e.shiftKey || e.altKey ||
+                (typeof e.button === "number" && e.button !== 0))) return;
       var target = e.target;
       while (target) {
         if (target.getAttribute && target.getAttribute(ATTR_ENLARGED) === "1") {
+          // 🔴 <video> IS DELIBERATELY EXCLUDED. It gets the size override like
+          // any other media, but its own controls occupy the element: a click on
+          // play/scrub/volume would open a lightbox instead of doing what the
+          // user asked. Video plays inline, enlarged.
+          var tag = (target.tagName || "").toLowerCase();
+          if (tag === "video") return;
           open(doc, target);
           if (typeof e.preventDefault === "function") e.preventDefault();
+          // Discord binds its OWN handler for opening its native image viewer.
+          // Without this, both open and the user gets two stacked lightboxes.
+          if (typeof e.stopPropagation === "function") e.stopPropagation();
           return;
         }
         target = target.parentElement;
@@ -407,6 +421,7 @@
       currentSrc: currentSrc,
       siblingCount: function () { return state ? state.siblings.length : 0; },
       zoomLevel: function () { return state ? state.zoomLevel : null; },
+      installAutoStart: installAutoStart,
       forget: forget,
     };
   }

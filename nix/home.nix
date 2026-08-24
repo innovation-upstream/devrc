@@ -777,6 +777,20 @@ in
       deeTmp="$deeDst.new.$$"
       $DRY_RUN_CMD mkdir -p "$HOME/.local/share"
 
+      # 🔴 NEVER `chmod -R` THROUGH A SYMLINK. `chmod -R` follows one, so if the
+      # destination (or a stale sibling) is a symlink into a git working tree,
+      # this rewrites the modes of the TARGET tree, not of anything we own —
+      # measured in a sandbox: a symlinked destination left the repo directory
+      # 555 -> 755 and its file 444 -> 644. The browserBridgeExtension block
+      # above guards the same hazard with `[ -d "$bbDst" ] && [ ! -L "$bbDst" ]`.
+      # A symlink has no tree to make writable, so it is simply unlinked.
+      deeScrub() {
+        [ -e "$1" ] || [ -L "$1" ] || return 0
+        if [ -L "$1" ]; then $DRY_RUN_CMD rm -f "$1"; return 0; fi
+        if [ -d "$1" ]; then $DRY_RUN_CMD chmod -R u+rwX "$1" 2>/dev/null || true; fi
+        $DRY_RUN_CMD rm -rf "$1"
+      }
+
       # Reclaim leftovers from interrupted earlier runs, but ONLY those whose
       # owning PID is dead, so a concurrent activation's in-flight temp survives.
       # `cp -rL` from the read-only store yields a 0555 tree and `rm -rf` cannot
@@ -789,15 +803,18 @@ in
         # is TRUE, so it would otherwise be spared forever.
         if [ -n "$deePid" ]; then
           case "$deePid" in (*[!0-9]*) continue;; esac
-          [ "$deePid" = "$$" ] && continue
-          [ -d "/proc/$deePid" ] && continue   # a LIVE activation owns it
+          # 🔴 DO NOT skip our OWN pid here. A `.old.$$`/`.new.$$` can be the
+          # wreckage of an EARLIER interrupted run that happened to get this pid,
+          # and sparing it means `mv -T "$deeDst" "$deeStash"` later fails with
+          # `Directory not empty` -> `false` -> the whole switch aborts. We create
+          # ours further down, after this sweep, so there is nothing of ours to
+          # protect at this point.
+          [ -d "/proc/$deePid" ] && [ "$deePid" != "$$" ] && continue
         fi
-        $DRY_RUN_CMD chmod -R u+rwX "$deeOld" 2>/dev/null || true
-        $DRY_RUN_CMD rm -rf "$deeOld"
+        deeScrub "$deeOld"
       done
 
-      $DRY_RUN_CMD chmod -R u+rwX "$deeTmp" 2>/dev/null || true
-      $DRY_RUN_CMD rm -rf "$deeTmp"           # cp -rL NESTS if the target exists
+      deeScrub "$deeTmp"                      # cp -rL NESTS if the target exists
       $DRY_RUN_CMD cp -rL "$deeSrc" "$deeTmp" # -L → real files, not store symlinks
       $DRY_RUN_CMD chmod -R u+rwX "$deeTmp"   # writable for the NEXT switch's rm -rf
 
@@ -813,6 +830,9 @@ in
         deeStash=""
         if [ -e "$deeDst" ] || [ -L "$deeDst" ]; then
           deeStash="$deeDst.old.$$"
+          # Belt-and-braces even with the sweep above: `mv -T` onto a non-empty
+          # directory fails, and under `set -e` that aborts the whole switch.
+          deeScrub "$deeStash"
           if ! mv -T "$deeDst" "$deeStash"; then
             echo "discord-embed-ext: deploy FAILED — could not move the existing" \
                  "$deeDst aside. Nothing was changed; the new tree is at $deeTmp." >&2
@@ -831,8 +851,7 @@ in
           false
         fi
         if [ -n "$deeStash" ]; then
-          $DRY_RUN_CMD chmod -R u+rwX "$deeStash" 2>/dev/null || true
-          $DRY_RUN_CMD rm -rf "$deeStash"
+          deeScrub "$deeStash"
         fi
       fi
     '';

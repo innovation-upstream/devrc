@@ -18,6 +18,7 @@
 
   var observer = null;
   var debounceTimer = null;
+  var pendingNodes = [];
 
   function isMediaElement(el) {
     if (!el || !el.tagName) return { isMedia: false, element: null, naturalWidth: 0, naturalHeight: 0 };
@@ -56,6 +57,20 @@
     return { isMedia: false, element: null, naturalWidth: 0, naturalHeight: 0 };
   }
 
+  // 🔴 ONLY A px LENGTH IS A PIXEL CAP. A computed max-width/max-height can be
+  // `none`, `400px`, `100%` or a calc(), and `parseFloat("100%")` is `100` —
+  // which is <= WIDTH_THRESHOLD. So a PERCENTAGE cap, which is ubiquitous, used
+  // to read as a 100px cap: the walk latched the first such ancestor and
+  // applyOverride wrote max-width/max-height/width/height `!important` onto it.
+  // That ancestor can be shared layout, and there is no undo — forget() clears
+  // the marker attribute, not the inline styles. Measured in Brave via CDP:
+  // getComputedStyle(el).maxWidth returns the string "100%" for max-width:100%.
+  function cssPx(v) {
+    if (typeof v !== "string") return NaN;
+    var m = /^\s*(-?[0-9]*\.?[0-9]+)px\s*$/.exec(v);
+    return m ? parseFloat(m[1]) : NaN;
+  }
+
   function findContainer(el) {
     var node = el;
     var getCS = (typeof globalThis !== "undefined" && globalThis.__DEE_GET_COMPUTED_STYLE__) ||
@@ -65,8 +80,8 @@
       if (!node) return null;
       if (!getCS) return null;
       var cs = getCS(node);
-      var mw = parseFloat(cs.getPropertyValue("max-width"));
-      var mh = parseFloat(cs.getPropertyValue("max-height"));
+      var mw = cssPx(cs.getPropertyValue("max-width"));
+      var mh = cssPx(cs.getPropertyValue("max-height"));
       if (!isNaN(mw) && mw <= WIDTH_THRESHOLD) return node;
       if (!isNaN(mh) && mh <= HEIGHT_THRESHOLD) return node;
     }
@@ -98,12 +113,22 @@
     return { ok: true, removed: removed };
   }
 
+  // 🔴 SCOPED TO `root`. This used to do `root.ownerDocument || root` and then
+  // query THAT, i.e. every call was a full-document rescan and the parameter was
+  // dead — `var doc = root;` was a surviving mutant. It also masked the observer
+  // dropping batches below, since a whole-document sweep re-found everything.
+  // A root that IS the media element is handled explicitly: querySelectorAll
+  // never matches the element it is called on.
   function scan(root) {
-    var doc = root.ownerDocument || root;
-    var imgs = (doc.querySelectorAll ? doc.querySelectorAll("img") : []);
-    var videos = (doc.querySelectorAll ? doc.querySelectorAll("video") : []);
+    var scope = (root && root.querySelectorAll) ? root
+              : (typeof document !== "undefined" ? document : null);
+    if (!scope) return 0;
     var count = 0;
     var all = [];
+    var rootTag = (root && root.tagName) ? root.tagName.toLowerCase() : "";
+    if (rootTag === "img" || rootTag === "video") all.push(root);
+    var imgs = scope.querySelectorAll("img");
+    var videos = scope.querySelectorAll("video");
     for (var i = 0; i < imgs.length; i++) all.push(imgs[i]);
     for (var j = 0; j < videos.length; j++) all.push(videos[j]);
     for (var k = 0; k < all.length; k++) {
@@ -127,22 +152,37 @@
       observer.disconnect();
       observer = null;
     }
+    // Disconnecting stops NEW batches; a debounce already in flight would still
+    // fire and re-mark elements after "forget".
+    if (debounceTimer) {
+      clearTimeout(debounceTimer);
+      debounceTimer = null;
+    }
+    pendingNodes = [];
   }
 
   function observe(doc) {
     if (typeof MutationObserver === "undefined") return null;
     var body = doc.body || doc.documentElement;
     if (!body) return null;
+    // 🔴 ACCUMULATE ACROSS BATCHES. The debounce used to close over only the
+    // NEWEST `mutations` and clearTimeout the pending run, so every batch that
+    // arrived within DEBOUNCE_MS of another was silently DISCARDED. Discord
+    // renders well after document_idle, so this observer — not the initial
+    // scan(document) — is the production path, and it was dropping work.
     observer = new MutationObserver(function (mutations) {
+      for (var i = 0; i < mutations.length; i++) {
+        var added = mutations[i].addedNodes;
+        for (var j = 0; j < added.length; j++) {
+          if (added[j] && added[j].nodeType === 1) pendingNodes.push(added[j]);
+        }
+      }
       if (debounceTimer) clearTimeout(debounceTimer);
       debounceTimer = setTimeout(function () {
-        for (var i = 0; i < mutations.length; i++) {
-          var added = mutations[i].addedNodes;
-          for (var j = 0; j < added.length; j++) {
-            var node = added[j];
-            if (node.nodeType === 1) scan(node);
-          }
-        }
+        debounceTimer = null;
+        var batch = pendingNodes;
+        pendingNodes = [];
+        for (var k = 0; k < batch.length; k++) scan(batch[k]);
       }, DEBOUNCE_MS);
     });
     observer.observe(body, { childList: true, subtree: true });
@@ -156,6 +196,7 @@
       findContainer: findContainer,
       applyOverride: applyOverride,
       scan: scan,
+      cssPx: cssPx,
       forget: forget,
       observe: observe,
     };

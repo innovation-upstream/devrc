@@ -225,15 +225,30 @@ SUITES=(
   # and lightbox (open/close, zoom, pan, per-message navigation, the wiring of
   # every on-screen control).
   #
-  # 60 tests / 2 files measured 2026-08-24 on the tree that added it.
-  # Floor 57 = 60 - min(50, max(1, 60/20)) = 60 - 3.
+  # 83 tests / 2 files measured 2026-08-24 on the tree that added it.
+  # Floor 79 = 83 - min(50, max(1, 83/20)) = 83 - 4.
   #
-  # Six of the lightbox tests are labelled REGRESSION and were watched to FAIL
-  # against the original build with the same observability added and no fixes:
-  # sibling scoping (actual 4, expected 2), arrow navigation, the prev/next
-  # buttons, the zoom buttons, the zoom label after navigating, and backdrop
-  # click-to-close. The other tests passed on that control, so they are invariant
-  # guards, not regression coverage — do not count them as such.
+  # 🔴 THIS COMMENT PREVIOUSLY CLAIMED SIX REGRESSION TESTS. IT WAS FIVE.
+  # The six original defects were re-introduced ONE AT A TIME by an adversarial
+  # audit; five were killed and one — "navigate() never re-applied the transform"
+  # — SURVIVED a fully green suite, because nothing asserted the transform string
+  # at all. The error was in how it was verified, not a miscount: the RED control
+  # carried all six defects AT ONCE, so the test that covers navigation failed on
+  # its zoom-LABEL assertion and the transform half was credited from the same red
+  # line. A mutant removed together with its enclosing condition proves nothing
+  # about the part you meant to pin — isolate it, or do not claim it.
+  #
+  # The transform is now pinned (scale/translate order, the /zoom pan divisor,
+  # and reset-on-navigate), as are the parts the fixture could not previously
+  # reach at all: the MutationObserver, installAutoStart's document click path,
+  # event propagation, and both sides of each walk-depth constant.
+  #
+  # Mutation sweep on this tree: 25 semantic mutants (operand swaps, branch
+  # inversions, constant moves in BOTH directions, guard removals), 24 killed.
+  # The one survivor is EQUIVALENT, not a gap: leaving forget()'s debounce timer
+  # running changes no observable behaviour because forget() also empties the
+  # pending-node list, so the timer fires over an empty batch. A positive control
+  # (reverting the media regex to host-only) dies, so the harness can go red.
   #
   # The media-URL tests are pinned to a MEASUREMENT, not to a guess: run against
   # two real logged-in channels on 2026-08-24, the original host-only pattern
@@ -242,7 +257,7 @@ SUITES=(
   # zero attachments. The narrowed pattern matched 0 there and 1 in the second
   # channel — a real attachment, in a container capped at max-height 350px, which
   # is the positive control proving it is not simply matching nothing.
-  "scripts/discord-embed-ext/tests|2|57"
+  "scripts/discord-embed-ext/tests|2|79"
 )
 
 # --- discovery roots -----------------------------------------------------------

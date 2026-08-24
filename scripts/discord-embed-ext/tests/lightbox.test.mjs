@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
-import { FakeElement, makeDiscordDoc } from "./fake_discord_dom.mjs";
+import { FakeElement, makeDiscordDoc, makeClickEvent, openShadow } from "./fake_discord_dom.mjs";
 
 globalThis.DEE_NO_AUTOSTART = true;
 // Load order MIRRORS manifest.json: embed_enlarge.js first, because it owns the
@@ -11,13 +11,6 @@ globalThis.DEE_NO_AUTOSTART = true;
 await import("../extension/embed_enlarge.js");
 await import("../extension/lightbox.js");
 const LB = globalThis.__DEE_LIGHTBOX__;
-
-function makeImg(src) {
-  var el = new FakeElement("img", { src: src });
-  el.naturalWidth = 1920;
-  el.naturalHeight = 1080;
-  return el;
-}
 
 function makeDocWithImage(src) {
   LB.forget();
@@ -51,8 +44,9 @@ function makeTwoMessageDoc() {
 }
 
 function shadowOf(doc) {
-  var host = doc.querySelector("#dee-lightbox-host");
-  return host ? host.shadowRoot : null;
+  // openShadow(), not host.shadowRoot: the root is mode:"closed", and the fake
+  // now hides it exactly as a real browser does.
+  return openShadow(doc.querySelector("#dee-lightbox-host"));
 }
 
 function buttonByText(shadow, text) {
@@ -89,7 +83,9 @@ test("opening creates a host with a closed shadow root", () => {
   assert.equal(result.ok, true);
   var host = doc.querySelector("#dee-lightbox-host");
   assert.ok(host, "host element created");
-  assert.equal(host.shadowRoot.mode, "closed", "shadow root is closed");
+  assert.equal(host.shadowRoot, null,
+    "a CLOSED root is unreachable from the host — the page cannot reach into it");
+  assert.equal(openShadow(host).mode, "closed", "and it really is closed");
   assert.equal(LB.isOpen(), true);
 });
 
@@ -410,4 +406,183 @@ test("REGRESSION: an avatar is not treated as message media", () => {
   LB.open(doc, real);
   assert.equal(LB.siblingCount(), 1,
     "the avatar in the same message must not become a navigation sibling");
+});
+
+// ===========================================================================
+// Coverage added after an adversarial audit found 34 of 43 semantic mutants
+// surviving a green suite. Each test below was watched to FAIL against the
+// pre-fix source with the mutant it names.
+// ===========================================================================
+
+test("REGRESSION: navigating APPLIES the transform, it does not merely reset the number", () => {
+  var doc = makeTwoMessageDoc();
+  var a1 = doc.querySelector("#msg-a img");
+  LB.open(doc, a1);
+  LB.setZoom(2);
+  LB.navigate(1);
+  var shadow = shadowOf(doc);
+  var clone = shadow.querySelector(".media-container img");
+  assert.equal(clone.style.transform, "scale(1) translate(0px, 0px)",
+    "the NEW media must be rendered untransformed — `navigate() minus applyTransform()` " +
+    "was a surviving mutant, because nothing ever asserted the transform string");
+});
+
+test("setZoom writes the transform, and the scale/translate order is pinned", () => {
+  var doc = makeDocWithImage(DISCORD_IMG);
+  LB.open(doc, doc.querySelector("img"));
+  LB.setZoom(1.5);
+  var clone = shadowOf(doc).querySelector(".media-container img");
+  assert.equal(clone.style.transform, "scale(1.5) translate(0px, 0px)",
+    "swapping scale/translate is a distinct transform and used to survive");
+});
+
+test("panning divides the delta by the zoom level (not multiplies)", () => {
+  var doc = makeDocWithImage(DISCORD_IMG);
+  LB.open(doc, doc.querySelector("img"));
+  LB.setZoom(2);
+  LB.handleMouseDown(doc, { clientX: 0, clientY: 0 });
+  LB.handleMouseMove(doc, { clientX: 100, clientY: 40 });
+  var clone = shadowOf(doc).querySelector(".media-container img");
+  assert.equal(clone.style.transform, "scale(2) translate(50px, 20px)",
+    "dx/zoom = 50, not dx*zoom = 200 — `/` -> `*` used to survive");
+});
+
+test("REGRESSION: opening on a NON-first image starts at that image", () => {
+  var doc = makeTwoMessageDoc();
+  var a2 = doc.querySelectorAll("#msg-a img")[1];
+  LB.open(doc, a2);
+  assert.equal(LB.currentSrc(), A2,
+    "hardcoding currentIndex = 0 used to survive: every test opened on the first image");
+  LB.handleKey(doc, { key: "ArrowRight", preventDefault: function () {} });
+  assert.equal(LB.currentSrc(), A1, "and it wraps from there");
+});
+
+test("REGRESSION: the message match is a SUBSTRING, so Discord's hashed classes work", () => {
+  LB.forget();
+  // This is the anti-rot property the source comment and the README both claim.
+  // `cls === "message"` used to survive, because no fixture shipped a hashed class.
+  var doc = makeDiscordDoc(
+    "<div class='message__74e4d cozy__1f3a'><div class='embed'>" +
+    "<img src='" + A1 + "' /><img src='" + A2 + "' /></div></div>");
+  LB.open(doc, doc.querySelector("img"));
+  assert.equal(LB.siblingCount(), 2, "a hashed class must still bound the message");
+});
+
+test("REGRESSION: the chat-messages- row id bounds a message too", () => {
+  LB.forget();
+  // The real client puts this on the <li>; the branch had no coverage at all.
+  var doc = makeDiscordDoc(
+    "<li id='chat-messages-111-222'><div class='wrapper'>" +
+    "<img src='" + A1 + "' /><img src='" + A2 + "' /></div></li>");
+  LB.open(doc, doc.querySelector("img"));
+  assert.equal(LB.siblingCount(), 2, "id-based bounding must work with no `message` class");
+});
+
+test("the message walk depth is bounded — a far-away message row does not bound", () => {
+  LB.forget();
+  var deep = "";
+  var close = "";
+  for (var i = 0; i < 20; i++) { deep += "<div class='w" + i + "'>"; close += "</div>"; }
+  var doc = makeDiscordDoc(
+    "<div class='message'>" + deep +
+    "<img src='" + A1 + "' /><img src='" + A2 + "' />" + close + "</div>");
+  LB.open(doc, doc.querySelector("img"));
+  assert.equal(LB.siblingCount(), 1,
+    "beyond MESSAGE_WALK_DEPTH it must fall back to the element itself, not keep climbing");
+});
+
+test("the message row binds at a REALISTIC nesting depth (~10 levels up)", () => {
+  LB.forget();
+  // Pins the LOWER side of MESSAGE_WALK_DEPTH. The 20-level test above pins only
+  // the upper side — it falls back to 1 sibling at ANY small depth, so `15 -> 2`
+  // survived it in the sweep. Discord nests a message body roughly 6-10 levels
+  // under its row, which is the band this constant exists to cover.
+  var open10 = "", close10 = "";
+  for (var i = 1; i <= 10; i++) { open10 += "<div class='n" + i + "'>"; close10 += "</div>"; }
+  var doc = makeDiscordDoc(
+    "<div class='message'>" + open10 +
+    "<img src='" + A1 + "' /><img src='" + A2 + "' />" + close10 + "</div>");
+  LB.open(doc, doc.querySelector("img"));
+  assert.equal(LB.siblingCount(), 2,
+    "a message row ~11 ancestors up must still bound the group");
+});
+
+// --- installAutoStart: the production entry point --------------------------
+// Every mutant here survived before, because the fake document's addEventListener
+// was a no-op and nothing ever dispatched a real bubbling click.
+
+test("REGRESSION: a click on enlarged media opens the lightbox (real bubbling dispatch)", () => {
+  LB.forget();
+  var doc = makeDiscordDoc(
+    "<div class='message'><div class='embed'><img src='" + A1 + "' /></div></div>");
+  var img = doc.querySelector("img");
+  img.setAttribute("data-dee-enlarged", "1");
+  LB.installAutoStart(doc);
+  var ev = makeClickEvent(img);
+  doc.dispatchEvent(ev);
+  assert.equal(LB.isOpen(), true, "the click handler must find the marked element");
+  assert.equal(ev.defaultPrevented, true, "and suppress the default action");
+  assert.equal(ev.__stopped, true,
+    "and stop propagation, or Discord's own viewer opens a SECOND lightbox");
+});
+
+test("REGRESSION: a click on UNMARKED media does not open the lightbox", () => {
+  LB.forget();
+  var doc = makeDiscordDoc(
+    "<div class='message'><div class='embed'><img src='" + A1 + "' /></div></div>");
+  LB.installAutoStart(doc);
+  doc.dispatchEvent(makeClickEvent(doc.querySelector("img")));
+  assert.equal(LB.isOpen(), false,
+    "dropping the data-dee-enlarged check used to survive");
+});
+
+test("REGRESSION: a click on a <video> does NOT open the lightbox", () => {
+  LB.forget();
+  var doc = makeDiscordDoc(
+    "<div class='message'><div class='embed'><video src='" +
+    "https://media.discordapp.net/attachments/1/2/c.mp4' controls></video></div></div>");
+  var vid = doc.querySelector("video");
+  vid.setAttribute("data-dee-enlarged", "1");
+  LB.installAutoStart(doc);
+  var ev = makeClickEvent(vid);
+  doc.dispatchEvent(ev);
+  assert.equal(LB.isOpen(), false,
+    "a video's own controls occupy the element — play/scrub must not open a lightbox");
+  assert.equal(ev.defaultPrevented, false, "and the click must reach the controls");
+});
+
+test("REGRESSION: a modified click is left to the browser", () => {
+  LB.forget();
+  var doc = makeDiscordDoc(
+    "<div class='message'><div class='embed'><img src='" + A1 + "' /></div></div>");
+  var img = doc.querySelector("img");
+  img.setAttribute("data-dee-enlarged", "1");
+  LB.installAutoStart(doc);
+  for (var mod of [{ ctrlKey: true }, { metaKey: true }, { shiftKey: true }, { button: 1 }]) {
+    LB.forget();
+    var ev = makeClickEvent(img, mod);
+    doc.dispatchEvent(ev);
+    assert.equal(LB.isOpen(), false, "open-in-new-tab / save must still work: " + JSON.stringify(mod));
+    assert.equal(ev.defaultPrevented, false);
+  }
+});
+
+test("a click on a CHILD of enlarged media still opens it (the walk-up works)", () => {
+  LB.forget();
+  var doc = makeDiscordDoc(
+    "<div class='message'><div class='embed' data-dee-enlarged='1'>" +
+    "<img src='" + A1 + "' /></div></div>");
+  LB.installAutoStart(doc);
+  doc.dispatchEvent(makeClickEvent(doc.querySelector("img")));
+  assert.equal(LB.isOpen(), true, "the handler walks up from e.target");
+});
+
+test("close() removes its document listeners", () => {
+  var doc = makeDocWithImage(DISCORD_IMG);
+  var before = doc.listenerCount("keydown");
+  LB.open(doc, doc.querySelector("img"));
+  assert.equal(doc.listenerCount("keydown"), before + 1, "open registers one");
+  LB.close(doc);
+  assert.equal(doc.listenerCount("keydown"), before,
+    "close must remove it — leaking one per open used to survive");
 });
