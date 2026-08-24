@@ -25,10 +25,15 @@ debugging, changing or copying a specific pipeline.
    convention). The **homelab** gateway nginx has **no reloader sidecar** → after a configmap
    change `kubectl -n nebula rollout restart ds/nebula-gateway`, or it serves 502. Keep
    `git revert` + `flux reconcile` staged to restore the gateway in ~2 min.
-2. **Stale `~/workspace/homelab-talos` checkout (~100 commits behind).** NEVER read/edit it
-   as authoritative — it caused a wrong "Tekton is already installed" conclusion. Verify
-   cluster state against **origin/trunk of `homelab-infra`** AND the **LIVE cluster** (a
-   running controller pod, not just a CRD's presence).
+2. **Never treat a local checkout as authoritative for cluster state** — verify against
+   **origin/trunk** AND the **LIVE cluster** (a running controller pod, not just a CRD's
+   presence). A stale `~/workspace/homelab-talos` once caused a wrong "Tekton is already
+   installed" conclusion. 🔴 **But do NOT carry a currency claim in prose — this line said
+   "~100 commits behind" and was measured 2026-08-24 at ZERO behind, while
+   `~/workspace/homelab-infra` was 3 behind: the advice had inverted.** Both directories are
+   clones of the SAME repo (`ZacxDev/homelab-infra`) despite the `homelab-talos` name, so
+   neither name tells you which is fresher. Measure at the moment you act:
+   `git -C <dir> fetch origin && git -C <dir> rev-list --count HEAD..origin/trunk`.
 3. **No RWX storage** — only local-path / openebs (RWO, node-pinned). Two RWO local-path PVCs
    in one pod would **DEADLOCK scheduling** (each binds a different node) UNLESS the pod is
    **node-pinned** (`taskRunTemplate.podTemplate.nodeSelector`), which forces both PVCs onto
@@ -64,12 +69,30 @@ debugging, changing or copying a specific pipeline.
    cause**, and "the gate is just flaky under load" will walk you straight past a real bug.
    Discriminator: a step that emitted `RESULT:` / `<leg> verdict=` **failed a test**; one that
    emitted neither was **killed**. 25 of the 27 kills had ≥4 gate TaskRuns overlapping.
-   🔴 **The kills are a RESOURCE MISMATCH, not bad luck.** `step-pytests` requests
-   **1 CPU / 2Gi** but limits at **4 CPU / 8Gi**, against a node already committed to ~**290%
-   CPU / 270% memory** limits (measured 2026-08-24) — the scheduler packs on requests, then the
-   step is killed on limits. Closing it is an edit to the `devrc-ci-gate` Task that moves
-   **every** CI run: flag it before doing it, and re-measure rather than trusting these
-   numbers, which move hourly.
+   🔴 **What KILLS a step is NOT established — and the obvious theory is MEASURED ABSENT.**
+   `step-pytests` requests **1 CPU / 2Gi** against **4 CPU / 8Gi** limits, and the node carries
+   a large limits overcommit, so "the scheduler packs on requests and the kernel kills on
+   limits" looks like the answer. It is not the answer for THIS step: homelab-infra **#393**
+   measured CFS throttle ratios across `tekton-ci` on 2026-08-24 and `step-pytests` came in at
+   **0.006 — not throttled**, with node saturation absent as well (16% CPU requested, ZERO
+   Pending pods, no OOMKilled). So the 255s are **undiagnosed**. Do NOT "fix" them by moving
+   devrc-ci's requests or limits on the strength of the request/limit gap alone — that is
+   reaching for the plausible theory instead of the discriminating control, and this exact
+   change has already been made once on a step where it was justified and would be inert here.
+   🔴 **The real slowness mechanism, when it IS present: CFS QUOTA STARVATION, and AVERAGE CPU
+   HIDES IT.** A step's own `limits.cpu` is enforced per 100ms CFS period, so a suite of
+   short-lived multi-threaded processes drains a 1-CPU quota in a few ms and stalls for the
+   rest of every period — averaging ~0.32 cores, which reads as *idle*, while throttled in
+   **100%** of periods. **Low mean CPU + high throttle ratio is the signature**; read
+   `container_cpu_cfs_throttled_periods_total / container_cpu_cfs_periods_total`
+   (namespace=`tekton-ci`), never average CPU, and never node pressure alone. Measured
+   2026-08-24 (#393): `scripts-tests` **1.00**, `gitleaks` 0.80, `clickup-mirror` 0.74 — all
+   starved and since raised — while `kustomize` and `render-diff` sat at **0.00 on the same
+   2-CPU limit**. That contrast is the point: it is starvation of specific BURSTY steps, not
+   "the limits are too low", so only measured steps should move.
+   🔴 **Raising the limit alone can HALF-WORK on a Go binary** — Go before 1.25 sizes
+   `GOMAXPROCS` from the HOST's cores, not from the cgroup quota, so it oversubscribes and
+   stays partly throttled at any cap. Pin `GOMAXPROCS` to the limit as well.
    🔴 **Do NOT measure a flake rate from inside a burst you are causing.** That mistake was
    made here and written into a handoff as a property of the CI tier before it was caught —
    `claude/RULES.md` → *"a control that SHARES the step you doubt"*. Take the baseline from a
