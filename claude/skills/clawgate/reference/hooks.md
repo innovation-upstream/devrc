@@ -124,7 +124,7 @@ worse, not better — and this hook is not that change.
 
 | trigger | reaches the phone? |
 |---|---|
-| Out of scope | **No** — semantic, produces no `PermissionRequest`. File a task **only if you can name its closing condition**; with none, say so in your reply instead of creating one (definition: `flows/task-authoring.md`, question 1 — the single source; do not restate it here). Note the criteria-less-create denial comes from a devrc PreToolUse hook, `clawgate-task-interview-guard.py`, NOT this one; and the criteria table in SKILL.md governs the final status on the LOCAL pickup path, which may set `complete` — it is the DISPATCHED devpod route that cannot, `taskstatus.go:79-81`. |
+| Out of scope | **No** — semantic, produces no `PermissionRequest`. File a task **only if you can name its closing condition**; with none, say so in your reply instead of creating one (definition: `~/.claude/skills/clawgate/flows/task-authoring.md`, question 1 — the single source; do not restate it here). Note the criteria-less-create denial comes from a devrc PreToolUse hook, `clawgate-task-interview-guard.py`, NOT this one; and the criteria table in SKILL.md governs the final status on the LOCAL pickup path, which may set `complete` — it is the DISPATCHED devpod route that cannot, `taskstatus.go:79-81`. |
 | Fork | **No.** A design fork raises no `PermissionRequest` at all; and even when one does surface, the return channel is binary — see the 🔴 above. Never route a Fork here. |
 | Outward-facing / irreversible | **Partially** — an allowlisted command never prompts, so it never reaches the phone at all. |
 | Named hazard | **No, and must not** — a named hazard's response is stage-it or hand-it-over, never solicit approval. |
