@@ -55,10 +55,17 @@ MODULE_PATH = ROOT / "scripts" / "lib" / "subsystem_recall.py"
 TOUCH_PATH = ROOT / "scripts" / "lib" / "subsystem_touch.py"
 RESUME_DOC = ROOT / "claude" / "skills" / "resume" / "SKILL.md"
 HANDOFF_DOC = ROOT / "claude" / "skills" / "handoff" / "SKILL.md"
+# The body that must ROUTE to the sidecar is the one that carries the protocol,
+# which since 2026-08-24 is the `subsystem-index` skill rather than /handoff.
+INDEX_DOC = ROOT / "claude" / "skills" / "subsystem-index" / "SKILL.md"
 # The on-demand evidence sidecar. Step 4's IMPERATIVES stay in HANDOFF_DOC; the
 # measured rationale behind them lives here and costs nothing until it is read.
+# 🔴 MOVED 2026-08-24 with the protocol it explains. `/handoff` step 4 became the
+# `subsystem-index` skill, and this reference doc is that skill's evidence file —
+# it was never about writing handoffs. The name is unchanged so its `§N` pointers
+# still resolve.
 HANDOFF_REFERENCE = (
-    ROOT / "claude" / "skills" / "handoff" / "reference" / "index-write.md"
+    ROOT / "claude" / "skills" / "subsystem-index" / "reference" / "index-write.md"
 )
 ANALYZE_DOC = ROOT / "claude" / "skills" / "analyze-service" / "SKILL.md"
 
@@ -3794,10 +3801,10 @@ class TestSkillDocsArePinned:
         self, sentence: str, why: str
     ) -> None:
         self._assert_rationale_pin(
-            HANDOFF_DOC.read_text(encoding="utf-8"),
+            INDEX_DOC.read_text(encoding="utf-8"),
             sentence,
             why,
-            "claude/skills/handoff/SKILL.md",
+            "claude/skills/subsystem-index/SKILL.md",
         )
 
     @pytest.mark.parametrize(
@@ -3810,7 +3817,7 @@ class TestSkillDocsArePinned:
             HANDOFF_REFERENCE.read_text(encoding="utf-8"),
             sentence,
             why,
-            "claude/skills/handoff/reference/index-write.md",
+            "claude/skills/subsystem-index/reference/index-write.md",
         )
 
     def test_a_reworded_pin_is_still_caught_in_its_new_home(self) -> None:
@@ -3848,16 +3855,25 @@ class TestSkillDocsArePinned:
         """Splitting rationale out is only safe if the body still points at it AND
         the pointer resolves. Nothing else in the gate checks that any skill's
         `reference/` link resolves, so an evidence file could be deleted or
-        renamed and the body would keep advertising it."""
-        doc = HANDOFF_DOC.read_text(encoding="utf-8")
+        renamed and the body would keep advertising it.
+
+        🔴 Reads INDEX_DOC since 2026-08-24: the sidecar explains the INDEX
+        protocol, which is no longer /handoff's to route to. /handoff's own seam
+        — that it still names the `subsystem-index` skill at all — is asserted by
+        `test_handoff_still_routes_to_the_index_skill` in test_subsystem_touch.py."""
+        doc = INDEX_DOC.read_text(encoding="utf-8")
         assert "reference/index-write.md" in doc, (
-            "claude/skills/handoff/SKILL.md no longer routes to its evidence "
+            "claude/skills/subsystem-index/SKILL.md no longer routes to its evidence "
             "sidecar — the rules would be left looking arbitrary with nowhere "
             "to check them."
         )
         assert HANDOFF_REFERENCE.exists(), f"the routed-to sidecar is gone: {HANDOFF_REFERENCE}"
         assert HANDOFF_REFERENCE.parent.name == "reference"
-        assert HANDOFF_REFERENCE.parent.parent == HANDOFF_DOC.parent
+        # The sidecar must live beside the body that ROUTES to it — which is
+        # INDEX_DOC since the 2026-08-24 extraction, not HANDOFF_DOC. Asserted
+        # structurally rather than as a literal path so a future move of the
+        # whole skill directory keeps this honest.
+        assert HANDOFF_REFERENCE.parent.parent == INDEX_DOC.parent
 
     def test_the_sidecar_is_DEPLOYED(self) -> None:
         """`home.file` ships `claude/skills` wholesale, so the sidecar reaches
@@ -3904,8 +3920,17 @@ class TestSkillDocsArePinned:
     def test_the_retracted_claim_is_NOT_still_asserted(self) -> None:
         """The half that had to GO. A correction that only adds text leaves the
         false sentence in front of the executor — and after the split it must be
-        absent from BOTH files, or moving the rationale would have reopened it."""
-        for path in (HANDOFF_DOC, HANDOFF_REFERENCE):
+        absent from EVERY file that could reassert it, or moving the rationale
+        would have reopened it.
+
+        🔴 INDEX_DOC WAS MISSING FROM THIS TUPLE AFTER THE 2026-08-24 EXTRACTION,
+        and an audit proved it by mutation: appending the retracted sentence to
+        `subsystem-index/SKILL.md` SURVIVED a full green suite. The guard kept
+        checking the file the prose had LEFT. That is `claude/RULES.md`'s
+        "a guard's DESCRIPTION claims COVERAGE" arriving through a file move
+        rather than an edit — the docstring already said BOTH/EVERY; the body
+        had silently narrowed to the wrong two."""
+        for path in (HANDOFF_DOC, HANDOFF_REFERENCE, INDEX_DOC):
             assert "fails loudly rather than clobbering" not in path.read_text(
                 encoding="utf-8"
             ), f"the retracted wording is back in {path}"

@@ -1,8 +1,8 @@
-# `/handoff` step 4 — the measured evidence behind the index rules
+# `subsystem-index` — the measured evidence behind the index rules
 
-**Rationale only. Every rule you must follow is in `SKILL.md` step 4 and is complete there** — nothing in this file needs to be read before running the read-only probe, and nothing here relaxes a rule. Read it when a rule looks arbitrary, when you are tempted to work around one, or before proposing a change to one.
+**Rationale only. Every rule you must follow is in the sibling `SKILL.md` and is complete there** — nothing in this file needs to be read before running the read-only probe, and nothing here relaxes a rule. Read it when a rule looks arbitrary, when you are tempted to work around one, or before proposing a change to one.
 
-Source: `~/workspace/devrc/claude/skills/handoff/reference/index-write.md` (deployed at `~/.claude/skills/handoff/reference/index-write.md`).
+Source: `~/workspace/devrc/claude/skills/subsystem-index/reference/index-write.md` (deployed at `~/.claude/skills/subsystem-index/reference/index-write.md`).
 
 🔴 **Long lines are deliberate.** Several sentences below are pinned verbatim by `scripts/tests/test_subsystem_recall.py`; hard-wrapping one puts a newline inside the pinned string and the guard goes red. Do not reflow this file.
 
@@ -142,7 +142,7 @@ If it fires: reword the copy with **invented** content that preserves only the S
 
 ## 7. Evidence demoted out of the step body
 
-Each subsection below is the measurement behind a rule whose imperative stays in `SKILL.md` step 4 and now cites this section. **The rules did not change; only the narrative moved.** 🔴 Nothing here relaxes a rule, and nothing here needs reading before running the read-only probe.
+Each subsection below is the measurement behind a rule whose imperative stays in the sibling `SKILL.md` and now cites this section. **The rules did not change; only the narrative moved.** 🔴 Nothing here relaxes a rule, and nothing here needs reading before running the read-only probe.
 
 ### 7.1 A PR landed in another repo is usually left unscoped
 

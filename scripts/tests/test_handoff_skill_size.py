@@ -168,7 +168,34 @@ REFERENCE_DIR = SKILL_MD.parent / "reference"
 # deliberately NOT sized to make the next round comfortable: the pressure is the
 # point, and the answer to the round after this one is lever 1 in the playbook
 # (move guidance into the tool), not another +600.
-MAX_BYTES = 48_600
+# 🔴 2026-08-24: 48,600 -> 24,000 (-24,600). RATCHETED DOWN, which this module
+# has said from the start is the intended direction — and the first time the
+# lever was structural rather than editorial.
+#
+# `/handoff` step 4 was ~26 KB of subsystem-index protocol living inside a skill
+# about writing handoffs: its own tool, its own store, its own reference doc, its
+# own ~72 pinned sentences. It moved WHOLE to `claude/skills/subsystem-index/`,
+# which /handoff now invokes. The body went 47,143 -> 21,729 B.
+#
+# 🔴 THE COMBINED TOTAL BARELY MOVED (49,602 vs 47,143) and that is not the
+# point. The saving is that the index protocol is no longer paid by every
+# /handoff run — a skill body costs its bytes when it is INVOKED, and /handoff is
+# invoked at the END of a session when the window is already tight, whereas the
+# index protocol is needed only on the runs that actually reach a write.
+#
+# Sized as before, in units of a real edit: mean paragraph ~486 B, mean 🔴 rule
+# ~572 B. 🔴 MIND THE BASE — the mistake test_rules_size.py records three times.
+# The ENFORCED budget is MAX_BYTES - MIN_HEADROOM_BYTES, so the usable margin is
+# FLOOR-relative and is roughly TWO mean rules, not the four a ceiling-relative
+# reading gives. An earlier draft of this comment said four. Do not restate
+# either figure: the failure messages print current / ceiling / free / budget,
+# and that is the authority.
+#
+# ⚠ THE LEVER WAS 2, NOT 1. This is the playbook's "demote a whole coherent
+# block" taken one step further — the block got a SKILL of its own rather than a
+# reference/ file. An earlier draft called it lever 1, which is "move guidance
+# INTO the tool"; that is not what happened.
+MAX_BYTES = 24_000
 
 # Required working margin below the ceiling.
 #
@@ -243,8 +270,13 @@ def _pin_counts() -> str:
         )
     parts = ", ".join(f"{n} in {k}" for k, n in sorted(counts.items()))
     return (
-        f"The skill's prose is pinned verbatim, phrase by phrase: {parts}. "
-        f"Deleting any one of them is a test failure, not a silent loss."
+        f"⚠ MOST OF THOSE PINS TARGET `claude/skills/subsystem-index/SKILL.md`, "
+        f"NOT THIS FILE, since the 2026-08-24 extraction: {parts}. They protect "
+        f"the INDEX protocol; trimming handoff/SKILL.md is largely NOT caught by "
+        f"them. An audit found this block telling a maintainer under budget "
+        f"pressure the opposite. What guards THIS file: the handoff-scoped "
+        f"SKILL_PINS entries and the seam test in test_subsystem_touch.py. Read "
+        f"the step cold — the pin count is not your safety net here."
     )
 
 
@@ -377,7 +409,7 @@ def test_the_gate_can_report_a_breach(tmp_path, monkeypatch):
 
     # The playbook rendered into that failure must name a real destination --
     # a maintainer over budget who is given no topic deletes text instead.
-    assert "index-write" in str(ceiling.value)
+    assert "write-gate" in str(ceiling.value)
 
     # POSITIVE HALF: the same function passes on a compliant file, so the red
     # above is a fact about the size and not about the harness.
@@ -456,7 +488,7 @@ def test_the_headroom_half_fires_on_its_OWN_condition(tmp_path, monkeypatch):
         test_handoff_skill_keeps_working_headroom()
     msg = str(headroom.value)
     assert "RECLAIM:   1 bytes" in msg, msg
-    assert "index-write" in msg
+    assert "write-gate" in msg
 
     # And one byte the other way is clean, so the boundary is pinned on both
     # sides rather than "big enough fails".
