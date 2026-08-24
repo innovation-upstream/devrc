@@ -197,10 +197,28 @@ line says which of the two you got; it never lets "verified" stand for both.
 timer can act on the number: `12` locked, `13` not logged in, `17` the note is
 GONE, `18` two notes share the name and neither can be trusted, `21` it differs
 only in trailing newlines — still probably usable, re-escrow it — `22` it differs
-materially, `25` the escrowed key does not open the artifacts. It reports **byte
-counts and a classification only, never the differing content**, and it reads the
-server from `bw config server` at run time rather than carrying an endpoint into
-a public repo.
+materially. It reports **byte counts and a classification only, never the
+differing content**, and it reads the server from `bw config server` at run time
+rather than carrying an endpoint into a public repo.
+
+🔴 **Under `--decrypt-check` the six outcomes mean different things, and only one
+of them is about the KEY.** Reading these wrong is how a working
+disaster-recovery key gets rotated, or a tampered backup gets waved through:
+
+| code | meaning | what to do |
+|---|---|---|
+| `29` `AGE-MISSING` | `age` is not on PATH | environment fault; says nothing about the escrow |
+| `30` `ARTIFACT-UNREADABLE` | failed before the key was used | diagnose the object, not the key |
+| `25` `DECRYPT-FAILED` | age wrote **nothing**: wrong key **or** damaged header — **not separable** | re-run `restore-verify.py` with the **on-disk** key; if it also fails, the artifact is the problem. **Do not rotate first.** |
+| `33` `ARTIFACT-CORRUPT` | age authenticated the header (**the key worked**) then failed the payload | 🔴 **the backup is TAMPERED/CORRUPT/TRUNCATED.** Check the other retained objects. Do not rotate. |
+| `31` `ARTIFACT-EMPTY` | age exited **zero** on an empty payload (**the key worked**) | the artifact holds nothing; do not rotate |
+| `26` `RESTORE-FAILED` | decrypted fine, the git bundle is bad | artifact fault; do not rotate |
+
+Measured (age v1.3.1, many offsets and sizes): a wrong key or a damaged header
+leaves **no** plaintext file, while payload corruption and truncation leave one —
+because age writes output *before* authenticating the payload. That, plus a
+machine-readable cause published by `restore-verify.py`, is what separates the
+rows; none of it is parsed out of age's stderr.
 
 ⚠ It cannot unlock the vault and will not try: every `bw` call runs with stdin on
 `/dev/null`, `--nointeraction`, and a timeout, so an unattended run **fails fast

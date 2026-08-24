@@ -307,24 +307,27 @@ def test_the_exit_code_table_is_pinned_EXACTLY_both_ways():
         "ARTIFACT-UNREADABLE": 30,
         "ARTIFACT-EMPTY": 31,
         "NOTE-MISSING": 32,
+        "ARTIFACT-CORRUPT": 33,
     }
 
 
-def test_the_five_decrypt_outcomes_are_FIVE_DISTINCT_codes():
+def test_the_SIX_decrypt_outcomes_are_SIX_DISTINCT_codes():
     """🔴 THE HEADLINE SPLIT, pinned as a set of distinct integers.
 
-    An audit found the original two-way split wrong in three measured cases,
-    every one of them blaming the escrow for a fault the escrow could not have
-    caused. These five must never collapse back: `age` absent is an ENVIRONMENT
-    fault, "failed before decrypt ran" is an OBJECT fault, "age refused" is a
-    KEY fault, "age succeeded on nothing" is a DATA fault where the key is
-    FINE, and "decrypt returned, restore failed" is a DATA fault too.
+    Two rounds of audit each found the previous split wrong, both times in the
+    direction that makes someone act destructively. These six must never
+    collapse back: `age` absent is an ENVIRONMENT fault; "failed before decrypt
+    ran" is an OBJECT fault; "age wrote nothing" is a wrong key OR a damaged
+    header and asserts neither; "age authenticated the header then failed the
+    payload" is TAMPERING with a working key; "age exited zero on nothing" is an
+    empty artifact with a working key; "decrypt returned, restore failed" is a
+    bundle fault with a working key.
     """
     names = ["AGE-MISSING", "ARTIFACT-UNREADABLE", "DECRYPT-FAILED",
-             "ARTIFACT-EMPTY", "RESTORE-FAILED"]
+             "ARTIFACT-CORRUPT", "ARTIFACT-EMPTY", "RESTORE-FAILED"]
     codes = [EV.EXIT_CODES[n] for n in names]
-    assert codes == [29, 30, 25, 31, 26]
-    assert len(set(codes)) == 5
+    assert codes == [29, 30, 25, 33, 31, 26]
+    assert len(set(codes)) == 6
 
 
 def test_every_exit_code_is_DISTINCT_and_never_collides_with_success_or_crash():
@@ -344,7 +347,21 @@ def test_an_unknown_token_CANNOT_be_raised():
         EV.EscrowError("NOT-A-REAL-TOKEN", "x")
     e = EV.EscrowError("VAULT-LOCKED", "x")
     assert e.exit_code == 12 and e.token == "VAULT-LOCKED"
-    assert str(e).startswith("VAULT-LOCKED: ")
+    assert str(e) == "VAULT-LOCKED: x"
+    assert e.detail is None
+
+
+def test_the_rendered_message_carries_BOTH_the_verdict_and_the_upstream_detail():
+    """🔴 `str(exc)` IS WHAT THE OPERATOR READS — the CLI prints it and nothing
+    else. Pinning only `.verdict` left `__str__` untested: a sweep found that
+    dropping the `[upstream: …]` half entirely SURVIVED the suite, silently
+    discarding age's own diagnosis on every failure path.
+
+    Both halves, whole, by equality — and the detail must NOT be swallowed."""
+    e = EV.EscrowError("ARTIFACT-CORRUPT", "the verdict half", "the upstream half")
+    assert e.verdict == "the verdict half"
+    assert e.detail == "the upstream half"
+    assert str(e) == "ARTIFACT-CORRUPT: the verdict half [upstream: the upstream half]"
 
 
 # --------------------------------------------------------------------------- #
@@ -589,6 +606,21 @@ def test_an_ABSENT_notes_FIELD_is_NOT_the_same_finding_as_an_EMPTY_one(tmp_path)
     assert ei.value.exit_code == 32
     assert ei.value.exit_code != EV.EXIT_CODES["NOTE-EMPTY"]
     assert "Do NOT re-escrow" in str(ei.value)
+
+
+def test_a_JSON_NULL_notes_is_ALSO_NOTE_MISSING(tmp_path):
+    """🔴 `{"notes": null}` IS THE SHAPE JSON ACTUALLY PRODUCES for "no notes",
+    and it is the very shape this module already handles for `serverUrl`.
+
+    Splitting on `"notes" not in item` alone let a null fall through to
+    `NOTE-EMPTY` — straight back to the "re-escrow over a good copy" advice
+    `NOTE-MISSING` was created to prevent."""
+    item = {"id": "n", "name": ITEM, "type": SECURE_NOTE, "notes": None}
+    assert "notes" in item, "the fixture must PRESENT the field as null"
+    with pytest.raises(EV.EscrowError) as ei:
+        _run(tmp_path, FakeBw(items=[item]))
+    assert ei.value.token == "NOTE-MISSING"
+    assert ei.value.exit_code == 32
 
 
 def test_a_notes_field_present_but_NOT_A_STRING_is_NOTE_EMPTY(tmp_path):
@@ -1244,6 +1276,53 @@ def test_a_ZERO_BYTE_object_is_ARTIFACT_UNREADABLE_and_never_claims_it_DECRYPTED
     assert "NOTHING here decrypted" in msg
 
 
+def _corrupt_payload(blob: bytes, offset: int = 400) -> bytes:
+    """Flip a byte PAST the age header. XOR, never a literal write.
+
+    🔴 `printf '\\xff'` is a NO-OP when the byte was already 0xff, and one such
+    no-op nearly produced a measurement saying age fails to detect tampering.
+    XOR always changes the byte. Verify the mutation actually mutates.
+    """
+    b = bytearray(blob)
+    before = b[offset]
+    b[offset] ^= 0xFF
+    assert b[offset] != before
+    return bytes(b)
+
+
+@pytest.mark.parametrize("mangle,name", [
+    (lambda blob: _corrupt_payload(blob, 400), "payload byte flipped"),
+    (lambda blob: _corrupt_payload(blob, 300), "payload byte flipped, offset 300"),
+    (lambda blob: blob[:-30], "ciphertext truncated"),
+])
+def test_a_TAMPERED_or_TRUNCATED_artifact_is_ARTIFACT_CORRUPT_not_EMPTY(
+        escrow_world, tmp_path, mangle, name):
+    """🔴 THE REGRESSION THIS ROUND EXISTS FOR — a verifier reporting TAMPERING
+    as "nothing to worry about".
+
+    The previous classifier read file PRESENCE as "age reported success" and so
+    reported a tampered or truncated artifact as `ARTIFACT-EMPTY` — *"THE ESCROW
+    IS FINE … a valid encryption of an empty payload"* — while quoting age's own
+    "may be corrupted or tampered with" in the same breath. Detecting tampering
+    is the single most important thing a backup verifier does.
+
+    Re-measured (age v1.3.1, 8 offsets x 4 sizes + 3 truncations): age writes
+    output BEFORE authenticating the payload, so PRESENT+rc!=0 means the header
+    authenticated — the escrowed key WORKED — and the bytes did not.
+    """
+    good = escrow_world["objects"][KEY_DELTA_NEW]
+    objects = dict(escrow_world["objects"])
+    objects[KEY_DELTA_NEW] = mangle(good)
+    with pytest.raises(EV.EscrowError) as ei:
+        _decrypt_run(escrow_world, objects=objects)
+    assert ei.value.token == "ARTIFACT-CORRUPT", name
+    assert ei.value.exit_code == 33
+    # 🔴 It must NOT be any of the three verdicts that would calm the operator
+    # down or send them at the key.
+    for wrong in ("ARTIFACT-EMPTY", "DECRYPT-FAILED", "ARTIFACT-UNREADABLE"):
+        assert ei.value.exit_code != EV.EXIT_CODES[wrong], (name, wrong)
+
+
 def test_a_valid_encryption_of_NOTHING_says_the_ESCROW_IS_FINE(escrow_world, tmp_path):
     """🔴 AUDIT CASE 2 — THE ONE THAT GETS A GOOD DR KEY ROTATED.
 
@@ -1270,13 +1349,21 @@ def test_a_valid_encryption_of_NOTHING_says_the_ESCROW_IS_FINE(escrow_world, tmp
         _decrypt_run(escrow_world, objects=objects)
     assert ei.value.token == "ARTIFACT-EMPTY"
     assert ei.value.exit_code == 31
-    # 🔴 DISCRIMINATING, not a substring presence check: it must NOT be the
-    # token that means "the escrowed key is wrong", and it must say so in words
-    # the operator would act on.
     assert ei.value.exit_code != EV.EXIT_CODES["DECRYPT-FAILED"]
-    msg = str(ei.value)
-    assert "THE ESCROW IS FINE" in msg
-    assert "Do NOT re-escrow or rotate" in msg
+    assert ei.value.exit_code != EV.EXIT_CODES["ARTIFACT-CORRUPT"]
+    # 🔴 THE WHOLE OWNED SENTENCE, BY EQUALITY — see the module docstring on
+    # `verdict` vs `detail`. The previous assertions here were
+    # `"THE ESCROW IS FINE" in msg` and `"Do NOT re-escrow or rotate" in msg`,
+    # and BOTH passed unchanged on a TAMPERED artifact, certifying a sentence
+    # that was false on the very run they tested.
+    assert ei.value.verdict == (
+        f"the ESCROWED key OPENED {KEY_DELTA_NEW} and the artifact contains "
+        f"NOTHING. 🔴 THE ESCROW IS FINE — age exited ZERO, which a wrong key "
+        f"cannot make it do; the payload is a valid encryption of an empty "
+        f"file. Do NOT re-escrow or rotate on the strength of this. Run "
+        f"`restore-verify.py` to diagnose the artifact.")
+    # The upstream half is carried separately, so it stays OUT of the pin.
+    assert ei.value.detail and "DECRYPT FAILED" in ei.value.detail
 
 
 def test_age_ABSENT_is_an_ENVIRONMENT_fault_not_a_verdict_on_the_escrow(
@@ -1314,6 +1401,115 @@ def test_the_age_precondition_runs_BEFORE_the_store_is_opened(escrow_world,
     assert d.gets == [], "the store was opened before the precondition was checked"
 
 
+def test_every_decrypt_family_VERDICT_is_pinned_WHOLE(escrow_world, tmp_path):
+    """🔴 ALL FIVE OWNED SENTENCES, BY EXACT EQUALITY, IN ONE PLACE.
+
+    The verdict LINES were already pinned whole; the refusal MESSAGES were not,
+    and that is where the false sentence survived a green suite. `verdict` holds
+    only what this module asserts, so equality is possible without pinning
+    another module's wording or an age exit code that varies run to run.
+
+    A cosmetic reword fails this test. That is the price of a machine-readable
+    claim on the sentences that decide whether a key gets rotated.
+    """
+    good = escrow_world["objects"][KEY_DELTA_NEW]
+    objects = dict(escrow_world["objects"])
+
+    # 1. ARTIFACT-CORRUPT
+    objects[KEY_DELTA_NEW] = _corrupt_payload(good)
+    with pytest.raises(EV.EscrowError) as ei:
+        _decrypt_run(escrow_world, objects=objects)
+    assert ei.value.verdict == (
+        f"🔴 {KEY_DELTA_NEW} is TAMPERED, CORRUPT or TRUNCATED. age "
+        f"authenticated the header with the ESCROWED key — which a non-matching "
+        f"identity cannot do — began writing plaintext, and then FAILED on the "
+        f"payload. THE ESCROW IS FINE; THE BACKUP IS NOT. This is the finding a "
+        f"backup verifier exists to make: treat the artifact as unusable, check "
+        f"the other retained objects for this scope, and do NOT rotate the key.")
+
+    # 2. ARTIFACT-UNREADABLE
+    objects[KEY_DELTA_NEW] = b""
+    with pytest.raises(EV.EscrowError) as ei:
+        _decrypt_run(escrow_world, objects=objects)
+    assert ei.value.verdict == (
+        f"the pipeline failed BEFORE the escrowed key was ever used, on "
+        f"{KEY_DELTA_NEW} — an empty or unreadable object, not a fact about the "
+        f"escrow. NOTHING here decrypted, and nothing here is evidence for or "
+        f"against the escrowed key. Run `restore-verify.py` to diagnose the "
+        f"object.")
+
+    # 3. DECRYPT-FAILED — wrong key, so age writes nothing at all.
+    wrong = _new_identity(tmp_path, "verdict-wrong.key")
+    d = FakeDownloader(escrow_world["objects"])
+    with pytest.raises(EV.EscrowError) as ei:
+        EV.run(bw=_cli(FakeBw(items=[_item(notes=wrong.read_text())])),
+               identity=wrong, item_name=ITEM, decrypt=True, prefix=PREFIX,
+               store=escrow_world["store"], work_dir=escrow_world["work"],
+               now=NOW, downloader_factory=lambda: d)
+    assert ei.value.verdict == (
+        f"age REFUSED {KEY_DELTA_NEW} without writing any plaintext at all. TWO "
+        f"CAUSES PRODUCE THIS AND THEY ARE NOT SEPARABLE FROM HERE: the escrowed "
+        f"identity does not match this artifact's recipients, or the artifact's "
+        f"HEADER is damaged. Neither is asserted. To tell them apart, run "
+        f"`restore-verify.py` with the ON-DISK identity: if that fails too the "
+        f"artifact is the problem, not the escrow. Do NOT rotate the key before "
+        f"doing that.")
+
+    # 4. RESTORE-FAILED — decrypt returns, the BUNDLE inside is damaged.
+    scope = escrow_world["store"] / "scope-delta"
+    objects[KEY_DELTA_NEW] = _artifact(scope, escrow_world["identity"], tmp_path,
+                                       mangle=_flip_middle_byte, tag="vpin")
+    with pytest.raises(EV.EscrowError) as ei:
+        _decrypt_run(escrow_world, objects=objects)
+    assert ei.value.token == "RESTORE-FAILED"
+    assert ei.value.verdict == (
+        f"the ESCROWED bytes DECRYPTED {KEY_DELTA_NEW} — `decrypt()` RETURNED, "
+        f"which is what makes that claim observable — and the restore then "
+        f"failed. This is a fault in the ARTIFACT, not in the escrow. The "
+        f"escrowed key works; run `restore-verify.py` to diagnose the artifact.")
+
+
+def test_a_HEADER_corrupt_artifact_lands_on_the_NOT_SEPARABLE_verdict(escrow_world):
+    """🔴 THE HONEST LIMIT, MEASURED AND PINNED.
+
+    Header corruption and a wrong key BOTH give rc=1 with no output file, so
+    they are genuinely indistinguishable from outside. The verdict must
+    therefore assert NEITHER — and must hand over the check that does separate
+    them (re-run with the ON-DISK identity). A verdict that blamed the escrow
+    here would send someone to rotate a working key over a damaged artifact.
+    """
+    good = escrow_world["objects"][KEY_DELTA_NEW]
+    b = bytearray(good)
+    b[40] ^= 0xFF                      # offset 40 is inside the age header
+    objects = dict(escrow_world["objects"])
+    objects[KEY_DELTA_NEW] = bytes(b)
+    with pytest.raises(EV.EscrowError) as ei:
+        _decrypt_run(escrow_world, objects=objects)
+    assert ei.value.token == "DECRYPT-FAILED"
+    assert "NOT SEPARABLE FROM HERE" in ei.value.verdict
+    assert "Do NOT rotate the key before doing that" in ei.value.verdict
+    # It must not claim the escrow is the fault, which the old wording did.
+    assert "not (or no longer) a working identity" not in ei.value.verdict
+
+
+def test_the_decrypt_CAUSE_is_a_published_VALUE_not_a_substring():
+    """🔴 THE SEAM, pinned from both sides.
+
+    `escrow-verify` branches on `restore_verify.DECRYPT_*`. If those constants
+    are renamed or the set changes, this goes red rather than the classifier
+    silently falling into its `else` — which is how a tampered artifact got
+    reported as empty in the first place.
+    """
+    assert RV.DECRYPT_AGE_MISSING == "age-missing"
+    assert RV.DECRYPT_AGE_REFUSED == "age-refused"
+    assert RV.DECRYPT_EMPTY_PLAINTEXT == "empty-plaintext"
+    assert RV.DECRYPT_CAUSES == {"age-missing", "age-refused", "empty-plaintext"}
+    with pytest.raises(KeyError):
+        RV.RestoreVerifyError("x", cause="not-a-published-cause")
+    # A failure with no published cause reads as None, never as a default one.
+    assert RV.RestoreVerifyError("x").cause is None
+
+
 def test_the_phase_probe_OBSERVES_rather_than_reimplements(escrow_world):
     """🔴 THE PROBE MUST BE TRANSPARENT. It wraps restore-verify's `decrypt` for
     the duration of one call; if it changed behaviour, or failed to restore the
@@ -1329,7 +1525,7 @@ def test_the_phase_probe_OBSERVES_rather_than_reimplements(escrow_world):
         seen["state"] = state
     assert RVmod.decrypt is before, "the probe did not restore the original"
     assert seen["state"] == {"reached": False, "returned": False,
-                             "plain_present": None}
+                             "plain_present": None, "cause": None}
     # And on a real run it records the success phase.
     v, _ = _decrypt_run(escrow_world)
     assert v.decrypt_checked is True
@@ -1600,6 +1796,42 @@ def test_shred_unlinks_a_SYMLINK_without_touching_its_target(tmp_path):
     assert target.read_text(encoding="utf-8") == "keep me\n"
 
 
+def test_shred_does_NOT_follow_a_symlink_it_FAILED_to_unlink(tmp_path):
+    """🔴 THE FALL-THROUGH, measured — a mutation sweep found it uncovered.
+
+    The test above uses a link whose unlink SUCCEEDS, so the `except OSError`
+    arm never runs. Restoring the old `pass`-and-fall-through survived the whole
+    suite: on that path `open(path, "r+b")` FOLLOWS the link and zeroes the
+    target, which is the truncate-in-place primitive the symlink branch exists
+    to remove. Same lesson as the `O_NOFOLLOW` layer one test up — a layer
+    nobody can observe failing is a layer nobody knows is gone.
+
+    A read-only parent directory makes `unlink` raise EACCES while the link
+    itself is still perfectly followable.
+    """
+    if os.geteuid() == 0:
+        pytest.skip("root ignores directory write permission; the arm is "
+                    "unreachable as root and a skip here is honest")
+    target = tmp_path / "precious.txt"
+    target.write_text("must survive\n", encoding="utf-8")
+    holder = tmp_path / "ro"
+    holder.mkdir()
+    link = holder / "link"
+    link.symlink_to(target)
+    os.chmod(holder, 0o500)                     # r-x: unlink will fail
+    try:
+        # POSITIVE CONTROL: the unlink really is impossible here, so the
+        # assertion below is about the arm under test and not about a link that
+        # simply vanished.
+        with pytest.raises(OSError):
+            link.unlink()
+        EV._shred(link)
+        assert target.read_text(encoding="utf-8") == "must survive\n"
+        assert link.is_symlink(), "the link should still be there, unfollowed"
+    finally:
+        os.chmod(holder, 0o700)
+
+
 def test_create_private_file_REFUSES_to_follow_a_symlink_it_cannot_remove(tmp_path):
     """A directory in the way is the case `O_EXCL` must turn into an error
     rather than a silent reuse — `_shred` cannot unlink a directory."""
@@ -1647,6 +1879,33 @@ def test_the_OPEN_flags_defend_the_path_EVEN_IF_the_unlink_layer_fails(tmp_path,
         assert victim.is_symlink()
     else:
         assert victim.read_text(encoding="utf-8") == "pre-existing\n"
+
+
+def test_the_fchmod_is_LOAD_BEARING_under_a_hostile_umask(tmp_path):
+    """🔴 MAKE THE REDUNDANT LAYER OBSERVABLE, or drop it — same lesson as the
+    `O_EXCL|O_NOFOLLOW` case one test up.
+
+    `os.open(..., 0o600)` is masked by the umask, and no ordinary umask clears
+    bits from 0600 — so deleting `os.fchmod(fd, _FILE_MODE)` survived all 120
+    tests while a positive control (`fchmod(fd, 0o666)`) was killed, proving the
+    assertions COULD see it and simply never exercised the case.
+
+    A umask of 0o377 clears owner-write from the `os.open` mode, leaving 0o200
+    masked to 0o000 — so without the fchmod the key file would be created
+    unreadable-and-unwritable by its owner, and with it the mode is 0600
+    regardless. The umask is restored in a `finally`; it is process-global.
+    """
+    p = tmp_path / "hostile.key"
+    old = os.umask(0o377)
+    try:
+        fd = EV._create_private_file(p)
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(b"synthetic-under-hostile-umask")
+    finally:
+        os.umask(old)
+    assert stat.S_IMODE(p.stat().st_mode) == 0o600, oct(
+        stat.S_IMODE(p.stat().st_mode))
+    assert p.read_bytes() == b"synthetic-under-hostile-umask"
 
 
 def test_create_private_file_makes_a_fresh_0600_regular_file(tmp_path):

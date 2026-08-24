@@ -235,10 +235,19 @@ EXIT_CODES: dict[str, int] = {
     #
     # Two of the three blame the escrow for a fault that is not the escrow's, in
     # the direction that makes someone act destructively.
+    # 🔴 AND A SIXTH, ADDED AFTER RE-MEASURING age: `ARTIFACT-CORRUPT`. The
+    # five-way version reported a TAMPERED or TRUNCATED artifact as
+    # `ARTIFACT-EMPTY` — "THE ESCROW IS FINE … a valid encryption of an empty
+    # payload" — because it read file PRESENCE as "age reported success". It does
+    # not: age writes output before authenticating the payload. Detecting
+    # tampering is the single most important thing a backup verifier does, and
+    # that spelling reported it as nothing to worry about.
     "AGE-MISSING": 29,          # precondition: the tool is not installed
     "ARTIFACT-UNREADABLE": 30,  # the pipeline failed BEFORE decrypt was reached
-    "DECRYPT-FAILED": 25,       # age RAN and REFUSED: the escrowed key is wrong
-    "ARTIFACT-EMPTY": 31,       # age SUCCEEDED on nothing: the key is FINE
+    "DECRYPT-FAILED": 25,       # age wrote NOTHING: wrong key OR damaged header
+    "ARTIFACT-CORRUPT": 33,     # age authenticated the HEADER then failed the
+                                #   payload: the key WORKED, the bytes are bad
+    "ARTIFACT-EMPTY": 31,       # age exited ZERO on nothing: the key is FINE
     "RESTORE-FAILED": 26,       # decrypt returned: the key WORKS, data is bad
     "STORE-UNREACHABLE": 27,
     "NO-ARTIFACT": 28,
@@ -246,6 +255,10 @@ EXIT_CODES: dict[str, int] = {
 
 # The three answers a byte comparison may give. Named constants because the test
 # suite pins the literal strings and a verdict is a machine-readable claim.
+# A sentinel distinct from None, so "the key is absent" and "the key is present
+# and null" can be told apart where that matters.
+_ABSENT = object()
+
 CLASS_IDENTICAL = "IDENTICAL"
 CLASS_TRAILING_NEWLINE = "DIFFERS-TRAILING-NEWLINE-ONLY"
 CLASS_MATERIAL = "DIFFERS-MATERIALLY"
@@ -261,21 +274,34 @@ class EscrowError(B.BackupError):
     🔴 The exit code is DERIVED from the token via `EXIT_CODES`, never passed in.
     A constructor that accepted both could raise a token with the wrong code, and
     that is precisely the conflation this class exists to prevent.
+
+    🔴 `verdict` AND `detail` ARE SEPARATE FIELDS, so the sentence THIS module
+    asserts can be pinned by exact equality while the part it does not own —
+    another module's message, an age exit code, a stderr fragment whose wording
+    varies run to run — stays out of the pin.
+
+    That split exists because a test asserting `"THE ESCROW IS FINE" in msg`
+    passed unchanged on a TAMPERED artifact, certifying a sentence that was
+    false on the very run it tested. A substring cannot tell a true message from
+    a confident wrong one; exact equality on the owned half can.
     """
 
-    def __init__(self, token: str, message: str):
+    def __init__(self, token: str, verdict: str, detail: str | None = None):
         if token not in EXIT_CODES:
             raise KeyError(
                 f"{token!r} is not in EXIT_CODES. Every refusal in this script "
                 f"is an ENUMERATED cause with its own exit code; adding one "
                 f"means adding it to the table in the same commit as the test "
                 f"that pins it.")
-        super().__init__(message)
+        super().__init__(verdict)
         self.token = token
+        self.verdict = verdict
+        self.detail = detail
         self.exit_code = EXIT_CODES[token]
 
     def __str__(self) -> str:
-        return f"{self.token}: {super().__str__()}"
+        base = f"{self.token}: {self.verdict}"
+        return f"{base} [upstream: {self.detail}]" if self.detail else base
 
 
 # --------------------------------------------------------------------------- #
@@ -443,7 +469,17 @@ def _shred(path: Path) -> None:
     """
     try:
         if path.is_symlink():
-            path.unlink(missing_ok=True)
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                # 🔴 `return`, NOT fall-through. A bare `except OSError: pass`
+                # here dropped into the `open(path, "r+b")` below — which
+                # FOLLOWS the link and zeroes the target: the exact
+                # truncate-in-place primitive this branch exists to remove,
+                # reachable whenever the unlink fails (a read-only directory, a
+                # race). The docstring's "the link itself is the only thing this
+                # function may destroy" was false on that path.
+                pass
             return
     except OSError:
         pass
@@ -527,26 +563,44 @@ def _rv():
     return mod
 
 
-# 🔴 WHAT THE PROBE BELOW OBSERVES, AND WHY IT IS SOUND — MEASURED, age v1.3.1.
-# `age --decrypt --output PLAIN` was run across every outcome that matters:
+# 🔴 WHAT THE PROBE BELOW OBSERVES — RE-MEASURED, age v1.3.1, MANY SAMPLES.
 #
-#   wrong key, real payload      rc=1  PLAIN absent
-#   wrong key, empty payload     rc=1  PLAIN absent
-#   corrupt ciphertext           rc=1  PLAIN absent
-#   right key, EMPTY payload     rc=0  PLAIN present, size 0
-#   right key, real payload      rc=0  PLAIN present, size 12
+# An earlier round wrote down "corrupt ciphertext -> rc=1, PLAIN absent" from a
+# SINGLE corrupted offset and built the classifier on it. That is false, and the
+# way it is false is the worst possible one: a TAMPERED artifact was reported as
+# `ARTIFACT-EMPTY` — "THE ESCROW IS FINE … a valid encryption of an empty
+# payload" — while quoting age's own "may be corrupted or tampered with" in the
+# same sentence. Detecting tampering is the single most important thing a backup
+# verifier does. One measurement is not a general claim; here is the general one:
 #
-# So the PRESENCE of the output file at the moment `decrypt()` raises separates
-# the two failures that were previously conflated: age REFUSED (no file — the
-# escrowed key is wrong) versus age SUCCEEDED on nothing (file present, empty —
-# the key is FINE and the artifact is an encryption of nothing, which is exactly
-# what restore-verify's own comment at its zero-byte branch says).
+#   WRONG KEY          5 payload sizes (0 B … 2 MB)      rc=1  PLAIN **ABSENT**
+#   HEADER corrupt     2 sizes                           rc=1  PLAIN **ABSENT**
+#   PAYLOAD corrupt    8 offsets x 4 sizes               rc=1  PLAIN PRESENT
+#                                                              (size 0 or partial)
+#   TRUNCATED          3 sizes                           rc=1  PLAIN PRESENT
+#   valid enc of NOTHING                                 rc=0  PLAIN PRESENT, 0
+#   intact                                               rc=0  PLAIN PRESENT, N
 #
-# ⚠ The inference "no file ⇒ age ran and refused" holds ONLY because
-# `decrypt_check` refuses up front when `age` is not on PATH: without that
-# precondition, restore-verify's own age-missing guard raises before touching
-# PLAIN and would be indistinguishable from a refusal. The two halves are one
-# argument; do not remove either alone.
+# ⚠ A no-op mutation nearly produced a second false table: writing 0xff over a
+# byte that was ALREADY 0xff left one sample reading rc=0, which would have said
+# age fails to detect tampering. Re-run with a guaranteed bit flip (XOR 0xFF),
+# all 8 offsets give rc=1. Verify the mutation actually mutates.
+#
+# TWO CONSEQUENCES, BOTH LOAD-BEARING:
+#
+#  1. `plain_present` CANNOT separate "valid encryption of nothing" from
+#     "corrupt payload" — both are PRESENT at size 0. So the rc==0 / rc!=0 split
+#     has to come from the module that knows, and it does:
+#     `restore_verify.DECRYPT_*` causes, published as values.
+#  2. Within a NON-ZERO age exit, file presence IS meaningful and is the only
+#     thing that separates a KEY fault from a DATA fault:
+#       * PLAIN ABSENT  -> age never wrote anything: the identity did not match
+#                          the recipients, OR the header is damaged. NOT
+#                          separable from outside, so neither is asserted.
+#       * PLAIN PRESENT -> age AUTHENTICATED THE HEADER, which requires the
+#                          identity to match, and then failed on a payload chunk
+#                          or ran out of input. The escrowed key WORKED; the
+#                          artifact is tampered, corrupt or truncated.
 @contextlib.contextmanager
 def _decrypt_phase_probe(RV):
     """Observe HOW FAR restore-verify's decrypt step got. Yields a state dict.
@@ -563,22 +617,26 @@ def _decrypt_phase_probe(RV):
     single-shot CLI that owns its own import; the swap is restored in a
     `finally`.
     """
-    state = {"reached": False, "returned": False, "plain_present": None}
+    state = {"reached": False, "returned": False, "plain_present": None,
+             "cause": None}
     real = RV.decrypt
 
     def probe(cipher, plain, identity):
         state["reached"] = True
         try:
             real(cipher, plain, identity)
-        except BaseException:
-            try:
-                state["plain_present"] = Path(plain).exists()
-            except OSError:
-                state["plain_present"] = None
+        except BaseException as exc:
+            # `Path.exists()` swallows OSError internally and returns False, so
+            # there is deliberately no try/except here — one would be dead.
+            state["plain_present"] = Path(plain).exists()
+            # The rc==0-vs-rc!=0 split, taken as a VALUE from the module that
+            # owns it. `getattr` because a non-RestoreVerifyError has no cause;
+            # None then means "no published cause", never a default one.
+            state["cause"] = getattr(exc, "cause", None)
             raise
         state["returned"] = True
 
-    RV.decrypt = real if real is None else probe
+    RV.decrypt = probe
     try:
         yield state
     finally:
@@ -735,6 +793,13 @@ def check_server(bw: BitwardenCLI, status: dict,
             "`bw config server` printed nothing, so which server answered "
             "cannot be determined. An escrow verified against an unknown server "
             "is an escrow verified against no server in particular.")
+    # 🔴 THE PIN CHECK LIVES IN EXACTLY ONE PLACE. It was open-coded at two
+    # sites — the session-unavailable early return and the normal path — with
+    # DIFFERENT WORDING for the same refusal, which is how one copy drifts and
+    # the disagreement becomes inaudible. Hoisted above both branches, so it
+    # cannot be skipped by whichever path is taken.
+    _refuse_unless_pin_matches(expect, configured)
+
     raw_session = status.get("serverUrl")
     session_server = (raw_session or "").strip()
     if not session_server:
@@ -742,12 +807,6 @@ def check_server(bw: BitwardenCLI, status: dict,
                + ("null" if raw_session is None else "empty")
                + " — the CLI's configured server could NOT be cross-checked "
                  "against the authenticated session's")
-        if expect is not None and _norm_url(expect) != _norm_url(configured):
-            raise EscrowError(
-                "SERVER-MISMATCH",
-                "the configured server does not match the one pinned by "
-                "--expect-server / ASIB_ESCROW_SERVER. URLs withheld — this "
-                "repo is public; compare them by hand with `bw config server`.")
         return configured, expect is not None, why
     if _norm_url(session_server) != _norm_url(configured):
         raise EscrowError(
@@ -758,16 +817,19 @@ def check_server(bw: BitwardenCLI, status: dict,
             "this repo is public and messages from it end up pasted into it.) "
             "Re-run `bw config server` and `bw status` by hand to see both, "
             "then `bw logout` and log in against the intended one.")
-    if expect is not None:
-        if _norm_url(expect) != _norm_url(configured):
-            raise EscrowError(
-                "SERVER-MISMATCH",
-                "the configured server does not match the one pinned by "
-                "--expect-server / ASIB_ESCROW_SERVER. Refusing to report an "
-                "escrow found on a server that is not the one you named — URLs "
-                "withheld, compare them by hand with `bw config server`.")
-        return configured, True, None
-    return configured, False, None
+    return configured, expect is not None, None
+
+
+def _refuse_unless_pin_matches(expect: str | None, configured: str) -> None:
+    """The `--expect-server` pin, in ONE place. No-op when nothing is pinned."""
+    if expect is None or _norm_url(expect) == _norm_url(configured):
+        return
+    raise EscrowError(
+        "SERVER-MISMATCH",
+        "the configured server does not match the one pinned by "
+        "--expect-server / ASIB_ESCROW_SERVER. Refusing to report an escrow "
+        "found on a server that is not the one you named — URLs withheld, this "
+        "repo is public; compare them by hand with `bw config server`.")
 
 
 def _norm_url(u: str) -> str:
@@ -831,12 +893,18 @@ def read_note(item: dict, item_name: str) -> bytes:
     for an intact note — overwrites a good copy on the strength of a parsing
     accident. `"notes" in item` is the whole fix.
     """
-    if "notes" not in item:
+    # 🔴 ABSENT **OR** NULL. JSON's shape for "this item has no notes" is almost
+    # certainly `{"notes": null}`, not an omitted key — the very shape this
+    # module already handles for `serverUrl` in `check_server`. Splitting on
+    # `"notes" not in item` alone let a null fall through to `NOTE-EMPTY`, i.e.
+    # straight back to the "re-escrow over a good copy" advice this token was
+    # created to prevent.
+    if item.get("notes", _ABSENT) is _ABSENT or item.get("notes") is None:
         raise EscrowError(
             "NOTE-MISSING",
             f"the vault item {item_name!r} exists but its payload carries NO "
-            f"`notes` FIELD AT ALL — not an empty one, an absent one. That is a "
-            f"`bw` output-schema surprise, not evidence the escrow was emptied, "
+            f"`notes` VALUE — the field is absent or null, not empty. That is a "
+            f"`bw` output-schema answer, not evidence the escrow was emptied, "
             f"and the note may be perfectly intact. Do NOT re-escrow on this: "
             f"read the item in the web vault first.")
     notes = item["notes"]
@@ -927,9 +995,10 @@ def decrypt_check(*, escrow_bytes: bytes, work_dir: Path, bucket: str,
         # classification depend on wording somebody else owns.
         raise EscrowError(
             "STORE-UNREACHABLE",
-            f"could not open the artifact store to test the escrowed key "
-            f"({type(exc).__name__}: {exc}). NOTHING about the escrow was "
-            f"proven by this run beyond the byte comparison above.")
+            "could not open the artifact store to test the escrowed key. "
+            "NOTHING about the escrow was proven by this run beyond the byte "
+            "comparison above.",
+            detail=f"{type(exc).__name__}: {exc}")
 
     try:
         keys = sorted(downloader.list(prefix))
@@ -1005,45 +1074,82 @@ def decrypt_check(*, escrow_bytes: bytes, work_dir: Path, bucket: str,
                         raise EscrowError(
                             "ARTIFACT-UNREADABLE",
                             f"the pipeline failed BEFORE the escrowed key was "
-                            f"ever used, on {key}: {exc} — an empty or "
-                            f"unreadable object, not a fact about the escrow. "
-                            f"NOTHING here decrypted, and nothing here is "
-                            f"evidence for or against the escrowed key. Run "
-                            f"`restore-verify.py` to diagnose the object.")
+                            f"ever used, on {key} — an empty or unreadable "
+                            f"object, not a fact about the escrow. NOTHING here "
+                            f"decrypted, and nothing here is evidence for or "
+                            f"against the escrowed key. Run `restore-verify.py` "
+                            f"to diagnose the object.",
+                            detail=str(exc))
+                    if phase["cause"] == RV.DECRYPT_AGE_MISSING:
+                        # Belt: the precondition at the top of `decrypt_check`
+                        # normally wins, so this is reachable only if `age`
+                        # disappears mid-run. It must never be read as a verdict
+                        # on the escrow.
+                        raise EscrowError(
+                            "AGE-MISSING",
+                            "`age` vanished between the precondition check and "
+                            "the decrypt call, so the escrowed key was never "
+                            "tested. This is an ENVIRONMENT fault and says "
+                            "NOTHING about the escrow or the artifacts.",
+                            detail=str(exc))
                     if not phase["returned"]:
-                        if phase["plain_present"]:
-                            # age exited 0 and produced an EMPTY plaintext.
-                            # Measured: a refusal leaves NO output file, so a
-                            # file that exists means the key opened it.
-                            # restore-verify's own comment at that branch says
-                            # the same: "age reported success, so this is not
-                            # damage — it is a valid encryption of nothing."
+                        # 🔴 `returned == False` MEANS `decrypt()` RAISED. The
+                        # previous version's comment here read "age exited 0 and
+                        # produced an EMPTY plaintext" — contradicting its own
+                        # enclosing condition, and that contradiction is exactly
+                        # where the tampered-artifact bug lived. Which of age's
+                        # two failure branches fired is taken as a VALUE from
+                        # restore-verify, never inferred from file presence.
+                        if phase["cause"] == RV.DECRYPT_EMPTY_PLAINTEXT:
                             raise EscrowError(
                                 "ARTIFACT-EMPTY",
                                 f"the ESCROWED key OPENED {key} and the artifact "
-                                f"contains NOTHING: {exc}. 🔴 THE ESCROW IS FINE "
-                                f"— age reported success and produced an output "
-                                f"file, which a wrong key cannot do. Do NOT "
-                                f"re-escrow or rotate on the strength of this; "
-                                f"the fault is a valid encryption of an empty "
-                                f"payload. Run `restore-verify.py` to diagnose "
-                                f"the artifact.")
+                                f"contains NOTHING. 🔴 THE ESCROW IS FINE — age "
+                                f"exited ZERO, which a wrong key cannot make it "
+                                f"do; the payload is a valid encryption of an "
+                                f"empty file. Do NOT re-escrow or rotate on the "
+                                f"strength of this. Run `restore-verify.py` to "
+                                f"diagnose the artifact.",
+                                detail=str(exc))
+                        if phase["plain_present"]:
+                            # age exited NON-ZERO having already written output.
+                            # Measured across 8 offsets x 4 sizes plus 3
+                            # truncations: reaching the payload at all means age
+                            # authenticated the HEADER, which requires the
+                            # identity to match. So the key worked and the bytes
+                            # did not.
+                            raise EscrowError(
+                                "ARTIFACT-CORRUPT",
+                                f"🔴 {key} is TAMPERED, CORRUPT or TRUNCATED. age "
+                                f"authenticated the header with the ESCROWED key "
+                                f"— which a non-matching identity cannot do — "
+                                f"began writing plaintext, and then FAILED on the "
+                                f"payload. THE ESCROW IS FINE; THE BACKUP IS NOT. "
+                                f"This is the finding a backup verifier exists to "
+                                f"make: treat the artifact as unusable, check the "
+                                f"other retained objects for this scope, and do "
+                                f"NOT rotate the key.",
+                                detail=str(exc))
                         raise EscrowError(
                             "DECRYPT-FAILED",
-                            f"the ESCROWED bytes do NOT open {key}: {exc} — age "
-                            f"ran and REFUSED it, leaving no plaintext at all. "
-                            f"The escrow is present but it is not (or no longer) "
-                            f"a working identity for these artifacts. Nothing "
-                            f"here says the artifacts are damaged; the on-disk "
-                            f"key was not used.")
+                            f"age REFUSED {key} without writing any plaintext at "
+                            f"all. TWO CAUSES PRODUCE THIS AND THEY ARE NOT "
+                            f"SEPARABLE FROM HERE: the escrowed identity does not "
+                            f"match this artifact's recipients, or the artifact's "
+                            f"HEADER is damaged. Neither is asserted. To tell "
+                            f"them apart, run `restore-verify.py` with the "
+                            f"ON-DISK identity: if that fails too the artifact is "
+                            f"the problem, not the escrow. Do NOT rotate the key "
+                            f"before doing that.",
+                            detail=str(exc))
                     raise EscrowError(
                         "RESTORE-FAILED",
                         f"the ESCROWED bytes DECRYPTED {key} — `decrypt()` "
                         f"RETURNED, which is what makes that claim observable — "
-                        f"and the restore then failed: {exc}. This is a fault in "
-                        f"the ARTIFACT, not in the escrow. The escrowed key "
-                        f"works; run `restore-verify.py` to diagnose the "
-                        f"artifact.")
+                        f"and the restore then failed. This is a fault in the "
+                        f"ARTIFACT, not in the escrow. The escrowed key works; "
+                        f"run `restore-verify.py` to diagnose the artifact.",
+                        detail=str(exc))
                 return scope, key, v.commits_restored, v.refs_restored
         finally:
             # 🔴 EVERY PATH OUT: success, either classified failure, and any
