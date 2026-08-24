@@ -970,28 +970,76 @@ _SPOOL_EMIT_PATH = Path(
 )
 _spool_emit_mod = None
 _spool_emit_tried = False
+# 🔴 THE LAZY LOAD RUNS ON A HANDLER THREAD, SO IT NEEDS A LOCK. ThreadingHTTPServer
+# gives every /cmd its own thread and each one emits after its response is sent, so
+# two commands in flight reach `_load_spool_emit` CONCURRENTLY — routinely, because
+# request N's emit fires exactly while request N+1 is being handled. Without this
+# lock the flag was published BEFORE the module: the loser thread read
+# `_spool_emit_tried is True`, was handed a still-None `_spool_emit_mod`, and
+# `emit_cmd_event` returned at its `if se is None` guard. That event was DROPPED —
+# not delayed, not retried, gone — for the whole life of the process on the losing
+# call, and the row simply never appears in activity.events.
+#
+# MEASURED, not reasoned, and stated at the scope it was measured: two threads
+# reaching this function with the cache cold, 40 trials per point, on the 24-core
+# workbench at load average ~42-49 (i.e. loaded, not idle — the CI-like end of
+# the range; the idle end was not measured). Events lost, before -> after:
+#
+#     stagger 0ms      35/40 -> 0/40
+#     stagger 0.5ms      1/40 -> 0/40
+#     stagger 2ms        0/40 -> 0/40
+#
+# So the window is the import's own duration, under 2ms here — which is why this
+# is rare on a workstation and ~10% of runs in a CI step container, where every
+# thread switch is slower. It surfaced as the #1 CI failure: the throttle test's
+# `throttled` row never landing while the server's own stderr proved it HAD
+# throttled. Raising that test's deadline 3s -> 10s could not help, because
+# nothing was ever going to arrive.
+_spool_emit_lock = threading.Lock()
 
 
 def _load_spool_emit():
     """Import the activity spool emitter by absolute path, once. Returns the
     module or None (best-effort — a missing/broken emitter just disables
-    telemetry, never raises)."""
+    telemetry, never raises).
+
+    THREAD-SAFE, and it has to be — see `_spool_emit_lock` above. Two orderings
+    carry the whole contract:
+      * `_spool_emit_tried` is set LAST, after `_spool_emit_mod` is published, so
+        the unlocked fast path can never observe "tried" with the module still
+        missing. (CPython's GIL makes the two global stores non-reorderable.)
+      * the double check inside the lock is what stops the second thread redoing
+        an import the first already finished.
+
+    BEST-EFFORT IS PRESERVED, with one honest caveat: a concurrent caller now
+    BLOCKS for the duration of one small stdlib-only file import instead of
+    silently losing its event. That cannot delay a command — every emit call site
+    runs after `_send` — and it happens at most once per process.
+
+    🔴 The lock is NOT re-entrant: nothing the loaded module imports may call back
+    into this function. spool_emit.py imports stdlib only; keep it that way.
+    """
     global _spool_emit_mod, _spool_emit_tried
     if _spool_emit_tried:
         return _spool_emit_mod
-    _spool_emit_tried = True
-    try:
-        import importlib.util
-        spec = importlib.util.spec_from_file_location(
-            "browser_bridge_spool_emit", str(_SPOOL_EMIT_PATH))
-        if spec is None or spec.loader is None:
-            return None
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
+    with _spool_emit_lock:
+        if _spool_emit_tried:
+            return _spool_emit_mod
+        mod = None
+        try:
+            import importlib.util
+            spec = importlib.util.spec_from_file_location(
+                "browser_bridge_spool_emit", str(_SPOOL_EMIT_PATH))
+            if spec is not None and spec.loader is not None:
+                candidate = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(candidate)
+                mod = candidate
+        except Exception:  # noqa: BLE001 — telemetry is strictly best-effort.
+            mod = None
         _spool_emit_mod = mod
-    except Exception:  # noqa: BLE001 — telemetry is strictly best-effort.
-        _spool_emit_mod = None
-    return _spool_emit_mod
+        # LAST. See the ordering contract in the docstring.
+        _spool_emit_tried = True
+        return _spool_emit_mod
 
 
 def _domain_from_result(result) -> str:
