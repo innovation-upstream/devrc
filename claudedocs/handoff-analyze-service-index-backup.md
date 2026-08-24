@@ -312,6 +312,14 @@ guess is loud, not silent — exit 19 prints the observed type. Locked/unauthent
 `/dev/null` precisely so an unattended run fails fast instead of blocking on an invisible
 prompt. `SECRETS.md` carries the full exit-code table with per-code "do not rotate" guidance.
 
+**Measured on BOTH hosts 2026-08-24, and they differ — correctly.** Workbench → `rc=12
+VAULT-LOCKED`; laptop → **`rc=13 VAULT-UNAUTH`**. Two points, two distinct codes, each
+accurate: this is the first *live* exercise of the unauthenticated branch, which had only
+ever been synthetic. 🔴 **The DR fact hiding in that second reading: the laptop's `bw` is
+not logged in at all.** If the workbench is the machine you lose, recovering the escrow from
+the laptop needs a fresh `bw login` there first — email plus master password plus 2FA, not
+just the master password. Worth doing before you need it.
+
 **And the retrieval path that actually matters in a disaster.** The escrow was verified
 through the `bw` CLI **on this machine**. If this machine is gone you would read that note
 from the **web vault on another device** and paste it into a file — a path that can silently
