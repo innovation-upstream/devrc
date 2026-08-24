@@ -4,7 +4,7 @@
 
 import { apiRequest, apiRequestV3, fetchAllPages } from './client.mjs';
 import { getList } from './lists.mjs';
-import { agentIdentity, buildMarker, stampDescription } from '../lib/agent-marker.mjs';
+import { agentIdentity, buildMarker, stampDescription, COND_UNSTATED } from '../lib/agent-marker.mjs';
 
 // Get task details
 export async function getTask(taskId, includeSubtasks = false) {
@@ -107,20 +107,28 @@ function agentStampEnabled(options) {
 // into the description, and (b) the tag to attach afterwards.
 //
 // EXPORTED for test/agent-marker.test.mjs. It is the entire stamping decision,
-// and it is pure — so the suite can assert what ClickUp would actually receive
-// without a network call or a module mock. createTask/createSubtask do nothing
-// with the result but spread it into the POST body and attach the tag.
+// and its ONLY side effect is the stderr warning below — so the suite can assert
+// what ClickUp would actually receive without a network call or a module mock.
+// createTask/createSubtask do nothing with the result but spread it into the
+// POST body and attach the tag.
 export function applyAgentStamp(options) {
   const { agentStamp: _drop, agentFp, agentCond, ...rest } = options;
   if (!agentStampEnabled(options)) return { body: rest, tag: null };
   const id = agentIdentity();
+  // A caller with a real closing condition passes one. A caller with none gets
+  // `unstated` — and is TOLD SO, loudly.
+  //
+  // 🔴 This used to default to `manual`, which stamped every conditionless task
+  // as though it had a condition. An honest marker of ABSENCE beats a dishonest
+  // marker of presence: `cond=unstated` is greppable, so "how many objects did we
+  // file with no closing condition?" is a countable question, where a fake
+  // `manual` simply hid the non-compliant object among the compliant ones.
+  const cond = agentCond ?? id.cond;
+  warnIfConditionUnstated(cond);
   const marker = buildMarker({
     srcProducer: id.producer,
     srcRunId: id.runId,
-    // A caller with a real machine-checkable condition passes one; a session
-    // filing a one-off gets `manual`, which is an honest "no machine closes
-    // this" rather than a fabricated condition nobody will evaluate.
-    cond: agentCond ?? id.cond,
+    cond,
     // 🔴 fp is OMITTED unless the caller supplies one. A session-filed task has
     // no stable claim tuple, and a fingerprint that changes every run defeats
     // the dedupe it exists to provide — see lib/agent-marker.mjs.
@@ -137,6 +145,19 @@ export function applyAgentStamp(options) {
     body.description = stampDescription(body.description, marker);
   }
   return { body, tag: id.label };
+}
+
+// Loud on stderr, never fatal: the caller asked for a task and gets one. The
+// warning is what makes the gap visible AT THE MOMENT it is created, instead of
+// only to whoever greps the corpus later.
+function warnIfConditionUnstated(cond) {
+  if (cond !== COND_UNSTATED) return;
+  process.stderr.write(
+    'Warning: filing this task with cond=unstated — no closing condition was named.\n'
+    + '  Pass --cond to say what closes it: gh_pr_merged:<owner>/<repo>#<n>, alert_cleared:<name>,\n'
+    + '  cmd_exit_zero:<id>, metric_below:<id>, or manual:<who> naming the human who checks it.\n'
+    + '  What counts as a closing condition: ~/.claude/skills/clawgate/flows/task-authoring.md, question 1.\n',
+  );
 }
 
 async function attachAgentTag(taskId, tag) {

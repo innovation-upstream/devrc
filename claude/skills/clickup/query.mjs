@@ -340,9 +340,12 @@ Options:
   --space      Space ID for create-doc (places doc in that space)
   --cond       Close-condition for a task an agent files, from the enumerated
                allowlist (gh_pr_merged:<owner>/<repo>#<n>, alert_cleared:<name>,
-               cmd_exit_zero:<id>, metric_below:<id>, manual). Recorded in the
-               task body so a later reconciler can close it. Defaults to
-               'manual'; anything off-allowlist is REJECTED, not stored.
+               cmd_exit_zero:<id>, metric_below:<id>, manual:<who>). Recorded in
+               the task body so a later reconciler can close it. 'manual' MUST
+               name who checks it - a bare 'manual' names nobody and is REJECTED,
+               as is anything off-allowlist. Omitting --cond records
+               cond=unstated and warns on stderr, so a task filed with no
+               condition stays countable instead of looking compliant.
 
 Bulk Operations (comma-separated IDs):
   node query.mjs get id1,id2,id3              Fetch multiple tasks at once
@@ -1094,15 +1097,17 @@ async function main() {
         }
         // Agent-object hygiene: an explicit close-condition for the marker
         // createTask() stamps. Validated HERE so an off-allowlist value fails
-        // loudly at the CLI instead of silently degrading to `manual` deep
-        // inside the stamp — a wrong condition that reads as accepted is how an
-        // object ends up believed-tracked and actually immortal.
+        // loudly at the CLI instead of silently degrading deep inside the stamp
+        // — a wrong condition that reads as accepted is how an object ends up
+        // believed-tracked and actually immortal. Omitting --cond entirely is
+        // NOT an error: it records cond=unstated and warns (api/tasks.mjs).
         if (condArg) {
           try {
             options.agentCond = validateCond(condArg);
           } catch (e) {
             console.error(`Error: ${e.message}`);
             console.error(`Allowed --cond kinds: ${[...COND_KINDS].sort().join(', ')}`);
+            console.error('Every kind takes an argument; manual takes the NAME of who checks it.');
             process.exit(1);
           }
         }

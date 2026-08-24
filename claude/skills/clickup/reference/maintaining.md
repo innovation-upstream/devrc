@@ -56,10 +56,22 @@ Two gotchas worth keeping:
   shallow sort silently fingerprints two identical claims apart whenever a nested
   object's keys were built in a different order. Mutation-verified: only the
   nested vector catches it.
-- `agentIdentity()` **sanitises rather than trusts**, and an unusable
-  `CLAW_AGENT_COND` degrades to `manual`, never to silence. `manual` is an honest
-  "no machine closes this"; dropping the marker would make the object invisible
-  again, which is the whole defect.
+- `agentIdentity()` **sanitises rather than trusts**, and a missing or unusable
+  `CLAW_AGENT_COND` degrades to `unstated`, never to silence and never to
+  `manual`. `unstated` is an honest, greppable marker of ABSENCE — a fake `manual`
+  hid the non-compliant object among the compliant ones; dropping the marker
+  entirely would make the object invisible again, which is the whole defect.
+  A caller may not pass `unstated`: it is an observation the code makes, not a
+  condition anyone may claim.
+- 🔴 **This side and the Python side now DIVERGE on `manual`'s arity, deliberately
+  and only there.** Here `manual:<who>` is required and a bare `manual` is
+  refused; Python still accepts a bare `manual` and refuses `manual:zach`
+  (measured 2026-08-24 against `<talos-infra>/scripts/lib/agent_obj_marker.py` at
+  `origin/trunk`). So this side **refuses to emit** a bare `manual` and **still
+  parses** one — rejecting it on the read path would blind a JS reconciler to
+  every object the Python producers stamp. The divergence is enumerated and
+  asserted in `test/agent-marker.test.mjs` (`PYTHON_DIVERGENCE`); closing it means
+  making the same change in the Python module and moving those notes with it.
 
 ## Tests
 

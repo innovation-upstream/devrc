@@ -217,7 +217,13 @@ SUITES=(
   # talos-infra's Python implementation (no byte-mirror can bridge the two, so
   # shared vectors are what keeps them from drifting), and the create-path seam.
   # Floor 145 = 152 - min(50, max(1, 152/20)) = 152 - 7.
-  "claude/skills/clickup/test|5|145"
+  #
+  # 160 tests / 5 files measured 2026-08-24: the `cond` guard grew a checker
+  # requirement (`manual:<who>`, bare `manual` rejected) and an honest
+  # missing-condition fallback (`cond=unstated`, warned on stderr at the create
+  # site) — plus the enumerated JS/Python divergence those two introduce.
+  # Floor 152 = 160 - min(50, max(1, 160/20)) = 160 - 8.
+  "claude/skills/clickup/test|5|152"
 )
 
 # --- discovery roots -----------------------------------------------------------

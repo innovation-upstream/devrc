@@ -47,7 +47,7 @@ export const MARKER_VERSION = '1';
 //   alert_cleared:<alertname>        closes when that Prometheus alert stops firing
 //   cmd_exit_zero:<id>               closes when a registered command exits 0
 //   metric_below:<id>                closes when a registered metric drops below its bound
-//   manual                           the escape hatch — no machine check, takes NO arg
+//   manual:<who>                     no machine check — NAMES the human who checks it
 export const COND_KINDS = Object.freeze([
   'gh_pr_merged',
   'alert_cleared',
@@ -56,10 +56,19 @@ export const COND_KINDS = Object.freeze([
   'manual',
 ]);
 
-// The one kind that is complete on its own. Every OTHER kind REQUIRES an
-// argument: a bare `metric_below` names no metric and is exactly as unactionable
-// as the free text the allowlist exists to forbid.
-export const COND_KINDS_NO_ARG = Object.freeze(['manual']);
+// 🔴 `manual` REQUIRES an argument, and that is the whole point of it.
+// `claude/RULES.md` (proactivity gate, "Out of scope") allows a task to be filed
+// only when its closing condition can be NAMED, together with who or what checks
+// it — the definition lives at question 1 of
+// `~/.claude/skills/clawgate/flows/task-authoring.md`. A bare `manual` satisfies
+// neither half: it is not a machine check, and it names nobody. So it is exactly
+// as unactionable as the free text this allowlist exists to forbid, and it is
+// worse than free text because it READS as a recorded condition.
+//
+// `unstated` is the ONE kind that is complete on its own — see below. Every kind
+// a caller may pass takes an argument.
+export const COND_UNSTATED = 'unstated';
+export const COND_KINDS_NO_ARG = Object.freeze([COND_UNSTATED]);
 
 export const AGENT_LABEL_PREFIX = 'agent/';
 
@@ -92,23 +101,55 @@ export function labelFor(producer) {
   return AGENT_LABEL_PREFIX + producer;
 }
 
-export function validateCond(cond) {
+// Validate a condition string.
+//
+// 🔴 TWO OPT-INS, both narrow, both named — never a bare boolean:
+//
+//   allowUnstated    `unstated` is the value the MISSING-cond fallback produces
+//                    (agentIdentity / applyAgentStamp). buildMarker and
+//                    parseMarker must be able to handle it; a CALLER must never
+//                    be able to pass it, because "I have no condition" is a fact
+//                    the code observes, not a condition anyone may claim.
+//   allowBareManual  parse-side only, and it is a CROSS-LANGUAGE fact rather
+//                    than a legacy allowance: talos-infra's
+//                    `scripts/lib/agent_obj_marker.py` is the other half of this
+//                    one grammar and it still emits a bare `manual` (measured
+//                    2026-08-24). Rejecting that on the READ path would blind a
+//                    JS reconciler to every object the Python producers stamp —
+//                    which is the exact invisibility this whole marker exists to
+//                    end. So: this side REFUSES TO EMIT one and still READS one.
+//                    A bare `manual` parses with condArg === null, which is how a
+//                    consumer counts the ones that name nobody.
+export function validateCond(cond, { allowUnstated = false, allowBareManual = false } = {}) {
   if (typeof cond !== 'string' || cond === '') {
     throw new MarkerError('cond is required');
   }
   const i = cond.indexOf(':');
   const kind = i < 0 ? cond : cond.slice(0, i);
   const arg = i < 0 ? '' : cond.slice(i + 1);
+  if (kind === COND_UNSTATED) {
+    if (!allowUnstated) {
+      throw new MarkerError(
+        'cond "unstated" is produced only by the missing-cond fallback and is never accepted as input'
+        + ' — name a real condition instead, e.g. `manual:<who>`',
+      );
+    }
+    if (i >= 0) throw new MarkerError('cond kind "unstated" takes no argument');
+    return cond;
+  }
   if (!COND_KINDS.includes(kind)) {
     throw new MarkerError(
       `cond kind ${JSON.stringify(kind)} is not in the allowlist ${JSON.stringify([...COND_KINDS].sort())}`,
     );
   }
-  if (COND_KINDS_NO_ARG.includes(kind)) {
-    if (i >= 0) throw new MarkerError(`cond kind ${JSON.stringify(kind)} takes no argument`);
-    return cond;
-  }
   if (i < 0 || arg === '') {
+    if (kind === 'manual') {
+      if (i < 0 && allowBareManual) return cond;
+      throw new MarkerError(
+        'cond kind "manual" must NAME who checks it — write `manual:<who>` (e.g. `manual:zach`).'
+        + ' A bare `manual` names nobody, so it records a condition no one can act on.',
+      );
+    }
     throw new MarkerError(`cond kind ${JSON.stringify(kind)} requires an argument (\`${kind}:<arg>\`)`);
   }
   if (!COND_ARG_RE.test(arg)) {
@@ -145,7 +186,9 @@ export function buildMarker({ srcProducer, srcRunId, cond, fp = null, init = nul
   if (!RUN_ID_RE.test(srcRunId ?? '')) {
     throw new MarkerError(`invalid run-id ${JSON.stringify(srcRunId)} (want ${RUN_ID_RE})`);
   }
-  validateCond(cond);
+  // `unstated` is buildable because the fallback produces it; a bare `manual` is
+  // NOT, because this side must never emit a condition that names nobody.
+  validateCond(cond, { allowUnstated: true });
   const parts = [`v=${MARKER_VERSION}`];
   if (fp !== null && fp !== undefined) {
     if (!FP_RE.test(fp)) throw new MarkerError(`invalid fp ${JSON.stringify(fp)} (want 12 lowercase hex)`);
@@ -195,7 +238,9 @@ function parseFields(blob) {
   const runId = src.slice(si + 1);
   if (!PRODUCER_RE.test(producer) || !RUN_ID_RE.test(runId)) return null;
   try {
-    validateCond(cond);
+    // Read side: tolerant of both the fallback value and the Python
+    // implementation's bare `manual` — see validateCond's opt-in notes.
+    validateCond(cond, { allowUnstated: true, allowBareManual: true });
   } catch {
     return null;
   }
@@ -236,14 +281,22 @@ export function agentIdentity(env = process.env) {
     RUN_ID_RE,
     (s) => s.replace(/[^A-Za-z0-9._-]/g, '-').slice(0, 128),
   ) ?? 'unknown';
-  // 🔴 An unrecognised cond falls back to `manual`, NOT to silence. `manual` is
-  // an honest "no machine can close this"; dropping the marker entirely would
-  // make the object invisible again, which is the whole defect.
-  let cond = 'manual';
+  // 🔴 A missing or unrecognised cond falls back to `unstated`, NOT to silence
+  // and NOT to `manual`.
+  //
+  // It used to fall back to `manual`, and that was a DISHONEST marker of
+  // presence: every task filed without a condition came out stamped as though it
+  // had one, so a non-compliant object was indistinguishable from a compliant
+  // one and nothing could count them. `unstated` is an honest marker of ABSENCE
+  // — greppable, countable ("how many objects were filed with no condition?"),
+  // and impossible to mistake for a condition somebody will evaluate. Dropping
+  // the marker entirely is still not an option: that makes the object invisible
+  // again, which is the defect this whole file exists to close.
+  let cond = COND_UNSTATED;
   try {
     if (env.CLAW_AGENT_COND) cond = validateCond(env.CLAW_AGENT_COND);
   } catch {
-    cond = 'manual';
+    cond = COND_UNSTATED;
   }
   const init = sanitise(env.CLAW_AGENT_INIT, INIT_RE, (s) => s.toLowerCase().replace(/[^a-z0-9-]/g, '-')) ?? null;
   return { producer, runId, cond, init, label: AGENT_LABEL_PREFIX + producer };

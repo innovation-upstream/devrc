@@ -36,6 +36,7 @@ import {
   MARKER_VERSION,
   COND_KINDS,
   COND_KINDS_NO_ARG,
+  COND_UNSTATED,
   MarkerError,
   AGENT_LABEL_PREFIX,
   labelFor,
@@ -60,8 +61,8 @@ const QUERY_SRC = readFileSync(resolve(__dirname, '..', 'query.mjs'), 'utf8');
 // and it would agree with any drift.
 const VECTORS = Object.freeze({
   minimal: {
-    args: { srcProducer: 'capacity-sweep', srcRunId: 'sweep-29159872-abcde', cond: 'manual' },
-    marker: '<!-- claw:obj v=1 src=capacity-sweep/sweep-29159872-abcde cond=manual -->',
+    args: { srcProducer: 'capacity-sweep', srcRunId: 'sweep-29159872-abcde', cond: 'cmd_exit_zero:drift-check' },
+    marker: '<!-- claw:obj v=1 src=capacity-sweep/sweep-29159872-abcde cond=cmd_exit_zero:drift-check -->',
   },
   full: {
     args: {
@@ -81,6 +82,31 @@ const VECTORS = Object.freeze({
     [{ producer: 'reliability-sweep-advisor', claim: 'index-candidates' }, '633d2c372bd0'],
   ],
   condKinds: ['alert_cleared', 'cmd_exit_zero', 'gh_pr_merged', 'manual', 'metric_below'],
+  // A Python-produced marker carrying the bare `manual` this side no longer
+  // EMITS but must still READ. Generated 2026-08-24 from
+  // talos-infra scripts/lib/agent_obj_marker.py at origin/trunk.
+  pythonBareManual: '<!-- claw:obj v=1 src=capacity-sweep/run-1 cond=manual -->',
+});
+
+// 🔴 THE DIVERGENCE FROM PYTHON, ENUMERATED — because tier 2 above otherwise
+// reads as "these two agree", and as of this change they do not, in exactly two
+// places. Both were MEASURED against the Python module at
+// talos-infra origin/trunk on 2026-08-24, and the error strings are quoted:
+//
+//   1. bare `manual`  — Python ACCEPTS it (`validate_cond('manual') -> 'manual'`);
+//      this side refuses to emit one and still parses one. Python rejects
+//      `manual:zach` with "cond kind 'manual' takes no argument (got 'zach')".
+//   2. `unstated`     — JS only. Python: "cond kind 'unstated' is not in the
+//      allowlist [...]".
+//
+// Neither divergence changes the ALLOWLIST OF KINDS, which is why the pin below
+// still holds. Closing the divergence means making the same change in
+// `scripts/lib/agent_obj_marker.py` and moving these notes with it; until then
+// this block is the honest record, not a to-do nobody wrote down.
+const PYTHON_DIVERGENCE = Object.freeze({
+  jsRefusesToEmitBareManual: true,
+  jsStillParsesBareManual: true,
+  jsOnlyFallbackKind: COND_UNSTATED,
 });
 
 // ── Tier 1: unit ────────────────────────────────────────────────────────────
@@ -120,11 +146,84 @@ test('buildMarker: a cond kind that needs an argument is rejected bare', () => {
   }
 });
 
-test('buildMarker: `manual` rejects an argument', () => {
+// ── `manual` must NAME a checker ────────────────────────────────────────────
+// The rule: a task may be filed only when its closing condition can be named,
+// together with who or what checks it (definition: question 1 of
+// ~/.claude/skills/clawgate/flows/task-authoring.md). A bare `manual` names
+// nobody, so it recorded a condition that satisfied neither half of that.
+
+test('validateCond: `manual:<who>` is the valid form and is returned verbatim', () => {
+  assert.equal(validateCond('manual:zach'), 'manual:zach');
+  assert.equal(validateCond('manual:koen'), 'manual:koen');
+  assert.equal(validateCond('manual:support-rota'), 'manual:support-rota');
+});
+
+test('validateCond: a BARE `manual` is rejected, and the message says what to write instead', () => {
+  let err;
   assert.throws(
-    () => buildMarker({ srcProducer: 'p', srcRunId: 'r', cond: 'manual:because-i-said-so' }),
-    MarkerError,
+    () => validateCond('manual'),
+    (e) => { err = e; return e instanceof MarkerError; },
+    'a bare `manual` must not validate — it names nobody',
   );
+  // 🔴 Pin the REMEDY, not just the rejection. A rejection with no instruction
+  // is how a caller ends up deleting --cond altogether.
+  assert.match(err.message, /manual:<who>/,
+    `the rejection must tell the caller to write \`manual:<who>\`; got: ${err.message}`);
+  assert.match(err.message, /names nobody/,
+    `the rejection must say WHY; got: ${err.message}`);
+  // `manual:` with an empty argument is the same defect wearing a colon.
+  assert.throws(() => validateCond('manual:'), MarkerError);
+});
+
+test('buildMarker: refuses to EMIT a bare `manual`, and round-trips `manual:<who>`', () => {
+  assert.throws(() => buildMarker({ srcProducer: 'p', srcRunId: 'r', cond: 'manual' }), MarkerError);
+  const marker = buildMarker({ srcProducer: 'capacity-sweep', srcRunId: 'run-1', cond: 'manual:zach' });
+  assert.equal(marker, '<!-- claw:obj v=1 src=capacity-sweep/run-1 cond=manual:zach -->');
+  const got = parseMarker(`body text\n${marker}\ntrailing`);
+  assert.ok(got, 'a `manual:<who>` marker must parse');
+  assert.equal(got.cond, 'manual:zach');
+  assert.equal(got.condKind, 'manual');
+  assert.equal(got.condArg, 'zach', 'the CHECKER is the whole point — it must survive the round-trip');
+});
+
+test('validateCond: the other allowlisted kinds are unchanged', () => {
+  assert.equal(validateCond('gh_pr_merged:civitai/devrc#796'), 'gh_pr_merged:civitai/devrc#796');
+  assert.equal(validateCond('alert_cleared:KubeNodeNotReady'), 'alert_cleared:KubeNodeNotReady');
+  assert.equal(validateCond('cmd_exit_zero:drift-check'), 'cmd_exit_zero:drift-check');
+  assert.equal(validateCond('metric_below:capacity:node-disk-free'), 'metric_below:capacity:node-disk-free');
+  for (const bare of ['gh_pr_merged', 'alert_cleared', 'cmd_exit_zero', 'metric_below']) {
+    assert.throws(() => validateCond(bare), MarkerError, `bare ${bare} must still be rejected`);
+  }
+});
+
+// ── `unstated` is produced, never accepted ──────────────────────────────────
+
+test('validateCond: `unstated` is REJECTED as caller input', () => {
+  let err;
+  assert.throws(
+    () => validateCond(COND_UNSTATED),
+    (e) => { err = e; return e instanceof MarkerError; },
+    '`unstated` must not be passable by a caller — it is an observation, not a claim',
+  );
+  assert.match(err.message, /never accepted as input/,
+    `the rejection must say it is fallback-only; got: ${err.message}`);
+  // Nor with an argument, nor via the marker builder's caller-facing path.
+  assert.throws(() => validateCond('unstated:whatever'), MarkerError);
+  assert.throws(() => validateCond('unstated:whatever', { allowUnstated: true }), MarkerError);
+  // …and it is NOT in the allowlist a caller is shown.
+  assert.equal(COND_KINDS.includes(COND_UNSTATED), false,
+    '`unstated` must stay out of COND_KINDS — that list is the menu offered to callers');
+  assert.deepEqual([...COND_KINDS_NO_ARG], [COND_UNSTATED],
+    'the fallback kind is the ONLY kind that is complete without an argument');
+});
+
+test('buildMarker/parseMarker: `unstated` round-trips, because the fallback must be stampable', () => {
+  const marker = buildMarker({ srcProducer: 'claude-code', srcRunId: 'r', cond: COND_UNSTATED });
+  assert.equal(marker, '<!-- claw:obj v=1 src=claude-code/r cond=unstated -->');
+  const got = parseMarker(marker);
+  assert.ok(got, 'an `unstated` marker must be readable — that is what makes the gap COUNTABLE');
+  assert.equal(got.cond, COND_UNSTATED);
+  assert.equal(got.condArg, null);
 });
 
 test('buildMarker: a value that would break the HTML comment is rejected', () => {
@@ -132,15 +231,15 @@ test('buildMarker: a value that would break the HTML comment is rejected', () =>
     assert.throws(() => buildMarker({ srcProducer: 'p', srcRunId: 'r', cond }), MarkerError);
   }
   for (const bad of ['Capacity Sweep', 'cap sweep', '-lead', '', 'A']) {
-    assert.throws(() => buildMarker({ srcProducer: bad, srcRunId: 'r', cond: 'manual' }), MarkerError);
+    assert.throws(() => buildMarker({ srcProducer: bad, srcRunId: 'r', cond: 'manual:zach' }), MarkerError);
   }
   for (const bad of ['run 1', 'run>1', '']) {
-    assert.throws(() => buildMarker({ srcProducer: 'p', srcRunId: bad, cond: 'manual' }), MarkerError);
+    assert.throws(() => buildMarker({ srcProducer: 'p', srcRunId: bad, cond: 'manual:zach' }), MarkerError);
   }
 });
 
 test('buildMarker: invalid optional fields are rejected', () => {
-  const base = { srcProducer: 'p', srcRunId: 'r', cond: 'manual' };
+  const base = { srcProducer: 'p', srcRunId: 'r', cond: 'manual:zach' };
   assert.throws(() => buildMarker({ ...base, fp: 'deadbeef' }), MarkerError);      // too short
   assert.throws(() => buildMarker({ ...base, fp: '0123456789AB' }), MarkerError);  // uppercase
   assert.throws(() => buildMarker({ ...base, init: 'Not A Slug' }), MarkerError);
@@ -162,8 +261,8 @@ test('parseMarker: round-trip with the optional fields ABSENT', () => {
   const got = parseMarker(VECTORS.minimal.marker);
   assert.equal(got.fp, null);
   assert.equal(got.init, null);
-  assert.equal(got.condArg, null);
-  assert.equal(got.cond, 'manual');
+  assert.equal(got.cond, 'cmd_exit_zero:drift-check');
+  assert.equal(got.condArg, 'drift-check');
 });
 
 test('parseMarker: an absent marker is null, never a throw', () => {
@@ -216,6 +315,29 @@ test('CROSS-LANGUAGE: markers are byte-identical to the Python implementation', 
   assert.equal(buildMarker(VECTORS.full.args), VECTORS.full.marker);
 });
 
+test('CROSS-LANGUAGE: the divergence from Python is EXACTLY the enumerated set', () => {
+  // 🔴 Tier 2 otherwise reads as "these two implementations agree", and on the
+  // `manual` arity they now do not. An enumerated, asserted divergence is the
+  // honest form: unplanned drift still goes red, and the planned part is
+  // greppable rather than a comment nobody re-checks.
+  assert.equal(PYTHON_DIVERGENCE.jsRefusesToEmitBareManual, true);
+  assert.throws(() => buildMarker({ srcProducer: 'p', srcRunId: 'r', cond: 'manual' }), MarkerError,
+    'this side must NOT emit the bare `manual` Python still emits');
+
+  assert.equal(PYTHON_DIVERGENCE.jsStillParsesBareManual, true);
+  const legacy = parseMarker(VECTORS.pythonBareManual);
+  assert.ok(legacy,
+    'a Python-stamped bare `manual` MUST still parse — rejecting it on the READ path would blind '
+    + 'a JS reconciler to every object the Python producers stamp, which is the invisibility this '
+    + 'marker exists to end');
+  assert.equal(legacy.condKind, 'manual');
+  assert.equal(legacy.condArg, null, 'condArg === null is how a consumer counts the ones naming nobody');
+
+  assert.equal(PYTHON_DIVERGENCE.jsOnlyFallbackKind, COND_UNSTATED);
+  // The kind ALLOWLIST is unchanged, which is why the pin above still holds.
+  assert.deepEqual([...COND_KINDS].sort(), VECTORS.condKinds);
+});
+
 test('CROSS-LANGUAGE: fingerprints match Python json.dumps(sort_keys=True)', () => {
   // The nested case is the one that matters: JSON.stringify preserves insertion
   // order, so a SHALLOW key sort silently fingerprints two identical claims
@@ -231,7 +353,9 @@ test('agentIdentity: defaults are usable with an empty environment', () => {
   const id = agentIdentity({});
   assert.equal(id.producer, DEFAULT_PRODUCER);
   assert.equal(id.runId, 'unknown');
-  assert.equal(id.cond, 'manual');
+  // 🔴 NOT `manual`. A missing condition is recorded as MISSING.
+  assert.equal(id.cond, COND_UNSTATED,
+    'a caller who named no condition must not be stamped as though they had');
   assert.equal(id.init, null);
   assert.equal(id.label, `agent/${DEFAULT_PRODUCER}`);
   // The whole point: whatever the environment holds, the result must BUILD.
@@ -247,10 +371,10 @@ test('agentIdentity: a hostile environment still yields a buildable identity', (
   });
   assert.equal(id.producer, 'capacity-sweep--');
   assert.equal(id.runId, 'run-id-with-spaces-and-brackets');
-  // 🔴 Falls back to `manual`, NOT to silence. `manual` is an honest "no machine
-  // closes this"; dropping the marker would make the object invisible again,
-  // which is the entire defect Phase 0 addresses.
-  assert.equal(id.cond, 'manual');
+  // 🔴 Falls back to `unstated`, NOT to silence and NOT to `manual`. An honest
+  // marker of ABSENCE beats a dishonest marker of presence; dropping the marker
+  // would make the object invisible again, which is the defect Phase 0 addresses.
+  assert.equal(id.cond, COND_UNSTATED);
   assert.equal(id.init, 'some-slug');
   const marker = buildMarker({ srcProducer: id.producer, srcRunId: id.runId, cond: id.cond, init: id.init });
   assert.ok(parseMarker(marker), 'a sanitised identity must produce a PARSEABLE marker');
@@ -274,14 +398,50 @@ test('stampDescription: idempotent — an existing marker is never doubled', () 
 
 // ── Tier 3: the producer seam (behavioural) ─────────────────────────────────
 
+/** Run `fn` with process.stderr.write captured; returns [result, stderrText]. */
+function captureStderr(fn) {
+  const real = process.stderr.write;
+  let out = '';
+  process.stderr.write = (chunk) => { out += String(chunk); return true; };
+  try {
+    return [fn(), out];
+  } finally {
+    process.stderr.write = real;
+  }
+}
+
 test('SEAM: a plain create is stamped with a parseable marker and a tag', () => {
-  const { body, tag } = applyAgentStamp({});
+  const [{ body, tag }] = captureStderr(() => applyAgentStamp({}));
   const got = parseMarker(body.markdown_description);
   assert.ok(got, `no marker in ${JSON.stringify(body)}`);
-  assert.equal(got.cond, 'manual');
+  assert.equal(got.cond, COND_UNSTATED);
   assert.equal(got.fp, null, 'a session-filed one-off has no stable claim — fp must be OMITTED');
   assert.equal(tag, got.label);
   assert.equal(tag, `agent/${got.producer}`, 'the tag and src= must name the SAME producer');
+});
+
+test('SEAM: a create with NO condition warns LOUDLY on stderr and records cond=unstated', () => {
+  const [{ body }, err] = captureStderr(() => applyAgentStamp({}));
+  // The stamp itself must be honest…
+  assert.ok(body.markdown_description.includes('cond=unstated'),
+    `the marker must carry the greppable absence; got: ${body.markdown_description}`);
+  // …and the gap must be visible AT CREATE TIME, not only to a later grep.
+  assert.match(err, /cond=unstated/, `stderr must name the value it recorded; got: ${JSON.stringify(err)}`);
+  assert.match(err, /no closing condition was named/,
+    `stderr must say what is missing; got: ${JSON.stringify(err)}`);
+  assert.match(err, /manual:<who>/,
+    `stderr must name the remedy, including the human form; got: ${JSON.stringify(err)}`);
+});
+
+test('SEAM: a create WITH a condition is silent — the warning is not noise on every create', () => {
+  const [{ body }, err] = captureStderr(
+    () => applyAgentStamp({ agentCond: 'gh_pr_merged:civitai/devrc#796' }),
+  );
+  assert.ok(body.markdown_description.includes('cond=gh_pr_merged:civitai/devrc#796'));
+  assert.equal(err, '',
+    `a compliant create must not warn, or the warning stops being read; got: ${JSON.stringify(err)}`);
+  const [, errManual] = captureStderr(() => applyAgentStamp({ agentCond: 'manual:zach' }));
+  assert.equal(errManual, '', '`manual:<who>` names a checker and is therefore compliant');
 });
 
 test('SEAM: an existing markdown description keeps its content and gains the marker', () => {
