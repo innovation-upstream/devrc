@@ -133,19 +133,28 @@ def test_concurrent_upserts_of_the_same_key_converge(tmp_path):
 # write lock from a second connection for a fixed span, so "the write was
 # blocked past its busy_timeout" is arranged, not hoped for.
 
-def _hold_write_lock(path, hold_seconds, acquired, released):
-    """Hold SQLite's write lock on `path` for `hold_seconds`, then let go.
+def _hold_write_lock(path, hold_seconds, acquired, released, stop=None):
+    """Hold SQLite's write lock on `path`, then let go.
 
     `BEGIN IMMEDIATE` takes the write lock at once (rather than on first write),
     which is what makes the block deterministic instead of timing-dependent.
     `acquired` fires only once the lock is genuinely held, so the test never
     races the blocker.
+
+    `stop` releases it EARLY. A test that only needs "the lock is held while I
+    make this call" sets it as soon as the call returns, so the test costs what
+    the call costs rather than `hold_seconds`; `hold_seconds` then serves as the
+    upper bound that keeps a broken run from hanging. A test that needs the lock
+    to free itself on a schedule passes no `stop` and gets the timed release.
     """
     conn = sqlite3.connect(str(path), timeout=30.0)
     try:
         conn.execute("BEGIN IMMEDIATE")
         acquired.set()
-        time.sleep(hold_seconds)
+        if stop is None:
+            time.sleep(hold_seconds)
+        else:
+            stop.wait(hold_seconds)
         conn.rollback()
     finally:
         conn.close()
@@ -168,11 +177,17 @@ def test_a_write_blocked_past_its_busy_timeout_still_lands(tmp_path):
     blocker.start()
     try:
         assert acquired.wait(10), "the blocker never took the write lock"
+        started = time.monotonic()
         st.upsert_alias("contended", "Jane Doe")
+        elapsed = time.monotonic() - started
     finally:
-        blocker.join(30)
+        blocker.join(60)
     assert st.alias("contended") == "Jane Doe"
     assert st.alias_count() == 1
+    # The write really did wait for the lock rather than sailing through before
+    # the blocker got there — otherwise this is a plain write test wearing a
+    # concurrency name. Only a lower bound: load can only make it larger.
+    assert elapsed >= 0.3, f"the write was never actually blocked ({elapsed:.3f}s)"
     st.close()
 
 
@@ -185,16 +200,18 @@ def test_without_the_retry_that_same_write_is_lost(tmp_path):
     """
     path = tmp_path / "held-no-retry.sqlite3"
     st = Store(path, timeout=0.02, write_attempts=1)
-    acquired, released = threading.Event(), threading.Event()
+    acquired, released, stop = (threading.Event(), threading.Event(),
+                                threading.Event())
     blocker = threading.Thread(target=_hold_write_lock,
-                               args=(path, 0.4, acquired, released))
+                               args=(path, 30.0, acquired, released, stop))
     blocker.start()
     try:
         assert acquired.wait(10), "the blocker never took the write lock"
         with pytest.raises(sqlite3.OperationalError) as excinfo:
             st.upsert_alias("contended", "Jane Doe")
     finally:
-        blocker.join(30)
+        stop.set()
+        blocker.join(60)
     assert "locked" in str(excinfo.value)
     assert st.alias_count() == 0      # the row is GONE, not merely delayed
     st.close()
@@ -235,15 +252,20 @@ def test_a_permanent_error_propagates_instead_of_being_retried(store):
     traceback into a 30-second hang and then the same traceback — with the real
     error dressed up as contention. `no such table` must come straight back.
     """
-    # Without this the timing bound below could pass vacuously.
-    assert store._write_deadline >= 5.0
+    # Without this the timing bound below could pass vacuously: the claim is
+    # "it returned in a fraction of the retry budget", which needs a budget.
+    assert store._write_deadline >= 15.0
     store._write(lambda conn: conn.execute("DROP TABLE aliases"))
     started = time.monotonic()
     with pytest.raises(sqlite3.OperationalError) as excinfo:
         store.upsert_alias("jd", "Jane Doe")
     elapsed = time.monotonic() - started
     assert "no such table" in str(excinfo.value)
-    assert elapsed < 1.0, f"a permanent error was retried for {elapsed:.2f}s"
+    # A fifth of the budget, so a contended CI node cannot turn "returned at
+    # once" into a failure while a genuine retry (which would take the FULL
+    # budget) still cannot slip under it.
+    assert elapsed < store._write_deadline / 5, \
+        f"a permanent error was retried for {elapsed:.2f}s"
 
 
 def test_is_busy_error_reads_the_code_sqlite_set(store, tmp_path):
@@ -260,16 +282,18 @@ def test_is_busy_error_reads_the_code_sqlite_set(store, tmp_path):
 
     path = tmp_path / "codes.sqlite3"
     st = Store(path, timeout=0.02, write_attempts=1)
-    acquired, released = threading.Event(), threading.Event()
+    acquired, released, stop = (threading.Event(), threading.Event(),
+                                threading.Event())
     blocker = threading.Thread(target=_hold_write_lock,
-                               args=(path, 0.3, acquired, released))
+                               args=(path, 30.0, acquired, released, stop))
     blocker.start()
     try:
         assert acquired.wait(10), "the blocker never took the write lock"
         with pytest.raises(sqlite3.OperationalError) as busy:
             st.upsert_alias("k", "Jane Doe")
     finally:
-        blocker.join(30)
+        stop.set()
+        blocker.join(60)
     assert busy.value.sqlite_errorcode == 5             # SQLITE_BUSY
     assert is_busy_error(busy.value) is True
     st.close()
@@ -285,9 +309,12 @@ def test_an_exhausted_retry_re_raises_rather_than_going_quiet(tmp_path):
     """
     path = tmp_path / "never-free.sqlite3"
     st = Store(path, timeout=0.01, write_deadline=0.1)
-    acquired, released = threading.Event(), threading.Event()
+    acquired, released, stop = (threading.Event(), threading.Event(),
+                                threading.Event())
+    # The lock is held until this test lets go, so "it gave up" cannot be the
+    # lock quietly freeing itself. 60s is the hang-guard, never the schedule.
     blocker = threading.Thread(target=_hold_write_lock,
-                               args=(path, 3.0, acquired, released))
+                               args=(path, 60.0, acquired, released, stop))
     blocker.start()
     try:
         assert acquired.wait(10), "the blocker never took the write lock"
@@ -296,11 +323,13 @@ def test_an_exhausted_retry_re_raises_rather_than_going_quiet(tmp_path):
             st.upsert_alias("doomed", "Jane Doe")
         elapsed = time.monotonic() - started
     finally:
-        blocker.join(30)
-    # Bounded on both sides: it kept retrying for roughly the deadline (so it
-    # did not give up on the first attempt), and it gave up well before the
-    # 3-second hold ended (so it is not simply waiting the blocker out).
-    assert 0.05 <= elapsed < 1.5, f"gave up after {elapsed:.3f}s"
+        stop.set()
+        blocker.join(60)
+    # It kept retrying for roughly the deadline rather than giving up on the
+    # first attempt. There is no upper bound here on purpose: the lock was still
+    # held when the call returned, which is the fact that matters, and any upper
+    # bound would be an assertion about how loaded the machine is.
+    assert elapsed >= 0.05, f"gave up after {elapsed:.3f}s — no retry happened"
     assert st.alias_count() == 0
     st.close()
 
@@ -323,16 +352,18 @@ def test_write_attempts_bounds_the_number_of_attempts_made(tmp_path):
         conn.execute("INSERT INTO host_prior (site, dir, ts) "
                      "VALUES ('example-site.test', 'Jane Doe', 0)")
 
-    acquired, released = threading.Event(), threading.Event()
+    acquired, released, stop = (threading.Event(), threading.Event(),
+                                threading.Event())
     blocker = threading.Thread(target=_hold_write_lock,
-                               args=(path, 3.0, acquired, released))
+                               args=(path, 60.0, acquired, released, stop))
     blocker.start()
     try:
         assert acquired.wait(10), "the blocker never took the write lock"
         with pytest.raises(sqlite3.OperationalError):
             st._write(work)
     finally:
-        blocker.join(30)
+        stop.set()
+        blocker.join(60)
     assert len(attempts) == 3
     st.close()
 
