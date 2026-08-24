@@ -70,6 +70,17 @@ debugging, changing or copying a specific pipeline.
    outcome you are trying to prevent; `tekton-ci` deliberately has neither a quota nor a
    LimitRange). Re-measure from outside a self-caused window first. **Memory, not CPU, is the
    binding constraint** on the pinned node — that is the number to watch.
+   ⚠ **"Queued and recovered" is not "harmless" — QUEUEING COSTS A VERDICT WHENEVER THE WAIT
+   EATS THE BUDGET, and the two findings are compatible.** Measured on `gitops-validate`
+   (2026-08-23): main-task pod-start latency **p50 1m07s, p90 11m09s, max 19m11s** (n=98,
+   plus 16 TaskRuns whose pod never created a container) — against a **20m** ceiling. Result:
+   **21 of 113 runs (18.6%) posted NOTHING.** Five of them had actually started running; one
+   got through 10 of 13 steps before the clock ran out. So the burst does not kill the pod, it
+   *delays* it — and whether that becomes a lost verdict is decided by the pipeline's own
+   headroom, not by the burst. devrc (50m budget) drains and survives; gitops-validate, with
+   the tightest budget and the worst latency, is the one that loses. **The lever is scheduling
+   pressure, not the timeout** (#378 family). Note `clawgate-ci` — the one pipeline with **no
+   `nodeSelector`** — has a pod-start max of **18s** rather than 19 minutes.
 4. **Placeholder imagePullSecret breaks ALL pulls.** A `harbor-cred` dockerconfigjson with a
    non-base64 `auth` placeholder makes every pod fail image pull ("illegal base64 data").
    **Do NOT attach a placeholder imagePullSecret** to the pipeline SA — public images
@@ -107,18 +118,38 @@ debugging, changing or copying a specific pipeline.
    task-level `timeout: 40s` → `Failed`, children `[slow,reporter]`, **finally RAN**. The
    reserved `timeouts.finally` is **not honoured** on the budget-expiry path — reserving it
    looks like protection and is not. Across 447 retained PipelineRuns: **25 timeouts, 0 ran
-   their report.** devrc was fixed in homelab-infra **#385**; the remaining five are in **#386**
-   (`fix/finally-on-timeout-five-pipelines`) — OPEN + MERGEABLE 2026-08-23, so **check whether it
-   landed before re-doing this work.**
+   their report.** devrc was fixed in homelab-infra **#385**; the remaining five in **#386**,
+   **MERGED + Flux-reconciled 2026-08-23** — confirmed on the LIVE Pipeline objects, which is
+   the claim that matters, since a run executes the DEPLOYED Pipeline (gotcha #7):
+   `clawgate-ci 25m · gitops-validate 20m · auditloop-ci 40m · remix 40m · naida 40m ·
+   devrc gate 45m / notify 2m`. **All six are fixed; nothing here is outstanding.**
    🔴 **#386 KEEPS the outer `timeouts.*` budgets and adds task-level ones INSIDE them** — a
    backstop plus a bound that fires first. Safe only while the arithmetic holds, so verify it
    rather than eyeballing the diff: **Σ(`spec.tasks[].timeout`) < `timeouts.tasks`** (else the
    budget wins and `finally` is skipped again) **and `tasks + finally ≤ pipeline`**. Verified on
    #386 across all six: 5-minute margin each, envelope closed.
+   🔴 **`retries:` re-opens the defect with every timeout value looking untouched** — Tekton
+   restarts the timeout clock per ATTEMPT, so the first term is really
+   **Σ(attempts × timeout) + startOffset**. `retries: 1` on `gitops-validate` would mean
+   2×20m against a 25m budget. Unset on all six today; check before adding one.
+   🔴 **NOTHING ENFORCES THAT ARITHMETIC — you are the only checker.** A server-side dry-run
+   happily accepts `timeout: 99m` under `tasks: 30m`. Tekton *does* validate
+   `tasks + finally ≤ pipeline` (`"30m0s + 5m0s should be <= pipeline duration"`) — but **NOT
+   on a TriggerTemplate's `resourcetemplates`**, which is exactly where these budgets live. An
+   invalid budget there applies cleanly and fails only when the EventListener tries to create
+   the run ⇒ **no status posted**: this very bug, by another door. To actually validate one,
+   lift the `timeouts` block into a standalone PipelineRun and `--dry-run=server` it.
    🔴 **The `finally` reporter is deliberately left UNBOUND — not an oversight.** `7038c77d`
    raised its budget after finding the reporter is slow to **SCHEDULE**, not slow to run (node
    congestion, gotcha #3). Strangling it re-creates the exact "posts NOTHING" bug the fix exists
    to close. Bound every `spec.tasks[]`; leave the reporter room.
+   The numbers, because the intuitive fix is the wrong one: across ~490 report TaskRuns the
+   `report-status` step has **never exceeded 28s**, while its pod-start latency reaches
+   **282s**. `remix-ux-audit-f6vks` lost its verdict to a **5m** `finally` on a run only 9m48s
+   long; `clawgate-ci-7smtg` survived by **15s**. Hence `finally: 10m` everywhere (#386).
+   ⚠ **Do NOT "fix" this by adding `--max-time` to the reporter's curls** — that was the first
+   diagnosis and an audit refuted it; it would have saved neither run. The curls genuinely are
+   unbounded (2 per reporter, 3 for devrc), just not what costs verdicts.
    🔴 Bound EVERY task, not just the slow one — the task deadline is
    `taskStart + timeout` while the budget is `runStart + tasks`, so an unbounded early task
    (devrc's `notify` inherited the cluster's 1h default) lets them cross and re-opens this.
