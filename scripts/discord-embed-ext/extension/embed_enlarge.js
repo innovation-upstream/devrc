@@ -65,9 +65,14 @@
   // That ancestor can be shared layout, and there is no undo — forget() clears
   // the marker attribute, not the inline styles. Measured in Brave via CDP:
   // getComputedStyle(el).maxWidth returns the string "100%" for max-width:100%.
+  // NEGATIVE IS NOT A CAP. CSS forbids a negative max-width/max-height and
+  // clamps a calc() result to >= 0, so `-10px` is not a value a real cap can
+  // hold — and accepting it made findContainer LATCH on such an ancestor and
+  // write !important overrides onto it. An earlier README claimed the negative
+  // branch was deliberate; it was unreachable, unpinned, and wrong.
   function cssPx(v) {
     if (typeof v !== "string") return NaN;
-    var m = /^\s*(-?[0-9]*\.?[0-9]+)px\s*$/.exec(v);
+    var m = /^\s*([0-9]*\.?[0-9]+)px\s*$/.exec(v);
     return m ? parseFloat(m[1]) : NaN;
   }
 
@@ -120,13 +125,30 @@
   // A root that IS the media element is handled explicitly: querySelectorAll
   // never matches the element it is called on.
   function scan(root) {
-    var scope = (root && root.querySelectorAll) ? root
-              : (typeof document !== "undefined" ? document : null);
+    var scope;
+    if (root === undefined || root === null) {
+      scope = (typeof document !== "undefined") ? document : null;
+    } else if (root.querySelectorAll) {
+      scope = root;
+    } else {
+      // 🔴 A NODE WE CANNOT QUERY IS NOT AN INVITATION TO SWEEP THE PAGE.
+      // Falling back to `document` for a BAD root turned any non-element that
+      // reached here — Discord inserts text nodes constantly — into a
+      // whole-document rescan, which is the exact cost the scoped scan exists to
+      // avoid. The observer's `nodeType === 1` filter is now defence in depth
+      // rather than the only thing standing between a text node and a full sweep.
+      return 0;
+    }
     if (!scope) return 0;
     var count = 0;
     var all = [];
     var rootTag = (root && root.tagName) ? root.tagName.toLowerCase() : "";
-    if (rootTag === "img" || rootTag === "video") all.push(root);
+    // `source` included: the observer hands us the <source> element when ITS
+    // src is set after insertion, and isMediaElement() resolves it to the
+    // parent <video>. Without this the observation cost is paid and the
+    // result thrown away — the comment below claimed the case was closed
+    // while scan() still dropped it on the floor.
+    if (rootTag === "img" || rootTag === "video" || rootTag === "source") all.push(root);
     var imgs = scope.querySelectorAll("img");
     var videos = scope.querySelectorAll("video");
     for (var i = 0; i < imgs.length; i++) all.push(imgs[i]);
@@ -215,12 +237,25 @@
     };
   }
 
+  // The production entry point, as a NAMED function so it can be pinned. As a
+  // bare pair of statements at module scope, deleting either one left the whole
+  // suite green: everything already rendered at document_idle would silently go
+  // un-enlarged, or nothing rendered later would ever be seen.
+  function autoStart(doc) {
+    doc = doc || (typeof document !== "undefined" ? document : null);
+    if (!doc) return false;
+    scan(doc);
+    observe(doc);
+    return true;
+  }
+
+  if (typeof globalThis !== "undefined") {
+    globalThis.__DEE__.autoStart = autoStart;
+  }
+
   if (typeof globalThis !== "undefined" && globalThis.DEE_NO_AUTOSTART) {
     return;
   }
 
-  if (typeof document !== "undefined") {
-    scan(document);
-    observe(document);
-  }
+  autoStart();
 }());

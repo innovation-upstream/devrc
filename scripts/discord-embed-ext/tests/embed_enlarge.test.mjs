@@ -578,3 +578,106 @@ test("the size thresholds are pinned from BOTH sides", () => {
   assert.equal(cappedH("401px"), null, "just past it is NOT");
   assert.equal(cappedH("900px"), null, "and a tall ancestor is never a cap");
 });
+
+// ===========================================================================
+// Round 3 — findings from an independent 163-mutant battery.
+// ===========================================================================
+
+test("REGRESSION: a negative px value is NOT a cap", () => {
+  // CSS forbids a negative max-width/max-height and clamps calc() to >= 0, so
+  // this is not a value a real cap can hold. Accepting it made findContainer
+  // LATCH on such an ancestor and write !important overrides onto it. An earlier
+  // README claimed the negative branch was deliberate — it was unreachable,
+  // unpinned and wrong. Dropping `-?` used to survive the whole suite.
+  assert.ok(Number.isNaN(DEE.cssPx("-10px")), "a negative length is not a cap");
+  assert.ok(Number.isNaN(DEE.cssPx("-0.5px")));
+  var wrap = new FakeElement("div", { class: "bad" });
+  wrap.style.setProperty("max-width", "-10px");
+  var img = new FakeElement("img", { src: "https://cdn.discordapp.com/attachments/1/2/p.png" });
+  wrap.appendChild(img);
+  assert.equal(DEE.findContainer(img), null,
+    "and it must not be latched on to as a constrainer");
+});
+
+test("REGRESSION: a <source> whose src is set after insertion resolves to its <video>", () => {
+  DEE.forget();
+  // The observer hands us the <source>; scan() used to accept only img/video as
+  // a root and threw it away, so the observation cost was paid and the result
+  // discarded — while the source comment claimed the case was closed.
+  var doc = makeDiscordDoc("<div class='message'><video></video></div>");
+  var video = doc.querySelector("video");
+  var source = doc.createElement("source");
+  source.setAttribute("src", "https://media.discordapp.net/attachments/1/2/late.mp4");
+  video.appendChild(source);
+  assert.equal(DEE.scan(source), 1, "scanning the <source> must find media");
+  assert.equal(video.getAttribute("data-dee-enlarged"), "1",
+    "and it is the parent <video> that gets marked");
+});
+
+test("REGRESSION: a non-element node never triggers a whole-document rescan", () => {
+  DEE.forget();
+  // Discord inserts text nodes constantly. Dropping the `nodeType === 1` filter
+  // survived the suite, and a text node reaching scan() falls through to
+  // `scope = document` — turning every text mutation into a full-page sweep,
+  // which is the bug class the scoped scan exists to prevent.
+  var doc = makeDiscordDoc(
+    "<div id='far'><img src='https://cdn.discordapp.com/attachments/9/9/far.png' /></div>" +
+    "<div id='live'></div>");
+  var far = doc.querySelector("#far img");
+  // 🔴 THE GLOBAL `document` MUST EXIST FOR THIS TEST TO BE ABLE TO FAIL. Node
+  // has none, so the "fall back to the whole document" branch is unreachable
+  // here and every mutant against it passes vacuously — which is exactly how
+  // this hazard survived a 163-mutant battery. Simulate the browser condition.
+  var realDoc = globalThis.document;
+  globalThis.document = doc;
+  try {
+    assert.equal(DEE.scan({ nodeType: 3, textContent: "hello" }), 0,
+      "a node with no querySelectorAll scans nothing");
+    assert.equal(far.getAttribute("data-dee-enlarged"), null,
+      "and above all does NOT trigger a whole-document sweep");
+    withFakeObserverAndTimers(function (cap, flush) {
+      DEE.observe(doc);
+      cap.cb([{ addedNodes: [{ nodeType: 3, textContent: "hello" }] }]);
+      flush();
+      assert.equal(far.getAttribute("data-dee-enlarged"), null,
+        "and the observer filters it out before it ever gets there");
+    });
+  } finally {
+    if (realDoc === undefined) delete globalThis.document;
+    else globalThis.document = realDoc;
+  }
+});
+
+test("REGRESSION: the container override is !important, or Discord's own CSS wins", () => {
+  var container = new FakeElement("div", { class: "embed" });
+  container.style.setProperty("max-width", "400px", "important");
+  container.style.setProperty("max-height", "300px", "important");
+  var img = new FakeElement("img", { src: "https://cdn.discordapp.com/attachments/1/2/p.png" });
+  container.appendChild(img);
+  DEE.applyOverride(img);
+  // The VALUE was asserted; the PRIORITY never was — and the whole point is to
+  // beat the stylesheet that set the cap in the first place. Dropping
+  // `"important"` used to survive.
+  var css = container.style.cssText;
+  assert.match(css, /max-width: none !important/, "container max-width must win");
+  assert.match(css, /max-height: none !important/, "container max-height must win");
+  assert.match(img.style.cssText, /max-width: 100% !important/,
+    "and the element side too");
+});
+
+test("SEAM: autoStart both scans what is already there AND subscribes for later", () => {
+  DEE.forget();
+  // Deleting either half used to survive: everything rendered by document_idle
+  // would go un-enlarged, or nothing rendered afterwards would ever be seen.
+  var doc = makeDiscordDoc(
+    "<div class='message'><div class='embed'>" +
+    "<img src='https://cdn.discordapp.com/attachments/1/2/already.png' /></div></div>");
+  var existing = doc.querySelector("img");
+  withFakeObserverAndTimers(function (cap) {
+    assert.equal(DEE.autoStart(doc), true);
+    assert.equal(existing.getAttribute("data-dee-enlarged"), "1",
+      "media present at load must be enlarged immediately");
+    assert.ok(cap.observedWith, "and the observer must be subscribed for later renders");
+    assert.equal(cap.observedWith.target, doc.body);
+  });
+});

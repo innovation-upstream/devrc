@@ -225,8 +225,8 @@ SUITES=(
   # and lightbox (open/close, zoom, pan, per-message navigation, the wiring of
   # every on-screen control).
   #
-  # 89 tests / 2 files measured 2026-08-24 on the tree that added it.
-  # Floor 85 = 89 - min(50, max(1, 89/20)) = 89 - 4.
+  # 94 tests / 2 files measured 2026-08-24 on the tree that added it.
+  # Floor 90 = 94 - min(50, max(1, 94/20)) = 94 - 4.
   #
   # 🔴 THIS COMMENT PREVIOUSLY CLAIMED SIX REGRESSION TESTS. IT WAS FIVE.
   # The six original defects were re-introduced ONE AT A TIME by an adversarial
@@ -251,11 +251,25 @@ SUITES=(
   # draining, the observer's call site, forget()'s two halves masking each other,
   # and arrow direction — the last invisible because a 2-image fixture cannot
   # tell +1 from -1). That is the same defect as the miscount above, one level up:
-  # a number stated wider than what was measured. So: 36 mutants, 25 mine and 11
-  # from that audit, ALL killed as of this tree — and the honest reading of "36"
-  # is "nobody has yet imagined a 37th", not "the suite is sound".
-  # A positive control (reverting the media regex to host-only) dies, so the
-  # harness can go red; every verdict is read from `ℹ fail N`, never an exit code.
+  # a number stated wider than what was measured.
+  #
+  # A THIRD audit then built a 163-mutant battery and found a 37th anyway —
+  # vindicating the clause, so keep reading it literally. It surfaced: a <source>
+  # root that scan() observed and then discarded; a negative-px value that
+  # findContainer would LATCH on (and a README sentence claiming that was
+  # deliberate — it was unreachable and wrong); the container override's
+  # !important priority, asserted by value but never by priority; the module's own
+  # entry point, where deleting the initial scan or the observer subscription left
+  # the suite green; and the <video><source> rule re-implemented in lightbox.js
+  # with only the OTHER copy pinned.
+  #
+  # Sweep as of this tree: 46 mutants (25 mine, 11 from audit 2, 10 from audit 3),
+  # 45 killed, 0 unapplied. The single survivor is EQUIVALENT BY CONSTRUCTION:
+  # scan() now returns 0 for any root it cannot query, so the observer's
+  # `nodeType === 1` filter became defence in depth rather than the only thing
+  # between a text node and a whole-page sweep. A positive control (reverting the
+  # media regex to host-only) dies, so the harness can go red. The sweep's
+  # verdicts are read from the runner's own failure count, never an exit code.
   #
   # The media-URL tests are pinned to a MEASUREMENT, not to a guess: run against
   # two real logged-in channels on 2026-08-24, the original host-only pattern
@@ -264,7 +278,7 @@ SUITES=(
   # zero attachments. The narrowed pattern matched 0 there and 1 in the second
   # channel — a real attachment, in a container capped at max-height 350px, which
   # is the positive control proving it is not simply matching nothing.
-  "scripts/discord-embed-ext/tests|2|85"
+  "scripts/discord-embed-ext/tests|2|90"
 )
 
 # --- discovery roots -----------------------------------------------------------

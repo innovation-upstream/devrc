@@ -7,8 +7,11 @@
   // to be a second copy of the same literal — and when the host-only pattern turned
   // out to match avatars, that is exactly the shape that gets fixed at one site and
   // left wrong at the other.
-  var MEDIA_URL_RE = (typeof globalThis !== "undefined" && globalThis.__DEE__ &&
-                      globalThis.__DEE__.MEDIA_URL_RE) || null;
+  function isMedia(el) {
+    var dee = (typeof globalThis !== "undefined") && globalThis.__DEE__;
+    if (!dee || typeof dee.isMediaElement !== "function") return false;
+    return dee.isMediaElement(el).isMedia === true;
+  }
 
   // How far up to look for the row that bounds one message. Discord nests a
   // message body ~6-10 levels under its row; 15 is slack, not a measurement.
@@ -59,23 +62,15 @@
   // on screen instead of the ones in the message you clicked.
   function getMediaSiblings(mediaEl) {
     var container = findMessageContainer(mediaEl);
-    if (!container || !container.querySelectorAll || !MEDIA_URL_RE) return [mediaEl];
+    if (!container || !container.querySelectorAll) return [mediaEl];
     var all = [];
     var els = container.querySelectorAll("img, video");
     for (var j = 0; j < els.length; j++) {
-      var el = els[j];
-      var src = el.getAttribute("src") || "";
-      if (MEDIA_URL_RE.test(src)) { all.push(el); continue; }
-      // a <video> carries its url on a child <source>
-      var kids = el.children || [];
-      for (var k = 0; k < kids.length; k++) {
-        var kid = kids[k];
-        if (kid.tagName && kid.tagName.toLowerCase() === "source" &&
-            MEDIA_URL_RE.test(kid.getAttribute("src") || "")) {
-          all.push(el);
-          break;
-        }
-      }
+      // ONE definition of "is this Discord message media", in embed_enlarge.
+      // This used to re-implement the url test AND the <video><source> rule
+      // here, and only the other copy was pinned — the exact shape the header
+      // comment above warns about for MEDIA_URL_RE.
+      if (isMedia(els[j])) all.push(els[j]);
     }
     return all.length > 0 ? all : [mediaEl];
   }

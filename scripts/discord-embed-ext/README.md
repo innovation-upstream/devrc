@@ -47,11 +47,16 @@ returns the string `"100%"` for a percentage cap, and `parseFloat("100%")` is
 first ancestor with `max-width:100%`, which is ubiquitous and often shared
 layout, and write `!important` overrides onto it with no undo.
 
-Only a **px length** counts — and that deliberately includes fractional and
-negative values, because `calc()` and flex layout genuinely produce them. Do not
-"tidy" the pattern to integers-only: `399.5px` is a real cap, and rejecting it
-silently stops the extension enlarging a legitimately capped embed. A percentage,
-`none`, or a `calc()` string is not a cap. Both directions are pinned by tests.
+Only a **non-negative px length** counts. Fractional values are deliberately
+included, because `calc()` and flex layout genuinely produce them — do not "tidy"
+the pattern to integers-only: `399.5px` is a real cap, and rejecting it silently
+stops the extension enlarging a legitimately capped embed. A percentage, `none`,
+a `calc()` string and a **negative** length are all rejected; CSS forbids a
+negative `max-width`, and accepting one made the walk latch onto that ancestor.
+Every one of those directions is pinned by a test.
+
+(An earlier version of this paragraph claimed negative values were deliberate and
+pinned. They were neither — the branch was unreachable and no test touched it.)
 
 🔴 **The path prefix is load-bearing, not tidiness.** The same CDN host serves
 avatars, server icons, emojis, stickers, banners, role icons, clan badges and
@@ -105,17 +110,21 @@ from a RED control that carried all six defects at once, so it failed on a
 different assertion in the same test. Isolate a mutant before claiming it is
 pinned. The transform is genuinely pinned now.
 
-The suite is mutation-swept: **36 semantic mutants, all killed** — operand
-swaps, branch inversions, constants moved in **both** directions, guard removals.
-A positive control (reverting the media pattern to host-only) dies, so the
-harness can go red.
+The suite is mutation-swept: **46 semantic mutants, 45 killed** — operand swaps,
+branch inversions, constants moved in **both** directions, guard removals. A
+positive control (reverting the media pattern to host-only) dies, so the harness
+can go red. The one survivor is equivalent by construction: `scan()` returns 0
+for any root it cannot query, so the observer's `nodeType === 1` filter is
+defence in depth rather than load-bearing.
 
-🔴 **Read that number correctly.** It is a claim about the 36 mutants somebody
-constructed, never about the suite. An earlier version of this file said "25
-mutants, 24 killed, the survivor is equivalent"; an independent audit then built
-its own battery and found **eight** more survivors that were not equivalent at
-all. If you change this code, add the mutant for the failure mode you are
-introducing — a passing sweep only means nobody has imagined the next one yet.
+🔴 **Read that number correctly.** It is a claim about the 46 mutants somebody
+constructed, never about the suite — and this file has been wrong about it
+**twice**. It once said "25 mutants, 24 killed, the survivor is equivalent"; an
+independent audit built its own battery and found **eight** more survivors, none
+equivalent. The corrected text then said 36 — and a third audit, with 163
+mutants, found a 37th. If you change this code, add the mutant for the failure
+mode you are introducing. A passing sweep only means nobody has imagined the next
+one yet.
 
 ## What was deliberately dropped
 
