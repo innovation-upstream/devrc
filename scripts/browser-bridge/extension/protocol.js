@@ -1696,8 +1696,11 @@ export const STORAGE_BUDGET_MS = 5000;
 // comment describes. Raising this constant, CDP_ATTACH_TIMEOUT_MS or
 // CDP_COMMAND_TIMEOUT_MS without re-deriving the sum fails that test.
 //
-// 1500ms clears a healthy capture (measured 192-1365ms) and cuts the pathological
-// hang off ~16.5s before the op would have died outright.
+// 1500ms clears the ORDINARY healthy-capture band (control arm n=3: 292-1365ms;
+// arm A n=2: ~280ms) and cuts the pathological hang off ~16.5s before the op
+// would have died outright. ⚠ NOT "clears a healthy capture" — the same run
+// recorded a healthy capture at 17.97s (arm A′, noted above). Sacrificing that
+// 1.5-18s tail to CDP is the POINT of the bound, not an oversight.
 //
 // 🔴 DELIBERATE CONSEQUENCE, corrected from an earlier draft that claimed the
 // opposite: a genuine QUOTA STORM now falls through to CDP rather than riding out
@@ -1718,7 +1721,8 @@ export const STORAGE_BUDGET_MS = 5000;
 //   (a) The retry ladder is largely CUT OFF for the OTHER transient class it was
 //       built for — `image readback failed`, the GPU/paint race behind #181's
 //       spacing invariant. Attempt 2 starts at T+700ms and must finish inside the
-//       bound; attempt 3 needs >=2200ms and can NEVER run. (At 2000ms, the maximum
+//       bound; attempt 3 needs >=2100ms (700·1 + 700·2; probed at 2106ms) and can
+//       NEVER run. (At 2000ms, the maximum
 //       the invariant allows, attempt 3 is still unreachable — this is structural,
 //       not a tuning error.) Such a capture now takes CDP instead of retrying.
 //   (b) A merely SLOW-but-successful capture in the 1.5-18s band now falls through

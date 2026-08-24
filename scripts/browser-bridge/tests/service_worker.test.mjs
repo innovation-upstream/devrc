@@ -81,7 +81,9 @@ globalThis.chrome = {
 };
 
 const { OPS, loopTiming } = await import("../extension/service_worker.js");
-const { FAST_CAPTURE_BUDGET_MS } = await import("../extension/protocol.js");
+const { FAST_CAPTURE_BUDGET_MS, EXEC_OP_BUDGET_MS, POLL_BUDGET_MS,
+        RESULT_BUDGET_MS, LOOP_STALL_MS, STORAGE_BUDGET_MS }
+  = await import("../extension/protocol.js");
 
 function lastExec() { return state.calls.executeScript[state.calls.executeScript.length - 1]; }
 
@@ -289,7 +291,6 @@ test("screenshot fast path: a HUNG captureVisibleTab falls through to CDP",
   globalThis.BROWSER_BRIDGE_LOOP_TIMING = { ...(realTiming || {}), fastCaptureMs: 20 };
   chrome.tabs.captureVisibleTab = () => new Promise(() => {});   // never settles
   state.tab.active = true;                                        // → fast path
-  const started = Date.now();
   // 🔴 RACE IT HERE rather than leaning on `{ timeout }` alone, so a regression is
   // counted as a FAILURE and not as a CANCELLATION. node scores a timed-out test
   // `cancelled`, leaving `fail` at 0 — so a gate that greps the fail count reads
@@ -319,7 +320,6 @@ test("screenshot fast path: a HUNG captureVisibleTab falls through to CDP",
   // boundary flake — a guard that cannot fail for its stated reason is worse than
   // none, because it reads as coverage. The bound's real magnitude is pinned in
   // the production-wiring test below.)
-  void started;
 });
 
 // 🔴 PINNING THE CONSTANT IS NOT PINNING THAT PRODUCTION USES IT.
@@ -330,13 +330,33 @@ test("screenshot fast path: a HUNG captureVisibleTab falls through to CDP",
 // FAST_CAPTURE_BUDGET_MS to a literal 600000 left ALL 501 tests green, i.e. the
 // original surviving mutant was still alive, just spelled one level down. This is
 // the seam assertion; it must run with NO override active.
-test("fast-path bound is wired to the constant, not to a literal", async () => {
+// 🔴 ALL SIX WIRES, not just the one this PR touched. Pinning only fastCaptureMs
+// left the SAME seam open on every other budget — and on the most important one:
+// mutating `execMs`'s default from EXEC_OP_BUDGET_MS to a literal 999999 left the
+// whole 502-test suite GREEN, i.e. the choke-point op budget could be silently
+// disconnected from its constant while every test that pins the CONSTANT's value
+// still passed. A per-field loop makes adding a 7th budget fail here until it is
+// wired, rather than silently going unpinned like these five did.
+test("loop budgets are wired to their constants, not to literals", async () => {
   const realTiming = globalThis.BROWSER_BRIDGE_LOOP_TIMING;
   delete globalThis.BROWSER_BRIDGE_LOOP_TIMING;
   try {
-    assert.equal(loopTiming().fastCaptureMs, FAST_CAPTURE_BUDGET_MS,
-                 "production must read FAST_CAPTURE_BUDGET_MS, so the budget "
-                 + "invariant in cdp_protocol.test.mjs actually governs runtime");
+    const wired = {
+      execMs: EXEC_OP_BUDGET_MS,
+      pollMs: POLL_BUDGET_MS,
+      resultMs: RESULT_BUDGET_MS,
+      stallMs: LOOP_STALL_MS,
+      storageMs: STORAGE_BUDGET_MS,
+      fastCaptureMs: FAST_CAPTURE_BUDGET_MS,
+    };
+    const actual = loopTiming();
+    assert.deepEqual(Object.keys(actual).sort(), Object.keys(wired).sort(),
+                     "a budget was added or removed — wire it to a constant here");
+    for (const [field, constant] of Object.entries(wired)) {
+      assert.equal(actual[field], constant,
+                   `loopTiming().${field} must read its protocol.js constant, or the `
+                   + `value assertions elsewhere do not govern runtime`);
+    }
   } finally {
     if (realTiming === undefined) delete globalThis.BROWSER_BRIDGE_LOOP_TIMING;
     else globalThis.BROWSER_BRIDGE_LOOP_TIMING = realTiming;

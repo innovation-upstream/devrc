@@ -213,11 +213,22 @@ test("fullPageClip uses the css content size for a full-document capture", () =>
 // the op SETTLES and control returns to the poll loop.
 
 test("timeout budgets are chosen well under the 20s server cmd_timeout", () => {
-  // EXEC_OP_BUDGET_MS belongs here too, and its absence was load-bearing: it is
-  // the right-hand side of the fast-path inequality below, so relaxing IT is the
-  // easiest way to satisfy that test — and a mutant raising it to 25000 (past the
-  // server's own 20s cmd_timeout, after which the envelope can never reach the
-  // caller at all) survived the entire suite.
+  // EXEC_OP_BUDGET_MS is included because it is the right-hand side of the
+  // fast-path inequality below, so it belongs in the same class bound.
+  //
+  // 🔴 CORRECTION, and it is this PR's own defect class for the third time: an
+  // earlier version of this comment claimed a mutant raising EXEC_OP_BUDGET_MS to
+  // 25000 "survived the entire suite". THAT IS FALSE, and it was written in as
+  // measured fact on an auditor's say-so without being re-run. Measured directly:
+  // it is pinned EXACTLY, twice, and both pins predate this PR —
+  // `tests/emulation.test.mjs:342` ("BUDGET: the step count is bounded by a
+  // CONSTANT") fails `25000 !== 18000`, and `test_server.py`'s
+  // test_exec_budget_matches_the_extension pins it across the language boundary.
+  // It survives only when cdp_protocol.test.mjs is run ALONE, which is what that
+  // claim was really measuring. So this entry adds the CLASS bound (< 20s) that a
+  // single-file run cannot mislead about; it does not close a hole, because there
+  // was none. Re-verify a mutation result before quoting it — including one an
+  // auditor hands you.
   for (const ms of [CDP_ATTACH_TIMEOUT_MS, CDP_COMMAND_TIMEOUT_MS, CDP_OP_BUDGET_MS,
                     FAST_CAPTURE_BUDGET_MS, EXEC_OP_BUDGET_MS]) {
     assert.ok(ms > 0 && ms < 20000, `budget ${ms} must be >0 and < the 20s server timeout`);
