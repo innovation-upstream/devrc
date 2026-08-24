@@ -1630,6 +1630,13 @@ export function promiseWithTimeout(promise, ms, label, timers = {},
 //     `cdp_timeout:<method>`). Anyone lowering EXEC_OP_BUDGET_MS below 16s, or
 //     raising CDP_ATTACH_TIMEOUT_MS / CDP_COMMAND_TIMEOUT_MS, converts the
 //     attach case into a generic `op_timeout` — re-measure before touching either.
+//     🔴 A THIRD WAY TO SPEND THAT MARGIN, and it is not on this line's face:
+//     `screenshot`'s fast path can now burn FAST_CAPTURE_BUDGET_MS *before* the
+//     CDP path even starts, so on a fallthrough the real figure is
+//     1500 + 16000 = 17500 and the headroom is **500ms, not 2000ms**. That sum is
+//     pinned by a test (cdp_protocol.test.mjs) rather than by this comment,
+//     because the first draft of that constant was 5000 — which made it 21000,
+//     silently over this bound, and green under every other test in the repo.
 // Known cost: a slow-but-SUCCESSFUL CDP op in the 18–20s band is now killed at 18s
 // where it previously had until the server's 20s. That band was already mostly
 // lost to the server, so the trade is small and deliberate.
@@ -1669,16 +1676,43 @@ export const STORAGE_BUDGET_MS = 5000;
 // with nothing drawn on top. Record:
 // <datapacket-talos>/claudedocs/app-capture-occlusion-refutation-2026-08-24.md
 //
-// 5s is chosen to sit ABOVE the legitimate retry ladder and far BELOW the op
-// ceiling: captureWithRetry can legitimately spend CAPTURE_MAX_ATTEMPTS(3) tries
-// spaced by max(CAPTURE_RETRY_BASE_MS(700)·attempt, CAPTURE_QUOTA_WAIT_MS(1000))
-// = 1000 + 1400 ≈ 2.4s of backoff on a real quota hit, plus the calls themselves
-// (healthy captures measured 192-1365ms). So a quota storm still RETRIES rather
-// than being pushed onto CDP, while the pathological hang is cut off ~13s before
-// the op would have failed outright. Falling through costs a debugger banner and
-// returns the SAME image: both paths measured identical 1709x1314 geometry (the
-// "CDP changes the image" caveat is about --fullpage, which is a different clip).
-export const FAST_CAPTURE_BUDGET_MS = 5000;
+// 🔴 THE CEILING ON THIS NUMBER IS THE CDP FALLTHROUGH'S OWN BUDGET, NOT TASTE.
+// Whatever the fast path spends is spent BEFORE the CDP path starts, and it comes
+// straight out of the attach-hang margin documented at EXEC_OP_BUDGET_MS above: a
+// hung attach costs CDP_ATTACH_TIMEOUT_MS(8s) + an awaited safeDetach bounded by
+// CDP_COMMAND_TIMEOUT_MS(8s) = 16s, and that comment explicitly warns that
+// leaving it under 16s "converts the attach case into a generic op_timeout".
+// So the invariant is:
+//
+//     FAST_CAPTURE_BUDGET_MS + CDP_ATTACH_TIMEOUT_MS + CDP_COMMAND_TIMEOUT_MS
+//         <= EXEC_OP_BUDGET_MS
+//     1500 + 8000 + 8000 = 17500 <= 18000
+//
+// It is PINNED BY A TEST (cdp_protocol.test.mjs), not by this comment — an
+// earlier draft of this constant was 5000, which silently blew the sum to 21000
+// and would have mislabelled a post-fallthrough attach hang as `op_timeout`,
+// destroying the very phase attribution `fast_capture_timeout` exists to give.
+// ⚠ Be honest about what is left: 500ms of headroom, DOWN from the 2000ms that
+// comment describes. Raising this constant, CDP_ATTACH_TIMEOUT_MS or
+// CDP_COMMAND_TIMEOUT_MS without re-deriving the sum fails that test.
+//
+// 1500ms clears a healthy capture (measured 192-1365ms) and cuts the pathological
+// hang off ~16.5s before the op would have died outright.
+//
+// 🔴 DELIBERATE CONSEQUENCE, corrected from an earlier draft that claimed the
+// opposite: a genuine QUOTA STORM now falls through to CDP rather than riding out
+// the retry ladder. captureWithRetry can legitimately spend CAPTURE_MAX_ATTEMPTS(3)
+// tries spaced by max(CAPTURE_RETRY_BASE_MS(700)·attempt, CAPTURE_QUOTA_WAIT_MS
+// (1000)) = 1000 + 1400 = 2400ms of backoff PLUS the calls themselves — up to
+// ~6.5s at the top of the measured band, i.e. over this bound at any plausible
+// value that also satisfies the invariant above. That is the right trade rather
+// than a regression: CDP has NO captureVisibleTab quota, so the fallthrough is
+// exactly what a quota storm wants. It costs a debugger banner and returns the
+// SAME image — both paths measured identical 1709x1314 geometry (the "CDP changes
+// the image" caveat is about --fullpage, a different clip). ⚠ That geometry
+// equality is n=1, at one zoom/deviceScaleFactor, and the fallthrough is now
+// ROUTINE rather than rare — so a divergence at non-100% zoom would be routine too.
+export const FAST_CAPTURE_BUDGET_MS = 1500;
 // A /poll blocks server-side for BROWSER_BRIDGE_POLL_TIMEOUT (default 25s) before
 // its 204. 40s leaves generous headroom for a slow loopback round-trip plus the
 // activeTabSnapshot() that precedes the fetch, while still being a bound.

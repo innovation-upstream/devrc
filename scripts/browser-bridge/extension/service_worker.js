@@ -1008,7 +1008,19 @@ const OPS = {
           loopTiming().fastCaptureMs, "screenshot.fast", {},
           "fast_capture_timeout");
         return { url: tab.url, dataUrl, via: "captureVisibleTab" };
-      } catch (e) { /* fall through to the CDP path (works off-screen) */ }
+      } catch (e) {
+        // 🔴 LEAVE A TRACE — a silently swallowed `e` makes this path invisible.
+        // Nothing else distinguishes "the fast path was bounded out" from "the
+        // tab was not active" or "--fullpage", so without this breadcrumb there
+        // is NO way to tell in production whether FAST_CAPTURE_BUDGET_MS is set
+        // anywhere near right, and the constant's justification stays a
+        // laboratory argument forever. Same rolling slot as execute()'s
+        // breadcrumbs, so it cannot grow. Fire-and-forget, like every other one.
+        breadcrumb("screenshot", (cmd && cmd.id) || null,
+                   String((e && e.message) || e).startsWith("fast_capture_timeout")
+                     ? "fast_timeout" : "fast_failed");
+        /* fall through to the CDP path (works off-screen) */
+      }
     }
     const dataUrl = await withCdp(tab.id, tab.url, async (send) => {
       const params = { format: "png" };

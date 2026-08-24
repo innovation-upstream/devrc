@@ -254,35 +254,67 @@ test("screenshot STILL uses the chrome.debugger (CDP) path — not regressed to 
 // on a tab CDP would have captured in well under a second. Measured 2026-08-24,
 // 3/3 `op_timeout:screenshot` at 18.07-18.11s vs 3/3 CDP successes 381-3084ms.
 //
-// RED WITHOUT THE FIX: with the bound removed this test does not fail with an
-// assertion, it HANGS until the runner's own timeout kills it — which is exactly
-// the production symptom, so the test is a faithful reproduction rather than a
-// restatement of the patch.
-test("screenshot fast path: a HUNG captureVisibleTab falls through to CDP", async () => {
+// RED WITHOUT THE FIX — and it must be red as a FAILURE, never as a hang.
+//
+// 🔴 THE `{ timeout }` IS LOAD-BEARING, NOT HYGIENE. With the bound reverted and
+// no per-test timeout, this file does not fail — it WEDGES: measured, the runner
+// never exits (still running at 200s), prints NO summary, reports `not ok` = 0
+// and `# fail` = 0, and the 12 tests declared after this one NEVER RUN. So the
+// regression this test exists to catch would read as CLEAN to any gate that
+// counts failures, while silently blinding the back half of the file. A hang is
+// the one failure shape a green-suite check cannot distinguish from success.
+// With the timeout it fails with an attributable message and the file completes.
+// 🔴 CLEANUP IS `t.after`, NOT `finally`, AND THAT IS THE SECOND HALF OF THE FIX.
+// A `finally` around the await does NOT run when the test times out — the await
+// never settles, so the block is never reached. Measured with the bound reverted:
+// the hung stub and `tab.active = true` LEAKED into the following tests, hanging
+// the healthy-fast-path control too, and the file still died at the runner's own
+// timeout with `fail=0, cancelled=2` and 10 tests never run — i.e. still the
+// count-blind shape this timeout was added to remove. `t.after` runs even on a
+// timed-out test, so exactly ONE test fails and the other 22 still execute.
+test("screenshot fast path: a HUNG captureVisibleTab falls through to CDP",
+     { timeout: 2000 }, async (t) => {
   resetCalls();
   const realCapture = chrome.tabs.captureVisibleTab;
   const realTiming = globalThis.BROWSER_BRIDGE_LOOP_TIMING;
-  // 20ms bound instead of the real 5s, via the same injection point the loop
-  // budgets already use.
-  globalThis.BROWSER_BRIDGE_LOOP_TIMING = { ...(realTiming || {}), fastCaptureMs: 20 };
-  chrome.tabs.captureVisibleTab = () => new Promise(() => {});   // never settles
-  state.tab.active = true;                                        // → fast path
-  try {
-    const started = Date.now();
-    const out = await OPS.screenshot({ tabId: TAB_ID });
-    assert.equal(out.via, "cdp", "a hung fast path must fall through to CDP");
-    assert.match(out.dataUrl, /^data:image\/png;base64,/);
-    assert.ok(state.calls.debugger.includes("Page.captureScreenshot"),
-              "the CDP path actually ran");
-    assert.ok(state.calls.debugger.includes("detach"), "always detaches");
-    // Bounded, not merely eventual: nowhere near the 18s op ceiling.
-    assert.ok(Date.now() - started < 5000,
-              "must be cut off by the fast-path bound, not by the op budget");
-  } finally {
+  t.after(() => {
     chrome.tabs.captureVisibleTab = realCapture;
     globalThis.BROWSER_BRIDGE_LOOP_TIMING = realTiming;
     state.tab.active = false;
-  }
+  });
+  // 20ms bound instead of the real 1500ms, via the same injection point the loop
+  // budgets already use. The production VALUE is pinned separately, in
+  // cdp_protocol.test.mjs — this test covers the mechanism, not the number.
+  globalThis.BROWSER_BRIDGE_LOOP_TIMING = { ...(realTiming || {}), fastCaptureMs: 20 };
+  chrome.tabs.captureVisibleTab = () => new Promise(() => {});   // never settles
+  state.tab.active = true;                                        // → fast path
+  const started = Date.now();
+  // 🔴 RACE IT HERE rather than leaning on `{ timeout }` alone, so a regression is
+  // counted as a FAILURE and not as a CANCELLATION. node scores a timed-out test
+  // `cancelled`, leaving `fail` at 0 — so a gate that greps the fail count reads
+  // a regression as clean, which is the same count-blindness in a smaller shape.
+  // Racing it makes the regression an ordinary assertion failure with a message
+  // that names the cause. The `{ timeout: 2000 }` above stays as the backstop for
+  // anything that hangs OUTSIDE this race.
+  let hangTimer;
+  const out = await Promise.race([
+    OPS.screenshot({ tabId: TAB_ID }),
+    new Promise((_, reject) => {
+      hangTimer = setTimeout(
+        () => reject(new Error("screenshot did not settle within 1s: the fast path "
+                               + "is unbounded, so a hung captureVisibleTab never "
+                               + "reaches the catch that falls through to CDP")),
+        1000);
+    }),
+  ]).finally(() => clearTimeout(hangTimer));
+  assert.equal(out.via, "cdp", "a hung fast path must fall through to CDP");
+  assert.match(out.dataUrl, /^data:image\/png;base64,/);
+  assert.ok(state.calls.debugger.includes("Page.captureScreenshot"),
+            "the CDP path actually ran");
+  assert.ok(state.calls.debugger.includes("detach"), "always detaches");
+  // Bounded, not merely eventual: nowhere near the 18s op ceiling.
+  assert.ok(Date.now() - started < 1000,
+            "must be cut off by the fast-path bound, not by the op budget");
 });
 
 // ATTRIBUTION CONTROL for the test above: the bound must not simply push every
