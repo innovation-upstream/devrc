@@ -64,21 +64,55 @@ import skill_tiers  # noqa: E402
 FACTS_READER = REPO_ROOT / "scripts" / "lib" / "skill_tier_facts.py"
 SYNC_SCRIPT = REPO_ROOT / "scripts" / "sync-skill-tiers.py"
 
-# Vacuity floor on the discovery itself. 36 entries were measured when this gate
+# Vacuity floor on the discovery itself. 37 entries were measured when this gate
 # was written; every assertion here is otherwise satisfied by an empty tree.
 MIN_SKILLS = 30
+
+# --------------------------------------------------------------------------- #
+# THE MEASUREMENT, PINNED
+#
+# 🔴 Every figure below is RECOMPUTED from the live tree by
+# `test_the_quoted_measurements_match_the_live_tree`, which prints the exact
+# replacement values when one drifts. They are quoted in the source so a reviewer
+# can see the ceiling was set from a real measurement rather than chosen — and
+# pinned so that audit trail cannot rot into a lie.
+#
+# This is deliberate friction: ADDING OR RETIRING A SKILL REDS THIS TEST, and the
+# fix is to copy the printed numbers. That is the point. The three transcribed
+# figures this replaced were each wrong within a day of being written — one was a
+# 36-entry total quoted in a 37-entry tree, and one contradicted the number the
+# same change reported to its reviewer.
+# --------------------------------------------------------------------------- #
+MEASURED_ENTRIES = 37
+MEASURED_TIER_A_ENTRIES = 24
+MEASURED_TIER_A_CHARS = 8_946
+# devrc's whole listing under the ledger (tier A in full, tier B name-only).
+MEASURED_UNDER_LEDGER_CHARS = 9_138
+# ...and what the same 37 entries would cost with every skill tier A. The
+# difference is what the ledger buys: 3,907 chars.
+MEASURED_ALL_TIER_A_CHARS = 13_045
 
 # 🔴 THE TIER-A RATCHET, in the REAL formula: the tier-A block cost
 # `sum(len(name) + 4 + min(len(desc), 1536)) + (n - 1)`.
 #
-# Measured at the commit that introduced the ledger: 24 tier-A entries, 8,946
-# chars (devrc's whole listing under the ledger is 9,120, down from 12,858 with
-# every skill tier A). The ceiling sits 254 chars above that — deliberately less
-# than one average tier-A entry (8,946 / 24 = 372) — so a NEW tier-A skill cannot
-# be added without an eviction or a demotion in the SAME commit. That is the rule
-# `claude/RULES.md`, `test_skill_descriptions.py` and
-# `scripts/browser-bridge/tests/test_skill_size.py` already apply to the other
-# always-on documents.
+# The ceiling sits 254 chars above MEASURED_TIER_A_CHARS — less than the MEAN
+# tier-A entry, which is 8,946 / 24 = 372.8.
+#
+# 🔴 READ WHAT THAT DOES AND DOES NOT BUY. A headroom below the mean bounds an
+# AVERAGE entry. It does NOT stop every addition, and the difference is not
+# academic:
+#   * a new tier-A skill whose entry is under 254 chars lands with NO eviction,
+#     and entries that small exist today — `handoff` is 205 and `audit-pr` 215;
+#   * the sibling ceiling in `test_skill_descriptions.py` has ALREADY been walked
+#     this way. `subsystem-index` arrived in #790 at 182 chars as that module
+#     measures, slipped inside its ~250 of headroom with no eviction, and took
+#     that headroom to 68.
+# So the honest claim is: this ceiling forces the eviction conversation for a
+# TYPICAL new skill, and a small one gets through until the accumulated slack
+# runs out. It is a ratchet on regrowth, not a per-addition gate. Do not restate
+# it as "a NEW skill cannot be added without an eviction" — that sentence claims
+# coverage this code does not provide, which `claude/RULES.md` calls worse than
+# no guard because it stops anyone looking.
 #
 # LOWER it when you cut; do NOT raise it to make a new description fit. Demoting
 # one skill to tier B in claude/skill-tiers.json is a ONE-LINE edit and is the
@@ -245,6 +279,50 @@ def test_the_symptom_routed_skills_stay_tier_a(ledger, skills, name):
     )
 
 
+def test_the_quoted_measurements_match_the_live_tree(ledger, skills):
+    """🔴 THE FIGURES IN THIS MODULE'S SOURCE ARE PINNED, NOT TRANSCRIBED.
+
+    A ceiling is only auditable if the reader can see what it was set from, so the
+    measurement is quoted at the top of this file. A quoted number nobody can
+    re-derive is exactly how the previous version shipped THREE wrong figures in
+    one comment — a 36-entry total quoted in a 37-entry tree, and a saving that
+    contradicted the number the same change reported to its reviewer.
+
+    This asserts each against the live computation and prints the replacements, in
+    the idiom `run-tests.sh` uses for its floors: resolve a drift by copying what
+    the failure says, never by arithmetic.
+    """
+    live = {
+        "MEASURED_ENTRIES": len(skills),
+        "MEASURED_TIER_A_ENTRIES": len(skill_tiers.tier_a_names(ledger)),
+        "MEASURED_TIER_A_CHARS": skill_tiers.tier_a_chars(ledger, skills),
+        "MEASURED_UNDER_LEDGER_CHARS": skill_tiers.devrc_listing_chars(ledger, skills),
+        "MEASURED_ALL_TIER_A_CHARS": skill_tiers.devrc_listing_chars(
+            {name: {"tier": "A"} for name in skills}, skills),
+    }
+    quoted = {
+        "MEASURED_ENTRIES": MEASURED_ENTRIES,
+        "MEASURED_TIER_A_ENTRIES": MEASURED_TIER_A_ENTRIES,
+        "MEASURED_TIER_A_CHARS": MEASURED_TIER_A_CHARS,
+        "MEASURED_UNDER_LEDGER_CHARS": MEASURED_UNDER_LEDGER_CHARS,
+        "MEASURED_ALL_TIER_A_CHARS": MEASURED_ALL_TIER_A_CHARS,
+    }
+    assert quoted == live, (
+        "the measurements quoted at the top of this module no longer describe the "
+        "tree. Copy these values in — do NOT recompute them by hand, and do not "
+        "adjust TIER_A_CEILING_CHARS to match unless you are deliberately "
+        "re-pinning the ratchet (raising it pays the saving back):\n"
+        + "\n".join(f"    {k} = {v:_}" for k, v in live.items())
+        + f"\n  the ledger saves {live['MEASURED_ALL_TIER_A_CHARS'] - live['MEASURED_UNDER_LEDGER_CHARS']:,} "
+        f"chars across {live['MEASURED_ENTRIES']} entries; the mean tier-A entry is "
+        f"{live['MEASURED_TIER_A_CHARS'] / live['MEASURED_TIER_A_ENTRIES']:.1f}, "
+        f"and TIER_A_CEILING_CHARS leaves "
+        f"{TIER_A_CEILING_CHARS - live['MEASURED_TIER_A_CHARS']} of headroom.\n"
+        "  🔴 Headroom below the mean bounds an AVERAGE entry, not every entry — "
+        "see the comment on TIER_A_CEILING_CHARS before claiming otherwise."
+    )
+
+
 def test_the_tier_a_cost_does_not_regrow_past_its_ratchet(ledger, skills):
     """🔴 THE RATCHET, in the REAL charging formula.
 
@@ -382,9 +460,17 @@ def test_control_the_tier_a_ratchet_can_go_red(ledger, skills):
     new tier-A skill — not a synthetic wall of text — because "someone adds a
     skill" is exactly how this ceiling gets breached.
 
-    It doubles as the headroom check: if one average entry does NOT breach it,
-    the ratchet has been left slack enough to absorb a whole skill unnoticed,
-    which is the failure mode it exists to prevent.
+    It doubles as the headroom check: if one MEAN-SIZED entry does not breach it,
+    the ratchet has been left slack enough to absorb a typical whole skill
+    unnoticed.
+
+    🔴 IT PROVES NOTHING ABOUT A SMALL ENTRY, and that gap is real rather than
+    theoretical — a tier-A skill under the current 254 chars of headroom lands
+    with no eviction, which is exactly how the sibling ceiling in
+    `test_skill_descriptions.py` went from ~250 of headroom to 68 when
+    `subsystem-index` arrived. The fixture is the mean deliberately: a control
+    built from the smallest possible entry would grade a property this ceiling
+    does not have.
     """
     live = skill_tiers.tier_a_chars(ledger, skills)
     assert live <= TIER_A_CEILING_CHARS, "live tree already red"
