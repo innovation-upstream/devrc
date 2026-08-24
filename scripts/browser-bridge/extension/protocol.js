@@ -1722,9 +1722,8 @@ export const STORAGE_BUDGET_MS = 5000;
 //       built for — `image readback failed`, the GPU/paint race behind #181's
 //       spacing invariant. Attempt 2 starts at T+700ms and must finish inside the
 //       bound; attempt 3 needs >=2100ms (700·1 + 700·2; probed at 2106ms) and can
-//       NEVER run. (At 2000ms, the maximum
-//       the invariant allows, attempt 3 is still unreachable — this is structural,
-//       not a tuning error.) Such a capture now takes CDP instead of retrying.
+//       NEVER run. (At 2000ms — the maximum the invariant allows — attempt 3 is
+//       still unreachable, so this is structural, not a tuning error.) Such a capture now takes CDP instead of retrying.
 //   (b) A merely SLOW-but-successful capture in the 1.5-18s band now falls through
 //       where it previously succeeded, and CDP is not a universal substitute:
 //       chrome.debugger.attach fails on a tab that already has DevTools attached,

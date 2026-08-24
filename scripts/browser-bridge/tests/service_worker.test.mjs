@@ -318,8 +318,11 @@ test("screenshot fast path: a HUNG captureVisibleTab falls through to CDP",
   // 1000ms, so any run reaching this point is necessarily under it. An earlier
   // `Date.now() - started < 1000` could therefore only ever fire as a 1-2ms
   // boundary flake — a guard that cannot fail for its stated reason is worse than
-  // none, because it reads as coverage. The bound's real magnitude is pinned in
-  // the production-wiring test below.)
+  // none, because it reads as coverage. The bound's magnitude is not pinned
+  // anywhere — it is BOUNDED, from both sides: `> 1365` and the `FAST + 16s <=
+  // 18s` sum invariant, both in cdp_protocol.test.mjs. The wiring test below pins
+  // the WIRE, not the value. Saying "pinned" of either would be a fourth loose
+  // claim in a PR whose whole history is loose claims.)
 });
 
 // 🔴 PINNING THE CONSTANT IS NOT PINNING THAT PRODUCTION USES IT.
@@ -349,6 +352,15 @@ test("loop budgets are wired to their constants, not to literals", async () => {
       storageMs: STORAGE_BUDGET_MS,
       fastCaptureMs: FAST_CAPTURE_BUDGET_MS,
     };
+    // 🔴 THE GUARD IS ONLY AS GOOD AS THE VALUES BEING DISTINCT. If two budgets
+    // ever hold the SAME number, swapping their wires passes every assertion
+    // below — the collapsed-fixture trap, where a fixture cannot express the
+    // difference it exists to detect. They are pairwise distinct today
+    // (1500/5000/10000/18000/40000/180000); this keeps it that way rather than
+    // leaving it to luck, and fails loudly on the day someone picks a duplicate.
+    assert.equal(new Set(Object.values(wired)).size, Object.keys(wired).length,
+                 "two budgets share a value — a swapped wire would be undetectable; "
+                 + "give them distinct values or assert the swap directly");
     const actual = loopTiming();
     assert.deepEqual(Object.keys(actual).sort(), Object.keys(wired).sort(),
                      "a budget was added or removed — wire it to a constant here");
