@@ -1102,7 +1102,11 @@ def test_running_the_v5_step_list_twice_is_a_no_op(tmp_path):
     store.record_source_url("https://example-site.test/a.mp4",
                             dir_name="Jane Doe")
     for step in MIGRATIONS[5]:
-        store._run_migration_step(step)
+        # `_run_migration_step` takes its connection explicitly now: `migrate`
+        # runs the whole step list inside one `Store._write` transaction so a
+        # SQLITE_BUSY during a migration is retried rather than crashing the
+        # sidecar on start-up.
+        store._run_migration_step(store.conn, step)
     assert store.source_url_count() == 1, "a re-run dropped the ledger"
     assert store.migrate() == SCHEMA_VERSION
     store.close()
