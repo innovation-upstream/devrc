@@ -84,12 +84,30 @@ node query.mjs edit-page <doc_id> <page_id> --file /tmp/page.md
   platform specifically**: the API token resolves to a HUMAN identity, so an agent-filed
   task is otherwise indistinguishable from a hand-typed one. Pass **`--cond`** to record
   what will close the task — from the enumerated allowlist `gh_pr_merged:<owner>/<repo>#<n>`,
-  `alert_cleared:<name>`, `cmd_exit_zero:<id>`, `metric_below:<id>`, `manual`. Anything
-  else is REJECTED at the CLI, not stored; omitting it means `manual`. ⚠️ The tag is
+  `alert_cleared:<name>`, `cmd_exit_zero:<id>`, `metric_below:<id>`, `manual:<who>`. It
+  works on **`create` and `subtask`** alike, and a batch plan takes the same value as a
+  `cond` key per task and per subtask (validated plan-wide *before* any task is created).
+  Anything else is REJECTED — **including a bare `manual`**, which names nobody, and
+  **including `unstated`**, which is what the code records when you named nothing and is
+  not something a caller may claim. Rejection happens at the create seam, not just at the
+  CLI. Omitting `--cond` records `cond=unstated` and warns on stderr: an honest, greppable
+  marker of ABSENCE, so tasks filed with no closing condition stay countable
+  instead of reading as compliant. ⚠️ The tag is
   **best-effort** — ClickUp requires a tag to exist at the SPACE level first, and creating
   one is a workspace mutation this will not do silently, so a missing space tag warns on
   stderr and the task is still created with its marker. Opt out with `CLICKUP_AGENT_STAMP=0`
   when a human is genuinely the author.
+
+## Task hygiene — read it before you create or close one
+
+🔴 **Creating or closing a ClickUp task? `~/.claude/skills/clickup/flows/task-hygiene.md`.**
+Pre-verify before creating (7 of 8 inbound tickets dissolve on verification, so
+"already done / already exists" and creating NOTHING is a success); one completion
+comment with evidence **per acceptance criterion** plus an explicit NOT-verified list;
+and **do not mark complete when you derived the criteria yourself** — the API token is a
+HUMAN identity here, so an agent closing a ticket is indistinguishable from the human
+doing it. Two comments per task, never per turn. ⚠️ **Nothing enforces any of it** —
+there is no ClickUp hook; it is a convention, and the flow says so first.
 
 ## Going deeper — load ONE only when its trigger fires
 

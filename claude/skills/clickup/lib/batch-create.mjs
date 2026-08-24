@@ -19,11 +19,12 @@
  *       "dueDate": "+7d",           // relative or absolute date
  *       "startDate": "today",
  *       "tags": ["architecture"],
+ *       "cond": "manual:zach",      // agent-object close-condition (see below)
  *       "listId": "900000000002",   // override default list
  *       "dependsOn": ["other-ref"], // must complete before this task starts
  *       "blocks": ["other-ref"],    // this task blocks other tasks
  *       "subtasks": [
- *         { "name": "Draft ERD", "assignee": "sam" },
+ *         { "name": "Draft ERD", "assignee": "sam", "cond": "manual:sam" },
  *         { "name": "Review ERD", "assignee": "riley" }
  *       ]
  *     }
@@ -33,6 +34,36 @@
 
 import { createTask, createSubtask, addDependency, setPriority, parseDateInput, setDueDate, setStartDate, assignTask, addTag } from '../api/tasks.mjs';
 import { findUser } from '../api/user.mjs';
+import { validateCond } from './agent-marker.mjs';
+
+/**
+ * Validate every `cond` in a plan BEFORE anything is created.
+ *
+ * 🔴 UP FRONT, not per task. A plan is a fan-out: validating lazily means task
+ * 17 of 20 throws with 16 objects already on the board and no rollback. The
+ * whole plan is a single authoring act, so it fails as one.
+ *
+ * Exported so the suite can assert the refusal without a network call.
+ * Returns the list of `<where>: <message>` problems; empty means the plan's
+ * conditions are all sayable.
+ */
+export function validatePlanConds(plan) {
+  const problems = [];
+  const check = (cond, where) => {
+    if (cond === undefined || cond === null) return; // omission is legal — it records `unstated`
+    try {
+      validateCond(cond);
+    } catch (e) {
+      problems.push(`${where}: ${e.message}`);
+    }
+  };
+  (plan.tasks || []).forEach((t, i) => {
+    const label = t.ref || t.name || `task[${i}]`;
+    check(t.cond, label);
+    (t.subtasks || []).forEach((s, j) => check(s.cond, `${label} > ${s.name || `subtask[${j}]`}`));
+  });
+  return problems;
+}
 
 /**
  * Execute a batch create plan.
@@ -47,6 +78,16 @@ export async function executeBatchCreate(plan, opts = {}) {
 
   if (tasks.length === 0) {
     return { created: [], errors: [], message: 'No tasks in plan' };
+  }
+
+  const condProblems = validatePlanConds(plan);
+  if (condProblems.length > 0) {
+    return {
+      created: [],
+      errors: condProblems.map((error) => ({ error })),
+      refMap: {},
+      message: `Plan rejected: ${condProblems.length} invalid cond value(s); nothing was created`,
+    };
   }
 
   // Phase 1: Create all tasks and map refs to real IDs
@@ -76,6 +117,11 @@ export async function executeBatchCreate(plan, opts = {}) {
       const createOpts = {};
       if (t.description) createOpts.markdown_description = t.description;
       if (t.status) createOpts.status = t.status;
+      // The close-condition for the agent-object marker createTask() stamps.
+      // Without this every batch-filed task is `cond=unstated` by construction,
+      // and a 20-task plan contributes 20 to a count that is supposed to measure
+      // authorial omission. Already validated above, plan-wide.
+      if (t.cond) createOpts.agentCond = t.cond;
       if (t.dueDate) {
         try {
           const date = parseDateInput(t.dueDate);
@@ -134,6 +180,8 @@ export async function executeBatchCreate(plan, opts = {}) {
             const subResult = await createSubtask(taskId, sub.name, {
               description: sub.description || undefined,
               status: sub.status || undefined,
+              // Same reason as the parent: a subtask is a stamped object too.
+              agentCond: sub.cond || undefined,
             });
             if (verbose) process.stderr.write(`  ↳ Subtask "${sub.name}" → ${subResult.id}\n`);
 
