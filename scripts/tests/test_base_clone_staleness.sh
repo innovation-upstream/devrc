@@ -22,7 +22,18 @@
 # documented mutation control:
 #
 #   sed 's/rev-list -n 100/rev-list -n 0/' scripts/claude-hooks/base-clone-staleness.sh > /tmp/m.sh
-#   HOOK=/tmp/m.sh bash scripts/tests/test_base_clone_staleness.sh   # must report FAIL 1
+#   HOOK=/tmp/m.sh bash scripts/tests/test_base_clone_staleness.sh   # must report FAIL 5
+#
+# ⚠️ That count was FAIL 1 until case 9 was added (2026-08-24). Breaking the
+# recoverability scan also strands the prune cases, which depend on phase 1 having
+# refreshed the file first. The kills are: case 2 "second refresh landed v3", and
+# four in case 9/9c. If you add cases, RE-RUN this control and update the number --
+# a stale expected count makes the next reader distrust a working harness.
+# A second mutant, aimed at the prune specifically (must report FAIL 5, all in 9/9c):
+#   sed 's/if ! git -C "$ROOT" cat-file -e "$UP:$p" 2>\/dev\/null; then/if false; then/' \
+#     scripts/claude-hooks/base-clone-staleness.sh > /tmp/mA.sh
+# 🔴 Confirm the sed ACTUALLY matched before believing a red -- a mutation that
+# silently fails to apply reports the unmutated hook's result.
 #
 # 🔴 HOOK defaults to the REPO copy, resolved relative to THIS FILE — never to a
 # deployed per-host path under ~/.claude/. A default pointing at the deployed
@@ -104,6 +115,16 @@ advance() { # advance <name> <claude-body> [newfile-relpath]
     git -C "$a" add "$newfile"
   fi
   git -C "$a" "${GIT_ID[@]}" commit -qm "advance $body"
+  git -C "$a" push -q origin fixture
+}
+
+# Remove a path upstream. The path must already exist there, and the work clone
+# must already have received it -- otherwise the case is vacuous (there is nothing
+# on disk for the prune to act on), which is why case 9 asserts that first.
+advance_delete() { # advance_delete <name> <relpath>
+  local a="$TMP/$1-author"
+  git -C "$a" rm -q "$2"
+  git -C "$a" "${GIT_ID[@]}" commit -qm "delete $2"
   git -C "$a" push -q origin fixture
 }
 
@@ -223,6 +244,98 @@ OUT=$(run_hook "$W")
 check "parses as JSON"        "$(jq -e . <<<"$OUT" >/dev/null 2>&1 && echo yes || echo no)" "yes"
 check "carries systemMessage" "$(jq -r 'has("systemMessage")' <<<"$OUT" 2>/dev/null)" "true"
 check "hookEventName correct" "$(jq -r '.hookSpecificOutput.hookEventName' <<<"$OUT" 2>/dev/null)" "SessionStart"
+
+# ---------------------------------------------------------------------------
+say "9. a path DELETED upstream is pruned here, not reported FAILED forever"
+# Defect (2026-08-24): `checkout $UP -- $p` cannot deliver a deletion -- the
+# pathspec matches nothing in $UP -- so the batch AND the per-file retry both
+# failed and the path landed in FAILED on every session start, forever, while the
+# file stayed on disk and kept loading into agent context. Exact mirror of the
+# ADDED-path bug in case 1, and the same wrong bucket.
+# Real instance: .claude/skills/check-clickup-addressed/ was removed from
+# talos-infra (it moved to devrc); the clone went on serving a 437-line retired
+# SKILL.md against the 562-line canonical one.
+W=$(mkfixture t9)
+advance t9 "CLAUDE v2" ".claude/skills/doomed/SKILL.md"
+git -C "$W" fetch -q origin fixture
+run_hook "$W" >/dev/null 2>&1                      # phase 1: the clone receives it
+pre "doomed skill exists before the delete" \
+    "$([ -e "$W/.claude/skills/doomed/SKILL.md" ] && echo yes || echo no)" "yes" && {
+  advance_delete t9 ".claude/skills/doomed/SKILL.md"
+  git -C "$W" fetch -q origin fixture
+  OUT=$(run_hook "$W")
+  vecho "$OUT"
+  check "deleted-upstream file is GONE locally" \
+        "$([ -e "$W/.claude/skills/doomed/SKILL.md" ] && echo yes || echo no)" "no"
+  check "reported as pruned, NOT failed" \
+        "$(jq -r '.systemMessage' <<<"$OUT" 2>/dev/null | grep -c 'pruned 1 deleted upstream')" "1"
+  check "no FAILED bucket for it" \
+        "$(jq -r '.systemMessage' <<<"$OUT" 2>/dev/null | grep -c 'FAILED')" "0"
+  # The emptied skill dir must not be left behind looking installed.
+  check "emptied skill dir cleaned up" \
+        "$([ -d "$W/.claude/skills/doomed" ] && echo yes || echo no)" "no"
+  # ...but a directory that still holds content must survive. `rmdir` refuses a
+  # non-empty dir, which is exactly why the cleanup uses it rather than `rm -r`.
+  check "sibling skill dir untouched" \
+        "$([ -e "$W/.claude/skills/demo/SKILL.md" ] && echo yes || echo no)" "yes"
+}
+
+say "9b. a deleted path holding UNIQUE LOCAL work is NOT pruned"
+# The prune must inherit the same protection as an overwrite. A local edit whose
+# blob appears NOWHERE in upstream history is unique human work; deleting it
+# would be strictly worse than the bug being fixed.
+#
+# ⚠️ HONEST LABEL: this is NOT regression coverage for the FAILED-bucket defect --
+# it passes on pre-change code too, because there the file survived by never being
+# pruned at all. It guards the NEW capability instead, and it is a killing guard
+# for it: mutating `if [ "$known" = no ]` to `[ "$known" = no ] && [ "$deleted" = no ]`
+# deletes the file and takes all three assertions red. Reachable, and it fires for
+# its own reason.
+W=$(mkfixture t9b)
+advance t9b "CLAUDE v2" ".claude/skills/precious/SKILL.md"
+git -C "$W" fetch -q origin fixture
+run_hook "$W" >/dev/null 2>&1
+printf 'HAND-WRITTEN LOCAL NOTES NOBODY ELSE HAS\n' > "$W/.claude/skills/precious/SKILL.md"
+pre "local edit is genuinely unrecoverable" \
+    "$(git -C "$W" rev-list --all --objects 2>/dev/null | grep -c "$(blob "$W" .claude/skills/precious/SKILL.md)")" "0" && {
+  advance_delete t9b ".claude/skills/precious/SKILL.md"
+  git -C "$W" fetch -q origin fixture
+  OUT=$(run_hook "$W")
+  vecho "$OUT"
+  check "unique local work SURVIVES the prune" \
+        "$([ -e "$W/.claude/skills/precious/SKILL.md" ] && echo yes || echo no)" "yes"
+  check "content is still the local edit" \
+        "$(cat "$W/.claude/skills/precious/SKILL.md")" "HAND-WRITTEN LOCAL NOTES NOBODY ELSE HAS"
+  check "reported as SKIPPED, not pruned" \
+        "$(jq -r '.systemMessage' <<<"$OUT" 2>/dev/null | grep -c 'SKIPPED')" "1"
+}
+
+say "9c. BASE_CLONE_NO_REFRESH=1 does not prune either (with a positive control)"
+# Report-only must mean report-only for deletions too, or the opt-out silently
+# stops protecting the one operation that cannot be undone by a re-run.
+#
+# ⚠️ HONEST LABEL: the two opt-out assertions are INVARIANT guards -- they pass on
+# pre-change code, where nothing was pruned under any flag. The POSITIVE CONTROL at
+# the end is the only real regression assertion in this case, and it is why the
+# other two are not vacuous: without it, "the file is still there" is the same
+# observation whether the opt-out works or the prune is simply broken.
+W=$(mkfixture t9c)
+advance t9c "CLAUDE v2" ".claude/skills/optout/SKILL.md"
+git -C "$W" fetch -q origin fixture
+run_hook "$W" >/dev/null 2>&1
+advance_delete t9c ".claude/skills/optout/SKILL.md"
+git -C "$W" fetch -q origin fixture
+OUT=$(run_hook "$W" BASE_CLONE_NO_REFRESH=1)
+vecho "$OUT"
+check "opt-out: file untouched" \
+      "$([ -e "$W/.claude/skills/optout/SKILL.md" ] && echo yes || echo no)" "yes"
+check "opt-out: no false 'pruned' claim" \
+      "$(jq -r '.systemMessage' <<<"$OUT" 2>/dev/null | grep -c 'pruned')" "0"
+# 🔴 Without this control the case above passes even if the prune never worked at
+# all -- "the file is still there" is the SAME observation as a broken feature.
+OUT=$(run_hook "$W")
+check "POSITIVE CONTROL: prunes without the flag" \
+      "$([ -e "$W/.claude/skills/optout/SKILL.md" ] && echo yes || echo no)" "no"
 
 printf '\n=====================================\n'
 printf 'PASS %d   FAIL %d\n' "$PASS" "$FAIL"
