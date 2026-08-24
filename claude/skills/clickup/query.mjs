@@ -84,6 +84,7 @@ import { uploadAttachment, uploadAttachments } from './api/attachments.mjs';
 
 // Lib imports
 import { executeBatchCreate } from './lib/batch-create.mjs';
+import { validateCond, COND_KINDS } from './lib/agent-marker.mjs';
 import { splitIds, isBulk, bulkExecute, formatBulkResults } from './lib/bulk.mjs';
 import { parseTaskId, parseListId, parseDocId, parsePageId, parseSpaceId } from './lib/parse.mjs';
 import {
@@ -112,6 +113,7 @@ let filterMe = false;
 let assigneeArg = null;
 let dueArg = null;
 let descriptionArg = null;
+let condArg = null;
 let contentArg = null;
 let nameArg = null;
 let parentArg = null;
@@ -147,6 +149,8 @@ for (let i = 0; i < args.length; i++) {
     dueArg = args[++i];
   } else if (arg === '--description' || arg === '--desc') {
     descriptionArg = args[++i];
+  } else if (arg === '--cond') {
+    condArg = args[++i];
   } else if (arg === '--content' || arg === '-c') {
     contentArg = args[++i];
   } else if (arg === '--file' || arg === '-f') {
@@ -334,6 +338,11 @@ Options:
   --attach     File path to upload as attachment (repeatable, for attach/comment)
   --page       Page ID for doc-reply (identifies which page the thread is on)
   --space      Space ID for create-doc (places doc in that space)
+  --cond       Close-condition for a task an agent files, from the enumerated
+               allowlist (gh_pr_merged:<owner>/<repo>#<n>, alert_cleared:<name>,
+               cmd_exit_zero:<id>, metric_below:<id>, manual). Recorded in the
+               task body so a later reconciler can close it. Defaults to
+               `manual`; anything off-allowlist is REJECTED, not stored.
 
 Bulk Operations (comma-separated IDs):
   node query.mjs get id1,id2,id3              Fetch multiple tasks at once
@@ -1082,6 +1091,20 @@ async function main() {
           // Note: Task descriptions use markdown_description (ClickUp parses),
           // while comments use JSON array format (we parse via markdownToClickUp)
           options.markdown_description = descriptionArg;
+        }
+        // Agent-object hygiene: an explicit close-condition for the marker
+        // createTask() stamps. Validated HERE so an off-allowlist value fails
+        // loudly at the CLI instead of silently degrading to `manual` deep
+        // inside the stamp — a wrong condition that reads as accepted is how an
+        // object ends up believed-tracked and actually immortal.
+        if (condArg) {
+          try {
+            options.agentCond = validateCond(condArg);
+          } catch (e) {
+            console.error(`Error: ${e.message}`);
+            console.error(`Allowed --cond kinds: ${[...COND_KINDS].sort().join(', ')}`);
+            process.exit(1);
+          }
         }
         if (dueArg) {
           const dueDate = parseDateInput(dueArg);
