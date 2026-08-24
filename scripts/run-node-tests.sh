@@ -233,6 +233,7 @@ SUITES=(
   # guarded by nothing; flipping it to a false gate claim went fully green).
   # Floor 163 = 171 - min(50, max(1, 171/20)) = 171 - 8.
   "claude/skills/clickup/test|5|163"
+  "scripts/discord-embed-ext/tests|3|50"
 )
 
 # --- discovery roots -----------------------------------------------------------
