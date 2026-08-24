@@ -444,7 +444,13 @@ def test_with_no_arguments_it_looks_for_the_registrar_under_home(tmp_path):
 # 3. WIRING — section 1 passes with home.nix untouched; that IS the shipped bug
 # --------------------------------------------------------------------------- #
 
-HOOK_CMD_RE = re.compile(r"~/\.claude/hooks/([A-Za-z0-9_.-]+\.py)")
+# 🔴 `.py|.sh`, not `.py`. This pattern IS the coverage of
+# test_home_nix_deploys_every_hook_the_registrar_registers below, and while it
+# was python-only that test's sentence ("every hook the registrar registers")
+# was wider than its implementation: the first non-python registration would
+# have been invisible to it and shipped undelivered, which is the exact bug the
+# test exists to catch, walked past by the guard meant to stop it.
+HOOK_CMD_RE = re.compile(r"~/\.claude/hooks/([A-Za-z0-9_.-]+\.(?:py|sh))")
 HOME_FILE_RE = re.compile(r'home\.file\."\.claude/hooks/([^"]+)"')
 
 
@@ -469,6 +475,11 @@ def test_the_parsers_find_something_positive_control():
     assert "next-step-nudge.py" in registers, registers
     assert len(deploys) >= 5, deploys
     assert "bash-guard.py" in deploys, deploys
+    # The `.sh` half of HOOK_CMD_RE, controlled separately: a pattern that had
+    # silently lost its shell alternation would still satisfy every assertion
+    # above, and the two tests below would go back to being python-only while
+    # still reading as "every hook".
+    assert "base-clone-staleness.sh" in registers, registers
 
 
 def test_home_nix_deploys_every_hook_the_registrar_registers():
@@ -548,6 +559,52 @@ def test_the_managed_hook_set_is_pinned_two_way_against_home_nix():
     )
 
 
+def test_the_shell_hook_set_is_pinned_two_way_against_home_nix():
+    """🔴 The SHELL ledger, pinned the same way its python sibling above is.
+
+    Separate test rather than a widened one, because the two sets answer
+    different questions and the sibling's `.py` filter is what keeps the rewrite
+    surface honest: MANAGED_HOOK_SCRIPTS means "whose INTERPRETER this script
+    rewrites", and a bash hook must never be in it — normalising that command's
+    first token to a python path turns every session start into a SyntaxError.
+
+    Fails when a `.claude/hooks/*.sh` entry lands in home.nix that nobody has
+    decided about, and when the registrant's set names one home.nix does not
+    deliver.
+    """
+    deployed = {n for n in home_nix_deploys() if n.endswith(".sh")}
+    shell = set(registrar_literal("MANAGED_SHELL_HOOK_SCRIPTS"))
+
+    # Positive control: both sides non-empty, so an equality of two empty sets
+    # can never be what makes this green.
+    assert deployed, "no .claude/hooks/*.sh home.file entry found in nix/home.nix"
+    assert shell, "MANAGED_SHELL_HOOK_SCRIPTS is empty"
+
+    assert deployed == shell, (
+        "nix/home.nix's .claude/hooks/*.sh set no longer matches the registrant's "
+        "shell ledger. Unaccounted (deployed, not managed): %r. Stale (claimed, "
+        "not deployed): %r."
+        % (sorted(deployed - shell), sorted(shell - deployed))
+    )
+
+
+def test_the_two_ledgers_are_disjoint_and_the_shell_one_is_never_rewritten():
+    """🔴 THE SEAM, pinned as a relationship rather than as two component facts.
+
+    A `.sh` name reaching MANAGED_HOOK_SCRIPTS would hand it to the interpreter
+    rewrite; a `.py` name in the shell set would put a python hook behind a
+    `bash` recogniser. Both sets can be individually well-formed and this can
+    still be wrong, which is why it is asserted about the PAIR.
+    """
+    managed = set(registrar_literal("MANAGED_HOOK_SCRIPTS"))
+    shell = set(registrar_literal("MANAGED_SHELL_HOOK_SCRIPTS"))
+
+    assert managed and shell                                    # positive control
+    assert managed & shell == set(), sorted(managed & shell)
+    assert all(n.endswith(".py") for n in managed), sorted(managed)
+    assert all(n.endswith(".sh") for n in shell), sorted(shell)
+
+
 def test_the_two_exclusions_are_explicit_and_justified():
     """🔴 The exclusions must be a DECISION, not an accident of omission.
 
@@ -569,12 +626,31 @@ def test_the_two_exclusions_are_explicit_and_justified():
         "a module excluded as a never-invoked library IS in the command tables: "
         + repr(sorted(libraries & registrar_registers()))
     )
-    # ...and every hook the registrant registers must be one it will also keep
-    # pinned, or the append surface would write a command the rewrite surface
-    # refuses to maintain.
-    assert registrar_registers() <= managed, (
-        "registered but not in the managed set, so its interpreter would never "
-        "be re-pinned: " + repr(sorted(registrar_registers() - managed))
+    # ...and every hook the registrant registers must be accounted for by ONE of
+    # the two ledgers, or the append surface would write a command no recogniser
+    # can read back — the unbounded re-append defect.
+    #
+    # 🔴 This used to read `<= managed` alone, and its stated reason ("its
+    # interpreter would never be re-pinned") is why: while every hook was python,
+    # "registered" and "interpreter-managed" were the same set. They are not the
+    # same question, and a shell hook is the case that separates them — it has no
+    # python token to re-pin, so demanding its presence in `managed` would demand
+    # exactly the rewrite that breaks it. The exhaustiveness is unchanged: a hook
+    # in NEITHER ledger still fails here.
+    shell = set(registrar_literal("MANAGED_SHELL_HOOK_SCRIPTS"))
+    unaccounted = registrar_registers() - (managed | shell)
+    assert unaccounted == set(), (
+        "registered but in neither ledger, so nothing maintains it and this "
+        "script cannot read its own command back: " + repr(sorted(unaccounted))
+    )
+    # And the python ledger is still exhaustive over the PYTHON registrations —
+    # the original claim, kept at its own width rather than dissolved into the
+    # union above, which would pass if a .py hook drifted into the shell set.
+    assert {n for n in registrar_registers() if n.endswith(".py")} <= managed, (
+        "a python hook is registered but not interpreter-managed, so it would "
+        "never be re-pinned: "
+        + repr(sorted({n for n in registrar_registers() if n.endswith(".py")}
+                      - managed))
     )
 
 
