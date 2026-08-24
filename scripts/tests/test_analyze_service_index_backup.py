@@ -58,6 +58,7 @@ sys.path.insert(0, str(SCRIPTS))
 
 import backup as B  # noqa: E402
 from testlib.mockbin import write_exec  # noqa: E402
+from testlib import hermetic_git  # noqa: E402
 
 
 def _require(tool: str, why: str) -> str:
@@ -96,6 +97,12 @@ def _git_env() -> dict:
         "GIT_TERMINAL_PROMPT": "0",
         "GIT_ALLOW_PROTOCOL": "file",
     })
+    # 🔴 Background maintenance OFF — `_manifest` hashes `.git`, so a
+    # transient `.git/objects/maintenance.lock` reads as a repository change.
+    # Broke CI twice before this was shared (#743, #780); see
+    # scripts/testlib/hermetic_git.py for the measurement and why the
+    # /dev/null pins above do NOT cover it.
+    e.update(hermetic_git.MAINTENANCE_OFF)
     return e
 
 
