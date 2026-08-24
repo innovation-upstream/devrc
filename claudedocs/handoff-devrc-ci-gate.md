@@ -222,21 +222,72 @@ longer true, and a permanently-red gate is no longer the expected outcome. See s
 - **Fixed:** `#385` — `timeout: "45m"` on `gate`, plus `timeout: "2m"` on `notify` so the
   50m budget is unreachable by *arithmetic* rather than by assertion (the deadlines cross
   whenever notify exceeds 5m, and notify previously inherited the cluster's 1h default).
-- ⚠ **Still open for the other five pipelines** — see next steps 1.
+- ✅ **CLOSED for all six.** homelab-infra **`#386`** landed the other five on 2026-08-23 —
+  merged, Flux-reconciled, and verified on the **LIVE Pipeline objects** (a run executes the
+  DEPLOYED Pipeline, so the file landing is not the claim that matters):
+  `clawgate-ci 25m · gitops-validate 20m · auditloop-ci 40m · remix 40m · naida 40m`.
+  Each task timeout is set to EXACTLY its previous `tasks` budget, with `tasks` +5m and
+  `pipeline` +10m — the effective deadline is deliberately **unmoved**, only the layer
+  enforcing it. 🔴 Deliberately NOT tightened the way `#385` tightened devrc 50m→45m:
+  `gitops-validate` has completed runs at 18m06s under a 20m ceiling, so the same move would
+  have killed runs that pass today.
+- 🔴 **`#386` also closed a SECOND, independent no-verdict path that this section never
+  named: `timeouts.finally` killing the REPORTER.** `remix-ux-audit-f6vks` lost its verdict
+  that way on a run only **9m48s** long against a 45m budget, and `clawgate-ci-7smtg`
+  survived by **15s**. `finally` is now 10m everywhere.
+  ⚠ **Do NOT "fix" that by bounding the reporter's `curl` calls** — that was the first
+  diagnosis, it was wrong, and an audit caught it. Across ~490 report TaskRuns the
+  `report-status` step has **never exceeded 28s**, while its pod-start latency reaches
+  **282s**. The reporter is slow to SCHEDULE, never slow to run. The curls genuinely are
+  unbounded (2 per reporter, 3 for devrc) — just not what costs verdicts.
+- 🔴 **The arithmetic is a RELATIONSHIP and nothing enforces it:**
+  `Σ(attempts × timeout) + startOffset < tasks`. Adding `retries:` restarts the clock per
+  attempt and re-opens the defect **with every timeout value looking untouched**. A
+  server-side dry-run accepts `timeout: 99m` under `tasks: 30m` without complaint. Tekton
+  *does* validate `tasks + finally ≤ pipeline` — but **not on a TriggerTemplate's
+  `resourcetemplates`**, which is exactly where these budgets live, so an invalid budget
+  there applies cleanly and fails only at EventListener time ⇒ no status posted, i.e. this
+  same bug by another door. To validate one, lift the `timeouts` block into a standalone
+  PipelineRun and `--dry-run=server` **that**.
+- ⚠ **What `#386` does NOT fix, and this is the bigger number.** `gitops-validate` loses
+  **21 of 113 runs (18.6%)** — ten times devrc's 2 — because its pods wait **p50 1m07s,
+  p90 11m09s, max 19m11s** against a **20m** ceiling. Five of the 21 had actually started
+  running; one got through **10 of 13 steps**. `#386` only makes such a run post a legible
+  `error` instead of silence. **The lever is scheduling pressure (the `#378` family), not
+  the timeout** — note `clawgate-ci`, the one pipeline with **no `nodeSelector`**, has a
+  pod-start max of **18s** rather than 19 minutes.
+  🔴 This reconciles with the skill's "a burst queued and recovered, zero checks eaten"
+  counter-datapoint rather than contradicting it: a burst **delays** the pod, and whether the
+  delay costs a verdict is decided by the pipeline's own headroom. devrc at 50m drains and
+  survives; `gitops-validate`, tightest budget and worst latency, is the one that loses.
+- ⚠ **Three audit rounds were needed and each found a real defect — in the fix's own
+  COMMENTS, not its values.** Round 1: two wrong diagnoses baked into config, one of which
+  had reversed the fix. Round 2: ten comments misstating the change itself, a
+  self-contradicting max, and a deleted caveat that still applied. Round 3: a corrected
+  figure contradicted a sibling file **in the same PR**. Budget for this shape.
 
 ## Next steps (ranked)
 
-1. 🔴 **Fix the `finally`-on-timeout defect in the OTHER FOUR pipelines.** `#385` fixed
-   devrc only. `gitops-validate`, `auditloop`, `naida`, `remix` **and `clawgate-ci`**
-   all have a `finally` report task behind a pipeline-level budget with no task-level
-   timeout. **`clawgate-ci` first** — busiest pipeline on the cluster and described
-   elsewhere as the real pre-merge gate. One line each: `timeout:` on the PipelineTask.
-   Measured impact: across 447 retained PipelineRuns there are **25 timeouts and 0 of
-   them ran their report task**.
-2. **Do NOT make `tekton/devrc-pytests` required yet.** It first reached `BOTH TIERS PASS`
-   (pytests 15150/0, nodetests 1149/0) on `devrc-ci-vl88r` at 2026-08-23T04:00Z and has been
-   green since — but it was red for **four independent reasons** on day one. Wants a stretch
-   of consecutive greens, not one observation.
+1. ✅ **DONE — homelab-infra `#386`, merged + deployed + verified live.** See the resolved
+   section above for what it covers and, more importantly, what it does not.
+2. ⚠️ **OVERTAKEN — `tekton/devrc-pytests` IS required now, and this doc advised against
+   it.** Measured 2026-08-24:
+   `required_status_checks.contexts = ["tekton/devrc-nodetests","tekton/devrc-pytests"]`
+   with `enforce_admins: true`. Someone made it required anyway; recorded here because the
+   advice below was not withdrawn, it was simply overrun, and the reasoning still stands as
+   the risk that was accepted:
+   > it first reached `BOTH TIERS PASS` (pytests 15150/0, nodetests 1149/0) on
+   > `devrc-ci-vl88r` at 2026-08-23T04:00Z — but it was red for **four independent reasons**
+   > on day one. That wants a stretch of consecutive greens, not one observation.
+
+   🔴 **The consequence is now live and worth knowing before you need it:** with both tiers
+   required and `enforce_admins: true`, a wedged Tekton blocks every merge with no admin
+   override. The escape hatch is
+   `gh api -X DELETE /repos/innovation-upstream/devrc/branches/main/protection/required_status_checks`.
+   ✅ The specific unsatisfiable case this doc flagged as the blocker on requiring anything —
+   a timed-out run posting NOTHING and sitting `pending` forever — **is the thing `#385`/`#386`
+   fixed**, so requiring both tiers is far safer now than when this was written. That is
+   probably why it happened.
 3. **Revisit the 45m gate timeout.** Headroom over the observed max is **3m32s (8.5%)**,
    and every measured run had a WARM nix cache — the budget's own stated worst case (a
    cold run after a nixpkgs bump) is absent from the evidence.
