@@ -80,7 +80,8 @@ globalThis.chrome = {
   alarms: { create() {}, onAlarm: { addListener() {} } },
 };
 
-const { OPS } = await import("../extension/service_worker.js");
+const { OPS, loopTiming } = await import("../extension/service_worker.js");
+const { FAST_CAPTURE_BUDGET_MS } = await import("../extension/protocol.js");
 
 function lastExec() { return state.calls.executeScript[state.calls.executeScript.length - 1]; }
 
@@ -312,9 +313,34 @@ test("screenshot fast path: a HUNG captureVisibleTab falls through to CDP",
   assert.ok(state.calls.debugger.includes("Page.captureScreenshot"),
             "the CDP path actually ran");
   assert.ok(state.calls.debugger.includes("detach"), "always detaches");
-  // Bounded, not merely eventual: nowhere near the 18s op ceiling.
-  assert.ok(Date.now() - started < 1000,
-            "must be cut off by the fast-path bound, not by the op budget");
+  // (No elapsed-time assertion here: the Promise.race above already rejects at
+  // 1000ms, so any run reaching this point is necessarily under it. An earlier
+  // `Date.now() - started < 1000` could therefore only ever fire as a 1-2ms
+  // boundary flake — a guard that cannot fail for its stated reason is worse than
+  // none, because it reads as coverage. The bound's real magnitude is pinned in
+  // the production-wiring test below.)
+  void started;
+});
+
+// 🔴 PINNING THE CONSTANT IS NOT PINNING THAT PRODUCTION USES IT.
+//
+// The test above injects `fastCaptureMs: 20`, and cdp_protocol.test.mjs asserts
+// the CONSTANT's value — so between them, nothing checked the wire connecting the
+// two. Measured by a re-audit: mutating loopTiming()'s default from
+// FAST_CAPTURE_BUDGET_MS to a literal 600000 left ALL 501 tests green, i.e. the
+// original surviving mutant was still alive, just spelled one level down. This is
+// the seam assertion; it must run with NO override active.
+test("fast-path bound is wired to the constant, not to a literal", async () => {
+  const realTiming = globalThis.BROWSER_BRIDGE_LOOP_TIMING;
+  delete globalThis.BROWSER_BRIDGE_LOOP_TIMING;
+  try {
+    assert.equal(loopTiming().fastCaptureMs, FAST_CAPTURE_BUDGET_MS,
+                 "production must read FAST_CAPTURE_BUDGET_MS, so the budget "
+                 + "invariant in cdp_protocol.test.mjs actually governs runtime");
+  } finally {
+    if (realTiming === undefined) delete globalThis.BROWSER_BRIDGE_LOOP_TIMING;
+    else globalThis.BROWSER_BRIDGE_LOOP_TIMING = realTiming;
+  }
 });
 
 // ATTRIBUTION CONTROL for the test above: the bound must not simply push every

@@ -213,8 +213,13 @@ test("fullPageClip uses the css content size for a full-document capture", () =>
 // the op SETTLES and control returns to the poll loop.
 
 test("timeout budgets are chosen well under the 20s server cmd_timeout", () => {
+  // EXEC_OP_BUDGET_MS belongs here too, and its absence was load-bearing: it is
+  // the right-hand side of the fast-path inequality below, so relaxing IT is the
+  // easiest way to satisfy that test — and a mutant raising it to 25000 (past the
+  // server's own 20s cmd_timeout, after which the envelope can never reach the
+  // caller at all) survived the entire suite.
   for (const ms of [CDP_ATTACH_TIMEOUT_MS, CDP_COMMAND_TIMEOUT_MS, CDP_OP_BUDGET_MS,
-                    FAST_CAPTURE_BUDGET_MS]) {
+                    FAST_CAPTURE_BUDGET_MS, EXEC_OP_BUDGET_MS]) {
     assert.ok(ms > 0 && ms < 20000, `budget ${ms} must be >0 and < the 20s server timeout`);
   }
 });
@@ -242,10 +247,21 @@ test("fast-path bound leaves the CDP fallthrough its full attach-hang budget", (
     `${FAST_CAPTURE_BUDGET_MS + attachHangCost}ms must fit the ${EXEC_OP_BUDGET_MS}ms ` +
     `op ceiling, or a post-fallthrough attach hang reports op_timeout instead of ` +
     `cdp_timeout:attach`);
-  // And it must still clear a healthy capture (measured 192-1365ms), or the bound
-  // pushes ordinary successes onto CDP and the fast path stops being a fast path.
+  // And it must still clear the ORDINARY healthy-capture band, or the bound pushes
+  // routine successes onto CDP and the fast path stops being a fast path.
+  //
+  // 🔴 THE BAND, NOT "THE SLOWEST" — an earlier version of this assertion said
+  // "must exceed the slowest measured healthy capture", which is FALSE and was the
+  // kind of false claim a test is worst at carrying, because the next person tuning
+  // this constant reasons from it. The same measurement run recorded a SUCCESSFUL
+  // capture at 17,970ms (arm A′). The slowest healthy capture is ~18s, not 1365ms.
+  // 1365ms is the top of the ORDINARY band (control arm, n=3: 292-1365ms; arm A,
+  // n=2: ~280ms). Sacrificing the 1.5-18s tail to CDP is the POINT of the bound,
+  // not a side effect. (The 292 figure also corrects a transcription error: the
+  // "192" previously quoted here came from a different 2026-08-19 measurement.)
   assert.ok(FAST_CAPTURE_BUDGET_MS > 1365,
-            "bound must exceed the slowest measured healthy capture");
+            "bound must exceed the ordinary healthy-capture band (292-1365ms), or "
+            + "routine successes fall through to CDP");
 });
 
 test("promiseWithTimeout: a hung promise rejects with cdp_timeout:<label> (settles, not hangs)", async () => {

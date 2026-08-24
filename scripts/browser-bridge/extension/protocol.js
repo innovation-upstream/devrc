@@ -1712,6 +1712,26 @@ export const STORAGE_BUDGET_MS = 5000;
 // the image" caveat is about --fullpage, a different clip). ⚠ That geometry
 // equality is n=1, at one zoom/deviceScaleFactor, and the fallthrough is now
 // ROUTINE rather than rare — so a divergence at non-100% zoom would be routine too.
+//
+// 🔴 WHAT THE NARROW BOUND COSTS. Stated rather than discovered later; none of it
+// is fatal, and no value satisfying the invariant above avoids (a):
+//   (a) The retry ladder is largely CUT OFF for the OTHER transient class it was
+//       built for — `image readback failed`, the GPU/paint race behind #181's
+//       spacing invariant. Attempt 2 starts at T+700ms and must finish inside the
+//       bound; attempt 3 needs >=2200ms and can NEVER run. (At 2000ms, the maximum
+//       the invariant allows, attempt 3 is still unreachable — this is structural,
+//       not a tuning error.) Such a capture now takes CDP instead of retrying.
+//   (b) A merely SLOW-but-successful capture in the 1.5-18s band now falls through
+//       where it previously succeeded, and CDP is not a universal substitute:
+//       chrome.debugger.attach fails on a tab that already has DevTools attached,
+//       which is a case where the fast path was the ONLY working path. Sacrificing
+//       that tail is the intent — but it is a real behaviour change, not free.
+//   (c) The abandoned ladder keeps firing captureVisibleTab in the background
+//       CONCURRENTLY with the CDP capture, consuming the ~2/sec quota. There is no
+//       abort primitive for captureVisibleTab (contrast the bounded fetch, which
+//       has a signal that tears the request down), so this cannot be fixed here.
+//       At 5000ms abandonment was rare; at 1500ms it is routine. Self-healing —
+//       the next op's own retry absorbs it.
 export const FAST_CAPTURE_BUDGET_MS = 1500;
 // A /poll blocks server-side for BROWSER_BRIDGE_POLL_TIMEOUT (default 25s) before
 // its 204. 40s leaves generous headroom for a slow loopback round-trip plus the

@@ -1000,7 +1000,8 @@ const OPS = {
       // CDP path would have captured fine. Measured 2026-08-24: 3/3 timeouts
       // pinned at 18.07-18.11s here vs 3/3 CDP successes in 381-3084ms.
       // The bound turns "never settles" into a rejection, which is the ONLY
-      // shape this catch can see. See FAST_CAPTURE_BUDGET_MS for the 5s choice.
+      // shape this catch can see. See FAST_CAPTURE_BUDGET_MS for the 1500ms choice
+      // and, more importantly, for the budget invariant that CAPS it.
       try {
         const dataUrl = await promiseWithTimeout(
           captureWithRetry(() =>
@@ -1009,16 +1010,24 @@ const OPS = {
           "fast_capture_timeout");
         return { url: tab.url, dataUrl, via: "captureVisibleTab" };
       } catch (e) {
-        // 🔴 LEAVE A TRACE — a silently swallowed `e` makes this path invisible.
+        // Leave a trace — a silently swallowed `e` makes this path invisible.
         // Nothing else distinguishes "the fast path was bounded out" from "the
-        // tab was not active" or "--fullpage", so without this breadcrumb there
-        // is NO way to tell in production whether FAST_CAPTURE_BUDGET_MS is set
-        // anywhere near right, and the constant's justification stays a
-        // laboratory argument forever. Same rolling slot as execute()'s
+        // tab was not active" or "--fullpage". Same rolling slot as execute()'s
         // breadcrumbs, so it cannot grow. Fire-and-forget, like every other one.
+        //
+        // 🔴 BE HONEST ABOUT WHAT THIS BUYS, because an earlier draft of this
+        // comment claimed production measurement it does not deliver: the slot
+        // is SINGLE and execute() overwrites it with `done` as soon as the CDP
+        // fallthrough succeeds — the normal outcome. Measured write sequence
+        // with a hung fast path: ["start", "screenshot_fast_timeout", "done"],
+        // final slot `done`. So this crumb survives only when the op ALSO wedges
+        // in CDP or the worker dies mid-capture; there, it is strictly more
+        // informative than a bare `start`. It is NOT an answer to "is 1500ms the
+        // right number in production" — that needs a separate counter key that
+        // execute() does not clobber, deliberately not added here.
         breadcrumb("screenshot", (cmd && cmd.id) || null,
                    String((e && e.message) || e).startsWith("fast_capture_timeout")
-                     ? "fast_timeout" : "fast_failed");
+                     ? "screenshot_fast_timeout" : "screenshot_fast_failed");
         /* fall through to the CDP path (works off-screen) */
       }
     }
@@ -1512,7 +1521,7 @@ function loopTiming() {
     storageMs: t.storageMs == null ? STORAGE_BUDGET_MS : t.storageMs,
     // The `screenshot` fast path's own bound — see FAST_CAPTURE_BUDGET_MS. It is
     // NOT a loop budget, but it lives here so a unit test can drive a 20ms bound
-    // through the same injection point instead of waiting 5 real seconds.
+    // through the same injection point instead of waiting 1500 real ms.
     fastCaptureMs: t.fastCaptureMs == null
       ? FAST_CAPTURE_BUDGET_MS : t.fastCaptureMs,
   };
@@ -1534,6 +1543,13 @@ function breadcrumb(op, id, phase) {
 }
 
 // execute — THE choke point where every op is bounded.
+//
+// 🔴 ONE DOCUMENTED EXCEPTION EXISTS — see README "one rule, one place" and
+// FAST_CAPTURE_BUDGET_MS. `screenshot`'s FAST PATH carries its own bound, because
+// this choke point can only END an op; it cannot make a hung sub-step FALL
+// THROUGH to a working alternative, and `captureVisibleTab` hangs rather than
+// rejecting. That is a different job from the one below, not a weakening of it.
+// The paragraph that follows is still the rule for TERMINATING an op.
 //
 // The bound lives here and NOWHERE else on purpose. Patching `frames` and
 // `screenshot` individually (the two ops the journal caught wedging) would fix
@@ -1826,8 +1842,15 @@ if (!(typeof globalThis !== "undefined" && globalThis.BROWSER_BRIDGE_NO_AUTOSTAR
 // `emulationState` is exported for TESTS only — it is the sticky-emulation Map, and
 // asserting "close cleared it" / "a vanished tab dropped it" requires seeing it.
 // Nothing in production reads it from outside this module.
+// `loopTiming` is exported for TESTS only — it is the seam between the protocol.js
+// budget constants and the code that actually reads them. Pinning the CONSTANT is
+// not the same claim as pinning that production USES it: a re-audit mutated this
+// function's `fastCaptureMs` default to a literal 600000 and the whole 501-test
+// suite stayed green, because the relationship test reads the constant while the
+// behavioural tests inject an override. Exporting it lets one assertion close that
+// gap without a 1.5s timing test.
 export { execute, OPS, ALLOWED_OPS, cdpAttached, loop, emulationState,
-         documentEmulation };
+         documentEmulation, loopTiming };
 
 // A read/reset window onto the loop's private liveness state, for tests.
 export const loopState = {
