@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html>
+<head><title>Discord Embed Fixture</title></head>
+<body>
+
+<!-- 1. Message with image embed (400px max-width, 300px max-height constraint) -->
+<div class="message" id="msg-img">
+  <div class="embed" style="max-width:400px;max-height:300px;">
+    <img src="https://cdn.discordapp.com/attachments/123/456/photo.png?v=1" />
+  </div>
+</div>
+
+<!-- 2. Message with video embed (400px constraint) -->
+<div class="message" id="msg-video">
+  <div class="embed" style="max-width:400px;">
+    <video src="https://media.discordapp.net/attachments/123/789/clip.mp4" controls></video>
+  </div>
+</div>
+
+<!-- 3. Message with multiple images (for lightbox navigation) -->
+<div class="message" id="msg-multi">
+  <div class="embed" style="max-width:400px;">
+    <img src="https://cdn.discordapp.com/attachments/100/200/a.jpg" />
+    <img src="https://cdn.discordapp.com/attachments/100/201/b.jpg" />
+    <img src="https://cdn.discordapp.com/attachments/100/202/c.jpg" />
+  </div>
+</div>
+
+<!-- 4. Non-Discord image (should NOT be enlarged) -->
+<div class="message" id="msg-external">
+  <div class="embed" style="max-width:400px;">
+    <img src="https://example.com/image.png" />
+  </div>
+</div>
+
+<!-- 5. Discord image with no constrainer -->
+<div class="message" id="msg-no-constrain">
+  <img src="https://cdn.discordapp.com/attachments/100/300/free.jpg" />
+</div>
+
+<!-- 6. Discord image with deeply nested constrainer (depth > 8) -->
+<div class="message" id="msg-deep">
+  <div><div><div><div><div><div><div><div><div class="embed" style="max-width:400px;">
+    <img src="https://cdn.discordapp.com/attachments/100/400/deep.jpg" />
+  </div></div></div></div></div></div></div></div></div>
+</div>
+
+<!-- 7. Video with source child element -->
+<div class="message" id="msg-video-source">
+  <div class="embed" style="max-width:400px;">
+    <video controls>
+      <source src="https://media.discordapp.net/attachments/100/500/with-source.mp4" type="video/mp4" />
+    </video>
+  </div>
+</div>
+
+<!-- 8. Already enlarged element (idempotency test) -->
+<div class="message" id="msg-already">
+  <div class="embed" style="max-width:400px;">
+    <img src="https://cdn.discordapp.com/attachments/100/600/already.jpg" data-dee-enlarged="1" />
+  </div>
+</div>
+
+</body>
+</html>

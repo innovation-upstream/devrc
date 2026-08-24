@@ -218,6 +218,31 @@ SUITES=(
   # shared vectors are what keeps them from drifting), and the create-path seam.
   # Floor 145 = 152 - min(50, max(1, 152/20)) = 152 - 7.
   "claude/skills/clickup/test|5|145"
+
+  # discord-embed-ext: the unpacked MV3 content-script extension that lifts
+  # Discord's 400x300 embed cap and adds the click-to-open lightbox. Two files:
+  # embed_enlarge (media detection, the container walk, the idempotent override)
+  # and lightbox (open/close, zoom, pan, per-message navigation, the wiring of
+  # every on-screen control).
+  #
+  # 60 tests / 2 files measured 2026-08-24 on the tree that added it.
+  # Floor 57 = 60 - min(50, max(1, 60/20)) = 60 - 3.
+  #
+  # Six of the lightbox tests are labelled REGRESSION and were watched to FAIL
+  # against the original build with the same observability added and no fixes:
+  # sibling scoping (actual 4, expected 2), arrow navigation, the prev/next
+  # buttons, the zoom buttons, the zoom label after navigating, and backdrop
+  # click-to-close. The other tests passed on that control, so they are invariant
+  # guards, not regression coverage — do not count them as such.
+  #
+  # The media-URL tests are pinned to a MEASUREMENT, not to a guess: run against
+  # two real logged-in channels on 2026-08-24, the original host-only pattern
+  # matched 59 of 60 <img>/<video> (avatars, server icons, emojis, clan badges,
+  # 48px /media/ decorations) and would have enlarged 10 avatars, while finding
+  # zero attachments. The narrowed pattern matched 0 there and 1 in the second
+  # channel — a real attachment, in a container capped at max-height 350px, which
+  # is the positive control proving it is not simply matching nothing.
+  "scripts/discord-embed-ext/tests|2|57"
 )
 
 # --- discovery roots -----------------------------------------------------------

@@ -745,6 +745,98 @@ in
       $DRY_RUN_CMD rm -rf "$bbTmp"
     '';
 
+  # discord-embed-ext: same git-immunity problem as browser-bridge above, same
+  # remedy — deploy the unpacked MV3 extension to a STABLE path outside the git
+  # working tree, as REAL files (`cp -rL`, not store symlinks), so a checkout,
+  # rebase or worktree operation in ~/workspace/devrc cannot swap the extension's
+  # code out from under a running Brave.
+  #
+  # 🔴 SECOND COPY OF A PREDICATE, KNOWINGLY. This repeats the shape of
+  # browserBridgeExtension rather than sharing it, and that is a DRY debt, not a
+  # design: consolidating both onto one helper means refactoring a live, hardened
+  # deploy path, which does not belong in a PR about a different extension. If a
+  # THIRD extension wants this, extract the helper first instead of pasting again.
+  # This copy is deliberately weaker than browser-bridge's: no `--exchange`
+  # two-attempt TOCTOU dance, because nothing here is serving traffic mid-switch —
+  # the failure it must avoid is a HALF-WRITTEN extension directory, not a torn
+  # handoff between a live server and its client.
+  #
+  # ⚠ FLAKE TRAP (identical to browser-bridge's): flakes only see git-TRACKED
+  # files, so a NEW extension file that has not been `git add`ed is silently
+  # omitted from ${../scripts/discord-embed-ext/extension} and therefore from the
+  # deployed tree — no error anywhere. `git add` new extension files BEFORE
+  # switching.
+  #
+  # MANUAL operator step, once: brave://extensions → Developer mode → Load
+  # unpacked → ~/.local/share/discord-embed-ext. Nix cannot register an unpacked
+  # extension with Brave; it can only keep the directory correct.
+  home.activation.discordEmbedExtension =
+    lib.hm.dag.entryAfter ["writeBoundary"] ''
+      deeSrc=${../scripts/discord-embed-ext/extension}
+      deeDst="$HOME/.local/share/discord-embed-ext"
+      deeTmp="$deeDst.new.$$"
+      $DRY_RUN_CMD mkdir -p "$HOME/.local/share"
+
+      # Reclaim leftovers from interrupted earlier runs, but ONLY those whose
+      # owning PID is dead, so a concurrent activation's in-flight temp survives.
+      # `cp -rL` from the read-only store yields a 0555 tree and `rm -rf` cannot
+      # unlink inside one, which under activation's `set -eu` would abort the
+      # whole switch — so chmod always precedes rm.
+      for deeOld in "$deeDst".new.* "$deeDst".old.*; do
+        [ -e "$deeOld" ] || continue
+        deePid="''${deeOld##*.}"
+        # An EMPTY suffix is ours-but-broken and must be swept: `[ -d /proc/ ]`
+        # is TRUE, so it would otherwise be spared forever.
+        if [ -n "$deePid" ]; then
+          case "$deePid" in (*[!0-9]*) continue;; esac
+          [ "$deePid" = "$$" ] && continue
+          [ -d "/proc/$deePid" ] && continue   # a LIVE activation owns it
+        fi
+        $DRY_RUN_CMD chmod -R u+rwX "$deeOld" 2>/dev/null || true
+        $DRY_RUN_CMD rm -rf "$deeOld"
+      done
+
+      $DRY_RUN_CMD chmod -R u+rwX "$deeTmp" 2>/dev/null || true
+      $DRY_RUN_CMD rm -rf "$deeTmp"           # cp -rL NESTS if the target exists
+      $DRY_RUN_CMD cp -rL "$deeSrc" "$deeTmp" # -L → real files, not store symlinks
+      $DRY_RUN_CMD chmod -R u+rwX "$deeTmp"   # writable for the NEXT switch's rm -rf
+
+      if [ -n "''${DRY_RUN_CMD:-}" ]; then
+        echo "would install the discord-embed-ext extension at $deeDst:"
+        echo "  mv -T $deeDst $deeDst.old.$$   # only if it already exists"
+        echo "  mv -T $deeTmp $deeDst"
+      else
+        # Move the old tree aside BEFORE putting the new one in place, so the
+        # window in which $deeDst does not exist is a rename, not a copy. A
+        # failure here leaves the previous tree at .old.<pid> for the sweep
+        # above to reclaim — never a half-written $deeDst.
+        deeStash=""
+        if [ -e "$deeDst" ] || [ -L "$deeDst" ]; then
+          deeStash="$deeDst.old.$$"
+          if ! mv -T "$deeDst" "$deeStash"; then
+            echo "discord-embed-ext: deploy FAILED — could not move the existing" \
+                 "$deeDst aside. Nothing was changed; the new tree is at $deeTmp." >&2
+            false
+          fi
+        fi
+        if ! mv -T "$deeTmp" "$deeDst"; then
+          echo "discord-embed-ext: deploy FAILED — could not install $deeTmp at" \
+               "$deeDst." >&2
+          if [ -n "$deeStash" ] && mv -T "$deeStash" "$deeDst"; then
+            echo "discord-embed-ext: RESTORED the previous extension tree." >&2
+          else
+            echo "discord-embed-ext: the previous tree is at $deeStash — Brave" \
+                 "will report the extension as missing until it is restored." >&2
+          fi
+          false
+        fi
+        if [ -n "$deeStash" ]; then
+          $DRY_RUN_CMD chmod -R u+rwX "$deeStash" 2>/dev/null || true
+          $DRY_RUN_CMD rm -rf "$deeStash"
+        fi
+      fi
+    '';
+
   home.stateVersion = "24.11";
 
   home.packages = if isNixOS
