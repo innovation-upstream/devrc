@@ -218,6 +218,7 @@ SUITES=(
   # shared vectors are what keeps them from drifting), and the create-path seam.
   # Floor 145 = 152 - min(50, max(1, 152/20)) = 152 - 7.
   "claude/skills/clickup/test|5|145"
+  "scripts/discord-embed-ext/tests|3|50"
 )
 
 # --- discovery roots -----------------------------------------------------------
