@@ -28,7 +28,14 @@ run() { # run <name> <expect: KILLED|SURVIVES> <sed-expr>
   local out fails
   out="$(HOOK="$m" bash "$SUITE" 2>&1 | tail -1)"
   fails="$(sed -n 's/.*FAIL \([0-9]*\)/\1/p' <<<"$out")"
-  local got="KILLED"; [ "${fails:-0}" -eq 0 ] && got="SURVIVES"
+  # 🔴 A suite that dies before printing its summary yields an EMPTY count, and
+  # `${fails:-0}` would score that as SURVIVES -- a harness crash reported as "the
+  # guard held". Say so instead of defaulting.
+  if [ -z "$fails" ]; then
+    printf '  %-34s 🔴 HARNESS BROKE — no summary line (got: %s)\n' "$name" "${out:-<no output>}"
+    return
+  fi
+  local got="KILLED"; [ "$fails" -eq 0 ] && got="SURVIVES"
   local mark="ok "; [ "$got" != "$expect" ] && mark="🔴 "
   printf '  %s%-32s %-9s (%s kills) expected %s\n' "$mark" "$name" "$got" "${fails:-?}" "$expect"
 }
@@ -58,4 +65,9 @@ printf '   `hash-object` fatals on a directory so one never reaches the prune, a
 printf '   `git diff --name-only` never emits a `..` component. These are defence in\n'
 printf '   depth against a future change UPSTREAM of the loop, not pinned behaviour.\n'
 run 'rm-f-to-rm-rf'            SURVIVES 's|rm -f "$ROOT/$p"|rm -rf "$ROOT/$p"|'
-run 'drop-absolute-path-guard' SURVIVES 's|/\*) failed+=("$p"); continue ;;|/*) : ;;|'
+# 🔴 ISOLATE THE MUTATION. The obvious pattern here --
+#   s|/\*) failed+=("$p"); continue ;;|...|
+# -- also matches the TAIL of the `*/../*)` arm, so it disables the `..`-component
+# guard at the same time and the SURVIVES verdict would be about two guards rather
+# than the one it names. Anchor to the line start so only the absolute-path arm moves.
+run 'drop-absolute-path-guard' SURVIVES 's|^    /\*) failed+=("$p"); continue ;;$|    /*) : ;;|'

@@ -116,9 +116,13 @@ if [ -n "$DIFFERING" ]; then
       # upstream NEVER HAD. So `deleted=yes` alone must never authorise a removal.
       #
       # The `HEAD:$p` shortcut below is what made that difference dangerous. For a
-      # REFRESH it is correct: matching HEAD means the file was never touched
-      # locally, so overwriting it with a newer upstream version loses nothing. For
-      # a PRUNE it proves only that the content is committed HERE -- which is
+      # REFRESH it is adequate: matching HEAD means there is no UNCOMMITTED local
+      # modification, so the content stays recoverable from HEAD after an overwrite.
+      # (Not "never touched locally" -- a locally COMMITTED CLAUDE.md does match HEAD
+      # and IS reverted in the worktree on every session start. Pre-existing, and
+      # recoverable, but do not restate the stronger claim: it is the exact reasoning
+      # that went wrong below.) For a PRUNE the shortcut proves only that the content
+      # is committed HERE -- and a removal is not recoverable from HEAD -- which is
       # exactly what a skill authored on this branch and not yet pushed looks like.
       # Left ungated it deleted: a locally-committed skill, a locally-committed
       # CLAUDE.md, and on a branch with no upstream (so `$UP` falls back to
@@ -212,7 +216,6 @@ fi
 for p in "${to_prune[@]:-}"; do
   [ -n "$p" ] || continue
   case "/$p/" in
-    /) failed+=("$p"); continue ;;
     */../*) failed+=("$p"); continue ;;
   esac
   case "$p" in
@@ -225,7 +228,11 @@ for p in "${to_prune[@]:-}"; do
     # destroy content -- an untracked sibling (build cache, local scratch) both
     # survives and stops the climb.
     #
-    # 🔴 Bounded at the REFRESH_PATHS roots. Unbounded it walked past its own scope:
+    # 🔴 Bounded at the REFRESH_PATHS roots by EXACT string compare, so a future
+    # entry must be spelled the way `dirname` yields it -- `.claude/skills`, not
+    # `.claude/skills/`. A future entry that is a NESTED FILE (`docs/AGENTS.md`)
+    # would bound at the file and leave its parent directory climbable; the current
+    # two-entry list has no such case. Unbounded it walked past its own scope:
     # on a repo whose only skill was deleted upstream it removed `.claude/skills`
     # AND `.claude` -- empty and harmless, but `.claude` is not a path this hook is
     # allowed to touch, and anything probing `[ -d .claude ]` would see it vanish.
