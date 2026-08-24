@@ -37,18 +37,27 @@ SCHEMA_VERSION = 6
 #
 # Raising the default timeout is NOT the fix: it moves the threshold and leaves
 # the write lossy past it. Every mutating statement therefore goes through
-# `Store._write`, which retries the whole transaction while SQLite says BUSY.
+# `Store._retry_busy` (via `_write`), which retries while SQLite says BUSY.
 SQLITE_BUSY = 5
 SQLITE_LOCKED = 6
 
-# Total wall clock the retry loop may spend on one write. It bounds the RETRIES,
-# not a single statement's own busy wait — with the default 10s busy_timeout a
-# contended write blocks inside SQLite first and this only decides whether it
-# gets another go. Chosen against the alternative it replaces: the sidecar
-# previously answered fast and silently dropped the row.
+# Wall clock the retry LOOP may spend on one write.
+#
+# 🔴 It is NOT the worst-case call duration, and the difference is large. The
+# deadline is checked AFTER an attempt returns, so the last attempt can begin at
+# `deadline - ε` and then block a further `busy_timeout` inside SQLite. The real
+# ceiling is therefore about `WRITE_DEADLINE + timeout` — with the production
+# defaults (10s busy_timeout) that is ~40s, not ~30s. Measured against a held
+# lock at three points: deadline=1.0/timeout=2.0 -> 2.02s;
+# deadline=0.5/timeout=4.0 -> 4.28s; deadline=3.0/timeout=1.0 -> 3.07s.
+#
+# That matters to a caller with its own budget: `server.py` documents that the
+# extension's /discard timeout (240s) must exceed `DISCARD_VERIFY_TIMEOUT_S`
+# (180s), and store retries on the same request now eat into that headroom.
 WRITE_DEADLINE = 30.0
 # Belt to the deadline's braces: caps churn when busy_timeout is tiny and each
-# attempt returns in microseconds.
+# attempt returns in microseconds. Unreachable at the production busy_timeout
+# (~3 attempts fit in the deadline); it bounds the tiny-timeout case.
 WRITE_ATTEMPTS = 64
 RETRY_BASE = 0.005      # first backoff, seconds
 RETRY_CAP = 0.2         # backoff ceiling, seconds
@@ -58,7 +67,16 @@ def is_busy_error(exc: BaseException) -> bool:
     """True ONLY for SQLITE_BUSY / SQLITE_LOCKED — the retryable failures.
 
     Structural rather than a message match: `sqlite_errorcode` is what SQLite
-    itself set, and the low byte strips any extended-code suffix.
+    itself set.
+
+    🔴 The `& 0xFF` is load-bearing, not tidiness. An extended result code is
+    `primary | (sub << 8)`, and this interpreter DOES surface them — a WAL
+    read-then-write upgrade raises `517` (`SQLITE_BUSY_SNAPSHOT`), and
+    `SQLITE_BUSY_TIMEOUT` is `773`. Without the mask those compare unequal to 5
+    and a genuinely retryable failure would propagate as if it were permanent.
+    No `_write` body reads before writing today, so it is latent — which is
+    exactly why it needs a test rather than a comment
+    (`test_is_busy_error_masks_the_extended_code_suffix`).
 
     This predicate is the whole safety of the retry. A malformed statement, a
     closed database, a missing table or a constraint violation is PERMANENT —
@@ -308,7 +326,10 @@ class Store:
         self._clock = clock
         self._timeout = timeout
         self._write_deadline = float(write_deadline)
-        self._write_attempts = max(1, int(write_attempts))
+        # No `max(1, …)`: the bound is checked AFTER an attempt, so the first
+        # one always runs and 0 or a negative value already behaves as 1. A
+        # clamp here would read as a guard while changing nothing.
+        self._write_attempts = int(write_attempts)
         self._local = threading.local()
         if str(self.path) != ":memory:":
             self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -324,7 +345,15 @@ class Store:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA busy_timeout=%d" % int(self._timeout * 1000))
         if str(self.path) != ":memory:":
-            conn.execute("PRAGMA journal_mode=WAL")
+            # THE ONE WRITE THAT CANNOT GO THROUGH `_write`: this runs while the
+            # connection is still being built, and `_write` reaches for
+            # `self.conn`, which would re-enter here. It is a real write —
+            # converting a delete-mode database to WAL takes the write lock and
+            # raises SQLITE_BUSY if another connection holds EXCLUSIVE — so it
+            # gets the same bounded retry applied directly. Narrow (only the
+            # one-time delete->WAL conversion) but it fails at CONSTRUCTION, and
+            # per `migrate` below that lands in a degrade nothing recovers from.
+            self._retry_busy(lambda: conn.execute("PRAGMA journal_mode=WAL"))
         conn.execute("PRAGMA foreign_keys=ON")
         return conn
 
@@ -346,54 +375,81 @@ class Store:
         self._local.conn = None
 
     # --- writes ------------------------------------------------------------- #
-    def _write(self, work):
-        """Run `work(conn)` as ONE transaction, retrying while SQLite is BUSY.
+    def _retry_busy(self, work, *, rollback=None):
+        """Run `work()`, retrying while SQLite says BUSY. THE retry, once.
 
-        EVERY mutating statement in this class goes through here — one rule, one
-        place. `busy_timeout` is not durability: when it expires the write is
-        dropped and the calling thread dies with it, which is how 125 of 150
-        rows went missing in the measurement at the top of this file. A bounded
-        retry makes a contended write COMPLETE instead of vanishing.
-
-        Retrying the WHOLE transaction is safe because a BUSY failure commits
-        nothing and the rollback below discards any partial work — so the
-        non-idempotent parts (`hits = aliases.hits + 1`) still apply exactly
-        once. This is also why the retry lives here and not at the call sites:
-        the unit that must be re-run is the transaction, which only this method
-        owns.
+        Separate from `_write` for one caller: `_connect` must retry the WAL
+        pragma, and cannot use `_write` because `_write` asks for `self.conn`
+        and would re-enter the connection it is still building. Everything else
+        goes through `_write`.
 
         Bounded on both axes, and ONLY for BUSY/LOCKED: any other
-        `OperationalError` propagates on the first attempt (see
-        `is_busy_error`). Exhausting the bounds re-raises the last BUSY error —
-        a lossy write must still be loud, never swallowed.
+        `OperationalError` propagates on the FIRST attempt (see
+        `is_busy_error`) — retrying a permanent error would hide it behind a
+        timeout. Exhausting the bounds re-raises the last BUSY error; a write
+        that cannot land must still be loud, never swallowed.
+
+        🔴 The deadline is checked AFTER an attempt, so this can outrun it by up
+        to one `busy_timeout`. See `WRITE_DEADLINE` for the real ceiling.
         """
-        conn = self.conn
         deadline = time.monotonic() + self._write_deadline
         delay = RETRY_BASE
         attempt = 0
         while True:
             attempt += 1
             try:
-                result = work(conn)
-                conn.commit()
-                return result
+                return work()
             except sqlite3.OperationalError as exc:
                 if not is_busy_error(exc):
                     raise
-                try:
-                    conn.rollback()
-                except sqlite3.Error:
-                    pass
+                if rollback is not None:
+                    try:
+                        rollback.rollback()
+                    except sqlite3.Error:
+                        pass
                 left = deadline - time.monotonic()
                 if attempt >= self._write_attempts or left <= 0:
                     raise
                 time.sleep(min(delay, left))
                 delay = min(delay * 2, RETRY_CAP)
 
+    def _write(self, work):
+        """Run `work(conn)` as ONE transaction, retrying while SQLite is BUSY.
+
+        Every mutating statement in this class goes through here — one rule, one
+        place — with the single, named exception of the WAL pragma in
+        `_connect`, which cannot (see `_retry_busy`). Both share one retry, and
+        `test_every_mutating_execute_is_routed_through_the_retry` pins that
+        ledger per `execute` call rather than per method.
+
+        `busy_timeout` is not durability: when it expires the write is dropped
+        and the calling thread dies with it, which is how 125 of 150 rows went
+        missing in the measurement at the top of this file. A bounded retry
+        makes a contended write COMPLETE instead of vanishing.
+
+        Retrying the WHOLE transaction is safe because a BUSY failure commits
+        nothing and the rollback discards any partial work — so the
+        non-idempotent parts (`hits = aliases.hits + 1`) still apply exactly
+        once. That is also why the retry lives here and not at the call sites:
+        the unit that must be re-run is the transaction, which only this method
+        owns.
+        """
+        conn = self.conn
+
+        def _commit():
+            result = work(conn)
+            conn.commit()
+            return result
+
+        return self._retry_busy(_commit, rollback=conn)
+
     # --- schema ------------------------------------------------------------ #
-    def _has_column(self, table: str, column: str) -> bool:
+    def _has_column(self, conn, table: str, column: str) -> bool:
+        # Takes its connection like `_run_migration_step`, its only caller: both
+        # run inside a `_write` transaction, and reaching for `self.conn` there
+        # would be a second handle on the same seam.
         return any(row[1] == column
-                   for row in self.conn.execute(f"PRAGMA table_info({table})"))
+                   for row in conn.execute(f"PRAGMA table_info({table})"))
 
     def _run_migration_step(self, conn, step) -> None:
         """Apply one migration step. Every step must be RE-RUNNABLE.
@@ -408,7 +464,7 @@ class Store:
             kind = step[0]
             if kind == "ADD_COLUMN_IF_MISSING":
                 _, table, column, decl = step
-                if not self._has_column(table, column):
+                if not self._has_column(conn, table, column):
                     conn.execute(
                         f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
                 return
@@ -416,9 +472,15 @@ class Store:
         conn.execute(step)
 
     def migrate(self) -> int:
-        # Retried like every other write: `server.py` constructs the Store
-        # unguarded, so a BUSY here is a `Restart=always` crash loop rather than
-        # one lost row.
+        # Retried like every other write, and the reason is NOT a crash loop.
+        # `server.py:main()` wraps `App(cfg, …)` — which is where this runs — in
+        # `except Exception`, logs `startup_error`, and degrades to
+        # `App(blank, store=Store(":memory:"))`. So a BUSY here does not raise
+        # out of the process: main() returns 0, the unit stays `active`,
+        # `Restart=always` never fires, and the sidecar serves 503 from an
+        # in-memory store on every routing endpoint until a human restarts it.
+        # That is WORSE than a crash loop, because nothing self-heals and the
+        # unit looks healthy — which is what makes retrying here worth doing.
         cur = self.conn.execute("PRAGMA user_version")
         version = int(cur.fetchone()[0])
         for target in range(version + 1, SCHEMA_VERSION + 1):

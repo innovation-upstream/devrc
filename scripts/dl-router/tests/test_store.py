@@ -133,13 +133,15 @@ def test_concurrent_upserts_of_the_same_key_converge(tmp_path):
 # write lock from a second connection for a fixed span, so "the write was
 # blocked past its busy_timeout" is arranged, not hoped for.
 
-def _hold_write_lock(path, hold_seconds, acquired, released, stop=None):
+def _hold_write_lock(path, hold_seconds, acquired, released, stop=None, *,
+                     mode="IMMEDIATE"):
     """Hold SQLite's write lock on `path`, then let go.
 
     `BEGIN IMMEDIATE` takes the write lock at once (rather than on first write),
     which is what makes the block deterministic instead of timing-dependent.
     `acquired` fires only once the lock is genuinely held, so the test never
-    races the blocker.
+    races the blocker. `mode="EXCLUSIVE"` additionally locks out readers, which
+    is what a delete-mode database needs to block the WAL conversion.
 
     `stop` releases it EARLY. A test that only needs "the lock is held while I
     make this call" sets it as soon as the call returns, so the test costs what
@@ -149,7 +151,7 @@ def _hold_write_lock(path, hold_seconds, acquired, released, stop=None):
     """
     conn = sqlite3.connect(str(path), timeout=30.0)
     try:
-        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(f"BEGIN {mode}")
         acquired.set()
         if stop is None:
             time.sleep(hold_seconds)
@@ -299,6 +301,111 @@ def test_is_busy_error_reads_the_code_sqlite_set(store, tmp_path):
     st.close()
 
 
+def _seed_delete_mode_db(path):
+    """A database that is NOT yet in WAL, so opening it must CONVERT it."""
+    conn = sqlite3.connect(str(path))
+    try:
+        conn.execute("CREATE TABLE seeded (x)")
+        conn.commit()
+    finally:
+        conn.close()
+    assert _journal_mode(path) == "delete"
+
+
+def _journal_mode(path):
+    conn = sqlite3.connect(str(path))
+    try:
+        return conn.execute("PRAGMA journal_mode").fetchone()[0]
+    finally:
+        conn.close()
+
+
+def test_the_wal_conversion_at_connect_time_survives_a_held_lock(tmp_path):
+    """`_connect`'s WAL pragma is a WRITE, and it is the one that cannot use
+    `_write` — so it gets the retry directly. This is that claim, measured.
+
+    Converting a delete-mode database to WAL takes the write lock, so an
+    EXCLUSIVE holder makes it raise SQLITE_BUSY. It happens during `Store()`
+    construction, and `server.py:main()` catches everything there and degrades
+    to an in-memory store that serves 503 forever — the unit stays `active`, so
+    `Restart=always` never rescues it. A lost lock race at start-up is therefore
+    stickier than a lost row.
+    """
+    path = tmp_path / "delete-mode.sqlite3"
+    _seed_delete_mode_db(path)
+    acquired, released = threading.Event(), threading.Event()
+    blocker = threading.Thread(target=_hold_write_lock,
+                               args=(path, 0.4, acquired, released),
+                               kwargs={"mode": "EXCLUSIVE"})
+    blocker.start()
+    try:
+        assert acquired.wait(10), "the blocker never took the lock"
+        started = time.monotonic()
+        st = Store(path, timeout=0.02)
+        elapsed = time.monotonic() - started
+    finally:
+        blocker.join(60)
+    assert st.version() == SCHEMA_VERSION
+    assert _journal_mode(path) == "wal"
+    assert elapsed >= 0.3, f"the conversion was never blocked ({elapsed:.3f}s)"
+    st.close()
+
+
+def test_without_the_retry_the_wal_conversion_is_lost(tmp_path):
+    """POSITIVE CONTROL for the test above — the harness CAN see that failure.
+
+    `write_attempts=1` is the pre-fix shape. Measured: raises code 5 in ~0.02s
+    while the same construction with the retry takes ~0.54s and succeeds.
+    """
+    path = tmp_path / "delete-mode-no-retry.sqlite3"
+    _seed_delete_mode_db(path)
+    acquired, released, stop = (threading.Event(), threading.Event(),
+                                threading.Event())
+    blocker = threading.Thread(target=_hold_write_lock,
+                               args=(path, 30.0, acquired, released, stop),
+                               kwargs={"mode": "EXCLUSIVE"})
+    blocker.start()
+    try:
+        assert acquired.wait(10), "the blocker never took the lock"
+        with pytest.raises(sqlite3.OperationalError) as excinfo:
+            Store(path, timeout=0.02, write_attempts=1)
+    finally:
+        stop.set()
+        blocker.join(60)
+    assert excinfo.value.sqlite_errorcode == 5
+    assert _journal_mode(path) == "delete", "the conversion should not have run"
+
+
+def test_is_busy_error_masks_the_extended_code_suffix():
+    """🔴 The `& 0xFF` in `is_busy_error`, pinned.
+
+    SQLite's extended result codes are `primary | (sub << 8)`, and this
+    interpreter surfaces them: a WAL read-then-write upgrade raises `517`
+    (`SQLITE_BUSY_SNAPSHOT`). Without the mask those compare unequal to 5 and a
+    genuinely retryable failure propagates as if it were permanent — the write
+    is lost again, which is the whole bug.
+
+    Latent today (no `_write` body reads before writing), which is precisely why
+    it needs a test: a mutant that drops the mask passed the entire suite.
+    """
+    def busy(code):
+        return type("_Coded", (sqlite3.OperationalError,),
+                    {"sqlite_errorcode": code})("database is locked")
+
+    for code in (5,      # SQLITE_BUSY
+                 6,      # SQLITE_LOCKED
+                 261,    # SQLITE_BUSY_RECOVERY
+                 262,    # SQLITE_LOCKED_SHAREDCACHE
+                 517,    # SQLITE_BUSY_SNAPSHOT
+                 773):   # SQLITE_BUSY_TIMEOUT
+        assert is_busy_error(busy(code)) is True, code
+    for code in (1,      # SQLITE_ERROR
+                 11,     # SQLITE_CORRUPT
+                 267,    # SQLITE_CORRUPT_VTAB — an extended code that is NOT busy
+                 19):    # SQLITE_CONSTRAINT
+        assert is_busy_error(busy(code)) is False, code
+
+
 def test_an_exhausted_retry_re_raises_rather_than_going_quiet(tmp_path):
     """A write that truly cannot land must still be LOUD.
 
@@ -396,36 +503,180 @@ def test_a_retry_rolls_back_the_partial_transaction_first(store):
     assert len(store.recent_routes()) == 1
 
 
-def test_every_mutating_method_routes_through_the_write_helper():
-    """One rule, one place — an asserted ledger, not a pinned example.
+# --- the ledger: no write may bypass the retry ------------------------------ #
+#
+# An earlier version of this guard matched SQL by substring and asked, per
+# METHOD, whether the word `self._write(` appeared anywhere in it. Its docstring
+# claimed it "fails when the set of mutating methods grows", and two mutants
+# showed it did not: `INSERT OR REPLACE INTO` does not contain `INSERT INTO`, and
+# a raw `conn.execute` added BESIDE an existing `self._write(…)` in the same
+# method was exempted by the method-wide substring. Both survived a fully green
+# suite. So the check below is per `execute` CALL and classifies the statement by
+# its VERB, not by a phrase somebody could spell differently.
 
-    A new write method that does its own `conn.execute` + `commit()` would
-    reintroduce exactly this bug at one site while every other site stays
-    correct, and nothing else in the suite would notice. This fails when the
-    set of mutating methods GROWS past the set that goes through `_write`.
+# The retry helpers. A statement reached through either is routed.
+_RETRY_HELPERS = ("_write", "_retry_busy")
+
+# SQL verbs that change the database.
+_MUTATING_VERBS = {"INSERT", "REPLACE", "UPDATE", "DELETE", "ALTER", "DROP",
+                   "CREATE"}
+
+# PRAGMAs that configure THIS CONNECTION and never touch the file, so they
+# cannot take the write lock. An ENUMERATION, not a pattern: an unknown pragma
+# assignment counts as mutating, so this fails closed. `journal_mode=` is
+# deliberately absent — converting a database to WAL is a real write, and it is
+# the one statement that cannot go through `_write` (see `Store._connect`).
+_CONNECTION_SCOPED_PRAGMAS = {"busy_timeout", "foreign_keys"}
+
+
+def _sql_of(call):
+    """The literal SQL of an `execute(...)` call, or None if not analysable.
+
+    An f-string contributes its literal parts, which is enough to read the verb
+    — every f-string here interpolates an identifier, never the verb itself.
     """
+    if not call.args:
+        return ""
+    node = call.args[0]
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.JoinedStr):
+        return "".join(p.value for p in node.values
+                       if isinstance(p, ast.Constant)
+                       and isinstance(p.value, str))
+    if isinstance(node, ast.BinOp):        # "PRAGMA busy_timeout=%d" % ...
+        return _sql_of(ast.Call(func=call.func, args=[node.left], keywords=[]))
+    return None
+
+
+def _is_mutating(sql):
+    """True if this statement can take the write lock. None (unreadable) → True.
+
+    Failing closed on an unreadable statement is the point: a write assembled at
+    runtime is exactly the one nobody can eyeball.
+    """
+    if sql is None:
+        return True
+    head = " ".join(sql.split()).upper()
+    if not head:
+        return False
+    if head.startswith("PRAGMA "):
+        target = head[len("PRAGMA "):].split("(")[0]
+        if "=" not in target:
+            return False                   # a query: PRAGMA user_version
+        return target.split("=")[0].strip().lower() \
+            not in _CONNECTION_SCOPED_PRAGMAS
+    return head.split(" ", 1)[0] in _MUTATING_VERBS
+
+
+def _routed_node_ids(func):
+    """Every AST node reached through a retry helper inside `func`.
+
+    Covers both shapes in use: a lambda written inline in the call, and a nested
+    `def` handed over by name (`self._write(_apply)`).
+    """
+    routed, handed = set(), set()
+    for node in ast.walk(func):
+        if not (isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr in _RETRY_HELPERS):
+            continue
+        for arg in list(node.args) + [kw.value for kw in node.keywords]:
+            if isinstance(arg, ast.Name):
+                handed.add(arg.id)
+            routed.update(id(n) for n in ast.walk(arg))
+    for node in ast.walk(func):
+        if isinstance(node, ast.FunctionDef) and node.name in handed:
+            routed.update(id(n) for n in ast.walk(node))
+    return routed
+
+
+def _store_class():
     source = (Path(__file__).resolve().parent.parent / "store.py").read_text(
         encoding="utf-8")
     tree = ast.parse(source)
-    store_cls = next(node for node in tree.body
-                     if isinstance(node, ast.ClassDef) and node.name == "Store")
-    # `_write` IS the helper; `_run_migration_step` only ever runs inside one
-    # (see `migrate`), and takes its connection as an argument for that reason.
-    exempt = {"_write", "_run_migration_step"}
-    mutating = ("INSERT INTO", "UPDATE ", "DELETE FROM", "ALTER TABLE",
-                "DROP TABLE", "PRAGMA USER_VERSION=")
+    return next(node for node in tree.body
+                if isinstance(node, ast.ClassDef) and node.name == "Store")
+
+
+def test_every_mutating_execute_is_routed_through_the_retry():
+    """One rule, one place — an asserted ledger, checked per `execute` call.
+
+    A write that does its own `conn.execute` + `commit()` reintroduces exactly
+    this bug at one site while every other site stays correct, and nothing else
+    in the suite would notice. This fails when such a site APPEARS — including
+    beside a correct one in the same method, and including a verb spelled
+    differently (`INSERT OR REPLACE`, `REPLACE INTO`, `CREATE INDEX`).
+    """
+    store_cls = _store_class()
+    # `_retry_busy` IS the helper. `_run_migration_step` executes SQL it is
+    # handed and cannot classify it — exempt, but see the next test, which pins
+    # that every call to it is itself routed.
+    exempt = {"_retry_busy", "_run_migration_step"}
     offenders = []
-    for node in store_cls.body:
-        if not isinstance(node, ast.FunctionDef) or node.name in exempt:
+    for func in store_cls.body:
+        if not isinstance(func, ast.FunctionDef) or func.name in exempt:
             continue
-        body = ast.get_source_segment(source, node) or ""
-        statements = "".join(
-            n.value for n in ast.walk(ast.parse(body))
-            if isinstance(n, ast.Constant) and isinstance(n.value, str)).upper()
-        if any(kw in statements for kw in mutating) \
-                and "self._write(" not in body:
-            offenders.append(node.name)
+        routed = _routed_node_ids(func)
+        for node in ast.walk(func):
+            if not (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "execute"):
+                continue
+            sql = _sql_of(node)
+            if _is_mutating(sql) and id(node) not in routed:
+                offenders.append(
+                    f"{func.name}:{node.lineno} {(sql or '<dynamic>')[:60]!r}")
     assert offenders == []
+
+
+def test_the_migration_step_runners_exemption_is_earned():
+    """`_run_migration_step` is exempt only because its CALLERS are routed.
+
+    Without this, the exemption above is a hole the size of the whole migration
+    path: anything could call it outside a transaction and the ledger would
+    still read green.
+    """
+    store_cls = _store_class()
+    unrouted = []
+    for func in store_cls.body:
+        if not isinstance(func, ast.FunctionDef):
+            continue
+        routed = _routed_node_ids(func)
+        for node in ast.walk(func):
+            if (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "_run_migration_step"
+                    and id(node) not in routed):
+                unrouted.append(f"{func.name}:{node.lineno}")
+    assert unrouted == []
+
+
+def test_the_ledger_classifier_reads_verbs_not_phrases():
+    """The classifier itself, against the spellings that walked the old guard.
+
+    A guard on words is walkable by rewording; these are the exact rewordings
+    two surviving mutants used, plus the reads that must stay unflagged.
+    """
+    for sql in ("INSERT INTO aliases (key) VALUES (?)",
+                "INSERT OR REPLACE INTO aliases (key) VALUES (?)",
+                "REPLACE INTO aliases (key) VALUES (?)",
+                "  update   aliases\n   SET dir = ?",
+                "DELETE FROM aliases WHERE key=?",
+                "CREATE INDEX IF NOT EXISTS aliases_dir ON aliases(dir)",
+                "ALTER TABLE aliases ADD COLUMN x TEXT",
+                "PRAGMA user_version = 6",
+                "PRAGMA journal_mode=WAL"):
+        assert _is_mutating(sql) is True, sql
+    for sql in ("SELECT * FROM aliases",
+                "PRAGMA user_version",
+                "PRAGMA table_info(aliases)",
+                "PRAGMA busy_timeout=10000",
+                "PRAGMA foreign_keys=ON"):
+        assert _is_mutating(sql) is False, sql
+    # Unreadable SQL fails CLOSED — a write assembled at runtime is the one
+    # nobody can eyeball, so it must be routed like any other.
+    assert _is_mutating(None) is True
 
 
 # --- examples + routes ----------------------------------------------------- #
