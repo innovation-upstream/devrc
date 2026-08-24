@@ -84,10 +84,14 @@ node query.mjs edit-page <doc_id> <page_id> --file /tmp/page.md
   platform specifically**: the API token resolves to a HUMAN identity, so an agent-filed
   task is otherwise indistinguishable from a hand-typed one. Pass **`--cond`** to record
   what will close the task — from the enumerated allowlist `gh_pr_merged:<owner>/<repo>#<n>`,
-  `alert_cleared:<name>`, `cmd_exit_zero:<id>`, `metric_below:<id>`, `manual:<who>`. Anything
-  else is REJECTED at the CLI, not stored — **including a bare `manual`**, which names
-  nobody. Omitting `--cond` records `cond=unstated` and warns on stderr: an honest,
-  greppable marker of ABSENCE, so tasks filed with no closing condition stay countable
+  `alert_cleared:<name>`, `cmd_exit_zero:<id>`, `metric_below:<id>`, `manual:<who>`. It
+  works on **`create` and `subtask`** alike, and a batch plan takes the same value as a
+  `cond` key per task and per subtask (validated plan-wide *before* any task is created).
+  Anything else is REJECTED — **including a bare `manual`**, which names nobody, and
+  **including `unstated`**, which is what the code records when you named nothing and is
+  not something a caller may claim. Rejection happens at the create seam, not just at the
+  CLI. Omitting `--cond` records `cond=unstated` and warns on stderr: an honest, greppable
+  marker of ABSENCE, so tasks filed with no closing condition stay countable
   instead of reading as compliant. ⚠️ The tag is
   **best-effort** — ClickUp requires a tag to exist at the SPACE level first, and creating
   one is a workspace mutation this will not do silently, so a missing space tag warns on

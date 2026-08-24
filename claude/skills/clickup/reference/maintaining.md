@@ -58,20 +58,41 @@ Two gotchas worth keeping:
   nested vector catches it.
 - `agentIdentity()` **sanitises rather than trusts**, and a missing or unusable
   `CLAW_AGENT_COND` degrades to `unstated`, never to silence and never to
-  `manual`. `unstated` is an honest, greppable marker of ABSENCE — a fake `manual`
-  hid the non-compliant object among the compliant ones; dropping the marker
-  entirely would make the object invisible again, which is the whole defect.
-  A caller may not pass `unstated`: it is an observation the code makes, not a
-  condition anyone may claim.
-- 🔴 **This side and the Python side now DIVERGE on `manual`'s arity, deliberately
-  and only there.** Here `manual:<who>` is required and a bare `manual` is
-  refused; Python still accepts a bare `manual` and refuses `manual:zach`
-  (measured 2026-08-24 against `<talos-infra>/scripts/lib/agent_obj_marker.py` at
-  `origin/trunk`). So this side **refuses to emit** a bare `manual` and **still
-  parses** one — rejecting it on the read path would blind a JS reconciler to
-  every object the Python producers stamp. The divergence is enumerated and
-  asserted in `test/agent-marker.test.mjs` (`PYTHON_DIVERGENCE`); closing it means
-  making the same change in the Python module and moving those notes with it.
+  `manual` — and the degradation now **warns at the point it happens**, quoting
+  the refused value. `unstated` is an honest, greppable marker of ABSENCE — a fake
+  `manual` hid the non-compliant object among the compliant ones; dropping the
+  marker entirely would make the object invisible again, which is the whole
+  defect.
+- 🔴 **`unstated` is PRODUCED, never ACCEPTED — and that is enforced at the create
+  seam, not only at the CLI.** `applyAgentStamp()` validates a caller's
+  `agentCond` with `unstated` refused, and `buildMarker`'s `allowUnstated` now
+  defaults to **false** so the only site that can emit one is the missing-cond
+  fallback. It used to pass `allowUnstated: true` unconditionally, which meant
+  `applyAgentStamp`, `createTask`, `createSubtask` and batch-create all accepted
+  `cond=unstated` from a caller while the docs and one test claimed they did not.
+  A caller who can assert `unstated` has converted an observation into a claim,
+  and the count stops measuring anything.
+- 🔴 **What the `unstated` count MEANS, and how it was nearly ruined.** It is
+  meant to measure **authorial omission**. That only holds while every creating
+  path can name a condition: `create-subtask` and batch-create originally could
+  not, so every subtask and every batch task was `unstated` by construction and a
+  20-task plan added 20. Both now take one (`--cond` on `subtask`; a `cond` key
+  per task and per subtask in a batch plan, validated plan-wide **before any task
+  is created**). **If you add another creating path, give it a cond option in the
+  same change** — a creator that structurally cannot name one silently reclassifies
+  an interface gap as authorial omission.
+- 🔴 **This side and the Python side DIVERGE in exactly ONE place: the
+  missing-cond FALLBACK.** JS has one (`agentIdentity` → `applyAgentStamp`), so JS
+  is the only half that ever EMITS `cond=unstated`; Python's `cond` is a required
+  positional and its `build_marker` validates with no opt-ins, so it cannot. Both
+  sides refuse to emit a bare `manual` and both still parse one; both refuse
+  `unstated` as input and both parse it. Measured 2026-08-24 against
+  `<talos-infra>/scripts/lib/agent_obj_marker.py` at commit `9e21058fc` (branch
+  `zach/marker-manual-names-checker`, PR civitai/talos-infra#1286, which merges
+  before this). The divergence is enumerated and asserted in
+  `test/agent-marker.test.mjs` (`PYTHON_DIVERGENCE`), which records that commit
+  and the sha256 of the file it was measured from; closing it means making the
+  same change in the Python module and moving those notes with it.
 
 ## Tests
 

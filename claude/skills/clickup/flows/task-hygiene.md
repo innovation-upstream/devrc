@@ -47,12 +47,16 @@ it anywhere. If you can name neither a mechanical check nor a named human
 judgement over named evidence, say so in your reply instead of creating an object
 nobody can close.
 
-**Record it mechanically too**: pass `--cond` on create
+**Record it mechanically too**: pass `--cond` on `create` **or `subtask`**
 (`gh_pr_merged:<owner>/<repo>#<n>`, `alert_cleared:<name>`, `cmd_exit_zero:<id>`,
-`metric_below:<id>`, or `manual:<who>` naming the human who checks it). Omitting
-`--cond` is not fatal — it records `cond=unstated` and warns — but `unstated` is a
-recorded admission that you filed something nobody can close, and it is greppable
-precisely so those can be counted.
+`metric_below:<id>`, or `manual:<who>` naming the human who checks it); a batch
+plan takes the same value as a `cond` key per task and per subtask. Omitting it is
+not fatal — it records `cond=unstated` and warns — but `unstated` is a recorded
+admission that you filed something nobody can close, and it is greppable precisely
+so those can be counted. 🔴 **You cannot pass `unstated` yourself.** It is what the
+code writes when it OBSERVED that you named nothing; a caller able to assert it
+would turn that observation back into a claim, and the count would stop measuring
+anything. It is rejected at the create path, not only at the CLI.
 
 **Body: keep it to Context + Acceptance criteria + Non-goals + Verifier.**
 
@@ -70,11 +74,13 @@ each, naming what proves it — **plus an explicit `NOT verified:` list**.
 
 📊 **Why, measured.** An entire skill exists solely to answer the question "was
 this actually done?" — `~/.claude/skills/check-clickup-addressed/SKILL.md` reads
-session transcripts because the tasks themselves do not say. On the tasks it could
-see it returned **0 addressed / 1 partially addressed / 2 not established.** A
+session transcripts because the tasks themselves do not say. The one end-to-end
+run recorded in this repo — `claude/skills/check-clickup-addressed/reference/validation-history.md`,
+"End-to-end after round 3" (2026-08-20) — came back **0 addressed, 0 partial,
+0 open, 2 unclear**: it could establish nothing about either task it looked at. A
 per-criterion mapping is what would have let that verdict be read off the task
 itself, instead of reconstructed from a transcript and still coming back
-"not established".
+"unclear".
 
 The `NOT verified:` list is the load-bearing half. It is the only place the reader
 learns what you did *not* check, and omitting it converts an honest partial into a

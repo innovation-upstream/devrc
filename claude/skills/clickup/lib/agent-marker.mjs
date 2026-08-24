@@ -179,16 +179,25 @@ function canonicalJson(value) {
   return JSON.stringify(value);
 }
 
-export function buildMarker({ srcProducer, srcRunId, cond, fp = null, init = null }) {
+// 🔴 `allowUnstated` DEFAULTS TO FALSE, and that default is the fix for a real
+// hole: this used to pass `{ allowUnstated: true }` unconditionally, so ANY
+// caller reaching buildMarker — or applyAgentStamp, createTask, create-subtask,
+// batch-create — could assert `cond=unstated` and have it stamped. Only the CLI
+// rejected it. `unstated` means the CODE OBSERVED AN ABSENCE; a caller able to
+// assert it converts an observation back into a claim, which destroys the
+// sentinel's only value (you can no longer count authorial omission, because
+// anyone can spell it). So the affordance is now opt-in AT THE CALL SITE, and
+// the only site that opts in is the missing-cond fallback in applyAgentStamp().
+export function buildMarker({ srcProducer, srcRunId, cond, fp = null, init = null, allowUnstated = false }) {
   if (!PRODUCER_RE.test(srcProducer ?? '')) {
     throw new MarkerError(`invalid producer ${JSON.stringify(srcProducer)} (want ${PRODUCER_RE})`);
   }
   if (!RUN_ID_RE.test(srcRunId ?? '')) {
     throw new MarkerError(`invalid run-id ${JSON.stringify(srcRunId)} (want ${RUN_ID_RE})`);
   }
-  // `unstated` is buildable because the fallback produces it; a bare `manual` is
-  // NOT, because this side must never emit a condition that names nobody.
-  validateCond(cond, { allowUnstated: true });
+  // A bare `manual` is never emittable — this side must not emit a condition
+  // that names nobody. `unstated` is emittable ONLY through the fallback path.
+  validateCond(cond, { allowUnstated });
   const parts = [`v=${MARKER_VERSION}`];
   if (fp !== null && fp !== undefined) {
     if (!FP_RE.test(fp)) throw new MarkerError(`invalid fp ${JSON.stringify(fp)} (want 12 lowercase hex)`);
@@ -292,14 +301,33 @@ export function agentIdentity(env = process.env) {
   // and impossible to mistake for a condition somebody will evaluate. Dropping
   // the marker entirely is still not an option: that makes the object invisible
   // again, which is the defect this whole file exists to close.
+  //
+  // 🔴 AND THE DEGRADATION IS ANNOUNCED WHERE IT HAPPENS. An operator who
+  // exported `CLAW_AGENT_COND=manual` (or any off-allowlist value) believes they
+  // named a condition; silently rewriting it to `unstated` makes them wrong in a
+  // way only a later grep could reveal, and the create-site warning alone says
+  // "no closing condition was named", which reads as false to someone who did
+  // set the variable. So the point of degradation says so, quoting the value and
+  // the reason it was refused.
   let cond = COND_UNSTATED;
   try {
     if (env.CLAW_AGENT_COND) cond = validateCond(env.CLAW_AGENT_COND);
-  } catch {
+  } catch (e) {
     cond = COND_UNSTATED;
+    warn(
+      `Warning: CLAW_AGENT_COND=${JSON.stringify(env.CLAW_AGENT_COND)} was REFUSED — ${e.message}\n`
+      + `  Recording cond=${COND_UNSTATED} instead. Export an allowlisted value, e.g.\n`
+      + '  CLAW_AGENT_COND=manual:zach, or pass --cond on the create.\n',
+    );
   }
   const init = sanitise(env.CLAW_AGENT_INIT, INIT_RE, (s) => s.toLowerCase().replace(/[^a-z0-9-]/g, '-')) ?? null;
   return { producer, runId, cond, init, label: AGENT_LABEL_PREFIX + producer };
+}
+
+// Single writer for this module's stderr, so a test can capture it the same way
+// it captures api/tasks.mjs's create-site warning.
+function warn(text) {
+  process.stderr.write(text);
 }
 
 function sanitise(raw, re, clean) {

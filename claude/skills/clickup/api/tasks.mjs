@@ -4,7 +4,9 @@
 
 import { apiRequest, apiRequestV3, fetchAllPages } from './client.mjs';
 import { getList } from './lists.mjs';
-import { agentIdentity, buildMarker, stampDescription, COND_UNSTATED } from '../lib/agent-marker.mjs';
+import {
+  agentIdentity, buildMarker, stampDescription, validateCond, MarkerError, COND_UNSTATED,
+} from '../lib/agent-marker.mjs';
 
 // Get task details
 export async function getTask(taskId, includeSubtasks = false) {
@@ -123,12 +125,25 @@ export function applyAgentStamp(options) {
   // marker of presence: `cond=unstated` is greppable, so "how many objects did we
   // file with no closing condition?" is a countable question, where a fake
   // `manual` simply hid the non-compliant object among the compliant ones.
-  const cond = agentCond ?? id.cond;
+  //
+  // 🔴 A CALLER'S cond IS VALIDATED HERE, WITH `unstated` REFUSED. This is the
+  // create seam — `query.mjs create`, `create-subtask`, batch-create and every
+  // programmatic import land on it — and until this validation existed only the
+  // CLI rejected `unstated`, so `applyAgentStamp({ agentCond: 'unstated' })`
+  // stamped it happily. `unstated` records that the CODE OBSERVED an absence;
+  // a caller who can assert it has converted an observation into a claim, and
+  // the count of `cond=unstated` objects stops measuring anything.
+  //
+  // Only the FALLBACK branch below may produce it, and it is the only branch
+  // that opts into buildMarker's `allowUnstated`.
+  const fromFallback = agentCond === undefined || agentCond === null;
+  const cond = fromFallback ? id.cond : validateCallerCond(agentCond);
   warnIfConditionUnstated(cond);
   const marker = buildMarker({
     srcProducer: id.producer,
     srcRunId: id.runId,
     cond,
+    allowUnstated: fromFallback,
     // 🔴 fp is OMITTED unless the caller supplies one. A session-filed task has
     // no stable claim tuple, and a fingerprint that changes every run defeats
     // the dedupe it exists to provide — see lib/agent-marker.mjs.
@@ -145,6 +160,25 @@ export function applyAgentStamp(options) {
     body.description = stampDescription(body.description, marker);
   }
   return { body, tag: id.label };
+}
+
+// Validate a CALLER-supplied cond, and say so in the message.
+//
+// 🔴 THE PREFIX IS LOAD-BEARING, and the reason is a mutation result. buildMarker
+// validates too, so removing this call changes NO behaviour a plain
+// `assert.throws(…, MarkerError)` can see — the mutant that deletes the seam's own
+// guard dies to buildMarker's instead, i.e. green for the wrong reason, and would
+// stay green with this guard gone. `claude/RULES.md`: "a mutant that dies for a
+// DIFFERENT guard's reason proves nothing about this one." Attributing the refusal
+// to the seam is what makes this guard's own assertion reachable — and it is also
+// the more useful error, because it names the OPTION the caller passed rather than
+// a grammar rule they never invoked directly.
+function validateCallerCond(agentCond) {
+  try {
+    return validateCond(agentCond);
+  } catch (e) {
+    throw new MarkerError(`agentCond rejected at the create seam: ${e.message}`);
+  }
 }
 
 // Loud on stderr, never fatal: the caller asked for a task and gets one. The
