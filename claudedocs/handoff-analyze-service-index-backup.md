@@ -1,4 +1,4 @@
-# Handoff: analyze-service index — backup, restore-verification, key escrow — 2026-08-23
+# Handoff: analyze-service index — backup, restore-verification, key escrow — 2026-08-24
 
 ## Run this first — the index, one read-only command
 ```bash
@@ -23,6 +23,10 @@ and close the one failure mode in it that is unrecoverable (no off-machine backu
 - `#681` — `skill-audit.py` headroom blindness.
 - `#737` — **the restore-verifier** (`scripts/analyze-service-index/restore-verify.py`),
   138 tests. Squash-merged as `592eef27`; verified by CONTENT, not ancestry.
+- `#765` — **the escrow-verifier** (`scripts/analyze-service-index/escrow-verify.py`),
+  136 tests. Squash-merged as `9300a01a`. It also amends the **already-shipped**
+  `restore-verify.py`: `decrypt()` now publishes a machine-readable `cause` (a closed set,
+  `KeyError` on an unpublished value) and unlinks a stale `plain` before invoking `age`.
 - `#673` — **MERGED** (`4dd14e68`), GUARD 9 / `scripts/testlib/nogit_plugin.py`. It is in
   `origin/main` and its banner prints on every pytest run
   (`gitenv(session) … mode=enforce(auto)`). 🔴 An earlier revision of this doc called it
@@ -43,6 +47,11 @@ and close the one failure mode in it that is unrecoverable (no off-machine backu
    04:48:20 CDT, Result=success`. Schedule is `OnCalendar=04:30` +
    `RandomizedDelaySec=1800`, so it lands 04:30–05:00 — *not* a fixed time.
 3. **Nothing verified the artifact as STORED.** `#737` does, by restoring it.
+4. **Nothing re-checked the ESCROW.** `#765` does — `escrow-verify.py` answers "is the
+   escrowed key still there, still byte-identical, and does it still *work*". Byte equality
+   and working are different claims: `--decrypt-check` writes the **escrowed** bytes to a
+   throwaway 0600 identity and decrypts a real artifact with them.
+   🔴 **Its unlocked path has never run.** See "The one link still untested".
 
 ### Verified live, end to end
 10 scopes, 201 commits compared, restored from the bucket → `age -d` → `git clone` →
@@ -85,6 +94,45 @@ The intact row is the positive control — it proves `clone` *can* succeed, so r
 discriminates rather than a harness that always fails. Both halves are pinned by tests,
 and `bundle` is absent from the script's read-only allowlist, so substituting it back
 fails at the call site.
+
+## 🔴 The `#765` lessons — five rounds, and a premise that was measured wrong THREE ways
+
+Kept because each cost a round, and none is a logic bug.
+
+- 🔴 **A premise "measured once" is not measured.** The escrow classifier keyed on *"corrupt
+  ciphertext leaves no plaintext file"*. True only for a corrupt **header** — payload
+  corruption and truncation leave a partial or zero-length file. The consequence was a
+  **tampered backup reported as "THE ESCROW IS FINE — age reported success"**, exit 31,
+  while quoting age's own `file may be corrupted or tampered with` in the same sentence.
+  Three separate attempts to measure this were each wrong differently: one sampled a single
+  offset and generalised; one used stdout redirection instead of the `--output` invocation
+  the code actually makes (they differ); one used `printf '\xff'` on a byte that was
+  **already `0xff`**, so the mutation never happened and the reading was an artefact of a
+  control that did not run. **XOR the byte and assert it changed.** Final matrix, age v1.3.1,
+  176 runs: wrong key → ABSENT; header corrupt → ABSENT; payload corrupt → PRESENT (0 or
+  partial); truncated → PRESENT; valid encryption of nothing → rc 0, PRESENT size 0.
+- 🔴 **A substring assertion cannot tell a true message from a confident wrong one.** A test
+  asserting `"THE ESCROW IS FINE" in msg` **passed unchanged on the tampered-artifact run**,
+  certifying a false sentence. Pin whole normalised strings for anything machine-readable.
+- 🔴 **`plain_present` did not witness what its branch claimed.** `returned == False` means
+  `decrypt()` *raised* — yet the branch's own comment read "age exited 0". Classification now
+  comes from a closed `cause` set published by the module that knows, not from the filesystem
+  and not from parsing stderr. **`DECRYPT-FAILED` deliberately asserts NEITHER cause**: wrong
+  key and damaged header are indistinguishable from outside, and saying so beats guessing.
+- **A handover check that shares the step you doubt is not a control.** The old
+  `DECRYPT-FAILED` advised re-running with the on-disk identity — reachable only when the
+  escrowed bytes are byte-identical to it, so the same experiment with the same input.
+- **Version boundaries: measure, don't assume.** `Path.exists()` stops raising
+  `PermissionError` in **3.14**, *not* 3.13 — a guard written to `>= (3,13)` would have gone
+  red on 3.13, reintroducing the failure it was added to prevent. The test now keys on a
+  runtime regime probe with **no version literal**; green on 3.12.14, 3.13.15 and 3.14.7.
+- **One rule, two places, wrong at one.** `--work-dir` hands the tool a directory someone
+  else populated. That reasoning was applied to the throwaway identity and not to `plain`,
+  so a stale plaintext from an aborted run made a **wrong key** read as `ARTIFACT-CORRUPT`
+  ("do NOT rotate"). One `unlink` removed the class.
+- **A layer nobody can observe failing is a layer nobody knows is gone.** `O_EXCL|O_NOFOLLOW`
+  survived mutation because `_shred` removed the symlink first; `os.fchmod` survived because
+  no test set a hostile umask. Both are now measured independently.
 
 ## Ranked follow-ups (none blocking)
 
@@ -192,6 +240,19 @@ Diagnosed and repaired, NOT closed.
   precondition). Re-measure `git config --local --get core.hooksPath` at the moment you act.
 - Pushes died `SIGPIPE 141` twice *after* the pre-push hook printed `RESULT: PASS`, remote
   unchanged both times — caught only by `git ls-remote`, not by the ✅.
+- 🔴 **15 untracked files on the workbench are in NO commit and NO backup** (measured
+  2026-08-24 by `drift-check.sh`): a handoff doc, a preserved `nix/system/apply-*.sh`, and an
+  entire `scripts/discord-embed-ext/` browser extension — manifest, service worker, icons.
+  Any routine `git checkout` by any session deletes them silently. Not mine to commit; commit
+  them or copy them aside.
+- **A pre-existing flake on `main`, measured not guessed**: `test_subsystem_touch.py::
+  test_the_LENGTH_bound_is_not_vacuous…` fails ~1 run in 300–600. **600 runs on a pristine
+  `origin/main` reproduced it twice.** Mechanism: `git rev-parse --disambiguate` lists every
+  object with the prefix — trees and blobs, not just commits — so ~8 objects against 4096
+  gives P ≈ 0.17%/run. Durable fix: a longer prefix, or assert the sha is *among* the
+  expansion rather than its sole member. **Run the control before calling a red gate a flake**
+  — and note the background-task notification for that red run reported "exit code 0", which
+  was the pipeline's status through `tail`, not the gate's.
 - ~125 registered agent worktrees are accumulating, in **three** places: `.claude/worktrees/`
   (~69), `/tmp` (~35) and **`~/workspace/devrc-*` (~20)** — the last is easy to miss. The
   count moves by the hour. "Stale" is asserted, not measured: `git worktree list --porcelain`
@@ -209,6 +270,13 @@ nix-shell -p 'python3.withPackages(p:[p.minio])' --run \
 systemctl --user list-timers analyze-service-index-backup.timer --all
 systemctl --user show analyze-service-index-backup.service -p Result
 
+# the escrow is still there, still correct, and still WORKS (needs the master password)
+nix-shell -p bitwarden-cli jq --run \
+  'export BW_SESSION="$(bw unlock --raw)"; python3 ~/workspace/devrc/scripts/analyze-service-index/escrow-verify.py --decrypt-check --host workbench-$(cat /etc/machine-id)'
+# no password to hand? this is still a real check — it must exit 12 VAULT-LOCKED,
+# promptly and without hanging, NOT sit waiting on an invisible prompt:
+nix-shell -p bitwarden-cli jq --run 'python3 ~/workspace/devrc/scripts/analyze-service-index/escrow-verify.py'
+
 # the index store's own verdict
 python3 ~/workspace/devrc/scripts/subsystem-audit.py
 
@@ -225,11 +293,30 @@ pgrep -f 'run-tests.sh|gate.sh' | while read -r p; do
 done   # none may equal ~/workspace/devrc/.git
 ```
 
-## The one link still untested
-The escrowed key was verified through the `bw` CLI **on this machine**. In a real disaster
-you would read that note from the **web vault on another device** and paste it into a file —
-a path that can silently mangle whitespace. Worth doing once at leisure: open the note in
-the web vault, paste it into a scratch file, confirm 189 bytes / 3 lines.
+## The one link still untested — 🔴 THE ONLY THING BLOCKED ON A HUMAN
+
+**`escrow-verify.py`'s unlocked path has never run.** Everything above the vault boundary
+is synthetic: the real note fetch, the real byte comparison against the real `age.key`, and
+`--decrypt-check` against MinIO are covered only by an injected fake. One command with the
+master password exercises all three:
+
+```bash
+nix-shell -p bitwarden-cli jq --run \
+  'export BW_SESSION="$(bw unlock --raw)"; python3 ~/workspace/devrc/scripts/analyze-service-index/escrow-verify.py --decrypt-check --host workbench-$(cat /etc/machine-id)'
+```
+
+It also settles two assumptions **never measured against the real vault item**: that a
+Secure Note has `type == 2`, and that `notes` is present in `bw list items` output. A wrong
+guess is loud, not silent — exit 19 prints the observed type. Locked/unauthenticated exit
+12/13 with an actionable message and **cannot hang**: every `bw` call runs with stdin on
+`/dev/null` precisely so an unattended run fails fast instead of blocking on an invisible
+prompt. `SECRETS.md` carries the full exit-code table with per-code "do not rotate" guidance.
+
+**And the retrieval path that actually matters in a disaster.** The escrow was verified
+through the `bw` CLI **on this machine**. If this machine is gone you would read that note
+from the **web vault on another device** and paste it into a file — a path that can silently
+mangle whitespace. Worth doing once at leisure: open the note in the web vault, paste it
+into a scratch file, confirm 189 bytes / 3 lines.
 
 ⚠ `bw` is **not installed** — run it as `nix-shell -p bitwarden-cli jq --run '…'`. Its
 server was repointed from the internal LAN name to the externally-trusted one
