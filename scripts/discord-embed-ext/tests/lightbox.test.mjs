@@ -5,9 +5,10 @@ import { readFileSync } from "node:fs";
 import { FakeElement, makeDiscordDoc, makeClickEvent, openShadow } from "./fake_discord_dom.mjs";
 
 globalThis.DEE_NO_AUTOSTART = true;
-// Load order MIRRORS manifest.json: embed_enlarge.js first, because it owns the
-// single MEDIA_URL_RE definition that lightbox.js consumes. Importing lightbox
-// alone would leave that null and silently reduce every message to one sibling.
+// Load order MIRRORS manifest.json: embed_enlarge.js first, because it owns
+// isMediaElement() — the single definition of "is this Discord message media",
+// including the <video><source> rule — which lightbox.js consumes. Importing
+// lightbox alone degrades every message to one sibling.
 await import("../extension/embed_enlarge.js");
 await import("../extension/lightbox.js");
 const LB = globalThis.__DEE_LIGHTBOX__;
@@ -334,7 +335,7 @@ test("the lightbox displays the media at native resolution", () => {
   assert.ok(mediaContainer, "media container found in shadow");
   var clonedImg = null;
   for (var k = 0; k < mediaContainer.children.length; k++) {
-    if (mediaContainer.children[k].tagName === "img") clonedImg = mediaContainer.children[k];
+    if (mediaContainer.children[k].tagName.toLowerCase() === "img") clonedImg = mediaContainer.children[k];
   }
   assert.ok(clonedImg, "cloned img in media container");
   assert.equal(clonedImg.getAttribute("src"), DISCORD_IMG, "the clone shows the clicked media");
@@ -351,6 +352,9 @@ test("a video clone carries its <source> children across", () => {
   var shadow = shadowOf(doc);
   var clone = shadow.querySelector(".media-container video");
   assert.ok(clone, "video cloned");
+  assert.equal(clone.getAttribute("controls"), "",
+    "the clone must keep its controls — a video you cannot play or scrub is not " +
+    "a lightbox, and dropping the attribute used to survive");
   var srcs = clone.querySelectorAll("source");
   assert.equal(srcs.length, 1, "the <source> child came with it");
   assert.equal(srcs[0].getAttribute("src"),
@@ -387,13 +391,58 @@ test("the extension ships no sidecar integration and no background worker", () =
     ["embed_enlarge.js", "lightbox.js"], "exactly the two scripts that exist");
 });
 
-test("SEAM: lightbox holds no second copy of the media pattern — it uses embed_enlarge's", () => {
+test("SEAM: lightbox holds no second copy of the media rule — it uses embed_enlarge's", () => {
   var src = readFileSync(new URL("../extension/lightbox.js", import.meta.url), "utf8");
   assert.ok(!src.includes("discordapp"),
     "a second host pattern here is how one site gets fixed and the other left wrong");
+  // NOT asserted: the absence of the string "source". lightbox.js legitimately
+  // names it in cloneMediaInto, which COPIES a video's <source> children into
+  // the overlay — that is cloning, not detection, and banning the word would be
+  // a guard against the wrong thing.
+  assert.ok(!/MEDIA_URL_RE\s*=/.test(src),
+    "nor a second definition of the media pattern");
   assert.ok(src.includes("__DEE__"), "it must read the shared definition");
-  assert.ok(globalThis.__DEE__ && globalThis.__DEE__.MEDIA_URL_RE instanceof RegExp,
+  // The consumed export is isMediaElement, NOT MEDIA_URL_RE — this assertion
+  // named the latter for two rounds after lightbox stopped reading it, so the
+  // guard was narrower than its own title.
+  assert.equal(typeof (globalThis.__DEE__ || {}).isMediaElement, "function",
     "and that definition must actually be present at load time");
+});
+
+test("the delegation covers <video> siblings, not just <img>", () => {
+  LB.forget();
+  // `querySelectorAll("img, video")` -> `"img"` survived: no lightbox test had a
+  // <video> sibling, so the rule the consolidation was ABOUT was unpinned on the
+  // consuming side.
+  var doc = makeDiscordDoc(
+    "<div class='message'><div class='embed'>" +
+    "<img src='" + A1 + "' />" +
+    "<video src='https://media.discordapp.net/attachments/1/2/c.mp4'></video>" +
+    "</div></div>");
+  LB.open(doc, doc.querySelector("img"));
+  assert.equal(LB.siblingCount(), 2, "a <video> in the same message is a sibling");
+});
+
+test("the delegation degrades safely when embed_enlarge is absent", () => {
+  LB.forget();
+  // lightbox.js is a SEPARATE content script. If __DEE__ is missing the guard
+  // must return false, not throw — dropping it would TypeError inside open().
+  var doc = makeDiscordDoc(
+    "<div class='message'><div class='embed'>" +
+    "<img src='" + A1 + "' /><img src='" + A2 + "' /></div></div>");
+  var realDee = globalThis.__DEE__;
+  globalThis.__DEE__ = undefined;
+  try {
+    var r = LB.open(doc, doc.querySelector("img"));
+    assert.equal(r.ok, true, "it must still open, not throw");
+    assert.equal(LB.siblingCount(), 1, "and collapse to the clicked element alone");
+  } finally {
+    globalThis.__DEE__ = realDee;
+    LB.forget();
+  }
+  // positive control: with the real __DEE__ back, the same fixture gives 2
+  LB.open(doc, doc.querySelector("img"));
+  assert.equal(LB.siblingCount(), 2, "so the degraded case above is a real difference");
 });
 
 test("REGRESSION: an avatar is not treated as message media", () => {

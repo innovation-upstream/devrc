@@ -225,8 +225,8 @@ SUITES=(
   # and lightbox (open/close, zoom, pan, per-message navigation, the wiring of
   # every on-screen control).
   #
-  # 94 tests / 2 files measured 2026-08-24 on the tree that added it.
-  # Floor 90 = 94 - min(50, max(1, 94/20)) = 94 - 4.
+  # 99 tests / 2 files measured 2026-08-24 on the tree that added it.
+  # Floor 95 = 99 - min(50, max(1, 99/20)) = 99 - 4.
   #
   # 🔴 THIS COMMENT PREVIOUSLY CLAIMED SIX REGRESSION TESTS. IT WAS FIVE.
   # The six original defects were re-introduced ONE AT A TIME by an adversarial
@@ -263,8 +263,16 @@ SUITES=(
   # the suite green; and the <video><source> rule re-implemented in lightbox.js
   # with only the OTHER copy pinned.
   #
-  # Sweep as of this tree: 46 mutants (25 mine, 11 from audit 2, 10 from audit 3),
-  # 45 killed, 0 unapplied. The single survivor is EQUIVALENT BY CONSTRUCTION:
+  # A FOURTH audit then found the 47th, and a whole VACUOUS CLASS: the fake DOM
+  # lowercased `tagName`, while a real HTML document reports it UPPERCASE. That
+  # silently voided all four `.toLowerCase()` guards in the extension — each one
+  # deletable with the suite fully green, and each deletion making the extension
+  # COMPLETELY INERT in Brave. A fixture that normalises away the thing the code
+  # normalises is not a test of that code. The fake now reports uppercase.
+  #
+  # Sweep as of this tree: 56 mutants (25 mine, 11 from audit 2, 10 from audit 3,
+  # 10 from audit 4), 55 killed, 0 unapplied. The single survivor is EQUIVALENT
+  # BY CONSTRUCTION, and audit 4 verified that independently:
   # scan() now returns 0 for any root it cannot query, so the observer's
   # `nodeType === 1` filter became defence in depth rather than the only thing
   # between a text node and a whole-page sweep. A positive control (reverting the
@@ -278,7 +286,7 @@ SUITES=(
   # zero attachments. The narrowed pattern matched 0 there and 1 in the second
   # channel — a real attachment, in a container capped at max-height 350px, which
   # is the positive control proving it is not simply matching nothing.
-  "scripts/discord-embed-ext/tests|2|90"
+  "scripts/discord-embed-ext/tests|2|95"
 )
 
 # --- discovery roots -----------------------------------------------------------

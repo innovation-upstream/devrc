@@ -110,21 +110,28 @@ from a RED control that carried all six defects at once, so it failed on a
 different assertion in the same test. Isolate a mutant before claiming it is
 pinned. The transform is genuinely pinned now.
 
-The suite is mutation-swept: **46 semantic mutants, 45 killed** — operand swaps,
+The suite is mutation-swept: **56 semantic mutants, 55 killed** — operand swaps,
 branch inversions, constants moved in **both** directions, guard removals. A
 positive control (reverting the media pattern to host-only) dies, so the harness
 can go red. The one survivor is equivalent by construction: `scan()` returns 0
 for any root it cannot query, so the observer's `nodeType === 1` filter is
 defence in depth rather than load-bearing.
 
-🔴 **Read that number correctly.** It is a claim about the 46 mutants somebody
+🔴 **Read that number correctly.** It is a claim about the 56 mutants somebody
 constructed, never about the suite — and this file has been wrong about it
-**twice**. It once said "25 mutants, 24 killed, the survivor is equivalent"; an
-independent audit built its own battery and found **eight** more survivors, none
-equivalent. The corrected text then said 36 — and a third audit, with 163
-mutants, found a 37th. If you change this code, add the mutant for the failure
-mode you are introducing. A passing sweep only means nobody has imagined the next
-one yet.
+**three times**. It said "25 mutants, 24 killed, the survivor is equivalent"; an
+independent audit found **eight** more survivors, none equivalent. Corrected to
+36 — a third audit, with 163 mutants, found a 37th. Corrected to 46 — a fourth
+found a 47th *and* a whole vacuous class (below). If you change this code, add
+the mutant for the failure mode you are introducing. A passing sweep only means
+nobody has imagined the next one yet.
+
+🔴 **The fixture must not normalise away what the code normalises.** A real HTML
+document reports `tagName` **UPPERCASE**; `tests/fake_discord_dom.mjs` used to
+lowercase it, which made all four `.toLowerCase()` calls in the extension
+untested — any one could be deleted with the suite green, and each deletion makes
+the extension completely inert in Brave. The fake now reports uppercase. Ask of
+any new fixture: what does it smooth over that production does not?
 
 ## What was deliberately dropped
 

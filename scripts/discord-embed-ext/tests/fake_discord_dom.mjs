@@ -25,7 +25,15 @@ class FakeComputedStyle {
 
 class FakeElement {
   constructor(tagName, attrs) {
-    this.tagName = String(tagName).toLowerCase();
+    // 🔴 UPPERCASE, LIKE A REAL HTML DOCUMENT. This used to lowercase, which
+    // silently voided every `.toLowerCase()` in the extension: four separate
+    // guards could be deleted with the suite still fully green, and each deletion
+    // makes the extension COMPLETELY INERT in Brave, where tagName really is
+    // "IMG"/"VIDEO"/"SOURCE". A fixture that normalises away the thing the code
+    // normalises is not a test of that code. Node names beginning with "#"
+    // (#document, #shadow-root) are not elements and keep their spelling.
+    var raw = String(tagName);
+    this.tagName = raw.charAt(0) === "#" ? raw : raw.toUpperCase();
     // Real element nodes are nodeType 1. Its absence here meant the extension's
     // `node.nodeType === 1` filter silently rejected every fake node, so an
     // observer test could never have marked anything.
@@ -238,7 +246,7 @@ function parseHTML(html) {
     if (inner.startsWith("/")) {
       var name = inner.slice(1).trim().toLowerCase();
       var node = current;
-      while (node && node !== root && node.tagName !== name) {
+      while (node && node !== root && node.tagName.toLowerCase() !== name) {
         node = node.parentElement || root;
       }
       if (node && node !== root) current = node.parentElement || root;
@@ -301,7 +309,7 @@ function parseCompound(part) {
 }
 
 function matchesCompound(node, c) {
-  if (c.tag && node.tagName !== c.tag) return false;
+  if (c.tag && node.tagName.toLowerCase() !== c.tag) return false;
   if (c.id && node.getAttribute("id") !== c.id) return false;
   for (var i = 0; i < c.classes.length; i++) {
     if ((node.classList.contains ? node.classList.contains(c.classes[i]) : false) === false) return false;
@@ -360,7 +368,7 @@ function makeDiscordDoc(html) {
   var root = parseHTML(html);
   var body = null;
   walk(root, function (node) {
-    if (node.tagName === "body") body = node;
+    if (node.tagName.toLowerCase() === "body") body = node;
   });
   if (!body) {
     body = new FakeElement("body");

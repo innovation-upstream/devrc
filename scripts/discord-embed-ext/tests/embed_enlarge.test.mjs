@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 
 import { FakeElement, FakeComputedStyle, makeDiscordDoc } from "./fake_discord_dom.mjs";
 
@@ -680,4 +681,78 @@ test("SEAM: autoStart both scans what is already there AND subscribes for later"
     assert.ok(cap.observedWith, "and the observer must be subscribed for later renders");
     assert.equal(cap.observedWith.target, doc.body);
   });
+});
+
+// ===========================================================================
+// Round 4 — the 47th mutant, and the entry point that still was not pinned.
+// ===========================================================================
+
+test("REGRESSION: a <video> arriving as the scan root is marked (the 47th mutant)", () => {
+  DEE.forget();
+  // Exact sibling of the <source> bug fixed last round: a <video> whose OWN src
+  // is set after insertion reaches scan() as the ROOT, via the same
+  // attributeFilter:["src"] branch. The img and source arms were pinned; this
+  // one was not, and dropping it left the suite fully green.
+  var doc = makeDiscordDoc("<div class='message'><video></video></div>");
+  var video = doc.querySelector("video");
+  video.setAttribute("src", "https://media.discordapp.net/attachments/1/2/late.mp4");
+  assert.equal(DEE.scan(video), 1, "scanning the <video> itself must find it");
+  assert.equal(video.getAttribute("data-dee-enlarged"), "1");
+});
+
+test("REGRESSION: tagName is matched case-insensitively, as a real document reports it", () => {
+  // A real HTML document returns UPPERCASE tagName. The fake used to lowercase,
+  // which made every `.toLowerCase()` in the extension vacuous: four guards could
+  // each be deleted with the suite green, and each deletion makes the extension
+  // completely inert in Brave. The fixture is now faithful; this asserts it.
+  var img = new FakeElement("img", { src: "https://cdn.discordapp.com/attachments/1/2/p.png" });
+  assert.equal(img.tagName, "IMG", "the fixture must report what the browser does");
+  assert.equal(DEE.isMediaElement(img).isMedia, true, "and detection must still work");
+
+  var video = new FakeElement("video", {});
+  var source = new FakeElement("source",
+    { src: "https://media.discordapp.net/attachments/1/2/v.mp4" });
+  video.appendChild(source);
+  assert.equal(video.tagName, "VIDEO");
+  assert.equal(source.tagName, "SOURCE");
+  assert.equal(DEE.isMediaElement(video).element, video, "video via its <source> child");
+  assert.equal(DEE.isMediaElement(source).element, video, "and a <source> resolves upward");
+  DEE.forget();
+  assert.equal(DEE.scan(video), 1, "and scan()'s own rootTag check is case-folded too");
+});
+
+test("SEAM: importing the script WITHOUT the autostart flag actually starts it", () => {
+  // 🔴 THE DEFECT MOVED ONE LEVEL UP LAST ROUND AND WAS NOT CLOSED. autoStart()'s
+  // two halves are pinned, but deleting the `autoStart();` CALL at module scope
+  // left the suite green — every test sets DEE_NO_AUTOSTART before importing, so
+  // module scope never reaches that line. The extension would do nothing at all
+  // in Brave. A source-text grep would be a spelled guard (a comment-out still
+  // matches), so this imports the real module in a SUBPROCESS with no flag set
+  // and asserts observable behaviour.
+  var extDir = new URL("../extension/", import.meta.url).pathname;
+  var fakeDom = new URL("./fake_discord_dom.mjs", import.meta.url).pathname;
+  var probe = [
+    'import { makeDiscordDoc } from ' + JSON.stringify(fakeDom) + ';',
+    'const doc = makeDiscordDoc(',
+    '  "<div class=\'message\'><div class=\'embed\'>" +',
+    '  "<img src=\'https://cdn.discordapp.com/attachments/1/2/auto.png\' /></div></div>");',
+    'globalThis.document = doc;',
+    'globalThis.MutationObserver = function (cb) {',
+    '  return { observe: function () { globalThis.__OBSERVED__ = true; }, disconnect: function () {} };',
+    '};',
+    // deliberately NOT setting DEE_NO_AUTOSTART
+    'await import(' + JSON.stringify(extDir + "embed_enlarge.js") + ');',
+    'const img = doc.querySelector("img");',
+    'process.stdout.write(JSON.stringify({',
+    '  scanned: img.getAttribute("data-dee-enlarged"),',
+    '  observed: globalThis.__OBSERVED__ === true,',
+    '}));',
+  ].join("\n");
+  var out = execFileSync(process.execPath,
+    ["--input-type=module", "-e", probe], { encoding: "utf8", timeout: 30000 });
+  var res = JSON.parse(out);
+  assert.equal(res.scanned, "1",
+    "importing the content script must enlarge what is already on the page");
+  assert.equal(res.observed, true,
+    "and must subscribe the observer for everything rendered later");
 });
