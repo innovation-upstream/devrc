@@ -22,17 +22,36 @@ assumed. (These counts DRIFT — 792/4,776 one day, 797/4,795 the next. They are
 and a date, not a constant.)
 
 🔴 THIS IS NOT THE ONLY TRANSCRIPT WALK IN THE REPO, and an earlier version of this
-docstring said it was. Six other subsystems glob `*.jsonl` under their own roots —
-`collector/claude/{_shared,tailer}.py`, `session-analysis/{extract_genesis,
-extract_user_msgs,initiative-scan,recon_cost}.py`, `validation/reconcile.py`,
-`tmux-session-restore.py`. They were NOT folded in here: each ships on its own deploy
-path (the collector is copied to `~/.config/activity-collector/claude/` with no
-`scripts/lib` beside it) and each wants a different unit. What IS true is scoped and
-machine-checked: this module is the only corpus walk reachable from
-`scripts/find-session.py` and `scripts/check-clickup-addressed/`, and every OTHER
-`*.jsonl` glob site in the repo is enumerated with its reason by
+docstring said it was. These other production files glob `*.jsonl` under their own roots:
+
+    scripts/collector/claude/_shared.py
+    scripts/collector/claude/tailer.py
+    scripts/session-analysis/extract_genesis.py
+    scripts/session-analysis/extract_user_msgs.py
+    scripts/session-analysis/initiative-scan.py
+    scripts/session-analysis/recon_cost.py
+    scripts/validation/reconcile.py
+    scripts/tmux-session-restore.py
+
+There is deliberately NO COUNT in front of that list. The sentence used to open "Six
+other subsystems" and then name eight files across four subsystems, and `scripts/README.md`
+carried the same "Six" while listing six — omitting `tmux-session-restore.py`, which this
+docstring named and the ledger carried. A number in prose is a claim nobody re-derives, so
+the LIST is pinned two-way against the ledger instead, in BOTH places, by
+`scripts/tests/test_transcript_search.py::test_the_prose_names_every_other_production_walk`.
+
+They were NOT folded in here: each ships on its own deploy path (the collector is copied
+to `~/.config/activity-collector/claude/` with no `scripts/lib` beside it) and each wants
+a different unit. What IS true is scoped and machine-checked: this module is the only
+corpus walk reachable from `scripts/find-session.py` and
+`scripts/check-clickup-addressed/`, and every OTHER `*.jsonl` walk site in a git-tracked
+Python file — a glob, an `os.walk`, or a bare `iterdir`/`listdir`/`scandir` listing — is
+enumerated with its reason AND ITS COUNT by
 `scripts/tests/test_transcript_search.py::test_the_jsonl_glob_site_ledger_is_pinned_two_way`,
-which fails on a new one.
+which fails on a new one. 🔴 Read THAT test's docstring before relying on this: it states
+the exact spellings it does and does not see, and "a walk added anywhere fails the suite"
+is wider than what it delivers (a non-Python file, a concatenated filename, and an
+untracked file are all outside it).
 """
 import json
 import os
@@ -93,12 +112,13 @@ def iter_transcripts(root=None, exclude_sessions=()):
 
     The ONE enumerator behind `scripts/find-session.py` and
     `scripts/check-clickup-addressed/` — those two tools and their three former private
-    walks. It is NOT the only `*.jsonl` glob in the repo (see the module docstring: six
-    other subsystems keep their own, deliberately). `scripts/tests/test_transcript_search.py`
+    walks. It is NOT the only `*.jsonl` glob in the repo (see the module docstring for the
+    others, which keep their own deliberately). `scripts/tests/test_transcript_search.py`
     pins BOTH halves two-way: that these callers reach the corpus only through here, and
-    that the full set of glob sites repo-wide is the enumerated one — so a hand-rolled walk
-    added anywhere fails the suite rather than passing unseen. Excluded: anything
-    `is_corpus_member` rejects, and any session id in `exclude_sessions`.
+    that the full set of walk sites repo-wide is the enumerated one — so a hand-rolled walk
+    added to any git-tracked Python file fails the suite rather than passing unseen. The
+    residual gaps are named in that test's docstring, not glossed over here. Excluded:
+    anything `is_corpus_member` rejects, and any session id in `exclude_sessions`.
 
     Sorted rather than raw glob order because ranking ties are broken by encounter order,
     and a search that reorders its own output between runs is not reproducible.
@@ -396,11 +416,15 @@ def search(terms, *, root=None, match_any=False, since=None, limit=None, project
     Result sets were diffed with and without it over the live corpus at both dates x four
     terms: 8 of 8 identical, up to n=500.
 
-    `stats`, when a dict, receives `sessions_examined` (files actually READ),
+    `stats`, when a dict, receives `sessions_examined` (files READ TO EOF — a file that
+    raised on open counts under `unreadable` and NOT here, so the three are disjoint and
+    `sessions_examined + skipped_stale + unreadable` decomposes the whole walk),
     `skipped_stale` (short-circuited by the `since` mtime prefilter), `unreadable` /
     `unreadable_paths` (an OSError mid-walk), and — if `session_filter` is set —
     `filtered_out` / `filtered_out_ids`. A drop nobody can count is indistinguishable
-    from a filter wired to nothing.
+    from a filter wired to nothing. Every one of these is asserted by a test; the
+    decomposition itself is asserted too, because a counter nobody sums is a counter
+    nobody notices going wrong.
     """
     if surface not in _SURFACE_RANK:
         raise ValueError(f"unknown surface {surface!r}; want one of {SURFACES}")
@@ -425,9 +449,17 @@ def search(terms, *, root=None, match_any=False, since=None, limit=None, project
             if since is not None and datetime.fromtimestamp(os.path.getmtime(path)) < since:
                 skipped_stale += 1
                 continue
-            examined += 1
             rec = scan_transcript(path, terms, patterns, surface=surface,
                                   include_sidechains=include_sidechains)
+            # 🔴 AFTER the read, not before. Incremented first, `sessions_examined`
+            # counted a file it never opened: 1 good transcript + 1 unreadable one
+            # reported `{'sessions_examined': 2, 'unreadable': 1}`, i.e. two files read
+            # where one was. The two counters were then not disjoint, so
+            # examined + skipped_stale + unreadable no longer decomposed the walk. The
+            # docstring said "files actually READ" the whole time; the code did not,
+            # and no assertion pinned it. Pinned now by
+            # test_an_unreadable_transcript_is_counted_and_named_not_silently_dropped.
+            examined += 1
         except OSError as e:
             # NOT silent, and NOT uncounted. Base find-session.py printed this line; the
             # consolidation dropped it, leaving a transcript that vanishes from every

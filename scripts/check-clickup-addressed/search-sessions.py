@@ -8,9 +8,14 @@ Output (default): one line per match, tab-separated:
     session_id\tdate\tproject\thits\topening_snippet
 
 With --json: an OBJECT — {"sessions": [...], "self_runs_skipped": N,
-"self_runs_skipped_ids": [...]}. It was a bare array until 2026-08-21; the
-count has to travel with the results or the self-run drop is invisible to the
-caller, which sees only a shorter list.
+"self_runs_skipped_ids": [...], "unreadable": N, "unreadable_paths": [...],
+"skipped_stale": N, "sessions_examined": N}. It was a bare array until
+2026-08-21; every count has to travel with the results or the corresponding
+drop is invisible to the caller, which sees only a shorter list. The four
+after the self-run pair were added 2026-08-25: they reached a human through
+stderr alone, and `check-addressed.py` does not read stderr. Consumers use
+`.get()`, so an added key is not a breaking change — `parse_search_payload`
+names the three it wants.
 
 Terms are ANDed by default (session must match all). Add --any to OR them.
 
@@ -67,10 +72,12 @@ def search_sessions(terms, since=None, limit=10, project_substr=None, match_any=
     asked about, so it always ranks top (14 hits, on 2026-08-20) and reads as the session
     that did the work. See `_selfrun.py`.
 
-    Pass `stats` (a dict) to learn how many were dropped — it gets `self_runs_skipped` and
-    `self_runs_skipped_ids`. The count is not returned in the result list because the drop
-    is otherwise INVISIBLE: the caller just sees a shorter list and a smaller "N found"
-    header, which is indistinguishable from the sessions not existing.
+    Pass `stats` (a dict) to learn how many were dropped and why. It gets this tool's own
+    `self_runs_skipped` / `self_runs_skipped_ids`, and the shared walk's `unreadable` /
+    `unreadable_paths` / `skipped_stale` / `sessions_examined`. None of these are returned
+    in the result list because every one of the drops is otherwise INVISIBLE: the caller
+    just sees a shorter list and a smaller "N found" header, which is indistinguishable
+    from the sessions not existing.
     """
     inner = {}
     hits = search(
@@ -105,6 +112,17 @@ def search_sessions(terms, since=None, limit=10, project_substr=None, match_any=
     if stats is not None:
         stats["self_runs_skipped"] = inner.get("filtered_out", 0)
         stats["self_runs_skipped_ids"] = inner.get("filtered_out_ids", [])
+        # 🔴 The OTHER two ways a transcript leaves the walk. The self-run drop travelled
+        # to the caller and these did not, so `--json` reported the one drop this tool
+        # performs and stayed silent about the two the shared walk performs — reaching a
+        # human through stderr only, which `check-addressed.py` does not read. All three
+        # are the same failure mode: a shorter list, indistinguishable from the sessions
+        # not existing. `sessions_examined` travels with them as the denominator; a raw
+        # "3 unreadable" out of an unstated total is not a number anyone can act on.
+        stats["unreadable"] = inner.get("unreadable", 0)
+        stats["unreadable_paths"] = inner.get("unreadable_paths", [])
+        stats["skipped_stale"] = inner.get("skipped_stale", 0)
+        stats["sessions_examined"] = inner.get("sessions_examined", 0)
 
     return [{
         "session_id": h["session_id"],
