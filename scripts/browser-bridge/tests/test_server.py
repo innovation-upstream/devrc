@@ -9135,33 +9135,30 @@ def test_main_actually_starts_and_stops_the_heartbeat(monkeypatch, tmp_path):
 # --------------------------------------------------------------------------- #
 # 🔴 THE ORDERING BETWEEN A TEST'S SAFETY NET AND THE CLI'S OWN BOUND.
 #
-# The guard for conftest's CLI_TIMEOUT_S. It reads the REAL bound out of the CLI
-# rather than restating it, and it walks the AST of EVERY test module here.
+# The guard for `cli_budget.CLI_TIMEOUT_S`. It reads the CLI's real bound out of
+# the CLI, derives the worst-case call count from an assertion this suite already
+# makes, and walks the AST of every test module here.
 #
 # 🔴 IT IS AN AST WALK BECAUSE THE REGEX VERSION WAS GREEN ON A LIVE INSTANCE OF
 # THE DEFECT IT FORBIDS. The first draft scanned this file with
 # `subprocess\.run\(\s*\[str\(BROWSER_BIN\)[^)]*?timeout=(\d+)`. `[^)]*?` cannot
-# cross a `)`, so the one site whose arg list contained a nested `str(tokf)` was
+# cross a `)`, so the one site whose arg list held a nested `str(tokf)` was
 # invisible: 11 sites, 10 converted, 1 still `timeout=30`, scan returns [], gate
-# green. It was also blind to `subprocess.Popen(...).wait(timeout=…)`, to a
-# pre-built `cmd = [...]` list, to `**kwargs`, and to `["bash", str(CLI), …]` —
-# the spelling THREE sibling files use for 20 more sites. A guard whose comment
-# claims a class while its implementation matches one spelling is worse than
-# none, because it stops the next person looking.
+# green. It was also blind to the `["bash", str(CLI), …]` spelling three sibling
+# files use for 20 more sites, because it read only `__file__`.
 #
-# ⚠️ SCOPE, NARROW ON PURPOSE — this is the same over-claim one level down. The
-# walk matches argv that NAMES a handle in `_CLI_HANDLES` ({BROWSER_BIN, CLI}).
-# It does NOT cover a wrapper that execs the CLI under its own name:
-# `browser-agent` (spawned in test_browser_agent.py, with its own dynamic stall
-# budget) is deliberately excluded. Each spelling claimed above has a planted
-# positive control in the battery — `Popen(...).wait()`, a pre-built `cmd` list
-# and `args=` were all asserted-but-GREEN in the previous round, so they are
-# implemented and demonstrated here rather than described.
-# --------------------------------------------------------------------------- #
+# 🔴 AND THEN IT WAS DELIBERATELY MADE SMALLER AGAIN. A later revision grew
+# branches for `Popen(...).wait()`, a pre-built `cmd` list and `args=`. Mutation
+# showed all three were dead AND unguarded — deleting each left the suite green —
+# while the module-wide maps they needed were scope-blind enough to flag an
+# unrelated `echo` in another function, against the wrong line. They are gone.
+# `_cli_timeout_violations` states exactly what it sees and what it does not.
+# A guard that is smaller than its problem, and says so, beats one that is larger
+# than its evidence.
 def _net_outranks(net_s, worst_s):
     """Is a test's safety net STRICTLY above the CLI's worst-case self-bound?
 
-    Extracted so the strictness is testable. At the shipped values (240 vs 180) a
+    Extracted so the strictness is testable. At the shipped values (300 vs 240) a
     `>` / `>=` mutation is indistinguishable, so the comparison would otherwise be
     an unexercised claim — the boundary is pinned by
     `test_net_outranks_is_strict_at_the_boundary`. A TIE must lose: the CLI has to
@@ -9171,107 +9168,75 @@ def _net_outranks(net_s, worst_s):
     return net_s > worst_s
 
 
-_CLI_SPAWNERS = {"run", "Popen", "check_output", "check_call", "call"}
-_CLI_HANDLES = {"BROWSER_BIN", "CLI"}
-
-
-def _mentions_cli(node):
-    """True iff this expression NAMES a CLI handle.
-
-    🔴 Matches ast.Name IDENTIFIERS, not a substring of the unparsed source. The
-    first version tested `re.search(r"\bCLI\b", ast.unparse(arg))`, which flagged
-    `subprocess.run(["echo", "the CLI banner"])` — a string LITERAL containing the
-    word — and demanded a CLI budget on an `echo`.
-    """
-    return any(isinstance(n, ast.Name) and n.id in _CLI_HANDLES for n in ast.walk(node))
-
-
-def _argv_of(call, lists):
-    """The argv expression of a subprocess call: first positional, else `args=`,
-    resolving a name bound to a list literal earlier in the module."""
-    argv = call.args[0] if call.args else None
-    if argv is None:
-        argv = next((k.value for k in call.keywords if k.arg == "args"), None)
-    if isinstance(argv, ast.Name) and argv.id in lists:
-        argv = lists[argv.id]
-    return argv
+_CLI_SPAWNERS = {"run", "check_output", "check_call", "call"}
+# BROWSER_CLI is test_surface_parity.py's handle for the same script; read-only
+# there today, included so it cannot become a silent hole.
+_CLI_HANDLES = {"BROWSER_BIN", "CLI", "BROWSER_CLI"}
 
 
 def _cli_timeout_violations(path):
     """Every CLI-spawning site in `path` whose timeout is not CLI_TIMEOUT_S.
 
-    🔴 THE FOUR SPELLINGS ARE IMPLEMENTED, NOT ASSERTED. An earlier comment here
-    claimed the walk closed `Popen(...).wait()`, a pre-built `cmd` list and
-    `args=`; measured, all three were GREEN — the comment was wider than the code
-    for the second round running. Each is handled below and each has a planted
-    positive control in the battery.
+    🔴 SCOPE, EXACTLY: a `subprocess.<spawner>(...)` whose FIRST POSITIONAL
+    argument directly NAMES a handle in `_CLI_HANDLES`. That is the shape of all
+    31 sites in this suite. It is matched on ast.Name IDENTIFIERS, not on a
+    substring of the unparsed source — the substring version demanded a CLI budget
+    on `subprocess.run(["echo", "the CLI banner"])`.
+
+    🔴 WHAT IT DELIBERATELY DOES **NOT** SEE, and why that is the right trade:
+    a pre-built `cmd = [...]` list, an `args=` kwarg, and
+    `Popen(...).wait(timeout=)`. An earlier revision handled all three. The corpus
+    contains **zero** instances of any of them, so every one of those branches was
+    dead code — and mutation proved it: deleting each left the suite GREEN, i.e.
+    they were unguarded as well as unused. Worse, the machinery they needed
+    (module-wide `lists` / `cli_popens` maps) was SCOPE-BLIND, so a `cmd` or `p`
+    bound in one function made an unrelated call in another function a violation,
+    reported against the wrong line. It cost four review rounds and produced live
+    false positives to guard spellings nobody writes.
+
+    So: if someone introduces one of those spellings, this guard will not catch
+    it. That is a stated limit, not a claim of coverage — and a limit the reader
+    can act on is worth more than a branch that is dead, unexercised and wrong.
     """
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    lists = {t.id: n.value
-             for n in ast.walk(tree) if isinstance(n, ast.Assign)
-             for t in n.targets
-             if isinstance(t, ast.Name) and isinstance(n.value, (ast.List, ast.Tuple))}
-    for n in ast.walk(tree):
-        if isinstance(n, ast.Assign) and isinstance(n.value, ast.Call):
-            f = n.value.func
-            if isinstance(f, ast.Attribute) and f.attr == "Popen":
-                for t in n.targets:
-                    if isinstance(t, ast.Name):
-                        setattr(n.value, "_bound_to", t.id)
-    cli_popens, bad = set(), []
-
-    def check(call, where, label):
-        kw = {k.arg: k.value for k in call.keywords if k.arg}
-        t = kw.get("timeout")
-        if t is None:
-            bad.append(f"{path.name}:{where} has NO timeout: {label}")
-        elif not (isinstance(t, ast.Name) and t.id == "CLI_TIMEOUT_S"):
-            bad.append(f"{path.name}:{where} uses {ast.unparse(t)!r}, "
-                       f"not CLI_TIMEOUT_S: {label}")
-
+    bad = []
     for node in ast.walk(tree):
         if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
             continue
-        # a .wait()/.communicate() on a name we saw bound to a CLI Popen
-        if node.func.attr in {"wait", "communicate"}:
-            if isinstance(node.func.value, ast.Name) and node.func.value.id in cli_popens:
-                check(node, node.lineno, f"{node.func.value.id}.{node.func.attr}()")
+        if node.func.attr not in _CLI_SPAWNERS or not node.args:
             continue
-        if node.func.attr not in _CLI_SPAWNERS:
+        argv = node.args[0]
+        if not any(isinstance(n, ast.Name) and n.id in _CLI_HANDLES
+                   for n in ast.walk(argv)):
             continue
-        argv = _argv_of(node, lists)
-        if argv is None or not _mentions_cli(argv):
-            continue
-        if node.func.attr == "Popen":
-            # Popen itself takes no timeout; its .wait()/.communicate() does, so
-            # remember the binding and check THERE rather than skipping silently.
-            parent = getattr(node, "_bound_to", None)
-            if parent:
-                cli_popens.add(parent)
-            continue
-        check(node, node.lineno, ast.unparse(argv)[:60])
+        kw = {k.arg: k.value for k in node.keywords if k.arg}
+        t = kw.get("timeout")
+        label = ast.unparse(argv)[:60]
+        if t is None:
+            bad.append(f"{path.name}:{node.lineno} has NO timeout: {label}")
+        elif not (isinstance(t, ast.Name) and t.id == "CLI_TIMEOUT_S"):
+            bad.append(f"{path.name}:{node.lineno} uses {ast.unparse(t)!r}, "
+                       f"not CLI_TIMEOUT_S: {label}")
     return bad
 
 
 def test_cli_subprocess_timeouts_outrank_the_cli_own_curl_bound():
-    # (1) THE CLI'S OWN PER-CALL BOUND, anchored to the curl argv it belongs to —
-    # not a bare `-m` scan, which matched any `grep -m N` and went red on a `-m`
-    # inside a COMMENT. `max` over all matches, so a second curl cannot hide.
+    # (1) THE CLI'S OWN PER-CALL BOUND, read from curl's own argv assignment so a
+    # future SECOND bounded curl cannot be missed (`max` over all matches).
     cli = pathlib.Path(BROWSER_BIN).read_text(encoding="utf-8")
     caps = re.findall(r"args=\(\s*-sS\s+(?:-m|--max-time)\s+(\d+)\b", cli)
     assert caps, ("could not find curl's bound in the CLI's args=(...) assignment — "
                   "it moved or was renamed; retarget this test, do not delete it")
     per_call = max(int(c) for c in caps)
 
-    # (2) ONE INVOCATION CAN ISSUE SEVERAL BOUNDED CURLS, and the maximum is FOUR:
-    # `emulate --reset --recreate` does emulate + release + open + close, a
-    # sequence this suite asserts verbatim in test_browser_cli_args.py on a test
-    # that drives the real CLI subprocess. Two earlier drafts said 1 and then 3.
-    # 🔴 DERIVED FROM THE SUITE'S OWN ASSERTION, NOT RESTATED. A hardcoded 4 is an
-    # unexercised claim: mutating it back to the false 3 left this test GREEN,
-    # because 300 clears 3 x 60 as well. test_browser_cli_args.py already asserts
-    # the exact op sequence `emulate --reset --recreate` issues, so read ITS
-    # length — then miscounting the CLI's worst case fails HERE.
+    # (2) ONE INVOCATION CAN ISSUE SEVERAL BOUNDED CURLS. The maximum is FOUR:
+    # `emulate --reset --recreate` does emulate + release + open + close. DERIVED
+    # from the sequence test_browser_cli_args.py already asserts, because a
+    # hardcoded 4 is an unexercised claim — mutating it back to the false 3 left
+    # this test green. ⚠️ That couples this guard to another file's SOURCE: a
+    # reflow, a trailing comma, or a longer unrelated `assert ops == [...]` makes
+    # it red. Every such perturbation fails LOUD (no silent mis-derivation), and
+    # the failure text names the arithmetic, so check the CLI before the budget.
     sib = (pathlib.Path(__file__).parent / "test_browser_cli_args.py").read_text(
         encoding="utf-8")
     seqs = re.findall(r"assert ops == \[([^\]]+)\]", sib)
@@ -9279,6 +9244,8 @@ def test_cli_subprocess_timeouts_outrank_the_cli_own_curl_bound():
                   "the worst-case curl count can no longer be derived; retarget "
                   "this rather than hardcoding a number")
     max_curls_per_invocation = max(len(q.split(",")) for q in seqs)
+    # A tripwire, not an exercised assertion: it fires only if that sequence ever
+    # SHRINKS, which is the one way the derivation could quietly under-count.
     assert max_curls_per_invocation >= 4, (
         f"derived worst-case op count fell to {max_curls_per_invocation}; the "
         f"`emulate --reset --recreate` sequence is four ops")
@@ -9289,15 +9256,51 @@ def test_cli_subprocess_timeouts_outrank_the_cli_own_curl_bound():
         f"stall fires the test's net first and reports an opaque TimeoutExpired "
         f"instead of the CLI's own error")
 
-    # (3) EVERY CLI-spawning site in EVERY module uses the constant. A literal is
-    # refused even when generous: the defect was never one bad number, it was N
-    # copies of one.
+    # (3) EVERY CLI-spawning site in EVERY module uses the constant — within the
+    # scope `_cli_timeout_violations` documents.
     bad = []
     for path in sorted(pathlib.Path(__file__).parent.glob("test_*.py")):
         bad.extend(_cli_timeout_violations(path))
     assert not bad, (
         "CLI-spawning site(s) not using CLI_TIMEOUT_S — one rule, one place, or "
         "the ordering rots at the copy someone forgets:\n  " + "\n  ".join(bad))
+
+
+def test_cli_timeout_scan_sees_what_it_claims_and_only_that(tmp_path):
+    """The scan's OWN battery, committed rather than run once in a shell.
+
+    🔴 An earlier revision's comment said each spelling "has a planted positive
+    control in the battery". There was no such test — the battery was an
+    in-session shell loop, so every branch it described was unguarded, and an
+    audit showed six of seven mutants surviving green. A claim of coverage with
+    no test behind it is worse than no claim: it stops the next person looking.
+    These four cases are that battery, in the repo.
+    """
+    def verdicts(body):
+        m = tmp_path / "test_synthetic.py"
+        m.write_text("import subprocess\nCLI = '/bin/true'\nCLI_TIMEOUT_S = 300\n"
+                     "def f():\n" + body + "\n", encoding="utf-8")
+        return _cli_timeout_violations(m)
+
+    # POSITIVE: a literal timeout at a CLI site is refused, and named by line.
+    bad = verdicts("    subprocess.run([CLI, 'health'], timeout=30)")
+    assert len(bad) == 1 and "uses '30'" in bad[0], bad
+
+    # POSITIVE: no timeout at all is refused (an unbounded wait is the whole bug).
+    bad = verdicts("    subprocess.run([CLI, 'health'])")
+    assert len(bad) == 1 and "has NO timeout" in bad[0], bad
+
+    # NEGATIVE: the constant is accepted — so the positives above mean something.
+    assert verdicts("    subprocess.run([CLI, 'health'], timeout=CLI_TIMEOUT_S)") == []
+
+    # NEGATIVE: a string LITERAL containing "CLI" is NOT a CLI site. The substring
+    # version of this check demanded a 300s budget on an `echo`.
+    assert verdicts("    subprocess.run(['echo', 'the CLI banner'], timeout=5)") == []
+
+    # NEGATIVE: an unrelated pre-built list in the same module is not attributed to
+    # a CLI site. The module-wide resolution this replaced flagged exactly this,
+    # against the wrong line number.
+    assert verdicts("    cmd = ['echo', 'hi']\n    subprocess.run(cmd, timeout=5)") == []
 
 
 def test_net_outranks_is_strict_at_the_boundary():
