@@ -69,8 +69,15 @@ debugging, changing or copying a specific pipeline.
    cause**, and "the gate is just flaky under load" will walk you straight past a real bug.
    Discriminator: a step that emitted `RESULT:` / `<leg> verdict=` **failed a test**; one that
    emitted neither was **killed**. 25 of the 27 kills had ≥4 gate TaskRuns overlapping.
-   🔴 **THE 255s ARE SCHEDULER PREEMPTION, AND `gitops-validate` IS THE PREEMPTOR — CI
-   PREEMPTS CI.** Confirmed 2026-08-25T04:46:13Z by catching a burst live: five gate pods,
+   🔴 **FIXED 2026-08-25 BY homelab-infra #396 — the paragraphs below are HISTORY, kept so
+   the signature is recognisable if it ever returns. Do not go hunting this.** #396 gave
+   `gitops-validate` its own nix cache and node, so the two pipelines no longer share one.
+   Measured 11h later: **before, 30/121 runs killed (24.8%); after, 0/9 (100% passed)**, with
+   `devrc-ci` on `talos-xr6-r7p` and `gitops-validate` on `talos-uvh-gtj`. ⚠ n=9 is
+   suggestive, not conclusive — ~2 kills would be expected in 9 runs at the old rate, so a
+   clean 9 happens by luck about 1 in 12; re-measure before treating it as settled.
+   🔴 **THE 255s WERE SCHEDULER PREEMPTION, AND `gitops-validate` WAS THE PREEMPTOR — CI
+   PREEMPTED CI.** Confirmed 2026-08-25T04:46:13Z by catching a burst live: five gate pods,
    five explicit `Preempted` events, three preemptors, all five `pytests` steps terminating
    `exit=255` within ONE SECOND having started minutes apart. The preemptors are priority-**0**
    `gitops-validate` pods blocked on `0/4 nodes are available: 1 Insufficient cpu, 3 node(s)
@@ -93,12 +100,12 @@ debugging, changing or copying a specific pipeline.
    non-cancelled failure, so it re-runs genuine verdicts). The lever actually taken was
    right-sizing gitops-validate's requests (4.65 → 2.40 CPU), which said in writing that it
    does **not** end preemption.
-   🔴 **The one thing measured 2026-08-25 that the prior work left open: the binding predicate
-   is still CPU, NOT pod count.** That matters because a kill on the `pods` predicate looks
-   IDENTICAL to one on CPU — same `reason=Preempted`, same exit 137/255 — while every CPU
-   number on the node reads healthy, so the manifests tell you to check pod count FIRST. The
-   preemptors' own message settles it: `0/4 nodes are available: 1 Insufficient cpu` — not
-   `Insufficient pods`. Named remaining inflation: `auditloop-ci` 2.8×, `clawgate-ci` 2.4×.
+   ⚠ **Measured at 04:46Z and MOOT since #396 that morning: the binding predicate was CPU,
+   not pod count** (`0/4 nodes are available: 1 Insufficient cpu`). Kept only because a
+   `pods`-predicate kill looks IDENTICAL to a CPU one — same `reason=Preempted`, same exit
+   137/255 — while every CPU number reads healthy, so that is the discrimination to redo if
+   this ever returns. It does **not** make right-sizing `auditloop-ci` (2.8×) or `clawgate-ci`
+   (2.4×) urgent: that argument rested on contention which #396 removed.
    ⚠ Also measured-absent, so don't reach for it: moving devrc-ci's requests/limits. #393 put
    `step-pytests` at **0.006, not throttled**, and a per-pod limit cannot kill five pods of
    different ages in the same second anyway.
