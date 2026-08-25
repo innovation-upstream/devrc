@@ -43,14 +43,14 @@ two names, and every clawgate task body already carries the second spelling --
 so accepting only the first would deny a correctly-specified body for using the
 house heading.
 
-One deliberate OVER-acceptance, recorded rather than hidden: a `--body` whose
-text contains the two characters `\n` is ALSO read with those decoded (see
-`escape_expanded`). `shlex` does not implement bash's `$'…'`, so an ANSI-C-quoted
-body arrives as one line beginning `$##` and would deny; and a plainly
-double-quoted `"…\n…"` really is one line to bash, which GitHub would render on
-one line too. Crediting both is a knowing trade: an author who typed `\n` between
-a heading and its content meant a newline, and denying them is the false positive
-that gets a gate routed around.
+One NARROW decode, and its boundary is the point: a `--body` value that ARRIVES
+ANSI-C-QUOTED (`$'…\n…'`, which `shlex` does not implement, so it reaches this
+gate as one line beginning `$##`) is ALSO read with `\n`/`\t` decoded — see
+`escape_expanded`. A plainly double-quoted `"…\n…"` is NOT decoded: bash leaves
+those two characters literal, GitHub renders the body on one line, and there is
+no heading on that page. Crediting it would have made this gate passable by
+appending ~30 characters that produce nothing, which is a spelled guard, not a
+structural one. The `$` prefix is the discriminator and it is exact.
 
 ROUTES COVERED, AND THE ONES THAT ARE NOT
 -----------------------------------------
@@ -68,6 +68,16 @@ is (a guard that does that stops people looking -- RULES.md):
     hook only ever sees Claude Code's Bash tool
   * `xargs gh issue create`, `ssh <host> gh issue create`, and argv assembled
     from a variable (`$CMD issue create`) -- the command text does not carry it
+  * 🔴 A CREATE PRECEDED BY A SHELL KEYWORD, i.e. inside a compound statement:
+    `if …; then gh issue create …; fi`, `while …; do gh issue create …; done`,
+    and the bare `then`/`do`/`else`/`!` prefixes. `guard_core._peel_variants`
+    peels wrappers (`sudo`, `timeout`, `nohup`) and `VAR=` assignments but not
+    keywords, so argv[0] is `then` and the argv is not a `gh` at all.
+    `time`/`command`/`exec`/`eval` DO reach the gate; those four are not
+    keywords in the peeler's sense. Measured 2026-08-25, identical before and
+    after this fix round, and NOT fixed here: the peeler is `guard_core`'s and
+    is shared with `bash-guard.py`, so widening it is its own change with its
+    own blast radius. Recorded rather than left for someone to rediscover.
   * `gh issue create --web` / `-w`, which does NOT post: gh opens the browser's
     new-issue form and exits, so the object is created by a human in a form this
     process cannot see. Structurally exempt, like `--help`; it is a one-flag way
@@ -76,6 +86,17 @@ is (a guard that does that stops people looking -- RULES.md):
   * `gh issue transfer`, `gh issue develop`, and issue creation as a side effect
     of some other tool (a bot, a workflow, `gh workflow run`)
   * the SEMANTIC question above: heading present and filled in is all it knows
+
+🔴 ONE KNOWN FALSE POSITIVE, recorded because a limit nobody wrote down is a
+limit nobody can fix: a body that QUOTES a heredoc operator inside a code fence
+(`## Closing condition … ```cat <<'EOF' > x``` `) denies. `heredocs` is
+quote-blind on purpose, `scrub_inert_heredocs` therefore blanks bytes that sit
+inside the quoted argument, the argument's quote no longer balances and the
+fallback tokeniser hands `--body` a fragment. Pinned by
+test_a_body_quoting_a_heredoc_operator_is_a_KNOWN_FALSE_POSITIVE. The fix is to
+make the SCRUB quote-aware while body resolution stays blind; that is a change to
+the mechanism the mention-is-not-an-invocation requirement rests on and has not
+been made.
 
 ONLY `create`. `gh issue comment|edit|close|reopen|list|view|status|develop`,
 `gh pr create`, and a GET of `…/issues` all pass untouched. This gate exists to
@@ -89,6 +110,24 @@ the call rather than its content -- the "spelled, not structural" failure
 RULES.md names. Both are denies, with a message that says how to make the body
 readable (write it to a file with the Write tool, then `--body-file <path>`).
 The cost is real and accepted.
+
+🔴 AND A HEREDOC ONLY EVER ANSWERS FOR THE COMMAND IT FEEDS. This claim used to
+be false in a way that voided the paragraph above: every fallback resolved
+`heredoc_bodies(<the whole command line>)`, so ONE unrelated
+`cat > /tmp/plan.md <<'EOF' … EOF` -- the ordinary agent workflow this gate
+watches -- rescued `--body-file -`, `--body "$(gen.sh)"`, an unreadable
+`--body-file`, an attached `-b…`, and a create with no body flag at all. It also
+made a line filing TWO issues pass on the strength of the FIRST one's heredoc.
+Body resolution is now scoped to the create's OWN command segment
+(`command_spans`), so a heredoc opened by a different command on the same line is
+not a candidate. Two deliberate consequences, recorded rather than hidden:
+  * an unreadable `--body-file <path>` is still rescued by a heredoc that WRITES
+    THAT EXACT PATH, wherever on the line it sits -- `cat > p.md <<'EOF' … EOF &&
+    gh issue create --body-file p.md` is a correctly-specified create and must
+    not deny. The match is on the path, not on adjacency.
+  * `cat <<'EOF' … EOF | gh issue create --body-file -` DENIES. The pipe puts the
+    heredoc in a different segment, and no cheap parse ties one command's stdin
+    to another command's heredoc. Use `--body "$(cat <<'EOF' … EOF)"`.
 
 🔴 A MENTION IS NOT AN INVOCATION, AND THAT IS A FIRST-CLASS REQUIREMENT.
 `bash-guard.py` blocks a command line that merely QUOTES a banned shape, and its
@@ -110,6 +149,17 @@ itself, or in the hook process's environment. Exactly the value `1`; `true`,
 override nobody can grep for. It is deliberately noisy in the transcript, which
 is the point: "when did we skip this" has to have an answer.
 
+🔴 IT IS DECIDED BY A QUOTE-AWARE WALK, NEVER BY A REGEX OVER THE RAW TEXT. The
+first version matched an anchored regex against the whole command line, and its
+anchor class included `\n`, `;` and a backtick -- every one of which occurs
+INSIDE an ordinary issue body. So a body that merely MENTIONED the override
+string on its own line, or after a semicolon, or in a markdown code span,
+disarmed the gate silently; and this gate's own deny message TELLS the reader
+that string, so an issue about this guard turned it off. `_shell_walk` now
+credits an assignment only at a real command position, outside every quote, and
+at substitution depth 0 -- a `` `VAR=1` `` inside a body is a substitution whose
+assignment cannot reach `gh`'s environment anyway.
+
 I/O CONTRACT
 ------------
 Reads PreToolUse JSON on stdin (`tool_name`, `tool_input.command`), prints
@@ -127,6 +177,7 @@ like an issue create by a pure regex that cannot itself fail. Everything else
 exits 0. That fallback IS text-based, so on the crash path -- and only there -- a
 mere mention can be denied; the message names the override.
 """
+import collections
 import json
 import os
 import re
@@ -168,14 +219,11 @@ FENCE = re.compile(r"^ {0,3}(?P<char>`{3,}|~{3,})(?P<info>.*)$")
 OVERRIDE_ENV = "GH_ISSUE_NO_CLOSING_CONDITION"
 # One spelling. See the module docstring.
 OVERRIDE_VALUE = "1"
-# The assignment in COMMAND POSITION, or via `export`. Anchored on a command
-# boundary so the same bytes quoted inside an issue body do not silently disarm
-# the gate (a guard that can be turned off by QUOTING its own name is not a
-# guard).
-OVERRIDE_INLINE = re.compile(
-    r"(?:^|[\n;&|(){}`]|\$\()\s*(?:(?:then|else|do|!)\s+)*(?:export\s+)?"
-    + OVERRIDE_ENV + r"=" + OVERRIDE_VALUE + r"(?![\w.-])"
-)
+# 🔴 THE WHOLE TOKEN, COMPARED EXACTLY. There is no regex over the raw command
+# text any more: `_shell_walk` finds command-position words and this is the one
+# it accepts. `…=1x`, `…_EXTRA=1` and `…=true` are different strings and do not
+# override; the same bytes inside a quoted issue body are never a command word.
+OVERRIDE_ASSIGNMENT = OVERRIDE_ENV + "=" + OVERRIDE_VALUE
 
 # Where the predicate is DEFINED. Both spellings are printed: the deployed path
 # is what the model can open right now, the repo path is what it edits. This gate
@@ -239,11 +287,18 @@ def escape_expanded(value):
 
     Used only as an EXTRA candidate beside the raw value, never as a replacement:
     a candidate can only ever let a command through, so decoding cannot invent a
-    deny. It also cannot invent a pass that the operator did not write — a body
-    whose literal text is `## Closing condition\\n…` is one whose author meant a
-    newline.
+    deny.
+
+    🔴 GATED ON THE `$` PREFIX, AND THAT GATE IS THE FIX, NOT A DETAIL. Decoding
+    unconditionally meant ANY body passed by appending
+    `\\n## Closing condition\\ndone` — about thirty characters that bash leaves
+    literal, so the issue GitHub renders carries no heading at all. Only a value
+    that really arrived ANSI-C-quoted is decoded; a double-quoted `"…\\n…"` is
+    one line to bash and is judged as one line here.
     """
-    out = value[1:] if value.startswith("$") else value
+    if not value.startswith("$"):
+        return value
+    out = value[1:]
     for esc, real in _ANSI_C_ESCAPES:
         out = out.replace(esc, real)
     return out
@@ -267,13 +322,28 @@ GH_ISSUE_BODY_FLAGS = ("--body", "-b")
 GH_ISSUE_BODY_FILE_FLAGS = ("--body-file", "-F")
 # Every `gh issue create` flag that consumes a separate value token, plus the gh
 # globals that may precede the verb.
+#
+# 🔴 DERIVED FROM `gh issue create --help` ON gh 2.97.0, AND WRONG IN BOTH
+# DIRECTIONS BEFORE THAT. A value-taking flag MISSING here puts its value in the
+# operand list, which defeats the `ops[:2] == ["issue", "create"]` prefix test
+# whenever the flag precedes the verb — `--type`, `--parent`, `--blocked-by`,
+# `--blocking` and `--recover` were all missing, i.e. five one-flag bypasses.
+# A BOOLEAN flag listed here eats the following token instead: `--editor`
+# (`-e`, a boolean) was listed and would swallow whatever came next.
 GH_ISSUE_VALUE_FLAGS = GH_ISSUE_BODY_FLAGS + GH_ISSUE_BODY_FILE_FLAGS + (
     "-a", "--assignee", "-l", "--label", "-m", "--milestone", "-p", "--project",
-    "-T", "--template", "-t", "--title", "-R", "--repo", "--editor",
-    "--hostname",
+    "-T", "--template", "-t", "--title", "-R", "--repo", "--hostname",
+    "--type", "--parent", "--blocked-by", "--blocking", "--recover",
 )
 # gh api's own value-taking flags.
-GH_API_FIELD_FLAGS = ("-f", "--field", "-F", "--raw-field")
+#
+# 🔴 `-F` IS `--field` AND `-f` IS `--raw-field`, NOT THE OTHER WAY ROUND. The
+# pairing was inverted here, which matters because gh documents the `@<path>`
+# read-from-file form as a `--field` (`-F`) feature ONLY. See
+# `_resolve_gh_api_field`.
+GH_API_AT_FILE_FLAGS = ("-F", "--field")
+GH_API_RAW_FIELD_FLAGS = ("-f", "--raw-field")
+GH_API_FIELD_FLAGS = GH_API_AT_FILE_FLAGS + GH_API_RAW_FIELD_FLAGS
 GH_API_VALUE_FLAGS = GH_API_FIELD_FLAGS + (
     "-X", "--method", "-H", "--header", "--input", "--hostname", "-q", "--jq",
     "-t", "--template", "--cache", "-p", "--preview",
@@ -319,7 +389,12 @@ _HEREDOC_OPEN = re.compile(
 INERT_HEREDOC_SINKS = frozenset({"cat", "tee", "echo", "printf"})
 # Anything on the operator's own line AFTER the tag that would send the sink's
 # output somewhere executable. `cat <<EOF | bash` is not inert.
-_PIPES_ONWARD = re.compile(r"[|&;]")
+#
+# 🔴 A PROCESS SUBSTITUTION IS AN EXECUTION TOO. `cat <<'EOF' > >(bash)` really
+# runs the body; with only `[|&;]` here it scored INERT and the body was blanked
+# out of the invocation scan — a one-redirect bypass. `>(` and `<(` are both
+# spelled out because the class is "the sink's bytes reach a shell", not "a pipe".
+_PIPES_ONWARD = re.compile(r"[|&;]|[<>]\(")
 # Separators that end the command the heredoc operator attaches to.
 _SEG_SPLIT = re.compile(r"\n|;|&&|\|\||\||&|\(|\)|`|\$\(")
 _ASSIGN_TOKEN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
@@ -338,8 +413,17 @@ def _attached_command(text, operator_start):
     return ""
 
 
+# `body`   the text between the operator's line and the terminator
+# `start`  where the body begins; `body_end` where the TERMINATOR LINE begins
+# `after`  past the terminator line — what a scan must skip to leave the body
+# `op`     the offset of the `<<` itself, which is what attributes a heredoc to
+#          the COMMAND that opened it (see `command_spans`)
+_Heredoc = collections.namedtuple(
+    "_Heredoc", "body start body_end inert op after head rest")
+
+
 def heredocs(text):
-    """Every heredoc in `text` as `(body, start, end, inert)`, in operator order.
+    """Every heredoc in `text` as a `_Heredoc`, in operator order.
 
     🔴 DELIBERATELY QUOTE-BLIND for the BODY, unlike `guard_core._scan`. The
     dominant real shape is
@@ -410,17 +494,59 @@ def heredocs(text):
             i = nxt
         consumed.append((start, i))
         cursor = i
+        head = _SEG_SPLIT.split(text[:m.start()])[-1]
         inert = (
             _attached_command(text, m.start()) in INERT_HEREDOC_SINKS
             and not _PIPES_ONWARD.search(rest_of_line)
         )
-        out.append(("\n".join(lines), start, body_end, inert))
+        out.append(_Heredoc("\n".join(lines), start, body_end, inert,
+                            m.start(), i, head, rest_of_line))
     return out
 
 
 def heredoc_bodies(text):
     """Every heredoc body, inert or not — the body-resolution view."""
-    return [h[0] for h in heredocs(text)]
+    return [h.body for h in heredocs(text)]
+
+
+# A redirection or a `tee` argument naming the file a heredoc is about to write.
+_REDIR = re.compile(r"^\d*>>?$")
+
+
+def heredoc_bodies_writing(text, path):
+    """Bodies of the heredocs on this line whose own command WRITES `path`.
+
+    🔴 THE ATTRIBUTION THAT REPLACED "any heredoc anywhere on the line". An
+    unreadable `--body-file p.md` is legitimately rescued by
+    `cat > p.md <<'EOF' … EOF` earlier on the line — the file does not exist yet
+    when a PreToolUse hook runs, and denying that shape denies a correctly
+    specified create. Matching on the PATH rather than on adjacency is what keeps
+    an UNRELATED heredoc from doing the same job.
+    """
+    want = os.path.abspath(os.path.expanduser(path))
+    out = []
+    for h in heredocs(text):
+        toks = (h.head + " " + h.rest).split()
+        is_tee = bool(toks) and os.path.basename(toks[0].strip("\"'")) == "tee"
+        targets, redir = [], False
+        for tok in toks[1:] if is_tee else toks:
+            bare = tok.strip("\"'")
+            if _REDIR.match(bare):
+                redir = True
+                continue
+            if bare.startswith(">"):
+                targets.append(bare.lstrip(">"))
+                continue
+            if redir:
+                targets.append(bare)
+                redir = False
+                continue
+            if is_tee and not bare.startswith("-"):
+                targets.append(bare)
+        if any(t and os.path.abspath(os.path.expanduser(t.strip("\"'"))) == want
+               for t in targets):
+            out.append(h.body)
+    return out
 
 
 def scrub_inert_heredocs(text):
@@ -442,7 +568,7 @@ def scrub_inert_heredocs(text):
     Body CONTENT is unaffected: `heredoc_bodies` reads the ORIGINAL text, so a
     `--body "$(cat <<'EOF' … EOF)"` is still resolved from its heredoc.
     """
-    spans = [(lo, hi) for _, lo, hi, inert in heredocs(text) if inert]
+    spans = [(h.start, h.body_end) for h in heredocs(text) if h.inert]
     if not spans:
         return text
     out, prev = [], 0
@@ -452,6 +578,169 @@ def scrub_inert_heredocs(text):
         prev = hi
     out.append(text[prev:])
     return "".join(out)
+
+
+# --------------------------------------------------------------------------- #
+# A quote-aware walk of the command line
+#
+# 🔴 THE ONE THING A REGEX OVER RAW TEXT CANNOT DO IS TELL A COMMAND FROM PROSE,
+# and both of the defects this exists to fix were exactly that mistake:
+#
+#   * the override was matched by a regex whose "command boundary" class held
+#     `\n`, `;` and a backtick — all of which appear inside an ordinary issue
+#     body, so quoting the override string in a body disarmed the gate;
+#   * every body-resolution fallback read `heredoc_bodies(<the whole line>)`, so
+#     a heredoc belonging to some OTHER command answered for a create.
+#
+# One walk answers both. It tracks single quotes, double quotes, backslash
+# escapes, `$( … )` and backtick substitution depth, and it steps OVER heredoc
+# bodies (whose bytes are data, not command text, and whose stray quotes would
+# otherwise corrupt the state for everything after them).
+# --------------------------------------------------------------------------- #
+# Words that leave the NEXT word still in command position.
+_CMD_KEEPERS = frozenset({"!", "then", "else", "elif", "do", "time", "command",
+                          "{", "}", "nohup"})
+# Words after which further `NAME=value` words are still assignments.
+_ASSIGN_INTRODUCERS = frozenset({"export", "env", "declare", "local",
+                                 "readonly", "typeset"})
+_ASSIGN_WORD = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_SEPARATOR_CHARS = ";&|\n"
+# A word ends at whitespace, at a separator, at a redirection, or at the start of
+# a substitution. Quotes are consumed as part of the word so `'a b'` stays one.
+_WORD_BREAK = " \t\r\n;&|()<>`"
+
+
+def _read_word(text, i, n):
+    """`(word, next index)` for the shell word starting at `i`."""
+    out, quote = [], None
+    while i < n:
+        c = text[i]
+        if quote:
+            if c == "\\" and quote == '"' and i + 1 < n:
+                out.append(text[i + 1])
+                i += 2
+                continue
+            if c == quote:
+                quote = None
+                i += 1
+                continue
+            out.append(c)
+            i += 1
+            continue
+        if c in ("'", '"'):
+            quote = c
+            i += 1
+            continue
+        if c == "\\" and i + 1 < n:
+            out.append(text[i + 1])
+            i += 2
+            continue
+        if c in _WORD_BREAK or (c == "$" and text[i + 1:i + 2] == "("):
+            break
+        out.append(c)
+        i += 1
+    return "".join(out), i
+
+
+def _shell_walk(text):
+    """`(spans, override)` — top-level command spans, and the override verdict.
+
+    `spans` are `[lo, hi)` slices of `text`, one per TOP-LEVEL command segment,
+    split on unquoted `;`/`&`/`|`/newline and on a subshell paren. A heredoc's
+    body is kept INSIDE the span of the command that opened it, because that is
+    exactly the relationship body resolution needs.
+
+    `override` is True only for a bare `GH_ISSUE_NO_CLOSING_CONDITION=1` word in
+    COMMAND POSITION at substitution depth 0 — the assignment bash would actually
+    put in `gh`'s environment. Inside `$( … )` or a backtick it is a different
+    process's environment and does not count; inside a quote it is prose.
+    """
+    n = len(text)
+    skip = {}
+    for h in heredocs(text):
+        skip[h.start] = h.after
+    spans, seg_lo = [], 0
+    stack = []            # (saved quote, closing char) per open substitution
+    quote, at_cmd, override, i = None, True, False, 0
+    while i < n:
+        if i in skip:
+            i = skip[i]
+            continue
+        c = text[i]
+        if quote == "'":
+            if c == "'":
+                quote = None
+            i += 1
+            continue
+        if quote == '"':
+            if c == "\\" and i + 1 < n:
+                i += 2
+                continue
+            if c == "$" and text[i + 1:i + 2] == "(":
+                stack.append((quote, ")"))
+                quote, at_cmd, i = None, True, i + 2
+                continue
+            if c == "`":
+                stack.append((quote, "`"))
+                quote, at_cmd, i = None, True, i + 1
+                continue
+            if c == '"':
+                quote = None
+            i += 1
+            continue
+        if c == "\\" and i + 1 < n:
+            at_cmd = False
+            i += 2
+            continue
+        if c == "$" and text[i + 1:i + 2] == "(":
+            stack.append((quote, ")"))
+            at_cmd, i = True, i + 2
+            continue
+        if stack and ((c == ")" and stack[-1][1] == ")")
+                      or (c == "`" and stack[-1][1] == "`")):
+            quote = stack.pop()[0]
+            at_cmd, i = False, i + 1
+            continue
+        if c == "`":
+            stack.append((quote, "`"))
+            at_cmd, i = True, i + 1
+            continue
+        if c in ("'", '"'):
+            quote, at_cmd, i = c, False, i + 1
+            continue
+        if c in _SEPARATOR_CHARS or (not stack and c in "()"):
+            if not stack:
+                # 🔴 A newline that OPENS a heredoc body ends the command, but
+                # the body belongs to it: the span runs past the terminator so
+                # `heredoc_bodies(span)` still finds it.
+                end = skip.get(i + 1) if c == "\n" else None
+                if end is not None:
+                    spans.append((seg_lo, i))
+                    seg_lo, i, at_cmd = end, end, True
+                    continue
+                spans.append((seg_lo, i))
+                seg_lo = i + 1
+            at_cmd, i = True, i + 1
+            continue
+        if c.isspace():
+            i += 1
+            continue
+        word, j = _read_word(text, i, n)
+        if at_cmd and not stack:
+            if _ASSIGN_WORD.match(word):
+                override = override or word == OVERRIDE_ASSIGNMENT
+            elif word not in _ASSIGN_INTRODUCERS and word not in _CMD_KEEPERS:
+                at_cmd = False
+        else:
+            at_cmd = False
+        i = max(j, i + 1)
+    spans.append((seg_lo, n))
+    return [(lo, hi) for lo, hi in spans if text[lo:hi].strip()], override
+
+
+def command_spans(text):
+    """The `[lo, hi)` slice of every top-level command segment in `text`."""
+    return _shell_walk(text)[0]
 
 
 # --------------------------------------------------------------------------- #
@@ -633,27 +922,41 @@ def is_gh_api_issue_create(argv):
 
 
 def _curl_parts(argv):
-    """(method, [url paths], [data values]) for a curl argv."""
+    """(method, [url paths], [data values]) for a curl argv.
+
+    🔴 EVERY FLAG READ THROUGH `_match_flag`, NOT BY EXACT-TOKEN EQUALITY. This
+    used to test `tok in CURL_DATA_FLAGS`, so `--request=POST`, `--data=…`,
+    `--data-raw=…`, `--json=…` and `--url=…` matched NOTHING: the call was not
+    even classified as a create, and the gate never ran on it. The order below is
+    load-bearing — the specific tables are consulted before the catch-all
+    `CURL_VALUE_FLAGS`, which is a superset of both.
+    """
     method, paths, data = None, [], []
     i = 1
     while i < len(argv):
         tok = argv[i]
-        if tok in CURL_METHOD_FLAGS and i + 1 < len(argv):
-            method = argv[i + 1].upper()
-            i += 2
+        hit = _match_flag(argv, i, CURL_METHOD_FLAGS)
+        if hit is not None:
+            if hit[1] is not None:
+                method = hit[1].upper()
+            i = hit[2]
             continue
-        if tok in CURL_DATA_FLAGS and i + 1 < len(argv):
-            data.append(argv[i + 1])
-            i += 2
+        hit = _match_flag(argv, i, CURL_DATA_FLAGS)
+        if hit is not None:
+            if hit[1] is not None:
+                data.append(hit[1])
+            i = hit[2]
             continue
-        if tok == "--url" and i + 1 < len(argv):
-            p = _url_path(argv[i + 1])
+        hit = _match_flag(argv, i, ("--url",))
+        if hit is not None:
+            p = _url_path(hit[1]) if hit[1] else None
             if p:
                 paths.append(p)
-            i += 2
+            i = hit[2]
             continue
-        if tok in CURL_VALUE_FLAGS:
-            i += 2
+        hit = _match_flag(argv, i, CURL_VALUE_FLAGS)
+        if hit is not None:
+            i = hit[2]
             continue
         if not tok.startswith("-") or tok == "-":
             p = _url_path(tok)
@@ -681,7 +984,7 @@ def is_curl_issue_create(argv):
     return bool(data)
 
 
-def is_exempt_invocation(argv):
+def is_exempt_invocation(argv, route="gh-issue"):
     """True for a create-shaped argv that STRUCTURALLY cannot post an issue.
 
     🔴 Structural exemptions, not convenience ones, and both are recorded in the
@@ -697,12 +1000,23 @@ def is_exempt_invocation(argv):
     curl flag at all; curl posts the request regardless. Letting this predicate
     answer for a curl create would hand every curl caller a one-word bypass —
     the exact hole the clawgate gate's first `is_help_invocation` had.
+
+    🔴 AND SCOPED BY ROUTE, because `gh issue create` and `gh api` do not share a
+    flag table. Judging a `gh api` argv against the ISSUE table left gh api's own
+    value flags (`-q`, `--jq`, `-H`, `--cache`, `--input`) unskipped, so a VALUE
+    that happened to be `-h` or `-w` — a jq expression, a header — exempted the
+    create. `route` is already known at the only call site.
     """
     if not _is_gh(argv):
         return False
-    if _has_flag(argv, HELP_FLAGS + WEB_FLAGS, GH_ISSUE_VALUE_FLAGS):
+    api = route == "gh-api"
+    value_flags = GH_API_VALUE_FLAGS if api else GH_ISSUE_VALUE_FLAGS
+    # `--web` is a `gh issue create` flag; `gh api` has no such thing, and `-w`
+    # there is not a flag at all.
+    exempting = HELP_FLAGS if api else HELP_FLAGS + WEB_FLAGS
+    if _has_flag(argv, exempting, value_flags):
         return True
-    return _operands(argv, GH_ISSUE_VALUE_FLAGS)[:1] == ["help"]
+    return _operands(argv, value_flags)[:1] == ["help"]
 
 
 # --------------------------------------------------------------------------- #
@@ -715,20 +1029,49 @@ UNRESOLVED_NONE = "the command names no body this gate can read"
 UNRESOLVED_JSON = "the request payload is not JSON this gate can parse"
 
 
+def _match_flag(argv, i, names):
+    """`(name, value, next index)` when `argv[i]` carries one of `names`' values.
+
+    🔴 ALL THREE SPELLINGS THE REAL TOOLS ACCEPT, because a flag table that knows
+    only one of them is a table with holes in the other two. `--flag value` is
+    obvious; `--flag=value` was already handled here and NOT in `_curl_parts`, so
+    `--request=POST --data=…` was not classified as a create at all; and an
+    ATTACHED short flag (`-b<body>`, `-F<path>`, `-XPOST`, `-d<payload>` — every
+    one of them valid) was handled nowhere, so a CORRECTLY specified
+    `gh issue create -b'## Closing condition …'` denied with "CANNOT SEE THE
+    BODY", the most confusing message this gate can print.
+
+    🔴 NO `--` EXCLUSION IS NEEDED HERE, AND ONE WAS DELETED FOR SAYING
+    OTHERWISE. The first draft carried `and not tok.startswith("--")` with a
+    comment claiming it stopped `--data-raw` being read as `-d` + a value. It
+    cannot: `name[1] != "-"` already means a token beginning `--` can never
+    satisfy `tok.startswith(name)`. A mutation sweep found the clause SURVIVED
+    every test because it is provably unreachable — a guard that reads as
+    coverage while providing none, which is worse than no guard.
+    """
+    tok = argv[i]
+    if tok in names:
+        return (tok, argv[i + 1], i + 2) if i + 1 < len(argv) else (tok, None, i + 1)
+    for name in names:
+        if tok.startswith(name + "="):
+            return name, tok[len(name) + 1:], i + 1
+        if (len(name) == 2 and name[0] == "-" and name[1] != "-"
+                and len(tok) > 2 and tok.startswith(name)):
+            return name, tok[len(name):], i + 1
+    return None
+
+
 def _flag_values(argv, names):
-    """Values of `--flag value` and `--flag=value`, in argv order."""
+    """Values of every spelling of `names` in `argv`, in argv order."""
     out, i = [], 1
     while i < len(argv):
-        tok = argv[i]
-        if tok in names and i + 1 < len(argv):
-            out.append(argv[i + 1])
-            i += 2
+        hit = _match_flag(argv, i, names)
+        if hit is None:
+            i += 1
             continue
-        for name in names:
-            if tok.startswith(name + "="):
-                out.append(tok[len(name) + 1:])
-                break
-        i += 1
+        _, value, i = hit
+        if value is not None:
+            out.append(value)
     return out
 
 
@@ -742,6 +1085,16 @@ def _read_body_file(path):
 
 def _resolve_inline(value, text):
     """([body, …], reason-or-None) for a literal `--body` argument."""
+    # 🔴 ONE ORDERING RULE, APPLIED ONCE: a heading PRESENT IN THE LITERAL
+    # ARGUMENT always wins. It was stated below for the opacity branch and NOT
+    # for this one, so a correctly specified body that merely QUOTES a heredoc —
+    # `## Closing condition … ```cat <<'EOF' > x``` `, i.e. any issue documenting
+    # a shell snippet — was resolved through the quoted heredoc instead of its
+    # own text and denied. `heredocs` is deliberately quote-blind, so it cannot
+    # tell a documented operator from a real one; the operator's own bytes can.
+    variants = _inline_variants(value)
+    if any(has_closing_condition(v) for v in variants):
+        return variants, None
     inner = heredoc_bodies(value)
     if inner:
         # 🔴 THE ORIGINAL TEXT IS THE AUTHORITATIVE READING WHEN THE ARGUMENT
@@ -763,6 +1116,11 @@ def _resolve_inline(value, text):
         # An earlier version narrowed this to the all-blank case; a mutation
         # sweep showed no test could tell the two apart, i.e. the narrowing was
         # an unreachable guard reading as coverage. Removed rather than kept.
+        #
+        # 🔴 THE "KNOWN LOOSENESS" ABOVE IS NOW CLOSED, and this comment is kept
+        # only so nobody re-derives it: `text` here is the create's OWN command
+        # segment, not the whole line, so a well-specified heredoc belonging to a
+        # different command is not in it.
         return (heredoc_bodies(text) or inner), None
     # 🔴 AN EMPTY VALUE IS AN ARTIFACT OF THE PARSE, NOT A BODY. `guard_core`'s
     # scanner LIFTS `$( … )` out of the segment it appears in, so
@@ -775,29 +1133,37 @@ def _resolve_inline(value, text):
     # command still denies — as "cannot see the body", which is the true fact.
     if not value.strip():
         return [], None
-    # 🔴 Ordered so that a heading PRESENT IN THE LITERAL ARGUMENT always wins.
-    # `--body "## Closing condition\n… $(date)"` is readable enough: whatever the
-    # substitution expands to, the heading is in the bytes the operator typed.
-    # Consulting opacity first would report "cannot see the body" about a body
-    # that is right there.
-    variants = _inline_variants(value)
-    if any(has_closing_condition(v) for v in variants):
-        return variants, None
+    # The literal-heading test that would sit here has been hoisted to the TOP of
+    # this function — see the note there. `--body "## Closing condition\n…
+    # $(date)"` is readable enough: whatever the substitution expands to, the
+    # heading is in the bytes the operator typed, so consulting opacity first
+    # would report "cannot see the body" about a body that is right there.
     if opaque_value(value):
         # Last chance: the operator may have opened the heredoc outside the
         # quoted argument (`--body "$(cat <<EOF)"` splits across both shapes).
-        outer = heredoc_bodies(text)
-        if outer:
-            return outer, None
+        #
+        # 🔴 GATED ON THE ARGUMENT ITSELF NAMING A HEREDOC. Without the `<<`
+        # test this branch rescued `--body "$(gen.sh)"` — the exact shape the
+        # docstring promises to BLOCK — from any heredoc that happened to be in
+        # scope. A substitution that opens no heredoc has nothing here to read.
+        if "<<" in value:
+            outer = heredoc_bodies(text)
+            if outer:
+                return outer, None
         return [], UNRESOLVED_OPAQUE
     return variants, None
 
 
-def _resolve_file(value, text):
-    """([body, …], reason-or-None) for a `--body-file` argument."""
+def _resolve_file(value, text, full=None):
+    """([body, …], reason-or-None) for a `--body-file` argument.
+
+    `text` is the create's OWN command segment; `full` is the whole command line,
+    used ONLY for the path-matched write-rescue below.
+    """
+    full = text if full is None else full
     if value in STDIN_NAMES:
-        # A body-file of `-` fed by a heredoc IS readable; fed by a pipe it is
-        # not.
+        # A body-file of `-` fed by a heredoc on THIS command IS readable; fed by
+        # a pipe, or by some other command's heredoc, it is not.
         inner = heredoc_bodies(text)
         return (inner, None) if inner else ([], UNRESOLVED_STDIN)
     if opaque_path(value):
@@ -806,8 +1172,10 @@ def _resolve_file(value, text):
         return [_read_body_file(value)], None
     except Exception:
         # The file may be about to be written by a heredoc earlier on the same
-        # command line, which this gate CAN read.
-        inner = heredoc_bodies(text)
+        # command line, which this gate CAN read — but ONLY a heredoc that writes
+        # THIS path. Accepting any heredoc anywhere let an unrelated
+        # `cat > /tmp/plan.md <<'EOF'` answer for an unreadable `--body-file`.
+        inner = heredoc_bodies_writing(full, value)
         return (inner, None) if inner else ([], UNRESOLVED_UNREADABLE)
 
 
@@ -829,7 +1197,7 @@ def _resolve_json_payload(payloads):
     return [], (UNRESOLVED_JSON if failed else UNRESOLVED_NONE)
 
 
-def _resolve_curl_data(value, text):
+def _resolve_curl_data(value, text, full=None):
     """([body, …], reason-or-None) for one curl data argument."""
     if value.startswith("@"):
         # 🔴 `-d @file` / `-d @-` still has to be JSON-PARSED afterwards.
@@ -837,7 +1205,7 @@ def _resolve_curl_data(value, text):
         # payload `{"body":"## Closing condition\n…"}` carries the heading only
         # as an ESCAPED \n, so the line-based detector never sees a heading and a
         # correctly-specified create is denied.
-        payloads, why = _resolve_file(value[1:], text)
+        payloads, why = _resolve_file(value[1:], text, full)
         if why:
             return [], why
     else:
@@ -850,30 +1218,44 @@ def _resolve_curl_data(value, text):
     return _resolve_json_payload(payloads)
 
 
-def _resolve_gh_api_field(value, text):
-    """([body, …], reason-or-None) for one `gh api -f/-F` field argument.
+def _resolve_gh_api_field(value, text, at_file, full=None):
+    """([body, …], reason-or-None) for one `gh api -F/-f` field argument.
 
     Only a field literally named `body` is a body; `title=…` and `labels[]=…` are
     not, and returning them would let a title carry the heading.
+
+    🔴 `@` IS A `-F`/`--field` FEATURE ONLY — `at_file` carries that, and it is
+    two bugs in one place. Applying `@`-file semantics to `-f`/`--raw-field` (a)
+    read a file gh would have sent verbatim, and (b) denied a legitimate body
+    that merely STARTS with an @mention — an ordinary way to open an issue — as
+    an unreadable path.
     """
     if "=" not in value:
         return [], None
     key, val = value.split("=", 1)
     if key.strip() != "body":
         return [], None
-    if val.startswith("@"):
-        return _resolve_file(val[1:], text)
+    if at_file and val.startswith("@"):
+        return _resolve_file(val[1:], text, full)
     return _resolve_inline(val, text)
 
 
-def body_candidates(argv, text, route):
+def body_candidates(argv, text, route, full=None):
     """([every body text this gate could read], reason the rest were unreadable).
 
     The reason is None when everything named was resolved. Aggregating rather
     than picking ONE source is deliberate: a command may legitimately name a
     body-file that a heredoc on the same line is about to write, and a candidate
     is only ever used to let the command THROUGH.
+
+    🔴 `text` IS THIS CREATE'S OWN COMMAND SEGMENT, NOT THE COMMAND LINE. That is
+    the whole of the B2/B3 fix and it is a change of MEANING, not of degree —
+    aggregation across sources on ONE command is deliberate, aggregation across
+    COMMANDS was a bug. `full` is threaded through for the single place that
+    still legitimately looks line-wide: a heredoc writing an as-yet-unwritten
+    `--body-file` path.
     """
+    full = text if full is None else full
     cands, reason = [], None
 
     def take(pair):
@@ -886,26 +1268,31 @@ def body_candidates(argv, text, route):
     if route == "curl":
         _, _, data = _curl_parts(argv)
         for value in data:
-            take(_resolve_curl_data(value, text))
+            take(_resolve_curl_data(value, text, full))
     elif route == "gh-api":
-        for value in _flag_values(argv, GH_API_FIELD_FLAGS):
-            take(_resolve_gh_api_field(value, text))
+        for value in _flag_values(argv, GH_API_AT_FILE_FLAGS):
+            take(_resolve_gh_api_field(value, text, True, full))
+        for value in _flag_values(argv, GH_API_RAW_FIELD_FLAGS):
+            take(_resolve_gh_api_field(value, text, False))
         for value in _flag_values(argv, ("--input",)):
             if value in STDIN_NAMES:
                 inner = heredoc_bodies(text)
                 take(_resolve_json_payload(inner) if inner else ([], UNRESOLVED_STDIN))
                 continue
-            payloads, why = _resolve_file(value, text)
+            payloads, why = _resolve_file(value, text, full)
             take(([], why) if why else _resolve_json_payload(payloads))
     else:
         for value in _flag_values(argv, GH_ISSUE_BODY_FLAGS):
             take(_resolve_inline(value, text))
         for value in _flag_values(argv, GH_ISSUE_BODY_FILE_FLAGS):
-            take(_resolve_file(value, text))
+            take(_resolve_file(value, text, full))
 
     if not cands and reason is None:
-        # No body argument at all. The heredoc on the line, if any, is still the
-        # operator's body — and if there is none, the gate has seen nothing.
+        # No body argument this gate could read. A heredoc on THIS COMMAND is
+        # still the operator's body — that is how the shape the deny message
+        # itself recommends, `--body "$(cat <<'EOF' … EOF)"`, resolves, since the
+        # shared core lifts the substitution and the argument arrives empty. If
+        # this command opened no heredoc, the gate has seen nothing.
         outer = heredoc_bodies(text)
         if outer:
             cands = outer
@@ -1004,13 +1391,21 @@ def crash_text(exc):
 def override_requested(text, env):
     """True when the operator explicitly disarmed the gate.
 
-    Two channels, one spelling. The inline assignment is anchored on a command
-    boundary; the process environment is read exactly, so `=true` / `=0` / an
-    empty value are NOT overrides.
+    Two channels, one spelling. The inline assignment is found by a quote-aware
+    walk (see `_shell_walk`), never by a regex over raw text; the process
+    environment is read exactly, so `=true` / `=0` / an empty value are NOT
+    overrides.
+
+    🔴 A FAILURE HERE FAILS CLOSED. This is also called from the crash path, and
+    an exception escaping it would leave the hook exiting non-zero — a silent
+    ALLOW for PreToolUse. "Could not tell" means "not overridden".
     """
     if env.get(OVERRIDE_ENV) == OVERRIDE_VALUE:
         return True
-    return bool(OVERRIDE_INLINE.search(text))
+    try:
+        return _shell_walk(text)[1]
+    except BaseException:  # noqa: BLE001 - see above
+        return False
 
 
 def _route(argv):
@@ -1025,18 +1420,37 @@ def _route(argv):
 
 
 def creating_invocations(text, guard_core):
-    """[(argv, route), …] for every REAL issue create on this command line.
+    """[(argv, route, scope), …] for every REAL issue create on this line.
 
-    🔴 The scan runs over `scrub_inert_heredocs(text)`, not `text`. That is the
+    🔴 The scan runs over `scrub_inert_heredocs(…)`, not the raw text. That is the
     mention-vs-invocation requirement: a `cat > notes.md <<'EOF'` body that spells
     out the command is documentation, and denying it would make this gate the
     thing people route around. Body resolution still reads the ORIGINAL text.
+
+    🔴 `scope` IS THE THIRD ELEMENT AND THE POINT OF THIS FUNCTION NOW. Each
+    create is enumerated inside its OWN top-level command segment and carries
+    that segment's text, so `body_candidates` cannot reach a heredoc a different
+    command opened. Two creates on one line therefore get two different scopes,
+    which is what stops the first one's good body answering for the second.
+
+    A create the segmentation does not attribute — malformed quoting, a shape the
+    walk and the shared core read differently — is still enumerated by a
+    whole-text pass and keeps the OLD line-wide scope. That is deliberate: the
+    backstop must not be able to turn a create that used to ALLOW into a deny,
+    only to keep one from disappearing.
     """
-    out = []
+    out, seen = [], []
+    for lo, hi in command_spans(text):
+        scope = text[lo:hi]
+        for argv in guard_core.commands(scrub_inert_heredocs(scope)):
+            route = _route(argv)
+            if route and not is_exempt_invocation(argv, route):
+                out.append((argv, route, scope))
+                seen.append(argv)
     for argv in guard_core.commands(scrub_inert_heredocs(text)):
         route = _route(argv)
-        if route and not is_exempt_invocation(argv):
-            out.append((argv, route))
+        if route and not is_exempt_invocation(argv, route) and argv not in seen:
+            out.append((argv, route, text))
     return out
 
 
@@ -1054,8 +1468,8 @@ def evaluate(text, env, guard_core):
     # good one — so the verdict is "every create had a closing condition", never
     # "some body somewhere did".
     worst = None
-    for argv, route in creates:
-        cands, reason = body_candidates(argv, text, route)
+    for argv, route, scope in creates:
+        cands, reason = body_candidates(argv, scope, route, text)
         if any(has_closing_condition(c) for c in cands):
             continue
         if cands:

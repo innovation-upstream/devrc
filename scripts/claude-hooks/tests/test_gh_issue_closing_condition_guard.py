@@ -66,6 +66,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -144,16 +145,34 @@ def q(s):
     return "'" + s.replace("'", "'\\''") + "'"
 
 
+# 🔴 A FRESH, EMPTY DIRECTORY — NOT A HARD-CODED `/tmp/…` NAME. Several cases
+# below assert a verdict that depends on a body-file path NOT existing
+# (`REASON_UNREADABLE`) or on one that a heredoc is about to write. A literal
+# `/tmp/x.md` makes those a claim about this machine's `/tmp`: a leftover file
+# from an earlier debugging session silently flips the verdict, and the test
+# reports green or red for a reason that has nothing to do with the code.
+# Module-scoped rather than `tmp_path` because the module-level command TABLES
+# need it at import time.
+SCRATCH = tempfile.mkdtemp(prefix="ghccg-test-")
+
+
+def scratch(name):
+    return os.path.join(SCRATCH, name)
+
+
 # --------------------------------------------------------------------------- #
 # drivers
 # --------------------------------------------------------------------------- #
-def verdict(cmd, env=None, tool_name="Bash", raw=None):
+def verdict(cmd, env=None, tool_name="Bash", raw=None, hook=None):
     """Run the REAL hook as a subprocess. Returns (returncode, parsed-json-or-None).
 
     A subprocess and not `guard.evaluate`, because the claims that matter most
     here — "always exits 0", "prints nothing on an allow" — are claims about the
     PROCESS. An in-process call cannot observe a traceback or a stray write to
     stdout.
+
+    `hook` points the run at a COPY of the hook, which is how the crash-path
+    tests drive a real import failure.
     """
     e = dict(os.environ)
     e.pop(OVERRIDE, None)
@@ -163,7 +182,7 @@ def verdict(cmd, env=None, tool_name="Bash", raw=None):
     payload = raw if raw is not None else json.dumps(
         {"tool_name": tool_name, "hook_event_name": "PreToolUse",
          "cwd": str(ROOT), "tool_input": {"command": cmd}})
-    p = subprocess.run([sys.executable, HOOK], input=payload,
+    p = subprocess.run([sys.executable, hook or HOOK], input=payload,
                        capture_output=True, text=True, env=e)
     assert p.returncode == 0, (
         f"a PreToolUse hook must exit 0; got {p.returncode}\n{p.stderr}")
@@ -549,27 +568,38 @@ def test_a_create_with_no_body_at_all_blocks():
 @pytest.mark.parametrize("body", [
     "$'## Closing condition\\nthe queue drains to 0'",
     "$'## Acceptance criteria\\nthe suite is green'",
-    '"## Closing condition\\nthe queue drains to 0"',
     "$'## Closing condition\\r\\nthe queue drains to 0'",
     "$'## Closing condition\\tthe queue drains\\nChecked by: a query'",
 ])
-def test_an_escaped_newline_body_is_decoded(body):
+def test_an_ansi_c_quoted_body_is_decoded(body):
     """🔴 `shlex` does not implement bash's `$'…'`, so a correctly-specified body
     written that way arrives as ONE line starting `$##` and DENIES. A gate that
-    false-positives on correct usage is the gate everyone routes around.
-
-    The plain double-quoted spelling is credited too. That is a DELIBERATE
-    over-acceptance, recorded in the guard's docstring: bash leaves `"\\n"` as two
-    literal characters, so GitHub would render the body on one line — but an
-    author who typed `\\n` between a heading and its content meant a newline, and
-    denying them is the false positive that gets a gate routed around."""
+    false-positives on correct usage is the gate everyone routes around."""
     assert ev(CREATE + " -t t --body " + body) is None, body
+
+
+@pytest.mark.parametrize("body", [
+    '"' + NO_CC + '\\n## Closing condition\\nit is done"',
+    '"## Closing condition\\nthe queue drains to 0"',
+    "'" + NO_CC + "\\n## Acceptance criteria\\nshipped'",
+])
+def test_a_literal_backslash_n_body_is_not_decoded(body):
+    """🔴 THE DECODE IS GATED ON `$`, AND THAT GATE IS A GUARD, NOT A DETAIL.
+
+    Decoding unconditionally let ANY body pass by appending about thirty
+    characters: bash leaves `"\\n"` as two literal characters, so the issue
+    GitHub renders carries no heading on any line. This was recorded in the
+    guard's docstring as a "deliberate over-acceptance"; it was a bypass, and the
+    docstring now says the opposite because the code does."""
+    assert MISSING_MARK in (ev(CREATE + " -t t --body " + body) or ""), body
 
 
 def test_the_ansi_c_decoding_cannot_manufacture_a_pass():
     """It only ever adds a candidate; a body with no heading still denies."""
     assert ev(CREATE + " -t t --body $'nothing specified\\nhere either'") is not None
     assert guard.escape_expanded("plain text") == "plain text"
+    assert guard.escape_expanded("a\\nb") == "a\\nb"
+    assert guard.escape_expanded("$a\\nb") == "a\nb"
 
 
 def test_a_lone_variable_inside_prose_is_not_opaque():
@@ -605,13 +635,85 @@ def test_a_tab_stripped_heredoc_body_is_readable():
     assert ev(cmd) is None
 
 
-def test_an_unrelated_heredoc_does_not_satisfy_a_create():
-    """🔴 The false ALLOW the blank-heredoc fallback is narrowed to avoid: a
-    well-specified heredoc written earlier on the line, for a DIFFERENT command,
-    must not let a create whose own body says nothing through."""
-    cmd = ("cat > /tmp/notes.md <<'EOF'\n" + CC + "\nEOF\n" +
-           CREATE + " -t t --body " + q(NO_CC))
-    assert MISSING_MARK in (ev(cmd) or ""), cmd
+# 🔴 THE SHAPE THAT RESCUED EVERY UNSEEABLE BODY. One `cat > /tmp/plan.md
+# <<'EOF' … EOF` — the ordinary agent workflow this gate watches — sat on the
+# same line, and EVERY fallback read `heredoc_bodies(<the whole line>)`. The
+# original test pinned only `--body '<no condition>'`, which is the one shape
+# that already worked; the five below all ALLOWED, in direct contradiction of
+# the docstring's headline "WHEN THE BODY CANNOT BE SEEN, THIS BLOCKS".
+PLAN_HEREDOC = "cat > " + scratch("notes.md") + " <<'EOF'\n" + CC + "\nEOF\n"
+
+UNRELATED_HEREDOC_CASES = [
+    (CREATE + " -t t --body " + q(NO_CC), MISSING_MARK),
+    (CREATE + " -t t --body-file -", REASON_STDIN),
+    (CREATE + ' -t t --body "$(generate-spec.sh)"', REASON_OPAQUE),
+    (CREATE + " -t t", REASON_NONE),
+    (CREATE + " -t t -b" + NO_CC.replace(" ", "-"), MISSING_MARK),
+    (CREATE + " -t t --body-file " + scratch("no-such-file.md"), REASON_UNREADABLE),
+]
+
+
+@pytest.mark.parametrize("tail,mark", UNRELATED_HEREDOC_CASES)
+def test_an_unrelated_heredoc_does_not_satisfy_a_create(tail, mark):
+    """🔴 A well-specified heredoc written earlier on the line, for a DIFFERENT
+    command, must not answer for a create — whatever the reason the create's own
+    body is unreadable. The mark asserted is the SPECIFIC reason, so a case
+    cannot pass by observing "it blocked"."""
+    assert mark in (ev(PLAN_HEREDOC + tail) or ""), tail
+
+
+def test_a_heredoc_that_writes_the_body_file_still_satisfies_it():
+    """🔴 The other side, and why the rescue is matched on the PATH rather than
+    deleted: the file does not exist yet when a PreToolUse hook runs, so a
+    correctly specified create would otherwise deny."""
+    target = scratch("body.md")
+    good = ("cat > " + target + " <<'EOF'\n" + CC + "\nEOF\n" +
+            CREATE + " -t t --body-file " + target)
+    assert ev(good) is None
+    # …and the same line whose heredoc writes some OTHER path does not.
+    other = ("cat > " + scratch("elsewhere.md") + " <<'EOF'\n" + CC + "\nEOF\n" +
+             CREATE + " -t t --body-file " + target)
+    assert REASON_UNREADABLE in (ev(other) or "")
+
+
+def test_an_opaque_body_is_not_rescued_by_a_heredoc_it_does_not_name():
+    """🔴 REACHABLE ONLY WHEN THE HEREDOC IS ON THE CREATE'S OWN COMMAND, which is
+    why the segment-scoping cases above could not see this guard at all — a
+    mutation sweep scored it SURVIVED. `gh` reads stdin for the body ONLY with
+    `--body-file -`, so a bare heredoc here feeds nothing; crediting it would let
+    `--body "$(gen.sh)"` — the shape the docstring promises to block — pass."""
+    cmd = (CREATE + " -t t --body \"$(generate-spec.sh)\" <<'EOF'\n" + CC + "\nEOF")
+    assert REASON_OPAQUE in (ev(cmd) or "")
+    # …while an argument that really DOES open the heredoc still resolves.
+    ok = CREATE + " -t t --body \"$(cat <<'EOF'\n" + CC + "\nEOF\n)\""
+    assert ev(ok) is None
+
+
+def test_an_inert_sink_feeding_a_process_substitution_is_marked_not_inert():
+    """🔴 PINNED AT THE FUNCTION, AND HERE IS WHY THAT IS THE HONEST PLACE.
+
+    `cat <<'EOF' > >(bash)` really executes the body, and `_PIPES_ONWARD` — the
+    "is this sink's output going somewhere executable" test — matched only
+    `[|&;]`, so it scored INERT. No end-to-end command currently discriminates
+    that mutant, because `command_spans` splits on the substitution's own parens
+    and re-exposes the body anyway. Two independent mechanisms is the point; a
+    test that leans on the OTHER one would report coverage this guard does not
+    have, so the claim is asserted where it is made."""
+    for sink in ("> >(bash)", "> >(sh -)", "< <(bash)"):
+        text = "cat <<'EOF' " + sink + "\n" + CREATE + " -t t --body x\nEOF"
+        got = guard.heredocs(text)
+        assert len(got) == 1, text
+        assert got[0].inert is False, text
+    plain = "cat <<'EOF' > " + scratch("n.md") + "\n" + CREATE + " -t t --body x\nEOF"
+    assert guard.heredocs(plain)[0].inert is True
+
+
+def test_a_body_file_dash_is_fed_only_by_its_own_commands_heredoc():
+    own = CREATE + " -t t --body-file - <<'EOF'\n" + CC + "\nEOF"
+    assert ev(own) is None
+    foreign = ("cat <<'EOF'\n" + CC + "\nEOF\n" +
+               CREATE + " -t t --body-file -")
+    assert REASON_STDIN in (ev(foreign) or "")
 
 
 def test_the_scrub_keeps_the_heredoc_terminator():
@@ -626,8 +728,40 @@ def test_the_scrub_keeps_the_heredoc_terminator():
 
 def test_a_here_string_is_not_read_as_a_heredoc():
     """A here-string has no body and no terminator; reading one as a heredoc would
-    swallow the rest of the line as prose the gate must not credit."""
-    assert ev(CREATE + " -t t --body-file - <<<" + q(CC)) is not None
+    swallow the rest of the line as prose the gate must not credit.
+
+    🔴 THE OLD VERSION OF THIS TEST PASSED WITH OR WITHOUT THE `(?<!<)` IT IS
+    NAMED FOR — it asserted only "something blocked", and deleting the protection
+    changed the REASON, not the verdict. Both halves below move when it goes: the
+    parse yields a body, and the create's verdict flips from "cannot see the
+    body" to "no closing condition" (about a body it invented)."""
+    swallowed = "wc -l <<<word\n" + CC + "\nword\n"
+    assert guard.heredoc_bodies(swallowed) == [], (
+        "`<<<word` was read as a heredoc opening tag `word`")
+    assert REASON_STDIN in (ev(CREATE + " -t t --body-file - <<<" + q(CC)) or "")
+
+
+def test_an_unparseable_heredoc_attachment_is_not_read_as_inert():
+    """🔴 `_attached_command`'s `""` fallback is the ALLOWLIST's fail-CLOSED half,
+    and it was untested: flipping the fallback to `"cat"` — i.e. treating an
+    unrecognisable attachment as a text sink — left all 251 tests green. It is
+    reachable whenever the operator opens the segment or is preceded only by an
+    assignment."""
+    assert guard._attached_command("<<'EOF'\nx\nEOF", 0) == ""
+    assert guard._attached_command("V=1 <<'EOF'\nx\nEOF", 4) == ""
+    for cmd in ("true | <<'EOF'\n" + CREATE + " -t t --body x\nEOF",
+                "V=1 <<'EOF'\n" + CREATE + " -t t --body x\nEOF"):
+        assert MISSING_MARK in (ev(cmd) or ""), cmd
+
+
+def test_a_process_substitution_sink_does_not_hide_a_create():
+    """The end-to-end half of the claim above: a body that really executes stays
+    in the invocation scan, while an ordinary file redirect does not."""
+    for cmd in ("cat <<'EOF' > >(bash)\n" + CREATE + " -t t --body x\nEOF",
+                "cat <<'EOF' > >(sh -)\n" + CREATE + " -t t --body x\nEOF"):
+        assert MISSING_MARK in (ev(cmd) or ""), cmd
+    assert ev("cat <<'EOF' > " + scratch("n.md") + "\n" + CREATE +
+              " -t t --body x\nEOF") is None
 
 
 # =========================================================================== #
@@ -755,6 +889,11 @@ def test_a_compound_shape_with_a_condition_is_allowed(cmd):
     assert ev(cmd) is None, cmd
 
 
+def _hd(body, tag="EOF"):
+    """The `--body "$(cat <<'TAG' … TAG)"` spelling the deny message recommends."""
+    return " --body \"$(cat <<'" + tag + "'\n" + body + "\n" + tag + "\n)\""
+
+
 def test_two_creates_are_judged_together():
     """🔴 A line that files two issues, one specified and one not, must not pass on
     the strength of the good one."""
@@ -764,6 +903,159 @@ def test_two_creates_are_judged_together():
     both = (CREATE + " -t a --body " + q(CC) + " && " +
             CREATE + " -t b --body " + q(AC))
     assert ev(both) is None
+
+
+@pytest.mark.parametrize("sep", [" && ", " ; ", "\n", " || "])
+def test_two_creates_in_the_heredoc_spelling_are_judged_separately(sep):
+    """🔴 THE SPELLING THIS GATE'S OWN `_HOW` MESSAGE RECOMMENDS, USED TWICE.
+
+    The plain `--body '…'` pinning above is the case that already worked. In the
+    heredoc spelling the shared core LIFTS the `$( … )`, so create #2's `--body`
+    arrives EMPTY, the no-body fallback fired, and it was handed BOTH heredocs on
+    the line — so the first issue's closing condition let the second through.
+    Each create now resolves inside its own command segment."""
+    bad = CREATE + " -t a" + _hd(CC) + sep + CREATE + " -t b" + _hd(NO_CC, "EOF2")
+    assert MISSING_MARK in (ev(bad) or ""), bad
+    # the FIRST one unspecified is caught too — not just the last
+    other = CREATE + " -t a" + _hd(NO_CC) + sep + CREATE + " -t b" + _hd(CC, "EOF2")
+    assert MISSING_MARK in (ev(other) or ""), other
+    good = CREATE + " -t a" + _hd(CC) + sep + CREATE + " -t b" + _hd(AC, "EOF2")
+    assert ev(good) is None, good
+
+
+def test_two_creates_in_the_heredoc_spelling_deny_through_the_real_process():
+    bad = (CREATE + " -t a" + _hd(CC) + " && " +
+           CREATE + " -t b" + _hd(NO_CC, "EOF2"))
+    assert MISSING_MARK in deny_reason(bad)
+
+
+# =========================================================================== #
+# 7b. FLAG TABLES — every spelling the real tools accept.
+#
+# 🔴 A FLAG TABLE IS A CLAIM ABOUT ANOTHER PROGRAM, so these are checked against
+# `gh issue create --help` / `gh api --help` / curl(1) on gh 2.97.0, not against
+# what the guard believes.
+# =========================================================================== #
+@pytest.mark.parametrize("flag", ["--type", "--parent", "--blocked-by",
+                                  "--blocking", "--recover"])
+def test_a_value_taking_gh_flag_before_the_verb_does_not_hide_the_create(flag):
+    """🔴 A value-taking flag MISSING from the table leaves its value in the
+    operand list, which breaks the `["issue", "create"]` PREFIX test — one flag,
+    one bypass. All five of these were missing."""
+    cmd = GH + " " + flag + " somevalue issue create -t t --body " + q(NO_CC)
+    assert MISSING_MARK in (ev(cmd) or ""), cmd
+
+
+@pytest.mark.parametrize("flag", ["--type Bug", "--parent 100",
+                                  "--blocked-by 200", "--blocking 300",
+                                  "--recover /tmp/r-821.json", "--editor",
+                                  "-e"])
+def test_a_real_gh_issue_create_flag_does_not_break_a_good_body(flag):
+    assert ev(CREATE + " -t t " + flag + " --body " + q(CC)) is None, flag
+
+
+def test_a_boolean_gh_flag_does_not_eat_the_next_token():
+    """🔴 `--editor` (`-e`) is BOOLEAN in gh; listing it as value-taking made it
+    swallow whatever followed.
+
+    The third assertion is the one that DISCRIMINATES, and it took a mutation
+    sweep to find: with `--editor` back in the value table the first two still
+    deny, because `_flag_values` looks the body flag up independently of the
+    table. What actually breaks is a flag whose presence is read through the
+    table — `--web`, which makes the call structurally exempt. Swallowed, the
+    create denies, i.e. a correct call is blocked."""
+    assert MISSING_MARK in (ev(CREATE + " --editor --body " + q(NO_CC)) or "")
+    assert MISSING_MARK in (ev(CREATE + " -e --body " + q(NO_CC)) or "")
+    assert ev(CREATE + " --editor --web -t t") is None
+
+
+@pytest.mark.parametrize("cmd", [
+    CREATE + " -t t -b" + q(CC),
+    CREATE + " -t t -b" + q(AC),
+])
+def test_an_attached_short_body_flag_is_read(cmd):
+    """🔴 gh accepts `-b<body>` and `-F<path>`. Reading neither meant a CORRECTLY
+    specified create denied with "CANNOT SEE THE BODY" — the most confusing
+    message this gate can print, and the kind that gets a gate switched off."""
+    assert ev(cmd) is None, cmd
+
+
+def test_an_attached_short_body_flag_without_a_condition_denies():
+    reason = deny_reason(CREATE + " -t t -b" + q(NO_CC))
+    assert MISSING_MARK in reason
+    assert UNSEEABLE_MARK not in reason
+
+
+def test_an_attached_short_body_file_flag_is_read(tmp_path):
+    good = tmp_path / "good.md"
+    good.write_text(CC)
+    assert ev(CREATE + " -t t -F" + str(good)) is None
+    bad = tmp_path / "bad.md"
+    bad.write_text(NO_CC)
+    assert MISSING_MARK in (ev(CREATE + " -t t -F" + str(bad)) or "")
+
+
+CURL_ATTACHED = [
+    "curl --request=POST --data=" + q(json.dumps({"body": NO_CC})) +
+    " https://api.github.com/repos/o/r/issues",
+    "curl --url=https://api.github.com/repos/o/r/issues --data-raw=" +
+    q(json.dumps({"body": NO_CC})),
+    "curl -X POST https://api.github.com/repos/o/r/issues --json=" +
+    q(json.dumps({"body": NO_CC})),
+    "curl -XPOST https://api.github.com/repos/o/r/issues -d" +
+    q(json.dumps({"body": NO_CC})),
+    "curl --request POST --data-binary=" + q(json.dumps({"body": NO_CC})) +
+    " https://api.github.com/repos/o/r/issues",
+]
+
+
+@pytest.mark.parametrize("cmd", CURL_ATTACHED)
+def test_a_curl_name_equals_value_flag_is_still_classified(cmd):
+    """🔴 `_curl_parts` matched method/data/url flags as EXACT TOKENS, so
+    `--request=POST --data=…` was not classified as a create AT ALL — the gate
+    never ran, rather than running and passing."""
+    assert MISSING_MARK in (ev(cmd) or ""), cmd
+
+
+@pytest.mark.parametrize("cmd", [c.replace(json.dumps({"body": NO_CC}),
+                                           json.dumps({"body": CC}))
+                                 for c in CURL_ATTACHED])
+def test_a_curl_name_equals_value_flag_with_a_condition_is_allowed(cmd):
+    assert ev(cmd) is None, cmd
+
+
+@pytest.mark.parametrize("pair", ["-q -h", "--jq -w", "-H -h", "--cache -w",
+                                  "-t -h"])
+def test_a_gh_api_flag_value_that_looks_like_help_does_not_exempt(pair):
+    """🔴 `is_exempt_invocation` judged a `gh api` argv against the ISSUE flag
+    table, so gh api's OWN value flags were not skipped and a VALUE equal to
+    `-h`/`-w` exempted the create."""
+    cmd = GH + " api -X POST repos/o/r/issues " + pair + " -f body=" + q(NO_CC)
+    assert MISSING_MARK in (ev(cmd) or ""), cmd
+
+
+def test_gh_api_help_is_still_exempt():
+    assert ev(GH + " api --help repos/o/r/issues -f body=" + q(NO_CC)) is None
+
+
+def test_the_at_file_form_belongs_to_field_not_raw_field(tmp_path):
+    """🔴 gh documents `@<path>` as a `-F`/`--field` feature ONLY. Applying it to
+    `-f`/`--raw-field` read a file gh would send verbatim, AND denied a body that
+    merely opens with an @mention as an unreadable path."""
+    f = tmp_path / "b.md"
+    f.write_text(CC)
+    assert ev(GH + " api repos/o/r/issues -F body=@" + str(f)) is None
+    assert ev(GH + " api repos/o/r/issues --field body=@" + str(f)) is None
+    # `-f` sends the bytes, so the body IS `@<path>` and names no condition.
+    assert MISSING_MARK in (ev(GH + " api repos/o/r/issues -f body=@" + str(f)) or "")
+
+
+def test_a_body_opening_with_an_at_mention_is_read_as_a_body():
+    body = "@zach please pick this up\n\n" + CC
+    assert ev(GH + " api repos/o/r/issues -f body=" + q(body)) is None
+    assert ev(GH + " api repos/o/r/issues --raw-field body=" + q(body)) is None
+    assert MISSING_MARK in (
+        ev(GH + " api repos/o/r/issues -f body=" + q("@zach have a look")) or "")
 
 
 def test_a_quoted_verb_pair_is_one_token_and_never_matches():
@@ -798,10 +1090,64 @@ def test_a_near_miss_inline_spelling_does_not_override(spelling):
     assert ev(cmd) is not None, cmd
 
 
-def test_the_override_quoted_inside_a_body_does_not_disarm_the_gate():
+# 🔴 EVERY PLACE THE OVERRIDE STRING CAN SIT INSIDE A BODY, not just the one
+# that happened to work. The shipped regex anchored on `[\n;&|(){}`]`, so a
+# newline, a semicolon or a backtick INSIDE A QUOTED BODY read as a command
+# boundary and disarmed the gate. Only the mid-line case was pinned, which is
+# precisely the case the broken regex got right — a mutant narrowing the anchor
+# to `^` survived all 251 tests. The gate's own deny message names this string,
+# so an issue ABOUT this guard is the shape that walked it.
+OVERRIDE_IN_PROSE = [
+    NO_CC + "\nwe considered " + OVERRIDE_ON + " but did not use it",   # mid-line
+    NO_CC + "\n" + OVERRIDE_ON + "\nis the escape hatch",               # own line
+    NO_CC + " ; " + OVERRIDE_ON + " was considered",                    # after `;`
+    NO_CC + " `" + OVERRIDE_ON + "` in a code span",                    # backtick
+    NO_CC + " (" + OVERRIDE_ON + ") in parens",
+    NO_CC + " | " + OVERRIDE_ON + " after a pipe character",
+    NO_CC + " & " + OVERRIDE_ON + " after an ampersand",
+    "## Notes\n" + OVERRIDE_ON + "\n## Nothing else",
+]
+
+
+@pytest.mark.parametrize("body", OVERRIDE_IN_PROSE)
+def test_the_override_quoted_inside_a_body_does_not_disarm_the_gate(body):
     """🔴 A guard you can switch off by naming it in prose is not a guard."""
-    body = NO_CC + "\nwe considered " + OVERRIDE_ON + " but did not use it"
-    assert ev(CREATE + " -t t --body " + q(body)) is not None
+    assert MISSING_MARK in (ev(CREATE + " -t t --body " + q(body)) or ""), body
+
+
+@pytest.mark.parametrize("body", OVERRIDE_IN_PROSE[:4])
+def test_the_override_in_prose_does_not_disarm_the_real_process(body):
+    assert deny_reason(CREATE + " -t t --body " + q(body))
+
+
+def test_the_override_inside_a_heredoc_body_does_not_disarm_the_gate():
+    cmd = (CREATE + " -t t --body \"$(cat <<'EOF'\n" + NO_CC + "\n" +
+           OVERRIDE_ON + "\nEOF\n)\"")
+    assert MISSING_MARK in (ev(cmd) or "")
+
+
+def test_the_override_inside_a_substitution_does_not_disarm_the_gate():
+    """🔴 An assignment inside `$( … )` sets a SUBSHELL's environment, so it can
+    never reach the `gh` process this gate is judging. Crediting it would be the
+    backtick hole under a second spelling."""
+    cmd = ("echo \"$(" + OVERRIDE_ON + " true)\" && " +
+           CREATE + " -t t --body " + q(NO_CC))
+    assert MISSING_MARK in (ev(cmd) or "")
+
+
+@pytest.mark.parametrize("cmd", [
+    OVERRIDE_ON + " " + CREATE + " -t t --body " + q(NO_CC),
+    "export " + OVERRIDE_ON + "; " + CREATE + " -t t --body " + q(NO_CC),
+    "true && " + OVERRIDE_ON + " " + CREATE + " -t t --body " + q(NO_CC),
+    "true; " + OVERRIDE_ON + " " + CREATE + " -t t --body " + q(NO_CC),
+    OVERRIDE_ON + " GH_TOKEN=x " + CREATE + " -t t --body " + q(NO_CC),
+    "GH_TOKEN=x " + OVERRIDE_ON + " " + CREATE + " -t t --body " + q(NO_CC),
+])
+def test_a_real_command_position_override_still_works(cmd):
+    """🔴 The other half. Tightening the override until the documented escape
+    hatch stops working would make this a permanently-red gate, which is worse
+    than no gate."""
+    assert ev(cmd) is None, cmd
 
 
 def test_the_override_is_named_in_both_deny_messages():
@@ -911,26 +1257,59 @@ def test_an_unrelated_command_is_allowed():
     assert_allowed("kubectl get pods -n monitoring")
 
 
-def test_the_crash_path_denies_a_create_shape():
-    """🔴 A crash must not become a silent allow. Driven by making the shared core
-    unimportable, which is the real failure this path exists for."""
-    e = dict(os.environ)
-    e.pop(OVERRIDE, None)
-    e["PYTHONPATH"] = ""
-    payload = json.dumps({"tool_name": "Bash", "hook_event_name": "PreToolUse",
-                          "tool_input": {"command": CREATE + " -t t --body " + q(NO_CC)}})
-    # Force the import to fail by pointing the hook at a directory with a
-    # poisoned guard_core earlier on sys.path is not possible from here, so drive
-    # the function directly with a core that raises.
-    class Boom:
-        def commands(self, _):
-            raise RuntimeError("boom")
+POISON = "poisoned-core-8f21"
 
-    with pytest.raises(RuntimeError):
-        guard.evaluate(CREATE + " -t t --body " + q(NO_CC), {}, Boom())
-    assert guard.CRASH_LOOKS_LIKE_CREATE.search(CREATE) is not None
-    assert OVERRIDE_ON in guard.crash_text(RuntimeError("boom"))
-    assert payload  # the shape a real hook receives; kept for the reader
+
+def _poisoned_hook(tmp_path):
+    """A COPY of the hook beside a `guard_core.py` that raises on import.
+
+    The hook puts its OWN directory first on `sys.path` before importing the
+    shared core, so this copy imports the poison and never the real module.
+    """
+    sandbox = tmp_path / "hooks"
+    sandbox.mkdir()
+    copy = sandbox / HOOK_BASENAME
+    copy.write_text(Path(HOOK).read_text(encoding="utf-8"), encoding="utf-8")
+    (sandbox / "guard_core.py").write_text(
+        "raise RuntimeError(" + repr(POISON) + ")\n", encoding="utf-8")
+    return str(copy)
+
+
+def test_the_crash_path_denies_a_create_shape(tmp_path):
+    """🔴 A crash must not become a silent allow — DRIVEN, not asserted around.
+
+    This test used to run neither `main()` nor the crash path: it asserted
+    `pytest.raises` on a local stub, a `re.search`, a substring of `crash_text`,
+    and `assert payload` (truthiness of a non-empty JSON string, vacuous). An
+    `if False:` mutant on the crash branch survived the WHOLE suite, so the
+    fail-closed backstop for the entire hook was unexercised. Its own comment
+    claimed driving a real import failure "is not possible from here"; it is —
+    copy the hook next to a `guard_core.py` that raises, and run the process.
+    """
+    rc, out = verdict(CREATE + " -t t --body " + q(NO_CC),
+                      hook=_poisoned_hook(tmp_path))
+    reason = reason_of(out)
+    assert rc == 0
+    assert "crashed while checking this command" in reason
+    assert POISON in reason, "the crash message must carry the real exception"
+    assert OVERRIDE_ON in reason
+
+
+def test_the_crash_path_still_allows_a_non_create(tmp_path):
+    """🔴 The negative control for the test above. A blanket deny-on-crash would
+    block `gh pr checks` on an unrelated bug, which is why the fallback is scoped
+    by a pure regex — and a test that only ever watches it DENY cannot tell a
+    scoped fallback from a blanket one."""
+    rc, out = verdict("gh pr checks 4", hook=_poisoned_hook(tmp_path))
+    assert rc == 0
+    assert out is None
+
+
+def test_the_crash_path_respects_the_override(tmp_path):
+    rc, out = verdict(OVERRIDE_ON + " " + CREATE + " -t t --body " + q(NO_CC),
+                      hook=_poisoned_hook(tmp_path))
+    assert rc == 0
+    assert out is None
 
 
 def test_the_crash_fallback_respects_the_override():
@@ -965,9 +1344,20 @@ def test_the_registrar_registers_it_on_pretooluse_bash():
 
 
 def test_the_rule_this_gate_enforces_still_exists():
-    """The gate is downstream of a rule; if the rule is gone the gate is orphaned."""
-    text = RULES.read_text(encoding="utf-8")
-    assert "CLOSING CONDITION" in text
+    """The gate is downstream of a rule; if the rule is gone the gate is orphaned.
+
+    🔴 A TWO-WORD SUBSTRING ANYWHERE IN THE FILE WAS TOO WEAK: any other bullet
+    mentioning the phrase satisfied it, so the test could not tell "the rule
+    exists" from "the words exist". Pinned instead as a RELATIONSHIP — the
+    requirement lives in the proactivity gate's `Out of scope` branch, and names
+    BOTH halves (what ends the item, and who or what checks it), which is exactly
+    what this hook asks a body to carry."""
+    text = " ".join(RULES.read_text(encoding="utf-8").split())
+    assert "Out of scope" in text, "the proactivity gate's branch is gone"
+    branch = text.split("Out of scope", 1)[1].split("**Fork**", 1)[0]
+    assert "CLOSING CONDITION that ends it and who or what checks it" in branch, (
+        "the Out-of-scope branch no longer requires a closing condition; this "
+        "gate is enforcing a rule that has moved or been dropped")
 
 
 # =========================================================================== #
@@ -994,3 +1384,124 @@ def test_control_the_detector_table_is_non_empty():
     assert len(REJECTS) >= 15
     assert len(MENTIONS) >= 12
     assert len(NOT_A_CREATE) >= 25
+    assert len(REALISTIC_ALLOWS) >= 30
+    assert len(OVERRIDE_IN_PROSE) >= 6
+
+
+# =========================================================================== #
+# 13. 🔴 THE ALLOW DIRECTION, AS ONE BATTERY.
+#
+# The tightenings this file's newer cases pin all move in the DENY direction, and
+# a gate that starts false-positiving gets switched off — at which point it
+# protects nothing. This is the standing regression set for the other half: every
+# entry is a shape a person or an agent would really type, and every one of them
+# must pass SILENTLY. It is deliberately redundant with the sections above,
+# because a battery you can run as one name is a battery that actually gets run
+# after a fix round.
+# =========================================================================== #
+REALISTIC_ALLOWS = [
+    # the plain spellings
+    CREATE + " --title t --body " + q(CC),
+    CREATE + " -t t -b " + q(AC),
+    CREATE + " -t t --body=" + q(CC),
+    CREATE + " -t t -b" + q(CC),
+    CREATE + " -t t --body " + q(CC + "\n\n## Notes\ncontext, links, a repro"),
+    CREATE + " -t t --body " + q("## Summary\nprose first\n\n" + CC),
+    CREATE + " -t t --body $'## Closing condition\\nthe queue drains to 0'",
+    # the heredoc spellings the deny message recommends
+    CREATE + " -t t --body \"$(cat <<'EOF'\n" + CC + "\nEOF\n)\"",
+    CREATE + " -t t --body \"$(cat <<'EOF'\n" + AC + "\nEOF\n)\"",
+    CREATE + " -t t --body-file - <<'EOF'\n" + CC + "\nEOF",
+    "cat > " + scratch("allow.md") + " <<'EOF'\n" + CC + "\nEOF\n" +
+    CREATE + " -t t --body-file " + scratch("allow.md"),
+    # bodies that carry shell-ish prose
+    CREATE + " -t t --body " + q(CC + "\nrun `make test` and set $PATH first"),
+    CREATE + " -t t --body " + q(CC + "\nsee `gh issue list; gh pr list`"),
+    CREATE + " -t t --body " + q(CC + "\n```\nkubectl get pods -n monitoring\n```"),
+    CREATE + " -t t --body " + q(CC + "\ncost is $5 & rising | fast"),
+    CREATE + " -t t --body " + q("## Acceptance criteria\n- [ ] a\n- [ ] b"),
+    # flags around the body
+    CREATE + " -t t -l bug -a zach -m sprint-3 --body " + q(CC),
+    CREATE + " -t t --type Bug --parent 100 --body " + q(CC),
+    CREATE + " -t t --blocked-by 200,201 --blocking 300 --body " + q(CC),
+    CREATE + " -R owner/repo -t t --body " + q(CC),
+    GH + " -R owner/repo issue create -t t --body " + q(CC),
+    CREATE + " -t t --project Roadmap -T bug-report --body " + q(CC),
+    # compounds and wrappers
+    "true && " + CREATE + " -t t --body " + q(CC),
+    "git -C /tmp/x log -1 && " + CREATE + " -t t --body " + q(CC),
+    'bash -c "' + CREATE + " -t t --body '" + CC + "'\"",
+    "sudo " + CREATE + " -t t --body " + q(CC),
+    "timeout 60 " + CREATE + " -t t --body " + q(CC),
+    "GH_TOKEN=x " + CREATE + " -t t --body " + q(CC),
+    CREATE + " -t a --body " + q(CC) + " && " + CREATE + " -t b --body " + q(AC),
+    # the API routes
+    GH + " api repos/o/r/issues -f title=t -f body=" + q(CC),
+    GH + " api -X POST repos/o/r/issues -F body=" + q(AC),
+    "curl -X POST -H 'Accept: application/vnd.github+json' "
+    "https://api.github.com/repos/o/r/issues -d " + q(json.dumps({"body": CC})),
+    "curl --request=POST --data=" + q(json.dumps({"body": AC})) +
+    " https://api.github.com/repos/o/r/issues",
+    # the documented escape hatches
+    OVERRIDE_ON + " " + CREATE + " -t t --body " + q(NO_CC),
+    CREATE + " --web -t t",
+    CREATE + " --help",
+]
+
+
+@pytest.mark.parametrize("cmd", REALISTIC_ALLOWS)
+def test_a_realistic_correct_call_is_allowed(cmd):
+    assert ev(cmd) is None, cmd
+
+
+@pytest.mark.parametrize("cmd", REALISTIC_ALLOWS[:12])
+def test_a_realistic_correct_call_is_allowed_through_the_real_process(cmd):
+    assert_allowed(cmd)
+
+
+@pytest.mark.parametrize("cmd", [
+    "then " + CREATE + " -t t --body " + q(NO_CC),
+    "do " + CREATE + " -t t --body " + q(NO_CC),
+    "else " + CREATE + " -t t --body " + q(NO_CC),
+    "if true; then " + CREATE + " -t t --body " + q(NO_CC) + "; fi",
+    "while read x; do " + CREATE + " -t t --body " + q(NO_CC) + "; done",
+])
+def test_a_shell_keyword_prefix_is_a_KNOWN_UNCOVERED_ROUTE(cmd):
+    """🔴 PINNED AS A GAP, NOT LEFT FOR SOMEONE TO REDISCOVER — and PRE-EXISTING,
+    identical on the pre-fix hook.
+
+    `guard_core._peel_variants` peels wrappers and `VAR=` assignments but not
+    shell keywords, so a create inside a compound statement has argv[0] == `then`
+    and is not classified as `gh` at all. Fixing it means widening the shared
+    peeler, which `bash-guard.py` also depends on — its own change, its own blast
+    radius. This is the docstring's NOT-COVERED entry made machine-readable, so
+    the claim cannot rot: if the peeler is widened, these go red and the
+    docstring entry has to go with them."""
+    assert ev(cmd) is None, cmd
+
+
+@pytest.mark.parametrize("word", ["time", "command", "exec", "eval"])
+def test_a_non_keyword_prefix_does_still_reach_the_gate(word):
+    """The boundary of the gap above — asserted, because a NOT-COVERED entry that
+    over-claims is as misleading as one that under-claims."""
+    assert MISSING_MARK in (ev(word + " " + CREATE + " -t t --body " + q(NO_CC)) or "")
+
+
+def test_a_body_quoting_a_heredoc_operator_is_a_KNOWN_FALSE_POSITIVE():
+    """🔴 PINNED AS A LIMIT, NOT LEFT INVISIBLE — and it is PRE-EXISTING, byte for
+    byte identical on the pre-fix hook.
+
+    `heredocs()` is deliberately quote-BLIND (it has to find body prose inside a
+    `"$(cat <<'EOF' … )"`), so a `<<'EOF'` written inside a fenced code block in
+    an issue body looks like a real operator. `scrub_inert_heredocs` then blanks
+    those bytes for the invocation scan, which unbalances the argument's quote,
+    and the fallback tokeniser hands `--body` a fragment. The create denies with
+    "no closing condition" about a body that has one.
+
+    Fixing it means teaching the SCRUB about quoting while leaving body
+    resolution blind — a change to the mechanism the whole mention-is-not-an-
+    invocation requirement rests on, so it is recorded here rather than smuggled
+    into a fix round for something else. If you fix it, this test goes red: make
+    it an ALLOW assertion and move the case into REALISTIC_ALLOWS."""
+    body = CC + "\n```\ncat <<'EOF' > x\nEOF\n```"
+    assert MISSING_MARK in (ev(CREATE + " -t t --body " + q(body)) or "")

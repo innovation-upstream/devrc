@@ -1700,7 +1700,22 @@ TARGET_FLOORS=(
   # sweep can report SURVIVED at all. ZERO new skips, so EXPECTED_SKIPS is
   # untouched. If this line conflicts with a sibling branch, re-run the gate on
   # the MERGED tree and copy what it prints.
-  "scripts/claude-hooks/tests/test_gh_issue_closing_condition_guard.py|239"
+  #
+  # 2026-08-25, the audit fix round on the same branch: 251 -> 383 collected, 0
+  # skipped. +132 because the audit found three 🔴 bypasses whose PINNING TESTS
+  # each asserted only the one shape that already worked — the override quoted in
+  # a body (only mid-line was pinned, and only mid-line worked), an unrelated
+  # heredoc rescuing an unseeable body (only `--body '<no condition>'` was pinned,
+  # five other shapes ALLOWED), and two creates on a line (only the plain `--body`
+  # spelling was pinned, the heredoc spelling passed). Each is now a table. The
+  # rest is the ALLOW-direction regression battery (36 realistic correct calls,
+  # asserted to pass silently) plus the crash-path tests, which previously ran
+  # neither `main()` nor the crash branch at all.
+  # Plus two KNOWN-GAP tables — a shell-keyword prefix and a body quoting a
+  # heredoc operator — which pin the docstring's NOT-COVERED entries so the
+  # claims cannot rot silently.
+  #   _suggested_floor 383 = 383 - min(50, max(1, 383/20 = 19)) = 383 - 19 = 364.
+  "scripts/claude-hooks/tests/test_gh_issue_closing_condition_guard.py|364"
   # 2026-08-18, the on-disk artifact-name registry arrives as a NEW target: 13
   # collected. Deliberately small — one test per module whose names it pins, plus the
   # two-sided classification guard that fails when a hook module appears or vanishes.
