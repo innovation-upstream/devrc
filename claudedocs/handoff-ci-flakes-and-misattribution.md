@@ -45,7 +45,8 @@ spool row. Both are now fixed; the flake family underneath is only half closed.
   on that host.
 - **#783 open by design** — #807 fixed the assertions, NOT the root cause.
 - **#778 CLOSED unmerged** — **decided 2026-08-25**, see the first entry below. No longer the
-  risky one; the risk moved to *not deleting the rescue branch before #824 lands*.
+  risky one. 🔴 **The risk is now DELETING `rescue/initiative-scan-resolved-filter` before
+  #824 lands** — that branch is still the sole copy until then. Keep it.
 
 ## Investigations — live diagnosis state (first entry is DECIDED, the rest are open)
 
@@ -63,7 +64,14 @@ ancestor), not by ancestry.
   `--exclude-slugs` (+12 lines, explicit operator list) vs `parse_resolved` (+55 lines,
   inferred verdict, filter **on by default**).
 - 🔴 **#778's own diagnosis was wrong in three ways** — found by re-measuring, not by reading
-  it. Corrected on the PR: <https://github.com/innovation-upstream/devrc/pull/778#issuecomment-5413412588>
+  it. Corrected on the PR across THREE comments, each left standing rather than edited
+  because people read each before the next was known to be needed. **Only the third is
+  authoritative** — the table below matches it:
+  `…#issuecomment-5413412588` (original; the `8 / 1 / 2` split is WRONG) →
+  `…#issuecomment-5414463043` (corrects the split to `7 / 1 / 3` — numbers right, but its
+  explanation of how `8 / 1 / 2` arose is wrong) →
+  `…#issuecomment-5414562898` (**authoritative**: same numbers, correct mechanism).
+  All three at <https://github.com/innovation-upstream/devrc/pull/778>.
   - Method: loaded `1327372d`'s module directly, ran `parse_resolved` over handoffs
     materialized from git, attributed every hit to the arm that fired. Positive control
     (`## Status: RESOLVED`) → `True`; negative control (plain prose) → `False`.
@@ -76,14 +84,24 @@ ancestor), not by ancestry.
     ⚠ Both corpora are PINNED on purpose. An earlier draft of this table wrote the first row
     as "`origin/main` today" and as **8 / 1 / 2** — wrong on both counts, caught by the #826
     audit. `main` moves (it is already past `199774f8`), so an unpinned row cannot be told
-    apart from doc rot; and the arm split was mis-transcribed by eyeballing a listing instead
-    of counting it. `8 / 1 / 2` is not merely wrong, it is UNREACHABLE: the extra doc at
-    `199774f8` is `handoff-ccua-…`, which has no marker-initial heading, so it can only be a
-    prose hit — and heading could only reach 8 by counting `handoff-prompt-optimization-…`,
-    which is itself the sole `inline-status` hit, forcing that column to 0. The row summed to
-    11 either way, which is exactly why the arithmetic self-check did not catch it.
-    🔴 The irony is the lesson: this section exists to correct #778 for publishing numbers it
-    had not re-derived, and its own first draft did the same thing.
+    apart from doc rot.
+    **How the `8 / 1 / 2` arose** — the actual mechanism, itself re-derived after a first
+    explanation turned out to be wrong: the linked #778 comment hedges the split as "7–8"
+    heading and "2–3" prose, and the table was then built by taking the TOP of one range and
+    the BOTTOM of the other. Not a miscount of any particular document — a hedge hardened in
+    two directions at once. **A previous draft of this note claimed `8 / 1 / 2` was
+    UNREACHABLE. That was also false**, and is recorded rather than deleted because it is the
+    same error a third time: at `199774f8` FOUR flagged docs sit outside the heading column
+    (3 prose + 1 inline), so miscounting any one of the three prose docs yields exactly
+    `8 / 1 / 2`. Two of them look like heading hits at a glance — `### ✅ CLOSED 2026-08-22`
+    and `## State now — DONE, verified end to end` — and classify as prose only because the
+    arm's regex needs the marker to START the heading.
+    The row summed to 11 in every wrong version, which is exactly why an arithmetic
+    self-check never caught any of them.
+    🔴 The lesson, earned three times in one section: this block exists to correct #778 for
+    publishing numbers it had not re-derived, and its first draft, and then its own
+    correction, each did the same thing. **Re-derive; do not reason about what the number
+    must have been.**
 
   - (a) It blames the prose scan and states *"the heading and inline `Status:` arms did **not**
     fire"*. The heading arm is the DOMINANT one — `### DONE this session`,
@@ -218,9 +236,13 @@ git -C ~/workspace/devrc show origin/main:scripts/browser-bridge/tests/test_serv
 # and #802's fix is still there beside it
 git -C ~/workspace/devrc show origin/main:scripts/browser-bridge/server.py | grep -c "_spool_emit_lock"          # 3
 
-# 🔴 READ THE TWO GREPS BELOW FIRST — they decide what an empty result here MEANS.
-#   greps == 0  -> #824 has NOT merged; empty here means the work is GONE. Alarm.
-#   greps == 1  -> #824 merged; empty here is CORRECT — the branch was deleted on purpose.
+# 🔴 RUN THE GREPS *AND* THE `gh` READ BELOW FIRST — together they decide what this means.
+#   Content on main does not prove WHICH pr put it there, so the grep alone is a proxy;
+#   `mergedAt` is the authority. All four states:
+#     ls-remote non-empty + 824 unmerged -> normal, pre-merge. Do nothing.
+#     ls-remote non-empty + 824 merged   -> normal, post-merge. The deliberate delete is DUE.
+#     ls-remote EMPTY    + 824 merged    -> CORRECT: branch deleted on purpose.
+#     ls-remote EMPTY    + 824 unmerged  -> 🔴 ALARM. The sole copy is GONE.
 git -C ~/workspace/devrc ls-remote --heads origin rescue/initiative-scan-resolved-filter
 
 # the salvage — BY CONTENT, since a squash merge is never an ancestor.
