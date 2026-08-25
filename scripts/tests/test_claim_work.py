@@ -277,6 +277,18 @@ def test_six_concurrent_first_movers_resolve_to_exactly_one_winner(tmp_path):
     moment each decides to start, none of the others has produced anything to
     see. A check-then-act design has a window here and this has none: the winner
     is decided by the server's ref transaction.
+
+    🔴 THIS IS AN INVARIANT ASSERTION, NOT A MUTATION DETECTOR — do not count it
+    as one. Measured against the `--force` mutant: it goes red only ~1 run in 3
+    (pass/pass/fail over three runs; 15/15 green at HEAD). The reason is that
+    concurrent pushes to one repo contend on git's own ref-transaction lock, so
+    even with the non-fast-forward guarantee deleted most of the six still
+    serialize and lose — for the WRONG reason, which is exactly the shape the
+    mutation-sweep rule warns about. The deterministic kills for that mutant are
+    `test_a_second_session_claiming_the_same_slug_is_refused_and_told_who_holds_it`
+    and `test_defeating_the_lock_with_force_lets_the_second_session_win`, both
+    serial by construction. Keep this test for the invariant it pins; do not
+    quote it as coverage of the lock.
     """
     origin = _bare_origin(tmp_path)
     sessions = [_session(tmp_path, origin, f"Session {i}", f"s{i}") for i in range(6)]
