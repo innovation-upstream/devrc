@@ -513,8 +513,9 @@ def _find_sessions_for_task(task_id, excluded=None, include_self_runs=False):
     ranking and no limit. It is the fallback that runs when no `--session` was supplied,
     and narrowing it to the parsed text surface would silently shrink what the completion
     scan can even look at. What IS shared is the corpus: `iter_transcripts` is the single
-    enumerator, so this stage and the search stage cannot disagree about which files
-    exist or about excluding the `subagents/` tier.
+    enumerator THESE TWO STAGES USE — not the only `*.jsonl` walk in the repo, see its
+    module docstring — so this stage and the search stage cannot disagree about which
+    files exist or about excluding the `subagents/` tier.
     """
     excluded = excluded or set()
     sessions = []

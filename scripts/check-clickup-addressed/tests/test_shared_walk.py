@@ -9,6 +9,8 @@ invariant guards or ledgers over the mutation harness, and are NOT evidence of a
 """
 import importlib.util
 import json
+import os
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -61,8 +63,8 @@ def test_a_malformed_line_costs_the_line_not_the_whole_transcript():
     `except (json.JSONDecodeError, OSError): continue`, so ONE unparseable line discarded
     every message in that transcript — silently, and indistinguishably from the session
     not mentioning the term at all. A truncated tail is the normal shape of a transcript
-    that is still being written. Measured 2026-08-24: 0 of 792 live transcripts currently
-    carry one, so this closes a hazard that had no live instances rather than a firing bug.
+    that is still being written. Re-measured 2026-08-25: 0 of 797 live transcripts carry
+    one, so this closes a hazard that had no live instances rather than a firing bug.
     """
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp) / "projects"
@@ -195,11 +197,19 @@ def test_the_mutation_sweep_carries_every_shared_module_these_scripts_import():
     `SHARED_MODULES` is not extended, this fails here instead of silently disarming the
     sweep. It fails on a SHRINK too: a module listed but no longer imported is a copy step
     nobody will notice has gone stale.
+
+    🔴 IT SCANS `tests/*.py` TOO, and for a round it did not. `SCRIPT_DIR.glob("*.py")`
+    is the top-level scripts ONLY, so a shared-lib import introduced in a TEST file was
+    invisible to this ledger — and a test file is exactly where an import gets added
+    casually. The copy has to carry a module a test imports for the same reason it has to
+    carry one a script imports.
     """
     sweep = _load("mutation_sweep_ledger", "tests/mutation_sweep.py")
     lib = SCRIPT_DIR.parent / "lib"
+    sources = sorted(SCRIPT_DIR.glob("*.py")) + sorted((SCRIPT_DIR / "tests").glob("*.py"))
+    assert len(sources) >= 15, f"positive control: only {len(sources)} source file(s) scanned"
     imported = set()
-    for script in SCRIPT_DIR.glob("*.py"):
+    for script in sources:
         src = script.read_text()
         for mod in lib.glob("*.py"):
             if f"from {mod.stem} import" in src or f"import {mod.stem}\n" in src:
@@ -207,45 +217,79 @@ def test_the_mutation_sweep_carries_every_shared_module_these_scripts_import():
     assert imported, "the positive control failed: no shared module import was detected at all"
     assert set(sweep.SHARED_MODULES) == imported, (
         f"mutation_sweep.SHARED_MODULES={sorted(sweep.SHARED_MODULES)} but the scripts "
-        f"import {sorted(imported)}")
+        f"and tests import {sorted(imported)}")
     for name in sweep.SHARED_MODULES:
         assert (lib / name).exists(), name
 
 
-def test_every_test_file_still_imports_inside_a_mutant_copy():
-    """🔴 THE SWEEP'S OWN PRECONDITION, checked without running a sweep.
+def test_the_sweeps_null_control_is_green_in_a_fresh_copy():
+    """🔴 THE SWEEP'S OWN PRECONDITION — checked by RUNNING it, in a subprocess.
 
-    `mutation_sweep.materialize` builds the tree each mutant runs in. If ANY test file
-    cannot import there, `run_all.py` scores it FAILED TO IMPORT, the NULL-CONTROL goes
-    KILLED, and the sweep aborts — no mutant can be scored at all. That is not
-    hypothetical: measured 2026-08-25, `test_awaiting_contract.py` reads its shared
-    contract table from `parents[3] / claude/skills/clickup/test/` at MODULE level, which
-    the copy did not carry, and the whole sweep aborted.
+    If anything is red inside a fresh mutant copy, `mutation_sweep` scores its
+    NULL-CONTROL KILLED and aborts: no mutant can be scored at all, and the tool that
+    tells you your guards work is silently unavailable. Two live instances, both of which
+    a name-list ledger is structurally unable to anticipate: `test_awaiting_contract.py`
+    reads a contract table from `parents[3]/claude/skills/clickup/test/` at MODULE level
+    (fixed by `REPO_FIXTURES`), and the scripts import `../lib/transcript_search.py`
+    (fixed by `SHARED_MODULES`).
 
-    A module-level read is the failure mode a `SHARED_MODULES`/`REPO_FIXTURES` name-list
-    cannot anticipate on its own, so this asserts the OUTCOME — every file imports — by
-    calling the same `materialize` the sweep calls. It is the positive control too: the
-    count of files it imported is asserted non-zero, because "0 files failed" out of a
-    walk that found nothing is the reassuring zero.
+    🔴 THE SUBPROCESS IS THE WHOLE POINT, and the previous version of this guard was
+    BLIND for want of it. It exec'd the copied test modules IN THE OUTER PYTEST PROCESS,
+    whose `sys.path`/`sys.modules` already carry the REAL `scripts/lib` — inserted there
+    by the real `search-sessions.py` at import — so the copy's own layout was never
+    consulted. Measured 2026-08-25: with `SHARED_MODULES = ()` in the copy, that guard
+    reported ✓ green while the actual sweep in the same tree printed `NULL-CTL KILLED`,
+    five files red, ABORTED. It also only ever observed IMPORT failure, while the sweep
+    aborts on any red test — a repo-relative read inside a test FUNCTION was outside its
+    reach despite a docstring that said it asserted "the OUTCOME".
+
+    So this calls `run_one` itself, with the exact arguments `main()` passes, and asserts
+    the verdict it acts on. Cost measured at ~0.4s: the copied suite is 244 tests in 0.3s.
+
+    🔴 IT MUST NOT RUN INSIDE THE COPY IT SPAWNS. `run_one` runs the whole suite, and the
+    suite contains this test — unbraked, the first call forks a copy that forks a copy,
+    unbounded (measured: 2,492 trees under /tmp before the run was killed). Two
+    independent brakes, checked against each other so neither can silently disarm the
+    guard: the `NESTED_RUN_ENV` variable `run_one` exports into every child, and the
+    structural fact that a mutant copy carries only the skill + `lib/` and so has no
+    sibling `find-session.py`. If they ever disagree, that is a broken harness — a stray
+    export in a real checkout, or a `materialize` that now copies the whole tree — and it
+    fails here rather than either recursing or quietly covering nothing.
     """
-    sweep = _load("mutation_sweep_copy", "tests/mutation_sweep.py")
+    sweep = _load("mutation_sweep_nullctl", "tests/mutation_sweep.py")
+    by_env = os.environ.get(sweep.NESTED_RUN_ENV) == "1"
+    by_layout = not (SCRIPT_DIR.parent / "find-session.py").exists()
+    assert by_env == by_layout, (
+        f"the two nesting brakes disagree: {sweep.NESTED_RUN_ENV}={by_env}, "
+        f"missing-sibling-find-session.py={by_layout}. One of them is now wrong, and "
+        f"getting this wrong either recurses without bound or disarms the guard.")
+    if by_env:
+        return          # deliberate no-op INSIDE a mutant copy; the outer run does the work
+
     with tempfile.TemporaryDirectory() as tmp:
-        dst = sweep.materialize(Path(tmp) / "tree")
-        for name in sweep.EXCLUDED_FROM_MUTANT_RUNS:
-            (dst / "tests" / name).unlink(missing_ok=True)
-        files = sorted((dst / "tests").glob("test_*.py"))
-        assert len(files) >= 10, f"positive control: only {len(files)} test file(s) copied"
-        broken = []
-        for f in files:
-            spec = importlib.util.spec_from_file_location(f"copy_{f.stem}", f)
-            mod = importlib.util.module_from_spec(spec)
-            try:
-                spec.loader.exec_module(mod)
-            except BaseException as e:
-                broken.append(f"{f.name}: {type(e).__name__}: {e}")
-        assert not broken, (
-            "these files cannot import inside a mutant copy, so the sweep would abort "
-            "on its NULL-CONTROL:\n  " + "\n  ".join(broken))
+        verdict, killers, out = sweep.run_one("NULL-CONTROL", sweep.CA, "", "",
+                                              "no mutation", tmp)
+    # DEAD-RUN CONTROL first: no verdict line at all is not a pass, and reads as empty
+    # output through any filter. This one is safe to run first — it cannot be satisfied by
+    # a broken tree, only by a missing one.
+    total = re.search(r"Total: (\d+) passed, (\d+) failed", out)
+    assert total, f"the copied suite printed no verdict line at all:\n{out[-2000:]}"
+
+    # 🔴 THE VERDICT ASSERT COMES BEFORE THE COLLECTION CONTROL, and that ordering was
+    # measured, not assumed. `run_all.py` scores a file that FAILS TO IMPORT as one
+    # failure for the whole file, so a copy missing `scripts/lib/` collapses from 244
+    # collected to 15 — which means a leading `passed >= 200` control fires FIRST and this
+    # test dies on the wrong assertion, saying "collected only 15" about the exact mutant
+    # it exists to catch. Verified 2026-08-25 by running it in that order. On the green
+    # path the collection control is still fully reachable, which is where it does its job.
+    assert verdict == "SURVIVED", (
+        f"the sweep's NULL-CONTROL scores {verdict} in a fresh copy, so every mutant "
+        f"would report KILLED whatever it did and no sweep can be run.\n"
+        f"copy reported {total.group(1)} passed / {total.group(2)} failed; "
+        f"red without any mutation: {killers[:8]}")
+    assert int(total.group(1)) >= 200, (
+        f"positive control: the NULL-CONTROL is green but the copy collected only "
+        f"{total.group(1)} test(s) — a suite covering nothing also reports no failures")
 
 
 def test_the_red_at_base_ledger_names_only_tests_that_exist():

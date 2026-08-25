@@ -10,19 +10,34 @@ named in `search`'s docstring; the ones that were bugs are each pinned by a test
 watched RED at 324693fd (`scripts/tests/test_transcript_search.py` and
 `scripts/check-clickup-addressed/tests/test_shared_walk.py` carry the ledgers).
 
-🔴 THE CORPUS IS NOT FLAT, and the difference is 6x. Measured 2026-08-24 over
-`~/.claude/projects`: 792 session transcripts sit one level down
-(`<project>/<session-id>.jsonl`) and **4,776 more sit three levels down**
+🔴 THE CORPUS IS NOT FLAT, and the difference is 6x. Measured 2026-08-25 over
+`~/.claude/projects`: 797 session transcripts sit one level down
+(`<project>/<session-id>.jsonl`) and **4,795 more sit three levels down**
 (`<project>/<session-id>/subagents/agent-*.jsonl`). A subagent transcript is not a
 session — it cannot be resumed, and attributing a task's work to one is a wrong answer,
 not a broader one. So `iter_transcripts` recurses (a flat `glob("*.jsonl")` would miss a
 future main transcript stored deeper) and excludes the subagent tier by name. Today the
-two policies pick the same 792 files; that agreement is pinned by a test rather than
-assumed.
+two policies pick the same 797 files; that agreement is pinned by a test rather than
+assumed. (These counts DRIFT — 792/4,776 one day, 797/4,795 the next. They are a shape
+and a date, not a constant.)
+
+🔴 THIS IS NOT THE ONLY TRANSCRIPT WALK IN THE REPO, and an earlier version of this
+docstring said it was. Six other subsystems glob `*.jsonl` under their own roots —
+`collector/claude/{_shared,tailer}.py`, `session-analysis/{extract_genesis,
+extract_user_msgs,initiative-scan,recon_cost}.py`, `validation/reconcile.py`,
+`tmux-session-restore.py`. They were NOT folded in here: each ships on its own deploy
+path (the collector is copied to `~/.config/activity-collector/claude/` with no
+`scripts/lib` beside it) and each wants a different unit. What IS true is scoped and
+machine-checked: this module is the only corpus walk reachable from
+`scripts/find-session.py` and `scripts/check-clickup-addressed/`, and every OTHER
+`*.jsonl` glob site in the repo is enumerated with its reason by
+`scripts/tests/test_transcript_search.py::test_the_jsonl_glob_site_ledger_is_pinned_two_way`,
+which fails on a new one.
 """
 import json
 import os
 import re
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -76,9 +91,14 @@ def is_corpus_member(path, root):
 def iter_transcripts(root=None, exclude_sessions=()):
     """Yield every session transcript under `root`, in sorted (deterministic) order.
 
-    THE ONLY enumerator of the corpus in this repo — `scripts/tests/test_transcript_search.py`
-    pins that ledger two-way, so a fourth hand-rolled walk fails the suite. Excluded:
-    anything `is_corpus_member` rejects, and any session id in `exclude_sessions`.
+    The ONE enumerator behind `scripts/find-session.py` and
+    `scripts/check-clickup-addressed/` — those two tools and their three former private
+    walks. It is NOT the only `*.jsonl` glob in the repo (see the module docstring: six
+    other subsystems keep their own, deliberately). `scripts/tests/test_transcript_search.py`
+    pins BOTH halves two-way: that these callers reach the corpus only through here, and
+    that the full set of glob sites repo-wide is the enumerated one — so a hand-rolled walk
+    added anywhere fails the suite rather than passing unseen. Excluded: anything
+    `is_corpus_member` rejects, and any session id in `exclude_sessions`.
 
     Sorted rather than raw glob order because ranking ties are broken by encounter order,
     and a search that reorders its own output between runs is not reproducible.
@@ -234,11 +254,23 @@ def _parse_ts(raw):
 
 
 def scan_transcript(path, terms, patterns, *, surface=SURFACE_TEXT,
-                    include_sidechains=False, include_titles=True):
+                    include_sidechains=False):
     """Read ONE transcript and return everything both call sites need from it.
 
     Returns a dict — never None; a session with no matches still carries its metadata,
     and the caller decides. `term_hits` counts OCCURRENCES, not messages (see `search`).
+
+    `include_sidechains` is a DELIBERATE per-call-site difference, not a preference:
+    base `find-session.py` skipped `isSidechain` records and base `search-sessions.py`
+    had no such filter, so the two tools pass opposite values to preserve their own
+    behaviour. Both branches are exercised by tests — an untested knob whose default
+    silently narrows one caller is how this axis was lost once already.
+
+    There is deliberately NO `include_titles` knob. `ai-title` records are searched
+    unconditionally, which is the resolution of a disagreement the consolidation found
+    (find-session.py never looked at them; search-sessions.py always did, over 493 of the
+    797 live transcripts). A knob there would let that decision be reverted silently, and
+    it had zero callers and zero coverage on both branches.
     """
     cwd = ""
     branch = ""
@@ -254,8 +286,6 @@ def scan_transcript(path, terms, patterns, *, surface=SURFACE_TEXT,
             this_title = rec.get("aiTitle", "") or ""
             if not title:
                 title = this_title
-            if not include_titles:
-                continue
             body = this_title
             role = "title"
         elif typ in ("user", "assistant"):
@@ -319,7 +349,7 @@ def compile_terms(terms):
 
 
 def search(terms, *, root=None, match_any=False, since=None, limit=None, project="",
-           surface=SURFACE_TEXT, include_sidechains=False, include_titles=True,
+           surface=SURFACE_TEXT, include_sidechains=False,
            exclude_sessions=(), session_filter=None, stats=None):
     """Rank every transcript matching `terms`.
 
@@ -331,6 +361,16 @@ def search(terms, *, root=None, match_any=False, since=None, limit=None, project
                      term "drift-check.sh" over the live corpus these differ by 6
                      sessions (45 vs 51), which is why neither default is imposed on the
                      other.
+      include_sidechains
+                     find-session passes False (base `find-session.py` skipped
+                     `isSidechain` records); ccua passes True (base `search-sessions.py`
+                     had no such filter). Measured 2026-08-25: **0** of 424,853
+                     user/assistant records in the live corpus are `isSidechain`-true,
+                     so today the two agree — but the KEY is present in 795 of 797 files,
+                     so this is a layout-dependent zero, not an impossible one. The
+                     default is False and it is the NARROWER of the two: leaving it
+                     unpassed silently narrows a caller, which is exactly how ccua lost
+                     this axis for one review round.
       session_filter callable(path) -> True to DROP. Only ccua passes one (its self-run
                      detector). Applied AFTER term matching, deliberately: it reads the
                      file to EOF and a non-matching file is discarded anyway — testing it
@@ -342,27 +382,58 @@ def search(terms, *, root=None, match_any=False, since=None, limit=None, project
         falling back to file mtime when a transcript carries no parseable timestamp.
       - `project` is a case-INSENSITIVE substring of `cwd` OR the encoded project dir.
 
-    `stats`, when a dict, receives `sessions_examined` and — if `session_filter` is set —
+    🔴 `since` is applied TWICE, and the cheap half has to come first. The authoritative
+    comparison is against the last message timestamp, which costs a full read to EOF; but
+    `st_mtime` is an upper bound on that timestamp for a file nobody rewrote, so a file
+    whose mtime already precedes `since` cannot pass and is skipped WITHOUT being opened.
+    Both base implementations trusted mtime alone for this. Dropping the prefilter during
+    the consolidation cost a measured **4.9x** on the live corpus (2026-08-25): 7.67s ->
+    1.56s for `--since 2026-08-22`, where 119 of 797 files pass and 678 are skipped
+    unopened — once PER TASK inside `check-addressed.py --transcripts`. Measured at a
+    second point on the same dimension so the claim carries its own scope: `--since
+    2026-08-01` skips only 144 of 797 and the saving falls to ~1.05x. The prefilter is
+    worth most exactly where the window is narrow, which is how the tool is used.
+    Result sets were diffed with and without it over the live corpus at both dates x four
+    terms: 8 of 8 identical, up to n=500.
+
+    `stats`, when a dict, receives `sessions_examined` (files actually READ),
+    `skipped_stale` (short-circuited by the `since` mtime prefilter), `unreadable` /
+    `unreadable_paths` (an OSError mid-walk), and — if `session_filter` is set —
     `filtered_out` / `filtered_out_ids`. A drop nobody can count is indistinguishable
     from a filter wired to nothing.
     """
     if surface not in _SURFACE_RANK:
         raise ValueError(f"unknown surface {surface!r}; want one of {SURFACES}")
+    if not terms:
+        # AND over an empty term list is vacuously true, so this would return the ENTIRE
+        # corpus ranked by nothing. Neither CLI can reach it (both reject an empty term
+        # list first), which is precisely why it needs a guard here rather than there.
+        raise ValueError("search() needs at least one term; an empty term list would "
+                         "match every transcript in the corpus")
     root = Path(root) if root is not None else DEFAULT_ROOT
     patterns = compile_terms(terms)
     needle = project.lower() if project else ""
 
     results = []
     filtered_ids = []
+    unreadable_paths = []
     examined = 0
+    skipped_stale = 0
 
     for path in iter_transcripts(root, exclude_sessions):
-        examined += 1
         try:
+            if since is not None and datetime.fromtimestamp(os.path.getmtime(path)) < since:
+                skipped_stale += 1
+                continue
+            examined += 1
             rec = scan_transcript(path, terms, patterns, surface=surface,
-                                  include_sidechains=include_sidechains,
-                                  include_titles=include_titles)
-        except OSError:
+                                  include_sidechains=include_sidechains)
+        except OSError as e:
+            # NOT silent, and NOT uncounted. Base find-session.py printed this line; the
+            # consolidation dropped it, leaving a transcript that vanishes from every
+            # answer with nothing to distinguish it from one that simply did not match.
+            unreadable_paths.append(str(path))
+            print(f"ERR {path}: {e}", file=sys.stderr)
             continue
 
         matched_terms = [t for t in terms if rec["term_hits"][t] > 0]
@@ -390,6 +461,9 @@ def search(terms, *, root=None, match_any=False, since=None, limit=None, project
 
     if stats is not None:
         stats["sessions_examined"] = examined
+        stats["skipped_stale"] = skipped_stale
+        stats["unreadable"] = len(unreadable_paths)
+        stats["unreadable_paths"] = unreadable_paths
         if session_filter is not None:
             stats["filtered_out"] = len(filtered_ids)
             stats["filtered_out_ids"] = filtered_ids

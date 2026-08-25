@@ -75,6 +75,16 @@ EXCLUDED_FROM_MUTANT_RUNS = ("test_no_real_identifiers.py",)
 # skill so the relative `../lib` import resolves there exactly as it does in the repo.
 SHARED_MODULES = ("transcript_search.py",)
 
+# 🔴 SET IN EVERY CHILD `run_one` SPAWNS, and it is a RECURSION BRAKE, not a nicety.
+# `tests/test_shared_walk.py` verifies the sweep's NULL-CONTROL by calling `run_one`, and
+# `run_one` runs the whole suite — which contains that test. Without a brake the first
+# invocation forks a copy that forks a copy, unbounded: measured 2026-08-25, one run left
+# 2,492 mutant trees under /tmp before it was killed. The test reads this variable and
+# no-ops when it is set, so exactly one level ever executes. It also cross-checks the
+# variable against a structural "am I in a copy" test and FAILS when the two disagree,
+# so a stray export cannot silently disarm the guard in a real checkout.
+NESTED_RUN_ENV = "CCUA_MUTANT_COPY"
+
 # 🔴 REPO-ROOT-RELATIVE DATA A TEST FILE READS AT IMPORT TIME, copied at the same relative
 # path so `Path(__file__).resolve().parents[3] / <path>` resolves in the copy as it does in
 # the repo. Measured 2026-08-25 on the merge of this branch with main: without the entry
@@ -415,15 +425,29 @@ def materialize(root):
 
 
 def run_one(mid, fname, old, new, note, workdir):
+    """Score ONE mutant. Returns (verdict, killers, stdout).
+
+    🔴 THE SUITE RUNS IN A SUBPROCESS, and that is load-bearing rather than convenient.
+    The copy's whole purpose is that `../lib/transcript_search.py` resolves to the COPY;
+    executed in-process, the parent's `sys.path`/`sys.modules` already hold the REAL
+    `scripts/lib` (the real `search-sessions.py` inserts it at import), so the copy's
+    layout is never consulted and a tree missing it still imports fine. Measured
+    2026-08-25: with `SHARED_MODULES = ()` an in-process guard reported green while this
+    function, in the same tree, printed NULL-CTL KILLED and aborted the sweep.
+
+    The stdout is returned, not just the verdict, so a caller can apply its own positive
+    control to it — a "0 failed" out of a run that collected nothing is the reassuring
+    zero this file exists to refuse.
+    """
     dst = materialize(Path(workdir) / mid)
     for name in EXCLUDED_FROM_MUTANT_RUNS:
         (dst / "tests" / name).unlink(missing_ok=True)
     target = dst / fname
     mutated = _apply(target.read_text(), mid, old, new)
     if mutated is None:
-        return "NOT APPLIED", []
+        return "NOT APPLIED", [], ""
     target.write_text(mutated)
-    env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
+    env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1", **{NESTED_RUN_ENV: "1"})
     proc = subprocess.run([sys.executable, str(dst / "tests" / "run_all.py")],
                           capture_output=True, text=True, env=env)
     killers = re.findall(r"^  ✗ (\S+?):", proc.stdout, re.M)
@@ -431,8 +455,8 @@ def run_one(mid, fname, old, new, note, workdir):
     if not total:
         # No verdict line at all is a DEAD RUN, never a pass — the runner's own docstring
         # says so, and an absent line reads as empty output through any filter.
-        return "NO VERDICT", killers
-    return ("KILLED" if int(total.group(2)) else "SURVIVED"), killers
+        return "NO VERDICT", killers, proc.stdout
+    return ("KILLED" if int(total.group(2)) else "SURVIVED"), killers, proc.stdout
 
 
 def _assert_ids_unique():
@@ -475,7 +499,7 @@ def main(argv):
         # sweep that proves nothing. That is not hypothetical: it is what the first run of
         # this file did, because a repo-hygiene gate cannot resolve the repo from a copy.
         # See EXCLUDED_FROM_MUTANT_RUNS.
-        verdict, killers = run_one("NULL-CONTROL", CA, "", "", "no mutation", workdir)
+        verdict, killers, _out = run_one("NULL-CONTROL", CA, "", "", "no mutation", workdir)
         print(f"{'NULL-CTL':8s} {verdict:11s} no mutation — MUST be SURVIVED")
         if verdict != "SURVIVED":
             for k in killers[:5]:
@@ -486,7 +510,7 @@ def main(argv):
             return 2
 
         for mid, fname, old, new, note in selected:
-            verdict, killers = run_one(mid, fname, old, new, note, workdir)
+            verdict, killers, _out = run_one(mid, fname, old, new, note, workdir)
             if verdict != "KILLED":
                 bad.append((mid, verdict))
             print(f"{mid:8s} {verdict:11s} {note}")

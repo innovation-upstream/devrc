@@ -12,10 +12,10 @@ pass at HEAD. The rest are invariant guards or structural ledgers — they pin s
 old code already satisfied, and they are NOT evidence that a bug was fixed. The list is
 asserted against the module's own test functions, so a test cannot quietly join or leave it.
 """
+import ast
 import io
 import json
 import os
-import re
 import sys
 import time
 import contextlib
@@ -205,12 +205,17 @@ def test_the_search_surfaces_nest():
 
 
 def test_an_unknown_surface_is_rejected_loudly():
-    try:
-        ts.search(["x"], surface="everything")
-    except ValueError as e:
-        assert "everything" in str(e)
-    else:
-        raise AssertionError("an unknown surface was accepted")
+    # `root=` is passed even though the guard raises before the walk: without it this test
+    # names the OPERATOR's real corpus, and is hermetic only by accident of the argument
+    # check's position. Move the check one line down and it silently becomes a 5,000-file
+    # read against live data.
+    with tempfile.TemporaryDirectory() as tmp:
+        try:
+            ts.search(["x"], root=tmp, surface="everything")
+        except ValueError as e:
+            assert "everything" in str(e)
+        else:
+            raise AssertionError("an unknown surface was accepted")
 
 
 def test_first_user_text_strips_the_wrappers_a_human_never_typed():
@@ -292,6 +297,145 @@ def test_project_matches_the_cwd_as_well_as_the_directory_and_ignores_case():
         assert len(ts.search(["tok"], root=tmp, project="unrelated")) == 0
 
 
+def test_since_skips_a_stale_file_without_opening_it():
+    """🔴 REACHABILITY, not just the result set. `--since` is applied twice — an mtime
+    prefilter and the authoritative last-message comparison — and only the second one is
+    visible in the output, so a suite that checks WHICH SESSIONS came back passes whether
+    or not the prefilter exists. That is exactly how it was lost: the consolidated `search`
+    read every file to EOF and then dropped it on `last_local`, a measured 5.1x on the live
+    corpus (7.67s vs 1.51s for `--since 2026-08-22`).
+
+    So this asserts the file was never SCANNED, by recording the calls, and pins the
+    counter that reports it. The fresh file is in the same fixture as the positive control:
+    a prefilter that skipped everything would fail on it.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        stale = _write(tmp, "-proj", "stale", [_user("tok")])
+        fresh = _write(tmp, "-proj", "fresh", [_user("tok")])
+        old = (datetime.now() - timedelta(days=10)).timestamp()
+        os.utime(stale, (old, old))
+        since = datetime.now() - timedelta(days=2)
+
+        scanned = []
+        real = ts.scan_transcript
+        ts.scan_transcript = lambda path, *a, **kw: (scanned.append(Path(path).stem)
+                                                     or real(path, *a, **kw))
+        try:
+            stats = {}
+            got = ts.search(["tok"], root=tmp, since=since, stats=stats)
+        finally:
+            ts.scan_transcript = real
+
+        assert [r["session_id"] for r in got] == ["fresh"], got
+        assert scanned == ["fresh"], f"the stale transcript was read to EOF anyway: {scanned}"
+        assert stats["skipped_stale"] == 1 and stats["sessions_examined"] == 1, stats
+        assert fresh.exists()
+
+
+def test_without_since_nothing_is_prefiltered():
+    """The prefilter's own negative control: with no `since`, mtime must not gate anything.
+
+    A prefilter written as `if mtime < (since or now)` would pass the test above and drop
+    the whole corpus here.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        p = _write(tmp, "-proj", "ancient", [_user("tok")])
+        old = (datetime.now() - timedelta(days=900)).timestamp()
+        os.utime(p, (old, old))
+        stats = {}
+        got = ts.search(["tok"], root=tmp, stats=stats)
+        assert [r["session_id"] for r in got] == ["ancient"], got
+        assert stats["skipped_stale"] == 0 and stats["sessions_examined"] == 1, stats
+
+
+def test_an_unreadable_transcript_is_counted_and_named_not_silently_dropped():
+    """🔴 The module argues three times that a drop nobody can count is indistinguishable
+    from a filter wired to nothing — and then dropped an unreadable transcript on a bare
+    `except OSError: continue`, uncounted, while base find-session.py printed `ERR <path>`.
+
+    The fixture is a DIRECTORY named `<id>.jsonl`: it matches the corpus glob and passes
+    `is_corpus_member`, so the walk reaches it and `open()` raises IsADirectoryError — an
+    OSError that does not depend on the test user's privileges, which a chmod-000 file
+    would (root reads it anyway and the guard never runs).
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        _write(tmp, "-proj", "good", [_user("tok")])
+        (Path(tmp) / "-proj" / "broken.jsonl").mkdir(parents=True)
+        stats = {}
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            got = ts.search(["tok"], root=tmp, stats=stats)
+        assert [r["session_id"] for r in got] == ["good"], got
+        assert stats["unreadable"] == 1, stats
+        assert stats["unreadable_paths"] and "broken.jsonl" in stats["unreadable_paths"][0]
+        assert "broken.jsonl" in err.getvalue(), err.getvalue()
+
+
+def test_an_empty_term_list_is_rejected_rather_than_matching_the_whole_corpus():
+    """AND over no terms is vacuously true, so `search([])` returned EVERY transcript
+    ranked by nothing. Neither CLI can reach it, which is why the guard belongs here."""
+    with tempfile.TemporaryDirectory() as tmp:
+        _write(tmp, "-proj", "s", [_user("anything")])
+        try:
+            ts.search([], root=tmp)
+        except ValueError as e:
+            assert "at least one term" in str(e), e
+        else:
+            raise AssertionError("an empty term list was accepted")
+
+
+# ------------------------------------------------------- the two per-call-site surfaces
+
+def test_the_sidechain_axis_is_a_live_per_call_site_difference_in_both_directions():
+    """🔴 A KNOB WITH BOTH BRANCHES UNEXERCISED IS NOT A KNOB — and this one silently
+    narrowed a caller for a review round.
+
+    Base `find-session.py` skipped `isSidechain` records; base `search-sessions.py` had no
+    such filter. The consolidated `search` defaults to the NARROWER of the two, so ccua
+    inherited find-session's policy by omission. Measured 2026-08-25: 0 of 424,853
+    user/assistant records in the live corpus are sidechain-true, so nothing moved — but
+    the key is present in 795 of 797 files, so it is a layout-dependent zero.
+
+    The fixture hides the ONLY occurrence of the token inside a sidechain record, so the
+    two answers cannot coincide, and it is asserted through the two CLIs rather than the
+    library: the defect was in what a CALL SITE passes, which a library-level test of the
+    parameter cannot see.
+    """
+    sys.path.insert(0, str(SCRIPTS / "check-clickup-addressed"))
+    ss = _load(SCRIPTS / "check-clickup-addressed" / "search-sessions.py", "ss_sidechain")
+    with tempfile.TemporaryDirectory() as tmp:
+        _write(tmp, "-proj", "side", [_user("zzsidetoken", isSidechain=True)])
+        _write(tmp, "-proj", "main", [_user("ordinary text")])
+
+        _, fs = _run_find_session(tmp, ["--json", "zzsidetoken"])
+        assert _ids(fs) == [], f"find-session must keep base behaviour and skip it: {fs}"
+
+        ss.CLAUDE_DIR = Path(tmp)
+        ccua = ss.search_sessions(["zzsidetoken"], limit=50, include_self_runs=True)
+        assert [r["session_id"] for r in ccua] == ["side"], ccua
+
+        # ...and the library default is the narrow one, which is why ccua must pass it.
+        assert ts.search(["zzsidetoken"], root=tmp) == []
+        assert [r["session_id"] for r in
+                ts.search(["zzsidetoken"], root=tmp, include_sidechains=True)] == ["side"]
+
+
+def test_ai_titles_are_searched_unconditionally_with_no_knob_to_turn_them_off():
+    """The `include_titles` knob is deliberately GONE, so this pins that its removal did
+    not leave the narrow branch reachable by another name. Passing it must raise rather
+    than be silently ignored — a `**kwargs` signature would swallow it and re-create the
+    dead configurability this removed."""
+    with tempfile.TemporaryDirectory() as tmp:
+        _write(tmp, "-proj", "s", [_rec(type="ai-title", aiTitle="zztitletoken here")])
+        assert [r["session_id"] for r in ts.search(["zztitletoken"], root=tmp)] == ["s"]
+        try:
+            ts.search(["zztitletoken"], root=tmp, include_titles=False)
+        except TypeError:
+            pass
+        else:
+            raise AssertionError("include_titles was accepted; the knob is back")
+
+
 # ------------------------------------------------------------ RED AT BASE (find-session)
 
 def test_all_flag_widens_the_surface_to_tool_input_and_output():
@@ -327,7 +471,15 @@ def test_since_names_a_local_calendar_day_not_a_utc_one():
     TZ is set explicitly rather than inherited: a suite that takes this dimension from the
     host is structurally blind to exactly the bug under test, and would pass vacuously at
     UTC+0.
+
+    ⚠️ It mutates PROCESS-GLOBAL state (`os.environ["TZ"]` + `time.tzset()`), which is the
+    only way to exercise this dimension in-process. Safe here because the runner is
+    single-process and sequential (`scripts/run-tests.sh` invokes pytest with no xdist),
+    and the window is this function. The restore is not merely written in a `finally` —
+    it is ASSERTED afterwards, because "restored in a finally" is a claim and the next
+    test that reads local time would pay for it being wrong.
     """
+    entry_tzname = time.tzname
     cases = [
         # tz,              local wall time of the last message, --since,   expected
         ("America/Chicago", "2026-08-23 23:30", "2026-08-24", []),    # UTC says the 24th
@@ -353,12 +505,15 @@ def test_since_names_a_local_calendar_day_not_a_utc_one():
         else:
             os.environ["TZ"] = old_tz
         time.tzset()
+    assert time.tzname == entry_tzname, (
+        f"this test left the process in {time.tzname}, not the {entry_tzname} it found — "
+        f"every later test that reads local time is now measuring a different host")
 
 
 def test_an_ai_title_is_searchable():
     """🔴 RED at 324693fd for find-session.py, which never looked at `ai-title` records —
-    while search-sessions.py always did. 490 of the 792 live transcripts carry one, so this
-    was a 62%-of-corpus disagreement about what a session's text even is. Unified on
+    while search-sessions.py always did. 493 of the 797 live transcripts carry one
+    (2026-08-25), so this was a 62%-of-corpus disagreement about what a session's text even is. Unified on
     searching it, which is what the two tools now share."""
     with tempfile.TemporaryDirectory() as tmp:
         _write(tmp, "-proj", "s", [
@@ -421,12 +576,20 @@ def test_both_clis_return_the_same_sessions_for_the_same_corpus():
         assert sorted(r["session_id"] for r in ccua) == ["real"], ccua
 
 
-def test_the_corpus_enumerator_ledger_is_pinned_two_way():
-    """STRUCTURAL LEDGER, not regression coverage. Fails when the set of files that walk
-    the transcript corpus GROWS (a fourth hand-rolled walk) or SHRINKS (the shared one is
-    gone). It asserts a relationship — one enumerator, N callers — which is what a guard
-    on a consolidation has to pin; a test that only checked the callers still work would
-    pass with the duplication restored."""
+def test_the_consolidated_callers_reach_the_corpus_only_through_the_shared_walk():
+    """STRUCTURAL LEDGER over the CONSOLIDATION — the four files it actually touched.
+
+    Fails when one of them regrows a private walk, or when the shared one disappears. It
+    asserts a relationship — one enumerator, N callers — which is what a guard on a
+    consolidation has to pin; a test that only checked the callers still work would pass
+    with the duplication restored.
+
+    🔴 ITS SCOPE IS THESE FOUR FILES AND NOTHING ELSE. It cannot see a walk added
+    anywhere else in the repo, and for one review round the docstring above it claimed it
+    could ("a fourth hand-rolled walk fails the suite") — a fifth walker planted at
+    `scripts/fifth_walker.py` was reported as 2 passed. The repo-wide half is the NEXT
+    test; neither is a substitute for the other.
+    """
     globbers = set()
     callers = set()
     scan = [
@@ -437,7 +600,7 @@ def test_the_corpus_enumerator_ledger_is_pinned_two_way():
     ]
     for path in scan:
         src = path.read_text()
-        if re.search(r"""glob\(\s*["'][^"']*\*\.jsonl""", src):
+        if _jsonl_glob_sites(src):
             globbers.add(path.name)
         if "iter_transcripts(" in src and path.name != "transcript_search.py":
             callers.add(path.name)
@@ -449,6 +612,154 @@ def test_the_corpus_enumerator_ledger_is_pinned_two_way():
     for path in (SCRIPTS / "find-session.py",
                  SCRIPTS / "check-clickup-addressed" / "search-sessions.py"):
         assert "from transcript_search import" in path.read_text(), path
+
+
+# ------------------------------------------------------- the repo-wide glob-site ledger
+
+# Directory names never descended into. `.claude` is load-bearing, not hygiene: agent
+# worktrees are created at `<repo>/.claude/worktrees/agent-*`, so a scan that descends
+# there walks every other branch in flight and answers about a tree nobody asked about.
+_SKIP_DIRS = {".git", ".claude", ".direnv", ".pytest_cache", "__pycache__",
+              "node_modules", "result"}
+
+# 🔴 EVERY `*.jsonl` GLOB SITE IN THE REPO, each with the reason it is not the shared
+# walk. An ENUMERATING entry globs a wildcard filename (it walks a corpus); a BY-ID entry
+# resolves one known transcript; an OS-WALK entry walks a tree in a file that also names
+# `.jsonl` in code. An unlisted site is a violation BY DEFAULT — this is an enumeration
+# and not a pattern, exactly like `drift-check.sh`'s settings.json allowlist, because the
+# whole point is that a walk nobody enumerated is the one that goes unnoticed.
+JSONL_GLOB_SITES = {
+    ("scripts/lib/transcript_search.py", "ENUMERATING"):
+        "THE shared corpus walk — find-session.py + check-clickup-addressed/",
+    ("scripts/lib/transcript_search.py", "BY-ID"):
+        "find_transcript: the targeted by-id lookup, same is_corpus_member rule",
+    ("scripts/collector/claude/_shared.py", "ENUMERATING"):
+        "activity collector: deployed by nix as a COPY of scripts/collector/claude/ with "
+        "no scripts/lib beside it, and takes N roots from CLAUDE_PROJECTS_DIR. Excludes "
+        "by basename(dirname), which is narrower than is_corpus_member",
+    ("scripts/collector/claude/tailer.py", "ENUMERATING"):
+        "the collector's message-stream walk, kept byte-identical to _shared's on purpose",
+    ("scripts/collector/claude/tests/test_session_tailer.py", "ENUMERATING"):
+        "test: globs its own tmp fixture tree, not the corpus",
+    ("scripts/session-analysis/extract_genesis.py", "ENUMERATING"):
+        "session-analysis one-shot: wants EVERY jsonl including subagents",
+    ("scripts/session-analysis/extract_user_msgs.py", "ENUMERATING"):
+        "session-analysis one-shot: wants EVERY jsonl including subagents",
+    ("scripts/session-analysis/initiative-scan.py", "ENUMERATING"):
+        "initiative scan: its unit is a cwd/branch, not a rankable session",
+    ("scripts/session-analysis/recon_cost.py", "ENUMERATING"):
+        "recon-cost accounting: its unit is a tool call, not a session",
+    ("scripts/validation/reconcile.py", "ENUMERATING"):
+        "telemetry reconciler: counts files against ClickHouse rows, opens none",
+    ("scripts/tmux-session-restore.py", "ENUMERATING"):
+        "FLAT glob of one already-known project dir; never recurses",
+    ("scripts/claude-hooks/search-tool-nudge.py", "BY-ID"):
+        "resolves ONE agent-<id>.jsonl in the subagents tier the shared walk excludes",
+    ("scripts/lib/subsystem_touch.py", "BY-ID"):
+        "resolves one session id; a second reader of the by-id rule, not of the corpus",
+    ("scripts/claude-hooks/tests/test_bg_command_capture.py", "OS-WALK"):
+        "test: walks its own tmp state dir",
+    ("scripts/claude-hooks/tests/test_search_tool_nudge.py", "OS-WALK"):
+        "test: walks its own tmp fixture tree",
+}
+
+_GLOB_ATTRS = {"glob", "rglob", "iglob"}
+
+
+def _string_literals(node):
+    return [n.value for n in ast.walk(node)
+            if isinstance(n, ast.Constant) and isinstance(n.value, str)]
+
+
+def _jsonl_glob_sites(src):
+    """(kind, lineno) for every `.jsonl` glob / corpus-shaped os.walk in `src`.
+
+    Parsed with `ast`, never grepped: a DOCSTRING that quotes `glob("*.jsonl")` is not a
+    walk, and three of this repo's do. `_selfrun.py` and this module's own prose would
+    both be false positives under a regex, which is how a text-matching ledger ends up
+    either noisy or narrowed until it sees nothing.
+    """
+    try:
+        tree = ast.parse(src)
+    except SyntaxError:                                # pragma: no cover - defensive
+        return []
+    docstring_nodes = set()
+    for n in ast.walk(tree):
+        if isinstance(n, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) \
+                and ast.get_docstring(n, clean=False) is not None:
+            docstring_nodes.add(id(n.body[0].value))
+    code_jsonl = any(isinstance(n, ast.Constant) and isinstance(n.value, str)
+                     and ".jsonl" in n.value and id(n) not in docstring_nodes
+                     for n in ast.walk(tree))
+    sites = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        is_glob = ((isinstance(func, ast.Attribute) and func.attr in _GLOB_ATTRS)
+                   or (isinstance(func, ast.Name) and func.id in _GLOB_ATTRS))
+        if is_glob:
+            # The pattern may be assembled — os.path.join(root, "**", "*.jsonl") — so
+            # every literal in the call's subtree counts, not just the first argument.
+            lits = [s for s in _string_literals(node) if ".jsonl" in s]
+            if lits:
+                sites.append(("ENUMERATING" if any("*.jsonl" in s for s in lits)
+                              else "BY-ID", node.lineno))
+        elif (isinstance(func, ast.Attribute) and func.attr == "walk"
+                and isinstance(func.value, ast.Name) and func.value.id == "os"
+                and code_jsonl):
+            sites.append(("OS-WALK", node.lineno))
+    return sites
+
+
+def _scan_repo_for_jsonl_globs():
+    found = {}
+    for path in sorted(REPO.rglob("*.py")):
+        rel = path.relative_to(REPO)
+        if _SKIP_DIRS & set(rel.parts[:-1]):
+            continue
+        for kind, _lineno in _jsonl_glob_sites(path.read_text(errors="replace")):
+            found.setdefault((rel.as_posix(), kind), []).append(_lineno)
+    return found
+
+
+def test_the_jsonl_glob_site_ledger_is_pinned_two_way():
+    """🔴 THE REPO-WIDE HALF, and the one that was MISSING while its docstring claimed it.
+
+    The previous ledger inspected a HARDCODED FOUR-FILE LIST while asserting that "a
+    fourth hand-rolled walk fails the suite". It did not: an auditor planted a fifth
+    walker at `scripts/fifth_walker.py` doing `glob.glob(root + "/**/*.jsonl",
+    recursive=True)` and the ledger reported 2 passed. Reading as coverage while providing
+    none is worse than none — it stops anyone looking.
+
+    So this SCANS the tree instead of naming files, and asserts the discovered set of glob
+    sites equals `JSONL_GLOB_SITES` exactly. Two-way on purpose: a new walk anywhere fails
+    (GROWTH), and a listed site that no longer exists fails too (SHRINK — a ledger entry
+    whose reason has quietly gone stale).
+
+    🔴 WHAT IT DOES NOT COVER, stated so nobody reads it wider than it is: a walk written
+    in a non-Python file (shell `find -name '*.jsonl'`, a `.mjs` reader), one that builds
+    the string `".json" + "l"`, or one that lives under a `_SKIP_DIRS` directory.
+    """
+    found = _scan_repo_for_jsonl_globs()
+    # POSITIVE CONTROL. A scan that walked nothing yields an empty dict, which compares
+    # equal to an empty ledger and reads exactly like a clean run.
+    assert (("scripts/lib/transcript_search.py", "ENUMERATING")) in found, (
+        "the scan did not even find the shared walk — it is wired to nothing, and a "
+        f"zero from it means nothing. Scanned root: {REPO}")
+    assert len(found) >= 10, f"positive control: only {len(found)} glob site(s) found"
+
+    extra = sorted(k for k in found if k not in JSONL_GLOB_SITES)
+    missing = sorted(k for k in JSONL_GLOB_SITES if k not in found)
+    assert not extra, (
+        "a NEW *.jsonl walk appeared and is not in JSONL_GLOB_SITES:\n  "
+        + "\n  ".join(f"{p} [{kind}] at line(s) {found[(p, kind)]}" for p, kind in extra)
+        + "\n\nIf it should use the shared enumerator, import "
+          "`transcript_search.iter_transcripts`. If it genuinely should not, add it to "
+          "JSONL_GLOB_SITES with the reason.")
+    assert not missing, (
+        "these JSONL_GLOB_SITES entries no longer exist — a stale reason nobody will "
+        f"notice: {missing}")
 
 
 def test_the_red_at_base_ledger_names_only_tests_that_exist():

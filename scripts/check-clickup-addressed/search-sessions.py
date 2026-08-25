@@ -18,6 +18,11 @@ Terms are ANDed by default (session must match all). Add --any to OR them.
 `--since` and `--project` live in `scripts/lib/transcript_search.py`, shared with
 `scripts/find-session.py`. Only two things are this tool's own and stay here: the
 self-run drop (`_selfrun.py`) and the output shape `check-addressed.py` parses.
+
+Two SEARCH AXES are passed explicitly below rather than inherited, because this tool and
+`find-session.py` genuinely want opposite values and the library default is the other
+tool's: `surface=SURFACE_TOOL_USE` (a task id in a Bash command is evidence) and
+`include_sidechains=True` (base behaviour here; base find-session.py dropped them).
 """
 import json, sys
 from datetime import datetime
@@ -79,6 +84,15 @@ def search_sessions(terms, since=None, limit=10, project_substr=None, match_any=
         # tool searches tool INPUT as well as prose. find-session.py deliberately does
         # not — see transcript_search.search's docstring for the measured difference.
         surface=SURFACE_TOOL_USE,
+        # 🔴 EXPLICIT, and not the library default. The shared `search` defaults to
+        # DROPPING `isSidechain` records because that is what base `find-session.py` did;
+        # base `search-sessions.py` had no such filter, so taking the default here would
+        # silently narrow THIS tool's evidence surface. Measured 2026-08-25: 0 of 424,853
+        # user/assistant records in the live corpus are sidechain-true, so the value
+        # changes no verdict today — but the key is present in 795 of 797 transcripts, so
+        # it is a layout-dependent zero. A completion check that quietly stops reading a
+        # class of message is the failure this skill exists to avoid.
+        include_sidechains=True,
         exclude_sessions=exclude_sessions or (),
         # Applied AFTER term matching, deliberately. is_self_run reads the file to EOF and
         # a non-matching file is discarded anyway, so testing it first only bought a full
