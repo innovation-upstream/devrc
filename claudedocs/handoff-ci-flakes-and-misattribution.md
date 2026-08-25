@@ -44,9 +44,10 @@ spool row. Both are now fixed; the flake family underneath is only half closed.
   another session's uncommitted `scripts/run-node-tests.sh` line. Deployed artifact ≠ commit
   on that host.
 - **#783 open by design** — #807 fixed the assertions, NOT the root cause.
-- **#778 CLOSED unmerged** — see the first open investigation; this is the risky one.
+- **#778 CLOSED unmerged** — **decided 2026-08-25**, see the first entry below. No longer the
+  risky one; the risk moved to *not deleting the rescue branch before #824 lands*.
 
-## Open investigations — live diagnosis state
+## Investigations — live diagnosis state (first entry is DECIDED, the rest are open)
 
 ### ✅ DECIDED 2026-08-25 — the rescued `initiative-scan.py` WIP: one half salvaged, one half rejected on measurement
 **Operator decision: salvage `--exclude-slugs` only; drop `parse_resolved`. `IN FLIGHT: devrc#824`.**
@@ -69,8 +70,20 @@ ancestor), not by ancestry.
 
     | corpus | scanned | flagged | `heading-marker` | `inline-status` | `PROSE-SUMMARY` |
     |---|---|---|---|---|---|
-    | `origin/main` today | 62 | 11 (18%) | **8** | 1 | 2 |
+    | `199774f8` (main at #824's base) | 62 | 11 (18%) | **7** | 1 | 3 |
     | `982778ee` (the sha it cites) | 53 | 10 (19%) | **7** | 1 | 2 |
+
+    ⚠ Both corpora are PINNED on purpose. An earlier draft of this table wrote the first row
+    as "`origin/main` today" and as **8 / 1 / 2** — wrong on both counts, caught by the #826
+    audit. `main` moves (it is already past `199774f8`), so an unpinned row cannot be told
+    apart from doc rot; and the arm split was mis-transcribed by eyeballing a listing instead
+    of counting it. `8 / 1 / 2` is not merely wrong, it is UNREACHABLE: the extra doc at
+    `199774f8` is `handoff-ccua-…`, which has no marker-initial heading, so it can only be a
+    prose hit — and heading could only reach 8 by counting `handoff-prompt-optimization-…`,
+    which is itself the sole `inline-status` hit, forcing that column to 0. The row summed to
+    11 either way, which is exactly why the arithmetic self-check did not catch it.
+    🔴 The irony is the lesson: this section exists to correct #778 for publishing numbers it
+    had not re-derived, and its own first draft did the same thing.
 
   - (a) It blames the prose scan and states *"the heading and inline `Status:` arms did **not**
     fire"*. The heading arm is the DOMINANT one — `### DONE this session`,
@@ -78,7 +91,9 @@ ancestor), not by ancestry.
   - (b) Its counts came from the **working tree** while citing `982778ee`: its headline example
     `handoff-ccua-waiting-flag-and-fork-close.md` does **not exist** at that sha
     (`git cat-file -e` → absent). That is the 11/55-vs-10/53 gap.
-  - (c) Its suggested fix — *"a heading that **starts** with the marker"* — **preserves all 8**.
+  - (c) Its suggested fix — *"a heading that **starts** with the marker"* — **preserves all 7**:
+    that arm's regex already requires the marker to start the heading, so the fix is a no-op
+    against every one of them.
 - **Root cause (the reason the half was rejected, not just deferred):** a handoff is a
   MULTI-SECTION document. Those headings describe one investigation *inside* a doc that still
   carries live next-steps. The predicate conflates "this document mentions something finished"
@@ -150,8 +165,10 @@ ancestor), not by ancestry.
    uncommitted `discord-embed-ext` line. Not ours to commit; resolves itself when they do.
 
 🔴 **This list is a WORK QUEUE WITH NO LOCK** — every `/resume` session draws from it, so a
-*better* ranked list produces *more* duplicate work. Nothing above is in flight as of this
-writing; if you start one, mark it `IN FLIGHT: <repo>#<pr>` here.
+*better* ranked list produces *more* duplicate work. **In flight right now: item 1 only, as
+`IN FLIGHT: devrc#824`. Items 2–5 are unclaimed.** If you start one, mark it
+`IN FLIGHT: <repo>#<pr>` here — and if you find this sentence disagreeing with the items above,
+believe the items, then fix this sentence.
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **`scripts/gate.sh` runs the DEV-HOST tier only** — `run-tests.sh` + `run-node-tests.sh`.
@@ -201,17 +218,20 @@ git -C ~/workspace/devrc show origin/main:scripts/browser-bridge/tests/test_serv
 # and #802's fix is still there beside it
 git -C ~/workspace/devrc show origin/main:scripts/browser-bridge/server.py | grep -c "_spool_emit_lock"          # 3
 
-# the rescued WIP still exists — 🔴 if this prints nothing, the work is GONE
-# (still true: the branch is NOT deleted until devrc#824 merges — see next-step 1)
+# 🔴 READ THE TWO GREPS BELOW FIRST — they decide what an empty result here MEANS.
+#   greps == 0  -> #824 has NOT merged; empty here means the work is GONE. Alarm.
+#   greps == 1  -> #824 merged; empty here is CORRECT — the branch was deleted on purpose.
 git -C ~/workspace/devrc ls-remote --heads origin rescue/initiative-scan-resolved-filter
 
-# the salvage, once #824 merges — BY CONTENT, since a squash merge is never an ancestor
+# the salvage — BY CONTENT, since a squash merge is never an ancestor.
+# Expect 0 until #824 merges, 1 after. A 0 is only news if #824 shows as merged.
 git -C ~/workspace/devrc show origin/main:scripts/session-analysis/initiative-scan.py \
-  | grep -c "def parse_exclude_slugs"                                                 # 1
+  | grep -c "def parse_exclude_slugs"                              # 0 pre-merge / 1 post
 # and the invariant guard that stops the rejected half being re-added
 git -C ~/workspace/devrc show origin/main:scripts/session-analysis/tests/test_initiative_scan.py \
-  | grep -c "test_a_handoff_that_says_DONE_is_still_reported"                         # 1
+  | grep -c "test_a_handoff_that_says_DONE_is_still_reported"      # 0 pre-merge / 1 post
+gh pr view 824 --repo innovation-upstream/devrc --json mergedAt,mergeCommit
 
-# both hosts carry it
+# both hosts carry what is ALREADY on main (not #824, until it merges)
 bash ~/workspace/devrc/scripts/drift-check.sh    # read-only; rc 0 = converged
 ```
