@@ -165,6 +165,61 @@ DEFAULT_THROTTLE = 30
 # (devrc-ci-wwj4d). Reproduced end-to-end by making the stub sleep 2.5s.
 DEFAULT_TMUX_TIMEOUT_S = 2.0
 
+# 🔴 THE ENV VAR EXISTS BECAUSE A PARAMETER CANNOT REACH FOUR OF THE SIX
+# EXPOSURES. #810 gave the CLI a `--tmux-timeout` flag, and an audit found it
+# covers 2 of 6: `scripts/opencode/plugin/ledger.js` HARDCODES its argv
+# (:114-129) so no flag can be injected, and `scripts/claude-hooks/
+# agent-ledger-hook.py` calls `tmux_context(pane=...)` with no knob at all. Both
+# read the process environment, so this is the one mechanism that reaches every
+# caller — including the four sibling tests whose pane-keyed assertions
+# otherwise depend on how loaded the machine is, which is the #810 flake.
+#
+# Precedence: an explicit `timeout=` argument WINS (a caller that named a number
+# meant it), then this, then the constant.
+TMUX_TIMEOUT_ENV = "AGENT_LEDGER_TMUX_TIMEOUT_S"
+
+
+def resolve_tmux_budget(timeout=None, environ=None, warn=None):
+    """Seconds to allow tmux: explicit arg > `$AGENT_LEDGER_TMUX_TIMEOUT_S` >
+    `DEFAULT_TMUX_TIMEOUT_S`.
+
+    🔴 NEVER RAISES, and that is load-bearing rather than defensive: this sits on
+    `PostToolUse` and on every opencode tool call, and `tmux_context`'s docstring
+    promises every failure is `(None, None)`. An audit of #810 found `float()`
+    outside the `try`, so `timeout="abc"` raised `ValueError` straight through a
+    contract that said it could not — contained only because the one caller that
+    takes user input validated first.
+
+    🔴 AN INVALID BUDGET IS NOT SILENTLY ACCEPTED. `timeout=0` and `timeout=-5`
+    previously reached `subprocess.run` and forced an instant timeout — i.e. the
+    degraded session-keyed path, silently. That is precisely the failure the
+    CLI's own guard exists to prevent, reachable from Python one layer down. Junk
+    now falls back to the default AND says so on stderr: a typo'd env var in a
+    test must not read as "the budget I asked for", because that puts the
+    assertion right back on the machine's load.
+    """
+    warn = warn if warn is not None else (
+        lambda m: print(m, file=sys.stderr, flush=True))
+    if timeout is not None:
+        src, raw = "timeout=", timeout
+    else:
+        env = os.environ if environ is None else environ
+        raw = env.get(TMUX_TIMEOUT_ENV)
+        if raw is None or raw == "":
+            return DEFAULT_TMUX_TIMEOUT_S
+        src = TMUX_TIMEOUT_ENV + "="
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        warn(f"agent_ledger: ignoring {src}{raw!r} (not a number); "
+             f"using {DEFAULT_TMUX_TIMEOUT_S}s")
+        return DEFAULT_TMUX_TIMEOUT_S
+    if not val > 0 or val != val or val == float("inf"):
+        warn(f"agent_ledger: ignoring {src}{raw!r} (must be finite and > 0); "
+             f"using {DEFAULT_TMUX_TIMEOUT_S}s")
+        return DEFAULT_TMUX_TIMEOUT_S
+    return val
+
 RUNTIMES = ("claude", "opencode", "clawgate")
 
 # `@41` -> `41`, matching the naming `tmux-task-hook.sh` used (`${WIN_ID//[@%]/}`).
@@ -659,14 +714,23 @@ def tmux_context(runner=None, pane=None, timeout=None):
     TWO callers: the Claude hook and the `--write` CLI. It is here so there is
     one resolver rather than one per writer.
 
-    `timeout` is the seconds to allow tmux, defaulting to
-    `DEFAULT_TMUX_TIMEOUT_S` — read that constant for why the default is short
-    and why a caller must be able to raise it.
+    `timeout` is the seconds to allow tmux. Resolution — explicit argument,
+    then `$AGENT_LEDGER_TMUX_TIMEOUT_S`, then `DEFAULT_TMUX_TIMEOUT_S` — lives in
+    `resolve_tmux_budget`; read that for why the env var exists (a parameter
+    cannot reach four of this function's six exposures) and why junk falls back
+    loudly rather than silently forcing the degraded path.
+
+    ⚠ `timeout`/the env var apply to the DEFAULT runner only. A caller supplying
+    `runner=` owns its own deadline — the budget is not threaded into an injected
+    runner, so a test passing both would get a false green about the budget.
     """
     pane = os.environ.get("TMUX_PANE") if pane is None else pane
     if not pane:
         return None, None
-    budget = DEFAULT_TMUX_TIMEOUT_S if timeout is None else float(timeout)
+    # Never raises, so it is safe outside the `try` — see its docstring. The
+    # previous `float(timeout)` here was NOT, which broke this function's own
+    # "every failure is (None, None)" promise.
+    budget = resolve_tmux_budget(timeout)
     argv = ["tmux", "display-message", "-t", pane, "-p", "#{window_id}|#{pid}"]
     try:
         run = runner or (lambda a: subprocess.run(
@@ -704,10 +768,21 @@ def main(argv=None) -> int:
     p.add_argument("--session", required=True)
     p.add_argument("--transcript-path", default=None)
     p.add_argument("--throttle", type=float, default=DEFAULT_THROTTLE)
-    p.add_argument("--tmux-timeout", type=float, default=DEFAULT_TMUX_TIMEOUT_S,
-                   help="seconds to allow tmux to answer (default %(default)s). "
-                        "Raise it when the pane-keyed filename must be RELIABLE "
-                        "rather than cheap — see DEFAULT_TMUX_TIMEOUT_S.")
+    # 🔴 default=None, NOT the constant — and the help text spells the constant
+    # itself rather than `%(default)s`. An argparse default is an EXPLICIT
+    # argument by the time `main` sees it, and an explicit argument beats the
+    # env var by design, so defaulting to the constant here made
+    # `$AGENT_LEDGER_TMUX_TIMEOUT_S` structurally unreachable on the CLI path —
+    # i.e. on the opencode plugin, which is one of the two exposures the env var
+    # exists to serve. Measured: with default=<constant>, the plugin's
+    # pane-keyed tests still went red under a mutated constant despite the
+    # variable being set. None means "nobody said", which is what lets
+    # `resolve_tmux_budget` consult the environment.
+    p.add_argument("--tmux-timeout", type=float, default=None,
+                   help="seconds to allow tmux to answer (default %s, or "
+                        "$%s). Raise it when the pane-keyed filename must be "
+                        "RELIABLE rather than cheap — see DEFAULT_TMUX_TIMEOUT_S."
+                        % (DEFAULT_TMUX_TIMEOUT_S, TMUX_TIMEOUT_ENV))
     p.add_argument("--prune", action="store_true",
                    help="also reap records past the retention window; the "
                         "caller does this on a session boundary, not per call")
@@ -718,7 +793,13 @@ def main(argv=None) -> int:
     # immediately, so a typo would silently force the DEGRADED session-keyed
     # path on every write while the CLI still exited 0. argparse's own exit
     # code (2) is the right one: this is a bad invocation, not a failed write.
-    if not args.tmux_timeout > 0 or args.tmux_timeout == float("inf"):
+    # Only when the flag was actually GIVEN: `None` means nobody said, which is
+    # not a bad invocation — it hands the decision to `resolve_tmux_budget`,
+    # which consults $AGENT_LEDGER_TMUX_TIMEOUT_S and then the constant, and
+    # warns rather than raising if THAT is junk. Guarding on `is not None` also
+    # stops the comparison below raising TypeError on the default path.
+    if args.tmux_timeout is not None and (
+            not args.tmux_timeout > 0 or args.tmux_timeout == float("inf")):
         p.error("--tmux-timeout must be a positive, finite number of seconds "
                 "(got %r); it bounds the tmux lookup, and a non-positive value "
                 "silently forces the session-keyed fallback" % args.tmux_timeout)

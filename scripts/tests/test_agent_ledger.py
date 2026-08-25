@@ -968,6 +968,81 @@ def test_the_default_tmux_budget_STAYS_THE_RIGHT_ORDER_OF_MAGNITUDE():
         f"say in the commit message which measurement moved.")
 
 
+# =========================================================================== #
+# resolve_tmux_budget — the knob that reaches the callers a FLAG cannot
+# =========================================================================== #
+def _warns():
+    """Collector standing in for stderr, so 'it warned' is an assertion."""
+    seen = []
+    return seen, seen.append
+
+
+def test_an_explicit_timeout_BEATS_the_env_var():
+    """A caller that named a number meant it. The env var is the fallback for
+    callers that have no way to name one, not an override of those that do."""
+    got, _ = AL.resolve_tmux_budget(7.5, environ={AL.TMUX_TIMEOUT_ENV: "60"}), None
+    assert got == 7.5
+
+
+def test_the_ENV_VAR_is_read_when_no_argument_is_passed():
+    """🔴 THE WHOLE POINT. `ledger.js` hardcodes its argv and the Claude hook
+    passes no timeout, so this is the only path by which those two — 4 of the 6
+    exposures — can be given a budget at all."""
+    assert AL.resolve_tmux_budget(environ={AL.TMUX_TIMEOUT_ENV: "42.5"}) == 42.5
+
+
+def test_the_constant_is_the_floor_of_the_chain():
+    assert AL.resolve_tmux_budget(environ={}) == AL.DEFAULT_TMUX_TIMEOUT_S
+    assert AL.resolve_tmux_budget(environ={AL.TMUX_TIMEOUT_ENV: ""}) == \
+        AL.DEFAULT_TMUX_TIMEOUT_S
+
+
+def test_an_UNPARSEABLE_env_var_falls_back_LOUDLY():
+    """🔴 Silence here would re-create the bug this change exists to fix: a
+    typo'd variable would read as "the budget I asked for" while the assertion
+    quietly went back to depending on machine load."""
+    seen, warn = _warns()
+    assert AL.resolve_tmux_budget(
+        environ={AL.TMUX_TIMEOUT_ENV: "2 seconds"}, warn=warn) == \
+        AL.DEFAULT_TMUX_TIMEOUT_S
+    assert seen and AL.TMUX_TIMEOUT_ENV in seen[0] and "2 seconds" in seen[0]
+
+
+def test_a_NON_POSITIVE_budget_does_not_silently_force_the_degraded_path():
+    """🔴 The audit finding. `timeout=0` and `timeout=-5` used to reach
+    subprocess.run, which times out instantly — i.e. the degraded session-keyed
+    path, silently. That is exactly what the CLI's own guard exists to prevent,
+    reachable from Python one layer down."""
+    for bad in (0, -5, float("nan"), float("inf")):
+        seen, warn = _warns()
+        assert AL.resolve_tmux_budget(bad, warn=warn) == AL.DEFAULT_TMUX_TIMEOUT_S, bad
+        assert seen, f"{bad!r} fell back SILENTLY"
+
+
+def test_it_NEVER_RAISES_because_tmux_context_promises_it_cannot():
+    """`tmux_context` documents that every failure is `(None, None)`, and it
+    runs on PostToolUse and every opencode tool call. An audit found `float()`
+    outside the `try` there, so `timeout="abc"` raised straight through that
+    contract."""
+    for junk in ("abc", object(), [], {}, "1e"):
+        seen, warn = _warns()
+        assert AL.resolve_tmux_budget(junk, warn=warn) == AL.DEFAULT_TMUX_TIMEOUT_S
+        assert seen, f"{junk!r} fell back SILENTLY"
+
+
+def test_tmux_context_survives_a_junk_timeout_END_TO_END():
+    """The seam, not just the helper: a junk budget must reach `(None, None)`
+    through the real function rather than an exception."""
+    got = AL.tmux_context(pane="%1", timeout="abc",
+                          runner=lambda a: _Proc(0, "@41|99\n"))
+    assert got == ("@41", "99")
+
+
+class _Proc:
+    def __init__(self, rc, out):
+        self.returncode, self.stdout = rc, out
+
+
 def test_a_cross_runtime_conflict_NAMES_THE_RUNTIMES():
     """🔴 The commonest real conflict is cross-runtime, and two opaque session
     ids do not say so. `claude, opencode` is the difference between "which agent
