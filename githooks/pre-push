@@ -65,16 +65,28 @@ REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
 # for the same reason: the pair was measured at ONE point on a dimension that
 # changes the answer — WHICH CHECKOUT THE PUSH CAME FROM.
 #
-# MEASURED 2026-08-25, git 2.55.0, parent explicitly scrubbed
-# (`env -u GIT_DIR -u GIT_WORK_TREE`), reproduced twice, both directions:
+# MEASURED 2026-08-25, git 2.55.0, parent explicitly scrubbed of every `GIT_*`
+# name, reproduced twice and independently re-derived on a separate rig:
 #
-#     push from the MAIN checkout    -> GIT_EXEC_PATH only.        no GIT_DIR
+#     push from the MAIN checkout    -> GIT_EXEC_PATH, GIT_PREFIX. no GIT_DIR
 #     push from a LINKED WORKTREE    -> GIT_DIR=<repo>/.git/worktrees/<name>
 #
 # **git ITSELF exports `GIT_DIR` into `pre-push` when the push originates from a
-# linked worktree. No outer caller is required.** That is the missing root
-# cause, and it matches the incident report exactly: clawgate#322 was a
-# `git push -u origin <branch>` FROM A LINKED WORKTREE.
+# linked worktree. No outer caller is required.** It matches the incident report
+# exactly: clawgate#322 was a `git push -u origin <branch>` FROM A LINKED
+# WORKTREE.
+#
+# ⚠ A WORKTREE IS NOT THE ONLY SHAPE, and saying "only" here would repeat this
+# block's own mistake at a narrower radius. Also measured as exporting
+# `GIT_DIR`: `--separate-git-dir` clones, submodules
+# (`<super>/.git/modules/<sub>`), and bare repos (a RELATIVE `.`). The list is
+# open — treat "this is not a worktree" as NO evidence that `GIT_DIR` is unset.
+#
+# ⚠ SCOPE OF THE CLAIM: this identifies what sets `GIT_DIR` on a push, which is
+# the question this block called unidentified. It does NOT complete the
+# end-to-end walk of `pre-push` -> `tests-on-push.sh` -> the suite for the
+# incident itself — `claudedocs/handoff-gitdir-leak-and-ci-gates.md` still lists
+# that leg as never exercised, and it remains outstanding.
 #
 # Why it does damage: `GIT_DIR` OVERRIDES `-C`, so a child asking
 # `git -C <scope> rev-parse --show-toplevel` about a PLAIN, NON-REPO directory
@@ -88,9 +100,10 @@ REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
 # not just when some exotic caller misbehaves. Do not weaken it on the grounds
 # that "pushing cannot set GIT_DIR" — from a worktree, it can and does.
 # Pinned by `scripts/tests/test_git_repo_isolation.py::
-# test_git_exports_GIT_DIR_to_pre_push_only_from_a_linked_worktree`, which is a
-# CANARY on git's behaviour: if a future git stops doing this the test fails and
-# tells you the precondition changed, rather than letting this comment rot.
+# test_git_exports_GIT_DIR_to_pre_push_from_a_worktree_but_not_a_main_checkout`,
+# which is a CANARY on git's behaviour: if a future git stops doing this the
+# test fails and tells you the precondition moved, rather than letting this
+# comment rot into the same false generalisation it replaced.
 #
 # `scripts/testlib/gitenv.py` closes the mechanism from the suite's side
 # whatever set the variable, and `scripts/tests/test_git_repo_isolation.py`

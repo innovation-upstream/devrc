@@ -1018,17 +1018,25 @@ def test_no_shell_script_that_can_reach_the_runner_assigns_a_git_repo_pointer():
     )
 
 
-def test_git_push_does_not_export_GIT_DIR_to_pre_push(tmp_path):
+def test_git_push_from_a_MAIN_CHECKOUT_does_not_export_GIT_DIR_to_pre_push(tmp_path):
     """🔴 THE CORRECTION, MEASURED, AS A PAIR — #683's body and commit message
     both stated that `githooks/pre-push` handing down `GIT_DIR` explained why
     *pushing* triggered the corruption, and that claim was relayed to another
     session as established fact before it was checked.
 
-    A `git push` from a GIT_DIR-free parent gives `pre-push` only
-    `GIT_EXEC_PATH` and `GIT_PREFIX` (plus the caller's own identity/config
-    vars). The rename remains correct hygiene — an outer caller's exported
-    `GIT_DIR` really does survive a reassignment — but it is NOT the diagnosis,
-    and the root cause of the incident is still unknown.
+    A `git push` **from a main checkout** with a GIT_DIR-free parent gives
+    `pre-push` only `GIT_EXEC_PATH` and `GIT_PREFIX` (plus the caller's own
+    identity/config vars). The rename remains correct hygiene — an outer
+    caller's exported `GIT_DIR` really does survive a reassignment.
+
+    🔴 THE SCOPE WORD IN THIS NAME IS LOAD-BEARING, AND IT WAS MISSING. This
+    test used to be called `test_git_push_does_not_export_GIT_DIR_to_pre_push`
+    and its docstring ended "the root cause of the incident is still unknown".
+    The measurement was right; the unqualified name generalised it to every
+    push. It is false for a push from a LINKED WORKTREE, where git exports
+    `GIT_DIR` on its own — see
+    `test_git_exports_GIT_DIR_to_pre_push_from_a_worktree_but_not_a_main_checkout`
+    below, which identifies the root cause this docstring called unknown.
     """
     home = tmp_path / "home"
     home.mkdir()
@@ -2138,106 +2146,132 @@ def test_the_runner_strips_the_pointers_before_a_non_pytest_target_runs(tmp_path
 # --------------------------------------------------------------------------- #
 # 9. THE PRECONDITION ITSELF — a canary on git, not on devrc
 # --------------------------------------------------------------------------- #
-def test_git_exports_GIT_DIR_to_pre_push_only_from_a_linked_worktree(tmp_path):
+def test_git_exports_GIT_DIR_to_pre_push_from_a_worktree_but_not_a_main_checkout(
+        tmp_path):
     """🔴 WHY GUARD 9's STRIP IS LOAD-BEARING ON THE ORDINARY PATH.
 
-    `githooks/pre-push` used to conclude that "pushing does not, on its own,
-    hand `GIT_DIR` to anything", and that the 2026-08-21 incident's root cause
-    "REMAINS UNIDENTIFIED". The measurement behind that was real but taken at
-    ONE point on a dimension that changes the answer: which checkout the push
-    came from. Measured 2026-08-25 on git 2.55.0 with the parent scrubbed:
+    The sibling test above measures the MAIN-CHECKOUT arm and finds no
+    `GIT_DIR`. That result is correct and this test does not contradict it —
+    what it corrects is the GENERALISATION once drawn from it, that "pushing
+    does not, on its own, hand GIT_DIR to anything" and that the 2026-08-21
+    incident's root cause was unidentified. Both were wrong, because the
+    measurement was taken at one point on a dimension that changes the answer:
+    WHICH CHECKOUT THE PUSH CAME FROM.
 
-        push from the MAIN checkout -> GIT_EXEC_PATH only, no GIT_DIR
+    Measured 2026-08-25, git 2.55.0, parent scrubbed of every `GIT_*` name:
+
+        push from the MAIN checkout -> GIT_EXEC_PATH, GIT_PREFIX.  no GIT_DIR
         push from a LINKED WORKTREE -> GIT_DIR=<repo>/.git/worktrees/<name>
 
-    git itself exports it. No outer caller is needed — and clawgate#322 was a
-    push from a linked worktree, which is the match.
+    git itself exports it; no outer caller is required. clawgate#322 was a push
+    from a linked worktree, which is the match.
 
-    🔴 THIS IS A CANARY ON GIT'S BEHAVIOUR, NOT A TEST OF OUR CODE. It exists so
-    that if a future git stops exporting `GIT_DIR` here, someone is TOLD the
-    precondition moved, instead of the comment quietly rotting into the same
-    false generalisation it replaced. If it fails because git changed: update
-    the comment in `githooks/pre-push`, and do NOT weaken the strip on the
-    strength of one version's behaviour.
+    ⚠ A WORKTREE IS NOT THE ONLY SHAPE THAT DOES THIS, and an earlier version of
+    this test said "only" in its own name. Also measured as exporting `GIT_DIR`:
+    `--separate-git-dir` clones, submodules (`<super>/.git/modules/<sub>`), and
+    bare repos (which export a RELATIVE `.`). The list is open; treat "not a
+    worktree" as no evidence that `GIT_DIR` is unset.
 
-    Both arms are asserted. The main-checkout arm is the control: without it a
-    hook that never ran, or a recorder that never wrote, would look identical to
-    "git does not export it".
+    🔴 THIS IS A CANARY ON GIT'S BEHAVIOUR, NOT A TEST OF OUR CODE. If a future
+    git stops exporting this, the test fails and tells you the precondition
+    moved — instead of the comment rotting into the same false generalisation it
+    replaced. Do NOT weaken the strip on one version's behaviour.
     """
-    repo = _mkrepo(tmp_path / "repo")
-    bare = tmp_path / "origin.git"
-    subprocess.run(["git", "init", "-q", "--bare", str(bare)],
-                   check=True, capture_output=True, env=_env())
-    assert _git(repo, "remote", "add", "origin", str(bare)).returncode == 0
-    assert _git(repo, "push", "-q", "origin", "main").returncode == 0
+    # Same isolation as the sibling: no inherited GIT_* names, and a pinned
+    # global config so the operator's own `core.hooksPath` cannot reach in.
+    gitconfig = tmp_path / "gitconfig"
+    gitconfig.write_text("[user]\n\tname = g9\n\temail = g9@example.invalid\n",
+                         encoding="utf-8")
+    base = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    base.update(_GIT_ENV)
+    base["GIT_CONFIG_GLOBAL"] = str(gitconfig)
 
+    bare = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True,
+                   capture_output=True, env=base)
+    work = tmp_path / "work"
+    work.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main", str(work)], check=True,
+                   capture_output=True, env=base)
+    (work / "f.txt").write_text("base\n", encoding="utf-8")
+    assert _git(work, "add", "f.txt", env=base).returncode == 0
+    assert _git(work, "commit", "-qm", "base", env=base).returncode == 0
+    assert _git(work, "remote", "add", "origin", str(bare), env=base).returncode == 0
+    assert _git(work, "push", "-q", "origin", "main", env=base).returncode == 0
+
+    # 🔴 `mockbin.write_exec` OWNS THE SHEBANG — writing `#!/usr/bin/env bash`
+    # here would (a) fail `test_runtime_shebangs.py` and (b) be unrunnable in
+    # the nix sandbox, where `/usr/bin/env` does not exist. Both were measured
+    # on this very test. The body is POSIX sh for the same reason: `${!v}` is a
+    # bash-ism and `mockbin.SH` is `/bin/sh`.
+    main_seen = tmp_path / "env-main.txt"
+    wt_seen = tmp_path / "env-wt.txt"
     hooks = tmp_path / "hooks"
     hooks.mkdir()
-    # Every line goes INTO the file. An earlier version of this probe printed to
-    # stdout, so the file the assertions read was always empty and the probe
-    # reported "not exported" no matter what git did.
-    (hooks / "pre-push").write_text(
-        "#!/usr/bin/env bash\n"
-        'out="${PROBE_OUT:-/dev/null}"\n'
-        ': > "$out"\n'
-        'for v in GIT_DIR GIT_EXEC_PATH; do\n'
-        '  if [ -n "${!v:-}" ]; then printf "%s=%s\\n" "$v" "${!v}" >> "$out"; fi\n'
-        'done\n'
-        "exit 0\n",
-        encoding="utf-8")
-    (hooks / "pre-push").chmod(0o755)
-    assert _git(repo, "config", "--local", "core.hooksPath", str(hooks)).returncode == 0
 
-    def push_from(cwd: Path, branch: str, tag: str) -> str:
-        out = tmp_path / f"env-{tag}.txt"
-        env = _env(PROBE_OUT=str(out))
-        # Scrub the pointer names from the PARENT, so anything recorded was put
-        # there by git and not inherited from this test process.
-        for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
-                     "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY"):
-            env.pop(name, None)
-        subprocess.run(["git", "-C", str(cwd), "push", "-q", "origin", branch],
-                       capture_output=True, text=True, env=env)
-        return out.read_text(encoding="utf-8") if out.exists() else ""
+    def arm(seen: Path):
+        mockbin.write_exec(
+            hooks / "pre-push",
+            f"env | grep -E '^GIT' | sort > {seen}\n"
+            "cat >/dev/null\nexit 0\n")
+
+    assert _git(work, "config", "--local", "core.hooksPath", str(hooks),
+                env=base).returncode == 0
 
     # --- arm 1: the MAIN checkout ------------------------------------------
-    assert _git(repo, "checkout", "-q", "-b", "from-main").returncode == 0
-    (repo / "b.txt").write_text("b\n", encoding="utf-8")
-    assert _git(repo, "add", "b.txt").returncode == 0
-    assert _git(repo, "commit", "-qm", "b").returncode == 0
-    main_env = push_from(repo, "from-main", "main")
+    arm(main_seen)
+    assert _git(work, "checkout", "-q", "-b", "from-main", env=base).returncode == 0
+    (work / "b.txt").write_text("b\n", encoding="utf-8")
+    assert _git(work, "add", "b.txt", env=base).returncode == 0
+    assert _git(work, "commit", "-qm", "b", env=base).returncode == 0
+    assert _git(work, "push", "-q", "origin", "from-main", env=base).returncode == 0
 
     # --- arm 2: a LINKED WORKTREE ------------------------------------------
     wt = tmp_path / "wt"
-    assert _git(repo, "worktree", "add", "-q", str(wt), "-b", "from-wt",
-                "main").returncode == 0
+    assert _git(work, "worktree", "add", "-q", str(wt), "-b", "from-wt", "main",
+                env=base).returncode == 0
+    arm(wt_seen)
     (wt / "c.txt").write_text("c\n", encoding="utf-8")
-    assert _git(wt, "add", "c.txt").returncode == 0
-    assert _git(wt, "commit", "-qm", "c").returncode == 0
-    wt_env = push_from(wt, "from-wt", "wt")
+    assert _git(wt, "add", "c.txt", env=base).returncode == 0
+    assert _git(wt, "commit", "-qm", "c", env=base).returncode == 0
+    assert _git(wt, "push", "-q", "origin", "from-wt", env=base).returncode == 0
 
-    # 🔴 POSITIVE CONTROL FIRST. git exports GIT_EXEC_PATH to hooks
-    # unconditionally, so if it is missing the hook never ran or never wrote,
-    # and an absent GIT_DIR below would prove nothing at all.
-    for tag, text in (("main-checkout", main_env), ("linked-worktree", wt_env)):
-        assert "GIT_EXEC_PATH=" in text, (
-            f"the {tag} probe recorded no GIT_EXEC_PATH, so the hook did not run "
-            f"or did not write. Nothing in this test was measured.\ngot: {text!r}")
+    def names(p: Path) -> set:
+        if not p.exists():
+            return set()
+        return {ln.split("=", 1)[0]
+                for ln in p.read_text(encoding="utf-8").splitlines()}
 
-    assert "GIT_DIR=" not in main_env, (
+    main_names, wt_names = names(main_seen), names(wt_seen)
+
+    # 🔴 POSITIVE CONTROL FIRST, BOTH ARMS. git exports GIT_EXEC_PATH to hooks
+    # unconditionally, so if it is missing the hook never ran or never wrote —
+    # and an absent GIT_DIR below would then prove nothing at all. Each arm has
+    # its OWN file, written and read within that arm, so arm 2 can never be
+    # scored on arm 1's leftovers.
+    for tag, seen in (("main-checkout", main_names), ("linked-worktree", wt_names)):
+        assert "GIT_EXEC_PATH" in seen, (
+            f"the {tag} hook did not run or did not write, so nothing in this "
+            f"test was measured.\nsaw: {sorted(seen)}")
+
+    assert "GIT_DIR" not in main_names, (
         "git exported GIT_DIR to pre-push from the MAIN checkout. The asymmetry "
-        "this test pins has changed; re-measure and update the comment in "
-        f"githooks/pre-push.\ngot: {main_env!r}")
+        "this canary pins has changed — re-measure and rewrite the root-cause "
+        f"block in githooks/pre-push.\nsaw: {sorted(main_names)}")
 
-    assert "GIT_DIR=" in wt_env, (
+    assert "GIT_DIR" in wt_names, (
         "git did NOT export GIT_DIR to pre-push from a LINKED WORKTREE. That is "
         "the precondition behind GUARD 9's strip and behind the clawgate#322 "
-        "diagnosis. If git genuinely changed, update the root-cause comment in "
+        "diagnosis. If git genuinely changed, rewrite the root-cause block in "
         "githooks/pre-push — do NOT weaken the strip on one version's "
-        f"behaviour.\ngot: {wt_env!r}")
+        f"behaviour.\nsaw: {sorted(wt_names)}")
 
     # Name it precisely: it points at the WORKTREE's gitdir, which is why a
-    # `-C` lookup elsewhere resolves into this repo rather than the target.
-    assert "/worktrees/" in wt_env, (
-        "GIT_DIR was exported but does not point at a linked worktree's gitdir; "
-        f"the mechanism may differ from the one documented.\ngot: {wt_env!r}")
+    # `-C` lookup elsewhere resolves back into this repo instead of the target.
+    wt_git_dir = next(
+        ln.split("=", 1)[1]
+        for ln in wt_seen.read_text(encoding="utf-8").splitlines()
+        if ln.startswith("GIT_DIR="))
+    assert "/worktrees/" in wt_git_dir, (
+        "GIT_DIR was exported but does not name a linked worktree's gitdir, so "
+        f"the mechanism may differ from the documented one.\ngot: {wt_git_dir!r}")

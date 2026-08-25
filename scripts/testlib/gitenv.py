@@ -40,10 +40,25 @@ hook was a route only if some OUTER caller had already exported the name (bash
 keeps an already-exported name exported across a reassignment); the hook's own
 comment stated that precondition correctly and the PR body dropped it. A live
 scan of the box found 46 processes carrying some `GIT_*` variable and **0**
-carrying `GIT_DIR` (13 unreadable). **THE ROOT CAUSE — what exported `GIT_DIR`
-into that gate run — IS STILL UNKNOWN.** The rename is correct hygiene and the
-strip below closes the mechanism whatever set it; neither identifies the
-setter. Do not cite the pre-push rename as the diagnosis.
+carrying `GIT_DIR` (13 unreadable).
+
+🔴 **THE ROOT CAUSE IS NO LONGER UNKNOWN, AND THIS PARAGRAPH USED TO SAY IT
+WAS.** The pair above is true and its generalisation was not: both points were
+measured from a MAIN CHECKOUT. Measured 2026-08-25, git 2.55.0, parent scrubbed
+of every `GIT_*` name, reproduced independently:
+
+    push from a MAIN checkout    -> GIT_EXEC_PATH, GIT_PREFIX.  no GIT_DIR
+    push from a LINKED WORKTREE  -> GIT_DIR=<repo>/.git/worktrees/<name>
+
+**git itself exports it from a linked worktree; no outer caller is required**,
+and clawgate#322 was a push from a linked worktree. Other shapes do it too —
+`--separate-git-dir`, submodules (`<super>/.git/modules/<sub>`) and bare repos
+(a RELATIVE `.`) — so "not a worktree" is no evidence that `GIT_DIR` is unset.
+Pinned by `test_git_exports_GIT_DIR_to_pre_push_from_a_worktree_but_not_a_main
+_checkout`. So the strip below is load-bearing on the ORDINARY path, not only
+against a misbehaving outer caller: do not weaken it on the belief that pushing
+cannot set `GIT_DIR`. The pre-push rename is still correct hygiene and still
+not, by itself, the diagnosis.
 
 And the fixture VALUES are the tell that identifies the MECHANISM (an inherited
 `GIT_DIR`) rather than merely being consistent with it: the tmpdir paths
