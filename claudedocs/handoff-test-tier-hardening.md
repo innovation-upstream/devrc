@@ -397,11 +397,44 @@ newest fixture-shaped reflog entry: 14:42:12 "commit: seed"   ← no recurrence 
   ```
 - **Recommendation on record, and it is SPLIT — do not read it as "merge #683":** #683's **prevention** half is correct and independently verified (guard at `run-tests.sh:235` / `run-node-tests.sh:142` / `gate.sh:120`, each immediately above its own `ROOT=`, nothing git-related executing before it). That half stops the measured mechanism and is worth landing. Its **detection** half is *not* stronger than #689 on the axis that produced #689's fourteen bypasses — two measured defects below. Continue #689 only if someone takes the per-verb positional-repo problem knowingly. Salvage from #689 regardless: the armed-vector battery with **live-axis arms**, the per-target `control=plugin:N inherited:N` accounting, and the fail-open checks.
 
-### 🔴 THE ROOT CAUSE OF THE RECURRENCE IS STILL UNIDENTIFIED — do not close this
+### ✅ THE ROOT CAUSE OF THE RECURRENCE IS IDENTIFIED (2026-08-25) — this heading used to say it was not
 
-- **RETRACTED:** *"`githooks/pre-push` assigns to the exported name `GIT_DIR`, so it hands the base clone's git dir down to `run-tests.sh` → pytest"* was relayed to me as established and is **wrong as stated**. Measured on git 2.55.0: **`git push` exports `GIT_EXEC_PATH`, `GIT_PREFIX=""` and `GIT_EDITOR` to `pre-push` — NOT `GIT_DIR`.** The rename in #683 is a route **only if an outer caller had already exported `GIT_DIR`**; `githooks/pre-push:44-48` states that precondition, and the PR body/commit message drop it. Good hygiene, not the explanation.
-- **Live scan, reported as a pair:** **46 processes carry some `GIT_*` var, 0 carry `GIT_DIR`** (13 unreadable ⇒ unmeasured, not zero). No tracked file assigns one.
-- So *why pushing appeared to trigger corruption* is open. Nothing found so far protects `homelab-talos` or any other repo's tooling either.
+🔴 **The retraction below is itself now partly retracted, and this is the fifth
+place the same false generalisation was found. A `RETRACTED:` banner carries
+extra authority, which is exactly why a wrong one is expensive.**
+
+- **What was measured, and is still true:** on git 2.55.0, a `git push` **from a
+  MAIN CHECKOUT** exports `GIT_EXEC_PATH`, `GIT_PREFIX` and `GIT_EDITOR` to
+  `pre-push` — not `GIT_DIR`. The rename in #683 is a route only if an outer
+  caller had already exported the name. That much stands.
+- 🔴 **What was WRONG: the generalisation to every push.** Both points were
+  measured on the same side of the dimension that decides the answer — which
+  checkout the push came from. Measured 2026-08-25, git 2.55.0, parent scrubbed
+  of every `GIT_*` name, reproduced independently on a second rig:
+
+  | push origin | `GIT_DIR` in `pre-push` |
+  |---|---|
+  | main checkout | *none* |
+  | **linked worktree** | `<repo>/.git/worktrees/<name>` |
+  | `--separate-git-dir` | `<separate gitdir>` |
+  | submodule | `<super>/.git/modules/<sub>` |
+  | bare repo | `.` *(relative!)* |
+
+  **git itself exports it. No outer caller is required** — and the incident was a
+  `git push -u origin <branch>` **from a linked worktree**. That is the answer to
+  "why pushing appeared to trigger corruption".
+- **The live scan is not counter-evidence.** "46 processes carry some `GIT_*`,
+  0 carry `GIT_DIR`" is a fact about ambient processes; git sets this variable
+  *for the duration of the hook*, where no scan would ever see it.
+- Pinned by `scripts/tests/test_git_repo_isolation.py::test_git_exports_GIT_DIR_to_pre_push_from_a_worktree_but_not_a_main_checkout`.
+  Since worktree isolation is the standing default for file-modifying agents,
+  this is the ORDINARY path — so the `REPO_POINTER_VARS` strip is load-bearing,
+  not belt-and-braces. Do not weaken it on the strength of the first bullet.
+- ⚠ **Still open:** this identifies what SETS `GIT_DIR` on a push. It does not
+  complete the end-to-end walk `pre-push` → `tests-on-push.sh` → the suite for
+  the incident itself, which `claudedocs/handoff-gitdir-leak-and-ci-gates.md`
+  still lists as never exercised. And nothing here protects `homelab-talos` or
+  any other repo's tooling.
 
 ### 🔴 #683's DETECTION half — two measured defects (its prevention half is sound)
 
