@@ -232,100 +232,18 @@ SUITES=(
   # flows/task-hygiene.md's no-enforcement disclaimer is pinned as prose (it was
   # guarded by nothing; flipping it to a false gate claim went fully green).
   # Floor 163 = 171 - min(50, max(1, 171/20)) = 171 - 8.
-  "claude/skills/clickup/test|5|163"
-
-  # discord-embed-ext: the unpacked MV3 content-script extension that lifts
-  # Discord's 400x300 embed cap and adds the click-to-open lightbox. Two files:
-  # embed_enlarge (media detection, the container walk, the idempotent override)
-  # and lightbox (open/close, zoom, pan, per-message navigation, the wiring of
-  # every on-screen control).
   #
-  # 118 tests / 2 files measured 2026-08-24 on the tree that added it.
-  # Floor 113 = 118 - min(50, max(1, 118/20)) = 118 - 5.
-  #
-  # 🔴 THIS COMMENT PREVIOUSLY CLAIMED SIX REGRESSION TESTS. IT WAS FIVE.
-  # The six original defects were re-introduced ONE AT A TIME by an adversarial
-  # audit; five were killed and one — "navigate() never re-applied the transform"
-  # — SURVIVED a fully green suite, because nothing asserted the transform string
-  # at all. The error was in how it was verified, not a miscount: the RED control
-  # carried all six defects AT ONCE, so the test that covers navigation failed on
-  # its zoom-LABEL assertion and the transform half was credited from the same red
-  # line. A mutant removed together with its enclosing condition proves nothing
-  # about the part you meant to pin — isolate it, or do not claim it.
-  #
-  # The transform is now pinned (scale/translate order, the /zoom pan divisor,
-  # and reset-on-navigate), as are the parts the fixture could not previously
-  # reach at all: the MutationObserver, installAutoStart's document click path,
-  # event propagation, and both sides of each walk-depth constant.
-  #
-  # 🔴 THE SWEEP NUMBER IS A CLAIM ABOUT THE MUTANTS SOMEBODY IMAGINED, NEVER
-  # ABOUT THE SUITE. This comment first said "25 mutants, 24 killed, the survivor
-  # is equivalent" — and an independent audit, constructing its OWN battery
-  # against the same tree, found EIGHT more that were not equivalent at all
-  # (altKey, fractional px, both thresholds raised, the pending list never
-  # draining, the observer's call site, forget()'s two halves masking each other,
-  # and arrow direction — the last invisible because a 2-image fixture cannot
-  # tell +1 from -1). That is the same defect as the miscount above, one level up:
-  # a number stated wider than what was measured.
-  #
-  # A THIRD audit then built a 163-mutant battery and found a 37th anyway —
-  # vindicating the clause, so keep reading it literally. It surfaced: a <source>
-  # root that scan() observed and then discarded; a negative-px value that
-  # findContainer would LATCH on (and a README sentence claiming that was
-  # deliberate — it was unreachable and wrong); the container override's
-  # !important priority, asserted by value but never by priority; the module's own
-  # entry point, where deleting the initial scan or the observer subscription left
-  # the suite green; and the <video><source> rule re-implemented in lightbox.js
-  # with only the OTHER copy pinned.
-  #
-  # A FOURTH audit then found the 47th, and a whole VACUOUS CLASS: the fake DOM
-  # lowercased `tagName`, while a real HTML document reports it UPPERCASE. That
-  # silently voided SEVEN `.toLowerCase()` guards across BOTH content scripts —
-  # each one deletable with the suite fully green, and each deletion making the
-  # extension COMPLETELY INERT in Brave. (This comment said "four" for one round:
-  # audit 5 counted the three in lightbox.js that audit 4 and I both missed. A
-  # count of the sites you happened to look at is not a count of the sites.)
-  # A fixture that normalises away the thing the code normalises is not a test of
-  # that code. The fake now reports uppercase.
-  #
-  # Sweep as of this tree: 86 mutants (25 mine, 11 from audit 2, 10 from audit 3,
-  # 10 from audit 4, 6 from audit 5, 7 from audit 6, 11 from audit 7, 6 from
-  # audit 8), 84 killed, 0 unapplied.
-  # TWO survivors,
-  # and they are ONE equivalence class counted properly: the `nodeType === 1`
-  # filter on the childList arm and on the attributes arm. Both are defence in
-  # depth — scan() returns 0 for any root it cannot query, and an attribute record
-  # only ever targets an Element — and audit 4 verified that argument
-  # independently. A positive control (reverting the media regex to host-only)
-  # dies, so the harness can go red. The sweep's verdicts are read from the
-  # runner's own failure count, never an exit code.
-  #
-  # 🔴 AND READ THAT TOTAL THE WAY README.md TELLS YOU TO: it is a claim about
-  # the 86 mutants somebody CONSTRUCTED, never about the suite. An independent
-  # 150-mutant battery against 20d34ffc — the tree BEFORE the fixes it prompted,
-  # not this one — found 33 survivors, most equivalent, several genuine coverage
-  # gaps that are pinned above BECAUSE of it. (Stating that 33 as a property of
-  # "this same tree" was wrong for one round: a survivor count belongs to the sha
-  # it was measured on, and crediting the fixes in the same breath contradicted
-  # it. Nobody has re-run those 150 against this tree, so there is no post-fix
-  # figure to quote.) The
-  # caveat lived only in README.md for a round, which is the same defect as the
-  # rest of this list: a figure is not safer for being quoted in two places, it
-  # is only safer if BOTH copies carry what it does not cover.
-  #
-  # 🔴 THIS BLOCK ITSELF CARRIED TWO WRONG NUMBERS FOR ONE ROUND: "56 mutants,
-  # 55 killed" while README.md said 62/61, and "the single survivor" beside a
-  # sentence saying it was really two. Two checked-in numbers for one measurement
-  # is the same defect as everything else on this list. Derive both from one
-  # sweep, or state neither.
-  #
-  # The media-URL tests are pinned to a MEASUREMENT, not to a guess: run against
-  # two real logged-in channels on 2026-08-24, the original host-only pattern
-  # matched 59 of 60 <img>/<video> (avatars, server icons, emojis, clan badges,
-  # 48px /media/ decorations) and would have enlarged 10 avatars, while finding
-  # zero attachments. The narrowed pattern matched 0 there and 1 in the second
-  # channel — a real attachment, in a container capped at max-height 350px, which
-  # is the positive control proving it is not simply matching nothing.
+  # 188 tests / 6 files measured 2026-08-24: test/awaiting-contract.test.mjs, the JS
+  # half of the CROSS-LANGUAGE contract for "the newest comment is not the token
+  # owner's". That predicate is implemented twice — here as `isAwaiting()`, and in
+  # scripts/check-clickup-addressed/ derived across a seam — and nothing made the two
+  # agree. Both suites now read ONE shared table
+  # (test/awaiting-contract.fixtures.json) and each MEASURES its own column, so a
+  # divergence appearing or disappearing is red on both sides. It also pins the
+  # structural blocker that makes a consolidation impossible: `awaiting` emits no row
+  # for a task the owner answered last. FILE COUNT MOVES 5 -> 6.
+  # Floor 179 = 188 - min(50, max(1, 188/20)) = 188 - 9.
+  "claude/skills/clickup/test|6|179"
   "scripts/discord-embed-ext/tests|2|113"
 )
 

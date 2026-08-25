@@ -15,10 +15,16 @@ for signals (default: 2000). Signals closer to the task ID mention are weighted 
 import json, os, re, sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+_HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(_HERE))
+sys.path.insert(0, str(_HERE.parent / "lib"))
 from _selfrun import is_self_run  # noqa: E402
+from transcript_search import (  # noqa: E402
+    DEFAULT_ROOT, SURFACE_TEXT, find_transcript, iter_transcripts, load_records, text_of,
+)
 
-CLAUDE_DIR = Path.home() / ".claude" / "projects"
+# Reassigned by tests to point at a tmp tree. Every walker below reads it at CALL time.
+CLAUDE_DIR = DEFAULT_ROOT
 
 # Shape of a ClickUp task ID in this workspace (e.g. 868gy0ddd). Used to detect when a
 # signal inside a task's text window actually belongs to a DIFFERENT task — the window is
@@ -236,14 +242,13 @@ def annotate_pr_refs(signals, default_repo=None):
 
 
 def session_path(session_id):
-    """Locate a session transcript by ID, or None."""
-    for project_dir in CLAUDE_DIR.iterdir():
-        if not project_dir.is_dir():
-            continue
-        path = project_dir / f"{session_id}.jsonl"
-        if path.exists():
-            return path
-    return None
+    """Locate a session transcript by ID, or None.
+
+    Resolved through the shared corpus enumerator, so this agrees with the search stage
+    on what counts as a session — in particular it will not resolve an id to a
+    `subagents/` transcript, which is not resumable and never came from the search.
+    """
+    return find_transcript(session_id, CLAUDE_DIR)
 
 
 def load_session_text(session_id):
@@ -260,25 +265,19 @@ def _read_session(path):
     report `mentions_found: 0` when read here. It also meant a human writing "this is
     still broken" was invisible to every verdict. The two stages now agree on what a
     session contains.
+
+    🔴 The `json.loads` here used to be UNGUARDED, so one malformed line — the shape a
+    transcript still being written naturally has — raised out of the whole run rather
+    than being skipped. It now parses through `transcript_search.load_records`, which
+    skips the line; that is also the rule the search stage uses, so the two stages cannot
+    disagree about which lines a transcript contains.
     """
     texts = []
-    with open(path, errors="replace") as f:
-        for line in f:
-            if not line.strip():
-                continue
-            obj = json.loads(line)
-            if obj.get("type") in ("assistant", "user"):
-                msg = obj.get("message", {})
-                if isinstance(msg, dict):
-                    content = msg.get("content", "")
-                else:
-                    content = str(msg)
-                if isinstance(content, list):
-                    for block in content:
-                        if isinstance(block, dict) and block.get("type") == "text":
-                            texts.append(block.get("text", ""))
-                elif content:
-                    texts.append(str(content))
+    for obj in load_records(path):
+        if obj.get("type") in ("assistant", "user"):
+            body = text_of(obj.get("message", {}), SURFACE_TEXT)
+            if body:
+                texts.append(body)
     return "\n".join(texts)
 
 
@@ -507,27 +506,32 @@ def _find_sessions_for_task(task_id, excluded=None, include_self_runs=False):
 
     Returns (session_ids, self_runs_skipped). The count is reported rather than swallowed:
     a guard nobody can see fire is indistinguishable from one wired to nothing.
+
+    🔴 The PREDICATE here is deliberately NOT `search-sessions.py`'s and is not folded
+    into it: this is a RAW substring test over the whole JSONL line, so it sees the task
+    id wherever it appears — a tool_result, a file path, a metadata field — with no
+    ranking and no limit. It is the fallback that runs when no `--session` was supplied,
+    and narrowing it to the parsed text surface would silently shrink what the completion
+    scan can even look at. What IS shared is the corpus: `iter_transcripts` is the single
+    enumerator THESE TWO STAGES USE — not the only `*.jsonl` walk in the repo, see its
+    module docstring — so this stage and the search stage cannot disagree about which
+    files exist or about excluding the `subagents/` tier.
     """
     excluded = excluded or set()
     sessions = []
     skipped = 0
-    for project_dir in CLAUDE_DIR.iterdir():
-        if not project_dir.is_dir():
+    for path in iter_transcripts(CLAUDE_DIR, exclude_sessions=excluded):
+        try:
+            with open(path, errors="replace") as f:
+                for line in f:
+                    if task_id in line:
+                        if not include_self_runs and is_self_run(path):
+                            skipped += 1
+                        else:
+                            sessions.append(path.stem)
+                        break
+        except OSError:
             continue
-        for path in project_dir.glob("*.jsonl"):
-            if path.stem in excluded:
-                continue
-            try:
-                with open(path, errors="replace") as f:
-                    for line in f:
-                        if task_id in line:
-                            if not include_self_runs and is_self_run(path):
-                                skipped += 1
-                            else:
-                                sessions.append(path.stem)
-                            break
-            except OSError:
-                continue
     return sessions, skipped
 
 

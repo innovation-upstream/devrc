@@ -47,9 +47,13 @@ import tempfile
 from pathlib import Path
 
 SKILL = Path(__file__).resolve().parent.parent
+REPO = SKILL.parents[1]
 RC = "recent-comments.py"
 CA = "check-addressed.py"
 CC = "check-completion.py"
+# Relative to the mutant copy's skill dir — resolves into the `lib/` sibling that run_one
+# reproduces beside it.
+TS = "../lib/transcript_search.py"
 
 # 🔴 REMOVED FROM EVERY MUTANT COPY, and this is the instrument's own correctness, not tidiness.
 # `test_no_real_identifiers.py` is a REPO-HYGIENE gate: it walks `<repo>/scripts/…` and
@@ -66,6 +70,31 @@ CC = "check-completion.py"
 # No code mutant can ever be caught by this gate (it reads the tree, not the logic), so dropping
 # it costs no coverage. `NULL-CONTROL` below is what proves the removal was sufficient.
 EXCLUDED_FROM_MUTANT_RUNS = ("test_no_real_identifiers.py",)
+
+# Modules from `scripts/lib/` these scripts import. Copied into the mutant tree beside the
+# skill so the relative `../lib` import resolves there exactly as it does in the repo.
+SHARED_MODULES = ("transcript_search.py",)
+
+# 🔴 SET IN EVERY CHILD `run_one` SPAWNS, and it is a RECURSION BRAKE, not a nicety.
+# `tests/test_shared_walk.py` verifies the sweep's NULL-CONTROL by calling `run_one`, and
+# `run_one` runs the whole suite — which contains that test. Without a brake the first
+# invocation forks a copy that forks a copy, unbounded: measured 2026-08-25, one run left
+# 2,492 mutant trees under /tmp before it was killed. The test reads this variable and
+# no-ops when it is set, so exactly one level ever executes. It also cross-checks the
+# variable against a structural "am I in a copy" test and FAILS when the two disagree,
+# so a stray export cannot silently disarm the guard in a real checkout.
+NESTED_RUN_ENV = "CCUA_MUTANT_COPY"
+
+# 🔴 REPO-ROOT-RELATIVE DATA A TEST FILE READS AT IMPORT TIME, copied at the same relative
+# path so `Path(__file__).resolve().parents[3] / <path>` resolves in the copy as it does in
+# the repo. Measured 2026-08-25 on the merge of this branch with main: without the entry
+# below, `test_awaiting_contract.py` raised at import (it reads its shared contract table
+# from `claude/skills/clickup/test/`), the whole file scored FAILED TO IMPORT, and the
+# NULL-CONTROL ABORTED the sweep — the "green for the wrong reason" failure this file's own
+# EXCLUDED_FROM_MUTANT_RUNS block was written about, recurring in a new shape. Copying is
+# the right fix rather than excluding the file: the fixture is DATA the mutants can be
+# scored against, so excluding it would drop real coverage.
+REPO_FIXTURES = ("claude/skills/clickup/test/awaiting-contract.fixtures.json",)
 
 # (id, file, old, new, note). `old` must occur EXACTLY ONCE or the mutant is NOT APPLIED.
 MUTANTS = [
@@ -320,6 +349,21 @@ MUTANTS = [
     ("U3", CC, "    if kind == \"ambiguous\":", "    if False:",
      "collapse the one failure whose diagnosis is TRUE into the generic message"),
 
+    # ---------- the shared transcript walk (scripts/lib/transcript_search.py, 2026-08-24)
+    # These prove this suite can still SEE a break in code that no longer lives in this
+    # directory. Consolidating the walk out of `search-sessions.py` and `check-completion.py`
+    # would otherwise have moved it out from under every mutant here — coverage lost with a
+    # fully green sweep to show for it.
+    # ⚠ This targets `is_corpus_member`, NOT `iter_transcripts`. An earlier spelling aimed at
+    # the walk's own body and, once the predicate was factored out, scored NOT APPLIED — a
+    # silent coverage hole that reads like a row rather than an absence. Re-check the anchor
+    # when transcript_search.py moves.
+    ("TS1", TS, "    if any(p in EXCLUDED_DIR_NAMES for p in parents):\n        return False\n",
+     "", "walk the subagents/ tier — 4,776 transcripts that are not sessions"),
+    ("TS2", TS, "            except Exception:\n                continue\n",
+     "            except Exception:\n                raise\n",
+     "let one malformed JSONL line abort the read again"),
+
     # ---------- POSITIVE CONTROL. A mutant round 6 proved is caught; if this ever reports
     # SURVIVED the harness is broken, not the code.
     ("PC", CA, '    reply_unreported = "my_latest_reply" not in nc', "    reply_unreported = False",
@@ -349,17 +393,61 @@ def _apply(body, mid, old, new):
     return body.replace(old, new)
 
 
-def run_one(mid, fname, old, new, note, workdir):
-    dst = Path(workdir) / mid
+def materialize(root):
+    """Build a runnable copy of the skill under `root`, and return its skill dir.
+
+    🔴 THE MUTANT COPY REPRODUCES THE REPO's `scripts/` LAYOUT, not just this directory.
+    The scripts import `scripts/lib/transcript_search.py` — the single transcript-corpus
+    walker they share with `scripts/find-session.py` — as `_HERE.parent / "lib"`, and
+    `tests/test_awaiting_contract.py` reads a shared contract table via
+    `parents[3] / "claude/skills/..."`. Copying only `SKILL` into a bare temp dir leaves
+    both unresolvable, every test file scores FAILED TO IMPORT, and the NULL-CONTROL
+    aborts the sweep. Nesting the copy under `<root>/scripts/` keeps ONE path rule — the
+    real repo's — true in the copy too, rather than teaching the code a second candidate
+    path that only ever fires inside a test harness.
+
+    A FUNCTION so the property is testable without running a sweep: the ledger test in
+    `tests/test_shared_walk.py` calls exactly this and then imports every test module.
+    """
+    root = Path(root)
+    dst = root / "scripts" / SKILL.name
+    dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(SKILL, dst, ignore=shutil.ignore_patterns("__pycache__", ".pytest_cache"))
+    shared = dst.parent / "lib"
+    shared.mkdir(parents=True, exist_ok=True)
+    for mod in SHARED_MODULES:
+        shutil.copy2(SKILL.parent / "lib" / mod, shared / mod)
+    for rel in REPO_FIXTURES:              # `root` IS the copy's repo root — parents[3]
+        target = root / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(REPO / rel, target)
+    return dst
+
+
+def run_one(mid, fname, old, new, note, workdir):
+    """Score ONE mutant. Returns (verdict, killers, stdout).
+
+    🔴 THE SUITE RUNS IN A SUBPROCESS, and that is load-bearing rather than convenient.
+    The copy's whole purpose is that `../lib/transcript_search.py` resolves to the COPY;
+    executed in-process, the parent's `sys.path`/`sys.modules` already hold the REAL
+    `scripts/lib` (the real `search-sessions.py` inserts it at import), so the copy's
+    layout is never consulted and a tree missing it still imports fine. Measured
+    2026-08-25: with `SHARED_MODULES = ()` an in-process guard reported green while this
+    function, in the same tree, printed NULL-CTL KILLED and aborted the sweep.
+
+    The stdout is returned, not just the verdict, so a caller can apply its own positive
+    control to it — a "0 failed" out of a run that collected nothing is the reassuring
+    zero this file exists to refuse.
+    """
+    dst = materialize(Path(workdir) / mid)
     for name in EXCLUDED_FROM_MUTANT_RUNS:
         (dst / "tests" / name).unlink(missing_ok=True)
     target = dst / fname
     mutated = _apply(target.read_text(), mid, old, new)
     if mutated is None:
-        return "NOT APPLIED", []
+        return "NOT APPLIED", [], ""
     target.write_text(mutated)
-    env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
+    env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1", **{NESTED_RUN_ENV: "1"})
     proc = subprocess.run([sys.executable, str(dst / "tests" / "run_all.py")],
                           capture_output=True, text=True, env=env)
     killers = re.findall(r"^  ✗ (\S+?):", proc.stdout, re.M)
@@ -367,11 +455,30 @@ def run_one(mid, fname, old, new, note, workdir):
     if not total:
         # No verdict line at all is a DEAD RUN, never a pass — the runner's own docstring
         # says so, and an absent line reads as empty output through any filter.
-        return "NO VERDICT", killers
-    return ("KILLED" if int(total.group(2)) else "SURVIVED"), killers
+        return "NO VERDICT", killers, proc.stdout
+    return ("KILLED" if int(total.group(2)) else "SURVIVED"), killers, proc.stdout
+
+
+def _assert_ids_unique():
+    """🔴 A DUPLICATE MUTANT ID IS A SILENT HARNESS BREAK, and it happened once.
+
+    `run_one` builds its work directory as `<workdir>/<id>`, and `--check`/selection match
+    on the id — so two rows sharing one id collide in the same temp tree and a selection
+    naming it picks up both, while `len(selected) != len(set(wanted))` rejects the run with
+    a bare "unknown mutant id". Adding TS1/TS2 as `T1`/`T2` produced exactly that. Fail
+    with the offending id instead.
+    """
+    seen, dupes = set(), []
+    for row in MUTANTS:
+        if row[0] in seen:
+            dupes.append(row[0])
+        seen.add(row[0])
+    if dupes:
+        raise SystemExit(f"duplicate mutant id(s) in MUTANTS: {sorted(set(dupes))}")
 
 
 def main(argv):
+    _assert_ids_unique()
     if "--list" in argv:
         for mid, fname, _o, _n, note in MUTANTS:
             print(f"{mid:8s} {fname:20s} {note}")
@@ -392,7 +499,7 @@ def main(argv):
         # sweep that proves nothing. That is not hypothetical: it is what the first run of
         # this file did, because a repo-hygiene gate cannot resolve the repo from a copy.
         # See EXCLUDED_FROM_MUTANT_RUNS.
-        verdict, killers = run_one("NULL-CONTROL", CA, "", "", "no mutation", workdir)
+        verdict, killers, _out = run_one("NULL-CONTROL", CA, "", "", "no mutation", workdir)
         print(f"{'NULL-CTL':8s} {verdict:11s} no mutation — MUST be SURVIVED")
         if verdict != "SURVIVED":
             for k in killers[:5]:
@@ -403,7 +510,7 @@ def main(argv):
             return 2
 
         for mid, fname, old, new, note in selected:
-            verdict, killers = run_one(mid, fname, old, new, note, workdir)
+            verdict, killers, _out = run_one(mid, fname, old, new, note, workdir)
             if verdict != "KILLED":
                 bad.append((mid, verdict))
             print(f"{mid:8s} {verdict:11s} {note}")

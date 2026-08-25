@@ -55,7 +55,7 @@ BEHIND="$(git -C "$ROOT" rev-list --count "HEAD..$UP" 2>/dev/null || echo 0)"
 # just not listed.
 DIFFERING="$(git -C "$ROOT" diff --name-only "$UP" -- "${REFRESH_PATHS[@]}" 2>/dev/null || true)"
 
-refreshed=(); skipped=(); optout=(); failed=(); approved=()
+refreshed=(); skipped=(); optout=(); failed=(); approved=(); pruned=(); to_prune=()
 
 if [ -n "$DIFFERING" ]; then
   while IFS= read -r p; do
@@ -76,6 +76,7 @@ if [ -n "$DIFFERING" ]; then
     # idempotence test that re-runs without upstream moving in between -- the
     # second refresh only breaks once the file goes stale AGAIN.
     known=no
+    deleted=no
     if [ ! -e "$ROOT/$p" ]; then
       # NEW UPSTREAM: the path does not exist here at all, so there is no local
       # content to protect and the checkout below CREATES it.
@@ -90,16 +91,60 @@ if [ -n "$DIFFERING" ]; then
     elif ! cur="$(git -C "$ROOT" hash-object "$p" 2>/dev/null)" || [ -z "$cur" ]; then
       failed+=("$p")
       continue
-    elif [ "$cur" = "$(git -C "$ROOT" rev-parse "HEAD:$p" 2>/dev/null || echo none)" ]; then
-      known=yes
     else
-      while IFS= read -r c; do
-        [ -n "$c" ] || continue
-        if [ "$cur" = "$(git -C "$ROOT" rev-parse "$c:$p" 2>/dev/null || echo none)" ]; then
-          known=yes
-          break
-        fi
-      done < <(git -C "$ROOT" rev-list -n 100 "$UP" -- "$p" 2>/dev/null)
+      # DELETED UPSTREAM: present here, absent in $UP. `checkout $UP -- $p` cannot
+      # deliver a deletion -- the pathspec matches nothing there -- so both it and
+      # the retry fail and the path lands in FAILED, every session, forever. The
+      # file is then retained indefinitely and keeps loading into agent context.
+      #
+      # 🔴 This is the exact mirror of the ADDED-path bug fixed above, and it lands
+      # in the same wrong bucket. Measured 2026-08-24 on a datapacket-talos clone:
+      # `.claude/skills/check-clickup-addressed/` was removed upstream (the skill
+      # moved to devrc), and the clone went on serving a 437-line retired SKILL.md
+      # against the 562-line canonical one -- with .pytest_cache/ and __pycache__/
+      # underneath it, so it was being RUN from, not merely read. The hook reported
+      # those paths as FAILED on every session start and could never resolve them.
+      #
+      # Detected by ASKING UPSTREAM (`cat-file -e`), never by an exit code from a
+      # comparison: `git diff --quiet <ref> -- <p>` exits 0 when <p> is on neither
+      # side, which reads as a reassuring "same" for a file that is simply absent.
+      if ! git -C "$ROOT" cat-file -e "$UP:$p" 2>/dev/null; then
+        deleted=yes
+      fi
+      # 🔴 `cat-file -e` answers "is this path ABSENT upstream", which is NOT the
+      # same question as "was it DELETED upstream" -- they differ for a path
+      # upstream NEVER HAD. So `deleted=yes` alone must never authorise a removal.
+      #
+      # The `HEAD:$p` shortcut below is what made that difference dangerous. For a
+      # REFRESH it is adequate: matching HEAD means there is no UNCOMMITTED local
+      # modification, so the content stays recoverable from HEAD after an overwrite.
+      # (Not "never touched locally" -- a locally COMMITTED CLAUDE.md does match HEAD
+      # and IS reverted in the worktree on every session start. Pre-existing, and
+      # recoverable, but do not restate the stronger claim: it is the exact reasoning
+      # that went wrong below.) For a PRUNE the shortcut proves only that the content
+      # is committed HERE -- and a removal is not recoverable from HEAD -- which is
+      # exactly what a skill authored on this branch and not yet pushed looks like.
+      # Left ungated it deleted: a locally-committed skill, a locally-committed
+      # CLAUDE.md, and on a branch with no upstream (so `$UP` falls back to
+      # `origin/HEAD`) every `.claude/skills/**` file the branch adds -- re-deleting
+      # them on every session, while the report said "GONE upstream on purpose ...
+      # find where it moved rather than restoring it". Caught in review, 2026-08-24.
+      #
+      # So a prune must clear the HIGHER bar: the blob has to appear in $UP's own
+      # history FOR THIS PATH. A never-upstream path has no such history (the
+      # rev-list below yields nothing), so it stays `known=no` and is protected.
+      if [ "$deleted" = no ] \
+         && [ "$cur" = "$(git -C "$ROOT" rev-parse "HEAD:$p" 2>/dev/null || echo none)" ]; then
+        known=yes
+      else
+        while IFS= read -r c; do
+          [ -n "$c" ] || continue
+          if [ "$cur" = "$(git -C "$ROOT" rev-parse "$c:$p" 2>/dev/null || echo none)" ]; then
+            known=yes
+            break
+          fi
+        done < <(git -C "$ROOT" rev-list -n 100 "$UP" -- "$p" 2>/dev/null)
+      fi
     fi
     if [ "$known" = no ]; then
       skipped+=("$p")
@@ -108,6 +153,11 @@ if [ -n "$DIFFERING" ]; then
 
     if [ "${BASE_CLONE_NO_REFRESH:-0}" = "1" ]; then
       optout+=("$p")
+      continue
+    fi
+
+    if [ "$deleted" = yes ]; then
+      to_prune+=("$p")
       continue
     fi
 
@@ -143,17 +193,78 @@ if [ "${#approved[@]}" -gt 0 ]; then
   fi
 fi
 
+# Deliver upstream DELETIONS. This is the only place the hook removes anything:
+#   * `rm -f` on a single FILE for the content itself, plus `rmdir` (empty
+#     directories ONLY, it refuses a non-empty one) to clear the shell left behind;
+#   * only paths git itself named, from a diff already restricted to REFRESH_PATHS;
+#   * only for a path whose blob appears in $UP's OWN history for that path, so a
+#     never-upstream or locally-authored file is routed to `skipped` above and is
+#     never reached here;
+#   * `BASE_CLONE_NO_REFRESH=1` opts out of this exactly as it does a refresh.
+#
+# ⚠️ Two of those are UNREACHABLE BACKSTOPS today, and are labelled rather than
+# claimed as tested: the `rm -f`-not-`rm -r` choice and the escape guard below both
+# survive mutation, because `hash-object` fatals on a directory (so one never
+# reaches here) and `git diff --name-only` never emits a `..` component. They are
+# defence in depth against a future change upstream of this loop, NOT pinned
+# behaviour. The `rmdir` bound IS pinned -- widening it to `rm -rf` is caught.
+#
+# 🔴 An absolute path or a `..` COMPONENT would escape REFRESH_PATHS, so reject
+# rather than resolve it. Match the component, not the substring: `*..*` also
+# rejects an ordinary filename like `v1..v2.md`, sending it to the FAILED bucket
+# forever -- the exact misclassification this whole change exists to remove.
+for p in "${to_prune[@]:-}"; do
+  [ -n "$p" ] || continue
+  case "/$p/" in
+    */../*) failed+=("$p"); continue ;;
+  esac
+  case "$p" in
+    /*) failed+=("$p"); continue ;;
+  esac
+  if rm -f "$ROOT/$p" 2>/dev/null && [ ! -e "$ROOT/$p" ]; then
+    pruned+=("$p")
+    # Clear the hollow `.claude/skills/<name>/` shell so a removed skill does not
+    # keep LOOKING installed. `rmdir` refuses a non-empty directory, so this cannot
+    # destroy content -- an untracked sibling (build cache, local scratch) both
+    # survives and stops the climb.
+    #
+    # 🔴 Bounded at the REFRESH_PATHS roots by EXACT string compare, so a future
+    # entry must be spelled the way `dirname` yields it -- `.claude/skills`, not
+    # `.claude/skills/`. A future entry that is a NESTED FILE (`docs/AGENTS.md`)
+    # would bound at the file and leave its parent directory climbable; the current
+    # two-entry list has no such case. Unbounded it walked past its own scope:
+    # on a repo whose only skill was deleted upstream it removed `.claude/skills`
+    # AND `.claude` -- empty and harmless, but `.claude` is not a path this hook is
+    # allowed to touch, and anything probing `[ -d .claude ]` would see it vanish.
+    d="$(dirname "$p")"
+    while [ "$d" != "." ] && [ "$d" != "/" ]; do
+      _bounded=no
+      for _r in "${REFRESH_PATHS[@]}"; do
+        [ "$d" = "$_r" ] && _bounded=yes && break
+      done
+      [ "$_bounded" = yes ] && break
+      rmdir "$ROOT/$d" 2>/dev/null || break
+      d="$(dirname "$d")"
+    done
+  else
+    failed+=("$p")
+  fi
+done
+
 n_ref=${#refreshed[@]}; n_skip=${#skipped[@]}; n_opt=${#optout[@]}; n_fail=${#failed[@]}
+n_prune=${#pruned[@]}
 
 # Nothing to say when the clone is current. A banner that fires every time gets
 # ignored, which is the failure mode this hook exists to prevent.
-if [ "$BEHIND" -eq 0 ] && [ "$n_ref" -eq 0 ] && [ "$n_skip" -eq 0 ] && [ "$n_opt" -eq 0 ] && [ "$n_fail" -eq 0 ]; then
+if [ "$BEHIND" -eq 0 ] && [ "$n_ref" -eq 0 ] && [ "$n_skip" -eq 0 ] && [ "$n_opt" -eq 0 ] && [ "$n_fail" -eq 0 ] \
+   && [ "$n_prune" -eq 0 ]; then
   exit 0
 fi
 
 repo="$(basename "$ROOT")"
 msg="$repo is $BEHIND commit(s) behind $UP"
 [ "$n_ref" -gt 0 ] && msg="$msg | refreshed $n_ref context file(s)"
+[ "$n_prune" -gt 0 ] && msg="$msg | pruned $n_prune deleted upstream"
 [ "$n_skip" -gt 0 ] && msg="$msg | SKIPPED $n_skip (local edits)"
 [ "$n_opt" -gt 0 ] && msg="$msg | STALE $n_opt (refresh opted out)"
 [ "$n_fail" -gt 0 ] && msg="$msg | FAILED $n_fail"
@@ -166,6 +277,17 @@ if [ "$n_ref" -gt 0 ]; then
 - REFRESHED from $UP (these now match upstream, and will show as modified-vs-HEAD
   in git status -- that is this hook's doing, not stray WIP):
 $(printf '    %s\n' "${refreshed[@]}")"
+fi
+if [ "$n_prune" -gt 0 ]; then
+  ctx="$ctx
+- PRUNED: deleted upstream, so removed here too. Each file was removed only after
+  confirming that exact content appears in $UP's own history for that path, so
+  nothing authored locally was touched; a directory left empty by the removal is
+  then cleared with rmdir, which refuses a non-empty one. HEAD was NOT moved, so
+  these show as deleted-in-worktree in git status until this clone's branch catches
+  up. If you were relying on one of these, it is GONE upstream on purpose -- find
+  where it moved rather than restoring it:
+$(printf '    %s\n' "${pruned[@]}")"
 fi
 if [ "$n_skip" -gt 0 ]; then
   ctx="$ctx

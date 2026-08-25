@@ -1481,14 +1481,32 @@ audit caught it. If the core rule ever narrows back to mechanical checks only, i
 that defect — the archive is not consulted to decide whether a rule applies, so the core's own
 wording has to carry the T2 case.
 
-**Stamping — IN FLIGHT, not shipped.** An `agent/<producer>` label plus a body marker are proposed
-for the in-cluster GitHub producers and the single ClickUp create choke point (PRs open, not
-merged, at time of writing; the marker grammar lands with the ClickUp one). Until they merge there
-is no format an agent can follow, which is why the core rule does **not** instruct anyone to stamp.
+**Stamping — SHIPPED for ClickUp, DROPPED for GitHub.** Verified 2026-08-24; this paragraph
+previously read "IN FLIGHT, not shipped" and was stale in **both** directions.
+
+*ClickUp — shipped.* The `agent/<producer>` tag plus a body marker land at the single create
+choke point: `claude/skills/clickup/lib/agent-marker.mjs` defines the grammar and
+`applyAgentStamp()` in `claude/skills/clickup/api/tasks.mjs` applies it, with `createTask` /
+`createSubtask` spreading the body and attaching the tag (devrc #768, merged). So a format an
+agent can follow now exists. It shipped harder than proposed: a caller-supplied `cond` is
+validated at the seam and `unstated` is **refused** there, so only the fallback branch may emit
+it — an honest marker of absence stays countable instead of being laundered into a fake `manual`.
+
+*GitHub — dropped, for want of a producer.* Never implemented, and no longer applicable: the
+in-cluster producer it was written for (`scripts/task-spec-drafter/drafter.sh`) now **denies**
+`gh issue create` outright via `DRAFTER_DENY_GH`, and `clank-resolver/bot.py` — the only other
+candidate — makes no GitHub API calls at all (its `labels` are its own task-DB column, which is
+what a naive grep trips on). Re-open this only if an in-cluster GitHub producer reappears.
+
+🔴 **The core rule still does not instruct anyone to stamp**, and that is now a choice rather
+than a consequence: the ClickUp path stamps itself at the choke point, so no agent needs to know
+the grammar. Do not add a "stamp your objects" instruction to the core on the strength of this
+paragraph.
+
 Before that work, **3** open GitHub objects carried any fingerprint marker — all three from one
 producer — and **zero** ClickUp tasks did, a zero validated against a synthetic control (the same
 pattern matched a planted marker, and descriptions do carry a literal `<`, so a real one would
-have been visible).
+have been visible). Those counts are the pre-stamping baseline and are not re-measured here.
 
 **What is NOT established, and bounds how far this goes.** Agent authorship of *issues* is
 bounded, not measured: the Claude Code footer lands on PR bodies (93 of 97 hits) and essentially
