@@ -344,15 +344,20 @@ not, which is why the same command behaved differently for the agent and the hum
 age identity file is the same size (fixed-width `# created:`, `# public key:` and key
 lines). Equal byte counts on both sides carry no information about whether the keys match.
 
-Public-key hashes, compared without printing key material — all four are distinct
-identities:
+Public-key hashes, compared without printing key material — all four are **distinct**
+identities. Three client checkouts carry their own key at a `…/.secrets/sops/age.key` path;
+they are not enumerated here (this repo is public) and which one it landed on does not
+change the conclusion:
 
 | identity | pubkey sha (first 16) |
 |---|---|
 | `homelab-talos/.secrets/age.key` (the real one) | `288c4d24cfdb5aa1` |
-| `civit/postgres-debezium-kafka-replication/.secrets/sops/age.key` | `7e3367f5a3a5d327` |
-| `civit/civitai-gpu-fleet/.secrets/sops/age.key` | `6643aa0a698317cf` |
-| `civit/datapacket-talos/.secrets/sops/age.key` | `8e6095ea38340cef` |
+| client checkout A | `7e3367f5a3a5d327` |
+| client checkout B | `6643aa0a698317cf` |
+| client checkout C | `8e6095ea38340cef` |
+
+Reproduce with `age-keygen -y <file> | sha256sum` — it prints the PUBLIC half only, so the
+comparison never handles secret material.
 
 **The on-disk homelab key is confirmed correct, independently of the vault.**
 `restore-verify.py --identity ~/workspace/homelab-talos/.secrets/age.key` → **rc=0**, all
