@@ -528,6 +528,13 @@ OWNS_NO_ON_DISK_STATE = {
                                  # the one hook here that is deliberately memoryless:
                                  # a per-session "already asked" counter would let a
                                  # second create in the same turn through unchecked.
+    "gh-issue-closing-condition-guard.py",  # stateless for the same reason as its
+                                 # twin above: the verdict is a pure function of the
+                                 # command text plus any --body-file it READS. It
+                                 # writes nothing and keeps no throttle, deliberately
+                                 # — a per-session "already asked" counter would let
+                                 # a second create in the same turn through
+                                 # unchecked.
     "bash-guard.py",             # thin wrapper over guard_core.py
     "bg-command-capture.py",     # delegates every path to lib/bg_command_capture.py,
                                  # exactly as agent-ledger-hook.py does. Its names

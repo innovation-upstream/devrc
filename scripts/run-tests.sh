@@ -682,6 +682,17 @@ HERMETIC_TARGETS=(
   # load-bearing half, so they are gated here rather than left to the ungated
   # hand-rolled scripts beside it.
   scripts/claude-hooks/tests/test_clawgate_task_interview_guard.py
+  # Same reason again — a FILE, not the directory. The interview gate's twin on
+  # the OTHER board: this one denies a `gh issue create` whose body names no
+  # closing condition, and — deliberately — one whose body it cannot read at all.
+  # It is the third hook here that can BLOCK and it fires PreToolUse on EVERY Bash
+  # call, on `gh`, the most-typed tool in these repos. Its NON-matches are the
+  # load-bearing half and then some: a `grep`/`echo`/`rg` for the command string,
+  # a heredoc that documents it, `issue comment|edit|close|list|view`, a `gh api`
+  # GET and a curl to `…/issues/<n>/comments` must all pass, or the gate becomes
+  # the thing everyone routes around. Gated here rather than left to the ungated
+  # hand-rolled scripts beside it.
+  scripts/claude-hooks/tests/test_gh_issue_closing_condition_guard.py
   # Same reason again — a FILE, not the directory. This one gates a CROSS-MODULE
   # class rather than any single hook: the on-disk names every hook's cache is made
   # of. Fifteen of them could be renamed with zero test movement, because writer and
@@ -1677,6 +1688,66 @@ TARGET_FLOORS=(
   # ZERO new skips, so EXPECTED_SKIPS is untouched. If this line conflicts with a
   # sibling branch, re-run the gate on the MERGED tree and copy what it prints.
   "scripts/claude-hooks/tests/test_clawgate_task_interview_guard.py|285"
+  # 2026-08-25, the gh-issue closing-condition gate arrives as a NEW target: 251
+  # collected, 0 skipped, measured on this branch. Gate's own rule applied to the
+  # gate's own count:
+  #   _suggested_floor 251 = 251 - min(50, max(1, 251/20 = 12)) = 251 - 12 = 239.
+  # The suite is deliberately weighted toward the ALLOW direction — 17 detector
+  # accepts, 18 mention shapes, 30 non-create verbs — because this hook can block
+  # and it watches `gh`. A 32-mutant sweep run under PYTHONDONTWRITEBYTECODE=1,
+  # each edit verified applied by reading the file back, killed 31/31 real
+  # mutants; the comment-only negative control survived, which is what proves the
+  # sweep can report SURVIVED at all. ZERO new skips, so EXPECTED_SKIPS is
+  # untouched. If this line conflicts with a sibling branch, re-run the gate on
+  # the MERGED tree and copy what it prints.
+  #
+  # 2026-08-25, the audit fix round on the same branch: 251 -> 383 collected, 0
+  # skipped. +132 because the audit found three 🔴 bypasses whose PINNING TESTS
+  # each asserted only the one shape that already worked — the override quoted in
+  # a body (only mid-line was pinned, and only mid-line worked), an unrelated
+  # heredoc rescuing an unseeable body (only `--body '<no condition>'` was pinned,
+  # five other shapes ALLOWED), and two creates on a line (only the plain `--body`
+  # spelling was pinned, the heredoc spelling passed). Each is now a table. The
+  # rest is the ALLOW-direction regression battery (36 realistic correct calls,
+  # asserted to pass silently) plus the crash-path tests, which previously ran
+  # neither `main()` nor the crash branch at all.
+  # Plus two KNOWN-GAP tables — a shell-keyword prefix and a body quoting a
+  # heredoc operator — which pin the docstring's NOT-COVERED entries so the
+  # claims cannot rot silently.
+  #   _suggested_floor 383 = 383 - min(50, max(1, 383/20 = 19)) = 383 - 19 = 364.
+  #
+  # 2026-08-25, the same-physical-line heredoc attribution fix (B2 reopened by
+  # 2bd3d1e7): 383 -> 394 collected, 0 skipped. +11 = a 7-case table for two
+  # heredoc openers on ONE line (`&&`, `;`, `| tee`, no body flag, `<<-`, CRLF,
+  # three chained), each watched RED at 2bd3d1e7 and green here; the ALLOW-
+  # direction case on that same shape (also red at 2bd3d1e7); and three INVARIANT
+  # guards, labelled as such in the file because they were green at that ref and
+  # are not regression coverage — they exist because the mutation sweep found
+  # nothing else that could see the literal B2 mutant or the override-after-a-
+  # heredoc path. That sweep, run under PYTHONDONTWRITEBYTECODE=1 in a per-mutant
+  # copy of the tree, killed 6/6 real mutants with the positive control also
+  # killed. ZERO new skips, so EXPECTED_SKIPS is untouched.
+  #   _suggested_floor 394 = 394 - min(50, max(1, 394/20 = 19)) = 394 - 19 = 375.
+  #
+  # 2026-08-25, bypasses A and B closed: 394 -> 474 collected, 0 skipped. +80.
+  #   A — a create inside a COMMAND SUBSTITUTION. `URL="$(gh issue create …)"`
+  #   allowed while the same line without the two quote characters denied, because
+  #   `guard_core._scan_raw` buffers a double-quoted region verbatim. 39 of the 79
+  #   were watched RED at c8d60161 and green here; the other 41 are INVARIANT
+  #   guards, labelled as such in the file — the ALLOW twin of every hidden-create
+  #   case, the single-quoted-prose battery, the unquoted/nested controls that
+  #   name the variable, and the brace-group gap pinned as a gap.
+  #   B — ONE EFFECTIVE BODY PER SOURCE, each rule measured against the shipped
+  #   tool: pflag last-wins with `--body-file` beating `--body` on gh 2.97.0, a
+  #   repeated `gh api` body field rejected outright, curl 8.17.0 MERGING repeated
+  #   data options (`&` for the `-d` family, plain concatenation for `--json`).
+  #   The mutation sweep — per-mutant tree copy, PYTHONDONTWRITEBYTECODE=1 —
+  #   killed 24/24 real mutants each by its OWN target test, positive control
+  #   (OVERRIDE_VALUE 1->2) also killed; two probe mutants SURVIVED and are
+  #   recorded as not-covered in the hook's own comments rather than counted.
+  #   ZERO new skips, so EXPECTED_SKIPS is untouched.
+  #   _suggested_floor 474 = 474 - min(50, max(1, 474/20 = 23)) = 474 - 23 = 451.
+  "scripts/claude-hooks/tests/test_gh_issue_closing_condition_guard.py|451"
   # 2026-08-18, the on-disk artifact-name registry arrives as a NEW target: 13
   # collected. Deliberately small — one test per module whose names it pins, plus the
   # two-sided classification guard that fails when a hook module appears or vanishes.

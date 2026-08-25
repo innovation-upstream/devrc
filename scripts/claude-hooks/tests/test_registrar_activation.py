@@ -93,6 +93,7 @@ WRITEBACK = HOOK_PY + " ~/.claude/hooks/clawgate-writeback-guard.py"
 INTERVIEW = HOOK_PY + " ~/.claude/hooks/clawgate-task-interview-guard.py"
 BASH_GUARD = HOOK_PY + " ~/.claude/hooks/bash-guard.py"
 BG_CAPTURE = HOOK_PY + " ~/.claude/hooks/bg-command-capture.py"
+GH_ISSUE = HOOK_PY + " ~/.claude/hooks/gh-issue-closing-condition-guard.py"
 CLAWGATE_STOP = "/home/zach/.claude/clawgate-stop-hook.sh"
 TMUX_STOP = "~/.config/tmux/task-hook.sh"
 
@@ -252,10 +253,14 @@ def test_unrelated_settings_content_is_untouched(tmp_path):
     # task interview guard, and the backgrounded-command capture log (868ktvqf9),
     # which is INSTRUMENTATION — it emits no permissionDecision and cannot refuse a
     # command, so its presence here widens what PreToolUse OBSERVES and not what it
-    # can block. Asserted as a whole-list equality, IN ORDER, so a fourth entry or a
-    # doubled bash-guard fails it — the strictness is the point, and is why adding a
-    # PreToolUse hook has to come through this line.
-    assert pre == [BASH_GUARD, INTERVIEW, BG_CAPTURE], pre
+    # can block. Asserted as a whole-list equality, IN ORDER, so an unexpected entry
+    # or a doubled bash-guard fails it — the strictness is the point, and is why
+    # adding a PreToolUse hook has to come through this line.
+    #
+    # 2026-08-25: GH_ISSUE joins them — the fourth entry and the THIRD that can
+    # refuse, denying a `gh issue create` whose body names no closing condition. It
+    # came through this line, as intended.
+    assert pre == [BASH_GUARD, INTERVIEW, BG_CAPTURE, GH_ISSUE], pre
 
 
 def test_a_settings_file_that_already_has_the_nudge_is_left_byte_identical(tmp_path):

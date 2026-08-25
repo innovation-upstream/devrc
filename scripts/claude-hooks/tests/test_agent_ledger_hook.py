@@ -69,6 +69,14 @@ def run_hook(data, home, env=None, args=()):
     e = dict(os.environ)
     e["HOME"] = str(home)
     e.pop("TMUX_PANE", None)           # no tmux by default; opt in per test
+    # 🔴 A CEILING, NOT A SLEEP. The hook calls `AL.tmux_context(pane=...)` with
+    # no timeout knob at all, so the env var is the only way to stop a pane-keyed
+    # assertion here silently depending on the 2.0s production default — which
+    # under the devrc-ci leg is the #810 flake. In the harness rather than in the
+    # two tests that need it today, so the next author cannot forget it. A
+    # passing stub call returns in ~3ms (0.197s worst at a 20x CPU stall), so 60s
+    # is ~300x the worst contended observation and costs a passing run nothing.
+    e["AGENT_LEDGER_TMUX_TIMEOUT_S"] = "60.0"
     e.update(env or {})
     return subprocess.run(
         [sys.executable, HOOK, *args],
