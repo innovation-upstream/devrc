@@ -3057,6 +3057,13 @@ def test_the_identity_note_asks_about_the_FILE_not_the_env(tmp_path):
     assert RV._identity_note(B.DEFAULT_IDENTITY) == ""
     note = RV._identity_note(tmp_path / "somewhere-else.key")
     assert "NOT the default identity" in note
+    # 🔴 ALL THREE SOURCES. Asserting only the two env vars let the message be
+    # reverted to exactly the wording the previous round rejected — an operator
+    # who used `--identity` sent to check two variables that had no effect on
+    # their run — with the whole suite green. `--identity` is the word this
+    # guard exists for, and it is the likely path: escrow-verify's mismatch
+    # message explicitly says "pass it the SAME --identity you used here".
+    assert "--identity" in note, note
     assert "ASIB_AGE_IDENTITY" in note and "SOPS_AGE_KEY_FILE" in note
 
 

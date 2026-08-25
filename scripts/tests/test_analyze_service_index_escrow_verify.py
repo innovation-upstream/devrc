@@ -2662,14 +2662,25 @@ def test_same_identity_file_asks_about_the_FILE_not_the_spelling(tmp_path):
     # `~` must expand: argparse does NOT expanduser, so a quoted
     # `--identity '~/...'` arrives literally and would otherwise never match.
     home = Path.home()
+    # BOTH sides — dropping `.expanduser()` from `b` alone survived a guard
+    # that only ever put `~` in position `a`. The NUL assertions below are
+    # symmetric; this one was not, and the asymmetry was an oversight.
     assert B.same_identity_file(Path("~"), home)
+    assert B.same_identity_file(home, Path("~"))
     assert not B.same_identity_file(Path("~"), home / "definitely-not-here")
+    assert not B.same_identity_file(home / "definitely-not-here", Path("~"))
     # 🔴 THE EXCEPTION BELT, MADE REACHABLE. An embedded NUL is the one input
     # that actually raises out of `resolve()` (ValueError, measured — symlink
     # loops, deep chains and unreadable parents all return normally on 3.12).
     # Without this the fallback was dead code and mutating it to the UNSAFE
     # `return True` — which would silence the warning for every path — survived
     # the whole suite.
+    # 🔴 THE PRECONDITION, ASSERTED. Without this the pair below pins only the
+    # OUTCOME: on a runtime whose `resolve()` stopped raising, the belt would
+    # silently become dead code again and the unsafe `return True` mutant would
+    # pass. Measured raising on 3.12 and 3.13; this says so the day it changes.
+    with pytest.raises(ValueError):
+        Path("a\x00b").expanduser().resolve()
     assert not B.same_identity_file(Path("a\x00b"), real)
     assert not B.same_identity_file(real, Path("a\x00b"))
     # a path that does not exist must compare, not raise
@@ -2900,6 +2911,27 @@ def test_the_SUCCESS_line_from_a_REAL_run_discloses_a_non_default_identity(
     assert "escrow OK" in line
     assert "NOT the default identity" in line
     assert "$SOPS_AGE_KEY_FILE" in line
+
+
+def test_no_source_renders_a_SELF_CONTRADICTING_refusal():
+    """🔴 RENDERS THE WHOLE PARAGRAPH, not just the helper.
+
+    `_undo_advice()` fixed the last sentence; the FIRST one still read "the
+    built-in default redirected the on-disk path away from …" — the same class
+    of nonsense, one sentence earlier. A test that calls the helper in
+    isolation structurally cannot see that, which is why this one renders
+    `provenance_clauses` instead.
+    """
+    for src in ("$SOPS_AGE_KEY_FILE", "$ASIB_AGE_IDENTITY",
+                EV.IDENTITY_SOURCE_FLAG, B.IDENTITY_SOURCE_DEFAULT):
+        chose, redirect = EV.provenance_clauses(Path("/srv/elsewhere.key"), src)
+        assert redirect, src
+        # only an ENV VAR can have "redirected" anything
+        if not src.startswith("$"):
+            assert "redirected" not in redirect, (src, redirect)
+            assert "env -u" not in redirect, (src, redirect)
+        # and nothing may claim a flag is settable by a shell
+        assert "unrelated shell" not in redirect, (src, redirect)
 
 
 def test_the_undo_advice_matches_the_KIND_of_source():

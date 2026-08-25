@@ -1346,6 +1346,21 @@ def provenance_clauses(identity: Path, identity_source: str | None
             f"are the same key. Re-run against {B.DEFAULT_IDENTITY} before "
             f"concluding anything, and do NOT re-escrow from the file you just "
             f"named.")
+    elif not identity_source.startswith("$"):
+        # 🔴 NEITHER a flag NOR an environment variable. Reachable only through
+        # `run()`'s keyword API (the CLI pairs the default sentinel exclusively
+        # with DEFAULT_IDENTITY), but it RENDERS, and the first version said
+        # "the built-in default redirected the on-disk path away from …" — the
+        # same self-contradiction `_undo_advice` exists to prevent, one
+        # sentence earlier. Neutral wording that is true of any source.
+        redirect = (
+            f" 🔴 READ THIS BEFORE RE-ESCROWING: the on-disk path is not "
+            f"{B.DEFAULT_IDENTITY}, so a mismatch here is at least as likely to "
+            f"mean you compared the WRONG FILE as it is to mean the escrow is "
+            f"damaged — and the two remedies are opposites. Every age identity "
+            f"file is the same size, so equal byte counts on both sides is what "
+            f"comparing two DIFFERENT keys looks like, not evidence they are the "
+            f"same key. {_undo_advice(identity_source)}")
     else:
         redirect = (
             f" 🔴 READ THIS BEFORE RE-ESCROWING: {identity_source} redirected the "
