@@ -45,6 +45,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
+from cli_budget import CLI_TIMEOUT_S  # noqa: E402  (see cli_budget for the rationale)
 
 BB = Path(__file__).resolve().parent.parent          # scripts/browser-bridge
 CLI = BB / "browser"
@@ -122,7 +123,7 @@ def bridge(tmp_path):
         @staticmethod
         def run(*args):
             return subprocess.run(["bash", str(CLI), *args], env=env,
-                                  capture_output=True, text=True, timeout=60)
+                                  capture_output=True, text=True, timeout=CLI_TIMEOUT_S)
 
     # Exposed so _run_on_a_pty can launch the SAME CLI against the SAME stub with
     # stdout on a real terminal — see that helper's docstring. Assigned AFTER the
@@ -202,7 +203,7 @@ def wake_fails(tmp_path):
         @staticmethod
         def run(*args):
             return subprocess.run(["bash", str(CLI), *args], env=env,
-                                  capture_output=True, text=True, timeout=60)
+                                  capture_output=True, text=True, timeout=CLI_TIMEOUT_S)
     try:
         yield _B
     finally:
@@ -629,7 +630,7 @@ def gateway_504(tmp_path):
         @staticmethod
         def run(*args):
             return subprocess.run(["bash", str(CLI), *args], env=env,
-                                  capture_output=True, text=True, timeout=60)
+                                  capture_output=True, text=True, timeout=CLI_TIMEOUT_S)
     try:
         yield _B
     finally:
@@ -685,7 +686,7 @@ def test_help_does_not_require_a_token_file(tmp_path):
                BROWSER_BRIDGE_TOKEN_FILE=str(tmp_path / "definitely-absent"))
     for args in (["--help"], ["-h"], ["help"], []):
         cp = subprocess.run(["bash", str(CLI), *args], env=env,
-                            capture_output=True, text=True, timeout=60)
+                            capture_output=True, text=True, timeout=CLI_TIMEOUT_S)
         assert cp.returncode == 0, f"{args}: {cp.stderr}"
         assert "FLAG ORDER / END OF FLAGS" in cp.stdout, args
         assert "token file" not in cp.stderr, args
@@ -748,7 +749,7 @@ def test_help_prints_the_HEADER_block_only_not_the_whole_files_comments(tmp_path
     env = dict(os.environ,
                BROWSER_BRIDGE_TOKEN_FILE=str(tmp_path / "absent"))
     cp = subprocess.run(["bash", str(CLI), "--help"], env=env,
-                        capture_output=True, text=True, timeout=60)
+                        capture_output=True, text=True, timeout=CLI_TIMEOUT_S)
     assert cp.returncode == 0, cp.stderr
 
     # Landmarks from the header block — the help must still be the real help.
@@ -792,7 +793,7 @@ def test_an_unknown_subcommand_is_reported_as_such_without_a_token(tmp_path):
     env = dict(os.environ,
                BROWSER_BRIDGE_TOKEN_FILE=str(tmp_path / "absent"))
     cp = subprocess.run(["bash", str(CLI), "bogus-op"], env=env,
-                        capture_output=True, text=True, timeout=60)
+                        capture_output=True, text=True, timeout=CLI_TIMEOUT_S)
     assert cp.returncode != 0
     assert "unknown subcommand: bogus-op" in cp.stderr
     assert "token file" not in cp.stderr
@@ -806,7 +807,7 @@ def test_a_glob_subcommand_cannot_pattern_match_past_the_validation(tmp_path):
                BROWSER_BRIDGE_TOKEN_FILE=str(tmp_path / "absent"))
     for bogus in ("*", "?ealth", "[hw]ealth"):
         cp = subprocess.run(["bash", str(CLI), bogus], env=env,
-                            capture_output=True, text=True, timeout=60)
+                            capture_output=True, text=True, timeout=CLI_TIMEOUT_S)
         assert cp.returncode != 0, bogus
         assert f"unknown subcommand: {bogus}" in cp.stderr, cp.stderr
 
@@ -816,7 +817,7 @@ def test_a_real_subcommand_still_requires_a_token(tmp_path):
     env = dict(os.environ,
                BROWSER_BRIDGE_TOKEN_FILE=str(tmp_path / "absent"))
     cp = subprocess.run(["bash", str(CLI), "health"], env=env,
-                        capture_output=True, text=True, timeout=60)
+                        capture_output=True, text=True, timeout=CLI_TIMEOUT_S)
     assert cp.returncode != 0 and "token file not found" in cp.stderr
 
 
@@ -826,7 +827,7 @@ def test_help_documents_the_end_of_flags_separator_generally(tmp_path):
     env = dict(os.environ,
                BROWSER_BRIDGE_TOKEN_FILE=str(tmp_path / "absent"))
     out = subprocess.run(["bash", str(CLI), "--help"], env=env,
-                         capture_output=True, text=True, timeout=60).stdout
+                         capture_output=True, text=True, timeout=CLI_TIMEOUT_S).stdout
     head = out.split("FLAG ORDER / END OF FLAGS")[1]
     for sub in ("js", "text", "type", "screenshot"):
         assert sub in head, f"{sub} missing from the end-of-flags entry"
@@ -962,7 +963,7 @@ def recreate_bridge(tmp_path):
         @staticmethod
         def run(*args):
             return subprocess.run(["bash", str(CLI), *args], env=env,
-                                  capture_output=True, text=True, timeout=60)
+                                  capture_output=True, text=True, timeout=CLI_TIMEOUT_S)
 
     try:
         yield _Bridge
@@ -1162,7 +1163,7 @@ def _run_on_a_pty(bridge, *args):
     try:
         proc = subprocess.run(["bash", str(CLI), *args], env=bridge.env,
                               stdin=subprocess.DEVNULL, stdout=slave,
-                              stderr=subprocess.PIPE, text=True, timeout=60)
+                              stderr=subprocess.PIPE, text=True, timeout=CLI_TIMEOUT_S)
         os.close(slave)
         slave = -1
         chunks = []
