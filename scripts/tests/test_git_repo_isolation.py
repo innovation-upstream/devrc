@@ -22,12 +22,32 @@ and a plugin rather than a patch in fourteen test files. The tmpdir
 paths written into the real config are the tell: the tests computed the RIGHT
 value and git wrote it into the WRONG repository.
 
-🔴 WHAT IS **NOT** KNOWN, stated here because #683's body asserted it and it was
-relayed onward: nothing has identified WHAT exported `GIT_DIR` into that run.
-`git push` does not hand `GIT_DIR` to `pre-push` (measured, git 2.55.0 — see
-`test_git_push_does_not_export_GIT_DIR_to_pre_push`), so the hook's old
-`GIT_DIR=` line was a route only when an outer caller had already exported the
-name. The rename is hygiene, not a diagnosis.
+✅ WHAT EXPORTED `GIT_DIR` — ANSWERED 2026-08-25, AND THIS PARAGRAPH USED TO SAY
+IT WAS UNKNOWN. It read: "nothing has identified WHAT exported `GIT_DIR` into
+that run. `git push` does not hand `GIT_DIR` to `pre-push`." The measurement
+behind that was taken from a MAIN CHECKOUT only, and the unqualified sentence is
+false. Measured on git 2.55.0 with the parent scrubbed of every `GIT_*` name,
+reproduced on two independent rigs:
+
+    push from a MAIN checkout   -> GIT_EXEC_PATH, GIT_PREFIX.  no GIT_DIR
+    push from a LINKED WORKTREE -> GIT_DIR=<repo>/.git/worktrees/<name>
+
+**git itself exports it; no outer caller is required**, and the 2026-08-21
+incident was a push from a linked worktree. `--separate-git-dir` clones,
+submodules (`<super>/.git/modules/<sub>`) and bare repos (a RELATIVE `.`) do it
+too — so "this is not a worktree" is NO evidence that `GIT_DIR` is unset.
+
+🔴 THIS PARAGRAPH IS THE FIRST THING ANYONE READS BEFORE TOUCHING
+`REPO_POINTER_VARS`, WHICH IS WHY IT MATTERED THAT IT WAS WRONG: it argued the
+strip was hygiene against an exotic caller. It is not — pushing from a worktree
+is the ORDINARY path here, since worktree isolation is the standing default for
+file-modifying agents. Do not prune `GIT_DIR` from the ledger.
+
+The two arms are pinned by
+`test_git_push_from_a_MAIN_CHECKOUT_does_not_export_GIT_DIR_to_pre_push` and
+`test_git_exports_GIT_DIR_to_pre_push_from_a_worktree_but_not_a_main_checkout`.
+The #683 rename remains correct hygiene and is still not, by itself, the
+diagnosis.
 
 HOW THIS FILE IS BUILT, and why each layer is not redundant with the next:
 
@@ -2212,7 +2232,7 @@ def test_git_exports_GIT_DIR_to_pre_push_from_a_worktree_but_not_a_main_checkout
     def arm(seen: Path):
         mockbin.write_exec(
             hooks / "pre-push",
-            f"env | grep -E '^GIT' | sort > {seen}\n"
+            f"env | grep -E '^GIT' | sort > '{seen}'\n"
             "cat >/dev/null\nexit 0\n")
 
     assert _git(work, "config", "--local", "core.hooksPath", str(hooks),
@@ -2246,9 +2266,15 @@ def test_git_exports_GIT_DIR_to_pre_push_from_a_worktree_but_not_a_main_checkout
 
     # 🔴 POSITIVE CONTROL FIRST, BOTH ARMS. git exports GIT_EXEC_PATH to hooks
     # unconditionally, so if it is missing the hook never ran or never wrote —
-    # and an absent GIT_DIR below would then prove nothing at all. Each arm has
-    # its OWN file, written and read within that arm, so arm 2 can never be
-    # scored on arm 1's leftovers.
+    # and an absent GIT_DIR below would then prove nothing at all.
+    # Each arm WRITES its own file, and `arm()` re-installs the hook pointing at
+    # that file before each push, so a hook that fails to fire in arm 2 leaves
+    # `wt_seen` ABSENT rather than holding arm 1's contents — `names()` returns
+    # an empty set and the positive control above fires. (Both files are read
+    # together after both pushes; it is the per-arm WRITE that closes the
+    # leftovers hole, not the read order. An earlier version of this comment
+    # said "written and read within that arm", which described the read wrongly
+    # while the property it claims is genuinely held.)
     for tag, seen in (("main-checkout", main_names), ("linked-worktree", wt_names)):
         assert "GIT_EXEC_PATH" in seen, (
             f"the {tag} hook did not run or did not write, so nothing in this "

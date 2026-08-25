@@ -52,8 +52,10 @@ REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
 #
 # 🔴 BUT THE PRECONDITION IN THE FIRST SENTENCE IS LOAD-BEARING AND #683's PR
 # BODY DROPPED IT, turning a hygiene fix into a false diagnosis that was then
-# relayed onward as established fact. Measured on git 2.55.0, as a PAIR: a
-# `git push` from a `GIT_DIR`-free parent gives `pre-push` only `GIT_EXEC_PATH`
+# relayed onward as established fact. ⚠ READ TO THE END OF THIS BLOCK BEFORE
+# ACTING ON THE NEXT SENTENCE — it is true only of a push from a MAIN CHECKOUT,
+# and the qualifier arrives a few lines down. Measured on git 2.55.0, as a PAIR:
+# a `git push` from a `GIT_DIR`-free parent gives `pre-push` only `GIT_EXEC_PATH`
 # and `GIT_PREFIX` (plus the caller's own `GIT_AUTHOR_*`/`GIT_CONFIG_*`) — no
 # `GIT_DIR`; the same push with `GIT_DIR` exported by the caller passes it
 # straight through. A live scan of the box found 46 processes carrying some
