@@ -1,0 +1,190 @@
+{
+  "_doc": [
+    "THE ONE TABLE. Two implementations of 'the newest comment on this task is NOT the",
+    "token owner's' live in this repo, in two languages, and NOTHING made them agree until",
+    "this file existed. It is read by BOTH suites:",
+    "",
+    "  JS  claude/skills/clickup/test/awaiting-contract.test.mjs",
+    "        -> measures claude/skills/clickup/lib/awaiting.mjs :: isAwaiting()",
+    "  PY  scripts/check-clickup-addressed/tests/test_awaiting_contract.py",
+    "        -> measures the ccua pipeline end to end: recent-comments.py::_collect (the",
+    "           producer, including latest_reply_ts_by + the UNIDENTIFIED sentinel) joined to",
+    "           check-addressed.py::build_newest_comment + _reply_answers_the_comment (the",
+    "           consumer that DERIVES the same predicate from what the producer reported).",
+    "",
+    "Each side MEASURES its own column rather than asserting it, so this table cannot lie",
+    "about either implementation; and each side recomputes `divergences` from the two columns",
+    "and pins it, so a divergence appearing OR disappearing is red on both sides.",
+    "",
+    "WHY THE TWO ARE NOT CONSOLIDATED: see `blockers` below and",
+    "claude/skills/clickup/reference/awaiting-vs-ccua.md. The short version is that",
+    "`query.mjs awaiting` cannot be ccua's producer, so a shared TABLE is the only single",
+    "definition available. Do not delete this file to 'simplify' — it is the consolidation.",
+    "",
+    "Every id, username and timestamp below is SYNTHETIC. This repo is public. Comment texts",
+    "are deliberately short, whitespace-free tokens: the authorship predicate never reads",
+    "them, ccua only requires them to be non-empty, and scripts/tests/test_no_captured_text.py",
+    "scans every string under a `comments` key."
+  ],
+
+  "owner_id": "9000001",
+  "colleague_id": "9000002",
+  "now_ms": 1755820800000,
+
+  "_timestamps": {
+    "early": "1755648000000  (now - 2d)",
+    "mid": "1755734400000  (now - 1d)",
+    "late": "1755777600000  (now - 12h)"
+  },
+
+  "_columns": {
+    "awaiting": "THE CONTRACT. true | false | \"undecidable\" — what is actually knowable from the comment list. \"undecidable\" means no implementation can honestly return a boolean; at least one side must therefore be non-boolean below.",
+    "js": "MEASURED from isAwaiting(). true | false | \"order-dependent\" (the answer flips when the comment array is reversed — asserted by reversing it, never merely labelled).",
+    "py": "MEASURED from the ccua producer+consumer pipeline. true | false | \"unverified\". \"unverified\" is the state awaiting.mjs has no way to return: the pipeline REFUSES to decide from the evidence, because the producer withheld `my_latest_reply` (the UNIDENTIFIED sentinel — the owner's own comments cannot be ranked, or the owner could not be identified at all) or because neither date resolution could be read. `_waiting_verdict` then surfaces the ticket with an explicit note that the check did not run, instead of claiming nobody answered.",
+    "_note_on_present_and_null": "`my_latest_reply: null` is NOT \"unverified\" — it is the positive claim \"I looked at every comment and none is mine\", so the newest comment is the colleague's and the verdict is a decided `true`. Present-and-null vs ABSENT is the distinction the whole ccua seam exists to protect, and reading them as one value is the false negative it was built against."
+  },
+
+  "cases": [
+    {
+      "name": "colleague_commented_last",
+      "why": "the ordinary match — someone else spoke after the owner did",
+      "comments": [
+        {"id": "c1", "user": {"id": "9000001", "username": "owner-synth"}, "date": "1755648000000", "comment": [{"text": "ack-alpha"}]},
+        {"id": "c2", "user": {"id": "9000002", "username": "colleague-synth"}, "date": "1755777600000", "comment": [{"text": "q-bravo"}]}
+      ],
+      "awaiting": true,
+      "js": true,
+      "py": true
+    },
+    {
+      "name": "owner_commented_last",
+      "why": "🔴 THE STRUCTURAL BLOCKER. `awaiting` DROPS this task entirely — that is its whole definition — while ccua still emits a record for the colleague's comment carrying `my_latest_reply_ms`, which is the ONLY input check-addressed.py's ANSWERED/suppression block has. Both halves are asserted, one per suite.",
+      "comments": [
+        {"id": "c3", "user": {"id": "9000002", "username": "colleague-synth"}, "date": "1755648000000", "comment": [{"text": "q-charlie"}]},
+        {"id": "c4", "user": {"id": "9000001", "username": "owner-synth"}, "date": "1755777600000", "comment": [{"text": "ack-delta"}]}
+      ],
+      "awaiting": false,
+      "js": false,
+      "py": false
+    },
+    {
+      "name": "only_a_colleague_has_commented",
+      "why": "no reply of the owner's exists at all — 'never answered', which is a different fact from 'could not look'",
+      "comments": [
+        {"id": "c5", "user": {"id": "9000002", "username": "colleague-synth"}, "date": "1755734400000", "comment": [{"text": "q-echo"}]}
+      ],
+      "awaiting": true,
+      "js": true,
+      "py": true
+    },
+    {
+      "name": "only_the_owner_has_commented",
+      "why": "nobody is waiting; ccua emits no row because it drops the owner's own comments",
+      "comments": [
+        {"id": "c6", "user": {"id": "9000001", "username": "owner-synth"}, "date": "1755734400000", "comment": [{"text": "note-foxtrot"}]}
+      ],
+      "awaiting": false,
+      "js": false,
+      "py": false
+    },
+    {
+      "name": "no_comments_at_all",
+      "why": "the empty list must not read as 'someone is waiting' on either side",
+      "comments": [],
+      "awaiting": false,
+      "js": false,
+      "py": false
+    },
+    {
+      "name": "owner_reply_in_the_same_millisecond",
+      "why": "🔴 DIVERGENCE, and on a REACHABLE input. There is no single newest comment, so the contract is undecidable. Python resolves it by an explicit documented rule (`mine_ms >= theirs_ms` — a genuine tie counts as answered; see _reply_answers_the_comment). JS resolves it by ARRAY ORDER: newestComment() keeps the first of an equal pair, so reversing the list flips the verdict — and in the API's own order it answers the OPPOSITE of Python.",
+      "comments": [
+        {"id": "c7", "user": {"id": "9000002", "username": "colleague-synth"}, "date": "1755734400000", "comment": [{"text": "q-golf"}]},
+        {"id": "c8", "user": {"id": "9000001", "username": "owner-synth"}, "date": "1755734400000", "comment": [{"text": "ack-hotel"}]}
+      ],
+      "awaiting": "undecidable",
+      "js": "order-dependent",
+      "py": false
+    },
+    {
+      "name": "the_newest_comment_has_no_author_id",
+      "why": "an unidentifiable COMMENT AUTHOR counts as someone else on both sides — a false positive costs one glance, a false negative hides the thing the check exists to find",
+      "comments": [
+        {"id": "c9", "user": {"id": "9000001", "username": "owner-synth"}, "date": "1755648000000", "comment": [{"text": "ack-india"}]},
+        {"id": "c10", "user": {}, "date": "1755777600000", "comment": [{"text": "q-juliett"}]}
+      ],
+      "awaiting": true,
+      "js": true,
+      "py": true
+    },
+    {
+      "name": "the_owners_own_comment_has_an_unreadable_date",
+      "why": "🔴 THE UNIDENTIFIED DISTINCTION, and the reason a consolidation onto the JS side would be LOSSY. One of the owner's comments cannot be dated, so which of the owner's comments is newest is UNKNOWABLE and Python says so (latest_reply_ts_by returns UNIDENTIFIED, build_record omits the key, and the flag announces that the check did not run). isAwaiting() has no third state: it sorts the undated comment oldest and returns a CONFIDENT true. Same direction, different confidence — and awaiting.mjs cannot express the difference.",
+      "comments": [
+        {"id": "c11", "user": {"id": "9000001", "username": "owner-synth"}, "date": "", "comment": [{"text": "ack-kilo"}]},
+        {"id": "c12", "user": {"id": "9000002", "username": "colleague-synth"}, "date": "1755777600000", "comment": [{"text": "q-lima"}]}
+      ],
+      "awaiting": "undecidable",
+      "js": true,
+      "py": "unverified"
+    },
+    {
+      "name": "every_comment_has_an_unreadable_date",
+      "why": "🔴 DIVERGENCE. Nothing can be ranked. Python declines to claim. isAwaiting() sorts every undated comment to -Infinity and keeps whichever the API happened to return first, so its answer is a property of the response order rather than of the thread.",
+      "comments": [
+        {"id": "c13", "user": {"id": "9000001", "username": "owner-synth"}, "date": "", "comment": [{"text": "ack-mike"}]},
+        {"id": "c14", "user": {"id": "9000002", "username": "colleague-synth"}, "date": "", "comment": [{"text": "q-november"}]}
+      ],
+      "awaiting": "undecidable",
+      "js": "order-dependent",
+      "py": "unverified"
+    }
+  ],
+
+  "divergences": [
+    "every_comment_has_an_unreadable_date",
+    "owner_reply_in_the_same_millisecond",
+    "the_owners_own_comment_has_an_unreadable_date"
+  ],
+
+  "awaiting_row_keys": [
+    "ageMs",
+    "commentCount",
+    "id",
+    "lastCommentAtMs",
+    "lastCommentBy",
+    "lastCommentById",
+    "list",
+    "name",
+    "status",
+    "url"
+  ],
+
+  "blockers": [
+    {
+      "kind": "population",
+      "field": "(the whole task)",
+      "why": "`awaiting` emits a row ONLY when the newest comment is not the owner's, so every task the owner answered last is structurally absent from its output. That is exactly the population check-addressed.py's ANSWERED note is built from — the note that carries BOT_IDENTITY_CAVEAT, i.e. the only place the report says 'an agent may have answered as you'. Asserted by the `owner_commented_last` case in both suites."
+    },
+    {
+      "kind": "field",
+      "field": "comment text",
+      "why": "`awaiting` rows carry no comment body at all (see `awaiting_row_keys`). ccua's whole decision surface is the text: the keep-open veto, the RESOLVED-reading-comment flag and the 4000-char TEXT_CHARS cap all read `text`."
+    },
+    {
+      "kind": "field",
+      "field": "my_latest_reply / my_latest_reply_ms",
+      "why": "no equivalent exists in awaiting.mjs. It is the fix for the D12 seam defect (a WAITING flag blind to the owner's own replies) and its ABSENCE is itself a reported fact — the UNIDENTIFIED sentinel. A two-state boolean cannot carry a three-state field."
+    },
+    {
+      "kind": "field",
+      "field": "task_priority",
+      "why": "`awaiting` carries `status` but not `priority`; check-addressed.py sets `clickup_priority` from it."
+    },
+    {
+      "kind": "failure-mode",
+      "field": "the owner's user id",
+      "why": "when the owner id cannot be resolved, `query.mjs awaiting` exits 1 and prints nothing. ccua CONTINUES with UNIDENTIFIED, warns on stderr, and disables every downstream 'have I already replied?' check by omitting the key. Exiting is right for a triage command and wrong for a producer feeding a report."
+    }
+  ]
+}
