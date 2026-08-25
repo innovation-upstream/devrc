@@ -197,37 +197,3 @@ from testlib.gitenv_plugin import (  # noqa: E402,F401
     pytest_runtest_logstart,
     pytest_sessionfinish,
 )
-
-# --------------------------------------------------------------------------- #
-# 🔴 A TEST'S SAFETY-NET TIMEOUT MUST NOT BE TIGHTER THAN THE BOUND OF THE THING
-# IT INVOKES — AND IT LIVES HERE, SUITE-WIDE, FOR THE REASON THIS FILE ALREADY
-# ARGUES ABOVE: a rule declared in one module covers one of the nine.
-#
-# The `browser` CLI bounds each of its HTTP calls at `curl -m 60`. Tests that
-# spawn the real CLI used to wrap it in `timeout=30` (test_server.py) or
-# `timeout=60` (the three sibling files) — i.e. the TEST's net fired first, or
-# tied. A stall therefore could never surface as the CLI's own attributable
-# error; it surfaced as an opaque subprocess.TimeoutExpired naming the test
-# instead of the cause, and being wall-clock it flaked under CI load. Measured
-# 2026-08-25: `test_browser_cli_backs_off_on_429` failed exactly that way in the
-# devrc-pytests gate.
-#
-# 🔴 THE VALUE IS SET BY THE WORST CASE, NOT THE COMMON ONE. A single invocation
-# can issue MORE THAN ONE bounded curl: `nav --wake` / `open --wake` do primary +
-# wake (browser: _wake_after), and `close` does release + open + close. So the
-# CLI's per-INVOCATION self-bound reaches 3 x 60 = 180s, not 60s. An earlier
-# draft of this constant was 90 — above one curl, below the real worst case, and
-# therefore still defective on exactly the paths the sibling files drive.
-#
-# ⚠️ HONEST COST, because it is not free: on a test that genuinely hangs, the
-# suite now waits 240s instead of 30s at that site. That is only paid when a test
-# is ALREADY failing, and it buys an attributable error instead of a timeout —
-# but if starvation is ever systemic rather than per-test, a run of hangs could
-# approach the CI Task ceiling and turn a clean red into a pipeline abort, which
-# is a strictly less informative signal. If that happens, the fix is a per-test
-# `pytest-timeout` budget, NOT lowering this back under the CLI's own bound.
-#
-# Pinned by `test_cli_subprocess_timeouts_outrank_the_cli_own_curl_bound`
-# (test_server.py), which reads the real `-m` out of the CLI and walks the AST of
-# every test module here rather than trusting a regex.
-CLI_TIMEOUT_S = 240

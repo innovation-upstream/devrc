@@ -41,7 +41,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
-from conftest import CLI_TIMEOUT_S  # suite-wide; see conftest for the rationale
+from cli_budget import CLI_TIMEOUT_S  # noqa: E402  (see cli_budget for the rationale)
 
 BB = Path(__file__).resolve().parent.parent
 CLI = BB / "browser"
