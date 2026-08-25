@@ -167,7 +167,40 @@ DEFAULT_TIMEOUT = 60.0
 # 🔴 `bw` IS NOT INSTALLED ON EITHER HOST — deliberately, it is a one-command
 # nix-shell away and nothing runs it unattended. The exact command lives here so
 # the failure message can hand it over instead of dying on FileNotFoundError.
-NIX_SHELL_HINT = "nix-shell -p bitwarden-cli jq --run '<command>'"
+#
+# 🔴 THE ADVERTISED SHELL MUST BE ABLE TO RUN THE COMMAND IT ADVERTISES.
+# MEASURED 2026-08-25: this hint provisioned `bitwarden-cli jq` ONLY, while
+# `--decrypt-check` reaches MinIO through `backup.MinioUploader`, whose `minio`
+# import is LAZY (inside the method, not at module import). So the advertised
+# shell parsed, started, unlocked the vault, and THEN died with
+# `ModuleNotFoundError: No module named 'minio'` — after the operator had
+# already typed the master password. A hint that cannot complete its own
+# invocation is worse than no hint: it is followed.
+#
+# So the packages are a LEDGER and the hint is DERIVED from it. The ledger is
+# pinned against the modules the decrypt path imports by
+# `test_escrow_verify.py`, so the advertised shell and the code's actual
+# dependencies cannot drift apart silently.
+NIX_SHELL_PACKAGES: tuple[str, ...] = (
+    "bitwarden-cli",                       # `bw` itself
+    "jq",                                  # the documented pipeline around it
+    "python3.withPackages(p:[p.minio])",   # --decrypt-check reaches the bucket
+)
+
+# The third-party Python modules the `--decrypt-check` path imports, named here
+# so the ledger above can be checked against them mechanically rather than by
+# someone remembering. `minio` is imported lazily by `backup.MinioUploader`.
+DECRYPT_PYTHON_MODULES: tuple[str, ...] = ("minio",)
+
+
+def _quote_nix_package(pkg: str) -> str:
+    """Shell-quote a `-p` argument that is a nix EXPRESSION, not a bare name."""
+    return f"'{pkg}'" if any(c in pkg for c in "()[]: ") else pkg
+
+
+NIX_SHELL_HINT = ("nix-shell -p "
+                  + " ".join(_quote_nix_package(p) for p in NIX_SHELL_PACKAGES)
+                  + " --run '<command>'")
 
 # 🔴 THERE IS DELIBERATELY NO `_DIR_MODE` ALIAS HERE. Directory mode is enforced
 # by `B._private_dir()`, which owns the number; re-exporting it would be a second
@@ -1216,6 +1249,7 @@ def decrypt_check(*, escrow_bytes: bytes, work_dir: Path, bucket: str,
 # the run
 # --------------------------------------------------------------------------- #
 def run(*, bw: BitwardenCLI, identity: Path, item_name: str,
+        identity_source: str | None = None,
         expect_server: str | None = None, decrypt: bool = False,
         bucket: str = DEFAULT_BUCKET, prefix: str | None = None,
         store: Path = DEFAULT_STORE, scope_filter: str | None = None,
@@ -1237,6 +1271,32 @@ def run(*, bw: BitwardenCLI, identity: Path, item_name: str,
     item = find_escrow_item(bw, item_name)
     escrow = read_note(item, item_name)
 
+    # 🔴 WHAT CHOSE THE ON-DISK FILE, stated in the mismatch messages below.
+    # Three branches, and the middle one is the whole point: an identity chosen
+    # by an environment variable is one an unrelated shell can redirect, so a
+    # mismatch is at least as likely to be a WRONG-FILE comparison as a damaged
+    # escrow. `None` means no caller stated a source — the messages then say
+    # NOTHING about provenance rather than asserting a default they cannot know.
+    if identity_source is None:
+        chose = ""
+        redirect = ""
+    elif identity_source == B.IDENTITY_SOURCE_DEFAULT:
+        chose = f" The on-disk path was chosen by {identity_source}."
+        redirect = ""
+    else:
+        chose = f" The on-disk path was chosen by {identity_source}, NOT by the default."
+        redirect = (
+            f" 🔴 READ THIS BEFORE RE-ESCROWING: because {identity_source} chose "
+            f"the on-disk path, a mismatch here is at least as likely to mean you "
+            f"compared the WRONG FILE as it is to mean the escrow is damaged — and "
+            f"the two remedies are opposites. Every age identity file is the same "
+            f"size, so equal byte counts on both sides is what comparing two "
+            f"DIFFERENT keys looks like, not evidence they are the same key. "
+            f"Re-escrowing now would overwrite a possibly-good escrow with "
+            f"whatever {identity_source} happens to point at. Re-run with "
+            f"--identity {B.DEFAULT_IDENTITY} to compare against the default "
+            f"first.")
+
     verdict_class = classify(escrow, disk)
     if verdict_class == CLASS_TRAILING_NEWLINE:
         raise EscrowError(
@@ -1248,7 +1308,7 @@ def run(*, bw: BitwardenCLI, identity: Path, item_name: str,
             f"identity still decrypts without its final newline, so the escrow "
             f"is very likely USABLE — but it is no longer a byte-for-byte copy, "
             f"and 'very likely' is not what a disaster-recovery artifact gets to "
-            f"be. Re-escrow the file. 🔴 --decrypt-check CANNOT confirm this: "
+            f"be.{chose} Re-escrow the file. 🔴 --decrypt-check CANNOT confirm this: "
             f"this refusal is raised BEFORE the decrypt step runs, so the flag "
             f"produces the identical message and tests nothing. To check the "
             f"trimmed bytes by hand, write them to a 0600 file yourself and pass "
@@ -1260,10 +1320,10 @@ def run(*, bw: BitwardenCLI, identity: Path, item_name: str,
             f"bytes vs {len(disk)} on disk, and they are not equal after "
             f"trailing newlines are removed. (The differing content is NOT "
             f"printed — it is key material; compare them by hand if you must.) "
-            f"One of the two copies is not the key this subsystem encrypts to. "
-            f"Re-escrow from the on-disk identity only after confirming the "
-            f"on-disk one is the one the bucket's artifacts open with — "
-            f"`restore-verify.py` answers that.")
+            f"One of the two copies is not the key this subsystem encrypts to."
+            f"{chose} Re-escrow from the on-disk identity only after confirming "
+            f"the on-disk one is the one the bucket's artifacts open with — "
+            f"`restore-verify.py` answers that.{redirect}")
 
     verdict = EscrowVerdict(
         item_name=item_name, server=server, server_pinned=pinned,
@@ -1291,12 +1351,20 @@ def run(*, bw: BitwardenCLI, identity: Path, item_name: str,
 
 def print_plan(*, identity: Path, item_name: str, expect_server: str | None,
                decrypt: bool, bucket: str, prefix: str, store: Path,
-               scope_filter: str | None, from_dir: Path | None) -> None:
+               scope_filter: str | None, from_dir: Path | None,
+               identity_source: str | None = None) -> None:
     """Pure text. Runs no `bw`, touches no network, reads no key material."""
     present = identity.is_file()
     size = identity.stat().st_size if present else 0
     print(f"identity:  {identity} ({size} bytes)" if present
           else f"identity:  {identity} (MISSING)")
+    # 🔴 The SIZE above cannot discriminate: every age identity file is the same
+    # size, so a redirected path looks identical here to the right one. The
+    # source is the only field on this line that can tell them apart.
+    if identity_source is not None:
+        note = ("" if identity_source == B.IDENTITY_SOURCE_DEFAULT else
+                "  <- NOT the default; an unrelated shell can set this")
+        print(f"chosen by: {identity_source}{note}")
     print(f"item:      {item_name!r} (exact name match; `bw list items "
           f"--search` is FUZZY, so its results are candidates)")
     print(f"type:      must be {ITEM_TYPE_SECURE_NOTE} (Secure Note) — checked "
@@ -1424,13 +1492,20 @@ def main(argv: list[str] | None = None) -> int:
                     help="print what would happen; run no `bw`, read no key")
     args = ap.parse_args(argv)
 
-    identity = args.identity or B.resolve_identity()
+    # 🔴 RESOLVE THE PATH AND WHAT CHOSE IT TOGETHER. An explicit --identity is
+    # its own source: it is the one choice the operator definitely made on
+    # purpose, so it must not be reported as an environment redirect.
+    if args.identity is not None:
+        identity, identity_source = args.identity, "the --identity flag"
+    else:
+        identity, identity_source = B.resolve_identity_with_source()
     prefix = (args.prefix if args.prefix is not None
               else args.host if args.host is not None
               else B.host_label())
 
     if args.print_plan:
-        print_plan(identity=identity, item_name=args.item_name,
+        print_plan(identity=identity, identity_source=identity_source,
+                   item_name=args.item_name,
                    expect_server=args.expect_server, decrypt=args.decrypt,
                    bucket=str(args.from_dir) if args.from_dir else args.bucket,
                    prefix=prefix, store=args.store, scope_filter=args.scope,
@@ -1446,6 +1521,7 @@ def main(argv: list[str] | None = None) -> int:
 
     def _go(work: Path | None) -> EscrowVerdict:
         return run(bw=bw, identity=identity, item_name=args.item_name,
+                   identity_source=identity_source,
                    expect_server=args.expect_server, decrypt=args.decrypt,
                    bucket=source, prefix=prefix, store=args.store,
                    scope_filter=args.scope, from_dir=args.from_dir,

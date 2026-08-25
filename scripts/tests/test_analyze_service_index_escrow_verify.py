@@ -2484,3 +2484,214 @@ def test_the_module_hardcodes_no_endpoint_and_no_host():
     for needle in ("http://", "https://"):
         assert needle not in src, f"{needle!r} appears in a public repo's source"
     assert "bw config server" in src or "\"config\", \"server\"" in src
+
+
+# --------------------------------------------------------------------------- #
+# 15. 🔴 THE ADVERTISED SHELL, AND WHAT CHOSE THE ON-DISK IDENTITY
+#
+# Both halves are regressions from ONE live run, 2026-08-25, in which the
+# operator typed the master password and got a confident wrong answer:
+#
+#   * the hint advertised `nix-shell -p bitwarden-cli jq`, and `--decrypt-check`
+#     then died `ModuleNotFoundError: No module named 'minio'` — AFTER the
+#     password had been spent. A hint that cannot run its own invocation is
+#     worse than none, because it is followed.
+#   * `SOPS_AGE_KEY_FILE`, exported by unrelated client work, redirected the
+#     on-disk side of the comparison to a DIFFERENT age key. Every age identity
+#     file is the same size, so the mismatch reported equal byte counts and read
+#     as a damaged escrow. The remedy it printed — "re-escrow from the on-disk
+#     identity" — would have overwritten a good escrow with an unrelated key.
+# --------------------------------------------------------------------------- #
+def test_the_advertised_nix_shell_provisions_every_module_the_decrypt_path_IMPORTS():
+    """🔴 The RELATIONSHIP, not either side alone: every module the decrypt path
+    needs must be provisioned by the shell the failure messages hand over.
+
+    Scope, stated so nobody reads more coverage into this than it has: it pins
+    LEDGER -> HINT. It cannot DISCOVER a newly-added third-party import on its
+    own; the companion test below ties the ledger to backup.py's import site.
+    """
+    assert EV.DECRYPT_PYTHON_MODULES, "an empty ledger would pass vacuously"
+    for mod in EV.DECRYPT_PYTHON_MODULES:
+        assert any(f"p.{mod}" in pkg for pkg in EV.NIX_SHELL_PACKAGES), (
+            f"{mod!r} is imported by --decrypt-check but no advertised package "
+            f"provides it: {EV.NIX_SHELL_PACKAGES}")
+        assert f"p.{mod}" in EV.NIX_SHELL_HINT, (
+            f"{mod!r} is in the ledger but the RENDERED hint omits it — the "
+            f"hint is what the operator actually copies")
+
+
+def test_the_decrypt_module_ledger_names_backup_pys_LAZY_minio_import():
+    """The ledger's one entry, tied to the code that creates the need.
+
+    `minio` is imported INSIDE `MinioUploader`, not at module scope, which is
+    exactly why the missing package survived every import-time check and only
+    surfaced mid-run against the real bucket.
+    """
+    src = Path(B.__file__).read_text(encoding="utf-8")
+    assert "from _minio import MinioArchive" in src, (
+        "backup.py's lazy minio import moved — re-derive DECRYPT_PYTHON_MODULES")
+    assert "minio" in EV.DECRYPT_PYTHON_MODULES
+
+
+def test_the_hint_quotes_nix_EXPRESSION_packages_and_leaves_bare_names_bare():
+    """An unquoted `python3.withPackages(p:[p.minio])` is a syntax error in the
+    operator's shell — parentheses and brackets are metacharacters. Pinned by
+    parsing the hint the way a shell would, not by eyeballing the string."""
+    words = shlex.split(EV.NIX_SHELL_HINT)
+    assert words[0] == "nix-shell"
+    assert words[1] == "-p"
+    # shlex removes the quoting, so the expression must survive as ONE word.
+    assert "python3.withPackages(p:[p.minio])" in words
+    assert "bitwarden-cli" in words
+    # ...and a bare name must NOT have been needlessly quoted into the string.
+    assert "'bitwarden-cli'" not in EV.NIX_SHELL_HINT
+
+
+@pytest.mark.parametrize("env,expect_path,expect_source", [
+    ({}, None, B.IDENTITY_SOURCE_DEFAULT),
+    ({"SOPS_AGE_KEY_FILE": "/srv/sops-chosen.key"},
+     "/srv/sops-chosen.key", "$SOPS_AGE_KEY_FILE"),
+    ({"ASIB_AGE_IDENTITY": "/srv/asib-chosen.key"},
+     "/srv/asib-chosen.key", "$ASIB_AGE_IDENTITY"),
+    # both set: ASIB wins, and the SOURCE must say so rather than naming the
+    # loser. A fixture whose two paths were equal could not see that swap.
+    ({"ASIB_AGE_IDENTITY": "/srv/asib-chosen.key",
+      "SOPS_AGE_KEY_FILE": "/srv/sops-chosen.key"},
+     "/srv/asib-chosen.key", "$ASIB_AGE_IDENTITY"),
+])
+def test_resolve_identity_with_source_NAMES_what_chose_the_path(
+        monkeypatch, env, expect_path, expect_source):
+    """🔴 The path alone cannot discriminate — every age identity file is the
+    same size, so a redirected path looks exactly like the right one. The
+    source is the only thing that separates 'your escrow is corrupt' from 'you
+    compared the wrong file', and those remedies are opposites.
+
+    The three fixture paths are pairwise distinct AND distinct from
+    DEFAULT_IDENTITY, so a mutant that returns any constant is visible.
+    """
+    for var in B.IDENTITY_ENV_VARS:
+        monkeypatch.delenv(var, raising=False)
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+
+    path, source = B.resolve_identity_with_source()
+    expected = B.DEFAULT_IDENTITY if expect_path is None else Path(expect_path)
+    assert path == expected
+    assert source == expect_source
+    # the two-return helper and the one-return one must never disagree
+    assert B.resolve_identity() == path
+
+
+def test_the_env_var_ORDER_is_declared_once_and_the_default_is_not_a_path():
+    """`resolve_identity()` delegates rather than repeating the loop: two copies
+    of a precedence order drift silently, because both return a plausible path."""
+    assert B.IDENTITY_ENV_VARS == ("ASIB_AGE_IDENTITY", "SOPS_AGE_KEY_FILE")
+    src = Path(B.__file__).read_text(encoding="utf-8")
+    body = src.split("def resolve_identity(", 1)[1].split("\ndef ", 1)[0]
+    assert "resolve_identity_with_source" in body, (
+        "resolve_identity() re-implements the order instead of delegating")
+    assert "os.environ" not in body, "a SECOND copy of the env order"
+    # the sentinel is a sentence, never a path — a message must not read
+    # "chosen by None" or "chosen by /some/path" where a source belongs.
+    assert isinstance(B.IDENTITY_SOURCE_DEFAULT, str)
+    assert "/" not in B.IDENTITY_SOURCE_DEFAULT
+
+
+def _mismatch_verdict(escrow_world, source):
+    """A BYTES-DIFFER-MATERIALLY run with a stated (or unstated) source."""
+    with pytest.raises(EV.EscrowError) as ei:
+        EV.run(bw=_cli(FakeBw(items=[_item(notes=OTHER_KEY)])),
+               identity=escrow_world["identity"], item_name=ITEM,
+               identity_source=source, store=escrow_world["store"], now=NOW)
+    assert ei.value.token == "BYTES-DIFFER-MATERIALLY"
+    return ei.value.verdict
+
+
+def test_a_mismatch_on_an_ENV_CHOSEN_identity_warns_BEFORE_the_remedy(escrow_world):
+    """🔴 THE REGRESSION. The old message named only the resolved PATH, so a
+    redirected comparison read as a damaged escrow and the advice it gave —
+    re-escrow from the on-disk identity — would have destroyed a good escrow."""
+    msg = _mismatch_verdict(escrow_world, "$SOPS_AGE_KEY_FILE")
+    assert "$SOPS_AGE_KEY_FILE" in msg, "the message does not name what redirected it"
+    assert "READ THIS BEFORE RE-ESCROWING" in msg
+    assert "WRONG FILE" in msg
+    # the size-is-not-evidence fact, which is why the mismatch is ambiguous
+    assert "same size" in msg
+    # it must still route the operator to the tool that can actually decide
+    assert "restore-verify.py" in msg
+
+
+def test_a_mismatch_on_the_DEFAULT_identity_does_NOT_carry_the_redirect_warning(
+        escrow_world):
+    """The warning must DISCRIMINATE. If it printed unconditionally it would be
+    noise on the one path where the on-disk file really is the expected one, and
+    a reader would learn to skip it."""
+    msg = _mismatch_verdict(escrow_world, B.IDENTITY_SOURCE_DEFAULT)
+    assert B.IDENTITY_SOURCE_DEFAULT in msg
+    assert "READ THIS BEFORE RE-ESCROWING" not in msg
+    assert "$SOPS_AGE_KEY_FILE" not in msg
+    assert "restore-verify.py" in msg
+
+
+def test_a_mismatch_with_NO_stated_source_asserts_NOTHING_about_provenance(
+        escrow_world):
+    """🔴 The honest third branch. A caller that states no source must not have
+    a default INVENTED for it: 'chosen by the built-in default' on a run that
+    never checked is the same class of confident wrong sentence this whole
+    module exists to prevent."""
+    msg = _mismatch_verdict(escrow_world, None)
+    assert "chosen by" not in msg
+    assert "READ THIS BEFORE RE-ESCROWING" not in msg
+    assert B.IDENTITY_SOURCE_DEFAULT not in msg
+    assert "restore-verify.py" in msg
+
+
+def test_print_plan_discloses_an_ENV_REDIRECT_before_any_password_is_spent(
+        monkeypatch, capsys, tmp_path):
+    """🔴 EXERCISES main()'s OWN derivation. The suite is otherwise hermetic —
+    every other test injects the identity — so main()'s resolution is exactly
+    the code that was never covered when this failed live.
+
+    `--print-plan` runs no `bw` and touches no network, so this is the check an
+    operator can make BEFORE typing a master password.
+    """
+    key = tmp_path / "redirected.key"
+    key.write_text(OTHER_KEY, encoding="utf-8")
+    for var in B.IDENTITY_ENV_VARS:
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("SOPS_AGE_KEY_FILE", str(key))
+
+    assert EV.main(["--print-plan"]) == EV.EXIT_OK
+    out = capsys.readouterr().out
+    assert "chosen by: $SOPS_AGE_KEY_FILE" in out
+    assert "NOT the default" in out
+    assert str(key) in out
+
+
+def test_print_plan_on_the_DEFAULT_identity_does_not_cry_redirect(
+        monkeypatch, capsys):
+    """The negative control for the test above: a clean environment must not
+    print a warning, or the warning stops meaning anything."""
+    for var in B.IDENTITY_ENV_VARS:
+        monkeypatch.delenv(var, raising=False)
+    assert EV.main(["--print-plan"]) == EV.EXIT_OK
+    out = capsys.readouterr().out
+    assert f"chosen by: {B.IDENTITY_SOURCE_DEFAULT}" in out
+    assert "NOT the default" not in out
+
+
+def test_an_explicit_identity_FLAG_is_reported_as_the_operators_own_choice(
+        monkeypatch, capsys, tmp_path):
+    """--identity is the one choice the operator definitely made deliberately.
+    Reporting it as an environment redirect would send them chasing a variable
+    they never set — and it must WIN over a set env var, not merely coexist."""
+    key = tmp_path / "explicit.key"
+    key.write_text(OTHER_KEY, encoding="utf-8")
+    monkeypatch.setenv("SOPS_AGE_KEY_FILE", "/srv/should-have-been-overridden.key")
+
+    assert EV.main(["--print-plan", "--identity", str(key)]) == EV.EXIT_OK
+    out = capsys.readouterr().out
+    assert "chosen by: the --identity flag" in out
+    assert "$SOPS_AGE_KEY_FILE" not in out
+    assert "should-have-been-overridden" not in out
+    assert str(key) in out

@@ -463,17 +463,44 @@ def scope_remotes(scope: Path) -> list[str]:
 # --------------------------------------------------------------------------- #
 # age
 # --------------------------------------------------------------------------- #
-def resolve_identity() -> Path:
-    """Path to the operator's age identity file.
+# 🔴 THE RESOLUTION ORDER LIVES HERE ONCE, as data. `resolve_identity()`
+# delegates to `resolve_identity_with_source()` rather than repeating the loop:
+# a second copy of this order is a second thing to get wrong, and the two would
+# drift silently because both return a plausible path.
+IDENTITY_ENV_VARS = ("ASIB_AGE_IDENTITY", "SOPS_AGE_KEY_FILE")
+
+# What chose the identity, when nothing overrode it. A sentinel STRING rather
+# than None so every consumer formats one type, and so a message can never read
+# "chosen by None".
+IDENTITY_SOURCE_DEFAULT = "the built-in default"
+
+
+def resolve_identity_with_source() -> tuple[Path, str]:
+    """The operator's age identity file, AND what chose it.
 
     Order: ASIB_AGE_IDENTITY -> SOPS_AGE_KEY_FILE (the handle the homelab repos
     already use, per SECRETS.md) -> the default homelab-talos path.
+
+    🔴 THE SECOND ELEMENT IS NOT COSMETIC. `SOPS_AGE_KEY_FILE` is exported by
+    unrelated client work, and every age identity file is the SAME SIZE (fixed
+    -width `# created:`, `# public key:` and key lines), so a comparison against
+    the wrong one fails with two equal byte counts and looks exactly like a
+    damaged escrow. A consumer that reports only the PATH leaves the operator
+    unable to tell "your escrow is corrupt" from "you compared the wrong file" —
+    and the remedies are opposites. MEASURED 2026-08-25: that is precisely what
+    happened, and the advice a path-only message gave would have overwritten a
+    good escrow with an unrelated key.
     """
-    for var in ("ASIB_AGE_IDENTITY", "SOPS_AGE_KEY_FILE"):
+    for var in IDENTITY_ENV_VARS:
         v = os.environ.get(var)
         if v:
-            return Path(v)
-    return DEFAULT_IDENTITY
+            return Path(v), f"${var}"
+    return DEFAULT_IDENTITY, IDENTITY_SOURCE_DEFAULT
+
+
+def resolve_identity() -> Path:
+    """Path only. See `resolve_identity_with_source()` for the order."""
+    return resolve_identity_with_source()[0]
 
 
 def resolve_recipient(identity: Path) -> str:
