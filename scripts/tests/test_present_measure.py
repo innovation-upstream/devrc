@@ -48,7 +48,10 @@ SCRIPTS = REPO_ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-present = pytest.importorskip("present")
+# 🔴 A PLAIN IMPORT, NOT `importorskip`. `scripts/run-tests.sh` GUARD 2 pins the
+# expected-skip SET, so a new skip is loud — but a skip still says "this suite
+# chose not to run", where an import error says "the module under test is
+# broken". Those are different findings and the second one is the true one.
 from present import content, measure  # noqa: E402
 
 
@@ -301,7 +304,8 @@ def test_the_rules_ceiling_is_read_from_the_test_that_owns_it():
                       claude_dir=Path.home() / ".claude",
                       index_store=Path.home() / ".claude" / "nonexistent",
                       allow_systemd=False)
-    row = measure.take(env, _registry(measure.REGISTRY[1])).by_key("rules.bytes")
+    entry = next(e for e in measure.REGISTRY if e[0] == "rules.bytes")
+    row = measure.take(env, _registry(entry)).by_key("rules.bytes")
     assert row.measured, row.reason
     assert f"{mod.MAX_BYTES:,}" in row.value, (
         "the rendered ceiling is not the one its owning test defines — a second "

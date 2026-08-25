@@ -38,7 +38,7 @@ SCRIPTS = REPO_ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-pytest.importorskip("present")
+# Plain import, deliberately — see the note in test_present_measure.py.
 from present import content, generate, measure, render  # noqa: E402
 
 GENERATOR = SCRIPTS / "present" / "generate.py"
