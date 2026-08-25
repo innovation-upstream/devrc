@@ -2926,12 +2926,43 @@ def test_no_source_renders_a_SELF_CONTRADICTING_refusal():
                 EV.IDENTITY_SOURCE_FLAG, B.IDENTITY_SOURCE_DEFAULT):
         chose, redirect = EV.provenance_clauses(Path("/srv/elsewhere.key"), src)
         assert redirect, src
+        # 🔴 POSITIVE CONTENT PINS, not only word-ABSENCES. The first version of
+        # this loop asserted three forbidden words and nothing else, and an
+        # INVERTED SAFETY CLAIM — "a mismatch here certainly means the escrow is
+        # DAMAGED and you should re-escrow at once", the exact opposite of this
+        # PR's advice — passed the whole suite using none of those words. A
+        # guard on WORDS is walkable by REWORDING; these say what must be TRUE.
+        assert "READ THIS BEFORE RE-ESCROWING" in redirect, (src, redirect)
+        assert str(B.DEFAULT_IDENTITY) in redirect, (src, redirect)
+        assert "same size" in redirect, (src, redirect)
         # only an ENV VAR can have "redirected" anything
         if not src.startswith("$"):
             assert "redirected" not in redirect, (src, redirect)
             assert "env -u" not in redirect, (src, redirect)
         # and nothing may claim a flag is settable by a shell
         assert "unrelated shell" not in redirect, (src, redirect)
+
+
+def test_the_NEUTRAL_arms_refusal_is_pinned_as_a_WHOLE_STRING():
+    """🔴 THE ARM THAT HAD NO POSITIVE PIN AT ALL, pinned whole.
+
+    Its two siblings each carry positive content assertions; this one carried
+    only word-absences, which is how an inverted safety instruction survived.
+    When the artifact under test IS prose, the guard is the whole normalised
+    string — a cosmetic reword then fails this test, and that is the trade
+    being made deliberately for a machine-readable claim about key material.
+    """
+    _, redirect = EV.provenance_clauses(Path("/srv/elsewhere.key"),
+                                        B.IDENTITY_SOURCE_DEFAULT)
+    d = B.DEFAULT_IDENTITY
+    assert redirect == (
+        f" 🔴 READ THIS BEFORE RE-ESCROWING: the on-disk path is not {d}, so a "
+        f"mismatch here is at least as likely to mean you compared the WRONG "
+        f"FILE as it is to mean the escrow is damaged — and the two remedies "
+        f"are opposites. Every age identity file is the same size, so equal "
+        f"byte counts on both sides is what comparing two DIFFERENT keys looks "
+        f"like, not evidence they are the same key. Re-run against {d} to "
+        f"compare against the default first.")
 
 
 def test_the_undo_advice_matches_the_KIND_of_source():
