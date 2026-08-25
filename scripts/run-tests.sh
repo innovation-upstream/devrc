@@ -1318,7 +1318,7 @@ TARGET_FLOORS=(
   # never fire: `zsh` is in REQUIRED_TOOLS, so a host without it aborts on
   # GUARD 1 naming the binary rather than running two tests thinner. That is
   # why they are not pinned in EXPECTED_SKIPS.
-  "scripts/tests|6459"
+  "scripts/tests|8036"
   # 2026-08-11, the session-summary changed-paths work: 230 -> 273 collected,
   # +43 for scripts/collector/tests/test_changed_paths.py (the shared
   # `changed_paths*` module). The gate printed this replacement itself —
