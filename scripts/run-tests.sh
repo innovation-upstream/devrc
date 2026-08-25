@@ -1461,7 +1461,21 @@ TARGET_FLOORS=(
   # waiting corpus (8) plus the bounds/parsing set (5) plus the round-7 additions
   # could have vanished with the gate still green, which is the exact staleness the
   # header above says a per-target floor exists to prevent.
-  "scripts/check-clickup-addressed/tests|203"
+  #
+  # 2026-08-24, the transcript-walk consolidation adds test_shared_walk.py: 234 collected,
+  # from this gate's own line `PASS scripts/check-clickup-addressed/tests
+  # (collected=234 passed=234 skipped=0 floor=203)`, agreeing with tests/run_all.py.
+  #   _suggested_floor 234 = 234 - min(50, max(1, 234/20 = 11)) = 234 - 11 = 223.
+  # 🔴 Again NOT forced — 234 is under the drift ceiling (203 + max(60, 203/4) = 263).
+  # Re-pinned for the same reason as the line above: the 8 tests added here are the ENTIRE
+  # regression record that `search-sessions.py` and `check-completion.py` no longer walk
+  # the corpus themselves, including the three watched red at 324693fd. Under floor 203
+  # every one of them could be deleted with the gate still green.
+  # ⚠ `scripts/tests` is deliberately NOT re-pinned in the same commit even though it moved
+  # 7885 -> 7908: its slack (1426) is pre-existing and tightening it to 7858 would fail any
+  # concurrent PR that lands with fewer tests. That is a repo-wide decision, not this
+  # change's to make silently.
+  "scripts/check-clickup-addressed/tests|223"
   "scripts/claude-hooks/tests/test_guard_core.py|1260"
   # 2026-08-13, next-step-nudge.py's suite arrives as a NEW target: 78 collected on the
   # branch. Gate's own count through the gate's own rule:
