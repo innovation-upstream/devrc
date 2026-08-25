@@ -882,3 +882,51 @@ test("MESSAGE_WALK_DEPTH is pinned exactly, not merely banded", () => {
   assert.equal(atDepth(14), 2, "a row at ancestor 15 is the last one in range");
   assert.equal(atDepth(15), 1, "ancestor 16 is out of range and must fall back");
 });
+
+// ===========================================================================
+// Round 8 — the backdrop's OWN wiring. Two shipped features could be unwired
+// with the suite fully green, because every wheel/pan test called the handler
+// DIRECTLY and nothing ever dispatched a real event through the backdrop.
+// This is the seam lightbox.js's own comment warns about, in the same file.
+// ===========================================================================
+
+test("REGRESSION: the backdrop's WHEEL listener is wired (scroll-to-zoom)", () => {
+  var doc = makeDocWithImage(DISCORD_IMG);
+  LB.open(doc, doc.querySelector("img"));
+  var backdrop = shadowOf(doc).querySelector(".backdrop");
+  assert.equal(LB.zoomLevel(), 1);
+  backdrop.dispatchEvent({ type: "wheel", deltaY: -100, preventDefault: function () {} });
+  assert.equal(LB.zoomLevel(), 1.25,
+    "deleting backdrop.addEventListener('wheel', …) left 114/114 green and " +
+    "scroll-to-zoom completely inert");
+  backdrop.dispatchEvent({ type: "wheel", deltaY: 100, preventDefault: function () {} });
+  assert.equal(LB.zoomLevel(), 1, "and it is the WHEEL handler, not some other one");
+});
+
+test("REGRESSION: the backdrop's MOUSEDOWN listener is wired (drag can start)", () => {
+  var doc = makeDocWithImage(DISCORD_IMG);
+  LB.open(doc, doc.querySelector("img"));
+  var backdrop = shadowOf(doc).querySelector(".backdrop");
+  // Without this wiring a drag can never BEGIN: handleMouseMove early-returns
+  // while state.dragging is false, so pan is dead and — because didDrag never
+  // latches — a pan-and-release closes the lightbox.
+  backdrop.dispatchEvent({ type: "mousedown", clientX: 10, clientY: 10 });
+  LB.handleMouseMove(doc, { clientX: 40, clientY: 30 });
+  var clone = shadowOf(doc).querySelector(".media-container img");
+  assert.equal(clone.style.transform, "scale(1) translate(30px, 20px)",
+    "the drag must have started from the real mousedown event");
+});
+
+test("the backdrop carries exactly the three listeners open() registers", () => {
+  var doc = makeDocWithImage(DISCORD_IMG);
+  LB.open(doc, doc.querySelector("img"));
+  var backdrop = shadowOf(doc).querySelector(".backdrop");
+  // An enumeration, like its document-side twin: it fails if the set SHRINKS,
+  // not if it grows. The click arm was already pinned, which is why deleting
+  // the whole three-line block died while deleting either of the other two
+  // survived — one arm masking the other two.
+  for (var t of ["wheel", "mousedown", "click"]) {
+    assert.equal((backdrop._listeners.get(t) || []).length, 1,
+      "open() must register exactly one " + t + " listener on the backdrop");
+  }
+});

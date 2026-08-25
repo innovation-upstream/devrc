@@ -110,7 +110,7 @@ from a RED control that carried all six defects at once, so it failed on a
 different assertion in the same test. Isolate a mutant before claiming it is
 pinned. The transform is genuinely pinned now.
 
-The suite is mutation-swept: **80 semantic mutants, 78 killed** — operand swaps,
+The suite is mutation-swept: **86 semantic mutants, 84 killed** — operand swaps,
 branch inversions, constants moved in **both** directions, guard removals. A
 positive control (reverting the media pattern to host-only) dies, so the harness
 can go red. The two survivors are ONE equivalence class counted properly — the
@@ -118,18 +118,29 @@ can go red. The two survivors are ONE equivalence class counted properly — the
 defence in depth: `scan()` returns 0 for any root it cannot query, and an
 attribute record only ever targets an Element.
 
-🔴 **Read that number correctly.** It is a claim about the 80 mutants somebody
-constructed, never about the suite — and this file has been wrong about it
-**four times**. It said "25 mutants, 24 killed, the survivor is equivalent"; an
-independent audit found **eight** more survivors, none equivalent. Corrected to
-36 — a third audit, with 163 mutants, found a 37th. Corrected to 46 — a fourth
-found a 47th *and* a whole vacuous class (below); a fifth found the same
-module-scope entry-point gap in the OTHER content script, and corrected "four"
-voided guards to seven; a sixth found four checked-in numbers disagreeing with
-each other; a seventh found the `didDrag` latch pinned on its SET and not its
-RELEASE — which reads as fully pinned. If you change this code, add
-the mutant for the failure mode you are introducing. A passing sweep only means
-nobody has imagined the next one yet.
+🔴 **Read that number correctly.** It is a claim about the 86 mutants somebody
+constructed, never about the suite. Every audit that went looking found one more,
+and the list is NUMBERED so the count cannot drift from it again — it already did
+so twice: the sentence said "four" while the list named six, was corrected to
+"six", and a clause was appended in the same commit without moving the number.
+The defect this paragraph is about, regrown inside the paragraph about it, twice.
+Count the items; do not trust a total anyone wrote in prose, this one included.
+
+1. "25 mutants, 24 killed, the survivor is equivalent" — an independent audit
+   built its own battery and found **eight** more survivors, none equivalent.
+2. Corrected to 36 — a third audit, with 163 mutants, found a 37th.
+3. Corrected to 46 — a fourth found a 47th *and* a whole vacuous class (below).
+4. A fifth found the same module-scope entry-point gap in the OTHER content
+   script, and corrected "four" voided guards to seven.
+5. A sixth found four checked-in numbers disagreeing with each other.
+6. A seventh found the `didDrag` latch pinned on its SET and not its RELEASE —
+   which reads as fully pinned.
+7. An eighth found the backdrop's own `wheel` and `mousedown` listeners could be
+   deleted with the suite green, leaving scroll-to-zoom and drag-to-pan inert.
+
+If you change this code, add the mutant for the failure mode you are introducing,
+and add a numbered line here if a sweep total ever turns out to be wrong again.
+A passing sweep only means nobody has imagined the next one yet.
 
 🔴 **The fixture must not normalise away what the code normalises.** A real HTML
 document reports `tagName` **UPPERCASE**; `tests/fake_discord_dom.mjs` used to

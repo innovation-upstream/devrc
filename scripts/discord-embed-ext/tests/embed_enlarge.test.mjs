@@ -831,3 +831,26 @@ test("REGRESSION: the debounce actually debounces, at the stated delay", () => {
     flush();
   });
 });
+
+test("REGRESSION: applyOverride writes its FULL declaration set, not just the caps", () => {
+  // max-width/max-height/cursor were pinned; width, height and object-fit were
+  // not — each deletable with the suite green. A cap removed while `width` stays
+  // at Discord's computed value is a half-enlarged embed.
+  var container = new FakeElement("div", { class: "embed" });
+  container.style.setProperty("max-width", "400px", "important");
+  var img = new FakeElement("img", { src: "https://cdn.discordapp.com/attachments/1/2/p.png" });
+  container.appendChild(img);
+  DEE.applyOverride(img);
+
+  var el = img.style.cssText;
+  for (var decl of ["max-width: 100% !important", "max-height: none !important",
+                    "width: auto !important", "height: auto !important",
+                    "object-fit: contain !important", "cursor: zoom-in !important"]) {
+    assert.ok(el.includes(decl), "element must declare " + decl + " — got: " + el);
+  }
+  var cs = container.style.cssText;
+  for (var cdecl of ["max-width: none !important", "max-height: none !important",
+                     "width: auto !important", "height: auto !important"]) {
+    assert.ok(cs.includes(cdecl), "container must declare " + cdecl + " — got: " + cs);
+  }
+});
