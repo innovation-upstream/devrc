@@ -582,6 +582,7 @@ SECTIONS: tuple[Section, ...] = (
                 "quiet. It exists to answer questions about where effort actually goes, "
                 "which is what makes claims like “this tool is dead” measurable rather than "
                 "impressionistic.")),
+            ("measure", "telemetry.sources"),
             ("p", (
                 "<b>The subsystem index store.</b> What a past session learned about a "
                 "subsystem, keyed by scope, recalled on demand. It costs nothing per "

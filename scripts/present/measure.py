@@ -792,6 +792,48 @@ def m_index_store(env: Env) -> dict:
     )
 
 
+def m_telemetry_sources(env: Env) -> dict:
+    """How many INDEPENDENT sources feed the activity pipeline.
+
+    Counted from the collector's own per-source directories rather than from a
+    list in a document: a source that is added and never written down would be
+    invisible to the document and is visible here.
+    """
+    collector = env.repo / "scripts" / "collector"
+    if not collector.is_dir():
+        raise Unmeasurable(f"{collector} does not exist")
+    sources = sorted(
+        d.name for d in collector.iterdir()
+        if d.is_dir() and not d.name.startswith((".", "_")) and d.name != "tests"
+    )
+    if not sources:
+        raise Unmeasurable(
+            "the collector holds no per-source directory — an empty listing is "
+            "the failure, not the all-clear"
+        )
+    rows = []
+    for name in sources:
+        d = collector / name
+        py = len(list(d.rglob("*.py")))
+        has_tests = (d / "tests").is_dir()
+        rows.append((name, str(py), "yes" if has_tests else "no"))
+    return dict(
+        value=f"{len(sources)} collector sources",
+        detail=(
+            "Shell, terminal multiplexer, keyboard, window manager, browser and "
+            "agent transcripts, landing in a columnar store with dashboards over "
+            "it. Each source carries a DEADMAN, because a source that stops "
+            "reporting looks exactly like a quiet one — this is the same "
+            "silent-zero shape the rest of the system is built against, in the "
+            "data layer. The pipeline is what makes a claim like 'this tool is "
+            "dead' measurable instead of impressionistic."
+        ),
+        source="per-source directories under scripts/collector/",
+        columns=("source", ".py files", "has its own suite"),
+        rows=tuple(rows),
+    )
+
+
 def m_managed_paths(env: Env) -> dict:
     home_nix = env.repo / "nix" / "home.nix"
     if not home_nix.is_file():
@@ -1240,6 +1282,8 @@ REGISTRY: tuple[tuple[str, str, str, object, str], ...] = (
      "bash scripts/drift-check.sh; echo rc=$?"),
     ("timers", "drift", "systemd user timers on this host", m_timers,
      "systemctl --user list-timers --all"),
+    ("telemetry.sources", "observed", "Activity-telemetry sources", m_telemetry_sources,
+     "ls -d scripts/collector/*/"),
     ("index.store", "observed", "The subsystem index store", m_index_store,
      "python scripts/analyze-service-index/... --list  (or: ls ~/.claude/analyze-service-index)"),
     ("seam.jsonl", "soft", "Independent transcript-corpus walkers", m_jsonl_walkers,
