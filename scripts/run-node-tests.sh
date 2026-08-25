@@ -244,6 +244,7 @@ SUITES=(
   # for a task the owner answered last. FILE COUNT MOVES 5 -> 6.
   # Floor 179 = 188 - min(50, max(1, 188/20)) = 188 - 9.
   "claude/skills/clickup/test|6|179"
+  "scripts/discord-embed-ext/tests|3|50"
 )
 
 # --- discovery roots -----------------------------------------------------------
