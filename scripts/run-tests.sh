@@ -1473,7 +1473,22 @@ TARGET_FLOORS=(
   # 🔴 Again NOT forced by the gate (235 is under the drift ceiling), and re-pinned for
   # the same reason as the line above: leaving 32 tests of slack lets this whole file
   # vanish with the gate still green, and its own subject is a guard against silence.
-  "scripts/check-clickup-addressed/tests|224"
+  #
+  # 2026-08-25, the transcript-walk consolidation adds tests/test_shared_walk.py on TOP of
+  # that: the 9 tests that are the ENTIRE regression record for `search-sessions.py` and
+  # `check-completion.py` no longer walking the corpus themselves. 🔴 THIS NUMBER IS THE
+  # MERGED TREE'S, MEASURED — not 223 (this branch alone) and not 224 (main alone), and
+  # NOT their arithmetic. Both sides added tests to this one target, which is exactly the
+  # shape the header above warns produces a hand-computed floor that is wrong on the tree
+  # it lands on; the first number written here was a 256 derived that way, and measurement
+  # said otherwise. Measured on the merge — `pytest --collect-only` says 244 and
+  # tests/run_all.py says `244 passed, 0 failed`; two runners, one number.
+  #   _suggested_floor 244 = 244 - min(50, max(1, 244/20 = 12)) = 244 - 12 = 232.
+  # ⚠ `scripts/tests` is deliberately NOT re-pinned in the same commit even though it
+  # moved 7885 -> 7908: its slack is pre-existing, and tightening it would fail any
+  # concurrent PR that lands with fewer tests. That is a repo-wide decision, not this
+  # change's to make silently.
+  "scripts/check-clickup-addressed/tests|232"
   "scripts/claude-hooks/tests/test_guard_core.py|1260"
   # 2026-08-13, next-step-nudge.py's suite arrives as a NEW target: 78 collected on the
   # branch. Gate's own count through the gate's own rule:

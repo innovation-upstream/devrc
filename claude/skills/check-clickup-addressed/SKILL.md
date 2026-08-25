@@ -111,6 +111,20 @@ yesterday's verdict back as today's evidence and re-confirms it forever. The rep
 
 ## Individual scripts
 
+🔴 **THIS SKILL DIRECTORY IS NO LONGER SELF-CONTAINED (2026-08-24).** `search-sessions.py`
+and `check-completion.py` import `scripts/lib/transcript_search.py` — the ONE transcript
+walk they now share with `scripts/find-session.py` — resolved as `_HERE.parent / "lib"`.
+Consequences worth knowing before you move, copy or deploy this directory:
+- copying the skill dir alone gives you scripts that cannot import; the sibling `lib/`
+  has to come with it. `tests/mutation_sweep.py::materialize` reproduces the repo's
+  `scripts/` layout for exactly this reason, and its `SHARED_MODULES` list is pinned
+  two-way by `tests/test_shared_walk.py`.
+- a change to that module changes THIS skill's verdicts. Its own regression ledger lives
+  in `scripts/tests/test_transcript_search.py`; run both suites, not just this one.
+- the two search axes this skill does NOT take from the library default —
+  `surface=SURFACE_TOOL_USE` and `include_sidechains=True` — are passed explicitly in
+  `search-sessions.py` and commented there.
+
 All scripts accept `--json` for machine-readable output. Two of them make network calls:
 `recent-comments.py` needs ClickUp credentials, and PR resolution shells out to `gh pr
 view` — **on by default in `check-addressed.py`** (`--no-resolve-prs` opts out), off by
@@ -425,8 +439,8 @@ announcement.
 - **Prior-run exclusion** (2026-08-20): every transcript that is a *run* of this checker is
   skipped too, recognised by anchored markers rather than session id. The markers had to be
   anchored. **Measured 2026-08-21 over the 735 transcripts these scripts actually walk**
-  (`CLAUDE_DIR.iterdir()` then `glob("*.jsonl")`, top level — *not* a recursive grep, which
-  also sees 4559 files under `<session>/subagents/` that are never opened): a bare
+  (*not* a recursive grep, which also sees 4,795 files under `<session>/subagents/` that are
+  never opened): a bare
   `check-clickup-addressed` matches **67 (9.1%)** because the skill catalog is injected into
   every session, and a bare `/check-clickup-addressed` matches **24 (3.3%)** because it is a
   substring of the skill's own path — against **4** for the real anchored markers. An earlier
