@@ -335,30 +335,56 @@ directly above: a count re-derived against a live pin decays the moment the next
 `grep -vc '^#' routes.golden` (the file's first three lines are comments) and subtract anything
 committed after the live pin.
 
-### Task ↔ session threads (#357, 0.7.98) — the direction that EXISTS, and the one that does not
+### Task ↔ session threads (#357, 0.7.98) — BOTH directions are machine-readable
 
 The `task_sessions` table records which Claude Code sessions touched a task, with a role of
 `created` / `worked` / `read`, and `/ui/tasks` renders a `👥 N session(s)` chip with a deep link.
 🔴 **The link is written by the SERVER as a side effect of the request; there is no producer API for
-it,** and the query is asymmetric:
+it** — you cannot create, edit or delete a link.
+
+🔴 **RETRACTED 2026-08-24: this section used to say the task→sessions direction had "no route",
+`clawgatectl` had "no subcommand", and the question was answerable "only by reading `/ui/tasks`".
+The CONCLUSION was wrong** — measured live against `0.7.99` on 11 tasks. The sub-route genuinely
+404s, but the thread is **EMBEDDED on every task read**, so the CLI has always been able to answer:
+
+```bash
+clawgatectl task get N | jq '.sessions[] | select(.role=="worked")'
+# {"sessionId":"55810ec6-…","role":"worked","host":"nixos",
+#  "firstSeenAt":"…","lastSeenAt":"…","detailAvailable":false}
+```
 
 | direction | surface | state |
 |---|---|---|
 | session → tasks | `GET /api/sessions/{id}/tasks` | ✅ callable (hook token), pinned in the golden |
-| task → sessions | *(none)* | 🔴 **no route.** `GET /api/tasks/{id}/sessions` returns **404** and appears nowhere in `routes.golden` |
-| either direction | `clawgatectl` | 🔴 **no subcommand** — not under `task`, not top-level |
+| task → sessions | `GET /api/tasks/{id}` → **`sessions[]`** | ✅ **embedded on the task read**, list and single. Pinned by `task_sessions_test.go` ("response embeds the link it just made") |
+| task → sessions | `GET /api/tasks/{id}/sessions` | 🔴 **404 BY DESIGN — do not "fix" it.** `TestNoForwardSessionsSubRoute` pins 404/405 because the codebase embeds a task's children rather than keep a second contract in sync. Correctly absent from `routes.golden` |
+| either direction | `clawgatectl` | ✅ `task get` (embed, above) · reverse is still curl |
 
-So *"which sessions worked task N"* — the question the feature was built to answer — is today
-answerable **only by reading `/ui/tasks`**. A machine consumer can ask the reverse question only.
+🔴 **The lesson that cost this file three days of being wrong:** "the sub-route 404s" and "the data
+is unreachable" are different claims, and the second does not follow from the first. A handoff doc
+queued *"build the forward direction"* as ranked work on the strength of this table. One
+`clawgatectl task get` would have retired it.
 
-🔴 **Membership OVER-reports, and a role NEVER downgrades.** Two measured causes, both live:
-- a **400-rejected** `PATCH` still records the session as having `worked` the task: `noteTaskSession`
-  (defined in `internal/api/task_sessions.go`, called from the PATCH handler in
-  `internal/api/notes.go`) runs **before** the body/tag validation that rejects the request —
-  verified on trunk, the call precedes both `StatusBadRequest` returns in that handler. Card #306
-  carries three fix options;
-- a **subagent inherits the parent's `CLAUDE_CODE_SESSION_ID`**, so a subagent merely *reading* a
-  task links the **parent** session to work it never did.
+#### Reading a thread WITHOUT being fooled by it
+
+**Filter on `role`, never on membership.** Presence in a thread does not mean the session did work:
+
+- 🔴 **A mere READ links you.** `task get` records a `read` link for your own session — so
+  *querying a thread changes it*. Checking task 337 took it from 2 sessions to 3. An agent polling
+  the board inflates every thread it touches.
+- 🔴 **A subagent inherits the parent's `CLAUDE_CODE_SESSION_ID`**, so a subagent merely reading a
+  task links the **parent** session to work it never did. Give a dispatched agent its own.
+- ✅ **FIXED in 0.7.99** (#306 / PR #391): a **400-rejected** `PATCH` used to record `worked`
+  permanently. It now records **no link at all** — not even `read`, deliberately, since the weaker
+  role would manufacture membership out of a refused attempt. Verified live against Postgres.
+
+**Trust `worked`/`created`; never infer from the absence of `read`.** The cap is asymmetric —
+it evicts oldest `read` first and **never** `created`/`worked` — so a `worked` link is durable
+evidence, while a missing `read` may simply have been evicted. This asymmetry is what makes the
+query answerable at all.
+
+⚠ **Expect `detailAvailable: false` on most rows** (16 of 17 live rows when measured) — see the
+`cc_sessions` note below. A `sessionId` usually will NOT resolve to a transcript.
 
 ⚠ **No FK to `cc_sessions`, deliberately** — that table is swept at 14 days, and a cascading FK would
 silently empty every thread, making a task that HAD five sessions render identically to one that
