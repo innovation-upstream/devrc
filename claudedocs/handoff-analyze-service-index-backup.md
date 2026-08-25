@@ -51,7 +51,11 @@ and close the one failure mode in it that is unrecoverable (no off-machine backu
    escrowed key still there, still byte-identical, and does it still *work*". Byte equality
    and working are different claims: `--decrypt-check` writes the **escrowed** bytes to a
    throwaway 0600 identity and decrypts a real artifact with them.
-   🔴 **Its unlocked path has never run.** See "The one link still untested".
+   🔴 **Its unlocked path ran once (2026-08-25) and did NOT settle the question** — it
+   compared against a client key an env var had redirected it to. The escrow's agreement
+   with the real `age.key` is **still unconfirmed since the 08-23 `cmp`**, and that older
+   claim is neither confirmed nor refuted by the 08-25 run. See "The one link still
+   untested" — and do not re-escrow on that run's advice.
 
 ### Verified live, end to end
 10 scopes, 201 commits compared, restored from the bucket → `age -d` → `git clone` →
@@ -271,11 +275,17 @@ systemctl --user list-timers analyze-service-index-backup.timer --all
 systemctl --user show analyze-service-index-backup.service -p Result
 
 # the escrow is still there, still correct, and still WORKS (needs the master password)
-nix-shell -p bitwarden-cli jq --run \
-  'export BW_SESSION="$(bw unlock --raw)"; python3 ~/workspace/devrc/scripts/analyze-service-index/escrow-verify.py --decrypt-check --host workbench-$(cat /etc/machine-id)'
+# 🔴 THE SHELL MUST CARRY minio AND THE IDENTITY MUST BE PINNED — see "The env
+# redirect" below. Both omissions cost a real run on 2026-08-25.
+nix-shell -p bitwarden-cli jq 'python3.withPackages(p:[p.minio])' --run \
+  'export BW_SESSION="$(bw unlock --raw)"; env -u SOPS_AGE_KEY_FILE -u ASIB_AGE_IDENTITY python3 ~/workspace/devrc/scripts/analyze-service-index/escrow-verify.py --decrypt-check --identity ~/workspace/homelab-talos/.secrets/age.key --host workbench-$(cat /etc/machine-id)'
 # no password to hand? this is still a real check — it must exit 12 VAULT-LOCKED,
-# promptly and without hanging, NOT sit waiting on an invisible prompt:
+# promptly and without hanging, NOT sit waiting on an invisible prompt.
+# MEASURED 2026-08-25: rc=12 in 2s.
 nix-shell -p bitwarden-cli jq --run 'python3 ~/workspace/devrc/scripts/analyze-service-index/escrow-verify.py'
+# and BEFORE spending a password, confirm which file the run will actually
+# compare against — no vault, no network:
+python3 ~/workspace/devrc/scripts/analyze-service-index/escrow-verify.py --print-plan
 
 # the index store's own verdict
 python3 ~/workspace/devrc/scripts/subsystem-audit.py
@@ -293,17 +303,74 @@ pgrep -f 'run-tests.sh|gate.sh' | while read -r p; do
 done   # none may equal ~/workspace/devrc/.git
 ```
 
-## The one link still untested — 🔴 THE ONLY THING BLOCKED ON A HUMAN
+## The one link still untested — 🔴 STILL THE ONLY THING BLOCKED ON A HUMAN
 
-**`escrow-verify.py`'s unlocked path has never run.** Everything above the vault boundary
-is synthetic: the real note fetch, the real byte comparison against the real `age.key`, and
-`--decrypt-check` against MinIO are covered only by an injected fake. One command with the
-master password exercises all three:
+**`escrow-verify.py`'s unlocked path has RUN ONCE, on 2026-08-25, and it did not settle
+the question** — it compared the escrow against the wrong file. Details in "The env
+redirect" below. So the claim below is unchanged: everything above the vault boundary is
+still synthetic — the real note fetch, the real byte comparison against the real `age.key`,
+and `--decrypt-check` against MinIO are covered only by an injected fake.
+
+🔴 **Do NOT re-escrow on the strength of that run.** What it proved is that the escrow
+differs from a **CivitAI client key**, which is not a fact about the escrow at all.
+
+The command below is the corrected one — it pins the identity and provisions `minio`.
+Both differences are load-bearing, and each was a separate failure on 2026-08-25:
 
 ```bash
-nix-shell -p bitwarden-cli jq --run \
-  'export BW_SESSION="$(bw unlock --raw)"; python3 ~/workspace/devrc/scripts/analyze-service-index/escrow-verify.py --decrypt-check --host workbench-$(cat /etc/machine-id)'
+nix-shell -p bitwarden-cli jq 'python3.withPackages(p:[p.minio])' --run \
+  'export BW_SESSION="$(bw unlock --raw)"; env -u SOPS_AGE_KEY_FILE -u ASIB_AGE_IDENTITY python3 ~/workspace/devrc/scripts/analyze-service-index/escrow-verify.py --decrypt-check --identity ~/workspace/homelab-talos/.secrets/age.key --host workbench-$(cat /etc/machine-id)'
 ```
+
+Validated to the vault boundary (`rc=12 VAULT-LOCKED` in 3s), so argv, `--identity`, the
+host label and the imports are all known-good; only the step the password opens is untried.
+
+### 🔴 The env redirect — what the 2026-08-25 run actually measured
+
+The run returned **`rc=22 BYTES-DIFFER-MATERIALLY`, "189 escrowed bytes vs 189 on disk"**,
+and its remedy said to re-escrow from the on-disk identity. Following that advice would
+have **overwritten a good escrow with a client's age key**. Two mechanisms fit that output
+and they demand opposite actions:
+
+- **A** — the escrow is stale/damaged → re-escrow.
+- **B** — the *on-disk* side was the wrong file → change nothing.
+
+**It was B, measured.** `resolve_identity()` reads `ASIB_AGE_IDENTITY` → `SOPS_AGE_KEY_FILE`
+→ the default. The command ran in an **interactive** shell (`!`/`.zshrc`), which had
+`SOPS_AGE_KEY_FILE` pointed into a **client repo**; the Bash tool's non-interactive zsh does
+not, which is why the same command behaved differently for the agent and the human.
+
+🔴 **"189 vs 189" is not corroboration — it is what two DIFFERENT keys look like.** Every
+age identity file is the same size (fixed-width `# created:`, `# public key:` and key
+lines). Equal byte counts on both sides carry no information about whether the keys match.
+
+Public-key hashes, compared without printing key material — all four are **distinct**
+identities. Three client checkouts carry their own key at a `…/.secrets/sops/age.key` path;
+they are not enumerated here (this repo is public) and which one it landed on does not
+change the conclusion:
+
+| identity | pubkey sha (first 16) |
+|---|---|
+| `homelab-talos/.secrets/age.key` (the real one) | `288c4d24cfdb5aa1` |
+| client checkout A | `7e3367f5a3a5d327` |
+| client checkout B | `6643aa0a698317cf` |
+| client checkout C | `8e6095ea38340cef` |
+
+Reproduce with `age-keygen -y <file> | sha256sum` — it prints the PUBLIC half only, so the
+comparison never handles secret material.
+
+**The on-disk homelab key is confirmed correct, independently of the vault.**
+`restore-verify.py --identity ~/workspace/homelab-talos/.secrets/age.key` → **rc=0**, all
+10 artifacts decrypted, 214 commits compared, `fsck OK`, 0 self-consistency-only, against
+artifacts stamped `20260824T094214Z` — the timer's own output. Two independent sources
+agree that path is the intended one: the systemd unit pins `SOPS_AGE_KEY_FILE` to it
+(`nix/home.nix:3312`), and it opens the bucket.
+
+**Both defects are fixed in this branch** (`fix/escrow-identity-provenance`): the advertised
+nix-shell is derived from a package ledger pinned against what the decrypt path imports, and
+a mismatch now names *what chose* the on-disk path — refusing to call the mismatch diagnosed
+when an env var did. `--print-plan` discloses a redirect before any password is spent.
+Matrix: both red at `a8089a51`, green at HEAD, demonstrated by execution.
 
 It also settles two assumptions **never measured against the real vault item**: that a
 Secure Note has `type == 2`, and that `notes` is present in `bw list items` output. A wrong
@@ -326,7 +393,9 @@ from the **web vault on another device** and paste it into a file — a path tha
 mangle whitespace. Worth doing once at leisure: open the note in the web vault, paste it
 into a scratch file, confirm 189 bytes / 3 lines.
 
-⚠ `bw` is **not installed** — run it as `nix-shell -p bitwarden-cli jq --run '…'`. Its
+⚠ `bw` is **not installed** — run it as `nix-shell -p bitwarden-cli jq --run '…'`, and add
+`'python3.withPackages(p:[p.minio])'` for `--decrypt-check`, which reaches MinIO through a
+**lazy** `minio` import and so dies mid-run, after the password, in a shell without it. Its
 server was repointed from the internal LAN name to the externally-trusted one
 (`bw config server` shows the current value; the old one survives as a historical
 `byServer` entry). The LAN endpoint serves a cert-manager **self-signed placeholder**

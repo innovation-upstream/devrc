@@ -463,17 +463,76 @@ def scope_remotes(scope: Path) -> list[str]:
 # --------------------------------------------------------------------------- #
 # age
 # --------------------------------------------------------------------------- #
-def resolve_identity() -> Path:
-    """Path to the operator's age identity file.
+# 🔴 THE RESOLUTION ORDER LIVES HERE ONCE, as data. `resolve_identity()`
+# delegates to `resolve_identity_with_source()` rather than repeating the loop:
+# a second copy of this order is a second thing to get wrong, and the two would
+# drift silently because both return a plausible path.
+IDENTITY_ENV_VARS = ("ASIB_AGE_IDENTITY", "SOPS_AGE_KEY_FILE")
+
+# What chose the identity, when nothing overrode it. A sentinel STRING rather
+# than None so every consumer formats one type, and so a message can never read
+# "chosen by None".
+IDENTITY_SOURCE_DEFAULT = "the built-in default"
+
+
+def resolve_identity_with_source() -> tuple[Path, str]:
+    """The operator's age identity file, AND what chose it.
 
     Order: ASIB_AGE_IDENTITY -> SOPS_AGE_KEY_FILE (the handle the homelab repos
     already use, per SECRETS.md) -> the default homelab-talos path.
+
+    🔴 THE SECOND ELEMENT IS NOT COSMETIC. `SOPS_AGE_KEY_FILE` is exported by
+    unrelated client work, and every age identity file is the SAME SIZE (fixed
+    -width `# created:`, `# public key:` and key lines), so a comparison against
+    the wrong one fails with two equal byte counts and looks exactly like a
+    damaged escrow. A consumer that reports only the PATH leaves the operator
+    unable to tell "your escrow is corrupt" from "you compared the wrong file" —
+    and the remedies are opposites. MEASURED 2026-08-25: that is precisely what
+    happened, and the advice a path-only message gave would have overwritten a
+    good escrow with an unrelated key.
     """
-    for var in ("ASIB_AGE_IDENTITY", "SOPS_AGE_KEY_FILE"):
+    for var in IDENTITY_ENV_VARS:
         v = os.environ.get(var)
         if v:
-            return Path(v)
-    return DEFAULT_IDENTITY
+            return Path(v), f"${var}"
+    return DEFAULT_IDENTITY, IDENTITY_SOURCE_DEFAULT
+
+
+def resolve_identity() -> Path:
+    """Path only. See `resolve_identity_with_source()` for the order."""
+    return resolve_identity_with_source()[0]
+
+
+def same_identity_file(a: Path, b: Path) -> bool:
+    """Do two identity paths name the SAME FILE?
+
+    🔴 THE DISCRIMINATING STATE IS THE FILE, NOT WHAT NAMED IT. A caller that
+    asks "was an environment variable set?" gets the wrong answer twice over:
+    the deployed backup unit sets `SOPS_AGE_KEY_FILE` to the default path
+    (`nix/home.nix`), so the env var is set and nothing is redirected; and an
+    explicit `--identity` can point AT the default, which no environment
+    redirected at all. Branching on the mechanism made both of those read as
+    "NOT the default" — a confident wrong claim, and a permanently-red warning
+    on the subsystem's own normal configuration.
+
+    Symlinks are resolved, so a default path that is a link to the file an env
+    var names is correctly judged the SAME file. `resolve()` is non-strict, so
+    a path that does not exist compares by its normalised form rather than
+    raising — an absent identity is a separate, already-classified failure.
+    """
+    try:
+        return a.expanduser().resolve() == b.expanduser().resolve()
+    except (OSError, ValueError, RuntimeError):
+        # 🔴 MEASURED on CPython 3.12: none of symlink loops, self-links,
+        # deep chains, ENAMETOOLONG, an unreadable parent or a deleted cwd
+        # raises here — `resolve(strict=False)` swallows them and returns a
+        # normalised path. So this is a BELT, not a live branch, and the
+        # earlier comment naming RuntimeError as "a symlink loop" was wrong
+        # about its own condition. `ValueError` (an embedded NUL) is the one
+        # that can actually escape, and is unreachable from argv or env.
+        # Falling back to the LITERAL comparison keeps the safe direction: two
+        # paths that are not textually equal stay "different", which warns.
+        return a == b
 
 
 def resolve_recipient(identity: Path) -> str:

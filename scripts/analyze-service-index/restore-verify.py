@@ -544,6 +544,29 @@ class ArtifactVerdict:
 # --------------------------------------------------------------------------- #
 # the verification of ONE artifact
 # --------------------------------------------------------------------------- #
+def _identity_note(identity: Path) -> str:
+    """" (NOT the default identity...)" when the file is not DEFAULT_IDENTITY.
+
+    🔴 A DECRYPT FAILURE HAS TWO MECHANISMS — wrong key, or damaged ciphertext —
+    and the message below names both. A THIRD is invisible without this note:
+    the identity was silently redirected by an environment variable, so the
+    "wrong key" arm is not a fact about the escrow or the artifact at all.
+    Asked of the FILE, never of what named it: the deployed backup unit exports
+    SOPS_AGE_KEY_FILE=<the default path>, which redirects nothing.
+    """
+    if B.same_identity_file(identity, B.DEFAULT_IDENTITY):
+        return ""
+    # 🔴 NAMES ALL THREE WAYS AN IDENTITY GETS CHOSEN, because this function
+    # is given the PATH and cannot know which one was used. Naming only the two
+    # environment variables told an operator who had passed `--identity` to go
+    # check two variables that had no effect on their run — and escrow-verify's
+    # mismatch message now explicitly hands over with "pass it the SAME
+    # --identity you used here", so that is the likely path, not a rare one.
+    return (" (which is NOT the default identity — it came from --identity, "
+            "ASIB_AGE_IDENTITY or SOPS_AGE_KEY_FILE; check which before "
+            "concluding the key is wrong)")
+
+
 def decrypt(cipher: Path, plain: Path, identity: Path) -> None:
     """`age -d -i <identity>`. A failure here is a DECRYPT failure, and says so.
 
@@ -588,7 +611,8 @@ def decrypt(cipher: Path, plain: Path, identity: Path) -> None:
         raise RestoreVerifyError(
             f"DECRYPT FAILED for {cipher.name} (age rc={p.returncode}): "
             f"{p.stderr.strip()}. The object was retrieved but the identity at "
-            f"{identity} does not open it, or the ciphertext is damaged. This is "
+            f"{identity}{_identity_note(identity)} does not open it, or the ciphertext "
+            f"is damaged. This is "
             f"NOT a corruption verdict about the git history inside — nothing "
             f"here has read it.",
             cause=DECRYPT_AGE_REFUSED)
@@ -1347,7 +1371,7 @@ def summarise(verdicts: list[ArtifactVerdict]) -> str:
 
 def print_plan(*, bucket: str, prefix: str, store: Path, identity: Path,
                scope_filter: str | None, verify_all: bool,
-               max_lag_days: float) -> None:
+               max_lag_days: float, identity_source: str | None = None) -> None:
     """Pure text. Reads the local store; touches neither the network nor the key."""
     prefix = normalise_prefix(prefix)
     # `source`, not `bucket`: with `--from-dir` it is a local directory, and a
@@ -1357,6 +1381,13 @@ def print_plan(*, bucket: str, prefix: str, store: Path, identity: Path,
     print(f"prefix:    {prefix}")
     print(f"store:     {store}")
     print(f"identity:  {identity} ({'present' if identity.is_file() else 'MISSING'})")
+    # Every age identity file is the same size, so the line above cannot tell a
+    # redirected key from the right one. Asked of the FILE, never of what named
+    # it: the deployed unit exports SOPS_AGE_KEY_FILE=<the default>.
+    if identity_source is not None:
+        note = ("" if B.same_identity_file(identity, B.DEFAULT_IDENTITY)
+                else "  <- NOT the default identity")
+        print(f"chosen by: {identity_source}{note}")
     mid = machine_id()
     ours = prefix_belongs_to_this_host(prefix, B.host_label(), mid)
     print(f"host:      {B.host_label()} (machine-id "
@@ -1447,7 +1478,16 @@ def main(argv: list[str] | None = None) -> int:
                     help="print what would happen; touch neither network nor key")
     args = ap.parse_args(argv)
 
-    identity = args.identity or B.resolve_identity()
+    # 🔴 RESOLVE THE PATH AND WHAT CHOSE IT TOGETHER — the same seam
+    # escrow-verify.py closes. This tool is where escrow-verify's mismatch
+    # message SENDS the operator ("restore-verify.py answers that"), so if it
+    # silently resolves its own identity through the same env vars, the
+    # handover lands on the redirected key too and the second opinion is a
+    # second sample of the first mistake.
+    if args.identity is not None:
+        identity, identity_source = args.identity, "the --identity flag"
+    else:
+        identity, identity_source = B.resolve_identity_with_source()
     if args.prefix is not None:
         prefix, explicit = args.prefix, True
     elif args.host is not None:
@@ -1467,6 +1507,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.print_plan:
             print_plan(bucket=bucket, prefix=prefix, store=args.store,
+                       identity_source=identity_source,
                        identity=identity, scope_filter=args.scope,
                        verify_all=args.verify_all, max_lag_days=args.max_lag_days)
             return 0

@@ -2484,3 +2484,493 @@ def test_the_module_hardcodes_no_endpoint_and_no_host():
     for needle in ("http://", "https://"):
         assert needle not in src, f"{needle!r} appears in a public repo's source"
     assert "bw config server" in src or "\"config\", \"server\"" in src
+
+
+# --------------------------------------------------------------------------- #
+# 15. 🔴 THE ADVERTISED SHELL, AND WHICH FILE WAS ACTUALLY COMPARED
+#
+# Regressions from a live run on 2026-08-25 in which the operator typed the
+# master password and got a confident wrong answer, and from the adversarial
+# audit of the first attempt to fix it — which shipped a NEW confident wrong
+# sentence in the very line added to prevent one:
+#
+#   * the hint advertised `nix-shell -p bitwarden-cli jq`, and --decrypt-check
+#     then died `ModuleNotFoundError: No module named 'minio'` AFTER the
+#     password had been spent.
+#   * `SOPS_AGE_KEY_FILE`, exported by unrelated work, redirected the on-disk
+#     side to a DIFFERENT age key. Every age identity file is the same size, so
+#     the mismatch reported equal byte counts and read as a damaged escrow. Its
+#     remedy would have overwritten a good escrow with an unrelated key.
+#   * the FIRST FIX then branched on WHAT NAMED the file instead of WHICH FILE
+#     it was, so `--identity <the default>` (the documented command!) and the
+#     deployed unit's own `SOPS_AGE_KEY_FILE=<the default>` both printed
+#     "NOT the default" — and told the reader an `--identity` FLAG could be
+#     "set by an unrelated shell".
+#
+# 🔴 THE SENTENCES ARE PINNED WHOLE. A guard asserting the fragment "NOT the
+# default" passed unchanged on that false line. When the artifact under test is
+# prose, a substring cannot tell a true message from a confident wrong one.
+# --------------------------------------------------------------------------- #
+def test_the_advertised_nix_shell_provisions_every_module_the_decrypt_path_IMPORTS():
+    """🔴 The RELATIONSHIP, not either side alone: every module the decrypt path
+    needs must be provisioned by the shell the failure messages hand over.
+
+    Scope, stated so nobody reads more coverage into this than it has: it pins
+    LEDGER -> HINT. It cannot DISCOVER a newly-added third-party import; the
+    companion test below ties the ledger to the import site that creates the
+    need. Neither covers NON-Python tools (`age`, `kubectl`, `git`) — those
+    resolve from the ambient profile because `nix-shell -p` is impure, and
+    `--pure` or a fresh host would break them with no guard watching.
+    """
+    assert EV.DECRYPT_PYTHON_MODULES, "an empty ledger would pass vacuously"
+    for mod in EV.DECRYPT_PYTHON_MODULES:
+        assert any(f"p.{mod}" in pkg for pkg in EV.NIX_SHELL_PACKAGES), (
+            f"{mod!r} is imported by --decrypt-check but no advertised package "
+            f"provides it: {EV.NIX_SHELL_PACKAGES}")
+        assert f"p.{mod}" in EV.NIX_SHELL_HINT, (
+            f"{mod!r} is in the ledger but the RENDERED hint omits it — the "
+            f"hint is what the operator actually copies")
+
+
+def test_the_decrypt_module_ledger_names_the_REAL_third_party_import_site():
+    """🔴 THE SITE THAT CREATES THE NEED, not the local shim that re-exports it.
+
+    The first revision asserted `from _minio import MinioArchive` in backup.py.
+    `_minio` is devrc's OWN module (`scripts/mail-actions/_minio.py`); the
+    third-party dependency is the `from minio import Minio` INSIDE it. Pinning
+    the shim meant swapping that module to another SDK would leave both tests
+    green while the advertised shell was wrong again — the same hazard in a
+    different shape.
+    """
+    shim = SCRIPT.parent.parent / "mail-actions" / "_minio.py"
+    assert shim.is_file(), f"the shim moved: {shim}"
+    assert "from minio import Minio" in shim.read_text(encoding="utf-8"), (
+        "the third-party minio import moved — re-derive DECRYPT_PYTHON_MODULES "
+        "from wherever it lives now")
+    assert "minio" in EV.DECRYPT_PYTHON_MODULES
+    # and backup.py must still route through that shim, or the chain is broken
+    assert "from _minio import MinioArchive" in Path(B.__file__).read_text(
+        encoding="utf-8")
+
+
+def test_the_rendered_hint_is_accepted_by_a_REAL_SHELL():
+    """🔴 THE NEGATIVE CONTROL THAT THE FIRST REVISION LACKED.
+
+    That version asserted the quoting via `shlex.split`, which does NOT treat
+    `(`/`)`/`[`/`]` as metacharacters — so deleting the quoting entirely left
+    the suite fully green while the advertised command became a bash syntax
+    error. `bash -n` is the instrument that can actually see it.
+
+    Both halves are asserted: the real hint PARSES, and an unquoted rendering
+    of the same packages does NOT. Without the second half this test could pass
+    against a `bash -n` that accepts anything.
+    """
+    if shutil.which("bash") is None:
+        pytest.fail("bash is required to validate the hint this module hands out")
+    cmd = EV.NIX_SHELL_HINT.replace("<command>", "true")
+    ok = subprocess.run(["bash", "-n", "-c", cmd], capture_output=True, text=True)
+    assert ok.returncode == 0, (
+        f"the advertised hint is not valid shell: {ok.stderr.strip()}")
+
+    unquoted = ("nix-shell -p " + " ".join(EV.NIX_SHELL_PACKAGES)
+                + " --run 'true'")
+    bad = subprocess.run(["bash", "-n", "-c", unquoted], capture_output=True,
+                         text=True)
+    assert bad.returncode != 0, (
+        "the positive control did not fire: an UNQUOTED package list was "
+        "accepted by `bash -n`, so this test cannot see missing quoting")
+
+
+def test_the_hint_carries_its_run_clause_and_quotes_only_what_needs_it():
+    """The `--run '<command>'` half is what makes the hint copy-pasteable;
+    deleting it survived the first revision's guards."""
+    assert EV.NIX_SHELL_HINT.endswith(" --run '<command>'")
+    assert EV.NIX_SHELL_HINT.startswith("nix-shell -p ")
+    assert "'python3.withPackages(p:[p.minio])'" in EV.NIX_SHELL_HINT
+    assert "'bitwarden-cli'" not in EV.NIX_SHELL_HINT, "a bare name was quoted"
+
+
+# --------------------------------------------------------------------------- #
+# 15b. resolution order + the SAME-FILE predicate
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("env,expect_path,expect_source", [
+    ({}, None, B.IDENTITY_SOURCE_DEFAULT),
+    ({"SOPS_AGE_KEY_FILE": "/srv/sops-chosen.key"},
+     "/srv/sops-chosen.key", "$SOPS_AGE_KEY_FILE"),
+    ({"ASIB_AGE_IDENTITY": "/srv/asib-chosen.key"},
+     "/srv/asib-chosen.key", "$ASIB_AGE_IDENTITY"),
+    ({"ASIB_AGE_IDENTITY": "/srv/asib-chosen.key",
+      "SOPS_AGE_KEY_FILE": "/srv/sops-chosen.key"},
+     "/srv/asib-chosen.key", "$ASIB_AGE_IDENTITY"),
+    # an EMPTY env var is not a choice — it must fall through, not resolve to
+    # Path(""). `if v:` vs `if v is not None:` is invisible without this row.
+    ({"SOPS_AGE_KEY_FILE": ""}, None, B.IDENTITY_SOURCE_DEFAULT),
+    ({"ASIB_AGE_IDENTITY": "", "SOPS_AGE_KEY_FILE": "/srv/sops-chosen.key"},
+     "/srv/sops-chosen.key", "$SOPS_AGE_KEY_FILE"),
+])
+def test_resolve_identity_with_source_NAMES_what_chose_the_path(
+        monkeypatch, env, expect_path, expect_source):
+    """The three fixture paths are pairwise distinct AND distinct from
+    DEFAULT_IDENTITY, so a mutant returning any constant is visible."""
+    for var in B.IDENTITY_ENV_VARS:
+        monkeypatch.delenv(var, raising=False)
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+
+    path, source = B.resolve_identity_with_source()
+    expected = B.DEFAULT_IDENTITY if expect_path is None else Path(expect_path)
+    assert path == expected
+    assert source == expect_source
+    assert B.resolve_identity() == path
+
+
+def test_the_env_var_ORDER_is_declared_once_and_the_sentinels_are_PINNED():
+    """`resolve_identity()` delegates rather than repeating the loop: two copies
+    of a precedence order drift silently, because both return a plausible path.
+
+    The two source sentinels are pinned as WHOLE strings — they are printed to
+    the operator, and `provenance_clauses` BRANCHES on the flag one.
+    """
+    assert B.IDENTITY_ENV_VARS == ("ASIB_AGE_IDENTITY", "SOPS_AGE_KEY_FILE")
+    src = Path(B.__file__).read_text(encoding="utf-8")
+    body = src.split("def resolve_identity(", 1)[1].split("\ndef ", 1)[0]
+    assert "resolve_identity_with_source" in body, (
+        "resolve_identity() re-implements the order instead of delegating")
+    assert "os.environ" not in body, "a SECOND copy of the env order"
+    assert B.IDENTITY_SOURCE_DEFAULT == "the built-in default"
+    assert EV.IDENTITY_SOURCE_FLAG == "the --identity flag"
+
+
+def test_same_identity_file_asks_about_the_FILE_not_the_spelling(tmp_path):
+    """🔴 THE PREDICATE THE WHOLE FEATURE TURNS ON.
+
+    Equal-but-differently-spelled paths are the SAME file (that is the deployed
+    config: the unit exports SOPS_AGE_KEY_FILE=<the default>). A symlink to it
+    is also the same file. Two genuinely different files are not.
+    """
+    real = tmp_path / "real.key"
+    real.write_text("an identity file's contents", encoding="utf-8")
+    other = tmp_path / "other.key"
+    other.write_text("different", encoding="utf-8")
+    link = tmp_path / "link.key"
+    link.symlink_to(real)
+
+    assert B.same_identity_file(real, real)
+    assert B.same_identity_file(real, Path(str(tmp_path) + "/./real.key"))
+    assert B.same_identity_file(real, link), "a symlink to the file is the file"
+    assert not B.same_identity_file(real, other)
+    # `~` must expand: argparse does NOT expanduser, so a quoted
+    # `--identity '~/...'` arrives literally and would otherwise never match.
+    home = Path.home()
+    # BOTH sides — dropping `.expanduser()` from `b` alone survived a guard
+    # that only ever put `~` in position `a`. The NUL assertions below are
+    # symmetric; this one was not, and the asymmetry was an oversight.
+    assert B.same_identity_file(Path("~"), home)
+    assert B.same_identity_file(home, Path("~"))
+    assert not B.same_identity_file(Path("~"), home / "definitely-not-here")
+    assert not B.same_identity_file(home / "definitely-not-here", Path("~"))
+    # 🔴 THE EXCEPTION BELT, MADE REACHABLE. An embedded NUL is the one input
+    # that actually raises out of `resolve()` (ValueError, measured — symlink
+    # loops, deep chains and unreadable parents all return normally on 3.12).
+    # Without this the fallback was dead code and mutating it to the UNSAFE
+    # `return True` — which would silence the warning for every path — survived
+    # the whole suite.
+    # 🔴 THE PRECONDITION, ASSERTED. Without this the pair below pins only the
+    # OUTCOME: on a runtime whose `resolve()` stopped raising, the belt would
+    # silently become dead code again and the unsafe `return True` mutant would
+    # pass. Measured raising on 3.12 and 3.13; this says so the day it changes.
+    with pytest.raises(ValueError):
+        Path("a\x00b").expanduser().resolve()
+    assert not B.same_identity_file(Path("a\x00b"), real)
+    assert not B.same_identity_file(real, Path("a\x00b"))
+    # a path that does not exist must compare, not raise
+    assert not B.same_identity_file(real, tmp_path / "absent.key")
+    assert B.same_identity_file(tmp_path / "absent.key", tmp_path / "absent.key")
+
+
+# --------------------------------------------------------------------------- #
+# 15c. 🔴 THE MESSAGES — pinned WHOLE, and the warning must DISCRIMINATE
+# --------------------------------------------------------------------------- #
+ELSEWHERE = Path("/srv/not-the-default.key")
+
+
+def test_the_default_FILE_never_triggers_a_warning_however_it_was_NAMED():
+    """🔴 THE AUDIT'S BLOCKING FINDING, both halves.
+
+    `--identity <the default>` is the command the handoff doc RECOMMENDS, and
+    `SOPS_AGE_KEY_FILE=<the default>` is what the deployed backup unit sets
+    (nix/home.nix). Branching on the mechanism made BOTH print "NOT the
+    default" — the second being a permanently-red warning on the subsystem's
+    own normal configuration, which trains a reader to skip it.
+    """
+    for source in (EV.IDENTITY_SOURCE_FLAG, "$SOPS_AGE_KEY_FILE",
+                   "$ASIB_AGE_IDENTITY", B.IDENTITY_SOURCE_DEFAULT):
+        chose, redirect = EV.provenance_clauses(B.DEFAULT_IDENTITY, source)
+        assert redirect == "", f"a warning fired on the DEFAULT file via {source}"
+        assert chose == (f" The on-disk path is the default identity, named by "
+                         f"{source}.")
+        assert "NOT the default" not in chose
+
+
+def test_an_UNSTATED_source_asserts_NOTHING_about_provenance():
+    """The honest branch: a caller that states no source must not have one
+    invented for it — neither for the default nor against it."""
+    for path in (B.DEFAULT_IDENTITY, ELSEWHERE):
+        assert EV.provenance_clauses(path, None) == ("", "")
+
+
+def test_an_ENV_REDIRECT_to_a_DIFFERENT_file_refuses_to_call_it_diagnosed():
+    chose, redirect = EV.provenance_clauses(ELSEWHERE, "$SOPS_AGE_KEY_FILE")
+    assert chose == (" The on-disk path is NOT the default identity; it was "
+                     "chosen by $SOPS_AGE_KEY_FILE.")
+    assert redirect.startswith(" 🔴 READ THIS BEFORE RE-ESCROWING: "
+                               "$SOPS_AGE_KEY_FILE redirected the on-disk path")
+    assert "WRONG FILE" in redirect
+    assert "same size" in redirect
+    # it must hand over a command that actually UNDOES the redirect...
+    assert "env -u SOPS_AGE_KEY_FILE" in redirect
+    # ...and must NOT tell them to re-run with the thing they already did
+    assert "--identity" not in redirect
+
+
+def test_an_EXPLICIT_FLAG_to_a_DIFFERENT_file_does_not_blame_a_shell():
+    """🔴 A flag is a deliberate act. The first revision told the operator an
+    `--identity` flag could be 'set by an unrelated shell', and advised them to
+    'Re-run with --identity <default>' — which, for someone who had just passed
+    --identity, is advice to repeat what they just did."""
+    chose, redirect = EV.provenance_clauses(ELSEWHERE, EV.IDENTITY_SOURCE_FLAG)
+    assert chose == (" The on-disk path is NOT the default identity; it was "
+                     "chosen by the --identity flag.")
+    assert "unrelated shell" not in redirect
+    assert "redirected" not in redirect
+    assert "you pointed --identity at a file" in redirect
+    assert str(B.DEFAULT_IDENTITY) in redirect
+    assert "do NOT re-escrow" in redirect
+
+
+def _mismatch_verdict(escrow_world, source, identity=None):
+    with pytest.raises(EV.EscrowError) as ei:
+        EV.run(bw=_cli(FakeBw(items=[_item(notes=OTHER_KEY)])),
+               identity=identity or escrow_world["identity"], item_name=ITEM,
+               identity_source=source, store=escrow_world["store"], now=NOW)
+    assert ei.value.token == "BYTES-DIFFER-MATERIALLY"
+    return ei.value.verdict
+
+
+def test_the_refusal_comes_BEFORE_the_remedy_it_argues_against(escrow_world):
+    """🔴 ORDER, not mere presence. The first revision appended the warning
+    AFTER 'Re-escrow from the on-disk identity…', so the reader met the
+    dangerous instruction first. A substring test could not see that, and the
+    PR body claimed the opposite of what the code did."""
+    msg = _mismatch_verdict(escrow_world, "$SOPS_AGE_KEY_FILE")
+    warn = msg.index("READ THIS BEFORE RE-ESCROWING")
+    remedy = msg.index("Re-escrow from the on-disk identity")
+    assert warn < remedy, "the warning trails the remedy it argues against"
+
+
+def test_a_mismatch_on_the_DEFAULT_file_carries_no_warning(escrow_world,
+                                                            monkeypatch):
+    """🔴 HERMETIC — the default is MONKEYPATCHED onto the fixture's own key.
+
+    The first version passed the REAL `B.DEFAULT_IDENTITY` into `run()`, which
+    READS that file. It therefore passed only on a machine holding the
+    operator's age key; anywhere else `run()` raised IDENTITY-MISSING before
+    reaching the comparison, and it turned the merge-gating nix sandbox tier
+    RED while the dev-host tier stayed green. Reproduce any such test with
+    `env HOME=<empty dir>` — that is the whole difference.
+    """
+    monkeypatch.setattr(B, "DEFAULT_IDENTITY", escrow_world["identity"])
+    msg = _mismatch_verdict(escrow_world, B.IDENTITY_SOURCE_DEFAULT)
+    assert "READ THIS BEFORE RE-ESCROWING" not in msg
+    assert "restore-verify.py" in msg
+
+
+def test_the_TRAILING_NEWLINE_arm_also_states_which_file_it_compared(
+        escrow_world, tmp_path):
+    """That arm gained the provenance clause but had ZERO coverage — dropping
+    it there survived the first revision's suite."""
+    ident = tmp_path / "trailing.key"
+    ident.write_text(escrow_world["identity"].read_text(encoding="utf-8"),
+                     encoding="utf-8")
+    note = ident.read_text(encoding="utf-8").rstrip("\n")
+    with pytest.raises(EV.EscrowError) as ei:
+        EV.run(bw=_cli(FakeBw(items=[_item(notes=note)])), identity=ident,
+               item_name=ITEM, identity_source="$SOPS_AGE_KEY_FILE",
+               store=escrow_world["store"], now=NOW)
+    assert ei.value.token == "BYTES-DIFFER-TRAILING-NEWLINE"
+    assert "is NOT the default identity" in ei.value.verdict
+
+
+def test_run_and_print_plan_DEFAULT_to_claiming_nothing():
+    """🔴 Both defaults were mutable to the DEFAULT sentinel invisibly, because
+    every test passes the argument explicitly. That mutation would invent a
+    provenance claim for callers that never made one."""
+    import inspect
+    for fn in (EV.run, EV.print_plan):
+        assert inspect.signature(fn).parameters["identity_source"].default is None
+
+
+# --------------------------------------------------------------------------- #
+# 15d. main()'s OWN derivation — the suite is otherwise hermetic here
+# --------------------------------------------------------------------------- #
+def _plan_out(capsys, argv):
+    """Run `--print-plan` in-process and return stdout.
+
+    NOT named `_plan` — this module already has a `_plan()` that builds a fake
+    `bw` script's behaviour plan, and shadowing it broke 14 CLI tests.
+    """
+    assert EV.main(["--print-plan", *argv]) == EV.EXIT_OK
+    return capsys.readouterr().out
+
+
+def test_print_plan_flags_a_REDIRECT_to_a_different_file(monkeypatch, capsys,
+                                                         tmp_path):
+    key = tmp_path / "redirected.key"
+    key.write_text(OTHER_KEY, encoding="utf-8")
+    for var in B.IDENTITY_ENV_VARS:
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("SOPS_AGE_KEY_FILE", str(key))
+    out = _plan_out(capsys, [])
+    assert f"chosen by: $SOPS_AGE_KEY_FILE{EV.NON_DEFAULT_NOTE}" in out
+    assert str(key) in out
+
+
+@pytest.mark.parametrize("argv,env,expect_source", [
+    ([], {}, B.IDENTITY_SOURCE_DEFAULT),
+    # 🔴 the deployed configuration: the unit exports the DEFAULT path
+    ([], {"SOPS_AGE_KEY_FILE": None}, "$SOPS_AGE_KEY_FILE"),
+    # 🔴 the command the handoff doc recommends
+    (["--identity", None], {}, EV.IDENTITY_SOURCE_FLAG),
+])
+def test_print_plan_is_SILENT_when_the_file_is_the_default(
+        monkeypatch, capsys, argv, env, expect_source):
+    """🔴 Both of the audit's blocking reproductions, as tests. `None` in the
+    fixtures is substituted with DEFAULT_IDENTITY so the row cannot drift from
+    the constant it is about."""
+    for var in B.IDENTITY_ENV_VARS:
+        monkeypatch.delenv(var, raising=False)
+    for k in env:
+        monkeypatch.setenv(k, str(B.DEFAULT_IDENTITY))
+    argv = [str(B.DEFAULT_IDENTITY) if a is None else a for a in argv]
+    out = _plan_out(capsys, argv)
+    assert f"chosen by: {expect_source}" in out
+    assert EV.NON_DEFAULT_NOTE not in out, (
+        "a warning fired for the DEFAULT identity file")
+    assert "NOT the default" not in out
+
+
+def test_an_explicit_flag_WINS_over_a_set_env_var(monkeypatch, capsys, tmp_path):
+    key = tmp_path / "explicit.key"
+    key.write_text(OTHER_KEY, encoding="utf-8")
+    monkeypatch.setenv("SOPS_AGE_KEY_FILE", "/srv/should-have-been-overridden.key")
+    out = _plan_out(capsys, ["--identity", str(key)])
+    assert f"chosen by: {EV.IDENTITY_SOURCE_FLAG}" in out
+    assert "$SOPS_AGE_KEY_FILE" not in out
+    assert "should-have-been-overridden" not in out
+    assert str(key) in out
+
+
+def test_the_non_default_note_is_pinned_WHOLE():
+    """🔴 The first revision asserted only the fragment 'NOT the default', and
+    that fragment was present in a sentence claiming a command-line flag could
+    be set by an unrelated shell. Pin the whole string."""
+    assert EV.NON_DEFAULT_NOTE == "  <- NOT the default identity"
+    assert "shell" not in EV.NON_DEFAULT_NOTE
+
+
+def test_the_SUCCESS_line_discloses_a_non_default_identity(escrow_world):
+    """🔴 'escrow OK — the Secure Note matches <path>' is where an undisclosed
+    comparison against the wrong file is LEAST likely to be questioned."""
+    v = EV.EscrowVerdict(
+        item_name=ITEM, server="s", server_pinned=True, escrow_bytes=1,
+        disk_bytes=1, classification=EV.CLASS_IDENTICAL, identity=ELSEWHERE,
+        identity_source="$SOPS_AGE_KEY_FILE")
+    assert "NOT the default identity" in v.line()
+    assert "$SOPS_AGE_KEY_FILE" in v.line()
+
+    d = EV.EscrowVerdict(
+        item_name=ITEM, server="s", server_pinned=True, escrow_bytes=1,
+        disk_bytes=1, classification=EV.CLASS_IDENTICAL,
+        identity=B.DEFAULT_IDENTITY, identity_source="$SOPS_AGE_KEY_FILE")
+    assert "NOT the default identity" not in d.line()
+
+
+
+def test_the_SUCCESS_line_from_a_REAL_run_discloses_a_non_default_identity(
+        escrow_world, monkeypatch):
+    """🔴 THE SEAM, not the dataclass. The sibling test constructs
+    `EscrowVerdict` directly, so deleting `identity_source=identity_source`
+    from `run()`'s construction left the whole disclosure INERT on the only
+    path that produces it, with the suite fully green."""
+    monkeypatch.setattr(B, "DEFAULT_IDENTITY", Path("/srv/not-this-one.key"))
+    v = EV.run(bw=_cli(FakeBw(items=[_item(notes=escrow_world["note"])])),
+               identity=escrow_world["identity"], item_name=ITEM,
+               identity_source="$SOPS_AGE_KEY_FILE",
+               store=escrow_world["store"], now=NOW)
+    line = v.line()
+    assert "escrow OK" in line
+    assert "NOT the default identity" in line
+    assert "$SOPS_AGE_KEY_FILE" in line
+
+
+def test_no_source_renders_a_SELF_CONTRADICTING_refusal():
+    """🔴 RENDERS THE WHOLE PARAGRAPH, not just the helper.
+
+    `_undo_advice()` fixed the last sentence; the FIRST one still read "the
+    built-in default redirected the on-disk path away from …" — the same class
+    of nonsense, one sentence earlier. A test that calls the helper in
+    isolation structurally cannot see that, which is why this one renders
+    `provenance_clauses` instead.
+    """
+    for src in ("$SOPS_AGE_KEY_FILE", "$ASIB_AGE_IDENTITY",
+                EV.IDENTITY_SOURCE_FLAG, B.IDENTITY_SOURCE_DEFAULT):
+        chose, redirect = EV.provenance_clauses(Path("/srv/elsewhere.key"), src)
+        assert redirect, src
+        # 🔴 POSITIVE CONTENT PINS, not only word-ABSENCES. The first version of
+        # this loop asserted three forbidden words and nothing else, and an
+        # INVERTED SAFETY CLAIM — "a mismatch here certainly means the escrow is
+        # DAMAGED and you should re-escrow at once", the exact opposite of this
+        # PR's advice — passed the whole suite using none of those words. A
+        # guard on WORDS is walkable by REWORDING; these say what must be TRUE.
+        assert "READ THIS BEFORE RE-ESCROWING" in redirect, (src, redirect)
+        assert str(B.DEFAULT_IDENTITY) in redirect, (src, redirect)
+        assert "same size" in redirect, (src, redirect)
+        # only an ENV VAR can have "redirected" anything
+        if not src.startswith("$"):
+            assert "redirected" not in redirect, (src, redirect)
+            assert "env -u" not in redirect, (src, redirect)
+        # and nothing may claim a flag is settable by a shell
+        assert "unrelated shell" not in redirect, (src, redirect)
+
+
+def test_the_NEUTRAL_arms_refusal_is_pinned_as_a_WHOLE_STRING():
+    """🔴 THE ARM THAT HAD NO POSITIVE PIN AT ALL, pinned whole.
+
+    Its two siblings each carry positive content assertions; this one carried
+    only word-absences, which is how an inverted safety instruction survived.
+    When the artifact under test IS prose, the guard is the whole normalised
+    string — a cosmetic reword then fails this test, and that is the trade
+    being made deliberately for a machine-readable claim about key material.
+    """
+    _, redirect = EV.provenance_clauses(Path("/srv/elsewhere.key"),
+                                        B.IDENTITY_SOURCE_DEFAULT)
+    d = B.DEFAULT_IDENTITY
+    assert redirect == (
+        f" 🔴 READ THIS BEFORE RE-ESCROWING: the on-disk path is not {d}, so a "
+        f"mismatch here is at least as likely to mean you compared the WRONG "
+        f"FILE as it is to mean the escrow is damaged — and the two remedies "
+        f"are opposites. Every age identity file is the same size, so equal "
+        f"byte counts on both sides is what comparing two DIFFERENT keys looks "
+        f"like, not evidence they are the same key. Re-run against {d} to "
+        f"compare against the default first.")
+
+
+def test_the_undo_advice_matches_the_KIND_of_source():
+    """`env -u` is meaningless for a flag, and nonsense for the built-in
+    default — which can pair with a non-default path only through `run()`'s
+    keyword API, but renders a sentence either way."""
+    assert "env -u SOPS_AGE_KEY_FILE" in EV._undo_advice("$SOPS_AGE_KEY_FILE")
+    for src in (EV.IDENTITY_SOURCE_FLAG, B.IDENTITY_SOURCE_DEFAULT):
+        advice = EV._undo_advice(src)
+        assert "env -u" not in advice, advice
+        assert str(B.DEFAULT_IDENTITY) in advice

@@ -3039,3 +3039,89 @@ def test_the_PRODUCER_points_at_the_verifier_for_the_downstream_half():
         "backup.py's --print-plan never mentions restore-verify.py, so nothing "
         "the operator reads says the uploaded object is verified separately — "
         "or that it is verified at all")
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 WHICH IDENTITY DID IT ACTUALLY USE — the seam with escrow-verify.py
+#
+# escrow-verify.py's mismatch message SENDS the operator here ("restore-verify.py
+# answers that"). If this tool silently resolves its own identity through the
+# same environment variables, the handover lands on the same redirected key and
+# the second opinion is a second sample of the first mistake — a control that
+# shares the step under suspicion is not a control.
+# --------------------------------------------------------------------------- #
+def test_the_identity_note_asks_about_the_FILE_not_the_env(tmp_path):
+    """The deployed backup unit exports SOPS_AGE_KEY_FILE=<the default path>,
+    so "an env var is set" is TRUE on the normal configuration and must not
+    produce a warning. Only a genuinely different file may."""
+    assert RV._identity_note(B.DEFAULT_IDENTITY) == ""
+    note = RV._identity_note(tmp_path / "somewhere-else.key")
+    assert "NOT the default identity" in note
+    # 🔴 ALL THREE SOURCES. Asserting only the two env vars let the message be
+    # reverted to exactly the wording the previous round rejected — an operator
+    # who used `--identity` sent to check two variables that had no effect on
+    # their run — with the whole suite green. `--identity` is the word this
+    # guard exists for, and it is the likely path: escrow-verify's mismatch
+    # message explicitly says "pass it the SAME --identity you used here".
+    assert "--identity" in note, note
+    assert "ASIB_AGE_IDENTITY" in note and "SOPS_AGE_KEY_FILE" in note
+
+
+def test_the_DECRYPT_FAILED_message_names_a_redirect_as_a_THIRD_mechanism():
+    """That message enumerates two mechanisms — wrong key, damaged ciphertext.
+    A redirected identity is a third, and without it the 'wrong key' arm reads
+    as a fact about the escrow or the artifact when it is neither."""
+    src = SCRIPT.read_text(encoding="utf-8")
+    assert "_identity_note(identity)" in src, (
+        "the DECRYPT FAILED message no longer states which identity it used")
+
+
+def test_print_plan_discloses_a_REDIRECTED_identity(tmp_path, identity):
+    store = tmp_path / "store"
+    _make_scope(store, "scope-alpha", {"e.md": "x"}, commits=1)
+    # `_cli` supplies the identity through ASIB_AGE_IDENTITY, so this also
+    # exercises the env arm — the one that caused the incident.
+    r = _cli("--print-plan", "--store", str(store), identity=identity)
+    assert "chosen by: $ASIB_AGE_IDENTITY" in r.stdout, r.stdout
+    # the fixture identity is a throwaway key, never the operator's default
+    assert "NOT the default identity" in r.stdout, r.stdout
+
+    # ...and the explicit-flag arm reports itself as the flag, not as an env var
+    r2 = _cli("--print-plan", "--store", str(store), "--identity", str(identity))
+    assert "chosen by: the --identity flag" in r2.stdout, r2.stdout
+
+
+def test_restore_print_plan_is_SILENT_for_the_DEFAULT_identity(
+        tmp_path, monkeypatch, capsys):
+    """🔴 THE NEGATIVE CONTROL. Without it, mutating this tool's trigger to warn
+    UNCONDITIONALLY leaves the whole suite green — i.e. the sibling of the exact
+    permanently-red-warning bug that was just fixed in escrow-verify.py could be
+    reintroduced here undetected. The positive case alone cannot see it.
+
+    Hermetic: the default is monkeypatched onto a tmp file, so this never reads
+    the operator's real key (a test that did turned the sandbox tier red).
+    """
+    key = tmp_path / "the-default.key"
+    key.write_text("an identity file's contents", encoding="utf-8")
+    monkeypatch.setattr(B, "DEFAULT_IDENTITY", key)
+    store = tmp_path / "store"
+    _make_scope(store, "scope-alpha", {"e.md": "x"}, commits=1)
+
+    RV.print_plan(bucket="a-bucket", prefix="a-host/", store=store,
+                  identity=key, scope_filter=None, verify_all=False,
+                  max_lag_days=1.0, identity_source="$SOPS_AGE_KEY_FILE")
+    out = capsys.readouterr().out
+    assert "chosen by: $SOPS_AGE_KEY_FILE" in out, out
+    assert "NOT the default identity" not in out, (
+        "restore-verify warned about the DEFAULT identity — the same "
+        "permanently-red warning that was just removed from escrow-verify")
+
+    # ...and the positive case, so this pair discriminates rather than just
+    # asserting silence (a print_plan that printed nothing would pass alone).
+    other = tmp_path / "somewhere-else.key"
+    other.write_text("different", encoding="utf-8")
+    RV.print_plan(bucket="a-bucket", prefix="a-host/", store=store,
+                  identity=other, scope_filter=None, verify_all=False,
+                  max_lag_days=1.0, identity_source="$SOPS_AGE_KEY_FILE")
+    out2 = capsys.readouterr().out
+    assert "NOT the default identity" in out2, out2
