@@ -1289,22 +1289,50 @@ Two changes close it:
    regenerates at the next op added (`targetTab()` alone is on the path of every
    op).
 
-   🔴 **ONE DOCUMENTED EXCEPTION, and it is not a weakening of that rule.**
-   `screenshot`'s **fast path** carries its own `FAST_CAPTURE_BUDGET_MS` bound.
+   🔴 **TWO DOCUMENTED EXCEPTIONS, and they are not a weakening of that rule.**
    The choke point above can only *end* an op; it cannot make a hung sub-step
-   FALL THROUGH to a working alternative. `chrome.tabs.captureVisibleTab` can
-   hang rather than reject, and the fast path's `catch` — which exists precisely
-   to fall through to the CDP path — can only see a rejection, so the op burned
-   all 18s and failed on a tab CDP captures fine. A bound that converts "never
-   settles" into a rejection is the only shape that restores the fallthrough.
-   The rule still holds for *terminating* an op; it simply cannot express
-   "recover from this step". ⚠ Its cost is a real constraint, pinned by a test in
-   `tests/cdp_protocol.test.mjs`: whatever the fast path spends comes out of the
-   CDP attach-hang margin below, so `FAST_CAPTURE_BUDGET_MS + 16s <= 18s`.
+   FALL THROUGH to a working alternative. So an await that sits inside a `try`
+   whose `catch` implements a **recovery** needs its own bound — the rule still
+   holds for *terminating* an op, it simply cannot express "recover from this
+   step". That shape is the whole test for whether an exception is warranted: if
+   a hung step has no alternative to fall through to, the choke point is already
+   the right and only answer.
 
-   ⚠ The predicted regeneration is already present: `open`'s
-   `await chrome.tabs.get(cmd.reuseTabId)` sits in a `catch` that promises a
-   fall-through it cannot deliver if that call hangs. Same class, not yet fixed.
+   1. **`screenshot`'s fast path** — `FAST_CAPTURE_BUDGET_MS` (1500ms).
+      `chrome.tabs.captureVisibleTab` can hang rather than reject, and the fast
+      path's `catch` — which exists precisely to fall through to the CDP path —
+      can only see a rejection, so the op burned all 18s and failed on a tab CDP
+      captures fine (measured: 3/3 `op_timeout` at 18.07–18.11s vs 3/3 CDP
+      successes in 381–3084ms). ⚠ Its cost is a real constraint, pinned by a test
+      in `tests/cdp_protocol.test.mjs`: whatever the fast path spends comes out of
+      the CDP attach-hang margin below, so `FAST_CAPTURE_BUDGET_MS + 16s <= 18s`.
+
+   2. **`open`'s reuse probe** — `REUSE_TAB_BUDGET_MS` (2000ms). *This was the
+      predicted regeneration, named right here as "same class, not yet fixed"
+      when (1) shipped; it is now fixed.* `open`'s idempotent re-open path awaits
+      `chrome.tabs.get(cmd.reuseTabId)` inside a `try` whose `catch` promises
+      "owned tab gone → open a fresh one below" — a fall-through it cannot
+      deliver if that call *hangs*, leaving a `cmd_timeout` on the op every
+      session starts with.
+      ⚠ **Its arithmetic is NOT (1)'s, and copying (1)'s would be a false
+      justification.** `open` never attaches the debugger, so the CDP attach-hang
+      margin does not constrain it; its fallthrough is `chrome.tabs.create`, one
+      more unbounded browser-process IPC terminated only by the op ceiling. 2000ms
+      hands that step 16000ms of the 18000ms ceiling — a figure that *coincides*
+      numerically with the 16s attach-hang cost without being the same constraint.
+      The 2000ms itself is anchored by an ordering rather than by taste:
+      `chrome.tabs.get` reads tab metadata from an in-memory registry (no
+      renderer, no page, no network, no quota, no retry ladder), so it must not
+      outrank the disk-backed `STORAGE_BUDGET_MS` (5000) — asserted, not merely
+      written down.
+      ⚠ **Cost:** falling through on a merely *slow* `tabs.get` opens a second tab
+      while the first is still live and unowned, i.e. the exact tab leak the reuse
+      path exists to prevent. A rare orphaned tab is traded for a
+      guaranteed-terminating op.
+      ⚠ **Evidence, honestly:** unlike (1), there is **no live measurement of a
+      hung `chrome.tabs.get`** — this is the same mechanism reasoned about from
+      the code (the await is unbounded; the catch is structurally blind to a
+      hang), not observed in the wild.
 
    Every *other* await in the loop body is bounded too: the poll fetch
    (`POLL_BUDGET_MS` 40s), the result POST (`RESULT_BUDGET_MS` 10s), and the
