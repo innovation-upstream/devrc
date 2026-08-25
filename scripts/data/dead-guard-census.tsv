@@ -1,0 +1,82 @@
+# Measured census of guard branches with zero corpus instances. Regenerate: scripts/dead-guard-scan.py --repo <path> --census <this file>
+# `status` out-of-instrument rows are NOT a clean result -- they are guards this tool cannot see. See scripts/data/dead-guard-registry.tsv.
+repo_slug	status	location	kind	case_handled	corpus_instances	justification
+# innovation-upstream/devrc measured under /home/zach/workspace/civit/datapacket-talos/.venv/bin/python3 (Python 3.12.14)
+innovation-upstream/devrc	flagged	scripts/testlib/captured_text_scan.py:143	if-body	sys.path.insert(0, str(_HERE.parent))	0	-
+innovation-upstream/devrc	flagged	scripts/testlib/captured_text_scan.py:451	if-body	esc = False	0	-
+innovation-upstream/devrc	flagged	scripts/testlib/captured_text_scan.py:453	if-body	esc = True	0	-
+innovation-upstream/devrc	flagged	scripts/testlib/captured_text_scan.py:469	if-body	i += 2	0	-
+innovation-upstream/devrc	flagged	scripts/testlib/captured_text_scan.py:495	except	return None	0	-
+innovation-upstream/devrc	flagged	scripts/testlib/captured_text_scan.py:523	if-body	return []	0	-
+innovation-upstream/devrc	flagged	scripts/testlib/client_host_scan.py:206	except	pass	0	-
+innovation-upstream/devrc	flagged	scripts/testlib/client_host_scan.py:216	if-body	continue	0	-
+innovation-upstream/devrc	flagged	scripts/testlib/launcher_scan.py:73	except	continue	0	— unreadable file
+innovation-upstream/devrc	flagged	scripts/testlib/launcher_scan.py:101	if-body	return True	0	-
+innovation-upstream/devrc	flagged	scripts/testlib/launcher_scan.py:218	except	continue	0	— a broken test file fails elsewhere
+innovation-upstream/devrc	flagged	scripts/testlib/launcher_scan.py:251	except	continue	0	— a broken test file fails elsewhere
+innovation-upstream/devrc	flagged	scripts/testlib/launcher_scan.py:258	if-body	continue	0	-
+innovation-upstream/devrc	flagged	scripts/testlib/launcher_scan.py:289	if-body	continue	0	-
+innovation-upstream/devrc	flagged	scripts/testlib/launcher_scan.py:293	except	continue	0	-
+innovation-upstream/devrc	flagged	scripts/testlib/public_ip_scan.py:211	except	pass  # fall through to the walk	0	-
+innovation-upstream/devrc	flagged	scripts/testlib/public_ip_scan.py:235	if-body	continue	0	-
+innovation-upstream/devrc	flagged	scripts/testlib/skills_mapping.py:119	if-body	return f"nix-instantiate is not on PATH, {_FIX_IT}"	0	-
+innovation-upstream/devrc	flagged	scripts/tests/test_clawgate_predicate_single_source.py:133	except	return False	0	-
+innovation-upstream/devrc	flagged	scripts/tests/test_clawgate_predicate_single_source.py:252	except	continue	0	-
+innovation-upstream/devrc	flagged	scripts/tests/test_clawgate_predicate_single_source.py:254	if-body	offenders[rel] = hits	0	-
+innovation-upstream/devrc	flagged	scripts/tests/test_clawgate_predicate_single_source.py:277	if-body	wrong.append("%s: file is gone (expected %d)" % (rel, expected))	0	-
+innovation-upstream/devrc	flagged	scripts/tests/test_clawgate_predicate_single_source.py:281	if-body	wrong.append("%s: expected %d, found %d at line(s) %s"	0	-
+innovation-upstream/devrc	flagged	scripts/tests/test_clawgate_predicate_single_source.py:313	if-body	offenders.append("%s:%d %s" % (rel, i, line.strip()))	0	-
+innovation-upstream/devrc	flagged	scripts/tests/test_clawgate_predicate_single_source.py:375	except	return False	0	-
+innovation-upstream/devrc	flagged	scripts/tests/test_clawgate_predicate_single_source.py:489	if-body	return	0	-
+innovation-upstream/devrc	flagged	scripts/tests/test_closing_condition_single_source.py:124	except	continue	0	-
+innovation-upstream/devrc	flagged	scripts/tests/test_dead_guard_scan.py:43	if-body	if event == "line":  # pragma: no cover - a tracer is not traced by itself	0	a tracer is not traced by itself
+innovation-upstream/devrc	flagged	scripts/tests/test_dead_guard_scan.py:44	if-body	seen.add(frame.f_lineno)  # pragma: no cover - a tracer is not traced by itself	0	a tracer is not traced by itself
+innovation-upstream/devrc	flagged	scripts/tests/test_dead_guard_scan.py:104	if-body	if event == "line":  # pragma: no cover - a tracer is not traced by itself	0	a tracer is not traced by itself
+innovation-upstream/devrc	flagged	scripts/tests/test_dead_guard_scan.py:105	if-body	seen.add(frame.f_lineno)  # pragma: no cover - a tracer is not traced by itself	0	a tracer is not traced by itself
+innovation-upstream/devrc	flagged	scripts/tests/test_doc_path_rot.py:442	if-body	return False	0	-
+innovation-upstream/devrc	flagged	scripts/tests/test_doc_path_rot.py:462	if-body	raise AssertionError(	0	-
+innovation-upstream/devrc	flagged	scripts/tests/test_doc_path_rot.py:532	if-body	continue	0	-
+innovation-upstream/devrc	flagged	scripts/tests/test_handoff_skill_size.py:218	if-body	return f"(none found under {REFERENCE_DIR} -- did reference/ move?)"	0	-
+innovation-upstream/devrc	flagged	scripts/tests/test_handoff_skill_size.py:241	if-body	continue	0	-
+innovation-upstream/devrc	flagged	scripts/tests/test_handoff_skill_size.py:265	if-body	return (	0	-
+innovation-upstream/devrc	flagged	scripts/tests/test_no_conflict_markers.py:142	if-body	raise subprocess.CalledProcessError(128, cmd, output="", stderr="")	0	-
+innovation-upstream/devrc	flagged	scripts/tests/test_no_public_ips.py:258	if-body	problems.append(f"{path}: hits but no PENDING_SCRUB entry")	0	covered by the scan
+innovation-upstream/devrc	flagged	scripts/tests/test_no_real_launchers.py:68	if-body	raise RuntimeError("bash not found on PATH; this suite cannot run hermetically")	0	— both tiers ship bash
+innovation-upstream/devrc	flagged	scripts/tests/test_no_real_launchers.py:501	if-body	assert not stub.exists(), (	0	-
+innovation-upstream/devrc	flagged	scripts/tests/test_no_real_launchers.py:520	if-body	assert shutil.which("systemctl") is None, (	0	-
+innovation-upstream/devrc	flagged	scripts/tests/test_no_real_launchers.py:563	if-body	assert shutil.which("systemctl") is None	0	-
+innovation-upstream/devrc	flagged	scripts/tests/test_no_real_launchers.py:591	if-body	assert shutil.which("systemctl") is None	0	-
+innovation-upstream/devrc	flagged	scripts/tests/test_no_real_launchers.py:629	if-body	assert shutil.which("systemctl") is None	0	-
+innovation-upstream/devrc	flagged	scripts/tests/test_no_real_launchers.py:745	if-body	assert shutil.which("systemctl") is None	0	-
+innovation-upstream/devrc	flagged	scripts/tests/test_prune_skill_size.py:479	if-body	problems.append(f"{label}: PATTERN DID NOT MATCH ({pattern!r}) — the "	0	-
+innovation-upstream/devrc	flagged	scripts/tests/test_prune_skill_size.py:482	if-body	problems.append(f"{label}: pattern matched {len(found)}x ({found}) — an "	0	-
+innovation-upstream/devrc	flagged	scripts/tests/test_prune_skill_size.py:486	if-body	problems.append(f"{label}: prose says {found[0]}, measured {expected}")	0	-
+innovation-upstream/devrc	flagged	scripts/tests/test_prune_skill_size.py:521	if-body	problems.append(	0	-
+innovation-upstream/devrc	flagged	scripts/tests/test_prune_skill_size.py:529	if-body	problems.append(	0	-
+innovation-upstream/devrc	flagged	scripts/tests/test_session_manager_skill_size.py:719	if-body	loops[topic.name] = hits	0	-
+innovation-upstream/devrc	out-of-instrument	-	bash	scripts/drift-check.sh, run-tests.sh, run-node-tests.sh: bash PS4/BASH_XTRACEFD line tracing works but cannot discriminate a single-line `if ...; then X; fi`, so a flag there is not decidable at line granularity	unmeasured	-
+innovation-upstream/devrc	out-of-instrument	-	mjs	skill .mjs guards: no node coverage backend built	unmeasured	-
+# ZacxDev/homelab-infra measured under /home/zach/workspace/civit/datapacket-talos/.venv/bin/python3 (Python 3.12.14)
+ZacxDev/homelab-infra	flagged	scripts/tests/test_catch_ci_preemption.py:26	if-body	raise AssertionError(f"cannot load {_SRC} — the script moved or was renamed")	0	-
+ZacxDev/homelab-infra	flagged	scripts/tests/test_devrc_ci_names_the_failing_test.py:97	if-body	raise AssertionError(	0	-
+ZacxDev/homelab-infra	flagged	scripts/tests/test_devrc_ci_names_the_failing_test.py:114	if-body	raise AssertionError(	0	-
+ZacxDev/homelab-infra	flagged	scripts/tests/test_devrc_ci_names_the_failing_test.py:211	if-body	raise AssertionError(	0	-
+ZacxDev/homelab-infra	flagged	scripts/tests/test_devrc_ci_names_the_failing_test.py:218	if-body	raise AssertionError(	0	-
+ZacxDev/homelab-infra	flagged	scripts/tests/test_devrc_ci_names_the_failing_test.py:632	if-body	raise AssertionError(	0	-
+ZacxDev/homelab-infra	flagged	scripts/tests/test_finally_reporter_timeout_invariant.py:175	except	raise AssertionError(f"{path.name} is not parseable YAML: {exc}") from exc	0	a broken tree
+ZacxDev/homelab-infra	flagged	scripts/tests/test_finally_reporter_timeout_invariant.py:187	if-body	problems.append(	0	-
+ZacxDev/homelab-infra	flagged	scripts/tests/test_finally_reporter_timeout_invariant.py:202	if-body	problems.append(	0	-
+ZacxDev/homelab-infra	flagged	scripts/tests/test_finally_reporter_timeout_invariant.py:218	if-body	continue	0	-
+ZacxDev/homelab-infra	flagged	scripts/tests/test_finally_reporter_timeout_invariant.py:234	if-body	inline.append(path.name)	0	-
+ZacxDev/homelab-infra	flagged	scripts/tests/test_finally_reporter_timeout_invariant.py:420	if-body	continue  # reported by its own assertion above	0	-
+ZacxDev/homelab-infra	flagged	scripts/tests/test_finally_reporter_timeout_invariant.py:427	if-body	continue  # reported by its own assertion above	0	-
+ZacxDev/homelab-infra	flagged	scripts/tests/test_finally_reporter_timeout_invariant.py:475	if-body	continue  # reported by its own assertion above	0	-
+ZacxDev/homelab-infra	out-of-instrument	-	go	~10 *_test.go guards under containers/clawgate: `go test -cover` reports per-package percentages only; no -coverprofile pipeline exists to resolve a single branch	unmeasured	-
+ZacxDev/homelab-infra	out-of-instrument	-	bash	scripts/check-*.sh, kustomize-validate.sh: same bash line-granularity limit	unmeasured	-
+# civitai/talos-infra measured under /home/zach/workspace/civit/datapacket-talos/.venv/bin/python3 (Python 3.12.14)
+civitai/talos-infra	out-of-instrument	-	python	scripts/validate-alert-nodata-state.py, validate-dashboard-metric-seam.py, validate-tekton-build-pool.py, lint-grafana-dashboards.py: these ARE python, but no pytest suite invokes them -- they are called from bash gates. This tool needs a pytest entry point to drive a guard against the corpus, so they are undecidable here, not clean	unmeasured	-
+civitai/talos-infra	out-of-instrument	-	bash	~21 scripts/validate-*.sh plus the 3,576-line scripts/gitops-delta-gate.sh: same bash line-granularity limit as above. These carry 53 tests/mutants-*.sh batteries, which already answer "does this guard fire" by a different and stronger method	unmeasured	-
+civitai/talos-infra	out-of-instrument	-	bash	.githooks/* and .claude/hooks/*.sh: same limit	unmeasured	-
+# civitai/civitai measured under /home/zach/workspace/civit/datapacket-talos/.venv/bin/python3 (Python 3.12.14)
+civitai/civitai	out-of-instrument	-	ts	~63 corpus-scanning *.test.ts guards plus eslint-local-rules.js: vitest v8 coverage exists but its `include` is scoped to src/server/services/** and src/server/jobs/**, which contains none of the lint-rule guards. Widening it is a config change with its own review, not part of this tool	unmeasured	-
+civitai/civitai	out-of-instrument	-	mjs	scripts/ci/*.mjs and .claude/hooks/*.mjs: no node coverage backend built	unmeasured	-

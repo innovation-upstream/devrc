@@ -1,0 +1,49 @@
+# Which guards `scripts/dead-guard-scan.py` measures, and which it CANNOT.
+#
+# Keyed on the git REMOTE SLUG, never the clone directory name: two of the four
+# clones are named nothing like their repo (`datapacket-talos` -> civitai/talos-infra,
+# `homelab-talos` -> ZacxDev/homelab-infra), so a basename key silently matches the
+# wrong profile or none at all.
+#
+# 🔴 THE `out-of-instrument` ROWS ARE THE POINT, NOT PADDING. A guard absent from
+# this file would read as "measured and clean". These rows say, in the artifact
+# itself, which ~180 of the ~270 guards this tool does not see and why. Removing a
+# row does not extend coverage; it only hides the gap.
+#
+# 🔴 THE `instrument` SELECTORS NAME CORPUS-SCANNING GUARDS, NOT "the test
+# suite". An earlier draft selected all ~110 `scripts/tests/test_*.py`; that
+# instrumented ordinary unit tests, whose untaken branches are not the defect
+# this tool looks for, and the traced run had not finished after 35 minutes.
+# Narrow selectors are what make the flag list readable AND the run affordable.
+#
+# status:
+#   instrument         -- traced; branch bodies with no executed line are flagged
+#   out-of-instrument  -- NOT measured; the selector column states why
+#
+# repo_slug<TAB>lang<TAB>status<TAB>selector_or_reason
+
+innovation-upstream/devrc	python	instrument	scripts/testlib/*_scan.py
+innovation-upstream/devrc	python	instrument	scripts/testlib/skip_dirs.py
+innovation-upstream/devrc	python	instrument	scripts/testlib/skills_mapping.py
+innovation-upstream/devrc	python	instrument	scripts/tests/test_no_*.py
+innovation-upstream/devrc	python	instrument	scripts/tests/test_doc_path_rot.py
+innovation-upstream/devrc	python	instrument	scripts/tests/test_runtime_shebangs.py
+innovation-upstream/devrc	python	instrument	scripts/tests/test_skip_dirs_ledger.py
+innovation-upstream/devrc	python	instrument	scripts/tests/test_skills_mapping_guard.py
+innovation-upstream/devrc	python	instrument	scripts/tests/test_conditional_skip_pins.py
+innovation-upstream/devrc	python	instrument	scripts/tests/test_*_single_source.py
+innovation-upstream/devrc	python	instrument	scripts/tests/test_*skill_size.py
+innovation-upstream/devrc	python	instrument	scripts/tests/test_dead_guard_scan.py
+innovation-upstream/devrc	bash	out-of-instrument	scripts/drift-check.sh, run-tests.sh, run-node-tests.sh: bash PS4/BASH_XTRACEFD line tracing works but cannot discriminate a single-line `if ...; then X; fi`, so a flag there is not decidable at line granularity
+innovation-upstream/devrc	mjs	out-of-instrument	skill .mjs guards: no node coverage backend built
+
+civitai/talos-infra	python	out-of-instrument	scripts/validate-alert-nodata-state.py, validate-dashboard-metric-seam.py, validate-tekton-build-pool.py, lint-grafana-dashboards.py: these ARE python, but no pytest suite invokes them -- they are called from bash gates. This tool needs a pytest entry point to drive a guard against the corpus, so they are undecidable here, not clean
+civitai/talos-infra	bash	out-of-instrument	~21 scripts/validate-*.sh plus the 3,576-line scripts/gitops-delta-gate.sh: same bash line-granularity limit as above. These carry 53 tests/mutants-*.sh batteries, which already answer "does this guard fire" by a different and stronger method
+civitai/talos-infra	bash	out-of-instrument	.githooks/* and .claude/hooks/*.sh: same limit
+
+civitai/civitai	ts	out-of-instrument	~63 corpus-scanning *.test.ts guards plus eslint-local-rules.js: vitest v8 coverage exists but its `include` is scoped to src/server/services/** and src/server/jobs/**, which contains none of the lint-rule guards. Widening it is a config change with its own review, not part of this tool
+civitai/civitai	mjs	out-of-instrument	scripts/ci/*.mjs and .claude/hooks/*.mjs: no node coverage backend built
+
+ZacxDev/homelab-infra	python	instrument	scripts/tests/test_*.py
+ZacxDev/homelab-infra	go	out-of-instrument	~10 *_test.go guards under containers/clawgate: `go test -cover` reports per-package percentages only; no -coverprofile pipeline exists to resolve a single branch
+ZacxDev/homelab-infra	bash	out-of-instrument	scripts/check-*.sh, kustomize-validate.sh: same bash line-granularity limit
