@@ -325,6 +325,28 @@ test("open's reuse-probe bound is ordered against the work it wraps (the op-ceil
             + `that assertion (1) no longer implies a healthy fallthrough share of `
             + `the ${EXEC_OP_BUDGET_MS}ms op ceiling — the reuse probe now needs its `
             + `own op-ceiling assertion, which this test deliberately omits`);
+
+  // 🔴 (3) LOWER BOUND — AND THE HAZARD LIVES DOWN HERE, WHICH (1) AND (2) BOTH MISS.
+  // Both constraints above are CEILINGS. Nothing stopped the constant going DOWN:
+  // measured, `REUSE_TAB_BUDGET_MS = 100` passed the entire 507-test suite. That is
+  // the wrong direction to be unguarded, because the bound's whole disclosed cost is
+  // a LOW-side failure — a merely slow probe falls through to a fresh tab and
+  // ORPHANS the live one, with nothing to reclaim it.
+  //
+  // ⚠️ BE HONEST ABOUT WHAT THIS FLOOR IS: there is NO measurement of a healthy
+  // `chrome.tabs.get` anywhere in this repo, so unlike #797's `> 1365` (anchored to
+  // a measured 292-1365ms capture band) this is a CONSERVATIVE floor, not a
+  // calibrated one. It is anchored to the cheapest chrome.* round-trip we DO have a
+  // number for: `activate` returns in ~350-500ms measured, and `activate` does
+  // strictly MORE than `tabs.get` (tabs.update + windows.update vs one registry
+  // read). 1000ms is ~2x that upper end. The moment someone measures `tabs.get`,
+  // replace this with the real band and say so.
+  assert.ok(REUSE_TAB_BUDGET_MS >= 1000,
+            `reuse probe (${REUSE_TAB_BUDGET_MS}ms) is below the 1000ms floor. Going `
+            + `LOW orphans live tabs: a slow-but-healthy probe falls through to a `
+            + `fresh tab and nothing reclaims the old one. The floor is conservative `
+            + `(2x activate's measured ~350-500ms round trip), not calibrated — if `
+            + `you have measured chrome.tabs.get, replace it with the real band`);
 });
 
 test("promiseWithTimeout: a hung promise rejects with cdp_timeout:<label> (settles, not hangs)", async () => {

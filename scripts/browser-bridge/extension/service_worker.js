@@ -1202,7 +1202,9 @@ const OPS = {
   // REJECTION and `chrome.tabs.get` can HANG instead of rejecting. Unbounded, that
   // await simply never returns: the fall-through its own comment promises never
   // happens, and the op dies at EXEC_OP_BUDGET_MS (18s) — a `cmd_timeout` on the
-  // first op of every session. Same defect class as `screenshot`'s fast path
+  // RE-open of a tab the session already owns — NOT the first op of every
+  // session: server.py injects `reuseTabId` only when one is already owned.
+  // Same defect class as `screenshot`'s fast path
   // (#797), and named in the README of that very commit as the predicted
   // regeneration. The bound turns "never settles" into a rejection, which is the
   // ONLY shape this catch can act on. See REUSE_TAB_BUDGET_MS for the 2000ms

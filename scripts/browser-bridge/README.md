@@ -1931,7 +1931,9 @@ per-session (multi-step **workflow**) isolation did not.
 - **Idempotent `open` (no orphaned tab).** A second `open` from a session that
   already owns a **live** tab returns that SAME tab (the server passes the owned
   tabId as `reuseTabId`; the extension reuses it) instead of creating a second
-  real tab — so a double `open` never orphans/leaks the first tab. If the owned
+  real tab — so a double `open` does not orphan the first tab **unless the reuse
+  probe exceeds `REUSE_TAB_BUDGET_MS`**, in which case it falls through to a fresh
+  tab and the first one IS orphaned with nothing to reclaim it. If the owned
   tab is **gone**, `open` transparently creates a fresh one.
 - **Self-heal on a vanished owned tab.** If the user manually closes an owned
   background tab, the next tab-scoped op dispatches the stale tabId and the

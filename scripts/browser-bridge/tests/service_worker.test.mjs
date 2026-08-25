@@ -414,7 +414,10 @@ test("screenshot fast path: a HEALTHY captureVisibleTab is still used", async ()
 // `catch` promises "owned tab gone → open a fresh one below". That promise is only
 // ever true of a REJECTION. Unbounded, a `tabs.get` that never settles never
 // reaches the catch, so the fall-through never happens and the op dies at
-// EXEC_OP_BUDGET_MS (18s) — on `open`, the first op of every session.
+// EXEC_OP_BUDGET_MS (18s) — on a session's RE-open of a tab it already owns.
+// (NOT "the first op of every session": server.py only injects `reuseTabId`
+// when _owned_tab_locked() already returns a tab, so a fresh session's first
+// `open` never enters the bounded try at all.)
 //
 // RED WITHOUT THE FIX — and red as a FAILURE, never as a hang. Both halves of the
 // #797 lesson apply verbatim and are NOT hygiene:
@@ -502,7 +505,8 @@ test("open reuse probe: a REJECTING chrome.tabs.get still falls through (unchang
 // never-settling `chrome.tabs.get` is a hang test whether or not that is its
 // subject: with the bound reverted, the bare `await OPS.open(...)` below wedged the
 // whole FILE. Measured on the reverted tree — `fail 1, cancelled 1, tests 18` of
-// 30, i.e. 12 tests never ran and node scored the wedge `cancelled`, not `fail`.
+// the file's 28, i.e. 10 never ran and node scored the wedge `cancelled`, not
+// `fail`.
 // That is precisely the count-blind shape #797's timeout was added to remove,
 // reintroduced one test later by a crumb assertion that looked unrelated to it.
 test("open reuse probe: the breadcrumb distinguishes a HANG from a genuinely-gone tab",
@@ -538,8 +542,10 @@ test("open reuse probe: the breadcrumb distinguishes a HANG from a genuinely-gon
   const hung = state.crumbs.filter((c) => c.op === "open");
   assert.equal(hung.length, 1, "the hang path leaves exactly one crumb");
   assert.equal(hung[0].phase, "open_reuse_timeout");
-  assert.notEqual(hung[0].phase, gone[0].phase,
-                  "a crumb that spells both causes the same way distinguishes nothing");
+  // (No `notEqual(hung.phase, gone.phase)` here: both phases are already pinned to
+  // distinct literals above, so such an assertion is strictly IMPLIED and cannot fail
+  // for any mutant — coverage-shaped and empty, the same defect this PR removed once
+  // already. The distinctness that matters is enforced by the two equals.)
 });
 
 // --------------------------------------------------------------------------- //

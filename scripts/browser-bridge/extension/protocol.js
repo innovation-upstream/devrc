@@ -1797,7 +1797,9 @@ export const FAST_CAPTURE_BUDGET_MS = 1500;
 // closes it. That is precisely the tab leak the reuse path exists to prevent, so
 // the bound trades a rare orphaned tab for a guaranteed-terminating op. It is the
 // right trade (an orphan is one stale tab; a hang is an 18s `cmd_timeout` on the
-// first op of every session), but it is a real behaviour change, not free. There
+// RE-open of a tab the session already owns — NOT the first op of every session,
+// since server.py injects `reuseTabId` only when one is already owned), but it is
+// a real behaviour change, not free. There
 // is no abort primitive for `chrome.tabs.get`, so the abandoned call still settles
 // in the background — harmlessly, since its result is no longer read.
 //

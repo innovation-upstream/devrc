@@ -24,4 +24,4 @@
 //   * a hash computed in the worker over its own source — same disk read
 // The marker must be a LITERAL in a module the worker imported, so that it was
 // frozen into the loaded module graph at load time and travels with the code.
-export const BUILD_MARKER = "44a1d80c1e9630a9";
+export const BUILD_MARKER = "e1ee86a50a811d40";
