@@ -2828,3 +2828,326 @@ def test_build_report_source_distribution_has_no_pure_doc(tmp_path, monkeypatch)
     assert "doc" not in sources
     assert "orphan-doc" not in slugs                      # unanchored handoff dropped
     assert "mail-automation" in slugs                     # anchored handoff survives as both
+
+
+# --------------------------------------------------------------------------- #
+# --exclude-slugs — operator-supplied suppression, and the inference it REFUSES
+#
+# History: PR #778 rescued a WIP that paired this flag with a `parse_resolved()`
+# that INFERRED "this initiative is finished" from markers in the handoff text,
+# filtering on by default. Measured over the real corpus it flagged 11 of 62
+# handoffs, 8 of them on section headings (`### DONE this session`) inside docs
+# that carried live next-steps. Only the explicit-list half was salvaged.
+# --------------------------------------------------------------------------- #
+def test_parse_exclude_slugs_strips_whitespace_and_empty_tokens():
+    # REGRESSION: the rescued WIP did a bare `set(raw.split(","))`, so `"a, b"` gave
+    # `{"a", " b"}` — ` b` matches no slug, and the run suppressed one initiative while
+    # reading as if it had suppressed two. Red on the pre-change expression.
+    assert isc.parse_exclude_slugs("a,b") == {"a", "b"}
+    assert isc.parse_exclude_slugs("a, b") == {"a", "b"}
+    assert isc.parse_exclude_slugs("  a ,  b  ") == {"a", "b"}
+    assert isc.parse_exclude_slugs("a,b,") == {"a", "b"}
+    assert isc.parse_exclude_slugs("a,,b") == {"a", "b"}
+
+
+def test_parse_exclude_slugs_returns_none_when_nothing_is_named():
+    # None/empty/all-separator values must be indistinguishable from "flag not passed",
+    # so build_report takes the no-filter path rather than filtering against an empty set.
+    assert isc.parse_exclude_slugs(None) is None
+    assert isc.parse_exclude_slugs("") is None
+    assert isc.parse_exclude_slugs(",") is None
+    assert isc.parse_exclude_slugs("  ,  ") is None
+
+
+def _two_initiative_repo(tmp_path, monkeypatch, now):
+    """A hermetic repo with two session-anchored initiatives: `alpha` and `beta`."""
+    repo = tmp_path / "r"
+    (repo / "claudedocs").mkdir(parents=True)
+    (repo / "claudedocs" / "handoff-alpha-2026-07-04.md").write_text(
+        "# Handoff: alpha\n## Next steps\n1. go\n")
+    (repo / "claudedocs" / "handoff-beta-2026-07-04.md").write_text(
+        "# Handoff: beta\n## Next steps\n1. go\n")
+    _stub_no_external_io(monkeypatch)
+    monkeypatch.setattr(isc, "worktree_canonical_map", lambda repos: {})
+    a = _sess("Alpha groundwork", session_id="sa", cwd=str(repo),
+              last_user_ts=now - isc.DAY, n_turns=10)
+    b = _sess("Beta groundwork", session_id="sb", cwd=str(repo),
+              last_user_ts=now - isc.DAY, n_turns=10)
+    monkeypatch.setattr(isc, "collect_session_records", lambda root, d, n=5: [a, b])
+    return repo
+
+
+def test_build_report_exclude_slugs_suppresses_only_the_named_row(tmp_path, monkeypatch):
+    import calendar
+    now = float(calendar.timegm((2026, 7, 5, 0, 0, 0, 0, 0, 0)))
+    repo = _two_initiative_repo(tmp_path, monkeypatch, now)
+
+    # Negative control FIRST: with no filter, both rows are present. Without this the
+    # assertion below would also pass if `alpha` had never been built at all.
+    unfiltered = isc.build_report(14, repos=[str(repo)], client=None, now=now)
+    assert {i["slug"] for i in unfiltered["by_repo"][str(repo)]} == {"alpha", "beta"}
+    assert unfiltered["excluded_slugs"] == []
+    assert unfiltered["excluded_count"] == 0
+
+    filtered = isc.build_report(14, repos=[str(repo)], client=None, now=now,
+                                exclude_slugs={"alpha"})
+    assert {i["slug"] for i in filtered["by_repo"][str(repo)]} == {"beta"}
+    assert filtered["excluded_slugs"] == ["alpha"]
+    assert filtered["excluded_count"] == 1
+
+
+def test_build_report_exclude_slugs_reports_zero_when_the_slug_matches_nothing(
+        tmp_path, monkeypatch):
+    # A misspelled slug must be AUDIBLE: `excluded_slugs` still names what was asked for
+    # while `excluded_count` stays 0. Reporting only the request would make a typo look
+    # identical to a successful suppression.
+    import calendar
+    now = float(calendar.timegm((2026, 7, 5, 0, 0, 0, 0, 0, 0)))
+    repo = _two_initiative_repo(tmp_path, monkeypatch, now)
+
+    report = isc.build_report(14, repos=[str(repo)], client=None, now=now,
+                              exclude_slugs={"alhpa"})   # typo, on purpose
+    assert {i["slug"] for i in report["by_repo"][str(repo)]} == {"alpha", "beta"}
+    assert report["excluded_slugs"] == ["alhpa"]
+    assert report["excluded_count"] == 0
+
+
+def test_render_announces_suppression_and_stays_silent_otherwise(tmp_path, monkeypatch):
+    import calendar
+    now = float(calendar.timegm((2026, 7, 5, 0, 0, 0, 0, 0, 0)))
+    repo = _two_initiative_repo(tmp_path, monkeypatch, now)
+
+    quiet = isc.render(isc.build_report(14, repos=[str(repo)], client=None, now=now),
+                       now=now)
+    assert "SUPPRESSED" not in quiet
+
+    loud = isc.render(isc.build_report(14, repos=[str(repo)], client=None, now=now,
+                                       exclude_slugs={"alpha"}), now=now)
+    assert "--exclude-slugs SUPPRESSED 1 initiative(s); asked for: alpha" in loud
+
+
+def test_a_handoff_that_says_DONE_is_still_reported(tmp_path, monkeypatch):
+    # INVARIANT GUARD, not regression coverage — the inferring filter was never merged,
+    # so this pins a property `main` already has rather than a bug it once had. It exists
+    # to make re-adding that inference fail loudly: every string below is a real shape
+    # from the corpus that the rescued `parse_resolved()` flagged as resolved, in a doc
+    # that carries live next-steps. Slugs are unique per marker so a failure NAMES the one
+    # that leaked. Suppression is by explicit slug only; nothing else may hide a row.
+    import calendar
+    now = float(calendar.timegm((2026, 7, 5, 0, 0, 0, 0, 0, 0)))
+    markers = {
+        "alfa":    "### DONE this session\nshipped the thing\n",
+        "bravo":   "## RESOLVED 2026-06-20 — the producer was THE TEST SUITE\ntrail\n",
+        "charlie": "## CLOSED: the guard fail-open (#395)\nfixed\n",
+        "delta":   "**Status: DONE, merged, deployed to BOTH hosts.**\n",
+        "echo":    "### ARCHIVED — superseded\nsee elsewhere\n",
+        "foxtrot": "It closed — and then kept going, which is why this is still open.\n",
+    }
+    repo = tmp_path / "r"
+    (repo / "claudedocs").mkdir(parents=True)
+    for slug, body in markers.items():
+        (repo / "claudedocs" / f"handoff-{slug}-2026-07-04.md").write_text(
+            f"# Handoff: {slug}\n\n## Summary\n{body}\n## Next steps\n1. still to do\n")
+    _stub_no_external_io(monkeypatch)
+    monkeypatch.setattr(isc, "worktree_canonical_map", lambda repos: {})
+    sessions = [_sess(f"{slug.capitalize()} groundwork", session_id=f"s-{slug}",
+                      cwd=str(repo), last_user_ts=now - isc.DAY, n_turns=10)
+                for slug in markers]
+    monkeypatch.setattr(isc, "collect_session_records", lambda root, d, n=5: sessions)
+
+    report = isc.build_report(14, repos=[str(repo)], client=None, now=now)
+    assert {i["slug"] for i in report["by_repo"][str(repo)]} == set(markers)
+    assert report["excluded_count"] == 0
+    # And no resolution verdict is computed or emitted anywhere in the payload.
+    assert not hasattr(isc, "parse_resolved")
+    assert all("resolved" not in i for i in report["by_repo"][str(repo)])
+
+
+# --------------------------------------------------------------------------- #
+# --exclude-slugs, round 2: the four mutants the first battery let through.
+# Found by the #824 pre-merge audit, not by the green suite. Each test below
+# names the mutant it kills so a future reader knows what it is FOR.
+# --------------------------------------------------------------------------- #
+def test_render_prints_the_REMOVED_count_not_the_REQUESTED_count(tmp_path, monkeypatch):
+    # Kills the mutant `render`: excluded_count -> len(excluded_slugs).
+    # The first render test only ever passed a slug that MATCHED, so request-size and
+    # real-count were both 1 and could not disagree — the mutant survived a green suite.
+    # The typo case was asserted on the report dict but never through render(), which is
+    # the surface the operator actually reads. Fixture makes the two numbers DIFFER.
+    import calendar
+    now = float(calendar.timegm((2026, 7, 5, 0, 0, 0, 0, 0, 0)))
+    repo = _two_initiative_repo(tmp_path, monkeypatch, now)
+
+    # Two slugs requested, ONE of them real -> requested=2, removed=1. Any implementation
+    # that prints the request size says 2 here.
+    out = isc.render(isc.build_report(14, repos=[str(repo)], client=None, now=now,
+                                      exclude_slugs={"alpha", "no-such-slug"}), now=now)
+    assert "SUPPRESSED 1 initiative(s)" in out
+    assert "SUPPRESSED 2 initiative(s)" not in out
+
+    # And the all-typo case, through render() rather than the dict.
+    typo = isc.render(isc.build_report(14, repos=[str(repo)], client=None, now=now,
+                                       exclude_slugs={"alhpa"}), now=now)
+    assert "SUPPRESSED 0 initiative(s); asked for: alhpa" in typo
+
+
+def test_excluded_slugs_render_in_a_deterministic_order(tmp_path, monkeypatch):
+    # Kills the mutant `sorted(exclude_slugs)` -> `list(exclude_slugs)`. Every earlier
+    # test used a single-element set, where iteration order cannot vary. Set ordering is
+    # salted per process, so the mutant produces output that differs BETWEEN RUNS.
+    #
+    # SIX slugs, not three. A 3-element set comes out already-sorted about 1 time in 6,
+    # so the mutant SURVIVED this test on 3 of 20 PYTHONHASHSEED values — a guard that
+    # only fires ~85% of the time. Six gives 1/720. The count is the guard's strength,
+    # so do not trim this list.
+    import calendar
+    now = float(calendar.timegm((2026, 7, 5, 0, 0, 0, 0, 0, 0)))
+    repo = _two_initiative_repo(tmp_path, monkeypatch, now)
+
+    slugs = {"zulu", "alpha", "mike", "delta", "oscar", "bravo"}
+    report = isc.build_report(14, repos=[str(repo)], client=None, now=now,
+                              exclude_slugs=slugs)
+    assert report["excluded_slugs"] == ["alpha", "bravo", "delta", "mike", "oscar", "zulu"]
+    assert ("asked for: alpha, bravo, delta, mike, oscar, zulu"
+            in isc.render(report, now=now))
+
+
+def test_suppression_runs_AFTER_the_days_window_so_the_count_means_rows_you_would_have_seen(
+        tmp_path, monkeypatch):
+    # Kills the mutant that relocates the suppression block ABOVE the `--days` cutoff.
+    # `stale` is outside a 4d window, so the window already removed it: excluding it must
+    # report 0, not 1. Filtering first would count it and inflate the number the operator
+    # reads. Bounds overshoot the step deliberately (19d vs a 4d window) so the fixture
+    # cannot land exactly on the boundary and make the assertion unreachable.
+    import calendar
+    now = float(calendar.timegm((2026, 7, 5, 0, 0, 0, 0, 0, 0)))
+    repo = tmp_path / "r"
+    (repo / "claudedocs").mkdir(parents=True)
+    (repo / "claudedocs" / "handoff-fresh-2026-07-04.md").write_text(
+        "# Handoff: fresh\n## Next steps\n1. go\n")
+    (repo / "claudedocs" / "handoff-stale-2026-06-16.md").write_text(
+        "# Handoff: stale\n## Next steps\n1. go\n")
+    _stub_no_external_io(monkeypatch)
+    monkeypatch.setattr(isc, "worktree_canonical_map", lambda repos: {})
+    fresh = _sess("Fresh feature build", session_id="sf", cwd=str(repo),
+                  last_user_ts=now - isc.DAY, n_turns=10)
+    stale = _sess("Stale cleanup task", session_id="ss", cwd=str(repo),
+                  last_user_ts=now - 19 * isc.DAY, n_turns=10)
+    monkeypatch.setattr(isc, "collect_session_records", lambda root, d, n=5: [fresh, stale])
+
+    windowed_out = isc.build_report(4, repos=[str(repo)], client=None, now=now,
+                                    exclude_slugs={"stale"})
+    assert windowed_out["excluded_count"] == 0          # the WINDOW removed it, not us
+    assert {i["slug"] for i in windowed_out["by_repo"][str(repo)]} == {"fresh"}
+
+    # Control: widen the window and the same slug IS ours to remove -> 1.
+    in_window = isc.build_report(30, repos=[str(repo)], client=None, now=now,
+                                 exclude_slugs={"stale"})
+    assert in_window["excluded_count"] == 1
+    assert {i["slug"] for i in in_window["by_repo"][str(repo)]} == {"fresh"}
+
+
+def test_render_tolerates_a_report_predating_the_exclude_keys(tmp_path, monkeypatch):
+    # Kills the mutant `report.get("excluded_slugs")` -> `report["excluded_slugs"]`.
+    # `--json` output is written to disk and re-read by other tooling, so a report dict
+    # produced before these keys existed must still render instead of raising KeyError.
+    import calendar
+    now = float(calendar.timegm((2026, 7, 5, 0, 0, 0, 0, 0, 0)))
+    repo = _two_initiative_repo(tmp_path, monkeypatch, now)
+    legacy = isc.build_report(14, repos=[str(repo)], client=None, now=now)
+    for key in ("excluded_slugs", "excluded_count", "excluded_live"):
+        legacy.pop(key)
+
+    out = isc.render(legacy, now=now)                   # must not raise
+    assert "SUPPRESSED" not in out
+    assert "alpha" in out and "beta" in out
+
+
+def test_one_slug_suppresses_that_row_in_EVERY_repo(tmp_path, monkeypatch):
+    # Pins the documented cross-repo behaviour (module docstring): a slug comes from the
+    # handoff FILENAME and is not repo-unique, so `--exclude-slugs clawgate` removes the
+    # row from every repo that has one. Asserted so the surprise is a contract, not a
+    # discovery — and so `excluded_count` (2 for one requested slug) stays the tell.
+    import calendar
+    now = float(calendar.timegm((2026, 7, 5, 0, 0, 0, 0, 0, 0)))
+    repos = []
+    sessions = []
+    for name in ("r1", "r2"):
+        repo = tmp_path / name
+        (repo / "claudedocs").mkdir(parents=True)
+        (repo / "claudedocs" / "handoff-alpha-2026-07-04.md").write_text(
+            "# Handoff: alpha\n## Next steps\n1. go\n")
+        (repo / "claudedocs" / f"handoff-only-{name}-2026-07-04.md").write_text(
+            f"# Handoff: only {name}\n## Next steps\n1. go\n")
+        repos.append(str(repo))
+        sessions.append(_sess("Alpha groundwork", session_id=f"sa-{name}",
+                              cwd=str(repo), last_user_ts=now - isc.DAY, n_turns=10))
+        sessions.append(_sess(f"Only {name} groundwork", session_id=f"so-{name}",
+                              cwd=str(repo), last_user_ts=now - isc.DAY, n_turns=10))
+    _stub_no_external_io(monkeypatch)
+    monkeypatch.setattr(isc, "worktree_canonical_map", lambda repos_: {})
+    monkeypatch.setattr(isc, "collect_session_records", lambda root, d, n=5: sessions)
+
+    before = isc.build_report(14, repos=repos, client=None, now=now)
+    assert all("alpha" in {i["slug"] for i in before["by_repo"][r]} for r in repos)
+
+    after = isc.build_report(14, repos=repos, client=None, now=now,
+                             exclude_slugs={"alpha"})
+    assert all("alpha" not in {i["slug"] for i in after["by_repo"][r]} for r in repos)
+    # ONE slug requested, TWO rows gone across two repos — that gap is the warning.
+    assert after["excluded_count"] == 2
+    assert after["excluded_slugs"] == ["alpha"]
+    # The per-repo rows that were NOT named survive in both repos.
+    assert {i["slug"] for i in after["by_repo"][repos[0]]} == {"only-r1"}
+    assert {i["slug"] for i in after["by_repo"][repos[1]]} == {"only-r2"}
+
+
+def test_suppressing_an_initiative_that_holds_a_LIVE_session_says_so(tmp_path, monkeypatch):
+    # A suppressed row takes its live tmux pane with it and is NOT re-surfaced under
+    # `tmux_unmatched` (that is computed earlier). Losing sight of a live session is a
+    # different, worse loss than hiding a stale row, so it is counted and announced.
+    import calendar
+    now = float(calendar.timegm((2026, 7, 5, 0, 0, 0, 0, 0, 0)))
+    repo = _two_initiative_repo(tmp_path, monkeypatch, now)
+    panes = [{"session": "9", "window": "1", "title": "Alpha groundwork",
+              "cwd": str(repo), "pane_id": "%1"}]
+
+    kept = isc.build_report(14, repos=[str(repo)], client=None, now=now,
+                            include_tmux=True, panes=panes)
+    assert kept["excluded_live"] == 0
+    live_slugs = {i["slug"] for i in kept["by_repo"][str(repo)] if i.get("tmux_sessions")}
+    assert live_slugs == {"alpha"}, f"fixture did not attach a live pane: {live_slugs}"
+
+    gone = isc.build_report(14, repos=[str(repo)], client=None, now=now,
+                            include_tmux=True, panes=panes, exclude_slugs={"alpha"})
+    assert gone["excluded_count"] == 1
+    assert gone["excluded_live"] == 1
+    # Pin the WHOLE normalised line, not a substring. A substring match leaves the
+    # separator punctuation unconstrained — dropping the comma, swapping in a semicolon
+    # and doubling the space all survived it. A cosmetic reword then fails this test;
+    # that is the trade for a machine-readable claim.
+    out = isc.render(gone, now=now)
+    assert ("   --exclude-slugs SUPPRESSED 1 initiative(s), 1 with a LIVE session; "
+            "asked for: alpha") in out.splitlines()
+    # Negative control: suppressing a row with NO live pane must not claim one.
+    quiet = isc.build_report(14, repos=[str(repo)], client=None, now=now,
+                             include_tmux=True, panes=panes, exclude_slugs={"beta"})
+    assert quiet["excluded_count"] == 1 and quiet["excluded_live"] == 0
+    assert "LIVE session" not in isc.render(quiet, now=now)
+
+    # `excluded_live` counts ROWS, not PANES. With one fixture pane the two are equal, so
+    # `sum(1 for ...)` -> `sum(len(...) for ...)` is invisible. Give the suppressed row
+    # TWO panes: rows stays 1, panes would read 2.
+    two_panes = panes + [{"session": "9", "window": "2", "title": "Alpha groundwork",
+                          "cwd": str(repo), "pane_id": "%2"}]
+    multi = isc.build_report(14, repos=[str(repo)], client=None, now=now,
+                             include_tmux=True, panes=two_panes)
+    live_rows = [i for i in multi["by_repo"][str(repo)] if i.get("tmux_sessions")]
+    assert len(live_rows) == 1 and len(live_rows[0]["tmux_sessions"]) == 2, (
+        f"fixture did not attach two panes to one row: {live_rows}")
+
+    multi_gone = isc.build_report(14, repos=[str(repo)], client=None, now=now,
+                                  include_tmux=True, panes=two_panes,
+                                  exclude_slugs={"alpha"})
+    assert multi_gone["excluded_count"] == 1
+    assert multi_gone["excluded_live"] == 1          # ROWS — 2 would mean it counted panes

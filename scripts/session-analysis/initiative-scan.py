@@ -49,7 +49,7 @@ Populate the password from SOPS (homelab-talos trunk):
       sops -d --extract '["stringData"]["reader-password"]' /tmp/s.yaml); rm -f /tmp/s.yaml
 
 Usage:
-  initiative-scan.py [--days N] [--json] [--repo PATH] [--tmux]
+  initiative-scan.py [--days N] [--json] [--repo PATH] [--tmux] [--exclude-slugs S1,S2,...]
   --days   trailing window in days (default 5)
   --json   machine-readable output (the raw per-initiative data)
   --repo   restrict to a single repo path (default: auto-discover under ~/workspace)
@@ -57,6 +57,22 @@ Usage:
            claude pane title against the initiative slug/title, scoped by the pane's
            cwd→repo); also lists live claude sessions with no matched initiative.
            Best-effort: no tmux server -> initiatives simply show [no session].
+  --exclude-slugs  comma-separated initiative slugs to suppress from the report, e.g.
+           "observability-gaps-audit,evaluate-script-then-validate". Matches the base
+           slug derived from the handoff filename — the slug shown on each row.
+           EXPLICIT ONLY: the scan never infers that an initiative is finished, so
+           nothing disappears from this report unless you name it here.
+           🔴 A slug is NOT repo-unique. Doc-anchored rows take it from the handoff
+           filename and two repos can hold `handoff-<same-slug>-<date>.md`; session-only
+           rows derive it from the session title, so a suppressible slug need not
+           correspond to ANY file on disk. Either way one name suppresses the matching
+           row in EVERY repo. Read the `SUPPRESSED N` count: N larger than the number of
+           slugs you passed means you hit more repos than you meant to.
+           Matching is exact and CASE-SENSITIVE: `Alpha` never matches `alpha`, and
+           reports `SUPPRESSED 0` rather than erroring.
+           A suppressed initiative takes its live tmux session out of the report with
+           it — it does NOT reappear under "no matched initiative". The header says how
+           many suppressed rows held a live session so that loss is never silent.
 
 HONESTY NOTE: this measures ACTIVITY, RECENCY, and EFFORT (commits / sessions /
 telemetry events / handoff freshness) plus the human-written "Next steps" line —
@@ -2266,7 +2282,8 @@ def build_report(days: int, repos: list[str] | None = None,
                  client=None, projects_root: str = PROJECTS_ROOT,
                  now: float | None = None, include_tmux: bool = False,
                  panes: list[dict] | None = None,
-                 gh_ok: bool | None = None) -> dict:
+                 gh_ok: bool | None = None,
+                 exclude_slugs: set[str] | None = None) -> dict:
     """Fuse the three sources into a ranked, per-repo report dict.
 
     `client` may be None (telemetry skipped). `repos` None -> auto-discover from the
@@ -2275,6 +2292,10 @@ def build_report(days: int, repos: list[str] | None = None,
     read (for tests / reproducibility). `gh_ok` overrides the `gh_available()` probe
     the same way — a test that stubs `gh_open_prs` must state which world it is in,
     rather than letting the report's honesty flag depend on the host running it.
+    `exclude_slugs` suppresses initiatives by EXACT slug — operator-supplied only, never
+    inferred; None and an empty set both mean "no filter". Applied after the `--days`
+    window, so `excluded_count` counts rows removed from what would otherwise be shown.
+    Slugs are not repo-unique, so one name can remove a row from several repos.
     """
     now_epoch = now if now is not None else time.time()
 
@@ -2358,6 +2379,32 @@ def build_report(days: int, repos: list[str] | None = None,
     initiatives = [i for i in initiatives
                    if i.get("last_touch") is not None and i["last_touch"] >= cutoff]
 
+    # Operator-supplied suppression. Deliberately the ONLY way a row leaves this report
+    # for a reason other than the `--days` window: an earlier WIP (PR #778) inferred
+    # "resolved" from markers in the handoff text and, measured over the real corpus,
+    # flagged 11 of 62 docs at 199774f8 — 7 of them on section headings like
+    # `### DONE this session` inside handoffs that carried live next-steps. A scan whose
+    # whole job is answering "what am I working on" must not hide a row on a guess, so
+    # this list is explicit.
+    # A suppressed row must stay AUDIBLE: report the slugs asked for and the number
+    # actually removed separately, so `--exclude-slugs typo` reads as "0 suppressed"
+    # rather than looking identical to a run that had nothing to suppress.
+    # Deliberately placed AFTER the `--days` window filter: `excluded_count` then means
+    # "rows removed from what you WOULD have seen", not "rows removed from all of history".
+    excluded_slugs = sorted(exclude_slugs) if exclude_slugs else []
+    excluded_count = 0
+    excluded_live = 0
+    if exclude_slugs:
+        kept = [i for i in initiatives if i.get("slug") not in exclude_slugs]
+        dropped = [i for i in initiatives if i.get("slug") in exclude_slugs]
+        excluded_count = len(dropped)
+        # A suppressed initiative takes its LIVE tmux pane out of the report with it —
+        # it is not re-surfaced under `tmux_unmatched`, which is computed earlier. So the
+        # one thing the operator must not silently lose ("which session is X in") gets
+        # counted and announced separately from the row count.
+        excluded_live = sum(1 for i in dropped if i.get("tmux_sessions"))
+        initiatives = kept
+
     initiatives = sort_initiatives(initiatives)
 
     # Sets aren't JSON-serializable and the renderer wants a stable order.
@@ -2381,6 +2428,13 @@ def build_report(days: int, repos: list[str] | None = None,
     return {
         "days": days,
         "telemetry_available": telemetry_available,
+        # What the operator asked to hide, and how many rows that actually removed.
+        # Both, because they can disagree — a misspelled slug suppresses nothing.
+        "excluded_slugs": excluded_slugs,
+        "excluded_count": excluded_count,
+        # Of the suppressed rows, how many held a LIVE tmux session. Separate because
+        # losing a live pane is a different kind of loss from hiding a stale row.
+        "excluded_live": excluded_live,
         # Says which zeroes are MEASURED and which are "not wired up here":
         # False means every `open_prs: []` / `merged_prs: 0` in this report is
         # an absence of data, not an absence of PRs.
@@ -2435,6 +2489,14 @@ def render(report: dict, now: float | None = None) -> str:
                "its momentum + next step. Momentum = recency of touch, NOT % done.")
     out.append(f"   Showing only initiatives touched in the last {days}d "
                "(or with a live tmux session); widen --days to resurface older/stalled work.")
+    # Say it out loud. A hidden row that nobody knows is hidden is how this report
+    # starts lying about what is in flight.
+    if report.get("excluded_slugs"):
+        live = report.get("excluded_live", 0)
+        out.append(f"   --exclude-slugs SUPPRESSED {report.get('excluded_count', 0)} "
+                   f"initiative(s)"
+                   + (f", {live} with a LIVE session" if live else "")
+                   + f"; asked for: {', '.join(report['excluded_slugs'])}")
 
     repo_names = sorted(report["by_repo"].keys()) or report.get("repos", [])
     for repo in repo_names:
@@ -2537,7 +2599,24 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--repo", default=None, help="restrict to a single repo path")
     p.add_argument("--tmux", action="store_true",
                    help="link each initiative to the live tmux session(s) hosting it")
+    p.add_argument("--exclude-slugs", default=None,
+                   help="comma-separated initiative slugs to suppress from the report")
     return p.parse_args(argv)
+
+
+def parse_exclude_slugs(raw: str | None) -> set[str] | None:
+    """Split a `--exclude-slugs` value into a slug set, or None if it names nothing.
+
+    Strips whitespace and drops empty tokens, so `"a, b"`, `"a,b,"` and `"a , b"` all
+    give `{"a", "b"}` — a bare `.split(",")` would yield `" b"` and `""`, which match
+    no slug and would silently suppress nothing while looking like they did. A value
+    that is all separators (`","`, `"  "`) returns None: nothing was named.
+    """
+    if not raw:
+        return None
+    slugs = {tok.strip() for tok in raw.split(",")}
+    slugs.discard("")
+    return slugs or None
 
 
 def main(argv=None) -> int:
@@ -2566,7 +2645,8 @@ def main(argv=None) -> int:
     except RuntimeError:
         client = None  # telemetry optional — degrade gracefully
 
-    report = build_report(a.days, repos=repos, client=client, include_tmux=a.tmux)
+    report = build_report(a.days, repos=repos, client=client, include_tmux=a.tmux,
+                          exclude_slugs=parse_exclude_slugs(a.exclude_slugs))
 
     if a.json:
         print(json.dumps(report, indent=2, default=str))
