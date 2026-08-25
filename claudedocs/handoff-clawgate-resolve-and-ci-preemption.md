@@ -22,34 +22,17 @@ Make `/handoff`'s clawgate association record the task a session actually WORKED
 `devrc-ci` gate runs being killed so a required merge gate can be trusted.
 
 ## State now
-- devrc `main`, both hosts converged at `33fa7c00` (`ship.sh` rc=0; workbench 527 managed
-  artifacts / 0 dangling / 0 stale, laptop 495 / 0 / 0). **Nothing in flight.**
-- ⚠ Workbench prints `NOTE: tree is DIRTY` — another session's uncommitted
-  `scripts/run-node-tests.sh` line plus `discord-embed-ext/`, `load_test_store.sh`.
-  Deployed artifact ≠ commit on that host. Not ours to commit.
-- **13 PRs merged, across two repos.**
-
-| PR | squash | what |
-|---|---|---|
-| devrc #738 | `a662b48b` | `/handoff`'s clawgate `resolve` ranks links by `role` instead of counting them |
-| devrc #751 | `db4fb3f4` | its seam ledger was *spelled*, not structural — a reworded re-read walked past it |
-| devrc #758 | `c0cec452` | CLAUDE.md gained the coverage *mechanism*; fixed a false claim inside the drift-detector's own docstring |
-| devrc #771 | `8f33523c` | five files still asserting a dead branch-protection state |
-| devrc #796 | `2f6928df` | `skills_mapping`'s `nix-instantiate` 60s budget blew under CI contention |
-| devrc #802 | `d09038d8` | 🔴 **production race**: browser-bridge silently DROPPED telemetry rows |
-| devrc #491 #667 #658 | `c42d2b48` `324693fd` `33fa7c00` | stale handoff PRs, unblocked once the gate stopped killing runs |
-| homelab-infra #389 | `0817bf6a` | `gitops-validate` reserved 4.65 CPU for a 1 CPU peak |
-| homelab-infra #399 | `a7b04f80` | `auditloop` 5.50 → 2.85 CPU / 9728 → 6656Mi |
-| homelab-infra #400 | `2acf9f4d` | 🔴 **the actual preemption cause** — removed `priorityClassName: ci-bulk` |
-| homelab-infra #402 | `a580f38c` | closed the `nodetests` request IOU; corrected a p50-quoted-as-max comment |
-
-- **Branch protection changed mid-session**, now correct in CLAUDE.md:
-  `contexts = ["tekton/devrc-nodetests","tekton/devrc-pytests"]`, `strict: false`,
-  `enforce_admins: true`. Both tiers required.
-- **Preemption stopped.** 0 `pytests=255` across the last 8 gate runs; devrc#658 — killed
-  twice on an unchanged tree — passed **first try** after #400.
-- **Deployed and verified live**, not merely merged: `resolve` driven end-to-end on the
-  deployed copy; `_spool_emit_lock` present in the running browser-bridge process.
+- This doc landed as devrc**#831**, squash `3f3494ff`. `origin/main` has since moved on.
+- 🔴 **THE HOSTS ARE NOT CONVERGED — the earlier "both hosts converged at `33fa7c00`" is
+  SUPERSEDED.** `ship.sh` after #831: **laptop ff'd to `3f3494ff`, switched, verified**
+  (495 managed artifacts / 0 dangling / 0 stale, clean tree). **Workbench SKIPPED, rc=7
+  `cannot-fast-forward(local changes in the way)`** and was left exactly as found.
+  `ship: cross-host agreement NOT COMPARED — 1 of 2 hosts reported a landed sha.`
+- **The workbench is therefore behind and silently receiving nothing further** — the exact
+  shape `CLAUDE.md` warns about, where a skipped host keeps looking healthy.
+  `scripts/drift-check.sh` is the passive detector if it stays this way.
+- Everything else in the table above is unchanged and still true: 13 PRs merged, both Tekton
+  tiers required, preemption stopped, `#802` live in the running browser-bridge process.
 
 ## Open investigations — live diagnosis state
 
@@ -86,32 +69,59 @@ Make `/handoff`'s clawgate association record the task a session actually WORKED
 - **Next probe:** read the log after the next occurrence — it records the transition plus a
   timestamped `ps` snapshot filtered to git/pre-push/pytest/claude.
 
-## Next steps (ranked)
-1. **homelab-infra #351** — the reporter/main-task ordering strand. Only remaining item that
-   can permanently block a merge. Files: `clusters/homelab/apps/tekton-pipelines/triggers/`.
-   Start with the history query above, not a fix.
-2. **Re-measure in 3–5 days; do not claim victory yet.** Baseline recorded: 20 pass / 6 real
-   failures / 3 kills of 29 completed runs (~10% kill rate). Honest tests: does `pytests=255`
-   stay absent, and does `test_the_throttle_path…` stop appearing. #402's own "after" window
-   is only n=30.
-3. **Decide the five conflicting PRs** — devrc `#646 #612 #480 #359 #355`, 98–384 commits
-   behind, all `CONFLICTING`; `#355` is `DO-NOT-MERGE-YET`. Several are handoff docs whose
-   value is the prose, so cherry-picking text may beat rebasing.
-4. **`clawgate-ci` requests remain ~2.4× inflated** (2.35 CPU / 3584Mi) — latent, and it has a
-   **sidecar**, so the max-of-steps reasoning used for `auditloop`/`gitops-validate` is
-   UNSOUND there. `auditloop` was the same shape and proved non-causal; do not spend on this
-   without a symptom.
-5. **`created` is TERMINAL upstream** (clawgate `taskstatus`), so a session that FILES a task
-   and then works it stays `created` and lands in `resolve`'s no-worked branch. Recorded, not
-   fixed. The fix, if it ever bites, is to rank `created`+`worked` co-occurrence — not to go
-   back to counting links.
+### 🔴 BLOCKED — the workbench cannot fast-forward, and the blocker is ANOTHER session's live WIP
+- **Symptom + exact repro:** `bash scripts/ship.sh` → workbench `rc=7`, laptop fine.
+  Reproduce directly with `git -C ~/workspace/devrc merge --ff-only origin/main`.
+- **Observed (with values):** two independent blockers, both in the workbench checkout.
+  ```
+  error: Your local changes to the following files would be overwritten by merge:
+      scripts/run-node-tests.sh
+  error: The following untracked working tree files would be overwritten by merge:
+      scripts/discord-embed-ext/extension/embed_enlarge.js   (+ 8 more)
+  ```
+  - **All 9** `scripts/discord-embed-ext/**` files present locally **DIFFER** from the copies
+    now on `origin/main` (`identical=0 differs=9`, compared with
+    `git show origin/main:<f> | cmp - <f>` per file). They are **not** redundant leftovers of
+    the landed rescue PR — they are a live working copy.
+  - `scripts/run-node-tests.sh` local vs `origin/main`, one line, and it is COHERENT with the
+    above: local `"scripts/discord-embed-ext/tests|3|50"` vs upstream
+    `"scripts/discord-embed-ext/tests|2|113"` — i.e. someone is mid-edit on that suite (3 test
+    files, floor 50) and moved the floor to match.
+- **Ruled out:** *stale leftovers safe to delete* — refuted by the 9-way content compare above.
+  *`git stash`* — banned repo-wide (`refs/stash` is in the common git dir; a concurrent
+  session can pop it). *Committing them* — not this session's work, and devrc forbids
+  committing to `main` in either host checkout.
+- **Leading hypothesis:** an active session is mid-work on `discord-embed-ext` in the
+  workbench checkout, after its first tranche landed (devrc#818).
+- **Next probe:** identify the owner before touching anything —
+  `git -C ~/workspace/devrc log --oneline -3 -- scripts/discord-embed-ext` and
+  `gh pr list --repo innovation-upstream/devrc --state open --search discord-embed-ext`.
+  Then: they commit or move it, and `ship.sh` again. 🔴 Do **not** delete or stash those files
+  to unblock the ship — that is nine files of someone's unsaved work.
 
-🔴 **This list is a WORK QUEUE WITH NO LOCK** — every `/resume` draws from it, so a *better*
-list produces *more* duplicate work. Nothing above is in flight as of this writing. If you
-start one, mark it `IN FLIGHT: <repo>#<pr>` here. **Measured this session:** two other
-sessions worked the same files concurrently — homelab-infra#401 re-tuned `gitops-validate`
-hours after this session's #389, and devrc#826 was updating the sibling handoff doc. Check
-`git log` for the file and `gh pr list --search <path>` before starting.
+## Next steps (ranked)
+1. 🔴 **Unblock the workbench** (devrc, workbench checkout only — no files in `main`).
+   Owner-gated: someone must commit or relocate `scripts/discord-embed-ext/**` and the
+   `scripts/run-node-tests.sh` line, then re-run `bash scripts/ship.sh`. Until then that host
+   receives nothing and `drift-check.sh` is the only signal. Cheapest item, and the one whose
+   silence is most misleading.
+2. **homelab-infra #351** — the `finally` reporter that posted a verdict ~4 min before its main
+   task finished and stranded a required check `pending`. Only remaining path that can
+   permanently block a merge. Start with the TaskRun-history query, not a fix.
+3. **Re-measure in 3–5 days; do not claim victory yet.** Baseline: 20 pass / 6 real failures /
+   3 kills of 29 completed runs (~10% kill rate). Honest tests: does `pytests=255` stay
+   absent, and does `test_the_throttle_path…` stop appearing.
+4. **Decide the five conflicting PRs** — devrc `#646 #612 #480 #359 #355`.
+5. **`clawgate-ci` requests ~2.4× inflated** — latent, has a **sidecar** so max-of-steps is
+   unsound there. Do not spend without a symptom.
+6. **`created` is TERMINAL upstream**, so file-then-work in one session lands in `resolve`'s
+   no-worked branch. Recorded, not fixed.
+
+🔴 **This list is a WORK QUEUE WITH NO LOCK.** Item 1 in particular is owned by whoever holds
+that WIP — do not "helpfully" clear it. **Measured this session:** three concurrent sessions
+touched files this one did (homelab-infra#401 re-tuned `gitops-validate` after #389; devrc#826
+was open on the sibling handoff doc; and the `discord-embed-ext` WIP above). Check `git log`
+for the file and `gh pr list` before starting anything here.
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **The auto-loaded `CLAUDE.md` is a session-start SNAPSHOT.** It caught this session
@@ -138,6 +148,19 @@ hours after this session's #389, and devrc#826 was updating the sibling handoff 
   (`x-kubernetes-preserve-unknown-fields`). Build the negative control first.
 - **A comment quoting a p50 as a max:** `devrc-ci-pipeline.yaml` claimed 2Gi was "2.4× a
   measured 823Mi peak" — 823Mi was the p50, real max 1520Mi, i.e. 1.35×. Fixed in #402.
+
+- 🔴 **A `--repo` whose working tree LACKS the doc makes `handoff_doc.py` treat an UPDATE as a
+  NEW doc.** Hit this immediately: `#831` merged to `origin/main`, but this checkout could not
+  fast-forward (item 1), so `clawgate_handoff.sh field <doc>` returned **66 cannot read** and
+  the merge tool would have written a duplicate over the merged copy. **Run step 5 against a
+  worktree off `origin/main` when the base checkout is blocked** — the base comes from the
+  working tree, and an ABSENT base is the severe form of the stale-base warning.
+- 🔴 **`bash …/clawgate_handoff.sh resolve | tail -3; echo rc=$?` reports TAIL's status.**
+  Printed `rc=0` for a run that actually exited **6**. Redirect to a file and read `$?` from
+  the unpiped command — the same exit-code-through-a-pipe defect this session found in
+  `gate.sh` and in the CI verdict step.
+- **`ship.sh` rc=7 is a SKIP, not a failure** — the host is left exactly as found, which is
+  correct behaviour and why the per-host lines must be read rather than the final verdict.
 
 ## How to verify
 ```bash
