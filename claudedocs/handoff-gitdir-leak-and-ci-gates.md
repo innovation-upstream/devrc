@@ -29,25 +29,39 @@ a foreign repository. Three programs, three PRs, all merged.
 **MERGED and verified by content**
 - **#721** `081838cc` — `commit.sh` strips the git repo-pointer vars. Live on **both** hosts.
 - **#767** `a8a7e94f` — `backup.py` (the one with a NETWORK) strips them via the shared
-  `testlib.gitenv` ledger. Live on the workbench.
-- **#801** `0f366a4e` — `dl-router` `Store._write()` retries `SQLITE_BUSY`. **NOT live** —
-  see below.
+  `testlib.gitenv` ledger. Live on **both** hosts (laptop re-verified 2026-08-25).
+- **#801** `0f366a4e` — `dl-router` `Store._write()` retries `SQLITE_BUSY`. **Live on both
+  hosts** as of 2026-08-24 22:34 — see below.
 
-**Deploy status — honest, and it differs per program**
+**Deploy status — all three programs are LIVE on both hosts (re-measured 2026-08-25T04:49Z)**
 - `commit.sh` and `backup.py` run **from the working tree** (`ExecStart=… %h/workspace/…`),
   so `readlink -f` terminates in the repo and the `git pull` made them live. Verified by
   grepping the file the unit actually executes.
-- 🔴 **`dl-router` does NOT** — the unit runs
-  `/nix/store/y2686x2sgh7kn2qys66db3q4fhn93vx0-dl-router/server.py`, the running copy has
-  **0** occurrences of the retry, and the unit is `active` on old code. Needs
-  `home-manager switch --flake ~/workspace/devrc --impure` + `systemctl --user restart dl-router`.
-  Not run because a switch drops every `home.packages` binary for ~1s and **3 sibling gate
-  runs were live**; that failure surfaces as a phantom defect in someone else's branch.
-- **Laptop** was behind at last check and converges itself; `commit.sh`'s fix was confirmed
-  live there.
+- ✅ **`dl-router` is now live too.** A `ship.sh`/switch ran at **2026-08-24 22:34** and
+  converged both hosts within 10s of each other. Verified at the CONSUMER, not the deploy:
+  the unit's `ExecStart` moved `y2686x2s… → ly00qzvv…`; workbench MainPID `1408184`
+  (`active/running`, cgroup `…/app.slice/dl-router.service`) is **executing** that path and
+  is the PID holding port **8791** — no orphan serving old code; `_retry_busy` occurs **5×**
+  in the `store.py` beside the file it is running. Laptop: same store path, started 22:34:58,
+  `_retry_busy` ×5.
+  ⚠ The switch-during-live-gates hazard that deferred this is still real (a switch drops
+  every `home.packages` binary for ~1s, surfacing as a phantom defect in a sibling branch) —
+  it was simply not hit this time. Keep checking for live gates before the next one.
+- **Laptop** is converged: `drift-check.sh` → **rc 0**, both hosts on `main` at `324693fd`,
+  324 managed symlinks resolving, built-source scopes current.
 
-**Cards filed this session:** #343 (backup.py, complete), #349 (dl-router, complete),
-#348 (CI preemption, open), #355 (timeout invariant, open). Evidence added to #337.
+**Cards filed this session** — 🔴 these are **clawgate card ids, NOT devrc PR numbers**:
+`clawgate#343` (backup.py, complete), `clawgate#349` (dl-router, complete),
+`clawgate#348` (CI preemption, open, repo `homelab-talos`), `clawgate#355` (timeout
+invariant, open, repo `homelab-talos`). Evidence added to `clawgate#337` (open, repo
+`civitai/talos-infra`). Re-verified against the live board 2026-08-25T04:49Z.
+
+🔴 **Write `clawgate#N`, never a bare `#N`, in a handoff.** Bare numbers here made
+`resume-state.sh` resolve all three OPEN cards as **devrc PRs** — they collide with real
+ones — and emit three confident, wrong DRIFT findings: two "MERGED but the handoff frames
+it as open/in-flight (do the follow-on)" for cards that are open, and one pointing at devrc
+PR #355, an unrelated `🔴 DO-NOT-MERGE-YET` airvpn killswitch branch. The reconciler prints
+a cross-repo ref as `PR owner/repo#N`; it can only do that if the doc gave it the qualifier.
 
 ## Open investigations — live diagnosis state
 
@@ -79,18 +93,23 @@ a foreign repository. Three programs, three PRs, all merged.
   done that way (`IMPORT OK — ledger has 11 names`, with a negative control).
 
 ## Next steps (ranked)
-1. **Run the dl-router deploy when the box is quiet** — `home-manager switch --flake
-   ~/workspace/devrc --impure && systemctl --user restart dl-router`. Check for live gates
-   first (`pgrep -f run-tests.sh` matches your OWN shell — resolve PIDs and read
-   `/proc/<pid>/cmdline`). devrc, no files.
-2. **#355 — pin the timeout invariant** (`homelab-talos`,
+~~1. **Run the dl-router deploy when the box is quiet.**~~ ✅ **DONE 2026-08-24 22:34**, both
+   hosts, verified at the consumer — see "Deploy status". Nothing to run.
+~~4. **Converge the laptop** (`scripts/ship.sh`).~~ ✅ **DONE** in the same run;
+   `drift-check.sh` rc 0.
+
+1. **`clawgate#355` — pin the timeout invariant** (`homelab-talos`,
    `clusters/homelab/apps/tekton-pipelines/triggers/*.yaml`, `scripts/tests/`). Margins are
    3–5min and unenforced. 🔴 The defect is already FIXED in all five pipelines; the card
-   guards it, do not re-fix it.
-3. **#348 / #337 — CI preemption.** Both my prescriptions on #348 are RETRACTED. The
-   repo's own record names the open levers: bound devrc CI concurrency, and right-size the
-   remaining pipelines' requests (`gitops-validate` was done by homelab-infra #389).
-4. **Converge the laptop** (`scripts/ship.sh`) once the workbench deploy lands.
+   guards it, do not re-fix it. Bounded; the highest-leverage item left.
+2. **`clawgate#348` / `clawgate#337` — CI preemption.** Both my prescriptions on `#348` are
+   RETRACTED. The repo's own record names the open levers: bound devrc CI concurrency, and
+   right-size the remaining pipelines' requests (`gitops-validate` was done by homelab-infra
+   PR #389). 🔴 `ci-bulk` at `-10000` is CORRECT — do not raise it; read
+   `ci-priority-classes.yaml`'s `# 🔴 was tried and REVERTED` record before proposing
+   anything, it already rejected four fixes with measurements.
+3. **Exercise the `pre-push` → `tests-on-push.sh` route end-to-end** — the first open
+   investigation ABOVE. It is the only claim in this doc still resting on inference.
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **Read the subsystem's decision record before proposing a fix.** I recommended four
