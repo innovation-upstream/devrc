@@ -389,7 +389,10 @@ def test_guard1c_dep_list_matches_the_flake_interpreter():
     # The nixpkgs attribute is `pyyaml`; the importable module is `yaml`. The
     # table only has to cover attrs actually present in gatePyEnv — the import
     # assertion above is what catches an unmapped one.
-    NIX_TO_MODULE = {"pyyaml": "yaml"}
+    # `pytest-xdist` likewise: the nixpkgs attr carries the distribution name,
+    # the importable module is `xdist`. Putting the attr in GUARD 1c's tuple
+    # would make the probe fail on a correctly-provisioned interpreter.
+    NIX_TO_MODULE = {"pyyaml": "yaml", "pytest-xdist": "xdist"}
     flake_modules = {NIX_TO_MODULE.get(d, d) for d in flake_deps}
 
     missing_from_guard = flake_modules - guard_deps

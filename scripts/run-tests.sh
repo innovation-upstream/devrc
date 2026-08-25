@@ -549,7 +549,7 @@ if [ "$CHECK_TARGETS_ONLY" -eq 0 ] && [ "$CHECK_FLOORS_ONLY" -eq 0 ]; then
   # already fails the run when pytest's summary is unparseable; this matches it.
   _dep_probe="$(python -c '
 import sys
-need = ("pytest", "requests", "psycopg2", "minio", "yaml")
+need = ("pytest", "xdist", "requests", "psycopg2", "minio", "yaml")
 missing = []
 for m in need:
     try:
@@ -2797,6 +2797,81 @@ _count_of() { # $1 = alternation regex, $2 = summary line
   printf '%s' "${n:-0}"
 }
 
+# --- PARALLELISM (pytest-xdist) ------------------------------------------------
+# MEASURED 2026-08-25 on this suite, whole-gate wall clock, one host:
+#
+#   serial                     1194s (19.9 min)
+#   -n 4 --dist loadfile        576s ( 9.6 min)   2.07x
+#
+# The win is concentrated because the run is: `scripts/tests` alone is 677s of
+# the 1194 (57%), browser-bridge 234s, dl-router 126s, and the other 24 targets
+# are 123s COMBINED. That shape is also why this is xdist and not a parallel
+# TARGET loop: running all 27 targets concurrently cannot finish sooner than its
+# longest single target, i.e. 677s — a 1.75x ceiling that -P2 already reaches and
+# -P8 does not improve on. The parallelism has to be INSIDE the big target.
+#
+# 🔴 `--dist loadfile`, not the `load` default: a file's tests stay on ONE
+# worker. Several suites here share module-level state (marker files, per-session
+# start files, spool paths), and `load` would scatter a single file's tests
+# across workers and race them.
+#
+# 🔴 DEVRC_TEST_NESTED — why this exists, and do not remove it. Tests in
+# scripts/tests SPAWN THIS SCRIPT (test_run_tests_floors.py and the .sh meta
+# tests run a nested run-tests.sh over a generated fixture suite). If the nested
+# run is also parallel, its guard plugins emit one session marker PER WORKER and
+# GUARD 7/8/10 fail the nested run for a doubled marker count — which is the
+# guards working correctly, on a condition the parallelism created. So the outer
+# run exports DEVRC_TEST_NESTED=1 into pytest's environment and any nested
+# invocation forces jobs=1. Measured: passing `-n 4` through the ENVIRONMENT
+# (PYTEST_ADDOPTS) instead of on this command line reproduces exactly that — 6
+# failures, all of them meta-tests, all "emitted 2 session marker(s)".
+#
+# Override with DEVRC_TEST_JOBS=1 to get the old serial behaviour back for a
+# bisect or a flake hunt.
+if [ "${DEVRC_TEST_NESTED:-0}" = "1" ]; then
+  PYTEST_JOBS=1
+else
+  PYTEST_JOBS="${DEVRC_TEST_JOBS:-4}"
+fi
+case "$PYTEST_JOBS" in
+  ''|*[!0-9]*|0)
+    echo "run-tests: FATAL — DEVRC_TEST_JOBS must be a positive integer, got '${DEVRC_TEST_JOBS:-}'." >&2
+    exit 2
+    ;;
+esac
+PYTEST_PARALLEL_ARGS=()
+if [ "$PYTEST_JOBS" -gt 1 ]; then
+  PYTEST_PARALLEL_ARGS=(-n "$PYTEST_JOBS" --dist loadfile)
+fi
+
+# --- session-marker accounting, shared by GUARDS 7, 8 and 10 -------------------
+# All three ask the same question of the same quantity — "did this plugin
+# actually load for this target, or is its clean result a claim about nothing?"
+# — so the predicate lives in ONE place. Open-coding it three times is how the
+# three drifted apart the first time (GUARD 9 already says `>= 1` for its own
+# double-registration case while these three said `-ne 1`).
+#
+# Serial: EXACTLY 1, unchanged from before parallelism existed.
+# Parallel: pytest_sessionstart fires in the controller AND in each xdist
+# worker, so the count is bounded by 1 + PYTEST_JOBS. The bound is still a real
+# assertion — 0 remains "the plugin never loaded", which is the state these
+# guards exist to catch.
+_markers_ok() {
+  local n="$1"
+  if [ "$PYTEST_JOBS" -eq 1 ]; then
+    [ "$n" -eq 1 ]
+  else
+    [ "$n" -ge 1 ] && [ "$n" -le $(( PYTEST_JOBS + 1 )) ]
+  fi
+}
+_markers_expected() {
+  if [ "$PYTEST_JOBS" -eq 1 ]; then
+    echo "exactly 1"
+  else
+    echo "between 1 and $(( PYTEST_JOBS + 1 )) (controller + up to $PYTEST_JOBS xdist workers)"
+  fi
+}
+
 run_pytest() {
   local d="$1"
   echo "=== pytest $d ==="
@@ -2842,8 +2917,13 @@ run_pytest() {
   # 10 refuses a WRITE to any repo outside the session tmp roots, which is the
   # case a pointer strip cannot answer. They landed a day apart from separate
   # branches and both claimed the number; only the numbering was reconciled.
+  #
+  # DEVRC_TEST_NESTED is exported HERE (per-invocation, not script-wide) so a
+  # nested run-tests.sh spawned by a test runs serial — see the PARALLELISM
+  # header above.
+  DEVRC_TEST_NESTED=1 \
   python -m pytest "$d" -q -p no:cacheprovider -p testlib.nolaunch_plugin -p testlib.spool_plugin -p testlib.gitenv_plugin -p testlib.nogit_plugin \
-    --no-header -rs >"$log" 2>&1
+    "${PYTEST_PARALLEL_ARGS[@]}" --no-header -rs >"$log" 2>&1
   rc=$?
   nl_after="$(_nolaunch_lines)"
   NOLAUNCH_SEEN+=("$d|$(( nl_before + 1 ))|$nl_after")
@@ -3263,8 +3343,8 @@ for entry in "${NOLAUNCH_SEEN[@]}"; do
     fi
   fi
 
-  if [ "$is_pytest" -eq 1 ] && [ "$markers" -ne 1 ]; then
-    nolaunch_problems+=("$nt  — the nolaunch plugin emitted $markers session marker(s), expected exactly 1. This target ran WITHOUT the guard, so its zero above means nothing (see GUARD 7's header: -p testlib.nolaunch_plugin on the pytest line).")
+  if [ "$is_pytest" -eq 1 ] && ! _markers_ok "$markers"; then
+    nolaunch_problems+=("$nt  — the nolaunch plugin emitted $markers session marker(s), expected $(_markers_expected). This target ran WITHOUT the guard, so its zero above means nothing (see GUARD 7's header: -p testlib.nolaunch_plugin on the pytest line).")
   fi
 done
 
@@ -3329,17 +3409,21 @@ for entry in "${SPOOL_SEEN[@]}"; do
   fi
 
   if [ "$is_pytest" -eq 1 ]; then
-    if [ "$markers" -ne 1 ]; then
-      spool_problems+=("$st  — the spool plugin emitted $markers session marker(s), expected exactly 1. This target ran WITHOUT the guard, so its fallback-leaked=$leak_rows means nothing (see GUARD 8's header: -p testlib.spool_plugin on the pytest line).")
+    if ! _markers_ok "$markers"; then
+      spool_problems+=("$st  — the spool plugin emitted $markers session marker(s), expected $(_markers_expected). This target ran WITHOUT the guard, so its fallback-leaked=$leak_rows means nothing (see GUARD 8's header: -p testlib.spool_plugin on the pytest line).")
     elif [ "$marker_iso" != "$SPOOL_ISOLATED" ]; then
       spool_problems+=("$st  — ran with ACTIVITY_SPOOL_DIR='$marker_iso', not this run's '$SPOOL_ISOLATED'. Something between this script and pytest is re-pointing the spool.")
     elif [ "$marker_ctl" != "$SPOOL_CONTROL_OK" ]; then
       spool_problems+=("$st  — the plugin WITHHELD its fallback control (control=$marker_ctl): it resolved the fallback to '$marker_fb', which is not inside $SPOOL_DIR. The leak detector for this target is UNARMED, so its zero is not evidence.")
-    elif [ "$controls" -ne 1 ]; then
+    elif ! _markers_ok "$controls"; then
       # The control was emitted and did not arrive. The trap is not where the
       # fallback goes, so `fallback-leaked=0` is the reassuring zero of a
       # counter wired to nothing.
-      spool_problems+=("$st  — the fallback trap recorded $controls control row(s), expected exactly 1. The detector is wired to nothing and its fallback-leaked=$leak_rows is unreadable.")
+      #
+      # One row PER SESSION, so the bound tracks the marker count for the same
+      # reason — under xdist each worker fires its own control. Zero is still
+      # the failure this catches.
+      spool_problems+=("$st  — the fallback trap recorded $controls control row(s), expected $(_markers_expected). The detector is wired to nothing and its fallback-leaked=$leak_rows is unreadable.")
     fi
   else
     # Non-pytest targets load no plugin, so a marker or a control from one means
@@ -3598,14 +3682,17 @@ for entry in ${NOGIT_SEEN[@]+"${NOGIT_SEEN[@]}"}; do
   fi
 
   if [ "$is_pytest" -eq 1 ]; then
-    if [ "$markers" -ne 1 ]; then
-      nogit_problems+=("$gt  — the nogit plugin emitted $markers session marker(s), expected exactly 1. This target ran WITHOUT the guard, so its real-config-changed=$gchanged means nothing (see GUARD 10's header: -p testlib.nogit_plugin on the pytest line).")
+    if ! _markers_ok "$markers"; then
+      nogit_problems+=("$gt  — the nogit plugin emitted $markers session marker(s), expected $(_markers_expected). This target ran WITHOUT the guard, so its real-config-changed=$gchanged means nothing (see GUARD 10's header: -p testlib.nogit_plugin on the pytest line).")
     elif [ "$m_redirect" != "$NOGIT_CONFIG" ]; then
       nogit_problems+=("$gt  — ran with GIT_CONFIG_GLOBAL='$m_redirect', not this run's '$NOGIT_CONFIG'. Something between this script and pytest is re-pointing git's global config.")
     elif [ "$m_control" != "$NOGIT_CONTROL_OK" ]; then
       nogit_problems+=("$gt  — the plugin could not show its 'git config --global' write was CONTAINED (control=$m_control: $m_control_detail). Its zero is not evidence.")
-    elif [ "$gctl" -ne 1 ]; then
-      nogit_problems+=("$gt  — the isolated config gained $gctl control key(s), expected exactly 1. A real 'git config --global' write was fired and did NOT arrive here, so the redirect is not where global writes land.")
+    elif ! _markers_ok "$gctl"; then
+      # One key PER SESSION (the key name carries the writer's pid), so under
+      # xdist each worker adds its own. Zero still means the redirect is not
+      # where global writes land, which is the whole point of the count.
+      nogit_problems+=("$gt  — the isolated config gained $gctl control key(s), expected $(_markers_expected). A real 'git config --global' write was fired and did NOT arrive here, so the redirect is not where global writes land.")
     elif [ "$m_protocol" != "$NOGIT_PROTOCOL_OK" ]; then
       nogit_problems+=("$gt  — a real 'https' git operation was NOT refused by the allowlist (protocol=$m_protocol, GIT_ALLOW_PROTOCOL='$m_protocols'): $m_protocol_detail. A fixture repo in this target could push to a real remote.")
     fi

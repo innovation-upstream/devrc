@@ -103,6 +103,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -149,6 +150,14 @@ SESSION_MARKER = "nogit(session)"
 CONTROL_SECTION = "devrc-nogit-guard"
 CONTROL_PREFIX = "control-"
 
+# git's wording when another process holds `<cfg>.lock`. Matched lower-cased on
+# the substring, for the same reason REFUSAL_TOKEN is: a phrasing change across
+# git versions must not silently turn a contended write into an unretried one.
+LOCK_CONTENTION = "could not lock config file"
+# 6 attempts with the back-off below spans ~1s, against a contention window that
+# is one small write per session. Raising it would start hiding a genuinely
+# stuck lock instead of a collision.
+LOCK_RETRIES = 6
 CONTROL_OK = "emitted"
 CONTROL_UNCONTAINED = "WITHHELD-UNCONTAINED"
 
@@ -231,11 +240,35 @@ def config_control(guard_dir: Path) -> tuple[str, str]:
     key = f"{CONTROL_SECTION}.{CONTROL_PREFIX}{os.getpid()}"
     token = f"nogit-{os.getpid()}"
 
-    wrote = _git(["config", "--global", key, token])
-    if wrote is None:
-        return "unmeasured", "git is not runnable from this session"
-    if wrote.returncode != 0:
-        return "unmeasured", f"git config --global exited {wrote.returncode}"
+    # 🔴 RETRY ONLY ON LOCK CONTENTION. Under pytest-xdist every worker runs its
+    # own session and fires this control, and they all write the SAME guard file
+    # — git takes an exclusive `<cfg>.lock` per write, so the losers exit 255
+    # with "could not lock config file". MEASURED: 8 concurrent
+    # `git config --global` writes to one file -> 4 exit 0, 4 exit 255 with that
+    # message. Before the retry, GUARD 10 reported `control=unmeasured` for 16 of
+    # 27 targets — the guard could not run its own positive control, which it
+    # correctly refuses to score as a pass.
+    #
+    # The retry is deliberately NARROW: any other non-zero exit still returns
+    # "unmeasured" on the first try. Widening it to all failures would convert a
+    # genuinely broken control into a slow green, which is the exact failure this
+    # guard exists to prevent.
+    for attempt in range(LOCK_RETRIES):
+        wrote = _git(["config", "--global", key, token])
+        if wrote is None:
+            return "unmeasured", "git is not runnable from this session"
+        if wrote.returncode == 0:
+            break
+        if LOCK_CONTENTION not in (wrote.stderr or "").lower():
+            return "unmeasured", f"git config --global exited {wrote.returncode}"
+        if attempt == LOCK_RETRIES - 1:
+            return ("unmeasured",
+                    f"git config --global exited {wrote.returncode} — still "
+                    f"lock-contended after {LOCK_RETRIES} attempts")
+        # Back off by a session-distinct amount so the retries do not re-collide
+        # in lockstep; PID is the only id available in every session (xdist
+        # worker or not).
+        time.sleep(0.05 * (attempt + 1) + (os.getpid() % 17) / 1000.0)
 
     read = _git(["config", "--global", "--get", key])
     if read is None or read.returncode != 0 or read.stdout.strip() != token:
