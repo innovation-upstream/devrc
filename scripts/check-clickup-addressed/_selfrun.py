@@ -13,8 +13,8 @@ One of them (868gx0bbb) carried a comment reading "Still live, do not close" —
 the operator to close it.
 
 The markers below must be ANCHORED. Measured **2026-08-21** over the population these
-scripts actually walk — `CLAUDE_DIR.iterdir()` then `glob("*.jsonl")`, top level only,
-**735 transcripts** on this box — a bare `check-clickup-addressed` matches **67 (9.1%)**,
+scripts actually walk — **735 transcripts** on this box — a bare
+`check-clickup-addressed` matches **67 (9.1%)**,
 because the skill catalog is injected into every session's context; a bare
 `/check-clickup-addressed` matches **24 (3.3%)**, because it is a substring of the *path*
 `~/.claude/skills/check-clickup-addressed`. The real anchored markers match **4**. That is a
@@ -25,10 +25,18 @@ because the skill catalog is injected into every session's context; a bare
 before quoting them anywhere.
 
 🔴 Measure over THAT population, not over `grep -r ~/.claude/projects`. A recursive grep also
-walks `<session>/subagents/*.jsonl` (4559 files) and `<session>/tool-results/*`, which these
-scripts never open — doing so gave 213 and 32 against a denominator of ~250, i.e. both
-numerator and denominator wrong, and made the rejected candidates look far worse than they
-are. The verdict survived re-measurement; the figures did not.
+walks `<session>/subagents/*.jsonl` (4795 files on 2026-08-25) and `<session>/tool-results/*`,
+which these scripts never open — doing so gave 213 and 32 against a denominator of ~250, i.e.
+both numerator and denominator wrong, and made the rejected candidates look far worse than
+they are. The verdict survived re-measurement; the figures did not.
+
+🔴 HOW TO REPRODUCE THAT POPULATION CHANGED ON 2026-08-24, and the figures above did not.
+The walk used to be `CLAUDE_DIR.iterdir()` then `glob("*.jsonl")`, top level only; it is now
+`transcript_search.iter_transcripts`, which RECURSES and excludes the `subagents/` and `wf_`
+tiers by name. The two pick the same files today (797 on 2026-08-25, pinned by a test), so
+the 735/67/24 ratios still hold — but a re-measurement driven by the old sentence would
+rebuild a flat walk and quietly diverge the day a transcript is stored deeper. Enumerate
+with `iter_transcripts`, never with a hand-rolled glob.
 """
 import re
 

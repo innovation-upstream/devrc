@@ -95,17 +95,36 @@ def test_search_sessions_reports_what_it_dropped():
     assert [r["session_id"] for r in found] == ["real-work-s"]
     assert stats["self_runs_skipped"] == 1, f"drop went unreported: {stats}"
     assert stats["self_runs_skipped_ids"] == ["prior-run-s"]
+    # 🔴 The self-run drop is not the only way a transcript leaves this walk. The other
+    # three reached a human through the shared walk's stderr alone, and nothing in
+    # check-addressed.py reads stderr. Asserted from the REAL call, not a hand-built
+    # dict, so a `stats` wiring that silently stops forwarding them fails here.
+    for key, want in (("unreadable", 0), ("skipped_stale", 0), ("sessions_examined", 2)):
+        assert key in stats, f"{key} did not travel with the results: {stats}"
+        assert stats[key] == want, f"{key}={stats[key]!r}, wanted {want}: {stats}"
+    assert stats["unreadable_paths"] == []
 
 
 def test_search_payload_is_an_object_and_round_trips_through_the_consumer():
     """Producer and consumer asserted TOGETHER, so the two halves cannot drift apart —
-    reverting either alone passed the suite when only one side was pinned."""
+    reverting either alone passed the suite when only one side was pinned.
+
+    The payload spreads `stats`, so the keys added on 2026-08-25 ride along with no
+    change to `render_payload`. The consumer reads its three by name via `.get()`, which
+    is why an added key is additive rather than breaking — asserted here rather than
+    assumed, since "it uses .get()" is a claim about code nobody re-read.
+    """
     payload = search_sessions.render_payload(
         [{"session_id": "s1"}],
-        {"self_runs_skipped": 2, "self_runs_skipped_ids": ["p1", "p2"]})
+        {"self_runs_skipped": 2, "self_runs_skipped_ids": ["p1", "p2"],
+         "unreadable": 1, "unreadable_paths": ["/tmp/x.jsonl"],
+         "skipped_stale": 7, "sessions_examined": 40})
     assert isinstance(payload, dict), f"emitted a bare list: {payload!r}"
     assert check_addressed.parse_search_payload(payload) == \
         ([{"session_id": "s1"}], 2, ["p1", "p2"])
+    for key, want in (("unreadable", 1), ("skipped_stale", 7),
+                      ("sessions_examined", 40), ("unreadable_paths", ["/tmp/x.jsonl"])):
+        assert payload[key] == want, f"{key} missing from the --json document: {payload}"
 
 
 def test_search_payload_tolerates_the_legacy_bare_list():

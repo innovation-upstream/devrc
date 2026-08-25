@@ -145,11 +145,11 @@ create** — a load-bearing wire contract producers key their retry on.
 ⚠ **A task body may carry extension-picked element references** — never search the selector first
 (`element-references.md`).
 
-⚠ **Task↔session threads (#357) are ONE-WAY.** `/ui/tasks` shows a `👥 N` chip, but
-`GET /api/tasks/{id}/sessions` **404s** — only the reverse `GET /api/sessions/{id}/tasks` is
-callable and `clawgatectl` has neither, so *"which sessions worked task N"* is **UI-only**.
-🔴 Membership OVER-reports and never downgrades: a 400-rejected PATCH still records `worked` (#306),
-and a subagent inherits the parent's session id. `task-api.md`
+⚠ **Task↔session threads (#357).** `GET /api/tasks/{id}/sessions` **404s BY DESIGN** (pinned by
+`TestNoForwardSessionsSubRoute`) — the thread is EMBEDDED on task reads. So
+`clawgatectl task get N | jq .sessions` answers *"which sessions worked task N"*; NOT UI-only.
+🔴 Membership OVER-reports: a subagent inherits the parent's id, and a mere READ links you.
+(#306's rejected-PATCH link is FIXED, live 0.7.99.) `task-api.md`
 
 **Writing/debugging a producer? Load `task-api.md`** — per-op semantics + status codes,
 409/immutability, the author allowlist, provenance, tag grammar, the route×auth inventory.
