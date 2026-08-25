@@ -22,8 +22,9 @@ session's git write, and browser-bridge tests blaming their own subject for a ne
 spool row. Both are now fixed; the flake family underneath is only half closed.
 
 ## State now
-- Branch `main`, both hosts converged. **IN FLIGHT: devrc#824** (the `--exclude-slugs`
-  salvage — next-step 1). Nothing else.
+- Branch `main`. **Nothing in flight.** #824 (the `--exclude-slugs` salvage) MERGED as
+  `d3b6eeae`, and `rescue/initiative-scan-resolved-filter` was deleted deliberately
+  afterwards — next-step 1 is fully closed, residual included.
   ⚠ Hosts were converged as of the deploy note below; that was measured on 2026-08-25 and
   `main` has moved since (#806, #812, #817, #818, …). Re-run `drift-check.sh` rather than
   reading the line below as current.
@@ -45,16 +46,24 @@ spool row. Both are now fixed; the flake family underneath is only half closed.
   on that host.
 - **#783 open by design** — #807 fixed the assertions, NOT the root cause.
 - **#778 CLOSED unmerged** — **decided 2026-08-25**, see the first entry below. No longer the
-  risky one. 🔴 **The risk is now DELETING `rescue/initiative-scan-resolved-filter` before
-  #824 lands** — that branch is still the sole copy until then. Keep it.
+  risky one, and no longer risky at all: #824 landed and the rescue branch was then deleted
+  deliberately. Nothing here is single-copy any more.
 
 ## Investigations — live diagnosis state (first entry is DECIDED, the rest are open)
 
 ### ✅ DECIDED 2026-08-25 — the rescued `initiative-scan.py` WIP: one half salvaged, one half rejected on measurement
-**Operator decision: salvage `--exclude-slugs` only; drop `parse_resolved`. `IN FLIGHT: devrc#824`.**
-🔴 **`rescue/initiative-scan-resolved-filter` still must NOT be deleted as cleanup** — it stays
-until #824 merges, and then goes deliberately, verified BY CONTENT (a squash merge is never an
-ancestor), not by ancestry.
+**Operator decision: salvage `--exclude-slugs` only; drop `parse_resolved`. SHIPPED — #824
+merged as `d3b6eeae` 2026-08-25.**
+✅ **`rescue/initiative-scan-resolved-filter` is now DELETED — deliberately, not as cleanup.**
+The delete was gated on four conditions re-checked in the same command that performed it:
+`parse_exclude_slugs` present on `origin/main` (**by content**, since a squash merge is never
+an ancestor), the invariant guard present, `gh pr view 824 --json mergedAt` non-null, and the
+branch still existing. All four held.
+🔴 **`parse_resolved` now exists NOWHERE.** That was the decision, not an accident — it is
+rejected, and the reasoning below is the record. Its commit was `1327372d`; GitHub keeps an
+unreferenced commit reachable by sha for a limited window only, so if it is ever wanted back,
+recover it soon or rebuild it from the description here. **Do not rebuild it as specified** —
+read the root cause first; the design is what failed, not the code.
 
 - **What made it urgent (re-verified live, not carried forward):** branch present on origin;
   `merge-base --is-ancestor 1327372d origin/main` → **no**; `git branch -a --contains` → only
@@ -166,12 +175,11 @@ ancestor), not by ancestry.
 
 ## Next steps (ranked)
 1. ~~**Decide the fate of `rescue/initiative-scan-resolved-filter`**~~ — **DONE 2026-08-25.**
-   Split decision: `--exclude-slugs` salvaged as **`IN FLIGHT: devrc#824`**, `parse_resolved`
-   rejected on measurement (see the decided investigation above). **Residual, blocked on #824
-   merging:** delete the rescue branch deliberately, after confirming BY CONTENT that the
-   salvage landed (`git show origin/main:scripts/session-analysis/initiative-scan.py |
-   grep -c parse_exclude_slugs` → 1) — never by ancestry. Closing condition: that grep, plus
-   `gh pr view 824 --json mergedAt,mergeCommit`. Until both, the branch stays.
+   Split decision: `--exclude-slugs` salvaged and **MERGED (#824, `d3b6eeae`)**,
+   `parse_resolved` rejected on measurement (see the decided investigation above).
+   **Residual also CLOSED:** the rescue branch was deleted deliberately, gated on the
+   closing condition this item named — the by-content grep **plus** `mergedAt` — both
+   re-checked inside the deleting command. Nothing remains of this item.
 2. **Close #783 at the root** (devrc: `scripts/browser-bridge/tests/conftest.py`,
    `scripts/browser-bridge/server.py`) — join emitter threads at teardown so a re-pointed
    `ACTIVITY_SPOOL_DIR` cannot be written by a dead test's thread.
@@ -183,8 +191,8 @@ ancestor), not by ancestry.
    uncommitted `discord-embed-ext` line. Not ours to commit; resolves itself when they do.
 
 🔴 **This list is a WORK QUEUE WITH NO LOCK** — every `/resume` session draws from it, so a
-*better* ranked list produces *more* duplicate work. **In flight right now: item 1 only, as
-`IN FLIGHT: devrc#824`. Items 2–5 are unclaimed.** If you start one, mark it
+*better* ranked list produces *more* duplicate work. **Nothing is in flight: item 1 is closed
+(merged + residual done), items 2–5 are unclaimed.** If you start one, mark it
 `IN FLIGHT: <repo>#<pr>` here — and if you find this sentence disagreeing with the items above,
 believe the items, then fix this sentence.
 
@@ -236,22 +244,16 @@ git -C ~/workspace/devrc show origin/main:scripts/browser-bridge/tests/test_serv
 # and #802's fix is still there beside it
 git -C ~/workspace/devrc show origin/main:scripts/browser-bridge/server.py | grep -c "_spool_emit_lock"          # 3
 
-# 🔴 RUN THE GREPS *AND* THE `gh` READ BELOW FIRST — together they decide what this means.
-#   Content on main does not prove WHICH pr put it there, so the grep alone is a proxy;
-#   `mergedAt` is the authority. All four states:
-#     ls-remote non-empty + 824 unmerged -> normal, pre-merge. Do nothing.
-#     ls-remote non-empty + 824 merged   -> normal, post-merge. The deliberate delete is DUE.
-#     ls-remote EMPTY    + 824 merged    -> CORRECT: branch deleted on purpose.
-#     ls-remote EMPTY    + 824 unmerged  -> 🔴 ALARM. The sole copy is GONE.
-git -C ~/workspace/devrc ls-remote --heads origin rescue/initiative-scan-resolved-filter
-
-# the salvage — BY CONTENT, since a squash merge is never an ancestor.
-# Expect 0 until #824 merges, 1 after. A 0 is only news if #824 shows as merged.
+# the salvage landed — BY CONTENT, since a squash merge is never an ancestor
 git -C ~/workspace/devrc show origin/main:scripts/session-analysis/initiative-scan.py \
-  | grep -c "def parse_exclude_slugs"                              # 0 pre-merge / 1 post
+  | grep -c "def parse_exclude_slugs"                                                   # 1
 # and the invariant guard that stops the rejected half being re-added
 git -C ~/workspace/devrc show origin/main:scripts/session-analysis/tests/test_initiative_scan.py \
-  | grep -c "test_a_handoff_that_says_DONE_is_still_reported"      # 0 pre-merge / 1 post
+  | grep -c "test_a_handoff_that_says_DONE_is_still_reported"                           # 1
+
+# the rescue branch is GONE, and that is CORRECT — deleted on purpose after the two greps
+# above returned 1. Expect EMPTY. 🔴 Empty is only alarming if those greps return 0.
+git -C ~/workspace/devrc ls-remote --heads origin rescue/initiative-scan-resolved-filter  # empty
 gh pr view 824 --repo innovation-upstream/devrc --json mergedAt,mergeCommit
 
 # both hosts carry what is ALREADY on main (not #824, until it merges)
