@@ -169,3 +169,27 @@ def base_bash_rules(config: dict | None = None) -> tuple:
 def effective_bash_action(command: str, config: dict | None = None) -> str:
     """The action opencode's PRIMARY agent resolves for one command node."""
     return resolve(base_bash_rules(config), command)
+
+
+def external_directory_rules(config: dict | None = None) -> tuple:
+    """The ORDERED (pattern, action) list for `permission.external_directory`.
+
+    🔴 TWO SHAPES, one code path. This key was a bare SCALAR (`"ask"`) until the
+    skills-tree carve-out made it a map, and both shapes are live in the wild —
+    an older checkout, another host, or a revert all produce the scalar. A caller
+    that assumes a dict raises `AttributeError` on it, which is a crash where a
+    verdict was wanted. A scalar is therefore modelled as a single `*` rule.
+
+    Same resolver as bash (LAST match wins, `ask` when nothing matches), because
+    two copies of a resolution loop disagree eventually and silently.
+    """
+    cfg = config if config is not None else load_config()
+    ed = cfg["permission"].get("external_directory", "ask")
+    if isinstance(ed, str):
+        return ((("*"), ed),)
+    return tuple(ed.items())
+
+
+def effective_external_directory_action(path: str, config: dict | None = None) -> str:
+    """The action opencode resolves for a read OUTSIDE the project directory."""
+    return resolve(external_directory_rules(config), path)

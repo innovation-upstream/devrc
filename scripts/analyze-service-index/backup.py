@@ -32,6 +32,22 @@ That read-only-ness is not asserted, it is measured: the test suite checksums a
 synthetic store before and after a full run and requires byte identity, and
 separately requires that every scope still reports zero remotes.
 
+🔴 READ-ONLY IS ONLY HALF THE QUESTION — THE OTHER HALF IS *WHICH REPOSITORY*
+------------------------------------------------------------------------------
+Every git call below is `git -C <scope> …`, and `-C` is the weakest possible
+claim about where a command lands: **GIT_DIR OVERRIDES IT**. MEASURED 2026-08-23
+(git 2.55.0) on the pre-fix tree, sole variable `GIT_DIR` pointed at a decoy
+repo, driving this CLI end to end under the unit's own environment shape:
+
+    control (no leak)  rc=0  bundle head: <sha> refs/heads/trunk
+    GIT_DIR=<decoy>    rc=0  bundle head: <sha> refs/heads/foreign-branch
+
+A perfectly read-only run, of the wrong repository, encrypted and uploaded
+off-box under a green timer. Being read-only is what makes it *worse*, not
+better: nothing looks damaged afterwards. `_git_env()` therefore strips the
+repo-pointer family before every invocation; see its docstring, and
+`testlib/gitenv.py` for the incident that established the mechanism.
+
 WHY age, WHEN MINIO IS SELF-HOSTED
 ----------------------------------
 🔴 The store is client-confidential and the scope READMEs say the content never
@@ -98,6 +114,36 @@ import tempfile
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
+
+# 🔴 THE REPO-POINTER LEDGER IS NOT SPELLED IN THIS FILE, ON PURPOSE.
+# `scripts/testlib/gitenv.py::REPO_POINTER_VARS` OWNS the set of environment
+# variables that decide WHICH repository a git command lands in. `commit.sh`
+# (the sibling program) has to re-spell it as a bash array because bash cannot
+# import; this file is Python and can use the owner directly, which is strictly
+# stronger — there is no copy to drift. claude/RULES.md → "One rule, one place".
+#
+# THE IMPORT IS A HARD FAILURE, NEVER A SILENT DEGRADE. A `try: … except
+# ImportError: POINTERS = ()` fallback would turn a missing ledger into a backup
+# that runs with the defect back in place and still reports success — the exact
+# false all-clear this whole file is built against. The unit mounts
+# `%h/workspace/devrc/scripts` read-only (nix/home.nix), so `testlib/` is on
+# disk beside this script in every environment that runs it; if it ever is not,
+# the run must stop and say so.
+_SCRIPTS_DIR = Path(__file__).resolve().parents[1]
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+try:
+    from testlib.gitenv import REPO_POINTER_VARS, strip_repo_pointers  # noqa: E402
+except ImportError as _exc:  # pragma: no cover - a deployment fault, not a code path
+    raise ImportError(
+        f"analyze-service-index/backup.py cannot import the git repo-pointer "
+        f"ledger from {_SCRIPTS_DIR / 'testlib' / 'gitenv.py'} ({_exc}). That "
+        f"ledger is what stops a leaked GIT_DIR aiming this program — which has "
+        f"a network and uploads what it bundles off-box — at a FOREIGN "
+        f"repository. Refusing to run without it: a backup that silently drops "
+        f"the strip would bundle and upload somebody else's history under a "
+        f"green timer."
+    ) from _exc
 
 PROG = "analyze-service-index-backup"
 
@@ -172,10 +218,54 @@ def _private_dir(d: Path) -> Path:
 # --------------------------------------------------------------------------- #
 # git — read-only by construction
 # --------------------------------------------------------------------------- #
-def _git_env() -> dict:
-    """Environment that makes git structurally incapable of writing to the repo.
+# 🔴 PROCESS-GLOBAL, AND DELIBERATELY NEVER RESET. `_git_env()` is rebuilt for
+# every git invocation, so without this the announcement below would print once
+# per call and bury the backup's own output. The consequence for TESTS is the
+# part worth naming: an in-process assertion on the announcement is
+# ORDER-DEPENDENT — whichever test runs first consumes the one line for that
+# name. So the behavioural pins on it (`test_the_leak_is_ANNOUNCED_…`,
+# `test_the_announcement_is_ONCE_PER_NAME_…`) drive a SUBPROCESS, where the set
+# starts empty by construction. A unit-level test must snapshot and restore it.
+_POINTERS_ANNOUNCED: set[str] = set()
 
-    Each entry earns its place:
+
+def _git_env() -> dict:
+    """The environment every git invocation in this file runs under.
+
+    Two independent jobs, and the docstring used to claim only one of them while
+    naming neither correctly. It said this environment "makes git structurally
+    incapable of writing to the repo" — a claim WIDER than the code: nothing here
+    made git incapable of writing (the allowlist in `_git` and the unit's
+    `BindReadOnlyPaths` do that), and nothing here said anything about WHICH
+    repository git resolves, which was the half that was actually missing.
+
+    1. WHICH REPOSITORY — `strip_repo_pointers`, and it is the load-bearing one.
+       ------------------------------------------------------------------------
+       🔴 `git -C <scope>` is the WEAKEST possible claim about where a command
+       lands: **GIT_DIR OVERRIDES IT**. MEASURED 2026-08-23 (git 2.55.0) driving
+       the pre-fix CLI end to end against a decoy repo, sole variable `GIT_DIR`,
+       under the unit's own environment shape (`env -i` plus PATH/HOME):
+
+           control (no leak)  rc=0  bundle head: <sha> refs/heads/trunk
+           GIT_DIR=<decoy>    rc=0  bundle head: <sha> refs/heads/foreign-branch
+
+       The run printed a successful backup of a repository it was never pointed
+       at. This program has NO `PrivateNetwork`, `Wants=network-online.target`,
+       and uploads what it bundles to MinIO — so where the committer's version of
+       this defect (#721) corrupted local history, this one EXFILTRATES.
+
+       🔴 AND THE RESTORE REHEARSAL IN `bundle_scope` CANNOT CATCH IT. Its
+       `want_names` is read with `_git(scope, "for-each-ref")` — through the same
+       poisoned environment — so both sides of the comparison report the decoy's
+       refs and agree. That is a second sample of the unknown, not a control;
+       nothing downstream of it may be cited as covering this.
+
+       The SET is not chosen here — `testlib/gitenv.py::REPO_POINTER_VARS` owns
+       it (see the import banner at the top of this file).
+
+    2. WHICH CONFIG, AND NO PROMPTS — the four keys below.
+       ------------------------------------------------------------------------
+       These decide what git READS, not what it may write:
 
       GIT_OPTIONAL_LOCKS=0   DEFENCE IN DEPTH, and stated at the scope it was
                              measured. Some git reads (`git status` is the
@@ -195,8 +285,22 @@ def _git_env() -> dict:
       GIT_CONFIG_GLOBAL      no ~/.gitconfig — so the operator's own config can
       GIT_CONFIG_SYSTEM      neither change what we produce nor be written to.
       GIT_TERMINAL_PROMPT=0  never block a timer-driven run on a prompt.
+
+    🔴 EVERY git subprocess in this file takes its environment from HERE — `_git`
+    and `_git_scratch` both, pinned by
+    `test_every_git_invocation_takes_its_environment_from_git_env`. A future call
+    site that builds its own `dict(os.environ)` reintroduces the defect above and
+    that test is what fails.
     """
     env = dict(os.environ)
+    # 🔴 THE STRIP. Its ORDER relative to the `update` below is NOT load-bearing
+    # — the two sets are disjoint, and a mutation moving this call after the
+    # update was swept and SURVIVED, correctly. What matters is that it runs at
+    # all, and that it is handed `env` (the copy) rather than a throwaway: a
+    # mutant passing `dict(env)` leaves every pointer in place with the call
+    # still visibly there, and is killed by the parametrised regression test.
+    stripped = strip_repo_pointers(env)
+    _announce_stripped_pointers(stripped)
     env.update({
         "GIT_OPTIONAL_LOCKS": "0",
         "GIT_CONFIG_NOSYSTEM": "1",
@@ -205,6 +309,49 @@ def _git_env() -> dict:
         "GIT_TERMINAL_PROMPT": "0",
     })
     return env
+
+
+def _announcing_program() -> str:
+    """The program actually running, for the announcement's prefix.
+
+    🔴 NOT `PROG`. `_git_env()` is SHARED: `restore-verify.py` imports this
+    module and calls `_git_env()` / `_git_scratch` directly (it deliberately
+    reuses them rather than copying the guards). Hardcoding `PROG` therefore
+    announced a leak hit during a RESTORE VERIFICATION under the BACKUP's name,
+    sending whoever read the journal to the wrong program and the wrong unit.
+    `sys.argv[0]`'s basename distinguishes them without either program having to
+    register anything.
+    """
+    try:
+        name = Path(sys.argv[0]).name
+    except (IndexError, TypeError, ValueError):  # pragma: no cover - argv is a list
+        return PROG
+    return name or PROG
+
+
+def _announce_stripped_pointers(stripped: dict) -> None:
+    """Say ONCE per variable that the caller's environment was aimed elsewhere.
+
+    Silence would be the wrong shape for this file: a run whose environment
+    carried `GIT_DIR=<somebody else's repo>` is a run whose *caller* is broken,
+    and the strip fixes this program's behaviour without fixing theirs. Printing
+    it makes the leak visible in the journal instead of only in a diff nobody
+    reads. Once per name, because `_git_env()` is rebuilt for every invocation
+    and a per-call line would bury the run's own output — see the note on
+    `_POINTERS_ANNOUNCED` for what that costs a test.
+    """
+    for name in sorted(stripped):
+        if name in _POINTERS_ANNOUNCED:
+            continue
+        _POINTERS_ANNOUNCED.add(name)
+        print(
+            f"{_announcing_program()}: STRIPPED {name}={stripped[name]!r} from "
+            f"the git environment. It decides WHICH repository a git command "
+            f"lands in and it OVERRIDES `git -C`; inherited here it would have "
+            f"aimed this program at that repository. Fix the caller — nothing "
+            f"in normal operation sets it.",
+            file=sys.stderr,
+        )
 
 
 def _subverb(args: tuple[str, ...]) -> str | None:
@@ -291,6 +438,24 @@ def commit_count(scope: Path) -> int:
 
 
 def scope_remotes(scope: Path) -> list[str]:
+    """🔴 TEST-ONLY. THERE IS NO PRODUCTION CALL SITE, AND THAT IS DELIBERATE.
+
+    Nothing on the run path calls this. It exists so the test suite can assert
+    the no-remote invariant from OUTSIDE the code under test
+    (`test_no_scope_gains_a_remote`), and its dead-code status is pinned by
+    `test_scope_remotes_has_no_production_call_site` so this docstring cannot
+    quietly become false in either direction.
+
+    Say so here because the surrounding module docstring talks at length about
+    "WHY NO REMOTE", and a reader skimming for the control that ENFORCES it will
+    land on this function. It enforces nothing. What actually holds the invariant
+    on the run path is `_git`'s (verb, subverb) allowlist — `git remote add` is
+    refused there — plus the unit's `BindReadOnlyPaths`. A post-hoc check here
+    would in any case be an unreachable guard: this program has no code that
+    could add a remote, so a run-path assertion that none appeared could never
+    fail, and claude/RULES.md rates a guard that cannot fail as worse than none
+    because it reads as coverage while providing none.
+    """
     p = _git(scope, "remote")
     return [ln for ln in p.stdout.split("\n") if ln.strip()]
 

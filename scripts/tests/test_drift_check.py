@@ -4751,3 +4751,286 @@ def test_the_two_rc_ladders_reserve_each_others_codes():
             f"code. The two ladders now reach {max(ship_codes | drift_codes)}, so "
             f"'nowhere to go but upward' points at a number that is already taken."
         )
+
+
+# --------------------------------------------------------------------------- #
+# SKILL-LISTING TIERS (rc 22)
+#
+# `claude/skill-tiers.json` decides which skills spend always-on listing budget
+# on a full description and which ship as `name-only`. That ledger is in git;
+# `~/.claude/settings.json` is per-host and unmanaged, so nothing keeps them
+# together except this arm and `scripts/sync-skill-tiers.py`.
+#
+# 🔴 THE DESIGN DECISION THESE TESTS EXIST TO PIN: a host with NO skillOverrides
+# is NOT ADOPTED, not drift, and sets NO rc. The mechanism shipped applied to
+# zero hosts — deliberately, because nothing is being truncated today — so
+# counting an unapplied host as drift would have made this code RED ON EVERY RUN
+# from the moment it landed, and `claude/RULES.md` is explicit that a
+# permanently-red gate is worse than no gate. rc 22 fires only on
+# adopted-then-drifted.
+#
+# The comparison is NOT cross-host: both machines can agree perfectly and both be
+# wrong. The reference is the ledger.
+# --------------------------------------------------------------------------- #
+
+TIER_LEDGER_FIXTURE = {
+    "skills": {
+        "alpha": {"tier": "B", "why": "a fixture rationale, long enough to pass"},
+        "beta": {"tier": "B", "why": "a second fixture rationale, also long"},
+        "gamma": {"tier": "A"},
+    }
+}
+TIER_WANT = {"alpha": "name-only", "beta": "name-only"}
+
+
+def _tier_ledger(tmp_path, body=None):
+    p = tmp_path / "skill-tiers.json"
+    p.write_text(json.dumps(body if body is not None else TIER_LEDGER_FIXTURE,
+                            indent=2), encoding="utf-8")
+    return p
+
+
+def _settings_with(home, overrides, extra=None):
+    """Write a fixture ~/.claude/settings.json in the SHAPE Claude Code writes:
+    2-space top-level keys, 4-space entries, `json.dumps(indent=2)`. The
+    extractor under test is a sed with a format dependency, so a fixture built
+    any other way would be testing a format nobody ships."""
+    claude = home / ".claude"
+    claude.mkdir(parents=True, exist_ok=True)
+    body = {"theme": "dark"}
+    if overrides is not None:
+        body["skillOverrides"] = overrides
+    body.update(extra or {})
+    (claude / "settings.json").write_text(
+        json.dumps(body, indent=2) + "\n", encoding="utf-8")
+
+
+def _tiers_block(out):
+    """Just the [tiers] lines, so an assertion cannot be satisfied by a word
+    that appears in some other arm's output."""
+    return "\n".join(ln for ln in out.splitlines() if ln.startswith("[tiers]"))
+
+
+def _tier_check(fleet, ledger, *args, **env):
+    return fleet.check("--no-remote", *args,
+                       DRIFT_TIER_LEDGER=str(ledger), **env)
+
+
+def test_a_host_with_no_skill_overrides_is_NOT_ADOPTED_not_drift(fleet, tmp_path):
+    """🔴 THE PERMANENTLY-RED-GATE GUARD, and the shipped state of the fleet.
+
+    Neither host had skillOverrides when this landed. If that counted as drift
+    the deadman would fail on every run forever, training the operator to click
+    through the one alert that has to keep its meaning.
+    """
+    fleet.catch_up()
+    _settings_with(fleet.home, None)
+    rc, out = _tier_check(fleet, _tier_ledger(tmp_path))
+    block = _tiers_block(out)
+    assert rc == 0, f"an unadopted host was reported as drift (rc {rc})\n{out}"
+    assert "NOT ADOPTED" in block, block
+    assert "DRIFT" not in block, block
+    assert "sync-skill-tiers.py --apply" in block, "no fix is offered\n" + block
+    assert "matches the ledger" not in block, (
+        "an unadopted host must not read as compliant\n" + block
+    )
+
+
+def test_a_host_matching_the_ledger_is_green(fleet, tmp_path):
+    """🔴 POSITIVE CONTROL. Report this ALONGSIDE the reds below: a green from an
+    arm wired to nothing looks exactly like this one, so the compliant case must
+    be shown to produce the AFFIRMATIVE line and not merely the absence of a
+    complaint."""
+    fleet.catch_up()
+    _settings_with(fleet.home, dict(TIER_WANT))
+    rc, out = _tier_check(fleet, _tier_ledger(tmp_path))
+    block = _tiers_block(out)
+    assert rc == 0, out
+    assert "matches the ledger (2 tier-B override(s) deployed as asked)" in block, block
+    assert "NOT ADOPTED" not in block, block
+
+
+def test_a_missing_ledger_entry_on_an_adopted_host_is_rc22(fleet, tmp_path):
+    """NEGATIVE CONTROL 1: the ledger gained an entry and nobody re-applied it.
+    Isolated — the host carries a VALID override for the other skill, so this can
+    only fail on the one that is absent."""
+    fleet.catch_up()
+    _settings_with(fleet.home, {"alpha": "name-only"})
+    rc, out = _tier_check(fleet, _tier_ledger(tmp_path))
+    block = _tiers_block(out)
+    assert rc == 22, f"expected rc 22, got {rc}\n{out}"
+    assert "in the ledger, NOT on the host: beta=name-only" in block, block
+    assert "alpha" not in block.split("NOT on the host:")[1].splitlines()[0], block
+
+
+def test_a_wrong_override_value_is_rc22(fleet, tmp_path):
+    """NEGATIVE CONTROL 2: the skill IS overridden, at a value the ledger does
+    not ask for. Reported as its own category — `off` hides the skill entirely,
+    which is a different fault from a missing entry and must not read the same."""
+    fleet.catch_up()
+    _settings_with(fleet.home, {"alpha": "off", "beta": "name-only"})
+    rc, out = _tier_check(fleet, _tier_ledger(tmp_path))
+    block = _tiers_block(out)
+    assert rc == 22, out
+    assert "DIFFERENT value than the ledger asks for: alpha=name-only" in block, block
+    assert "NOT on the host" not in block, block
+
+
+def test_an_override_the_ledger_does_not_name_is_rc22(fleet, tmp_path):
+    """NEGATIVE CONTROL 3: a hand-edit, or an override left behind by a retired
+    skill. The ledger is the reference in BOTH directions or it is not a
+    ledger."""
+    fleet.catch_up()
+    _settings_with(fleet.home, dict(TIER_WANT, delta="off"))
+    rc, out = _tier_check(fleet, _tier_ledger(tmp_path))
+    block = _tiers_block(out)
+    assert rc == 22, out
+    assert "NOT in the ledger (hand-edited, or a retired skill): delta=off" in block, block
+
+
+def test_rc22_names_the_fix_and_the_ordering_against_a_behind_host(fleet, tmp_path):
+    """A host reported BEHIND carries a STALE ledger, so this finding can be a
+    symptom of that one. The output has to say which to do first, or an operator
+    re-applies a ledger that is about to change under them."""
+    fleet.catch_up()
+    _settings_with(fleet.home, {"alpha": "name-only"})
+    _, out = _tier_check(fleet, _tier_ledger(tmp_path))
+    block = _tiers_block(out)
+    assert "sync-skill-tiers.py" in block, block
+    assert "ship it FIRST" in block, block
+
+
+def test_an_unusable_ledger_is_COULD_NOT_MEASURE_and_sets_no_rc(fleet, tmp_path):
+    """🔴 The reassuring zero this arm refuses. An unreadable ledger yields an
+    EMPTY expectation, and an empty expectation makes every host look compliant.
+    It must print COULD NOT MEASURE, set no rc, and never say `matches`."""
+    fleet.catch_up()
+    _settings_with(fleet.home, dict(TIER_WANT))
+    rc, out = _tier_check(fleet, tmp_path / "no-such-ledger.json")
+    block = _tiers_block(out)
+    assert rc == 0, out
+    assert "COULD NOT MEASURE" in block, block
+    assert "matches the ledger" not in block, block
+    assert "NOT ADOPTED" not in block, block
+
+    bad = tmp_path / "broken.json"
+    bad.write_text("{ not json", encoding="utf-8")
+    rc, out = _tier_check(fleet, bad)
+    assert rc == 0, out
+    assert "COULD NOT MEASURE" in _tiers_block(out), out
+
+
+def test_a_host_that_did_not_report_the_fact_is_not_reported_as_matching(
+        fleet, tmp_path):
+    """A host that produced no fact must never print like one that matches.
+
+    🔴 The reason is NOT "the far side runs an older drift-check.sh" — it cannot.
+    `PAYLOAD` is composed HERE and piped to `bash -s`, so the remote always runs
+    THIS script's payload. The real causes are a host that was not reached and a
+    stream cut short before the FACT lines, and the stub is the second shape: a
+    remote that answers cleanly, reports the earlier facts, and stops.
+    """
+    fleet.catch_up()
+    _settings_with(fleet.home, dict(TIER_WANT))
+    fleet.stub_ssh(0, stdout=("[laptop] clean\n"
+                              "[laptop] FACT settings-keys theme\n"
+                              "[laptop] PARITY-RC=0"))
+    rc, out = fleet.check(DRIFT_TIER_LEDGER=str(_tier_ledger(tmp_path)))
+    block = _tiers_block(out)
+    assert "laptop: NOT REPORTED" in block, block
+    assert "laptop: matches the ledger" not in block, block
+
+
+def test_the_ledger_the_arm_defaults_to_is_the_repos_own(fleet):
+    """With no override the arm reads `claude/skill-tiers.json` beside the script
+    — the copy that ships WITH this checker, so the two cannot be a version
+    apart. Measured through the live ledger's real tier-B count."""
+    fleet.catch_up()
+    _settings_with(fleet.home, None)
+    rc, out = fleet.check("--no-remote")
+    block = _tiers_block(out)
+    n = len(json.loads((REPO_ROOT / "claude" / "skill-tiers.json").read_text()
+                       )["skills"])
+    n_b = sum(1 for e in json.loads(
+        (REPO_ROOT / "claude" / "skill-tiers.json").read_text()
+    )["skills"].values() if e["tier"] == "B")
+    assert n >= 30, f"the live ledger has only {n} entries — is it being read?"
+    assert f"ledger asks for {n_b} name-only override(s)" in block, block
+
+
+# --- the EXTRACTOR, driven directly ---------------------------------------- #
+
+def _parity_fact(home, name="skill-overrides"):
+    """Run the real PARITY payload against a fixture $HOME and return one fact."""
+    proc = subprocess.run(
+        ["bash", "-c", _payload_literal("PARITY")],
+        capture_output=True, text=True,
+        env={"HOME": str(home), "PATH": os.environ.get("PATH", ""),
+             "DRIFT_LABEL": "fx", "DRIFT_PARITY_ROOTS": "no/such/dir"},
+    )
+    m = re.search(r"^\[fx\] FACT %s (.*)$" % re.escape(name), proc.stdout, re.M)
+    assert m, f"no `{name}` fact in the payload output:\n{proc.stdout}{proc.stderr}"
+    return m.group(1).strip()
+
+
+def test_the_extractor_can_actually_see_overrides(tmp_path):
+    """🔴 POSITIVE CONTROL FOR THE EXTRACTOR. Every other assertion about this
+    fact is a NONE / EMPTY / mismatch, and a sed that matches nothing produces
+    those too. It has to be shown reading real values out of the real shape."""
+    home = tmp_path / "h"
+    _settings_with(home, {"zeta": "name-only", "alpha": "off"})
+    assert _parity_fact(home) == "alpha=off zeta=name-only"
+
+
+def test_an_absent_key_is_NONE_and_an_unreadable_file_is_UNEVALUATED(tmp_path):
+    """Three states that must never collapse into one another."""
+    home = tmp_path / "h"
+    _settings_with(home, None)
+    assert _parity_fact(home) == "NONE"
+
+    empty = tmp_path / "e"
+    (empty / ".claude").mkdir(parents=True)
+    assert _parity_fact(empty) == "UNEVALUATED"
+
+
+def test_an_empty_overrides_object_does_not_swallow_the_following_key(tmp_path):
+    """🔴 ISOLATED MUTATION GUARD on the sed RANGE END, and the reason it is
+    `^  [}"]` rather than `^  }`.
+
+    `"skillOverrides": {},` on ONE line still matches the range START (the
+    pattern is an unanchored substring), so with `^  }` as the end the range runs
+    on through every FOLLOWING key and harvests their 4-space entries as
+    overrides. The fixture puts a nested object with entries of exactly that
+    shape immediately after, so a widened range would report them — and reporting
+    them would then be diffed against the ledger and called drift on a host that
+    has no overrides at all.
+    """
+    home = tmp_path / "h"
+    _settings_with(home, {}, extra={"statusLine": {"padStart": "yes",
+                                                   "command": "bar-status"}})
+    fact = _parity_fact(home)
+    assert fact == "EMPTY", fact
+    assert "padStart" not in fact and "command" not in fact, fact
+
+
+def test_a_populated_block_followed_by_another_key_stops_at_the_brace(tmp_path):
+    """The other side of the same boundary: a REAL multi-line block followed by
+    another object key must yield exactly its own entries. Without this, an
+    over-tight range end would pass the test above by matching nothing at all."""
+    home = tmp_path / "h"
+    _settings_with(home, {"alpha": "name-only", "beta": "off"},
+                   extra={"statusLine": {"command": "bar-status"}})
+    assert _parity_fact(home) == "alpha=name-only beta=off"
+
+
+def test_the_extractor_reports_only_the_enum_values_it_finds(tmp_path):
+    """The override VALUES are printed, unlike the key-name-only rule the rest of
+    this payload follows for settings.json — they are an enum, not a secret. This
+    pins that nothing ELSE from the file rides along: the fixture's other keys
+    carry values that would be a leak if they appeared."""
+    home = tmp_path / "h"
+    _settings_with(home, {"alpha": "name-only"},
+                   extra={"apiKeyHelper": "SECRET-DO-NOT-PRINT"})
+    fact = _parity_fact(home)
+    assert fact == "alpha=name-only"
+    assert "SECRET" not in fact

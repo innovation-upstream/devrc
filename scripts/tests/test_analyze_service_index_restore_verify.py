@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+from testlib import hermetic_git  # noqa: E402
 import os
 import shutil
 import subprocess
@@ -118,7 +119,41 @@ SYNTH_MACHINE_ID = "0123456789abcdef0123456789abcdef"
 # helpers
 # --------------------------------------------------------------------------- #
 def _git_env() -> dict:
-    """A git environment that cannot read or write the OPERATOR's real config."""
+    """A git environment that cannot read or write the OPERATOR's real config,
+    and in which git's BACKGROUND MAINTENANCE cannot fire.
+
+    🔴 THE MAINTENANCE PIN IS WHAT MAKES `_manifest` HONEST, and it is the same
+    fix #743 made for `tree_hash` in `test_handoff_doc.py` — the source removed,
+    not the guard weakened.
+
+    `_manifest` fingerprints every file under the repo root INCLUDING `.git`,
+    deliberately: a read that refreshes `.git/index` moves an mtime, and a
+    manifest blind to that would call a mutating read "unchanged". The cost of
+    that honesty is that any file git creates under `.git` on its own initiative
+    is a difference. Git's auto-maintenance does exactly that, transiently:
+
+        AssertionError: the repository changed anyway
+          Right contains 1 more item:
+          {'.git/objects/maintenance.lock': (0, …, 'e3b0c44…')}
+
+    MEASURED in CI 2026-08-23 on `devrc-ci-7w4kx` (PR #764, a branch touching
+    neither this file nor the script it tests): 15,481 collected, 1 failed, at
+    `test_git_refuses_a_write_or_forbidden_subcommand`. The same tree passed
+    three local runs. `claude/RULES.md` calls a flaky test fixable — "remove the
+    timing dependency rather than re-running" — and this is the second module to
+    need it, so the mechanism is copied rather than reinvented.
+
+    `GIT_CONFIG_COUNT`/`_KEY_n`/`_VALUE_n` inject config that outranks the repo's
+    own, and because they are ENVIRONMENT variables they are inherited by every
+    git process spawned from one that has them -- including the ones the script
+    under test launches, since `_run` merges this dict.
+
+    ⚠ `GIT_CONFIG_COUNT` is NOT redundant with the `/dev/null` pins beside it.
+    Those two stop git READING the operator's config; neither turns maintenance
+    off, because `maintenance.auto` and `gc.auto` default to ON with no config
+    file at all. `test_git_maintenance_cannot_fire_inside_a_fixture_repo` below
+    proves that distinction with a negative control rather than asserting it.
+    """
     e = dict(os.environ)
     e.update({
         "GIT_CONFIG_NOSYSTEM": "1",
@@ -128,6 +163,7 @@ def _git_env() -> dict:
         "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@localhost",
         "GIT_TERMINAL_PROMPT": "0",
         "GIT_ALLOW_PROTOCOL": "file",
+        **hermetic_git.MAINTENANCE_OFF,
     })
     return e
 
@@ -135,6 +171,52 @@ def _git_env() -> dict:
 def _git_run(repo: Path, *args: str) -> subprocess.CompletedProcess:
     return subprocess.run([GIT, "-C", str(repo), *args],
                           capture_output=True, text=True, env=_git_env())
+
+
+def test_git_maintenance_cannot_fire_inside_a_fixture_repo(tmp_path):
+    """🔴 THE REGRESSION GUARD for the `maintenance.lock` flake.
+
+    Asserts the pin REACHES a real git process launched the way this module
+    launches them. A structural check on the dict would prove nothing — a
+    literal cannot be misspelled in an interesting way — so this reads the
+    values back out of git itself, inside a fixture repo built by `_make_scope`.
+
+    🔴 THE NEGATIVE CONTROL IS THE LOAD-BEARING HALF. It re-runs the identical
+    query with ONLY the `GIT_CONFIG_COUNT` injection stripped, leaving
+    `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM`/`GIT_CONFIG_NOSYSTEM` pinned — so
+    exactly ONE variable moves. Without it, a git that happened to default these
+    off would satisfy the assertions above while the pin did nothing, which is
+    `claude/RULES.md`'s "a green that is a fact about the instrument".
+    """
+    repo = _make_scope(tmp_path / "store", "scope-maint", {"e.md": "x"}, commits=1)
+
+    # `--default ''` so an UNSET key exits 0 and returns empty. Without it a
+    # broken pin dies on the non-zero exit and the failure names the helper
+    # rather than the property under test.
+    def _cfg(key: str, env: dict) -> str:
+        return subprocess.run(
+            [GIT, "-C", str(repo), "config", "--get", "--default", "", key],
+            capture_output=True, text=True, env=env,
+        ).stdout.strip()
+
+    pinned = _git_env()
+    assert _cfg("maintenance.auto", pinned) == "false", (
+        "maintenance.auto is not pinned off inside a fixture repo — git can "
+        "create .git/objects/maintenance.lock mid-test and _manifest will "
+        "correctly report the repository as changed"
+    )
+    assert _cfg("gc.auto", pinned) == "0", "gc.auto is not pinned off"
+
+    stripped = {
+        k: v for k, v in pinned.items()
+        if not k.startswith(("GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_",
+                             "GIT_CONFIG_VALUE_"))
+    }
+    assert _cfg("maintenance.auto", stripped) == "", (
+        "git reports maintenance.auto even with the injection removed, so the "
+        "assertion above is green for a reason other than this pin — it proves "
+        "nothing about the fix"
+    )
 
 
 def _make_scope(store: Path, name: str, entries: dict[str, str],

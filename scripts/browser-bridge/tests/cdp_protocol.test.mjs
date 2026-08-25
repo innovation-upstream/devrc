@@ -16,6 +16,7 @@ import {
   elementRectExpression, focusExpression, fullPageClip,
   promiseWithTimeout, assertTabCdpReady, TAB_DISCARDED_MESSAGE,
   CDP_ATTACH_TIMEOUT_MS, CDP_COMMAND_TIMEOUT_MS, CDP_OP_BUDGET_MS,
+  FAST_CAPTURE_BUDGET_MS, EXEC_OP_BUDGET_MS,
   matchCdpFrameId, pickOopifSessionId, evalValueOrThrow,
 } from "../extension/protocol.js";
 
@@ -212,9 +213,66 @@ test("fullPageClip uses the css content size for a full-document capture", () =>
 // the op SETTLES and control returns to the poll loop.
 
 test("timeout budgets are chosen well under the 20s server cmd_timeout", () => {
-  for (const ms of [CDP_ATTACH_TIMEOUT_MS, CDP_COMMAND_TIMEOUT_MS, CDP_OP_BUDGET_MS]) {
+  // EXEC_OP_BUDGET_MS is included because it is the right-hand side of the
+  // fast-path inequality below, so it belongs in the same class bound.
+  //
+  // 🔴 CORRECTION, and it is this PR's own defect class for the third time: an
+  // earlier version of this comment claimed a mutant raising EXEC_OP_BUDGET_MS to
+  // 25000 "survived the entire suite". THAT IS FALSE, and it was written in as
+  // measured fact on an auditor's say-so without being re-run. Measured directly:
+  // it is pinned EXACTLY, twice, and both pins predate this PR —
+  // `tests/emulation.test.mjs:342` ("BUDGET: the step count is bounded by a
+  // CONSTANT") fails `25000 !== 18000`, and `test_server.py`'s
+  // test_exec_budget_matches_the_extension pins it across the language boundary.
+  // It survives only when cdp_protocol.test.mjs is run ALONE, which is what that
+  // claim was really measuring. So this entry adds the CLASS bound (< 20s) that a
+  // single-file run cannot mislead about; it does not close a hole, because there
+  // was none. Re-verify a mutation result before quoting it — including one an
+  // auditor hands you.
+  for (const ms of [CDP_ATTACH_TIMEOUT_MS, CDP_COMMAND_TIMEOUT_MS, CDP_OP_BUDGET_MS,
+                    FAST_CAPTURE_BUDGET_MS, EXEC_OP_BUDGET_MS]) {
     assert.ok(ms > 0 && ms < 20000, `budget ${ms} must be >0 and < the 20s server timeout`);
   }
+});
+
+// 🔴 THE `screenshot` FAST-PATH BOUND IS ONLY SAFE RELATIVE TO WHAT FOLLOWS IT.
+//
+// Whatever the fast path spends is spent BEFORE the CDP fallthrough begins, and
+// it comes out of the attach-hang margin that EXEC_OP_BUDGET_MS's own comment
+// calls THIN: a hung attach costs CDP_ATTACH_TIMEOUT_MS + an awaited safeDetach
+// bounded by CDP_COMMAND_TIMEOUT_MS = 16s against the 18s op ceiling, and that
+// comment warns that dropping below 16s "converts the attach case into a generic
+// op_timeout" — i.e. destroys the phase attribution the whole timeout scheme
+// exists to provide.
+//
+// This is pinned as a RELATIONSHIP, in the style of wake.test.mjs, because the
+// failure mode is changing ONE of these four numbers without re-deriving the sum.
+// The first draft of FAST_CAPTURE_BUDGET_MS was 5000, which makes this 21000 —
+// over the ceiling, and green under every other test in this repo.
+test("fast-path bound leaves the CDP fallthrough its full attach-hang budget", () => {
+  const attachHangCost = CDP_ATTACH_TIMEOUT_MS + CDP_COMMAND_TIMEOUT_MS;
+  assert.equal(attachHangCost, 16000, "the documented attach-hang cost moved — re-derive");
+  assert.ok(
+    FAST_CAPTURE_BUDGET_MS + attachHangCost <= EXEC_OP_BUDGET_MS,
+    `fast path (${FAST_CAPTURE_BUDGET_MS}ms) + attach-hang (${attachHangCost}ms) = ` +
+    `${FAST_CAPTURE_BUDGET_MS + attachHangCost}ms must fit the ${EXEC_OP_BUDGET_MS}ms ` +
+    `op ceiling, or a post-fallthrough attach hang reports op_timeout instead of ` +
+    `cdp_timeout:attach`);
+  // And it must still clear the ORDINARY healthy-capture band, or the bound pushes
+  // routine successes onto CDP and the fast path stops being a fast path.
+  //
+  // 🔴 THE BAND, NOT "THE SLOWEST" — an earlier version of this assertion said
+  // "must exceed the slowest measured healthy capture", which is FALSE and was the
+  // kind of false claim a test is worst at carrying, because the next person tuning
+  // this constant reasons from it. The same measurement run recorded a SUCCESSFUL
+  // capture at 17,970ms (arm A′). The slowest healthy capture is ~18s, not 1365ms.
+  // 1365ms is the top of the ORDINARY band (control arm, n=3: 292-1365ms; arm A,
+  // n=2: ~280ms). Sacrificing the 1.5-18s tail to CDP is the POINT of the bound,
+  // not a side effect. (The 292 figure also corrects a transcription error: the
+  // "192" previously quoted here came from a different 2026-08-19 measurement.)
+  assert.ok(FAST_CAPTURE_BUDGET_MS > 1365,
+            "bound must exceed the ordinary healthy-capture band (292-1365ms), or "
+            + "routine successes fall through to CDP");
 });
 
 test("promiseWithTimeout: a hung promise rejects with cdp_timeout:<label> (settles, not hangs)", async () => {

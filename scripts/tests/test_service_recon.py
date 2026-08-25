@@ -20,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from testlib import hermetic_git  # noqa: E402
 import subprocess
 import sys
 from pathlib import Path
@@ -49,7 +50,8 @@ def _git(repo: Path, *args: str) -> None:
     subprocess.run(
         ["git", "-C", str(repo), *args],
         check=True, capture_output=True, text=True,
-        env={**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e",
+        env={**os.environ, **hermetic_git.MAINTENANCE_OFF,
+             "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e",
              "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@e"},
     )
 

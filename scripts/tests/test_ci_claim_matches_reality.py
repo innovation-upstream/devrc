@@ -19,10 +19,16 @@ carry branch protection, and `statusCheckRollup` is non-empty. Still true: no
 used to continue: "the protection carries **no `required_status_checks`**:
 checks RUN, nothing BLOCKS", evidenced by #707 merging **28 minutes** after its
 `devrc-pytests` went RED and #711 two minutes after. **Measured FALSE on
-2026-08-23**: `required_status_checks.contexts` is `["tekton/devrc-nodetests"]`,
-`strict: false`, `enforce_admins: true` — a merge DOES block now. But on one
-tier of two, and the required one collects `*.test.mjs` ONLY, so a Python-only
-change cannot fail it. "Partially blocked" is the shape that reads as "blocked".
+2026-08-23**: `required_status_checks.contexts` is
+`["tekton/devrc-nodetests","tekton/devrc-pytests"]`, `strict: false`,
+`enforce_admins: true` — BOTH tiers block, so a Python-only change is gated too.
+
+⚠ It briefly listed nodetests ALONE (same day, corrected within the hour), and
+that one-element state is worth remembering rather than deleting: nodetests
+collects `*.test.mjs` ONLY, so a Python-only change could not fail the required
+check at all, yet the setting read as "protected". "Partially blocked" is the
+shape that reads as "blocked" — which is why the re-measure below says to read
+the LIST, not whether the key exists.
 
 The marker was `other` before that change and is `other` after, because it
 encodes what REPORTS, not what BLOCKS: something this test cannot see (Tekton)

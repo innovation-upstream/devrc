@@ -114,6 +114,14 @@ CLAWGATE_STOP = "/home/zach/.claude/clawgate-stop-hook.sh"
 SEARCH_NUDGE = PY + " ~/.claude/hooks/search-tool-nudge.py"
 NEXT_STEP = PY + " ~/.claude/hooks/next-step-nudge.py"
 TMUX_STOP = "~/.config/tmux/task-hook.sh"
+# 🔴 THE ONE MANAGED COMMAND WITH NO PYTHON IN IT — see scenario 18. It is spelled
+# with a bare `bash` on purpose, and several assertions below that used to read
+# "every command names the pinned interpreter" now have to say "every PYTHON
+# command", because this one legitimately does not and must never be made to.
+# Excluding it is not a weakening: scenario 18 asserts the exclusion positively
+# (the interpreter stays `bash`), so a mutant that dropped the shell hook from the
+# tables would go red there rather than quietly satisfying a widened `all()` here.
+BCS = "bash ~/.claude/hooks/base-clone-staleness.sh"
 LEDGER = PY + " ~/.claude/hooks/agent-ledger-hook.py"
 WRITEBACK = PY + " ~/.claude/hooks/clawgate-writeback-guard.py"
 INTERVIEW = PY + " ~/.claude/hooks/clawgate-task-interview-guard.py"
@@ -476,8 +484,14 @@ with tempfile.TemporaryDirectory() as tmp:
           and matchers_for(d3, "PostToolUse", "/search-tool-nudge.py") == ["Bash"])
     # Every command this run wrote carries the pinned absolute interpreter — no
     # bare `python3` survives anywhere in the file it produced.
-    check("9: every managed command it wrote names the absolute interpreter",
-          all(c.startswith(PY + " ") for c in all_cmds if c != TMUX_STOP))
+    check("9: every managed PYTHON command it wrote names the absolute interpreter",
+          all(c.startswith(PY + " ")
+              for c in all_cmds if c not in (TMUX_STOP, BCS)))
+    # Anti-vacuity for the exclusion just added: the shell hook really is in
+    # this file, so the filter is removing something rather than describing an
+    # empty case, and it is NOT carrying a python interpreter.
+    check("9: ...and the one non-python managed command is present and bash-run",
+          all_cmds.count(BCS) == 1)
 
 # --- 10. THE RECOGNISER IS CONSERVATIVE -------------------------------------
 # 🔴 Each command below names a MANAGED hook script under the hooks dir and must
@@ -566,8 +580,13 @@ with tempfile.TemporaryDirectory() as tmp:
     with open(settings) as f:
         d5 = json.load(f)
     every = [c for ev in d5.get("hooks", {}) for c in cmds(d5, ev)]
-    check("11: every command now names the BUMPED interpreter",
-          every and all(c.startswith(PY2 + " ") for c in every))
+    check("11: every PYTHON command now names the BUMPED interpreter",
+          every and all(c.startswith(PY2 + " ") for c in every if c != BCS))
+    # 🔴 The shell hook must NOT have been bumped -- an interpreter bump that
+    # reached it would have rewritten `bash` to a python path and broken every
+    # session start. Asserted here because this is the scenario that bumps.
+    check("11: the shell hook was NOT bumped -- it still runs under bash",
+          every.count(BCS) == 1)
     check("11: not one command still names the old interpreter",
           not any(c.startswith(PY + " ") for c in every))
     # Anti-vacuity: the file still holds the hooks it held before, in the same
@@ -729,7 +748,8 @@ with tempfile.TemporaryDirectory() as tmp:
     check("12: the matchered Stop duplicate was removed, keeping the FIRST copy",
           entries(d12, "Stop").count((None, NEXT_STEP)) == 1
           and ("Bash", NEXT_STEP) not in entries(d12, "Stop"))
-    check("12: SessionStart healed", entries(d12, "SessionStart") == [(None, LEDGER)])
+    check("12: SessionStart healed, and the shell hook appended after it",
+          entries(d12, "SessionStart") == [(None, LEDGER), (None, BCS)])
     check("12: UserPromptSubmit healed",
           entries(d12, "UserPromptSubmit") == [(None, NOTIFY), (None, LEDGER)])
     check("12: SubagentStop healed", entries(d12, "SubagentStop") == [(None, NOTIFY)])
@@ -884,14 +904,21 @@ for hostile, why, hostile_cwd, expected_reason in HOSTILE_OVERRIDES:
         # commands than it did. The literal stays a literal — `a == b == c` is
         # satisfied by a run that appends nothing at all, which is the unbounded-
         # growth guard's own failure mode inverted.
-        check(tag + ": three consecutive runs hold exactly 18 hook commands",
-              counts == [18, 18, 18])
+        # 18 -> 19: base-clone-staleness.sh joined SINGLE_EVENT_CMDS on
+        # SessionStart, so one converged run holds one more command.
+        check(tag + ": three consecutive runs hold exactly 19 hook commands",
+              counts == [19, 19, 19])
         with open(settings) as f:
             d13 = json.load(f)
         written = [c for ev in d13.get("hooks", {}) for c in cmds(d13, ev)
-                   if c != TMUX_STOP]
-        check(tag + ": every hook command names the resolved fallback instead",
+                   if c not in (TMUX_STOP, BCS)]
+        check(tag + ": every PYTHON hook command names the resolved fallback instead",
               written and all(c.startswith(RESOLVED + " ") for c in written))
+        # The hostile override must not have reached the shell hook either --
+        # it has no python token to poison, and it must still be exactly one.
+        check(tag + ": the shell hook survived the hostile override untouched",
+              [c for ev in d13.get("hooks", {}) for c in cmds(d13, ev)
+               if "base-clone-staleness.sh" in c] == [BCS])
         # By PREFIX, not substring: the resolved fallback is itself a path ending
         # in `python3`, so a substring test would report the relative override as
         # "reached" purely because the honest answer contains its spelling.
@@ -1225,6 +1252,132 @@ with tempfile.TemporaryDirectory() as tmp:
     check("17: the second run reports no change", "no change" in p17b.stdout)
     check("17: the healed file is BYTE-IDENTICAL after a second run",
           open(settings, "rb").read() == healed17)
+
+# --- 18. THE SHELL HOOK: REGISTERED, NEVER REWRITTEN, NEVER RE-APPENDED -------
+# 🔴 base-clone-staleness.sh is the first NON-PYTHON hook this script registers,
+# and it walks straight at the two defects the python side already paid for:
+#
+#   * THE UNBOUNDED RE-APPEND. The append surface asks "is this script already
+#     registered" through a recogniser. While that recogniser was python-only it
+#     could not read a `bash …` command back — including one it had just written
+#     — so every run would append another copy. Measured on the python side at
+#     14 -> 27 -> 40 over three runs. (c) below is what makes that visible: it is
+#     the assertion that goes red if `hook_script_of` ever loses its shell half.
+#   * THE REWRITE THAT DESTROYS IT. `normalized_command` replaces the FIRST token
+#     with an absolute python. Applied here it produces
+#     `<python> ~/.claude/hooks/base-clone-staleness.sh`, i.e. a SyntaxError on
+#     every single session start. (b) pins that the rewrite pass does not see it.
+#
+# The fixture is EMPTY of SessionStart entries so the append is a real creation,
+# not a preservation — an append bug is invisible on a populated event.
+with tempfile.TemporaryDirectory() as tmp:
+    home = os.path.join(tmp, "home")
+    os.makedirs(os.path.join(home, ".claude"))
+    settings = os.path.join(home, ".claude", "settings.json")
+    with open(settings, "w") as f:
+        json.dump({"hooks": {}}, f, indent=2)
+
+    env = dict(os.environ)
+    env["HOME"] = home
+    env["DEVRC_HOOK_PYTHON"] = PY
+
+    p18 = run(env)
+    check("18: run exits 0", p18.returncode == 0)
+    with open(settings) as f:
+        d18 = json.load(f)
+
+    ss = cmds(d18, "SessionStart")
+
+    # (a) IT IS REGISTERED AT ALL — the gap this scenario exists to close. Before
+    #     this change the switch delivered the script and registered nothing, so
+    #     the hook fired only on the one host where the entry was hand-added.
+    check("18: the shell hook is registered on SessionStart", BCS in ss)
+    check("18: exactly once", ss.count(BCS) == 1)
+
+    # POSITIVE CONTROL: SessionStart is an event the python side also writes to,
+    # so a run that appended nothing at all cannot be what makes (a) green.
+    check("18: POSITIVE CONTROL — the python hook landed on the same event too",
+          LEDGER in ss)
+
+    # (b) THE REWRITE PASS DOES NOT TOUCH IT. Asserted on the string, because the
+    #     damage is exactly a substituted first token.
+    check("18: the interpreter is still `bash`, NOT the pinned python",
+          [c for c in ss if "base-clone-staleness.sh" in c] == [BCS])
+    check("18: no SessionStart command pairs a python interpreter with a .sh",
+          not any(c.endswith(".sh") and c.startswith(PY) for c in ss))
+    check("18: ...and the run did not report it as pinned",
+          "base-clone-staleness.sh" not in "".join(
+              ln for ln in p18.stdout.splitlines() if ln.startswith("  ~ ")))
+
+    # (c) THE FIXED POINT — the re-append defect, measured over a second run.
+    after18 = open(settings, "rb").read()
+    p18b = run(env)
+    check("18: the second run reports no change", "no change" in p18b.stdout)
+    check("18: the file is BYTE-IDENTICAL after a second run",
+          open(settings, "rb").read() == after18)
+    with open(settings) as f:
+        check("18: still exactly one shell-hook registration after re-running",
+              cmds(json.load(f), "SessionStart").count(BCS) == 1)
+
+# --- 18b. THE HAND-PLACED ENTRY THIS SCRIPT MUST LEAVE ALONE ------------------
+# 🔴 The host that pioneered the hook carries it with `timeout: 20` and a
+# `statusMessage`, added by hand. Both are keys this script never writes, so it
+# must neither duplicate the registration nor strip the keys — `removable_duplicate`
+# reads any extra hook-level key as somebody else's configuration. A second, BARE
+# copy is added alongside to prove the de-dup identity covers shell hooks too:
+# without it the bare duplicate survives and the hook fires twice per session.
+HANDPLACED = {"hooks": {"SessionStart": [
+    {"hooks": [{"type": "command", "command": BCS,
+                "timeout": 20, "statusMessage": "Checking base-clone staleness..."}]},
+    {"hooks": [{"type": "command", "command": BCS}]},
+]}}
+
+with tempfile.TemporaryDirectory() as tmp:
+    home = os.path.join(tmp, "home")
+    os.makedirs(os.path.join(home, ".claude"))
+    settings = os.path.join(home, ".claude", "settings.json")
+    with open(settings, "w") as f:
+        json.dump(HANDPLACED, f, indent=2)
+
+    env = dict(os.environ)
+    env["HOME"] = home
+    env["DEVRC_HOOK_PYTHON"] = PY
+
+    p18c = run(env)
+    check("18b: run exits 0", p18c.returncode == 0)
+    with open(settings) as f:
+        d18c = json.load(f)
+
+    ss_hooks = [h for e in d18c["hooks"]["SessionStart"] for h in e["hooks"]
+                if "base-clone-staleness.sh" in h.get("command", "")]
+
+    # ⚠ AN INVARIANT GUARD, labelled honestly — NOT regression coverage, and it
+    # was demoted to this label after being mutation-tested rather than assumed.
+    # TWO independent barriers stand in front of it, so no small mutant reaches
+    # it: `_MANAGED_CMD_RE` is anchored on `\.py`, so a `.sh` command cannot match
+    # the python recogniser however the ledgers are edited; and the rewrite pass
+    # raises rather than writing a product it cannot read back. Both mutants that
+    # SHOULD have reached it — widening `normalized_command` to `shell_match`,
+    # with and without adding the `.sh` to MANAGED_HOOK_SCRIPTS — died on that
+    # raise, which is the right failure but a different one.
+    #
+    # It stays because it states the consequence in one line, and the assertion
+    # BELOW it is the one that actually caught both mutants (the file keeps two
+    # unhealed copies when the registrar aborts mid-run).
+    check("18b: the rewrite pass did NOT swap `bash` for a python interpreter",
+          not any(c.endswith(".sh") and c.startswith(PY)
+                  for c in cmds(d18c, "SessionStart")))
+    check("18b: ...and the command is verbatim the one the tables write",
+          [c for c in cmds(d18c, "SessionStart")
+           if "base-clone-staleness.sh" in c] == [BCS])
+
+    check("18b: the bare duplicate is healed away", len(ss_hooks) == 1)
+    check("18b: ...and the survivor is the FIRST entry, keys intact",
+          ss_hooks[:1] == [{"type": "command", "command": BCS, "timeout": 20,
+                            "statusMessage": "Checking base-clone staleness..."}])
+    check("18b: no THIRD copy was appended beside the hand-placed one",
+          cmds(d18c, "SessionStart").count(BCS) == 1)
+
 
 with open(SCRIPT) as f:
     src = f.read()

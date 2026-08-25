@@ -84,6 +84,7 @@ import { uploadAttachment, uploadAttachments } from './api/attachments.mjs';
 
 // Lib imports
 import { executeBatchCreate } from './lib/batch-create.mjs';
+import { validateCond, COND_KINDS } from './lib/agent-marker.mjs';
 import { splitIds, isBulk, bulkExecute, formatBulkResults } from './lib/bulk.mjs';
 import { parseTaskId, parseListId, parseDocId, parsePageId, parseSpaceId } from './lib/parse.mjs';
 import {
@@ -112,6 +113,7 @@ let filterMe = false;
 let assigneeArg = null;
 let dueArg = null;
 let descriptionArg = null;
+let condArg = null;
 let contentArg = null;
 let nameArg = null;
 let parentArg = null;
@@ -147,6 +149,8 @@ for (let i = 0; i < args.length; i++) {
     dueArg = args[++i];
   } else if (arg === '--description' || arg === '--desc') {
     descriptionArg = args[++i];
+  } else if (arg === '--cond') {
+    condArg = args[++i];
   } else if (arg === '--content' || arg === '-c') {
     contentArg = args[++i];
   } else if (arg === '--file' || arg === '-f') {
@@ -205,6 +209,30 @@ function unescapeText(str) {
 contentArg = unescapeText(contentArg);
 descriptionArg = unescapeText(descriptionArg);
 arg2 = unescapeText(arg2);
+
+// Agent-object hygiene: fold --cond into a create's options, validated.
+//
+// 🔴 ONE PLACE, because there is more than one creating command. `create` and
+// `subtask` both stamp (api/tasks.mjs), so both must be able to NAME the closing
+// condition — a creator that structurally cannot is a creator whose objects are
+// all `cond=unstated` no matter how diligent the author, which turns the
+// `unstated` count from a measure of authorial omission into a measure of an
+// interface gap. Validated HERE so an off-allowlist value fails loudly at the
+// CLI instead of degrading somewhere deeper: a wrong condition that reads as
+// accepted is how an object ends up believed-tracked and actually immortal.
+// Omitting --cond is NOT an error: it records cond=unstated and warns.
+function withAgentCond(options) {
+  if (!condArg) return options;
+  try {
+    options.agentCond = validateCond(condArg);
+  } catch (e) {
+    console.error(`Error: ${e.message}`);
+    console.error(`Allowed --cond kinds: ${[...COND_KINDS].sort().join(', ')}`);
+    console.error('Every kind takes an argument; manual takes the NAME of who checks it.');
+    process.exit(1);
+  }
+  return options;
+}
 
 // --file overrides --content: read file contents as the content/text argument
 if (fileArg) {
@@ -334,6 +362,18 @@ Options:
   --attach     File path to upload as attachment (repeatable, for attach/comment)
   --page       Page ID for doc-reply (identifies which page the thread is on)
   --space      Space ID for create-doc (places doc in that space)
+  --cond       Close-condition for a task an agent files (create AND subtask),
+               from the enumerated allowlist (gh_pr_merged:<owner>/<repo>#<n>,
+               alert_cleared:<name>, cmd_exit_zero:<id>, metric_below:<id>,
+               manual:<who>). Recorded in the task body so a later reconciler
+               can close it. 'manual' MUST name who checks it - a bare 'manual'
+               names nobody and is REJECTED, as is anything off-allowlist.
+               'unstated' is REJECTED too: it is what the code records when you
+               named nothing, never something you may claim. Omitting --cond
+               records cond=unstated and warns on stderr, so a task filed with
+               no condition stays countable instead of looking compliant.
+               batch-create takes the same value per task as a 'cond' key (and
+               per subtask), validated before ANY task is created.
 
 Bulk Operations (comma-separated IDs):
   node query.mjs get id1,id2,id3              Fetch multiple tasks at once
@@ -1083,6 +1123,10 @@ async function main() {
           // while comments use JSON array format (we parse via markdownToClickUp)
           options.markdown_description = descriptionArg;
         }
+        // Agent-object hygiene: an explicit close-condition for the marker
+        // createTask() stamps. See withAgentCond() — one validator, both
+        // creating commands.
+        withAgentCond(options);
         if (dueArg) {
           const dueDate = parseDateInput(dueArg);
           options.due_date = dueDate.getTime();
@@ -1305,7 +1349,10 @@ async function main() {
           console.error('Usage: node query.mjs subtask <task> "Subtask title"');
           process.exit(1);
         }
-        const subtask = await createSubtask(taskId, arg2);
+        // A subtask is a created object like any other: it gets stamped, so it
+        // must be able to name what closes it. Without --cond here every
+        // subtask this CLI files is `cond=unstated` by construction.
+        const subtask = await createSubtask(taskId, arg2, withAgentCond({}));
         if (jsonOutput) {
           console.log(JSON.stringify(subtask, null, 2));
         } else {

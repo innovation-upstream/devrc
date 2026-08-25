@@ -58,11 +58,14 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
 import time
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = REPO_ROOT / "scripts"
@@ -1024,6 +1027,670 @@ def test_a_repo_local_change_still_FAILS_when_no_cotenant_is_proven(tmp_path):
         f"blind spot is not named:\n{block}")
     assert str(scratch / ".git" / "config") in block, (
         f"the failure did not NAME the file that changed:\n{block}\n---\n{out}")
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE ATTRIBUTION MESSAGE — WHAT MOVED, AND WHICH HYPOTHESIS IT SUPPORTS
+# --------------------------------------------------------------------------- #
+# MEASURED 2026-08-23 on the operator's box: GUARD 10 flagged `<devrc>/.git/config`
+# FOUR separate times in one day and each time the message named whichever target
+# was in teardown ("…so the change is attributed to this target"). Every one of
+# those writes was a concurrent `git branch` / `worktree add` in the shared clone.
+# Cost: a four-run experiment by one agent and a diagnosis pass by the operator,
+# all of it auditing tests that had done nothing.
+#
+# The DETECTION is deliberately unchanged — an unattributable repo-local delta
+# still fails the run, and the controls below pin that in both directions. What
+# these tests pin is the MESSAGE: the key names that moved, and a ranking that
+# follows them rather than always landing on the target.
+#
+# WHAT IS REGRESSION COVERAGE HERE AND WHAT IS NOT:
+#   * `test_an_ORDINARY_git_delta_does_not_blame_the_target` is THE regression
+#     test. Base prints the accusatory sentence and no key delta at all.
+#   * the HAZARD, VALUE and NOT-VISIBLE tests are NEGATIVE CONTROLS on the
+#     ranking, the redaction and the empty list. They are red at base only
+#     because base emits none of this; the behaviour they defend is "the fix did
+#     not overshoot into always excusing the target", "a config VALUE is never
+#     printed", and "an unobservable delta says so instead of rendering blank".
+
+def _plant_repo_local_keys(scratch: Path, *pairs: tuple[str, str]) -> str:
+    """A shell target that writes specific KEYS into the scratch clone's config.
+
+    Same no-shebang convention as `_plant_repo_local_write` above, and for the
+    same reason: `run-tests.sh` invokes SHELL_TESTS as `bash "$SHELL_TEST"`.
+
+    🔴 BOTH SIDES GO THROUGH `shlex.quote`. They were interpolated bare, which
+    was correct for the values in use and silently wrong for anything carrying
+    a space, a glob or a `!` — the planter would then write something other
+    than what its caller asked for and the test would pass or fail for a reason
+    nobody could see. `submodule.<n>.update = !cmd` is exactly such a value.
+    """
+    name = "g10-write-keys.sh"
+    body = "set -euo pipefail\n" + "".join(
+        f'git -C {shlex.quote(str(scratch))} config {shlex.quote(k)} '
+        f'{shlex.quote(v)}\n' for k, v in pairs)
+    (scratch / name).write_text(body, encoding="utf-8")
+    return name
+
+
+def test_an_ORDINARY_git_delta_does_not_blame_the_target(tmp_path):
+    """🔴 THE REGRESSION TEST for the four misattributions of 2026-08-23.
+
+    `branch.<name>.remote` / `.merge` appearing in a clone's SHARED config is
+    what `git branch --track`, `checkout -b --track` and `push -u` write. The
+    run must still FAIL — that is the guard's job and it is unchanged — but the
+    message must name the keys and rank the concurrent writer FIRST, instead of
+    telling the reader the target did it.
+    """
+    scratch = _scratch_root(tmp_path)
+    name = _plant_repo_local_keys(
+        scratch,
+        ("branch.topic-x.remote", "origin"),
+        ("branch.topic-x.merge", "refs/heads/topic-x"))
+    runner = _runner_over(tmp_path, scratch, [name])
+
+    assert not live_cotenants([scratch / ".git"]), (
+        "something is already sitting in this scratch root, so this run would "
+        "take the DOWNGRADE arm and measure a different message")
+    proc = _run_at(runner, scratch, tmp_path)
+    out = proc.stdout + proc.stderr
+
+    # 🔴 THE DETECTION IS UNCHANGED. Without this the whole fix is satisfied by
+    # a patch that simply stops failing, which is the outcome the message was
+    # annoying enough to tempt someone into.
+    assert proc.returncode != 0, (
+        f"the run PASSED — the message fix silently disarmed the guard:\n{out}")
+
+    block = _guard10_failure_block(out)
+    assert block, f"GUARD 10's failure block was not printed at all:\n{out}"
+    # The sentence that was wrong four times. Its absence is the fix.
+    assert "attributed to this target" not in block, (
+        f"the failure still hands the reader a VERDICT it cannot support:\n{block}")
+    assert "WINDOW, NOT A CULPRIT" in block, (
+        f"the failure did not say the target is the window rather than the "
+        f"writer:\n{block}")
+    # 🔴 The keys themselves, in GUARD 10's block — not merely somewhere in the
+    # run. Same reason `_guard10_failure_block` exists.
+    assert "+ branch.topic-x.remote" in block, (
+        f"the failure did not name the key that moved:\n{block}")
+    assert "+ branch.topic-x.merge" in block, (
+        f"the failure named only one of the two keys that moved:\n{block}")
+    assert "SHAPE: ORDINARY GIT" in block, (
+        f"the failure did not classify the delta's shape:\n{block}")
+    assert "LEADING hypothesis is a concurrent git command" in block, (
+        f"the failure did not rank the concurrent writer first:\n{block}")
+    # A ranking, never a clearance — the probe proved nothing either way.
+    assert "RANKING, not a verdict" in block, (
+        f"the failure presented its ranking as a finding:\n{block}")
+    assert "worktree list" in block, (
+        f"the failure did not hand over the discriminator for the blind spot it "
+        f"just admitted to:\n{block}")
+
+
+def test_a_HAZARD_shaped_delta_still_points_at_the_target(tmp_path):
+    """🔴 NEGATIVE CONTROL ON THE RANKING — the fix must not overshoot.
+
+    `core.hooksPath` written into a clone's config is the 2026-08-21 incident
+    itself. If the new wording led with "the target is the window, not a
+    culprit" here it would have traded one confident misdiagnosis for its
+    mirror image, and the guard's whole reason for existing reads as noise.
+    """
+    scratch = _scratch_root(tmp_path)
+    name = _plant_repo_local_keys(
+        scratch, ("core.hooksPath", "/tmp/planted-by-a-test"))
+    runner = _runner_over(tmp_path, scratch, [name])
+
+    proc = _run_at(runner, scratch, tmp_path)
+    out = proc.stdout + proc.stderr
+    assert proc.returncode != 0, (
+        f"a core.hooksPath write into the clone's config PASSED:\n{out}")
+
+    block = _guard10_failure_block(out)
+    assert block, f"GUARD 10's failure block was not printed at all:\n{out}"
+    # git lower-cases key names in `--list`; pin what is actually printed.
+    assert "+ core.hookspath" in block, (
+        f"the failure did not name the key that moved:\n{block}")
+    assert "SHAPE: HAZARD" in block, (
+        f"the incident's own key shape was not classified as a hazard:\n{block}")
+    assert "AUDIT THIS TARGET FIRST" in block, (
+        f"the failure did not send the reader to the target:\n{block}")
+    assert "WINDOW, NOT A CULPRIT" not in block, (
+        f"the failure led with the concurrent-writer excuse on a delta that is "
+        f"the 2026-08-21 incident's own shape:\n{block}")
+
+
+def test_the_key_delta_never_prints_a_config_VALUE(tmp_path):
+    """🔴 NEGATIVE CONTROL ON REDACTION, with its positive control beside it.
+
+    `<git-common-dir>/config` holds `remote.<name>.url`, which on some clones
+    carries a token, and this output lands in CI logs. The rendering prints key
+    NAMES only — so a value-only change must still surface (positive control:
+    the key name appears, marked `~`) while the value must not appear ANYWHERE
+    in the run's output, not merely outside GUARD 10's block.
+    """
+    scratch = _scratch_root(tmp_path)
+    secret = "s3cr3t-token-that-must-never-be-printed"
+    seed = subprocess.run(
+        ["git", "-C", str(scratch), "config", "remote.origin.url",
+         "https://example.invalid/before"],
+        capture_output=True, text=True, timeout=120)
+    assert seed.returncode == 0, f"could not seed the remote URL:\n{seed.stderr}"
+    name = _plant_repo_local_keys(
+        scratch, ("remote.origin.url", f"https://example.invalid/{secret}"))
+    runner = _runner_over(tmp_path, scratch, [name])
+
+    proc = _run_at(runner, scratch, tmp_path)
+    out = proc.stdout + proc.stderr
+
+    # Positive control: the write really landed, so a clean output below is
+    # about the RENDERING and not about a write that never happened.
+    assert secret in (scratch / ".git" / "config").read_text(encoding="utf-8"), (
+        "the planted value never reached the config — this run proves nothing")
+    block = _guard10_failure_block(out)
+    assert block, f"GUARD 10's failure block was not printed at all:\n{out}"
+    assert "~ remote.origin.url" in block, (
+        f"a VALUE-only change did not surface as a moved key:\n{block}")
+    assert secret not in out, (
+        "a git config VALUE was printed into the run's output")
+
+
+def test_bytes_that_move_with_no_key_delta_SAY_SO(tmp_path):
+    """🔴 AN EMPTY LIST WOULD BE A CLAIM ABOUT THE FILE, NOT THE PARSE.
+
+    A comment appended to `.git/config` moves the bytes the tripwire hashes and
+    changes nothing `git config --list` reports. Rendering that as an empty
+    "keys that moved" list reads as "nothing identifiable changed" — which is
+    the same shape of confident silence this whole fix exists to remove.
+    """
+    scratch = _scratch_root(tmp_path)
+    name = "g10-comment.sh"
+    (scratch / name).write_text(
+        "set -euo pipefail\n"
+        f'printf "\\t# planted by a test\\n" >> "{scratch}/.git/config"\n',
+        encoding="utf-8")
+    runner = _runner_over(tmp_path, scratch, [name])
+
+    proc = _run_at(runner, scratch, tmp_path)
+    out = proc.stdout + proc.stderr
+    assert proc.returncode != 0, (
+        f"a byte-level change to the clone's config PASSED:\n{out}")
+
+    block = _guard10_failure_block(out)
+    assert block, f"GUARD 10's failure block was not printed at all:\n{out}"
+    assert "NOT VISIBLE" in block, (
+        f"a delta with no visible keys rendered as an empty list:\n{block}")
+    assert "no key-level delta was visible" in block, (
+        f"the failure did not say WHY the key list is empty:\n{block}")
+    assert "SHAPE: UNRECOGNISED" in block, (
+        f"an unobservable delta was ranked instead of declared unrankable:"
+        f"\n{block}")
+
+
+def test_the_DOWNGRADED_block_also_carries_the_key_delta(tmp_path):
+    """The reader's question is the same whether the run failed or not.
+
+    A downgrade answers "this will not fail you"; it does not answer "who wrote
+    it". The rows are already recorded, so withholding them here would leave the
+    #730 arm — the common one on the operator's box — as uninformative as the
+    message this change replaced.
+    """
+    scratch = _scratch_root(tmp_path)
+    name = _plant_repo_local_keys(scratch, ("branch.topic-y.remote", "origin"))
+    runner = _runner_over(tmp_path, scratch, [name])
+
+    with _cotenant(scratch):
+        proc = _run_at(runner, scratch, tmp_path)
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 0, (
+        f"a repo-local change with a PROVEN external writer failed the run — "
+        f"this test is measuring the wrong arm:\n{out}")
+
+    head = "---- repo-local git config: REPORTED, not enforced (#730) ----"
+    tail = "This file is the git COMMON dir's config"
+    assert head in out and tail in out, (
+        f"the downgrade block was not printed as expected:\n{out}")
+    block = out.split(head, 1)[1].split(tail, 1)[0]
+    assert "+ branch.topic-y.remote" in block, (
+        f"the downgrade block did not say WHICH key moved:\n{block}")
+    assert "SHAPE: ORDINARY GIT" in block, (
+        f"the downgrade block did not classify the delta's shape:\n{block}")
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE #773 AUDIT ROUND — the reassuring lead was reachable from three states
+# --------------------------------------------------------------------------- #
+# The first cut of the lead selection branched on `hazard` alone, so BOTH other
+# states fell through to "THE TARGET NAMED HERE IS THE WINDOW, NOT A CULPRIT":
+#
+#   * a MIXED run, where a GLOBAL file also changed. `_nogit_shape_for` returns
+#     `none` for a global file — there are no key rows for one — so the shape
+#     aggregation structurally could not see it, and the one class that is
+#     ALWAYS attributable got the excuse. The comment above the loop claimed the
+#     opposite of what the code did.
+#   * an UNRECOGNISED delta, which the classifier's own header says must be
+#     "ranked as NEITHER". It fired on `devrc-g10.planted` — this file's own
+#     fixture for a test escaping isolation — printing "NOT A CULPRIT" directly
+#     above "this run cannot rank the two hypotheses".
+#
+# The audit's mutation sweep also found two advertised arms unpinned: deleting
+# the whole `remote.*.url|pushurl` hazard clause SURVIVED, and flipping the
+# `unrecognised` fall-through to `ordinary` SURVIVED. Both are covered below.
+
+def test_a_MIXED_global_and_repo_local_delta_leads_with_the_GLOBAL_class(tmp_path):
+    """🔴 REGRESSION for #773's first audit finding. RED at a7499d67.
+
+    A target that writes `core.hooksPath` into a scratch `~/.gitconfig` AND one
+    `branch.*` key into the clone. The global write is attributable by
+    construction — no concurrent worktree operation touches the operator's
+    global config — so the lead must send the reader at the target, not excuse
+    it. Before this round the very same run led with NOT A CULPRIT.
+    """
+    scratch = _scratch_root(tmp_path)
+    home = tmp_path / "scratch-home"
+    home.mkdir(parents=True, exist_ok=True)
+    (home / ".gitconfig").write_text("[user]\n\tname = before\n", encoding="utf-8")
+    name = "g10-mixed.sh"
+    (scratch / name).write_text(
+        "set -euo pipefail\n"
+        f'git -C "{scratch}" config branch.topic-m.remote origin\n'
+        "env -u GIT_CONFIG_GLOBAL -u GIT_CONFIG_SYSTEM -u GIT_CONFIG_NOSYSTEM "
+        f'HOME="{home}" git config --global core.hooksPath /tmp/planted-by-a-test\n',
+        encoding="utf-8")
+    runner = _runner_over(tmp_path, scratch, [name])
+
+    env = {**os.environ, **_unguarded_home(tmp_path), "HOME": str(home)}
+    for k, v in list(env.items()):
+        if v is None:
+            del env[k]
+    proc = subprocess.run(["bash", str(runner), str(scratch)], capture_output=True,
+                          text=True, timeout=900, cwd=str(REPO_ROOT), env=env)
+    out = proc.stdout + proc.stderr
+    assert proc.returncode != 0, f"a mixed global + repo-local run PASSED:\n{out}"
+
+    block = _guard10_failure_block(out)
+    assert block, f"GUARD 10's failure block was not printed at all:\n{out}"
+    # Positive control: BOTH classes really are in this failure. Without it a
+    # green here could just mean the global write never landed.
+    assert "global-enforced" in block, (
+        f"the global write never reached the failure — this run is not the "
+        f"mixed case it claims to measure:\n{block}")
+    assert "repo-local-enforced" in block, (
+        f"the repo-local write never reached the failure:\n{block}")
+    assert "GLOBAL ONE, WHICH *IS* ATTRIBUTABLE" in block, (
+        f"the mixed run did not lead with the attributable class:\n{block}")
+    assert "AUDIT THIS TARGET FIRST" in block, (
+        f"the mixed run did not send the reader at the target:\n{block}")
+    assert "WINDOW, NOT A CULPRIT" not in block, (
+        f"the mixed run excused the target while the operator's GLOBAL config "
+        f"was being rewritten — this is #773's first audit finding:\n{block}")
+
+
+def test_an_UNRECOGNISED_delta_is_ranked_as_NEITHER_in_the_HEADLINE(tmp_path):
+    """🔴 REGRESSION for #773's second audit finding. RED at a7499d67.
+
+    `_nogit_delta_shape`'s header says an unknown key "must not be laundered
+    into 'probably concurrent'". The per-file line honoured that; the HEADLINE
+    did not, so the two contradicted each other on the same screen — and the
+    key that triggers it here is `devrc-g10.planted`, this file's own model of a
+    fixture write escaping isolation.
+    """
+    scratch = _scratch_root(tmp_path)
+    name = _plant_repo_local_write(scratch)          # writes devrc-g10.planted
+    runner = _runner_over(tmp_path, scratch, [name])
+
+    proc = _run_at(runner, scratch, tmp_path)
+    out = proc.stdout + proc.stderr
+    assert proc.returncode != 0, f"an unrecognised repo-local delta PASSED:\n{out}"
+
+    block = _guard10_failure_block(out)
+    assert block, f"GUARD 10's failure block was not printed at all:\n{out}"
+    assert "+ devrc-g10.planted" in block, (
+        f"the failure did not name the key that moved:\n{block}")
+    assert "SHAPE: UNRECOGNISED" in block, (
+        f"an unknown key was classified rather than declined:\n{block}")
+    assert "CANNOT RANK THE TWO HYPOTHESES" in block, (
+        f"the headline ranked a delta the classifier declined to rank:\n{block}")
+    assert "WINDOW, NOT A CULPRIT" not in block, (
+        f"the headline handed the reader the reassuring lead over an "
+        f"unrecognised key — this is #773's second audit finding:\n{block}")
+
+
+@pytest.mark.parametrize("key,value", [
+    ("remote.origin.url", "https://example.invalid/x"),
+    ("remote.origin.pushurl", "https://example.invalid/y"),
+    ("remote.origin.uploadpack", "/tmp/planted-uploadpack"),
+    ("remote.origin.receivepack", "/tmp/planted-receivepack"),
+    ("submodule.mod.update", "!/tmp/planted-update"),
+])
+def test_remote_and_submodule_COMMAND_and_URL_keys_rank_HAZARD(tmp_path, key, value):
+    """🔴 THE ARM THE AUDIT'S SWEEP FOUND UNPINNED — one case per key.
+
+    🔴 THE PARAMS SPLIT INTO TWO DIFFERENT CLAIMS AND THE LABEL MATTERS.
+    MEASURED at a7499d67: `url` and `pushurl` PASS there, the other three FAIL.
+
+      * `uploadpack`, `receivepack`, `submodule.<n>.update` are REGRESSION
+        coverage. They ranked ORDINARY at a7499d67 — the reassuring arm — while
+        being exactly the arbitrary-command-execution keys a test escaping
+        isolation would write. `remote.*` was an unanchored prefix.
+      * `url` and `pushurl` are MUTATION coverage, NOT regression coverage. The
+        hazard clause already covered them; deleting it whole nonetheless
+        SURVIVED the previous round's suite, because the only test that wrote
+        such a key asserted the key name and the redaction and never the shape.
+        Counting these two as regression coverage would be a coverage claim
+        nobody measured.
+
+    Parametrized so a single surviving key cannot hide behind its siblings.
+    """
+    scratch = _scratch_root(tmp_path)
+    name = _plant_repo_local_keys(scratch, (key, value))
+    runner = _runner_over(tmp_path, scratch, [name])
+
+    proc = _run_at(runner, scratch, tmp_path)
+    out = proc.stdout + proc.stderr
+    assert proc.returncode != 0, f"a {key} write PASSED:\n{out}"
+
+    block = _guard10_failure_block(out)
+    assert block, f"GUARD 10's failure block was not printed at all:\n{out}"
+    assert f"+ {key}" in block, (
+        f"the failure did not name {key}:\n{block}")
+    assert "SHAPE: HAZARD" in block, (
+        f"{key} was not ranked as a hazard — it names a remote or executes a "
+        f"command, and nothing routine writes it into an existing clone:\n{block}")
+    assert "WINDOW, NOT A CULPRIT" not in block, (
+        f"{key} got the reassuring lead:\n{block}")
+
+
+def test_a_key_with_a_SPACE_survives_the_fold_and_still_ranks_HAZARD(tmp_path):
+    """🔴 A git key can contain a SPACE, and the fold used to eat it.
+
+    `[remote "my name"]` is legal — `git config 'remote.my name.url' <u>` exits
+    0 — and `git submodule add <url> "my dir"` produces the same shape. Folding
+    the `--list -z` output on a SPACE truncated the key to `remote.my`: a key
+    that does not exist, ungreppable, and one the `remote\\..*\\.url$` hazard
+    clause cannot match. The single key this guard names as the token-bearing
+    hazard was the one a space defeated.
+    """
+    scratch = _scratch_root(tmp_path)
+    name = "g10-spacekey.sh"
+    (scratch / name).write_text(
+        "set -euo pipefail\n"
+        f"git -C \"{scratch}\" config 'remote.my name.url' "
+        "'https://example.invalid/spaced'\n",
+        encoding="utf-8")
+    runner = _runner_over(tmp_path, scratch, [name])
+
+    proc = _run_at(runner, scratch, tmp_path)
+    out = proc.stdout + proc.stderr
+    # Positive control: git really accepted the spaced subsection, so a pass
+    # below is about the fold and not about a write that never happened.
+    assert "my name" in (scratch / ".git" / "config").read_text(encoding="utf-8"), (
+        "git did not write the spaced subsection — this run proves nothing")
+    assert proc.returncode != 0, f"a spaced-key write PASSED:\n{out}"
+
+    block = _guard10_failure_block(out)
+    assert block, f"GUARD 10's failure block was not printed at all:\n{out}"
+    assert "+ remote.my name.url" in block, (
+        f"the key was truncated at its space instead of printed whole:\n{block}")
+    assert "SHAPE: HAZARD" in block, (
+        f"a spaced remote URL key escaped the hazard rule:\n{block}")
+
+
+def test_a_LARGE_delta_still_reaches_the_hazard_arm(tmp_path):
+    """🔴 SIGPIPE + `set -o pipefail` silently sent every large delta to the
+    REASSURING arm. RED at a7499d67.
+
+    `printf '%s\\n' "$delta" | grep -q …`: `grep -q` exits on the first match,
+    `printf` then takes SIGPIPE (141), and `pipefail` reports the PIPELINE as
+    141 — so the `if` goes FALSE even though the pattern matched. Both greps
+    fell through and `_nogit_delta_shape` returned `ordinary`. The audit
+    measured the cliff between 5001 lines (still correct) and 8001 (wrong),
+    reproducible 10/10; herestrings remove the pipeline entirely.
+
+    🔴 THE HAZARD KEY MUST SORT EARLY, and getting that wrong is how this test
+    first shipped green at base while proving nothing. `_nogit_key_delta` ends
+    in `sort -k2`, so a `core.*` key lands AFTER 15000 `bigsect.*` lines —
+    `grep -q` then reads almost the whole input, never exits early, and the
+    SIGPIPE never happens. Measured: that version PASSED at a7499d67. The key
+    here is `alias.*` — also in the hazard set, and it sorts before everything
+    else in the fixture, so `grep -q` matches on the first line and abandons
+    ~300 KB of unread input. That is the shape the bug needs.
+    """
+    scratch = _scratch_root(tmp_path)
+    name = "g10-bigdelta.sh"
+    cfg = scratch / ".git" / "config"
+    (scratch / name).write_text(
+        "set -euo pipefail\n"
+        f'cfg={shlex.quote(str(cfg))}\n'
+        '{ echo "[alias]"; echo "\tplantedcmd = !/tmp/planted-by-a-test"\n'
+        '  echo "[bigsect]"\n'
+        '  i=0; while [ "$i" -lt 15000 ]; do echo "\tkey$i = v$i"; i=$((i+1)); done\n'
+        '} >> "$cfg"\n',
+        encoding="utf-8")
+    runner = _runner_over(tmp_path, scratch, [name])
+
+    proc = _run_at(runner, scratch, tmp_path)
+    out = proc.stdout + proc.stderr
+    # Positive control: the delta really is past the cliff, so a pass below is
+    # about the pipeline and not about a fixture that stayed small.
+    entries = cfg.read_text(encoding="utf-8").count("key")
+    assert entries >= 15000, (
+        f"the fixture only produced {entries} keys — too small to reach the "
+        f"measured SIGPIPE cliff, so this run proves nothing")
+    assert proc.returncode != 0, f"a 15000-key config delta PASSED:\n{out[-3000:]}"
+
+    block = _guard10_failure_block(out)
+    assert block, f"GUARD 10's failure block was not printed at all:\n{out[-3000:]}"
+    assert "+ alias.plantedcmd" in block, (
+        f"the hazard key was not listed among the 15000:\n{block[:2000]}")
+    assert "SHAPE: HAZARD" in block, (
+        f"an alias.* write at the head of a large delta was ranked as "
+        f"something other than a hazard — SIGPIPE swallowed the match:"
+        f"\n{block[:2000]}")
+    assert "WINDOW, NOT A CULPRIT" not in block, (
+        f"a large delta carrying an alias.* command got the reassuring lead:"
+        f"\n{block[:2000]}")
+
+
+def test_a_LARGE_unrecognised_delta_is_not_flattened_to_ORDINARY(tmp_path):
+    """🔴 THE MIRROR OF THE TEST ABOVE, AND THE SWEEP IS WHY IT EXISTS.
+
+    `_nogit_delta_shape` has TWO `grep -q` calls and the test above only reaches
+    the first. Mutating the SECOND back to `printf | grep -q` SURVIVED a fully
+    green run: nothing exercised a large delta that gets PAST the hazard arm.
+
+    That path is the more dangerous one. `grep -qv ORDINARY` matches on the
+    first non-ordinary line, `printf` takes SIGPIPE, `pipefail` reports 141, the
+    `if` goes false and the function falls through to `ordinary` — so a delta of
+    15000 keys the classifier does not recognise would be announced as ordinary
+    git activity with the target ranked SECOND. Unknown keys laundered into the
+    reassuring arm, in bulk.
+
+    `aaasect.*` is neither ordinary nor hazard and sorts first, so the `-qv`
+    match happens on line one and abandons the rest.
+    """
+    scratch = _scratch_root(tmp_path)
+    name = "g10-bigunknown.sh"
+    cfg = scratch / ".git" / "config"
+    (scratch / name).write_text(
+        "set -euo pipefail\n"
+        f'cfg={shlex.quote(str(cfg))}\n'
+        '{ echo "[aaasect]"\n'
+        '  i=0; while [ "$i" -lt 15000 ]; do echo "\tkey$i = v$i"; i=$((i+1)); done\n'
+        '} >> "$cfg"\n',
+        encoding="utf-8")
+    runner = _runner_over(tmp_path, scratch, [name])
+
+    proc = _run_at(runner, scratch, tmp_path)
+    out = proc.stdout + proc.stderr
+    entries = cfg.read_text(encoding="utf-8").count("key")
+    assert entries >= 15000, (
+        f"the fixture only produced {entries} keys — too small to reach the "
+        f"measured SIGPIPE cliff, so this run proves nothing")
+    assert proc.returncode != 0, f"a 15000-key config delta PASSED:\n{out[-3000:]}"
+
+    block = _guard10_failure_block(out)
+    assert block, f"GUARD 10's failure block was not printed at all:\n{out[-3000:]}"
+    assert "+ aaasect.key0" in block, (
+        f"the unknown keys were not listed:\n{block[:2000]}")
+    assert "SHAPE: UNRECOGNISED" in block, (
+        f"15000 unknown keys were classified as something the runner claims to "
+        f"recognise — the ordinary grep's match was swallowed:\n{block[:2000]}")
+    assert "CANNOT RANK THE TWO HYPOTHESES" in block, (
+        f"the headline ranked a delta of unknown keys:\n{block[:2000]}")
+
+
+def test_the_hazard_message_NAMES_the_family_the_key_belongs_to(tmp_path):
+    """🔴 THE PROSE-CONTRADICTS-CODE BUG, RE-INSTATED BY THE FIX ROUND ITSELF.
+
+    After the hazard regex widened to cover `remote.*.uploadpack` and friends,
+    the sentence the operator READS still enumerated the pre-widening families,
+    so a real finding was explained by a list that excluded it. The ledger test
+    pins the string; this pins that the string is what actually gets PRINTED
+    beside the key — a ledger nobody renders is still a ledger nobody reads.
+    """
+    scratch = _scratch_root(tmp_path)
+    name = _plant_repo_local_keys(
+        scratch, ("remote.origin.uploadpack", "/tmp/planted-uploadpack"))
+    runner = _runner_over(tmp_path, scratch, [name])
+
+    proc = _run_at(runner, scratch, tmp_path)
+    out = proc.stdout + proc.stderr
+    block = _guard10_failure_block(out)
+    assert block, f"GUARD 10's failure block was not printed at all:\n{out}"
+    assert "SHAPE: HAZARD" in block, f"the key was not ranked hazard:\n{block}"
+    assert "uploadpack" in block.split("SHAPE: HAZARD", 1)[1], (
+        f"the HAZARD explanation does not name the family the key that "
+        f"triggered it belongs to — the reader is handed a list that excludes "
+        f"their own finding:\n{block}")
+    # The routine writer of the one hazard key an ordinary git command produces.
+    assert "git submodule init" in block, (
+        f"the hazard arm does not name the routine writer of "
+        f"submodule.<n>.url/.update, so a submodule-bearing repo gets "
+        f"'AUDIT THIS TARGET FIRST' with no way to discriminate:\n{block}")
+
+
+def test_an_ABORTED_run_still_shreds_the_config_snapshots(tmp_path):
+    """🔴 THE SNAPSHOTS HOLD REAL CONFIG VALUES; A KILLED RUN USED TO KEEP THEM.
+
+    `$NOGIT_DIR/keys-{before,after}.N` are full `key<TAB>value` dumps of the
+    operator's real `<git-common-dir>/config` — `remote.origin.url` included.
+    Cleanup lived only on the normal path, so every TERM/INT/abort left them on
+    disk. Moving it into the EXIT trap fixed that, and the delta re-audit then
+    showed the fix was UNPINNED: deleting the `rm -rf` left the whole file
+    green. A guard nobody can break is a guard nobody is testing.
+
+    🔴 THE MATRIX, STATED SO THE LABEL IS NOT INFERRED. RED at `a7499d67`
+    (measured: the dir "survived a TERM"), GREEN at `089883d8` — because the
+    trap fix already landed there. So against 089883d8 this is MUTATION
+    coverage for an unpinned fix, not regression coverage; it is regression
+    coverage only relative to a7499d67.
+
+    Also asserts the verdict still prints and rc is still 143 — the cleanup runs
+    AFTER `_emit_verdict` precisely so it cannot swallow either.
+    """
+    scratch = _scratch_root(tmp_path)
+    name = _plant_repo_local_keys(scratch, ("branch.topic-abort.remote", "origin"))
+    runner = _runner_over(tmp_path, scratch, [name])
+
+    env = {**os.environ, **_unguarded_home(tmp_path)}
+    for k, v in list(env.items()):
+        if v is None:
+            del env[k]
+    proc = subprocess.Popen(["bash", str(runner), str(scratch)],
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True, cwd=str(REPO_ROOT), env=env)
+    nogit_dir = None
+    assert proc.stdout is not None
+    captured = []
+    for line in proc.stdout:                      # read until the dir is named
+        captured.append(line)
+        if "GIT_CONFIG_GLOBAL=" in line:
+            nogit_dir = Path(line.split("GIT_CONFIG_GLOBAL=", 1)[1].strip()).parent
+            break
+    assert nogit_dir is not None, (
+        "the runner never announced its isolated config, so this test never "
+        "learned which directory to watch:\n" + "".join(captured))
+    # Positive control: the thing we are about to assert is GONE must first be
+    # THERE. Without it a passing test is indistinguishable from watching a
+    # directory that was never created.
+    assert nogit_dir.is_dir(), f"{nogit_dir} does not exist to begin with"
+
+    proc.terminate()
+    rest = proc.stdout.read()
+    proc.wait(timeout=120)
+    out = "".join(captured) + rest
+
+    assert not nogit_dir.exists(), (
+        f"{nogit_dir} survived a TERM. It holds key<TAB>value dumps of the "
+        f"operator's real git config:\n{sorted(p.name for p in nogit_dir.iterdir())}")
+    assert "RESULT: FAIL (exit=143)" in out, (
+        f"the cleanup ran but the verdict did not survive it:\n{out[-1500:]}")
+    assert proc.returncode == 143, (
+        f"the EXIT trap changed the process status: {proc.returncode}")
+
+
+def test_the_shape_ledger_is_pinned_two_way():
+    """🔴 THE CLASSIFIER'S TWO SETS ARE A LEDGER, not prose plus a regex.
+
+    Same shape this repo already uses for `EXPECTED_PLUGINS`, `TARGET_FLOORS`
+    and drift-check's phase-2 reason tokens. The sets decide which writes get
+    the reassuring headline, so silently widening `ordinary` — or narrowing
+    `hazard` — must fail the suite, not merely change a message nobody reads
+    until the next incident.
+
+    Both directions: a token added to the runner and not here fails, and a
+    token removed from the runner while still listed here fails.
+    """
+    src = RUN_TESTS.read_text(encoding="utf-8")
+
+    def _assignment(name: str) -> str:
+        m = re.search(rf"^{name}='([^']*)'$", src, re.M)
+        assert m, (
+            f"{name} is not a single-quoted one-line assignment in "
+            f"run-tests.sh any more — this ledger cannot read it, so it is "
+            f"pinning nothing. Re-point it or restore the shape.")
+        return m.group(1)
+
+    assert _assignment("NOGIT_HAZARD_KEYS") == (
+        r"^[+~-] (core|user|url|http|credential|include|includeif|alias)\."
+        r"|^[+~-] (remote|submodule)\..*\.(url|pushurl|uploadpack|receivepack|proxy|update)$"
+    ), ("the HAZARD key set moved. Every key it drops starts getting the "
+        "'concurrent writer is the leading hypothesis' headline instead of "
+        "'AUDIT THIS TARGET FIRST'. Update this ledger in the SAME commit, and "
+        "add a behavioural case for the new key.")
+
+    assert _assignment("NOGIT_ORDINARY_KEYS") == (
+        r"^[+~-] (branch|remote|worktree|submodule|maintenance)\."
+        r"|^[+~-] extensions\.worktreeconfig$"
+    ), ("the ORDINARY key set moved. Every key it gains gets the reassuring "
+        "headline. Update this ledger in the SAME commit.")
+
+    # 🔴 THE READER-FACING RENDERING IS PART OF THE LEDGER, and the #773 delta
+    # re-audit is why. The hazard message used to RETYPE the family list, and
+    # after the regex widened it still named the pre-widening set: a
+    # `remote.origin.uploadpack` finding was explained as "core.* / user.* /
+    # url.* / …", none of which it is. Prose contradicting the code it describes
+    # is the defect class this whole branch exists to close.
+    families = _assignment("NOGIT_HAZARD_FAMILIES")
+    assert families == (
+        "core.* / user.* / url.* / http.* / credential.* / include* / alias.*, "
+        "or any remote.*/submodule.* key whose last component is url / pushurl "
+        "/ uploadpack / receivepack / proxy / update"
+    ), ("the hazard set's READER-FACING rendering moved. It is what the operator "
+        "is shown when a run fails; keep it in step with NOGIT_HAZARD_KEYS.")
+
+    # And the half that catches real drift rather than an edit to this file:
+    # every family the prose NAMES must actually occur in the regex. A widened
+    # regex with a stale sentence passes the literal pin above (nobody touched
+    # the sentence) and fails here only if the sentence names something the
+    # regex dropped — so this is the direction that decays silently.
+    connectives = {"or", "any", "key", "whose", "last", "component", "is"}
+    named = {w for w in re.findall(r"[a-z]+", families)} - connectives
+    missing = sorted(w for w in named if w not in _assignment("NOGIT_HAZARD_KEYS"))
+    assert not missing, (
+        f"NOGIT_HAZARD_FAMILIES names {missing}, which NOGIT_HAZARD_KEYS does "
+        f"not match. The operator is being told this guard catches a key family "
+        f"it does not catch.")
 
 
 def test_a_global_change_FAILS_even_with_a_cotenant_PROVEN(tmp_path):
