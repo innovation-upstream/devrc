@@ -5819,8 +5819,51 @@ def test_default_knobs_do_not_throttle_normal_use():
 # --------------------------------------------------------------------------- #
 BROWSER_BIN = Path(__file__).resolve().parent.parent / "browser"
 
+# 🔴 A TEST'S SAFETY-NET TIMEOUT MUST NOT BE TIGHTER THAN THE BOUND OF THE THING IT
+# INVOKES. The CLI bounds its own HTTP call at `curl -m 60`; every CLI-spawning test
+# here used `timeout=30`, i.e. the test's net always fired FIRST. A stall therefore
+# surfaced as an opaque subprocess.TimeoutExpired instead of the CLI's own
+# attributable error — and, being wall-clock, it flaked under CI load: measured
+# 2026-08-25, `test_browser_cli_backs_off_on_429` failed exactly this way in the
+# devrc-pytests gate while the SAME nix derivation
+# (9cvfsmpjq6ip5yiv51mk8mf1f9zazpdz) built green locally. All ten sites shared the
+# defect. 90 > 60 leaves the CLI's own bound to govern, so a stall now reports what
+# the CLI says rather than that the test ran out of patience.
+# Pinned by `test_cli_subprocess_timeouts_outrank_the_cli_own_curl_bound`.
+CLI_TIMEOUT_S = 90
+
 
 @pytest.mark.skipif(shutil.which("curl") is None, reason="curl not on PATH")
+# --------------------------------------------------------------------------- #
+# 🔴 THE ORDERING BETWEEN A TEST'S SAFETY NET AND THE CLI'S OWN BOUND.
+#
+# This is the guard for CLI_TIMEOUT_S. It reads the REAL bound out of the CLI
+# rather than restating it, so raising `curl -m` without revisiting these tests
+# fails HERE instead of becoming ten wall-clock flakes nobody can attribute.
+#
+# It also refuses a LITERAL timeout at a CLI-spawning site: the defect was not one
+# bad number, it was ten copies of one: a predicate duplicated across N call sites
+# is wrong at N-1 of them. A new site must use the constant.
+# --------------------------------------------------------------------------- #
+def test_cli_subprocess_timeouts_outrank_the_cli_own_curl_bound():
+    cli = open(str(BROWSER_BIN)).read()
+    caps = re.findall(r"(?:^|\s)-m\s+(\d+)", cli)
+    assert caps, "could not find `curl -m <n>` in the CLI — retarget this test"
+    curl_max = max(int(c) for c in caps)
+    assert CLI_TIMEOUT_S > curl_max, (
+        f"CLI_TIMEOUT_S ({CLI_TIMEOUT_S}s) must EXCEED the CLI's own curl bound "
+        f"({curl_max}s), or a stall fires the test's net first and reports an opaque "
+        f"TimeoutExpired instead of the CLI's own error")
+
+    src = open(__file__).read()
+    literal = re.findall(
+        r"subprocess\.run\(\s*\[str\(BROWSER_BIN\)[^)]*?timeout=(\d+)", src, re.S)
+    assert not literal, (
+        f"{len(literal)} CLI-spawning site(s) use a LITERAL timeout {literal} instead "
+        f"of CLI_TIMEOUT_S — one rule, one place, or the ordering rots at the copy "
+        f"someone forgets")
+
+
 def test_browser_cli_backs_off_on_429(tmp_path):
     class _H(S.BaseHTTPRequestHandler):
         def log_message(self, *a):  # noqa: A003
@@ -5850,7 +5893,7 @@ def test_browser_cli_backs_off_on_429(tmp_path):
                BROWSER_BRIDGE_TOKEN_FILE=str(tokf))
     try:
         r = subprocess.run([str(BROWSER_BIN), "eval", "1+1"], env=env,
-                           capture_output=True, text=True, timeout=30)
+                           capture_output=True, text=True, timeout=CLI_TIMEOUT_S)
         assert r.returncode != 0, "a 429 must make the CLI exit non-zero"
         low = r.stderr.lower()
         assert "rate-limited" in low or "back off" in low, \
@@ -5912,7 +5955,7 @@ def _run_browser(args, tmp_path):
                BROWSER_BRIDGE_TOKEN_FILE=str(tokf))
     try:
         r = subprocess.run([str(BROWSER_BIN), *args], env=env,
-                           capture_output=True, text=True, timeout=30)
+                           capture_output=True, text=True, timeout=CLI_TIMEOUT_S)
         return r, srv_state.bodies
     finally:
         srv.shutdown(); srv.server_close()
@@ -6917,7 +6960,7 @@ def test_browser_cli_whoami(tmp_path):
                BROWSER_BRIDGE_TOKEN_FILE=str(tokf))
     try:
         r = subprocess.run([str(BROWSER_BIN), "whoami"], env=env,
-                           capture_output=True, text=True, timeout=30)
+                           capture_output=True, text=True, timeout=CLI_TIMEOUT_S)
         assert r.returncode == 0, r.stderr
         out = json.loads(r.stdout)
         assert out["host"]["label"] == "workbench"
@@ -6993,7 +7036,7 @@ def test_browser_cli_upload_rejects_missing_and_nonfile_path(tmp_path):
 
     def run(*args):
         return subprocess.run([str(BROWSER_BIN), *args], env=env,
-                              capture_output=True, text=True, timeout=30)
+                              capture_output=True, text=True, timeout=CLI_TIMEOUT_S)
     try:
         # Nonexistent path → refused before dispatch.
         r = run("upload", "#f", str(tmp_path / "nope.png"))
@@ -7056,7 +7099,7 @@ def _run_browser_against(data, args, tmp_path):
                BROWSER_BRIDGE_TOKEN_FILE=str(tokf))
     try:
         return subprocess.run([str(BROWSER_BIN), *args], env=env,
-                              capture_output=True, text=True, timeout=30)
+                              capture_output=True, text=True, timeout=CLI_TIMEOUT_S)
     finally:
         srv.shutdown(); srv.server_close()
 
@@ -7533,7 +7576,7 @@ def _run_browser_canned(data, args, tmp_path, env_extra=None):
         env.update(env_extra)
     try:
         r = subprocess.run([str(BROWSER_BIN), *args], env=env,
-                           capture_output=True, text=True, timeout=30)
+                           capture_output=True, text=True, timeout=CLI_TIMEOUT_S)
         return r, state.bodies
     finally:
         srv.shutdown(); srv.server_close()
@@ -7933,13 +7976,13 @@ def test_browser_cli_help_lists_js_alias_and_screenshot_data_url():
     """`browser --help` (the header comment) documents the new surface, and the
     unknown-subcommand error lists `js` too."""
     r = subprocess.run([str(BROWSER_BIN), "--help"], capture_output=True,
-                       text=True, timeout=30)
+                       text=True, timeout=CLI_TIMEOUT_S)
     assert r.returncode == 0, r.stderr
     assert "browser js '<js>'" in r.stdout
     assert "--data-url" in r.stdout
     assert "--max-bytes" in r.stdout
     r2 = subprocess.run([str(BROWSER_BIN), "bogus-op"], capture_output=True,
-                        text=True, timeout=30)
+                        text=True, timeout=CLI_TIMEOUT_S)
     assert r2.returncode != 0
     assert " js " in r2.stderr and " eval " in r2.stderr
 
@@ -8183,7 +8226,7 @@ def _run_health(srv, tmp_path):
                BROWSER_BRIDGE_PORT=str(srv.server_address[1]),
                BROWSER_BRIDGE_TOKEN_FILE=str(tokf))
     return subprocess.run([str(BROWSER_BIN), "health"], env=env,
-                          capture_output=True, text=True, timeout=30)
+                          capture_output=True, text=True, timeout=CLI_TIMEOUT_S)
 
 
 def test_browser_health_prints_one_DISCONNECTED_line_and_keeps_stdout_json(tmp_path):
@@ -8297,7 +8340,7 @@ def _run_browser_routing(srv, args, tmp_path):
                BROWSER_BRIDGE_PORT=str(srv.server_address[1]),
                BROWSER_BRIDGE_TOKEN_FILE=str(tokf))
     return subprocess.run([str(BROWSER_BIN), *args], env=env,
-                          capture_output=True, text=True, timeout=30)
+                          capture_output=True, text=True, timeout=CLI_TIMEOUT_S)
 
 
 _UNKNOWN_404 = {
