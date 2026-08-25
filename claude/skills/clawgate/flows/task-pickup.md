@@ -60,7 +60,8 @@ subagent links its PARENT. Only `worked` / `created` are claims about work.
 ⚠ **Never read "no `read` link" as "nobody looked".** The thread cap evicts oldest `read` first and
 **never** `created`/`worked` — so `worked` is durable evidence while a missing `read` may just have
 been evicted. ⚠ `detailAvailable: false` is the majority state; a `sessionId` usually will not
-resolve to a transcript. Full semantics: `reference/task-api.md` → "Task ↔ session threads".
+resolve to a transcript. Full semantics:
+`~/.claude/skills/clawgate/reference/task-api.md` → "Task ↔ session threads".
 
 **Acceptance-criteria detector — deterministic, not a judgement call.** A heading matching
 `## Acceptance criteria` (case-insensitive) → **AUTHOR-SPECIFIED**. Anything else — including a body
