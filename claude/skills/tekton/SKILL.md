@@ -81,16 +81,27 @@ debugging, changing or copying a specific pipeline.
    not even buy the preemptor a slot — `not eligible due to a terminating pod on the nominated
    node` recurs, so victims die and the preemptor stays Pending. Full evidence:
    homelab-infra `claudedocs/handoff-devrc-ci-kills-are-simultaneous.md`.
-   🔴 **Two fixes that look right and are NOT.** (a) **Raising `ci-bulk` above 0** removes no
-   contention — it only inverts which pipeline is destroyed, and gitops-validate already has
-   the tightest timeout budget and the worst pod-start latency here. (b) **Moving devrc-ci's
-   requests/limits**: `step-pytests` requests 1 CPU/2Gi against 4 CPU/8Gi limits on an
-   overcommitted node, which looks like the answer and is measured absent — #393 put
-   `step-pytests` at **0.006, not throttled**, with no node saturation (16% CPU requested, zero
-   Pending, no OOMKilled). A per-pod limit also cannot kill five pods of different ages in the
-   same second. The fault is **two pipelines pinned to one node out of four**; note when
-   choosing that devrc-ci's pin buys the RWO `nix-store-cache` (~1m50s/run) while
-   gitops-validate is pinned for the same cache and is the one that cannot fit.
+   🔴 **DO NOT DESIGN A FIX FROM THIS SKILL — the analysis lives in the manifests, and three
+   obvious fixes are ALREADY REJECTED WITH MEASUREMENTS.** Read the comments in
+   `triggers/ci-priority-classes.yaml` (~100), `triggers/gitops-validate-triggertemplate.yaml`
+   (~98) and `triggers/devrc-ci-pipeline.yaml` (~1130) before proposing anything. Rejected
+   there: **concurrency capping** (simulated on the real arrival trace — worse at every cap
+   that helps, because a queued TaskRun's clock starts at CREATION and burns its own
+   deadline), **ResourceQuota** (cannot be scoped safely — scoped to `ci-bulk` it covers the
+   `notify`/`report`/affinity pods that declare no requests, and losing `report` is the worst
+   failure here), and **`retries`** (tried for this, REVERTED as a trap — Tekton retries any
+   non-cancelled failure, so it re-runs genuine verdicts). The lever actually taken was
+   right-sizing gitops-validate's requests (4.65 → 2.40 CPU), which said in writing that it
+   does **not** end preemption.
+   🔴 **The one thing measured 2026-08-25 that the prior work left open: the binding predicate
+   is still CPU, NOT pod count.** That matters because a kill on the `pods` predicate looks
+   IDENTICAL to one on CPU — same `reason=Preempted`, same exit 137/255 — while every CPU
+   number on the node reads healthy, so the manifests tell you to check pod count FIRST. The
+   preemptors' own message settles it: `0/4 nodes are available: 1 Insufficient cpu` — not
+   `Insufficient pods`. Named remaining inflation: `auditloop-ci` 2.8×, `clawgate-ci` 2.4×.
+   ⚠ Also measured-absent, so don't reach for it: moving devrc-ci's requests/limits. #393 put
+   `step-pytests` at **0.006, not throttled**, and a per-pod limit cannot kill five pods of
+   different ages in the same second anyway.
    🔴 **The real slowness mechanism, when it IS present: CFS QUOTA STARVATION, and AVERAGE CPU
    HIDES IT.** A step's own `limits.cpu` is enforced per 100ms CFS period, so a suite of
    short-lived multi-threaded processes drains a 1-CPU quota in a few ms and stalls for the
