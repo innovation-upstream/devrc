@@ -2905,7 +2905,10 @@ echo "  parallelism =${PYTEST_JOBS} pytest worker(s)$([ "$PYTEST_JOBS" -gt 1 ] &
 # from session-scoped AUTOUSE FIXTURES (nolaunch_plugin.py, spool_plugin.py,
 # nogit_plugin.py), NOT from pytest_sessionstart, so the xdist CONTROLLER never
 # emits one: it collects and distributes, it runs no tests. The count at -n 4 is
-# exactly 4, never 5. The old "controller + up to N workers" bound admitted one
+# exactly 4 in a healthy run. (Not structural: xdist restarts a crashed worker
+# up to --max-worker-restart times, and a run with restarts was measured
+# emitting 20 markers at -n 4. Every such run was already red for the crash.)
+# The old "controller + up to N workers" bound admitted one
 # session that cannot legitimately exist. FEWER than JOBS is legitimate — with
 # --dist loadfile a target with fewer files than workers leaves some idle.
 #
@@ -2937,13 +2940,31 @@ _markers_ok() {
 # observation went unattributed. See the GUARD 9b block for why the co-tenant
 # condition is what makes this safe to arm at all.
 _gitenv_unattributed_verdict() {
-  local cotenant_sessions unattributed
+  local cotenant_sessions foreign_writers unattributed
   cotenant_sessions="$(grep -aF "$GITENV_SESSION_MARKER" "$1" \
     | grep -aoE 'unattributable=[0-9]+' \
     | awk -F= '$2 != 0 {n++} END {print n+0}')"
+  # 🔴 THE SECOND KIND OF PROOF, and leaving it out shipped a FALSE RED.
+  # `unattributable=` is written by ONE probe, at import time: live processes
+  # whose cwd sits in the repo. The plugin's other two probes — the idle probe
+  # and the settle re-read, which gitenv.py calls its strongest — prove a
+  # foreign writer LATER and record it as a `gitenv(foreign-writer)` line,
+  # touching no `unattributable=` field at all. A writer whose cwd is OUTSIDE
+  # the repo (drift-check's `git fetch`, 4x/day, and concurrent agent sessions
+  # — both named in gitenv.py as routine writers to this clone) is invisible to
+  # the first probe and caught by the others.
+  #
+  # Reproduced serially, not xdist-specific: an external process creating
+  # branches during a run produced `unattributable=0`, a `gitenv(foreign-writer)`
+  # line, `unattributed-observations=4`, and pytest rc=0 — and this gate then
+  # said "no session reported a co-tenant, so there was no legitimate reason to
+  # leave enforce mode" three lines below the log's own proof of the opposite.
+  # On a REQUIRED merge check that sends the developer to audit their own tests.
+  foreign_writers="$(grep -acF 'gitenv(foreign-writer)' "$1" || true)"
   unattributed="$(grep -aoE 'unattributed-observations=[0-9]+' "$1" \
     | awk -F= '{s+=$2} END {print s+0}')"
-  if [ "$cotenant_sessions" -eq 0 ] && [ "$unattributed" -gt 0 ]; then
+  if [ "$cotenant_sessions" -eq 0 ] && [ "${foreign_writers:-0}" -eq 0 ] \
+     && [ "$unattributed" -gt 0 ]; then
     echo "FAIL $unattributed"
   else
     echo "OK"
@@ -3044,8 +3065,16 @@ run_pytest() {
   # attribute. Fixing the sibling-process misattribution in testlib/gitenv.py
   # removes the FALSE unattributables; this catches the true ones.
   #
-  # 🔴 Gated on every session reporting `unattributable=0`, and that gate is why
-  # this is safe to arm. An operator's box legitimately has other processes
+  # 🔴 Gated on the log carrying NO evidence of another writer — neither an
+  # `unattributable=` count nor a `gitenv(foreign-writer)` line — and that gate
+  # is why this is safe to arm.
+  #
+  # ⚠ MEASURED, and worth knowing before you reason about this: under xdist
+  # exactly ONE `gitenv(session) stripped=…` line reaches the target log, and it
+  # is the CONTROLLER's (it precedes "bringing up nodes..."); worker
+  # pytest_configure output is swallowed. So the `unattributable=` half rests on
+  # a probe taken before any worker exists, in a process that runs no tests. The
+  # `gitenv(foreign-writer)` half is what covers the run's later window. An operator's box legitimately has other processes
   # living in the repo (8 measured here: zsh, nvidia-smi, an editor), which puts
   # the detector in report mode for real reasons unrelated to this run. Failing
   # there would make the gate permanently red locally — the "red gate trains

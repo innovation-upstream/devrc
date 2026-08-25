@@ -725,27 +725,40 @@ def _is_sibling_xdist_worker(entry: Path, run_id: str, our_ppid: int) -> bool:
     `/proc/<pid>/environ` (another user) claims nothing — the candidate stays a
     co-tenant, which is the direction that keeps the guard sharp.
 
-    🔴 THE RUN ID ALONE IS TOO BROAD, and this cost six of this guard's own
-    tests. A subprocess a TEST spawns INHERITS our whole environment, run id
-    included — so matching on the id alone swallowed exactly the case these
-    tests construct on purpose (`test_live_cotenants_sees_another_process_in_
-    the_repo` starts a child sitting in the repo and requires the probe to SEE
-    it). Excluding a test's own child is not "our run being tidy", it is the
-    detector going blind to a real writer.
+    🔴 IT IS THE PPID, AND NOT THE RUN ID, THAT DOES THE WORK — and an earlier
+    revision of this function ALSO checked the run id in `/proc/<pid>/environ`,
+    which made the whole predicate INERT: it could never return True.
 
-    So the check is SIBLING, not same-run: a worker's parent is the controller,
-    and every worker of one run shares that parent (measured: worker ppid ==
-    controller pid). A test's child has US as its parent, not our parent, so it
-    stays visible. Both conditions are required.
+    `/proc/<pid>/environ` exposes the `env_start..env_end` region, i.e. the
+    environment AS OF EXEC. xdist assigns the run id at RUNTIME inside an
+    already-running worker (`os.environ[...] = workerinput["testrunuid"]`), and
+    CPython's setenv allocates a new array on the heap without touching that
+    region. MEASURED, with a positive control:
+
+        inside a worker:            os.environ has it = True
+                                    /proc/self/environ has it = False
+        control, set before exec:   /proc/self/environ has it = True
+
+    So the id is readable from OUR OWN os.environ (which is what the caller's
+    `_own_xdist_run_id()` does, and why that half works) and is NOT readable
+    from a sibling's /proc. The lesson generalises: two ways of reading "the
+    environment" are two different surfaces, and measuring one says nothing
+    about the other.
+
+    The ppid alone is the correct sibling test, and only inside a worker — which
+    is exactly when the caller applies it. A worker's parent is the CONTROLLER,
+    whose children are the workers; a test's own child has the WORKER as its
+    parent, so it stays visible, which is what
+    `test_live_cotenants_sees_another_process_in_the_repo` requires. In a SERIAL
+    run this must not be applied at all: our parent is then whatever launched
+    pytest, and its other children are exactly the foreign writers we are
+    looking for.
+
+    `run_id` is retained in the signature because the caller uses its presence
+    as the "am I a worker" gate; it is deliberately not re-read here.
     """
-    if _ppid_of(entry) != our_ppid:
-        return False
-    needle = f"{_XDIST_RUN_ENV}={run_id}".encode()
-    try:
-        raw = (entry / "environ").read_bytes()
-    except OSError:
-        return False
-    return needle in raw.split(b"\0")
+    del run_id  # see the docstring: unreadable from another process's /proc
+    return _ppid_of(entry) == our_ppid
 
 
 def live_cotenants(git_dirs: "list[Path]") -> "list[str]":

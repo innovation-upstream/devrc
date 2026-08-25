@@ -43,6 +43,13 @@ SUMMARY_QUIET = ("gitenv(session) summary: attributed-violations=0 "
                  "unattributed-observations=0 mode=enforce(auto)")
 SUMMARY_OBSERVED = ("gitenv(session) summary: attributed-violations=0 "
                     "unattributed-observations=2 mode=report(auto)")
+# The OTHER proof of a foreign writer, written by the idle probe and the settle
+# re-read rather than by the import-time co-tenant probe. It touches no
+# `unattributable=` field, which is exactly how the first version of this gate
+# came to contradict its own log.
+FOREIGN_WRITER = ("gitenv(foreign-writer) the repository changed AGAIN during a "
+                  "0.25s settle, while no test was running — something outside "
+                  "this pytest session is writing to it")
 
 
 def _extract(name: str) -> str:
@@ -91,8 +98,15 @@ def test_a_PROVEN_cotenant_excuses_the_observation(tmp_path: Path) -> None:
 
 
 def test_one_cotenant_session_among_several_still_excuses(tmp_path: Path) -> None:
-    """Under xdist each worker prints its own line; any one proving a co-tenant
-    means the repo demonstrably has another writer for the whole target."""
+    """Any one line proving a co-tenant excuses the whole target.
+
+    ⚠ The docstring here used to say "under xdist each worker prints its own
+    line". MEASURED FALSE: exactly one `gitenv(session) stripped=…` line reaches
+    the log and it is the CONTROLLER's — worker pytest_configure output is
+    swallowed. The multi-line case below is therefore defensive rather than
+    representative, and the sentence mattered because it was the one making the
+    gate's safety argument read as sound.
+    """
     assert _verdict(tmp_path, [SESSION_CLEAN, SESSION_COTENANT,
                                SUMMARY_OBSERVED, SUMMARY_OBSERVED]) == "OK"
 
@@ -115,6 +129,25 @@ def test_the_marker_is_matched_LITERALLY_not_as_a_regex(tmp_path: Path) -> None:
     assert _verdict(tmp_path, [SESSION_COTENANT.replace("gitenv(session)",
                                                         "gitenvsession"),
                                SUMMARY_OBSERVED]) == "FAIL 2"
+
+
+def test_a_PROVEN_foreign_writer_excuses_the_observation(tmp_path: Path) -> None:
+    """🔴 THE FALSE-RED CASE. A writer whose cwd is outside the repo is invisible
+    to the co-tenant probe, so `unattributable=0` while the run has ALREADY
+    printed proof that something external is writing. Failing here would red a
+    required gate and send the developer to audit their own tests."""
+    assert _verdict(tmp_path, [SESSION_CLEAN, FOREIGN_WRITER,
+                               SUMMARY_OBSERVED]) == "OK"
+
+
+def test_a_foreign_writer_line_alone_is_not_a_free_pass(tmp_path: Path) -> None:
+    """The excuse must not become unconditional: with no observation there is
+    nothing to excuse, and the verdict is OK for that reason, not this one."""
+    assert _verdict(tmp_path, [SESSION_CLEAN, FOREIGN_WRITER,
+                               SUMMARY_QUIET]) == "OK"
+    # ...and with the foreign-writer line absent, the same observation DOES fail,
+    # which is what proves the line is what changed the verdict.
+    assert _verdict(tmp_path, [SESSION_CLEAN, SUMMARY_OBSERVED]) == "FAIL 2"
 
 
 @pytest.mark.parametrize("n", [1, 2, 7])
