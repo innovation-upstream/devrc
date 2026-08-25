@@ -50,6 +50,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
+from conftest import CLI_TIMEOUT_S  # suite-wide; see conftest for the rationale
 
 BB = Path(__file__).resolve().parent.parent          # scripts/browser-bridge
 CLI = BB / "browser"
@@ -92,7 +93,7 @@ def _env(tmp_path, **over):
 
 def _print_id(env, **kw):
     cp = subprocess.run(["bash", str(CLI), "--print-session-id"], env=env,
-                        capture_output=True, text=True, timeout=60, **kw)
+                        capture_output=True, text=True, timeout=CLI_TIMEOUT_S, **kw)
     assert cp.returncode == 0, cp.stderr
     return cp.stdout.strip()
 
@@ -154,7 +155,7 @@ def _live_probe(tmp_path, env=None):
     out.mkdir(exist_ok=True)
     cp = subprocess.run(["bash", "-c", LIVE_PROBE, "probe", str(CLI), str(out)],
                         env=env or _env(tmp_path), capture_output=True,
-                        text=True, timeout=60, start_new_session=True)
+                        text=True, timeout=CLI_TIMEOUT_S, start_new_session=True)
     assert cp.returncode == 0, cp.stderr
     r = {n: (out / n).read_text().strip()
          for n in ("leader", "awk22", "comm", "direct", "childpid", "err")}
@@ -169,7 +170,7 @@ def _probe(tmp_path, env, new_session=False):
     out = tmp_path / f"probe-{'ns' if new_session else 'inh'}"
     out.mkdir(exist_ok=True)
     cp = subprocess.run(["bash", "-c", PROBE, "probe", str(CLI), str(out)],
-                        env=env, capture_output=True, text=True, timeout=60,
+                        env=env, capture_output=True, text=True, timeout=CLI_TIMEOUT_S,
                         start_new_session=new_session)
     assert cp.returncode == 0, cp.stderr
     return {n: (out / n).read_text().strip()
@@ -268,7 +269,7 @@ def _fake_proc(tmp_path, self_stat, leader=None, leader_stat=None):
 
 def _run_id(env):
     return subprocess.run(["bash", str(CLI), "--print-session-id"], env=env,
-                          capture_output=True, text=True, timeout=60)
+                          capture_output=True, text=True, timeout=CLI_TIMEOUT_S)
 
 
 def test_comm_containing_a_close_paren_space_is_parsed_by_the_LAST_paren(tmp_path):
@@ -442,7 +443,7 @@ def refuser(tmp_path):
         @staticmethod
         def run(*args):
             return subprocess.run(["bash", str(CLI), *args], env=env,
-                                  capture_output=True, text=True, timeout=60)
+                                  capture_output=True, text=True, timeout=CLI_TIMEOUT_S)
     try:
         yield _R
     finally:
@@ -674,7 +675,7 @@ def capture(tmp_path):
         def run(*args, **over):
             env = _env(tmp_path, **{**base, **over})
             return subprocess.run(["bash", str(CLI), *args], env=env,
-                                  capture_output=True, text=True, timeout=60)
+                                  capture_output=True, text=True, timeout=CLI_TIMEOUT_S)
     try:
         yield _C
     finally:
@@ -985,7 +986,7 @@ def test_two_invocations_in_one_opencode_session_derive_the_same_id(tmp_path):
     first = _print_id(env)
     second = subprocess.run(
         ["bash", "-c", f'echo "$(bash {CLI} --print-session-id)"'],
-        env=env, capture_output=True, text=True, timeout=60)
+        env=env, capture_output=True, text=True, timeout=CLI_TIMEOUT_S)
     assert second.returncode == 0, second.stderr
     assert first == second.stdout.strip() == f"opencode:{OC_ID}"
 

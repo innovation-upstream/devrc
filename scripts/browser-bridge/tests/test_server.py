@@ -12,6 +12,8 @@ import base64
 import hashlib
 import json
 import os
+import ast
+import pathlib
 import re
 import shutil
 import stat
@@ -5819,51 +5821,11 @@ def test_default_knobs_do_not_throttle_normal_use():
 # --------------------------------------------------------------------------- #
 BROWSER_BIN = Path(__file__).resolve().parent.parent / "browser"
 
-# 🔴 A TEST'S SAFETY-NET TIMEOUT MUST NOT BE TIGHTER THAN THE BOUND OF THE THING IT
-# INVOKES. The CLI bounds its own HTTP call at `curl -m 60`; every CLI-spawning test
-# here used `timeout=30`, i.e. the test's net always fired FIRST. A stall therefore
-# surfaced as an opaque subprocess.TimeoutExpired instead of the CLI's own
-# attributable error — and, being wall-clock, it flaked under CI load: measured
-# 2026-08-25, `test_browser_cli_backs_off_on_429` failed exactly this way in the
-# devrc-pytests gate while the SAME nix derivation
-# (9cvfsmpjq6ip5yiv51mk8mf1f9zazpdz) built green locally. All ten sites shared the
-# defect. 90 > 60 leaves the CLI's own bound to govern, so a stall now reports what
-# the CLI says rather than that the test ran out of patience.
-# Pinned by `test_cli_subprocess_timeouts_outrank_the_cli_own_curl_bound`.
-CLI_TIMEOUT_S = 90
+# CLI_TIMEOUT_S lives in conftest.py (suite-wide; see its rationale there).
+from conftest import CLI_TIMEOUT_S  # noqa: E402
 
 
 @pytest.mark.skipif(shutil.which("curl") is None, reason="curl not on PATH")
-# --------------------------------------------------------------------------- #
-# 🔴 THE ORDERING BETWEEN A TEST'S SAFETY NET AND THE CLI'S OWN BOUND.
-#
-# This is the guard for CLI_TIMEOUT_S. It reads the REAL bound out of the CLI
-# rather than restating it, so raising `curl -m` without revisiting these tests
-# fails HERE instead of becoming ten wall-clock flakes nobody can attribute.
-#
-# It also refuses a LITERAL timeout at a CLI-spawning site: the defect was not one
-# bad number, it was ten copies of one: a predicate duplicated across N call sites
-# is wrong at N-1 of them. A new site must use the constant.
-# --------------------------------------------------------------------------- #
-def test_cli_subprocess_timeouts_outrank_the_cli_own_curl_bound():
-    cli = open(str(BROWSER_BIN)).read()
-    caps = re.findall(r"(?:^|\s)-m\s+(\d+)", cli)
-    assert caps, "could not find `curl -m <n>` in the CLI — retarget this test"
-    curl_max = max(int(c) for c in caps)
-    assert CLI_TIMEOUT_S > curl_max, (
-        f"CLI_TIMEOUT_S ({CLI_TIMEOUT_S}s) must EXCEED the CLI's own curl bound "
-        f"({curl_max}s), or a stall fires the test's net first and reports an opaque "
-        f"TimeoutExpired instead of the CLI's own error")
-
-    src = open(__file__).read()
-    literal = re.findall(
-        r"subprocess\.run\(\s*\[str\(BROWSER_BIN\)[^)]*?timeout=(\d+)", src, re.S)
-    assert not literal, (
-        f"{len(literal)} CLI-spawning site(s) use a LITERAL timeout {literal} instead "
-        f"of CLI_TIMEOUT_S — one rule, one place, or the ordering rots at the copy "
-        f"someone forgets")
-
-
 def test_browser_cli_backs_off_on_429(tmp_path):
     class _H(S.BaseHTTPRequestHandler):
         def log_message(self, *a):  # noqa: A003
@@ -7489,7 +7451,7 @@ def test_browser_cli_unknown_op_maps_to_stale_extension_message(tmp_path):
                BROWSER_BRIDGE_TOKEN_FILE=str(tokf))
     try:
         r = subprocess.run([str(BROWSER_BIN), "upload", "#f", str(tokf)],
-                           env=env, capture_output=True, text=True, timeout=30)
+                           env=env, capture_output=True, text=True, timeout=CLI_TIMEOUT_S)
         assert r.returncode != 0, "a stale-extension unknown_op must exit non-zero"
         low = r.stderr.lower()
         assert "unknown_op" in low
@@ -9168,3 +9130,103 @@ def test_main_actually_starts_and_stops_the_heartbeat(monkeypatch, tmp_path):
     assert started[0] is served[0], \
         "the heartbeat was given a different Registry than the server's"
     assert stopped == [True], "main() did not stop the heartbeat on shutdown"
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE ORDERING BETWEEN A TEST'S SAFETY NET AND THE CLI'S OWN BOUND.
+#
+# The guard for conftest's CLI_TIMEOUT_S. It reads the REAL bound out of the CLI
+# rather than restating it, and it walks the AST of EVERY test module here.
+#
+# 🔴 IT IS AN AST WALK BECAUSE THE REGEX VERSION WAS GREEN ON A LIVE INSTANCE OF
+# THE DEFECT IT FORBIDS. The first draft scanned this file with
+# `subprocess\.run\(\s*\[str\(BROWSER_BIN\)[^)]*?timeout=(\d+)`. `[^)]*?` cannot
+# cross a `)`, so the one site whose arg list contained a nested `str(tokf)` was
+# invisible: 11 sites, 10 converted, 1 still `timeout=30`, scan returns [], gate
+# green. It was also blind to `subprocess.Popen(...).wait(timeout=…)`, to a
+# pre-built `cmd = [...]` list, to `**kwargs`, and to `["bash", str(CLI), …]` —
+# the spelling THREE sibling files use for 20 more sites. A guard whose comment
+# claims a class while its implementation matches one spelling is worse than
+# none, because it stops the next person looking.
+# --------------------------------------------------------------------------- #
+def _net_outranks(net_s, worst_s):
+    """Is a test's safety net STRICTLY above the CLI's worst-case self-bound?
+
+    Extracted so the strictness is testable. At the shipped values (240 vs 180) a
+    `>` / `>=` mutation is indistinguishable, so the comparison would otherwise be
+    an unexercised claim — the boundary is pinned by
+    `test_net_outranks_is_strict_at_the_boundary`. A TIE must lose: the CLI has to
+    start, parse args and reach curl before its own bound begins, so an equal net
+    still fires first in practice.
+    """
+    return net_s > worst_s
+
+
+_CLI_SPAWNERS = {"run", "Popen", "check_output", "check_call", "call"}
+
+
+def _cli_spawning_calls(tree):
+    """Yield (call_node, unparsed_first_arg) for every subprocess.* call whose
+    argv references the browser CLI, however it is spelled."""
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        if node.func.attr not in _CLI_SPAWNERS:
+            continue
+        if not node.args:
+            continue
+        argv = ast.unparse(node.args[0])
+        # BROWSER_BIN (this file) or a bare CLI name (the sibling files).
+        if "BROWSER_BIN" in argv or re.search(r"\bCLI\b", argv):
+            yield node, argv
+
+
+def test_cli_subprocess_timeouts_outrank_the_cli_own_curl_bound():
+    # (1) THE CLI'S OWN PER-CALL BOUND, anchored to the curl argv it belongs to.
+    # NOT a bare `-m` scan over the whole script: that matched any `grep -m N`,
+    # and would read the WRONG number if the real bound moved to `--max-time`.
+    cli = pathlib.Path(BROWSER_BIN).read_text(encoding="utf-8")
+    m = re.search(r"args=\(\s*-sS\s+(?:-m|--max-time)\s+(\d+)\b", cli)
+    assert m, ("could not find curl's bound in the CLI's args=(...) assignment — "
+               "it moved or was renamed; retarget this test rather than deleting it")
+    per_call = int(m.group(1))
+
+    # (2) A SINGLE INVOCATION CAN ISSUE SEVERAL BOUNDED CURLS. `--wake` does
+    # primary + wake; `close` does release + open + close. The worst case is what
+    # the net must clear, not one call.
+    max_curls_per_invocation = 3
+    worst = per_call * max_curls_per_invocation
+    assert _net_outranks(CLI_TIMEOUT_S, worst), (
+        f"CLI_TIMEOUT_S ({CLI_TIMEOUT_S}s) must EXCEED the CLI's worst-case "
+        f"self-bound ({max_curls_per_invocation} x {per_call}s = {worst}s), or a "
+        f"stall fires the test's net first and reports an opaque TimeoutExpired "
+        f"instead of the CLI's own error")
+
+    # (3) EVERY CLI-spawning site in EVERY module must use the constant. A literal
+    # is refused even when it is generous: the defect was never one bad number, it
+    # was N copies of one, and a predicate duplicated across N sites is wrong at
+    # N-1 of them.
+    bad = []
+    for path in sorted(pathlib.Path(__file__).parent.glob("test_*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node, argv in _cli_spawning_calls(tree):
+            kw = {k.arg: k.value for k in node.keywords if k.arg}
+            t = kw.get("timeout")
+            if t is None:
+                # Popen itself takes no timeout; its .wait()/.communicate() does.
+                if node.func.attr == "Popen":
+                    continue
+                bad.append(f"{path.name}:{node.lineno} has NO timeout: {argv[:60]}")
+            elif not (isinstance(t, ast.Name) and t.id == "CLI_TIMEOUT_S"):
+                bad.append(f"{path.name}:{node.lineno} uses {ast.unparse(t)!r}, "
+                           f"not CLI_TIMEOUT_S: {argv[:60]}")
+    assert not bad, (
+        "CLI-spawning site(s) not using CLI_TIMEOUT_S — one rule, one place, or "
+        "the ordering rots at the copy someone forgets:\n  " + "\n  ".join(bad))
+
+
+def test_net_outranks_is_strict_at_the_boundary():
+    """The tie must LOSE — otherwise `>` could be weakened to `>=` unnoticed."""
+    assert _net_outranks(181, 180)
+    assert not _net_outranks(180, 180), "a tie must not count as outranking"
+    assert not _net_outranks(179, 180)

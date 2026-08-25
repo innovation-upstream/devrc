@@ -41,6 +41,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
+from conftest import CLI_TIMEOUT_S  # suite-wide; see conftest for the rationale
 
 BB = Path(__file__).resolve().parent.parent
 CLI = BB / "browser"
@@ -121,7 +122,7 @@ def bridge(tmp_path):
             e = dict(_B.env)
             e.update(kw.pop("extra_env", {}) or {})
             return subprocess.run(["bash", str(CLI), *args], env=e,
-                                  capture_output=True, text=True, timeout=60)
+                                  capture_output=True, text=True, timeout=CLI_TIMEOUT_S)
 
         @staticmethod
         def ops():
@@ -341,7 +342,7 @@ def test_the_env_vars_are_documented_where_the_flags_are():
     """A targeting default nobody can discover is not a fix. Both the CLI's own
     --help header and the agent-facing SKILL.md must name all three."""
     help_text = subprocess.run(["bash", str(CLI), "--help"],
-                               capture_output=True, text=True, timeout=60).stdout
+                               capture_output=True, text=True, timeout=CLI_TIMEOUT_S).stdout
     skill = (BB / "SKILL.md").read_text()
     for var in ("BB_INSTANCE", "BB_TAB", "BB_FRAME"):
         assert var in help_text, f"{var} missing from `browser --help`"
