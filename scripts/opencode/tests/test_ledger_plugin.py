@@ -42,9 +42,23 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from testlib import mockbin as M  # noqa: E402
 
 
+# 🔴 A CEILING, NOT A SLEEP, and it belongs in the HARNESS rather than in the
+# tests that happen to need it today. `ledger.js` HARDCODES its argv (:114-129),
+# so no `--tmux-timeout` flag can reach the CLI it spawns — the env var is the
+# only mechanism that does. Set here so every test in this file measures the
+# record shape instead of the host's spare capacity, and so the next test author
+# cannot forget it. A passing stub call returns in ~3ms (0.197s worst at a 20x
+# CPU stall), so 60s is ~300x the worst contended observation and costs nothing.
+# Two tests here previously asserted a PANE-KEYED filename while silently
+# depending on the 2.0s production default; under the devrc-ci leg that is the
+# #810 flake.
+_TMUX_BUDGET_S = "60.0"
+
+
 def run_node(code: str, env: dict | None = None) -> subprocess.CompletedProcess:
     base = dict(os.environ)
     base.pop("TMUX_PANE", None)
+    base["AGENT_LEDGER_TMUX_TIMEOUT_S"] = _TMUX_BUDGET_S
     base.update(env or {})
     return subprocess.run(["node", "--input-type=module", "-e", code],
                           capture_output=True, text=True, env=base, timeout=30)
