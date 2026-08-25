@@ -942,6 +942,22 @@ in
     source = ../claude/RULES.md;
     force = true;  # overwrite the pre-existing unmanaged file on first switch
   };
+  # 🔴 RULES.md is USELESS ON ITS OWN: it is dense with `→ archive: <anchor>`
+  # pointers into RULES-ARCHIVE.md — the evidence, dates and retracted theories
+  # behind each rule. Until 2026-08-24 the archive was deployed NOWHERE, so
+  # ~/.claude/RULES-ARCHIVE.md did not exist and every one of those pointers was
+  # a dead end for any agent without a devrc checkout. That is the "reads as
+  # coverage while providing none" shape RULES.md itself names: a pointer nobody
+  # can follow stops people looking, which is worse than no pointer.
+  #
+  # Costs nothing per session: unlike RULES.md this is NOT auto-loaded and NOT
+  # concatenated into opencode's AGENTS.md (that concat reads ../claude/RULES.md
+  # explicitly — see the opencode block below). It is paid only when an agent
+  # actually follows a pointer, which is exactly when it should be.
+  home.file.".claude/RULES-ARCHIVE.md" = {
+    source = ../claude/RULES-ARCHIVE.md;
+    force = true;
+  };
   home.file.".claude/PRINCIPLES.md" = {
     source = ../claude/PRINCIPLES.md;
     force = true;
