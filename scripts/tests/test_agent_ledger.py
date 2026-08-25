@@ -919,6 +919,55 @@ def test_the_CLI_default_budget_IS_the_module_constant(tmp_path):
         f"{AL.DEFAULT_TMUX_TIMEOUT_S}:\n{out}")
 
 
+# 🔴 The bounds are the guard; they are NOT a second spelling of the constant.
+# Pinning the literal 2.0 would be exactly the two-spellings mistake the test
+# above exists to prevent, and would fire on every legitimate tune. These say
+# only "still the right ORDER OF MAGNITUDE", which is the property that keeps
+# both failure modes out.
+_TMUX_BUDGET_FLOOR_S = 1.0
+_TMUX_BUDGET_CEILING_S = 5.0
+
+
+def test_the_default_tmux_budget_STAYS_THE_RIGHT_ORDER_OF_MAGNITUDE():
+    """INVARIANT GUARD, labelled as one — this pins a property, not a regression.
+
+    🔴 WHY IT EXISTS: an adversarial audit of #810 found that raising
+    `DEFAULT_TMUX_TIMEOUT_S` from 2.0 to **30.0 survives the entire suite** — 118
+    passed. The rationale for keeping it short lived only in a comment, and a
+    comment cannot fail. That matters because under exactly the pressure #810
+    documents ("CI is slow, the deadline was missed"), *raising this constant is
+    the cheapest-looking fix in the file* — and it is the wrong one twice over:
+
+      * It is a HOT PATH. `tmux_context` runs on `PostToolUse` for the Claude
+        hook and on every opencode tool call for the CLI, so a wedged or
+        restarting tmux server would stall the agent for the full budget. At
+        30.0 that is a 30-SECOND hang per call, and nothing else objects.
+      * It is SELF-INFLATING in CI. The slow-path fixtures derive their sleep
+        from this constant (`_slow_tmux_env`), so raising it lengthens the very
+        pytest leg being killed — measured by the audit at 9.7s -> 44.6s for a
+        three-file run at 30.0.
+
+    The floor matters too, and is the opposite mistake: drop the budget far
+    enough and the CLI silently takes `filename_for`'s degraded session-keyed
+    path, which is the ORIGINAL #810 flake returning — reproduced there at 0.001.
+    The measured stub call is 0.003s p50 idle and 0.197s worst at a 20x CPU
+    stall, so 1.0 leaves ~5x headroom over the worst figure anyone has measured.
+
+    Deliberately NOT asserting an exact value: see the bounds' own comment.
+    """
+    assert _TMUX_BUDGET_FLOOR_S <= AL.DEFAULT_TMUX_TIMEOUT_S <= _TMUX_BUDGET_CEILING_S, (
+        f"DEFAULT_TMUX_TIMEOUT_S={AL.DEFAULT_TMUX_TIMEOUT_S} is outside "
+        f"[{_TMUX_BUDGET_FLOOR_S}, {_TMUX_BUDGET_CEILING_S}].\n"
+        f"  TOO HIGH: this runs on PostToolUse and every opencode tool call, so "
+        f"the budget is a per-call stall against a wedged tmux — and the slow-path "
+        f"fixtures scale with it, inflating the CI leg you are probably trying to "
+        f"fix.\n"
+        f"  TOO LOW: the CLI falls to the degraded session-keyed filename and the "
+        f"#810 flake returns.\n"
+        f"  If you genuinely need a value outside this range, move the bound AND "
+        f"say in the commit message which measurement moved.")
+
+
 def test_a_cross_runtime_conflict_NAMES_THE_RUNTIMES():
     """🔴 The commonest real conflict is cross-runtime, and two opaque session
     ids do not say so. `claude, opencode` is the difference between "which agent
