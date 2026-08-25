@@ -1,7 +1,12 @@
-# Measured census of guard branches with zero corpus instances. Regenerate: scripts/dead-guard-scan.py --repo <path> --census <this file>
-# `status` out-of-instrument rows are NOT a clean result -- they are guards this tool cannot see. See scripts/data/dead-guard-registry.tsv.
+# Measured census of guard branches with zero corpus instances.
+# Regenerate, per repo: scripts/dead-guard-scan.py --repo <path> --census <this file>
+# 🔴 out-of-instrument rows are NOT a clean result -- they are guards this tool
+#    CANNOT see. A repo's absence from this file is not evidence about it.
+# 🔴 A flag has THREE readings and only two are defects: dead code, an untested
+#    reporting branch, or a branch driven through a subprocess. See
+#    scripts/lib/dead_guard.py. Adjudicating them is a human's job.
 repo_slug	status	location	kind	case_handled	corpus_instances	justification
-# innovation-upstream/devrc measured under /home/zach/workspace/civit/datapacket-talos/.venv/bin/python3 (Python 3.12.14)
+innovation-upstream/devrc	flagged	scripts/claude-hooks/tests/test_guard_core.py:2492	if-body	execs.append(argv)	0	-
 innovation-upstream/devrc	flagged	scripts/testlib/captured_text_scan.py:143	if-body	sys.path.insert(0, str(_HERE.parent))	0	-
 innovation-upstream/devrc	flagged	scripts/testlib/captured_text_scan.py:451	if-body	esc = False	0	-
 innovation-upstream/devrc	flagged	scripts/testlib/captured_text_scan.py:453	if-body	esc = True	0	-
@@ -29,10 +34,10 @@ innovation-upstream/devrc	flagged	scripts/tests/test_clawgate_predicate_single_s
 innovation-upstream/devrc	flagged	scripts/tests/test_clawgate_predicate_single_source.py:375	except	return False	0	-
 innovation-upstream/devrc	flagged	scripts/tests/test_clawgate_predicate_single_source.py:489	if-body	return	0	-
 innovation-upstream/devrc	flagged	scripts/tests/test_closing_condition_single_source.py:124	except	continue	0	-
-innovation-upstream/devrc	flagged	scripts/tests/test_dead_guard_scan.py:43	if-body	if event == "line":  # pragma: no cover - a tracer is not traced by itself	0	a tracer is not traced by itself
-innovation-upstream/devrc	flagged	scripts/tests/test_dead_guard_scan.py:44	if-body	seen.add(frame.f_lineno)  # pragma: no cover - a tracer is not traced by itself	0	a tracer is not traced by itself
-innovation-upstream/devrc	flagged	scripts/tests/test_dead_guard_scan.py:104	if-body	if event == "line":  # pragma: no cover - a tracer is not traced by itself	0	a tracer is not traced by itself
-innovation-upstream/devrc	flagged	scripts/tests/test_dead_guard_scan.py:105	if-body	seen.add(frame.f_lineno)  # pragma: no cover - a tracer is not traced by itself	0	a tracer is not traced by itself
+innovation-upstream/devrc	flagged	scripts/tests/test_dead_guard_scan.py:44	if-body	if event == "line":  # pragma: no cover - a tracer is not traced by itself	0	a tracer is not traced by itself
+innovation-upstream/devrc	flagged	scripts/tests/test_dead_guard_scan.py:45	if-body	seen.add(frame.f_lineno)  # pragma: no cover - a tracer is not traced by itself	0	a tracer is not traced by itself
+innovation-upstream/devrc	flagged	scripts/tests/test_dead_guard_scan.py:112	if-body	if event == "line":  # pragma: no cover - a tracer is not traced by itself	0	a tracer is not traced by itself
+innovation-upstream/devrc	flagged	scripts/tests/test_dead_guard_scan.py:113	if-body	seen.add(frame.f_lineno)  # pragma: no cover - a tracer is not traced by itself	0	a tracer is not traced by itself
 innovation-upstream/devrc	flagged	scripts/tests/test_doc_path_rot.py:442	if-body	return False	0	-
 innovation-upstream/devrc	flagged	scripts/tests/test_doc_path_rot.py:462	if-body	raise AssertionError(	0	-
 innovation-upstream/devrc	flagged	scripts/tests/test_doc_path_rot.py:532	if-body	continue	0	-
@@ -54,9 +59,14 @@ innovation-upstream/devrc	flagged	scripts/tests/test_prune_skill_size.py:486	if-
 innovation-upstream/devrc	flagged	scripts/tests/test_prune_skill_size.py:521	if-body	problems.append(	0	-
 innovation-upstream/devrc	flagged	scripts/tests/test_prune_skill_size.py:529	if-body	problems.append(	0	-
 innovation-upstream/devrc	flagged	scripts/tests/test_session_manager_skill_size.py:719	if-body	loops[topic.name] = hits	0	-
+innovation-upstream/devrc	out-of-instrument	-	python	scripts/claude-hooks/tests/test_bash_guard.py -- NOT a pytest suite by design; its own docstring says so ("hand-rolled asserts, not pytest-collectable -- the guard calls main() at import time, so it is only ever driven via subprocess"). Registering it as instrumentable produced zero traced lines, which the scan reported UNDECIDABLE rather than publishing 400 lines of false flags against the PreToolUse deny-guard	unmeasured	-
+innovation-upstream/devrc	out-of-instrument	-	python	scripts/browser-bridge/tests -- the exemplar guard (_cli_timeout_violations) lives here, but the suite spawns the real browser CLI with a 300s budget per site, so a traced run is far too slow to be re-derivable; measure it on demand with a narrowed selector	unmeasured	-
+innovation-upstream/devrc	out-of-instrument	-	python	scripts/claude-hooks/tests -- the rest of it: ordinary unit suites for the notify/nudge/capture hooks rather than corpus-scanning guards; the two real guards there ARE instrumented above	unmeasured	-
+innovation-upstream/devrc	out-of-instrument	-	python	scripts/check-clickup-addressed/tests, scripts/collector/tests, scripts/collector/browser-ext/tests, scripts/collector/claude/tests, scripts/collector/i3/tests, scripts/collector/keylog/tests, scripts/collector/opencode/tests -- NOT SURVEYED for guard content in this pass. Recorded as unlooked-at rather than omitted; saying so is the point of this row	unmeasured	-
+innovation-upstream/devrc	out-of-instrument	-	python	scripts/dl-router/tests, scripts/initiatives/tests, scripts/mail-actions/tests, scripts/opencode/tests, scripts/repo-cos/tests, scripts/signal/tests, scripts/task-spec-drafter/tests, scripts/validation/tests -- NOT SURVEYED for guard content in this pass; repo-cos/prescan.py and signal/tests/mutation_battery.py are known candidates for a later round	unmeasured	-
+innovation-upstream/devrc	out-of-instrument	-	python	scripts/session-analysis/tests, scripts/session-analysis/session_insight/tests -- NOT SURVEYED for guard content in this pass	unmeasured	-
 innovation-upstream/devrc	out-of-instrument	-	bash	scripts/drift-check.sh, run-tests.sh, run-node-tests.sh: bash PS4/BASH_XTRACEFD line tracing works but cannot discriminate a single-line `if ...; then X; fi`, so a flag there is not decidable at line granularity	unmeasured	-
 innovation-upstream/devrc	out-of-instrument	-	mjs	skill .mjs guards: no node coverage backend built	unmeasured	-
-# ZacxDev/homelab-infra measured under /home/zach/workspace/civit/datapacket-talos/.venv/bin/python3 (Python 3.12.14)
 ZacxDev/homelab-infra	flagged	scripts/tests/test_catch_ci_preemption.py:26	if-body	raise AssertionError(f"cannot load {_SRC} — the script moved or was renamed")	0	-
 ZacxDev/homelab-infra	flagged	scripts/tests/test_devrc_ci_names_the_failing_test.py:97	if-body	raise AssertionError(	0	-
 ZacxDev/homelab-infra	flagged	scripts/tests/test_devrc_ci_names_the_failing_test.py:114	if-body	raise AssertionError(	0	-
@@ -73,10 +83,9 @@ ZacxDev/homelab-infra	flagged	scripts/tests/test_finally_reporter_timeout_invari
 ZacxDev/homelab-infra	flagged	scripts/tests/test_finally_reporter_timeout_invariant.py:475	if-body	continue  # reported by its own assertion above	0	-
 ZacxDev/homelab-infra	out-of-instrument	-	go	~10 *_test.go guards under containers/clawgate: `go test -cover` reports per-package percentages only; no -coverprofile pipeline exists to resolve a single branch	unmeasured	-
 ZacxDev/homelab-infra	out-of-instrument	-	bash	scripts/check-*.sh, kustomize-validate.sh: same bash line-granularity limit	unmeasured	-
-# civitai/talos-infra measured under /home/zach/workspace/civit/datapacket-talos/.venv/bin/python3 (Python 3.12.14)
 civitai/talos-infra	out-of-instrument	-	python	scripts/validate-alert-nodata-state.py, validate-dashboard-metric-seam.py, validate-tekton-build-pool.py, lint-grafana-dashboards.py: these ARE python, but no pytest suite invokes them -- they are called from bash gates. This tool needs a pytest entry point to drive a guard against the corpus, so they are undecidable here, not clean	unmeasured	-
 civitai/talos-infra	out-of-instrument	-	bash	~21 scripts/validate-*.sh plus the 3,576-line scripts/gitops-delta-gate.sh: same bash line-granularity limit as above. These carry 53 tests/mutants-*.sh batteries, which already answer "does this guard fire" by a different and stronger method	unmeasured	-
 civitai/talos-infra	out-of-instrument	-	bash	.githooks/* and .claude/hooks/*.sh: same limit	unmeasured	-
-# civitai/civitai measured under /home/zach/workspace/civit/datapacket-talos/.venv/bin/python3 (Python 3.12.14)
+# civitai/civitai measured under Python 3.12.14 (pytest rc=0)
 civitai/civitai	out-of-instrument	-	ts	~63 corpus-scanning *.test.ts guards plus eslint-local-rules.js: vitest v8 coverage exists but its `include` is scoped to src/server/services/** and src/server/jobs/**, which contains none of the lint-rule guards. Widening it is a config change with its own review, not part of this tool	unmeasured	-
 civitai/civitai	out-of-instrument	-	mjs	scripts/ci/*.mjs and .claude/hooks/*.mjs: no node coverage backend built	unmeasured	-

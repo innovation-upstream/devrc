@@ -23,12 +23,21 @@ VIOLATION-REPORTING branch has zero corpus instances precisely when the repo is
 CLEAN -- that is the branch doing its job. Tracing the corpus alone would flag
 it and recommend deleting the guard's firing path, which is worse than the
 defect. Because the trace covers the whole test run, a reporting branch with a
-planted positive control is exercised BY that control and does not flag. So a
-flag means one of exactly two things, and both are the defect:
+planted positive control is exercised BY that control and does not flag.
+
+🔴 A FLAG IS EVIDENCE, NOT A VERDICT, AND IT HAS THREE READINGS -- ONLY TWO OF
+WHICH ARE DEFECTS:
   (a) dead recognition code -- no corpus instance and no test -> delete it;
   (b) a reporting branch with NO positive control -> the battery does not
-      cover what its comment says it covers.
-Which of the two it is, is the one call a human makes. It is not guessed here.
+      cover what its comment says it covers;
+  (c) NOT A DEFECT: the branch runs somewhere this tracer cannot see -- most
+      often because its test drives the guard through a SUBPROCESS.
+Which one it is, is the call a human makes. It is not guessed here.
+An earlier revision claimed a flag meant "exactly two things, and both are the
+defect". That was itself the over-claiming-guard defect this module exists to
+find: (c) is common -- 8 of this module's own tests drive their subject through
+`subprocess.run` -- and a reviewer told there were only two readings would
+mis-adjudicate every one of them.
 
 🔴 STATED LIMITS, because a limit a reader can act on beats a branch that is
 dead, unexercised and wrong:
@@ -38,6 +47,15 @@ dead, unexercised and wrong:
   - Python only. A guard written in bash, TypeScript or Go is out of
     instrument. The registry records those explicitly rather than letting a
     silent absence read as coverage.
+  - SUBPROCESSES ARE INVISIBLE. `sys.settrace` is per-interpreter, so a guard
+    exercised only by spawning a child python reads as 100% dead. The caller
+    refuses to publish a file whose executed-line count is ZERO for exactly
+    this reason -- but a guard driven PARTLY in-process and partly by
+    subprocess still under-reports, and nothing detects that.
+  - THE TRACER CAN BE DISARMED BY THE CODE UNDER TEST. `sys.settrace` is one
+    global slot; any test that clears it costs this instrument every line
+    after that point. The plugin re-arms per test AND reports `clobbered`, and
+    the caller refuses to publish when it is set.
   - A guard must be INVOCABLE. One that cannot be run is reported UNDECIDABLE,
     never silently passed.
   - This measures the run you gave it. A branch reachable only under a

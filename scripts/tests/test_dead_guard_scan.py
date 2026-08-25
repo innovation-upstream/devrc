@@ -14,6 +14,7 @@ from the implementation: the verdicts are literal.
 import pathlib
 import subprocess
 import sys
+import tokenize
 
 import pytest
 
@@ -45,11 +46,18 @@ def _run(body, corpus):
             return tr
         return None
 
+    # 🔴 SAVE AND RESTORE, NEVER `settrace(None)`. `sys.settrace` is a single
+    # global slot: clearing it disarms whatever tracer was already installed --
+    # including dead_guard_plugin's, when this very suite is being scanned. That
+    # made the tool refuse to publish devrc's census (correctly: the trace would
+    # have been a lower bound, i.e. false positives against live code). Handing
+    # the previous tracer back is what a well-behaved test owes its harness.
+    prev = sys.gettrace()
     sys.settrace(tr)
     try:
         ns["scan"](corpus)
     finally:
-        sys.settrace(None)
+        sys.settrace(prev)
     return dg.evaluate("<t>", body, seen)
 
 
@@ -106,12 +114,13 @@ def test_a_reporting_branch_covered_only_by_its_battery_is_not_flagged():
             return tr
         return None
 
+    prev = sys.gettrace()                 # restore, never clear -- see _run()
     sys.settrace(tr)
     try:
         ns["scan"](["clean line"])        # the corpus: clean
         ns["scan"](["a VIOLATION here"])  # the battery's positive control
     finally:
-        sys.settrace(None)
+        sys.settrace(prev)
     assert dg.evaluate("<t>", src, seen) == []
 
 
@@ -383,6 +392,267 @@ def test_e2e_the_census_path_is_repo_relative_not_absolute(tmp_path):
 
 
 # --------------------------------------------------------------------------
+# span semantics — a branch body is TAKEN if ANY of its lines ran
+#
+# 🔴 EVERY FIXTURE ABOVE HAS A SINGLE-LINE BRANCH BODY, WHICH MAKES `any` AND
+# `all` INDISTINGUISHABLE. An audit mutated `any(...)` -> `all(...)` and
+# `last = max(...)` -> `last = first` and BOTH survived the whole suite, so the
+# span semantics `dead_guard.evaluate` calls load-bearing were entirely
+# untested. That is the fixture-collapse trap: a fixture whose values cannot
+# differ between two implementations cannot see the difference. These cases
+# give the branch a MULTI-LINE body with a line that does NOT run.
+
+_MULTILINE = (
+    'def scan(ls):\n'                    # 1
+    '    for l in ls:\n'                 # 2
+    '        if "A" in l:\n'             # 3
+    '            hit = 1\n'              # 4  <- runs
+    '            if "B" in l:\n'         # 5  <- runs (condition false)
+    '                return "b"\n'       # 6  <- does NOT run
+    '            return "a"\n'           # 7  <- runs
+    '    return None\n')                 # 8
+
+
+def test_a_multiline_body_is_TAKEN_when_only_SOME_of_its_lines_ran():
+    """`any`, not `all`. Under `all` the outer if-body would be condemned
+    because line 6 never runs — a false positive on plainly live code."""
+    flags = _run(_MULTILINE, ["A only"])
+    lines = sorted(f.branch.first_line for f in flags)
+    assert 4 not in lines, (
+        "the outer if-body (line 4) RAN and must not be flagged; "
+        f"got flags at {lines}")
+    # The genuinely-unexecuted inner branch IS flagged, so this fixture is not
+    # simply flagging nothing.
+    assert lines == [6], lines
+
+
+def test_the_body_span_reaches_its_LAST_line_not_just_its_first():
+    """Kills `last = max(...)` -> `last = first`. Only the last line of the
+    body runs, so a span truncated to the first line reports it dead."""
+    src = ('def scan(ls):\n'
+           '    for l in ls:\n'
+           '        if "A" in l:\n'
+           '            if "Z" in l:\n'
+           '                pass\n'
+           '            return "deep"\n'
+           '    return None\n')
+    flags = _run(src, ["A only"])
+    lines = sorted(f.branch.first_line for f in flags)
+    assert 4 not in lines, (
+        f"the outer if-body spans lines 4-6 and line 6 ran; got {lines}")
+    assert lines == [5], lines
+
+
+# --------------------------------------------------------------------------
+# the zeros that must be UNDECIDABLE rather than clean or dead
+
+def test_a_LIBRARY_guard_driven_only_by_a_SUBPROCESS_is_undecidable(tmp_path):
+    """🔴 The worst possible output: a complete, confident, entirely false
+    census of working code. `sys.settrace` is per-interpreter, so a library
+    guard exercised only by spawning a child python is invisible, and every one
+    of its branches would be reported dead.
+
+    ⚠️ The subject must be a LIBRARY module, not the test file. pytest imports
+    a test file during collection, so its module-level lines always trace and
+    this arm can never fire for one — a limit the CLI states at the site.
+    """
+    lib = tmp_path / "scripts" / "guardlib.py"
+    lib.parent.mkdir(parents=True, exist_ok=True)
+    lib.write_text('def scan(ls):\n'
+                   '    hits = []\n'
+                   '    for l in ls:\n'
+                   '        if "REAL" in l:\n'
+                   '            hits.append("real")\n'
+                   '    return hits\n', encoding="utf-8")
+    guard = ('import subprocess, sys, pathlib\n'
+             '\n'
+             'LIB = pathlib.Path(__file__).resolve().parents[2] / "scripts" / "guardlib.py"\n'
+             '\n'
+             '\n'
+             'def test_driven_only_through_a_subprocess():\n'
+             '    code = "import importlib.util,sys;"\\\n'
+             '           "s=importlib.util.spec_from_file_location(\'g\', sys.argv[1]);"\\\n'
+             '           "m=importlib.util.module_from_spec(s);s.loader.exec_module(m);"\\\n'
+             '           "print(m.scan([\'a REAL line\']))"\n'
+             '    p = subprocess.run([sys.executable, "-c", code, str(LIB)],\n'
+             '                       capture_output=True, text=True, timeout=60)\n'
+             '    assert "real" in p.stdout, (p.stdout, p.stderr)\n')
+    reg = _synthetic_repo(tmp_path, guard)
+    reg.write_text(
+        "test/synthetic\tpython\tinstrument\tscripts/tests/test_guard.py\n"
+        "test/synthetic\tpython\tinstrument\tscripts/guardlib.py\n"
+        "test/synthetic\tbash\tout-of-instrument\t"
+        "a reason long enough to satisfy the registry's own contract that an "
+        "out-of-instrument row must say WHY it is not measured\n",
+        encoding="utf-8")
+    rc, out = _cli(tmp_path, reg)
+    assert rc == 2, (rc, out)
+    assert "guardlib.py: NO line of this file was traced" in out, out
+    assert 'hits.append("real")' not in out, \
+        "a live branch was reported dead on an untraced library module"
+
+
+def test_a_test_that_CLEARS_the_tracer_makes_the_run_undecidable(tmp_path):
+    """🔴 `sys.settrace` is one global slot. A test that clears it disarms this
+    instrument for every file collected afterwards, which then reports LIVE
+    branches as dead — on a GREEN run, so the red-run banner never fires.
+    Re-arming per test is not sufficient on its own: a tracer cleared partway
+    through a test still loses that test's lines, so the run is reported
+    UNDECIDABLE rather than published."""
+    guard = ('import sys\n'
+             '\n'
+             'def scan(ls):\n'
+             '    hits = []\n'
+             '    for l in ls:\n'
+             '        if "REAL" in l:\n'
+             '            hits.append("real")\n'
+             '    return hits\n'
+             '\n'
+             '\n'
+             'def test_that_clears_the_global_tracer():\n'
+             '    def tr(frame, event, arg):\n'
+             '        return None\n'
+             '    sys.settrace(tr)\n'
+             '    try:\n'
+             '        assert scan(["a REAL line"]) == ["real"]\n'
+             '    finally:\n'
+             '        sys.settrace(None)\n'
+             '\n'
+             '\n'
+             'def test_zz_runs_after_the_clobber():\n'
+             '    assert scan(["a REAL line"]) == ["real"]\n')
+    reg = _synthetic_repo(tmp_path, guard)
+    rc, out = _cli(tmp_path, reg)
+    assert rc == 2, (rc, out)
+    assert "sys.settrace" in out, out
+
+
+def test_a_guard_that_cannot_be_DECODED_is_undecidable_not_a_findings_exit(tmp_path):
+    """🔴 A file this tool cannot analyse must exit 2, not 1. Exit 1 means
+    "found dead branches" and is indistinguishable from a real result — and the
+    escaping exception wrote no census at all.
+
+    A latin-1 `.py` is the REACHABLE case: `read_text(encoding="utf-8")` raises
+    `UnicodeDecodeError` before anything is parsed.
+    """
+    reg = _synthetic_repo(tmp_path, _E2E_GUARD)
+    bad = tmp_path / "scripts" / "tests" / "test_latin1.py"
+    bad.write_bytes(b'# caf\xe9\ndef test_ok():\n    assert True\n')
+    reg.write_text(reg.read_text(encoding="utf-8").replace(
+        "scripts/tests/test_guard.py", "scripts/tests/test_*.py"), encoding="utf-8")
+    rc, out = _cli(tmp_path, reg)
+    assert rc == 2, (rc, out)
+    assert "cannot be analysed (UnicodeDecodeError" in out, out
+
+
+def test_tokenize_TokenError_is_deliberately_NOT_in_the_catch_list():
+    """🔴 THE FIX FOR AN AUDIT FINDING WAS ITSELF A DEAD GUARD BRANCH.
+
+    `tokenize.TokenError` is not a `SyntaxError` subclass, so adding it looked
+    obviously right — and it is unreachable. `ast.parse` runs first and raises
+    `SyntaxError` for every input that would raise `TokenError`. Measured here
+    rather than asserted, so that if CPython ever changes this the catch can be
+    restored WITH a real input behind it. Applying this repo's own rule to the
+    fix round: delete the unexercised branch and state the limit.
+    """
+    assert not issubclass(tokenize.TokenError, SyntaxError)
+    for src in ('x = "abc\n', 'x = """abc\n', 'x = (1,\n', 'x = 1 + \\\n'):
+        with pytest.raises(SyntaxError):
+            dg.branch_bodies(src)          # ast.parse gets there first
+        with pytest.raises(tokenize.TokenError):
+            dg.justifications(src)         # ...only tokenize would have raised
+    assert "tokenize.TokenError" not in SCAN.read_text(encoding="utf-8").split(
+        "🔴 `tokenize.TokenError` IS DELIBERATELY ABSENT")[1], \
+        "the catch was re-added without a reachable input to justify it"
+
+
+def test_an_unparseable_guard_is_undecidable_not_a_findings_exit(tmp_path):
+    """The parse arm, driven: a syntactically broken guard exits 2."""
+    reg = _synthetic_repo(tmp_path, _E2E_GUARD)
+    # A second registered guard that cannot be tokenised.
+    bad = tmp_path / "scripts" / "tests" / "test_broken.py"
+    bad.write_text('def test_ok():\n    assert True\n\nx = "unterminated\n',
+                   encoding="utf-8")
+    reg.write_text(reg.read_text(encoding="utf-8").replace(
+        "scripts/tests/test_guard.py", "scripts/tests/test_*.py"), encoding="utf-8")
+    rc, out = _cli(tmp_path, reg)
+    assert rc == 2, (rc, out)
+    assert "cannot be analysed" in out, out
+
+
+def test_an_instrument_selector_matching_NOTHING_is_undecidable(tmp_path):
+    """🔴 A one-character typo in a selector otherwise reduces the whole report
+    to nothing and exits 0 — shaped identically to the legitimate 'this repo
+    has no python guards' case."""
+    reg = _synthetic_repo(tmp_path, _E2E_GUARD)
+    reg.write_text(reg.read_text(encoding="utf-8").replace(
+        "scripts/tests/test_guard.py", "scripts/tests/test_guardd.py"),
+        encoding="utf-8")
+    rc, out = _cli(tmp_path, reg)
+    assert rc == 2, (rc, out)
+    assert "matched NO python file" in out, out
+
+
+# --------------------------------------------------------------------------
+# the census is an artifact people re-derive
+
+def test_the_census_is_IDEMPOTENT(tmp_path):
+    """🔴 It is append-only no longer. The regeneration command is printed in
+    the census's own header, so following it used to DOUBLE every row — and a
+    flag resolved in the source was never removed, so the artifact drifted
+    upward from the thing it measures."""
+    reg = _synthetic_repo(tmp_path, _E2E_GUARD)
+    census = tmp_path / "c.tsv"
+    for _ in range(3):
+        subprocess.run([sys.executable, str(SCAN), "--repo", str(tmp_path),
+                        "--registry", str(reg), "--census", str(census)],
+                       capture_output=True, text=True, timeout=900)
+    rows = [r for r in census.read_text(encoding="utf-8").splitlines()
+            if r.startswith("test/synthetic\t")]
+    assert len(rows) == 2, rows          # 1 flagged + 1 out-of-instrument
+    assert len(set(rows)) == 2, rows
+
+
+def test_the_census_never_carries_an_absolute_path(tmp_path):
+    """🔴 The committed census recorded
+    `/home/<user>/workspace/.../.venv/bin/python3` — the operator's home dir
+    and an unrelated repo's venv, published into devrc and pinning the artifact
+    to one machine. The interpreter VERSION is what changes which branches run;
+    the path is a terminal diagnostic, not an artifact field."""
+    reg = _synthetic_repo(tmp_path, _E2E_GUARD)
+    census = tmp_path / "c.tsv"
+    subprocess.run([sys.executable, str(SCAN), "--repo", str(tmp_path),
+                    "--registry", str(reg), "--census", str(census)],
+                   capture_output=True, text=True, timeout=900)
+    text = census.read_text(encoding="utf-8")
+    assert "measured under Python " in text, text
+    for line in text.splitlines():
+        assert "/home/" not in line, line
+        assert str(tmp_path) not in line, line
+
+
+def test_the_census_records_that_the_run_was_RED(tmp_path):
+    """A reader six months out cannot otherwise tell that N flags came off a
+    failing run. The stdout banner does not survive into the artifact."""
+    guard = _E2E_GUARD + '\n\ndef test_deliberately_failing():\n    assert False\n'
+    reg = _synthetic_repo(tmp_path, guard)
+    census = tmp_path / "c.tsv"
+    subprocess.run([sys.executable, str(SCAN), "--repo", str(tmp_path),
+                    "--registry", str(reg), "--census", str(census)],
+                   capture_output=True, text=True, timeout=900)
+    text = census.read_text(encoding="utf-8")
+    assert "RED RUN" in text and "1 test(s) FAILED" in text, text
+
+
+def test_a_TAB_in_a_snippet_cannot_shift_the_census_columns():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("dgs_tsv", SCAN)
+    dgs = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(dgs)
+    assert "\t" not in dgs._tsv("a\tb\nc")
+
+
+# --------------------------------------------------------------------------
 # the registry is an artifact with a contract
 
 def test_registry_parses_and_every_repo_declares_what_is_NOT_measured():
@@ -407,6 +677,41 @@ def test_registry_parses_and_every_repo_declares_what_is_NOT_measured():
                 f"{s}: an out-of-instrument row must say WHY, not just that: {r}"
     for r in rows:
         assert r["status"] in ("instrument", "out-of-instrument"), r
+
+
+def test_registry_names_every_test_directory_in_devrc():
+    """🔴 THE GUARD THE PREVIOUS ONE ONLY CLAIMED TO BE.
+
+    `test_registry_parses_and_every_repo_declares_what_is_NOT_measured` says in
+    its docstring that it would catch "a repo with only `instrument` rows …
+    guards unlooked-at". Its body asserts only that at least ONE
+    out-of-instrument row exists, so it could not see a guard surface present
+    in NEITHER status — and 12 python guard modules under
+    `scripts/claude-hooks/`, including the PreToolUse deny-guards
+    `guard_core.py` and `bash-guard.py`, were exactly that. The registry's own
+    headline claim ("a guard absent from this file would read as measured and
+    clean") was violated for devrc's largest python guard surface.
+
+    Bidirectional, like homelab-infra's `ci-manifest.txt`: a new test directory
+    with no row FAILS, so the set cannot silently grow. It does not try to
+    decide what a "guard" is — it requires a DECISION to be on record.
+    """
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("dgs_reg", SCAN)
+    dgs = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(dgs)
+    rows = dgs.load_registry(REGISTRY)
+
+    dirs = dgs.test_dirs(REPO)
+    assert len(dirs) >= 10, (
+        f"only {len(dirs)} test dirs found in {REPO} — the enumeration is "
+        f"broken, and an empty ledger would pass this test vacuously: {dirs}")
+
+    missing = dgs.unregistered_test_dirs(REPO, rows, "innovation-upstream/devrc")
+    assert missing == [], (
+        "these directories hold test_*.py and appear in NO registry row, in "
+        "either status — so this tool reports clean over them while never "
+        "having looked:\n  " + "\n  ".join(missing))
 
 
 def test_registry_is_keyed_on_the_remote_slug_not_the_clone_directory():

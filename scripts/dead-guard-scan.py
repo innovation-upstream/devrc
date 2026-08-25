@@ -6,24 +6,33 @@
     python3 scripts/dead-guard-scan.py --repo <path> --census <out.tsv>
 
 A guard branch that never executes -- against the real corpus AND the guard's
-own battery -- is either dead recognition code or a reporting branch with no
-positive control. Both are the defect `claude/RULES.md` names under "A guard's
-DESCRIPTION claims COVERAGE"; the remedy is to DELETE it and state the limit,
-not to harden it. The analysis, and its stated limits, live in
-`scripts/lib/dead_guard.py`. Resolve a flag by deleting the branch or writing
-one line at the site: `# pragma: no cover - <reason>`.
+own battery -- is EVIDENCE of one of three things, two of which are the defect
+`claude/RULES.md` names under "A guard's DESCRIPTION claims COVERAGE": dead
+recognition code, a reporting branch with no positive control, or (not a
+defect) a branch driven through a subprocess this tracer cannot see. For the
+first two the remedy is to DELETE it and state the limit, not to harden it. The
+analysis and its full limits live in `scripts/lib/dead_guard.py`. Resolve a
+flag by deleting the branch or writing one line at the site:
+`# pragma: no cover - <reason>`.
 
 🔴 THIS IS ADVISORY. It gates nothing until deliberately wired into CI, and its
 own precision on real code is a human call -- flags are evidence for that
 reading, not a verdict to auto-apply.
 
 🔴 WHAT A CLEAN EXIT DOES NOT MEAN. Only the `instrument` rows of
-`scripts/data/dead-guard-registry.tsv` are measured -- roughly 88 of ~270
-guards across the four repos. Everything else is bash, TypeScript or Go, and is
-listed there as out-of-instrument WITH ITS REASON. Exit 0 means "no unresolved
-flag among the guards this tool can see", never "the repo's guards are alive".
-The census prints that ratio on every run so the number is not quotable without
-its denominator.
+`scripts/data/dead-guard-registry.tsv` are measured. Everything else -- bash,
+TypeScript, Go -- is listed there as out-of-instrument WITH ITS REASON. Exit 0
+means "no unresolved flag among the guards this tool can see", never "the
+repo's guards are alive".
+
+🔴 AND THE DENOMINATOR IS NOT DERIVABLE FROM THIS TOOL. An earlier revision of
+this docstring claimed "the census prints that ratio on every run so the number
+is not quotable without its denominator". It did not: what is printed is a
+count of instrumented FILES and a count of registry ROWS, neither of which is a
+guard total. Nothing here enumerates every guard in a repo, so any "N of M"
+figure is a human's survey, not a measurement -- do not quote one as if this
+tool produced it. That false claim shipped in this file and in the PR body, and
+it is the same over-claiming-guard defect the tool exists to find.
 """
 
 import argparse
@@ -84,10 +93,72 @@ def guard_files(repo, rows, slug):
     return out
 
 
+_WALK_SKIP = {".git", "__pycache__", "node_modules", ".venv", ".mypy_cache",
+              ".pytest_cache", ".claude"}
+
+
+def test_dirs(repo):
+    """Every directory holding a `test_*.py` -- the surface a registry must
+    have an opinion about.
+
+    Prefers `git ls-files` (tracked files only, so build output and stray
+    scratch files cannot inflate the ledger). Falls back to a filesystem walk
+    when git returns nothing, so this works in a plain copy of a tree -- which
+    is how the mutation battery runs, and is also just a repo that has not been
+    initialised. A hard git dependency here would make the fallback path exit
+    with an empty ledger, i.e. a silent "everything is registered".
+    """
+    repo = pathlib.Path(repo)
+    out = subprocess.run(["git", "-C", str(repo), "ls-files"],
+                         capture_output=True, text=True, timeout=120).stdout
+    files = [f for f in out.splitlines()
+             if re.search(r"(^|/)test_[^/]*\.py$", f) and "/" in f]
+    if not files:
+        files = [str(p.relative_to(repo)) for p in repo.rglob("test_*.py")
+                 if p.is_file()
+                 and not _WALK_SKIP & set(p.relative_to(repo).parts)]
+        files = [f for f in files if "/" in f]
+    return sorted({f.rsplit("/", 1)[0] for f in files})
+
+
+def unregistered_test_dirs(repo, rows, slug):
+    """Test directories no registry row mentions, in EITHER status.
+
+    🔴 THIS IS THE REGISTRY'S OWN GUARD, AND IT EXISTS BECAUSE THE FIRST ONE WAS
+    NARROWER THAN ITS DOCSTRING. `test_registry_parses_and_every_repo_declares_
+    what_is_NOT_measured` claims it would catch "a repo with only `instrument`
+    rows"; its body only asserts that at least one out-of-instrument row exists.
+    It therefore could not see a guard surface present in NEITHER status -- and
+    12 python guard modules under `scripts/claude-hooks/`, including the
+    PreToolUse deny-guards `guard_core.py` and `bash-guard.py`, were exactly
+    that: absent, and so reading as measured and clean.
+
+    Mechanical, not heuristic: it does not try to decide what a "guard" is. It
+    requires a DECISION to have been recorded for every directory that holds
+    tests -- which is the homelab-infra `ci-manifest.txt` pattern.
+    """
+    mine = [r for r in rows if r["slug"] == slug]
+    named = " ".join(r["selector"] for r in mine)
+    return [d for d in test_dirs(repo) if d not in named]
+
+
 def run_traced(repo, targets, python=None, extra_args=()):
-    """Run the guards under pytest with the line tracer. Returns
-    (executed, rc, tail). `executed` is None when the trace never landed --
-    a missing file must not read as 'nothing executed'.
+    """Trace the guards, ONE PYTEST INVOCATION PER TEST DIRECTORY.
+
+    🔴 `conftest.py` IS NOT NAMESPACED. This repo has several `conftest.py`
+    files and no `__init__.py`, so an importer binds to whichever lands in
+    `sys.modules` first and collecting two test directories in ONE pytest run
+    fails with an ImportError naming the wrong file. (`scripts/browser-bridge/
+    tests/cli_budget.py` documents the same trap; devrc's own runner uses one
+    target per invocation for this reason.) Measured here: adding
+    `scripts/claude-hooks/tests/` to the registry made `test_bash_guard.py`
+    collect zero tests, so NOT ONE of its lines was traced -- which, before the
+    zero-lines guard existed, would have been published as "every branch in the
+    PreToolUse deny-guard is dead".
+
+    Returns (trace, (rc, nfail), tail), traces merged across groups. `trace` is
+    None when a group produced no trace file at all -- a missing file must not
+    read as 'nothing executed'.
 
     🔴 THE INTERPRETER IS PART OF THE MEASUREMENT, AND IT LEAKS FROM cwd.
     `sys.executable` is whatever python is running THIS script, which under
@@ -99,38 +170,74 @@ def run_traced(repo, targets, python=None, extra_args=()):
     hence the interpreter is printed on every run and written into the census.
     """
     python = python or sys.executable
-    with tempfile.TemporaryDirectory(prefix="dgs-") as td:
-        out = pathlib.Path(td) / "executed.json"
-        env = dict(os.environ)
-        env["DGS_TARGETS"] = os.pathsep.join(str(t) for t in targets)
-        env["DGS_OUT"] = str(out)
-        env["PYTHONPATH"] = os.pathsep.join(
-            [str(PLUGIN_DIR)] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
-        env.pop("PYTEST_ADDOPTS", None)
-        cmd = [python, "-m", "pytest", "-p", "dead_guard_plugin",
-               "-q", "--no-header", "--continue-on-collection-errors",
-               "-p", "no:cacheprovider",
-               *[str(t) for t in targets if t.name.startswith("test_")], *extra_args]
-        proc = subprocess.run(cmd, cwd=str(repo), env=env,
-                              capture_output=True, text=True, timeout=3600)
-        tail = (proc.stdout or "")[-3000:] + (proc.stderr or "")[-1500:]
-        # Count FAILED lines rather than reading the exit code: a red run leaves
-        # branches unexecuted for a reason that is NOT deadness, so the caller
-        # must be able to say how much of the census rests on it.
-        nfail = len(re.findall(r"^FAILED ", proc.stdout or "", re.M))
-        if not out.exists():
-            return None, proc.returncode, tail
-        return (json.loads(out.read_text(encoding="utf-8")),
-                (proc.returncode, nfail), tail)
+    tests = [t for t in targets if t.name.startswith("test_")]
+    groups = {}
+    for t in tests:
+        groups.setdefault(t.parent, []).append(t)
+    if not groups:                      # only library modules registered
+        groups = {None: []}
+
+    merged, code, nfail, tails = {}, 0, 0, []
+    clobbered = False
+    for parent, files in sorted(groups.items(), key=lambda kv: str(kv[0])):
+        with tempfile.TemporaryDirectory(prefix="dgs-") as td:
+            out = pathlib.Path(td) / "executed.json"
+            env = dict(os.environ)
+            # EVERY target is traced in EVERY group: a library module is
+            # exercised by whichever suite happens to import it.
+            env["DGS_TARGETS"] = os.pathsep.join(str(t) for t in targets)
+            env["DGS_OUT"] = str(out)
+            env["PYTHONPATH"] = os.pathsep.join(
+                [str(PLUGIN_DIR)] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
+            env.pop("PYTEST_ADDOPTS", None)
+            env["PYTHONDONTWRITEBYTECODE"] = "1"   # a "read-only" scan must not
+            # litter the target repo with __pycache__ -- and a stale .pyc is how
+            # a same-length edit gets scored without ever executing.
+            cmd = [python, "-m", "pytest", "-p", "dead_guard_plugin",
+                   "-q", "--no-header", "--continue-on-collection-errors",
+                   "-p", "no:cacheprovider",
+                   *[str(t) for t in files], *extra_args]
+            try:
+                proc = subprocess.run(cmd, cwd=str(repo), env=env,
+                                      capture_output=True, text=True, timeout=3600)
+            except subprocess.TimeoutExpired as e:
+                # NOT a clean run and NOT a set of findings: we did not measure.
+                return None, (-1, 0), f"traced run timed out after 3600s: {e}"
+            tails.append((proc.stdout or "")[-2000:] + (proc.stderr or "")[-1000:])
+            # Count FAILED lines rather than reading the exit code: a red run
+            # leaves branches unexecuted for a reason that is NOT deadness, so
+            # the caller must say how much of the census rests on it.
+            nfail += len(re.findall(r"^FAILED ", proc.stdout or "", re.M))
+            code = code or proc.returncode
+            if not out.exists():
+                return None, (proc.returncode, nfail), "\n".join(tails)
+            part = json.loads(out.read_text(encoding="utf-8"))
+            clobbered = clobbered or bool(part.get("clobbered"))
+            for path, lines in part.get("executed", {}).items():
+                merged.setdefault(path, set()).update(lines)
+
+    return ({"executed": {k: sorted(v) for k, v in merged.items()},
+             "clobbered": clobbered},
+            (code, nfail), "\n".join(tails))
 
 
-def interpreter_id(python):
-    """`<path> (Python X.Y.Z)` -- recorded so a trace carries its own scope."""
+def interpreter_id(python, redact=False):
+    """`<path> (Python X.Y.Z)` -- recorded so a trace carries its own scope.
+
+    🔴 `redact=True` for anything COMMITTED. The absolute path is the operator's
+    home directory, and under direnv it is routinely another repo's `.venv`
+    (see `run_traced`) -- committing it publishes a local filesystem layout and
+    pins the artifact to one machine. The VERSION is the part that changes
+    which branches run; the path is a diagnostic for the person at the
+    terminal, so it is printed and not written.
+    """
     try:
         v = subprocess.run([python, "-c", "import sys;print('.'.join(map(str,sys.version_info[:3])))"],
                            capture_output=True, text=True, timeout=60).stdout.strip()
     except (OSError, subprocess.SubprocessError):
         v = "?"
+    if redact:
+        return f"Python {v or '?'}"
     return f"{python} (Python {v or '?'})"
 
 
@@ -152,6 +259,23 @@ def scan(repo, census_path=None, verbose=True, python=None, registry=None):
 
     targets = guard_files(repo, rows, slug)
     oo = [r for r in rows if r["slug"] == slug and r["status"] == "out-of-instrument"]
+    inst = [r for r in rows if r["slug"] == slug and r["status"] == "instrument"]
+
+    # 🔴 AN `instrument` SELECTOR THAT MATCHES NOTHING IS A TYPO, NOT A CLEAN
+    # REPO. Without this, a one-character slip in a selector silently reduces
+    # the report to nothing and exits 0 -- shaped identically to the legitimate
+    # "this repo has no Python guards" case, which is the single most damaging
+    # confusion this tool can produce.
+    empty = [r["selector"] for r in inst
+             if not [p for p in pathlib.Path(repo).glob(r["selector"])
+                     if p.is_file() and p.suffix == ".py"]]
+    if empty:
+        print(f"{slug}: {len(empty)} `instrument` selector(s) matched NO python "
+              f"file in this clone -- a typo, or the guards moved. That is "
+              f"UNDECIDABLE, not clean:\n  " + "\n  ".join(empty),
+              file=sys.stderr)
+        return EXIT_UNDECIDABLE
+
     if not targets:
         # 🔴 STILL WRITE THE CENSUS. A repo with nothing instrumentable is
         # exactly the one whose absence from the artifact would read as "swept
@@ -162,26 +286,82 @@ def scan(repo, census_path=None, verbose=True, python=None, registry=None):
               f"{len(oo)} out-of-instrument row(s) registered.")
         if census_path:
             write_census(census_path, slug, [], oo, [],
-                         interpreter_id(python))
+                         interpreter_id(python, redact=True))
         return EXIT_CLEAN
 
-    executed, rc, tail = run_traced(repo, targets, python=python)
-    if executed is None:
+    trace, rc, tail = run_traced(repo, targets, python=python)
+    if trace is None:
         print(f"{slug}: the traced run produced no trace file (pytest rc={rc}). "
               f"That is UNDECIDABLE, not clean.\n{tail}", file=sys.stderr)
+        return EXIT_UNDECIDABLE
+    executed = trace.get("executed", {})
+
+    # 🔴 A DISARMED TRACER MUST NOT PUBLISH. If any test cleared or replaced
+    # `sys.settrace`, every target executed afterwards went unrecorded, so the
+    # trace is a LOWER BOUND -- and a lower bound on execution is an UPPER
+    # bound on deadness, i.e. false positives against live code, on a green run.
+    if trace.get("clobbered"):
+        print(f"{slug}: a test cleared or replaced sys.settrace during the run, "
+              f"so the trace is a lower bound and live branches would be "
+              f"reported dead. UNDECIDABLE, not clean.", file=sys.stderr)
         return EXIT_UNDECIDABLE
 
     all_flags, undecidable = [], []
     for t in targets:
-        src = t.read_text(encoding="utf-8")
         # REPO-RELATIVE in the artifact: the census is committed and read on
         # other machines, where an absolute path names a directory that does
         # not exist -- and here it would bake in a throwaway worktree's name.
         rel = str(t.relative_to(repo))
+        # PARSEABILITY FIRST. A file that will not parse is "cannot be
+        # analysed" whatever the trace says -- and it is also, necessarily,
+        # never traced, so the zero-lines arm below would otherwise claim it
+        # was driven by a subprocess. Attribute the cause you actually know.
+        try:
+            src = t.read_text(encoding="utf-8")
+            dg.branch_bodies(src, rel)
+        except (SyntaxError, ValueError) as e:
+            # TWO names, not five. An audit found that only SyntaxError and
+            # IndentationError were caught, so a file this tool could not
+            # analyse escaped as a traceback and exit 1 -- indistinguishable
+            # from "found dead branches" -- and no census was written at all.
+            # The first fix widened this to five names; three of them were
+            # REDUNDANT SPELLINGS that read as coverage while adding nothing,
+            # which is the very defect this tool looks for. Measured on 3.12:
+            # so a file this tool could not analyse escaped as a traceback and
+            # exit 1 -- indistinguishable from "found dead branches" -- and no
+            # census was written at all. UnicodeDecodeError is the reachable
+            # one: a .py file in latin-1 raises it from `read_text`.
+            #
+            # 🔴 `tokenize.TokenError` IS DELIBERATELY ABSENT, though it is not
+            # a SyntaxError subclass and the first fix DID add it. Measured on
+            # 3.12: every input that raises TokenError (unterminated string,
+            # unterminated triple-quote, open bracket at EOF, trailing
+            # backslash) raises SyntaxError from `ast.parse` FIRST, and
+            # `ast.parse` runs before any tokenising. The catch was therefore
+            # unreachable -- a dead guard branch, in the fix for a dead-guard
+            # finder. Deleted and stated, per this repo's own rule, rather than
+            # kept as reassuring width. If you find an input that parses but
+            # will not tokenise, add it back WITH that input as a test.
+            undecidable.append(f"{rel}: cannot be analysed ({type(e).__name__}: {e})")
+            continue
+        # 🔴 ZERO EXECUTED LINES IS "NEVER TRACED", NOT "ENTIRELY DEAD". The
+        # common cause is a library guard whose tests drive it through a
+        # SUBPROCESS, which `sys.settrace` cannot see. Reporting every branch
+        # of such a file would be the tool's worst output: a confident,
+        # complete, entirely false census of working code.
+        # ⚠️ LIMIT: this cannot fire for a pytest FILE, because collection
+        # imports it and its module-level lines always trace. It protects
+        # library modules. A test file whose subject runs only in a subprocess
+        # still under-reports, and nothing here detects that.
+        if not executed.get(str(t)):
+            undecidable.append(
+                f"{rel}: NO line of this file was traced. It is driven through "
+                f"a subprocess, or was never imported -- not dead.")
+            continue
         try:
             flags = dg.evaluate(rel, src, set(executed.get(str(t), [])))
-        except (SyntaxError, IndentationError) as e:
-            undecidable.append(f"{rel}: will not parse ({e})")
+        except (SyntaxError, ValueError) as e:  # see the note above
+            undecidable.append(f"{rel}: cannot be analysed ({type(e).__name__}: {e})")
             continue
         all_flags.extend(flags)
 
@@ -190,7 +370,10 @@ def scan(repo, census_path=None, verbose=True, python=None, registry=None):
     if verbose:
         _report(slug, targets, all_flags, unres, oo, undecidable, rc, interp)
     if census_path:
-        write_census(census_path, slug, all_flags, oo, undecidable, interp)
+        write_census(census_path, slug, all_flags, oo, undecidable,
+                     interpreter_id(python, redact=True), rc)
+    # Undecidable outranks flags: "I could not measure part of this" must not
+    # be reported as "here is the measurement".
     if undecidable:
         return EXIT_UNDECIDABLE
     return EXIT_FLAGS if unres else EXIT_CLEAN
@@ -209,8 +392,12 @@ def _report(slug, targets, flags, unres, oo, undecidable, rc, interp):
               f"a failure did not execute for a reason that is NOT deadness -- "
               f"flags in those files are weaker evidence. Green the run, or "
               f"attribute each flag by hand.")
-    print(f"   NOT measured : {len(oo)} registered out-of-instrument row(s) -- "
-          f"bash / TypeScript / Go")
+    # Say ROWS, not guards. These are registry entries, each covering an
+    # unknown number of files; calling them a guard count would invent a
+    # denominator this tool cannot measure.
+    print(f"   NOT measured : {len(oo)} registered out-of-instrument ROW(s) "
+          f"(registry entries, NOT a guard count -- no denominator is derivable "
+          f"here)")
     print(f"   flagged      : {len(flags)} branch bodies never executed "
           f"({len(flags) - len(unres)} justified, {len(unres)} unresolved)")
     for f in sorted(unres, key=lambda x: (x.path, x.branch.first_line)):
@@ -220,31 +407,64 @@ def _report(slug, targets, flags, unres, oo, undecidable, rc, interp):
         print(f"   UNDECIDABLE {u}")
 
 
-def write_census(path, slug, flags, oo, undecidable, interp="?"):
+_CENSUS_HEADER = [
+    "# Measured census of guard branches with zero corpus instances.",
+    "# Regenerate, per repo: scripts/dead-guard-scan.py --repo <path> --census <this file>",
+    "# 🔴 out-of-instrument rows are NOT a clean result -- they are guards this tool",
+    "#    CANNOT see. A repo's absence from this file is not evidence about it.",
+    "# 🔴 A flag has THREE readings and only two are defects: dead code, an untested",
+    "#    reporting branch, or a branch driven through a subprocess. See",
+    "#    scripts/lib/dead_guard.py. Adjudicating them is a human's job.",
+    "repo_slug\tstatus\tlocation\tkind\tcase_handled\tcorpus_instances\tjustification",
+]
+
+
+def _tsv(s):
+    """A TAB inside a snippet or a reason would shift every later column."""
+    return str(s).replace("\t", "\\t").replace("\n", " ").replace("\r", " ")
+
+
+def write_census(path, slug, flags, oo, undecidable, interp="?", rc=(0, 0)):
+    """Rewrite THIS repo's rows, leaving other repos' rows intact.
+
+    🔴 IDEMPOTENT, because the regeneration command is printed in the file's own
+    header. Appending meant that following your own instructions doubled every
+    row, and a flag resolved in the source was never removed from the artifact
+    -- so the census drifted upward from the thing it claims to measure.
+    """
     p = pathlib.Path(path)
-    new = not p.exists()
-    with p.open("a", encoding="utf-8") as fh:
-        if new:
-            fh.write("# Measured census of guard branches with zero corpus "
-                     "instances. Regenerate: scripts/dead-guard-scan.py --repo "
-                     "<path> --census <this file>\n")
-            fh.write("# `status` out-of-instrument rows are NOT a clean result "
-                     "-- they are guards this tool cannot see. See "
-                     "scripts/data/dead-guard-registry.tsv.\n")
-            fh.write("repo_slug\tstatus\tlocation\tkind\tcase_handled"
-                     "\tcorpus_instances\tjustification\n")
-        # The interpreter is part of the measurement: a different one takes
-        # different branches, so a census without it is not reproducible.
-        fh.write(f"# {slug} measured under {interp}\n")
-        for f in sorted(flags, key=lambda x: (x.path, x.branch.first_line)):
-            b = f.branch
-            fh.write(f"{slug}\tflagged\t{f.path}:{b.first_line}\t{b.kind}\t"
-                     f"{b.snippet}\t0\t{f.justified_reason or '-'}\n")
-        for r in oo:
-            fh.write(f"{slug}\tout-of-instrument\t-\t{r['lang']}\t"
-                     f"{r['selector']}\tunmeasured\t-\n")
-        for u in undecidable:
-            fh.write(f"{slug}\tundecidable\t{u}\t-\t-\t-\t-\n")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    code, nfail = rc if isinstance(rc, tuple) else (rc, 0)
+
+    kept = []
+    if p.exists():
+        for line in p.read_text(encoding="utf-8").splitlines():
+            if line.startswith("#") or line.startswith("repo_slug\t"):
+                continue                       # header is re-emitted below
+            if line.startswith(f"{slug}\t") or line.startswith(f"# {slug} "):
+                continue                       # this repo's old rows: replaced
+            if line.strip():
+                kept.append(line)
+
+    out = list(_CENSUS_HEADER)
+    out.extend(kept)
+    # The interpreter VERSION is part of the measurement (a different one takes
+    # different branches). The PATH is not written -- see `interpreter_id`.
+    note = f"# {slug} measured under {interp}"
+    if nfail:
+        note += (f" -- 🔴 RED RUN, {nfail} test(s) FAILED: branches downstream of "
+                 f"a failure did not execute for a reason that is NOT deadness")
+    out.append(f"{note} (pytest rc={code})")
+    for f in sorted(flags, key=lambda x: (x.path, x.branch.first_line)):
+        b = f.branch
+        out.append(f"{slug}\tflagged\t{_tsv(f.path)}:{b.first_line}\t{b.kind}\t"
+                   f"{_tsv(b.snippet)}\t0\t{_tsv(f.justified_reason or '-')}")
+    for r in oo:
+        out.append(f"{slug}\tout-of-instrument\t-\t{r['lang']}\t"
+                   f"{_tsv(r['selector'])}\tunmeasured\t-")
+    for u in undecidable:
+        out.append(f"{slug}\tundecidable\t{_tsv(u)}\t-\t-\t-\t-")
+    p.write_text("\n".join(out) + "\n", encoding="utf-8")
 
 
 # --------------------------------------------------------------------------
