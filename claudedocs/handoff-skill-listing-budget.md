@@ -1,5 +1,33 @@
 # Handoff: skill-listing-budget — 2026-08-23
 
+> 🔴 **SUPERSEDED 2026-08-24. Its central claim was FALSE and `/resume` points here — read this
+> box before anything below it.** The corrected model lives in
+> `claudedocs/proposal-skill-listing-tiers.md` and in the docstring of
+> `scripts/tests/test_skill_descriptions.py`. Do **not** re-derive what this doc argues.
+>
+> - 🔴 **"No tokenizer makes it fit" / the break-even divisor argument is MOOT.** Claude Code
+>   never tokenizes the listing. The budget is characters:
+>   `floor(contextWindow × zx(model) × skillListingBudgetFraction)`, and **`zx` is not a
+>   constant** — 4 for models up to 4.6, **3 for `claude-opus-5`+**. So 6,000 chars at 200k and
+>   30,000 at 1M on the model actually in use, not the 8,680 this doc assumed.
+> - 🔴 **"Descriptions are being silently DROPPED today" was FALSE for the live configuration.**
+>   Measured 2026-08-24: the whole listing fits at **0.69× of budget**; nothing was being
+>   truncated, and the operator is always on 1M. The urgency this doc conveys was never real.
+>   The honest framing is runway (~1.9 months at current growth), not an emergency.
+> - 🔴 **"Built-in skills are ADDITIONAL" is backwards.** *Bundled* skills are EXEMPT from the
+>   truncation pass — they spend the budget first. (And "bundled" ≠ "builtin": `init` and
+>   `security-review` are `builtin` and are *not* exempt.) Measured at 7,007 chars, not ~6,000.
+> - 🔴 **"Closing the gap needs skills RETIRED or MERGED" was wrong about the mechanism.**
+>   `skillOverrides: name-only` lists a skill at `name + 2` chars while it stays fully
+>   invocable — verified live. Retiring the three skills this doc proposed bought 772 chars
+>   ≈ **4.5 days** of growth; the problem is the growth RATE, not the total.
+> - The gate's own measure undercounts the real charge by **`5n − 1`**, not by a fixed number.
+>
+> **Everything under "Next steps" below is DONE**: the three skills were retired (#785), the
+> analysis landed (#784), and the tier mechanism shipped unadopted (#792). The `GIT_DIR`
+> investigation below was NOT revisited and its status is unchanged.
+
+
 > No `clawgate-task:` front matter: `clawgate_handoff.sh resolve` returned **NOTHING RESOLVED
 > (0 tasks)**. An unknown session id answers 200 with an empty array, so that result cannot
 > distinguish "touched no task" from "wrong id". It is not a clean bill of health, and no task
@@ -58,6 +86,7 @@ first time. `CLAUDE.md`'s `<!-- merge-gate: -->` marker correctly reads `other`.
 
 ## Open investigations — live diagnosis state
 
+### ✅ CLOSED 2026-08-24 — and the reasoning below is RETRACTED (see the box at the top)
 ### The skill listing cannot be brought under the 200k budget by editing devrc's skills
 - **Symptom + exact repro:** listing total exceeds ~1% of a 200k context. Reproduce:
   ```bash
@@ -84,6 +113,12 @@ first time. `CLAUDE.md`'s `<!-- merge-gate: -->` marker correctly reads `other`.
 - **Leading hypothesis:** the gap is structural. Closing it needs **fewer skills**, not shorter
   descriptions — or an explicit decision that 200k sessions lose routing while 1M sessions are
   unaffected.
+  🔴 **RETRACTED 2026-08-24 — this is the sentence that sent the next session deleting working
+  skills.** "Fewer skills" was the wrong lever: `skillOverrides: name-only` keeps a skill
+  installed and invocable at `name + 2` chars, so the fix is per-skill LISTING COST, not skill
+  COUNT. The second clause is right by accident — 1M sessions really are unaffected — but for
+  the wrong reason, and the numbers it rests on are wrong (see the box at the top). Retiring
+  three skills bought 4.5 days of growth; the growth RATE was always the problem.
 - **Next probe:** the only remaining evidence-backed retirements, zero on **all three** reads,
   worth **772 chars** total:
   ```bash
@@ -132,13 +167,28 @@ first time. `CLAUDE.md`'s `<!-- merge-gate: -->` marker correctly reads `other`.
     echo "run$i rc=$?"; grep -c 'DEVRC-GITENV-VIOLATION' run$i.log; done
   ```
 
-## Next steps (ranked)
-1. **Decide the listing question** — retire `ux-sweep` / `gpu-operator-check` / `session-audit`
-   (772 chars, → ~1.47×), or accept 200k overflow. It cannot be closed by editing text.
+## Next steps (ranked) — 1 and 3 are DONE; only 2 remains
+1. ~~**Decide the listing question**~~ — **DONE 2026-08-24.** The three skills were retired
+   (#785). It reached ~1.46× of a figure that was itself wrong; see the box at the top. The
+   listing question is closed by `#792`'s tier mechanism, which is **merged but NOT adopted** —
+   `skillOverrides` is absent from both hosts and `claude/skill-tiers.json` is inert until
+   someone runs `scripts/sync-skill-tiers.py --apply`.
+   **The standing recommendation is to leave it unadopted**: nothing truncates at 1M, and
+   `LISTING_TOTAL_CEILING_CHARS` has **68 chars of headroom**, so the next skill of any size
+   reds that gate loudly and forces the decision then, with the mechanism already built.
 2. **Find the `GIT_DIR` exporter**, or formally close the incident as contained-but-unattributed
-   and say so in `CLAUDE.md` rather than leaving it implicitly open.
-3. Re-pin `LISTING_TOTAL_CEILING_CHARS` in the same commit as any future listing change — a
-   ceiling left at the old number licenses the regrowth it exists to catch.
+   and say so in `CLAUDE.md` rather than leaving it implicitly open. ← **the only item still
+   open in this doc**; not revisited on 2026-08-24.
+3. ~~Re-pin `LISTING_TOTAL_CEILING_CHARS`~~ — **DONE** (`13_741` → `12_929` in #785, in the same
+   commit as the cut). ⚠ Do NOT re-pin it upward: headroom is now 68 against a live measure of
+   12,861, and that constant's own comment forbids raising it.
+
+## Residual risk (2026-08-24)
+🔴 **The 1M context is not guaranteed.** `kT` silently returns 200,000 instead of 1e6 when 1M
+credits are blocked — no error, no visible change. In that state the protected bundled skills
+(~6,850) exceed the entire 6,000-char budget on their own, so **every devrc description drops at
+once**. It presents only as "Claude stopped picking the right skill today." This is the one path
+by which the silent-truncation failure this doc was written about can still actually occur.
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **NEVER run the tier from anything sharing the base clone's git common dir.** The invariant
