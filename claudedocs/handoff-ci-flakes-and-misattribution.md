@@ -22,32 +22,37 @@ session's git write, and browser-bridge tests blaming their own subject for a ne
 spool row. Both are now fixed; the flake family underneath is only half closed.
 
 ## State now
-- Branch `main`. **Nothing in flight.** #824 (the `--exclude-slugs` salvage) MERGED as
-  `d3b6eeae`, and `rescue/initiative-scan-resolved-filter` was deleted deliberately
-  afterwards — next-step 1 is fully closed, residual included.
-  ⚠ Hosts were converged as of the deploy note below; that was measured on 2026-08-25 and
-  `main` has moved since (#806, #812, #817, #818, …). Re-run `drift-check.sh` rather than
-  reading the line below as current.
-- **Five PRs merged:**
+- Branch `main`. **Nothing in flight.** Base clone `behind 1` — benign; the untracked
+  `scripts/discord-embed-ext/` WIP that was blocking `merge --ff-only` landed as **#838**
+  (all four previously local-only files verified on `origin/main`), so a plain
+  `git merge --ff-only origin/trunk`/`origin/main` clears it now.
+- **Seven PRs merged 2026-08-25, each verified by CONTENT (a squash is never an ancestor):**
 
 | PR | squash | what |
 |---|---|---|
-| devrc #773 | `8ecde026` | GUARD 10 prints the KEY NAMES that moved + ranks the writer. Detection byte-for-byte unchanged. |
-| devrc #779 | `188da3c3` | rescued `handoff-espanso-audit-gate.md`, untracked for two days |
-| devrc #788 | `f06ef868` | CLAUDE.md said `nix build .#checks` **or** `gate.sh` — they are two TIERS |
-| devrc #807 | `3e207432` | browser-bridge spool rows selected by `op`, not position |
-| devrc #770 | `ebd30a62` | the ccua handoff, next-step 1 recorded DONE |
+| devrc #810 | `01121dab` | two ledger tests asserted under a PRODUCTION deadline they did not control |
+| devrc #811 | `6c900e9b` | tekton skill: trigger count, the `255` split, prior-art credit, `<homelab-infra>/` path convention |
+| devrc #833 | `21166720` | pin the tmux budget's MAGNITUDE — `2.0 → 30.0` had survived the whole suite |
+| devrc #840 | `266edd8d` | make the budget reachable from all SIX exposures, not two |
+| homelab-infra #395 | `ba904916` | the kills are simultaneous + node-level |
+| homelab-infra #397 | `19eadbf1` | superseded-by-#396 record + follow-up measurement |
+| homelab-infra #403 | `7a49ee2f` | read-only burst watcher + 8 unittest cases, `RUN` in `ci-manifest.txt` |
 
-- **Deploy VERIFIED on both hosts.** `ship.sh` rc=0, both at `324693fd`, cross-host agreement
-  actually COMPARED (not the `NOT COMPARED` one-host case): workbench 527 managed artifacts
-  resolve / 0 dangling / 0 stale, laptop 488 / 0 / 0.
-  ⚠ Workbench printed `NOTE: tree is DIRTY` — what was built there is `origin/main` **plus**
-  another session's uncommitted `scripts/run-node-tests.sh` line. Deployed artifact ≠ commit
-  on that host.
-- **#783 open by design** — #807 fixed the assertions, NOT the root cause.
-- **#778 CLOSED unmerged** — **decided 2026-08-25**, see the first entry below. No longer the
-  risky one, and no longer risky at all: #824 landed and the rescue branch was then deleted
-  deliberately. Nothing here is single-copy any more.
+- 🔴 **THE HEADLINE: the devrc-ci gate's ~59% pass rate had TWO causes and both are now
+  closed — but only one of them by this session.**
+  - **~27 of ~65 failures were SCHEDULER PREEMPTION**, and that was **already diagnosed
+    2026-08-24** in the manifests' own comments. Fixed by **homelab-infra #396**
+    (`c35c78cd`, "give gitops-validate its own nix cache and node"), which merged
+    2026-08-25 05:32Z — **46 minutes AFTER** the burst capture that "confirmed" it. Not our work.
+  - **~27 were genuine per-test flakes**, ~1 test in ~15,500, varying run to run. #810/#833/#840
+    address the tmux-deadline class; the rest are listed under Next steps.
+- **Post-fix measurement (the one `ci-priority-classes.yaml` explicitly asks for):**
+  before #396 `30/121 killed (24.8%)`; after (≥06:00Z 2026-08-25) **`0/9`, 100% passed**,
+  with `devrc-ci` on `talos-xr6-r7p` and `gitops-validate` on `talos-uvh-gtj`.
+  ⚠ **n=9 is suggestive, NOT conclusive** — ~2 kills expected at the old rate, so a clean 9
+  arises by luck ~1 in 12. **Re-run it** (next-step 1).
+- **Deploy: NOT done this session.** Nothing was shipped to either host; all seven PRs are
+  merged only. `DEFAULT_TMUX_TIMEOUT_S` is untouched at `2.0`, so no production behaviour changed.
 
 ## Investigations — live diagnosis state (first entry is DECIDED, the rest are open)
 
@@ -174,27 +179,31 @@ read the root cause first; the design is what failed, not the code.
   under-diagnosis this thread spent the evening correcting.
 
 ## Next steps (ranked)
-1. ~~**Decide the fate of `rescue/initiative-scan-resolved-filter`**~~ — **DONE 2026-08-25.**
-   Split decision: `--exclude-slugs` salvaged and **MERGED (#824, `d3b6eeae`)**,
-   `parse_resolved` rejected on measurement (see the decided investigation above).
-   **Residual also CLOSED:** the rescue branch was deleted deliberately, gated on the
-   closing condition this item named — the by-content grep **plus** `mergedAt` — both
-   re-checked inside the deleting command. Nothing remains of this item.
-2. **Close #783 at the root** (devrc: `scripts/browser-bridge/tests/conftest.py`,
-   `scripts/browser-bridge/server.py`) — join emitter threads at teardown so a re-pointed
-   `ACTIVITY_SPOOL_DIR` cannot be written by a dead test's thread.
-3. **Capture the browser-agent verdict line and file it** (devrc:
-   `scripts/browser-bridge/tests/test_browser_agent.py:558`).
-4. **Migrate the 39 remaining count-based spool call sites** (devrc: `test_server.py`) — safe
-   until a neighbour is late; mechanical, but intent must be read per site.
-5. **Workbench dirty-tree note** — `scripts/run-node-tests.sh` carries another session's
-   uncommitted `discord-embed-ext` line. Not ours to commit; resolves itself when they do.
-
-🔴 **This list is a WORK QUEUE WITH NO LOCK** — every `/resume` session draws from it, so a
-*better* ranked list produces *more* duplicate work. **Nothing is in flight: item 1 is closed
-(merged + residual done), items 2–5 are unclaimed.** If you start one, mark it
-`IN FLIGHT: <repo>#<pr>` here — and if you find this sentence disagreeing with the items above,
-believe the items, then fix this sentence.
+1. **Re-run the post-#396 kill-rate measurement** — the only open question with a deadline
+   attached, because it decides whether the preemption fix is actually settled. Compare
+   against `30/121 (24.8%)` before and `0/9` after. Repo: `homelab-infra`. One command,
+   `KUBECONFIG=$KC_HOMELAB`, classify `devrc-ci` gate TaskRuns by whether any step exited
+   `255`/`137` (killed, no test result) vs `verdict exit=1` (genuine).
+2. **Two flaky tests still UNDIAGNOSED**, both `devrc`, `scripts/tests/`:
+   `test_no_unallowlisted_public_ip_literal_is_committed` and
+   `test_the_module_root_is_load_bearing`. Neither has a wall-clock dependency in the sandbox
+   tier; either could have been a *correct* red on some branch. Logs were unrecoverable (pods
+   GC'd; commit statuses cap at 140 chars) — **but `broken-gate-tail` now exists**, so a
+   recurrence is readable.
+3. **Re-check `test_an_absent_origin_header_is_not_the_same_as_an_empty_one`** —
+   `scripts/browser-bridge/tests/`. It shares #802's dropped-emit mechanism and **#802 has
+   merged (`d09038d8`)**; the prior agent said verify rather than assume it is covered.
+4. **A ninth flake, UNCONFIRMED:** `test_live_cotenants_does_not_count_this_process`
+   (`scripts/tests/test_git_repo_isolation.py:1479`). Leading suspect `git commit`'s detached
+   `run_auto_maintenance`. 0/25 reproductions across three load conditions, **and the /proc
+   watcher used failed its own positive control — so those zeros are not evidence.**
+5. **#810's two remaining cosmetic nits:** `scripts/lib/agent_ledger.py:261` still says "a 2s
+   timeout under load" (a second spelling of the budget), and the narrow arm's failure message
+   in `test_agent_ledger.py` names the wrong cause. Neither merits its own PR.
+6. **Housekeeping, none urgent:** `homelab-talos` has **53 stash entries** and a repo-local
+   `core.hooksPath` nobody set deliberately; `devrc` has **46 worktrees**, many on merged
+   branches. And `ecc4332e` references the capacity question as `#1205`, which is **not** a
+   homelab-infra number (issues stop at #316, PRs at #394) — tracker unknown.
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **`scripts/gate.sh` runs the DEV-HOST tier only** — `run-tests.sh` + `run-node-tests.sh`.
@@ -231,31 +240,91 @@ believe the items, then fix this sentence.
   exited early and no SIGPIPE occurred — it passed at base. Fixed by using `alias.*`, which
   sorts first.
 
+- 🔴 **THE MANIFESTS HOLD LOAD-BEARING ANALYSIS — READ THE COMMENTS BEFORE RE-DERIVING.**
+  This session diagnosed CI preemption from scratch over several rounds. All of it already
+  existed in `homelab-infra` comments dated 2026-08-24: `triggers/ci-priority-classes.yaml`
+  (~100), `triggers/gitops-validate-triggertemplate.yaml` (~98),
+  `triggers/devrc-ci-pipeline.yaml` (~1130) — including direct `Preempted` events, the rate
+  (14/108 = 41% of non-passing), and the exit-code explanation. **Three fixes are rejected
+  there WITH MEASUREMENTS** and will keep being re-proposed: concurrency capping (worse at
+  every helpful cap — a queued TaskRun's clock starts at CREATION and burns its own
+  deadline), `ResourceQuota` (cannot be scoped safely; it rejects the no-requests
+  `notify`/`report`/affinity pods, and losing `report` is the worst failure here), and
+  `retries` (reverted as a trap — Tekton retries any non-cancelled failure, so it re-runs
+  genuine verdicts).
+- 🔴 **`exit 255` is a claim about the STEP, not about the tests — and the LOG discriminates,
+  not the exit code.** Measured over all completed `devrc-ci` gate TaskRuns: **~27 killed
+  steps** (25× `pytests` 255, 1× `nodetests` 255, 1× `137` OOMKilled) reporting **no test
+  result at all**, against **~27 genuine failures** surfacing as `verdict exit=1`. A step that
+  printed `RESULT:` / `<leg> verdict=` failed a test; one that printed neither was killed.
+  ⚠ `nodetests exit=2` while the leg actually PASSED (`verdict=pass nix_rc=0`) — the step exit
+  codes mislead in both directions.
+- 🔴 **`broken-gate-tail` exists and WORKS — use it before guessing.** `ecc4332e` added it;
+  positive-controlled 2026-08-25 at **14 populated / 35 empty**, so a zero from it is real.
+  ```bash
+  kubectl -n tekton-ci get taskrun <run>-report -o \
+    jsonpath='{.status.results[?(@.name=="broken-gate-tail")].value}'
+  ```
+  Two ways to misread it, both of which cost time here: a `nodetests` section reading
+  `killed before it wrote any` is **not** an early kill (the legs are sequential, so
+  `nodetests` never starts once `pytests` dies); and the tail is the **last 1200B**, so it
+  always ends mid-suite — that is truncation, not the failure point.
+- 🔴 **The kube-scheduler logs NOTHING about preemption at default verbosity** — measured
+  **6 lines in 24h**. Its silence is not evidence. The discriminator is which pods ARRIVED on
+  the node at the kill second; preemption deletes victims first, so the preemptor appears a
+  second or two AFTER them.
+- 🔴 **`git checkout -- <file>` inside a mutation loop DESTROYS uncommitted work.** Done in
+  this session, mid-verification: the loop restored a mutated constant with
+  `git checkout -- scripts/lib/agent_ledger.py`, which reverted the entire in-progress
+  refactor in that file. The "HEAD" arm then ran without the change under test and produced a
+  confident, wrong result ("fixed 2 of 4") that was reported before being caught. **Restore a
+  mutated line with `sed`, never `checkout`.**
+- 🔴 **AN ARGPARSE DEFAULT SHADOWS AN ENV VAR, INVISIBLY.** `--tmux-timeout` carried
+  `default=DEFAULT_TMUX_TIMEOUT_S`, so `timeout` was **never `None`** at that call site — and
+  an explicit argument beats the env var by design. `$AGENT_LEDGER_TMUX_TIMEOUT_S` was
+  therefore structurally unreachable on the CLI path, i.e. on the opencode plugin, one of the
+  two exposures it exists to serve. The code reads correctly; only the mutation matrix
+  disagreed. Fix: `default=None` ("nobody said"), with the help text spelling the constant
+  instead of `%(default)s` so the existing help-pin test still holds.
+- 🔴 **A GUARD'S MUTANT MUST BE BOUNDARY-ADJACENT, not just extreme.** #833's range guard
+  `[1.0, 5.0]` was proved by killing `5.5` and `0.9` — not only `30.0`. Killing the extreme
+  alone would not have shown the bounds were load-bearing. Run mutations under
+  `PYTHONDONTWRITEBYTECODE=1` so a stale `.pyc` cannot score one as SURVIVED.
+- ⚠ **A big local failure count is meaningless without the base run.** A broad
+  `scripts/tests + claude-hooks + opencode` sweep showed **67 failed / 10362 passed** — and
+  the identical command at `origin/main` gave the **identical failure set**, zero difference
+  in either direction. They are dependency gaps in an ad-hoc `nix-shell` (`yaml` missing,
+  among others), not a regression.
+- **CARRIED FORWARD from the previous `State now`/`Next steps` (they sit under REPLACE headings
+  and this update would otherwise drop them — they are decisions, not stale status):**
+  **#778 CLOSED unmerged, decided 2026-08-25.** The `--exclude-slugs` salvage landed instead as
+  **#824 (`d3b6eeae`)**, and `rescue/initiative-scan-resolved-filter` was then **deleted
+  deliberately**, gated on two content greps returning 1 — so that thread is fully closed,
+  residual included, and nothing there is single-copy any more. 🔴 A later reader finding that
+  branch absent should read this line before treating it as lost work.
+  ⚠ The previous doc's "Deploy VERIFIED on both hosts / `ship.sh` rc=0 at `324693fd`" is NOT
+  carried forward on purpose: `main` has moved many times since, and **this session deployed
+  nothing**. Re-run `drift-check.sh` rather than trusting any deploy line in this doc.
+- ⚠ **`devrc` is PUBLIC and cites other repos' paths.** `test_no_new_dead_paths` flags a
+  cross-repo path whose first segment collides with a real devrc directory — `claudedocs/…`
+  did exactly that. The convention is `<homelab-infra>/claudedocs/…`; rule 3 skips any token
+  containing `<`. Sibling `triggers/…` citations passed only because devrc has no `triggers/`
+  top-level.
+
 ## How to verify
 ```bash
-# GUARD 10's new message, live — run any gate and read its block
-nix develop ~/workspace/devrc --command bash ~/workspace/devrc/scripts/gate.sh --tier both --set all
-#   expect, when a concurrent session writes the shared config:
-#     "keys that moved in this file (NAMES ONLY …)"  +  "+ branch.<name>.remote"
-#     "→ SHAPE: ORDINARY GIT … the target above is the SECOND"
-
-# the spool fix is on main (content, not ancestry — squash merges are never ancestors)
-git -C ~/workspace/devrc show origin/main:scripts/browser-bridge/tests/test_server.py | grep -c "def _wait_ops"   # 1
-# and #802's fix is still there beside it
-git -C ~/workspace/devrc show origin/main:scripts/browser-bridge/server.py | grep -c "_spool_emit_lock"          # 3
-
-# the salvage landed — BY CONTENT, since a squash merge is never an ancestor
-git -C ~/workspace/devrc show origin/main:scripts/session-analysis/initiative-scan.py \
-  | grep -c "def parse_exclude_slugs"                                                   # 1
-# and the invariant guard that stops the rejected half being re-added
-git -C ~/workspace/devrc show origin/main:scripts/session-analysis/tests/test_initiative_scan.py \
-  | grep -c "test_a_handoff_that_says_DONE_is_still_reported"                           # 1
-
-# the rescue branch is GONE, and that is CORRECT — deleted on purpose after the two greps
-# above returned 1. Expect EMPTY. 🔴 Empty is only alarming if those greps return 0.
-git -C ~/workspace/devrc ls-remote --heads origin rescue/initiative-scan-resolved-filter  # empty
-gh pr view 824 --repo innovation-upstream/devrc --json mergedAt,mergeCommit
-
-# both hosts carry what is ALREADY on main (not #824, until it merges)
-bash ~/workspace/devrc/scripts/drift-check.sh    # read-only; rc 0 = converged
+# the three devrc changes are on main, and production behaviour did NOT change
+git -C ~/workspace/devrc show origin/main:scripts/lib/agent_ledger.py \
+  | grep -E '^DEFAULT_TMUX_TIMEOUT_S = 2.0|def resolve_tmux_budget|TMUX_TIMEOUT_ENV = '
+# the budget is reachable from all six exposures — the load-bearing direction is the SECOND:
+#   constant 0.001 + env 60.0  -> 0 failed (env protects)
+#   constant 2.0   + env 0.001 -> 4 failed (env CONTROLS)
+# the watcher and its manifest registration landed
+git -C $HOMELAB show origin/trunk:scripts/tests/ci-manifest.txt | grep catch_ci_preemption
+# preemption is gone: the two pipelines are on DIFFERENT nodes
+KUBECONFIG=$KC_HOMELAB kubectl -n tekton-ci get pods -o json | python3 -c "
+import json,sys,collections; d=json.load(sys.stdin); a=collections.Counter()
+[a.__setitem__((n.split('-')[0], p['spec'].get('nodeName')), a[(n.split('-')[0], p['spec'].get('nodeName'))]+1)
+ for p in d['items'] for n in [p['metadata']['name']] if p['status'].get('phase')=='Running']
+print(a)"
 ```
