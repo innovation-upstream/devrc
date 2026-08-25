@@ -2133,3 +2133,111 @@ def test_the_runner_strips_the_pointers_before_a_non_pytest_target_runs(tmp_path
     assert r["deltas"] == [], (
         "the foreign repository changed even though its HEAD did not:\n"
         + "\n".join(r["deltas"]))
+
+
+# --------------------------------------------------------------------------- #
+# 9. THE PRECONDITION ITSELF — a canary on git, not on devrc
+# --------------------------------------------------------------------------- #
+def test_git_exports_GIT_DIR_to_pre_push_only_from_a_linked_worktree(tmp_path):
+    """🔴 WHY GUARD 9's STRIP IS LOAD-BEARING ON THE ORDINARY PATH.
+
+    `githooks/pre-push` used to conclude that "pushing does not, on its own,
+    hand `GIT_DIR` to anything", and that the 2026-08-21 incident's root cause
+    "REMAINS UNIDENTIFIED". The measurement behind that was real but taken at
+    ONE point on a dimension that changes the answer: which checkout the push
+    came from. Measured 2026-08-25 on git 2.55.0 with the parent scrubbed:
+
+        push from the MAIN checkout -> GIT_EXEC_PATH only, no GIT_DIR
+        push from a LINKED WORKTREE -> GIT_DIR=<repo>/.git/worktrees/<name>
+
+    git itself exports it. No outer caller is needed — and clawgate#322 was a
+    push from a linked worktree, which is the match.
+
+    🔴 THIS IS A CANARY ON GIT'S BEHAVIOUR, NOT A TEST OF OUR CODE. It exists so
+    that if a future git stops exporting `GIT_DIR` here, someone is TOLD the
+    precondition moved, instead of the comment quietly rotting into the same
+    false generalisation it replaced. If it fails because git changed: update
+    the comment in `githooks/pre-push`, and do NOT weaken the strip on the
+    strength of one version's behaviour.
+
+    Both arms are asserted. The main-checkout arm is the control: without it a
+    hook that never ran, or a recorder that never wrote, would look identical to
+    "git does not export it".
+    """
+    repo = _mkrepo(tmp_path / "repo")
+    bare = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(bare)],
+                   check=True, capture_output=True, env=_env())
+    assert _git(repo, "remote", "add", "origin", str(bare)).returncode == 0
+    assert _git(repo, "push", "-q", "origin", "main").returncode == 0
+
+    hooks = tmp_path / "hooks"
+    hooks.mkdir()
+    # Every line goes INTO the file. An earlier version of this probe printed to
+    # stdout, so the file the assertions read was always empty and the probe
+    # reported "not exported" no matter what git did.
+    (hooks / "pre-push").write_text(
+        "#!/usr/bin/env bash\n"
+        'out="${PROBE_OUT:-/dev/null}"\n'
+        ': > "$out"\n'
+        'for v in GIT_DIR GIT_EXEC_PATH; do\n'
+        '  if [ -n "${!v:-}" ]; then printf "%s=%s\\n" "$v" "${!v}" >> "$out"; fi\n'
+        'done\n'
+        "exit 0\n",
+        encoding="utf-8")
+    (hooks / "pre-push").chmod(0o755)
+    assert _git(repo, "config", "--local", "core.hooksPath", str(hooks)).returncode == 0
+
+    def push_from(cwd: Path, branch: str, tag: str) -> str:
+        out = tmp_path / f"env-{tag}.txt"
+        env = _env(PROBE_OUT=str(out))
+        # Scrub the pointer names from the PARENT, so anything recorded was put
+        # there by git and not inherited from this test process.
+        for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
+                     "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY"):
+            env.pop(name, None)
+        subprocess.run(["git", "-C", str(cwd), "push", "-q", "origin", branch],
+                       capture_output=True, text=True, env=env)
+        return out.read_text(encoding="utf-8") if out.exists() else ""
+
+    # --- arm 1: the MAIN checkout ------------------------------------------
+    assert _git(repo, "checkout", "-q", "-b", "from-main").returncode == 0
+    (repo / "b.txt").write_text("b\n", encoding="utf-8")
+    assert _git(repo, "add", "b.txt").returncode == 0
+    assert _git(repo, "commit", "-qm", "b").returncode == 0
+    main_env = push_from(repo, "from-main", "main")
+
+    # --- arm 2: a LINKED WORKTREE ------------------------------------------
+    wt = tmp_path / "wt"
+    assert _git(repo, "worktree", "add", "-q", str(wt), "-b", "from-wt",
+                "main").returncode == 0
+    (wt / "c.txt").write_text("c\n", encoding="utf-8")
+    assert _git(wt, "add", "c.txt").returncode == 0
+    assert _git(wt, "commit", "-qm", "c").returncode == 0
+    wt_env = push_from(wt, "from-wt", "wt")
+
+    # 🔴 POSITIVE CONTROL FIRST. git exports GIT_EXEC_PATH to hooks
+    # unconditionally, so if it is missing the hook never ran or never wrote,
+    # and an absent GIT_DIR below would prove nothing at all.
+    for tag, text in (("main-checkout", main_env), ("linked-worktree", wt_env)):
+        assert "GIT_EXEC_PATH=" in text, (
+            f"the {tag} probe recorded no GIT_EXEC_PATH, so the hook did not run "
+            f"or did not write. Nothing in this test was measured.\ngot: {text!r}")
+
+    assert "GIT_DIR=" not in main_env, (
+        "git exported GIT_DIR to pre-push from the MAIN checkout. The asymmetry "
+        "this test pins has changed; re-measure and update the comment in "
+        f"githooks/pre-push.\ngot: {main_env!r}")
+
+    assert "GIT_DIR=" in wt_env, (
+        "git did NOT export GIT_DIR to pre-push from a LINKED WORKTREE. That is "
+        "the precondition behind GUARD 9's strip and behind the clawgate#322 "
+        "diagnosis. If git genuinely changed, update the root-cause comment in "
+        "githooks/pre-push — do NOT weaken the strip on one version's "
+        f"behaviour.\ngot: {wt_env!r}")
+
+    # Name it precisely: it points at the WORKTREE's gitdir, which is why a
+    # `-C` lookup elsewhere resolves into this repo rather than the target.
+    assert "/worktrees/" in wt_env, (
+        "GIT_DIR was exported but does not point at a linked worktree's gitdir; "
+        f"the mechanism may differ from the one documented.\ngot: {wt_env!r}")
