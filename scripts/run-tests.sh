@@ -1715,7 +1715,20 @@ TARGET_FLOORS=(
   # heredoc operator — which pin the docstring's NOT-COVERED entries so the
   # claims cannot rot silently.
   #   _suggested_floor 383 = 383 - min(50, max(1, 383/20 = 19)) = 383 - 19 = 364.
-  "scripts/claude-hooks/tests/test_gh_issue_closing_condition_guard.py|364"
+  #
+  # 2026-08-25, the same-physical-line heredoc attribution fix (B2 reopened by
+  # 2bd3d1e7): 383 -> 394 collected, 0 skipped. +11 = a 7-case table for two
+  # heredoc openers on ONE line (`&&`, `;`, `| tee`, no body flag, `<<-`, CRLF,
+  # three chained), each watched RED at 2bd3d1e7 and green here; the ALLOW-
+  # direction case on that same shape (also red at 2bd3d1e7); and three INVARIANT
+  # guards, labelled as such in the file because they were green at that ref and
+  # are not regression coverage — they exist because the mutation sweep found
+  # nothing else that could see the literal B2 mutant or the override-after-a-
+  # heredoc path. That sweep, run under PYTHONDONTWRITEBYTECODE=1 in a per-mutant
+  # copy of the tree, killed 6/6 real mutants with the positive control also
+  # killed. ZERO new skips, so EXPECTED_SKIPS is untouched.
+  #   _suggested_floor 394 = 394 - min(50, max(1, 394/20 = 19)) = 394 - 19 = 375.
+  "scripts/claude-hooks/tests/test_gh_issue_closing_condition_guard.py|375"
   # 2026-08-18, the on-disk artifact-name registry arrives as a NEW target: 13
   # collected. Deliberately small — one test per module whose names it pins, plus the
   # two-sided classification guard that fails when a hook module appears or vanishes.

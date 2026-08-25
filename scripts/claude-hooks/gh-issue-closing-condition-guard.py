@@ -119,8 +119,13 @@ watches -- rescued `--body-file -`, `--body "$(gen.sh)"`, an unreadable
 `--body-file`, an attached `-b…`, and a create with no body flag at all. It also
 made a line filing TWO issues pass on the strength of the FIRST one's heredoc.
 Body resolution is now scoped to the create's OWN command segment
-(`command_spans`), so a heredoc opened by a different command on the same line is
-not a candidate. Two deliberate consequences, recorded rather than hidden:
+(`command_segments`), and a heredoc is attributed to the command whose text
+holds its `<<` operator — never to whichever command the newline before its body
+happened to end. That distinction is the whole claim: when two commands on ONE
+physical line each open a heredoc, bash queues the bodies in operator order, so
+"the body after this command's newline" names the OTHER command's body. A
+heredoc opened by a different command is not a candidate. Two deliberate
+consequences, recorded rather than hidden:
   * an unreadable `--body-file <path>` is still rescued by a heredoc that WRITES
     THAT EXACT PATH, wherever on the line it sits -- `cat > p.md <<'EOF' … EOF &&
     gh issue create --body-file p.md` is a correctly-specified create and must
@@ -417,7 +422,9 @@ def _attached_command(text, operator_start):
 # `start`  where the body begins; `body_end` where the TERMINATOR LINE begins
 # `after`  past the terminator line — what a scan must skip to leave the body
 # `op`     the offset of the `<<` itself, which is what attributes a heredoc to
-#          the COMMAND that opened it (see `command_spans`)
+#          the COMMAND that opened it (see `_shell_walk`/`command_segments`) —
+#          the body's own position cannot, since several commands on one line
+#          queue their bodies back to back after the LAST of them
 _Heredoc = collections.namedtuple(
     "_Heredoc", "body start body_end inert op after head rest")
 
@@ -643,12 +650,32 @@ def _read_word(text, i, n):
 
 
 def _shell_walk(text):
-    """`(spans, override)` — top-level command spans, and the override verdict.
+    """`(segments, override)` — one TEXT per top-level command segment.
 
-    `spans` are `[lo, hi)` slices of `text`, one per TOP-LEVEL command segment,
-    split on unquoted `;`/`&`/`|`/newline and on a subshell paren. A heredoc's
-    body is kept INSIDE the span of the command that opened it, because that is
-    exactly the relationship body resolution needs.
+    A segment is a TOP-LEVEL command, split on unquoted `;`/`&`/`|`/newline and
+    on a subshell paren, with the bodies of the heredocs THAT COMMAND OPENED
+    appended to it.
+
+    🔴 A SEGMENT IS NOT A `[lo, hi)` SLICE, AND CANNOT BE. A heredoc body sits
+    physically after the newline that ends the command line, and when SEVERAL
+    commands on one line each open one, bash queues the bodies back to back in
+    OPERATOR order — so the second command's command text and the second
+    command's body are separated by the FIRST command's body. One contiguous
+    slice cannot name that set. Returning a slice is what reopened B2: the span
+    was widened to the first queued body's end, which swallowed the EARLIER
+    command's body while the opener's own body fell outside every span.
+
+    Attribution is therefore by `_Heredoc.op` — the offset of the `<<` itself,
+    which is inside the command text of the command that opened it — and never
+    by which command the newline happened to terminate. A body already contained
+    in the command text (a heredoc opened INSIDE a `$( … )`, whose body is not
+    past the segment's end) is not appended a second time; appending it would put
+    the body's bytes in the invocation scan twice.
+
+    The reassembled text is `<command text> + "\\n" + <its bodies, in operator
+    order>`, which re-parses: the joiner restores the newline the split consumed,
+    so `heredocs()` reading a segment finds each operator's body exactly where
+    bash would.
 
     `override` is True only for a bare `GH_ISSUE_NO_CLOSING_CONDITION=1` word in
     COMMAND POSITION at substitution depth 0 — the assignment bash would actually
@@ -656,14 +683,24 @@ def _shell_walk(text):
     process's environment and does not count; inside a quote it is prose.
     """
     n = len(text)
-    skip = {}
-    for h in heredocs(text):
-        skip[h.start] = h.after
+    heres = heredocs(text)
+    skip = {h.start: h.after for h in heres}
     spans, seg_lo = [], 0
     stack = []            # (saved quote, closing char) per open substitution
     quote, at_cmd, override, i = None, True, False, 0
     while i < n:
         if i in skip:
+            # 🔴 A BODY IS DATA, NOT COMMAND TEXT. Stepping over it keeps its
+            # stray quotes out of the quote state — and keeps its bytes out of
+            # whichever segment is currently open. When the pending segment has
+            # nothing in it yet the body starts exactly where the segment does
+            # (a body always follows the newline that ended the opening command,
+            # or the previous body's terminator), so the segment begins AFTER it.
+            # `at_cmd` is deliberately untouched: the separator that opened this
+            # segment already set it, and the first word after the body really is
+            # in command position — that is the `VAR=1 gh …`-after-a-heredoc path.
+            if not text[seg_lo:i].strip():
+                seg_lo = skip[i]
             i = skip[i]
             continue
         c = text[i]
@@ -710,14 +747,11 @@ def _shell_walk(text):
             continue
         if c in _SEPARATOR_CHARS or (not stack and c in "()"):
             if not stack:
-                # 🔴 A newline that OPENS a heredoc body ends the command, but
-                # the body belongs to it: the span runs past the terminator so
-                # `heredoc_bodies(span)` still finds it.
-                end = skip.get(i + 1) if c == "\n" else None
-                if end is not None:
-                    spans.append((seg_lo, end))
-                    seg_lo, i, at_cmd = end, end, True
-                    continue
+                # The separator ends the COMMAND TEXT here, full stop. Any
+                # heredoc body it opened is re-attached below, by operator
+                # offset — never by "whatever body starts at i + 1", which is the
+                # FIRST queued body on the line and belongs to the EARLIEST
+                # opener, not to the command this newline is ending.
                 spans.append((seg_lo, i))
                 seg_lo = i + 1
             at_cmd, i = True, i + 1
@@ -735,11 +769,28 @@ def _shell_walk(text):
             at_cmd = False
         i = max(j, i + 1)
     spans.append((seg_lo, n))
-    return [(lo, hi) for lo, hi in spans if text[lo:hi].strip()], override
+    segments = []
+    for lo, hi in spans:
+        head = text[lo:hi]
+        if not head.strip():
+            continue
+        # `h.start >= hi` is what says "this body sits PAST the command text" —
+        # i.e. it was queued for a later line. A heredoc opened inside a
+        # `$( … )` has its body within `[lo, hi)` already and must not be
+        # duplicated: a second copy would put its bytes through the invocation
+        # scan twice, and a body that spells a create would then be counted.
+        bodies = [text[h.start:h.after]
+                  for h in heres if lo <= h.op < hi and h.start >= hi]
+        segments.append((head + "\n" + "".join(bodies)) if bodies else head)
+    return segments, override
 
 
-def command_spans(text):
-    """The `[lo, hi)` slice of every top-level command segment in `text`."""
+def command_segments(text):
+    """The reassembled TEXT of every top-level command segment in `text`.
+
+    Each segment is its command text followed by the bodies of the heredocs that
+    command opened — see `_shell_walk` for why that cannot be one slice.
+    """
     return _shell_walk(text)[0]
 
 
@@ -1119,8 +1170,9 @@ def _resolve_inline(value, text):
         #
         # 🔴 THE "KNOWN LOOSENESS" ABOVE IS NOW CLOSED, and this comment is kept
         # only so nobody re-derives it: `text` here is the create's OWN command
-        # segment, not the whole line, so a well-specified heredoc belonging to a
-        # different command is not in it.
+        # segment — its words plus the bodies of the heredocs whose `<<` it
+        # spells — not the whole line, so a well-specified heredoc belonging to a
+        # different command is not in it, on a preceding line OR on this one.
         return (heredoc_bodies(text) or inner), None
     # 🔴 AN EMPTY VALUE IS AN ARTIFACT OF THE PARSE, NOT A BODY. `guard_core`'s
     # scanner LIFTS `$( … )` out of the segment it appears in, so
@@ -1251,9 +1303,12 @@ def body_candidates(argv, text, route, full=None):
     🔴 `text` IS THIS CREATE'S OWN COMMAND SEGMENT, NOT THE COMMAND LINE. That is
     the whole of the B2/B3 fix and it is a change of MEANING, not of degree —
     aggregation across sources on ONE command is deliberate, aggregation across
-    COMMANDS was a bug. `full` is threaded through for the single place that
-    still legitimately looks line-wide: a heredoc writing an as-yet-unwritten
-    `--body-file` path.
+    COMMANDS was a bug. The segment carries the bodies of the heredocs this
+    command's own text opened (attributed by the `<<` offset), so a
+    `heredoc_bodies(text)` here reads this create's body and no other's, however
+    the openers are interleaved on the line. `full` is threaded through for the
+    single place that still legitimately looks line-wide: a heredoc writing an
+    as-yet-unwritten `--body-file` path.
     """
     full = text if full is None else full
     cands, reason = [], None
@@ -1429,9 +1484,12 @@ def creating_invocations(text, guard_core):
 
     🔴 `scope` IS THE THIRD ELEMENT AND THE POINT OF THIS FUNCTION NOW. Each
     create is enumerated inside its OWN top-level command segment and carries
-    that segment's text, so `body_candidates` cannot reach a heredoc a different
-    command opened. Two creates on one line therefore get two different scopes,
-    which is what stops the first one's good body answering for the second.
+    that segment's REASSEMBLED text — the command's words plus the bodies of the
+    heredocs IT opened, attributed by operator offset — so `body_candidates`
+    cannot reach a heredoc a different command opened, even when both openers
+    share one physical line and bash queues their bodies back to back. Two
+    creates on one line therefore get two different scopes, which is what stops
+    the first one's good body answering for the second.
 
     A create the segmentation does not attribute — malformed quoting, a shape the
     walk and the shared core read differently — is still enumerated by a
@@ -1440,8 +1498,7 @@ def creating_invocations(text, guard_core):
     only to keep one from disappearing.
     """
     out, seen = [], []
-    for lo, hi in command_spans(text):
-        scope = text[lo:hi]
+    for scope in command_segments(text):
         for argv in guard_core.commands(scrub_inert_heredocs(scope)):
             route = _route(argv)
             if route and not is_exempt_invocation(argv, route):

@@ -662,6 +662,148 @@ def test_an_unrelated_heredoc_does_not_satisfy_a_create(tail, mark):
     assert mark in (ev(PLAN_HEREDOC + tail) or ""), tail
 
 
+# =========================================================================== #
+# 🔴 THE SAME-PHYSICAL-LINE HALF — the one-sidedness that let B2 reopen.
+#
+# Every case in `UNRELATED_HEREDOC_CASES` puts the foreign heredoc on a PRECEDING
+# line, and a preceding line is the single arrangement where "the body that
+# starts after the newline ending this command" and "the body this command
+# opened" are the same bytes. So a walk that attributes a body BY POSITION passes
+# that whole table while being exactly wrong about the shape below.
+#
+# When two commands on ONE physical line each open a heredoc, bash queues the
+# bodies back to back in OPERATOR order after the last of them. "The body after
+# my newline" then names the FIRST opener's body — the EARLIER command's — while
+# the later command's own body starts where that one ended and falls outside
+# every segment. The verdicts invert: a junk-bodied create is credited with a
+# well-specified body it never opened, and a well-specified create is denied on
+# the strength of junk it never opened either. Both directions are pinned.
+#
+# Measured at 2bd3d1e7 (the parent of the commit adding these): every one of the
+# SEVEN cases in this table ALLOWED, and `test_the_same_line_good_heredoc_still_
+# allows` DENIED — 8 red, driven. The two cases that were already GREEN at that
+# ref are deliberately NOT in this table: they are invariant guards on the fix
+# itself, written as their own tests and labelled as such, because a guard the
+# bug never violated is not regression coverage and must not be counted as any.
+# The fixtures each name their own file under the per-run scratch dir, so no
+# leftover path can answer a `--body-file` question for them.
+# =========================================================================== #
+def _line(first_target, joiner, create_tail, first_body, own_body, op="<<"):
+    """One physical line: `cat <<A > <file> <joiner> <create> <tail>`, then the
+    queued bodies — A's first, the create's second, exactly as bash orders them.
+    """
+    pre = "" if op == "<<" else "\t"
+    def wrap(s):
+        return "\n".join(pre + line for line in s.splitlines())
+    return ("cat " + op + "'A' > " + first_target + " " + joiner + " " +
+            CREATE + " " + create_tail + "\n" +
+            wrap(first_body) + "\n" + pre + "A\n" +
+            wrap(own_body) + "\n" + pre + "B\n")
+
+
+SAME_LINE_HEREDOC_CASES = [
+    # `&&` — the shape a real agent types: write the plan, then file the issue.
+    ("&&", _line(scratch("sl-and.md"), "&&", "-t t --body-file - " + "<<'B'",
+                 CC, NO_CC), MISSING_MARK),
+    # `;` — a different separator must not change the attribution.
+    (";", _line(scratch("sl-semi.md"), ";", "-t t --body-file - " + "<<'B'",
+                CC, NO_CC), MISSING_MARK),
+    # A pipe between the first opener and its sink, still two openers on the line.
+    ("| tee",
+     "cat <<'A' | tee " + scratch("sl-pipe.md") + " && " + CREATE +
+     " -t t --body-file - <<'B'\n" + CC + "\nA\n" + NO_CC + "\nB\n",
+     MISSING_MARK),
+    # No body flag at all: the create's OWN heredoc feeds nothing gh reads, but
+    # it is still the operator's text — and it is still not the FIRST body.
+    ("no body flag", _line(scratch("sl-noflag.md"), "&&", "-t t <<'B'",
+                           CC, NO_CC), MISSING_MARK),
+    # `<<-` strips leading tabs from the bodies AND the terminators.
+    ("<<- tab stripped",
+     _line(scratch("sl-dash.md"), "&&", "-t t --body-file - " + "<<-'B'",
+           CC, NO_CC, op="<<-"), MISSING_MARK),
+    # CRLF: the reassembled segment must keep the line structure the parser needs.
+    ("CRLF", _line(scratch("sl-crlf.md"), "&&", "-t t --body-file - " + "<<'B'",
+                   CC, NO_CC).replace("\n", "\r\n"), MISSING_MARK),
+    # Three openers: the create's body is the THIRD in the queue, so a walk that
+    # takes "the next body" is wrong by two, not by one.
+    ("three chained heredocs",
+     "cat <<'A' > " + scratch("sl-1.md") + " && cat <<'B' > " +
+     scratch("sl-2.md") + " && " + CREATE + " -t t --body-file - <<'C'\n" +
+     CC + "\nA\n" + AC + "\nB\n" + NO_CC + "\nC\n", MISSING_MARK),
+]
+
+
+@pytest.mark.parametrize("label,cmd,mark", SAME_LINE_HEREDOC_CASES,
+                         ids=[c[0] for c in SAME_LINE_HEREDOC_CASES])
+def test_a_same_line_heredoc_belongs_to_the_command_that_opened_it(label, cmd, mark):
+    """🔴 A well-specified heredoc opened by a DIFFERENT command on the SAME line
+    must not answer for a create — the bodies are queued in operator order, so
+    position cannot attribute them and only the `<<` offset can. The mark is the
+    SPECIFIC reason, so a case cannot pass by observing "it blocked"."""
+    assert mark in (ev(cmd) or ""), cmd
+
+
+def test_the_same_line_good_heredoc_still_allows():
+    """🔴 THE OTHER DIRECTION, and the reason this is not just "block more". With
+    the bodies queued the other way round, position-based attribution hands the
+    create the FOREIGN junk body and denies a correctly-specified create. A fix
+    that only tightened would fail here."""
+    good = _line(scratch("sl-ok.md"), "&&", "-t t --body-file - " + "<<'B'",
+                 "junk the create never opened", CC)
+    assert ev(good) is None, good
+    # …and with the create's own body emptied of a condition it denies again,
+    # so the ALLOW above is about the body, not about the shape.
+    bad = _line(scratch("sl-ok2.md"), "&&", "-t t --body-file - " + "<<'B'",
+                "junk the create never opened", NO_CC)
+    assert MISSING_MARK in (ev(bad) or ""), bad
+
+
+def test_a_create_with_its_own_heredoc_is_not_credited_with_an_earlier_line_s():
+    """⚠️ AN INVARIANT GUARD — green at 2bd3d1e7, and written because a mutation
+    sweep found nothing else that could see it. It is the input that separates a
+    segment starting at the create from one starting at byte 0: the create opens
+    its OWN heredoc (so re-parsing its segment DOES find an operator), and a
+    well-specified heredoc sits on an earlier line. Widen the segment to the whole
+    line and the earlier body answers — the literal B2 bug, scored SURVIVED by
+    the suite as shipped."""
+    cmd = ("cat <<'A' > " + scratch("sl-prev.md") + "\n" + CC + "\nA\n" +
+           CREATE + " -t t --body-file - <<'B'\njunk\nB\n")
+    assert MISSING_MARK in (ev(cmd) or ""), cmd
+    # …and the create's own well-specified heredoc still ALLOWS on that same
+    # shape, so the assertion above is about attribution, not about denying more.
+    ok = ("cat <<'A' > " + scratch("sl-prev2.md") + "\njunk\nA\n" +
+          CREATE + " -t t --body-file - <<'B'\n" + CC + "\nB\n")
+    assert ev(ok) is None, ok
+
+
+def test_a_create_with_no_heredoc_of_its_own_sees_no_body():
+    """⚠️ AN INVARIANT GUARD, NOT REGRESSION COVERAGE — green at 2bd3d1e7 too, and
+    labelled so nobody counts it. It passed there for a reason that has nothing
+    to do with attribution: the widened span carried the foreign BODY but not the
+    foreign `<<` OPERATOR, so re-parsing the segment found no heredoc at all. It
+    is here because the fix reassembles segment text by hand, and an assembler
+    that appended every body rather than this command's would break it.
+
+    The reason must be "no body this gate can read", not "no closing condition" —
+    the gate saw nothing; it did not read a body and find it wanting."""
+    cmd = ("cat <<'A' > " + scratch("sl-none.md") + " && " + CREATE + " -t t\n" +
+           CC + "\nA\n")
+    assert REASON_NONE in (ev(cmd) or ""), cmd
+
+
+def test_the_override_still_reaches_a_command_after_a_heredoc_body():
+    """⚠️ ALSO AN INVARIANT GUARD — green at 2bd3d1e7. The walk steps OVER a
+    heredoc body; the first word after it is still in command position. Losing
+    that makes a legitimate override stop working, which is a permanently-red
+    gate — the failure direction nobody reports. It is pinned because the fix
+    rewrote the branch that used to re-arm `at_cmd` after a body (mutant M5)."""
+    line = ("cat <<'A' > " + scratch("sl-ovr.md") + "\nplan\nA\n" +
+            OVERRIDE_ON + " " + CREATE + " -t t -b nope")
+    assert ev(line) is None, line
+    # …and without the assignment the same line still denies.
+    assert MISSING_MARK in (ev(line.replace(OVERRIDE_ON + " ", "")) or "")
+
+
 def test_a_heredoc_that_writes_the_body_file_still_satisfies_it():
     """🔴 The other side, and why the rescue is matched on the PATH rather than
     deleted: the file does not exist yet when a PreToolUse hook runs, so a
@@ -695,7 +837,7 @@ def test_an_inert_sink_feeding_a_process_substitution_is_marked_not_inert():
     `cat <<'EOF' > >(bash)` really executes the body, and `_PIPES_ONWARD` — the
     "is this sink's output going somewhere executable" test — matched only
     `[|&;]`, so it scored INERT. No end-to-end command currently discriminates
-    that mutant, because `command_spans` splits on the substitution's own parens
+    that mutant, because `command_segments` splits on the substitution's own parens
     and re-exposes the body anyway. Two independent mechanisms is the point; a
     test that leans on the OTHER one would report coverage this guard does not
     have, so the claim is asserted where it is made."""
