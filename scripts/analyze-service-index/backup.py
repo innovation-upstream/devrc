@@ -503,6 +503,31 @@ def resolve_identity() -> Path:
     return resolve_identity_with_source()[0]
 
 
+def same_identity_file(a: Path, b: Path) -> bool:
+    """Do two identity paths name the SAME FILE?
+
+    🔴 THE DISCRIMINATING STATE IS THE FILE, NOT WHAT NAMED IT. A caller that
+    asks "was an environment variable set?" gets the wrong answer twice over:
+    the deployed backup unit sets `SOPS_AGE_KEY_FILE` to the default path
+    (`nix/home.nix`), so the env var is set and nothing is redirected; and an
+    explicit `--identity` can point AT the default, which no environment
+    redirected at all. Branching on the mechanism made both of those read as
+    "NOT the default" — a confident wrong claim, and a permanently-red warning
+    on the subsystem's own normal configuration.
+
+    Symlinks are resolved, so a default path that is a link to the file an env
+    var names is correctly judged the SAME file. `resolve()` is non-strict, so
+    a path that does not exist compares by its normalised form rather than
+    raising — an absent identity is a separate, already-classified failure.
+    """
+    try:
+        return a.expanduser().resolve() == b.expanduser().resolve()
+    except (OSError, RuntimeError):
+        # RuntimeError: a symlink loop. Fall back to the literal comparison
+        # rather than letting a path oddity crash a verifier.
+        return a == b
+
+
 def resolve_recipient(identity: Path) -> str:
     """The age recipient to encrypt to, DERIVED from the identity we can decrypt with.
 

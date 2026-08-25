@@ -119,6 +119,7 @@ import contextlib
 import importlib.util
 import json
 import os
+import shlex
 import shutil
 import signal
 import subprocess
@@ -152,6 +153,13 @@ DEFAULT_ITEM_NAME = "age.key — SOPS + analyze-service-index backups"
 # trusting the name: any item type can be given any name, and a Login item whose
 # `notes` happen to hold something is not the escrow.
 ITEM_TYPE_SECURE_NOTE = 2
+
+# What `main()` reports when the operator passed `--identity` explicitly. A
+# named constant because `provenance_clauses()` BRANCHES on it: a flag is a
+# deliberate act, and wording it like an environment redirect sends the reader
+# chasing a variable they never set — and told them to re-run with the very
+# flag they had just used.
+IDENTITY_SOURCE_FLAG = "the --identity flag"
 
 # The file the escrowed bytes are written to under `--decrypt-check`. A module
 # constant so the test suite can assert the path is GONE afterwards by name,
@@ -194,8 +202,16 @@ DECRYPT_PYTHON_MODULES: tuple[str, ...] = ("minio",)
 
 
 def _quote_nix_package(pkg: str) -> str:
-    """Shell-quote a `-p` argument that is a nix EXPRESSION, not a bare name."""
-    return f"'{pkg}'" if any(c in pkg for c in "()[]: ") else pkg
+    """Shell-quote a `-p` argument that is a nix EXPRESSION, not a bare name.
+
+    🔴 `shlex.quote`, NOT a hand-rolled rule. The first revision tested for a
+    trigger set of metacharacters and wrapped in single quotes without escaping
+    any embedded quote — correct for today's two entries and wrong for the
+    first entry that contains a `'` or a `$`. `shlex.quote` leaves a bare name
+    bare and is correct for every input, which is the whole point of a hint the
+    operator pastes into a shell.
+    """
+    return shlex.quote(pkg)
 
 
 NIX_SHELL_HINT = ("nix-shell -p "
@@ -717,10 +733,23 @@ class EscrowVerdict:
     decrypt_commits: int | None = None
     decrypt_refs: int | None = None
 
+    # What chose `identity`, when a caller stated it. 🔴 DISCLOSED ON THE
+    # SUCCESS LINE TOO: "escrow OK — the Secure Note matches <path>" is exactly
+    # where a comparison against a file nobody intended is least likely to be
+    # questioned, and this module's stated stance is that a false all-clear is
+    # the worst outcome in this subsystem.
+    identity_source: str | None = None
+
     def line(self) -> str:
         head = (f"{PROG}: escrow OK — the Secure Note matches {self.identity} "
                 f"{self.classification} ({self.escrow_bytes} escrowed bytes vs "
                 f"{self.disk_bytes} on disk)")
+        if (self.identity_source is not None
+                and not B.same_identity_file(self.identity, B.DEFAULT_IDENTITY)):
+            head += (f" 🔴 NOTE: that is NOT the default identity — it was "
+                     f"chosen by {self.identity_source}, so this 'matches' is a "
+                     f"claim about that file, not about "
+                     f"{B.DEFAULT_IDENTITY}")
         # 🔴 TWO INDEPENDENT FACTS, NEVER MERGED INTO ONE SENTENCE: whether the
         # operator PINNED a server, and whether the session cross-check could be
         # made at all. The old line asserted the second unconditionally while
@@ -1246,6 +1275,77 @@ def decrypt_check(*, escrow_bytes: bytes, work_dir: Path, bucket: str,
 
 
 # --------------------------------------------------------------------------- #
+# provenance
+# --------------------------------------------------------------------------- #
+# The exact sentence `--print-plan` prints when the on-disk file is NOT the
+# default. A module constant so the test suite can pin it WHOLE: a guard that
+# asserts only the fragment "NOT the default" is satisfied by any other
+# sentence containing it, including a false one — which is how the first
+# revision of this feature shipped a line claiming an `--identity` flag could
+# be "set by an unrelated shell".
+NON_DEFAULT_NOTE = "  <- NOT the default identity"
+
+
+def provenance_clauses(identity: Path, identity_source: str | None
+                       ) -> tuple[str, str]:
+    """`(chose, redirect)` — what to say about WHICH FILE was compared.
+
+    🔴 THE TRIGGER IS THE FILE, NEVER THE MECHANISM. Both of the first
+    revision's branches were wrong, and both printed a confident FALSE
+    sentence on an ordinary invocation:
+
+      * `--identity <the default path>` — the documented recommended command —
+        was reported as "NOT by the default", and warned that "an unrelated
+        shell can set this" about a COMMAND-LINE FLAG.
+      * `SOPS_AGE_KEY_FILE=<the default path>` is what the deployed backup unit
+        itself sets, so the warning fired on the subsystem's own normal
+        configuration — a permanently-red warning, which trains a reader to
+        skip the one sentence that matters when it is finally true.
+
+    So: `redirect` is emitted only when the resolved file genuinely differs
+    from `DEFAULT_IDENTITY`, and the source name is carried as INFORMATION.
+    A source of `None` means no caller stated one — nothing is claimed about
+    provenance rather than a default being invented for them.
+    """
+    if identity_source is None:
+        return "", ""
+
+    if B.same_identity_file(identity, B.DEFAULT_IDENTITY):
+        # Named by anything at all — env var, flag or the built-in default —
+        # it is still the default FILE, so there is nothing to warn about.
+        return f" The on-disk path is the default identity, named by {identity_source}.", ""
+
+    chose = (f" The on-disk path is NOT the default identity; it was chosen by "
+             f"{identity_source}.")
+
+    if identity_source == IDENTITY_SOURCE_FLAG:
+        # A flag is a deliberate act by the person reading this message. Say
+        # what was compared, without implying something redirected them.
+        redirect = (
+            f" 🔴 READ THIS BEFORE RE-ESCROWING: you pointed --identity at a file "
+            f"that is NOT the identity this subsystem encrypts to, so this "
+            f"mismatch says nothing about whether the escrow is intact. Every age "
+            f"identity file is the same size, so equal byte counts on both sides "
+            f"is what comparing two DIFFERENT keys looks like, not evidence they "
+            f"are the same key. Re-run against {B.DEFAULT_IDENTITY} before "
+            f"concluding anything, and do NOT re-escrow from the file you just "
+            f"named.")
+    else:
+        redirect = (
+            f" 🔴 READ THIS BEFORE RE-ESCROWING: {identity_source} redirected the "
+            f"on-disk path away from {B.DEFAULT_IDENTITY}, so a mismatch here is "
+            f"at least as likely to mean you compared the WRONG FILE as it is to "
+            f"mean the escrow is damaged — and the two remedies are opposites. "
+            f"Every age identity file is the same size, so equal byte counts on "
+            f"both sides is what comparing two DIFFERENT keys looks like, not "
+            f"evidence they are the same key. Re-escrowing now would overwrite a "
+            f"possibly-good escrow with whatever {identity_source} happens to "
+            f"point at. Re-run with `env -u {identity_source.lstrip('$')} …` to "
+            f"compare against the default first.")
+    return chose, redirect
+
+
+# --------------------------------------------------------------------------- #
 # the run
 # --------------------------------------------------------------------------- #
 def run(*, bw: BitwardenCLI, identity: Path, item_name: str,
@@ -1271,31 +1371,7 @@ def run(*, bw: BitwardenCLI, identity: Path, item_name: str,
     item = find_escrow_item(bw, item_name)
     escrow = read_note(item, item_name)
 
-    # 🔴 WHAT CHOSE THE ON-DISK FILE, stated in the mismatch messages below.
-    # Three branches, and the middle one is the whole point: an identity chosen
-    # by an environment variable is one an unrelated shell can redirect, so a
-    # mismatch is at least as likely to be a WRONG-FILE comparison as a damaged
-    # escrow. `None` means no caller stated a source — the messages then say
-    # NOTHING about provenance rather than asserting a default they cannot know.
-    if identity_source is None:
-        chose = ""
-        redirect = ""
-    elif identity_source == B.IDENTITY_SOURCE_DEFAULT:
-        chose = f" The on-disk path was chosen by {identity_source}."
-        redirect = ""
-    else:
-        chose = f" The on-disk path was chosen by {identity_source}, NOT by the default."
-        redirect = (
-            f" 🔴 READ THIS BEFORE RE-ESCROWING: because {identity_source} chose "
-            f"the on-disk path, a mismatch here is at least as likely to mean you "
-            f"compared the WRONG FILE as it is to mean the escrow is damaged — and "
-            f"the two remedies are opposites. Every age identity file is the same "
-            f"size, so equal byte counts on both sides is what comparing two "
-            f"DIFFERENT keys looks like, not evidence they are the same key. "
-            f"Re-escrowing now would overwrite a possibly-good escrow with "
-            f"whatever {identity_source} happens to point at. Re-run with "
-            f"--identity {B.DEFAULT_IDENTITY} to compare against the default "
-            f"first.")
+    chose, redirect = provenance_clauses(identity, identity_source)
 
     verdict_class = classify(escrow, disk)
     if verdict_class == CLASS_TRAILING_NEWLINE:
@@ -1320,16 +1396,22 @@ def run(*, bw: BitwardenCLI, identity: Path, item_name: str,
             f"bytes vs {len(disk)} on disk, and they are not equal after "
             f"trailing newlines are removed. (The differing content is NOT "
             f"printed — it is key material; compare them by hand if you must.) "
+            # 🔴 ORDER IS LOAD-BEARING: the refusal comes BEFORE the remedy.
+            # The first revision appended it after "Re-escrow from the on-disk
+            # identity…", so the operator read the dangerous instruction first
+            # and the reason not to follow it second.
             f"One of the two copies is not the key this subsystem encrypts to."
-            f"{chose} Re-escrow from the on-disk identity only after confirming "
-            f"the on-disk one is the one the bucket's artifacts open with — "
-            f"`restore-verify.py` answers that.{redirect}")
+            f"{chose}{redirect} Re-escrow from the on-disk identity only after "
+            f"confirming the on-disk one is the one the bucket's artifacts open "
+            f"with — `restore-verify.py` answers that (pass it the SAME "
+            f"--identity you used here, or it will resolve its own).")
 
     verdict = EscrowVerdict(
         item_name=item_name, server=server, server_pinned=pinned,
         server_session_reason=session_reason,
         escrow_bytes=len(escrow), disk_bytes=len(disk),
         classification=verdict_class, identity=identity,
+        identity_source=identity_source,
     )
     if not decrypt:
         return verdict
@@ -1359,11 +1441,14 @@ def print_plan(*, identity: Path, item_name: str, expect_server: str | None,
     print(f"identity:  {identity} ({size} bytes)" if present
           else f"identity:  {identity} (MISSING)")
     # 🔴 The SIZE above cannot discriminate: every age identity file is the same
-    # size, so a redirected path looks identical here to the right one. The
-    # source is the only field on this line that can tell them apart.
+    # size, so a different key looks identical here to the right one. Whether
+    # the file IS the default is the only thing on this line that separates
+    # them — and it is asked of the FILE, never of what named it, so that
+    # `--identity <the default>` and the deployed unit's own
+    # `SOPS_AGE_KEY_FILE=<the default>` are both correctly silent.
     if identity_source is not None:
-        note = ("" if identity_source == B.IDENTITY_SOURCE_DEFAULT else
-                "  <- NOT the default; an unrelated shell can set this")
+        note = ("" if B.same_identity_file(identity, B.DEFAULT_IDENTITY)
+                else NON_DEFAULT_NOTE)
         print(f"chosen by: {identity_source}{note}")
     print(f"item:      {item_name!r} (exact name match; `bw list items "
           f"--search` is FUZZY, so its results are candidates)")
@@ -1496,7 +1581,7 @@ def main(argv: list[str] | None = None) -> int:
     # its own source: it is the one choice the operator definitely made on
     # purpose, so it must not be reported as an environment redirect.
     if args.identity is not None:
-        identity, identity_source = args.identity, "the --identity flag"
+        identity, identity_source = args.identity, IDENTITY_SOURCE_FLAG
     else:
         identity, identity_source = B.resolve_identity_with_source()
     prefix = (args.prefix if args.prefix is not None
