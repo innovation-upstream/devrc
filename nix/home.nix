@@ -1260,16 +1260,22 @@ in
   # absent from the upstream branch's recent history, and reports what it
   # touched. `BASE_CLONE_NO_REFRESH=1` makes it report-only.
   #
-  # Registration in ~/.claude/settings.json stays PER-HOST and unmanaged, exactly
-  # like bash-guard.py above: register-nudge-hook.py deliberately does NOT own
-  # it. That is structural, not an omission — the registrar's managed-command
-  # surface recognises `<python> <path>.py` commands only, and its whole rewrite
-  # half exists to normalise a python INTERPRETER token to an absolute /nix/store
-  # path. This hook is bash, so there is no interpreter hazard to fix and nothing
-  # for the registrar to match; teaching that shared component a second
-  # interpreter would widen a load-bearing surface for no benefit. Consequence,
-  # the same known gap bash-guard.py has: on any host where the entry has not
-  # been added by hand, the switch delivers the script and the hook is INERT.
+  # 🔴 REGISTERED BY register-nudge-hook.py since 2026-08-23 — this comment used to
+  # say the opposite, and the opposite was a shipped gap. It reasoned that the
+  # registrar recognises `<python> <path>.py` only, that a bash hook has no
+  # interpreter hazard to fix, and concluded that teaching it a second interpreter
+  # "would widen a load-bearing surface for no benefit". The first two clauses are
+  # still true; the conclusion did not follow. The benefit is not interpreter
+  # pinning — it is REGISTRATION, and the stated consequence was the #452 shape
+  # verbatim: on the second host the switch delivers the script, reports success,
+  # and the hook sits INERT with nothing on screen to say so. Measured: it fired on
+  # exactly one host, the one where the entry had been hand-added.
+  #
+  # What the registrar gained is an IDENTITY recogniser (`hook_script_of`) sitting
+  # beside the interpreter one, not a widened rewrite surface. The rewrite pass
+  # still keys on the python-only `managed_match`, because normalising this
+  # command's first token to a python path would make every session start a
+  # SyntaxError. See MANAGED_SHELL_HOOK_SCRIPTS in that script.
   #
   # 🔴 A NEW file, so it must be `git add`ed or the flake silently omits it and
   # the switch still succeeds with the hook absent — this repo's standing trap
@@ -1281,8 +1287,10 @@ in
   # never been hand-placed. MEASURED 2026-08-22 before the first switch that
   # deploys it — `ls -la ~/.claude/hooks/` shows 14 entries on this host, ALL
   # /nix/store symlinks, no regular files, and no base-clone-staleness.sh among
-  # them. The live copy being replaced lives in ~/.claude/local-hooks/, a
-  # different directory this attribute does not write to. If a foreign file ever
+  # them. The live copy being replaced lived in ~/.claude/local-hooks/, a
+  # different directory this attribute never wrote to; it was kept as the rollback
+  # path until the hook was observed to fire from here, and deleted 2026-08-23
+  # once it had been. If a foreign file ever
   # does appear at this path the switch fails LOUDLY ("would be clobbered")
   # rather than silently leaving it unmanaged — add it to dropStaleClaudeHooks
   # then.
@@ -2624,7 +2632,7 @@ in
         # local_ipv4s identifies WHICH host this is (both report hostname `nixos`).
         # Without it detection returns "unknown" and the script exits 6.
         #
-        # 🔴 python3 AND tmux ARE FOR THE CHILD, NOT FOR drift-check.sh ITSELF.
+        # 🔴 tmux IS FOR THE CHILD; python3 IS NOW FOR BOTH.
         # The fuzzyclaw phase-2 gate execs `scripts/session-manager`, whose
         # shebang resolves `python3` from PATH and which shells out to `tmux
         # list-panes`. Under systemd there is none of the login shell's PATH, so
@@ -2632,6 +2640,12 @@ in
         # forever — from a unit that looks correct, which is the exact shape the
         # iproute2 note above records. Pinned by
         # `test_the_phase2_child_binaries_are_on_the_unit_path`.
+        # ⚠ This block used to say python3 was for the child ONLY. That stopped
+        # being true when the skill-tier arm (rc 22) landed: drift-check.sh now
+        # runs `python3 lib/skill_tier_facts.py` itself, in the driver, to read
+        # `claude/skill-tiers.json` through the ledger's own parser instead of a
+        # second sed. Without python3 that arm reports COULD NOT MEASURE — no rc,
+        # but also no coverage.
         "PATH=${lib.makeBinPath [ pkgs.git pkgs.openssh pkgs.iproute2 pkgs.bash pkgs.coreutils pkgs.gawk pkgs.gnused pkgs.gnugrep pkgs.python3 pkgs.tmux ]}"
         "HOME=%h"
       ];
@@ -2642,6 +2656,12 @@ in
         "${../scripts/drift-check.sh}"
         "${../scripts/lib/host-role.sh}"
         "${../scripts/lib/drift_phase2.py}"
+        # The rc-22 skill-tier arm: the reader, the parser it delegates to, and
+        # the ledger itself. The ledger is listed because a re-tiering changes
+        # what the unit would REPORT without any script changing at all.
+        "${../scripts/lib/skill_tier_facts.py}"
+        "${../scripts/lib/skill_tiers.py}"
+        "${../claude/skill-tiers.json}"
       ];
     };
   };

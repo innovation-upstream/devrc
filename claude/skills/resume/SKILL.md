@@ -101,4 +101,32 @@ Topic argument (optional): `$ARGUMENTS`.
    - Any drift you found between the handoff and live state.
    - Anything the index recalled that bears on the next steps — labelled `from index`, kept separate from what step 2 measured.
 
+6. 🔴 **BEFORE ACTING ON A NEXT-STEP, CLAIM IT — the list is a SHARED QUEUE WITH NO LOCK.**
+   Every session that resumes this handoff draws from the same ranked list, and
+   nothing marks an item as taken. Measured 2026-08-24 on one handoff: its
+   next-step 1 became homelab-infra `#386`, and next-step 4 became **both `#388`
+   and `#389`** — two sessions, same item, one PR abandoned after two audit
+   rounds of work.
+   🔴 **Worktree isolation does NOT prevent this and is not the answer.** Both
+   sessions isolated correctly; no file was ever clobbered. Worktrees stop a
+   FILESYSTEM collision (two agents in one tree); this is a TASK-ALLOCATION
+   collision. Isolation is in fact what HIDES it — a shared tree would have shown
+   the other branch.
+   **So do both of these, in this order:**
+   - **`gh pr list --repo <r> --state open --json number,title,headRefName,files`
+     before you start, and AGAIN immediately before `gh pr create`.** Two moments,
+     because the window is ~20 minutes and the second one is where the sunk cost
+     is highest. Measured: `#774` was public **22 minutes** before the duplicate
+     was opened, and `#388` was public **18 minutes** before the other side's
+     first commit. Each was visible; neither was checked.
+   - **PUSH THE BRANCH THE MOMENT YOU CREATE IT, before doing the work** (an empty
+     commit is fine). That is the claim. It costs seconds and collapses the
+     invisible window from ~20 minutes to ~0, because a branch is visible to
+     `git ls-remote` the instant it lands.
+   ⚠ **A pre-flight check alone is NOT sufficient, and it is worth knowing why:**
+   whoever moves FIRST cannot see the second session at all. In the `#388`/`#389`
+   pair, no check on the first mover's side could have helped — the duplication
+   was created entirely by the later session. That is exactly why the early push
+   matters: it is the only half of this that protects the first mover.
+
 Then wait for direction. Pair: `/handoff` (it writes the index entries this step reads).

@@ -99,6 +99,15 @@ there. Only what's specific to this repo, where a working tree is also a **deplo
   its absence a token fails the suite. It exists because the prose version was false for
   three days — `summary.age_sources` was read with no presence check, and a report
   missing it printed a `READY` byte-identical to a real one.
+  🔴 **rc 22 — a host's deployed `skillOverrides` disagree with `claude/skill-tiers.json`.**
+  A host with NO overrides prints **NOT ADOPTED and sets no rc**: the tier mechanism
+  shipped applied to zero hosts on purpose (nothing is being truncated today), and
+  counting an unapplied host as drift would have made this arm red on every run from
+  the day it landed. rc 22 is **adopted-then-drifted** only. It ranks just under rc 10
+  because a BEHIND host carries a stale ledger — ship it first, then re-run
+  `scripts/sync-skill-tiers.py`. The expectation is read through the ledger's own
+  parser, never a second sed; a ledger it cannot read prints COULD NOT MEASURE and
+  sets no rc, because an empty expectation would make every host look compliant.
 - **Recovering a diverged host** — preserve, verify, *then* move the pointer:
   `git branch <topic> HEAD && git push -u origin <topic>` on that host → confirm the shas are
   on origin **from a different host** → `git reset --keep origin/main` (`--keep` refuses
@@ -121,6 +130,7 @@ there. Only what's specific to this repo, where a working tree is also a **deplo
   does — something must NAME it, so give each one a router (a SKILL.md table row, and where it
   matters a hook that names the path in its message; see `clawgate/flows/task-authoring.md`).
 - 🔴 **The skill LISTING is a third always-on cost, and it fails SILENTLY.** Every skill's name + `description` (+ `when_to_use`) loads on **every session** under a budget of **1% of the context window** (per-entry cap 1,536 chars); on overflow Claude Code DROPS descriptions starting with the skills you invoke least — stripping the very trigger keywords that make a skill auto-fire, with no error. So a description is **routing surface, not documentation**: key use case first, then the literal phrases Zach says, then disambiguation from a sibling skill. Narrative goes in the body (0 until invoked). 🔴 **Measured 2026-08-23: the listing does NOT fit a 200k context and cannot be made to — it fits 1M.** The TOTAL is now ratcheted by `scripts/tests/test_skill_descriptions.py`, which owns the constants, the measurement, the break-even argument and the eviction playbook — **read them there, never restate them.** Any addition needs an eviction in the SAME commit; closing the remaining gap means retiring or merging skills, or disabling the cloudflare plugin (a quarter of the total, and not devrc's to edit). ⚠ `claude doctor` (the CLI) reports no listing cost; the interactive `/doctor` reportedly does — unverified.
+  🔴 **The cost is now per-skill opt-in, and ADDING A SKILL MEANS TIERING IT.** `claude/skill-tiers.json` assigns every skill tier A (full description) or tier B (`name-only`, ~12 chars, still `/name`-invocable, no routing prose). `scripts/tests/test_skill_tiers.py` pins it **two-way** — a skill with no entry, or an entry naming no skill, fails the suite — and owns the tier-A ratchet, the real charging formula and the playbook: **read them there, never restate them.** Tier by whether the skill must **AUTO-FIRE from a symptom Zach describes**, never by an invocation counter (`dl-router` runs as a live systemd service and `adoption-scan` has 20,494 tool events; Claude Code's counter says 0 for both). 🔴 **The ledger is applied to NO host by default** — `~/.claude/settings.json` is per-host and unmanaged, so `scripts/sync-skill-tiers.py` (dry-run unless `--apply`) is an operator act, and `drift-check.sh` reports an unapplied host as **NOT ADOPTED, not drift**. Full argument: `claudedocs/proposal-skill-listing-tiers.md`.
 - `.zshrc`, `.tmux.conf` etc. are read by the nix modules — read with offset/limit, they're large.
 
 ### Subsystems — operate each via its SKILL, not from here
@@ -145,17 +155,18 @@ Repo-level facts that are NOT in any skill — they live here on purpose:
 - **Graphical/agent-facing layer is home-manager, never `/etc/nixos`** (migrated PR #74; the old `i3config.nix`/`i3blocks.nix`/`i3blocks-scripts` are RETIRED). Cutover gotcha: finish with `sudo systemctl restart display-manager`, NOT `i3-msg restart`.
 - 🔴 **`scripts/agent-ops` — the "mission control" TUI — is RETIRED, and so are all three of its launchers** (`$mod+i`, tmux `prefix+A`, the ▦ bar button's click). Every panel has an owner: the clawgate queue + live runs → `session-manager`, open PRs + cluster health + **local systemd health** → `standup`, momentum → `/initiative-scan`, the mail/clawgate counts → bar pills. The one part worth keeping, its `/proc` Claude-session detector, is now `scripts/lib/claude_sessions.py` — shared, and deployed beside the ▦ bar pill (`i3status-claude-runs`), which remains as an indicator. ⚠ fuzzyclaw (`~/.tmux/tasks/*.json`) is UNTRUSTED as a data source.
 - 🔴 **Zach works ENTIRELY via agents → modernization targets this agent-facing layer, NOT interactive-CLI ricing.**
-- **Two always-on docs have enforced byte ceilings**, because both load on every session: `scripts/browser-bridge/SKILL.md` (gated by `scripts/browser-bridge/tests/test_skill_size.py`) and `claude/RULES.md` (gated by `scripts/tests/test_rules_size.py`). Each test OWNS its constants and prints an eviction playbook on failure — **read the numbers there, never restate them.** Any addition needs an eviction in the SAME commit.
+- **Several docs have enforced byte ceilings, each gated by its own test that OWNS the constants and prints an eviction playbook on failure** — `claude/RULES.md` (the only always-on one) plus the skill bodies `browser`, `prune-skill`, `session-manager` and `handoff`. 🔴 **Read the numbers in the tests, never restate them, and do not restate the LIST either** — `git grep -l MIN_HEADROOM_BYTES scripts/` answers it. This bullet has twice carried a count that was wrong within a day. Any addition needs an eviction in the SAME commit; raising a ceiling needs the commit message to say which instruction would not fit.
 - **Run the gate with `scripts/gate.sh`** (`--tier pytest|node|both`, `--set hermetic|all`). It sends the full output to a LOG FILE and prints only a bounded summary, so there is no reason to pipe it — and **its exit status is authoritative**. It also cross-checks that status against the runners' own `RESULT:` line and exits **90 = could-not-vouch** when they disagree, when a run printed no verdict, or when `panic: test timed out` appears. 90 is not "the tests failed"; it means read the log.
 - **The runners' verdict line carries their exit code** (`RESULT: FAIL (exit=1)`), emitted from one writer behind an EXIT trap, so it survives a pipe and a killed run still says so. Historically the status was destroyed by `… | tail; echo "rc=$?"` — four agents reported `exit 0` over `RESULT: FAIL` on 2026-08-11 — which is why counting `PASSED`/`FAILED` lines used to be mandatory. Still a fine cross-check; no longer the only thing you can trust.
-- 🔴 **A MERGE IS NOW BLOCKED BY `tekton/devrc-nodetests`. `devrc-pytests` is NOT.** <!-- merge-gate: other -->
-  Since 2026-08-23 `required_status_checks.contexts = ["tekton/devrc-nodetests"]` on `main`,
-  with `enforce_admins: true`. Verified behaviourally, not from the setting: PRs with
-  nodetests `ERROR` or `PENDING` read `mergeStateStatus=BLOCKED`, green ones read `CLEAN`,
-  and a PR with pytests red but nodetests green reads `UNSTABLE` — mergeable. That split is
-  deliberate — and nodetests collects `*.test.mjs` ONLY, so a Python-only PR cannot fail
-  the required check at all. There is still no `.github/workflows`, so
-  the marker stays `other`.
+- 🔴 **A MERGE IS BLOCKED BY BOTH TIERS — `tekton/devrc-pytests` AND `tekton/devrc-nodetests`.** <!-- merge-gate: other -->
+  Measured 2026-08-23: `required_status_checks.contexts =
+  ["tekton/devrc-nodetests","tekton/devrc-pytests"]` on `main`, `enforce_admins: true`. A
+  Python-only change is now genuinely gated. ⚠ **It was not, earlier the same day** —
+  `contexts` held nodetests ALONE, which collects `*.test.mjs` ONLY, so a Python-only PR
+  could not fail it and read `UNSTABLE` (mergeable) with pytests red. **That observation is
+  OBSOLETE**; it reads `BLOCKED` today. Kept because a one-element `contexts` list reads as
+  "blocked" at a glance — check the LIST, not that the key exists. There is still no
+  `.github/workflows`, so the marker stays `other`.
   🔴 **`enforce_admins: true` is LIVE now** — it protected nothing while nothing was
   required. If Tekton is down or wedged, NOTHING merges and there is no admin override.
   The escape hatch, deliberately written down because you will want it under pressure:
@@ -179,7 +190,7 @@ Repo-level facts that are NOT in any skill — they live here on purpose:
   🔴 **`error` is not `failure`.** A check posted as `error` with `COULD NOT RUN: <leg>`
   means the gate stopped before that leg reported — a broken gate, not a bad change. Do not
   debug your diff against it.
-  🔴 **Before making a check REQUIRED, know this failure mode:** when a run hits
+  🔴 **Both checks are REQUIRED, so this failure mode is LIVE:** when a run hits
   `timeouts.tasks` the `finally` report task never runs, so **nothing is posted and the PR's
   checks stay `pending` forever** — measured on `devrc-ci-nnt6f` and `devrc-ci-9p6mf`,
   `childReferences` `[notify, gate]` only, still `pending` hours later. A required check in
@@ -205,11 +216,22 @@ Repo-level facts that are NOT in any skill — they live here on purpose:
   agent-worktree creation, is NOT a devrc setting, and `git config --local --get
   core.hooksPath` per clone is the only answer.
   **Until then: run the gate yourself before you merge, and say which command you ran.**
-  `nix build .#checks.x86_64-linux.pytests` / `.#checks.x86_64-linux.nodetests` (or
-  `scripts/gate.sh`) are authoritative — they assert collected-test FLOORS and parse structured
-  output rather than reading an exit code, because `node --test <dir>` silently yields a bogus
-  `# tests 1` and a pytest suite can collect 0 with a zero exit. Gate on the MERGED tree, not
-  the PR branch.
+  Both of these assert collected-test FLOORS and parse structured output rather than reading
+  an exit code, because `node --test <dir>` silently yields a bogus `# tests 1` and a pytest
+  suite can collect 0 with a zero exit. Gate on the MERGED tree, not the PR branch.
+  🔴 **BUT THEY ARE TWO DIFFERENT TIERS, NOT TWO SPELLINGS OF ONE — this line used to join
+  them with "or", and that word cost a required check.** `scripts/gate.sh` runs
+  `scripts/run-tests.sh` + `scripts/run-node-tests.sh` **on the dev host** (see its
+  `PYTEST_RUNNER`/`NODE_RUNNER`); it does **not** invoke `nix build` at all.
+  `nix build .#checks.x86_64-linux.{pytests,nodetests}` builds from a `cp -r ${./.}` **store
+  copy with NO `.git`**, and that is the tier **Tekton runs and the merge is gated on**.
+  Measured 2026-08-23 on #773: four consecutive `GATE: RESULT=PASS` runs, then
+  `tekton/devrc-pytests` red — the sandbox tier had never been run. The dev-host tier is also
+  structurally blind to anything keyed on the repo being a git checkout: GUARD 10's
+  `NOGIT_REPO_LOCAL` is EMPTY in the sandbox, so its whole repo-local class evaluates
+  differently there. **Run BOTH before you claim a merge is safe, and name the tier and the
+  base sha in the claim** — "the gate passed" is true of one run, one tier, one base, and
+  reads as a property of the change.
   🔴 **The `<!-- merge-gate: … -->` marker above is LOAD-BEARING, not decoration.**
   `scripts/tests/test_ci_claim_matches_reality.py` parses it and fails when it disagrees with
   the repo. **Reword this prose freely — but keep a sentence on the marker's line and do not
@@ -223,9 +245,9 @@ Repo-level facts that are NOT in any skill — they live here on purpose:
   see (Tekton — which is why it reads `other` today — or an installed `githooks/` pre-push
   gate); `other` exists so the test can never force you to write a false `none`.
   🔴 **The marker records that something RUNS, never that it BLOCKS.** Those are different
-  facts, and the marker cannot tell them apart: it read `other` both while nothing blocked
-  (2026-08-22) and now that `tekton/devrc-nodetests` is required (2026-08-23) — the value
-  did not move, because what changed was branch protection, which this test cannot see.
+  facts, and the marker cannot tell them apart: it read `other` while nothing blocked
+  (2026-08-22), while one tier blocked, and now that both do (2026-08-23) — the value never
+  moved, because what changed each time was branch protection, which this test cannot see.
   So `other` never licenses "the merge is protected". Whether a run blocks is branch
   protection, which — along with Tekton and git hooks — is named above but NOT
   machine-checked from here. Re-verify by hand rather than trusting this paragraph's age:

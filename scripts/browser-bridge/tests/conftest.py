@@ -39,9 +39,17 @@ shells out is covered too. (No test does today: nothing here spawns `server.py`,
 and neither the `browser` CLI nor `browser-agent` touches the spool at all.)
 
 TWO FIXTURES, TWO DIFFERENT HAZARDS — see each one's own docstring. The
-per-test one gives each test its own spool so tests cannot read each other's
-rows; the session-scoped backstop exists because the per-test one's TEARDOWN is
-itself a hole.
+per-test one gives each test its own spool DIRECTORY; the session-scoped
+backstop exists because the per-test one's TEARDOWN is itself a hole.
+
+🔴 A PER-TEST DIRECTORY IS NOT A PER-TEST WRITER SET, and this sentence used to
+claim it was ("so tests cannot read each other's rows"). `ACTIVITY_SPOOL_DIR` is
+process-global and re-pointed per test, so a thread still ALIVE from an earlier
+test emits into the CURRENT test's dir. Corrected in the same change that fixed
+the assertions it broke — see `_isolate_activity_spool` below for the
+measurement. The correction lived only on that fixture at first, leaving this
+paragraph contradicting it 70 lines higher in the same file; a reader who stops
+here would still get the false guarantee, which is the whole failure mode.
 
 `scripts/browser-bridge/tests/test_spool_isolation.py` is the regression guard,
 and it is a SEPARATE FILE on purpose: its first two tests are only meaningful as
@@ -114,8 +122,24 @@ def _session_spool_backstop(tmp_path_factory):
 
 @pytest.fixture(autouse=True)
 def _isolate_activity_spool(tmp_path, monkeypatch):
-    """Narrow the spool to a PER-TEST temp dir, so no test can read another's
-    rows. Teardown restores to the session backstop above, never to ambient."""
+    """Narrow the spool to a PER-TEST temp dir. Teardown restores to the session
+    backstop above, never to ambient.
+
+    🔴 THIS DOES NOT GUARANTEE "no test can read another's rows", which is what
+    this docstring used to claim. `ACTIVITY_SPOOL_DIR` is a process-global env
+    var and this re-points it per test, so a thread still ALIVE from an earlier
+    test emits into whatever the CURRENT test's dir is. Measured 2026-08-24: a
+    neighbour's `{"op":"getHtml","outcome":"timeout"}` sat at position 0 of two
+    different tests' spools in CI, which made
+    `_wait_events(spool_dir, 1)[0]` return someone else's row and reddened two
+    PRs that cannot reach browser-bridge at all.
+
+    What this fixture actually gives you is a per-test dir, not a per-test
+    WRITER SET. Select rows by `op` (`_wait_ops`/`_wait_payload` in
+    `test_server.py`) rather than by position, and treat the isolation here as
+    narrowing the blast radius rather than closing it. Closing it properly means
+    joining every emitter thread at teardown, which is a bigger change than the
+    one that fixed the assertions."""
     monkeypatch.setenv("ACTIVITY_SPOOL_DIR", str(tmp_path / "activity-spool"))
     # Only reset the lazy emitter cache on an ALREADY-imported `server`. Several
     # modules here (test_skill_size, test_browser_agent_parse, …) never import

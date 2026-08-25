@@ -225,6 +225,27 @@ _STAMP_FMT = "%Y%m%dT%H%M%SZ"
 _STAMP_RE = re.compile(r"^(?P<stamp>\d{8}T\d{6}Z)\.bundle\.age$")
 
 
+# 🔴 MACHINE-READABLE CAUSES FOR THE DECRYPT STEP. `decrypt()` below has three
+# distinct failure branches and they mean COMPLETELY different things to a
+# caller — one is an environment fault, one says the identity does not open the
+# artifact, and one says the identity DID open it and the artifact holds
+# nothing. Every one of them raises `RestoreVerifyError`, so from the outside
+# they were separable only by reading the message text.
+#
+# `escrow-verify.py` has to make exactly that distinction to decide whether a
+# failure is a verdict on the ESCROWED KEY or on the ARTIFACT, and getting it
+# wrong there reports a tampered backup as "nothing to worry about" or gets a
+# working disaster-recovery key rotated. Substring-matching another module's
+# prose is the approach that whole feature exists to remove, so the cause is
+# published as a value instead — set HERE, by the module that knows.
+DECRYPT_AGE_MISSING = "age-missing"          # the binary is not on PATH
+DECRYPT_AGE_REFUSED = "age-refused"          # age exited NON-ZERO
+DECRYPT_EMPTY_PLAINTEXT = "empty-plaintext"  # age exited ZERO, wrote 0 bytes
+
+DECRYPT_CAUSES = frozenset(
+    {DECRYPT_AGE_MISSING, DECRYPT_AGE_REFUSED, DECRYPT_EMPTY_PLAINTEXT})
+
+
 class RestoreVerifyError(B.BackupError):
     """A failure that must make the whole run non-zero.
 
@@ -232,7 +253,22 @@ class RestoreVerifyError(B.BackupError):
     script's own refusals and the ones raised by the helpers it reuses from
     `backup.py` (`_git_scratch`'s store guard, most importantly). Two exception
     hierarchies over one pipeline is how a failure escapes to a bare traceback.
+
+    `cause` is an OPTIONAL machine-readable tag, currently set only by
+    `decrypt()` (see `DECRYPT_CAUSES` above). It defaults to None everywhere
+    else, so a caller that reads it gets an explicit "this failure carries no
+    published cause" rather than a wrong one — never treat None as a default
+    cause.
     """
+
+    def __init__(self, message: str, *, cause: str | None = None):
+        super().__init__(message)
+        if cause is not None and cause not in DECRYPT_CAUSES:
+            raise KeyError(
+                f"{cause!r} is not a published cause. The set is closed on "
+                f"purpose: a consumer branches on these, so inventing one "
+                f"silently lands in whatever `else` that consumer has.")
+        self.cause = cause
 
 
 # --------------------------------------------------------------------------- #
@@ -523,7 +559,27 @@ def decrypt(cipher: Path, plain: Path, identity: Path) -> None:
             "flake.nix `gateTools`; add it there rather than working around it. "
             "There is no fallback: an artifact this cannot decrypt is an "
             "artifact this cannot verify, and skipping it would report safety "
-            "that was never measured.")
+            "that was never measured.",
+            cause=DECRYPT_AGE_MISSING)
+    # 🔴 A STALE OUTPUT FILE MAKES age's OWN FAILURE UNREADABLE. MEASURED: on
+    # BOTH the wrong-key and damaged-header paths age leaves a PRE-EXISTING
+    # `--output` file completely untouched (rc=1, file present, original 34-byte
+    # content intact) — it only creates the file once it has authenticated the
+    # header. Consumers therefore read the PRESENCE of `plain` as "age got past
+    # the header", and a leftover from an aborted earlier run turns that into a
+    # lie: a WRONG KEY reads as a corrupt artifact.
+    #
+    # `work_dir` is routinely REUSED — `B._private_dir` documents the
+    # already-exists case as "every run after the first with an explicit
+    # --work-dir" — so this is an ordinary sequence, not an exotic one: abort a
+    # run mid-decrypt, re-run with the same --work-dir, get a confident wrong
+    # answer.
+    #
+    # One unlink removes the whole class. The same reasoning already guards the
+    # throwaway identity in `escrow-verify.py::_create_private_file`; it was
+    # applied there and not here, which is a predicate that was right at one of
+    # its two sites.
+    plain.unlink(missing_ok=True)
     p = subprocess.run(
         ["age", "--decrypt", "--identity", str(identity),
          "--output", str(plain), str(cipher)],
@@ -534,7 +590,8 @@ def decrypt(cipher: Path, plain: Path, identity: Path) -> None:
             f"{p.stderr.strip()}. The object was retrieved but the identity at "
             f"{identity} does not open it, or the ciphertext is damaged. This is "
             f"NOT a corruption verdict about the git history inside — nothing "
-            f"here has read it.")
+            f"here has read it.",
+            cause=DECRYPT_AGE_REFUSED)
     if not plain.is_file() or plain.stat().st_size == 0:
         # 🔴 MEASURED: `age` encrypts a ZERO-BYTE payload to a perfectly valid
         # 200-byte ciphertext, and decrypts it back at rc=0. So an object that
@@ -548,7 +605,8 @@ def decrypt(cipher: Path, plain: Path, identity: Path) -> None:
             f"bytes. age reported success, so this is not damage — it is a "
             f"valid encryption of nothing. An empty bundle restores to nothing "
             f"and would otherwise be reported as a clean restore of a scope "
-            f"with no history.")
+            f"with no history.",
+            cause=DECRYPT_EMPTY_PLAINTEXT)
     os.chmod(plain, _FILE_MODE)
 
 

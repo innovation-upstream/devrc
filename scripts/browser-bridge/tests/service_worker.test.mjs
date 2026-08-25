@@ -80,7 +80,10 @@ globalThis.chrome = {
   alarms: { create() {}, onAlarm: { addListener() {} } },
 };
 
-const { OPS } = await import("../extension/service_worker.js");
+const { OPS, loopTiming } = await import("../extension/service_worker.js");
+const { FAST_CAPTURE_BUDGET_MS, EXEC_OP_BUDGET_MS, POLL_BUDGET_MS,
+        RESULT_BUDGET_MS, LOOP_STALL_MS, STORAGE_BUDGET_MS }
+  = await import("../extension/protocol.js");
 
 function lastExec() { return state.calls.executeScript[state.calls.executeScript.length - 1]; }
 
@@ -243,6 +246,149 @@ test("screenshot STILL uses the chrome.debugger (CDP) path — not regressed to 
   assert.equal(state.calls.getAllFrames.length, 0, "screenshot must not enumerate frames");
   assert.equal(out.via, "cdp");
   assert.match(out.dataUrl, /^data:image\/png;base64,/);
+});
+
+// --------------------------------------------------------------------------- //
+// 🔴 THE FAST PATH MUST SURVIVE A HANG, NOT ONLY A REJECTION.
+//
+// `chrome.tabs.captureVisibleTab` can simply never settle. Before the fast-path
+// bound, the `catch` that is supposed to fall through to CDP could not see that:
+// the await never returned, and the whole op died at EXEC_OP_BUDGET_MS (18s) —
+// on a tab CDP would have captured in well under a second. Measured 2026-08-24,
+// 3/3 `op_timeout:screenshot` at 18.07-18.11s vs 3/3 CDP successes 381-3084ms.
+//
+// RED WITHOUT THE FIX — and it must be red as a FAILURE, never as a hang.
+//
+// 🔴 THE `{ timeout }` IS LOAD-BEARING, NOT HYGIENE. With the bound reverted and
+// no per-test timeout, this file does not fail — it WEDGES: measured, the runner
+// never exits (still running at 200s), prints NO summary, reports `not ok` = 0
+// and `# fail` = 0, and the 12 tests declared after this one NEVER RUN. So the
+// regression this test exists to catch would read as CLEAN to any gate that
+// counts failures, while silently blinding the back half of the file. A hang is
+// the one failure shape a green-suite check cannot distinguish from success.
+// With the timeout it fails with an attributable message and the file completes.
+// 🔴 CLEANUP IS `t.after`, NOT `finally`, AND THAT IS THE SECOND HALF OF THE FIX.
+// A `finally` around the await does NOT run when the test times out — the await
+// never settles, so the block is never reached. Measured with the bound reverted:
+// the hung stub and `tab.active = true` LEAKED into the following tests, hanging
+// the healthy-fast-path control too, and the file still died at the runner's own
+// timeout with `fail=0, cancelled=2` and 10 tests never run — i.e. still the
+// count-blind shape this timeout was added to remove. `t.after` runs even on a
+// timed-out test, so exactly ONE test fails and the other 22 still execute.
+test("screenshot fast path: a HUNG captureVisibleTab falls through to CDP",
+     { timeout: 2000 }, async (t) => {
+  resetCalls();
+  const realCapture = chrome.tabs.captureVisibleTab;
+  const realTiming = globalThis.BROWSER_BRIDGE_LOOP_TIMING;
+  t.after(() => {
+    chrome.tabs.captureVisibleTab = realCapture;
+    globalThis.BROWSER_BRIDGE_LOOP_TIMING = realTiming;
+    state.tab.active = false;
+  });
+  // 20ms bound instead of the real 1500ms, via the same injection point the loop
+  // budgets already use. The production VALUE is pinned separately, in
+  // cdp_protocol.test.mjs — this test covers the mechanism, not the number.
+  globalThis.BROWSER_BRIDGE_LOOP_TIMING = { ...(realTiming || {}), fastCaptureMs: 20 };
+  chrome.tabs.captureVisibleTab = () => new Promise(() => {});   // never settles
+  state.tab.active = true;                                        // → fast path
+  // 🔴 RACE IT HERE rather than leaning on `{ timeout }` alone, so a regression is
+  // counted as a FAILURE and not as a CANCELLATION. node scores a timed-out test
+  // `cancelled`, leaving `fail` at 0 — so a gate that greps the fail count reads
+  // a regression as clean, which is the same count-blindness in a smaller shape.
+  // Racing it makes the regression an ordinary assertion failure with a message
+  // that names the cause. The `{ timeout: 2000 }` above stays as the backstop for
+  // anything that hangs OUTSIDE this race.
+  let hangTimer;
+  const out = await Promise.race([
+    OPS.screenshot({ tabId: TAB_ID }),
+    new Promise((_, reject) => {
+      hangTimer = setTimeout(
+        () => reject(new Error("screenshot did not settle within 1s: the fast path "
+                               + "is unbounded, so a hung captureVisibleTab never "
+                               + "reaches the catch that falls through to CDP")),
+        1000);
+    }),
+  ]).finally(() => clearTimeout(hangTimer));
+  assert.equal(out.via, "cdp", "a hung fast path must fall through to CDP");
+  assert.match(out.dataUrl, /^data:image\/png;base64,/);
+  assert.ok(state.calls.debugger.includes("Page.captureScreenshot"),
+            "the CDP path actually ran");
+  assert.ok(state.calls.debugger.includes("detach"), "always detaches");
+  // (No elapsed-time assertion here: the Promise.race above already rejects at
+  // 1000ms, so any run reaching this point is necessarily under it. An earlier
+  // `Date.now() - started < 1000` could therefore only ever fire as a 1-2ms
+  // boundary flake — a guard that cannot fail for its stated reason is worse than
+  // none, because it reads as coverage. The bound's magnitude is not pinned
+  // anywhere — it is BOUNDED, from both sides: `> 1365` and the `FAST + 16s <=
+  // 18s` sum invariant, both in cdp_protocol.test.mjs. The wiring test below pins
+  // the WIRE, not the value. Saying "pinned" of either would be a fourth loose
+  // claim in a PR whose whole history is loose claims.)
+});
+
+// 🔴 PINNING THE CONSTANT IS NOT PINNING THAT PRODUCTION USES IT.
+//
+// The test above injects `fastCaptureMs: 20`, and cdp_protocol.test.mjs asserts
+// the CONSTANT's value — so between them, nothing checked the wire connecting the
+// two. Measured by a re-audit: mutating loopTiming()'s default from
+// FAST_CAPTURE_BUDGET_MS to a literal 600000 left ALL 501 tests green, i.e. the
+// original surviving mutant was still alive, just spelled one level down. This is
+// the seam assertion; it must run with NO override active.
+// 🔴 ALL SIX WIRES, not just the one this PR touched. Pinning only fastCaptureMs
+// left the SAME seam open on every other budget — and on the most important one:
+// mutating `execMs`'s default from EXEC_OP_BUDGET_MS to a literal 999999 left the
+// whole 502-test suite GREEN, i.e. the choke-point op budget could be silently
+// disconnected from its constant while every test that pins the CONSTANT's value
+// still passed. A per-field loop makes adding a 7th budget fail here until it is
+// wired, rather than silently going unpinned like these five did.
+test("loop budgets are wired to their constants, not to literals", async () => {
+  const realTiming = globalThis.BROWSER_BRIDGE_LOOP_TIMING;
+  delete globalThis.BROWSER_BRIDGE_LOOP_TIMING;
+  try {
+    const wired = {
+      execMs: EXEC_OP_BUDGET_MS,
+      pollMs: POLL_BUDGET_MS,
+      resultMs: RESULT_BUDGET_MS,
+      stallMs: LOOP_STALL_MS,
+      storageMs: STORAGE_BUDGET_MS,
+      fastCaptureMs: FAST_CAPTURE_BUDGET_MS,
+    };
+    // 🔴 THE GUARD IS ONLY AS GOOD AS THE VALUES BEING DISTINCT. If two budgets
+    // ever hold the SAME number, swapping their wires passes every assertion
+    // below — the collapsed-fixture trap, where a fixture cannot express the
+    // difference it exists to detect. They are pairwise distinct today
+    // (1500/5000/10000/18000/40000/180000); this keeps it that way rather than
+    // leaving it to luck, and fails loudly on the day someone picks a duplicate.
+    assert.equal(new Set(Object.values(wired)).size, Object.keys(wired).length,
+                 "two budgets share a value — a swapped wire would be undetectable; "
+                 + "give them distinct values or assert the swap directly");
+    const actual = loopTiming();
+    assert.deepEqual(Object.keys(actual).sort(), Object.keys(wired).sort(),
+                     "a budget was added or removed — wire it to a constant here");
+    for (const [field, constant] of Object.entries(wired)) {
+      assert.equal(actual[field], constant,
+                   `loopTiming().${field} must read its protocol.js constant, or the `
+                   + `value assertions elsewhere do not govern runtime`);
+    }
+  } finally {
+    if (realTiming === undefined) delete globalThis.BROWSER_BRIDGE_LOOP_TIMING;
+    else globalThis.BROWSER_BRIDGE_LOOP_TIMING = realTiming;
+  }
+});
+
+// ATTRIBUTION CONTROL for the test above: the bound must not simply push every
+// capture onto CDP. A healthy fast path is still the fast path — otherwise the
+// test above would pass just as well with the fast path deleted outright, and
+// would be recording coverage it does not have.
+test("screenshot fast path: a HEALTHY captureVisibleTab is still used", async () => {
+  resetCalls();
+  state.tab.active = true;
+  try {
+    const out = await OPS.screenshot({ tabId: TAB_ID });
+    assert.equal(out.via, "captureVisibleTab", "healthy fast path must NOT go to CDP");
+    assert.equal(state.calls.debugger.length, 0, "no debugger attach on the fast path");
+  } finally {
+    state.tab.active = false;
+  }
 });
 
 // --------------------------------------------------------------------------- //

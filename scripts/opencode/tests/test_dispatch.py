@@ -404,6 +404,68 @@ def test_the_verdict_constants_match_the_sentences_pinned_here():
     assert D.VERDICT_CLEAN.format(n=2) == LINE_CLEAN_2
 
 
+# --------------------------------------------------------------------------- #
+# The skill-reference blind spot.
+#
+# 🔴 Every verdict above is about paths named in the BRIEF. A skill the agent
+# loads points at its OWN reference/ files, which live outside --dir for every
+# dispatch — so preflight can report "NOT EXAMINED" truthfully while a run is
+# about to die on an external_directory auto-reject. MEASURED 2026-08-23: that
+# is exactly what happened, and preflight was clean at the time.
+#
+# Same literal-sentence discipline as above: written out, not imported.
+# --------------------------------------------------------------------------- #
+_SKILLS = str(D.SKILLS_DIR)
+LINE_REFS_OK = ("  skill reference/  : readable — external_directory allows "
+                f"{_SKILLS} (rule: {_SKILLS}/**)")
+LINE_REFS_BLOCKED = ("  skill reference/  : 🔴 NOT readable — external_directory "
+                     f"resolves to `ask` for {_SKILLS}")
+
+_CFG_MAP_ALLOWED = {"permission": {"external_directory": {"*": "ask",
+                                                          f"{_SKILLS}/**": "allow"}}}
+
+
+def test_the_skill_reference_sentences_match_the_literals_pinned_here():
+    """Two-way pin, for the same reason as the block above."""
+    assert D.skill_reference_verdict(_CFG_MAP_ALLOWED) == LINE_REFS_OK
+    assert D.skill_reference_verdict(
+        {"permission": {"external_directory": "ask"}}) == LINE_REFS_BLOCKED
+
+
+def test_a_SCALAR_ask_reports_BLOCKED_and_does_not_crash():
+    """🔴 THE REGRESSION. `external_directory` was a bare scalar `"ask"` until the
+    skills carve-out made it a map, and that scalar is the shape that killed a
+    real dispatch. Two things are asserted, not one:
+
+    * it reports BLOCKED — so this line would have caught the incident BEFORE it
+      happened, rather than after;
+    * it does not raise. A caller assuming a dict hits `AttributeError` on a
+      scalar, which is a crash where a verdict was wanted — and the scalar is
+      still what a revert, an older checkout or another host produces.
+    """
+    out = D.skill_reference_verdict({"permission": {"external_directory": "ask"}})
+    assert "NOT readable" in out and "ask" in out
+
+
+def test_an_absent_key_is_BLOCKED_because_opencodes_fallback_is_ask():
+    """No key at all resolves to opencode's own fallback, which is `ask` — not
+    to a permissive default. Pinned so a future refactor cannot quietly invert
+    the safe direction."""
+    assert "NOT readable" in D.skill_reference_verdict({"permission": {}})
+
+
+def test_an_unreadable_config_says_COULD_NOT_DETERMINE_never_readable():
+    """🔴 An unreadable config and a permissive one are DIFFERENT FACTS.
+
+    Defaulting to the reassuring sentence here would rebuild precisely the
+    "description wider than the implementation" bug that produced
+    `VERDICT_NOT_EXAMINED` in the first place.
+    """
+    out = D.skill_reference_verdict({})          # no "permission" key at all
+    assert "COULD NOT DETERMINE" in out
+    assert "readable — external_directory allows" not in out
+
+
 def test_an_empty_scan_says_NOT_EXAMINED_not_an_all_clear(tmp_path):
     """🔴 THE finding. The report used to print
     'external paths : none — every path is under --dir' UNCONDITIONALLY, right

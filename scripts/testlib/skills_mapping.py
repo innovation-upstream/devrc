@@ -39,6 +39,7 @@ nix cannot evaluate FAILS loudly as "needs updating"; nothing passes silently.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -65,6 +66,39 @@ _FIX_IT = (
     "about a deployed file."
 )
 
+#: MEASURED, idle 24-core workbench: 0.02 s, and COLD == WARM (no nixpkgs
+#: import, nothing realised, so there is no cache to warm). Only CPU contention
+#: moves it, roughly with the oversubscription factor: 0.06 s at 1x, 0.26 s at
+#: 4x, 1.8 s at 10x. CI runs this in the `checks.pytests` sandbox beside ~15k
+#: tests where cgroup throttling stacks on that, and the old hardcoded 60 s was
+#: reached for real (devrc-ci-ztn92) — turning "cannot answer" into a red
+#: REQUIRED gate on unrelated PRs. 180 s is ~100x the worst measured contended
+#: run: a deadman, not a performance budget, so reaching it means WEDGED.
+_TIMEOUT_ENV = "DEVRC_SKILLS_MAPPING_TIMEOUT_S"
+_DEFAULT_TIMEOUT_S = 180.0
+
+
+def _budget() -> float | str:
+    """Seconds to allow, or a "cannot answer" reason when the override is junk.
+
+    🔴 A junk override must NOT fall back to the default. This knob can only
+    widen or narrow a safety check, so ignoring an unreadable one is how `…=0`
+    or a typo switches the check off while it still reads green.
+    """
+    raw = os.environ.get(_TIMEOUT_ENV)
+    if raw is None or not raw.strip():
+        return _DEFAULT_TIMEOUT_S
+    try:
+        seconds = float(raw)
+    except ValueError:
+        seconds = float("nan")
+    if not seconds > 0 or seconds == float("inf"):
+        return (
+            f"{_TIMEOUT_ENV}={raw!r} is not a positive, finite number of "
+            f"seconds, {_FIX_IT}"
+        )
+    return seconds
+
 
 def skills_mapping_problem(home_nix: Path | str) -> str | None:
     """A failure reason, or None when the mapping is declared and live."""
@@ -83,16 +117,23 @@ def skills_mapping_problem(home_nix: Path | str) -> str | None:
         return f"{shown} is not a file, {_FIX_IT}"
     if shutil.which("nix-instantiate") is None:
         return f"nix-instantiate is not on PATH, {_FIX_IT}"
+    budget = _budget()
+    if isinstance(budget, str):
+        return budget
     try:
         p = subprocess.run(
             ["nix-instantiate", "--eval", "--strict", "--json",
              "-E", _EXPR.replace("@PATH@", str(home_nix.resolve()))],
-            capture_output=True, text=True, timeout=60,
+            capture_output=True, text=True, timeout=budget,
         )
     except subprocess.TimeoutExpired:
-        # Measured runtime is ~0.02 s; a hang means the environment is wrong,
-        # which is a broken check, not a broken home.nix.
-        return f"nix-instantiate did not finish within 60s, {_FIX_IT}"
+        # Idle runtime is ~0.02 s (see _DEFAULT_TIMEOUT_S), so reaching this is
+        # a wedged environment — a broken check, not a broken home.nix.
+        return (
+            f"nix-instantiate did not finish within {budget:g}s, {_FIX_IT} "
+            f"If the host is merely slow rather than wedged, widen the budget "
+            f"with {_TIMEOUT_ENV}=<seconds> — do not shrink the check."
+        )
     if p.returncode != 0:
         return f"nix cannot evaluate {shown}, {_FIX_IT}\n{p.stderr.strip()[-600:]}"
     m = json.loads(p.stdout)

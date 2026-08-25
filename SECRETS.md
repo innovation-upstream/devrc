@@ -167,6 +167,69 @@ rc=128 with `error: index-pack died`. `bundle verify` reads the header and the
 prerequisites; it does not walk the pack. The only evidence a backup is
 restorable is having restored it.
 
+#### The key's own escrow — `escrow-verify.py`
+
+Everything above decrypts with **one file**. It is escrowed into the self-hosted
+Vaultwarden as a Secure Note (name: `age.key — SOPS + analyze-service-index
+backups`); `scripts/analyze-service-index/escrow-verify.py` is what re-checks
+that copy, so the escrow does not quietly rot into a second thing that only
+looks intact.
+
+```sh
+# `bw` is deliberately NOT installed on either host.
+nix-shell -p bitwarden-cli jq --run '
+  export BW_SESSION="$(bw unlock --raw)"          # the ONE step nothing can automate
+  python3 scripts/analyze-service-index/escrow-verify.py
+'
+… escrow-verify.py --decrypt-check --host <host label>   # the claim that matters
+… escrow-verify.py --print-plan                          # no bw, no network, no key
+```
+
+Two levels, and they are **different claims**. The default compares the note to
+the on-disk identity **byte for byte** — which proves the two copies agree, and
+proves nothing about either one opening anything. `--decrypt-check` writes the
+**escrowed** bytes to a 0600 throwaway identity (shredded and unlinked on every
+path out, including the failures) and uses *that* to decrypt the newest real
+artifact out of the bucket, via `restore-verify.py`'s own pipeline. The verdict
+line says which of the two you got; it never lets "verified" stand for both.
+
+🔴 **Every cause has its own exit code** (`--print-plan` lists all of them), so a
+timer can act on the number: `12` locked, `13` not logged in, `17` the note is
+GONE, `18` two notes share the name and neither can be trusted, `21` it differs
+only in trailing newlines — still probably usable, re-escrow it — `22` it differs
+materially. It reports **byte counts and a classification only, never the
+differing content**, and it reads the server from `bw config server` at run time
+rather than carrying an endpoint into a public repo.
+
+🔴 **Under `--decrypt-check` the eight outcomes mean different things, and only
+one of them is about the KEY.** Reading these wrong is how a working
+disaster-recovery key gets rotated, or a tampered backup gets waved through:
+
+| code | meaning | what to do |
+|---|---|---|
+| `27` `STORE-UNREACHABLE` | could not open the bucket at all | cluster/route fault; nothing was tested |
+| `28` `NO-ARTIFACT` | zero objects under the prefix | wrong `--host`/prefix, or the backups are gone — `restore-verify.py` diagnoses which |
+| `29` `AGE-MISSING` | `age` is not on PATH | environment fault; says nothing about the escrow |
+| `30` `ARTIFACT-UNREADABLE` | failed before the key was used | diagnose the object, not the key |
+| `25` `DECRYPT-FAILED` | age wrote **nothing**: wrong key **or** damaged header — **not separable** | try a **different** artifact (`--scope <other>`) with the same escrowed copy: if another opens, the key is fine and this object's header is damaged. **Do not rotate first.** |
+| `33` `ARTIFACT-CORRUPT` | age authenticated the header (**the key worked**) then failed the payload | 🔴 **the backup is TAMPERED/CORRUPT/TRUNCATED.** Check the other retained objects. Do not rotate. |
+| `31` `ARTIFACT-EMPTY` | age exited **zero** on an empty payload (**the key worked**) | the artifact holds nothing; do not rotate |
+| `26` `RESTORE-FAILED` | decrypted fine, the git bundle is bad | artifact fault; do not rotate |
+
+⚠ `27` and `28` are the two most likely to fire in practice (a bucket outage, or
+the `--host` prefix trap `restore-verify.py` documents), and neither is a verdict
+on the escrow.
+
+Measured (age v1.3.1, many offsets and sizes): a wrong key or a damaged header
+leaves **no** plaintext file, while payload corruption and truncation leave one —
+because age writes output *before* authenticating the payload. That, plus a
+machine-readable cause published by `restore-verify.py`, is what separates the
+rows; none of it is parsed out of age's stderr.
+
+⚠ It cannot unlock the vault and will not try: every `bw` call runs with stdin on
+`/dev/null`, `--nointeraction`, and a timeout, so an unattended run **fails fast
+with exit 12** instead of hanging on an invisible password prompt.
+
 ---
 
 ## Kubeconfigs (`$KC_*` handles from `nix/programs/zsh/default.nix`)
