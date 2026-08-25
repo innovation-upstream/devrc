@@ -25,10 +25,15 @@ debugging, changing or copying a specific pipeline.
    convention). The **homelab** gateway nginx has **no reloader sidecar** → after a configmap
    change `kubectl -n nebula rollout restart ds/nebula-gateway`, or it serves 502. Keep
    `git revert` + `flux reconcile` staged to restore the gateway in ~2 min.
-2. **Stale `~/workspace/homelab-talos` checkout (~100 commits behind).** NEVER read/edit it
-   as authoritative — it caused a wrong "Tekton is already installed" conclusion. Verify
-   cluster state against **origin/trunk of `homelab-infra`** AND the **LIVE cluster** (a
-   running controller pod, not just a CRD's presence).
+2. **Never treat a local checkout as authoritative for cluster state** — verify against
+   **origin/trunk** AND the **LIVE cluster** (a running controller pod, not just a CRD's
+   presence). A stale `~/workspace/homelab-talos` once caused a wrong "Tekton is already
+   installed" conclusion. 🔴 **But do NOT carry a currency claim in prose — this line said
+   "~100 commits behind" and was measured 2026-08-24 at ZERO behind, while
+   `~/workspace/homelab-infra` was 3 behind: the advice had inverted.** Both directories are
+   clones of the SAME repo (`ZacxDev/homelab-infra`) despite the `homelab-talos` name, so
+   neither name tells you which is fresher. Measure at the moment you act:
+   `git -C <dir> fetch origin && git -C <dir> rev-list --count HEAD..origin/trunk`.
 3. **No RWX storage** — only local-path / openebs (RWO, node-pinned). Two RWO local-path PVCs
    in one pod would **DEADLOCK scheduling** (each binds a different node) UNLESS the pod is
    **node-pinned** (`taskRunTemplate.podTemplate.nodeSelector`), which forces both PVCs onto
@@ -53,6 +58,71 @@ debugging, changing or copying a specific pipeline.
    before this leg reported`: **a broken gate, not a bad change — do not debug your diff
    against it.** The tell that it is congestion rather than code: it heals when the queue
    drains, and a code cause does not.
+   🔴 **But 255 is NOT the same claim as "no test failed" — READ WHETHER THE STEP PRINTED A
+   VERDICT.** "It heals when the queue drains" is a true tell and a slow one; the log answers
+   in one read. Measured 2026-08-24 over all completed `devrc-ci` gate TaskRuns (classified by
+   which step died and with what code, NOT by the PipelineRun verdict): the failures split
+   **~27 KILLED steps** — 25× `step-pytests` 255, 1× `step-nodetests` 255, 1× `137`/OOMKilled,
+   which reported no test result at all — against **~27 GENUINE single-test failures**, ~1 test
+   in ~15,500, surfacing as `verdict exit=1`. The genuine ones do **NOT** correlate cleanly
+   with concurrency (several ran with ≤1 overlap), so congestion is an **amplifier, not the
+   cause**, and "the gate is just flaky under load" will walk you straight past a real bug.
+   Discriminator: a step that emitted `RESULT:` / `<leg> verdict=` **failed a test**; one that
+   emitted neither was **killed**. 25 of the 27 kills had ≥4 gate TaskRuns overlapping.
+   🔴 **FIXED 2026-08-25 BY homelab-infra #396 — the paragraphs below are HISTORY, kept so
+   the signature is recognisable if it ever returns. Do not go hunting this.** #396 gave
+   `gitops-validate` its own nix cache and node, so the two pipelines no longer share one.
+   Measured 11h later: **before, 30/121 runs killed (24.8%); after, 0/9 (100% passed)**, with
+   `devrc-ci` on `talos-xr6-r7p` and `gitops-validate` on `talos-uvh-gtj`. ⚠ n=9 is
+   suggestive, not conclusive — ~2 kills would be expected in 9 runs at the old rate, so a
+   clean 9 happens by luck about 1 in 12; re-measure before treating it as settled.
+   🔴 **THE 255s WERE SCHEDULER PREEMPTION, AND `gitops-validate` WAS THE PREEMPTOR — CI
+   PREEMPTED CI.** Confirmed 2026-08-25T04:46:13Z by catching a burst live: five gate pods,
+   five explicit `Preempted` events, three preemptors, all five `pytests` steps terminating
+   `exit=255` within ONE SECOND having started minutes apart. The preemptors are priority-**0**
+   `gitops-validate` pods blocked on `0/4 nodes are available: 1 Insufficient cpu, 3 node(s)
+   didn't match Pod's node affinity/selector` — **both pipelines `nodeSelector`-pin to the SAME
+   single node** out of four, so gitops-validate cannot fit and the scheduler evicts the
+   `ci-bulk` (**-10000**) devrc gate pods to make room. One-directional by design: devrc-ci is
+   denied the reverse (`preemption: not eligible due to preemptionPolicy=Never`). It often does
+   not even buy the preemptor a slot — `not eligible due to a terminating pod on the nominated
+   node` recurs, so victims die and the preemptor stays Pending. Full evidence:
+   `<homelab-infra>/claudedocs/handoff-devrc-ci-kills-are-simultaneous.md`.
+   🔴 **DO NOT DESIGN A FIX FROM THIS SKILL — the analysis lives in the manifests, and three
+   obvious fixes are ALREADY REJECTED WITH MEASUREMENTS.** Read the comments in
+   `triggers/ci-priority-classes.yaml` (~100), `triggers/gitops-validate-triggertemplate.yaml`
+   (~98) and `triggers/devrc-ci-pipeline.yaml` (~1130) before proposing anything. Rejected
+   there: **concurrency capping** (simulated on the real arrival trace — worse at every cap
+   that helps, because a queued TaskRun's clock starts at CREATION and burns its own
+   deadline), **ResourceQuota** (cannot be scoped safely — scoped to `ci-bulk` it covers the
+   `notify`/`report`/affinity pods that declare no requests, and losing `report` is the worst
+   failure here), and **`retries`** (tried for this, REVERTED as a trap — Tekton retries any
+   non-cancelled failure, so it re-runs genuine verdicts). The lever actually taken was
+   right-sizing gitops-validate's requests (4.65 → 2.40 CPU), which said in writing that it
+   does **not** end preemption.
+   ⚠ **Measured at 04:46Z and MOOT since #396 that morning: the binding predicate was CPU,
+   not pod count** (`0/4 nodes are available: 1 Insufficient cpu`). Kept only because a
+   `pods`-predicate kill looks IDENTICAL to a CPU one — same `reason=Preempted`, same exit
+   137/255 — while every CPU number reads healthy, so that is the discrimination to redo if
+   this ever returns. It does **not** make right-sizing `auditloop-ci` (2.8×) or `clawgate-ci`
+   (2.4×) urgent: that argument rested on contention which #396 removed.
+   ⚠ Also measured-absent, so don't reach for it: moving devrc-ci's requests/limits. #393 put
+   `step-pytests` at **0.006, not throttled**, and a per-pod limit cannot kill five pods of
+   different ages in the same second anyway.
+   🔴 **The real slowness mechanism, when it IS present: CFS QUOTA STARVATION, and AVERAGE CPU
+   HIDES IT.** A step's own `limits.cpu` is enforced per 100ms CFS period, so a suite of
+   short-lived multi-threaded processes drains a 1-CPU quota in a few ms and stalls for the
+   rest of every period — averaging ~0.32 cores, which reads as *idle*, while throttled in
+   **100%** of periods. **Low mean CPU + high throttle ratio is the signature**; read
+   `container_cpu_cfs_throttled_periods_total / container_cpu_cfs_periods_total`
+   (namespace=`tekton-ci`), never average CPU, and never node pressure alone. Measured
+   2026-08-24 (#393): `scripts-tests` **1.00**, `gitleaks` 0.80, `clickup-mirror` 0.74 — all
+   starved and since raised — while `kustomize` and `render-diff` sat at **0.00 on the same
+   2-CPU limit**. That contrast is the point: it is starvation of specific BURSTY steps, not
+   "the limits are too low", so only measured steps should move.
+   🔴 **Raising the limit alone can HALF-WORK on a Go binary** — Go before 1.25 sizes
+   `GOMAXPROCS` from the HOST's cores, not from the cgroup quota, so it oversubscribes and
+   stays partly throttled at any cap. Pin `GOMAXPROCS` to the limit as well.
    🔴 **Do NOT measure a flake rate from inside a burst you are causing.** That mistake was
    made here and written into a handoff as a property of the CI tier before it was caught —
    `claude/RULES.md` → *"a control that SHARES the step you doubt"*. Take the baseline from a
@@ -221,9 +291,13 @@ Path: GitHub → Cloudflare → **prod Traefik** → prod nginx `0.0.0.0:19100` 
 repo-wide, so **red Actions checks on `homelab-infra` are noise, not signal** — don't debug
 them and don't read them as a gate. Four known-open 🟡 issues (branch-creation over-match,
 unpinned PVC, no concurrency control, `error`-vs-`fail` on the CSS path only) are in the
-reference file. Six triggers share `el-github-listener`: `naida-push-main`,
+reference file. **Seven** triggers share `el-github-listener`: `naida-push-main`,
 `remix-push-trunk`, `gitops-validate-pr`, `gitops-validate-push-trunk`, `clawgate-ci-push`,
-`auditloop-push-main`.
+`auditloop-push-main`, `devrc-ci-pr`. 🔴 **`devrc-ci-pr` is the only one whose check actually
+BLOCKS a merge** (gotcha #9) — the rest are detectors, because their repos cannot configure a
+required check at all. Read the count off the CR, never off this line:
+`kubectl -n tekton-ci get eventlistener github-listener -o jsonpath='{.spec.triggers[*].name}'`
+— this file said "six" for the whole period `devrc-ci-pr` was live and gating.
 
 ### `gitops-validate` — the gitleaks leg (hardened #265)
 
