@@ -22,46 +22,30 @@ what it actually found. It found a family: a leaked `GIT_DIR` aims git-writing p
 a foreign repository. Three programs, three PRs, all merged.
 
 ## State now
-- Branch: `main`, clean except other sessions' WIP (`scripts/run-node-tests.sh`, +1 line).
-- `origin/main` moved **~15 times** during this session; every gate result below names the
-  sha it was measured on.
+- Branch: `main`, clean apart from two other-session untracked files
+  (`nix/system/apply-nebula-443.sh.LOCAL-preserved-2026-08-02`,
+  `scripts/dl-router/tests/load_test_store.sh`).
+- **Both hosts converged and clean** — `drift-check.sh` rc 0, workbench + laptop both
+  `main == origin/main`, 328/331 managed symlinks resolving, 0 dangling.
 
-**MERGED and verified by content**
-- **#721** `081838cc` — `commit.sh` strips the git repo-pointer vars. Live on **both** hosts.
-- **#767** `a8a7e94f` — `backup.py` (the one with a NETWORK) strips them via the shared
-  `testlib.gitenv` ledger. Live on **both** hosts (laptop re-verified 2026-08-25).
-- **#801** `0f366a4e` — `dl-router` `Store._write()` retries `SQLITE_BUSY`. **Live on both
-  hosts** as of 2026-08-24 22:34 — see below.
+**MERGED AND VERIFIED BY CONTENT this session** (a squash is never an ancestor — all
+checked by reading the file on `origin/main`, never by `merge-base --is-ancestor`):
 
-**Deploy status — all three programs are LIVE on both hosts (re-measured 2026-08-25T04:49Z)**
-- `commit.sh` and `backup.py` run **from the working tree** (`ExecStart=… %h/workspace/…`),
-  so `readlink -f` terminates in the repo and the `git pull` made them live. Verified by
-  grepping the file the unit actually executes.
-- ✅ **`dl-router` is now live too.** A `ship.sh`/switch ran at **2026-08-24 22:34** and
-  converged both hosts within 10s of each other. Verified at the CONSUMER, not the deploy:
-  the unit's `ExecStart` moved `y2686x2s… → ly00qzvv…`; workbench MainPID `1408184`
-  (`active/running`, cgroup `…/app.slice/dl-router.service`) is **executing** that path and
-  is the PID holding port **8791** — no orphan serving old code; `_retry_busy` occurs **5×**
-  in the `store.py` beside the file it is running. Laptop: same store path, started 22:34:58,
-  `_retry_busy` ×5.
-  ⚠ The switch-during-live-gates hazard that deferred this is still real (a switch drops
-  every `home.packages` binary for ~1s, surfacing as a phantom defect in a sibling branch) —
-  it was simply not hit this time. Keep checking for live gates before the next one.
-- **Laptop** is converged: `drift-check.sh` → **rc 0**, both hosts on `main` at `324693fd`,
-  324 managed symlinks resolving, built-source scopes current.
+| PR | what |
+|---|---|
+| devrc **#813** `a8089a51` | this doc: dl-router marked live; card ids qualified `clawgate#N` |
+| devrc **#825** `f0f90d62` | this doc: a REJECTED lever was listed as open; two clusters de-bundled |
+| devrc **#830** `3ad7f66a` | **the `GIT_DIR` root cause — identified**, + a canary test |
+| homelab-infra **#398** `e33a77d2` | `clawgate#355` — the finally-reporter timeout invariant, pinned |
+| homelab-infra **#397** | merged by its owner; my correction comment landed with it |
 
-**Cards filed this session** — 🔴 these are **clawgate card ids, NOT devrc PR numbers**:
-`clawgate#343` (backup.py, complete), `clawgate#349` (dl-router, complete),
-`clawgate#348` (CI preemption, open, repo `homelab-talos`), `clawgate#355` (timeout
-invariant, open, repo `homelab-talos`). Evidence added to `clawgate#337` (open, repo
-`civitai/talos-infra`). Re-verified against the live board 2026-08-25T04:49Z.
+**clawgate board:** `#322` `#343` `#349` `#355` complete. `#348` and `#337` **open by
+design**, both re-scoped with corrected evidence (see Next steps).
 
-🔴 **Write `clawgate#N`, never a bare `#N`, in a handoff.** Bare numbers here made
-`resume-state.sh` resolve all three OPEN cards as **devrc PRs** — they collide with real
-ones — and emit three confident, wrong DRIFT findings: two "MERGED but the handoff frames
-it as open/in-flight (do the follow-on)" for cards that are open, and one pointing at devrc
-PR #355, an unrelated `🔴 DO-NOT-MERGE-YET` airvpn killswitch branch. The reconciler prints
-a cross-repo ref as `PR owner/repo#N`; it can only do that if the doc gave it the qualifier.
+**Deploy status:** nothing this session needs a `home-manager switch` — the work was
+`claudedocs/`, `scripts/tests/`, `scripts/testlib/` and `githooks/` (and `core.hooksPath`
+measured **unset** at every push, so the hook is not installed). Other sessions' skill
+changes did need one and have had it; `drift-check` confirms.
 
 ## Open investigations — live diagnosis state
 
@@ -97,6 +81,75 @@ a cross-repo ref as `PR owner/repo#N`; it can only do that if the doc gave it th
   **throwaway store**, not the live one. The import-reachability half of this was already
   done that way (`IMPORT OK — ledger has 11 names`, with a negative control).
 
+### The `pre-push` → `tests-on-push.sh` route — TRIGGER identified, end-to-end leg still not walked
+- 🔴 **This supersedes the block above that called the root cause unidentified. The
+  eliminations there are still true; the framing was wrong.**
+- **Observed (with values):** git 2.55.0, parent scrubbed of every `GIT_*` name,
+  reproduced twice by me and independently on a second rig by an auditor:
+
+  | push origin | `GIT_DIR` in `pre-push` |
+  |---|---|
+  | main checkout | *(none)* — `GIT_EXEC_PATH`, `GIT_PREFIX` only |
+  | **linked worktree** | `<repo>/.git/worktrees/<name>` |
+  | `--separate-git-dir` | `<separate gitdir>` |
+  | submodule | `<super>/.git/modules/<sub>` |
+  | bare repo | `.` *(RELATIVE)* |
+
+  **git itself exports it; no outer caller is required.** `clawgate#322` was a push from a
+  linked worktree — the match is exact. Damage mechanism, reproduced in isolation:
+  `git -C <plain-non-repo-dir> rev-parse --show-toplevel` returns `<repoA>` clean and
+  `<repoA>/nested/scope` with `GIT_DIR` leaked, so a nesting guard asking "is this its own
+  repo?" gets YES for a directory that is not one. The strip restores `<repoA>`.
+- **Ruled out:** *"pushing cannot set `GIT_DIR` on its own"* — REFUTED, see above. The old
+  live-process scan ("46 carry some `GIT_*`, 0 carry `GIT_DIR`") is **not counter-evidence
+  and must not be cited as narrowing it**: git sets the variable only for the duration of
+  the hook, where no process scan could ever observe it.
+- **Leading hypothesis:** the remaining leg is mechanical, not mysterious — the strip in
+  `githooks/tests-on-push.sh` runs before any corruptible read, so the route should be
+  closed. Untested end to end.
+- **Next probe:** actually walk it. Clone devrc to scratch, add a LOCAL bare remote, make a
+  linked worktree, set `core.hooksPath` repo-locally to `<clone>/githooks`, commit two docs
+  files, push from the worktree, and diff HEAD before/after plus grep for `autocommit:`
+  fixture commits. 🔴 Re-measure `core.hooksPath` at that moment — it read **unset** every
+  time this session and the record says it has flipped three times in one day.
+
+### 🔴 The same false claim existed in EIGHT places and I found one
+- **Symptom:** the claim *"`git push` does not hand `GIT_DIR` to `pre-push`" / "root cause
+  unidentified"* was true only of a main checkout, and had been copied into eight locations.
+- **Observed:** I found 1. Audit round 1 found 3 more in live code plus 2 merge-blocking
+  🔴. Its closing 🟢 pointed at a 5th (docs, under a **`RETRACTED:`** banner); chasing that
+  surfaced a 6th (an *Open investigations* block). The delta re-audit found a **7th and
+  8th**. The 7th was in the **module docstring of GUARD 9's own test file** — the first
+  thing anyone reads before touching `REPO_POINTER_VARS`, arguing the strip was hygiene
+  against an exotic caller — and it cited `test_git_push_does_not_export_GIT_DIR_to_pre_push`,
+  a name renamed two commits earlier, so `pytest -k` on it **selected zero tests and exited
+  0**. The 8th was created by my own fix: a new scope clause started routing readers to
+  `handoff-gitdir-leak-and-ci-gates.md`, which still said "**only** from a linked worktree".
+- **Ruled out:** *"grep once and you have them all"* — the phrasings differ per site
+  (`is NOT`, `still unknown`, `UNIDENTIFIED`, a test NAME, a `RETRACTED:` banner). Only
+  re-grepping after each round converged.
+- **Leading hypothesis:** none needed — all eight are corrected on `main`.
+- **Next probe:** none open. If a ninth appears, the search that finds it is
+  `find . -path ./.git -prune -o -type f -print0 | xargs -0 grep -lniE 'NOT .?GIT_DIR|root cause.*(still )?(unidentified|unknown)'`
+  (`grep -r` here is a ugrep function that honours `.gitignore` and will miss generated paths).
+
+### `clawgate#348` — preemption CONFIRMED, then its premise moved 46 minutes later
+- **Observed:** confirmed live `2026-08-25T04:46:13Z` (homelab-infra #397): five gate pods,
+  five explicit `Preempted` events, all five `pytests` at `exit=255` within one second having
+  started minutes apart. 🔴 **The preemptor was `gitops-validate` — CI preempting CI**, both
+  pinned to the same node while the cluster has four. Then **#396 merged at `05:32:44Z`** —
+  46 minutes *after* the confirming measurement — and gave `gitops-validate` its own node
+  (`talos-uvh-gtj`; devrc-ci stays `talos-xr6-r7p`; clawgate-ci `talos-jkj-deb`), verified live.
+- 🔴 **Ruled out — the obvious post-fix check is NOT evidence, and I nearly reported it as
+  one.** Kills went **30 of 117 before #396 → 0 of 21 after**. But `ci-priority-classes.yaml`
+  measured that kills occur only at **≥5 concurrent** devrc gates (0 in the 18 runs at ≤4),
+  and matching on that gives **before 11/32 killed at ≥5 (34.4%), after 0/3**. Three clean
+  runs at a 34.4% rate happen ~28% of the time by luck. **UNMEASURED, not fixed.**
+- **Next probe:** wait for ~8–10 gate runs that *start* at ≥5 concurrency and re-count.
+  Reproduce: pull `taskruns -n tekton-ci`, take `devrc-ci-*-gate`, classify killed as any
+  step terminated `exitCode` 255 or 137, compute concurrency as gate TaskRuns live at each
+  run's own `startTime`, cut at `2026-08-25T05:32:44Z`.
+
 ## Closed since this doc was written (2026-08-24 → 08-25)
 - ✅ **dl-router deploy** — done 2026-08-24 22:34, both hosts, verified at the consumer
   (see "Deploy status"). ✅ **Laptop converged** in the same run; `drift-check.sh` rc 0.
@@ -111,19 +164,19 @@ a cross-repo ref as `PR owner/repo#N`; it can only do that if the doc gave it th
   `finally`) against the live cluster — that premise now sits under a merged test.
 
 ## Next steps (ranked)
-1. **`clawgate#348` — CI preemption (homelab).** 🔴 **CORRECTED 2026-08-25 — this item as
-   originally written named a lever the repo had ALREADY REJECTED, and bundled two
-   different clusters.** Read "The `#348` correction" below before acting. Short form: the
-   mechanism is now CONFIRMED (live `Preempted` events) and its confirmed preemptor has
-   since been moved off devrc's node by homelab-infra PR #396, so criteria 2–5 need
-   **re-deciding rather than executing**. Full re-scope is on the card itself.
-2. **`clawgate#337` — a DIFFERENT CLUSTER.** `civitai/talos-infra`, 20 nodes, the
-   `tekton-build=true` pool. It was bundled with `#348` above; that was wrong, and nothing
-   measured on homelab bears on it. Its figures are from the 2026-08-22 scan and are stale;
-   the one fact that decides whether this is "restore a node" or "re-plan the build pool"
-   is whether the cordoned RMA node `talos-x3r-mnv` is back. Re-measure before acting.
-3. **Exercise the `pre-push` → `tests-on-push.sh` route end-to-end** — the first open
-   investigation ABOVE. It is the only claim in this doc still resting on inference.
+1. **Walk the `pre-push` route end-to-end** — the one item fully in this repo's control and
+   the last inference in this doc. `devrc`, no files changed; scratch clone + local bare
+   remote (recipe in the Open-investigations block above). NOT claimed by anyone.
+2. **`clawgate#348` — do NOT act yet; it is gathering data.** Re-run the concurrency query
+   above once ≥5-concurrency runs accumulate. 🔴 Changing the priority class now would
+   confound the only clean experiment running. `homelab-talos`,
+   `clusters/homelab/apps/tekton-pipelines/triggers/ci-priority-classes.yaml`.
+   🔴 Concurrency capping, ResourceQuota and `retries` are all
+   **REJECTED-WITH-A-MEASUREMENT** — read that file before proposing anything.
+3. **`clawgate#337` — needs credentials I did not have.** `civitai/talos-infra`, a DIFFERENT
+   cluster from #348 (20 nodes, the `tekton-build=true` pool). Its figures are from the
+   2026-08-22 scan and are stale. One fact decides whether it is "restore a node" or
+   "re-plan the pool": is the cordoned RMA node `talos-x3r-mnv` back?
 
 ## The `#348` correction — read this before touching CI preemption
 
@@ -219,22 +272,70 @@ scheduler's message was `Insufficient cpu`, not `Insufficient pods`.
   **Hash a dirty file against recent commits before treating it as WIP** — both were
   genuine, neither a stale orphan. Never `git stash` here.
 
+- 🔴 **`nix build` exits 0 while its log says `RESULT: FAIL`. This fired THREE times in one
+  session.** Two separate builds of `checks.x86_64-linux.pytests` at a broken commit both
+  reported exit 0. Append a marker line to the command and grep the log for `RESULT:`; the
+  failing build also prints `For full logs, run:` while a passing one does not. Verify a
+  pass POSITIVELY — the drv's `out` path exists **and** the log carries `TOTAL collected=…
+  failed=0` — because a reassuring silence is indistinguishable from a build that did nothing.
+  ⚠ One log contained BOTH `RESULT: all good` and `RESULT: FAIL (exit=1)`; a grep that stops
+  at the first match reads the failing build as passing.
+- 🔴 **A green test FILE is not a green TIER.** My pre-audit verification of #830 was
+  "`test_git_repo_isolation.py`: 113 passed" — true, and blind to the fact that the file's
+  `#!/usr/bin/env bash` string literal turned a *different* test red and made the hook
+  unrunnable in the nix sandbox entirely. `scripts/tests` is `HERMETIC_TARGETS[0]`, so that
+  would have been a red required check. **`mockbin.write_exec` owns the shebang**; a body
+  written there must be POSIX (`${!v}` is a bash-ism and `mockbin.SH` is `/bin/sh`).
+- 🔴 **My own probe reported the OPPOSITE of the truth.** Its `printf`s went to stdout while
+  its verdict grepped a file, so it printed `TRIGGER ABSENT` regardless of what git did —
+  with the real answer visible two lines above in the raw output. Every instrument now
+  carries a positive control: `GIT_EXEC_PATH` is exported to hooks unconditionally, so if it
+  is absent the hook never ran and an absent `GIT_DIR` proves nothing.
+- 🔴 **zsh ate a git ref.** `$c:scripts/run-node-tests.sh` — the `:s` is a history modifier,
+  so the expansion was well-formed and WRONG. Brace it: `${c}:path`.
+- **`git merge --ff-only … | tail -1` hid its own error.** The "Updating a..b" line prints
+  last; the real message ("local changes would be overwritten") was above it, and I reported
+  a sync that had not happened. Read the whole output.
+- **Dead end:** running the dev-host tier from a shared checkout. GUARD 10 reports
+  `cannot attribute` because sibling sessions write the common-dir `.git/config`
+  (`git worktree add` alone does it). Not a defect in the change — use the hermetic tier.
+- **`resume-state.sh` resolved bare `#N` card ids as devrc PRs** and emitted three confident,
+  wrong DRIFT findings, one pointing at an unrelated `DO-NOT-MERGE-YET` branch. Write
+  `clawgate#N` in handoffs; the reconciler prints cross-repo refs as `owner/repo#N` only if
+  the doc gave it the qualifier.
+- ⚠ **CARRIED FORWARD from the replaced status block — the switch-during-live-gates hazard
+  is still real.** A `home-manager switch` writes two profile generations and the
+  intermediate one drops every `home.packages` binary for ~1s, so anything invoked by BARE
+  COMMAND NAME during a switch dies "command not found" — and it surfaces as a phantom defect
+  in someone ELSE's branch. Check for live gate runs before switching; `pgrep -f run-tests.sh`
+  matches your own shell, so resolve PIDs and read `/proc/<pid>/cmdline`.
+- **Not verified, carried forward:** nobody has re-measured the original three-way probe
+  (that a `timeouts.tasks` expiry SKIPS `finally`) against the live cluster. Tekton's
+  documented design arguably says the opposite. That premise now sits under a merged test in
+  homelab-infra #398. The guard is conservative either way — if the probe is wrong the guard
+  is unnecessary, not harmful.
+
 ## How to verify
 ```bash
-# the three fixes are present on main (content, not ancestry — squashes are never ancestors)
-git -C ~/workspace/devrc show origin/main:scripts/analyze-service-index/commit.sh | grep -c DEVRC_GIT_REPO_POINTERS
-git -C ~/workspace/devrc show origin/main:scripts/analyze-service-index/backup.py   | grep -c strip_repo_pointers
-git -C ~/workspace/devrc show origin/main:scripts/dl-router/store.py                | grep -c _retry_busy
+# the GIT_DIR root cause is pinned on main (content, not ancestry)
+git -C ~/workspace/devrc show origin/main:scripts/tests/test_git_repo_isolation.py \
+  | grep -c 'def test_git_exports_GIT_DIR_to_pre_push_from_a_worktree_but_not_a_main_checkout'   # want 1
 
-# is dl-router LIVE? (runs from /nix/store — a pull does NOT deploy it)
-p=$(systemctl --user show dl-router.service -p ExecStart | grep -oE '/[^ ;]+server\.py'); readlink -f "$p"
-grep -c _retry_busy "$(dirname "$(readlink -f "$p")")/store.py"   # want: non-zero
+# the canary actually discriminates (both arms), inside the devshell
+nix develop ~/workspace/devrc --command python3 -m pytest \
+  ~/workspace/devrc/scripts/tests/test_git_repo_isolation.py \
+  ~/workspace/devrc/scripts/tests/test_runtime_shebangs.py -q          # want: 122 passed
 
-# the pointer family is contained (want: HEAD unmoved, 0 foreign objects, scope commits to itself)
-# build a decoy repo + worktree, export each of GIT_DIR/GIT_OBJECT_DIRECTORY/GIT_INDEX_FILE/
-# GIT_COMMON_DIR/GIT_CEILING_DIRECTORIES/GIT_TEMPLATE_DIR/GIT_CONFIG in turn, run commit.sh
+# the timeout invariant is pinned in homelab-infra (six pipelines, margins printed)
+cd ~/workspace/homelab-talos && env CDPATH= nix-shell -p bash kustomize kubeconform \
+  findutils gitleaks kubernetes-helm git "(python3.withPackages(ps: [ps.pyyaml]))" \
+  --run "bash scripts/tests/run-ci-suite.sh"        # want: RESULT: pass, tests_ran>=187
 
-# both tiers — read RESULT:, never an exit code, and never through a pipe
-nix develop <wt> --command bash <wt>/scripts/run-tests.sh <wt> --set all
-nix build <wt>#checks.x86_64-linux.pytests ; nix build <wt>#checks.x86_64-linux.nodetests
+# 🔴 the gating tier — READ THE LOG, never the exit code
+nix build ~/workspace/devrc#checks.x86_64-linux.pytests --no-link
+nix log $(nix path-info --derivation ~/workspace/devrc#checks.x86_64-linux.pytests) \
+  | grep -E 'RESULT:|TOTAL collected'               # want: RESULT: PASS (exit=0)
+
+# hosts
+bash ~/workspace/devrc/scripts/drift-check.sh       # want rc 0, both hosts clean
 ```
