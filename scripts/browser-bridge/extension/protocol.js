@@ -1736,6 +1736,80 @@ export const STORAGE_BUDGET_MS = 5000;
 //       At 5000ms abandonment was rare; at 1500ms it is routine. Self-healing —
 //       the next op's own retry absorbs it.
 export const FAST_CAPTURE_BUDGET_MS = 1500;
+// 🔴 `open`'s REUSE PROBE IS THE SAME DEFECT CLASS, AND IT WAS THE PREDICTED
+// REGENERATION — the README named it as "same class, not yet fixed" in the very
+// commit that fixed `screenshot` (#797).
+//
+// `open` takes an idempotent re-open path when the server passes `reuseTabId`:
+// `await chrome.tabs.get(reuseTabId)` inside a `try`, whose `catch` carries the
+// comment "owned tab gone → open a fresh one below". That promise is only ever
+// true of a REJECTION. The call is awaited, so a promise that NEVER SETTLES never
+// reaches the catch, the fall-through never happens, and the op dies at
+// EXEC_OP_BUDGET_MS — a `cmd_timeout` on `open`, which is the op every session
+// starts with. Identical shape to the fast-path hang: an unbounded await whose
+// only recovery path can observe a rejection but not a hang.
+//
+// ⚠ HONESTY ABOUT THE EVIDENCE — this is NOT the measured case #797 was.
+// FAST_CAPTURE_BUDGET_MS rests on a live 3/3-vs-3/3 measurement of a real hang.
+// There is NO such measurement of a hung `chrome.tabs.get`; this is the same
+// mechanism reasoned about, not observed. What IS established is that the awaited
+// call is unbounded and the catch is structurally blind to a hang — that holds
+// from the code regardless of how often the browser exercises it.
+//
+// 🔴 THE CEILING ARITHMETIC IS **NOT** `screenshot`'s, AND COPYING IT WOULD BE A
+// FALSE JUSTIFICATION. FAST_CAPTURE_BUDGET_MS is capped by the CDP attach-hang
+// margin (CDP_ATTACH_TIMEOUT_MS 8s + an awaited safeDetach ≤ CDP_COMMAND_TIMEOUT_MS
+// 8s = 16s) because its fallthrough is the CDP path. **`open` never attaches the
+// debugger.** Its fallthrough is `chrome.tabs.create` — one more unbounded
+// browser-process IPC, terminated only by the op ceiling. So the 16s attach-hang
+// margin documented at EXEC_OP_BUDGET_MS above was checked and does NOT constrain
+// this constant. The invariant that DOES:
+//
+//     REUSE_TAB_BUDGET_MS + (what chrome.tabs.create needs) <= EXEC_OP_BUDGET_MS
+//     2000 + 16000 = 18000
+//
+// i.e. the probe hands the create step 16000ms of the 18000ms ceiling. ⚠ THAT
+// 16000 IS A NUMERICAL COINCIDENCE WITH THE CDP ATTACH-HANG COST, NOT THE SAME
+// CONSTRAINT — flagged because a future reader who spots 16000 will otherwise
+// re-derive the wrong reason and treat it as a hard floor. It is not one: the
+// binding pin in cdp_protocol.test.mjs is the WORK ORDERING below, not this sum.
+// (An op-ceiling-share assertion was written and then removed — assertion (1)
+// there is strictly tighter, so the share guard could never fire. The reasoning
+// and the re-add trigger are recorded in that test.)
+//
+// WHY 2000ms, DERIVED FROM THE CALL AND NOT FROM TASTE. `chrome.tabs.get` is the
+// cheapest chrome.* call anything in this file wraps: one browser-process IPC that
+// reads tab metadata out of an in-memory registry. No renderer, no page, no paint,
+// no network, no disk. And — unlike `captureVisibleTab` — no quota and no retry
+// ladder, so there is no legitimate slow band that a bound has to clear. The
+// ordering against the neighbouring budget is the real anchor: STORAGE_BUDGET_MS
+// (5000) wraps `chrome.storage.local`, which is DISK-BACKED and therefore strictly
+// more work; a call that does strictly less must not be given a longer leash. That
+// ordering is asserted, not left to this comment.
+// 2000 is also forced to be DISTINCT from every other wired budget
+// (1500/5000/10000/18000/40000/180000) by the collapsed-fixture assertion in
+// service_worker.test.mjs — two budgets sharing a value make a swapped wire
+// undetectable.
+//
+// 🔴 WHAT THE BOUND COSTS, stated rather than discovered later. Falling through
+// when the tab is merely SLOW to report (not hung) opens a SECOND tab while the
+// first is still live — and the first has no ownership record, so nothing ever
+// closes it. That is precisely the tab leak the reuse path exists to prevent, so
+// the bound trades a rare orphaned tab for a guaranteed-terminating op. It is the
+// right trade (an orphan is one stale tab; a hang is an 18s `cmd_timeout` on the
+// RE-open of a tab the session already owns — NOT the first op of every session,
+// since server.py injects `reuseTabId` only when one is already owned), but it is
+// a real behaviour change, not free. There
+// is no abort primitive for `chrome.tabs.get`, so the abandoned call still settles
+// in the background — harmlessly, since its result is no longer read.
+//
+// ⚠ LOOP_STALL_MS's worst-legitimate-iteration sum was CHECKED and does NOT move.
+// That comment warns "ADDING A NEW BOUNDED AWAIT TO THE LOOP BODY EATS INTO IT",
+// which is about the LOOP BODY's own awaits. This bound sits INSIDE execute(),
+// already carried in that sum as EXEC_OP_BUDGET_MS (18.00s) — a sub-step of an op
+// cannot push the op past its own ceiling. Same reason FAST_CAPTURE_BUDGET_MS adds
+// no line there. The sum stays 113.25s.
+export const REUSE_TAB_BUDGET_MS = 2000;
 // A /poll blocks server-side for BROWSER_BRIDGE_POLL_TIMEOUT (default 25s) before
 // its 204. 40s leaves generous headroom for a slow loopback round-trip plus the
 // activeTabSnapshot() that precedes the fetch, while still being a bound.

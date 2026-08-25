@@ -16,7 +16,8 @@ import {
   elementRectExpression, focusExpression, fullPageClip,
   promiseWithTimeout, assertTabCdpReady, TAB_DISCARDED_MESSAGE,
   CDP_ATTACH_TIMEOUT_MS, CDP_COMMAND_TIMEOUT_MS, CDP_OP_BUDGET_MS,
-  FAST_CAPTURE_BUDGET_MS, EXEC_OP_BUDGET_MS,
+  FAST_CAPTURE_BUDGET_MS, EXEC_OP_BUDGET_MS, REUSE_TAB_BUDGET_MS,
+  STORAGE_BUDGET_MS,
   matchCdpFrameId, pickOopifSessionId, evalValueOrThrow,
 } from "../extension/protocol.js";
 
@@ -230,7 +231,7 @@ test("timeout budgets are chosen well under the 20s server cmd_timeout", () => {
   // was none. Re-verify a mutation result before quoting it — including one an
   // auditor hands you.
   for (const ms of [CDP_ATTACH_TIMEOUT_MS, CDP_COMMAND_TIMEOUT_MS, CDP_OP_BUDGET_MS,
-                    FAST_CAPTURE_BUDGET_MS, EXEC_OP_BUDGET_MS]) {
+                    FAST_CAPTURE_BUDGET_MS, EXEC_OP_BUDGET_MS, REUSE_TAB_BUDGET_MS]) {
     assert.ok(ms > 0 && ms < 20000, `budget ${ms} must be >0 and < the 20s server timeout`);
   }
 });
@@ -273,6 +274,79 @@ test("fast-path bound leaves the CDP fallthrough its full attach-hang budget", (
   assert.ok(FAST_CAPTURE_BUDGET_MS > 1365,
             "bound must exceed the ordinary healthy-capture band (292-1365ms), or "
             + "routine successes fall through to CDP");
+});
+
+// 🔴 `open`'s REUSE-PROBE BOUND IS ANCHORED BY AN ORDERING, NOT BY THE CDP SUM.
+//
+// The obvious move when adding the second exception to "one rule, one place" is to
+// copy the fast path's `X + 16000 <= 18000` invariant. THAT WOULD BE WRONG, and
+// wrong in the direction that reads as rigour: `open` never attaches the debugger.
+// Its fallthrough is `chrome.tabs.create`, one more unbounded browser-process IPC
+// terminated only by the op ceiling — not an attach/detach composition. So the 16s
+// attach-hang margin is checked here and explicitly NOT applied.
+//
+// What actually constrains the constant, in two independent directions:
+test("open's reuse-probe bound is ordered against the work it wraps (the op-ceiling share is deliberately NOT asserted)", () => {
+  // (1) UPPER BOUND BY WORK ORDERING. `chrome.tabs.get` reads tab metadata out of
+  // an in-memory browser-process registry: no renderer, no page, no paint, no
+  // network, no disk — and, unlike captureVisibleTab, no quota and no retry ladder,
+  // so there is no legitimate slow band a bound must clear. STORAGE_BUDGET_MS wraps
+  // `chrome.storage.local`, which is DISK-BACKED and therefore strictly more work.
+  // A call doing strictly less must not get a longer leash. This is the assertion
+  // that makes "derived from the call, not from taste" checkable rather than a
+  // claim in a comment.
+  assert.ok(REUSE_TAB_BUDGET_MS < STORAGE_BUDGET_MS,
+            `reuse probe (${REUSE_TAB_BUDGET_MS}ms) wraps chrome.tabs.get, which is `
+            + `strictly cheaper than the disk-backed chrome.storage.local bounded at `
+            + `${STORAGE_BUDGET_MS}ms — it must not outrank it`);
+  // (2) THE OP-CEILING SHARE IS **DELIBERATELY NOT ASSERTED**, AND THAT IS A
+  // FINDING, NOT AN OMISSION.
+  //
+  // The obvious second guard is "the probe must leave `chrome.tabs.create` the
+  // bulk of EXEC_OP_BUDGET_MS, or the bound just MOVES the op_timeout one step
+  // later instead of removing it" — a real constraint, and the regeneration this
+  // change exists to prevent. It was written, and the mutation battery then showed
+  // it can NEVER FIRE: assertion (1) already caps the constant at
+  // STORAGE_BUDGET_MS (5000), while a 12000ms-share requirement only binds above
+  // 6000. (1) is strictly tighter, so (2) was unreachable — a guard that cannot
+  // fail for its stated reason, which is worse than no guard because it reads as
+  // coverage. Every mutant aimed at it (2000→17000, 2000→5000) died to (1) first.
+  //
+  // So the arithmetic is RECORDED here and GOVERNED by (1):
+  //     REUSE_TAB_BUDGET_MS + (what chrome.tabs.create needs) <= EXEC_OP_BUDGET_MS
+  //     2000 + 16000 = 18000
+  // Any value (1) admits (< 5000) leaves the create step >= 13000ms of the 18000ms
+  // ceiling, which is the property the deleted assertion was reaching for. If
+  // STORAGE_BUDGET_MS is ever RAISED past ~6000, (1) stops being the tighter of
+  // the two and this share does need its own assertion — that is the trigger to
+  // re-add it, and the only one.
+  assert.ok(EXEC_OP_BUDGET_MS - STORAGE_BUDGET_MS >= 12000,
+            `STORAGE_BUDGET_MS (${STORAGE_BUDGET_MS}ms) has been raised far enough `
+            + `that assertion (1) no longer implies a healthy fallthrough share of `
+            + `the ${EXEC_OP_BUDGET_MS}ms op ceiling — the reuse probe now needs its `
+            + `own op-ceiling assertion, which this test deliberately omits`);
+
+  // 🔴 (3) LOWER BOUND — AND THE HAZARD LIVES DOWN HERE, WHICH (1) AND (2) BOTH MISS.
+  // Both constraints above are CEILINGS. Nothing stopped the constant going DOWN:
+  // measured, `REUSE_TAB_BUDGET_MS = 100` passed the entire 507-test suite. That is
+  // the wrong direction to be unguarded, because the bound's whole disclosed cost is
+  // a LOW-side failure — a merely slow probe falls through to a fresh tab and
+  // ORPHANS the live one, with nothing to reclaim it.
+  //
+  // ⚠️ BE HONEST ABOUT WHAT THIS FLOOR IS: there is NO measurement of a healthy
+  // `chrome.tabs.get` anywhere in this repo, so unlike #797's `> 1365` (anchored to
+  // a measured 292-1365ms capture band) this is a CONSERVATIVE floor, not a
+  // calibrated one. It is anchored to the cheapest chrome.* round-trip we DO have a
+  // number for: `activate` returns in ~350-500ms measured, and `activate` does
+  // strictly MORE than `tabs.get` (tabs.update + windows.update vs one registry
+  // read). 1000ms is ~2x that upper end. The moment someone measures `tabs.get`,
+  // replace this with the real band and say so.
+  assert.ok(REUSE_TAB_BUDGET_MS >= 1000,
+            `reuse probe (${REUSE_TAB_BUDGET_MS}ms) is below the 1000ms floor. Going `
+            + `LOW orphans live tabs: a slow-but-healthy probe falls through to a `
+            + `fresh tab and nothing reclaims the old one. The floor is conservative `
+            + `(2x activate's measured ~350-500ms round trip), not calibrated — if `
+            + `you have measured chrome.tabs.get, replace it with the real band`);
 });
 
 test("promiseWithTimeout: a hung promise rejects with cdp_timeout:<label> (settles, not hangs)", async () => {
