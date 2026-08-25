@@ -50,7 +50,7 @@ import {
   // body is raced against a wall-clock budget (see protocol.js for why and for
   // the CDP < exec < server-cmd_timeout ordering).
   promiseWithTimeout, EXEC_OP_BUDGET_MS, POLL_BUDGET_MS, RESULT_BUDGET_MS,
-  LOOP_STALL_MS, STORAGE_BUDGET_MS, FAST_CAPTURE_BUDGET_MS,
+  LOOP_STALL_MS, STORAGE_BUDGET_MS, FAST_CAPTURE_BUDGET_MS, REUSE_TAB_BUDGET_MS,
   // `emulate` op: device emulation (viewport/touch/UA+UA-CH/media/geo/tz) that is
   // STICKY per tab because CDP overrides die at detach — see the EMULATION section
   // in protocol.js for the central problem and the safety property it buys.
@@ -1197,13 +1197,48 @@ const OPS = {
   // one — otherwise a double `open` would orphan the first real tab (no ownership
   // → never closed → leaked). If the reuse tab is gone, fall through and open a
   // fresh one (open-after-owned-tab-gone).
+  //
+  // 🔴 THE REUSE PROBE IS BOUNDED, because the `catch` below can only see a
+  // REJECTION and `chrome.tabs.get` can HANG instead of rejecting. Unbounded, that
+  // await simply never returns: the fall-through its own comment promises never
+  // happens, and the op dies at EXEC_OP_BUDGET_MS (18s) — a `cmd_timeout` on the
+  // RE-open of a tab the session already owns — NOT the first op of every
+  // session: server.py injects `reuseTabId` only when one is already owned.
+  // Same defect class as `screenshot`'s fast path
+  // (#797), and named in the README of that very commit as the predicted
+  // regeneration. The bound turns "never settles" into a rejection, which is the
+  // ONLY shape this catch can act on. See REUSE_TAB_BUDGET_MS for the 2000ms
+  // choice — and, importantly, for why `screenshot`'s CDP attach-hang arithmetic
+  // does NOT apply here (`open` never attaches the debugger).
   async open(cmd) {
     if (cmd && cmd.reuseTabId != null) {
       try {
-        const existing = await chrome.tabs.get(cmd.reuseTabId);
+        const existing = await promiseWithTimeout(
+          chrome.tabs.get(cmd.reuseTabId),
+          loopTiming().reuseTabMs, "open.reuse", {}, "reuse_tab_timeout");
         return { tabId: existing.id, url: existing.url || "about:blank",
                  reused: true };
-      } catch (e) { /* owned tab gone → open a fresh one below */ }
+      } catch (e) {
+        // Leave a trace. The argument for a crumb is STRONGER here than on the
+        // screenshot fast path: there, the two outcomes differ (`via: cdp` vs
+        // `via: captureVisibleTab`). Here they are IDENTICAL — a hung probe and a
+        // genuinely-gone tab both return a fresh `{tabId, url}` with no `reused`
+        // flag, so nothing in the envelope distinguishes "the owned tab was gone"
+        // (correct, free) from "the probe timed out and we just orphaned a live
+        // tab" (the bound's known cost). Same single rolling slot, fire-and-forget.
+        //
+        // ⚠ SAME HONEST CAVEAT AS THE SCREENSHOT CRUMB: the slot is SINGLE and
+        // execute() overwrites it with `done` the moment the op completes — which
+        // is the normal outcome here, since the fall-through succeeds. So this
+        // survives only when the op ALSO wedges in tabs.create or the worker dies
+        // mid-open. It is NOT a counter and NOT an answer to "how often does the
+        // probe time out in production" — that needs a key execute() does not
+        // clobber, deliberately not added here.
+        breadcrumb("open", (cmd && cmd.id) || null,
+                   String((e && e.message) || e).startsWith("reuse_tab_timeout")
+                     ? "open_reuse_timeout" : "open_reuse_gone");
+        /* owned tab gone (or hung) → open a fresh one below */
+      }
     }
     const tab = await chrome.tabs.create({
       url: (cmd && cmd.url) ? cmd.url : "about:blank",
@@ -1524,6 +1559,10 @@ function loopTiming() {
     // through the same injection point instead of waiting 1500 real ms.
     fastCaptureMs: t.fastCaptureMs == null
       ? FAST_CAPTURE_BUDGET_MS : t.fastCaptureMs,
+    // `open`'s reuse probe — see REUSE_TAB_BUDGET_MS. Also not a loop budget; it
+    // lives here for the same reason, so a unit test can drive a 20ms bound
+    // instead of waiting 2000 real ms.
+    reuseTabMs: t.reuseTabMs == null ? REUSE_TAB_BUDGET_MS : t.reuseTabMs,
   };
 }
 
@@ -1544,12 +1583,19 @@ function breadcrumb(op, id, phase) {
 
 // execute — THE choke point where every op is bounded.
 //
-// 🔴 ONE DOCUMENTED EXCEPTION EXISTS — see README "one rule, one place" and
-// FAST_CAPTURE_BUDGET_MS. `screenshot`'s FAST PATH carries its own bound, because
-// this choke point can only END an op; it cannot make a hung sub-step FALL
-// THROUGH to a working alternative, and `captureVisibleTab` hangs rather than
-// rejecting. That is a different job from the one below, not a weakening of it.
+// 🔴 TWO DOCUMENTED EXCEPTIONS EXIST — see README "one rule, one place",
+// FAST_CAPTURE_BUDGET_MS and REUSE_TAB_BUDGET_MS. `screenshot`'s FAST PATH and
+// `open`'s REUSE PROBE each carry their own bound, because this choke point can
+// only END an op; it cannot make a hung sub-step FALL THROUGH to a working
+// alternative, and both `captureVisibleTab` and `tabs.get` can hang rather than
+// reject. That is a different job from the one below, not a weakening of it.
 // The paragraph that follows is still the rule for TERMINATING an op.
+//
+// 🔴 THE SHAPE THAT EARNS AN EXCEPTION IS NARROW AND CHECKABLE, so this does not
+// become an open licence to bound things locally: an await inside a `try` whose
+// `catch` implements a RECOVERY (a second, working path), where the awaited call
+// can hang. If a hung step has no alternative to fall through to, the choke point
+// below is already the right and only answer — do NOT add a bound for it.
 //
 // The bound lives here and NOWHERE else on purpose. Patching `frames` and
 // `screenshot` individually (the two ops the journal caught wedging) would fix

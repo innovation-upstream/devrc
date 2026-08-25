@@ -2129,7 +2129,11 @@ class Registry:
             # instance, hand the extension that tabId as `reuseTabId`. The SW
             # returns the SAME tab when it is still live (no second real tab → no
             # orphaned/leaked tab) and only creates a fresh one when the old tab
-            # is gone (owned_tab_gone) — so a double `open` never orphans a tab.
+            # is gone (owned_tab_gone). 🔴 NO LONGER UNCONDITIONAL: since the
+            # extension bounds that probe (REUSE_TAB_BUDGET_MS), a probe that
+            # exceeds the budget falls through to a FRESH tab and the ownership
+            # record below is overwritten, deterministically ORPHANING the live
+            # first tab. Nothing reclaims it; only a human closes it.
             reuse_tab_id = None
             if op == "open" and session_id is not None and tab is None:
                 reuse_tab_id = self._owned_tab_locked(inst.key, session_id,

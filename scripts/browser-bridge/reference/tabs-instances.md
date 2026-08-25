@@ -27,7 +27,9 @@ Now each session can own its own tab:
 - **`--tab <id>`** targets a specific tab explicitly (overrides owned/active).
 - **Double `open` is safe (idempotent) — but 🔴 a re-`open` DOES NOT NAVIGATE, it
   DISCARDS your url.** Calling `browser open <url>` again in a session that already
-  owns a **live** tab returns that SAME tabId (it does not leak a second tab) — and
+  owns a **live** tab returns that SAME tabId (it does not leak a second tab —
+  EXCEPT when the reuse probe exceeds `REUSE_TAB_BUDGET_MS`, which falls through to
+  a fresh tab and orphans the first) — and
   drops the url on the floor. In `extension/service_worker.js`'s `open`, a live
   `reuseTabId` returns `chrome.tabs.get(reuseTabId)` as `{tabId, url, reused: true}`
   and **never calls `chrome.tabs.update`**, so `cmd.url` is never applied and the

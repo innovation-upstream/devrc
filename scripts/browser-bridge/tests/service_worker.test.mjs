@@ -17,6 +17,10 @@ import assert from "node:assert/strict";
 
 // --- a single mutable chrome mock the SW closes over -------------------------- //
 const TAB_ID = 5;
+// Distinct from TAB_ID on purpose: `open`'s reuse tests turn on WHICH tab came
+// back, so a shared id would let a reused tab and a freshly created one satisfy
+// the same assertion (the collapsed-fixture trap).
+const FRESH_TAB_ID = 91;
 const OOPIF_URL = "https://model-benchmarking.example.test/";
 const state = {
   frames: [
@@ -27,11 +31,13 @@ const state = {
   tab: { id: TAB_ID, url: "https://civitai.com/apps/run/model-benchmarking",
          title: "Model Benchmarking", active: false, status: "complete", windowId: 1 },
   calls: { getAllFrames: [], executeScript: [], debugger: [], tabsGet: [],
-           tabsUpdate: [], windowsUpdate: [] },
+           tabsUpdate: [], windowsUpdate: [], tabsCreate: [] },
+  crumbs: [],
 };
 function resetCalls() {
   state.calls = { getAllFrames: [], executeScript: [], debugger: [], tabsGet: [],
-                  tabsUpdate: [], windowsUpdate: [] };
+                  tabsUpdate: [], windowsUpdate: [], tabsCreate: [] };
+  state.crumbs = [];
   state.execResult = { ok: true };
 }
 // Keep the `activate` wait fast + deterministic in these wiring tests (the wait
@@ -53,6 +59,10 @@ globalThis.chrome = {
     async get(id) { state.calls.tabsGet.push(id); return { ...state.tab, id }; },
     async query() { return [state.tab]; },
     async captureVisibleTab() { return "data:image/png;base64,AAAA"; },
+    async create(props) {
+      state.calls.tabsCreate.push(props);
+      return { id: FRESH_TAB_ID, url: (props && props.url) || "about:blank" };
+    },
     async update(id, props) {
       state.calls.tabsUpdate.push({ id, props });
       if (props) Object.assign(state.tab, props);   // e.g. {active:true}
@@ -75,14 +85,17 @@ globalThis.chrome = {
     onDetach: { addListener() {} },
     onEvent: { addListener() {}, removeListener() {} },
   },
-  storage: { local: { async get() { return {}; }, async set() {} } },
+  storage: { local: {
+    async get() { return {}; },
+    async set(v) { if (v && v.lastExec) state.crumbs.push(v.lastExec); },
+  } },
   runtime: { onInstalled: { addListener() {} }, onStartup: { addListener() {} } },
   alarms: { create() {}, onAlarm: { addListener() {} } },
 };
 
 const { OPS, loopTiming } = await import("../extension/service_worker.js");
 const { FAST_CAPTURE_BUDGET_MS, EXEC_OP_BUDGET_MS, POLL_BUDGET_MS,
-        RESULT_BUDGET_MS, LOOP_STALL_MS, STORAGE_BUDGET_MS }
+        RESULT_BUDGET_MS, LOOP_STALL_MS, STORAGE_BUDGET_MS, REUSE_TAB_BUDGET_MS }
   = await import("../extension/protocol.js");
 
 function lastExec() { return state.calls.executeScript[state.calls.executeScript.length - 1]; }
@@ -351,12 +364,13 @@ test("loop budgets are wired to their constants, not to literals", async () => {
       stallMs: LOOP_STALL_MS,
       storageMs: STORAGE_BUDGET_MS,
       fastCaptureMs: FAST_CAPTURE_BUDGET_MS,
+      reuseTabMs: REUSE_TAB_BUDGET_MS,
     };
     // 🔴 THE GUARD IS ONLY AS GOOD AS THE VALUES BEING DISTINCT. If two budgets
     // ever hold the SAME number, swapping their wires passes every assertion
     // below — the collapsed-fixture trap, where a fixture cannot express the
     // difference it exists to detect. They are pairwise distinct today
-    // (1500/5000/10000/18000/40000/180000); this keeps it that way rather than
+    // (1500/2000/5000/10000/18000/40000/180000); this keeps it that way rather than
     // leaving it to luck, and fails loudly on the day someone picks a duplicate.
     assert.equal(new Set(Object.values(wired)).size, Object.keys(wired).length,
                  "two budgets share a value — a swapped wire would be undetectable; "
@@ -389,6 +403,149 @@ test("screenshot fast path: a HEALTHY captureVisibleTab is still used", async ()
   } finally {
     state.tab.active = false;
   }
+});
+
+// --------------------------------------------------------------------------- //
+// 🔴 `open`'s REUSE PROBE MUST SURVIVE A HANG, NOT ONLY A REJECTION.
+//
+// THE PREDICTED REGENERATION. When the fast-path bound above shipped (#797), the
+// README named this exact call as "same class, not yet fixed": `open`'s idempotent
+// re-open path awaits `chrome.tabs.get(cmd.reuseTabId)` inside a `try` whose
+// `catch` promises "owned tab gone → open a fresh one below". That promise is only
+// ever true of a REJECTION. Unbounded, a `tabs.get` that never settles never
+// reaches the catch, so the fall-through never happens and the op dies at
+// EXEC_OP_BUDGET_MS (18s) — on a session's RE-open of a tab it already owns.
+// (NOT "the first op of every session": server.py only injects `reuseTabId`
+// when _owned_tab_locked() already returns a tab, so a fresh session's first
+// `open` never enters the bounded try at all.)
+//
+// RED WITHOUT THE FIX — and red as a FAILURE, never as a hang. Both halves of the
+// #797 lesson apply verbatim and are NOT hygiene:
+//   * `t.after`, NOT `finally`. A `finally` wrapped around a hung await never runs
+//     (the await never settles, so the block is never reached), leaking the hung
+//     stub into every following test and hanging them too — which is exactly the
+//     count-blind shape this test exists to remove.
+//   * RACE THE CALL HERE rather than leaning on `{ timeout }` alone. node scores a
+//     timed-out test `cancelled`, leaving `fail` at 0, so a gate that greps the
+//     fail count reads a live regression as clean. Racing it makes the regression
+//     an ordinary assertion failure that names its own cause; the `{ timeout }`
+//     stays only as a backstop for anything hanging OUTSIDE the race.
+test("open reuse probe: a HUNG chrome.tabs.get falls through to a fresh tab",
+     { timeout: 2000 }, async (t) => {
+  resetCalls();
+  const realGet = chrome.tabs.get;
+  const realTiming = globalThis.BROWSER_BRIDGE_LOOP_TIMING;
+  t.after(() => {
+    chrome.tabs.get = realGet;
+    globalThis.BROWSER_BRIDGE_LOOP_TIMING = realTiming;
+  });
+  // 20ms bound instead of the real 2000ms, through the same injection point the
+  // loop budgets use. The production VALUE is pinned separately in
+  // cdp_protocol.test.mjs — this covers the mechanism, not the number.
+  globalThis.BROWSER_BRIDGE_LOOP_TIMING = { ...(realTiming || {}), reuseTabMs: 20 };
+  chrome.tabs.get = () => new Promise(() => {});   // never settles
+  let hangTimer;
+  const out = await Promise.race([
+    OPS.open({ reuseTabId: TAB_ID, url: "https://civitai.com/" }),
+    new Promise((_, reject) => {
+      hangTimer = setTimeout(
+        () => reject(new Error("open did not settle within 1s: the reuse probe is "
+                               + "unbounded, so a hung chrome.tabs.get never reaches "
+                               + "the catch that opens a fresh tab")),
+        1000);
+    }),
+  ]).finally(() => clearTimeout(hangTimer));
+  assert.equal(out.tabId, FRESH_TAB_ID,
+               "a hung reuse probe must fall through and create a NEW tab");
+  assert.ok(!out.reused, "a hung probe must not be reported as a reuse");
+  assert.equal(state.calls.tabsCreate.length, 1, "the fall-through actually created a tab");
+  assert.deepEqual(state.calls.tabsCreate[0],
+                   { url: "https://civitai.com/", active: false },
+                   "the fresh tab keeps open's normal shape (background, requested url)");
+});
+
+// ATTRIBUTION CONTROL for the test above: the bound must not simply turn every
+// reuse into a fresh tab. A healthy `tabs.get` must still reuse — otherwise the
+// test above would pass just as well with the reuse path deleted outright, and
+// would be recording coverage it does not have. (Tab reuse is not cosmetic: a
+// missed reuse orphans the previous tab, which nothing owns and nothing closes.)
+test("open reuse probe: a HEALTHY chrome.tabs.get still reuses the owned tab", async () => {
+  resetCalls();
+  const out = await OPS.open({ reuseTabId: TAB_ID, url: "https://civitai.com/" });
+  assert.equal(out.reused, true, "a healthy probe must reuse, not create");
+  assert.equal(out.tabId, TAB_ID, "reuse must return the OWNED tab, not a fresh one");
+  assert.deepEqual(state.calls.tabsGet, [TAB_ID], "the probe ran against the owned tab");
+  assert.equal(state.calls.tabsCreate.length, 0, "no second tab on the reuse path");
+});
+
+// The REJECTION arm — the case the catch always handled. Kept next to the hang arm
+// so a change that "fixes" one by breaking the other cannot pass quietly.
+test("open reuse probe: a REJECTING chrome.tabs.get still falls through (unchanged)", async (t) => {
+  resetCalls();
+  const realGet = chrome.tabs.get;
+  t.after(() => { chrome.tabs.get = realGet; });
+  chrome.tabs.get = async () => { throw new Error("No tab with id: 5."); };
+  const out = await OPS.open({ reuseTabId: TAB_ID, url: "https://civitai.com/" });
+  assert.equal(out.tabId, FRESH_TAB_ID, "a gone tab still yields a fresh one");
+  assert.ok(!out.reused);
+  assert.equal(state.calls.tabsCreate.length, 1);
+});
+
+// 🔴 THE CRUMB MUST SEPARATE THE TWO CAUSES, WHICH THE RESULT ENVELOPE CANNOT.
+//
+// A hung probe and a genuinely-gone tab both return the SAME shape — a fresh
+// `{tabId, url}` with no `reused` flag. So the only thing that can ever tell
+// "correct, the tab was gone" from "we timed out and just orphaned a LIVE tab"
+// (the bound's known cost) is the breadcrumb phase. A crumb that spelled both
+// cases the same way would provide nothing while reading as observability, so
+// the DIFFERENCE is what is asserted here, not the mere presence of a crumb.
+//
+// 🔴 ITS HANG ARM NEEDS THE SAME RACE + `{ timeout }` AS THE TEST ABOVE, AND THIS
+// COMMENT EXISTS BECAUSE THE FIRST DRAFT OMITTED THEM. Any test that drives a
+// never-settling `chrome.tabs.get` is a hang test whether or not that is its
+// subject: with the bound reverted, the bare `await OPS.open(...)` below wedged the
+// whole FILE. Measured on the reverted tree — `fail 1, cancelled 1, tests 18` of
+// the file's 28, i.e. 10 never ran and node scored the wedge `cancelled`, not
+// `fail`.
+// That is precisely the count-blind shape #797's timeout was added to remove,
+// reintroduced one test later by a crumb assertion that looked unrelated to it.
+test("open reuse probe: the breadcrumb distinguishes a HANG from a genuinely-gone tab",
+     { timeout: 2000 }, async (t) => {
+  const realGet = chrome.tabs.get;
+  const realTiming = globalThis.BROWSER_BRIDGE_LOOP_TIMING;
+  t.after(() => {
+    chrome.tabs.get = realGet;
+    globalThis.BROWSER_BRIDGE_LOOP_TIMING = realTiming;
+  });
+
+  resetCalls();
+  chrome.tabs.get = async () => { throw new Error("No tab with id: 5."); };
+  await OPS.open({ id: "cmd-gone", reuseTabId: TAB_ID });
+  const gone = state.crumbs.filter((c) => c.op === "open");
+  assert.equal(gone.length, 1, "the gone path leaves exactly one crumb");
+  assert.equal(gone[0].phase, "open_reuse_gone");
+  assert.equal(gone[0].id, "cmd-gone", "the crumb carries the command id");
+
+  resetCalls();
+  globalThis.BROWSER_BRIDGE_LOOP_TIMING = { ...(realTiming || {}), reuseTabMs: 20 };
+  chrome.tabs.get = () => new Promise(() => {});   // never settles
+  let hangTimer;
+  await Promise.race([
+    OPS.open({ id: "cmd-hang", reuseTabId: TAB_ID }),
+    new Promise((_, reject) => {
+      hangTimer = setTimeout(
+        () => reject(new Error("open did not settle within 1s: the reuse probe is "
+                               + "unbounded, so no crumb is ever written")),
+        1000);
+    }),
+  ]).finally(() => clearTimeout(hangTimer));
+  const hung = state.crumbs.filter((c) => c.op === "open");
+  assert.equal(hung.length, 1, "the hang path leaves exactly one crumb");
+  assert.equal(hung[0].phase, "open_reuse_timeout");
+  // (No `notEqual(hung.phase, gone.phase)` here: both phases are already pinned to
+  // distinct literals above, so such an assertion is strictly IMPLIED and cannot fail
+  // for any mutant — coverage-shaped and empty, the same defect this PR removed once
+  // already. The distinctness that matters is enforced by the two equals.)
 });
 
 // --------------------------------------------------------------------------- //
