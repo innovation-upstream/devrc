@@ -89,9 +89,25 @@ unset "${DEVRC_GITENV_CONTROL_VARS[@]}"
 
 # 🔴 `GIT_PREFIX` is on that list and git DOES export it to a pre-push hook
 # (measured, git 2.55.0: `GIT_EXEC_PATH` and `GIT_PREFIX` are exported to
-# `pre-push`; `GIT_DIR` is NOT). Nothing below reads it, and
+# `pre-push` from a MAIN CHECKOUT). Nothing below reads it, and
 # clearing it before `rev-parse` is what keeps the resolution on the next line
 # a function of the CWD alone.
+#
+# 🔴 THAT PARENTHESIS USED TO END "`GIT_DIR` is NOT", FULL STOP — THREE LINES
+# ABOVE THE STRIP IT WOULD TALK YOU OUT OF. It is true only of a push from a
+# main checkout. Measured 2026-08-25, git 2.55.0, parent scrubbed:
+#
+#     push from a MAIN checkout   -> GIT_EXEC_PATH, GIT_PREFIX.  no GIT_DIR
+#     push from a LINKED WORKTREE -> GIT_DIR=<repo>/.git/worktrees/<name>
+#
+# git exports it ITSELF from a worktree — and `--separate-git-dir`, submodules
+# and bare repos do it too, so "not a worktree" is no evidence either. Since
+# worktree isolation is the standing default for file-modifying agents here,
+# that is the ORDINARY path, not an exotic one.
+# **So do not prune `GIT_DIR` from `DEVRC_GIT_REPO_POINTERS` above on the
+# strength of this parenthesis.** Pinned by `scripts/tests/
+# test_git_repo_isolation.py::test_git_exports_GIT_DIR_to_pre_push_from_a_
+# worktree_but_not_a_main_checkout`.
 REPO_ROOT="${1:-$(git rev-parse --show-toplevel 2>/dev/null || true)}"
 [ -n "$REPO_ROOT" ] || exit 0
 

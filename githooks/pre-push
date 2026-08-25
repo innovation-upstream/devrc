@@ -52,20 +52,65 @@ REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
 #
 # 🔴 BUT THE PRECONDITION IN THE FIRST SENTENCE IS LOAD-BEARING AND #683's PR
 # BODY DROPPED IT, turning a hygiene fix into a false diagnosis that was then
-# relayed onward as established fact. **Measured on git 2.55.0, as a PAIR: a
-# `git push` from a `GIT_DIR`-free parent gives `pre-push` only `GIT_EXEC_PATH`
+# relayed onward as established fact. ⚠ READ TO THE END OF THIS BLOCK BEFORE
+# ACTING ON THE NEXT SENTENCE — it is true only of a push from a MAIN CHECKOUT,
+# and the qualifier arrives a few lines down. Measured on git 2.55.0, as a PAIR:
+# a `git push` from a `GIT_DIR`-free parent gives `pre-push` only `GIT_EXEC_PATH`
 # and `GIT_PREFIX` (plus the caller's own `GIT_AUTHOR_*`/`GIT_CONFIG_*`) — no
 # `GIT_DIR`; the same push with `GIT_DIR` exported by the caller passes it
-# straight through.** So pushing does not, on its own, hand `GIT_DIR` to
-# anything; the old line was a route only when some OUTER caller had already
-# exported that name. A live scan of the box found 46 processes carrying some
+# straight through. A live scan of the box found 46 processes carrying some
 # `GIT_*` variable and ZERO carrying `GIT_DIR` (13 unreadable).
-# 🔴 THE ROOT CAUSE OF THE INCIDENT — what exported `GIT_DIR` into that gate run
-# — REMAINS UNIDENTIFIED. This rename removes a real route and is worth keeping;
-# it is not the explanation. `scripts/testlib/gitenv.py` closes the mechanism
-# from the suite's side whatever set the variable, and
-# `scripts/tests/test_git_repo_isolation.py` asserts no shell script that can
-# reach the runner assigns to one of those names.
+#
+# 🔴 THAT PAIR IS TRUE AND ITS GENERALISATION WAS FALSE. This block used to
+# conclude "**so pushing does not, on its own, hand `GIT_DIR` to anything**" and
+# that "THE ROOT CAUSE OF THE INCIDENT REMAINS UNIDENTIFIED". Both were wrong,
+# for the same reason: the pair was measured at ONE point on a dimension that
+# changes the answer — WHICH CHECKOUT THE PUSH CAME FROM.
+#
+# MEASURED 2026-08-25, git 2.55.0, parent explicitly scrubbed of every `GIT_*`
+# name, reproduced twice and independently re-derived on a separate rig:
+#
+#     push from the MAIN checkout    -> GIT_EXEC_PATH, GIT_PREFIX. no GIT_DIR
+#     push from a LINKED WORKTREE    -> GIT_DIR=<repo>/.git/worktrees/<name>
+#
+# **git ITSELF exports `GIT_DIR` into `pre-push` when the push originates from a
+# linked worktree. No outer caller is required.** It matches the incident report
+# exactly: clawgate#322 was a `git push -u origin <branch>` FROM A LINKED
+# WORKTREE.
+#
+# ⚠ A WORKTREE IS NOT THE ONLY SHAPE, and saying "only" here would repeat this
+# block's own mistake at a narrower radius. Also measured as exporting
+# `GIT_DIR`: `--separate-git-dir` clones, submodules
+# (`<super>/.git/modules/<sub>`), and bare repos (a RELATIVE `.`). The list is
+# open — treat "this is not a worktree" as NO evidence that `GIT_DIR` is unset.
+#
+# ⚠ SCOPE OF THE CLAIM: this identifies what sets `GIT_DIR` on a push, which is
+# the question this block called unidentified. It does NOT complete the
+# end-to-end walk of `pre-push` -> `tests-on-push.sh` -> the suite for the
+# incident itself — `claudedocs/handoff-gitdir-leak-and-ci-gates.md` still lists
+# that leg as never exercised, and it remains outstanding.
+#
+# Why it does damage: `GIT_DIR` OVERRIDES `-C`, so a child asking
+# `git -C <scope> rev-parse --show-toplevel` about a PLAIN, NON-REPO directory
+# gets <scope> ITSELF back instead of the repo enclosing it. Measured on the
+# same day: clean env -> `<repoA>`; with `GIT_DIR` leaked -> `<repoA>/nested/scope`.
+# A nesting guard asking "is this its own repo?" therefore gets YES for a
+# directory that is not a repo at all, skips, and the write lands in the FOREIGN
+# repository `GIT_DIR` names. Unsetting the pointer set restores `<repoA>`.
+#
+# 🔴 SO THE STRIP IN `tests-on-push.sh` IS LOAD-BEARING ON THE ORDINARY PATH,
+# not just when some exotic caller misbehaves. Do not weaken it on the grounds
+# that "pushing cannot set GIT_DIR" — from a worktree, it can and does.
+# Pinned by `scripts/tests/test_git_repo_isolation.py::
+# test_git_exports_GIT_DIR_to_pre_push_from_a_worktree_but_not_a_main_checkout`,
+# which is a CANARY on git's behaviour: if a future git stops doing this the
+# test fails and tells you the precondition moved, rather than letting this
+# comment rot into the same false generalisation it replaced.
+#
+# `scripts/testlib/gitenv.py` closes the mechanism from the suite's side
+# whatever set the variable, and `scripts/tests/test_git_repo_isolation.py`
+# also asserts no shell script that can reach the runner assigns to one of
+# those names.
 HOOK_GIT_DIR="$(git rev-parse --git-dir 2>/dev/null || true)"
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 

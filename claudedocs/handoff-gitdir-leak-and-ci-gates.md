@@ -71,8 +71,13 @@ a cross-repo ref as `PR owner/repo#N`; it can only do that if the doc gave it th
   (`autocommit: N change(s) in the some-scope analyze-service index`), the real commit gone,
   the index wrecked, working files surviving on disk.
 - **Observed (with values):** mechanism proven at the unit level and reproduced end-to-end
-  against a decoy. git 2.55.0 exports `GIT_DIR` into a pre-push hook **only from a linked
-  worktree** (main checkout → `GIT_EDITOR`/`GIT_EXEC_PATH`/`GIT_PREFIX` only). With it set,
+  against a decoy. git 2.55.0 exports `GIT_DIR` into a pre-push hook from a **linked
+  worktree** but not from a main checkout (which gets
+  `GIT_EDITOR`/`GIT_EXEC_PATH`/`GIT_PREFIX` only). ⚠ **This line said "ONLY from a linked
+  worktree" and that word was wrong** — measured 2026-08-25, `--separate-git-dir` clones,
+  submodules (`<super>/.git/modules/<sub>`) and bare repos (a RELATIVE `.`) export it too, so
+  "not a worktree" is NO evidence that `GIT_DIR` is unset. The correction matters here
+  specifically because `githooks/pre-push` now routes readers to this doc. With it set,
   `git -C "$scope" rev-parse --show-toplevel` returns `$scope` itself → `scope_repo_state`
   reports "its own repo" → the nesting guard is skipped. Decoy went `2320f0a → 8c952fe`,
   HEAD tree `a.md`/`alpha.md`/`beta.md`.

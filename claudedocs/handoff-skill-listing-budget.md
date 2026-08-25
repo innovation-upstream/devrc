@@ -24,8 +24,12 @@
 > - The gate's own measure undercounts the real charge by **`5n − 1`**, not by a fixed number.
 >
 > **Everything under "Next steps" below is DONE**: the three skills were retired (#785), the
-> analysis landed (#784), and the tier mechanism shipped unadopted (#792). The `GIT_DIR`
-> investigation below was NOT revisited and its status is unchanged.
+> analysis landed (#784), and the tier mechanism shipped unadopted (#792).
+> - ✅ **UPDATE 2026-08-25: the `GIT_DIR` investigation below WAS revisited, and its central
+>   open question is ANSWERED** — git itself exports `GIT_DIR` into `pre-push` on a push from a
+>   linked worktree, which is what the 2026-08-21 incident was. This sentence used to say the
+>   investigation "was NOT revisited and its status is unchanged". The unattributed
+>   `scripts/tests` writer noted there is a SEPARATE question and remains open.
 
 
 > No `clawgate-task:` front matter: `clawgate_handoff.sh resolve` returned **NOTHING RESOLVED
@@ -127,7 +131,7 @@ first time. `CLAUDE.md`'s `<!-- merge-gate: -->` marker correctly reads `other`.
   # reaches ~1.47x — still over. Decide the product question first.
   ```
 
-### The test tier still mutates the repo it runs from — root cause UNIDENTIFIED
+### The test tier still mutates the repo it runs from — the GIT_DIR SETTER is identified (2026-08-25); the unattributed writer is not
 - **Symptom + exact repro:** running devrc's pytest tier writes into the git repo it runs from —
   refs, `.git/config`, `HEAD`. On 2026-08-21 it force-overwrote **`main` on the public GitHub
   remote** with ~63 fixture commits authored `T <t@example.com>`, set `core.bare=true` on the
@@ -141,9 +145,22 @@ first time. `CLAUDE.md`'s `<!-- merge-gate: -->` marker correctly reads `other`.
     clone's config.
   - Before/after on the same two test files with a poisoned `GIT_DIR`: **165 passed / 230 ERRORS**
     → **395 passed / 0 errors**, refs + config byte-identical after.
-  - 🔴 **Who exported `GIT_DIR` is still unknown.** Live scan reported as a pair:
-    **46 processes carry some `GIT_*`, 0 carry `GIT_DIR`**, 13 unreadable (UNMEASURED). No
-    tracked file assigns one.
+  - ✅ **ANSWERED 2026-08-25 — `git` itself, on a push from a linked worktree.** This bullet
+    read "🔴 Who exported `GIT_DIR` is still unknown" and the heading above still says
+    UNIDENTIFIED; both are superseded. Measured on git 2.55.0, parent scrubbed of every
+    `GIT_*` name, reproduced on two independent rigs: a push from a **main checkout** exports
+    `GIT_EXEC_PATH`/`GIT_PREFIX` and no `GIT_DIR`, while a push from a **linked worktree**
+    exports `GIT_DIR=<repo>/.git/worktrees/<name>`. Also true of `--separate-git-dir`,
+    submodules (`<super>/.git/modules/<sub>`) and bare repos (a relative `.`). No outer caller
+    is required, and the 2026-08-21 incident was a push from a linked worktree.
+  - ⚠ **The live scan is not counter-evidence and should not be read as narrowing it.**
+    "46 processes carry some `GIT_*`, 0 carry `GIT_DIR`", 13 unreadable, no tracked file
+    assigns one — all true, and all about AMBIENT processes. git sets this variable only for
+    the duration of the hook, where no process scan could ever observe it. The pair was
+    sound; the inference from it was not.
+  - Pinned by `scripts/tests/test_git_repo_isolation.py::test_git_exports_GIT_DIR_to_pre_push_from_a_worktree_but_not_a_main_checkout`.
+    ⚠ Still open: this names the SETTER. The unattributed `scripts/tests` writer in the bullet
+    below is a separate question and is NOT closed by it.
   - Still observed AFTER the guards: a PASS → FAIL → PASS sequence on an **identical tree** in an
     **isolated standalone clone**, the FAIL being GUARD 10 catching `scripts/tests` writing to
     that clone's `.git/config`, `0 failed` tests. Writer unattributed.
