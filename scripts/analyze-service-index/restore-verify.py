@@ -556,8 +556,15 @@ def _identity_note(identity: Path) -> str:
     """
     if B.same_identity_file(identity, B.DEFAULT_IDENTITY):
         return ""
-    return (" (which is NOT the default identity — check ASIB_AGE_IDENTITY / "
-            "SOPS_AGE_KEY_FILE before concluding the key is wrong)")
+    # 🔴 NAMES ALL THREE WAYS AN IDENTITY GETS CHOSEN, because this function
+    # is given the PATH and cannot know which one was used. Naming only the two
+    # environment variables told an operator who had passed `--identity` to go
+    # check two variables that had no effect on their run — and escrow-verify's
+    # mismatch message now explicitly hands over with "pass it the SAME
+    # --identity you used here", so that is the likely path, not a rare one.
+    return (" (which is NOT the default identity — it came from --identity, "
+            "ASIB_AGE_IDENTITY or SOPS_AGE_KEY_FILE; check which before "
+            "concluding the key is wrong)")
 
 
 def decrypt(cipher: Path, plain: Path, identity: Path) -> None:

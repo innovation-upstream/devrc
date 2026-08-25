@@ -2968,3 +2968,40 @@ def test_the_docstring_no_longer_claims_more_than_the_code_does():
     assert "GIT_DIR OVERRIDES IT" in doc, (
         "the docstring no longer states WHY `-C` is not enough, which is the "
         "fact the whole function turns on")
+
+
+def test_the_units_SOPS_AGE_KEY_FILE_is_the_SAME_FILE_as_DEFAULT_IDENTITY():
+    """🔴 THE ARBITER OF EVERY "NOT the default identity" WARNING, PINNED TO THE
+    THING IT CLAIMS TO BE ABOUT.
+
+    `escrow-verify.py` and `restore-verify.py` now decide whether to warn by
+    comparing the resolved identity against `B.DEFAULT_IDENTITY`, and one of
+    those messages asserts the stronger claim that a non-matching file is "NOT
+    the identity this subsystem encrypts to". What the subsystem actually
+    encrypts to is whatever the BACKUP UNIT exports — `nix/home.nix`'s
+    `SOPS_AGE_KEY_FILE=…`, read by `backup.resolve_identity()` at run time.
+
+    Nothing compared those two. If home.nix drifts, one of two silent failures
+    follows, both with a fully green suite:
+      * the unit encrypts to a key the verifiers call "not the default", which
+        is the permanently-red warning this feature was fixed to remove; or
+      * "the default" quietly stops being the key the unit uses, so a genuine
+        redirect goes unwarned.
+
+    `%h` is systemd's home specifier; it is expanded to the running user's home,
+    which is what `Path.home()` gives this test.
+    """
+    block = _backup_block()
+    entries = _environment_entries(block)
+    keyed = [e for e in entries if e.startswith("SOPS_AGE_KEY_FILE=")]
+    assert len(keyed) == 1, (
+        f"expected exactly one SOPS_AGE_KEY_FILE entry, got {keyed!r} — the "
+        f"verifiers' notion of 'the default identity' is derived from it")
+    raw = keyed[0].split("=", 1)[1]
+    assert raw.startswith("%h/"), (
+        f"{raw!r} does not start with systemd's %h specifier; this test can "
+        f"only expand that form and must not guess at another")
+    unit_path = Path.home() / raw[len("%h/"):]
+    assert B.same_identity_file(unit_path, B.DEFAULT_IDENTITY), (
+        f"the backup unit encrypts to {unit_path}, but the verifiers treat "
+        f"{B.DEFAULT_IDENTITY} as the default identity. One of the two moved.")

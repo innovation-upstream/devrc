@@ -2659,6 +2659,19 @@ def test_same_identity_file_asks_about_the_FILE_not_the_spelling(tmp_path):
     assert B.same_identity_file(real, Path(str(tmp_path) + "/./real.key"))
     assert B.same_identity_file(real, link), "a symlink to the file is the file"
     assert not B.same_identity_file(real, other)
+    # `~` must expand: argparse does NOT expanduser, so a quoted
+    # `--identity '~/...'` arrives literally and would otherwise never match.
+    home = Path.home()
+    assert B.same_identity_file(Path("~"), home)
+    assert not B.same_identity_file(Path("~"), home / "definitely-not-here")
+    # 🔴 THE EXCEPTION BELT, MADE REACHABLE. An embedded NUL is the one input
+    # that actually raises out of `resolve()` (ValueError, measured — symlink
+    # loops, deep chains and unreadable parents all return normally on 3.12).
+    # Without this the fallback was dead code and mutating it to the UNSAFE
+    # `return True` — which would silence the warning for every path — survived
+    # the whole suite.
+    assert not B.same_identity_file(Path("a\x00b"), real)
+    assert not B.same_identity_file(real, Path("a\x00b"))
     # a path that does not exist must compare, not raise
     assert not B.same_identity_file(real, tmp_path / "absent.key")
     assert B.same_identity_file(tmp_path / "absent.key", tmp_path / "absent.key")
@@ -2744,9 +2757,19 @@ def test_the_refusal_comes_BEFORE_the_remedy_it_argues_against(escrow_world):
     assert warn < remedy, "the warning trails the remedy it argues against"
 
 
-def test_a_mismatch_on_the_DEFAULT_file_carries_no_warning(escrow_world):
-    msg = _mismatch_verdict(escrow_world, B.IDENTITY_SOURCE_DEFAULT,
-                            identity=B.DEFAULT_IDENTITY)
+def test_a_mismatch_on_the_DEFAULT_file_carries_no_warning(escrow_world,
+                                                            monkeypatch):
+    """🔴 HERMETIC — the default is MONKEYPATCHED onto the fixture's own key.
+
+    The first version passed the REAL `B.DEFAULT_IDENTITY` into `run()`, which
+    READS that file. It therefore passed only on a machine holding the
+    operator's age key; anywhere else `run()` raised IDENTITY-MISSING before
+    reaching the comparison, and it turned the merge-gating nix sandbox tier
+    RED while the dev-host tier stayed green. Reproduce any such test with
+    `env HOME=<empty dir>` — that is the whole difference.
+    """
+    monkeypatch.setattr(B, "DEFAULT_IDENTITY", escrow_world["identity"])
+    msg = _mismatch_verdict(escrow_world, B.IDENTITY_SOURCE_DEFAULT)
     assert "READ THIS BEFORE RE-ESCROWING" not in msg
     assert "restore-verify.py" in msg
 
@@ -2859,3 +2882,32 @@ def test_the_SUCCESS_line_discloses_a_non_default_identity(escrow_world):
         disk_bytes=1, classification=EV.CLASS_IDENTICAL,
         identity=B.DEFAULT_IDENTITY, identity_source="$SOPS_AGE_KEY_FILE")
     assert "NOT the default identity" not in d.line()
+
+
+
+def test_the_SUCCESS_line_from_a_REAL_run_discloses_a_non_default_identity(
+        escrow_world, monkeypatch):
+    """🔴 THE SEAM, not the dataclass. The sibling test constructs
+    `EscrowVerdict` directly, so deleting `identity_source=identity_source`
+    from `run()`'s construction left the whole disclosure INERT on the only
+    path that produces it, with the suite fully green."""
+    monkeypatch.setattr(B, "DEFAULT_IDENTITY", Path("/srv/not-this-one.key"))
+    v = EV.run(bw=_cli(FakeBw(items=[_item(notes=escrow_world["note"])])),
+               identity=escrow_world["identity"], item_name=ITEM,
+               identity_source="$SOPS_AGE_KEY_FILE",
+               store=escrow_world["store"], now=NOW)
+    line = v.line()
+    assert "escrow OK" in line
+    assert "NOT the default identity" in line
+    assert "$SOPS_AGE_KEY_FILE" in line
+
+
+def test_the_undo_advice_matches_the_KIND_of_source():
+    """`env -u` is meaningless for a flag, and nonsense for the built-in
+    default — which can pair with a non-default path only through `run()`'s
+    keyword API, but renders a sentence either way."""
+    assert "env -u SOPS_AGE_KEY_FILE" in EV._undo_advice("$SOPS_AGE_KEY_FILE")
+    for src in (EV.IDENTITY_SOURCE_FLAG, B.IDENTITY_SOURCE_DEFAULT):
+        advice = EV._undo_advice(src)
+        assert "env -u" not in advice, advice
+        assert str(B.DEFAULT_IDENTITY) in advice

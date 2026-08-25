@@ -522,9 +522,16 @@ def same_identity_file(a: Path, b: Path) -> bool:
     """
     try:
         return a.expanduser().resolve() == b.expanduser().resolve()
-    except (OSError, RuntimeError):
-        # RuntimeError: a symlink loop. Fall back to the literal comparison
-        # rather than letting a path oddity crash a verifier.
+    except (OSError, ValueError, RuntimeError):
+        # 🔴 MEASURED on CPython 3.12: none of symlink loops, self-links,
+        # deep chains, ENAMETOOLONG, an unreadable parent or a deleted cwd
+        # raises here — `resolve(strict=False)` swallows them and returns a
+        # normalised path. So this is a BELT, not a live branch, and the
+        # earlier comment naming RuntimeError as "a symlink loop" was wrong
+        # about its own condition. `ValueError` (an embedded NUL) is the one
+        # that can actually escape, and is unreachable from argv or env.
+        # Falling back to the LITERAL comparison keeps the safe direction: two
+        # paths that are not textually equal stay "different", which warns.
         return a == b
 
 

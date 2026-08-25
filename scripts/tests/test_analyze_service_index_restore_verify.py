@@ -3082,3 +3082,39 @@ def test_print_plan_discloses_a_REDIRECTED_identity(tmp_path, identity):
     # ...and the explicit-flag arm reports itself as the flag, not as an env var
     r2 = _cli("--print-plan", "--store", str(store), "--identity", str(identity))
     assert "chosen by: the --identity flag" in r2.stdout, r2.stdout
+
+
+def test_restore_print_plan_is_SILENT_for_the_DEFAULT_identity(
+        tmp_path, monkeypatch, capsys):
+    """🔴 THE NEGATIVE CONTROL. Without it, mutating this tool's trigger to warn
+    UNCONDITIONALLY leaves the whole suite green — i.e. the sibling of the exact
+    permanently-red-warning bug that was just fixed in escrow-verify.py could be
+    reintroduced here undetected. The positive case alone cannot see it.
+
+    Hermetic: the default is monkeypatched onto a tmp file, so this never reads
+    the operator's real key (a test that did turned the sandbox tier red).
+    """
+    key = tmp_path / "the-default.key"
+    key.write_text("an identity file's contents", encoding="utf-8")
+    monkeypatch.setattr(B, "DEFAULT_IDENTITY", key)
+    store = tmp_path / "store"
+    _make_scope(store, "scope-alpha", {"e.md": "x"}, commits=1)
+
+    RV.print_plan(bucket="a-bucket", prefix="a-host/", store=store,
+                  identity=key, scope_filter=None, verify_all=False,
+                  max_lag_days=1.0, identity_source="$SOPS_AGE_KEY_FILE")
+    out = capsys.readouterr().out
+    assert "chosen by: $SOPS_AGE_KEY_FILE" in out, out
+    assert "NOT the default identity" not in out, (
+        "restore-verify warned about the DEFAULT identity — the same "
+        "permanently-red warning that was just removed from escrow-verify")
+
+    # ...and the positive case, so this pair discriminates rather than just
+    # asserting silence (a print_plan that printed nothing would pass alone).
+    other = tmp_path / "somewhere-else.key"
+    other.write_text("different", encoding="utf-8")
+    RV.print_plan(bucket="a-bucket", prefix="a-host/", store=store,
+                  identity=other, scope_filter=None, verify_all=False,
+                  max_lag_days=1.0, identity_source="$SOPS_AGE_KEY_FILE")
+    out2 = capsys.readouterr().out
+    assert "NOT the default identity" in out2, out2

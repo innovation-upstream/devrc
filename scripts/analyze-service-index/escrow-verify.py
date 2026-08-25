@@ -1286,6 +1286,22 @@ def decrypt_check(*, escrow_bytes: bytes, work_dir: Path, bucket: str,
 NON_DEFAULT_NOTE = "  <- NOT the default identity"
 
 
+def _undo_advice(identity_source: str) -> str:
+    """How to re-run against the default, phrased for THIS kind of source.
+
+    🔴 `env -u` is only meaningful for an ENVIRONMENT VARIABLE. The sources are
+    a closed set of shapes, and one combination is self-contradictory — the
+    built-in default paired with a path that is not the default — so it gets
+    generic advice rather than a sentence telling the operator to unset
+    something called "the built-in default".
+    """
+    if identity_source.startswith("$"):
+        return (f"Re-run with `env -u {identity_source.lstrip('$')} …` to "
+                f"compare against the default first.")
+    return (f"Re-run against {B.DEFAULT_IDENTITY} to compare against the "
+            f"default first.")
+
+
 def provenance_clauses(identity: Path, identity_source: str | None
                        ) -> tuple[str, str]:
     """`(chose, redirect)` — what to say about WHICH FILE was compared.
@@ -1340,8 +1356,7 @@ def provenance_clauses(identity: Path, identity_source: str | None
             f"both sides is what comparing two DIFFERENT keys looks like, not "
             f"evidence they are the same key. Re-escrowing now would overwrite a "
             f"possibly-good escrow with whatever {identity_source} happens to "
-            f"point at. Re-run with `env -u {identity_source.lstrip('$')} …` to "
-            f"compare against the default first.")
+            f"point at. {_undo_advice(identity_source)}")
     return chose, redirect
 
 
