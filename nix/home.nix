@@ -1189,6 +1189,22 @@ in
   # …and on PATH, like dl-route, so the skill body's commands are copy-pasteable.
   home.file.".local/bin/opencode-dispatch".source =
     config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/scripts/opencode/opencode-dispatch";
+
+  # 🔴 `claim-work` — the lock on the handoff's ranked next-step queue, ON PATH
+  # AS A BARE COMMAND ON PURPOSE. `claude/RULES.md` names it, and RULES.md is the
+  # ONE file BOTH runtimes load (Claude Code imports it; the AGENTS.md
+  # concatenation below carries it into opencode). The colliding party in the
+  # measured incident was an OPENCODE run, not a Claude session — so a mechanism
+  # reachable only through a Claude skill would not have covered it, and a
+  # mechanism named by an absolute devrc path would not resolve for an agent
+  # working in another repo. A bare command on `home.sessionPath` resolves from
+  # any cwd, in either runtime.
+  #
+  # Out-of-store (mkOutOfStoreSymlink) for the same reason as dl-route: this runs
+  # at the start of every resumed session, and a store copy would keep serving
+  # the last switch's version while the checkout moved on.
+  home.file.".local/bin/claim-work".source =
+    config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/scripts/claim-work.sh";
   # Claude Code hooks managed here (the script only — the settings.json
   # registration is per-host/unmanaged, as for bash-guard.py above, whose script
   # is likewise managed now). audit-pr-nudge fires
