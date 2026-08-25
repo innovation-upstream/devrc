@@ -212,6 +212,42 @@ def test_the_mutation_sweep_carries_every_shared_module_these_scripts_import():
         assert (lib / name).exists(), name
 
 
+def test_every_test_file_still_imports_inside_a_mutant_copy():
+    """🔴 THE SWEEP'S OWN PRECONDITION, checked without running a sweep.
+
+    `mutation_sweep.materialize` builds the tree each mutant runs in. If ANY test file
+    cannot import there, `run_all.py` scores it FAILED TO IMPORT, the NULL-CONTROL goes
+    KILLED, and the sweep aborts — no mutant can be scored at all. That is not
+    hypothetical: measured 2026-08-25, `test_awaiting_contract.py` reads its shared
+    contract table from `parents[3] / claude/skills/clickup/test/` at MODULE level, which
+    the copy did not carry, and the whole sweep aborted.
+
+    A module-level read is the failure mode a `SHARED_MODULES`/`REPO_FIXTURES` name-list
+    cannot anticipate on its own, so this asserts the OUTCOME — every file imports — by
+    calling the same `materialize` the sweep calls. It is the positive control too: the
+    count of files it imported is asserted non-zero, because "0 files failed" out of a
+    walk that found nothing is the reassuring zero.
+    """
+    sweep = _load("mutation_sweep_copy", "tests/mutation_sweep.py")
+    with tempfile.TemporaryDirectory() as tmp:
+        dst = sweep.materialize(Path(tmp) / "tree")
+        for name in sweep.EXCLUDED_FROM_MUTANT_RUNS:
+            (dst / "tests" / name).unlink(missing_ok=True)
+        files = sorted((dst / "tests").glob("test_*.py"))
+        assert len(files) >= 10, f"positive control: only {len(files)} test file(s) copied"
+        broken = []
+        for f in files:
+            spec = importlib.util.spec_from_file_location(f"copy_{f.stem}", f)
+            mod = importlib.util.module_from_spec(spec)
+            try:
+                spec.loader.exec_module(mod)
+            except BaseException as e:
+                broken.append(f"{f.name}: {type(e).__name__}: {e}")
+        assert not broken, (
+            "these files cannot import inside a mutant copy, so the sweep would abort "
+            "on its NULL-CONTROL:\n  " + "\n  ".join(broken))
+
+
 def test_the_red_at_base_ledger_names_only_tests_that_exist():
     defined = {k for k in globals() if k.startswith("test_")}
     missing = RED_AT_BASE - defined

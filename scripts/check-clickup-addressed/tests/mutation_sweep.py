@@ -47,6 +47,7 @@ import tempfile
 from pathlib import Path
 
 SKILL = Path(__file__).resolve().parent.parent
+REPO = SKILL.parents[1]
 RC = "recent-comments.py"
 CA = "check-addressed.py"
 CC = "check-completion.py"
@@ -73,6 +74,17 @@ EXCLUDED_FROM_MUTANT_RUNS = ("test_no_real_identifiers.py",)
 # Modules from `scripts/lib/` these scripts import. Copied into the mutant tree beside the
 # skill so the relative `../lib` import resolves there exactly as it does in the repo.
 SHARED_MODULES = ("transcript_search.py",)
+
+# 🔴 REPO-ROOT-RELATIVE DATA A TEST FILE READS AT IMPORT TIME, copied at the same relative
+# path so `Path(__file__).resolve().parents[3] / <path>` resolves in the copy as it does in
+# the repo. Measured 2026-08-25 on the merge of this branch with main: without the entry
+# below, `test_awaiting_contract.py` raised at import (it reads its shared contract table
+# from `claude/skills/clickup/test/`), the whole file scored FAILED TO IMPORT, and the
+# NULL-CONTROL ABORTED the sweep — the "green for the wrong reason" failure this file's own
+# EXCLUDED_FROM_MUTANT_RUNS block was written about, recurring in a new shape. Copying is
+# the right fix rather than excluding the file: the fixture is DATA the mutants can be
+# scored against, so excluding it would drop real coverage.
+REPO_FIXTURES = ("claude/skills/clickup/test/awaiting-contract.fixtures.json",)
 
 # (id, file, old, new, note). `old` must occur EXACTLY ONCE or the mutant is NOT APPLIED.
 MUTANTS = [
@@ -332,7 +344,11 @@ MUTANTS = [
     # directory. Consolidating the walk out of `search-sessions.py` and `check-completion.py`
     # would otherwise have moved it out from under every mutant here — coverage lost with a
     # fully green sweep to show for it.
-    ("TS1", TS, "        if any(p in EXCLUDED_DIR_NAMES for p in parents):\n            continue\n",
+    # ⚠ This targets `is_corpus_member`, NOT `iter_transcripts`. An earlier spelling aimed at
+    # the walk's own body and, once the predicate was factored out, scored NOT APPLIED — a
+    # silent coverage hole that reads like a row rather than an absence. Re-check the anchor
+    # when transcript_search.py moves.
+    ("TS1", TS, "    if any(p in EXCLUDED_DIR_NAMES for p in parents):\n        return False\n",
      "", "walk the subagents/ tier — 4,776 transcripts that are not sessions"),
     ("TS2", TS, "            except Exception:\n                continue\n",
      "            except Exception:\n                raise\n",
@@ -367,22 +383,39 @@ def _apply(body, mid, old, new):
     return body.replace(old, new)
 
 
-def run_one(mid, fname, old, new, note, workdir):
-    # 🔴 THE MUTANT COPY REPRODUCES THE REPO's `scripts/` LAYOUT, not just this directory.
-    # The scripts import `scripts/lib/transcript_search.py` — the single transcript-corpus
-    # walker they share with `scripts/find-session.py` — as `_HERE.parent / "lib"`. Copying
-    # only `SKILL` into a bare temp dir would leave that import unresolvable, every test
-    # file would score FAILED TO IMPORT, and the NULL-CONTROL below would abort the sweep.
-    # Nesting the copy one level down keeps ONE import rule (a relative `../lib`) true in
-    # both the real tree and the copy, rather than teaching the scripts a second candidate
-    # path that only ever fires inside a test harness.
-    dst = Path(workdir) / mid / "scripts" / SKILL.name
+def materialize(root):
+    """Build a runnable copy of the skill under `root`, and return its skill dir.
+
+    🔴 THE MUTANT COPY REPRODUCES THE REPO's `scripts/` LAYOUT, not just this directory.
+    The scripts import `scripts/lib/transcript_search.py` — the single transcript-corpus
+    walker they share with `scripts/find-session.py` — as `_HERE.parent / "lib"`, and
+    `tests/test_awaiting_contract.py` reads a shared contract table via
+    `parents[3] / "claude/skills/..."`. Copying only `SKILL` into a bare temp dir leaves
+    both unresolvable, every test file scores FAILED TO IMPORT, and the NULL-CONTROL
+    aborts the sweep. Nesting the copy under `<root>/scripts/` keeps ONE path rule — the
+    real repo's — true in the copy too, rather than teaching the code a second candidate
+    path that only ever fires inside a test harness.
+
+    A FUNCTION so the property is testable without running a sweep: the ledger test in
+    `tests/test_shared_walk.py` calls exactly this and then imports every test module.
+    """
+    root = Path(root)
+    dst = root / "scripts" / SKILL.name
     dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(SKILL, dst, ignore=shutil.ignore_patterns("__pycache__", ".pytest_cache"))
     shared = dst.parent / "lib"
     shared.mkdir(parents=True, exist_ok=True)
     for mod in SHARED_MODULES:
         shutil.copy2(SKILL.parent / "lib" / mod, shared / mod)
+    for rel in REPO_FIXTURES:              # `root` IS the copy's repo root — parents[3]
+        target = root / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(REPO / rel, target)
+    return dst
+
+
+def run_one(mid, fname, old, new, note, workdir):
+    dst = materialize(Path(workdir) / mid)
     for name in EXCLUDED_FROM_MUTANT_RUNS:
         (dst / "tests" / name).unlink(missing_ok=True)
     target = dst / fname

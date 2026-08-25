@@ -241,6 +241,7 @@ DEPLOYED_MAP: tuple[tuple[str, Path], ...] = (
     ("~/.claude/hooks/", REPO_ROOT / "scripts/claude-hooks"),
     ("~/.claude/skills/", REPO_ROOT / "claude/skills"),
     ("~/.claude/RULES.md", REPO_ROOT / "claude/RULES.md"),
+    ("~/.claude/RULES-ARCHIVE.md", REPO_ROOT / "claude/RULES-ARCHIVE.md"),
     ("~/.claude/PRINCIPLES.md", REPO_ROOT / "claude/PRINCIPLES.md"),
     # Not a deploy entry -- a spelling of this repo's own root that docs use.
     # Tilde-only on purpose: see the HERMETICITY note in the module docstring.
