@@ -87,7 +87,7 @@ debugging, changing or copying a specific pipeline.
    denied the reverse (`preemption: not eligible due to preemptionPolicy=Never`). It often does
    not even buy the preemptor a slot — `not eligible due to a terminating pod on the nominated
    node` recurs, so victims die and the preemptor stays Pending. Full evidence:
-   homelab-infra `claudedocs/handoff-devrc-ci-kills-are-simultaneous.md`.
+   `<homelab-infra>/claudedocs/handoff-devrc-ci-kills-are-simultaneous.md`.
    🔴 **DO NOT DESIGN A FIX FROM THIS SKILL — the analysis lives in the manifests, and three
    obvious fixes are ALREADY REJECTED WITH MEASUREMENTS.** Read the comments in
    `triggers/ci-priority-classes.yaml` (~100), `triggers/gitops-validate-triggertemplate.yaml`
