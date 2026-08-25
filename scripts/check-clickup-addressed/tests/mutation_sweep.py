@@ -50,6 +50,9 @@ SKILL = Path(__file__).resolve().parent.parent
 RC = "recent-comments.py"
 CA = "check-addressed.py"
 CC = "check-completion.py"
+# Relative to the mutant copy's skill dir — resolves into the `lib/` sibling that run_one
+# reproduces beside it.
+TS = "../lib/transcript_search.py"
 
 # 🔴 REMOVED FROM EVERY MUTANT COPY, and this is the instrument's own correctness, not tidiness.
 # `test_no_real_identifiers.py` is a REPO-HYGIENE gate: it walks `<repo>/scripts/…` and
@@ -66,6 +69,10 @@ CC = "check-completion.py"
 # No code mutant can ever be caught by this gate (it reads the tree, not the logic), so dropping
 # it costs no coverage. `NULL-CONTROL` below is what proves the removal was sufficient.
 EXCLUDED_FROM_MUTANT_RUNS = ("test_no_real_identifiers.py",)
+
+# Modules from `scripts/lib/` these scripts import. Copied into the mutant tree beside the
+# skill so the relative `../lib` import resolves there exactly as it does in the repo.
+SHARED_MODULES = ("transcript_search.py",)
 
 # (id, file, old, new, note). `old` must occur EXACTLY ONCE or the mutant is NOT APPLIED.
 MUTANTS = [
@@ -320,6 +327,17 @@ MUTANTS = [
     ("U3", CC, "    if kind == \"ambiguous\":", "    if False:",
      "collapse the one failure whose diagnosis is TRUE into the generic message"),
 
+    # ---------- the shared transcript walk (scripts/lib/transcript_search.py, 2026-08-24)
+    # These prove this suite can still SEE a break in code that no longer lives in this
+    # directory. Consolidating the walk out of `search-sessions.py` and `check-completion.py`
+    # would otherwise have moved it out from under every mutant here — coverage lost with a
+    # fully green sweep to show for it.
+    ("TS1", TS, "        if any(p in EXCLUDED_DIR_NAMES for p in parents):\n            continue\n",
+     "", "walk the subagents/ tier — 4,776 transcripts that are not sessions"),
+    ("TS2", TS, "            except Exception:\n                continue\n",
+     "            except Exception:\n                raise\n",
+     "let one malformed JSONL line abort the read again"),
+
     # ---------- POSITIVE CONTROL. A mutant round 6 proved is caught; if this ever reports
     # SURVIVED the harness is broken, not the code.
     ("PC", CA, '    reply_unreported = "my_latest_reply" not in nc', "    reply_unreported = False",
@@ -350,8 +368,21 @@ def _apply(body, mid, old, new):
 
 
 def run_one(mid, fname, old, new, note, workdir):
-    dst = Path(workdir) / mid
+    # 🔴 THE MUTANT COPY REPRODUCES THE REPO's `scripts/` LAYOUT, not just this directory.
+    # The scripts import `scripts/lib/transcript_search.py` — the single transcript-corpus
+    # walker they share with `scripts/find-session.py` — as `_HERE.parent / "lib"`. Copying
+    # only `SKILL` into a bare temp dir would leave that import unresolvable, every test
+    # file would score FAILED TO IMPORT, and the NULL-CONTROL below would abort the sweep.
+    # Nesting the copy one level down keeps ONE import rule (a relative `../lib`) true in
+    # both the real tree and the copy, rather than teaching the scripts a second candidate
+    # path that only ever fires inside a test harness.
+    dst = Path(workdir) / mid / "scripts" / SKILL.name
+    dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(SKILL, dst, ignore=shutil.ignore_patterns("__pycache__", ".pytest_cache"))
+    shared = dst.parent / "lib"
+    shared.mkdir(parents=True, exist_ok=True)
+    for mod in SHARED_MODULES:
+        shutil.copy2(SKILL.parent / "lib" / mod, shared / mod)
     for name in EXCLUDED_FROM_MUTANT_RUNS:
         (dst / "tests" / name).unlink(missing_ok=True)
     target = dst / fname
@@ -371,7 +402,26 @@ def run_one(mid, fname, old, new, note, workdir):
     return ("KILLED" if int(total.group(2)) else "SURVIVED"), killers
 
 
+def _assert_ids_unique():
+    """🔴 A DUPLICATE MUTANT ID IS A SILENT HARNESS BREAK, and it happened once.
+
+    `run_one` builds its work directory as `<workdir>/<id>`, and `--check`/selection match
+    on the id — so two rows sharing one id collide in the same temp tree and a selection
+    naming it picks up both, while `len(selected) != len(set(wanted))` rejects the run with
+    a bare "unknown mutant id". Adding TS1/TS2 as `T1`/`T2` produced exactly that. Fail
+    with the offending id instead.
+    """
+    seen, dupes = set(), []
+    for row in MUTANTS:
+        if row[0] in seen:
+            dupes.append(row[0])
+        seen.add(row[0])
+    if dupes:
+        raise SystemExit(f"duplicate mutant id(s) in MUTANTS: {sorted(set(dupes))}")
+
+
 def main(argv):
+    _assert_ids_unique()
     if "--list" in argv:
         for mid, fname, _o, _n, note in MUTANTS:
             print(f"{mid:8s} {fname:20s} {note}")
