@@ -1,7 +1,7 @@
 ---
 name: initiative-scan
 description: "Run the on-demand cross-repo initiative scan — every initiative with its momentum (active/slowing/stalled), last-touched, commits/PRs, next-step and the live tmux session hosting it; also snapshots/restores the tmux workspace across a reboot. Use for \"what am I working on\", \"what's in flight\", \"what's stalled\", \"where did I leave X\", \"which session is X in\". The durable board is `initiatives`."
-argument-hint: "[--days N] [--repo PATH] [--json] [--tmux] | snapshot | restore [--dry-run] | show — runs scripts/session-analysis/initiative-scan.py; defaults to --days 4 --tmux"
+argument-hint: "[--days N] [--repo PATH] [--json] [--tmux] [--exclude-slugs A,B] | snapshot | restore [--dry-run] | show — runs scripts/session-analysis/initiative-scan.py; defaults to --days 4 --tmux"
 allowed-tools: Bash
 ---
 
@@ -28,6 +28,26 @@ Runs the read-only report and presents it. This is the durable, cross-session vi
   - `gh_available: false` → **every `open_prs: []` and `merged_prs: 0` is UNMEASURED, not zero.** The PR fetch returns `[]` on any failure, so without this flag the two are identical.
   - `tmux_enabled: false` → no `--tmux`, or no tmux server; the session-linking column is absent, not empty.
   - `commits_unknown: true` on an initiative → its branch refs were unresolvable, so `commits: 0` there means "could not count", not "no commits".
+
+## `--exclude-slugs A,B` — the ONLY way a row is hidden
+Suppresses named initiatives: `--exclude-slugs observability-gaps-audit,repo-cos-precision`.
+**Explicit list only — the scan never infers that an initiative is finished**, so nothing
+disappears unless you name it. (A rejected WIP inferred "resolved" from `DONE`/`CLOSED`
+markers in the handoff text and, measured over the real corpus, flagged 11 of 62 docs — 7 of
+them on section headings like `### DONE this session` inside handoffs carrying live
+next-steps. See devrc#824 / #778. Do not re-add that.)
+
+Three things to know before quoting a suppressed run:
+- **The header says what it hid**: `--exclude-slugs SUPPRESSED N initiative(s); asked for: …`.
+  `SUPPRESSED 0` with a slug named means you misspelled it — matching is exact and
+  **case-sensitive**, and a typo errors nothing.
+- **A slug is NOT repo-unique.** Doc-anchored rows take it from the handoff filename and two
+  repos can hold the same one; session-only rows derive it from the session title, so a
+  suppressible slug need not match any file on disk. One name hides the row in **every** repo
+  — `N` larger than the number of slugs you passed is the tell.
+- **A suppressed initiative takes its live tmux session with it** and does *not* reappear
+  under "no matched initiative". The header appends `N with a LIVE session` when that
+  happens, so re-read it before concluding nothing is running.
 - The text renderer appends an explicit NOTE for the telemetry-off and gh-unavailable cases; the `--json` output carries the raw booleans.
 
 For the **durable, queryable** version of this data — the Postgres store, the 15-min sync, the
