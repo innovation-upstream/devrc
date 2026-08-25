@@ -92,24 +92,83 @@ a cross-repo ref as `PR owner/repo#N`; it can only do that if the doc gave it th
   **throwaway store**, not the live one. The import-reachability half of this was already
   done that way (`IMPORT OK — ledger has 11 names`, with a negative control).
 
-## Next steps (ranked)
-~~1. **Run the dl-router deploy when the box is quiet.**~~ ✅ **DONE 2026-08-24 22:34**, both
-   hosts, verified at the consumer — see "Deploy status". Nothing to run.
-~~4. **Converge the laptop** (`scripts/ship.sh`).~~ ✅ **DONE** in the same run;
-   `drift-check.sh` rc 0.
+## Closed since this doc was written (2026-08-24 → 08-25)
+- ✅ **dl-router deploy** — done 2026-08-24 22:34, both hosts, verified at the consumer
+  (see "Deploy status"). ✅ **Laptop converged** in the same run; `drift-check.sh` rc 0.
+- ✅ **`clawgate#355` — the timeout invariant is pinned.** ZacxDev/homelab-infra **#398**,
+  merged to `trunk` as `e33a77d2`, card `complete`.
+  `scripts/tests/test_finally_reporter_timeout_invariant.py` + a 15-mutant battery.
+  🔴 It found the hand-written list was short: **SIX** pipelines carry a `finally` block,
+  not five — `naida-ux-audit` was missing, and a hardcoded list would have left it
+  unguarded. Three adversarial audit rounds; the recurring defect was **a guard narrower
+  than the prose describing it**, three separate times. ⚠ Still unverified: nobody has
+  re-measured the original three-way probe (that a `timeouts.tasks` expiry SKIPS
+  `finally`) against the live cluster — that premise now sits under a merged test.
 
-1. **`clawgate#355` — pin the timeout invariant** (`homelab-talos`,
-   `clusters/homelab/apps/tekton-pipelines/triggers/*.yaml`, `scripts/tests/`). Margins are
-   3–5min and unenforced. 🔴 The defect is already FIXED in all five pipelines; the card
-   guards it, do not re-fix it. Bounded; the highest-leverage item left.
-2. **`clawgate#348` / `clawgate#337` — CI preemption.** Both my prescriptions on `#348` are
-   RETRACTED. The repo's own record names the open levers: bound devrc CI concurrency, and
-   right-size the remaining pipelines' requests (`gitops-validate` was done by homelab-infra
-   PR #389). 🔴 `ci-bulk` at `-10000` is CORRECT — do not raise it; read
-   `ci-priority-classes.yaml`'s `# 🔴 was tried and REVERTED` record before proposing
-   anything, it already rejected four fixes with measurements.
+## Next steps (ranked)
+1. **`clawgate#348` — CI preemption (homelab).** 🔴 **CORRECTED 2026-08-25 — this item as
+   originally written named a lever the repo had ALREADY REJECTED, and bundled two
+   different clusters.** Read "The `#348` correction" below before acting. Short form: the
+   mechanism is now CONFIRMED (live `Preempted` events) and its confirmed preemptor has
+   since been moved off devrc's node by homelab-infra PR #396, so criteria 2–5 need
+   **re-deciding rather than executing**. Full re-scope is on the card itself.
+2. **`clawgate#337` — a DIFFERENT CLUSTER.** `civitai/talos-infra`, 20 nodes, the
+   `tekton-build=true` pool. It was bundled with `#348` above; that was wrong, and nothing
+   measured on homelab bears on it. Its figures are from the 2026-08-22 scan and are stale;
+   the one fact that decides whether this is "restore a node" or "re-plan the build pool"
+   is whether the cordoned RMA node `talos-x3r-mnv` is back. Re-measure before acting.
 3. **Exercise the `pre-push` → `tests-on-push.sh` route end-to-end** — the first open
    investigation ABOVE. It is the only claim in this doc still resting on inference.
+
+## The `#348` correction — read this before touching CI preemption
+
+🔴 **This doc told you to bound devrc CI concurrency. The repo had already rejected that
+with a measurement, three days before I wrote it.** `ci-priority-classes.yaml` records a
+cap simulated against the real arrival trace of 106 gate TaskRuns:
+
+```
+  cap  queue wait p50/max   runs blowing the gate's 45m deadline
+    4       19.2m / 69.1m   53/106 (50%)
+    6        0.0m / 26.8m   12/106 (11%)
+    8        0.0m / 20.1m    3/106  (3%)
+                            (vs 14/106 = 13% killed today)
+```
+
+Worse at every cap that would help, because **a queued TaskRun's clock starts at
+CREATION** — it burns its own deadline while Pending. Re-propose only with a mechanism
+that queues WITHOUT the deadline running (`spec.status: PipelineRunPending` plus a
+releaser, which puts a required merge gate behind a bespoke controller). The irony is
+exact: the gotcha two sections down says *read the decision record before proposing a
+fix*, and this line was written without doing so.
+
+**Mechanism CONFIRMED** 2026-08-25T04:46:13Z (homelab-infra PR #397, still open): five
+gate pods, five explicit `Preempted` events, all five `pytests` at `exit=255` within one
+second having started minutes apart. 🔴 **The preemptor was `gitops-validate` — CI
+preempting CI**, both pinned to the same node while the cluster has four.
+
+**And then the premise moved.** homelab-infra **#396** merged at `05:32:44Z` — *46 minutes
+after* that confirming measurement — and gave `gitops-validate` its own node. Verified
+live 2026-08-25: gitops-validate on `talos-uvh-gtj`, devrc-ci on `talos-xr6-r7p`,
+clawgate-ci on `talos-jkj-deb`. ⚠ #397's header says "re-confirmed post-fix"; that is post
+the RIGHT-SIZING fix, **not** post #396. Do not read it as evidence about the current
+topology.
+
+🔴 **AND THE OBVIOUS POST-FIX CHECK IS NOT EVIDENCE.** Gate TaskRuns killed
+(`exit=255/137`) went **30 of 117 before #396 → 0 of 13 after**. That looks decisive and is
+not: `ci-priority-classes.yaml` measured that *kills only ever occur at ≥5 concurrent devrc
+gates (0 kills in the 18 runs at ≤4)*, and the post-#396 window peaked at **4**. Zero kills
+is exactly what the UNFIXED system produces over that window. The path was not exercised;
+#396's effect is **UNMEASURED**. To verify, wait for a window reaching ≥5 concurrent gates
+and re-count.
+
+**Rejected-with-a-measurement, do not re-propose:** concurrency capping (above),
+ResourceQuota (cannot be scoped safely — scoped to `ci-bulk` it covers the
+`notify`/`report`/affinity-assistant pods, which declare no requests, and a compute quota
+rejects those outright; losing `report` is the worst failure this platform has), and
+`retries` on the gate task (tried, REVERTED as a trap — Tekton retries genuine verdicts
+too). **Still-open lever:** request inflation from Tekton summing SEQUENTIAL steps —
+`auditloop-ci` was 2.8×/3.2× (fixed by #399), `clawgate-ci` remains 2.4×/1.8×. The
+scheduler's message was `Insufficient cpu`, not `Insufficient pods`.
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **Read the subsystem's decision record before proposing a fix.** I recommended four
@@ -120,7 +179,15 @@ a cross-repo ref as `PR owner/repo#N`; it can only do that if the doc gave it th
 - 🔴 **`ci-bulk` at `-10000` is CORRECT, not a misconfiguration.** Measured: it is CI-only
   (301 pods, all `tekton-ci`), and the pinned node `talos-xr6-r7p` runs cert-manager, the
   Flux image controllers, external-dns and real apps at default priority. Preemption of
-  devrc gates is the system working as designed. **Do not raise it.**
+  devrc gates *by those* is the system working as designed. **Do not raise it.**
+  ⚠ **But that argument does not cover the case actually observed.** The confirmed
+  preemptor was `gitops-validate` — **another CI pipeline at priority 0**, not a production
+  workload. #396 addressed that by node separation rather than by priority, which is why
+  `#348`'s criterion 2 ("stop running below default priority") is now a decision to
+  re-make rather than a task to execute. Note that priority `0` + `preemptionPolicy: Never`
+  would make the gate non-preemptible by default-priority pods (preemption requires
+  STRICTLY higher priority) while still unable to preempt anyone — **UNTESTED; do not act
+  on that sentence without testing it.**
 - 🔴 **Two tiers disagree in BOTH directions.** #721's hermetic tier was red while dev-host
   passed; #801's dev-host was red while hermetic passed. Read both, always.
 - 🔴 **The pipe trap, three ways this session:** `nix build … | tail; echo $?` printed
