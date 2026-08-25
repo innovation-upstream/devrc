@@ -26,10 +26,10 @@ function matchesSelector(el, sel) {
   var tag = null, id = null, classes = [], attrs = [];
   var rest = sel.replace(/^([a-zA-Z][a-zA-Z0-9]*)/, function (_, t) { tag = t.toLowerCase(); return ""; });
   rest = rest.replace(/#([a-zA-Z0-9_-]+)/g, function (_, i) { id = i; return ""; });
-  rest = rest.replace(/\.([a-zA-Z0-9_-]+)/g, function (_, c) { classes.push(c); return ""; });
   rest = rest.replace(/\[([a-zA-Z0-9_-]+)(?:=["']?([^"'\]]+)["']?)?\]/g, function (_, name, val) {
     attrs.push({ name: name, val: val !== undefined ? val : null }); return "";
   });
+  rest = rest.replace(/\.([a-zA-Z0-9_-]+)/g, function (_, c) { classes.push(c); return ""; });
 
   if (tag && el.tagName.toLowerCase() !== tag) return false;
   if (id && el.getAttribute("id") !== id) return false;
@@ -88,6 +88,9 @@ class FakeElement {
       for (var i = 0; i < children.length; i++) this.appendChild(children[i]);
     }
   }
+
+  get id() { return this.getAttribute("id") || ""; }
+  set id(v) { this.setAttribute("id", v); }
 
   getAttribute(name) {
     var v = this.attrs[String(name).toLowerCase()];
@@ -218,11 +221,21 @@ class FakeElement {
 
 function makeDiscordDoc(html) {
   var root = new FakeElement("html");
+  var head = new FakeElement("head");
   var body = new FakeElement("body");
+  root.appendChild(head);
   root.appendChild(body);
   var doc = new FakeElement("#document");
   doc.appendChild(root);
   doc.body = body;
+  doc.head = head;
+  doc.getElementById = function (id) {
+    var found = null;
+    root._walkDescendants(function (node) {
+      if (!found && node.getAttribute && node.getAttribute("id") === id) found = node;
+    });
+    return found;
+  };
   doc.createElement = function (tag) { return new FakeElement(tag); };
   doc.addEventListener = function () {};
   doc.removeEventListener = function () {};

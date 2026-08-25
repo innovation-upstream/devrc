@@ -1,103 +1,92 @@
 (function () {
   "use strict";
 
-  var MEDIA_URL_RE = /^https?:\/\/(cdn\.discordapp\.com|media\.discordapp\.net)\/.*$/i;
+  var MEDIA_URL_RE = /^https?:\/\/(cdn\.discordapp\.com|media\.discordapp\.net)\/(attachments|embeds)\/.*$/i;
+  var EMOJI_RE = /^https?:\/\/cdn\.discordapp\.com\/emojis\//i;
+  var STICKER_RE = /^https?:\/\/cdn\.discordapp\.com\/stickers\//i;
   var ATTR_ENLARGED = "data-dee-enlarged";
-  var MAX_WALK_DEPTH = 8;
-  var WIDTH_THRESHOLD = 500;
-  var HEIGHT_THRESHOLD = 400;
+  var STYLE_ID = "dee-enlarge-css";
   var DEBOUNCE_MS = 100;
 
   var observer = null;
   var debounceTimer = null;
 
-  function getComputedStyleFn() {
-    if (typeof globalThis !== "undefined" && globalThis.__DEE_GET_COMPUTED_STYLE__) {
-      return globalThis.__DEE_GET_COMPUTED_STYLE__;
-    }
-    if (typeof getComputedStyle === "function") return getComputedStyle;
-    return null;
-  }
-
-  function parsePx(val) {
-    if (typeof val !== "string") return NaN;
-    var m = val.match(/([\d.]+)\s*px/);
-    return m ? parseFloat(m[1]) : NaN;
+  function isDiscordMedia(src) {
+    if (!src || typeof src !== "string") return false;
+    return MEDIA_URL_RE.test(src) && !EMOJI_RE.test(src) && !STICKER_RE.test(src);
   }
 
   function isMediaElement(el) {
-    if (!el || !el.tagName) return { isMedia: false, element: null, naturalWidth: 0, naturalHeight: 0 };
+    if (!el || !el.tagName) return { isMedia: false, element: null };
     var tag = el.tagName.toLowerCase();
     if (tag === "img") {
       var src = el.getAttribute("src") || "";
-      if (MEDIA_URL_RE.test(src)) {
-        return { isMedia: true, element: el, naturalWidth: el.naturalWidth || 0, naturalHeight: el.naturalHeight || 0 };
-      }
+      if (isDiscordMedia(src)) return { isMedia: true, element: el };
     }
     if (tag === "video") {
       var vsrc = el.getAttribute("src") || "";
-      if (MEDIA_URL_RE.test(vsrc)) {
-        return { isMedia: true, element: el, naturalWidth: el.naturalWidth || 0, naturalHeight: el.naturalHeight || 0 };
-      }
+      if (isDiscordMedia(vsrc)) return { isMedia: true, element: el };
       var sources = el.children || [];
       for (var i = 0; i < sources.length; i++) {
         var child = sources[i];
         if (child && child.tagName && child.tagName.toLowerCase() === "source") {
           var ssrc = child.getAttribute("src") || "";
-          if (MEDIA_URL_RE.test(ssrc)) {
-            return { isMedia: true, element: el, naturalWidth: el.naturalWidth || 0, naturalHeight: el.naturalHeight || 0 };
-          }
+          if (isDiscordMedia(ssrc)) return { isMedia: true, element: el };
         }
       }
     }
-    return { isMedia: false, element: null, naturalWidth: 0, naturalHeight: 0 };
+    return { isMedia: false, element: null };
   }
 
-  function findContainer(el) {
-    var getCS = getComputedStyleFn();
-    if (!getCS) return null;
-    var node = el;
-    for (var depth = 0; depth < MAX_WALK_DEPTH; depth++) {
-      node = node.parentElement;
-      if (!node) return null;
-      var cs = getCS(node);
-      var mw = parsePx(cs.getPropertyValue("max-width"));
-      if (!isNaN(mw) && mw <= WIDTH_THRESHOLD) return node;
-      var mh = parsePx(cs.getPropertyValue("max-height"));
-      if (!isNaN(mh) && mh <= HEIGHT_THRESHOLD) return node;
-    }
-    return null;
+  var ENLARGE_CSS = [
+    "img[src*='cdn.discordapp.com/attachments/'],",
+    "img[src*='media.discordapp.net/attachments/'],",
+    "video[src*='cdn.discordapp.com/attachments/'],",
+    "video[src*='media.discordapp.net/attachments/'] {",
+    "  max-width: none !important;",
+    "  max-height: none !important;",
+    "  width: auto !important;",
+    "  height: auto !important;",
+    "  object-fit: contain !important;",
+    "}",
+    "div:has(img[src*='cdn.discordapp.com/attachments/']),",
+    "div:has(img[src*='media.discordapp.net/attachments/']),",
+    "div:has(video[src*='cdn.discordapp.com/attachments/']),",
+    "div:has(video[src*='media.discordapp.net/attachments/']) {",
+    "  max-width: none !important;",
+    "  max-height: none !important;",
+    "  width: auto !important;",
+    "  height: auto !important;",
+    "  overflow: visible !important;",
+    "}",
+    "div:has(> img[src*='cdn.discordapp.com/attachments/']),",
+    "div:has(> img[src*='media.discordapp.net/attachments/']),",
+    "div:has(> video[src*='cdn.discordapp.com/attachments/']),",
+    "div:has(> video[src*='media.discordapp.net/attachments/']) {",
+    "  max-width: none !important;",
+    "  max-height: none !important;",
+    "  width: auto !important;",
+    "  height: auto !important;",
+    "  overflow: visible !important;",
+    "}"
+  ].join("\n");
+
+  function injectStylesheet(doc) {
+    if (!doc || !doc.head) return;
+    if (doc.getElementById(STYLE_ID)) return;
+    var style = doc.createElement("style");
+    style.id = STYLE_ID;
+    style.textContent = ENLARGE_CSS;
+    doc.head.appendChild(style);
   }
 
-  function applyOverride(el) {
-    if (!el || !el.getAttribute) return { ok: false, removed: false };
-    if (el.getAttribute(ATTR_ENLARGED) === "1") return { ok: true, removed: false };
-    var container = findContainer(el);
-    var removed = false;
-    if (container && container.style) {
-      var cs = container.style;
-      var hadConstraint = false;
-      if (cs.getPropertyValue("max-width") && cs.getPropertyValue("max-width") !== "none") hadConstraint = true;
-      if (cs.getPropertyValue("max-height") && cs.getPropertyValue("max-height") !== "none") hadConstraint = true;
-      cs.setProperty("max-width", "none", "important");
-      cs.setProperty("max-height", "none", "important");
-      cs.setProperty("width", "auto", "important");
-      cs.setProperty("height", "auto", "important");
-      removed = hadConstraint;
-    }
-    if (el.style) {
-      el.style.setProperty("max-width", "100%", "important");
-      el.style.setProperty("max-height", "none", "important");
-      el.style.setProperty("width", "auto", "important");
-      el.style.setProperty("height", "auto", "important");
-      el.style.setProperty("object-fit", "contain", "important");
-      el.style.setProperty("cursor", "zoom-in", "important");
-    }
-    el.setAttribute(ATTR_ENLARGED, "1");
-    return { ok: true, removed: removed };
+  function removeStylesheet(doc) {
+    if (!doc) return;
+    var el = doc.getElementById(STYLE_ID);
+    if (el && el.parentElement) el.parentElement.removeChild(el);
   }
 
-  function scanMedia(root) {
+  function markMediaElements(root) {
     if (!root || !root.querySelectorAll) return 0;
     var imgs = root.querySelectorAll("img");
     var vids = root.querySelectorAll("video");
@@ -107,8 +96,9 @@
     var count = 0;
     for (var k = 0; k < all.length; k++) {
       var info = isMediaElement(all[k]);
-      if (info.isMedia) {
-        applyOverride(info.element);
+      if (info.isMedia && !info.element.getAttribute(ATTR_ENLARGED)) {
+        info.element.setAttribute(ATTR_ENLARGED, "1");
+        info.element.style.setProperty("cursor", "zoom-in", "important");
         count++;
       }
     }
@@ -130,7 +120,7 @@
           var added = mutations[i].addedNodes;
           for (var j = 0; j < added.length; j++) {
             var node = added[j];
-            if (node.nodeType === 1) scanMedia(node);
+            if (node.nodeType === 1) markMediaElements(node);
           }
         }
       }, DEBOUNCE_MS);
@@ -144,17 +134,24 @@
     if (debounceTimer) { clearTimeout(debounceTimer); debounceTimer = null; }
     var d = doc || (typeof document !== "undefined" ? document : null);
     if (!d) return;
+    removeStylesheet(d);
     var all = d.querySelectorAll("[" + ATTR_ENLARGED + "]");
-    for (var i = 0; i < all.length; i++) all[i].removeAttribute(ATTR_ENLARGED);
+    for (var i = 0; i < all.length; i++) {
+      all[i].removeAttribute(ATTR_ENLARGED);
+      all[i].style.removeProperty("cursor");
+    }
   }
 
   if (typeof globalThis !== "undefined") {
     globalThis.__DEE__ = {
       MEDIA_URL_RE: MEDIA_URL_RE,
+      EMOJI_RE: EMOJI_RE,
+      STICKER_RE: STICKER_RE,
+      isDiscordMedia: isDiscordMedia,
       isMediaElement: isMediaElement,
-      findContainer: findContainer,
-      applyOverride: applyOverride,
-      scan: scanMedia,
+      ENLARGE_CSS: ENLARGE_CSS,
+      injectStylesheet: injectStylesheet,
+      markMediaElements: markMediaElements,
       extractChannelId: extractChannelId,
       observe: observe,
       forget: forget
@@ -163,6 +160,7 @@
 
   if (typeof globalThis !== "undefined" && globalThis.DEE_NO_AUTOSTART) return;
   if (typeof document === "undefined") return;
-  scanMedia(document);
+  injectStylesheet(document);
+  markMediaElements(document);
   observe(document);
 }());

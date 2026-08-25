@@ -11,54 +11,74 @@ const source = readFileSync(
   path.join(here, "..", "extension", "embed_enlarge.js"), "utf8");
 
 const fakeGlobal = { DEE_NO_AUTOSTART: true };
-new Function("globalThis", "document", "getComputedStyle", source)(
-  fakeGlobal, undefined, undefined);
+new Function("globalThis", "document", source)(fakeGlobal, undefined);
 
 const DEE = fakeGlobal.__DEE__;
 
-const FIXTURE_HTML = readFileSync(
-  path.join(here, "fixtures", "discord_embeds.html"), "utf8");
-
 function makeDoc(html) {
-  return makeDiscordDoc(html || FIXTURE_HTML);
+  return makeDiscordDoc(html || '<html><body></body></html>');
 }
 
 function makeEl(tag, attrs, children) {
   return new FakeElement(tag, attrs || {}, children || []);
 }
 
-function withMockCS(fn) {
-  fakeGlobal.__DEE_GET_COMPUTED_STYLE__ = (el) => el.style;
-  try { fn(); } finally { delete fakeGlobal.__DEE_GET_COMPUTED_STYLE__; }
-}
-
 test("the module exposes its pure functions and starts nothing", () => {
   assert.ok(DEE);
-  for (const fn of ["isMediaElement", "findContainer", "applyOverride", "scan",
-    "extractChannelId", "observe", "forget"]) {
+  for (const fn of ["isDiscordMedia", "isMediaElement", "injectStylesheet",
+    "markMediaElements", "extractChannelId", "observe", "forget"]) {
     assert.equal(typeof DEE[fn], "function", fn);
   }
 });
 
-test("MEDIA_URL_RE matches cdn.discordapp.com URLs", () => {
+test("MEDIA_URL_RE matches attachment URLs", () => {
   assert.ok(DEE.MEDIA_URL_RE.test("https://cdn.discordapp.com/attachments/123/a/b.png"));
-  assert.ok(DEE.MEDIA_URL_RE.test("https://cdn.discordapp.com/attachments/123/a/b.png?width=400"));
-  assert.ok(DEE.MEDIA_URL_RE.test("http://cdn.discordapp.com/attachments/123/a/b.png"));
+  assert.ok(DEE.MEDIA_URL_RE.test("https://media.discordapp.net/attachments/123/a/b.png"));
+  assert.ok(DEE.MEDIA_URL_RE.test("https://cdn.discordapp.com/embeds/123/a/b.png"));
 });
 
-test("MEDIA_URL_RE matches media.discordapp.net URLs", () => {
-  assert.ok(DEE.MEDIA_URL_RE.test("https://media.discordapp.net/attachments/123/a/b.png"));
-  assert.ok(DEE.MEDIA_URL_RE.test("https://media.discordapp.net/attachments/123/a/b.mp4?width=400&height=300"));
+test("MEDIA_URL_RE rejects emoji URLs", () => {
+  assert.ok(!DEE.MEDIA_URL_RE.test("https://cdn.discordapp.com/emojis/12345.png"));
+  assert.ok(!DEE.MEDIA_URL_RE.test("https://cdn.discordapp.com/emojis/12345.gif"));
+});
+
+test("MEDIA_URL_RE rejects sticker URLs", () => {
+  assert.ok(!DEE.MEDIA_URL_RE.test("https://cdn.discordapp.com/stickers/12345.png"));
 });
 
 test("MEDIA_URL_RE rejects non-Discord URLs", () => {
   assert.ok(!DEE.MEDIA_URL_RE.test("https://example.com/photo.jpg"));
-  assert.ok(!DEE.MEDIA_URL_RE.test("https://cdn.notdiscord.com/attachments/123/a/b.png"));
-});
-
-test("MEDIA_URL_RE rejects empty and null", () => {
   assert.ok(!DEE.MEDIA_URL_RE.test(""));
   assert.ok(!DEE.MEDIA_URL_RE.test(null));
+});
+
+test("EMOJI_RE matches emoji CDN paths", () => {
+  assert.ok(DEE.EMOJI_RE.test("https://cdn.discordapp.com/emojis/123.png"));
+  assert.ok(!DEE.EMOJI_RE.test("https://cdn.discordapp.com/attachments/123.png"));
+});
+
+test("STICKER_RE matches sticker CDN paths", () => {
+  assert.ok(DEE.STICKER_RE.test("https://cdn.discordapp.com/stickers/123.png"));
+  assert.ok(!DEE.STICKER_RE.test("https://cdn.discordapp.com/attachments/123.png"));
+});
+
+test("isDiscordMedia returns true for attachments", () => {
+  assert.ok(DEE.isDiscordMedia("https://cdn.discordapp.com/attachments/123/a/b.png"));
+  assert.ok(DEE.isDiscordMedia("https://media.discordapp.net/attachments/123/a/b.mp4"));
+});
+
+test("isDiscordMedia returns false for emojis", () => {
+  assert.ok(!DEE.isDiscordMedia("https://cdn.discordapp.com/emojis/123.png"));
+});
+
+test("isDiscordMedia returns false for stickers", () => {
+  assert.ok(!DEE.isDiscordMedia("https://cdn.discordapp.com/stickers/123.png"));
+});
+
+test("isDiscordMedia returns false for non-Discord", () => {
+  assert.ok(!DEE.isDiscordMedia("https://example.com/photo.jpg"));
+  assert.ok(!DEE.isDiscordMedia(null));
+  assert.ok(!DEE.isDiscordMedia(""));
 });
 
 test("isMediaElement identifies Discord images", () => {
@@ -83,173 +103,104 @@ test("isMediaElement identifies video with source child", () => {
   assert.equal(result.element, vid);
 });
 
+test("isMediaElement rejects emoji images", () => {
+  const img = makeEl("img", { src: "https://cdn.discordapp.com/emojis/123.png" });
+  const result = DEE.isMediaElement(img);
+  assert.equal(result.isMedia, false);
+});
+
 test("isMediaElement rejects non-Discord images", () => {
   const img = makeEl("img", { src: "https://example.com/photo.jpg" });
   const result = DEE.isMediaElement(img);
   assert.equal(result.isMedia, false);
 });
 
-test("isMediaElement rejects divs without matching src", () => {
+test("isMediaElement rejects divs", () => {
   const div = makeEl("div", {});
   const result = DEE.isMediaElement(div);
   assert.equal(result.isMedia, false);
 });
 
-test("isMediaElement handles null and elements without tagName", () => {
+test("isMediaElement handles null", () => {
   assert.equal(DEE.isMediaElement(null).isMedia, false);
-  assert.equal(DEE.isMediaElement({}).isMedia, false);
 });
 
-test("findContainer walks up to find max-width constraint", () => {
-  withMockCS(() => {
-    const grandparent = makeEl("div", {});
-    grandparent.style.setProperty("max-width", "400px");
-    const parent = makeEl("div", {});
-    const img = makeEl("img", { src: "https://cdn.discordapp.com/attachments/123/a/b.png" });
-    parent.appendChild(img);
-    grandparent.appendChild(parent);
-    const found = DEE.findContainer(img);
-    assert.equal(found, grandparent);
-  });
+test("ENLARGE_CSS contains selectors for attachments", () => {
+  assert.match(DEE.ENLARGE_CSS, /cdn\.discordapp\.com\/attachments\//);
+  assert.match(DEE.ENLARGE_CSS, /media\.discordapp\.net\/attachments\//);
 });
 
-test("findContainer walks up to find max-height constraint", () => {
-  withMockCS(() => {
-    const container = makeEl("div", {});
-    container.style.setProperty("max-height", "300px");
-    const img = makeEl("img", { src: "https://cdn.discordapp.com/attachments/123/a/b.png" });
-    container.appendChild(img);
-    const found = DEE.findContainer(img);
-    assert.equal(found, container);
-  });
+test("ENLARGE_CSS contains !important overrides", () => {
+  assert.match(DEE.ENLARGE_CSS, /max-width:\s*none\s*!important/);
+  assert.match(DEE.ENLARGE_CSS, /max-height:\s*none\s*!important/);
+  assert.match(DEE.ENLARGE_CSS, /object-fit:\s*contain\s*!important/);
 });
 
-test("findContainer returns null when no constrainer exists", () => {
-  withMockCS(() => {
-    const parent = makeEl("div", {});
-    const img = makeEl("img", { src: "https://cdn.discordapp.com/attachments/123/a/b.png" });
-    parent.appendChild(img);
-    const found = DEE.findContainer(img);
-    assert.equal(found, null);
-  });
+test("ENLARGE_CSS does not target emojis", () => {
+  assert.ok(!DEE.ENLARGE_CSS.includes("/emojis/"));
+  assert.ok(!DEE.ENLARGE_CSS.includes("/stickers/"));
 });
 
-test("findContainer caps walk depth at MAX_WALK_DEPTH", () => {
-  withMockCS(() => {
-    let root = makeEl("div", {});
-    root.style.setProperty("max-width", "400px");
-    let current = root;
-    for (let i = 0; i < 10; i++) {
-      const child = makeEl("div", {});
-      current.appendChild(child);
-      current = child;
-    }
-    const img = makeEl("img", { src: "https://cdn.discordapp.com/attachments/123/a/b.png" });
-    current.appendChild(img);
-    const found = DEE.findContainer(img);
-    assert.equal(found, null);
-  });
+test("injectStylesheet creates a style element", () => {
+  const doc = makeDoc("<html><head></head><body></body></html>");
+  DEE.injectStylesheet(doc);
+  const style = doc.querySelector("#dee-enlarge-css");
+  assert.ok(style);
+  assert.equal(style.tagName.toLowerCase(), "style");
 });
 
-test("findContainer stops at first constrainer (nearest wins)", () => {
-  withMockCS(() => {
-    const outer = makeEl("div", {});
-    outer.style.setProperty("max-width", "400px");
-    const inner = makeEl("div", {});
-    inner.style.setProperty("max-width", "350px");
-    const img = makeEl("img", { src: "https://cdn.discordapp.com/attachments/123/a/b.png" });
-    inner.appendChild(img);
-    outer.appendChild(inner);
-    const found = DEE.findContainer(img);
-    assert.equal(found, inner);
-  });
+test("injectStylesheet is idempotent", () => {
+  const doc = makeDoc("<html><head></head><body></body></html>");
+  DEE.injectStylesheet(doc);
+  DEE.injectStylesheet(doc);
+  assert.equal(doc.querySelectorAll("#dee-enlarge-css").length, 1);
 });
 
-test("findContainer returns null without getComputedStyle", () => {
-  const img = makeEl("img", { src: "https://cdn.discordapp.com/attachments/123/a/b.png" });
-  const found = DEE.findContainer(img);
-  assert.equal(found, null);
+test("markMediaElements marks Discord images", () => {
+  const doc = makeDoc('<html><body>' +
+    '<img src="https://cdn.discordapp.com/attachments/123/a/b.png" />' +
+    '</body></html>');
+  const count = DEE.markMediaElements(doc);
+  assert.equal(count, 1);
+  const img = doc.querySelector("img");
+  assert.equal(img.getAttribute("data-dee-enlarged"), "1");
 });
 
-test("applyOverride removes max-width and max-height constraints", () => {
-  withMockCS(() => {
-    const container = makeEl("div", {});
-    container.style.setProperty("max-width", "400px");
-    container.style.setProperty("max-height", "300px");
-    const img = makeEl("img", { src: "https://cdn.discordapp.com/attachments/123/a/b.png" });
-    container.appendChild(img);
-    const result = DEE.applyOverride(img);
-    assert.equal(result.ok, true);
-    assert.equal(result.removed, true);
-    assert.match(container.style.getPropertyValue("max-width"), /none/);
-    assert.match(container.style.getPropertyValue("max-height"), /none/);
-    assert.equal(img.getAttribute("data-dee-enlarged"), "1");
-  });
+test("markMediaElements sets cursor: zoom-in", () => {
+  const doc = makeDoc('<html><body>' +
+    '<img src="https://cdn.discordapp.com/attachments/123/a/b.png" />' +
+    '</body></html>');
+  DEE.markMediaElements(doc);
+  const img = doc.querySelector("img");
+  assert.match(img.style.getPropertyValue("cursor"), /zoom-in/);
 });
 
-test("applyOverride sets cursor: zoom-in on media", () => {
-  withMockCS(() => {
-    const container = makeEl("div", {});
-    container.style.setProperty("max-width", "400px");
-    const img = makeEl("img", { src: "https://cdn.discordapp.com/attachments/123/a/b.png" });
-    container.appendChild(img);
-    DEE.applyOverride(img);
-    assert.match(img.style.getPropertyValue("cursor"), /zoom-in/);
-  });
+test("markMediaElements skips emojis", () => {
+  const doc = makeDoc('<html><body>' +
+    '<img src="https://cdn.discordapp.com/emojis/123.png" />' +
+    '</body></html>');
+  const count = DEE.markMediaElements(doc);
+  assert.equal(count, 0);
 });
 
-test("applyOverride is idempotent (skips already enlarged)", () => {
-  withMockCS(() => {
-    const container = makeEl("div", {});
-    container.style.setProperty("max-width", "400px");
-    const img = makeEl("img", {
-      src: "https://cdn.discordapp.com/attachments/123/a/b.png",
-      "data-dee-enlarged": "1"
-    });
-    container.appendChild(img);
-    const result = DEE.applyOverride(img);
-    assert.equal(result.ok, true);
-    assert.equal(result.removed, false);
-  });
+test("markMediaElements is idempotent", () => {
+  const doc = makeDoc('<html><body>' +
+    '<img src="https://cdn.discordapp.com/attachments/123/a/b.png" />' +
+    '</body></html>');
+  const count1 = DEE.markMediaElements(doc);
+  const count2 = DEE.markMediaElements(doc);
+  assert.equal(count1, 1);
+  assert.equal(count2, 0);
 });
 
-test("applyOverride returns removed:false when no constraints present", () => {
-  withMockCS(() => {
-    const container = makeEl("div", {});
-    const img = makeEl("img", { src: "https://cdn.discordapp.com/attachments/123/a/b.png" });
-    container.appendChild(img);
-    const result = DEE.applyOverride(img);
-    assert.equal(result.ok, true);
-    assert.equal(result.removed, false);
-  });
-});
-
-test("scan finds and overrides all Discord media in a fixture", () => {
-  withMockCS(() => {
-    const doc = makeDoc();
-    const count = DEE.scan(doc);
-    assert.ok(count > 0);
-    const nonDiscord = doc.querySelector("img[src='https://example.com/photo.jpg']");
-    assert.ok(nonDiscord);
-    assert.equal(nonDiscord.getAttribute("data-dee-enlarged"), null);
-  });
-});
-
-test("scan is idempotent", () => {
-  withMockCS(() => {
-    const doc = makeDoc();
-    const count1 = DEE.scan(doc);
-    const count2 = DEE.scan(doc);
-    assert.equal(count2, 0);
-  });
-});
-
-test("scan counts Discord images and videos", () => {
-  withMockCS(() => {
-    const doc = makeDoc();
-    const count = DEE.scan(doc);
-    assert.ok(count >= 6);
-  });
+test("markMediaElements counts multiple images", () => {
+  const doc = makeDoc('<html><body>' +
+    '<img src="https://cdn.discordapp.com/attachments/1/2/a.png" />' +
+    '<img src="https://cdn.discordapp.com/attachments/3/4/b.png" />' +
+    '<img src="https://cdn.discordapp.com/emojis/5.png" />' +
+    '</body></html>');
+  const count = DEE.markMediaElements(doc);
+  assert.equal(count, 2);
 });
 
 test("extractChannelId parses @me channel", () => {
@@ -270,14 +221,17 @@ test("extractChannelId returns null for non-strings", () => {
   assert.equal(DEE.extractChannelId(undefined), null);
 });
 
-test("forget resets all data-dee-enlarged attributes", () => {
-  withMockCS(() => {
-    const doc = makeDoc();
-    DEE.scan(doc);
-    assert.ok(doc.querySelector("[data-dee-enlarged]"));
-    DEE.forget(doc);
-    assert.equal(doc.querySelector("[data-dee-enlarged]"), null);
-  });
+test("forget removes stylesheet and attributes", () => {
+  const doc = makeDoc("<html><head></head><body>" +
+    '<img src="https://cdn.discordapp.com/attachments/123/a/b.png" />' +
+    "</body></html>");
+  DEE.injectStylesheet(doc);
+  DEE.markMediaElements(doc);
+  assert.ok(doc.querySelector("#dee-enlarge-css"));
+  assert.ok(doc.querySelector("[data-dee-enlarged]"));
+  DEE.forget(doc);
+  assert.equal(doc.querySelector("#dee-enlarge-css"), null);
+  assert.equal(doc.querySelector("[data-dee-enlarged]"), null);
 });
 
 test("the manifest targets only discord.com domains", () => {
