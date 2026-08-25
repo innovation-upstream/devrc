@@ -69,16 +69,28 @@ debugging, changing or copying a specific pipeline.
    cause**, and "the gate is just flaky under load" will walk you straight past a real bug.
    Discriminator: a step that emitted `RESULT:` / `<leg> verdict=` **failed a test**; one that
    emitted neither was **killed**. 25 of the 27 kills had ≥4 gate TaskRuns overlapping.
-   🔴 **What KILLS a step is NOT established — and the obvious theory is MEASURED ABSENT.**
-   `step-pytests` requests **1 CPU / 2Gi** against **4 CPU / 8Gi** limits, and the node carries
-   a large limits overcommit, so "the scheduler packs on requests and the kernel kills on
-   limits" looks like the answer. It is not the answer for THIS step: homelab-infra **#393**
-   measured CFS throttle ratios across `tekton-ci` on 2026-08-24 and `step-pytests` came in at
-   **0.006 — not throttled**, with node saturation absent as well (16% CPU requested, ZERO
-   Pending pods, no OOMKilled). So the 255s are **undiagnosed**. Do NOT "fix" them by moving
-   devrc-ci's requests or limits on the strength of the request/limit gap alone — that is
-   reaching for the plausible theory instead of the discriminating control, and this exact
-   change has already been made once on a step where it was justified and would be inert here.
+   🔴 **THE 255s ARE SCHEDULER PREEMPTION, AND `gitops-validate` IS THE PREEMPTOR — CI
+   PREEMPTS CI.** Confirmed 2026-08-25T04:46:13Z by catching a burst live: five gate pods,
+   five explicit `Preempted` events, three preemptors, all five `pytests` steps terminating
+   `exit=255` within ONE SECOND having started minutes apart. The preemptors are priority-**0**
+   `gitops-validate` pods blocked on `0/4 nodes are available: 1 Insufficient cpu, 3 node(s)
+   didn't match Pod's node affinity/selector` — **both pipelines `nodeSelector`-pin to the SAME
+   single node** out of four, so gitops-validate cannot fit and the scheduler evicts the
+   `ci-bulk` (**-10000**) devrc gate pods to make room. One-directional by design: devrc-ci is
+   denied the reverse (`preemption: not eligible due to preemptionPolicy=Never`). It often does
+   not even buy the preemptor a slot — `not eligible due to a terminating pod on the nominated
+   node` recurs, so victims die and the preemptor stays Pending. Full evidence:
+   homelab-infra `claudedocs/handoff-devrc-ci-kills-are-simultaneous.md`.
+   🔴 **Two fixes that look right and are NOT.** (a) **Raising `ci-bulk` above 0** removes no
+   contention — it only inverts which pipeline is destroyed, and gitops-validate already has
+   the tightest timeout budget and the worst pod-start latency here. (b) **Moving devrc-ci's
+   requests/limits**: `step-pytests` requests 1 CPU/2Gi against 4 CPU/8Gi limits on an
+   overcommitted node, which looks like the answer and is measured absent — #393 put
+   `step-pytests` at **0.006, not throttled**, with no node saturation (16% CPU requested, zero
+   Pending, no OOMKilled). A per-pod limit also cannot kill five pods of different ages in the
+   same second. The fault is **two pipelines pinned to one node out of four**; note when
+   choosing that devrc-ci's pin buys the RWO `nix-store-cache` (~1m50s/run) while
+   gitops-validate is pinned for the same cache and is the one that cannot fit.
    🔴 **The real slowness mechanism, when it IS present: CFS QUOTA STARVATION, and AVERAGE CPU
    HIDES IT.** A step's own `limits.cpu` is enforced per 100ms CFS period, so a suite of
    short-lived multi-threaded processes drains a 1-CPU quota in a few ms and stalls for the
