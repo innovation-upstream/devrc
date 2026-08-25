@@ -1366,6 +1366,54 @@ in
   home.file.".claude/hooks/clawgate-task-interview-guard.py" = {
     source = ../scripts/claude-hooks/clawgate-task-interview-guard.py;
   };
+  # 🔴 THE GH-ISSUE CLOSING-CONDITION GATE — the interview gate's twin on the
+  # OTHER board. That one makes a clawgate task say what "done" means; this one
+  # makes a GitHub issue say what ENDS it.
+  #
+  # PreToolUse(Bash): denies `gh issue create` (plus a `gh api …/issues` POST and
+  # a curl POST to the same path) whose body carries no `## Closing condition` /
+  # `## Acceptance criteria` heading WITH CONTENT UNDER IT. The rule it enforces
+  # is claude/RULES.md's "Out of scope" branch; the predicate's single definition
+  # is question 1 of claude/skills/clawgate/flows/task-authoring.md, which the
+  # block message points at rather than restating (that single-source claim is
+  # gated by scripts/tests/test_closing_condition_single_source.py).
+  #
+  # 🔴 WHY A HOOK AND NOT MORE PROSE — measured, two blind runs, private solo
+  # repos so the outward-facing half of the rule could not confound: an UNBRIEFED
+  # subagent filed 6 issues with 0 closing conditions; a BRIEFED one (same rule
+  # pasted verbatim into its prompt) filed 10 with 10. BOTH had the rule —
+  # subagents do receive RULES.md — so the failure is SALIENCE, not delivery, and
+  # PRINCIPLES.md answers that with a structural fix.
+  #
+  # 🔴 IT MUST NOT FIRE ON A MENTION. This one watches `gh`, the most-typed tool
+  # in these repos, so a block on a `grep`/`echo`/heredoc that merely QUOTES the
+  # command would train everyone to reach for the override — and a
+  # permanently-red gate is worse than no gate. Classification is argv-based, and
+  # a heredoc body attached to a text sink (cat/tee/echo/printf, not piped
+  # onward) is not read as commands. That sink list is an ALLOWLIST, so anything
+  # unrecognised keeps the body: over-block, never silent pass.
+  #
+  # 🔴 It also denies a create whose body it CANNOT SEE (a generator
+  # substitution, `--body-file -`, a missing file) — failing open there would
+  # make the gate walkable by changing the SHAPE of the call. Escape hatches, both
+  # deliberate and both tested: a body that already carries the heading passes
+  # SILENTLY, and `GH_ISSUE_NO_CLOSING_CONDITION=1` skips it for one call in ONE
+  # greppable spelling.
+  #
+  # 🔴 IT DOES NOT CHECK SEMANTICS, and its own message says so. In the briefed
+  # arm above all 10 issues carried the heading and MOST wrote the remedy under
+  # it rather than a condition that ends the object. This raises the floor from
+  # nothing to a filled-in section; it does not certify the content.
+  #
+  # 🔴 A NEW file, so it must be `git add`ed or the flake silently omits it and
+  # the switch succeeds with the hook absent — this repo's standing trap.
+  # Registered on PreToolUse(Bash) per-host by register-nudge-hook.py, which is
+  # also what pins its interpreter to an absolute /nix/store path (a bare
+  # `python3` there is `command not found` for ~1s of every switch, and a
+  # PreToolUse hook exiting 127 FAILS OPEN — PR #609).
+  home.file.".claude/hooks/gh-issue-closing-condition-guard.py" = {
+    source = ../scripts/claude-hooks/gh-issue-closing-condition-guard.py;
+  };
   # 🔴 THE BASE-CLONE STALENESS HOOK — the only hook here that fixes what the
   # agent READS rather than what it does.
   #

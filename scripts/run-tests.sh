@@ -682,6 +682,17 @@ HERMETIC_TARGETS=(
   # load-bearing half, so they are gated here rather than left to the ungated
   # hand-rolled scripts beside it.
   scripts/claude-hooks/tests/test_clawgate_task_interview_guard.py
+  # Same reason again — a FILE, not the directory. The interview gate's twin on
+  # the OTHER board: this one denies a `gh issue create` whose body names no
+  # closing condition, and — deliberately — one whose body it cannot read at all.
+  # It is the third hook here that can BLOCK and it fires PreToolUse on EVERY Bash
+  # call, on `gh`, the most-typed tool in these repos. Its NON-matches are the
+  # load-bearing half and then some: a `grep`/`echo`/`rg` for the command string,
+  # a heredoc that documents it, `issue comment|edit|close|list|view`, a `gh api`
+  # GET and a curl to `…/issues/<n>/comments` must all pass, or the gate becomes
+  # the thing everyone routes around. Gated here rather than left to the ungated
+  # hand-rolled scripts beside it.
+  scripts/claude-hooks/tests/test_gh_issue_closing_condition_guard.py
   # Same reason again — a FILE, not the directory. This one gates a CROSS-MODULE
   # class rather than any single hook: the on-disk names every hook's cache is made
   # of. Fifteen of them could be renamed with zero test movement, because writer and
@@ -1677,6 +1688,19 @@ TARGET_FLOORS=(
   # ZERO new skips, so EXPECTED_SKIPS is untouched. If this line conflicts with a
   # sibling branch, re-run the gate on the MERGED tree and copy what it prints.
   "scripts/claude-hooks/tests/test_clawgate_task_interview_guard.py|285"
+  # 2026-08-25, the gh-issue closing-condition gate arrives as a NEW target: 251
+  # collected, 0 skipped, measured on this branch. Gate's own rule applied to the
+  # gate's own count:
+  #   _suggested_floor 251 = 251 - min(50, max(1, 251/20 = 12)) = 251 - 12 = 239.
+  # The suite is deliberately weighted toward the ALLOW direction — 17 detector
+  # accepts, 18 mention shapes, 30 non-create verbs — because this hook can block
+  # and it watches `gh`. A 32-mutant sweep run under PYTHONDONTWRITEBYTECODE=1,
+  # each edit verified applied by reading the file back, killed 31/31 real
+  # mutants; the comment-only negative control survived, which is what proves the
+  # sweep can report SURVIVED at all. ZERO new skips, so EXPECTED_SKIPS is
+  # untouched. If this line conflicts with a sibling branch, re-run the gate on
+  # the MERGED tree and copy what it prints.
+  "scripts/claude-hooks/tests/test_gh_issue_closing_condition_guard.py|239"
   # 2026-08-18, the on-disk artifact-name registry arrives as a NEW target: 13
   # collected. Deliberately small — one test per module whose names it pins, plus the
   # two-sided classification guard that fails when a hook module appears or vanishes.

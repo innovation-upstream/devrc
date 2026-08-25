@@ -218,6 +218,7 @@ MANAGED_HOOK_SCRIPTS = frozenset({
     "claude-notify.py",
     "clawgate-task-interview-guard.py",
     "clawgate-writeback-guard.py",
+    "gh-issue-closing-condition-guard.py",
     "next-step-nudge.py",
     "search-tool-nudge.py",
     "shell-env-nudge.py",
@@ -616,6 +617,15 @@ PRE_BASH_CMDS = [
     # Registering it does not widen what PreToolUse can REFUSE — only what it
     # observes.
     with_python("~/.claude/hooks/bg-command-capture.py"),
+    # 🔴 THE THIRD PreToolUse entry, and — unlike the one above — the SECOND that
+    # can REFUSE. It denies a `gh issue create` whose body names no closing
+    # condition, the RULES.md rule whose failure mode was measured to be SALIENCE
+    # rather than delivery (6 issues / 0 conditions unbriefed vs 10 / 10 briefed,
+    # with BOTH agents holding the rule). Registered here rather than left to a
+    # hand edit for the #452 reason its neighbours record: a hook that ships
+    # unregistered reports a successful switch and sits INERT with nothing on
+    # screen to say so.
+    with_python("~/.claude/hooks/gh-issue-closing-condition-guard.py"),
 ]
 
 # Hooks registered on exactly one event each: {event: [command, ...]}.
