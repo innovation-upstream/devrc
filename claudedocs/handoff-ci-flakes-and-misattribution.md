@@ -22,7 +22,12 @@ session's git write, and browser-bridge tests blaming their own subject for a ne
 spool row. Both are now fixed; the flake family underneath is only half closed.
 
 ## State now
-- Branch `main`, both hosts converged. **Nothing in flight.**
+- Branch `main`. **Nothing in flight.** #824 (the `--exclude-slugs` salvage) MERGED as
+  `d3b6eeae`, and `rescue/initiative-scan-resolved-filter` was deleted deliberately
+  afterwards — next-step 1 is fully closed, residual included.
+  ⚠ Hosts were converged as of the deploy note below; that was measured on 2026-08-25 and
+  `main` has moved since (#806, #812, #817, #818, …). Re-run `drift-check.sh` rather than
+  reading the line below as current.
 - **Five PRs merged:**
 
 | PR | squash | what |
@@ -40,28 +45,93 @@ spool row. Both are now fixed; the flake family underneath is only half closed.
   another session's uncommitted `scripts/run-node-tests.sh` line. Deployed artifact ≠ commit
   on that host.
 - **#783 open by design** — #807 fixed the assertions, NOT the root cause.
-- **#778 CLOSED unmerged** — see the first open investigation; this is the risky one.
+- **#778 CLOSED unmerged** — **decided 2026-08-25**, see the first entry below. No longer the
+  risky one, and no longer risky at all: #824 landed and the rescue branch was then deleted
+  deliberately. Nothing here is single-copy any more.
 
-## Open investigations — live diagnosis state
+## Investigations — live diagnosis state (first entry is DECIDED, the rest are open)
 
-### 🔴 The rescued `initiative-scan.py` WIP now has exactly ONE copy, and its PR was closed
-- **Symptom + exact repro:** `origin/rescue/initiative-scan-resolved-filter` @ `1327372d` is
-  the only surviving copy of a `--exclude-slugs` / resolved-filter feature. Deleting that
-  branch destroys the work.
-- **Observed (with values):**
-  - working tree: `grep -c "exclude-slugs\|def parse_resolved" scripts/session-analysis/initiative-scan.py` → **0** (the WIP was discarded)
-  - on `origin/main`: same grep → **0**
-  - `git branch --contains 1327372d` excluding the rescue branch → **0**
-  - `git merge-base --is-ancestor 1327372d origin/main` → **no**
-  - `git ls-remote --heads origin rescue/initiative-scan-resolved-filter` → **1** (present)
-  - PR #778 `closedAt=2026-08-25T00:50:23Z`, **comments=0**
-- **Ruled out:** it did not land on `main` under another name (grep above); it is not on any
-  other local branch.
-- **Leading hypothesis:** whoever closed #778 did not know the branch had become the sole
-  copy — it was a draft, and the working-tree original was cleaned independently.
-- **Next probe:** ask the operator whether the feature is wanted. If yes, reopen/rebase; if
-  no, say so explicitly so the branch can be deleted deliberately rather than tidied away.
-  🔴 Do NOT delete that branch as cleanup.
+### ✅ DECIDED 2026-08-25 — the rescued `initiative-scan.py` WIP: one half salvaged, one half rejected on measurement
+**Operator decision: salvage `--exclude-slugs` only; drop `parse_resolved`. SHIPPED — #824
+merged as `d3b6eeae` 2026-08-25.**
+✅ **`rescue/initiative-scan-resolved-filter` is now DELETED — deliberately, not as cleanup.**
+The delete was gated on four conditions re-checked in the same command that performed it:
+`parse_exclude_slugs` present on `origin/main` (**by content**, since a squash merge is never
+an ancestor), the invariant guard present, `gh pr view 824 --json mergedAt` non-null, and the
+branch still existing. All four held.
+🔴 **`parse_resolved` now exists NOWHERE.** That was the decision, not an accident — it is
+rejected, and the reasoning below is the record. Its commit was `1327372d`; GitHub keeps an
+unreferenced commit reachable by sha for a limited window only, so if it is ever wanted back,
+recover it soon or rebuild it from the description here. **Do not rebuild it as specified** —
+read the root cause first; the design is what failed, not the code.
+
+- **What made it urgent (re-verified live, not carried forward):** branch present on origin;
+  `merge-base --is-ancestor 1327372d origin/main` → **no**; `git branch -a --contains` → only
+  the rescue branch itself; grep on `origin/main` → **0**. And `initiative-scan.py` had taken
+  **zero commits** since the rescue's parent, so the WIP still applied cleanly.
+- **The two halves are independent**, which is what made a split decision possible at all:
+  `--exclude-slugs` (+12 lines, explicit operator list) vs `parse_resolved` (+55 lines,
+  inferred verdict, filter **on by default**).
+- 🔴 **#778's own diagnosis was wrong in three ways** — found by re-measuring, not by reading
+  it. Corrected on the PR across THREE comments, each left standing rather than edited
+  because people read each before the next was known to be needed. **Only the third is
+  authoritative** — the table below matches it:
+  `…#issuecomment-5413412588` (original; the `8 / 1 / 2` split is WRONG) →
+  `…#issuecomment-5414463043` (corrects the split to `7 / 1 / 3` — numbers right, but its
+  explanation of how `8 / 1 / 2` arose is wrong) →
+  `…#issuecomment-5414562898` (**authoritative**: same numbers, correct mechanism).
+  All three at <https://github.com/innovation-upstream/devrc/pull/778>.
+  - Method: loaded `1327372d`'s module directly, ran `parse_resolved` over handoffs
+    materialized from git, attributed every hit to the arm that fired. Positive control
+    (`## Status: RESOLVED`) → `True`; negative control (plain prose) → `False`.
+
+    | corpus | scanned | flagged | `heading-marker` | `inline-status` | `PROSE-SUMMARY` |
+    |---|---|---|---|---|---|
+    | `199774f8` (main at #824's base) | 62 | 11 (18%) | **7** | 1 | 3 |
+    | `982778ee` (the sha it cites) | 53 | 10 (19%) | **7** | 1 | 2 |
+
+    ⚠ Both corpora are PINNED on purpose. An earlier draft of this table wrote the first row
+    as "`origin/main` today" and as **8 / 1 / 2** — wrong on both counts, caught by the #826
+    audit. `main` moves (it is already past `199774f8`), so an unpinned row cannot be told
+    apart from doc rot.
+    **How the `8 / 1 / 2` arose** — the actual mechanism, itself re-derived after a first
+    explanation turned out to be wrong: the linked #778 comment hedges the split as "7–8"
+    heading and "2–3" prose, and the table was then built by taking the TOP of one range and
+    the BOTTOM of the other. Not a miscount of any particular document — a hedge hardened in
+    two directions at once. **A previous draft of this note claimed `8 / 1 / 2` was
+    UNREACHABLE. That was also false**, and is recorded rather than deleted because it is the
+    same error a third time: at `199774f8` FOUR flagged docs sit outside the heading column
+    (3 prose + 1 inline), so miscounting any one of the three prose docs yields exactly
+    `8 / 1 / 2`. Two of them look like heading hits at a glance — `### ✅ CLOSED 2026-08-22`
+    and `## State now — DONE, verified end to end` — and classify as prose only because the
+    arm's regex needs the marker to START the heading.
+    The row summed to 11 in every wrong version, which is exactly why an arithmetic
+    self-check never caught any of them.
+    🔴 The lesson, earned three times in one section: this block exists to correct #778 for
+    publishing numbers it had not re-derived, and its first draft, and then its own
+    correction, each did the same thing. **Re-derive; do not reason about what the number
+    must have been.**
+
+  - (a) It blames the prose scan and states *"the heading and inline `Status:` arms did **not**
+    fire"*. The heading arm is the DOMINANT one — `### DONE this session`,
+    `### RESOLVED: the clawgate stuck detector…`, `## CLOSED: the commit-to-main guard fail-open`.
+  - (b) Its counts came from the **working tree** while citing `982778ee`: its headline example
+    `handoff-ccua-waiting-flag-and-fork-close.md` does **not exist** at that sha
+    (`git cat-file -e` → absent). That is the 11/55-vs-10/53 gap.
+  - (c) Its suggested fix — *"a heading that **starts** with the marker"* — **preserves all 7**:
+    that arm's regex already requires the marker to start the heading, so the fix is a no-op
+    against every one of them.
+- **Root cause (the reason the half was rejected, not just deferred):** a handoff is a
+  MULTI-SECTION document. Those headings describe one investigation *inside* a doc that still
+  carries live next-steps. The predicate conflates "this document mentions something finished"
+  with "this initiative is finished", and that signal **does not exist in the corpus at the
+  granularity it needs** — so no tightening of the marker regex reaches it. A report whose
+  entire job is answering *"what am I working on"* must not hide a row on a guess.
+- **Also fixed in the salvage:** the WIP's `set(raw.split(","))` never stripped, so `"a, b"`
+  yielded `" b"` — it suppressed one of two while reading as though it had done both.
+- **Not a dead end, recorded so nobody re-derives it:** if an inferred filter is ever wanted,
+  it needs an explicit top-level status FIELD as a handoff convention. That convention does
+  not exist today, and inventing it is a docs-format change, not a parser change.
 
 ### #783 — the spool defect's ROOT CAUSE is untouched
 - **Symptom + exact repro:** a test reads `_wait_events(spool_dir, 1)[0]` and gets a
@@ -104,9 +174,12 @@ spool row. Both are now fixed; the flake family underneath is only half closed.
   under-diagnosis this thread spent the evening correcting.
 
 ## Next steps (ranked)
-1. **Decide the fate of `rescue/initiative-scan-resolved-filter`** (devrc, branch only — no
-   files in `main`). Sole copy; PR #778 closed with no comment. Cheapest item, highest
-   irreversibility.
+1. ~~**Decide the fate of `rescue/initiative-scan-resolved-filter`**~~ — **DONE 2026-08-25.**
+   Split decision: `--exclude-slugs` salvaged and **MERGED (#824, `d3b6eeae`)**,
+   `parse_resolved` rejected on measurement (see the decided investigation above).
+   **Residual also CLOSED:** the rescue branch was deleted deliberately, gated on the
+   closing condition this item named — the by-content grep **plus** `mergedAt` — both
+   re-checked inside the deleting command. Nothing remains of this item.
 2. **Close #783 at the root** (devrc: `scripts/browser-bridge/tests/conftest.py`,
    `scripts/browser-bridge/server.py`) — join emitter threads at teardown so a re-pointed
    `ACTIVITY_SPOOL_DIR` cannot be written by a dead test's thread.
@@ -118,8 +191,10 @@ spool row. Both are now fixed; the flake family underneath is only half closed.
    uncommitted `discord-embed-ext` line. Not ours to commit; resolves itself when they do.
 
 🔴 **This list is a WORK QUEUE WITH NO LOCK** — every `/resume` session draws from it, so a
-*better* ranked list produces *more* duplicate work. Nothing above is in flight as of this
-writing; if you start one, mark it `IN FLIGHT: <repo>#<pr>` here.
+*better* ranked list produces *more* duplicate work. **Nothing is in flight: item 1 is closed
+(merged + residual done), items 2–5 are unclaimed.** If you start one, mark it
+`IN FLIGHT: <repo>#<pr>` here — and if you find this sentence disagreeing with the items above,
+believe the items, then fix this sentence.
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **`scripts/gate.sh` runs the DEV-HOST tier only** — `run-tests.sh` + `run-node-tests.sh`.
@@ -169,9 +244,18 @@ git -C ~/workspace/devrc show origin/main:scripts/browser-bridge/tests/test_serv
 # and #802's fix is still there beside it
 git -C ~/workspace/devrc show origin/main:scripts/browser-bridge/server.py | grep -c "_spool_emit_lock"          # 3
 
-# the rescued WIP still exists — 🔴 if this prints nothing, the work is GONE
-git -C ~/workspace/devrc ls-remote --heads origin rescue/initiative-scan-resolved-filter
+# the salvage landed — BY CONTENT, since a squash merge is never an ancestor
+git -C ~/workspace/devrc show origin/main:scripts/session-analysis/initiative-scan.py \
+  | grep -c "def parse_exclude_slugs"                                                   # 1
+# and the invariant guard that stops the rejected half being re-added
+git -C ~/workspace/devrc show origin/main:scripts/session-analysis/tests/test_initiative_scan.py \
+  | grep -c "test_a_handoff_that_says_DONE_is_still_reported"                           # 1
 
-# both hosts carry it
+# the rescue branch is GONE, and that is CORRECT — deleted on purpose after the two greps
+# above returned 1. Expect EMPTY. 🔴 Empty is only alarming if those greps return 0.
+git -C ~/workspace/devrc ls-remote --heads origin rescue/initiative-scan-resolved-filter  # empty
+gh pr view 824 --repo innovation-upstream/devrc --json mergedAt,mergeCommit
+
+# both hosts carry what is ALREADY on main (not #824, until it merges)
 bash ~/workspace/devrc/scripts/drift-check.sh    # read-only; rc 0 = converged
 ```
