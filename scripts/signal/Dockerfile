@@ -1,8 +1,11 @@
 # The Signal consumer pod — `consumer.py run`, the long-lived ingest daemon.
 #
 # 🔴 BUILT FROM devrc, NOT VENDORED INTO homelab-talos. Same split as
-# `scripts/subsystem-store-api/Dockerfile` (read its header for the full
-# argument) and as `clusters/homelab/apps/mailbox` uses for mail-receiver:
+# `clusters/homelab/apps/mailbox` uses for mail-receiver. (It was also the split
+# used by `scripts/subsystem-store-api/Dockerfile`, whose header carried the long
+# form of this argument — that service was retired 2026-08-25, see
+# `claudedocs/decision-subsystem-store-api-retired-2026-08-25.md`, so the
+# argument is restated here rather than pointed at):
 # the code lives HERE, gated by this repo's own suite (387 tests under
 # `scripts/signal/tests/`), and homelab-talos holds MANIFESTS ONLY plus a
 # pinned image digest. A vendored copy would pass its own tests while drifting
@@ -73,7 +76,8 @@ ENV HOME=/home/nonroot \
 
 RUN mkdir -p /home/nonroot && chown -R 65532:65532 /home/nonroot
 
-# 65532 matches the subsystem-store-api and clawgate precedents. This pod holds
+# 65532 matches the clawgate precedent (and the retired subsystem-store-api,
+# which used the same uid). This pod holds
 # no volume, so there is no fsGroup story to get right — it only needs to not
 # be root.
 USER 65532:65532

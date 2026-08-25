@@ -165,7 +165,7 @@ could read one.
 | `/resume` step 4 | runs `subsystem_recall --repo <repo>`; branches on `status=`, the index row, the featured-entry basis, `🔴 N OPEN` | never; explicitly forbidden from creating entries |
 | `/handoff` step 4 | runs `subsystem_touch` probes (`--session`/`--pr`/`--commit`), then **writes the entry by hand** | yes — ungated since 2026-08-15 |
 | handoff docs' first section | embeds `subsystem_recall --repo <repo>` at the top of every doc | never |
-| `subsystem-store-api/server.py` | serves `render_text()`/`render_search()` verbatim over HTTP | GET-only |
+| ~~`subsystem-store-api/server.py`~~ | ~~serves `render_text()`/`render_search()` verbatim over HTTP~~ **RETIRED + deleted 2026-08-25** (`decision-subsystem-store-api-retired-2026-08-25.md`) — one fewer surface constrains the shape | — |
 | `analyze-service-index-commit` timer | hourly git autocommit, no remote | git only |
 | `/analyze-service` skill | 🔴 invokes **no** command for the read; reads and writes the store by hand | yes |
 
@@ -654,8 +654,10 @@ python3 ~/workspace/devrc/scripts/lib/subsystem_touch.py --validate --scope <sco
 
 - `claudedocs/decision-subsystem-store-rejected-2026-08-11.md` — the rejected generalization, its
   four measurements, and the superseded reopening gate. Read before proposing anything structural.
-- `claudedocs/handoff-subsystem-store.md` — live state; the `#505` paragraph is the origin of the
-  openness schema, and "next steps" item 4 is the origin of §3.5.
+- `claudedocs/handoff-subsystem-store.md` — ⚠ **no longer live state**: the hosted half was
+  retired 2026-08-25 and that file now opens with a superseding note. Still the origin of the
+  openness schema (the `#505` paragraph) and of §3.5 ("next steps" item 4) — both of which are
+  about the LOCAL store and are unaffected.
 - `claude/skills/analyze-service/SKILL.md` — the documented schema, in two hash-pinned regions.
   🔴 `sensitivity`, the section spine, the `Pointers` sub-grammar and the prune rules sit
   **outside** both hashed regions and outside the substring pins, so they can move materially and

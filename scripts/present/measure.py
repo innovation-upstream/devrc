@@ -1291,23 +1291,24 @@ def imports_http_client(source: str) -> bool:
 
 
 def m_store_api_clients(env: Env) -> dict:
-    """Soft seam: the hosted store API — running, with a client set of size N.
+    """Soft seam, now CLOSED: a complete subsystem that never acquired a reader.
 
-    🔴 THIS MEASURES THE HALF THAT IS MEASURABLE FROM THE REPO. Whether the pod
-    has served a request since it was built is a fact about a running service's
-    audit log, not about this tree; that half is a separate row and it renders
-    UNMEASURED, because inventing a number for it is exactly what this page
-    exists not to do.
+    🔴 WHAT THIS ROW MEASURES CHANGED ON 2026-08-25, AND THE CHANGE IS THE
+    POINT. It used to size a hosted HTTP API over the recall store — server plus
+    build tooling plus suite — against a client set that stayed empty. The
+    service was retired on that date (`claudedocs/
+    decision-subsystem-store-api-retired-2026-08-25.md`); what the row measures
+    now is that the server-side artefacts are GONE while the local readers'
+    HTTP-client count is unchanged at whatever it always was.
+
+    Kept rather than deleted because the interesting half was never the server:
+    it is that a reader can stay absent through nine merged PRs with every gate
+    green. A row asserting the count is still zero is what would notice a
+    hosted client being reintroduced without the demand that was missing the
+    first time.
     """
     server_dir = env.repo / "scripts" / "subsystem-store-api"
-    if not server_dir.is_dir():
-        raise Unmeasurable(f"{server_dir} does not exist")
-    server_lines = sum(
-        len(p.read_text(encoding="utf-8", errors="replace").splitlines())
-        for p in sorted(server_dir.rglob("*")) if p.is_file()
-    )
     suite = env.repo / "scripts" / "tests" / "test_subsystem_store_api.py"
-    suite_lines = len(suite.read_text(encoding="utf-8", errors="replace").splitlines()) if suite.is_file() else 0
 
     # A client would need an HTTP client library. Count the readers that IMPORT one.
     #
@@ -1321,47 +1322,54 @@ def m_store_api_clients(env: Env) -> dict:
                "scripts/lib/subsystem_touch.py", "scripts/subsystem-audit.py"]
     rows = []
     clients = 0
+    present = 0
     for rel in readers:
         p = env.repo / rel
         if not p.is_file():
             rows.append((rel, "ABSENT"))
             continue
+        present += 1
         has = imports_http_client(p.read_text(encoding="utf-8", errors="replace"))
         clients += 1 if has else 0
         rows.append((rel, "speaks HTTP" if has else "no HTTP client"))
-    rows.append(("server + its build tooling", f"{server_lines:,} lines"))
-    rows.append(("its test suite", f"{suite_lines:,} lines"))
+
+    # 🔴 A ZERO OVER ZERO READERS IS NOT A ZERO. With no reader file present
+    # nothing was scanned, and `0 clients` would be byte-identical to the real
+    # finding — the silent zero this whole module is built against. It also
+    # keeps an empty tree ALL-unmeasured, which is the condition the generator
+    # exits non-zero on; a row that "measures" against no input would turn that
+    # broken build into a page.
+    if present == 0:
+        raise Unmeasurable(
+            f"none of the {len(readers)} local store readers exists under "
+            f"{env.repo} — nothing was scanned, so the client count is an "
+            "absence and not a zero"
+        )
+
+    rows.append(("the hosted server + its build tooling",
+                 "still present" if server_dir.is_dir() else "retired — no longer in this tree"))
+    rows.append(("its test suite",
+                 "still present" if suite.is_file() else "retired — no longer in this tree"))
     return dict(
-        value=f"{clients} local reader(s) can speak to it",
+        value=f"{clients} local reader(s) can speak to a hosted store",
         detail=(
-            "The server is built, tested and hosted. The consuming client was "
+            "The server was built, tested and hosted. The consuming client was "
             "designed and decided — 'hosted is an ENTRY-LEVEL ADVISORY, never the "
             "primary read' — and then never written; the handoff says so in its "
-            "own words. The only things that have ever spoken to it are its own "
-            "seed and byte-identity scripts. 🔴 This is the shape worth "
-            "recognising: a subsystem can be complete, correct, well-tested and "
-            "have no reader, and every gate stays green throughout."
+            "own words. The only things that ever spoke to it were its own seed "
+            "and byte-identity scripts, and the service was retired on that "
+            "evidence. 🔴 The shape worth recognising is not the retirement but "
+            "the interval before it: a subsystem can be complete, correct, "
+            "well-tested and have no reader, with every gate green throughout. "
+            "The readers named here are a local disk library by design — this "
+            "row going non-zero means a network hop was reintroduced."
         ),
-        source="wc -l over scripts/subsystem-store-api/ + an HTTP-client grep over the local store readers",
+        source=(
+            "presence check on scripts/subsystem-store-api/ and its suite, plus an "
+            "HTTP-client import scan over the local store readers"
+        ),
         columns=("reader / artefact", "finding"),
         rows=tuple(rows),
-    )
-
-
-def m_store_api_traffic(env: Env) -> dict:
-    """Deliberately UNMEASURABLE from this repo — and rendered as such.
-
-    🔴 THIS ROW IS THE POINT OF THE `UNMEASURED` MACHINERY, kept as a permanent
-    worked example. A request count for the hosted pod was reported to this
-    page's author as "309, all from its own build session". That number appears
-    NOWHERE in this tree. Rendering it would be restating a claim as a
-    measurement, which is the exact failure the page is built against — so the
-    row exists, says UNMEASURED, names the reason, and hands over the check.
-    """
-    raise Unmeasurable(
-        "a request count for the hosted pod is a fact about a running service's "
-        "audit log, not about this tree — no repo file records one, and an "
-        "empty grep is not a zero"
     )
 
 
@@ -1416,10 +1424,8 @@ REGISTRY: tuple[tuple[str, str, str, object, str], ...] = (
      "grep -rn pane_current_command scripts .tmux.conf | grep -v tests/"),
     ("seam.sessions", "soft", "The session-surface constellation", m_session_surfaces,
      "wc -l scripts/session-manager scripts/session-resolve scripts/waiting-windows scripts/session-write"),
-    ("seam.store_api", "soft", "The hosted store API and its client set", m_store_api_clients,
-     "grep -rn 'urllib\\|requests\\|urlopen' scripts/lib/subsystem_*.py"),
-    ("seam.store_traffic", "soft", "Has the hosted store served anyone?", m_store_api_traffic,
-     "read the pod's audit log for any request whose token identity is not the seed/verify credential"),
+    ("seam.store_api", "soft", "The retired hosted API, and the readers' client set", m_store_api_clients,
+     "ls scripts/subsystem-store-api 2>&1; grep -rn 'urllib\\|requests\\|urlopen' scripts/lib/subsystem_*.py"),
 )
 
 

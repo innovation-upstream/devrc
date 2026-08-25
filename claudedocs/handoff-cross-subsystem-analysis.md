@@ -98,8 +98,10 @@ cannot mistake a scan-less run for a scanned one, which was the actual hazard.
 **Already shipped, in both layers.**
 - Library: `scripts/lib/subsystem_recall.py:2532` — `search(..., all_scopes: bool = False)`;
   CLI flag `--all-scopes` at `:2863`.
-- HTTP API: `scripts/subsystem-store-api/server.py:1728` already parses `all_scopes` from
-  the query string.
+- HTTP API: `scripts/subsystem-store-api/server.py:1728` already parsed `all_scopes` from
+  the query string. ⚠ **2026-08-25: that HTTP layer is RETIRED and deleted**
+  (`claudedocs/decision-subsystem-store-api-retired-2026-08-25.md`). The library half above
+  is untouched and still the answer — the rejection of Rec 3 stands on it alone.
 
 The original doc's "cross-scope query gap identified" was a reading error, not a gap.
 
@@ -187,7 +189,10 @@ scan off, stamping openly marked unshipped.
 - clawgate auth pair: the two `curl` lines above — **expect 401 then 200**. A 200 on the
   first means the hook token was unset or removed; a 401 on the second means an app-level
   gate was added and Finding 1's decision was reversed.
-- Cross-scope search exists: `grep -n "all_scopes" scripts/lib/subsystem_recall.py scripts/subsystem-store-api/server.py`
+- Cross-scope search exists: `grep -n "all_scopes" scripts/lib/subsystem_recall.py`
+  (the second path this line used to name, `scripts/subsystem-store-api/server.py`, was
+  deleted with the hosted service on 2026-08-25 — a `grep` over a missing file exits 2 and
+  prints nothing, which reads like "the feature is gone" and is not)
 - Transcript mode is opt-in, not absent: `python3 scripts/check-clickup-addressed/check-addressed.py --help | grep transcripts`
 - Writeback guard's rejection of `--rearm`: `sed -n '348,357p' scripts/claude-hooks/clawgate-writeback-guard.py`
 - ClickUp stamping is real and wired: `grep -n "applyAgentStamp" claude/skills/clickup/api/tasks.mjs`

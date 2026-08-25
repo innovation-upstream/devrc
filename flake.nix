@@ -106,7 +106,7 @@
       gateTools = [
         gatePyEnv pkgs.bash pkgs.ripgrep pkgs.git pkgs.util-linux pkgs.jq
         pkgs.gnugrep pkgs.curl pkgs.nodejs pkgs.nix pkgs.opencode pkgs.logrotate
-        pkgs.rsync pkgs.zsh pkgs.age
+        pkgs.zsh pkgs.age
       ];
     in
     {
@@ -298,16 +298,17 @@
             # sees a pytest tmp_path, its own generated config and its own state
             # file; no network, no ambient /var/lib/logrotate.status.
             #
-            # rsync: MEASURED 2026-08-16 — scripts/tests/test_subsystem_store_api.py
-            # drives the REAL scripts/subsystem-store-api/seed.sh, whose one
-            # copy step is `rsync -a --delete "$STORE"/ "$STAGE"/`. Without the
-            # binary those tests fail with `rsync: command not found` (rc 127),
-            # which is a FAILURE and not a skip, deliberately: the property they
-            # pin is that seeding never writes to the local store, and that store
-            # is the only copy of client-confidential content. The same
-            # nix-shell-stripped-PATH method as the `nix` entry above reproduced
-            # it. Present on the workbench (`~/.nix-profile/bin/rsync`), so the
-            # pre-push tier is unaffected.
+            # rsync: REMOVED 2026-08-25 along with the hosted subsystem-store
+            # service it existed for. Its only executing consumer was
+            # scripts/tests/test_subsystem_store_api.py driving that service's
+            # seed.sh; both are gone (see
+            # claudedocs/decision-subsystem-store-api-retired-2026-08-25.md).
+            # MEASURED before dropping it: every remaining `rsync` under
+            # scripts/tests/ PARSES the word out of a shell script or a systemd
+            # unit and never executes the binary, so nothing in either tier
+            # needed it on PATH. Re-add it here AND in run-tests.sh's
+            # REQUIRED_TOOLS together — one without the other is the spelling
+            # mismatch that guard exists to catch.
             #
             # zsh: scripts/tests/test_run3.py. The rule `scripts/run3` enforces
             # is a zsh-vs-bash DIFFERENCE — MULTIOS duplicates stdout onto a

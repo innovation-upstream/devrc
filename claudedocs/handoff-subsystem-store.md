@@ -1,4 +1,27 @@
-# Handoff: subsystem-store — 2026-08-18 (🔴 THE STORE IS PUBLIC; cutover done)
+# Handoff: subsystem-store — 2026-08-18 (🔴 SUPERSEDED — the hosted half is RETIRED)
+
+> 🔴 **SUPERSEDING NOTE, 2026-08-25 — read this before anything below.**
+> This file's original title was *"THE STORE IS PUBLIC; cutover done"*, and every
+> state claim it makes about a running service is now historical. **The hosted
+> `subsystem-store-api` has been retired**: `scripts/subsystem-store-api/` and
+> `scripts/tests/test_subsystem_store_api.py` are deleted from devrc, and the
+> Kubernetes objects are torn down in a separate `homelab-talos` PR.
+>
+> **Why:** the pod's own audit log showed 309 successful authenticated requests in
+> its entire life, all on 2026-08-20 from the one IP that built it, and none since.
+> The advisory client the "DECIDED 2026-08-20" block below specifies **was never
+> implemented** — no reader in devrc has a hosted path or `--source hosted`. The
+> missing piece was a **sync** between the two hosts' local stores, not more server.
+>
+> **The record is `claudedocs/decision-subsystem-store-api-retired-2026-08-25.md`**,
+> including the bar for rebuilding it and who checks it.
+>
+> 🔴 **Nothing below is edited or deleted** — it is the build history, and the
+> exposure incident it documents produced `check-relay-guard.py`, which is still
+> live. But read every "State now" section, every phase table and every ✅ in this
+> file as *what was true on its date*, not as current. **The LOCAL index store and
+> its readers are unaffected and fully alive** — `subsystem_recall.py`,
+> `subsystem_touch.py` and `subsystem_resolver.py` were never part of the retirement.
 
 ## Run this first — the index, one read-only command
 ```bash

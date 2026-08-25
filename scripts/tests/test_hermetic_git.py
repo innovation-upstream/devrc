@@ -59,7 +59,6 @@ EXPECTED_MEMBERS = {
     "test_handoff_doc.py",
     "test_service_recon.py",
     "test_subsystem_recall.py",
-    "test_subsystem_store_api.py",
     "test_subsystem_touch.py",
 }
 

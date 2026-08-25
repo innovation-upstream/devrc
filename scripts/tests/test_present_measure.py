@@ -492,23 +492,57 @@ def test_the_http_client_predicate_is_an_import_not_a_word():
         assert measure.imports_http_client(real), real
 
 
-def test_the_store_traffic_row_is_permanently_unmeasured_by_design(synthetic_env):
-    """INVARIANT GUARD, and a deliberate one.
+def test_the_local_store_readers_hold_no_http_client():
+    """🔴 REGRESSION GUARD for the retirement, against the LIVE tree.
 
-    A number for this was REPORTED to the page's author and appears nowhere in
-    the tree. Rendering it would restate a claim as a measurement, which is the
-    exact failure the page is built against. The row must therefore stay
-    UNMEASURED against ANY tree — including the real one — until something in
-    this repo can actually measure it.
+    The hosted `subsystem-store-api` was retired on 2026-08-25 after its audit
+    log showed every request it ever served came from the session that built it
+    (`claudedocs/decision-subsystem-store-api-retired-2026-08-25.md`). The thing
+    worth pinning is not that the server files are gone — `git` knows that — but
+    that the local index readers are still a DISK LIBRARY with no network hop.
+
+    This is the counterpart to the retirement, not a restatement of it: a future
+    session re-adding `import requests` to a reader would rebuild the client
+    half of a service whose demand was measured at zero, and no other test in
+    this repo would notice. The expected value is written out literally rather
+    than recomputed from `measure.py`, so the guard cannot agree with a broken
+    implementation.
     """
-    with pytest.raises(measure.Unmeasurable):
-        measure.m_store_api_traffic(synthetic_env)
     live = measure.Env(repo=REPO_ROOT, home=Path.home(),
                        claude_dir=Path.home() / ".claude",
                        index_store=Path.home() / ".claude" / "analyze-service-index",
                        allow_systemd=False, allow_network=False)
-    with pytest.raises(measure.Unmeasurable):
-        measure.m_store_api_traffic(live)
+    fields = measure.m_store_api_clients(live)
+    assert fields["value"] == "0 local reader(s) can speak to a hosted store", (
+        "a local subsystem-index reader now imports an HTTP client. The hosted "
+        "store was retired for want of a reader; re-adding one is a decision, "
+        "not a refactor — re-read the decision record before changing this."
+    )
+    findings = dict(fields["rows"])
+    assert findings["the hosted server + its build tooling"].startswith("retired"), findings
+    assert findings["its test suite"].startswith("retired"), findings
+
+
+def test_the_retirement_guard_would_notice_a_reintroduced_client(tmp_path):
+    """🔴 NEGATIVE CONTROL for the guard above — it must be able to go red.
+
+    A guard that reports "0 clients" off a scan wired to nothing is
+    indistinguishable from a working one, and this repo has already scored a
+    reader as HTTP-capable off the phrase "pull requests" in its own prose. So:
+    build a tree whose readers DO import an HTTP client and confirm the measured
+    value moves off zero.
+    """
+    readers = ["scripts/lib/subsystem_recall.py", "scripts/lib/subsystem_resolver.py",
+               "scripts/lib/subsystem_touch.py", "scripts/subsystem-audit.py"]
+    for rel in readers:
+        p = tmp_path / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("import urllib.request\n", encoding="utf-8")
+    env = measure.Env(repo=tmp_path, home=tmp_path, claude_dir=tmp_path / ".claude",
+                      index_store=tmp_path / ".claude" / "analyze-service-index",
+                      allow_systemd=False, allow_network=False)
+    fields = measure.m_store_api_clients(env)
+    assert fields["value"] == "4 local reader(s) can speak to a hosted store", fields["value"]
 
 
 # --------------------------------------------------------------------------- #
