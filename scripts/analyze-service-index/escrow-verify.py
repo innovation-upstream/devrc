@@ -179,8 +179,8 @@ DEFAULT_TIMEOUT = 60.0
 #
 # So the packages are a LEDGER and the hint is DERIVED from it. The ledger is
 # pinned against the modules the decrypt path imports by
-# `test_escrow_verify.py`, so the advertised shell and the code's actual
-# dependencies cannot drift apart silently.
+# `scripts/tests/test_analyze_service_index_escrow_verify.py`, so the advertised
+# shell and the code's actual dependencies cannot drift apart silently.
 NIX_SHELL_PACKAGES: tuple[str, ...] = (
     "bitwarden-cli",                       # `bw` itself
     "jq",                                  # the documented pipeline around it
