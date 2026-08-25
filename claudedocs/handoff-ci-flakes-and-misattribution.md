@@ -46,11 +46,33 @@ spool row. Both are now fixed; the flake family underneath is only half closed.
     2026-08-25 05:32Z — **46 minutes AFTER** the burst capture that "confirmed" it. Not our work.
   - **~27 were genuine per-test flakes**, ~1 test in ~15,500, varying run to run. #810/#833/#840
     address the tmux-deadline class; the rest are listed under Next steps.
-- **Post-fix measurement (the one `ci-priority-classes.yaml` explicitly asks for):**
-  before #396 `30/121 killed (24.8%)`; after (≥06:00Z 2026-08-25) **`0/9`, 100% passed**,
-  with `devrc-ci` on `talos-xr6-r7p` and `gitops-validate` on `talos-uvh-gtj`.
-  ⚠ **n=9 is suggestive, NOT conclusive** — ~2 kills expected at the old rate, so a clean 9
-  arises by luck ~1 in 12. **Re-run it** (next-step 1).
+- ✅ **Post-fix measurement — RE-RUN 2026-08-25 ~23:50Z at n=65. THE PREEMPTION FIX IS SETTLED.**
+  Before #396 `30/121 killed (24.8%)`; after (created ≥06:00Z 2026-08-25) **`0/65` killed,
+  57 passed / 8 genuine `verdict exit=1` / 3 still running.**
+  P(0 kills in 65 | rate unchanged at 24.8%) = **9e-9**; 95% upper bound on any residual
+  kill rate **4.5%**, down from 24.8%. The earlier `0/9` was ~1-in-13 by luck; this is not.
+  - 🔴 **Instrument validated by EXACT RECONSTRUCTION, not by plausibility.** The same
+    classifier over the same window boundary reproduces the prior session's figure to the
+    digit — `30/121 = 24.8%` — numerator *and* denominator. (`121` = all gate TaskRuns
+    created before `06:00Z`, incompletes included; a `complete`-only denominator gives
+    `30/116 = 25.9%`. Both are stated so the number carries its own definition.)
+  - **TWO independent discriminators agree.** Kills counted as any step exiting `255`/`137`;
+    separately, `verdict exit=2` is the killed-step signature. Pre: 30 and 30. Post: **0 and 0.**
+    Zero `255`/`137` on ANY step (`clone`/`pytests`/`nodetests`/…), not just the test legs.
+  - 🔴 **The rival mechanism — "the post window was just quiet" — is REFUTED by measurement,
+    not assumed away.** Post is *busier*: median concurrent TaskRuns 14 vs 12, max **74 vs 44**;
+    max overlapping `gitops-validate` TaskRuns **38 vs 30**; max overlapping `devrc-ci` gates
+    **14 vs 9**; runs overlapping ≥10 `gitops-validate` TaskRuns **15 vs 12**. Equal-or-higher
+    contention, zero kills.
+  - **No pruning confound:** 68 `devrc-ci` PipelineRuns and 68 gate TaskRuns in the post
+    window — nothing GC'd out of the denominator.
+  - **The mechanism is live:** 212 pods checked, `devrc-ci` **entirely** on `talos-xr6-r7p`,
+    `gitops-validate` **entirely** on `talos-uvh-gtj`, zero cross-over.
+  - **Preemption did not MOVE — it stopped:** `gitops-validate` shows `0` killed in *both*
+    windows (0/238 pre, 0/107 post); it was the preemptor, never the victim.
+  - **The genuine-flake class is UNCHANGED, exactly as expected:** `verdict exit=1` at
+    14/116 (12.1%) pre vs 8/65 (12.3%) post. #396 closed preemption and touched nothing
+    else — the per-test flakes under Next steps 2–4 are still open and still real.
 - **Deploy: NOT done this session.** Nothing was shipped to either host; all seven PRs are
   merged only. `DEFAULT_TMUX_TIMEOUT_S` is untouched at `2.0`, so no production behaviour changed.
 
@@ -179,11 +201,15 @@ read the root cause first; the design is what failed, not the code.
   under-diagnosis this thread spent the evening correcting.
 
 ## Next steps (ranked)
-1. **Re-run the post-#396 kill-rate measurement** — the only open question with a deadline
-   attached, because it decides whether the preemption fix is actually settled. Compare
-   against `30/121 (24.8%)` before and `0/9` after. Repo: `homelab-infra`. One command,
-   `KUBECONFIG=$KC_HOMELAB`, classify `devrc-ci` gate TaskRuns by whether any step exited
-   `255`/`137` (killed, no test result) vs `verdict exit=1` (genuine).
+1. ✅ **DONE 2026-08-25 — the post-#396 kill-rate measurement re-ran at n=65 and came back
+   `0/65`.** Full result, controls and refuted rival mechanism under `State now`. **The
+   preemption arm of this thread is CLOSED**; do not re-derive it. What remains below is the
+   genuine per-test flake class only, which the same measurement shows is untouched (12.1% →
+   12.3%, i.e. unchanged). Method, if it is ever needed again: dump
+   `kubectl -n tekton-ci get taskruns -o json`, take names matching `devrc-ci-*-gate`,
+   count a run as KILLED if ANY step's `terminated.exitCode` is `255` or `137`, GENUINE if
+   `verdict` exits non-zero without one. **Reproduce `30/121` on the pre-`06:00Z 2026-08-25`
+   window first** — that is the instrument's positive control, and it matches to the digit.
 2. **Two flaky tests still UNDIAGNOSED**, both `devrc`, `scripts/tests/`:
    `test_no_unallowlisted_public_ip_literal_is_committed` and
    `test_the_module_root_is_load_bearing`. Neither has a wall-clock dependency in the sandbox
