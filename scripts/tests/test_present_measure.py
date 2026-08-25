@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import importlib.machinery
 import importlib.util
+import re
 import sys
 from pathlib import Path
 
@@ -75,7 +76,7 @@ def synthetic_env(tmp_path: Path) -> measure.Env:
     return measure.Env(
         repo=repo, home=home, claude_dir=home / ".claude",
         index_store=home / ".claude" / "analyze-service-index",
-        allow_systemd=False,
+        allow_systemd=False, allow_network=False,
     )
 
 
@@ -271,7 +272,7 @@ def test_the_live_repo_measures_something():
         home=Path.home(),
         claude_dir=Path.home() / ".claude",
         index_store=Path.home() / ".claude" / "analyze-service-index",
-        allow_systemd=False,
+        allow_systemd=False, allow_network=False,
     )
     ms = measure.take(env)
     assert ms.verdict() == "ok"
@@ -303,7 +304,7 @@ def test_the_rules_ceiling_is_read_from_the_test_that_owns_it():
     env = measure.Env(repo=REPO_ROOT, home=Path.home(),
                       claude_dir=Path.home() / ".claude",
                       index_store=Path.home() / ".claude" / "nonexistent",
-                      allow_systemd=False)
+                      allow_systemd=False, allow_network=False)
     entry = next(e for e in measure.REGISTRY if e[0] == "rules.bytes")
     row = measure.take(env, _registry(entry)).by_key("rules.bytes")
     assert row.measured, row.reason
@@ -343,6 +344,82 @@ def test_reading_a_constant_that_is_not_a_literal_is_an_absence_not_a_guess(tmp_
     assert "not a literal" in str(exc.value)
 
 
+@pytest.mark.parametrize("source,why", [
+    ("CEILING = 0\nOTHER = 1\nCEILING = 24_000\n", "a later rebinding"),
+    ("CEILING = 1\nCEILING += 23_999\n", "an augmented assignment"),
+    ("CEILING = 24_000\nif True:\n    pass\nCEILING = 0\n", "a rebinding after a block"),
+])
+def test_a_constant_bound_more_than_once_is_an_ABSENCE_not_a_stale_number(
+        tmp_path, source, why):
+    """🔴 REGRESSION COVERAGE. The parser returned the FIRST binding and stopped.
+
+    Probed against the shipped code: `X = 0` followed later by `X = 24_000`
+    returned **0**, and `X = 1; X += 23_999` returned **1**. Both render a WRONG
+    NUMBER as a measured, timestamped fact — which is the single failure this
+    whole page exists to prevent — and neither is distinguishable, on the page,
+    from a correct read.
+
+    The premise of parsing instead of importing is that a source this module
+    cannot understand yields an ABSENCE. A name whose value depends on execution
+    order is exactly that, so it must refuse rather than guess. Latent when
+    written (each owner has one binding today) and closed anyway, because every
+    number on the page depends on this refusing.
+    """
+    owner = tmp_path / "owner.py"
+    owner.write_text(source, encoding="utf-8")
+    with pytest.raises(measure.Unmeasurable) as exc:
+        measure._const(owner, "CEILING")
+    assert "binds CEILING" in str(exc.value), (why, str(exc.value))
+    # CONTROL: the same file with the duplicate binding removed still reads.
+    single = tmp_path / "single.py"
+    single.write_text("CEILING = 24_000\n", encoding="utf-8")
+    assert measure._const(single, "CEILING") == 24_000
+
+
+def test_a_constant_bound_by_UNPACKING_is_an_absence_not_a_skip(tmp_path):
+    """NEGATIVE CONTROL for the same rule, one syntax form over.
+
+    `A, B = 1, 2` is a real definition of `A` that `literal_eval` cannot
+    evaluate. Walking past it would resurrect the stale-value defect through a
+    door the rebinding check does not watch: the parser would report "no longer
+    defines CEILING" for a file that plainly defines it.
+    """
+    owner = tmp_path / "owner.py"
+    owner.write_text("CEILING, FLOOR = 24_000, 1\n", encoding="utf-8")
+    with pytest.raises(measure.Unmeasurable) as exc:
+        measure._const(owner, "CEILING")
+    assert "cannot evaluate" in str(exc.value), str(exc.value)
+
+
+def test_an_annotation_without_a_value_is_not_a_binding(tmp_path):
+    """CONTROL against over-refusing. `X: int` annotates; it does not bind.
+
+    Without this, `CEILING: int` followed by `CEILING = 24_000` — an ordinary,
+    correct way to write a typed constant — would be counted as two bindings and
+    the number would go UNMEASURED for no reason. A guard that refuses valid
+    input is how a measurement layer trains people to stop reading it.
+    """
+    owner = tmp_path / "owner.py"
+    owner.write_text("CEILING: int = 24_000\n", encoding="utf-8")
+    assert measure._const(owner, "CEILING") == 24_000
+    both = tmp_path / "both.py"
+    both.write_text("CEILING: int\nCEILING = 24_000\n", encoding="utf-8")
+    assert measure._const(both, "CEILING") == 24_000
+
+
+def test_a_binding_INSIDE_a_function_does_not_shadow_the_module_level_one(tmp_path):
+    """CONTROL. The rule is about MODULE-level bindings, and only those.
+
+    A local named the same thing is not a rebinding of the constant, and
+    counting it would make the ceiling unreadable in any owner that happens to
+    use the name as a local.
+    """
+    owner = tmp_path / "owner.py"
+    owner.write_text("def f():\n    CEILING = 0\n    return CEILING\nCEILING = 24_000\n",
+                     encoding="utf-8")
+    assert measure._const(owner, "CEILING") == 24_000
+
+
 def test_a_missing_constant_owner_is_reported_not_guessed(tmp_path):
     """NEGATIVE CONTROL for the constant-reading path.
 
@@ -356,7 +433,8 @@ def test_a_missing_constant_owner_is_reported_not_guessed(tmp_path):
     (repo / "scripts" / "tests" / "test_rules_size.py").write_text(
         "# an owner module with no ceiling in it\nSOMETHING_ELSE = 1\n", encoding="utf-8")
     env = measure.Env(repo=repo, home=tmp_path, claude_dir=tmp_path / ".claude",
-                      index_store=tmp_path / "none", allow_systemd=False)
+                      index_store=tmp_path / "none", allow_systemd=False,
+                      allow_network=False)
     with pytest.raises(measure.Unmeasurable) as exc:
         measure.m_rules_bytes(env)
     assert "MAX_BYTES" in str(exc.value)
@@ -384,7 +462,8 @@ def test_an_empty_enumeration_is_a_failure_not_a_zero(tmp_path):
     (repo / "nix").mkdir(parents=True)
     (repo / "nix" / "home.nix").write_text("{ }\n", encoding="utf-8")
     env = measure.Env(repo=repo, home=tmp_path, claude_dir=tmp_path / ".c",
-                      index_store=tmp_path / "n", allow_systemd=False)
+                      index_store=tmp_path / "n", allow_systemd=False,
+                      allow_network=False)
     with pytest.raises(measure.Unmeasurable) as exc:
         measure.m_managed_paths(env)
     assert "empty match set" in str(exc.value)
@@ -427,6 +506,163 @@ def test_the_store_traffic_row_is_permanently_unmeasured_by_design(synthetic_env
     live = measure.Env(repo=REPO_ROOT, home=Path.home(),
                        claude_dir=Path.home() / ".claude",
                        index_store=Path.home() / ".claude" / "analyze-service-index",
-                       allow_systemd=False)
+                       allow_systemd=False, allow_network=False)
     with pytest.raises(measure.Unmeasurable):
         measure.m_store_api_traffic(live)
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE SUITE'S OWN BLAST RADIUS
+# --------------------------------------------------------------------------- #
+
+#: Programs whose whole purpose is to leave this machine. `git` is deliberately
+#: absent as a NAME — it is this module's most-used local tool — and is checked
+#: by SUBCOMMAND instead, which is the only part of it that talks to a remote.
+NETWORK_BINARIES = frozenset({"gh", "curl", "wget", "ssh", "scp", "nc",
+                              "kubectl", "rsync", "httpie"})
+NETWORK_GIT_SUBCOMMANDS = frozenset({"fetch", "clone", "ls-remote", "push", "pull"})
+
+
+def _module_functions(name: str):
+    import ast
+    src = (SCRIPTS / "present" / f"{name}.py").read_text(encoding="utf-8")
+    for node in ast.parse(src).body:
+        if isinstance(node, ast.FunctionDef) and node.name.startswith("m_"):
+            yield node
+
+
+def _measurers_that_leave_the_machine() -> set[str]:
+    """Every `m_*` in `measure.py` whose body invokes a network program.
+
+    Read off the SOURCE by PARSING, never by grepping for the word `gh`: this
+    repo has already scored a measurer as HTTP-capable off the phrase "pull
+    requests" in its own docstring, and the guard for that is just above.
+    """
+    import ast
+
+    found: set[str] = set()
+    for node in _module_functions("measure"):
+        for call in ast.walk(node):
+            if not isinstance(call, ast.Call) or not call.args:
+                continue
+            argv = call.args[0]
+            if not isinstance(argv, (ast.List, ast.Tuple)):
+                continue
+            words = [e.value for e in argv.elts
+                     if isinstance(e, ast.Constant) and isinstance(e.value, str)]
+            if not words:
+                continue
+            if words[0] in NETWORK_BINARIES:
+                found.add(node.name)
+            elif words[0] == "git" and NETWORK_GIT_SUBCOMMANDS & set(words[1:]):
+                found.add(node.name)
+    return found
+
+
+def _measurers_gated_on_the_network_flag() -> set[str]:
+    """Every `m_*` that BRANCHES on `env.allow_network`.
+
+    🔴 A FIELD THAT EXISTS IS NOT A GUARD — only a branch on it is. Reading the
+    branch is the difference between "the flag is declared" and "the flag stops
+    something".
+    """
+    import ast
+
+    gated: set[str] = set()
+    for node in _module_functions("measure"):
+        for sub in ast.walk(node):
+            if (isinstance(sub, ast.Attribute) and sub.attr == "allow_network"
+                    and isinstance(sub.value, ast.Name) and sub.value.id == "env"):
+                gated.add(node.name)
+    return gated
+
+
+def test_every_measurer_that_leaves_the_machine_is_gated_on_the_network_flag():
+    """🔴 SEAM GUARD, asserted as a LEDGER so it fails when the set moves EITHER way.
+
+    The finding: `m_branch_protection` shells `gh api … --timeout 45`, and it was
+    reached by every test that called `take()` — five outbound GitHub calls per
+    suite run, 45s ceiling each, no aggregate bound, inside a check that BLOCKS a
+    merge. A required gate whose runtime depends on a third party's availability
+    is a flake source, and a permanently-flaky required gate trains everyone to
+    click through it.
+
+    Pinned as a RELATIONSHIP, not a count: the set that leaves the machine must
+    EQUAL the set gated on `env.allow_network`. It fails when the set GROWS (a
+    new measurer shells out and nobody gated it) and when it SHRINKS (someone
+    drops the gate but keeps the call).
+    """
+    leaves = _measurers_that_leave_the_machine()
+    gated = _measurers_gated_on_the_network_flag()
+    # POSITIVE CONTROL: a detector that finds nothing would satisfy equality
+    # against an empty gate set and prove precisely nothing. Report the pair.
+    assert "m_branch_protection" in leaves, (
+        "the network-call detector found no outbound call in a module that "
+        f"definitely makes one — the detector is broken, not the module. "
+        f"detected={sorted(leaves)}")
+    assert leaves == gated, (
+        f"leaves the machine but NOT gated: {sorted(leaves - gated)}; "
+        f"gated but no longer leaving: {sorted(gated - leaves)}")
+
+
+def test_the_network_gate_actually_refuses_and_says_so(synthetic_env):
+    """BEHAVIOURAL half of the guard above.
+
+    A structural ledger type-checks past a gate wired to the wrong flag. This
+    calls the measurer with the flag off and reads the reason — which is also
+    what proves the row renders as an ABSENCE and not as "nothing protects this
+    branch", the worst possible misreading of this particular row.
+    """
+    from dataclasses import replace
+
+    env = replace(synthetic_env, repo=REPO_ROOT, allow_network=False)
+    with pytest.raises(measure.Unmeasurable) as exc:
+        measure.m_branch_protection(env)
+    assert "network" in str(exc.value).lower(), str(exc.value)
+    assert "no-network" in str(exc.value), str(exc.value)
+
+
+def test_no_present_test_constructs_an_env_that_may_reach_the_network():
+    """🔴 THE FINDING ITSELF, pinned on the SUITE rather than on the module.
+
+    Gating the measurer is only half of it: an `Env` built in a test WITHOUT
+    `allow_network=False` inherits the default `True` and the call goes out
+    anyway. This reads every `test_present_*.py` and requires each
+    `measure.Env(...)` construction — and each `generate.py` subprocess, which is
+    a second door into the same measurer and is invisible to a search for `Env` —
+    to turn the network off explicitly.
+
+    A check on the CONSTRUCTION, deliberately, not on a count of calls: a count
+    passes the day someone adds a fifth call site.
+    """
+    import ast
+
+    offenders: list[str] = []
+    seen_env = seen_cli = 0
+    for path in sorted(Path(__file__).parent.glob("test_present_*.py")):
+        text = path.read_text(encoding="utf-8")
+        for call in ast.walk(ast.parse(text)):
+            if not isinstance(call, ast.Call):
+                continue
+            func = call.func
+            if not (isinstance(func, ast.Attribute) and func.attr == "Env"
+                    and isinstance(func.value, ast.Name) and func.value.id == "measure"):
+                continue
+            seen_env += 1
+            if "allow_network" not in {k.arg for k in call.keywords}:
+                offenders.append(
+                    f"{path.name}:{call.lineno} measure.Env(...) with no allow_network")
+        for m in re.finditer(r"str\(GENERATOR\)(.*?)\]", text, re.S):
+            seen_cli += 1
+            if "--no-network" not in m.group(1):
+                offenders.append(
+                    f"{path.name}:{text[:m.start()].count(chr(10)) + 1} "
+                    "generator subprocess with no --no-network")
+    # POSITIVE CONTROL for the scanner: a walk that found NOTHING would report a
+    # reassuring zero. Report the pair — what it examined beside what it found.
+    assert seen_env >= 5 and seen_cli >= 3, (
+        f"the scanner examined too little to be believed: {seen_env} Env "
+        f"constructions, {seen_cli} generator subprocesses")
+    assert not offenders, (
+        "these make a REQUIRED merge gate depend on GitHub being reachable:\n  "
+        + "\n  ".join(offenders))

@@ -256,7 +256,7 @@ def _live_set():
     env = measure.Env(repo=REPO_ROOT, home=Path.home(),
                       claude_dir=Path.home() / ".claude",
                       index_store=Path.home() / ".claude" / "analyze-service-index",
-                      allow_systemd=False)
+                      allow_systemd=False, allow_network=False)
     return measure.take(env)
 
 

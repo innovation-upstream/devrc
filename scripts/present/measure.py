@@ -159,6 +159,18 @@ def _const(path: Path, name: str):
     measurement technique rather than by the tree — which is the worst kind,
     because it looks like a finding. Parsing has no import graph and no side
     effects.
+
+    🔴 A NAME BOUND MORE THAN ONCE IS `UNMEASURABLE`, NOT "THE FIRST ONE". The
+    first cut returned the first top-level binding and ignored every later one,
+    so `X = 0` followed later by `X = 24_000` reported **0**, and `X = 1;
+    X += 23_999` reported **1**. Both are a WRONG NUMBER rendered as a measured
+    fact — the failure this whole page exists to prevent — and both look exactly
+    like a correct read. The premise of parsing is that a source this module
+    cannot understand yields an ABSENCE; a name whose value depends on execution
+    order is a source this module cannot understand. Tuple unpacking
+    (`A, B = 1, 2`) counts as a binding for the same reason: it is a real
+    definition of the name that `literal_eval` cannot evaluate, and silently
+    walking past it would resurrect the same defect one syntax form over.
     """
     if not path.is_file():
         raise Unmeasurable(f"{path} does not exist")
@@ -166,20 +178,55 @@ def _const(path: Path, name: str):
         tree = ast.parse(path.read_text(encoding="utf-8"))
     except (OSError, SyntaxError) as exc:
         raise Unmeasurable(f"{path.name} could not be parsed: {exc!r}") from exc
+
+    def _binds(target) -> bool:
+        """Does this assignment target bind `name`? Recurses into unpacking."""
+        if isinstance(target, ast.Name):
+            return target.id == name
+        if isinstance(target, (ast.Tuple, ast.List)):
+            return any(_binds(el) for el in target.elts)
+        if isinstance(target, ast.Starred):
+            return _binds(target.value)
+        return False
+
+    values: list = []          # the literal-evaluable bindings, in source order
+    bindings = 0               # EVERY top-level binding, evaluable or not
     for node in tree.body:
+        if isinstance(node, ast.AugAssign):
+            if _binds(node.target):
+                bindings += 1
+            continue
+        if isinstance(node, ast.AnnAssign) and node.value is None:
+            continue           # `X: int` annotates; it does not bind
         targets = (node.targets if isinstance(node, ast.Assign)
                    else [node.target] if isinstance(node, ast.AnnAssign) else [])
-        for t in targets:
-            if isinstance(t, ast.Name) and t.id == name and node.value is not None:
-                try:
-                    return ast.literal_eval(node.value)
-                except ValueError as exc:
-                    raise Unmeasurable(
-                        f"{path.name}:{name} is not a literal ({exc})") from exc
-    raise Unmeasurable(
-        f"{path.name} no longer defines {name} — this module reads that number "
-        "from its owner and must not restate it"
-    )
+        if not any(_binds(t) for t in targets):
+            continue
+        bindings += 1
+        if any(isinstance(t, ast.Name) and t.id == name for t in targets):
+            values.append(node.value)
+
+    if bindings > 1:
+        raise Unmeasurable(
+            f"{path.name} binds {name} {bindings} times at module level — this "
+            "module reads a number by PARSING, which cannot tell you which "
+            "binding wins at run time, and reporting the first one would render "
+            "a stale value as a measured fact"
+        )
+    if not values:
+        if bindings:
+            raise Unmeasurable(
+                f"{path.name} binds {name} in a form this module cannot evaluate "
+                "(unpacking or an augmented assignment), so its value is unread")
+        raise Unmeasurable(
+            f"{path.name} no longer defines {name} — this module reads that number "
+            "from its owner and must not restate it"
+        )
+    try:
+        return ast.literal_eval(values[0])
+    except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError) as exc:
+        raise Unmeasurable(
+            f"{path.name}:{name} is not a literal ({exc})") from exc
 
 
 def _run(argv: list[str], cwd: Path | None = None, timeout: int = 120):
@@ -239,6 +286,15 @@ class Env:
     claude_dir: Path
     index_store: Path
     allow_systemd: bool = True
+    #: 🔴 MAY A MEASURER LEAVE THIS MACHINE? Exactly one does (`m_branch_protection`
+    #: shells `gh api`), and it was reached by every test that called `take()` —
+    #: five outbound GitHub calls per suite run, each with a 45s ceiling and no
+    #: aggregate bound, inside a check that BLOCKS a merge. A gate whose runtime
+    #: depends on a third party's availability is a flake source, and a flaky
+    #: required gate trains everyone to click through it. Tests set this False;
+    #: the row then renders UNMEASURED with the reason, which is the same shape
+    #: an offline build already produced and is therefore already covered.
+    allow_network: bool = True
 
     @classmethod
     def live(cls, repo: Path | None = None) -> "Env":
@@ -579,15 +635,22 @@ def m_gate_tiers(env: Env) -> dict:
     checks = sorted(set(re.findall(r'runCommandLocal\s+"devrc-([a-z0-9-]+)"', ftext)))
     gtext = gate.read_text(encoding="utf-8", errors="replace")
     exits = sorted(set(re.findall(r"^#\s+(\d+)\s*=\s*(.+)$", gtext, re.M)))
-    rows = [
+    #: 🔴 THE TIERS ARE A STRUCTURE, SO THE COUNT IS DERIVED FROM IT. This layer's
+    #: charter is that no quantity is TYPED — a literal `2` here would be the
+    #: first hand-maintained number on a page built to have none, and it would
+    #: survive a third tier being added right below it.
+    tiers = (
         ("dev-host tier", "nix develop --impure --command bash scripts/gate.sh --tier both"),
         ("sandbox tier", "nix build .#checks.x86_64-linux.{pytests,nodetests}"),
+    )
+    rows = list(tiers) + [
         ("sandbox source", "a `cp -r ${./.}` store copy with NO .git — repo-local git facts evaluate differently"),
         ("gate.sh could-not-vouch code", "90 — status/content disagreement or a truncated run; NOT 'the tests failed'"),
     ]
     rows += [(f"gate.sh exit {code}", desc.strip()) for code, desc in exits if code in {"0", "1", "2", "90"}]
     return dict(
-        value=f"2 tiers, {len(checks)} flake checks" if checks else "2 tiers",
+        value=(f"{len(tiers)} tiers, {len(checks)} flake checks" if checks
+               else f"{len(tiers)} tiers"),
         detail=(
             "🔴 TWO TIERS, NOT TWO SPELLINGS OF ONE. `scripts/gate.sh` runs the "
             "runners on the DEV HOST; it never invokes `nix build`. The sandbox "
@@ -609,7 +672,15 @@ def m_branch_protection(env: Env) -> dict:
     This measurer is the page's worked example of `UNMEASURED`: offline, or
     without `gh` authenticated, it cannot answer, and it says so with the exact
     command that would settle it rather than rendering a reassuring blank.
+
+    🔴 IT IS THE ONLY MEASURER THAT LEAVES THIS MACHINE, so it is the only one
+    gated on `env.allow_network`. See that field for why the suite turns it off.
     """
+    if not env.allow_network:
+        raise Unmeasurable(
+            "network probing was disabled for this build (--no-network), so the "
+            "live branch-protection fact was not read — this row is an absence, "
+            "never an 'unprotected'")
     rc, out, _ = _run(["git", "-C", str(env.repo), "remote", "get-url", "origin"])
     if rc != 0 or not out.strip():
         raise Unmeasurable("no `origin` remote — cannot name the repository to ask about")
@@ -686,6 +757,30 @@ def m_hooks(env: Env) -> dict:
     else:
         reg_note = " (this host has no ~/.claude/settings.json)"
 
+    # 🔴 THE REFUSAL LIST IS MEASURED, NOT ENUMERATED IN PROSE. The hand-written
+    # version named four refusals out of the guard's real policy and read as the
+    # whole list — it omitted `git stash`, which is 🔴 in RULES.md and is the one
+    # this repo has an incident for. A sentence that names some of a set and
+    # reads as all of it is the "description claims coverage the body does not
+    # provide" shape, in a document. Counted from the guard's own policy block;
+    # if that block cannot be parsed the count is simply absent, because this row
+    # is really about SHIPPED-vs-REGISTERED and an unparseable list must not take
+    # the whole row down with it.
+    guard = shipped_dir / "bash-guard.py"
+    refusal_note = ""
+    if guard.is_file():
+        gtext = guard.read_text(encoding="utf-8", errors="replace")
+        start = gtext.find("The list today:")
+        block = gtext[start:start + 4000] if start >= 0 else ""
+        refusals = re.findall(r"^\s+-\s+(\S.*?)\s+->", block, re.M)
+        if refusals:
+            refusal_note = (
+                f" `bash-guard.py` is the blocking one and its policy block lists "
+                f"{len(refusals)} refusals — among them `git add -A`, `git reset "
+                "--hard`, `git stash` (the stash stack is repo-GLOBAL, so a "
+                "worktree gives no isolation), `git commit` on a main branch, "
+                "`pkill -f`, and publishing a secret or a public IP.")
+
     rows = [("SHIPPED in scripts/claude-hooks/", "", n) for n in shipped]
     rows += [("REGISTERED", f"{e} / {m}", leaf) for e, m, leaf in sorted(registered)]
     return dict(
@@ -693,9 +788,9 @@ def m_hooks(env: Env) -> dict:
         detail=(
             "🔴 SHIPPED and REGISTERED are independent. `~/.claude/settings.json` "
             "is per-host and unmanaged by design, so a hook can be in the tree and "
-            "fire on neither machine. `bash-guard.py` is the blocking one: it "
-            "refuses `git add -A`, `git reset --hard`, oversized heredocs, and "
-            "publishing a secret or a public IP. A hook that only NUDGES cannot "
+            "fire on neither machine."
+            + refusal_note
+            + " A hook that only NUDGES cannot "
             "stop anything — read the exit code it returns before calling it a guard."
             + reg_note
         ),
@@ -793,11 +888,22 @@ def m_index_store(env: Env) -> dict:
 
 
 def m_telemetry_sources(env: Env) -> dict:
-    """How many INDEPENDENT sources feed the activity pipeline.
+    """How many per-source DIRECTORIES the collector tree holds.
 
-    Counted from the collector's own per-source directories rather than from a
-    list in a document: a source that is added and never written down would be
+    Counted from the collector's own layout rather than from a list in a
+    document: a source directory that is added and never written down would be
     invisible to the document and is visible here.
+
+    🔴 THE LABEL SAYS DIRECTORIES BECAUSE DIRECTORIES ARE WHAT IT COUNTS. It
+    used to render "N collector sources", which was a different and smaller
+    number than the pipeline actually has — shell and terminal-multiplexer
+    events are emitted by a FILE (`scripts/collector/emit`), not a directory, so
+    they were outside the count while the label claimed to be counting sources.
+    Two other places on the same page said otherwise: this row's own `detail`
+    named six kinds against a value of five, and the skill inventory rendered a
+    description naming nine. Measuring the source SET properly would mean a
+    roster this tree does not have; naming what was measured costs nothing and
+    stops the page contradicting itself.
     """
     collector = env.repo / "scripts" / "collector"
     if not collector.is_dir():
@@ -817,8 +923,9 @@ def m_telemetry_sources(env: Env) -> dict:
         py = len(list(d.rglob("*.py")))
         has_tests = (d / "tests").is_dir()
         rows.append((name, str(py), "yes" if has_tests else "no"))
+    emit = collector / "emit"
     return dict(
-        value=f"{len(sources)} collector sources",
+        value=f"{len(sources)} per-source directories",
         detail=(
             "Shell, terminal multiplexer, keyboard, window manager, browser and "
             "agent transcripts, landing in a columnar store with dashboards over "
@@ -826,7 +933,14 @@ def m_telemetry_sources(env: Env) -> dict:
             "reporting looks exactly like a quiet one — this is the same "
             "silent-zero shape the rest of the system is built against, in the "
             "data layer. The pipeline is what makes a claim like 'this tool is "
-            "dead' measurable instead of impressionistic."
+            "dead' measurable instead of impressionistic. "
+            "🔴 THIS COUNTS DIRECTORIES, NOT SOURCES, and the two differ"
+            + (": shell and terminal-multiplexer events are emitted by "
+               "`scripts/collector/emit`, a FILE, so they are outside the number "
+               "above." if emit.is_file() else
+               " wherever a source is emitted by something other than a directory.")
+            + " The label states what was counted rather than what one would "
+            "like to have counted."
         ),
         source="per-source directories under scripts/collector/",
         columns=("source", ".py files", "has its own suite"),
@@ -901,9 +1015,19 @@ def m_drift_ladder(env: Env) -> dict:
         raise Unmeasurable("the EXIT CODES block parsed to zero codes")
 
     reserved = re.search(r"RESERVED-TO-SHIP:\s*([\d ]+)", text)
+    # 🔴 THE LABEL NAMES THE BANNER, NOT THE SCRIPT'S RETURN SET. This parses the
+    # EXIT CODES block, which documents the DRIFT codes and starts at 2. rc 0
+    # (clean) and rc 1 are real returns and are not in it, so "N exit codes" was
+    # a count of one thing wearing the name of another — and a reader deciding
+    # whether their rc is covered would have looked for it in the wrong set.
+    banner_lo = min(int(c) for c, _ in rows)
     return dict(
-        value=f"{len(rows)} exit codes",
+        value=f"{len(rows)} exit codes documented in the banner",
         detail=(
+            f"The banner starts at rc {banner_lo}: rc 0 (no drift) and rc 1 are "
+            "real returns and are deliberately not in it, so the number above "
+            "counts documented DRIFT codes, not everything this script can "
+            "return. "
             "A deadman that REPORTS and never fixes — it may `git fetch`, and a "
             "static allowlist scanner in its own test suite proves it can run no "
             "mutating git subcommand, including through `ssh`. 🔴 rc 18 is the "

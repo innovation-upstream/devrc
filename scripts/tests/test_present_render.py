@@ -90,6 +90,50 @@ def test_the_self_containment_scan_can_actually_go_red():
         assert problems, f"the scan reported this page CLEAN: {snippet!r}"
 
 
+PROTOCOL_RELATIVE_PAGES = [
+    '<img src="//fonts.example.org/a.png">',
+    "<style>body{background:url(//example.org/bg.png)}</style>",
+    '<video src="//example.org/v.mp4"></video>',
+    '<svg><image href="//example.org/x.png"/></svg>',
+    "<img src=//example.org/x.png>",
+    '<source srcset="//example.org/a.png 1x">',
+    "<style>@font-face{src:url('//example.org/f.woff2')}</style>",
+]
+
+
+def test_a_PROTOCOL_RELATIVE_reference_is_not_self_contained():
+    """🔴 REGRESSION COVERAGE. The guard was SPELLED, not structural.
+
+    A `//host/path` reference has no `http:` prefix, so every scheme check is
+    blind to it, and the only thing standing in its way was the literal string
+    `//cdn.` — one hostname convention. Every case above scanned CLEAN on the
+    shipped code: a page that reaches the network on open, certified as
+    self-contained.
+
+    The hazard is not the word "cdn". It is a reference that begins a VALUE with
+    `//`, so the rule matches the POSITION — the start of an attribute value or
+    of a CSS `url()` — which renaming a host cannot walk past.
+    """
+    for snippet in PROTOCOL_RELATIVE_PAGES:
+        page = f"<!doctype html><html><body>{snippet}</body></html>"
+        assert generate.self_contained(page), (
+            f"the scan reported this page CLEAN: {snippet!r}")
+
+
+def test_the_protocol_relative_rule_does_not_fire_on_ordinary_double_slashes():
+    """CONTROL for the rule above — a permanently-red gate is worse than none.
+
+    `//` appears in prose, in comments and in collapsed paths. Only `//` that
+    OPENS an attribute value or a CSS `url()` is a reference; the rest is text.
+    """
+    for snippet in ("<style>.a{margin:0}/* //not a url */</style>",
+                    "<p>see scripts//run-tests.sh</p>",
+                    "<p>the ratio was 4//5</p>",
+                    "<p>a comment marker <code>//</code> in prose</p>"):
+        page = f"<!doctype html><html><body>{snippet}</body></html>"
+        assert generate.self_contained(page) == [], snippet
+
+
 def test_the_self_containment_scan_does_not_fire_on_the_svg_namespace():
     """POSITIVE CONTROL's complement: the one allowed token must not trip it.
 
@@ -106,7 +150,7 @@ def test_the_real_page_references_no_external_host():
     env = measure.Env(repo=REPO_ROOT, home=Path.home(),
                       claude_dir=Path.home() / ".claude",
                       index_store=Path.home() / ".claude" / "analyze-service-index",
-                      allow_systemd=False)
+                      allow_systemd=False, allow_network=False)
     ms = measure.take(env)
     page = render.build_html(ms, sanitized=False)
     problems = generate.self_contained(page)
@@ -252,7 +296,7 @@ def test_the_cli_writes_a_page_and_reports_the_counts(tmp_path):
     out = tmp_path / "page.html"
     proc = subprocess.run(
         [sys.executable, str(GENERATOR), "-o", str(out), "--no-systemd",
-         "--repo", str(REPO_ROOT)],
+         "--no-network", "--repo", str(REPO_ROOT)],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=600)
     assert proc.returncode == 0, proc.stderr
     assert out.is_file() and out.stat().st_size > 20_000
@@ -271,7 +315,7 @@ def test_the_cli_fails_loudly_when_nothing_can_be_measured(tmp_path):
     out = tmp_path / "should-not-exist.html"
     proc = subprocess.run(
         [sys.executable, str(GENERATOR), "-o", str(out), "--no-systemd",
-         "--repo", str(empty)],
+         "--no-network", "--repo", str(empty)],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=600)
     assert proc.returncode == 3, (
         f"expected the all-unmeasured verdict (3), got {proc.returncode}. "
@@ -285,7 +329,7 @@ def test_check_mode_writes_nothing(tmp_path):
     out = tmp_path / "nope.html"
     proc = subprocess.run(
         [sys.executable, str(GENERATOR), "-o", str(out), "--check", "--no-systemd",
-         "--repo", str(REPO_ROOT)],
+         "--no-network", "--repo", str(REPO_ROOT)],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=600)
     assert proc.returncode == 0, proc.stderr
     assert not out.exists()
