@@ -2995,14 +2995,21 @@ def test_excluded_slugs_render_in_a_deterministic_order(tmp_path, monkeypatch):
     # Kills the mutant `sorted(exclude_slugs)` -> `list(exclude_slugs)`. Every earlier
     # test used a single-element set, where iteration order cannot vary. Set ordering is
     # salted per process, so the mutant produces output that differs BETWEEN RUNS.
+    #
+    # SIX slugs, not three. A 3-element set comes out already-sorted about 1 time in 6,
+    # so the mutant SURVIVED this test on 3 of 20 PYTHONHASHSEED values — a guard that
+    # only fires ~85% of the time. Six gives 1/720. The count is the guard's strength,
+    # so do not trim this list.
     import calendar
     now = float(calendar.timegm((2026, 7, 5, 0, 0, 0, 0, 0, 0)))
     repo = _two_initiative_repo(tmp_path, monkeypatch, now)
 
+    slugs = {"zulu", "alpha", "mike", "delta", "oscar", "bravo"}
     report = isc.build_report(14, repos=[str(repo)], client=None, now=now,
-                              exclude_slugs={"zulu", "alpha", "mike"})
-    assert report["excluded_slugs"] == ["alpha", "mike", "zulu"]        # sorted, not set order
-    assert "asked for: alpha, mike, zulu" in isc.render(report, now=now)
+                              exclude_slugs=slugs)
+    assert report["excluded_slugs"] == ["alpha", "bravo", "delta", "mike", "oscar", "zulu"]
+    assert ("asked for: alpha, bravo, delta, mike, oscar, zulu"
+            in isc.render(report, now=now))
 
 
 def test_suppression_runs_AFTER_the_days_window_so_the_count_means_rows_you_would_have_seen(
@@ -3115,10 +3122,32 @@ def test_suppressing_an_initiative_that_holds_a_LIVE_session_says_so(tmp_path, m
                             include_tmux=True, panes=panes, exclude_slugs={"alpha"})
     assert gone["excluded_count"] == 1
     assert gone["excluded_live"] == 1
+    # Pin the WHOLE normalised line, not a substring. A substring match leaves the
+    # separator punctuation unconstrained — dropping the comma, swapping in a semicolon
+    # and doubling the space all survived it. A cosmetic reword then fails this test;
+    # that is the trade for a machine-readable claim.
     out = isc.render(gone, now=now)
-    assert "1 with a LIVE session" in out
+    assert ("   --exclude-slugs SUPPRESSED 1 initiative(s), 1 with a LIVE session; "
+            "asked for: alpha") in out.splitlines()
     # Negative control: suppressing a row with NO live pane must not claim one.
     quiet = isc.build_report(14, repos=[str(repo)], client=None, now=now,
                              include_tmux=True, panes=panes, exclude_slugs={"beta"})
     assert quiet["excluded_count"] == 1 and quiet["excluded_live"] == 0
     assert "LIVE session" not in isc.render(quiet, now=now)
+
+    # `excluded_live` counts ROWS, not PANES. With one fixture pane the two are equal, so
+    # `sum(1 for ...)` -> `sum(len(...) for ...)` is invisible. Give the suppressed row
+    # TWO panes: rows stays 1, panes would read 2.
+    two_panes = panes + [{"session": "9", "window": "2", "title": "Alpha groundwork",
+                          "cwd": str(repo), "pane_id": "%2"}]
+    multi = isc.build_report(14, repos=[str(repo)], client=None, now=now,
+                             include_tmux=True, panes=two_panes)
+    live_rows = [i for i in multi["by_repo"][str(repo)] if i.get("tmux_sessions")]
+    assert len(live_rows) == 1 and len(live_rows[0]["tmux_sessions"]) == 2, (
+        f"fixture did not attach two panes to one row: {live_rows}")
+
+    multi_gone = isc.build_report(14, repos=[str(repo)], client=None, now=now,
+                                  include_tmux=True, panes=two_panes,
+                                  exclude_slugs={"alpha"})
+    assert multi_gone["excluded_count"] == 1
+    assert multi_gone["excluded_live"] == 1          # ROWS — 2 would mean it counted panes

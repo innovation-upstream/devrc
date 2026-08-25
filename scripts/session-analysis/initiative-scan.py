@@ -62,10 +62,12 @@ Usage:
            slug derived from the handoff filename — the slug shown on each row.
            EXPLICIT ONLY: the scan never infers that an initiative is finished, so
            nothing disappears from this report unless you name it here.
-           🔴 A slug is NOT repo-unique — it comes from the handoff filename, and two
-           repos can hold `handoff-<same-slug>-<date>.md`. One name therefore suppresses
-           the matching row in EVERY repo. Read the `SUPPRESSED N` count: N larger than
-           the number of slugs you passed means you hit more repos than you meant to.
+           🔴 A slug is NOT repo-unique. Doc-anchored rows take it from the handoff
+           filename and two repos can hold `handoff-<same-slug>-<date>.md`; session-only
+           rows derive it from the session title, so a suppressible slug need not
+           correspond to ANY file on disk. Either way one name suppresses the matching
+           row in EVERY repo. Read the `SUPPRESSED N` count: N larger than the number of
+           slugs you passed means you hit more repos than you meant to.
            Matching is exact and CASE-SENSITIVE: `Alpha` never matches `alpha`, and
            reports `SUPPRESSED 0` rather than erroring.
            A suppressed initiative takes its live tmux session out of the report with
