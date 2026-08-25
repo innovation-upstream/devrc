@@ -100,6 +100,7 @@ see (an atexit hook, a lingering thread, a fixture finalizer).
 from __future__ import annotations
 
 import os
+import random
 import shutil
 import subprocess
 import sys
@@ -154,10 +155,12 @@ CONTROL_PREFIX = "control-"
 # the substring, for the same reason REFUSAL_TOKEN is: a phrasing change across
 # git versions must not silently turn a contended write into an unretried one.
 LOCK_CONTENTION = "could not lock config file"
-# 6 attempts with the back-off below spans ~1s, against a contention window that
-# is one small write per session. Raising it would start hiding a genuinely
-# stuck lock instead of a collision.
+# 6 attempts with the full-jitter backoff below averages ~0.5s and is bounded by
+# ~1s of sleeping, against a contention window that is one small write per
+# session. Raising it would start hiding a genuinely stuck lock instead of a
+# collision. LOCK_TIMEOUT bounds the whole loop at 6 * 5s = 30s worst case.
 LOCK_RETRIES = 6
+LOCK_TIMEOUT = 5
 CONTROL_OK = "emitted"
 CONTROL_UNCONTAINED = "WITHHELD-UNCONTAINED"
 
@@ -215,9 +218,17 @@ def _git(args: list[str], timeout: int = 30) -> subprocess.CompletedProcess | No
     exe = shutil.which("git")
     if exe is None:
         return None
+    # 🔴 LC_ALL=C. BOTH controls in this file decide their verdict by matching an
+    # ENGLISH substring of git's output — REFUSAL_TOKEN ("not allowed") and
+    # LOCK_CONTENTION ("could not lock config file") — and nothing upstream pins
+    # the locale. Under a localised git the substring misses and the control
+    # reports `unmeasured`/`ALLOWED`, i.e. the guard fails or goes quiet for a
+    # reason that has nothing to do with what it is guarding. Pinning it here
+    # covers every call rather than at the two comparison sites.
+    env = {**os.environ, "LC_ALL": "C", "LANGUAGE": "C"}
     try:
         return subprocess.run([exe, *args], capture_output=True, text=True,
-                              timeout=timeout)
+                              timeout=timeout, env=env)
     except (OSError, subprocess.SubprocessError):  # noqa: BLE001
         return None
 
@@ -254,7 +265,10 @@ def config_control(guard_dir: Path) -> tuple[str, str]:
     # genuinely broken control into a slow green, which is the exact failure this
     # guard exists to prevent.
     for attempt in range(LOCK_RETRIES):
-        wrote = _git(["config", "--global", key, token])
+        # A SHORT timeout, not _git's 30s default: this is one tiny local write,
+        # and it is now retried, so the worst case is LOCK_RETRIES * timeout. At
+        # 30s that is 3 minutes per session spent discovering a stuck lock.
+        wrote = _git(["config", "--global", key, token], timeout=LOCK_TIMEOUT)
         if wrote is None:
             return "unmeasured", "git is not runnable from this session"
         if wrote.returncode == 0:
@@ -265,10 +279,11 @@ def config_control(guard_dir: Path) -> tuple[str, str]:
             return ("unmeasured",
                     f"git config --global exited {wrote.returncode} — still "
                     f"lock-contended after {LOCK_RETRIES} attempts")
-        # Back off by a session-distinct amount so the retries do not re-collide
-        # in lockstep; PID is the only id available in every session (xdist
-        # worker or not).
-        time.sleep(0.05 * (attempt + 1) + (os.getpid() % 17) / 1000.0)
+        # FULL JITTER, not a pid-derived offset. The first version used
+        # `(os.getpid() % 17) / 1000` — at most 16ms against a 50ms step, and
+        # two pids congruent mod 17 got IDENTICAL backoff, so the losers
+        # re-collided in lockstep exactly as if there were no jitter at all.
+        time.sleep(random.uniform(0.0, 0.05 * (attempt + 1)))
 
     read = _git(["config", "--global", "--get", key])
     if read is None or read.returncode != 0 or read.stdout.strip() != token:

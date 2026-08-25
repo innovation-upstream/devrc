@@ -2815,34 +2815,79 @@ _count_of() { # $1 = alternation regex, $2 = summary line
 # start files, spool paths), and `load` would scatter a single file's tests
 # across workers and race them.
 #
-# 🔴 DEVRC_TEST_NESTED — why this exists, and do not remove it. Tests in
-# scripts/tests SPAWN THIS SCRIPT (test_run_tests_floors.py and the .sh meta
-# tests run a nested run-tests.sh over a generated fixture suite). If the nested
-# run is also parallel, its guard plugins emit one session marker PER WORKER and
-# GUARD 7/8/10 fail the nested run for a doubled marker count — which is the
-# guards working correctly, on a condition the parallelism created. So the outer
-# run exports DEVRC_TEST_NESTED=1 into pytest's environment and any nested
-# invocation forces jobs=1. Measured: passing `-n 4` through the ENVIRONMENT
-# (PYTEST_ADDOPTS) instead of on this command line reproduces exactly that — 6
-# failures, all of them meta-tests, all "emitted 2 session marker(s)".
+# ⚠ What loadfile does NOT buy, stated so nobody reads more into it: it pins
+# INTRA-file co-location only. State shared ACROSS files — the run-wide launch
+# log, the spool ledger, the nogit guard config — is still touched by every
+# worker concurrently. See the KNOWN RACE note in scripts/tests/
+# test_no_real_launchers.py.
 #
+# 🔴 NESTED RUNS MUST BE SERIAL, and the signal is PYTEST_CURRENT_TEST.
+# Tests in scripts/tests SPAWN THIS SCRIPT (test_run_tests_floors.py and the .sh
+# meta tests run a nested run-tests.sh over a generated fixture suite). If the
+# nested run is also parallel, its guard plugins emit one session marker PER
+# WORKER and GUARD 7/8/10 fail it for the doubled count — the guards working
+# correctly on a condition the parallelism created. Passing -n through the
+# ENVIRONMENT (PYTEST_ADDOPTS) reproduces exactly that: 6 failures, all
+# meta-tests, all "emitted 2 session marker(s)".
+#
+# 🔴 An earlier revision used an env var this script exported itself
+# (DEVRC_TEST_NESTED) and then UNSET at the root of every run, so that a stale
+# ambient value could not silently force the whole gate serial. Those two halves
+# CONTRADICT each other: a nested run-tests.sh is itself "a fresh run", so it
+# cleared the very flag that was meant to serialise it and went parallel — which
+# is exactly what `test_a_nested_pytest_session_does_not_write_into_the_targets_
+# ledger` then caught (`parallelism =4` inside the nested run). Do not
+# reintroduce that pair.
+#
+# pytest sets PYTEST_CURRENT_TEST in the test process and CHILD PROCESSES
+# INHERIT IT — measured, serial and under xdist. So a run-tests.sh spawned from
+# a test always sees it, no cooperation from this script required, and there is
+# no flag for a stale value to leak. Nesting WINS over an explicit
+# DEVRC_TEST_JOBS: a parallel nested run corrupts the ledger accounting.
 # Override with DEVRC_TEST_JOBS=1 to get the old serial behaviour back for a
 # bisect or a flake hunt.
-if [ "${DEVRC_TEST_NESTED:-0}" = "1" ]; then
-  PYTEST_JOBS=1
-else
-  PYTEST_JOBS="${DEVRC_TEST_JOBS:-4}"
-fi
+# The default ADAPTS to the machine rather than hard-coding 4. `devrc-ci` runs
+# this in a pod requesting 1 CPU (limit 4); on a 1-2 core node a fixed -n 4
+# oversubscribes and pushes every timing-sensitive test in the suite — the 15s
+# subprocess waits, the gitenv settle re-read — toward its deadline, which turns
+# a capacity problem into a flaky gate. Capped at 4 because the measured win is
+# concentrated in one target and more workers past that buy little.
+_devrc_default_jobs="$(nproc 2>/dev/null || echo 1)"
+case "$_devrc_default_jobs" in ''|*[!0-9]*|0) _devrc_default_jobs=1 ;; esac
+[ "$_devrc_default_jobs" -gt 4 ] && _devrc_default_jobs=4
+PYTEST_JOBS="${DEVRC_TEST_JOBS:-$_devrc_default_jobs}"
+unset _devrc_default_jobs
+
+# Reject anything that is not a plain positive integer. `00` and `007` are
+# rejected too: they would pass a naive digit test, then fail `-gt 1` and run
+# SERIAL while the operator believed they had asked for parallelism.
+# The ceiling is not arithmetic taste — PYTEST_JOBS is also the marker upper
+# bound, so an absurd value turns that assertion into one about nothing.
 case "$PYTEST_JOBS" in
-  ''|*[!0-9]*|0)
-    echo "run-tests: FATAL — DEVRC_TEST_JOBS must be a positive integer, got '${DEVRC_TEST_JOBS:-}'." >&2
-    exit 2
+  ''|*[!0-9]*|0|0*)
+    echo "run-tests: FATAL — DEVRC_TEST_JOBS must be a positive integer without leading zeros, got '${DEVRC_TEST_JOBS:-}'." >&2
+    # 3, not 2: this file's exit-code header says 3 = the ENVIRONMENT could not
+    # satisfy a precondition, 2 = a REPO-CONTENT defect. A bad env var is
+    # environment.
+    exit 3
     ;;
 esac
+if [ "$PYTEST_JOBS" -gt 64 ]; then
+  echo "run-tests: FATAL — DEVRC_TEST_JOBS=$PYTEST_JOBS is not a plausible worker count." >&2
+  exit 3
+fi
+# Nesting overrides everything above, including an explicit DEVRC_TEST_JOBS.
+if [ -n "${PYTEST_CURRENT_TEST:-}" ]; then
+  PYTEST_JOBS=1
+fi
 PYTEST_PARALLEL_ARGS=()
 if [ "$PYTEST_JOBS" -gt 1 ]; then
   PYTEST_PARALLEL_ARGS=(-n "$PYTEST_JOBS" --dist loadfile)
 fi
+# Every other lever in this file announces itself. A run whose log cannot say
+# whether it was parallel cannot be compared against another run's timing, and
+# "it was serial all along" is exactly the failure the `unset` above prevents.
+echo "  parallelism =${PYTEST_JOBS} pytest worker(s)$([ "$PYTEST_JOBS" -gt 1 ] && echo " (-n ${PYTEST_JOBS} --dist loadfile)" || echo " (serial)")"
 
 # --- session-marker accounting, shared by GUARDS 7, 8 and 10 -------------------
 # All three ask the same question of the same quantity — "did this plugin
@@ -2852,23 +2897,64 @@ fi
 # double-registration case while these three said `-ne 1`).
 #
 # Serial: EXACTLY 1, unchanged from before parallelism existed.
-# Parallel: pytest_sessionstart fires in the controller AND in each xdist
-# worker, so the count is bounded by 1 + PYTEST_JOBS. The bound is still a real
-# assertion — 0 remains "the plugin never loaded", which is the state these
-# guards exist to catch.
+#
+# Parallel: one marker per WORKER that ran at least one test, so 1..PYTEST_JOBS.
+#
+# 🔴 MEASURED, and an earlier revision of this comment got it wrong in the
+# PERMISSIVE direction — do not restate that version. These three markers come
+# from session-scoped AUTOUSE FIXTURES (nolaunch_plugin.py, spool_plugin.py,
+# nogit_plugin.py), NOT from pytest_sessionstart, so the xdist CONTROLLER never
+# emits one: it collects and distributes, it runs no tests. The count at -n 4 is
+# exactly 4, never 5. The old "controller + up to N workers" bound admitted one
+# session that cannot legitimately exist. FEWER than JOBS is legitimate — with
+# --dist loadfile a target with fewer files than workers leaves some idle.
+#
+# What the upper bound is FOR: the pre-parallel `-ne 1` caught a second thing
+# besides "the plugin never loaded" — an un-flagged NESTED session polluting
+# this target's ledger, which is what the *_IN_SESSION flags exist to prevent.
+# Capping at JOBS keeps that: a stray extra session still trips it.
+# Pinned by scripts/tests/test_markers_ok_predicate.py.
 _markers_ok() {
   local n="$1"
   if [ "$PYTEST_JOBS" -eq 1 ]; then
     [ "$n" -eq 1 ]
   else
-    [ "$n" -ge 1 ] && [ "$n" -le $(( PYTEST_JOBS + 1 )) ]
+    [ "$n" -ge 1 ] && [ "$n" -le "$PYTEST_JOBS" ]
   fi
 }
+# GUARD 9b's predicate. $1 = a target's pytest log -> "FAIL <n>" or "OK".
+#
+# 🔴 A FUNCTION, not four inline pipes, because the first inline version was
+# WRONG in the silent direction and shipped a permanently-red gate: it built an
+# ERE containing the marker `gitenv(session)`, whose PARENTHESES are an ERE
+# GROUP, so the pattern matched the literal text "gitenvsession", never hit, and
+# returned a co-tenant count of 0 — i.e. "nothing else writes here" — on a box
+# whose sessions had just reported `unattributable=1`. A zero from a pattern
+# that cannot match is indistinguishable from a real zero. `-F` fixes that
+# specific bug; being callable from a test is what stops the next one.
+#
+# The gate: fail ONLY when no session reported a co-tenant AND at least one
+# observation went unattributed. See the GUARD 9b block for why the co-tenant
+# condition is what makes this safe to arm at all.
+_gitenv_unattributed_verdict() {
+  local cotenant_sessions unattributed
+  cotenant_sessions="$(grep -aF "$GITENV_SESSION_MARKER" "$1" \
+    | grep -aoE 'unattributable=[0-9]+' \
+    | awk -F= '$2 != 0 {n++} END {print n+0}')"
+  unattributed="$(grep -aoE 'unattributed-observations=[0-9]+' "$1" \
+    | awk -F= '{s+=$2} END {print s+0}')"
+  if [ "$cotenant_sessions" -eq 0 ] && [ "$unattributed" -gt 0 ]; then
+    echo "FAIL $unattributed"
+  else
+    echo "OK"
+  fi
+}
+
 _markers_expected() {
   if [ "$PYTEST_JOBS" -eq 1 ]; then
     echo "exactly 1"
   else
-    echo "between 1 and $(( PYTEST_JOBS + 1 )) (controller + up to $PYTEST_JOBS xdist workers)"
+    echo "between 1 and $PYTEST_JOBS (one per xdist worker that ran a test)"
   fi
 }
 
@@ -2917,13 +3003,8 @@ run_pytest() {
   # 10 refuses a WRITE to any repo outside the session tmp roots, which is the
   # case a pointer strip cannot answer. They landed a day apart from separate
   # branches and both claimed the number; only the numbering was reconciled.
-  #
-  # DEVRC_TEST_NESTED is exported HERE (per-invocation, not script-wide) so a
-  # nested run-tests.sh spawned by a test runs serial — see the PARALLELISM
-  # header above.
-  DEVRC_TEST_NESTED=1 \
   python -m pytest "$d" -q -p no:cacheprovider -p testlib.nolaunch_plugin -p testlib.spool_plugin -p testlib.gitenv_plugin -p testlib.nogit_plugin \
-    "${PYTEST_PARALLEL_ARGS[@]}" --no-header -rs >"$log" 2>&1
+    ${PYTEST_PARALLEL_ARGS[@]+"${PYTEST_PARALLEL_ARGS[@]}"} --no-header -rs >"$log" 2>&1
   rc=$?
   nl_after="$(_nolaunch_lines)"
   NOLAUNCH_SEEN+=("$d|$(( nl_before + 1 ))|$nl_after")
@@ -2948,6 +3029,40 @@ run_pytest() {
     echo "  result there is a claim about nothing. Check that '-p testlib.gitenv_plugin'" >&2
     echo "  is still on this runner's pytest line." >&2
     RESULTS+=("FAIL  $d (GUARD 9 marker absent)")
+    fail=1
+  fi
+
+  # --- GUARD 9b: an UNATTRIBUTED observation must not pass silently ----------
+  # 🔴 The hole this closes, found by an audit of the xdist change. GUARD 9 does
+  # not only fail loudly or pass — it can DOWNGRADE itself from enforce to
+  # report, and in report mode `_report()` never calls pytest.fail. Nothing here
+  # parsed the line that records the downgrade, so a repo mutation the detector
+  # SAW but could not pin on a test scored a clean PASS.
+  #
+  # Parallelism makes the downgrade routine rather than exotic: worker A mutates
+  # the repo during worker B's idle window, so B observes a delta it cannot
+  # attribute. Fixing the sibling-process misattribution in testlib/gitenv.py
+  # removes the FALSE unattributables; this catches the true ones.
+  #
+  # 🔴 Gated on every session reporting `unattributable=0`, and that gate is why
+  # this is safe to arm. An operator's box legitimately has other processes
+  # living in the repo (8 measured here: zsh, nvidia-smi, an editor), which puts
+  # the detector in report mode for real reasons unrelated to this run. Failing
+  # there would make the gate permanently red locally — the "red gate trains
+  # everyone to click through" failure this file's own doctrine rates worse than
+  # no gate. A clean checkout (CI) has no co-tenants, so this is live exactly
+  # where the guard is still sharp.
+  local gitenv_verdict gitenv_unattributed
+  gitenv_verdict="$(_gitenv_unattributed_verdict "$log")"
+  gitenv_unattributed="${gitenv_verdict#FAIL }"
+  if [ "${gitenv_verdict%% *}" = "FAIL" ]; then
+    echo "run-tests: FATAL — GUARD 9 saw $gitenv_unattributed unattributed repo observation(s) in $d." >&2
+    echo "  No session reported a co-tenant, so there was no legitimate reason to" >&2
+    echo "  leave enforce mode: the detector WATCHED a protected repository change" >&2
+    echo "  and could not pin it on a test. In report mode that does not fail the" >&2
+    echo "  test, so without this check the target passes having measured nothing." >&2
+    echo "  Read the '$GITENV_SESSION_MARKER summary:' line above for what moved." >&2
+    RESULTS+=("FAIL  $d (GUARD 9 unattributed observation)")
     fail=1
   fi
 
@@ -3379,12 +3494,15 @@ for entry in "${SPOOL_SEEN[@]}"; do
 
   sess_slice="$(_spool_slice "$SPOOL_SESSIONS_LOG" "$sfrom" "$sto")"
   markers=$(printf '%s\n' "$sess_slice" | grep -c "^$SPOOL_SESSION_MARKER" || true)
-  marker_iso="$(printf '%s\n' "$sess_slice" | grep "^$SPOOL_SESSION_MARKER" | head -1 \
-    | awk -F'\t' '{for(i=1;i<=NF;i++) if($i ~ /^isolated=/) print substr($i,10)}')"
-  marker_ctl="$(printf '%s\n' "$sess_slice" | grep "^$SPOOL_SESSION_MARKER" | head -1 \
-    | awk -F'\t' '{for(i=1;i<=NF;i++) if($i ~ /^control=/) print substr($i,9)}')"
-  marker_fb="$(printf '%s\n' "$sess_slice" | grep "^$SPOOL_SESSION_MARKER" | head -1 \
-    | awk -F'\t' '{for(i=1;i<=NF;i++) if($i ~ /^fallback=/) print substr($i,10)}')"
+  marker_iso="$(printf '%s\n' "$sess_slice" | grep "^$SPOOL_SESSION_MARKER" \
+    | awk -F'\t' '{for(i=1;i<=NF;i++) if($i ~ /^isolated=/) print substr($i,10)}' \
+    | sort -u | paste -sd, -)"
+  marker_ctl="$(printf '%s\n' "$sess_slice" | grep "^$SPOOL_SESSION_MARKER" \
+    | awk -F'\t' '{for(i=1;i<=NF;i++) if($i ~ /^control=/) print substr($i,9)}' \
+    | sort -u | paste -sd, -)"
+  marker_fb="$(printf '%s\n' "$sess_slice" | grep "^$SPOOL_SESSION_MARKER" \
+    | awk -F'\t' '{for(i=1;i<=NF;i++) if($i ~ /^fallback=/) print substr($i,10)}' \
+    | sort -u | paste -sd, -)"
 
   trap_slice="$(_spool_slice "$SPOOL_TRAP_LOG" "$tfrom" "$tto")"
   controls=$(printf '%s\n' "$trap_slice" | grep -cF "source=$SPOOL_CONTROL_SOURCE" || true)
@@ -3562,9 +3680,25 @@ for entry in ${NOGIT_SEEN[@]+"${NOGIT_SEEN[@]}"}; do
 
   gsess="$(_spool_slice "$NOGIT_SESSIONS_LOG" "$gfrom" "$gto")"
   markers=$(printf '%s\n' "$gsess" | grep -c "^$NOGIT_SESSION_MARKER" || true)
-  _nogit_field() { # $1 = field name -> its value from this target's first marker
-    printf '%s\n' "$gsess" | grep "^$NOGIT_SESSION_MARKER" | head -1 \
-      | awk -F'\t' -v k="$1=" '{for(i=1;i<=NF;i++) if(index($i,k)==1) print substr($i,length(k)+1)}'
+  # $1 = field name -> the DISTINCT values that field took across EVERY session
+  # of this target, comma-joined.
+  #
+  # 🔴 This was `head -1`, correct only while a target was ONE pytest session.
+  # Under xdist there are N, each firing its OWN positive control, and reading
+  # the first discards N-1 of them — so a worker whose control came back
+  # `unmeasured` (or whose GIT_CONFIG_GLOBAL had been re-pointed, or whose https
+  # probe was ALLOWED) scored a PASS whenever another worker appended first, and
+  # which one is first is an append race. That is the same fail-open the retry
+  # loop exists to prevent, one layer up, and exactly what this guard's header
+  # refuses to do: score a pass it could not demonstrate.
+  #
+  # DISTINCT values keep every existing comparison working unchanged — sessions
+  # that agree yield the single value; one dissenter yields "emitted,unmeasured",
+  # which matches no OK constant and fails loudly naming both states.
+  _nogit_field() {
+    printf '%s\n' "$gsess" | grep "^$NOGIT_SESSION_MARKER" \
+      | awk -F'\t' -v k="$1=" '{for(i=1;i<=NF;i++) if(index($i,k)==1) print substr($i,length(k)+1)}' \
+      | sort -u | paste -sd, -
   }
   m_redirect="$(_nogit_field redirect)"
   m_control="$(_nogit_field control)"

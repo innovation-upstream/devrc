@@ -685,6 +685,69 @@ def _own_process_lineage() -> "set[int]":
     return lineage
 
 
+_XDIST_RUN_ENV = "PYTEST_XDIST_TESTRUNUID"
+
+
+def _own_xdist_run_id() -> "str | None":
+    """This xdist run's id, or None when not running under xdist.
+
+    MEASURED: xdist sets this in every WORKER and NOT in the controller, and all
+    workers of one run share the value. The controller needs no special case —
+    it is each worker's direct parent (measured: worker ppid == controller pid),
+    so `_own_process_lineage` already excludes it.
+    """
+    value = os.environ.get(_XDIST_RUN_ENV)
+    return value or None
+
+
+def _ppid_of(entry: Path) -> "int | None":
+    """`entry`'s parent pid from /proc/<pid>/stat, or None if unreadable."""
+    try:
+        stat = (entry / "stat").read_text(encoding="utf-8", errors="replace")
+        return int(stat[stat.rindex(")") + 1:].split()[1])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _is_sibling_xdist_worker(entry: Path, run_id: str, our_ppid: int) -> bool:
+    """True when `entry` is a SIBLING WORKER of our xdist run.
+
+    🔴 Why the run id and not something cheaper. The obvious candidates are all
+    wrong in the fail-OPEN direction, which for this detector means going blind:
+
+      * lineage INTERSECTION — every lineage reaches pid 1, so this matches
+        every process on the box and the guard stops seeing anything.
+      * "the candidate's parent is in our lineage" — our lineage contains
+        `systemd --user`, so any other session's process parented by it matches.
+
+    The run id is exact: only processes of THIS xdist run carry it. A foreign
+    session running its own xdist has a DIFFERENT id, and an unreadable
+    `/proc/<pid>/environ` (another user) claims nothing — the candidate stays a
+    co-tenant, which is the direction that keeps the guard sharp.
+
+    🔴 THE RUN ID ALONE IS TOO BROAD, and this cost six of this guard's own
+    tests. A subprocess a TEST spawns INHERITS our whole environment, run id
+    included — so matching on the id alone swallowed exactly the case these
+    tests construct on purpose (`test_live_cotenants_sees_another_process_in_
+    the_repo` starts a child sitting in the repo and requires the probe to SEE
+    it). Excluding a test's own child is not "our run being tidy", it is the
+    detector going blind to a real writer.
+
+    So the check is SIBLING, not same-run: a worker's parent is the controller,
+    and every worker of one run shares that parent (measured: worker ppid ==
+    controller pid). A test's child has US as its parent, not our parent, so it
+    stays visible. Both conditions are required.
+    """
+    if _ppid_of(entry) != our_ppid:
+        return False
+    needle = f"{_XDIST_RUN_ENV}={run_id}".encode()
+    try:
+        raw = (entry / "environ").read_bytes()
+    except OSError:
+        return False
+    return needle in raw.split(b"\0")
+
+
 def live_cotenants(git_dirs: "list[Path]") -> "list[str]":
     """Live processes, not our own ancestors, sitting inside a protected repo.
 
@@ -712,6 +775,8 @@ def live_cotenants(git_dirs: "list[Path]") -> "list[str]":
     if not proc.is_dir():
         return []
     mine = _own_process_lineage()
+    xdist_run = _own_xdist_run_id()
+    our_ppid = os.getppid()
     found: list[str] = []
     try:
         entries = list(proc.iterdir())
@@ -722,6 +787,15 @@ def live_cotenants(git_dirs: "list[Path]") -> "list[str]":
             continue
         pid = int(entry.name)
         if pid in mine:
+            continue
+        # A sibling xdist worker is OUR run, not a foreign writer. Without this
+        # every worker names its siblings as positive evidence, attribution
+        # fails, and the detector silently drops ENFORCE -> REPORT: a repo
+        # mutation reverted before session end then passes GREEN. Measured on a
+        # clean throwaway repo: serial rc=1 naming the culprit test, `-n 4`
+        # rc=0. Invisible on a dev box (which has real co-tenants and is already
+        # in report mode) and live exactly where the guard was still sharp — CI.
+        if xdist_run is not None and _is_sibling_xdist_worker(entry, xdist_run, our_ppid):
             continue
         try:
             cwd = (entry / "cwd").resolve()
