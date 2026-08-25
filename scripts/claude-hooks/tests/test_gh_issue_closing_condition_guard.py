@@ -1270,8 +1270,15 @@ def test_the_override_inside_a_heredoc_body_does_not_disarm_the_gate():
 
 def test_the_override_inside_a_substitution_does_not_disarm_the_gate():
     """🔴 An assignment inside `$( … )` sets a SUBSHELL's environment, so it can
-    never reach the `gh` process this gate is judging. Crediting it would be the
-    backtick hole under a second spelling."""
+    never reach a `gh` process OUTSIDE that subshell. Crediting it would be the
+    backtick hole under a second spelling.
+
+    🔴 READ THE SCOPE, NOT THE SPELLING — the create here is a DIFFERENT command
+    from the substitution, which is what makes the assignment unable to reach it.
+    An assignment in command position inside the substitution that CONTAINS the
+    create is the documented override for that call and does disarm it; see
+    test_the_override_reaches_a_create_inside_a_substitution. The two are not in
+    tension and the difference is which shell runs the `gh`."""
     cmd = ("echo \"$(" + OVERRIDE_ON + " true)\" && " +
            CREATE + " -t t --body " + q(NO_CC))
     assert MISSING_MARK in (ev(cmd) or "")
@@ -1647,3 +1654,452 @@ def test_a_body_quoting_a_heredoc_operator_is_a_KNOWN_FALSE_POSITIVE():
     it an ALLOW assertion and move the case into REALISTIC_ALLOWS."""
     body = CC + "\n```\ncat <<'EOF' > x\nEOF\n```"
     assert MISSING_MARK in (ev(CREATE + " -t t --body " + q(body)) or "")
+
+
+# =========================================================================== #
+# 14. 🔴 BYPASS A — A CREATE INSIDE A COMMAND SUBSTITUTION.
+#
+# `URL="$(gh issue create …)"` — capturing the new issue's URL, the single most
+# natural line an agent writes here — ALLOWED until 2026-08-25, while the SAME
+# line without the two quote characters denied. The whole difference was two
+# bytes: `guard_core._scan_raw` buffers a double-quoted region verbatim, so
+# `"$( … )"` survived as one argv TOKEN and the create inside was never
+# enumerated. A substitution RUNS; the quotes decide only how its OUTPUT is
+# word-split.
+#
+# Every case here is driven as a shape a person would really type, and the ALLOW
+# twin of each is asserted beside it — a fix that denies the quoted form by
+# denying every quoted form would pass a DENY-only table.
+# =========================================================================== #
+SUBSTITUTION_HIDDEN_CREATES = [
+    'URL="$(' + CREATE + " -t t -b " + q(NO_CC) + ')"',
+    'export URL="$(' + CREATE + " -t t -b " + q(NO_CC) + ')"',
+    'echo "created: $(' + CREATE + " -t t -b " + q(NO_CC) + ')"',
+    'printf "%s" "$(' + CREATE + " -t t -b " + q(NO_CC) + ')"',
+    'if [ -n "$(' + CREATE + " -t t -b " + q(NO_CC) + ')" ]; then echo y; fi',
+    'jq --arg u "$(' + CREATE + " -t t -b " + q(NO_CC) + ')" .',
+    'URL="`' + CREATE + " -t t -b " + q(NO_CC) + '`"',
+    'echo "$(' + CREATE + " -t t -b " + q(NO_CC) + ')" | tee /dev/null',
+    CREATE + " -t a --body " + q(CC) + ' && URL="$(' + CREATE + " -t b -b " + q(NO_CC) + ')"',
+    # 🔴 A NESTED `( … )` AHEAD OF THE CREATE. The substitution's own extent has
+    # to be found by COUNTING parens: stop at the first `)` and the slice ends
+    # before `gh` is ever reached, so the create disappears and the line allows.
+    # The nesting is deliberately BEFORE the create, and the outer `$(` is inside
+    # a word, which is the only path that reaches `_substitution_end`.
+    'URL="$(cd $(dirname /tmp/x) && ' + CREATE + " -t t -b " + q(NO_CC) + ')"',
+]
+
+SUBSTITUTION_SPECIFIED_CREATES = [
+    'URL="$(' + CREATE + " -t t --body " + q(CC) + ')"',
+    'export URL="$(' + CREATE + " -t t --body " + q(AC) + ')"',
+    'echo "created: $(' + CREATE + " -t t --body " + q(CC) + ')"',
+    'if [ -n "$(' + CREATE + " -t t --body " + q(AC) + ')" ]; then echo y; fi',
+    'URL="`' + CREATE + " -t t --body " + q(CC) + '`"',
+    CREATE + " -t a --body " + q(CC) + ' && URL="$(' + CREATE + " -t b -b " + q(AC) + ')"',
+]
+
+
+@pytest.mark.parametrize("cmd", SUBSTITUTION_HIDDEN_CREATES)
+def test_a_create_inside_a_quoted_substitution_is_judged(cmd):
+    assert MISSING_MARK in (ev(cmd) or ""), cmd
+
+
+@pytest.mark.parametrize("cmd", SUBSTITUTION_HIDDEN_CREATES[:4])
+def test_a_create_inside_a_quoted_substitution_is_judged_through_the_real_process(cmd):
+    assert MISSING_MARK in deny_reason(cmd)
+
+
+@pytest.mark.parametrize("cmd", SUBSTITUTION_SPECIFIED_CREATES)
+def test_a_specified_create_inside_a_substitution_still_passes(cmd):
+    """The ALLOW twin of every case above. Without this the section could be
+    satisfied by a change that denies any command line containing `$(`."""
+    assert ev(cmd) is None, cmd
+
+
+@pytest.mark.parametrize("cmd", [
+    "echo $(" + CREATE + " -t t -b " + q(NO_CC) + ")",
+    "X=$(" + CREATE + " -t t -b " + q(NO_CC) + ")",
+    "X=`" + CREATE + " -t t -b " + q(NO_CC) + "`",
+    # 🔴 NESTED SUBSTITUTIONS BELONG HERE, NOT IN THE TABLE ABOVE — measured, they
+    # denied at the pre-fix hook too. The inner `"` CLOSES the outer one for
+    # `guard_core`'s scanner, so the inner `$(` is briefly unquoted and gets
+    # lifted by accident. Counting them as regression coverage would have been a
+    # vacuous guard; they are a control instead.
+    'echo "$(printf %s "$(' + CREATE + " -t t -b " + q(NO_CC) + ')")"',
+    'URL="$(echo "$(' + CREATE + " -t t -b " + q(NO_CC) + ')")"',
+])
+def test_an_unquoted_substitution_create_is_judged_INVARIANT(cmd):
+    """🔴 AN INVARIANT GUARD, NOT REGRESSION COVERAGE — green at the pre-fix hook
+    too. `guard_core` already lifts an UNQUOTED `$( … )`, so these always denied;
+    they are here as the CONTROL that names the variable, because the entire
+    difference between this table and the one above is two quote characters."""
+    assert MISSING_MARK in (ev(cmd) or ""), cmd
+
+
+@pytest.mark.parametrize("cmd", [
+    # single quotes: `$(` and a backtick are literal text, not a substitution
+    CREATE + " -t t --body " + q(CC + '\nrepro: URL="$(gh issue create -t x -b y)"'),
+    CREATE + " -t t --body " + q(CC + "\nrun `gh issue create` by hand"),
+    "grep -n '$(gh issue create -t t -b nope)' notes.md",
+    # a substitution that runs something inert
+    'echo "today is $(date)" && ' + CREATE + " -t t --body " + q(CC),
+    'N="$(gh api repos/o/r/issues --jq \'length\')"',
+    # a double-quoted body whose backtick spans are ESCAPED is not a substitution
+    CREATE + ' -t t --body "## Closing condition\nrun \\`gh issue create\\` by hand\n'
+             'Checked by: a reviewer"',
+    # 🔴 THE ATTACHED SPELLINGS, WHICH ARE THE ONLY ONES THAT REACH `_read_word`.
+    # A body written as a SEPARATE argument starts with the quote, so the walk's
+    # own quote branch handles it and `_read_word` never sees it — meaning a
+    # `_read_word` that scanned single quotes as well as double would look
+    # harmless on every case above and false-deny only here. `--body=` and `-b`
+    # attached are both in REALISTIC_ALLOWS, so this is an ordinary spelling.
+    CREATE + " -t t --body=" + q(CC + '\nrepro: URL="$(gh issue create -t x -b y)"'),
+    CREATE + " -t t -b" + q(CC + "\nrun `gh issue create -t x -b y` by hand"),
+])
+def test_reading_substitutions_does_not_fire_on_prose(cmd):
+    """🔴 THE FALSE-POSITIVE HALF, and the reason the fix is in the WALK rather
+    than in a regex for `$(`. A create NAMED inside a single-quoted body is text
+    bash never executes, and must stay allowed."""
+    assert ev(cmd) is None, cmd
+
+
+def test_a_double_quoted_body_with_a_RAW_backtick_span_denies_KNOWN_CONSEQUENCE():
+    """🔴 PINNED AS A COST, NOT HIDDEN — this ALLOWED before 2026-08-25.
+
+    In `"…"` an unescaped backtick span really is command substitution: bash runs
+    what is inside and splices the output into the body, so this line was never
+    going to file the issue the author wrote. Denying it is the correct reading of
+    bash, not a mention being punished — but it IS a behaviour change on a shape
+    that looks like documentation, so it is recorded here. Every correct example
+    in this file single-quotes its body, which is untouched."""
+    cmd = (CREATE + ' -t t --body "## Closing condition\n'
+           'run `gh issue create -b x` by hand\nChecked by: a reviewer"')
+    assert MISSING_MARK in (ev(cmd) or "")
+
+
+@pytest.mark.parametrize("cmd,allowed", [
+    # in command position INSIDE the substitution — the call the gate is judging
+    ('URL="$(' + OVERRIDE_ON + " " + CREATE + " -t t -b " + q(NO_CC) + ')"', True),
+    # on the line, ahead of the assignment
+    (OVERRIDE_ON + ' URL="$(' + CREATE + " -t t -b " + q(NO_CC) + ')"', True),
+    # near-miss spellings are NOT the override
+    ('URL="$(' + OVERRIDE + "=true " + CREATE + " -t t -b " + q(NO_CC) + ')"', False),
+    ('URL="$(' + OVERRIDE + "=0 " + CREATE + " -t t -b " + q(NO_CC) + ')"', False),
+    # the override MENTIONED in the body inside the substitution is prose
+    ('URL="$(' + CREATE + " -t t -b " + q("nope; " + OVERRIDE_ON) + ')"', False),
+    # two hidden creates, only one overridden — the other still has to answer
+    ('A="$(' + OVERRIDE_ON + " " + CREATE + " -t a -b " + q(NO_CC) + ')"; '
+     'B="$(' + CREATE + " -t b -b " + q(NO_CC) + ')"', False),
+])
+def test_the_override_reaches_a_create_inside_a_substitution(cmd, allowed):
+    """🔴 A GATE WITH NO WAY PAST IT GETS SWITCHED OFF. Widening what the gate
+    SEES has to widen where the documented escape hatch WORKS, or the newly
+    covered shapes would be the only ones with no out. The near-misses are here
+    because an override with several spellings is one nobody can grep for."""
+    got = ev(cmd)
+    assert (got is None) is allowed, (cmd, got)
+
+
+@pytest.mark.parametrize("cmd", [
+    # opened inside a WORD — `_read_word`'s scanner runs off the end
+    'URL="$(' + CREATE + " -t t -b " + q(NO_CC),
+    # opened at top level after a quote — the walk's own stack is left open
+    'echo "$(' + CREATE + " -t t -b " + q(NO_CC),
+])
+def test_an_unterminated_substitution_still_shows_the_create(cmd):
+    """🔴 FAIL-CLOSED ON MALFORMED INPUT. bash would reject an unterminated
+    `$(`, so there is no "correct" reading to preserve — but a truncated opener
+    must not be a way to make the create invisible, which is the only direction a
+    guard may err in. Both entry points into the substitution scan have their own
+    unterminated case because they run off the end in different places."""
+    assert MISSING_MARK in (ev(cmd) or ""), cmd
+
+
+def test_the_substitution_tables_are_not_empty():
+    assert len(SUBSTITUTION_HIDDEN_CREATES) >= 10
+    assert len(SUBSTITUTION_SPECIFIED_CREATES) >= 6
+
+
+def test_control_the_specified_fixtures_carry_REAL_newlines():
+    """🔴 A FIXTURE-HYGIENE CONTROL, because the failure it catches reads as a
+    CODE regression. This gate deliberately denies a body whose `\\n` arrived as
+    the two literal characters — bash leaves them literal in `"…"`, GitHub renders
+    the body on one line, and there is no heading on that page. So a fixture
+    written with a literal backslash-n where a real newline was meant turns a
+    CORRECT deny into what looks like a false positive, and the next person
+    "fixes" working code. Assert the bytes rather than trusting the source."""
+    for cmd in SUBSTITUTION_SPECIFIED_CREATES:
+        assert "## Closing condition\n" in cmd or "## Acceptance criteria\n" in cmd, cmd
+        assert "\\n" not in cmd, cmd
+    # and the scratch dir is per-run, not a fixed name in a shared /tmp
+    assert SCRATCH.startswith(tempfile.gettempdir())
+    assert os.path.basename(SCRATCH).startswith("ghccg-test-")
+    assert len(os.path.basename(SCRATCH)) > len("ghccg-test-")
+
+
+# =========================================================================== #
+# 15. 🔴 BYPASS B — ONE EFFECTIVE BODY PER SOURCE.
+#
+# The gate used to aggregate every body-shaped argument and pass if ANY of them
+# carried the heading, so a SECOND body flag was a bypass: ~40 characters of
+# stock text in an argument the tool DISCARDS bought a pass. That is the
+# "spelled, not structural" failure the module docstring refuses to allow for
+# ANSI-C decoding, reached from the other side.
+#
+# 🔴 THE RULE IS PER SOURCE BECAUSE THE THREE TOOLS GENUINELY DISAGREE, and each
+# expectation below is a MEASURED fact about the shipped tool, not a guess:
+#   * gh 2.97.0 `issue create` binds `--body`/`-b` and `--body-file`/`-F` with
+#     pflag `StringVarP` — last occurrence wins (probed with
+#     `gh api --hostname aaa-first.invalid --hostname bbb-last.invalid`, which
+#     connects to bbb-last) — and `create.go` assigns `opts.Body` from the file
+#     AFTER `--body` is bound, so `--body-file` wins whatever the order (probed:
+#     `--body 'aaa' --body-file /nonexistent/zz.md` dies on the file read and
+#     never reaches the API);
+#   * gh 2.97.0 `api` REFUSES a repeated field: `-f body=A -f body=B`,
+#     `-f body=A -F body=B` and `-F body=A -f body=B` all exit with
+#     `unexpected override existing field under "body"`, while the single-field
+#     control `-f body=A` reaches the API;
+#   * curl 8.17.0 MERGES repeated data options — `-d` and its siblings with a
+#     separating `&`, `--json` by plain concatenation — it does not take the last.
+# A rule copied from one tool to the others would be wrong in the direction that
+# false-denies, so each is asserted separately.
+# =========================================================================== #
+REASON_JSON = "the request payload is not JSON this gate can parse"
+REASON_DUP_FIELD = "the body field is given more than once, which gh rejects outright"
+REASON_CURL_MERGE = (
+    "several curl body options are combined in a way this gate cannot reconstruct")
+
+
+@pytest.mark.parametrize("cmd", [
+    CREATE + " -t t --body " + q(CC) + " --body " + q(NO_CC),
+    CREATE + " -t t -b " + q(CC) + " -b " + q(NO_CC),
+    CREATE + " -t t -b " + q(AC) + " --body " + q(NO_CC),
+    CREATE + " -t t --body=" + q(CC) + " -b" + q(NO_CC),
+    CREATE + " -t t --body " + q(CC) + " --body " + q(AC) + " --body " + q(NO_CC),
+])
+def test_only_the_LAST_body_flag_answers_for_a_gh_issue_create(cmd):
+    """pflag last-wins: the earlier value is bound and then overwritten, so it
+    never reaches GitHub and cannot buy a pass."""
+    assert MISSING_MARK in (ev(cmd) or ""), cmd
+
+
+@pytest.mark.parametrize("cmd", [
+    CREATE + " -t t --body " + q(NO_CC) + " --body " + q(CC),
+    CREATE + " -t t -b " + q(NO_CC) + " -b " + q(AC),
+    CREATE + " -t t --body " + q(NO_CC) + " --body=" + q(CC),
+])
+def test_the_LAST_body_flag_being_correct_still_passes(cmd):
+    """The other half of last-wins — the rule is a direction, not a deny."""
+    assert ev(cmd) is None, cmd
+
+
+def test_a_body_file_beats_a_body_flag_whatever_the_order():
+    """`create.go` assigns `opts.Body = string(b)` after `--body` is bound, so the
+    FILE is what GitHub renders even when `--body` was written second."""
+    good = scratch("bfile-good.md")
+    bad = scratch("bfile-bad.md")
+    with open(good, "w") as f:
+        f.write(CC + "\n")
+    with open(bad, "w") as f:
+        f.write(NO_CC + "\n")
+    # the file wins even though --body came first and was correct
+    assert MISSING_MARK in (ev(CREATE + " -t t --body " + q(CC) +
+                               " --body-file " + bad) or "")
+    # …and even though --body came second and was correct
+    assert MISSING_MARK in (ev(CREATE + " -t t --body-file " + bad +
+                               " --body " + q(CC)) or "")
+    # the mirror image: a correct FILE rescues an incorrect --body
+    assert ev(CREATE + " -t t --body " + q(NO_CC) + " --body-file " + good) is None
+    assert ev(CREATE + " -t t --body-file " + good + " --body " + q(NO_CC)) is None
+    # and repeats of --body-file are last-wins like any other pflag StringVar
+    assert MISSING_MARK in (ev(CREATE + " -t t --body-file " + good +
+                               " --body-file " + bad) or "")
+    assert ev(CREATE + " -t t --body-file " + bad + " --body-file " + good) is None
+
+
+def test_a_correct_body_beside_an_UNREADABLE_body_file_cannot_see_the_body():
+    """🔴 A DELIBERATE OVER-BLOCK, ASSERTED SO IT IS NOT A SURPRISE. gh reads the
+    file regardless of `--body` and ERRORS when it cannot, so the call creates
+    nothing either way; reading the `--body` gh discards is the bypass. The
+    verdict must be the CANNOT-SEE one, not "no closing condition" — they are
+    different facts."""
+    missing = scratch("bfile-does-not-exist.md")
+    assert not os.path.exists(missing)
+    reason = ev(CREATE + " -t t --body " + q(CC) + " --body-file " + missing) or ""
+    assert UNSEEABLE_MARK in reason
+    assert REASON_UNREADABLE in reason
+
+
+@pytest.mark.parametrize("cmd", [
+    "gh api repos/o/r/issues -f title=t -f body=" + q(CC) + " -f body=" + q(NO_CC),
+    "gh api repos/o/r/issues -f body=" + q(NO_CC) + " -f body=" + q(CC),
+    "gh api repos/o/r/issues -F body=" + q(CC) + " -f body=" + q(NO_CC),
+    "gh api repos/o/r/issues -f body=" + q(NO_CC) + " -F body=" + q(CC),
+    "gh api -X POST repos/o/r/issues --field body=" + q(CC) +
+    " --raw-field body=" + q(NO_CC),
+])
+def test_a_repeated_gh_api_body_field_is_reported_as_unseeable(cmd):
+    """gh REJECTS it outright, so there is no body to check — and saying "no
+    closing condition" about a call gh will not run would be a wrong fact."""
+    reason = ev(cmd) or ""
+    assert UNSEEABLE_MARK in reason, cmd
+    assert REASON_DUP_FIELD in reason, cmd
+
+
+@pytest.mark.parametrize("cmd", [
+    "gh api repos/o/r/issues -f title=t -f body=" + q(CC),
+    "gh api -X POST repos/o/r/issues -F body=" + q(AC),
+    # two DIFFERENT keys are not a repeat — gh accepts them and so must this
+    "gh api repos/o/r/issues -f title=t -f labels=bug -f body=" + q(CC),
+    "gh api repos/o/r/issues -f title=t -F body=" + q(AC),
+    # `body[]=` is gh's ARRAY syntax, which APPENDS rather than colliding
+    "gh api repos/o/r/issues -f 'body[]=x' -f 'body[]=y' -f body=" + q(CC),
+])
+def test_a_single_gh_api_body_field_is_unaffected(cmd):
+    assert ev(cmd) is None, cmd
+
+
+CURL_URL = "https://api.github.com/repos/o/r/issues"
+
+
+@pytest.mark.parametrize("cmd", [
+    "curl -X POST " + CURL_URL + " -d " + q(json.dumps({"title": "t", "body": CC})) +
+    " -d " + q(json.dumps({"body": NO_CC})),
+    "curl -X POST " + CURL_URL + " -d " + q(json.dumps({"body": NO_CC})) +
+    " -d " + q(json.dumps({"body": CC})),
+    "curl -X POST " + CURL_URL + " --data " + q(json.dumps({"body": CC})) +
+    " --data-raw " + q(json.dumps({"body": NO_CC})),
+])
+def test_repeated_curl_data_is_MERGED_not_taken_one_at_a_time(cmd):
+    """curl(1): "If any of these options is used more than once on the same
+    command line, the data pieces specified are merged with a separating
+    &-symbol." Two JSON objects joined by `&` are not JSON, so the gate cannot
+    read a body — which is the true fact, and GitHub would reject the request
+    for the same reason."""
+    reason = ev(cmd) or ""
+    assert UNSEEABLE_MARK in reason, cmd
+    assert REASON_JSON in reason, cmd
+
+
+# 🔴 SPLIT AT A STRUCTURAL POSITION, NOT AN ARBITRARY OFFSET. The pair below is
+# the control that separates the two curl families, and it only works if the two
+# joins give DIFFERENT answers: `"".join` must produce valid JSON and `"&".join`
+# must not. An earlier version of these fixtures split `json.dumps(...)` at
+# character 12 — INSIDE the title's string literal — so an inserted `&` landed
+# harmlessly in a value and BOTH joins parsed. The mutants that swap one family's
+# separator for the other's survived a fully green suite on exactly that.
+JSON_HEAD = '{"title":"t",'
+JSON_TAIL = '"body":' + json.dumps(CC) + "}"
+
+
+def test_a_split_curl_json_payload_is_CONCATENATED_and_readable():
+    """🔴 THE RULE MUST BE PER FAMILY, AND THIS IS THE CASE THAT PROVES IT. curl
+    documents `--json` as concatenating with NO separator — its own man page
+    example splits one object across two `--json` arguments — so applying the `&`
+    rule here would DENY a correct call. It denied at the pre-fix hook for a
+    different reason (each half parsed alone, neither is JSON); it must allow
+    now."""
+    assert json.loads(JSON_HEAD + JSON_TAIL)["body"] == CC   # the fixture is real
+    assert ev("curl -X POST " + CURL_URL + " --json " + q(JSON_HEAD) +
+              " --json " + q(JSON_TAIL)) is None
+
+
+def test_a_split_curl_DATA_payload_is_AMP_merged_and_therefore_unreadable():
+    """The mirror of the case above, and the other half of the control: the SAME
+    two halves under `-d` are joined with `&`, which is not JSON, so the gate
+    cannot read a body and GitHub would reject the request for the same reason.
+    A rule that gave `-d` the `--json` treatment would ALLOW this."""
+    reason = ev("curl -X POST " + CURL_URL + " -d " + q(JSON_HEAD) +
+                " -d " + q(JSON_TAIL)) or ""
+    assert UNSEEABLE_MARK in reason
+    assert REASON_JSON in reason
+
+
+def test_a_curl_data_argument_carrying_TWO_heredocs_is_unmergeable():
+    """🔴 THE NARROW EDGE OF THE MERGE, ASSERTED BECAUSE IT IS REACHABLE. One
+    `-d` whose substitution opens two heredocs resolves to TWO candidate texts;
+    there is no single string to put in the merge, so the payload is UNRESOLVED
+    rather than silently built from the first. Without that check the gate would
+    merge the FIRST body and quietly ignore the second — reading a payload curl
+    never sends."""
+    cmd = ("curl -X POST " + CURL_URL + " -d \"$(cat <<'A'\n" +
+           json.dumps({"body": CC}) + "\nA\ncat <<'B'\n" +
+           json.dumps({"body": NO_CC}) + "\nB\n)\" -d " + q('{"title":"t"}'))
+    reason = ev(cmd) or ""
+    assert UNSEEABLE_MARK in reason
+    assert REASON_CURL_MERGE in reason
+
+
+@pytest.mark.parametrize("cmd", [
+    # `-d` (&-merged) beside `--json` (concatenated): no single join models it
+    "curl -X POST " + CURL_URL + " -d " + q('{"a":1}') + " --json " +
+    q(json.dumps({"body": CC})),
+    # multipart parts are not a mergeable text payload at all
+    "curl -X POST " + CURL_URL + " -F 'a=1' -F " + q("body=" + CC),
+])
+def test_curl_body_options_this_gate_cannot_merge_are_unseeable(cmd):
+    reason = ev(cmd) or ""
+    assert UNSEEABLE_MARK in reason, cmd
+    assert REASON_CURL_MERGE in reason, cmd
+
+
+@pytest.mark.parametrize("cmd", [
+    "curl -X POST " + CURL_URL + " -d " + q(json.dumps({"title": "t", "body": CC})),
+    "curl --request=POST --data=" + q(json.dumps({"body": AC})) + " " + CURL_URL,
+    "curl -X POST -H 'Accept: application/vnd.github+json' " + CURL_URL +
+    " -d " + q(json.dumps({"body": CC})),
+])
+def test_a_single_curl_data_argument_is_unaffected(cmd):
+    """The shape ~every real curl uses stays byte-for-byte what it was."""
+    assert ev(cmd) is None, cmd
+
+
+def test_only_the_LAST_gh_api_input_answers():
+    """`--input` is a pflag `StringVar` in gh api, so a repeat is last-wins for
+    exactly the reason `--body` is."""
+    good = scratch("input-good.json")
+    bad = scratch("input-bad.json")
+    with open(good, "w") as f:
+        json.dump({"title": "t", "body": CC}, f)
+    with open(bad, "w") as f:
+        json.dump({"title": "t", "body": NO_CC}, f)
+    assert MISSING_MARK in (ev("gh api -X POST repos/o/r/issues --input " + good +
+                               " --input " + bad) or "")
+    assert ev("gh api -X POST repos/o/r/issues --input " + bad +
+              " --input " + good) is None
+
+
+# =========================================================================== #
+# 16. 🔴 THE BRACE-GROUP GAP, PINNED SO IT CANNOT ROT.
+# =========================================================================== #
+@pytest.mark.parametrize("cmd", [
+    "{ " + CREATE + " -t t -b " + q(NO_CC) + "; }",
+    "f(){ " + CREATE + " -t t -b " + q(NO_CC) + "; }; f",
+    "{ " + CREATE + " -t t -b " + q(NO_CC) + "; } > /dev/null",
+])
+def test_a_brace_group_is_a_KNOWN_UNCOVERED_ROUTE(cmd):
+    """🔴 PINNED AS A GAP, NOT LEFT FOR SOMEONE TO REDISCOVER — and PRE-EXISTING,
+    identical on the pre-fix hook.
+
+    `guard_core._tokenise` hands the segment to `shlex.split`, which has no idea
+    `{` is a shell reserved word, so argv[0] is the literal `{` and the argv is
+    not a `gh` at all. It is the same family as the keyword gap above and needs
+    the same shared-tokeniser change.
+
+    🔴 THE TWO PARSERS HERE DISAGREE ABOUT `{`, AND THIS FILE'S ONE IS RIGHT:
+    `_CMD_KEEPERS` lists `{` and `}` because bash's `{` is a reserved word that
+    leaves the NEXT word in command position — which is why the override walk
+    reads `{ GH_ISSUE_NO_CLOSING_CONDITION=1 gh … ; }` correctly (asserted
+    below). `guard_core` is the one that would have to learn it, and that changes
+    what `bash-guard.py` sees on every call. If the tokeniser is widened, these
+    go red and the docstring's NOT-COVERED entry has to go with them."""
+    assert ev(cmd) is None, cmd
+
+
+def test_the_walk_does_read_a_brace_group_as_command_position():
+    """The boundary of the gap above, and the evidence for the claim in its
+    docstring: THIS file's walk gets `{` right even though the shared tokeniser
+    does not. Without `{` in `_CMD_KEEPERS` the assignment after it would not be
+    at command position and the override would be missed."""
+    assert guard._shell_walk("{ " + OVERRIDE_ON + " true; }")[1] is True
+    assert guard._shell_walk("{ true; }")[1] is False

@@ -1728,7 +1728,26 @@ TARGET_FLOORS=(
   # copy of the tree, killed 6/6 real mutants with the positive control also
   # killed. ZERO new skips, so EXPECTED_SKIPS is untouched.
   #   _suggested_floor 394 = 394 - min(50, max(1, 394/20 = 19)) = 394 - 19 = 375.
-  "scripts/claude-hooks/tests/test_gh_issue_closing_condition_guard.py|375"
+  #
+  # 2026-08-25, bypasses A and B closed: 394 -> 474 collected, 0 skipped. +80.
+  #   A — a create inside a COMMAND SUBSTITUTION. `URL="$(gh issue create …)"`
+  #   allowed while the same line without the two quote characters denied, because
+  #   `guard_core._scan_raw` buffers a double-quoted region verbatim. 39 of the 79
+  #   were watched RED at c8d60161 and green here; the other 41 are INVARIANT
+  #   guards, labelled as such in the file — the ALLOW twin of every hidden-create
+  #   case, the single-quoted-prose battery, the unquoted/nested controls that
+  #   name the variable, and the brace-group gap pinned as a gap.
+  #   B — ONE EFFECTIVE BODY PER SOURCE, each rule measured against the shipped
+  #   tool: pflag last-wins with `--body-file` beating `--body` on gh 2.97.0, a
+  #   repeated `gh api` body field rejected outright, curl 8.17.0 MERGING repeated
+  #   data options (`&` for the `-d` family, plain concatenation for `--json`).
+  #   The mutation sweep — per-mutant tree copy, PYTHONDONTWRITEBYTECODE=1 —
+  #   killed 24/24 real mutants each by its OWN target test, positive control
+  #   (OVERRIDE_VALUE 1->2) also killed; two probe mutants SURVIVED and are
+  #   recorded as not-covered in the hook's own comments rather than counted.
+  #   ZERO new skips, so EXPECTED_SKIPS is untouched.
+  #   _suggested_floor 474 = 474 - min(50, max(1, 474/20 = 23)) = 474 - 23 = 451.
+  "scripts/claude-hooks/tests/test_gh_issue_closing_condition_guard.py|451"
   # 2026-08-18, the on-disk artifact-name registry arrives as a NEW target: 13
   # collected. Deliberately small — one test per module whose names it pins, plus the
   # two-sided classification guard that fails when a hook module appears or vanishes.

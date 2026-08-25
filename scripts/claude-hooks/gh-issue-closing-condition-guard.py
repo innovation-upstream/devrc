@@ -60,6 +60,28 @@ COVERED (classified from a real argv, never from adjacency in the raw text):
                                       `-f`/`-F`/`--input` payload, which is what
                                       makes gh default to POST
   * `curl` POST to a `…/issues` URL path
+  * any of the three INSIDE A COMMAND SUBSTITUTION, quoted or not:
+    `URL="$(gh issue create …)"`, `echo "created: $(…)"`, `if [ -n "$(…)" ]`,
+    the backtick spelling, and nested ones. A substitution RUNS -- the quotes
+    only decide how its OUTPUT is word-split -- so capturing the new issue's URL,
+    the single most natural thing to write, is not a way past this gate. It was
+    until 2026-08-25: `guard_core._scan_raw` buffers a double-quoted region
+    verbatim, so `"$( … )"` survived as ONE argv token and the create inside was
+    never enumerated, while the same line WITHOUT the two quote characters
+    denied. `substitution_scopes` closes it inside this file; `guard_core` is
+    untouched. The override reaches these too, in command position inside the
+    substitution -- see `creating_invocations`.
+
+🔴 ONE EFFECTIVE BODY PER SOURCE. A create that names a body flag TWICE is judged
+on the value the tool actually sends, not on whichever one happened to carry the
+heading: `--body`/`-b` and `--body-file`/`-F` are last-wins with `--body-file`
+beating `--body` outright, a repeated `gh api` `body` field is a hard gh error,
+and curl MERGES repeated data options rather than replacing. Each rule is
+measured against the shipped tool and cited where it is implemented
+(`body_candidates`, `_api_body_fields`, `CURL_DATA_JOIN`). Aggregating them, as
+this file did until 2026-08-25, meant ~40 characters of stock text in a discarded
+argument bought a pass -- the same "spelled, not structural" failure the ANSI-C
+paragraph above refuses, arrived at from the other side.
 
 NOT COVERED, deliberately enumerated so this file cannot read as wider than it
 is (a guard that does that stops people looking -- RULES.md):
@@ -78,6 +100,21 @@ is (a guard that does that stops people looking -- RULES.md):
     after this fix round, and NOT fixed here: the peeler is `guard_core`'s and
     is shared with `bash-guard.py`, so widening it is its own change with its
     own blast radius. Recorded rather than left for someone to rediscover.
+  * 🔴 A CREATE INSIDE A BRACE GROUP OR A FUNCTION BODY, same mechanism, one
+    keyword further out: `{ gh issue create …; }` and
+    `f(){ gh issue create …; }; f` both ALLOW, because `guard_core._tokenise`
+    hands the segment to `shlex.split`, which has no idea `{` is a shell reserved
+    word, so argv[0] is the literal `{`. THE TWO PARSERS HERE DISAGREE ABOUT `{`
+    AND THIS FILE'S ONE IS RIGHT: `_CMD_KEEPERS` lists `{` and `}` precisely
+    because bash's `{` is a reserved word that leaves the NEXT word in command
+    position, which is why the override walk gets `{ GH_ISSUE_… =1 gh … ; }`
+    right. Fixing the enumeration means teaching the SHARED tokeniser the same
+    thing, and it would change what `bash-guard.py` sees on every call -- its own
+    change, its own blast radius. Measured 2026-08-25, unchanged by this round,
+    and pinned by test_a_brace_group_is_a_KNOWN_UNCOVERED_ROUTE so it cannot rot.
+    Note it is NOT reachable by simply wrapping a create in braces to hide it and
+    hoping: `{` must be followed by a space and the group by a `;` or newline, or
+    bash itself rejects the line.
   * `gh issue create --web` / `-w`, which does NOT post: gh opens the browser's
     new-issue form and exits, so the object is created by a human in a form this
     process cannot see. Structurally exempt, like `--help`; it is a one-flag way
@@ -97,6 +134,16 @@ test_a_body_quoting_a_heredoc_operator_is_a_KNOWN_FALSE_POSITIVE. The fix is to
 make the SCRUB quote-aware while body resolution stays blind; that is a change to
 the mechanism the mention-is-not-an-invocation requirement rests on and has not
 been made.
+
+🔴 AND ONE CONSEQUENCE OF READING SUBSTITUTIONS, recorded for the same reason: a
+DOUBLE-quoted body carrying an UNESCAPED backtick span or `$( … )` around a
+`gh issue create` now denies, where it used to pass. That is not a mention -- in
+`"…"` bash really does run what is between the backticks and splice its output
+into the body -- so the same line would have mangled the issue either way; the
+gate is telling you the quoting is wrong. SINGLE-quoted bodies (the spelling
+every correct example here uses) and backslash-escaped spans are untouched, and
+both are pinned. Cost: a body written with double quotes and raw markdown code spans
+denies, with a message that names the override.
 
 ONLY `create`. `gh issue comment|edit|close|reopen|list|view|status|develop`,
 `gh pr create`, and a GET of `…/issues` all pass untouched. This gate exists to
@@ -354,10 +401,32 @@ GH_API_VALUE_FLAGS = GH_API_FIELD_FLAGS + (
     "-t", "--template", "--cache", "-p", "--preview",
 )
 
-# curl flags that carry a request body.
-CURL_DATA_FLAGS = (
+# curl flags that carry a request body, split by WHAT REPEATING ONE DOES.
+#
+# 🔴 curl DOES NOT TAKE THE LAST ONE. Measured against curl(1) as shipped here
+# (curl 8.17.0), because assuming the gh rule would have been wrong in the
+# direction that invents a body nobody sent:
+#   * `-d`/`--data`/`--data-raw`/`--data-ascii`/`--data-binary`/`--data-urlencode`
+#     — "If any of these options is used more than once on the same command line,
+#     the data pieces specified are merged with a separating &-symbol."
+#   * `--json` — "data pieces are concatenated to the previous before sending",
+#     with NO separator; curl's own example splits one JSON object across two
+#     `--json` arguments.
+#   * `-F`/`--form` and `-T`/`--upload-file` are not a mergeable text payload at
+#     all (multipart parts / a whole-file PUT), so no join models them.
+CURL_AMP_DATA_FLAGS = (
     "-d", "--data", "--data-raw", "--data-ascii", "--data-binary",
-    "--data-urlencode", "--json", "-F", "--form", "-T", "--upload-file",
+    "--data-urlencode",
+)
+CURL_CONCAT_DATA_FLAGS = ("--json",)
+CURL_OTHER_BODY_FLAGS = ("-F", "--form", "-T", "--upload-file")
+CURL_DATA_FLAGS = CURL_AMP_DATA_FLAGS + CURL_CONCAT_DATA_FLAGS + CURL_OTHER_BODY_FLAGS
+# The separator curl inserts between repeats of each family, or None for a family
+# whose repeats this gate will not model.
+CURL_DATA_JOIN = dict(
+    [(f, "&") for f in CURL_AMP_DATA_FLAGS]
+    + [(f, "") for f in CURL_CONCAT_DATA_FLAGS]
+    + [(f, None) for f in CURL_OTHER_BODY_FLAGS]
 )
 CURL_METHOD_FLAGS = ("-X", "--request")
 # curl flags that take a value we must not mistake for a URL or a body.
@@ -617,8 +686,43 @@ _SEPARATOR_CHARS = ";&|\n"
 _WORD_BREAK = " \t\r\n;&|()<>`"
 
 
-def _read_word(text, i, n):
-    """`(word, next index)` for the shell word starting at `i`."""
+def _substitution_end(text, i, n):
+    """`(inner start, inner end, next index)` for the substitution opening at `i`.
+
+    `$( … )` counts nesting; `` ` … ` `` ends at the next backtick. An opener with
+    no closer runs to the end of the text — the fail-CLOSED reading, so a
+    truncated substitution cannot hide the command inside it.
+    """
+    if text[i] == "`":
+        j = text.find("`", i + 1)
+        return (i + 1, n, n) if j == -1 else (i + 1, j, j + 1)
+    depth, j = 1, i + 2
+    while j < n and depth:
+        if text[j] == "(":
+            depth += 1
+        elif text[j] == ")":
+            depth -= 1
+        j += 1
+    return (i + 2, j - 1, j) if depth == 0 else (i + 2, n, n)
+
+
+def _read_word(text, i, n, subs=None):
+    """`(word, next index)` for the shell word starting at `i`.
+
+    🔴 `subs` COLLECTS SUBSTITUTIONS THIS WORD SWALLOWED, and without it half of
+    bypass A stayed open after the walk itself was fixed. A word is read whole,
+    quotes included, so `URL="$(gh issue create …)"` — one assignment word — was
+    consumed here in its entirety and `_shell_walk`'s own `$(` branch never saw
+    the opener at all: the create inside stayed invisible while the
+    otherwise-identical `echo "created: $(…)"` (whose argument STARTS with the
+    quote, so the main walk handles it) was found. Same for `--flag="$( … )"`.
+    A word can carry a command; recording it here is what makes the two agree.
+
+    Only a DOUBLE-quoted region is scanned: inside `'…'` a `$(` is literal text,
+    and at top level the word BREAKS at `$(` (and at a backtick, via
+    `_WORD_BREAK`) so the caller's own branch sees it — which is why nothing is
+    recorded twice.
+    """
     out, quote = [], None
     while i < n:
         c = text[i]
@@ -626,6 +730,13 @@ def _read_word(text, i, n):
             if c == "\\" and quote == '"' and i + 1 < n:
                 out.append(text[i + 1])
                 i += 2
+                continue
+            if quote == '"' and (c == "`" or (c == "$" and text[i + 1:i + 2] == "(")):
+                lo, hi, nxt = _substitution_end(text, i, n)
+                if subs is not None:
+                    subs.append(text[lo:hi])
+                out.append(text[i:nxt])
+                i = nxt
                 continue
             if c == quote:
                 quote = None
@@ -650,7 +761,8 @@ def _read_word(text, i, n):
 
 
 def _shell_walk(text):
-    """`(segments, override)` — one TEXT per top-level command segment.
+    """`(segments, override, substitutions)` — one TEXT per top-level command
+    segment, plus the INNER TEXT of every command substitution on the line.
 
     A segment is a TOP-LEVEL command, split on unquoted `;`/`&`/`|`/newline and
     on a subshell paren, with the bodies of the heredocs THAT COMMAND OPENED
@@ -681,12 +793,31 @@ def _shell_walk(text):
     COMMAND POSITION at substitution depth 0 — the assignment bash would actually
     put in `gh`'s environment. Inside `$( … )` or a backtick it is a different
     process's environment and does not count; inside a quote it is prose.
+
+    🔴 `substitutions` IS THE THIRD ELEMENT AND IT CLOSES A REAL BYPASS. This walk
+    already had to enter `$( … )` and `` ` … ` `` INSIDE A DOUBLE QUOTE to decide
+    the override correctly (see the `quote == '"'` branch), so it is the one
+    parser here that can see a command hidden there. `guard_core._scan_raw` cannot:
+    its `if quote:` branch buffers every byte of a double-quoted region verbatim,
+    so `"$( … )"` survives as ONE argv TOKEN and the command inside it is never
+    enumerated. `URL="$(gh issue create -t t -b 'nope')"` — the single most
+    natural way to capture the new issue's URL — therefore ALLOWED, while the
+    same line without the two quote characters DENIED. Collecting the inner text
+    here and enumerating it in `creating_invocations` is what makes the two agree.
+
+    The inner text is the RAW SLICE between the opener and its matching closer, so
+    a heredoc body that a command inside the substitution opened is inside it
+    (the walk steps OVER those bytes, but they are still between the two offsets)
+    and re-parses when the slice is walked again. An UNCLOSED substitution yields
+    the tail; that is the fail-CLOSED direction — a truncated `$(` must not hide
+    a create.
     """
     n = len(text)
     heres = heredocs(text)
     skip = {h.start: h.after for h in heres}
     spans, seg_lo = [], 0
-    stack = []            # (saved quote, closing char) per open substitution
+    subs = []             # inner text of every closed command substitution
+    stack = []            # (saved quote, closing char, inner start) per open one
     quote, at_cmd, override, i = None, True, False, 0
     while i < n:
         if i in skip:
@@ -714,11 +845,11 @@ def _shell_walk(text):
                 i += 2
                 continue
             if c == "$" and text[i + 1:i + 2] == "(":
-                stack.append((quote, ")"))
+                stack.append((quote, ")", i + 2))
                 quote, at_cmd, i = None, True, i + 2
                 continue
             if c == "`":
-                stack.append((quote, "`"))
+                stack.append((quote, "`", i + 1))
                 quote, at_cmd, i = None, True, i + 1
                 continue
             if c == '"':
@@ -730,16 +861,18 @@ def _shell_walk(text):
             i += 2
             continue
         if c == "$" and text[i + 1:i + 2] == "(":
-            stack.append((quote, ")"))
+            stack.append((quote, ")", i + 2))
             at_cmd, i = True, i + 2
             continue
         if stack and ((c == ")" and stack[-1][1] == ")")
                       or (c == "`" and stack[-1][1] == "`")):
-            quote = stack.pop()[0]
+            saved_quote, _closer, sub_lo = stack.pop()
+            subs.append(text[sub_lo:i])
+            quote = saved_quote
             at_cmd, i = False, i + 1
             continue
         if c == "`":
-            stack.append((quote, "`"))
+            stack.append((quote, "`", i + 1))
             at_cmd, i = True, i + 1
             continue
         if c in ("'", '"'):
@@ -759,7 +892,7 @@ def _shell_walk(text):
         if c.isspace():
             i += 1
             continue
-        word, j = _read_word(text, i, n)
+        word, j = _read_word(text, i, n, subs)
         if at_cmd and not stack:
             if _ASSIGN_WORD.match(word):
                 override = override or word == OVERRIDE_ASSIGNMENT
@@ -768,6 +901,21 @@ def _shell_walk(text):
         else:
             at_cmd = False
         i = max(j, i + 1)
+    # An opener with no closer: the rest of the line is its inner text. Fail
+    # CLOSED — a `$(` the walk never closed must not swallow a create silently.
+    #
+    # 🔴 NOT DEMONSTRATED BY ANY TEST, AND SAID SO RATHER THAN LEFT TO READ AS
+    # COVERAGE. Mutation-checked 2026-08-25 by emptying this loop: SURVIVED the
+    # whole suite, because `guard_core._scan_raw`'s own unterminated-quote
+    # recovery already re-reads the tail and exposes the create, so both
+    # unterminated shapes in
+    # test_an_unterminated_substitution_still_shows_the_create deny either way
+    # (they denied at the pre-fix hook too — an invariant guard, not regression
+    # coverage). It is kept because the two parsers recover by different routes
+    # and the cost of being wrong here is a create going unseen; it is NOT
+    # evidence that this file handles truncated input on its own.
+    for _saved, _closer, sub_lo in stack:
+        subs.append(text[sub_lo:n])
     spans.append((seg_lo, n))
     segments = []
     for lo, hi in spans:
@@ -782,7 +930,7 @@ def _shell_walk(text):
         bodies = [text[h.start:h.after]
                   for h in heres if lo <= h.op < hi and h.start >= hi]
         segments.append((head + "\n" + "".join(bodies)) if bodies else head)
-    return segments, override
+    return segments, override, subs
 
 
 def command_segments(text):
@@ -792,6 +940,31 @@ def command_segments(text):
     command opened — see `_shell_walk` for why that cannot be one slice.
     """
     return _shell_walk(text)[0]
+
+
+def substitution_scopes(text):
+    """Command-segment TEXTS from inside every `$( … )` / `` ` … ` `` on `text`.
+
+    🔴 A COMMAND SUBSTITUTION RUNS. That is the entire argument for reading it,
+    and it is why the shape this closes is not a "mention": bash forks a shell,
+    executes what is inside, and substitutes the output — so a `gh issue create`
+    there files an issue exactly as a bare one does. Quoting the substitution
+    changes only how the RESULT is word-split, never whether it executes.
+
+    The nesting is already handled by `_shell_walk`'s stack: an inner `$( … )`
+    closes first and is recorded on its own, an outer one is recorded whole, so
+    both are returned and nothing here needs to recurse.
+    """
+    out = []
+    for body in _shell_walk(text)[2]:
+        # No blank-body skip here on purpose: `command_segments` already drops a
+        # segment whose text is all whitespace, so one would be a `continue` that
+        # can never change an answer. It was written, mutation-checked, found to
+        # SURVIVE every case in the suite for exactly that reason, and deleted.
+        for seg in command_segments(body):
+            if seg not in out:
+                out.append(seg)
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -973,7 +1146,13 @@ def is_gh_api_issue_create(argv):
 
 
 def _curl_parts(argv):
-    """(method, [url paths], [data values]) for a curl argv.
+    """(method, [url paths], [(data flag, data value), …]) for a curl argv.
+
+    🔴 THE DATA LIST CARRIES THE FLAG NAME, NOT JUST THE VALUE, because which
+    flag it was decides how curl MERGES repeats — see `CURL_DATA_JOIN`. Dropping
+    the name here is what made `-d <good> -d <bad>` readable as "some payload
+    carried the heading", when the bytes curl actually sends are the two values
+    joined by `&`.
 
     🔴 EVERY FLAG READ THROUGH `_match_flag`, NOT BY EXACT-TOKEN EQUALITY. This
     used to test `tok in CURL_DATA_FLAGS`, so `--request=POST`, `--data=…`,
@@ -995,7 +1174,7 @@ def _curl_parts(argv):
         hit = _match_flag(argv, i, CURL_DATA_FLAGS)
         if hit is not None:
             if hit[1] is not None:
-                data.append(hit[1])
+                data.append((hit[0], hit[1]))
             i = hit[2]
             continue
         hit = _match_flag(argv, i, ("--url",))
@@ -1078,6 +1257,10 @@ UNRESOLVED_STDIN = "the body is piped in on stdin, where a PreToolUse hook canno
 UNRESOLVED_UNREADABLE = "the body-file path could not be read"
 UNRESOLVED_NONE = "the command names no body this gate can read"
 UNRESOLVED_JSON = "the request payload is not JSON this gate can parse"
+UNRESOLVED_CURL_MERGE = (
+    "several curl body options are combined in a way this gate cannot reconstruct")
+UNRESOLVED_DUP_FIELD = (
+    "the body field is given more than once, which gh rejects outright")
 
 
 def _match_flag(argv, i, names):
@@ -1249,25 +1432,68 @@ def _resolve_json_payload(payloads):
     return [], (UNRESOLVED_JSON if failed else UNRESOLVED_NONE)
 
 
-def _resolve_curl_data(value, text, full=None):
-    """([body, …], reason-or-None) for one curl data argument."""
+def _curl_data_texts(value, text, full=None):
+    """([raw payload text, …], reason-or-None) for one curl data argument.
+
+    The texts are UNPARSED on purpose: repeats of a data flag are merged by curl
+    BEFORE anything is sent, so JSON-parsing a single argument would be parsing
+    something curl never transmits. `_resolve_curl_payload` does the merge and
+    hands the result to `_resolve_json_payload` exactly once.
+    """
     if value.startswith("@"):
         # 🔴 `-d @file` / `-d @-` still has to be JSON-PARSED afterwards.
         # Returning the file's raw bytes as a body candidate is a real defect: a
         # payload `{"body":"## Closing condition\n…"}` carries the heading only
         # as an ESCAPED \n, so the line-based detector never sees a heading and a
         # correctly-specified create is denied.
-        payloads, why = _resolve_file(value[1:], text, full)
+        return _resolve_file(value[1:], text, full)
+    payloads = heredoc_bodies(value) or ([] if opaque_value(value) else [value])
+    if not payloads:
+        outer = heredoc_bodies(text)
+        if not outer:
+            return [], UNRESOLVED_OPAQUE
+        payloads = outer
+    return payloads, None
+
+
+def _resolve_curl_payload(data, text, full=None):
+    """([body, …], reason-or-None) for the ONE payload this curl actually sends.
+
+    `data` is `[(flag, value), …]` in argv order — see `_curl_parts`.
+
+    🔴 curl MERGES REPEATED DATA OPTIONS; IT DOES NOT TAKE THE LAST ONE, and it
+    does not evaluate them independently either. Treating each argument as its
+    own candidate meant a create passed as soon as ANY of them carried the
+    heading, so ~40 characters of stock text in a `-d` curl never sends as its own
+    request bought a pass — the "spelled, not structural" failure this gate
+    refused to allow for ANSI-C decoding. The merge rule is per family and is
+    quoted from curl(1) at `CURL_DATA_JOIN`.
+
+    Two deliberate fail-CLOSED edges:
+      * mixed families (`-d` beside `--json`, or any `-F`/`-T`) have no single
+        join this gate can claim, so the payload is UNRESOLVED rather than
+        guessed;
+      * an argument that resolves to SEVERAL alternative texts (a value carrying
+        more than one heredoc) cannot be placed in a merge, so the same.
+    Both keep the single-argument path — the shape ~every real curl uses —
+    byte-for-byte what it was.
+    """
+    if len(data) == 1:
+        payloads, why = _curl_data_texts(data[0][1], text, full)
+        return ([], why) if why else _resolve_json_payload(payloads)
+    joins = {CURL_DATA_JOIN.get(flag) for flag, _ in data}
+    if len(joins) != 1 or None in joins:
+        return [], UNRESOLVED_CURL_MERGE
+    sep = joins.pop()
+    pieces = []
+    for _flag, value in data:
+        got, why = _curl_data_texts(value, text, full)
         if why:
             return [], why
-    else:
-        payloads = heredoc_bodies(value) or ([] if opaque_value(value) else [value])
-        if not payloads:
-            outer = heredoc_bodies(text)
-            if not outer:
-                return [], UNRESOLVED_OPAQUE
-            payloads = outer
-    return _resolve_json_payload(payloads)
+        if len(got) != 1:
+            return [], UNRESOLVED_CURL_MERGE
+        pieces.append(got[0])
+    return _resolve_json_payload([sep.join(pieces)])
 
 
 def _resolve_gh_api_field(value, text, at_file, full=None):
@@ -1292,18 +1518,86 @@ def _resolve_gh_api_field(value, text, at_file, full=None):
     return _resolve_inline(val, text)
 
 
+def _api_body_fields(argv):
+    """[(field value, is `-F`/`--field`), …] naming `body`, in gh's OWN order.
+
+    🔴 gh api PROCESSES EVERY `-f`/`--raw-field` FIRST, THEN EVERY
+    `-F`/`--field` — regardless of the order they were typed in — and REFUSES a
+    key it has already set. Read from `parseFields` in
+    `cli/cli@v2.97.0:pkg/cmd/api/fields.go`:
+
+        } else {
+            if _, exists := destMap[subkey]; exists {
+                return fmt.Errorf("unexpected override existing field under %q", subkey)
+            }
+            destMap[subkey] = value
+        }
+
+    Verified against the shipped binary (gh 2.97.0): `-f body=A -f body=B`,
+    `-f body=A -F body=B` and `-F body=A -f body=B` ALL exit with
+    `unexpected override existing field under "body"`, while the single-field
+    control `-f body=A` reaches the API. So a repeated body field is not
+    last-wins here the way `gh issue create --body` is — it is a hard error, and
+    the caller sees whichever of the two they wrote LAST no more than the first.
+    The ordering below matters only for the single-field case; it is gh's, so
+    this function cannot drift from it in the direction that reads the wrong one.
+    """
+    out = []
+    for at_file, flags in ((False, GH_API_RAW_FIELD_FLAGS),
+                           (True, GH_API_AT_FILE_FLAGS)):
+        for value in _flag_values(argv, flags):
+            key = value.split("=", 1)[0] if "=" in value else None
+            if key is not None and key.strip() == "body":
+                out.append((value, at_file))
+    return out
+
+
 def body_candidates(argv, text, route, full=None):
     """([every body text this gate could read], reason the rest were unreadable).
 
-    The reason is None when everything named was resolved. Aggregating rather
-    than picking ONE source is deliberate: a command may legitimately name a
-    body-file that a heredoc on the same line is about to write, and a candidate
-    is only ever used to let the command THROUGH.
+    The reason is None when everything named was resolved.
+
+    🔴 ONE EFFECTIVE BODY PER SOURCE, NOT EVERY BODY-SHAPED ARGUMENT ON THE LINE.
+    This used to aggregate every candidate and `evaluate` passed if ANY of them
+    carried the heading, so a SECOND body flag was a bypass:
+    `gh issue create --body '<a correct section>' --body 'nope'` allowed, while
+    `gh` sends only the LAST value and GitHub only ever renders that one. ~40
+    characters of stock text that never reach GitHub bought a pass — the
+    "spelled, not structural" failure the module docstring refuses to allow for
+    ANSI-C decoding, arrived at from the other side.
+
+    The rule is per source because the three tools genuinely disagree, and one
+    rule applied everywhere would be WRONG in the direction that false-denies:
+
+      * `gh issue create` registers `--body`/`-b` and `--body-file`/`-F` as pflag
+        `StringVarP`, so a REPEAT of either is last-wins (measured on gh 2.97.0:
+        `gh api --hostname aaa-first.invalid --hostname bbb-last.invalid …`
+        connects to `bbb-last.invalid`). Across the two flags `--body-file` wins
+        REGARDLESS OF ORDER: `create.go` assigns `opts.Body = string(b)` after
+        `--body` has already been bound, and the file is read even when `--body`
+        was given (measured: `--body 'aaa' --body-file /nonexistent/zz.md` fails
+        with `open /nonexistent/zz.md: no such file or directory`, never reaching
+        the API).
+      * `gh api` REJECTS a repeated `body` field outright — see `_api_body_fields`.
+      * `curl` MERGES repeated data options rather than replacing — see
+        `_resolve_curl_payload` and `CURL_DATA_JOIN`.
+
+    Aggregation WITHIN one source is still deliberate and is untouched: a single
+    `--body-file` may resolve to several candidate texts (a heredoc about to
+    write that path), and a candidate is only ever used to let the command
+    through.
+
+    🔴 A DELIBERATE OVER-BLOCK, RECORDED RATHER THAN HIDDEN: `--body '<good>'
+    --body-file <unreadable>` now denies as "cannot see the body". gh would ERROR
+    on that call, so nothing is created either way, and the alternative — reading
+    the `--body` gh discards — is the bypass this fixes.
 
     🔴 `text` IS THIS CREATE'S OWN COMMAND SEGMENT, NOT THE COMMAND LINE. That is
     the whole of the B2/B3 fix and it is a change of MEANING, not of degree —
-    aggregation across sources on ONE command is deliberate, aggregation across
-    COMMANDS was a bug. The segment carries the bodies of the heredocs this
+    aggregation across COMMANDS was a bug. (The sentence that stood here also
+    called aggregation across SOURCES on one command deliberate; the block above
+    is where that stopped being true, and the two lines were one edit apart on
+    purpose.) The segment carries the bodies of the heredocs this
     command's own text opened (attributed by the `<<` offset), so a
     `heredoc_bodies(text)` here reads this create's body and no other's, however
     the openers are interleaved on the line. `full` is threaded through for the
@@ -1322,25 +1616,36 @@ def body_candidates(argv, text, route, full=None):
 
     if route == "curl":
         _, _, data = _curl_parts(argv)
-        for value in data:
-            take(_resolve_curl_data(value, text, full))
+        if data:
+            take(_resolve_curl_payload(data, text, full))
     elif route == "gh-api":
-        for value in _flag_values(argv, GH_API_AT_FILE_FLAGS):
-            take(_resolve_gh_api_field(value, text, True, full))
-        for value in _flag_values(argv, GH_API_RAW_FIELD_FLAGS):
-            take(_resolve_gh_api_field(value, text, False))
-        for value in _flag_values(argv, ("--input",)):
+        fields = _api_body_fields(argv)
+        if len(fields) > 1:
+            take(([], UNRESOLVED_DUP_FIELD))
+        elif fields:
+            value, at_file = fields[0]
+            take(_resolve_gh_api_field(value, text, at_file, full))
+        # `--input` is a pflag `StringVar` in gh api, so a repeat is last-wins for
+        # the same reason `--body` is; only the last one names the request body.
+        inputs = _flag_values(argv, ("--input",))
+        if inputs:
+            value = inputs[-1]
             if value in STDIN_NAMES:
                 inner = heredoc_bodies(text)
                 take(_resolve_json_payload(inner) if inner else ([], UNRESOLVED_STDIN))
-                continue
-            payloads, why = _resolve_file(value, text, full)
-            take(([], why) if why else _resolve_json_payload(payloads))
+            else:
+                payloads, why = _resolve_file(value, text, full)
+                take(([], why) if why else _resolve_json_payload(payloads))
     else:
-        for value in _flag_values(argv, GH_ISSUE_BODY_FLAGS):
-            take(_resolve_inline(value, text))
-        for value in _flag_values(argv, GH_ISSUE_BODY_FILE_FLAGS):
-            take(_resolve_file(value, text, full))
+        # `--body-file` beats `--body` whatever the order, and within either flag
+        # the LAST spelling is the one gh binds. See this function's docstring for
+        # the measurement behind both halves.
+        files = _flag_values(argv, GH_ISSUE_BODY_FILE_FLAGS)
+        bodies = _flag_values(argv, GH_ISSUE_BODY_FLAGS)
+        if files:
+            take(_resolve_file(files[-1], text, full))
+        elif bodies:
+            take(_resolve_inline(bodies[-1], text))
 
     if not cands and reason is None:
         # No body argument this gate could read. A heredoc on THIS COMMAND is
@@ -1496,12 +1801,47 @@ def creating_invocations(text, guard_core):
     whole-text pass and keeps the OLD line-wide scope. That is deliberate: the
     backstop must not be able to turn a create that used to ALLOW into a deny,
     only to keep one from disappearing.
+
+    🔴 THE SUBSTITUTION PASS IS SECOND, AND IT IS DEDUPED AGAINST THE FIRST.
+    `guard_core` already lifts an UNQUOTED `$( … )` into its own segment, so
+    `echo $(gh issue create …)` is found by the first loop with its line-wide
+    scope; what the shared core cannot lift is a substitution inside a DOUBLE
+    QUOTE (its `if quote:` branch buffers the region verbatim), and that is the
+    set this loop adds. Skipping an argv the first loop already attributed keeps
+    the pass additive: nothing already seen is re-judged under a second, narrower
+    scope.
+
+    🔴 THE DEDUPE ITSELF IS A CONSERVATIVE CHOICE, NOT A TESTED ONE, and that is
+    recorded rather than dressed up. Mutation-checked 2026-08-25 by deleting the
+    `argv not in seen` clause: SURVIVED the whole suite. The hazard it is aimed at
+    — the same argv judged twice, the second time under a scope missing a heredoc
+    the first one carried, so a create that ALLOWED denies — was searched for and
+    NOT reproduced. It is kept because every duplicate can only make `evaluate`
+    stricter and the failure direction is a false deny; do not cite it as covered.
     """
     out, seen = [], []
     for scope in command_segments(text):
         for argv in guard_core.commands(scrub_inert_heredocs(scope)):
             route = _route(argv)
             if route and not is_exempt_invocation(argv, route):
+                out.append((argv, route, scope))
+                seen.append(argv)
+    for scope in substitution_scopes(text):
+        # 🔴 THE ESCAPE HATCH HAS TO REACH THE SHAPE THE HATCH IS FOR. A
+        # substitution runs in its own shell, so `GH_ISSUE_NO_CLOSING_CONDITION=1`
+        # in command position INSIDE it is the assignment bash puts in THAT `gh`'s
+        # environment — the override's documented spelling, "on the call itself".
+        # `override_requested` cannot see it: `_shell_walk` deliberately ignores
+        # an assignment at substitution depth > 0, which is right for the line
+        # (there it is a different process's environment) and wrong once the call
+        # inside is the thing being judged. Without this, the newly-covered shapes
+        # would be the only ones with no way out — and a gate nobody can get past
+        # is the one people switch off.
+        if _shell_walk(scope)[1]:
+            continue
+        for argv in guard_core.commands(scrub_inert_heredocs(scope)):
+            route = _route(argv)
+            if route and not is_exempt_invocation(argv, route) and argv not in seen:
                 out.append((argv, route, scope))
                 seen.append(argv)
     for argv in guard_core.commands(scrub_inert_heredocs(text)):
