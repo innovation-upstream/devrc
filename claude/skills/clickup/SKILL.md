@@ -121,3 +121,6 @@ there is no ClickUp hook; it is a convention, and the flow says so first.
 - **CHANGING this skill** — where to edit so the change deploys, the nix-built
   `node_modules` + `npmDepsHash`, and the test suites →
   `~/.claude/skills/clickup/reference/maintaining.md`.
+- **"`check-clickup-addressed` re-derives `awaiting`'s predicate — consolidate them"**
+  → `~/.claude/skills/clickup/reference/awaiting-vs-ccua.md`. It cannot; the answer is
+  measured, not argued. Read it BEFORE proposing that ccua call `query.mjs awaiting`.

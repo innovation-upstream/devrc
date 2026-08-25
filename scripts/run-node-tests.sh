@@ -232,7 +232,18 @@ SUITES=(
   # flows/task-hygiene.md's no-enforcement disclaimer is pinned as prose (it was
   # guarded by nothing; flipping it to a false gate claim went fully green).
   # Floor 163 = 171 - min(50, max(1, 171/20)) = 171 - 8.
-  "claude/skills/clickup/test|5|163"
+  #
+  # 188 tests / 6 files measured 2026-08-24: test/awaiting-contract.test.mjs, the JS
+  # half of the CROSS-LANGUAGE contract for "the newest comment is not the token
+  # owner's". That predicate is implemented twice — here as `isAwaiting()`, and in
+  # scripts/check-clickup-addressed/ derived across a seam — and nothing made the two
+  # agree. Both suites now read ONE shared table
+  # (test/awaiting-contract.fixtures.json) and each MEASURES its own column, so a
+  # divergence appearing or disappearing is red on both sides. It also pins the
+  # structural blocker that makes a consolidation impossible: `awaiting` emits no row
+  # for a task the owner answered last. FILE COUNT MOVES 5 -> 6.
+  # Floor 179 = 188 - min(50, max(1, 188/20)) = 188 - 9.
+  "claude/skills/clickup/test|6|179"
 )
 
 # --- discovery roots -----------------------------------------------------------

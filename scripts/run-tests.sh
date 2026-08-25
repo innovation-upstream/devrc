@@ -1461,7 +1461,19 @@ TARGET_FLOORS=(
   # waiting corpus (8) plus the bounds/parsing set (5) plus the round-7 additions
   # could have vanished with the gate still green, which is the exact staleness the
   # header above says a per-target floor exists to prevent.
-  "scripts/check-clickup-addressed/tests|203"
+  #
+  # 2026-08-24, +22 for tests/test_awaiting_contract.py — the PYTHON half of the
+  # cross-language contract for "the newest comment is not the token owner's". That
+  # predicate is implemented twice, here (recent-comments.py -> check-addressed.py,
+  # across the D12 seam) and as `isAwaiting()` in claude/skills/clickup/lib/awaiting.mjs,
+  # and nothing made the two agree. Both suites now read ONE shared table
+  # (claude/skills/clickup/test/awaiting-contract.fixtures.json) and each MEASURES its
+  # own column. 235 collected, agreeing with tests/run_all.py — two runners, one number.
+  #   _suggested_floor 235 = 235 - min(50, max(1, 235/20 = 11)) = 235 - 11 = 224.
+  # 🔴 Again NOT forced by the gate (235 is under the drift ceiling), and re-pinned for
+  # the same reason as the line above: leaving 32 tests of slack lets this whole file
+  # vanish with the gate still green, and its own subject is a guard against silence.
+  "scripts/check-clickup-addressed/tests|224"
   "scripts/claude-hooks/tests/test_guard_core.py|1260"
   # 2026-08-13, next-step-nudge.py's suite arrives as a NEW target: 78 collected on the
   # branch. Gate's own count through the gate's own rule:

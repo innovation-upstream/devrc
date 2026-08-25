@@ -29,6 +29,19 @@
  * Everything here is pure except `findAwaiting`, whose two effects (fetching
  * comments, sleeping) are injected, so the cap and pacing are testable without
  * a network.
+ *
+ * 🔴 THIS PREDICATE IS IMPLEMENTED TWICE, AND THAT IS DELIBERATE.
+ * `scripts/check-clickup-addressed/` derives the same fact across a seam
+ * (`recent-comments.py::latest_reply_ts_by` -> `check-addressed.py::
+ * _reply_answers_the_comment`), and it already shells out to this CLI — so
+ * "have ccua call `query.mjs awaiting`" looks obvious and is a REGRESSION. The
+ * decisive reason is one line below (`selectAwaiting` skips a task the owner
+ * answered last, which is exactly the population ccua's suppression note is
+ * built from); the rest, plus the three measured cross-language divergences,
+ * are in `reference/awaiting-vs-ccua.md`. The two implementations are pinned to
+ * ONE shared table — `test/awaiting-contract.fixtures.json`, read by
+ * `test/awaiting-contract.test.mjs` and by the Python half — so neither can
+ * drift silently. Read that file before changing anything here.
  */
 
 export const MS_PER_DAY = 86400000;
