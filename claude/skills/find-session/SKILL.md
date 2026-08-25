@@ -27,7 +27,14 @@ Query: `$ARGUMENTS`.
 3. **Help pick the right one.** If several look plausible, point at the most likely from the genesis + snippets and say why. If the user wants the content (not to switch sessions), offer to read the transcript file directly with the printed `file:` path, or grep deeper.
 
 Notes:
-- This searches user-typed AND assistant text; pass `--all` to include tool output (noisier).
+- This searches user-typed AND assistant text, plus the session's AI title; pass `--all` to
+  widen the surface to tool inputs and tool output (noisier). 🔴 `--all` was **inert** until
+  2026-08-24 — its handler sat behind a check an earlier `continue` had already made
+  unreachable — so any earlier session that "searched with `--all`" searched the narrow
+  surface. Re-run a query you trusted it for.
+- The walk itself lives in `scripts/lib/transcript_search.py` and is shared with
+  `check-clickup-addressed`; `subagents/` transcripts are excluded (they are not resumable
+  sessions, and there are ~6x more of them than there are sessions).
 - To actually re-enter a session, the user runs `claude --resume <id>` themselves (a session can't resume into another from here).
 
 Pair: `/resume` (re-enter from a handoff doc), `/handoff` (so next time there's a doc instead of archaeology).
