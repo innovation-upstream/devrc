@@ -69,6 +69,7 @@ for _p in (_HERE / "lib", _HERE.parent / "collector"):
         sys.path.insert(0, str(_p))
 
 import brief_scan  # noqa: E402
+import oc_permissions  # noqa: E402
 
 TOOL = "opencode-dispatch"
 
@@ -321,6 +322,53 @@ VERDICT_NOT_EXAMINED = ("  external paths    : NOT EXAMINED — no resolvable pa
                         "in the brief, and no attachments")
 VERDICT_CLEAN = "  external paths    : none — all {n} examined resolve under --dir"
 
+# 🔴 THE BLIND SPOT THIS SCAN STRUCTURALLY CANNOT SEE, STATED RATHER THAN LEFT
+# UNKNOWN.
+#
+# Every verdict above is about paths named in the BRIEF. But a skill the agent
+# loads carries pointers to its OWN `reference/` and `flows/` files, and those
+# live under ~/.config/opencode/skills — outside `--dir` for every dispatch, by
+# construction. MEASURED 2026-08-23: a dispatch loaded a skill, followed the
+# skill's own pointer, hit the `external_directory` auto-reject and the run DIED
+# mid-task — while preflight had correctly reported "external paths: NOT
+# EXAMINED", because the brief named nothing.
+#
+# So a clean preflight was never evidence that a run is safe from an
+# external-directory stall. This line closes that gap the only way a static scan
+# can: it does not try to guess which skills will load — it reports whether the
+# CONFIG would permit such a read at all, which is a fact it can actually check.
+SKILLS_DIR = Path.home() / ".config" / "opencode" / "skills"
+VERDICT_SKILL_REFS_OK = ("  skill reference/  : readable — external_directory "
+                         "allows {dir} (rule: {pattern})")
+VERDICT_SKILL_REFS_BLOCKED = (
+    "  skill reference/  : 🔴 NOT readable — external_directory resolves to "
+    "`{action}` for {dir}")
+
+
+def skill_reference_verdict(config: dict | None = None) -> str:
+    """One line: would the CONFIG permit a skill to read its own reference/ file?
+
+    🔴 It reports a CONFIG state, not a scan result, and that is the point — the
+    offending path comes from the skill, never from the brief, so no amount of
+    brief-scanning can reach it.
+
+    🔴 A failure to read the config returns an explicit COULD-NOT-DETERMINE line,
+    never the OK one. An unreadable config and a permissive config are different
+    facts, and defaulting to reassurance here would rebuild the exact "guard
+    whose description is wider than its implementation" this file already
+    corrected once.
+    """
+    probe = str(SKILLS_DIR / "any-skill" / "reference" / "any.md")
+    try:
+        rules = oc_permissions.external_directory_rules(config)
+        action, pattern = oc_permissions.resolve_with_rule(rules, probe)
+    except Exception as e:                      # unreadable / malformed config
+        return ("  skill reference/  : COULD NOT DETERMINE — "
+                f"{type(e).__name__}: {e}")
+    if action == "allow":
+        return VERDICT_SKILL_REFS_OK.format(dir=SKILLS_DIR, pattern=pattern)
+    return VERDICT_SKILL_REFS_BLOCKED.format(action=action, dir=SKILLS_DIR)
+
 
 def print_report(rep: dict) -> None:
     # 🔴 Always print what was EXAMINED beside what was found. A bare "0
@@ -350,6 +398,8 @@ def print_report(rep: dict) -> None:
         print(VERDICT_NOT_EXAMINED)
     else:
         print(VERDICT_CLEAN.format(n=examined))
+
+    print(skill_reference_verdict())
 
     # 🔴 UNMEASURED is its own category and is never folded into either verdict
     # above — the same discipline drift-check applies to `absent`/`fetch failed`.

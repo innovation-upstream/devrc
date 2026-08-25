@@ -36,6 +36,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
+from testlib import hermetic_git  # noqa: E402
 from testlib.mockbin import write_exec  # noqa: E402
 
 TOOL = REPO_ROOT / "scripts" / "lib" / "handoff_doc.py"
@@ -141,11 +142,11 @@ UPDATE_DOC = f"""## State now
 GIT_ENV = {
     "GIT_CONFIG_GLOBAL": "/dev/null",
     "GIT_CONFIG_SYSTEM": "/dev/null",
-    "GIT_CONFIG_COUNT": "2",
-    "GIT_CONFIG_KEY_0": "maintenance.auto",
-    "GIT_CONFIG_VALUE_0": "false",
-    "GIT_CONFIG_KEY_1": "gc.auto",
-    "GIT_CONFIG_VALUE_1": "0",
+    # 🔴 CONSOLIDATED 2026-08-24. These five keys were spelled out here, again
+    # in restore-verify, and nowhere in five other modules that need them — the
+    # N-sites-wrong-at-N-1 shape. One copy now: testlib/hermetic_git.py, whose
+    # ledger test fails when a new module joins the class without them.
+    **hermetic_git.MAINTENANCE_OFF,
 }
 
 
@@ -411,13 +412,55 @@ class TestDeclineWritesNothing:
         run_tool(repo, update=update_file, advanced="fixed the drain loop")
         assert _sh("git", "-C", str(remote), "log", "--format=%H", cwd=repo) == before
 
-    def test_the_diff_is_shown_so_there_is_something_to_decline(
+    def test_the_diff_is_shown_because_that_is_now_the_runs_whole_job(
         self, repo: Path, update_file: Path
     ) -> None:
-        """A gate that writes nothing AND shows nothing is not a gate either."""
+        """🔴 The y/N was retired 2026-08-23, so the diff is ALL this run
+        produces — it exists to put the change in the transcript before the
+        confirm lands it. A default-mode run that writes nothing AND shows
+        nothing would be pure cost.
+
+        The old assertion here was `"(y/N)" in res.stdout`. That is now the
+        WRONG direction and is asserted as such below."""
         res = run_tool(repo, update=update_file)
         assert diff_body(res.stdout), f"no diff hunks printed:\n{res.stdout}"
-        assert "(y/N)" in res.stdout
+        assert "status=proposed" in res.stdout
+        assert "--confirm --push" in res.stdout, (
+            "the run must name the command that lands it — with no prompt, this "
+            "line is the only thing telling the caller what comes next"
+        )
+
+    def test_no_run_asks_a_yes_no_question(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """🔴 THE RETIREMENT, asserted rather than described. Operator decision
+        2026-08-23: the prompt was always answered `y`, so it bought a round trip
+        and no safety — the same evidence that retired the index write's prompt
+        on 2026-08-15.
+
+        Watched to fail against the pre-change module, where `status=proposed`
+        printed ``Ask exactly one `update the handoff doc and push it? (y/N)```.
+
+        ⚠ Scoped to the tool's OWN output. It cannot stop a skill body telling an
+        agent to ask; `test_the_skill_does_not_reinstate_the_prompt` covers that
+        side, and neither test covers a human deciding to ask anyway."""
+        res = run_tool(repo, update=update_file)
+        both = res.stdout + res.stderr
+        assert "(y/N)" not in both, (
+            f"the tool is still asking a yes/no question:\n{both}"
+        )
+        assert "y ->" not in both and "n ->" not in both
+
+    def test_the_warnings_survive_the_prompt(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """🔴 The prompt was not what made this safe, and removing it must not
+        take the part that did. With no y/N the refusing statuses and the
+        warnings printed above the diff are the ONLY reader between a proposal
+        and a pushed commit, so the run has to say so where a caller will see
+        it."""
+        res = run_tool(repo, update=update_file)
+        assert "READ THE WARNINGS ABOVE THE DIFF" in res.stdout, res.stdout
 
     def test_push_without_confirm_is_refused(
         self, repo: Path, update_file: Path
@@ -615,6 +658,9 @@ class TestNoAdvanceMakesNoOffer:
         res = run_tool(repo, update=update_file, advanced=None)
         both = res.stdout + res.stderr
         assert diff_body(both) == [], f"a diff was offered anyway:\n{both}"
+        # No prompt exists anywhere since 2026-08-23, so this clause no longer
+        # distinguishes this path from a normal proposal — it is kept as a cheap
+        # invariant, and `diff_body(both) == []` above is what carries the case.
         assert "(y/N)" not in both
 
     @pytest.mark.parametrize(
@@ -1363,9 +1409,22 @@ SKILL_PINS: list[tuple[str, str]] = [
         "--confirm",
         "the accept half of the gate is spelled out for the executor",
     ),
+    # 🔴 SUPERSEDES the pin on the literal question `"update the handoff doc and
+    # push it? (y/N)"`. Operator decision 2026-08-23 retired that prompt on the
+    # same evidence that retired the index write's on 2026-08-15 — it was always
+    # answered `y`. Pinning the question would now REQUIRE the skill to carry a
+    # prompt the tool no longer prints, which is a gate pinning its own drift.
     (
-        "update the handoff doc and push it? (y/N)",
-        "🔴 the gate SHAPE is the one /handoff already uses for the index write",
+        "Land it — no question. SHOW the diff, then push",
+        "🔴 the write rule is the one /handoff already uses for the index write",
+    ),
+    (
+        "The two-run shape STAYS",
+        "🔴 …and the diff-before-write half, which the prompt was never doing",
+    ),
+    (
+        "they are the only reader now",
+        "🔴 what carries the load instead: the refusals and the warnings",
     ),
     (
         "Do NOT forbid updating the handoff",
@@ -1394,6 +1453,27 @@ SKILL_PINS: list[tuple[str, str]] = [
     (
         "buckets:",
         "rule (g): the executor is told the bucket line exists and to read it",
+    ),
+    # 🔴 THE NEW-DOC PATH. MEASURED 2026-08-23: the skill told step 2 to `Write`
+    # a brand-new handoff doc directly, and step 5 -- the only step that commits
+    # -- then returned `status=no-change` (exit 5) against it, whose documented
+    # instruction is "report the line and stop". Following the skill literally,
+    # a NEW handoff was never committed and ended the session untracked, which
+    # `claude/RULES.md` calls unsaved work one routine `checkout` from silent
+    # deletion. The module already handled the no-base case correctly (see
+    # `base_text = ... if doc.exists() else ""` and the MergeReport branch under
+    # it); the skill routed around it.
+    (
+        "is written by step 5 and by nothing else",
+        "🔴 the doc has exactly ONE writer, whether or not it already exists",
+    ),
+    (
+        "Never `Write` the doc yourself",
+        "🔴 …stated as a prohibition at the step that used to do it",
+    ),
+    (
+        "This step CREATES the doc as well as updating it",
+        "🔴 …and the gate step claims the new-doc case, so it is not left orphaned",
     ),
 ]
 
@@ -2179,25 +2259,57 @@ class TestSkillAndModuleAgree:
             f"  Restore it or change scripts/lib/handoff_doc.py in the SAME commit."
         )
 
-    def test_the_decline_half_is_stated_in_step_5_not_borrowed_from_step_4(self) -> None:
-        """🔴 STRUCTURAL, because the phrase pin would be VACUOUS here.
+    def test_step_5_states_its_own_write_rule_not_a_borrowed_one(self) -> None:
+        """🔴 STRUCTURAL, because a phrase pin is VACUOUS here.
 
-        MEASURED: `"on decline, discard"` was already in the skill before this
-        change — step 4's index gate says it — so a `phrase in doc` assertion
-        passed against the PRE-change file and proved nothing about the doc
-        gate. What has to hold is that step 5 states its own decline half, so
-        this asserts POSITION: the phrase, and the question that precedes it,
-        both occur after step 5 begins."""
+        MEASURED, and the reason this test is positional: `"on decline,
+        discard"` was already in the skill before step 5 existed — step 4 said
+        it — so `phrase in doc` passed against the PRE-change file and proved
+        nothing about the doc write. The same trap applies to the current
+        wording: "no question" now appears at BOTH steps.
+
+        So this asserts POSITION: step 5 carries its own write rule and its own
+        statement of what replaced the prompt, both after step 5 begins.
+
+        ⚠ The old version of this test anchored on the literal y/N question.
+        That prompt was retired 2026-08-23, so anchoring there would now pin the
+        skill to a prompt the tool does not print."""
         doc = HANDOFF_SKILL.read_text(encoding="utf-8")
         step5 = doc.index("5. **Land the handoff doc")
-        assert doc.index("update the handoff doc and push it? (y/N)") > step5
-        assert doc.rindex("on decline, discard") > step5
+        assert doc.index("Land it — no question. SHOW the diff, then push") > step5
+        assert doc.rindex("they are the only reader now") > step5
 
     def test_the_pin_can_report_absence(self) -> None:
         """NEGATIVE CONTROL on the pin above: a check that can only pass is not
         a check. This phrase is not in the skill and must not become so."""
         doc = HANDOFF_SKILL.read_text(encoding="utf-8")
         assert "push the handoff without asking anyone" not in doc
+
+    def test_the_skill_does_not_reinstate_the_prompt(self) -> None:
+        """🔴 THE OTHER HALF of `test_no_run_asks_a_yes_no_question`, which can
+        only see the TOOL's output. The prompt lived in prose as much as in the
+        module, and prose is what an agent actually executes — so a well-meaning
+        edit could put the question back at step 5 while the tool stayed silent,
+        and every module-level test would remain green.
+
+        Scoped deliberately: the two surviving `y/N` mentions in the skill both
+        describe the RETIREMENT in the past tense, so this asserts that no
+        INSTRUCTION to ask survives, not that the string is absent."""
+        doc = HANDOFF_SKILL.read_text(encoding="utf-8")
+        for banned in (
+            "Ask exactly",
+            "(y/N)`.",
+            "a single y/N",
+            "blocks on a y/N",
+            "behind an explicit y/N",
+            "Step 5 keeps its y/N",
+        ):
+            assert banned not in doc, (
+                f"claude/skills/handoff/SKILL.md still instructs the executor to "
+                f"prompt: {banned!r}. The y/N was retired 2026-08-23 by operator "
+                f"decision at BOTH writes; if it is being reinstated, change "
+                f"scripts/lib/handoff_doc.py in the SAME commit."
+            )
 
     def test_every_exit_code_the_module_can_return_is_documented(self) -> None:
         """A status the tool returns and the skill never mentions leaves the
@@ -2238,6 +2350,123 @@ class TestSkillAndModuleAgree:
             "scripts/lib/handoff_doc.py is not tracked by git, so the flake will "
             "omit it from the deploy and `home-manager switch` will succeed with "
             "the file simply absent."
+        )
+
+
+class TestTheNewDocPathReachesTheGate:
+    """🔴 A brand-new handoff doc must reach step 5, not be `Write`n in step 2.
+
+    MEASURED 2026-08-23, in a throwaway repo, following the skill literally:
+    step 2 wrote `claudedocs/handoff-t.md` in full, then step 5 -- the only step
+    that commits -- was run with that content as its delta and returned
+
+        status=no-change   (exit 5)
+
+    whose documented instruction is "report the line and stop". Nothing was
+    committed. The doc ended the session untracked, which `claude/RULES.md`
+    names as unsaved work one routine `checkout` away from silent deletion. Two
+    untracked handoff docs were sitting in the devrc working tree at the time,
+    the older one two days old, against 52 tracked ones -- consistent with the
+    update path landing and the new-doc path leaking.
+
+    The module was never the problem: `main()` reads `base_text = "" if not
+    doc.exists()` and the MergeReport branch under it makes the delta the doc
+    verbatim. The skill routed around a path the tool already had.
+
+    Both halves are asserted here, because either alone is walkable: the PROSE
+    contract (step 2 no longer instructs a direct write) and the BEHAVIOUR the
+    prose now promises (the tool creates, gates and commits a doc with no base).
+    """
+
+    def _skill(self) -> str:
+        return HANDOFF_SKILL.read_text(encoding="utf-8")
+
+    def test_step_2_no_longer_instructs_a_direct_write(self) -> None:
+        """🔴 THE REGRESSION ASSERTION. Watched to fail against the pre-change
+        file: `git show origin/main:claude/skills/handoff/SKILL.md` opens step 2
+        with exactly this sentence."""
+        doc = self._skill()
+        assert "**Write the handoff doc** to `claudedocs/" not in doc, (
+            "step 2 instructs the executor to write claudedocs/handoff-<topic>.md "
+            "directly. That path never reaches a commit: step 5 is the only step "
+            "that commits, and against an already-written doc it returns "
+            "status=no-change (exit 5), whose instruction is to stop. The doc is "
+            "then left untracked. Draft into a scratch file and let step 5 land "
+            "it -- handoff_doc.py handles the no-base case."
+        )
+
+    def test_the_scratch_instruction_precedes_the_kickoff(self) -> None:
+        """Structural, not a phrase: the drafting instruction is useless if it
+        arrives after the step that consumes the doc's path."""
+        doc = self._skill()
+        draft = doc.find("**Draft the handoff doc into a SCRATCH FILE")
+        assert draft >= 0, "step 2's drafting instruction is gone"
+        kickoff = doc.find("**Output a kickoff block**")
+        gate = doc.find("5. **Land the handoff doc")
+        assert draft < kickoff < gate
+
+    def test_both_directions_of_the_swap_are_asserted(self) -> None:
+        """⚠ NOT a negative control, and it was mislabelled as one until an
+        audit said so. It re-states the same two assertions against the same
+        real file as the tests above; it never shows the negative assertion CAN
+        go red, so it proves nothing they do not.
+
+        It survives as a cheap statement of the pair -- the old sentence is gone
+        AND the new one is present -- because a rewrite that satisfies only one
+        half is the plausible regression. The evidence that these can report a
+        difference is external and was run by hand: all three assertions in this
+        class are RED against `git show origin/main:claude/skills/handoff/SKILL.md`.
+        `claude/RULES.md`: "a guard's DESCRIPTION claims COVERAGE."
+        """
+        doc = self._skill()
+        assert "**Write the handoff doc** to `claudedocs/" not in doc
+        assert "**Draft the handoff doc into a SCRATCH FILE" in doc
+
+    def test_the_module_creates_a_doc_that_does_not_exist(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """The BEHAVIOUR the prose now promises: with no base the run offers the
+        ordinary gate -- a diff, `status=proposed`, nothing written.
+
+        ⚠ AN INVARIANT GUARD, NOT REGRESSION COVERAGE, and labelled as one. The
+        module already behaved this way; the defect was that the skill never
+        routed here, so this was green before the change and never caught the
+        bug. It is here because the prose contract above now DEPENDS on this
+        behaviour, and nothing else asserts it."""
+        doc = repo / "claudedocs" / "handoff-sample-topic.md"
+        doc.unlink()
+        res = run_tool(repo, update=update_file)
+        assert res.returncode == 0, (res.returncode, res.stdout, res.stderr)
+        assert "status=proposed" in res.stdout + res.stderr
+        assert "+++ b/claudedocs/handoff-sample-topic.md" in res.stdout
+        assert not doc.exists(), "the proposal wrote the doc — the gate is bypassed"
+
+    def test_the_no_base_run_confirms_into_exactly_one_commit(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """…and `--confirm` lands it, so the new-doc case ends the session
+        COMMITTED rather than untracked -- the property whose absence is the
+        whole finding.
+
+        ⚠ Also an INVARIANT GUARD on the module (green before the change). What
+        regressed was the ROUTE to it, asserted by the prose tests above."""
+        doc = repo / "claudedocs" / "handoff-sample-topic.md"
+        doc.unlink()
+        before = commit_shas(repo)
+        res = run_tool(repo, "--confirm", update=update_file)
+        assert res.returncode == 0, (res.returncode, res.stdout, res.stderr)
+        assert doc.exists(), "the doc was not created"
+        after = commit_shas(repo)
+        assert len(after) == len(before) + 1, "expected exactly one commit"
+        tracked = subprocess.run(
+            ["git", "-C", str(repo), "ls-files", "--",
+             "claudedocs/handoff-sample-topic.md"],
+            capture_output=True, text=True, env=dict(os.environ, **GIT_ENV),
+        ).stdout.strip()
+        assert tracked == "claudedocs/handoff-sample-topic.md", (
+            "the new doc is not tracked after --confirm — it would end the "
+            "session as untracked working-tree content, which is the failure "
+            "this class exists for"
         )
 
 

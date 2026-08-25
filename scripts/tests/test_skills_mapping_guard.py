@@ -20,15 +20,32 @@ lexical hole a regex over the raw text would have.
 """
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from testlib.skills_mapping import skills_mapping_problem  # noqa: E402
+from testlib import mockbin  # noqa: E402
+from testlib.skills_mapping import (  # noqa: E402
+    _DEFAULT_TIMEOUT_S,
+    _TIMEOUT_ENV,
+    assert_skills_mapping_declared,
+    skills_mapping_problem,
+)
 
 HOME_NIX = ROOT / "nix" / "home.nix"
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_override(monkeypatch):
+    """Every test states its own budget. An operator's exported value must not
+    decide what the rest of this file measures — the honouring of that value is
+    itself under test below, so leaking it in would make those cases circular."""
+    monkeypatch.delenv(_TIMEOUT_ENV, raising=False)
 
 # Every fixture is a home-manager module function, like the real file.
 REAL_SHAPE = """{ ... }:
@@ -216,7 +233,13 @@ def test_passing_the_files_TEXT_reads_as_a_broken_check(tmp_path):
 #: property it still got wrong, and was cut to ~4 KB by dropping that ambition.
 #: Without a gate that ceiling is a prose intention, and this file's own history
 #: shows prose intentions do not hold. Precedent: test_rules_size.py.
-MAX_MODULE_BYTES = 5_600
+#:
+#: Raised 5,600 -> 7,400 once, for `_budget()` + `_TIMEOUT_ENV` and the measured
+#: justification of the default. That allowance is SPENT: it bought the timeout
+#: knob and nothing else. It is not a general loosening, and it is not precedent
+#: for re-growing the source-resolution tracing named below -- that ambition is
+#: still forbidden at any byte count.
+MAX_MODULE_BYTES = 7_400
 
 
 def test_the_module_stays_under_its_ceiling():
@@ -231,6 +254,206 @@ def test_the_module_stays_under_its_ceiling():
         "the number. That half is verified against reality by ship.sh and\n"
         "drift-check.sh; re-deriving it from nix source is strictly worse."
     )
+
+
+# --------------------------------------------------------------------------
+# THE TIMEOUT BUDGET.
+#
+# The old hardcoded 60 s was REACHED in CI (devrc-ci-ztn92): the check could not
+# answer, said so correctly, and that correct answer was a red REQUIRED gate on
+# unrelated PRs. The budget is now `DEVRC_SKILLS_MAPPING_TIMEOUT_S`.
+#
+# 🔴 These cases must not depend on how long real nix takes -- that is the very
+# load-sensitivity being fixed, and pinning a test to it rebuilds the bug in the
+# harness. So they run against a STUB `nix-instantiate` that sleeps a known
+# duration and then emits the exact JSON the predicate parses. The stub is held
+# fixed and the OVERRIDE is varied, so the override is the only moving part.
+# --------------------------------------------------------------------------
+
+#: Whole seconds, so the stub needs nothing beyond POSIX `sleep`. Long enough
+#: that a narrow override cuts it off with room to spare, short enough that a
+#: generous override finishes it well inside the suite's patience.
+_STUB_SLEEP_S = 2
+
+_LIVE_MAPPING_JSON = (
+    '{"declared": true, "source": true, "enable": true, '
+    '"target": ".claude/skills"}'
+)
+
+
+def _stub_nix_instantiate(tmp_path, monkeypatch, sleep_s=_STUB_SLEEP_S):
+    """Put a slow-but-successful `nix-instantiate` at the front of PATH.
+
+    It answers "the mapping is live", so anything the predicate returns while
+    this is installed comes from the BUDGET, never from the fixture's content.
+    """
+    bindir = tmp_path / "stubbin"
+    bindir.mkdir()
+    stub = mockbin.write_exec(
+        bindir / "nix-instantiate",
+        f"sleep {sleep_s}\nprintf '%s' '{_LIVE_MAPPING_JSON}'\n",
+    )
+    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
+    return stub
+
+
+def test_a_budget_narrower_than_the_call_cuts_it_off(tmp_path, monkeypatch):
+    """REGRESSION. Before the fix the env var did not exist: the 60 s literal
+    swallowed this stub whole and the predicate returned None -- a PASS. Red at
+    base, green at HEAD."""
+    _stub_nix_instantiate(tmp_path, monkeypatch)
+    monkeypatch.setenv(_TIMEOUT_ENV, "0.2")
+    problem = skills_mapping_problem(write(tmp_path, REAL_SHAPE))
+    assert problem is not None, (
+        f"{_TIMEOUT_ENV}=0.2 against a {_STUB_SLEEP_S}s call returned a PASS -- "
+        "the override is being ignored, so the budget is still hardcoded"
+    )
+    assert "did not finish" in problem, problem
+
+
+def test_a_budget_wider_than_the_call_lets_it_finish(tmp_path, monkeypatch):
+    """The paired control for the case above -- NOT regression coverage: the old
+    60 s default also cleared this stub, so it was green at base too.
+
+    Its job is to isolate the variable. Same stub, same fixture, only the
+    override's MAGNITUDE differs from the previous test, and the outcome
+    inverts. Without it, "0.2 fails" would be equally well explained by the
+    override merely being *present* rather than by its value being used.
+    """
+    _stub_nix_instantiate(tmp_path, monkeypatch)
+    monkeypatch.setenv(_TIMEOUT_ENV, "300")
+    assert skills_mapping_problem(write(tmp_path, REAL_SHAPE)) is None
+
+
+def test_the_timeout_message_names_the_knob_and_refuses_deletion(tmp_path, monkeypatch):
+    """REGRESSION. The pre-fix message named no knob, so the only actions it
+    suggested were "fix the check" or (against its own advice) delete it. A
+    maintainer hitting this in CI needs the third option spelled out."""
+    _stub_nix_instantiate(tmp_path, monkeypatch)
+    monkeypatch.setenv(_TIMEOUT_ENV, "0.2")
+    problem = skills_mapping_problem(write(tmp_path, REAL_SHAPE))
+    assert problem is not None
+    assert _TIMEOUT_ENV in problem, (
+        "the timeout message does not name the env var that widens it:\n" + problem
+    )
+    assert "do NOT delete it" in problem, problem
+
+
+def test_the_timeout_path_RAISES_rather_than_passing_or_skipping(tmp_path, monkeypatch):
+    """Fail-closed, measured at the CALLER's surface.
+
+    The four modules that consume this call `assert_skills_mapping_declared`,
+    not the predicate. "Could not answer" has to arrive there as a FAILURE --
+    not None, and emphatically not `pytest.skip`, which is how a check quietly
+    stops being one.
+    """
+    _stub_nix_instantiate(tmp_path, monkeypatch)
+    monkeypatch.setenv(_TIMEOUT_ENV, "0.2")
+    with pytest.raises(AssertionError) as excinfo:
+        assert_skills_mapping_declared(write(tmp_path, REAL_SHAPE))
+    assert "did not finish" in str(excinfo.value), excinfo.value
+
+
+@pytest.mark.parametrize("junk", ["abc", "0", "-5", "nan", "inf", "1e400", "5s"])
+def test_an_UNUSABLE_override_fails_closed_instead_of_falling_back(
+    tmp_path, monkeypatch, junk
+):
+    """REGRESSION, and the reason this knob is not just `int(os.environ[...])`.
+
+    A knob that silently reverts to its default when it cannot be read is a knob
+    that disables the check on a typo: `…=0` would otherwise mean "budget zero"
+    or "budget 180" depending on the parser, and nobody would be told which.
+    Every value here must land as "cannot answer", naming the value.
+    """
+    _stub_nix_instantiate(tmp_path, monkeypatch, sleep_s=0)
+    monkeypatch.setenv(_TIMEOUT_ENV, junk)
+    problem = skills_mapping_problem(write(tmp_path, REAL_SHAPE))
+    assert problem is not None, (
+        f"{_TIMEOUT_ENV}={junk!r} was accepted -- an unreadable budget silently "
+        "became the default, so a typo in this variable cannot be noticed"
+    )
+    assert _TIMEOUT_ENV in problem and repr(junk) in problem, problem
+    assert "do NOT delete it" in problem, problem
+
+
+@pytest.mark.parametrize("unset", ["", "   "])
+def test_an_EMPTY_override_means_the_default_not_an_error(tmp_path, monkeypatch, unset):
+    """An exported-but-empty variable is how a shell spells "I did not set
+    this". Treating it as junk would fail the gate on an empty export."""
+    _stub_nix_instantiate(tmp_path, monkeypatch, sleep_s=0)
+    monkeypatch.setenv(_TIMEOUT_ENV, unset)
+    assert skills_mapping_problem(write(tmp_path, REAL_SHAPE)) is None
+
+
+def test_the_default_budget_stays_far_above_the_MEASURED_cost():
+    """INVARIANT GUARD, not regression coverage -- a ratchet on a judgement call.
+
+    Measured on an idle 24-core workbench: 0.02 s, cold == warm. Under CPU
+    oversubscription it rises roughly linearly -- 0.06 s at 1x, 0.26 s at 4x,
+    1.8 s at 10x -- and CI stacks cgroup throttling on top of that inside the
+    `checks.pytests` sandbox, which is how 60 s was reached at all.
+
+    The floor below is deliberately well under the shipped default: this pins
+    the ORDER OF MAGNITUDE ("a deadman, not a performance budget"), and is not a
+    restatement of the constant. Lowering the default back toward the contended
+    measurements re-opens devrc-ci-ztn92.
+    """
+    assert _DEFAULT_TIMEOUT_S >= 120, (
+        f"the default budget is {_DEFAULT_TIMEOUT_S}s. The old 60 s literal was "
+        "REACHED in CI; anything near the contended measurements above makes "
+        "'the check could not answer' a routine red gate on unrelated PRs."
+    )
+
+
+# --------------------------------------------------------------------------
+# THE DISTINCTION THAT MAKES THIS CHECK WORTH HAVING.
+# --------------------------------------------------------------------------
+
+def test_cannot_answer_and_answer_is_no_stay_TELLABLE_APART(tmp_path, monkeypatch):
+    """INVARIANT GUARD -- true before this change too, and load-bearing for it.
+
+    "I could not answer" and "the answer is no" demand opposite responses: fix
+    the harness, versus fix nix/home.nix. The predicate keeps them separable by
+    appending `_FIX_IT` ("do NOT delete it") to every could-not-answer reason
+    and to NO answer-is-no reason. Adding the timeout knob added a new member to
+    each set, which is exactly when such a partition rots.
+
+    Pinned as a PARTITION over both sets rather than one example from each, so a
+    future reason cannot join the wrong side unnoticed.
+    """
+    stub_tmp = tmp_path / "stub"
+    stub_tmp.mkdir()
+
+    answer_is_no = {
+        "no mapping": skills_mapping_problem(write(tmp_path, NO_MAPPING)),
+        "no source": skills_mapping_problem(write(tmp_path, NO_SOURCE)),
+        "disabled": skills_mapping_problem(write(tmp_path, DISABLED)),
+        "redirected": skills_mapping_problem(write(tmp_path, REDIRECTED)),
+    }
+    cannot_answer = {
+        "absent file": skills_mapping_problem(tmp_path / "nope.nix"),
+        "unparseable": skills_mapping_problem(write(tmp_path, UNPARSEABLE)),
+    }
+
+    _stub_nix_instantiate(stub_tmp, monkeypatch)
+    monkeypatch.setenv(_TIMEOUT_ENV, "0.2")
+    cannot_answer["timed out"] = skills_mapping_problem(write(stub_tmp, REAL_SHAPE))
+    monkeypatch.setenv(_TIMEOUT_ENV, "junk")
+    cannot_answer["junk budget"] = skills_mapping_problem(write(stub_tmp, REAL_SHAPE))
+
+    for name, problem in {**answer_is_no, **cannot_answer}.items():
+        assert problem is not None, f"{name} produced a PASS"
+
+    for name, problem in cannot_answer.items():
+        assert "do NOT delete it" in problem, (
+            f"could-not-answer reason {name!r} is missing the fix-the-check "
+            f"marker, so it reads as a verdict on home.nix:\n{problem}"
+        )
+    for name, problem in answer_is_no.items():
+        assert "do NOT delete it" not in problem, (
+            f"answer-is-no reason {name!r} carries the fix-the-check marker, so "
+            f"a real broken deploy now reads as a broken harness:\n{problem}"
+        )
 
 
 def test_a_path_that_is_not_a_file_fails(tmp_path):

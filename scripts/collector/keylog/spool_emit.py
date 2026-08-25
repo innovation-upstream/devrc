@@ -15,6 +15,18 @@ daemon (`collector.parse_line`) ships the records unchanged:
     the caller omits them — mirroring the bash `emit`.
   * Append is a single newline-terminated `write`, opened O_APPEND, so
     concurrent writers do not interleave for sub-PIPE_BUF lines.
+
+🔴 KEEP THE IMPORTS AT MODULE SCOPE STDLIB-ONLY, AND KEEP THIS BODY CHEAP.
+This is a constraint imposed by a CONSUMER in another directory, so nothing here
+would otherwise hint at it: browser-bridge's `server.py` imports this file lazily
+from a request-handler thread, holding a global lock across `exec_module` (see
+`_spool_emit_lock` there). That lock is what stops a concurrent handler being
+handed a half-loaded module and silently dropping its telemetry row — and its
+worst-case hold time is exactly however long THIS file takes to import. A heavy
+import here, or one that reaches back into `server` and re-enters
+`_load_spool_emit`, turns that into a stall or a deadlock. Unenforced by a test
+on purpose (low reachability, and a test would be more machinery than the risk);
+this note is the enforcement.
 """
 from __future__ import annotations
 

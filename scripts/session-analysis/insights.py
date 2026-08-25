@@ -196,7 +196,7 @@ def _parse_payload(p) -> dict:
     return {}
 
 
-# Non-exclusive theme buckets for typed prompts (compact subset of analyze.py's).
+# Non-exclusive theme buckets for typed prompts.
 THEMES = {
     "deploy/infra": r"\b(deploy|kubernetes|k8s|kubectl|helm|flux|talos|cluster|nixos|home-manager|nix|nodeport|ingress|namespace|pod|rollout)\b",
     "git/PR": r"\b(commit|push|merge|rebase|pull request|\bpr\b|branch|\bgit\b|\bgh\b)\b",

@@ -90,7 +90,8 @@
 # further down ("a new DRIFT code has nowhere to go but upward") points the next
 # one. So:
 #   * 19, 20 and 21 are RESERVED to ship.sh here and must not be taken as DRIFT
-#     codes — the next free code for this script is 22.
+#     codes. 22 is now TAKEN by this script (skillOverrides disagree with the
+#     tier ledger), so the next free code for this script is 23.
 #   * anything this script adds above 21 is reserved back the other way; ship.sh
 #     documents this in its own header for the same reason.
 #
@@ -144,6 +145,14 @@
 #       fire for it. 🔴 The gap rc 17 left: "we could not look" correctly set no
 #       code, and therefore escalated NEVER. See "UNMEASURED IS NOT FOREVER"
 #       below. Same ladder as rc 13, and it ranks just under it — see severity().
+#   22  DRIFT — a host's DEPLOYED `skillOverrides` disagree with devrc's skill-
+#       listing tier ledger (`claude/skill-tiers.json`), so the always-on skill
+#       listing on that host is not the one this repo describes. 🔴 A host with
+#       NO overrides at all is NOT ADOPTED and sets NO code — that is the state
+#       the mechanism shipped in, and calling it drift would have made this arm
+#       permanently red. rc 22 is adopted-then-drifted only. See "SKILL-LISTING
+#       TIERS" below. It ranks just under rc 10, because a BEHIND host carries a
+#       stale ledger and can produce this finding as a symptom.
 #   16  ACTIONABLE, not drift — the fuzzyclaw PHASE-2 GATE has OPENED: zero rows
 #       still take their `age_secs` from fuzzyclaw alone, so the readers can be
 #       removed. See "THE FUZZYCLAW PHASE-2 GATE" below. It is the LEAST severe
@@ -381,14 +390,16 @@
 # is reading a timer's output, so the single number it hands to systemd must be
 # the worst thing found, or an un-pushed workbench could hide behind a merely
 # behind laptop. Severity order (worst first):
-#     8 > 17 > 14 > 13 > 18 > 6 > 2 > 4 > 3 > 12 > 15 > 10 > 16
+#     8 > 17 > 14 > 13 > 18 > 6 > 2 > 4 > 3 > 12 > 15 > 10 > 22 > 16
 # 🔴 THAT ORDER IS THE severity() TABLE, NOT THE DIGITS — it never was monotonic
-# (14 outranks 13 outranks 18 outranks 6 outranks 4), and 17 is not "less severe
-# than 16" because it is larger. Every code below 16 that is still free (5, 7, 9, 11) is
+# (14 outranks 13 outranks 18 outranks 6 outranks 4), 17 is not "less severe
+# than 16" because it is larger, and 22 ranks second-LAST despite being the
+# largest digit here. Every code below 16 that is still free (5, 7, 9, 11) is
 # reserved to a ship.sh meaning this script does not take, so a new DRIFT code
 # has nowhere to go but upward; its rank is stated in severity() and here.
-# 🔴 UPWARD IS NOT EMPTY EITHER: ship.sh owns 19 (hosts-disagree) and 20
-# (superseded), so the next free DRIFT code is 22, not 19. See the reciprocal
+# 🔴 UPWARD IS NOT EMPTY EITHER: ship.sh owns 19 (hosts-disagree), 20
+# (superseded) and 21 (usage), and this script has now taken 22, so the next free
+# DRIFT code is 23, not 19. See the reciprocal
 # reservation under EXIT CODES above — that collision was one increment away.
 # (6 and 2 are both unreachable through this path today — the script exits each
 # directly, before any per-host leg runs — but the order is documented for every
@@ -448,6 +459,13 @@
 #                    gate is local-only, and every value sent over ssh is one
 #                    that has to be proved safe.
 #   DRIFT_PHASE2_TIMEOUT  seconds the phase-2 scan may take (default 60, integer)
+#   DRIFT_TIER_LEDGER  path to the skill-listing tier ledger (default: the
+#                    claude/skill-tiers.json beside this script's repo). Exists
+#                    so the suite can drive the rc-22 arm against a fixture
+#                    ledger; the default is the only correct value on a real
+#                    host. Deliberately NOT forwarded over ssh — the comparison
+#                    happens in the driver, and every value sent across that hop
+#                    is one that has to be proved safe.
 set -uo pipefail
 
 # --- Host identity: SOURCED, never copied (see header) ------------------------
@@ -622,6 +640,17 @@ severity() {
     # header for why un-pushed commits still outrank a broken deployment.
     15) echo 35 ;;
     10) echo 30 ;;
+    # 22 (a host's deployed skillOverrides disagree with the devrc tier ledger)
+    # ranks BELOW 10 and above 16, and the digit says nothing about that either.
+    #   BELOW 10, because a host that is BEHIND has not received the ledger yet:
+    #   a stale checkout can PRODUCE this finding as a symptom, so the code that
+    #   names the cause must outrank the one that names the effect. Shipping the
+    #   host is also the first thing to try.
+    #   ABOVE 16, because 16 is not a fault at all. This one is a real
+    #   divergence: the always-on skill listing on that host is not the listing
+    #   the repo describes, which degrades routing silently and in exactly the
+    #   way the tier mechanism exists to control.
+    22) echo 25 ;;
     # 16 is the FLOOR of the owned codes, deliberately. It is not a fault at all
     # — it says an optional cleanup became possible — so it must never outrank a
     # host that is behind, let alone one with un-pushed commits. Being last also
@@ -970,11 +999,46 @@ if [ "$eplug" != UNEVALUATED ] && [ "$eplug" != NONE ] && [ "$iplug" != UNEVALUA
   fi
 fi
 
+# --- skillOverrides: the SKILL-LISTING TIER LEDGER, AS DEPLOYED ---------------
+# 🔴 Reported as a FACT only. The verdict is NOT a property of this host — it is
+# the difference between this host and a ledger that lives in a repo, so it is
+# computed in the driver (see "SKILL-LISTING TIERS" below) where the ledger can
+# be read by its own parser instead of by a second sed.
+#
+# Three states, and they must never print the same way:
+#   NONE         the key is absent — the ledger has never been APPLIED here.
+#                Not drift: this is the state the mechanism shipped in.
+#   EMPTY        the key exists and holds nothing.
+#   UNEVALUATED  settings.json unreadable, or the extractor matched nothing.
+#
+# 🔴 THE RANGE END IS `^  [}"]`, NOT `^  }`. A minified-away or one-line
+# `"skillOverrides": {},` still matches the range START (the pattern is a
+# substring match), and with `^  }` as the end the range would run on through
+# every following key and harvest their 4-space entries as overrides. Ending at
+# the next TOP-LEVEL line — a closing brace or the next key — bounds it either
+# way, and an empty harvest reports EMPTY rather than a clean-looking NONE.
+#
+# Values are printed, unlike the key-name-only rule above: an override value is
+# one of `on` / `name-only` / `user-invocable-only` / `off`, which is an enum,
+# not a secret. Nothing here reads a permission rule, a hook command or a token.
+sover="UNEVALUATED"
+if [ -r "$set_file" ]; then
+  if [ -n "$(sed -n '"'"'/^  "skillOverrides":/p'"'"' "$set_file")" ]; then
+    solist="$(sed -n '"'"'/^  "skillOverrides": {/,/^  [}"]/p'"'"' "$set_file")"
+    solist="$(printf "%s\n" "$solist" | sed -n '"'"'s/^    "\([^"]*\)": *"\([^"]*\)".*/\1=\2/p'"'"')"
+    sover="$(norm_set "$solist")"
+    [ -n "$sover" ] || sover="EMPTY"
+  else
+    sover="NONE"
+  fi
+fi
+
 # FACT lines are the machine-readable half — the driver diffs them ACROSS hosts,
 # which is the only place a key-set difference can be seen at all.
 echo "[$label] FACT settings-keys $skeys"
 echo "[$label] FACT enabled-plugins $eplug"
 echo "[$label] FACT installed-plugins $iplug"
+echo "[$label] FACT skill-overrides $sover"
 echo "[$label] PARITY-RC=$p_rc"
 '
 
@@ -1727,6 +1791,119 @@ else
 fi
 echo
 
+# ── SKILL-LISTING TIERS (rc 22) ───────────────────────────────────────────────
+# 🔴 WHAT THIS MEASURES. Every skill's name + description loads on EVERY session
+# under a budget of 1% of the context window, IN CHARACTERS. `skillOverrides` in
+# settings.json makes that cost per-skill opt-in, and `claude/skill-tiers.json`
+# is devrc's ledger of which skills spend it. That ledger is in git;
+# ~/.claude/settings.json is per-host and unmanaged, so nothing keeps them
+# together except this arm and `scripts/sync-skill-tiers.py`.
+#
+# 🔴 THIS IS NOT A CROSS-HOST COMPARISON. Both hosts can agree perfectly and both
+# be wrong; the reference is the ledger, not the other machine. So each host is
+# reported against the ledger on its own, and a run that reaches only one host
+# still says something true about that one.
+#
+# 🔴 "NO OVERRIDES AT ALL" IS **NOT** DRIFT, AND THAT IS THE WHOLE DESIGN.
+# The mechanism shipped with the ledger applied to NO host — deliberately:
+# measured 2026-08-24, the listing was 20,708 chars against a 30,000-char budget
+# on claude-opus-5 @1M (0.69x), so nothing is being truncated and a wide tier B
+# would cost real routing today for a benefit ~1.8 months out. If an unapplied
+# host counted as drift, this code would be red on every run from the moment it
+# landed — and `claude/RULES.md` is explicit that a permanently-red gate is worse
+# than no gate, because it trains everyone to click through. So a host with no
+# `skillOverrides` key prints NOT ADOPTED, every run, with NO rc. rc 22 fires
+# only once a host HAS been given overrides and they have since disagreed:
+# adopted-then-drifted, which is the hazard a ledger in git can actually own.
+#
+# 🔴 THE EXPECTATION IS READ BY THE LEDGER'S OWN PARSER, never by a second sed.
+# `lib/skill_tier_facts.py` projects it through `lib/skill_tiers.py` — the same
+# module `sync-skill-tiers.py` writes from — so the checker and the writer cannot
+# disagree about what the ledger says. A reader that cannot produce an
+# expectation prints COULD NOT MEASURE and sets no rc: an empty expectation would
+# make every host look compliant, in silence, which is the reassuring zero this
+# whole subsystem exists to refuse.
+_drift_tier_py="$_drift_dir/lib/skill_tier_facts.py"
+
+tier_report() { # tier_report <role> <that host's fact> <wanted name=value list> <wanted count>
+  local ROLE="$1" FACT="$2" WANT="$3" NW="$4"
+  local X N V MISSING="" WRONG="" EXTRA=""
+  if [ -z "$FACT" ]; then
+    echo "[tiers] $ROLE: NOT REPORTED — that host produced no skill-overrides fact."
+    echo "[tiers]   Not reached (--no-local/--no-remote, or unreachable), or its stream was cut"
+    echo "[tiers]   short before the FACT lines. NOT a match — nothing was compared for this host."
+    return 0
+  fi
+  if [ "$FACT" = UNEVALUATED ]; then
+    echo "[tiers] $ROLE: NOT EVALUATED — settings.json unreadable or unparseable there (see its line above)."
+    echo "[tiers]   This is not 'it matches the ledger'. Nothing was compared for this host."
+    return 0
+  fi
+  if [ "$NW" = 0 ]; then
+    echo "[tiers] $ROLE: nothing to compare — the ledger asks for 0 overrides (every skill is tier A)."
+    return 0
+  fi
+  if [ "$FACT" = NONE ] || [ "$FACT" = EMPTY ]; then
+    echo "[tiers] $ROLE: NOT ADOPTED — no skillOverrides deployed, so none of the ledger's $NW tier-B entries apply."
+    echo "[tiers]   This is the state the mechanism SHIPPED in, not drift — applying it is an"
+    echo "[tiers]   operator act on a per-host file. Apply it there with:"
+    echo "[tiers]     scripts/sync-skill-tiers.py            # dry-run, prints the exact diff"
+    echo "[tiers]     scripts/sync-skill-tiers.py --apply    # writes"
+    return 0
+  fi
+  for X in $WANT; do
+    N="${X%%=*}"
+    V="${X#*=}"
+    case " $FACT " in
+      *" $N=$V "*) ;;
+      *" $N="*) WRONG="$WRONG $X" ;;
+      *) MISSING="$MISSING $X" ;;
+    esac
+  done
+  for X in $FACT; do
+    N="${X%%=*}"
+    case " $WANT " in
+      *" $N="*) ;;
+      *) EXTRA="$EXTRA $X" ;;
+    esac
+  done
+  if [ -n "$MISSING" ] || [ -n "$WRONG" ] || [ -n "$EXTRA" ]; then
+    echo "[tiers] 🔴 DRIFT — $ROLE has skillOverrides that disagree with claude/skill-tiers.json:"
+    [ -n "$MISSING" ] && echo "[tiers]   in the ledger, NOT on the host:$MISSING"
+    [ -n "$WRONG" ] && echo "[tiers]   on the host with a DIFFERENT value than the ledger asks for:$WRONG"
+    [ -n "$EXTRA" ] && echo "[tiers]   on the host, NOT in the ledger (hand-edited, or a retired skill):$EXTRA"
+    echo "[tiers]   The always-on skill listing on that host is not the one this repo describes."
+    echo "[tiers]   fix (on that host): scripts/sync-skill-tiers.py   (dry-run; --apply to write)"
+    echo "[tiers]   If the host is also reported BEHIND above, ship it FIRST — a stale checkout"
+    echo "[tiers]   carries a stale ledger, and this finding is then a symptom of that one."
+    note_rc 22
+  else
+    echo "[tiers] $ROLE: matches the ledger ($NW tier-B override(s) deployed as asked)."
+  fi
+}
+
+echo "=== skill-listing tiers (deployed skillOverrides vs claude/skill-tiers.json) ==="
+if [ ! -r "$_drift_tier_py" ]; then
+  echo "[tiers] COULD NOT MEASURE — cannot read $_drift_tier_py."
+  echo "[tiers]   This is NOT 'the hosts match the ledger'. No rc is set."
+else
+  T_RAW="$(python3 "$_drift_tier_py" "${DRIFT_TIER_LEDGER:-}" 2>/dev/null)"
+  T_TOKEN="${T_RAW%% *}"
+  if [ "$T_TOKEN" != ok ]; then
+    echo "[tiers] COULD NOT MEASURE — the ledger reader produced no usable expectation."
+    echo "[tiers]   An empty expectation would make every host look compliant, in silence."
+    echo "[tiers]   This is NOT 'the hosts match the ledger'. No rc is set."
+  else
+    T_WANT="${T_RAW#ok}"
+    T_WANT="${T_WANT# }"
+    T_NW="$(printf '%s' "$T_WANT" | wc -w)"
+    echo "[tiers] ledger asks for $T_NW name-only override(s); every other skill keeps its description."
+    tier_report "$LOCAL_ROLE" "$(fact_of "$LOCAL_OUT" skill-overrides)" "$T_WANT" "$T_NW"
+    tier_report "$REMOTE_ROLE" "$(fact_of "$REMOTE_OUT" skill-overrides)" "$T_WANT" "$T_NW"
+  fi
+fi
+echo
+
 # ── CROSS-HOST SOURCE-REPO COMPARISON ─────────────────────────────────────────
 # 🔴 INFORMATION ONLY — it sets no exit code, and that is a decision, not an
 # omission. Whether a given source-repo HEAD is WRONG has a defined answer and it
@@ -2043,6 +2220,9 @@ if [ "$rc" != 0 ]; then
   echo "  rc18=a built-source scope has been UNMEASURABLE for N consecutive runs on that host"
   echo "       (no upstream / fetch failing), so rc17 cannot fire for it. repo ABSENT never"
   echo "       escalates. (ranks just under rc13 — same 'could not look' class, smaller scope)"
+  echo "  rc22=a host's deployed skillOverrides disagree with claude/skill-tiers.json. A host"
+  echo "       with NO overrides is NOT ADOPTED, never rc22 — that is the shipped state."
+  echo "       (ranks just under rc10 — a behind host carries a stale ledger; ship it first)"
 fi
 [ -n "$UNCHECKED" ] && echo "drift-check: NOT checked: $UNCHECKED"
 exit "$rc"

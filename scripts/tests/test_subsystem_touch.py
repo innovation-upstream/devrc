@@ -60,6 +60,13 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 MODULE_PATH = ROOT / "scripts" / "lib" / "subsystem_touch.py"
 HANDOFF_DOC = ROOT / "claude" / "skills" / "handoff" / "SKILL.md"
+# 🔴 THE PROTOCOL MOVED 2026-08-24. `/handoff` step 4 was ~26 KB of index
+# protocol inside a skill about writing handoffs; it is now the `subsystem-index`
+# skill, which `/handoff` and `/analyze-service` both follow. The pins below
+# assert against THAT file: they pin the PROTOCOL, and the protocol has a home of
+# its own now. `HANDOFF_DOC` stays because two pins are about /handoff itself —
+# that it still routes here, and that the kickoff block precedes both writes.
+INDEX_DOC = ROOT / "claude" / "skills" / "subsystem-index" / "SKILL.md"
 ANALYZE_DOC = ROOT / "claude" / "skills" / "analyze-service" / "SKILL.md"
 # 🔴 THE PINNED PROSE MOVED OUT OF THE ALWAYS-LOADED BODY, and these pins moved
 # with it in the SAME commit. `SKILL.md` was 17,476 bytes and loads on every
@@ -76,6 +83,7 @@ ANALYZE_WRITEBACK_DOC = (ROOT / "claude" / "skills" / "analyze-service"
 sys.path.insert(0, str(ROOT / "scripts" / "lib"))
 sys.path.insert(0, str(ROOT / "scripts"))
 
+from testlib import hermetic_git  # noqa: E402
 from testlib.skills_mapping import (  # noqa: E402
     assert_skills_mapping_declared,
 )
@@ -182,6 +190,10 @@ def _git_env(home: Path) -> dict:
             "GIT_COMMITTER_EMAIL": "test@example.invalid",
         }
     )
+    # 🔴 Background maintenance OFF — `_tree_hash` hashes `.git`, so a transient
+    # `.git/objects/maintenance.lock` reads as a repository change. See
+    # scripts/testlib/hermetic_git.py; the /dev/null pins above do NOT cover it.
+    env.update(hermetic_git.MAINTENANCE_OFF)
     return env
 
 
@@ -1432,7 +1444,14 @@ class TestSkillDocsArePinned:
         ("scripts/lib/subsystem_touch.py", "the step actually calls this module"),
         ("It **never writes**", "the helper's read-only contract, stated to its caller"),
         ("Write it — no question", "the index write is deliberately ungated"),
-        ("Step 5 keeps its y/N", "the PUSH gate survives; blast radius earns a gate"),
+        # 🔴 SUPERSEDES `("Step 5 keeps its y/N", …)`. Operator decision
+        # 2026-08-23 retired step 5's prompt too, on the same evidence that
+        # retired this step's on 2026-08-15: it was always answered `y`. The
+        # asymmetry that pin protected is GONE — what must survive is that
+        # neither write asks, and that the diff is still shown before both.
+        ("declining **by prompt** is what is gone", "the prompt went; declining did not"),
+        ("Both steps still SHOW the diff before writing",
+         "🔴 the half the prompt was never doing, kept at BOTH writes"),
         ("re-read the file and re-apply to current bytes", "no concurrent append is clobbered"),
         ("Never silent-mutate.", "the invariant carried over from analyze-service"),
         ("pointers, not copies", "the bloat rule"),
@@ -1533,15 +1552,18 @@ class TestSkillDocsArePinned:
             "It appears alongside `resolved` too",
             "why: entries must still accrue when something already matches",
         ),
-        ("on decline, discard", "the analyze-service clause that was dropped"),
+        # 🔴 WAS `("on decline, discard", …)`, which came from the
+        # analyze-service gate. Both prompts are retired (2026-08-15, then
+        # 2026-08-23), so the SKILL HOMES append follows the index write's
+        # current rule — show the diff, then edit — and pinning the old clause
+        # would require prose describing a prompt nothing asks.
+        ("show one compact diff, then edit; no question",
+         "the SKILL HOMES append follows the index write's CURRENT rule"),
         (
             "use `Edit` anchored on `## Nuance / work-history`, not `Write`",
             "no whole-file retype of a curated unbacked-up entry",
         ),
-        (
-            "Emit this BEFORE step 4's confirm gate, unconditionally",
-            "the kickoff block is the deliverable and must not sit behind a y/N",
-        ),
+
         ("--exclude claudedocs/handoff-", "the ritual does not nominate its own artifact"),
         (
             "in particular the `test_<slug>` stem",
@@ -1761,17 +1783,28 @@ class TestSkillDocsArePinned:
         agent to improvise at exactly the moment it is about to write into a
         client-confidential store. Derived from `STATUS_PRECEDENCE` rather than
         hand-listed, so a status added later cannot quietly go uncovered."""
-        doc = HANDOFF_DOC.read_text(encoding="utf-8")
+        doc = INDEX_DOC.read_text(encoding="utf-8")
         for status in st.STATUS_PRECEDENCE:
             assert f"`{status}`" in doc, (
-                f"claude/skills/handoff/SKILL.md never mentions the `{status}` status, "
+                f"claude/skills/subsystem-index/SKILL.md never mentions the `{status}` status, "
                 f"which subsystem_touch.build_report can emit."
             )
 
     def test_the_kickoff_block_precedes_the_confirm_gate(self) -> None:
-        """Structural, not a phrase: a user who walks away from the y/N must
-        still have the deliverable. Asserted on ORDER in the file, because the
-        pin above only proves the sentence exists somewhere."""
+        """Structural, not a phrase: a run that never reaches the end must
+        still have handed over the deliverable. Asserted on ORDER in the file,
+        because the pin above only proves the sentence exists somewhere.
+
+        ⚠ The original reason was "a user who walks away from the y/N" — both
+        prompts are retired (index write 2026-08-15, push 2026-08-23), so the
+        reason is now that everything after the kickoff can REFUSE: step 4 can
+        dead-end and step 5 can exit without writing on four separate statuses.
+        The ordering requirement did not change; only why it matters.
+
+        🔴 Reads HANDOFF_DOC, not INDEX_DOC: this is a claim about /handoff's own
+        step order. The index PROTOCOL moved to `subsystem-index` (2026-08-24);
+        the fact that /handoff hands over the deliverable before invoking it did
+        not."""
         doc = HANDOFF_DOC.read_text(encoding="utf-8")
 
         def at(needle: str) -> int:
@@ -1791,32 +1824,67 @@ class TestSkillDocsArePinned:
         # The index write is no longer gated (2026-08-15, operator decision), so
         # the ordering anchor is step 5's PUSH gate — still the last thing that
         # can block, and still after the deliverable.
-        gate = at("update the handoff doc and push it? (y/N)")
+        # 🔴 The anchor moved when the y/N was retired 2026-08-23. It is still
+        # the last thing in step 5 that can stop the doc landing — now a refusal
+        # rather than a question — so the ordering claim is unchanged.
+        gate = at("Land it — no question. SHOW the diff, then push")
         assert kickoff < index_step < gate
 
     @pytest.mark.parametrize(
         "sentence,why", HANDOFF_SENTENCES, ids=[w for _, w in HANDOFF_SENTENCES]
     )
     def test_handoff_step_sentence(self, sentence: str, why: str) -> None:
-        doc = HANDOFF_DOC.read_text(encoding="utf-8")
+        doc = INDEX_DOC.read_text(encoding="utf-8")
         assert sentence in doc, (
-            f"claude/skills/handoff/SKILL.md no longer contains the sentence pinning {why}.\n"
+            f"claude/skills/subsystem-index/SKILL.md no longer contains the sentence pinning {why}.\n"
             f"  missing: {sentence!r}\n"
             f"  Either restore it or change scripts/lib/subsystem_touch.py in the SAME\n"
             f"  commit. The module cannot enforce a protocol its only caller stopped\n"
             f"  following, and the drift is silent: the step simply stops happening."
         )
 
+    def test_handoff_still_routes_to_the_index_skill(self) -> None:
+        """🔴 THE SEAM the 2026-08-24 extraction created. The protocol moved to
+        `subsystem-index`; if /handoff stops naming it, the whole step silently
+        stops happening and every pin above still passes — they assert the
+        protocol EXISTS, not that anyone runs it.
+
+        This is the one assertion that fails if the two halves come apart."""
+        doc = HANDOFF_DOC.read_text(encoding="utf-8")
+        assert "`subsystem-index`" in doc, (
+            "claude/skills/handoff/SKILL.md no longer names the `subsystem-index` "
+            "skill. The index protocol moved out of step 4 on 2026-08-24; without "
+            "this reference nothing invokes it and the store stops accruing."
+        )
+        assert "--exclude claudedocs/handoff-" in doc, (
+            "/handoff must still pass --exclude for its own doc — that is caller "
+            "knowledge the index skill cannot supply."
+        )
+
+    def test_the_kickoff_precedes_both_writes(self) -> None:
+        """Replaces the pin on `Emit this BEFORE step 4's confirm gate` — that
+        gate was retired 2026-08-15 and step 4 is now a pointer, so the sentence
+        named something that no longer exists. Asserted here against the handoff
+        doc with its current wording."""
+        doc = HANDOFF_DOC.read_text(encoding="utf-8")
+        assert "Emit this BEFORE steps 4 and 5, unconditionally" in doc
+
     def test_the_pin_can_report_absence(self) -> None:
         """Negative control on the pin itself: a check against a doc that happens
         to contain everything is indistinguishable from one pointed at the wrong
         file."""
-        doc = HANDOFF_DOC.read_text(encoding="utf-8")
+        doc = INDEX_DOC.read_text(encoding="utf-8")
         assert "a sentence deliberately absent from the handoff skill" not in doc
 
     def test_the_pinned_docs_are_the_DEPLOYED_ones(self) -> None:
-        """Pinning a file that does not ship would be a vacuous green."""
-        for d in (HANDOFF_DOC, ANALYZE_DOC):
+        """Pinning a file that does not ship would be a vacuous green.
+
+        🔴 INDEX_DOC is in this tuple since 2026-08-24 and that is the point of
+        the entry: every one of the pins in this class now targets it, so if it
+        failed to deploy the whole battery would be green about a file no host
+        has. It was missed when the protocol moved — the guard's sentence stayed
+        wide while its body narrowed to the two files it happened to name."""
+        for d in (HANDOFF_DOC, ANALYZE_DOC, INDEX_DOC):
             assert d.exists(), f"the pinned doc is gone: {d}"
             assert d.name == "SKILL.md"
             assert d.parent.parent.name == "skills"
@@ -1831,6 +1899,21 @@ class TestSkillDocsArePinned:
             assert f"reference/{d.name}" in body, (
                 f"analyze-service/SKILL.md no longer points at reference/{d.name}"
             )
+        # 🔴 TRACKED, not merely present: the flake source contains only tracked
+        # files, so an untracked SKILL.md deploys as an ABSENCE while every test
+        # here passes against the working copy. The sidecar already had this
+        # check; the SKILL.md carrying 77 pins did not.
+        if (ROOT / ".git").exists():
+            for d in (HANDOFF_DOC, ANALYZE_DOC, INDEX_DOC):
+                rel = d.relative_to(ROOT).as_posix()
+                out = subprocess.run(
+                    ["git", "-C", str(ROOT), "ls-files", "--error-unmatch", "--", rel],
+                    capture_output=True, text=True,
+                )
+                assert out.returncode == 0, (
+                    f"{rel} is not tracked by git, so the flake omits it from the "
+                    f"deploy and every pin against it is vacuous.\n{out.stderr}"
+                )
         # Shared predicate — declared-and-not-switched-off only; see
         # testlib/skills_mapping.py for what it does NOT check, and why.
         assert_skills_mapping_declared(ROOT / "nix" / "home.nix")
@@ -10531,7 +10614,7 @@ class TestStep4IsTOLDToReadTheShapeBlock:
         assert emitted == set(self.KINDS)
 
     def test_step_4_names_every_kind_the_scanner_can_emit(self) -> None:
-        doc = HANDOFF_DOC.read_text(encoding="utf-8")
+        doc = INDEX_DOC.read_text(encoding="utf-8")
         for kind in self.KINDS:
             assert kind.upper() in doc, (
                 f"`{kind}` can be reported by --validate and step 4 never mentions it; "
@@ -10541,7 +10624,7 @@ class TestStep4IsTOLDToReadTheShapeBlock:
     def test_step_4_names_the_headings_the_shape_block_CHECKS(self) -> None:
         """And only those: a writer told the spine is checked would read the
         zero as a claim about `## What it is`, which nothing examines."""
-        doc = HANDOFF_DOC.read_text(encoding="utf-8")
+        doc = INDEX_DOC.read_text(encoding="utf-8")
         for heading in st.SHAPE_HEADINGS:
             assert heading in doc, heading
 
@@ -10549,7 +10632,7 @@ class TestStep4IsTOLDToReadTheShapeBlock:
         """The one fact that makes the instruction necessary rather than
         redundant. Without it "run --validate and read the output" is advice a
         reader discharges by checking `rc == 0`."""
-        doc = " ".join(HANDOFF_DOC.read_text(encoding="utf-8").split())
+        doc = " ".join(INDEX_DOC.read_text(encoding="utf-8").split())
         assert "advisory and deliberately does **not** move the verdict" in doc
         assert "still exits 0" in doc
 
