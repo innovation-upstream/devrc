@@ -19,8 +19,11 @@ flow was opened. Everything else about the pickup is here.
 Route-level cites: `task-api.md` → "Notifications".
 
 ```bash
-clawgatectl task get <id>            # 1. READ — body + comments are BOTH already here
+clawgatectl task get <id>            # 1. READ — body, comments AND sessions are ALL already here
                                      #    (no /comments GET exists; it is 405)
+#  1b. WHO ALREADY TOUCHED IT — free, the read above already returned it:
+#      jq '.sessions[] | select(.role=="worked" or .role=="created")'
+#      A `worked` link from ANOTHER session => say so before doing the work again.
 #  2. EVALUATE and report to Zach. Do NOT flip status yet — see the ordering trap below.
 #  3a. On "local dispatch": settle the acceptance criteria (detector below).
 clawgatectl task comment <id> --body "$(cat <<'EOF'
@@ -38,6 +41,27 @@ clawgatectl task status <id> in_progress          # 3c. THEN flip, and work
 clawgatectl task comment <id> --body "…"          # 5. ONE completion comment (shape below)
 clawgatectl task status <id> ready_for_review     # 6. …or `complete` — see the gate
 ```
+
+**Step 1b — has someone already done this?** The `sessions` array is the task's thread: which
+Claude Code sessions touched it, and how. It arrives **in the step-1 response**, so this check
+costs no extra call and creates no extra link. Two cards (#193, #194) were dispatched and paid for
+twice; this is the cheapest thing that catches that before you start.
+
+🔴 **Filter on `role`. Membership alone means nothing** — a *mere read* links a session, and a
+subagent links its PARENT. Only `worked` / `created` are claims about work.
+
+| what you see | what it means | what to do |
+|---|---|---|
+| `worked` by another session | someone did real work already | **Say so before starting.** Check the comments for their write-back; it may be finished and un-flipped |
+| `created` only | the card was filed, not worked | normal — proceed |
+| only `read` links | nobody worked it | proceed |
+| your OWN id as `worked` | you already worked it this session | you are probably re-entering; re-read your own comment first |
+
+⚠ **Never read "no `read` link" as "nobody looked".** The thread cap evicts oldest `read` first and
+**never** `created`/`worked` — so `worked` is durable evidence while a missing `read` may just have
+been evicted. ⚠ `detailAvailable: false` is the majority state; a `sessionId` usually will not
+resolve to a transcript. Full semantics:
+`~/.claude/skills/clawgate/reference/task-api.md` → "Task ↔ session threads".
 
 **Acceptance-criteria detector — deterministic, not a judgement call.** A heading matching
 `## Acceptance criteria` (case-insensitive) → **AUTHOR-SPECIFIED**. Anything else — including a body

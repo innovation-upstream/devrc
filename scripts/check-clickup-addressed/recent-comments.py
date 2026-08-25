@@ -10,6 +10,17 @@ Output (default): one line per comment, tab-separated:
 With --json: JSON array of objects.
 
 --fast: Only check the 10 most recently updated tasks (much faster for large backlogs).
+
+🔴 THIS FILE SHELLS OUT TO THE CLICKUP SKILL'S CLI (`node query.mjs`, below), AND THAT CLI
+NOW HAS AN `awaiting` COMMAND ANSWERING A PREDICATE THIS PIPELINE ALSO DERIVES. Do NOT
+replace the derivation with a call to it: `awaiting` emits a row only when the newest
+comment is not the owner's, so every task the owner answered last is structurally absent —
+exactly the population `check-addressed.py`'s ANSWERED/suppression note is built from — and
+it carries no comment text, no priority, no `my_latest_reply`, and no way to express the
+`UNIDENTIFIED` sentinel below. The full ledger, the three measured cross-language
+divergences, and the shared table that keeps the two implementations pinned to one
+contract: `claude/skills/clickup/reference/awaiting-vs-ccua.md` and
+`tests/test_awaiting_contract.py`.
 """
 import subprocess, json, sys, os
 from datetime import datetime, timezone
