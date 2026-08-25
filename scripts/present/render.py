@@ -117,6 +117,11 @@ section h3{font-size:1.02rem; margin:26px 0 8px; letter-spacing:-.005em}
 section p{max-width:78ch}
 section ul{max-width:78ch; padding-left:20px}
 section li{margin:.45em 0}
+/* 🔴 An UNMEASURED reason routinely carries a 100+ character absolute path with
+   no break opportunity in it. Without this, one such row widens the grid column
+   and the BODY scrolls horizontally — the failure the narrow-viewport rule
+   exists to prevent. Applied to every container that can hold machine text. */
+section p,section li,.reason,.md,dl.kv dd,.card p,.note p,.unbanner li{overflow-wrap:anywhere}
 
 .stub{
   background:var(--bad-soft); border:2px dashed var(--bad); border-radius:10px;
@@ -146,10 +151,15 @@ section li{margin:.45em 0}
 dl.kv{margin:16px 0; max-width:82ch}
 dl.kv dt{font-weight:650; margin-top:14px; font-size:.95rem}
 dl.kv dd{margin:3px 0 0; color:var(--ink-2); font-size:.93rem}
+/* 🔴 Deliberately NOT `white-space:nowrap`. The longest tag here is a whole
+   clause, and at a 360px viewport an unwrappable one is wider than the column —
+   MEASURED forcing the BODY to scroll sideways, which is the one layout failure
+   this page must not have. Tags sit on one line wherever there is room, so
+   allowing them to wrap costs nothing at desktop widths. */
 .tag{
   display:inline-block; font-size:.68rem; letter-spacing:.05em; text-transform:uppercase;
   background:var(--ok-soft); color:var(--ok); border-radius:4px; padding:1px 6px;
-  white-space:nowrap; font-weight:650;
+  font-weight:650; overflow-wrap:anywhere;
 }
 .tag-soft{background:var(--warn-soft); color:var(--warn)}
 
@@ -209,6 +219,26 @@ svg.diagram{display:block; width:100%; height:auto; max-width:920px; margin:20px
 .dedge{fill:var(--ink-3); font-size:9.5px; text-anchor:middle;
        font-family:ui-sans-serif,system-ui,sans-serif}
 .darrow{stroke:currentColor; stroke-width:1.3; fill:none}
+
+/* The §0 overview cycle. It is the page's primary navigation, so it must stay
+   legible rather than shrink to fit: below `min-width` it scrolls INSIDE its own
+   container. That container is what scrolls — never the page body. */
+.ovwrap{overflow-x:auto; margin:20px 0; -webkit-overflow-scrolling:touch}
+svg.overview{display:block; width:100%; min-width:700px; max-width:940px;
+             height:auto; margin:0 auto; color:var(--ink-3)}
+svg.overview a{text-decoration:none; cursor:pointer}
+svg.overview a .dbox{transition:stroke .12s,stroke-width .12s}
+svg.overview a:hover .dbox,svg.overview a:focus .dbox{stroke:var(--accent); stroke-width:2.2}
+svg.overview a:hover .dlabel,svg.overview a:focus .dlabel{fill:var(--accent)}
+.dcount{fill:var(--ink); font-size:12px; font-weight:700; text-anchor:middle;
+        font-variant-numeric:tabular-nums;
+        font-family:ui-sans-serif,system-ui,sans-serif}
+/* 🔴 An UNMEASURED stage is rendered LOUDLY, never as a blank, a dash or a zero.
+   A gap in a diagram reads as "nothing there", which is the exact silent-zero
+   this page exists to teach against. */
+.dcount-un{fill:var(--warn); font-weight:800; letter-spacing:.07em}
+.dctr{fill:var(--ink-2); font-size:11.5px; font-weight:660; letter-spacing:.05em;
+      text-anchor:middle; font-family:ui-sans-serif,system-ui,sans-serif}
 
 .unbanner{
   border:2px solid var(--warn); background:var(--warn-soft); color:var(--warn);
@@ -310,7 +340,13 @@ def _table(columns, rows, key: str) -> str:
             cells = []
             for i, c in enumerate(r):
                 num = bool(re.fullmatch(r"[\d,._ ]+", str(c).strip()))
-                cells.append(f'<td class="{"num" if num and i else ""}">{rich(c)}</td>')
+                # An EMPTY class attribute is ~11 dead bytes per cell, and the
+                # tables here are the largest single thing on the page. Emit the
+                # attribute only when it carries a class.
+                cells.append(
+                    f'<td class="num">{rich(c)}</td>' if (num and i)
+                    else f"<td>{rich(c)}</td>"
+                )
             out.append("<tr>" + "".join(cells) + "</tr>")
         return "".join(out)
 
@@ -395,6 +431,15 @@ def _blocks(blocks, ms: _measure.MeasurementSet) -> str:
         elif kind == "svg":
             fn = _content.DIAGRAMS.get(payload)
             out.append(fn() if fn else "")
+        elif kind == "svgm":
+            # A MEASUREMENT-AWARE diagram. It is handed the whole set rather
+            # than a pre-formatted string so that a key it cannot find renders
+            # as UNMEASURED inside the picture, with the same loudness as a
+            # missing row — see content.diagram_overview.
+            fn = _content.LIVE_DIAGRAMS.get(payload)
+            out.append(fn(ms) if fn else "")
+        elif kind == "unbanner":
+            out.append(_unmeasured_banner(ms))
         elif kind == "measure":
             m = ms.by_key(payload)
             if m is None:
@@ -503,12 +548,12 @@ def build_html(ms: _measure.MeasurementSet, *, sanitized: bool, san=None,
         + "<main>"
         '<header class="masthead">'
         "<h1>devrc &mdash; how the agent layer works</h1>"
-        '<p class="sub">A dotfiles repository that grew an agent-operations layer. '
-        "This page explains it well enough to change it correctly: the loop a change "
-        "travels, the invariants it must not break, and the questions already settled.</p>"
         f'<div class="buildbar">{"".join(chips)}</div>'
         "</header>"
-        + _unmeasured_banner(ms)
+        # The what-this-is line and the UNMEASURED roll-up now live INSIDE §0,
+        # directly above and below the overview diagram, so a cold reader gets
+        # "what am I looking at" and "how fresh is it" in one glance instead of
+        # two competing summaries.
         + "".join(body)
         + "</main></div>"
         "<footer><p><b>This page is a measurement, not a document.</b> It is "

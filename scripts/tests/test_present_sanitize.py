@@ -308,35 +308,9 @@ def test_the_generator_ships_no_committed_html_or_data_fixture():
     assert not stray, f"generated or captured data is committed under present/: {stray}"
 
 
-def test_the_content_module_never_restates_a_live_measured_number():
-    """🔴 SEAM GUARD — the one that keeps the page from rotting.
-
-    The whole premise is that prose names MECHANISMS and only measured rows
-    carry VALUES. The moment a paragraph restates a number the generator
-    measures, that paragraph starts aging, and this repo has measured its own
-    prose false in both directions.
-
-    So: take every value the live registry produces, pull the multi-digit
-    numeric tokens out of it, and assert none of them appears in the content
-    module's prose. Historical measurements (a killed proposal's numbers, a
-    dated incident) are permanently true and are deliberately NOT in scope —
-    they cannot collide, because they are not what the generator measures.
-    """
-    env = measure.Env(repo=REPO_ROOT, home=Path.home(),
-                      claude_dir=Path.home() / ".claude",
-                      index_store=Path.home() / ".claude" / "analyze-service-index",
-                      allow_systemd=False)
-    ms = measure.take(env)
-    assert ms.measured, "nothing measured — this guard would then be vacuous"
-
-    prose = (PRESENT_DIR / "content.py").read_text(encoding="utf-8")
-    live: set[str] = set()
-    for m in ms.measured:
-        for token in re.findall(r"\d[\d,]{2,}", m.value or ""):
-            live.add(token)
-            live.add(token.replace(",", ""))
-    collisions = sorted(t for t in live if t in prose)
-    assert not collisions, (
-        "content.py restates a number the generator measures live: "
-        f"{collisions}. Name the mechanism in prose and let the measured row "
-        "carry the value.")
+# The prose-restatement guard MOVED to `test_present_content.py`, where it sits
+# beside the other prose gates — and was narrowed there, because this spelling
+# grepped the raw `content.py` SOURCE and so read SVG geometry as prose. It was
+# RED on an unrelated machine whose index store had grown to a size that
+# collided with a diagram coordinate, with no change to this tree. See
+# `_authored_visible_text` in that module for the full account.
