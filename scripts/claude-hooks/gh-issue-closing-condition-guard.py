@@ -715,7 +715,7 @@ def _shell_walk(text):
                 # `heredoc_bodies(span)` still finds it.
                 end = skip.get(i + 1) if c == "\n" else None
                 if end is not None:
-                    spans.append((seg_lo, i))
+                    spans.append((seg_lo, end))
                     seg_lo, i, at_cmd = end, end, True
                     continue
                 spans.append((seg_lo, i))
