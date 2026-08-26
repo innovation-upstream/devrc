@@ -9,8 +9,9 @@ one of them appears in the page's authored VISIBLE TEXT.
 
 Historical quantities are deliberately IN BOUNDS — a killed proposal's
 measurement, a dated incident's count. They are permanently true, they are not
-what the generator measures, and stripping them would gut §11 and §12, whose
-whole job is to carry the number that settled a question. What is out of bounds
+what the generator measures, and stripping them would gut §10 (negative space)
+and §11 (the evidence bar), whose whole job is to carry the number that settled
+a question. What is out of bounds
 is restating a LIVE fact: the moment prose carries a byte count or a test total,
 that paragraph starts aging, and this repo has measured its own prose false in
 both directions.
@@ -104,7 +105,7 @@ def _arrow(x1, y1, x2, y2, mid, label=""):
 
 
 # --------------------------------------------------------------------------- #
-# §0 — the overview cycle. The ONLY place the whole system appears at once.
+# §0 — the three concepts. The ONLY place the whole system appears at once.
 # --------------------------------------------------------------------------- #
 
 #: (stage label, section slug, description lines, measurement key, box tone).
@@ -114,32 +115,35 @@ def _arrow(x1, y1, x2, y2, mid, label=""):
 #: — and a key no measurer produces renders UNMEASURED rather than blank.
 #: `test_present_content.py` pins every slug against a real section and every key
 #: against the live registry, both directions.
+#:
+#: The first three are the page's three PRIMARY CONCEPTS. The fourth is not a
+#: fourth concept: it is the band of constraints all three sit inside, drawn
+#: underneath them rather than beside them for exactly that reason.
 OVERVIEW_STAGES: tuple[tuple[str, str, str, str, str], ...] = (
-    ("TOLD", "told",
-     "rules &#183; skills &#183; memory|all three CAPPED, paid every session",
-     "skills.listing", "a"),
-    ("MAY DO", "may-do",
-     "hooks that can REFUSE a call|shipped and registered differ",
-     "hooks", "a"),
-    ("VERIFIED", "verified",
-     "two gate tiers, running in|two different environments",
-     "gate.tiers", "b"),
-    ("SHIPS", "ships",
-     "a switch, per host &#8212; a merge|deploys precisely nothing",
-     "ship.managed", "b"),
-    ("DRIFT", "drift",
-     "a passive deadman on a timer|it reports, and never fixes",
-     "drift.ladder", "d"),
-    ("OBSERVED", "observed",
-     "telemetry &#183; recall store|&#183; live session surfaces",
-     "telemetry.sources", "c"),
+    ("SESSIONS", "sessions",
+     "Claude Code instances doing work|one pane, one transcript, many views",
+     "seam.sessions", "a"),
+    ("CLAIMABLE TASKS", "tasks",
+     "clawgate Tasks is canonical here|three other systems also mint work",
+     "tasks.intake", "b"),
+    ("SUBSYSTEMS", "subsystems",
+     "what is worked on, and what is|known about it &#8212; recalled on demand",
+     "index.store", "c"),
+    ("WHAT CONSTRAINS ALL THREE", "constraints",
+     "always-on context budgets &#183; two gate tiers, in two environments|"
+     "merged is not deployed &#8212; a switch, per host, or nothing moves",
+     "skills.listing", "d"),
 )
 
-#: Box geometry, laid out as a closed racetrack: three across the top going
-#: right, down the right edge, three across the bottom coming back left, up the
-#: left edge to the start. A true hexagon reads worse at this text density.
-_OV_W, _OV_H = 260, 104
-_OV_POS = ((20, 30), (330, 30), (640, 30), (640, 250), (330, 250), (20, 250))
+#: Box geometry, parallel to `OVERVIEW_STAGES`: three concept boxes across the
+#: top, and the constraints band spanning the full width beneath them. The band
+#: is WIDE and LOW on purpose — it reads as ground, not as a peer.
+_OV_GEOM = (
+    (16, 30, 272, 112),
+    (324, 30, 272, 112),
+    (632, 30, 272, 112),
+    (16, 214, 888, 92),
+)
 
 
 def _wrap(text: str, width: int, maxlines: int = 2) -> list[str]:
@@ -188,39 +192,44 @@ def _stage_count(ms, key: str):
 
 
 def diagram_overview(ms) -> str:
-    """The whole system as one closed cycle, with live counts, as navigation.
+    """The three concepts, the three seams between them, and the ground they sit on.
 
     Each stage is an `<a href="#slug">`: this figure IS the page's primary
     navigation, which is why it must stay legible rather than shrink to fit. The
     CSS gives it a `min-width` inside a scrolling container, so a narrow viewport
     scrolls the FIGURE and never the page body.
+
+    🔴 THE EDGES ARE THE PAYLOAD, not decoration between boxes. Each of the three
+    is a place where two owners meet and neither holds both sides, so all three
+    are drawn as labelled arrows and the whole seam group is itself a link.
     """
     mid = "ar-ov"
     # 🔴 NOT role="img". An `img` role collapses the whole figure into one opaque
-    # image for assistive tech, which would hide the six stage LINKS inside it —
-    # and this diagram is the page's primary navigation. `role="group"` keeps the
+    # image for assistive tech, which would hide the stage LINKS inside it — and
+    # this diagram is the page's primary navigation. `role="group"` keeps the
     # accessible name while leaving the links reachable.
-    parts = [_SVG_HEAD.format(w=920, h=384, alt=(
-        "The loop a change travels, drawn as a closed cycle: what the agent is "
-        "told, what it may do, how work is verified, how it ships, how drift is "
-        "caught, what is observed, and back to what the agent is told. Each "
-        "stage carries its live measured count and links to its section."
+    parts = [_SVG_HEAD.format(w=920, h=344, alt=(
+        "The three primary concepts, drawn as three boxes: sessions, claimable "
+        "tasks and subsystems. Sessions claim tasks; tasks name subsystems; "
+        "sessions write subsystems. Beneath all three runs a band of constraints "
+        "they all sit inside. Each box carries its live measured count and links "
+        "to its section."
     ), mid=mid)
         .replace('role="img"', 'role="group"')
         .replace('class="diagram"', 'class="diagram overview"')]
 
     for i, (label, slug, sub, key, tone) in enumerate(OVERVIEW_STAGES):
-        x, y = _OV_POS[i]
-        cx = x + _OV_W / 2
+        x, y, w, h = _OV_GEOM[i]
+        cx = x + w / 2
         lines, un, reason = _stage_count(ms, key)
         tip = f"{label} — {'UNMEASURED: ' + reason if un else 'open this section'}"
         parts.append(f'<a href="#{slug}"><title>{html.escape(tip)}</title>')
-        parts.append(_box(x, y, _OV_W, _OV_H, label, sub, "warn" if un else tone))
+        parts.append(_box(x, y, w, h, label, sub, "warn" if un else tone))
         cls = "dcount dcount-un" if un else "dcount"
         # One line sits low and centred; two lines start higher so the second
         # never rides the box's bottom edge. An UNMEASURED stage always takes the
         # two-line form: the word, and where its reason lives.
-        top = y + (82 if (len(lines) == 1 and not un) else 76)
+        top = y + h - (22 if (len(lines) == 1 and not un) else 28)
         for j, line in enumerate(lines):
             parts.append(
                 f'<text x="{cx}" y="{top + j * 14}" class="{cls}">'
@@ -228,22 +237,28 @@ def diagram_overview(ms) -> str:
             )
         if un:
             parts.append(
-                f'<text x="{cx}" y="{y + 92}" class="dnote">'
+                f'<text x="{cx}" y="{y + h - 12}" class="dnote">'
                 'why not &#8212; open this section</text>'
             )
         parts.append("</a>")
 
-    parts.append(_arrow(284, 82, 326, 82, mid))
-    parts.append(_arrow(594, 82, 636, 82, mid))
-    parts.append(_arrow(770, 138, 770, 246, mid))
-    parts.append(_arrow(636, 302, 594, 302, mid))
-    parts.append(_arrow(326, 302, 284, 302, mid))
-    parts.append(_arrow(150, 246, 150, 138, mid))
+    # The three seams. The two short ones sit between the boxes; the long one
+    # runs underneath, because sessions reach subsystems without going through a
+    # task at all — which is the seam that leaks.
+    parts.append('<a href="#seams"><title>The three seams &#8212; open the section</title>')
+    parts.append(_arrow(292, 86, 320, 86, mid, "claim"))
+    parts.append(_arrow(600, 86, 628, 86, mid, "name"))
+    parts.append(
+        '<path d="M152,148 V186 H768 V150" class="darrow" '
+        f'marker-end="url(#{mid})"/>'
+    )
+    parts.append('<text x="460" y="180" class="dedge">sessions write subsystems '
+                 'without going through a task</text>')
+    parts.append('<text x="460" y="204" class="dctr">THE SEAMS ARE WHERE THE DEFECTS LIVE</text>')
+    parts.append("</a>")
 
-    parts.append('<text x="460" y="166" class="dctr">THE LOOP A CHANGE TRAVELS</text>')
-    parts.append('<text x="460" y="190" class="dnote">what drift finds becomes a RULE,</text>')
-    parts.append('<text x="460" y="206" class="dnote">and a rule costs always-on budget &#8212;</text>')
-    parts.append('<text x="460" y="222" class="dnote">which is why the loop has a ceiling.</text>')
+    parts.append('<text x="460" y="330" class="dnote">Not a fourth concept &#8212; the '
+                 'physics. Nothing above escapes the band below it.</text>')
     parts.append("</svg>")
     return f'<div class="ovwrap">{"".join(parts)}</div>'
 
@@ -320,18 +335,21 @@ LIVE_DIAGRAMS = {
 # The spine
 # --------------------------------------------------------------------------- #
 
+
 SECTIONS: tuple[Section, ...] = (
     Section(
-        slug="overview", number="0", title="Overview — the whole loop",
+        slug="overview", number="0", title="Overview — three concepts",
         lede="A NixOS dotfiles repo that grew an agent-operations layer: one operator works "
              "almost entirely through coding agents, so what is engineered here is the "
-             "agent's environment. Every stage below carries its live count and is a link.",
+             "agent's environment. Three nouns carry all of it. Each box below shows its "
+             "live count and is a link.",
         blocks=(
             ("svgm", "overview"),
             ("note", ("why", "One fact explains most of the design", (
                 "<b>Instructions cost context on every session, and context is finite.</b> "
                 "The byte ceilings, the tier ledger, the eviction rule and the refusal to "
-                "restate a number all fall out of that."))),
+                "restate a number all fall out of that &mdash; which is why the band under "
+                "the three concepts is drawn as ground rather than as a fourth box."))),
             ("unbanner", None),
         ),
     ),
@@ -353,8 +371,7 @@ SECTIONS: tuple[Section, ...] = (
                 "page names which.",
                 "<b>Prose names mechanisms; only measured rows carry live values.</b> A test "
                 "greps the live registry's numbers against this page's text. Historical "
-                "numbers &mdash; the measurement that killed a proposal &mdash; are in "
-                "bounds; they cannot go stale.",
+                "numbers cannot go stale, so they are in bounds.",
             ]),
             ("note", ("why", "Why a generator instead of a document", (
                 "This repo's own <code>CLAUDE.md</code> carried one claim in two opposite, "
@@ -373,89 +390,62 @@ SECTIONS: tuple[Section, ...] = (
              "modes, which is the point.",
         blocks=(
             ("cards", [
-                ("“Add a skill or a rule.”",
-                 "<a href=\"#told\">§3</a>, then <a href=\"#cost\">§10</a>. Both are capped "
-                 "surfaces: an addition needs an eviction in the same commit, and a new "
-                 "skill needs a tier-ledger entry or the suite goes red."),
-                ("“Change some code.”",
-                 "<a href=\"#verified\">§5</a> and <a href=\"#invariants\">§9</a>. Two gate "
-                 "tiers in two environments &mdash; and merged is not deployed."),
-                ("“Something is stale on a host.”",
-                 "<a href=\"#ships\">§6</a> and <a href=\"#drift\">§7</a>. Git, host and "
-                 "source parity are independent; a machine can be perfect on one and "
-                 "silently broken on another."),
+                ("“What is running, and is anything waiting on me?”",
+                 "<a href=\"#sessions\">§3</a>. A session is one agent instance in one "
+                 "terminal pane; every tool here is a view onto that pane and its "
+                 "transcript."),
+                ("“What should I pick up next?”",
+                 "<a href=\"#tasks\">§4</a>. One task system is canonical &mdash; and three "
+                 "others also mint work, which is the thing to know before you meet one."),
+                ("“What do we already know about X?”",
+                 "<a href=\"#subsystems\">§5</a>. Knowledge about a subsystem is durable "
+                 "state in a store that costs nothing until it is recalled."),
                 ("“Propose an improvement.”",
-                 "<a href=\"#negative\">§11</a> first, then <a href=\"#evidence\">§12</a>. "
-                 "§11 is what was already killed, each with the measurement that killed it."),
+                 "<a href=\"#negative\">§10</a> first, then <a href=\"#evidence\">§11</a>. "
+                 "§10 is what was already killed, each with the measurement that killed it."),
             ]),
+            ("note", ("what", "Where everything else went", (
+                "The three touch at three edges, and that is where the real defects are "
+                "&mdash; <a href=\"#seams\">§6</a>. What bounds all three is not a fourth "
+                "concept but the physics they sit in "
+                "(<a href=\"#constraints\">§7</a>)."))),
         ),
     ),
 
     Section(
-        slug="told", number="3", title="What the agent is told",
-        lede="Three surfaces load into every session before the operator types anything. All "
-             "three are capped, and the caps are the most explanatory fact about the design.",
+        slug="sessions", number="3", title="Sessions",
+        lede="A session is one Claude Code instance doing work. Every tool named here is a "
+             "view onto the same two facts — a multiplexer pane, and a transcript on disk.",
         blocks=(
             ("p", (
-                "Instructions are paid on <b>every session</b>, across two machines and "
-                "several concurrent agents. So the question is never “is this instruction "
-                "correct?” but “is it worth what it costs, forever, against what it "
-                "displaces?”")),
-            ("svg", "budget"),
+                "There is no session <i>service</i> and no session record. A session is "
+                "inferred &mdash; a process under a pane, and a transcript file it appends "
+                "to &mdash; and everything that reports on sessions re-derives that "
+                "inference, which is why these surfaces disagree with each other more than "
+                "anything else here (<a href=\"#seams\">§6</a>).")),
             ("kv", [
-                ("The rules file &mdash; <i>paid twice</i>",
-                 "Imperatives and the verification standard, charged once by the harness and "
-                 "again because the nix build concatenates it into the other agent runner's "
-                 "instruction file. It once grew 2.9&times; in three days by a process where "
-                 "every commit was individually correct and nothing asked what the file "
-                 "cost. A test now owns its ceiling."),
-                ("The skill listing &mdash; <i>it fails silently</i>",
-                 "A skill body costs nothing until its trigger fires, but every name and "
-                 "description loads every session under a fraction of the context window. On "
-                 "overflow the harness <b>drops descriptions, least-invoked first, with no "
-                 "error</b> &mdash; so the skills least able to afford weak routing lose it "
-                 "first. A description is <b>routing surface, not documentation</b>."),
-                ("The memory index &mdash; <i>a hard cap</i>",
-                 "Durable lessons, with topic files behind it that cost nothing until "
-                 "recalled. <b>Content past the cap is dropped on load, silently</b> &mdash; "
-                 "the index does not error, it carries less than it says. The usual cause is "
-                 "status creep: “shipped”, “deployed”, “soaking”."),
+                ("The live inventory &mdash; <code>/session-manager</code>",
+                 "Cross-host: which panes have an agent, what each is doing, and &mdash; the "
+                 "one that pays &mdash; which are <i>waiting on a human</i>. That got its own "
+                 "tool after two windows were measured unanswered for days."),
+                ("One window &mdash; <code>/window-triage</code>",
+                 "By codename, hotkey or address, plus a ranking of the windows stranded "
+                 "past a threshold."),
+                ("A past session &mdash; <code>/find-session</code>",
+                 "Keyword search across every transcript: project, branch, resume command."),
+                ("The scripts underneath",
+                 "Resolution, the waiting clock, writing into a pane, the shared "
+                 "<code>/proc</code> detector, and the multiplexer naming and restore "
+                 "helpers. <b>The skill is the surface; this page routes to it.</b>"),
             ]),
-            ("measure", "rules.bytes"),
-            ("measure", "rules.archive"),
-            ("note", ("hazard", "Never satisfy a ceiling by narrowing a rule", (
-                "One prohibition had to be <i>re-broadened</i> after a narrow wording let an "
-                "agent walk into the failure it forbade. <b>Evict the evidence, never the "
-                "scope</b> &mdash; and raising a ceiling costs a commit message naming the "
-                "rule that would not fit."))),
-            ("measure", "skills.listing"),
-            ("note", ("hazard", "Tier by symptom, never by an invocation counter", (
-                "Tier A carries a full description and auto-fires from a described symptom; "
-                "tier B is name-only. Two skills here are demonstrably live with a recorded "
-                "count of <i>zero</i>, because the counter cannot see a skill running as a "
-                "systemd service. Tie-break: tier B when a mis-route <b>degrades the "
-                "answer</b>, tier A when it <b>takes a wrong action</b>."))),
-            ("measure", "memory.index"),
-            ("p", (
-                "The inventory is shallow on purpose &mdash; name, tier, the skill's own "
-                "first sentence, path. <b>The skill is the operating surface; this page "
-                "routes to it.</b> A procedure restated here would be a fourth documentation "
-                "surface, and the fourth copy goes stale first.")),
-            ("measure", "skills.inventory"),
-        ),
-    ),
-
-    Section(
-        slug="may-do", number="4", title="What the agent may do",
-        lede="Hooks that can refuse a tool call, and integrations that act on the world.",
-        blocks=(
+            ("h3", "What a session may do"),
             ("p", (
                 "Prose is the weak form of control &mdash; the rules file says so itself. "
                 "The strong form is a <b>hook</b>: a program the harness runs before a tool "
-                "call, whose exit code can block it. The blocking one refuses blind staging "
-                "(<code>git add -A</code>), hard resets, <code>git stash</code> (the stash "
-                "stack is repository-global, so it reaches into other worktrees), oversized "
-                "heredocs, and publishing a secret or a public IP into a public repo.")),
+                "call, whose exit code can block it. The blocking one refuses blind staging, "
+                "hard resets, <code>git stash</code> (the stash stack is repository-global, "
+                "so it reaches into other worktrees), oversized heredocs, and publishing a "
+                "secret or a public IP into a public repo.")),
             ("note", ("hazard", "A hook that only nudges is not a guard", (
                 "Most hooks here emit advice and exit zero. Legitimate &mdash; one nudge "
                 "moved a behaviour from 0% to 50% adoption &mdash; but <b>not</b> a control. "
@@ -465,22 +455,208 @@ SECTIONS: tuple[Section, ...] = (
                 "deliberately unmanaged settings file. A hook can be present, correct, fully "
                 "tested, and firing on neither machine &mdash; hence two counts below."))),
             ("measure", "hooks"),
-            ("note", ("why", "What generalises across the integrations", (
-                "An approval UI turning a permission prompt into a phone notification, a "
-                "ticket system, a bridge driving the operator's real logged-in browser, a "
-                "download router &mdash; each operated through its own skill (see "
-                "<a href=\"#told\">§3</a>). These are the surfaces where a wrong action is "
-                "not recoverable by editing a file, so work that leaves the machine, cannot "
-                "be undone, or moves many things at once is flagged <i>before</i> it "
-                "happens &mdash; and an approval covers only the step it was given for."))),
+            ("h3", "What is observed about sessions"),
+            ("p", (
+                "Shell, multiplexer, keyboard, window manager, browser and agent transcripts "
+                "feed a collector that lands events in a columnar database, with a "
+                "per-source deadman so a source that stops is noticed rather than assumed "
+                "quiet. It is what makes “this tool is dead” measurable.")),
+            ("measure", "telemetry.sources"),
         ),
     ),
 
     Section(
-        slug="verified", number="5", title="How work is verified",
-        lede="Two gate tiers running the same suites in two environments. Treating them as "
-             "two spellings of one thing has already cost a required check.",
+        slug="tasks", number="4", title="Claimable tasks",
+        lede="A unit of work something can pick up and be held to. One system here is "
+             "canonical. Three others also mint work, and meeting one of those in the wild "
+             "should not be a surprise.",
         blocks=(
+            ("note", ("why", "The canonical one, and why the others are still here", (
+                "<b>clawgate Tasks</b> is the canonical claimable task: it has dispatch, "
+                "agents, acceptance criteria and a status gate &mdash; the four properties "
+                "that let something other than a human pick the work up and be judged on it. "
+                "The other three are listed, not hidden. <b>Implying a consolidation that "
+                "has not happened is the failure this page exists to teach against</b>: it "
+                "reads as coverage while providing none."))),
+            ("p", (
+                "clawgate is the self-hosted approval UI &mdash; an agent's permission "
+                "prompt becomes something the operator can approve from a phone &mdash; and "
+                "it grew a Tasks board on that channel. Authoring one well is a procedure "
+                "with its own flow document rather than a paragraph here. Skill: "
+                "<code>/clawgate</code>.")),
+            ("h3", "The other three, one line each"),
+            ("kv", [
+                ("ClickUp &mdash; <code>/clickup</code>",
+                 "The client-facing ticket system. <b>Separate because it is someone else's "
+                 "system of record</b>: statuses and assignees are set off this machine, so "
+                 "nothing here gates on them and no agent claims one. "
+                 "<code>/check-clickup-addressed</code> reads transcripts to answer whether "
+                 "the work happened."),
+                ("The initiatives board &mdash; <code>/initiatives</code>",
+                 "A durable cross-repo ledger of ongoing efforts, with momentum and a next "
+                 "step. <b>Separate because an initiative is a thread, not a unit</b>: "
+                 "coarser than a task and carrying no acceptance criterion. "
+                 "<code>/initiative-scan</code> is the on-demand view."),
+                ("<code>scripts/claim-work.sh</code>",
+                 "<b>Separate because it is a lock, not a queue</b>: the ranked next-steps "
+                 "list in a handoff document has no lock, so pushing an orphan commit to a "
+                 "claim ref <i>is</i> the claim &mdash; git's own compare-and-swap, so two "
+                 "simultaneous first movers resolve to exactly one winner. It <b>fails "
+                 "open</b>."),
+            ]),
+            ("note", ("hazard", "Four systems mint work and none knows about the others", (
+                "A session drawing from a handoff document is covered by the claim lock; a "
+                "clawgate Task by its own status gate; a ClickUp ticket and an initiative by "
+                "nothing on this machine. <b>What would settle it:</b> whether one claim can "
+                "be expressed against all four, or whether the other three are deliberately "
+                "out of scope. Neither is measured here &mdash; so it is analysis, not a "
+                "work item."))),
+            ("measure", "tasks.intake"),
+        ),
+    ),
+
+    Section(
+        slug="subsystems", number="5", title="Subsystems",
+        lede="The things being worked on, and what is known about them. That knowledge is "
+             "durable state in a store that costs nothing until something asks for it.",
+        blocks=(
+            ("p", (
+                "A subsystem is a named area with an owner: the browser bridge, the download "
+                "router, the telemetry pipeline, the mail automation, the drift checker. Two "
+                "things attach to each &mdash; <b>an operating surface</b> (a skill, which "
+                "costs nothing until its trigger fires) and <b>a recall entry</b> (what a "
+                "past session learned, keyed by scope).")),
+            ("p", (
+                "<b>The skill is the operating surface; this page routes to it.</b> A "
+                "procedure restated here would be a second documentation surface, and the "
+                "second copy goes stale first. So the inventory below is deliberately "
+                "shallow: name, tier, the skill's own first sentence, path.")),
+            ("measure", "skills.inventory"),
+            ("h3", "The index store"),
+            ("p", (
+                "Recalled on demand and never auto-loaded, which is precisely why it can be "
+                "large where the rules file cannot (<a href=\"#constraints\">§7</a>). It is "
+                "<b>local state on each machine and not in this repository</b>, so the row "
+                "below describes the host that built this page. Three libraries sit under "
+                "it: one reads the store, one resolves a reference to a scope, one records "
+                "what a session touched. Skills: <code>/analyze-service</code> recalls, "
+                "<code>/subsystem-index</code> writes, <code>/prune-index</code> evicts "
+                "resolved entries so recall keeps surfacing the right one.")),
+            ("measure", "index.store"),
+            ("h3", "A complete subsystem with no reader"),
+            ("p", (
+                "A hosted API over that store is built, tested and running. The consuming "
+                "client was designed, <i>decided</i> &mdash; “hosted is an entry-level "
+                "advisory, never the primary read” &mdash; and never written. No local "
+                "reader in this tree contains an HTTP client at all; the only things that "
+                "have spoken to it are its own seeding and byte-identity scripts. <b>A "
+                "subsystem can be complete, correct, well-tested and have no reader, with "
+                "every gate green throughout.</b>")),
+            ("measure", "seam.store_api"),
+            ("measure", "seam.store_traffic"),
+        ),
+    ),
+
+    Section(
+        slug="seams", number="6", title="Where the three touch",
+        lede="Sessions claim tasks · tasks name subsystems · sessions write subsystems. The "
+             "defects live on these edges, because no single owner holds both sides.",
+        blocks=(
+            ("h3", "Sessions claim tasks"),
+            ("p", (
+                "Work intake spans <b>four</b> systems (<a href=\"#tasks\">§4</a>) and the "
+                "claim mechanism covers <b>one</b>. Worktree isolation is not an alternative "
+                "and never was: every colliding session was already in its own worktree, "
+                "because a worktree prevents a <i>filesystem</i> collision while this is a "
+                "<i>task-allocation</i> collision &mdash; isolation is what hides it.")),
+            ("h3", "Tasks name subsystems"),
+            ("p", (
+                "A task names its subsystem in prose. <b>Nothing joins a task to a scope in "
+                "the index store</b>, so what a previous session learned about that "
+                "subsystem is not attached to the task that needs it; the join is done by a "
+                "human or not at all. <b>What would settle it:</b> whether any consumer "
+                "would branch on a scope reference carried on a task &mdash; a field that "
+                "exists in a record is not a guard, only a branch on it is.")),
+            ("h3", "Sessions write subsystems"),
+            ("p", (
+                "Sessions produce transcripts and index entries; several subsystems read "
+                "them back, and <b>they do not agree on what the corpus is</b>: some walk "
+                "recursively, some recursively while excluding the synthetic sub-agent "
+                "directories, some only the top level. One subsystem's source documents the "
+                "divergence and quantifies it in the thousands of files; a pair of walkers "
+                "re-implement the same skip rule inline, held in sync by <b>a comment</b> "
+                "saying they match. <b>What would settle it:</b> re-run the count before and "
+                "after any consolidation &mdash; if it does not fall, the consolidation "
+                "added a walker instead of removing several, and a shared walker silently "
+                "picking one of the three definitions changes what at least one subsystem "
+                "sees.")),
+            ("measure", "seam.jsonl"),
+            ("h3", "And one concept is soft inside itself"),
+            ("p", (
+                "“Sessions” is not one surface but a constellation, each satellite existing "
+                "because of what the primary does and does not expose: one satellite's "
+                "header says it adds <i>“exactly two things … a clock and a threshold”</i>, "
+                "because the primary computed a “waiting” field nothing consumed. Another "
+                "records a measured refutation of its own brief &mdash; the view it was told "
+                "to consume drops the join key it was told to join on.")),
+            ("p", (
+                "Underneath, independent implementations answer “is an agent running in this "
+                "pane”, and their predicates are <b>not equivalent</b>: a case-insensitive "
+                "regex over the pane's command; the same regex plus a process-tree walk; "
+                "exact string equality; and, in the multiplexer's own config, a prefix glob. "
+                "An agent under a wrapper is invisible to the ones that do not walk the "
+                "tree. The honest counterpoint: other nearby tools deliberately <i>refuse to "
+                "re-derive</i> the predicate. The seam is the ones that do.")),
+            ("measure", "seam.detectors"),
+            ("measure", "seam.sessions"),
+            ("note", ("what", "This is analysis, not a backlog", (
+                "None of the above becomes a work item without a closing condition &mdash; a "
+                "mechanical check, or a named human judgement over named evidence. Where "
+                "this page can name one it does; where it cannot it says so, rather than "
+                "minting an object nobody can close."))),
+        ),
+    ),
+
+    Section(
+        slug="constraints", number="7", title="What constrains all three",
+        lede="Not a fourth concept — the physics. Three facts bound every session, every "
+             "task and every subsystem here, and most of the design falls out of the first.",
+        blocks=(
+            ("h3", "1 &middot; Always-on context is finite, and overflow is silent"),
+            ("p", (
+                "Three surfaces load before the operator types anything, on every session, "
+                "on two machines, for every concurrent agent. So the question is never “is "
+                "this instruction correct?” but “is it worth what it costs, forever, against "
+                "what it displaces?”")),
+            ("svg", "budget"),
+            ("kv", [
+                ("The rules file &mdash; <i>paid twice</i>",
+                 "Charged once by the harness, again because the nix build concatenates it "
+                 "into the other agent runner's instructions. It once grew 2.9&times; in "
+                 "three days with every commit individually correct. A test owns its "
+                 "ceiling."),
+                ("The skill listing &mdash; <i>it fails silently</i>",
+                 "Every name and description loads every session; a skill's body costs "
+                 "nothing until its trigger fires. On overflow the harness <b>drops "
+                 "descriptions, least-invoked first, with no error</b> &mdash; so a "
+                 "description is <b>routing surface, not documentation</b>. Tier a skill by "
+                 "the symptom that should auto-fire it, never by an invocation counter: two "
+                 "here are demonstrably live with a recorded count of <i>zero</i>."),
+            ]),
+            ("measure", "rules.bytes"),
+            ("measure", "rules.archive"),
+            ("note", ("hazard", "Never satisfy a ceiling by narrowing a rule", (
+                "One prohibition had to be <i>re-broadened</i> after a narrow wording let an "
+                "agent walk into the failure it forbade. <b>Evict the evidence, never the "
+                "scope</b> &mdash; and raising a ceiling costs a commit message naming the "
+                "rule that would not fit."))),
+            ("measure", "skills.listing"),
+            ("p", (
+                "The third fails most quietly: <b>content past the memory index's cap is "
+                "dropped on load, silently</b>. It does not error; it carries less than it "
+                "says.")),
+            ("measure", "memory.index"),
+            ("h3", "2 &middot; Two gate tiers, running in two environments"),
             ("svg", "tiers"),
             ("p", (
                 "The diagram is the whole warning. Four consecutive green dev-host runs on "
@@ -490,108 +666,50 @@ SECTIONS: tuple[Section, ...] = (
             ("p", (
                 "Whether a check <i>runs</i> and whether it <i>blocks</i> are different "
                 "facts, and the repo's machine-checked marker sees only the first. One day "
-                "here exactly one of the two required contexts was listed &mdash; and it "
-                "collected only the JavaScript tests, so a Python-only change could not fail "
-                "it and read as mergeable with the Python suite red. <b>Check the list, not "
+                "here exactly one of the two required contexts was listed, and it collected "
+                "only the JavaScript tests &mdash; so a Python-only change could not fail it "
+                "and read as mergeable with the Python suite red. <b>Check the list, not "
                 "that the key exists.</b>")),
             ("measure", "gate.protection"),
             ("measure", "gate.hooks_installed"),
             ("p", (
                 "Both runners assert a <b>collected-test floor</b> and parse structured "
-                "output instead of reading an exit status, because a collection error or an "
-                "empty glob can produce “zero tests” with a zero exit. There is no "
-                "hand-written total: the global floor is the sum of per-target floors, each "
-                "a function of a measurement. The literal it replaced took eleven values "
-                "across eight pull requests in one day.")),
+                "output rather than an exit status, because a collection error produces "
+                "“zero tests” with a zero exit. The global floor is the sum of per-target "
+                "floors, each a function of a measurement; the hand-written total it "
+                "replaced took eleven values across eight pull requests in one day. What a "
+                "test must <i>prove</i>, as opposed to run, is "
+                "<a href=\"#evidence\">§11</a>.")),
             ("measure", "tests.pytest"),
             ("measure", "tests.node"),
-            ("h3", "The evidence bar for a test"),
-            ("p", (
-                "Stricter than “the suite is green”. The vocabulary &mdash; <i>invariant "
-                "guard</i>, <i>seam guard</i>, <i>positive control</i> &mdash; is defined in "
-                "<a href=\"#glossary\">§14</a>; these are the obligations.")),
-            ("ul", [
-                "<b>Show a regression test FAIL on pre-change code</b> and report the "
-                "matrix: red at the base ref, green at HEAD. A test pinning an invariant the "
-                "bug never violated is an invariant guard &mdash; say so, and do not count "
-                "it as regression coverage.",
-                "<b>Mutation-test a guard, and prove it REACHABLE.</b> A mutation still "
-                "passes when an earlier check always wins, or when a <i>different</i> "
-                "guard's error kills your test.",
-                "<b>Validate the instrument before reading its verdict</b> &mdash; both "
-                "controls, and report the pair. A reassuring zero is indistinguishable from "
-                "a harness wired to nothing.",
-                "<b>“Verified in isolation” is the new vacuous green.</b> Two components, "
-                "each hermetically tested, can be broken together because no test ever built "
-                "the combined state. Ask which surface your fixture does <i>not</i> load.",
-                "<b>Never derive an expectation from the implementation it tests.</b> "
-                "Stubbing one function to a no-op once left thirty-one integration tests "
-                "green.",
-            ]),
-        ),
-    ),
-
-    Section(
-        slug="ships", number="6", title="How it ships",
-        lede="Two machines converged by one idempotent script. The trap: a merge changes "
-             "nothing a package manager owns.",
-        blocks=(
+            ("h3", "3 &middot; Merged is not deployed"),
             ("p", (
                 "A nix flake describes what each host should have; applying it is a "
-                "<i>switch</i>. One convergence script fetches, fast-forwards, switches and "
-                "verifies both hosts. It never stashes, and a host it cannot fast-forward "
-                "is <b>skipped and left exactly as found</b>, with the blocking files "
-                "named.")),
-            ("note", ("hazard", "Merged is not deployed", (
-                "Every managed path changes only on a switch. <code>git pull</code> changes "
-                "nothing nix manages &mdash; <b>deliberately</b>, so a concurrent session's "
-                "<code>git checkout</code> cannot swap deployed code out from under a "
-                "verification in progress. It is also exactly what makes it easy to trip "
-                "on. Merge &rarr; pull &rarr; switch &rarr; restart the consumer; skip the "
-                "last two and you will verify the old artefact and report it as new."))),
+                "<i>switch</i>, and one convergence script fetches, fast-forwards, switches "
+                "and verifies both hosts. <code>git pull</code> changes nothing nix manages "
+                "&mdash; <b>deliberately</b>, so a concurrent session's checkout cannot swap "
+                "deployed code out from under a verification. Whether a given path is live "
+                "or stale is answered by resolving the symlink and by nothing else: some "
+                "managed paths are store copies, others point back at the working tree, and "
+                "byte-identical proves nothing because identity can mean they are one "
+                "file.")),
             ("note", ("hazard", "The skip is the dangerous outcome, not the failure", (
-                "A skipped host keeps looking healthy &mdash; same commits, same green "
-                "generation, no error &mdash; while receiving nothing. That has happened "
-                "more than once, and each time the only detector was a human shipping "
-                "something unrelated and reading the per-host lines. <b>Read every per-host "
+                "A host the script cannot fast-forward is <b>skipped and left exactly as "
+                "found</b> &mdash; and then keeps looking healthy: same commits, same green "
+                "generation, no error, receiving nothing. Each time that happened the only "
+                "detector was a human shipping something unrelated. <b>Read every per-host "
                 "line, not the final verdict.</b>"))),
             ("measure", "ship.managed"),
-            ("note", ("why", "readlink is the only arbiter of live-versus-stale", (
-                "Some managed paths are store copies (editing the repo does nothing until a "
-                "switch); others are out-of-store symlinks (the working copy <i>is</i> the "
-                "live file). Resolve the symlink &mdash; never diff the file against the "
-                "repo. Byte-identical proves nothing: identity can mean they are one "
-                "file."))),
-        ),
-    ),
-
-    Section(
-        slug="drift", number="7", title="How drift is caught",
-        lede="A passive deadman on a timer, because nothing runs the deploy on a schedule. "
-             "It reports and never fixes.",
-        blocks=(
             ("p", (
-                "The convergence script is correct and not enough, because nothing invokes "
-                "it automatically. A separate checker runs unattended and asks one "
-                "question: <i>is either host silently no longer receiving changes?</i> It "
-                "may fetch; a static allowlist scanner in its own suite proves it can run "
-                "no mutating git subcommand, including through an ssh hop. <b>A deadman "
-                "that repairs is a deployer with no supervision.</b>")),
-            ("kv", [
-                ("Git parity",
-                 "Is the checkout still tracking the main branch? The obvious one, and for "
-                 "a long time the only one asked."),
-                ("Host parity",
-                 "Is what the checkout describes actually <i>deployed</i>, and the same on "
-                 "both machines? Every skill on one host was once a dangling symlink into a "
-                 "garbage-collected store path while the checkout was byte-identical to "
-                 "origin. Perfect git parity, zero host parity, checker green."),
-                ("Source parity",
-                 "Some packages build from a working tree of <i>another</i> repository, and "
-                 "nothing converges those. One host shipped a binary missing two "
-                 "subcommands while wearing the version label of one that had them; the "
-                 "command printed help and exited zero."),
-            ]),
+                "Nothing invokes that script on a schedule, so a separate checker runs "
+                "unattended asking one question: <i>is either host silently no longer "
+                "receiving changes?</i> <b>A deadman that repairs is a deployer with no "
+                "supervision</b>, so it only reports. It answers three independent parities "
+                "&mdash; git (is the checkout tracking?), host (is what the checkout "
+                "describes actually <i>deployed</i>, on both machines?) and source (some "
+                "packages build from a working tree of <i>another</i> repository, and "
+                "nothing converges those). One host was once byte-identical to origin while "
+                "every skill on it was a dangling symlink into a collected store path.")),
             ("note", ("hazard", "Why UNMEASURED grew its own escalation", (
                 "Setting no exit code for “we could not look” is right per run and wrong "
                 "forever: a scope that could never be evaluated escalated <b>never</b>, so "
@@ -599,58 +717,22 @@ SECTIONS: tuple[Section, ...] = (
                 "unable to. It now rides a consecutive-run ladder, per host and per scope, "
                 "reset the moment it measures. <b>This is the idea this page borrowed most "
                 "directly.</b>"))),
-            ("note", ("why", "Two designs worth stealing from the exit-code ladder", (
-                "An “actionable, not drift” code that is the <i>least</i> severe the checker "
-                "owns &mdash; and a <i>success</i> to the service manager, since a code that "
-                "stays set until someone does a cleanup would otherwise fire a failure "
-                "notification several times a day forever. And an adopted-then-drifted-only "
-                "arm: a host that never adopted a mechanism prints NOT ADOPTED and sets no "
-                "code. <b>A permanently-red gate is worse than no gate.</b>"))),
             ("measure", "drift.ladder"),
             ("measure", "timers"),
         ),
     ),
 
     Section(
-        slug="observed", number="8", title="What is observed",
-        lede="Three surfaces with different lifetimes: a telemetry pipeline, a recall store, "
-             "and the live session views.",
-        blocks=(
-            ("p", (
-                "<b>Activity telemetry.</b> Shell, multiplexer, keyboard, window manager, "
-                "browser and agent transcripts feed a collector that lands events in a "
-                "columnar database, with a per-source deadman so a source that stops is "
-                "noticed rather than assumed quiet. It is what makes “this tool is dead” "
-                "measurable instead of impressionistic.")),
-            ("measure", "telemetry.sources"),
-            ("p", (
-                "<b>The subsystem index store.</b> What a past session learned, keyed by "
-                "scope, recalled on demand. It costs nothing per session &mdash; precisely "
-                "why it can be large where the rules file cannot. It is local state, not in "
-                "this repository, so the row below describes the machine that built this "
-                "page.")),
-            ("measure", "index.store"),
-            ("p", (
-                "<b>Session surfaces.</b> A cross-host view of every terminal window: which "
-                "have an agent running, and &mdash; the one that pays &mdash; which are "
-                "<i>waiting on a human</i>. That got its own tool after two windows were "
-                "measured sitting unanswered for days. See <a href=\"#soft\">§13</a> for "
-                "how many surfaces now answer overlapping versions of it.")),
-        ),
-    ),
-
-    Section(
-        slug="invariants", number="9", title="Invariants and tripwires",
+        slug="invariants", number="8", title="Invariants and tripwires",
         lede="What a change must not break. Most are enforced by a test; where one is not, "
              "it says so.",
         blocks=(
             ("kv", [
                 ("Adding a skill costs an eviction, in the same commit",
-                 "The listing total is ratcheted by a test that owns the constant. "
+                 "The listing total is ratcheted by a test that owns the constant, and a new "
+                 "skill needs a tier-ledger entry &mdash; pinned two-way, so a skill with no "
+                 "entry and an entry naming no skill both fail. "
                  "<span class=\"tag\">enforced</span>"),
-                ("A new skill needs a tier-ledger entry",
-                 "Pinned two-way: a shipped skill with no entry fails, an entry naming no "
-                 "skill fails. <span class=\"tag\">enforced</span>"),
                 ("The rules file has a byte ceiling",
                  "Owned by its test, which prints the eviction playbook on failure. Raising "
                  "it costs a commit message naming the rule that would not fit. "
@@ -661,26 +743,25 @@ SECTIONS: tuple[Section, ...] = (
                  "<span class=\"tag tag-soft\">not enforced locally</span>"),
                 ("A new file must be <code>git add</code>ed",
                  "The flake builds from tracked files, so an untracked skill, hook or test "
-                 "is silently omitted from the deploy &mdash; the switch succeeds and the "
-                 "file is not there. "
+                 "is silently omitted &mdash; the switch succeeds and the file is not there. "
                  "<span class=\"tag tag-soft\">not enforced &mdash; the loudest silent failure here</span>"),
                 ("Worktree isolation for parallel file-modifying agents",
                  "Two agents modifying files in one checkout <b>will</b> clobber each "
                  "other. A worktree isolates a working directory only &mdash; not the repo "
                  "it was built from, the branch namespace, the gitignored environment file, "
-                 "submodules, or a copy you make of it. "
+                 "submodules, or a copy you make of it. It is <b>not</b> a defence against "
+                 "two sessions claiming the same work (<a href=\"#seams\">§6</a>). "
                  "<span class=\"tag tag-soft\">convention</span>"),
-                ("Never <code>git stash</code>",
+                ("Never <code>git stash</code>, <code>git add -A</code> or "
+                 "<code>git reset --hard</code>",
                  "The stash ref lives in the common git directory, so your own worktree "
-                 "gives you zero isolation and a concurrent agent can pop your stash. "
-                 "<span class=\"tag\">hook-blocked</span>"),
-                ("Never <code>git add -A</code>, never <code>git reset --hard</code>",
-                 "Blind staging leaks unrelated work and secrets from a dirty tree; a hard "
-                 "reset irreversibly destroys uncommitted work. "
+                 "gives zero isolation and a concurrent agent can pop your stash; blind "
+                 "staging leaks unrelated work and secrets from a dirty tree; a hard reset "
+                 "irreversibly destroys uncommitted work. "
                  "<span class=\"tag\">hook-blocked</span>"),
                 ("Merged is not deployed",
                  "Every managed path changes only on a switch. "
-                 "<span class=\"tag tag-soft\">not enforced &mdash; see <a href=\"#ships\">§6</a></span>"),
+                 "<span class=\"tag tag-soft\">not enforced &mdash; see <a href=\"#constraints\">§7</a></span>"),
                 ("Never commit to main in either host checkout",
                  "The convergence script fast-forwards only, so a diverged host is skipped "
                  "and then silently receives nothing while looking healthy. "
@@ -696,7 +777,7 @@ SECTIONS: tuple[Section, ...] = (
     ),
 
     Section(
-        slug="cost", number="10", title="The cost model of a change",
+        slug="cost", number="9", title="The cost model of a change",
         lede="What it costs to add something here — not to build it, to keep it. Four "
              "clocks, only the first of which anyone estimates.",
         blocks=(
@@ -735,7 +816,7 @@ SECTIONS: tuple[Section, ...] = (
     ),
 
     Section(
-        slug="negative", number="11", title="Negative space — what was tried and rejected",
+        slug="negative", number="10", title="Negative space — what was tried and rejected",
         lede="Each was proposed, built or nearly built, and killed by a specific "
              "measurement. The highest-yield section on the page: it stops you re-proposing "
              "a settled question.",
@@ -786,10 +867,8 @@ SECTIONS: tuple[Section, ...] = (
                 "again afterwards.")),
             ("p", (
                 "The shipped answer is an <b>absolute session tombstone with a named false "
-                "negative</b>. The source says why: <i>“the alternative … is speculative "
-                "complexity inventing an intention nobody stated. There is deliberately no "
-                "<code>--rearm</code> flag: the escape from a dismissal is a new session, "
-                "which costs nothing and is unambiguous.”</i>")),
+                "negative</b>, and the source says why: <i>“the escape from a dismissal is a "
+                "new session, which costs nothing and is unambiguous.”</i>")),
             ("h3", "A per-scope fallback to the hosted store"),
             ("p", (
                 "<b>Proposed:</b> when a recall finds a scope absent or empty locally, fall "
@@ -804,12 +883,12 @@ SECTIONS: tuple[Section, ...] = (
                 "trigger to the granularity of the loss.</b>")),
             ("note", ("why", "A second finding from the same investigation", (
                 "The snapshot header's <code>entry-files</code> count was <i>not</i> the "
-                "entry count &mdash; both the seeder and the server counted every markdown "
-                "file, including one index per scope, and quoting the header had made the "
-                "hosted copy look like a superset of the store it mirrors. Separately, an "
-                "entire ratio argument was <b>deleted outright</b>, because every audit "
-                "round but the first found its new defect inside that one paragraph: "
-                "<i>“a number nobody needs is a place for the next error to live.”</i>"))),
+                "entry count &mdash; it counted every markdown file, including one index per "
+                "scope, so quoting the header made the hosted copy look like a superset of "
+                "the store it mirrors. An entire ratio argument was then <b>deleted "
+                "outright</b>, because every audit round but the first found its new defect "
+                "inside that one paragraph: <i>“a number nobody needs is a place for the "
+                "next error to live.”</i>"))),
             ("h3", "The skill-tier ledger, applied to zero hosts"),
             ("p", (
                 "<b>Built end to end, then deliberately not switched on.</b> Ledger, sync "
@@ -832,27 +911,26 @@ SECTIONS: tuple[Section, ...] = (
                 "you do.</b>")),
             ("h3", "Four more, briefly"),
             ("ul", [
-                "<b>Shrinking the telemetry table</b> &mdash; the maximum conceivable "
-                "saving was about twenty megabytes against a hundred-and-twenty-gigabyte "
-                "store, and it was the only option that lost data. <i>Size the prize before "
-                "designing for it.</i>",
+                "<b>Shrinking the telemetry table</b> &mdash; the largest conceivable saving "
+                "was about twenty megabytes against a hundred-and-twenty-gigabyte store, and "
+                "it was the only option that lost data. <i>Size the prize first.</i>",
                 "<b>A stale-directory reap estimated at tens of gigabytes</b> &mdash; "
-                "self-retracted: the estimate multiplied a sample <i>mean</i> over a "
-                "heavy-tailed distribution, the actual reap freed about 1.4 GiB, and the "
-                "median was visible at the time. <i>Never extrapolate a mean over a heavy "
-                "tail when the median is in front of you.</i>",
+                "self-retracted: it multiplied a sample <i>mean</i> over a heavy-tailed "
+                "distribution, the actual reap freed about 1.4 GiB, and the median was "
+                "visible at the time. <i>Never extrapolate a mean over a heavy tail when the "
+                "median is in front of you.</i>",
                 "<b>A reported flake rate</b> &mdash; retracted: measured over a window the "
                 "measuring session was itself saturating, 4% before the load burst and 24% "
                 "during it. <i>A rate measured inside your own load is measuring you.</i>",
                 "<b>“The runner can exit zero while printing FAIL”</b> &mdash; retracted, "
-                "does not reproduce. The real defect was a status destroyed by a pipeline. "
-                "<i>A false-green report is usually a status read through a pipe.</i>",
+                "does not reproduce; the real defect was a status destroyed by a pipeline. "
+                "<i>A false green is usually a status read through a pipe.</i>",
             ]),
         ),
     ),
 
     Section(
-        slug="evidence", number="12", title="The evidence bar for a proposal",
+        slug="evidence", number="11", title="The evidence bar",
         lede="Measure, then propose. Here is the worked example that teaches it, because the "
              "abstract version does not stick.",
         blocks=(
@@ -866,12 +944,11 @@ SECTIONS: tuple[Section, ...] = (
                  "middleware. The result <i>inverted the premise</i>: the middleware the "
                  "recommendation trusted was a literal pass-through &mdash; a function "
                  "returning its argument &mdash; so the named route was not the open "
-                 "surface; every route using that middleware was. The proposed fix would "
-                 "also have broken the operator's own web UI."),
+                 "surface; every route using that middleware was."),
                 ("2. Retire a legacy mode — <span class=\"pill pill-un\">KILLED</span>",
                  "Settled by <b>reading the comment already in the source</b>: the mode had "
-                 "been made opt-in days earlier and the runtime win was already banked. "
-                 "(Its supporting evidence was also n=3, on a single day.)"),
+                 "been made opt-in days earlier and the win was already banked. (Its "
+                 "supporting evidence was also n=3, on a single day.)"),
                 ("3. Add a cross-scope query — <span class=\"pill pill-un\">KILLED</span>",
                  "Settled by <b>one <code>grep</code></b>. It already shipped, in both the "
                  "library and the HTTP layer, with a flag. The “gap identified” was a "
@@ -886,7 +963,7 @@ SECTIONS: tuple[Section, ...] = (
                 ("6. Make a guard's escalation resettable — <span class=\"pill pill-un\">KILLED</span>",
                  "Settled by <b>reading a ten-line comment block</b> that already named and "
                  "priced the exact false negative the recommendation thought it had found. "
-                 "(The <code>--rearm</code> refusal from <a href=\"#negative\">§11</a>.)"),
+                 "(The <code>--rearm</code> refusal from <a href=\"#negative\">§10</a>.)"),
             ]),
             ("note", ("why", "The failure mode, in the document's own words", (
                 "<i>“The failure mode was <b>tracing code and reporting the trace as a "
@@ -899,12 +976,11 @@ SECTIONS: tuple[Section, ...] = (
                 "success means nothing unless the same probe demonstrably fails somewhere.",
                 "<b>An empty result is not evidence.</b> A query against the wrong "
                 "repository slug returned an empty list &mdash; <i>byte-identical to "
-                "“nothing was ever proposed”</i>. Take the slug from the remote URL, never "
-                "the directory name.",
+                "“nothing was ever proposed”</i>. Take the slug from the remote URL.",
                 "<b>A definition is not a mechanism.</b> Expect a definition <i>and</i> a "
                 "call site; a definition alone is a dormant field. The first revision of "
                 "the correction got this wrong by quoting a document instead of checking "
-                "the code &mdash; the same failure, reproduced inside the correction.",
+                "the code &mdash; the same failure, inside the correction.",
                 "<b>Engage the existing counter-argument.</b> Re-proposing something whose "
                 "refusal is written down, without engaging it, is a regression in the "
                 "reasoning rather than a finding.",
@@ -913,71 +989,50 @@ SECTIONS: tuple[Section, ...] = (
                 "over named evidence &mdash; is not a work item. Say so, and why, rather "
                 "than mint an object nobody can close.",
             ]),
+            ("h3", "The same bar, applied to a test"),
+            ("p", (
+                "Stricter than “the suite is green”. The vocabulary &mdash; <i>invariant "
+                "guard</i>, <i>seam guard</i>, <i>positive control</i> &mdash; is defined in "
+                "<a href=\"#glossary\">§12</a>; these are the obligations.")),
+            ("ul", [
+                "<b>Show a regression test FAIL on pre-change code</b> and report the "
+                "matrix: red at the base ref, green at HEAD. A test pinning an invariant the "
+                "bug never violated is an invariant guard &mdash; say so, and do not count "
+                "it as regression coverage.",
+                "<b>Mutation-test a guard, and prove it REACHABLE.</b> A mutation still "
+                "passes when an earlier check always wins, or when a <i>different</i> "
+                "guard's error kills your test.",
+                "<b>Validate the instrument before reading its verdict</b> &mdash; both "
+                "controls, and report the pair. A reassuring zero is indistinguishable from "
+                "a harness wired to nothing.",
+                "<b>“Verified in isolation” is the new vacuous green.</b> Two components, "
+                "each hermetically tested, can be broken together because no test ever built "
+                "the combined state. Ask which surface your fixture does <i>not</i> load "
+                "&mdash; the same question <a href=\"#seams\">§6</a> asks of the system.",
+                "<b>Never derive an expectation from the implementation it tests.</b> "
+                "Stubbing one function to a no-op once left thirty-one integration tests "
+                "green.",
+            ]),
         ),
     ),
 
     Section(
-        slug="soft", number="13", title="Where the system is soft",
-        lede="Open seams, each with what would settle it. Analysis, not a backlog — by "
-             "the local standard none of it becomes a work item without a closing condition.",
-        blocks=(
-            ("h3", "A complete subsystem with no reader"),
-            ("p", (
-                "A hosted API over the recall store is built, tested and running. The "
-                "consuming client was designed, <i>decided</i> &mdash; “hosted is an "
-                "entry-level advisory, never the primary read” &mdash; and never written. "
-                "No local reader in this tree contains an HTTP client at all; the only "
-                "things that have spoken to it are its own seeding and byte-identity "
-                "scripts. <b>A subsystem can be complete, correct, well-tested and have no "
-                "reader, with every gate green throughout.</b>")),
-            ("measure", "seam.store_api"),
-            ("measure", "seam.store_traffic"),
-            ("h3", "Several detectors for one question"),
-            ("p", (
-                "Independent implementations answer “is an agent running in this pane”, and "
-                "their predicates are <b>not equivalent</b>: a case-insensitive regex over "
-                "the pane's command; the same regex plus a process-tree walk; exact string "
-                "equality; and, in the multiplexer's own config, a prefix glob. An agent "
-                "under a wrapper is invisible to the ones that do not walk the tree. The "
-                "honest counterpoint: other nearby tools deliberately <i>refuse to "
-                "re-derive</i> the predicate and say so in their headers. The seam is the "
-                "ones that do.")),
-            ("measure", "seam.detectors"),
-            ("h3", "One question, several owners"),
-            ("p", (
-                "A constellation of session tools, each satellite existing because of what "
-                "the primary does and does not expose. One satellite's header says it adds "
-                "<i>“exactly two things … a clock and a threshold”</i>, because the primary "
-                "computed a “waiting” field nothing consumed. Another records a measured "
-                "refutation of its own brief: the view it was told to consume drops the "
-                "join key it was told to join on. <b>What would settle it:</b> whether the "
-                "coupling is to a command-line contract or a shared library, and whether "
-                "one owner with two flags is smaller than several owners with several "
-                "suites. Neither is measured here.")),
-            ("measure", "seam.sessions"),
-            ("h3", "Many walks over one corpus"),
-            ("p", (
-                "Independent places open the agent transcript corpus themselves, and "
-                "<b>they do not agree on what that corpus is</b>: some walk recursively, "
-                "some recursively while excluding the synthetic sub-agent directories, some "
-                "only the top level. One subsystem's source documents the divergence and "
-                "quantifies it in the thousands of files; a pair of walkers are "
-                "near-duplicates re-implementing the same skip rule inline, held in sync by "
-                "<b>a comment</b> saying they match. <b>What would settle it:</b> re-run "
-                "the count before and after any consolidation. If it does not fall, the "
-                "consolidation added a walker instead of removing several &mdash; and a "
-                "shared walker silently picking one of the three definitions changes what "
-                "at least one subsystem sees.")),
-            ("measure", "seam.jsonl"),
-        ),
-    ),
-
-    Section(
-        slug="glossary", number="14", title="Glossary",
+        slug="glossary", number="12", title="Glossary",
         lede="The local vocabulary is not guessable. These appear in commit messages, test "
              "names and skill bodies, and mean specific things here.",
         blocks=(
             ("kv", [
+                ("session",
+                 "One agent instance doing work in one multiplexer pane, with one transcript "
+                 "on disk. Not a record anything keeps &mdash; every surface that reports on "
+                 "sessions <i>infers</i> them, which is why they disagree."),
+                ("claimable task",
+                 "A unit of work something other than a human can pick up and be judged on: "
+                 "dispatch, an agent, acceptance criteria, a status gate. Three other "
+                 "systems here mint work without being this."),
+                ("scope",
+                 "The key an index-store entry is filed under &mdash; usually a repository "
+                 "or a subsystem. What a recall asks for."),
                 ("the merged tree",
                  "The tree a merge <i>creates</i>, as opposed to either branch. A pull "
                  "request green on its own branch proves nothing about it: the second "
@@ -988,10 +1043,6 @@ SECTIONS: tuple[Section, ...] = (
                 ("<code>UNMEASURED</code>",
                  "A first-class result meaning “this was not evaluated”, as distinct from "
                  "“this evaluated clean”."),
-                ("<code>rc 17</code>",
-                 "The drift checker's <i>source parity</i> code: the subtree a package is "
-                 "built from is not current on that host. Counted against a path-limited "
-                 "subtree &mdash; scoping it to the whole repository made it permanently red."),
                 ("<code>scope-absent</code>",
                  "A recall condition meaning the requested scope is not in the local store. "
                  "Notable as a rejected trigger: the loss it was meant to cover lives at "
@@ -1011,10 +1062,8 @@ SECTIONS: tuple[Section, ...] = (
                  "<b>not</b> regression coverage, and saying so is required."),
                 ("clawgate",
                  "The self-hosted approval UI: an agent's permission prompt becomes "
-                 "something the operator can approve remotely."),
-                ("fuzzyclaw",
-                 "A multiplexer task integration that writes session state to disk. Flagged "
-                 "<b>untrusted as a data source</b> in this repo's own notes."),
+                 "something the operator can approve remotely. Its Tasks board is the "
+                 "canonical claimable task here."),
                 ("the base clone",
                  "The main checkout on a host, as opposed to the worktrees agents work in. "
                  "The worktrees do the committing, so it is effectively write-only and "
