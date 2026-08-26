@@ -482,33 +482,199 @@ def test_the_http_client_predicate_is_an_import_not_a_word():
     for prose in ('"""work lands through pull requests, not commits."""\n',
                   "# see the requests below\n",
                   '"""urllib is deliberately NOT used here."""\n'):
-        assert not measure.imports_http_client(prose), prose
+        assert not measure.reaches_http_client(prose), prose
 
     # POSITIVE CONTROL — the real shapes a client takes.
     for real in ("import urllib.request\n", "from urllib import request\n",
                  "import requests\n", "import httpx\n",
                  "    body = urlopen(url).read()\n",
                  "r = requests.get(url)\n"):
-        assert measure.imports_http_client(real), real
+        assert measure.reaches_http_client(real), real
 
 
-def test_the_store_traffic_row_is_permanently_unmeasured_by_design(synthetic_env):
-    """INVARIANT GUARD, and a deliberate one.
+def test_the_predicate_also_sees_the_two_non_import_shapes():
+    """🔴 A client does not have to spell itself `import`.
 
-    A number for this was REPORTED to the page's author and appears nowhere in
-    the tree. Rendering it would restate a claim as a measurement, which is the
-    exact failure the page is built against. The row must therefore stay
-    UNMEASURED against ANY tree — including the real one — until something in
-    this repo can actually measure it.
+    Two shapes reached zero before this: the module name as a STRING fed to
+    importlib, and a generic HTTP fetcher shelled out to as a subprocess. Both
+    are what a hand-rolled hosted-store client actually looks like, and both are
+    cheap to see, so both are pinned. The negative half is the point of the
+    exclusions: `gh` and `git` are network binaries these readers ALREADY run,
+    and counting them would make the row permanently red.
     """
-    with pytest.raises(measure.Unmeasurable):
-        measure.m_store_api_traffic(synthetic_env)
+    for real in ('mod = importlib.import_module("requests")\n',
+                 "mod = importlib.import_module('urllib.request')\n",
+                 '__import__("httpx")\n',
+                 'subprocess.run(["curl", "-s", url])\n',
+                 "subprocess.run(['wget', '-qO-', url])\n"):
+        assert measure.reaches_http_client(real), real
+
+    for benign in ('subprocess.run(["gh", "pr", "view", num])\n',
+                   'subprocess.run(["git", "fetch", "origin"])\n',
+                   '"""curl is deliberately not used here."""\n',
+                   "mod = importlib.import_module(name)\n"):
+        assert not measure.reaches_http_client(benign), benign
+
+
+def test_the_reader_set_is_derived_so_a_new_module_cannot_hide(tmp_path):
+    """🔴 The set the guard scans must GROW and SHRINK with the tree.
+
+    A four-name hardcode was blind in both directions, and the blindness that
+    mattered is the growing one: a reintroduced hosted client would most
+    naturally arrive as a NEW module (`subsystem_hosted.py`, a `--source hosted`
+    shim), which a fixed list never opens. Both directions are exercised here
+    against a synthetic tree, so the derivation is covered by the suite and not
+    only by a hand mutation.
+    """
+    lib = tmp_path / "scripts" / "lib"
+    lib.mkdir(parents=True)
+    (tmp_path / "scripts" / "subsystem-audit.py").write_text("x = 1\n", encoding="utf-8")
+    for name in ("subsystem_recall.py", "subsystem_resolver.py", "subsystem_touch.py"):
+        (lib / name).write_text('"""lands through pull requests."""\n', encoding="utf-8")
+
+    assert measure.store_readers(tmp_path) == [
+        "scripts/lib/subsystem_recall.py", "scripts/lib/subsystem_resolver.py",
+        "scripts/lib/subsystem_touch.py", "scripts/subsystem-audit.py",
+    ]
+
+    # GROWS: a brand-new module is discovered and SCANNED, not merely listed.
+    (lib / "subsystem_hosted.py").write_text(
+        "import requests\n\n\ndef fetch(u):\n    return requests.get(u).text\n",
+        encoding="utf-8")
+    env = measure.Env(repo=tmp_path, home=tmp_path, claude_dir=tmp_path / ".claude",
+                      index_store=tmp_path / ".claude" / "asi",
+                      allow_systemd=False, allow_network=False)
+    assert "scripts/lib/subsystem_hosted.py" in measure.store_readers(tmp_path)
+    fields = measure.m_store_api_clients(env)
+    assert fields["value"] == "1 of 5 local store readers can speak to a hosted store"
+    assert dict(fields["rows"])["scripts/lib/subsystem_hosted.py"] == "speaks HTTP"
+
+    # SHRINKS: a reader renamed out of the namespace leaves the set, and the
+    # denominator in the rendered value moves with it — it does not silently
+    # keep reporting a clean count over a narrower scan.
+    (lib / "subsystem_hosted.py").unlink()
+    (tmp_path / "scripts" / "subsystem-audit.py").rename(tmp_path / "scripts" / "audit-tool.py")
+    assert measure.store_readers(tmp_path) == [
+        "scripts/lib/subsystem_recall.py", "scripts/lib/subsystem_resolver.py",
+        "scripts/lib/subsystem_touch.py",
+    ]
+    assert measure.m_store_api_clients(env)["value"] == (
+        "0 of 3 local store readers can speak to a hosted store")
+
+
+def test_a_tree_with_no_reader_raises_rather_than_reporting_zero(tmp_path):
+    """🔴 INVARIANT GUARD. An empty match set is an absence, never a zero.
+
+    Reachable only through the derived set: with the globs matching nothing the
+    row must go UNMEASURED, because `0 clients` over `0 files scanned` renders
+    byte-identical to the real finding.
+    """
+    (tmp_path / "scripts" / "lib").mkdir(parents=True)
+    env = measure.Env(repo=tmp_path, home=tmp_path, claude_dir=tmp_path / ".claude",
+                      index_store=tmp_path / ".claude" / "asi",
+                      allow_systemd=False, allow_network=False)
+    with pytest.raises(measure.Unmeasurable) as exc:
+        measure.m_store_api_clients(env)
+    assert "nothing was scanned" in str(exc.value)
+
+
+#: 🔴 A TWO-WAY LEDGER OF THE LIVE READER SET. `measure.store_readers()` DERIVES
+#: this set by glob; this literal is what the repo is expected to contain. Pinned
+#: in both directions on purpose:
+#:   * the set SHRINKING (a reader renamed or deleted) used to leave the guard
+#:     reporting a perfectly clean "0" over a narrower scan;
+#:   * the set GROWING is the case that matters — a reintroduced hosted client
+#:     arrives as a NEW module far more naturally than as an `import requests`
+#:     grafted onto `subsystem_recall.py`.
+#: Adding a reader is therefore a two-line change: the file, and this tuple.
+EXPECTED_STORE_READERS = (
+    "scripts/lib/subsystem_recall.py",
+    "scripts/lib/subsystem_resolver.py",
+    "scripts/lib/subsystem_touch.py",
+    "scripts/subsystem-audit.py",
+)
+
+
+def test_the_local_store_readers_hold_no_http_client():
+    """🔴 REGRESSION GUARD for the retirement, against the LIVE tree.
+
+    The hosted `subsystem-store-api` was retired on 2026-08-25 after its audit
+    log showed every request it ever served came from the session that built it
+    (`claudedocs/decision-subsystem-store-api-retired-2026-08-25.md`). The thing
+    worth pinning is not that the server files are gone — `git` knows that — but
+    that no local index reader holds a DIRECT HTTP CLIENT that could reach a
+    hosted store.
+
+    🔴 THAT IS NARROWER THAN "NO NETWORK HOP", and the narrower wording is the
+    honest one: `subsystem_touch.py` and `subsystem-audit.py` both shell out to
+    `gh pr view`. `measure.reaches_http_client` enumerates precisely what the
+    predicate sees and which shapes walk past it (indirection through a local
+    helper, a computed module name, an out-of-process fetcher). Do not restate
+    this guard wider than that docstring.
+
+    This is the counterpart to the retirement, not a restatement of it: a future
+    session re-adding `import requests` to a reader would rebuild the client
+    half of a service whose demand was measured at zero, and no other test in
+    this repo would notice. Every expected value is written out literally rather
+    than recomputed from `measure.py`, so the guard cannot agree with a broken
+    implementation.
+
+    Three assertions, ordered so each failure carries its own diagnosis:
+      1. no reader speaks HTTP  — a client was reintroduced;
+      2. the reader set matches — the scan grew or shrank underneath it;
+      3. the rendered value     — the page says what the guard checked.
+    """
     live = measure.Env(repo=REPO_ROOT, home=Path.home(),
                        claude_dir=Path.home() / ".claude",
                        index_store=Path.home() / ".claude" / "analyze-service-index",
                        allow_systemd=False, allow_network=False)
-    with pytest.raises(measure.Unmeasurable):
-        measure.m_store_api_traffic(live)
+    fields = measure.m_store_api_clients(live)
+
+    speaking = sorted(r for r, finding in fields["rows"] if finding == "speaks HTTP")
+    assert speaking == [], (
+        f"a local subsystem-index reader now reaches for an HTTP client: {speaking}. "
+        "The hosted store was retired for want of a reader; re-adding one is a "
+        "decision, not a refactor — re-read the decision record before changing this."
+    )
+
+    assert measure.store_readers(REPO_ROOT) == list(EXPECTED_STORE_READERS), (
+        "the local store reader set changed. It is DERIVED by glob and pinned "
+        "here, so this fires when a reader is added (register it above — and ask "
+        "whether it is a hosted client) or renamed/deleted away (the guard would "
+        "otherwise keep reporting a clean zero over a scan that quietly narrowed). "
+        f"derived={measure.store_readers(REPO_ROOT)} expected={list(EXPECTED_STORE_READERS)}"
+    )
+
+    assert fields["value"] == "0 of 4 local store readers can speak to a hosted store", (
+        f"the rendered value moved: {fields['value']!r}. The count and the "
+        "denominator are both load-bearing — a zero over a shrunken set is the "
+        "silent zero this row exists to prevent."
+    )
+
+    findings = dict(fields["rows"])
+    assert findings["the hosted server + its build tooling"].startswith("retired"), findings
+    assert findings["its test suite"].startswith("retired"), findings
+
+
+def test_the_retirement_guard_would_notice_a_reintroduced_client(tmp_path):
+    """🔴 NEGATIVE CONTROL for the guard above — it must be able to go red.
+
+    A guard that reports "0 clients" off a scan wired to nothing is
+    indistinguishable from a working one, and this repo has already scored a
+    reader as HTTP-capable off the phrase "pull requests" in its own prose. So:
+    build a tree whose readers DO import an HTTP client and confirm the measured
+    value moves off zero.
+    """
+    for rel in EXPECTED_STORE_READERS:
+        p = tmp_path / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("import urllib.request\n", encoding="utf-8")
+    env = measure.Env(repo=tmp_path, home=tmp_path, claude_dir=tmp_path / ".claude",
+                      index_store=tmp_path / ".claude" / "analyze-service-index",
+                      allow_systemd=False, allow_network=False)
+    fields = measure.m_store_api_clients(env)
+    assert fields["value"] == "4 of 4 local store readers can speak to a hosted store", (
+        fields["value"])
 
 
 # --------------------------------------------------------------------------- #

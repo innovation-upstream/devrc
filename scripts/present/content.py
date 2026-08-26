@@ -921,17 +921,18 @@ SECTIONS: tuple[Section, ...] = (
         lede="Open seams, each with what would settle it. Analysis, not a backlog — by "
              "the local standard none of it becomes a work item without a closing condition.",
         blocks=(
-            ("h3", "A complete subsystem with no reader"),
+            ("h3", "A complete subsystem with no reader &mdash; the seam that closed"),
             ("p", (
-                "A hosted API over the recall store is built, tested and running. The "
-                "consuming client was designed, <i>decided</i> &mdash; “hosted is an "
+                "A hosted API over the recall store was built, tested and run in public. "
+                "The consuming client was designed, <i>decided</i> &mdash; “hosted is an "
                 "entry-level advisory, never the primary read” &mdash; and never written. "
-                "No local reader in this tree contains an HTTP client at all; the only "
-                "things that have spoken to it are its own seeding and byte-identity "
-                "scripts. <b>A subsystem can be complete, correct, well-tested and have no "
-                "reader, with every gate green throughout.</b>")),
+                "No local reader ever contained an HTTP client; the only things that spoke "
+                "to it were its own seeding and byte-identity scripts. It was <b>retired</b> "
+                "once its audit log was read: every request it served came from the session "
+                "that built it. <b>A subsystem can be complete, correct, well-tested and "
+                "have no reader, with every gate green throughout.</b> The missing piece "
+                "was never more server &mdash; it was a sync, which nothing had.")),
             ("measure", "seam.store_api"),
-            ("measure", "seam.store_traffic"),
             ("h3", "Several detectors for one question"),
             ("p", (
                 "Independent implementations answer “is an agent running in this pane”, and "

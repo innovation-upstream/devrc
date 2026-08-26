@@ -356,12 +356,16 @@ cd "$ROOT" || { echo "run-tests: cannot cd to ROOT=$ROOT" >&2; exit 3; }
 #           pytest.FAIL, not skip, when absent: this is the ONLY file that can
 #           see a resolver-semantics change under an unchanged config, so a skip
 #           there is precisely the silent green the version pin exists to stop.
-#   rsync   scripts/tests/test_subsystem_store_api.py, which drives the real
-#           scripts/subsystem-store-api/seed.sh — its copy step is
-#           `rsync -a --delete "$STORE"/ "$STAGE"/`. Without the binary those
-#           tests fail with rc 127 rather than skipping, deliberately: the
-#           property they pin is that seeding never writes to the local store,
-#           and that store is the only copy of client-confidential content.
+#   (rsync  was here until 2026-08-25. Its ONLY executing consumer was
+#           scripts/tests/test_subsystem_store_api.py, which drove the hosted
+#           store's seed.sh; both were retired with the service — see
+#           claudedocs/decision-subsystem-store-api-retired-2026-08-25.md.
+#           MEASURED before dropping it: every other `rsync` in scripts/tests/
+#           PARSES the word out of a shell script or a systemd unit
+#           (test_ship_converge.py, test_analyze_service_index_commit.py,
+#           test_drift_check.py) and never invokes the binary, so the
+#           precondition had no consumer left. Re-add it — here AND in
+#           flake.nix `gateTools` — the moment a test actually runs rsync.)
 # logrotate: scripts/tests/test_claude_log_rotate.py drives the REAL binary
 # against a temp directory (rotation, truncation, generation cap, and the .bak
 # scope fence). Those tests FAIL rather than skip when it is absent — a skipped
@@ -379,7 +383,7 @@ cd "$ROOT" || { echo "run-tests: cannot cd to ROOT=$ROOT" >&2; exit 3; }
 # 🔴 `python` is listed as well as `python3` because THIS SCRIPT invokes
 # `python -m pytest`, not `python3`. Asserting only `python3` checked a binary
 # the runner never calls.
-REQUIRED_TOOLS=(bash curl node rg git awk jq grep setsid python python3 nix-instantiate opencode logrotate rsync zsh)
+REQUIRED_TOOLS=(bash curl node rg git awk jq grep setsid python python3 nix-instantiate opencode logrotate zsh)
 missing_tools=()
 for t in "${REQUIRED_TOOLS[@]}"; do
   command -v "$t" >/dev/null 2>&1 || missing_tools+=("$t")
@@ -1329,7 +1333,30 @@ TARGET_FLOORS=(
   # never fire: `zsh` is in REQUIRED_TOOLS, so a host without it aborts on
   # GUARD 1 naming the binary rather than running two tests thinner. That is
   # why they are not pinned in EXPECTED_SKIPS.
-  "scripts/tests|8036"
+  #
+  # 2026-08-25, retiring the hosted subsystem-store-api: the deletion of
+  # scripts/tests/test_subsystem_store_api.py removed tests from this target,
+  # and the pin was LOWERED — the weakening direction, which is exactly the
+  # direction this table's convention exists to keep accountable. It went in
+  # with no entry; this is that entry, written when the audit caught the gap.
+  #
+  # 🔴 The pin this REPLACES was 8036, then 7772, neither of them accounted for
+  # here. ONE number below is measured: **7825 collected in scripts/tests** on
+  # this branch, `pytest scripts/tests --collect-only -q` under
+  # `nix develop --impure`, 2026-08-25. The branch is the retirement plus the
+  # three guards this audit round added to test_present_measure.py (the derived
+  # reader set, the two non-import client shapes, and the no-reader-at-all
+  # Unmeasurable). That "+3" is a count of functions written, NOT a second
+  # `--collect-only` run, so no pre-audit total is asserted here.
+  #
+  # Rule applied to that measurement, not to the two sides of a diff:
+  #
+  #   _suggested_floor 7825 = 7825 - min(50, max(1, 391)) = 7825 - 50 = 7775
+  #
+  # ⚠ ZERO new skips. Re-measure before trusting this number: as the entries
+  # above document at length, this line drifts by hundreds between the
+  # contributions that happen to look at it.
+  "scripts/tests|7775"
   # 2026-08-11, the session-summary changed-paths work: 230 -> 273 collected,
   # +43 for scripts/collector/tests/test_changed_paths.py (the shared
   # `changed_paths*` module). The gate printed this replacement itself —

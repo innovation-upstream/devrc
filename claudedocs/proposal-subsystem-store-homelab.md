@@ -1,5 +1,15 @@
 # Proposal: move the subsystem store into homelab, behind an auth'd ingress
 
+> 🔴 **SUPERSEDED 2026-08-25 — HISTORICAL. What this proposes was built, and then RETIRED.**
+> Phase 1 shipped, the public cutover followed on 2026-08-18, and the service was retired on
+> 2026-08-25 after its audit log showed every request it ever served came from the session
+> that built it. `scripts/subsystem-store-api/` is deleted; the k8s objects are torn down in
+> a separate `homelab-talos` PR. **The record is
+> `claudedocs/decision-subsystem-store-api-retired-2026-08-25.md`** — including why the
+> missing piece was a sync between the two hosts' local stores rather than any of the
+> phases below. Read everything after this line as the design that was executed, not as work
+> to do. The LOCAL store this proposes moving is unaffected and still in daily use.
+
 **Status: PHASE 1 SHIPPED 2026-08-16** — cluster-internal, no ingress. devrc #512 (the API over
 the existing reader) and homelab-infra #326 (manifests, Flux-adopted with no rollout) are merged;
 the pod runs on homelab in ns `subsystem-store`. **Phases 1.5–4 are still proposals.** The header
