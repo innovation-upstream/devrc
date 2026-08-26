@@ -236,7 +236,16 @@ def test_a_target_that_reaches_a_launcher_is_named_and_red(tmp_path):
     assert "GUARD 7 problem" in out, (
         f"the run failed, but not for the launcher reason:\n{out}")
     assert str(target) in out, f"the failure did not NAME the target:\n{out}"
-    assert "notify-send NOLAUNCH-PROBE planted reach" in out, (
+    # 🔴 The `[<worker>]` tag is matched as a PATTERN, not a literal, and that is
+    # not laziness: it is whatever `PYTEST_XDIST_WORKER` the nested runner
+    # inherited from THIS session's worker, so it is `gw2` under the gate and
+    # `main` under a bare serial `pytest` — a literal would pin the harness's
+    # own parallelism rather than the guard's report. What IS pinned is that the
+    # tag is present and sits between the launcher name and the argv, because
+    # that placement is what keeps `run-tests.sh`'s ^-anchored classifiers from
+    # reading the line as something else entirely.
+    assert re.search(
+        r"notify-send \[[^\]\s]+\] NOLAUNCH-PROBE planted reach", out), (
         f"the guard reported a reach it never actually recorded:\n{out}")
 
 

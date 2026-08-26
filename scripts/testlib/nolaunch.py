@@ -99,9 +99,55 @@ The principle is NOT "never install a stub where no real binary exists" — it i
 (or one with only flags) has no verb, so it is recorded and swallowed with exit
 0 and no output, where the real binary would list units. Every call site in
 this tree passes a verb.
+
+🔴 EVERY LINE CARRIES THE WRITER'S pytest-xdist WORKER ID — AND WHY
+-------------------------------------------------------------------
+There is ONE run-wide log, shared by every target and, since #841, by every
+xdist worker inside a target. `run-tests.sh` runs each pytest target
+`-n N --dist loadfile`. `loadfile` keeps one FILE's tests on one worker, so a
+file does not race itself — but the ~8 sibling files in `scripts/tests` that
+also invoke `systemctl`/`openrgb`/`systemd-run`/`notify-send` run on SIBLING
+workers and append to this same file. Measured composition of the log for a
+9-file subset at `-n 4`: 23 `systemctl(blocked)`, 9 `openrgb`, 8 `systemd-run`,
+8 `notify-send` foreign lines per run.
+
+That breaks the shape every assertion here uses:
+
+    before = len(blocked_systemctl(stub_dir))   # sample
+    ...do the thing...                          # <- a sibling worker appends
+    assert len(blocked_systemctl(stub_dir)) == before + 1
+
+`before + 1` is a claim about THIS worker's launches, measured against a
+counter every worker increments. A few-ms window on a REQUIRED gate, and it
+presents as an unrelated test failing for no reason.
+
+So the stub stamps the tag INTO the line and the readers filter on it. Two
+things that look arbitrary are not:
+
+  * THE TAG IS THE SECOND FIELD, NEVER THE FIRST. `run-tests.sh` classifies
+    this log with THREE `^`-anchored greps on the FIRST token — one counting
+    `nolaunch(session)` markers, one counting `systemctl(read)` passthroughs,
+    and one selecting everything that is neither as a launcher HIT — and
+    `blocked_systemctl` below uses `startswith("systemctl(blocked)")`. A tag at
+    line start would silently reclassify the marker and every read as a real
+    launcher reach and fail the run. The patterns themselves are not restated
+    here: `test_the_runners_anchored_classifiers_still_match_the_tagged_format`
+    reads them OUT of run-tests.sh and runs them against a log this tree wrote.
+  * THE RUNNER'S LEDGER NEEDS NO CHANGE. `NOLAUNCH_SEEN` brackets a WHOLE
+    pytest invocation by line offset (`nl_before+1 .. nl_after`), and all N
+    workers run inside that bracket for the SAME target, so an interleaved
+    sibling-worker line already belongs to the correct target. That is why
+    this is a tag in one shared log rather than per-worker log FILES — those
+    WOULD need the ledger model changed.
+
+Serial runs (`DEVRC_TEST_JOBS=1`, a bare `pytest`, and every NON-pytest target
+the runner starts) have no `PYTEST_XDIST_WORKER`, so they tag `main` — one
+namespace, and the filter is a no-op there rather than a special case.
 """
 from __future__ import annotations
 
+import os
+import re
 import shutil
 from pathlib import Path
 
@@ -145,10 +191,60 @@ SYSTEMCTL_READ_FLAGS = ("--version", "--help", "-h")
 
 LOG_NAME = "launches.log"
 
+# pytest-xdist exports this into each WORKER process, and a child shell inherits
+# it. MEASURED (6 files, `-n 4 --dist loadfile`): four distinct ids `gw0`..`gw3`
+# reached a `sh -c` child; the same suite run serially left it UNSET there.
+WORKER_ENV = "PYTEST_XDIST_WORKER"
+
+# The tag used when `WORKER_ENV` is absent: a serial pytest run, or one of the
+# NON-pytest targets (`HOOK_TESTS`, `SHELL_TESTS`) that reach the stubs through
+# PATH with no plugin at all. A name, not an empty string, so every line has a
+# tag in the same position and the parser never has to special-case one.
+SERIAL_WORKER = "main"
+
+# `worker=` sentinels for the readers below. Neither can collide with a real tag
+# — pytest-xdist ids are `gw<N>` and `SERIAL_WORKER` is a bare word — so passing
+# one can never be confused with asking for a worker that happens to be called
+# that.
+THIS_WORKER = "<this>"
+ALL_WORKERS = "<all>"
+
+# `<classifier> [<tag>] <argv…>`. Anchored, and the tag may not contain a space
+# or a `]`, so an argv that happens to contain a bracketed word cannot be read
+# as the tag.
+_TAGGED = re.compile(r"^\S+ \[([^\]\s]+)\] ")
+
+# The POSIX-sh expression the stubs expand to get their own tag. Assembled from
+# the constants above so the shell and the Python reader cannot drift apart on
+# the variable name or the fallback — the one thing a copy would get wrong
+# silently, because a stub tagged `main` under xdist still LOOKS well-formed.
+_WORKER_SH = '"${' + WORKER_ENV + ':-' + SERIAL_WORKER + '}"'
+
 
 def log_path(stub_dir: Path) -> Path:
     """Where `install(stub_dir)` records intercepted argv, one line per launch."""
     return Path(stub_dir) / LOG_NAME
+
+
+def worker_tag() -> str:
+    """The tag THIS process's launches are stamped with.
+
+    Read at call time, never cached: `nolaunch` is imported once per pytest
+    worker but the value is a property of the process, and a cached module-level
+    constant would be captured before a nested session could change it.
+    """
+    return os.environ.get(WORKER_ENV) or SERIAL_WORKER
+
+
+def line_worker(line: str) -> str | None:
+    """The worker tag a recorded line carries, or None if it carries none.
+
+    None is the honest answer for the plugin's `nolaunch(session)` marker, which
+    is deliberately NOT tagged: `run-tests.sh` counts it per TARGET (one per
+    worker that ran a test) and owns that accounting.
+    """
+    m = _TAGGED.match(line)
+    return m.group(1) if m else None
 
 
 def launcher_body(name: str, log: Path) -> str:
@@ -161,10 +257,19 @@ def launcher_body(name: str, log: Path) -> str:
 
     🔴 And RECORDING IS ALL IT DOES. The guard test pins this text against a
     literal copy of itself, because a stub that records correctly AND has a side
-    effect passes every behavioural assertion in the suite.
+    effect passes every behavioural assertion in the suite. That pin lives in
+    `scripts/tests/test_no_real_launchers.py::test_a_stub_does_nothing_but_record`
+    and spells the expectation out by hand — deriving it from here would make a
+    mutation of this function invisible to it.
+
+    🔴 The `[$worker]` field is the second one, never the first: `run-tests.sh`
+    classifies this log with `^`-anchored greps on the FIRST token. See the
+    module docstring.
     """
-    return 'printf \'%s %s\\n\' "{name}" "$*" >> "{log}"\nexit 0\n'.format(
-        name=name, log=log)
+    return (
+        "printf '%s [%s] %s\\n' \"{name}\" {worker} \"$*\" >> \"{log}\"\n"
+        "exit 0\n"
+    ).format(name=name, worker=_WORKER_SH, log=log)
 
 
 def systemctl_body(real: str, log: Path) -> str:
@@ -195,13 +300,14 @@ def systemctl_body(real: str, log: Path) -> str:
     """
     verbs = "|".join(SYSTEMCTL_READ_VERBS)
     flags = "|".join(SYSTEMCTL_READ_FLAGS)
+    w = _WORKER_SH
     return (
         # Position-independent read flags first: they print and exit whatever
         # else is on the line.
         'for a in "$@"; do\n'
         '  case "$a" in\n'
         f'    {flags})\n'
-        f'      printf \'%s %s\\n\' "systemctl(read)" "$*" >> "{log}"\n'
+        f'      printf \'%s [%s] %s\\n\' "systemctl(read)" {w} "$*" >> "{log}"\n'
         f'      exec "{real}" "$@" ;;\n'
         '  esac\n'
         'done\n'
@@ -218,10 +324,10 @@ def systemctl_body(real: str, log: Path) -> str:
         'done\n'
         'case "$verb" in\n'
         f'  {verbs})\n'
-        f'    printf \'%s %s\\n\' "systemctl(read)" "$*" >> "{log}"\n'
+        f'    printf \'%s [%s] %s\\n\' "systemctl(read)" {w} "$*" >> "{log}"\n'
         f'    exec "{real}" "$@" ;;\n'
         'esac\n'
-        f'printf \'%s %s\\n\' "systemctl(blocked)" "$*" >> "{log}"\n'
+        f'printf \'%s [%s] %s\\n\' "systemctl(blocked)" {w} "$*" >> "{log}"\n'
         'exit 0\n'
     )
 
@@ -252,17 +358,42 @@ def install(stub_dir: Path) -> Path:
     return log
 
 
-def recorded(stub_dir: Path) -> list[str]:
-    """Every intercepted launch so far, as `<name> <argv…>` lines."""
+def recorded(stub_dir: Path, worker: str = THIS_WORKER) -> list[str]:
+    """Intercepted launches, as `<name> [<worker>] <argv…>` lines.
+
+    🔴 THE DEFAULT IS THIS WORKER'S LINES ONLY, AND THAT IS THE SAFE DIRECTION.
+    Every caller in the tree uses the `before = len(recorded(...)) / … / ==
+    before + 1` shape, which is a claim about launches THIS test made; against
+    the unfiltered log that claim is measured on a counter three sibling xdist
+    workers also increment (see the module docstring). Defaulting to unfiltered
+    would leave the race armed for the next test somebody writes, which is the
+    same shape as the bug this exists to close.
+
+    Pass `worker=ALL_WORKERS` for the whole log — the report/inspection view,
+    and the only honest answer to "did anything at all get intercepted". Pass a
+    literal tag (`"gw2"`) to ask about one specific worker.
+
+    Untagged lines — today only the plugin's `nolaunch(session)` marker — belong
+    to no worker and appear ONLY under `ALL_WORKERS`.
+    """
     log = log_path(stub_dir)
     if not log.exists():
         return []
-    return [ln for ln in log.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    lines = [ln for ln in log.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    if worker == ALL_WORKERS:
+        return lines
+    want = worker_tag() if worker == THIS_WORKER else worker
+    return [ln for ln in lines if line_worker(ln) == want]
 
 
-def blocked_systemctl(stub_dir: Path) -> list[str]:
-    """The recorded systemctl calls that were SWALLOWED rather than executed."""
-    return [ln for ln in recorded(stub_dir) if ln.startswith("systemctl(blocked)")]
+def blocked_systemctl(stub_dir: Path, worker: str = THIS_WORKER) -> list[str]:
+    """The recorded systemctl calls that were SWALLOWED rather than executed.
+
+    Same `worker=` contract as `recorded()`, and for the same reason: every
+    caller counts these before and after an action.
+    """
+    return [ln for ln in recorded(stub_dir, worker)
+            if ln.startswith("systemctl(blocked)")]
 
 
 def main(argv: list[str] | None = None) -> int:

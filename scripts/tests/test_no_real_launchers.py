@@ -40,6 +40,13 @@ What is asserted, and why each is not enough alone:
   * THE LEDGER  — pinned against the TREE (`testlib.launcher_scan`), not only
     against itself. `dunstctl`, `rofi` and `yad` were all reachable while the
     self-pinned list said the set was complete.
+  * THE TAG     — every recorded line carries the writing pytest-xdist worker's
+    id as its SECOND field, and the readers filter on it. Without that, the
+    `before = len(...)` / `== before + 1` shape used throughout this file is a
+    claim about THIS worker measured on a counter every sibling worker
+    increments — a few-ms flake on a REQUIRED gate. Pinned deterministically
+    (an injected foreign line), never raced for, plus the placement constraint
+    `run-tests.sh`'s `^`-anchored greps impose on where the tag may sit.
 """
 from __future__ import annotations
 
@@ -431,7 +438,11 @@ def test_invoking_a_launcher_records_and_launches_nothing(launcher, no_real_laun
     lines = nolaunch.recorded(no_real_launchers)
     assert len(lines) == before + 1, (
         f"expected exactly one new recorded launch, got {lines[before:]}")
-    assert lines[-1] == f"{launcher} {marker}", lines[-1]
+    # The `[<worker>]` field is pinned HERE, by exact equality, because the
+    # per-worker filter that makes `before + 1` sound under xdist reads exactly
+    # this position. A stub that stopped emitting it would still record, still
+    # exit 0, and quietly make every filtered read return nothing.
+    assert lines[-1] == f"{launcher} [{nolaunch.worker_tag()}] {marker}", lines[-1]
 
 
 def test_the_stubs_exit_zero_because_a_failing_stub_would_change_the_script(
@@ -474,14 +485,276 @@ def test_a_stub_does_nothing_but_record(launcher, no_real_launchers):
     # keeps the expectation a LITERAL (deriving it from `mockbin.SHEBANG` would
     # make a mutation of that constant invisible here) while staying out of the
     # scanner's needles.
+    # 🔴 The `[%s]` worker field and its `${PYTEST_XDIST_WORKER:-main}` source
+    # are spelled out HERE as literals, not built from `nolaunch.WORKER_ENV` /
+    # `SERIAL_WORKER`, for the same reason as the shebang below: a mutation of
+    # those constants would change the expectation and this pin with it. Under
+    # xdist a stub that read the WRONG variable would tag every line `main` and
+    # still look perfectly well-formed in the log.
     expected = (
         "#" + "!/bin/sh\n"
-        "printf '%s %s\\n' \"" + launcher + "\" \"$*\" >> \"" + str(log) + "\"\n"
+        "printf '%s [%s] %s\\n' \"" + launcher + "\" "
+        "\"${PYTEST_XDIST_WORKER:-main}\" \"$*\" >> \"" + str(log) + "\"\n"
         "exit 0\n"
     )
     actual = (no_real_launchers / launcher).read_text(encoding="utf-8")
     assert actual == expected, (
         f"the {launcher} stub is not a pure recorder any more:\n{actual!r}")
+
+
+# --------------------------------------------------------------------------- #
+# THE PER-WORKER TAG — the xdist cross-worker race, closed deterministically
+# --------------------------------------------------------------------------- #
+# 🔴 The bug these pin: ONE run-wide `launches.log`, and since #841 every pytest
+# target runs `-n N --dist loadfile`. `loadfile` keeps THIS file's tests on one
+# worker, so this file does not race itself — but ~8 sibling files in
+# `scripts/tests` also invoke `systemctl`/`openrgb`/`systemd-run`/`notify-send`,
+# run on SIBLING workers, and append to the same file. Every assertion here is
+# `before = len(...)` → act → `== before + 1`, i.e. a claim about THIS worker's
+# launches measured on a counter four workers increment.
+#
+# The window is a few ms and the original report got NOT REPRODUCED in 2/2 runs,
+# so none of these races for it. The foreign line is INJECTED between the sample
+# and the assertion, which is the same state the race produces and is reached
+# every single run.
+def _private_stubs(tmp_path) -> Path:
+    """A stub dir of this test's OWN, never the session's run-wide one.
+
+    🔴 Load-bearing, twice over. (1) One of these tests APPENDS a fabricated
+    foreign line to the log; in the run-wide log that line would be counted by
+    `run-tests.sh`'s GUARD 7 accounting as a real launcher reach, and would move
+    the `before` sample of every other test in this file. (2) They all assert an
+    EXACT total, which the shared log can never offer.
+    """
+    stubs = tmp_path / "own-stubs"
+    nolaunch.install(stubs)
+    return stubs
+
+
+def _through_a_shell(stubs: Path, command: str, **envextra):
+    """Invoke a stub the way a script under test does: a PATH lookup in a child.
+
+    Deliberately NOT `subprocess.run([str(stubs / name)])`: an absolute path to a
+    ledgered basename is exactly what the plugin's L2 layer rewrites, and it
+    would rewrite it to the SESSION stub dir — so the launch would be recorded in
+    the wrong log and this test would measure nothing.
+    """
+    env = dict(os.environ)
+    env["PATH"] = str(stubs) + os.pathsep + env["PATH"]
+    env.update(envextra)
+    return subprocess.run([_SH, "-c", command],
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          text=True, timeout=15, env=env)
+
+
+def test_a_sibling_workers_line_does_not_count_as_this_workers_launch(tmp_path):
+    """🔴 REGRESSION for the xdist cross-worker race — deterministic, not raced.
+
+    RED AT origin/main, but say how: there the module has no per-worker concept
+    at all, so this test cannot even be expressed and dies on `AttributeError`.
+    The meaningful red is the mutant that restores origin/main's SEMANTICS while
+    keeping the API — `recorded()` accepting `worker=` and ignoring it. MEASURED
+    against that mutant, this test fails on the assertion below with its own
+    message: the injected sibling lines land inside `before + 1` and the count
+    is 3.
+    """
+    stubs = _private_stubs(tmp_path)
+    log = nolaunch.log_path(stubs)
+    mine = nolaunch.worker_tag()
+    sibling = f"{mine}-sibling"
+    assert sibling != mine
+
+    before = len(nolaunch.recorded(stubs))
+
+    # THE RACE. A sibling xdist worker appending between the sample and the
+    # assertion — two lines, because both readers are exposed.
+    with log.open("a", encoding="utf-8") as fh:
+        fh.write(f"notify-send [{sibling}] --a-sibling-workers-toast\n")
+        fh.write(f"systemctl(blocked) [{sibling}] --user stop sibling.timer\n")
+
+    marker = "--own-launch-probe"
+    p = _through_a_shell(stubs, f"notify-send {marker}")
+    assert p.returncode == 0, f"{p.stdout}{p.stderr}"
+
+    lines = nolaunch.recorded(stubs)
+    assert len(lines) == before + 1, (
+        "a SIBLING xdist worker's launches were counted as this worker's. That "
+        "is the race: `before + 1` is a claim about what THIS test launched, "
+        f"and it was measured against every worker's lines:\n{lines}")
+    assert lines[-1] == f"notify-send [{mine}] {marker}", lines[-1]
+
+    assert nolaunch.blocked_systemctl(stubs) == [], (
+        "the sibling worker's blocked systemctl call was attributed to this "
+        "worker — `blocked_systemctl` is exposed to the same race")
+
+    # 🔴 POSITIVE CONTROL. Everything above is equally satisfied by an injection
+    # that never happened, or by a `recorded()` pointed at the wrong file. The
+    # unfiltered view must SEE the foreign lines for the filtered view's silence
+    # to mean anything.
+    every = nolaunch.recorded(stubs, worker=nolaunch.ALL_WORKERS)
+    assert len(every) == before + 3, (
+        f"the foreign lines are not in the log at all, so filtering them out "
+        f"proves nothing:\n{every}")
+    assert [ln for ln in every if nolaunch.line_worker(ln) == sibling] == [
+        f"notify-send [{sibling}] --a-sibling-workers-toast",
+        f"systemctl(blocked) [{sibling}] --user stop sibling.timer",
+    ], every
+    assert len(nolaunch.blocked_systemctl(stubs, worker=nolaunch.ALL_WORKERS)) == 1
+
+
+def test_the_stub_takes_its_tag_from_the_xdist_worker_variable(tmp_path):
+    """The MECHANISM, measured at both ends of the dimension it depends on.
+
+    MEASURED on the workbench before this was written (6 files, `-n 4 --dist
+    loadfile`): four distinct ids `gw0`..`gw3` reached a `sh -c` child; the same
+    files run serially left `PYTEST_XDIST_WORKER` UNSET there. Both points are
+    pinned here rather than raced for, because a stub that read the variable but
+    had no fallback would tag serial runs with an empty field and a stub that
+    ignored the variable would tag every xdist worker `main` — and BOTH still
+    produce a well-formed-looking log.
+    """
+    stubs = _private_stubs(tmp_path)
+
+    # Point 1: a worker id in the environment is the tag.
+    p = _through_a_shell(stubs, "openrgb --under-a-worker",
+                         PYTEST_XDIST_WORKER="gw7")
+    assert p.returncode == 0, f"{p.stdout}{p.stderr}"
+
+    # Point 2: no worker id — the serial fallback, one namespace with no gap.
+    env = {k: v for k, v in os.environ.items() if k != "PYTEST_XDIST_WORKER"}
+    env["PATH"] = str(stubs) + os.pathsep + os.environ["PATH"]
+    q = subprocess.run([_SH, "-c", "openrgb --serial"],
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                       text=True, timeout=15, env=env)
+    assert q.returncode == 0, f"{q.stdout}{q.stderr}"
+
+    every = nolaunch.recorded(stubs, worker=nolaunch.ALL_WORKERS)
+    assert every == [
+        "openrgb [gw7] --under-a-worker",
+        f"openrgb [{nolaunch.SERIAL_WORKER}] --serial",
+    ], every
+    assert nolaunch.recorded(stubs, worker="gw7") == [
+        "openrgb [gw7] --under-a-worker"], every
+
+
+def test_the_readers_default_to_this_worker_and_can_still_see_everything(tmp_path):
+    """The `worker=` contract, pinned against a hand-written log.
+
+    🔴 THE DEFAULT IS THE POINT. A `recorded()` that defaulted to the whole log
+    would leave the race armed for the next test somebody writes — the shape of
+    the bug, not a variant of it — so "the default filters" is asserted, not
+    left to be inferred from the call sites that happen to exist today.
+
+    The `nolaunch(session)` marker is here on purpose: it is deliberately
+    untagged (`run-tests.sh` owns its per-target accounting), so it belongs to
+    no worker and must appear under ALL_WORKERS and nowhere else.
+    """
+    stubs = tmp_path / "hand-written"
+    stubs.mkdir()
+    mine = nolaunch.worker_tag()
+    log = nolaunch.log_path(stubs)
+    log.write_text(
+        "nolaunch(session) scripts/tests -q\n"
+        f"systemd-run [{mine}] --user --unit=ours --on-active=2h true\n"
+        "systemctl(blocked) [gwZ] --user stop theirs.timer\n"
+        f"systemctl(blocked) [{mine}] --user stop ours.timer\n"
+        "systemctl(read) [gwZ] --user is-active theirs.timer\n"
+        "i3-msg(abs) [gwZ] workspace 9\n",
+        encoding="utf-8")
+
+    assert nolaunch.recorded(stubs) == [
+        f"systemd-run [{mine}] --user --unit=ours --on-active=2h true",
+        f"systemctl(blocked) [{mine}] --user stop ours.timer",
+    ], nolaunch.recorded(stubs)
+    assert nolaunch.blocked_systemctl(stubs) == [
+        f"systemctl(blocked) [{mine}] --user stop ours.timer"]
+
+    assert len(nolaunch.recorded(stubs, worker=nolaunch.ALL_WORKERS)) == 6
+    assert nolaunch.recorded(stubs, worker="gwZ") == [
+        "systemctl(blocked) [gwZ] --user stop theirs.timer",
+        "systemctl(read) [gwZ] --user is-active theirs.timer",
+        "i3-msg(abs) [gwZ] workspace 9",
+    ]
+    assert nolaunch.line_worker("nolaunch(session) scripts/tests -q") is None
+    assert nolaunch.line_worker("i3-msg(abs) [gwZ] workspace 9") == "gwZ"
+    # An argv containing a bracketed word must not be mistaken for the tag.
+    assert nolaunch.line_worker("notify-send [gw1] -t 2500 [not-a-tag]") == "gw1"
+
+
+# ⚠ INVARIANT GUARD, not regression coverage: this passes at origin/main too,
+# because there the tag does not exist and the classifiers match trivially. It
+# pins the constraint the tag's PLACEMENT had to satisfy — `run-tests.sh` reads
+# this log with `^`-anchored greps on the FIRST token, so a tag at line START
+# would stop the session marker and every `systemctl(read)` passthrough from
+# matching and report both as real launcher reaches, failing the whole run.
+# Nothing in Python covered those greps before; they are the log's real consumer.
+def test_the_runners_anchored_classifiers_still_match_the_tagged_format(tmp_path):
+    """Run `run-tests.sh`'s OWN grep patterns against a log this tree produced.
+
+    The patterns are read out of the runner rather than copied, so a change on
+    that side is visible here; and they are executed by real `grep`, not
+    re-implemented in `re`, because the claim is about what the runner does.
+    """
+    runner = (SCRIPTS / "run-tests.sh").read_text(encoding="utf-8")
+    marker_pat = r"^nolaunch(session)"
+    read_pat = r"^systemctl(read)"
+    hit_pat = r"^(nolaunch\(session\)|systemctl\(read\)|$)"
+    assert "grep -c '^nolaunch(session)'" in runner, (
+        "run-tests.sh no longer classifies the session marker with this "
+        "pattern — the placement constraint this test pins has moved")
+    assert "grep -c '^systemctl(read)'" in runner, (
+        "run-tests.sh no longer counts systemctl READS with this pattern")
+    assert ("grep -vE '^(nolaunch\\(session\\)|systemctl\\(read\\)|$)'"
+            in runner), (
+        "run-tests.sh no longer selects launcher HITS with this pattern")
+
+    grep = shutil.which("grep")
+    assert grep is not None, (
+        "no grep on PATH — run-tests.sh cannot classify its own launch log "
+        "without one, so this environment cannot run the gate either")
+
+    # 🔴 EVERY LINE BELOW IS PRODUCED BY THIS TREE'S OWN CODE, none typed out
+    # here. Hand-writing the `systemctl(read)` and `nolaunch(session)` lines is
+    # what makes this guard vacuous: those two are the ONLY ones the runner
+    # classifies by their first token, so a hand-written copy stays in the old
+    # format under the very mutation this test exists to catch — MEASURED, the
+    # earlier draft of this test stayed green under a tag-at-line-start mutant.
+    stubs = _private_stubs(tmp_path)
+    log = nolaunch.log_path(stubs)
+    from testlib import nolaunch_plugin
+    nolaunch_plugin._log_marker(stubs, "scripts/tests -q")
+    for cmd in ("notify-send a-toast", "systemd-run --user --unit=u true"):
+        assert _through_a_shell(stubs, cmd).returncode == 0
+    # The systemctl stub, generated by `systemctl_body` and pointed at a
+    # passthrough target of our own — so BOTH its branches run in BOTH tiers,
+    # where `install()` writes no systemctl stub at all when the host has none.
+    passthrough = tmp_path / "passthrough-systemctl"
+    write_exec(passthrough, "exit 0\n")
+    write_exec(stubs / "systemctl",
+               nolaunch.systemctl_body(str(passthrough), log))
+    assert _through_a_shell(stubs, "systemctl --user status u").returncode == 0
+    assert _through_a_shell(stubs, "systemctl --user stop u").returncode == 0
+
+    def _grep(args):
+        p = subprocess.run([grep, *args, str(log)], stdout=subprocess.PIPE,
+                           text=True, timeout=15)
+        return [ln for ln in p.stdout.splitlines() if ln]
+
+    assert _grep(["-c", marker_pat]) == ["1"], (
+        "the session marker stopped matching the runner's ^-anchored count — "
+        "GUARD 7 would report the plugin as never loaded in this target")
+    assert _grep(["-c", read_pat]) == ["1"], (
+        "a systemctl READ stopped matching the runner's ^-anchored count and "
+        "would now be reported as a real launcher reach")
+    hits = _grep(["-vE", hit_pat])
+    assert len(hits) == 3, (
+        "the runner's HIT selector no longer classifies the log the way this "
+        "tree writes it — the marker and the systemctl READ must be excluded "
+        f"and the three launcher lines kept; a tag at line START breaks exactly "
+        f"that:\n{hits}")
+    assert sorted(ln.split(" [", 1)[0] for ln in hits) == [
+        "notify-send", "systemctl(blocked)", "systemd-run"], hits
+    assert all(nolaunch.line_worker(ln) == nolaunch.worker_tag() for ln in hits), hits
 
 
 # --------------------------------------------------------------------------- #
@@ -532,28 +805,23 @@ def test_a_mutating_systemctl_verb_is_recorded_and_swallowed(no_real_launchers):
     assert p.stderr == "", (
         f"the real systemctl appears to have run: {p.stderr!r}")
     blocked = nolaunch.blocked_systemctl(no_real_launchers)
-    # 🔴 KNOWN RACE, OPEN — this comment used to say "sound only because pytest
-    # runs this suite sequentially in one process". That premise is FALSE as of
-    # the xdist change: run-tests.sh runs each target `-n N --dist loadfile`.
-    #
-    # loadfile keeps THIS file's tests on one worker, so they do not race each
-    # other. What does race is the other eight files in this tree that invoke
-    # `systemctl` — they run on sibling workers and append to the SAME run-wide
+    # 🔴 THE CROSS-WORKER RACE THIS USED TO CARRY IS CLOSED — read the note, it
+    # is what makes `before + 1` sound again. This comment previously said the
+    # assertion was "sound only because pytest runs this suite sequentially in
+    # one process", which the xdist change (`-n N --dist loadfile`) made false:
+    # loadfile keeps THIS file on one worker, but ~8 sibling files in this tree
+    # also invoke `systemctl` and append to the SAME run-wide
     # `$DEVRC_TEST_LAUNCH_STUB_DIR/launches.log` that `before` was sampled from.
-    # Measured composition of that log for a 9-file subset at -n 4: 23
-    # `systemctl(blocked)`, 9 `openrgb`, 8 `systemd-run`, 8 `notify-send` foreign
-    # lines per run, interleaving with these assertions.
     #
-    # NOT REPRODUCED in 2/2 subset runs — the window is a few ms — so this is a
-    # small-probability flake on a REQUIRED gate, which is worse than a loud one:
-    # it will present as an unrelated test failing for no reason.
-    #
-    # The fix is the one the original comment named — a per-worker stub dir — and
-    # it is deliberately NOT done here: the stub log path is baked into the stub
-    # script bodies at install() time, and the runner attributes intercepts to
-    # targets by LINE OFFSET into that single file, so per-worker logs need the
-    # runner's ledger model changed too. That is a design change, not a patch.
-    # Until then: `DEVRC_TEST_JOBS=1` makes this deterministic.
+    # It is not fixed by per-worker LOG FILES — that WOULD need the runner's
+    # ledger model changed, since it attributes intercepts to targets by line
+    # offset into one file. It is fixed by a per-worker TAG inside that one log:
+    # `blocked_systemctl()` now returns only THIS worker's lines by default, so
+    # a sibling worker's `systemctl(blocked)` can no longer land inside the
+    # window. See `testlib/nolaunch.py`'s docstring, and the deterministic pins
+    # under "THE PER-WORKER TAG" above — the race is injected there rather than
+    # raced for, because the window is a few ms and it was NOT REPRODUCED in 2/2
+    # runs when it was open.
     assert len(blocked) == before + 1, blocked[before:]
     assert unit in blocked[-1] and "stop" in blocked[-1], blocked[-1]
 

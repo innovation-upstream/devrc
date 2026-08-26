@@ -78,6 +78,12 @@ SESSION_MARKER = "nolaunch(session)"
 
 
 def _log_marker(stub_dir: Path, note: str) -> None:
+    # 🔴 DELIBERATELY NOT `[<worker>]`-TAGGED, unlike every launch line. This
+    # marker is `run-tests.sh`'s per-TARGET positive control — it counts one per
+    # xdist worker that ran a test and compares against `-n N` — so the runner
+    # already owns its attribution and a tag would buy nothing. The consequence,
+    # stated rather than implied: `nolaunch.recorded()` filtered to a worker does
+    # NOT return these; `worker=ALL_WORKERS` does.
     log = nolaunch.log_path(stub_dir)
     log.parent.mkdir(parents=True, exist_ok=True)
     with log.open("a", encoding="utf-8") as fh:
@@ -151,9 +157,16 @@ def _patch_subprocess(stub_dir: Path):
             redirected = _redirect_argv(args, stub_dir)
             if redirected is not None:
                 log = nolaunch.log_path(stub_dir)
+                # 🔴 SAME `[<worker>]` SECOND FIELD as the L1 stubs write. Both
+                # write paths must be tagged or `recorded()`'s per-worker filter
+                # would silently drop the L2 line — an absolute-path reach that
+                # WAS intercepted reading as one that was never seen, which is
+                # the reassuring-zero failure this whole guard exists to avoid.
                 with log.open("a", encoding="utf-8") as fh:
-                    fh.write("%s(abs) %s\n" % (os.path.basename(str(args[0])),
-                                               " ".join(str(x) for x in args[1:])))
+                    fh.write("%s(abs) [%s] %s\n" % (
+                        os.path.basename(str(args[0])),
+                        nolaunch.worker_tag(),
+                        " ".join(str(x) for x in args[1:])))
                 args = redirected
             super().__init__(args, *a, **kw)
 
