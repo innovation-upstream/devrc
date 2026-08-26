@@ -47,7 +47,14 @@
 #      no `tasks` array, a row carrying no usable id, or a counting pass that
 #      produced no usable tally — a broken READ is never reported as an empty
 #      board)
-#   5  the board answered and resolved NOTHING — see the caveat printed with it
+#   5  the board answered and resolved NOTHING — see the caveat printed with it.
+#      🔴 TWO WORDINGS, ONE CODE. `resolve` runs a bounded POSITIVE CONTROL
+#      before printing this verdict (`clawgate_zero_probe`), and when the
+#      control resolves rows the wording narrows from "this cannot distinguish
+#      two mechanisms" to "the board answered; the id under test is still
+#      unproven". THE CODE IS 5 EITHER WAY — `claude/skills/handoff/SKILL.md`
+#      and the resume tooling branch on it to mean "write no field", so it is a
+#      wire contract and only the MESSAGE ever changes.
 #   6  ASK; this command will not pick one. FOUR distinguishable causes, each
 #      named in the output: several WORKED tasks, NO worked task beside one or
 #      more created/read links, a role this tool does not recognise, or (roles
@@ -73,6 +80,14 @@ CLAWGATE_DEFAULT_API_URL="http://192.168.50.250:30302"
 #: Where the hook token and base URL live, RELATIVE to $HOME. Expanded at call
 #: time, never at source time — a caller may set HOME after sourcing.
 CLAWGATE_ENV_REL=".claude/clawgate.env"
+
+#: Seconds ONE control request may take, and it is deliberately a THIRD of the
+#: 10 s the request under test gets. The control can only ever make the rc 5
+#: wording NARROWER — it never changes the code, never resolves a task and never
+#: makes the verdict louder — so it must not be the thing that makes `resolve`
+#: slow or flaky. Two requests, no retries: 6 s is the whole worst case it can
+#: add, and every failure of it falls through to today's wording unchanged.
+CLAWGATE_CONTROL_MAX_TIME=3
 
 #: The front-matter key. One spelling, used by the reader and the writer.
 CLAWGATE_FIELD_KEY="clawgate-task"
@@ -358,6 +373,72 @@ clawgate_usable_id(){
   return 0
 }
 
+# `clawgate_zero_verdict [control-session-id] [control-body-text]` — the ONLY
+# place the "0 tasks for this session" verdict is worded, in either of its two
+# forms. PURE: it takes the control's RESULT as text and does no I/O itself.
+#
+# 🔴 WHY THE CONTROL EXISTS. `GET /api/sessions/{id}/tasks` answers `200
+# {"tasks":[]}` for an id it has never seen — not 404 — so an empty array is the
+# observable that "this session touched no task" and "the id is wrong" SHARE,
+# and it identifies neither (`claude/RULES.md` -> "An EMPTY RESULT cannot
+# distinguish two mechanisms"). Worse, a reassuring zero is also what a dead
+# endpoint, a wrong base URL and a rejected token produce, which is the
+# "positive control" half of the same rules file: a zero is unproven until
+# something has been shown to make the number MOVE.
+#
+# So the caller queries the SAME endpoint with an id KNOWN to be linked. If that
+# comes back with rows, the instrument demonstrably works and the zero under
+# test is a real reading of the board. That hedge was paid for by hand in
+# session 2f969fa6-866b-4ac2-ac11-4c359cbeda7e, whose handoff doc and closing
+# report both had to carry "not a clean bill of health"; this automates the
+# three commands that resolved it.
+#
+# 🔴 IT MUST NOT OVERCLAIM, AND THE OUTPUT SAYS SO IN SO MANY WORDS. A working
+# endpoint proves that a CORRECT id would have resolved. It says NOTHING about
+# whether the id under test is correct — a wrong id still answers 200 with an
+# empty array. The upgraded wording is a NARROWER honest claim, not a clean bill
+# of health, and it still forbids writing a field or minting a task.
+#
+# 🔴 FAIL SAFE, IN EVERY DIRECTION. No control, an unparseable one, one whose
+# `tasks` is not an array, and one that resolved ZERO rows all print today's
+# wording BYTE FOR BYTE. A control that resolved nothing is itself an empty
+# result and cannot license a stronger claim than the one it was meant to check.
+# Called with no arguments at all (which is what `clawgate_rank_rows` does, so
+# the ranking stays pure and serverless) it is exactly the old function.
+clawgate_zero_verdict(){
+  local ctl_sid="${1:-}" ctl_body="${2:-}" ctl_n=""
+  if [ -n "$ctl_sid" ] && [ -n "$ctl_body" ]; then
+    # `empty` rather than `0` for a non-array. ⚠ NOT A GUARD, and measured to be
+    # BEHAVIOURALLY EQUIVALENT to `0` today — both land on the `-gt 0` test and
+    # print the old wording, and the mutant swapping them is an equivalent
+    # mutant this file's suite (correctly) cannot kill. It is spelled this way
+    # because "the schema broke" and "the control answered zero" are different
+    # facts, and the next branch on `$ctl_n` should not have to re-derive that.
+    ctl_n=$(printf '%s' "$ctl_body" | jq -r '
+      if (.tasks | type) == "array" then (.tasks | length) else empty end' 2>/dev/null)
+  fi
+  # Anything that is not ONE bare non-negative integer — empty, text, several
+  # lines from a filter that lost its wrapper — is no control. Same discipline
+  # as the tally guard in `clawgate_rank_rows`: a broken read is never a count.
+  case "$ctl_n" in
+    ''|*[!0-9]*) ctl_n=0 ;;
+  esac
+
+  echo "clawgate: NOTHING RESOLVED — 0 tasks for this session."
+  if [ "$ctl_n" -gt 0 ]; then
+    echo "  POSITIVE CONTROL: the SAME endpoint answered $ctl_n link(s) for session $ctl_sid,"
+    echo "  so the board is reachable, the base URL is right and the token is accepted —"
+    echo "  this 0 is a REAL READING of the board, not an instrument wired to nothing."
+    echo "  🔴 IT DOES NOT PROVE THE SESSION ID UNDER TEST IS RIGHT. A wrong id ALSO answers"
+    echo "  200 with an EMPTY ARRAY; the control shows only that a CORRECT id WOULD have"
+    echo "  resolved. That is a NARROWER claim, NOT a clean bill of health."
+  else
+    echo "  An unknown session id answers 200 with an EMPTY ARRAY, so this cannot"
+    echo "  distinguish 'this session touched no task' from 'the id is wrong'."
+  fi
+  echo "  Write NO clawgate-task: field, say so in the report, and never create a task."
+}
+
 # `clawgate_rank_rows <response-body-text>` — the whole verdict, from text alone.
 # Prints the candidate rows (role-ANNOTATED and role-ORDERED, worked first) and
 # then one verdict line, and returns `resolve`'s 0/4/5/6 (see the header).
@@ -527,11 +608,14 @@ clawgate_rank_rows(){
   n_read="${fields[3]}"; n_created="${fields[4]}"
   n_unknown="${fields[5]}"; n_absent="${fields[6]}"
 
+  # 🔴 THE WORDING IS DELEGATED, THE CODE IS NOT. `clawgate_zero_verdict` owns
+  # both forms of this verdict in ONE place (`claude/RULES.md` -> "One rule, one
+  # place"); called with no arguments it prints exactly the un-upgraded text, so
+  # this function stays PURE and drivable from a fixture string with no server.
+  # `clawgate_resolve` is the only caller that has a control to hand it, and it
+  # re-renders through this same function rather than wording it a second time.
   if [ "$n" -eq 0 ]; then
-    echo "clawgate: NOTHING RESOLVED — 0 tasks for this session."
-    echo "  An unknown session id answers 200 with an EMPTY ARRAY, so this cannot"
-    echo "  distinguish 'this session touched no task' from 'the id is wrong'."
-    echo "  Write NO clawgate-task: field, say so in the report, and never create a task."
+    clawgate_zero_verdict
     return 5
   fi
 
@@ -646,6 +730,79 @@ clawgate_env_get(){
   return 1
 }
 
+# `clawgate_zero_probe <base> <curl-config> <out-file> <session-id-under-test>`
+# — the POSITIVE CONTROL behind rc 5's upgraded wording. Prints the control
+# session id on stdout and leaves that session's response body in <out-file>;
+# prints NOTHING and returns non-zero on any failure whatsoever.
+#
+# TWO bounded requests, in this order:
+#   1. `GET /api/tasks?limit=1` — the cheapest read on the board that names a
+#      session. A task's `sourceSessionId` is BY CONSTRUCTION linked to that
+#      task with `role=created` (see the role table in this file's header), so
+#      it is an id that MUST resolve if the endpoint works. Nothing is invented:
+#      the control id comes from the server's own data, not from a constant that
+#      could go stale.
+#   2. `GET /api/sessions/<that id>/tasks` — THE SAME ENDPOINT UNDER TEST. That
+#      identity is the whole point. A control that exercised a different route
+#      would share none of the steps in doubt and could not tell a dead endpoint
+#      from an empty board.
+#
+# 🔴 NON-FATAL BY CONSTRUCTION. Every branch here is `return 1`, never an echo
+# and never a code the caller propagates: the caller's verdict and exit code are
+# identical whether this succeeds or dies. `--max-time` is
+# `$CLAWGATE_CONTROL_MAX_TIME` on both requests and there are no retries, so the
+# worst case it can add is two short timeouts. It runs ONLY on the rc 5 path — a
+# resolve that resolved anything never issues these requests at all.
+#
+# 🔴 IT REUSES THE CALLER'S CURL CONFIG, so the token is written once, into one
+# 0600 file, under one trap. A second auth path here would be a second place to
+# leak it from, and `claude/RULES.md` -> "One rule, one place" applies to the
+# credential exactly as it does to a predicate. It also reuses <out-file> for
+# BOTH requests: request 2 overwrites request 1's body, and the caller reads that
+# file only when this returns 0 — so a failed request 2 can never hand the task
+# LIST back as if it were a session's links.
+#
+# 🔴 A CONTROL ID EQUAL TO THE ID UNDER TEST IS REFUSED. It would be a second
+# sample of the same unknown rather than a control (`claude/RULES.md` -> "A
+# control that SHARES the step you doubt is not a control"). Unreachable while
+# the board is consistent — that session resolving rows here and zero rows in
+# the request under test is a contradiction — but a task filed by this very
+# session BETWEEN the two requests would produce exactly that race, and the
+# refusal costs one `case`.
+clawgate_zero_probe(){
+  local base="$1" cfg="$2" out="$3" under_test="$4" code rc sid
+  code=$(curl -sS --max-time "$CLAWGATE_CONTROL_MAX_TIME" --config "$cfg" \
+         -o "$out" -w '%{http_code}' "$base/api/tasks?limit=1" 2>/dev/null)
+  rc=$?
+  [ "$rc" -eq 0 ] || return 1
+  [ "$code" = "200" ] || return 1
+
+  # `.[0]` on an empty array is null, and `select(type == "string")` drops it —
+  # so an empty board, an error object that happens to parse, and a schema that
+  # renamed the field are all the same "no control", never a bare word that
+  # would then be pasted into a URL path.
+  sid=$(jq -r 'if type == "array" then .[0] else . end
+               | if type == "object" then (.sourceSessionId // empty) else empty end
+               | select(type == "string")' < "$out" 2>/dev/null)
+
+  # The SAME refusal `clawgate_resolve` applies to the id under test: this is
+  # interpolated into a URL PATH, so anything that could steer it — a slash, a
+  # `..`, a query string — and anything that is not exactly ONE id (a newline is
+  # not in the class, so a filter that matched several rows is rejected too) is
+  # no control rather than a request sent blind.
+  case "$sid" in
+    ''|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  [ "$sid" != "$under_test" ] || return 1
+
+  code=$(curl -sS --max-time "$CLAWGATE_CONTROL_MAX_TIME" --config "$cfg" \
+         -o "$out" -w '%{http_code}' "$base/api/sessions/$sid/tasks" 2>/dev/null)
+  rc=$?
+  [ "$rc" -eq 0 ] || return 1
+  [ "$code" = "200" ] || return 1
+  printf '%s\n' "$sid"
+}
+
 # `clawgate_resolve` — which clawgate task(s) does THIS session own?
 #
 # 🔴 THE SESSION ID COMES FROM `CLAUDE_CODE_SESSION_ID` — there is no `CLAUDE_SESSION_ID`.
@@ -738,29 +895,60 @@ clawgate_resolve(){
   code=$(curl -sS --max-time 10 --config "$cfg" -o "$body" -w '%{http_code}' \
          "$base/api/sessions/$sid/tasks" 2>/dev/null)
   rc=$?
-  rm -f "$cfg"
+  # 🔴 THE CONFIG OUTLIVES THIS REQUEST NOW, and the trap is why that is safe.
+  # The control below reuses it rather than writing the token a second time, so
+  # the unlink moves to every exit path instead of sitting here — and `^C`
+  # anywhere in between is still covered by the EXIT/INT/TERM trap installed
+  # above. Each path unlinks BOTH files explicitly and then clears the trap.
 
   if [ "$rc" -ne 0 ]; then
-    rm -f "$body"; trap - EXIT INT TERM
+    rm -f "$cfg" "$body"; trap - EXIT INT TERM
     echo "clawgate: DID NOT ANSWER (curl exit $rc — unreachable, TLS, or timed out). UNKNOWN, not empty."
     return 4
   fi
   if [ "$code" != "200" ]; then
-    rm -f "$body"; trap - EXIT INT TERM
+    rm -f "$cfg" "$body"; trap - EXIT INT TERM
     echo "clawgate: DID NOT ANSWER (HTTP $code). UNKNOWN, not empty."
     return 4
   fi
 
   # 🔴 THE DECIDING HAPPENS ABOVE THE I/O LINE. Everything from here is handing
   # the response TEXT to `clawgate_rank_rows` — `$(< "$body")` is a bash
-  # redirection, not a `cat`, so this does not grow the preflight ledger. The
-  # body is read and the temp file unlinked BEFORE any verdict runs, so no exit
-  # path can leave it behind.
-  local body_text
+  # redirection, not a `cat`, so this does not grow the preflight ledger.
+  local body_text verdict vrc
   body_text=$(< "$body")
-  rm -f "$body"; trap - EXIT INT TERM
 
-  clawgate_rank_rows "$body_text"
+  verdict=$(clawgate_rank_rows "$body_text")
+  vrc=$?
+
+  # 🔴 rc 5 IS THE ONLY CODE THE ZERO BRANCH RETURNS, and that is what makes it
+  # usable as the trigger here without re-asking "was it empty?" in a second
+  # place. Anything else resolved, asked or failed — none of which a control
+  # could inform — so the buffered verdict goes straight out and NO extra
+  # request is issued. A resolve that resolves is exactly as fast as before.
+  if [ "$vrc" -ne 5 ]; then
+    rm -f "$cfg" "$body"; trap - EXIT INT TERM
+    printf '%s\n' "$verdict"
+    return "$vrc"
+  fi
+
+  # The zero path, and the ONLY path that pays for the control. `$verdict` is
+  # discarded and re-rendered through the same function, because that function
+  # is where both wordings live; a probe that fails reproduces `$verdict` byte
+  # for byte.
+  #
+  # 🔴 THE EXIT CODE IS 5 IN BOTH DIRECTIONS. It is a wire contract —
+  # `claude/skills/handoff/SKILL.md` and the resume tooling read it as "write no
+  # `clawgate-task:` field" — so the control may narrow the WORDING and may
+  # never move the code. `$body` is reused as the probe's scratch file: it has
+  # already been read into `$body_text`, and it is unlinked below on every path.
+  local ctl_sid="" ctl_body=""
+  if ctl_sid=$(clawgate_zero_probe "$base" "$cfg" "$body" "$sid"); then
+    ctl_body=$(< "$body")
+  fi
+  rm -f "$cfg" "$body"; trap - EXIT INT TERM
+  clawgate_zero_verdict "$ctl_sid" "$ctl_body"
+  return 5
 }
 
 clawgate_handoff_usage(){

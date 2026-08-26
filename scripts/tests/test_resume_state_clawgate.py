@@ -1285,8 +1285,20 @@ def resolver(tmp_path):
     # the suite could say about the token is that it is not in argv — and the
     # file it IS in, its escaping, and whether it is unlinked afterwards were
     # all unmeasured.
+    # 🔴 THE STUB DISPATCHES ON THE URL, because `resolve` can now issue THREE
+    # different requests and they are not interchangeable: the session under
+    # test, the task-list read that names a control session, and that control
+    # session's own links. A stub that served one body to all of them could not
+    # express "the control answered while the session under test did not" —
+    # which is the entire behaviour under test — and would have made the
+    # upgraded-wording test pass for the wrong reason.
+    #
+    # Unset control bodies mean "this request returns an EMPTY file", which is
+    # what every pre-existing test gets: the probe then finds no session id and
+    # falls through to the old wording, so none of them changes meaning.
     write_exec(binp / "curl", (
         'out=""\n'
+        'url=""\n'
         'while [ $# -gt 0 ]; do\n'
         '  case "$1" in\n'
         '    -o) out="$2"; shift 2 ;;\n'
@@ -1296,12 +1308,34 @@ def resolver(tmp_path):
         # drop it from the trap) left the suite green with a real token file
         # persisting while the fixture's TMPDIR sat empty.
         '    --config) printf "%s\\n" "$2" >> "$STUB_CFG_PATHS"; cp "$2" "$STUB_CFG_COPY"; shift 2 ;;\n'
+        '    http://*|https://*)\n'
+        '      url="$1"; printf "%s\\n" "$1" >> "$STUB_URLS"\n'
+        '      printf "%s\\n" "$1" >> "$STUB_ARGV"; shift ;;\n'
         '    *) printf "%s\\n" "$1" >> "$STUB_ARGV"; shift ;;\n'
         '  esac\n'
         'done\n'
-        '[ -n "$out" ] && [ -n "${STUB_BODY:-}" ] && cp "$STUB_BODY" "$out"\n'
-        'printf "%s" "${STUB_CODE:-200}"\n'
-        'exit "${STUB_RC:-0}"\n'
+        'body="${STUB_BODY:-}"\n'
+        'code="${STUB_CODE:-200}"\n'
+        'rc="${STUB_RC:-0}"\n'
+        'case "$url" in\n'
+        # the request under test — keeps STUB_BODY/STUB_CODE/STUB_RC verbatim
+        '  */api/sessions/"$STUB_MAIN_SID"/tasks) : ;;\n'
+        '  */api/tasks*)\n'
+        '     body="${STUB_BODY_TASKLIST:-}"\n'
+        '     code="${STUB_CTL_CODE:-200}"; rc="${STUB_CTL_RC:-0}" ;;\n'
+        # 🔴 THE CONTROL'S TWO REQUESTS GET SEPARATE CODES, and they had to.
+        # Sharing one knob made request 1 fail first, so request 2's own
+        # status check NEVER EXECUTED — a mutant deleting it survived the whole
+        # class (`claude/RULES.md` -> "a mutation test still passes when an
+        # earlier check always wins so the guard never executes").
+        '  */api/sessions/*/tasks)\n'
+        '     body="${STUB_BODY_CONTROL:-}"\n'
+        '     code="${STUB_CTL2_CODE:-200}"; rc="${STUB_CTL2_RC:-0}" ;;\n'
+        'esac\n'
+        '[ -n "$out" ] && : > "$out"\n'
+        '[ -n "$out" ] && [ -n "$body" ] && cp "$body" "$out"\n'
+        'printf "%s" "$code"\n'
+        'exit "$rc"\n'
     ))
 
     # 🔴 A PASS-THROUGH `jq` THAT CAN BE MADE TO DIE ON ONE SPECIFIC CALL.
@@ -1326,13 +1360,33 @@ def resolver(tmp_path):
         f'exec {real_jq} "$@"\n'
     ))
 
+    url_log = tmp_path / "curl-urls.log"
+
     def go(payload=None, *, session=SESSION_VAR, session_id="sess-abc-123",
            code="200", rc="0", env_file: str | None = None,
-           jq_fail_on: int | None = None, jq_fail_out: str = ""):
+           jq_fail_on: int | None = None, jq_fail_out: str = "",
+           tasklist=None, control=None, ctl_code="200", ctl_rc="0",
+           ctl2_code="200", ctl2_rc="0"):
         env = _base_env()
         env["HOME"] = str(home)
         env["PATH"] = f"{binp}{os.pathsep}{env['PATH']}"
         env["STUB_ARGV"] = str(argv_log)
+        env["STUB_URLS"] = str(url_log)
+        env["STUB_MAIN_SID"] = session_id or ""
+        env["STUB_CTL_CODE"] = ctl_code
+        env["STUB_CTL_RC"] = ctl_rc
+        env["STUB_CTL2_CODE"] = ctl2_code
+        env["STUB_CTL2_RC"] = ctl2_rc
+        if url_log.exists():
+            url_log.unlink()           # the URL log is PER CALL, not per fixture
+        if tasklist is not None:
+            p = tmp_path / "tasklist.json"
+            p.write_text(tasklist if isinstance(tasklist, str) else json.dumps(tasklist))
+            env["STUB_BODY_TASKLIST"] = str(p)
+        if control is not None:
+            p = tmp_path / "control.json"
+            p.write_text(control if isinstance(control, str) else json.dumps(control))
+            env["STUB_BODY_CONTROL"] = str(p)
         env["STUB_CFG_COPY"] = str(cfg_copy)
         env["STUB_CFG_PATHS"] = str(cfg_paths)
         # 🔴 LOAD-BEARING, AND IT WAS MISSING. `mktemp` honours TMPDIR, so
@@ -1360,6 +1414,7 @@ def resolver(tmp_path):
                               text=True, timeout=30, env=env)
 
     go.argv_log = argv_log  # type: ignore[attr-defined]
+    go.url_log = url_log  # type: ignore[attr-defined]
     go.cfg_copy = cfg_copy  # type: ignore[attr-defined]
     go.cfg_paths = cfg_paths  # type: ignore[attr-defined]
     go.tmpdir = tmpdir  # type: ignore[attr-defined]
@@ -2120,6 +2175,384 @@ class TestResolve:
         assert out.returncode == 4, out.stdout + out.stderr
         assert "is not on PATH" in out.stdout
         assert "UNKNOWN, not empty" in out.stdout
+
+
+# --------------------------------------------------------------------------- #
+# §5b rc 5's POSITIVE CONTROL
+#
+# `GET /api/sessions/{id}/tasks` answers `200 {"tasks":[]}` for an id it has
+# never seen, so the zero it returns is the observable shared by "this session
+# touched no task", "the id is wrong", "the endpoint is dead", "the base URL is
+# wrong" and "the token was rejected". `resolve` therefore asks the SAME
+# endpoint with an id it knows IS linked — a task's own `sourceSessionId` — and
+# narrows the wording only when that comes back with rows.
+#
+# 🔴 THE EXIT CODE NEVER MOVES. rc 5 is a wire contract read by
+# `claude/skills/handoff/SKILL.md` and the resume tooling as "write no
+# `clawgate-task:` field"; every test in this section asserts it explicitly, in
+# BOTH directions, so an upgrade of the wording can never become an upgrade of
+# the verdict.
+# --------------------------------------------------------------------------- #
+
+#: 🔴 SPELLED HERE, NEVER READ FROM THE SUBJECT, and pinned as a WHOLE
+#: NORMALISED STRING rather than by keyword. The artifact under test is PROSE,
+#: and `claude/RULES.md` -> "a guard on WORDS is walkable by REWORDING" — a
+#: keyword check would let the control's caveat be softened, dropped or
+#: contradicted while staying green. A cosmetic reword now costs a test edit;
+#: that is the price of a machine-readable claim.
+OLD_ZERO_WORDING = (
+    "clawgate: NOTHING RESOLVED — 0 tasks for this session.\n"
+    "  An unknown session id answers 200 with an EMPTY ARRAY, so this cannot\n"
+    "  distinguish 'this session touched no task' from 'the id is wrong'.\n"
+    "  Write NO clawgate-task: field, say so in the report, and never create a task."
+)
+
+#: 🔴 CHOSEN SO NO ASSERTION CAN PASS ON A CONSTANT. The control session id is
+#: nothing like the id under test (`sess-abc-123`), and the control resolves
+#: THREE links — not one, and not the same number as any other quantity the
+#: verdict prints — so a mutant that hardcodes `1`, echoes the session under
+#: test, or counts the wrong array cannot produce this string.
+CTL_SID = "ctl-7d41e9f0-known-linked"
+CTL_TASK_ID = 946
+CTL_LINKS = 3
+
+
+def upgraded_zero_wording(sid: str = CTL_SID, n: int = CTL_LINKS) -> str:
+    """The wording rc 5 carries when the control resolved rows.
+
+    Built from the two values the control actually produced, so the assertion
+    is sensitive to BOTH of them: a subject that printed a fixed id or a fixed
+    count would satisfy a keyword check and fails this.
+    """
+    return (
+        "clawgate: NOTHING RESOLVED — 0 tasks for this session.\n"
+        f"  POSITIVE CONTROL: the SAME endpoint answered {n} link(s) for session {sid},\n"
+        "  so the board is reachable, the base URL is right and the token is accepted —\n"
+        "  this 0 is a REAL READING of the board, not an instrument wired to nothing.\n"
+        "  🔴 IT DOES NOT PROVE THE SESSION ID UNDER TEST IS RIGHT. A wrong id ALSO answers\n"
+        "  200 with an EMPTY ARRAY; the control shows only that a CORRECT id WOULD have\n"
+        "  resolved. That is a NARROWER claim, NOT a clean bill of health.\n"
+        "  Write NO clawgate-task: field, say so in the report, and never create a task."
+    )
+
+
+def norm(text: str) -> str:
+    """Trailing whitespace stripped per line, and the trailing blank lines gone.
+
+    Deliberately the ONLY normalisation: the words, their order, the indentation
+    and the line breaks are all under test.
+    """
+    return "\n".join(ln.rstrip() for ln in text.splitlines()).rstrip("\n")
+
+
+def tasklist_naming(sid: str, task_id: int = CTL_TASK_ID) -> list:
+    """What `GET /api/tasks?limit=1` returns: a JSON ARRAY of task objects, each
+    carrying the `sourceSessionId` that filed it.
+
+    🔴 THE SHAPE IS THE LIVE SERVER'S, verified against clawgate 0.8.0 on
+    2026-08-25 (`/api/tasks?limit=1` -> `[{"id":358, …,
+    "sourceSessionId":"e0242f58-…"}]`) — a bare array, NOT the `{"tasks":[…]}`
+    envelope the sessions endpoint uses. A fixture built from the wrong
+    envelope would exercise the fallback rather than the feature.
+    """
+    return [{"id": task_id, "title": "a task somebody filed", "status": "open",
+             "sourceSessionId": sid}]
+
+
+def control_links(sid: str = CTL_SID, n: int = CTL_LINKS) -> dict:
+    """What the control session's own `GET /api/sessions/{sid}/tasks` returns."""
+    return {"sessionId": sid,
+            "tasks": [{"id": CTL_TASK_ID + i, "role": "created", "status": "open",
+                       "title": f"link {i}"} for i in range(n)]}
+
+
+def urls(resolver) -> list[str]:
+    log = resolver.url_log  # type: ignore[attr-defined]
+    return log.read_text().split() if log.exists() else []
+
+
+class TestZeroPositiveControl:
+    # --------------------------------------------------- the upgraded wording
+    def test_a_control_that_RESOLVES_ROWS_upgrades_the_zero_verdict(self, resolver):
+        """🔴 THE REGRESSION TEST. Watched RED at a2dc76be (origin/main), where
+        `resolve` prints the un-upgraded hedge for this exact fixture because no
+        control exists at all; green at HEAD.
+
+        The whole stdout is pinned, so this also asserts that NOTHING ELSE is
+        printed on the zero path — a stray line from the probe would fail it."""
+        r = resolver(NONE, tasklist=tasklist_naming(CTL_SID), control=control_links())
+        assert r.returncode == 5, r.stdout + r.stderr
+        assert norm(r.stdout) == upgraded_zero_wording(), r.stdout
+
+    def test_the_upgraded_verdict_REFUSES_to_bless_the_id_under_test(self, resolver):
+        """🔴 THE OVERCLAIM THIS FEATURE COULD EASILY HAVE SHIPPED. A working
+        endpoint proves a CORRECT id would have resolved; it proves nothing
+        about whether the id under test IS correct, because a wrong id answers
+        200 with an empty array too. Named separately from the whole-string pin
+        above so a future reword cannot quietly drop the caveat and be recorded
+        as a cosmetic test edit."""
+        r = resolver(NONE, tasklist=tasklist_naming(CTL_SID), control=control_links())
+        assert "DOES NOT PROVE THE SESSION ID UNDER TEST IS RIGHT" in r.stdout
+        assert "NOT a clean bill of health" in r.stdout
+        assert "EMPTY ARRAY" in r.stdout, "the ambiguity it does NOT resolve is still named"
+        # and it still forbids the two things rc 5 exists to forbid
+        assert "Write NO clawgate-task: field" in r.stdout
+        assert "never create a task" in r.stdout
+        assert recorded(r.stdout) == [], r.stdout
+
+    def test_the_upgraded_verdict_NAMES_the_control_it_used(self, resolver):
+        """The claim carries its own scope: which id resolved, and how many
+        links. Driven at a SECOND (sid, count) pair so neither can be a constant
+        the subject happens to print — `claude/RULES.md` -> "One measurement is
+        not a general claim"."""
+        other_sid, other_n = "ctl-0b5c22ae-second-probe", 7
+        r = resolver(NONE,
+                     tasklist=tasklist_naming(other_sid),
+                     control=control_links(other_sid, other_n))
+        assert r.returncode == 5, r.stdout + r.stderr
+        assert norm(r.stdout) == upgraded_zero_wording(other_sid, other_n), r.stdout
+
+    # ------------------------------------------------ the fail-safe direction
+    #: Every way the control can fail to be a control. Each must reproduce the
+    #: OLD wording byte for byte: a control that did not answer may not make the
+    #: verdict louder, and may not make it quieter either.
+    DEAD_CONTROLS: list[tuple[str, dict]] = [
+        ("no task list at all", {}),
+        ("an empty task list", {"tasklist": []}),
+        ("a task list that is not JSON", {"tasklist": "<html>502</html>"}),
+        ("a task list naming no session",
+         {"tasklist": [{"id": CTL_TASK_ID, "title": "t"}]}),
+        ("a sourceSessionId that is not a string",
+         {"tasklist": [{"id": CTL_TASK_ID, "sourceSessionId": 17}]}),
+        ("a sourceSessionId that could steer the URL",
+         {"tasklist": [{"id": CTL_TASK_ID, "sourceSessionId": "../../api/tasks"}]}),
+        ("a control session that resolves NOTHING",
+         {"tasklist": tasklist_naming(CTL_SID), "control": {"tasks": []}}),
+        ("a control whose tasks is not an array",
+         {"tasklist": tasklist_naming(CTL_SID), "control": {"tasks": {"id": 1}}}),
+        ("a control that is not JSON",
+         {"tasklist": tasklist_naming(CTL_SID), "control": "gateway timed out"}),
+        ("a task list the server refuses",
+         {"tasklist": tasklist_naming(CTL_SID), "control": control_links(),
+          "ctl_code": "500"}),
+        ("a task list curl could not reach",
+         {"tasklist": tasklist_naming(CTL_SID), "control": control_links(),
+          "ctl_rc": "7"}),
+        # 🔴 THE TWO CASES THAT REACH REQUEST 2's OWN CHECKS. The four above all
+        # die in request 1, so request 2's status/rc guards never execute and a
+        # mutant deleting them SURVIVED. These let request 1 succeed and fail
+        # only the control query — the body is still served, exactly as a real
+        # 5xx or a proxy error page would be, so a subject that ignored the
+        # status would read it as three resolved links.
+        ("a control session the server refuses",
+         {"tasklist": tasklist_naming(CTL_SID), "control": control_links(),
+          "ctl2_code": "500"}),
+        ("a control session curl could not reach",
+         {"tasklist": tasklist_naming(CTL_SID), "control": control_links(),
+          "ctl2_rc": "7"}),
+    ]
+
+    @pytest.mark.parametrize("why,kw", DEAD_CONTROLS, ids=[w for w, _ in DEAD_CONTROLS])
+    def test_a_control_that_did_not_answer_keeps_the_OLD_wording_byte_for_byte(
+        self, resolver, why, kw
+    ):
+        """🔴 FAIL SAFE. The control is a nicety; its failure must be invisible.
+        Byte-for-byte, because "roughly the same message" is how a hedge gets
+        softened by accident — and because a control that failed has told us
+        NOTHING, which is exactly what the old wording says."""
+        r = resolver(NONE, **kw)
+        assert r.returncode == 5, r.stdout + r.stderr
+        assert norm(r.stdout) == OLD_ZERO_WORDING, r.stdout
+
+    #: Every `sourceSessionId` shape that must never reach a URL path. The
+    #: middle one is what an error page or a renamed field leaves behind.
+    UNSENDABLE_IDS = ["../../api/tasks", "", "sess abc", "x/../../etc", "a?b=c"]
+
+    @pytest.mark.parametrize("bad", UNSENDABLE_IDS)
+    def test_a_control_id_that_could_steer_the_URL_is_never_SENT(self, resolver, bad):
+        """🔴 ASSERTED ON THE REQUEST, NOT ON THE WORDING — and it had to be.
+        Deleting this refusal left the whole class GREEN: the steered URL
+        `…/api/sessions/../../api/tasks/tasks` still contains `/api/tasks`, so
+        the fixture served it the task LIST, whose shape carries no `tasks`
+        array, so the verdict fell back to the old wording anyway. The output
+        was identical while a hand-built path had been sent to the server. Only
+        counting the requests can see that (`claude/RULES.md` -> "A guard can be
+        SPELLED rather than STRUCTURAL")."""
+        r = resolver(NONE, tasklist=[{"id": CTL_TASK_ID, "sourceSessionId": bad}])
+        assert r.returncode == 5, r.stdout + r.stderr
+        assert norm(r.stdout) == OLD_ZERO_WORDING, r.stdout
+        seen = urls(resolver)
+        assert seen == [
+            "http://clawgate.invalid:1/api/sessions/sess-abc-123/tasks",
+            "http://clawgate.invalid:1/api/tasks?limit=1",
+        ], f"a third request was issued with a refused control id {bad!r}: {seen}"
+
+    def test_a_control_id_EQUAL_to_the_session_under_test_is_not_a_control(self, resolver):
+        """🔴 `claude/RULES.md` -> "A control that SHARES the step you doubt is a
+        second sample of the same unknown, not a control". Reachable only as a
+        race (a task filed by this very session between the two requests), and
+        refused rather than reasoned about."""
+        r = resolver(NONE, session_id="sess-abc-123",
+                     tasklist=tasklist_naming("sess-abc-123"),
+                     control=control_links("sess-abc-123"))
+        assert r.returncode == 5, r.stdout + r.stderr
+        assert norm(r.stdout) == OLD_ZERO_WORDING, r.stdout
+        # and it never issued the second control request at all
+        assert urls(resolver) == [
+            "http://clawgate.invalid:1/api/sessions/sess-abc-123/tasks",
+            "http://clawgate.invalid:1/api/tasks?limit=1",
+        ], urls(resolver)
+
+    # ------------------------------------------------------ the exit contract
+    def test_the_exit_code_is_5_in_BOTH_directions(self, resolver):
+        """🔴 THE WIRE CONTRACT, asserted as a PAIR in one test so the two halves
+        cannot drift apart. `claude/skills/handoff/SKILL.md` branches on rc 5 to
+        mean "write no `clawgate-task:` field"; a control that moved the code
+        would silently change what every caller does."""
+        up = resolver(NONE, tasklist=tasklist_naming(CTL_SID), control=control_links())
+        old = resolver(NONE)
+        assert (up.returncode, old.returncode) == (5, 5), (up.stdout, old.stdout)
+        # …and the two really did take different branches, or the pair is vacuous
+        assert norm(up.stdout) != norm(old.stdout)
+
+    # ------------------------------------------- the requests actually happen
+    def test_the_probe_issues_the_two_control_requests_it_claims_to(self, resolver):
+        """🔴 POSITIVE CONTROL ON THE HARNESS. Every fail-safe assertion above is
+        of the form "the output is unchanged", which a probe wired to nothing
+        satisfies for free. This is the case that must produce a non-zero count:
+        three URLs, the last of them the SAME endpoint as the first, with the id
+        the task list named."""
+        r = resolver(NONE, tasklist=tasklist_naming(CTL_SID), control=control_links())
+        assert r.returncode == 5
+        seen = urls(resolver)
+        assert len(seen) == 3, seen
+        assert seen[0].endswith("/api/sessions/sess-abc-123/tasks"), seen
+        assert "/api/tasks?limit=1" in seen[1], seen
+        assert seen[2].endswith(f"/api/sessions/{CTL_SID}/tasks"), seen
+
+    def test_NO_control_request_is_issued_when_anything_RESOLVES(self, resolver):
+        """🔴 THE COST BOUND. `resolve` must not get slower for the runs that
+        work. Driven across every non-5 outcome the ranking can reach — one
+        resolution, an ASK, and a broken read — because the trigger is the exit
+        code and a mutant moving the probe above that check would still look
+        right on the empty payload."""
+        for payload, want_rc in ((ONE, 0), (TWO, 6), ({"tasks": "nope"}, 4)):
+            r = resolver(payload, tasklist=tasklist_naming(CTL_SID),
+                         control=control_links())
+            assert r.returncode == want_rc, r.stdout
+            assert urls(resolver) == [
+                "http://clawgate.invalid:1/api/sessions/sess-abc-123/tasks"
+            ], (payload, urls(resolver))
+
+    def test_the_TOKEN_FILE_is_still_gone_after_the_control_runs(self, resolver):
+        """🔴 THE ONE THING THIS CHANGE MADE RISKIER. The curl config holds a
+        live bearer token and used to be unlinked immediately after the request
+        under test; it now OUTLIVES that request so the control can reuse it
+        rather than writing the credential a second time. So the deletion has to
+        be re-proven on the longest path — and on exactly ONE file, since a
+        second auth path would show up here as a second leftover."""
+        tmpdir = resolver.tmpdir  # type: ignore[attr-defined]
+        assert not list(tmpdir.iterdir()), "the fixture TMPDIR did not start empty"
+        r = resolver(NONE, tasklist=tasklist_naming(CTL_SID), control=control_links())
+        assert r.returncode == 5
+        assert list(tmpdir.iterdir()) == [], [p.name for p in tmpdir.iterdir()]
+        # ONE config, handed to all three requests — not one per request
+        paths = set(resolver.cfg_paths.read_text().split())  # type: ignore[attr-defined]
+        assert len(paths) == 1, f"the token was written to {len(paths)} files: {paths}"
+        assert SENTINEL_TOKEN not in r.stdout + r.stderr
+
+    def test_the_stub_serves_DIFFERENT_bodies_per_URL(self, resolver):
+        """🔴 NEGATIVE CONTROL ON THE HARNESS ITSELF. If the stub served one body
+        to every request, the upgraded-wording test would pass whenever the
+        session under test resolved rows — i.e. for the wrong reason entirely.
+        Here the session under test is EMPTY while the control is not, and the
+        subject must report both facts at once."""
+        r = resolver(NONE, tasklist=tasklist_naming(CTL_SID), control=control_links())
+        assert "0 tasks for this session" in r.stdout
+        assert f"{CTL_LINKS} link(s) for session {CTL_SID}" in r.stdout
+
+    # ---------------------------------------------------- structure and cost
+    def test_the_control_is_TIME_BOUNDED_and_never_retries(self):
+        """🔴 STRUCTURAL, because the behavioural version would have to be slow
+        to be real. Every curl inside the probe must carry the shared timeout
+        constant, that constant must be SHORTER than the request under test's,
+        and no retry flag may appear — a stacking retry is how a nicety becomes
+        the reason `resolve` hangs."""
+        src = LIB.read_text(encoding="utf-8")
+        probe = _decommented(shell_fn_body(src, "clawgate_zero_probe"))
+        calls = re.findall(r"\bcurl\b", probe)
+        assert len(calls) == 2, f"the probe issues {len(calls)} curl call(s), not 2"
+        bounded = re.findall(r'--max-time\s+"\$CLAWGATE_CONTROL_MAX_TIME"', probe)
+        assert len(bounded) == len(calls), (
+            "a curl in the probe is not bounded by $CLAWGATE_CONTROL_MAX_TIME:\n" + probe
+        )
+        assert "--retry" not in probe, "the control must not retry"
+        m = re.search(r"^CLAWGATE_CONTROL_MAX_TIME=(\d+)\s*$", src, re.M)
+        assert m, "CLAWGATE_CONTROL_MAX_TIME is no longer a plain integer constant"
+        # Exactly ONE literal `--max-time N`: a second would make "the request
+        # under test's timeout" ambiguous and this comparison arbitrary.
+        literals = re.findall(r"--max-time\s+(\d+)\b", src)
+        assert len(literals) == 1, f"expected one literal --max-time, found {literals}"
+        assert int(m.group(1)) < int(literals[0]), (
+            f"the control's timeout ({m.group(1)}s) is not shorter than the "
+            f"request under test's ({literals[0]}s)"
+        )
+
+    def test_the_zero_wording_lives_in_exactly_ONE_function(self):
+        """🔴 `claude/RULES.md` -> "One rule, one place". Two copies of this
+        verdict — one in the ranking, one in the resolver — is how the upgraded
+        branch and the fail-safe branch drift apart, and only one of them is
+        ever exercised by a run against a live board."""
+        src = LIB.read_text(encoding="utf-8")
+        sentinel = "NOTHING RESOLVED — 0 tasks for this session."
+        assert src.count(sentinel) == 1, "the zero verdict is worded in more than one place"
+        assert sentinel in shell_fn_body(src, "clawgate_zero_verdict")
+        rank = shell_fn_body(src, "clawgate_rank_rows")
+        assert "clawgate_zero_verdict" in rank, "the ranking no longer delegates the wording"
+        assert sentinel not in rank
+
+    def test_the_verdict_is_PURE_and_the_probe_is_NOT(self):
+        """🔴 THE FILE'S OWN PURE/IO CONTRACT, extended to the two new functions.
+        The wording is drivable from a fixture with no server; the requests are
+        not, and putting them on the wrong side of that line is how the last
+        untestable 50-line block got there."""
+        src = LIB.read_text(encoding="utf-8")
+        io_line = src.index("# I/O — everything below this line")
+        assert src.index("clawgate_zero_verdict(){") < io_line
+        assert src.index("clawgate_zero_probe(){") > io_line
+        probe = _decommented(shell_fn_body(src, "clawgate_zero_probe"))
+        assert "echo" not in probe, (
+            "the probe prints a diagnostic — its failure must be invisible to the "
+            "verdict, which is the caller's to word"
+        )
+
+    # ---------------------------------------- the wording, driven PURELY
+    def test_the_renderer_answers_from_TEXT_ALONE(self):
+        """No server, no stub, no PATH games: the two wordings are a pure
+        function of (control id, control body). This is what makes every case
+        above reproducible from a string."""
+        up = call_fn("clawgate_zero_verdict", CTL_SID, json.dumps(control_links()))
+        assert up.returncode == 0, up.stdout + up.stderr
+        assert norm(up.stdout) == upgraded_zero_wording(), up.stdout
+        old = call_fn("clawgate_zero_verdict")
+        assert norm(old.stdout) == OLD_ZERO_WORDING, old.stdout
+
+    @pytest.mark.parametrize("body", [
+        "", "not json", "{}", '{"tasks": []}', '{"tasks": null}',
+        '{"tasks": {"id": 1}}', '{"tasks": "3"}', "[]",
+    ])
+    def test_no_shape_of_dead_control_body_can_upgrade_the_wording(self, body):
+        """🔴 A CONTROL THAT RESOLVED ZERO IS ITSELF AN EMPTY RESULT and cannot
+        license a stronger claim. Driven at the renderer because no live server
+        produces all of these, and the branch must be right for each."""
+        r = call_fn("clawgate_zero_verdict", CTL_SID, body)
+        assert norm(r.stdout) == OLD_ZERO_WORDING, (body, r.stdout)
+
+    def test_a_control_id_with_no_body_is_not_a_control(self):
+        """Both halves are required — an id alone names a session nothing was
+        read from."""
+        r = call_fn("clawgate_zero_verdict", CTL_SID)
+        assert norm(r.stdout) == OLD_ZERO_WORDING, r.stdout
 
 
 # --------------------------------------------------------------------------- #
