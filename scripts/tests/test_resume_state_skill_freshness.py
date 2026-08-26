@@ -898,9 +898,12 @@ def _hanging_remote(tmp_path, name="hangs"):
     subprocess.run(["git", "init", "-q", str(repo)], check=True, env=_git_env(tmp_path))
     subprocess.run(["git", "init", "-q", "--bare", str(repo / "origin.git")],
                    check=True, env=_git_env(tmp_path))
+    # testlib.mockbin owns the shebang — the nix build sandbox that runs the
+    # authoritative gate has no /usr/bin/env, and patchShebangs cannot reach a
+    # file a test writes at runtime. test_runtime_shebangs.py enforces it, and
+    # caught the hand-written `#!/bin/sh` this fixture first carried.
     sleeper = repo / "sleep-upload-pack.sh"
-    sleeper.write_text("#!/bin/sh\nsleep 600\n")
-    sleeper.chmod(0o755)
+    write_exec(sleeper, "sleep 600\n")
     _git(repo, "remote", "add", "origin", str(repo / "origin.git"))
     _git(repo, "config", "remote.origin.uploadpack", str(sleeper))
     return repo
