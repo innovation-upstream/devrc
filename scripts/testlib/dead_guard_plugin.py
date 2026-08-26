@@ -97,16 +97,31 @@ def pytest_runtest_setup(item):
     _arm()
 
 
+def pytest_runtest_teardown(item):
+    """🔴 CHECK AFTER EACH TEST TOO, NOT AT INTERPRETER EXIT.
+
+    Detection at `pytest_runtest_setup` alone can never see a clobber in the
+    LAST test -- there is no next setup -- which is exactly the "it only
+    survived because that file sorted last" shape this detector exists for.
+
+    🔴 BUT THE CHECK MUST NOT LIVE IN `atexit`. `atexit` is LIFO, so any
+    cleanup the TARGET REPO registered after this module was imported runs
+    BEFORE the dump -- and an ordinary `atexit.register(lambda:
+    sys.settrace(None))` in a library then trips the detector on a run whose
+    trace was complete and correct. Measured: identical executed-line set to a
+    clean baseline, yet `clobbered=true`, so the scan returned UNDECIDABLE and
+    blamed "a test cleared sys.settrace" for something no test did. A
+    permanently-red gate with a false cause. Teardown fires inside the run,
+    before any of that.
+    """
+    if _TARGETS and _OUT and sys.gettrace() is not _tracer:
+        _state["clobbered"] = True
+
+
 @atexit.register
 def _dump():
     if not _OUT:
         return
-    # 🔴 CHECK ONE LAST TIME. Detection at `pytest_runtest_setup` alone can
-    # never see a clobber in the LAST test -- there is no next setup -- which is
-    # exactly the "it only survived because that file sorted last" shape this
-    # detector exists for.
-    if _TARGETS and sys.gettrace() is not _tracer:
-        _state["clobbered"] = True
     sys.settrace(None)
     threading.settrace(None)
     pathlib.Path(_OUT).write_text(

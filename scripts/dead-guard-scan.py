@@ -168,6 +168,15 @@ def unregistered_test_dirs(repo, rows, slug):
             # `scripts/collector/tests` would silently accept a later
             # `scripts/collector/`, which is a different directory needing its
             # own decision.
+            # 🔴 ...AND ONLY FOR `instrument` ROWS. The out-of-instrument
+            # column is PROSE, and prose is full of dotted words: the bash row
+            # naming `scripts/drift-check.sh` registered the bare directory
+            # `scripts` in three repos, so a future `scripts/test_x.py` would
+            # have been silently accepted -- the exact "everything is
+            # registered" this function exists to prevent, re-admitted through
+            # the sentence rather than the path.
+            if r["status"] != "instrument":
+                continue
             last = tok.rsplit("/", 1)[-1]
             if "/" in tok and ("." in last or "*" in last or "?" in last):
                 named.add(tok.rsplit("/", 1)[0])
@@ -339,6 +348,7 @@ def scan(repo, census_path=None, verbose=True, python=None, registry=None):
               f"That is UNDECIDABLE, not clean.\n{tail}", file=sys.stderr)
         return EXIT_UNDECIDABLE
     executed = trace.get("executed", {})
+    no_tests = not [t for t in targets if t.name.startswith("test_")]
 
     # 🔴 A DISARMED TRACER MUST NOT PUBLISH. If any test cleared or replaced
     # `sys.settrace`, every target executed afterwards went unrecorded, so the
@@ -398,9 +408,15 @@ def scan(repo, census_path=None, verbose=True, python=None, registry=None):
         # library modules. A test file whose subject runs only in a subprocess
         # still under-reports, and nothing here detects that.
         if not executed.get(str(t)):
+            # Say WHICH zero this is. "driven through a subprocess" is a guess
+            # when no test file was registered at all -- the code knows that
+            # case and used to report the wrong cause anyway, under a comment
+            # 40 lines above saying "attribute the cause you actually know".
+            why = ("no registered test file drives it -- the registry lists "
+                   "library modules only" if no_tests else
+                   "it is driven through a subprocess, or was never imported")
             undecidable.append(
-                f"{rel}: NO line of this file was traced. It is driven through "
-                f"a subprocess, or was never imported -- not dead.")
+                f"{rel}: NO line of this file was traced; {why} -- not dead.")
             continue
         try:
             flags = dg.evaluate(rel, src, set(executed.get(str(t), [])))
@@ -493,14 +509,20 @@ def write_census(path, slug, flags, oo, undecidable, interp="?", rc=(0, 0)):
                 continue
             if line in _CENSUS_HEADER or line.startswith("repo_slug\t"):
                 continue                       # header is re-emitted below
-            if line.startswith(f"# {slug} measured under"):
-                continue                       # this repo's old note: replaced
-            if line.startswith(f"{slug}\t"):
-                continue                       # this repo's old rows: replaced
+            # NOTE: this repo's own old lines are NOT skipped here. They are
+            # grouped like everyone else's and then REPLACED wholesale by
+            # `blocks[slug] = mine` below. Two `continue`s used to do it here
+            # as well; the battery showed them to be dead (mutating them away
+            # changed nothing), so they are gone rather than kept as
+            # reassuring width.
             kept.append(line)
 
     out = list(_CENSUS_HEADER)
-    out.extend(kept)
+    blocks = {}
+    for line in kept:
+        key = line.split("\t", 1)[0] if not line.startswith("#") else \
+            line.split(" ", 2)[1] if line.startswith("# ") else ""
+        blocks.setdefault(key, []).append(line)
     # The interpreter VERSION is part of the measurement (a different one takes
     # different branches). The PATH is not written -- see `interpreter_id`.
     note = f"# {slug} measured under {interp}"
@@ -517,7 +539,18 @@ def write_census(path, slug, flags, oo, undecidable, interp="?", rc=(0, 0)):
                    f"{_tsv(r['selector'])}\tunmeasured\t-")
     for u in undecidable:
         out.append(f"{slug}\tundecidable\t{_tsv(u)}\t-\t-\t-\t-")
-    p.write_text("\n".join(out) + "\n", encoding="utf-8")
+    # 🔴 ORDER-STABLE, SORTED BY SLUG. Appending this repo's block after the
+    # kept lines moved the scanned repo to EOF, so re-deriving ONE repo
+    # produced a whole-file reordering diff -- a reviewer re-running the
+    # command printed in the census's own header could not tell "nothing
+    # changed" from "everything moved". Idempotent per repo is not enough; the
+    # artifact has to be byte-stable under any scan order.
+    mine = out[len(_CENSUS_HEADER):]
+    blocks[slug] = mine
+    body = []
+    for key in sorted(blocks):
+        body.extend(blocks[key])
+    p.write_text("\n".join(list(_CENSUS_HEADER) + body) + "\n", encoding="utf-8")
 
 
 # --------------------------------------------------------------------------

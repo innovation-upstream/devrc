@@ -168,7 +168,7 @@ run 'except-handlers-dropped' "$LIB" \
 printf '\n== the justification hatch (must be KILLED) ==\n'
 run 'bare-marker-now-resolves' "$LIB" \
   test_a_justification_needs_a_reason \
-  's|^        flags.append(Flag(path, b, reason or None))|        flags.append(Flag(path, b, "x" if reason is not None else None))|'
+  's|^    return \[f for f in flags if not f.justified_reason\]|    return [f for f in flags if f.justified_reason is None]|'
 run 'reason-no-longer-required' "$LIB" \
   test_a_justification_needs_a_reason \
   's|^    return \[f for f in flags if not f.justified_reason\]|    return []|'
@@ -177,7 +177,7 @@ run 'hatch-read-by-regex-not-tokenize' "$LIB" \
   's|^        if tok.type != tokenize.COMMENT:|        if tok.type == tokenize.COMMENT and False:|'
 run 'body-line-placement-ignored' "$LIB" \
   test_justification_is_read_from_the_condition_line_or_the_body_line \
-  's|^            for ln in b.lines():|            for ln in []:|'
+  's|^            reason = just.get(b.first_line)|            reason = None|'
 
 printf '\n== the zeros that must be UNDECIDABLE, not clean (must be KILLED) ==\n'
 run 'missing-trace-scored-clean' "$CLI" \
@@ -232,7 +232,7 @@ run 'census-drops-the-out-of-instrument-rows' "$CLI" \
   's|^    for r in oo:|    for r in []:|'
 run 'census-goes-back-to-append-only' "$CLI" \
   test_the_census_is_IDEMPOTENT \
-  's|^            if line.startswith(f"{slug}\\t"):|            if False:|'
+  's|^    blocks\[slug\] = mine|    blocks.setdefault(slug, []).extend(mine)|'
 run 'census-writes-the-absolute-interpreter-path' "$CLI" \
   test_the_census_never_carries_an_absolute_path \
   's|^                     interpreter_id(python, redact=True), rc)|                     interpreter_id(python, redact=False), rc)|'
@@ -271,10 +271,22 @@ run 'span-truncated-to-first-line' "$LIB" \
 
 run 'census-drops-other-repos-provenance' "$CLI" \
   test_scanning_one_repo_KEEPS_another_repos_provenance_line \
-  's|^            if line.startswith(f"# {slug} measured under"):|            if line.startswith("#"):|'
+  's|^            if line in _CENSUS_HEADER or line.startswith("repo_slug\\t"):|            if line.startswith("#") or line.startswith("repo_slug\\t"):|'
 run 'pragma-on-if-also-silences-the-else' "$LIB" \
   test_one_pragma_on_an_IF_line_does_not_silence_its_ELSE_too \
-  's|^        if b.kind == "if-body":|        if True:|'
+  's|^        reason = just.get(b.cond_line) if b.kind != "else-body" else None|        reason = just.get(b.cond_line)|'
+run 'except-header-pragma-stops-resolving' "$LIB" \
+  test_a_pragma_on_an_EXCEPT_line_resolves_that_handler \
+  's|^        reason = just.get(b.cond_line) if b.kind != "else-body" else None|        reason = just.get(b.cond_line) if b.kind == "if-body" else None|'
+run 'body-read-widened-to-the-whole-span' "$LIB" \
+  test_a_NESTED_branchs_pragma_does_not_resolve_its_PARENT \
+  's|^            reason = just.get(b.first_line)|            reason = next((just[l] for l in b.lines() if just.get(l)), None)|'
+run 'prose-rows-register-their-parent-dir' "$CLI" \
+  test_ledger_membership_is_path_segments_not_substrings \
+  's|^            if r\["status"\] != "instrument":|            if False:|'
+run 'census-blocks-no-longer-sorted' "$CLI" \
+  test_the_census_is_ORDER_STABLE_across_repos \
+  's|^    for key in sorted(blocks):|    for key in blocks:|'
 run 'ledger-membership-back-to-substring' "$CLI" \
   test_ledger_membership_is_path_segments_not_substrings \
   's|^    return \[d for d in test_dirs(repo) if d not in named\]|    return [d for d in test_dirs(repo) if d not in " ".join(named)]|'

@@ -189,29 +189,47 @@ def evaluate(path, src, executed):
     recorded the mutant as an expected survivor. That claim was wrong, and a
     `global` declaration is the counterexample; it is now a fixture.)
 
-    🔴 WHERE A JUSTIFICATION MAY SIT, and why it is not "anywhere near":
-    an `if` and its `else` share a condition line, so reading the hatch from
-    `cond_line` for BOTH meant one comment written about one branch silenced
-    two -- a silent false negative with no workaround. The condition line is
-    now consulted only for the branch it actually introduces (`if-body`);
-    every other kind reads the hatch from its own body span. An `else:`,
-    `case X:` or loop-`else:` LINE ITSELF still resolves nothing: put the
-    comment on the first line of the body instead.
+    🔴 WHERE A JUSTIFICATION MAY SIT. Exactly two places: the branch's own
+    HEADER line, and the FIRST line of its body. Both narrower rules that were
+    tried are wrong in a way that costs a reader something:
+
+      * reading `cond_line` for EVERY kind silenced an `else` with a comment
+        written about its `if` -- they share a condition line, so one comment
+        resolved two branches. A silent false negative with no workaround.
+      * restricting `cond_line` to `if-body` over-corrected and broke
+        `except <E>:  # pragma: no cover - reason`, the idiomatic and
+        coverage.py-compatible placement. It silently invalidated four
+        justifications that already existed in the scanned repos' source and
+        flipped them to unresolved flags in the committed census.
+      * reading ANY line of the body span let a NESTED branch's comment resolve
+        its PARENT: when a parent is dead its children are too, so there was no
+        placement that justified the inner without silencing the outer --
+        strictly worse than the defect being fixed.
+
+    So: `cond_line` is read for every kind EXCEPT `else-body`, because
+    `else-body` is the only kind whose header line introduces a SIBLING branch
+    as well as its own. `except <E>:`, `case X:` and a loop's `else:` each
+    introduce exactly one branch and cannot silence anything else. The body is
+    read at its FIRST line only, which is owned by this branch and by no nested
+    one. An `else:` line itself still resolves nothing -- put the comment on the
+    first line of its body.
     """
     just = justifications(src)
     flags = []
     for b in branch_bodies(src, path):
         if any(ln in executed for ln in b.lines()):
             continue
-        reason = None
-        if b.kind == "if-body":
-            reason = just.get(b.cond_line)
-        if not reason:
-            for ln in b.lines():
-                if just.get(ln):
-                    reason = just[ln]
-                    break
-        flags.append(Flag(path, b, reason or None))
+        # 🔴 CARRY THE REASON FAITHFULLY, INCLUDING AN EMPTY ONE. Whether a
+        # bare marker counts is decided in ONE place -- `unresolved` -- and
+        # nowhere else. Three coercions used to enforce it independently
+        # (`if not reason`, `reason or None`, and `unresolved`), so no single
+        # mutation could flip the rule and the battery could not test it: the
+        # duplicated-predicate shape this repo's rules call out, in the guard
+        # written to find duplicated predicates.
+        reason = just.get(b.cond_line) if b.kind != "else-body" else None
+        if reason is None:
+            reason = just.get(b.first_line)
+        flags.append(Flag(path, b, reason))
     return flags
 
 

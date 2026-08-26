@@ -216,6 +216,50 @@ def test_one_pragma_on_an_IF_line_does_not_silence_its_ELSE_too():
         "the else was silenced by a comment written about the if"
 
 
+def test_a_pragma_on_an_EXCEPT_line_resolves_that_handler():
+    """🔴 THE REGRESSION THE if-ONLY RESTRICTION CAUSED.
+
+    `except <E>:  # pragma: no cover - reason` is the idiomatic, coverage.py-
+    compatible placement, and an `except` header introduces exactly ONE branch
+    so it cannot silence a sibling. Restricting the condition-line read to
+    `if-body` silently invalidated four justifications that already existed in
+    the scanned repos' source — they flipped to unresolved flags in the
+    committed census, inflating the very artifact a human is asked to
+    adjudicate.
+    """
+    src = ('def f(p):\n'
+           '    try:\n'
+           '        return open(p).read()\n'
+           '    except OSError:  # pragma: no cover - unreadable file\n'
+           '        return None\n')
+    flags = dg.evaluate("<t>", src, {2, 3})      # try ran, handler did not
+    assert len(flags) == 1 and flags[0].branch.kind == "except", flags
+    assert flags[0].justified_reason == "unreadable file"
+    assert dg.unresolved(flags) == []
+
+
+def test_a_NESTED_branchs_pragma_does_not_resolve_its_PARENT():
+    """🔴 THE OVER-RESOLUTION THE any-line-in-the-span READ CAUSED.
+
+    When a parent branch is dead its children necessarily are too, so if the
+    parent's span swallowed a nested comment there was NO placement that
+    justified the inner without silencing the outer — strictly worse than the
+    if/else collision it was meant to fix. The body is read at its FIRST line
+    only, which no nested branch owns.
+    """
+    src = ('def f(a, b):\n'
+           '    if a:\n'
+           '        if b:\n'
+           '            x = 1  # pragma: no cover - the INNER branch only\n'
+           '    return 0\n')
+    flags = dg.evaluate("<t>", src, {5})          # neither branch ran
+    by_line = {f.branch.first_line: f.justified_reason for f in flags}
+    assert by_line.get(3) is None, \
+        f"the OUTER branch was silenced by a comment written about the inner: {by_line}"
+    assert by_line.get(4) == "the INNER branch only", by_line
+    assert len(dg.unresolved(flags)) == 1
+
+
 def test_a_pragma_on_the_body_line_resolves_an_else_or_case():
     """The documented placement for the kinds whose own header line resolves
     nothing: put it on the first line of the body."""
@@ -485,8 +529,15 @@ def test_a_body_whose_FIRST_STATEMENT_EMITS_NO_BYTECODE_is_still_TAKEN():
 
 
 def test_the_body_span_reaches_its_LAST_line_not_just_its_first():
-    """Kills `last = max(...)` -> `last = first`. Only the last line of the
-    body runs, so a span truncated to the first line reports it dead."""
+    """⚠️ THIS DOES **NOT** KILL `last = max(...)` -> `last = first`, and an
+    earlier docstring here claimed it did. Measured: this test PASSES under
+    that mutant, because its fixture's first body line is the nested `if`,
+    which executes. Believing this claim is why round 1 concluded the mutant
+    was equivalent and recorded it as an expected survivor. The fixture that
+    actually kills it is
+    `test_a_body_whose_FIRST_STATEMENT_EMITS_NO_BYTECODE_is_still_TAKEN`.
+    What this case does pin is that the span reaches past the first line at
+    all."""
     src = ('def scan(ls):\n'
            '    for l in ls:\n'
            '        if "A" in l:\n'
@@ -711,6 +762,43 @@ def test_scanning_one_repo_KEEPS_another_repos_provenance_line(tmp_path):
         assert len(rows) == len(set(rows)) == 2, (s, rows)
 
 
+def test_the_census_is_ORDER_STABLE_across_repos(tmp_path):
+    """🔴 Re-deriving ONE repo used to move its whole block to EOF, so a
+    reviewer running the command printed in the census's own header got a
+    pure-reordering diff and could not tell "nothing changed" from "everything
+    moved". Idempotent per repo is not enough — the artifact must be byte-
+    stable under any scan order."""
+    a = tmp_path / "a"
+    a.mkdir()
+    reg = _synthetic_repo(a, _E2E_GUARD)
+    b = tmp_path / "b"
+    (b / "scripts" / "tests").mkdir(parents=True)
+    (b / "scripts" / "tests" / "test_guard.py").write_text(_E2E_GUARD, encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(b)], check=True, timeout=60)
+    subprocess.run(["git", "-C", str(b), "remote", "add", "origin",
+                    "git@github.com:test/second.git"], check=True, timeout=60)
+    reg.write_text(reg.read_text(encoding="utf-8") +
+                   "test/second\tpython\tinstrument\tscripts/tests/test_guard.py\n"
+                   "test/second\tbash\tout-of-instrument\t"
+                   "a reason long enough to satisfy the registry's own contract "
+                   "that a row must say why it is not measured\n",
+                   encoding="utf-8")
+
+    def build(order, path):
+        for repo in order:
+            subprocess.run([sys.executable, str(SCAN), "--repo", str(repo),
+                            "--registry", str(reg), "--census", str(path)],
+                           capture_output=True, text=True, timeout=900)
+        return path.read_text(encoding="utf-8")
+
+    first = build([a, b], tmp_path / "c1.tsv")
+    second = build([b, a], tmp_path / "c2.tsv")
+    assert first == second, "scan order changed the census bytes"
+    # ...and re-deriving just one repo must not move anything either.
+    third = build([a], tmp_path / "c1.tsv")
+    assert third == first, "re-deriving one repo reordered the file"
+
+
 def test_the_census_never_carries_an_absolute_path(tmp_path):
     """🔴 The committed census recorded
     `/home/<user>/workspace/.../.venv/bin/python3` — the operator's home dir
@@ -837,6 +925,26 @@ def test_ledger_membership_is_path_segments_not_substrings(tmp_path):
     assert missing == ["scripts/collector"], (
         "`scripts/collector` is a DIFFERENT directory from "
         "`scripts/collector/tests` and needs its own decision; got " + repr(missing))
+
+    # 🔴 A PROSE ROW MUST NOT REGISTER A DIRECTORY VIA A DOTTED WORD. The
+    # file-registers-its-parent rule is right for an `instrument` selector
+    # (a real path), and wrong for the out-of-instrument column, which is
+    # English. Measured on the committed registry, `scripts/drift-check.sh` in
+    # a prose row registered the bare directory `scripts` in THREE repos — so a
+    # future `scripts/test_x.py` would have been silently accepted.
+    (tmp_path / "scripts").mkdir(exist_ok=True)
+    (tmp_path / "scripts" / "test_top.py").write_text("def test_t():\n    pass\n",
+                                                      encoding="utf-8")
+    prose = [{"slug": "probe/p", "lang": "bash", "status": "out-of-instrument",
+              "selector": "scripts/drift-check.sh, run-tests.sh -- bash guards, "
+                          "no coverage backend exists for them in this tool"},
+             {"slug": "probe/p", "lang": "python", "status": "out-of-instrument",
+              "selector": "scripts/collector/tests, scripts/collector, "
+                          "scripts/mailer -- registered"}]
+    missing = dgs.unregistered_test_dirs(tmp_path, prose, "probe/p")
+    assert "scripts" in missing, (
+        "a dotted word inside a PROSE row registered the bare `scripts` "
+        f"directory; got {missing}")
 
 
 def test_registry_is_keyed_on_the_remote_slug_not_the_clone_directory():
