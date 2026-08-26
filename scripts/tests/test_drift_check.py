@@ -55,6 +55,11 @@ from testlib.mockbin import write_exec  # noqa: E402
 DRIFT = REPO_ROOT / "scripts" / "drift-check.sh"
 SHIP = REPO_ROOT / "scripts" / "ship.sh"
 HOST_ROLE_LIB = REPO_ROOT / "scripts" / "lib" / "host-role.sh"
+# The SECOND lib the checker sources — the derived nix-read predicate behind
+# rc 23. Its functions run inside the CHECK payload, so the reverse-PATH
+# tokenizer sees their names in command position exactly as it sees
+# host-role.sh's, and they are accounted for the same way.
+NIXREAD_LIB = REPO_ROOT / "scripts" / "lib" / "nix_read_paths.sh"
 
 pytestmark = pytest.mark.skipif(
     shutil.which("git") is None or shutil.which("bash") is None,
@@ -140,6 +145,7 @@ class Fleet:
         self.git(builder, "commit", "-q", "-am", "ahead")
         self.git(builder, "push", "-q", "origin", "main")
         self.builder = builder
+        self.state.mkdir(exist_ok=True)
 
     # -- plumbing ----------------------------------------------------------- #
     def env(self, **extra):
@@ -184,6 +190,63 @@ class Fleet:
         """Make `work`'s main equal origin/main (the clean state)."""
         self.git(self.work, "fetch", "origin", "-q")
         self.git(self.work, "merge", "--ff-only", "-q", "origin/main")
+
+    # -- the nix-read fixture tree (rc 23) ---------------------------------- #
+    #
+    # Committed through the BUILDER and then fast-forwarded in, never written
+    # straight into `work`: a file written into the checkout would itself be
+    # untracked, and a fixture that is part of the population under measurement
+    # cannot be trusted to isolate anything.
+    #
+    # 🔴 Names pairwise distinct, and distinct from every constant the assertions
+    # name (LIVE, STORE, nix-read, rc23). `kilo-live.txt` is deliberately NOT
+    # committed — it is a mkOutOfStoreSymlink target that only ever exists as an
+    # untracked file, which is exactly the shape the ladder is about.
+    NIXREAD_FLAKE = (
+        "{\n"
+        "  outputs = { self, ... }: {\n"
+        "    homeConfigurations.someone.modules = [ ./nix/home.nix ];\n"
+        "  };\n"
+        "}\n"
+    )
+    NIXREAD_HOME_NIX = (
+        "{ config, ... }:\n"
+        'let workspace = "${config.home.homeDirectory}/workspace";\n'
+        "in {\n"
+        '  home.file.".alpha".source = ../copied-alpha.txt;\n'
+        '  home.file.".bravo".source = ../charlie-dir;\n'
+        # A repo-ROOT file whose NAME collides with a header field of the FACT
+        # line the payload emits. Deliberately named `reason`: it is the one
+        # spelling that can be mistaken for `reason=<TOKEN>`, and the parser
+        # matched it as one until the arm order was fixed.
+        '  home.file.".papa".source = ../reason;\n'
+        '  home.file.".delta".source =\n'
+        '    config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/kilo-live.txt";\n'
+        "}\n"
+    )
+
+    def seed_nix_read(self, *, with_lib=True, with_flake=True):
+        """Land a real flake shape + the predicate lib on origin/main and here."""
+        b = self.builder
+        (b / "nix").mkdir(parents=True, exist_ok=True)
+        added = []
+        if with_flake:
+            (b / "flake.nix").write_text(self.NIXREAD_FLAKE)
+            (b / "nix" / "home.nix").write_text(self.NIXREAD_HOME_NIX)
+            added += ["flake.nix", "nix/home.nix"]
+        (b / "copied-alpha.txt").write_text("alpha\n")
+        (b / "charlie-dir" / "nested").mkdir(parents=True, exist_ok=True)
+        (b / "charlie-dir" / "nested" / "foxtrot.txt").write_text("foxtrot\n")
+        added += ["copied-alpha.txt", "charlie-dir/nested/foxtrot.txt"]
+        if with_lib:
+            lib = b / "scripts" / "lib" / "nix_read_paths.sh"
+            lib.parent.mkdir(parents=True, exist_ok=True)
+            lib.write_text(NIXREAD_LIB.read_text())
+            added.append("scripts/lib/nix_read_paths.sh")
+        self.git(b, "add", *added)
+        self.git(b, "commit", "-q", "-m", "seed the nix-read fixture")
+        self.git(b, "push", "-q", "origin", "main")
+        self.catch_up()
 
     def add_local_commit(self, msg="un-pushed local work"):
         p = self.work / ("local-%d.txt" % len(list(self.work.glob("local-*.txt"))))
@@ -1613,6 +1676,7 @@ def test_the_unit_path_table_accounts_for_every_command_the_scripts_run():
         | _PROSE_NOT_COMMANDS
         | _defined_functions(DRIFT.read_text())
         | _defined_functions(HOST_ROLE_LIB.read_text())
+        | _defined_functions(NIXREAD_LIB.read_text())
     )
     unaccounted = sorted(_candidate_command_words() - known)
     assert unaccounted == [], (
@@ -1654,6 +1718,7 @@ def test_the_reverse_path_guard_can_actually_see_a_new_command(tmp_path):
         set(UNIT_PATH_REQUIREMENTS) | _SHELL_BUILTINS | _PROSE_NOT_COMMANDS
         | _defined_functions(DRIFT.read_text())
         | _defined_functions(HOST_ROLE_LIB.read_text())
+        | _defined_functions(NIXREAD_LIB.read_text())
     )
     assert sorted(words - known) == ["jq"], (
         "an added command was NOT reported as unaccounted: %r" % sorted(words - known)
@@ -5034,3 +5099,338 @@ def test_the_extractor_reports_only_the_enum_values_it_finds(tmp_path):
     fact = _parity_fact(home)
     assert fact == "alpha=name-only"
     assert "SECRET" not in fact
+
+
+# --------------------------------------------------------------------------- #
+# UNTRACKED FILES IN NIX-READ PATHS (rc 23)
+#
+# 🔴 THE GAP THE UNTRACKED BLOCK LEFT. Untracked files have been counted and
+# listed here from the start and have never escalated — right for most of them,
+# and wrong for the subset that is DEPLOYED CODE with no commit and no backup.
+# Measured 2026-08-25: one untracked file had sat on the workbench for ~3 weeks
+# with every check green, and the same run listed a second one that IS nix-read
+# (nix/home.nix copies scripts/dl-router into the store whole). Nothing in the
+# output distinguished them.
+#
+# The design decisions these tests pin, each of which could have gone the other
+# way and been silently worse:
+#   * a host whose derived nix-read set is EMPTY is COULD NOT MEASURE and sets NO
+#     rc, and bumps and resets NOTHING. An empty set classifies every untracked
+#     file on every host as clean, which is the reassuring-zero failure this
+#     whole subsystem exists to refuse.
+#   * the ladder is per (HOST, PATH) and RESETS the moment a path stops being
+#     reported — a ladder that only ever increments is the rc 18 bug this repo
+#     already paid for.
+#   * the threshold is LONGER than rc 18's, because writing a file and
+#     committing it an hour later is the normal working shape here.
+# --------------------------------------------------------------------------- #
+def _nixdirt(out):
+    """(hosts-reporting, untracked, nix-read-paths, hits, escalated, blind) off
+    the summary line, or None when the block withheld it."""
+    m = re.search(
+        r"\[nixdirt\] hosts-reporting=(\d+) untracked=(\d+) nix-read-paths=(\d+) "
+        r"hits=(\d+) escalated=(\d+) blind=(\d+)", out)
+    return tuple(int(g) for g in m.groups()) if m else None
+
+
+def test_an_untracked_nix_read_file_is_reported_but_does_not_fail_the_unit(fleet):
+    """Below the threshold this must stay quiet to systemd. A file created ten
+    minutes ago and not yet committed is the normal working shape, and a deadman
+    that alerts on it trains everyone to click through.
+
+    RED AT origin/main (200e6383): no [nixdirt] block exists there at all, so the
+    assertion on its summary line cannot match.
+    """
+    fleet.seed_nix_read()
+    (fleet.work / "charlie-dir" / "nested" / "november.txt").write_text("nov\n")
+
+    rc, out = fleet.check("--no-remote", DRIFT_NIXDIRT_ESCALATE="3")
+    assert rc == 0, out
+    assert "charlie-dir/nested/november.txt: UNTRACKED in a NIX-READ path (STORE)" in out, out
+    assert "1/3 consecutive; NOT escalated" in out, out
+    assert _nixdirt(out)[:1] == (1,), out
+    assert _nixdirt(out)[3:] == (1, 0, 0), out
+
+
+def test_an_untracked_nix_read_file_escalates_after_n_consecutive_runs(fleet):
+    """🔴 THE OTHER DIRECTION. A file that has been sitting in a nix-read path
+    for the whole window is not "mid-edit" — it is content on exactly one machine
+    that the machine is also running.
+
+    RED AT origin/main (200e6383): the ladder there is [0, 0, 0, 0] for every
+    untracked file, nix-read or not — that is the defect.
+    """
+    fleet.seed_nix_read()
+    (fleet.work / "charlie-dir" / "nested" / "november.txt").write_text("nov\n")
+
+    codes = []
+    for _ in range(4):
+        rc, out = fleet.check("--no-remote", DRIFT_NIXDIRT_ESCALATE="3")
+        codes.append(rc)
+    assert codes == [0, 0, 23, 23], f"escalation ladder wrong: {codes}\n{out}"
+    # The whole claim on ONE normalised line — host, path, class, streak,
+    # threshold. Split across two it is walkable by rewording the other half.
+    assert ("DRIFT — workbench charlie-dir/nested/november.txt: UNTRACKED in a "
+            "NIX-READ path (STORE) for 4 CONSECUTIVE runs (threshold 3)." in out), out
+    assert _nixdirt(out)[4] == 1, out
+
+
+def test_an_untracked_mkOutOfStoreSymlink_target_escalates_as_LIVE(fleet):
+    """The LIVE class names a different consequence and must say so: the deployed
+    path is a link back into the working tree, so this file is being SERVED right
+    now — no switch, no generation boundary, no other copy anywhere."""
+    fleet.seed_nix_read()
+    (fleet.work / "kilo-live.txt").write_text("kilo\n")
+
+    for _ in range(3):
+        rc, out = fleet.check("--no-remote", DRIFT_NIXDIRT_ESCALATE="3")
+    assert rc == 23, out
+    assert ("DRIFT — workbench kilo-live.txt: UNTRACKED in a NIX-READ path "
+            "(LIVE) for 3 CONSECUTIVE runs (threshold 3)." in out), out
+    assert "SERVED on that host right now" in out, out
+
+
+def test_the_nixdirt_streak_resets_when_the_file_is_committed(fleet):
+    """🔴 THE LADDER MUST COME DOWN. A ladder that only ever increments escalates
+    on evidence from a state that has since been fixed — the rc 18 bug this repo
+    already paid for once."""
+    fleet.seed_nix_read()
+    p = fleet.work / "charlie-dir" / "nested" / "november.txt"
+    p.write_text("nov\n")
+    for _ in range(2):
+        rc, out = fleet.check("--no-remote", DRIFT_NIXDIRT_ESCALATE="3")
+        assert rc == 0, out
+    assert "2/3 consecutive" in out, out
+
+    # It stops being UNTRACKED — the fix an operator would actually make.
+    fleet.git(fleet.work, "add", "charlie-dir/nested/november.txt")
+    rc, out = fleet.check("--no-remote", DRIFT_NIXDIRT_ESCALATE="3")
+    assert rc == 0, out
+    assert _nixdirt(out)[3] == 0, out          # hits back to zero
+
+    # ...and if it returns, the count starts from ONE, not from three.
+    fleet.git(fleet.work, "rm", "-q", "--cached", "charlie-dir/nested/november.txt")
+    rc, out = fleet.check("--no-remote", DRIFT_NIXDIRT_ESCALATE="3")
+    assert rc == 0, f"the streak did not reset when the file was tracked\n{out}"
+    assert "1/3 consecutive" in out, out
+
+
+def test_an_untracked_file_outside_every_nix_read_path_never_escalates(fleet):
+    """The complement, and the reason this is not just "escalate on untracked".
+    A scratch file that nix never opens is reported as information and stays
+    information however long it sits there."""
+    fleet.seed_nix_read()
+    (fleet.work / "outside-mike.txt").write_text("mike\n")
+
+    codes = []
+    for _ in range(4):
+        rc, out = fleet.check("--no-remote", DRIFT_NIXDIRT_ESCALATE="3")
+        codes.append(rc)
+    assert codes == [0, 0, 0, 0], f"a non-nix-read file escalated: {codes}\n{out}"
+    assert "untracked: 1 file(s)" in out, out          # still REPORTED
+    assert _nixdirt(out)[3] == 0, out                  # ...and not a hit
+
+
+def test_a_measured_fleet_reports_a_zero_over_a_REAL_nixread_denominator(fleet):
+    """🔴 POSITIVE CONTROL for the whole block, and the partner of every red
+    above. `hits=0` is exactly what a classifier wired to nothing prints. It is
+    only evidence beside a NON-ZERO nix-read-paths count: a set was derived, the
+    untracked files were walked against it, and none matched."""
+    fleet.seed_nix_read()
+    (fleet.work / "outside-mike.txt").write_text("mike\n")
+
+    rc, out = fleet.check("--no-remote")
+    assert rc == 0, out
+    hosts, untracked, nixread, hits, escalated, blind = _nixdirt(out)
+    assert (hosts, untracked, hits, escalated, blind) == (1, 1, 0, 0, 0), out
+    assert nixread >= 4, f"the denominator is {nixread}; a zero there is no scan\n{out}"
+
+
+def test_a_host_with_no_derivable_nix_read_set_is_COULD_NOT_MEASURE(fleet):
+    """🔴 THE REFUSAL. Without a derived set every untracked file classifies
+    clean — so the run says it could not look, sets NO code, and the summary is
+    withheld rather than printed as a clean-looking line over an empty set."""
+    fleet.seed_nix_read(with_flake=False)     # lib present, nothing to derive from
+    (fleet.work / "charlie-dir" / "nested" / "november.txt").write_text("nov\n")
+
+    for _ in range(4):
+        rc, out = fleet.check("--no-remote", DRIFT_NIXDIRT_ESCALATE="1")
+        assert rc == 0, out
+    assert "[nixdirt] workbench: COULD NOT MEASURE" in out, out
+    assert "nix-read-paths=0" in out, out
+    assert _nixdirt(out) is None, f"a summary was printed over an empty set\n{out}"
+    assert "NOT EVALUATED" in out, out
+
+
+def test_a_host_without_the_predicate_lib_is_COULD_NOT_MEASURE(fleet):
+    """The pre-deploy state: a host still on a commit that predates the lib. It
+    must read as "we could not look", never as "nothing is exposed"."""
+    fleet.seed_nix_read(with_lib=False)
+    (fleet.work / "charlie-dir" / "nested" / "november.txt").write_text("nov\n")
+
+    rc, out = fleet.check("--no-remote", DRIFT_NIXDIRT_ESCALATE="1")
+    assert rc == 0, out
+    assert "COULD NOT MEASURE — reason=NOLIB" in out, out
+    assert "untracked-in-nix-read-paths: COULD NOT MEASURE (NOLIB)" in out, out
+
+
+def test_a_blind_host_does_not_clear_a_ladder_it_could_not_measure(fleet):
+    """🔴 A ladder cleared by a scan that walked nothing is worse than no ladder:
+    the counter resets every run and the escalation can never arrive."""
+    fleet.seed_nix_read()
+    p = fleet.work / "charlie-dir" / "nested" / "november.txt"
+    p.write_text("nov\n")
+    for _ in range(2):
+        rc, out = fleet.check("--no-remote", DRIFT_NIXDIRT_ESCALATE="3")
+    assert "2/3 consecutive" in out, out
+
+    # The lib disappears — the host goes blind for one run.
+    lib = fleet.work / "scripts" / "lib" / "nix_read_paths.sh"
+    saved = lib.read_text()
+    lib.unlink()
+    rc, out = fleet.check("--no-remote", DRIFT_NIXDIRT_ESCALATE="3")
+    assert rc == 0, out
+    assert "COULD NOT MEASURE" in out, out
+
+    lib.write_text(saved)
+    rc, out = fleet.check("--no-remote", DRIFT_NIXDIRT_ESCALATE="3")
+    assert rc == 23, (
+        "the blind run reset a ladder it could not measure\n%s" % out)
+
+
+def test_the_nixdirt_ladder_is_kept_PER_PATH(fleet):
+    """One path clearing must not clear another. They are separate exposures and
+    a shared counter is a ladder that resets itself for reasons nobody sees."""
+    fleet.seed_nix_read()
+    a = fleet.work / "charlie-dir" / "nested" / "november.txt"
+    b = fleet.work / "charlie-dir" / "nested" / "oscar.txt"
+    a.write_text("nov\n")
+    b.write_text("osc\n")
+    for _ in range(2):
+        rc, out = fleet.check("--no-remote", DRIFT_NIXDIRT_ESCALATE="3")
+    assert out.count("2/3 consecutive") == 2, out
+
+    a.unlink()
+    rc, out = fleet.check("--no-remote", DRIFT_NIXDIRT_ESCALATE="3")
+    assert rc == 23, f"oscar's own ladder was cleared by november going away\n{out}"
+    assert "oscar.txt" in out and "november.txt" not in out, out
+
+
+def test_the_nixdirt_counter_filename_is_INJECTIVE(fleet):
+    """`a/b` and `a_b` must not land on one counter. The encoder doubles `_`
+    before mapping `/`, which is reversible over the whole path alphabet."""
+    fleet.seed_nix_read()
+    (fleet.work / "charlie-dir" / "nested" / "papa.txt").write_text("p\n")
+    (fleet.work / "charlie-dir" / "nested_papa.txt").write_text("q\n")
+    rc, out = fleet.check("--no-remote", DRIFT_NIXDIRT_ESCALATE="9")
+    assert rc == 0, out
+    files = sorted(p.name for p in fleet.state.glob("nixdirt-*"))
+    assert len(files) == 2, f"two paths collided onto {files}\n{out}"
+
+
+def test_rc23_ranks_between_rc15_and_rc12():
+    """The digit is not the severity. rc 12 (a checkout ship.sh will SKIP
+    forever) outranks it; rc 15 (a settings.json key set that differs, which
+    costs a capability and loses nothing) does not."""
+    body = DRIFT.read_text().split("severity() {", 1)[1].split("\n}", 1)[0]
+    ranks = {int(m): int(v) for m, v in
+             re.findall(r"^\s*(\d+)\)\s*echo (\d+)", body, re.M)}
+    assert ranks[12] > ranks[23] > ranks[15], ranks
+
+
+def test_the_rc23_legend_is_printed_with_the_verdict(fleet):
+    fleet.seed_nix_read()
+    (fleet.work / "kilo-live.txt").write_text("kilo\n")
+    rc, out = fleet.check("--no-remote", DRIFT_NIXDIRT_ESCALATE="1")
+    assert rc == 23, out
+    assert "rc23=" in out, f"the rc legend does not mention the code it returned\n{out}"
+    assert "DRIFT (rc=23)" in out, out
+
+
+def test_a_non_integer_nixdirt_threshold_is_rejected(fleet):
+    rc, out = fleet.check("--no-remote", DRIFT_NIXDIRT_ESCALATE="four")
+    assert rc == 2, out
+    assert "DRIFT_NIXDIRT_ESCALATE must be a non-negative integer" in out, out
+
+
+def test_unpushed_devrc_commits_still_outrank_an_escalated_rc23(fleet):
+    """A host holding un-pushed commits is the code the whole legend is read
+    against; an untracked passenger must never displace it.
+
+    INVARIANT GUARD, not regression coverage — GREEN at origin/main (200e6383),
+    where rc 23 did not exist and rc 8 won by default. Kept because the ranking
+    is the claim: severity() is a table, not the digits, and 23 > 8 numerically."""
+    fleet.seed_nix_read()
+    fleet.add_local_commit()
+    (fleet.work / "kilo-live.txt").write_text("kilo\n")
+    rc, out = fleet.check("--no-remote", DRIFT_NIXDIRT_ESCALATE="1")
+    assert rc == 8, out
+
+
+def test_the_nixdirt_summary_is_withheld_when_no_host_reported(fleet):
+    """A run that contacted nobody must not print a triple that reads clean."""
+    fleet.stub_ssh(255)
+    rc, out = fleet.check("--no-local")
+    assert _nixdirt(out) is None, out
+    assert "[nixdirt] NOT EVALUATED — no host returned a nix-untracked fact" in out, out
+
+
+def test_a_path_named_like_a_header_field_is_read_as_a_PATH(fleet):
+    """🔴 REACHABILITY, and a bug this actually found. The FACT line carries
+    `reason=<TOKEN>` header fields and `<path>=<CLASS>` pairs in one
+    whitespace-separated list. An untracked repo-root file named `reason` emits
+    the token `reason=STORE` — and with the header arms matched first, the driver
+    read it as the line's REASON, called the host COULD NOT MEASURE and dropped
+    the very file it was reporting. Silently, in the reassuring direction.
+
+    The fixture names `../reason` in home.nix so the path is genuinely nix-read;
+    a fixture where it classified NONE could not reach this at all.
+    """
+    fleet.seed_nix_read()
+    (fleet.work / "reason").write_text("collides with a header field\n")
+
+    rc, out = fleet.check("--no-remote", DRIFT_NIXDIRT_ESCALATE="1")
+    assert rc == 23, f"a path named like a header field was not classified\n{out}"
+    assert "[nixdirt] workbench: COULD NOT MEASURE" not in out, (
+        "a path token was read as the line's reason field\n%s" % out)
+    assert ("DRIFT — workbench reason: UNTRACKED in a NIX-READ path (STORE) for "
+            "1 CONSECUTIVE runs (threshold 1)." in out), out
+
+
+def test_a_fact_line_claiming_OK_over_a_ZERO_denominator_is_still_refused(fleet):
+    """🔴 REACHABILITY for the DENOMINATOR guard, which no real payload can
+    exercise: nix_read_scan cannot return OK with a zero count, so `[ $N_MM -le
+    0 ]` sits behind a check that always wins and a mutation of it survives a
+    fully green suite. What it defends against is a malformed or OLDER payload on
+    the far side of the ssh hop — which is what a stubbed remote is for.
+
+    Reported COULD NOT MEASURE and NOT escalated: with a zero denominator the
+    pair on that line is a classification nothing was measured against.
+    """
+    fleet.seed_nix_read()
+    fleet.stub_ssh(0, stdout=(
+        "[laptop] FACT nix-untracked untracked=1 nixread=0 reason=OK papa-x.txt=STORE"))
+    rc, out = fleet.check("--no-local", DRIFT_NIXDIRT_ESCALATE="1")
+    assert "[nixdirt] laptop: COULD NOT MEASURE — reason=OK untracked=1 nix-read-paths=0." in out, out
+    assert rc != 23, f"escalated off a zero denominator\n{out}"
+    assert "papa-x.txt" not in out.split("[nixdirt]", 1)[1].split("===", 1)[0], out
+
+
+def test_the_payload_classifies_by_CLASS_and_not_merely_by_being_untracked(fleet):
+    """🔴 ISOLATED REACHABILITY for the payload's class filter — the arm that
+    decides which untracked files reach the driver at all. The driver-side
+    `*=LIVE|*=STORE` filter cannot be reached by a NONE path, because the payload
+    never emits one; so this is where the distinction is actually made, and this
+    is the case that proves it is made on the CLASS.
+    """
+    fleet.seed_nix_read()
+    (fleet.work / "outside-mike.txt").write_text("mike\n")          # NONE
+    (fleet.work / "charlie-dir" / "nested" / "november.txt").write_text("nov\n")  # STORE
+
+    rc, out = fleet.check("--no-remote", DRIFT_NIXDIRT_ESCALATE="9")
+    assert rc == 0, out
+    assert "untracked: 2 file(s)" in out, out
+    assert "untracked-in-nix-read-paths: 1 of 2 untracked file(s)" in out, out
+    assert "november.txt" in out
+    hits = _nixdirt(out)[3]
+    assert hits == 1, f"the class filter counted {hits} of 2 untracked files\n{out}"

@@ -91,7 +91,8 @@
 # one. So:
 #   * 19, 20 and 21 are RESERVED to ship.sh here and must not be taken as DRIFT
 #     codes. 22 is now TAKEN by this script (skillOverrides disagree with the
-#     tier ledger), so the next free code for this script is 23.
+#     tier ledger) and 23 by the nix-read untracked ladder, so the next free
+#     code for this script is 24.
 #   * anything this script adds above 21 is reserved back the other way; ship.sh
 #     documents this in its own header for the same reason.
 #
@@ -153,6 +154,13 @@
 #       permanently red. rc 22 is adopted-then-drifted only. See "SKILL-LISTING
 #       TIERS" below. It ranks just under rc 10, because a BEHIND host carries a
 #       stale ledger and can produce this finding as a symptom.
+#   23  DRIFT — an UNTRACKED file in a path NIX READS has survived N CONSECUTIVE
+#       runs on that host. Untracked files have always been reported here as
+#       information; this is the subset where the file is not merely unbacked but
+#       DEPLOYED — either live through a mkOutOfStoreSymlink or copied into the
+#       artifact by the next switch. Measured 2026-08-25: one such file had sat
+#       on the workbench for ~3 weeks with every check green. See "UNTRACKED IN A
+#       NIX-READ PATH" below. It ranks between rc 15 and rc 12 — see severity().
 #   16  ACTIONABLE, not drift — the fuzzyclaw PHASE-2 GATE has OPENED: zero rows
 #       still take their `age_secs` from fuzzyclaw alone, so the readers can be
 #       removed. See "THE FUZZYCLAW PHASE-2 GATE" below. It is the LEAST severe
@@ -255,6 +263,45 @@
 #
 # READ-ONLY, like everything else in this file: `fetch`, `rev-parse`, `rev-list`,
 # `symbolic-ref`, `status`. It never pulls, never switches, never repairs.
+#
+# ── UNTRACKED IN A NIX-READ PATH (rc 23) ──────────────────────────────────────
+# 🔴 THE GAP THE UNTRACKED BLOCK LEFT. Untracked files have always been counted
+# and listed here, and have never escalated — correctly, because most of them are
+# scratch. But a subset of them is not scratch: it is DEPLOYED CODE with no
+# commit and no backup anywhere.
+#
+# MEASURED 2026-08-25 on the workbench:
+# nix/system/apply-nebula-443.sh.LOCAL-preserved-2026-08-02 had sat untracked for
+# ~3 weeks, reported every run, escalated never. That one turns out NOT to be
+# nix-read (nix/system/ holds hand-run sudo scripts the flake never opens) — but
+# the same run listed scripts/dl-router/tests/load_test_store.sh, which IS:
+# nix/home.nix says `${../scripts/dl-router}` and copies that directory into the
+# store WHOLE. Nothing distinguished the two, and no operator was going to.
+#
+# WHICH PATHS NIX READS IS DERIVED, NEVER LISTED — scripts/lib/nix_read_paths.sh
+# reads it out of nix/ at scan time and returns two classes, because the
+# consequences differ:
+#   LIVE   a mkOutOfStoreSymlink target. The deployed path is a link back into
+#          the working tree, so an untracked file there is being SERVED right
+#          now, continuously, with no switch and no generation boundary.
+#   STORE  a nix path literal. It lands in the artifact the next switch builds.
+# Both escalate; both are named with their class, so the operator knows whether
+# the exposure is already live or arrives at the next switch.
+#
+# THE LADDER IS rc 13's, for rc 18's reason: reported on EVERY run, escalated to
+# rc 23 only after N CONSECUTIVE runs (DRIFT_NIXDIRT_ESCALATE, default 12 ≈ 3
+# days at the 6h cadence), per (HOST, PATH), and RESET the moment that path stops
+# being untracked — committed, deleted or gitignored. 3 days rather than rc 18's
+# 24h because creating a file and committing it an hour later is the NORMAL
+# working shape here; the finding is "this has been sitting there", not "this
+# exists".
+#
+# 🔴 IT REFUSES TO BE SATISFIED BY MEASURING NOTHING, and that guard is the whole
+# reason the derived set reports its own population. A host whose payload derived
+# ZERO nix-read paths prints COULD NOT MEASURE with a reason token and sets NO
+# code — because an empty nix-read set classifies every untracked file on every
+# host as clean, forever, in silence. It also bumps and resets NOTHING in that
+# state: a ladder must not be cleared by a scan that walked nothing.
 #
 # ── UNMEASURED IS NOT FOREVER (rc 18) ─────────────────────────────────────────
 # 🔴 THE GAP rc 17 LEFT. A scope that CANNOT be evaluated is reported UNMEASURED
@@ -390,16 +437,16 @@
 # is reading a timer's output, so the single number it hands to systemd must be
 # the worst thing found, or an un-pushed workbench could hide behind a merely
 # behind laptop. Severity order (worst first):
-#     8 > 17 > 14 > 13 > 18 > 6 > 2 > 4 > 3 > 12 > 15 > 10 > 22 > 16
+#     8 > 17 > 14 > 13 > 18 > 6 > 2 > 4 > 3 > 12 > 23 > 15 > 10 > 22 > 16
 # 🔴 THAT ORDER IS THE severity() TABLE, NOT THE DIGITS — it never was monotonic
 # (14 outranks 13 outranks 18 outranks 6 outranks 4), 17 is not "less severe
-# than 16" because it is larger, and 22 ranks second-LAST despite being the
-# largest digit here. Every code below 16 that is still free (5, 7, 9, 11) is
-# reserved to a ship.sh meaning this script does not take, so a new DRIFT code
-# has nowhere to go but upward; its rank is stated in severity() and here.
+# than 16" because it is larger, 23 outranks 15 while 22 ranks second-LAST, and
+# 22 is the largest digit here. Every code below 16 that is still free (5, 7, 9,
+# 11) is reserved to a ship.sh meaning this script does not take, so a new DRIFT
+# code has nowhere to go but upward; its rank is stated in severity() and here.
 # 🔴 UPWARD IS NOT EMPTY EITHER: ship.sh owns 19 (hosts-disagree), 20
-# (superseded) and 21 (usage), and this script has now taken 22, so the next free
-# DRIFT code is 23, not 19. See the reciprocal
+# (superseded) and 21 (usage), and this script has now taken 22 and 23, so the
+# next free DRIFT code is 24, not 19. See the reciprocal
 # reservation under EXIT CODES above — that collision was one increment away.
 # (6 and 2 are both unreachable through this path today — the script exits each
 # directly, before any per-host leg runs — but the order is documented for every
@@ -407,9 +454,11 @@
 # to the unknown-code slot, which would rank them 99, ABOVE rc 8.)
 # Per-host lines are ALWAYS printed for every host, whatever the code.
 #
-# Untracked files are counted and listed per host as INFORMATION only — they
-# never change the exit code. They are the same loss class (work sitting on one
-# host that no other host and no backup has) and cost nothing to report.
+# Untracked files are counted and listed per host as INFORMATION — they are the
+# same loss class (work sitting on one host that no other host and no backup has)
+# and cost nothing to report. 🔴 THE SUBSET THAT SITS IN A PATH NIX READS IS NOT
+# information only: it rides the rc 23 ladder below. This comment said "they
+# never change the exit code" for as long as that was true of all of them.
 #
 # ── USAGE ─────────────────────────────────────────────────────────────────────
 #   scripts/drift-check.sh                 # check this host + the other one
@@ -449,7 +498,16 @@
 #                        (default 12 ≈ 3 days). Separate from the tunable above
 #                        because they are not the same hazard; see "UNMEASURED IS
 #                        NOT FOREVER". `repo ABSENT` is on NEITHER ladder.
-#   DRIFT_STATE_DIR  where the unreachable and unmeasured streaks are persisted
+#   DRIFT_NIXDIRT_ESCALATE  consecutive runs an UNTRACKED file may sit in a
+#                        NIX-READ path before rc 23 (default 12 ≈ 3 days at the
+#                        6h cadence). Longer than DRIFT_UNMEASURED_ESCALATE on
+#                        purpose: writing a file and committing it an hour later
+#                        is the normal working shape, and the finding is that it
+#                        has been SITTING there. Deliberately NOT forwarded over
+#                        ssh — the ladder is kept by the host running the driver,
+#                        for both hosts' paths.
+#   DRIFT_STATE_DIR  where the unreachable, unmeasured and nix-dirt streaks are
+#                    persisted
 #                    (default ${XDG_STATE_HOME:-$HOME/.local/state}/drift-check)
 #   DRIFT_SESSION_MANAGER  path to the session-manager used by the phase-2 gate
 #                    (default: the copy beside this script). Exists so the test
@@ -511,6 +569,9 @@ DRIFT_UNREACHABLE_ESCALATE="${DRIFT_UNREACHABLE_ESCALATE:-4}"
 # — see "UNMEASURED IS NOT FOREVER" in the header for the full argument.
 DRIFT_UNMEASURED_ESCALATE="${DRIFT_UNMEASURED_ESCALATE:-4}"
 DRIFT_UNMEASURED_FETCH_ESCALATE="${DRIFT_UNMEASURED_FETCH_ESCALATE:-12}"
+# The rc 23 ladder — see "UNTRACKED IN A NIX-READ PATH" for why it is longer than
+# the structural-unmeasured one rather than the same number reused.
+DRIFT_NIXDIRT_ESCALATE="${DRIFT_NIXDIRT_ESCALATE:-12}"
 DRIFT_STATE_DIR="${DRIFT_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/drift-check}"
 DRIFT_SESSION_MANAGER="${DRIFT_SESSION_MANAGER:-$_drift_dir/session-manager}"
 DRIFT_PHASE2_TIMEOUT="${DRIFT_PHASE2_TIMEOUT:-60}"
@@ -535,6 +596,10 @@ require_int DRIFT_UNREACHABLE_ESCALATE "$DRIFT_UNREACHABLE_ESCALATE"
 # would go quiet in exactly the direction this code exists to refuse.
 require_int DRIFT_UNMEASURED_ESCALATE "$DRIFT_UNMEASURED_ESCALATE"
 require_int DRIFT_UNMEASURED_FETCH_ESCALATE "$DRIFT_UNMEASURED_FETCH_ESCALATE"
+# Same reasoning: not forwarded over ssh either, but a non-integer would turn
+# `[ "$STK" -ge "$THR" ]` into an error rather than a comparison and the ladder
+# would go quiet — the one direction it may never fail in.
+require_int DRIFT_NIXDIRT_ESCALATE "$DRIFT_NIXDIRT_ESCALATE"
 # Not interpolated into a remote payload — but it IS handed to `timeout`, where a
 # non-integer would make the phase-2 scan fail in a way that reads as "the tool
 # is broken" rather than "you passed nonsense".
@@ -634,6 +699,18 @@ severity() {
     4)  echo 55 ;;
     3)  echo 50 ;;
     12) echo 40 ;;
+    # 23 (an untracked file in a NIX-READ path has persisted N runs) sits between
+    # 12 and 15, and the digit says nothing about that either.
+    #   BELOW 12, because a checkout that is not on main will be SKIPPED by
+    #   ship.sh and therefore stops receiving every future change; this one still
+    #   converges normally, it just carries a passenger while it does.
+    #   ABOVE 15, because the loss classes differ in kind. A settings.json key
+    #   set that disagrees costs the operator a CAPABILITY on one host, and both
+    #   copies of the fact still exist. This is content that exists on exactly
+    #   ONE machine, in no commit and no backup, AND is being executed there —
+    #   rc 8's loss class at a smaller scope, which is why it outranks a parity
+    #   difference and not a divergence.
+    23) echo 37 ;;
     # 15 ranks BELOW 12 and above 10: a key-set or plugin difference is a real
     # divergence, but ship.sh does not fix it and it costs the operator a
     # capability, not a commit. 14 ranks just under 8 — see the table in the
@@ -707,8 +784,68 @@ if [ -n "$untracked" ]; then
   printf "%s\n" "$untracked" | head -n "$maxu" | sed "s|^|[$label]     - |"
   [ "$n" -gt "$maxu" ] && say "    ... and $(( n - maxu )) more"
 else
+  n=0
   say "untracked: 0"
 fi
+
+# --- The rc 23 subset: untracked AND in a path NIX READS ----------------------
+# 🔴 NOT information. See "UNTRACKED IN A NIX-READ PATH" in the header. This leg
+# only MEASURES and reports; the consecutive-run ladder lives in the driver,
+# because a streak is persistent state and belongs to the machine keeping the
+# record — the same reason the rc 13 and rc 18 ladders are there.
+#
+# The FACT line is the contract with the driver and its shape is deliberate:
+#   FACT nix-untracked untracked=<N> nixread=<M> reason=<TOKEN> [<path>=<CLASS>]…
+# The two counts are emitted UNCONDITIONALLY, including as zeros, because a
+# driver that sees no pairs must be able to tell "this host has no untracked
+# nix-read files" from "the nix-read set came out empty and every file on every
+# host is therefore clean". Pairs are told apart from the header fields by their
+# VALUE — LIVE or STORE, the whole class vocabulary — so a repo-root file called
+# `reason` cannot be read as a header field.
+NU_REASON=NOLIB
+NU_PAIRS=""
+NU_M=0
+NU_HITS=0
+NU_UNREP=0
+NU_LIB="$repo/scripts/lib/nix_read_paths.sh"
+if [ -r "$NU_LIB" ]; then
+  # shellcheck source=lib/nix_read_paths.sh
+  . "$NU_LIB"
+  if nix_read_scan "$repo"; then
+    NU_REASON=OK
+    NU_M="$NIXREAD_COUNT"
+  else
+    NU_REASON="$NIXREAD_REASON"
+    NU_M="$NIXREAD_COUNT"
+  fi
+fi
+if [ "$NU_REASON" = OK ] && [ "$n" != 0 ]; then
+  while IFS= read -r NU_P; do
+    [ -n "$NU_P" ] || continue
+    case "$(nix_read_class_of "$NU_P")" in
+      LIVE)            NU_PAIRS="$NU_PAIRS $NU_P=LIVE";  NU_HITS=$(( NU_HITS + 1 )) ;;
+      STORE)           NU_PAIRS="$NU_PAIRS $NU_P=STORE"; NU_HITS=$(( NU_HITS + 1 )) ;;
+      UNREPRESENTABLE) NU_UNREP=$(( NU_UNREP + 1 )) ;;
+    esac
+  done <<NU_EOF
+$untracked
+NU_EOF
+fi
+
+if [ "$NU_REASON" != OK ]; then
+  say "untracked-in-nix-read-paths: COULD NOT MEASURE ($NU_REASON) — $n untracked file(s),"
+  say "  $NU_M nix-read path(s) derived. A zero here would classify every untracked file on"
+  say "  every host as harmless, so this run makes no such claim and sets no code."
+elif [ "$NU_HITS" = 0 ]; then
+  say "untracked-in-nix-read-paths: 0 of $n untracked file(s), against $NU_M nix-read path(s)."
+else
+  say "untracked-in-nix-read-paths: $NU_HITS of $n untracked file(s), against $NU_M nix-read path(s):"
+  for NU_X in $NU_PAIRS; do
+    say "    - ${NU_X%=*} (${NU_X##*=})"
+  done
+fi
+[ "$NU_UNREP" != 0 ] && say "  ($NU_UNREP untracked path(s) NOT CLASSIFIED — a character the classifier does not model)"
+echo "[$label] FACT nix-untracked untracked=$n nixread=$NU_M reason=$NU_REASON$NU_PAIRS"
 
 # --- Which branch is checked out? ---------------------------------------------
 branch=$(git symbolic-ref --quiet --short HEAD 2>/dev/null || echo DETACHED)
@@ -1590,21 +1727,45 @@ u_threshold() { # u_threshold <reason-token> -> consecutive-run threshold, or NE
   fi
 }
 
-_u_streak_file() { # _u_streak_file <role> <scope> -> that pair's counter path
-  # 🔴 INJECTIVE, not merely "sanitised". The scope scan can only produce
-  # [A-Za-z0-9._/-], so doubling `_` and then mapping `/` to `_` is reversible
-  # over that whole alphabet: `a/b` and `a_b` cannot land on one file. A plain
-  # `/`->`_` would collide them, and two scopes sharing a counter is a ladder
-  # that resets itself for reasons nobody can see.
+_streak_key() { # _streak_key <scope> -> the filename-safe, INJECTIVE encoding
+  # 🔴 INJECTIVE, not merely "sanitised". Every scope this script keys on comes
+  # from a scan whose alphabet is [A-Za-z0-9._/-], so doubling `_` and then
+  # mapping `/` to `_` is reversible over that whole alphabet: `a/b` and `a_b`
+  # cannot land on one file. A plain `/`->`_` would collide them, and two scopes
+  # sharing a counter is a ladder that resets itself for reasons nobody can see.
+  #
+  # ONE encoder, used by both ladder namers below. It was open-coded in
+  # _u_streak_file alone until the rc 23 ladder needed the same property; a
+  # predicate copied to a second site is typically wrong at one of them.
   local S
-  S="${2//_/__}"
+  S="${1//_/__}"
   S="${S//\//_}"
-  printf '%s\n' "$DRIFT_STATE_DIR/unmeasured-${1:-host}-$S"
+  printf '%s' "$S"
+}
+
+_u_streak_file() { # _u_streak_file <role> <scope> -> that pair's counter path
+  printf '%s\n' "$DRIFT_STATE_DIR/unmeasured-${1:-host}-$(_streak_key "$2")"
+}
+
+_n_streak_file() { # _n_streak_file <role> <repo-path> -> that pair's counter path
+  # 🔴 ITS OWN FILENAME PREFIX, not a namespace inside the rc 18 one. A scope
+  # `nixdirt/x` encodes to `nixdirt_x`, which is exactly what a source repo
+  # literally named `nixdirt` with a subtree `x` would produce — implausible, and
+  # a collision between two ladders is not a thing to leave to plausibility.
+  printf '%s\n' "$DRIFT_STATE_DIR/nixdirt-${1:-host}-$(_streak_key "$2")"
 }
 
 u_streak_bump() { # u_streak_bump <role> <scope> <reason> -> new streak, or -1
+  _streak_file_bump "$(_u_streak_file "$1" "$2")" "$3"
+}
+
+n_streak_bump() { # n_streak_bump <role> <path> <class> -> new streak, or -1
+  _streak_file_bump "$(_n_streak_file "$1" "$2")" "$3"
+}
+
+_streak_file_bump() { # _streak_file_bump <counter-file> <reason> -> streak, or -1
   local f PREV PREASON PCOUNT NEXT
-  f="$(_u_streak_file "$1" "$2")"
+  f="$1"
   mkdir -p "$DRIFT_STATE_DIR" 2>/dev/null || { echo -1; return 0; }
   PREV="$(cat "$f" 2>/dev/null || true)"
   PREASON=""
@@ -1622,11 +1783,11 @@ u_streak_bump() { # u_streak_bump <role> <scope> <reason> -> new streak, or -1
   # thresholds, so carrying a FETCHFAILED count into a NOUPSTREAM ladder would
   # escalate on evidence that was never about that hazard — and the reset written
   # by u_streak_reset ("MEASURED 0") clears the streak through this same rule.
-  [ "$PREASON" = "$3" ] || PCOUNT=0
+  [ "$PREASON" = "$2" ] || PCOUNT=0
   NEXT=$(( PCOUNT + 1 ))
   # `2>/dev/null` FIRST, then the target — see streak_bump for why the order of
   # the redirections is load-bearing.
-  printf '%s %s\n' "$3" "$NEXT" 2>/dev/null > "$f" || { echo -1; return 0; }
+  printf '%s %s\n' "$2" "$NEXT" 2>/dev/null > "$f" || { echo -1; return 0; }
   echo "$NEXT"
 }
 
@@ -1635,11 +1796,24 @@ u_streak_reset() { # u_streak_reset <role> <scope> — it MEASURED; the run ends
   # unmeasured needs no file, and creating one per scope per run would put state
   # in the journal's way for no gain. The token is not a reason, so the reason
   # comparison in u_streak_bump restarts the count from 0 whatever comes next.
+  _streak_file_reset "$(_u_streak_file "$1" "$2")" MEASURED
+}
+
+n_streak_reset() { # n_streak_reset <counter-file> — that path is untracked no more
+  # Takes the FILE, not the path: the rc 23 complement is discovered by LISTING
+  # the state dir (a path that stopped being untracked is, by construction, not
+  # in this run's report), so the caller holds a filename and no scope name to
+  # re-encode. Decoding _streak_key back to a path would be a second, inverse
+  # copy of the encoder — the thing consolidating it was meant to stop.
+  _streak_file_reset "$1" CLEARED
+}
+
+_streak_file_reset() { # _streak_file_reset <counter-file> <token>
   local f
-  f="$(_u_streak_file "$1" "$2")"
+  f="$1"
   [ -d "$DRIFT_STATE_DIR" ] || return 0
   [ -f "$f" ] || return 0
-  printf 'MEASURED 0\n' 2>/dev/null > "$f" || true
+  printf '%s 0\n' "$2" 2>/dev/null > "$f" || true
 }
 
 if [ "$DO_LOCAL" = 1 ]; then
@@ -2063,6 +2237,133 @@ else
 fi
 echo
 
+# ── UNTRACKED FILES THAT SIT IN NIX-READ PATHS (rc 23) ────────────────────────
+# 🔴 See "UNTRACKED IN A NIX-READ PATH" in the header for what this measures and
+# why the ladder is longer than rc 18's. Here: how it refuses to be satisfied by
+# measuring nothing.
+#
+# It runs HERE, in the driver, for the reason rc 13's and rc 18's ladders do: the
+# streak is PERSISTENT STATE and belongs to the machine keeping the record, while
+# the payload is a stateless thing piped to whichever host is being examined.
+#
+# 🔴 A HOST IS WALKED ONLY IF IT ANSWERED, and only if its answer carries a
+# NON-ZERO nix-read denominator. Without one, every untracked file on that host
+# classifies clean — so nothing is bumped AND nothing is reset: a ladder cleared
+# by a scan that walked nothing is worse than no ladder.
+echo "=== untracked files in NIX-READ paths ($LOCAL_ROLE / $REMOTE_ROLE) ==="
+N_REPORTING=0
+N_UNTRACKED=0
+N_NIXREAD=0
+N_HITS=0
+N_ESCALATED=0
+N_BLIND=0
+for HROLE in "$LOCAL_ROLE" "$REMOTE_ROLE"; do
+  if [ "$HROLE" = "$LOCAL_ROLE" ]; then
+    N_LINE="$(fact_of "$LOCAL_OUT" nix-untracked)"
+  else
+    N_LINE="$(fact_of "$REMOTE_OUT" nix-untracked)"
+  fi
+  [ -n "$N_LINE" ] || continue
+  N_REPORTING=$(( N_REPORTING + 1 ))
+
+  # 🔴 READ BY KEY, NOT BY POSITION, and the path pairs are matched FIRST, by
+  # their VALUE. `${x#* }` positional parsing is what made the phase-2 gate print
+  # `47 of 47`. The ORDER of these arms is load-bearing and was wrong once: with
+  # `reason=*` ahead of the pair arm, an untracked repo-root file literally named
+  # `reason` produced the token `reason=STORE`, which was read as this line's
+  # REASON field — so the host came out COULD NOT MEASURE and the file it named
+  # was dropped, silently, in the direction of "nothing to see". LIVE and STORE
+  # are the whole class vocabulary and no header field can take either value, so
+  # matching the pairs first cannot swallow a header key.
+  N_UNT=-1; N_MM=-1; N_RSN=""; N_PAIRS=""
+  for X in $N_LINE; do
+    case "$X" in
+      *=LIVE|*=STORE) N_PAIRS="$N_PAIRS $X" ;;
+      untracked=*)    N_UNT="${X#untracked=}" ;;
+      nixread=*)      N_MM="${X#nixread=}" ;;
+      reason=*)       N_RSN="${X#reason=}" ;;
+    esac
+  done
+  case "$N_UNT" in ''|*[!0-9]*) N_UNT=-1 ;; esac
+  case "$N_MM" in ''|*[!0-9]*) N_MM=-1 ;; esac
+
+  if [ "$N_RSN" != OK ] || [ "$N_UNT" -lt 0 ] || [ "$N_MM" -le 0 ]; then
+    echo "[nixdirt] $HROLE: COULD NOT MEASURE — reason=${N_RSN:-ABSENT} untracked=$N_UNT nix-read-paths=$N_MM."
+    echo "[nixdirt]   With no derived nix-read set every untracked file on that host classifies"
+    echo "[nixdirt]   as harmless. That is not a finding of none: nothing was bumped, nothing"
+    echo "[nixdirt]   was reset, and NO code is set for it."
+    N_BLIND=$(( N_BLIND + 1 ))
+    continue
+  fi
+  N_UNTRACKED=$(( N_UNTRACKED + N_UNT ))
+  N_NIXREAD=$(( N_NIXREAD + N_MM ))
+
+  N_KEEP=""
+  for X in $N_PAIRS; do
+    N_P="${X%=*}"
+    N_C="${X##*=}"
+    N_HITS=$(( N_HITS + 1 ))
+    N_F="$(_n_streak_file "$HROLE" "$N_P")"
+    N_KEEP="$N_KEEP ${N_F##*/}"
+    STK="$(n_streak_bump "$HROLE" "$N_P" "$N_C")"
+    if [ "$STK" -lt 0 ]; then
+      echo "[nixdirt] 🔴 $HROLE $N_P: UNTRACKED in a NIX-READ path ($N_C), and the streak under"
+      echo "[nixdirt]   $DRIFT_STATE_DIR could not be persisted, so 'for how long' is"
+      echo "[nixdirt]   unknowable — ESCALATING (rc 23)."
+      N_ESCALATED=$(( N_ESCALATED + 1 ))
+      note_rc 23
+    elif [ "$STK" -ge "$DRIFT_NIXDIRT_ESCALATE" ]; then
+      # The whole claim on ONE line — host, path, class, streak and threshold —
+      # for the reason the rc 18 line gives: a guard on half a sentence is
+      # walkable by rewording the other half.
+      echo "[nixdirt] 🔴 DRIFT — $HROLE $N_P: UNTRACKED in a NIX-READ path ($N_C) for $STK CONSECUTIVE runs (threshold $DRIFT_NIXDIRT_ESCALATE)."
+      if [ "$N_C" = LIVE ]; then
+        echo "[nixdirt]   LIVE: the deployed path is a mkOutOfStoreSymlink back into that working"
+        echo "[nixdirt]   tree, so this file is being SERVED on that host right now — with no"
+        echo "[nixdirt]   commit, no backup and no other host holding a copy."
+      else
+        echo "[nixdirt]   STORE: nix reads it at eval/build time, so every generation built on"
+        echo "[nixdirt]   that host carries it — with no commit, no backup and no other host"
+        echo "[nixdirt]   holding a copy."
+      fi
+      echo "[nixdirt]   fix: commit it, delete it, or gitignore it on that host, then re-run."
+      N_ESCALATED=$(( N_ESCALATED + 1 ))
+      note_rc 23
+    else
+      echo "[nixdirt] $HROLE $N_P: UNTRACKED in a NIX-READ path ($N_C) — $STK/$DRIFT_NIXDIRT_ESCALATE consecutive; NOT escalated."
+      echo "[nixdirt]   Still not a pass: that content exists on exactly one machine."
+    fi
+  done
+
+  # The complement — every counter this host kept that this run did NOT report —
+  # ends its run. A path that was committed, deleted or gitignored is simply
+  # absent from the report, so the state dir is the only place it can be seen.
+  # 🔴 Reached only past the denominator guard above: a host that could not
+  # measure leaves its ladders exactly as they were.
+  for N_F in "$DRIFT_STATE_DIR"/nixdirt-"$HROLE"-*; do
+    [ -f "$N_F" ] || continue
+    case " $N_KEEP " in
+      *" ${N_F##*/} "*) ;;
+      *) n_streak_reset "$N_F" ;;
+    esac
+  done
+done
+
+# 🔴 REPORTING BESIDE THE DENOMINATOR BESIDE THE HITS. `hits=0` is the identical
+# output for "no untracked file is nix-read" and "no nix-read path was ever
+# derived", and only the denominator separates them — so the summary is withheld
+# entirely rather than printed as a clean-looking line over an empty set.
+if [ "$N_REPORTING" = 0 ]; then
+  echo "[nixdirt] NOT EVALUATED — no host returned a nix-untracked fact; obtained from: ${CHECKED:-none}."
+  echo "[nixdirt]   this is not 'nothing is exposed'. No untracked file on any host was classified."
+elif [ "$N_NIXREAD" = 0 ]; then
+  echo "[nixdirt] NOT EVALUATED — $N_REPORTING host(s) answered and between them derived ZERO"
+  echo "[nixdirt]   nix-read paths. A classifier with an empty set calls everything clean."
+else
+  echo "[nixdirt] hosts-reporting=$N_REPORTING untracked=$N_UNTRACKED nix-read-paths=$N_NIXREAD hits=$N_HITS escalated=$N_ESCALATED blind=$N_BLIND"
+fi
+echo
+
 # ── FUZZYCLAW PHASE-2 GATE ────────────────────────────────────────────────────
 # See "THE FUZZYCLAW PHASE-2 GATE" in the header for what this measures and why
 # it is local-only. Here: how it refuses to produce a silent zero.
@@ -2223,6 +2524,10 @@ if [ "$rc" != 0 ]; then
   echo "  rc22=a host's deployed skillOverrides disagree with claude/skill-tiers.json. A host"
   echo "       with NO overrides is NOT ADOPTED, never rc22 — that is the shipped state."
   echo "       (ranks just under rc10 — a behind host carries a stale ledger; ship it first)"
+  echo "  rc23=an UNTRACKED file in a path NIX READS has survived $DRIFT_NIXDIRT_ESCALATE consecutive runs on that"
+  echo "       host — LIVE (a mkOutOfStoreSymlink target, served right now) or STORE (copied"
+  echo "       into the artifact by the next switch). A host whose nix-read set came out EMPTY"
+  echo "       is COULD NOT MEASURE, never rc23. (ranks between rc15 and rc12; see severity() )"
 fi
 [ -n "$UNCHECKED" ] && echo "drift-check: NOT checked: $UNCHECKED"
 exit "$rc"

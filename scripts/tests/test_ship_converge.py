@@ -32,6 +32,12 @@ import pytest
 SCRIPTS = Path(__file__).resolve().parents[1]
 SHIP = SCRIPTS / "ship.sh"
 HOST_ROLE_LIB = SCRIPTS / "lib" / "host-role.sh"
+# The DERIVED nix-read predicate the dirty-tree verdict is classified through.
+# Its own suite is scripts/tests/test_nix_read_paths.py; here it is copied into
+# the throwaway repo verbatim, because CONVERGE sources it out of `$repo` — the
+# post-fast-forward copy, deliberately, so a run classifies against the nix/ it
+# just landed on.
+NIXREAD_LIB = SCRIPTS / "lib" / "nix_read_paths.sh"
 
 sys.path.insert(0, str(SCRIPTS))
 
@@ -197,9 +203,64 @@ class Repo:
     # kill, so _assert_foreign_store_is_absent() pins it.
     FOREIGN_STORE = "/nix/store/zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz-home-manager-files"
 
+    # -- the nix-read fixture tree ------------------------------------------ #
+    #
+    # A minimal but REAL flake shape: flake.nix names nix/home.nix, which names
+    # one file source, one DIRECTORY source and one mkOutOfStoreSymlink. All
+    # three spellings matter — the directory one is the shape that made the
+    # measured 2026-08-25 workbench file nix-read when nobody expected it
+    # (home.nix says ${../scripts/dl-router}, copying that whole tree into the
+    # store).
+    #
+    # 🔴 The names are pairwise distinct AND distinct from every constant the
+    # assertions name (LIVE, STORE, origin/main, DIRTY). A fixture that can only
+    # produce a constant's own value cannot detect a mutant that hardcodes it.
+    NIXREAD_FLAKE = (
+        "{\n"
+        "  outputs = { self, ... }: {\n"
+        "    homeConfigurations.someone.modules = [ ./nix/home.nix ];\n"
+        "  };\n"
+        "}\n"
+    )
+    NIXREAD_HOME_NIX = (
+        "{ config, ... }:\n"
+        'let workspace = "${config.home.homeDirectory}/workspace";\n'
+        "in {\n"
+        '  home.file.".alpha".source = ../copied-alpha.txt;\n'
+        '  home.file.".bravo".source = ../charlie-dir;\n'
+        '  home.file.".delta".source =\n'
+        '    config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/echo-live.txt";\n'
+        "}\n"
+    )
+    # repo-relative -> its expected class, used by the tests AND by the writer so
+    # the two cannot drift apart.
+    NIXREAD_PATHS = {
+        "copied-alpha.txt": "STORE",
+        "charlie-dir/nested/foxtrot.txt": "STORE",   # via the DIRECTORY source
+        "echo-live.txt": "LIVE",
+    }
+
+    def _write_nixread_into(self, tree):
+        """Seed the flake shape + the real predicate lib. Returns pathspecs."""
+        (tree / "nix").mkdir(parents=True, exist_ok=True)
+        (tree / "flake.nix").write_text(self.NIXREAD_FLAKE)
+        (tree / "nix" / "home.nix").write_text(self.NIXREAD_HOME_NIX)
+        for rel in self.NIXREAD_PATHS:
+            f = tree / rel
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text(rel + " base\n")
+        lib = tree / "scripts" / "lib" / "nix_read_paths.sh"
+        lib.parent.mkdir(parents=True, exist_ok=True)
+        lib.write_text(NIXREAD_LIB.read_text())
+        return [
+            "flake.nix", "nix/home.nix", "scripts/lib/nix_read_paths.sh",
+            *self.NIXREAD_PATHS,
+        ]
+
     def __init__(self, tmp_path, gitconfig_extra="", stale_managed=(), phantom_managed=False,
                  second_host=False, ship_in_repo=False, ship_changes=True,
-                 ship_pad_lines=0, ship_broken=False, lib_broken=None):
+                 ship_pad_lines=0, ship_broken=False, lib_broken=None,
+                 nixread=False):
         """`stale_managed` seeds those entries from the BASE commit's bytes.
 
         That is the real staleness shape, not a synthetic one: the deployed
@@ -265,6 +326,8 @@ class Repo:
         extra = []
         if ship_in_repo:
             extra = self._write_ship_into(builder, 1, pad_lines=ship_pad_lines)
+        if nixread:
+            extra = [*extra, *self._write_nixread_into(builder)]
         self._git(builder, "checkout", "-q", "-B", "main")
         self._git(builder, "add", "f", "stable.txt", *self.SOURCE_PATHS, *extra)
         self._git(builder, "commit", "-q", "-m", "base")
@@ -1034,12 +1097,192 @@ def test_reports_missing_origin_main_as_config_error_not_divergence(repo):
 
 
 def test_verify_line_names_a_dirty_tree(repo):
-    """Dirty convergence is the normal path now — the verifier must say so."""
+    """Dirty convergence is the normal path now — the verifier must say so.
+
+    This repo carries no flake, so the classifier cannot measure and the verdict
+    falls back to the flat sentence — WITH the reason attached, which is the
+    difference between "no dirty path is nix-read" and "we did not look".
+    """
     (repo.work / "stable.txt").write_text("stable\nwip\n")
     rc, out = repo.ship()
     assert rc == 0, out
     assert "DIRTY" in out, f"verify line hides the dirty state\n{out}"
     assert "origin/main + local WIP" in out
+    assert "NOT CLASSIFIED" in out, f"the fallback does not say it could not look\n{out}"
+
+
+# --------------------------------------------------------------------------- #
+# THE CLASSIFIED DIRTY VERDICT
+#
+# 🔴 WHY THIS EXISTS. "what was built/deployed is origin/main + local WIP" was
+# true of every dirty tree and actionable for none of them. Measured on the
+# workbench 2026-08-25: the two dirty paths were a staged sudo script under
+# nix/system/ (nix opens nothing there) and a test under scripts/dl-router/
+# (which nix/home.nix copies into the store WHOLE). One of those was in the
+# artifact; nothing in the output told them apart.
+#
+# The three verdicts are three different FACTS, and each gets its own test:
+# LIVE (already deployed, no switch involved), STORE (in the generation this run
+# built), and NEITHER — which is a real verdict about the deploy, not a softened
+# warning, and is asserted to NOT print the hedged sentence.
+#
+# 🔴 The instrument controls come first: nixrepo_can_classify is the positive
+# control (the classifier reports a NON-ZERO derived population), and
+# test_verify_line_names_a_dirty_tree above is the negative one (a repo it
+# cannot measure says so instead of printing a clean verdict).
+# --------------------------------------------------------------------------- #
+@pytest.fixture
+def nixrepo(tmp_path):
+    """A throwaway repo carrying a real flake shape and the real predicate lib."""
+    return Repo(tmp_path, nixread=True)
+
+
+def test_the_classifier_reports_a_non_zero_population(nixrepo):
+    """🔴 POSITIVE CONTROL, and the reason every branch below prints its
+    denominator. A run whose derived set is EMPTY classifies every dirty path as
+    clean and prints the friendliest line in the file. So watch the number: it
+    must be non-zero, and it must be stated in the output where an operator
+    reading a verdict can see what it was measured against."""
+    (nixrepo.work / "stable.txt").write_text("stable\nwip\n")
+    rc, out = nixrepo.ship()
+    assert rc == 0, out
+    m = re.search(r"classified (\d+) dirty path\(s\) against (\d+) nix-read "
+                  r"path\(s\) derived from (\d+) nix file\(s\)", out)
+    assert m, f"the verdict carries no population line\n{out}"
+    dirty, nixread, files = (int(g) for g in m.groups())
+    assert dirty >= 1, out
+    assert nixread >= 4, f"derived only {nixread} nix-read path(s)\n{out}"
+    assert files == 2, f"read {files} nix file(s), expected flake.nix + nix/home.nix\n{out}"
+
+
+def test_a_dirty_mkOutOfStoreSymlink_target_is_reported_as_LIVE(nixrepo):
+    """The strongest case: the deployed path is a link back into this working
+    tree, so the WIP is being served with no switch and no generation boundary."""
+    (nixrepo.work / "echo-live.txt").write_text("echo-live.txt wip\n")
+    rc, out = nixrepo.ship()
+    assert rc == 0, out
+    assert "DIRTY AND LIVE" in out, out
+    assert "echo-live.txt" in out
+    assert "DIRTY AND IN THE ARTIFACT" not in out, (
+        f"a live target was also reported as a store copy\n{out}"
+    )
+    assert "NO dirty path is read by nix" not in out, out
+
+
+def test_a_dirty_nix_path_literal_is_reported_as_IN_THE_ARTIFACT(nixrepo):
+    (nixrepo.work / "copied-alpha.txt").write_text("copied-alpha.txt wip\n")
+    rc, out = nixrepo.ship()
+    assert rc == 0, out
+    assert "DIRTY AND IN THE ARTIFACT" in out, out
+    assert "copied-alpha.txt" in out
+    assert "DIRTY AND LIVE" not in out, out
+    assert "NO dirty path is read by nix" not in out, out
+
+
+def test_a_dirty_file_UNDER_a_directory_source_is_still_in_the_artifact(nixrepo):
+    """🔴 THE MEASURED CASE. Nothing names this file; its ANCESTOR is the source,
+    and the whole directory is copied into the store. A predicate that matched
+    only exact spellings would call it clean — which is what a hand-written list
+    did to scripts/dl-router/tests/load_test_store.sh."""
+    p = nixrepo.work / "charlie-dir" / "nested" / "foxtrot.txt"
+    p.write_text("foxtrot wip\n")
+    rc, out = nixrepo.ship()
+    assert rc == 0, out
+    assert "DIRTY AND IN THE ARTIFACT" in out, out
+    assert "charlie-dir/nested/foxtrot.txt" in out, out
+
+
+def test_an_UNTRACKED_file_in_a_nix_read_path_is_classified_too(nixrepo):
+    """The dirty set is modified + staged + UNTRACKED, exactly as blocking_files
+    computes it. An untracked file inside a directory source is in the artifact
+    just as surely as a modified one."""
+    (nixrepo.work / "charlie-dir" / "nested" / "hotel-new.txt").write_text("new\n")
+    rc, out = nixrepo.ship()
+    assert rc == 0, out
+    assert "DIRTY AND IN THE ARTIFACT" in out, out
+    assert "charlie-dir/nested/hotel-new.txt" in out, out
+
+
+def test_a_dirty_tree_with_no_nix_read_path_says_the_deploy_IS_origin_main(nixrepo):
+    """🔴 A REAL VERDICT, and it must not be collapsed into the warning. This is
+    the case the workbench was actually in, and the old note implied otherwise."""
+    (nixrepo.work / "stable.txt").write_text("stable\nwip\n")
+    (nixrepo.work / "untracked-golf.txt").write_text("golf\n")
+    rc, out = nixrepo.ship()
+    assert rc == 0, out
+    assert "NO dirty path is read by nix" in out, out
+    assert "built/deployed IS origin/main" in out, out
+    assert "DIRTY AND LIVE" not in out, out
+    assert "DIRTY AND IN THE ARTIFACT" not in out, out
+    # 🔴 and NOT the hedged sentence: saying both would be saying nothing.
+    assert "origin/main + local WIP" not in out, (
+        f"the nix-read-free verdict still hedges\n{out}"
+    )
+
+
+def test_a_clean_tree_gets_no_classification_block_at_all(nixrepo):
+    """INVARIANT GUARD, not regression coverage — GREEN at origin/main
+    (200e6383) too, because there was no block to print. It pins that the
+    classification stays scoped to the dirty branch and never becomes noise on
+    the run an operator sees most often."""
+    rc, out = nixrepo.ship()
+    assert rc == 0, out
+    assert "clean tree" in out, out
+    assert "classified" not in out, out
+    assert "DIRTY" not in out, out
+
+
+def test_the_classification_never_blocks_the_ship(nixrepo):
+    """It is the honesty of the verdict, not a gate. A tree dirty in the LIVE
+    class — the loudest finding this can make — still converges and still
+    exits 0.
+
+    INVARIANT GUARD, not regression coverage — GREEN at origin/main (200e6383),
+    where a dirty converge already exited 0. Kept because the whole change is a
+    new finding printed on a path an operator relies on completing: the way this
+    goes wrong later is someone deciding it SHOULD block."""
+    (nixrepo.work / "echo-live.txt").write_text("echo-live.txt wip\n")
+    rc, out = nixrepo.ship()
+    assert rc == 0, out
+    assert_converged(nixrepo, out)
+    assert "✅ VERIFIED" in out, out
+
+
+def test_both_classes_at_once_are_reported_separately(nixrepo):
+    """They are different facts with different consequences (one is already
+    running, one arrives with the generation), so one must not swallow the
+    other."""
+    (nixrepo.work / "echo-live.txt").write_text("echo-live.txt wip\n")
+    (nixrepo.work / "copied-alpha.txt").write_text("copied-alpha.txt wip\n")
+    rc, out = nixrepo.ship()
+    assert rc == 0, out
+    assert "DIRTY AND LIVE" in out and "echo-live.txt" in out, out
+    assert "DIRTY AND IN THE ARTIFACT" in out and "copied-alpha.txt" in out, out
+
+
+def test_a_repo_whose_predicate_lib_is_missing_says_so_rather_than_clean(nixrepo):
+    """🔴 NEGATIVE CONTROL on the instrument. With the lib gone the run must fall
+    back to the hedged sentence AND name the reason — never print the
+    "no dirty path is read by nix" verdict off a classifier that never ran."""
+    (nixrepo.work / "echo-live.txt").write_text("echo-live.txt wip\n")
+    (nixrepo.work / "scripts" / "lib" / "nix_read_paths.sh").unlink()
+    rc, out = nixrepo.ship()
+    assert rc == 0, out
+    assert "NOT CLASSIFIED (NOLIB)" in out, out
+    assert "origin/main + local WIP" in out, out
+    assert "NO dirty path is read by nix" not in out, out
+    assert "DIRTY AND LIVE" not in out, out
+
+
+def test_a_repo_with_no_flake_at_all_says_it_could_not_look(nixrepo):
+    """The derivation reporting NOROOTS is not "nothing is nix-read"."""
+    (nixrepo.work / "echo-live.txt").write_text("echo-live.txt wip\n")
+    (nixrepo.work / "flake.nix").unlink()
+    shutil.rmtree(nixrepo.work / "nix")
+    rc, out = nixrepo.ship()
+    assert rc == 0, out
+    assert "NOT CLASSIFIED (NOROOTS)" in out, out
+    assert "NO dirty path is read by nix" not in out, out
 
 
 def test_skips_when_local_main_diverged(repo):

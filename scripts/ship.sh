@@ -171,14 +171,14 @@
 # 🔴 THE LADDER IS SHARED WITH scripts/drift-check.sh, RECIPROCALLY. That script
 # is the passive deadman for the same fleet and deliberately uses the same
 # vocabulary, so a number must not mean two things across the pair. It owns
-# 10, 14, 15, 16, 17, 18 and 22 — DRIFT meanings this script does not take — and
-# reserves them here; this script owns 5, 7, 9, 11, 19, 20 and 21 and they are
-# reserved there. Its header says "a new DRIFT code has nowhere to go but
+# 10, 14, 15, 16, 17, 18, 22 and 23 — DRIFT meanings this script does not take —
+# and reserves them here; this script owns 5, 7, 9, 11, 19, 20 and 21 and they
+# are reserved there. Its header says "a new DRIFT code has nowhere to go but
 # upward", which points the next one at 19 unless the reservation is written
-# down on both sides: so the next free code for THIS script is 23, and so is the
+# down on both sides: so the next free code for THIS script is 24, and so is the
 # next free code for that one.
 #
-# RESERVED-TO-DRIFT-CHECK: 10 14 15 16 17 18 22
+# RESERVED-TO-DRIFT-CHECK: 10 14 15 16 17 18 22 23
 #
 # That line is a LEDGER, machine-read, not a comment: it must equal exactly the
 # set of codes drift-check.sh can return and this script cannot, so it fails when
@@ -1181,13 +1181,100 @@ verify_managed_currency || exit 13
 #     so "fewer than two shas" stays distinguishable from "two that agree".
 echo "[$host] ship-landed-sha $now"
 
-# 6) Verdict. Name the dirty state explicitly: converging a dirty tree is the
-#    NORMAL supported path, and home-manager builds from the WORKING TREE — so
-#    what got deployed is origin/main PLUS that WIP, not origin/main. Saying so
-#    is the difference between an honest verifier and a misleading one.
+# 6) Verdict. Name the dirty state explicitly AND CLASSIFY IT. Converging a
+#    dirty tree is the NORMAL supported path, and home-manager builds from the
+#    WORKING TREE — but "origin/main + local WIP" was true of every dirty tree
+#    and actionable for none of them. Measured on the workbench 2026-08-25: the
+#    two dirty paths were a staged sudo script under nix/system/ (nix reads
+#    nothing there) and a test under scripts/dl-router/ (which home.nix copies
+#    into the store WHOLE, via ${../scripts/dl-router}). One of those is in the
+#    artifact and one is not, and the old line said the same thing about both.
+#
+#    Three verdicts now, because they are three different facts:
+#      dirty AND a mkOutOfStoreSymlink target -> that WIP is LIVE on this host
+#           right now; the deployed path is a link back into the working tree,
+#           so it needed no switch and there is no generation boundary on it.
+#      dirty AND a nix path literal           -> that WIP is IN the artifact
+#           this run just built, pinned to this generation.
+#      dirty and NEITHER                      -> the deploy IS origin/main. A
+#           real verdict, printed as one — not softened into a warning.
+#
+#    A DETERMINISTIC SET OPERATION over a DERIVED set (see
+#    scripts/lib/nix_read_paths.sh, which reads it out of nix/ at scan time and
+#    is pinned two-way by scripts/tests/test_nix_read_paths.py). Same discipline
+#    as blocking_files above: we never parse git error prose to decide anything.
+#
+#    🔴 It NEVER blocks the ship. This is the honesty of the verdict, not a gate.
+#    🔴 EXAMINED BESIDE FOUND, on every branch: a run that classified nothing
+#    must not print the same reassuring line as one that classified everything,
+#    so the population — dirty paths checked, nix-read paths derived, nix files
+#    read — is on the output whatever the answer.
 if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
   echo "[$host] ✅ VERIFIED — on branch main at origin/main + switched"
-  echo "[$host]   NOTE: tree is DIRTY — what was built/deployed is origin/main + local WIP."
+
+  # The dirty set, computed exactly like blocking_files: modified, staged and
+  # untracked, deduped. --no-renames for the same reason it gives.
+  nr_dirty=$(mktemp); nr_live=$(mktemp); nr_store=$(mktemp); nr_unrep=$(mktemp)
+  { git diff --name-only --no-renames
+    git diff --cached --name-only --no-renames
+    git ls-files --others --exclude-standard
+  } 2>/dev/null | sort -u > "$nr_dirty"
+  nr_n=$(wc -l < "$nr_dirty" | tr -d " ")
+
+  nr_reason=""
+  nr_lib="$repo/scripts/lib/nix_read_paths.sh"
+  if [ ! -r "$nr_lib" ]; then
+    nr_reason=NOLIB
+  else
+    # shellcheck source=lib/nix_read_paths.sh
+    . "$nr_lib"
+    nix_read_scan "$repo" || nr_reason="$NIXREAD_REASON"
+  fi
+
+  if [ -n "$nr_reason" ]; then
+    # 🔴 THE OLD LINE, and it is still the right one HERE — but it now says which
+    # of the two things it means. "No dirty path is read by nix" and "we could
+    # not look" are different claims and must never print the same sentence.
+    echo "[$host]   NOTE: tree is DIRTY — what was built/deployed is origin/main + local WIP."
+    echo "[$host]   NOT CLASSIFIED ($nr_reason) — $nr_n dirty path(s), 0 nix-read path(s) derived."
+    echo "[$host]   This run cannot say whether that WIP reached the artifact. It is NOT a"
+    echo "[$host]   claim that it did not."
+  else
+    while IFS= read -r nr_p; do
+      [ -n "$nr_p" ] || continue
+      case "$(nix_read_class_of "$nr_p")" in
+        LIVE)            printf "%s\n" "$nr_p" >> "$nr_live" ;;
+        STORE)           printf "%s\n" "$nr_p" >> "$nr_store" ;;
+        UNREPRESENTABLE) printf "%s\n" "$nr_p" >> "$nr_unrep" ;;
+      esac
+    done < "$nr_dirty"
+    nr_nl=$(wc -l < "$nr_live" | tr -d " ")
+    nr_ns=$(wc -l < "$nr_store" | tr -d " ")
+    nr_nu=$(wc -l < "$nr_unrep" | tr -d " ")
+
+    if [ "$nr_nl" != 0 ]; then
+      echo "[$host]   🔴 DIRTY AND LIVE — $nr_nl path(s) are mkOutOfStoreSymlink targets, so the"
+      echo "[$host]   deployed copy is a link INTO this working tree. This WIP is running on"
+      echo "[$host]   this host right now, and it did not need the switch to get there:"
+      sed "s|^|[$host]     - |" "$nr_live"
+    fi
+    if [ "$nr_ns" != 0 ]; then
+      echo "[$host]   🔴 DIRTY AND IN THE ARTIFACT — nix reads $nr_ns path(s) at eval/build time,"
+      echo "[$host]   so the generation this run just built is origin/main PLUS them:"
+      sed "s|^|[$host]     - |" "$nr_store"
+    fi
+    if [ "$nr_nl" = 0 ] && [ "$nr_ns" = 0 ] && [ "$nr_nu" = 0 ]; then
+      echo "[$host]   NOTE: tree is DIRTY, but NO dirty path is read by nix — what was"
+      echo "[$host]   built/deployed IS origin/main."
+    fi
+    if [ "$nr_nu" != 0 ]; then
+      echo "[$host]   NOT CLASSIFIED — $nr_nu dirty path(s) carry a character the classifier does"
+      echo "[$host]   not model, so no verdict is offered about them:"
+      sed "s|^|[$host]     - |" "$nr_unrep"
+    fi
+    echo "[$host]   classified $nr_n dirty path(s) against $NIXREAD_COUNT nix-read path(s) derived from $NIXREAD_FILES nix file(s)."
+  fi
+  rm -f "$nr_dirty" "$nr_live" "$nr_store" "$nr_unrep"
 else
   echo "[$host] ✅ VERIFIED — on branch main at origin/main (clean tree) + switched"
 fi
