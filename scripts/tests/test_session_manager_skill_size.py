@@ -716,7 +716,7 @@ def test_no_reference_topic_ROUTES_TO_ITSELF():
         hits = [t for t in _routing_paths(topic.read_text(encoding="utf-8"))
                 if _resolve_routing_path(t) == topic]
         if hits:
-            loops[topic.name] = hits
+            loops[topic.name] = hits  # pragma: no cover - the guard's own FIRING path: it fires only when the corpus is dirty, and no planted positive control drives it. Adding one is the real remedy
     assert not loops, (
         "a reference topic routes to ITSELF -- a reader following the pointer "
         "lands back where they already are:\n"
