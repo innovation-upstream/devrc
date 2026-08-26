@@ -68,6 +68,7 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 from present import generate, serve  # noqa: E402
+from testlib import mockbin  # noqa: E402
 
 REGEN_WRAPPER = SCRIPTS / "present" / "run-regen.sh"
 
@@ -473,11 +474,16 @@ def _fake_repo(tmp_path: Path) -> Path:
 
 def _stub_python(tmp_path: Path, body: str) -> Path:
     """A stand-in for `python3 -m scripts.present.generate`. It is handed the
-    same argv the wrapper builds, so `-o <tmp>` is available to it."""
-    p = tmp_path / "stub-python"
-    p.write_text("#!/usr/bin/env bash\n" + body, encoding="utf-8")
-    p.chmod(0o755)
-    return p
+    same argv the wrapper builds, so `-o <tmp>` is available to it.
+
+    🔴 Through `testlib.mockbin.write_exec`, which owns the shebang. A test that
+    writes `#!/usr/bin/env bash` at runtime execs fine on the dev host and
+    ENOENTs in the nix build sandbox — the tier the merge is gated on — so the
+    defect is structurally invisible to the tier you are most likely to run.
+    Caught here by `test_runtime_shebangs.py` on the first sandbox-tier gate.
+    The stub bodies below are POSIX sh.
+    """
+    return mockbin.write_exec(tmp_path / "stub-python", body)
 
 
 def _run_regen(tmp_path: Path, stub_body: str, out_dir: Path):
