@@ -3,7 +3,14 @@
 WHAT IT ANSWERS: "is this repo-relative path read by nix?", and in which of two
 classes — LIVE (a `mkOutOfStoreSymlink` target, deployed continuously into the
 working tree, no switch involved) or STORE (a nix path literal, read at
-eval/build time and therefore in the artifact the next switch produces).
+eval/build time).
+
+🔴 AND THE CLASS IS NOT THE WHOLE ANSWER. A STORE classification says nix reads
+the PATH; whether the FILE reached the artifact also depends on whether git knows
+about it, because nix's flake source for a git checkout is filtered to exactly
+that. Section 10 pins `nix_read_artifact_reach`, which is where the class becomes
+a claim — and the seam test there is what stops either consumer reading the class
+directly again.
 
 WHO CONSUMES IT: scripts/ship.sh (classifies the DIRTY note at the end of a
 converge) and scripts/drift-check.sh (the rc 23 ladder for untracked files that
@@ -102,6 +109,16 @@ def scan(repo, classify=()):
 
 def _q(s):
     return "'" + str(s).replace("'", "'\\''") + "'"
+
+
+def reach(cls, known):
+    """Drive nix_read_artifact_reach directly."""
+    out = subprocess.run(
+        ["bash", "-c", ". %s\nnix_read_artifact_reach %s %s" % (_q(LIB), _q(cls), known)],
+        capture_output=True, text=True,
+    )
+    assert out.returncode == 0, out.stderr
+    return out.stdout.strip()
 
 
 # --------------------------------------------------------------------------- #
@@ -577,3 +594,114 @@ def test_the_scan_roots_exist():
     assert any((REPO_ROOT / f).is_file() for f in files), files
     for d in dirs:
         assert (REPO_ROOT / d).is_dir(), d
+
+
+# --------------------------------------------------------------------------- #
+# 10. CLASS IS NOT REACH — nix_read_artifact_reach
+#
+# 🔴 THE CORRECTION THIS SECTION EXISTS FOR. A STORE classification says "nix
+# reads this path". The first version of both consumers treated that as "this
+# file is in the artifact", and it is not: nix's flake source for a git checkout
+# is FILTERED to the files git knows about, so an UNTRACKED file in a STORE path
+# reaches nothing. Saying otherwise is false in the ALARMING direction, which is
+# the failure this whole change exists to remove.
+#
+# MEASURED 2026-08-25 with a controlled four-state build (see
+# test_the_flake_source_really_is_filtered_to_what_git_knows below, which is the
+# same experiment as an executable test) and corroborated on the live host: all
+# six `-dl-router` store generations carry `tests/` (37 files) and none carries
+# the untracked `tests/load_test_store.sh`.
+# --------------------------------------------------------------------------- #
+REACH = [
+    # class,  git knows it,  reach
+    ("LIVE",  1, "LIVE"),
+    ("LIVE",  0, "LIVE"),      # a mkOutOfStoreSymlink resolves at USE time
+    ("STORE", 1, "ARTIFACT"),  # index membership, not commitment, is the line
+    ("STORE", 0, "DROPPED"),   # the flake filtered it out
+    ("NONE",  1, "NONE"),
+    ("NONE",  0, "NONE"),
+    ("UNREPRESENTABLE", 1, "UNREPRESENTABLE"),
+    ("UNREPRESENTABLE", 0, "UNREPRESENTABLE"),
+]
+
+
+@pytest.mark.parametrize("cls,known,want", REACH)
+def test_the_reach_table(cls, known, want):
+    got = reach(cls, known)
+    assert got == want, (
+        "nix_read_artifact_reach(%s, known=%s) = %s, expected %s — the class is "
+        "not the reach" % (cls, known, got, want)
+    )
+
+
+def test_a_STORE_path_reaches_the_artifact_ONLY_when_git_knows_it():
+    """🔴 THE WHOLE CORRECTION ON ONE LINE. Both halves asserted together, so a
+    mutant that hardcodes either answer is caught: the same class must give two
+    different reaches depending on the bit that was previously ignored."""
+    assert reach("STORE", 1) != reach("STORE", 0), (
+        "a STORE path reports the same reach tracked and untracked — the flake "
+        "filter is being ignored again"
+    )
+    assert (reach("STORE", 1), reach("STORE", 0)) == ("ARTIFACT", "DROPPED")
+
+
+def test_LIVE_is_unaffected_by_tracked_ness():
+    """Not an assumption. mkOutOfStoreSymlink bakes a runtime PATH STRING into
+    the store, so the deployed link resolves into the working tree at use time
+    and never through the flake source. Verified on the live host:
+    ~/.claude/skills/browser/browser -> …-home-manager-files/… ->
+    <repo>/scripts/browser-bridge/browser."""
+    assert reach("LIVE", 1) == reach("LIVE", 0) == "LIVE"
+
+
+# 🔴 WHY THE FLAKE MEASUREMENT ITSELF IS NOT A TEST HERE, stated so nobody
+# "fixes" that by adding one. The experiment needs `nix` on PATH, which the
+# dev-host tier has and the nix-sandbox tier (the one the merge is gated on) does
+# not. A test that RUNS in one tier and SKIPS in the other is the exact shape
+# `run-tests.sh`'s EXPECTED_SKIPS ledger has twice removed on purpose — it means
+# one thing on a dev host and nothing at all in the tier that gates merges, and
+# it moves the skip accounting. So the environmental fact is recorded with its
+# method in nix_read_artifact_reach's header (reproduce with `nix flake metadata
+# <repo> --json` on a git repo with one committed, one modified, one `git add`ed
+# and one untracked file — the store path it reports is the FILTERED source), and
+# what runs in every tier is the two things a regression would actually break:
+# the reach table above, and the seam below.
+
+
+@pytest.mark.parametrize("consumer", [SHIP, DRIFT])
+def test_each_consumer_routes_through_the_reach_function(consumer):
+    """🔴 THE SEAM, and the pin against the bug this section corrects.
+
+    Both consumers used to branch on `nix_read_class_of` alone and report a STORE
+    path as "in the artifact" whether or not git knew about it — false, and false
+    in the alarming direction. The fix is only real if the class never reaches a
+    verdict without passing through `nix_read_artifact_reach`, so: every call of
+    the classifier in executable code must be an ARGUMENT to the reach function.
+
+    Structural rather than behavioural on purpose — the behavioural cases live in
+    test_ship_converge.py and test_drift_check.py — because this is the property
+    that a later edit is most likely to undo by accident.
+    """
+    code = [ln for ln in consumer.read_text().splitlines()
+            if not ln.strip().startswith("#")]
+    classify = [ln for ln in code if "nix_read_class_of" in ln]
+    assert classify, f"{consumer.name} does not classify at all"
+    bare = [ln for ln in classify if "nix_read_artifact_reach" not in ln]
+    assert bare == [], (
+        "%s reads the CLASS without passing it through nix_read_artifact_reach, "
+        "so a STORE path is about to be reported as reaching the artifact "
+        "whether or not git knows it: %r" % (consumer.name, bare)
+    )
+
+
+def test_the_reach_function_has_exactly_one_definition():
+    """Same ledger discipline as the classifier: the tracked/untracked rule is a
+    predicate, and a predicate open-coded at two sites is typically wrong at one
+    of them."""
+    definers = set()
+    for p in sorted(SCRIPTS.rglob("*.sh")):
+        if "/tests/" in str(p):
+            continue
+        if "nix_read_artifact_reach()" in p.read_text():
+            definers.add(str(p.relative_to(REPO_ROOT)))
+    assert definers == {"scripts/lib/nix_read_paths.sh"}, definers

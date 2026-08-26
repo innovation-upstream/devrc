@@ -1190,14 +1190,27 @@ echo "[$host] ship-landed-sha $now"
 #    into the store WHOLE, via ${../scripts/dl-router}). One of those is in the
 #    artifact and one is not, and the old line said the same thing about both.
 #
-#    Three verdicts now, because they are three different facts:
+#    FOUR verdicts, because they are four different facts:
 #      dirty AND a mkOutOfStoreSymlink target -> that WIP is LIVE on this host
 #           right now; the deployed path is a link back into the working tree,
 #           so it needed no switch and there is no generation boundary on it.
-#      dirty AND a nix path literal           -> that WIP is IN the artifact
-#           this run just built, pinned to this generation.
+#      dirty AND a nix path literal AND GIT KNOWS IT -> that WIP is IN the
+#           artifact this run just built, pinned to this generation.
+#      dirty AND a nix path literal AND UNTRACKED -> the flake DROPPED it. Nix
+#           filters a git checkout to the files git knows about, so this reached
+#           nothing. Reported (it is unsaved work in no commit and no backup, one
+#           `git add` away from the artifact) but NOT as something deployed.
 #      dirty and NEITHER                      -> the deploy IS origin/main. A
 #           real verdict, printed as one — not softened into a warning.
+#
+#    🔴 THE THIRD CASE IS WHY THE DIRTY SET IS COMPUTED IN TWO PARTS HERE and not
+#    as one `sort -u` the way blocking_files does it. blocking_files only needs
+#    the union — every one of those paths blocks a fast-forward whether git knows
+#    it or not. This needs the DISTINCTION, because the same STORE class means
+#    two opposite things across it, and saying "in the artifact" about an
+#    untracked file is false in the ALARMING direction. Measured 2026-08-25: all
+#    six `-dl-router` store generations carry tests/ (37 files) and none carries
+#    the untracked tests/load_test_store.sh. See nix_read_artifact_reach.
 #
 #    A DETERMINISTIC SET OPERATION over a DERIVED set (see
 #    scripts/lib/nix_read_paths.sh, which reads it out of nix/ at scan time and
@@ -1212,14 +1225,20 @@ echo "[$host] ship-landed-sha $now"
 if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
   echo "[$host] ✅ VERIFIED — on branch main at origin/main + switched"
 
-  # The dirty set, computed exactly like blocking_files: modified, staged and
-  # untracked, deduped. --no-renames for the same reason it gives.
-  nr_dirty=$(mktemp); nr_live=$(mktemp); nr_store=$(mktemp); nr_unrep=$(mktemp)
+  # The dirty set, from the SAME three commands blocking_files uses — but kept in
+  # TWO buckets rather than one union, because index membership is what decides
+  # whether a STORE-class path reached the artifact. blocking_files needs only the
+  # union: every one of those paths can block a fast-forward whether git knows it
+  # or not. --no-renames for the reason it gives.
+  nr_idx=$(mktemp); nr_unt=$(mktemp)
+  nr_live=$(mktemp); nr_store=$(mktemp); nr_drop=$(mktemp); nr_unrep=$(mktemp)
   { git diff --name-only --no-renames
     git diff --cached --name-only --no-renames
-    git ls-files --others --exclude-standard
-  } 2>/dev/null | sort -u > "$nr_dirty"
-  nr_n=$(wc -l < "$nr_dirty" | tr -d " ")
+  } 2>/dev/null | sort -u > "$nr_idx"
+  git ls-files --others --exclude-standard 2>/dev/null | sort -u > "$nr_unt"
+  nr_ni=$(wc -l < "$nr_idx" | tr -d " ")
+  nr_nt=$(wc -l < "$nr_unt" | tr -d " ")
+  nr_n=$(( nr_ni + nr_nt ))
 
   nr_reason=""
   nr_lib="$repo/scripts/lib/nix_read_paths.sh"
@@ -1240,16 +1259,24 @@ if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
     echo "[$host]   This run cannot say whether that WIP reached the artifact. It is NOT a"
     echo "[$host]   claim that it did not."
   else
-    while IFS= read -r nr_p; do
-      [ -n "$nr_p" ] || continue
-      case "$(nix_read_class_of "$nr_p")" in
-        LIVE)            printf "%s\n" "$nr_p" >> "$nr_live" ;;
-        STORE)           printf "%s\n" "$nr_p" >> "$nr_store" ;;
-        UNREPRESENTABLE) printf "%s\n" "$nr_p" >> "$nr_unrep" ;;
-      esac
-    done < "$nr_dirty"
+    # nr_known: 1 for the paths git has in its index, 0 for the untracked ones.
+    # That bit — never the class alone — is what nix_read_artifact_reach turns
+    # into a claim about the artifact.
+    for nr_known in 1 0; do
+      if [ "$nr_known" = 1 ]; then nr_src="$nr_idx"; else nr_src="$nr_unt"; fi
+      while IFS= read -r nr_p; do
+        [ -n "$nr_p" ] || continue
+        case "$(nix_read_artifact_reach "$(nix_read_class_of "$nr_p")" "$nr_known")" in
+          LIVE)            printf "%s\n" "$nr_p" >> "$nr_live" ;;
+          ARTIFACT)        printf "%s\n" "$nr_p" >> "$nr_store" ;;
+          DROPPED)         printf "%s\n" "$nr_p" >> "$nr_drop" ;;
+          UNREPRESENTABLE) printf "%s\n" "$nr_p" >> "$nr_unrep" ;;
+        esac
+      done < "$nr_src"
+    done
     nr_nl=$(wc -l < "$nr_live" | tr -d " ")
     nr_ns=$(wc -l < "$nr_store" | tr -d " ")
+    nr_nd=$(wc -l < "$nr_drop" | tr -d " ")
     nr_nu=$(wc -l < "$nr_unrep" | tr -d " ")
 
     if [ "$nr_nl" != 0 ]; then
@@ -1259,22 +1286,41 @@ if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
       sed "s|^|[$host]     - |" "$nr_live"
     fi
     if [ "$nr_ns" != 0 ]; then
-      echo "[$host]   🔴 DIRTY AND IN THE ARTIFACT — nix reads $nr_ns path(s) at eval/build time,"
-      echo "[$host]   so the generation this run just built is origin/main PLUS them:"
+      echo "[$host]   🔴 DIRTY AND IN THE ARTIFACT — nix reads $nr_ns path(s) at eval/build time"
+      echo "[$host]   and git has them, so the generation this run just built is origin/main"
+      echo "[$host]   PLUS them:"
       sed "s|^|[$host]     - |" "$nr_store"
     fi
+    # 🔴 NOT "in the artifact", and that distinction is the whole point of this
+    # branch. Nix filters a git checkout to the files git knows about, so an
+    # UNTRACKED file in a nix-read path reached nothing — measured, see
+    # nix_read_artifact_reach. Still reported: it is unsaved work in no commit
+    # and no backup, sitting in a tree nix copies, one `git add` from the
+    # artifact. Reporting it as deployed would be false in the ALARMING
+    # direction, which is exactly what this block exists to stop.
+    if [ "$nr_nd" != 0 ]; then
+      echo "[$host]   UNTRACKED IN A NIX-READ PATH — $nr_nd path(s). The flake source is filtered"
+      echo "[$host]   to the files git knows about, so these did NOT reach the artifact. They are"
+      echo "[$host]   unsaved work in no commit and no backup, one git-add from being deployed:"
+      sed "s|^|[$host]     - |" "$nr_drop"
+    fi
     if [ "$nr_nl" = 0 ] && [ "$nr_ns" = 0 ] && [ "$nr_nu" = 0 ]; then
-      echo "[$host]   NOTE: tree is DIRTY, but NO dirty path is read by nix — what was"
-      echo "[$host]   built/deployed IS origin/main."
+      if [ "$nr_nd" = 0 ]; then
+        echo "[$host]   NOTE: tree is DIRTY, but NO dirty path is read by nix — what was"
+        echo "[$host]   built/deployed IS origin/main."
+      else
+        echo "[$host]   NOTE: tree is DIRTY, but nothing dirty REACHED the build — what was"
+        echo "[$host]   built/deployed IS origin/main."
+      fi
     fi
     if [ "$nr_nu" != 0 ]; then
       echo "[$host]   NOT CLASSIFIED — $nr_nu dirty path(s) carry a character the classifier does"
       echo "[$host]   not model, so no verdict is offered about them:"
       sed "s|^|[$host]     - |" "$nr_unrep"
     fi
-    echo "[$host]   classified $nr_n dirty path(s) against $NIXREAD_COUNT nix-read path(s) derived from $NIXREAD_FILES nix file(s)."
+    echo "[$host]   classified $nr_n dirty path(s) ($nr_ni tracked, $nr_nt untracked) against $NIXREAD_COUNT nix-read path(s) derived from $NIXREAD_FILES nix file(s)."
   fi
-  rm -f "$nr_dirty" "$nr_live" "$nr_store" "$nr_unrep"
+  rm -f "$nr_idx" "$nr_unt" "$nr_live" "$nr_store" "$nr_drop" "$nr_unrep"
 else
   echo "[$host] ✅ VERIFIED — on branch main at origin/main (clean tree) + switched"
 fi

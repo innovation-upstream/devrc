@@ -267,8 +267,9 @@
 # ── UNTRACKED IN A NIX-READ PATH (rc 23) ──────────────────────────────────────
 # 🔴 THE GAP THE UNTRACKED BLOCK LEFT. Untracked files have always been counted
 # and listed here, and have never escalated — correctly, because most of them are
-# scratch. But a subset of them is not scratch: it is DEPLOYED CODE with no
-# commit and no backup anywhere.
+# scratch. But a subset of them is not scratch: it sits in a path NIX READS, and
+# is either being served right now or is one `git add` from the next artifact,
+# with no commit and no backup anywhere.
 #
 # MEASURED 2026-08-25 on the workbench:
 # nix/system/apply-nebula-443.sh.LOCAL-preserved-2026-08-02 had sat untracked for
@@ -281,12 +282,22 @@
 # WHICH PATHS NIX READS IS DERIVED, NEVER LISTED — scripts/lib/nix_read_paths.sh
 # reads it out of nix/ at scan time and returns two classes, because the
 # consequences differ:
-#   LIVE   a mkOutOfStoreSymlink target. The deployed path is a link back into
-#          the working tree, so an untracked file there is being SERVED right
-#          now, continuously, with no switch and no generation boundary.
-#   STORE  a nix path literal. It lands in the artifact the next switch builds.
-# Both escalate; both are named with their class, so the operator knows whether
-# the exposure is already live or arrives at the next switch.
+#   LIVE     a mkOutOfStoreSymlink target. The deployed path is a link back into
+#            the working tree, resolved at USE time and never through the flake
+#            source, so an untracked file there IS being served right now.
+#   DROPPED  a nix path literal — nix READS that path, but the flake source is
+#            filtered to the files git knows about, so an UNTRACKED file there
+#            reached NOTHING.
+# 🔴 DROPPED IS NOT "STORE", and calling it that was this block's first bug. The
+# class says nix reads the PATH; only nix_read_artifact_reach turns that into a
+# claim about the FILE, and every path here is untracked by construction.
+# MEASURED 2026-08-25: all six `-dl-router` store generations carry tests/ (37
+# files) and NONE carries the untracked tests/load_test_store.sh; a controlled
+# four-state build confirms committed / modified / `git add`ed all land (with the
+# WORKING-TREE content) and untracked never does.
+# Both still escalate — DROPPED is unsaved work in no commit and no backup,
+# sitting in a tree nix copies, one `git add` from the artifact — but the reason
+# printed for each is now one that is true of it.
 #
 # THE LADDER IS rc 13's, for rc 18's reason: reported on EVERY run, escalated to
 # rc 23 only after N CONSECUTIVE runs (DRIFT_NIXDIRT_ESCALATE, default 12 ≈ 3
@@ -795,13 +806,22 @@ fi
 # record — the same reason the rc 13 and rc 18 ladders are there.
 #
 # The FACT line is the contract with the driver and its shape is deliberate:
-#   FACT nix-untracked untracked=<N> nixread=<M> reason=<TOKEN> [<path>=<CLASS>]…
+#   FACT nix-untracked untracked=<N> nixread=<M> reason=<TOKEN> [<path>=<REACH>]…
 # The two counts are emitted UNCONDITIONALLY, including as zeros, because a
 # driver that sees no pairs must be able to tell "this host has no untracked
 # nix-read files" from "the nix-read set came out empty and every file on every
 # host is therefore clean". Pairs are told apart from the header fields by their
-# VALUE — LIVE or STORE, the whole class vocabulary — so a repo-root file called
-# `reason` cannot be read as a header field.
+# VALUE — LIVE or DROPPED, the whole reach vocabulary — so a repo-root file
+# called `reason` cannot be read as a header field.
+#
+# 🔴 THE PAIR CARRIES THE REACH, NOT THE CLASS, and that is a correction. A STORE
+# class says nix READS the path; it does NOT say the file got into the artifact,
+# because nix filters a git checkout to the files git knows about. Every path in
+# this block came from `git ls-files --others`, so it is UNTRACKED by
+# construction — which makes the reach of a STORE path DROPPED, always. The
+# translation is nix_read_artifact_reach in the shared lib, called HERE with the
+# known-tracked bit hardcoded to 0, so the rule has exactly one definition and
+# ship.sh (which sees both kinds) calls the same function.
 NU_REASON=NOLIB
 NU_PAIRS=""
 NU_M=0
@@ -822,9 +842,9 @@ fi
 if [ "$NU_REASON" = OK ] && [ "$n" != 0 ]; then
   while IFS= read -r NU_P; do
     [ -n "$NU_P" ] || continue
-    case "$(nix_read_class_of "$NU_P")" in
-      LIVE)            NU_PAIRS="$NU_PAIRS $NU_P=LIVE";  NU_HITS=$(( NU_HITS + 1 )) ;;
-      STORE)           NU_PAIRS="$NU_PAIRS $NU_P=STORE"; NU_HITS=$(( NU_HITS + 1 )) ;;
+    case "$(nix_read_artifact_reach "$(nix_read_class_of "$NU_P")" 0)" in
+      LIVE)            NU_PAIRS="$NU_PAIRS $NU_P=LIVE";    NU_HITS=$(( NU_HITS + 1 )) ;;
+      DROPPED)         NU_PAIRS="$NU_PAIRS $NU_P=DROPPED"; NU_HITS=$(( NU_HITS + 1 )) ;;
       UNREPRESENTABLE) NU_UNREP=$(( NU_UNREP + 1 )) ;;
     esac
   done <<NU_EOF
@@ -2270,18 +2290,18 @@ for HROLE in "$LOCAL_ROLE" "$REMOTE_ROLE"; do
   # their VALUE. `${x#* }` positional parsing is what made the phase-2 gate print
   # `47 of 47`. The ORDER of these arms is load-bearing and was wrong once: with
   # `reason=*` ahead of the pair arm, an untracked repo-root file literally named
-  # `reason` produced the token `reason=STORE`, which was read as this line's
+  # `reason` produced a `reason=<REACH>` token that was read as this line's
   # REASON field — so the host came out COULD NOT MEASURE and the file it named
-  # was dropped, silently, in the direction of "nothing to see". LIVE and STORE
-  # are the whole class vocabulary and no header field can take either value, so
+  # was dropped, silently, in the direction of "nothing to see". LIVE and DROPPED
+  # are the whole reach vocabulary and no header field can take either value, so
   # matching the pairs first cannot swallow a header key.
   N_UNT=-1; N_MM=-1; N_RSN=""; N_PAIRS=""
   for X in $N_LINE; do
     case "$X" in
-      *=LIVE|*=STORE) N_PAIRS="$N_PAIRS $X" ;;
-      untracked=*)    N_UNT="${X#untracked=}" ;;
-      nixread=*)      N_MM="${X#nixread=}" ;;
-      reason=*)       N_RSN="${X#reason=}" ;;
+      *=LIVE|*=DROPPED) N_PAIRS="$N_PAIRS $X" ;;
+      untracked=*)      N_UNT="${X#untracked=}" ;;
+      nixread=*)        N_MM="${X#nixread=}" ;;
+      reason=*)         N_RSN="${X#reason=}" ;;
     esac
   done
   case "$N_UNT" in ''|*[!0-9]*) N_UNT=-1 ;; esac
@@ -2319,12 +2339,20 @@ for HROLE in "$LOCAL_ROLE" "$REMOTE_ROLE"; do
       echo "[nixdirt] 🔴 DRIFT — $HROLE $N_P: UNTRACKED in a NIX-READ path ($N_C) for $STK CONSECUTIVE runs (threshold $DRIFT_NIXDIRT_ESCALATE)."
       if [ "$N_C" = LIVE ]; then
         echo "[nixdirt]   LIVE: the deployed path is a mkOutOfStoreSymlink back into that working"
-        echo "[nixdirt]   tree, so this file is being SERVED on that host right now — with no"
+        echo "[nixdirt]   tree, which the link resolves at USE time and not through the flake"
+        echo "[nixdirt]   source — so this file IS being served on that host right now, with no"
         echo "[nixdirt]   commit, no backup and no other host holding a copy."
       else
-        echo "[nixdirt]   STORE: nix reads it at eval/build time, so every generation built on"
-        echo "[nixdirt]   that host carries it — with no commit, no backup and no other host"
-        echo "[nixdirt]   holding a copy."
+        # 🔴 THE SENTENCE THIS REPLACED WAS FALSE. It said "every generation built
+        # on that host carries it". Nix filters a git checkout to the files git
+        # knows about, so an untracked file reaches NOTHING — measured on all six
+        # -dl-router store generations. Overstating here is the precise failure
+        # this whole block exists to remove, so the finding keeps its escalation
+        # and loses the claim it could not support.
+        echo "[nixdirt]   DROPPED: nix reads that path, but the flake source is filtered to the"
+        echo "[nixdirt]   files git knows about, so this file did NOT reach the artifact. It is"
+        echo "[nixdirt]   unsaved work in no commit, no backup and on no other host — sitting in"
+        echo "[nixdirt]   a tree nix copies, one git-add from being deployed."
       fi
       echo "[nixdirt]   fix: commit it, delete it, or gitignore it on that host, then re-run."
       N_ESCALATED=$(( N_ESCALATED + 1 ))
@@ -2525,8 +2553,9 @@ if [ "$rc" != 0 ]; then
   echo "       with NO overrides is NOT ADOPTED, never rc22 — that is the shipped state."
   echo "       (ranks just under rc10 — a behind host carries a stale ledger; ship it first)"
   echo "  rc23=an UNTRACKED file in a path NIX READS has survived $DRIFT_NIXDIRT_ESCALATE consecutive runs on that"
-  echo "       host — LIVE (a mkOutOfStoreSymlink target, served right now) or STORE (copied"
-  echo "       into the artifact by the next switch). A host whose nix-read set came out EMPTY"
+  echo "       host — LIVE (a mkOutOfStoreSymlink target, being served right now) or DROPPED"
+  echo "       (nix reads the path, but the flake filtered the untracked file OUT of the"
+  echo "       artifact — unsaved work, not a deployed one). A host whose nix-read set came EMPTY"
   echo "       is COULD NOT MEASURE, never rc23. (ranks between rc15 and rc12; see severity() )"
 fi
 [ -n "$UNCHECKED" ] && echo "drift-check: NOT checked: $UNCHECKED"

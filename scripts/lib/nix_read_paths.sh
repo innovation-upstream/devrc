@@ -41,6 +41,10 @@
 # pinned to a generation), so the classes are reported separately rather than
 # folded into one "nix-read" bit.
 #
+# 🔴 A STORE CLASSIFICATION IS NOT YET A CLAIM THAT THE FILE REACHED THE
+# ARTIFACT — and the first version of this file said it was. See
+# nix_read_artifact_reach below for the measurement and the rule.
+#
 # ── DERIVED, NEVER HARDCODED ──────────────────────────────────────────────────
 # Same discipline as drift-check.sh's built-source set, which is "derived from
 # nix/pkgs/ at scan time and pinned two-way by a test, so a third such package is
@@ -259,4 +263,49 @@ nix_read_class_of() {
     case "$P" in */*) P="${P%/*}" ;; *) break ;; esac
   done
   printf 'NONE\n'
+}
+
+# nix_read_artifact_reach <class> <1 if git KNOWS the path, else 0>
+#   -> LIVE | ARTIFACT | DROPPED | NONE | UNREPRESENTABLE
+#
+# 🔴 THE CLASS ALONE OVERSTATES, AND THIS IS WHERE THAT IS FIXED. A STORE
+# classification says "nix reads this path". It does NOT say the file reached the
+# built artifact, because nix's flake source for a git checkout is FILTERED to
+# the files git knows about — CLAUDE.md already says so from the other side ("A
+# NEW file must be `git add`ed or the flake silently omits it from the deploy"),
+# and the first version of this library ignored it.
+#
+# MEASURED 2026-08-25, one directory, one build, four states, positive control
+# included (scripts/tests/test_nix_read_paths.py pins the same table):
+#   committed, unmodified ....... PRESENT (committed content)
+#   committed, MODIFIED ......... PRESENT — with the WORKING-TREE content
+#   `git add`ed, never committed  PRESENT — with the WORKING-TREE content
+#   staged then modified again .. PRESENT — with the LATEST working-tree content
+#   UNTRACKED ................... ABSENT, at every depth
+# and corroborated on the live host: all six `-dl-router` store generations carry
+# `tests/` (37 files) and NONE carries the untracked `tests/load_test_store.sh`.
+#
+# So the discriminator is INDEX MEMBERSHIP, not commitment: `git ls-files
+# --error-unmatch <p>`, or equivalently "this path came from `git diff` /
+# `git diff --cached` rather than from `git ls-files --others`". A file staged
+# ten seconds ago is in the artifact; a file committed nowhere but staged is in
+# the artifact; a file never `git add`ed is not, however long it has sat there.
+#
+# 🔴 LIVE IS UNAFFECTED, and that is not an assumption. `mkOutOfStoreSymlink`
+# bakes a runtime PATH STRING into the store, so the deployed link resolves into
+# the working tree at USE time and never through the flake source. Verified on
+# the live host: ~/.claude/skills/browser/browser -> …-home-manager-files/… ->
+# /home/zach/workspace/devrc/scripts/browser-bridge/browser. An untracked file at
+# a LIVE path is therefore genuinely being served.
+#
+# DROPPED is NOT "harmless". The file is unsaved work in no commit and no backup,
+# it sits in a tree nix copies, and a single `git add` moves it into the artifact
+# with no other action — so it is worth reporting. It is simply not worth
+# reporting as something that is already deployed.
+nix_read_artifact_reach() {
+  case "$1" in
+    LIVE)  printf 'LIVE\n' ;;
+    STORE) if [ "${2:-0}" = 1 ]; then printf 'ARTIFACT\n'; else printf 'DROPPED\n'; fi ;;
+    *)     printf '%s\n' "$1" ;;
+  esac
 }

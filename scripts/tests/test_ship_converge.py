@@ -1146,8 +1146,8 @@ def test_the_classifier_reports_a_non_zero_population(nixrepo):
     (nixrepo.work / "stable.txt").write_text("stable\nwip\n")
     rc, out = nixrepo.ship()
     assert rc == 0, out
-    m = re.search(r"classified (\d+) dirty path\(s\) against (\d+) nix-read "
-                  r"path\(s\) derived from (\d+) nix file\(s\)", out)
+    m = re.search(r"classified (\d+) dirty path\(s\) \(\d+ tracked, \d+ untracked\) "
+                  r"against (\d+) nix-read path\(s\) derived from (\d+) nix file\(s\)", out)
     assert m, f"the verdict carries no population line\n{out}"
     dirty, nixread, files = (int(g) for g in m.groups())
     assert dirty >= 1, out
@@ -1193,14 +1193,22 @@ def test_a_dirty_file_UNDER_a_directory_source_is_still_in_the_artifact(nixrepo)
 
 
 def test_an_UNTRACKED_file_in_a_nix_read_path_is_classified_too(nixrepo):
-    """The dirty set is modified + staged + UNTRACKED, exactly as blocking_files
-    computes it. An untracked file inside a directory source is in the artifact
-    just as surely as a modified one."""
+    """The dirty set is modified + staged + UNTRACKED, and the untracked ones are
+    CLASSIFIED rather than ignored — a file inside a directory source is found by
+    the ancestor walk whether or not git knows it.
+
+    🔴 This test asserted "in the artifact just as surely as a modified one" and
+    that was WRONG — the flake filters untracked files out. What it pins now is
+    the part that was right: the path is still found and still reported. Which
+    verdict it gets is
+    test_an_UNTRACKED_store_path_is_NOT_reported_as_in_the_artifact.
+    """
     (nixrepo.work / "charlie-dir" / "nested" / "hotel-new.txt").write_text("new\n")
     rc, out = nixrepo.ship()
     assert rc == 0, out
-    assert "DIRTY AND IN THE ARTIFACT" in out, out
     assert "charlie-dir/nested/hotel-new.txt" in out, out
+    assert "UNTRACKED IN A NIX-READ PATH" in out, out
+    assert "0 tracked, 1 untracked" in out, out
 
 
 def test_a_dirty_tree_with_no_nix_read_path_says_the_deploy_IS_origin_main(nixrepo):
@@ -3127,3 +3135,120 @@ def test_the_switch_log_lives_under_tmpdir_and_is_removed(tmp_path):
         f"ship left temp files behind: {leftovers} — twice over, because a "
         f"superseding run runs the local leg twice\n{out}"
     )
+
+
+# --------------------------------------------------------------------------- #
+# THE TRACKED/UNTRACKED SPLIT WITHIN THE STORE CLASS
+#
+# 🔴 A CORRECTION, and the reason it matters more than it looks. The first
+# version of this block reported every STORE-class dirty path as "in the artifact
+# just built". For a MODIFIED TRACKED file that is true — nix takes the
+# working-tree content. For an UNTRACKED file it is FALSE: nix's flake source for
+# a git checkout is filtered to the files git knows about, so the file reached
+# nothing.
+#
+# MEASURED 2026-08-25 on the live host: all six `-dl-router` store generations
+# carry `tests/` (37 files) and NONE carries the untracked
+# `tests/load_test_store.sh` — the very file that motivated this whole change.
+# A controlled four-state flake build confirms the rule and separates it from
+# "the switch predates the file": committed, modified-tracked and `git add`ed all
+# land (with the WORKING-TREE content); untracked never does, at any depth.
+#
+# The finding is KEPT — unsaved work in no commit and no backup, one `git add`
+# from the artifact — but it no longer claims to be deployed. Overstating is the
+# exact failure this block exists to remove.
+# --------------------------------------------------------------------------- #
+def test_an_UNTRACKED_store_path_is_NOT_reported_as_in_the_artifact(nixrepo):
+    """🔴 THE CORRECTION. Same path, same STORE class, untracked — and the
+    verdict must not be the one that says it is deployed."""
+    (nixrepo.work / "charlie-dir" / "nested" / "hotel-new.txt").write_text("new\n")
+    rc, out = nixrepo.ship()
+    assert rc == 0, out
+    assert "charlie-dir/nested/hotel-new.txt" in out, out
+    # 🔴 ONE assertion for BOTH directions, with ONE message. Split across two,
+    # a mutant that flips the classification dies on whichever line happens to
+    # come first — and the failure then names the wrong guard, which is
+    # indistinguishable from dying for an unrelated reason.
+    assert ("UNTRACKED IN A NIX-READ PATH" in out
+            and "did NOT reach the artifact" in out
+            and "DIRTY AND IN THE ARTIFACT" not in out), (
+        "an untracked file was reported as being in the artifact — the flake "
+        "filters it out, so it reached nothing\n%s" % out
+    )
+
+
+def test_a_TRACKED_modified_store_path_IS_in_the_artifact(nixrepo):
+    """The other half of the same distinction, asserted in the SAME class so a
+    mutant that hardcodes either verdict is caught. Nix takes the WORKING-TREE
+    content of a file git knows about, so this WIP really is in the generation."""
+    (nixrepo.work / "copied-alpha.txt").write_text("copied-alpha.txt wip\n")
+    rc, out = nixrepo.ship()
+    assert rc == 0, out
+    assert "DIRTY AND IN THE ARTIFACT" in out, out
+    assert "copied-alpha.txt" in out, out
+    assert "UNTRACKED IN A NIX-READ PATH" not in out, out
+
+
+def test_a_STAGED_never_committed_store_path_IS_in_the_artifact(nixrepo):
+    """🔴 THE BOUNDARY IS THE INDEX, NOT A COMMIT — measured, not assumed. A file
+    `git add`ed ten seconds ago and never committed is in the flake source. If
+    the split were keyed on "is it in a commit" this would be reported as
+    dropped, and it would be wrong."""
+    p = nixrepo.work / "charlie-dir" / "nested" / "india-staged.txt"
+    p.write_text("staged\n")
+    nixrepo._git(nixrepo.work, "add", "charlie-dir/nested/india-staged.txt")
+    rc, out = nixrepo.ship()
+    assert rc == 0, out
+    # One assertion, one message — see the untracked case above for why.
+    assert ("DIRTY AND IN THE ARTIFACT" in out
+            and "charlie-dir/nested/india-staged.txt" in out
+            and "UNTRACKED IN A NIX-READ PATH" not in out), (
+        "a `git add`ed file was not reported as reaching the artifact — the "
+        "discriminator has slipped from index membership to commitment\n%s" % out
+    )
+
+
+def test_an_untracked_LIVE_target_is_still_LIVE(nixrepo):
+    """🔴 LIVE IS NOT SPLIT, and that is not an oversight. mkOutOfStoreSymlink
+    bakes a runtime path string into the store, so the deployed link resolves
+    into the working tree at USE time and never through the flake source — an
+    untracked file there IS being served. Verified on the live host:
+    ~/.claude/skills/browser/browser resolves to the repo working tree."""
+    (nixrepo.work / "echo-live.txt").unlink()
+    nixrepo._git(nixrepo.work, "rm", "-q", "--cached", "echo-live.txt")
+    (nixrepo.work / "echo-live.txt").write_text("untracked but LIVE\n")
+    rc, out = nixrepo.ship()
+    assert rc == 0, out
+    assert "DIRTY AND LIVE" in out, out
+    assert "echo-live.txt" in out, out
+    assert "UNTRACKED IN A NIX-READ PATH" not in out, (
+        "a mkOutOfStoreSymlink target was reported as dropped by the flake "
+        "filter — it never goes through the flake source at all\n%s" % out
+    )
+
+
+def test_only_untracked_nix_read_paths_still_says_the_deploy_IS_origin_main(nixrepo):
+    """The consequence of the correction, and it is a REAL verdict: if the only
+    dirty nix-read paths are untracked, the flake dropped all of them, so what
+    was built IS origin/main. Both facts are printed — the artifact is clean AND
+    there is unsaved work — because they are independent claims."""
+    (nixrepo.work / "charlie-dir" / "nested" / "hotel-new.txt").write_text("new\n")
+    rc, out = nixrepo.ship()
+    assert rc == 0, out
+    assert "UNTRACKED IN A NIX-READ PATH" in out, out
+    assert "built/deployed IS origin/main" in out, out
+    assert "nothing dirty REACHED the build" in out, out
+
+
+def test_the_population_line_splits_tracked_from_untracked(nixrepo):
+    """The denominator must carry the bit the verdict now turns on — otherwise a
+    reader cannot tell which of the two rules produced the answer."""
+    (nixrepo.work / "copied-alpha.txt").write_text("wip\n")
+    (nixrepo.work / "charlie-dir" / "nested" / "hotel-new.txt").write_text("new\n")
+    rc, out = nixrepo.ship()
+    assert rc == 0, out
+    m = re.search(r"classified (\d+) dirty path\(s\) \((\d+) tracked, (\d+) untracked\)", out)
+    assert m, f"the population line does not split tracked from untracked\n{out}"
+    total, tracked, untracked = (int(g) for g in m.groups())
+    assert (tracked, untracked) == (1, 1), out
+    assert total == tracked + untracked
