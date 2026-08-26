@@ -58,7 +58,7 @@ assert spec and spec.loader
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 analyze = mod.analyze
-CONTENT, FILES = mod.CONTENT, mod.FILES
+CONTENT = mod.CONTENT
 
 fails = []
 
@@ -86,41 +86,52 @@ if len(fails) != 1:
 fails.clear()
 
 # --------------------------------------------------------------------------- #
-# MUST FIRE — tree searches the native tools already do.
+# MUST FIRE — a tree WALK by a searcher that honours .gitignore.
+#
+# 🔴 THE POSITIVE CONTROL for the whole retarget. Without it a silenced hook is
+# indistinguishable from a broken one: every "must not fire" case below would pass
+# just as well against a detector that was wired to nothing.
+#
+# The hazard these share, reproduced live on this host (see the hook's header):
+# whole-tree `grep -rn` found 1 where GNU grep found 2, and bare `rg` found 1 where
+# `rg --no-ignore` found 2.
 # --------------------------------------------------------------------------- #
 MUST_FIRE = [
-    # grep -r / -R across a tree
+    # grep -r / -R across a tree: the shell-snapshot function execs ugrep
+    # --ignore-files, so the walk is gitignore-pruned.
     ("grep -r", "grep -r TODO src/", [CONTENT]),
     ("grep -R", "grep -R 'def main' .", [CONTENT]),
     ("grep clustered flags", "grep -rn --color=never foo lib/", [CONTENT]),
     ("grep --recursive", "grep --recursive pattern .", [CONTENT]),
     ("sudo grep -r", "sudo grep -r secret /etc", [CONTENT]),
-    # ripgrep and friends default to recursive-from-cwd
+    # ripgrep and friends walk from cwd AND honour .gitignore by default
     ("bare rg", "rg 'class Foo'", [CONTENT]),
     ("rg with path", "rg -n TODO scripts/", [CONTENT]),
-    ("rg --files", "rg --files", [FILES]),
     ("ag", "ag pattern src", [CONTENT]),
-    # find by name
-    ("find -name", "find . -name '*.py'", [FILES]),
-    ("find -iname abs path", f"find {HOME}/workspace -iname 'README*'", [FILES]),
-    ("find -path", "find . -path '*/tests/*'", [FILES]),
-    # find piped into grep
-    ("find | xargs grep", "find . -name '*.py' | xargs grep -l TODO", [CONTENT]),
-    ("find -print0 | xargs -0 grep", "find . -name '*.js' -print0 | xargs -0 grep foo", [CONTENT]),
-    ("find -exec grep", "find src -name '*.c' -exec grep -H TODO {} +", [CONTENT]),
-    ("xargs grep from a file list", "cat filelist.txt | xargs grep TODO", [CONTENT]),
-    # ls -R
-    ("ls -R", "ls -R nix/", [FILES]),
-    ("ls -Ral", "ls -Ral scripts", [FILES]),
+    # `rg --files` LISTS files rather than searching contents, so it used to be the
+    # Glob-recommending kind. It stays a firing case under the retarget for a reason
+    # measured on this host: it is gitignore-blind too — `rg --files` listed 1 where
+    # `rg --files --no-ignore` listed 2. The hazard is the walk, not the output mode.
+    ("rg --files", "rg --files", [CONTENT]),
     # multi-command: a search hidden after a &&
     ("chained after &&", "git status && grep -r foo .", [CONTENT]),
     # multi-line: shlex treats \n as plain whitespace, so without an explicit
     # newline->separator pass the whole block lexes as one `cd` command and the
     # search is invisible. Caught by mutant M1.
     ("search on a later LINE", "cd /repo\necho hi\ngrep -r foo src/", [CONTENT]),
-    ("find on a later LINE", "W=/tmp/x\nfind $W -name '*.py'", [FILES]),
-    # both kinds in one call
-    ("both kinds", "grep -r foo . && find . -name '*.md'", [CONTENT, FILES]),
+    # one nudge, not two, when a call carries several blind searches
+    ("two blind searches dedupe to one kind", "grep -r a . && rg b", [CONTENT]),
+    # wrappers that do NOT change which binary runs must stay transparent
+    ("env grep -r", "env grep -r TODO src/", [CONTENT]),
+    ("time grep -r", "time grep -r TODO src/", [CONTENT]),
+    ("nice rg", "nice rg TODO", [CONTENT]),
+    ("VAR=x grep -r", "LC_ALL=C grep -r TODO src/", [CONTENT]),
+    ("grep -r after a semicolon", "cd /repo; grep -r foo .", [CONTENT]),
+    ("grep -r inside a pipeline HEAD", "grep -r foo . | head -20", [CONTENT]),
+    ("grep --dereference-recursive", "grep --dereference-recursive foo .", [CONTENT]),
+    ("ack", "ack pattern", [CONTENT]),
+    # a flag cluster that merely CONTAINS r, and one where r is not first
+    ("grep -inr cluster", "grep -inr TODO src/", [CONTENT]),
 ]
 for name, cmd, want in MUST_FIRE:
     check("FIRE " + name, analyze(cmd), want)
@@ -130,6 +141,62 @@ for name, cmd, want in MUST_FIRE:
 # failure mode here: this runs on EVERY Bash call.
 # --------------------------------------------------------------------------- #
 BENIGN = [
+    # ---------------------------------------------------------------------- #
+    # 🔴 THE RETARGET CASES — shapes this hook used to nudge about and can no
+    # longer justify. Two distinct reasons, both MEASURED, not assumed:
+    #
+    #  (a) the old advice named Grep/Glob, which do not exist on this fleet:
+    #      128 sessions reached for Grep and 0 used it; 5 reached for Glob and
+    #      0 used it. `find -name` / `ls -R` / `rg --files` fired ONLY to
+    #      recommend Glob, so with no tool to name there is nothing to say.
+    #  (b) these shapes are not gitignore-blind anyway, so the NEW warning
+    #      would be false: `find` is shadowed to `bfs`, which is not passed an
+    #      ignore-files flag and DOES see gitignored paths; and a searcher fed
+    #      EXPLICIT paths from xargs/-exec never prunes them.
+    #      Control: `find … | xargs grep` returned the correct 2 where a bare
+    #      tree walk returned 1.
+    # ---------------------------------------------------------------------- #
+    ("find -name (bfs sees gitignored files)", "find . -name '*.py'"),
+    ("find -iname abs path", f"find {HOME}/workspace -iname 'README*'"),
+    ("find -path", "find . -path '*/tests/*'"),
+    ("find on a later LINE", "W=/tmp/x\nfind $W -name '*.py'"),
+    ("ls -R", "ls -R nix/"),
+    ("ls -Ral", "ls -Ral scripts"),
+    ("find | xargs grep (explicit paths)", "find . -name '*.py' | xargs grep -l TODO"),
+    ("find -print0 | xargs -0 grep", "find . -name '*.js' -print0 | xargs -0 grep foo"),
+    ("find -exec grep", "find src -name '*.c' -exec grep -H TODO {} +"),
+    ("xargs grep from a file list", "cat filelist.txt | xargs grep TODO"),
+    # 🔴 The case that actually REACHES the via_xargs guard. Every other xargs shape is
+    # already rejected by the recursion requirement (`xargs grep -l` is not recursive)
+    # or by piped_in (`… | xargs rg`), so without a RECURSIVE grep behind xargs the
+    # guard never executes and a mutation deleting it SURVIVES — measured, then fixed
+    # by adding this case. Behaviour confirmed live: `find . -type f -print0 |
+    # xargs -0 grep -rn` returned the correct 2, i.e. explicit paths are not pruned.
+    ("xargs grep -r (explicit paths, -r is a no-op)",
+     "find . -type f -print0 | xargs -0 grep -rn TODO"),
+    # 🔴 The hook must not nag its own advice. `command grep` / an absolute path
+    # bypass the shadowing function and ARE GNU grep; --no-ignore is the rg fix.
+    ("command grep -r is the FIX", "command grep -r TODO src/"),
+    ("absolute-path grep is GNU grep", "/usr/bin/grep -rn TODO src/"),
+    ("nix-store grep is GNU grep", "/nix/store/abc-gnugrep-3.12/bin/grep -r TODO ."),
+    ("rg --no-ignore is the FIX", "rg --no-ignore TODO"),
+    ("rg --no-ignore-vcs is the FIX", "rg --no-ignore-vcs TODO src/"),
+    ("rg -u is the FIX", "rg -u TODO"),
+    ("rg --unrestricted is the FIX", "rg --unrestricted TODO"),
+    ("rg -uu is the FIX", "rg -uu TODO"),
+    ("rg -nu cluster is the FIX", "rg -nu TODO src/"),
+    ("sudo command grep -r still bypasses", "sudo command grep -r TODO /etc"),
+    ("env command grep -r still bypasses", "env command grep -r TODO src/"),
+    ("relative-path grep bypasses", "./grep -r TODO src/"),
+    # 🔴 Only the spelling `grep` is shadowed by the shell snapshot (it defines exactly
+    # three functions: find, grep, pkill). These reach the real GNU binaries, so they
+    # are NOT gitignore-blind and warning about them would be a false positive.
+    # Measured on the planted-token fixture: `egrep -rn` and `fgrep -rn` both returned
+    # the correct 2, where `grep -rn` returned 1.
+    ("egrep -r is unshadowed GNU egrep", "egrep -r 'a|b' src/"),
+    ("fgrep -R is unshadowed GNU fgrep", "fgrep -R literal ."),
+    ("rgrep is unshadowed", "rgrep -r foo ."),
+    ("ggrep -r is unshadowed", "ggrep -r foo src/"),
     # grep against a single named file
     ("grep single file", "grep TODO README.md"),
     ("grep -n single file", "grep -n 'def main' scripts/foo.py"),
@@ -178,6 +245,30 @@ for name, cmd in BENIGN:
     check("BENIGN " + name, analyze(cmd), [])
 
 # --------------------------------------------------------------------------- #
+# 🔴 THE SHADOWED/UNSHADOWED LEDGER, enforced BOTH ways.
+#
+# The hazard exists only for the ONE spelling the shell snapshot shadows. The hook
+# records that split as two named sets; without this block `UNSHADOWED_GREP` would be
+# unused decoration, and a later "tidy-up" that folded it back into GREP_BINS would
+# reintroduce the false positive with nothing to notice. So: every name in the
+# unshadowed set must classify benign under a RECURSIVE invocation (the only shape
+# that could fire at all), the sets must stay disjoint, and neither may go empty —
+# an empty UNSHADOWED_GREP would make the first loop vacuous.
+# --------------------------------------------------------------------------- #
+check("the shadowed set is exactly {'grep'}", mod.GREP_BINS, {"grep"})
+check("the unshadowed ledger is non-empty (else the loop below is vacuous)",
+      len(mod.UNSHADOWED_GREP) > 0, True)
+check("shadowed and unshadowed sets are disjoint",
+      mod.GREP_BINS & mod.UNSHADOWED_GREP, set())
+for _g in sorted(mod.UNSHADOWED_GREP):
+    check("unshadowed %s -r is benign" % _g, analyze("%s -r foo src/" % _g), [])
+# Positive control for that loop: the SAME call shape on the SHADOWED name must fire,
+# so "all benign" cannot pass by the classifier being wired to nothing.
+for _g in sorted(mod.GREP_BINS):
+    check("shadowed %s -r fires (positive control)" % _g,
+          analyze("%s -r foo src/" % _g), [CONTENT])
+
+# --------------------------------------------------------------------------- #
 # Robustness — a malformed command must be silent, never an exception.
 # --------------------------------------------------------------------------- #
 check("unbalanced quote is silent", analyze("grep -r 'unterminated"), [])
@@ -224,20 +315,41 @@ sid = "test-session-search-nudge-DO-NOT-COLLIDE"
 rc, out = run({"tool_name": "Bash", "session_id": sid,
                "tool_input": {"command": "grep -r TODO src/"}})
 check("io rc", rc, 0)
-check("io first-fire emits", bool(out) and "Grep tool" in out and "additionalContext" in out, True)
+check("io first-fire emits", bool(out) and "additionalContext" in out, True)
 # It is a NUDGE: the payload must carry no deny/block decision of any kind.
 parsed = json.loads(out) if out else {}
 check("io hookEventName", parsed.get("hookSpecificOutput", {}).get("hookEventName"), "PostToolUse")
 check("io never denies", any(k in out for k in ("permissionDecision", "\"deny\"", "block")), False)
 
+# --------------------------------------------------------------------------- #
+# 🔴 THE MESSAGE MUST NOT NAME AN ABSENT TOOL, and must not repeat the retired
+# statistic. This is the assertion that actually pins the bug that prompted the
+# retarget — the detector could be perfect while the text still told the agent to
+# call something the session does not have.
+#
+# Pinned as an ENUMERATED ban rather than one spelling: "Grep tool" alone was
+# walkable by rewording to "the Grep tool" or "Grep(". The old quoted figure is
+# banned too, because it asserted a discipline failure the data does not support
+# (it counted ATTEMPTS, essentially all of which failed).
+# --------------------------------------------------------------------------- #
+_ctx = parsed.get("hookSpecificOutput", {}).get("additionalContext", "")
+for _banned in ("Grep", "Glob", "37.5k", "native tool", "structured results"):
+    check("io message never mentions %r" % _banned, _banned in _ctx, False)
+# Positive control for that ban: the SAME field is asserted to carry the thing it
+# SHOULD say, so a message that went empty (or a field read that returns "") cannot
+# pass the five bans above by vacuity.
+check("io message says what IS actionable (.gitignore)", ".gitignore" in _ctx, True)
+check("io message names the bypass", "command grep" in _ctx, True)
+
 # second search of the same kind in the same session -> deduped, silent
 rc2, out2 = run({"tool_name": "Bash", "session_id": sid,
                  "tool_input": {"command": "grep -r other ."}})
 check("io dedupe silent", out2, "")
-# a DIFFERENT kind still fires once
+# a shape the hook can no longer justify -> silent even though the session is fresh
+# for it. Paired with the fire above, this is the fire/no-fire pair for the IO path.
 rc3, out3 = run({"tool_name": "Bash", "session_id": sid,
                  "tool_input": {"command": "find . -name '*.md'"}})
-check("io other kind fires", "Glob tool" in out3, True)
+check("io retargeted-away kind is silent", (rc3, out3), (0, ""))
 
 # benign command -> silent
 rc4, out4 = run({"tool_name": "Bash", "session_id": sid,
@@ -255,16 +367,18 @@ check("io malformed rc", p.returncode, 0)
 clear_test_state()
 
 # --------------------------------------------------------------------------- #
-# AVAILABILITY SUPPRESSION — never recommend a tool this session does not have.
+# STATE, CONCURRENCY AND FAIL-OPEN scenarios.
 #
-# The hook infers availability from the transcript, because nothing it receives
-# enumerates the session's tools and the unavailability wording is server-side (not in
-# the claude-code bundle). Each scenario below gets its OWN session id so one scenario's
-# cache file cannot decide another's outcome.
+# 🔴 What is NOT here any more, deliberately: the availability-suppression suite that
+# fed the hook a transcript containing `Error: No such tool available: Grep` and asserted
+# the nudge went quiet. That machinery is gone from the hook (see its header — the signal
+# only ever arrived AFTER the model had already eaten the failed tool call), so those
+# tests would have been asserting against deleted code.
 #
-# The pairing that makes these readable: every "suppressed" assertion is preceded by the
-# SAME payload shape against a transcript with no error record, asserted to FIRE. A
-# passing "no nudge" is otherwise indistinguishable from a harness wired to nothing.
+# Each scenario gets its OWN session id so one scenario's state cannot decide another's
+# outcome. `fire()` still accepts a transcript_path because the payload really carries
+# one; the hook now ignores it, and the fail-open cases below pin that a malformed value
+# still cannot change the outcome or crash the hook.
 # --------------------------------------------------------------------------- #
 TMP = tempfile.mkdtemp(prefix="search-tool-nudge-tests-")
 SESSIONS = []
@@ -311,23 +425,6 @@ def session(name):
     return sid
 
 
-def unavailable_record(tool):
-    """The record the harness really writes — shape copied from a live transcript
-    (claude-code 2.1.220), including the <tool_use_error> wrapper and is_error."""
-    return {
-        "type": "user",
-        "isSidechain": False,
-        "message": {"role": "user", "content": [{
-            "type": "tool_result",
-            "content": ("<tool_use_error>Error: No such tool available: %s. %s is not "
-                        "available in this session — search file contents with "
-                        "`grep` via the Bash tool instead.</tool_use_error>" % (tool, tool)),
-            "is_error": True,
-            "tool_use_id": "toolu_01FAKE",
-        }]},
-        "toolUseResult": "Error: No such tool available: %s." % tool,
-    }
-
 
 BENIGN_RECORDS = [
     {"type": "user", "message": {"role": "user", "content": [
@@ -350,16 +447,6 @@ def transcript(name, records):
     return p
 
 
-def agent_transcript(main_path, agent_id, records):
-    d = os.path.join(main_path[: -len(".jsonl")], "subagents")
-    os.makedirs(d, exist_ok=True)
-    p = os.path.join(d, "agent-%s.jsonl" % agent_id)
-    with open(p, "w") as fh:
-        for r in records:
-            fh.write(json.dumps(r) + "\n")
-    return p
-
-
 def fire(sid, cmd, transcript_path=None, agent_id=None):
     """Run the real hook and report whether it emitted a nudge."""
     payload = {"tool_name": "Bash", "session_id": sid, "tool_input": {"command": cmd}}
@@ -368,163 +455,9 @@ def fire(sid, cmd, transcript_path=None, agent_id=None):
     if agent_id is not None:
         payload["agent_id"] = agent_id
     rc, out = run(payload)
-    check("suppression rc 0 (%s)" % sid.split("-")[3], rc, 0)
+    check("hook exits 0 (%s)" % sid.split("-")[3], rc, 0)
     return bool(out)
 
-
-# --- POSITIVE CONTROL: a transcript with no error record must still nudge. -----
-sid = session("clean")
-clean = transcript("clean", BENIGN_RECORDS)
-check("clean transcript still nudges (positive control)", fire(sid, "grep -r TODO src/", clean), True)
-
-# --- NEGATIVE: Grep proven unavailable -> the CONTENT nudge is suppressed. -----
-sid = session("grep-gone")
-gone = transcript("grep-gone", BENIGN_RECORDS + [unavailable_record("Grep")])
-check("Grep unavailable suppresses the content nudge", fire(sid, "grep -r TODO src/", gone), False)
-# Per-TOOL, not session-wide: only Grep was proven missing, so the Glob nudge still
-# fires. Pins the scope of the claim — a session-wide flag would silence this too.
-check("Glob nudge still fires when only Grep was proven gone",
-      fire(sid, "find . -name '*.py'", gone), True)
-# The same distinction inside ONE command that earns BOTH kinds: the Grep half must be
-# dropped and the Glob half still delivered. A session-wide "any tool missing -> stay
-# silent" passes every check above and fails only here.
-sid = session("grep-gone-both")
-gone2 = transcript("grep-gone-both", [unavailable_record("Grep")])
-rc_b, out_b = run({"tool_name": "Bash", "session_id": sid, "transcript_path": gone2,
-                   "tool_input": {"command": "grep -r foo . && find . -name '*.md'"}})
-check("one command, both kinds: only the unavailable half is dropped",
-      ("Glob tool" in out_b, "Grep tool" in out_b), (True, False))
-
-# --- Both proven unavailable -> both suppressed. -------------------------------
-sid = session("both-gone")
-both = transcript("both-gone", [unavailable_record("Grep"), unavailable_record("Glob")])
-check("both tools gone: content suppressed", fire(sid, "grep -r TODO src/", both), False)
-check("both tools gone: files suppressed", fire(sid, "find . -name '*.py'", both), False)
-
-# --- The verdict is CACHED: a later call with no transcript at all stays quiet. -
-# Proves the short-circuit works (and that the scan is not re-run on every call).
-check("suppression persists once recorded", fire(sid, "grep -R other .", None), False)
-# ...and it is cached as a TOOL VERDICT, not merely by spending the nudge budget.
-# Asserted on the state dir because the behavioural check above cannot tell the two
-# apart: a hook that simply emitted both nudges and marked both kinds used would also
-# fall silent here. Pre-change this reads ["content", "files"] with no verdict at all.
-# (The kinds ARE present too — a kind is claimed before the scan, so that the scan runs
-# once and only one process can emit; see the claim protocol.)
-check("suppression records a tool verdict alongside the spent kinds",
-      recorded_tokens(sid), ["content", "files", "no:Glob", "no:Grep"])
-
-# --- STRUCTURAL, not spelled: the same TEXT in a non-error position must not ----
-# suppress. This is the real transcript hazard — the error wording appears verbatim
-# inside an Agent tool_use prompt and inside a subagent's report, both is_error false.
-sid = session("prose")
-_echoed = unavailable_record("Grep")["message"]["content"][0]["content"]
-prose = transcript("prose", [
-    {"type": "assistant", "message": {"role": "assistant", "content": [{
-        "type": "tool_use", "id": "toolu_x", "name": "Agent",
-        "input": {"prompt": "the harness said: Error: No such tool available: Grep. "
-                            "Grep is not available in this session — fix the hook"}}]}},
-    {"type": "user", "message": {"role": "user", "content": [{
-        "type": "tool_result", "is_error": False, "tool_use_id": "toolu_x",
-        "content": "report: Error: No such tool available: Grep. (quoted, not an error)"}]}},
-    # 🔴 The one that actually pins `is_error` as the discriminator: a tool_result whose
-    # text is BYTE-IDENTICAL to the real error record's, differing ONLY in the flag.
-    # This is what a Bash call that prints a transcript record produces — i.e. exactly
-    # what debugging this hook does. Without it, dropping the is_error check survives:
-    # the other two fixtures are rejected by the leading anchor instead, so they exercise
-    # the regex anchor, not the structural guard.
-    {"type": "user", "message": {"role": "user", "content": [{
-        "type": "tool_result", "is_error": False, "tool_use_id": "toolu_y",
-        "content": _echoed}]},
-     "toolUseResult": _echoed},
-])
-check("quoted error prose does NOT suppress", fire(sid, "grep -r TODO src/", prose), True)
-
-# --- ANCHORED: the marker must START the error text, not merely appear in it. --
-# A genuinely failed Bash call whose stderr quotes the marker is an is_error result, so
-# is_error alone does not separate it — only the anchor does. Kills `.match -> .search`;
-# there is deliberately no `^` in the pattern for a mutant to delete for free.
-sid = session("mid-text")
-midtext = transcript("mid-text", [{
-    "type": "user", "message": {"role": "user", "content": [{
-        "type": "tool_result", "is_error": True, "tool_use_id": "toolu_z",
-        "content": "grep: exit 2\nlog line: Error: No such tool available: Grep. "
-                   "Grep is not available in this session"}]}}])
-check("marker mid-text in a real error does NOT suppress",
-      fire(sid, "grep -r TODO src/", midtext), True)
-# 🔴 SAME LINE, no newline before the marker. The fixture above is not enough on its
-# own: `.` does not cross newlines, so a mutant that loosens the pattern to
-# `.*No such tool available: (…)` still fails to match it and survives. This is the
-# realistic shape — a failed command whose own stderr quotes the marker on one line —
-# and under that mutant it is FALSELY SUPPRESSED.
-sid = session("mid-line")
-midline = transcript("mid-line", [{
-    "type": "user", "message": {"role": "user", "content": [{
-        "type": "tool_result", "is_error": True, "tool_use_id": "toolu_z1",
-        "content": "Command failed with exit code 2: hook.py: Error: No such tool "
-                   "available: Grep. (matched 0 files)"}]}}])
-check("marker mid-LINE in a real error does NOT suppress",
-      fire(sid, "grep -r TODO src/", midline), True)
-
-# --- The list-form content branch is real, not speculative. -------------------
-sid = session("list-form")
-listform = transcript("list-form", [{
-    "type": "user", "message": {"role": "user", "content": [{
-        "type": "tool_result", "is_error": True, "tool_use_id": "toolu_l",
-        "content": [{"type": "text",
-                     "text": "Error: No such tool available: Grep. gone."}]}]}}])
-check("list-form error content is understood", fire(sid, "grep -r TODO src/", listform), False)
-
-# --- A DIFFERENT tool being unavailable must not suppress Grep/Glob. -----------
-sid = session("other-tool")
-other = transcript("other-tool", [unavailable_record("WebFetch")])
-check("an unrelated missing tool does not suppress", fire(sid, "grep -r TODO src/", other), True)
-
-# --- SUBAGENT SCOPING ---------------------------------------------------------
-# transcript_path is derived from the SESSION id, which a subagent shares with its
-# parent — so a subagent's own errors are only in its per-agent transcript.
-sid = session("subagent")
-parent = transcript("subagent", BENIGN_RECORDS)
-agent_transcript(parent, "agentX", [unavailable_record("Grep")])
-check("subagent's own transcript is consulted",
-      fire(sid, "grep -r TODO src/", parent, agent_id="agentX"), False)
-# ...and it must NOT leak: the parent session (same session_id, no agent_id) reads only
-# the parent transcript, which is clean, so its nudge is still delivered.
-check("subagent suppression does not leak to the parent session",
-      fire(sid, "grep -r TODO src/", parent), True)
-# ...nor to a SIBLING agent whose own transcript is clean.
-agent_transcript(parent, "agentY", BENIGN_RECORDS)
-check("subagent suppression does not leak to a sibling agent",
-      fire(sid, "grep -r TODO src/", parent, agent_id="agentY"), True)
-
-# A NESTED agent (an agent spawned by an agent) lives one level deeper; the glob
-# fallback is what finds it. Without it this transcript is never consulted.
-sid = session("nested-agent")
-nested_parent = transcript("nested-agent", BENIGN_RECORDS)
-nested_dir = os.path.join(nested_parent[: -len(".jsonl")], "subagents", "outer")
-os.makedirs(nested_dir, exist_ok=True)
-with open(os.path.join(nested_dir, "agent-inner1.jsonl"), "w") as fh:
-    fh.write(json.dumps(unavailable_record("Grep")) + "\n")
-check("nested subagent transcript is found via the glob fallback",
-      fire(sid, "grep -r TODO src/", nested_parent, agent_id="inner1"), False)
-
-# --- agent_id VALIDATION, asserted on the RESOLVED SCAN TARGET. ---------------
-# The outcome alone cannot see this: `_transcript_paths` is called directly so the
-# assertion is about which files would be READ, not about whether a nudge appeared.
-# A glob metacharacter is the realistic leak — unvalidated, "*" makes the fallback
-# glob match a SIBLING agent's transcript and inherit its verdict.
-sid = session("agent-glob")
-sib_parent = transcript("agent-glob", BENIGN_RECORDS)
-agent_transcript(sib_parent, "realsibling", [unavailable_record("Grep")])
-_paths = internal("_transcript_paths")
-check("a glob metacharacter in agent_id resolves to NO extra scan target",
-      _paths({"transcript_path": sib_parent, "agent_id": "*"}) if _paths else None,
-      [sib_parent])
-check("...and a traversal in agent_id resolves to no extra scan target either",
-      _paths({"transcript_path": sib_parent, "agent_id": "../../etc"}) if _paths else None,
-      [sib_parent])
-# Behavioural companion: it must not inherit the sibling's verdict.
-check("agent_id='*' does not inherit a sibling's suppression",
-      fire(sid, "grep -r TODO src/", sib_parent, agent_id="*"), True)
 
 # --- STATE KEY IS INJECTIVE ---------------------------------------------------
 # session="…a" + agent="b" must not share a state dir with session="…a_b" alone.
@@ -560,113 +493,6 @@ check("state key: '@' pair — agent-scoped call nudges",
       fire(Y, "grep -r TODO src/", None, agent_id="b"), True)
 check("state key: '@' pair — the raw '@' session still gets its own nudge",
       fire(Y + "@b", "grep -r TODO src/", None), True)
-
-# --- FAIL OPEN: every detection failure leaves behaviour exactly as before. ----
-sid = session("missing-file")
-check("nonexistent transcript path -> nudge unchanged",
-      fire(sid, "grep -r TODO src/", os.path.join(TMP, "nope", "sess.jsonl")), True)
-
-sid = session("garbage")
-garbage = os.path.join(TMP, "garbage.jsonl")
-with open(garbage, "w") as fh:
-    fh.write("not json\n{\"truncated\": \n\x00\x01binary\n")
-check("unparseable transcript -> nudge unchanged", fire(sid, "grep -r TODO src/", garbage), True)
-
-sid = session("is-a-dir")
-check("transcript path is a directory -> nudge unchanged", fire(sid, "grep -r TODO src/", TMP), True)
-
-sid = session("unreadable")
-unreadable = os.path.join(TMP, "unreadable.jsonl")
-with open(unreadable, "w") as fh:
-    fh.write(json.dumps(unavailable_record("Grep")) + "\n")
-os.chmod(unreadable, 0o000)
-# Skipped under a uid that ignores the mode (root in some CI images) — asserting there
-# would pin the sandbox's uid, not the hook.
-if not os.access(unreadable, os.R_OK):
-    check("unreadable transcript -> nudge unchanged", fire(sid, "grep -r TODO src/", unreadable), True)
-os.chmod(unreadable, 0o644)
-
-sid = session("nul-byte")
-# Reaches the OTHER fail-open branch — the one around path RESOLUTION rather than the
-# one around reading. Getting there needs both an agent_id and a NUL: os.path.isfile()
-# swallows ValueError and returns False (checked — a NUL path alone proves nothing),
-# but the nested-subagent glob does not: `scandir: embedded null character in path`.
-# Without that handler the exception escapes into main()'s catch-all, which exits 0
-# silently — so a detection ERROR would have become a silent SUPPRESSION.
-check("embedded NUL in transcript_path -> nudge unchanged",
-      fire(sid, "grep -r TODO src/", "/tmp/a\x00b.jsonl", agent_id="agentZ"), True)
-
-sid = session("no-transcript-key")
-check("payload without transcript_path -> nudge unchanged (legacy shape)",
-      fire(sid, "grep -r TODO src/", None), True)
-
-# --- SCAN CAP: truncation fails OPEN, and the boundary is pinned at 2 points. --
-# Measured at both ends rather than one: a cap that admits the error line exactly, and
-# one byte less. Without both, an off-by-one on the comparison is invisible.
-cap_records = BENIGN_RECORDS + [unavailable_record("Grep")]
-cap_file = transcript("cap", cap_records)
-with open(cap_file, "rb") as fh:
-    _cap_bytes = fh.read()
-EXACT = len(_cap_bytes)  # budget that admits the final (error) line in full
-
-
-def fire_with_cap_agent(sid, cap, transcript_path, agent_id=None):
-    payload = {"tool_name": "Bash", "session_id": sid, "transcript_path": transcript_path,
-               "tool_input": {"command": "grep -r TODO src/"}}
-    if agent_id is not None:
-        payload["agent_id"] = agent_id
-    p = subprocess.run([sys.executable, HOOK], input=json.dumps(payload),
-                       capture_output=True, text=True,
-                       env=dict(os.environ, SEARCH_TOOL_NUDGE_MAX_SCAN_BYTES=str(cap)))
-    check("cap rc 0", p.returncode, 0)
-    return bool(p.stdout.strip())
-
-
-def fire_with_cap(sid, cap, transcript_path):
-    return fire_with_cap_agent(sid, cap, transcript_path)
-
-
-sid = session("cap-exact")
-check("cap exactly covering the error line still detects it",
-      fire_with_cap(sid, EXACT, cap_file), False)
-sid = session("cap-short")
-check("cap one byte short truncates and fails OPEN (nudge delivered)",
-      fire_with_cap(sid, EXACT - 1, cap_file), True)
-sid = session("cap-tiny")
-check("a tiny cap fails OPEN rather than suppressing",
-      fire_with_cap(sid, 1, cap_file), True)
-
-# 🔴 The override is read at IMPORT time, outside main()'s try. An unparseable value
-# there escapes as a non-zero exit with a traceback on EVERY Bash call in the session —
-# the one thing the module docstring promises never happens, and a typo in a shell
-# profile is enough to trigger it. Every junk shape must exit 0 AND still nudge.
-for _i, _bad in enumerate(("abc", "", "  ", "-1", "0", "1e9", "9" * 400, "12abc", "0x10")):
-    sid = session("cap-junk-%d" % _i)
-    _p = subprocess.run(
-        [sys.executable, HOOK],
-        input=json.dumps({"tool_name": "Bash", "session_id": sid,
-                          "tool_input": {"command": "grep -r TODO src/"}}),
-        capture_output=True, text=True,
-        env=dict(os.environ, SEARCH_TOOL_NUDGE_MAX_SCAN_BYTES=_bad))
-    check("junk scan-cap %r: exit 0, no traceback, nudge delivered" % _bad,
-          (_p.returncode, "Traceback" in _p.stderr, bool(_p.stdout.strip())),
-          (0, False, True))
-
-# ...and a junk value must FALL BACK to the default, not silently disable detection.
-# Asserting "no crash" alone cannot see that: with a non-positive cap accepted verbatim,
-# every scan truncates on its first line, which also fails open and also nudges — the
-# same observable, a completely different reason. Only a transcript that SHOULD suppress
-# separates them.
-for _i, _bad in enumerate(("0", "-1", "abc")):
-    sid = session("cap-fallback-%d" % _i)
-    _p = subprocess.run(
-        [sys.executable, HOOK],
-        input=json.dumps({"tool_name": "Bash", "session_id": sid, "transcript_path": gone,
-                          "tool_input": {"command": "grep -r TODO src/"}}),
-        capture_output=True, text=True,
-        env=dict(os.environ, SEARCH_TOOL_NUDGE_MAX_SCAN_BYTES=_bad))
-    check("junk scan-cap %r falls back to the default (detection still works)" % _bad,
-          (_p.returncode, bool(_p.stdout.strip())), (0, False))
 
 # --- CONCURRENCY: at most ONE nudge per kind per session, under real parallelism.
 # 12 processes released by a shared barrier so their read-modify-write windows overlap.
@@ -792,25 +618,6 @@ if not os.access(_cdir, os.R_OK):
           fire(sid, "grep -r TODO src/", None), False)
 os.chmod(_cdir, 0o700)
 
-# --- Scan ORDER is load-bearing, not cosmetic. --------------------------------
-# Most-specific-first only shows up when the budget cannot cover both files: the
-# subagent's own transcript must be read BEFORE the parent's, or a large parent eats
-# the budget and the agent's own verdict is never seen.
-sid = session("scan-order")
-order_parent = transcript("scan-order", BENIGN_RECORDS * 300)
-agent_transcript(order_parent, "agentO", [unavailable_record("Grep")])
-_agent_len = os.path.getsize(os.path.join(order_parent[: -len(".jsonl")], "subagents",
-                                          "agent-agentO.jsonl"))
-check("agent transcript is scanned before the parent (budget covers only one)",
-      fire_with_cap_agent(sid, _agent_len, order_parent, "agentO"), False)
-
-# --- Only a .jsonl is treated as a transcript. --------------------------------
-sid = session("not-jsonl")
-_notjson = os.path.join(TMP, "notatranscript.txt")
-with open(_notjson, "w") as fh:
-    fh.write(json.dumps(unavailable_record("Grep")) + "\n")
-check("a non-.jsonl transcript_path is not scanned", fire(sid, "grep -r TODO src/", _notjson), True)
-
 # --- State key components are sanitized (no directory escape). ----------------
 _sdir = internal("_state_dir")
 _root = internal("STATE_ROOT")
@@ -818,13 +625,19 @@ check("a traversal in session/agent ids cannot escape the state root",
       os.path.dirname(_sdir({"session_id": "../../escape", "agent_id": "../x"}))
       if (_sdir and _root) else None, _root)
 
+# A well-formed transcript, used below only to prove that a REALISTIC payload shape
+# still behaves — the hook no longer reads the file, so these cases pin that the extra
+# fields cannot change the outcome or crash it.
+clean = transcript("clean", BENIGN_RECORDS)
+
 for i, bad in enumerate((123, [], {"a": 1}, "", "/not/a/jsonl", "/etc")):
-    # A wrong-typed / non-jsonl transcript_path must never crash and never suppress.
+    # A wrong-typed transcript_path must never crash and never change the verdict.
     sid = session("badtype%d" % i)
     check("bad transcript_path %r -> nudge unchanged" % (bad,),
           fire(sid, "grep -r TODO src/", bad), True)
 
-# Same for a wrong-typed agent_id (a `..` traversal must not become a scan target).
+# 🔴 agent_id IS still read — it scopes the state directory — so a wrong-typed or
+# traversal value must neither crash nor escape the state root (asserted above).
 for i, bad_agent in enumerate((123, [], "../../etc", "a/b", "")):
     sid = session("badagent%d" % i)
     payload = {"tool_name": "Bash", "session_id": sid, "agent_id": bad_agent,
@@ -856,7 +669,15 @@ leaked = sorted(os.path.basename(p) for pref in TEST_SID_PREFIXES
 check("no test state leaks into the next run", leaked, [])
 shutil.rmtree(TMP, ignore_errors=True)
 
-MIN_CHECKS = 160  # floor: a suite that silently shrinks is a vacuous green
+# Floor: a suite that silently shrinks is a vacuous green.
+# 🔴 LOWERED 160 -> 130 on 2026-08-25, deliberately and once. The availability-suppression
+# suite (~42 checks: transcript scanning, scan-cap boundaries, subagent transcript
+# resolution, scan order) was removed because the hook code it asserted against was
+# removed — see the hook's header. Those checks did not become flaky or get skipped, they
+# stopped having a subject. The run measures 134, so 130 leaves the same ~4-check margin
+# the old value carried; it is NOT set to the measured number, so a real shrink still
+# trips it.
+MIN_CHECKS = 130
 if fails:
     print("FAIL:")
     for f in fails:
@@ -868,7 +689,7 @@ if len(ran) < MIN_CHECKS:
 print(f"all search-tool-nudge tests passed ({len(ran)} checks: "
       f"{len(MUST_FIRE)} must-fire, {len(BENIGN)} benign, "
       f"1 harness negative control, 1 benign-counter positive control, "
-      f"{len(SESSIONS)} availability-suppression scenarios)")
+      f"{len(SESSIONS)} state/concurrency scenarios)")
 # Machine-readable, and PARSED by the external isolation guard — keep the wording.
 # This half is only the number this file measured itself; the other half of the
 # pair (writes to the INHERITED home, which must be 0) is measured from outside,
