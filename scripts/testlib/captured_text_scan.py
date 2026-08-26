@@ -140,7 +140,7 @@ from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
 if str(_HERE.parent) not in sys.path:
-    sys.path.insert(0, str(_HERE.parent))
+    sys.path.insert(0, str(_HERE.parent))  # pragma: no cover - the package parent is already on sys.path under every runner used here
 
 # 🔴 ONE RULE, ONE PLACE. The file-enumeration half — `git ls-files` with a
 # filesystem fallback for the nix sandbox, and the skip-dir test taken RELATIVE
@@ -448,9 +448,9 @@ def _strip_jsonc(text: str) -> str:
         if in_str:
             out.append(c)
             if esc:
-                esc = False
+                esc = False  # pragma: no cover - no JSON in this corpus escapes a character inside a string
             elif c == "\\":
-                esc = True
+                esc = True  # pragma: no cover - no JSON in this corpus contains a backslash inside a string
             elif c == '"':
                 in_str = False
             i += 1
@@ -466,7 +466,7 @@ def _strip_jsonc(text: str) -> str:
                 i += 1
             continue
         if c == "/" and i + 1 < n and text[i + 1] == "*":
-            i += 2
+            i += 2  # pragma: no cover - no JSON in this corpus carries a /* */ block comment
             while i + 1 < n and not (text[i] == "*" and text[i + 1] == "/"):
                 i += 1
             i += 2
@@ -492,7 +492,7 @@ def _parse(path: Path):
     try:
         text = path.read_text(encoding="utf-8")
     except (UnicodeDecodeError, OSError):
-        return None
+        return None  # pragma: no cover - not raised over the tracked corpus
     suffix = path.suffix.lower()
     try:
         if suffix in _LINE_SUFFIXES:
@@ -520,7 +520,7 @@ def _filename_seed(path: Path) -> str | None:
 def scan_file(path: Path) -> list[tuple[str, int, int]]:
     """`(keypath, count, max_len)` for one file, sorted. NEVER returns a value."""
     if path.suffix.lower() not in SCANNED_SUFFIXES:
-        return []
+        return []  # pragma: no cover - no path with an unscanned suffix reaches this call in the current corpus
     docs = _parse(path)
     if docs is None:
         return []

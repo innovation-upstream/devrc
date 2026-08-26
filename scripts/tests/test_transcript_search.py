@@ -720,8 +720,12 @@ JSONL_GLOB_SITES = {
         (1, "telemetry reconciler: counts files against ClickHouse rows, opens none"),
     ("scripts/tmux-session-restore.py", "ENUMERATING"):
         (1, "FLAT glob of one already-known project dir; never recurses"),
-    ("scripts/claude-hooks/search-tool-nudge.py", "BY-ID"):
-        (1, "resolves ONE agent-<id>.jsonl in the subagents tier the shared walk excludes"),
+    # 🔴 REMOVED 2026-08-25 with the code it described. search-tool-nudge.py used to
+    # resolve ONE agent-<id>.jsonl to infer whether the session had the Grep/Glob tools.
+    # That inference is gone (the tools are absent fleet-wide and the signal only ever
+    # arrived after the failed call), so the hook reads no transcript at all now and
+    # imports no `glob`. This ledger is pinned BOTH ways, so leaving the entry here
+    # would have failed the gate as a stale reason — which is exactly how it was caught.
     ("scripts/lib/subsystem_touch.py", "BY-ID"):
         (1, "resolves one session id; a second reader of the by-id rule, not of the corpus"),
     ("scripts/claude-hooks/tests/test_bg_command_capture.py", "OS-WALK"):

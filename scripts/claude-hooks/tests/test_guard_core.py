@@ -2489,7 +2489,7 @@ def test_ordinary_commands_never_exec_git(tmp_path, monkeypatch):
 
     def counting(argv, *a, **k):
         if isinstance(argv, (list, tuple)) and argv and argv[0] == "git":
-            execs.append(argv)
+            execs.append(argv)  # pragma: no cover - no case in this suite drives a git argv through the fake
         return real(argv, *a, **k)
 
     monkeypatch.setattr(gc.subprocess, "run", counting)

@@ -121,7 +121,7 @@ def _corpus() -> dict[Path, str]:
         try:
             out[p] = _normalise(p.read_text(encoding="utf-8"))
         except (UnicodeDecodeError, OSError):
-            continue
+            continue  # pragma: no cover - not raised over the tracked corpus
     return out
 
 

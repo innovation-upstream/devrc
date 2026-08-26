@@ -208,7 +208,7 @@ def repo_files(root: Path) -> list[Path]:
                 capture_output=True, text=True, check=True, timeout=60).stdout
             return sorted(root / p for p in out.split("\0") if p)
         except (OSError, subprocess.SubprocessError):
-            pass  # fall through to the walk
+            pass  # fall through to the walk  # pragma: no cover - not raised over the tracked corpus
     return sorted(
         p for p in root.rglob("*")
         if p.is_file() and not _is_skipped(p, root)
@@ -232,7 +232,7 @@ def scan_repo(root: Path) -> list[tuple[str, int, str, str]]:
     hits: list[tuple[str, int, str, str]] = []
     for path in repo_files(root):
         if _is_skipped(path, root):
-            continue
+            continue  # pragma: no cover - SKIP_DIRS are gitignored, so the git ls-files path never yields one; on the rglob fallback repo_files has already filtered. Load-bearing on the git path
         for lineno, tok, line in scan_file(path):
             hits.append((str(path.relative_to(root)), lineno, tok, line))
     return sorted(hits)

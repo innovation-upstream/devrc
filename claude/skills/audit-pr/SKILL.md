@@ -58,9 +58,43 @@ Ask the re-auditor to:
   check that now rejects a legitimate case);
 - treat "the author says it's fixed" as a claim to verify against the diff.
 
-Stop when a round produces no new findings — not when the author says it's done. **Say that to the
-re-auditor explicitly** ("a clean round is the stop condition; do not invent findings to justify the
-round") — otherwise late rounds manufacture nits to look productive.
+### 🔴 A clean round ENDS the ladder. Never run another round to confirm a clean round.
+
+Rounds continue **only** while the previous round produced a finding that required a fix. The first
+round that returns no findings is the last one — stop there, and do not re-confirm it. Stop on that,
+not on the author saying it's done.
+
+🔴 **A "safe to merge" VERDICT is not the stop signal — the FINDINGS are.** #804's rounds **5, 6 and
+7 each returned "safe to merge" and each still reported real defects** that were then fixed: a
+module-scope `installAutoStart` whose deletion left the entire lightbox inert in Brave with the
+suite 99/99 green; four checked-in numbers that disagreed with each other about one measurement; and
+a `didDrag` latch pinned on its SET but not its RELEASE, where deleting the reset, deleting the
+clear, and deleting **both** were all green. A ladder keyed to the verdict stops at round 5 and
+ships that latch — a guard that reads as pinned and is vacuous in both directions.
+
+⚠ **#804 is NOT an example of a wasted round, and neither is any other PR cited here.** Every one of
+its eight rounds produced findings that needed fixing, round 8 included (three 🟢, two of them
+shipped features that could be unwired with the suite green). The ladder ran to 8 legitimately and
+the stop rule was never exercised on it. This is a forward rule with a demonstrated near-miss — do
+not cite it as a fix for measured waste.
+
+🔴 **This is NOT a round cap, and a cap was rejected.** The count is set by FINDINGS, never by a
+number, and #505 is why: its round 2 opens *"Round 1 fixed six findings and introduced two of its
+own"*, and its round 4 caught a **ReDoS that round 3's own fix introduced** — three 40-char shas did
+not return in 30 s, hanging `/handoff` with no output — plus a terminator requirement that round 3
+had added and that silently dropped ten marker shapes, *"the failure this detector exists to
+prevent, reintroduced by the fix for the previous one"*. A cap at 2 or 3 ships both. Keep going
+while rounds keep finding things — `claude/RULES.md` still says to budget for several — and stop the
+moment one does not.
+
+**When a round's fix is mostly renumbering your own prose, fix the FORM, not the number.** #804 hit
+this three times: round 5 found "four `.toLowerCase()` guards" was seven, round 6 found four
+checked-in numbers for one measurement, and round 8's own message records the count regrowing wrong
+*twice in the paragraph about counts*. Number the list and tell the reader to count it; a total
+maintained in parallel with the thing it counts will drift.
+
+**Say the stop rule to the re-auditor explicitly** ("a clean round is the stop condition; do not
+invent findings to justify the round") — otherwise late rounds manufacture nits to look productive.
 
 🔴 **A FRAMED AUDIT VERIFIES THE FRAME. When a PR has already been audited, dispatch the next one
 BLIND** — give it the diff and the checklist, *not* your conclusions or the prior findings' answers.
