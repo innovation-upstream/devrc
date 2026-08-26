@@ -131,6 +131,20 @@ off **host + `cwd-id`**, both recorded in the claim commit. Allowed without
 escape hatch is for), or a slug nobody holds. Refused (rc 10): a live claim
 belonging to another session, **and one whose owner could not be read** — "could
 not find out" must not authorise a destructive write on somebody else's lock.
+🔴 **And it reads the LEGACY field, because refs OUTLIVE a format change.**
+Found by verifying live rather than by the suite: at the moment the gate landed,
+**three claims made by the pre-hash version were live on the real origin**, each
+carrying an absolute `cwd:` and no `cwd-id:`. A gate reading only the new field
+would have locked their own holder out of `--release` without `--force` for the
+rest of the TTL — the new guard becoming the stuck-lock it exists to prevent. So
+ownership falls back to comparing the legacy `cwd:` (read only; never written),
+and a transitional claim's `where:` line says which format it is in rather than
+"unknown". Pinned at both points by
+`test_a_claim_in_the_pre_cwd_id_format_is_still_recognised_as_its_holders_own` —
+the matching cwd releases without `--force`, a different cwd is still refused.
+⚠ Those three published claims carry `cwd: /home/zach/workspace/devrc`, a path
+already all over this public repo, so nothing needed redacting.
+
 Pinned by `test_release_refuses_another_sessions_live_claim_unless_forced`,
 `test_steal_refuses_another_sessions_live_claim_unless_forced`,
 `test_a_stale_claim_can_still_be_released_by_anyone_without_force` (the same

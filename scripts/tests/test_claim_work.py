@@ -1682,3 +1682,64 @@ def test_the_claim_commit_records_an_opaque_cwd_id_not_an_absolute_path(tmp_path
         f"the claim commit published an ABSOLUTE PATH to the remote:\n{body}")
     assert re.search(r"^host: \S+$", body, re.M), body
     assert re.search(r"^nonce: \S+$", body, re.M), body
+
+
+# ── 🔴 refs OUTLIVE a format change ──────────────────────────────────────────
+
+def _legacy_claim(origin: Path, work: Path, slug: str, cwd: str,
+                  host: str, subject: str = "legacy claim") -> str:
+    """Publish a claim in the PRE-2026-08-26 format: an absolute `cwd:` trailer
+    and no `cwd-id:`. Built with raw git so it is genuinely the old shape rather
+    than whatever the current script emits."""
+    env = _env()
+    tree = _git("-C", str(work), "mktree", input="", env=env).stdout.strip()
+    body = (f"claim({slug}): {subject}\n\n"
+            f"claimed-by: t <t@localhost>\n"
+            f"host: {host}\n"
+            f"cwd: {cwd}\n"
+            f"nonce: 1-2\n")
+    sha = _git("-C", str(work), "commit-tree", tree, input=body, env=env).stdout.strip()
+    _git("-C", str(work), "push", "origin", f"{sha}:{CLAIM_NS}{slug}", env=env)
+    return sha
+
+
+def test_a_claim_in_the_pre_cwd_id_format_is_still_recognised_as_its_holders_own(tmp_path):
+    """🔴 FOUND BY VERIFYING LIVE, NOT BY THE SUITE. At the moment the ownership
+    gate landed, THREE claims made by the pre-hash version were live on the real
+    origin, each carrying an absolute `cwd:` and no `cwd-id:`. A gate that only
+    reads the new field would have locked their own holder out of `--release`
+    without `--force` for the rest of the TTL — the new guard turning into the
+    stuck-lock it exists to prevent.
+
+    So ownership reads the legacy field too. Measured at BOTH points, because
+    "accepts the legacy field" and "accepts it from anyone" are different bugs:
+    the matching cwd releases without `--force`, a different cwd is still refused.
+    """
+    origin = _bare_origin(tmp_path)
+    a = _session(tmp_path, origin, "Same Identity", "a")
+    b = _session(tmp_path, origin, "Same Identity", "b")
+    host = os.uname().nodename
+
+    # (1) The legacy claim's `cwd:` matches THIS invocation's ident repo.
+    _legacy_claim(origin, a, "legacy-mine", cwd=str(a), host=host)
+    mine = _run("--release", "legacy-mine", repo=a)
+    assert mine.returncode == RC_OK, (
+        f"the holder of a pre-cwd-id claim could not release it without --force "
+        f"(rc={mine.returncode}) — the ownership gate locks them out of their own "
+        f"live claim for the rest of the TTL\n{mine.stdout}\n{mine.stderr}")
+    assert f"{CLAIM_NS}legacy-mine" not in _remote_refs(origin)
+
+    # (2) …and it is NOT everybody's. Same legacy shape, a different cwd.
+    _legacy_claim(origin, a, "legacy-theirs", cwd=str(a), host=host)
+    theirs = _run("--release", "legacy-theirs", repo=b)
+    assert theirs.returncode == RC_TAKEN, (
+        f"the legacy branch accepted a claim recorded against a DIFFERENT cwd "
+        f"(rc={theirs.returncode}) — it is reading the field but not comparing it"
+        f"\n{theirs.stdout}\n{theirs.stderr}")
+    assert f"{CLAIM_NS}legacy-theirs" in _remote_refs(origin)
+
+    # (3) …and a reader is told the format, not "unknown".
+    shown = _run("--check", "legacy-theirs", repo=b)
+    assert shown.returncode == RC_TAKEN
+    assert str(a) in shown.stdout and "pre-2026-08-26 claim format" in shown.stdout, (
+        f"a transitional claim's origin is reported as unknown:\n{shown.stdout}")

@@ -565,11 +565,40 @@ claim_field() {
 # 🔴 OWNERSHIP, AND WHY IT IS NOT THE AUTHOR. See MY_CWD_ID above: the git
 # identity is identical across both hosts and across every agent on one host, so
 # `%an <%ae>` cannot tell two sessions apart. host + cwd-id can.
+#
+# 🔴 AND IT READS THE LEGACY FIELD, because refs OUTLIVE a format change.
+# Measured 2026-08-26: three claims made by the pre-hash version were LIVE on
+# origin at the moment the ownership gate landed, each carrying an absolute
+# `cwd:` instead of `cwd-id:`. Without this branch their own holder could not
+# `--release` them without `--force` for the rest of the TTL — the new gate
+# locking the operator out of his own claims. We READ the old field; we never
+# write it.
 claim_is_mine() {
-  local ref="$1" h c
+  local ref="$1" h c legacy
   h="$(claim_field "$ref" host)"
+  [ -n "$h" ] && [ "$h" = "$MY_HOST" ] || return 1
   c="$(claim_field "$ref" cwd-id)"
-  [ -n "$h" ] && [ -n "$c" ] && [ "$h" = "$MY_HOST" ] && [ "$c" = "$MY_CWD_ID" ]
+  if [ -n "$c" ]; then
+    [ "$c" = "$MY_CWD_ID" ]
+    return
+  fi
+  legacy="$(claim_field "$ref" cwd)"
+  [ -n "$legacy" ] && [ "$legacy" = "$IDENT_REPO" ]
+}
+
+# WHERE a claim came from, for a human. Prefers the hash; falls back to the
+# legacy absolute `cwd:` and SAYS it is the old format, so a reader of a
+# transitional claim is not told "unknown".
+claim_where() {
+  local ref="$1" c legacy
+  c="$(claim_field "$ref" cwd-id)"
+  if [ -n "$c" ]; then printf 'cwd-id %s' "$c"; return 0; fi
+  legacy="$(claim_field "$ref" cwd)"
+  if [ -n "$legacy" ]; then
+    printf 'cwd %s  (pre-2026-08-26 claim format — no cwd-id)' "$legacy"
+    return 0
+  fi
+  printf 'cwd-id unknown'
 }
 
 claim_age_secs() {
@@ -606,7 +635,6 @@ report_existing() {
   subject="$(git_ -C "$WS" log -1 --format='%s' "refs/claims/$s")"
   age="$(claim_age_secs "refs/claims/$s")"
   host="$(claim_field "refs/claims/$s" host)"
-  cwdid="$(claim_field "refs/claims/$s" cwd-id)"
 
   printf '%s: ALREADY CLAIMED — %s%s\n' "$PROG" "$CLAIM_NS" "$s"
   printf '  who:   %s\n' "$who"
@@ -614,7 +642,7 @@ report_existing() {
   # 🔴 WHERE, not just WHO. `%an <%ae>` is the SAME identity for every session on
   # both hosts, so a refusal naming only the author names a party that cannot
   # discriminate — the reader cannot tell somebody else's claim from their own.
-  printf '  where: host %s, cwd-id %s%s\n' "${host:-unknown}" "${cwdid:-unknown}" \
+  printf '  where: host %s, %s%s\n' "${host:-unknown}" "$(claim_where "refs/claims/$s")" \
     "$(claim_is_mine "refs/claims/$s" && printf ' — THIS SESSION (you already hold it)' || true)"
   printf '  what:  %s\n' "$(human_subject "$s" "$subject")"
 
@@ -662,8 +690,8 @@ require_ownership_or_force() {
   printf '%s: REFUSED — %s%s is NOT yours and is NOT stale (%s old, TTL %s day(s))\n' \
     "$PROG" "$CLAIM_NS" "$s" "$(human_age "$age")" "$TTL_DAYS"
   printf '  held by:  %s\n' "$(git_ -C "$WS" log -1 --format='%an <%ae>' "refs/claims/$s")"
-  printf '  where:    host %s, cwd-id %s\n' \
-    "$(claim_field "refs/claims/$s" host)" "$(claim_field "refs/claims/$s" cwd-id)"
+  printf '  where:    host %s, %s\n' \
+    "$(claim_field "refs/claims/$s" host)" "$(claim_where "refs/claims/$s")"
   printf '  you are:  host %s, cwd-id %s\n' "$MY_HOST" "$MY_CWD_ID"
   printf '  what:     %s\n' \
     "$(human_subject "$s" "$(git_ -C "$WS" log -1 --format='%s' "refs/claims/$s")")"
