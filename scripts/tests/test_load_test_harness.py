@@ -463,13 +463,20 @@ def test_the_harness_cannot_be_collected_by_the_gate() -> None:
     assert name.endswith(".sh"), name
     assert not name.startswith("test_"), name
     assert not name.endswith("_test.py"), name
-    configs = [REPO_ROOT / n for n in
-               ("pytest.ini", "setup.cfg", "pyproject.toml", "tox.ini")]
-    present = [c.name for c in configs if c.exists()]
-    assert not present, (
-        f"a pytest config appeared ({present}) — re-check that it does not set "
-        "`python_files`, which is the only thing that could make "
-        f"{name} collectable by scripts/run-tests.sh")
+    # `python_files` is the ONE setting that could change what that name means.
+    # Check the CONTENT of whatever config exists rather than forbidding configs
+    # outright — a `pyproject.toml` added for an unrelated reason must not fail
+    # this with a message about pytest collection.
+    widened = []
+    for cfg in ("pytest.ini", "setup.cfg", "pyproject.toml", "tox.ini"):
+        path = REPO_ROOT / cfg
+        if path.exists() and "python_files" in path.read_text(
+                encoding="utf-8", errors="replace"):
+            widened.append(cfg)
+    assert not widened, (
+        f"{widened} set `python_files` — re-check that the pattern still "
+        f"excludes {name}, or scripts/run-tests.sh will collect a script that "
+        "spawns CPU burners and takes minutes")
 
 
 def deploy_carries(repo: Path, path: Path) -> tuple[bool, str]:
