@@ -160,6 +160,35 @@ def scratch(name):
     return os.path.join(SCRATCH, name)
 
 
+def stable_id(cmd):
+    """A parametrize id for `cmd` with the per-run scratch path REDACTED.
+
+    🔴 A PARAMETRIZE ID MUST NOT CARRY `SCRATCH`, OR THE WHOLE GATE STOPS —
+    and it is the id, not the test, that breaks. pytest derives an id from the
+    parameter VALUE, so a command string holding this module's `mkdtemp` path
+    puts that random path in the id. Every xdist worker imports this module
+    fresh and gets a DIFFERENT `SCRATCH`, so the workers collect different ids
+    and xdist aborts the whole run:
+
+        ERROR gw1 - Different tests were collected between gw0 and gw1
+
+    Measured on this file at 200e6383: `-n 4` → 3 errors, 0 tests; serial →
+    474 passed. Since #841 the gate runs every pytest target 4-way, so that is
+    a red gate blocking every open PR in the repo — from a test id, with no
+    test having failed.
+
+    Redaction rather than a fixed path: several cases below depend on the
+    FILESYSTEM path being fresh and per-run (see the `SCRATCH` comment), and a
+    fixed shared name would collide between the concurrent gate runs this box
+    hosts. So the path stays random and only the id is pinned — the id becomes
+    a pure function of the table.
+
+    `test_control_no_parametrize_id_can_carry_the_scratch_path` pins that this
+    is actually applied everywhere it must be.
+    """
+    return cmd.replace(SCRATCH, "<scratch>")
+
+
 # --------------------------------------------------------------------------- #
 # drivers
 # --------------------------------------------------------------------------- #
@@ -653,7 +682,8 @@ UNRELATED_HEREDOC_CASES = [
 ]
 
 
-@pytest.mark.parametrize("tail,mark", UNRELATED_HEREDOC_CASES)
+@pytest.mark.parametrize("tail,mark", UNRELATED_HEREDOC_CASES,
+                         ids=[stable_id(c[0]) for c in UNRELATED_HEREDOC_CASES])
 def test_an_unrelated_heredoc_does_not_satisfy_a_create(tail, mark):
     """🔴 A well-specified heredoc written earlier on the line, for a DIFFERENT
     command, must not answer for a create — whatever the reason the create's own
@@ -1598,12 +1628,14 @@ REALISTIC_ALLOWS = [
 ]
 
 
-@pytest.mark.parametrize("cmd", REALISTIC_ALLOWS)
+@pytest.mark.parametrize("cmd", REALISTIC_ALLOWS,
+                         ids=[stable_id(c) for c in REALISTIC_ALLOWS])
 def test_a_realistic_correct_call_is_allowed(cmd):
     assert ev(cmd) is None, cmd
 
 
-@pytest.mark.parametrize("cmd", REALISTIC_ALLOWS[:12])
+@pytest.mark.parametrize("cmd", REALISTIC_ALLOWS[:12],
+                         ids=[stable_id(c) for c in REALISTIC_ALLOWS[:12]])
 def test_a_realistic_correct_call_is_allowed_through_the_real_process(cmd):
     assert_allowed(cmd)
 
@@ -1835,6 +1867,90 @@ def test_control_the_specified_fixtures_carry_REAL_newlines():
     assert SCRATCH.startswith(tempfile.gettempdir())
     assert os.path.basename(SCRATCH).startswith("ghccg-test-")
     assert len(os.path.basename(SCRATCH)) > len("ghccg-test-")
+
+
+def _collect_ids_in_a_fresh_process(tmpdir):
+    """This file's collected node ids, from a SEPARATE process with its OWN
+    TMPDIR — i.e. its own `SCRATCH`, exactly like an xdist worker."""
+    os.makedirs(tmpdir, exist_ok=True)
+    e = {k: v for k, v in os.environ.items() if not k.startswith("PYTEST_")}
+    e["TMPDIR"] = str(tmpdir)
+    e["PYTHONDONTWRITEBYTECODE"] = "1"
+    p = subprocess.run(
+        [sys.executable, "-m", "pytest", os.path.abspath(__file__),
+         "--collect-only", "-q", "-p", "no:cacheprovider"],
+        capture_output=True, text=True, env=e, cwd=str(ROOT))
+    assert p.returncode == 0, (
+        "the control could not collect this file at all — the assertions below "
+        f"would be vacuous:\n{p.stdout[-2000:]}\n{p.stderr[-2000:]}")
+    return [ln for ln in p.stdout.splitlines() if "::" in ln]
+
+
+def test_control_no_parametrize_id_can_carry_the_scratch_path(tmp_path):
+    """🔴 THE ID IS PART OF THE CONTRACT, AND IT BREAKS THE GATE, NOT THE TEST.
+
+    `SCRATCH` is a fresh `mkdtemp` (deliberately — see its comment), and pytest
+    derives a parametrize id from the parameter VALUE. So any table entry
+    holding a `scratch(...)` path puts a random path in an id. Every xdist
+    worker imports this module fresh and gets a different one, so the workers
+    disagree about WHICH TESTS EXIST and xdist aborts:
+
+        ERROR gw1 - Different tests were collected between gw0 and gw1
+
+    Measured at 200e6383 on this file: `-n 4` → 3 errors, 0 tests collected;
+    serial → 474 passed. The gate has run every pytest target 4-way since #841,
+    so that is a red gate — on both tiers — blocking every open PR, with no
+    test having failed and nothing in the output naming a cause.
+
+    Two real processes with different TMPDIRs, because that is the defect's own
+    definition and the only shape that cannot be satisfied by agreeing with
+    itself: deriving the expectation from this module's own `SCRATCH` would
+    assert only that one process is self-consistent, which it always is.
+
+    NOT fixed by pinning `SCRATCH` to a constant path: several cases here need
+    a directory no leftover file can answer for, and a shared name collides
+    between the concurrent gate runs this box hosts. The id is pinned; the
+    path stays random.
+    """
+    a = _collect_ids_in_a_fresh_process(tmp_path / "tmp-a")
+    b = _collect_ids_in_a_fresh_process(tmp_path / "tmp-b")
+
+    # --- THE CLAIM, FIRST --------------------------------------------------- #
+    # 🔴 ORDER IS LOAD-BEARING, and the first draft of this test had it wrong.
+    # With the coverage controls above the claim, removing an `ids=` DROPS the
+    # redaction count, so the control tripped first and the claim below never
+    # executed — the guard went red for a reason that named neither the
+    # offending table nor xdist. A mutant must be killed by the assertion that
+    # OWNS it. The controls still run; they just cannot pre-empt it, and a
+    # vacuous collection (0 ids, no offenders) still fails on them below.
+    offenders = [i for i in a + b if "ghccg-test-" in i]
+    assert not offenders, (
+        f"{len(offenders)} collected id(s) embed the per-process scratch dir. "
+        "Under xdist every worker gets a different one and the ENTIRE RUN "
+        "aborts with a collection mismatch — every open PR in the repo blocked, "
+        "with no test having failed. Give that parametrize an explicit "
+        "`ids=[stable_id(...) ...]`.\n  " + "\n  ".join(o[:200] for o in offenders[:5]))
+
+    assert a == b, (
+        "two processes collected different node ids, so xdist will abort this "
+        "target with 'Different tests were collected'. Something in a "
+        "parametrize table varies per process (a tmpdir, a pid, a timestamp, a "
+        "uuid). Differing ids:\n  " +
+        "\n  ".join(x[:200] for x in (set(a) ^ set(b)))[:2000])
+
+    # --- COVERAGE CONTROLS, AFTER --------------------------------------------- #
+    # A guard that read an empty id list would report a reassuring zero above.
+    # These say the collection happened AND that it reached the at-risk tables.
+    assert len(a) >= 400, (
+        f"only {len(a)} ids collected — too few for this file; the offender "
+        "search above was scanning almost nothing")
+    redacted = [i for i in a if "<scratch>" in i]
+    assert len(redacted) >= 3, (
+        "fewer than 3 collected ids carry the '<scratch>' redaction token, so "
+        "the offender search above is watching less than it was written for. "
+        "Either `stable_id` stopped being applied to a table that needs it, or "
+        "the tables stopped using `scratch(...)` — check which before relaxing "
+        f"this number. ids carrying the token: {redacted}")
 
 
 # =========================================================================== #
