@@ -17,36 +17,42 @@ This doc records what shipped, what the name applies to, and the coupling points
 team instance, each measured rather than assumed.
 
 ## State now
-- Branch `main`, clean apart from two files another session is editing
+- Branch `main`, 1 behind origin at snapshot time; two files dirty from another session
   (`claudedocs/close-the-loop/STATE.md`, `claudedocs/the-algorithm-applied-2026-06-17.md`).
-- **The name is Cairn**, decided 2026-08-26 after a presentation that went well. It names the
-  whole three-noun layer — **sessions · claimable tasks · subsystems** — not just the index.
-  Chosen over Almanac / Muster / Atlas: one syllable, no collision with the crowded `claw`
-  family (clawgate, kubeclaw, openclaw, fuzzyclaw, clawdbot), and semantically exact — a cairn
-  is a marker left on a trail so whoever comes next knows the way, which is what a
-  subsystem-index entry is.
-- **Seven PRs merged this session**, each verified by content on `origin/main` after squash
-  (a squash never makes the branch head an ancestor, so ancestry lies):
+- **The name is Cairn** (2026-08-26). It names the whole three-noun layer — **sessions ·
+  claimable tasks · subsystems** — not just the index. Chosen over Almanac / Muster / Atlas:
+  one syllable, no collision with the crowded `claw` family, and a cairn is a marker left on a
+  trail so whoever comes next knows the way — which is what a subsystem-index entry is.
+- **Eight PRs merged**, each verified by content on `origin/main` after squash (a squash never
+  makes the branch head an ancestor, so ancestry lies):
 
   | PR | squash | what |
   |---|---|---|
-  | #816 | `f881856b` | awaiting-predicate contract — the consolidation was a REGRESSION, shipped a pinned contract instead |
+  | #816 | `f881856b` | awaiting-predicate contract — the consolidation was a REGRESSION; shipped a pinned contract |
   | #819 | `e18e55d7` | transcript-search consolidation — **7 real bugs**, each watched red at base |
   | #829 | `fed5c5c8` | the explainer page + `scripts/present/` generator |
   | #855 | `1d67f5e8` | xdist unblock — `main` was red for EVERY PR |
-  | #872 | `30acd174` | three-noun restructure (sessions · claimable tasks · subsystems) |
+  | #872 | `30acd174` | three-noun restructure |
   | #862 | `2d4b2980` | workbench-local serving + daily regeneration |
-  | #882 | `d78af6c8` | three real-process flakes, each reproduced on demand and mutation-verified |
+  | #882 | `d78af6c8` | three real-process flakes, reproduced on demand and mutation-verified |
+  | #889 | `1f3d854c` | this handoff doc |
 
-- **The explainer page is live and deployed** (not just merged): `present-serve.service` active,
-  `present-regen.timer` armed, both `serverMode`-gated. Serving `HTTP 200` at
-  `http://192.168.50.250:8900/`, 117,561 B, `X-Present-State: fresh`. `/sanitized` serves the
-  redacted variant. Next regen 05:06 daily.
-- 🔴 **Workbench-only, deliberately.** Port 8900 is NOT in `/etc/nixos/configuration.nix`'s
-  `allowedTCPPorts`. Measured from the laptop: `22 OPEN, 443 OPEN, 8899 CLOSED, 8900 CLOSED` —
-  and 8899 is `initiatives-viewer` listening on the identical address, which is why following
-  that precedent warned nobody. LAN/nebula reach is deferred behind a named trigger: *someone
-  who is not on the workbench actually needs to read it*.
+- **The explainer page is deployed, not merely merged**: `present-serve.service` active,
+  `present-regen.timer` armed, both `serverMode`-gated. `HTTP 200` at
+  `http://192.168.50.250:8900/`, `X-Present-State: fresh`. `/sanitized` serves the redacted
+  variant. Regenerates 05:06 daily.
+- 🔴 **Workbench-only, deliberately.** 8900 is NOT in `/etc/nixos/configuration.nix`'s
+  `allowedTCPPorts`. From the laptop: `22 OPEN, 443 OPEN, 8899 CLOSED, 8900 CLOSED` — and 8899
+  is `initiatives-viewer` on the identical address with the identical gap, which is why
+  following that precedent warned nobody. LAN/nebula reach is deferred behind a named trigger:
+  *someone not on the workbench actually needs to read it*.
+- **Board state:** #359 `complete` by supersede (not by criteria — none of its five were
+  validated); **#360 `in_progress` in another session** — `98843002…`, project `homelab-talos`,
+  tmux `scratch15:@334`, peer `homelab-talos-02`; **#366 `open`**, the supersede decision card.
+- **#360's session has been told the CLI should ship as `cairn`**, not `scripts/store`, via
+  `SendMessage`. Also passed on: the team-instance direction reframes its criterion 6 token
+  from per-*host* to per-*person*, and `sensitivity: client-confidential` becomes an
+  authorization boundary rather than a transit question.
 
 ## Open investigations — live diagnosis state
 
@@ -102,17 +108,23 @@ team instance, each measured rather than assumed.
   trade.
 
 ## Next steps (ranked)
-1. **Tell task #360's session the CLI should be named `cairn`.** #360 is IN FLIGHT in another
-   session right now and its criterion 2 specifies a CLI at `scripts/store`. If that ships
-   unnamed, the rename becomes a follow-up against freshly-merged code. Repo: `devrc`.
-2. **Fix the sanitizer leak** — `scripts/present/sanitize.py`, evidence above. Repo: `devrc`.
-   Verify with the control pair, not a bare zero: sanitized vs full counts for `naida`, `vetr`,
-   `auditloop` alongside `civitai`/`zacx.dev`.
+1. **Fix the sanitizer leak** — `scripts/present/sanitize.py`. Drive substitution from the
+   store's own scope set (which `measure` already resolves) instead of a length/word heuristic.
+   Verify with the control pair, never a bare zero. Repo: `devrc`. **Do this before the team
+   instance** — the heuristic *becomes* the entitlement boundary the moment someone who is not
+   Zach reads a page.
+2. **Build `cairn who <task>`** — the task→session→window→transcript resolver. Every hop exists;
+   only the join is missing (see the Gotchas block below for the exact chain). Repo: `devrc`.
+   This is the first capability that is *about* Cairn rather than inherited from devrc.
 3. **Convert the six remaining positional audit reads** —
-   `scripts/tests/test_subsystem_store_api.py`, closing condition above. Repo: `devrc`.
-4. **Diagnose the Tekton non-fire** — EventListener logs + GitHub webhook delivery log.
-   Repo: `homelab-talos` (Tekton lives on homelab).
-5. **Ratify or close clawgate #359**, superseded by #360. Board decision, no repo.
+   `scripts/tests/test_subsystem_store_api.py`. One PR covering all 11 sites, each shown red
+   under a forced `_audit` delay. Repo: `devrc`. 🔴 **Do this AFTER #360 lands** — that card may
+   restructure the file substantially.
+4. **Instrument the Tekton non-fire rather than chase it** — a check that flags "PR has required
+   checks pending with no PipelineRun for that sha". Bounded and useful whether or not the root
+   cause is ever found; chasing one dropped webhook is not. Repo: `homelab-talos`.
+5. **#366** — the supersede decision card, `open`. Repo: `homelab-talos`,
+   `containers/clawgate/`.
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **The store-api retirement was proposed and CLOSED by the operator** (devrc #849,
@@ -140,6 +152,47 @@ team instance, each measured rather than assumed.
   failures they did not cause (an xdist ID collision; a real-process race). The control that
   settles it is running the same target on a clean checkout of `main` — cheap, and it twice
   stopped an agent hunting a phantom in the wrong subsystem.
+
+- **Why the name happened at all, and why the direction changed — recorded here rather than
+  under a REPLACE heading so a later status update cannot drop it.** Zach presented the system
+  on 2026-08-26 and **it went well**; the three outcomes were: keep iterating locally, move
+  toward decoupling it into something deployable that a **team instance** teammates read and
+  write into, and give it a name simple enough to refer to. **Cairn** was chosen over Almanac /
+  Muster / Atlas — one syllable, no collision with the crowded `claw` family (clawgate,
+  kubeclaw, openclaw, fuzzyclaw, clawdbot), and semantically exact: a cairn is a marker left on
+  a trail so whoever comes next knows the way, which is what a subsystem-index entry is. The
+  team-instance half is the load-bearing part — it turns `sensitivity: client-confidential` from
+  a transit question into an **authorization** question, which nothing in the system has today.
+- 🔴 **The task→session→window→transcript chain RESOLVES today, but takes four tools and a jq
+  join — no single command does it.** Demonstrated end to end on #360:
+  `clawgate task get 360 | jq .sessions` → session `98843002…` (clawgate embeds sessions on task
+  reads, with a `role` of `created`/`read`/`worked`) → `session-manager --json`, key
+  `claude_session_id` → `pane_id` `%334` → tmux `scratch15:@334` on workbench → `ListAgents`
+  peer name `homelab-talos-02` → transcript
+  `~/.claude/projects/-home-zach-workspace-homelab-talos/98843002….jsonl`. 🔴 **`ListAgents`
+  labels peers by a short ref that is NOT the session uuid** (`5e2e92`, not `988430`), so the
+  window↔uuid join must go through `session-manager`, not through the peer name. The dispatch-pod
+  case is the same lookup with a different backend (`devpod-<agent-name>` instead of a pane).
+- 🔴 **clawgate ALREADY HAS supersede, and it was unreachable on the only real supersede.**
+  `POST /tasks/merge` implements it properly (nothing deleted, loser → `complete` + comment,
+  winner gains the tag union). Measured 2026-08-26: session route → **409** (refuses when either
+  task is `in_progress` or `complete`, and the successor was in_progress *because* it
+  superseded), `/api/tasks/merge` → **405** (no machine counterpart), `clawgatectl` → no verb.
+  **The hand-rolled workaround produced a WORSE record**: a `claude-code` comment instead of the
+  `user`-authored audit comment merge writes, which `taskCommentAuthor` structurally cannot mint.
+  Filed as **#366**. Do not file "build supersede" — it exists.
+- 🔴 **No clawgate status means "superseded".** Statuses are exactly
+  `open`/`in_progress`/`ready_for_review`/`complete`. #359 is `complete`, which is false — none
+  of its criteria were validated — and the truth survives only because a human wrote a comment.
+  That is the part most likely to break a team instance, where nobody reads every comment.
+  Dismissal is not the alternative: it **deletes** the task.
+- **`/handoff`'s clawgate resolver lands in the no-worked case for a session that FILES cards.**
+  `created` is terminal upstream and outranks `worked`, so a session that created a task *and*
+  commented on it *and* flipped its status still reports `created`. Both handoffs this session
+  hit exit 6 and recorded no field — correct, but worth knowing before you go looking for a bug.
+- **A decision task is not an implementation task.** #366 was deliberately scoped to produce a
+  written decision with named checkers, not code — because writing acceptance criteria before
+  the design is settled is what produced #359's criteria being rewritten mid-flight.
 
 ## How to verify
 ```bash
