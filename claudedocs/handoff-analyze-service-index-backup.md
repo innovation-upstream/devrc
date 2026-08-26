@@ -33,8 +33,20 @@ and close the one failure mode in it that is unrecoverable (no off-machine backu
   "deliberately unmerged" — that was true when first written and false ~28 h later. It is
   the load-bearing safety fact behind the fixture-wipe section below, so check it by
   content (`git log --diff-filter=A -- scripts/testlib/nogit_plugin.py`), never from prose.
+- `#822` — **identity PROVENANCE** (`f6516771`, 2026-08-25). A mismatch now says WHICH
+  FILE it compared and refuses to call it diagnosed when an env var chose the path.
+- `#851` — **the `--decrypt-check` PREFLIGHT + `check-escrow.sh`** (`a58a261d`,
+  2026-08-26). Refuses before any `bw` call when the interpreter cannot finish.
 
 **Closed WITHOUT merging:** `#689`, `#676` — superseded, kept as the record.
+
+🔴 **Both shipped and VERIFIED BY SYMPTOM on each host, not by the deploy reporting
+success.** `ship.sh` → converged + verified, 2 hosts compared, both at `a58a261d`. Then, on
+each: a wrong shell exits **34** in ~2s with the vault untouched (workbench measured
+`rc=34`; laptop's true `rc=34` — its first reading showed `rc=0`, which was `head`'s status
+through a pipe, not python's), and `--print-plan --identity <the default>` prints
+`chosen by: the --identity flag` with **no** "NOT the default" warning, while a genuine
+redirect still warns.
 
 ### The three things that were open at the last handoff, and are now closed
 
@@ -64,6 +76,42 @@ remotes on all 10 scopes. The artifacts verified were the ones the **TIMER** pro
 (object stamp `20260823T094821Z`, one second after its `LastTrigger`), not a hand-triggered
 run. The commit count and the store's file count both advance hourly; the *byte-identity*
 and *zero-remotes* claims are the durable ones.
+
+### 🔴 OUTSTANDING — measured 2026-08-26, nothing blocked on an agent
+
+**DR gaps (need a human, and one is worse than earlier revisions of this doc said):**
+1. 🔴 **The laptop cannot reach the vault at all.** RE-MEASURED: `bw status` →
+   `{"serverUrl":null,"lastSync":null,"status":"unauthenticated"}`. Earlier revisions said
+   "not logged in"; `serverUrl` is **null**, so it is not even pointed at the server.
+   Recovery from the laptop needs `bw config server <url>` **and** `bw login` (email +
+   master password + 2FA). If the workbench is the machine you lose, the laptop is the
+   machine you are standing at.
+2. **The web-vault paste path is still untested.** Everything verified went through `bw`
+   **on the machine that already holds the key**. The real disaster path — open the note in
+   the web vault on another device, paste into a file — can silently mangle whitespace and
+   nothing here exercises it. Paste to a scratch file, confirm 189 bytes / 3 lines.
+3. **`server NOT PINNED`** on the successful run — `--expect-server` / `ASIB_ESCROW_SERVER`
+   unset, so it trusted whatever `bw config server` said. The session cross-check DID run
+   and matched (weaker, but real). Set `ASIB_ESCROW_SERVER` to close it.
+
+**Repo hygiene:**
+4. Two MERGED branches still on the remote: `fix/escrow-identity-provenance` and
+   `fix/decrypt-check-minio-preflight`. 🔴 Deliberately NOT deleted — the first carries
+   `bde25889`, the commit whose client paths the operator chose to LEAVE in history
+   (2026-08-25). Deleting that branch eventually makes it unreachable, which is arguably
+   desirable but is **not** what was decided. The second is unambiguous cleanup.
+5. The base clone carries two untracked files that predate this work
+   (`nix/system/apply-nebula-443.sh.LOCAL-preserved-2026-08-02`,
+   `scripts/dl-router/tests/load_test_store.sh`) — in no commit and no backup.
+
+**Known and deliberately unfixed:**
+6. 🔴 **The late-precondition class is NARROWED, not closed.** `kubectl`, `git`,
+   reachability to the MinIO tenant and `--store` readability all still fail **after** the
+   vault round-trip, and the advertised shell provisions none of them — they resolve only
+   because `nix-shell -p` is impure. Under `--pure` or on a fresh host an operator who
+   follows the rc-34 remedy verbatim gets past the preflight and dies later. `age` was
+   fixed because it is one PATH lookup with no network; the rest is design work. Written
+   into #851 under "What this does NOT close".
 
 ## 🔴 Two gotchas that will bite you immediately
 
@@ -264,6 +312,12 @@ Diagnosed and repaired, NOT closed.
 
 ## How to verify
 ```bash
+# 🔴 THE ESCROW — one command, no quoting to get wrong. Runs a LOCKED DRY PASS
+# first (proves shell + interpreter + argv + host label, spends nothing, because
+# escrow-verify.py never prompts), and only then asks for the password.
+~/workspace/devrc/scripts/analyze-service-index/check-escrow.sh
+~/workspace/devrc/scripts/analyze-service-index/check-escrow.sh --plan   # no bw, no network, no key
+
 # the restore path, for real (10 scopes, from the bucket)
 nix-shell -p 'python3.withPackages(p:[p.minio])' --run \
   "python3 ~/workspace/devrc/scripts/analyze-service-index/restore-verify.py \
@@ -273,18 +327,13 @@ nix-shell -p 'python3.withPackages(p:[p.minio])' --run \
 systemctl --user list-timers analyze-service-index-backup.timer --all
 systemctl --user show analyze-service-index-backup.service -p Result
 
-# the escrow is still there, still correct, and still WORKS (needs the master password)
-# 🔴 THE SHELL MUST CARRY minio AND THE IDENTITY MUST BE PINNED — see "The env
-# redirect" below. Both omissions cost a real run on 2026-08-25.
-nix-shell -p bitwarden-cli jq 'python3.withPackages(p:[p.minio])' --run \
-  'export BW_SESSION="$(bw unlock --raw)"; env -u SOPS_AGE_KEY_FILE -u ASIB_AGE_IDENTITY python3 ~/workspace/devrc/scripts/analyze-service-index/escrow-verify.py --decrypt-check --identity ~/workspace/homelab-talos/.secrets/age.key --host workbench-$(cat /etc/machine-id)'
-# no password to hand? this is still a real check — it must exit 12 VAULT-LOCKED,
-# promptly and without hanging, NOT sit waiting on an invisible prompt.
-# MEASURED 2026-08-25: rc=12 in 2s.
-nix-shell -p bitwarden-cli jq --run 'python3 ~/workspace/devrc/scripts/analyze-service-index/escrow-verify.py'
-# and BEFORE spending a password, confirm which file the run will actually
-# compare against — no vault, no network:
-python3 ~/workspace/devrc/scripts/analyze-service-index/escrow-verify.py --print-plan
+# the PREFLIGHT is live on this host: a shell WITHOUT the package must exit 34 in
+# ~2s having contacted nothing. MEASURED on both hosts 2026-08-26.
+nix-shell -p bitwarden-cli jq --run \
+  'python3 ~/workspace/devrc/scripts/analyze-service-index/escrow-verify.py --decrypt-check \
+   --identity ~/workspace/homelab-talos/.secrets/age.key --host workbench-$(cat /etc/machine-id)'
+# 🔴 read the exit code WITHOUT a pipe — `| head` reports HEAD's status, and that
+# is exactly how a laptop rc=34 first read as rc=0 on 2026-08-26.
 
 # the index store's own verdict
 python3 ~/workspace/devrc/scripts/subsystem-audit.py
@@ -467,3 +516,55 @@ server was repointed from the internal LAN name to the externally-trusted one
 (`UNABLE_TO_VERIFY_LEAF_SIGNATURE`), so the CLI cannot talk to it at all. Fixing that cert
 is separate homelab breakage, unrelated to this work. Endpoints deliberately not named
 here — this repo is public.
+## Gotchas / decisions / dead-ends — 2026-08-25/26
+
+🔴 **A fix to a message's CONTENT is not a fix to its TIMING.** `#822` corrected which
+shell `escrow-verify.py` advertises and left the master password still being spent before
+the failure surfaced. **Four adversarial audit rounds missed it**, because every round was
+framed as *"is this sentence true?"* and none asked *"does this refusal come early
+enough?"*. The reviewers inherited the framing. When an audit-fix round closes, ask what
+axis the rounds did NOT vary.
+
+🔴 **The same failure three times is a signal about the FORM, not the contents.** Getting
+one successful `--decrypt-check` took three attempts and three master-password entries, and
+every failure was QUOTING: the `withPackages` argument omitted (`ModuleNotFoundError`), the
+script-path token lost (dropped into a **Python REPL**), the identity-path token lost
+(`--identity: expected one argument`). Rewriting the one-liner each time was the wrong
+response — a ~300-character line carrying a nix expression, a `--run` string and three
+nested command substitutions is not something to hand a person to paste. The quoting now
+lives in `check-escrow.sh`.
+
+🔴 **`bw unlock --raw` can exit ZERO having printed NOTHING** — no TTY, EOF, or a cancelled
+prompt. So `BW_SESSION=$(bw unlock --raw) && …` lets a doomed run through: the empty session
+exports fine and the verifier then reports **VAULT-LOCKED**, which reads as *a vault
+problem* rather than *an unlock that never happened*. Two faults, one message.
+`check-escrow.sh` checks the emptiness explicitly and names it.
+
+🔴 **Five instrument failures in one session, each producing a confident wrong verdict, none
+visible in a diff.** Validate the instrument before reading its answer:
+- a mutation sweep whose sandbox copied only `scripts/` — the UNMUTATED baseline failed 19
+  tests, so every mutant "died" for that reason and reported a clean 5/5 measuring nothing;
+- a sandbox copied with `rsync -a`, carrying **valid** `__pycache__`, so it executed
+  bytecode from the ORIGINAL tree. 🔴 `PYTHONDONTWRITEBYTECODE=1` does **not** prevent this
+  — it stops *writing*, not *reading*;
+- background task notifications reporting **"exit code 0"** for a FAILED `nix build`,
+  because a trailing `echo` owned the pipeline's status (hit three times; fixed by ending
+  the command with `exit $rc`);
+- `$?` read after `| head`, turning a laptop `rc=34` into `rc=0`;
+- `bw unlock --raw` above.
+Every sweep here now runs an unmutated baseline FIRST and requires it GREEN, asserts no
+`.pyc` reached the sandbox, and includes a **no-op control that must SURVIVE** — otherwise
+a harness that reddens everything is indistinguishable from real coverage.
+
+🔴 **An unguarded fix is a comment, not a guarantee.** Round 3 of #822's audit found the
+round-2 fix could be reverted verbatim with all 450 tests green. Same shape in #851: the
+clause that mattered most — *"the vault was NOT contacted"* — was pinned only by
+substrings, so flipping it to *"the vault WAS contacted"*, a falsehood about whether the
+operator's credential had been used, passed the entire suite. **When the artifact under
+test is prose, pin the whole normalised string.**
+
+⚠ **`bde25889` decision (2026-08-25):** it added three client repo paths to a PUBLIC repo;
+`1543df0a` redacted the tree. The operator chose **leave the history, squash-merge only** —
+so `main` never carried them (verified: 0 occurrences, `main` gained ONE commit) while the
+branch commit stays visible. That makes **squash-merge load-bearing**, not conventional,
+and all three merge methods are enabled on this repo.
