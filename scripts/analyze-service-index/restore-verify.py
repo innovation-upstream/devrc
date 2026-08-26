@@ -113,6 +113,17 @@ backups is worse than no verifier.
   * a decrypted bundle that restores to zero commits   -> failure
   * zero commits compared against the live scope       -> failure
   * a run that verified zero scopes                    -> failure
+  * THIS host's artifacts, and NOT ONE of them cross-checked because the store
+    side gave nothing                                  -> failure
+
+The last one is the STORE-side twin of the first, and it was exit-0 until it
+was measured: `--host <this host> --store <an empty directory>` printed 13
+`RESTORED … fsck OK … NOT CROSS-CHECKED … self-consistency only` lines and
+rc=0. An exit code is all a timer reads, so a wrong or absent `--store`
+downgraded the whole run to "it decrypts and is internally consistent" and
+called that success. Foreign artifacts and PARTIAL runs (one scope with no live
+repository beside scopes that have one) are outside it by construction — see
+`nothing_cross_checked_message`.
 
 The single exception is the same one `backup.py` permits: a host that has never
 run the backup at all — no local store AND no objects under its own default
@@ -891,6 +902,59 @@ def live_scope_path(store: Path, scope: str) -> Path | None:
     return p
 
 
+# The THREE states a `--store` path can be in, which "no local store" used to
+# spell as one. See `store_state`.
+STORE_ABSENT = "absent"
+STORE_EMPTY = "empty"
+STORE_POPULATED = "populated"
+
+
+def store_state(store: Path) -> tuple[str, list[str]]:
+    """`(state, scope names)` for the live store as a WHOLE.
+
+    🔴 "NO LOCAL STORE" WAS THREE DIFFERENT FACTS SHARING ONE SENTENCE, and
+    they call for three different actions:
+
+      * ABSENT     — the path does not exist. Either the disaster this whole
+        feature exists for, or `--store` points at nothing (a typo, a host where
+        the store lives elsewhere). The operator must find out WHICH.
+      * EMPTY      — the directory is there and holds no scope repository at
+        all. /analyze-service has never run here, or the store was emptied.
+      * POPULATED  — scope repositories are there; the one being compared is
+        simply not among them. That is a per-scope finding, not a store one, and
+        printing "no local store" for it sends the reader to look at the wrong
+        thing entirely.
+
+    An EMPTY RESULT CANNOT DISTINGUISH ITS CAUSES (RULES.md); this is the split
+    that makes it discriminating, and it is read by both the per-artifact reason
+    and the whole-run refusal below.
+    """
+    if not store.is_dir():
+        return STORE_ABSENT, []
+    names = local_scopes(store)
+    return (STORE_POPULATED, names) if names else (STORE_EMPTY, [])
+
+
+def why_no_live_scope(store: Path, scope: str) -> str:
+    """WHICH store state blocked `scope`'s cross-check. Never "no local store"."""
+    state, names = store_state(store)
+    if state == STORE_ABSENT:
+        return f"the store directory {store} DOES NOT EXIST"
+    p = store / scope
+    if p.is_symlink():
+        return (f"{p} is a SYMLINK, and a symlink is never followed here — "
+                f"following one would compare against a repository from "
+                f"OUTSIDE the store")
+    if p.is_dir() and not (p / ".git").exists():
+        return f"{p} exists but is not a git repository (it has no .git)"
+    if state == STORE_EMPTY:
+        return (f"the store directory {store} EXISTS but holds NO scope "
+                f"repositories")
+    return (f"the store {store} holds {len(names)} scope "
+            f"repositor{'y' if len(names) == 1 else 'ies'} but none named "
+            f"{scope!r}")
+
+
 # Where `%m` comes from. A module-level tuple so the test suite can point the
 # reader at synthetic files and exercise the REAL function, rather than
 # re-implementing its shape check in the test — which would only ever prove the
@@ -952,10 +1016,32 @@ def prefix_belongs_to_this_host(prefix: str, this_host: str,
     return bool(this_machine_id) and this_machine_id in prefix
 
 
+# 🔴 THE REASON IN MACHINE-READABLE FORM. The prose reason is for the operator
+# and is free to be reworded; the KIND is what the whole-run refusal branches
+# on, so that predicate can never be a substring match on a sentence. Keyed on
+# WHY the comparison was dropped, because the two answers are not the same
+# finding and only one of them is a gap in verification:
+#
+#   * the artifacts are ANOTHER host's        -> suppressing the compare is
+#     CORRECT (the two stores are divergent content sharing scope names), so a
+#     run with zero cross-checks is a correct run;
+#   * this host's own artifacts, and the LOCAL STORE offered nothing -> the
+#     comparison was silently dropped, and a run with zero of them exits 0
+#     having compared nothing at all. That is the one this refuses.
+NO_CROSS_CHECK_FOREIGN_HOST = "foreign-host"
+NO_CROSS_CHECK_MACHINE_ID_UNREADABLE = "machine-id-unreadable"
+NO_CROSS_CHECK_NO_LIVE_SCOPE = "no-live-scope"
+
+# The kinds that are a fact about THE STORE SIDE — i.e. the artifacts are this
+# machine's and the local half contributed nothing. Membership, not a default:
+# a kind added later is NOT store-side until someone puts it here on purpose.
+STORE_SIDE_BLOCK_KINDS = frozenset({NO_CROSS_CHECK_NO_LIVE_SCOPE})
+
+
 def cross_check_target(store: Path, scope: str, *, artifacts_are_foreign: bool,
                        machine_id_unreadable: bool = False,
-                       ) -> tuple[Path | None, str | None]:
-    """The live repo to compare `scope`'s artifact against, or `(None, reason)`.
+                       ) -> tuple[Path | None, str | None, str | None]:
+    """The live repo to compare `scope`'s artifact against, or `(None, reason, kind)`.
 
     🔴 ONE PLACE OWNS "IS THERE ANYTHING TO COMPARE AGAINST", because the
     predicate used to be open-coded at two sites and was WRONG AT ONE of them —
@@ -1005,15 +1091,17 @@ def cross_check_target(store: Path, scope: str, *, artifacts_are_foreign: bool,
                 "host's label — so whether these artifacts are this machine's "
                 "is UNKNOWN, not decided. Declining to cross-check rather than "
                 "risk a false data-loss alarm; re-run with a matching --host, "
-                "or fix the machine id")
+                "or fix the machine id"), NO_CROSS_CHECK_MACHINE_ID_UNREADABLE
         return None, ("the artifacts belong to ANOTHER host (--host/--prefix) "
                       "and this machine's store is DIVERGENT content that only "
                       "shares scope NAMES — comparing them would report a false "
-                      "data-loss alarm")
+                      "data-loss alarm"), NO_CROSS_CHECK_FOREIGN_HOST
     live = live_scope_path(store, scope)
     if live is None:
-        return None, f"no live scope repository at {store / scope}"
-    return live, None
+        return None, (f"no live scope repository at {store / scope}: "
+                      f"{why_no_live_scope(store, scope)}"
+                      ), NO_CROSS_CHECK_NO_LIVE_SCOPE
+    return live, None, None
 
 
 def uncovered_local_scopes(store: Path, covered: set[str], now: datetime,
@@ -1182,6 +1270,60 @@ def diagnose_empty_prefix(*, bucket: str, prefix: str, siblings: list[str],
                    f"nothing to verify{where}")
 
 
+def nothing_cross_checked_message(*, bucket: str, prefix: str, store: Path,
+                                  artifacts: int, scopes: list[str]) -> str:
+    """The refusal for a run of THIS host's artifacts that compared NOTHING.
+
+    🔴 THE EXIT-0 VARIANT IS WORSE THAN THE REFUSAL — the same argument
+    `diagnose_empty_prefix` already makes for the BUCKET side, made here for the
+    STORE side. MEASURED on this host: `restore-verify.py --host <this host>
+    --store <an empty directory>` printed 13 lines of `RESTORED N commit(s) …,
+    fsck OK … NOT CROSS-CHECKED … self-consistency only`, a summary reading
+    `13 self-consistency only`, and **rc=0**. An exit code is the only thing a
+    systemd timer reads, so a wrong or absent `--store` silently downgrades the
+    run to "the artifact decrypts and is internally consistent" — which proves
+    nothing about whether the backup still matches the history it is a backup
+    OF — and reports success while doing it.
+
+    🔴 IT FIRES ON THE OBSERVED PROPERTY, NEVER ON "WAS A FLAG TYPED". The
+    v1/v2/v3 note in `run()` and `cross_check_target`'s docstring are both about
+    the same mistake made in the other direction; keying this on `--store`
+    having been passed would let the DEFAULT store path — the case actually
+    measured — sail through.
+
+    🔴 AND IT IS NOT A PERMANENTLY-RED GATE. Three legitimate zero-cross-check
+    runs are outside it by construction:
+      * FOREIGN artifacts (`--host`/`--prefix` naming the other machine), where
+        suppressing the compare is correct and its kind is not store-side;
+      * a PARTIAL run — one scope with no live repository beside scopes that
+        have one — because a single live target anywhere clears the guard;
+      * a host that has never run the backup, which never reaches here (the
+        zero-objects no-op returns first, with no verdicts).
+    """
+    state, names = store_state(store)
+    if state == STORE_ABSENT:
+        where = f"the store directory {store} DOES NOT EXIST"
+    elif state == STORE_EMPTY:
+        where = (f"the store directory {store} EXISTS but holds NO scope "
+                 f"repositories")
+    else:
+        where = (f"the store {store} holds {len(names)} scope "
+                 f"repositor{'y' if len(names) == 1 else 'ies'} "
+                 f"({sorted(names)}), none of which is one of the artifact "
+                 f"scope(s) verified here")
+    return (
+        f"NOTHING WAS CROSS-CHECKED AGAINST THE LIVE STORE. All {artifacts} "
+        f"artifact(s) under {bucket}/{prefix} are THIS machine's, and every one "
+        f"of them was verified for SELF-CONSISTENCY ONLY, because the store "
+        f"side contributed nothing: {where}. Scope(s) with no live repository: "
+        f"{scopes}. Self-consistency proves the object decrypts and restores; "
+        f"it proves NOTHING about whether it still matches the history it is a "
+        f"backup OF, and zero commits were compared on this run. Exiting "
+        f"non-zero because an exit code is all a timer reads. Point --store at "
+        f"the live store, or fix it. Verifying ANOTHER host's artifacts is the "
+        f"one case where zero cross-checks is correct, and this is not it.")
+
+
 def run(*, bucket: str, prefix: str, this_host: str,
         this_machine_id: str | None, store: Path, identity: Path,
         scope_filter: str | None, verify_all: bool, max_lag_days: float,
@@ -1281,6 +1423,12 @@ def run(*, bucket: str, prefix: str, this_host: str,
                 failures.append(msg)
                 print(f"{PROG}: FAILED {msg}", file=sys.stderr)
 
+        # Two counters read by the whole-run refusal after the loop. They record
+        # what was OBSERVED per scope — never what was typed — so the refusal
+        # cannot be argued out of firing by a flag.
+        scopes_with_a_live_target = 0
+        store_blocked_scopes: list[str] = []
+
         for scope in sorted(by_scope):
             entries = by_scope[scope]
             # NOTE: no empty-`entries` guard. `group_by_scope` builds each list
@@ -1291,9 +1439,13 @@ def run(*, bucket: str, prefix: str, this_host: str,
             # stamp is fixed-width UTC), so the last entry is the newest.
             newest_stamp = entries[-1][0]
             chosen = entries if verify_all else [entries[-1]]
-            live, no_live_reason = cross_check_target(
+            live, no_live_reason, no_live_kind = cross_check_target(
                 store, scope, artifacts_are_foreign=artifacts_are_foreign,
                 machine_id_unreadable=(this_machine_id is None))
+            if live is not None:
+                scopes_with_a_live_target += 1
+            if no_live_kind in STORE_SIDE_BLOCK_KINDS:
+                store_blocked_scopes.append(scope)
             for stamp, key in chosen:
                 try:
                     v = verify_artifact(
@@ -1329,6 +1481,39 @@ def run(*, bucket: str, prefix: str, this_host: str,
                        f"this one.")
                 failures.append(msg)
                 print(f"{PROG}: FAILED {msg}", file=sys.stderr)
+
+        # 🔴 THE RUN COMPARED NOTHING AGAINST LIVE, AND THE STORE IS WHY.
+        # THREE conjuncts, each excluding a run this must not fire on, and each
+        # able to fail on its own; the whole argument is in
+        # `nothing_cross_checked_message`.
+        #
+        #   verdicts                      a run that verified ZERO artifacts has
+        #                                 its own, louder finding. Saying "all 0
+        #                                 artifacts were self-consistency only"
+        #                                 there blames the STORE for what is
+        #                                 actually a broken artifact.
+        #   scopes_with_a_live_target==0  ONE usable live target anywhere clears
+        #                                 this: a partial run, and equally a run
+        #                                 whose only comparable artifact was
+        #                                 corrupt — the store DID contribute.
+        #   store_blocked_scopes          at least one scope was dropped by the
+        #                                 STORE side rather than because the
+        #                                 artifacts are another host's.
+        #
+        # 🔴 `not any(v.cross_checked ...)` IS DELIBERATELY ABSENT. It reads
+        # like the heart of the check and it is implied by the second conjunct —
+        # a verdict can only be cross-checked against a live target, so zero
+        # targets means zero cross-checks. A mutation sweep scored flipping it
+        # to `not all(...)` SURVIVED, which is the honest answer for a conjunct
+        # that cannot fail: it would have read as coverage while providing none.
+        if (verdicts
+                and scopes_with_a_live_target == 0
+                and store_blocked_scopes):
+            msg = nothing_cross_checked_message(
+                bucket=bucket, prefix=prefix, store=store,
+                artifacts=len(verdicts), scopes=sorted(store_blocked_scopes))
+            failures.append(msg)
+            print(f"{PROG}: FAILED {msg}", file=sys.stderr)
     finally:
         ctx.__exit__(None, None, None)
 
@@ -1408,6 +1593,11 @@ def print_plan(*, bucket: str, prefix: str, store: Path, identity: Path,
     print("           restored tip must be an ANCESTOR of the live tip. Never an")
     print("           equality — the store advances hourly and an equality check")
     print("           would be a permanently-red gate.")
+    print("           A run of THIS host's artifacts in which NOT ONE scope could")
+    print("           be compared FAILS: self-consistency alone says the object")
+    print("           decrypts, never that it still matches the history it backs")
+    print("           up. Another host's artifacts are exempt (their comparison")
+    print("           is suppressed on purpose), and so is a PARTIAL run.")
     print("coverage:  every LOCAL scope must have at least one artifact. A scope")
     print("           that stopped being backed up is invisible to every other")
     print("           check here, because they all iterate the objects that ARE")

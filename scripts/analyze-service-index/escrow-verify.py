@@ -1121,7 +1121,12 @@ def decrypt_check(*, escrow_bytes: bytes, work_dir: Path, bucket: str,
 
         this_host = B.host_label()
         this_machine_id = RV.machine_id()
-        live, no_live_reason = RV.cross_check_target(
+        # The third element is the machine-readable KIND of the block, which
+        # `restore-verify.py`'s whole-run refusal branches on. This script
+        # verifies exactly ONE artifact and asks a different question — does the
+        # ESCROWED KEY open it — so a missing live scope is not a finding here
+        # and the kind is deliberately unused.
+        live, no_live_reason, _no_live_kind = RV.cross_check_target(
             store, scope,
             artifacts_are_foreign=not RV.prefix_belongs_to_this_host(
                 prefix, this_host, this_machine_id),

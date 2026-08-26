@@ -50,6 +50,7 @@ import hashlib
 import importlib.util
 from testlib import hermetic_git  # noqa: E402
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -1023,25 +1024,40 @@ def test_a_NON_BRANCH_ref_round_trips_and_is_cross_checked(tmp_path, identity):
 # --------------------------------------------------------------------------- #
 # 5. 🔴 THE ABSENT LIVE SCOPE — the actual disaster case, and NOT a failure
 # --------------------------------------------------------------------------- #
-def test_an_absent_live_scope_verifies_SELF_CONSISTENCY_and_says_so(
+def test_ONE_absent_live_scope_verifies_SELF_CONSISTENCY_and_says_so(
         tmp_path, identity):
-    """🔴 If the store is gone there is nothing to cross-check against — which is
-    the scenario these backups exist for. Failing here would make the verifier
+    """🔴 A scope whose live repository is gone is NOT a failure — that is the
+    scenario these backups exist for, and failing on it would make the verifier
     useless at the exact moment it is needed.
 
     But it must be DISTINGUISHABLE. `cross_checked` is False, the reason is
     stated, and the printed line says NOT CROSS-CHECKED rather than a word that
     reads like a full verification.
+
+    🔴 THE PARTIAL SHAPE IS THE POINT, and it is what keeps the whole-run
+    refusal below from being a permanently-red gate: `scope-beta` IS live and IS
+    compared, so the run has cross-checked something and stays rc=0 while
+    `scope-alpha` reports honestly that it could not be. A run where NOT ONE
+    scope could be compared is a different finding —
+    `test_a_run_that_CROSS_CHECKS_NOTHING_because_of_the_store_REFUSES`.
     """
     store = tmp_path / "store"
     scope = _make_scope(tmp_path / "elsewhere", "scope-alpha", {"e.md": "x"},
                         commits=5)
     data = _make_artifact(scope, identity, tmp_path)
-    store.mkdir()          # the store exists; THIS SCOPE does not
+    beta = _make_scope(store, "scope-beta", {"e.md": "b"}, commits=2)
+    beta_data = _make_artifact(beta, identity, tmp_path)
+    # the store exists and holds scope-beta; scope-alpha's repository does NOT
 
     verdicts = _verify(store, tmp_path / "work",
-                       FakeDownloader({_key("scope-alpha"): data}), identity)
-    v = verdicts[0]
+                       FakeDownloader({_key("scope-alpha"): data,
+                                       _key("scope-beta"): beta_data}),
+                       identity)
+    by_scope = {v.scope: v for v in verdicts}
+    v = by_scope["scope-alpha"]
+    assert by_scope["scope-beta"].cross_checked is True, (
+        "the control half of this fixture did not cross-check, so 'partial' is "
+        "not what is being measured here")
     assert v.cross_checked is False
     assert v.commits_restored == 5, v.commits_restored
     assert v.commits_compared == 0, "it claims to have compared commits it could not"
@@ -1053,21 +1069,302 @@ def test_an_absent_live_scope_verifies_SELF_CONSISTENCY_and_says_so(
         "one — the two claims are folded into one OK")
 
 
-def test_an_absent_live_scope_EXITS_ZERO_through_the_real_CLI(tmp_path, identity):
-    """The library returning is not the same claim as the PROCESS exiting 0."""
+def test_a_PARTIAL_cross_check_EXITS_ZERO_through_the_real_CLI(tmp_path, identity):
+    """The library returning is not the same claim as the PROCESS exiting 0.
+
+    🔴 AND THIS IS THE ANTI-PERMANENTLY-RED CONTROL for the whole-run refusal,
+    driven end to end: one scope compared, one scope that could not be, rc=0.
+    """
+    store = tmp_path / "store"
     scope = _make_scope(tmp_path / "elsewhere", "scope-alpha", {"e.md": "x"},
                         commits=4)
-    data = _make_artifact(scope, identity, tmp_path)
-    src = _dir_store(tmp_path / "objects", {_key("scope-alpha"): data})
+    beta = _make_scope(store, "scope-beta", {"e.md": "b"}, commits=2)
+    src = _dir_store(tmp_path / "objects", {
+        _key("scope-alpha"): _make_artifact(scope, identity, tmp_path),
+        _key("scope-beta"): _make_artifact(beta, identity, tmp_path),
+    })
 
     r = _cli("--from-dir", str(src), "--prefix", HOST,
-             "--store", str(tmp_path / "gone"), "--max-lag-days", "100000",
+             "--store", str(store), "--max-lag-days", "100000",
              identity=identity)
     assert r.returncode == 0, f"rc={r.returncode}\n{r.stdout}\n{r.stderr}"
     assert "NOT CROSS-CHECKED" in r.stdout, r.stdout
     assert "self-consistency only" in r.stdout, r.stdout
-    assert "1 against the live store" not in r.stdout, (
+    assert "2 against the live store" not in r.stdout, (
         f"the summary claims a live comparison that did not happen:\n{r.stdout}")
+
+
+# --------------------------------------------------------------------------- #
+# 5b. 🔴 A RUN THAT CROSS-CHECKED NOTHING, BECAUSE OF THE STORE
+#
+# REPRODUCED LIVE 2026-08-26 on this host, at the real bucket:
+#
+#     restore-verify.py --host <this host> --store <an empty directory>
+#     -> rc=0, 13 scopes "RESTORED N commit(s) ..., fsck OK ... NOT
+#        CROSS-CHECKED ... self-consistency only",
+#        summary "0 against the live store (0 commit(s) compared), 13
+#        self-consistency only"
+#
+# An exit code is the only thing a systemd timer reads. So a wrong or absent
+# `--store` silently downgraded the entire run to "the artifact decrypts and is
+# internally consistent" — which says nothing about whether the backup still
+# matches the history it is a backup OF — and reported success.
+#
+# The refusal must NOT reach the three legitimate zero-cross-check runs, each of
+# which has its own control below or above:
+#   * FOREIGN artifacts                    -> test_FOREIGN_..._stay_rc_ZERO
+#   * a PARTIAL run                        -> the two tests in section 5
+#   * a host that never ran the backup     -> the zero-objects no-op, which
+#                                             returns before any verdict exists
+# --------------------------------------------------------------------------- #
+def test_a_run_that_CROSS_CHECKS_NOTHING_because_of_the_store_REFUSES(
+        tmp_path, identity):
+    """🔴 THE F5 REGRESSION GUARD. Red before the fix: this run returned two
+    verdicts and raised nothing.
+
+    🔴 THE WHOLE MESSAGE IS PINNED, NORMALISED — not a substring. A clause
+    pinned by substring has twice shipped in this repo asserting the OPPOSITE of
+    what the code does and passed the entire suite (#851, #765). A cosmetic
+    reword costs this literal; that price buys a machine-readable claim.
+    """
+    store = tmp_path / "store"          # exists, holds NO scope repository
+    store.mkdir()
+    elsewhere = tmp_path / "elsewhere"
+    objects = {}
+    for name, commits in (("scope-alpha", 5), ("scope-beta", 3)):
+        s = _make_scope(elsewhere, name, {"e.md": name}, commits=commits)
+        objects[_key(name)] = _make_artifact(s, identity, tmp_path)
+
+    with pytest.raises(RV.RestoreVerifyError) as ei:
+        _verify(store, tmp_path / "work", FakeDownloader(objects), identity)
+
+    expected = (
+        f"1 artifact/scope check(s) FAILED; 2 verified. First failure: "
+        f"NOTHING WAS CROSS-CHECKED AGAINST THE LIVE STORE. All 2 artifact(s) "
+        f"under test-bucket/{PREFIX} are THIS machine's, and every one of them "
+        f"was verified for SELF-CONSISTENCY ONLY, because the store side "
+        f"contributed nothing: the store directory {store} EXISTS but holds NO "
+        f"scope repositories. Scope(s) with no live repository: "
+        f"['scope-alpha', 'scope-beta']. Self-consistency proves the object "
+        f"decrypts and restores; it proves NOTHING about whether it still "
+        f"matches the history it is a backup OF, and zero commits were compared "
+        f"on this run. Exiting non-zero because an exit code is all a timer "
+        f"reads. Point --store at the live store, or fix it. Verifying ANOTHER "
+        f"host's artifacts is the one case where zero cross-checks is correct, "
+        f"and this is not it.")
+    assert " ".join(str(ei.value).split()) == " ".join(expected.split())
+
+
+def test_the_STORE_refusal_reaches_the_PROCESS_EXIT_CODE(tmp_path, identity):
+    """The library raising is not the same claim as the PROCESS exiting non-zero,
+    and the exit code is the entire reason this defect matters: it is all a
+    systemd timer ever reads.
+
+    🔴 `subprocess.run` is read directly. `$?` after a pipe reports the PIPE's
+    status — that is exactly how a real rc=34 read as rc=0 on this host.
+    """
+    scope = _make_scope(tmp_path / "elsewhere", "scope-alpha", {"e.md": "x"},
+                        commits=4)
+    src = _dir_store(tmp_path / "objects",
+                     {_key("scope-alpha"): _make_artifact(scope, identity,
+                                                          tmp_path)})
+
+    r = _cli("--from-dir", str(src), "--prefix", HOST,
+             "--store", str(tmp_path / "gone"), "--max-lag-days", "100000",
+             identity=identity)
+    assert r.returncode != 0, (
+        f"the process exited 0 having compared NOTHING against the live "
+        f"store:\n{r.stdout}\n{r.stderr}")
+    assert "NOTHING WAS CROSS-CHECKED AGAINST THE LIVE STORE" in r.stderr, (
+        f"non-zero for some OTHER reason — a control that goes red because a "
+        f"different guard fired is green for the wrong reason:\n{r.stderr}")
+    assert f"the store directory {tmp_path / 'gone'} DOES NOT EXIST" in r.stderr, (
+        f"the refusal does not name the store it looked at, so the operator "
+        f"cannot tell a typo from a disaster:\n{r.stderr}")
+
+
+def test_a_BROKEN_artifact_beside_a_LIVE_target_is_not_blamed_on_the_store(
+        tmp_path, identity, capsys):
+    """🔴 THE STORE DID CONTRIBUTE — the artifact is what broke.
+
+    `scope-alpha` IS live in the store, so a comparison was available; its
+    artifact is corrupt, so no verdict for it exists and NOTHING ended up
+    cross-checked. Blaming that on the store would hand the operator a
+    misdiagnosis ("point --store at the live store") for a bit-rot failure, and
+    it is the only case that separates `scopes_with_a_live_target == 0` from the
+    zero-cross-checks it looks redundant with.
+
+    Reached with a case NO earlier check rejects: the run is already failing on
+    the corrupt artifact, so this asserts WHICH failures were recorded, read off
+    stderr — `str(exc)` carries only `failures[0]`.
+    """
+    store = tmp_path / "store"
+    alpha = _make_scope(store, "scope-alpha", {"e.md": "a"}, commits=3)
+    beta = _make_scope(tmp_path / "elsewhere", "scope-beta", {"e.md": "b"},
+                       commits=2)
+    objects = {
+        _key("scope-alpha"): _make_artifact(alpha, identity, tmp_path,
+                                            mangle=_flip_middle_byte),
+        _key("scope-beta"): _make_artifact(beta, identity, tmp_path),
+    }
+
+    with pytest.raises(RV.RestoreVerifyError):
+        _verify(store, tmp_path / "work", FakeDownloader(objects), identity)
+
+    err = capsys.readouterr().err
+    assert "FAILED scope-alpha" in err, (
+        f"the corrupt artifact was not the recorded failure, so this fixture "
+        f"is not exercising what it claims:\n{err}")
+    assert "NOTHING WAS CROSS-CHECKED AGAINST THE LIVE STORE" not in err, (
+        f"a corrupt artifact was reported as a STORE problem — the store held "
+        f"a live scope-alpha and offered a comparison:\n{err}")
+
+
+def test_a_run_that_verified_ZERO_artifacts_is_not_called_a_store_problem(
+        tmp_path, identity, capsys):
+    """🔴 "ALL 0 ARTIFACTS WERE SELF-CONSISTENCY ONLY" IS A CLAIM ABOUT NOTHING.
+
+    Store absent AND the one artifact corrupt: every other conjunct of the
+    refusal holds, and only `verdicts` keeps it quiet. The run is loudly failing
+    already, on the right thing; adding a store diagnosis on top would send the
+    reader to fix `--store` for a bit-rot failure.
+    """
+    scope = _make_scope(tmp_path / "elsewhere", "scope-alpha", {"e.md": "x"},
+                        commits=3)
+    data = _make_artifact(scope, identity, tmp_path, mangle=_flip_middle_byte)
+
+    with pytest.raises(RV.RestoreVerifyError):
+        _verify(tmp_path / "gone", tmp_path / "work",
+                FakeDownloader({_key("scope-alpha"): data}), identity)
+
+    err = capsys.readouterr().err
+    assert "FAILED scope-alpha" in err, err
+    assert "NOTHING WAS CROSS-CHECKED AGAINST THE LIVE STORE" not in err, (
+        f"a run that verified ZERO artifacts announced that all zero of them "
+        f"were self-consistency only:\n{err}")
+    assert "All 0 artifact(s)" not in err, err
+
+
+def test_FOREIGN_artifacts_with_zero_cross_checks_stay_rc_ZERO(tmp_path, identity):
+    """🔴 THE ANTI-PERMANENTLY-RED CONTROL, and the one that decides WHERE the
+    predicate is keyed.
+
+    Cross-checking another host's artifacts against THIS host's store compares
+    two histories that were never the same one and reports a false data-loss
+    alarm, so suppressing it is CORRECT — which makes zero cross-checks correct
+    too. A guard keyed on "were any cross-checked" alone, rather than on the
+    store-side KIND of the block, goes red on the exact command SECRETS.md tells
+    an operator to run.
+    """
+    now = datetime.now(timezone.utc)
+    elsewhere = _make_scope(tmp_path / "elsewhere", "scope-alpha", {"e.md": "x"},
+                            commits=3)
+    data = _make_artifact(elsewhere, identity, tmp_path)
+    store = tmp_path / "store"          # empty: the store side offers nothing
+    store.mkdir()
+
+    verdicts = _verify(store, tmp_path / "work",
+                       FakeDownloader({_key("scope-alpha",
+                                            now - timedelta(hours=2),
+                                            host="other-host"): data}),
+                       identity, prefix="other-host", this_host=HOST,
+                       this_machine_id=SYNTH_MACHINE_ID, explicit=True,
+                       max_lag_days=3.0, now=now)
+    assert [v.cross_checked for v in verdicts] == [False], verdicts
+    assert "ANOTHER host" in (verdicts[0].no_cross_check_reason or "")
+
+    r = _cli("--from-dir", str(_dir_store(
+                 tmp_path / "objects",
+                 {_key("scope-alpha", host="other-host"): data})),
+             "--prefix", "other-host", "--store", str(store),
+             "--max-lag-days", "100000", identity=identity)
+    assert r.returncode == 0, (
+        f"verifying ANOTHER host's artifacts went red — a permanently-red gate "
+        f"on the documented cross-host command:\n{r.stdout}\n{r.stderr}")
+
+
+# --------------------------------------------------------------------------- #
+# 5c. F6 — "no local store" was THREE facts sharing one sentence
+# --------------------------------------------------------------------------- #
+def test_the_THREE_store_states_get_THREE_DIFFERENT_sentences(tmp_path):
+    """🔴 AN EMPTY RESULT CANNOT DISTINGUISH ITS CAUSES. "no local store" was
+    printed for a store that does not exist, for one that exists and is empty,
+    and for one that is full but does not hold this scope. They call for three
+    different actions — find the store / the store was emptied / this one scope
+    is missing — and the reader was given one sentence for all of them.
+
+    Every sub-case is also asserted to be REACHED, so a state whose branch stops
+    executing cannot pass by matching some other state's sentence.
+    """
+    absent = tmp_path / "gone"
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    full = tmp_path / "full"
+    _make_scope(full, "scope-beta", {"e.md": "b"}, commits=1)
+
+    said = {
+        "absent": RV.why_no_live_scope(absent, "scope-alpha"),
+        "empty": RV.why_no_live_scope(empty, "scope-alpha"),
+        "full": RV.why_no_live_scope(full, "scope-alpha"),
+    }
+    assert len(set(said.values())) == 3, (
+        f"two of the three store states share a sentence, so they are "
+        f"indistinguishable in the output: {said}")
+
+    assert said["absent"] == f"the store directory {absent} DOES NOT EXIST"
+    assert said["empty"] == (
+        f"the store directory {empty} EXISTS but holds NO scope repositories")
+    assert said["full"] == (
+        f"the store {full} holds 1 scope repository but none named "
+        f"'scope-alpha'")
+
+    # The two sub-cases of "the path is there but unusable" — a symlink is never
+    # followed (it would compare against a repository OUTSIDE the store) and a
+    # plain directory is not a repository. Neither may be reported as "the store
+    # holds N scopes, none named X", which reads as "the scope was never here".
+    real = _make_scope(tmp_path / "outside", "scope-alpha", {"e.md": "x"},
+                       commits=1)
+    (full / "scope-link").symlink_to(real)
+    link_said = RV.why_no_live_scope(full, "scope-link")
+    assert link_said == (
+        f"{full / 'scope-link'} is a SYMLINK, and a symlink is never followed "
+        f"here — following one would compare against a repository from OUTSIDE "
+        f"the store")
+
+    (full / "scope-plain").mkdir()
+    plain_said = RV.why_no_live_scope(full, "scope-plain")
+    assert plain_said == (
+        f"{full / 'scope-plain'} exists but is not a git repository (it has no "
+        f".git)")
+    assert len({*said.values(), link_said, plain_said}) == 5, (
+        "two of the five store-side findings share a sentence")
+
+
+def test_the_STORE_SIDE_kind_LEDGER_is_pinned_two_way_to_cross_check_target():
+    """🔴 THE PREDICATE BRANCHES ON A KIND, NOT ON A SENTENCE — and this pins
+    that the ledger and the function cannot drift apart.
+
+    A kind added to `cross_check_target` without a decision about whether it is
+    store-side would silently either widen the refusal (a false alarm) or narrow
+    it (the F5 defect back, one branch over). Two-way: every kind the function
+    can return is a declared constant, and every declared constant is returned.
+    """
+    src = SCRIPT.read_text(encoding="utf-8")
+    declared = set(re.findall(r"^(NO_CROSS_CHECK_[A-Z_]+) = ", src, re.M))
+    assert declared, "no NO_CROSS_CHECK_* constants found — the pin is vacuous"
+
+    body = src.split("def cross_check_target(", 1)[1].split("\ndef ", 1)[0]
+    returned = set(re.findall(r"NO_CROSS_CHECK_[A-Z_]+", body))
+    assert returned == declared, (
+        f"cross_check_target returns {returned - declared} that is not "
+        f"declared, or declares {declared - returned} it never returns")
+
+    assert RV.STORE_SIDE_BLOCK_KINDS <= {getattr(RV, n) for n in declared}, (
+        "STORE_SIDE_BLOCK_KINDS names a kind cross_check_target cannot return, "
+        "so the refusal can never fire for it")
+    assert RV.NO_CROSS_CHECK_FOREIGN_HOST not in RV.STORE_SIDE_BLOCK_KINDS
+    assert RV.NO_CROSS_CHECK_MACHINE_ID_UNREADABLE not in RV.STORE_SIDE_BLOCK_KINDS
+    assert RV.NO_CROSS_CHECK_NO_LIVE_SCOPE in RV.STORE_SIDE_BLOCK_KINDS
 
 
 def test_an_EMPTY_artifact_is_still_a_failure_with_no_live_scope(
@@ -2023,12 +2320,21 @@ def test_the_two_NO_CROSS_CHECK_reasons_are_DISTINGUISHABLE(tmp_path, identity):
     key_own = _key("scope-alpha", now - timedelta(hours=2))
     key_foreign = _key("scope-alpha", now - timedelta(hours=2), host="other-host")
 
-    empty_store = tmp_path / "store"
-    empty_store.mkdir()
-    missing = _verify(empty_store, tmp_path / "w1",
-                      FakeDownloader({key_own: data}), identity,
-                      max_lag_days=3.0, now=now)[0]
-    foreign = _verify(empty_store, tmp_path / "w2",
+    # 🔴 The own-host run is deliberately PARTIAL — `scope-beta` is live, so the
+    # run cross-checks something and the whole-run refusal does not fire. What
+    # is under test here is the per-artifact REASON, not the exit code.
+    store = tmp_path / "store"
+    beta = _make_scope(store, "scope-beta", {"e.md": "b"}, commits=2)
+    beta_data = _make_artifact(beta, identity, tmp_path)
+    own = {v.scope: v for v in _verify(
+        store, tmp_path / "w1",
+        FakeDownloader({key_own: data,
+                        _key("scope-beta", now - timedelta(hours=2)): beta_data}),
+        identity, max_lag_days=3.0, now=now)}
+    missing = own["scope-alpha"]
+    assert own["scope-beta"].cross_checked is True, (
+        "the live half of the fixture did not compare — this run is not partial")
+    foreign = _verify(store, tmp_path / "w2",
                       FakeDownloader({key_foreign: data}), identity,
                       prefix="other-host", this_host=HOST,
                       this_machine_id=SYNTH_MACHINE_ID, explicit=True,
@@ -3022,6 +3328,43 @@ def test_SECRETS_md_points_at_the_verifier_from_the_restore_recipe():
     assert "rc=0" in recipe and "index-pack died" in recipe, (
         "the warning is an assertion with no measurement behind it — state what "
         "was observed, not that a thing is bad")
+
+
+def test_SECRETS_md_documents_the_ZERO_CROSS_CHECK_refusal_WORD_FOR_WORD():
+    """🔴 THE ARTIFACT UNDER TEST IS PROSE, SO THE WHOLE NORMALISED PARAGRAPH IS
+    PINNED, not a phrase in it.
+
+    A guard on WORDS is walkable by REWORDING, and the direction that matters
+    here is the one a reword flips silently: this behaviour was rc=0 until
+    2026-08-26, and a doc that says so again would send a disaster-recovery
+    operator to treat a non-zero exit as a broken tool. Pinning the paragraph
+    means a cosmetic edit costs a test edit — which is the price of a claim a
+    machine can check.
+    """
+    doc = SECRETS_MD.read_text(encoding="utf-8")
+    recipe = doc.split("**Restoring**", 1)[1].split("\n## ", 1)[0]
+    expected = (
+        "🔴 **A run of THIS host's artifacts in which NOT ONE scope could be "
+        "compared FAILS.** Measured 2026-08-26: `--host <this host> --store <an "
+        "empty directory>` printed every scope as `NOT CROSS-CHECKED … "
+        "self-consistency only` and exited **0** — an exit code is all a systemd "
+        "timer reads, so a wrong or absent `--store` silently downgraded the "
+        "whole run to \"the object decrypts and is internally consistent\", "
+        "which says nothing about whether it still matches the history it is a "
+        "backup of. It now exits non-zero and names the store it looked at, "
+        "distinguishing a store that **does not exist** from one that exists and "
+        "is **empty** from one that holds scopes but not this one. Two "
+        "zero-cross-check runs are deliberately still rc=0: **another host's** "
+        "artifacts (suppressing the comparison there is correct), and a "
+        "**partial** run where at least one scope did compare. So on a "
+        "disaster-recovery machine with no store yet, expect a non-zero exit — "
+        "read the per-artifact lines, which still say each artifact restored and "
+        "passed `fsck`.")
+    assert " ".join(expected.split()) in " ".join(recipe.split()), (
+        "SECRETS.md's restore recipe no longer carries the zero-cross-check "
+        "paragraph verbatim. If you reworded it deliberately, update this "
+        "literal — but re-read it first: the claim it makes is that the run "
+        "FAILS, and the previous behaviour was exit 0.")
 
 
 def test_the_PRODUCER_points_at_the_verifier_for_the_downstream_half():

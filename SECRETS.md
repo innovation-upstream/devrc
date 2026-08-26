@@ -160,6 +160,21 @@ two stores are divergent content that merely share scope names, so comparing
 them would raise a false data-loss alarm), or this machine's id could not be
 read, which makes "another host's" an assumption rather than a measurement.
 
+🔴 **A run of THIS host's artifacts in which NOT ONE scope could be compared
+FAILS.** Measured 2026-08-26: `--host <this host> --store <an empty directory>`
+printed every scope as `NOT CROSS-CHECKED … self-consistency only` and exited
+**0** — an exit code is all a systemd timer reads, so a wrong or absent
+`--store` silently downgraded the whole run to "the object decrypts and is
+internally consistent", which says nothing about whether it still matches the
+history it is a backup of. It now exits non-zero and names the store it looked
+at, distinguishing a store that **does not exist** from one that exists and is
+**empty** from one that holds scopes but not this one. Two zero-cross-check
+runs are deliberately still rc=0: **another host's** artifacts (suppressing the
+comparison there is correct), and a **partial** run where at least one scope did
+compare. So on a disaster-recovery machine with no store yet, expect a non-zero
+exit — read the per-artifact lines, which still say each artifact restored and
+passed `fsck`.
+
 🔴 **It never runs `git bundle verify`, and neither should you.** Measured: a
 bundle with one byte flipped mid-packfile passes it at **rc=0** printing *"The
 bundle records a complete history."*, while a clone of the same bundle dies at
