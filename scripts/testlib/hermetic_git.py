@@ -28,6 +28,26 @@ modules define such a helper (`tree_hash` / `_tree_hash` / `_manifest` /
 of them in the same direction, and unifying them is what makes the disagreement
 audible." Unifying them is this module.
 
+🔴 RE-MEASURED 2026-08-26: NINE modules, and the last unpinned one had already
+fired. `test_hermetic_git.py::EXPECTED_MEMBERS` is the live ledger — read the
+count THERE, not the sentence above, which is a dated observation and not a
+claim about today. The ninth hole was `test_analyze_service_index_commit.py`'s
+`_decoy_repo_with_worktree`, which built its decoy from a bare `dict(os.environ)`
+while `_run` in the same module pinned maintenance off with a comment naming
+this exact hazard: git spawned `git maintenance run --auto --quiet --detach`
+against the decoy, and that DETACHED process created and removed
+`<decoy>/.git/objects/maintenance.lock` inside the window between the test's two
+fingerprints of that tree. 4/180 red under CPU load; 0/180 once pinned.
+
+⚠ AND THE LEDGER'S DETECTOR IS NARROWER THAN THE HAZARD, stated so the count is
+not read as coverage. It keys on four helper NAMES and globs
+`scripts/tests/test_*.py` only. `scripts/tests/test_git_repo_isolation.py`
+creates repo fixtures with no maintenance pin and snapshots their `.git` dirs;
+it is safe TODAY only because `gitenv.snapshot` reads a fixed three-file set and
+never walks `objects/` — widen its `extra_files` the way
+`test_analyze_service_index_commit.py::_objects_files` does and that module joins
+the class with nothing to notice.
+
 🔴 THE STAKES CHANGED, WHICH IS WHY THIS IS NOT COSMETIC. Both Tekton tiers
 (`devrc-pytests` AND `devrc-nodetests`) are required on `main` with
 `enforce_admins: true`. A flake in any one of these modules therefore blocks
