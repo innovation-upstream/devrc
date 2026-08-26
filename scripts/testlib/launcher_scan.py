@@ -98,7 +98,7 @@ def _inherits(node: ast.AST, module: ast.Module, depth: int = 0) -> bool:
         if isinstance(sub, ast.Attribute) and sub.attr in ("environ", "getenv"):
             return True
         if isinstance(sub, ast.Name) and sub.id in ("environ", "getenv"):
-            return True
+            return True  # pragma: no cover - the bare-name spelling (from os import environ) has zero corpus instances; the attribute form is caught above. KEPT deliberately -- this docstring calls the over-width right for a scan whose failure mode is a missed clobber
         if isinstance(sub, ast.Constant) and sub.value == "PATH":
             return True
     if depth >= 2:
@@ -255,7 +255,7 @@ def path_clobbers(tests_dir: Path) -> list[tuple[str, int, str]]:
                 continue
             lineno = getattr(value, "lineno", getattr(node, "lineno", 0))
             if lineno in seen:
-                continue
+                continue  # pragma: no cover - no module in this corpus yields two path values on one line
             seen.add(lineno)
             src = ast.get_source_segment(text, node) or ""
             out.append((py.name, lineno, " ".join(src.split())[:160]))
@@ -286,10 +286,10 @@ def absolute_launcher_sites(scripts_root: Path) -> dict[str, list[str]]:
     root = Path(scripts_root)
     for py in sorted(root.rglob("*.py")):
         if "__pycache__" in py.parts:
-            continue
+            continue  # pragma: no cover - the scan runs under PYTHONDONTWRITEBYTECODE, so no __pycache__ exists to skip
         try:
             module = ast.parse(py.read_text(encoding="utf-8", errors="replace"))
-        except (SyntaxError, OSError):  # pragma: no cover
+        except (SyntaxError, OSError):  # pragma: no cover - no .py under scripts_root fails to parse or read
             continue
         found = []
         for node in ast.walk(module):

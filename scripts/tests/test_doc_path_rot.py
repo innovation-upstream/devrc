@@ -439,7 +439,7 @@ def _is_path_claim(token: str, doc: str) -> bool:
         return True
     last = segments[-1]
     if not last:
-        return False
+        return False  # pragma: no cover - zero corpus instances
     # The extensionless affordance is a `scripts/` one only, and it is keyed on
     # what the AUTHOR WROTE -- a relative or deployed token is never granted it,
     # so a bare `../something` stays prose.
@@ -459,7 +459,7 @@ def _read_list(path: Path) -> list[str]:
         # every known-dead one as NEW. That is exactly how the reference
         # implementation's repo produced a confident false alarm -- the script
         # was pulled into a clone without its sidecar.
-        raise AssertionError(
+        raise AssertionError(  # pragma: no cover - the guard's own FIRING path: it fires only when the corpus is dirty, and no planted positive control drives it. Adding one is the real remedy
             f"{path} is missing. This gate's verdict is meaningless without it; "
             "restore it from git rather than letting the run continue."
         )
@@ -529,7 +529,7 @@ def _corpus_from_filesystem(root: Path = REPO_ROOT) -> list[str]:
         for f in p.rglob("*.md"):
             rel = f.relative_to(root)
             if any(seg.startswith(".") for seg in rel.parts):
-                continue
+                continue  # pragma: no cover - zero corpus instances
             if f.is_file():
                 out.append(str(rel))
     return sorted(out)

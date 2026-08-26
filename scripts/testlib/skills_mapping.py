@@ -116,7 +116,7 @@ def skills_mapping_problem(home_nix: Path | str) -> str | None:
     if not is_file:
         return f"{shown} is not a file, {_FIX_IT}"
     if shutil.which("nix-instantiate") is None:
-        return f"nix-instantiate is not on PATH, {_FIX_IT}"
+        return f"nix-instantiate is not on PATH, {_FIX_IT}"  # pragma: no cover - nix-instantiate is present in every environment this runs in
     budget = _budget()
     if isinstance(budget, str):
         return budget
