@@ -1365,6 +1365,82 @@ def m_store_api_traffic(env: Env) -> dict:
     )
 
 
+#: The systems that MINT WORK, and the artefact in this tree that proves each is
+#: still here. `(system, canonical?, why it is separate, entry points)`.
+#:
+#: 🔴 THE LEDGER IS AUTHORED; WHAT IS MEASURED IS WHETHER IT STILL RESOLVES. That
+#: distinction is the whole honesty of this row, so it is stated in the rendered
+#: detail rather than left for a reader to infer. What this catches is the drift
+#: that actually happens — an intake system renamed, retired or moved, while the
+#: page keeps claiming four. What it CANNOT catch is a FIFTH system nobody adds
+#: here; there is no derivable definition of "mints work" to enumerate from, and
+#: pretending otherwise would be a scan that walked nothing reporting all-clear.
+WORK_INTAKE: tuple[tuple[str, bool, str, tuple[str, ...]], ...] = (
+    ("clawgate Tasks", True,
+     "dispatch, agents, acceptance criteria, a status gate",
+     ("claude/skills/clawgate/SKILL.md",
+      "claude/skills/clawgate/flows/task-authoring.md")),
+    ("ClickUp", False,
+     "someone else's system of record — set off this machine",
+     ("claude/skills/clickup/SKILL.md",
+      "scripts/check-clickup-addressed")),
+    ("the initiatives board", False,
+     "threads, not units — momentum, never an acceptance criterion",
+     ("claude/skills/initiatives/SKILL.md", "scripts/initiatives")),
+    ("claim-work", False,
+     "a LOCK over a handoff doc's ranked list, not a queue",
+     ("scripts/claim-work.sh",
+      "claude/skills/handoff/reference/shared-queue.md")),
+)
+
+
+def m_work_intake(env: Env) -> dict:
+    """How many systems mint claimable work, and which one is canonical.
+
+    🔴 THE ROW EXISTS BECAUSE THE PAGE MAKES A CONSOLIDATION-SHAPED CLAIM. §4
+    names one canonical task system and demotes three others. "Demoted" and
+    "gone" render identically to a reader who never meets the other three, so the
+    count is measured and stamped rather than asserted in a sentence that would
+    stay at four after one of them was retired.
+    """
+    rows = []
+    present = 0
+    canonical = None
+    for name, is_canonical, why, paths in WORK_INTAKE:
+        found = [p for p in paths if (env.repo / p).exists()]
+        if found:
+            present += 1
+            if is_canonical:
+                canonical = name
+            where = found[0] + ("" if len(found) == 1 else f" (+{len(found) - 1} more)")
+            state = f"{'CANONICAL — ' if is_canonical else ''}{where}"
+        else:
+            state = "ABSENT from this tree — the ledger entry is stale"
+        rows.append((name, why, state))
+    if not present:
+        raise Unmeasurable(
+            "not one pinned work-intake entry point resolves under "
+            f"{env.repo} — this is not a devrc checkout, and a zero here would "
+            "read as 'nothing mints work'"
+        )
+    return dict(
+        value=f"{present} of {len(WORK_INTAKE)} intake systems present, "
+              f"{'1 canonical' if canonical else 'NO canonical one'}",
+        detail=(
+            "Work arrives from more than one place, and only one of them is a "
+            "claimable task in the full sense. 🔴 The ledger of systems is "
+            "HAND-AUTHORED; what is MEASURED is whether each one's entry point "
+            "still resolves in this tree — so a retired or renamed system shows "
+            "up here as ABSENT, while a fifth system nobody adds to the ledger is "
+            "invisible to this row. The ledger is "
+            "`scripts/present/measure.py::WORK_INTAKE`."
+        ),
+        source="path existence for each entry point in measure.WORK_INTAKE, under the repo root",
+        columns=("system", "why it is separate", "entry point in this tree"),
+        rows=tuple(rows),
+    )
+
+
 # --------------------------------------------------------------------------- #
 # The registry
 # --------------------------------------------------------------------------- #
@@ -1378,47 +1454,49 @@ def m_store_api_traffic(env: Env) -> dict:
 REGISTRY: tuple[tuple[str, str, str, object, str], ...] = (
     ("repo.head", "how-to-read", "This build's provenance", m_repo_head,
      "git -C <repo> rev-parse --short HEAD && git -C <repo> status --porcelain"),
-    ("rules.bytes", "told", "RULES.md against its ceiling", m_rules_bytes,
+    ("rules.bytes", "constraints", "RULES.md against its ceiling", m_rules_bytes,
      "python -c \"import sys;sys.path.insert(0,'scripts/tests');import test_rules_size as t;print(t.MAX_BYTES)\""),
-    ("rules.archive", "told", "RULES-ARCHIVE.md (costs zero per session)", m_rules_archive_bytes,
+    ("rules.archive", "constraints", "RULES-ARCHIVE.md (costs zero per session)", m_rules_archive_bytes,
      "wc -c claude/RULES-ARCHIVE.md"),
-    ("skills.listing", "told", "The always-on skill listing", m_skill_listing,
+    ("skills.listing", "constraints", "The always-on skill listing", m_skill_listing,
      "nix develop --impure --command python -m pytest scripts/tests/test_skill_tiers.py -q"),
-    ("memory.index", "told", "MEMORY.md against its hard cap", m_memory_index,
+    ("memory.index", "constraints", "MEMORY.md against its hard cap", m_memory_index,
      "python scripts/memory-audit.py"),
-    ("skills.inventory", "told", "The skill inventory (routing table)", m_skill_inventory,
+    ("skills.inventory", "subsystems", "The skill inventory (routing table)", m_skill_inventory,
      "ls claude/skills/*/SKILL.md"),
-    ("hooks", "may-do", "Hooks: shipped vs registered", m_hooks,
+    ("hooks", "sessions", "Hooks: shipped vs registered", m_hooks,
      "jq '.hooks' ~/.claude/settings.json"),
-    ("gate.tiers", "verified", "The two gate tiers", m_gate_tiers,
+    ("tasks.intake", "tasks", "The systems that mint work", m_work_intake,
+     "python -c \"import sys;sys.path.insert(0,'scripts');from present.measure import WORK_INTAKE;print(*WORK_INTAKE,sep=chr(10))\""),
+    ("gate.tiers", "constraints", "The two gate tiers", m_gate_tiers,
      "nix develop --impure --command bash scripts/gate.sh --tier both"),
-    ("gate.protection", "verified", "What actually BLOCKS a merge", m_branch_protection,
+    ("gate.protection", "constraints", "What actually BLOCKS a merge", m_branch_protection,
      "gh api /repos/<owner>/<repo>/branches/main/protection --jq .required_status_checks"),
-    ("tests.pytest", "verified", "Per-target collected-test floors", m_pytest_floors,
+    ("tests.pytest", "constraints", "Per-target collected-test floors", m_pytest_floors,
      "bash scripts/run-tests.sh --check-floors"),
-    ("tests.node", "verified", "The node tier's file floors", m_node_floors,
+    ("tests.node", "constraints", "The node tier's file floors", m_node_floors,
      "grep -A40 '^SUITES=(' scripts/run-node-tests.sh"),
-    ("gate.hooks_installed", "verified", "Is a blocking pre-push gate installed?", m_hook_gate_install,
+    ("gate.hooks_installed", "constraints", "Is a blocking pre-push gate installed?", m_hook_gate_install,
      "git config --local --get core.hooksPath; git config --global --get core.hooksPath"),
-    ("ship.managed", "ships", "What home-manager actually deploys", m_managed_paths,
+    ("ship.managed", "constraints", "What home-manager actually deploys", m_managed_paths,
      "grep -c 'home\\.file\\.\"' nix/home.nix"),
-    ("drift.ladder", "drift", "drift-check.sh exit-code ladder", m_drift_ladder,
+    ("drift.ladder", "constraints", "drift-check.sh exit-code ladder", m_drift_ladder,
      "bash scripts/drift-check.sh; echo rc=$?"),
-    ("timers", "drift", "systemd user timers on this host", m_timers,
+    ("timers", "constraints", "systemd user timers on this host", m_timers,
      "systemctl --user list-timers --all"),
-    ("telemetry.sources", "observed", "Activity-telemetry sources", m_telemetry_sources,
+    ("telemetry.sources", "sessions", "Activity-telemetry sources", m_telemetry_sources,
      "ls -d scripts/collector/*/"),
-    ("index.store", "observed", "The subsystem index store", m_index_store,
+    ("index.store", "subsystems", "The subsystem index store", m_index_store,
      "python scripts/analyze-service-index/... --list  (or: ls ~/.claude/analyze-service-index)"),
-    ("seam.jsonl", "soft", "Independent transcript-corpus walkers", m_jsonl_walkers,
+    ("seam.jsonl", "seams", "Independent transcript-corpus walkers", m_jsonl_walkers,
      "grep -rn '\\*\\.jsonl' --include='*.py' scripts | grep -E 'glob|rglob|iterdir|walk' | grep -v tests/"),
-    ("seam.detectors", "soft", "Independent Claude-session detectors", m_session_detectors,
+    ("seam.detectors", "seams", "Independent Claude-session detectors", m_session_detectors,
      "grep -rn pane_current_command scripts .tmux.conf | grep -v tests/"),
-    ("seam.sessions", "soft", "The session-surface constellation", m_session_surfaces,
+    ("seam.sessions", "seams", "The session-surface constellation", m_session_surfaces,
      "wc -l scripts/session-manager scripts/session-resolve scripts/waiting-windows scripts/session-write"),
-    ("seam.store_api", "soft", "The hosted store API and its client set", m_store_api_clients,
+    ("seam.store_api", "subsystems", "The hosted store API and its client set", m_store_api_clients,
      "grep -rn 'urllib\\|requests\\|urlopen' scripts/lib/subsystem_*.py"),
-    ("seam.store_traffic", "soft", "Has the hosted store served anyone?", m_store_api_traffic,
+    ("seam.store_traffic", "subsystems", "Has the hosted store served anyone?", m_store_api_traffic,
      "read the pod's audit log for any request whose token identity is not the seed/verify credential"),
 )
 
