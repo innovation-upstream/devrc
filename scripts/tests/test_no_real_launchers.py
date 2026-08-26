@@ -532,9 +532,28 @@ def test_a_mutating_systemctl_verb_is_recorded_and_swallowed(no_real_launchers):
     assert p.stderr == "", (
         f"the real systemctl appears to have run: {p.stderr!r}")
     blocked = nolaunch.blocked_systemctl(no_real_launchers)
-    # ⚠ EXACT count, which is sound only because pytest runs this suite
-    # sequentially in one process and the stub log is shared. Under xdist this
-    # would race; the fix then is a per-worker stub dir, not a looser assertion.
+    # 🔴 KNOWN RACE, OPEN — this comment used to say "sound only because pytest
+    # runs this suite sequentially in one process". That premise is FALSE as of
+    # the xdist change: run-tests.sh runs each target `-n N --dist loadfile`.
+    #
+    # loadfile keeps THIS file's tests on one worker, so they do not race each
+    # other. What does race is the other eight files in this tree that invoke
+    # `systemctl` — they run on sibling workers and append to the SAME run-wide
+    # `$DEVRC_TEST_LAUNCH_STUB_DIR/launches.log` that `before` was sampled from.
+    # Measured composition of that log for a 9-file subset at -n 4: 23
+    # `systemctl(blocked)`, 9 `openrgb`, 8 `systemd-run`, 8 `notify-send` foreign
+    # lines per run, interleaving with these assertions.
+    #
+    # NOT REPRODUCED in 2/2 subset runs — the window is a few ms — so this is a
+    # small-probability flake on a REQUIRED gate, which is worse than a loud one:
+    # it will present as an unrelated test failing for no reason.
+    #
+    # The fix is the one the original comment named — a per-worker stub dir — and
+    # it is deliberately NOT done here: the stub log path is baked into the stub
+    # script bodies at install() time, and the runner attributes intercepts to
+    # targets by LINE OFFSET into that single file, so per-worker logs need the
+    # runner's ledger model changed too. That is a design change, not a patch.
+    # Until then: `DEVRC_TEST_JOBS=1` makes this deterministic.
     assert len(blocked) == before + 1, blocked[before:]
     assert unit in blocked[-1] and "stop" in blocked[-1], blocked[-1]
 

@@ -86,8 +86,20 @@
       # relationship in the other direction -- every REQUIRED_TOOLS entry must
       # be reachable from this list.
       # ---------------------------------------------------------------------
+      # 🔴 NO COMMENTS INSIDE THE LIST BELOW. GUARD 1c
+      # (test_guard1c_dep_list_matches_the_flake_interpreter) parses this list
+      # TEXTUALLY, so a comment's words are read as package names and it fails
+      # naming every word. Put the prose here instead.
+      #
+      # pytest-xdist: scripts/run-tests.sh runs each target `-n 4 --dist
+      # loadfile`. Measured on the whole gate: 1194s serial -> 576s (2.07x),
+      # with the dominant target (scripts/tests, 57% of the run) going
+      # 677s -> 223s. Read run-tests.sh's PARALLELISM header before changing the
+      # job count or the dist mode — `loadfile` and the nested-run serialisation
+      # are both load-bearing, not tuning.
       gatePyEnv = pkgs.python312.withPackages (ps: with ps; [
         pytest
+        pytest-xdist
         requests
         psycopg2
         minio

@@ -521,9 +521,16 @@ def test_since_names_a_local_calendar_day_not_a_utc_one():
     UTC+0.
 
     ⚠️ It mutates PROCESS-GLOBAL state (`os.environ["TZ"]` + `time.tzset()`), which is the
-    only way to exercise this dimension in-process. Safe here because the runner is
-    single-process and sequential (`scripts/run-tests.sh` invokes pytest with no xdist),
-    and the window is this function. The restore is not merely written in a `finally` —
+    only way to exercise this dimension in-process. Safe here because the mutation is
+    confined to ONE PROCESS and the window is this function.
+
+    🔴 This used to read "safe because the runner is single-process and sequential
+    (`scripts/run-tests.sh` invokes pytest with no xdist)". That premise is FALSE as of
+    the xdist change — the runner now passes `-n N --dist loadfile`. The conclusion
+    still holds, but for a different reason: each xdist worker is its OWN process with
+    its own `os.environ`, so a `TZ` mutation cannot reach a sibling worker, and
+    `loadfile` keeps this file's tests on one worker. Do not restore the old wording.
+    The restore is not merely written in a `finally` —
     it is ASSERTED afterwards, because "restored in a finally" is a claim and the next
     test that reads local time would pay for it being wrong.
     """

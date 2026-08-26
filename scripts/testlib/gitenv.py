@@ -685,6 +685,114 @@ def _own_process_lineage() -> "set[int]":
     return lineage
 
 
+_XDIST_RUN_ENV = "PYTEST_XDIST_TESTRUNUID"
+
+
+def _own_xdist_run_id() -> "str | None":
+    """This xdist run's id if WE are a worker of it, else None.
+
+    MEASURED: xdist sets this in every WORKER and NOT in the controller, and all
+    workers of one run share the value. The controller needs no special case —
+    it is each worker's direct parent (measured: worker ppid == controller pid),
+    so `_own_process_lineage` already excludes it.
+
+    🔴 "IN MY ENVIRONMENT" IS NOT "I AM A WORKER". A worker's children inherit
+    the variable, so a nested pytest launched from a test would take the worker
+    branch below and exclude its parent worker's other children — processes it
+    has no business excluding.
+
+    The discriminator is the same /proc quirk that made an earlier version of
+    the sibling check inert, used deliberately this time: xdist assigns the id
+    at RUNTIME, so in a genuine worker it is in `os.environ` and ABSENT from
+    `/proc/self/environ` (the exec-time snapshot). A process that merely
+    INHERITED it has it in both. Measured, with both controls:
+
+        genuine worker:      os.environ yes / /proc/self/environ no
+        inheriting child:    os.environ yes / /proc/self/environ YES
+        set before exec:     os.environ yes / /proc/self/environ YES
+
+    An unreadable /proc yields None — we then claim no siblings, leaving every
+    candidate visible, which is the direction that keeps the guard sharp.
+    """
+    value = os.environ.get(_XDIST_RUN_ENV)
+    if not value:
+        return None
+    try:
+        raw = Path("/proc/self/environ").read_bytes()
+    except OSError:
+        return None
+    inherited = any(entry.startswith(f"{_XDIST_RUN_ENV}=".encode())
+                    for entry in raw.split(b"\0"))
+    return None if inherited else value
+
+
+def _ppid_of(entry: Path) -> "int | None":
+    """`entry`'s parent pid from /proc/<pid>/stat, or None if unreadable."""
+    try:
+        stat = (entry / "stat").read_text(encoding="utf-8", errors="replace")
+        return int(stat[stat.rindex(")") + 1:].split()[1])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _is_sibling_xdist_worker(entry: Path, run_id: str, our_ppid: int) -> bool:
+    """True when `entry` is a SIBLING WORKER of our xdist run.
+
+    🔴 The paragraph that used to sit here argued "why the run id and not
+    something cheaper" and asserted "the run id is exact: only processes of THIS
+    xdist run carry it". Both are now WRONG and are deleted rather than left to
+    be believed: the id is unreadable from another process's /proc (see below),
+    and it is not exact anyway — a worker's children inherit it, which is why
+    `_own_xdist_run_id` now rejects an inherited value.
+
+    What that paragraph got RIGHT, and is worth keeping: the cheap alternatives
+    are catastrophic. Lineage INTERSECTION matches every process on the box
+    (every lineage reaches pid 1). "The candidate's parent is in our lineage"
+    matches anything parented by `systemd --user`.
+
+    🔴 RESIDUAL HAZARD, not guarded: if the controller dies and this worker is
+    reparented to a subreaper (`systemd --user`, or a container init), then
+    `os.getppid()` becomes that subreaper and this check would exclude the large
+    class of processes parented by it. A worker outliving its controller is
+    already a broken run, but the exclusion would be wrong rather than merely
+    useless, so it is named here instead of being discovered later.
+
+    🔴 IT IS THE PPID, AND NOT THE RUN ID, THAT DOES THE WORK — and an earlier
+    revision of this function ALSO checked the run id in `/proc/<pid>/environ`,
+    which made the whole predicate INERT: it could never return True.
+
+    `/proc/<pid>/environ` exposes the `env_start..env_end` region, i.e. the
+    environment AS OF EXEC. xdist assigns the run id at RUNTIME inside an
+    already-running worker (`os.environ[...] = workerinput["testrunuid"]`), and
+    CPython's setenv allocates a new array on the heap without touching that
+    region. MEASURED, with a positive control:
+
+        inside a worker:            os.environ has it = True
+                                    /proc/self/environ has it = False
+        control, set before exec:   /proc/self/environ has it = True
+
+    So the id is readable from OUR OWN os.environ (which is what the caller's
+    `_own_xdist_run_id()` does, and why that half works) and is NOT readable
+    from a sibling's /proc. The lesson generalises: two ways of reading "the
+    environment" are two different surfaces, and measuring one says nothing
+    about the other.
+
+    The ppid alone is the correct sibling test, and only inside a worker — which
+    is exactly when the caller applies it. A worker's parent is the CONTROLLER,
+    whose children are the workers; a test's own child has the WORKER as its
+    parent, so it stays visible, which is what
+    `test_live_cotenants_sees_another_process_in_the_repo` requires. In a SERIAL
+    run this must not be applied at all: our parent is then whatever launched
+    pytest, and its other children are exactly the foreign writers we are
+    looking for.
+
+    `run_id` is retained in the signature because the caller uses its presence
+    as the "am I a worker" gate; it is deliberately not re-read here.
+    """
+    del run_id  # see the docstring: unreadable from another process's /proc
+    return _ppid_of(entry) == our_ppid
+
+
 def live_cotenants(git_dirs: "list[Path]") -> "list[str]":
     """Live processes, not our own ancestors, sitting inside a protected repo.
 
@@ -712,6 +820,8 @@ def live_cotenants(git_dirs: "list[Path]") -> "list[str]":
     if not proc.is_dir():
         return []
     mine = _own_process_lineage()
+    xdist_run = _own_xdist_run_id()
+    our_ppid = os.getppid()
     found: list[str] = []
     try:
         entries = list(proc.iterdir())
@@ -722,6 +832,15 @@ def live_cotenants(git_dirs: "list[Path]") -> "list[str]":
             continue
         pid = int(entry.name)
         if pid in mine:
+            continue
+        # A sibling xdist worker is OUR run, not a foreign writer. Without this
+        # every worker names its siblings as positive evidence, attribution
+        # fails, and the detector silently drops ENFORCE -> REPORT: a repo
+        # mutation reverted before session end then passes GREEN. Measured on a
+        # clean throwaway repo: serial rc=1 naming the culprit test, `-n 4`
+        # rc=0. Invisible on a dev box (which has real co-tenants and is already
+        # in report mode) and live exactly where the guard was still sharp — CI.
+        if xdist_run is not None and _is_sibling_xdist_worker(entry, xdist_run, our_ppid):
             continue
         try:
             cwd = (entry / "cwd").resolve()
