@@ -210,26 +210,74 @@ read the root cause first; the design is what failed, not the code.
    count a run as KILLED if ANY step's `terminated.exitCode` is `255` or `137`, GENUINE if
    `verdict` exits non-zero without one. **Reproduce `30/121` on the pre-`06:00Z 2026-08-25`
    window first** — that is the instrument's positive control, and it matches to the digit.
-2. **Two flaky tests still UNDIAGNOSED**, both `devrc`, `scripts/tests/`:
-   `test_no_unallowlisted_public_ip_literal_is_committed` and
-   `test_the_module_root_is_load_bearing`. Neither has a wall-clock dependency in the sandbox
-   tier; either could have been a *correct* red on some branch. Logs were unrecoverable (pods
-   GC'd; commit statuses cap at 140 chars) — **but `broken-gate-tail` now exists**, so a
-   recurrence is readable.
-3. **Re-check `test_an_absent_origin_header_is_not_the_same_as_an_empty_one`** —
+2. ✅ **DONE 2026-08-25 — NEITHER OF THE "TWO FLAKY TESTS" WAS EVER A FLAKE.** Both were
+   already diagnosed AND closed, and — 🔴 the part worth carrying — **both were recorded as
+   closed in THIS DOC'S OWN LINEAGE and then carried forward as "UNDIAGNOSED" anyway.** The
+   hedge that was right (*"either could have been a correct red on some branch"*) sat next to
+   the answer for two days because nobody re-read the predecessor. Same misattribution class
+   this thread exists to fix, committed by the thread's own notes.
+   - **`test_the_module_root_is_load_bearing` — a DETERMINISTIC two-tier failure, fixed by
+     #732 (`5a2a7b21`, 2026-08-22).** It asserted `gitenv.py` sits inside a git checkout; the
+     authoritative runner's source is a `/nix/store` path with **no `.git`**, so it died on
+     its own precondition — green on a dev host, red in the only tier that gates a merge, **on
+     every open PR, for reasons no PR had touched.** Recorded ✅ DONE in `cdcc61f8`.
+     **Re-verified live here, both arms, in `.git`-less trees exported with `git archive`:**
+
+     | tree | result |
+     |---|---|
+     | `5a2a7b21^` (pre-#732) | **1 failed** — `AssertionError: gitenv.py is not inside a git checkout`, the verbatim CI assertion |
+     | `origin/main` | **2 passed** |
+
+     The red arm is the **negative control**: the harness was shown to go red before its
+     green was believed. A regression guard also exists —
+     `test_the_module_root_pin_does_not_depend_on_this_tree_being_a_checkout`.
+   - **`test_no_unallowlisted_public_ip_literal_is_committed` — a CORRECT RED, not a flake.**
+     It failed #762's first revision, which committed
+     `nix/system/apply-nebula-443.sh.LOCAL-preserved-2026-08-02` — carrying a real prod
+     lighthouse IP **6 times** — into a **PUBLIC** repo. Recorded in `6d959016`. The test has
+     no wall-clock, no concurrency and no process scan; it is a pure function of the tree, so
+     it *cannot* flake. **Re-verified live, with both controls:** the file is **absent from
+     `origin/main`** (`git cat-file -e` → never committed, so the gate did its job); under
+     test the committed tree gives **0 unpinned**; feeding the same assertion path the leak
+     file gives **6**, all from that one path. Instrument proven able to go red; the zero is real.
+3. 🔴 **`broken-gate-tail` CANNOT name a failing test — do not reach for it expecting one.**
+   Measured over every `devrc-ci-*-report` TaskRun: **24 of 139 populated**, but only **1 of
+   the 24 genuine failures**. It is the *broken-gate* instrument (kills), and its content is
+   the last 1200B of a log captured mid-suite, so it ends in a wall of dots. **The instrument
+   that names the test is the commit status** (`FAILING: <test> | TOTAL collected=…`).
+   ⚠ **That naming only starts at `a9337827` (2026-08-24T20:34Z)** — every failure before it
+   carries counts and no name, which is why the two tests above were unattributable rather
+   than unexplained. 17 of the window's 24 genuine failures are named; all 17 are read and
+   **neither test above appears**.
+4. 🔴 **UNEXPLAINED, found while doing the above: a leg reported `FAILED` with `failed=0`.**
+   Commit `1ca46a80` (`devrc-ci-jqx65`, 2026-08-25T20:44Z):
+   `FAILED: pytests — TOTAL collected=16062 passed=16060 skipped=2 failed=0`. The arithmetic
+   closes (16060+2=16062), so no test failed and the leg still failed the PR. Either a target
+   died without producing a test failure (collection error, non-pytest target, non-zero exit)
+   or the verdict logic mis-attributes. **This is a misattribution of exactly this thread's
+   kind and it is LIVE** — it was not chased here.
+5. **Re-check `test_an_absent_origin_header_is_not_the_same_as_an_empty_one`** —
    `scripts/browser-bridge/tests/`. It shares #802's dropped-emit mechanism and **#802 has
    merged (`d09038d8`)**; the prior agent said verify rather than assume it is covered.
-4. **A ninth flake, UNCONFIRMED:** `test_live_cotenants_does_not_count_this_process`
+   **Now the top open flake item**, since 1 and 2 are closed.
+6. **A ninth flake, UNCONFIRMED:** `test_live_cotenants_does_not_count_this_process`
    (`scripts/tests/test_git_repo_isolation.py:1479`). Leading suspect `git commit`'s detached
    `run_auto_maintenance`. 0/25 reproductions across three load conditions, **and the /proc
    watcher used failed its own positive control — so those zeros are not evidence.**
-5. **#810's two remaining cosmetic nits:** `scripts/lib/agent_ledger.py:261` still says "a 2s
+7. **#810's two remaining cosmetic nits:** `scripts/lib/agent_ledger.py:261` still says "a 2s
    timeout under load" (a second spelling of the budget), and the narrow arm's failure message
    in `test_agent_ledger.py` names the wrong cause. Neither merits its own PR.
-6. **Housekeeping, none urgent:** `homelab-talos` has **53 stash entries** and a repo-local
+8. **Housekeeping, none urgent:** `homelab-talos` has **53 stash entries** and a repo-local
    `core.hooksPath` nobody set deliberately; `devrc` has **46 worktrees**, many on merged
    branches. And `ecc4332e` references the capacity question as `#1205`, which is **not** a
    homelab-infra number (issues stop at #316, PRs at #394) — tracker unknown.
+   ⚠ **New, and it is a LEAK sitting in a working tree, not a tidiness item:**
+   `nix/system/apply-nebula-443.sh.LOCAL-preserved-2026-08-02` is **still untracked in the
+   workbench `devrc` checkout**, 23 days on, carrying a prod IP 6×, in a repo where
+   `git add -A` is banned for exactly this reason. `6d959016` established its entire delta IS
+   the leak (the tracked `apply-nebula-443.sh` takes the IP at runtime), so it is not stranded
+   work and deleting it loses nothing. **Left in place — removing an operator's untracked file
+   is their call, not an agent's.**
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **`scripts/gate.sh` runs the DEV-HOST tier only** — `run-tests.sh` + `run-node-tests.sh`.
