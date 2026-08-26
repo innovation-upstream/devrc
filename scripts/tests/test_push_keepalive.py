@@ -112,14 +112,23 @@ def _searchable_files() -> list[Path]:
     executable code", never by extension. Breadth is the point of a ledger; an
     enumeration narrower than its own sentence is a coverage claim nobody can
     see is false.
+
+    ⚠ ONE DELIBERATE EXCLUSION: `.md`. Widening the scan made it trippable by a
+    file that DOCUMENTS the hazard rather than commits it — `githooks/README.md`
+    shows the bad form as a counter-example — and a ledger that goes red at
+    prose teaches people to ignore it. Documentation is not executed. The
+    residual is stated rather than hidden: a test FIXTURE that legitimately
+    represents the broken state would still trip this, and the failure message
+    is what tells its author so.
     """
     out: list[Path] = []
     for root in (SCRIPTS, GITHOOKS):
         if not root.is_dir():
             continue
         for p in sorted(root.rglob("*")):
-            if p.is_file() and "__pycache__" not in p.parts \
-                    and p.resolve() != Path(__file__).resolve():
+            if (p.is_file() and "__pycache__" not in p.parts
+                    and p.suffix.lower() != ".md"
+                    and p.resolve() != Path(__file__).resolve()):
                 out.append(p)
     return out
 
@@ -128,62 +137,157 @@ def _searchable_files() -> list[Path]:
 MEASURED_IDLE_CLOSE_S = 360
 
 
-def _module_code() -> str:
-    """The git module's CODE, with ALL THREE nix comment forms stripped.
+def _nix_code(path: Path, keep_strings: bool = True) -> str:
+    r"""Nix source with ALL comment forms removed, in ONE string-aware pass.
 
-    🔴 The header of this module quotes every token these pins look for —
-    `ServerAliveInterval`, the measured numbers, the option names. A pin read off
-    the raw text would answer a question about the PROSE and pass on a module
-    whose actual setting had been deleted.
+    🔴 THIS FUNCTION IS THE FIX FOR A BUG I SHIPPED TWICE. Round 3 of this PR's
+    audit hardened comment-stripping HERE and left the identical whole-line-`#`
+    stripper open in the two sibling guards that read `nix/home.nix` and
+    `nix/programs/default.nix` — so the very delete-shape this docstring calls
+    "the one a reviewer would actually reach for" walked all three links of the
+    reachability chain while the suite stayed green. A predicate open-coded at N
+    sites is wrong at N-1 of them; consolidating is what makes that audible, so
+    every nix read in this file now goes through this one function.
 
-    🔴 A FIRST VERSION STRIPPED ONLY WHOLE-LINE `#`, AND AN AUDIT WALKED IT.
-    Nix has three comment forms and the delete-shape a reviewer would actually
-    reach for is the one that was missed: wrapping the setting in a `/* … */`
-    block left the suite at 5 passed while `nix eval` confirmed `sshCommand` was
-    genuinely ABSENT from the settings attrset. A trailing `#` on a code line did
-    the same. This docstring used to claim exactly the protection it did not
-    provide, which is the failure mode worth naming: reading as coverage while
-    supplying none is worse than none, because it stops anyone looking.
+    Handles all three nix comment forms and both string forms:
+      * `# …` to end of line, and `/* … */`, each recognised only OUTSIDE a
+        string — a `#` in an option value, or a `/*` inside a path glob like
+        `"~/ignore/*.tmp"`, must not eat code. (The previous version ran a
+        `/\*.*?\*/` regex with no string awareness; an ordinary glob value plus
+        any later `*/` deleted the ENTIRE remainder of the module from the
+        parser's view.)
+      * `"…"` with backslash escapes, and `''…''` indented strings.
 
-    `#` is only treated as a comment OUTSIDE a double-quoted string, so the `#`
-    that may legitimately appear inside an option value cannot truncate the line
-    being measured.
+    `keep_strings=False` blanks string CONTENT (keeping the quotes), so a pin
+    looking for code cannot be satisfied by the same text spelled inside a
+    string literal. Reads that need the value itself pass True.
+
+    Newlines inside removed comments are preserved so that line-anchored
+    patterns still see the structure they expect.
     """
-    src = GIT_MODULE.read_text(encoding="utf-8")
-    src = re.sub(r"/\*.*?\*/", "", src, flags=re.S)   # block comments
+    src = path.read_text(encoding="utf-8")
     out: list[str] = []
-    for line in src.splitlines():
-        in_str = False
-        cut = len(line)
-        i = 0
-        while i < len(line):
-            ch = line[i]
-            if ch == "\\" and in_str:
-                i += 2
-                continue
-            if ch == '"':
-                in_str = not in_str
-            elif ch == "#" and not in_str:
-                cut = i
+    i, n = 0, len(src)
+    while i < n:
+        c = src[i]
+        if c == '"':
+            j = i + 1
+            while j < n:
+                if src[j] == "\\":
+                    j += 2
+                    continue
+                if src[j] == '"':
+                    j += 1
+                    break
+                j += 1
+            out.append(src[i:j] if keep_strings else '"' + " " * max(0, j - i - 2) + '"')
+            i = j
+            continue
+        if src.startswith("''", i):
+            j = i + 2
+            while j < n and not src.startswith("''", j):
+                j += 1
+            j = min(n, j + 2)
+            chunk = src[i:j]
+            out.append(chunk if keep_strings
+                       else "''" + "".join(ch if ch == "\n" else " "
+                                           for ch in chunk[2:-2]) + "''")
+            i = j
+            continue
+        if src.startswith("/*", i):
+            j = src.find("*/", i + 2)
+            j = n if j == -1 else j + 2
+            out.append("\n" * src.count("\n", i, j))
+            i = j
+            continue
+        if c == "#":
+            j = src.find("\n", i)
+            i = n if j == -1 else j
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def _top_level_of_settings() -> str:
+    r"""Only the entries at the TOP level of the git module's `settings` attrset.
+
+    🔴 WHY DEPTH MATTERS, AND WHY AN ANCHOR WAS NOT ENOUGH. `^\s*core\.sshCommand`
+    matches at ANY indentation, so a keepalive declared inside a scoped
+    `includes = [{ condition = "gitdir:~/workspace/"; contents = {…}; }]` — or a
+    raw `includeIf` attribute — satisfied it while applying to ONE SUBTREE. That
+    leaves #782 live for every other repo on the host, which is the opposite of
+    the claim the guard makes. An audit walked it both ways before this existed.
+
+    Nested braces are blanked rather than removed, so a match here means "a
+    direct member of settings", not "somewhere under settings".
+    """
+    code = _nix_code(GIT_MODULE, keep_strings=True)
+    m = re.search(r"\bsettings\s*=\s*\{", code)
+    if not m:
+        return ""
+    depth, i, body = 1, m.end(), []
+    while i < len(code) and depth:
+        ch = code[i]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
                 break
-            i += 1
-        out.append(line[:cut])
-    return "\n".join(out)
+        body.append(ch)
+        i += 1
+    depth = 0
+    out: list[str] = []
+    for ch in body:
+        if ch == "{":
+            depth += 1
+            out.append(" ")
+        elif ch == "}":
+            depth -= 1
+            out.append(" ")
+        else:
+            out.append(ch if depth == 0 else (" " if ch != "\n" else "\n"))
+    return "".join(out)
 
 
 def _ssh_command() -> str:
-    """The declared `core.sshCommand` value, or "" if absent.
+    """The `core.sshCommand` declared as a DIRECT member of `settings`, or "".
 
-    🔴 ANCHORED. An unanchored `core\\.sshCommand` also matches
-    `notcore.sshCommand = …` and any value nested under a scoped
-    `includeIf`/`includes` block that applies to a subtree rather than globally —
-    both verified to pass before this anchor was added. The setting must be a
-    top-level attribute of the settings attrset to apply to every repo, which is
-    the whole claim.
+    Anchored (so `notcore.sshCommand` cannot satisfy it) AND depth-constrained
+    (so a value scoped to a subtree cannot) — see `_top_level_of_settings`.
     """
-    m = re.search(r'^\s*core\.sshCommand\s*=\s*"([^"]*)"\s*;',
-                  _module_code(), re.M)
+    m = re.search(r'(?:^|\s)core\.sshCommand\s*=\s*"([^"]*)"\s*;',
+                  _top_level_of_settings())
     return m.group(1) if m else ""
+
+
+def _assigned_value(line: str) -> str:
+    """The VALUE assigned to the variable on this line, quotes respected.
+
+    🔴 SPLITTING ON THE VARIABLE NAME AND KEEPING THE REST OF THE LINE IS NOT
+    SCOPING — it only trims the LEFT. An audit walked the previous version both
+    ways, and the second is the realistic one:
+
+        export GIT_SSH_...="ssh -o BatchMode=yes"; export OTHER="... -o ServerAliveInterval=30"
+        export GIT_SSH_...="ssh -o BatchMode=yes"  # TODO restore -o ServerAliveInterval=30
+
+    A keepalive DELETED and left as a TODO passed the very ledger that exists to
+    catch it. So the value ends where the quoted string ends, and an unquoted
+    value ends at whitespace or `;`.
+    """
+    rest = line.split(NEEDLE, 1)[1].lstrip()
+    if rest[:1] in ("'", '"'):
+        quote, j = rest[0], 1
+        while j < len(rest):
+            if rest[j] == "\\" and quote == '"':
+                j += 2
+                continue
+            if rest[j] == quote:
+                break
+            j += 1
+        return rest[1:j]
+    return re.split(r"[;\s]", rest, maxsplit=1)[0]
 
 
 def _opt(value: str, name: str) -> int | None:
@@ -296,9 +400,9 @@ def test_the_setting_is_reachable_from_the_home_manager_entry_point():
           -> nix/programs/default.nix  git = import ./git {};
             -> nix/programs/git/default.nix  core.sshCommand = …
     """
-    index = PROGRAMS_INDEX.read_text(encoding="utf-8")
-    code = "\n".join(ln for ln in index.splitlines()
-                     if not ln.lstrip().startswith("#"))
+    # keep_strings=False: a pin looking for CODE must not be satisfiable by the
+    # same text spelled inside a nix string literal.
+    code = _nix_code(PROGRAMS_INDEX, keep_strings=False)
     # `\b` is NOT enough: `./git-old` matches it. Require the import to be
     # followed by nix argument-set syntax, which `./git-old {}` cannot satisfy
     # while still naming ./git.
@@ -312,9 +416,7 @@ def test_the_setting_is_reachable_from_the_home_manager_entry_point():
     # The link above that one: home.nix must actually hand `programs` to
     # home-manager. Without this the whole aggregator is inert and every
     # assertion in this file is about a file nothing reads.
-    home = HOME_NIX.read_text(encoding="utf-8")
-    home_code = "\n".join(ln for ln in home.splitlines()
-                          if not ln.lstrip().startswith("#"))
+    home_code = _nix_code(HOME_NIX, keep_strings=False)
     assert re.search(r"^\s*programs\s*=\s*programs\s*;", home_code, re.M), (
         f"{HOME_NIX} no longer assigns `programs = programs;`, so "
         f"{PROGRAMS_INDEX} is built but never handed to home-manager — every "
@@ -356,7 +458,7 @@ def test_every_GIT_SSH_COMMAND_export_carries_the_keepalive():
             #   export OTHER="ssh -o ServerAliveInterval=30"; export GIT_SSH_...="ssh"
             # passed before this narrowing. Green for a reason unrelated to the
             # option is the shape this whole file exists to avoid.
-            value = line.split(NEEDLE, 1)[1]
+            value = _assigned_value(line)
             # `-o Name=value` and `-oName=value` are both valid ssh spellings
             # (confirmed against `ssh -G`), and both are in use in this repo.
             if not re.search(r"-o\s*ServerAliveInterval=\d+", value):
@@ -367,7 +469,7 @@ def test_every_GIT_SSH_COMMAND_export_carries_the_keepalive():
     # reads as a clean pass. "No offenders" and "nothing was inspected" must not
     # look the same.
     assert found_any, (
-        f"no GIT_SSH_COMMAND assignment was found anywhere under {SCRIPTS}. "
+        f"no such assignment was found anywhere under {SCRIPTS} or {GITHOOKS}. "
         "This test inspected nothing, so its silence means nothing — the scan "
         "is broken, not the repo clean.")
 
