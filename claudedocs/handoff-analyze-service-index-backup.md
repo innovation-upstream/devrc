@@ -372,6 +372,25 @@ a mismatch now names *what chose* the on-disk path — refusing to call the mism
 when an env var did. `--print-plan` discloses a redirect before any password is spent.
 Matrix: both red at `a8089a51`, green at HEAD, demonstrated by execution.
 
+🔴 **A run from the WRONG SHELL now refuses BEFORE the vault, exit 34.** Measured
+2026-08-25, twice: `--decrypt-check` unlocked the vault and *then* died on a missing
+`minio` — after the master password had been typed. The first fix corrected which shell is
+advertised; it did not change *when* the run discovers it is in the wrong one, so it
+happened again. `preflight_decrypt_imports()` now runs before any `bw` call and names the
+interpreter that came up short:
+
+```
+DECRYPT-DEPS-MISSING: --decrypt-check needs minio, which <the profile python3>
+cannot import. NOTHING HAS BEEN CHECKED and the vault was NOT contacted ...
+```
+
+Only the `python3.withPackages(p:[p.minio])` shape resolves a `python3` that has it — the
+bare shell and `-p bitwarden-cli jq` both resolve the ambient profile's, which does not.
+The old failure surfaced as `scripts/mail-actions/_minio.py`'s own `SystemExit`, which
+names a different program (`extract.py archive-invoices`) and a different package set;
+accurate for its original caller, misleading here. That shim is unchanged — escrow-verify
+simply no longer reaches it.
+
 It also settles two assumptions **never measured against the real vault item**: that a
 Secure Note has `type == 2`, and that `notes` is present in `bw list items` output. A wrong
 guess is loud, not silent — exit 19 prints the observed type. Locked/unauthenticated exit

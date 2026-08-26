@@ -308,6 +308,9 @@ def test_the_exit_code_table_is_pinned_EXACTLY_both_ways():
         "ARTIFACT-EMPTY": 31,
         "NOTE-MISSING": 32,
         "ARTIFACT-CORRUPT": 33,
+        # raised BEFORE any `bw` call — the interpreter cannot finish the run,
+        # so no master password is spent on one that was never going to
+        "DECRYPT-DEPS-MISSING": 34,
     }
 
 
@@ -2974,3 +2977,146 @@ def test_the_undo_advice_matches_the_KIND_of_source():
         advice = EV._undo_advice(src)
         assert "env -u" not in advice, advice
         assert str(B.DEFAULT_IDENTITY) in advice
+
+
+# --------------------------------------------------------------------------- #
+# 16. 🔴 --decrypt-check REFUSES BEFORE THE VAULT WHEN IT CANNOT FINISH
+#
+# Measured twice on 2026-08-25, the second time AFTER the hint was fixed:
+# `--decrypt-check` unlocked the vault and then died on a missing `minio`,
+# i.e. after the master password had been typed. Fixing WHICH shell is
+# advertised did not fix WHEN the run discovers it is in the wrong one.
+# --------------------------------------------------------------------------- #
+def test_the_preflight_token_and_code_are_pinned():
+    assert EV.EXIT_CODES["DECRYPT-DEPS-MISSING"] == 34
+    # distinct from every other code, or the operator is sent to the wrong place
+    codes = list(EV.EXIT_CODES.values())
+    assert len(codes) == len(set(codes))
+
+
+def test_the_preflight_PASSES_when_every_module_resolves():
+    """The positive control. Without it a preflight wired to nothing — or one
+    that always raised — would be indistinguishable from a working one."""
+    EV.preflight_decrypt_imports(modules=("os", "sys"))
+    # and the real ledger resolves in this environment too
+    EV.preflight_decrypt_imports()
+
+
+def test_the_preflight_NAMES_the_module_the_interpreter_and_the_shell():
+    with pytest.raises(EV.EscrowError) as ei:
+        EV.preflight_decrypt_imports(modules=("definitely_not_installed_xyz",))
+    assert ei.value.token == "DECRYPT-DEPS-MISSING"
+    assert ei.value.exit_code == 34
+    msg = ei.value.verdict
+    assert "definitely_not_installed_xyz" in msg
+    # 🔴 WHICH interpreter — the whole confusion was not knowing which python ran
+    assert sys.executable in msg
+    # ...and the shell that would work, rendered from the ledger
+    assert EV.NIX_SHELL_HINT in msg
+    # ...and that nothing was checked, so this is not read as a verdict
+    assert "NOTHING HAS BEEN CHECKED" in msg
+
+
+def test_a_module_whose_PARENT_is_absent_counts_as_missing():
+    """`find_spec` RAISES rather than returning None when a parent package is
+    itself absent. Treating that as 'present' would let the run proceed to the
+    exact failure the preflight exists to prevent."""
+    with pytest.raises(EV.EscrowError) as ei:
+        EV.preflight_decrypt_imports(modules=("no_such_parent_pkg.child",))
+    assert ei.value.token == "DECRYPT-DEPS-MISSING"
+
+
+def test_a_find_spec_that_RAISES_ImportError_is_treated_as_missing():
+    def boom(_mod):
+        raise ImportError("simulated")
+    with pytest.raises(EV.EscrowError) as ei:
+        EV.preflight_decrypt_imports(modules=("anything",), find_spec=boom)
+    assert ei.value.token == "DECRYPT-DEPS-MISSING"
+
+
+def test_the_refusal_happens_BEFORE_A_SINGLE_bw_CALL(escrow_world, monkeypatch):
+    """🔴 THE POINT OF THE WHOLE CHANGE, asserted as a COUNT.
+
+    A message that merely mentions the vault was not contacted is a claim; the
+    fake `bw` recording ZERO invocations is the evidence. If this ever regresses
+    the operator spends a master password on a run that cannot finish.
+    """
+    monkeypatch.setattr(EV, "DECRYPT_PYTHON_MODULES",
+                        ("definitely_not_installed_xyz",))
+    fake = FakeBw(items=[_item(notes=escrow_world["note"])])
+    with pytest.raises(EV.EscrowError) as ei:
+        EV.run(bw=_cli(fake), identity=escrow_world["identity"], item_name=ITEM,
+               decrypt=True, prefix=PREFIX, store=escrow_world["store"],
+               work_dir=escrow_world["work"], now=NOW)
+    assert ei.value.token == "DECRYPT-DEPS-MISSING"
+    assert fake.calls == [], (
+        f"the vault was contacted before the preflight refused: {fake.calls}")
+
+
+def test_an_INJECTED_downloader_is_never_refused(escrow_world, monkeypatch):
+    """The negative control for the guard's SCOPE. A caller supplying a fake
+    needs none of these modules; refusing it would make the seam untestable
+    wherever the package is absent, which is its own failure mode."""
+    monkeypatch.setattr(EV, "DECRYPT_PYTHON_MODULES",
+                        ("definitely_not_installed_xyz",))
+    d = FakeDownloader(escrow_world["objects"])
+    v = EV.run(bw=_cli(FakeBw(items=[_item(notes=escrow_world["note"])])),
+               identity=escrow_world["identity"], item_name=ITEM, decrypt=True,
+               prefix=PREFIX, store=escrow_world["store"],
+               work_dir=escrow_world["work"], now=NOW,
+               downloader_factory=lambda: d)
+    assert v.decrypt_checked is True
+
+
+def test_a_run_WITHOUT_decrypt_check_is_never_refused(escrow_world, monkeypatch):
+    """A byte-comparison run reaches no bucket, so the modules are irrelevant.
+    Refusing it would be a permanently-red gate on the cheap check."""
+    monkeypatch.setattr(EV, "DECRYPT_PYTHON_MODULES",
+                        ("definitely_not_installed_xyz",))
+    v = EV.run(bw=_cli(FakeBw(items=[_item(notes=escrow_world["note"])])),
+               identity=escrow_world["identity"], item_name=ITEM,
+               store=escrow_world["store"], now=NOW)
+    assert v.decrypt_checked is False
+
+
+def test_the_preflight_OUTRANKS_a_missing_bw(escrow_world, monkeypatch):
+    """🔴 A DELIBERATE ORDERING, pinned — not an accident of line order.
+
+    Both can be wrong at once: no `bw` on PATH AND an interpreter without the
+    decrypt deps. The deps refusal is the more useful of the two, because its
+    remedy is ONE nix-shell that provides `bw` as well. Reporting BW-MISSING
+    first sends the operator to solve half the problem and hit the other half
+    on the next run — the second trip being exactly what this change exists to
+    prevent.
+
+    Without this test, moving the preflight below `require_available()` is an
+    invisible change: that method is a PATH lookup with no subprocess, so the
+    zero-bw-calls guard cannot see the swap.
+    """
+    monkeypatch.setattr(EV, "DECRYPT_PYTHON_MODULES",
+                        ("definitely_not_installed_xyz",))
+    fake = FakeBw(items=[_item(notes=escrow_world["note"])])
+    with pytest.raises(EV.EscrowError) as ei:
+        EV.run(bw=_cli(fake, locator=lambda name: None),
+               identity=escrow_world["identity"], item_name=ITEM,
+               decrypt=True, prefix=PREFIX, store=escrow_world["store"],
+               work_dir=escrow_world["work"], now=NOW)
+    assert ei.value.token == "DECRYPT-DEPS-MISSING", (
+        "BW-MISSING won: the preflight no longer runs before require_available")
+    assert fake.calls == []
+    # and the remedy it prints must cover BOTH faults, or the ordering is wrong
+    assert "bitwarden-cli" in ei.value.verdict
+    assert "p.minio" in ei.value.verdict
+
+
+def test_a_missing_bw_STILL_reports_itself_when_the_deps_are_fine(escrow_world):
+    """The negative control for the ordering above: with the deps present, a
+    missing `bw` must still produce BW-MISSING. Otherwise the preflight could
+    be masking that failure rather than outranking it."""
+    fake = FakeBw(items=[_item(notes=escrow_world["note"])])
+    with pytest.raises(EV.EscrowError) as ei:
+        EV.run(bw=_cli(fake, locator=lambda name: None),
+               identity=escrow_world["identity"], item_name=ITEM,
+               decrypt=True, prefix=PREFIX, store=escrow_world["store"],
+               work_dir=escrow_world["work"], now=NOW)
+    assert ei.value.token == "BW-MISSING"
