@@ -2889,8 +2889,22 @@ _count_of() { # $1 = alternation regex, $2 = summary line
 # ⚠ What loadfile does NOT buy, stated so nobody reads more into it: it pins
 # INTRA-file co-location only. State shared ACROSS files — the run-wide launch
 # log, the spool ledger, the nogit guard config — is still touched by every
-# worker concurrently. See the KNOWN RACE note in scripts/tests/
-# test_no_real_launchers.py.
+# worker concurrently.
+#
+# For the LAUNCH LOG that is now handled rather than merely known: every line it
+# records carries the writing worker's id as its SECOND field
+# (`systemctl(blocked) [gw2] …`), and `testlib.nolaunch`'s readers filter on it,
+# so a test's `before + 1` is a claim about its OWN worker again. Read
+# `scripts/testlib/nolaunch.py`'s module docstring before changing the log
+# format — in particular, the tag may NOT move to line start, because the GUARD
+# 7 evaluation block below classifies this file with ^-anchored greps on the
+# FIRST token. NOTHING IN THIS SCRIPT NEEDED TO CHANGE for that fix, and the
+# reason is `NOLAUNCH_SEEN`: it brackets a whole pytest invocation by line
+# offset and all N workers run inside that bracket for the SAME target, so an
+# interleaved sibling-worker line already belongs to the right target.
+#
+# The spool ledger and the nogit guard config are NOT covered by that and remain
+# as described above.
 #
 # 🔴 NESTED RUNS MUST BE SERIAL, and the signal is PYTEST_CURRENT_TEST.
 # Tests in scripts/tests SPAWN THIS SCRIPT (test_run_tests_floors.py and the .sh

@@ -525,9 +525,35 @@ def _private_stubs(tmp_path) -> Path:
     `run-tests.sh`'s GUARD 7 accounting as a real launcher reach, and would move
     the `before` sample of every other test in this file. (2) They all assert an
     EXACT total, which the shared log can never offer.
+
+    🔴 AND THE `systemctl` STUB IS RE-POINTED, not left as `install()` wrote it.
+    `install()` resolves "the real systemctl" through `shutil.which`, and by the
+    time any test runs, PATH[0] is the SESSION stub dir — so a plain `install()`
+    here writes a systemctl stub whose read branch execs the SESSION stub, which
+    records into the SESSION log. `install()`'s own self-exec assertion cannot
+    catch that: it only compares against the dir being installed into, and these
+    are two different dirs. Inert today (only the classifier test invokes
+    systemctl, and it overwrites this file first) — closed anyway, because the
+    next test to call `systemctl` through this helper would silently measure the
+    wrong file and read as a passing test.
     """
     stubs = tmp_path / "own-stubs"
     nolaunch.install(stubs)
+    real = _real_binary("systemctl")
+    if real is None:
+        # What `install()` would have written on a PATH with no stub dir on it:
+        # nothing. Never fabricate an answer — the module's own rule.
+        (stubs / "systemctl").unlink(missing_ok=True)
+    else:
+        write_exec(stubs / "systemctl",
+                   nolaunch.systemctl_body(real, nolaunch.log_path(stubs)))
+    sysctl = stubs / "systemctl"
+    if sysctl.exists():
+        body = sysctl.read_text(encoding="utf-8")
+        assert str(_stub_dir_from_env()) not in body, (
+            "this private stub dir's systemctl still chains into the SESSION "
+            "stub dir, so a read verb through it would exec the session stub "
+            f"and be recorded in the wrong log:\n{body}")
     return stubs
 
 
@@ -628,10 +654,32 @@ def test_the_stub_takes_its_tag_from_the_xdist_worker_variable(tmp_path):
                        text=True, timeout=15, env=env)
     assert q.returncode == 0, f"{q.stdout}{q.stderr}"
 
+    # 🔴 Point 3, THE BOUNDARY BETWEEN THEM: set-but-EMPTY. Neither of the two
+    # points above can see it, and it is where the shell and Python spellings
+    # can silently disagree — `${PYTEST_XDIST_WORKER:-main}` falls back on
+    # empty, and so must `worker_tag()`. MEASURED: rewriting that `or` as
+    # `os.environ.get(WORKER_ENV, SERIAL_WORKER)` SURVIVES a set/unset-only
+    # test, and would then have Python looking for `""` while the stub wrote
+    # `[main]` — every filtered read empty, every line well-formed.
+    r = _through_a_shell(stubs, "openrgb --empty-worker", PYTEST_XDIST_WORKER="")
+    assert r.returncode == 0, f"{r.stdout}{r.stderr}"
+    prev = os.environ.get("PYTEST_XDIST_WORKER")
+    os.environ["PYTEST_XDIST_WORKER"] = ""
+    try:
+        assert nolaunch.worker_tag() == nolaunch.SERIAL_WORKER, (
+            "an EMPTY PYTEST_XDIST_WORKER made Python disagree with the stub: "
+            "the sh `:-` fallback wrote the serial tag and this did not")
+    finally:
+        if prev is None:
+            os.environ.pop("PYTEST_XDIST_WORKER", None)
+        else:
+            os.environ["PYTEST_XDIST_WORKER"] = prev
+
     every = nolaunch.recorded(stubs, worker=nolaunch.ALL_WORKERS)
     assert every == [
         "openrgb [gw7] --under-a-worker",
         f"openrgb [{nolaunch.SERIAL_WORKER}] --serial",
+        f"openrgb [{nolaunch.SERIAL_WORKER}] --empty-worker",
     ], every
     assert nolaunch.recorded(stubs, worker="gw7") == [
         "openrgb [gw7] --under-a-worker"], every
@@ -677,8 +725,24 @@ def test_the_readers_default_to_this_worker_and_can_still_see_everything(tmp_pat
     ]
     assert nolaunch.line_worker("nolaunch(session) scripts/tests -q") is None
     assert nolaunch.line_worker("i3-msg(abs) [gwZ] workspace 9") == "gwZ"
-    # An argv containing a bracketed word must not be mistaken for the tag.
+    # 🔴 `line_worker`'s PARSE, pinned at the width its comment claims — each
+    # case below is a piece of the regex that SURVIVES deletion without it.
+    # An argv containing a bracketed word must not be mistaken for the tag
+    # (this one is carried by the `^\S+ ` anchor, not by the tag class):
     assert nolaunch.line_worker("notify-send [gw1] -t 2500 [not-a-tag]") == "gw1"
+    # The tag class excludes whitespace — a malformed field is NOT a tag, and
+    # the module comment names the bounded silent-zero this implies:
+    assert nolaunch.line_worker("notify-send [gw 1] hello") is None
+    # …and excludes `]`, so the tag cannot swallow its own delimiter and keep
+    # hunting for a later one. Without that exclusion this yields `gw]x`:
+    assert nolaunch.line_worker("notify-send [gw]x] hello") is None
+    # The ordinary well-formed shape still parses, so the case above is a
+    # rejection of malformed input and not the class being broken outright:
+    assert nolaunch.line_worker("notify-send [gw] hello") == "gw"
+    # The delimiter must be followed by the argv separator:
+    assert nolaunch.line_worker("notify-send [gw1]nospace") is None
+    # A missing classifier token is not a tagged line either:
+    assert nolaunch.line_worker("[gw1] notify-send hello") is None
 
 
 # ⚠ INVARIANT GUARD, not regression coverage: this passes at origin/main too,
@@ -688,25 +752,46 @@ def test_the_readers_default_to_this_worker_and_can_still_see_everything(tmp_pat
 # would stop the session marker and every `systemctl(read)` passthrough from
 # matching and report both as real launcher reaches, failing the whole run.
 # Nothing in Python covered those greps before; they are the log's real consumer.
+def _guard7_grep_patterns() -> tuple[str, str, str]:
+    """PARSE the three log classifiers out of run-tests.sh's GUARD 7 block.
+
+    🔴 EXTRACTED, not copied — an earlier version of this helper asserted three
+    `<literal> in runner` substrings and its docstring claimed it "read the
+    patterns out of the runner". That was false in the way that matters: a
+    substring check cannot notice a FOURTH classifier appearing, and it cannot
+    tell you which pattern the runner actually applies to what. This returns
+    what the runner will run.
+
+    Scoped to the GUARD 7 evaluation block by its own section banners, so a
+    `grep -c` belonging to GUARD 8 or 10 cannot be mistaken for one of these.
+    """
+    runner = (SCRIPTS / "run-tests.sh").read_text(encoding="utf-8")
+    start = runner.find("# --- GUARD 7 (evaluation)")
+    end = runner.find("# --- GUARD 8 (evaluation)", start + 1)
+    assert start != -1 and end > start, (
+        "run-tests.sh's GUARD 7 evaluation block is no longer delimited by the "
+        "banners this parse anchors on — it cannot say what the runner runs, "
+        "and a pass here would mean nothing")
+    block = runner[start:end]
+    counts = re.findall(r"grep -c '([^']+)'", block)
+    selects = re.findall(r"grep -vE '([^']+)'", block)
+    # Both directions: a classifier added or removed changes what "unclassified
+    # = a real launcher reach" means, which is the whole verdict GUARD 7 emits.
+    assert counts == ["^nolaunch(session)", "^systemctl(read)"], (
+        f"GUARD 7's ^-anchored COUNT classifiers changed: {counts}")
+    assert selects == [r"^(nolaunch\(session\)|systemctl\(read\)|$)"], (
+        f"GUARD 7's HIT selector changed: {selects}")
+    return counts[0], counts[1], selects[0]
+
+
 def test_the_runners_anchored_classifiers_still_match_the_tagged_format(tmp_path):
     """Run `run-tests.sh`'s OWN grep patterns against a log this tree produced.
 
-    The patterns are read out of the runner rather than copied, so a change on
-    that side is visible here; and they are executed by real `grep`, not
-    re-implemented in `re`, because the claim is about what the runner does.
+    The patterns are PARSED out of the runner (see `_guard7_grep_patterns`), and
+    executed by real `grep` rather than re-implemented in `re`, because the
+    claim is about what the runner does to this file.
     """
-    runner = (SCRIPTS / "run-tests.sh").read_text(encoding="utf-8")
-    marker_pat = r"^nolaunch(session)"
-    read_pat = r"^systemctl(read)"
-    hit_pat = r"^(nolaunch\(session\)|systemctl\(read\)|$)"
-    assert "grep -c '^nolaunch(session)'" in runner, (
-        "run-tests.sh no longer classifies the session marker with this "
-        "pattern — the placement constraint this test pins has moved")
-    assert "grep -c '^systemctl(read)'" in runner, (
-        "run-tests.sh no longer counts systemctl READS with this pattern")
-    assert ("grep -vE '^(nolaunch\\(session\\)|systemctl\\(read\\)|$)'"
-            in runner), (
-        "run-tests.sh no longer selects launcher HITS with this pattern")
+    marker_pat, read_pat, hit_pat = _guard7_grep_patterns()
 
     grep = shutil.which("grep")
     assert grep is not None, (
@@ -717,7 +802,7 @@ def test_the_runners_anchored_classifiers_still_match_the_tagged_format(tmp_path
     # here. Hand-writing the `systemctl(read)` and `nolaunch(session)` lines is
     # what makes this guard vacuous: those two are the ONLY ones the runner
     # classifies by their first token, so a hand-written copy stays in the old
-    # format under the very mutation this test exists to catch — MEASURED, the
+    # format under the very mutation this test exists to catch — MEASURED, an
     # earlier draft of this test stayed green under a tag-at-line-start mutant.
     stubs = _private_stubs(tmp_path)
     log = nolaunch.log_path(stubs)
@@ -726,14 +811,18 @@ def test_the_runners_anchored_classifiers_still_match_the_tagged_format(tmp_path
     for cmd in ("notify-send a-toast", "systemd-run --user --unit=u true"):
         assert _through_a_shell(stubs, cmd).returncode == 0
     # The systemctl stub, generated by `systemctl_body` and pointed at a
-    # passthrough target of our own — so BOTH its branches run in BOTH tiers,
-    # where `install()` writes no systemctl stub at all when the host has none.
+    # passthrough target of our own — so ALL THREE of its branches run in BOTH
+    # tiers, where `install()` writes no systemctl stub at all when the host has
+    # none: the VERB read, the mutating block, and the position-independent
+    # `--version`/`--help` flag read, which no test in this tree exercised at
+    # all before (it has its own printf, so it is its own mutation site).
     passthrough = tmp_path / "passthrough-systemctl"
     write_exec(passthrough, "exit 0\n")
     write_exec(stubs / "systemctl",
                nolaunch.systemctl_body(str(passthrough), log))
     assert _through_a_shell(stubs, "systemctl --user status u").returncode == 0
     assert _through_a_shell(stubs, "systemctl --user stop u").returncode == 0
+    assert _through_a_shell(stubs, "systemctl --version").returncode == 0
 
     def _grep(args):
         p = subprocess.run([grep, *args, str(log)], stdout=subprocess.PIPE,
@@ -743,13 +832,30 @@ def test_the_runners_anchored_classifiers_still_match_the_tagged_format(tmp_path
     assert _grep(["-c", marker_pat]) == ["1"], (
         "the session marker stopped matching the runner's ^-anchored count — "
         "GUARD 7 would report the plugin as never loaded in this target")
-    assert _grep(["-c", read_pat]) == ["1"], (
+    reads = _grep([read_pat])
+    assert len(reads) == 2, (
         "a systemctl READ stopped matching the runner's ^-anchored count and "
-        "would now be reported as a real launcher reach")
+        f"would now be reported as a real launcher reach: {reads}")
+    # 🔴 THE READ LINES CARRY THE TAG TOO — asserted here because NOTHING ELSE
+    # CAN SEE IT. A read is by construction not a `hit`, so the hits assertion
+    # below never inspects it, and in the nix sandbox tier (no real systemctl)
+    # `install()` writes no systemctl stub, so no other test in the file
+    # produces a read line at all. MEASURED: with this assertion absent,
+    # deleting `[%s]` from ONLY the `systemctl(read)` branch of
+    # `systemctl_body` survived that tier at 74 passed / exit 0, while the
+    # identical mutation of its `systemctl(blocked)` sibling was killed. Both
+    # read branches are covered: `--user status u` is the VERB one and
+    # `--version` is the position-independent FLAG one.
+    assert [nolaunch.line_worker(ln) for ln in reads] == [
+        nolaunch.worker_tag(), nolaunch.worker_tag()], (
+        "a `systemctl(read)` line lost its [worker] tag. It still classifies "
+        "correctly for the runner, so nothing in run-tests.sh notices — but "
+        f"every per-worker read drops it silently: {reads}")
+
     hits = _grep(["-vE", hit_pat])
     assert len(hits) == 3, (
         "the runner's HIT selector no longer classifies the log the way this "
-        "tree writes it — the marker and the systemctl READ must be excluded "
+        "tree writes it — the marker and both systemctl READS must be excluded "
         f"and the three launcher lines kept; a tag at line START breaks exactly "
         f"that:\n{hits}")
     assert sorted(ln.split(" [", 1)[0] for ln in hits) == [

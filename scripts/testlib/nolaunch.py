@@ -209,9 +209,27 @@ SERIAL_WORKER = "main"
 THIS_WORKER = "<this>"
 ALL_WORKERS = "<all>"
 
-# `<classifier> [<tag>] <argv…>`. Anchored, and the tag may not contain a space
-# or a `]`, so an argv that happens to contain a bracketed word cannot be read
-# as the tag.
+# `<classifier> [<tag>] <argv…>` — the tag is the SECOND field and nothing else
+# is. What each piece actually does, stated at the width it is pinned to (see
+# `test_the_readers_default_to_this_worker_and_can_still_see_everything`):
+#
+#   `^\S+ `      the classifier token, then exactly one space. This is what
+#                stops a bracketed word LATER in the argv from being read as the
+#                tag — `notify-send [gw1] -t 2500 [not-a-tag]` yields `gw1`.
+#   `[^\]\s]+`   the tag itself: no `]` (it would swallow the delimiter) and no
+#                whitespace. The `\s` half is the conservative parse of a
+#                MALFORMED field, not a live case: pytest-xdist ids are `gw<N>`
+#                and `SERIAL_WORKER` is a literal, so neither can contain a
+#                space. ⚠ THE BOUNDED CONSEQUENCE, stated because it is a silent
+#                zero and not obvious: if somebody exports
+#                `PYTEST_XDIST_WORKER="gw 1"`, the stub writes `[gw 1]` and this
+#                reads the line as UNTAGGED, so a filtered `recorded()` will not
+#                return it even though `worker_tag()` would say `gw 1`. That
+#                asymmetry is pinned rather than fixed — normalising here would
+#                have to be mirrored in the sh stub, and two spellings of one
+#                rule is the bug this module already exists to avoid.
+#   trailing ` ` the delimiter must be followed by the argv separator, so
+#                `notify-send [gw1]nospace` is not a tagged line.
 _TAGGED = re.compile(r"^\S+ \[([^\]\s]+)\] ")
 
 # The POSIX-sh expression the stubs expand to get their own tag. Assembled from
@@ -232,6 +250,14 @@ def worker_tag() -> str:
     Read at call time, never cached: `nolaunch` is imported once per pytest
     worker but the value is a property of the process, and a cached module-level
     constant would be captured before a nested session could change it.
+
+    🔴 `or`, NOT `os.environ.get(WORKER_ENV, SERIAL_WORKER)`. The two differ on
+    exactly one input — the variable SET TO EMPTY — and `or` is the one that
+    agrees with the sh stub's `${PYTEST_XDIST_WORKER:-main}`, which also falls
+    back on empty. `get(..., default)` would make Python read `""` while the
+    stub wrote `[main]`, so every filtered read would return nothing while the
+    log looked perfectly well-formed. Pinned by
+    `test_the_stub_takes_its_tag_from_the_xdist_worker_variable`.
     """
     return os.environ.get(WORKER_ENV) or SERIAL_WORKER
 
