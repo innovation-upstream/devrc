@@ -2891,10 +2891,13 @@ _count_of() { # $1 = alternation regex, $2 = summary line
 # log, the spool ledger, the nogit guard config — is still touched by every
 # worker concurrently.
 #
-# For the LAUNCH LOG that is now handled rather than merely known: every line it
-# records carries the writing worker's id as its SECOND field
+# For the LAUNCH LOG that is now handled rather than merely known: every
+# INTERCEPT line it records carries the writing worker's id as its SECOND field
 # (`systemctl(blocked) [gw2] …`), and `testlib.nolaunch`'s readers filter on it,
-# so a test's `before + 1` is a claim about its OWN worker again. Read
+# so a test's `before + 1` is a claim about its OWN worker again. ⚠ The one
+# exception, because `recorded()`'s contract is careful about it and this
+# comment must be too: the `nolaunch(session)` MARKER is deliberately UNTAGGED —
+# its attribution is owned right here, by the per-target count below. Read
 # `scripts/testlib/nolaunch.py`'s module docstring before changing the log
 # format — in particular, the tag may NOT move to line start, because the GUARD
 # 7 evaluation block below classifies this file with ^-anchored greps on the
