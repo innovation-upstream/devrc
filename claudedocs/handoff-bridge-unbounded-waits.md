@@ -202,9 +202,12 @@ and 3 of the original list are DONE and are kept in place rather than renumbered
   #358's first mechanism and REJECTED — civitai and homelab-talos have ZERO batteries, and a
   full sweep runs for hours so it cannot gate a push.
 
-- 🔴 **RETRACTION OF THIS DOC'S OWN EARLIER GOTCHA. The entry below that says the
-  foregrounding machinery is INERT / "`activate` … raises nothing" is WRONG**, and
-  believing it cost two audit rounds. `browser activate` does three things and the
+- 🔴 **RETRACTION OF THIS DOC'S OWN EARLIER CLAIM: the foregrounding machinery is NOT
+  "INERT" and `activate` does NOT "raise nothing".** Believing it cost two audit rounds.
+  (The wrong wording lived in **Next steps item 5**, which is a REPLACE section, so the
+  2026-08-26 update overwrote it rather than leaving it quotable — this bullet is the
+  only surviving record that the doc ever said it. An earlier draft of this line said
+  "the entry below", which pointed at nothing.) `browser activate` does three things and the
   `--focus` gate suppresses ONE: the host-side `i3-msg`. It still makes the tab its
   window's **active tab** (which is what routes a capture onto the `captureVisibleTab`
   fast path that hangs), and it still calls the **ungated**
