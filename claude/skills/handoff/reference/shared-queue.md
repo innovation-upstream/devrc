@@ -39,14 +39,34 @@ The first row is the atomicity, and it is the half that covers the FIRST mover.
 defence in the serialized row, where an unrelated root can never be a descendant.
 
 It **FAILS OPEN**: no canonical remote/network/auth ⇒ a loud stderr warning and
-exit 0, so it can never block a `/resume`. ⚠ **What you publish is PUBLIC** — the
-claim carries your git identity, hostname and the `--subject` text verbatim to
-the canonical origin, so keep the subject generic.
+exit 0, so it can never block a `/resume`.
+
+⚠ **What you publish is PUBLIC.** A claim commit is pushed to the canonical
+origin and this repo is PUBLIC: keep the subject generic — no client names, real
+hostnames, paths or captured text. A newline or any control character in
+`--subject` is rc 2: free text sits ABOVE the ownership trailers in the commit
+body, and until 2026-08-26+1 a newline in the subject let the caller write
+trailers of their own — a claim then reported `host attacker-host` and **the real
+holder was refused `--release` on their own live claim**. Both halves are closed
+now (the subject is validated, and the trailers are read via `git
+interpret-trailers --parse` rather than by scanning for the first `^key:` line).
 
 ⚠ **`--release` and `--steal` are gated.** A LIVE claim that is not yours is
-refused (rc 10); `--force` overrides. Ownership keys off the host + an opaque
-`cwd-id` in the claim commit, NOT the git author — one identity covers both hosts
-and every agent on them, so the author can never tell two sessions apart.
+refused (rc 10); `--force` overrides. **rc 12 means it is YOURS — carry on**, not
+a refusal. Ownership keys off an `owner-id` in the claim commit, NOT the git
+author — one identity covers both hosts and every agent on them, so the author can
+never tell two sessions apart.
+
+🔴 **The owner token is per HOST and per CLONE, and cwd-independent**:
+`/etc/machine-id` + the realpath of the clone's `--git-common-dir`. So any
+subdirectory and any linked worktree of the clone you claimed from counts as the
+same owner — a deliberate trade, argued in `claim-work.sh` — while a different
+clone or the other host does not. It was `uname -n` + `hash($PWD)` until
+2026-08-26+1 and was wrong in both directions: both hosts answer `nixos` to
+`uname -n` (so each read the other's claims as its own, and could release them at
+rc 0), and hashing the literal `$PWD` meant `cd scripts/` locked the legitimate
+owner out of their own claim for the whole TTL. `owner-id` is a DISCRIMINATOR, not
+a secret — `--force` bypasses the gate by design.
 
 Source: `scripts/claim-work.sh` (deployed on PATH as `claim-work`), named in
 `claude/RULES.md` so **both** runtimes get it — Claude Code imports that file and
@@ -145,7 +165,9 @@ the affected claims first.
 
 A claim ref nobody deletes would block an item forever, which is why the age is
 part of the verdict: past `DEVRC_CLAIM_TTL_DAYS` (default 7) a claim reports
-**rc 11 / STALE** instead of rc 10, and `--list` flags it. Taking one over is a
+**rc 11 / STALE** instead of rc 10, and `--list` flags it. (A stale claim of your
+OWN still reports **rc 12** — it is yours either way — with the STALE advisory
+printed alongside.) Taking one over is a
 deliberate, separate verb (`--steal`) — never automatic, because "the holder went
 quiet for a week" and "the holder is on a long piece of work" are the same
 observable. Release your own claims when the work lands.

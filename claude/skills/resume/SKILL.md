@@ -126,14 +126,28 @@ Topic argument (optional): `$ARGUMENTS`.
    work — an empty commit is enough; a branch is visible to `git ls-remote` the
    instant it lands.
 
-   **rc 10 ⇒ STOP** — it prints who holds it, since when, **where** (host +
-   cwd-id, because one git identity covers both hosts and every agent on them),
-   and what they called it. Pick another item, or coordinate. **rc 11 ⇒ the claim
-   is past its TTL and may be abandoned**: decide explicitly, then `claim-work
-   --steal "$SLUG"` or `--release "$SLUG"`. **`claim-work --release "$SLUG"` when
-   you finish or abandon the item** — an unreleased ref is the one way this blocks
-   work. ⚠ `--release`/`--steal` of a LIVE claim that is not yours is **refused**
-   (rc 10); `--force` overrides, deliberately.
+   **rc 10 ⇒ STOP — SOMEBODY ELSE holds it.** It prints who, since when,
+   **where** (host + owner-id, because one git identity covers both hosts and
+   every agent on them), and what they called it. Pick another item, or
+   coordinate. **rc 11 ⇒ the claim is past its TTL and may be abandoned**: decide
+   explicitly, then `claim-work --steal "$SLUG"` or `--release "$SLUG"`.
+   🔴 **rc 12 ⇒ YOU already hold it — CARRY ON.** Not a refusal: it is what a
+   re-run of `/resume`, or a session resuming after a context reset, gets for its
+   own item. It used to be rc 10, so the same output said "you already hold it"
+   and "DO NOT start this item" three lines apart and the honest reading was
+   *stop*. **`claim-work --release "$SLUG"` when you finish or abandon the item**
+   — an unreleased ref is the one way this blocks work. ⚠ `--release`/`--steal` of
+   a LIVE claim that is not yours is **refused** (rc 10); `--force` overrides,
+   deliberately.
+
+   🔴 **Ownership is per HOST and per CLONE, and it does NOT depend on your cwd.**
+   The token is `/etc/machine-id` + the clone's git dir, so any subdirectory and
+   any worktree of the clone you claimed from can release it — deliberately, and
+   documented in `claim-work.sh`. A different clone, or the other host, cannot.
+   It was `uname -n` + a hash of `$PWD` until 2026-08-26+1, which was wrong in
+   BOTH directions at once: both hosts are called `nixos` (so each read the
+   other's claims as its own), and `cd scripts/` made you a stranger to your own
+   claim for the rest of the TTL.
 
    🔴 **The claim namespace is GLOBAL.** Every claim lands on ONE canonical
    remote, taken from `claim-work`'s own location — **not** from the repo you are
@@ -142,9 +156,11 @@ Topic argument (optional): `$ARGUMENTS`.
    claimed once per remote. It was `$PWD` until 2026-08-26 and did exactly that.
    Run the bare command from wherever you are; do **not** pass `--repo`.
 
-   🔴 **What you claim is PUBLIC.** The commit is pushed to the canonical origin
-   with your git identity, hostname and the `--subject` text verbatim. Keep the
-   subject generic — no client names, paths or captured text.
+   🔴 **What you claim is PUBLIC.** A claim commit is pushed to the canonical
+   origin and this repo is PUBLIC: keep the subject generic — no client names,
+   real hostnames, paths or captured text. A newline or control character in
+   `--subject` is rc 2, because free text sits above the ownership trailers in the
+   commit body.
 
    🔴 **It FAILS OPEN.** No canonical remote, no network, no auth ⇒ a loud stderr
    warning and exit 0. A degraded run means you are UNCLAIMED, not that you hold

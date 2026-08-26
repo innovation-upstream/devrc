@@ -100,17 +100,45 @@ canonical remote ⇒ rc 0 then rc 10, and no stray ref on either cwd origin),
 ### 🔴 What a claim publishes, and this repo is PUBLIC
 
 A claim commit goes to the canonical origin, where anyone with read access sees
-it. It carries the claimant's git name and email, the **hostname**, an opaque
-`cwd-id`, a nonce, and the `--subject` text **verbatim**.
+it. It carries the claimant's git name and email, the **hostname**, an
+`owner-id`, a nonce, and the `--subject` text **verbatim**.
 
-- The `cwd-id` is a **hash**, not the absolute path it replaced: an absolute cwd
-  leaks a client repo's directory name into a public remote, and the hash is all
-  ownership needs (it only has to distinguish two sessions).
-- **The subject is public.** `CLAUDE.md` → "This repo is PUBLIC" forbids real
-  media paths, client directory names, third-party hostnames and captured text;
-  a claim subject is a publish path like any other. Describe the item generically.
-  This is stated in the script header, `usage()`, `/resume` step 6 and here,
-  because the person typing the subject is the only control on it.
+- The `owner-id` is a **hash**, not the absolute path it replaced: an absolute
+  cwd leaks a client repo's directory name into a public remote, and a hash is
+  all ownership needs (it only has to distinguish two sessions).
+- ⚠ **"Opaque" was the wrong word and this doc used it.** Its predecessor
+  `cwd-id` was `git hash-object` over a short, guessable absolute path — a
+  target's token was recoverable in ONE command
+  (`printf %s <path> | git hash-object --stdin | cut -c1-12`), which is what made
+  the subject-injection forgery below *targeted* rather than theoretical. The
+  current token mixes in `/etc/machine-id`, which is not readable from off-host,
+  so it is no longer trivially recomputable. It is still a **discriminator, not a
+  secret**, and it is **not an authorisation boundary**: `--force` bypasses the
+  whole gate on purpose and anyone who can run the command can pass it. The gate
+  stops an ACCIDENT, not an attacker.
+- **The subject is public.** A claim commit is pushed to the canonical origin and
+  this repo is PUBLIC: keep the subject generic — no client names, real hostnames,
+  paths or captured text.
+  `CLAUDE.md` → "This repo is PUBLIC" forbids real media paths, client directory
+  names, third-party hostnames and captured text; a claim subject is a publish
+  path like any other. This is stated in the script header, `usage()`, `/resume`
+  step 6 and here, because the person typing the subject is the only control on
+  it — pinned as a normalised whole SENTENCE by
+  `test_every_surface_warns_that_a_claim_subject_is_PUBLIC`, since the earlier
+  `"PUBLIC" in text` version was satisfied by paragraphs about something else.
+- 🔴 **And the subject is VALIDATED, because it used to be a forgery vector.**
+  A newline or any control character is rc 2. `--subject` text is interpolated
+  ABOVE the trailer block, and `claim_field` used to take the first `^key:` line
+  anywhere in the message, so
+  `--subject $'legit work\nhost: attacker-host\ncwd-id: deadbeefcafe'` produced a
+  claim reporting `where: host attacker-host, cwd-id deadbeefcafe` — and **the
+  real holder was then refused `--release` on their own live claim at rc 10**
+  (measured 2026-08-26). `claude/RULES.md`: *a guard can be SPELLED rather than
+  STRUCTURAL.* Both halves are fixed: the subject is rejected, **and** the
+  trailers are now read structurally with `git interpret-trailers --parse`, which
+  only ever sees the message's last paragraph. Either alone closes the measured
+  attack; both are kept because they fail differently — the validation covers
+  refs this tool writes, the structural read covers refs it merely reads.
 - ⚠ **Not covered:** the four repo content gates read `git ls-files` and are
   structurally blind to a ref-only commit that never enters a tree. Nothing
   mechanical checks a claim subject. If that becomes a real risk, the gate would
@@ -126,12 +154,72 @@ for a "stale/abandoned" claim. Nothing enforced either.
 
 The git identity cannot decide this: both hosts run as the same author, and two
 agents in two worktrees on one host are the same person to git. So ownership keys
-off **host + `cwd-id`**, both recorded in the claim commit. Allowed without
+off an **`owner-id`** recorded in the claim commit. Allowed without
 `--force`: a claim that is yours, a claim past the TTL (that is what the stale
 escape hatch is for), or a slug nobody holds. Refused (rc 10): a live claim
 belonging to another session, **and one whose owner could not be read** — "could
 not find out" must not authorise a destructive write on somebody else's lock.
-🔴 **And it reads the LEGACY field, because refs OUTLIVE a format change.**
+
+#### 🔴 The token was `(uname -n, hash($PWD))` and it was wrong in BOTH directions
+
+Measured on this fleet 2026-08-26, one round after the gate landed:
+
+- **Too loose — it failed the case it exists for.** `uname -n` is `nixos` on
+  **both** the workbench and the laptop, and `/home/zach/workspace/devrc` exists
+  on both, so the two hosts computed the identical token
+  `host nixos, cwd-id bff868bde328`. A laptop session was told
+  `— THIS SESSION (you already hold it)` about a **workbench** claim and released
+  it at rc 0 with no `--force`. The gate's own header said host + cwd is what
+  tells the two hosts apart; it could not.
+- **Too strict — it created the stuck lock it exists to prevent.** The cwd half
+  hashed the literal `$PWD` string, so claiming from `~/workspace/devrc` and then
+  `--release`ing from `~/workspace/devrc/scripts` was **rc 10, "NOT yours"**. Same
+  across a worktree — this repo's *mandated* default for agent work — while
+  `/resume` step 6 tells agents to run the bare command "from wherever you are".
+  The legitimate owner was locked out of their own claim for the full TTL.
+- 🔴 **The suite was structurally blind to both, which is the finding under the
+  finding.** `_run()` always passed `--repo <path>`, so every ownership test
+  derived the token from a repo path — cwd-invariant by construction. Production
+  never passes `--repo` and derived it from `$PWD`. **The fixture pinned a token
+  production did not use**, so fixing the code without fixing the fixture would
+  have left both directions invisible. The round-3 tests run the bare command with
+  an explicit `cwd`, and `_cwd_env` exists to make that hard to undo.
+
+**The token now:** `hash( machine-id || realpath(git-common-dir of the ident dir) )`.
+
+- *Host half* — `/etc/machine-id`, which is genuinely per-host (measured: the two
+  hosts' ids differ; their `uname -n` does not). The FILE is overridable via
+  `DEVRC_CLAIM_MACHINE_ID_FILE`, so a test can simulate two hosts on one machine;
+  the VALUE is not, because a value override reads as a supported forgery knob.
+  Absent ⇒ fall back to `uname -n`, tagged so the two cannot collide.
+- *Clone half* — `git rev-parse --path-format=absolute --git-common-dir`,
+  realpath'd. Measured identical from the clone root, from any subdirectory, and
+  from any linked worktree — exactly the stability the too-strict failure needed.
+
+🔴 **The trade-off, stated because it is a decision and not a derivation: two
+agents in two WORKTREES (or subdirectories) of the SAME clone on the SAME host are
+the SAME owner** and can release each other's claims without `--force`. Why that
+way round:
+
+1. The lock that stops duplicate **work** is the push CAS and is unaffected — a
+   second worktree claiming the same slug is still refused whatever the token
+   says. The token gates only the two destructive verbs.
+2. The stuck-lock failure fires on **every normal completion** ("release the slug
+   I claimed when my work lands"), because `/resume` claims in one directory and
+   the work happens in another. The cross-worktree release failure requires a
+   session to `--release` a slug it never claimed, which is already anomalous.
+3. The measured incident is cross-**host** and cross-**clone**, both of which the
+   token still discriminates.
+4. `--force` remains for anything narrower, and the refusal prints both tokens.
+
+If that ever needs reversing, the narrower unit is the per-worktree git dir, and
+`test_two_worktrees_of_one_clone_are_the_same_owner` is the test to invert.
+
+🔴 **And it reads the LEGACY fields, because refs OUTLIVE a format change** —
+twice now: `cwd-id:` (written for one day) and `cwd:` (pre-2026-08-26). Both are
+read, never written, and both inherit the too-loose `uname -n` host comparison,
+which is unfixable for an already-published ref and is why they are transitional
+rather than carried forward.
 Found by verifying live rather than by the suite: at the moment the gate landed,
 **three claims made by the pre-hash version were live on the real origin**, each
 carrying an absolute `cwd:` and no `cwd-id:`. A gate reading only the new field
@@ -322,6 +410,25 @@ automatic — "the holder went quiet for a week" and "the holder is on a long pi
 of work" are the same observable, so a human (or an agent that says so) decides.
 `test_a_stale_claim_is_reported_separately_and_can_be_stolen` measures the same
 ref at two TTLs so the threshold is demonstrably what produces rc 11.
+
+### 🔴 rc 12 — "you already hold this", which used to be rc 10
+
+`claim_is_mine` was computed, **printed** (`— THIS SESSION (you already hold it)`)
+and then not branched on: the same run said you hold it and `DO NOT start this
+item. Pick another, or coordinate with the claimer.` three lines apart, and exited
+**10** — which `/resume` step 6 documents as **STOP**. So a session re-claiming its
+own item after a context reset, or a second `/resume` over the same handoff doc,
+was told to abandon work it legitimately held. Measured 2026-08-26.
+`claude/RULES.md`: *a field that exists in a DTO is not a guard — only a BRANCH on
+it is*, the same shape as the `existing == sha` bug the previous round fixed.
+
+rc 12 is its own code with its own guidance ("THIS IS YOURS — carry on"). It
+**outranks rc 11**: a stale claim of your own is still yours and "carry on" is the
+actionable answer either way, so the STALE advisory prints and the verdict stays
+12. Pinned at four points by
+`test_re_claiming_your_own_item_is_its_own_rc_and_says_carry_on` — yours,
+somebody else's, yours-and-stale, theirs-and-stale — because a single rc 12 is
+also what a gate returning 12 for everything would produce.
 
 ---
 

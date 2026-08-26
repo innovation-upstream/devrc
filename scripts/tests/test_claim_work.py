@@ -98,6 +98,7 @@ RC_OK = 0
 RC_USAGE = 2
 RC_TAKEN = 10
 RC_TAKEN_STALE = 11
+RC_MINE = 12
 RC_DEGRADED_STRICT = 20
 
 CLAIM_NS = "refs/heads/claim/"
@@ -158,6 +159,43 @@ def _session(root: Path, origin: Path, who: str, name: str = "work") -> Path:
     _git("-C", str(path), "config", "user.email",
          f"{who.lower().replace(' ', '.')}@localhost")
     return path
+
+
+def _cwd_env(origin: Path, **overrides: str) -> dict:
+    """🔴 THE ENV FOR A TEST THAT MUST NOT PASS `--repo`.
+
+    `_run(repo=…)` ALWAYS passes `--repo <path>`, and `--repo` makes the owner
+    token derive from a REPO PATH — which is cwd-invariant by construction. So
+    every ownership test written that way was structurally blind to the cwd half
+    of the token, and BOTH directions of the 2026-08-26 ownership bug lived
+    exactly there. `/resume` step 6 says in as many words: run the bare command
+    from wherever you are, do NOT pass `--repo`.
+
+    This gives the production shape instead — no flag, the remote from the
+    environment (resolution order 3, which `--repo`/`--remote` would outrank) —
+    so the token comes from `$PWD` the way it does in a real session.
+    """
+    return _env(DEVRC_CLAIM_REMOTE=str(origin), **overrides)
+
+
+def _worktree(session: Path, path: Path, branch: str = "wt") -> Path:
+    """A linked worktree of `session`, so ownership can be measured across the
+    isolation this repo MANDATES for agent work. `worktree add` needs a commit,
+    and `_session` leaves an unborn HEAD."""
+    _git("-C", str(session), "checkout", "-q", "-b", "base")
+    _git("-C", str(session), "commit", "-q", "--allow-empty", "-m", "base")
+    _git("-C", str(session), "worktree", "add", "-q", str(path), "-b", branch)
+    return path
+
+
+def _machine_id(root: Path, name: str, value: str) -> Path:
+    """A stand-in `/etc/machine-id`. The script reads the FILE named by
+    `DEVRC_CLAIM_MACHINE_ID_FILE`, never a value from the environment, so two
+    files is a genuine simulation of two machines rather than a value backdoor —
+    and it is the only way to measure the cross-HOST half on one host."""
+    p = root / name
+    p.write_text(value + "\n", encoding="utf-8")
+    return p
 
 
 def _run(*args: str, repo: Path | None = None, script: Path | None = None,
@@ -580,7 +618,11 @@ def test_a_stale_claim_is_reported_separately_and_can_be_stolen(tmp_path):
 
     stolen = _run("--steal", "topic-4", "--subject", "taking over", repo=b)
     assert stolen.returncode == RC_OK, stolen.stderr
-    assert _run("--check", "topic-4", repo=b).returncode == RC_TAKEN
+    # b now HOLDS it, so b asking about it is rc 12 (yours), not rc 10.
+    assert _run("--check", "topic-4", repo=b).returncode == RC_MINE
+    # …and a THIRD party still reads it as taken.
+    c = _session(tmp_path, origin, "Session C", "c")
+    assert _run("--check", "topic-4", repo=c).returncode == RC_TAKEN
     assert "taking over" in _run("--list", repo=b).stdout
 
 
@@ -654,7 +696,8 @@ def test_the_claim_never_touches_the_callers_repository(tmp_path):
 
     before = _fingerprint(a)
     assert _run("topic-1", "--subject", "x", repo=a).returncode == RC_OK
-    assert _run("--check", "topic-1", repo=a).returncode == RC_TAKEN
+    # rc 12, not 10: `repo=a` is the session that claimed it.
+    assert _run("--check", "topic-1", repo=a).returncode == RC_MINE
     assert _run("--list", repo=a).returncode == RC_OK
     after = _fingerprint(a)
 
@@ -807,7 +850,7 @@ def test_no_arguments_prints_usage_rather_than_claiming_something(tmp_path):
 def test_the_script_documents_every_rc_it_can_return():
     """A distinct exit code nobody can look up is not a documented contract."""
     src = SCRIPT.read_text(encoding="utf-8")
-    for rc in (RC_USAGE, RC_TAKEN, RC_TAKEN_STALE, RC_DEGRADED_STRICT):
+    for rc in (RC_USAGE, RC_TAKEN, RC_TAKEN_STALE, RC_MINE, RC_DEGRADED_STRICT):
         assert re.search(rf"^#\s+{rc}\s", src, re.M), (
             f"rc {rc} is returned but has no line in the EXIT CODES block")
 
@@ -1210,14 +1253,14 @@ def test_the_refusal_names_the_session_not_only_the_shared_identity(tmp_path):
 
     second = _run("topic-1", repo=b)
     assert second.returncode == RC_TAKEN, second.stdout
-    assert re.search(r"where:\s+host \S+, cwd-id [0-9a-f]{6,}", second.stdout), (
+    assert re.search(r"where:\s+host \S+, owner-id [0-9a-f]{6,}", second.stdout), (
         f"the refusal does not say WHERE the holder is, so with one shared git "
         f"identity it names nothing the reader can act on:\n{second.stdout}")
 
     # …and the SAME session is told it already holds it, which is the usability
     # half: without it, "who: Same Identity" is indistinguishable from your own.
     own = _run("--check", "topic-1", repo=a)
-    assert own.returncode == RC_TAKEN
+    assert own.returncode == RC_MINE
     assert "THIS SESSION" in own.stdout, (
         f"a session checking its OWN claim is not told so:\n{own.stdout}")
 
@@ -1272,12 +1315,17 @@ def test_two_claims_that_would_be_byte_identical_still_collide(tmp_path):
     first = _run("twin", repo=a, env=env)
     assert first.returncode == RC_OK, f"{first.stdout}\n{first.stderr}"
     second = _run("twin", repo=a, env=env)
-    assert second.returncode == RC_TAKEN, (
+    # rc 12 (yours), because pinning every input identical necessarily means the
+    # SAME owner token. What the mutant produces is rc 0 + "CLAIMED", so the pair
+    # rc/text below is still what discriminates; only the expected code moved.
+    assert second.returncode == RC_MINE, (
         f"a second invocation with every input pinned identical was told it had "
         f"CLAIMED the item (rc={second.returncode}). The two claim commits share "
         f"a sha, so the push was 'Everything up-to-date' — the nonce is not "
         f"making them differ.\n{second.stdout}\n{second.stderr}"
     )
+    assert "ALREADY CLAIMED" in second.stdout, (
+        f"the second invocation reported a fresh CLAIM:\n{second.stdout}")
 
 
 def test_a_claim_exactly_at_the_ttl_boundary_reads_LIVE_not_stale(tmp_path):
@@ -1650,34 +1698,118 @@ def test_the_preflight_sweep_is_on_the_unconditional_path_not_the_degraded_one()
         "shared-queue.md no longer says the sweep is unconditional")
 
 
+# 🔴 THE WARNING, AS A WHOLE NORMALISED SENTENCE. See the test below for why a
+# keyword was not enough. Deliberately free of markdown emphasis, backticks and
+# line-leading bullets so ONE spelling can live in a bash comment header, a
+# `usage()` heredoc and three markdown docs unchanged.
+PUBLIC_SENTENCE = (
+    "A claim commit is pushed to the canonical origin and this repo is PUBLIC: "
+    "keep the subject generic — no client names, real hostnames, paths or "
+    "captured text."
+)
+
+
+def _prose(text: str) -> str:
+    """`_normalised`, plus line-leading comment / quote markers stripped.
+
+    So a sentence can be pinned identically across a `#`-commented bash header, a
+    heredoc and a markdown doc without the marker landing mid-sentence when the
+    line wraps. Bullet characters are NOT stripped: a `-` can legitimately start
+    a wrapped line of prose, and stripping it would let a reworded bullet satisfy
+    a sentence pin.
+    """
+    return _normalised(re.sub(r"(?m)^[ \t]*[#>]+[ \t]?", "", text))
+
+
 def test_every_surface_warns_that_a_claim_subject_is_PUBLIC():
     """A claim commit is pushed to the canonical origin with the `--subject` text
     verbatim, and this repo is PUBLIC. All four content gates read `git ls-files`
     and are structurally blind to a ref-only commit, so the person typing the
-    subject is the only control there is — which makes the warning the control."""
+    subject is the only control there is — which makes the warning the control.
+
+    🔴 PINNED AS A NORMALISED WHOLE SENTENCE, not `"PUBLIC" in text`. The keyword
+    version was walkable by any surface that mentions the word for any reason —
+    and three of these five discuss "this repo is PUBLIC" in other paragraphs, so
+    it was satisfied without warning anybody about the SUBJECT. Its neighbour
+    `test_the_preflight_sweep_is_on_the_unconditional_path_not_the_degraded_one`
+    was already pinned this way for exactly this reason; this one was not.
+    `claude/RULES.md`: when the artifact under test IS prose, a guard on WORDS is
+    walkable by REWORDING — pin the whole normalised string.
+
+    Reword the surrounding paragraphs freely; this sentence is the
+    machine-readable half. Changing it is a deliberate edit in six places.
+    """
     helped = _run("--help")
-    for name, text in (
-            ("claim-work --help (usage)", helped.stderr + helped.stdout),
-            ("scripts/claim-work.sh", SCRIPT.read_text(encoding="utf-8")),
-            ("resume/SKILL.md step 6", _resume_step_6()),
-            ("shared-queue.md", SHARED_QUEUE.read_text(encoding="utf-8")),
-            ("design-claim-by-push.md", DESIGN_DOC.read_text(encoding="utf-8"))):
-        assert "PUBLIC" in text, (
-            f"{name} does not warn that what a claim publishes is public")
+    assert helped.returncode == RC_OK, helped.stderr
+    surfaces = (
+        ("claim-work --help (usage)", helped.stderr + helped.stdout),
+        ("scripts/claim-work.sh", SCRIPT.read_text(encoding="utf-8")),
+        ("resume/SKILL.md step 6", _resume_step_6()),
+        ("shared-queue.md", SHARED_QUEUE.read_text(encoding="utf-8")),
+        ("design-claim-by-push.md", DESIGN_DOC.read_text(encoding="utf-8")),
+    )
+    for name, text in surfaces:
+        assert PUBLIC_SENTENCE in _prose(text), (
+            f"{name} does not carry the canonical subject-is-PUBLIC sentence "
+            f"verbatim:\n\n  {PUBLIC_SENTENCE}\n\n"
+            f"A `\"PUBLIC\" in text` check passed here while the surface said "
+            f"nothing about the SUBJECT — reword around it, but keep it.")
 
 
-def test_the_claim_commit_records_an_opaque_cwd_id_not_an_absolute_path(tmp_path):
+def test_the_PUBLIC_sentence_pin_is_not_satisfied_by_the_keyword_alone():
+    """🔴 THE NEGATIVE CONTROL ON THE GUARD ABOVE. Until it has been watched to
+    reject something, "every surface carries the sentence" is a claim about five
+    files that all happen to contain the word PUBLIC.
+
+    So: a surface that mentions PUBLIC and warns about the wrong thing must FAIL
+    the sentence pin, and the real sentence must pass through `_prose` from all
+    three comment shapes it has to survive.
+
+    ⚠ LABEL: base-independent by construction — it exercises `_prose` and the
+    constant, never the script, so it passes at every revision. It is a control
+    ON THE GUARD ABOVE, not regression cover for anything.
+    """
+    walker = "This repo is PUBLIC, so never commit a real media path."
+    assert "PUBLIC" in walker
+    assert PUBLIC_SENTENCE not in _prose(walker), (
+        "the pin is satisfied by any text containing the word PUBLIC")
+
+    for shape in (
+            "# " + PUBLIC_SENTENCE,
+            "# A claim commit is pushed to the canonical origin and this repo is\n"
+            "# PUBLIC: keep the subject generic — no client names, real\n"
+            "# hostnames, paths or captured text.",
+            "> " + PUBLIC_SENTENCE,
+            PUBLIC_SENTENCE.replace(": ", ":\n"),
+    ):
+        assert PUBLIC_SENTENCE in _prose(shape), (
+            f"`_prose` cannot see the sentence in this shape, so a surface that "
+            f"carries it correctly would still fail:\n{shape}")
+
+
+def test_the_claim_commit_records_a_hashed_owner_id_not_an_absolute_path(tmp_path):
     """The ownership token has to distinguish two sessions; it does NOT have to
     name a directory. An absolute cwd would put a client repo's name on a public
-    remote, so the commit carries a hash instead."""
+    remote, so the commit carries a hash instead.
+
+    ⚠ HASHED IS NOT OPAQUE, and the earlier name for this test said otherwise.
+    The token it replaced was `git hash-object` over a short, guessable absolute
+    path — recoverable in one command. The current one mixes in `/etc/machine-id`,
+    which is not readable off-host, so it is no longer trivially recomputable;
+    it is still a DISCRIMINATOR, not a secret, and `--force` bypasses the gate on
+    purpose. What this test pins is the leak, not a secrecy claim.
+    """
     origin = _bare_origin(tmp_path)
     a = _session(tmp_path, origin, "Session A", "a")
     assert _run("topic-1", repo=a).returncode == RC_OK
 
     body = _git("-C", str(origin), "log", "-1", "--format=%B",
                 f"{CLAIM_NS}topic-1").stdout
-    assert re.search(r"^cwd-id: [0-9a-f]{6,}$", body, re.M), (
-        f"the claim commit does not carry an opaque cwd-id:\n{body}")
+    assert re.search(r"^owner-id: [0-9a-f]{6,}$", body, re.M), (
+        f"the claim commit does not carry a hashed owner-id:\n{body}")
+    assert "cwd-id:" not in body, (
+        f"the claim commit still WRITES the superseded cwd-id trailer — it is "
+        f"read for old refs and must never be written again:\n{body}")
     assert str(a) not in body, (
         f"the claim commit published an ABSOLUTE PATH to the remote:\n{body}")
     assert re.search(r"^host: \S+$", body, re.M), body
@@ -1743,3 +1875,476 @@ def test_a_claim_in_the_pre_cwd_id_format_is_still_recognised_as_its_holders_own
     assert shown.returncode == RC_TAKEN
     assert str(a) in shown.stdout and "pre-2026-08-26 claim format" in shown.stdout, (
         f"a transitional claim's origin is reported as unknown:\n{shown.stdout}")
+
+
+# ── 🔴 ROUND 3 / B1: the owner token was wrong in BOTH DIRECTIONS ─────────────
+#
+# The round-2 token was `(uname -n, git hash-object($PWD))`. Measured on this
+# fleet 2026-08-26:
+#
+#   TOO LOOSE — `uname -n` is `nixos` on BOTH hosts and
+#     `/home/zach/workspace/devrc` exists on both, so the two hosts computed the
+#     IDENTICAL token. A laptop session was told "— THIS SESSION (you already
+#     hold it)" about a WORKBENCH claim and released it at rc 0 with no --force.
+#   TOO STRICT — the cwd half hashed the literal `$PWD`, so claiming from a repo
+#     root and releasing from `<root>/scripts` was rc 10 "NOT yours". Same across
+#     a worktree, which is this repo's MANDATED default for agent work.
+#
+# 🔴 AND THE SUITE COULD SEE NEITHER, which is the finding under the finding:
+# `_run(repo=…)` ALWAYS passes `--repo <path>`, so every ownership test derived
+# the token from a repo path — cwd-invariant by construction. Production never
+# passes `--repo` (`/resume` step 6 says not to) and derived it from `$PWD`. The
+# fixture pinned a token production did not use. Every test below therefore runs
+# the BARE command with `cwd=`, and `_cwd_env` exists to make that hard to undo.
+
+def test_release_from_a_SUBDIRECTORY_is_still_the_owners_own_claim(tmp_path):
+    """🔴 THE STUCK LOCK THE GATE ITSELF CREATED, measured: claim from the repo
+    root, `cd scripts/`, `--release` ⇒ rc 10, "NOT yours". The legitimate owner
+    was locked out of their own claim for the full TTL, and `/resume` step 6 tells
+    agents to run the bare command "from wherever you are".
+
+    Three depths, because one measurement is not a general claim: the root itself,
+    one level down, and two.
+    """
+    origin = _bare_origin(tmp_path)
+    a = _session(tmp_path, origin, "Same Identity", "a")
+    deep = a / "sub" / "deeper"
+    deep.mkdir(parents=True)
+    env = _cwd_env(origin)
+
+    for depth, where in (("root", a), ("one level", a / "sub"), ("two levels", deep)):
+        claimed = _run("subdir-probe", "--subject", "generic item", cwd=a, env=env)
+        assert claimed.returncode == RC_OK, f"{claimed.stdout}\n{claimed.stderr}"
+        rel = _run("--release", "subdir-probe", cwd=where, env=env)
+        assert rel.returncode == RC_OK, (
+            f"the OWNER could not release its own claim from {depth} "
+            f"({where}) — rc={rel.returncode}. The owner token is keyed on the "
+            f"literal cwd, so a claim taken at the root is unreleasable from any "
+            f"subdirectory and the item is blocked for the whole TTL.\n"
+            f"{rel.stdout}\n{rel.stderr}")
+        assert f"{CLAIM_NS}subdir-probe" not in _remote_refs(origin)
+
+
+def test_two_worktrees_of_one_clone_are_the_same_owner(tmp_path):
+    """🔴 A DOCUMENTED DECISION, NOT A DERIVATION — and the test to invert if it
+    is ever reversed.
+
+    Two worktrees (or subdirectories) of the SAME clone on the SAME host are ONE
+    owner and can release each other's claims without `--force`. Why that way
+    round is argued in `claim-work.sh` above `MY_HOST`; the short version is that
+    the lock which prevents duplicate WORK is the push CAS and is unaffected,
+    while the stuck-lock failure fires on every normal completion because
+    `/resume` claims in one directory and the work happens in another.
+
+    The narrower alternative is the per-worktree git dir. If you take it, this
+    test is the one that must flip to `RC_TAKEN`.
+    """
+    origin = _bare_origin(tmp_path)
+    a = _session(tmp_path, origin, "Same Identity", "a")
+    wt = _worktree(a, tmp_path / "a-wt")
+    env = _cwd_env(origin)
+
+    assert _run("wt-probe", "--subject", "generic item", cwd=a,
+                env=env).returncode == RC_OK
+    rel = _run("--release", "wt-probe", cwd=wt, env=env)
+    assert rel.returncode == RC_OK, (
+        f"a claim taken in the clone could not be released from a WORKTREE of "
+        f"that same clone (rc={rel.returncode}). Worktree isolation is this "
+        f"repo's mandated default for agent work, so this is the routine case, "
+        f"not an edge one.\n{rel.stdout}\n{rel.stderr}")
+
+    # …and the reverse direction, so the token is symmetric rather than
+    # accidentally accepting one ordering.
+    assert _run("wt-probe-2", cwd=wt, env=env).returncode == RC_OK
+    assert _run("--release", "wt-probe-2", cwd=a, env=env).returncode == RC_OK
+
+
+def test_two_different_clones_on_one_host_are_different_owners(tmp_path):
+    """The other side of the boundary above, measured WITHOUT `--repo` so it
+    exercises the production derivation. Same host, same git identity, two
+    clones ⇒ two owners, and the refusal must hold.
+
+    ⚠ LABEL: this is an INVARIANT GUARD, not regression cover. Measured against
+    the pre-change script (`a6c60a58`) it PASSES — hashing the literal `$PWD`
+    already separated two clones. It pins the property the new token must not
+    lose while it fixes the two directions that were broken, and it must not be
+    counted as coverage of a defect. `claude/RULES.md`: a guard pinning an
+    invariant the bug never violated is an invariant guard; label it as one.
+    """
+    origin = _bare_origin(tmp_path)
+    a = _session(tmp_path, origin, "Same Identity", "a")
+    b = _session(tmp_path, origin, "Same Identity", "b")
+    env = _cwd_env(origin)
+
+    assert _run("clone-probe", "--subject", "generic item", cwd=a,
+                env=env).returncode == RC_OK
+    before = _remote_refs(origin)[f"{CLAIM_NS}clone-probe"]
+
+    refused = _run("--release", "clone-probe", cwd=b, env=env)
+    assert refused.returncode == RC_TAKEN, (
+        f"a session in a DIFFERENT clone released a live claim it does not hold "
+        f"(rc={refused.returncode})\n{refused.stdout}\n{refused.stderr}")
+    assert _remote_refs(origin)[f"{CLAIM_NS}clone-probe"] == before
+    # …and the owner still can, so the gate is not simply "always refuse".
+    assert _run("--release", "clone-probe", cwd=a, env=env).returncode == RC_OK
+
+
+def test_two_hosts_produce_different_owner_tokens(tmp_path):
+    """🔴 THE HALF THE ROUND-2 TOKEN GOT BACKWARDS, and the half a one-host suite
+    cannot see by accident.
+
+    `uname -n` is `nixos` on BOTH the workbench and the laptop — measured, not
+    assumed — and `/home/zach/workspace/devrc` exists on both, so the round-2
+    token was byte-identical on the two machines and each host read the other's
+    claims as its own. The fix keys the host half off `/etc/machine-id`, whose
+    values DO differ (measured: `d48f5d71…` vs `8d9fd8d4…`).
+
+    Simulated here by two machine-id FILES, which is what the script reads —
+    same path, same clone, same identity, so the machine-id is the ONLY variable
+    and a green result cannot come from anything else.
+    """
+    origin = _bare_origin(tmp_path)
+    a = _session(tmp_path, origin, "Same Identity", "a")
+    host_a = _machine_id(tmp_path, "machine-id-A", "a" * 32)
+    host_b = _machine_id(tmp_path, "machine-id-B", "b" * 32)
+    env_a = _cwd_env(origin, DEVRC_CLAIM_MACHINE_ID_FILE=str(host_a))
+    env_b = _cwd_env(origin, DEVRC_CLAIM_MACHINE_ID_FILE=str(host_b))
+
+    claimed = _run("host-probe", "--subject", "generic item", cwd=a, env=env_a)
+    assert claimed.returncode == RC_OK, claimed.stderr
+    token_a = re.search(r"owner-id ([0-9a-f]+)", claimed.stdout)
+    assert token_a, claimed.stdout
+
+    # (1) The tokens themselves differ. Read off the two runs' own output, so
+    #     this is the script's derivation and not a re-implementation of it.
+    refused = _run("--release", "host-probe", cwd=a, env=env_b)
+    token_b = re.search(r"you are:\s+host \S+, owner-id ([0-9a-f]+)",
+                        refused.stdout)
+    assert token_b, refused.stdout
+    assert token_a.group(1) != token_b.group(1), (
+        f"two hosts computed the SAME owner token {token_a.group(1)} — the host "
+        f"half discriminates nothing, which is exactly the state `uname -n` left "
+        f"it in on a fleet where both machines are called `nixos`")
+
+    # (2) …and it MATTERS: the other host is refused, and the ref survives.
+    assert refused.returncode == RC_TAKEN, (
+        f"the OTHER host released a live claim without --force "
+        f"(rc={refused.returncode})\n{refused.stdout}\n{refused.stderr}")
+    assert f"{CLAIM_NS}host-probe" in _remote_refs(origin), "the ref was deleted"
+    assert "THIS SESSION" not in refused.stdout, (
+        f"the other host was told the claim was its own:\n{refused.stdout}")
+
+    # (3) POSITIVE CONTROL: the claiming host is still allowed. Without this the
+    #     refusal above is satisfied by a token that discriminates NOTHING and
+    #     refuses everybody, including the owner — the round-2 failure mode.
+    assert _run("--release", "host-probe", cwd=a, env=env_a).returncode == RC_OK
+
+
+def test_a_missing_machine_id_file_degrades_instead_of_collapsing_every_token(
+        tmp_path):
+    """A container or a minimal sandbox has no `/etc/machine-id`. That must fall
+    back to the hostname — no worse than the token this replaced — rather than
+    contributing an EMPTY host half, which would make every host one owner and
+    reinstate the too-loose bug wholesale.
+
+    Both halves are asserted: the run works, and the fallback is still combined
+    with the clone half rather than swallowing it.
+    """
+    origin = _bare_origin(tmp_path)
+    a = _session(tmp_path, origin, "Same Identity", "a")
+    b = _session(tmp_path, origin, "Same Identity", "b")
+    absent = _cwd_env(origin,
+                      DEVRC_CLAIM_MACHINE_ID_FILE=str(tmp_path / "no-such-file"))
+
+    claimed = _run("no-machine-id", "--subject", "generic item", cwd=a, env=absent)
+    assert claimed.returncode == RC_OK, f"{claimed.stdout}\n{claimed.stderr}"
+    assert re.search(r"owner-id [0-9a-f]{6,}", claimed.stdout), claimed.stdout
+    assert "unknown" not in claimed.stdout.lower(), claimed.stdout
+
+    refused = _run("--release", "no-machine-id", cwd=b, env=absent)
+    assert refused.returncode == RC_TAKEN, (
+        f"with no machine-id file the clone half stopped discriminating too, so "
+        f"every session on the box became one owner (rc={refused.returncode})"
+        f"\n{refused.stdout}")
+    assert _run("--release", "no-machine-id", cwd=a, env=absent).returncode == RC_OK
+
+
+# ── 🔴 ROUND 3 / B2: ownership was a SPELLED guard ────────────────────────────
+
+@pytest.mark.parametrize("bad,label", [
+    ("legit work\nhost: attacker-host\nowner-id: deadbeefcafe", "newline"),
+    ("legit\rowner-id: dead", "carriage return"),
+    ("legit\towner-id: dead", "tab"),
+    ("legit\x7fowner-id: dead", "DEL"),
+])
+def test_a_subject_carrying_a_control_character_is_a_usage_error(tmp_path, bad, label):
+    """🔴 MEASURED FORGERY, not a theory. On the pre-fix tree
+
+        claim-work slug --subject $'legit work\\nhost: attacker-host\\ncwd-id: …'
+
+    produced a claim whose `where:` read `host attacker-host, cwd-id
+    deadbeefcafe` — and THE REAL HOLDER WAS THEN REFUSED `--release` ON THEIR OWN
+    LIVE CLAIM at rc 10. `claim_field` took the FIRST `^<key>:` line in the
+    message and the subject is interpolated ABOVE the trailer block.
+
+    rc 2 per the documented usage contract: a subject the tool will not publish
+    must be LOUD, never silently mangled. And nothing may be claimed.
+    """
+    origin = _bare_origin(tmp_path)
+    a = _session(tmp_path, origin, "Session A", "a")
+    r = _run("injected", "--subject", bad, repo=a)
+    assert r.returncode == RC_USAGE, (
+        f"a subject containing a {label} produced rc {r.returncode}, not a usage "
+        f"error — it lands in the commit body where the ownership trailers live"
+        f"\n{r.stdout}\n{r.stderr}")
+    assert f"{CLAIM_NS}injected" not in _remote_refs(origin), (
+        "a rejected subject still published a claim")
+
+    # POSITIVE CONTROL: the same slug with a CLEAN subject claims fine, so the rc
+    # 2 above is the subject's doing and not a broken fixture.
+    ok = _run("injected", "--subject", "legit work", repo=a)
+    assert ok.returncode == RC_OK, f"{ok.stdout}\n{ok.stderr}"
+    assert f"{CLAIM_NS}injected" in _remote_refs(origin)
+
+
+def test_a_forged_subject_cannot_shadow_the_ownership_trailers(tmp_path):
+    """🔴 THE STRUCTURAL HALF, and it is tested SEPARATELY on purpose.
+
+    Rejecting control characters in `--subject` is a spelling fix for a spelling
+    bug: it closes the one route the CLI offers and says nothing about the READER.
+    `claude/RULES.md` — "a guard can be SPELLED rather than STRUCTURAL: can it
+    pass while the hazard exists in a different shape?" A ref published by an
+    older `claim-work`, by a different tool, or by hand can still carry `host:`
+    in its subject, and the gate must read the real value anyway.
+
+    So this test bypasses the CLI entirely: it takes a REAL claim's trailer block
+    (so the expected owner token is the script's own derivation, never
+    re-implemented here) and republishes it under a forged subject.
+    """
+    origin = _bare_origin(tmp_path)
+    a = _session(tmp_path, origin, "Same Identity", "a")
+    b = _session(tmp_path, origin, "Same Identity", "b")
+
+    assert _run("forged", "--subject", "legit work", repo=a).returncode == RC_OK
+    body = _git("-C", str(origin), "log", "-1", "--format=%B",
+                f"{CLAIM_NS}forged").stdout
+    trailers = body.split("\n\n", 1)[1]
+    m = re.search(r"^owner-id: (\S+)$", trailers, re.M)
+    assert m, f"the real claim carries no owner-id trailer:\n{body}"
+    real_owner = m.group(1)
+
+    forged = ("claim(forged): legit work\n"
+              "host: attacker-host\n"
+              "owner-id: deadbeefcafe\n"
+              "cwd-id: deadbeefcafe\n"
+              "cwd: /somewhere/else\n"
+              "\n" + trailers)
+    tree = _git("-C", str(a), "mktree", input="").stdout.strip()
+    sha = _git("-C", str(a), "commit-tree", tree, input=forged).stdout.strip()
+    _git("-C", str(a), "push", "-f", "origin", f"{sha}:{CLAIM_NS}forged")
+
+    shown = _run("--check", "forged", repo=b)
+    where = [l for l in shown.stdout.splitlines()
+             if l.strip().startswith("where:")]
+    assert where, shown.stdout
+    assert real_owner in where[0], (
+        f"the reported owner came from the SUBJECT, not the trailer block: "
+        f"{where[0]!r} (the real owner is {real_owner})")
+    assert "attacker-host" not in where[0] and "deadbeefcafe" not in where[0], (
+        f"forged free text was read as an ownership trailer: {where[0]!r}")
+
+    # …and the two things that actually matter: a third party is still refused,
+    # and the REAL HOLDER can still release their own claim — which is precisely
+    # what the forgery took away.
+    assert _run("--release", "forged", repo=b).returncode == RC_TAKEN, (
+        "the forged subject let a third party release the claim")
+    rel = _run("--release", "forged", repo=a)
+    assert rel.returncode == RC_OK, (
+        f"the REAL holder was refused --release on their own claim because a "
+        f"forged subject shadowed the trailers (rc={rel.returncode})"
+        f"\n{rel.stdout}\n{rel.stderr}")
+
+    # 🔴 LEG 2 — THE CASE THAT SEPARATES THE TWO CANDIDATE FIXES, and without it
+    # `git interpret-trailers --parse` would be dead weight. `claim_field` also
+    # takes the LAST matching line rather than the first, which alone defeats
+    # anything PREPENDED (the subject is always first) — so leg 1 above stays
+    # green with the structural read removed.
+    #
+    # Here the ref is a LEGACY one (`cwd:`, no `owner-id:`) whose SUBJECT spells
+    # an `owner-id`. That forged line is then the ONLY `owner-id:` in the whole
+    # message, so first-or-last makes no difference: a line scan reads it, decides
+    # the claim belongs to `deadbeefcafe`, and locks the legacy holder out. The
+    # structural read sees no owner-id trailer at all and falls through to the
+    # legacy tier, which is correct.
+    host = os.uname().nodename
+    _legacy_claim(origin, a, "forged-legacy", cwd=str(a), host=host,
+                  subject="legit work\nowner-id: deadbeefcafe")
+    legacy = _run("--release", "forged-legacy", repo=a)
+    assert legacy.returncode == RC_OK, (
+        f"a forged `owner-id:` in the SUBJECT of a legacy claim locked its own "
+        f"holder out (rc={legacy.returncode}) — the trailers are being read by "
+        f"line scan, not as a trailer block\n{legacy.stdout}\n{legacy.stderr}")
+    assert f"{CLAIM_NS}forged-legacy" not in _remote_refs(origin)
+
+
+# ── 🔴 ROUND 3 / B3: `claim_is_mine` was computed, printed, not branched on ────
+
+def test_re_claiming_your_own_item_is_its_own_rc_and_says_carry_on(tmp_path):
+    """🔴 `/resume` step 6 says **rc 10 ⇒ STOP**. The round-2 code computed
+    ownership, PRINTED "— THIS SESSION (you already hold it)", then ignored it
+    and returned rc 10 with "DO NOT start this item. Pick another." three lines
+    later — so a session re-claiming its own item after a context reset, or a
+    second `/resume` over the same handoff doc, was told to abandon work it
+    legitimately held. `claude/RULES.md`: a field that exists is not a guard,
+    only a BRANCH on it is.
+
+    Measured at all three points that must disagree — yours, somebody else's,
+    and yours-but-stale — because a single rc 12 could be produced by a gate that
+    returns 12 for everything.
+    """
+    origin = _bare_origin(tmp_path)
+    a = _session(tmp_path, origin, "Same Identity", "a")
+    b = _session(tmp_path, origin, "Same Identity", "b")
+
+    assert _run("mine", "--subject", "generic item", repo=a).returncode == RC_OK
+
+    again = _run("mine", "--subject", "generic item", repo=a)
+    assert again.returncode == RC_MINE, (
+        f"re-claiming your OWN item returned rc {again.returncode}. rc "
+        f"{RC_TAKEN} is documented as STOP, so this told a session to abandon "
+        f"work it holds.\n{again.stdout}")
+    assert "THIS IS YOURS" in again.stdout, again.stdout
+    assert "DO NOT start this item" not in again.stdout, (
+        f"the same output says you hold it AND tells you not to start it:"
+        f"\n{again.stdout}")
+
+    # --check agrees. Two verbs, because the rc vocabulary is per-tool, not
+    # per-code-path.
+    assert _run("--check", "mine", repo=a).returncode == RC_MINE
+
+    # DISCRIMINATION: somebody else's live claim is still rc 10 with the STOP
+    # wording. Without this the assertion above is satisfied by "always 12".
+    theirs = _run("--check", "mine", repo=b)
+    assert theirs.returncode == RC_TAKEN, theirs.stdout
+    assert "DO NOT start this item" in theirs.stdout, theirs.stdout
+    assert "THIS IS YOURS" not in theirs.stdout, theirs.stdout
+
+    # A STALE claim OF YOUR OWN is still yours — rc 12 outranks rc 11 — and the
+    # stale advisory is still printed, so nothing is hidden by the precedence.
+    old = int(time.time()) - 30 * 86400
+    aged = _env(GIT_AUTHOR_DATE=f"{old} +0000", GIT_COMMITTER_DATE=f"{old} +0000")
+    assert _run("mine-old", repo=a, env=aged).returncode == RC_OK
+    own_stale = _run("--check", "mine-old", repo=a)
+    assert own_stale.returncode == RC_MINE, (
+        f"a stale claim of your OWN read rc {own_stale.returncode}; it is still "
+        f"yours and 'carry on' is the actionable answer\n{own_stale.stdout}")
+    assert "STALE" in own_stale.stdout, (
+        f"the staleness advisory was suppressed by the ownership branch:"
+        f"\n{own_stale.stdout}")
+    # …and somebody ELSE'S stale claim is still rc 11, so 12 is not swallowing it.
+    assert _run("--check", "mine-old", repo=b).returncode == RC_TAKEN_STALE
+
+
+# ── 🔴 ROUND 3 / B4: an exported GIT_DIR beats `-C` ───────────────────────────
+
+def test_an_exported_GIT_DIR_cannot_make_the_lock_inert(tmp_path):
+    """🔴 `GIT_DIR` OVERRIDES `-C`, so with one exported this script's
+    `git init --bare "$WS"` and `git -C "$WS" remote add` both acted on the
+    CALLER's repository. MEASURED 2026-08-26 on the round-2 tree:
+
+        GIT_DIR=<other>/.git claim-work --check <slug>
+        claim-work: DEGRADED — could not attach remote '<origin>'   → exit 0
+
+    i.e. any agent with `GIT_DIR` exported got SILENT ZERO LOCKING out of a tool
+    that reported success. The script deliberately unset `GIT_ASKPASS` /
+    `SSH_ASKPASS`; the repo-pointer ledger was simply missing.
+
+    Parametrised over the whole ledger would be slow; `GIT_DIR` is the one that
+    beats `-C`, and `test_git_repo_isolation.py` pins that this script's copy of
+    the ledger matches `gitenv.py`'s in BOTH directions — so the other ten cannot
+    silently go missing.
+    """
+    origin = _bare_origin(tmp_path)
+    a = _session(tmp_path, origin, "Session A", "a")
+    decoy = _session(tmp_path, origin, "Decoy", "decoy")
+
+    poisoned = _env(DEVRC_CLAIM_REMOTE=str(origin), GIT_DIR=str(decoy / ".git"))
+    # --strict so "degraded" is visible: the contract is exit 0 either way, which
+    # is exactly what hid this.
+    claimed = _run("poisoned", "--subject", "generic item", "--strict",
+                   cwd=a, env=poisoned)
+    assert claimed.returncode == RC_OK, (
+        f"an exported GIT_DIR degraded the run (rc={claimed.returncode}) — with "
+        f"--strict that is rc {RC_DEGRADED_STRICT}, and WITHOUT it the same run "
+        f"reports exit 0 while locking nothing\n{claimed.stdout}\n{claimed.stderr}")
+    assert "CLAIMED" in claimed.stdout, claimed.stdout
+    assert f"{CLAIM_NS}poisoned" in _remote_refs(origin), (
+        "the claim ref did not land on origin under an exported GIT_DIR")
+
+    # …and the DECOY repository was not written into. That is the other half of
+    # the hazard: GIT_DIR redirects where objects and refs go.
+    decoy_refs = _git("-C", str(decoy), "for-each-ref", "--format=%(refname)").stdout
+    assert "claim/" not in decoy_refs, (
+        f"a claim ref landed in the repository GIT_DIR pointed at:\n{decoy_refs}")
+
+    # …and the lock still LOCKS through it, which "the ref exists" does not prove.
+    b = _session(tmp_path, origin, "Session B", "b")
+    assert _run("poisoned", cwd=b, env=poisoned).returncode == RC_TAKEN
+
+
+# ── 🔴 ROUND 3 / B6: a flag swallowed as the subject ──────────────────────────
+
+def test_a_flag_swallowed_as_the_subject_is_a_usage_error(tmp_path):
+    """`--subject --force` claimed with `what: --force` and silently DROPPED the
+    `--force`, so the caller believed they had forced something. The identical
+    nit was already fixed for `--slug-for`; this is the same treatment."""
+    origin = _bare_origin(tmp_path)
+    a = _session(tmp_path, origin, "Session A", "a")
+
+    r = _run("flagsub", "--subject", "--force", repo=a)
+    assert r.returncode == RC_USAGE, (
+        f"a flag swallowed as the subject produced rc {r.returncode}\n{r.stdout}")
+    assert "--force" in r.stderr, r.stderr
+    assert f"{CLAIM_NS}flagsub" not in _remote_refs(origin), (
+        "a claim was published with a flag as its human description")
+
+    # POSITIVE CONTROL: text that merely CONTAINS a dash is still fine.
+    ok = _run("flagsub", "--subject", "re-run the gate --set all", repo=a)
+    assert ok.returncode == RC_OK, f"{ok.stdout}\n{ok.stderr}"
+
+
+def test_a_legacy_cwd_claim_is_releasable_from_a_worktree_of_that_clone(tmp_path):
+    """🔴 THE REFS THAT ARE ACTUALLY LIVE. Measured 2026-08-26: all three claims
+    on the real origin are in the oldest (`cwd:`) format, each recorded against
+    `/home/zach/workspace/devrc`. Fixing the cwd-sensitivity only for NEW claims
+    would leave their holder unable to release them from a worktree or a
+    subdirectory for the rest of the TTL — the same stuck lock, on the refs that
+    exist today rather than on hypothetical ones.
+
+    So the legacy tier also accepts the CLONE ROOT. Measured at both points,
+    because "accepts the clone root" and "accepts it from anyone" are different
+    bugs: a worktree of the claiming clone releases without `--force`, a
+    different clone is still refused.
+    """
+    origin = _bare_origin(tmp_path)
+    a = _session(tmp_path, origin, "Same Identity", "a")
+    b = _session(tmp_path, origin, "Same Identity", "b")
+    wt = _worktree(a, tmp_path / "a-legacy-wt")
+    host = os.uname().nodename
+    env = _cwd_env(origin)
+
+    _legacy_claim(origin, a, "legacy-wt", cwd=str(a), host=host)
+    mine = _run("--release", "legacy-wt", cwd=wt, env=env)
+    assert mine.returncode == RC_OK, (
+        f"a live legacy claim could not be released from a WORKTREE of the clone "
+        f"it was taken in (rc={mine.returncode}) — the three claims on the real "
+        f"origin are all in this format\n{mine.stdout}\n{mine.stderr}")
+    assert f"{CLAIM_NS}legacy-wt" not in _remote_refs(origin)
+
+    # …and the widening stops at the clone. A different clone is still refused.
+    _legacy_claim(origin, a, "legacy-other", cwd=str(a), host=host)
+    theirs = _run("--release", "legacy-other", cwd=b, env=env)
+    assert theirs.returncode == RC_TAKEN, (
+        f"the legacy clone-root accept widened to a DIFFERENT clone "
+        f"(rc={theirs.returncode})\n{theirs.stdout}")
+    assert f"{CLAIM_NS}legacy-other" in _remote_refs(origin)
