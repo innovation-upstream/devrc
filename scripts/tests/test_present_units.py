@@ -380,7 +380,7 @@ def test_the_server_binds_the_workbench_and_never_the_homelab_node():
     block = unit_block("systemd.user.services.present-serve")
     env = _env(block)
     assert env.get("PRESENT_SERVE_HOST") == WORKBENCH_LAN, (
-        f"expected the workbench's own eth1 address {WORKBENCH_LAN}, got "
+        f"expected the workbench's own eth0 address {WORKBENCH_LAN}, got "
         f"{env.get('PRESENT_SERVE_HOST')!r}")
     assert HOMELAB_NODE not in block, (
         f"{HOMELAB_NODE} is a homelab node (kube-apiserver / NodePorts). It is "
@@ -399,10 +399,16 @@ def test_the_serve_default_in_the_code_matches_the_unit():
 
 
 def test_the_page_is_not_wired_into_the_public_gateway():
-    """🔴 Deliberately LAN/nebula-only, exactly like initiatives-viewer. The
-    off-LAN reader is served by the portable SANITIZED export, not by public
+    """🔴 Deliberately WORKBENCH-LOCAL — not LAN, not nebula, and not public.
+    The off-workbench reader is served by the portable SANITIZED export, not by
     hosting. A `zacx.dev` hostname anywhere in these units would mean that
-    decision was reversed without being argued."""
+    decision was reversed without being argued.
+
+    ⚠ This assertion covers the PUBLIC half only, and that is all it can cover:
+    what actually keeps the page off the LAN is the firewall, which is in
+    /etc/nixos and invisible from here (module docstring). A green run means "no
+    public hostname was added", never "unreachable".
+    """
     for attr in UNITS:
         block = unit_block(attr)
         assert "zacx.dev" not in block, (
