@@ -1792,7 +1792,12 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
             scopes = sorted(
                 p
                 for p in root.iterdir()
-                if p.is_dir() and not p.name.startswith(".")
+                # `is_symlink()` FIRST: `is_dir()` dereferences, so a symlinked
+                # scope directory would otherwise be walked and its target's
+                # files shipped. See the entry-level note below.
+                if not p.is_symlink()
+                and p.is_dir()
+                and not p.name.startswith(".")
                 and (scope_filter is None or p.name == scope_filter)
             )
         except OSError as exc:
@@ -1826,22 +1831,76 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
             info.type = tarfile.REGTYPE
             return info
 
+        # 🔴 AN UNREADABLE SCOPE IS NOT AN EMPTY ONE, AND `Path.glob` CANNOT TELL
+        # YOU WHICH IT SAW. `glob`/`iterdir` swallow `PermissionError` and yield
+        # nothing, so the first version of this handler answered 200 with
+        # `X-Store-Exit: 0` for a `chmod 000` scope, the tar silently omitted it,
+        # and the client rendered `scope-empty — reached the store; nothing
+        # recorded`. That is the exact lie this route's client exists to prevent,
+        # and `snapshot_freshness` above already carries a long comment about it
+        # (it uses `os.walk(onerror=...)` for this reason). Caught by an audit,
+        # reproduced end-to-end, not hypothetical.
+        #
+        # So every directory read is EXPLICIT and every failure is COLLECTED —
+        # never skipped — and any failure at all makes the whole response a 503
+        # carrying the same `store-unreachable` state `_recall` uses. A partial
+        # snapshot served as 200 is worse than no snapshot.
+        unreadable: list[str] = []
+        selected: list[tuple[Path, str]] = []
+        for scope in scopes:
+            try:
+                names = sorted(
+                    p for p in scope.iterdir() if p.name.endswith(".md")
+                )
+            except OSError as exc:
+                unreadable.append(f"{scope.name}/: {exc.strerror or exc}")
+                continue
+            for entry in names:
+                # 🔴 SYMLINKS ARE REFUSED, NOT FOLLOWED. `is_file()`/`is_dir()`
+                # dereference, so a symlinked entry or scope would let one
+                # authenticated GET ship a file from outside the store — and
+                # `/snapshot` walks EVERY scope, where `/recall` makes you name
+                # one. Refusing (rather than skipping) matches `commit.sh`, which
+                # refuses symlinked scopes for the same reason, and keeps this
+                # from becoming a silent omission. Measured 2026-08-25: zero
+                # symlinks in the store on either host or in the pod's `/data`.
+                if entry.is_symlink():
+                    unreadable.append(f"{scope.name}/{entry.name}: symlink refused")
+                    continue
+                selected.append((entry, f"{scope.name}/{entry.name}"))
+
+        if unreadable:
+            body = ("store unreadable:\n  " + "\n  ".join(unreadable) + "\n").encode()
+            self._respond(
+                503,
+                body,
+                headers={"X-Store-Status": "store-unreachable", "X-Store-Exit": "3"},
+            )
+            self._audit(urlsplit(self.path).path, 503, "store-unreachable")
+            return
+
         buf = io.BytesIO()
         count = 0
         try:
-            with tarfile.open(fileobj=buf, mode="w", format=tarfile.PAX_FORMAT) as tar:
+            # 🔴 GZIPPED, because PAX is expensive per member and these members
+            # are tiny. MEASURED: 305 entries totalling 62,821 bytes of markdown
+            # produced a 634,880-byte uncompressed tar — **10.1x the payload** —
+            # since PAX spends ~2 KB of headers on a ~200-byte entry. The whole
+            # tar is held in memory here and again on the client, and a timer
+            # re-transfers the entire store every tick, so the multiplier is the
+            # thing that matters, not the absolute size. The client opens with
+            # mode="r", which auto-detects, so this needs no client change.
+            with tarfile.open(
+                fileobj=buf, mode="w:gz", format=tarfile.PAX_FORMAT
+            ) as tar:
                 stamp = root / SEED_STAMP_NAME
-                if stamp.is_file():
+                if stamp.is_file() and not stamp.is_symlink():
                     with stamp.open("rb") as fh:
                         tar.addfile(_member(stamp, SEED_STAMP_NAME), fh)
-                for scope in scopes:
-                    for entry in sorted(scope.glob("*.md")):
-                        if not entry.is_file():
-                            continue
-                        arcname = f"{scope.name}/{entry.name}"
-                        with entry.open("rb") as fh:
-                            tar.addfile(_member(entry, arcname), fh)
-                        count += 1
+                for entry, arcname in selected:
+                    with entry.open("rb") as fh:
+                        tar.addfile(_member(entry, arcname), fh)
+                    count += 1
         except OSError as exc:
             self._respond(
                 503,
@@ -1855,14 +1914,18 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
         self._respond(
             200,
             buf.getvalue(),
-            content_type="application/x-tar",
+            content_type="application/gzip",
             headers={
                 "X-Store-Status": "snapshot",
                 "X-Store-Exit": "0",
                 "X-Store-Snapshot": fresh_header,
-                # The client reports "N entries cached" from its own extraction;
-                # this is the SERVER's count of what it put in, so a truncated
-                # transfer is visible as a disagreement rather than a smaller
+                # The SERVER's count of what it put in. The client compares its
+                # own extracted count against this and refuses a mismatch —
+                # `scripts/store::install_snapshot`. (An earlier version of this
+                # comment claimed the disagreement was "visible" while NOTHING
+                # compared them; the comparison now exists. A comment is a claim
+                # too.) ⚠ On a `?scope=` request the counts still describe the
+                # same filtered set, so the check holds there as well.
                 # number nobody can compare against.
                 "X-Store-Entries": str(count),
             },
