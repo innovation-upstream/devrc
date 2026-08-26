@@ -1,12 +1,12 @@
 ---
 name: clawgate
-description: "Operate clawgate — the self-hosted Claude Code approval UI (plus Tasks/agents/runbooks). Status, send-a-test, push/SSE logs, build and deploy a version, toggle the approval hook, manage credentials/QR. Use for: clawgate, clawgate.zacx.dev, remote approval, the PermissionRequest approval hook, push notifications for permission prompts."
+description: "Operate clawgate — the self-hosted Claude Code permission router (plus Tasks/agents/runbooks). Status, send-a-test, push/SSE logs, build and deploy a version, toggle the approval hook, manage credentials/QR. Use for: clawgate, clawgate.zacx.dev, remote approval, the PermissionRequest approval hook, push notifications for permission prompts."
 ---
 
 # clawgate operations
 
-Self-hosted Go + htmx PWA routing Claude Code permission prompts to Zach's phone (approve /
-approve-with-comment / deny), grown into the **agent dispatch loop**: Tasks/Repos/Agents on Postgres,
+Self-hosted Go + htmx PWA routing Claude Code permission prompts to Zach's phone (it ROUTES;
+does NOT gate — `telemetry.md`), grown into the **agent dispatch loop**: Tasks/Repos/Agents on Postgres,
 agent self-service + privilege profiles + an Operator, runbooks with approval gates, and a machine
 Task API producers post work into for one-tap Dispatch.
 
