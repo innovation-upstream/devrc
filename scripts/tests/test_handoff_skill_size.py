@@ -206,17 +206,25 @@ MAX_BYTES = 24_000
 MIN_HEADROOM_BYTES = 900
 
 
-def _existing_topics() -> str:
+def existing_topics_text(reference_dir: Path) -> str:
     """The reference topics that exist RIGHT NOW, read off the filesystem.
 
     Globbed rather than hard-coded for the reason test_skill_size.py gives: a
     hand-maintained list drifts, and a drifted list steers a maintainer into
     creating a duplicate topic for content that already has a home.
+
+    Takes the directory as an argument so the empty-glob branch -- the one that
+    tells a maintainer `reference/` moved -- can be driven by a planted control
+    against a tmp dir instead of waiting for the real tree to lose its sidecars.
     """
-    topics = sorted(p.stem for p in REFERENCE_DIR.glob("*.md"))
+    topics = sorted(p.stem for p in reference_dir.glob("*.md"))
     if not topics:
-        return f"(none found under {REFERENCE_DIR} -- did reference/ move?)"  # pragma: no cover - the guard's own FIRING path: it fires only when the corpus is dirty, and no planted positive control drives it. Adding one is the real remedy
+        return f"(none found under {reference_dir} -- did reference/ move?)"
     return ", ".join(topics)
+
+
+def _existing_topics() -> str:
+    return existing_topics_text(REFERENCE_DIR)
 
 
 def _pin_lists() -> dict[str, int]:
@@ -259,10 +267,16 @@ def _pin_lists() -> dict[str, int]:
     return counts
 
 
-def _pin_counts() -> str:
-    counts = _pin_lists()
+def pin_counts_text(counts: dict[str, int]) -> str:
+    """Render the pin-count block from an already-parsed count mapping.
+
+    Split from `_pin_lists()` so the unparseable-corpus branch below is
+    reachable from a planted control: it fires only when NEITHER pin module can
+    be parsed, which never happens on a healthy tree, so it was recorded as a
+    guard nobody has watched execute.
+    """
     if not counts:
-        return (  # pragma: no cover - the guard's own FIRING path: it fires only when the corpus is dirty, and no planted positive control drives it. Adding one is the real remedy
+        return (
             "The skill's prose is pinned verbatim by HANDOFF_SENTENCES "
             "(scripts/tests/test_subsystem_touch.py) and SKILL_PINS "
             "(scripts/tests/test_handoff_doc.py) -- neither could be parsed "
@@ -278,6 +292,10 @@ def _pin_counts() -> str:
         f"SKILL_PINS entries and the seam test in test_subsystem_touch.py. Read "
         f"the step cold — the pin count is not your safety net here."
     )
+
+
+def _pin_counts() -> str:
+    return pin_counts_text(_pin_lists())
 
 
 def _eviction_playbook() -> str:
@@ -350,6 +368,47 @@ def test_eviction_playbook_lists_every_reference_topic():
         "maintainer following it would create a duplicate topic. The list must "
         "stay derived from the filesystem, never hard-coded."
     )
+
+
+def test_control_existing_topics_reports_an_empty_reference_dir(tmp_path):
+    """Positive control for the `reference/ moved` arm of the topic renderer.
+
+    On a healthy tree the glob is never empty, so this branch was recorded by
+    `scripts/dead-guard-scan.py` as never executed -- asserted to work, never
+    watched to. Driven IN-PROCESS against an empty tmp dir; a subprocess would
+    leave the branch just as unobserved.
+    """
+    empty = tmp_path / "reference"
+    empty.mkdir()
+    assert existing_topics_text(empty) == (
+        f"(none found under {empty} -- did reference/ move?)"
+    )
+    # Negative control: the same helper does NOT say "none found" when a topic
+    # exists, so the message above is a fact about the empty dir, not the code.
+    (empty / "some-topic.md").write_text("x", encoding="utf-8")
+    (empty / "another-topic.md").write_text("y", encoding="utf-8")
+    assert existing_topics_text(empty) == "another-topic, some-topic"
+
+
+def test_control_pin_counts_reports_an_unparseable_pin_corpus():
+    """Positive control for the `neither could be parsed` arm of the pin block.
+
+    It fires only when BOTH pin modules are missing or hold no list literal --
+    never true on a healthy tree. Driven by handing the renderer an empty
+    mapping directly, which is exactly what `_pin_lists()` returns in that case.
+    """
+    assert pin_counts_text({}) == (
+        "The skill's prose is pinned verbatim by HANDOFF_SENTENCES "
+        "(scripts/tests/test_subsystem_touch.py) and SKILL_PINS "
+        "(scripts/tests/test_handoff_doc.py) -- neither could be parsed "
+        "from here, so re-count them by hand before editing."
+    )
+    # Negative control: a populated mapping renders the OTHER arm, so the branch
+    # above is selected by the emptiness and nothing else. The counts are
+    # deliberately not the live ones -- a mutant hardcoding a real figure dies.
+    populated = pin_counts_text({"HANDOFF_SENTENCES": 41, "SKILL_PINS": 7})
+    assert "neither could be parsed" not in populated
+    assert "41 in HANDOFF_SENTENCES, 7 in SKILL_PINS" in populated
 
 
 def test_handoff_skill_under_hard_ceiling():

@@ -700,6 +700,70 @@ def test_a_NEW_orphan_sidecar_reaches_the_unrouted_verdict():
     )
 
 
+def self_routing_loops_in(topics, resolve) -> dict[str, list[str]]:
+    """Which of `topics` hold a routing path that resolves back to themselves.
+
+    Extracted from the gate below so the RECORDING branch -- the one that files
+    a loop -- can be driven by a planted control. On a healthy tree no topic
+    self-routes, so that branch was scored by `scripts/dead-guard-scan.py` as
+    never executed: the gate's red had been argued, never watched.
+
+    Pure in its inputs: `topics` are the paths to read and `resolve` decides
+    where a written token lands, so a control can supply both.
+    """
+    loops: dict[str, list[str]] = {}
+    for topic in topics:
+        hits = [t for t in _routing_paths(topic.read_text(encoding="utf-8"))
+                if resolve(t) == topic]
+        if hits:
+            loops[topic.name] = hits
+    return loops
+
+
+def test_control_a_planted_self_route_is_recorded_as_a_loop(tmp_path):
+    """Positive control for the loop-recording branch of the self-route gate.
+
+    Two topics are planted side by side and only ONE of them points at itself,
+    so a mutant that records unconditionally is caught by the other's absence
+    from the verdict -- equality on the whole mapping, not `loops` being truthy.
+    The forward pointer is the exact shape the 2026-08-21 prune produced when it
+    sliced text verbatim out of the core: correct in the core, a loop once it
+    landed inside its own target.
+    """
+    looper = tmp_path / "loops-onto-itself.md"
+    looper.write_text(
+        "See `reference/loops-onto-itself.md` for the detail.\n", encoding="utf-8")
+    forward = tmp_path / "points-elsewhere.md"
+    forward.write_text(
+        "See `reference/loops-onto-itself.md` for the detail.\n", encoding="utf-8")
+
+    def resolve(token: str) -> Path:
+        return tmp_path / Path(token).name
+
+    assert self_routing_loops_in([looper, forward], resolve) == {
+        "loops-onto-itself.md": ["reference/loops-onto-itself.md"]
+    }
+
+
+def test_control_forward_pointers_alone_record_no_loop(tmp_path):
+    """Negative control: the branch above is selected by the self-pointer only.
+
+    Without it the positive control cannot tell "the guard fired" from "the
+    guard fires on everything", which is the mutant that survives a truthiness
+    assertion.
+    """
+    forward = tmp_path / "points-elsewhere.md"
+    forward.write_text(
+        "See `reference/some-other-topic.md` for the detail.\n", encoding="utf-8")
+    bare = tmp_path / "routes-nothing.md"
+    bare.write_text("Prose with no routing path at all.\n", encoding="utf-8")
+
+    def resolve(token: str) -> Path:
+        return tmp_path / Path(token).name
+
+    assert self_routing_loops_in([forward, bare], resolve) == {}
+
+
 def test_no_reference_topic_ROUTES_TO_ITSELF():
     """🔴 THE BLIND SPOT OF THE ROUTING GATE ABOVE: it reads SKILL.md only.
 
@@ -711,12 +775,8 @@ def test_no_reference_topic_ROUTES_TO_ITSELF():
     hand-patched with "-- i.e. this file, above"; the other two were not, and
     nothing could have told anyone.
     """
-    loops = {}
-    for topic in sorted(REFERENCE_DIR.glob("*.md")):
-        hits = [t for t in _routing_paths(topic.read_text(encoding="utf-8"))
-                if _resolve_routing_path(t) == topic]
-        if hits:
-            loops[topic.name] = hits  # pragma: no cover - the guard's own FIRING path: it fires only when the corpus is dirty, and no planted positive control drives it. Adding one is the real remedy
+    loops = self_routing_loops_in(sorted(REFERENCE_DIR.glob("*.md")),
+                                  _resolve_routing_path)
     assert not loops, (
         "a reference topic routes to ITSELF -- a reader following the pointer "
         "lands back where they already are:\n"
