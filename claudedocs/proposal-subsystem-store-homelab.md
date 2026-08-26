@@ -1,15 +1,27 @@
 # Proposal: move the subsystem store into homelab, behind an auth'd ingress
 
-**Status: PHASE 1 SHIPPED 2026-08-16** — cluster-internal, no ingress. devrc #512 (the API over
-the existing reader) and homelab-infra #326 (manifests, Flux-adopted with no rollout) are merged;
-the pod runs on homelab in ns `subsystem-store`. **Phases 1.5–4 are still proposals.** The header
-formerly read *"proposal, nothing built"*, which stopped being true the day phase 1 shipped —
-the same deployed-state category as the port corrected in §2b.
+**Status: PHASES 1 AND 1.5 SHIPPED. Phases 2–4 are still proposals.** devrc #512 (the API over
+the existing reader) and homelab-infra #326 (manifests, Flux-adopted with no rollout) merged
+2026-08-16; the pod runs on homelab in ns `subsystem-store`. The §2b hardening and the
+IngressRoute followed, so the store is **publicly reachable at `store.zacx.dev/api/`** — the
+header's previous claim that 1.5 was "still a proposal" stopped being true when that route
+landed, the same deployed-state category as the port corrected in §2b.
 
-Every number about the *current* store below was measured 2026-08-16. Every number about the
-*unbuilt* phases is an estimate and is labelled as one. 🔴 **Nothing in §5's verification plan is
-satisfied by phase 1 for the phases that follow** — in particular no off-mesh control has ever
-run, and token rotation has never been exercised. Read §4 for what each phase still owes.
+🔴 **Phase 2 is the gap, and it is why this nearly got deleted.** The server was built and the
+**client never was**: `_reject_write()` refuses every write verb, the route table is exactly
+`/healthz` + `/api/v1/recall/{scope}` + `/api/v1/search/{scope}`, there is no CLI wrapper, and
+**no client-side token exists on either host** — it lives only as the in-cluster secret. The pod
+logged 309 requests, all on 2026-08-20, all from the session that built it. Retirement was
+proposed on that evidence (devrc #849, homelab-infra #404) and **both were closed unmerged on
+2026-08-25**: the store is being finished, not retired. Clawgate task **360** owns phases 2–3.
+
+Every number about the *current* store below was measured 2026-08-16 unless dated otherwise.
+Every number about the *unbuilt* phases is an estimate and is labelled as one. 🔴 **Nothing in
+§5's verification plan is satisfied for the phases that follow.** The auth controls have now
+been watched to fail closed — no token → 401, wrong token → 401, `recall/devrc` → 200 with
+`x-store-exit: 0` (2026-08-25) — but **those runs were made FROM THE WORKBENCH, i.e. on the
+mesh**, so §5's off-mesh control still has **never** run, and token rotation has never been
+exercised. Read §4 for what each phase still owes.
 
 **Goal (as stated):** make the store simple to reach from anywhere.
 
@@ -17,27 +29,45 @@ run, and token rotation has never been exercised. Read §4 for what each phase s
 
 ## 0. The gating decision, before any design
 
-🔴 **The store's own policy file forbids exactly the thing that "migrate it to a server"
-usually means.** `~/.claude/analyze-service-index/README.md`:
+🔴 **CORRECTED 2026-08-25 — this section used to quote an ABSOLUTE ban, and the absolute form
+was wrong.** In its old form it banned a *mechanism* (a git remote) in place of the *hazard*
+(client-confidential content reaching an operator who is not Zach). Those are not the same
+thing: a bare repository on a homelab node reached over nebula involves no such operator, while
+a hosted forge involves one even when the repository is private. The absolute wording was
+therefore unfalsifiable and load-bearing in the wrong place — **it is what forced the
+HTTP-replication design in this very document**, rather than letting anyone weigh the two
+options on their actual exposure. `~/.claude/analyze-service-index/README.md` has been corrected
+on both hosts and now reads:
 
-> the scopes hold **client-sensitive** infrastructure detail and **must never gain a git remote**.
+> the scopes hold **client-sensitive** infrastructure detail, and they **must never transit a third party**:
+> no hosted forge (GitHub, GitLab, Bitbucket — private repositories included), no third-party CI,
+> no service whose operator is someone other than Zach. A git remote, a sync target or an API
+> endpoint is permitted only on infrastructure Zach owns and reaches over the nebula mesh.
 
-This is not just prose. Three tests in `scripts/tests/test_analyze_service_index_commit.py`
-enforce it, and one of them is deliberately paranoid:
+🔴 **The forge boundary is unchanged, and nothing below is relaxed by this.** Pushing a scope to
+any hosted forge remains forbidden. Three tests in `scripts/tests/test_analyze_service_index_commit.py`
+still enforce that the **committer** is not the thing that pushes, and one of them is
+deliberately paranoid:
 
 | test | asserts |
 |---|---|
-| `test_a_normal_run_adds_no_remote` | the daily commit timer never configures a remote |
+| `test_a_normal_run_adds_no_remote` | the hourly commit timer never configures a remote |
 | `test_a_configured_remote_is_never_pushed_to` | **even if a remote exists**, no push, and no `refs/remotes/*` may appear |
 | `test_a_configured_remote_is_not_pushed_to_on_a_CLEAN_run` | same, on the no-op path |
 
 **The design below keeps all three passing unchanged, and does not touch git remotes at all.**
-Replication happens over the HTTP API, not `git push`. That is a deliberate choice: it honours
-the letter of the policy, so no test has to be weakened and no reviewer has to decide whether
-this migration is "the exception".
+Replication happens over the HTTP API, not `git push`. That choice survives the correction above
+and is now made for a better reason than the one originally given. It was defended as honouring
+*the letter* of an absolute rule — a defence that no longer applies, since the corrected
+predicate would permit a bare repository on a homelab node. It is kept because the API is the
+better mechanism on the merits: it carries an auth layer, a rate limiter, a revision stamp and
+an append operation that a `git push` has no equivalent of (§2c). **No test has to be weakened
+either way**, which is what keeps the forge boundary structurally enforced rather than
+remembered.
 
-But the *intent* behind the policy — client-confidential content must not end up somewhere it
-can leak — is a live question that only you can settle, and it has one sharp edge:
+The *intent* behind the policy — client-confidential content must not reach an operator who is
+not Zach — is **settled as of 2026-08-25** and is now stated directly in the README above. It
+had one sharp edge, and that edge is the reason the wording matters:
 
 🔴 **Every other `*.zacx.dev` host is Cloudflare-proxied** (`cloudflare-proxied: "true"` in each
 DNS Ingress). Proxied means TLS terminates at Cloudflare's edge, so **plaintext

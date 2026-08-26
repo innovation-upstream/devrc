@@ -100,6 +100,38 @@ reads as green. A repo with **no** stack present is a legitimate PASS.
   a detected python project with neither ⇒ **INCOMPLETE**.
 - **Nix** (`flake.nix`): `nix-instantiate --parse` by default; `nix flake check`
   if the repo's `.verify-agent.json` opts in.
+
+### 🔴 BLIND SPOT — PHP/Laravel is NOT a detected stack. Never trust a verdict here.
+`detect_stacks()` (`scripts/verify-agent-work:157-201`) tests exactly four markers —
+`package.json`, `go.mod`, `pyproject.toml`/`requirements.txt`, `flake.nix`. **`composer.json`
+and `phpunit.xml` are not among them, so a PHP repo's real test suite is INVISIBLE to this
+tool.** The gate cannot run it, cannot report it, and says nothing about it.
+
+**Measured on `vetrllc/vetr-api` 2026-08-25** — a Laravel/Pest repo with **182 `.php` files under
+`tests/` and 1,678 `\b(test|it)\(` occurrences** (a static grep count, not a runner count — the
+order of magnitude is the point), whose `package.json` declares only `build`/`dev` (Vite assets):
+
+| run | detected | verdict |
+|---|---|---|
+| the real repo (`--json --no-gh`) | `["ts"]` — **PHP absent** | `INCOMPLETE`, exit 1 |
+| fixture: same `package.json` **plus** `composer.json` + `phpunit.xml`, `node_modules` present | `["ts"]` — **still PHP absent** | `INCOMPLETE`, exit 1 |
+
+Adding the PHP markers moved detection **not at all** — the blind spot is in detection, not in
+a missing toolchain, and it is INCOMPLETE for the whole repo either way.
+
+🔴 **The real hazard is the tool's OWN suggested remedy.** On the second run the `ts` check
+advises `add a gate or "skip":["ts"] in .verify-agent.json`. Taking it is a **vacuous green**:
+with `{"skip":["ts"]}` the same fixture returns **`verdict: PASS`, exit 0** having run **zero
+tests** — a clean pass on a repo with ~1,678 unrun PHP tests. **Do not skip `ts` on a PHP repo
+to quiet this tool.** (`adoption-scan` will also score that run as an `outcome=pass` — a
+false-green counted as a real one.)
+
+**So on any PHP repo: this gate's verdict is not evidence either way** — `INCOMPLETE` does not
+mean the code is broken, and a `PASS` bought by skipping means nothing was checked. Run the
+suite yourself and report THAT:
+`nix shell path:<system-channel>#php84 -- php vendor/bin/pest` (no local PHP on this host).
+Follow-up (separate PR, needs its own tests): teach `detect_stacks` a `php` stack off
+`composer.json`/`phpunit.xml` with `vendor/bin/pest`|`phpunit` as the gate.
 - **Git completeness**: uncommitted/untracked, unpushed vs upstream, open PR
   (best-effort `gh`) — the "committed but stopped" tell.
 - **Stale-worktree footgun**: a broken/missing `node_modules` is reported as an

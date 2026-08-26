@@ -32,7 +32,7 @@ Sibling harnesses feed it — see the `ux-audit-loops` skill.
 - **P2** — regression diffing vs the previous done run: pure-Go pixel diff (`internal/diff`), new/removed pages, new axe rules, console/network deltas. **Full-page height shifts → "layout changed", NOT a false ~100% regression** (gated on `!SizeChanged`); >24MP captures skip the viz alloc.
 - **P3** — opt-in multi-model **vision-LLM draft UX notes** (`internal/llm` OpenRouter + `internal/notes`): each selected model × each page, both viewports + grounded (axe/console/diff) → editable notes side-by-side. Server-side, key-gated, `page_notes` table. The prompt is **purely-visual critique** — the LLM no longer re-narrates axe/console/network/perf (all deterministic now); `Grounding` dropped the a11y/console fields.
 - **P4** — **login recipes** (`internal/recipe` + `internal/crypto`): authed crawl behind a same-domain login; creds **AES-256-GCM at rest** (`AUDITLOOP_ENCRYPTION_KEY`), write-only UI, redacted; test-login button.
-- **P5** — **plugin push ingestion** (`internal/plugin` + `cmd/auditloop-push`): push-only targets w/ hashed rotatable token; `POST /api/plugins/runs` (Bearer, multipart) → ingested run gets the P2 diff. The push carries optional raw `perf`/`layout` blocks + a run-level **`environment` (lab|staging|prod)**; auditloop computes the perf/layout FINDINGS server-side via `internal/signals` — and **`environment:"lab"` SUPPRESSES the perf findings** (localhost numbers aren't field-representative; raw columns kept, amber run-view banner). The naida/vetr harnesses push `lab`.
+- **P5** — **plugin push ingestion** (`internal/plugin` + `cmd/auditloop-push`): push-only targets w/ hashed rotatable token; `POST /api/plugins/runs` (Bearer, multipart) → ingested run gets the P2 diff. The push carries optional raw `perf`/`layout` blocks + a run-level **`environment` (lab|staging|prod)**; auditloop computes the perf/layout FINDINGS server-side via `internal/signals` — and **`environment:"lab"` SUPPRESSES the perf findings** (localhost numbers aren't field-representative; raw columns kept, amber run-view banner). 🔴 **The producers are NOT uniform here — see "The producers" below; do not assume a pushed run carries `environment`/perf/layout.**
 
 ### Deterministic signals (shipped, replaced LLM re-narration)
 Every page+viewport; native crawl AND pushed runs share `internal/signals` (**one source of
@@ -53,7 +53,13 @@ rotatable, **shown once**); consumer sets **`AUDITLOOP_API_TOKEN`** + `Authoriza
 Owner-scoped routes (SQL-scoped, foreign→404):
 `GET /api/audit/targets/{id-or-name}/runs` · `…/runs/latest` (→report.json bytes) ·
 `/api/audit/runs/{id}` (→report.json) · `/api/audit/artifacts/{key}` (bytes, per-object
-owner-checked). Target resolves by **name OR UUID** (symmetric with the name-keyed push).
+owner-checked). Target resolves by **name OR UUID** (symmetric with the name-keyed push). ⚠ **The push SPEC key
+and the target's DISPLAY NAME are separate strings and need not match** — a target created in
+the UI with a decorated name (e.g. a `… (harness)` suffix) still accepts pushes under the bare
+spec key, but a read addressed by that spec key **404s**. A 404 on a target you know exists
+means "wrong name", not "no such target": take the target's **UUID** from the dashboard and
+address it by UUID. (Not verified against the live `vetr-funnel` target from here — no
+`AUDITLOOP_API_TOKEN` on this host.)
 This is how CI/Tekton + the naida `fetch-findings` helper pull findings back.
 ```bash
 curl -H "Authorization: Bearer $AUDITLOOP_API_TOKEN" https://auditloop.zacx.dev/api/audit/targets/<spec>/runs/latest
@@ -166,6 +172,23 @@ harness in `containers/remix/e2e/uxaudit/`, `make ux-audit`), and **civitai-mana
 (`civitai-manager-funnel`) — a Go/chromedp ux-audit harness in `ZacxDev/civitai-manager`
 `e2e/uxaudit/` (**a SEPARATE module so chromedp stays out of the shipped binary**),
 `make ux-audit`, pushes `environment=lab`.
+
+🔴 **`vetr-funnel` is the THIN producer — it is not the naida payload** (both `_lib/push.ts`
+read 2026-08-25):
+
+| | naida (`naida-ai`) | vetr (`vetr-app`) |
+|---|---|---|
+| payload | `{label, pages, environment}` + optional `perf`/`layout` per page (`:58,59,72`) | **`{label, pages}` and nothing else** — `PushMetadata` (`:44-47`) and `viewsToPushMetadata` (`:111`) have **no `environment`, no `perf`, no `layout`** |
+| `viewport` | `"desktop"` (`:132`) | **hardcoded `"mobile"`** (`:101`) — the walk is single-viewport phone 390×844 (`playwright.ux-audit.config.ts:37-41`). ⚠ `UX_AUDIT_VIEWPORT=desktop` opts the walk into 1280×900 **but push.ts still labels it `"mobile"`** — an A/B run is mislabelled server-side |
+
+Consequences for vetr runs: the **`environment:"lab"` perf-suppression never applies** (the key
+is absent) — harmless only because vetr also sends no `perf` block, so there are no perf
+findings to suppress. A vetr run therefore carries **a11y + console + network only**.
+
+**Neither harness emits the structured a11y detail this skill recommends below.** Both flatten
+to the LEGACY string `` `${a.id} — ${a.help}` `` (vetr `:90`, naida `:121`) and `PushFinding` is
+`{type, severity, detail}` with **no top-level `id`**. So `new_a11y_rules` for every pushed run
+today goes through the server's **legacy-derivation** path, never the structured one.
 
 Each pushes via P5 — enable with `AUDITLOOP_PUSH_URL=https://auditloop.zacx.dev` +
 `AUDITLOOP_PUSH_TOKENS='{"<spec>":"<token>"}'` (or `AUDITLOOP_PUSH_TOKEN` for the

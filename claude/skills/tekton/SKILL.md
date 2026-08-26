@@ -287,9 +287,17 @@ Path: GitHub → Cloudflare → **prod Traefik** → prod nginx `0.0.0.0:19100` 
 | `remix-ux-audit` | `remix-push-trunk` — `homelab-infra` + `refs/heads/trunk` + path `containers/remix/**` | a11y-rule delta → `tekton/ux-audit-remix` |
 | `clawgate-ci` | `clawgate-ci-push` — push-only, ANY branch, path `containers/clawgate/` | go / extension / hook legs → commit status |
 
-`clawgate-ci` is the repo's **real pre-merge gate**: GitHub Actions is billing-blocked
-repo-wide, so **red Actions checks on `homelab-infra` are noise, not signal** — don't debug
-them and don't read them as a gate. Four known-open 🟡 issues (branch-creation over-match,
+`clawgate-ci` is the repo's **real pre-merge gate**: GitHub Actions is billing-blocked **for
+`homelab-infra` and the other repos in THIS skill's scope**, so **red Actions checks on
+`homelab-infra` are noise, not signal** — don't debug them and don't read them as a gate.
+🔴 **That is a per-repo fact, NOT a fleet-wide one — do not carry it to a repo this skill does
+not cover.** Carve-out, measured 2026-08-25: in **`vetrllc/vetr-app` GitHub Actions is LIVE and
+is the ONLY gate** (`tests` + `e2e (hermetic)`, real successes on `main`; `gh run list`), so a
+red check there is **real signal — debug it**. Sibling `vetrllc/vetr-api` is the third case:
+all three workflows are `disabled_manually` (`gh workflow list --all`), so it has **no Actions
+gate at all** — checks are ABSENT, not red, and nothing runs its Pest suite automatically.
+Neither vetr repo is wired to Tekton. **Check the repo before applying the noise rule:
+`gh workflow list --all` + `gh run list`.** Four known-open 🟡 issues (branch-creation over-match,
 unpinned PVC, no concurrency control, `error`-vs-`fail` on the CSS path only) are in the
 reference file. **Seven** triggers share `el-github-listener`: `naida-push-main`,
 `remix-push-trunk`, `gitops-validate-pr`, `gitops-validate-push-trunk`, `clawgate-ci-push`,

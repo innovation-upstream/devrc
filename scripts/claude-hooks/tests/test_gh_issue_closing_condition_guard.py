@@ -155,38 +155,54 @@ def q(s):
 # need it at import time.
 SCRATCH = tempfile.mkdtemp(prefix="ghccg-test-")
 
+# 🔴 …AND THAT RANDOM NAME MUST NOT REACH A `parametrize` VALUE EITHER — which is
+# a strictly stronger claim than "must not reach an id", and #855 deliberately
+# left it open. That PR unbroke a hard-blocked required gate under time pressure
+# by REDACTING `SCRATCH` out of the ids (`stable_id`, now retired below); pinning
+# the label was the right call for that job and it worked. What it left behind is
+# the other half: the VALUES still interpolated the per-process directory, so
+# every xdist worker executed a different byte string under one shared id.
+# Measured on `main` at 1d67f5e8: 10 of 379 parametrize values.
+#
+# An id-level fix cannot see that, by construction — `SAME_LINE_HEREDOC_CASES`
+# pins its own labels, so a per-process path in ITS values collides with nothing
+# and no id-level check can ever notice. So the directory NAME stays out of the
+# tables entirely: they spell it as a stable placeholder and the two drivers
+# substitute the real one at call time. Id AND executed bytes are then identical
+# in every worker, and `stable_id` has nothing left to redact.
+#
+# The random directory itself stays, for the reason above it: several cases
+# assert a verdict that depends on a body-file path NOT existing, and a fixed
+# name makes those a claim about this machine's `/tmp` — and would collide
+# between the concurrent gate runs this box hosts.
+#
+# `scratch()` — the spelling anyone adding a table will reach for — is the SAFE
+# one. Only a test that touches the file on disk needs `scratch_on_disk()`, and
+# that is a deliberate minority of five.
+SCRATCH_TOKEN = "/ghccg-scratch"
+
 
 def scratch(name):
+    """A path in the per-run scratch dir, spelled as a stable placeholder.
+
+    Safe in a `parametrize` table. `ev()` / `verdict()` resolve it to `SCRATCH`
+    before the command reaches the gate, so what runs is the real path.
+    """
+    return SCRATCH_TOKEN + "/" + name
+
+
+def scratch_on_disk(name):
+    """The REAL path — for the handful of tests that open or stat the file."""
     return os.path.join(SCRATCH, name)
 
 
-def stable_id(cmd):
-    """A parametrize id for `cmd` with the per-run scratch path REDACTED.
+def resolved(cmd):
+    """Substitute the real per-run scratch dir for the placeholder.
 
-    🔴 A PARAMETRIZE ID MUST NOT CARRY `SCRATCH`, OR THE WHOLE GATE STOPS —
-    and it is the id, not the test, that breaks. pytest derives an id from the
-    parameter VALUE, so a command string holding this module's `mkdtemp` path
-    puts that random path in the id. Every xdist worker imports this module
-    fresh and gets a DIFFERENT `SCRATCH`, so the workers collect different ids
-    and xdist aborts the whole run:
-
-        ERROR gw1 - Different tests were collected between gw0 and gw1
-
-    Measured on this file at 200e6383: `-n 4` → 3 errors, 0 tests; serial →
-    474 passed. Since #841 the gate runs every pytest target 4-way, so that is
-    a red gate blocking every open PR in the repo — from a test id, with no
-    test having failed.
-
-    Redaction rather than a fixed path: several cases below depend on the
-    FILESYSTEM path being fresh and per-run (see the `SCRATCH` comment), and a
-    fixed shared name would collide between the concurrent gate runs this box
-    hosts. So the path stays random and only the id is pinned — the id becomes
-    a pure function of the table.
-
-    `test_control_no_parametrize_id_can_carry_the_scratch_path` pins that this
-    is actually applied everywhere it must be.
+    A no-op on a command built with `scratch_on_disk()`, so the drivers can apply
+    it unconditionally.
     """
-    return cmd.replace(SCRATCH, "<scratch>")
+    return cmd.replace(SCRATCH_TOKEN, SCRATCH)
 
 
 # --------------------------------------------------------------------------- #
@@ -210,7 +226,7 @@ def verdict(cmd, env=None, tool_name="Bash", raw=None, hook=None):
         e.update(env)
     payload = raw if raw is not None else json.dumps(
         {"tool_name": tool_name, "hook_event_name": "PreToolUse",
-         "cwd": str(ROOT), "tool_input": {"command": cmd}})
+         "cwd": str(ROOT), "tool_input": {"command": resolved(cmd)}})
     p = subprocess.run([sys.executable, hook or HOOK], input=payload,
                        capture_output=True, text=True, env=e)
     assert p.returncode == 0, (
@@ -244,7 +260,7 @@ def assert_allowed(cmd, env=None):
 # would make the suite slow. The subprocess driver above covers the process
 # contract; this covers volume.
 def ev(cmd, env=None):
-    return guard.evaluate(cmd, env or {}, guard_core)
+    return guard.evaluate(resolved(cmd), env or {}, guard_core)
 
 
 # =========================================================================== #
@@ -682,8 +698,7 @@ UNRELATED_HEREDOC_CASES = [
 ]
 
 
-@pytest.mark.parametrize("tail,mark", UNRELATED_HEREDOC_CASES,
-                         ids=[stable_id(c[0]) for c in UNRELATED_HEREDOC_CASES])
+@pytest.mark.parametrize("tail,mark", UNRELATED_HEREDOC_CASES)
 def test_an_unrelated_heredoc_does_not_satisfy_a_create(tail, mark):
     """🔴 A well-specified heredoc written earlier on the line, for a DIFFERENT
     command, must not answer for a create — whatever the reason the create's own
@@ -1628,14 +1643,12 @@ REALISTIC_ALLOWS = [
 ]
 
 
-@pytest.mark.parametrize("cmd", REALISTIC_ALLOWS,
-                         ids=[stable_id(c) for c in REALISTIC_ALLOWS])
+@pytest.mark.parametrize("cmd", REALISTIC_ALLOWS)
 def test_a_realistic_correct_call_is_allowed(cmd):
     assert ev(cmd) is None, cmd
 
 
-@pytest.mark.parametrize("cmd", REALISTIC_ALLOWS[:12],
-                         ids=[stable_id(c) for c in REALISTIC_ALLOWS[:12]])
+@pytest.mark.parametrize("cmd", REALISTIC_ALLOWS[:12])
 def test_a_realistic_correct_call_is_allowed_through_the_real_process(cmd):
     assert_allowed(cmd)
 
@@ -1909,27 +1922,27 @@ def test_control_no_parametrize_id_can_carry_the_scratch_path(tmp_path):
 
     NOT fixed by pinning `SCRATCH` to a constant path: several cases here need
     a directory no leftover file can answer for, and a shared name collides
-    between the concurrent gate runs this box hosts. The id is pinned; the
-    path stays random.
+    between the concurrent gate runs this box hosts. The path stays random; it
+    is its NAME that is kept out of the tables (`SCRATCH_TOKEN`).
     """
     a = _collect_ids_in_a_fresh_process(tmp_path / "tmp-a")
     b = _collect_ids_in_a_fresh_process(tmp_path / "tmp-b")
 
     # --- THE CLAIM, FIRST --------------------------------------------------- #
     # 🔴 ORDER IS LOAD-BEARING, and the first draft of this test had it wrong.
-    # With the coverage controls above the claim, removing an `ids=` DROPS the
-    # redaction count, so the control tripped first and the claim below never
-    # executed — the guard went red for a reason that named neither the
-    # offending table nor xdist. A mutant must be killed by the assertion that
-    # OWNS it. The controls still run; they just cannot pre-empt it, and a
-    # vacuous collection (0 ids, no offenders) still fails on them below.
+    # A coverage control placed ABOVE the claim tripped first, so the guard went
+    # red for a reason that named neither the offending table nor xdist. A mutant
+    # must be killed by the assertion that OWNS it. The control still runs; it
+    # just cannot pre-empt this, and a vacuous collection (0 ids, no offenders)
+    # still fails on it below.
     offenders = [i for i in a + b if "ghccg-test-" in i]
     assert not offenders, (
         f"{len(offenders)} collected id(s) embed the per-process scratch dir. "
         "Under xdist every worker gets a different one and the ENTIRE RUN "
         "aborts with a collection mismatch — every open PR in the repo blocked, "
-        "with no test having failed. Give that parametrize an explicit "
-        "`ids=[stable_id(...) ...]`.\n  " + "\n  ".join(o[:200] for o in offenders[:5]))
+        "with no test having failed. Build that path with `scratch(...)`, which "
+        "spells it as `SCRATCH_TOKEN` and is resolved by the drivers.\n  "
+        + "\n  ".join(o[:200] for o in offenders[:5]))
 
     assert a == b, (
         "two processes collected different node ids, so xdist will abort this "
@@ -1938,19 +1951,86 @@ def test_control_no_parametrize_id_can_carry_the_scratch_path(tmp_path):
         "uuid). Differing ids:\n  " +
         "\n  ".join(x[:200] for x in (set(a) ^ set(b)))[:2000])
 
-    # --- COVERAGE CONTROLS, AFTER --------------------------------------------- #
+    # --- COVERAGE CONTROL, AFTER ---------------------------------------------- #
     # A guard that read an empty id list would report a reassuring zero above.
-    # These say the collection happened AND that it reached the at-risk tables.
     assert len(a) >= 400, (
         f"only {len(a)} ids collected — too few for this file; the offender "
         "search above was scanning almost nothing")
-    redacted = [i for i in a if "<scratch>" in i]
-    assert len(redacted) >= 3, (
-        "fewer than 3 collected ids carry the '<scratch>' redaction token, so "
-        "the offender search above is watching less than it was written for. "
-        "Either `stable_id` stopped being applied to a table that needs it, or "
-        "the tables stopped using `scratch(...)` — check which before relaxing "
-        f"this number. ids carrying the token: {redacted}")
+
+    # 🔴 THE `<scratch>` REDACTION CONTROL THAT USED TO SIT HERE IS RETIRED, AND
+    # NOT AS DEAD CODE — it was INCOMPATIBLE with fixing the values. It asserted
+    # `len([i for i in a if "<scratch>" in i]) >= 3`, i.e. that at least three ids
+    # had needed redacting, which is an assertion that the per-process path IS
+    # still in the tables. Any later value-level fix therefore had to turn it red
+    # to land. Its coverage is not lost: what it was really watching — that the
+    # at-risk tables are still reached — is now pinned positively by
+    # `test_no_parametrize_VALUE_carries_the_per_run_scratch_PATH`, which walks
+    # the values themselves and carries its own `> 300` positive control.
+
+
+# =========================================================================== #
+# 🔴 THE VALUE HALF — what an id-level check CANNOT see, by construction.
+#
+# The guard above compares collected IDs, which is the right shape for the
+# failure that took the gate down: workers disagreeing about which tests exist.
+# But an id is only as informative as the label, and a table is free to pin its
+# own (`SAME_LINE_HEREDOC_CASES` passes `ids=[c[0] for c in ...]`). Put a
+# per-process path in THAT table's values and every worker collects an identical
+# id list while executing a different byte string under each name — green, and
+# wrong. That is not hypothetical: it is the state `main` was in at 1d67f5e8,
+# where 10 of 379 parametrize values still interpolated `SCRATCH`.
+#
+# So this pins the VALUES. Together the two guards pin id-level and value-level
+# determinism independently, and neither subsumes the other: mutating a value
+# behind an explicit `ids=` kills only this one.
+# =========================================================================== #
+PARAM_DRIFT_MARK = "PER-RUN SCRATCH PATH IN A parametrize VALUE"
+
+
+def _every_parametrize_value():
+    """(test name, value) for every entry of every `parametrize` table here.
+
+    Read off the decorated functions' own `pytestmark`, NOT off
+    `request.session.items`: `items` holds only what the current invocation
+    SELECTED, so a `-k` or `-x` run would hand this two items and fail its
+    positive control on a tree that is perfectly fine. A guard that goes red on a
+    filtered run is a guard people learn to ignore. (Measured: the first draft
+    read `session.items` and did exactly that under `-k`.)
+    """
+    out = []
+    for name, obj in sorted(globals().items()):
+        if not (name.startswith("test_") and callable(obj)):
+            continue
+        for mark in getattr(obj, "pytestmark", []):
+            if mark.name != "parametrize":
+                continue
+            values = mark.args[1] if len(mark.args) > 1 else mark.kwargs.get(
+                "argvalues", [])
+            out.extend((name, v) for v in values)
+    return out
+
+
+def test_no_parametrize_VALUE_carries_the_per_run_scratch_PATH():
+    """🔴 EVERY WORKER MUST RUN THE SAME BYTES, not merely agree on the names.
+
+    A stable id over a per-process value is the same cross-worker inconsistency
+    with the alarm switched off. This walks the parameters rather than their
+    labels, so an explicit `ids=` cannot hide anything from it."""
+    values = _every_parametrize_value()
+    # POSITIVE CONTROL: an empty walk must not read as a pass. Anchored well
+    # below the real count (379) so an ordinary edit need not touch it.
+    assert len(values) > 300, (
+        f"the parametrize walk found only {len(values)} values in this module — "
+        f"it is measuring nothing")
+    offenders = [(t, v) for t, v in values if SCRATCH in repr(v)]
+    assert not offenders, (
+        f"{PARAM_DRIFT_MARK}: {len(offenders)} parametrize value(s) interpolate "
+        f"the per-run scratch directory {SCRATCH!r}, which differs in every "
+        f"process. Each xdist worker would run DIFFERENT bytes under one id — "
+        f"an id-level check cannot see this. Use `scratch()` (the stable "
+        f"placeholder, resolved by `ev()`/`verdict()`), never "
+        f"`scratch_on_disk()`, in a table.\n"
+        + "\n".join(f"  {t} -> {v!r:.200}" for t, v in offenders[:5]))
 
 
 # =========================================================================== #
@@ -2012,8 +2092,8 @@ def test_the_LAST_body_flag_being_correct_still_passes(cmd):
 def test_a_body_file_beats_a_body_flag_whatever_the_order():
     """`create.go` assigns `opts.Body = string(b)` after `--body` is bound, so the
     FILE is what GitHub renders even when `--body` was written second."""
-    good = scratch("bfile-good.md")
-    bad = scratch("bfile-bad.md")
+    good = scratch_on_disk("bfile-good.md")
+    bad = scratch_on_disk("bfile-bad.md")
     with open(good, "w") as f:
         f.write(CC + "\n")
     with open(bad, "w") as f:
@@ -2039,7 +2119,7 @@ def test_a_correct_body_beside_an_UNREADABLE_body_file_cannot_see_the_body():
     nothing either way; reading the `--body` gh discards is the bypass. The
     verdict must be the CANNOT-SEE one, not "no closing condition" — they are
     different facts."""
-    missing = scratch("bfile-does-not-exist.md")
+    missing = scratch_on_disk("bfile-does-not-exist.md")
     assert not os.path.exists(missing)
     reason = ev(CREATE + " -t t --body " + q(CC) + " --body-file " + missing) or ""
     assert UNSEEABLE_MARK in reason
@@ -2173,8 +2253,8 @@ def test_a_single_curl_data_argument_is_unaffected(cmd):
 def test_only_the_LAST_gh_api_input_answers():
     """`--input` is a pflag `StringVar` in gh api, so a repeat is last-wins for
     exactly the reason `--body` is."""
-    good = scratch("input-good.json")
-    bad = scratch("input-bad.json")
+    good = scratch_on_disk("input-good.json")
+    bad = scratch_on_disk("input-bad.json")
     with open(good, "w") as f:
         json.dump({"title": "t", "body": CC}, f)
     with open(bad, "w") as f:

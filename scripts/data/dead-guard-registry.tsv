@@ -1,0 +1,77 @@
+# Which guards `scripts/dead-guard-scan.py` measures, and which it CANNOT.
+#
+# Keyed on the git REMOTE SLUG, never the clone directory name: two of the four
+# clones are named nothing like their repo (`datapacket-talos` -> civitai/talos-infra,
+# `homelab-talos` -> ZacxDev/homelab-infra), so a basename key silently matches the
+# wrong profile or none at all.
+#
+# 🔴 THE `out-of-instrument` ROWS ARE THE POINT, NOT PADDING. A guard absent from
+# this file would read as "measured and clean". These rows say, in the artifact
+# itself, which ~180 of the ~270 guards this tool does not see and why. Removing a
+# row does not extend coverage; it only hides the gap.
+#
+# 🔴 THE `instrument` SELECTORS NAME CORPUS-SCANNING GUARDS, NOT "the test
+# suite". An earlier draft selected all ~110 `scripts/tests/test_*.py`; that
+# instrumented ordinary unit tests, whose untaken branches are not the defect
+# this tool looks for, and the traced run had not finished after 35 minutes.
+# Narrow selectors are what make the flag list readable AND the run affordable.
+#
+# status:
+#   instrument         -- traced; branch bodies with no executed line are flagged
+#   out-of-instrument  -- NOT measured; the selector column states why
+#
+# repo_slug<TAB>lang<TAB>status<TAB>selector_or_reason
+
+innovation-upstream/devrc	python	instrument	scripts/testlib/*_scan.py
+innovation-upstream/devrc	python	instrument	scripts/testlib/skip_dirs.py
+innovation-upstream/devrc	python	instrument	scripts/testlib/skills_mapping.py
+innovation-upstream/devrc	python	instrument	scripts/tests/test_no_*.py
+innovation-upstream/devrc	python	instrument	scripts/tests/test_doc_path_rot.py
+innovation-upstream/devrc	python	instrument	scripts/tests/test_runtime_shebangs.py
+innovation-upstream/devrc	python	instrument	scripts/tests/test_skip_dirs_ledger.py
+innovation-upstream/devrc	python	instrument	scripts/tests/test_skills_mapping_guard.py
+innovation-upstream/devrc	python	instrument	scripts/tests/test_conditional_skip_pins.py
+innovation-upstream/devrc	python	instrument	scripts/tests/test_*_single_source.py
+innovation-upstream/devrc	python	instrument	scripts/tests/test_*skill_size.py
+innovation-upstream/devrc	python	instrument	scripts/tests/test_dead_guard_scan.py
+# 🔴 THE SCANNER'S OWN MODULES. They were absent from BOTH statuses for three
+# rounds -- the one surface this file's headline ("a guard absent from this file
+# would read as measured and clean") applies to most sharply, and the reason a
+# brand-new unexercised branch in dead-guard-scan.py was invisible to the tool
+# that finds unexercised branches. `unregistered_test_dirs` could not catch it:
+# it ledgers test DIRECTORIES, and these are library modules.
+innovation-upstream/devrc	python	instrument	scripts/lib/dead_guard.py
+innovation-upstream/devrc	python	instrument	scripts/dead-guard-scan.py
+innovation-upstream/devrc	python	out-of-instrument	scripts/testlib/dead_guard_plugin.py -- the tracer itself. CPython suppresses tracing inside the trace function, so this module is structurally invisible to its own instrument; every branch would read as dead. The one file that cannot measure itself
+innovation-upstream/devrc	python	instrument	scripts/claude-hooks/tests/test_guard_core.py
+innovation-upstream/devrc	python	out-of-instrument	scripts/claude-hooks/tests/test_bash_guard.py -- NOT a pytest suite by design; its own docstring says so ("hand-rolled asserts, not pytest-collectable -- the guard calls main() at import time, so it is only ever driven via subprocess"). Registering it as instrumentable produced zero traced lines, which the scan reported UNDECIDABLE rather than publishing 400 lines of false flags against the PreToolUse deny-guard
+# Every OTHER directory in this repo holding test_*.py, listed so its absence
+# cannot read as coverage. `test_registry_names_every_test_directory_in_devrc`
+# enforces this list in ONE direction: a new test directory with no row here
+# FAILS, so the surface cannot silently grow.
+# 🔴 It does NOT fail on a row naming a directory that no longer exists -- the
+# out-of-instrument column is prose, so a stale path cannot be told from an
+# explanatory sentence. An earlier version of this comment claimed the check
+# was "bidirectional"; it was not, and a planted
+# `scripts/THIS-WAS-DELETED/tests` row passed. That was the
+# description-wider-than-implementation defect this whole file is about,
+# recurring inside its own fix. `instrument` rows ARE checked the other way:
+# a selector matching no file makes the entire scan UNDECIDABLE.
+innovation-upstream/devrc	python	out-of-instrument	scripts/browser-bridge/tests -- the exemplar guard (_cli_timeout_violations) lives here, but the suite spawns the real browser CLI with a 300s budget per site, so a traced run is far too slow to be re-derivable; measure it on demand with a narrowed selector
+innovation-upstream/devrc	python	out-of-instrument	scripts/claude-hooks/tests -- the rest of it: ordinary unit suites for the notify/nudge/capture hooks rather than corpus-scanning guards; the two real guards there ARE instrumented above
+innovation-upstream/devrc	python	out-of-instrument	scripts/check-clickup-addressed/tests, scripts/collector/tests, scripts/collector/browser-ext/tests, scripts/collector/claude/tests, scripts/collector/i3/tests, scripts/collector/keylog/tests, scripts/collector/opencode/tests -- NOT SURVEYED for guard content in this pass. Recorded as unlooked-at rather than omitted; saying so is the point of this row
+innovation-upstream/devrc	python	out-of-instrument	scripts/dl-router/tests, scripts/initiatives/tests, scripts/mail-actions/tests, scripts/opencode/tests, scripts/repo-cos/tests, scripts/signal/tests, scripts/task-spec-drafter/tests, scripts/validation/tests -- NOT SURVEYED for guard content in this pass; repo-cos/prescan.py and signal/tests/mutation_battery.py are known candidates for a later round
+innovation-upstream/devrc	python	out-of-instrument	scripts/session-analysis/tests, scripts/session-analysis/session_insight/tests -- NOT SURVEYED for guard content in this pass
+innovation-upstream/devrc	bash	out-of-instrument	scripts/drift-check.sh, run-tests.sh, run-node-tests.sh: bash PS4/BASH_XTRACEFD line tracing works but cannot discriminate a single-line `if ...; then X; fi`, so a flag there is not decidable at line granularity
+innovation-upstream/devrc	mjs	out-of-instrument	skill .mjs guards: no node coverage backend built
+
+civitai/talos-infra	python	out-of-instrument	scripts/validate-alert-nodata-state.py, validate-dashboard-metric-seam.py, validate-tekton-build-pool.py, lint-grafana-dashboards.py: these ARE python, but no pytest suite invokes them -- they are called from bash gates. This tool needs a pytest entry point to drive a guard against the corpus, so they are undecidable here, not clean
+civitai/talos-infra	bash	out-of-instrument	~21 scripts/validate-*.sh plus the 3,576-line scripts/gitops-delta-gate.sh: same bash line-granularity limit as above. These carry 53 tests/mutants-*.sh batteries, which already answer "does this guard fire" by a different and stronger method
+civitai/talos-infra	bash	out-of-instrument	.githooks/* and .claude/hooks/*.sh: same limit
+
+civitai/civitai	ts	out-of-instrument	~63 corpus-scanning *.test.ts guards plus eslint-local-rules.js: vitest v8 coverage exists but its `include` is scoped to src/server/services/** and src/server/jobs/**, which contains none of the lint-rule guards. Widening it is a config change with its own review, not part of this tool
+civitai/civitai	mjs	out-of-instrument	scripts/ci/*.mjs and .claude/hooks/*.mjs: no node coverage backend built
+
+ZacxDev/homelab-infra	python	instrument	scripts/tests/test_*.py
+ZacxDev/homelab-infra	go	out-of-instrument	~10 *_test.go guards under containers/clawgate: `go test -cover` reports per-package percentages only; no -coverprofile pipeline exists to resolve a single branch
+ZacxDev/homelab-infra	bash	out-of-instrument	scripts/check-*.sh, kustomize-validate.sh: same bash line-granularity limit
