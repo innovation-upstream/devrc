@@ -10,14 +10,23 @@ mutant, so it is a manual instrument, not something two agents can run at once.
 It is committed because a mutation result quoted from an instrument nobody else
 can run is a claim, not evidence.
 
-🔴 WHAT THIS ONE ADDS OVER THE SIBLING: it does not accept "a test failed" as a
-kill. Each mutant names the SPECIFIC text its own guard produces, and the mutant
-counts as killed only when that text appears in the failure output. "I broke it
-and something went red" stays green for the wrong reason when an earlier check
-always wins, when a DIFFERENT guard's message kills the test, or when the happy
-path resolves anyway — all three are live shapes in a block that is one long
-chain of early returns. A mutant that goes red for the wrong reason is reported
-as KILLED-WRONG-REASON, which is a FAILURE of this battery, not a pass.
+🔴 WHAT THIS ONE ADDS OVER THE SIBLING — AND EXACTLY WHAT IT PROVES. It does not
+accept "a test failed" as a kill. Each mutant names a phrase from the ASSERTION
+MESSAGE of the test that owns that guard's behaviour, and counts as killed only
+when the phrase appears in pytest's rendered `E ` lines.
+
+Be precise about the strength of that, because the sentence here used to
+overstate it: this proves **the test carrying that phrase is the one that went
+red** — NOT "the guard emitted its own text". The phrase is the TEST's wording,
+and several of these mutants make the guard emit nothing at all, which is the
+whole defect. Test-level attribution is still the property worth buying, because
+what it rules out is live in this file: an earlier check in a long chain of
+early returns always winning, a DIFFERENT guard's message killing the test, or
+the happy path resolving anyway. It does NOT rule out two tests sharing wording.
+Where a guard does emit text the messages carry the real line (`got: …`), so the
+guard's output is in the `E ` lines too — but the MATCH is on the test's phrase,
+and the claim above is all that match licenses. A mutant that goes red for the
+wrong reason is reported as KILLED-WRONG-REASON, a FAILURE of this battery.
 
 READ BEFORE TRUSTING A VERDICT:
   * The CONTROL runs first and aborts on a red OR EMPTY baseline. A zero is
@@ -139,8 +148,8 @@ MUTANTS: list[tuple[str, str, str, str, str, str]] = [
      '  dep_hash=$(git -C "$d" hash-object -- "$d/$rel" 2>/dev/null)',
      "BEHIND origin/main"),
     ("S17", "arbiter", "every deployed copy is labelled a live working-tree copy",
-     '  if [ "$live" -eq 1 ]; then\n    prov="live working-tree copy at $real"',
-     '  if true; then\n    prov="live working-tree copy at $real"',
+     '  if [ "$live" -eq 1 ]; then\n    prov="the live working-tree copy at $real"',
+     '  if true; then\n    prov="the live working-tree copy at $real"',
      "store copy at"),
     ("S18", "wip fork", "uncommitted local edits are called STALE",
      '  if [ "$live" -eq 1 ] && ! git -C "$d" diff --quiet -- "$rel" 2>/dev/null; then\n',
@@ -182,13 +191,25 @@ MUTANTS: list[tuple[str, str, str, str, str, str]] = [
     # 🔴 AN AUDIT FIX RESETS THE VERIFICATION GATE. Every one of these is a
     # change made in response to a review, so each gets a mutant of its own and
     # the WHOLE battery is re-run — not just the row for what moved.
+    # ⚠ R1 RESTORES THE ORIGINAL DEFECT rather than deleting the notice. An
+    # earlier revision deleted it outright while the description said "goes back
+    # under the findings branch" — a STRONGER mutation than the bug, described
+    # as the bug. The pre-fix shape is: no unconditional print, and the notice
+    # living in the `elif [ -z "$HANDOFF" ]` arm, where any finding shadows it.
     ("R1", "no-handoff", "the notice goes back under the findings branch, so any "
-     "finding suppresses it — the defect this round exists for",
+     "finding suppresses it — the exact pre-fix shape, restored",
      '  if [ -z "$HANDOFF" ]; then\n'
      '    echo "  (no handoff loaded — nothing to reconcile; this is NOT a clean bill of health)"\n'
      '  fi\n',
      '',
      "a finding suppressed the notice"),
+    ("R1b", "no-handoff", "the notice is ALSO printed from the elif arm, so a "
+     "no-handoff run with no finding prints it TWICE",
+     "    # still print the gaps.\n    print_gaps",
+     "    # still print the gaps.\n"
+     '    echo "  (no handoff loaded — nothing to reconcile; this is NOT a clean bill of health)"\n'
+     "    print_gaps",
+     "the notice must appear exactly once"),
     ("R2", "no-handoff", "the notice prints even when a handoff WAS reconciled "
      "— the mirror-image lie",
      '  if [ -z "$HANDOFF" ]; then\n'
@@ -204,13 +225,13 @@ MUTANTS: list[tuple[str, str, str, str, str, str]] = [
      '    if [ "$scanned" -ge "$cap" ]; then capped=1; break; fi',
      "the match sits exactly ON the cap"),
     ("R4", "capped cause", "the capped branch asserts the cause it never measured",
-     '    DRIFT+=("the /$name skill THIS SESSION IS EXECUTING $how — it is NOT current,',
+     '    DRIFT+=("the /$name skill THIS SESSION IS EXECUTING $how — the deployed copy at $dep is NOT current,',
      '    DRIFT+=("the /$name skill THIS SESSION IS EXECUTING $how — it was built from a '
-     'tree that was never pushed; it is NOT current,',
+     'tree that was never pushed; the deployed copy at $dep is NOT current,',
      "never pushed"),
     ("R5", "hedge", "the matchless branch drops the hedge and re-asserts one cause",
-     'was built from a tree that is not on $ref (uncommitted, or a branch that has not merged)',
-     'was built from a tree that was never pushed',
+     "it may be uncommitted, on a branch that has not merged, or older than a rename of this path (the walk has no --follow)",
+     "it was built from a tree that was never pushed",
      "never pushed"),
     ("R6", "timeout", "the fetch is no longer bounded — a hung remote hangs the resume",
      '      timeout 25 git -C "$d" fetch --quiet origin >/dev/null 2>&1 || rc=1',
@@ -226,16 +247,33 @@ MUTANTS: list[tuple[str, str, str, str, str, str]] = [
      "must LEAD the digest"),
     ("R9", "provenance", "the three-way label collapses back to two, telling a "
      "foreign file that a switch will replace it",
-     '        prov="UNMANAGED file at $real — neither a checkout nor /nix/store, so home-manager will NOT replace it (home.file.force does not clobber a foreign file); remove it and re-switch" ;;',
-     '        prov="store copy at $real — only a home-manager switch replaces it" ;;',
+     '        prov="an UNMANAGED file at $real"\n'
+     '        prov_note="neither a checkout nor /nix/store, so home-manager will NOT replace it — home.file.force does not clobber a foreign file, so remove it and re-switch" ;;',
+     '        prov="a store copy at $real"\n'
+     '        prov_note="only a home-manager switch replaces it" ;;',
      "expected UNMANAGED provenance"),
     ("R10", "cap input", "a non-integer cap is no longer validated, so `[` writes "
      "to stderr once per commit and the cap silently stops applying",
      '  case "$cap" in\n'
-     "    ''|*[!0-9]*|0)\n",
+     "    ''|*[!0-9]*|0*)\n",
      '  case "$cap" in\n'
      "    '__never_matches__')\n",
      "integer expected"),
+    ("R12", "cap input", "the leading-zero arm narrows back to a bare `0`, so `00` "
+     "is accepted and caps the walk at the first commit",
+     "    ''|*[!0-9]*|0*)\n",
+     "    ''|*[!0-9]*|0)\n",
+     "a leading zero must be rejected"),
+    ("R13", "hedge", "the matchless sentence re-asserts absence from $ref, which "
+     "is false for content that predates a rename of the path",
+     "this walk could not place the deployed copy at $dep in that path's history",
+     "the deployed copy at $dep is not on $ref",
+     "is not on origin/main"),
+    ("R14", "prov splice", "the provenance remedy is fused back into the noun "
+     "phrase, so it lands inside a COULD NOT MEASURE parenthetical",
+     '  local prov_full="$prov${prov_note:+ — $prov_note}"',
+     '  local prov_full="$prov"; prov="$prov${prov_note:+ — $prov_note}"',
+     "must not carry its remedy"),
     ("R11", "vocabulary", "a new COULD NOT MEASURE reason appears with no entry "
      "in SKILL.md — the drift the scraper exists to catch",
      '  local d="" live=0 cand\n',
@@ -244,7 +282,10 @@ MUTANTS: list[tuple[str, str, str, str, str, str]] = [
      "    printf '  skill-read: %s — COULD NOT MEASURE (the moon was in the wrong phase)\\n' \"$name\"\n"
      "    return\n"
      "  fi\n",
-     "never mentions it"),
+     # keyed on the FILE both assertions name, not on either one's wording: the
+     # doc guard has two arms (the spelled count, and the per-reason sweep) and
+     # which fires first depends on how many reasons the scrape found.
+     "claude/skills/resume/SKILL.md"),
 
     # ---- POSITIVE CONTROL -------------------------------------------------
     # A mutant nobody doubts, kept in the batch so a run that scores everything

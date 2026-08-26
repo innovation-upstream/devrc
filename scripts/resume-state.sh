@@ -762,20 +762,33 @@ skill_freshness(){
   # replaces it" sends the reader to run a switch that will leave the file
   # exactly where it is (or fail), and the comparison below still reports it
   # against origin as though nix had put it there.
-  local prov
+  #
+  # 🔴 TWO PARTS, because they are spliced into sentences with different shapes.
+  # `$prov` is a NOUN PHRASE WITH ITS ARTICLE — it goes inside other people's
+  # clauses, including a `COULD NOT MEASURE (…)` parenthetical, so it must carry
+  # no parentheses of its own and must read correctly after "is". `$prov_note`
+  # is the REMEDY, a sentence in its own right, appended only where there is room
+  # for one. Fused into a single string they produced "…is a UNMANAGED file at
+  # X — …(home.file.force does not clobber a foreign file); remove it and
+  # re-switch and no git checkout of its source could be found", i.e. nested
+  # parens inside the parenthetical and an imperative spliced mid-clause.
+  local prov prov_note=""
   if [ "$live" -eq 1 ]; then
-    prov="live working-tree copy at $real"
+    prov="the live working-tree copy at $real"
   else
     case "$real" in
       /nix/store/*)
-        prov="store copy at $real — only a home-manager switch replaces it" ;;
+        prov="a store copy at $real"
+        prov_note="only a home-manager switch replaces it" ;;
       *)
-        prov="UNMANAGED file at $real — neither a checkout nor /nix/store, so home-manager will NOT replace it (home.file.force does not clobber a foreign file); remove it and re-switch" ;;
+        prov="an UNMANAGED file at $real"
+        prov_note="neither a checkout nor /nix/store, so home-manager will NOT replace it — home.file.force does not clobber a foreign file, so remove it and re-switch" ;;
     esac
   fi
+  local prov_full="$prov${prov_note:+ — $prov_note}"
   if [ -z "$d" ]; then
     printf '  skill-read: %s — COULD NOT MEASURE (no git checkout of the skill source found; %s)\n' "$name" "$prov"
-    UNRECONCILED+=("the /$name skill's deployed copy is a $prov and no git checkout of its source could be found (tried \$RESUME_STATE_SKILL_REPO, \$DEVRC, ~/workspace/devrc) — its age against origin is UNKNOWN")
+    UNRECONCILED+=("the /$name skill's deployed copy is $prov and no git checkout of its source could be found (tried \$RESUME_STATE_SKILL_REPO, \$DEVRC, ~/workspace/devrc) — its age against origin is UNKNOWN")
     return
   fi
 
@@ -865,10 +878,18 @@ skill_freshness(){
   # treats the test as false, so the cap silently does not apply. A digest that
   # scribbles on stderr is one a caller cannot cleanly capture. Fall back to the
   # default and say so as a gap, rather than half-applying a value nobody meant.
+  #
+  # 🔴 `0*`, NOT `0` — A LEADING ZERO IS THE SAME HAZARD AS A ZERO. `[` reads
+  # its operands as decimal, so `00` and `007` are ACCEPTED by a `|0)` arm and
+  # `[ 1 -gt 00 ]` is TRUE: the walk caps on the very first commit, which is
+  # exactly the state the zero arm exists to prevent, and the digest then prints
+  # "older than the newest 00 commit(s)". Measured. `run-tests.sh` rejects
+  # leading zeros for the same reason; this matches it. `0*` covers `0`, `00`
+  # and `007` in one pattern and leaves `200` alone.
   local cap="${RESUME_STATE_SKILL_SCAN_CAP:-200}"
   case "$cap" in
-    ''|*[!0-9]*|0)
-      UNRECONCILED+=("RESUME_STATE_SKILL_SCAN_CAP=$cap is not a positive integer — the /$name skill's history walk used the default 200 instead")
+    ''|*[!0-9]*|0*)
+      UNRECONCILED+=("RESUME_STATE_SKILL_SCAN_CAP=$cap is not a positive integer without a leading zero — the /$name skill's history walk used the default 200 instead")
       cap=200 ;;
   esac
   local behind=0 found="" capped="" c h scanned=0
@@ -880,13 +901,21 @@ skill_freshness(){
     behind=$((behind+1))
   #
   # ⚠ NO `--follow`, RECORDED RATHER THAN FIXED. A rename of the skill path
-  # truncates this walk at the rename, so a deployed copy older than it reports
-  # "matches NO commit" instead of a number. That degrades the report from
-  # "N behind" to "not current, provenance unknown" — never to a false CURRENT,
-  # because the tip-hash comparison above returns before the walk is reached.
-  # `--follow` buys the number at the cost of git's rename heuristics deciding
-  # which file this is, on a path that moves roughly never. Pinned by
-  # test_a_renamed_skill_path_degrades_to_not_current_never_to_CURRENT.
+  # truncates this walk at the rename, so a deployed copy older than the rename
+  # reports "matches NO commit" instead of a number. That degrades the report
+  # from "N behind" to "not current, provenance unknown" — never to a false
+  # CURRENT, because the tip-hash comparison above returns before the walk is
+  # reached. `--follow` buys the number at the cost of git's rename heuristics
+  # deciding which file this is, on a path that moves roughly never.
+  #
+  # 🔴 THE CLAIM THIS COMMENT USED TO MAKE WAS FALSE, which is worse than making
+  # none: it named a test that exercised NO rename. Its fixture did
+  # `git mv REL REL.tmp` and back in one commit, which git records as a plain
+  # `M` — the walk was never truncated, the output was the ordinary
+  # "2 commit(s) BEHIND", and the only assertion ("CURRENT" absent) passed for
+  # that reason. The real shape is a file that ORIGINATES at another path and is
+  # renamed in; `test_a_renamed_skill_path_truncates_the_walk_never_to_CURRENT`
+  # builds that and asserts the truncation is what happens.
   done < <(git -C "$d" log --format=%H "$ref" -- "$rel" 2>/dev/null)
 
   local newest
@@ -895,7 +924,7 @@ skill_freshness(){
 
   if [ -n "$found" ]; then
     printf '  skill-read: %s🔴 %s — deployed copy is %s commit(s) BEHIND %s for %s (newest it lacks: %s) [%s]\n' \
-      "$pre" "$name" "$behind" "$ref" "$rel" "$newest" "$prov"
+      "$pre" "$name" "$behind" "$ref" "$rel" "$newest" "$prov_full"
     DRIFT+=("the /$name skill THIS SESSION IS EXECUTING is STALE: the deployed copy at $dep is $behind commit(s) behind $ref for $rel (newest it lacks: $newest) — $howto and follow THAT text, not the loaded one; only a home-manager switch replaces the deployed copy")
   elif [ -n "$capped" ]; then
     # 🔴 SAY WHAT YOU MEASURED. The cap means the WALK ran out of budget, which
@@ -907,23 +936,34 @@ skill_freshness(){
     # amount this run declined to compute.
     local how="is older than the newest $cap commit(s) touching $rel on $ref"
     printf '  skill-read: %s🔴 %s — deployed copy %s; the scan stopped at its cap, so the DISTANCE was not measured; newest on %s: %s [%s]\n' \
-      "$pre" "$name" "$how" "$ref" "$newest" "$prov"
-    DRIFT+=("the /$name skill THIS SESSION IS EXECUTING $how — it is NOT current, and this run stopped at its scan cap (RESUME_STATE_SKILL_SCAN_CAP=$cap) without measuring by how much; $howto and follow THAT text, not the loaded one")
+      "$pre" "$name" "$how" "$ref" "$newest" "$prov_full"
+    # ⚠ NAMES THE EFFECTIVE CAP, NOT THE ENV VAR. Printing
+    # `RESUME_STATE_SKILL_SCAN_CAP=$cap` here read `=200` on a run where the
+    # variable was UNSET, and `=200` again on a run where it was `abc` — while
+    # the gap line two lines away correctly quoted `=abc`. One run, two numbers,
+    # both presented as the setting. And it names $dep, like its two siblings.
+    DRIFT+=("the /$name skill THIS SESSION IS EXECUTING $how — the deployed copy at $dep is NOT current, and this run stopped after $cap commit(s) without measuring by how much (raise RESUME_STATE_SKILL_SCAN_CAP for the number); $howto and follow THAT text, not the loaded one")
   else
     # The walk went all the way back and found nothing: the deployed content is
     # not any commit of this path on $ref.
     #
-    # 🔴 THE CAUSE IS HEDGED, because two shapes reach here and only one is the
-    # obvious one. (a) built from an uncommitted tree; (b) built from a branch
-    # that is PUSHED but not merged — which this repo's own CLAUDE.md
+    # 🔴 THE CAUSE IS HEDGED, because THREE shapes reach here and only one is
+    # the obvious one. (a) built from an uncommitted tree; (b) built from a
+    # branch that is PUSHED but not merged — which this repo's own CLAUDE.md
     # recommends, since `home-manager switch --flake ~/workspace/devrc` is how
-    # you validate a nix edit end to end. The old sentence asserted "was built
-    # from a tree that was never pushed, so its instructions are not anyone
-    # else's", which is false of (b).
+    # you validate a nix edit end to end; (c) THE CONTENT PREDATES A RENAME of
+    # this path, so the walk above cannot see it (no `--follow`, see the note
+    # there) — and in that case the content IS on $ref, at another path.
+    #
+    # Each successive revision of this sentence has been false of the case
+    # discovered next: "was built from a tree that was never pushed" was false
+    # of (b), and "was built from a tree that is not on $ref" is false of (c).
+    # So the wording now names the OBSERVATION (this walk did not find it) and
+    # lists the causes as possibilities, rather than asserting any of them.
     local how="matches NO commit of $rel on $ref"
     printf '  skill-read: %s🔴 %s — deployed copy %s; newest on %s: %s [%s]\n' \
-      "$pre" "$name" "$how" "$ref" "$newest" "$prov"
-    DRIFT+=("the /$name skill THIS SESSION IS EXECUTING $how — the deployed copy at $dep was built from a tree that is not on $ref (uncommitted, or a branch that has not merged), so what you loaded is not what $ref says; $howto to compare")
+      "$pre" "$name" "$how" "$ref" "$newest" "$prov_full"
+    DRIFT+=("the /$name skill THIS SESSION IS EXECUTING $how — this walk could not place the deployed copy at $dep in that path's history, so what you loaded is not what $ref says today; it may be uncommitted, on a branch that has not merged, or older than a rename of this path (the walk has no --follow); $howto to compare")
   fi
 }
 

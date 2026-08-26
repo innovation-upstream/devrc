@@ -354,7 +354,9 @@ def test_a_deployed_copy_matching_no_commit_is_not_a_pass(tmp_path, stub_bin):
     assert "CURRENT" not in line, line
     # the CAUSE is hedged — the exact sentence is pinned whole by
     # test_a_matchless_deployed_copy_HEDGES_the_cause_it_did_not_measure
-    assert any("is not on origin/main" in f for f in findings(out)), findings(out)
+    assert any(
+        "could not place the deployed copy" in f for f in findings(out)
+    ), findings(out)
 
 
 def _norm(text, checkout):
@@ -398,14 +400,20 @@ def test_the_history_walk_is_capped_and_says_what_it_did_NOT_measure(tmp_path, s
 
     found = findings(out)
     assert len(found) == 1, found
-    assert _norm(found[0], checkout) == (
+    normalised = _norm(found[0], checkout).replace(str(tmp_path), "<TMP>")
+    assert normalised == (
         "the /resume skill THIS SESSION IS EXECUTING is older than the newest 2 "
-        "commit(s) touching claude/skills/resume/SKILL.md on origin/main — it is "
-        "NOT current, and this run stopped at its scan cap "
-        "(RESUME_STATE_SKILL_SCAN_CAP=2) without measuring by how much; read it "
-        "with: git -C <REPO> show origin/main:claude/skills/resume/SKILL.md and "
-        "follow THAT text, not the loaded one"
-    ), _norm(found[0], checkout)
+        "commit(s) touching claude/skills/resume/SKILL.md on origin/main — the "
+        "deployed copy at <TMP>/claude/skills/resume/SKILL.md is NOT current, and "
+        "this run stopped after 2 commit(s) without measuring by how much (raise "
+        "RESUME_STATE_SKILL_SCAN_CAP for the number); read it with: git -C <REPO> "
+        "show origin/main:claude/skills/resume/SKILL.md and follow THAT text, not "
+        "the loaded one"
+    ), normalised
+    # ⚠ it names the EFFECTIVE cap, never `RESUME_STATE_SKILL_SCAN_CAP=<n>` —
+    # that spelling read `=200` on an UNSET run and `=200` on an `abc` run,
+    # while the gap line beside it correctly quoted `=abc`.
+    assert "RESUME_STATE_SKILL_SCAN_CAP=" not in normalised, normalised
     # the cause it did NOT measure must not appear
     for false_cause in ("never pushed", "uncommitted tree", "not anyone else's"):
         assert false_cause not in " ".join(found), (found, false_cause)
@@ -462,13 +470,22 @@ def test_a_matchless_deployed_copy_HEDGES_the_cause_it_did_not_measure(
     normalised = _norm(found[0], checkout).replace(str(tmp_path), "<TMP>")
     assert normalised == (
         "the /resume skill THIS SESSION IS EXECUTING matches NO commit of "
-        "claude/skills/resume/SKILL.md on origin/main — the deployed copy at "
-        "<TMP>/claude/skills/resume/SKILL.md was built from a tree that is not on "
-        "origin/main (uncommitted, or a branch that has not merged), so what you "
-        "loaded is not what origin/main says; read it with: git -C <REPO> show "
+        "claude/skills/resume/SKILL.md on origin/main — this walk could not place "
+        "the deployed copy at <TMP>/claude/skills/resume/SKILL.md in that path's "
+        "history, so what you loaded is not what origin/main says today; it may be "
+        "uncommitted, on a branch that has not merged, or older than a rename of "
+        "this path (the walk has no --follow); read it with: git -C <REPO> show "
         "origin/main:claude/skills/resume/SKILL.md to compare"
     ), normalised
     assert "never pushed" not in normalised, normalised
+    # 🔴 AND IT NO LONGER ASSERTS ABSENCE FROM origin/main. That wording was
+    # false for the rename case, which reaches this same branch with the content
+    # present on origin/main at another path — see
+    # test_a_renamed_skill_path_truncates_the_walk_never_to_CURRENT. The sentence
+    # states the OBSERVATION (this walk could not place it) and lists causes as
+    # possibilities; each earlier revision asserted a cause and was false of the
+    # case found next.
+    assert "is not on origin/main" not in normalised, normalised
 
 
 # --------------------------------------------------------------------------- #
@@ -801,7 +818,12 @@ def test_the_notice_still_appears_when_there_is_no_finding_at_all(tmp_path, stub
     drift = drift_lines(run_resume(checkout, stub_bin, claude_dir=dep, skill_repo=checkout))
     assert drift == [
         "(no handoff loaded — nothing to reconcile; this is NOT a clean bill of health)"
-    ], drift
+    ], (
+        # exactly once: hoisting the notice out of the `elif` chain without
+        # removing it from the arm prints it TWICE on this path, which reads as
+        # a formatting bug and trains the eye to skip it.
+        f"the notice must appear exactly once and alone here; got: {drift}"
+    )
 
 
 def test_the_notice_is_absent_when_a_handoff_WAS_loaded(tmp_path, stub_bin):
@@ -827,15 +849,57 @@ def _could_not_measure_reasons():
     that goes stale the first time someone adds a branch — measured, it already
     had: the script grew `no origin/<default-branch> ref in …` and `could not
     hash the deployed copy or the … blob` while SKILL.md still named five.
+
+    🔴 THE FIRST VERSION WAS NARROWER THAN THIS DOCSTRING. It matched
+    `COULD NOT MEASURE \\((.*?)\\)\\\\n'` — a parenthetical that ENDS a printf
+    format string — so a reason emitted by `echo`, or one with any trailing text
+    after the closing paren, was invisible, and `len(reasons) >= 7` could not
+    notice because the floor counts what was found. Same class as the guard it
+    was written to prevent.
+
+    Now: find every `COULD NOT MEASURE (` anywhere in the source and walk
+    forward balancing parens to its own close. That is emitter-agnostic and
+    survives nesting and trailing text.
+
+    ⚠ FULL-LINE COMMENTS ARE STRIPPED FIRST, and that is not tidiness: the
+    widened scan immediately picked up a COMMENT that discusses the message
+    shape (`a \\`COULD NOT MEASURE (…)\\` parenthetical`) and scored `…` as an
+    eighth reason, which would have demanded a doc entry for a reason nothing
+    emits. Prose about the emitter is not the emitter.
     """
-    src = SCRIPT.read_text(encoding="utf-8")
+    src = "\n".join(
+        ln for ln in SCRIPT.read_text(encoding="utf-8").splitlines()
+        if not ln.lstrip().startswith("#")
+    )
+    marker = "COULD NOT MEASURE ("
     out = set()
-    for body in re.findall(r"COULD NOT MEASURE \((.*?)\)\\n'", src):
+    i = src.find(marker)
+    while i != -1:
+        j = i + len(marker)
+        depth = 1
+        while j < len(src) and depth:
+            if src[j] == "(":
+                depth += 1
+            elif src[j] == ")":
+                depth -= 1
+            elif src[j] == "\n":            # unbalanced — do not run off the line
+                break
+            j += 1
+        body = src[i + len(marker): j - 1 if depth == 0 else j]
         # the parts between interpolations are what a doc can carry verbatim
         frag = max((p.strip(" ;<>") for p in body.split("%s")), key=len).strip()
         if frag:
             out.add(frag)
+        i = src.find(marker, j)
     return out
+
+
+#  The doc spells the count as a WORD. Unpinned prose with a number in it is
+#  exactly the drift `4519a276` had to fix elsewhere in this PR, so the word is
+#  derived from the scrape rather than trusted.
+_COUNT_WORDS = {
+    4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight", 9: "nine", 10: "ten",
+}
 
 
 def test_every_COULD_NOT_MEASURE_reason_the_script_can_print_is_documented():
@@ -844,6 +908,14 @@ def test_every_COULD_NOT_MEASURE_reason_the_script_can_print_is_documented():
     reasons = _could_not_measure_reasons()
     assert len(reasons) >= 7, f"the scraper found too few reasons: {reasons}"
     doc = RESUME_SKILL.read_text(encoding="utf-8")
+    word = _COUNT_WORDS.get(len(reasons))
+    assert word, f"add {len(reasons)} to _COUNT_WORDS"
+    assert f"**{word}** reasons" in doc, (
+        f"the script can print {len(reasons)} COULD NOT MEASURE reasons, and "
+        f"claude/skills/resume/SKILL.md does not say '**{word}** reasons'. A "
+        "spelled-out count in prose is drift waiting to happen — that is why it "
+        "is derived here instead of trusted."
+    )
     for reason in sorted(reasons):
         assert reason in doc, (
             f"resume-state.sh can print COULD NOT MEASURE ({reason!r}…) and "
@@ -862,6 +934,11 @@ def test_the_reason_scraper_can_report_a_missing_one():
     assert invented not in _could_not_measure_reasons()
     # POSITIVE half: the scraper really does read the script, not an empty set
     assert "no deployed copy at" in _could_not_measure_reasons()
+    # 🔴 AND IT MUST NOT COUNT PROSE ABOUT THE EMITTER. Widening the scan to be
+    # emitter-agnostic immediately swept in a COMMENT reading "a `COULD NOT
+    # MEASURE (…)` parenthetical" and scored `…` as an eighth reason — which
+    # would have demanded a SKILL.md entry for a message nothing prints.
+    assert "…" not in _could_not_measure_reasons()
 
 
 # --------------------------------------------------------------------------- #
@@ -959,14 +1036,43 @@ def test_every_git_fetch_in_the_script_is_wrapped_in_a_timeout():
     "the string `timeout` appears" but "every `git … fetch` in this file is
     bounded". A second, unbounded fetch added elsewhere fails here even though
     the behavioural test above would never see it."""
+    # 🔴 STRIP QUOTED SPANS FIRST. The first version matched any non-comment line
+    # containing both `git` and `fetch`, so a future GAP MESSAGE telling the
+    # reader to run `git fetch` — ordinary prose inside a quoted string — would
+    # have failed as "an unbounded fetch". A scanner that cannot tell a command
+    # from a sentence about a command reports on the wrong thing.
+    quoted = re.compile(r"\"[^\"]*\"|'[^']*'")
     src = SCRIPT.read_text(encoding="utf-8")
-    fetches = [ln.strip() for ln in src.splitlines()
-               if re.search(r"\bgit\b[^\n#]*\bfetch\b", ln) and not ln.strip().startswith("#")]
+    fetches = []
+    for ln in src.splitlines():
+        if ln.strip().startswith("#"):
+            continue
+        code = quoted.sub(" ", ln)          # what is left is command, not prose
+        if re.search(r"\bgit\b[^#]*\bfetch\b", code):
+            fetches.append((ln.strip(), code))
     assert fetches, "POSITIVE CONTROL: no `git fetch` found at all — the scanner is blind"
-    for ln in fetches:
-        m = re.search(r"\btimeout (\d+) git\b", ln)
-        assert m, f"an unbounded `git fetch`: {ln}"
-        assert 1 <= int(m.group(1)) <= 60, f"the bound is not seconds-scale: {ln}"
+    for raw, code in fetches:
+        m = re.search(r"\btimeout (\d+) git\b", code)
+        assert m, f"an unbounded `git fetch`: {raw}"
+        assert 1 <= int(m.group(1)) <= 60, f"the bound is not seconds-scale: {raw}"
+
+
+def test_the_fetch_scanner_does_not_mistake_PROSE_for_a_command():
+    """NEGATIVE CONTROL on the scanner above, and the reason it strips quotes.
+
+    A line that merely *mentions* `git fetch` inside a message must not be
+    scored as an unbounded invocation — otherwise the guard fires on a
+    documentation change and everyone learns to edit the guard.
+    """
+    quoted = re.compile(r"\"[^\"]*\"|'[^']*'")
+    prose = '    UNRECONCILED+=("could not reach origin — try `git fetch origin` by hand")'
+    assert not re.search(r"\bgit\b[^#]*\bfetch\b", quoted.sub(" ", prose)), (
+        "the scanner still reads a quoted sentence as a command"
+    )
+    real = '      timeout 25 git -C "$d" fetch --quiet origin >/dev/null 2>&1 || rc=1'
+    assert re.search(r"\bgit\b[^#]*\bfetch\b", quoted.sub(" ", real)), (
+        "POSITIVE CONTROL: stripping quotes hid the REAL invocation too"
+    )
 
 
 def test_a_SKIPPED_fetch_is_declared_on_the_line(tmp_path, stub_bin):
@@ -1037,6 +1143,37 @@ def test_an_UNMANAGED_foreign_file_is_not_told_a_switch_will_replace_it(
     assert "1 commit(s) BEHIND origin/main" in line, line
 
 
+def test_the_provenance_noun_phrase_does_not_carry_its_own_remedy(tmp_path, stub_bin):
+    """🔴 A NOUN PHRASE SPLICED INTO OTHER PEOPLE'S SENTENCES MUST STAY ONE.
+
+    `$prov` is interpolated into a `COULD NOT MEASURE (…)` parenthetical and
+    into a gap sentence after "is". Fusing the remedy into it produced nested
+    parens inside the parenthetical, "…is a UNMANAGED file at X", and an
+    imperative ("remove it and re-switch") spliced mid-clause of a sentence that
+    continued "and no git checkout of its source could be found". The remedy
+    lives in `$prov_note` and is appended only where a sentence can end.
+    """
+    checkout, _, _ = make_devrc(tmp_path, ["v0\n"])
+    dep = make_deployed(tmp_path, body="v0\n")
+    notrepo = tmp_path / "not-a-repo"
+    notrepo.mkdir()
+    out = run_resume(checkout, stub_bin, claude_dir=dep, skill_repo=notrepo)
+    line = skill_line(out)
+    body = line.split("COULD NOT MEASURE (", 1)[1]
+    assert "(" not in body, (
+        "the provenance must not carry its remedy into the parenthetical — "
+        f"nested parens in: {line}"
+    )
+    assert "remove it and re-switch" not in line, (
+        f"the provenance must not carry its remedy here; got: {line}"
+    )
+    gap = " ".join(gap_lines(out))
+    assert "is an UNMANAGED file at" in gap, (
+        f"the gap sentence must read grammatically after 'is'; got: {gap}"
+    )
+    assert "is a UNMANAGED" not in gap, gap
+
+
 def test_a_REAL_store_path_is_still_labelled_as_needing_a_switch(tmp_path, stub_bin):
     """POSITIVE CONTROL for the three-way fork. Without it the fix above would
     be indistinguishable from renaming EVERY store copy to "UNMANAGED", which
@@ -1083,29 +1220,112 @@ def test_a_non_integer_scan_cap_is_reported_and_writes_NOTHING_to_stderr(
     assert "1 commit(s) BEHIND origin/main" in skill_line(proc.stdout)
 
 
-def test_a_renamed_skill_path_degrades_to_not_current_never_to_CURRENT(
-    tmp_path, stub_bin
-):
-    """RECORDED LIMIT, PINNED. The walk has no `--follow`, so a rename truncates
-    it and an older deployed copy reports "matches NO commit" instead of a
-    number. What must never happen is the reassuring direction: a deployed copy
-    that is NOT the tip cannot read CURRENT, because the tip-hash comparison
-    runs before the walk is ever reached."""
-    checkout, pusher, _ = make_devrc(tmp_path, ["v0\n", "v1\n"])
-    # rename the skill on origin, then change it again under the new name
-    _git(pusher, "pull", "-q", "origin", "main")
-    _git(pusher, "mv", REL, "claude/skills/resume/SKILL.md.tmp")
-    _git(pusher, "mv", "claude/skills/resume/SKILL.md.tmp", REL)
-    (pusher / REL).write_text("v2 after a path churn\n")
+def test_a_LEADING_ZERO_cap_is_rejected_like_a_zero(tmp_path, stub_bin):
+    """🔴 `[` READS DECIMAL, SO `00` IS A ZERO. A `|0)` arm rejects `0` and
+    accepts `00` and `007`; `[ 1 -gt 00 ]` is TRUE, so the walk caps on the very
+    first commit and the digest prints "older than the newest 00 commit(s)" —
+    precisely the state the zero arm exists to prevent, wearing two characters.
+    Measured. `run-tests.sh` rejects leading zeros for the same reason.
+    """
+    checkout, _, _ = make_devrc(tmp_path, ["v0\n", "v1\n"])
+    dep = make_deployed(tmp_path, body="v0\n")
+    out = run_resume(
+        checkout, stub_bin, claude_dir=dep, skill_repo=checkout,
+        extra_env={"RESUME_STATE_SKILL_SCAN_CAP": "00"},
+    )
+    line = skill_line(out)
+    assert "older than the newest 00" not in line, (
+        f"a leading zero must be rejected, not used as a cap; got: {line}"
+    )
+    assert "1 commit(s) BEHIND origin/main" in line, (
+        f"a leading zero must be rejected and the default used; got: {line}"
+    )
+    assert any("not a positive integer" in g for g in gap_lines(out)), (
+        f"a leading zero must be rejected loudly; gaps: {gap_lines(out)}"
+    )
+
+
+def test_a_renamed_skill_path_truncates_the_walk_never_to_CURRENT(tmp_path, stub_bin):
+    """RECORDED LIMIT, NOW ACTUALLY EXERCISED.
+
+    🔴 THE PREVIOUS VERSION OF THIS TEST EXERCISED NO RENAME. It did
+    `git mv REL REL.tmp` and back inside one commit, which git records as a
+    plain `M` — measured: `--name-status` prints `M claude/…/SKILL.md`, and
+    `git log -- <rel>` still returns every commit. The walk was never truncated,
+    the digest printed the ordinary `2 commit(s) BEHIND`, and the single
+    assertion ("CURRENT" absent) passed for that reason. Worse, a comment in
+    resume-state.sh named this test as the pin for the `--follow` limitation, so
+    the file claimed coverage that did not exist.
+
+    The real shape is a file that ORIGINATES elsewhere and is renamed IN — which
+    is exactly this repo's history: every skill moved from `claude/commands/` to
+    `claude/skills/<name>/SKILL.md`. Then `git log -- <new path>` stops at the
+    rename, and content older than it is genuinely invisible to the walk.
+
+    Two assertions, because the limitation has a shape AND a safe direction:
+      * the walk really is truncated — `matches NO commit`, not a number;
+      * it is never the reassuring direction — a copy that is not the tip cannot
+        read CURRENT, because the tip-hash comparison runs before the walk.
+    """
+    old_path = "claude/commands/resume.md"
+    origin = tmp_path / "origin.git"
+    env = _git_env(tmp_path)
+    subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(origin)],
+                   check=True, env=env)
+    pusher = tmp_path / "pusher"
+    checkout = tmp_path / "checkout"
+    for dest in (pusher, checkout):
+        subprocess.run(["git", "clone", "-q", str(origin), str(dest)], check=True, env=env)
+
+    # v0 and v1 live at the OLD path; only then is it renamed into place.
+    (pusher / old_path).parent.mkdir(parents=True)
+    (pusher / "claudedocs").mkdir(parents=True)
+    (pusher / "claudedocs/handoff-fixture.md").write_text(INERT_HANDOFF)
+    (pusher / old_path).write_text("v0 — the pre-rename revision\n")
+    _git(pusher, "add", old_path, "claudedocs/handoff-fixture.md")
+    _git(pusher, "commit", "-qm", "skill v0 at the old path")
+    (pusher / old_path).write_text("v1 — still at the old path\n")
+    _git(pusher, "add", old_path)
+    _git(pusher, "commit", "-qm", "skill v1 at the old path")
+    _git(pusher, "push", "-q", "origin", "main")
+    _git(checkout, "pull", "-q", "origin", "main")
+
+    (pusher / REL).parent.mkdir(parents=True, exist_ok=True)
+    _git(pusher, "mv", old_path, REL)
+    _git(pusher, "commit", "-qm", "migrate commands/ -> skills/")
+    (pusher / REL).write_text("v2 — after the migration\n")
     _git(pusher, "add", REL)
-    _git(pusher, "commit", "-qm", "churn the path")
+    _git(pusher, "commit", "-qm", "skill v2")
     _git(pusher, "push", "-q", "origin", "main")
 
-    dep = make_deployed(tmp_path, body="v0\n")
-    line = skill_line(run_resume(checkout, stub_bin, claude_dir=dep, skill_repo=checkout))
+    # FIXTURE PRECONDITION, asserted rather than assumed: the walk this test is
+    # about must really be truncated at the rename.
+    seen = subprocess.run(
+        ["git", "-C", str(pusher), "log", "--format=%s", "origin/main", "--", REL],
+        capture_output=True, text=True, env=_git_env(pusher),
+    ).stdout.split("\n")
+    assert "skill v0 at the old path" not in seen, (
+        f"fixture: the walk was not truncated by the rename — it sees {seen}"
+    )
+
+    dep = make_deployed(tmp_path, body="v0 — the pre-rename revision\n")
+    out = run_resume(checkout, stub_bin, claude_dir=dep, skill_repo=checkout)
+    line = skill_line(out)
+    assert "matches NO commit" in line, (
+        f"expected the truncated-walk sentence after a rename; got: {line}"
+    )
     assert "CURRENT" not in line, (
         "a stale copy read as CURRENT after a rename — the tip comparison must "
         f"run before the walk: {line}"
+    )
+    # 🔴 AND THE HEDGE MUST COVER THIS CASE. The content IS on origin/main, at
+    # the old path — so a finding asserting "built from a tree that is not on
+    # origin/main" would be false here, which is what the previous wording said.
+    found = " ".join(findings(out))
+    assert "older than a rename of this path" in found, found
+    assert "is not on origin/main" not in found, (
+        f"the finding asserts the content is absent from origin/main; it is "
+        f"present at {old_path}: {found}"
     )
 
 
