@@ -1012,6 +1012,10 @@ KIND_OTHER = "other"                  # fifo, socket, device, door…
 # EACCES fell into KIND_OTHER and was skipped", and cited a measurement of
 # `/snapshot` answering 200 / exit 0 / entries=0. BOTH WERE WRONG, and the
 # second was inherited from an audit report and written up here as first-hand.
+# ⚠ And the raise did NOT come from `classify_path` — that function is INTRODUCED
+# by this fix. In the failing version it came from `candidate.is_dir()` in
+# `_snapshot`, which this commit deletes. Corrected after an audit caught the
+# anachronism; the docstring below was already accurate.
 # Measured on the pinned interpreter:
 #     pathlib._IGNORED_ERRNOS == (ENOENT, ENOTDIR, EBADF, ELOOP)
 #     child of a 0o600 dir: is_symlink/is_dir/is_file/exists each RAISE
@@ -2148,7 +2152,7 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
                 "X-Store-Snapshot": fresh_header,
                 # The SERVER's count of what it put in. The client compares its
                 # own extracted count against this and refuses a mismatch —
-                # `scripts/store::install_snapshot`. (An earlier version of this
+                # `scripts/cairn::install_snapshot`. (An earlier version of this
                 # comment claimed the disagreement was "visible" while NOTHING
                 # compared them; the comparison now exists. A comment is a claim
                 # too.) ⚠ On a `?scope=` request the counts still describe the

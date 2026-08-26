@@ -10,7 +10,7 @@ because **no client was ever written**. This is that client.
 no prompt" and runs on the `/resume` hot path. Proposal §2d is explicit that a
 recall must not become a live HTTP call: a DNS blip, a suspended laptop or a
 cluster reconcile would turn "orient me" into an error, or — worse — into an
-empty screen that reads like "nothing recorded". So `store` syncs the store into
+empty screen that reads like "nothing recorded". So `cairn` syncs the store into
 a local cache and runs the **unmodified** reader against it. Nothing in
 `scripts/lib/` is imported-and-patched, monkeypatched or forked here.
 
@@ -553,7 +553,7 @@ def _report(args: argparse.Namespace, *, search: str | None) -> int:
         return hint
 
     # `scope_for_repo` raises GitError outside a git repo — previously uncaught,
-    # so `store recall` in a plain directory exited 1 with a traceback and the
+    # so `cairn recall` in a plain directory exited 1 with a traceback and the
     # EXIT_USAGE path below was unreachable for the commonest way to hit it.
     try:
         scope = args.scope or scope_for_repo(args.repo)
@@ -608,7 +608,7 @@ def _report(args: argparse.Namespace, *, search: str | None) -> int:
     # promised this ("the reader's own non-zero codes pass through unchanged so
     # a malformed entry still reports what it always did") while the code
     # hardcoded 0. Measured on an all-malformed scope: `subsystem_recall.py`
-    # exited 3, `store recall` exited 0. The stdout text was loud either way, so
+    # exited 3, `cairn recall` exited 0. The stdout text was loud either way, so
     # a human was not deceived — but `/resume` step 4 branches on the CODE, and
     # a machine consumer was. `_exit_for` is the reader's own decision, reused
     # rather than re-derived, exactly as the server does in `_serve_report`.
@@ -656,7 +656,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
         return hint
     print(banner(state, detail), file=sys.stderr)
     # 🔴 THE CACHE IS A MULTI-SCOPE STORE; `--validate` IS SCOPE-BOUND. With no
-    # `--scope` the writer derives one from the REPO, so `store validate` in any
+    # `--scope` the writer derives one from the REPO, so `cairn validate` in any
     # checkout validated a scope the cache does not hold and printed "NOTHING
     # WAS CHECKED — a zero here is NOT a clean bill of health" while exiting 0.
     # That is the silent zero this command exists to detect, committed by the
@@ -666,7 +666,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
         # 🔴 THE SILENT ZERO THIS FUNCTION WAS REWRITTEN TO CLOSE, STILL OPEN ON
         # THIS BRANCH. The no-scope path was fixed to enumerate the cache; the
         # explicit `--scope` path passed the value straight through, so
-        # `store validate --scope no-such-scope` printed the writer's own
+        # `cairn validate --scope no-such-scope` printed the writer's own
         # "NOTHING WAS CHECKED — a zero here is NOT a clean bill of health" and
         # exited 0. The docstring above names that failure mode verbatim while
         # the branch that commits it went unguarded — the fix covered the case

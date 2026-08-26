@@ -741,23 +741,38 @@ class TestEntryTableCellsHaveBehaviour:
         secret.write_text("BEGIN OPENSSH PRIVATE KEY — outside the store")
         (source_store / "widget-cfg" / "innocent.md").symlink_to(secret)
 
-        code, body = self._snapshot_members(live_store.base)
-        assert code == 503, body[:300]
-        assert "innocent.md" in body and "link-to-file refused" in body, body[:300]
-        # 🔴 THE BELT-AND-BRACES LINE HERE USED TO BE VACUOUS, and its comment
-        # claimed the opposite: `assert "OPENSSH PRIVATE KEY" not in body` CANNOT
-        # fail on a 200, because `/snapshot` ships `w:gz` — the plaintext is
-        # never in the raw body. Measured: on a tar.gz containing exactly that
-        # string, the substring is absent from the raw bytes while the
-        # round-tripped member content IS the secret. So it has to decompress.
+        # 🔴 THE LEAK CHECK RUNS FIRST, AND THE ORDER IS THE WHOLE FIX.
+        #
+        # v1 of this line was `assert "OPENSSH PRIVATE KEY" not in body` — which
+        # CANNOT fail on a 200, because `/snapshot` ships `w:gz` and the
+        # plaintext is never in the raw bytes. v2 decompressed correctly but sat
+        # BELOW `assert code == 503`, which dominates it: with the mutant the
+        # test dies on the status line and the leak block never executes.
+        # Measured both ways — unmutated, `raw is None` so the block was skipped;
+        # mutated, pytest never reached it. So v2 left the suite byte-for-byte
+        # as it was before v1 was "fixed": an assertion that cannot fail became
+        # an assertion that does not run.
+        #
+        # Hoisted above the status assert, and no `if raw is not None` guard —
+        # that guard was a second inertia path (`_snapshot_raw` returns None on
+        # ANY HTTPError, so a 429 from the limiter would silently skip it too).
         raw = self._snapshot_raw(live_store.base)
-        if raw is not None:
+        if raw is not None:  # a 200 came back: it MUST NOT carry the secret
             with tarfile.open(fileobj=io.BytesIO(raw), mode="r") as tar:
+                names = tar.getnames()
                 for member in tar.getmembers():
                     handle = tar.extractfile(member)
                     content = handle.read() if handle is not None else b""
                     assert b"OPENSSH PRIVATE KEY" not in content, member.name
-                assert "widget-cfg/innocent.md" not in tar.getnames()
+                assert "widget-cfg/innocent.md" not in names, names
+            raise AssertionError(
+                "/snapshot answered 200 for a store containing a symlinked "
+                f"entry; it must refuse. members={names}"
+            )
+
+        code, body = self._snapshot_members(live_store.base)
+        assert code == 503, body[:300]
+        assert "innocent.md" in body and "link-to-file refused" in body, body[:300]
 
     def test_a_FIFO_named_md_is_refused_rather_than_opened(
         self, source_store: Path, live_store, tmp_path: Path
