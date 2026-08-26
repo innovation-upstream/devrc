@@ -281,6 +281,10 @@ unset GIT_ASKPASS SSH_ASKPASS 2>/dev/null || true
 # export would resurrect #782 with no test able to see it.
 # scripts/tests/test_push_keepalive.py asserts every GIT_SSH_COMMAND export in
 # this repo carries it.
+# ⚠ The `:-` means an INHERITED value wins and then carries no keepalive, and
+# that ledger cannot see it — it reads this literal default. Left as-is (an
+# operator who sets the variable owns it), but it is a blind spot, not a
+# guarantee.
 export GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=30 -o ServerAliveCountMax=6}"
 
 # 🔴 NOT a function whose output is captured. `degrade` EXITS, and an `exit`

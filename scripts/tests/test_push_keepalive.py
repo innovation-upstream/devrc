@@ -49,10 +49,25 @@ WHAT IS REGRESSION COVERAGE HERE AND WHAT IS NOT (RULES.md asks for the label):
     setting only the interval silently introduces a 90 s disconnect trigger on
     EVERY git-over-ssh operation on the host. Inheriting that silently is the
     defect; declaring it is the fix.
+  * `test_every_GIT_SSH_COMMAND_export_carries_the_keepalive` is a LEDGER, and
+    REGRESSION coverage for a bypass: `GIT_SSH_COMMAND` (env) beats
+    `core.sshCommand` (config), so any script exporting it discards the fix.
   * `test_the_setting_is_reachable_from_the_home_manager_entry_point` is an
     INVARIANT GUARD, and it is the one that would have caught the original
     misplacement: a setting in a file nothing imports ships nothing. It is
     labelled as a guard and NOT counted as regression coverage for #782.
+
+(Five tests, and the list above has one entry each — count it rather than
+trusting a total maintained in parallel with the thing it counts.)
+
+🔴 WHAT THIS FILE STILL CANNOT SEE, STATED SO NOBODY READS IT AS WIDER:
+  * `scripts/claim-work.sh` uses `${GIT_SSH_COMMAND:-…}`. An INHERITED outer
+    value wins and the keepalive is then silently absent, while the ledger reads
+    the literal default and passes. Pre-dates this change and is only reachable
+    from an operator's or a parent agent's environment — but the ledger is
+    structurally blind to it, and that is not the same as it being safe.
+  * The setting shipping is not the setting being LIVE. It reaches a host only
+    after `home-manager switch`; until then #782 is unmitigated there.
 
 🔴 THIS FILE PARSES NIX SOURCE TEXT, WHICH IS A WEAKER INSTRUMENT THAN
 EVALUATING IT, AND THAT IS A DELIBERATE TRADE. Evaluating would mean shelling
@@ -75,6 +90,38 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 GIT_MODULE = REPO_ROOT / "nix" / "programs" / "git" / "default.nix"
 PROGRAMS_INDEX = REPO_ROOT / "nix" / "programs" / "default.nix"
 SCRIPTS = REPO_ROOT / "scripts"
+GITHOOKS = REPO_ROOT / "githooks"
+HOME_NIX = REPO_ROOT / "nix" / "home.nix"
+
+# Assembled, not spelled, so THIS file's own text cannot register as one of the
+# assignments the ledger below enumerates.
+NEEDLE = "GIT_SSH_" + "COMMAND="
+
+
+def _searchable_files() -> list[Path]:
+    """Every file that could plausibly set the variable — not just `*.sh`.
+
+    🔴 A FIRST VERSION GLOBBED `scripts/**/*.sh` WHILE ITS DOCSTRING CLAIMED IT
+    "fails when the set GROWS". An audit walked it three ways, all real shapes in
+    this tree: a `.py` under `scripts/`; an EXTENSIONLESS shell script (there are
+    43 of them here — `run3`, `dogfood-cycle`, `mail-triage`, …); and anything in
+    `githooks/`, which is the directory hosting the very pre-push hook whose
+    runtime caused #782 and which is not under `scripts/` at all.
+
+    So the scan is defined by "a text file in the two directories that hold
+    executable code", never by extension. Breadth is the point of a ledger; an
+    enumeration narrower than its own sentence is a coverage claim nobody can
+    see is false.
+    """
+    out: list[Path] = []
+    for root in (SCRIPTS, GITHOOKS):
+        if not root.is_dir():
+            continue
+        for p in sorted(root.rglob("*")):
+            if p.is_file() and "__pycache__" not in p.parts \
+                    and p.resolve() != Path(__file__).resolve():
+                out.append(p)
+    return out
 
 # The measured close, in seconds. Named so the pins below state a RELATIONSHIP
 # rather than restate a magic number.
@@ -82,21 +129,60 @@ MEASURED_IDLE_CLOSE_S = 360
 
 
 def _module_code() -> str:
-    """The git module's CODE, comments stripped.
+    """The git module's CODE, with ALL THREE nix comment forms stripped.
 
     🔴 The header of this module quotes every token these pins look for —
     `ServerAliveInterval`, the measured numbers, the option names. A pin read off
     the raw text would answer a question about the PROSE and pass on a module
     whose actual setting had been deleted.
+
+    🔴 A FIRST VERSION STRIPPED ONLY WHOLE-LINE `#`, AND AN AUDIT WALKED IT.
+    Nix has three comment forms and the delete-shape a reviewer would actually
+    reach for is the one that was missed: wrapping the setting in a `/* … */`
+    block left the suite at 5 passed while `nix eval` confirmed `sshCommand` was
+    genuinely ABSENT from the settings attrset. A trailing `#` on a code line did
+    the same. This docstring used to claim exactly the protection it did not
+    provide, which is the failure mode worth naming: reading as coverage while
+    supplying none is worse than none, because it stops anyone looking.
+
+    `#` is only treated as a comment OUTSIDE a double-quoted string, so the `#`
+    that may legitimately appear inside an option value cannot truncate the line
+    being measured.
     """
     src = GIT_MODULE.read_text(encoding="utf-8")
-    return "\n".join(ln for ln in src.splitlines()
-                     if not ln.lstrip().startswith("#"))
+    src = re.sub(r"/\*.*?\*/", "", src, flags=re.S)   # block comments
+    out: list[str] = []
+    for line in src.splitlines():
+        in_str = False
+        cut = len(line)
+        i = 0
+        while i < len(line):
+            ch = line[i]
+            if ch == "\\" and in_str:
+                i += 2
+                continue
+            if ch == '"':
+                in_str = not in_str
+            elif ch == "#" and not in_str:
+                cut = i
+                break
+            i += 1
+        out.append(line[:cut])
+    return "\n".join(out)
 
 
 def _ssh_command() -> str:
-    """The declared `core.sshCommand` value, or "" if absent."""
-    m = re.search(r'core\.sshCommand\s*=\s*"([^"]*)"\s*;', _module_code())
+    """The declared `core.sshCommand` value, or "" if absent.
+
+    🔴 ANCHORED. An unanchored `core\\.sshCommand` also matches
+    `notcore.sshCommand = …` and any value nested under a scoped
+    `includeIf`/`includes` block that applies to a subtree rather than globally —
+    both verified to pass before this anchor was added. The setting must be a
+    top-level attribute of the settings attrset to apply to every repo, which is
+    the whole claim.
+    """
+    m = re.search(r'^\s*core\.sshCommand\s*=\s*"([^"]*)"\s*;',
+                  _module_code(), re.M)
     return m.group(1) if m else ""
 
 
@@ -198,16 +284,41 @@ def test_the_setting_is_reachable_from_the_home_manager_entry_point():
     setting ships" are different claims. This pins the second, as far as a text
     read can: the module this file asserts on must actually be imported by the
     aggregator `nix/home.nix` builds `programs` from.
+
+    🔴 IT MUST CHECK THE WHOLE CHAIN, AND A FIRST VERSION CHECKED ONE LINK.
+    An audit walked it: commenting out `programs = programs;` in `nix/home.nix`
+    — which makes every setting in this module ship NOTHING — left the suite at
+    5 passed. And `import\\s+\\./git\\b` matches `import ./git-old`, because `-`
+    is a word boundary, so redirecting the import to a different module also
+    passed. Both are now covered. The chain is:
+
+        nix/home.nix  programs = programs;
+          -> nix/programs/default.nix  git = import ./git {};
+            -> nix/programs/git/default.nix  core.sshCommand = …
     """
     index = PROGRAMS_INDEX.read_text(encoding="utf-8")
     code = "\n".join(ln for ln in index.splitlines()
                      if not ln.lstrip().startswith("#"))
-    assert re.search(r"import\s+\./git\b", code), (
-        f"{PROGRAMS_INDEX} no longer imports ./git — the module this file "
-        "asserts on would generate nothing")
+    # `\b` is NOT enough: `./git-old` matches it. Require the import to be
+    # followed by nix argument-set syntax, which `./git-old {}` cannot satisfy
+    # while still naming ./git.
+    assert re.search(r"import\s+\./git\s*\{", code), (
+        f"{PROGRAMS_INDEX} no longer imports ./git (or imports a DIFFERENT "
+        "module whose name starts with 'git') — the module this file asserts "
+        "on would generate nothing")
     assert re.search(r"^\s*git\s*=\s*git\s*;", code, re.M), (
         f"{PROGRAMS_INDEX} imports ./git but does not expose it as `git`, so "
         "home-manager's programs.git never receives these settings")
+    # The link above that one: home.nix must actually hand `programs` to
+    # home-manager. Without this the whole aggregator is inert and every
+    # assertion in this file is about a file nothing reads.
+    home = HOME_NIX.read_text(encoding="utf-8")
+    home_code = "\n".join(ln for ln in home.splitlines()
+                          if not ln.lstrip().startswith("#"))
+    assert re.search(r"^\s*programs\s*=\s*programs\s*;", home_code, re.M), (
+        f"{HOME_NIX} no longer assigns `programs = programs;`, so "
+        f"{PROGRAMS_INDEX} is built but never handed to home-manager — every "
+        "setting in nix/programs/git ships nothing")
 
 
 # --------------------------------------------------------------------------- #
@@ -230,15 +341,25 @@ def test_every_GIT_SSH_COMMAND_export_carries_the_keepalive():
     """
     offenders: list[str] = []
     found_any = False
-    for path in sorted(SCRIPTS.rglob("*.sh")):
-        for i, line in enumerate(path.read_text(encoding="utf-8",
-                                                errors="replace").splitlines(), 1):
+    for path in _searchable_files():
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue          # binary or unreadable: cannot assign a shell var
+        for i, line in enumerate(text.splitlines(), 1):
             stripped = line.lstrip()
-            if stripped.startswith("#") or "GIT_SSH_COMMAND=" not in line:
+            if stripped.startswith("#") or NEEDLE not in line:
                 continue
             found_any = True
-            # `-o Name=value` and `-oName=value` are both valid ssh spellings.
-            if not re.search(r"-o\s*ServerAliveInterval=\d+", line):
+            # 🔴 Search the ASSIGNMENT'S VALUE, not the whole line. A line-wise
+            # match is satisfied by an unrelated neighbour —
+            #   export OTHER="ssh -o ServerAliveInterval=30"; export GIT_SSH_...="ssh"
+            # passed before this narrowing. Green for a reason unrelated to the
+            # option is the shape this whole file exists to avoid.
+            value = line.split(NEEDLE, 1)[1]
+            # `-o Name=value` and `-oName=value` are both valid ssh spellings
+            # (confirmed against `ssh -G`), and both are in use in this repo.
+            if not re.search(r"-o\s*ServerAliveInterval=\d+", value):
                 offenders.append(f"{path.relative_to(REPO_ROOT)}:{i}: {stripped}")
 
     # 🔴 POSITIVE CONTROL. Without this, a glob that matched nothing — a moved
