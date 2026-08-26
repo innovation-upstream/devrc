@@ -148,11 +148,13 @@ from __future__ import annotations
 import argparse
 import hashlib
 import hmac
+import io
 import ipaddress
 import math
 import os
 import re
 import sys
+import tarfile
 import threading
 import time
 from datetime import datetime, timezone
@@ -1624,6 +1626,9 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
             if len(parts) == 2 and parts[0] == "search":
                 self._search(parts[1], params)
                 return
+            if len(parts) == 1 and parts[0] == "snapshot":
+                self._snapshot(params)
+                return
         except ValueError as exc:
             # A caller error, and the caller is authenticated, so it may be told
             # what it did wrong.
@@ -1735,6 +1740,134 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
             report.malformed,
             rc.render_search(report),
         )
+
+    def _snapshot(self, params: dict[str, list[str]]) -> None:
+        """Ship the store's entry files as a tar, so a client can hold a CACHE.
+
+        🔴 WHY A SECOND READ ROUTE EXISTS AT ALL, given `/recall` already
+        renders. `/recall` returns a RENDERED digest for one query. A client that
+        can only replay rendered answers is online-only in practice: the laptop
+        suspends and travels, and `/resume` must not turn into an error or — far
+        worse — an empty screen when the pod is unreachable (§2d, which states
+        outright that `subsystem_recall.py` keeps its no-network property and the
+        WRAPPER owns the network). Serving the files lets the client run the
+        unmodified local reader against its own copy, so an offline query it has
+        never asked before still answers.
+
+        🔴 THIS ROUTE IS READ-ONLY AND PHASE 2 STAYS READ-ONLY. It adds a GET; it
+        does not add a write verb, and `do_POST = do_PUT = do_PATCH = do_DELETE
+        = _reject_write` is untouched. `TestPhaseOneScope` has TWO guards and
+        only the route-ledger one moves — deliberately, so the write guard is
+        still the thing that has to be broken on purpose when phase 3 lands.
+
+        🔴 MTIMES ARE PRESERVED, AND THAT IS LOAD-BEARING, NOT TIDINESS. The
+        reader orders the index "NEWEST-FIRST by entry-file mtime". A tar built
+        with normalised mtimes — the usual move for reproducibility — would
+        reorder every digest rendered from the extracted copy, so the client's
+        output would differ from the pod's for content that is byte-identical.
+        That failure is invisible: no error, no missing entry, just a different
+        order that reads as a stale cache. uid/gid/uname/gname/mode ARE
+        normalised, since none of them reaches the reader.
+
+        What is shipped is exactly what the reader consumes — `<scope>/<x>.md`
+        at depth 2 — plus the seed stamp, so the client can date the copy for
+        itself instead of trusting a header. Nothing else: no `.git`, no dot
+        directories, no deeper paths.
+        """
+        root = Path(self.store_root)
+        wanted = params.get("scope")
+        scope_filter = wanted[-1] if wanted else None
+        if scope_filter is not None and not SAFE_PATH_COMPONENT.fullmatch(scope_filter):
+            # Same refusal as a bad path component: this value reaches the
+            # filesystem, and the caller is authenticated so it may be told.
+            self._respond(
+                400,
+                b"bad request: invalid scope\n",
+                headers={"X-Store-Status": "bad-request"},
+            )
+            self._audit(urlsplit(self.path).path, 400, "bad-request")
+            return
+
+        try:
+            scopes = sorted(
+                p
+                for p in root.iterdir()
+                if p.is_dir() and not p.name.startswith(".")
+                and (scope_filter is None or p.name == scope_filter)
+            )
+        except OSError as exc:
+            # 🔴 The store was NOT read. Same state, same code and the same
+            # reasoning as `_recall`'s: an empty tar and an unreadable store must
+            # never render alike, because one of them is a lie.
+            self._respond(
+                503,
+                f"store unreadable: {exc}\n".encode("utf-8"),
+                headers={"X-Store-Status": "store-unreachable", "X-Store-Exit": "3"},
+            )
+            self._audit(urlsplit(self.path).path, 503, "store-unreachable")
+            return
+
+        def _member(path: Path, arcname: str) -> tarfile.TarInfo:
+            st = path.stat()
+            info = tarfile.TarInfo(arcname)
+            info.size = st.st_size
+            # 🔴 SUB-SECOND PRECISION IS PART OF "PRESERVED", and `int()` here
+            # was a real bug caught by a test, not a hypothetical. Entries
+            # written in the same second tie on a whole-second mtime, so the
+            # reader falls back to its ref tie-break and the extracted copy
+            # orders its index DIFFERENTLY from the source — same bytes, same
+            # count, different order, no error. That is why the tar is opened
+            # PAX_FORMAT below: ustar stores mtime as integer octal seconds and
+            # structurally cannot carry the fraction.
+            info.mtime = st.st_mtime  # float — see PAX_FORMAT below
+            info.mode = 0o644
+            info.uid = info.gid = 0
+            info.uname = info.gname = ""
+            info.type = tarfile.REGTYPE
+            return info
+
+        buf = io.BytesIO()
+        count = 0
+        try:
+            with tarfile.open(fileobj=buf, mode="w", format=tarfile.PAX_FORMAT) as tar:
+                stamp = root / SEED_STAMP_NAME
+                if stamp.is_file():
+                    with stamp.open("rb") as fh:
+                        tar.addfile(_member(stamp, SEED_STAMP_NAME), fh)
+                for scope in scopes:
+                    for entry in sorted(scope.glob("*.md")):
+                        if not entry.is_file():
+                            continue
+                        arcname = f"{scope.name}/{entry.name}"
+                        with entry.open("rb") as fh:
+                            tar.addfile(_member(entry, arcname), fh)
+                        count += 1
+        except OSError as exc:
+            self._respond(
+                503,
+                f"store unreadable: {exc}\n".encode("utf-8"),
+                headers={"X-Store-Status": "store-unreachable", "X-Store-Exit": "3"},
+            )
+            self._audit(urlsplit(self.path).path, 503, "store-unreachable")
+            return
+
+        fresh_header, _prose = snapshot_freshness(self.store_root)
+        self._respond(
+            200,
+            buf.getvalue(),
+            content_type="application/x-tar",
+            headers={
+                "X-Store-Status": "snapshot",
+                "X-Store-Exit": "0",
+                "X-Store-Snapshot": fresh_header,
+                # The client reports "N entries cached" from its own extraction;
+                # this is the SERVER's count of what it put in, so a truncated
+                # transfer is visible as a disagreement rather than a smaller
+                # number nobody can compare against.
+                "X-Store-Entries": str(count),
+            },
+        )
+        self._audit(urlsplit(self.path).path, 200, "snapshot")
 
 
 def build_server(

@@ -49,8 +49,10 @@ import hashlib
 import http.client
 import importlib.util
 from testlib import hermetic_git  # noqa: E402
+import io
 import os
 import re
+import tarfile
 import secrets
 import subprocess
 import sys
@@ -952,6 +954,203 @@ class TestReadOnlyPhase1:
 # =============================================================================
 
 
+class TestSnapshotRoute:
+    """Phase 2's cache-fill route: `GET /api/v1/snapshot` ships the entry files.
+
+    🔴 The property under test is NOT "a tar came back". It is that a digest
+    rendered from the EXTRACTED copy is byte-identical to one rendered from the
+    source — because that is what makes a client's offline answer the same
+    answer, and it is the thing a plausible tar gets silently wrong.
+    """
+
+    @staticmethod
+    def _members(body: bytes) -> dict[str, tarfile.TarInfo]:
+        with tarfile.open(fileobj=io.BytesIO(body), mode="r") as tar:
+            return {m.name: m for m in tar.getmembers()}
+
+    @staticmethod
+    def _extract(body: bytes, dest: Path) -> Path:
+        with tarfile.open(fileobj=io.BytesIO(body), mode="r") as tar:
+            tar.extractall(dest)
+        return dest
+
+    def test_it_ships_every_entry_and_counts_them(self, store: Path):
+        with running(store) as (base, _):
+            code, headers, body = fetch(f"{base}/api/v1/snapshot", token=GOOD_TOKEN)
+        assert code == 200
+        assert headers["X-Store-Status"] == "snapshot"
+        assert headers["Content-Type"] == "application/x-tar"
+        members = self._members(body)
+        on_disk = {
+            f"{p.parent.name}/{p.name}" for p in store.glob("*/*.md") if p.is_file()
+        }
+        assert on_disk, "fixture bug: the store has no entries to ship"
+        assert on_disk <= set(members), f"missing: {on_disk - set(members)}"
+        # The server's own count must agree with what it actually wrote.
+        assert int(headers["X-Store-Entries"]) == len(on_disk)
+
+    def test_a_digest_from_the_EXTRACTED_copy_is_BYTE_IDENTICAL(
+        self, store: Path, tmp_path: Path
+    ):
+        """🔴 The criterion this route exists to satisfy.
+
+        Rendered from the source vs rendered from the extracted copy. The one
+        line that legitimately differs is `store: <root>`, for exactly the
+        reason `verify-byte-identity.sh` documents — so it is canonicalised on
+        BOTH sides and nothing else is.
+        """
+        with running(store) as (base, _):
+            _c, _h, body = fetch(f"{base}/api/v1/snapshot", token=GOOD_TOKEN)
+        copy = self._extract(body, tmp_path / "cache")
+
+        def digest(root: Path) -> str:
+            report = api.rc.recall(str(root), SCOPE, mode=api.rc.DEFAULT_MODE)
+            text = api.rc.render_text(report)
+            return re.sub(r"^(\s*store:) .*$", r"\1 X", text, flags=re.M)
+
+        assert digest(copy) == digest(store)
+
+    def test_mtimes_are_PRESERVED_not_normalised(self, store: Path, tmp_path: Path):
+        """🔴 Load-bearing, and the reason a "reproducible" tar is WRONG here.
+
+        The reader orders the index newest-first by entry-file mtime. Normalising
+        mtimes — the usual reproducibility move — reorders every digest rendered
+        from the copy, with no error and nothing missing: it just reads as a
+        stale cache.
+
+        The fixture mtimes are pairwise distinct AND deliberately anti-aligned
+        with alphabetical order, so a tar that dropped mtimes cannot accidentally
+        reproduce the right ordering.
+        """
+        # This test owns its ordering requirement rather than depending on the
+        # shared fixture's shape — which holds ONE entry in this scope, so the
+        # ordering claim would have been vacuous against it.
+        for name in ("thing-beta", "thing-gamma"):
+            (store / SCOPE / f"{name}.md").write_text(
+                _entry(name, SCOPE, nuance=f"- 2026-02-01: {name} distinct nuance.")
+            )
+        entries = sorted(store.glob(f"{SCOPE}/*.md"))
+        assert len(entries) >= 3, "fixture bug: need several entries to order"
+        # 🔴 FRACTIONAL, AND SHARING ONE WHOLE SECOND. An earlier version of this
+        # test used whole-second mtimes a day apart and PASSED against a server
+        # that truncated with `int()` — the truncation was invisible because the
+        # fixture had no fraction to lose. Entries written in the same second is
+        # the NORMAL case (a `/handoff` writes several at once), and there the
+        # truncation makes every entry tie, so the reader's ref tie-break
+        # silently reorders the index. Fixture values must be able to see the
+        # mutation, or a green result is a claim about the fixture.
+        base_t = 1_700_000_000
+        for i, path in enumerate(reversed(entries)):
+            stamp = base_t + 0.1 * (i + 1)  # same second, distinct fractions
+            os.utime(path, (stamp, stamp))
+        want = {f"{p.parent.name}/{p.name}": p.stat().st_mtime for p in entries}
+        assert len({int(v) for v in want.values()}) == 1, (
+            "fixture bug: the mtimes must share a whole second, or truncation "
+            "is not exercised"
+        )
+
+        with running(store) as (base, _):
+            _c, _h, body = fetch(f"{base}/api/v1/snapshot", token=GOOD_TOKEN)
+        members = self._members(body)
+        for name, mtime in want.items():
+            assert members[name].mtime == pytest.approx(mtime, abs=1e-4), (
+                f"{name}: snapshot lost sub-second mtime precision"
+            )
+
+        copy = self._extract(body, tmp_path / "cache")
+        for name, mtime in want.items():
+            assert (copy / name).stat().st_mtime == pytest.approx(mtime, abs=1e-4)
+
+    def test_the_index_ORDER_survives_a_round_trip(self, store: Path, tmp_path: Path):
+        """The behavioural consequence of the mtime test above.
+
+        Preserving mtimes is a means; this is the end. Asserted separately
+        because a structural mtime check passes for a tar whose ordering the
+        reader still disagrees with — e.g. if the reader's tie-break changed.
+        """
+        for name in ("thing-beta", "thing-gamma"):
+            (store / SCOPE / f"{name}.md").write_text(
+                _entry(name, SCOPE, nuance=f"- 2026-02-01: {name} distinct nuance.")
+            )
+        base_t = 1_700_000_000
+        for i, path in enumerate(sorted(store.glob(f"{SCOPE}/*.md"))):
+            stamp = base_t + 0.1 * (i + 1)
+            os.utime(path, (stamp, stamp))
+
+        with running(store) as (base, _):
+            _c, _h, body = fetch(f"{base}/api/v1/snapshot", token=GOOD_TOKEN)
+        copy = self._extract(body, tmp_path / "cache")
+
+        def index_order(root: Path) -> list[str]:
+            report = api.rc.recall(str(root), SCOPE, mode=api.rc.DEFAULT_MODE)
+            return [
+                line.split()[0]
+                for line in api.rc.render_text(report).splitlines()
+                if line.startswith("  ") and line.strip() and "nuance" in line
+            ]
+
+        source_order = index_order(store)
+        assert len(source_order) >= 3, f"fixture bug: got {source_order}"
+        assert index_order(copy) == source_order
+
+    def test_the_mtime_assertion_can_SEE_a_normalised_tar(self, store: Path):
+        """Positive control for the test above: build the tar the WRONG way and
+        watch the same comparison fail. Without this, a snapshot that happened to
+        preserve mtimes and one whose mtimes were never checked look alike."""
+        entries = sorted(store.glob(f"{SCOPE}/*.md"))
+        os.utime(entries[0], (1_700_000_000, 1_700_000_000))
+        want = int(entries[0].stat().st_mtime)
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w") as tar:
+            info = tarfile.TarInfo(f"{SCOPE}/{entries[0].name}")
+            info.size = entries[0].stat().st_size
+            info.mtime = 0  # the mutation: normalised, as a "reproducible" tar would
+            with entries[0].open("rb") as fh:
+                tar.addfile(info, fh)
+        members = self._members(buf.getvalue())
+        got = members[f"{SCOPE}/{entries[0].name}"].mtime
+        assert got != want, "the control cannot distinguish a normalised tar"
+
+    def test_scope_filter_ships_only_that_scope(self, store: Path):
+        with running(store) as (base, _):
+            _c, _h, body = fetch(
+                f"{base}/api/v1/snapshot?scope={SCOPE}", token=GOOD_TOKEN
+            )
+        names = [n for n in self._members(body) if n.endswith(".md")]
+        assert names, "filtered snapshot shipped nothing"
+        assert all(n.startswith(f"{SCOPE}/") for n in names), names
+
+    def test_an_invalid_scope_is_a_400_not_a_traversal(self, store: Path):
+        with running(store) as (base, _):
+            code, headers, _b = fetch(
+                f"{base}/api/v1/snapshot?scope=../../etc", token=GOOD_TOKEN
+            )
+        assert code == 400
+        assert headers["X-Store-Status"] == "bad-request"
+
+    def test_it_requires_a_token(self, store: Path):
+        with running(store) as (base, _):
+            code, _h, _b = fetch(f"{base}/api/v1/snapshot")
+        assert code == 401
+
+    def test_it_ships_no_dot_dirs_and_no_non_markdown(self, store: Path):
+        (store / SCOPE / "notes.txt").write_text("not an entry")
+        (store / ".git").mkdir(exist_ok=True)
+        (store / ".git" / "HEAD").write_text("ref: refs/heads/main")
+        with running(store) as (base, _):
+            _c, _h, body = fetch(f"{base}/api/v1/snapshot", token=GOOD_TOKEN)
+        names = set(self._members(body))
+        assert not any(n.startswith(".git") for n in names), names
+        assert not any(n.endswith(".txt") for n in names), names
+
+    def test_taking_a_snapshot_leaves_the_store_BYTE_IDENTICAL(self, store: Path):
+        before = tree_hash(store)
+        with running(store) as (base, _):
+            fetch(f"{base}/api/v1/snapshot", token=GOOD_TOKEN)
+            fetch(f"{base}/api/v1/snapshot?scope={SCOPE}", token=GOOD_TOKEN)
+        assert tree_hash(store) == before
+
+
 class TestSearchOverHTTP:
     def test_POSITIVE_a_query_that_must_hit_DOES(self, store: Path):
         with running(store) as (base, _):
@@ -1784,11 +1983,41 @@ class TestPhaseOneScope:
         for handler in ("def do_POST", "def do_PUT", "def do_PATCH", "def do_DELETE"):
             assert handler not in src
 
-    def test_the_only_routes_are_recall_and_search(self, store: Path):
-        """Behavioural, not a grep: an authenticated GET to anything else 404s.
+    # 🔴 THE LEDGER. Adding a route means adding it HERE, on purpose, in the
+    # same commit. That is the whole point of the guard below.
+    ROUTES: tuple[str, ...] = ("recall", "search", "snapshot")
 
-        A structural read of the router would be satisfied by a route added
-        through a different spelling; this walks the endpoint list.
+    def test_the_route_ledger_is_the_whole_route_set(self, store: Path):
+        """🔴 REWRITTEN 2026-08-25 — the previous version was a SPELLED guard.
+
+        It was named `test_the_only_routes_are_recall_and_search` and its
+        docstring claimed it "walks the endpoint list". It did not: it probed
+        four hardcoded non-routes (`/entry/x/y/bullets`, `/scopes`, `/sync`,
+        `/api/v1/`) and asserted each 404s. So a route added under any OTHER
+        name passed it — MEASURED: `/api/v1/snapshot` was added to the server
+        and all three tests in this class stayed green. A guard that reads as
+        "the only routes are X and Y" while permitting Z is worse than none,
+        because it stops anyone looking.
+
+        This version derives the accepted set from the router itself and asserts
+        it EQUALS the ledger — so it fails when the set GROWS *or* SHRINKS, and
+        a new route cannot be added without editing `ROUTES` deliberately.
+        """
+        src = SERVER_PATH.read_text()
+        # Every dispatch arm has the shape `parts[0] == "<name>"`.
+        accepted = set(re.findall(r'parts\[0\]\s*==\s*"([a-z0-9-]+)"', src))
+        assert accepted == set(self.ROUTES), (
+            f"router accepts {sorted(accepted)} but the ledger says "
+            f"{sorted(self.ROUTES)} — add it to ROUTES on purpose, or remove it"
+        )
+
+    def test_anything_outside_the_ledger_404s(self, store: Path):
+        """Behavioural companion to the structural ledger above.
+
+        The ledger reads the source; this proves the server actually refuses.
+        Both are needed: a structural check type-checks past a router that
+        accepts a name it never dispatches, and a behavioural sample cannot see
+        a route it did not think to name.
         """
         with running(store) as (base, _):
             for path in (
@@ -1800,6 +2029,27 @@ class TestPhaseOneScope:
                 code, headers, _b = fetch(f"{base}{path}", token=GOOD_TOKEN)
                 assert code == 404, f"{path} answered {code}"
                 assert headers["X-Store-Status"] == "no-route"
+
+    def test_the_ledger_guard_can_SEE_an_unledgered_route(self, store: Path):
+        """🔴 Positive control for the ledger. A guard built from a regex that
+        matches nothing would pass for every possible router, so the regex is
+        fed a router arm it MUST catch."""
+        fake = 'if len(parts) == 2 and parts[0] == "exfiltrate":\n'
+        accepted = set(re.findall(r'parts\[0\]\s*==\s*"([a-z0-9-]+)"', fake))
+        assert accepted == {"exfiltrate"}, "the ledger regex matches nothing"
+
+    def test_the_snapshot_route_added_NO_write_verb(self, store: Path):
+        """Phase 2 adds a READ route. The write guard above must be untouched by
+        it — stated as its own test so "phase 2 stayed read-only" is a checked
+        claim rather than a sentence in a commit message."""
+        with running(store) as (base, _):
+            for method in ("POST", "PUT", "PATCH", "DELETE"):
+                code, headers, body = fetch(
+                    f"{base}/api/v1/snapshot", token=GOOD_TOKEN, method=method
+                )
+                assert code == 405, f"{method} answered {code}"
+                assert headers["Allow"] == "GET, HEAD"
+                assert body == b"read-only\n"
 
     def test_nothing_in_this_directory_writes_to_the_store(self):
         for path in sorted(API_DIR.iterdir()):

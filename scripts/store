@@ -1,0 +1,442 @@
+#!/usr/bin/env python3
+"""`store` — the read-through client for the hosted subsystem store (phase 2).
+
+WHAT THIS IS FOR. The pod at `store.zacx.dev/api/` has served a read-only API
+since 2026-08-16 and logged 309 requests, all from the session that built it,
+because **no client was ever written**. This is that client.
+
+🔴 THE READER KEEPS ITS NO-NETWORK PROPERTY; THIS WRAPPER OWNS THE NETWORK.
+`subsystem_recall.py` documents itself "READ-ONLY. No clock, no network, no git,
+no prompt" and runs on the `/resume` hot path. Proposal §2d is explicit that a
+recall must not become a live HTTP call: a DNS blip, a suspended laptop or a
+cluster reconcile would turn "orient me" into an error, or — worse — into an
+empty screen that reads like "nothing recorded". So `store` syncs the store into
+a local cache and runs the **unmodified** reader against it. Nothing in
+`scripts/lib/` is imported-and-patched, monkeypatched or forked here.
+
+🔴 WHY A STATE LINE IS PRINTED BEFORE EVERY REPORT, AND WHY IT IS NOT OPTIONAL.
+The server prepends a provenance banner to every response for a measured reason
+(`server.py::snapshot_freshness`): on 2026-08-20 the public endpoint answered
+`ALL 5 entries in devrc/, none omitted` while the source held 9, and one served
+entry was a 40-day-old copy of a file edited that morning. Nothing was wrong;
+nothing was current either. Running the reader locally against a cache would
+DROP that banner and reintroduce exactly that confusion, because the reader's
+"none omitted" is a truthful claim about whatever bytes it was pointed at. So
+this client states, in the output itself, which of four states produced it:
+
+    live                          fetched just now                        exit 0
+    cached (stale <age>)          pod unreachable, served from cache      exit 0
+    scope-empty                   reached the store, genuinely nothing    exit 0
+    store-unreachable, no cache   nothing was read at all                 exit 3
+
+🔴 The fourth is the one that must never be collapsed into the third. `scope-empty`
+and `store-unreachable` both "print no entries", and one of them is a lie. That is
+the silent-zero class `obs-read` and `drift-check.sh` exist to defend against.
+
+CONFIG: `~/.config/subsystem-store/env` (mode 0600) — `SUBSYSTEM_STORE_URL`,
+`SUBSYSTEM_STORE_TOKEN`. Environment variables of the same name win, so a test
+can point this at a throwaway server without touching the file. See SECRETS.md.
+"""
+
+from __future__ import annotations
+
+import argparse
+import io
+import os
+import shutil
+import sys
+import tarfile
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+from typing import Sequence
+
+sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+import subsystem_recall as rc  # noqa: E402
+from subsystem_touch import scope_for_repo  # noqa: E402
+
+DEFAULT_CONFIG = Path.home() / ".config" / "subsystem-store" / "env"
+DEFAULT_CACHE = Path.home() / ".cache" / "subsystem-store"
+SYNC_STAMP = ".sync-stamp"
+DEFAULT_TIMEOUT = 20
+
+# Exit codes. 0/3 are the contract §3 pins; the reader's own non-zero codes pass
+# through unchanged so a malformed entry still reports what it always did.
+EXIT_OK = 0
+EXIT_UNREACHABLE_NO_CACHE = 3
+EXIT_USAGE = 2
+# `sync` only: the store was not reached, but a usable cache survived. Distinct
+# from 3 so a caller can tell "stale but serviceable" from "nothing at all".
+EXIT_REFRESH_FAILED = 4
+
+STATE_LIVE = "live"
+STATE_CACHED = "cached"
+STATE_EMPTY = "scope-empty"
+STATE_NO_CACHE = "store-unreachable, no cache"
+
+
+class StoreUnreachable(Exception):
+    """The pod could not be read. Carries the reason, never a bare failure.
+
+    🔴 The reason is mandatory: criterion 5 of the card this implements is that
+    an unreachable host is reported as UNMEASURED **with a reason**, never as a
+    silent success or a zero.
+    """
+
+
+def load_config(path: Path | None = None) -> tuple[str, str]:
+    """`(url, token)` from the env file, with real environment taking priority.
+
+    A missing file is not fatal on its own — the caller may have exported both
+    values — but a missing VALUE is, and it says which one. "No token" must not
+    degrade into an unauthenticated request that comes back 401 and gets read as
+    "the store is down".
+    """
+    path = path or Path(os.environ.get("SUBSYSTEM_STORE_CONFIG", DEFAULT_CONFIG))
+    from_file: dict[str, str] = {}
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            from_file[key.strip()] = value.strip()
+    except OSError:
+        pass
+
+    url = os.environ.get("SUBSYSTEM_STORE_URL") or from_file.get("SUBSYSTEM_STORE_URL")
+    token = os.environ.get("SUBSYSTEM_STORE_TOKEN") or from_file.get(
+        "SUBSYSTEM_STORE_TOKEN"
+    )
+    missing = [
+        n
+        for n, v in (("SUBSYSTEM_STORE_URL", url), ("SUBSYSTEM_STORE_TOKEN", token))
+        if not v
+    ]
+    if missing:
+        raise StoreUnreachable(
+            f"config incomplete: {', '.join(missing)} not set "
+            f"(looked in {path} and the environment)"
+        )
+    return url.rstrip("/"), token  # type: ignore[union-attr,return-value]
+
+
+def fetch_snapshot(
+    url: str, token: str, *, scope: str | None, timeout: int
+) -> tuple[bytes, dict[str, str]]:
+    """GET the tar. Every failure becomes a StoreUnreachable NAMING the host."""
+    target = f"{url}/api/v1/snapshot" + (f"?scope={scope}" if scope else "")
+    req = urllib.request.Request(target, method="GET")
+    req.add_header("Authorization", f"Bearer {token}")
+    # 🔴 A User-Agent IS REQUIRED, and the default one is actively refused.
+    # MEASURED 2026-08-25 against the live host, same token, same path, three
+    # requests differing ONLY in this header:
+    #     curl's default UA    -> 200
+    #     `Python-urllib/3.12` -> 403      <-- urllib's default
+    #     empty UA             -> 200
+    # The 403 comes from the edge, not the app, so it is NOT a token rejection
+    # and NOT the store being down — but it arrives looking like both. Without
+    # this line every Python client of `store.zacx.dev` is blocked, which is
+    # exactly the shape of bug that gets diagnosed as "the store is broken".
+    req.add_header("User-Agent", "subsystem-store-client/1")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.read(), dict(resp.headers)
+    except urllib.error.HTTPError as exc:
+        raise StoreUnreachable(f"{url} answered HTTP {exc.code}") from exc
+    except urllib.error.URLError as exc:
+        raise StoreUnreachable(f"{url} unreachable: {exc.reason}") from exc
+    except OSError as exc:  # socket timeouts and friends
+        raise StoreUnreachable(f"{url} unreachable: {exc}") from exc
+
+
+def install_snapshot(body: bytes, cache: Path, headers: dict[str, str]) -> int:
+    """Replace the cache with the tar's contents, atomically-ish.
+
+    🔴 Extract to a SIBLING then swap, rather than extracting over the live
+    cache. A half-extracted cache that a concurrent `/resume` reads from would
+    report "none omitted" over a partial tree — the completeness claim again,
+    over bytes that are not a store.
+    """
+    staging = cache.parent / f"{cache.name}.new"
+    retired = cache.parent / f"{cache.name}.old"
+    for path in (staging, retired):
+        shutil.rmtree(path, ignore_errors=True)
+    staging.mkdir(parents=True, exist_ok=True)
+
+    count = 0
+    with tarfile.open(fileobj=io.BytesIO(body), mode="r") as tar:
+        for member in tar.getmembers():
+            # Defence in depth: the server already refuses unsafe components,
+            # but a client that extracts whatever it is handed is a client that
+            # trusts the server about paths on ITS filesystem.
+            name = member.name
+            if member.issym() or member.islnk() or name.startswith("/") or ".." in name:
+                raise StoreUnreachable(f"refusing unsafe tar member: {name!r}")
+            tar.extract(member, staging)
+            if name.endswith(".md"):
+                count += 1
+
+    (staging / SYNC_STAMP).write_text(
+        "\n".join(
+            [
+                f"synced={int(time.time())}",
+                f"revision={headers.get('X-Store-Revision', 'unknown')}",
+                f"snapshot={headers.get('X-Store-Snapshot', 'UNSTAMPED')}",
+                f"entries={count}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    if cache.exists():
+        cache.rename(retired)
+    staging.rename(cache)
+    shutil.rmtree(retired, ignore_errors=True)
+    return count
+
+
+def cache_age(cache: Path) -> tuple[int | None, dict[str, str]]:
+    """`(age_seconds, stamp_fields)`; age is None when the stamp is unreadable.
+
+    An unreadable stamp is NOT reported as age 0. "Fresh" is the one answer a
+    broken clock must never produce here.
+    """
+    fields: dict[str, str] = {}
+    try:
+        for line in (cache / SYNC_STAMP).read_text(encoding="utf-8").splitlines():
+            key, _, value = line.partition("=")
+            fields[key.strip()] = value.strip()
+        return max(0, int(time.time()) - int(fields["synced"])), fields
+    except (OSError, KeyError, ValueError):
+        return None, fields
+
+
+def human_age(seconds: int | None) -> str:
+    if seconds is None:
+        return "age UNKNOWN"
+    if seconds < 90:
+        return f"{seconds}s"
+    if seconds < 5400:
+        return f"{seconds // 60}m"
+    if seconds < 172800:
+        return f"{seconds // 3600}h"
+    return f"{seconds // 86400}d"
+
+
+def resolve_state(
+    cache: Path, *, no_sync: bool, scope: str | None, timeout: int
+) -> tuple[str, str, int | None]:
+    """`(state, detail, exit_hint)` — the four-state decision, in ONE place.
+
+    Every caller reads its state from here so the four cannot drift apart per
+    subcommand, which is how three of them end up rendering alike.
+    """
+    if no_sync:
+        age, fields = cache_age(cache)
+        if not (cache / SYNC_STAMP).exists():
+            return STATE_NO_CACHE, "--no-sync given and no cache exists", (
+                EXIT_UNREACHABLE_NO_CACHE
+            )
+        return (
+            STATE_CACHED,
+            f"--no-sync given; cache {human_age(age)} old, "
+            f"revision {fields.get('revision', 'unknown')}",
+            None,
+        )
+
+    try:
+        url, token = load_config()
+        body, headers = fetch_snapshot(url, token, scope=scope, timeout=timeout)
+        count = install_snapshot(body, cache, headers)
+        return (
+            STATE_LIVE,
+            f"fetched from {url} just now — {count} entries, "
+            f"snapshot {headers.get('X-Store-Snapshot', 'UNSTAMPED')}",
+            None,
+        )
+    except StoreUnreachable as exc:
+        age, fields = cache_age(cache)
+        if not (cache / SYNC_STAMP).exists():
+            # 🔴 NOTHING WAS READ. Not an empty digest, not "nothing recorded".
+            return STATE_NO_CACHE, str(exc), EXIT_UNREACHABLE_NO_CACHE
+        return (
+            STATE_CACHED,
+            f"{exc} — SERVED FROM CACHE, {human_age(age)} old, "
+            f"revision {fields.get('revision', 'unknown')}",
+            None,
+        )
+
+
+def banner(state: str, detail: str) -> str:
+    marker = "🔴" if state == STATE_NO_CACHE else ("⚠" if state == STATE_CACHED else "")
+    return f"{marker} store: {state} — {detail}".strip()
+
+
+def cmd_sync(args: argparse.Namespace) -> int:
+    """🔴 `sync` FAILS when it could not refresh, even though a cache survives.
+
+    This is deliberately different from `recall`, and the difference is the
+    whole contract. `recall`'s job is to answer, so a stale answer is a success
+    that says it is stale (exit 0). `sync`'s job is to REFRESH, so "I did not
+    reach the store" is a failed operation no matter how good the cache is —
+    exit non-zero, naming the host. A `sync` that exited 0 on an outage is how a
+    timer reports success forever while the cache silently ages out.
+    """
+    state, detail, hint = resolve_state(
+        args.cache, no_sync=False, scope=args.scope, timeout=args.timeout
+    )
+    if state == STATE_LIVE:
+        print(banner(state, detail))
+        return EXIT_OK
+    print(banner(state, detail), file=sys.stderr)
+    return hint if hint is not None else EXIT_REFRESH_FAILED
+
+
+def cmd_ls_entries(args: argparse.Namespace) -> int:
+    state, detail, hint = resolve_state(
+        args.cache, no_sync=args.no_sync, scope=None, timeout=args.timeout
+    )
+    if hint is not None:
+        print(banner(state, detail), file=sys.stderr)
+        return hint
+    print(banner(state, detail), file=sys.stderr)
+    for path in sorted(args.cache.glob("*/*.md")):
+        print(f"{path.parent.name}/{path.name}")
+    return EXIT_OK
+
+
+def _report(args: argparse.Namespace, *, search: str | None) -> int:
+    # 🔴 SYNC THE WHOLE STORE, NEVER `scope=args.scope`. A scope-filtered cache
+    # makes the reader answer `scope-absent` for every scope that was simply not
+    # fetched — indistinguishable, in the output, from a scope the store has
+    # never held. That is the silent-zero this file exists to prevent, and the
+    # first draft of this function had it.
+    state, detail, hint = resolve_state(
+        args.cache, no_sync=args.no_sync, scope=None, timeout=args.timeout
+    )
+    if hint is not None:
+        print(banner(state, detail), file=sys.stderr)
+        return hint
+
+    scope = args.scope or scope_for_repo(args.repo)
+    if not scope:
+        print("store: --scope is required (no scope could be derived)", file=sys.stderr)
+        return EXIT_USAGE
+
+    if search is not None:
+        report = rc.search(
+            str(args.cache),
+            scope,
+            search,
+            context=rc.CONTEXT_BULLET,
+            threshold=rc.DEFAULT_SEARCH_THRESHOLD,
+            max_hits=rc.DEFAULT_MAX_HITS,
+            all_scopes=args.all_scopes,
+        )
+        text = rc.render_search(report)
+    else:
+        report = rc.recall(str(args.cache), scope, mode=args.mode)
+        text = rc.render_text(report)
+
+    # An empty scope reached through a LIVE fetch is `scope-empty`; the same
+    # emptiness behind a cache stays `cached`, because we did not reach the
+    # store and cannot claim the emptiness is the store's.
+    if state == STATE_LIVE and getattr(report, "status", "") in ("scope-empty", "scope-absent"):
+        state, detail = STATE_EMPTY, "reached the store; nothing recorded for this scope"
+
+    print(banner(state, detail))
+    print()
+    print(text)
+    return EXIT_OK
+
+
+def cmd_recall(args: argparse.Namespace) -> int:
+    return _report(args, search=None)
+
+
+def cmd_search(args: argparse.Namespace) -> int:
+    return _report(args, search=args.query)
+
+
+def cmd_validate(args: argparse.Namespace) -> int:
+    """Validate the CACHE with the reader's own parser.
+
+    Deliberately the cache and not the source: this command answers "is what I
+    was served readable", which is a different question from "is my local store
+    readable" — `subsystem_recall.py --validate` already answers that one.
+    """
+    state, detail, hint = resolve_state(
+        args.cache, no_sync=args.no_sync, scope=args.scope, timeout=args.timeout
+    )
+    if hint is not None:
+        print(banner(state, detail), file=sys.stderr)
+        return hint
+    print(banner(state, detail), file=sys.stderr)
+    rc_argv = ["--store", str(args.cache), "--validate"]
+    if args.scope:
+        rc_argv += ["--scope", args.scope]
+    return rc.main(rc_argv)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="store",
+        description=(
+            "Read-through client for the hosted subsystem store. Syncs a local "
+            "cache and runs the UNMODIFIED local reader against it, so a recall "
+            "never depends on the network and never reports an unreachable "
+            "store as an empty one."
+        ),
+    )
+    p.add_argument("--cache", type=Path, default=DEFAULT_CACHE)
+    p.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    def common(sp):
+        sp.add_argument("--scope", default=None)
+        sp.add_argument("--repo", default=".")
+        sp.add_argument(
+            "--no-sync",
+            action="store_true",
+            help="skip the network entirely and read the cache as it stands",
+        )
+        return sp
+
+    s = sub.add_parser("sync", help="refresh the local cache from the pod")
+    s.add_argument("--scope", default=None)
+    s.set_defaults(func=cmd_sync)
+
+    r = common(sub.add_parser("recall", help="the scope's digest"))
+    r.add_argument("--mode", default=rc.DEFAULT_MODE)
+    r.set_defaults(func=cmd_recall)
+
+    q = common(sub.add_parser("search", help="search the scope for hunks"))
+    q.add_argument("query")
+    q.add_argument("--all-scopes", action="store_true")
+    q.set_defaults(func=cmd_search)
+
+    v = common(sub.add_parser("validate", help="parse-check the cached entries"))
+    v.set_defaults(func=cmd_validate)
+
+    e = common(sub.add_parser("ls-entries", help="one `<scope>/<entry>.md` per line"))
+    e.set_defaults(func=cmd_ls_entries)
+    return p
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    if not hasattr(args, "no_sync"):
+        args.no_sync = False
+    try:
+        return args.func(args)
+    except StoreUnreachable as exc:
+        # Reached only by a config failure outside `resolve_state`; still named.
+        print(f"🔴 store: {STATE_NO_CACHE} — {exc}", file=sys.stderr)
+        return EXIT_UNREACHABLE_NO_CACHE
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
