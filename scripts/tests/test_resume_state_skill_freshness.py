@@ -38,9 +38,11 @@ are stubbed as tripwires that log and fail.
 """
 
 import os
+import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -51,6 +53,7 @@ sys.path.insert(0, str(REPO_ROOT / "scripts"))
 from testlib.mockbin import write_exec  # noqa: E402
 
 SCRIPT = REPO_ROOT / "scripts/resume-state.sh"
+RESUME_SKILL = REPO_ROOT / "claude/skills/resume/SKILL.md"
 REL = "claude/skills/resume/SKILL.md"
 
 pytestmark = pytest.mark.skipif(
@@ -162,7 +165,13 @@ def make_deployed(tmp_path, body=None, link_to=None, skill="resume", name="claud
 
 
 def run_resume(repo, stub_bin, *, claude_dir=None, skill_repo=None, extra_env=None,
-               fetch=True, home=None):
+               fetch=True, home=None, raw=False):
+    """Run the digest and return its stdout — or the whole CompletedProcess.
+
+    `fetch=False` sets $RESUME_STATE_SKIP_FETCH, which the block declares on its
+    own line; `raw=True` hands back stderr too, because "writes nothing to
+    stderr" is a property one test asserts and stdout-only cannot see.
+    """
     d, log = stub_bin
     env = _git_env(repo)
     env["PATH"] = f"{d}{os.pathsep}{env['PATH']}"
@@ -195,7 +204,7 @@ def run_resume(repo, stub_bin, *, claude_dir=None, skill_repo=None, extra_env=No
         env=env,
     )
     assert out.returncode == 0, f"script failed rc={out.returncode}\n{out.stderr}"
-    return out.stdout
+    return out if raw else out.stdout
 
 
 def skill_lines(stdout):
@@ -343,26 +352,123 @@ def test_a_deployed_copy_matching_no_commit_is_not_a_pass(tmp_path, stub_bin):
     line = skill_line(out)
     assert "matches NO commit" in line, line
     assert "CURRENT" not in line, line
-    assert any("never pushed" in f for f in findings(out)), findings(out)
+    # the CAUSE is hedged — the exact sentence is pinned whole by
+    # test_a_matchless_deployed_copy_HEDGES_the_cause_it_did_not_measure
+    assert any("is not on origin/main" in f for f in findings(out)), findings(out)
 
 
-def test_the_history_walk_is_capped_and_says_so(tmp_path, stub_bin):
-    """Hitting the cap is "older than the newest N", never a clean answer.
+def _norm(text, checkout):
+    """The finding with its only run-dependent operand replaced.
 
-    The cap exists so a long-lived path cannot turn a resume into a thousand
-    rev-parse calls; it is env-overridable ONLY so this test can reach the
-    branch with a 3-commit fixture instead of a 201-commit one.
+    🔴 WHOLE-STRING, because the artifact under test IS PROSE. A guard on a word
+    is walkable by rewording — and the first version of the capped test asserted
+    only that `findings(out)` was non-empty, so the sentence it emitted could
+    have said anything at all, including the cause it had not measured.
     """
-    checkout, _, _ = make_devrc(tmp_path, ["v0\n", "v1\n", "v2\n"])
+    return text.replace(str(checkout), "<REPO>")
+
+
+def test_the_history_walk_is_capped_and_says_what_it_did_NOT_measure(tmp_path, stub_bin):
+    """Hitting the cap means the WALK ran out of budget — nothing more.
+
+    🔴 THE SENTENCE IS THE SUBJECT. This branch used to be routed through the
+    "built from a tree that was never pushed, so its instructions are not anyone
+    else's" wording, which is a CAUSE the scan never measured: a capped walk is
+    perfectly compatible with an ordinary old release. The whole normalised
+    finding is pinned so a reword has to come here and be argued.
+
+    BOUNDS OVERSHOOT ON PURPOSE — cap 2 over 5 commits with the deployed copy at
+    the very bottom, so the walk is genuinely exhausted rather than landing
+    exactly on its own boundary. The boundary itself is the next test's job.
+    """
+    checkout, _, _ = make_devrc(tmp_path, ["v0\n", "v1\n", "v2\n", "v3\n", "v4\n"])
     dep = make_deployed(tmp_path, body="v0\n")
     out = run_resume(
         checkout, stub_bin, claude_dir=dep, skill_repo=checkout,
-        extra_env={"RESUME_STATE_SKILL_SCAN_CAP": "1"},
+        extra_env={"RESUME_STATE_SKILL_SCAN_CAP": "2"},
     )
     line = skill_line(out)
-    assert "scan capped" in line and "older than the newest 1" in line, line
+    assert "older than the newest 2 commit(s)" in line, (
+        f"expected the capped sentence; got: {line}"
+    )
+    assert "the DISTANCE was not measured" in line, (
+        f"expected the capped sentence to say the distance was not measured; got: {line}"
+    )
     assert "CURRENT" not in line, line
-    assert findings(out), out
+
+    found = findings(out)
+    assert len(found) == 1, found
+    assert _norm(found[0], checkout) == (
+        "the /resume skill THIS SESSION IS EXECUTING is older than the newest 2 "
+        "commit(s) touching claude/skills/resume/SKILL.md on origin/main — it is "
+        "NOT current, and this run stopped at its scan cap "
+        "(RESUME_STATE_SKILL_SCAN_CAP=2) without measuring by how much; read it "
+        "with: git -C <REPO> show origin/main:claude/skills/resume/SKILL.md and "
+        "follow THAT text, not the loaded one"
+    ), _norm(found[0], checkout)
+    # the cause it did NOT measure must not appear
+    for false_cause in ("never pushed", "uncommitted tree", "not anyone else's"):
+        assert false_cause not in " ".join(found), (found, false_cause)
+
+
+def test_a_match_exactly_AT_the_cap_is_still_FOUND_not_reported_as_capped(
+    tmp_path, stub_bin
+):
+    """🔴 THE BOUNDARY, which the test above structurally cannot see.
+
+    `-gt` vs `-ge` on the scan counter is a one-character mutation. With the
+    deployed copy anywhere BELOW the cap both operators emit byte-identical
+    output, so a fixture placed there pins the wording and not the boundary —
+    measured: `-gt` -> `-ge` SURVIVED the whole suite.
+
+    This fixture puts the matching commit EXACTLY at the cap: cap 2, and the
+    deployed copy is the second commit the walk examines. `-gt` finds it and
+    reports `1 commit(s) BEHIND`; `-ge` stops one iteration early and reports
+    the capped sentence instead. Different output, so the operator is observable.
+    """
+    checkout, _, _ = make_devrc(tmp_path, ["v0\n", "v1\n", "v2\n", "v3\n"])
+    dep = make_deployed(tmp_path, body="v2\n")   # one commit back from the tip
+    out = run_resume(
+        checkout, stub_bin, claude_dir=dep, skill_repo=checkout,
+        extra_env={"RESUME_STATE_SKILL_SCAN_CAP": "2"},
+    )
+    line = skill_line(out)
+    assert "1 commit(s) BEHIND origin/main" in line, (
+        "the match sits exactly ON the cap and must still be found — an "
+        f"off-by-one in the cap test stops the walk one commit early. got: {line}"
+    )
+    assert "older than the newest" not in line, line
+
+
+def test_a_matchless_deployed_copy_HEDGES_the_cause_it_did_not_measure(
+    tmp_path, stub_bin
+):
+    """Two shapes reach "matches NO commit", and the old sentence was false of
+    one of them.
+
+    (a) built from an uncommitted tree; (b) built from a branch that is PUSHED
+    but not merged — which is what `home-manager switch --flake ~/workspace/devrc`
+    off a feature branch produces, and CLAUDE.md recommends exactly that for
+    validating a nix edit end to end. "was built from a tree that was never
+    pushed, so its instructions are not anyone else's" asserts (a) and is wrong
+    about (b). Whole normalised sentence, same reason as above.
+    """
+    checkout, _, _ = make_devrc(tmp_path, ["v0\n", "v1\n"])
+    dep = make_deployed(tmp_path, body="a revision that lives on no branch\n")
+    out = run_resume(checkout, stub_bin, claude_dir=dep, skill_repo=checkout)
+
+    found = findings(out)
+    assert len(found) == 1, found
+    normalised = _norm(found[0], checkout).replace(str(tmp_path), "<TMP>")
+    assert normalised == (
+        "the /resume skill THIS SESSION IS EXECUTING matches NO commit of "
+        "claude/skills/resume/SKILL.md on origin/main — the deployed copy at "
+        "<TMP>/claude/skills/resume/SKILL.md was built from a tree that is not on "
+        "origin/main (uncommitted, or a branch that has not merged), so what you "
+        "loaded is not what origin/main says; read it with: git -C <REPO> show "
+        "origin/main:claude/skills/resume/SKILL.md to compare"
+    ), normalised
+    assert "never pushed" not in normalised, normalised
 
 
 # --------------------------------------------------------------------------- #
@@ -435,15 +541,22 @@ def test_the_skill_repo_is_fetched_even_when_it_is_not_the_repo_being_resumed(
     assert str(project) in out, out
 
 
-def test_a_store_copy_is_labelled_as_needing_a_switch(tmp_path, stub_bin):
-    """The other side of the same fork. The label is the actionable half: a
-    store copy does not change on `git pull`, only on `home-manager switch`."""
+def test_a_non_live_copy_is_not_called_a_live_working_tree_copy(tmp_path, stub_bin):
+    """The other side of the live/not-live fork.
+
+    ⚠ This USED to assert "store copy at …" for a plain file under tmp_path, and
+    that assertion was WRONG once the label became three-way: a file that is
+    neither in a checkout nor under /nix/store is UNMANAGED, and telling its
+    reader a switch will replace it is a false instruction (see
+    test_an_UNMANAGED_foreign_file_is_not_told_a_switch_will_replace_it and
+    test_a_REAL_store_path_is_still_labelled_as_needing_a_switch, which now own
+    the two non-live arms). What survives here is the fork itself.
+    """
     checkout, _, _ = make_devrc(tmp_path, ["v0\n", "v1\n"])
     dep = make_deployed(tmp_path, body="v0\n")
     line = skill_line(run_resume(checkout, stub_bin, claude_dir=dep, skill_repo=checkout))
-    assert "store copy at" in line, line
-    assert "home-manager switch" in line, line
     assert "live working-tree copy" not in line, line
+    assert "home-manager" in line, line
 
 
 def test_uncommitted_edits_on_the_live_copy_are_not_called_stale(tmp_path, stub_bin):
@@ -476,7 +589,16 @@ def _assert_could_not_measure(out, needle):
     and one earlier expectation was matching a neighbouring guard's text.
     """
     line = skill_line(out)
-    assert "COULD NOT MEASURE" in line, f"expected COULD NOT MEASURE; got: {line}"
+    # 🔴 THE NEEDLE IS NAMED IN **BOTH** MESSAGES, not just the second. Removing
+    # one of these guards does not necessarily produce a DIFFERENT
+    # could-not-measure line — measured, removing the no-checkout guard makes
+    # `git -C ""` fall back to the CURRENT directory and report a confident
+    # CURRENT — so the first assert is the one that fires, and a message that
+    # named only the shared banner left a mutation battery unable to tell which
+    # guard had gone red.
+    assert "COULD NOT MEASURE" in line, (
+        f"expected COULD NOT MEASURE ({needle!r}); got: {line}"
+    )
     assert needle in line, f"expected {needle!r} in the skill-read line; got: {line}"
     assert "CURRENT" not in line, f"must not claim CURRENT; got: {line}"
     gaps = gap_lines(out)
@@ -542,9 +664,15 @@ def test_a_skill_absent_from_origin_is_not_reported_as_matching(tmp_path, stub_b
         extra_env={"RESUME_STATE_SKILL": "neverpushed"},
     )
     line = skill_line(out)
-    assert "COULD NOT MEASURE" in line and "is not on origin/main" in line, line
-    assert "CURRENT" not in line, line
-    assert any("neverpushed skill" in g for g in gap_lines(out)), gap_lines(out)
+    assert "COULD NOT MEASURE" in line and "is not on origin/main" in line, (
+        f"expected COULD NOT MEASURE ('is not on origin/main'); got: {line}"
+    )
+    assert "CURRENT" not in line, (
+        f"a skill absent from origin/main must not read as CURRENT; got: {line}"
+    )
+    assert any("neverpushed skill" in g for g in gap_lines(out)), (
+        f"expected a '! …/neverpushed skill …' GAP; got: {gap_lines(out)}"
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -623,6 +751,359 @@ def test_bounded_fetch_refuses_an_empty_dir_instead_of_dying(tmp_path):
     # reasoned: it passed at 200e6383 and only the exact match went red there.
     assert r.stdout.strip().splitlines()[-1] == "rc=1", r.stdout + r.stderr
     assert "bad array subscript" not in r.stderr, r.stderr
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 A FINDING MUST NOT SUPPRESS "NOTHING WAS RECONCILED"
+# --------------------------------------------------------------------------- #
+def test_a_stale_skill_does_not_suppress_the_no_handoff_notice(tmp_path, stub_bin):
+    """🔴 THE REGRESSION THIS ROUND EXISTS FOR, and the SKILL block created it.
+
+    `main` printed the "(no handoff loaded …)" notice from an `elif` under
+    `${#DRIFT[@]} -gt 0`, so ANY finding suppressed it. Before this block that
+    was nearly unreachable — every finding came from reconciling a handoff, so a
+    finding implied a handoff. A stale deployed skill is the first finding that
+    does NOT, and the combination is ordinary: run `/resume` in a repo with no
+    handoff doc, on a host whose deploy is behind.
+
+    The reader then gets a bare `-` list under a header the /resume skill defines
+    as "the lines where live state contradicts the handoff" — with no handoff
+    reconciled at all. That code's own comment says the notice exists because
+    "the reassuring shape of it is the actual harm"; a findings list without it
+    is the same harm wearing a different face.
+    """
+    checkout, _, _ = make_devrc(tmp_path, ["v0\n", "v1\n"])
+    # the fixture's handoff doc is committed to the PUSHER only, so this
+    # checkout genuinely has none
+    (checkout / "claudedocs/handoff-fixture.md").unlink()
+    dep = make_deployed(tmp_path, body="v0\n")
+    out = run_resume(checkout, stub_bin, claude_dir=dep, skill_repo=checkout)
+
+    assert "handoff: (none found — git-only)" in out, out
+    drift = drift_lines(out)
+    notice = "(no handoff loaded — nothing to reconcile; this is NOT a clean bill of health)"
+    assert notice in drift, (
+        "a finding suppressed the notice — the reader sees DRIFT findings with "
+        f"no statement that nothing was reconciled:\n{drift}"
+    )
+    # and it is not INSTEAD of the finding: both facts are independent
+    assert any("is STALE" in f for f in findings(out)), findings(out)
+    # …and it LEADS, because it frames everything under it
+    assert drift[0] == notice, drift
+
+
+def test_the_notice_still_appears_when_there_is_no_finding_at_all(tmp_path, stub_bin):
+    """POSITIVE CONTROL for the move: hoisting the notice out of the `elif`
+    chain must not lose it on the path that always had it."""
+    checkout, _, _ = make_devrc(tmp_path, ["v0\n"])
+    (checkout / "claudedocs/handoff-fixture.md").unlink()
+    dep = make_deployed(tmp_path, body="v0\n")          # current: no finding
+    drift = drift_lines(run_resume(checkout, stub_bin, claude_dir=dep, skill_repo=checkout))
+    assert drift == [
+        "(no handoff loaded — nothing to reconcile; this is NOT a clean bill of health)"
+    ], drift
+
+
+def test_the_notice_is_absent_when_a_handoff_WAS_loaded(tmp_path, stub_bin):
+    """NEGATIVE CONTROL. Printing it unconditionally would be the mirror-image
+    lie — a run that DID reconcile a doc must not claim it reconciled nothing."""
+    checkout, _, _ = make_devrc(tmp_path, ["v0\n", "v1\n"])
+    dep = make_deployed(tmp_path, body="v0\n")
+    out = run_resume(checkout, stub_bin, claude_dir=dep, skill_repo=checkout)
+    assert "handoff: handoff-fixture.md" in out, out
+    assert "no handoff loaded" not in out, (
+        "the digest claimed nothing was reconciled while it had just reconciled "
+        f"handoff-fixture.md:\n{drift_lines(out)}"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE COULD-NOT-MEASURE VOCABULARY IS DERIVED FROM THE SCRIPT, NOT RESTATED
+# --------------------------------------------------------------------------- #
+def _could_not_measure_reasons():
+    """Every reason `skill_freshness` can print, as its longest STATIC fragment.
+
+    Scraped, deliberately: an enumeration maintained by hand is an enumeration
+    that goes stale the first time someone adds a branch — measured, it already
+    had: the script grew `no origin/<default-branch> ref in …` and `could not
+    hash the deployed copy or the … blob` while SKILL.md still named five.
+    """
+    src = SCRIPT.read_text(encoding="utf-8")
+    out = set()
+    for body in re.findall(r"COULD NOT MEASURE \((.*?)\)\\n'", src):
+        # the parts between interpolations are what a doc can carry verbatim
+        frag = max((p.strip(" ;<>") for p in body.split("%s")), key=len).strip()
+        if frag:
+            out.add(frag)
+    return out
+
+
+def test_every_COULD_NOT_MEASURE_reason_the_script_can_print_is_documented():
+    """Modelled on test_resume_state_clawgate.py's clock sweep, which exists
+    because exactly this drifted once before."""
+    reasons = _could_not_measure_reasons()
+    assert len(reasons) >= 7, f"the scraper found too few reasons: {reasons}"
+    doc = RESUME_SKILL.read_text(encoding="utf-8")
+    for reason in sorted(reasons):
+        assert reason in doc, (
+            f"resume-state.sh can print COULD NOT MEASURE ({reason!r}…) and "
+            "claude/skills/resume/SKILL.md never mentions it. A reader told "
+            "there are five reasons, shown a sixth, has to guess what it means."
+        )
+
+
+def test_the_reason_scraper_can_report_a_missing_one():
+    """🔴 NEGATIVE CONTROL on the instrument. A phrase check that can only pass
+    is not a check — and this one's whole job is to go red on an addition
+    nobody documented."""
+    doc = RESUME_SKILL.read_text(encoding="utf-8")
+    invented = "the moon was in the wrong phase"
+    assert invented not in doc
+    assert invented not in _could_not_measure_reasons()
+    # POSITIVE half: the scraper really does read the script, not an empty set
+    assert "no deployed copy at" in _could_not_measure_reasons()
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE FETCH — bounded, declared, and memoised BY RESULT
+# --------------------------------------------------------------------------- #
+def _source_and_call(snippet, cwd, timeout=90):
+    return subprocess.run(
+        ["bash", "-c", f'source "{SCRIPT}"; {snippet}'],
+        capture_output=True, text=True, timeout=timeout, cwd=str(cwd),
+    )
+
+
+def _hanging_remote(tmp_path, name="hangs"):
+    """A repo whose `git fetch` blocks forever, hermetically.
+
+    The origin is an ordinary LOCAL bare repo and `remote.origin.uploadpack` is
+    a script that sleeps, so `git fetch` spawns it and waits. No network, no
+    ssh, no listening socket.
+
+    🔴 THE TRANSPORT IS PART OF THE FIXTURE, NOT AN ACCIDENT. Two neater-looking
+    mechanisms are both unusable here, and finding out cost a debugging round:
+      * `ext::sh -c "sleep …"` — refused by git's default `protocol.ext.allow`;
+      * `core.gitProxy` + a `git://` URL — hangs beautifully by hand, and fails
+        INSTANTLY under this suite, because `testlib/nogit_plugin` exports
+        `GIT_ALLOW_PROTOCOL=file` to refuse every transport that can reach
+        another machine. That guard is right and must not be widened for a
+        test; the fixture moved to the `file` transport instead. It presented as
+        a 0.0 s "bounded" fetch — i.e. the timing assertion is what caught it,
+        and a test asserting only `rc == 1` would have passed on a fetch that
+        never hung at all.
+    """
+    repo = tmp_path / name
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True, env=_git_env(tmp_path))
+    subprocess.run(["git", "init", "-q", "--bare", str(repo / "origin.git")],
+                   check=True, env=_git_env(tmp_path))
+    sleeper = repo / "sleep-upload-pack.sh"
+    sleeper.write_text("#!/bin/sh\nsleep 600\n")
+    sleeper.chmod(0o755)
+    _git(repo, "remote", "add", "origin", str(repo / "origin.git"))
+    _git(repo, "config", "remote.origin.uploadpack", str(sleeper))
+    return repo
+
+
+def test_a_hanging_fetch_is_BOUNDED_and_the_memo_spares_a_second_wait(tmp_path):
+    """🔴 THE HEADLINE PRODUCTION PROPERTY: "a fetch that cannot complete must
+    cost seconds, not a hung resume." It had no guard at all — deleting
+    `timeout 25` SURVIVED all 398 tests in the three resume suites.
+
+    Two properties, one wait, because the second is what makes the first
+    affordable in production:
+      * the first call returns rc 1 in ~25s rather than hanging for 600s;
+      * the SECOND call returns from the memo in well under a second — so a
+        digest whose handoff repo and skill repo are the same checkout pays the
+        bounded wait ONCE, not twice.
+
+    ⚠ COSTS ~25 SECONDS by construction. The sleep must outlast the timeout for
+    the timeout to be observable, and the timeout is a production constant this
+    test refuses to parameterise.
+    """
+    repo = _hanging_remote(tmp_path)
+    t0 = time.monotonic()
+    r = _source_and_call(
+        f'bounded_fetch "{repo}"; echo "first=$?"; '
+        f'S=$SECONDS; bounded_fetch "{repo}"; echo "second=$?"; '
+        f'echo "memo_secs=$((SECONDS-S))"',
+        cwd=repo,
+    )
+    elapsed = time.monotonic() - t0
+    # 🔴 EXACT LINES, never `"first=1" in stdout` — `first=127` (the status of a
+    # function that does not exist) CONTAINS `first=1`, so the substring form is
+    # green against a build where `bounded_fetch` was never defined. That is the
+    # same trap this module already hit once, in test_bounded_fetch_refuses_an_
+    # empty_dir.
+    lines = r.stdout.split()
+    assert "first=1" in lines, r.stdout + r.stderr
+    assert "second=1" in lines, (
+        "the memo answered 0 for a fetch that FAILED — a caller reading that "
+        f"claims fresh refs it does not have:\n{r.stdout}"
+    )
+    assert "memo_secs=0" in lines, (
+        f"the second call re-ran the fetch instead of reading the memo:\n{r.stdout}"
+    )
+    assert 20 <= elapsed < 60, (
+        f"the fetch was not bounded to ~25s (took {elapsed:.1f}s) — with the "
+        "timeout removed the sleeping proxy runs for 600s"
+    )
+
+
+def test_every_git_fetch_in_the_script_is_wrapped_in_a_timeout():
+    """The STRUCTURAL half, and it pins a RELATIONSHIP rather than a word: not
+    "the string `timeout` appears" but "every `git … fetch` in this file is
+    bounded". A second, unbounded fetch added elsewhere fails here even though
+    the behavioural test above would never see it."""
+    src = SCRIPT.read_text(encoding="utf-8")
+    fetches = [ln.strip() for ln in src.splitlines()
+               if re.search(r"\bgit\b[^\n#]*\bfetch\b", ln) and not ln.strip().startswith("#")]
+    assert fetches, "POSITIVE CONTROL: no `git fetch` found at all — the scanner is blind"
+    for ln in fetches:
+        m = re.search(r"\btimeout (\d+) git\b", ln)
+        assert m, f"an unbounded `git fetch`: {ln}"
+        assert 1 <= int(m.group(1)) <= 60, f"the bound is not seconds-scale: {ln}"
+
+
+def test_a_SKIPPED_fetch_is_declared_on_the_line(tmp_path, stub_bin):
+    """`RESUME_STATE_SKIP_FETCH` makes the comparison run against whatever refs
+    are already on disk. That is a materially weaker claim and the line has to
+    say so — the prefix had no assertion anywhere, and `run_resume`'s own
+    `fetch=` parameter was dead code no test ever passed."""
+    checkout, _, _ = make_devrc(tmp_path, ["v0\n", "v1\n"])
+    dep = make_deployed(tmp_path, body="v0\n")
+    line = skill_line(run_resume(checkout, stub_bin, claude_dir=dep,
+                                 skill_repo=checkout, fetch=False))
+    assert line.startswith("skill-read: [fetch skipped; compared against refs already on disk]"), line
+    # …and the fixture is built stale-until-fetched, so the weaker claim really
+    # is weaker: without the fetch this reads CURRENT.
+    assert "CURRENT" in line, line
+
+
+def test_a_FAILED_fetch_is_declared_on_the_line(tmp_path, stub_bin):
+    """The other prefix. An unreachable origin must not silently degrade into a
+    confident comparison against stale local refs."""
+    checkout, _, _ = make_devrc(tmp_path, ["v0\n", "v1\n"])
+    _git(checkout, "remote", "set-url", "origin", str(tmp_path / "no-such-origin.git"))
+    dep = make_deployed(tmp_path, body="v0\n")
+    line = skill_line(run_resume(checkout, stub_bin, claude_dir=dep, skill_repo=checkout))
+    assert line.startswith("skill-read: [fetch failed; compared against refs already on disk]"), line
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 ORDER, PROVENANCE, AND THE ODD INPUTS
+# --------------------------------------------------------------------------- #
+def test_the_SKILL_block_LEADS_the_digest(tmp_path, stub_bin):
+    """Declared load-bearing in the code comment ("FIRST, deliberately") and in
+    SKILL.md, and pinned nowhere: moving the call SURVIVED the suite. It leads
+    because it is a claim about the INSTRUCTIONS, which the reader has to weigh
+    before the findings those instructions produce."""
+    checkout, _, _ = make_devrc(tmp_path, ["v0\n"])
+    dep = make_deployed(tmp_path, body="v0\n")
+    out = run_resume(checkout, stub_bin, claude_dir=dep, skill_repo=checkout)
+    headers = [ln for ln in out.splitlines()
+               if ln and not ln.startswith((" ", "#"))]
+    assert headers == ["SKILL", "GIT/PR", "WORKLOAD", "ALERTS", "CLAWGATE", "DRIFT"], (
+        f"the SKILL block must LEAD the digest; got {headers}"
+    )
+
+
+def test_an_UNMANAGED_foreign_file_is_not_told_a_switch_will_replace_it(
+    tmp_path, stub_bin
+):
+    """🔴 A THREE-WAY ANSWER REPORTED AS TWO IS A FALSE INSTRUCTION.
+
+    `readlink -f` can land in a checkout (live), in /nix/store (a copy a switch
+    replaces), or in NEITHER — a hand-placed foreign file, which is the new-host
+    case. CLAUDE.md is explicit that `home.file.force` does NOT clobber one, so
+    labelling it "store copy … only a home-manager switch replaces it" sends the
+    reader to run a switch that cannot fix it.
+    """
+    checkout, _, _ = make_devrc(tmp_path, ["v0\n", "v1\n"])
+    dep = make_deployed(tmp_path, body="v0\n")     # a plain file under tmp_path
+    line = skill_line(run_resume(checkout, stub_bin, claude_dir=dep, skill_repo=checkout))
+    assert "UNMANAGED file at" in line, f"expected UNMANAGED provenance; got: {line}"
+    assert "home-manager will NOT replace it" in line, (
+        f"expected UNMANAGED provenance to say a switch will not fix it; got: {line}"
+    )
+    assert "only a home-manager switch replaces it" not in line, (
+        f"expected UNMANAGED provenance, not the store-copy instruction; got: {line}"
+    )
+    # the comparison itself still happens — unmanaged is a provenance, not a gap
+    assert "1 commit(s) BEHIND origin/main" in line, line
+
+
+def test_a_REAL_store_path_is_still_labelled_as_needing_a_switch(tmp_path, stub_bin):
+    """POSITIVE CONTROL for the three-way fork. Without it the fix above would
+    be indistinguishable from renaming EVERY store copy to "UNMANAGED", which
+    would be a worse lie than the one it replaced.
+
+    A test cannot write into /nix/store, so the deployed path is symlinked at a
+    file that genuinely lives there: the realpath of `git`, which is a store
+    path on this host AND inside the nix build sandbox — the two tiers that run
+    this suite. Its CONTENT is irrelevant; the assertion is the provenance
+    label. (A `tmp_path` directory named `nix/store` would not do: the script
+    matches an absolute `/nix/store/*` prefix, which is the point.)
+    """
+    git_real = Path(os.path.realpath(shutil.which("git")))
+    assert str(git_real).startswith("/nix/store/"), (
+        f"fixture precondition: git does not resolve into /nix/store ({git_real}), "
+        "so this control cannot exercise the store arm on this host"
+    )
+    checkout, _, _ = make_devrc(tmp_path, ["v0\n", "v1\n"])
+    dep = make_deployed(tmp_path, link_to=git_real)
+    line = skill_line(run_resume(checkout, stub_bin, claude_dir=dep, skill_repo=checkout))
+    assert "store copy at /nix/store/" in line, line
+    assert "only a home-manager switch replaces it" in line, line
+    assert "UNMANAGED" not in line, line
+
+
+def test_a_non_integer_scan_cap_is_reported_and_writes_NOTHING_to_stderr(
+    tmp_path, stub_bin
+):
+    """`[ "$scanned" -gt "abc" ]` prints `integer expected` to STDERR once per
+    commit walked, then evaluates false — so the cap silently stops applying
+    AND the digest scribbles on a stream its callers capture."""
+    checkout, _, _ = make_devrc(tmp_path, ["v0\n", "v1\n"])
+    dep = make_deployed(tmp_path, body="v0\n")
+    proc = run_resume(
+        checkout, stub_bin, claude_dir=dep, skill_repo=checkout, raw=True,
+        extra_env={"RESUME_STATE_SKILL_SCAN_CAP": "abc"},
+    )
+    assert "integer expected" not in proc.stderr, proc.stderr
+    assert proc.stderr == "", f"the digest wrote to stderr:\n{proc.stderr}"
+    assert any("not a positive integer" in g for g in gap_lines(proc.stdout)), (
+        gap_lines(proc.stdout)
+    )
+    # and the walk still ran, on the default
+    assert "1 commit(s) BEHIND origin/main" in skill_line(proc.stdout)
+
+
+def test_a_renamed_skill_path_degrades_to_not_current_never_to_CURRENT(
+    tmp_path, stub_bin
+):
+    """RECORDED LIMIT, PINNED. The walk has no `--follow`, so a rename truncates
+    it and an older deployed copy reports "matches NO commit" instead of a
+    number. What must never happen is the reassuring direction: a deployed copy
+    that is NOT the tip cannot read CURRENT, because the tip-hash comparison
+    runs before the walk is ever reached."""
+    checkout, pusher, _ = make_devrc(tmp_path, ["v0\n", "v1\n"])
+    # rename the skill on origin, then change it again under the new name
+    _git(pusher, "pull", "-q", "origin", "main")
+    _git(pusher, "mv", REL, "claude/skills/resume/SKILL.md.tmp")
+    _git(pusher, "mv", "claude/skills/resume/SKILL.md.tmp", REL)
+    (pusher / REL).write_text("v2 after a path churn\n")
+    _git(pusher, "add", REL)
+    _git(pusher, "commit", "-qm", "churn the path")
+    _git(pusher, "push", "-q", "origin", "main")
+
+    dep = make_deployed(tmp_path, body="v0\n")
+    line = skill_line(run_resume(checkout, stub_bin, claude_dir=dep, skill_repo=checkout))
+    assert "CURRENT" not in line, (
+        "a stale copy read as CURRENT after a rename — the tip comparison must "
+        f"run before the walk: {line}"
+    )
 
 
 # --------------------------------------------------------------------------- #

@@ -122,10 +122,16 @@ MUTANTS: list[tuple[str, str, str, str, str, str]] = [
      "  newest=$(git -C \"$d\" log -1 --format='%h %s' \"$ref\" -- \"$rel\" 2>/dev/null)",
      '  newest=""',
      "newest it lacks"),
-    ("S15", "cap", "the capped walk claims a clean answer",
-     '    [ -n "$capped" ] && how="is older than the newest $cap commit(s) touching $rel on $ref (scan capped)"',
-     "    :",
-     "scan capped"),
+    # ⚠ S15 was rewritten when the capped branch was split out of the
+    # matchless one. The ORIGINAL pattern no longer exists, and the battery said
+    # so — `!! PATTERN OCCURS 0x — NOT APPLIED`, counted as a survivor rather
+    # than passed over. That report is the only reason this row was not silently
+    # measuring nothing; keep the not-applied check.
+    ("S15", "cap", "the capped flag is ignored, so a budget-limited walk is "
+     "reported as if the content matched no commit",
+     '  elif [ -n "$capped" ]; then',
+     '  elif false; then',
+     "expected the capped sentence"),
 
     # ---- the live/store fork (readlink -f is the arbiter) -----------------
     ("S16", "arbiter", "the working tree is compared instead of the DEPLOYED copy",
@@ -172,6 +178,74 @@ MUTANTS: list[tuple[str, str, str, str, str, str]] = [
      "  local pre=\"\"\n  RESUME_STATE_SKIP_FETCH=1 bounded_fetch \"$d\"\n",
      "the skill repo was not fetched"),
 
+    # ---- THE REVIEW ROUND'S FIXES ----------------------------------------
+    # 🔴 AN AUDIT FIX RESETS THE VERIFICATION GATE. Every one of these is a
+    # change made in response to a review, so each gets a mutant of its own and
+    # the WHOLE battery is re-run — not just the row for what moved.
+    ("R1", "no-handoff", "the notice goes back under the findings branch, so any "
+     "finding suppresses it — the defect this round exists for",
+     '  if [ -z "$HANDOFF" ]; then\n'
+     '    echo "  (no handoff loaded — nothing to reconcile; this is NOT a clean bill of health)"\n'
+     '  fi\n',
+     '',
+     "a finding suppressed the notice"),
+    ("R2", "no-handoff", "the notice prints even when a handoff WAS reconciled "
+     "— the mirror-image lie",
+     '  if [ -z "$HANDOFF" ]; then\n'
+     '    echo "  (no handoff loaded — nothing to reconcile; this is NOT a clean bill of health)"\n'
+     '  fi\n',
+     '  if true; then\n'
+     '    echo "  (no handoff loaded — nothing to reconcile; this is NOT a clean bill of health)"\n'
+     '  fi\n',
+     "claimed nothing was reconciled"),
+    ("R3", "cap boundary", "the scan cap is off by one (`-gt` -> `-ge`), stopping "
+     "the walk one commit early",
+     '    if [ "$scanned" -gt "$cap" ]; then capped=1; break; fi',
+     '    if [ "$scanned" -ge "$cap" ]; then capped=1; break; fi',
+     "the match sits exactly ON the cap"),
+    ("R4", "capped cause", "the capped branch asserts the cause it never measured",
+     '    DRIFT+=("the /$name skill THIS SESSION IS EXECUTING $how — it is NOT current,',
+     '    DRIFT+=("the /$name skill THIS SESSION IS EXECUTING $how — it was built from a '
+     'tree that was never pushed; it is NOT current,',
+     "never pushed"),
+    ("R5", "hedge", "the matchless branch drops the hedge and re-asserts one cause",
+     'was built from a tree that is not on $ref (uncommitted, or a branch that has not merged)',
+     'was built from a tree that was never pushed',
+     "never pushed"),
+    ("R6", "timeout", "the fetch is no longer bounded — a hung remote hangs the resume",
+     '      timeout 25 git -C "$d" fetch --quiet origin >/dev/null 2>&1 || rc=1',
+     '      git -C "$d" fetch --quiet origin >/dev/null 2>&1 || rc=1',
+     "an unbounded `git fetch`"),
+    ("R7", "memo", "the memo stores SUCCESS for a fetch that failed",
+     "  FETCH_RC[$d]=$rc\n",
+     "  FETCH_RC[$d]=0\n",
+     "the memo answered 0 for a fetch that FAILED"),
+    ("R8", "order", "the SKILL block no longer leads the digest",
+     "  skill_block\n  git_pr_block\n",
+     "  git_pr_block\n  skill_block\n",
+     "must LEAD the digest"),
+    ("R9", "provenance", "the three-way label collapses back to two, telling a "
+     "foreign file that a switch will replace it",
+     '        prov="UNMANAGED file at $real — neither a checkout nor /nix/store, so home-manager will NOT replace it (home.file.force does not clobber a foreign file); remove it and re-switch" ;;',
+     '        prov="store copy at $real — only a home-manager switch replaces it" ;;',
+     "expected UNMANAGED provenance"),
+    ("R10", "cap input", "a non-integer cap is no longer validated, so `[` writes "
+     "to stderr once per commit and the cap silently stops applying",
+     '  case "$cap" in\n'
+     "    ''|*[!0-9]*|0)\n",
+     '  case "$cap" in\n'
+     "    '__never_matches__')\n",
+     "integer expected"),
+    ("R11", "vocabulary", "a new COULD NOT MEASURE reason appears with no entry "
+     "in SKILL.md — the drift the scraper exists to catch",
+     '  local d="" live=0 cand\n',
+     '  local d="" live=0 cand\n'
+     '  if [ -n "${RESUME_STATE_FAKE_REASON:-}" ]; then\n'
+     "    printf '  skill-read: %s — COULD NOT MEASURE (the moon was in the wrong phase)\\n' \"$name\"\n"
+     "    return\n"
+     "  fi\n",
+     "never mentions it"),
+
     # ---- POSITIVE CONTROL -------------------------------------------------
     # A mutant nobody doubts, kept in the batch so a run that scores everything
     # KILLED still has one result whose correctness is obvious at a glance. If
@@ -204,8 +278,23 @@ def run_suite() -> tuple[int, int, str]:
     )
     out = r.stdout + r.stderr
     nfail = int(m.group(1)) if (m := re.search(r"(\d+) failed", out)) else 0
+    # 🔴 ERRORS COUNT AS KILLS. A mutant that removes the fetch timeout makes a
+    # test hang until `subprocess.run(timeout=…)` raises, and pytest reports
+    # that as `1 error`, not `1 failed` — so a battery reading only "failed"
+    # scores the most dangerous mutant in the set as SURVIVED.
+    nerr = int(m.group(1)) if (m := re.search(r"(\d+) error", out)) else 0
+    nfail += nerr
     npass = int(m.group(1)) if (m := re.search(r"(\d+) passed", out)) else 0
-    return nfail, npass, out
+    # 🔴 ONLY THE `E ` LINES COUNT AS "THE MESSAGE". Under `--tb=short` pytest
+    # also echoes the SOURCE of the failing statement — which, for an assert
+    # carrying an f-string message, contains that message's literal text. So
+    # `expected in <whole output>` matched the test's own source and reported
+    # KILLED-for-the-right-reason for a guard that had produced nothing. Exactly
+    # the source-line-echo trap this file's docstring says it already hit once,
+    # in a second place. pytest prefixes every rendered assertion line with
+    # `E `, and prefixes source echo with nothing.
+    msgs = "\n".join(ln for ln in out.splitlines() if ln.startswith("E "))
+    return nfail, npass, msgs
 
 
 def main() -> int:

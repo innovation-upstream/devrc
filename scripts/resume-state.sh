@@ -728,8 +728,9 @@ skill_freshness(){
 
   # 🔴 `readlink -f` IS THE ARBITER, and it answers two questions at once: does
   # the path resolve at all (a dangling link into a GC'd store path is a live
-  # failure mode on these hosts), and does it terminate in a checkout (live) or
-  # in /nix/store (a copy, updated only by a switch).
+  # failure mode on these hosts), and WHERE does it terminate — which is a
+  # THREE-way answer, not two: a checkout (mkOutOfStoreSymlink, live), /nix/store
+  # (a home.file copy, replaced only by a switch), or NEITHER.
   local real
   real=$(readlink -f "$dep" 2>/dev/null)
   if [ -z "$real" ] || [ ! -f "$real" ]; then
@@ -753,11 +754,24 @@ skill_freshness(){
       d=""
     done
   fi
+  # 🔴 THREE PROVENANCES, because the ACTION differs and a two-way label told
+  # one of them to do something that cannot work. A path that resolves neither
+  # into a checkout nor into /nix/store is a FOREIGN file someone hand-placed —
+  # the new-host case — and CLAUDE.md is explicit that `home.file.force` does
+  # NOT clobber one. Calling it a "store copy … only a home-manager switch
+  # replaces it" sends the reader to run a switch that will leave the file
+  # exactly where it is (or fail), and the comparison below still reports it
+  # against origin as though nix had put it there.
   local prov
   if [ "$live" -eq 1 ]; then
     prov="live working-tree copy at $real"
   else
-    prov="store copy at $real — only a home-manager switch replaces it"
+    case "$real" in
+      /nix/store/*)
+        prov="store copy at $real — only a home-manager switch replaces it" ;;
+      *)
+        prov="UNMANAGED file at $real — neither a checkout nor /nix/store, so home-manager will NOT replace it (home.file.force does not clobber a foreign file); remove it and re-switch" ;;
+    esac
   fi
   if [ -z "$d" ]; then
     printf '  skill-read: %s — COULD NOT MEASURE (no git checkout of the skill source found; %s)\n' "$name" "$prov"
@@ -819,6 +833,17 @@ skill_freshness(){
   # The deployed copy differs. On the LIVE path that can mean this session's own
   # uncommitted edits, which is not staleness — same fork the handoff check
   # makes, and it must not be called STALE.
+  #
+  # ⚠ IT GOES TO `UNRECONCILED`, AND THAT IS A DELIBERATE IMPRECISION, RECORDED
+  # RATHER THAN FIXED. An audit is right that the gap banner reads "SOURCES THAT
+  # DID NOT ANSWER" while this source answered perfectly well; it is a caveat,
+  # not a silence. It stays because `handoff_freshness` files its IDENTICAL case
+  # ("handoff doc has uncommitted local edits …") in the same array, and moving
+  # only this one would make two instances of one situation behave differently —
+  # the disagreement is worse than the imprecision. It also errs safe: the run
+  # withholds the all-clear while you are executing unpushed instructions. If
+  # the banner is ever split into "did not answer" vs "answered with a caveat",
+  # BOTH sites move together.
   if [ "$live" -eq 1 ] && ! git -C "$d" diff --quiet -- "$rel" 2>/dev/null; then
     printf '  skill-read: %s⚠ %s — deployed copy is the working tree, which has UNCOMMITTED edits and differs from %s\n' "$pre" "$name" "$ref"
     UNRECONCILED+=("the /$name skill you are executing has UNCOMMITTED local edits and differs from $ref — these instructions are unpushed, so nobody else is running them")
@@ -834,7 +859,18 @@ skill_freshness(){
   # "older than the newest N", printed as such. The cap is env-overridable
   # purely so the capped branch is reachable from a test with a 3-commit
   # fixture; a guard no test can reach is a guard nobody has watched work.
+  # 🔴 VALIDATE ONCE, BEFORE THE LOOP. `[ "$scanned" -gt "$cap" ]` with a
+  # non-numeric cap prints `[: abc: integer expected` to STDERR **once per
+  # commit walked** — the only unredirected stderr in this block — and then
+  # treats the test as false, so the cap silently does not apply. A digest that
+  # scribbles on stderr is one a caller cannot cleanly capture. Fall back to the
+  # default and say so as a gap, rather than half-applying a value nobody meant.
   local cap="${RESUME_STATE_SKILL_SCAN_CAP:-200}"
+  case "$cap" in
+    ''|*[!0-9]*|0)
+      UNRECONCILED+=("RESUME_STATE_SKILL_SCAN_CAP=$cap is not a positive integer — the /$name skill's history walk used the default 200 instead")
+      cap=200 ;;
+  esac
   local behind=0 found="" capped="" c h scanned=0
   while read -r c; do
     scanned=$((scanned+1))
@@ -842,6 +878,15 @@ skill_freshness(){
     h=$(git -C "$d" rev-parse -q --verify "$(printf '%s:%s' "$c" "$rel")" 2>/dev/null) || h=""
     if [ "$h" = "$dep_hash" ]; then found="$c"; break; fi
     behind=$((behind+1))
+  #
+  # ⚠ NO `--follow`, RECORDED RATHER THAN FIXED. A rename of the skill path
+  # truncates this walk at the rename, so a deployed copy older than it reports
+  # "matches NO commit" instead of a number. That degrades the report from
+  # "N behind" to "not current, provenance unknown" — never to a false CURRENT,
+  # because the tip-hash comparison above returns before the walk is reached.
+  # `--follow` buys the number at the cost of git's rename heuristics deciding
+  # which file this is, on a path that moves roughly never. Pinned by
+  # test_a_renamed_skill_path_degrades_to_not_current_never_to_CURRENT.
   done < <(git -C "$d" log --format=%H "$ref" -- "$rel" 2>/dev/null)
 
   local newest
@@ -852,14 +897,33 @@ skill_freshness(){
     printf '  skill-read: %s🔴 %s — deployed copy is %s commit(s) BEHIND %s for %s (newest it lacks: %s) [%s]\n' \
       "$pre" "$name" "$behind" "$ref" "$rel" "$newest" "$prov"
     DRIFT+=("the /$name skill THIS SESSION IS EXECUTING is STALE: the deployed copy at $dep is $behind commit(s) behind $ref for $rel (newest it lacks: $newest) — $howto and follow THAT text, not the loaded one; only a home-manager switch replaces the deployed copy")
-  else
-    # Content that matches no commit of this path is not a clean pass either —
-    # it means the deployed artefact was built from a tree nobody pushed.
-    local how="matches NO commit of $rel on $ref"
-    [ -n "$capped" ] && how="is older than the newest $cap commit(s) touching $rel on $ref (scan capped)"
-    printf '  skill-read: %s🔴 %s — deployed copy %s (built from an uncommitted tree?); newest on %s: %s [%s]\n' \
+  elif [ -n "$capped" ]; then
+    # 🔴 SAY WHAT YOU MEASURED. The cap means the WALK ran out of budget, which
+    # is a fact about this scan and about nothing else: the deployed copy may be
+    # an ancient release, and the distance is simply unknown. An earlier
+    # revision routed this case through the "built from a tree that was never
+    # pushed" sentence below — a cause it had not measured and mostly does not
+    # hold. Not stale-vs-current either way: it is NOT current, and by an
+    # amount this run declined to compute.
+    local how="is older than the newest $cap commit(s) touching $rel on $ref"
+    printf '  skill-read: %s🔴 %s — deployed copy %s; the scan stopped at its cap, so the DISTANCE was not measured; newest on %s: %s [%s]\n' \
       "$pre" "$name" "$how" "$ref" "$newest" "$prov"
-    DRIFT+=("the /$name skill THIS SESSION IS EXECUTING $how — the deployed copy at $dep was built from a tree that was never pushed, so its instructions are not anyone else's; $howto to see what $ref says")
+    DRIFT+=("the /$name skill THIS SESSION IS EXECUTING $how — it is NOT current, and this run stopped at its scan cap (RESUME_STATE_SKILL_SCAN_CAP=$cap) without measuring by how much; $howto and follow THAT text, not the loaded one")
+  else
+    # The walk went all the way back and found nothing: the deployed content is
+    # not any commit of this path on $ref.
+    #
+    # 🔴 THE CAUSE IS HEDGED, because two shapes reach here and only one is the
+    # obvious one. (a) built from an uncommitted tree; (b) built from a branch
+    # that is PUSHED but not merged — which this repo's own CLAUDE.md
+    # recommends, since `home-manager switch --flake ~/workspace/devrc` is how
+    # you validate a nix edit end to end. The old sentence asserted "was built
+    # from a tree that was never pushed, so its instructions are not anyone
+    # else's", which is false of (b).
+    local how="matches NO commit of $rel on $ref"
+    printf '  skill-read: %s🔴 %s — deployed copy %s; newest on %s: %s [%s]\n' \
+      "$pre" "$name" "$how" "$ref" "$newest" "$prov"
+    DRIFT+=("the /$name skill THIS SESSION IS EXECUTING $how — the deployed copy at $dep was built from a tree that is not on $ref (uncommitted, or a branch that has not merged), so what you loaded is not what $ref says; $howto to compare")
   fi
 }
 
@@ -1345,6 +1409,22 @@ main(){
   alerts_block
   clawgate_block
   echo "DRIFT"
+  # 🔴 UNCONDITIONAL, AND FIRST. This notice used to live in the `elif` chain
+  # below, which meant ANY finding suppressed it — and the SKILL block made that
+  # reachable on an ordinary path: a stale deployed skill is a finding that has
+  # nothing to do with the handoff, so a run with NO handoff doc and a stale
+  # skill printed a bare `-` list under a header the /resume skill defines as
+  # "lines where live state contradicts the handoff", with no handoff
+  # reconciled at all. Measured side by side against 200e6383 on one fixture.
+  #
+  # The two facts are INDEPENDENT — "findings exist" and "nothing was
+  # reconciled" — so they get independent lines. It leads because it FRAMES
+  # whatever follows: findings read differently once you know no doc was
+  # loaded. A full `if`, not `[ … ] && echo`, for the reason the branch below
+  # documents.
+  if [ -z "$HANDOFF" ]; then
+    echo "  (no handoff loaded — nothing to reconcile; this is NOT a clean bill of health)"
+  fi
   if [ "${#DRIFT[@]}" -gt 0 ]; then
     printf '  - %s\n' "${DRIFT[@]}"
     # Print gaps ALONGSIDE findings too: a source that never answered is easy to
@@ -1360,8 +1440,9 @@ main(){
     # No handoff resolved => nothing was reconciled. Saying "live state matches
     # the handoff's claims" here is a LIE, and the reassuring shape of it is the
     # actual harm: a caller reads it as a clean bill of health for an initiative
-    # whose doc was never loaded. Name the absence instead.
-    echo "  (no handoff loaded — nothing to reconcile; this is NOT a clean bill of health)"
+    # whose doc was never loaded. The notice itself is printed ABOVE, for every
+    # run with no handoff; this branch exists only to withhold the all-clear and
+    # still print the gaps.
     print_gaps
   elif [ "${#UNRECONCILED[@]}" -gt 0 ]; then
     # A handoff loaded and nothing contradicted it — but a source went
