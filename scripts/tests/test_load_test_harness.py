@@ -58,6 +58,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -66,6 +67,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = REPO_ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
+from testlib.hermetic_git import hermetic_git_env  # noqa: E402
 from testlib.mockbin import write_exec  # noqa: E402
 
 HARNESS = SCRIPTS / "dl-router" / "tests" / "load_test_store.sh"
@@ -142,6 +144,47 @@ def run_harness(
         cwd=str(tmp_path),
     )
     return proc, argv_log
+
+
+def state_and_pgrp(stat_text: str) -> tuple[str, int] | None:
+    """Parse `state` and `pgrp` out of one /proc/<pid>/stat line.
+
+    Split AFTER the last `)`: the `comm` field is the process name in
+    parentheses and may itself contain spaces and parentheses, so a plain
+    `.split()` on the whole line mis-indexes every field after it.
+    """
+    close = stat_text.rfind(")")
+    if close == -1:
+        return None
+    fields = stat_text[close + 2:].split()
+    if len(fields) < 3 or not fields[2].lstrip("-").isdigit():
+        return None
+    return fields[0], int(fields[2])
+
+
+def live_pids_in_group(pgid: int) -> list[int]:
+    """PIDs in `pgid` that are NOT zombies.
+
+    🔴 `os.kill(pid, 0)` / `os.killpg(pgid, 0)` SUCCEED on a zombie. That exact
+    mistake made `devrc-ci` red on its first 5 of 5 runs, in a reap check green
+    on every dev host — a CI step container's PID 1 does not reap, so the dead
+    child lingered as `Z` and the "is it gone" probe said no. Read the STATE.
+    """
+    live: list[int] = []
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            stat = (entry / "stat").read_text(encoding="utf-8", errors="replace")
+        except (FileNotFoundError, ProcessLookupError, PermissionError, OSError):
+            continue  # the process exited between listdir and read
+        parsed = state_and_pgrp(stat)
+        if parsed is None:
+            continue
+        state, pgrp = parsed
+        if state != "Z" and pgrp == pgid:
+            live.append(int(entry.name))
+    return live
 
 
 def invocations(argv_log: Path) -> list[list[str]]:
@@ -344,6 +387,33 @@ def test_runs_above_the_cap_are_refused_so_91_stays_unambiguous(
     assert "91 is reserved" in proc.stderr
 
 
+def test_the_reap_probe_sees_a_live_process_and_ignores_a_zombie() -> None:
+    """Validate the INSTRUMENT before reading its verdict.
+
+    A `live_pids_in_group` that returned `[]` unconditionally would make the
+    reap test below green forever. Positive control: a real live process in its
+    own group MUST be seen. Then the parser is driven directly over a zombie
+    line and over a `comm` carrying spaces and parentheses — the two shapes a
+    naive `.split()` gets wrong.
+    """
+    # POSITIVE CONTROL — the probe must be able to return a NON-EMPTY answer.
+    sleeper = subprocess.Popen(["sleep", "30"], start_new_session=True)
+    try:
+        seen = live_pids_in_group(os.getpgid(sleeper.pid))
+        assert sleeper.pid in seen, (
+            f"the probe cannot see a live process — it is wired to nothing "
+            f"(pid {sleeper.pid}, group answer {seen})")
+    finally:
+        sleeper.kill()
+        sleeper.wait()
+
+    assert state_and_pgrp("42 (python3.12) S 1 4242 4242 0 -1 …") == ("S", 4242)
+    assert state_and_pgrp("42 (bash) Z 1 4242 4242 0 -1 …") == ("Z", 4242)
+    # A comm with spaces AND parentheses — `.split()` on the whole line would
+    # read "weird)" as the state here.
+    assert state_and_pgrp("42 (my (weird) proc) R 1 99 99 0 -1 …") == ("R", 99)
+
+
 def test_burners_are_reaped_when_the_run_ends(tmp_path: Path) -> None:
     """The EXIT trap must leave no busy loop behind.
 
@@ -367,10 +437,14 @@ def test_burners_are_reaped_when_the_run_ends(tmp_path: Path) -> None:
     out, _ = proc.communicate(timeout=120)
     assert proc.returncode == 0, out
     assert "spawned 2 burners" in out, out
-    # The group must be empty once the harness has exited. If a burner survived
-    # it would still be in this group and killpg(0) would succeed.
-    with pytest.raises(ProcessLookupError):
-        os.killpg(pgid, 0)
+    deadline = time.monotonic() + 10
+    live = live_pids_in_group(pgid)
+    while live and time.monotonic() < deadline:
+        time.sleep(0.1)
+        live = live_pids_in_group(pgid)
+    assert not live, (
+        f"burners survived the EXIT trap: pids {live} are still in process "
+        f"group {pgid}")
 
 
 # --------------------------------------------------------------------------
@@ -398,23 +472,81 @@ def test_the_harness_cannot_be_collected_by_the_gate() -> None:
         f"{name} collectable by scripts/run-tests.sh")
 
 
-def test_the_harness_is_tracked_by_git() -> None:
+def deploy_carries(repo: Path, path: Path) -> tuple[bool, str]:
+    """Would the nix deploy carry `path`? Answered in BOTH tiers, never skipped.
+
+    * dev host — the flake's source is the GIT TREE, so an untracked file under
+      `scripts/dl-router/` is copied into the store by nothing and is silently
+      absent from the deployed artifact. `git ls-files` is the question.
+    * nix build sandbox — there is no `.git` at all (`cp -r ${./.}`, and a
+      flake's `./.` is the tracked tree). But the directory being read there IS
+      that store copy, so PRESENCE is the same claim, already answered.
+
+    🔴 Deliberately not a `pytest.skip`: `scripts/run-tests.sh` GUARD 2 pins the
+    expected-skip SET and its TOTAL, so a new skip fails the gate — and a
+    deploy-completeness check that evaporates in the tier the merge is gated on
+    would be reading as coverage while providing none.
+    """
+    if (repo / ".git").exists():
+        rel = path.relative_to(repo).as_posix()
+        proc = subprocess.run(
+            ["git", "-C", str(repo), "ls-files", "--error-unmatch", rel],
+            capture_output=True, text=True,
+            env=hermetic_git_env())
+        return proc.returncode == 0, (
+            f"git ls-files --error-unmatch {rel}: rc={proc.returncode} "
+            f"{proc.stderr.strip()}")
+    return path.exists(), (
+        f"no .git under {repo} (sandbox tier) — presence of {path} in the "
+        "store copy is the proof the flake carried it")
+
+
+def test_the_harness_is_carried_by_the_deploy() -> None:
     """🔴 `scripts/dl-router/` is a `home.file` source.
 
     An untracked file there is silently ABSENT from the deployed artifact — the
     switch succeeds and the file simply is not present. This harness lived
     untracked in one host's checkout for a day for exactly that reason.
     """
-    rel = HARNESS.relative_to(REPO_ROOT).as_posix()
-    proc = subprocess.run(
-        ["git", "-C", str(REPO_ROOT), "ls-files", "--error-unmatch", rel],
-        capture_output=True, text=True)
-    if proc.returncode != 0 and "not a git repository" in proc.stderr.lower():
-        pytest.skip("no git checkout here (nix build sandbox copies without .git)")
-    assert proc.returncode == 0, (
-        f"{rel} is NOT tracked by git — the nix flake copies "
-        "scripts/dl-router/ into the store from the git tree, so an untracked "
-        "file is omitted from the deploy with no error")
+    carried, why = deploy_carries(REPO_ROOT, HARNESS)
+    assert carried, (
+        f"{HARNESS.relative_to(REPO_ROOT).as_posix()} would NOT reach the "
+        f"deployed artifact — {why}")
+
+
+def test_the_deploy_check_can_say_no_on_both_branches(tmp_path: Path) -> None:
+    """Negative + positive control for `deploy_carries`, on BOTH its branches.
+
+    Without this, the sandbox branch never executes on a dev host and the
+    checkout branch never executes in the sandbox — so each tier would be
+    trusting a branch it cannot observe.
+    """
+    # --- sandbox-shaped: no .git, so presence is the answer -----------------
+    sandbox = tmp_path / "storecopy"
+    sandbox.mkdir()
+    absent = sandbox / "nope.sh"
+    carried, why = deploy_carries(sandbox, absent)
+    assert carried is False, why
+    present = sandbox / "here.sh"
+    present.write_text("", encoding="utf-8")
+    carried, why = deploy_carries(sandbox, present)
+    assert carried is True, why
+
+    # --- checkout-shaped: a real repo, file untracked then tracked ----------
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    env = hermetic_git_env()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True, env=env)
+    tracked_later = repo / "sub" / "thing.sh"
+    tracked_later.parent.mkdir()
+    tracked_later.write_text("", encoding="utf-8")
+    carried, why = deploy_carries(repo, tracked_later)
+    assert carried is False, (
+        f"an UNTRACKED file must not read as carried — {why}")
+    subprocess.run(["git", "-C", str(repo), "add", "sub/thing.sh"],
+                   check=True, env=env)
+    carried, why = deploy_carries(repo, tracked_later)
+    assert carried is True, why
 
 
 def test_the_harness_is_executable() -> None:
