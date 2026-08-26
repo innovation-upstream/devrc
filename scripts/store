@@ -60,17 +60,23 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+import zlib
 from pathlib import Path
 from typing import Sequence
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 import subsystem_recall as rc  # noqa: E402
+import subsystem_touch  # noqa: E402
 from subsystem_touch import scope_for_repo  # noqa: E402
 
 DEFAULT_CONFIG = Path.home() / ".config" / "subsystem-store" / "env"
 DEFAULT_CACHE = Path.home() / ".cache" / "subsystem-store"
 SYNC_STAMP = ".sync-stamp"
 DEFAULT_TIMEOUT = 20
+# Ceiling on what a snapshot may unpack to. The whole store measured ~63 KB of
+# markdown across 305 entries in 2026-08; 256 MB is ~4000x that, so it bounds a
+# decompression bomb without being reachable by real growth for years.
+MAX_UNPACKED_BYTES = 256 * 1024 * 1024
 
 # Exit codes. 0/3 are the contract §3 pins; the reader's own non-zero codes pass
 # through unchanged so a malformed entry still reports what it always did.
@@ -201,6 +207,39 @@ def _safe_member_name(name: str) -> bool:
     return bool(parts) and not any(p in ("..", "") for p in parts)
 
 
+ORPHAN_GRACE_SECONDS = 3600
+
+
+def _reap_orphans(cache: Path) -> int:
+    """Remove stale `<cache>.new-*` / `<cache>.old-*` trees. Returns how many.
+
+    🔴 THE PER-RUN STAGING NAME TRADED ONE BUG FOR A LEAK. The pre-fix version
+    used a FIXED staging name and `rmtree`d it at the top of every run, which
+    raced (that was the truncation bug) but was self-healing. Unique names fixed
+    the race and removed the healing: an audit SIGKILLed three syncs mid-run and
+    the orphaned trees were still there afterwards, with a later clean sync
+    leaving them alone. `finally` covers exceptions; it does not cover SIGKILL,
+    a power cut, or an OOM — and with the planned sync timer these accumulate in
+    `~/.cache` without bound.
+
+    The grace period is why this is safe to run at the START of a sync: a
+    directory younger than an hour may belong to a CONCURRENT sync, and deleting
+    it would reintroduce the very race the unique names removed. Anything older
+    than that cannot be live — the whole operation takes well under a second.
+    """
+    cutoff = time.time() - ORPHAN_GRACE_SECONDS
+    reaped = 0
+    for prefix in (f"{cache.name}.new-", f"{cache.name}.old-"):
+        for path in cache.parent.glob(f"{prefix}*"):
+            try:
+                if path.is_dir() and path.stat().st_mtime < cutoff:
+                    shutil.rmtree(path, ignore_errors=True)
+                    reaped += 1
+            except OSError:
+                continue  # someone else's, or vanished under us; not our problem
+    return reaped
+
+
 def install_snapshot(body: bytes, cache: Path, headers: dict[str, str]) -> int:
     """Replace the cache with the tar's contents.
 
@@ -220,13 +259,29 @@ def install_snapshot(body: bytes, cache: Path, headers: dict[str, str]) -> int:
     download never blocks another reader.
     """
     cache.parent.mkdir(parents=True, exist_ok=True)
+    _reap_orphans(cache)
     staging = Path(tempfile.mkdtemp(dir=cache.parent, prefix=f"{cache.name}.new-"))
 
     try:
         count = 0
         seen: set[str] = set()
         with tarfile.open(fileobj=io.BytesIO(body), mode="r") as tar:
-            for member in tar.getmembers():
+            members = tar.getmembers()
+            # 🔴 A DECOMPRESSED-SIZE CAP. Gzip removed the natural bound: before
+            # it, the response body limited what could be extracted. An audit
+            # MEASURED a 203,934-byte body expanding to 209,715,200 bytes on
+            # disk — 1028x — and the client reported `live … 1 entries`, exit 0.
+            # Every other hostile-archive guard here (links, traversal,
+            # duplicates, count mismatch) exists for a server we do not fully
+            # trust; a size bomb is the same threat model and was the one hole.
+            declared_bytes = sum(m.size for m in members)
+            if declared_bytes > MAX_UNPACKED_BYTES:
+                raise StoreCorrupt(
+                    f"archive unpacks to {declared_bytes} bytes, over the "
+                    f"{MAX_UNPACKED_BYTES}-byte ceiling "
+                    f"({len(body)} bytes on the wire)"
+                )
+            for member in members:
                 name = member.name
                 # 🔴 A HOSTILE OR CORRUPT ARCHIVE IS NOT AN OUTAGE. This raises
                 # StoreCorrupt, not StoreUnreachable, so it can never be quietly
@@ -361,6 +416,15 @@ def resolve_state(
         body, headers = fetch_snapshot(url, token, scope=scope, timeout=timeout)
         try:
             count = install_snapshot(body, cache, headers)
+        except (EOFError, zlib.error) as exc:
+            # 🔴 THE GZIP SWITCH REOPENED THIS IN A NEW SHAPE. Before gzip a
+            # short body raised `tarfile.ReadError`, handled below. Compressed,
+            # a truncated body raises `EOFError: Compressed file ended before
+            # the end-of-stream marker was reached` — which was NOT caught, so
+            # it escaped as a traceback at exit 1 with a healthy cache unused:
+            # exactly the defect the ReadError arm was added to fix, one
+            # exception type over. Measured by an audit against this client.
+            raise StoreUnreachable(f"{url} sent a truncated archive: {exc}") from exc
         except tarfile.ReadError as exc:
             # 🔴 A 200 THAT IS NOT A TAR. Realistic in production precisely
             # because this host's edge answers 200 with HTML for some clients
@@ -518,7 +582,12 @@ def _report(args: argparse.Namespace, *, search: str | None) -> int:
     # `label` is DERIVED, not an attribute — `RecallReport` has no `.label`, and
     # assuming it did was an AttributeError that took every recall to exit 1.
     # Derived exactly as the server does in `_recall`, so the two agree.
-    label = f"{report.scope}/" if search is None else search
+    # 🔴 SEARCH USES ITS OWN LABEL. `SearchReport.label` is a property naming the
+    # scopes SEARCHED; passing the query instead made the reader's failure
+    # sentence say "`lease` holds 1 entry file" — naming the search term as if it
+    # were a scope path. The server passes `report.label` for search and derives
+    # `f"{scope}/"` only for recall; this now matches both.
+    label = report.label if search is not None else f"{report.scope}/"
     return rc._exit_for(report.status, label, report.malformed)
 
 
@@ -531,11 +600,18 @@ def cmd_search(args: argparse.Namespace) -> int:
 
 
 def cmd_validate(args: argparse.Namespace) -> int:
-    """Validate the CACHE with the reader's own parser.
+    """Validate the CACHE with the writer's own parser.
 
-    Deliberately the cache and not the source: this command answers "is what I
-    was served readable", which is a different question from "is my local store
-    readable" — `subsystem_recall.py --validate` already answers that one.
+    🔴 THIS COMMAND NEVER WORKED. It shelled `subsystem_recall.main` with
+    `--validate`, which is a **`subsystem_touch`** flag — the reader has no such
+    option, so every invocation exited 2 with `unrecognized arguments:
+    --validate`. Worse, the test written to close the "no validate coverage"
+    gap asserted only that the cache directory was unchanged, so it passed
+    green over a command that failed on every input. A test that cannot
+    distinguish "worked" from "exited 2" is not coverage.
+
+    The docstring also claimed "`subsystem_recall.py --validate` already answers
+    that one", which was the same false belief stated as justification.
     """
     # `scope=None` — see the note in `cmd_sync`. `--scope` still narrows what is
     # VALIDATED (below); it must never narrow what is CACHED.
@@ -546,10 +622,30 @@ def cmd_validate(args: argparse.Namespace) -> int:
         print(banner(state, detail), file=sys.stderr)
         return hint
     print(banner(state, detail), file=sys.stderr)
-    rc_argv = ["--store", str(args.cache), "--validate"]
-    if args.scope:
-        rc_argv += ["--scope", args.scope]
-    return rc.main(rc_argv)
+    # 🔴 THE CACHE IS A MULTI-SCOPE STORE; `--validate` IS SCOPE-BOUND. With no
+    # `--scope` the writer derives one from the REPO, so `store validate` in any
+    # checkout validated a scope the cache does not hold and printed "NOTHING
+    # WAS CHECKED — a zero here is NOT a clean bill of health" while exiting 0.
+    # That is the silent zero this command exists to detect, committed by the
+    # command itself. With no --scope we validate EVERY scope in the cache.
+    scopes = (
+        [args.scope]
+        if args.scope
+        else sorted(p.name for p in args.cache.iterdir() if p.is_dir())
+    )
+    if not scopes:
+        print(
+            f"store: nothing to validate — {args.cache} holds no scopes",
+            file=sys.stderr,
+        )
+        return EXIT_UNREACHABLE_NO_CACHE
+    worst = EXIT_OK
+    for scope in scopes:
+        code = subsystem_touch.main(
+            ["--store", str(args.cache), "--validate", "--scope", scope]
+        )
+        worst = max(worst, code)
+    return worst
 
 
 def build_parser() -> argparse.ArgumentParser:

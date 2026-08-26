@@ -954,41 +954,6 @@ class TestReadOnlyPhase1:
 # =============================================================================
 
 
-def _routes_from_ast(source: str) -> set[str]:
-    """Every string the router compares a `parts[...]` subscript against.
-
-    Spelling-independent by construction: `ast` sees no difference between
-    `"x"`, `'x'`, an underscore or a capital. Handles `==` in either operand
-    order and `in` over a tuple/list. Strings NOT compared against `parts` are
-    ignored, so the router's error messages and header values do not count as
-    routes (pinned by `test_the_ledger_guard_ignores_unrelated_strings`).
-    """
-    def _is_parts(node: ast.AST) -> bool:
-        return (
-            isinstance(node, ast.Subscript)
-            and isinstance(node.value, ast.Name)
-            and node.value.id == "parts"
-        )
-
-    found: set[str] = set()
-    for node in ast.walk(ast.parse(source)):
-        if not isinstance(node, ast.Compare):
-            continue
-        operands = [node.left, *node.comparators]
-        if not any(_is_parts(o) for o in operands):
-            continue
-        for op, comparator in zip(node.ops, node.comparators):
-            targets = (
-                comparator.elts
-                if isinstance(op, ast.In) and isinstance(comparator, (ast.Tuple, ast.List))
-                else [comparator, node.left]
-            )
-            for target in targets:
-                if isinstance(target, ast.Constant) and isinstance(target.value, str):
-                    found.add(target.value)
-    return found
-
-
 class TestSnapshotRoute:
     """Phase 2's cache-fill route: `GET /api/v1/snapshot` ships the entry files.
 
@@ -2069,25 +2034,21 @@ class TestPhaseOneScope:
         the table case; a computed name remains uncovered, and the behavioural
         test cannot cover it either because it cannot guess the name.
         """
-        accepted = _routes_from_ast(SERVER_PATH.read_text())
-        assert accepted == set(self.ROUTES), (
-            f"router accepts {sorted(accepted)} but the ledger says "
+        assert set(api.API_ROUTES) == set(self.ROUTES), (
+            f"router dispatches {sorted(api.API_ROUTES)} but the ledger says "
             f"{sorted(self.ROUTES)} — add it to ROUTES on purpose, or remove it"
         )
 
-    def test_no_table_dispatch_on_parts(self):
-        """The AST walk above reads COMPARISONS. A dict/table dispatch routes
-        without one, so it would be invisible — refuse the construct outright
-        rather than pretend the ledger covers it."""
-        tree = ast.parse(SERVER_PATH.read_text())
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Subscript):
-                inner = node.slice
-                if isinstance(inner.value, ast.Name) and inner.value.id == "parts":
-                    raise AssertionError(
-                        f"table dispatch on `parts` at line {node.lineno} — the "
-                        f"route ledger cannot see it; use an explicit comparison"
-                    )
+    def test_every_ledgered_route_actually_dispatches(self, store: Path):
+        """Structural companion: the table's handlers must EXIST and be bound.
+
+        A table is only as good as its rows — a typo'd handler name would make a
+        ledgered route 500 rather than serve, and the equality check above
+        cannot see that.
+        """
+        for name, (handler, arity) in api.API_ROUTES.items():
+            assert hasattr(api.StoreRequestHandler, handler), f"{name} -> missing {handler}"
+            assert arity >= 1, f"{name} has arity {arity}"
 
     def test_anything_outside_the_ledger_404s(self, store: Path):
         """Behavioural companion to the structural ledger above.
@@ -2108,38 +2069,33 @@ class TestPhaseOneScope:
                 assert code == 404, f"{path} answered {code}"
                 assert headers["X-Store-Status"] == "no-route"
 
-    # 🔴 SPELLINGS THAT DEFEATED THE PREVIOUS GUARD. `raw_dump` is the one an
-    # audit actually used to walk past v2 while all six tests stayed green; the
-    # rest are the same hole in other clothes. A control that feeds the guard
-    # only the spelling it already catches proves nothing — that was v2's error,
-    # and repeating it here would be the same mistake in a new costume.
-    @pytest.mark.parametrize(
-        "arm,expected",
-        [
-            ('if parts[0] == "raw_dump":\n    pass', {"raw_dump"}),      # underscore
-            ("if parts[0] == 'single_quoted':\n    pass", {"single_quoted"}),
-            ('if parts[0] == "MixedCase":\n    pass', {"MixedCase"}),    # case
-            ('if "reversed_operands" == parts[0]:\n    pass', {"reversed_operands"}),
-            ('if parts[0] in ("tuple_a", "tuple_b"):\n    pass', {"tuple_a", "tuple_b"}),
-            ('if parts[1] == "deeper_subscript":\n    pass', {"deeper_subscript"}),
-        ],
-    )
-    def test_the_ledger_guard_can_SEE_each_spelling(self, arm: str, expected: set):
-        """Positive control, one case per spelling the old guard missed."""
-        assert _routes_from_ast(arm) == expected, f"ledger is blind to: {arm}"
+    def test_the_router_reads_the_table_rather_than_its_own_spelling(self):
+        """🔴 WHY THE SOURCE-PARSING LEDGER IS GONE, recorded so nobody rebuilds it.
 
-    def test_the_ledger_guard_ignores_unrelated_strings(self):
-        """Negative control. A guard that scooped up EVERY string constant would
-        pass the cases above while being useless — it would flag the router's
-        error messages as routes. Feed it a function full of strings that are
-        not compared against `parts` and require an empty set."""
-        noise = (
-            'x = "no-such-endpoint"\n'
-            'self._respond(404, b"nope", headers={"X-Store-Status": "no-route"})\n'
-            'if other[0] == "different_variable":\n'
-            "    pass\n"
+        Three versions of this guard read the router as TEXT and each was
+        defeated by a re-spelling while the whole suite stayed green:
+
+          v1  four hardcoded non-route probes  -> missed `/snapshot` entirely
+          v2  regex `parts\\[0\\] == "([a-z0-9-]+)"` -> missed `"raw_dump"`
+              (underscore); its own positive control fed it the one spelling it
+              caught, so it could not reveal that
+          v3  AST walk over comparisons against `parts` -> missed
+              `head = parts[0]; head == "x"` and `parts[0] in NAME`, both one
+              ordinary refactor away, and it was file-scoped so a rewrite of an
+              unrelated `parts` local (server.py has two) would have produced a
+              FALSE failure naming a header value as a route
+
+        Each fix made the pattern-matching cleverer, which is the wrong axis.
+        The route set is now DATA the dispatcher reads (`API_ROUTES`), so
+        "what does the router accept" is answered by reading the router's own
+        table instead of guessing how it was written. There is no spelling left
+        to miss, and no source text to parse.
+        """
+        src = SERVER_PATH.read_text()
+        assert "API_ROUTES.get(parts[0])" in src, (
+            "the dispatcher no longer reads API_ROUTES — the ledger test above "
+            "would then be asserting against a table nothing uses"
         )
-        assert _routes_from_ast(noise) == set()
 
     def test_the_snapshot_route_added_NO_write_verb(self, store: Path):
         """Phase 2 adds a READ route. The write guard above must be untouched by

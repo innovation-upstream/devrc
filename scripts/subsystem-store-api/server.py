@@ -967,6 +967,26 @@ def scope_revision(store_root: str | Path, scope: str) -> str:
 
 SEED_STAMP_NAME = ".seed-stamp"
 
+# 🔴 THE ROUTE TABLE, AND THE DISPATCHER READS IT. `name -> (handler, arity)`,
+# where arity counts the path components including the route name itself, so
+# `recall/<scope>` is 2 and `snapshot` is 1.
+#
+# It is a module-level constant so a test can assert `set(API_ROUTES)` against
+# its ledger without reading this file as text. Two previous guards tried that —
+# a regex, then an AST walk — and each was defeated by an ordinary re-spelling
+# of the router while every test stayed green. One rule, one place: a route that
+# is not in this dict is not dispatched, so a route that is not in the ledger
+# cannot exist.
+#
+# 🔴 Adding a row here is ALSO adding a public, internet-reachable endpoint.
+# `TestPhaseOneScope` fails until its `ROUTES` ledger is updated to match, which
+# is the point: the update is where somebody has to think about it.
+API_ROUTES: dict[str, tuple[str, int]] = {
+    "recall": ("_recall", 2),
+    "search": ("_search", 2),
+    "snapshot": ("_snapshot", 1),
+}
+
 # How deep to walk when dating the served copy. Deliberately the SAME depth
 # `seed.sh` uses for its own `remote_entries` count (`find -maxdepth 2 -name
 # '*.md'`), so the two numbers are answers to the same question and a
@@ -1620,15 +1640,27 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
             return
 
         try:
-            if len(parts) == 2 and parts[0] == "recall":
-                self._recall(parts[1], params)
-                return
-            if len(parts) == 2 and parts[0] == "search":
-                self._search(parts[1], params)
-                return
-            if len(parts) == 1 and parts[0] == "snapshot":
-                self._snapshot(params)
-                return
+            # 🔴 DISPATCH FROM THE DECLARED TABLE. Adding a route means adding a
+            # row to `API_ROUTES`, because that table IS the dispatcher — there
+            # is no second place to put one.
+            #
+            # This replaces a test that PARSED THIS SOURCE for route names, and
+            # it replaces it because that approach was defeated twice. v2 used a
+            # regex and missed `parts[0] == "raw_dump"` (underscore). v3 walked
+            # the AST and still missed `head = parts[0]; head == "x"` and
+            # `parts[0] in NAME` — one ordinary refactor away, with the literal
+            # sitting right there. Every iteration was a guard on the SPELLING
+            # of the router rather than on the router. A table the code actually
+            # dispatches from cannot be out of date with the code, so the test
+            # is now `set(API_ROUTES) == ledger` and spelling is not a variable.
+            route = API_ROUTES.get(parts[0]) if parts else None
+            if route is not None:
+                handler_name, arity = route
+                if len(parts) == arity:
+                    getattr(self, handler_name)(
+                        *(parts[1:arity]), params
+                    )
+                    return
         except ValueError as exc:
             # A caller error, and the caller is authenticated, so it may be told
             # what it did wrong.
@@ -1789,15 +1821,10 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
             return
 
         try:
-            scopes = sorted(
+            candidates = sorted(
                 p
                 for p in root.iterdir()
-                # `is_symlink()` FIRST: `is_dir()` dereferences, so a symlinked
-                # scope directory would otherwise be walked and its target's
-                # files shipped. See the entry-level note below.
-                if not p.is_symlink()
-                and p.is_dir()
-                and not p.name.startswith(".")
+                if not p.name.startswith(".")
                 and (scope_filter is None or p.name == scope_filter)
             )
         except OSError as exc:
@@ -1847,6 +1874,24 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
         # snapshot served as 200 is worse than no snapshot.
         unreadable: list[str] = []
         selected: list[tuple[Path, str]] = []
+        scopes: list[Path] = []
+        for candidate in candidates:
+            # 🔴 REFUSED, NOT FILTERED — and the difference is the whole bug.
+            # The previous version dropped symlinked scope dirs out of the list
+            # with a comprehension filter, so they never reached `unreadable`
+            # and never reached the tar: an audit MEASURED a symlinked scope
+            # holding 2 entries rendering as `scope-empty — nothing recorded` at
+            # exit 0. That is the headline defect of this whole client,
+            # reintroduced one level up by the guard added to close it at the
+            # entry level. A guard that SKIPS is a silent omission; only one
+            # that REPORTS is a guard.
+            if candidate.is_symlink():
+                unreadable.append(f"{candidate.name}/: symlink refused")
+                continue
+            if not candidate.is_dir():
+                continue  # a stray file at the store root is not a scope
+            scopes.append(candidate)
+
         for scope in scopes:
             try:
                 names = sorted(
@@ -1866,6 +1911,18 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
                 # symlinks in the store on either host or in the pod's `/data`.
                 if entry.is_symlink():
                     unreadable.append(f"{scope.name}/{entry.name}: symlink refused")
+                    continue
+                # 🔴 RESTORED. The previous round replaced `is_file()` with the
+                # symlink check and dropped it, which is a removed guard with no
+                # replacement: a DIRECTORY named `*.md` then raised
+                # IsADirectoryError and 503'd the whole store for every caller,
+                # and a FIFO named `*.md` blocked `open()` forever, leaking a
+                # handler thread permanently on a threading server. Refused
+                # rather than skipped, for the same reason as the symlink above.
+                if not entry.is_file():
+                    unreadable.append(
+                        f"{scope.name}/{entry.name}: not a regular file"
+                    )
                     continue
                 selected.append((entry, f"{scope.name}/{entry.name}"))
 

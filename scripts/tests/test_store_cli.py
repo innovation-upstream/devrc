@@ -26,6 +26,7 @@ import os
 import socket
 import subprocess
 import sys
+import time
 import tarfile
 import threading
 import urllib.error
@@ -78,11 +79,21 @@ def source_store(tmp_path: Path) -> Path:
     root = tmp_path / "src"
     (root / "widget-cfg").mkdir(parents=True)
     (root / "hollow-area").mkdir(parents=True)
+    # 🔴 A SECOND *POPULATED* SCOPE, and it is load-bearing. The scope-filter
+    # regression test asserts that `sync --scope X` does not narrow the shared
+    # cache — but with `hollow-area` empty, a filtered cache and a complete one
+    # hold the SAME `*/*.md` set, so the test passed against the broken code and
+    # both re-threading mutants survived the whole suite. The measured original
+    # failure was 305 entries -> 2 and needs a second scope with content in it.
+    (root / "gizmo-notes").mkdir(parents=True)
     (root / "widget-cfg" / "thing-alpha.md").write_text(
         _entry("thing-alpha", "widget-cfg", "- 2026-01-02: probe lies for 40s.")
     )
     (root / "widget-cfg" / "thing-beta.md").write_text(
         _entry("thing-beta", "widget-cfg", "- 2026-01-03: sidecar drops its lease.")
+    )
+    (root / "gizmo-notes" / "other-thing.md").write_text(
+        _entry("other-thing", "gizmo-notes", "- 2026-01-04: a different scope.")
     )
     return root
 
@@ -169,6 +180,19 @@ def run_store(*args: str, url: str | None, cache: Path, token: str = GOOD_TOKEN)
     return proc
 
 
+
+ORPHAN_GRACE = 3600  # mirrors scripts/store::ORPHAN_GRACE_SECONDS
+
+
+def _fetch_snapshot_bytes(base: str) -> bytes:
+    """The real snapshot body, so truncation fixtures are built from real bytes."""
+    req = urllib.request.Request(base + "/api/v1/snapshot")
+    req.add_header("Authorization", f"Bearer {GOOD_TOKEN}")
+    req.add_header("User-Agent", "subsystem-store-client/1")
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return resp.read()
+
+
 def _dead_port() -> int:
     """A port nothing is listening on — bound then released, so it is real."""
     with socket.socket() as sock:
@@ -240,6 +264,7 @@ class TestIdempotence:
         listing = run_store("ls-entries", "--no-sync", url=None, cache=cache)
         assert listing.returncode == 0
         assert sorted(listing.stdout.split()) == [
+            "gizmo-notes/other-thing.md",
             "widget-cfg/thing-alpha.md",
             "widget-cfg/thing-beta.md",
         ]
@@ -379,6 +404,7 @@ class TestHostileOrBrokenArchives:
         assert "did not return an archive" in proc.stderr
         # and the good cache survived
         assert sorted(p.name for p in cache.glob("*/*.md")) == [
+            "other-thing.md",
             "thing-alpha.md",
             "thing-beta.md",
         ]
@@ -457,6 +483,25 @@ class TestScopeFilterNeverNarrowsTheSharedCache:
         after = sorted(p.name for p in cache.glob("*/*.md"))
         assert after == before, f"{cmd[0]} --scope narrowed the shared cache"
 
+    @pytest.mark.parametrize("cmd", [("sync",), ("validate",)])
+    def test_the_OTHER_scope_still_answers_afterwards(
+        self, live_store, tmp_path: Path, cmd
+    ):
+        """🔴 The PROPERTY, not the artifact. `test_the_cache_stays_complete`
+        counts files; this asserts the consequence the original defect actually
+        had — after a scoped command, an offline recall of a DIFFERENT scope
+        must still find it, rather than reporting "nothing recorded yet" at
+        exit 0 from a cache that was quietly narrowed.
+        """
+        cache = tmp_path / "cache"
+        assert run_store("sync", url=live_store.base, cache=cache).returncode == 0
+        run_store(*cmd, "--scope", "widget-cfg", url=live_store.base, cache=cache)
+        proc = run_store(
+            "recall", "--scope", "gizmo-notes", "--no-sync", url=None, cache=cache
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert "other-thing" in proc.stdout, proc.stdout
+
     def test_the_stamp_records_that_the_cache_is_COMPLETE(
         self, live_store, tmp_path: Path
     ):
@@ -511,6 +556,155 @@ class TestUnreadableScope:
             assert "hollow-area" in combined, combined
         finally:
             locked.chmod(0o755)
+
+
+class TestSymlinkedScopeIsRefusedNotDropped:
+    def test_a_symlinked_scope_dir_is_NOT_reported_as_scope_empty(
+        self, source_store: Path, live_store, tmp_path: Path
+    ):
+        """🔴 THE DEFECT THE PREVIOUS FIX ROUND INTRODUCED.
+
+        The symlink guard added to stop the server following links FILTERED
+        symlinked scope dirs out of the candidate list, so they never reached
+        the `unreadable` report and never reached the tar. Measured: a symlinked
+        scope holding 2 entries rendered as `scope-empty — nothing recorded` at
+        exit 0, while the PREVIOUS commit served them. The headline defect of
+        this whole client, reintroduced one level up by the guard added to close
+        it at the entry level. A guard that SKIPS is a silent omission.
+        """
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "sneaky.md").write_text(
+            _entry("sneaky", "linked-scope", "- 2026-01-09: lives elsewhere.")
+        )
+        (source_store / "linked-scope").symlink_to(outside, target_is_directory=True)
+
+        proc = run_store(
+            "recall", "--scope", "linked-scope", url=live_store.base,
+            cache=tmp_path / "cache",
+        )
+        combined = proc.stdout + proc.stderr
+        assert "scope-empty" not in combined, combined
+        assert proc.returncode != 0, combined
+        assert "linked-scope" in combined, combined
+
+
+class TestValidateActuallyRuns:
+    def test_validate_exits_0_on_a_clean_cache(self, live_store, tmp_path: Path):
+        """🔴 `store validate` NEVER WORKED — it passed `--validate` to the
+        READER, which has no such flag, so every invocation exited 2 with
+        `unrecognized arguments`. The test written to close that gap asserted
+        only that the cache directory was unchanged, so it passed green over a
+        command that failed on every input. Assert the OUTCOME."""
+        cache = tmp_path / "cache"
+        assert run_store("sync", url=live_store.base, cache=cache).returncode == 0
+        proc = run_store("validate", "--no-sync", url=None, cache=cache)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "unrecognized arguments" not in (proc.stdout + proc.stderr)
+
+    def test_validate_exits_NONZERO_on_a_malformed_cache(
+        self, source_store: Path, live_store, tmp_path: Path
+    ):
+        """Negative control: a validator that never fails is not a validator."""
+        (source_store / "widget-cfg" / "broken.md").write_text(
+            "aliases: [wrapped,\n  list]\nno front matter at all\n"
+        )
+        cache = tmp_path / "cache"
+        assert run_store("sync", url=live_store.base, cache=cache).returncode == 0
+        proc = run_store("validate", "--no-sync", url=None, cache=cache)
+        assert proc.returncode != 0, proc.stdout + proc.stderr
+
+
+class TestArchiveSizeAndTruncation:
+    def test_a_truncated_GZIP_serves_the_cache_instead_of_a_traceback(
+        self, live_store, tmp_path: Path
+    ):
+        """🔴 The gzip switch reopened the crash finding one exception type over.
+        A short body used to raise `tarfile.ReadError` (handled); compressed it
+        raises `EOFError`, which was not, so it escaped as a traceback at exit 1
+        with a healthy cache unused."""
+        cache = tmp_path / "cache"
+        assert run_store("sync", url=live_store.base, cache=cache).returncode == 0
+        good = _fetch_snapshot_bytes(live_store.base)
+        truncated = good[: len(good) // 2]
+        proc = TestHostileOrBrokenArchives()._run_against(
+            truncated, "application/gzip", cache
+        )
+        assert "Traceback" not in proc.stderr, proc.stderr
+        assert proc.returncode != 0
+        assert sorted(p.name for p in cache.glob("*/*.md")), "cache was destroyed"
+
+    def test_a_decompression_BOMB_is_refused(self, tmp_path: Path):
+        """🔴 Gzip removed the natural bound: before it, the response body
+        limited what could be extracted. Measured on the previous commit: a
+        203,934-byte body wrote 209,715,200 bytes to disk and reported
+        `live … 1 entries`, exit 0."""
+        buf = io.BytesIO()
+        payload = b"\0" * (300 * 1024 * 1024)
+        with tarfile.open(fileobj=buf, mode="w:gz", format=tarfile.PAX_FORMAT) as tar:
+            info = tarfile.TarInfo("widget-cfg/bomb.md")
+            info.size = len(payload)
+            tar.addfile(info, io.BytesIO(payload))
+        body = buf.getvalue()
+        assert len(body) < 2 * 1024 * 1024, "fixture is not actually compressed"
+        proc = TestHostileOrBrokenArchives()._run_against(
+            body, "application/gzip", tmp_path / "cache"
+        )
+        assert proc.returncode != 0, proc.stdout
+        assert "REFUSED" in proc.stderr and "ceiling" in proc.stderr, proc.stderr
+        assert not list((tmp_path / "cache").glob("*/*.md"))
+
+
+class TestNonRegularFilesInTheStore:
+    def test_a_directory_named_md_does_not_503_the_whole_store(
+        self, source_store: Path, live_store, tmp_path: Path
+    ):
+        """🔴 The previous round replaced `is_file()` with the symlink check and
+        dropped it. A DIRECTORY named `*.md` then raised `IsADirectoryError`,
+        503ing the entire store for every caller and every scope."""
+        (source_store / "widget-cfg" / "trap.md").mkdir()
+        proc = run_store(
+            "recall", "--scope", "gizmo-notes", url=live_store.base,
+            cache=tmp_path / "cache",
+        )
+        combined = proc.stdout + proc.stderr
+        # 🔴 ASSERT THE REFUSAL WORDING, not merely "it did not crash". At
+        # 44eb5841 this produced `store unreadable: [Errno 21] Is a directory:
+        # …/trap.md` — which also names the file and also avoids the literal
+        # word "IsADirectoryError", so a test asserting only those two things
+        # passed against the broken code. It has to pin the classified refusal.
+        assert "not a regular file" in combined, combined
+        assert "trap.md" in combined, combined
+        assert "Errno 21" not in combined, combined
+
+
+class TestOrphanStagingIsReaped:
+    def test_an_old_staging_dir_is_removed_by_the_next_sync(
+        self, live_store, tmp_path: Path
+    ):
+        """🔴 Per-run staging names fixed the truncation race but removed the
+        self-healing the fixed name had: an audit SIGKILLed three syncs and the
+        orphans survived every later clean run. With a sync timer they grow
+        without bound in `~/.cache`."""
+        cache = tmp_path / "cache"
+        orphan = cache.parent / f"{cache.name}.new-deadbeef"
+        orphan.mkdir(parents=True)
+        (orphan / "junk.md").write_text("left behind by a SIGKILL")
+        old = time.time() - (ORPHAN_GRACE + 60)
+        os.utime(orphan, (old, old))
+
+        assert run_store("sync", url=live_store.base, cache=cache).returncode == 0
+        assert not orphan.exists(), "orphan staging dir survived a clean sync"
+
+    def test_a_RECENT_staging_dir_is_left_alone(self, live_store, tmp_path: Path):
+        """Negative control, and it is the safety property: a young `.new-*` may
+        belong to a CONCURRENT sync, and reaping it would reintroduce the race
+        the unique names removed."""
+        cache = tmp_path / "cache"
+        fresh = cache.parent / f"{cache.name}.new-inflight"
+        fresh.mkdir(parents=True)
+        assert run_store("sync", url=live_store.base, cache=cache).returncode == 0
+        assert fresh.exists(), "reaper deleted a possibly-live staging dir"
 
 
 class TestTheHarnessItself:
