@@ -467,3 +467,73 @@ server was repointed from the internal LAN name to the externally-trusted one
 (`UNABLE_TO_VERIFY_LEAF_SIGNATURE`), so the CLI cannot talk to it at all. Fixing that cert
 is separate homelab breakage, unrelated to this work. Endpoints deliberately not named
 here — this repo is public.
+## Open investigations — live diagnosis state
+
+### devrc CI gate pods are PREEMPTED mid-run — 16.7%, and the rate went UP
+- **Symptom + exact repro:** a devrc PR's checks post
+  `COULD NOT RUN: <leg> — the gate stopped before this leg reported`. Both legs are
+  REQUIRED with `enforce_admins: true`, so the PR reads `BLOCKED` and cannot merge.
+  Reproduced on `#799` twice in a row.
+- **Observed (with values):**
+  - `kubectl -n tekton-ci get taskrun <run>-gate -o jsonpath='{range .status.steps[*]}…'`
+    → `clone 0, capture-etc 0, seed-nix 0, pytests 255, nodetests 2, verdict 2`.
+  - `kubectl get events -n tekton-ci` →
+    `Preempted  pod/devrc-ci-sgcv2-gate-pod  Preempted by pod 83e799bc-… on node talos-xr6-r7p`
+  - Gate pods carry `priorityClassName=ci-bulk`, **`priority=-10000`**; every other pod on
+    that node is priority **0**, so any of them is a valid preemptor.
+  - **Five PipelineRuns failed within 3 seconds** (21:07:06–21:07:09) — one admission
+    evicting a batch, matching the manifest's stated blast radius (one gitops-validate pod
+    evicts 2–4 devrc runs).
+  - **Kill rate, measured with the manifest's OWN classifier** (a step at 137/255 after
+    clone/capture-etc/seed-nix all exited 0), over 162 retained gate TaskRuns:
+    **succeeded 92 (56.8%) · PREEMPTED 27 (16.7%) · genuine fail/timeout 38 (23.5%)**.
+    Baseline recorded in `ci-priority-classes.yaml` was **14/108 = 13.0%**. Excluding this
+    session's own 3 attempts: **24/159 ≈ 15.1%** — still up.
+- **Ruled out:**
+  - *A broken gate / a defect in the diff* — PR **#801** failed identically in the same
+    window, and `error`-with-`COULD NOT RUN` is by design a could-not-run, not a failure.
+  - *Congestion* — the `tekton` skill's documented tell is that congestion **heals when the
+    queue drains**. It did not: a push onto a drained queue (running=1, pending=0, node 41%
+    requests) failed the same way.
+  - *Node pressure* — `MemoryPressure=False DiskPressure=False PIDPressure=False`, node at
+    46% cpu / 52% memory requests, 63/110 pods.
+  - *The pruner* — `keep:100`, schedule `0 3 * * *`, last ran 17h before the failures.
+- **Leading hypothesis:** working as designed. `ci-priority-classes.yaml` states it outright —
+  *"Everything sat at priority 0, so nothing was a valid victim. Putting devrc below 0
+  supplies the victim. **That eviction IS the fix.**"* The residual question is only whether
+  the recent `gitops-validate` right-sizing moved the rate, and the measurement above says
+  it did not.
+- **Next probe:** the manifest names it — check **pod count**, not CPU/memory, before
+  re-deriving the resource argument, because a kill on the `pods` predicate is
+  indistinguishable from a CPU kill while every CPU/memory number reads healthy:
+  ```bash
+  KUBECONFIG=$KC_HOMELAB kubectl get pods -A \
+    --field-selector spec.nodeName=talos-xr6-r7p,status.phase!=Succeeded,status.phase!=Failed \
+    --no-headers | wc -l   # against the node's 110 cap; 63 observed during these kills
+  ```
+
+## Gotchas — landing a PR in this repo (CI)
+- 🔴 **A devrc PR that reads `COULD NOT RUN` is almost certainly PREEMPTED, not broken.
+  RE-PUSH; do not "fix" anything.** ~1 in 6 gate runs dies this way. Push when **≤4 devrc
+  gates are running** — `ci-priority-classes.yaml` measured **0 kills in 18 runs at ≤4**,
+  with kills only at ≥5:
+  `kubectl get pipelineruns -n tekton-ci --no-headers | grep -c Running`
+- 🔴 **DO NOT "fix" `ci-bulk` by raising its value. I proposed exactly that and it was
+  WRONG.** The preemption is deliberate and load-bearing: it supplies the only eligible
+  victim on the pinned node, without which `gitops-validate` hits `PipelineRunTimeout`
+  (13 times in 40 minutes, measured). The manifest anticipates the mistake and says
+  *"do not paraphrase this line as 'queue order' again, it was wrong once"* — I made that
+  paraphrase anyway, and only reading the file before editing caught it. **Read
+  `clusters/homelab/apps/tekton-pipelines/triggers/ci-priority-classes.yaml` in FULL before
+  touching CI scheduling**; it already rejects concurrency caps, `retries`, ResourceQuotas
+  and relocation, each with the measurement that killed it.
+- 🔴 **`PriorityClass.value` is IMMUTABLE** — `value: Forbidden: may not be changed in an
+  update`. Any change needs a delete+recreate, so Flux cannot patch it in place.
+- **The exit code lied three times this session, in three different ways.** A background
+  task reported `exit code 0` for a run whose content said `GATE_RC=1`; a drain watcher
+  reported `failed with exit code 1` having fully succeeded (a trailing `grep` matched
+  nothing); and `clawgate_handoff.sh resolve | tail` printed `rc=0` for a true exit of
+  **5**, because zsh has no `PIPESTATUS`. **Read the content; capture status without a pipe.**
+- **A completion notification can name a STALE target.** A watcher keyed on the pre-push
+  head fired after a new push and read exactly like a result for the current one. Believing
+  it would have merged on checks that ran against different content.
