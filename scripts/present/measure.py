@@ -84,10 +84,57 @@ class Measurement:
     settle: str | None = None        # the command that would settle it
     columns: tuple[str, ...] = ()
     rows: tuple[tuple[str, ...], ...] = ()
+    #: What KIND of text each column holds, parallel to `columns`. Empty means
+    #: "every column is ordinary", which is the pre-existing behaviour.
+    #:
+    #: 🔴 THIS EXISTS BECAUSE SUBSTITUTION CANNOT REDACT PROSE, AND THE PAGE
+    #: SHIPPED CLAIMING OTHERWISE. `--sanitize` rewrites identifier CLASSES it
+    #: has been shown; a measurer that harvests a human-written sentence out of
+    #: a file hands it text with no class at all. Measured 2026-08-26: three
+    #: third-party project names rode out of `claude/skills/*/SKILL.md`
+    #: descriptions into a page stamped SANITIZED, while the same run took four
+    #: other identifier classes to zero — so the banner looked clean.
+    #:
+    #: Widening the name list was tried and REJECTED ON MEASUREMENT: sourcing
+    #: names from the index store, the skill directories AND every directory
+    #: under the operator's workspace (149 names) still left one project name
+    #: untouched — its directory is `<name>-ai` and the leak was a bare `<name>`
+    #: in a sentence — while rewriting `test`, `fast` and `scratch` wherever
+    #: they appeared as English words. A name list is fail-OPEN by construction:
+    #: it closes exactly the names something happened to be called after.
+    #:
+    #: So the kinds split the problem where it actually splits:
+    #:
+    #:   `""`      ordinary — sanitized by the identifier classes, as before.
+    #:   `"name"`  a LOCAL IDENTIFIER in a structured cell. Known local names
+    #:             are substituted inside it. Confined to the cell, so a skill
+    #:             called `bar` cannot rewrite the word "bar" in prose — the
+    #:             corruption that forced the length ladder in the first place.
+    #:   `"prose"` HUMAN-AUTHORED PROSE harvested from a file. WITHHELD in a
+    #:             sanitized build, never scrubbed, because no rule can
+    #:             enumerate what a sentence might name.
+    #:
+    #: `PROSE_LEDGER` in `scripts/tests/test_present_sanitize.py` pins the
+    #: declarations two-way — a registry key that gains or loses one fails the
+    #: suite — because a measurer that starts harvesting prose without saying so
+    #: is precisely the leak this field was added to stop, and it is invisible
+    #: in a diff that only adds a `rows.append`.
+    column_kinds: tuple[str, ...] = ()
 
     @property
     def measured(self) -> bool:
         return self.status == MEASURED
+
+    def kind_of(self, index: int) -> str:
+        """The declared kind of column `index` — `""` when nothing is declared.
+
+        Out-of-range is `""` and not an error on purpose: a row that is shorter
+        or longer than `columns` is a measurer bug, and turning it into an
+        exception here would take down a whole build over one ragged row.
+        """
+        if index < len(self.column_kinds):
+            return self.column_kinds[index]
+        return ""
 
 
 @dataclass
@@ -422,6 +469,15 @@ def m_skill_listing(env: Env) -> dict:
         ),
         source="scripts/lib/skill_tiers.py (the ledger's own parser), ratchet from scripts/tests/test_skill_tiers.py",
         columns=("what", "measured"),
+        #: 🔴 THE `what` COLUMN IS `name` FOR THREE ROWS OUT OF TEN, AND WHICH
+        #: THREE IS NOT FIXED. `costliest tier-A entry: <skill>` interpolates a
+        #: skill name into an otherwise-static label, so this column leaks
+        #: whenever the costliest entries happen to be the client-named skills.
+        #: Today they are not — measured `clickup`, `session-manager`,
+        #: `window-triage` — which is exactly why declaring it only when the
+        #: leak is visible would be wrong: the cell contents are a ranking that
+        #: moves on its own, with no commit to notice it.
+        column_kinds=("name", ""),
         rows=tuple(rows),
     )
 
@@ -465,6 +521,19 @@ def m_skill_inventory(env: Env) -> dict:
         ),
         source="claude/skills/*/SKILL.md front-matter + claude/skill-tiers.json",
         columns=("skill", "tier", "what it is (its own words)", "path"),
+        #: The description is the skill AUTHOR's sentence, not this module's, so
+        #: it can name anything — a client, a product, a hostname this module has
+        #: never been shown. It is `prose`, and a sanitized build withholds it.
+        #: The skill name is a local identifier and appears twice (bare, and
+        #: inside the path), so both of those cells are `name`.
+        #:
+        #: 🔴 EVERY name IS SUBSTITUTED, NOT JUST THE ONES THAT LOOK LIKE
+        #: CLIENTS — and that is the entitlement argument, not over-caution.
+        #: Redacting only the names judged sensitive would publish the judgement:
+        #: a reader seeing 35 real names and 2 stand-ins learns exactly which
+        #: two are the clients. Uniform substitution leaks neither the names nor
+        #: the boundary.
+        column_kinds=("name", "", "prose", "name"),
         rows=tuple(rows),
     )
 

@@ -19,11 +19,18 @@ and that the mapping is STABLE. They cannot prove an unknown class is caught —
 `test_the_sanitizer_cannot_see_an_unknown_identifier_class` pins that limitation
 as a property, so nobody reads this suite as a guarantee it does not make.
 
-WHAT COUNTS AS COVERAGE. All INVARIANT GUARDS: `scripts/present/` is new in this
-commit, so nothing here can be shown red on pre-change code. Each substitution
-test carries its own control — the un-sanitized path must leave the value ALONE —
-because a `Sanitizer` that rewrote everything unconditionally would pass a
-one-sided assertion and destroy the private build.
+WHAT COUNTS AS COVERAGE. Most of this file is INVARIANT GUARDS: `scripts/present/`
+was new in the commit that added them, so they cannot be shown red on pre-change
+code. Each substitution test carries its own control — the un-sanitized path must
+leave the value ALONE — because a `Sanitizer` that rewrote everything
+unconditionally would pass a one-sided assertion and destroy the private build.
+
+🔴 THE `column_kinds` TESTS ARE REGRESSION COVERAGE, NOT INVARIANT GUARDS, and
+the difference is load-bearing. They pin a leak that SHIPPED: harvested prose
+naming a third party rode into a page stamped SANITIZED while four other
+identifier classes on the same run went to zero. `test_a_declared_PROSE_cell_is_
+withheld_whole_not_scrubbed` is red on the pre-change tree — verify it there
+before trusting it, since a guard nobody has watched fail proves nothing.
 
 Every value below is INVENTED. Real identifiers are read at run time from local
 state and appear in no fixture, which is the arrival path this repo's captured-
@@ -64,10 +71,24 @@ FAKE_STORE = "/nix/store/abcdefghijklmnopqrstuvwxyz012345-python3-3.12.14"
 #: other half of this class, which is the one that cannot be substituted safely.
 FAKE_NODE = "workbench-prod"
 
+#: Local identifiers for a `name` cell. Deliberately mixed:
+#:
+#:   * `quartzsight` and `pelagic-mail` are shaped like the leak that motivated
+#:     the class — a third party's name used as a local identifier;
+#:   * `bar` and `resume` are shaped like the CORRUPTION risk — ordinary English
+#:     words that are also real local identifiers. They are what proves the
+#:     substitution stays inside the cell it was declared on.
+FAKE_NAMES = ("quartzsight", "pelagic-mail", "bar", "resume")
+#: A sentence of the kind a measurer HARVESTS rather than authors. It names a
+#: third party that appears in NO name list — which is the whole point: this is
+#: the value substitution structurally cannot reach.
+FAKE_PROSE = "Walk the Northwind Dental funnel and screenshot every view"
+
 
 def _san(enabled=True, **kw) -> sanitize.Sanitizer:
     base = dict(enabled=enabled, home=FAKE_HOME, user="jrandom",
-                scopes=FAKE_SCOPES, hostnames=(FAKE_NODE,))
+                scopes=FAKE_SCOPES, hostnames=(FAKE_NODE,),
+                local_names=FAKE_NAMES)
     base.update(kw)
     return sanitize.Sanitizer(**base)
 
@@ -491,6 +512,254 @@ def test_apply_sanitizes_every_string_field_including_an_absence():
     assert out.by_key("b").status == measure.UNMEASURED, "apply() changed a status"
 
 
+# --------------------------------------------------------------------------- #
+# Prose is WITHHELD, not scrubbed — the class substitution cannot reach
+# --------------------------------------------------------------------------- #
+
+
+def test_a_declared_PROSE_cell_is_withheld_whole_not_scrubbed():
+    """REGRESSION GUARD — red before `column_kinds` existed.
+
+    The shipped bug: a measurer harvested a human sentence out of a file, the
+    sentence named a third party no identifier list contained, and it rode into
+    a page stamped SANITIZED. Substituting harder cannot fix this — the name is
+    not in any list to substitute — so the cell has to go.
+    """
+    ms = measure.MeasurementSet()
+    ms.items.append(_row("skills.inventory",
+                         columns=("skill", "what it is"),
+                         column_kinds=("name", "prose"),
+                         rows=(("/quartzsight", FAKE_PROSE),)))
+    out = sanitize.apply(ms, _san())
+    cell = out.by_key("skills.inventory").rows[0][1]
+    assert "Northwind" not in cell, f"harvested prose survived: {cell!r}"
+    assert cell == sanitize.WITHHELD, f"prose was scrubbed, not withheld: {cell!r}"
+
+
+def test_withholding_says_WITHHELD_and_never_leaves_a_BLANK():
+    """A blank cell cannot be told from a skill that has no description.
+
+    Same silent-zero failure the UNMEASURED state exists to prevent, arriving
+    one layer down.
+    """
+    ms = measure.MeasurementSet()
+    ms.items.append(_row("k", columns=("c",), column_kinds=("prose",),
+                         rows=((FAKE_PROSE,),)))
+    cell = sanitize.apply(ms, _san()).by_key("k").rows[0][0]
+    assert cell.strip(), "a withheld cell rendered as whitespace"
+    assert "WITHHELD" in cell
+
+
+def test_withholding_still_happens_when_EVERY_name_source_is_empty():
+    """FAIL-CLOSED GUARD, and the one that separates this fix from the old one.
+
+    A name-list fix is only as good as the list. Withholding is driven by the
+    DECLARATION, so a host with no index store and no skill inventory — where
+    every name list is empty and the old approach degraded to doing nothing —
+    still removes the prose.
+    """
+    bare = sanitize.Sanitizer(enabled=True, home="", user="", scopes=(),
+                              hostnames=(), local_names=())
+    ms = measure.MeasurementSet()
+    ms.items.append(_row("k", columns=("c",), column_kinds=("prose",),
+                         rows=((FAKE_PROSE,),)))
+    cell = sanitize.apply(ms, bare).by_key("k").rows[0][0]
+    assert cell == sanitize.WITHHELD, f"empty name sources reopened the hole: {cell!r}"
+
+
+def test_an_UNKNOWN_column_kind_is_withheld_and_not_waved_through():
+    """FAIL-CLOSED GUARD on the declaration itself.
+
+    A typo, or a kind a newer measurer knows and this module does not, must
+    lose the text rather than publish it. The ordinary path is spelled `""` and
+    has to be spelled — silence is not the safe default here.
+    """
+    ms = measure.MeasurementSet()
+    ms.items.append(_row("k", columns=("c",), column_kinds=("prosee",),
+                         rows=((FAKE_PROSE,),)))
+    cell = sanitize.apply(ms, _san()).by_key("k").rows[0][0]
+    assert cell == sanitize.WITHHELD, f"an unknown kind was treated as ordinary: {cell!r}"
+
+
+def test_a_NAME_cell_substitutes_every_local_identifier_including_short_ones():
+    """A `name` cell is a structured slot, so the length ladder does not apply.
+
+    `bar` is 3 characters and `text()` would decline it — correctly, since it
+    is an English word. Here it is unambiguously an identifier.
+    """
+    ms = measure.MeasurementSet()
+    ms.items.append(_row("k", columns=("skill", "path"),
+                         column_kinds=("name", "name"),
+                         rows=(("/bar", "claude/skills/bar/SKILL.md"),
+                               ("/quartzsight", "claude/skills/quartzsight/SKILL.md"))))
+    rows = sanitize.apply(ms, _san()).by_key("k").rows
+    blob = repr(rows)
+    for real in ("bar", "quartzsight"):
+        assert f"/{real}" not in blob, f"{real!r} survived a name cell: {blob!r}"
+    assert "claude/skills/" in blob, "the path SHAPE was destroyed, not just the name"
+
+
+def test_the_same_name_gets_the_same_stand_in_in_both_of_its_cells():
+    """Otherwise the row stops being readable as one row.
+
+    A skill whose name and path disagreed would read as two different skills,
+    which is a worse artefact than the one this replaced.
+    """
+    ms = measure.MeasurementSet()
+    ms.items.append(_row("k", columns=("skill", "path"),
+                         column_kinds=("name", "name"),
+                         rows=(("/quartzsight", "claude/skills/quartzsight/SKILL.md"),)))
+    name_cell, path_cell = sanitize.apply(ms, _san()).by_key("k").rows[0]
+    stand = name_cell.lstrip("/")
+    assert stand.startswith("name-"), f"unexpected stand-in {name_cell!r}"
+    assert f"claude/skills/{stand}/SKILL.md" == path_cell, \
+        f"name and path disagree: {name_cell!r} vs {path_cell!r}"
+
+
+def test_a_local_name_that_is_an_ENGLISH_WORD_is_not_rewritten_OUTSIDE_its_cell():
+    """CORRUPTION CONTROL — the failure that killed the name-list approach.
+
+    Sourcing names widely and substituting them everywhere rewrote `test`,
+    `fast` and `scratch` as they occurred in ordinary English. Confining the
+    class to a declared cell is what makes substituting ALL names safe, so this
+    is the assertion that licenses the aggressive half of the fix.
+    """
+    prose = "resume the run from the status bar and read the bar chart"
+    ms = measure.MeasurementSet()
+    ms.items.append(_row("k", detail=prose,
+                         columns=("ordinary",), column_kinds=("",),
+                         rows=((prose,),)))
+    out = sanitize.apply(ms, _san()).by_key("k")
+    assert out.rows[0][0] == prose, f"an ordinary cell was name-substituted: {out.rows[0][0]!r}"
+    assert out.detail == prose, f"`detail` was name-substituted: {out.detail!r}"
+
+
+def test_a_row_with_NO_declared_kinds_behaves_exactly_as_before():
+    """BACKWARD-COMPATIBILITY GUARD. An empty `column_kinds` is not `prose`.
+
+    Twenty-one registered rows declare nothing. If the default drifted to
+    withholding, the page would empty itself and the tests that count rows
+    would still pass.
+    """
+    ms = measure.MeasurementSet()
+    ms.items.append(_row("k", columns=("c",), rows=((f"at {FAKE_HOME}/x",),)))
+    cell = sanitize.apply(ms, _san()).by_key("k").rows[0][0]
+    assert "WITHHELD" not in cell, "an undeclared column was withheld"
+    assert FAKE_HOME not in cell, "an undeclared column stopped being sanitized"
+
+
+def test_the_legend_counts_withheld_cells_and_warnings_does_NOT_call_it_a_hole():
+    """Withholding is the redaction WORKING; a declined substitution is not.
+
+    Filing them together would make a clean build print degradation warnings
+    forever, which is how a warning stops being read.
+    """
+    ms = measure.MeasurementSet()
+    ms.items.append(_row("k", columns=("c",), column_kinds=("prose",),
+                         rows=((FAKE_PROSE,), (FAKE_PROSE,))))
+    san = _san()
+    sanitize.apply(ms, san)
+    assert san.withheld == 2
+    assert dict(san.legend())["prose-withheld"] == 2
+    assert not [w for w in san.warnings() if "withheld" in w.lower()], \
+        f"withholding was reported as a degradation: {san.warnings()!r}"
+
+
+def test_the_disabled_sanitizer_withholds_NOTHING():
+    """The private build must be the identity transform on prose too."""
+    ms = measure.MeasurementSet()
+    ms.items.append(_row("k", columns=("c",), column_kinds=("prose",),
+                         rows=((FAKE_PROSE,),)))
+    out = sanitize.apply(ms, _san(enabled=False))
+    assert out.by_key("k").rows[0][0] == FAKE_PROSE
+
+
+# --------------------------------------------------------------------------- #
+# The declaration ledger — pinned two-way
+# --------------------------------------------------------------------------- #
+
+#: Every registry key that declares a non-ordinary column, and what it declares.
+#:
+#: 🔴 PINNED TWO-WAY ON PURPOSE. A measurer that starts harvesting prose without
+#: declaring it is EXACTLY the leak `column_kinds` was added to stop, and it is
+#: invisible in review — the diff is one more `rows.append`. So a key that gains
+#: a declaration, loses one, or changes one fails this test until someone edits
+#: the ledger and, in doing so, states what the new column holds.
+#:
+#: Adding a key here is not a formality. Ask: can a cell in that column contain
+#: a sentence somebody WROTE? If yes it is `prose` — no matter how safe today's
+#: contents look, because the contents change without a commit here.
+PROSE_LEDGER = {
+    "skills.listing": ("name", ""),
+    "skills.inventory": ("name", "", "prose", "name"),
+}
+
+
+def _ledger_env(tmp_path):
+    """The REAL repo — the ledger is a claim about the real measurers.
+
+    Home, claude dir and index store point at `tmp_path` so nothing reads the
+    operator's machine, and `allow_network=False` keeps `m_branch_protection`
+    from shelling `gh` (see `Env.allow_network`).
+    """
+    return measure.Env(repo=REPO_ROOT, home=tmp_path,
+                       claude_dir=tmp_path / ".claude",
+                       index_store=tmp_path / "index-store",
+                       allow_systemd=False, allow_network=False)
+
+
+def _declared_kinds(env) -> dict:
+    out = {}
+    for item in measure.take(env):
+        if item.column_kinds:
+            out[item.key] = tuple(item.column_kinds)
+    return out
+
+
+def test_the_column_kind_ledger_is_pinned_two_way(tmp_path):
+    """SEAM GUARD over the whole registry, not over one measurer.
+
+    Runs the real registry and compares the declarations it PRODUCES against
+    the ledger. Both directions matter: a new prose column that nobody declared
+    never appears here (so the ledger is checked against reality, not against
+    itself), and a declaration deleted from a measurer fails rather than
+    silently reopening the hole.
+    """
+    env = _ledger_env(tmp_path)
+    live = _declared_kinds(env)
+    assert live == PROSE_LEDGER, (
+        "the declared column kinds moved.\n"
+        f"  registry says: {live}\n"
+        f"  ledger says:   {PROSE_LEDGER}\n"
+        "If a measurer now harvests human-written text out of a file, declare "
+        "that column `prose` and add it here. If a column stopped being "
+        "harvested, remove it here in the same commit."
+    )
+
+
+def test_every_ledger_KEY_is_a_real_registry_key():
+    """The other direction: a ledger entry naming nothing pins nothing."""
+    keys = {entry[0] for entry in measure.REGISTRY}
+    unknown = set(PROSE_LEDGER) - keys
+    assert not unknown, f"the ledger names keys the registry does not have: {unknown}"
+
+
+def test_every_declaration_is_as_long_as_its_own_columns(tmp_path):
+    """A short `column_kinds` silently leaves the tail columns ordinary.
+
+    That is the shape where a declaration READS as coverage and provides none —
+    the prose column sits past the end of the tuple and is waved through.
+    """
+    env = _ledger_env(tmp_path)
+    for item in measure.take(env):
+        if not item.column_kinds:
+            continue
+        assert len(item.column_kinds) == len(item.columns), (
+            f"{item.key}: {len(item.column_kinds)} kinds for "
+            f"{len(item.columns)} columns — the tail is undeclared"
+        )
+
+
 def test_apply_preserves_the_measured_unmeasured_split():
     """INVARIANT GUARD. Sanitizing must not turn an absence into a value."""
     ms = measure.MeasurementSet()
@@ -555,14 +824,52 @@ def test_scope_substitution_degrading_to_ZERO_is_LOUD(tmp_path):
         assert san.warnings(), f"{label}: nothing would be printed"
         assert any("NOT-SUBSTITUTED" in k for k, _ in san.legend()), (
             f"{label}: the page's own legend would not show it: {san.legend()}")
+        # 🔴 It must degrade for the SCOPE reason specifically. `build()` now has
+        # a second name source (the skill inventory) whose absence ALSO degrades,
+        # and a bare `san.degraded` would go green on that one alone — this test
+        # would then pass with scope degradation deleted entirely.
+        assert any("scope" in reason for reason in san.degraded), (
+            f"{label}: degraded, but not about scopes: {san.degraded!r}")
 
-    # CONTROL: a store that measured real scopes degrades NOTHING, so the flag
+    # CONTROL: with BOTH name sources measured, nothing degrades — so the flag
     # above cannot be a constant.
     fine = measure.MeasurementSet()
     fine.items.append(_row("index.store", columns=("scope",), rows=(("borealis",),)))
+    fine.items.append(_row("skills.inventory", columns=("skill",),
+                           column_kinds=("name",), rows=(("/pelagic-mail",),)))
     ok = sanitize.build(True, env, fine)
-    assert not ok.degraded and ok.scopes == ("borealis",)
+    assert not ok.degraded, f"a fully-measured build degraded: {ok.degraded!r}"
+    assert ok.scopes == ("borealis",)
+    assert ok.local_names == ("pelagic-mail",), (
+        f"the name source did not load: {ok.local_names!r}")
     assert not any("NOT-SUBSTITUTED" in k for k, _ in ok.legend())
+
+
+def test_the_NAME_source_degrading_is_LOUD_but_does_NOT_reopen_the_prose_hole(tmp_path):
+    """The two halves of the fix must fail INDEPENDENTLY.
+
+    A missing skill inventory means identifiers around the prose keep their real
+    names — worth a warning. It must NOT mean the prose comes back, because the
+    withholding is driven by the DECLARATION, not by any name list. Coupling
+    them would rebuild the fail-open behaviour this change removed, one layer up.
+    """
+    env = measure.Env(repo=tmp_path, home=tmp_path / "h", claude_dir=tmp_path / "c",
+                      index_store=tmp_path / "s", allow_systemd=False,
+                      allow_network=False)
+    ms = measure.MeasurementSet()
+    ms.items.append(_row("index.store", columns=("scope",), rows=(("borealis",),)))
+    san = sanitize.build(True, env, ms)
+
+    assert any("skills.inventory" in r for r in san.degraded), (
+        f"a missing name source degraded silently: {san.degraded!r}")
+    assert san.local_names == ()
+
+    page = measure.MeasurementSet()
+    page.items.append(_row("k", columns=("c",), column_kinds=("prose",),
+                           rows=((FAKE_PROSE,),)))
+    cell = sanitize.apply(page, san).by_key("k").rows[0][0]
+    assert cell == sanitize.WITHHELD, (
+        f"a degraded name source reopened the prose hole: {cell!r}")
 
 
 def test_the_legend_never_prints_the_real_side():

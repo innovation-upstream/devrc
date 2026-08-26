@@ -21,6 +21,27 @@ a security boundary and it must never be described as one:
     class of identifier walks straight through, silently, and the only defence
     is reading the output.
 
+🔴 PROSE IS NOT SUBSTITUTED, IT IS WITHHELD — AND THAT IS THE ONLY HONEST
+ANSWER. Substitution rewrites identifiers it has been SHOWN. A measurer that
+harvests a human-written sentence out of a file hands this module text with no
+class at all, and the sentence can name anything. Measured 2026-08-26: three
+third-party project names rode out of `claude/skills/*/SKILL.md` descriptions
+into a page stamped SANITIZED, while four other identifier classes on the SAME
+run went to zero — so nothing looked wrong.
+
+Widening the name list was tried and rejected on measurement, not on taste:
+sourcing names from the index store, the skill directories AND all 149
+directories under the operator's workspace still left one project name fully
+intact — its directory is `<name>-ai` and the leak was a bare `<name>` in a
+sentence — while rewriting `test`, `fast` and `scratch` wherever they occurred
+as English words. A name list closes exactly the names something happened to be
+named after, which is fail-OPEN, and an entitlement boundary may not be.
+
+So a measurer DECLARES what each column holds (`Measurement.column_kinds`) and
+this module withholds the prose instead of pretending to clean it. Withholding
+is driven by that declaration, never by the name list, so it still happens on a
+host where every name source is empty.
+
 🔴 EVERY CLASS BELOW IS CASE-INSENSITIVE AND HYPHEN-BLIND, AND THAT IS A FIX,
 NOT A STYLE CHOICE. Both asymmetries shipped and both leaked, into a page whose
 whole purpose is being handed to an outsider:
@@ -193,6 +214,13 @@ NOT_SUBSTITUTED = frozenset({"devrc"})
 #: of a short scope walks through, and the legend says so.
 SCOPE_AGGRESSIVE_MIN = 5
 
+#: What a withheld prose cell renders as.
+#:
+#: 🔴 IT SAYS WITHHELD, NOT BLANK. An empty cell is the silent zero this whole
+#: page is built against — the reader cannot tell "the skill has no description"
+#: from "the description was removed", and only one of those is true.
+WITHHELD = "[WITHHELD — prose, not redactable]"
+
 
 def _word(literal: str) -> str:
     """A boundary that treats a HYPHEN as a separator, not as part of the word.
@@ -229,6 +257,13 @@ class Sanitizer:
     #: Dotless machine names read from local state. See `_hosts` for why only
     #: some of them can safely be substituted.
     hostnames: tuple[str, ...] = ()
+    #: LOCAL IDENTIFIERS substituted ONLY inside a cell a measurer declared
+    #: `name`. They are deliberately NOT part of `text()`: this set contains
+    #: names like `bar`, `i3`, `signal` and `resume`, and letting them loose on
+    #: the whole page would rewrite ordinary English — the corruption that
+    #: forced `SCOPE_AGGRESSIVE_MIN` to exist. Confining them to a structured
+    #: cell is what makes substituting ALL of them safe.
+    local_names: tuple[str, ...] = ()
     keep: frozenset[str] = NOT_SUBSTITUTED
     #: Why a class is weaker than it claims on THIS build. Set by `build()`.
     degraded: tuple[str, ...] = ()
@@ -236,6 +271,9 @@ class Sanitizer:
     _counters: dict[str, int] = field(default_factory=dict)
     #: kind -> how many real values this run declined to substitute.
     _skipped: dict[str, int] = field(default_factory=dict)
+    #: How many prose cells this run withheld. Counted separately from
+    #: `_skipped` because it is the redaction WORKING, not a hole in it.
+    _withheld: int = 0
 
     def _next(self, kind: str) -> int:
         self._counters[kind] = self._counters.get(kind, 0) + 1
@@ -384,6 +422,45 @@ class Sanitizer:
         out = self._hosts(out)
         return out
 
+    def _names(self, text: str) -> str:
+        """Substitute LOCAL IDENTIFIERS — only ever called on a `name` cell.
+
+        No length ladder and no exact-form fallback: a `name` cell is a
+        structured identifier slot, so a short name there is a name, not an
+        English word that happens to collide. That is precisely the assumption
+        `text()` may NOT make, which is why this is a separate method rather
+        than another class inside it.
+        """
+        for real in sorted(self.local_names, key=len, reverse=True):
+            if not real or real.lower() in self.keep:
+                continue
+            stand = self._stand_in("name", real.lower(), lambda n: f"name-{n:02d}")
+            text = re.sub(_word(real), stand, text, flags=re.I)
+        return text
+
+    def cell(self, value: str | None, kind: str) -> str | None:
+        """Sanitize one table cell according to its DECLARED kind.
+
+        🔴 AN UNKNOWN KIND IS TREATED AS `prose`, NOT AS ORDINARY. This is the
+        fail-closed direction and it is the whole point of the field: a typo, a
+        kind added by a newer measurer than this module knows about, or a
+        half-finished declaration must lose the text, never publish it. The
+        ordinary path is the one spelled `""`, and it has to be spelled.
+        """
+        if value is None or not self.enabled:
+            return value
+        if kind == "":
+            return self.text(value)
+        if kind == "name":
+            return self._names(self.text(value) or "")
+        self._withheld += 1
+        return WITHHELD
+
+    @property
+    def withheld(self) -> int:
+        """How many prose cells this run removed rather than scrubbed."""
+        return self._withheld
+
     @property
     def substitutions(self) -> int:
         return len(self._map)
@@ -404,6 +481,8 @@ class Sanitizer:
             for key in source:
                 kind = key.split(":", 1)[0]
                 counts[kind] = counts.get(kind, 0) + 1
+        if self._withheld:
+            counts["prose-withheld"] = self._withheld
         if self.degraded:
             counts["NOT-SUBSTITUTED-see-build-log"] = len(self.degraded)
         return tuple(sorted(counts.items()))
@@ -449,6 +528,32 @@ def build(enabled: bool, env, measurements=None) -> Sanitizer:
                 degraded.append(
                     "the index store measured ZERO scopes, so no scope name is "
                     "substituted — an empty scope list is not a clean one")
+    #: LOCAL IDENTIFIERS for `name` cells, read from the skill inventory the
+    #: same way scopes are read from the index store — local state, never a
+    #: committed literal.
+    #:
+    #: 🔴 AN EMPTY SET HERE IS NOT A CLEAN RUN, AND IT DOES NOT REOPEN THE
+    #: PROSE HOLE. Withholding is driven by the DECLARATION, not by this list,
+    #: so a build with no inventory still removes every prose cell — it just
+    #: cannot rename the identifiers around them, and says so.
+    local_names: list[str] = []
+    if measurements is not None:
+        inv = measurements.by_key("skills.inventory")
+        if inv is None:
+            degraded.append(
+                "no `skills.inventory` row is registered, so NO local identifier "
+                "is renamed in a `name` cell — the prose is still withheld")
+        elif not inv.measured:
+            degraded.append(
+                "the skill inventory came back UNMEASURED "
+                f"({inv.reason or 'no reason given'}), so NO local identifier is "
+                "renamed in a `name` cell — the prose is still withheld")
+        else:
+            local_names = [row[0].lstrip("/") for row in inv.rows if row and row[0]]
+            if not local_names:
+                degraded.append(
+                    "the skill inventory measured ZERO skills, so no local "
+                    "identifier is renamed — an empty name list is not a clean one")
     home = str(env.home).rstrip("/")
     try:
         node = socket.gethostname()
@@ -461,6 +566,7 @@ def build(enabled: bool, env, measurements=None) -> Sanitizer:
         user=os.path.basename(home),
         scopes=tuple(scopes),
         hostnames=hostnames,
+        local_names=tuple(sorted(set(local_names))),
         degraded=tuple(degraded),
     )
 
@@ -492,6 +598,9 @@ def apply(measurements, san: Sanitizer):
             source=san.text(item.source) or "",
             reason=san.text(item.reason),
             settle=san.text(item.settle),
-            rows=tuple(tuple(san.text(c) or "" for c in row) for row in item.rows),
+            rows=tuple(
+                tuple(san.cell(c, item.kind_of(i)) or "" for i, c in enumerate(row))
+                for row in item.rows
+            ),
         ))
     return out
