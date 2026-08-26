@@ -954,6 +954,113 @@ class TestReadOnlyPhase1:
 # =============================================================================
 
 
+class TestClassifierIsTotal:
+    """🔴 THE GUARD THAT IS SUPPOSED TO END THE ROUND-N LOOP.
+
+    Four audit rounds found the same defect shape in `_snapshot`, each time in a
+    NEW input class that the previous round's sequence of `if`s did not decide:
+    symlinked entries, symlinked scope dirs, symlinked non-scopes, then dangling
+    links and symlink loops. Every fix added an arm; none made the rule total,
+    so the next class fell through the same gap and rendered as `scope-empty —
+    nothing recorded` at exit 0.
+
+    These tests pin the classification itself rather than its instances:
+      1. every path lands in exactly one kind (totality of `classify_path`);
+      2. every kind is mapped explicitly in BOTH contexts (no default);
+      3. the fallthrough RAISES, so an unmapped kind is a failure, not a skip.
+
+    Adding a kind therefore breaks (2) until somebody decides, per context,
+    whether it is TAKE, SKIP or REFUSE — which is the decision the last four
+    rounds each made implicitly, by omission, and got wrong.
+    """
+
+    def test_every_kind_is_mapped_in_BOTH_contexts(self):
+        for name, actions in (
+            ("_ROOT_ACTIONS", api._ROOT_ACTIONS),
+            ("_ENTRY_ACTIONS", api._ENTRY_ACTIONS),
+        ):
+            missing = api.ALL_KINDS - set(actions)
+            extra = set(actions) - api.ALL_KINDS
+            assert not missing, f"{name} does not decide: {sorted(missing)}"
+            assert not extra, f"{name} maps unknown kinds: {sorted(extra)}"
+
+    def test_every_mapped_action_is_a_known_action(self):
+        for actions in (api._ROOT_ACTIONS, api._ENTRY_ACTIONS):
+            for kind, action in actions.items():
+                assert action in (api.SKIP, api.TAKE, api.REFUSE), (kind, action)
+
+    def test_an_unmapped_kind_RAISES_rather_than_defaulting(self):
+        """🔴 The fallthrough is the whole mechanism. If `action_for` returned a
+        default, adding a kind would silently inherit SKIP — which is exactly
+        how a dangling scope link became `scope-empty` at exit 0."""
+        with pytest.raises(AssertionError, match="unclassified path kind"):
+            api.action_for("a-kind-nobody-mapped", api._ROOT_ACTIONS)
+
+    @pytest.mark.parametrize(
+        "kind,expected_root,expected_entry",
+        [
+            ("KIND_BROKEN_LINK", "REFUSE", "REFUSE"),
+            ("KIND_LINK_TO_DIR", "REFUSE", "REFUSE"),
+            ("KIND_LINK_TO_FILE", "SKIP", "REFUSE"),
+            ("KIND_LINK_TO_OTHER", "SKIP", "REFUSE"),
+            ("KIND_DIRECTORY", "TAKE", "REFUSE"),
+            ("KIND_REGULAR_FILE", "SKIP", "TAKE"),
+            ("KIND_OTHER", "SKIP", "REFUSE"),
+        ],
+    )
+    def test_the_decision_table_is_pinned(self, kind, expected_root, expected_entry):
+        """Pins the table itself, so a silent flip of any single cell fails.
+
+        Every previous round's bug was one cell of this table being wrong or
+        absent; asserting the table makes each cell a named, reviewable decision
+        instead of an emergent property of statement order.
+        """
+        k = getattr(api, kind)
+        assert api._ROOT_ACTIONS[k] == getattr(api, expected_root)
+        assert api._ENTRY_ACTIONS[k] == getattr(api, expected_entry)
+
+    def test_classify_returns_the_right_kind_for_each_REAL_path(self, tmp_path: Path):
+        """🔴 The table above is only meaningful if `classify_path` actually
+        produces these kinds from real filesystem objects. Built with `os.mkfifo`
+        and real symlinks — not mocks — because the whole bug class came from
+        `pathlib` predicates DEREFERENCING in ways a mock would not reproduce.
+        """
+        (tmp_path / "plain.md").write_text("x")
+        (tmp_path / "adir").mkdir()
+        (tmp_path / "to_file").symlink_to(tmp_path / "plain.md")
+        (tmp_path / "to_dir").symlink_to(tmp_path / "adir", target_is_directory=True)
+        (tmp_path / "dangling").symlink_to(tmp_path / "nope")
+        (tmp_path / "loop").symlink_to(tmp_path / "loop")
+        os.mkfifo(tmp_path / "afifo")
+        (tmp_path / "to_fifo").symlink_to(tmp_path / "afifo")
+
+        assert api.classify_path(tmp_path / "plain.md") == api.KIND_REGULAR_FILE
+        assert api.classify_path(tmp_path / "adir") == api.KIND_DIRECTORY
+        assert api.classify_path(tmp_path / "to_file") == api.KIND_LINK_TO_FILE
+        assert api.classify_path(tmp_path / "to_dir") == api.KIND_LINK_TO_DIR
+        # 🔴 The r4 regression lived here: `is_dir()` is False for BOTH of these,
+        # so the old code skipped them and the scope read as empty.
+        assert api.classify_path(tmp_path / "dangling") == api.KIND_BROKEN_LINK
+        assert api.classify_path(tmp_path / "loop") == api.KIND_BROKEN_LINK
+        assert api.classify_path(tmp_path / "afifo") == api.KIND_OTHER
+        assert api.classify_path(tmp_path / "to_fifo") == api.KIND_LINK_TO_OTHER
+
+    def test_classify_is_exhaustive_over_a_real_directory(self, tmp_path: Path):
+        """Totality, behaviourally: every child of a directory containing one of
+        each shape classifies into `ALL_KINDS`, and between them they cover it."""
+        (tmp_path / "plain.md").write_text("x")
+        (tmp_path / "adir").mkdir()
+        (tmp_path / "to_file").symlink_to(tmp_path / "plain.md")
+        (tmp_path / "to_dir").symlink_to(tmp_path / "adir", target_is_directory=True)
+        (tmp_path / "dangling").symlink_to(tmp_path / "nope")
+        os.mkfifo(tmp_path / "afifo")
+        (tmp_path / "to_fifo").symlink_to(tmp_path / "afifo")
+
+        seen = {api.classify_path(p) for p in tmp_path.iterdir()}
+        assert seen <= api.ALL_KINDS, f"produced an unknown kind: {seen - api.ALL_KINDS}"
+        assert seen == api.ALL_KINDS, f"fixture misses kinds: {api.ALL_KINDS - seen}"
+
+
 class TestSnapshotRoute:
     """Phase 2's cache-fill route: `GET /api/v1/snapshot` ships the entry files.
 

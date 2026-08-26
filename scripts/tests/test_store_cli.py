@@ -684,7 +684,11 @@ class TestNonRegularFilesInTheStore:
         # …/trap.md` — which also names the file and also avoids the literal
         # word "IsADirectoryError", so a test asserting only those two things
         # passed against the broken code. It has to pin the classified refusal.
-        assert "not a regular file" in combined, combined
+        # The refusal now speaks the classifier's vocabulary (`directory
+        # refused`) rather than an ad-hoc sentence. What is pinned is unchanged:
+        # a CLASSIFIED refusal naming the offender, not a raw `[Errno 21] Is a
+        # directory` escaping from an unguarded `open()`.
+        assert "directory refused" in combined, combined
         assert "trap.md" in combined, combined
         assert "Errno 21" not in combined, combined
 
@@ -717,6 +721,32 @@ class TestOrphanStagingIsReaped:
         os.utime(orphan, (old, old))
         assert run_store("sync", url=live_store.base, cache=cache).returncode == 0
         assert not orphan.exists(), ".old- orphan survived a clean sync"
+
+    def test_a_symlinked_orphan_is_UNLINKED_not_counted_as_reaped(
+        self, live_store, tmp_path: Path
+    ):
+        """🔴 The fix for this was exactly as invisible as the bug: BOTH mutants
+        (`lstat`->`stat`, and dropping the unlink arm) survived all 333 tests.
+
+        `rmtree` on a symlink is a silent no-op, so the old code counted the
+        orphan as reaped while never removing it — and the count is the only
+        evidence, which is what made the miscount invisible. Asserts the link is
+        gone AND the target survives, because unlinking the wrong one is the
+        obvious way to "fix" this and lose data.
+        """
+        cache = tmp_path / "cache"
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        target = tmp_path / "precious"
+        target.mkdir()
+        (target / "keep.md").write_text("must survive")
+        link = cache.parent / f"{cache.name}.new-symlinked"
+        link.symlink_to(target, target_is_directory=True)
+        old = time.time() - (ORPHAN_GRACE + 60)
+        os.utime(link, (old, old), follow_symlinks=False)
+
+        assert run_store("sync", url=live_store.base, cache=cache).returncode == 0
+        assert not link.exists() and not link.is_symlink(), "symlinked orphan survived"
+        assert (target / "keep.md").read_text() == "must survive", "reaper ate the target"
 
     def test_a_RECENT_staging_dir_is_left_alone(self, live_store, tmp_path: Path):
         """🔴 Negative control, and it pins the grace period FROM BELOW — the
@@ -773,13 +803,25 @@ class TestNotAScopeIsSkippedNotRefused:
         )
         assert proc.returncode == 0, proc.stdout + proc.stderr
 
-    def test_an_editor_lock_file_does_not_deny_the_whole_store(
+    def test_an_editor_lock_file_does_not_deny_the_SNAPSHOT_path(
         self, source_store: Path, live_store, tmp_path: Path
     ):
         """🔴 An Emacs lock file is `.#entry.md` — a DANGLING SYMLINK whose name
         ends in `.md`. The entry-level symlink refusal made one open buffer 503
         the entire store for every caller. Reproduced at two earlier commits, so
-        it predates this fix; it shares the root cause above."""
+        it predates this fix; it shares the root cause above.
+
+        ⚠ NAMED FOR THE PATH IT ACTUALLY COVERS. `/api/v1/recall/<scope>` is
+        STILL affected: `load_index` uses `scope_dir.glob("*.md")`, and pathlib
+        glob DOES match a leading dot, so a lock file still 503s that route. The
+        fix lives in `scripts/lib/subsystem_resolver.py`, which this card's
+        non-goals forbid touching ("the local store is alive and heavily used;
+        this task moves files between hosts"). Calling this
+        `..._does_not_deny_the_whole_store` would be the exact
+        description-wider-than-implementation defect an earlier round was
+        renamed to close. Closing condition: `store recall` and
+        `/api/v1/recall/<scope>` both serve a scope containing `.#x.md`.
+        """
         (source_store / "widget-cfg" / ".#thing-alpha.md").symlink_to(
             "zach@nixos.12345:1700000000"
         )
@@ -789,6 +831,39 @@ class TestNotAScopeIsSkippedNotRefused:
         )
         assert proc.returncode == 0, proc.stdout + proc.stderr
         assert "thing-alpha" in proc.stdout
+
+    @pytest.mark.parametrize("shape", ["dangling", "loop"])
+    def test_a_BROKEN_scope_pointer_is_refused_not_silently_skipped(
+        self, source_store: Path, live_store, tmp_path: Path, shape: str
+    ):
+        """🔴 THE ROUND-4 REGRESSION, pinned in both directions.
+
+        `is_dir()` returns False for a dangling symlink AND for a symlink loop —
+        `pathlib` swallows ENOENT and ELOOP — so reordering the guard to check
+        `is_dir()` first made both vanish from the snapshot silently. Measured
+        across the two commits, same fixture:
+
+            bc2364eb: dangling scope link -> rc 3, "symlink refused"
+            a17c5df7: dangling scope link -> rc 0, "scope-empty — nothing recorded"
+
+        A directory entry named `<scope>` exists at the store root and nothing
+        anywhere reported that its target was gone. That is this PR's headline
+        defect, one state over, and the suite could not see it in EITHER
+        direction — the mutant flipping it back survived all 333 tests.
+        """
+        if shape == "dangling":
+            (source_store / "linked").symlink_to(tmp_path / "does-not-exist")
+        else:
+            (source_store / "linked").symlink_to(source_store / "linked")
+
+        proc = run_store(
+            "recall", "--scope", "linked", url=live_store.base,
+            cache=tmp_path / "cache",
+        )
+        combined = proc.stdout + proc.stderr
+        assert "scope-empty" not in combined, combined
+        assert proc.returncode != 0, combined
+        assert "linked" in combined, combined
 
     def test_a_symlinked_SCOPE_is_still_refused(
         self, source_store: Path, live_store, tmp_path: Path
@@ -889,6 +964,33 @@ class TestSearchOverTheClient:
         combined = proc.stdout + proc.stderr
         assert "`lease`" not in combined, combined
         assert "rubble-pile" in combined, combined
+
+    def test_the_search_label_is_the_READERS_label_not_a_lookalike(
+        self, source_store: Path, live_store, tmp_path: Path
+    ):
+        """🔴 The previous version of the test above pinned only "the query is
+        not named", which `label = f"{report.scope}/"` also satisfies — so that
+        mutant SURVIVED all 333 tests. `SearchReport.label` is a PROPERTY over
+        `scopes_searched`, and for `--all-scopes` it differs from any single
+        scope, which is the case that tells the two apart.
+        """
+        broken = source_store / "rubble-pile"
+        broken.mkdir()
+        (broken / "junk.md").write_text("no front matter, nothing parseable\n")
+        api = _load_api()
+        report = api.rc.search(
+            str(source_store), "rubble-pile", "lease",
+            context=api.rc.CONTEXT_BULLET,
+            threshold=api.rc.DEFAULT_SEARCH_THRESHOLD,
+            max_hits=api.rc.DEFAULT_MAX_HITS,
+            all_scopes=False,
+        )
+        proc = run_store(
+            "search", "lease", "--scope", "rubble-pile", url=live_store.base,
+            cache=tmp_path / "cache",
+        )
+        combined = proc.stdout + proc.stderr
+        assert report.label in combined, (report.label, combined)
 
 
 class TestTheHarnessItself:

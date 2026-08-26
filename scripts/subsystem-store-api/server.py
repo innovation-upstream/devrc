@@ -967,6 +967,121 @@ def scope_revision(store_root: str | Path, scope: str) -> str:
 
 SEED_STAMP_NAME = ".seed-stamp"
 
+
+# =============================================================================
+# 🔴 THE TOTAL CLASSIFIER — why this exists instead of a fourth `if` arm.
+#
+# Four consecutive audit rounds found the same shape of defect in `_snapshot`,
+# and every fix added one more predicate to a sequence:
+#
+#   r1  entry symlinks followed          -> refuse symlinked ENTRIES
+#   r2  symlinked SCOPE dirs filtered    -> silently omitted, read as scope-empty
+#   r3  `is_symlink()` before `is_dir()` -> a symlinked README 503'd everything
+#   r4  `is_dir()` first                 -> a DANGLING scope link vanished,
+#                                           read as scope-empty at exit 0
+#
+# Each round the stated predicate ("refuse a thing that IS a scope but cannot be
+# served safely; skip a thing that is not one") failed to DECIDE the next input
+# class, because a broken pointer is neither. Adding an arm fixes the instance;
+# it does not make the rule total, so the next class falls through the same gap.
+#
+# So: classify the path's TYPE exhaustively, in one place, and have each context
+# map EVERY kind to an action explicitly. `_ROOT_ACTIONS` and `_ENTRY_ACTIONS`
+# are asserted complete by `TestClassifierIsTotal`, and an unmapped kind raises
+# rather than defaulting — a fallthrough is a test failure, not a silent skip.
+# Name-based rules (dotfiles, the `.md` suffix) stay SEPARATE from type, because
+# conflating them is what made the dotfile and symlink rules interfere.
+# =============================================================================
+
+KIND_BROKEN_LINK = "broken-link"      # dangling target, or a symlink loop
+KIND_LINK_TO_DIR = "link-to-dir"
+KIND_LINK_TO_FILE = "link-to-file"
+KIND_LINK_TO_OTHER = "link-to-other"  # link to a fifo/socket/device
+KIND_DIRECTORY = "directory"
+KIND_REGULAR_FILE = "regular-file"
+KIND_OTHER = "other"                  # fifo, socket, device, door…
+
+ALL_KINDS: frozenset[str] = frozenset(
+    {
+        KIND_BROKEN_LINK,
+        KIND_LINK_TO_DIR,
+        KIND_LINK_TO_FILE,
+        KIND_LINK_TO_OTHER,
+        KIND_DIRECTORY,
+        KIND_REGULAR_FILE,
+        KIND_OTHER,
+    }
+)
+
+# What a context does with each kind. `SKIP` = not the thing we are looking for,
+# so its absence is not a fact worth reporting. `TAKE` = use it. `REFUSE` = it
+# IS (or claims to be) the thing, and we cannot serve it — which must be
+# REPORTED, never skipped, because a skip renders as "nothing recorded".
+SKIP, TAKE, REFUSE = "skip", "take", "refuse"
+
+_ROOT_ACTIONS: dict[str, str] = {
+    # 🔴 A BROKEN POINTER IS A SCOPE THAT SHOULD BE THERE AND IS NOT. Skipping
+    # it is the r4 regression: `is_dir()` is False for a dangling link AND for a
+    # loop, so both vanished and the scope read as `scope-empty` at exit 0.
+    KIND_BROKEN_LINK: REFUSE,
+    KIND_LINK_TO_DIR: REFUSE,   # a real scope we will not follow off-store
+    KIND_DIRECTORY: TAKE,
+    KIND_LINK_TO_FILE: SKIP,    # a file is not a scope, link or no link (r3)
+    KIND_REGULAR_FILE: SKIP,    # …and neither is a plain README.md
+    KIND_LINK_TO_OTHER: SKIP,
+    KIND_OTHER: SKIP,
+}
+
+_ENTRY_ACTIONS: dict[str, str] = {
+    # Inside a scope the name has ALREADY selected for `*.md`, so anything here
+    # claims to be an entry. A claim we cannot serve is refused, not skipped.
+    KIND_BROKEN_LINK: REFUSE,
+    KIND_LINK_TO_DIR: REFUSE,
+    KIND_LINK_TO_FILE: REFUSE,
+    KIND_LINK_TO_OTHER: REFUSE,
+    KIND_DIRECTORY: REFUSE,     # a directory named `*.md` (r3: it 503'd on open)
+    KIND_OTHER: REFUSE,         # a FIFO named `*.md` blocked `open()` forever
+    KIND_REGULAR_FILE: TAKE,
+}
+
+
+def classify_path(path: Path) -> str:
+    """The path's type, as exactly one of `ALL_KINDS`. Total by construction.
+
+    🔴 `is_symlink()` is checked FIRST and on its own, because every other
+    predicate here DEREFERENCES: `is_dir()`, `is_file()` and `exists()` all
+    answer about the TARGET and all silently return False when there is no
+    target (dangling) or the walk loops (ELOOP). That single fact is what every
+    previous ordering got wrong in one direction or the other.
+    """
+    if path.is_symlink():
+        if path.is_dir():
+            return KIND_LINK_TO_DIR
+        if path.is_file():
+            return KIND_LINK_TO_FILE
+        if not path.exists():
+            # Dangling OR a loop — `exists()` is False for both, and the
+            # distinction does not change what we do about it.
+            return KIND_BROKEN_LINK
+        return KIND_LINK_TO_OTHER
+    if path.is_dir():
+        return KIND_DIRECTORY
+    if path.is_file():
+        return KIND_REGULAR_FILE
+    return KIND_OTHER
+
+
+def action_for(kind: str, actions: dict[str, str]) -> str:
+    """Look up the action, refusing to guess. An unmapped kind is a BUG."""
+    try:
+        return actions[kind]
+    except KeyError:  # pragma: no cover - pinned by TestClassifierIsTotal
+        raise AssertionError(
+            f"unclassified path kind {kind!r}: every kind must be mapped "
+            f"explicitly, because a default is how the last four rounds of this "
+            f"defect happened"
+        ) from None
+
 # 🔴 THE ROUTE TABLE, AND THE DISPATCHER READS IT. `name -> (handler, arity)`,
 # where arity counts the path components including the route name itself, so
 # `recall/<scope>` is 2 and `snapshot` is 1.
@@ -1876,43 +1991,23 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
         selected: list[tuple[Path, str]] = []
         scopes: list[Path] = []
         for candidate in candidates:
-            # 🔴 REFUSED, NOT FILTERED — and the difference is the whole bug.
-            # The previous version dropped symlinked scope dirs out of the list
-            # with a comprehension filter, so they never reached `unreadable`
-            # and never reached the tar: an audit MEASURED a symlinked scope
-            # holding 2 entries rendering as `scope-empty — nothing recorded` at
-            # exit 0. That is the headline defect of this whole client,
-            # reintroduced one level up by the guard added to close it at the
-            # entry level. A guard that SKIPS is a silent omission; only one
-            # that REPORTS is a guard.
-            # 🔴 ORDER MATTERS, AND GETTING IT WRONG TURNED A SKIP INTO AN
-            # OUTAGE. Testing `is_symlink()` FIRST refused every symlink at the
-            # store root — including a symlinked `README.md`, which is not a
-            # scope and never was. Measured: that one link took the whole
-            # snapshot from rc 0 to rc 3 for every caller and every scope, while
-            # a NON-symlinked `README.md` in the same place was still skipped
-            # silently. Two spellings of "not a scope", opposite outcomes.
-            #
-            # The predicate is: refuse a thing that IS a scope but cannot be
-            # served safely; skip a thing that is not a scope at all. So resolve
-            # what it points at first, and only then decide.
-            if not candidate.is_dir():
-                continue  # a file, or a link to one — not a scope either way
-            if candidate.is_symlink():
-                unreadable.append(f"{candidate.name}/: symlink refused")
-                continue
-            scopes.append(candidate)
+            # One classification, one mapping, no ordering to get wrong.
+            kind = classify_path(candidate)
+            action = action_for(kind, _ROOT_ACTIONS)
+            if action == TAKE:
+                scopes.append(candidate)
+            elif action == REFUSE:
+                unreadable.append(f"{candidate.name}/: {kind} refused")
 
         for scope in scopes:
             try:
-                # 🔴 DOTFILES ARE SKIPPED INSIDE A SCOPE TOO, matching the store
-                # root. An Emacs lock file is `.#entry.md` — a DANGLING SYMLINK
-                # whose name ends in `.md` — so the entry-level symlink refusal
-                # added earlier made one open buffer 503 the entire store for
-                # every caller. Reproduced at two commits, so it is not this
-                # round's doing, but it is the same blast radius as the root
-                # case above and shares its fix: a thing that is not an entry
-                # must not be classified as an unservable one.
+                # 🔴 NAME RULES ARE SEPARATE FROM TYPE RULES, and keeping them
+                # separate is the point. `*.md` and the dotfile skip decide
+                # whether a path CLAIMS to be an entry; `classify_path` decides
+                # whether the claim can be served. Conflating them is what made
+                # an Emacs lock file — `.#entry.md`, a DANGLING SYMLINK whose
+                # name ends in `.md` — 503 the entire store for every caller
+                # because one buffer was open.
                 names = sorted(
                     p
                     for p in scope.iterdir()
@@ -1922,28 +2017,12 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
                 unreadable.append(f"{scope.name}/: {exc.strerror or exc}")
                 continue
             for entry in names:
-                # 🔴 SYMLINKS ARE REFUSED, NOT FOLLOWED. `is_file()`/`is_dir()`
-                # dereference, so a symlinked entry or scope would let one
-                # authenticated GET ship a file from outside the store — and
-                # `/snapshot` walks EVERY scope, where `/recall` makes you name
-                # one. Refusing (rather than skipping) matches `commit.sh`, which
-                # refuses symlinked scopes for the same reason, and keeps this
-                # from becoming a silent omission. Measured 2026-08-25: zero
-                # symlinks in the store on either host or in the pod's `/data`.
-                if entry.is_symlink():
-                    unreadable.append(f"{scope.name}/{entry.name}: symlink refused")
+                kind = classify_path(entry)
+                action = action_for(kind, _ENTRY_ACTIONS)
+                if action == REFUSE:
+                    unreadable.append(f"{scope.name}/{entry.name}: {kind} refused")
                     continue
-                # 🔴 RESTORED. The previous round replaced `is_file()` with the
-                # symlink check and dropped it, which is a removed guard with no
-                # replacement: a DIRECTORY named `*.md` then raised
-                # IsADirectoryError and 503'd the whole store for every caller,
-                # and a FIFO named `*.md` blocked `open()` forever, leaking a
-                # handler thread permanently on a threading server. Refused
-                # rather than skipped, for the same reason as the symlink above.
-                if not entry.is_file():
-                    unreadable.append(
-                        f"{scope.name}/{entry.name}: not a regular file"
-                    )
+                if action != TAKE:
                     continue
                 selected.append((entry, f"{scope.name}/{entry.name}"))
 
