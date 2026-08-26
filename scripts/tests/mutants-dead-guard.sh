@@ -168,10 +168,10 @@ run 'except-handlers-dropped' "$LIB" \
 printf '\n== the justification hatch (must be KILLED) ==\n'
 run 'bare-marker-now-resolves' "$LIB" \
   test_a_justification_needs_a_reason \
-  's|^    return \[f for f in flags if not f.justified_reason\]|    return [f for f in flags if f.justified_reason is None]|'
+  's|^            if not (f.justified_reason and re.search(r"\\w", f.justified_reason))\]|            if f.justified_reason is None]|'
 run 'reason-no-longer-required' "$LIB" \
   test_a_justification_needs_a_reason \
-  's|^    return \[f for f in flags if not f.justified_reason\]|    return []|'
+  's|^    return \[f for f in flags|    return [] or [f for f in flags[:0]|'
 run 'hatch-read-by-regex-not-tokenize' "$LIB" \
   test_a_pragma_inside_a_STRING_is_not_a_justification \
   's|^        if tok.type != tokenize.COMMENT:|        if tok.type == tokenize.COMMENT and False:|'
@@ -290,6 +290,16 @@ run 'census-blocks-no-longer-sorted' "$CLI" \
 run 'ledger-membership-back-to-substring' "$CLI" \
   test_ledger_membership_is_path_segments_not_substrings \
   's|^    return \[d for d in test_dirs(repo) if d not in named\]|    return [d for d in test_dirs(repo) if d not in " ".join(named)]|'
+
+run 'em-dash-counts-as-a-reason' "$LIB" \
+  test_a_marker_with_only_PUNCTUATION_after_it_is_still_bare \
+  's|^            if not (f.justified_reason and re.search(r"\\w", f.justified_reason))\]|            if not f.justified_reason]|'
+run 'no-test-file-blamed-on-subprocesses' "$CLI" \
+  test_a_registry_with_NO_test_file_says_so_instead_of_blaming_subprocesses \
+  's|^            why = ("no registered test file drives it -- the registry lists "|            why = ("driven through a subprocess XX "|'
+run 'bare-pytest-runs-the-target-repos-whole-suite' "$CLI" \
+  test_a_registry_with_NO_test_file_says_so_instead_of_blaming_subprocesses \
+  's|^        return ({"executed": {}, "clobbered": False}, (0, 0),|        groups = {None: []}\n    if False:\n        return ({"executed": {}, "clobbered": False}, (0, 0),|'
 
 printf '\n== POSITIVE CONTROL — a mutant that MUST survive ==\n'
 run 'comment-only-edit-must-survive' "$LIB" \

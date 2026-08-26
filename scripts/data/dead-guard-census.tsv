@@ -32,6 +32,35 @@ civitai/talos-infra	out-of-instrument	-	bash	~21 scripts/validate-*.sh plus the 
 civitai/talos-infra	out-of-instrument	-	bash	.githooks/* and .claude/hooks/*.sh: same limit	unmeasured	-
 # innovation-upstream/devrc measured under Python 3.12.14 -- 🔴 RED RUN, 5 test(s) FAILED: branches downstream of a failure did not execute for a reason that is NOT deadness (pytest rc=1)
 innovation-upstream/devrc	flagged	scripts/claude-hooks/tests/test_guard_core.py:2492	if-body	execs.append(argv)	0	-
+innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:66	except	return ""	0	-
+innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:78	if-body	raise SystemExit(f"registry: malformed row (want 4 tab-separated "	0	-
+innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:89	if-body	continue	0	-
+innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:92	if-body	out.append(p)	0	-
+innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:230	if-body	return ({"executed": {}, "clobbered": False}, (0, 0),	0	-
+innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:258	except	return None, (-1, 0), f"traced run timed out after 3600s: {e}"	0	-
+innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:266	if-body	return None, (proc.returncode, nfail), "\n".join(tails)	0	-
+innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:291	except	v = "?"	0	-
+innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:293	if-body	return f"Python {v or '?'}"	0	-
+innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:303	if-body	print(f"could not read origin for {repo} -- cannot key the registry",	0	-
+innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:308	if-body	print(f"{slug} is not in {REGISTRY.name}. Add rows for it -- including "	0	-
+innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:326	if-body	print(f"{slug}: {len(empty)} `instrument` selector(s) matched NO python "	0	-
+innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:338	if-body	print(f"{slug}: 0 instrumentable guards present in this clone; "	0	-
+innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:341	if-body	write_census(census_path, slug, [], oo, [],	0	-
+innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:358	if-body	print(f"{slug}: a test cleared or replaced sys.settrace during the run, "	0	-
+innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:399	except	undecidable.append(f"{rel}: cannot be analysed ({type(e).__name__}: {e})")	0	-
+innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:415	if-body	why = ("no registered test file drives it -- the registry lists "	0	-
+innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:431	if-body	_report(slug, targets, all_flags, unres, oo, undecidable, rc, interp)	0	-
+innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:433	if-body	write_census(census_path, slug, all_flags, oo, undecidable,	0	-
+innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:438	if-body	return EXIT_UNDECIDABLE	0	-
+innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:451	if-body	print(f"   🔴 RED RUN   : {nfail} test(s) FAILED. Branches downstream of "	0	-
+innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:507	if-body	for line in p.read_text(encoding="utf-8").splitlines():	0	-
+innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:509	if-body	continue	0	-
+innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:511	if-body	continue                       # header is re-emitted below	0	-
+innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:530	if-body	note += (f" -- 🔴 RED RUN, {nfail} test(s) FAILED: branches downstream of "	0	-
+innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:589	if-body	if event == "line":	0	-
+innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:590	if-body	executed.add(frame.f_lineno)	0	-
+innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:681	if-body	return self_test()	0	-
+innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:683	if-body	ap.error("give --repo <path>, or --self-test")	0	-
 innovation-upstream/devrc	flagged	scripts/testlib/captured_text_scan.py:143	if-body	sys.path.insert(0, str(_HERE.parent))	0	-
 innovation-upstream/devrc	flagged	scripts/testlib/captured_text_scan.py:451	if-body	esc = False	0	-
 innovation-upstream/devrc	flagged	scripts/testlib/captured_text_scan.py:453	if-body	esc = True	0	-
@@ -74,16 +103,17 @@ innovation-upstream/devrc	flagged	scripts/tests/test_no_public_ips.py:258	if-bod
 innovation-upstream/devrc	flagged	scripts/tests/test_no_real_launchers.py:68	if-body	raise RuntimeError("bash not found on PATH; this suite cannot run hermetically")	0	— both tiers ship bash
 innovation-upstream/devrc	flagged	scripts/tests/test_no_real_launchers.py:501	if-body	assert not stub.exists(), (	0	-
 innovation-upstream/devrc	flagged	scripts/tests/test_no_real_launchers.py:520	if-body	assert shutil.which("systemctl") is None, (	0	-
-innovation-upstream/devrc	flagged	scripts/tests/test_no_real_launchers.py:563	if-body	assert shutil.which("systemctl") is None	0	-
-innovation-upstream/devrc	flagged	scripts/tests/test_no_real_launchers.py:591	if-body	assert shutil.which("systemctl") is None	0	-
-innovation-upstream/devrc	flagged	scripts/tests/test_no_real_launchers.py:629	if-body	assert shutil.which("systemctl") is None	0	-
-innovation-upstream/devrc	flagged	scripts/tests/test_no_real_launchers.py:745	if-body	assert shutil.which("systemctl") is None	0	-
+innovation-upstream/devrc	flagged	scripts/tests/test_no_real_launchers.py:582	if-body	assert shutil.which("systemctl") is None	0	-
+innovation-upstream/devrc	flagged	scripts/tests/test_no_real_launchers.py:610	if-body	assert shutil.which("systemctl") is None	0	-
+innovation-upstream/devrc	flagged	scripts/tests/test_no_real_launchers.py:648	if-body	assert shutil.which("systemctl") is None	0	-
+innovation-upstream/devrc	flagged	scripts/tests/test_no_real_launchers.py:764	if-body	assert shutil.which("systemctl") is None	0	-
 innovation-upstream/devrc	flagged	scripts/tests/test_prune_skill_size.py:479	if-body	problems.append(f"{label}: PATTERN DID NOT MATCH ({pattern!r}) — the "	0	-
 innovation-upstream/devrc	flagged	scripts/tests/test_prune_skill_size.py:482	if-body	problems.append(f"{label}: pattern matched {len(found)}x ({found}) — an "	0	-
 innovation-upstream/devrc	flagged	scripts/tests/test_prune_skill_size.py:486	if-body	problems.append(f"{label}: prose says {found[0]}, measured {expected}")	0	-
 innovation-upstream/devrc	flagged	scripts/tests/test_prune_skill_size.py:521	if-body	problems.append(	0	-
 innovation-upstream/devrc	flagged	scripts/tests/test_prune_skill_size.py:529	if-body	problems.append(	0	-
 innovation-upstream/devrc	flagged	scripts/tests/test_session_manager_skill_size.py:719	if-body	loops[topic.name] = hits	0	-
+innovation-upstream/devrc	out-of-instrument	-	python	scripts/testlib/dead_guard_plugin.py -- the tracer itself. CPython suppresses tracing inside the trace function, so this module is structurally invisible to its own instrument; every branch would read as dead. The one file that cannot measure itself	unmeasured	-
 innovation-upstream/devrc	out-of-instrument	-	python	scripts/claude-hooks/tests/test_bash_guard.py -- NOT a pytest suite by design; its own docstring says so ("hand-rolled asserts, not pytest-collectable -- the guard calls main() at import time, so it is only ever driven via subprocess"). Registering it as instrumentable produced zero traced lines, which the scan reported UNDECIDABLE rather than publishing 400 lines of false flags against the PreToolUse deny-guard	unmeasured	-
 innovation-upstream/devrc	out-of-instrument	-	python	scripts/browser-bridge/tests -- the exemplar guard (_cli_timeout_violations) lives here, but the suite spawns the real browser CLI with a 300s budget per site, so a traced run is far too slow to be re-derivable; measure it on demand with a narrowed selector	unmeasured	-
 innovation-upstream/devrc	out-of-instrument	-	python	scripts/claude-hooks/tests -- the rest of it: ordinary unit suites for the notify/nudge/capture hooks rather than corpus-scanning guards; the two real guards there ARE instrumented above	unmeasured	-

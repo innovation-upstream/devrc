@@ -179,6 +179,32 @@ def test_a_justification_with_a_reason_resolves_the_flag():
     assert dg.unresolved(flags) == []
 
 
+@pytest.mark.parametrize("marker,resolves", [
+    ("# pragma: no cover",                         False),
+    ("# pragma: no cover -",                       False),
+    ("# pragma: no cover —",                  False),   # EM DASH
+    ("# pragma: no cover –",                  False),   # EN DASH
+    ("# pragma: no cover .",                       False),
+    ("# pragma: no cover — unreadable file",  True),
+    ("# pragma: no cover - unreadable file",       True),
+])
+def test_a_marker_with_only_PUNCTUATION_after_it_is_still_bare(marker, resolves):
+    """🔴 THE REQUIRED-REASON RULE WAS WALKABLE BY THIS REPO'S OWN HOUSE STYLE.
+
+    `[:\\s-]*` strips the ASCII hyphen only, so `# pragma: no cover —` yielded
+    the reason "—" and RESOLVED the flag — and an em dash is what every real
+    justification site in this repo uses (the census reason column reads
+    `— unreadable file`). The bare-marker control only ever exercised the ASCII
+    spelling, so a one-character change defeated the rule. `unresolved` now
+    requires a WORD CHARACTER, and remains the sole arbiter.
+    """
+    src = DEAD.replace('if "ZZZ" in l:', f'if "ZZZ" in l:  {marker}')
+    flags = _run(src, ["has A"])
+    assert len(flags) == 1, flags
+    assert (dg.unresolved(flags) == []) is resolves, \
+        f"{marker!r} -> reason {flags[0].justified_reason!r}"
+
+
 def test_dead_guard_ok_is_accepted_as_the_same_hatch():
     src = DEAD.replace('if "ZZZ" in l:', 'if "ZZZ" in l:  # dead-guard-ok: vendor quirk')
     assert dg.unresolved(_run(src, ["has A"])) == []
@@ -597,8 +623,51 @@ def test_a_LIBRARY_guard_driven_only_by_a_SUBPROCESS_is_undecidable(tmp_path):
     rc, out = _cli(tmp_path, reg)
     assert rc == 2, (rc, out)
     assert "guardlib.py: NO line of this file was traced" in out, out
+    # The CAUSE clause, not just the headline — an audit found the whole
+    # cause-attribution fix unexercised, which is a branch with zero test
+    # instances added by the tool that finds branches with zero test instances.
+    assert "driven through a subprocess" in out, out
     assert 'hits.append("real")' not in out, \
         "a live branch was reported dead on an untraced library module"
+
+
+def test_a_registry_with_NO_test_file_says_so_instead_of_blaming_subprocesses(tmp_path):
+    """🔴 ATTRIBUTE THE CAUSE YOU ACTUALLY KNOW. When the registry lists only
+    library modules there is nothing to drive the guards with — and the code
+    knows that, yet used to report "driven through a subprocess" anyway. It
+    must also NOT invoke pytest with no path arguments, which would collect and
+    RUN the target repo's entire suite in a repo we were asked only to read."""
+    lib = tmp_path / "scripts" / "guardlib.py"
+    lib.parent.mkdir(parents=True)
+    lib.write_text('def scan(ls):\n    if "A" in ls:\n        return 1\n    return 0\n',
+                   encoding="utf-8")
+    # A test file that is NOT registered — if pytest were invoked bare it would
+    # collect and run this, and the side effect would prove it.
+    other = tmp_path / "othertests"
+    other.mkdir()
+    (other / "test_side_effect.py").write_text(
+        "import pathlib\n"
+        "def test_side_effect():\n"
+        "    pathlib.Path(__file__).parent.joinpath('RAN').write_text('x')\n",
+        encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, timeout=60)
+    subprocess.run(["git", "-C", str(tmp_path), "remote", "add", "origin",
+                    "git@github.com:test/libonly.git"], check=True, timeout=60)
+    reg = tmp_path / "reg.tsv"
+    reg.write_text(
+        "test/libonly\tpython\tinstrument\tscripts/guardlib.py\n"
+        "test/libonly\tpython\tout-of-instrument\tothertests -- not a guard, and "
+        "recorded here so its absence cannot read as coverage\n"
+        "test/libonly\tbash\tout-of-instrument\t"
+        "a reason long enough to satisfy the registry's own contract that a row "
+        "must say why it is not measured\n", encoding="utf-8")
+    rc, out = _cli(tmp_path, reg)
+    assert rc == 2, (rc, out)
+    assert "no registered test file drives it" in out, out
+    assert "driven through a subprocess" not in out, \
+        "reported a cause the code knew was wrong"
+    assert not (other / "RAN").exists(), \
+        "pytest was invoked with no path args and ran the target repo's own suite"
 
 
 def test_a_test_that_CLEARS_the_tracer_makes_the_run_undecidable(tmp_path):
@@ -878,9 +947,15 @@ def test_registry_names_every_test_directory_in_devrc():
     headline claim ("a guard absent from this file would read as measured and
     clean") was violated for devrc's largest python guard surface.
 
-    Bidirectional, like homelab-infra's `ci-manifest.txt`: a new test directory
-    with no row FAILS, so the set cannot silently grow. It does not try to
-    decide what a "guard" is — it requires a DECISION to be on record.
+    FORWARD DIRECTION ONLY, like the forward half of homelab-infra's
+    `ci-manifest.txt`: a new test directory with no row FAILS, so the set
+    cannot silently GROW. A row naming a directory that no longer exists does
+    NOT fail — the out-of-instrument column is prose, so a stale path cannot be
+    told from a sentence. (An earlier docstring here said "bidirectional"; the
+    retraction landed in the CLI and the registry and was missed here for two
+    rounds, which is the same claim-wider-than-code defect in its third copy.)
+    It does not try to decide what a "guard" is — it requires a DECISION to be
+    on record.
     """
     import importlib.util
     spec = importlib.util.spec_from_file_location("dgs_reg", SCAN)

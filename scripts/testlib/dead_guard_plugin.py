@@ -24,7 +24,8 @@ escaped corruption only because that file happened to sort LAST -- an unpinned
 invariant that one registry row would have broken. So:
   * re-arm in `pytest_runtest_setup`, before each test's call phase;
   * ALSO record whether the slot was found empty or foreign at that moment,
-    and again at exit, and surface it as `clobbered` so the caller can refuse
+    at each teardown, and at session end, and surface it as `clobbered` so the
+    caller can refuse
     to publish rather than publish a false census. Re-arming alone is not
     enough -- a tracer cleared part-way THROUGH a test still loses that test's
     lines.
@@ -113,6 +114,23 @@ def pytest_runtest_teardown(item):
     blamed "a test cleared sys.settrace" for something no test did. A
     permanently-red gate with a false cause. Teardown fires inside the run,
     before any of that.
+    """
+    if _TARGETS and _OUT and sys.gettrace() is not _tracer:
+        _state["clobbered"] = True
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """🔴 AND ONCE MORE AT SESSION END, because teardown is not last either.
+
+    A `-p`-loaded hookimpl runs BEFORE pytest's own teardown machinery, so a
+    FIXTURE FINALIZER that clears the tracer runs after `pytest_runtest_teardown`
+    has already looked. For every test but the last, the next `setup` still
+    catches it; for the last test nothing did. Measured: a last-test fixture
+    finalizer clearing the slot went from `clobbered=true` (round 2, via the
+    atexit check) to `false` (round 3, teardown only) -- the round-3 commit
+    claimed "blind spot unchanged", and it had changed. This closes it without
+    reintroducing the atexit false positive, because `sessionfinish` still runs
+    inside the run, before any target module's `atexit` cleanup.
     """
     if _TARGETS and _OUT and sys.gettrace() is not _tracer:
         _state["clobbered"] = True

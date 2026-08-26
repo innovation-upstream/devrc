@@ -41,6 +41,9 @@ mis-adjudicate every one of them.
 
 🔴 STATED LIMITS, because a limit a reader can act on beats a branch that is
 dead, unexercised and wrong:
+  - NOT EVERY BRANCH IS ENUMERATED. `try/.../else:` and `async for/.../else:`
+    bodies are absent -- only `ExceptHandler` and `For`/`While` orelse are
+    walked. They are not reported clean; they are not reported at all.
   - LINE granularity. A sub-line branch -- `a and b`, a ternary, a
     comprehension `if` -- cannot be discriminated by line coverage and is NOT
     enumerated. It is not reported as clean; it is not reported at all.
@@ -208,11 +211,29 @@ def evaluate(path, src, executed):
 
     So: `cond_line` is read for every kind EXCEPT `else-body`, because
     `else-body` is the only kind whose header line introduces a SIBLING branch
-    as well as its own. `except <E>:`, `case X:` and a loop's `else:` each
-    introduce exactly one branch and cannot silence anything else. The body is
-    read at its FIRST line only, which is owned by this branch and by no nested
-    one. An `else:` line itself still resolves nothing -- put the comment on the
-    first line of its body.
+    as well as its own.
+
+    🔴 WHICH LINE IS `cond_line` DIFFERS BY KIND, and an earlier version of
+    this docstring got two of them wrong. Measured:
+      * `if-body`   -> the `if`/`elif` test line. Read.
+      * `except`    -> the `except <E>:` line. Read -- the idiomatic placement.
+      * `else-body` -> the `if` test line (shared with its sibling). NOT read.
+      * `match-case`-> the first line of the case BODY, not the `case X:` line.
+        So a comment on `case X:` resolves NOTHING.
+      * `loop-else` -> the `for`/`while` line, not the `else:` line. So a
+        comment on the loop's `else:` resolves NOTHING -- and one on the `for`
+        line resolves the loop-else, which is a collision of the same family as
+        the if/else one, in the other direction.
+    For those two kinds, put the comment on the FIRST LINE OF THE BODY. That
+    placement always works, for every kind.
+
+    🔴 AND "the body's first line is owned by no nested branch" IS NOT QUITE
+    TRUE: a nested loop's header IS its parent's body-first line, so
+    `if a:` / `for x in xs:  # pragma` / `else:` resolves the outer `if-body`
+    and the inner `loop-else` from one comment. Stated rather than fixed --
+    every candidate fix so far has traded one collision for another, and this
+    one fails CLOSED in the direction that matters least (it over-resolves a
+    branch whose parent is already justified).
     """
     just = justifications(src)
     flags = []
@@ -234,5 +255,14 @@ def evaluate(path, src, executed):
 
 
 def unresolved(flags):
-    """Flags with no justification -- the ones that fail the run."""
-    return [f for f in flags if not f.justified_reason]
+    r"""Flags with no justification -- the ones that fail the run.
+
+    🔴 THE SOLE ARBITER of whether a marker counts, and it requires a WORD
+    CHARACTER, not merely a non-empty string. `[:\s-]*` in the pattern strips
+    the ASCII hyphen only, so `# pragma: no cover \u2014` (an EM DASH -- which is
+    what every real justification site in this repo uses) yielded the reason
+    "\u2014" and resolved the flag. A bare marker with a punctuation mark after it
+    is still a bare marker.
+    """
+    return [f for f in flags
+            if not (f.justified_reason and re.search(r"\w", f.justified_reason))]

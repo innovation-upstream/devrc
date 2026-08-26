@@ -418,12 +418,12 @@ def scan(repo, census_path=None, verbose=True, python=None, registry=None):
             undecidable.append(
                 f"{rel}: NO line of this file was traced; {why} -- not dead.")
             continue
-        try:
-            flags = dg.evaluate(rel, src, set(executed.get(str(t), [])))
-        except (SyntaxError, ValueError, OSError) as e:  # see the note above
-            undecidable.append(f"{rel}: cannot be analysed ({type(e).__name__}: {e})")
-            continue
-        all_flags.extend(flags)
+        # 🔴 NO try/except HERE. `src` is already in memory and `branch_bodies`
+        # already parsed it at the check above, so `evaluate` cannot raise the
+        # analysis errors -- the handler that used to wrap this was unreachable
+        # width in the fix for a dead-guard finder. If this ever does raise, the
+        # traceback is the honest outcome: it means an assumption above is wrong.
+        all_flags.extend(dg.evaluate(rel, src, set(executed.get(str(t), []))))
 
     unres = dg.unresolved(all_flags)
     interp = interpreter_id(python)
@@ -517,7 +517,7 @@ def write_census(path, slug, flags, oo, undecidable, interp="?", rc=(0, 0)):
             # reassuring width.
             kept.append(line)
 
-    out = list(_CENSUS_HEADER)
+    out = []
     blocks = {}
     for line in kept:
         key = line.split("\t", 1)[0] if not line.startswith("#") else \
@@ -545,7 +545,7 @@ def write_census(path, slug, flags, oo, undecidable, interp="?", rc=(0, 0)):
     # command printed in the census's own header could not tell "nothing
     # changed" from "everything moved". Idempotent per repo is not enough; the
     # artifact has to be byte-stable under any scan order.
-    mine = out[len(_CENSUS_HEADER):]
+    mine = out
     blocks[slug] = mine
     body = []
     for key in sorted(blocks):
