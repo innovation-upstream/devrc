@@ -67,13 +67,15 @@ THE VERDICTS
 --------------------------------------------------------------
 Repo-level scoping (`--repo` / `--repos-from` / `--scan-root`) used to be the
 ONLY filter, and that is not fine-grained enough to be safe. Measured on this
-machine (870 worktrees / 128 repos -> 250 dead, 40 orphan, 528 live, 52
-cannot-tell): **131 of the 250 `dead` rows were `.claude/worktrees/agent-*`
-worktrees belonging to OTHER LIVE Claude sessions.** Removing one destroys
-another session's working directory. Dodging them by dropping whole repos
-collapsed the safe set from 106 to 24 rows, because a repo like `civit/civitai`
-holds 59 ordinary dead rows AND agent worktrees — so ~82 legitimately-dead
-worktrees were unreachable.
+machine (860 worktrees / 129 repos -> 231 dead, 44 orphan, 529 live, 56
+cannot-tell, with ALL 231 dead rows removable): **135 of those 231 were
+worktrees under a `.claude/worktrees/` directory belonging to OTHER LIVE Claude
+sessions.** `dead` is a correct verdict about the BRANCH and a catastrophic
+instruction about the DIRECTORY — removing one destroys a working directory that
+is in use right now. Dodging them by dropping whole repos also drops the ordinary
+dead rows those repos hold, because a repo like `civit/civitai` carries dozens of
+each; with `--skip-agent-worktrees` all 135 are spared and 96 legitimately-dead
+worktrees stay reachable.
 
 `--exclude-path GLOB` (repeatable) fixes that at the row level:
 
@@ -84,18 +86,39 @@ worktrees were unreachable.
   * An excluded row is NEVER removable, whatever its verdict, and is NOT counted
     toward `--confirm N`. `--confirm N` keeps meaning "the exact number that will
     actually be removed".
-  * 🔴 GLOB SEMANTICS, CHOSEN AND PINNED BY A TEST
-    (`test_the_glob_star_crosses_slashes`): matching is `fnmatch.fnmatchcase`
-    against the ABSOLUTE path git reports, and **`*` DOES cross `/`**. It is not
-    shell/`pathlib` globbing. So `*/.claude/worktrees/agent-*` matches
-    `/home/z/any/depth/of/repo/.claude/worktrees/agent-x/and/below`, and
-    `*/civitai/*` matches every path with a `civitai` component. That is the
-    behaviour the agent-worktree case needs; the cost is that a glob is easier to
-    write too WIDE than too narrow, and a too-wide glob is safe in this tool's
-    only direction (it excludes MORE from removal, never less).
-  * `--skip-agent-worktrees` is exactly `--exclude-path '*/.claude/worktrees/agent-*'`
+  * 🔴 A GLOB THAT MATCHES NOTHING IS BYTE-IDENTICAL TO NO GLOB AT ALL. That is
+    the worst failure this flag can have: the operator mistypes
+    `*/.claude/wortrees/*`, reads "231 row(s) would be removed", passes
+    `--confirm 231` — and `--confirm` provides ZERO independent protection,
+    because N is derived from the same wrong count. So the report ALWAYS echoes
+    the effective glob list with a PER-GLOB match count (per-glob, because a
+    total is non-zero as soon as one of two globs works), names any glob that
+    matched zero rows, and `--execute` REFUSES while any glob is in that state.
+  * 🔴 GLOB SEMANTICS, ALL FOUR PINNED BY TESTS. Matching is
+    `fnmatch.fnmatchcase` against the ABSOLUTE path git reports:
+      - **`*` CROSSES `/`** — not shell/`pathlib` globbing. `*/civitai/*`
+        matches every path with a `civitai` component.
+      - **SUBTREE**: a glob matching any ANCESTOR excludes the worktree too, so
+        `--exclude-path <dir>` covers the directory's CONTENTS. Chosen over
+        auto-appending `/*` (which would stop the glob matching the directory
+        itself, and is meaningless for a glob already ending in `*`) and over a
+        second `--exclude-tree` flag (a second rule is a second thing to drift).
+        Before this, naming a repo matched the repo's own row and nothing else,
+        printing a reassuring "1 row(s) matched … 0 of them are dead" while both
+        dead children stayed removable.
+      - **trailing `/` stripped**, because rows never carry one and tab
+        completion always adds one.
+      - **the symlink-resolved path is tested too**, because git records the
+        path the worktree was created with.
+    A literal path containing `* ? [` does NOT match itself — `[v2]` is a
+    character class. Use `glob.escape`; `--help` says so.
+    The cost of all this is that a glob is easier to write too WIDE than too
+    narrow, and too wide is safe in this tool's only direction: it excludes MORE
+    from removal, never less.
+  * `--skip-agent-worktrees` is exactly `--exclude-path '*/.claude/worktrees/*'`
     — the same constant fed to the same predicate, so the common case does not
-    depend on the operator retyping the glob correctly.
+    depend on the operator retyping the glob correctly. Note `worktrees/*`, not
+    `worktrees/agent-*`: see the constant's own comment for the measurement.
 
 🔴 WHAT THIS TOOL WILL NOT DO
 -----------------------------
@@ -150,7 +173,17 @@ VERDICTS = (DEAD, ORPHAN, LIVE, CANNOT_TELL)
 # 🔴 The one glob behind `--skip-agent-worktrees`. Spelled ONCE: the convenience
 # flag is implemented by appending this to the `--exclude-path` list, so both
 # routes go through the same predicate and cannot drift apart.
-AGENT_WORKTREE_GLOB = "*/.claude/worktrees/agent-*"
+#
+# 🔴 It is `.../worktrees/*`, NOT `.../worktrees/agent-*`. Measured: of 246
+# `.claude/worktrees/` entries across 14 repos on this box, exactly one did not
+# carry the `agent-` prefix — `…/fast/comfyui/.claude/worktrees/card-ux`, a real
+# registered worktree on `refs/heads/feat/prefopt-card-ux`. Under the narrower
+# glob it was spared only by the dirty check (three untracked `__pycache__`
+# dirs); one `git clean` plus a squash merge and it would have become a
+# removable row that the flag's own help text advertised as covered. A guard
+# whose DESCRIPTION is wider than its BODY reads as coverage while providing
+# none. The directory is what identifies these trees, not the entry's prefix.
+AGENT_WORKTREE_GLOB = "*/.claude/worktrees/*"
 
 # 🔴 argv on Linux is capped (~128 KiB for a single argument list, and a
 # civitai branch can touch thousands of paths). Pathspecs are therefore batched
@@ -548,11 +581,54 @@ def resolve_exclude_globs(patterns: "list[str] | None", skip_agent_worktrees: bo
     `--skip-agent-worktrees` is not a second matcher — it is this list plus
     `AGENT_WORKTREE_GLOB`, matched by the same `path_excluded` below. A second
     open-coded match is exactly how the two would come to disagree.
+
+    🔴 Trailing slashes are stripped. Rows carry `str(Path(...))`, which NEVER
+    ends in `/`, and shell tab-completion appends one to every directory — so
+    `--exclude-path ~/workspace/civitai/` would otherwise match nothing at all
+    and look exactly like no filter. A blank glob is dropped for the same
+    reason (and rejected outright at the CLI, which is the loud half).
     """
-    globs = [g for g in (patterns or []) if g]
+    globs: list[str] = []
+    for raw in (patterns or []):
+        g = raw.rstrip("/")
+        if not g.strip():
+            continue
+        if g not in globs:
+            globs.append(g)
     if skip_agent_worktrees and AGENT_WORKTREE_GLOB not in globs:
         globs.append(AGENT_WORKTREE_GLOB)
     return globs
+
+
+def _path_candidates(path: str) -> "list[str]":
+    """Every string a glob is tested against for one worktree path.
+
+    Three widenings, each closing a way a filter could silently fail to match:
+
+    * the path AS GIT RECORDED IT — the primary form;
+    * its SYMLINK-RESOLVED form, because git records the path the worktree was
+      created with. An operator who globs the real path while git holds the
+      symlinked one (or vice versa) would otherwise get a silent zero;
+    * every ANCESTOR of both. This is what makes `--exclude-path <dir>` cover
+      the directory's CONTENTS. Without it a glob naming a repo matched the
+      repo's own row and nothing else — printing a reassuring
+      "1 row(s) matched … 0 of them are dead" while both dead children stayed
+      removable. A reassuring positive is worse than a silent zero.
+    """
+    forms = [path]
+    try:
+        real = str(Path(path).resolve())
+    except OSError:
+        real = None
+    if real and real != path:
+        forms.append(real)
+    out: list[str] = []
+    for f in forms:
+        p = Path(f)
+        for cand in (str(p), *(str(a) for a in p.parents)):
+            if cand not in out:
+                out.append(cand)
+    return out
 
 
 def path_excluded(path: str, globs: "list[str] | None") -> "str | None":
@@ -562,14 +638,30 @@ def path_excluded(path: str, globs: "list[str] | None") -> "str | None":
     WHY it was spared, so a report reader can tell a deliberate exclusion from a
     verdict — and can see which of several globs did it.
 
-    🔴 SEMANTICS: `fnmatch.fnmatchcase` against the absolute path git reports.
-    `*` CROSSES `/`. `fnmatchcase`, not `fnmatch`, so the answer does not depend
-    on the platform's filesystem case-folding. Pinned by
-    `test_the_glob_star_crosses_slashes`.
+    🔴 SEMANTICS, all four pinned by tests:
+      1. `fnmatch.fnmatchcase`, so `*` CROSSES `/` — this is not shell or
+         `pathlib` globbing (`test_the_glob_star_crosses_slashes`).
+      2. `fnmatchcase` rather than `fnmatch`, so matching never routes through
+         `os.path.normcase` and cannot start case-folding on a different
+         platform (`test_the_matcher_does_not_route_through_normcase`).
+      3. SUBTREE semantics: a glob that matches any ANCESTOR of the worktree
+         excludes it too, so naming a directory covers everything under it
+         (`test_excluding_a_directory_covers_its_contents`).
+      4. Both the recorded and the symlink-resolved path are tested
+         (`test_a_glob_on_the_resolved_path_matches_a_symlinked_repo`).
+
+    🔴 A literal path containing an `fnmatch` metacharacter (`* ? [`) does NOT
+    match itself — `fnmatchcase('/a/proj[v2]', '/a/proj[v2]')` is False, because
+    `[v2]` is a character class. Run such a path through `glob.escape` first;
+    `--help` says so.
     """
-    for g in globs or []:
-        if fnmatch.fnmatchcase(path, g):
-            return g
+    if not globs:
+        return None
+    candidates = _path_candidates(path)
+    for g in globs:
+        for c in candidates:
+            if fnmatch.fnmatchcase(c, g):
+                return g
     return None
 
 
@@ -733,11 +825,33 @@ def scan_repo(repo: Path, gh_cmd: str, use_gh: bool, pr_limit: int, jobs: int,
 
 # ── reporting ─────────────────────────────────────────────────────────────────
 
-def summarize(rows: "list[dict]") -> "dict":
+def summarize(rows: "list[dict]", exclude_globs: "list[str] | None" = None) -> "dict":
+    """The report's numbers, INCLUDING a per-glob match count.
+
+    🔴 The glob accounting lives here rather than being bolted on by `main()`
+    afterwards, so the summary dict has ONE shape whatever the caller — and so
+    that no caller can render a report without it.
+
+    🔴 Each glob is counted INDEPENDENTLY (`path_excluded(path, [g])`), not by
+    tallying `excluded_by`. `excluded_by` records the FIRST glob that matched, so
+    a working glob shadowed by an earlier one would tally zero and raise a false
+    alarm. The question this count answers is "does THIS glob match anything",
+    and shadowing is not part of it.
+    """
     counts = {v: 0 for v in VERDICTS}
     for r in rows:
         counts[r["verdict"]] = counts.get(r["verdict"], 0) + 1
     excluded = [r for r in rows if r.get("excluded_by")]
+
+    per_glob: list[dict] = []
+    for g in (exclude_globs or []):
+        hits = [r for r in rows if path_excluded(r["path"], [g])]
+        per_glob.append({
+            "glob": g,
+            "matched": len(hits),
+            "matched_dead": sum(1 for r in hits if r["verdict"] == DEAD),
+        })
+
     return {
         "worktrees": len(rows),
         "repos": len({r["repo"] for r in rows}),
@@ -748,6 +862,13 @@ def summarize(rows: "list[dict]") -> "dict":
         # removed without it. That is the number that says whether the filter did
         # anything, and it is not the same as `excluded`.
         "excluded_dead": sum(1 for r in excluded if r["verdict"] == DEAD),
+        "exclude_globs": per_glob,
+        # 🔴 THE HEADLINE SAFETY NUMBER. A glob that matches nothing produces
+        # output BYTE-IDENTICAL to passing no filter at all, and `--confirm N`
+        # offers zero independent protection because N is derived from the same
+        # wrong count. So the zero-matchers are named, not merely implied by a
+        # count the operator would have to notice was missing.
+        "exclude_globs_matching_nothing": [d["glob"] for d in per_glob if d["matched"] == 0],
     }
 
 
@@ -777,20 +898,35 @@ def render_text(rows: "list[dict]", summary: dict, verbose: bool) -> str:
                  f"{c[DEAD]} dead, {c[ORPHAN]} orphan, {c[LIVE]} live, {c[CANNOT_TELL]} cannot-tell")
     lines.append(f"{summary['removable']} row(s) would be removed by --execute "
                  f"(dead + clean + unlocked only)")
-    if summary.get("excluded"):
+    # 🔴 Printed whenever a glob was SUPPLIED — never gated on whether anything
+    # matched. Gating it on the match count is precisely the bug: a mistyped glob
+    # then produced output identical to an unfiltered run, and the operator read
+    # the full removable count as if their filter were in force.
+    if summary.get("exclude_globs"):
+        lines.append("")
+        lines.append(f"exclusion filters in force ({len(summary['exclude_globs'])}):")
+        for d in summary["exclude_globs"]:
+            lines.append(f"    --exclude-path {d['glob']!r}  ->  matched {d['matched']} row(s), "
+                         f"{d['matched_dead']} of them dead")
         lines.append(
-            f"{summary['excluded']} row(s) matched an --exclude-path glob — still classified "
-            f"and counted above, NEVER removed, and NOT counted toward --confirm. "
+            f"{summary['excluded']} row(s) matched at least one glob — still classified and "
+            f"counted above, NEVER removed, and NOT counted toward --confirm. "
             f"{summary['excluded_dead']} of them are `dead` and would otherwise have been "
-            f"removed. Re-run with --verbose to see them by path.")
+            f"removed. Re-run with --verbose to list them by path.")
+        for g in summary.get("exclude_globs_matching_nothing") or []:
+            lines.append(
+                f"🔴 --exclude-path {g!r} matched ZERO rows. A glob that matches nothing is "
+                f"BYTE-IDENTICAL to passing no filter at all, and --confirm N cannot catch it "
+                f"because N is derived from the same count. Check the spelling (and note that "
+                f"`*` crosses `/`, a trailing `/` is stripped, and a literal path containing "
+                f"`* ? [` needs glob.escape) before --execute. --execute REFUSES while any "
+                f"glob is in this state.")
     if c[CANNOT_TELL]:
         lines.append(f"🔴 {c[CANNOT_TELL]} row(s) are cannot-tell — they are NOT dead and are "
                      "NOT removable. Read their verdict_reason before believing any count above.")
     if verbose:
         lines.append("")
         for r in sorted(rows, key=lambda x: (x["verdict"], x["path"])):
-            if r["verdict"] == LIVE and not verbose:
-                continue
             lines.append(f"[{verdict_label(r)}] {r['path']}  branch={r['branch']}")
             lines.append(f"    {r['verdict_reason']}")
             for e in r["evidence"]:
@@ -883,13 +1019,22 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--exclude-path", action="append", default=[], metavar="GLOB",
                    help="spare any worktree whose ABSOLUTE path matches GLOB (repeatable). "
                         "fnmatch semantics and `*` CROSSES `/`, so '*/civitai/*' matches every "
-                        "path with a civitai component. An excluded row is still classified and "
+                        "path with a civitai component. SUBTREE semantics: matching a "
+                        "worktree's ANCESTOR excludes it too, so naming a directory covers "
+                        "everything under it. A trailing '/' is stripped (tab-completion adds "
+                        "one) and the symlink-resolved path is tested as well as the recorded "
+                        "one. A literal path containing '* ? [' does NOT match itself — run it "
+                        "through glob.escape first. An excluded row is still classified and "
                         "still printed (as `<verdict> (excluded)`), is NEVER removed, and is NOT "
-                        "counted toward --confirm N.")
+                        "counted toward --confirm N. Every glob's match count is echoed in the "
+                        "report, and --execute REFUSES while any glob matches ZERO rows.")
     p.add_argument("--skip-agent-worktrees", action="store_true",
-                   help=f"shorthand for --exclude-path {AGENT_WORKTREE_GLOB!r}. Those worktrees "
-                        "belong to OTHER LIVE Claude sessions; removing one destroys a working "
-                        "directory that is in use. Same predicate as --exclude-path.")
+                   help=f"shorthand for --exclude-path {AGENT_WORKTREE_GLOB!r} — EVERY worktree "
+                        "under a `.claude/worktrees/` directory, not just the `agent-` prefixed "
+                        "ones (measured: 1 of 246 such entries on this box has no `agent-` "
+                        "prefix and is a live session's tree). These belong to OTHER LIVE Claude "
+                        "sessions; removing one destroys a working directory that is in use. "
+                        "Same predicate as --exclude-path.")
     p.add_argument("--jobs", type=int, default=8, help="parallel worktree probes (default 8)")
     p.add_argument("--no-gh", action="store_true",
                    help="do not consult gh. Every unlanded row then becomes cannot-tell, "
@@ -936,6 +1081,14 @@ def main(argv: "list[str] | None" = None) -> int:
     if args.confirm is not None and not args.execute:
         _log("--confirm is only meaningful with --execute.")
         return RC_USAGE
+    # 🔴 A blank --exclude-path is silently a no-op filter, which is the exact
+    # class of failure this flag exists to prevent. Refuse it rather than drop it.
+    for raw in args.exclude_path:
+        if not raw.strip().rstrip("/"):
+            _log(f"--exclude-path was given an EMPTY glob ({raw!r}). An empty filter excludes "
+                 "nothing and is indistinguishable from passing no filter at all. Remove the "
+                 "flag or spell the glob.")
+            return RC_USAGE
 
     repos = collect_repos(args)
     if not repos:
@@ -949,10 +1102,7 @@ def main(argv: "list[str] | None" = None) -> int:
         rows.extend(scan_repo(repo, args.gh_cmd, not args.no_gh, args.pr_limit, args.jobs,
                               exclude_globs))
 
-    summary = summarize(rows)
-    # The glob list is recorded in the report: a count read without knowing what
-    # was filtered out of the removable set is a count nobody can check.
-    summary["exclude_globs"] = list(exclude_globs)
+    summary = summarize(rows, exclude_globs)
     payload = {"summary": summary, "rows": rows}
 
     if args.out:
@@ -967,6 +1117,21 @@ def main(argv: "list[str] | None" = None) -> int:
     if not args.execute:
         _log("DRY RUN — nothing was removed. Pass --execute --confirm N to act.")
         return RC_OK
+
+    # 🔴 A glob matching nothing is BYTE-IDENTICAL to no glob at all, so the
+    # operator reads the full removable count as if their filter were in force —
+    # and `--confirm N` is no help, because N comes from that same count. This is
+    # the ONLY check standing between a typo and deleting live sessions' working
+    # directories, so it REFUSES rather than warning. Fix the glob, or drop it.
+    dud = summary["exclude_globs_matching_nothing"]
+    if dud:
+        _log("REFUSED: " + ", ".join(repr(g) for g in dud) +
+             f" matched ZERO of the {len(rows)} scanned row(s). A filter that matches nothing "
+             "is indistinguishable from no filter, and --confirm cannot catch that because it "
+             "is derived from the same count. Fix the glob (`*` crosses `/`; a trailing `/` is "
+             "stripped; a literal path containing `* ? [` needs glob.escape) or drop it. "
+             "Nothing removed.")
+        return RC_EXECUTE_REFUSED
     return execute_removals(rows, args.confirm)
 
 
