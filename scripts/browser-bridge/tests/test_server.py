@@ -25,6 +25,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from pathlib import Path
 from unittest import mock
 
@@ -171,8 +172,11 @@ def _wait_events(spool_dir, n=1, timeout=10.0, until=None) -> list:
     CI as `assert 'getHtml' == 'frames'` and `assert 'getHtml' == 'type'`. Use
     `_wait_ops` / `_wait_payload` below to select by op rather than by position.
     The `absent, empty` unpack named above as the order-dependent exception is
-    now `_wait_ops(spool_dir, "tabs", 2)`, which keeps the order and drops
-    foreign rows.
+    now `_wait_ops(spool_dir, "tabs", 2, where=_routed_to(inst))`, which keeps
+    the order and drops foreign rows — op alone would NOT have, because both of
+    its rows are `tabs` and a neighbour's `tabs` row selects just as well. See
+    `_wait_ops` for why the extra discriminator is the ROUTING KEY and not the
+    session.
 
     🔴 AND A TIMEOUT IS NOW LOUD. This used to return a SHORT list silently, so
     every caller's next line — `[0]`, or a filter — failed with a message about
@@ -206,9 +210,9 @@ def _wait_events(spool_dir, n=1, timeout=10.0, until=None) -> list:
     return evs
 
 
-def _payload_op(e) -> str | None:
-    """The `op` inside a spooled event's payload, or None if it has no readable
-    one.
+def _payload_field(e, field) -> str | None:
+    """The named field inside a spooled event's payload, or None if the row has
+    no readable one.
 
     Total by construction — a row written by something other than the bridge
     must not raise here, because the whole point of the helpers below is to walk
@@ -221,14 +225,41 @@ def _payload_op(e) -> str | None:
     `payload` key and a `None` payload were actually covered. A non-bridge
     writer emitting a scalar payload is exactly the named case, so the claim and
     the code disagreed precisely where it mattered.
+
+    ONE reader for every payload field, so the totality argument above is made
+    once instead of re-derived per accessor — `_payload_op` and `_routed_to`
+    below are both this function.
     """
     try:
-        return json.loads(e["payload"]).get("op")
+        return json.loads(e["payload"]).get(field)
     except (KeyError, TypeError, ValueError, AttributeError):
         return None
 
 
-def _wait_ops(spool_dir, op, n=1, **kw) -> list:
+def _payload_op(e) -> str | None:
+    """The `op` inside a spooled event's payload, or None. See _payload_field."""
+    return _payload_field(e, "op")
+
+
+def _routed_to(key):
+    """A `_wait_ops(where=…)` predicate: the row names `key` as its ROUTING
+    TARGET (`payload.key`, which server.py fills from the request's `target`).
+
+    THE DISCRIMINATOR IS DELIBERATELY ORTHOGONAL TO SESSION ATTRIBUTION. A
+    caller that routes its commands to an instance id minted for that run can
+    select exactly the rows it caused, and a neighbour's row of the same op
+    carries a different key (or none) and is dropped — WITHOUT the filter being
+    built out of `session`/`sess_src`, which is what the one site needing this
+    actually asserts. Filtering on the thing under test would turn a real
+    attribution regression into a wait timeout; see `_wait_ops`.
+
+    Total for the same reason `_payload_field` is: a foreign or malformed row
+    must be walked past, never raise.
+    """
+    return lambda e: _payload_field(e, "key") == key
+
+
+def _wait_ops(spool_dir, op, n=1, where=None, **kw) -> list:
     """The first `n` spooled events whose payload op is `op`, waiting for them.
 
     🔴 USE THIS INSTEAD OF `_wait_events(spool_dir, n)[i]` WHENEVER YOU WANT A
@@ -254,21 +285,55 @@ def _wait_ops(spool_dir, op, n=1, **kw) -> list:
     wrong ROW. `until=` fixes both, and this wraps the idiom so each call site
     does not re-derive it.
 
-    🔴 WHAT THIS DOES **NOT** COVER — it narrows the class, it does not close it.
-    Discrimination is on `op` ALONE, so a neighbour emitting the SAME op is
-    still selected. The exposed shape is a caller asking for N rows of a common
-    op where their ORDER carries the signal — `_wait_ops(…, "tabs", 2)` below is
-    the one such site. Measured for the #807 audit: no current test leaves a
-    `tabs` command in flight to time out (the two candidates call
-    `registry.submit` directly and never reach `emit_cmd_event`), so today's
-    residual is far smaller than the `getHtml`-timeout shape that caused the
-    incident. If that ever changes, the rows already carry `session` and a
-    payload `sess_src`, which would discriminate further.
+    🔴 `op` ALONE IS NOT ENOUGH WHEN ORDER CARRIES THE SIGNAL — PASS `where=`.
+    Bare `op` selection still admits a neighbour emitting the SAME op, so a
+    caller asking for N rows of a common op and unpacking them POSITIONALLY
+    (`absent, empty = …`) has its assertions silently swapped onto the wrong
+    rows by one foreign row landing between them. `where=` is a per-ROW
+    predicate ANDed with the op test for exactly that case. It must be TOTAL: a
+    foreign or malformed row has to be walked past, not raise — build it out of
+    `_payload_field` (`_routed_to` above is the ready-made one).
+
+    THE ONE SITE IN THIS FILE THAT UNPACKS A PAIR USES IT.
+    `test_an_absent_origin_header_is_not_the_same_as_an_empty_one` routes both
+    of its commands to an instance id minted per run and selects with
+    `where=_routed_to(that id)`, so the pair it unpacks is the pair it caused.
+    That is an INVARIANT THE CODE ENFORCES, replacing the corpus property this
+    docstring used to assert ("no current test leaves a `tabs` command in flight
+    to time out"). Re-measured 2026-08-26 before removing it — it had NOT lapsed,
+    but it was true for a different reason than the one it gave, and it was never
+    the only route in:
+      * 51 call sites issue `{"op": "tabs"}` here, not the 2 the old text
+        implies, and `tabs` is the single most-emitted op in a run (75 rows).
+      * NONE of the 51 is issued off the test's own thread, which is what a
+        pending-at-teardown command requires — so the timeout route is shut, and
+        that is the real reason, not "they call `registry.submit` directly".
+      * The pending route was never the only one anyway: `emit_cmd_event` runs
+        AFTER the HTTP response (see conftest's `_session_spool_backstop`), so
+        even a synchronous command's row can land past its own test's teardown.
+      * The class is demonstrably LIVE for another op: instrumenting a full run
+        twice, `test_cmd_queue_full_returns_429` — two `getHtml` /cmds issued
+        from unjoined daemon threads — put 2 `{"op":"getHtml","outcome":
+        "timeout"}` rows into a LATER test's spool in each run, a different
+        victim each time.
+    A corpus property that has to be re-argued every time the corpus grows is not
+    a guarantee. The filter is.
+
+    🔴 WHY NOT `session` / `sess_src`, which an earlier revision named as the
+    remedy here: `sess_src` is the caller's TIER ("claude"), which every
+    neighbour on that tier shares, and `session` is precisely what that test
+    ASSERTS. A filter built out of the thing under test is not a control — a
+    regression in the attribution logic would stop the row matching and surface
+    as a 10s wait timeout instead of the attribution assertion. Hence
+    `_routed_to`.
     """
+    def _match(e):
+        return _payload_op(e) == op and (where is None or where(e))
+
     def _seen(evs):
-        return len([e for e in evs if _payload_op(e) == op]) >= n
+        return len([e for e in evs if _match(e)]) >= n
     evs = _wait_events(spool_dir, until=_seen, **kw)
-    return [e for e in evs if _payload_op(e) == op][:n]
+    return [e for e in evs if _match(e)][:n]
 
 
 def _wait_payload(spool_dir, op, **kw) -> dict:
@@ -328,6 +393,70 @@ def test_a_neighbours_late_row_does_not_become_this_tests_event(telemetry):
         assert len(evs) >= 2, (
             "this test's own event never landed — the control is measuring an "
             "empty spool, not a contested one")
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_a_neighbours_row_of_the_same_op_is_not_selected_as_one_of_ours(telemetry):
+    """🔴 REGRESSION for the residual the sibling above does NOT close.
+
+    `_wait_ops` used to discriminate on `op` ALONE, which is enough when any row
+    of that op will do — and NOT enough at the one site that asks for TWO rows of
+    one op and unpacks them positionally
+    (`test_an_absent_origin_header_is_not_the_same_as_an_empty_one`). There a
+    neighbour's `tabs` row is selected as one of the pair and the two assertions
+    land on the wrong rows: silently, and asserting someone else's attribution.
+
+    Same discipline as the sibling: the foreign row is PLANTED, not raced. The
+    defect is "a row this test did not cause is sitting in the spool"; how it got
+    there is the neighbour's business, and planting makes this deterministic
+    instead of load-dependent. It is a realistic neighbour row — same `op`, same
+    `kind`, a session of its own — differing only in the routing key, which is
+    the discriminator under test.
+    """
+    spool_dir = telemetry
+    spool_dir.mkdir(parents=True, exist_ok=True)
+    inst = "pair-" + uuid.uuid4().hex[:12]
+    # Distinct from every session constant this file asserts on, so a mutant that
+    # hardcodes one of those cannot pass by matching the planted row.
+    foreign_session = "0b7f4c31-5555-4ccc-9aaa-000000000005"
+    foreign_payload = json.dumps({"op": "tabs", "key": "a-neighbours-instance",
+                                  "outcome": "ok", "sess_src": "claude"})
+    _log_file(spool_dir).write_text("\t".join([
+        "v1", "source=browser-bridge", "kind=cmd",
+        "b64:session=" + base64.b64encode(foreign_session.encode()).decode(),
+        "b64:payload=" + base64.b64encode(foreign_payload.encode()).decode(),
+    ]) + "\n")
+
+    srv, _ = _serve()
+    ext = FakeExtension(srv, instance_id=inst)
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        assert _cmd_sess(srv, {"op": "tabs", "target": inst},
+                         sid=LEAKED_ID)[0] == 200
+        assert _cmd_sess(srv, {"op": "tabs", "target": inst},
+                         sid=LEAKED_ID, origin="")[0] == 200
+
+        # THE FIX: `where=` keeps the pair THIS test caused, in order. Asserted
+        # on the attribution the real site reads, so a filter that let the
+        # planted row through fails HERE rather than somewhere incidental.
+        first, second = _wait_ops(spool_dir, "tabs", 2,
+                                  where=_routed_to(inst))
+        assert first["session"] == LEAKED_UUID, first
+        assert _payload_field(first, "key") == inst, first
+        assert "session" not in second, second
+        assert _payload_field(second, "origin") == "invalid", second
+
+        # 🔴 THE CONTROL, in the same test so it cannot rot separately: the
+        # op-only form really does take the neighbour's row first here. Without
+        # it, the assertions above would pass just as happily on a spool holding
+        # only our own two rows, and this test would be pinning nothing.
+        stolen = _wait_ops(spool_dir, "tabs", 2)
+        assert _payload_field(stolen[0], "key") == "a-neighbours-instance", (
+            "the planted neighbour row is not selected first by the op-only "
+            "form, so this test is not reproducing the exposure it covers")
+        assert stolen[0]["session"] == foreign_session, stolen[0]
     finally:
         ext.stop(); srv.shutdown(); srv.server_close()
 
@@ -3420,18 +3549,30 @@ def test_an_absent_origin_header_is_not_the_same_as_an_empty_one(telemetry):
     the column this PR exists to fill). Present but empty -> suppress. They differ
     ONLY in whether the header is on the request, which is exactly what
     `session_origin is None` tests and what `or None` in the handler destroyed.
+
+    🔴 BOTH ROWS ARE `tabs`, SO ORDER BETWEEN THEM IS THE SIGNAL — and `op`
+    alone does not select them: a neighbour's `tabs` row landing between the two
+    would be unpacked as one of them and swap these assertions onto someone
+    else's row. So both commands are ROUTED to an instance id minted for this
+    run and the pair is selected with `where=_routed_to(inst)` — the rows this
+    test caused, by construction, not by an argument about what the rest of the
+    corpus happens to emit today. Guarded by
+    `test_a_neighbours_row_of_the_same_op_is_not_selected_as_one_of_ours`.
     """
     spool_dir = telemetry
+    # Unique per RUN, not per file: nothing else in the process can name it, so
+    # the filter below cannot be defeated by a test added later.
+    inst = "absent-vs-empty-" + uuid.uuid4().hex[:12]
     srv, _ = _serve()
-    ext = FakeExtension(srv)
+    ext = FakeExtension(srv, instance_id=inst)
     ext.start()
     try:
         assert _wait_connected(srv, want=True)
-        assert _cmd_sess(srv, {"op": "tabs"}, sid=LEAKED_ID)[0] == 200
-        assert _cmd_sess(srv, {"op": "tabs"}, sid=LEAKED_ID, origin="")[0] == 200
-        # Both rows are `tabs`, so ORDER between them is the signal and must be
-        # preserved — but a neighbour's row must not be counted as one of them.
-        absent, empty = _wait_ops(spool_dir, "tabs", 2)
+        assert _cmd_sess(srv, {"op": "tabs", "target": inst},
+                         sid=LEAKED_ID)[0] == 200
+        assert _cmd_sess(srv, {"op": "tabs", "target": inst},
+                         sid=LEAKED_ID, origin="")[0] == 200
+        absent, empty = _wait_ops(spool_dir, "tabs", 2, where=_routed_to(inst))
         assert absent["session"] == LEAKED_UUID, absent
         assert "origin" not in json.loads(absent["payload"])
         assert "session" not in empty, empty
