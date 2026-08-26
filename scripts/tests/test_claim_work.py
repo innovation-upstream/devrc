@@ -2542,7 +2542,13 @@ exec {real_git} "$@"
 
 
 def test_a_submodule_working_dir_is_a_different_owner_than_its_superproject(tmp_path):
-    """⚠ A DOCUMENTED CONSEQUENCE, not a bug — pinned because the script's own
+    """⚠ LABEL: an INVARIANT GUARD, not regression cover — it passes on
+    pre-change code, and `claudedocs/design-claim-by-push.md` refers to it by
+    exactly that phrase. (It said so while this docstring never used the words,
+    so a reader checking the doc's claim against the test found nothing to match;
+    round 5 made the two agree.)
+
+    ⚠ A DOCUMENTED CONSEQUENCE, not a bug — pinned because the script's own
     decision text says "any SUBDIRECTORY of the same worktree is the same owner"
     and a submodule working directory looks like a subdirectory while NOT being
     one. Its git dir is `<super>/.git/modules/<name>` (measured), so it is a
@@ -2652,3 +2658,303 @@ def test_a_legacy_cwd_claim_is_releasable_from_a_worktree_of_that_clone(tmp_path
         f"the legacy clone-root accept widened to a DIFFERENT clone "
         f"(rc={theirs.returncode})\n{theirs.stdout}")
     assert f"{CLAIM_NS}legacy-other" in _remote_refs(origin)
+
+
+# ── 🔴 ROUND 5 / F1: the legacy tier still told a SIBLING WORKTREE "carry on" ──
+#
+# Round 4 narrowed the `owner-id:` token to per-worktree and pinned it well. It
+# left the LEGACY `cwd:` tier accepting the whole clone — for BOTH readers of
+# `claim_is_mine`. On the refs that actually exist that is round 3's flagship bug
+# verbatim, because every claim live on the real origin is legacy-format and
+# recorded at `<clone>`. Measured read-only from a linked worktree of the real
+# clone, 2026-08-26, before this fix:
+#
+#     claim/devrc-nix-read-path-dirt                       → rc 12 "carry on"
+#     claim/devrc-xdist-collection-mismatch-gh-issue-guard → rc 12 "carry on"
+#     claim/analyze-service-index-backup-1                 → rc 12 "carry on"
+#
+# 100% of them, in a clone with 61 registered worktrees, with `/resume` step 6
+# running `claim-work "$SLUG"` directly and documenting rc 12 as CARRY ON.
+#
+# The fix is a SCOPE, not a narrowing: `claim_is_mine` takes the legacy scope as
+# its second argument, `report_existing` (the verdict) omits it and gets strict
+# per-worktree identity, `require_ownership_or_force` (the destructive verbs)
+# passes `clone` and keeps the widening the live refs depend on.
+
+def test_a_sibling_worktree_is_told_STOP_not_carry_on_about_a_legacy_claim(tmp_path):
+    """🔴 F1. The claim/`--check` VERDICT must not accept the clone-root
+    widening: "may I delete this ref?" and "should I start this work?" are
+    different questions and only the first can afford the forgiving answer.
+
+    Four points, because a gate that answered a constant would satisfy any one of
+    them: the sibling's `--check`, the sibling's bare CLAIM (what `/resume`
+    actually runs), the holder standing where the claim was taken, and the
+    sibling's `--release` — which must still SUCCEED, since keeping the live refs
+    releasable from anywhere in their clone is the entire reason the widening
+    exists.
+    """
+    origin = _bare_origin(tmp_path)
+    a = _session(tmp_path, origin, "Same Identity", "a")
+    wt = _worktree(a, tmp_path / "a-sibling-wt")
+    host = os.uname().nodename
+    env = _cwd_env(origin)
+
+    _legacy_claim(origin, a, "legacy-verdict", cwd=str(a), host=host)
+
+    # (1) THE BUG: a sibling worktree asking "should I start this?"
+    sibling = _run("--check", "legacy-verdict", cwd=wt, env=env)
+    assert sibling.returncode == RC_TAKEN, (
+        f"a SIBLING worktree was told rc {sibling.returncode} about a legacy "
+        f"claim taken in a different worktree of the same clone. rc {RC_MINE} "
+        f"means CARRY ON, and every claim live on the real origin is in this "
+        f"format — so this is round 3's bug on 100% of the refs that exist."
+        f"\n{sibling.stdout}")
+    assert "DO NOT start this item" in sibling.stdout, sibling.stdout
+    assert "THIS IS YOURS" not in sibling.stdout, sibling.stdout
+
+    # (2) …and through the bare CLAIM verb, which is the one `/resume` step 6
+    # runs. Two verbs, because the rc vocabulary is per-tool, not per-code-path.
+    claimed = _run("legacy-verdict", "--subject", "generic item", cwd=wt, env=env)
+    assert claimed.returncode == RC_TAKEN, (
+        f"the CLAIM verb told a sibling worktree rc {claimed.returncode}"
+        f"\n{claimed.stdout}")
+    assert "THIS IS YOURS" not in claimed.stdout, claimed.stdout
+
+    # (3) POSITIVE CONTROL: a gate that returned rc 10 for everything would pass
+    # (1) and (2). The holder, standing exactly where the claim was taken, still
+    # reads rc 12 CARRY ON.
+    holder = _run("--check", "legacy-verdict", cwd=a, env=env)
+    assert holder.returncode == RC_MINE, (
+        f"the legacy holder lost their own rc {RC_MINE} verdict "
+        f"(rc={holder.returncode})\n{holder.stdout}")
+    assert "THIS IS YOURS" in holder.stdout, holder.stdout
+
+    # (4) …and the DESTRUCTIVE verb keeps the wide answer. ⚠ THIS IS THE PRICE,
+    # PINNED RATHER THAN HIDDEN: the sibling worktree that was just told STOP can
+    # still `--release` the claim without `--force`, because a legacy ref records
+    # a bare path and nothing distinguishes a sibling from the holder standing in
+    # a subdirectory. rc 10 is the safe side of the START question; a wrong YES
+    # on the DELETE question costs one visible `--force`. Removing this accept
+    # makes the live refs unreleasable from a worktree for the whole TTL.
+    rel = _run("--release", "legacy-verdict", cwd=wt, env=env)
+    assert rel.returncode == RC_OK, (
+        f"the legacy clone-root accept was removed from the destructive verbs "
+        f"too (rc={rel.returncode}) — the claims live on the real origin are "
+        f"then stuck for the rest of the TTL\n{rel.stdout}\n{rel.stderr}")
+    assert f"{CLAIM_NS}legacy-verdict" not in _remote_refs(origin)
+
+
+# ── 🔴 ROUND 5 / F2: the second probe was silent too ──────────────────────────
+
+def test_an_unreadable_git_common_dir_probe_SAYS_it_degraded(tmp_path):
+    """🔴 THE SAME SILENT-FALLBACK CLASS AS
+    `test_an_unreadable_git_dir_probe_SAYS_it_degraded`, reintroduced fifty lines
+    below its own lesson and in the same delta that fixed it.
+
+    `MY_CLONE_ROOT` comes from `rev-parse --path-format=absolute
+    --git-common-dir`. When that probe fails the variable is EMPTY, the legacy
+    clone-root accept silently stops accepting, and the holder of a legacy claim
+    taken at the clone root gets rc 10 "is NOT yours" about their own lock, with
+    no warning — indistinguishable from somebody else holding the slug.
+
+    Driven with a `git` shim that fails ONLY that probe, so the degraded path is
+    reached by mutating the ENVIRONMENT rather than the script. The shim leaves
+    `--git-dir` working, which is what makes this a test of the SECOND probe: the
+    first one's warning must not fire.
+    """
+    origin = _bare_origin(tmp_path)
+    a = _session(tmp_path, origin, "Same Identity", "a")
+    wt = _worktree(a, tmp_path / "a-common-wt")
+    host = os.uname().nodename
+    shim_dir = tmp_path / "shim-common"
+    shim_dir.mkdir()
+    real_git = shutil.which("git")
+    assert real_git, "no git on PATH"
+    mockbin.write_exec(shim_dir / "git", f"""
+abs=0; common=0
+for a in "$@"; do
+  [ "$a" = "--path-format=absolute" ] && abs=1
+  [ "$a" = "--git-common-dir" ] && common=1
+done
+[ "$abs" = 1 ] && [ "$common" = 1 ] && exit 128
+exec {real_git} "$@"
+""")
+    env = _cwd_env(origin)
+    env["PATH"] = f"{shim_dir}{os.pathsep}{env.get('PATH', os.environ.get('PATH', ''))}"
+
+    _legacy_claim(origin, a, "legacy-common", cwd=str(a), host=host)
+    r = _run("--release", "legacy-common", cwd=wt, env=env)
+    assert r.returncode == RC_TAKEN, (
+        f"the fixture did not reproduce the lockout (rc={r.returncode}); the "
+        f"warning assertion below would then be vacuous\n{r.stdout}\n{r.stderr}")
+    assert "could not resolve this clone's root" in r.stderr, (
+        f"MY_CLONE_ROOT fell back to EMPTY and the holder was refused their own "
+        f"legacy claim with no warning at all. stderr was:\n{r.stderr}")
+    assert "--force" in r.stderr, (
+        f"the warning does not name the way out of the lockout it just created:"
+        f"\n{r.stderr}")
+    # …and it is the SECOND probe's warning, not the first one's leaking over.
+    assert "could not read this directory's git dir" not in r.stderr, (
+        f"the git-DIR probe also failed, so this test is measuring the wrong "
+        f"one:\n{r.stderr}")
+
+    # NEGATIVE CONTROL: without the shim the same command must NOT warn — and
+    # must succeed, or the assertion above is satisfied by a script that always
+    # prints it.
+    clean_env = _cwd_env(origin)
+    _legacy_claim(origin, a, "legacy-common-2", cwd=str(a), host=host)
+    clean = _run("--release", "legacy-common-2", cwd=wt, env=clean_env)
+    assert clean.returncode == RC_OK, f"{clean.stdout}\n{clean.stderr}"
+    assert "could not resolve this clone's root" not in clean.stderr, clean.stderr
+
+
+# ── 🔴 ROUND 5 / F3: the trailer neutralisation missed the ENVIRONMENT layer ──
+
+@pytest.mark.parametrize("envcfg", [
+    pytest.param({"GIT_CONFIG_COUNT": "1",
+                  "GIT_CONFIG_KEY_0": "trailer.separators",
+                  "GIT_CONFIG_VALUE_0": "="},
+                 id="GIT_CONFIG_COUNT-separators"),
+    pytest.param({"GIT_CONFIG_COUNT": "1",
+                  "GIT_CONFIG_KEY_0": "trailer.owner-id.key",
+                  "GIT_CONFIG_VALUE_0": "OWNER="},
+                 id="GIT_CONFIG_COUNT-key-rename"),
+    pytest.param({"GIT_CONFIG_PARAMETERS": "'trailer.separators'='='"},
+                 id="GIT_CONFIG_PARAMETERS-separators"),
+    pytest.param({"GIT_CONFIG_PARAMETERS": "'trailer.owner-id.key'='OWNER='"},
+                 id="GIT_CONFIG_PARAMETERS-key-rename"),
+])
+def test_the_trailer_config_in_the_ENVIRONMENT_cannot_lock_the_owner_out(
+        tmp_path, envcfg):
+    """🔴 THE FIFTH CONFIG LAYER. `claim_field`'s note claimed it neutralised
+    `trailer.*` "AT EVERY CONFIG LAYER" while dropping four of git's five: the
+    caller's repo-local (via `-C "$WS"`), global and system (via
+    `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_NOSYSTEM`) — and NOT the environment.
+
+    🔴 IT IS NOT AN EXOTIC LAYER. `GIT_CONFIG_PARAMETERS` is set BY GIT ITSELF to
+    propagate a parent process's `-c` to its children, so it arrives from a hook,
+    an alias or `rebase -x` with nobody typing it. Both spellings reproduce the
+    full lockout on the unfixed script: the ownership read returns empty, the
+    claim reports `owner-id unknown`, and `--release` of your own 0-second-old
+    claim is rc 10 "NOT yours" for the whole TTL.
+
+    Both knobs × both spellings, because `separators` and `<key>.key` are
+    independent (pinning one does not cover the other — that is why the
+    command-line layer's `-c trailer.separators=:` is not enough on its own).
+
+    ⚠ LABEL, MEASURED AND NOT ASSUMED — only HALF of these cases are regression
+    cover. Run against `6f55576f` (the round-4 tree):
+
+        [GIT_CONFIG_COUNT-key-rename]        FAILED   ← the bug
+        [GIT_CONFIG_PARAMETERS-key-rename]   FAILED   ← the bug
+        [GIT_CONFIG_COUNT-separators]        passed   ← INVARIANT GUARD
+        [GIT_CONFIG_PARAMETERS-separators]   passed   ← INVARIANT GUARD
+
+    The two `separators` cases were ALREADY covered before the environment layer
+    was dropped, because the command-line `-c trailer.separators=:` outranks
+    every config layer including the environment. They are kept as invariant
+    guards — they stop the pin and the unset from being removed together and
+    scored as one change — but they are NOT evidence that this fix did anything.
+    The `<key>.key` pair is.
+    """
+    origin = _bare_origin(tmp_path)
+    a = _session(tmp_path, origin, "Same Identity", "a")
+    env = _cwd_env(origin, **envcfg)
+
+    # The fixture must actually be hostile, or every assertion below passes
+    # against an environment git ignored. Read it back through git itself.
+    probe = subprocess.run(
+        ["git", "config", "--get",
+         envcfg.get("GIT_CONFIG_KEY_0", "trailer.separators")
+         if "GIT_CONFIG_COUNT" in envcfg
+         else envcfg["GIT_CONFIG_PARAMETERS"].split("'")[1]],
+        capture_output=True, text=True, env=dict(env, GIT_CONFIG_GLOBAL="/dev/null"),
+        cwd=str(a))
+    assert probe.stdout.strip() == (
+        envcfg.get("GIT_CONFIG_VALUE_0")
+        or envcfg["GIT_CONFIG_PARAMETERS"].split("=", 1)[1].strip("'")), (
+        f"the hostile environment config did not take: {probe.stdout!r}")
+
+    claimed = _run("envtrailer", "--subject", "generic item", cwd=a, env=env)
+    assert claimed.returncode == RC_OK, f"{claimed.stdout}\n{claimed.stderr}"
+
+    rel = _run("--release", "envtrailer", cwd=a, env=env)
+    assert rel.returncode == RC_OK, (
+        f"with hostile `trailer.*` config in the ENVIRONMENT the owner could not "
+        f"release their own claim (rc={rel.returncode}) — every ownership "
+        f"trailer read empty, so the holder is locked out for the whole TTL"
+        f"\n{rel.stdout}\n{rel.stderr}")
+    assert f"{CLAIM_NS}envtrailer" not in _remote_refs(origin)
+
+    # POSITIVE CONTROL: the read is not simply "always mine" now. A different
+    # clone must still be refused with the same hostile environment in place.
+    b = _session(tmp_path, origin, "Same Identity", "b")
+    assert _run("envtrailer2", cwd=a, env=env).returncode == RC_OK
+    theirs = _run("--release", "envtrailer2", cwd=b, env=env)
+    assert theirs.returncode == RC_TAKEN, (
+        f"neutralising the environment layer made every claim readable as MINE "
+        f"(rc={theirs.returncode})\n{theirs.stdout}")
+
+
+# ── 🔴 ROUND 5 / F6: the `-c trailer.separators=:` pin is NOT redundant ───────
+
+def test_a_hostile_init_template_cannot_lock_the_owner_out(tmp_path):
+    """🔴 THE ONE `trailer.*` LAYER `-C "$WS"` CANNOT DROP: `$WS`'s OWN
+    repo-local config. The script neutralises the caller's local, global, system
+    and environment layers for the trailer read — but `$WS` is created by
+    `git init --bare "$WS"` while the caller's global config is STILL in effect,
+    and `init.templateDir` copies a template's `config` straight into the new
+    repository. Measured 2026-08-26: a template whose `config` sets
+    `trailer.separators = "="` lands that key in `$WS/config`, where `-C "$WS"`
+    puts it right back into the stack it was supposed to remove.
+
+    So the command-line `-c trailer.separators=:` is load-bearing, not the
+    "explicit positive pin" of a value we would otherwise inherit from git's
+    default — an audit measured that removing it left the whole suite green,
+    which is what this test exists to correct.
+
+    ⚠ LABEL: an INVARIANT GUARD, not regression cover — it PASSES at `6f55576f`,
+    measured. Nothing was broken here; the pin was simply unpinned, so an audit
+    could delete it and watch 95/95 stay green. This is the test that makes the
+    `separators-pin-removed` mutant killable, and that is its whole job.
+
+    ⚠ SCOPE: this closes `separators` only. `trailer.<key>.key` planted the same
+    way is a DOCUMENTED RESIDUAL, named in `claim_field`'s note along with its
+    one-token fix (`git init --bare --template=`). Do not read this test as
+    covering the layer.
+    """
+    origin = _bare_origin(tmp_path)
+    a = _session(tmp_path, origin, "Same Identity", "a")
+    tpl = tmp_path / "hostile-template"
+    tpl.mkdir()
+    (tpl / "config").write_text('[trailer]\n\tseparators = "="\n', encoding="utf-8")
+    hostile = tmp_path / "hostile-init.gitconfig"
+    hostile.write_text(f'[init]\n\ttemplateDir = {tpl}\n', encoding="utf-8")
+    env = _cwd_env(origin, GIT_CONFIG_GLOBAL=str(hostile))
+
+    # The fixture must actually plant the key, or the assertions below pass
+    # against a template git ignored. Build a bare repo the same way the script
+    # does and read the result back through git.
+    probe_repo = tmp_path / "probe.git"
+    _git("init", "-q", "--bare", str(probe_repo), env=env)
+    planted = _git("-C", str(probe_repo), "config", "--get", "trailer.separators",
+                   env=_env(), check=False).stdout.strip()
+    assert planted == "=", (
+        f"the hostile init template did not reach the new repo's config "
+        f"({planted!r}) — this test would then be vacuous")
+
+    claimed = _run("tpltrailer", "--subject", "generic item", cwd=a, env=env)
+    assert claimed.returncode == RC_OK, f"{claimed.stdout}\n{claimed.stderr}"
+
+    rel = _run("--release", "tpltrailer", cwd=a, env=env)
+    assert rel.returncode == RC_OK, (
+        f"a `trailer.separators` planted into the SCRATCH repo's own config by "
+        f"`init.templateDir` locked the owner out of their own claim "
+        f"(rc={rel.returncode})\n{rel.stdout}\n{rel.stderr}")
+    assert f"{CLAIM_NS}tpltrailer" not in _remote_refs(origin)
+
+    # POSITIVE CONTROL: still not "always mine". A different clone is refused.
+    b = _session(tmp_path, origin, "Same Identity", "b")
+    assert _run("tpltrailer2", cwd=a, env=env).returncode == RC_OK
+    assert _run("--release", "tpltrailer2", cwd=b,
+                env=env).returncode == RC_TAKEN

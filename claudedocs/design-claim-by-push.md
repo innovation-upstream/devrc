@@ -251,7 +251,29 @@ its superproject**, because its git dir is `<super>/.git/modules/<name>`
 not what "any subdirectory is the same owner" would lead you to expect. devrc has
 no submodules, so nothing exercises it in anger; it is pinned by
 `test_a_submodule_working_dir_is_a_different_owner_than_its_superproject` as an
-invariant guard, labelled as one.
+invariant guard, labelled as one **in the docstring as well as here** — round 5
+found the doc claiming the label and the docstring never using the words.
+
+🔴 **A third residual, found in round 5 and NOT fixed: a claim made in a worktree
+that is later `git worktree remove`d can never be released by anyone without
+`--force`.** The token is `<clone>/.git/worktrees/<name>`; removing the worktree
+deletes that admin directory, so no live directory computes it. Measured: rc 10
+from the clone root *and* from a sibling worktree, for the full TTL, with the
+refusal saying the claim "is NOT yours" about the owner's own lock. **This shape
+is produced routinely** — this repo mandates a worktree per file-modifying agent
+and auto-removes one that ends unchanged. It is not fixed because every fix
+widens the token back towards the clone, which is round 3's bug; the escape
+hatches are `--force`, the TTL, or recreating a worktree at the same path with
+the same admin name (measured to restore ownership — the token is the admin
+dir's PATH, not its inode). `git worktree move` is safe.
+
+⚠ **A fourth: a `cp -a` copy of a worktree is the SAME owner as the original**,
+because the copy's `.git` is a file holding `gitdir: <original admin dir>`.
+Correct per git's semantics, and worth stating because `claude/RULES.md`
+explicitly tells agents to make such copies.
+
+🔴 **The residual list is OPEN, not a closed set of four.** Round 4 enumerated two
+and read as complete; an audit then found these two. Add to it.
 
 `test_two_worktrees_of_one_clone_are_DIFFERENT_owners` (round 3's
 `…_are_the_same_owner`, inverted — this document named it as the test to flip) and
@@ -269,8 +291,11 @@ read, never written, and both inherit the too-loose `uname -n` host comparison,
 which is unfixable for an already-published ref and is why they are transitional
 rather than carried forward.
 Found by verifying live rather than by the suite: at the moment the gate landed,
-**three claims made by the pre-hash version were live on the real origin**, each
-carrying an absolute `cwd:` and no `cwd-id:`. A gate reading only the new field
+**every claim live on the real origin had been made by the pre-hash version**,
+each carrying an absolute `cwd:` and no `cwd-id:`. (Do not write the count down —
+it was three when round 4 measured it, two when round 5's brief was written and
+three again ten minutes later, because other sessions claim and release. Re-derive
+with `git ls-remote origin 'refs/heads/claim/*'`.) A gate reading only the new field
 would have locked their own holder out of `--release` without `--force` for the
 rest of the TTL — the new guard becoming the stuck-lock it exists to prevent. So
 ownership falls back to comparing the legacy `cwd:` (read only; never written),
@@ -278,8 +303,38 @@ and a transitional claim's `where:` line says which format it is in rather than
 "unknown". Pinned at both points by
 `test_a_claim_in_the_pre_cwd_id_format_is_still_recognised_as_its_holders_own` —
 the matching cwd releases without `--force`, a different cwd is still refused.
-⚠ Those three published claims carry `cwd: /home/zach/workspace/devrc`, a path
-already all over this public repo, so nothing needed redacting.
+⚠ Those published claims carry `cwd: /home/zach/workspace/devrc`, a path already
+all over this public repo, so nothing needed redacting.
+
+#### 🔴 Round 5: the legacy tier's widening is scoped to the DESTRUCTIVE verbs
+
+Because the live refs were all taken at `<clone>`, round 4 let a legacy `cwd:`
+also match the **clone root** — derived from `--git-common-dir`, deliberately
+wider than the token. That accept was read by **both** callers of
+`claim_is_mine`, so on 100% of the refs that actually exist a sibling worktree
+asking "is this taken?" was told `rc 12  ✅ THIS IS YOURS — carry on with it`.
+Measured read-only from a linked worktree against the real origin, 2026-08-26, on
+every live claim — round 3's flagship bug verbatim, in a clone with 61 registered
+worktrees, with `/resume` step 6 running the bare command and documenting rc 12
+as CARRY ON.
+
+`claim_is_mine` now takes the legacy scope as a second argument:
+
+| caller | question | scope | why |
+|---|---|---|---|
+| `report_existing` (claim / `--check`, rc 10 vs 12) | "should I start this work?" | **strict** (default) | a wrong YES means two sessions build the same thing — silently, which is the whole reason this tool exists |
+| `require_ownership_or_force` (`--release` / `--steal`) | "may I delete this ref?" | **`clone`** | a wrong YES costs one visible `--force`; a wrong NO strands the live refs for the full TTL |
+
+The default is strict so a future caller that forgets the argument gets the
+conservative answer. ⚠ **The price, stated:** a genuine legacy holder standing in
+a subdirectory or a worktree of their own clone now reads rc 10 STOP rather than
+rc 12 CARRY ON — nothing distinguishes them from a sibling, since a legacy ref
+records a bare path. rc 10 is the safe side of that coin and `--release` still
+works for them without `--force`. New (`owner-id:`) claims are unaffected.
+Pinned by `test_a_sibling_worktree_is_told_STOP_not_carry_on_about_a_legacy_claim`
+(four points: the sibling's `--check`, the sibling's bare claim, the holder's
+rc 12 as positive control, and the sibling's `--release` still succeeding) and by
+the `report-existing-gets-the-wide-legacy-scope` mutant.
 
 Pinned by `test_release_refuses_another_sessions_live_claim_unless_forced`,
 `test_steal_refuses_another_sessions_live_claim_unless_forced`,

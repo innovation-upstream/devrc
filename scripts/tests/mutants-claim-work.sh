@@ -211,8 +211,9 @@ run 'owner-id-trailer-is-a-constant' \
   's@^owner-id: \$MY_OWNER_ID$@owner-id: CONSTANT@'
 
 printf '\n== the LEGACY tier, which is the one that is actually LIVE (must be KILLED) ==\n'
-# All three claims on the real origin are `cwd:`-format. Narrowing the legacy
-# accept back to the literal ident dir locks their holder out from a worktree.
+# EVERY claim live on the real origin is `cwd:`-format (the COUNT moves hourly —
+# re-derive it, never quote it). Narrowing the legacy accept back to the literal
+# ident dir locks their holder out from a worktree.
 run 'legacy-clone-root-accept-removed' \
   test_a_legacy_cwd_claim_is_releasable_from_a_worktree_of_that_clone \
   's@^  \[ -n "\$MY_CLONE_ROOT" \] && \[ "\$legacy" = "\$MY_CLONE_ROOT" \]$@  false@'
@@ -223,11 +224,37 @@ run 'legacy-accept-widened-to-everyone' \
 # 🔴 MY_CLONE_ROOT must keep coming from `--git-common-dir` even though the TOKEN
 # narrowed to `--git-dir`. Deriving it from the git dir gives a linked worktree
 # `<clone>/.git/worktrees/<name>`, which matches no `*/.git` case, so
-# MY_CLONE_ROOT is EMPTY and the three live claims become unreleasable from a
+# MY_CLONE_ROOT is EMPTY and the live claims become unreleasable from a
 # worktree — the stuck lock, on the refs that exist today.
 run 'clone-root-derived-from-the-worktree-git-dir' \
   test_a_legacy_cwd_claim_is_releasable_from_a_worktree_of_that_clone \
   's@\(^owner_common_part="\$(git_ -C "\$IDENT_REPO" rev-parse .*\)--git-common-dir@\1--git-dir@'
+# 🔴 ROUND 5 / F1, THE OTHER DIRECTION: the destructive verbs must KEEP the wide
+# `clone` scope. Dropping the argument at `require_ownership_or_force` re-creates
+# the stuck lock on the refs that exist today, and it is the mutant that proves
+# the F1 fix did not buy the verdict at the release path's expense.
+run 'require-ownership-loses-the-wide-legacy-scope' \
+  test_a_legacy_cwd_claim_is_releasable_from_a_worktree_of_that_clone \
+  's@^  if claim_is_mine "refs/claims/\$s" clone; then$@  if claim_is_mine "refs/claims/$s"; then@'
+# 🔴 ROUND 5 / F1: …and the VERDICT must NOT get it. Handing `report_existing`
+# the wide scope is the bug verbatim — every sibling worktree of the clone is
+# told "✅ THIS IS YOURS — carry on with it" about a peer's legacy claim, which
+# was 100% of the live refs on the real origin.
+run 'report-existing-gets-the-wide-legacy-scope' \
+  test_a_sibling_worktree_is_told_STOP_not_carry_on_about_a_legacy_claim \
+  's@^  if claim_is_mine "refs/claims/\$s"; then mine=1; fi$@  if claim_is_mine "refs/claims/$s" clone; then mine=1; fi@'
+# …and the scope guard inside `claim_is_mine`, isolated: with it gone, strict and
+# clone are the same answer again and the caller-side fix above is inert.
+run 'legacy-scope-guard-removed' \
+  test_a_sibling_worktree_is_told_STOP_not_carry_on_about_a_legacy_claim \
+  's@^  \[ "\$legacy_scope" = clone \] || return 1$@  :@'
+# 🔴 ROUND 5 / F2: the SECOND silent probe. Same class as
+# `degraded-git-dir-probe-goes-quiet`, 50 lines below it, shipped in the same
+# delta and still quiet — a failing `--git-common-dir` empties MY_CLONE_ROOT and
+# refuses the holder their own legacy claim with no warning.
+run 'degraded-git-common-dir-probe-goes-quiet' \
+  test_an_unreadable_git_common_dir_probe_SAYS_it_degraded \
+  "s@^  warn \"could not resolve this clone's root@  : \"@"
 # 🔴 THE LEGACY HOST CHECK (round 4, B4). It was outside the previous sweep's
 # closed set while being the tier that is ACTUALLY live.
 run 'legacy-host-check-removed' \
@@ -246,6 +273,21 @@ run 'trailer-read-runs-in-the-callers-repo' \
 run 'trailer-read-keeps-the-global-config-layer' \
   test_the_callers_trailer_config_cannot_lock_the_owner_out \
   's@( export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1; @( @'
+# 🔴 ROUND 5 / F3: …and the ENVIRONMENT layer, which the note above claimed was
+# covered ("AT EVERY CONFIG LAYER") while four of git's five layers were dropped.
+# `GIT_CONFIG_PARAMETERS` is set BY GIT to propagate a parent's `-c`, so it
+# arrives from a hook, an alias or `rebase -x` with nobody typing it.
+run 'env-config-layer-not-neutralised' \
+  test_the_trailer_config_in_the_ENVIRONMENT_cannot_lock_the_owner_out \
+  's@; unset GIT_CONFIG_COUNT GIT_CONFIG_PARAMETERS;@;@'
+# 🔴 ROUND 5 / F6: the `-c trailer.separators=:` pin was UNPINNED — an audit
+# removed it and watched the whole suite stay green. It is not redundant: it is
+# the only cover for the one layer that is NOT dropped, `$WS`'s OWN repo-local
+# config, which `git init --bare "$WS"` writes while the caller's global
+# `init.templateDir` is still in effect.
+run 'separators-pin-removed' \
+  test_a_hostile_init_template_cannot_lock_the_owner_out \
+  's@ -c trailer.separators=: interpret-trailers@ interpret-trailers@'
 
 printf '\n== the SUBJECT is not a place to write trailers (must be KILLED) ==\n'
 run 'subject-control-chars-allowed' \
@@ -328,11 +370,17 @@ printf '\n'
 # 🔴 THE SUMMARY STATES ITS OWN SCOPE. "ALL OK" read as a claim about the script;
 # it is a claim about the rows ABOVE and nothing else. Round 4 found two live
 # guards outside the closed set — the legacy tier's `host:` check (on the tier
-# that is ACTUALLY live: all three claims on the real origin are `cwd:`-format)
+# that is ACTUALLY live: every claim on the real origin is `cwd:`-format)
 # and the git-dir probe's fallback — and the previous summary reported ALL OK over
 # both. Both are covered now; the point is that the WORDING must not re-create the
 # gap for the next one. `claude/RULES.md`: a green sweep is only a claim about the
 # mutations you IMAGINED.
+# 🔴 AND IT HAPPENED AGAIN IN ROUND 5, WHICH IS THE POINT OF SAYING IT TWICE. An
+# audit of the round-4 tree — over this sweep reporting ALL OK — found the legacy
+# tier still handing every sibling worktree rc 12 on 100% of the live refs, a
+# SECOND silent probe of the same class as the one round 4 had just fixed, an
+# unneutralised config layer under a comment claiming all of them, and a pin the
+# suite did not pin. Four rows below are those. Assume the next four exist.
 printf 'scope: %d mutant(s), enumerated in this file. NOT a claim about any guard\n' "$ROWS"
 printf '       this file does not name — add a row when you add a guard.\n'
 if [ "$FAILURES" -eq 0 ]; then

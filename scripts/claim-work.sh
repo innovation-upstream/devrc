@@ -667,20 +667,47 @@ ident_mail="$(git_ -C "$IDENT_REPO" config --get user.email 2>/dev/null || true)
 #     `<root>/scripts` used to be rc 10 — while making siblings distinct owners.
 #     A different CLONE has a different git dir too, so two clones stay two owners.
 #
-# 🔴 THE RESIDUAL, STATED RATHER THAN HIDDEN: two sessions in the SAME directory
-# still compute the same token and can release each other's claims without
-# `--force`. There is nothing in a path or a machine-id that can separate them.
-# That is accepted, not overlooked: `claude/RULES.md` already forbids two
-# file-modifying agents in one checkout, and the isolation this repo mandates for
-# agent work — a worktree per agent — is exactly the case the token now splits.
-# If you run two agents in one directory anyway, the ownership gate is blind to
-# the difference and the push CAS is the only thing left protecting you.
+# 🔴 THE RESIDUALS, STATED RATHER THAN HIDDEN. This is an OPEN list of known
+# consequences of keying ownership on a git dir, not a closed set of four: an
+# earlier round enumerated two and read as complete, and the two added below were
+# found by an audit afterwards. Add to it rather than assuming it is finished.
 #
-# 🔴 AND THE OTHER RESIDUAL: a SUBMODULE working directory is a DIFFERENT owner
-# from its superproject, because its git dir is `<super>/.git/modules/<name>`
-# (measured). That is correct — a submodule is a different repository — but it is
-# NOT what "any subdirectory is the same owner" would lead you to expect, so it is
-# written down. devrc has no submodules, so nothing here exercises it in anger.
+#   R1 — TWO SESSIONS IN THE SAME DIRECTORY compute the same token and can
+#     release each other's claims without `--force`. There is nothing in a path
+#     or a machine-id that can separate them. Accepted, not overlooked:
+#     `claude/RULES.md` already forbids two file-modifying agents in one
+#     checkout, and the isolation this repo mandates for agent work — a worktree
+#     per agent — is exactly the case the token now splits. Run two agents in one
+#     directory anyway and the push CAS is the only thing left protecting you.
+#
+#   R2 — A SUBMODULE working directory is a DIFFERENT owner from its
+#     superproject, because its git dir is `<super>/.git/modules/<name>`
+#     (measured). Correct — a submodule is a different repository — but NOT what
+#     "any subdirectory is the same owner" would lead you to expect. devrc has no
+#     submodules, so nothing here exercises it in anger.
+#
+#   R3 — A CLAIM MADE IN A WORKTREE THAT IS LATER `git worktree remove`d CANNOT
+#     BE RELEASED BY ANYONE WITHOUT `--force`, for the whole TTL. The token is
+#     `<clone>/.git/worktrees/<name>`, and removing the worktree deletes that
+#     admin directory, so no live directory computes it any more: measured rc 10
+#     from the clone root AND from a sibling worktree, and the refusal says the
+#     claim "is NOT yours" about the owner's own lock. 🔴 THIS SHAPE IS PRODUCED
+#     ROUTINELY, not hypothetically — this repo mandates a worktree per
+#     file-modifying agent and the harness AUTO-REMOVES one that ends unchanged.
+#     NOT FIXED, and deliberately so: making the token survive its own worktree's
+#     deletion means widening it back towards the clone, which is round 3's bug.
+#     The escape hatches are `--force`, the TTL, or recreating a worktree at the
+#     same path with the same admin name (measured: ownership is restored, since
+#     the token is the PATH of the admin dir and not its inode). `git worktree
+#     move` is safe — it rewrites the working tree's location, not the admin dir.
+#
+#   R4 — A `cp -a` COPY OF A WORKTREE IS THE SAME OWNER as the original, because
+#     the copy's `.git` is a FILE holding `gitdir: <original admin dir>`, so
+#     `rev-parse --git-dir` from the copy resolves to the ORIGINAL's admin
+#     directory. Correct per git's own semantics, and worth writing down because
+#     `claude/RULES.md` explicitly tells agents to make such copies (the
+#     restore-from-`cp -a` recipe in the worktree-isolation rules) — so two
+#     "different" trees on disk are one owner here, by design and not by accident.
 #
 # `test_two_worktrees_of_one_clone_are_DIFFERENT_owners` and
 # `test_a_concurrent_fanout_of_worktrees_gets_exactly_one_winner` pin this; the
@@ -703,9 +730,11 @@ fi
 # git was invoked from; `readlink -f` so a symlinked clone path cannot produce
 # two tokens for one git dir. `|| true` on BOTH, then an explicit emptiness
 # check — see the fallback note below.
+OWNER_TOKEN_DEGRADED=0
 owner_worktree_part="$(git_ -C "$IDENT_REPO" rev-parse --path-format=absolute --git-dir 2>/dev/null || true)"
 owner_worktree_part="$(readlink -f -- "$owner_worktree_part" 2>/dev/null || printf '%s' "$owner_worktree_part")"
 if [ -z "$owner_worktree_part" ]; then
+  OWNER_TOKEN_DEGRADED=1
   # 🔴 THE FALLBACK IS NOW LOUD, AND IT USED TO BE SILENT. Its comment blamed
   # only "not a git repository at all", which reads as unreachable in practice
   # and is why nobody looked at it. The probe fails for OTHER reasons too — most
@@ -732,9 +761,14 @@ fi
 # label that names a derivation it no longer uses is the kind of comment this
 # repo's rules call a claim. Bumping it costs NOTHING here, measured rather than
 # assumed: `git ls-remote origin 'refs/heads/claim/*'` on the canonical remote
-# returns exactly three refs and all three carry the legacy `cwd:` trailer, so
-# there is not a single `owner-id:` ref in existence to orphan. Round 3 never
-# shipped past this PR branch.
+# returns only refs carrying the legacy `cwd:` trailer — not a single `owner-id:`
+# ref exists to orphan. Round 3 never shipped past this PR branch.
+# 🔴 RE-MEASURE, DO NOT QUOTE A COUNT. This comment used to say "exactly three
+# refs". The number moved twice inside one day — three when round 4 wrote it,
+# two when round 5's brief was written, three again ten minutes later when round 5
+# measured it, because other sessions claim and release while you read. Any count
+# written here is stale within hours; the FORMAT is what is durable, and the
+# command that re-derives both is on the line above.
 owner_material="claim-work-owner-v2
 $OWNER_HOST_PART
 $owner_worktree_part"
@@ -744,41 +778,91 @@ MY_OWNER_ID="$(printf '%s' "$owner_material" | git_ hash-object --stdin 2>/dev/n
 # 🔴 THE OLD TOKEN, KEPT ONLY TO READ OLD REFS. Refs OUTLIVE a format change, so
 # `claim_is_mine` still recognises a `cwd-id:` claim written before this change.
 # It is NEVER written any more, and it inherits the too-loose host problem
-# described above — which is unfixable for an already-published ref and is why
-# the legacy tiers age out with the TTL rather than being carried forward.
+# described above — which is unfixable for an already-published ref, and is why
+# the legacy tiers are TRANSITIONAL: nothing new is written in them, so once the
+# last legacy ref is released or stolen the tiers are dead code to delete.
+# ⚠ NOT "they age out with the TTL" — an earlier round said that and it was
+# false. Nothing expires a ref. What the TTL does is make a legacy claim
+# RELEASABLE by anyone past it (`require_ownership_or_force` returns 0 on stale);
+# the ref itself sits on origin until somebody runs `--release`/`--steal`.
 MY_CWD_ID="$(printf '%s' "$IDENT_REPO" | git_ hash-object --stdin 2>/dev/null | cut -c1-12 || true)"
 [ -n "$MY_CWD_ID" ] || MY_CWD_ID="unknown"
 
-# 🔴 AND THE OLDEST TIER GETS THE CWD FIX TOO, because it is the one that is
-# ACTUALLY LIVE. Measured 2026-08-26: all three claims on the real origin are in
-# the `cwd:` format, every one recorded against `/home/zach/workspace/devrc`. A
-# legacy comparison against `$PWD` alone would leave their holder unable to
-# release them from a worktree or a subdirectory — the same stuck lock, on the
-# refs that exist today rather than on hypothetical future ones.
+# 🔴 AND THE OLDEST TIER GETS A CWD ACCOMMODATION TOO, because it is the one that
+# is ACTUALLY LIVE. Measured 2026-08-26: every claim on the real origin is in the
+# `cwd:` format, each recorded against `/home/zach/workspace/devrc` (the count
+# moves; re-derive it, see the note above). A legacy comparison against `$PWD`
+# alone would leave their holder unable to release them from a worktree or a
+# subdirectory — the same stuck lock, on the refs that exist today rather than on
+# hypothetical future ones.
 #
-# So a legacy `cwd:` also matches the CLONE ROOT: the parent of the realpath'd
+# So a legacy `cwd:` ALSO matches the CLONE ROOT: the parent of the realpath'd
 # git-common-dir, which is the main worktree's toplevel for any subdirectory and
-# for any linked worktree. It is an EXTRA accept, never a replacement, so it can
-# only widen.
+# for any linked worktree.
+#
+# 🔴 BUT ONLY FOR THE DESTRUCTIVE VERBS, AND THAT SCOPE IS THE WHOLE POINT.
+# `claim_is_mine` has two callers and they want different answers here:
+#
+#   `require_ownership_or_force`  (--release / --steal)  ⇒ scope `clone`
+#       "may I delete or overwrite this ref?" The holder of a legacy claim taken
+#       at `<clone>` must be able to answer YES from a worktree or a subdirectory
+#       of that clone, or their own lock is stuck for the whole TTL. This is the
+#       ONLY reason the widening exists.
+#
+#   `report_existing`  (the claim / --check verdict, rc 10 vs rc 12)  ⇒ strict
+#       "should I start work on this item?" A DIFFERENT session in a sibling
+#       worktree of the same clone is not the holder, and telling it
+#       "✅ THIS IS YOURS — carry on with it" is round 3's flagship bug verbatim.
+#       Measured 2026-08-26 from a linked worktree against the REAL origin: every
+#       live claim returned rc 12 CARRY ON, in a clone with 61 registered
+#       worktrees, and `/resume` step 6 runs `claim-work "$SLUG"` directly and
+#       documents rc 12 as CARRY ON.
+#
+# The asymmetry is deliberate and it is not symmetric in cost: a wrong YES on
+# "may I delete it" costs one `--force` and an unnecessary `--force` is visible;
+# a wrong YES on "should I start" costs two sessions building the same thing,
+# silently, which is the entire reason this tool exists. So the destructive verbs
+# get the WIDE, forgiving answer and the verdict gets the NARROW, conservative
+# one — never the reverse.
+#
+# ⚠ THE PRICE, STATED: a genuine legacy holder standing in a SUBDIRECTORY of, or
+# a worktree of, their own clone now reads rc 10 STOP rather than rc 12 CARRY ON.
+# Nothing distinguishes them from a sibling at that point — the legacy ref
+# records a path and nothing else. rc 10 is the safe side of that coin (STOP, not
+# START) and `--release` still works for them without `--force`. New (`owner-id:`)
+# claims are unaffected: they carry a per-worktree token and answer exactly.
 #
 # 🔴 THIS IS THE ONE PLACE THAT STILL READS `--git-common-dir`, ON PURPOSE, AND
 # IT IS A SEPARATE READ FROM THE TOKEN ABOVE. The token narrowed to `--git-dir`
 # so that two linked worktrees are two owners; this accept must stay WIDE, because
-# the three live `cwd:` claims on the real origin were all made at
-# `<clone>` and their holder has to be able to release them from a worktree — the
-# stuck lock, on refs that exist today. Deriving it from `--git-dir` would give a
-# linked worktree `<clone>/.git/worktrees/<name>`, no `*/.git` match, an EMPTY
-# MY_CLONE_ROOT and exactly that stuck lock back. Pinned by
-# `test_a_legacy_cwd_claim_is_releasable_from_a_worktree_of_that_clone`.
+# the live `cwd:` claims on the real origin were all made at `<clone>` and their
+# holder has to be able to release them from a worktree. Deriving it from
+# `--git-dir` would give a linked worktree `<clone>/.git/worktrees/<name>`, no
+# `*/.git` match, an EMPTY MY_CLONE_ROOT and exactly that stuck lock back. Pinned
+# by `test_a_legacy_cwd_claim_is_releasable_from_a_worktree_of_that_clone`.
 #
-# It widens the LEGACY tier only, which already carries the too-loose `uname -n`
-# host comparison and ages out with the TTL. It does NOT widen `owner-id:`.
+# It widens the LEGACY tier only, on the destructive verbs only. It does NOT
+# widen `owner-id:`, and it no longer widens rc 12.
 owner_common_part="$(git_ -C "$IDENT_REPO" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
 owner_common_part="$(readlink -f -- "$owner_common_part" 2>/dev/null || printf '%s' "$owner_common_part")"
 MY_CLONE_ROOT=""
 case "$owner_common_part" in
   */.git) MY_CLONE_ROOT="$(dirname -- "$owner_common_part")" ;;
 esac
+# 🔴 AND THIS PROBE IS LOUD TOO. Its twin 50 lines up got a dedicated warning
+# after a round-4 audit found the silent fallback; this one shipped in the same
+# delta and was still silent. Measured with a `git` shim failing ONLY
+# `rev-parse --path-format=absolute --git-common-dir`: a legacy claim taken at the
+# clone root, `--release` from a worktree of that clone ⇒ rc 10 "is NOT yours",
+# no warning, holder locked out for the whole TTL. Same symptom, same class,
+# same fix.
+#
+# Gated on `$OWNER_TOKEN_DEGRADED` so it fires only when we ARE in a git
+# repository: with no repo at all the git-dir probe above has already warned, and
+# a second line saying the same thing trains the reader to skip both.
+if [ -z "$MY_CLONE_ROOT" ] && [ "$OWNER_TOKEN_DEGRADED" -eq 0 ]; then
+  warn "could not resolve this clone's root (an unreadable --git-common-dir, or a git dir that is not named .git) — a pre-2026-08-26 'cwd:' claim taken at the clone root cannot be recognised as yours from a worktree or a subdirectory. --release/--steal will be refused as 'not yours'; use --force if that happens."
+fi
 
 remote_ref_sha() {
   # Prints the sha of the claim ref on origin, or nothing. Returns non-zero ONLY
@@ -860,29 +944,72 @@ human_subject() {
 # Both fail CLOSED (a refusal, not a false grant), which is the right direction
 # and still a stuck lock.
 #
-# 🔴 SO THE FIX NEUTRALISES THE WHOLE `trailer.*` CLASS AT EVERY CONFIG LAYER,
-# rather than pinning the two keys that were measured. Enumerating keys was tried
-# first and was WRONG, which is why it is written down instead of quietly dropped:
+# 🔴 SO THE FIX NEUTRALISES THE WHOLE `trailer.*` CLASS AT THE CONFIG LAYERS
+# ENUMERATED BELOW, rather than pinning the two keys that were measured.
+# ⚠ IT USED TO SAY "AT EVERY CONFIG LAYER" AND THAT WAS FALSE — git has five
+# layers and only four were dropped. The missing one was the ENVIRONMENT, and it
+# is not exotic: `GIT_CONFIG_PARAMETERS` is set BY GIT ITSELF to propagate a
+# parent process's `-c`, so it arrives from a hook, an alias or `rebase -x`
+# without anyone typing it. Measured 2026-08-26 (round 5), both spellings:
+# `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=trailer.owner-id.key
+# GIT_CONFIG_VALUE_0='OWNER='` and `GIT_CONFIG_PARAMETERS="'trailer.separators'='='"`
+# each reproduce the full lockout — own 0-second-old claim reads
+# `owner-id unknown`, `--release` rc 10. A prose claim wider than the code is what
+# stops anyone looking, so the list is now enumerated and each entry says what it
+# covers:
 # `-c trailer.cwd-id.key='cwd-id: '` makes `interpret-trailers` match input tokens
 # against that configured key BY PREFIX, so a legacy `cwd: <path>` trailer came
 # back RENAMED to `cwd-id: <path>` — the ownership read then took an absolute path
 # as a hashed id and the legacy tier went rc 10 on its own live claim. Three tests
 # caught it. A per-key allowlist in this API is a booby trap; drop the layers.
-#   `-C "$WS"`               the throwaway bare repo this script made, so the
-#                            CALLER's repo-local `trailer.*` is out of the stack;
-#   `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`
-#                            the user's and the machine's layers, which `-C`
-#                            cannot displace;
-#   `-c trailer.separators=:` an explicit positive pin, so the value we depend on
-#                            is stated rather than inherited from git's default.
+#   `-C "$WS"`               REPO-LOCAL: the throwaway bare repo this script made,
+#                            so the CALLER's repo-local `trailer.*` is out of the
+#                            stack. ⚠ It replaces the caller's local layer with
+#                            `$WS`'s OWN — see the residual at the end of this
+#                            note;
+#   `GIT_CONFIG_GLOBAL=/dev/null`
+#                            GLOBAL: the user's `~/.gitconfig`, which `-C` cannot
+#                            displace;
+#   `GIT_CONFIG_NOSYSTEM=1`  SYSTEM: `/etc/gitconfig`, likewise;
+#   `unset GIT_CONFIG_COUNT GIT_CONFIG_PARAMETERS`
+#                            ENVIRONMENT, added in round 5. `GIT_CONFIG_COUNT`
+#                            GATES the whole `GIT_CONFIG_KEY_<n>`/`_VALUE_<n>`
+#                            family — measured: with COUNT unset, an exported
+#                            `GIT_CONFIG_KEY_0=trailer.separators` is ignored
+#                            entirely — so unsetting the counter is the complete
+#                            fix for that spelling, and `GIT_CONFIG_PARAMETERS`
+#                            is the second, independent one. The deprecated
+#                            `GIT_CONFIG` is already unset process-wide (see
+#                            DEVRC_GIT_REPO_POINTERS at the top of this file);
+#   `-c trailer.separators=:` COMMAND LINE: an explicit positive pin, and it is
+#                            NOT redundant. It is the only thing left covering the
+#                            one layer above that is NOT dropped — `$WS`'s own
+#                            repo-local config, which `git init --bare "$WS"`
+#                            creates while the caller's global config IS still in
+#                            effect. Measured 2026-08-26 (round 5): a global
+#                            `init.templateDir` pointing at a directory whose
+#                            `config` sets `trailer.separators = "="` plants that
+#                            key straight into `$WS/config`. Pinned by
+#                            `test_a_hostile_init_template_cannot_lock_the_owner_out`
+#                            and by the `separators-pin-removed` mutant.
 # In a subshell, not as an env prefix on the `git_` FUNCTION: an assignment
 # prefixing a function call leaks into the caller's scope in bash.
-# Verified 2026-08-26: with both hostile keys set repo-locally AND globally, the
-# real trailer block comes back unchanged.
+# Verified 2026-08-26: with both hostile keys set repo-locally, globally and in
+# the environment, the real trailer block comes back unchanged.
+#
+# 🔴 THE RESIDUAL, NOT FIXED IN ROUND 5: the `$WS`-local layer is closed for
+# `trailer.separators` (by the `-c` pin) and OPEN for `trailer.<key>.key` — a
+# global `init.templateDir` whose template `config` sets
+# `trailer.owner-id.key = 'OWNER='` still lands in `$WS/config` and still
+# produces the lockout. Enumerating keys in the `-c` list is NOT the fix (it was
+# tried, it is the booby trap described above). The one-token fix is
+# `git init --bare --template= "$WS"`, which stops a template from planting
+# anything; it is left for a later round because it changes how the scratch repo
+# is created, and the vector needs the operator's own global config to be hostile.
 claim_field() {
   local ref="$1" key="$2"
   git_ -C "$WS" log -1 --format='%B' "$ref" 2>/dev/null \
-    | ( export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1; git_ -C "$WS" -c trailer.separators=: interpret-trailers --parse 2>/dev/null ) \
+    | ( export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1; unset GIT_CONFIG_COUNT GIT_CONFIG_PARAMETERS; git_ -C "$WS" -c trailer.separators=: interpret-trailers --parse 2>/dev/null ) \
     | awk -v k="${key}:" '$1==k { sub(/^[^ ]+[ ]*/, ""); v=$0 } END { if (v != "") print v }'
 }
 
@@ -895,16 +1022,31 @@ claim_field() {
 #                   is written. It does not consult `host:` at all: the host is
 #                   already inside the hash, and `host:` is a HUMAN field.
 #   2. `cwd-id:`    written between 2026-08-26 and this change. host + hash($PWD).
-#   3. `cwd:`       pre-2026-08-26. host + the absolute path. Measured: three such
-#                   claims were LIVE on the real origin at the moment the
-#                   ownership gate first landed, and a gate reading only the new
-#                   field would have locked their own holder out of `--release`
-#                   without `--force` for the rest of the TTL.
+#   3. `cwd:`       pre-2026-08-26. host + the absolute path. Measured: EVERY
+#                   claim live on the real origin was in this format at the moment
+#                   the ownership gate first landed — and still is — so a gate
+#                   reading only the new field would have locked their own holder
+#                   out of `--release` without `--force` for the rest of the TTL.
+#                   (How many there are changes hourly; do not write it down.)
 # We READ 2 and 3; we never write them. Both inherit the too-loose `uname -n`
 # host comparison — unfixable for an already-published ref, and the reason they
 # are transitional rather than permanent.
+#
+# 🔴 THE SECOND ARGUMENT IS THE LEGACY SCOPE, AND IT IS NOT A CONVENIENCE KNOB.
+# The two callers ask two different questions of the same function and one of
+# them must NOT get the widened answer — see the MY_CLONE_ROOT block above for
+# the full argument:
+#   claim_is_mine "$ref"          strict  — "should I start work on this?"
+#                                 (`report_existing`: rc 12 CARRY ON vs rc 10 STOP)
+#   claim_is_mine "$ref" clone    wide    — "may I delete/overwrite this ref?"
+#                                 (`require_ownership_or_force`: --release/--steal)
+# The default is STRICT on purpose: a new caller that forgets the argument gets
+# the conservative answer, and a widening has to be typed out deliberately.
+# Tiers 1 and 2 (`owner-id:`, `cwd-id:`) ignore the scope entirely — it exists
+# only for the oldest tier, which records a bare path and can be nothing better
+# than a guess about who is standing in it.
 claim_is_mine() {
-  local ref="$1" owner h c legacy
+  local ref="$1" legacy_scope="${2:-strict}" owner h c legacy
   owner="$(claim_field "$ref" owner-id)"
   if [ -n "$owner" ]; then
     [ "$owner" = "$MY_OWNER_ID" ] && [ "$MY_OWNER_ID" != "unknown" ]
@@ -920,6 +1062,7 @@ claim_is_mine() {
   legacy="$(claim_field "$ref" cwd)"
   [ -n "$legacy" ] || return 1
   [ "$legacy" = "$IDENT_REPO" ] && return 0
+  [ "$legacy_scope" = clone ] || return 1
   [ -n "$MY_CLONE_ROOT" ] && [ "$legacy" = "$MY_CLONE_ROOT" ]
 }
 
@@ -978,6 +1121,12 @@ report_existing() {
   host="$(claim_field "refs/claims/$s" host)"
   # `if`, not `&& mine=1`: under `set -e` an AND-list whose first command fails
   # is a status nobody should have to reason about at a glance.
+  #
+  # 🔴 STRICT — NO SECOND ARGUMENT, AND THAT OMISSION IS THE GUARD. This decides
+  # rc 12 "carry on" vs rc 10 "STOP", which is a verdict about STARTING WORK, not
+  # about deleting a ref. Passing `clone` here hands every sibling worktree of the
+  # clone a legacy claim's "✅ THIS IS YOURS", which is exactly what was measured
+  # against the real origin before round 5.
   if claim_is_mine "refs/claims/$s"; then mine=1; fi
 
   printf '%s: ALREADY CLAIMED — %s%s\n' "$PROG" "$CLAIM_NS" "$s"
@@ -1033,6 +1182,13 @@ report_existing() {
 # `--check` verdicts (rc 12 vs rc 10) — not just these two destructive verbs. That
 # is precisely how round 3's too-wide token turned into "carry on with a peer's
 # live claim". Widen the token and you widen rc 12 with it.
+#
+# 🔴 WHICH IS WHY THE LEGACY WIDENING IS SCOPED TO THIS CALLER, via the second
+# argument below. Round 4 narrowed the `owner-id:` token to per-worktree and left
+# the legacy `cwd:` tier accepting the whole clone for BOTH readers — so on the
+# only refs that actually exist (all legacy, all recorded at `<clone>`) every
+# sibling worktree was still told rc 12 CARRY ON. Measured against the real
+# origin. The token is shared; the ANSWER is not.
 require_ownership_or_force() {
   local s="$1" verb="$2" age readable=1
   fetch_claim "$s" || readable=0
@@ -1047,7 +1203,11 @@ require_ownership_or_force() {
     return "$RC_TAKEN"
   fi
   age="$(claim_age_secs "refs/claims/$s")"
-  if claim_is_mine "refs/claims/$s"; then
+  # 🔴 `clone` — the WIDE legacy scope, and the ONLY caller that gets it. A
+  # pre-2026-08-26 `cwd:` claim taken at the clone root must stay releasable by
+  # its holder from a worktree or a subdirectory of that clone, or the live refs
+  # on the real origin are stuck for the whole TTL. See `claim_is_mine`.
+  if claim_is_mine "refs/claims/$s" clone; then
     return 0
   fi
   if is_stale "$age"; then
