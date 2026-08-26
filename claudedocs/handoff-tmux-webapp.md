@@ -3,184 +3,201 @@
 # Handoff: tmux-webapp — 2026-08-26
 
 ## Goal
-Build a webapp that visually organizes and provides live terminal interaction with tmux
-sessions across two machines (workbench + laptop). Single unified view.
+A **clawgate feature**: a webapp that visually organizes and gives live terminal interaction
+with tmux sessions across workbench + laptop, with a composable view system agents can drive,
+and an **attention queue** that surfaces sessions needing a human so Zach can jump straight in.
 
-## State now
-- Branch: `handoff-tmux-webapp` on `devrc` (this doc). Nothing else built — no code, no PR.
-- 🔴 **This doc was AUDITED on 2026-08-26 after the design session.** Four of its original
-  decisions did not survive contact with the repo; they are marked **REOPENED** below and the
-  evidence is in "Audit findings". Do not implement a REOPENED decision without resolving it.
-- 2 untracked + 2 modified tracked files on the workbench, all unrelated
-  (`nix/system/apply-nebula-443.sh.LOCAL-preserved-2026-08-02`,
-  `scripts/dl-router/tests/load_test_store.sh`, `claudedocs/close-the-loop/STATE.md`,
-  `claudedocs/the-algorithm-applied-2026-06-17.md`).
-- Drift (re-measured 2026-08-26, supersedes this doc's first draft):
-  `drift-check.sh` → **rc 10 — laptop `main` is BEHIND `origin/main` by 2 commits, needs a
-  ship.** The earlier `rc17 clawgate-srcDir` note is **stale**; `[srcrepo] compared=2 same=2
-  differing=0` today. Fix: `scripts/ship.sh`.
+## Status
+Design settled 2026-08-26 across two rounds: a greenfield session, then an audit that reopened
+four decisions, then a re-platform onto clawgate that resolved three of them outright. **No code
+yet.** The decisions below are RESOLVED unless marked otherwise.
 
-## Audit findings (2026-08-26) — read before implementing
+## Platform: this is a clawgate feature
+| | |
+|---|---|
+| Source | `~/workspace/homelab-talos/containers/clawgate/` (Go, module `github.com/zacxdev/clawgate`) |
+| Live version | **0.8.1** (`clawgatectl health`, 2026-08-26) |
+| Cluster / ns | **workbench**, ns `clawgate`; GitOps from `trunk` |
+| Stack | Go + **htmx** (136 `hx-*` attributes in `internal/ui/*.go`; UI is Go-built HTML, **not** template files) |
+| LAN URL | `http://192.168.50.250:30302` (NodePort) — 🔴 **no human auth** |
+| Public URL | `https://clawgate.zacx.dev` behind **Authelia passkey** |
 
-Each finding names the file that contradicts the decision. Verify before acting; these were
-measured against `origin/main` at `5426fe54`.
+### What the re-platform resolved for free
+- **Transport (was A1).** clawgate **already terminates WebSockets** server-side —
+  `coder/websocket v1.8.14`, `websocket.Accept(...)` at `internal/api/agents.go:1132` — and
+  **already does SSE**. The Python-stdlib constraint that made this a fork does not exist in Go.
+  Use WS for terminal I/O, SSE (or htmx polling) for the read model.
+- **Frontend framework (was part of A4).** htmx is the established pattern; no build step, no
+  SPA. Only the terminal widget remains open.
+- **Deploy target (was A2), partially.** The workbench cluster is the right *cluster* — it runs
+  on the workbench itself. It is **not** sufficient on its own; see the next section.
 
-**A1 🔴 REOPENED — WebSocket contradicts the stdlib constraint that justifies every other
-decision.** Python's stdlib has no WebSocket server; `http.server` cannot speak RFC 6455. This
-repo has already stood at this exact fork and written the answer down:
-`scripts/browser-bridge/server.py:23-26` — *"Long-poll (vs a hand-rolled stdlib WebSocket) was
-chosen because the whole rendezvous is then pure `http.server` + `threading` and is FULLY
-unit-testable with stdlib alone against an in-process fake extension — no new pip deps."*
-browser-bridge is the closest analogue in the codebase (live bidirectional
-browser ↔ local-process channel) and it **rejected** WebSocket on precisely the grounds this
-doc used to justify stdlib. The only RFC6455 mentions anywhere in the repo
-(`server.py:19`, `browser-bridge/README.md:147`) are that same decision restated. Either adopt
-long-poll, or state explicitly that this workload justifies breaking
-the constraint — but the constraint and the transport cannot both stand as written.
+## 🔴 The blocker the re-platform did NOT resolve
+The clawgate deployment has **no `hostPath`, no `hostNetwork`, no `hostPID`, no `nodeName`**
+(`clusters/workbench/apps/clawgate/deployment.yaml`). tmux sockets are unix sockets on the
+workbench and laptop **hosts**. A pod cannot see them.
 
-**A2 🔴 REOPENED — the deploy target is the wrong machine, and this exact pattern has a
-measured failure here.** tmux sockets are local unix sockets on the workbench and the laptop.
-Neither is a homelab node — homelab and workbench are **separate clusters with separate
-kubeconfigs** (`$KC_HOMELAB` vs `$KC_WORKBENCH`). A homelab pod can only reach tmux by SSH-ing
-to both hosts, which contradicts this doc's own "single backend on workbench, SSH to laptop".
-And the precedent is recorded at `nix/home.nix:3021-3022`: *"Building hosted reach ahead of a
-reader is the shape that left the subsystem-store-api dead on arrival."* The established
-pattern for a workbench-hosted UI is `initiatives-viewer` — a `systemd.user.services.<name>`
-unit, `serverMode`-gated, bound to the workbench's own LAN address.
+**RESOLVED — host-side agent per host.** A small systemd user service on each host owns the tmux
+socket and holds an **outbound** connection to clawgate:
 
-**A3 🔴 REOPENED — `send-keys` under the inherited trust model is unauthenticated RCE on both
-machines.** The API surface below lists `send-keys` and the doc never mentions auth. The prior
-art it would copy is deliberately unauthenticated: `scripts/initiatives/viewer.py:4203` —
-*"Deliberately UNAUTHENTICATED: the viewer binds LAN/localhost only."* That trust model was
-chosen for a **read-only** page. `send-keys` into an arbitrary pane is arbitrary command
-execution as your user, on the workbench **and** the laptop. This needs an explicit decision,
-not inheritance.
-  - Mitigating fact, and know why it is not a control: 8899/8900 are **not** in
-    `networking.firewall.allowedTCPPorts`, so off-host SYNs are dropped — measured from the
-    laptop 2026-08-25, `8899 CLOSED, 8900 CLOSED` (`nix/home.nix:3005-3014`). A copied bind is
-    therefore workbench-only *by firewall accident of the pattern*, not by design — and the
-    original k8s-ingress plan would have removed it.
+```
+workbench host                     laptop host
+  tmux socket                        tmux socket
+      |                                  |
+  tmux-agent (systemd user)          tmux-agent
+      |  outbound WS/long-poll           |
+      +----------> clawgate pod <--------+
+                  (workbench cluster)
+                   UI + queue + API
+```
 
-**A4 🔴 REOPENED — xterm.js contradicts "vanilla JS, no build step".** xterm.js is **not** in
-this repo (the only `xterm` greps that hit are substring noise — `"xterm"` as a probe string in
-a security test) and there is **no frontend build step anywhere** under `scripts/`. Adopting it
-means vendoring a third-party bundle — the first in the repo — or adding a build. Either is a
-departure from the constraint stated one line above it in the original draft. Decide it out
-loud.
+Why this shape: symmetric across both hosts, **no inbound access to either machine**, no
+privileged pod, no SSH credential living in a pod on an unauthenticated LAN surface. It also
+mirrors the rendezvous pattern already running here (`browser-bridge`), and `session-manager` is
+already the host-side collector — see "Build on what exists".
 
-**A5 The port table was wrong.** The draft listed browser-bridge **and**
-browser-activity-receiver both on 8787 — two servers on one port, which is the tell. Declared
-and measured (`nix/home.nix:3030-3032`, `ss -lptn` 2026-08-25): **8787** activity-receiver,
-**8788** browser-bridge, **8791** dl-router, **8793**, **8899** initiatives-viewer, **8900**
-present-serve, **8931**. Note a new server's port is **test-gated**:
-`scripts/tests/test_present_units.py` pins declared ports under `nix/`, so picking one is a
-change with a test, not a free choice.
+## 🔴 Auth — the highest-stakes decision
+**`send-keys` is arbitrary command execution as your user, on both machines.** Measured in
+source, not assumed:
+- `internal/api/auth.go:40-42` — `requireSession` is a literal `return next`. **Human auth was
+  removed**; the LAN is "treated as trusted-open" and the public path relies on the Authelia
+  forward-auth edge.
+- `internal/api/auth.go:51-54` — `requireHookToken` **fails OPEN** when no token is configured
+  ("left open for back-compat").
+- The LAN NodePort already exposes unauthenticated `DELETE /tasks/{id}` and
+  `POST /api/auto-approve-all`.
 
-**A6 The laptop address was the unroutable one.** `192.168.50.155` is LAN-only, same-network.
-The routable target used by every other consumer is **`zach@10.42.0.100`** (nebula).
-`scripts/session-manager:364-372` carries a 🔴 warning that `10.42.0.10` is the homelab
-*gateway*, not the laptop, and that getting this wrong **does not fail loudly**.
+**RESOLVED — a real auth check on the tmux WRITE surface**, independent of `requireSession`.
 
-**A7 Step 1 would have reinvented a 4,395-line tested collector.** See "Build on what exists".
+🔴 **It must FAIL CLOSED.** Do **not** reuse `requireHookToken` for terminal writes: its
+enforce-when-set semantics mean an unset token silently yields an open remote shell on both
+machines. A dedicated wrapper that refuses to serve when unconfigured is the requirement, and
+the difference between the two is the whole control.
 
-**A8 A related proposal is unmentioned and would invalidate the read model.**
-`claudedocs/proposal-tmux-server-multiplexing.md` (2026-08-14, Draft) proposes **per-i3-workspace
-tmux servers**. A read model that assumes one tmux server per host breaks under it. If that
-proposal is live, this design depends on it; if it is dead, say so here.
+Reads may follow existing clawgate conventions. Writes — `send-keys`, `kill-*`, `new-*` — go
+behind the fail-closed wrapper.
+
+## Structured dynamic UI — persisted layout model
+**RESOLVED — layout lives in Postgres**, because that is the only shape where an agent can
+genuinely compose a view (client-side layout is unaddressable from `clawgatectl`).
+
+```
+view    id, name, owner, layout(grid|stack)
+ panel  id, view_id, position, size,
+        target{host, session, window, pane},
+        state{expanded | collapsed | archived}
+```
+
+Both the htmx UI and `clawgatectl` mutate the same rows, so a human drag and an agent call are
+the same operation. Sketch of the agent surface:
+
+```
+clawgatectl view create "deploys"
+clawgatectl view add-panel deploys --host workbench --session <name>
+clawgatectl panel collapse <id>
+```
+
+## Attention queue
+**RESOLVED — three raisers.** The point is a queue Zach can scan and jump into.
+
+| Raiser | State today |
+|---|---|
+| **Agent asks a question** | 🔴 **Silent today.** `hook/clawgate-hook.sh:79` explicitly defers `AskUserQuestion` to the terminal **without contacting the server**, because a question is not allow/deny-routable. **This hook must change** — it is the primary use case. |
+| **Agent stopped, ready for next prompt** | Stop hook already fires (`/api/suggest`, writes `cc_sessions`). Route it into the queue as a lower-priority "idle, awaiting prompt" entry. ⚠ It was ~96% dead — 23,937 payload failures vs 921 successes since 2026-06-14 — and **both chokepoints are now fixed** (`--rawfile` + `--data-binary @file`). Do not re-derive that bug. |
+| **Explicit `clawgatectl` verb** | New. An agent deliberately raises with a reason. |
+
+🔴 **A queue entry is NOT a decision object.** The existing request card carries approve/deny;
+an attention entry carries **no decision and a destination** (jump to this session). Model it as
+a distinct entity or the approve/deny UI leaks into it.
+
+**Push already exists**: `POST /api/notify` — `{title, body, host, project}`, push-only, no
+request card, hook-token auth (`internal/api/server.go:347`). The attention primitive does not
+need building, only wiring.
+
+⚠ **Known coverage gap, accepted deliberately.** `session-manager`'s passive waiting-detection
+was considered and **declined**. All three chosen raisers depend on an agent cooperating or a
+hook firing, so an agent that **hangs, crashes, or is killed** raises nothing. The passive
+source is read-only and can be added later if the queue proves to miss cases.
+
+## 🔴 Vocabulary collision — settle before routes and verbs are baked
+clawgate **already has a `session`**: `cc_sessions` + `task_sessions` (migration 0023), with
+`GET /api/sessions/{id}/tasks`. It means a **Claude Code session**. A tmux session is a
+different thing. Two entities called `session` in one API is a defect that gets permanent the
+moment routes and `clawgatectl` verbs ship. Namespace the new one (`term:` / `tmux_session`)
+before writing the first route.
 
 ## Build on what exists (do not reinvent)
-
 | Need | Already exists | Where |
 |---|---|---|
-| Cross-host tmux read model | `session-manager` SSHes to the laptop, runs `tmux list-panes -a` + `list-windows -a` on **both** hosts, emits `--json` as `report["hosts"][{workbench,laptop}]["windows"]`. 4,395 lines, test-covered. | `scripts/session-manager`, `scripts/tests/test_session_manager.py` |
-| Live bidirectional browser ↔ local-process channel on stdlib | `browser-bridge`'s long-poll command queue (`GET /poll` blocks ~25s → 204 → re-poll; `POST /cmd` enqueues, `POST /result` returns) | `scripts/browser-bridge/server.py` |
-| A workbench-hosted LAN web UI as a nix-managed unit | `initiatives-viewer` — `systemd.user.services`, `serverMode`-gated, `X-Restart-Triggers`, pinned python312 | `nix/home.nix:2922+`, `scripts/initiatives/viewer.py` |
-| Claude-session detection inside panes | `claude_sessions.py` (shared; also feeds the ▦ bar pill) | `scripts/lib/claude_sessions.py` |
+| Cross-host tmux read model | `session-manager` SSHes to the laptop, runs `tmux list-panes -a` + `list-windows -a` on **both** hosts, emits `--json` as `report["hosts"][{workbench,laptop}]["windows"]`. 4,395 lines, test-covered. | `devrc/scripts/session-manager` |
+| Push notification | `POST /api/notify` | `internal/api/server.go:347` |
+| WebSocket termination | `coder/websocket`, origin-checked | `internal/api/agents.go:1132` |
+| Rendezvous pattern for a host agent | `browser-bridge`'s outbound long-poll command queue | `devrc/scripts/browser-bridge/server.py` |
+| Claude-session detection in panes | `claude_sessions.py` | `devrc/scripts/lib/claude_sessions.py` |
 
 Hazards `session-manager` already encodes that a fresh collector would rediscover:
 - `list-panes` and `list-windows` are **two non-atomic calls** — the join can tear.
-- `reachable` / `error` describe the **first** call only; one call succeeding says nothing
-  about the other.
+- `reachable` / `error` describe the **first** call only.
 
-Two more from the analyze-service index (**recall — verify before relying on**):
-- tmux **window ids restart at `@0` when the tmux server restarts**, so a row needs the server
-  pid as a sentinel or a post-reboot `@41` inherits a dead session's identity and a multi-day age.
+From the analyze-service index (**recall — verify before relying on**):
+- tmux **window ids restart at `@0` when the tmux server restarts**; a row needs the server pid
+  as a sentinel or a post-reboot `@41` inherits a dead session's identity and a multi-day age.
 - `$TMUX_PANE` can be set while `tmux display-message` **fails**, landing a partial record on
   top of a good one and silently un-joining the window.
 
-## Architecture decisions
-- **Backend**: Python stdlib `http.server` — **stands**. Codebase convention; all existing
-  servers are stdlib `BaseHTTPRequestHandler` + `ThreadingHTTPServer`.
-- **Frontend**: Vanilla JS + CSS — **stands**. Terminal widget is **REOPENED (A4)**.
-- **Transport**: **REOPENED (A1)** — long-poll vs WebSocket vs "break the constraint".
-- **Multi-host**: single backend on the workbench, laptop over SSH at **`zach@10.42.0.100`**
-  — stands, corrected address (A6). Source the data from `session-manager` (A7).
-- **Deploy**: **REOPENED (A2)** — `systemd.user.services` on the workbench (the
-  `initiatives-viewer` shape) vs a cluster deploy, and if a cluster, **which** one.
-- **Auth**: **UNDECIDED, and required before `send-keys` ships (A3).**
+## Still open
+- **A4 — the terminal widget.** clawgate vendors only two hand-written JS files
+  (`filter-toggle.js`, `tag-normalize.js`, ~3.7 KB total) and **no third-party bundle**.
+  xterm.js would be the first. Go's `embed` makes it mechanically easy, and it must be
+  **vendored, not CDN** — clawgate is reachable on an offline LAN. Alternative: ship read-only
+  `capture-pane` rendering first and defer xterm.js until interaction proves needed.
+- **The "jump in" action is cross-machine and under-specified.** From a phone, "jump into the
+  session" cannot attach a terminal — it has to be the web terminal. At the workbench, focusing
+  the real tmux window is better (`window-triage` already resolves codenames/hotkeys). These are
+  two different actions behind one button; design them explicitly.
 
-## tmux API surface to wrap
-| Command | Purpose |
-|---|---|
-| `list-sessions -F '...'` | Read model: all sessions with metadata |
-| `list-windows -t <s> -F '...'` | Windows per session |
-| `list-panes -t <s>:<w> -F '...'` | Panes per window |
-| `capture-pane -t <target> -p` | Live pane content for previews |
-| `send-keys -t <target>` | Send input to a pane — **gated on A3** |
-| `rename-session` / `rename-window` | Organize |
-| `swap-window` / `move-window` | Reorder/regroup |
-| `kill-session` / `kill-window` | Cleanup — **gated on A3** |
-| `new-session` / `new-window` | Create |
+## Next steps (ranked)
+1. **Ship the attention queue first — it is independently valuable and much smaller.** Push
+   (`/api/notify`) and the Stop hook already exist; the AskUserQuestion hook change and a
+   `clawgatectl` verb are small. It delivers the jump-to-session value without the host agent,
+   the terminal widget, or the layout schema.
+2. **Settle the vocabulary collision** — one decision, blocks route and verb naming.
+3. **Host-side tmux agent** — systemd user service on both hosts, outbound to clawgate, sourcing
+   from `session-manager` rather than a new collector.
+4. **Fail-closed terminal-write auth wrapper** — before any write endpoint exists, not after.
+5. **Layout schema + `clawgatectl view`/`panel` verbs** — server-side model first, UI second.
+6. **The grid UI** — panels, expand/collapse/archive, live `capture-pane` previews.
+7. **Terminal widget** — per the A4 decision.
 
-## What exists today (verified 2026-08-26 against `5426fe54`)
-- **No web frameworks** — all servers are stdlib `BaseHTTPRequestHandler` + `ThreadingHTTPServer`.
-- **6 existing servers**, ports corrected per A5.
-- **Nix deployment pattern** well established: **25** `systemd.user.services` blocks in
-  `nix/home.nix`, `Type="simple"`, pinned interpreter, `X-Restart-Triggers`.
-- **Python 3.12** is the service standard (27 `python312` references in `nix/home.nix`).
-- **Node.js 26** available (`pkgs.nodejs_26`) — but see A4: no frontend build step exists today.
-- **`.tmux.conf`**: 222 lines, no custom socket, 20 scratchpad slots, auto-rename shows `●` for
-  claude processes, Gruvbox theme.
-- **Two hosts**: workbench, and the laptop at `zach@10.42.0.100`.
-- **tmux snapshot**: workbench 22 sessions / 2 attached; laptop 15 sessions / 2 attached, all
-  created within the same minute (likely a bulk restore — may need special handling).
-
-## Next steps (re-ranked)
-1. **Resolve the four REOPENED decisions (A1–A4)** — transport, deploy target, auth model,
-   terminal widget. They are upstream of every line of code; picking wrong costs the prototype.
-   *(Zach has further project criteria to add — resolve these together with those.)*
-2. **Ship the laptop** — `scripts/ship.sh` clears the live rc 10. Unrelated to this work, but
-   it is the standing drift and it is one command.
-3. **Prototype the read model as a thin layer over `session-manager --json`** — decide
-   import-as-library vs shell-out vs fork-the-helpers, then `scripts/tmux-webapp/server.py`
-   serving `/api/sessions`. No new collector.
-4. **Live-interaction layer** — per A1's outcome; `capture-pane` streaming + input, behind A3's
-   auth decision.
-5. **Frontend** — session grid, window sub-cards, pane mini-maps; terminal widget per A4.
-6. **Organization ops** — rename / move / swap / kill endpoints + UI, destructive ones behind A3.
-7. **Deploy** — per A2's outcome. If it is the `initiatives-viewer` shape: a
-   `systemd.user.services` block in `nix/home.nix` plus a port that satisfies
-   `scripts/tests/test_present_units.py`.
-
-## Gotchas / decisions / dead-ends
-- No new backend frameworks — stdlib only (codebase-wide convention). This is what makes A1 a
-  real fork rather than a preference.
-- `capture-pane` is the expensive call — debounce/batch across panes.
-- The laptop is nebula-only and often not on the network; `session-manager` already buys a
-  timeout for that case rather than hanging.
-- Do not bind `192.168.50.94` — that is a homelab node hosting the kube-apiserver and
-  NodePorts; it is not assignable on the workbench and binding it **crash-loops the unit**. It
-  already cost `initiatives-viewer` an outage (`nix/home.nix:3024-3028`).
-- A new file must be `git add`ed or the flake silently omits it from the deploy.
+## Gotchas
+- 🔴 **Committing to `trunk` deploys the MANIFEST, not the container CODE.** The image pin is an
+  immutable literal tag with no Flux image automation, so a commit under `containers/clawgate/**`
+  reconciles cleanly and **changes nothing running**. Shipping = build + push image + bump pin.
+  `clawgatectl health` is the evidence, never `git log`.
+- 🔴 **`clawgate-ci` does NOT run Playwright — this feature is almost entirely browser-layer, so
+  it is UNGATED.** Run `make e2e` locally and **count**: without Docker, `test.skip` on
+  `!dockerAvailable()` leaves **11 of 18 spec files / 77 of 113 tests** and goes green.
+- 🔴 **`clawgatectl` is built from a LOCAL working tree of homelab-talos**, so it can be present
+  but STALE — a behind checkout ships a binary **missing verbs that prints help and exits 0**
+  under a plausible version label. This already happened (0.7.95, no `task status`). New verbs
+  inherit it: an agent calling `clawgatectl view add-panel` on a stale host gets help and a
+  success exit. rc 7 covers *binary newer than server*; the dangerous inverse needs its own
+  guard. Both hosts need the rebuild.
+- Do not bind `192.168.50.94` — a homelab node; binding it **crash-loops the unit** and already
+  cost `initiatives-viewer` an outage.
+- Public routing must `proxy_pass` to the NodePort IP `http://192.168.50.250:30302`, never a
+  `.svc.cluster.local` name — that doesn't resolve there and **crashes nginx, taking down all
+  nebula-routed services**.
+- Laptop `main` is 2 commits behind `origin/main` (`drift-check.sh` rc 10) — `scripts/ship.sh`.
 
 ## How to verify
-- `curl localhost:<port>/api/sessions` returns JSON with workbench sessions.
-- `curl 'localhost:<port>/api/sessions?host=laptop'` returns laptop sessions over SSH — and
-  returns a *timeout error*, not a hang, when the laptop is off-nebula.
-- Cross-check the response against `session-manager --json` for the same instant; a divergence
-  means the wrapper is re-deriving rather than delegating.
-- Browser shows the session grid with live pane previews.
-- Clicking a pane opens a terminal that can type into the tmux pane — **only after A3**.
-- Whatever A2 decides: confirm the unit is `active` (not `activating`) **and** that the process
-  holding the port is the one the unit started (`ss -lptn 'sport = :<port>'` → PID →
-  `/proc/<pid>/cgroup`). A deploy reporting success is a claim about the deploy, not the consumer.
+- Attention queue: an agent calling `AskUserQuestion` produces a queue entry **and** a push;
+  today it produces neither. That before/after pair is the regression test.
+- Read model: the clawgate view agrees with `session-manager --json` for the same instant. A
+  divergence means the agent is re-deriving rather than delegating.
+- Auth: the write surface **refuses to serve with no token configured**. Assert the refusal —
+  a fail-open wrapper passes any test that only checks the happy path.
+- Laptop off-nebula returns a *timeout error*, not a hang.
+- After deploy: `clawgatectl health` shows the new version, the pod is `active` (not
+  `activating`), and the process holding the port is the one the unit started. A deploy
+  reporting success is a claim about the deploy, not the consumer.
