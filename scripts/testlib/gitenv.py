@@ -689,15 +689,41 @@ _XDIST_RUN_ENV = "PYTEST_XDIST_TESTRUNUID"
 
 
 def _own_xdist_run_id() -> "str | None":
-    """This xdist run's id, or None when not running under xdist.
+    """This xdist run's id if WE are a worker of it, else None.
 
     MEASURED: xdist sets this in every WORKER and NOT in the controller, and all
     workers of one run share the value. The controller needs no special case —
     it is each worker's direct parent (measured: worker ppid == controller pid),
     so `_own_process_lineage` already excludes it.
+
+    🔴 "IN MY ENVIRONMENT" IS NOT "I AM A WORKER". A worker's children inherit
+    the variable, so a nested pytest launched from a test would take the worker
+    branch below and exclude its parent worker's other children — processes it
+    has no business excluding.
+
+    The discriminator is the same /proc quirk that made an earlier version of
+    the sibling check inert, used deliberately this time: xdist assigns the id
+    at RUNTIME, so in a genuine worker it is in `os.environ` and ABSENT from
+    `/proc/self/environ` (the exec-time snapshot). A process that merely
+    INHERITED it has it in both. Measured, with both controls:
+
+        genuine worker:      os.environ yes / /proc/self/environ no
+        inheriting child:    os.environ yes / /proc/self/environ YES
+        set before exec:     os.environ yes / /proc/self/environ YES
+
+    An unreadable /proc yields None — we then claim no siblings, leaving every
+    candidate visible, which is the direction that keeps the guard sharp.
     """
     value = os.environ.get(_XDIST_RUN_ENV)
-    return value or None
+    if not value:
+        return None
+    try:
+        raw = Path("/proc/self/environ").read_bytes()
+    except OSError:
+        return None
+    inherited = any(entry.startswith(f"{_XDIST_RUN_ENV}=".encode())
+                    for entry in raw.split(b"\0"))
+    return None if inherited else value
 
 
 def _ppid_of(entry: Path) -> "int | None":
@@ -712,18 +738,24 @@ def _ppid_of(entry: Path) -> "int | None":
 def _is_sibling_xdist_worker(entry: Path, run_id: str, our_ppid: int) -> bool:
     """True when `entry` is a SIBLING WORKER of our xdist run.
 
-    🔴 Why the run id and not something cheaper. The obvious candidates are all
-    wrong in the fail-OPEN direction, which for this detector means going blind:
+    🔴 The paragraph that used to sit here argued "why the run id and not
+    something cheaper" and asserted "the run id is exact: only processes of THIS
+    xdist run carry it". Both are now WRONG and are deleted rather than left to
+    be believed: the id is unreadable from another process's /proc (see below),
+    and it is not exact anyway — a worker's children inherit it, which is why
+    `_own_xdist_run_id` now rejects an inherited value.
 
-      * lineage INTERSECTION — every lineage reaches pid 1, so this matches
-        every process on the box and the guard stops seeing anything.
-      * "the candidate's parent is in our lineage" — our lineage contains
-        `systemd --user`, so any other session's process parented by it matches.
+    What that paragraph got RIGHT, and is worth keeping: the cheap alternatives
+    are catastrophic. Lineage INTERSECTION matches every process on the box
+    (every lineage reaches pid 1). "The candidate's parent is in our lineage"
+    matches anything parented by `systemd --user`.
 
-    The run id is exact: only processes of THIS xdist run carry it. A foreign
-    session running its own xdist has a DIFFERENT id, and an unreadable
-    `/proc/<pid>/environ` (another user) claims nothing — the candidate stays a
-    co-tenant, which is the direction that keeps the guard sharp.
+    🔴 RESIDUAL HAZARD, not guarded: if the controller dies and this worker is
+    reparented to a subreaper (`systemd --user`, or a container init), then
+    `os.getppid()` becomes that subreaper and this check would exclude the large
+    class of processes parented by it. A worker outliving its controller is
+    already a broken run, but the exclusion would be wrong rather than merely
+    useless, so it is named here instead of being discovered later.
 
     🔴 IT IS THE PPID, AND NOT THE RUN ID, THAT DOES THE WORK — and an earlier
     revision of this function ALSO checked the run id in `/proc/<pid>/environ`,

@@ -2925,52 +2925,6 @@ _markers_ok() {
     [ "$n" -ge 1 ] && [ "$n" -le "$PYTEST_JOBS" ]
   fi
 }
-# GUARD 9b's predicate. $1 = a target's pytest log -> "FAIL <n>" or "OK".
-#
-# 🔴 A FUNCTION, not four inline pipes, because the first inline version was
-# WRONG in the silent direction and shipped a permanently-red gate: it built an
-# ERE containing the marker `gitenv(session)`, whose PARENTHESES are an ERE
-# GROUP, so the pattern matched the literal text "gitenvsession", never hit, and
-# returned a co-tenant count of 0 — i.e. "nothing else writes here" — on a box
-# whose sessions had just reported `unattributable=1`. A zero from a pattern
-# that cannot match is indistinguishable from a real zero. `-F` fixes that
-# specific bug; being callable from a test is what stops the next one.
-#
-# The gate: fail ONLY when no session reported a co-tenant AND at least one
-# observation went unattributed. See the GUARD 9b block for why the co-tenant
-# condition is what makes this safe to arm at all.
-_gitenv_unattributed_verdict() {
-  local cotenant_sessions foreign_writers unattributed
-  cotenant_sessions="$(grep -aF "$GITENV_SESSION_MARKER" "$1" \
-    | grep -aoE 'unattributable=[0-9]+' \
-    | awk -F= '$2 != 0 {n++} END {print n+0}')"
-  # 🔴 THE SECOND KIND OF PROOF, and leaving it out shipped a FALSE RED.
-  # `unattributable=` is written by ONE probe, at import time: live processes
-  # whose cwd sits in the repo. The plugin's other two probes — the idle probe
-  # and the settle re-read, which gitenv.py calls its strongest — prove a
-  # foreign writer LATER and record it as a `gitenv(foreign-writer)` line,
-  # touching no `unattributable=` field at all. A writer whose cwd is OUTSIDE
-  # the repo (drift-check's `git fetch`, 4x/day, and concurrent agent sessions
-  # — both named in gitenv.py as routine writers to this clone) is invisible to
-  # the first probe and caught by the others.
-  #
-  # Reproduced serially, not xdist-specific: an external process creating
-  # branches during a run produced `unattributable=0`, a `gitenv(foreign-writer)`
-  # line, `unattributed-observations=4`, and pytest rc=0 — and this gate then
-  # said "no session reported a co-tenant, so there was no legitimate reason to
-  # leave enforce mode" three lines below the log's own proof of the opposite.
-  # On a REQUIRED merge check that sends the developer to audit their own tests.
-  foreign_writers="$(grep -acF 'gitenv(foreign-writer)' "$1" || true)"
-  unattributed="$(grep -aoE 'unattributed-observations=[0-9]+' "$1" \
-    | awk -F= '{s+=$2} END {print s+0}')"
-  if [ "$cotenant_sessions" -eq 0 ] && [ "${foreign_writers:-0}" -eq 0 ] \
-     && [ "$unattributed" -gt 0 ]; then
-    echo "FAIL $unattributed"
-  else
-    echo "OK"
-  fi
-}
-
 _markers_expected() {
   if [ "$PYTEST_JOBS" -eq 1 ]; then
     echo "exactly 1"
@@ -3053,47 +3007,29 @@ run_pytest() {
     fail=1
   fi
 
-  # --- GUARD 9b: an UNATTRIBUTED observation must not pass silently ----------
-  # 🔴 The hole this closes, found by an audit of the xdist change. GUARD 9 does
-  # not only fail loudly or pass — it can DOWNGRADE itself from enforce to
-  # report, and in report mode `_report()` never calls pytest.fail. Nothing here
-  # parsed the line that records the downgrade, so a repo mutation the detector
-  # SAW but could not pin on a test scored a clean PASS.
+  # --- GUARD 9b: REMOVED 2026-08-25, and the reason is worth keeping ---------
+  # A check lived here that failed a target with a non-zero
+  # `unattributed-observations`. It was added to close the residual case the
+  # sibling-worker fix in testlib/gitenv.py cannot: worker A mutating the repo
+  # during worker B's idle window.
   #
-  # Parallelism makes the downgrade routine rather than exotic: worker A mutates
-  # the repo during worker B's idle window, so B observes a delta it cannot
-  # attribute. Fixing the sibling-process misattribution in testlib/gitenv.py
-  # removes the FALSE unattributables; this catches the true ones.
+  # 🔴 IT COULD NOT FIRE, and it read as coverage for two rounds. In auto mode —
+  # the only mode this runner permits, since it unsets DEVRC_GITENV_MODE above —
+  # `unattributed-observations>0` requires report mode; report mode requires
+  # `_UNATTRIBUTABLE` non-empty; and that happens either at import, which prints
+  # `unattributable=k>0`, or via `_mark_foreign`, which prints a
+  # `gitenv(foreign-writer)` line. Both were the check's own excuse conditions.
+  # Every log that could trip it carried one. Before that it was measured
+  # producing a FALSE RED on a run whose log already proved an external writer.
   #
-  # 🔴 Gated on the log carrying NO evidence of another writer — neither an
-  # `unattributable=` count nor a `gitenv(foreign-writer)` line — and that gate
-  # is why this is safe to arm.
+  # The protection that actually works is upstream: with sibling workers no
+  # longer misread as foreign co-tenants, every worker stays in ENFORCE and
+  # fails the TEST that touched the repo, naming it. Measured, cwd inside the
+  # protected repo at -n 4: fixed -> all four workers cotenants=0, ENFORCE;
+  # inert -> all four cotenants=3, REPORT.
   #
-  # ⚠ MEASURED, and worth knowing before you reason about this: under xdist
-  # exactly ONE `gitenv(session) stripped=…` line reaches the target log, and it
-  # is the CONTROLLER's (it precedes "bringing up nodes..."); worker
-  # pytest_configure output is swallowed. So the `unattributable=` half rests on
-  # a probe taken before any worker exists, in a process that runs no tests. The
-  # `gitenv(foreign-writer)` half is what covers the run's later window. An operator's box legitimately has other processes
-  # living in the repo (8 measured here: zsh, nvidia-smi, an editor), which puts
-  # the detector in report mode for real reasons unrelated to this run. Failing
-  # there would make the gate permanently red locally — the "red gate trains
-  # everyone to click through" failure this file's own doctrine rates worse than
-  # no gate. A clean checkout (CI) has no co-tenants, so this is live exactly
-  # where the guard is still sharp.
-  local gitenv_verdict gitenv_unattributed
-  gitenv_verdict="$(_gitenv_unattributed_verdict "$log")"
-  gitenv_unattributed="${gitenv_verdict#FAIL }"
-  if [ "${gitenv_verdict%% *}" = "FAIL" ]; then
-    echo "run-tests: FATAL — GUARD 9 saw $gitenv_unattributed unattributed repo observation(s) in $d." >&2
-    echo "  No session reported a co-tenant, so there was no legitimate reason to" >&2
-    echo "  leave enforce mode: the detector WATCHED a protected repository change" >&2
-    echo "  and could not pin it on a test. In report mode that does not fail the" >&2
-    echo "  test, so without this check the target passes having measured nothing." >&2
-    echo "  Read the '$GITENV_SESSION_MARKER summary:' line above for what moved." >&2
-    RESULTS+=("FAIL  $d (GUARD 9 unattributed observation)")
-    fail=1
-  fi
+  # Do not reinstate this without first constructing a log that trips it. A gate
+  # that cannot fail is worse than no gate — it stops anyone looking.
 
   # GUARD 4: parse pytest's summary line. `-q` emits it undecorated, e.g.
   #   "660 passed, 123 skipped in 15.10s"   /   "1 failed, 2 passed in 0.1s"
