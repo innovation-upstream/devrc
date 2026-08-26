@@ -56,12 +56,17 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "scripts"))
+
+from testlib import mockbin  # noqa: E402
+
 AUDIT = ROOT / "githooks" / "audit-on-push.sh"
 
 ZERO_SHA = "0" * 40
@@ -117,18 +122,27 @@ def _make_repo(where: Path, home: Path, branch: str) -> Path:
 
 
 def _stub_claude(bindir: Path) -> Path:
-    """A recording `claude` that answers CLEAN. Its LOG is the positive control."""
+    """A recording `claude` that answers CLEAN. Its LOG is the positive control.
+
+    🔴 `mockbin.write_exec` OWNS THE SHEBANG, and that is not style. This stub is
+    written at RUNTIME and then exec'd by the worker via a PATH lookup, so its
+    interpreter must exist in BOTH tiers. `#!/usr/bin/env bash` — what this
+    function used to write — resolves on a NixOS dev host and does NOT exist in
+    the nix build sandbox, where the authoritative gate runs; `patchShebangs`
+    fixes the source tree and cannot touch a file a test creates while running.
+    That is exactly the two-tier hazard `scripts/tests/test_runtime_shebangs.py`
+    guards, and it took this PR red on `tekton/devrc-pytests` while the dev-host
+    run stayed green. `write_exec` writes `#!/bin/sh` and RAISES if a call site
+    supplies its own shebang, so the body below must stay POSIX sh.
+    """
     bindir.mkdir(parents=True, exist_ok=True)
     calls = bindir / "claude-calls.log"
-    stub = bindir / "claude"
-    stub.write_text(
-        "#!/usr/bin/env bash\n"
-        f'printf "%s\\n" "$*" >> {calls}\n'
+    mockbin.write_exec(
+        bindir / "claude",
+        f'printf "%s\\n" "$*" >> "{calls}"\n'
         'printf "VERDICT:SAFE\\nCLEAN\\n"\n'
         "exit 0\n",
-        encoding="utf-8",
     )
-    stub.chmod(0o755)
     return calls
 
 
@@ -256,6 +270,36 @@ def outside_tmp():
 def test_the_worker_exists_and_is_executable():
     assert AUDIT.is_file(), f"{AUDIT} missing — every test below is vacuous"
     assert os.access(AUDIT, os.X_OK), f"{AUDIT} is not executable"
+
+
+def test_bash_is_on_path_in_this_tier():
+    """🔴 NOT a skipif. Every run below invokes `bash <worker>` explicitly rather
+    than relying on the worker's own shebang, so a missing `bash` would surface
+    as a FileNotFoundError inside an unrelated assertion. `pkgs.bash` is in the
+    pytests check's nativeBuildInputs; if it ever is not, fail here by name."""
+    assert shutil.which("bash") is not None, (
+        "bash is not on PATH in this tier — add it to the pytests check in "
+        "flake.nix rather than skipping these tests")
+
+
+def test_the_stub_this_file_writes_actually_execs_in_this_tier(tmp_path):
+    """🔴 THE TIER CONTROL, and the one this PR earned the hard way.
+
+    A stub whose interpreter does not exist fails at `execve`, and the symptom
+    downstream is "the audit did not run" — indistinguishable from the guard
+    working. `/usr/bin/env` exists on a NixOS dev host and NOT in the nix build
+    sandbox, so the first version of this file was green here and red on the
+    gate. This test asks the direct question in whichever tier it runs in.
+    """
+    calls = _stub_claude(tmp_path / "bin")
+    p = subprocess.run([str(tmp_path / "bin" / "claude"), "-p", "hello"],
+                       capture_output=True, text=True, timeout=30)
+    assert p.returncode == 0, (
+        f"the recording stub could not exec (rc={p.returncode}): {p.stderr!r}. "
+        "If this is ENOENT on the interpreter, the shebang is not valid in this "
+        "tier — see scripts/testlib/mockbin.py")
+    assert "VERDICT:SAFE" in p.stdout, p.stdout
+    assert calls.exists() and "-p hello" in calls.read_text(encoding="utf-8")
 
 
 def test_the_harness_can_observe_an_audit_actually_running(tmp_path, outside_tmp):
