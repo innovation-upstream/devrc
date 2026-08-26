@@ -140,6 +140,20 @@ Measured twice in one session: an adversarial audit correctly identified a missi
 inert** feature that still passed 428 green tests and a second clean audit. The audit was right
 about the gap and the fix was wrong about reality.
 
+**The stop condition, and why it is not a cap.** A 14-day audit of 443 Claude Code sessions found
+audit-round escalation to be the largest single token sink in devrc. Measured from transcripts: PR
+#804 ran **eight** numbered delta re-audit rounds, and rounds **5, 6, 7 and 8 all returned "safe to
+merge"** — the stop condition was met at round 5 and four rounds ran anyway, much of each fix round
+spent correcting the round count in Claude's own prose (*"I did it again — appended the eighth
+clause without moving the count"*). #482 took six rounds, #505 five, #390 and #393 five each.
+
+A numeric CAP was the first version of this fix and was **rejected**. Session `f23b37ec`
+legitimately needed round 4 because **both** of round 3's blockers were introduced by round 2's own
+fixes; a cap at 2 would have shipped a corrupted census artifact. The rule that survives is
+narrower and costs nothing when rounds are still productive: rounds continue while the previous one
+produced a finding that needed fixing, and the FIRST round that returns none is the last — it is
+never re-confirmed.
+
 ## unreachable-guards
 *Supports: 🔴 "Mutation-test a guard before certifying it — and prove it REACHABLE, not just breakable." (the reachability half).*
 

@@ -58,9 +58,25 @@ Ask the re-auditor to:
   check that now rejects a legitimate case);
 - treat "the author says it's fixed" as a claim to verify against the diff.
 
-Stop when a round produces no new findings — not when the author says it's done. **Say that to the
-re-auditor explicitly** ("a clean round is the stop condition; do not invent findings to justify the
-round") — otherwise late rounds manufacture nits to look productive.
+### 🔴 A clean round ENDS the ladder. Never run another round to confirm a clean round.
+
+Rounds continue **only** while the previous round produced a finding that required a fix. The first
+round that returns no findings is the last one — stop there, and do not re-confirm it. Stop on that,
+not on the author saying it's done.
+
+Measured across 443 sessions in 14 days, audit-round escalation is the largest single token sink in
+this repo: PR #804 ran **eight** numbered delta rounds, and rounds **5, 6, 7 and 8 all returned
+"safe to merge"** — the stop condition was met at round 5 and four rounds ran anyway, much of each
+one spent correcting the round count in the prose rather than the code.
+
+🔴 **This is NOT a round cap, and a cap was rejected.** The count is set by FINDINGS, never by a
+number: session `f23b37ec` legitimately needed round 4 because **both** of round 3's blockers were
+introduced by round 2's own fixes, and a cap at 2 would have shipped a corrupted artifact. Keep
+going while rounds keep finding things — `claude/RULES.md` still says to budget for several — and
+stop the moment one does not.
+
+**Say the stop rule to the re-auditor explicitly** ("a clean round is the stop condition; do not
+invent findings to justify the round") — otherwise late rounds manufacture nits to look productive.
 
 🔴 **A FRAMED AUDIT VERIFIES THE FRAME. When a PR has already been audited, dispatch the next one
 BLIND** — give it the diff and the checklist, *not* your conclusions or the prior findings' answers.

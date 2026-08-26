@@ -457,7 +457,47 @@ ARCHIVE_MD = REPO_ROOT / "claude" / "RULES-ARCHIVE.md"
 # Said the other way: the next new rule still pays ceiling, exactly as the entry above
 # insists. If a later round does NOT spend this, ratchet it back down -- that entry is
 # right that down is the intended direction of travel.
-MAX_BYTES = 40_900
+#
+# 2026-08-25: 40,900 -> 41,400 (+500 B). The rule that would not fit is the audit
+# ladder's STOP condition -- "a CLEAN round ENDS the ladder; never run another to
+# confirm one" -- 270 B appended to the "An audit/review fix RESETS the
+# verification gate" bullet, which is the bullet that MANDATES several rounds and
+# so is the only place the stop rule can be read in the same breath as the reason
+# rounds continue. It reuses that bullet's frame, trigger and the
+# `audit-fix-resets-gate` anchor, so it adds no `-> archive:` tag.
+#
+# The measurement it rests on: across 443 sessions in 14 days, audit-round
+# escalation was the largest single token sink, and on devrc #804 rounds 5, 6, 7
+# and 8 ALL returned "safe to merge" -- four rounds run purely to re-confirm a
+# clean one. 🔴 Do NOT restate this rule as a CAP. A cap was the first version of
+# the fix and was rejected on this file's own evidence: session f23b37ec
+# legitimately needed round 4 because BOTH of round 3's blockers were introduced
+# by round 2's fixes, so a cap at 2 would have shipped a corrupted artifact. The
+# clause therefore says "the count is set by FINDINGS, never by a number".
+#
+# 🔴 EVICTION WAS RE-RUN, NOT ASSUMED EXHAUSTED. The 2026-08-21 entry declared the
+# duplication vein exhausted but scoped that claim honestly ("re-running will not
+# find one either UNLESS NEW PROSE LANDS"), and new prose has landed since --
+# #642's control-design clause, #661's MULTIOS trap, the proactivity gate, the
+# closing-condition clause and #847's claim-work bullet. So the sweep was re-run
+# by the same method: every core line >=120 B, whitespace-normalised, longest-
+# common-block against the WHOLE archive with `*Supports:` echo lines excluded,
+# threshold 34 B. 79 lines scanned, 23 blocks matched, and EVERY one is
+# imperative, scope or failure-shape text the playbook keeps -- the largest
+# (107 B) is the sops-retraction bullet's "a checksum guard wrapped around the
+# suspected operation proves nothing if the real write happens elsewhere", which
+# IS the rule. Yield: 0 B. The vein is exhausted again, now measured against the
+# newer prose rather than inherited from a four-day-old claim.
+#
+# NAME THE BASE: post-bump slack is 1,330 B ceiling-relative and 430 B
+# FLOOR-relative. Sized to the 2026-08-23 precedent (448 B floor-relative) rather
+# than to clear the floor, because that entry's own finding -- and 2026-08-22's
+# before it -- is that a ceiling leaving less than a review round's worth of
+# bytes cannot absorb its OWN audit, and both were reproduced within a day of
+# being written. Observed review-round costs in this ledger are 130-170 B, so
+# 430 B survives one and part of a second. It is still under the ~500 B mean
+# bullet, so the next NEW rule pays ceiling, exactly as the entries above insist.
+MAX_BYTES = 41_400
 
 # Required working margin below the ceiling.
 #
