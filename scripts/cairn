@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""`store` — the read-through client for the hosted subsystem store (phase 2).
+"""`cairn` — the read-through client for the hosted subsystem store (phase 2).
 
 WHAT THIS IS FOR. The pod at `store.zacx.dev/api/` has served a read-only API
 since 2026-08-16 and logged 309 requests, all from the session that built it,
@@ -491,7 +491,7 @@ def resolve_state(
 
 def banner(state: str, detail: str) -> str:
     marker = "🔴" if state == STATE_NO_CACHE else ("⚠" if state == STATE_CACHED else "")
-    return f"{marker} store: {state} — {detail}".strip()
+    return f"{marker} cairn: {state} — {detail}".strip()
 
 
 def cmd_sync(args: argparse.Namespace) -> int:
@@ -559,13 +559,13 @@ def _report(args: argparse.Namespace, *, search: str | None) -> int:
         scope = args.scope or scope_for_repo(args.repo)
     except Exception as exc:  # GitError and anything else the resolver raises
         print(
-            f"store: could not derive a scope from {args.repo!r}: {exc}\n"
+            f"cairn: could not derive a scope from {args.repo!r}: {exc}\n"
             f"       pass --scope explicitly.",
             file=sys.stderr,
         )
         return EXIT_USAGE
     if not scope:
-        print("store: --scope is required (no scope could be derived)", file=sys.stderr)
+        print("cairn: --scope is required (no scope could be derived)", file=sys.stderr)
         return EXIT_USAGE
 
     if search is not None:
@@ -673,7 +673,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
         # it was looking at, not the predicate.
         if args.scope not in held:
             print(
-                f"store: cache holds no scope {args.scope!r} — "
+                f"cairn: cache holds no scope {args.scope!r} — "
                 f"nothing was validated. Held: {', '.join(held) or '(none)'}",
                 file=sys.stderr,
             )
@@ -683,7 +683,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
         scopes = held
     if not scopes:
         print(
-            f"store: nothing to validate — {args.cache} holds no scopes",
+            f"cairn: nothing to validate — {args.cache} holds no scopes",
             file=sys.stderr,
         )
         return EXIT_UNREACHABLE_NO_CACHE
@@ -698,7 +698,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        prog="store",
+        prog="cairn",
         description=(
             "Read-through client for the hosted subsystem store. Syncs a local "
             "cache and runs the UNMODIFIED local reader against it, so a recall "
@@ -752,11 +752,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         # ships a link, a traversal member, a duplicate, or a count disagreeing
         # with its own header is not an outage — it is the case that must stop
         # the run, cache or no cache.
-        print(f"🔴 store: REFUSED the archive — {exc}", file=sys.stderr)
+        print(f"🔴 cairn: REFUSED the archive — {exc}", file=sys.stderr)
         return EXIT_CORRUPT
     except StoreUnreachable as exc:
         # Reached only by a config failure outside `resolve_state`; still named.
-        print(f"🔴 store: {STATE_NO_CACHE} — {exc}", file=sys.stderr)
+        print(f"🔴 cairn: {STATE_NO_CACHE} — {exc}", file=sys.stderr)
         return EXIT_UNREACHABLE_NO_CACHE
 
 

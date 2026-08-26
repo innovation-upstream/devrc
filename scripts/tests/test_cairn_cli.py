@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""`scripts/store` — the read-through client's four states.
+"""`scripts/cairn` — the read-through client's four states.
 
 🔴 WHAT THIS FILE IS ACTUALLY GUARDING. Three of the four states print no
 entries, and one of those three is a lie: `scope-empty` means the store was
@@ -37,7 +37,7 @@ from types import SimpleNamespace
 import pytest
 
 REPO = Path(__file__).resolve().parents[2]
-STORE_CLI = REPO / "scripts" / "store"
+CAIRN_CLI = REPO / "scripts" / "cairn"
 SERVER_PY = REPO / "scripts" / "subsystem-store-api" / "server.py"
 GOOD_TOKEN = "a" * 20 + "B" * 20 + "c" * 8
 LOOPBACK = ipaddress.ip_network("127.0.0.1/32")
@@ -158,7 +158,7 @@ def live_store(source_store: Path):
         httpd.server_close()
 
 
-def run_store(*args: str, url: str | None, cache: Path, token: str = GOOD_TOKEN):
+def run_cairn(*args: str, url: str | None, cache: Path, token: str = GOOD_TOKEN):
     env = dict(os.environ)
     env["SUBSYSTEM_STORE_TOKEN"] = token
     # Point config resolution at a path that does not exist, so a real
@@ -171,7 +171,7 @@ def run_store(*args: str, url: str | None, cache: Path, token: str = GOOD_TOKEN)
     else:
         env["SUBSYSTEM_STORE_URL"] = url
     proc = subprocess.run(
-        [sys.executable, str(STORE_CLI), "--cache", str(cache), "--timeout", "5", *args],
+        [sys.executable, str(CAIRN_CLI), "--cache", str(cache), "--timeout", "5", *args],
         capture_output=True,
         text=True,
         env=env,
@@ -181,7 +181,7 @@ def run_store(*args: str, url: str | None, cache: Path, token: str = GOOD_TOKEN)
 
 
 
-ORPHAN_GRACE = 3600  # mirrors scripts/store::ORPHAN_GRACE_SECONDS
+ORPHAN_GRACE = 3600  # mirrors scripts/cairn::ORPHAN_GRACE_SECONDS
 
 
 def _fetch_snapshot_bytes(base: str) -> bytes:
@@ -202,16 +202,16 @@ def _dead_port() -> int:
 
 class TestTheFourStates:
     def test_live_says_live_and_exits_0(self, live_store, tmp_path: Path):
-        proc = run_store("recall", "--scope", "widget-cfg", url=live_store.base,
+        proc = run_cairn("recall", "--scope", "widget-cfg", url=live_store.base,
                          cache=tmp_path / "cache")
         assert proc.returncode == 0, proc.stderr
-        assert "store: live" in proc.stdout
+        assert "cairn: live" in proc.stdout
         assert "thing-alpha" in proc.stdout
 
     def test_scope_empty_is_exit_0_and_says_it_REACHED_the_store(
         self, live_store, tmp_path: Path
     ):
-        proc = run_store("recall", "--scope", "hollow-area", url=live_store.base,
+        proc = run_cairn("recall", "--scope", "hollow-area", url=live_store.base,
                          cache=tmp_path / "cache")
         assert proc.returncode == 0, proc.stderr
         assert "scope-empty" in proc.stdout
@@ -221,10 +221,10 @@ class TestTheFourStates:
         self, live_store, tmp_path: Path
     ):
         cache = tmp_path / "cache"
-        assert run_store("sync", url=live_store.base, cache=cache).returncode == 0
-        proc = run_store("recall", "--scope", "widget-cfg", url=None, cache=cache)
+        assert run_cairn("sync", url=live_store.base, cache=cache).returncode == 0
+        proc = run_cairn("recall", "--scope", "widget-cfg", url=None, cache=cache)
         assert proc.returncode == 0, proc.stderr
-        assert "store: cached" in proc.stdout
+        assert "cairn: cached" in proc.stdout
         assert "SERVED FROM CACHE" in proc.stdout
         # The content still arrives — a stale answer is still an answer.
         assert "thing-alpha" in proc.stdout
@@ -233,7 +233,7 @@ class TestTheFourStates:
         self, tmp_path: Path
     ):
         """🔴 The state that must never look like `scope-empty`."""
-        proc = run_store("recall", "--scope", "widget-cfg", url=None,
+        proc = run_cairn("recall", "--scope", "widget-cfg", url=None,
                          cache=tmp_path / "cache")
         assert proc.returncode != 0
         assert "store-unreachable, no cache" in proc.stderr
@@ -245,9 +245,9 @@ class TestTheFourStates:
         """🔴 The whole point, asserted as a RELATIONSHIP rather than two
         separate string checks: same shape of request, two different states,
         and they must differ in both text and exit code."""
-        empty = run_store("recall", "--scope", "hollow-area", url=live_store.base,
+        empty = run_cairn("recall", "--scope", "hollow-area", url=live_store.base,
                           cache=tmp_path / "a")
-        outage = run_store("recall", "--scope", "hollow-area", url=None,
+        outage = run_cairn("recall", "--scope", "hollow-area", url=None,
                            cache=tmp_path / "b")
         assert empty.returncode == 0 and outage.returncode != 0
         assert (empty.stdout + empty.stderr) != (outage.stdout + outage.stderr)
@@ -258,10 +258,10 @@ class TestIdempotence:
         self, live_store, tmp_path: Path
     ):
         cache = tmp_path / "cache"
-        first = run_store("sync", url=live_store.base, cache=cache)
-        second = run_store("sync", url=live_store.base, cache=cache)
+        first = run_cairn("sync", url=live_store.base, cache=cache)
+        second = run_cairn("sync", url=live_store.base, cache=cache)
         assert first.returncode == 0 and second.returncode == 0
-        listing = run_store("ls-entries", "--no-sync", url=None, cache=cache)
+        listing = run_cairn("ls-entries", "--no-sync", url=None, cache=cache)
         assert listing.returncode == 0
         assert sorted(listing.stdout.split()) == [
             "gizmo-notes/other-thing.md",
@@ -275,9 +275,9 @@ class TestIdempotence:
         """A failed refresh must not leave a half-tree that still claims
         'none omitted'. The previous cache survives instead."""
         cache = tmp_path / "cache"
-        assert run_store("sync", url=live_store.base, cache=cache).returncode == 0
+        assert run_cairn("sync", url=live_store.base, cache=cache).returncode == 0
         before = sorted(p.name for p in cache.glob("*/*.md"))
-        assert run_store("sync", url=None, cache=cache).returncode != 0
+        assert run_cairn("sync", url=None, cache=cache).returncode != 0
         after = sorted(p.name for p in cache.glob("*/*.md"))
         assert after == before, "a failed sync damaged the existing cache"
 
@@ -293,7 +293,7 @@ class TestByteIdentityWithTheLocalReader:
         import re
 
         cache = tmp_path / "cache"
-        proc = run_store("recall", "--scope", "widget-cfg", url=live_store.base, cache=cache)
+        proc = run_cairn("recall", "--scope", "widget-cfg", url=live_store.base, cache=cache)
         assert proc.returncode == 0, proc.stderr
         # Drop the client's banner + its blank line; compare the report only.
         got = proc.stdout.split("\n", 2)[2]
@@ -348,7 +348,7 @@ class TestHostileOrBrokenArchives:
     def _run_against(self, body, ctype, cache, headers=None):
         srv, url = self._serve_once(body, ctype, headers)
         try:
-            return run_store("sync", url=url, cache=cache)
+            return run_cairn("sync", url=url, cache=cache)
         finally:
             srv.shutdown()
             srv.server_close()
@@ -395,7 +395,7 @@ class TestHostileOrBrokenArchives:
         answer 200 with an HTML interstitial. This previously escaped every
         handler as a traceback at exit 1 with a healthy cache sitting unused."""
         cache = tmp_path / "cache"
-        assert run_store("sync", url=live_store.base, cache=cache).returncode == 0
+        assert run_cairn("sync", url=live_store.base, cache=cache).returncode == 0
         proc = self._run_against(
             b"<html>Just a moment...</html>", "text/html", cache
         )
@@ -418,7 +418,7 @@ class TestHostileOrBrokenArchives:
         (source_store / "widget-cfg" / "a..b.md").write_text(
             _entry("a..b", "widget-cfg", "- 2026-01-04: dots are legal.")
         )
-        proc = run_store("sync", url=live_store.base, cache=tmp_path / "cache")
+        proc = run_cairn("sync", url=live_store.base, cache=tmp_path / "cache")
         assert proc.returncode == 0, proc.stderr + proc.stdout
         assert (tmp_path / "cache" / "widget-cfg" / "a..b.md").is_file()
 
@@ -450,7 +450,7 @@ class TestConcurrentSync:
         threads = [
             threading.Thread(
                 target=lambda: results.append(
-                    run_store("sync", url=live_store.base, cache=cache)
+                    run_cairn("sync", url=live_store.base, cache=cache)
                 )
             )
             for _ in range(10)
@@ -477,9 +477,9 @@ class TestScopeFilterNeverNarrowsTheSharedCache:
     @pytest.mark.parametrize("cmd", [("sync",), ("validate",), ("ls-entries",)])
     def test_the_cache_stays_complete(self, live_store, tmp_path: Path, cmd):
         cache = tmp_path / "cache"
-        assert run_store("sync", url=live_store.base, cache=cache).returncode == 0
+        assert run_cairn("sync", url=live_store.base, cache=cache).returncode == 0
         before = sorted(p.name for p in cache.glob("*/*.md"))
-        run_store(*cmd, "--scope", "widget-cfg", url=live_store.base, cache=cache)
+        run_cairn(*cmd, "--scope", "widget-cfg", url=live_store.base, cache=cache)
         after = sorted(p.name for p in cache.glob("*/*.md"))
         assert after == before, f"{cmd[0]} --scope narrowed the shared cache"
 
@@ -494,9 +494,9 @@ class TestScopeFilterNeverNarrowsTheSharedCache:
         exit 0 from a cache that was quietly narrowed.
         """
         cache = tmp_path / "cache"
-        assert run_store("sync", url=live_store.base, cache=cache).returncode == 0
-        run_store(*cmd, "--scope", "widget-cfg", url=live_store.base, cache=cache)
-        proc = run_store(
+        assert run_cairn("sync", url=live_store.base, cache=cache).returncode == 0
+        run_cairn(*cmd, "--scope", "widget-cfg", url=live_store.base, cache=cache)
+        proc = run_cairn(
             "recall", "--scope", "gizmo-notes", "--no-sync", url=None, cache=cache
         )
         assert proc.returncode == 0, proc.stderr
@@ -506,7 +506,7 @@ class TestScopeFilterNeverNarrowsTheSharedCache:
         self, live_store, tmp_path: Path
     ):
         cache = tmp_path / "cache"
-        assert run_store("sync", url=live_store.base, cache=cache).returncode == 0
+        assert run_cairn("sync", url=live_store.base, cache=cache).returncode == 0
         assert "coverage=ALL" in (cache / ".sync-stamp").read_text()
 
 
@@ -520,7 +520,7 @@ class TestReaderExitCodePassesThrough:
         broken = source_store / "rubble-pile"
         broken.mkdir()
         (broken / "junk.md").write_text("no front matter, no headings, nothing\n")
-        proc = run_store(
+        proc = run_cairn(
             "recall", "--scope", "rubble-pile", url=live_store.base,
             cache=tmp_path / "cache",
         )
@@ -546,7 +546,7 @@ class TestUnreadableScope:
         locked = source_store / "hollow-area"
         locked.chmod(0o000)
         try:
-            proc = run_store(
+            proc = run_cairn(
                 "recall", "--scope", "hollow-area", url=live_store.base,
                 cache=tmp_path / "cache",
             )
@@ -579,7 +579,7 @@ class TestSymlinkedScopeIsRefusedNotDropped:
         )
         (source_store / "linked-scope").symlink_to(outside, target_is_directory=True)
 
-        proc = run_store(
+        proc = run_cairn(
             "recall", "--scope", "linked-scope", url=live_store.base,
             cache=tmp_path / "cache",
         )
@@ -591,14 +591,14 @@ class TestSymlinkedScopeIsRefusedNotDropped:
 
 class TestValidateActuallyRuns:
     def test_validate_exits_0_on_a_clean_cache(self, live_store, tmp_path: Path):
-        """🔴 `store validate` NEVER WORKED — it passed `--validate` to the
+        """🔴 `cairn validate` NEVER WORKED — it passed `--validate` to the
         READER, which has no such flag, so every invocation exited 2 with
         `unrecognized arguments`. The test written to close that gap asserted
         only that the cache directory was unchanged, so it passed green over a
         command that failed on every input. Assert the OUTCOME."""
         cache = tmp_path / "cache"
-        assert run_store("sync", url=live_store.base, cache=cache).returncode == 0
-        proc = run_store("validate", "--no-sync", url=None, cache=cache)
+        assert run_cairn("sync", url=live_store.base, cache=cache).returncode == 0
+        proc = run_cairn("validate", "--no-sync", url=None, cache=cache)
         assert proc.returncode == 0, proc.stdout + proc.stderr
         assert "unrecognized arguments" not in (proc.stdout + proc.stderr)
 
@@ -610,8 +610,8 @@ class TestValidateActuallyRuns:
             "aliases: [wrapped,\n  list]\nno front matter at all\n"
         )
         cache = tmp_path / "cache"
-        assert run_store("sync", url=live_store.base, cache=cache).returncode == 0
-        proc = run_store("validate", "--no-sync", url=None, cache=cache)
+        assert run_cairn("sync", url=live_store.base, cache=cache).returncode == 0
+        proc = run_cairn("validate", "--no-sync", url=None, cache=cache)
         assert proc.returncode != 0, proc.stdout + proc.stderr
 
 
@@ -624,7 +624,7 @@ class TestArchiveSizeAndTruncation:
         raises `EOFError`, which was not, so it escaped as a traceback at exit 1
         with a healthy cache unused."""
         cache = tmp_path / "cache"
-        assert run_store("sync", url=live_store.base, cache=cache).returncode == 0
+        assert run_cairn("sync", url=live_store.base, cache=cache).returncode == 0
         good = _fetch_snapshot_bytes(live_store.base)
         truncated = good[: len(good) // 2]
         proc = TestHostileOrBrokenArchives()._run_against(
@@ -674,7 +674,7 @@ class TestNonRegularFilesInTheStore:
         not a raw `[Errno 21] Is a directory` escaping from an unguarded open.
         """
         (source_store / "widget-cfg" / "trap.md").mkdir()
-        proc = run_store(
+        proc = run_cairn(
             "recall", "--scope", "gizmo-notes", url=live_store.base,
             cache=tmp_path / "cache",
         )
@@ -710,6 +710,18 @@ class TestEntryTableCellsHaveBehaviour:
     cell needs an observable of its own.
     """
 
+    def _snapshot_raw(self, base: str) -> bytes | None:
+        """The raw body on a 200, else None — so a leak assertion can DECOMPRESS
+        rather than grep a gzip stream for plaintext it can never contain."""
+        req = urllib.request.Request(base + "/api/v1/snapshot")
+        req.add_header("Authorization", f"Bearer {GOOD_TOKEN}")
+        req.add_header("User-Agent", "subsystem-store-client/1")
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                return resp.read()
+        except urllib.error.HTTPError:
+            return None
+
     def _snapshot_members(self, base: str) -> tuple[int, str]:
         req = urllib.request.Request(base + "/api/v1/snapshot")
         req.add_header("Authorization", f"Bearer {GOOD_TOKEN}")
@@ -732,9 +744,20 @@ class TestEntryTableCellsHaveBehaviour:
         code, body = self._snapshot_members(live_store.base)
         assert code == 503, body[:300]
         assert "innocent.md" in body and "link-to-file refused" in body, body[:300]
-        # Belt and braces: the payload must not contain the secret under ANY
-        # status, so a future 200 with a different message still fails here.
-        assert "OPENSSH PRIVATE KEY" not in body
+        # 🔴 THE BELT-AND-BRACES LINE HERE USED TO BE VACUOUS, and its comment
+        # claimed the opposite: `assert "OPENSSH PRIVATE KEY" not in body` CANNOT
+        # fail on a 200, because `/snapshot` ships `w:gz` — the plaintext is
+        # never in the raw body. Measured: on a tar.gz containing exactly that
+        # string, the substring is absent from the raw bytes while the
+        # round-tripped member content IS the secret. So it has to decompress.
+        raw = self._snapshot_raw(live_store.base)
+        if raw is not None:
+            with tarfile.open(fileobj=io.BytesIO(raw), mode="r") as tar:
+                for member in tar.getmembers():
+                    handle = tar.extractfile(member)
+                    content = handle.read() if handle is not None else b""
+                    assert b"OPENSSH PRIVATE KEY" not in content, member.name
+                assert "widget-cfg/innocent.md" not in tar.getnames()
 
     def test_a_FIFO_named_md_is_refused_rather_than_opened(
         self, source_store: Path, live_store, tmp_path: Path
@@ -772,7 +795,7 @@ class TestOrphanStagingIsReaped:
         old = time.time() - (ORPHAN_GRACE + 60)
         os.utime(orphan, (old, old))
 
-        assert run_store("sync", url=live_store.base, cache=cache).returncode == 0
+        assert run_cairn("sync", url=live_store.base, cache=cache).returncode == 0
         assert not orphan.exists(), "orphan staging dir survived a clean sync"
 
     def test_an_old_DOT_OLD_orphan_is_also_removed(self, live_store, tmp_path: Path):
@@ -783,7 +806,7 @@ class TestOrphanStagingIsReaped:
         orphan.mkdir(parents=True)
         old = time.time() - (ORPHAN_GRACE + 60)
         os.utime(orphan, (old, old))
-        assert run_store("sync", url=live_store.base, cache=cache).returncode == 0
+        assert run_cairn("sync", url=live_store.base, cache=cache).returncode == 0
         assert not orphan.exists(), ".old- orphan survived a clean sync"
 
     def test_a_symlinked_orphan_is_UNLINKED_not_counted_as_reaped(
@@ -808,7 +831,7 @@ class TestOrphanStagingIsReaped:
         old = time.time() - (ORPHAN_GRACE + 60)
         os.utime(link, (old, old), follow_symlinks=False)
 
-        assert run_store("sync", url=live_store.base, cache=cache).returncode == 0
+        assert run_cairn("sync", url=live_store.base, cache=cache).returncode == 0
         assert not link.exists() and not link.is_symlink(), "symlinked orphan survived"
         assert (target / "keep.md").read_text() == "must survive", "reaper ate the target"
 
@@ -827,7 +850,7 @@ class TestOrphanStagingIsReaped:
         fresh.mkdir(parents=True)
         recent = time.time() - (ORPHAN_GRACE // 2)
         os.utime(fresh, (recent, recent))
-        assert run_store("sync", url=live_store.base, cache=cache).returncode == 0
+        assert run_cairn("sync", url=live_store.base, cache=cache).returncode == 0
         assert fresh.exists(), "reaper deleted a possibly-live staging dir"
 
 
@@ -848,7 +871,7 @@ class TestNotAScopeIsSkippedNotRefused:
         target = tmp_path / "notes.md"
         target.write_text("not a scope, just a file")
         (source_store / "README.md").symlink_to(target)
-        proc = run_store(
+        proc = run_cairn(
             "recall", "--scope", "widget-cfg", url=live_store.base,
             cache=tmp_path / "cache",
         )
@@ -861,7 +884,7 @@ class TestNotAScopeIsSkippedNotRefused:
         """The other half of the relationship — asserted so the two cannot drift
         apart again. Either both skip or the guard is inconsistent."""
         (source_store / "README.md").write_text("not a scope")
-        proc = run_store(
+        proc = run_cairn(
             "recall", "--scope", "widget-cfg", url=live_store.base,
             cache=tmp_path / "cache",
         )
@@ -883,13 +906,13 @@ class TestNotAScopeIsSkippedNotRefused:
         this task moves files between hosts"). Calling this
         `..._does_not_deny_the_whole_store` would be the exact
         description-wider-than-implementation defect an earlier round was
-        renamed to close. Closing condition: `store recall` and
+        renamed to close. Closing condition: `cairn recall` and
         `/api/v1/recall/<scope>` both serve a scope containing `.#x.md`.
         """
         (source_store / "widget-cfg" / ".#thing-alpha.md").symlink_to(
             "zach@nixos.12345:1700000000"
         )
-        proc = run_store(
+        proc = run_cairn(
             "recall", "--scope", "widget-cfg", url=live_store.base,
             cache=tmp_path / "cache",
         )
@@ -920,7 +943,7 @@ class TestNotAScopeIsSkippedNotRefused:
         else:
             (source_store / "linked").symlink_to(source_store / "linked")
 
-        proc = run_store(
+        proc = run_cairn(
             "recall", "--scope", "linked", url=live_store.base,
             cache=tmp_path / "cache",
         )
@@ -939,7 +962,7 @@ class TestNotAScopeIsSkippedNotRefused:
         outside.mkdir()
         (outside / "sneaky.md").write_text(_entry("sneaky", "linked", "- x."))
         (source_store / "linked").symlink_to(outside, target_is_directory=True)
-        proc = run_store(
+        proc = run_cairn(
             "recall", "--scope", "linked", url=live_store.base,
             cache=tmp_path / "cache",
         )
@@ -992,8 +1015,8 @@ class TestValidateScopeGuard:
         WAS CHECKED — a zero here is NOT a clean bill of health" and exited 0.
         The fix covered the case it was looking at, not the predicate."""
         cache = tmp_path / "cache"
-        assert run_store("sync", url=live_store.base, cache=cache).returncode == 0
-        proc = run_store(
+        assert run_cairn("sync", url=live_store.base, cache=cache).returncode == 0
+        proc = run_cairn(
             "validate", "--scope", "no-such-scope", "--no-sync", url=None, cache=cache
         )
         assert proc.returncode != 0, proc.stdout + proc.stderr
@@ -1001,11 +1024,11 @@ class TestValidateScopeGuard:
 
 
 class TestSearchOverTheClient:
-    """🔴 `store search` had ZERO tests anywhere in the repo, so the fix that
+    """🔴 `cairn search` had ZERO tests anywhere in the repo, so the fix that
     gave search its own `_exit_for` label had no regression test at all."""
 
     def test_search_finds_a_hunk_and_exits_0(self, live_store, tmp_path: Path):
-        proc = run_store(
+        proc = run_cairn(
             "search", "lease", "--scope", "widget-cfg", url=live_store.base,
             cache=tmp_path / "cache",
         )
@@ -1021,7 +1044,7 @@ class TestSearchOverTheClient:
         broken = source_store / "rubble-pile"
         broken.mkdir()
         (broken / "junk.md").write_text("no front matter, nothing parseable\n")
-        proc = run_store(
+        proc = run_cairn(
             "search", "lease", "--scope", "rubble-pile", url=live_store.base,
             cache=tmp_path / "cache",
         )
@@ -1057,7 +1080,7 @@ class TestSearchOverTheClient:
         # the `report.label -> f"{report.scope}/"` mutant passed 349/349. A
         # fixture that cannot distinguish the mutant from the fix is not a test.
         cache = tmp_path / "cache"
-        proc = run_store(
+        proc = run_cairn(
             "search", "lease", "--scope", "rubble-pile", "--all-scopes",
             url=live_store.base, cache=cache,
         )
@@ -1124,7 +1147,7 @@ class TestTheHarnessItself:
     ):
         """Negative control: the fixture can still say no, so a 200 above means
         the token was checked rather than the auth layer being absent."""
-        proc = run_store("sync", url=live_store.base, cache=tmp_path / "cache",
+        proc = run_cairn("sync", url=live_store.base, cache=tmp_path / "cache",
                          token="z" * 48)
         assert proc.returncode != 0
         assert "401" in proc.stderr, proc.stdout

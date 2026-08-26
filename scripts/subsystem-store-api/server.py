@@ -1002,18 +1002,28 @@ KIND_LINK_TO_OTHER = "link-to-other"  # link to a fifo/socket/device
 KIND_DIRECTORY = "directory"
 KIND_REGULAR_FILE = "regular-file"
 KIND_OTHER = "other"                  # fifo, socket, device, door…
-# 🔴 THE LAST CELL OF THE LOOP. The first version of this classifier was total
-# over KIND STRINGS but not over KNOWLEDGE: every `pathlib` predicate returns
-# False when the stat itself fails, so an EACCES, ESTALE or EIO fell into
-# `KIND_OTHER` — the FIFO bucket — and `_ROOT_ACTIONS` skipped it. MEASURED with
-# the store root at mode 0o600 (readable, NOT searchable, so `readdir` works and
-# every child's `lstat` gives EACCES):
-#     GET /api/v1/snapshot -> 200, X-Store-Exit: 0, X-Store-Entries: 0
-#     store recall --scope widget-cfg -> rc 0
-#       "scope-empty — reached the store; nothing recorded for this scope"
-# An unreadable store rendering as an empty one, in the function whose docstring
-# said "total by construction". "I could not determine what this is" is its own
-# answer and must never share a bucket with "I know exactly what this is".
+# 🔴 THE LAST CELL OF THE LOOP: the first version of this classifier was total
+# over KIND STRINGS but not over KNOWLEDGE. "I could not determine what this is"
+# is its own answer and must never share a bucket with "I know exactly what this
+# is".
+#
+# ⚠ CORRECTED — AND THE CORRECTION IS THE INTERESTING PART. This comment used to
+# say "every pathlib predicate returns False when the stat itself fails, so an
+# EACCES fell into KIND_OTHER and was skipped", and cited a measurement of
+# `/snapshot` answering 200 / exit 0 / entries=0. BOTH WERE WRONG, and the
+# second was inherited from an audit report and written up here as first-hand.
+# Measured on the pinned interpreter:
+#     pathlib._IGNORED_ERRNOS == (ENOENT, ENOTDIR, EBADF, ELOOP)
+#     child of a 0o600 dir: is_symlink/is_dir/is_file/exists each RAISE
+#                           PermissionError — none returns False
+# So the old failure was not a silent empty store; it was an UNCAUGHT
+# PermissionError out of `classify_path`, crashing the handler with no response
+# and no audit line. Loud, not quiet.
+#
+# The fix stands — a crashed handler becoming a typed 503 is strictly better —
+# but the reasoning had to be corrected, because "pathlib returns False on stat
+# failure" is exactly the kind of false premise that gets a guard deleted
+# somewhere else in this file on the strength of a comment.
 KIND_INDETERMINATE = "indeterminate"
 # Vanished between `readdir` and the stat — a benign race, not a hazard, and
 # distinct from INDETERMINATE because the right action differs.
@@ -1075,13 +1085,18 @@ def classify_path(path: Path) -> str:
     """The path's type, as exactly one of `ALL_KINDS`. Total by construction.
 
     🔴 ONE `lstat`, THEN THE MODE BITS — not a sequence of pathlib predicates.
-    `is_dir()`, `is_file()` and `exists()` all DEREFERENCE and all silently
-    return False when the stat fails, so an ordering built from them cannot
-    distinguish "this is not a directory" from "I could not look". Every earlier
-    version got that wrong in one direction or the other, and the last one let
-    an EACCES render as an empty store. Reading the mode bits directly makes the
-    failure an exception we must classify rather than a False we might miss, and
-    it halves the syscalls, which narrows the TOCTOU window between them.
+    Those predicates fail in TWO different ways and neither is usable here:
+    they return False for the errnos in `pathlib._IGNORED_ERRNOS` (ENOENT,
+    ENOTDIR, EBADF, ELOOP), so "not a directory" and "no such path" are
+    indistinguishable; and they RAISE for every other errno (EACCES, ESTALE,
+    EIO), so a sequence built from them can abort mid-classification and take
+    the handler with it. The previous version did exactly that on an
+    unstat-able child.
+
+    Reading the mode bits from one explicit `lstat` makes both cases answerable:
+    a failure is an exception we must classify, not a False we might miss or a
+    raise we did not expect. It also halves the syscalls, which narrows the
+    TOCTOU window between them.
     """
     try:
         st = path.lstat()
@@ -1102,9 +1117,20 @@ def classify_path(path: Path) -> str:
     try:
         target = path.stat()  # follows the link
     except OSError as exc:
-        # ENOENT = dangling, ELOOP = a cycle. Both are broken POINTERS, which is
-        # a fact we know; anything else means the stat failed for a reason we
+        # ENOENT = dangling, ELOOP = a cycle (measured: self-loop, mutual loop
+        # and a 45-link chain all give ELOOP). Both are broken POINTERS, which
+        # is a fact we know; anything else means the stat failed for a reason we
         # cannot interpret, which is not.
+        #
+        # ⚠ NO ACTION DEPENDS ON THIS BRANCH, and saying so is honest rather
+        # than leaving it to read as coverage: BROKEN_LINK and INDETERMINATE map
+        # to the SAME action in BOTH tables, so the split only changes the word
+        # in the 503 body. A mutant collapsing it survives the suite, and that
+        # is correct — there is no behaviour to catch. It is kept because the
+        # two words mean different things to whoever reads the 503, and because
+        # the tables could diverge later. Errnos measured to land in
+        # `indeterminate` rather than `broken-link`: ENOTDIR (`/etc/hosts/x`),
+        # ENAMETOOLONG (300-char target), EACCES (link into an unsearchable dir).
         if exc.errno in (errno.ENOENT, errno.ELOOP):
             return KIND_BROKEN_LINK
         return KIND_INDETERMINATE

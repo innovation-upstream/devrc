@@ -954,6 +954,23 @@ class TestReadOnlyPhase1:
 # =============================================================================
 
 
+# 🔴 THE PINNED DECISION TABLE, as a named constant so the completeness guard
+# and the per-cell guard read the SAME list. Introspecting the parametrize mark
+# to get it was clever and wrong; two literals would drift.
+DECISION_TABLE = [
+    ("KIND_BROKEN_LINK", "REFUSE", "REFUSE"),
+    ("KIND_LINK_TO_DIR", "REFUSE", "REFUSE"),
+    ("KIND_LINK_TO_FILE", "SKIP", "REFUSE"),
+    ("KIND_LINK_TO_OTHER", "SKIP", "REFUSE"),
+    ("KIND_DIRECTORY", "TAKE", "REFUSE"),
+    ("KIND_REGULAR_FILE", "SKIP", "TAKE"),
+    ("KIND_OTHER", "SKIP", "REFUSE"),
+    # 🔴 "I could not look" must never share a cell with "nothing is there".
+    ("KIND_INDETERMINATE", "REFUSE", "REFUSE"),
+    ("KIND_ABSENT", "SKIP", "SKIP"),
+]
+
+
 class TestClassifierIsTotal:
     """🔴 THE GUARD THAT IS SUPPOSED TO END THE ROUND-N LOOP.
 
@@ -984,6 +1001,47 @@ class TestClassifierIsTotal:
             assert not missing, f"{name} does not decide: {sorted(missing)}"
             assert not extra, f"{name} maps unknown kinds: {sorted(extra)}"
 
+    def test_the_pinned_table_covers_EVERY_kind(self):
+        """🔴 Two-way pin on the parametrize list itself.
+
+        `test_the_decision_table_is_pinned`'s docstring says "a silent flip of
+        any single cell fails", but nothing asserted its parametrize list
+        covered `ALL_KINDS` — so a future kind, mapped correctly in both dicts,
+        would have an UNPINNED cell while the docstring claimed otherwise. Same
+        idiom as `test_waiting_windows.py`'s `set(KIND_BAND) == set(ALL_KINDS)`.
+        """
+        pinned = {getattr(api, name) for name, _r, _e in DECISION_TABLE}
+        assert pinned == api.ALL_KINDS, (
+            f"unpinned cells: {sorted(api.ALL_KINDS - pinned)}"
+        )
+
+    def test_an_unstatable_ROOT_child_is_REFUSED_by_the_CLASSIFIER(
+        self, store: Path, tmp_path: Path
+    ):
+        """🔴 The cell this whole commit exists for had only a CONSTANTS pin —
+        the shape `TestEntryTableCellsHaveBehaviour`'s own docstring calls
+        insufficient ("exactly the kind a future edit updates ALONGSIDE the code
+        it was meant to stop"). Three ENTRY cells got behavioural tests; the
+        ROOT cell did not.
+
+        🔴 IT ASSERTS THE MESSAGE, NOT THE STATUS, AND THAT IS THE WHOLE POINT.
+        With the store root at 0o600 the tar block ALSO fails (on `.seed-stamp`),
+        so a test asserting only `503` passes even with this cell flipped to
+        SKIP — green for the wrong reason. The classifier's refusal is emitted
+        BEFORE the tar block and names the kind, so pinning `indeterminate
+        refused` is what discriminates. Verified by mutation, not assumed.
+        """
+        if os.geteuid() == 0:
+            pytest.skip("root ignores directory permissions; unreachable as root")
+        store.chmod(0o600)  # readable, NOT searchable -> every child lstat EACCES
+        try:
+            with running(store) as (base, _):
+                code, _h, body = fetch(f"{base}/api/v1/snapshot", token=GOOD_TOKEN)
+        finally:
+            store.chmod(0o755)
+        assert code == 503, body[:300]
+        assert b"indeterminate refused" in body, body[:300]
+
     def test_every_mapped_action_is_a_known_action(self):
         for actions in (api._ROOT_ACTIONS, api._ENTRY_ACTIONS):
             for kind, action in actions.items():
@@ -996,22 +1054,7 @@ class TestClassifierIsTotal:
         with pytest.raises(AssertionError, match="unclassified path kind"):
             api.action_for("a-kind-nobody-mapped", api._ROOT_ACTIONS)
 
-    @pytest.mark.parametrize(
-        "kind,expected_root,expected_entry",
-        [
-            ("KIND_BROKEN_LINK", "REFUSE", "REFUSE"),
-            ("KIND_LINK_TO_DIR", "REFUSE", "REFUSE"),
-            ("KIND_LINK_TO_FILE", "SKIP", "REFUSE"),
-            ("KIND_LINK_TO_OTHER", "SKIP", "REFUSE"),
-            ("KIND_DIRECTORY", "TAKE", "REFUSE"),
-            ("KIND_REGULAR_FILE", "SKIP", "TAKE"),
-            ("KIND_OTHER", "SKIP", "REFUSE"),
-            # 🔴 "I could not look" must never share a cell with "nothing is
-            # there": an EACCES parent rendered the store empty at exit 0.
-            ("KIND_INDETERMINATE", "REFUSE", "REFUSE"),
-            ("KIND_ABSENT", "SKIP", "SKIP"),
-        ],
-    )
+    @pytest.mark.parametrize("kind,expected_root,expected_entry", DECISION_TABLE)
     def test_the_decision_table_is_pinned(self, kind, expected_root, expected_entry):
         """Pins the table itself, so a silent flip of any single cell fails.
 
