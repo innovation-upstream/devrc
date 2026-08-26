@@ -1006,6 +1006,10 @@ class TestClassifierIsTotal:
             ("KIND_DIRECTORY", "TAKE", "REFUSE"),
             ("KIND_REGULAR_FILE", "SKIP", "TAKE"),
             ("KIND_OTHER", "SKIP", "REFUSE"),
+            # 🔴 "I could not look" must never share a cell with "nothing is
+            # there": an EACCES parent rendered the store empty at exit 0.
+            ("KIND_INDETERMINATE", "REFUSE", "REFUSE"),
+            ("KIND_ABSENT", "SKIP", "SKIP"),
         ],
     )
     def test_the_decision_table_is_pinned(self, kind, expected_root, expected_entry):
@@ -1044,6 +1048,29 @@ class TestClassifierIsTotal:
         assert api.classify_path(tmp_path / "loop") == api.KIND_BROKEN_LINK
         assert api.classify_path(tmp_path / "afifo") == api.KIND_OTHER
         assert api.classify_path(tmp_path / "to_fifo") == api.KIND_LINK_TO_OTHER
+        assert api.classify_path(tmp_path / "never-existed") == api.KIND_ABSENT
+
+    def test_an_UNSTATABLE_path_is_INDETERMINATE_not_OTHER(self, tmp_path: Path):
+        """🔴 The last cell of the four-round loop.
+
+        Every pathlib predicate returns False when the stat itself fails, so an
+        EACCES child fell into KIND_OTHER — the FIFO bucket — and was SKIPPED at
+        the root. MEASURED end-to-end before this fix, store root at 0o600
+        (readable, not searchable, so readdir works and every lstat gives
+        EACCES): snapshot answered 200 / X-Store-Exit: 0 / entries=0, and the
+        client printed "scope-empty — nothing recorded". An unreadable store
+        rendering as an empty one, which is the defect this client exists for.
+        """
+        if os.geteuid() == 0:
+            pytest.skip("root ignores directory permissions; unreachable as root")
+        parent = tmp_path / "locked"
+        parent.mkdir()
+        (parent / "child.md").write_text("x")
+        parent.chmod(0o600)  # readable, NOT searchable -> lstat(child) = EACCES
+        try:
+            assert api.classify_path(parent / "child.md") == api.KIND_INDETERMINATE
+        finally:
+            parent.chmod(0o755)
 
     def test_classify_is_exhaustive_over_a_real_directory(self, tmp_path: Path):
         """Totality, behaviourally: every child of a directory containing one of
@@ -1057,8 +1084,14 @@ class TestClassifierIsTotal:
         (tmp_path / "to_fifo").symlink_to(tmp_path / "afifo")
 
         seen = {api.classify_path(p) for p in tmp_path.iterdir()}
+        # ABSENT and INDETERMINATE cannot be produced by iterating a readable
+        # directory — they are the two "the stat failed" answers — so they are
+        # covered by their own tests above rather than here. Named, not omitted.
+        reachable_by_iteration = api.ALL_KINDS - {api.KIND_ABSENT, api.KIND_INDETERMINATE}
         assert seen <= api.ALL_KINDS, f"produced an unknown kind: {seen - api.ALL_KINDS}"
-        assert seen == api.ALL_KINDS, f"fixture misses kinds: {api.ALL_KINDS - seen}"
+        assert seen == reachable_by_iteration, (
+            f"fixture misses kinds: {reachable_by_iteration - seen}"
+        )
 
 
 class TestSnapshotRoute:

@@ -693,6 +693,70 @@ class TestNonRegularFilesInTheStore:
         assert "Errno 21" not in combined, combined
 
 
+class TestEntryTableCellsHaveBehaviour:
+    """🔴 Three `_ENTRY_ACTIONS` cells were pinned ONLY by the constants test.
+
+    Measured: flipping `KIND_LINK_TO_FILE` REFUSE -> TAKE and deselecting
+    `test_the_decision_table_is_pinned` left **342 passed, 0 failed**, while the
+    server happily shipped a file from OUTSIDE the store:
+
+        unmutated: 503 "widget-cfg/innocent.md: link-to-file refused"
+        mutant:    200, member content "BEGIN OPENSSH PRIVATE KEY …"
+
+    `entry_broken_link -> SKIP` and `entry_other -> SKIP` survived the same way,
+    the latter being the FIFO whose own comment says it "blocked open() forever,
+    leaking a handler thread permanently". A constants assertion is exactly the
+    kind a future edit updates ALONGSIDE the code it was meant to stop, so each
+    cell needs an observable of its own.
+    """
+
+    def _snapshot_members(self, base: str) -> tuple[int, str]:
+        req = urllib.request.Request(base + "/api/v1/snapshot")
+        req.add_header("Authorization", f"Bearer {GOOD_TOKEN}")
+        req.add_header("User-Agent", "subsystem-store-client/1")
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                return resp.status, resp.read().decode("utf-8", "replace")
+        except urllib.error.HTTPError as exc:
+            return exc.code, exc.read().decode("utf-8", "replace")
+
+    def test_a_symlinked_entry_never_ships_an_OFF_STORE_file(
+        self, source_store: Path, live_store, tmp_path: Path
+    ):
+        """🔴 The security-relevant cell. `/snapshot` walks EVERY scope in one
+        authenticated GET, where `/recall` makes you name one."""
+        secret = tmp_path / "id_ed25519"
+        secret.write_text("BEGIN OPENSSH PRIVATE KEY — outside the store")
+        (source_store / "widget-cfg" / "innocent.md").symlink_to(secret)
+
+        code, body = self._snapshot_members(live_store.base)
+        assert code == 503, body[:300]
+        assert "innocent.md" in body and "link-to-file refused" in body, body[:300]
+        # Belt and braces: the payload must not contain the secret under ANY
+        # status, so a future 200 with a different message still fails here.
+        assert "OPENSSH PRIVATE KEY" not in body
+
+    def test_a_FIFO_named_md_is_refused_rather_than_opened(
+        self, source_store: Path, live_store, tmp_path: Path
+    ):
+        """A FIFO blocks `open()` forever and leaks a handler thread on a
+        threading server. Refused means the request RETURNS."""
+        os.mkfifo(source_store / "widget-cfg" / "pipe.md")
+        code, body = self._snapshot_members(live_store.base)
+        assert code == 503, body[:300]
+        assert "pipe.md" in body and "other refused" in body, body[:300]
+
+    def test_a_dangling_ENTRY_link_is_refused_not_skipped(
+        self, source_store: Path, live_store, tmp_path: Path
+    ):
+        """Non-dotfile, so the name rules do not filter it first — this reaches
+        the type table, unlike the Emacs lock-file case."""
+        (source_store / "widget-cfg" / "gone.md").symlink_to(tmp_path / "nowhere")
+        code, body = self._snapshot_members(live_store.base)
+        assert code == 503, body[:300]
+        assert "gone.md" in body and "broken-link refused" in body, body[:300]
+
+
 class TestOrphanStagingIsReaped:
     def test_an_old_staging_dir_is_removed_by_the_next_sync(
         self, live_store, tmp_path: Path
@@ -863,7 +927,7 @@ class TestNotAScopeIsSkippedNotRefused:
         combined = proc.stdout + proc.stderr
         assert "scope-empty" not in combined, combined
         assert proc.returncode != 0, combined
-        assert "linked" in combined, combined
+        assert "linked/: broken-link refused" in combined, combined
 
     def test_a_symlinked_SCOPE_is_still_refused(
         self, source_store: Path, live_store, tmp_path: Path
@@ -974,23 +1038,55 @@ class TestSearchOverTheClient:
         `scopes_searched`, and for `--all-scopes` it differs from any single
         scope, which is the case that tells the two apart.
         """
+        # 🔴 EVERY scope must be unreadable, because the label only reaches the
+        # output through `_exit_for`'s FAILURE sentence — a successful search
+        # prints no label at all, so an all-scopes search that finds anything
+        # cannot discriminate. This is the fixture the property actually needs.
+        for existing in source_store.glob("*/*.md"):
+            existing.unlink()
+        for scope in ("widget-cfg", "gizmo-notes"):
+            (source_store / scope / "junk.md").write_text("nothing parseable\n")
         broken = source_store / "rubble-pile"
         broken.mkdir()
         (broken / "junk.md").write_text("no front matter, nothing parseable\n")
+        # 🔴 `--all-scopes` IS THE DISCRIMINATING CASE, and the previous version
+        # of this test named it in its docstring and then did not use it:
+        #     all_scopes=False -> report.label == f"{report.scope}/"  IDENTICAL
+        #     all_scopes=True  -> "gizmo-notes/, hollow-area/, …" vs "(all scopes)/"
+        # so the fixture could only ever produce the lookalike's own value, and
+        # the `report.label -> f"{report.scope}/"` mutant passed 349/349. A
+        # fixture that cannot distinguish the mutant from the fix is not a test.
+        cache = tmp_path / "cache"
+        proc = run_store(
+            "search", "lease", "--scope", "rubble-pile", "--all-scopes",
+            url=live_store.base, cache=cache,
+        )
+        # 🔴 EXPECTATION DERIVED FROM WHAT THE CLI ACTUALLY READ — the CACHE, not
+        # the source. An EMPTY scope directory never ships in the tar (only
+        # `*.md` members do), so `hollow-area` exists in the source and not in
+        # the cache, and a label computed from the source names a scope the CLI
+        # could not have searched. Comparing against the wrong store is how a
+        # correct implementation fails a test.
         api = _load_api()
         report = api.rc.search(
-            str(source_store), "rubble-pile", "lease",
+            str(cache), "rubble-pile", "lease",
             context=api.rc.CONTEXT_BULLET,
             threshold=api.rc.DEFAULT_SEARCH_THRESHOLD,
             max_hits=api.rc.DEFAULT_MAX_HITS,
-            all_scopes=False,
+            all_scopes=True,
         )
-        proc = run_store(
-            "search", "lease", "--scope", "rubble-pile", url=live_store.base,
-            cache=tmp_path / "cache",
+        assert report.label != f"{report.scope}/", (
+            "fixture bug: label and the lookalike are identical here, so this "
+            "cannot see the mutant"
         )
-        combined = proc.stdout + proc.stderr
-        assert report.label in combined, (report.label, combined)
+        # 🔴 STDERR ONLY. `render_search`'s caveat ALSO prints the label to
+        # stdout, so asserting over `stdout + stderr` passes whatever
+        # `_exit_for` was handed — measured: the `label -> f"{scope}/"` mutant
+        # survived that version of this test. The one-line sentence on stderr is
+        # the only output `_exit_for` produces, so it is the only place that
+        # discriminates. Third time this file has had to move an assertion off a
+        # string that two different code paths can produce.
+        assert report.label in proc.stderr, (report.label, proc.stderr)
 
 
 class TestTheHarnessItself:

@@ -146,6 +146,7 @@ a capability that does not exist).
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import hmac
 import io
@@ -153,6 +154,7 @@ import ipaddress
 import math
 import os
 import re
+import stat
 import sys
 import tarfile
 import threading
@@ -1000,6 +1002,22 @@ KIND_LINK_TO_OTHER = "link-to-other"  # link to a fifo/socket/device
 KIND_DIRECTORY = "directory"
 KIND_REGULAR_FILE = "regular-file"
 KIND_OTHER = "other"                  # fifo, socket, device, door…
+# 🔴 THE LAST CELL OF THE LOOP. The first version of this classifier was total
+# over KIND STRINGS but not over KNOWLEDGE: every `pathlib` predicate returns
+# False when the stat itself fails, so an EACCES, ESTALE or EIO fell into
+# `KIND_OTHER` — the FIFO bucket — and `_ROOT_ACTIONS` skipped it. MEASURED with
+# the store root at mode 0o600 (readable, NOT searchable, so `readdir` works and
+# every child's `lstat` gives EACCES):
+#     GET /api/v1/snapshot -> 200, X-Store-Exit: 0, X-Store-Entries: 0
+#     store recall --scope widget-cfg -> rc 0
+#       "scope-empty — reached the store; nothing recorded for this scope"
+# An unreadable store rendering as an empty one, in the function whose docstring
+# said "total by construction". "I could not determine what this is" is its own
+# answer and must never share a bucket with "I know exactly what this is".
+KIND_INDETERMINATE = "indeterminate"
+# Vanished between `readdir` and the stat — a benign race, not a hazard, and
+# distinct from INDETERMINATE because the right action differs.
+KIND_ABSENT = "absent"
 
 ALL_KINDS: frozenset[str] = frozenset(
     {
@@ -1010,6 +1028,8 @@ ALL_KINDS: frozenset[str] = frozenset(
         KIND_DIRECTORY,
         KIND_REGULAR_FILE,
         KIND_OTHER,
+        KIND_INDETERMINATE,
+        KIND_ABSENT,
     }
 )
 
@@ -1030,6 +1050,10 @@ _ROOT_ACTIONS: dict[str, str] = {
     KIND_REGULAR_FILE: SKIP,    # …and neither is a plain README.md
     KIND_LINK_TO_OTHER: SKIP,
     KIND_OTHER: SKIP,
+    # 🔴 REFUSE, not SKIP. We do not know whether this is a scope, so we cannot
+    # claim its absence — that claim is the whole defect class.
+    KIND_INDETERMINATE: REFUSE,
+    KIND_ABSENT: SKIP,  # it is genuinely gone; nothing to report
 }
 
 _ENTRY_ACTIONS: dict[str, str] = {
@@ -1042,33 +1066,53 @@ _ENTRY_ACTIONS: dict[str, str] = {
     KIND_DIRECTORY: REFUSE,     # a directory named `*.md` (r3: it 503'd on open)
     KIND_OTHER: REFUSE,         # a FIFO named `*.md` blocked `open()` forever
     KIND_REGULAR_FILE: TAKE,
+    KIND_INDETERMINATE: REFUSE,
+    KIND_ABSENT: SKIP,
 }
 
 
 def classify_path(path: Path) -> str:
     """The path's type, as exactly one of `ALL_KINDS`. Total by construction.
 
-    🔴 `is_symlink()` is checked FIRST and on its own, because every other
-    predicate here DEREFERENCES: `is_dir()`, `is_file()` and `exists()` all
-    answer about the TARGET and all silently return False when there is no
-    target (dangling) or the walk loops (ELOOP). That single fact is what every
-    previous ordering got wrong in one direction or the other.
+    🔴 ONE `lstat`, THEN THE MODE BITS — not a sequence of pathlib predicates.
+    `is_dir()`, `is_file()` and `exists()` all DEREFERENCE and all silently
+    return False when the stat fails, so an ordering built from them cannot
+    distinguish "this is not a directory" from "I could not look". Every earlier
+    version got that wrong in one direction or the other, and the last one let
+    an EACCES render as an empty store. Reading the mode bits directly makes the
+    failure an exception we must classify rather than a False we might miss, and
+    it halves the syscalls, which narrows the TOCTOU window between them.
     """
-    if path.is_symlink():
-        if path.is_dir():
-            return KIND_LINK_TO_DIR
-        if path.is_file():
-            return KIND_LINK_TO_FILE
-        if not path.exists():
-            # Dangling OR a loop — `exists()` is False for both, and the
-            # distinction does not change what we do about it.
+    try:
+        st = path.lstat()
+    except FileNotFoundError:
+        return KIND_ABSENT
+    except OSError:
+        # EACCES on the parent, ESTALE, EIO… We do not know what this is, and
+        # saying so is the point — see KIND_INDETERMINATE.
+        return KIND_INDETERMINATE
+
+    if not stat.S_ISLNK(st.st_mode):
+        if stat.S_ISDIR(st.st_mode):
+            return KIND_DIRECTORY
+        if stat.S_ISREG(st.st_mode):
+            return KIND_REGULAR_FILE
+        return KIND_OTHER
+
+    try:
+        target = path.stat()  # follows the link
+    except OSError as exc:
+        # ENOENT = dangling, ELOOP = a cycle. Both are broken POINTERS, which is
+        # a fact we know; anything else means the stat failed for a reason we
+        # cannot interpret, which is not.
+        if exc.errno in (errno.ENOENT, errno.ELOOP):
             return KIND_BROKEN_LINK
-        return KIND_LINK_TO_OTHER
-    if path.is_dir():
-        return KIND_DIRECTORY
-    if path.is_file():
-        return KIND_REGULAR_FILE
-    return KIND_OTHER
+        return KIND_INDETERMINATE
+    if stat.S_ISDIR(target.st_mode):
+        return KIND_LINK_TO_DIR
+    if stat.S_ISREG(target.st_mode):
+        return KIND_LINK_TO_FILE
+    return KIND_LINK_TO_OTHER
 
 
 def action_for(kind: str, actions: dict[str, str]) -> str:
