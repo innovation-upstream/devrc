@@ -108,7 +108,7 @@ Topic argument (optional): `$ARGUMENTS`.
    # (a) THE LOCK — a COMMAND, not a habit.
    claim-work --list                                            # what is already taken
    SLUG=$(claim-work --slug-for <handoff-doc> <rank>)            # the canonical id — both sessions derive the SAME one
-   claim-work "$SLUG" --subject "<the item, in generic words>"   # 0 = yours · 10 = taken · 11 = taken but stale
+   claim-work "$SLUG" --subject "<the item, in generic words>"   # 0 = yours · 10 = taken, STOP · 11 = taken but stale · 12 = ALREADY yours, carry on
 
    # (b) THE SWEEP — UNCONDITIONAL, not a fallback. Before you start…
    gh pr list --repo <r> --state open --json number,title,headRefName,files
@@ -140,10 +140,13 @@ Topic argument (optional): `$ARGUMENTS`.
    a LIVE claim that is not yours is **refused** (rc 10); `--force` overrides,
    deliberately.
 
-   🔴 **Ownership is per HOST and per CLONE, and it does NOT depend on your cwd.**
-   The token is `/etc/machine-id` + the clone's git dir, so any subdirectory and
-   any worktree of the clone you claimed from can release it — deliberately, and
-   documented in `claim-work.sh`. A different clone, or the other host, cannot.
+   🔴 **Ownership is per HOST and per WORKTREE, and it does NOT depend on your cwd.**
+   The token is `/etc/machine-id` + `git rev-parse --git-dir`, so any
+   subdirectory of the worktree you claimed from can release it, at any depth. A
+   SIBLING WORKTREE of the same clone cannot — it is a different agent, and for
+   one day it was told rc 12 "carry on" about a peer's live claim because the
+   token used `--git-common-dir`, which every linked worktree of a clone shares.
+   A different clone, or the other host, cannot either.
    It was `uname -n` + a hash of `$PWD` until 2026-08-26+1, which was wrong in
    BOTH directions at once: both hosts are called `nixos` (so each read the
    other's claims as its own), and `cd scripts/` made you a stranger to your own

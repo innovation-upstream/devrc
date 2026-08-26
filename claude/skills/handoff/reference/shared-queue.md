@@ -57,16 +57,27 @@ a refusal. Ownership keys off an `owner-id` in the claim commit, NOT the git
 author — one identity covers both hosts and every agent on them, so the author can
 never tell two sessions apart.
 
-🔴 **The owner token is per HOST and per CLONE, and cwd-independent**:
-`/etc/machine-id` + the realpath of the clone's `--git-common-dir`. So any
-subdirectory and any linked worktree of the clone you claimed from counts as the
-same owner — a deliberate trade, argued in `claim-work.sh` — while a different
-clone or the other host does not. It was `uname -n` + `hash($PWD)` until
-2026-08-26+1 and was wrong in both directions: both hosts answer `nixos` to
-`uname -n` (so each read the other's claims as its own, and could release them at
-rc 0), and hashing the literal `$PWD` meant `cd scripts/` locked the legitimate
-owner out of their own claim for the whole TTL. `owner-id` is a DISCRIMINATOR, not
-a secret — `--force` bypasses the gate by design.
+🔴 **The owner token is per HOST and per WORKTREE, and cwd-independent**:
+`/etc/machine-id` + the realpath of `git rev-parse --git-dir`. Any subdirectory of
+the worktree you claimed from counts as the same owner, at any depth; a SIBLING
+worktree, a different clone, and the other host do not. It was `uname -n` +
+`hash($PWD)` until 2026-08-26+1 and was wrong in both directions: both hosts answer
+`nixos` to `uname -n` (so each read the other's claims as its own, and could
+release them at rc 0), and hashing the literal `$PWD` meant `cd scripts/` locked
+the legitimate owner out of their own claim for the whole TTL.
+
+🔴 **And the first fix for that used `--git-common-dir`, which EVERY linked
+worktree of a clone shares** — so for one day all 40+ agent worktrees under this
+clone were one owner, and an unrelated sibling claiming a peer's live slug was
+told **rc 12, "carry on"** rather than rc 10, STOP. Measured: one clone + five
+worktrees, concurrent, 1 CLAIMED and 5 × rc 12. **Never widen this token without
+checking `report_existing`** — `claim_is_mine` decides the CLAIM verdict too, not
+just `--release`/`--steal`, and a note claiming otherwise is what licensed that
+widening. The residual, accepted deliberately: two sessions in the SAME directory
+are still one owner, which the rules already forbid.
+
+`owner-id` is a DISCRIMINATOR, not a secret — `--force` bypasses the gate by
+design.
 
 Source: `scripts/claim-work.sh` (deployed on PATH as `claim-work`), named in
 `claude/RULES.md` so **both** runtimes get it — Claude Code imports that file and

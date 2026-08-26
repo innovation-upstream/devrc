@@ -181,9 +181,17 @@ def _cwd_env(origin: Path, **overrides: str) -> dict:
 def _worktree(session: Path, path: Path, branch: str = "wt") -> Path:
     """A linked worktree of `session`, so ownership can be measured across the
     isolation this repo MANDATES for agent work. `worktree add` needs a commit,
-    and `_session` leaves an unborn HEAD."""
-    _git("-C", str(session), "checkout", "-q", "-b", "base")
-    _git("-C", str(session), "commit", "-q", "--allow-empty", "-m", "base")
+    and `_session` leaves an unborn HEAD.
+
+    IDEMPOTENT on the `base` commit, because the round-4 fan-out test needs FIVE
+    worktrees of one clone and `checkout -b base` can only succeed once. Without
+    this the second call dies on "a branch named 'base' already exists" and the
+    test that exists to measure the fan-out cannot build one.
+    """
+    if not _git("-C", str(session), "rev-parse", "--verify", "-q", "refs/heads/base",
+                check=False).stdout.strip():
+        _git("-C", str(session), "checkout", "-q", "-b", "base")
+        _git("-C", str(session), "commit", "-q", "--allow-empty", "-m", "base")
     _git("-C", str(session), "worktree", "add", "-q", str(path), "-b", branch)
     return path
 
@@ -1925,19 +1933,31 @@ def test_release_from_a_SUBDIRECTORY_is_still_the_owners_own_claim(tmp_path):
         assert f"{CLAIM_NS}subdir-probe" not in _remote_refs(origin)
 
 
-def test_two_worktrees_of_one_clone_are_the_same_owner(tmp_path):
-    """🔴 A DOCUMENTED DECISION, NOT A DERIVATION — and the test to invert if it
-    is ever reversed.
+def test_two_worktrees_of_one_clone_are_DIFFERENT_owners(tmp_path):
+    """🔴 ROUND 3'S DECISION, INVERTED — and this is the test its own design doc
+    named as the one to flip if the call were reversed.
 
-    Two worktrees (or subdirectories) of the SAME clone on the SAME host are ONE
-    owner and can release each other's claims without `--force`. Why that way
-    round is argued in `claim-work.sh` above `MY_HOST`; the short version is that
-    the lock which prevents duplicate WORK is the push CAS and is unaffected,
-    while the stuck-lock failure fires on every normal completion because
-    `/resume` claims in one directory and the work happens in another.
+    Round 3 keyed the token off `--git-common-dir` and declared two linked
+    worktrees of one clone to be ONE owner. Measured 2026-08-26: every linked
+    worktree of a clone reports the SAME `--git-common-dir`, and `claim_is_mine`
+    also decides `report_existing`'s exit code — so an UNRELATED sibling agent
+    claiming a slug a peer already held got
 
-    The narrower alternative is the per-worktree git dir. If you take it, this
-    test is the one that must flip to `RC_TAKEN`.
+        rc 12  "✅ THIS IS YOURS — carry on with it. Nothing to do."
+
+    which `/resume` step 6 and `claude/RULES.md` both document as CARRY ON. The
+    flagship guarantee delivered its exact opposite, in the fan-out shape this
+    repo MANDATES for agent work.
+
+    The token is now `--git-dir`, which is per-worktree. Both halves are asserted
+    here, because "siblings are different owners" and "the owner can still work"
+    are different claims and the round-2 failure was exactly a token that
+    discriminated nothing and refused everybody:
+
+      (1) the sibling cannot release the peer's live claim, and the ref survives;
+      (2) the sibling CLAIMING it gets rc 10 STOP, not rc 12 CARRY ON;
+      (3) the actual holder still can release it, from its own worktree AND from
+          a subdirectory of it — which is round 3's real fix and must not regress.
     """
     origin = _bare_origin(tmp_path)
     a = _session(tmp_path, origin, "Same Identity", "a")
@@ -1946,17 +1966,98 @@ def test_two_worktrees_of_one_clone_are_the_same_owner(tmp_path):
 
     assert _run("wt-probe", "--subject", "generic item", cwd=a,
                 env=env).returncode == RC_OK
-    rel = _run("--release", "wt-probe", cwd=wt, env=env)
-    assert rel.returncode == RC_OK, (
-        f"a claim taken in the clone could not be released from a WORKTREE of "
-        f"that same clone (rc={rel.returncode}). Worktree isolation is this "
-        f"repo's mandated default for agent work, so this is the routine case, "
-        f"not an edge one.\n{rel.stdout}\n{rel.stderr}")
+    before = _remote_refs(origin)[f"{CLAIM_NS}wt-probe"]
 
-    # …and the reverse direction, so the token is symmetric rather than
-    # accidentally accepting one ordering.
+    # (1) the destructive verb
+    rel = _run("--release", "wt-probe", cwd=wt, env=env)
+    assert rel.returncode == RC_TAKEN, (
+        f"a session in a SIBLING WORKTREE released a live claim it does not hold "
+        f"(rc={rel.returncode}). Every linked worktree of one clone shares a "
+        f"git-common-dir, so keying the token on that makes 40+ agent worktrees "
+        f"one owner.\n{rel.stdout}\n{rel.stderr}")
+    assert _remote_refs(origin)[f"{CLAIM_NS}wt-probe"] == before
+
+    # (2) 🔴 the verdict path — the one that actually costs a duplicate PR, and
+    #     the one round 3's own note wrongly said the token did not touch.
+    dup = _run("wt-probe", "--subject", "the same item, from the sibling",
+               cwd=wt, env=env)
+    assert dup.returncode == RC_TAKEN, (
+        f"a sibling worktree claiming a peer's LIVE slug got rc={dup.returncode} "
+        f"instead of {RC_TAKEN}. rc {RC_MINE} means CARRY ON.\n{dup.stdout}")
+    assert "THIS IS YOURS" not in dup.stdout, dup.stdout
+    assert "THIS SESSION" not in dup.stdout, dup.stdout
+    assert "DO NOT start this item" in dup.stdout, dup.stdout
+
+    # (3) POSITIVE CONTROL: the holder is not locked out — including from a
+    #     subdirectory, which is the too-strict failure round 3 fixed.
+    sub = a / "sub"
+    sub.mkdir()
+    assert _run("--release", "wt-probe", cwd=sub, env=env).returncode == RC_OK
+
+    # …and symmetrically: a claim taken IN the worktree is that worktree's, and
+    # releasable from a subdirectory of IT, but not from the main checkout.
     assert _run("wt-probe-2", cwd=wt, env=env).returncode == RC_OK
-    assert _run("--release", "wt-probe-2", cwd=a, env=env).returncode == RC_OK
+    assert _run("--release", "wt-probe-2", cwd=a, env=env).returncode == RC_TAKEN
+    wtsub = wt / "sub"
+    wtsub.mkdir()
+    assert _run("--release", "wt-probe-2", cwd=wtsub, env=env).returncode == RC_OK
+
+
+def test_a_concurrent_fanout_of_worktrees_gets_exactly_one_winner_and_no_carry_on(
+        tmp_path):
+    """🔴 THE SHAPE THE SUITE COULD NOT SEE, AND THAT IS THE FINDING UNDER THE
+    FINDING — twice in a row now.
+
+    `test_six_concurrent_first_movers_resolve_to_exactly_one_winner` uses
+    `_session()`, i.e. six separate CLONES. Agents in this repo are never in
+    separate clones: the mandated isolation is `git worktree add`, so the real
+    fan-out is ONE clone with N linked worktrees, all sharing one git-common-dir
+    and one git identity. Round 3's token could not tell them apart, and the
+    concurrency test could not see it because its fixture had the wrong topology.
+
+    Measured on the round-3 script with this exact fixture: 1 CLAIMED and
+    N-1 × **rc 12 "carry on"**. At HEAD: 1 CLAIMED and N-1 × rc 10 STOP.
+
+    N-1 losers is the assertion that matters, and it is stated as a SET so a
+    single stray rc 12 fails rather than being averaged away. The `_worktree`
+    fixture's own `checkout -b base` means the main checkout is a peer of the
+    linked ones, so the winner may be any of them — the test asserts the
+    PARTITION, never which member won.
+    """
+    origin = _bare_origin(tmp_path)
+    a = _session(tmp_path, origin, "Same Identity", "a")
+    wts = [_worktree(a, tmp_path / f"a-wt{i}", branch=f"wt{i}") for i in range(5)]
+    dirs = [a, *wts]
+    env = _cwd_env(origin)
+
+    procs = [
+        subprocess.Popen(
+            ["bash", str(SCRIPT), "fanout-item", "--subject", f"item from {i}"],
+            cwd=str(d), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, env=env,
+        )
+        for i, d in enumerate(dirs)
+    ]
+    results = [(p.wait(), *p.communicate()) for p in procs]
+    codes = [rc for rc, _, _ in results]
+    dump = "\n".join(f"--- {d} rc={rc}\n{out}\n{err}"
+                     for d, (rc, out, err) in zip(dirs, results))
+
+    assert codes.count(RC_OK) == 1, (
+        f"expected exactly ONE winner across one clone + {len(wts)} linked "
+        f"worktrees, got {codes}\n{dump}")
+    assert codes.count(RC_MINE) == 0, (
+        f"{codes.count(RC_MINE)} sibling worktree(s) were told rc {RC_MINE} — "
+        f"'THIS IS YOURS — carry on with it' — about a peer's live claim. "
+        f"`/resume` step 6 runs this command directly and reads {RC_MINE} as "
+        f"carry on, so every one of them proceeds to do the same work.\n{dump}")
+    assert set(codes) == {RC_OK, RC_TAKEN}, (
+        f"a loser exited with something other than rc {RC_TAKEN}: {codes}\n{dump}")
+    assert f"{CLAIM_NS}fanout-item" in _remote_refs(origin)
+    # The losers must have been TOLD to stop, not merely have exited 10.
+    for (rc, out, _), d in zip(results, dirs):
+        if rc == RC_TAKEN:
+            assert "DO NOT start this item" in out, f"{d}:\n{out}"
 
 
 def test_two_different_clones_on_one_host_are_different_owners(tmp_path):
@@ -2311,6 +2412,209 @@ def test_a_flag_swallowed_as_the_subject_is_a_usage_error(tmp_path):
     # POSITIVE CONTROL: text that merely CONTAINS a dash is still fine.
     ok = _run("flagsub", "--subject", "re-run the gate --set all", repo=a)
     assert ok.returncode == RC_OK, f"{ok.stdout}\n{ok.stderr}"
+
+
+@pytest.mark.parametrize("cfg", [
+    ("trailer.separators", "=", "local"),
+    ("trailer.owner-id.key", "OWNER=", "local"),
+    ("trailer.separators", "=", "global"),
+    ("trailer.owner-id.key", "OWNER=", "global"),
+])
+def test_the_callers_trailer_config_cannot_lock_the_owner_out(tmp_path, cfg):
+    """🔴 THE STRUCTURAL TRAILER READ INHERITED THE CALLER'S GIT CONFIG, AND THE
+    LINE SCAN IT REPLACED WAS CONFIG-IMMUNE.
+
+    `claim_field` moved from an awk scan to `git interpret-trailers --parse` to
+    close a forgery — and `interpret-trailers` was invoked with NO `-C`, i.e.
+    inside whatever repository the agent was standing in. Two ordinary user
+    settings, both measured 2026-08-26, make every ownership read return empty:
+
+      * `trailer.separators = '='` — `key: value` stops being a trailer at all.
+      * `trailer.owner-id.key = 'OWNER='` — the token is RENAMED on output
+        (`owner-id: abc` printed as `OWNER=: abc`), which the first fix (pinning
+        `trailer.separators`) does NOT cover. Two independent knobs, so two cases.
+
+    An empty owner read fails CLOSED, which is the right direction and still a
+    stuck lock: `--release` of your OWN 0-second-old claim ⇒ rc 10 "NOT yours",
+    for the whole TTL. Measured end to end before the fix.
+
+    🔴 TWO LAYERS, because the two defences are independent and neither covers
+    the other. `local` writes to the caller's repo config — closed by running
+    `interpret-trailers` with `-C "$WS"`, the throwaway repo. `global` points
+    `GIT_CONFIG_GLOBAL` at a hostile file — which `-C` cannot displace, and which
+    is closed only by neutralising the global/system layers for that one call. A
+    suite with just the `local` cases scores the global mutant SURVIVED.
+    """
+    key, value, layer = cfg
+    origin = _bare_origin(tmp_path)
+    a = _session(tmp_path, origin, "Same Identity", "a")
+    env = _cwd_env(origin)
+    if layer == "local":
+        _git("-C", str(a), "config", key, value)
+    else:
+        hostile = tmp_path / "hostile.gitconfig"
+        section, _, leaf = key.rpartition(".")
+        head, _, sub = section.partition(".")
+        hostile.write_text(
+            (f'[{head} "{sub}"]\n' if sub else f"[{head}]\n") + f"\t{leaf} = {value}\n",
+            encoding="utf-8")
+        env = dict(env, GIT_CONFIG_GLOBAL=str(hostile))
+        # The fixture must actually be hostile, or every assertion below passes
+        # against a config git ignored. Read it back through git itself.
+        seen = _git("config", "--file", str(hostile), "--get", key,
+                    env=_env()).stdout.strip()
+        assert seen == value, f"the hostile global config did not take: {seen!r}"
+
+    claimed = _run("trailercfg", "--subject", "generic item", cwd=a, env=env)
+    assert claimed.returncode == RC_OK, f"{claimed.stdout}\n{claimed.stderr}"
+
+    rel = _run("--release", "trailercfg", cwd=a, env=env)
+    assert rel.returncode == RC_OK, (
+        f"with `{key} = {value}` in the caller's {layer} git config the owner "
+        f"could not release their own claim (rc={rel.returncode}) — every "
+        f"ownership trailer read empty, so the holder is locked out for the whole "
+        f"TTL\n{rel.stdout}\n{rel.stderr}")
+    assert f"{CLAIM_NS}trailercfg" not in _remote_refs(origin)
+
+    # POSITIVE CONTROL: the read is not simply "always mine" now. A different
+    # clone must still be refused with the same hostile config in place.
+    b = _session(tmp_path, origin, "Same Identity", "b")
+    if layer == "local":
+        _git("-C", str(b), "config", key, value)
+    assert _run("trailercfg2", cwd=a, env=env).returncode == RC_OK
+    theirs = _run("--release", "trailercfg2", cwd=b, env=env)
+    assert theirs.returncode == RC_TAKEN, (
+        f"neutralising the trailer config made every claim readable as MINE "
+        f"(rc={theirs.returncode})\n{theirs.stdout}")
+
+
+def test_an_unreadable_git_dir_probe_SAYS_it_degraded(tmp_path):
+    """🔴 A SILENT FALLBACK TO A DIFFERENT IDENTITY. When
+    `rev-parse --path-format=absolute --git-dir` fails for ANY reason the token
+    falls back to the ident DIRECTORY — reinstating the round-2 cwd-keyed token,
+    with no warning at all. Its comment blamed only "not a git repository", which
+    reads as unreachable; the same path fires on a `safe.directory` refusal
+    (git >= 2.35.2, a directory owned by another uid) and on any git that renames
+    the flag.
+
+    Degrading is right for a tool whose contract is "never block a resume". Being
+    QUIET about it is not: the symptom is rc 10 "NOT yours" on your own claim,
+    which is indistinguishable from somebody else holding your slug.
+
+    Driven with a `git` shim that fails ONLY that probe — a narrow mutation of the
+    environment, not of the script, so the degraded path is genuinely reached.
+    """
+    origin = _bare_origin(tmp_path)
+    a = _session(tmp_path, origin, "Same Identity", "a")
+    shim_dir = tmp_path / "shim"
+    shim_dir.mkdir()
+    real_git = shutil.which("git")
+    assert real_git, "no git on PATH"
+    mockbin.write_exec(shim_dir / "git", f"""
+for a in "$@"; do
+  case "$a" in
+    --git-dir)
+      for b in "$@"; do
+        [ "$b" = "--path-format=absolute" ] && exit 128
+      done ;;
+  esac
+done
+exec {real_git} "$@"
+""")
+    env = _cwd_env(origin)
+    env["PATH"] = f"{shim_dir}{os.pathsep}{env.get('PATH', os.environ.get('PATH', ''))}"
+
+    r = _run("degraded-probe", "--subject", "generic item", cwd=a, env=env)
+    assert r.returncode == RC_OK, f"{r.stdout}\n{r.stderr}"
+    assert "could not read this directory's git dir" in r.stderr, (
+        f"the owner token fell back to the DIRECTORY PATH and said nothing. "
+        f"stderr was:\n{r.stderr}")
+    assert "--force" in r.stderr, (
+        f"the warning does not name the way out of the lockout it just created:\n"
+        f"{r.stderr}")
+
+    # NEGATIVE CONTROL: without the shim the same command must NOT warn, or the
+    # assertion above is satisfied by a script that always prints it.
+    clean = _run("degraded-probe-2", "--subject", "generic item", cwd=a,
+                 env=_cwd_env(origin))
+    assert clean.returncode == RC_OK, f"{clean.stdout}\n{clean.stderr}"
+    assert "could not read this directory's git dir" not in clean.stderr, clean.stderr
+
+
+def test_a_submodule_working_dir_is_a_different_owner_than_its_superproject(tmp_path):
+    """⚠ A DOCUMENTED CONSEQUENCE, not a bug — pinned because the script's own
+    decision text says "any SUBDIRECTORY of the same worktree is the same owner"
+    and a submodule working directory looks like a subdirectory while NOT being
+    one. Its git dir is `<super>/.git/modules/<name>` (measured), so it is a
+    different owner. That is correct — a submodule is a different repository —
+    but it is the kind of thing a maintainer would otherwise read the wrong way
+    off the decision text, and devrc has no submodules to exercise it in anger.
+
+    `protocol.file.allow=always` because git >= 2.38.1 refuses `file://`
+    submodule transport by default; the fixture is local by construction.
+    """
+    origin = _bare_origin(tmp_path)
+    sub_origin = _bare_origin(tmp_path, "subproject.git")
+    sub_src = _session(tmp_path, sub_origin, "Same Identity", "subsrc")
+    _git("-C", str(sub_src), "commit", "-q", "--allow-empty", "-m", "sub base")
+    _git("-C", str(sub_src), "push", "-q", "origin", "HEAD:refs/heads/main")
+    # `_bare_origin` does not pass `-b`, so the bare HEAD points at git's default
+    # branch name and a `submodule add` clone would find no HEAD to check out
+    # (exit 128). Point it at what was actually pushed.
+    _git("-C", str(sub_origin), "symbolic-ref", "HEAD", "refs/heads/main")
+
+    a = _session(tmp_path, origin, "Same Identity", "a")
+    _git("-C", str(a), "commit", "-q", "--allow-empty", "-m", "base")
+    _git("-C", str(a), "-c", "protocol.file.allow=always", "submodule", "add",
+         "-q", str(sub_origin), "vendor")
+    _git("-C", str(a), "commit", "-q", "-m", "add submodule")
+    sub_wd = a / "vendor"
+    assert (sub_wd / ".git").exists()
+    env = _cwd_env(origin)
+
+    assert _run("submod-probe", "--subject", "generic item", cwd=a,
+                env=env).returncode == RC_OK
+    r = _run("--release", "submod-probe", cwd=sub_wd, env=env)
+    assert r.returncode == RC_TAKEN, (
+        f"the submodule working directory was read as the SUPERPROJECT's owner "
+        f"(rc={r.returncode}). If this ever becomes desirable, change the "
+        f"decision text in claim-work.sh with it.\n{r.stdout}")
+    # POSITIVE CONTROL: the superproject still owns its own claim.
+    assert _run("--release", "submod-probe", cwd=a, env=env).returncode == RC_OK
+
+
+def test_a_legacy_cwd_claim_from_another_HOST_is_not_yours(tmp_path):
+    """The legacy tier's `host:` check, which is the tier that is ACTUALLY LIVE —
+    all three claims on the real origin are `cwd:`-format. It was outside the
+    committed mutation sweep's closed set, so nothing had ever watched it fail.
+
+    ⚠ LABEL: an INVARIANT GUARD, not regression cover — it passes at `9d6efc29`.
+    It exists so the legacy comparison cannot be widened to "any legacy claim
+    with a matching path is mine" without a test going red, and it is the killer
+    for the `legacy-host-check-removed` mutant.
+
+    ⚠ AND THE HONEST LIMIT, which is the whole reason the legacy tiers are
+    transitional: `host:` is `uname -n`, which is `nixos` on BOTH machines in this
+    fleet, so on the real hosts this check discriminates NOTHING. The test proves
+    the branch exists and is reached; it does not prove the fleet is protected.
+    That is unfixable for an already-published ref.
+    """
+    origin = _bare_origin(tmp_path)
+    a = _session(tmp_path, origin, "Same Identity", "a")
+    env = _cwd_env(origin)
+
+    _legacy_claim(origin, a, "legacy-host", cwd=str(a), host="some-other-host")
+    r = _run("--release", "legacy-host", cwd=a, env=env)
+    assert r.returncode == RC_TAKEN, (
+        f"a legacy claim recorded against a DIFFERENT host was released as "
+        f"'mine' (rc={r.returncode})\n{r.stdout}")
+    assert f"{CLAIM_NS}legacy-host" in _remote_refs(origin)
+
+    # POSITIVE CONTROL: the same claim with THIS host's name is releasable, so
+    # the refusal above is the host check and not the path check.
+    _legacy_claim(origin, a, "legacy-host-ok", cwd=str(a),
+                  host=os.uname().nodename)
+    assert _run("--release", "legacy-host-ok", cwd=a, env=env).returncode == RC_OK
 
 
 def test_a_legacy_cwd_claim_is_releasable_from_a_worktree_of_that_clone(tmp_path):

@@ -185,35 +185,83 @@ Measured on this fleet 2026-08-26, one round after the gate landed:
   have left both directions invisible. The round-3 tests run the bare command with
   an explicit `cwd`, and `_cwd_env` exists to make that hard to undo.
 
-**The token now:** `hash( machine-id || realpath(git-common-dir of the ident dir) )`.
+### 🔴 …and round 3's fix was too LOOSE again, in the worst direction (round 4)
+
+Round 3 keyed the second half off `git rev-parse --git-common-dir` and wrote down,
+as a deliberate decision, that two linked worktrees of one clone are the SAME
+owner. **Every linked worktree of a clone reports the same `--git-common-dir`** —
+measured on this clone, `devrc`, `devrc-claim-r2` and `devrc-integ2` all report
+`/home/zach/workspace/devrc/.git` — so the token could not tell any of them apart.
+And because `claim_is_mine` also decides `report_existing`'s exit code, an
+UNRELATED sibling agent claiming a slug a peer already held was handed
+
+```
+rc 12  "✅ THIS IS YOURS — carry on with it. Nothing to do."
+```
+
+One clone + five linked worktrees, concurrent claim of one slug — **round 2:
+1 CLAIMED, 5 × rc 10 STOP; round 3: 1 CLAIMED, 5 × rc 12 CARRY ON.** Nothing in
+the output hints at a sibling: `who:` is the shared git identity and both tokens
+match. 40+ agent worktrees are registered under this clone today, `/resume` step 6
+runs `claim-work "$SLUG"` directly, and rc 12 is documented as CARRY ON in
+`claude/RULES.md`, `resume/SKILL.md` and the script's own stdout. **The flagship
+guarantee delivered its exact opposite, in the fan-out shape this repo mandates,
+in the direction that costs a PR** — and this document's own fact for the
+motivating incident is *"every colliding session was already in its own worktree."*
+
+🔴 **The premise that licensed the widening was false in the same commit, and is
+RETRACTED — do not re-derive it.** Point 1 below used to read "the token gates
+only the two destructive verbs; a second worktree claiming the same slug is still
+refused whatever the token says." `claim_is_mine` is read by `report_existing`
+too, i.e. by the CLAIM and `--check` verdicts. The push CAS does refuse the second
+PUSH — and the second session is then told the existing ref is its own.
+
+**The token now:** `hash( machine-id || realpath(git-DIR of the ident dir) )`.
 
 - *Host half* — `/etc/machine-id`, which is genuinely per-host (measured: the two
   hosts' ids differ; their `uname -n` does not). The FILE is overridable via
   `DEVRC_CLAIM_MACHINE_ID_FILE`, so a test can simulate two hosts on one machine;
   the VALUE is not, because a value override reads as a supported forgery knob.
   Absent ⇒ fall back to `uname -n`, tagged so the two cannot collide.
-- *Clone half* — `git rev-parse --path-format=absolute --git-common-dir`,
-  realpath'd. Measured identical from the clone root, from any subdirectory, and
-  from any linked worktree — exactly the stability the too-strict failure needed.
+- *Worktree half* — `git rev-parse --path-format=absolute --git-dir`, realpath'd.
+  **Not `--git-common-dir`.** Measured on this host:
 
-🔴 **The trade-off, stated because it is a decision and not a derivation: two
-agents in two WORKTREES (or subdirectories) of the SAME clone on the SAME host are
-the SAME owner** and can release each other's claims without `--force`. Why that
-way round:
+  | invoked from | `--git-common-dir` | `--git-dir` |
+  |---|---|---|
+  | clone root | `<clone>/.git` | `<clone>/.git` |
+  | `wt1` … `wt5` | `<clone>/.git` (all equal) | `<clone>/.git/worktrees/wt<n>` |
 
-1. The lock that stops duplicate **work** is the push CAS and is unaffected — a
-   second worktree claiming the same slug is still refused whatever the token
-   says. The token gates only the two destructive verbs.
-2. The stuck-lock failure fires on **every normal completion** ("release the slug
-   I claimed when my work lands"), because `/resume` claims in one directory and
-   the work happens in another. The cross-worktree release failure requires a
-   session to `--release` a slug it never claimed, which is already anomalous.
-3. The measured incident is cross-**host** and cross-**clone**, both of which the
-   token still discriminates.
-4. `--force` remains for anything narrower, and the refusal prints both tokens.
+  and — the property round 3 actually needed — `--git-dir` is identical from a
+  worktree's root and from any subdirectory of it, measured at three depths. So
+  this keeps round 3's real fix (release from `<root>/scripts` used to be rc 10)
+  while making siblings distinct owners. A different clone has a different git dir
+  too, so two clones stay two owners.
 
-If that ever needs reversing, the narrower unit is the per-worktree git dir, and
-`test_two_worktrees_of_one_clone_are_the_same_owner` is the test to invert.
+🔴 **The residual, stated rather than hidden: two sessions in the SAME directory
+still compute the same token** and can release each other's claims without
+`--force`. Nothing in a path or a machine-id can separate them. That is accepted,
+not overlooked — `claude/RULES.md` already forbids two file-modifying agents in one
+checkout, and the isolation this repo mandates for agent work is exactly the case
+the token now splits. Run two agents in one directory anyway and the ownership
+gate is blind to the difference; the push CAS is all that is left.
+
+⚠ **And a second residual: a SUBMODULE working directory is a different owner from
+its superproject**, because its git dir is `<super>/.git/modules/<name>`
+(measured). That is correct — a submodule is a different repository — but it is
+not what "any subdirectory is the same owner" would lead you to expect. devrc has
+no submodules, so nothing exercises it in anger; it is pinned by
+`test_a_submodule_working_dir_is_a_different_owner_than_its_superproject` as an
+invariant guard, labelled as one.
+
+`test_two_worktrees_of_one_clone_are_DIFFERENT_owners` (round 3's
+`…_are_the_same_owner`, inverted — this document named it as the test to flip) and
+`test_a_concurrent_fanout_of_worktrees_gets_exactly_one_winner_and_no_carry_on`
+pin the call. The fan-out test exists because the pre-existing concurrency test
+uses `_session()`, i.e. separate **clones** — a topology agents in this repo never
+have, which is exactly why a fully green suite could not see this.
+
+⚠ **If it ever needs reversing** the wider unit is `--git-common-dir` again, and
+those two tests are the ones to invert — but read the retraction above first.
 
 🔴 **And it reads the LEGACY fields, because refs OUTLIVE a format change** —
 twice now: `cwd-id:` (written for one day) and `cwd:` (pre-2026-08-26). Both are

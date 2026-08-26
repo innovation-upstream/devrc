@@ -624,8 +624,30 @@ ident_mail="$(git_ -C "$IDENT_REPO" config --get user.email 2>/dev/null || true)
 #    and `/resume` step 6 says to run the bare command "from wherever you are".
 #    The legitimate owner was locked out of their own claim for the whole TTL.
 #
-# ── THE TOKEN NOW, AND THE TRADE-OFF IT ACCEPTS ───────────────────────────────
-#   owner-id = hash( machine-id  ||  realpath(git-common-dir of the ident dir) )
+# ── AND ROUND 3'S FIX WAS TOO LOOSE AGAIN, IN THE WORST DIRECTION ─────────────
+# Round 3 keyed the second half off `git rev-parse --git-common-dir` and wrote
+# down, as a deliberate decision, that two linked WORKTREES of one clone are the
+# SAME owner. Measured 2026-08-26 on this very clone: EVERY linked worktree of
+# one clone reports the SAME `--git-common-dir`, so the token could not tell them
+# apart at all — and because `claim_is_mine` also decides `report_existing`'s exit
+# code, an UNRELATED sibling agent claiming a slug a peer already held was handed
+#     rc 12  "✅ THIS IS YOURS — carry on with it. Nothing to do."
+# One clone + five linked worktrees, concurrent claim of one slug: 1 CLAIMED and
+# 5 × rc 12 CARRY ON. That is the flagship guarantee delivering its exact
+# opposite, in the fan-out shape this repo MANDATES (40+ agent worktrees are
+# registered under this clone today), and `/resume` step 6 runs `claim-work
+# "$SLUG"` directly and reads rc 12 as "carry on".
+#
+# 🔴 THE PREMISE THAT LICENSED THE WIDENING WAS ALSO FALSE, IN THE SAME COMMIT.
+# Round 3's own note said "the token only gates the two DESTRUCTIVE verbs — a
+# second worktree claiming the same slug is still refused, whatever the token
+# says." It is not. `claim_is_mine` is read by `report_existing`, i.e. by the
+# CLAIM and `--check` verdicts, not only by `--release`/`--steal`. The push CAS
+# does refuse the second PUSH, but the second session is then told the existing
+# ref is its own and to carry on. Do not re-derive that premise; it is retracted.
+#
+# ── THE TOKEN NOW ─────────────────────────────────────────────────────────────
+#   owner-id = hash( machine-id  ||  realpath(git-DIR of the ident dir) )
 #
 #   HOST HALF — `/etc/machine-id`, which is genuinely per-host (measured: the two
 #     hosts' ids differ; their `uname -n` does not). The FILE is overridable via
@@ -633,30 +655,37 @@ ident_mail="$(git_ -C "$IDENT_REPO" config --get user.email 2>/dev/null || true)
 #     not, because a value override reads as a supported forgery knob. Absent or
 #     unreadable ⇒ fall back to `uname -n`, tagged so the two cannot collide.
 #
-#   CLONE HALF — `git rev-parse --git-common-dir`, realpath'd. That is IDENTICAL
-#     from the clone root, from any SUBDIRECTORY of it, and from any linked
-#     WORKTREE of it (measured), which is exactly the stability the too-strict
-#     failure needed. A different clone of the same repo has a different git dir,
-#     so two clones are two owners.
+#   WORKTREE HALF — `git rev-parse --path-format=absolute --git-dir`, realpath'd.
+#     NOT `--git-common-dir`. Measured on this host:
+#       --git-common-dir   clone, wt1..wt5  → <clone>/.git            (all five equal)
+#       --git-dir          clone            → <clone>/.git
+#                          wt1              → <clone>/.git/worktrees/wt1
+#                          wt5              → <clone>/.git/worktrees/wt5
+#     and, the property round 3 actually needed, `--git-dir` is IDENTICAL from a
+#     worktree's root and from any subdirectory of it, at every depth measured
+#     (root, one level, two). So this keeps round 3's real fix — release from
+#     `<root>/scripts` used to be rc 10 — while making siblings distinct owners.
+#     A different CLONE has a different git dir too, so two clones stay two owners.
 #
-# 🔴 THE DECISION, STATED BECAUSE IT IS A DECISION AND NOT A DERIVATION: two
-# agents in two WORKTREES (or two subdirectories) of the SAME clone on the SAME
-# host ARE THE SAME OWNER, and can release each other's claims without `--force`.
-# Why that way round:
-#   * The lock that stops duplicate WORK is the push CAS, and it is unaffected —
-#     a second worktree claiming the same slug is still refused, whatever the
-#     token says. The token only gates the two DESTRUCTIVE verbs.
-#   * The stuck-lock failure fires on EVERY normal completion ("release the slug
-#     I claimed when my work lands"), because /resume claims in one directory and
-#     the work happens in another. The cross-worktree release failure requires a
-#     session to `--release` a slug it never claimed, which is already anomalous.
-#   * The measured incident is cross-HOST and cross-CLONE, and both of those the
-#     token still discriminates.
-#   * `--force` remains for anything narrower, and the refusal prints both tokens
-#     so a human can see which is which.
-# If that trade ever needs reversing, the narrower unit is the WORKTREE dir
-# (`git rev-parse --path-format=absolute --git-dir`), and
-# `test_two_worktrees_of_one_clone_are_the_same_owner` is the test to invert.
+# 🔴 THE RESIDUAL, STATED RATHER THAN HIDDEN: two sessions in the SAME directory
+# still compute the same token and can release each other's claims without
+# `--force`. There is nothing in a path or a machine-id that can separate them.
+# That is accepted, not overlooked: `claude/RULES.md` already forbids two
+# file-modifying agents in one checkout, and the isolation this repo mandates for
+# agent work — a worktree per agent — is exactly the case the token now splits.
+# If you run two agents in one directory anyway, the ownership gate is blind to
+# the difference and the push CAS is the only thing left protecting you.
+#
+# 🔴 AND THE OTHER RESIDUAL: a SUBMODULE working directory is a DIFFERENT owner
+# from its superproject, because its git dir is `<super>/.git/modules/<name>`
+# (measured). That is correct — a submodule is a different repository — but it is
+# NOT what "any subdirectory is the same owner" would lead you to expect, so it is
+# written down. devrc has no submodules, so nothing here exercises it in anger.
+#
+# `test_two_worktrees_of_one_clone_are_DIFFERENT_owners` and
+# `test_a_concurrent_fanout_of_worktrees_gets_exactly_one_winner` pin this; the
+# former is round 3's `…_are_the_same_owner` inverted, which round 3's own design
+# doc named as the test to flip if the call were reversed.
 MY_HOST="$(uname -n 2>/dev/null || echo unknown)"
 
 MACHINE_ID_FILE="${DEVRC_CLAIM_MACHINE_ID_FILE:-/etc/machine-id}"
@@ -674,13 +703,22 @@ fi
 # git was invoked from; `readlink -f` so a symlinked clone path cannot produce
 # two tokens for one git dir. `|| true` on BOTH, then an explicit emptiness
 # check — see the fallback note below.
-owner_clone_part="$(git_ -C "$IDENT_REPO" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
-owner_clone_part="$(readlink -f -- "$owner_clone_part" 2>/dev/null || printf '%s' "$owner_clone_part")"
-if [ -z "$owner_clone_part" ]; then
-  # Not a git repository at all (claiming from /tmp, say). Fall back to the
-  # ident dir itself. This reinstates cwd-sensitivity for that case ONLY, and
-  # says so rather than pretending otherwise.
-  owner_clone_part="$(readlink -f -- "$IDENT_REPO" 2>/dev/null || printf '%s' "$IDENT_REPO")"
+owner_worktree_part="$(git_ -C "$IDENT_REPO" rev-parse --path-format=absolute --git-dir 2>/dev/null || true)"
+owner_worktree_part="$(readlink -f -- "$owner_worktree_part" 2>/dev/null || printf '%s' "$owner_worktree_part")"
+if [ -z "$owner_worktree_part" ]; then
+  # 🔴 THE FALLBACK IS NOW LOUD, AND IT USED TO BE SILENT. Its comment blamed
+  # only "not a git repository at all", which reads as unreachable in practice
+  # and is why nobody looked at it. The probe fails for OTHER reasons too — most
+  # concretely a `safe.directory` refusal (git ≥2.35.2 on a directory owned by
+  # another uid), and any future git that renames the flag. Whatever the cause,
+  # falling through here silently reinstates the round-2 CWD-KEYED token:
+  # measured with a git shim, claim at the repo root then `--release` from
+  # `scripts/` ⇒ rc 10 "NOT yours", no warning, owner locked out for the TTL.
+  # Degrading is still the right call for a tool whose contract is "never block a
+  # resume" — but it must SAY it degraded, because the symptom it produces looks
+  # exactly like somebody else holding your slug.
+  warn "could not read this directory's git dir (not a git repository, a safe.directory refusal, or an unsupported git) — the owner token falls back to the DIRECTORY PATH. A --release/--steal from a DIFFERENT directory of the same repo will be refused as 'not yours'; use --force if that happens."
+  owner_worktree_part="$(readlink -f -- "$IDENT_REPO" 2>/dev/null || printf '%s' "$IDENT_REPO")"
 fi
 
 # 🔴 THE FALLBACK IS REACHABLE, AND THE ONE IT REPLACED WAS NOT. The old line was
@@ -690,9 +728,16 @@ fi
 # the SCRIPT at the assignment — the guard line could never run. A safety net
 # that cannot fire is worse than none, because it reads as one. Hence `|| true`
 # on the substitution, and the emptiness test after it.
-owner_material="claim-work-owner-v1
+# `-v2` because the second component's MEANING changed (clone → worktree), and a
+# label that names a derivation it no longer uses is the kind of comment this
+# repo's rules call a claim. Bumping it costs NOTHING here, measured rather than
+# assumed: `git ls-remote origin 'refs/heads/claim/*'` on the canonical remote
+# returns exactly three refs and all three carry the legacy `cwd:` trailer, so
+# there is not a single `owner-id:` ref in existence to orphan. Round 3 never
+# shipped past this PR branch.
+owner_material="claim-work-owner-v2
 $OWNER_HOST_PART
-$owner_clone_part"
+$owner_worktree_part"
 MY_OWNER_ID="$(printf '%s' "$owner_material" | git_ hash-object --stdin 2>/dev/null | cut -c1-12 || true)"
 [ -n "$MY_OWNER_ID" ] || MY_OWNER_ID="unknown"
 
@@ -714,10 +759,25 @@ MY_CWD_ID="$(printf '%s' "$IDENT_REPO" | git_ hash-object --stdin 2>/dev/null | 
 # So a legacy `cwd:` also matches the CLONE ROOT: the parent of the realpath'd
 # git-common-dir, which is the main worktree's toplevel for any subdirectory and
 # for any linked worktree. It is an EXTRA accept, never a replacement, so it can
-# only widen — and it widens exactly as far as the current token already does.
+# only widen.
+#
+# 🔴 THIS IS THE ONE PLACE THAT STILL READS `--git-common-dir`, ON PURPOSE, AND
+# IT IS A SEPARATE READ FROM THE TOKEN ABOVE. The token narrowed to `--git-dir`
+# so that two linked worktrees are two owners; this accept must stay WIDE, because
+# the three live `cwd:` claims on the real origin were all made at
+# `<clone>` and their holder has to be able to release them from a worktree — the
+# stuck lock, on refs that exist today. Deriving it from `--git-dir` would give a
+# linked worktree `<clone>/.git/worktrees/<name>`, no `*/.git` match, an EMPTY
+# MY_CLONE_ROOT and exactly that stuck lock back. Pinned by
+# `test_a_legacy_cwd_claim_is_releasable_from_a_worktree_of_that_clone`.
+#
+# It widens the LEGACY tier only, which already carries the too-loose `uname -n`
+# host comparison and ages out with the TTL. It does NOT widen `owner-id:`.
+owner_common_part="$(git_ -C "$IDENT_REPO" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+owner_common_part="$(readlink -f -- "$owner_common_part" 2>/dev/null || printf '%s' "$owner_common_part")"
 MY_CLONE_ROOT=""
-case "$owner_clone_part" in
-  */.git) MY_CLONE_ROOT="$(dirname -- "$owner_clone_part")" ;;
+case "$owner_common_part" in
+  */.git) MY_CLONE_ROOT="$(dirname -- "$owner_common_part")" ;;
 esac
 
 remote_ref_sha() {
@@ -782,10 +842,47 @@ human_subject() {
 # The LAST match wins rather than the first: `make_claim_commit` writes each key
 # once, so this only ever matters if a future writer duplicates one, and taking
 # the last is the direction that cannot be shadowed by something prepended.
+#
+# 🔴 AND IT RUNS UNDER PINNED `trailer.*` CONFIG, BECAUSE THE STRUCTURAL READ
+# INHERITED THE CALLER'S. The awk line scan it replaced was config-immune;
+# `interpret-trailers` is not, and it was being run with NO `-C`, i.e. inside
+# whatever repository the agent happened to be standing in. Two keys were
+# measured to corrupt the output on 2026-08-26, both of them ordinary user
+# config rather than an attack:
+#   * `trailer.separators = '='`  ⇒ `key: value` stops being a trailer at all and
+#     EVERY ownership read returns empty. Measured end to end: `--release` of your
+#     OWN 0-second-old claim ⇒ rc 10 "NOT yours", locked out for the whole TTL.
+#   * `trailer.owner-id.key = 'OWNER='` ⇒ the token is RENAMED on output
+#     (`owner-id: abc` printed as `OWNER=: abc`), same empty read, same lockout.
+#     `--parse` implies `--only-input`, so a configured trailer is never ADDED —
+#     verified with an `ifmissing=add` + `command` entry, which did not leak — but
+#     `.key` still rewrites what IS there.
+# Both fail CLOSED (a refusal, not a false grant), which is the right direction
+# and still a stuck lock.
+#
+# 🔴 SO THE FIX NEUTRALISES THE WHOLE `trailer.*` CLASS AT EVERY CONFIG LAYER,
+# rather than pinning the two keys that were measured. Enumerating keys was tried
+# first and was WRONG, which is why it is written down instead of quietly dropped:
+# `-c trailer.cwd-id.key='cwd-id: '` makes `interpret-trailers` match input tokens
+# against that configured key BY PREFIX, so a legacy `cwd: <path>` trailer came
+# back RENAMED to `cwd-id: <path>` — the ownership read then took an absolute path
+# as a hashed id and the legacy tier went rc 10 on its own live claim. Three tests
+# caught it. A per-key allowlist in this API is a booby trap; drop the layers.
+#   `-C "$WS"`               the throwaway bare repo this script made, so the
+#                            CALLER's repo-local `trailer.*` is out of the stack;
+#   `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`
+#                            the user's and the machine's layers, which `-C`
+#                            cannot displace;
+#   `-c trailer.separators=:` an explicit positive pin, so the value we depend on
+#                            is stated rather than inherited from git's default.
+# In a subshell, not as an env prefix on the `git_` FUNCTION: an assignment
+# prefixing a function call leaks into the caller's scope in bash.
+# Verified 2026-08-26: with both hostile keys set repo-locally AND globally, the
+# real trailer block comes back unchanged.
 claim_field() {
   local ref="$1" key="$2"
   git_ -C "$WS" log -1 --format='%B' "$ref" 2>/dev/null \
-    | git_ interpret-trailers --parse 2>/dev/null \
+    | ( export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1; git_ -C "$WS" -c trailer.separators=: interpret-trailers --parse 2>/dev/null ) \
     | awk -v k="${key}:" '$1==k { sub(/^[^ ]+[ ]*/, ""); v=$0 } END { if (v != "") print v }'
 }
 
@@ -794,7 +891,7 @@ claim_field() {
 # `%an <%ae>` cannot tell two sessions apart.
 #
 # THREE TIERS, NEWEST FIRST, because refs OUTLIVE a format change — twice now:
-#   1. `owner-id:`  the current token (machine-id + clone git-dir). The ONE that
+#   1. `owner-id:`  the current token (machine-id + WORKTREE git-dir). The ONE that
 #                   is written. It does not consult `host:` at all: the host is
 #                   already inside the hash, and `host:` is a HUMAN field.
 #   2. `cwd-id:`    written between 2026-08-26 and this change. host + hash($PWD).
@@ -925,11 +1022,17 @@ report_existing() {
 # A's 0-second-old live claim, rc 0, silently — and stole it, rc 0.
 #
 # Allowed without --force: a claim that is MINE (`owner-id` match — see
-# `claim_is_mine` for the token and for what it deliberately does NOT split), or one
-# past the TTL (that is exactly what the stale escape hatch is for), or a slug
-# nobody holds. Refused: a live claim belonging to another session, and a claim
-# whose owner could not be READ — "could not find out" must not authorise a
-# destructive write on somebody else's lock.
+# `claim_is_mine` for the token and for the ONE case it deliberately does not
+# split, two sessions in the SAME directory), or one past the TTL (that is exactly
+# what the stale escape hatch is for), or a slug nobody holds. Refused: a live
+# claim belonging to another session, and a claim whose owner could not be READ —
+# "could not find out" must not authorise a destructive write on somebody's lock.
+#
+# ⚠ THIS IS NOT THE ONLY READER OF `claim_is_mine`, AND A COMMENT HERE ONCE SAID
+# IT WAS. `report_existing` reads it too, so the token also decides the CLAIM and
+# `--check` verdicts (rc 12 vs rc 10) — not just these two destructive verbs. That
+# is precisely how round 3's too-wide token turned into "carry on with a peer's
+# live claim". Widen the token and you widen rc 12 with it.
 require_ownership_or_force() {
   local s="$1" verb="$2" age readable=1
   fetch_claim "$s" || readable=0

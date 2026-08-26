@@ -82,6 +82,7 @@ ORIG_SHA="$(sha256sum "$T/script.orig" | cut -d' ' -f1)"
 restore() { cp -a "$T/script.orig" "$SCRIPT"; }
 
 FAILURES=0
+ROWS=0
 
 # failed test names, one per line. Read the CONTENT — never an exit code.
 # 🔴 A SUITE THAT NEVER RAN YIELDS ZERO `FAILED` LINES, i.e. "clean", so a
@@ -107,6 +108,7 @@ failing() {
 
 run() { # run <name> <expect: a test node name | SURVIVES> <sed-expr>
   local name="$1" want="$2" expr="$3"
+  ROWS=$((ROWS+1))
   sed "$expr" "$SCRIPT" > "$T/m" 2>/dev/null
   if cmp -s "$SCRIPT" "$T/m"; then
     printf '  🔴 %-46s MUTATION DID NOT APPLY — result meaningless\n' "$name"
@@ -165,20 +167,38 @@ printf 'baseline (must be empty): '
 b="$(failing)"; [ -z "$b" ] && echo "clean" || { echo "🔴 ALREADY RED: $b"; exit 1; }
 
 printf '\n== the OWNER TOKEN: both directions of the round-2 bug (must be KILLED) ==\n'
-# The too-strict half, reproduced exactly: key the clone component off the
-# literal ident dir instead of the clone's git-common-dir.
-run 'clone-half-is-the-literal-cwd' \
+# The too-strict half, reproduced exactly: key the worktree component off the
+# literal ident dir instead of the worktree's git-dir.
+run 'worktree-half-is-the-literal-cwd' \
   test_release_from_a_SUBDIRECTORY_is_still_the_owners_own_claim \
-  's@^owner_clone_part="\$(git_ -C "\$IDENT_REPO" rev-parse.*@owner_clone_part="$IDENT_REPO"@'
+  's@^owner_worktree_part="\$(git_ -C "\$IDENT_REPO" rev-parse.*@owner_worktree_part="$IDENT_REPO"@'
+# 🔴 ROUND 3'S BUG, AS A MUTANT: widen the worktree half back to
+# `--git-common-dir`, which every linked worktree of a clone shares. That made an
+# unrelated sibling agent's claim of a peer's live slug return rc 12 "carry on".
+run 'worktree-half-widened-to-git-common-dir' \
+  test_a_concurrent_fanout_of_worktrees_gets_exactly_one_winner_and_no_carry_on \
+  's@\(^owner_worktree_part="\$(git_ -C "\$IDENT_REPO" rev-parse .*\)--git-dir@\1--git-common-dir@'
+# …and the same widening seen through the DESTRUCTIVE verb, so the two readers of
+# `claim_is_mine` are each pinned by a mutant of their own. Round 3's note said
+# the token gated only these verbs; it was the verdict path that broke.
+run 'worktree-half-widened--release-side' \
+  test_two_worktrees_of_one_clone_are_DIFFERENT_owners \
+  's@\(^owner_worktree_part="\$(git_ -C "\$IDENT_REPO" rev-parse .*\)--git-dir@\1--git-common-dir@'
+# 🔴 THE SILENT FALLBACK (round 4, B2). Deleting the warning must go red: a probe
+# failure reinstates the round-2 cwd-keyed token, and the symptom it produces —
+# rc 10 on your own claim — is indistinguishable from somebody else holding it.
+run 'degraded-git-dir-probe-goes-quiet' \
+  test_an_unreadable_git_dir_probe_SAYS_it_degraded \
+  's@^  warn "could not read this directory.s git dir@  : "@'
 # The too-loose half, reproduced exactly: key the host component off `uname -n`,
 # which is `nixos` on BOTH machines in this fleet.
 run 'host-half-is-uname-not-machine-id' \
   test_two_hosts_produce_different_owner_tokens \
   's@^  OWNER_HOST_PART="machine-id:\$machine_id"@  OWNER_HOST_PART="hostname:$MY_HOST"@'
-# Drop the clone component entirely: every session on one host becomes one owner.
-run 'clone-half-dropped-from-the-token' \
+# Drop the worktree component entirely: every session on one host becomes one owner.
+run 'worktree-half-dropped-from-the-token' \
   test_two_different_clones_on_one_host_are_different_owners \
-  's@^\$owner_clone_part"$@CONSTANT-CLONE"@'
+  's@^\$owner_worktree_part"$@CONSTANT-CLONE"@'
 # The machine-id read must tolerate an absent file. Without `2>/dev/null || true`
 # the substitution fails and `set -e` aborts the whole run — a tool whose
 # contract is "never block a resume" dying because /etc/machine-id is missing.
@@ -200,6 +220,32 @@ run 'legacy-clone-root-accept-removed' \
 run 'legacy-accept-widened-to-everyone' \
   test_a_legacy_cwd_claim_is_releasable_from_a_worktree_of_that_clone \
   's@\[ "\$legacy" = "\$MY_CLONE_ROOT" \]@true@'
+# 🔴 MY_CLONE_ROOT must keep coming from `--git-common-dir` even though the TOKEN
+# narrowed to `--git-dir`. Deriving it from the git dir gives a linked worktree
+# `<clone>/.git/worktrees/<name>`, which matches no `*/.git` case, so
+# MY_CLONE_ROOT is EMPTY and the three live claims become unreleasable from a
+# worktree — the stuck lock, on the refs that exist today.
+run 'clone-root-derived-from-the-worktree-git-dir' \
+  test_a_legacy_cwd_claim_is_releasable_from_a_worktree_of_that_clone \
+  's@\(^owner_common_part="\$(git_ -C "\$IDENT_REPO" rev-parse .*\)--git-common-dir@\1--git-dir@'
+# 🔴 THE LEGACY HOST CHECK (round 4, B4). It was outside the previous sweep's
+# closed set while being the tier that is ACTUALLY live.
+run 'legacy-host-check-removed' \
+  test_a_legacy_cwd_claim_from_another_HOST_is_not_yours \
+  's@^  \[ -n "\$h" \] && \[ "\$h" = "\$MY_HOST" \] || return 1$@  :@'
+
+printf '\n== the TRAILER READ must not inherit the callers git config (KILLED) ==\n'
+# 🔴 `interpret-trailers` obeys `trailer.*`; the awk line scan it replaced did
+# not. `trailer.separators = '"'"'='"'"'` in the CALLER's repo made every ownership read
+# empty ⇒ rc 10 on your own 0-second-old claim. Dropping `-C "$WS"` puts the
+# caller's repo-local config back in the stack.
+run 'trailer-read-runs-in-the-callers-repo' \
+  test_the_callers_trailer_config_cannot_lock_the_owner_out \
+  's@; git_ -C "\$WS" -c trailer.separators=:@; git_ -c trailer.separators=:@'
+# …and dropping the global/system neutralisation, which `-C` cannot do.
+run 'trailer-read-keeps-the-global-config-layer' \
+  test_the_callers_trailer_config_cannot_lock_the_owner_out \
+  's@( export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1; @( @'
 
 printf '\n== the SUBJECT is not a place to write trailers (must be KILLED) ==\n'
 run 'subject-control-chars-allowed' \
@@ -207,7 +253,13 @@ run 'subject-control-chars-allowed' \
   's@if \[\[ \$SUBJECT =~ .*; then@if false; then@'
 run 'both-trailer-guards-removed' \
   test_a_forged_subject_cannot_shadow_the_ownership_trailers \
-  's@^    | git_ interpret-trailers --parse 2>/dev/null \\$@    | cat \\@;s@v=\$0 } END { if (v != "") print v }@print; exit }@'
+  's@^    | ( export GIT_CONFIG_GLOBAL=.*interpret-trailers --parse 2>/dev/null ) \\$@    | cat \\@;s@v=\$0 } END { if (v != "") print v }@print; exit }@'
+# 🔴 AND THE STRUCTURAL READ ON ITS OWN, which the note below used to assert kills
+# nothing. It does. Isolated so the row means what it says: only the
+# `interpret-trailers` pipeline is replaced; the last-match awk is untouched.
+run 'structural-trailer-read-removed' \
+  test_a_forged_subject_cannot_shadow_the_ownership_trailers \
+  's@^    | ( export GIT_CONFIG_GLOBAL=.*interpret-trailers --parse 2>/dev/null ) \\$@    | cat \\@'
 run 'flag-swallowed-as-the-subject' \
   test_a_flag_swallowed_as_the_subject_is_a_usage_error \
   's@        -\*) die_usage "--subject needs text@        -zzz) die_usage "--subject needs text@'
@@ -236,15 +288,20 @@ run 'already-caught-positive-control' \
   's@^is_stale() { \[ "\$1" -gt @is_stale() { [ "$1" -lt @'
 
 printf '\n== EXPECTED SURVIVORS, each with its reason ==\n'
-# 🔴 `claim_field` has TWO independent defences against a prepended forgery: the
-# structural `interpret-trailers --parse`, and taking the LAST match rather than
-# the first. The subject is always FIRST in the message, so either one alone
-# defeats everything the CLI can produce — which is why mutating either alone
-# SURVIVES and only `both-trailer-guards-removed` above goes red. Recorded here
-# so nobody reads the survivor as a coverage gap. (The structural read is not
-# redundant in general: leg 2 of the forged test covers a legacy ref where a
-# line scan finds a forged key our trailer block does not contain at all — and
-# that is why REMOVING it alone still kills nothing, while removing BOTH does.)
+# 🔴 THE COMMENT THAT USED TO BE HERE WAS WRONG, AND WRONG IN THE DIRECTION THAT
+# STOPS ANYONE LOOKING. It said the structural `interpret-trailers --parse` read
+# "alone still kills nothing" — i.e. that it was pure redundancy behind the
+# last-match rule. Measured in round 4: removing it on its own goes RED. The
+# structural read is genuinely covered; it is the LAST-MATCH half that is the
+# documented survivor. Keeping the wrong note would have told a maintainer an
+# uncovered guard was covered and a covered guard was not — both directions at
+# once, out of one sentence. The isolated removal is now a KILLED row of its own
+# (`structural-trailer-read-removed`, above), not a claim in a comment.
+#
+# The remaining survivor: `claim_field` has TWO defences against a prepended
+# forgery, and the SUBJECT is always FIRST in the message, so taking the LAST
+# match is defeated by nothing the CLI can produce once the structural read is in
+# place. Mutating it alone therefore survives, by design.
 run 'trailer-scan-takes-the-FIRST-match' SURVIVES_BY_DESIGN \
   's@v=\$0 } END { if (v != "") print v }@print; exit }@'
 # The `!= "unknown"` belt on the owner-id comparison. `git hash-object` over a
@@ -268,9 +325,19 @@ else
 fi
 
 printf '\n'
+# 🔴 THE SUMMARY STATES ITS OWN SCOPE. "ALL OK" read as a claim about the script;
+# it is a claim about the rows ABOVE and nothing else. Round 4 found two live
+# guards outside the closed set — the legacy tier's `host:` check (on the tier
+# that is ACTUALLY live: all three claims on the real origin are `cwd:`-format)
+# and the git-dir probe's fallback — and the previous summary reported ALL OK over
+# both. Both are covered now; the point is that the WORDING must not re-create the
+# gap for the next one. `claude/RULES.md`: a green sweep is only a claim about the
+# mutations you IMAGINED.
+printf 'scope: %d mutant(s), enumerated in this file. NOT a claim about any guard\n' "$ROWS"
+printf '       this file does not name — add a row when you add a guard.\n'
 if [ "$FAILURES" -eq 0 ]; then
-  echo "ALL OK"
+  echo "ALL OK (for the $ROWS mutant(s) above)"
   exit 0
 fi
-echo "$FAILURES row(s) not ok"
+echo "$FAILURES of $ROWS row(s) not ok"
 exit 1
