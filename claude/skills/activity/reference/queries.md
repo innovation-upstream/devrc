@@ -23,23 +23,44 @@ attention is the i3∩domain intersection below.
   belong to the **LEAVING** tab.
 - `scroll_pct`/`scroll_ms` exist on a SUBSET of nav events only (scrolled pages;
   un-scrolled report 0).
-- i3 + scroll exist only for **`host=laptop`** (GUI). `workspace` is empty on a small
-  share of window-focus events.
+- 🔴 **i3 is on BOTH hosts — never filter it to `host='laptop'`.** The workbench runs a
+  real X/i3 session and is the MAJORITY of the data: measured 2026-08-26 over a 7d window,
+  workbench **7,672** window-focus rows vs laptop **1,205**, so a laptop-only filter drops
+  ~86% of i3 attention. (This bullet said "i3 + scroll exist only for `host=laptop`" until
+  2026-08-26 — the same claim `SKILL.md` already retracts in its source table. Do not
+  re-derive it.)
+- **`browser` — nav AND scroll — genuinely IS laptop-only**: the extension is hand-loaded
+  in the laptop's Brave. Same window: 867 `browser` rows, **zero** on the workbench; all
+  7,571 scroll-bearing nav rows laptop. So an i3∩browser query must pin **one host on both
+  sides** — what makes it correct is the host-consistency, not the `'laptop'` literal.
+- `app` is empty on **every** `workspace-focus` row, on both hosts, by construction
+  (0 of 1,100 laptop / 0 of 4,179 workbench populated) — so filter `kind='window-focus'`
+  before grouping by `app`; `app != ''` alone reads as a data-quality filter but is really
+  doing the kind filter's job. On `window-focus` itself `app` is populated 96.9% on the
+  workbench (7,434/7,672) and 100% on the laptop. `workspace` was populated on 100% of
+  window-focus rows on both hosts in that window.
 - `ts` is the **UTC instant**. Group by local hour/day only with an explicit
   `'America/Winnipeg'` tz arg (`toHour`/`toDate`); NEVER tz-shift `$__timeFilter` or a
   range comparison against `now()`.
 
 ## i3 attention / dwell by app
 
+Both hosts, reported **per host** — `PARTITION BY host` already keeps the dwell gap from
+bleeding across machines, so the only thing the old `host IN ('laptop')` filter did was
+discard the workbench. Group by `host` as well as `app`: summing the two together silently
+adds a workbench Slack minute to a laptop Slack minute.
+
 ```sql
-SELECT app, round(sum(dwell_ms)/60000,1) AS dwell_min FROM (
-  SELECT app, kind, least(
+SELECT host, app, round(sum(dwell_ms)/60000,1) AS dwell_min FROM (
+  SELECT host, app, kind, least(
     leadInFrame(toUnixTimestamp64Milli(ts),1,toUnixTimestamp64Milli(ts))
       OVER (PARTITION BY host ORDER BY ts ASC ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)
       - toUnixTimestamp64Milli(ts), 1800000) AS dwell_ms
-  FROM activity.events WHERE source='i3' AND host IN ('laptop') AND ts > now()-interval 7 day)
-WHERE kind='window-focus' AND app != '' GROUP BY app ORDER BY dwell_min DESC;
+  FROM activity.events WHERE source='i3' AND ts > now()-interval 7 day)
+WHERE kind='window-focus' AND app != '' GROUP BY host, app ORDER BY host, dwell_min DESC;
 ```
+
+Add `WHERE host='<h>'` to scope it to one machine — never as the default.
 
 ## Browser reading depth by domain
 
@@ -53,6 +74,13 @@ FROM activity.events WHERE source='browser' AND kind='nav' AND text!='' GROUP BY
 ## Browser ATTENTION by domain (i3-DERIVED — replaces the retired `active_ms`)
 
 Intersect i3 "Brave-focused" intervals with the active-tab domain timeline.
+
+🔴 **The `host='laptop'` below is load-bearing on BOTH sides and must stay matched** — this
+is the one query here that should NOT be widened. The `CROSS JOIN` has no host predicate,
+so dropping (or mismatching) either filter intersects **workbench i3 dwell with laptop
+browser navigation** and invents attention that never happened. Today only `laptop`
+returns rows at all, because `browser` is laptop-only; if the extension ever lands on a
+second host, change both filters together to the same `<h>`.
 
 ```sql
 WITH brave AS (SELECT bs, be FROM (SELECT toUnixTimestamp64Milli(ts) bs, app,
