@@ -2898,7 +2898,7 @@ in
   # WORKBENCH-ONLY (gated on serverMode), same rationale as the sync: the homelab
   # kubeconfig is direct-LAN only here, AND the viewer must run on the host whose
   # tmux server it reads (the live overlay). It binds the workbench's OWN LAN address
-  # (192.168.50.250:8899, eth1 — NOT 192.168.50.94, which is a homelab node hosting the
+  # (192.168.50.250:8899, eth0 — NOT 192.168.50.94, which is a homelab node hosting the
   # kube-apiserver/NodePorts and is not assignable here) — internal work data, deliberately
   # NOT wired into the public homelab gateway. Public exposure would be a later, explicit choice.
   #
@@ -3000,9 +3000,29 @@ in
   #
   #   present-regen.service   oneshot — build BOTH variants into ~/.local/share/present
   #   present-regen.timer     daily
-  #   present-serve.service   a STATIC file server on the workbench LAN
+  #   present-serve.service   a STATIC file server, workbench-local (see below)
   #
-  # 🔴 BIND 192.168.50.250 (eth1, the workbench's OWN address). NOT
+  # 🔴 WHO CAN ACTUALLY READ IT: THE WORKBENCH, AND NOTHING ELSE. The socket is
+  # bound to 192.168.50.250 — a LAN address — but 8900 is NOT in
+  # /etc/nixos/configuration.nix's `networking.firewall.allowedTCPPorts`
+  # (7844 80 443 58012 8180 25565 8110 6443), so every off-host SYN is dropped.
+  # A same-host `curl http://192.168.50.250:8900/` returns 200 because it takes
+  # the `lo` path, which the firewall accepts unconditionally; that says nothing
+  # about a second machine. Measured from the laptop 2026-08-25: 22 OPEN, 443
+  # OPEN, 8899 CLOSED, 8900 CLOSED. 8899 is `initiatives-viewer`, listening on
+  # the identical address with the identical gap — which is exactly why copying
+  # its shape did not warn anyone.
+  #
+  # That is the DECISION, not an oversight: the reader who is not on the
+  # workbench is served by the SANITIZED PORTABLE EXPORT the same regen run
+  # produces. Widening reach is a system-level change (/etc/nixos, a `sudo
+  # nixos-rebuild`) PLUS a decision to publish client scope names to everything
+  # on the LAN — worth doing when someone who is not on the workbench actually
+  # needs to read this page, and not before. Building hosted reach ahead of a
+  # reader is the shape that left the subsystem-store-api dead on arrival.
+  #
+  # 🔴 BIND 192.168.50.250 (eth0, the workbench's OWN address — `ip -4 -o addr`;
+  # every earlier copy of this comment said eth1 and there is no eth1 here). NOT
   # 192.168.50.94 — that is a homelab node hosting the kube-apiserver and the
   # NodePorts, it is not assignable here, and binding it CRASH-LOOPS the unit.
   # It already cost `initiatives-viewer` an outage; see the block above it.
@@ -3010,15 +3030,15 @@ in
   # 🔴 PORT 8900. Measured free on the workbench 2026-08-25 (`ss -lptn`): the
   # occupied neighbours are 8787 activity-receiver, 8788 browser-bridge, 8791
   # dl-router, 8793, 8899 initiatives-viewer, 8931.
-  # `scripts/tests/test_present_units.py` pins it against every OTHER port
-  # DECLARED under nix/ — a live `ss` reading is a fact about one moment, and
-  # what two units actually fight over across a reboot is the declared set.
+  # `scripts/tests/test_present_units.py` pins it against the ports DECLARED IN
+  # CODE under nix/ — a live `ss` reading is a fact about one moment, and what
+  # two units actually fight over across a reboot is the declared set. Read that
+  # file's ledger header for which declaration SHAPES the scan sees and which it
+  # structurally cannot; the sentence there used to claim more than it checked.
   #
-  # 🔴 NOT WIRED INTO THE PUBLIC HOMELAB GATEWAY, deliberately, exactly as the
-  # initiatives viewer is not. This page names local paths, unit names, repo
-  # layout and hook wiring. The off-LAN reader is served by the SANITIZED export
-  # that the same regen run produces — a portable file you hand over on purpose,
-  # not a hostname anyone can reach. Public exposure would be a later, explicit
+  # 🔴 NOT WIRED INTO THE PUBLIC HOMELAB GATEWAY either, deliberately, exactly
+  # as the initiatives viewer is not. This page names local paths, unit names,
+  # repo layout and hook wiring. Public exposure would be a later, explicit
   # choice, and it would be a choice about the sanitized copy only.
   #
   # ── 🔴 THE STALENESS CONTRACT ────────────────────────────────────────────────
@@ -3042,7 +3062,12 @@ in
   #      mtime AT REQUEST TIME and, past PRESENT_STALE_AFTER_SEC, injects a
   #      fixed full-width banner naming the age in words. If it cannot inject
   #      the banner it serves a 503 interstitial INSTEAD of the page: there is
-  #      no code path that emits stale artefact bytes unmarked.
+  #      no code path that emits not-fresh artefact bytes unmarked.
+  #      🔴 THREE states, not two: an artefact dated in the FUTURE gets its own
+  #      `clock-suspect` banner. A bad RTC corrected backwards by NTP dates
+  #      every already-written file ahead of `now`, and clamping that age to
+  #      zero — which is what the first cut did — reports a week-old page as
+  #      `fresh` with no banner. See CLOCK_SUSPECT_AFTER in serve.py.
   #
   # Why not serve-an-error outright: the content is still true as of its stamp
   # and is usually exactly what the reader needs (a stale page is a symptom of
@@ -3114,6 +3139,10 @@ in
   # `initiatives-viewer` needs for its ↻ button. It answers two artefact routes
   # out of an explicit table and 404s everything else, so there is no directory
   # handler and therefore no path-traversal surface to reason about.
+  #
+  # 🔴 PRESENT_SERVE_HOST is a LAN address and the page is still WORKBENCH-LOCAL
+  # — the firewall does not admit this port. Full argument, with the measured
+  # laptop-side control, in the block above.
   #
   # Wants+After present-regen: a best-effort prime, so a fresh deploy serves a
   # page instead of the "not generated yet" interstitial without waiting until

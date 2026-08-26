@@ -3,15 +3,28 @@
 
     present-regen.service   oneshot — rebuild both page variants
     present-regen.timer     daily
-    present-serve.service   static file server on the workbench LAN
+    present-serve.service   static file server, bound to the workbench's own LAN
+                            address and reachable only FROM the workbench
 
 WHAT THIS FILE CAN AND CANNOT SEE
 ---------------------------------
 It reads `nix/home.nix` as TEXT. It cannot evaluate the flake (the hermetic
 sandbox has no network and no flake inputs), so it cannot tell you the unit
 started, bound its port, or served a byte — that is the live verification in the
-PR description, and the two claims are different. What it CAN pin is everything
-that is decided at authoring time and that goes wrong silently:
+PR description, and the two claims are different.
+
+🔴 AND IT CANNOT SEE THE FIREWALL AT ALL. `/etc/nixos/configuration.nix` is not
+in this repo, so nothing below knows that 8900 is absent from
+`networking.firewall.allowedTCPPorts` and that every off-host SYN is therefore
+dropped. Measured from the laptop 2026-08-25: 22 OPEN, 443 OPEN, 8899 CLOSED,
+8900 CLOSED — 8899 being `initiatives-viewer`, on the identical address, with
+the identical gap. A same-host `curl` succeeds over `lo`, which the firewall
+accepts unconditionally, and proves nothing about a second machine. That is the
+current, deliberate scope: the off-workbench reader is served by the sanitized
+portable export. Do not read a green run here as reachability evidence.
+
+What it CAN pin is everything that is decided at authoring time and that goes
+wrong silently:
 
   * the units exist, and all three are `serverMode`-gated (an ungated unit would
     be emitted on the laptop, where the LAN address is not assignable and the
@@ -19,8 +32,10 @@ that is decided at authoring time and that goes wrong silently:
   * both services carry `OnFailure = notify-failure@%n.service`, which is the
     OPERATOR half of the staleness contract. Without it a failed regeneration is
     silent and the reader's banner is the only signal, hours late.
-  * the port does not collide with any OTHER port this host BINDS, measured
-    against the declared set rather than one `ss` reading
+  * the port does not collide with any other port DECLARED IN CODE under `nix/`
+    — see the ledger's own header for exactly which declaration shapes that
+    scan does and does not see, because the sentence that used to be here
+    ("any OTHER port this host BINDS") was wider than the implementation
   * the bind address is the workbench's own, and is NOT the homelab node
   * the timer's schedule is what the comment claims, and the staleness threshold
     is wider than the cadence (a threshold at or below the cadence would banner
@@ -56,7 +71,9 @@ UNITS = (
     "systemd.user.services.present-serve",
 )
 
-#: The workbench's own LAN address (eth1).
+#: The workbench's own LAN address (eth0 — `ip -4 -o addr`; this constant, the
+#: matching comment in nix/home.nix and serve.py's `DEFAULT_HOST` all said eth1,
+#: and there is no eth1 on this host).
 WORKBENCH_LAN = "192.168.50.250"
 #: 🔴 A homelab node — kube-apiserver and NodePorts. Not assignable here;
 #: binding it crash-loops the unit.
@@ -153,60 +170,182 @@ def test_the_service_toasts_on_failure(attr):
 # --------------------------------------------------------------------------- #
 # 🔴 THE PORT LEDGER
 #
-# An enumeration, not a pattern: every `*_PORT` literal declared under nix/ must
-# be classified here, so adding a port tomorrow forces a decision rather than
+# WHAT THIS SCAN SEES — read this before quoting it as coverage.
+#
+# It reads every `nix/**/*.nix` file, STRIPS `#` COMMENTS, and collects three
+# declaration shapes:
+#
+#   1. `"NAME_PORT=NNNN"`            — a systemd `Environment` literal
+#   2. `HOST:NNNN`                   — but only for a host THIS MACHINE CAN BIND
+#                                      (loopback, the workbench's own LAN and
+#                                      nebula addresses). `192.168.50.94:6443`
+#                                      is a homelab node and is excluded
+#                                      structurally, not by a ledger entry.
+#   3. `someNamePort = NNNN;`        — a nix binding interpolated into a
+#                                      `--listen-addr`-style flag
+#
+# An earlier cut collected shape 1 ONLY, under a header claiming it covered
+# "any OTHER port this host BINDS". It did not, and the gap was demonstrated
+# rather than argued: changing `nix/observability.nix`'s alloy UI from
+# `--server.http.listen-addr=127.0.0.1:12349` to `…:8900` — a real local-bind
+# collision with present-serve — left the suite fully green. Shapes 2 and 3 are
+# what closes that.
+#
+# 🔴 WHAT IT STILL CANNOT SEE, stated so nobody reads a green run as more than
+# it is:
+#
+#   * a port bound by a program whose flag lives in `scripts/`, not `nix/`
+#   * a port mentioned only in a COMMENT — deliberately: prose is not a bind,
+#     and including it made the initiatives-viewer's own comment alias its unit
+#   * TWO different units in ONE file binding the same loopback port. Labels are
+#     `<file>::<host>`, so the two collapse into one claim and cancel out. The
+#     `*_PORT=` env shape (1) does not have this blind spot, and that is the
+#     shape the units in `nix/home.nix` actually use.
+#   * anything the firewall does. `/etc/nixos` is not in this repo — see the
+#     module docstring.
+#
+# An enumeration, not a pattern: every label the scan produces must be
+# classified here, so adding a port tomorrow forces a decision rather than
 # defaulting into an unchecked bucket. The same shape drift-check.sh uses for
 # the settings.json key allowlist, and for the same reason.
 # --------------------------------------------------------------------------- #
 
-#: Ports THIS HOST BINDS. These must be pairwise distinct — two units claiming
-#: one port is a crash-loop that only shows up after a reboot.
-LOCAL_BIND_PORT_VARS = {
-    "BROWSER_RECEIVER_PORT",     # scripts/collector activity receiver
-    "BROWSER_BRIDGE_PORT",       # scripts/browser-bridge loopback server
-    "DL_ROUTER_PORT",            # scripts/dl-router sidecar
-    "INITIATIVES_VIEWER_PORT",   # scripts/initiatives viewer
-    "PRESENT_SERVE_PORT",        # this change
+#: Addresses THIS HOST can bind. A `HOST:PORT` literal naming anything else
+#: describes a port somewhere ELSE and is not a collision candidate.
+BINDABLE_HOSTS = ("127.0.0.1", "0.0.0.0", "localhost", r"\[::1\]",
+                  "192.168.50.250",   # workbench LAN, eth0
+                  "10.42.0.30")       # workbench nebula
+_HOSTPORT_RE = re.compile(
+    r"(?<![\w.])(" + "|".join(BINDABLE_HOSTS) + r"):(\d{2,5})(?!\d)")
+_ENVPORT_RE = re.compile(r'"([A-Z0-9_]*PORT)=(\d+)"')
+_NIXPORT_RE = re.compile(r"^\s*([a-zA-Z][\w']*[Pp]ort[\w']*)\s*=\s*(\d{2,5});", re.M)
+
+#: Ports THIS HOST BINDS, label -> the ONE thing that binds it. Two labels may
+#: name the same owner (an env var and the flag that consumes it); two OWNERS on
+#: one port is the crash-loop this ledger exists to catch.
+LOCAL_BIND_CLAIMS = {
+    "BROWSER_RECEIVER_PORT": "activity receiver (scripts/collector)",
+    "BROWSER_BRIDGE_PORT": "browser-bridge loopback server",
+    "DL_ROUTER_PORT": "dl-router sidecar",
+    "INITIATIVES_VIEWER_PORT": "initiatives-viewer",
+    "PRESENT_SERVE_PORT": "present-serve",                       # this change
+    "nix/home.nix::127.0.0.1": "homelab-kube-tunnel SOCKS proxy",
+    # 9090/3100 here are PLACEHOLDER URLs fed to `alloy validate` at build time
+    # and 12349 is the real alloy UI bind. All three are loopback ports spoken
+    # for by this file; over-claiming a loopback port costs a rename, and
+    # under-claiming it is the collision.
+    "nix/observability.nix::127.0.0.1": "obs-ship / alloy",
+    "nix/observability.nix::nodeExporterPort": "node-exporter",
+    "nix/graphical.nix::192.168.50.250": "k3s NodePort (clawgate bar pill)",
 }
 
 #: Ports of REMOTE services reached through a `kubectl port-forward` on an
 #: ephemeral LOCAL port. They name a port in a cluster, not one here, so two
 #: units naming the same value is correct and not a collision.
-REMOTE_SERVICE_PORT_VARS = {
-    "RECAP_SERVICE_PORT",        # homelab ns promptver, svc/vllm-recap:8000
-    "AGENT_PORT",                # homelab ns devpod-initiatives, svc/…:18789
+REMOTE_SERVICE_CLAIMS = {
+    "RECAP_SERVICE_PORT": "homelab ns promptver, svc/vllm-recap:8000",
+    "AGENT_PORT": "homelab ns devpod-initiatives, svc/…:18789",
 }
 
 
-def _declared_port_vars() -> dict[str, set[int]]:
+def _strip_nix_comments(text: str) -> str:
+    """Drop `#`-to-end-of-line, but not a `#` inside a string literal.
+
+    Counting quotes to the left of the `#` is the cheap test and it is
+    deliberately conservative: a mis-strip can only ever HIDE a declaration, and
+    the positive controls below prove the real ones survive.
+    """
+    out = []
+    for line in text.splitlines():
+        i = 0
+        while True:
+            j = line.find("#", i)
+            if j < 0:
+                break
+            if line.count('"', 0, j) % 2 == 0:
+                line = line[:j]
+                break
+            i = j + 1
+        out.append(line)
+    return "\n".join(out)
+
+
+def _declared_ports() -> dict[str, set[int]]:
+    """Every port DECLARED IN CODE under nix/, by label. See the header."""
     found: dict[str, set[int]] = {}
     for path in sorted(NIX_DIR.rglob("*.nix")):
-        for name, val in re.findall(r'"([A-Z0-9_]*PORT)=(\d+)"',
-                                    path.read_text(encoding="utf-8")):
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        code = _strip_nix_comments(path.read_text(encoding="utf-8"))
+        for name, val in _ENVPORT_RE.findall(code):
             found.setdefault(name, set()).add(int(val))
+        for host, val in _HOSTPORT_RE.findall(code):
+            found.setdefault(f"{rel}::{host}", set()).add(int(val))
+        for name, val in _NIXPORT_RE.findall(code):
+            found.setdefault(f"{rel}::{name}", set()).add(int(val))
     return found
 
 
 def test_positive_control_the_port_scan_finds_the_known_ports():
     """A scan that found nothing would make the ledger and the collision check
-    vacuously clean."""
-    found = _declared_port_vars()
+    vacuously clean. One assertion per DECLARATION SHAPE — a regex that silently
+    stopped matching one of the three would otherwise leave the other two
+    carrying a claim about all of them."""
+    found = _declared_ports()
+    # shape 1 — the env literal
     assert found.get("INITIATIVES_VIEWER_PORT") == {8899}, found
     assert found.get("BROWSER_BRIDGE_PORT") == {8788}, found
-    assert len(found) >= 6, f"only {len(found)} port vars found: {sorted(found)}"
+    # shape 2 — the host:port literal that shape 1 alone could not see. This is
+    # the exact declaration whose mutation to :8900 used to pass.
+    assert 12349 in found.get("nix/observability.nix::127.0.0.1", set()), found
+    assert found.get("nix/home.nix::127.0.0.1") == {1080}, found
+    # shape 3 — the nix binding interpolated into --web.listen-address
+    assert found.get("nix/observability.nix::nodeExporterPort") == {9101}, found
+    assert len(found) >= 10, f"only {len(found)} labels found: {sorted(found)}"
 
 
-def test_every_declared_port_var_is_classified():
-    """Two-way pin. An unclassified var fails; a classified var that names
+def test_the_scan_ignores_ports_on_hosts_this_machine_cannot_bind():
+    """Negative control for shape 2. `192.168.50.94:6443` is the homelab
+    kube-apiserver and appears four times in nix/home.nix; treating it as a
+    local claim would make the ledger a list of everything anyone ever dialled."""
+    found = _declared_ports()
+    assert not any("192.168.50.94" in label for label in found), sorted(found)
+    assert not any(6443 in ports for ports in found.values()), {
+        k: sorted(v) for k, v in found.items() if 6443 in v}
+
+
+def test_the_comment_stripper_removes_prose_without_removing_code():
+    """Both directions, because a stripper that ate everything would produce an
+    empty scan that every assertion above is written to catch — and one that ate
+    nothing would re-introduce the aliasing this ledger cannot represent.
+
+    The prose case is real: nix/home.nix's initiatives-viewer comment block
+    names `192.168.50.250:8899` in English. That is a description of a bind, not
+    a bind, and attributing it to the file's label would make any future
+    `192.168.50.250:<other>` mention read as a second owner.
+    """
+    src = HOME_NIX.read_text(encoding="utf-8")
+    assert "192.168.50.250:8899" in src, (
+        "the fixture this control depends on is gone — find another commented "
+        "host:port in nix/home.nix or delete this test, do not weaken it")
+    stripped = _strip_nix_comments(src)
+    assert "192.168.50.250:8899" not in stripped
+    assert "127.0.0.1:1080" in stripped, (
+        "the SOCKS proxy's ExecStart is code, not a comment — the stripper is "
+        "eating declarations and every scan above is now under-counting")
+
+
+def test_every_declared_port_is_classified():
+    """Two-way pin. An unclassified label fails; a classified label that names
     nothing in the tree fails too — an accounting entry describing nothing is
     how a ledger stops being evidence."""
-    found = set(_declared_port_vars())
-    classified = LOCAL_BIND_PORT_VARS | REMOTE_SERVICE_PORT_VARS
+    found = set(_declared_ports())
+    classified = set(LOCAL_BIND_CLAIMS) | set(REMOTE_SERVICE_CLAIMS)
     assert found - classified == set(), (
-        f"unclassified port var(s) {sorted(found - classified)} — add each to "
-        "LOCAL_BIND_PORT_VARS (this host binds it) or REMOTE_SERVICE_PORT_VARS "
-        "(it names a port in a cluster). Defaulting is not on offer: an "
-        "unclassified bind is exactly the collision this ledger exists to catch.")
+        f"unclassified port declaration(s) {sorted(found - classified)} — add "
+        "each to LOCAL_BIND_CLAIMS (this host binds it, mapped to the ONE thing "
+        "that binds it) or REMOTE_SERVICE_CLAIMS (it names a port in a "
+        "cluster). Defaulting is not on offer: an unclassified bind is exactly "
+        "the collision this ledger exists to catch.")
     assert classified - found == set(), (
         f"classified but not declared anywhere under nix/: "
         f"{sorted(classified - found)}")
@@ -214,16 +353,23 @@ def test_every_declared_port_var_is_classified():
 
 def test_no_two_locally_bound_ports_collide():
     """🔴 The whole point of the ledger. `ss -lptn` answers what is bound RIGHT
-    NOW; this answers what two units would fight over after a reboot."""
-    found = _declared_port_vars()
+    NOW; this answers what two units would fight over after a reboot.
+
+    Grouped by OWNER and not by label, so an env var and the flag that consumes
+    it are one claim while two genuinely different programs on one port are two.
+    """
+    found = _declared_ports()
     by_port: dict[int, set[str]] = {}
-    for name in LOCAL_BIND_PORT_VARS:
-        for val in found.get(name, ()):
-            by_port.setdefault(val, set()).add(name)
-    clashes = {p: sorted(n) for p, n in by_port.items() if len(n) > 1}
-    assert not clashes, f"two units bind the same port: {clashes}"
-    assert 8900 in by_port and by_port[8900] == {"PRESENT_SERVE_PORT"}, (
-        f"PRESENT_SERVE_PORT is not the sole claimant of 8900: {by_port.get(8900)}")
+    for label, owner in LOCAL_BIND_CLAIMS.items():
+        for val in found.get(label, ()):
+            by_port.setdefault(val, set()).add(owner)
+    clashes = {p: sorted(o) for p, o in by_port.items() if len(o) > 1}
+    assert not clashes, (
+        f"two different things bind the same port: {clashes}. On this host that "
+        "is not a warning — the second one to start fails to bind and the unit "
+        "crash-loops, typically first noticed after a reboot.")
+    assert by_port.get(8900) == {"present-serve"}, (
+        f"present-serve is not the sole claimant of 8900: {by_port.get(8900)}")
 
 
 # --------------------------------------------------------------------------- #

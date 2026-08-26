@@ -14,10 +14,20 @@ module pins the half of that which is mechanical:
 
     every response that carries ARTEFACT BYTES is either fresh, or bannered.
 
-There is no third branch in `build_response`, and
 `test_no_response_ever_carries_unbannered_stale_bytes` is the assertion that
 keeps it that way — it drives the resolver across a swept age range and checks
 the property at every point rather than at the two the author thought of.
+
+🔴 THERE ARE THREE STATES, NOT TWO, AND THE THIRD IS WHY THE SWEEP GOES
+NEGATIVE. `fresh` / `stale` / `clock-suspect`. The age used to be
+`max(0.0, now - mtime)` with no third state, so an artefact dated in the FUTURE
+— a bad RTC corrected backwards by NTP is the realistic route — reported age 0,
+`X-Present-Stale: 0` and no banner, however old it really was. That is the
+single outcome this file exists to prevent, reached through the clamp that was
+supposed to be a formatting nicety. The clock-suspect tests below therefore pin
+two separate things: the STATE (it is not `fresh`), and the REACHABILITY (the
+guard is asked BEFORE the staleness comparison, without which it could never
+fire, since the clamped age lands in the fresh branch every time).
 
 WHAT COUNTS AS REGRESSION COVERAGE HERE
 ---------------------------------------
@@ -127,7 +137,7 @@ def _backdated(tmp_path: Path, age: float, *, page: str = FIXTURE_PAGE) -> Path:
 
 
 def _has_banner(body: bytes) -> bool:
-    """Does this response carry the staleness banner?
+    """Does this response carry the STALENESS banner?
 
     🔴 STRUCTURAL, NOT SPELLED. It looks for the word STALE *and* for the
     z-index that makes the banner unmissable — a page that merely contains the
@@ -136,6 +146,23 @@ def _has_banner(body: bytes) -> bool:
     """
     text = body.decode("utf-8", "replace")
     return "STALE" in text and "2147483647" in text
+
+
+def _has_clock_banner(body: bytes) -> bool:
+    """Its twin for the clock-suspect state. Same structural rule: the headline
+    words AND the z-index, so prose about clocks cannot pass for a banner."""
+    text = body.decode("utf-8", "replace")
+    return "AGE UNKNOWN" in text and "2147483647" in text
+
+
+def _warned(body: bytes) -> bool:
+    """Was the READER told not to trust this page as current, by ANY banner?
+
+    🔴 The central property is about the reader, not about one message. A fourth
+    state added later must extend this predicate; a state that fails to is
+    exactly the silent disarm the sweep is looking for.
+    """
+    return _has_banner(body) or _has_clock_banner(body)
 
 
 def _artefact_bytes_present(body: bytes) -> bool:
@@ -163,10 +190,33 @@ def test_positive_control_the_banner_detector_is_not_fooled_by_the_word():
         b"<html><body><p>a stale page is STALE and that is bad</p></body></html>")
 
 
+def test_positive_control_the_clock_banner_detector_can_see_its_banner():
+    """Its twin. Without this, every clock-suspect assertion below could be
+    satisfied by a detector that matches nothing."""
+    banner = serve.clock_suspect_banner(90_000, "present.html")
+    assert _has_clock_banner(banner.encode("utf-8"))
+    assert _warned(banner.encode("utf-8"))
+
+
+def test_positive_control_the_two_banner_detectors_do_not_see_each_other():
+    """🔴 If either detector fired on the other's banner, `_warned` would be one
+    predicate wearing two names and the state tests below would pass while
+    serving the wrong message to a reader."""
+    stale = serve.stale_banner(90_000, "present.html").encode("utf-8")
+    clock = serve.clock_suspect_banner(90_000, "present.html").encode("utf-8")
+    assert _has_banner(stale) and not _has_clock_banner(stale)
+    assert _has_clock_banner(clock) and not _has_banner(clock)
+
+
+def test_positive_control_the_clock_banner_detector_is_not_fooled_by_the_word():
+    assert not _has_clock_banner(
+        b"<html><body><p>the AGE UNKNOWN case is discussed here</p></body></html>")
+
+
 def test_positive_control_the_fixture_page_is_bannerable():
     """If injection could never succeed on the fixture, the stale-with-banner
     branch is unreachable and the sweep only exercises the refusal path."""
-    out = serve.inject_banner(FIXTURE_PAGE, 90_000, "present.html")
+    out = serve.inject_banner(FIXTURE_PAGE, serve.stale_banner(90_000, "present.html"))
     assert out is not None
     assert _has_banner(out.encode("utf-8"))
     assert "a measured figure: 41 skills" in out, (
@@ -198,48 +248,78 @@ def test_the_fresh_branch_is_reachable_at_all(tmp_path):
     assert body.decode("utf-8") == FIXTURE_PAGE
 
 
+def test_the_clock_suspect_branch_is_reachable_at_all(tmp_path):
+    """The third state's reachability control, and the one that mattered: the
+    branch it guards is reached through a value (`delta < 0`) that the CLAMPED
+    age can never carry, so it is exactly the kind of guard that type-checks,
+    reads correctly, and never runs."""
+    d = _artefacts(tmp_path)
+    status, _ctype, hdr, body = _resolve(d, "/", age=-86_400.0)
+    assert status == 200
+    assert hdr["X-Present-State"] == "clock-suspect-bannered"
+    assert _has_clock_banner(body)
+
+
 # --------------------------------------------------------------------------- #
 # 🔴 THE CENTRAL PROPERTY
 # --------------------------------------------------------------------------- #
 
 def test_no_response_ever_carries_unbannered_stale_bytes(tmp_path):
-    """Swept across the threshold: artefact bytes go out ONLY when fresh, or
-    with the banner. Never unmarked, at any age.
+    """Swept across the threshold AND across zero: artefact bytes go out ONLY
+    when fresh, or with a banner. Never unmarked, at any age.
 
     The sweep is what makes this a claim about the COMPARISON rather than about
-    two ages the author picked — boundary and middle on both sides.
+    two ages the author picked — boundary and middle on both sides, and the
+    negative side too, which is where the third state lives.
+
+    🔴 The predicate here is `_warned`, not `_has_banner`. The first cut asked
+    only about the staleness banner, so a clock-suspect response carrying its
+    OWN banner would have counted as unbannered — and, worse, a clock-suspect
+    response carrying NOTHING would have counted as fresh, because `_has_banner`
+    and `X-Present-Stale` agreed with each other about a page neither had
+    looked at properly.
     """
     offsets = [
-        0.0,                        # just written
+        -TEST_STALE_AFTER * 40,                 # far in the future
+        -TEST_STALE_AFTER,                      # middle of the suspect side
+        -serve.CLOCK_SUSPECT_AFTER - 1,         # boundary, suspect side
+        -serve.CLOCK_SUSPECT_AFTER,             # EXACTLY on it — still fresh
+        -serve.CLOCK_SUSPECT_AFTER / 2,         # sub-tolerance skew: fresh
+        0.0,                                    # just written
         1.0,
-        TEST_STALE_AFTER / 2,       # middle of the fresh side
-        TEST_STALE_AFTER - 1,       # boundary, fresh side
-        TEST_STALE_AFTER,           # EXACTLY on it — `<=` means fresh
-        TEST_STALE_AFTER + 1,       # boundary, stale side
-        TEST_STALE_AFTER * 2,       # middle of the stale side
-        TEST_STALE_AFTER * 40,      # far out
+        TEST_STALE_AFTER / 2,                   # middle of the fresh side
+        TEST_STALE_AFTER - 1,                   # boundary, fresh side
+        TEST_STALE_AFTER,                       # EXACTLY on it — `<=` is fresh
+        TEST_STALE_AFTER + 1,                   # boundary, stale side
+        TEST_STALE_AFTER * 2,                   # middle of the stale side
+        TEST_STALE_AFTER * 40,                  # far out
     ]
-    seen_fresh = seen_stale = 0
+    seen_fresh = seen_stale = seen_suspect = 0
     d = _artefacts(tmp_path)
     for age in offsets:
         status, _ctype, hdr, body = _resolve(d, "/", age=age)
-        stale = hdr["X-Present-Stale"] == "1"
+        not_current = hdr["X-Present-Stale"] == "1"
         if _artefact_bytes_present(body):
-            if stale:
-                seen_stale += 1
-                assert _has_banner(body), (
+            if not_current:
+                if hdr["X-Present-State"].startswith("clock-suspect"):
+                    seen_suspect += 1
+                else:
+                    seen_stale += 1
+                assert _warned(body), (
                     f"age {age}s: the artefact's bytes were served, the server "
-                    "called them STALE, and no banner was injected — this is the "
-                    "exact outcome serve.py exists to prevent")
+                    f"flagged them NOT CURRENT ({hdr['X-Present-State']}), and "
+                    "no banner was injected — this is the exact outcome serve.py "
+                    "exists to prevent")
             else:
                 seen_fresh += 1
-                assert not _has_banner(body), (
-                    f"age {age}s: a FRESH page carries a staleness banner; a "
+                assert not _warned(body), (
+                    f"age {age}s: a FRESH page carries a warning banner; a "
                     "banner that is always there is a banner nobody reads")
         assert status in (200, 503)
-    assert seen_fresh >= 3 and seen_stale >= 3, (
-        f"the sweep exercised {seen_fresh} fresh / {seen_stale} stale responses "
-        "— it must reach both sides or it proves nothing about the comparison")
+    assert seen_fresh >= 3 and seen_stale >= 3 and seen_suspect >= 3, (
+        f"the sweep exercised {seen_fresh} fresh / {seen_stale} stale / "
+        f"{seen_suspect} clock-suspect responses — it must reach all three or "
+        "it proves nothing about the classification")
 
 
 def test_the_threshold_itself_counts_as_fresh(tmp_path):
@@ -288,16 +368,127 @@ def test_the_header_and_the_body_agree_about_staleness(tmp_path):
         assert _has_banner(body) is (expect == "1")
 
 
-def test_an_mtime_in_the_future_clamps_to_zero_rather_than_going_negative(tmp_path):
-    """Measured while verifying live: `touch -d '3 days 4 hours ago'` sets a
-    mtime three days in the FUTURE (GNU date binds `ago` to the last term only),
-    and an unclamped age would then be negative — which compares as fresh
-    anyway, but reports as a nonsense header. The clamp makes the reported age
-    0 and the state `fresh`, which is the honest reading of "written after now"."""
+# --------------------------------------------------------------------------- #
+# 🔴 THE THIRD STATE: an artefact written AFTER now
+#
+# REPLACES `test_an_mtime_in_the_future_clamps_to_zero_rather_than_going_negative`
+# — deliberately, and this note says which half of it survived.
+#
+# That test asserted `X-Present-Age-Seconds == "0"` AND `X-Present-State ==
+# "fresh"` for a mtime 500,000s in the future, justified by a `touch -d
+# '3 days 4 hours ago'` mistake made during live verification. The FIRST
+# assertion was about header FORMAT and is kept below, unchanged in substance:
+# the reported age is never negative. The SECOND was a classification, and it
+# was wrong — it pinned the exact silent disarm the module exists to prevent.
+# A page that is genuinely eight days old reads `fresh`, age 0, no banner, the
+# moment a bad RTC is corrected backwards by NTP. So it is replaced, not
+# deleted, and the case it was written for (an operator's `touch` typo) still
+# resolves sanely: it now says AGE UNKNOWN instead of lying.
+# --------------------------------------------------------------------------- #
+
+def test_the_age_header_never_reports_a_negative_number(tmp_path):
+    """The surviving half of the old clamp test. `X-Present-Age-Seconds` is
+    consumed as an int; a minus sign is a parse hazard for no benefit. Measured
+    on BOTH sides of the tolerance, because the clamp and the classification are
+    now two different decisions and only one of them moved."""
     d = _artefacts(tmp_path)
-    _s, _c, hdr, _b = _resolve(d, "/", age=-500_000.0)
-    assert hdr["X-Present-Age-Seconds"] == "0"
-    assert hdr["X-Present-State"] == "fresh"
+    for age in (-1.0, -serve.CLOCK_SUSPECT_AFTER / 2, -serve.CLOCK_SUSPECT_AFTER,
+                -serve.CLOCK_SUSPECT_AFTER - 1, -500_000.0):
+        _s, _c, hdr, _b = _resolve(d, "/", age=age)
+        assert hdr["X-Present-Age-Seconds"] == "0", (
+            f"skew {age}s produced {hdr['X-Present-Age-Seconds']!r}")
+
+
+def test_a_future_mtime_is_clock_suspect_and_never_fresh(tmp_path):
+    """🔴 THE DEFECT. A backwards clock jump (bad RTC corrected by NTP) dates
+    every already-written file in the future. Under the old clamp a genuinely
+    eight-day-old page reported `fresh`, `X-Present-Age-Seconds: 0` and no
+    banner — the single reader-facing staleness signal disarming itself, in the
+    one situation where the machine's sense of time is what is broken."""
+    d = _artefacts(tmp_path)
+    _s, _c, hdr, body = _resolve(d, "/", age=-8 * 86_400.0)
+    assert hdr["X-Present-State"] == "clock-suspect-bannered", (
+        "an artefact dated 8 days in the FUTURE was classified "
+        f"{hdr['X-Present-State']!r}. The clamp makes its age 0, so the "
+        "staleness comparison cannot see it: without its own state this page is "
+        "served as current however old it really is.")
+    assert hdr["X-Present-Stale"] == "1", (
+        "the machine-readable twin says this page is current. A consumer "
+        "reading only the header gets the disarmed answer.")
+    assert hdr["X-Present-Clock-Skew-Seconds"] == str(8 * 86_400)
+
+
+def test_the_reader_and_not_only_the_header_is_told_about_a_future_mtime(tmp_path):
+    """🔴 A header is not a reader-facing signal. `stale` gets a full-bleed
+    banner; this state has to be visible the same way or it is a machine-only
+    fact about a page a human is reading."""
+    d = _artefacts(tmp_path)
+    _s, _c, _h, body = _resolve(d, "/", age=-8 * 86_400.0)
+    assert _has_clock_banner(body), (
+        "the clock-suspect response carries no banner — the reader sees a "
+        "normal-looking page and only a header disagrees")
+    assert b"AGE UNKNOWN" in body
+    assert b"present-regen.service" in body, (
+        "the banner must name the unit that would fix it")
+    assert not _has_banner(body), (
+        "a clock-suspect page must not claim a MEASURED staleness; its age is "
+        "precisely what is unknown")
+    assert b"a measured figure: 41 skills" in body, (
+        "the last-good page's own content was dropped — this state banners the "
+        "page, it does not replace it")
+
+
+def test_a_sub_tolerance_future_mtime_is_still_fresh(tmp_path):
+    """The other side of the boundary. A page written seconds before the request
+    and read across a sub-second NTP slew must not raise a clock alarm — a
+    banner that fires on noise is a banner nobody reads, which is the failure
+    this whole file is arguing against."""
+    d = _artefacts(tmp_path)
+    for skew in (1.0, serve.CLOCK_SUSPECT_AFTER / 2, serve.CLOCK_SUSPECT_AFTER):
+        _s, _c, hdr, body = _resolve(d, "/", age=-skew)
+        assert hdr["X-Present-State"] == "fresh", (
+            f"a {skew}s future skew tripped the clock guard; the tolerance is "
+            f"{serve.CLOCK_SUSPECT_AFTER}s and the boundary itself is fresh")
+        assert not _warned(body)
+
+
+def test_a_clock_suspect_page_that_cannot_be_bannered_is_withheld(tmp_path):
+    """🔴 The refusal applies to the NEW state too. This is the assertion that
+    catches a third state wired straight to a 200 — the exact way the
+    no-unbannered-bytes contract gets re-opened by someone adding a case."""
+    d = _artefacts(tmp_path, page="<html><p>no body tag here</p></html>")
+    status, _c, hdr, body = _resolve(d, "/", age=-8 * 86_400.0)
+    assert status == 503, (
+        f"got {status}: a clock-suspect page the injector cannot banner was "
+        "served anyway. The new state has its own path to a 200 and does not go "
+        "through the refusal — the no-unbannered-bytes contract is re-opened.")
+    assert hdr["X-Present-State"] == "clock-suspect-withheld"
+    assert b"no body tag here" not in body, (
+        "the artefact's bytes were served with no banner because the injector "
+        "could not run — withholding is the only honest degradation")
+    assert b"withheld" in body.lower()
+
+
+def test_the_clock_guard_is_asked_before_the_staleness_comparison(tmp_path):
+    """🔴 REACHABILITY, not just correctness.
+
+    `age` is clamped, so a future mtime reaches `age > stale_after` as 0 and
+    lands in the FRESH branch every single time. Reorder the two guards and this
+    one becomes dead code that still reads correctly — the shape of an
+    unreachable guard. Driven with a `stale_after` so small that ANY ordering
+    bug shows: at `stale_after = 1`, a genuinely-aged page is stale, and the
+    future-dated page must still come back clock-suspect rather than either
+    `fresh` or `stale`.
+    """
+    d = _artefacts(tmp_path)
+    _s, _c, past, _b = _resolve(d, "/", age=3600.0, stale_after=1.0)
+    assert past["X-Present-State"] == "stale-bannered", (
+        "control: with stale_after=1 an hour-old page must be stale, or this "
+        "test is not exercising the staleness branch at all")
+    _s, _c, future, _b = _resolve(d, "/", age=-3600.0, stale_after=1.0)
+    assert future["X-Present-State"] == "clock-suspect-bannered", (
+        f"got {future['X-Present-State']!r} — the clock guard did not run "
+        "before the staleness comparison")
 
 
 def test_the_age_header_reports_the_measured_age(tmp_path):
@@ -403,11 +594,14 @@ def test_both_variants_are_reachable_and_distinct(tmp_path):
 # Self-containment — through the GENERATOR's own scanner, not a second copy
 # --------------------------------------------------------------------------- #
 
-def test_the_bannered_page_is_still_self_contained(tmp_path):
+@pytest.mark.parametrize("age", (TEST_STALE_AFTER * 6, -8 * 86_400.0),
+                         ids=("stale", "clock-suspect"))
+def test_the_bannered_page_is_still_self_contained(tmp_path, age):
     """The artefact's whole point is that it opens from `file://` with no
-    network. Injecting a banner must not smuggle in an external reference."""
+    network. Injecting a banner must not smuggle in an external reference — and
+    BOTH banners are injected code, so both are checked."""
     d = _artefacts(tmp_path)
-    _s, _c, _h, body = _resolve(d, "/", age=TEST_STALE_AFTER * 6)
+    _s, _c, _h, body = _resolve(d, "/", age=age)
     problems = generate.self_contained(body.decode("utf-8"))
     assert problems == [], problems
 
@@ -415,7 +609,7 @@ def test_the_bannered_page_is_still_self_contained(tmp_path):
 def test_the_interstitials_are_self_contained():
     """They stand in for the artefact, so they clear the same bar."""
     for page in (serve._missing_page("present.html"),
-                 serve._unbannerable_page("present.html", 99_999)):
+                 serve._unbannerable_page("present.html", "<code>x</code> is old.")):
         assert generate.self_contained(page) == []
 
 
