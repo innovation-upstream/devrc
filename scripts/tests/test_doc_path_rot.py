@@ -459,7 +459,7 @@ def _read_list(path: Path) -> list[str]:
         # every known-dead one as NEW. That is exactly how the reference
         # implementation's repo produced a confident false alarm -- the script
         # was pulled into a clone without its sidecar.
-        raise AssertionError(  # pragma: no cover - the guard's own FIRING path: it fires only when the corpus is dirty, and no planted positive control drives it. Adding one is the real remedy
+        raise AssertionError(
             f"{path} is missing. This gate's verdict is meaningless without it; "
             "restore it from git rather than letting the run continue."
         )
@@ -1215,6 +1215,30 @@ def test_ignore_matcher_handles_both_forms():
     assert not _ignored("claude/skills/gone/SKILL.md.bak", ignores)
     assert not _ignored("claudedocs/other/deep.md", ignores)
     assert not _ignored("claude/skills/gone/SKILL.md", [])
+
+
+def test_a_missing_data_file_raises_LOUDLY_rather_than_reading_as_empty(tmp_path):
+    """POSITIVE CONTROL on `_read_list`'s missing-file guard.
+
+    Both sidecars exist in every real checkout, so on a healthy tree that guard
+    is never executed — indistinguishable from a guard wired to nothing. The
+    hazard it covers is silent: without it `path.read_text()` raises
+    `FileNotFoundError`, which reads as "the run crashed" rather than "the
+    gate's verdict is meaningless", and an earlier `.is_file()`-less version
+    would have returned an EMPTY list — reclassifying every exempt reference as
+    dead, or every known-dead one as NEW.
+
+    🔴 Pin the TYPE and the MESSAGE, not merely "something raised": deleting the
+    guard still raises, just a different exception with a different meaning.
+    """
+    missing = tmp_path / "doc-path-ignore.list"
+    with pytest.raises(AssertionError, match=r"is missing\. This gate's verdict"):
+        _read_list(missing)
+    # …and the happy path still returns the parsed list, so the guard is not
+    # simply refusing everything (comments and blanks stripped).
+    present = tmp_path / "present.list"
+    present.write_text("# a comment\n\nclaude/skills/gone/SKILL.md  # why\n")
+    assert _read_list(present) == ["claude/skills/gone/SKILL.md"]
 
 
 # --- stated limits -----------------------------------------------------------

@@ -240,18 +240,118 @@ def test_the_scanner_actually_walks_the_repo():
 
 
 # =========================================================================== #
-# THE GUARD
+# THE CHECKS, as pure functions over a root
 # =========================================================================== #
-def test_the_pending_state_set_is_defined_exactly_once():
+# 🔴 Each of the three loops below used to live inline inside its test, walking
+# the LIVE repo. That made every one of them structurally undriveable: they fire
+# only on a dirty corpus, and the corpus is clean, so the FIRING half of each
+# guard had never been executed by any test. Extracted verbatim (same
+# comparisons, same message strings) so a synthetic tree can drive them — the
+# live tests below call these with REPO and assert exactly what they did before.
+def scan_for_unallowlisted_literals(root: Path, allowlist=ALLOWLIST) -> dict:
+    """`{relpath: [line, ...]}` for every file holding TARGET outside `allowlist`."""
     offenders = {}
-    for p in python_files(REPO):
-        rel = p.relative_to(REPO).as_posix()
+    for p in python_files(root):
+        rel = p.relative_to(root).as_posix()
         try:
             hits = find_state_set_literals(p.read_text(encoding="utf-8"))
         except (SyntaxError, UnicodeDecodeError):
             continue  # pragma: no cover - not raised over the tracked corpus
-        if hits and rel not in ALLOWLIST:
-            offenders[rel] = hits  # pragma: no cover - the guard's own FIRING path: it fires only when the corpus is dirty, and no planted positive control drives it. Adding one is the real remedy
+        if hits and rel not in allowlist:
+            offenders[rel] = hits
+    return offenders
+
+
+def check_allowlist_counts(root: Path, allowlist=ALLOWLIST) -> list:
+    """Messages for every allowlist entry whose file is gone or miscounted."""
+    wrong = []
+    for rel, expected in sorted(allowlist.items()):
+        p = root / rel
+        if not p.exists():
+            wrong.append("%s: file is gone (expected %d)" % (rel, expected))
+            continue
+        hits = find_state_set_literals(p.read_text(encoding="utf-8"))
+        if len(hits) != expected:
+            wrong.append("%s: expected %d, found %d at line(s) %s"
+                         % (rel, expected, len(hits), hits))
+    return wrong
+
+
+def scan_for_threshold_respellings(root: Path, skip=()) -> list:
+    """`["rel:lineno text", ...]` for every re-spelling of the shared constant."""
+    offenders = []
+    for p in python_files(root):
+        rel = p.relative_to(root).as_posix()
+        if rel in skip:
+            continue
+        text = p.read_text(encoding="utf-8", errors="replace")
+        for i, line in enumerate(text.splitlines(), 1):
+            if "THRESHOLD_SECS" in line and "=" in line and "CG." not in line \
+                    and "clawgate_tasks" not in line:
+                offenders.append("%s:%d %s" % (rel, i, line.strip()))
+    return offenders
+
+
+# =========================================================================== #
+# 🔴 POSITIVE CONTROLS on the three FIRING paths above. Each feeds a synthetic
+# tree that MUST make one guard fire, and asserts THAT guard's own message —
+# never merely "the list is non-empty". Counts are pairwise distinct so the two
+# arms of the allowlist comparison cannot be confused for each other.
+# =========================================================================== #
+def test_positive_control_an_unallowlisted_copy_IS_reported(tmp_path):
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "rogue.py").write_text(
+        "# a fourth surface re-spelling the predicate\n"
+        'STATES = frozenset({"ready_for_review", "open"})\n')
+    # …and a file that IS pardoned must stay out of the report.
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "lib").mkdir()
+    (tmp_path / "scripts" / "lib" / "clawgate_tasks.py").write_text(
+        'PENDING_TASK_STATES = frozenset({"open", "ready_for_review"})\n')
+
+    offenders = scan_for_unallowlisted_literals(tmp_path)
+    assert offenders == {"pkg/rogue.py": [2]}, offenders
+
+
+def test_positive_control_a_pardoned_file_that_VANISHED_is_reported(tmp_path):
+    # Only the "file is gone" arm: nothing on disk at all. 7 is unique to this
+    # test, so a mutant that leaks into the other arm's message is visible.
+    wrong = check_allowlist_counts(tmp_path, {"scripts/vanished.py": 7})
+    assert wrong == ["scripts/vanished.py: file is gone (expected 7)"], wrong
+
+
+def test_positive_control_a_pardoned_file_with_the_WRONG_COUNT_is_reported(tmp_path):
+    # Only the count arm: the file exists and holds exactly 2 literals while the
+    # pardon was issued for 3. Both numbers differ from each other and from the
+    # 7 above, so this cannot pass by coincidence with the other arm.
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "pardoned.py").write_text(
+        'A = frozenset({"open", "ready_for_review"})\n'
+        'B = ["ready_for_review", "open", "blocked"]\n')
+    wrong = check_allowlist_counts(tmp_path, {"scripts/pardoned.py": 3})
+    assert wrong == [
+        "scripts/pardoned.py: expected 3, found 2 at line(s) [1, 2]"], wrong
+    # The same file pinned at its true count is silent — the guard is not simply
+    # rejecting everything.
+    assert check_allowlist_counts(tmp_path, {"scripts/pardoned.py": 2}) == []
+
+
+def test_positive_control_a_respelled_threshold_constant_is_reported(tmp_path):
+    (tmp_path / "consumer.py").write_text(
+        "import os\n"
+        "STUCK_THRESHOLD_SECS = 900\n"
+        "threshold = CG.STUCK_THRESHOLD_SECS\n")
+    (tmp_path / "skipped.py").write_text("OTHER_THRESHOLD_SECS = 42\n")
+
+    offenders = scan_for_threshold_respellings(tmp_path, skip=("skipped.py",))
+    assert offenders == ["consumer.py:2 STUCK_THRESHOLD_SECS = 900"], offenders
+
+
+# =========================================================================== #
+# THE GUARD
+# =========================================================================== #
+def test_the_pending_state_set_is_defined_exactly_once():
+    offenders = scan_for_unallowlisted_literals(REPO)
     assert not offenders, (
         "a second copy of the clawgate operator-pending state set appeared:\n"
         + "\n".join("  %s: line(s) %s" % (k, v) for k, v in offenders.items())
@@ -270,16 +370,7 @@ def test_every_allowlist_entry_carries_EXACTLY_the_pinned_number_of_literals():
     to an already-listed file, which is the regrowth the whole guard exists to
     catch, wearing a pardon it was never granted.
     """
-    wrong = []
-    for rel, expected in sorted(ALLOWLIST.items()):
-        p = REPO / rel
-        if not p.exists():
-            wrong.append("%s: file is gone (expected %d)" % (rel, expected))  # pragma: no cover - the guard's own FIRING path: it fires only when the corpus is dirty, and no planted positive control drives it. Adding one is the real remedy
-            continue
-        hits = find_state_set_literals(p.read_text(encoding="utf-8"))
-        if len(hits) != expected:
-            wrong.append("%s: expected %d, found %d at line(s) %s"  # pragma: no cover - the guard's own FIRING path: it fires only when the corpus is dirty, and no planted positive control drives it. Adding one is the real remedy
-                         % (rel, expected, len(hits), hits))
+    wrong = check_allowlist_counts(REPO)
     assert not wrong, (
         "the ALLOWLIST no longer accounts for the literals in these files:\n  "
         + "\n  ".join(wrong)
@@ -300,17 +391,9 @@ def test_the_threshold_constant_is_also_defined_exactly_once():
     # vacuous the moment it was renamed — a guard that stops matching is
     # indistinguishable from a guard that finds nothing. `_SECS` is what keeps it
     # off unrelated thresholds like session-manager's DEFAULT_STALE_THRESHOLD.
-    offenders = []
-    for p in python_files(REPO):
-        rel = p.relative_to(REPO).as_posix()
-        if rel in (LIB_REL, "scripts/tests/test_clawgate_tasks.py",
-                   "scripts/tests/test_clawgate_predicate_single_source.py"):
-            continue
-        text = p.read_text(encoding="utf-8", errors="replace")
-        for i, line in enumerate(text.splitlines(), 1):
-            if "THRESHOLD_SECS" in line and "=" in line and "CG." not in line \
-                    and "clawgate_tasks" not in line:
-                offenders.append("%s:%d %s" % (rel, i, line.strip()))  # pragma: no cover - the guard's own FIRING path: it fires only when the corpus is dirty, and no planted positive control drives it. Adding one is the real remedy
+    offenders = scan_for_threshold_respellings(
+        REPO, skip=(LIB_REL, "scripts/tests/test_clawgate_tasks.py",
+                    "scripts/tests/test_clawgate_predicate_single_source.py"))
     assert not offenders, (
         "a stuck-threshold constant was re-spelled outside the shared module:\n  "
         + "\n  ".join(offenders)
