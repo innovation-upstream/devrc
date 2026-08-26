@@ -113,13 +113,20 @@ def _searchable_files() -> list[Path]:
     enumeration narrower than its own sentence is a coverage claim nobody can
     see is false.
 
-    ⚠ ONE DELIBERATE EXCLUSION: `.md`. Widening the scan made it trippable by a
-    file that DOCUMENTS the hazard rather than commits it — `githooks/README.md`
-    shows the bad form as a counter-example — and a ledger that goes red at
-    prose teaches people to ignore it. Documentation is not executed. The
-    residual is stated rather than hidden: a test FIXTURE that legitimately
-    represents the broken state would still trip this, and the failure message
-    is what tells its author so.
+    ⚠ ONE DELIBERATE EXCLUSION: `.md`, and its ORIGINAL JUSTIFICATION HERE WAS
+    FALSE. This said `githooks/README.md` "shows the bad form as a
+    counter-example"; it does not — that file contains no such assignment at
+    all, because the README change that would have introduced one was reverted
+    in c558eb0d. A census of tracked files finds the string in exactly two
+    places, both already in the ledger. So the exclusion protects against
+    nothing TODAY and is kept only pre-emptively: documentation is not executed,
+    and a ledger that reddens at prose is a ledger people learn to ignore.
+    Stated honestly rather than left reading as a measured need.
+
+    ⚠ RESIDUAL, not hidden: a test FIXTURE representing the broken state would
+    still trip this, as would a shell COMMENT mentioning the assignment — the
+    "documentation is not executed" reasoning does not extend to comments inside
+    executable files. Neither exists today.
     """
     out: list[Path] = []
     for root in (SCRIPTS, GITHOOKS):
@@ -184,10 +191,33 @@ def _nix_code(path: Path, keep_strings: bool = True) -> str:
             i = j
             continue
         if src.startswith("''", i):
+            # 🔴 `''$`, `'''` and `''\\` are ESCAPES inside an indented string, not
+            # terminators. `nix/home.nix` contains four `''${…}` antiquotation
+            # escapes, and treating one as a closer DESYNCS the scanner for the
+            # rest of the file: every real closer is then read as an opener.
+            # Measured consequences before this was handled — both of them the
+            # exact failure classes this file exists to prevent:
+            #   * FALSE GREEN — the contents of a later `''` block were emitted
+            #     as code, so `keep_strings=False` did not blank them and a pin
+            #     could be satisfied by text spelled inside a string.
+            #   * FALSE RED, position-dependent — a later block contains the
+            #     glob `{plugin,plugins}/*.{ts,js}`, whose `/*` then swallowed
+            #     to EOF, so merely MOVING `programs = programs;` to the end of
+            #     home.nix turned this suite red. A guard whose verdict depends
+            #     on where in a file an assignment sits is worse than no guard.
+            # Confirmed against nix itself: `builtins.stringLength ''a="''${x}"''`
+            # counts the `${` as literal.
             j = i + 2
-            while j < n and not src.startswith("''", j):
+            while j < n:
+                if src.startswith("''", j):
+                    if src[j + 2:j + 3] in ("$", "'", "\\"):
+                        j += 3          # escape — keep scanning
+                        continue
+                    j += 2
+                    break
                 j += 1
-            j = min(n, j + 2)
+            else:
+                j = n
             chunk = src[i:j]
             out.append(chunk if keep_strings
                        else "''" + "".join(ch if ch == "\n" else " "
@@ -222,8 +252,18 @@ def _top_level_of_settings() -> str:
     Nested braces are blanked rather than removed, so a match here means "a
     direct member of settings", not "somewhere under settings".
     """
+    # 🔴 LOCATE on the string-BLANKED text, SLICE the string-KEEPING one. Both
+    # passes remove comments identically and blank strings in place, so the two
+    # outputs have identical offsets — which lets the locator be immune to a
+    # `settings = {` spelled inside a string while the extraction still sees the
+    # real value.
+    # 🔴 `\b` is NOT the right boundary: it treats `.` as one, so `lfs.settings`
+    # satisfied `\bsettings` and an earlier unrelated attrset could hijack the
+    # locator. That is the SAME `\b` trap this file already fixed for
+    # `import ./git` — one rule, wrong at the site nobody updated.
     code = _nix_code(GIT_MODULE, keep_strings=True)
-    m = re.search(r"\bsettings\s*=\s*\{", code)
+    located = _nix_code(GIT_MODULE, keep_strings=False)
+    m = re.search(r"(?<![.\w])settings\s*=\s*\{", located)
     if not m:
         return ""
     depth, i, body = 1, m.end(), []
