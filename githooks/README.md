@@ -14,7 +14,7 @@ Version-controlled, global git hooks. Two features, in order on every push:
 |---|---|
 | `pre-push` | Global dispatcher. Chains to any repo-local pre-push first (never clobbers it), runs the **blocking test gate**, then fires the audit **backgrounded** so the push is never delayed. |
 | `tests-on-push.sh` | SYNCHRONOUS worker: self-detects devrc, filters on changed files, runs `scripts/run-tests.sh --set all` in the repo's **own devShell** (`nix develop`, so a venv owned by the caller's cwd cannot shadow the interpreter), and (mode `on`) **blocks on a test failure (exit 1) or a repo-content guard (exit 2)**. An ENVIRONMENT precondition (exit 3) → warn + allow. No-op for non-devrc repos. |
-| `audit-on-push.sh` | The backgrounded worker: branch + diff-size + flag gates, then headless `claude -p "/audit-pr current"`, then routes 🔴/🟡 to clawgate. |
+| `audit-on-push.sh` | The backgrounded worker: fixture-tree + branch + synthetic-ref + diff-size + flag gates, then headless `claude -p "/audit-pr current"`, then routes 🔴/🟡 to clawgate. |
 | `install.sh` | Sets `git config --global core.hooksPath` to this dir. `--uninstall` reverts. |
 | `audit-on-push.env.example` | Config template → copy to `~/.claude/audit-on-push.env`. |
 
@@ -128,13 +128,40 @@ Other knobs in that file: `AUDIT_MIN_LINES` (default 40 — skip trivial diffs),
 ## Trigger gates (all must pass, else it exits silently)
 
 1. `AUDIT_ON_PUSH != off`
-2. Branch is a **feature branch** — `zach/*`, `feat*`, `fix*`, `feature/*`,
+2. **The repository being graded is not a pytest temp fixture tree** — the
+   REPO ROOT (not cwd) is not under `pytest-of-*` / `/tmp/pytest-*` /
+   `*/pytest[-_]basetemp/*`, and no `PYTEST_CURRENT_TEST` / `PYTEST_VERSION`
+   is in the environment. Both halves are kept: `--basetemp=<dir>` defeats
+   every path pattern, and the env is absent when a stale fixture path is
+   pushed from a plain shell after the run.
+3. Branch is a **feature branch** — `zach/*`, `feat*`, `fix*`, `feature/*`,
    `hotfix/*`, `chore/*`, `refactor/*`, `wip/*`, or any `*/*`.
    **Never** `trunk` / `main` / `master` / `develop`.
-3. Diff (HEAD vs merge-base with upstream/default) ≥ `AUDIT_MIN_LINES` lines.
+4. **The push is not at a throwaway remote, and the branch is not a synthetic
+   local test ref** — the destination URL is not a `/tmp`-ish filesystem path,
+   and a `test/*`-namespace branch with no upstream whose remote sha is
+   all-zero (git's own "the remote does not have this ref") is skipped.
+   🔴 "no upstream" **alone** is deliberately NOT a trigger: the first
+   `git push -u origin fix/…` of a real feature branch also lacks one, and
+   that is the single most valuable push to audit.
+5. Diff (HEAD vs merge-base with upstream/default) ≥ `AUDIT_MIN_LINES` lines.
 
 Only then does the single LLM call (the audit) run. Everything before it is
 deterministic + cheap. Clean / 🟢-only audits are suppressed → no notification.
+
+Gates 2 and 4 are the **2026-08-25 fixture-audit fix**: a 14-day session audit
+found 5 hook-fired audit runs, **3 of them launched from inside
+`/tmp/.../pytest-of-zach/pytest-0/test_…/`**, one of which graded the branch
+`test/prepush-pc-r3` — a ref that has never existed upstream. The four
+non-productive runs cost **167,977 output tokens**. Pinned by
+`scripts/tests/test_audit_on_push_fixture_guard.py`. 🔴 That file re-measures
+the guard's own mutation score every run instead of asserting it in prose: the
+worker carries `# >>> GUARD:x` / `# <<< GUARD:x` sentinels, the test deletes
+exactly those lines and requires the result to audit all five cases the shipped
+worker skips. **If you edit either guard, keep the sentinels on their own lines
+and keep the helper functions OUTSIDE them** — a mutant that removes a guard
+together with the machinery it calls dies of `command not found`, which is a
+kill the test has not earned.
 
 ## Notification surface
 
