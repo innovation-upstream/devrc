@@ -428,12 +428,30 @@ def test_an_unmeasured_stage_renders_the_word_not_a_blank():
     checked: a row that came back UNMEASURED, and a key no measurer produces at
     all — the second has no row to be missing from, so a fallback to empty text
     would leave the picture looking complete.
+
+    🔴 THE EXPECTATION IS A DELTA, NOT A LITERAL, AND THE VICTIMS ARE CHOSEN
+    FROM WHAT MEASURED ON THIS BUILD. This test asserted a literal `== 2` warned
+    boxes and pinned its victims to stage positions 0 and 1. `index.store` is a
+    stage whose row needs a home directory, so it is legitimately UNMEASURED in
+    the sandbox tier — which made the count 3 there and 2 on the dev host. The
+    test therefore PASSED on the dev host and FAILED in the tier the merge is
+    gated on: exactly the two-tier blindness the page itself warns about, in the
+    suite that guards the page. Measured 2026-08-25: dev host 2, sandbox 3.
     """
     from dataclasses import replace
 
     ms = _live_set()
-    key = content.OVERVIEW_STAGES[0][3]
-    gone = content.OVERVIEW_STAGES[1][3]
+    live_warned = content.diagram_overview(ms).count("dbox-warn")
+
+    measured_keys = [
+        k for _label, _slug, _sub, k, _tone in content.OVERVIEW_STAGES
+        if (row := ms.by_key(k)) is not None and row.measured
+    ]
+    assert len(measured_keys) >= 2, (
+        "fewer than two overview stages measured on this build, so this "
+        "control cannot introduce two NEW absences and would prove nothing"
+    )
+    key, gone = measured_keys[0], measured_keys[1]
 
     items = []
     for m in ms.items:
@@ -451,7 +469,15 @@ def test_an_unmeasured_stage_renders_the_word_not_a_blank():
         "each absent stage must render the WORD in the box and name itself in "
         "its tooltip — two mentions per stage, two stages"
     )
-    assert svg.count("dbox-warn") == 2, "an absent stage must be visibly toned"
+    # 🔴 THIS IS ALSO THE CONTROL. A diagram that toned every stage regardless
+    # would give live_warned == len(OVERVIEW_STAGES) and no delta, so it fails
+    # here; a diagram that toned nothing gives a delta of 0 and fails too. The
+    # equality is what makes both directions observable.
+    assert content.diagram_overview(bad).count("dbox-warn") == live_warned + 2, (
+        "breaking two stages that measured on this build must add exactly two "
+        f"visibly-toned boxes (live={live_warned}); it did not, so either "
+        "absence is not being toned or every stage is toned unconditionally"
+    )
     assert "a synthetic absence, for this control" in svg, (
         "the reason for an UNMEASURED stage must be reachable from the diagram"
     )
@@ -461,12 +487,6 @@ def test_an_unmeasured_stage_renders_the_word_not_a_blank():
     assert _html.escape(f"no measurer produces {gone!r}") in svg, (
         "a stage whose key no measurer produces must say so — it has no row to "
         "be missing from, so silence here is invisible"
-    )
-    # And the control that makes the three above meaningful: with everything
-    # measured, none of that fires.
-    assert "dbox-warn" not in content.diagram_overview(ms), (
-        "the fully-measured diagram is also flagging absence, so the assertions "
-        "above would pass no matter what the code did"
     )
 
 
