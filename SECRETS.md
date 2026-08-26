@@ -175,14 +175,31 @@ backups`); `scripts/analyze-service-index/escrow-verify.py` is what re-checks
 that copy, so the escrow does not quietly rot into a second thing that only
 looks intact.
 
+🔴 **RUN IT ONCE BEFORE YOU UNLOCK.** The order below is deliberate and was
+learned twice: `--decrypt-check` reaches MinIO through a LAZY `minio` import, so
+a shell without that package unlocked the vault and died afterwards — the master
+password spent on a run that was never going to finish. A locked first pass costs
+a second and proves the shell, the argv and the host label; `escrow-verify.py`
+cannot prompt for a password itself (every `bw` call runs with stdin on
+`/dev/null`), so the only spend is your own `bw unlock`.
+
+⚠ The `python3.withPackages(...)` argument is **required** for `--decrypt-check`.
+Without it `python3` resolves from the ambient profile, which does not carry
+`minio`, and the run refuses with exit 34 naming the interpreter.
+
 ```sh
 # `bw` is deliberately NOT installed on either host.
-nix-shell -p bitwarden-cli jq --run '
-  export BW_SESSION="$(bw unlock --raw)"          # the ONE step nothing can automate
-  python3 scripts/analyze-service-index/escrow-verify.py
+nix-shell -p bitwarden-cli jq 'python3.withPackages(p:[p.minio])' --run '
+  # 1. locked dry pass: exits 12 VAULT-LOCKED, or 34 if THIS shell is wrong.
+  #    Either way no password has been spent.
+  python3 scripts/analyze-service-index/escrow-verify.py --decrypt-check --host <host label>
+  # 2. only now — the ONE step nothing can automate
+  export BW_SESSION="$(bw unlock --raw)"
+  # 3. the claim that matters
+  python3 scripts/analyze-service-index/escrow-verify.py --decrypt-check --host <host label>
 '
-… escrow-verify.py --decrypt-check --host <host label>   # the claim that matters
-… escrow-verify.py --print-plan                          # no bw, no network, no key
+… escrow-verify.py --print-plan   # no bw, no network, no key — and it names
+                                  # which file the comparison will actually use
 ```
 
 Two levels, and they are **different claims**. The default compares the note to
@@ -201,12 +218,13 @@ materially. It reports **byte counts and a classification only, never the
 differing content**, and it reads the server from `bw config server` at run time
 rather than carrying an endpoint into a public repo.
 
-🔴 **Under `--decrypt-check` the eight outcomes mean different things, and only
+🔴 **Under `--decrypt-check` the nine outcomes mean different things, and only
 one of them is about the KEY.** Reading these wrong is how a working
 disaster-recovery key gets rotated, or a tampered backup gets waved through:
 
 | code | meaning | what to do |
 |---|---|---|
+| `34` `DECRYPT-DEPS-MISSING` | this interpreter cannot import what the decrypt path needs — raised BEFORE any `bw` call | re-run under the shell above; nothing was tested and the vault was not contacted |
 | `27` `STORE-UNREACHABLE` | could not open the bucket at all | cluster/route fault; nothing was tested |
 | `28` `NO-ARTIFACT` | zero objects under the prefix | wrong `--host`/prefix, or the backups are gone — `restore-verify.py` diagnoses which |
 | `29` `AGE-MISSING` | `age` is not on PATH | environment fault; says nothing about the escrow |

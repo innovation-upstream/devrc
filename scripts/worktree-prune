@@ -1,0 +1,835 @@
+#!/usr/bin/env python3
+"""Classify git worktrees across many repos as dead / orphan / live / cannot-tell.
+
+WHY THIS EXISTS
+---------------
+A 14-day audit counted 593 worktrees across these repos and reported 217 dead
+and 245 orphans. That classification is NOT usable as a delete list, for a
+reason that has nothing to do with the count: the containment checker that
+produced it called a `git diff --pathspec-from-file` that does not exist, exited
+129, and therefore scored EVERY branch as unmerged. It was rebuilt and spot-
+checked 7/7 against PR ground truth afterwards — but 7 confirmations is thin
+support for 245 irreversible deletions, and "unmerged, no PR" is also the exact
+profile of work in progress.
+
+So this tool re-derives the classification from scratch, records the EVIDENCE
+each verdict rests on, and refuses to guess.
+
+🔴 THE TRAP THIS TOOL IS BUILT AROUND: A SQUASH MERGE IS NOT AN ANCESTOR
+------------------------------------------------------------------------
+`git merge-base --is-ancestor <branch> <default>` returns FALSE for every
+squash-merged branch, forever — the squash is a new commit with different
+parents, so the branch's own commits genuinely are not in the default branch's
+history. A classifier that asks only that question reports merged work as
+orphaned, which is the failure mode that gets real work deleted.
+
+"Did this land" is therefore answered by FOUR independent signals, and the row
+records which ones fired:
+
+  ancestor          `git merge-base --is-ancestor` — definitive when true,
+                    worthless when false (see above).
+  pr-merged         `gh pr list --head <branch> --state all` reports MERGED.
+                    Definitive, and the only signal that survives a squash the
+                    default branch has since built on top of.
+  content-identical every path the branch changed since its merge-base has the
+                    SAME content in the default branch. This is the signal that
+                    catches a squash merge with no git-level ancestry.
+  patch-equivalent  `git cherry <default> <head>` finds an equivalent commit
+                    upstream for every commit on the branch. Catches rebases
+                    and cherry-picks.
+
+🔴 `content-identical` HAS A KNOWN FALSE NEGATIVE, stated rather than implied:
+if the branch squash-merged and the default branch has since CHANGED one of
+those paths again, the contents no longer match and this signal goes quiet. That
+is why `pr-merged` exists, and why a row with no signal at all and no
+authoritative PR answer is `cannot-tell`, never `dead`.
+
+🔴 AND A GUARD AGAINST THE MIRROR-IMAGE BUG: a comparison against an ABSENT
+operand reports SAME, not MISSING. If the branch changed nothing since its
+merge-base the changed-path set is EMPTY, and a pathspec-less `git diff` would
+then compare the WHOLE TREES and answer a question nobody asked. That case is
+short-circuited explicitly (`no-content-change`) and never reaches the diff.
+
+THE VERDICTS
+------------
+  live         the main checkout, or locked, or DIRTY (any uncommitted or
+               untracked file), or carrying an OPEN pull request.
+  dead         clean, and at least one landing signal fired.
+  orphan       clean, no landing signal, AND an authoritative PR answer says
+               there is no open PR. Informational — NEVER removable.
+  cannot-tell  everything else, loudly: gh unavailable or unauthenticated, a
+               truncated PR index, a detached HEAD with no branch to look up, an
+               unresolvable default branch, a git command that failed, a
+               worktree whose path is gone. It is never silently folded into
+               `dead`.
+
+🔴 WHAT THIS TOOL WILL NOT DO
+-----------------------------
+  * `--dry-run` is the DEFAULT. Nothing is removed without `--execute`.
+  * `--execute` additionally requires `--confirm N` where N is EXACTLY the
+     number of rows the run would remove. A scope that moved under you (a
+     branch merged, a worktree went dirty) changes N and the run refuses.
+  * Only rows whose verdict is `dead` are ever removable. `orphan` and
+    `cannot-tell` are not, by construction.
+  * `git worktree remove` is called WITHOUT `--force`, ever. Git's own refusal
+    on a dirty tree is a second, independent floor under the dirty check this
+    tool already ran — and it is re-run immediately BEFORE each removal, not
+    inherited from the scan that motivated it.
+
+USAGE
+  worktree-prune --scan-root ~/workspace --scan-depth 2 [--out report.json]
+  worktree-prune --repo ~/workspace/devrc --format json
+  worktree-prune --repos-from repos.txt --no-gh
+  worktree-prune --scan-root ~/workspace --execute --confirm 12   # fires
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
+# ── exit codes ────────────────────────────────────────────────────────────────
+RC_OK = 0
+RC_USAGE = 2
+RC_EXECUTE_REFUSED = 3
+RC_NOTHING_TO_SCAN = 4
+
+# Verdict vocabulary. Spelled as literals so a test can pin them without reading
+# them back out of the classifier that produces them.
+DEAD = "dead"
+ORPHAN = "orphan"
+LIVE = "live"
+CANNOT_TELL = "cannot-tell"
+VERDICTS = (DEAD, ORPHAN, LIVE, CANNOT_TELL)
+
+# 🔴 argv on Linux is capped (~128 KiB for a single argument list, and a
+# civitai branch can touch thousands of paths). Pathspecs are therefore batched
+# well under that rather than passed in one go — a truncated-argv failure would
+# show up as "no differing paths", i.e. as a confident, wrong `dead`.
+PATHSPEC_BATCH_BYTES = 40_000
+
+GIT_TIMEOUT = 180
+GH_TIMEOUT = 120
+
+DEFAULT_BRANCH_CANDIDATES = ("main", "master", "trunk", "develop")
+
+
+def _log(msg: str) -> None:
+    print(msg, file=sys.stderr)
+
+
+# ── git plumbing ──────────────────────────────────────────────────────────────
+
+def _git(cwd: Path, *args: str, timeout: int = GIT_TIMEOUT) -> subprocess.CompletedProcess:
+    """One git invocation. `--no-optional-locks` so a read cannot race a
+    concurrent session by refreshing the index of a repo it does not own."""
+    return subprocess.run(
+        ["git", "--no-optional-locks", "-C", str(cwd), *args],
+        capture_output=True, text=True, timeout=timeout, check=False,
+    )
+
+
+def _git_ok(cwd: Path, *args: str) -> "str | None":
+    r = _git(cwd, *args)
+    return r.stdout.strip() if r.returncode == 0 else None
+
+
+def is_dir(p: Path) -> bool:
+    """`Path.is_dir()` that cannot raise.
+
+    🔴 `Path.is_dir()` RAISES on EACCES — it swallows only ENOENT/ENOTDIR/EBADF/
+    ELOOP. Measured on this tool's FIRST real run: a `lost+found` inside a scan
+    root took the whole scan down with a PermissionError traceback before one
+    row was printed. A directory we cannot read holds no worktrees we can
+    classify; that is a row we cannot tell about, not a reason to abandon the
+    other 750. One helper, used at every such test, because the same
+    `Path.is_dir()` sits behind `path_exists` and the dirty check too.
+    """
+    try:
+        return p.is_dir()
+    except OSError:
+        return False
+
+
+def discover_repos(roots: "list[Path]", depth: int) -> "list[Path]":
+    """Directories under `roots` (to `depth` levels) whose `.git` is a DIRECTORY.
+
+    🔴 The `.git`-is-a-directory test is what separates a MAIN checkout from a
+    linked worktree: a linked worktree's `.git` is a FILE holding `gitdir: …`.
+    Enumerating worktrees from a linked worktree would report the same set N
+    times and make every count wrong.
+    """
+    found: dict[str, Path] = {}
+
+    def walk(d: Path, level: int) -> None:
+        if level > depth:
+            return
+        try:
+            entries = sorted(p for p in d.iterdir() if is_dir(p) and not p.is_symlink())
+        except OSError:
+            return
+        for p in entries:
+            if p.name == ".git":
+                continue
+            if is_dir(p / ".git"):
+                found[str(p.resolve())] = p.resolve()
+                continue  # a main checkout; do not descend into its worktrees
+            walk(p, level + 1)
+
+    for root in roots:
+        root = root.expanduser()
+        if is_dir(root / ".git"):
+            found[str(root.resolve())] = root.resolve()
+            continue
+        walk(root, 1)
+    return sorted(found.values(), key=str)
+
+
+def parse_worktree_porcelain(text: str) -> "list[dict]":
+    """Parse `git worktree list --porcelain` into one dict per worktree.
+
+    Blocks are blank-line separated; the FIRST block is the main worktree.
+    Attribute lines are `key` or `key value`.
+    """
+    rows: list[dict] = []
+    cur: "dict | None" = None
+    for raw in text.splitlines():
+        line = raw.rstrip("\n")
+        if not line.strip():
+            if cur is not None:
+                rows.append(cur)
+                cur = None
+            continue
+        key, _, value = line.partition(" ")
+        if key == "worktree":
+            if cur is not None:
+                rows.append(cur)
+            cur = {"path": value, "head": None, "branch": None, "detached": False,
+                   "bare": False, "locked": False, "lock_reason": None,
+                   "prunable": False, "prune_reason": None}
+        elif cur is None:
+            continue
+        elif key == "HEAD":
+            cur["head"] = value
+        elif key == "branch":
+            cur["branch"] = value[len("refs/heads/"):] if value.startswith("refs/heads/") else value
+        elif key == "detached":
+            cur["detached"] = True
+        elif key == "bare":
+            cur["bare"] = True
+        elif key == "locked":
+            cur["locked"] = True
+            cur["lock_reason"] = value or None
+        elif key == "prunable":
+            cur["prunable"] = True
+            cur["prune_reason"] = value or None
+    if cur is not None:
+        rows.append(cur)
+    for i, r in enumerate(rows):
+        r["is_main"] = (i == 0)
+    return rows
+
+
+def list_worktrees(repo: Path) -> "list[dict]":
+    r = _git(repo, "worktree", "list", "--porcelain")
+    if r.returncode != 0:
+        return []
+    return parse_worktree_porcelain(r.stdout)
+
+
+def resolve_default_ref(repo: Path) -> "tuple[str | None, str]":
+    """The repo's default branch, plus HOW it was resolved.
+
+    The `how` string is carried into every row's evidence: a verdict computed
+    against the wrong default branch is wrong in the dangerous direction, and
+    "we guessed `main` because origin/HEAD was unset" must be visible.
+    """
+    sym = _git_ok(repo, "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD")
+    if sym:
+        return sym, "origin-head-symref"
+    for name in DEFAULT_BRANCH_CANDIDATES:
+        ref = f"refs/remotes/origin/{name}"
+        if _git(repo, "rev-parse", "--verify", "--quiet", ref).returncode == 0:
+            return ref, f"remote-candidate:{name}"
+    for name in DEFAULT_BRANCH_CANDIDATES:
+        ref = f"refs/heads/{name}"
+        if _git(repo, "rev-parse", "--verify", "--quiet", ref).returncode == 0:
+            return ref, f"local-candidate:{name}"
+    return None, "unresolved"
+
+
+def repo_slug(repo: Path) -> "str | None":
+    """`owner/name` from origin's URL, for `gh --repo`. None if not GitHub."""
+    url = _git_ok(repo, "remote", "get-url", "origin")
+    if not url:
+        return None
+    u = url.strip()
+    if u.endswith(".git"):
+        u = u[:-4]
+    if "github.com" not in u:
+        return None
+    if u.startswith("git@") or u.startswith("ssh://"):
+        _, _, tail = u.partition("github.com")
+        tail = tail.lstrip(":/")
+    else:
+        _, _, tail = u.partition("github.com")
+        tail = tail.lstrip("/")
+    parts = [p for p in tail.split("/") if p]
+    return "/".join(parts[:2]) if len(parts) >= 2 else None
+
+
+def worktree_dirty(path: Path) -> "tuple[bool | None, int, list[str]]":
+    """(dirty, count, sample). `None` means UNKNOWABLE — never False.
+
+    Untracked files count as dirty on purpose: an unstaged new file is exactly
+    the "docs written into a working tree are unsaved work" case, and it is the
+    one a tracked-only check would silently discard.
+    """
+    if not is_dir(path):
+        return None, 0, []
+    r = _git(path, "status", "--porcelain=v1", "--untracked-files=normal")
+    if r.returncode != 0:
+        return None, 0, [f"git status failed rc={r.returncode}: {r.stderr.strip()[:200]}"]
+    lines = [ln for ln in r.stdout.splitlines() if ln.strip()]
+    return (len(lines) > 0), len(lines), lines[:10]
+
+
+def _paths_differ(repo: Path, rev_a: str, rev_b: str, paths: "list[str]") -> "bool | None":
+    """Do any of `paths` differ between the two revs? None on a git failure.
+
+    🔴 `paths` MUST be non-empty. A pathspec-less `git diff` compares the whole
+    trees, which would answer a different question and — for a branch with no
+    unique content — answer it wrongly. The caller short-circuits that case; the
+    assertion here is the second floor under it.
+    """
+    if not paths:
+        raise AssertionError(
+            "_paths_differ called with an EMPTY pathspec — that silently widens "
+            "the comparison to the whole tree. The no-content-change case is "
+            "the caller's to handle.")
+    batch: list[str] = []
+    size = 0
+    batches: list[list[str]] = []
+    for p in paths:
+        if batch and size + len(p) + 1 > PATHSPEC_BATCH_BYTES:
+            batches.append(batch)
+            batch, size = [], 0
+        batch.append(p)
+        size += len(p) + 1
+    if batch:
+        batches.append(batch)
+    for b in batches:
+        r = _git(repo, "diff", "--name-only", rev_a, rev_b, "--", *b)
+        if r.returncode != 0:
+            return None
+        if r.stdout.strip():
+            return True
+    return False
+
+
+def landing_signals(repo: Path, head: str, default_ref: str) -> "dict":
+    """Which of the git-side landing signals fired, and what was checked.
+
+    Returns {"fired": [...], "checked": [...], "notes": [...]}.
+    """
+    fired: list[str] = []
+    checked: list[str] = []
+    notes: list[str] = []
+
+    checked.append("ancestor")
+    anc = _git(repo, "merge-base", "--is-ancestor", head, default_ref)
+    if anc.returncode == 0:
+        fired.append("ancestor")
+        notes.append(f"{head[:12]} is an ancestor of {default_ref}")
+        return {"fired": fired, "checked": checked, "notes": notes}
+    if anc.returncode not in (0, 1):
+        notes.append(f"ancestor check failed rc={anc.returncode}: {anc.stderr.strip()[:160]}")
+        return {"fired": fired, "checked": checked, "notes": notes, "error": True}
+
+    base = _git_ok(repo, "merge-base", head, default_ref)
+    if not base:
+        notes.append(f"no merge-base between {head[:12]} and {default_ref}")
+        return {"fired": fired, "checked": checked, "notes": notes, "error": True}
+
+    checked.append("content-identical")
+    r = _git(repo, "diff", "--name-only", base, head)
+    if r.returncode != 0:
+        notes.append(f"changed-path listing failed rc={r.returncode}")
+        return {"fired": fired, "checked": checked, "notes": notes, "error": True}
+    changed = [p for p in r.stdout.splitlines() if p.strip()]
+    if not changed:
+        # 🔴 The empty-operand case, handled here and NOT by a pathspec-less
+        # diff. The branch introduced no content relative to its merge-base, so
+        # there is nothing that could fail to be present upstream.
+        fired.append("no-content-change")
+        notes.append(f"branch changes no path relative to merge-base {base[:12]}")
+        return {"fired": fired, "checked": checked, "notes": notes}
+    differ = _paths_differ(repo, head, default_ref, changed)
+    if differ is None:
+        notes.append("content comparison failed")
+        return {"fired": fired, "checked": checked, "notes": notes, "error": True}
+    if not differ:
+        fired.append("content-identical")
+        notes.append(f"all {len(changed)} changed path(s) have identical content in {default_ref}")
+    else:
+        notes.append(f"at least one of {len(changed)} changed path(s) differs from {default_ref}")
+
+    checked.append("patch-equivalent")
+    cherry = _git(repo, "cherry", default_ref, head)
+    if cherry.returncode == 0:
+        lines = [ln for ln in cherry.stdout.splitlines() if ln.strip()]
+        if lines and all(ln.startswith("-") for ln in lines):
+            fired.append("patch-equivalent")
+            notes.append(f"git cherry: all {len(lines)} commit(s) have an equivalent upstream")
+        elif lines:
+            unmatched = sum(1 for ln in lines if ln.startswith("+"))
+            notes.append(f"git cherry: {unmatched}/{len(lines)} commit(s) have no upstream equivalent")
+    else:
+        notes.append(f"git cherry failed rc={cherry.returncode}")
+
+    return {"fired": fired, "checked": checked, "notes": notes}
+
+
+# ── gh / pull requests ────────────────────────────────────────────────────────
+
+class PullRequestIndex:
+    """Per-repo branch -> pull request state, with an explicit ANSWERED flag.
+
+    🔴 `answered` is the whole point. "No PR found" and "we could not ask" are
+    the same OBSERVABLE — an empty result — and they license opposite verdicts:
+    the first supports `orphan`, the second supports only `cannot-tell`. A
+    truncated PR listing collapses them too, so truncation is detected and the
+    per-branch fallback query is used for anything the bulk index missed.
+    """
+
+    def __init__(self, slug: "str | None", gh_cmd: str, enabled: bool, limit: int = 2000):
+        self.slug = slug
+        self.gh_cmd = gh_cmd
+        self.enabled = enabled
+        self.limit = limit
+        self.by_branch: "dict[str, dict]" = {}
+        self.truncated = False
+        self.available = False
+        self.reason = "gh disabled by --no-gh" if not enabled else "not fetched"
+
+    def fetch(self) -> None:
+        if not self.enabled:
+            return
+        if not self.slug:
+            self.reason = "no github origin remote — cannot ask gh"
+            return
+        r = self._gh("pr", "list", "--repo", self.slug, "--state", "all",
+                     "--limit", str(self.limit),
+                     "--json", "number,state,headRefName,mergedAt,url")
+        if r is None or r.returncode != 0:
+            err = "gh not runnable" if r is None else (r.stderr.strip()[:200] or f"rc={r.returncode}")
+            self.reason = f"gh pr list failed: {err}"
+            return
+        try:
+            data = json.loads(r.stdout or "[]")
+        except json.JSONDecodeError:
+            self.reason = "gh pr list returned unparseable JSON"
+            return
+        for pr in data:
+            branch = pr.get("headRefName")
+            if not branch:
+                continue
+            prev = self.by_branch.get(branch)
+            # Prefer MERGED > OPEN > CLOSED, then the highest number.
+            rank = {"MERGED": 3, "OPEN": 2, "CLOSED": 1}
+            if prev is None or (rank.get(pr.get("state"), 0), pr.get("number", 0)) > \
+                    (rank.get(prev.get("state"), 0), prev.get("number", 0)):
+                self.by_branch[branch] = pr
+        self.truncated = len(data) >= self.limit
+        self.available = True
+        self.reason = (f"gh pr list returned {len(data)} PR(s)"
+                       + (f" — AT THE {self.limit} LIMIT, index may be truncated" if self.truncated else ""))
+
+    def lookup(self, branch: "str | None") -> "dict":
+        """{'answered': bool, 'state': str|None, 'number': int|None, 'why': str}"""
+        if branch is None:
+            return {"answered": False, "state": None, "number": None, "merged_at": None,
+                    "why": "detached HEAD — no branch to look a pull request up by"}
+        if not self.enabled:
+            return {"answered": False, "state": None, "number": None, "merged_at": None,
+                    "why": "gh disabled (--no-gh)"}
+        if not self.available:
+            return {"answered": False, "state": None, "number": None, "merged_at": None,
+                    "why": self.reason}
+        hit = self.by_branch.get(branch)
+        if hit is not None:
+            return {"answered": True, "state": hit.get("state"), "number": hit.get("number"),
+                    "merged_at": hit.get("mergedAt"), "why": "found in the repo's PR index"}
+        if not self.truncated:
+            return {"answered": True, "state": None, "number": None, "merged_at": None,
+                    "why": f"absent from a COMPLETE index of {len(self.by_branch)} branch(es)"}
+        # Truncated index: an absence proves nothing. Ask directly.
+        r = self._gh("pr", "list", "--repo", self.slug, "--head", branch, "--state", "all",
+                     "--limit", "10", "--json", "number,state,headRefName,mergedAt,url")
+        if r is None or r.returncode != 0:
+            return {"answered": False, "state": None, "number": None, "merged_at": None,
+                    "why": "PR index truncated and the per-branch query failed"}
+        try:
+            data = json.loads(r.stdout or "[]")
+        except json.JSONDecodeError:
+            return {"answered": False, "state": None, "number": None, "merged_at": None,
+                    "why": "PR index truncated and the per-branch query returned bad JSON"}
+        if not data:
+            return {"answered": True, "state": None, "number": None, "merged_at": None,
+                    "why": "no pull request for this branch (direct query)"}
+        rank = {"MERGED": 3, "OPEN": 2, "CLOSED": 1}
+        best = max(data, key=lambda p: (rank.get(p.get("state"), 0), p.get("number", 0)))
+        return {"answered": True, "state": best.get("state"), "number": best.get("number"),
+                "merged_at": best.get("mergedAt"), "why": "direct per-branch query"}
+
+    def _gh(self, *args: str) -> "subprocess.CompletedProcess | None":
+        try:
+            return subprocess.run([self.gh_cmd, *args], capture_output=True, text=True,
+                                  timeout=GH_TIMEOUT, check=False)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+
+
+# ── classification ────────────────────────────────────────────────────────────
+
+def classify(row: "dict") -> "dict":
+    """Decide the verdict from the already-gathered evidence on `row`.
+
+    Pure: it runs no subprocess, so a test can drive every branch from a dict.
+    """
+    ev: list[str] = list(row.get("evidence", []))
+    blockers: list[str] = []
+
+    def out(verdict: str, reason: str) -> dict:
+        row["verdict"] = verdict
+        row["verdict_reason"] = reason
+        row["evidence"] = ev
+        removable = verdict == DEAD and not blockers
+        row["removable"] = removable
+        row["blockers"] = blockers
+        return row
+
+    if row.get("is_main"):
+        blockers.append("main checkout — never a removal candidate")
+        return out(LIVE, "the repository's main worktree")
+    if row.get("bare"):
+        blockers.append("bare worktree")
+        return out(LIVE, "bare worktree")
+
+    if row.get("prunable"):
+        blockers.append("git reports this worktree as prunable (stale admin entry)")
+        return out(CANNOT_TELL,
+                   "git reports the worktree prunable: "
+                   f"{row.get('prune_reason') or 'no reason given'} — "
+                   "`git worktree prune` is the right tool, not `remove`")
+    if not row.get("path_exists"):
+        blockers.append("worktree path does not exist on disk")
+        return out(CANNOT_TELL, "the worktree directory is gone but git still lists it")
+
+    if row.get("locked"):
+        blockers.append("worktree is locked")
+        return out(LIVE, f"locked: {row.get('lock_reason') or 'no reason given'}")
+
+    dirty = row.get("dirty")
+    if dirty is None:
+        blockers.append("could not determine whether the worktree is dirty")
+        return out(CANNOT_TELL, "`git status` did not answer — dirtiness unknown")
+    if dirty:
+        blockers.append(f"{row.get('dirty_count', 0)} uncommitted/untracked path(s)")
+        return out(LIVE, f"uncommitted work: {row.get('dirty_count', 0)} dirty path(s)")
+
+    if row.get("default_ref") is None:
+        blockers.append("default branch could not be resolved")
+        return out(CANNOT_TELL, "no default branch to compare against")
+
+    pr = row.get("pr") or {}
+    if pr.get("state") == "OPEN":
+        blockers.append(f"open pull request #{pr.get('number')}")
+        return out(LIVE, f"open pull request #{pr.get('number')}")
+
+    fired = list(row.get("landed_signals") or [])
+    if pr.get("state") == "MERGED":
+        if "pr-merged" not in fired:
+            fired.append("pr-merged")
+            row["landed_signals"] = fired
+        ev.append(f"pr-merged: #{pr.get('number')} merged at {pr.get('merged_at')}")
+    if fired:
+        return out(DEAD, "landed — signals: " + ", ".join(fired))
+
+    if row.get("signal_error"):
+        blockers.append("a git containment check failed")
+        return out(CANNOT_TELL, "a containment check errored; landing is undetermined")
+
+    if pr.get("answered"):
+        state = pr.get("state")
+        detail = f"closed-unmerged PR #{pr.get('number')}" if state == "CLOSED" else "no pull request"
+        return out(ORPHAN,
+                   f"no landing signal fired and {detail} ({pr.get('why')}) — "
+                   "unmerged work with nothing tracking it")
+
+    blockers.append("no authoritative pull-request answer")
+    return out(CANNOT_TELL,
+               "no landing signal fired, and the pull-request state is UNKNOWN "
+               f"({pr.get('why')}) — an absence of evidence, not evidence of absence")
+
+
+# ── scanning ──────────────────────────────────────────────────────────────────
+
+def scan_repo(repo: Path, gh_cmd: str, use_gh: bool, pr_limit: int, jobs: int) -> "list[dict]":
+    wts = list_worktrees(repo)
+    if not wts:
+        return []
+    default_ref, default_how = resolve_default_ref(repo)
+    slug = repo_slug(repo)
+    index = PullRequestIndex(slug, gh_cmd, use_gh, pr_limit)
+    index.fetch()
+
+    def build(wt: dict) -> dict:
+        path = Path(wt["path"])
+        row: dict = {
+            "repo": str(repo),
+            "repo_slug": slug,
+            "path": str(path),
+            "path_exists": is_dir(path),
+            "is_main": wt["is_main"],
+            "bare": wt["bare"],
+            "detached": wt["detached"],
+            "branch": wt["branch"],
+            "head": wt["head"],
+            "locked": wt["locked"],
+            "lock_reason": wt["lock_reason"],
+            "prunable": wt["prunable"],
+            "prune_reason": wt["prune_reason"],
+            "default_ref": default_ref,
+            "default_how": default_how,
+            "evidence": [f"default branch {default_ref} resolved by {default_how}"],
+        }
+        dirty, count, sample = worktree_dirty(path)
+        row["dirty"] = dirty
+        row["dirty_count"] = count
+        row["dirty_sample"] = sample
+        row["evidence"].append(
+            "dirty=UNKNOWN" if dirty is None else f"dirty={dirty} ({count} path(s))")
+
+        row["pr"] = index.lookup(wt["branch"])
+        row["evidence"].append(
+            f"pr: answered={row['pr']['answered']} state={row['pr']['state']} ({row['pr']['why']})")
+
+        row["landed_signals"] = []
+        row["checks_run"] = []
+        row["signal_error"] = False
+        if (not wt["is_main"] and not wt["bare"] and default_ref and wt["head"]
+                and dirty is False and row["pr"].get("state") != "OPEN"):
+            sig = landing_signals(repo, wt["head"], default_ref)
+            row["landed_signals"] = sig["fired"]
+            row["checks_run"] = sig["checked"]
+            row["signal_error"] = bool(sig.get("error"))
+            row["evidence"].extend(sig["notes"])
+        return classify(row)
+
+    if jobs > 1:
+        with ThreadPoolExecutor(max_workers=jobs) as pool:
+            return list(pool.map(build, wts))
+    return [build(w) for w in wts]
+
+
+# ── reporting ─────────────────────────────────────────────────────────────────
+
+def summarize(rows: "list[dict]") -> "dict":
+    counts = {v: 0 for v in VERDICTS}
+    for r in rows:
+        counts[r["verdict"]] = counts.get(r["verdict"], 0) + 1
+    return {
+        "worktrees": len(rows),
+        "repos": len({r["repo"] for r in rows}),
+        "counts": counts,
+        "removable": sum(1 for r in rows if r.get("removable")),
+    }
+
+
+def render_text(rows: "list[dict]", summary: dict, verbose: bool) -> str:
+    lines: list[str] = []
+    per_repo: dict[str, dict] = {}
+    for r in rows:
+        d = per_repo.setdefault(r["repo"], {v: 0 for v in VERDICTS})
+        d[r["verdict"]] += 1
+    lines.append(f"{'repo':<58} {'dead':>5} {'orphan':>7} {'live':>5} {'cannot-tell':>12}")
+    for repo in sorted(per_repo):
+        d = per_repo[repo]
+        lines.append(f"{repo[-58:]:<58} {d[DEAD]:>5} {d[ORPHAN]:>7} {d[LIVE]:>5} {d[CANNOT_TELL]:>12}")
+    c = summary["counts"]
+    lines.append("")
+    lines.append(f"{summary['worktrees']} worktree(s) across {summary['repos']} repo(s): "
+                 f"{c[DEAD]} dead, {c[ORPHAN]} orphan, {c[LIVE]} live, {c[CANNOT_TELL]} cannot-tell")
+    lines.append(f"{summary['removable']} row(s) would be removed by --execute "
+                 f"(dead + clean + unlocked only)")
+    if c[CANNOT_TELL]:
+        lines.append(f"🔴 {c[CANNOT_TELL]} row(s) are cannot-tell — they are NOT dead and are "
+                     "NOT removable. Read their verdict_reason before believing any count above.")
+    if verbose:
+        lines.append("")
+        for r in sorted(rows, key=lambda x: (x["verdict"], x["path"])):
+            if r["verdict"] == LIVE and not verbose:
+                continue
+            lines.append(f"[{r['verdict']}] {r['path']}  branch={r['branch']}")
+            lines.append(f"    {r['verdict_reason']}")
+            for e in r["evidence"]:
+                lines.append(f"      · {e}")
+    return "\n".join(lines)
+
+
+# ── execute ───────────────────────────────────────────────────────────────────
+
+def execute_removals(rows: "list[dict]", confirm: "int | None") -> int:
+    """Remove ONLY `removable` rows, re-verifying each immediately beforehand.
+
+    🔴 The re-verification is not belt-and-braces. The scan that produced these
+    rows is a claim about the PAST; a concurrent session can have started
+    editing in one of those worktrees since. The check therefore runs at the
+    moment of the destructive step, not in the survey that motivated it.
+
+    🔴 `git worktree remove` is called WITHOUT `--force`. Git refuses on a dirty
+    or locked tree, which is an INDEPENDENT floor under our own dirty check —
+    two mechanisms, so a bug in ours is not the only thing standing there.
+    """
+    targets = [r for r in rows if r.get("removable")]
+    if confirm is None:
+        _log(f"REFUSED: --execute requires --confirm N. This run would remove {len(targets)} "
+             f"worktree(s); pass --confirm {len(targets)} if that is what you intend.")
+        return RC_EXECUTE_REFUSED
+    if confirm != len(targets):
+        _log(f"REFUSED: --confirm {confirm} does not match the {len(targets)} row(s) this run "
+             "would remove. The scope moved under you — re-read the report. Nothing removed.")
+        return RC_EXECUTE_REFUSED
+
+    removed = skipped = failed = 0
+    for r in targets:
+        path = Path(r["path"])
+        repo = Path(r["repo"])
+        if r.get("verdict") != DEAD:
+            _log(f"SKIP {path}: verdict is {r.get('verdict')}, not {DEAD}")
+            skipped += 1
+            continue
+        live = [w for w in list_worktrees(repo) if Path(w["path"]) == path]
+        if not live:
+            _log(f"SKIP {path}: git no longer lists this worktree")
+            skipped += 1
+            continue
+        if live[0]["locked"]:
+            _log(f"SKIP {path}: locked since the scan")
+            skipped += 1
+            continue
+        # 🔴 LAST, so it is the check immediately before the destructive step
+        # rather than one buried in the survey that motivated it.
+        dirty, count, _ = worktree_dirty(path)
+        if dirty is not False:
+            _log(f"SKIP {path}: re-check says dirty={dirty} ({count} path(s)) — "
+                 "it changed since the scan, or was never knowable")
+            skipped += 1
+            continue
+        res = _git(repo, "worktree", "remove", str(path))
+        if res.returncode == 0:
+            _log(f"REMOVED {path}")
+            removed += 1
+        else:
+            _log(f"FAILED  {path}: rc={res.returncode} {res.stderr.strip()[:300]}")
+            failed += 1
+    _log(f"execute: removed={removed} skipped={skipped} failed={failed}")
+    return RC_OK if failed == 0 else 1
+
+
+# ── cli ───────────────────────────────────────────────────────────────────────
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="worktree-prune",
+        description="Classify git worktrees as dead / orphan / live / cannot-tell. "
+                    "DRY-RUN BY DEFAULT — nothing is removed without --execute.")
+    p.add_argument("--repo", action="append", default=[], metavar="DIR",
+                   help="a repository to scan (repeatable)")
+    p.add_argument("--scan-root", action="append", default=[], metavar="DIR",
+                   help="discover main checkouts under DIR (repeatable)")
+    p.add_argument("--repos-from", metavar="FILE",
+                   help="file of repository paths, one per line; # comments allowed")
+    p.add_argument("--scan-depth", type=int, default=2,
+                   help="how deep --scan-root descends looking for checkouts (default 2)")
+    p.add_argument("--jobs", type=int, default=8, help="parallel worktree probes (default 8)")
+    p.add_argument("--no-gh", action="store_true",
+                   help="do not consult gh. Every unlanded row then becomes cannot-tell, "
+                        "because 'no PR found' and 'we could not ask' stop being distinguishable.")
+    p.add_argument("--gh-cmd", default="gh", help="the gh executable to use (default: gh)")
+    p.add_argument("--pr-limit", type=int, default=2000,
+                   help="how many PRs to pull per repo before falling back to per-branch queries")
+    p.add_argument("--format", choices=("text", "json"), default="text")
+    p.add_argument("--out", metavar="FILE", help="write the machine-readable row list here")
+    p.add_argument("--verbose", action="store_true", help="print every row with its evidence")
+    p.add_argument("--dry-run", action="store_true",
+                   help="explicit no-op: dry-run is already the default")
+    p.add_argument("--execute", action="store_true",
+                   help="actually remove the `dead` rows. Requires --confirm N.")
+    p.add_argument("--confirm", type=int, metavar="N",
+                   help="the exact number of worktrees --execute may remove")
+    return p
+
+
+def collect_repos(args) -> "list[Path]":
+    repos: list[Path] = [Path(r).expanduser() for r in args.repo]
+    if args.repos_from:
+        for line in Path(args.repos_from).expanduser().read_text(encoding="utf-8").splitlines():
+            line = line.split("#", 1)[0].strip()
+            if line:
+                repos.append(Path(line).expanduser())
+    if args.scan_root:
+        repos.extend(discover_repos([Path(r) for r in args.scan_root], args.scan_depth))
+    seen: dict[str, Path] = {}
+    for r in repos:
+        try:
+            key = str(r.resolve())
+        except OSError:
+            key = str(r)
+        seen.setdefault(key, r)
+    return list(seen.values())
+
+
+def main(argv: "list[str] | None" = None) -> int:
+    args = build_parser().parse_args(argv)
+    if args.dry_run and args.execute:
+        _log("--dry-run and --execute are contradictory. Pick one.")
+        return RC_USAGE
+    if args.confirm is not None and not args.execute:
+        _log("--confirm is only meaningful with --execute.")
+        return RC_USAGE
+
+    repos = collect_repos(args)
+    if not repos:
+        _log("nothing to scan: pass --repo, --repos-from or --scan-root.")
+        return RC_NOTHING_TO_SCAN
+
+    rows: list[dict] = []
+    for repo in repos:
+        rows.extend(scan_repo(repo, args.gh_cmd, not args.no_gh, args.pr_limit, args.jobs))
+
+    summary = summarize(rows)
+    payload = {"summary": summary, "rows": rows}
+
+    if args.out:
+        Path(args.out).expanduser().write_text(
+            json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    if args.format == "json":
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(render_text(rows, summary, args.verbose))
+
+    if not args.execute:
+        _log("DRY RUN — nothing was removed. Pass --execute --confirm N to act.")
+        return RC_OK
+    return execute_removals(rows, args.confirm)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

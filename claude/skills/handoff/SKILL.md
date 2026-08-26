@@ -27,6 +27,8 @@ Topic argument (optional): `$ARGUMENTS`. If empty, infer a short kebab-case topi
 
      Each linked row carries a **`role`**, and the verdict RANKS by it instead of counting links: `worked` (this session commented on the task or flipped its status), `created` (it FILED the task), `read` (it only fetched it). `worked` is the signal because `claude/skills/clawgate/flows/task-pickup.md` mandates the comment/status write-back on every pickup and a Stop hook blocks the turn without it.
 
+     🔴 **CAPTURE the status — a PIPE EATS it**: `… | tail; echo "rc=$?"` prints 0 for a real 5. Use `out=$(… resolve 2>&1); rc=$?`. 📖 `~/.claude/skills/handoff/reference/exit-code.md`.
+
      Act on the exit code — and on nothing else:
      - **0, one WORKED task** → record it in step 2's front matter. Still 0 however many `created`/`read` rows sit beside it. With no `role` on ANY row (an older server) it falls back to "exactly one task" and prints `ROLES UNAVAILABLE` — read the rows yourself before recording.
      - **6** → **ASK the user which one.** Do not guess, and do not record more than one. The output says which of four this is: several WORKED tasks; **no worked task at all** beside one or more `created`/`read` links; a role the tool does not recognise; or several tasks with roles unavailable.

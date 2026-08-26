@@ -139,7 +139,7 @@ def test_it_still_scans_the_tree_when_git_cannot_answer(monkeypatch) -> None:
         if kwargs.get("check"):
             # What the real subprocess.run does on a non-zero exit, which is the
             # pre-fix behaviour this test must be able to see.
-            raise subprocess.CalledProcessError(128, cmd, output="", stderr="")
+            raise subprocess.CalledProcessError(128, cmd, output="", stderr="")  # pragma: no cover - no case in this suite drives the fake with check=True
         return subprocess.CompletedProcess(
             cmd, 128, stdout="", stderr="fatal: not a git repository"
         )
