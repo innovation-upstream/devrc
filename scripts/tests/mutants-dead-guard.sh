@@ -237,7 +237,7 @@ run 'census-goes-back-to-append-only' "$CLI" \
   's|^    blocks\[slug\] = mine|    blocks.setdefault(slug, []).extend(mine)|'
 run 'census-writes-the-absolute-interpreter-path' "$CLI" \
   test_the_census_never_carries_an_absolute_path \
-  's|^                     interpreter_id(python, redact=True), rc)|                     interpreter_id(python, redact=False), rc)|'
+  's|^                     interpreter_id(python, redact=True), rc, excluded=excl)|                     interpreter_id(python, redact=False), rc, excluded=excl)|'
 run 'census-stops-recording-the-red-run' "$CLI" \
   test_the_census_records_that_the_run_was_RED \
   's|^    if nfail:$|    if False:|'
@@ -273,7 +273,7 @@ run 'span-truncated-to-first-line' "$LIB" \
 
 run 'census-drops-other-repos-provenance' "$CLI" \
   test_scanning_one_repo_KEEPS_another_repos_provenance_line \
-  's|^            if line in _CENSUS_HEADER or line.startswith("repo_slug\\t"):|            if line.startswith("#") or line.startswith("repo_slug\\t"):|'
+  's|^            if line.startswith("#") and not _PROVENANCE.match(line):|            if line.startswith("#"):|'
 run 'pragma-on-if-also-silences-the-else' "$LIB" \
   test_one_pragma_on_an_IF_line_does_not_silence_its_ELSE_too \
   's|^        reason = just.get(b.cond_line) if b.kind != "else-body" else None|        reason = just.get(b.cond_line)|'
