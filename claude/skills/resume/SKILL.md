@@ -126,7 +126,10 @@ Topic argument (optional): `$ARGUMENTS`.
    work — an empty commit is enough; a branch is visible to `git ls-remote` the
    instant it lands.
 
-   **rc 10 ⇒ STOP — SOMEBODY ELSE holds it.** It prints who, since when,
+   **rc 10 ⇒ STOP.** Usually somebody else holds it — but see the LEGACY note
+   below: on a pre-2026-08-26 `cwd:`-format ref it can also mean *you* hold it
+   from a different directory. Either way STOP is the safe reading; check the
+   printed `where:` against your own before assuming a peer. It prints who, since when,
    **where** (host + owner-id, because one git identity covers both hosts and
    every agent on them), and what they called it. Pick another item, or
    coordinate. **rc 11 ⇒ the claim is past its TTL and may be abandoned**: decide
@@ -147,6 +150,17 @@ Topic argument (optional): `$ARGUMENTS`.
    one day it was told rc 12 "carry on" about a peer's live claim because the
    token used `--git-common-dir`, which every linked worktree of a clone shares.
    A different clone, or the other host, cannot either.
+
+   ⚠ **LEGACY refs (`cwd:` format, created before 2026-08-26+1) use a SECOND
+   predicate, and it differs BY VERB.** For the claim/check verdict they are
+   strict per-worktree — so a subdirectory of the claiming clone reads **rc 10**,
+   not rc 12, even though you hold it. For `--release`/`--steal` the old
+   clone-wide accept still applies, so a sibling worktree CAN release one without
+   `--force`. That asymmetry is deliberate: narrowing the destructive side would
+   have made already-published refs unreleasable by anyone. It ages out as those
+   refs are released. Re-derive which refs are affected rather than trusting a
+   count here: `git ls-remote --heads origin 'refs/heads/claim/*'`, then
+   `claim-work --check <slug>` — a legacy one says so in its output.
    It was `uname -n` + a hash of `$PWD` until 2026-08-26+1, which was wrong in
    BOTH directions at once: both hosts are called `nixos` (so each read the
    other's claims as its own), and `cd scripts/` made you a stranger to your own

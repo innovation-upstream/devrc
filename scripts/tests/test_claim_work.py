@@ -2591,7 +2591,7 @@ def test_a_submodule_working_dir_is_a_different_owner_than_its_superproject(tmp_
 
 def test_a_legacy_cwd_claim_from_another_HOST_is_not_yours(tmp_path):
     """The legacy tier's `host:` check, which is the tier that is ACTUALLY LIVE —
-    all three claims on the real origin are `cwd:`-format. It was outside the
+    every claim then live on the real origin was `cwd:`-format. It was outside the
     committed mutation sweep's closed set, so nothing had ever watched it fail.
 
     ⚠ LABEL: an INVARIANT GUARD, not regression cover — it passes at `9d6efc29`.
@@ -2624,7 +2624,10 @@ def test_a_legacy_cwd_claim_from_another_HOST_is_not_yours(tmp_path):
 
 
 def test_a_legacy_cwd_claim_is_releasable_from_a_worktree_of_that_clone(tmp_path):
-    """🔴 THE REFS THAT ARE ACTUALLY LIVE. Measured 2026-08-26: all three claims
+    """🔴 THE REFS THAT ARE ACTUALLY LIVE. Measured 2026-08-26 — the count is NOT
+    pinned here because it MOVES (it went 3 -> 2 -> 6 inside one session as other
+    sessions claimed and released). Re-derive it:
+    `git ls-remote --heads origin 'refs/heads/claim/*'`. At that time every claim
     on the real origin are in the oldest (`cwd:`) format, each recorded against
     `/home/zach/workspace/devrc`. Fixing the cwd-sensitivity only for NEW claims
     would leave their holder unable to release them from a worktree or a
@@ -2647,7 +2650,7 @@ def test_a_legacy_cwd_claim_is_releasable_from_a_worktree_of_that_clone(tmp_path
     mine = _run("--release", "legacy-wt", cwd=wt, env=env)
     assert mine.returncode == RC_OK, (
         f"a live legacy claim could not be released from a WORKTREE of the clone "
-        f"it was taken in (rc={mine.returncode}) — the three claims on the real "
+        f"it was taken in (rc={mine.returncode}) — the legacy claims on the real "
         f"origin are all in this format\n{mine.stdout}\n{mine.stderr}")
     assert f"{CLAIM_NS}legacy-wt" not in _remote_refs(origin)
 

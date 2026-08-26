@@ -60,7 +60,18 @@ never tell two sessions apart.
 🔴 **The owner token is per HOST and per WORKTREE, and cwd-independent**:
 `/etc/machine-id` + the realpath of `git rev-parse --git-dir`. Any subdirectory of
 the worktree you claimed from counts as the same owner, at any depth; a SIBLING
-worktree, a different clone, and the other host do not. It was `uname -n` +
+worktree, a different clone, and the other host do not.
+
+⚠ **That describes NEW-format refs. LEGACY `cwd:` refs (pre-2026-08-26+1) carry a
+SECOND predicate that differs BY VERB**: strict per-worktree for the claim/check
+verdict (so a subdirectory of the claiming clone reads **rc 10**, not rc 12, even
+though you hold it), but the old clone-wide accept for `--release`/`--steal` (so a
+sibling worktree can release one without `--force`). Deliberate: narrowing the
+destructive side would have made already-published refs unreleasable by anyone. It
+ages out as those refs are released. Do not trust a count of affected refs written
+here — re-derive it with `git ls-remote --heads origin 'refs/heads/claim/*'`.
+
+It was `uname -n` +
 `hash($PWD)` until 2026-08-26+1 and was wrong in both directions: both hosts answer
 `nixos` to `uname -n` (so each read the other's claims as its own, and could
 release them at rc 0), and hashing the literal `$PWD` meant `cd scripts/` locked
