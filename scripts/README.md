@@ -75,6 +75,7 @@ Click actions for those blocks:
 | `playwright-nixos` | drive Playwright with the nixpkgs Chromium matching *this project's* pin (`--list` / `--select`) |
 | `dogfood-cycle` | automate the civitai App Block "dogfood test cycle" |
 | `run3` | run a command with stdout and stderr captured to **separate** files (never merged), reporting each stream's byte count, path and the command's own exit code. Use it whenever the question is *which stream produced this* — in zsh, `cmd 2>&1 >/dev/null \| consumer` hands the consumer **stdout**, so redirection order cannot answer it |
+| `worktree-prune` | classify git worktrees across many repos as `dead` / `orphan` / `live` / `cannot-tell`, recording the EVIDENCE each verdict rests on. **Dry-run by default**; `--execute` additionally requires `--confirm N` matching the exact removal count, only ever touches `dead` rows, re-checks dirtiness immediately before each removal and never passes `--force`. 🔴 It does **not** decide "did this land" by ancestry: `git merge-base --is-ancestor` is false for every **squash**-merged branch forever, so containment is answered by four independent signals (`ancestor`, `pr-merged` via `gh`, `content-identical` over the branch's changed paths, `patch-equivalent` via `git cherry`) and anything none of them can answer is a loud `cannot-tell`, never a `dead` |
 
 ## Network / VPN
 
