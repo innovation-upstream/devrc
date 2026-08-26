@@ -3,6 +3,44 @@
 Read when: metrics/logs are missing, you're adding an event or a dashboard panel, or you're about
 to debug a red CI check.
 
+## 🔴 It ROUTES; it does not GATE — measured, not asserted (2026-08 usage audit)
+
+SKILL.md's one-liner points here. Do not describe clawgate as an approval gate.
+
+| | |
+|---|---|
+| permission requests routed, 14d | **121,740** (~11.3k/day) |
+| human decisions, full 30d Prometheus retention | **1** — one `approve`, 2026-07-31 |
+| resolved by the **global** auto-approve window | ~**99.9%** |
+| global window max duration | **24h** (`handleAutoApproveAll`: 1h/8h/24h, no `forever`) |
+
+The 24h cap is the point: ~1 arming/day is **one standing decision the UI forces the operator to
+re-enter daily**, not repeated choices to bypass a gate. The operator's call on 2026-08-26 was to
+accept this and retain decision history so a narrower gate can later be designed from data.
+
+**Four traps when reasoning about this — each cost a wrong claim in review:**
+
+- 🔴 **`requests` row count is NOT a usage measure.** It is a working queue the hook `DELETE`s from,
+  so it sits at ~0. Query **`request_history`** (migration `0025`, live in 0.8.1) instead —
+  `decided_by` is `human` / `auto` / `expired`, and it is a **column**, never inferred from the
+  comment text (the auto path happens to write `"auto-approved"`, which any path could spell).
+- 🔴 **`project` is the cwd BASENAME** (`devrc` vs `devrc-wt-nudge`). Every git worktree mints a new
+  project identity, so per-project auto-approve windows go cold exactly when worktree isolation is
+  mandated — i.e. when agents write most.
+- 🔴 **Expiries land in `Delete`, not `Sweep`.** The hook's EXIT trap DELETEs at a **170s** deadline
+  and the DEPLOYED `CLAWGATE_REQUEST_TTL` is **5m**, so Delete normally fires ~130s before Sweep's
+  cutoff. ⚠ Take that TTL from `deployment.yaml`, never from `main.go`'s 1h **default** — using the
+  default produced a "~35 minutes" claim that was wrong by an order of magnitude.
+- 🔴 **`clawgatectl` cannot mint a permission request** — it only reaches `/health`, `/api/agents`
+  and `/api/tasks*`, never `POST /api/send`. The genuinely hook-less producer is the agent
+  **checkpoint**, which runs on the 24h `checkpointSweepGrace`, not the 5m TTL.
+
+⚠ **`pushResolved` is a SILENT control message, not a buzz.** `sw.js` maps `type:"resolved"` to
+`closeByTag(...)` and *"Render nothing."* Auto-approved requests never reach `pushNewRequest` at all
+(the auto-approve branch returns first), so the ~26k/day deliveries are no-op closes of
+notifications that were never shown — a minor efficiency item, **not** notification spam. Do not
+repeat the "your phone buzzes 26k times" framing; it was checked and is false.
+
 ## CI — 🔑 IT MOVED (2026-07-30)
 **GitHub Actions is BILLING-BLOCKED repo-wide**: every workflow run fails in seconds with
 `steps: 0` and the annotation *"recent account payments have failed or your spending limit needs to
