@@ -2898,7 +2898,7 @@ in
   # WORKBENCH-ONLY (gated on serverMode), same rationale as the sync: the homelab
   # kubeconfig is direct-LAN only here, AND the viewer must run on the host whose
   # tmux server it reads (the live overlay). It binds the workbench's OWN LAN address
-  # (192.168.50.250:8899, eth1 — NOT 192.168.50.94, which is a homelab node hosting the
+  # (192.168.50.250:8899, eth0 — NOT 192.168.50.94, which is a homelab node hosting the
   # kube-apiserver/NodePorts and is not assignable here) — internal work data, deliberately
   # NOT wired into the public homelab gateway. Public exposure would be a later, explicit choice.
   #
@@ -2981,6 +2981,204 @@ in
         "${../scripts/initiatives/archive.py}"
         "${../scripts/initiatives/nextstep.py}"
       ];
+    };
+    Install = {
+      WantedBy = [ "default.target" ];
+    };
+  };
+
+  # ── THE AGENT-LAYER EXPLAINER PAGE (scripts/present/) ────────────────────────
+  # `scripts/present/generate.py` builds ONE self-contained HTML file that
+  # MEASURES this host — the index store, the systemd timers, the git hooks, the
+  # gate config, branch protection — and stamps every figure with the moment it
+  # was taken. It has to run ON the host; a container would measure a machine
+  # nobody uses. Until now the only way to read it was to generate it by hand,
+  # which means in practice nobody read it.
+  #
+  # Three units, all serverMode-gated for the same reason `initiatives-viewer`
+  # is: this is the workbench's own LAN surface, and the laptop is nebula-only.
+  #
+  #   present-regen.service   oneshot — build BOTH variants into ~/.local/share/present
+  #   present-regen.timer     daily
+  #   present-serve.service   a STATIC file server, workbench-local (see below)
+  #
+  # 🔴 WHO CAN ACTUALLY READ IT: THE WORKBENCH, AND NOTHING ELSE. The socket is
+  # bound to 192.168.50.250 — a LAN address — but 8900 is NOT in
+  # /etc/nixos/configuration.nix's `networking.firewall.allowedTCPPorts`
+  # (7844 80 443 58012 8180 25565 8110 6443), so every off-host SYN is dropped.
+  # A same-host `curl http://192.168.50.250:8900/` returns 200 because it takes
+  # the `lo` path, which the firewall accepts unconditionally; that says nothing
+  # about a second machine. Measured from the laptop 2026-08-25: 22 OPEN, 443
+  # OPEN, 8899 CLOSED, 8900 CLOSED. 8899 is `initiatives-viewer`, listening on
+  # the identical address with the identical gap — which is exactly why copying
+  # its shape did not warn anyone.
+  #
+  # That is the DECISION, not an oversight: the reader who is not on the
+  # workbench is served by the SANITIZED PORTABLE EXPORT the same regen run
+  # produces. Widening reach is a system-level change (/etc/nixos, a `sudo
+  # nixos-rebuild`) PLUS a decision to publish client scope names to everything
+  # on the LAN — worth doing when someone who is not on the workbench actually
+  # needs to read this page, and not before. Building hosted reach ahead of a
+  # reader is the shape that left the subsystem-store-api dead on arrival.
+  #
+  # 🔴 BIND 192.168.50.250 (eth0, the workbench's OWN address — `ip -4 -o addr`;
+  # every earlier copy of this comment said eth1 and there is no eth1 here). NOT
+  # 192.168.50.94 — that is a homelab node hosting the kube-apiserver and the
+  # NodePorts, it is not assignable here, and binding it CRASH-LOOPS the unit.
+  # It already cost `initiatives-viewer` an outage; see the block above it.
+  #
+  # 🔴 PORT 8900. Measured free on the workbench 2026-08-25 (`ss -lptn`): the
+  # occupied neighbours are 8787 activity-receiver, 8788 browser-bridge, 8791
+  # dl-router, 8793, 8899 initiatives-viewer, 8931.
+  # `scripts/tests/test_present_units.py` pins it against the ports DECLARED IN
+  # CODE under nix/ — a live `ss` reading is a fact about one moment, and what
+  # two units actually fight over across a reboot is the declared set. Read that
+  # file's ledger header for which declaration SHAPES the scan sees and which it
+  # structurally cannot; the sentence there used to claim more than it checked.
+  #
+  # 🔴 NOT WIRED INTO THE PUBLIC HOMELAB GATEWAY either, deliberately, exactly
+  # as the initiatives viewer is not. This page names local paths, unit names,
+  # repo layout and hook wiring. Public exposure would be a later, explicit
+  # choice, and it would be a choice about the sanitized copy only.
+  #
+  # ── 🔴 THE STALENESS CONTRACT ────────────────────────────────────────────────
+  # The generator EXITS 3 AND WRITES NO FILE when every fact came back
+  # UNMEASURED, by design — it refuses to publish a build that would look careful
+  # and be broken. That is correct, and it creates exactly one hazard on the
+  # serving side: a failed regeneration leaves the PREVIOUS page in place, and a
+  # page measured last Tuesday served today with no marking is indistinguishable
+  # from a current one. It is the same silent-zero shape the page itself exists
+  # to teach against.
+  #
+  # THE CHOICE MADE HERE IS **serve-last-good, with the age made obvious** —
+  # not serve-an-error. Three mechanisms, each covering a different reader:
+  #
+  #   1. WRITER — scripts/present/run-regen.sh generates to a temp file and
+  #      promotes with an atomic `mv` ONLY on exit 0. A failed build never
+  #      overwrites a good page, and never half-writes one.
+  #   2. OPERATOR — present-regen carries OnFailure = notify-failure@%n.service
+  #      like every other unit here, so a failed regeneration toasts.
+  #   3. READER — scripts/present/serve.py computes the artefact's age from its
+  #      mtime AT REQUEST TIME and, past PRESENT_STALE_AFTER_SEC, injects a
+  #      fixed full-width banner naming the age in words. If it cannot inject
+  #      the banner it serves a 503 interstitial INSTEAD of the page: there is
+  #      no code path that emits not-fresh artefact bytes unmarked.
+  #      🔴 THREE states, not two: an artefact dated in the FUTURE gets its own
+  #      `clock-suspect` banner. A bad RTC corrected backwards by NTP dates
+  #      every already-written file ahead of `now`, and clamping that age to
+  #      zero — which is what the first cut did — reports a week-old page as
+  #      `fresh` with no banner. See CLOCK_SUSPECT_AFTER in serve.py.
+  #
+  # Why not serve-an-error outright: the content is still true as of its stamp
+  # and is usually exactly what the reader needs (a stale page is a symptom of
+  # the thing they came to debug). What is unacceptable is SILENCE, and the
+  # banner removes the silence without removing the page.
+  #
+  # 30h staleness threshold, not 48h: the cadence is daily + 600s jitter, so two
+  # healthy runs land at most ~24h10m apart. 30h means the banner appears before
+  # a SECOND scheduled run has been missed. 48h would let a whole extra day pass
+  # in silence, which is the failure being guarded against, only slower.
+  #
+  # PATH: python3 (the generator and the server are stdlib-only — no nix-shell
+  # here, unlike the initiatives units) + git (provenance/hooks rows) + gh (the
+  # branch-protection row; its own 45s ceiling, and it degrades to UNMEASURED)
+  # + systemd for `systemctl --user list-timers` (the timers row) + bash for the
+  # wrapper and for run-tests.sh --check-floors.
+  systemd.user.services.present-regen = lib.mkIf serverMode {
+    Unit = {
+      Description = "Regenerate the devrc agent-layer explainer page (both variants)";
+      After = [ "network-online.target" ];
+      Wants = [ "network-online.target" ];
+      OnFailure = [ "notify-failure@%n.service" ];
+    };
+    Service = {
+      Type = "oneshot";
+      # Hard ceiling. A warm run is ~10-20s; the only unbounded-ish step is the
+      # `gh api` branch-protection read, which carries its own 45s timeout and
+      # degrades to an UNMEASURED row rather than failing the build.
+      TimeoutStartSec = 300;
+      Environment = [
+        "PATH=${lib.makeBinPath [ pkgs.python3 pkgs.git pkgs.gh pkgs.systemd pkgs.bash pkgs.coreutils pkgs.gnused pkgs.gnugrep ]}"
+        "PRESENT_REPO=%h/workspace/devrc"
+        # 🔴 The SAME directory present-serve reads. Two literals that must
+        # agree is the seam neither file owns, so the test suite pins them
+        # against each other rather than trusting this comment.
+        "PRESENT_ARTEFACT_DIR=%h/.local/share/present"
+        "HOME=%h"
+      ];
+      ExecStart = "${pkgs.bash}/bin/bash %h/workspace/devrc/scripts/present/run-regen.sh";
+      # The whole package: the wrapper shells the generator, which imports
+      # measure/render/content/sanitize. A DIRECTORY rather than six file paths
+      # on purpose — a seventh module added tomorrow is covered without an edit
+      # here, which is the difference between a structural trigger and a spelled
+      # one.
+      X-Restart-Triggers = [ "${../scripts/present}" ];
+    };
+  };
+
+  # Daily at 05:00 local. Persistent catches up a single missed run (host down
+  # over the boundary) on the next start — which matters here precisely because
+  # a missed run is invisible except as an age, and the age is what the banner
+  # is reading. RandomizedDelaySec 600 keeps it off the 04:00/04:30 cluster.
+  systemd.user.timers.present-regen = lib.mkIf serverMode {
+    Unit = {
+      Description = "Daily timer for the devrc explainer page regeneration";
+    };
+    Timer = {
+      OnCalendar = "*-*-* 05:00:00";
+      Persistent = true;
+      RandomizedDelaySec = 600;
+    };
+    Install = {
+      WantedBy = [ "timers.target" ];
+    };
+  };
+
+  # The server. STATIC on purpose, and that is the whole design: no refresh
+  # button, no subprocess, no credential, no sops, no gh — none of what
+  # `initiatives-viewer` needs for its ↻ button. It answers two artefact routes
+  # out of an explicit table and 404s everything else, so there is no directory
+  # handler and therefore no path-traversal surface to reason about.
+  #
+  # 🔴 PRESENT_SERVE_HOST is a LAN address and the page is still WORKBENCH-LOCAL
+  # — the firewall does not admit this port. Full argument, with the measured
+  # laptop-side control, in the block above.
+  #
+  # Wants+After present-regen: a best-effort prime, so a fresh deploy serves a
+  # page instead of the "not generated yet" interstitial without waiting until
+  # 05:00. `Wants` and not `Requires` — a failed regen must not block the
+  # server, since serving the last-good page IS the designed behaviour.
+  #
+  # StartLimit is explicit because of that coupling: an unbindable port would
+  # otherwise re-trigger a regeneration (and its `gh api` call) every RestartSec
+  # forever. Five attempts in five minutes, then it stays failed and toasts.
+  systemd.user.services.present-serve = lib.mkIf serverMode {
+    Unit = {
+      Description = "Serve the devrc agent-layer explainer page on the workbench LAN";
+      After = [ "network-online.target" "present-regen.service" ];
+      Wants = [ "network-online.target" "present-regen.service" ];
+      OnFailure = [ "notify-failure@%n.service" ];
+      StartLimitIntervalSec = 300;
+      StartLimitBurst = 5;
+    };
+    Service = {
+      Type = "simple";
+      Environment = [
+        "PATH=${lib.makeBinPath [ pkgs.python3 pkgs.coreutils ]}"
+        "PRESENT_SERVE_HOST=192.168.50.250"
+        "PRESENT_SERVE_PORT=8900"
+        "PRESENT_ARTEFACT_DIR=%h/.local/share/present"
+        # 30 hours. See the threshold argument in the block above.
+        "PRESENT_STALE_AFTER_SEC=108000"
+        "HOME=%h"
+      ];
+      ExecStart = "${pkgs.python3}/bin/python3 %h/workspace/devrc/scripts/present/serve.py";
+      Restart = "on-failure";
+      RestartSec = "10s";
+      # The server is a single stdlib file and imports nothing from the present
+      # package — it never parses the page, it only injects into it. So its
+      # trigger is that one file, not the package.
+      X-Restart-Triggers = [ "${../scripts/present/serve.py}" ];
     };
     Install = {
       WantedBy = [ "default.target" ];
