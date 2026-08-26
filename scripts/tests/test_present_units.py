@@ -359,18 +359,56 @@ def test_positive_control_the_exec_start_scan_finds_both_entry_points():
     }, paths
 
 
-def test_every_exec_start_path_exists_and_is_git_tracked():
+def _tracked_under(prefix: str) -> set[str] | None:
+    """`git ls-files <prefix>`, or None when this tree has no git dir.
+
+    🔴 IT IS None IN THE TIER THE MERGE IS GATED ON. `nix build
+    .#checks.x86_64-linux.pytests` runs against a `cp -r ${./.}` STORE COPY with
+    no `.git`, so `git ls-files` exits 128 there. The first cut used
+    `check=True` and took the sandbox tier red with a `CalledProcessError` while
+    the dev-host tier was green — the two-tier hazard, in a check written to
+    catch a deploy hazard.
+    """
+    r = subprocess.run(["git", "-C", str(REPO_ROOT), "ls-files", prefix],
+                       capture_output=True, text=True)
+    return set(r.stdout.split()) if r.returncode == 0 else None
+
+
+def test_every_exec_start_path_is_present_in_the_tree_that_will_deploy():
     """🔴 CLAUDE.md: a NEW file must be `git add`ed or the flake silently omits
     it from the deploy. The switch SUCCEEDS and the file is simply not there —
     which for these two units means a unit that dies on the first tick with
-    'No such file or directory', long after anyone is watching."""
+    'No such file or directory', long after anyone is watching.
+
+    NO SKIP, and each tier proves the same thing by a different route:
+
+      * dev host — the tree is a git checkout, so `git ls-files` answers
+        directly and the existence check is the weaker half.
+      * nix sandbox — the tree IS the flake source, i.e. the git-tracked tree
+        already materialised. An un-`git add`ed file is simply ABSENT there, so
+        the existence check is not the weaker half: it is the same claim,
+        evaluated by the build that will actually ship.
+    """
     paths = _exec_start_repo_paths()
     assert paths, "the ExecStart scan found nothing — this check is vacuous"
-    tracked = set(subprocess.run(
-        ["git", "-C", str(REPO_ROOT), "ls-files", "scripts/present"],
-        capture_output=True, text=True, check=True).stdout.split())
+
     for rel in paths:
-        assert (REPO_ROOT / rel).is_file(), f"{rel} does not exist"
+        assert (REPO_ROOT / rel).is_file(), (
+            f"{rel} does not exist in this tree. On the dev host that means the "
+            "path is wrong; in the nix sandbox it means the file was never "
+            "`git add`ed, so the flake omitted it and the deploy will not carry it.")
+
+    tracked = _tracked_under("scripts/present")
+    if tracked is None:
+        # The sandbox arm. Assert the reason rather than passing quietly — a
+        # `None` that is really "git is broken on the dev host" must not read
+        # as "correctly running in the sandbox".
+        assert not (REPO_ROOT / ".git").exists(), (
+            "`git ls-files` failed in a tree that HAS a .git — that is a broken "
+            "git, not the sandbox, and this check silently degraded to an "
+            "existence test without saying so.")
+        return
+    for rel in paths:
         assert rel in tracked, (
             f"{rel} is NOT git-tracked. `git add` it — the flake builds from the "
             "tracked tree, so the switch will succeed and the file will be absent.")
