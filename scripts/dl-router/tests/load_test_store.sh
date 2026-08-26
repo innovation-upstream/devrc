@@ -185,7 +185,9 @@ for (( run=1; run<=RUNS; run++ )); do
     >"$log" 2>&1
   run_rc=$?
   set -e
-  summary=$(grep -Ev '^[[:space:]]*$' "$log" | tail -1)
+  # `|| true`: `set -o pipefail` is on, and grep exits 1 on an EMPTY log — which
+  # would kill the script here, mid-measurement, over a cosmetic line.
+  summary=$(grep -Ev '^[[:space:]]*$' "$log" | tail -1 || true)
   # A run that collected nothing is the ORIGINAL defect wearing a different
   # hat: it must not be scored as a failure of the code under test.
   if grep -qE '^no tests (ran|collected) in ' "$log"; then

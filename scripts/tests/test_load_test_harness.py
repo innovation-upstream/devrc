@@ -322,6 +322,20 @@ def test_a_clean_sweep_reports_zero_and_exits_zero(tmp_path: Path) -> None:
     assert "failures: 0 / 3" in proc.stdout
 
 
+def test_an_empty_run_log_does_not_kill_the_harness(tmp_path: Path) -> None:
+    """`set -o pipefail` + a `grep` over an EMPTY log exits 1.
+
+    The summary line is cosmetic; it must never be able to abort the
+    measurement. Without the guard the harness dies after run 1 and never
+    prints a `failures:` line at all.
+    """
+    proc, _ = run_harness(tmp_path, runs=3, run_out="", run_rc="0")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "failures: 0 / 3" in proc.stdout, (
+        "the harness stopped early on an empty log instead of finishing its "
+        f"runs:\n{proc.stdout}")
+
+
 def test_runs_above_the_cap_are_refused_so_91_stays_unambiguous(
         tmp_path: Path) -> None:
     """91 is only a distinguishable status while a failure count cannot reach it."""
