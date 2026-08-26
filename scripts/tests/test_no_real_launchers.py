@@ -40,6 +40,14 @@ What is asserted, and why each is not enough alone:
   * THE LEDGER  — pinned against the TREE (`testlib.launcher_scan`), not only
     against itself. `dunstctl`, `rofi` and `yad` were all reachable while the
     self-pinned list said the set was complete.
+  * THE ABSENT HOST — the systemctl tests each have a "this host has no real
+    systemctl" arm that carries the whole claim for the nix sandbox tier, and
+    the dev host anyone measures from can never take it. All six were measured
+    by `scripts/dead-guard-scan.py` as branch bodies that NEVER EXECUTE, and
+    each carried a `# pragma: no cover` saying so — a note about a gap, not a
+    closing of it. The arms are now module-level functions
+    (`check_systemctl_stub_matches_host`, `unless_the_host_has_no_systemctl`)
+    driven IN-PROCESS with a synthetic host under "THE SYNTHETIC HOST" below.
   * THE TAG     — every recorded line carries the writing pytest-xdist worker's
     id as its SECOND field, and the readers filter on it. Without that, the
     `before = len(...)` / `== before + 1` shape used throughout this file is a
@@ -50,6 +58,7 @@ What is asserted, and why each is not enough alone:
 """
 from __future__ import annotations
 
+import functools
 import os
 import re
 import shutil
@@ -104,6 +113,102 @@ def _real_binary(name: str) -> str | None:
     stub = str(_stub_dir_from_env())
     entries = [p for p in os.environ["PATH"].split(os.pathsep) if p and p != stub]
     return shutil.which(name, path=os.pathsep.join(entries))
+
+
+# --------------------------------------------------------------------------- #
+# The "this host has no systemctl" arm, hoisted out of the tests so it can be
+# DRIVEN rather than merely declared
+# --------------------------------------------------------------------------- #
+# 🔴 WHY THESE ARE FUNCTIONS AND NOT `if` BLOCKS INSIDE THE TESTS. Every
+# systemctl test below has two arms, and this dev host can only ever take one of
+# them: `_real_binary("systemctl")` resolves here, so the `real is None` arm —
+# the one the nix sandbox tier takes on EVERY run — never executed in-process on
+# the machine anyone measures from. `scripts/dead-guard-scan.py` flagged all six
+# of those arms as never-executed branch bodies, and the honest reading is (b)
+# in `scripts/lib/dead_guard.py`'s taxonomy: a reporting branch with no positive
+# control. Six sites carried a `# pragma: no cover` saying exactly that.
+#
+# Hoisting the arm into a module-level function makes it drivable with a
+# SYNTHETIC `real`/`resolved` pair, which is what the two controls under "THE
+# SYNTHETIC HOST" at the end of this file do. They call these functions
+# DIRECTLY, in this interpreter, because `sys.settrace` is per-interpreter: a
+# control that drove them through `subprocess.run` would leave the branch
+# recorded as never-executed and buy nothing at all.
+#
+# It also collapses a predicate that was open-coded at FIVE sites into one, so
+# `_assert_nothing_answers_to_systemctl`'s message is written once. Four of
+# those five spelled it as a bare `assert shutil.which("systemctl") is None`
+# with no message; they now carry the fifth's.
+def _assert_nothing_answers_to_systemctl(resolved) -> None:
+    """On a host with no real systemctl, nothing may answer to the name.
+
+    `resolved` is what `shutil.which("systemctl")` says on the LIVE PATH — i.e.
+    with the fixture's stub dir in front. A stub installed where there is
+    nothing to shadow would make `command -v systemctl` start succeeding and
+    change which branch every script under test takes.
+    """
+    assert resolved is None, (
+        "no real systemctl, yet something answers to the name")
+
+
+def check_systemctl_stub_matches_host(real, stub, stub_dir, resolved) -> None:
+    """🔴 The invariant, asserted in BOTH directions rather than skipped in one.
+
+    Extracted verbatim from `test_systemctl_is_stubbed_exactly_when_a_real_one_
+    exists`; the test now calls this and nothing else, so both arms are one
+    another's siblings in one place.
+
+      `real`     — the systemctl on the AMBIENT path (`_real_binary`), or None.
+      `stub`     — where the fixture would have written a systemctl stub.
+      `stub_dir` — the fixture's stub directory.
+      `resolved` — `shutil.which("systemctl")` on the LIVE path.
+    """
+    if real is None:
+        assert not stub.exists(), (
+            "a systemctl stub was installed on a host that has no systemctl — "
+            "that changes `command -v systemctl` for every script under test")
+        _assert_nothing_answers_to_systemctl(resolved)
+    else:
+        assert stub.exists(), (
+            f"a real systemctl exists at {real} and nothing shadows it — "
+            "mutating verbs from the scripts under test reach the live session")
+        assert Path(resolved).parent == stub_dir
+
+
+def unless_the_host_has_no_systemctl(real, resolved, body):
+    """Run `body()` where a real systemctl exists; assert the claim where none does.
+
+    The four tests below that used to open with
+
+        if _real_binary("systemctl") is None:
+            assert shutil.which("systemctl") is None
+            return
+
+    now route through here. Deliberately NOT `pytest.skip`: this file's whole
+    argument is that a tier which cannot reach the hazard should still ASSERT
+    the absence rather than fall silent, and a skipped test is invisible in the
+    tier that is authoritative for merges.
+    """
+    if real is None:
+        _assert_nothing_answers_to_systemctl(resolved)
+        return
+    body()
+
+
+def only_when_a_real_systemctl_exists(fn):
+    """`unless_the_host_has_no_systemctl` as a decorator, for the tests whose
+    check sits at the very TOP of the body.
+
+    Not used on `test_monitor_blackout_restore_cannot_stop_a_real_timer`: there
+    the check sits deliberately AFTER the script has been run, and hoisting it
+    to the top would stop that tier running monitor-blackout.sh at all.
+    """
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        return unless_the_host_has_no_systemctl(
+            _real_binary("systemctl"), shutil.which("systemctl"),
+            lambda: fn(*args, **kwargs))
+    return wrapper
 
 
 # --------------------------------------------------------------------------- #
@@ -941,20 +1046,14 @@ def test_systemctl_is_stubbed_exactly_when_a_real_one_exists(no_real_launchers):
     under test takes — a behaviour change in the authoritative tier bought for
     no protection at all. Installing NONE where a real one exists is the hazard.
     """
-    real = _real_binary("systemctl")
-    stub = no_real_launchers / "systemctl"
-    if real is None:
-        assert not stub.exists(), (  # pragma: no cover - the guard's own FIRING path: it fires only when the corpus is dirty, and no planted positive control drives it. Adding one is the real remedy
-            "a systemctl stub was installed on a host that has no systemctl — "
-            "that changes `command -v systemctl` for every script under test")
-        assert shutil.which("systemctl") is None
-    else:
-        assert stub.exists(), (
-            f"a real systemctl exists at {real} and nothing shadows it — "
-            "mutating verbs from the scripts under test reach the live session")
-        assert Path(shutil.which("systemctl")).parent == no_real_launchers
+    check_systemctl_stub_matches_host(
+        _real_binary("systemctl"),
+        no_real_launchers / "systemctl",
+        no_real_launchers,
+        shutil.which("systemctl"))
 
 
+@only_when_a_real_systemctl_exists
 def test_a_mutating_systemctl_verb_is_recorded_and_swallowed(no_real_launchers):
     """`stop` must not reach the real binary.
 
@@ -962,11 +1061,6 @@ def test_a_mutating_systemctl_verb_is_recorded_and_swallowed(no_real_launchers):
     of a unit that is not loaded exits non-zero and writes to stderr, so
     rc == 0 with empty stderr is itself evidence the real one did not run.
     """
-    if _real_binary("systemctl") is None:
-        assert shutil.which("systemctl") is None, (  # pragma: no cover - the guard's own FIRING path: it fires only when the corpus is dirty, and no planted positive control drives it. Adding one is the real remedy
-            "no real systemctl, yet something answers to the name")
-        return
-
     before = len(nolaunch.blocked_systemctl(no_real_launchers))
     unit = "devrc-guard-probe-never-exists.timer"
     p = subprocess.run(
@@ -1016,13 +1110,10 @@ def test_a_mutating_systemctl_verb_is_recorded_and_swallowed(no_real_launchers):
     "-M somehost is-active devrc-guard-probe.service",
     "FOO=cat stop devrc-guard-probe.service",
 ])
+@only_when_a_real_systemctl_exists
 def test_an_argument_that_spells_a_read_verb_does_not_promote_a_mutation(
         argv, no_real_launchers):
     """The verb is the FIRST NON-FLAG token, exactly as systemd parses it."""
-    if _real_binary("systemctl") is None:
-        assert shutil.which("systemctl") is None  # pragma: no cover - the guard's own FIRING path: it fires only when the corpus is dirty, and no planted positive control drives it. Adding one is the real remedy
-        return
-
     before = len(nolaunch.blocked_systemctl(no_real_launchers))
     p = subprocess.run(
         [_SH, "-c", f"systemctl {argv}"],
@@ -1036,6 +1127,7 @@ def test_an_argument_that_spells_a_read_verb_does_not_promote_a_mutation(
         f"`systemctl {argv}` was not recorded as blocked: {blocked[before:]}")
 
 
+@only_when_a_real_systemctl_exists
 def test_the_read_passthrough_forwards_stdout_stderr_and_status_faithfully(
         no_real_launchers):
     """🔴 FIDELITY, compared against the REAL binary rather than asserted.
@@ -1047,10 +1139,6 @@ def test_the_read_passthrough_forwards_stdout_stderr_and_status_faithfully(
     three channels to match.
     """
     real = _real_binary("systemctl")
-    if real is None:
-        assert shutil.which("systemctl") is None  # pragma: no cover - the guard's own FIRING path: it fires only when the corpus is dirty, and no planted positive control drives it. Adding one is the real remedy
-        return
-
     args = ["--user", "cat", "devrc-guard-probe-never-exists.service"]
     through_stub = subprocess.run(
         [shutil.which("systemctl"), *args],
@@ -1078,6 +1166,7 @@ def test_the_read_passthrough_forwards_stdout_stderr_and_status_faithfully(
                nolaunch.recorded(no_real_launchers))
 
 
+@only_when_a_real_systemctl_exists
 def test_a_read_only_systemctl_verb_still_reaches_the_real_binary(no_real_launchers):
     """The other half: swallowing reads would fabricate system state.
 
@@ -1085,10 +1174,6 @@ def test_a_read_only_systemctl_verb_still_reaches_the_real_binary(no_real_launch
     binary answers (non-zero), because scripts and tests branch on it —
     monitor-blackout's `status` is exactly that branch.
     """
-    if _real_binary("systemctl") is None:
-        assert shutil.which("systemctl") is None  # pragma: no cover - the guard's own FIRING path: it fires only when the corpus is dirty, and no planted positive control drives it. Adding one is the real remedy
-        return
-
     p = subprocess.run(
         [_SH, "-c", "systemctl --user is-active devrc-guard-probe-never-exists.timer"],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
@@ -1199,17 +1284,24 @@ def test_monitor_blackout_restore_cannot_stop_a_real_timer(tmp_path):
                        timeout=60, env=env)
     assert p.returncode == 0, f"{p.stdout}{p.stderr}"
 
-    if _real_binary("systemctl") is None:
-        # Nothing to protect: no systemctl exists, so cancel_timer's calls could
-        # not have reached one. Assert THAT, rather than skipping.
-        assert shutil.which("systemctl") is None  # pragma: no cover - the guard's own FIRING path: it fires only when the corpus is dirty, and no planted positive control drives it. Adding one is the real remedy
-        return
+    # 🔴 THE CHECK SITS HERE, NOT AT THE TOP OF THE TEST, AND THAT PLACEMENT IS
+    # LOAD-BEARING — which is why this one site calls the dispatcher by hand
+    # instead of wearing `@only_when_a_real_systemctl_exists`. On a host with no
+    # systemctl there is nothing to protect (cancel_timer's calls could not have
+    # reached one) and the claim to assert is THAT, rather than skipping — but
+    # monitor-blackout.sh must still have been RUN, which is the tier where the
+    # script itself is exercised. Hoisting the check to the top would take that
+    # run away from exactly the tier that is authoritative for merges.
+    def tail():
+        blocked = nolaunch.blocked_systemctl(stub_dir)[before:]
+        verbs = {v for ln in blocked
+                 for v in ("stop", "kill", "reset-failed") if v in ln}
+        assert verbs == {"stop", "kill", "reset-failed"}, (
+            f"cancel_timer's mutating verbs did not all land in the stub: {blocked}")
+        assert any("monitor-blackout-restore-v2" in ln for ln in blocked), blocked
 
-    blocked = nolaunch.blocked_systemctl(stub_dir)[before:]
-    verbs = {v for ln in blocked for v in ("stop", "kill", "reset-failed") if v in ln}
-    assert verbs == {"stop", "kill", "reset-failed"}, (
-        f"cancel_timer's mutating verbs did not all land in the stub: {blocked}")
-    assert any("monitor-blackout-restore-v2" in ln for ln in blocked), blocked
+    unless_the_host_has_no_systemctl(
+        _real_binary("systemctl"), shutil.which("systemctl"), tail)
 
 
 def test_rig_control_notify_and_rgb_reach_the_stub(tmp_path):
@@ -1743,3 +1835,118 @@ def test_the_ledger_equality_is_what_makes_a_new_reacher_red(tmp_path):
     assert mutant.returncode == 0, (
         "with the ledger relaxed to a subset the test is STILL red, so it is "
         f"red for some other reason and proves nothing.\n{mutant.stdout}")
+
+
+# --------------------------------------------------------------------------- #
+# THE SYNTHETIC HOST — positive controls for the arm this machine cannot take
+# --------------------------------------------------------------------------- #
+# 🔴 WHAT THESE ARE FOR, stated so nobody reads them as duplicate coverage. Six
+# `if _real_binary("systemctl") is None:` bodies in this file were measured by
+# `scripts/dead-guard-scan.py` as NEVER EXECUTED: this host has a real
+# systemctl, so only the other arm ever ran, and the arm that carries the whole
+# claim for the nix sandbox tier had nothing driving it. Each site had a
+# `# pragma: no cover` saying precisely that, which is a note about a gap, not a
+# closing of it.
+#
+# The arms now live in `check_systemctl_stub_matches_host` and
+# `unless_the_host_has_no_systemctl`, and the tests below drive them with a
+# SYNTHETIC (real, resolved, stub) triple. Everything here is an ordinary
+# in-process call — no `subprocess.run`, deliberately: `sys.settrace` is
+# per-interpreter, so a control that spawned a child would leave the branch
+# recorded as never-executed and close nothing.
+#
+# Each control asserts on THIS guard's own message, not merely that "something
+# raised" — a neighbouring assertion firing instead would fail the `match=`.
+#
+# 🔴 EVERY SYNTHETIC PATH IS BUILT FROM `tmp_path`, NEVER WRITTEN AS A LITERAL.
+# `test_no_real_launchers_all_targets.py::test_the_absolute_path_sites_are_
+# pinned` pins the set of absolute launcher-path LITERALS in the tree both ways,
+# because a literal like "/usr/bin/systemctl" performs no PATH lookup and so no
+# stub dir can shadow it. A first draft of these controls wrote exactly that
+# spelling and turned that pin red — correctly. Nothing here is ever executed,
+# but the pin is about the SHAPE, and adding an exemption to it to make a
+# convenience literal legal would be the wrong direction entirely.
+_NO_SYSTEMCTL_MSG = "no real systemctl, yet something answers to the name"
+_STUB_WITHOUT_A_HOST_MSG = (
+    "a systemctl stub was installed on a host that has no systemctl")
+
+
+def test_the_no_systemctl_arm_fires_when_a_stub_was_installed_anyway(tmp_path):
+    """`check_systemctl_stub_matches_host`, `real is None`, FIRST assertion.
+
+    A stub present on a host that has no systemctl is the behaviour change the
+    guard exists to refuse: `command -v systemctl` starts succeeding and every
+    script under test takes a different branch.
+
+    🔴 `resolved=None` ISOLATES THE MUTATION. The realistic pairing is
+    `resolved=str(stub)` — a stub on PATH does resolve — but MEASURED with that
+    input, neutering `stub.exists()` killed this test via the SECOND assertion
+    in the same arm (`no real systemctl, yet something answers to the name`),
+    i.e. the mutant died to a neighbouring guard and this one's own firing was
+    never observed. Feeding an unresolved stub leaves exactly one assertion in
+    the arm that can fail.
+    """
+    # `write_exec`, not a hand-written shebang: `test_runtime_shebangs.py`
+    # pins that no test writes its own, and the first draft of this control
+    # tripped it. Same family as the absolute-literal note above — both guards
+    # live in OTHER files, so a green run of this one could not see either.
+    stub = tmp_path / "systemctl"
+    write_exec(stub, "exit 0\n")
+
+    with pytest.raises(AssertionError, match=re.escape(_STUB_WITHOUT_A_HOST_MSG)):
+        check_systemctl_stub_matches_host(None, stub, tmp_path, resolved=None)
+
+    # The clean half of the same arm: no real systemctl, no stub, nothing
+    # answering — this must pass, or the control above is red for a reason that
+    # has nothing to do with the stub.
+    check_systemctl_stub_matches_host(
+        None, tmp_path / "absent-systemctl", tmp_path, resolved=None)
+
+
+def test_the_no_systemctl_arm_fires_when_something_still_answers(tmp_path):
+    """`check_systemctl_stub_matches_host`, `real is None`, SECOND assertion —
+    reached only once the stub-absence assertion above has passed, so it needs
+    its own input: no stub file, yet `which` resolves.
+
+    That is the shape a PATH entry outside the fixture's stub dir produces, and
+    the first assertion is blind to it.
+    """
+    elsewhere = tmp_path / "some-other-path-entry" / "systemctl"
+    with pytest.raises(AssertionError, match=re.escape(_NO_SYSTEMCTL_MSG)):
+        check_systemctl_stub_matches_host(
+            None, tmp_path / "absent-systemctl", tmp_path,
+            resolved=str(elsewhere))
+
+
+def test_the_dispatcher_asserts_instead_of_running_the_body_with_no_systemctl(
+        tmp_path):
+    """`unless_the_host_has_no_systemctl` — the arm shared by four tests.
+
+    Three claims, because two of them are each other's control:
+      * with nothing answering, the body is NOT run and nothing is raised;
+      * with something answering, THIS guard's message is raised;
+      * with a real systemctl, the body IS run — without which a silent "the
+        body did not run" would be indistinguishable from a dispatcher wired to
+        nothing, and every assertion in the four tests it fronts would be
+        vacuous.
+    """
+    ran = []
+    ambient = str(tmp_path / "ambient-bin" / "systemctl")
+    shadowing = str(tmp_path / "stub-bin" / "systemctl")
+
+    unless_the_host_has_no_systemctl(None, None, lambda: ran.append("body"))
+    assert ran == [], (
+        "the body ran on a host with no systemctl — the four tests this fronts "
+        "would try to drive a binary that does not exist")
+
+    with pytest.raises(AssertionError, match=re.escape(_NO_SYSTEMCTL_MSG)):
+        unless_the_host_has_no_systemctl(
+            None, ambient, lambda: ran.append("body"))
+    assert ran == [], "the body ran even though the guard fired"
+
+    unless_the_host_has_no_systemctl(
+        ambient, shadowing, lambda: ran.append("body"))
+    assert ran == ["body"], (
+        "the body did NOT run on a host that has a real systemctl, so this "
+        "dispatcher is wired to nothing and every test it fronts is vacuous")
+

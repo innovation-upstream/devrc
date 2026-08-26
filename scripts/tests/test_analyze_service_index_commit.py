@@ -2520,12 +2520,25 @@ def _decoy_repo_with_worktree(tmp_path):
     (MEASURED, git 2.55.0 — a push from the MAIN checkout exports no GIT_DIR),
     which is how the variable reaches a suite, and from there anything the suite
     runs.
+
+    🔴 BUILT WITH THE HERMETIC ENV, AND THAT IS LOAD-BEARING, NOT TIDINESS. With
+    maintenance left at its default, `git` here spawns
+    `git maintenance run --auto --quiet --detach` against THIS repo — a
+    DETACHED process that outlives the command and creates, then removes,
+    `<decoy>/.git/objects/maintenance.lock` on its own schedule. `_fingerprint`
+    walks `objects/`, so that lock is a file appearing and disappearing inside
+    the very tree the assertion below is about. Measured on the unmodified tree
+    under CPU load: 4/180 red, every one of them
+    `DELETED .../objects/maintenance.lock` — the lock was caught by the `before`
+    snapshot and gone by the `after` one. The identity/`decoy` overrides are
+    kept because a committer named `decoy` is what distinguishes this repo's
+    commits from the ones the script under test writes.
     """
     work = tmp_path / "decoy" / "work"
     work.mkdir(parents=True)
-    env = dict(os.environ)
-    env.update({"GIT_AUTHOR_NAME": "decoy", "GIT_AUTHOR_EMAIL": "d@example.invalid",
-                "GIT_COMMITTER_NAME": "decoy", "GIT_COMMITTER_EMAIL": "d@example.invalid"})
+    env = hermetic_git.hermetic_git_env(
+        GIT_AUTHOR_NAME="decoy", GIT_AUTHOR_EMAIL="d@example.invalid",
+        GIT_COMMITTER_NAME="decoy", GIT_COMMITTER_EMAIL="d@example.invalid")
     subprocess.run(["git", "init", "-q", "-b", "decoy/base", str(work)],
                    check=True, capture_output=True, env=env)
     (work / "real-file.txt").write_text("real\n", encoding="utf-8")

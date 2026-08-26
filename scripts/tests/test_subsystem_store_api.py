@@ -180,8 +180,13 @@ def running(
     Deliberately not a handler-level unit test: the response CODE, the header
     set and the exact bytes on the wire are what every claim in this file is
     about, and an in-process call to a handler method cannot observe them.
+
+    🔴 THE YIELDED `audit` IS AN `AuditLog`, NOT A BARE LIST, so `await_audit`
+    works on it. The response-does-not-imply-the-line race `drain_output`
+    documents is NOT a property of the subprocess pipe — it is a property of
+    `ThreadingHTTPServer`, and this in-process server has exactly the same one.
     """
-    audit: list[str] = []
+    audit = AuditLog()
     httpd = api.build_server(
         host="127.0.0.1",
         port=0,
@@ -289,6 +294,55 @@ def _comparable(headers: dict) -> tuple:
 AUDIT_PREFIX = "store-api audit "
 
 
+def _audit_lines(all_lines: "list[str]") -> "list[str]":
+    """The audit subset of a stream. ONE copy, shared by both record types.
+
+    `Drained` (a subprocess's stdout) and `AuditLog` (an in-process server's
+    sink) differ in where the lines come from and in nothing else that matters
+    here; open-coding the filter twice is how the two drift apart.
+    """
+    return [ln for ln in all_lines if ln.startswith(AUDIT_PREFIX)]
+
+
+class AuditLog(list):
+    """Every line an IN-PROCESS `running()` server has emitted so far.
+
+    🔴 IT IS A REAL `list` BECAUSE FORTY-ODD ASSERTIONS READ IT AS ONE, and it
+    carries `Drained`'s read surface because `await_audit` is the one helper in
+    this file that knows how to wait for a line. The race is NOT a property of
+    the subprocess pipe: `_respond` runs before `_audit` on a
+    `ThreadingHTTPServer`, so an in-process `fetch()` returning proves exactly
+    as little about the audit line as a subprocess one does. Before this class
+    existed the in-process sites had no way to wait at all, and the only thing
+    standing between them and a red run was `shutdown()`'s 0.5s poll interval —
+    a `sleep` nobody wrote down. Measured: with the handler's `_audit` delayed
+    past that interval, the teardown "barrier" vanishes entirely.
+
+    🔴 `closed` IS `None`, NOT AN UNSET `Event`, AND THAT IS THE HONEST VALUE.
+    A `Drained` reaches EOF when the pipe closes, which is a real "no more lines
+    are coming" signal. This stream has none: `ThreadingHTTPServer` runs its
+    handlers as DAEMON threads, which `socketserver._Threads.append` refuses to
+    track, so `server_close()` joins nothing and a handler can still append
+    after teardown returns. Setting a `closed` event there would be a lie that
+    turns "the line is a little late" into a hard failure; `await_audit` reads
+    the sentinel and simply waits out its deadline instead.
+    """
+
+    closed = None
+
+    @property
+    def all(self) -> "list[str]":
+        return list(self)
+
+    @property
+    def audit(self) -> "list[str]":
+        return _audit_lines(list(self))
+
+    @property
+    def text(self) -> str:
+        return "\n".join(self)
+
+
 class Drained:
     """Everything a running store-api process has printed so far.
 
@@ -307,7 +361,7 @@ class Drained:
 
     @property
     def audit(self) -> "list[str]":
-        return [ln for ln in self.all if ln.startswith(AUDIT_PREFIX)]
+        return _audit_lines(self.all)
 
     @property
     def text(self) -> str:
@@ -362,9 +416,16 @@ def drain_output(proc) -> Drained:
     return out
 
 
-def await_audit(out: Drained, n: int, timeout: float = 15.0) -> "list[str]":
+def await_audit(out: "Drained | AuditLog", n: int, timeout: float = 15.0) -> "list[str]":
     """Wait for at least `n` audit lines, then return them. RAISES if they never
     arrive.
+
+    🔴 IT TAKES EITHER RECORD, and that is the whole reason there is only one of
+    these. `Drained` wraps a subprocess's stdout; `AuditLog` is what an
+    in-process `running()` server appends to. The hazard is identical in both —
+    `_respond` runs before `_audit` — so a second waiting helper for the second
+    shape would be the open-coded predicate `claude/RULES.md` warns about, wrong
+    at N-1 sites.
 
     🔴 It raises rather than returning short, so that `[-1]` on the result is
     always safe. Returning whatever had arrived is what produced the CI failure
@@ -384,15 +445,19 @@ def await_audit(out: Drained, n: int, timeout: float = 15.0) -> "list[str]":
     `out.wait_closed()`. `test_the_STDOUT_audit_stream_names_the_matched_
     fingerprint` does both and is the worked example.
     """
+    # `closed` is None for an `AuditLog`: that stream has no EOF to short-circuit
+    # on, so the loop simply runs to its deadline. See `AuditLog`.
+    closed = out.closed
     deadline = time.time() + timeout
     while len(out.audit) < n and time.time() < deadline:
-        if out.closed.is_set() and len(out.audit) < n:
+        if closed is not None and closed.is_set() and len(out.audit) < n:
             break                                   # the pipe is done; no more coming
         time.sleep(0.02)
     lines = out.audit
+    ended = closed is not None and closed.is_set()
     assert len(lines) >= n, (
         f"expected at least {n} `{AUDIT_PREFIX}` line(s) within {timeout:g}s, got "
-        f"{len(lines)}{' (stdout closed early)' if out.closed.is_set() else ''}.\n"
+        f"{len(lines)}{' (stdout closed early)' if ended else ''}.\n"
         f"full stdout:\n{out.text}")
     return lines
 
@@ -2060,8 +2125,14 @@ class TestClientIpIsCloudflareOnly:
             code, _h, body = fetch(
                 f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN, client_ip=CLIENT_IP
             )
+            # 🔴 WAIT FOR ALL TWENTY-ONE LINES. `fetch` returning means the
+            # RESPONSE was written; `_audit()` runs after it, on a handler
+            # thread. See `drain_output` — the hazard is the server's, not the
+            # subprocess pipe's, and this site is in-process.
+            lines = await_audit(audit, 21)
         assert code == 200, "an unidentifiable caller locked out an identified one"
         assert POINTER_LINE.encode() in body
+        assert len(lines) == 21, lines
         # 🔴 THE ASSERTION THAT MAKES THIS TEST MEAN ANYTHING, and it was missing.
         # An audit found this test VACUOUS against the very hazard it names:
         # under the mutant `ip = "unknown"` (bucket every unidentified caller
@@ -2070,12 +2141,23 @@ class TestClientIpIsCloudflareOnly:
         # distinguishes fail-closed from a shared bucket is that the twentieth
         # unidentified request is STILL `no-client-ip` and never `locked-out`:
         # nothing was counted, because there was no bucket to count into.
-        statuses = {
-            line.split("status=")[1].split()[0] for line in audit[:20]
-        }
+        #
+        # 🔴 SELECTED BY IDENTITY, NEVER BY POSITION. This used to slice
+        # `audit[:20]`, which assumes the twenty rejections were APPENDED before
+        # the twenty-first request's line. They are not ordered: twenty-one
+        # handler threads each write their response and then race to append, so
+        # the `status=recalled` record can land anywhere in the list. Measured on
+        # an unmodified tree under CPU load: 2/50 red; with the handler's
+        # `_audit` delayed for `no-client-ip` only, 1/1 — `{'no-client-ip',
+        # 'recalled'}`. A row is not yours because it is FIRST.
+        unidentified = [ln for ln in lines if " ip=- " in ln]
+        assert len(unidentified) == 20, (
+            f"expected twenty unidentified records, got {len(unidentified)} — "
+            f"an unidentified caller was given an identity:\n" + "\n".join(lines))
+        statuses = {line.split("status=")[1].split()[0] for line in unidentified}
         assert statuses == {"no-client-ip"}, statuses
-        assert not any("locked-out" in line for line in audit)
-        assert not any("lockout-triggered" in line for line in audit)
+        assert not any("locked-out" in line for line in lines)
+        assert not any("lockout-triggered" in line for line in lines)
 
     def test_the_address_is_NORMALISED_so_one_caller_is_one_bucket(self):
         assert api.client_ip({"CF-Connecting-IP": "::FFFF:203.0.113.7"}) == api.client_ip(
@@ -3906,7 +3988,21 @@ class TestTrustedProxyOverTheRealProcess:
         assert all(f"ip={UNTRUSTED_PEER}" in ln for ln in lines), lines
         assert all("peer=untrusted" in ln for ln in lines), lines
         # …and the forger locks out ITSELF, which is a rate limiter working.
-        assert "status=lockout-triggered" in lines[-1], lines[-1]
+        #
+        # 🔴 READ AS A MULTISET, NEVER AS `lines[-1]`. `await_audit` guarantees
+        # the five lines EXIST; it cannot guarantee the ORDER they were appended
+        # in, and it never could. The five requests are issued sequentially and
+        # the limiter is charged before the response, so the fifth is the one
+        # that trips — but each handler writes its response and only then races
+        # to `_audit()`, so request 5's record can be appended before request
+        # 4's. `lines[-1]` then holds a plain `unauthorized` and the test is red
+        # on a tree with nothing wrong with it. The multiset says exactly what
+        # the sentence above says — five attempts, one of them the lockout — and
+        # says it about all five records instead of one.
+        statuses = sorted(ln.split("status=")[1].split()[0] for ln in lines)
+        assert statuses == ["lockout-triggered"] + ["unauthorized"] * 4, (
+            f"expected four unauthorized and one lockout-triggered, got "
+            f"{statuses}:\n" + "\n".join(lines))
 
     def test_an_untrusted_peer_LOCKING_ITSELF_OUT_does_not_touch_the_victim(
         self, store: Path, token_file: Path
