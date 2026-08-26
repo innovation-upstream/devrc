@@ -155,9 +155,45 @@ def q(s):
 # need it at import time.
 SCRATCH = tempfile.mkdtemp(prefix="ghccg-test-")
 
+# 🔴 …AND THAT RANDOM NAME MUST NEVER REACH A `parametrize` VALUE. A parameter is
+# what pytest builds the test ID from, and every xdist worker imports this module
+# in its OWN process — so a `mkdtemp` name baked into a table gives each worker a
+# DIFFERENT id for the same case, and xdist aborts the run with "Different tests
+# were collected between gw0 and gw1" before a single test executes. Measured at
+# 200e6383: 474 passed serially, 3 collection ERRORS at `-n 4 --dist loadfile`.
+#
+# So the tables spell the directory as a STABLE PLACEHOLDER and the two drivers
+# substitute the real one at call time. Both halves matter: an explicit `ids=`
+# would stabilise the LABEL while leaving each worker a different VALUE, i.e. the
+# same cross-worker inconsistency with the alarm switched off.
+#
+# `scratch()` — the one everybody reaches for, and the one a new table entry will
+# use — is the SAFE spelling. Only a test that touches the file on disk needs
+# `scratch_on_disk()`, and that is a deliberate minority.
+SCRATCH_TOKEN = "/ghccg-scratch"
+
 
 def scratch(name):
+    """A path in the per-run scratch dir, spelled as a stable placeholder.
+
+    Safe in a `parametrize` table. `ev()` / `verdict()` resolve it to `SCRATCH`
+    before the command reaches the gate, so what runs is the real path.
+    """
+    return SCRATCH_TOKEN + "/" + name
+
+
+def scratch_on_disk(name):
+    """The REAL path — for the handful of tests that open or stat the file."""
     return os.path.join(SCRATCH, name)
+
+
+def resolved(cmd):
+    """Substitute the real per-run scratch dir for the placeholder.
+
+    A no-op on a command built with `scratch_on_disk()`, so the drivers can apply
+    it unconditionally.
+    """
+    return cmd.replace(SCRATCH_TOKEN, SCRATCH)
 
 
 # --------------------------------------------------------------------------- #
@@ -181,7 +217,7 @@ def verdict(cmd, env=None, tool_name="Bash", raw=None, hook=None):
         e.update(env)
     payload = raw if raw is not None else json.dumps(
         {"tool_name": tool_name, "hook_event_name": "PreToolUse",
-         "cwd": str(ROOT), "tool_input": {"command": cmd}})
+         "cwd": str(ROOT), "tool_input": {"command": resolved(cmd)}})
     p = subprocess.run([sys.executable, hook or HOOK], input=payload,
                        capture_output=True, text=True, env=e)
     assert p.returncode == 0, (
@@ -215,7 +251,7 @@ def assert_allowed(cmd, env=None):
 # would make the suite slow. The subprocess driver above covers the process
 # contract; this covers volume.
 def ev(cmd, env=None):
-    return guard.evaluate(cmd, env or {}, guard_core)
+    return guard.evaluate(resolved(cmd), env or {}, guard_core)
 
 
 # =========================================================================== #
@@ -1838,6 +1874,133 @@ def test_control_the_specified_fixtures_carry_REAL_newlines():
 
 
 # =========================================================================== #
+# 14b. 🔴 THE PARAMETERS MUST NOT CARRY A PER-PROCESS RANDOM VALUE.
+#
+# The hazard the two tests below pin is INVISIBLE to every other test in this
+# file, and it took `main` down. `SCRATCH` is a `mkdtemp` name, so it differs per
+# PROCESS; the module-level tables interpolate scratch paths; and each xdist
+# worker imports this module in its own process. The parameter — and therefore
+# the test ID pytest derives from it — was different in every worker, so xdist
+# refused to run at all:
+#
+#   200e6383, serial            -> 474 passed
+#   200e6383, -n 4 --dist loadfile -> 3 errors, "Different tests were collected
+#                                     between gw0 and gw1", diffing
+#                                     ghccg-test-0zehf5ye vs ghccg-test-52gb_244
+#
+# A serial run is structurally blind to it — it stayed green the whole time — and
+# both PRs involved (#821 adding this file, #841 adding the 4-way xdist leg) were
+# green on their own branches, because `strict: false` means nothing ever gated
+# the merged tree. So the detector has to live HERE, where a serial run finds it.
+#
+# TWO tests, because one covers what the other cannot:
+#   - the ID half catches ANY per-process value that reaches an id, whatever its
+#     source (mkdtemp, uuid4, a pid, a clock);
+#   - the VALUE half catches the residual hole the ID half has by construction —
+#     an explicit `ids=` (`SAME_LINE_HEREDOC_CASES` has one) pins the LABEL while
+#     leaving each worker a different VALUE. Stable ids over random values is not
+#     a fix; it is the same inconsistency with the alarm switched off.
+# =========================================================================== #
+ID_DRIFT_MARK = "NONDETERMINISTIC TEST ID"
+PARAM_DRIFT_MARK = "PER-RUN SCRATCH PATH IN A parametrize VALUE"
+
+
+def _collect_ids_in_a_fresh_process():
+    """Collect THIS module in a NEW interpreter and return its test IDs.
+
+    A subprocess and not a second in-process collection, because the property
+    under test is what a fresh PROCESS produces — which is exactly what an xdist
+    worker is. Re-collecting in this process would re-use the module object
+    already imported and report an agreement it never established.
+
+    `PYTEST_*` is stripped from the child's environment so it is a genuinely
+    independent session rather than a continuation of this one.
+    """
+    e = {k: v for k, v in os.environ.items() if not k.startswith("PYTEST_")}
+    e["PYTHONDONTWRITEBYTECODE"] = "1"
+    p = subprocess.run(
+        [sys.executable, "-m", "pytest", "-p", "no:cacheprovider",
+         "--collect-only", "-q", os.path.abspath(__file__)],
+        capture_output=True, text=True, cwd=str(ROOT), env=e)
+    assert p.returncode == 0, (
+        f"the nested collection itself failed (exit {p.returncode}) — this test "
+        f"cannot vouch for anything until that is fixed\n"
+        f"--- stdout ---\n{p.stdout[-4000:]}\n--- stderr ---\n{p.stderr[-4000:]}")
+    ids = [ln for ln in p.stdout.splitlines() if "::" in ln]
+    # POSITIVE CONTROL: a harness wired to nothing would compare two empty lists
+    # and report a reassuring pass. Anchored well below the real count so an
+    # ordinary edit does not have to touch it.
+    assert len(ids) > 300, (
+        f"the nested collection returned only {len(ids)} ids — this test is "
+        f"measuring nothing\n{p.stdout[-4000:]}")
+    return ids
+
+
+def test_the_collected_test_IDS_are_IDENTICAL_ACROSS_TWO_FRESH_COLLECTIONS():
+    """🔴 THE REGRESSION GUARD FOR THE xdist COLLECTION MISMATCH. Two independent
+    collections of this module must produce byte-identical id lists. If they do
+    not, every xdist worker disagrees with every other and the whole run ERRORS
+    out before a test executes — while a serial run stays green and says nothing.
+    """
+    first = _collect_ids_in_a_fresh_process()
+    second = _collect_ids_in_a_fresh_process()
+    drifted = [(a, b) for a, b in zip(first, second) if a != b]
+    assert first == second, (
+        f"{ID_DRIFT_MARK}: two fresh collections of this module disagree on "
+        f"{len(drifted)} of {len(first)} ids (and on the COUNT, if these differ: "
+        f"{len(first)} vs {len(second)}).\n"
+        f"Something built into a `parametrize` value changes per PROCESS — a "
+        f"`mkdtemp` name, a uuid, a pid, a timestamp. Every xdist worker imports "
+        f"this module separately, so it will refuse the run with 'Different tests "
+        f"were collected between gw0 and gw1'.\n"
+        f"Fix the VALUE (a stable placeholder resolved by the driver — see "
+        f"`SCRATCH_TOKEN` / `scratch()` above), not the label.\n"
+        + "\n".join(f"  gw0: {a}\n  gw1: {b}" for a, b in drifted[:5]))
+
+
+def _every_parametrize_value():
+    """(test name, value) for every entry of every `parametrize` table here.
+
+    Read off the decorated functions' own `pytestmark`, NOT off
+    `request.session.items`: `items` holds only what the current invocation
+    SELECTED, so a `-k` or `-x` run would hand this test two items and fail its
+    positive control on a tree that is perfectly fine. A guard that goes red on a
+    filtered run is a guard people learn to ignore.
+    """
+    out = []
+    for name, obj in sorted(globals().items()):
+        if not (name.startswith("test_") and callable(obj)):
+            continue
+        for mark in getattr(obj, "pytestmark", []):
+            if mark.name != "parametrize":
+                continue
+            values = mark.args[1] if len(mark.args) > 1 else mark.kwargs.get(
+                "argvalues", [])
+            out.extend((name, v) for v in values)
+    return out
+
+
+def test_no_parametrize_VALUE_carries_the_per_run_scratch_PATH():
+    """🔴 THE HALF AN EXPLICIT `ids=` HIDES. The test above compares IDs, so a
+    table that pins its own labels — `SAME_LINE_HEREDOC_CASES` does — can hold a
+    per-process path and still collect identically everywhere. That is not
+    harmless: each worker would then run DIFFERENT bytes under one name. This
+    walks the parameters themselves rather than their labels."""
+    values = _every_parametrize_value()
+    # POSITIVE CONTROL, same reason as above: an empty walk must not read as a pass.
+    assert len(values) > 300, (
+        f"the parametrize walk found only {len(values)} values in this module — "
+        f"it is measuring nothing")
+    offenders = [(t, v) for t, v in values if SCRATCH in repr(v)]
+    assert not offenders, (
+        f"{PARAM_DRIFT_MARK}: {len(offenders)} parametrize value(s) interpolate "
+        f"the per-run scratch directory {SCRATCH!r}, which differs in every "
+        f"process. Use `scratch()` (the stable placeholder, resolved by "
+        f"`ev()`/`verdict()`), never `scratch_on_disk()`, in a table.\n"
+        + "\n".join(f"  {t} -> {v!r:.200}" for t, v in offenders[:5]))
+
+
+# =========================================================================== #
 # 15. 🔴 BYPASS B — ONE EFFECTIVE BODY PER SOURCE.
 #
 # The gate used to aggregate every body-shaped argument and pass if ANY of them
@@ -1896,8 +2059,8 @@ def test_the_LAST_body_flag_being_correct_still_passes(cmd):
 def test_a_body_file_beats_a_body_flag_whatever_the_order():
     """`create.go` assigns `opts.Body = string(b)` after `--body` is bound, so the
     FILE is what GitHub renders even when `--body` was written second."""
-    good = scratch("bfile-good.md")
-    bad = scratch("bfile-bad.md")
+    good = scratch_on_disk("bfile-good.md")
+    bad = scratch_on_disk("bfile-bad.md")
     with open(good, "w") as f:
         f.write(CC + "\n")
     with open(bad, "w") as f:
@@ -1923,7 +2086,7 @@ def test_a_correct_body_beside_an_UNREADABLE_body_file_cannot_see_the_body():
     nothing either way; reading the `--body` gh discards is the bypass. The
     verdict must be the CANNOT-SEE one, not "no closing condition" — they are
     different facts."""
-    missing = scratch("bfile-does-not-exist.md")
+    missing = scratch_on_disk("bfile-does-not-exist.md")
     assert not os.path.exists(missing)
     reason = ev(CREATE + " -t t --body " + q(CC) + " --body-file " + missing) or ""
     assert UNSEEABLE_MARK in reason
@@ -2057,8 +2220,8 @@ def test_a_single_curl_data_argument_is_unaffected(cmd):
 def test_only_the_LAST_gh_api_input_answers():
     """`--input` is a pflag `StringVar` in gh api, so a repeat is last-wins for
     exactly the reason `--body` is."""
-    good = scratch("input-good.json")
-    bad = scratch("input-bad.json")
+    good = scratch_on_disk("input-good.json")
+    bad = scratch_on_disk("input-bad.json")
     with open(good, "w") as f:
         json.dump({"title": "t", "body": CC}, f)
     with open(bad, "w") as f:
