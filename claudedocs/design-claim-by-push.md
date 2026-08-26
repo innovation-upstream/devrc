@@ -49,9 +49,93 @@ claim-work --release "$SLUG"                                  # when you finish 
 claim-work --steal "$SLUG"                                    # take over a stale claim, deliberately
 ```
 
+Run it as a **bare command from wherever you are** — the namespace is global and
+the cwd is not consulted (see below). `--repo` changes the namespace and is for
+tests, not routine use.
+
 Exit codes (documented in the script's own header, and pinned by the test suite):
 `0` won / free / degraded · `2` usage · `10` taken · `11` taken but stale ·
 `20` degraded under `--strict`.
+
+### 🔴 The claim namespace is GLOBAL — and it was not, for two days
+
+The queue this locks is global: handoff docs live in `devrc/claudedocs/` while the
+work they rank happens in homelab-infra, datapacket-talos, civitai and elsewhere.
+The measured incident is literally that shape — the handoff doc was a **devrc**
+artifact (`claudedocs/handoff-devrc-ci-gate.md`) while the colliding PRs were
+**homelab-infra** `#386`/`#388`/`#389`.
+
+🔴 **The first shipped version resolved the remote from `$PWD`, so the namespace
+was PER-ORIGIN and the whole mechanism was inert cross-repo.** Measured
+2026-08-26: the same canonical slug claimed from `~/workspace/devrc` and from
+`~/workspace/homelab-talos` **both returned rc 0 CLAIMED**, one ref on each
+origin, no warning — and the two claims carried different git identities, so even
+the refusal text could not have disambiguated them. Natural usage produces exactly
+that: derive the slug from the devrc handoff doc, then run `claim-work` in the
+repo you are actually working in.
+
+The fix resolves ONE canonical remote **from the location of the script itself**:
+`readlink -f` the file (the deployed `claim-work` is a symlink onto
+`devrc/scripts/claim-work.sh`), walk to that repo's root, read *its* `origin`.
+That works from any cwd, in any repo, with no configuration. Precedence, in full:
+
+| # | source | note |
+|---|---|---|
+| 1 | `--remote <url>` | explicit, wins |
+| 2 | `--repo <path>`'s `origin` | explicit, and it **changes the namespace** — for tests and one-off cross-remote work, never routine use |
+| 3 | `DEVRC_CLAIM_REMOTE` | explicit, environment |
+| 4 | the script's own repo's `origin` | **the default** — global, cwd-independent |
+| 5 | *degrade* | |
+
+🔴 **There is deliberately NO cwd fallback.** A fallback is not a graceful
+degradation here: it reinstates the per-origin namespace *and* reports CLAIMED
+while doing it, which is strictly worse than saying "I could not find out". So an
+unresolvable canonical remote degrades (exit 0, loud stderr, rc 20 under
+`--strict`) and claims nothing. Pinned by
+`test_the_claim_namespace_is_global_not_per_origin` (two repos, two origins, one
+canonical remote ⇒ rc 0 then rc 10, and no stray ref on either cwd origin),
+`test_the_canonical_remote_survives_the_symlink_the_command_is_deployed_as`, and
+`test_an_unresolvable_canonical_remote_degrades_rather_than_using_the_cwd`.
+
+### 🔴 What a claim publishes, and this repo is PUBLIC
+
+A claim commit goes to the canonical origin, where anyone with read access sees
+it. It carries the claimant's git name and email, the **hostname**, an opaque
+`cwd-id`, a nonce, and the `--subject` text **verbatim**.
+
+- The `cwd-id` is a **hash**, not the absolute path it replaced: an absolute cwd
+  leaks a client repo's directory name into a public remote, and the hash is all
+  ownership needs (it only has to distinguish two sessions).
+- **The subject is public.** `CLAUDE.md` → "This repo is PUBLIC" forbids real
+  media paths, client directory names, third-party hostnames and captured text;
+  a claim subject is a publish path like any other. Describe the item generically.
+  This is stated in the script header, `usage()`, `/resume` step 6 and here,
+  because the person typing the subject is the only control on it.
+- ⚠ **Not covered:** the four repo content gates read `git ls-files` and are
+  structurally blind to a ref-only commit that never enters a tree. Nothing
+  mechanical checks a claim subject. If that becomes a real risk, the gate would
+  have to read `refs/heads/claim/*` on the remote, which no existing test does.
+
+### 🔴 Ownership, and why it is not the author
+
+`--release` deletes and `--steal` overwrites a ref, and until 2026-08-26 neither
+had any gate: **measured, session B released session A's zero-second-old live
+claim (rc 0, silently) and stole it (rc 0)** — while rc 10 prints "DO NOT start
+this item" with `--steal` one flag away, and `usage()` called `--steal` the verb
+for a "stale/abandoned" claim. Nothing enforced either.
+
+The git identity cannot decide this: both hosts run as the same author, and two
+agents in two worktrees on one host are the same person to git. So ownership keys
+off **host + `cwd-id`**, both recorded in the claim commit. Allowed without
+`--force`: a claim that is yours, a claim past the TTL (that is what the stale
+escape hatch is for), or a slug nobody holds. Refused (rc 10): a live claim
+belonging to another session, **and one whose owner could not be read** — "could
+not find out" must not authorise a destructive write on somebody else's lock.
+Pinned by `test_release_refuses_another_sessions_live_claim_unless_forced`,
+`test_steal_refuses_another_sessions_live_claim_unless_forced`,
+`test_a_stale_claim_can_still_be_released_by_anyone_without_force` (the same
+fixture at two TTLs, so the threshold is demonstrably what opened the gate) and
+`test_a_claim_whose_owner_cannot_be_read_is_not_yours_by_default`.
 
 ### Why this protects the FIRST mover (acceptance criterion 2)
 
@@ -73,23 +157,44 @@ one `rc 0` and five `rc 10`.
 
 ### Why it is atomic, and not a check-then-act
 
-Every claim commit is an **unrelated orphan root**: `git commit-tree` with no
-`-p`, over the empty tree. It can never be a descendant of whatever is already on
-the ref, so a second push to an already-claimed ref is rejected
-**non-fast-forward** by the receiving git — under its own ref transaction lock,
-evaluated on the server at update time.
+🔴 **This section said "rejected non-fast-forward" until 2026-08-26 and that was
+the wrong name, in six places across the script, the tests and three docs.** It
+matters because the next reader reasons from the name. Measured with real git:
 
-That means the lock is git's own **compare-and-swap**, not a read we take and
-then act on. There is no TOCTOU window between "is it free?" and "take it",
-because the script never asks the first question on the claim path: it just
-pushes, and reads the remote afterwards only to explain a failure.
+| case | who refuses, and on what | the message git actually emits |
+|---|---|---|
+| **two TRUE concurrent first movers** | the **SERVER**. Both clients saw no ref, so both sent the update with `old = 0000…0` — a CREATE. The ref transaction is a **compare-and-swap on that expected old value**, so exactly one create can land. | `cannot lock ref '<ref>': reference already exists` |
+| **a SERIALIZED second mover** | the **CLIENT**, before anything is sent. The connection advertises the ref at a sha the fresh scratch repo does not hold, so git cannot prove a fast-forward. | `! [rejected] <sha> -> claim/<slug> (fetch first)` |
 
-Verified empirically rather than asserted:
-`test_the_lock_is_gits_own_ref_compare_and_swap_not_a_check_then_act` pushes two
-distinct orphan commits at one ref through **raw git** (so the property belongs
-to git, not to our shell), asserts the second is refused, asserts the rejection
-is specifically a non-fast-forward, and asserts the loser's commit did not
-overwrite the winner's.
+The **first** row is the atomicity, and it is the half that covers the FIRST
+mover. 🔴 **The orphan-root property plays NO part in it.** Every claim commit is
+an unrelated root (`git commit-tree` with no `-p`, over the empty tree), and that
+earns its keep in the *second* row only: a repo that DID hold the winner's object
+would print `non-fast-forward` rather than `fetch first`, because an unrelated
+root can never be a descendant. Neither refusal is what the docs used to claim.
+
+Either way the lock is git's own **compare-and-swap**, not a read we take and then
+act on. There is no TOCTOU window between "is it free?" and "take it", because the
+script never asks the first question on the claim path: it just pushes, and reads
+the remote afterwards only to explain a failure — and it branches on what the
+remote says, never on the message.
+
+Verified empirically rather than asserted, and now as **two** tests because one
+could not cover both mechanisms:
+`test_a_true_concurrent_create_is_refused_by_the_ref_transaction_cas` performs the
+create twice with raw `update-ref` and an explicit `old = 0000…0` (the same
+transaction a create-push runs, minus the transport) and pins the
+`reference already exists` refusal;
+`test_a_serialized_loser_is_refused_client_side_and_cannot_fast_forward` builds
+the script's real shape — a fresh bare repo holding none of origin's objects — and
+pins `fetch first`, asserting the CAS message is ABSENT so it cannot silently
+become a duplicate of the other.
+
+⚠ **The old single test is why this matters.** It asserted
+`"non-fast-forward" in blob or "fetch first" in blob` while calling itself a test
+of the compare-and-swap. It was green because it exercised the *serialized* path;
+the CAS message contains neither string, so it would have gone red in exactly the
+case its name claimed to cover.
 
 🔴 **And the assertion is proved load-bearing by a mutation**, not by its own
 greenness: `test_defeating_the_lock_with_force_lets_the_second_session_win`
@@ -100,9 +205,9 @@ control against silently matching nothing.
 ### Why it fails open
 
 This runs at the start of every resumed session, so a bug in it is felt by every
-`/resume`. No origin, not a git repo, no network, no auth, git missing, remote
-hung ⇒ **loud warning on stderr, exit 0**, degrading to exactly the behaviour we
-had before the script existed. Every network call is wrapped in a bounded
+`/resume`. No canonical remote, no network, no auth, git missing, remote hung ⇒
+**loud warning on stderr, exit 0**, degrading to exactly the behaviour we had
+before the script existed. Every network call is wrapped in a bounded
 `timeout` so a hung remote cannot hang a resume.
 
 Two deliberate exceptions to "exit 0", both because failing open there would
@@ -121,10 +226,22 @@ apart from "I could not find out", which an exit-0-either-way contract hides.
 
 ### Why it never touches the caller's repository
 
-It reads one thing from the caller's repo — `remote.origin.url` — and does
-everything else in a throwaway **bare** repo under `mktemp -d`, removed on exit.
+It reads `user.name` / `user.email` from the caller's repo — nothing else — and
+does everything in a throwaway **bare** repo under `mktemp -d`, removed on exit.
 No index, no working tree, no local branch, no `FETCH_HEAD`, no stash, no objects
-in the caller's object database. A claim tool that can perturb the tree it is
+in the caller's object database.
+
+🔴 **And it never runs the operator's hooks.** The scratch repo is `git init`ed,
+so it inherits `core.hooksPath` from `~/.gitconfig` — measured 2026-08-26, a
+global `pre-push` FIRES on a claim push, and one that blocks makes the lock
+silently inert (push fails ⇒ degrade ⇒ exit 0 ⇒ "unclaimed"). Every git call now
+goes through a wrapper pinning `-c core.hooksPath=/dev/null`, and every push adds
+`--no-verify`. The suite was structurally blind to this because
+`testlib/hermetic_git.py` pins `GIT_CONFIG_GLOBAL=/dev/null` — *the exact surface
+that carries the hazard* — so
+`test_a_global_pre_push_hook_cannot_make_the_lock_inert` deliberately builds its
+environment without that pin, with a real `$HOME/.gitconfig` and a real hook, and
+carries a negative control proving the hook fires there. A claim tool that can perturb the tree it is
 claiming work in would be worse than the collision it prevents. Pinned
 behaviourally by `test_the_claim_never_touches_the_callers_repository`, which
 content-hashes the whole caller tree (including `.git`) before and after.
@@ -196,13 +313,21 @@ ref at two TTLs so the threshold is demonstrably what produces rc 11.
 
 ## Alternatives rejected
 
-**A pre-flight `gh pr list` alone.** Rejected because it *structurally* cannot
-help the first mover — the second session does not exist when the first decides
-to start. It was already the standing rule and it is what failed: `#774` was
-public 22 minutes before its duplicate, `#388` 18 minutes before the other side's
-first commit; both were visible to `gh pr list` and neither was checked. It
-survives as the documented fallback for a degraded run, and as the only thing
-that can see a duplicate that was never claimed.
+**A pre-flight `gh pr list` alone.** Rejected as the *whole* fix because it
+*structurally* cannot help the first mover — the second session does not exist
+when the first decides to start. It was already the standing rule and it is what
+failed: `#774` was public 22 minutes before its duplicate, `#388` 18 minutes
+before the other side's first commit; both were visible to `gh pr list` and
+neither was checked.
+
+🔴 **But it was NOT rejected as a step, and demoting it to "for a degraded run
+only" was a regression corrected 2026-08-26.** The sweep is the only thing that
+can see a duplicate that was *never claimed* — a class this very document lists
+under "What is NOT covered" — so it covers something the lock cannot, and a
+mechanism that covers something else is not a fallback for it. `/resume` step 6
+therefore runs **both**, unconditionally: the claim, plus `gh pr list --state
+open` before starting and again immediately before `gh pr create`, plus pushing
+the branch the moment it is created.
 
 **Move next-step items into clawgate.** A genuinely stronger state model —
 assignees, status, history. Rejected on two counts: it adds a **workbench-cluster
@@ -245,11 +370,29 @@ any of them stops naming it:
 | `claude/skills/handoff/reference/shared-queue.md` | the mechanism up front, then the measurements |
 | `claude/RULES-ARCHIVE.md` → `shared-queue-lock` | the incident evidence and the refutations |
 
+## Cleanup
+
+Nothing prunes `refs/heads/claim/*` automatically, and nothing ever will
+implicitly: deleting somebody's claim is a decision, not maintenance. The
+supported story is manual and two commands — `claim-work --list` flags everything
+past the TTL with `[STALE]`, and `claim-work --release <slug>` drops one (your
+own, or a stale one; anything else needs `--force`). **Release your own claims
+when the work lands**; that is what keeps the namespace small.
+
+⚠ **A `--prune-stale` verb was considered and deliberately NOT built.** origin
+already carries 262 heads, so the concern is real — but a batch delete of other
+people's claims is exactly the operation the ownership gate above exists to
+prevent, and it would need its own confirm/force semantics and tests before it
+could be safe. If the namespace does grow unmanageably, that verb is the shape to
+build, gated the same way `--release` now is. Until then this section IS the
+cleanup story, and its absence was half the finding.
+
 ## What is NOT covered, and how you would notice
 
 - **A collision on work that was never claimed at all.** Nothing forces a session
-  to run the command; the rule and the two skills ask it to. `--list` and
-  `gh pr list` remain the only detectors for that case.
+  to run the command; the rule and the two skills ask it to. `--list` and the
+  `gh pr list` sweep remain the only detectors for that case — which is exactly
+  why the sweep is unconditional rather than a fallback.
 - **Reworded duplicates**, per the limitation above.
 - **A degraded run.** It exits 0 by design. The stderr warning is the only signal,
   and an agent that ignores stderr proceeds unclaimed believing otherwise —

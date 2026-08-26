@@ -11,15 +11,42 @@ a command, not any of the prose below:
 ```bash
 claim-work --list                                            # every live claim, with age + subject
 SLUG=$(claim-work --slug-for <handoff-doc> <rank>)            # the canonical id both sessions must derive
-claim-work "$SLUG" --subject "<the item, in your own words>"  # 0 = yours · 10 = taken · 11 = stale
+claim-work "$SLUG" --subject "<the item, in generic words>"   # 0 = yours · 10 = taken · 11 = stale
 claim-work --release "$SLUG"                                  # when you finish or abandon it
 ```
 
-It publishes an ORPHAN commit to `refs/heads/claim/<slug>` on origin. Because
-each claim is an unrelated root, a push to an already-claimed ref is rejected
-NON-FAST-FORWARD — git's own atomic ref compare-and-swap, decided on the server,
-with no check-then-act window. It **FAILS OPEN**: no origin/network/auth ⇒ a
-loud stderr warning and exit 0, so it can never block a `/resume`.
+🔴 **The namespace is GLOBAL — ONE canonical remote, resolved from the script's
+own location, never from the cwd's `origin`.** That is not a detail: the queue is
+global (handoff docs live in devrc while the work happens in other repos), and it
+was `$PWD` until 2026-08-26, which made the whole mechanism **inert cross-repo** —
+measured, the same slug claimed from two repos returned rc 0 CLAIMED twice, one
+ref per origin, no warning. Run the bare command from wherever you are; `--repo`
+changes the namespace and is for tests, not routine use. If the canonical remote
+cannot be resolved it DEGRADES rather than falling back — a fallback reinstates
+the bug behind a confident CLAIMED.
+
+It publishes an ORPHAN commit to `refs/heads/claim/<slug>` on that remote. 🔴 **A
+second claimant is refused, but name the mechanism correctly — there are two, and
+neither is spelled "non-fast-forward".** Measured 2026-08-26:
+
+| case | who refuses | the actual message |
+|---|---|---|
+| two TRUE concurrent first movers | the SERVER's ref transaction: both sent `old=0000…`, and a create is a compare-and-swap on that value | `cannot lock ref '<ref>': reference already exists` |
+| a SERIALIZED second mover | the CLIENT: its fresh scratch repo does not hold the winner's object, so git cannot prove a fast-forward | `! [rejected] <sha> -> claim/<slug> (fetch first)` |
+
+The first row is the atomicity, and it is the half that covers the FIRST mover.
+🔴 **The orphan-root property plays no part in it** — it is the second line of
+defence in the serialized row, where an unrelated root can never be a descendant.
+
+It **FAILS OPEN**: no canonical remote/network/auth ⇒ a loud stderr warning and
+exit 0, so it can never block a `/resume`. ⚠ **What you publish is PUBLIC** — the
+claim carries your git identity, hostname and the `--subject` text verbatim to
+the canonical origin, so keep the subject generic.
+
+⚠ **`--release` and `--steal` are gated.** A LIVE claim that is not yours is
+refused (rc 10); `--force` overrides. Ownership keys off the host + an opaque
+`cwd-id` in the claim commit, NOT the git author — one identity covers both hosts
+and every agent on them, so the author can never tell two sessions apart.
 
 Source: `scripts/claim-work.sh` (deployed on PATH as `claim-work`), named in
 `claude/RULES.md` so **both** runtimes get it — Claude Code imports that file and
@@ -88,13 +115,19 @@ it still had not. The duplication was created entirely by the later session.
 
 **That is the whole reason `claim-work` claims at DRAW time rather than checking
 at start time.** The claim exists before any work does, so the first mover is
-covered by construction. A `gh pr list` sweep remains useful — it is the fallback
-when the claim degrades, and it is the only thing that can see a duplicate that
-was *never claimed* — but it is a second-best signal, not the lock.
+covered by construction.
 
-Manual fallback, for a degraded run only: check `gh pr list --state open` before
-starting and again immediately before `gh pr create`, and push the branch the
-moment you create it (an empty commit is enough).
+🔴 **But the sweep is NOT a degraded-run fallback, and calling it one was a
+regression.** The lock only ever sees work somebody CLAIMED; a duplicate that was
+never claimed is invisible to it and visible to `gh pr list` — a class the design
+doc itself lists under "What is NOT covered". So both run, every time, and
+neither substitutes for the other:
+
+- **`gh pr list --state open` before you start, and AGAIN immediately before
+  `gh pr create`.** Two moments, because the window is ~20 minutes and the second
+  is where the sunk cost is highest.
+- **Push the branch the moment you create it**, before doing the work (an empty
+  commit is enough) — it is visible to `git ls-remote` the instant it lands.
 
 ## Producing side
 
