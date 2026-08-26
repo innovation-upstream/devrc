@@ -474,7 +474,7 @@ class TestScopeFilterNeverNarrowsTheSharedCache:
     offline recall of any other scope reported 'nothing recorded yet' at exit 0,
     a claim about the STORE derived from a filtered cache."""
 
-    @pytest.mark.parametrize("cmd", [("sync",), ("validate",)])
+    @pytest.mark.parametrize("cmd", [("sync",), ("validate",), ("ls-entries",)])
     def test_the_cache_stays_complete(self, live_store, tmp_path: Path, cmd):
         cache = tmp_path / "cache"
         assert run_store("sync", url=live_store.base, cache=cache).returncode == 0
@@ -656,12 +656,23 @@ class TestArchiveSizeAndTruncation:
 
 
 class TestNonRegularFilesInTheStore:
-    def test_a_directory_named_md_does_not_503_the_whole_store(
+    def test_a_directory_named_md_is_REFUSED_by_name_not_by_errno(
         self, source_store: Path, live_store, tmp_path: Path
     ):
-        """🔴 The previous round replaced `is_file()` with the symlink check and
-        dropped it. A DIRECTORY named `*.md` then raised `IsADirectoryError`,
-        503ing the entire store for every caller and every scope."""
+        """🔴 RENAMED — the old name claimed a property the code does not have.
+
+        It was `test_a_directory_named_md_does_not_503_the_whole_store`, and it
+        does 503 the whole store: the client always requests unfiltered, so one
+        bad file in ANY scope denies every scope. (The SERVER isolates correctly
+        — raw `?scope=healthy` returns 200 — but no client path reaches that.)
+        The body only ever asserted the refusal WORDING, which is the real,
+        deliberate property. A test whose name asserts availability while its
+        body asserts classification is the "description wider than the
+        implementation" pattern, in a test written to close a finding about it.
+
+        What is pinned: the failure is a CLASSIFIED refusal naming the offender,
+        not a raw `[Errno 21] Is a directory` escaping from an unguarded open.
+        """
         (source_store / "widget-cfg" / "trap.md").mkdir()
         proc = run_store(
             "recall", "--scope", "gizmo-notes", url=live_store.base,
@@ -696,15 +707,188 @@ class TestOrphanStagingIsReaped:
         assert run_store("sync", url=live_store.base, cache=cache).returncode == 0
         assert not orphan.exists(), "orphan staging dir survived a clean sync"
 
+    def test_an_old_DOT_OLD_orphan_is_also_removed(self, live_store, tmp_path: Path):
+        """The `.old-*` half of the glob had no test: dropping that prefix
+        SURVIVED the whole suite, so half the reaper was unguarded."""
+        cache = tmp_path / "cache"
+        orphan = cache.parent / f"{cache.name}.old-deadbeef"
+        orphan.mkdir(parents=True)
+        old = time.time() - (ORPHAN_GRACE + 60)
+        os.utime(orphan, (old, old))
+        assert run_store("sync", url=live_store.base, cache=cache).returncode == 0
+        assert not orphan.exists(), ".old- orphan survived a clean sync"
+
     def test_a_RECENT_staging_dir_is_left_alone(self, live_store, tmp_path: Path):
-        """Negative control, and it is the safety property: a young `.new-*` may
-        belong to a CONCURRENT sync, and reaping it would reintroduce the race
-        the unique names removed."""
+        """🔴 Negative control, and it pins the grace period FROM BELOW — the
+        direction the docstring's whole safety argument rests on. Shrinking the
+        grace to 1 second SURVIVED the previous suite, because the fixture aged
+        its "recent" dir ~0 s and so sat on its own boundary: a 1-second grace
+        would delete a live concurrent sync's staging dir with the suite green.
+
+        Aged to just INSIDE the window instead, so the assertion is about the
+        grace period rather than about scheduling luck.
+        """
         cache = tmp_path / "cache"
         fresh = cache.parent / f"{cache.name}.new-inflight"
         fresh.mkdir(parents=True)
+        recent = time.time() - (ORPHAN_GRACE // 2)
+        os.utime(fresh, (recent, recent))
         assert run_store("sync", url=live_store.base, cache=cache).returncode == 0
         assert fresh.exists(), "reaper deleted a possibly-live staging dir"
+
+
+class TestNotAScopeIsSkippedNotRefused:
+    """🔴 The predicate the `unreadable` list must encode: REFUSE a thing that
+    is a scope/entry but cannot be served safely; SKIP a thing that is not one.
+
+    Round 3 got the order wrong and tested `is_symlink()` before `is_dir()`, so
+    a symlinked `README.md` at the store root — not a scope, never was — took
+    the whole snapshot from exit 0 to exit 3 for every caller and every scope,
+    while a plain `README.md` in the same place was still skipped silently. Two
+    spellings of "not a scope", opposite outcomes.
+    """
+
+    def test_a_symlinked_FILE_at_the_store_root_is_skipped(
+        self, source_store: Path, live_store, tmp_path: Path
+    ):
+        target = tmp_path / "notes.md"
+        target.write_text("not a scope, just a file")
+        (source_store / "README.md").symlink_to(target)
+        proc = run_store(
+            "recall", "--scope", "widget-cfg", url=live_store.base,
+            cache=tmp_path / "cache",
+        )
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "thing-alpha" in proc.stdout
+
+    def test_a_plain_FILE_at_the_store_root_is_skipped_too(
+        self, source_store: Path, live_store, tmp_path: Path
+    ):
+        """The other half of the relationship — asserted so the two cannot drift
+        apart again. Either both skip or the guard is inconsistent."""
+        (source_store / "README.md").write_text("not a scope")
+        proc = run_store(
+            "recall", "--scope", "widget-cfg", url=live_store.base,
+            cache=tmp_path / "cache",
+        )
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+
+    def test_an_editor_lock_file_does_not_deny_the_whole_store(
+        self, source_store: Path, live_store, tmp_path: Path
+    ):
+        """🔴 An Emacs lock file is `.#entry.md` — a DANGLING SYMLINK whose name
+        ends in `.md`. The entry-level symlink refusal made one open buffer 503
+        the entire store for every caller. Reproduced at two earlier commits, so
+        it predates this fix; it shares the root cause above."""
+        (source_store / "widget-cfg" / ".#thing-alpha.md").symlink_to(
+            "zach@nixos.12345:1700000000"
+        )
+        proc = run_store(
+            "recall", "--scope", "widget-cfg", url=live_store.base,
+            cache=tmp_path / "cache",
+        )
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "thing-alpha" in proc.stdout
+
+    def test_a_symlinked_SCOPE_is_still_refused(
+        self, source_store: Path, live_store, tmp_path: Path
+    ):
+        """Negative control for the reorder. Skipping non-scopes must not have
+        also started skipping symlinked SCOPES — that was round 2's defect and
+        this reorder is exactly the shape of change that could undo its fix."""
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "sneaky.md").write_text(_entry("sneaky", "linked", "- x."))
+        (source_store / "linked").symlink_to(outside, target_is_directory=True)
+        proc = run_store(
+            "recall", "--scope", "linked", url=live_store.base,
+            cache=tmp_path / "cache",
+        )
+        combined = proc.stdout + proc.stderr
+        assert proc.returncode != 0, combined
+        assert "scope-empty" not in combined, combined
+
+
+class TestInodeBomb:
+    def test_an_archive_with_too_MANY_members_is_refused(self, tmp_path: Path):
+        """🔴 The byte ceiling bounds nothing here: `m.size` is 0 for an empty
+        member. Measured against the previous commit — a 282,282-byte body
+        carrying 60,000 zero-length `*.md` members wrote 60,000 files into the
+        cache and reported `live … 60000 entries`, exit 0."""
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz", format=tarfile.PAX_FORMAT) as tar:
+            for i in range(60_000):
+                tar.addfile(tarfile.TarInfo(f"widget-cfg/e{i:06d}.md"), io.BytesIO(b""))
+        proc = TestHostileOrBrokenArchives()._run_against(
+            buf.getvalue(), "application/gzip", tmp_path / "cache"
+        )
+        assert proc.returncode != 0, proc.stdout
+        assert "REFUSED" in proc.stderr and "member" in proc.stderr, proc.stderr
+        assert not list((tmp_path / "cache").glob("*/*.md"))
+
+    def test_the_byte_ceiling_sums_rather_than_maxes(self, tmp_path: Path):
+        """🔴 `sum` -> `max` SURVIVED the previous suite because the bomb fixture
+        was a SINGLE member, which makes the two indistinguishable. Many
+        moderate members is the case that tells them apart."""
+        buf = io.BytesIO()
+        chunk = b"\0" * (4 * 1024 * 1024)
+        with tarfile.open(fileobj=buf, mode="w:gz", format=tarfile.PAX_FORMAT) as tar:
+            for i in range(80):  # 320 MB total, no single member over the cap
+                info = tarfile.TarInfo(f"widget-cfg/big{i:03d}.md")
+                info.size = len(chunk)
+                tar.addfile(info, io.BytesIO(chunk))
+        proc = TestHostileOrBrokenArchives()._run_against(
+            buf.getvalue(), "application/gzip", tmp_path / "cache"
+        )
+        assert proc.returncode != 0, proc.stdout[:400]
+        assert "ceiling" in proc.stderr, proc.stderr
+
+
+class TestValidateScopeGuard:
+    def test_validate_on_a_scope_the_cache_does_NOT_hold_is_nonzero(
+        self, live_store, tmp_path: Path
+    ):
+        """🔴 The silent zero `cmd_validate` was rewritten to close, still open
+        on the explicit `--scope` branch: it printed the writer's own "NOTHING
+        WAS CHECKED — a zero here is NOT a clean bill of health" and exited 0.
+        The fix covered the case it was looking at, not the predicate."""
+        cache = tmp_path / "cache"
+        assert run_store("sync", url=live_store.base, cache=cache).returncode == 0
+        proc = run_store(
+            "validate", "--scope", "no-such-scope", "--no-sync", url=None, cache=cache
+        )
+        assert proc.returncode != 0, proc.stdout + proc.stderr
+        assert "no-such-scope" in proc.stderr, proc.stderr
+
+
+class TestSearchOverTheClient:
+    """🔴 `store search` had ZERO tests anywhere in the repo, so the fix that
+    gave search its own `_exit_for` label had no regression test at all."""
+
+    def test_search_finds_a_hunk_and_exits_0(self, live_store, tmp_path: Path):
+        proc = run_store(
+            "search", "lease", "--scope", "widget-cfg", url=live_store.base,
+            cache=tmp_path / "cache",
+        )
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "thing-beta" in proc.stdout, proc.stdout
+
+    def test_search_on_an_all_malformed_scope_names_the_SCOPE_not_the_query(
+        self, source_store: Path, live_store, tmp_path: Path
+    ):
+        """🔴 `_exit_for` was handed the QUERY where the reader passes
+        `SearchReport.label`, so the failure sentence read "`lease` holds 1
+        entry file" — naming the search term as if it were a scope path."""
+        broken = source_store / "rubble-pile"
+        broken.mkdir()
+        (broken / "junk.md").write_text("no front matter, nothing parseable\n")
+        proc = run_store(
+            "search", "lease", "--scope", "rubble-pile", url=live_store.base,
+            cache=tmp_path / "cache",
+        )
+        combined = proc.stdout + proc.stderr
+        assert "`lease`" not in combined, combined
+        assert "rubble-pile" in combined, combined
 
 
 class TestTheHarnessItself:

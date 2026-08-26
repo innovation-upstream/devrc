@@ -2039,7 +2039,31 @@ class TestPhaseOneScope:
             f"{sorted(self.ROUTES)} — add it to ROUTES on purpose, or remove it"
         )
 
-    def test_every_ledgered_route_actually_dispatches(self, store: Path):
+    @pytest.mark.parametrize(
+        "path",
+        [
+            f"/api/v1/recall/{SCOPE}/extra",   # ledgered head, too many parts
+            "/api/v1/recall",                  # ledgered head, too few
+            "/api/v1/snapshot/anything/at/all",
+            "/api/v1/search",
+        ],
+    )
+    def test_a_ledgered_head_with_the_WRONG_arity_404s(self, store: Path, path: str):
+        """🔴 The dispatcher's one numeric field had NO test.
+
+        `if len(parts) == arity` mutated to `>=` SURVIVED all 318 tests, and
+        that mutant serves `200 recalled` for `/recall/<scope>/extra` and
+        `200 snapshot` for `/snapshot/anything/at/all`. The existing
+        `test_anything_outside_the_ledger_404s` only probes heads OUTSIDE the
+        table, so a ledgered head with the wrong component count was unreachable
+        by every guard in this file. Arity is the table's other half.
+        """
+        with running(store) as (base, _):
+            code, headers, _b = fetch(f"{base}{path}", token=GOOD_TOKEN)
+        assert code == 404, f"{path} answered {code}"
+        assert headers["X-Store-Status"] == "no-route"
+
+    def test_every_ledgered_route_actually_dispatches(self):
         """Structural companion: the table's handlers must EXIST and be bound.
 
         A table is only as good as its rows — a typo'd handler name would make a
@@ -2084,6 +2108,11 @@ class TestPhaseOneScope:
               ordinary refactor away, and it was file-scoped so a rewrite of an
               unrelated `parts` local (server.py has two) would have produced a
               FALSE failure naming a header value as a route
+
+        v3 and its companion `test_no_table_dispatch_on_parts` are BOTH GONE —
+        this docstring described them for a round after they were deleted, which
+        is the same "reads as coverage while providing none" failure the guard
+        itself exists to prevent. What runs now is the assertion below.
 
         Each fix made the pattern-matching cleverer, which is the wrong axis.
         The route set is now DATA the dispatcher reads (`API_ROUTES`), so

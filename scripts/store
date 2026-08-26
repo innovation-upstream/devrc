@@ -77,6 +77,10 @@ DEFAULT_TIMEOUT = 20
 # markdown across 305 entries in 2026-08; 256 MB is ~4000x that, so it bounds a
 # decompression bomb without being reachable by real growth for years.
 MAX_UNPACKED_BYTES = 256 * 1024 * 1024
+# Companion ceiling on MEMBER COUNT. The live store held 305 entries in 2026-08;
+# 50,000 is ~160x that and bounds an inode bomb, which the byte ceiling alone
+# cannot see because empty members declare size 0.
+MAX_MEMBERS = 50_000
 
 # Exit codes. 0/3 are the contract §3 pins; the reader's own non-zero codes pass
 # through unchanged so a malformed entry still reports what it always did.
@@ -232,9 +236,20 @@ def _reap_orphans(cache: Path) -> int:
     for prefix in (f"{cache.name}.new-", f"{cache.name}.old-"):
         for path in cache.parent.glob(f"{prefix}*"):
             try:
-                if path.is_dir() and path.stat().st_mtime < cutoff:
+                # `lstat`, not `stat`: a SYMLINK named like a staging dir
+                # dereferences under `is_dir()`/`stat()`, and `rmtree` on a
+                # symlink is a silent no-op — so it would be counted as reaped
+                # while never being removed, and the miscount is invisible
+                # because the count is the only evidence.
+                if path.lstat().st_mtime >= cutoff:
+                    continue
+                if path.is_symlink():
+                    path.unlink()
+                elif path.is_dir():
                     shutil.rmtree(path, ignore_errors=True)
-                    reaped += 1
+                else:
+                    continue
+                reaped += 1
             except OSError:
                 continue  # someone else's, or vanished under us; not our problem
     return reaped
@@ -274,11 +289,29 @@ def install_snapshot(body: bytes, cache: Path, headers: dict[str, str]) -> int:
             # Every other hostile-archive guard here (links, traversal,
             # duplicates, count mismatch) exists for a server we do not fully
             # trust; a size bomb is the same threat model and was the one hole.
+            # 🔴 TWO CEILINGS, BECAUSE BYTES ALONE BOUND NOTHING. `m.size` is 0
+            # for an empty member, so a byte ceiling never fires on an INODE
+            # bomb: measured against the previous commit, a 282,282-byte body
+            # carrying 60,000 zero-length `*.md` members wrote 60,000 files into
+            # the cache in 3.7 s and reported `live … 60000 entries`, exit 0.
+            # Same threat model as the byte bomb closed last round, one axis
+            # over — and `X-Store-Entries` cannot help, since the same hostile
+            # server sets it.
+            #
+            # `sum`, not `max`: a `max`-based ceiling passes a 1000 x 250 MB
+            # archive, and the single-member bomb fixture cannot tell the two
+            # apart (that mutant survived the previous round's suite).
             declared_bytes = sum(m.size for m in members)
             if declared_bytes > MAX_UNPACKED_BYTES:
                 raise StoreCorrupt(
                     f"archive unpacks to {declared_bytes} bytes, over the "
                     f"{MAX_UNPACKED_BYTES}-byte ceiling "
+                    f"({len(body)} bytes on the wire)"
+                )
+            if len(members) > MAX_MEMBERS:
+                raise StoreCorrupt(
+                    f"archive holds {len(members)} members, over the "
+                    f"{MAX_MEMBERS}-member ceiling "
                     f"({len(body)} bytes on the wire)"
                 )
             for member in members:
@@ -628,11 +661,26 @@ def cmd_validate(args: argparse.Namespace) -> int:
     # WAS CHECKED — a zero here is NOT a clean bill of health" while exiting 0.
     # That is the silent zero this command exists to detect, committed by the
     # command itself. With no --scope we validate EVERY scope in the cache.
-    scopes = (
-        [args.scope]
-        if args.scope
-        else sorted(p.name for p in args.cache.iterdir() if p.is_dir())
-    )
+    held = sorted(p.name for p in args.cache.iterdir() if p.is_dir())
+    if args.scope:
+        # 🔴 THE SILENT ZERO THIS FUNCTION WAS REWRITTEN TO CLOSE, STILL OPEN ON
+        # THIS BRANCH. The no-scope path was fixed to enumerate the cache; the
+        # explicit `--scope` path passed the value straight through, so
+        # `store validate --scope no-such-scope` printed the writer's own
+        # "NOTHING WAS CHECKED — a zero here is NOT a clean bill of health" and
+        # exited 0. The docstring above names that failure mode verbatim while
+        # the branch that commits it went unguarded — the fix covered the case
+        # it was looking at, not the predicate.
+        if args.scope not in held:
+            print(
+                f"store: cache holds no scope {args.scope!r} — "
+                f"nothing was validated. Held: {', '.join(held) or '(none)'}",
+                file=sys.stderr,
+            )
+            return EXIT_USAGE
+        scopes = [args.scope]
+    else:
+        scopes = held
     if not scopes:
         print(
             f"store: nothing to validate — {args.cache} holds no scopes",

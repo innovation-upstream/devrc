@@ -1885,17 +1885,38 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
             # reintroduced one level up by the guard added to close it at the
             # entry level. A guard that SKIPS is a silent omission; only one
             # that REPORTS is a guard.
+            # 🔴 ORDER MATTERS, AND GETTING IT WRONG TURNED A SKIP INTO AN
+            # OUTAGE. Testing `is_symlink()` FIRST refused every symlink at the
+            # store root — including a symlinked `README.md`, which is not a
+            # scope and never was. Measured: that one link took the whole
+            # snapshot from rc 0 to rc 3 for every caller and every scope, while
+            # a NON-symlinked `README.md` in the same place was still skipped
+            # silently. Two spellings of "not a scope", opposite outcomes.
+            #
+            # The predicate is: refuse a thing that IS a scope but cannot be
+            # served safely; skip a thing that is not a scope at all. So resolve
+            # what it points at first, and only then decide.
+            if not candidate.is_dir():
+                continue  # a file, or a link to one — not a scope either way
             if candidate.is_symlink():
                 unreadable.append(f"{candidate.name}/: symlink refused")
                 continue
-            if not candidate.is_dir():
-                continue  # a stray file at the store root is not a scope
             scopes.append(candidate)
 
         for scope in scopes:
             try:
+                # 🔴 DOTFILES ARE SKIPPED INSIDE A SCOPE TOO, matching the store
+                # root. An Emacs lock file is `.#entry.md` — a DANGLING SYMLINK
+                # whose name ends in `.md` — so the entry-level symlink refusal
+                # added earlier made one open buffer 503 the entire store for
+                # every caller. Reproduced at two commits, so it is not this
+                # round's doing, but it is the same blast radius as the root
+                # case above and shares its fix: a thing that is not an entry
+                # must not be classified as an unservable one.
                 names = sorted(
-                    p for p in scope.iterdir() if p.name.endswith(".md")
+                    p
+                    for p in scope.iterdir()
+                    if p.name.endswith(".md") and not p.name.startswith(".")
                 )
             except OSError as exc:
                 unreadable.append(f"{scope.name}/: {exc.strerror or exc}")
