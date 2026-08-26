@@ -646,6 +646,15 @@ def _git_env(repo: Path) -> dict:
         "GIT_CONFIG_SYSTEM": str(repo.parent / "gitconfig-system"),
         "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
         "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid",
+        # 🔴 The SKILL block checks the DEPLOYED ~/.claude/skills/<name>/SKILL.md
+        # against origin — a fact about the HOST, not about these fixtures. Left
+        # on, every case here would inherit whatever this machine's deploy looks
+        # like (and a `!` gap in the nix sandbox, which has no ~/.claude at all),
+        # turning the DRIFT all-clear assertions into host-dependent noise.
+        # EMPTY, not unset: `${RESUME_STATE_SKILL-resume}` reads unset as "check
+        # /resume", and empty as "check none" — which is what this suite means.
+        # scripts/tests/test_resume_state_skill_freshness.py owns that block.
+        "RESUME_STATE_SKILL": "",
     })
     return env
 
