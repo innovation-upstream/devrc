@@ -83,14 +83,51 @@ is at entry granularity and a scope-granular trigger cannot see it.
 path, no manifest path, and no `--source hosted` flag. Nor does any other reader:
 
 ```bash
-grep -rn 'urllib\|requests\|httpx\|urlopen' scripts/lib/subsystem_*.py scripts/subsystem-audit.py
+# ANCHORED. An import statement, not a word anywhere in the file.
+grep -rnE '^[[:space:]]*(import|from)[[:space:]]+(urllib|requests|httpx|aiohttp|http)([. ]|$)' \
+  scripts/lib/subsystem_*.py scripts/subsystem-*.py
 ```
 
-returns nothing — every consumer of the index (`/resume`, `/handoff`, `/analyze-service`,
-`/prune-index`, `subsystem-index`, `resume-state.sh`, `subsystem-audit.py`, the collector)
-imports the reader as a **local-disk library**. The handoff block itself flagged this,
-in its own words: *"THE MANIFEST DOES NOT EXIST YET, AND THIS IS THEREFORE NOT A
-CLIENT-ONLY PHASE 2."* It was right, and it stayed true for five days.
+returns nothing (exit 1) as of 1f7019e0, over the four readers that glob matches —
+`subsystem_recall.py`, `subsystem_resolver.py`, `subsystem_touch.py`, `subsystem-audit.py`.
+Every consumer of the index (`/resume`, `/handoff`, `/analyze-service`, `/prune-index`,
+`subsystem-index`, `resume-state.sh`, `subsystem-audit.py`, the collector) imports the reader
+as a **local-disk library**. The handoff block itself flagged this, in its own words:
+*"THE MANIFEST DOES NOT EXIST YET, AND THIS IS THEREFORE NOT A CLIENT-ONLY PHASE 2."*
+It was right, and it stayed true for five days.
+
+🔴 **The `-E` and the `^[[:space:]]*(import|from)` anchor are the whole command.** The first
+version of this record printed the unanchored `grep -rn 'urllib\|requests\|httpx\|urlopen'`
+and asserted it "returns nothing". Running it returns **10 matches, exit 0** — nine in
+`subsystem_touch.py` and one in `subsystem-audit.py`, every one of them the prose phrase
+"pull requests". That is the identical false positive `scripts/tests/test_present_measure.py
+::test_the_http_client_predicate_is_an_import_not_a_word` was written against, handed to the
+reader as the way to check the claim. The authority is
+`scripts/present/measure.py` → `reaches_http_client()`, which the suite drives against both
+controls; this grep is the anchored hand version of its first two clauses.
+
+⚠ **Neither the grep nor the predicate proves "no network call".** Both
+`subsystem_touch.py` and `subsystem-audit.py` shell out to `gh pr view`, which is a network
+hop. What is pinned is narrower and is the thing that matters here: **no direct HTTP client
+that could reach a hosted index store.** `reaches_http_client()` enumerates exactly what it
+sees and what walks past it.
+
+Measured against the live guard, mutation by mutation:
+
+| shape injected | verdict | killed by |
+|---|---|---|
+| `import requests` in a new `scripts/lib/subsystem_hosted.py` | RED | the client count |
+| `subprocess.run(["curl", …])`, no import statement | RED | the client count |
+| `importlib.import_module("requests")` | RED | the client count |
+| `from . import _hosted_client` in a **new** module | RED | the reader-set ledger |
+| `from . import _hosted_client` appended to the **existing** `subsystem_recall.py` | **GREEN — not covered** | — |
+| `scripts/subsystem-audit.py` renamed out of the glob | RED | the reader-set ledger |
+
+The one green is the whole residual, stated rather than papered over: **a client added to a
+reader that ALREADY EXISTS, through indirection the predicate cannot follow, is invisible to
+this row.** Everything arriving as a new file is caught whatever it contains, because the
+reader set is globbed and pinned two-way — which is why the fourth and fifth rows differ by
+nothing except which file the identical line went into.
 
 So the service was complete, correct, well-tested and hosted, with a client set of size
 zero — **and every gate stayed green the entire time.** A test suite cannot fail for want of
@@ -169,5 +206,9 @@ not mint one.
   is the same failure mode arriving by a different route.
 - `claudedocs/proposal-subsystem-store-homelab.md` — the hosting design. Historical.
 - `scripts/lib/subsystem_recall.py` — the reader that was always the real interface.
-- `scripts/present/measure.py` → `m_store_api_clients` — the measured row that pins the
-  local readers as a disk library with no network hop, so a reintroduced client is visible.
+- `scripts/present/measure.py` → `m_store_api_clients` — the measured row that pins **zero
+  direct HTTP clients** across every reader `scripts/lib/subsystem_*.py` and
+  `scripts/subsystem-*.py` matches, so a reintroduced client is visible **including one that
+  arrives as a new module**: the reader set is globbed, not listed. Read
+  `reaches_http_client()` for what the predicate sees — it is narrower than "no network
+  hop", and deliberately so, since two of these readers already run `gh pr view`.

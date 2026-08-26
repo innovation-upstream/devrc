@@ -6,8 +6,11 @@
 # form of this argument — that service was retired 2026-08-25, see
 # `claudedocs/decision-subsystem-store-api-retired-2026-08-25.md`, so the
 # argument is restated here rather than pointed at):
-# the code lives HERE, gated by this repo's own suite (387 tests under
-# `scripts/signal/tests/`), and homelab-talos holds MANIFESTS ONLY plus a
+# the code lives HERE, gated by this repo's own suite (`scripts/signal/tests/` —
+# 717 collected on 2026-08-25, up from the 387 this line claimed for months; the
+# enforced number is the `scripts/signal/tests` entry in `run-tests.sh`
+# TARGET_FLOORS, which moves, so re-measure rather than quoting this one), and
+# homelab-talos holds MANIFESTS ONLY plus a
 # pinned image digest. A vendored copy would pass its own tests while drifting
 # from the CLI the workbench runs — the exact local/remote disagreement the
 # design exists to make impossible.

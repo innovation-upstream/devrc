@@ -1333,7 +1333,30 @@ TARGET_FLOORS=(
   # never fire: `zsh` is in REQUIRED_TOOLS, so a host without it aborts on
   # GUARD 1 naming the binary rather than running two tests thinner. That is
   # why they are not pinned in EXPECTED_SKIPS.
-  "scripts/tests|7772"
+  #
+  # 2026-08-25, retiring the hosted subsystem-store-api: the deletion of
+  # scripts/tests/test_subsystem_store_api.py removed tests from this target,
+  # and the pin was LOWERED — the weakening direction, which is exactly the
+  # direction this table's convention exists to keep accountable. It went in
+  # with no entry; this is that entry, written when the audit caught the gap.
+  #
+  # 🔴 The pin this REPLACES was 8036, then 7772, neither of them accounted for
+  # here. ONE number below is measured: **7825 collected in scripts/tests** on
+  # this branch, `pytest scripts/tests --collect-only -q` under
+  # `nix develop --impure`, 2026-08-25. The branch is the retirement plus the
+  # three guards this audit round added to test_present_measure.py (the derived
+  # reader set, the two non-import client shapes, and the no-reader-at-all
+  # Unmeasurable). That "+3" is a count of functions written, NOT a second
+  # `--collect-only` run, so no pre-audit total is asserted here.
+  #
+  # Rule applied to that measurement, not to the two sides of a diff:
+  #
+  #   _suggested_floor 7825 = 7825 - min(50, max(1, 391)) = 7825 - 50 = 7775
+  #
+  # ⚠ ZERO new skips. Re-measure before trusting this number: as the entries
+  # above document at length, this line drifts by hundreds between the
+  # contributions that happen to look at it.
+  "scripts/tests|7775"
   # 2026-08-11, the session-summary changed-paths work: 230 -> 273 collected,
   # +43 for scripts/collector/tests/test_changed_paths.py (the shared
   # `changed_paths*` module). The gate printed this replacement itself —
