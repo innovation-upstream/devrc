@@ -87,7 +87,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
-from testlib import hermetic_git  # noqa: E402
+from testlib import hermetic_git, mockbin  # noqa: E402
 
 SCRIPT = REPO_ROOT / "scripts" / "claim-work.sh"
 
@@ -1030,9 +1030,11 @@ def test_a_push_that_lands_and_then_fails_client_side_reports_CLAIMED(tmp_path):
     """
     origin = _bare_origin(tmp_path)
     a = _session(tmp_path, origin, "Session A", "a")
-    wrapper = tmp_path / "receive-pack-then-fail.sh"
-    wrapper.write_text('#!/usr/bin/env bash\ngit receive-pack "$1"\nexit 1\n')
-    wrapper.chmod(0o755)
+    # `mockbin.write_exec` owns the shebang: a runtime-written `#!/usr/bin/env`
+    # stub execs on the dev host and ENOENTs in the nix sandbox, which is a
+    # repo-wide guard (`scripts/tests/test_runtime_shebangs.py`).
+    wrapper = mockbin.write_exec(tmp_path / "receive-pack-then-fail.sh",
+                                 'git receive-pack "$1"\nexit 1\n')
 
     env = _env_with_git_config([("remote.origin.receivepack", str(wrapper))])
     r = _run("landed-anyway", "--subject", "the item", repo=a, env=env)
@@ -1412,14 +1414,11 @@ def test_a_global_pre_push_hook_cannot_make_the_lock_inert(tmp_path):
     hooks = tmp_path / "global-hooks"
     hooks.mkdir()
     fired = tmp_path / "hook-fired"
-    hook = hooks / "pre-push"
-    hook.write_text(
-        "#!/usr/bin/env bash\n"
+    hook = mockbin.write_exec(
+        hooks / "pre-push",
         f'echo fired >> "{fired}"\n'
         'echo "global pre-push says no" >&2\n'
-        "exit 1\n"
-    )
-    hook.chmod(0o755)
+        "exit 1\n")
 
     home = tmp_path / "home"
     home.mkdir()
@@ -1472,13 +1471,10 @@ def test_git_never_prompts_for_credentials_on_a_claim(tmp_path):
     origin = _bare_origin(tmp_path)
     a = _session(tmp_path, origin, "Session A", "a")
     dump = tmp_path / "push-env.txt"
-    wrapper = tmp_path / "receive-pack-recording-env.sh"
-    wrapper.write_text(
-        "#!/usr/bin/env bash\n"
+    wrapper = mockbin.write_exec(
+        tmp_path / "receive-pack-recording-env.sh",
         f'env > "{dump}"\n'
-        'exec git receive-pack "$1"\n'
-    )
-    wrapper.chmod(0o755)
+        'exec git receive-pack "$1"\n')
 
     env = _env_with_git_config([("remote.origin.receivepack", str(wrapper))])
     r = _run("topic-1", repo=a, env=env)
