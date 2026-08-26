@@ -1,6 +1,6 @@
 ---
 name: clawgate
-description: "Operate clawgate — the self-hosted Claude Code approval UI (plus Tasks/agents/runbooks). Status, send-a-test, push/SSE logs, build and deploy a version, toggle the approval hook, manage credentials/QR. Use for: clawgate, clawgate.zacx.dev, remote approval, the PermissionRequest approval hook, push notifications for permission prompts."
+description: "Operate clawgate — the self-hosted Claude Code permission ROUTER and task board (plus agents/runbooks). Status, send-a-test, push/SSE logs, build and deploy a version, toggle the approval hook, manage credentials/QR. Use for: clawgate, clawgate.zacx.dev, remote approval, the PermissionRequest approval hook, push notifications for permission prompts."
 ---
 
 # clawgate operations
@@ -9,6 +9,19 @@ Self-hosted Go + htmx PWA routing Claude Code permission prompts to Zach's phone
 approve-with-comment / deny), grown into the **agent dispatch loop**: Tasks/Repos/Agents on Postgres,
 agent self-service + privilege profiles + an Operator, runbooks with approval gates, and a machine
 Task API producers post work into for one-tap Dispatch.
+
+🔴 **In practice it ROUTES; it does not GATE — say so rather than calling it an approval gate.**
+Measured in the 2026-08 usage audit, not assumed: **121,740** permission requests routed in 14 days
+against **exactly one** human decision across Prometheus's full 30-day retention (one `approve`,
+2026-07-31). ~99.9% are resolved by the **global auto-approve window**, whose maximum duration is
+**24h** (`handleAutoApproveAll` offers 1h/8h/24h and, unlike the per-project windows, no `forever`) —
+so the ~1 arming/day is one standing decision the UI forces Zach to re-enter, not repeated choices to
+bypass a gate. The operator's call on 2026-08-26 was to accept this and retain decision history
+(`request_history`, migration 0025) so a narrower gate can later be designed from data.
+⚠ Two traps when reasoning about this: `project` is the **cwd basename**, so every git worktree is a
+new project identity and per-project windows go cold exactly when agents write most; and
+`requests` is a working queue the hook `DELETE`s from, so its row count is ~0 and is **not** a usage
+measure. Query `request_history` instead.
 
 🔴 **Point-in-time state: `~/workspace/homelab-talos/containers/clawgate/HANDOFF.md` —
 GREP it for the section you need, never read it whole (~190 KB, lower half superseded).**
