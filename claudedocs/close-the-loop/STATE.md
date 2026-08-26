@@ -205,8 +205,10 @@ LIVE 2026-06-15, each with its own staleness rule). Parked: the context-capturin
   path — they cannot guess it.**
 - **Civit fleet** (in `datapacket-talos`): capacity-sweep, reliability-sweep P1–P4,
   dependency-pr-auditor, classifier-tuner, pr-reviewer, alert-diagnose-svc, standup-triage…
-  Check before building anything civit-side (the `next-lever` skill + `AGENTIC_LEVERAGE.md` are
-  the catalog).
+  Check before building anything civit-side — the catalog is
+  `datapacket-talos:clusters/production/apps/AGENTIC_LEVERAGE.md` (VERIFIED present
+  2026-08-26). The `next-lever` skill that used to front it is RETIRED — gone from
+  `origin/main` and deployed on neither host — so reach the catalog by path, not by skill.
 - **Existing artifacts:** `perf-deep-dive` runbook + `homelab-observability-read` profile
   (perf-deep-dive is a **manual tool**, not a loop).
 

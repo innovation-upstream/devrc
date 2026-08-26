@@ -12,7 +12,7 @@ Pipeline: `devrc/scripts/session-analysis/{extract_user_msgs,extract_genesis}.py
 
 **Where the work is (last 14 days, 147 sessions):** civitai prod infra dominates — `datapacket-talos` **100**, `civitai` 12, `homelab-talos` 11, `devrc` 7, the rest scattered (vetr, gpu-fleet, naida). This is overwhelmingly **prod ops on one system**, not greenfield.
 
-**How sessions open:** 45% with a slash command, 55% typed. Top openers: `/investigate-alert` (35), `/check-app` (26), `/kubeclaw-agents` (16), `/investigate-network` (11), `/app-blocks` (10), `/manage-postgres` (10), `/next-lever` (8). Typed openers are dominated by **"read X (load context)" (59)** and **"analyze/recon X" (32)** — i.e. re-loading state and re-deriving subsystem maps.
+**How sessions open:** 45% with a slash command, 55% typed. Top openers: `/investigate-alert` (35), `/check-app` (26), `/kubeclaw-agents` (16), `/investigate-network` (11), `/app-blocks` (10), `/manage-postgres` (10), `/next-lever` (8 — skill RETIRED since, count kept: this is a measurement of 2026-06-17, not a live inventory). Typed openers are dominated by **"read X (load context)" (59)** and **"analyze/recon X" (32)** — i.e. re-loading state and re-deriving subsystem maps.
 
 **~40 distinct slash commands/skills** are in active use. The work is heavily tooled already.
 
@@ -79,7 +79,7 @@ If after cutting you've kept more than ~120 lines, you didn't cut enough.
 ### 3. Simplify & optimize (only what survived deletion)
 
 - The surviving rules are already terse — collapse the duplicate "use best tool/parallel" rules into **one** Tool-Optimization rule.
-- **Do NOT over-consolidate the command fleet.** The `investigate-*` (4) and `manage-*` (8) families look like duplication but `AGENTIC_LEVERAGE.md`'s skill-granularity rule already governs this deliberately (runbook depth ⇒ own skill). Respect it; this is a case where apparent duplication is correct.
+- **Do NOT over-consolidate the command fleet.** The `investigate-*` (4) and `manage-*` (8) families look like duplication but the skill-granularity rule in `datapacket-talos:clusters/production/apps/AGENTIC_LEVERAGE.md` already governs this deliberately (runbook depth ⇒ own skill). Respect it; this is a case where apparent duplication is correct.
 - Simplify continuity: 59 "read X" + 13 "read handoff" openers mean **context-reload is the single most repeated act.** `/resume` now collapses it — but it's unproven (see §5).
 
 ### 4. Accelerate cycle time (only now)
