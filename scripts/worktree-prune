@@ -63,6 +63,40 @@ THE VERDICTS
                worktree whose path is gone. It is never silently folded into
                `dead`.
 
+🔴 PATH EXCLUSION — `--exclude-path` / `--skip-agent-worktrees`
+--------------------------------------------------------------
+Repo-level scoping (`--repo` / `--repos-from` / `--scan-root`) used to be the
+ONLY filter, and that is not fine-grained enough to be safe. Measured on this
+machine (870 worktrees / 128 repos -> 250 dead, 40 orphan, 528 live, 52
+cannot-tell): **131 of the 250 `dead` rows were `.claude/worktrees/agent-*`
+worktrees belonging to OTHER LIVE Claude sessions.** Removing one destroys
+another session's working directory. Dodging them by dropping whole repos
+collapsed the safe set from 106 to 24 rows, because a repo like `civit/civitai`
+holds 59 ordinary dead rows AND agent worktrees — so ~82 legitimately-dead
+worktrees were unreachable.
+
+`--exclude-path GLOB` (repeatable) fixes that at the row level:
+
+  * An excluded worktree is STILL scanned, classified and reported. It does not
+    vanish from the output — silent truncation reads as "we covered everything",
+    which is the failure this tool exists to not have. It is reported as
+    `dead (excluded)` (or `live (excluded)`, …) and counted in its own column.
+  * An excluded row is NEVER removable, whatever its verdict, and is NOT counted
+    toward `--confirm N`. `--confirm N` keeps meaning "the exact number that will
+    actually be removed".
+  * 🔴 GLOB SEMANTICS, CHOSEN AND PINNED BY A TEST
+    (`test_the_glob_star_crosses_slashes`): matching is `fnmatch.fnmatchcase`
+    against the ABSOLUTE path git reports, and **`*` DOES cross `/`**. It is not
+    shell/`pathlib` globbing. So `*/.claude/worktrees/agent-*` matches
+    `/home/z/any/depth/of/repo/.claude/worktrees/agent-x/and/below`, and
+    `*/civitai/*` matches every path with a `civitai` component. That is the
+    behaviour the agent-worktree case needs; the cost is that a glob is easier to
+    write too WIDE than too narrow, and a too-wide glob is safe in this tool's
+    only direction (it excludes MORE from removal, never less).
+  * `--skip-agent-worktrees` is exactly `--exclude-path '*/.claude/worktrees/agent-*'`
+    — the same constant fed to the same predicate, so the common case does not
+    depend on the operator retyping the glob correctly.
+
 🔴 WHAT THIS TOOL WILL NOT DO
 -----------------------------
   * `--dry-run` is the DEFAULT. Nothing is removed without `--execute`.
@@ -71,6 +105,10 @@ THE VERDICTS
      branch merged, a worktree went dirty) changes N and the run refuses.
   * Only rows whose verdict is `dead` are ever removable. `orphan` and
     `cannot-tell` are not, by construction.
+  * A row matching `--exclude-path` is never removable, whatever else is true of
+    it. That is enforced in TWO independent places — as a blocker in
+    `classify()`, and re-asserted in `execute_removals()` immediately before the
+    destructive step rather than trusted from the flag it was handed.
   * `git worktree remove` is called WITHOUT `--force`, ever. Git's own refusal
     on a dirty tree is a second, independent floor under the dirty check this
     tool already ran — and it is re-run immediately BEFORE each removal, not
@@ -80,11 +118,14 @@ USAGE
   worktree-prune --scan-root ~/workspace --scan-depth 2 [--out report.json]
   worktree-prune --repo ~/workspace/devrc --format json
   worktree-prune --repos-from repos.txt --no-gh
+  worktree-prune --scan-root ~/workspace --skip-agent-worktrees
+  worktree-prune --scan-root ~/workspace --exclude-path '*/civitai/*'
   worktree-prune --scan-root ~/workspace --execute --confirm 12   # fires
 """
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import json
 import os
 import subprocess
@@ -105,6 +146,11 @@ ORPHAN = "orphan"
 LIVE = "live"
 CANNOT_TELL = "cannot-tell"
 VERDICTS = (DEAD, ORPHAN, LIVE, CANNOT_TELL)
+
+# 🔴 The one glob behind `--skip-agent-worktrees`. Spelled ONCE: the convenience
+# flag is implemented by appending this to the `--exclude-path` list, so both
+# routes go through the same predicate and cannot drift apart.
+AGENT_WORKTREE_GLOB = "*/.claude/worktrees/agent-*"
 
 # 🔴 argv on Linux is capped (~128 KiB for a single argument list, and a
 # civitai branch can touch thousands of paths). Pathspecs are therefore batched
@@ -494,6 +540,39 @@ class PullRequestIndex:
             return None
 
 
+# ── path exclusion ────────────────────────────────────────────────────────────
+
+def resolve_exclude_globs(patterns: "list[str] | None", skip_agent_worktrees: bool) -> "list[str]":
+    """The effective glob list. ONE RULE, ONE PLACE.
+
+    `--skip-agent-worktrees` is not a second matcher — it is this list plus
+    `AGENT_WORKTREE_GLOB`, matched by the same `path_excluded` below. A second
+    open-coded match is exactly how the two would come to disagree.
+    """
+    globs = [g for g in (patterns or []) if g]
+    if skip_agent_worktrees and AGENT_WORKTREE_GLOB not in globs:
+        globs.append(AGENT_WORKTREE_GLOB)
+    return globs
+
+
+def path_excluded(path: str, globs: "list[str] | None") -> "str | None":
+    """The FIRST glob in `globs` that matches `path`, or None.
+
+    Returning the matching glob rather than a bool is deliberate: the row records
+    WHY it was spared, so a report reader can tell a deliberate exclusion from a
+    verdict — and can see which of several globs did it.
+
+    🔴 SEMANTICS: `fnmatch.fnmatchcase` against the absolute path git reports.
+    `*` CROSSES `/`. `fnmatchcase`, not `fnmatch`, so the answer does not depend
+    on the platform's filesystem case-folding. Pinned by
+    `test_the_glob_star_crosses_slashes`.
+    """
+    for g in globs or []:
+        if fnmatch.fnmatchcase(path, g):
+            return g
+    return None
+
+
 # ── classification ────────────────────────────────────────────────────────────
 
 def classify(row: "dict") -> "dict":
@@ -512,6 +591,13 @@ def classify(row: "dict") -> "dict":
         row["removable"] = removable
         row["blockers"] = blockers
         return row
+
+    # 🔴 FIRST, and unconditional: an excluded row is spared whatever verdict the
+    # evidence goes on to support. Placed here rather than in each branch so
+    # there is exactly one statement to read (and exactly one to break).
+    excluded_by = row.get("excluded_by")
+    if excluded_by:
+        blockers.append(f"excluded by path filter {excluded_by!r} — reported, never removed")
 
     if row.get("is_main"):
         blockers.append("main checkout — never a removal candidate")
@@ -579,7 +665,8 @@ def classify(row: "dict") -> "dict":
 
 # ── scanning ──────────────────────────────────────────────────────────────────
 
-def scan_repo(repo: Path, gh_cmd: str, use_gh: bool, pr_limit: int, jobs: int) -> "list[dict]":
+def scan_repo(repo: Path, gh_cmd: str, use_gh: bool, pr_limit: int, jobs: int,
+              exclude_globs: "list[str] | None" = None) -> "list[dict]":
     wts = list_worktrees(repo)
     if not wts:
         return []
@@ -606,8 +693,15 @@ def scan_repo(repo: Path, gh_cmd: str, use_gh: bool, pr_limit: int, jobs: int) -
             "prune_reason": wt["prune_reason"],
             "default_ref": default_ref,
             "default_how": default_how,
+            "excluded_by": path_excluded(str(path), exclude_globs),
             "evidence": [f"default branch {default_ref} resolved by {default_how}"],
         }
+        if row["excluded_by"]:
+            # Recorded as EVIDENCE, not as a verdict: the row is still fully
+            # classified below and still printed. Only its removability changes.
+            row["evidence"].append(
+                f"excluded by --exclude-path {row['excluded_by']!r} — "
+                "classified and reported, but never removable")
         dirty, count, sample = worktree_dirty(path)
         row["dirty"] = dirty
         row["dirty_count"] = count
@@ -643,12 +737,25 @@ def summarize(rows: "list[dict]") -> "dict":
     counts = {v: 0 for v in VERDICTS}
     for r in rows:
         counts[r["verdict"]] = counts.get(r["verdict"], 0) + 1
+    excluded = [r for r in rows if r.get("excluded_by")]
     return {
         "worktrees": len(rows),
         "repos": len({r["repo"] for r in rows}),
         "counts": counts,
         "removable": sum(1 for r in rows if r.get("removable")),
+        "excluded": len(excluded),
+        # How many rows the exclusion actually SPARED — i.e. would have been
+        # removed without it. That is the number that says whether the filter did
+        # anything, and it is not the same as `excluded`.
+        "excluded_dead": sum(1 for r in excluded if r["verdict"] == DEAD),
     }
+
+
+def verdict_label(row: "dict") -> str:
+    """The verdict as PRINTED. An excluded row keeps its verdict and gains a
+    marker — it must not read as a fifth verdict, and must not read as an
+    ordinary `dead` either."""
+    return f"{row['verdict']} (excluded)" if row.get("excluded_by") else row["verdict"]
 
 
 def render_text(rows: "list[dict]", summary: dict, verbose: bool) -> str:
@@ -657,16 +764,25 @@ def render_text(rows: "list[dict]", summary: dict, verbose: bool) -> str:
     for r in rows:
         d = per_repo.setdefault(r["repo"], {v: 0 for v in VERDICTS})
         d[r["verdict"]] += 1
-    lines.append(f"{'repo':<58} {'dead':>5} {'orphan':>7} {'live':>5} {'cannot-tell':>12}")
+        d["excluded"] = d.get("excluded", 0) + (1 if r.get("excluded_by") else 0)
+    lines.append(f"{'repo':<58} {'dead':>5} {'orphan':>7} {'live':>5} {'cannot-tell':>12} "
+                 f"{'excluded':>9}")
     for repo in sorted(per_repo):
         d = per_repo[repo]
-        lines.append(f"{repo[-58:]:<58} {d[DEAD]:>5} {d[ORPHAN]:>7} {d[LIVE]:>5} {d[CANNOT_TELL]:>12}")
+        lines.append(f"{repo[-58:]:<58} {d[DEAD]:>5} {d[ORPHAN]:>7} {d[LIVE]:>5} "
+                     f"{d[CANNOT_TELL]:>12} {d.get('excluded', 0):>9}")
     c = summary["counts"]
     lines.append("")
     lines.append(f"{summary['worktrees']} worktree(s) across {summary['repos']} repo(s): "
                  f"{c[DEAD]} dead, {c[ORPHAN]} orphan, {c[LIVE]} live, {c[CANNOT_TELL]} cannot-tell")
     lines.append(f"{summary['removable']} row(s) would be removed by --execute "
                  f"(dead + clean + unlocked only)")
+    if summary.get("excluded"):
+        lines.append(
+            f"{summary['excluded']} row(s) matched an --exclude-path glob — still classified "
+            f"and counted above, NEVER removed, and NOT counted toward --confirm. "
+            f"{summary['excluded_dead']} of them are `dead` and would otherwise have been "
+            f"removed. Re-run with --verbose to see them by path.")
     if c[CANNOT_TELL]:
         lines.append(f"🔴 {c[CANNOT_TELL]} row(s) are cannot-tell — they are NOT dead and are "
                      "NOT removable. Read their verdict_reason before believing any count above.")
@@ -675,7 +791,7 @@ def render_text(rows: "list[dict]", summary: dict, verbose: bool) -> str:
         for r in sorted(rows, key=lambda x: (x["verdict"], x["path"])):
             if r["verdict"] == LIVE and not verbose:
                 continue
-            lines.append(f"[{r['verdict']}] {r['path']}  branch={r['branch']}")
+            lines.append(f"[{verdict_label(r)}] {r['path']}  branch={r['branch']}")
             lines.append(f"    {r['verdict_reason']}")
             for e in r["evidence"]:
                 lines.append(f"      · {e}")
@@ -712,6 +828,13 @@ def execute_removals(rows: "list[dict]", confirm: "int | None") -> int:
         repo = Path(r["repo"])
         if r.get("verdict") != DEAD:
             _log(f"SKIP {path}: verdict is {r.get('verdict')}, not {DEAD}")
+            skipped += 1
+            continue
+        # Second, independent floor under the exclusion — same reasoning as the
+        # verdict re-assert above: the executor does not trust the `removable`
+        # flag it was handed.
+        if r.get("excluded_by"):
+            _log(f"SKIP {path}: excluded by path filter {r['excluded_by']!r}")
             skipped += 1
             continue
         live = [w for w in list_worktrees(repo) if Path(w["path"]) == path]
@@ -757,6 +880,16 @@ def build_parser() -> argparse.ArgumentParser:
                    help="file of repository paths, one per line; # comments allowed")
     p.add_argument("--scan-depth", type=int, default=2,
                    help="how deep --scan-root descends looking for checkouts (default 2)")
+    p.add_argument("--exclude-path", action="append", default=[], metavar="GLOB",
+                   help="spare any worktree whose ABSOLUTE path matches GLOB (repeatable). "
+                        "fnmatch semantics and `*` CROSSES `/`, so '*/civitai/*' matches every "
+                        "path with a civitai component. An excluded row is still classified and "
+                        "still printed (as `<verdict> (excluded)`), is NEVER removed, and is NOT "
+                        "counted toward --confirm N.")
+    p.add_argument("--skip-agent-worktrees", action="store_true",
+                   help=f"shorthand for --exclude-path {AGENT_WORKTREE_GLOB!r}. Those worktrees "
+                        "belong to OTHER LIVE Claude sessions; removing one destroys a working "
+                        "directory that is in use. Same predicate as --exclude-path.")
     p.add_argument("--jobs", type=int, default=8, help="parallel worktree probes (default 8)")
     p.add_argument("--no-gh", action="store_true",
                    help="do not consult gh. Every unlanded row then becomes cannot-tell, "
@@ -809,11 +942,17 @@ def main(argv: "list[str] | None" = None) -> int:
         _log("nothing to scan: pass --repo, --repos-from or --scan-root.")
         return RC_NOTHING_TO_SCAN
 
+    exclude_globs = resolve_exclude_globs(args.exclude_path, args.skip_agent_worktrees)
+
     rows: list[dict] = []
     for repo in repos:
-        rows.extend(scan_repo(repo, args.gh_cmd, not args.no_gh, args.pr_limit, args.jobs))
+        rows.extend(scan_repo(repo, args.gh_cmd, not args.no_gh, args.pr_limit, args.jobs,
+                              exclude_globs))
 
     summary = summarize(rows)
+    # The glob list is recorded in the report: a count read without knowing what
+    # was filtered out of the removable set is a count nobody can check.
+    summary["exclude_globs"] = list(exclude_globs)
     payload = {"summary": summary, "rows": rows}
 
     if args.out:

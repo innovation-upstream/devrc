@@ -41,6 +41,18 @@ verdict to degrade to `cannot-tell` rather than stay `orphan`. "No PR found" and
 "we could not ask" are the same observable — an empty result — and they license
 opposite verdicts.
 
+🔴 AND THE PATH-EXCLUSION SECTION, WHICH EXISTS BECAUSE OF A MEASUREMENT
+------------------------------------------------------------------------
+A full scan of this machine reported 870 worktrees / 128 repos -> 250 dead. 131
+of those 250 were `.claude/worktrees/agent-*` trees belonging to OTHER LIVE
+Claude sessions: `dead` is a correct verdict about the BRANCH and a catastrophic
+instruction about the DIRECTORY. `--exclude-path` / `--skip-agent-worktrees`
+spare a row without hiding it, and the tests for them carry the same shape as the
+ones above — a positive control that BOTH fixtures are removable unfiltered, a
+both-halves test (the excluded one survives on disk AND the other is really
+gone), and a mutation control that neuters `path_excluded` and watches the
+excluded row become removable again.
+
 HERMETIC BY CONSTRUCTION
 ------------------------
 Every repository is created under `tmp_path` with real git. The only remote is a
@@ -1056,6 +1068,368 @@ def test_default_branch_resolution_records_how_it_was_resolved(tmp_path):
 
 
 # ── the instrument's own controls ─────────────────────────────────────────────
+
+# ── 🔴 --exclude-path / --skip-agent-worktrees ────────────────────────────────
+#
+# WHY THIS SECTION EXISTS, measured rather than imagined. A full scan of this
+# machine reported 870 worktrees / 128 repos -> 250 dead, 40 orphan, 528 live,
+# 52 cannot-tell. 131 of the 250 `dead` rows were `.claude/worktrees/agent-*`
+# trees belonging to OTHER LIVE Claude sessions: `dead` is a correct verdict
+# about the BRANCH and a catastrophic instruction about the DIRECTORY. Excluding
+# whole repos to dodge them collapsed the safe set from 106 rows to 24, because
+# a repo like civit/civitai holds 59 ordinary dead rows AND agent worktrees.
+#
+# So the filter has to be per-ROW, and it has to be visible: an excluded row that
+# vanished from the report would read as "we covered everything".
+
+AGENT_GLOB = "*/.claude/worktrees/agent-*"
+
+
+@pytest.fixture()
+def two_dead(tmp_path: Path):
+    """One repo, TWO dead worktrees — one at an agent path, one not.
+
+    🔴 Both halves matter. A fixture with only the agent worktree cannot tell
+    "the filter spared it" from "the run removed nothing at all", and that is
+    precisely the shape of a filter wired to nothing.
+
+    Returns (repo, agent_worktree, plain_worktree, gh_cmd).
+    """
+    repo = new_repo(tmp_path)
+
+    # squash-merged -> dead by content-identical
+    git(repo, "checkout", "-q", "-b", "feat/agent-work")
+    write(repo / "agentwork.txt", "one\n")
+    git(repo, "add", "agentwork.txt")
+    git(repo, "commit", "-qm", "agent work part 1")
+    write(repo / "agentwork.txt", "one\ntwo\n")
+    git(repo, "add", "agentwork.txt")
+    git(repo, "commit", "-qm", "agent work part 2")
+    git(repo, "checkout", "-q", "main")
+    squash_merge(repo, "feat/agent-work", "agentwork.txt", "squash agent work (#1)")
+
+    # true-merged -> dead by ancestry
+    commit_on_branch(repo, "feat/plain", "plain.txt", "plain\n", "plain work")
+    git(repo, "merge", "-q", "--no-ff", "-m", "merge feat/plain", "feat/plain")
+    publish(repo)
+
+    # The agent worktree sits where the real ones do: <repo>/.claude/worktrees/agent-<id>.
+    agent = add_worktree(repo, repo / ".claude" / "worktrees" / "agent-7f3a91",
+                         "feat/agent-work")
+    plain = add_worktree(repo, tmp_path / "wts" / "plain", "feat/plain")
+    return repo, agent, plain, gh_stub(tmp_path, [], name="gh-excl")
+
+
+def _rows_by_path(repo: Path, gh: str, globs: "list[str] | None" = None) -> dict:
+    return {r["path"]: r
+            for r in wp.scan_repo(repo, gh, True, 2000, jobs=1, exclude_globs=globs)}
+
+
+# ── POSITIVE CONTROL on the fixture: unfiltered, BOTH are removable ───────────
+
+def test_without_any_filter_both_dead_worktrees_are_removable(two_dead):
+    """🔴 Without this, every assertion below is compatible with a fixture that
+    was never removable in the first place."""
+    repo, agent, plain, gh = two_dead
+    rows = _rows_by_path(repo, gh)
+    assert rows[str(agent)]["verdict"] == "dead", rows[str(agent)]["verdict_reason"]
+    assert rows[str(plain)]["verdict"] == "dead", rows[str(plain)]["verdict_reason"]
+    assert rows[str(agent)]["removable"] is True
+    assert rows[str(plain)]["removable"] is True
+    assert rows[str(agent)]["excluded_by"] is None
+
+
+# ── the headline: one survives, the other is really gone ──────────────────────
+
+@pytest.mark.parametrize("flag", [
+    ["--skip-agent-worktrees"],
+    ["--exclude-path", AGENT_GLOB],
+])
+def test_execute_removes_the_plain_dead_tree_and_spares_the_excluded_one(two_dead, flag, capsys):
+    """BOTH halves, in ONE run. The excluded worktree must still be on disk and
+    the other must be GONE — a filter that spared everything would pass the first
+    assertion on its own."""
+    repo, agent, plain, gh = two_dead
+    rc = wp.main(["--repo", str(repo), "--gh-cmd", gh, "--jobs", "1",
+                  *flag, "--execute", "--confirm", "1"])
+    err = capsys.readouterr().err
+    assert rc == wp.RC_OK, err
+    assert agent.is_dir(), "the EXCLUDED agent worktree was removed"
+    assert (agent / "agentwork.txt").is_file(), (
+        "the excluded worktree's directory survives but its contents do not")
+    assert not plain.exists(), (
+        "the non-excluded dead worktree was NOT removed — the run may have "
+        "removed nothing at all, which would make the survival above meaningless")
+    assert "removed=1" in err, err
+
+
+def test_the_excluded_row_is_still_classified_dead_and_marked(two_dead):
+    """Exclusion changes REMOVABILITY, not the verdict. A row that quietly became
+    `live` or dropped out would hide a real dead worktree from the operator."""
+    repo, agent, plain, gh = two_dead
+    rows = _rows_by_path(repo, gh, [AGENT_GLOB])
+    r = rows[str(agent)]
+    assert r["verdict"] == "dead"
+    assert r["excluded_by"] == AGENT_GLOB
+    assert r["removable"] is False
+    assert any("exclude" in b for b in r["blockers"]), r["blockers"]
+    assert rows[str(plain)]["excluded_by"] is None
+    assert rows[str(plain)]["removable"] is True
+
+
+# ── --confirm N counts REMOVABLE rows, not dead rows ──────────────────────────
+
+def test_confirm_counts_only_the_rows_that_will_actually_be_removed(two_dead, capsys):
+    """N = non-excluded dead count SUCCEEDS."""
+    repo, agent, plain, gh = two_dead
+    rc = wp.main(["--repo", str(repo), "--gh-cmd", gh, "--jobs", "1",
+                  "--skip-agent-worktrees", "--execute", "--confirm", "1"])
+    assert rc == wp.RC_OK, capsys.readouterr().err
+    assert not plain.exists()
+
+
+def test_confirm_with_the_total_dead_count_is_refused_when_one_is_excluded(two_dead, capsys):
+    """N = TOTAL dead count (2) REFUSES, and removes nothing.
+
+    This is the half that pins the meaning of --confirm: if excluded rows still
+    counted, `--confirm 2` would be the accepted value and the operator's number
+    would silently describe rows the run was never going to touch."""
+    repo, agent, plain, gh = two_dead
+    rc = wp.main(["--repo", str(repo), "--gh-cmd", gh, "--jobs", "1",
+                  "--skip-agent-worktrees", "--execute", "--confirm", "2"])
+    err = capsys.readouterr().err
+    assert rc == wp.RC_EXECUTE_REFUSED, err
+    assert "does not match the 1 row(s)" in err, err
+    assert agent.is_dir() and plain.is_dir(), "a refused run removed something"
+
+
+def test_without_the_filter_the_same_scope_needs_confirm_two(two_dead, capsys):
+    """The control on the test above: 2 is the RIGHT number when nothing is
+    excluded, so the refusal there is caused by the exclusion and not by the
+    fixture happening to hold one dead row."""
+    repo, agent, plain, gh = two_dead
+    rc = wp.main(["--repo", str(repo), "--gh-cmd", gh, "--jobs", "1",
+                  "--execute", "--confirm", "2"])
+    assert rc == wp.RC_OK, capsys.readouterr().err
+    assert not agent.exists() and not plain.exists()
+
+
+# ── excluded rows stay VISIBLE in the report ──────────────────────────────────
+
+def test_excluded_rows_still_appear_in_the_text_report(two_dead, capsys):
+    repo, agent, plain, gh = two_dead
+    wp.main(["--repo", str(repo), "--gh-cmd", gh, "--jobs", "1",
+             "--skip-agent-worktrees", "--verbose"])
+    out = capsys.readouterr().out
+    assert "excluded" in out
+    assert "1 row(s) matched an --exclude-path glob" in out, out
+    assert "1 of them are `dead`" in out, out
+    assert str(agent) in out, "the excluded worktree vanished from the report"
+    assert "[dead (excluded)]" in out, out
+    # …and the summary still counts it as dead, so the operator's totals do not
+    # silently shrink when they add a filter.
+    assert "2 dead" in out, out
+
+
+def test_excluded_rows_still_appear_in_the_json_report(two_dead, tmp_path, capsys):
+    repo, agent, plain, gh = two_dead
+    out = tmp_path / "excl.json"
+    wp.main(["--repo", str(repo), "--gh-cmd", gh, "--jobs", "1",
+             "--skip-agent-worktrees", "--format", "json", "--out", str(out)])
+    capsys.readouterr()
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    by_path = {r["path"]: r for r in payload["rows"]}
+    assert str(agent) in by_path, "the excluded row was dropped from the JSON rows"
+    assert by_path[str(agent)]["verdict"] == "dead"
+    assert by_path[str(agent)]["excluded_by"] == AGENT_GLOB
+    assert payload["summary"]["counts"]["dead"] == 2
+    assert payload["summary"]["removable"] == 1
+    assert payload["summary"]["excluded"] == 1
+    assert payload["summary"]["excluded_dead"] == 1
+    assert payload["summary"]["exclude_globs"] == [AGENT_GLOB]
+
+
+def test_an_unfiltered_run_does_not_shout_about_exclusions(two_dead, capsys):
+    """Negative control on the report line above — it must be caused by an actual
+    exclusion, not printed unconditionally."""
+    repo, agent, plain, gh = two_dead
+    wp.main(["--repo", str(repo), "--gh-cmd", gh, "--jobs", "1"])
+    out = capsys.readouterr().out
+    assert "matched an --exclude-path glob" not in out
+    assert "(excluded)" not in out
+
+
+# ── 🔴 THE MUTATION CONTROL for the exclusion ─────────────────────────────────
+
+def test_neutering_the_path_predicate_makes_the_agent_worktree_removable(two_dead, monkeypatch):
+    """Watch the SAME fixture go wrong with the filter removed.
+
+    If this fails, the agent row's `removable is False` above is being produced
+    by something other than the exclusion — a dirty tree, an open PR, a verdict
+    that was never `dead` — and every assertion in this section is vacuous.
+    """
+    repo, agent, plain, gh = two_dead
+    monkeypatch.setattr(wp, "path_excluded", lambda path, globs: None)
+    rows = _rows_by_path(repo, gh, [AGENT_GLOB])
+    r = rows[str(agent)]
+    assert r["excluded_by"] is None
+    assert r["verdict"] == "dead" and r["removable"] is True, (
+        "with the predicate neutered the agent worktree is STILL not removable, "
+        "so the exclusion is not what is sparing it")
+
+
+# ── 🔴 GLOB SEMANTICS: `*` CROSSES `/`. Chosen, documented, pinned. ───────────
+
+def test_the_glob_star_crosses_slashes():
+    """fnmatch semantics, NOT shell/pathlib globbing.
+
+    This is a real fork: under pathlib/shell rules `*` stops at a separator and
+    `*/.claude/worktrees/agent-*` would match only a worktree exactly one level
+    below the root — i.e. essentially none of the real ones. fnmatch is chosen
+    because the agent-worktree case needs to match at ANY depth. The cost, pinned
+    here so nobody discovers it by accident, is that a glob is easy to write too
+    WIDE — which in this tool spares more and removes less, never the reverse.
+    """
+    assert wp.path_excluded("/home/z/a/b/c/.claude/worktrees/agent-1", [AGENT_GLOB]) == AGENT_GLOB
+    assert wp.path_excluded("/home/z/.claude/worktrees/agent-1", [AGENT_GLOB]) == AGENT_GLOB
+    assert wp.path_excluded("/home/z/.claude/worktrees/agent-1/deep/inside",
+                            [AGENT_GLOB]) == AGENT_GLOB
+    # `*` swallowing separators is the DEFINING behaviour, not an accident of the
+    # agent glob: one `*` spans three components here.
+    assert wp.path_excluded("/x/a/b/c/leaf", ["/x/*/leaf"]) == "/x/*/leaf"
+    # …and the negative half, so the matcher is not simply always-true.
+    assert wp.path_excluded("/home/z/repo/.claude/worktrees/keep-me", [AGENT_GLOB]) is None
+    assert wp.path_excluded("/home/z/repo/wt/agent-1", [AGENT_GLOB]) is None
+    assert wp.path_excluded("/x/a/b/c/other", ["/x/*/leaf"]) is None
+
+
+def test_the_glob_match_is_case_sensitive():
+    """`fnmatchcase`, so the verdict does not depend on the host filesystem's
+    case-folding — a filter that behaves differently per platform is a filter
+    nobody can reason about."""
+    assert wp.path_excluded("/home/z/.CLAUDE/worktrees/agent-1", [AGENT_GLOB]) is None
+
+
+def test_an_empty_glob_list_excludes_nothing():
+    for globs in (None, [], [""]):
+        assert wp.path_excluded("/home/z/.claude/worktrees/agent-1", globs) is None
+
+
+def test_the_first_matching_glob_is_the_one_reported():
+    """The row records WHICH glob spared it; an operator debugging an
+    over-broad filter needs the answer, not a bool."""
+    assert wp.path_excluded("/a/b/c", ["/nope/*", "/a/*", "/a/b/*"]) == "/a/*"
+
+
+def test_multiple_exclude_paths_all_apply(two_dead):
+    repo, agent, plain, gh = two_dead
+    rows = _rows_by_path(repo, gh, ["*/nothing-matches-this/*", AGENT_GLOB])
+    assert rows[str(agent)]["excluded_by"] == AGENT_GLOB
+    assert rows[str(agent)]["removable"] is False
+
+
+# ── ONE RULE, ONE PLACE: the convenience flag IS the glob ─────────────────────
+
+def test_skip_agent_worktrees_resolves_to_exactly_the_documented_glob():
+    assert wp.resolve_exclude_globs([], True) == [wp.AGENT_WORKTREE_GLOB]
+    assert wp.AGENT_WORKTREE_GLOB == AGENT_GLOB
+    assert wp.resolve_exclude_globs(["*/x/*"], True) == ["*/x/*", wp.AGENT_WORKTREE_GLOB]
+    assert wp.resolve_exclude_globs([], False) == []
+    # Spelling it both ways must not double it up.
+    assert wp.resolve_exclude_globs([AGENT_GLOB], True) == [AGENT_GLOB]
+
+
+def test_the_convenience_flag_and_the_explicit_glob_produce_identical_rows(two_dead, capsys):
+    """Behavioural, not structural: the two routes must agree row for row. A
+    second open-coded matcher would pass a `==` on the constant and still drift
+    here."""
+    repo, agent, plain, gh = two_dead
+    a = _rows_by_path(repo, gh, wp.resolve_exclude_globs([], True))
+    b = _rows_by_path(repo, gh, [AGENT_GLOB])
+    key = lambda rs: {p: (r["verdict"], r["excluded_by"], r["removable"])
+                      for p, r in rs.items()}
+    assert key(a) == key(b)
+    assert key(a)[str(agent)] == ("dead", AGENT_GLOB, False)
+
+
+def test_the_agent_glob_literal_is_spelled_exactly_once_in_executable_code():
+    """Structural backstop for the one-rule-one-place claim. `--skip-agent-worktrees`
+    interpolates the CONSTANT into its help text, so a second occurrence of the
+    literal means somebody re-typed the pattern."""
+    literals = _executable_string_literals(TOOL)
+    assert literals.count(AGENT_GLOB) == 1, (
+        f"the agent glob is spelled {literals.count(AGENT_GLOB)} times in executable "
+        "code — the convenience flag must reuse AGENT_WORKTREE_GLOB, not a copy")
+
+
+# ── the executor's own floor ──────────────────────────────────────────────────
+
+def test_execute_refuses_an_excluded_row_even_if_removable_was_forced(two_dead, capsys):
+    """Defence in depth, matching the verdict re-assert next to it: the executor
+    does not trust the `removable` flag it was handed."""
+    repo, agent, plain, gh = two_dead
+    rows = [r for r in wp.scan_repo(repo, gh, True, 2000, jobs=1, exclude_globs=[AGENT_GLOB])
+            if r["path"] == str(agent)]
+    assert rows[0]["excluded_by"] == AGENT_GLOB
+    rows[0]["removable"] = True
+    assert wp.execute_removals(rows, 1) == wp.RC_OK
+    assert agent.is_dir()
+    assert "excluded by path filter" in capsys.readouterr().err
+
+
+def test_a_full_execute_pass_over_the_scanned_rows_never_touches_an_excluded_path(two_dead, capsys):
+    """🔴 THE SEAM TEST. `--confirm` and the exclusion are two guards in series,
+    and a mutation sweep showed the confirm mismatch killing every end-to-end
+    test FIRST — which leaves the `is_dir()` assertion, the one that actually
+    says "we did not delete someone's working directory", UNREACHABLE under a
+    mutant that lets the excluded row into the removable set.
+
+    So this one asks the tool how many rows it intends to remove and passes that
+    number back, taking --confirm out of the picture. The disk assertion then
+    runs no matter which of the two exclusion floors is broken.
+    """
+    repo, agent, plain, gh = two_dead
+    rows = wp.scan_repo(repo, gh, True, 2000, jobs=1, exclude_globs=[AGENT_GLOB])
+    n = sum(1 for r in rows if r.get("removable"))
+    assert wp.execute_removals(rows, n) == wp.RC_OK, capsys.readouterr().err
+    assert agent.is_dir(), "an excluded worktree was removed by a full execute pass"
+    assert (agent / "agentwork.txt").is_file()
+    assert not plain.exists(), (
+        "the non-excluded dead worktree survived too — this pass removed nothing, "
+        "so the survival above says nothing about the exclusion")
+
+
+def test_an_excluded_row_is_unremovable_whatever_its_verdict():
+    for kw in ({"landed_signals": ["ancestor"]}, {}, {"dirty": True}, {"is_main": True}):
+        r = wp.classify(base_row(excluded_by=AGENT_GLOB, **kw))
+        assert r["removable"] is False, (kw, r["verdict"])
+        assert any("exclude" in b for b in r["blockers"]), r["blockers"]
+
+
+def test_exclusion_does_not_change_the_verdict_itself():
+    """The mirror of the test above: sparing a row must not relabel it."""
+    for kw in ({"landed_signals": ["ancestor"]}, {}, {"dirty": True}):
+        plain = wp.classify(base_row(**kw))["verdict"]
+        excl = wp.classify(base_row(excluded_by=AGENT_GLOB, **kw))["verdict"]
+        assert plain == excl, (kw, plain, excl)
+
+
+def test_verdict_label_marks_only_excluded_rows():
+    assert wp.verdict_label({"verdict": "dead"}) == "dead"
+    assert wp.verdict_label({"verdict": "dead", "excluded_by": None}) == "dead"
+    assert wp.verdict_label({"verdict": "dead", "excluded_by": AGENT_GLOB}) == "dead (excluded)"
+    assert wp.verdict_label({"verdict": "live", "excluded_by": AGENT_GLOB}) == "live (excluded)"
+
+
+def test_the_help_text_documents_the_new_flags_and_the_glob_semantics():
+    """`--help` is the only documentation most operators will read, and the
+    slash-crossing choice is exactly the thing they will get wrong."""
+    text = wp.build_parser().format_help()
+    assert "--exclude-path" in text
+    assert "--skip-agent-worktrees" in text
+    assert "CROSSES" in text, text
+    assert AGENT_GLOB in text, text
+
 
 def test_the_gh_stub_can_be_observed_to_answer(tmp_path):
     """A positive control on the harness. A stub wired to nothing produces the
