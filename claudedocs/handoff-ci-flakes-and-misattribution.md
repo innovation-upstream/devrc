@@ -160,7 +160,7 @@ read the root cause first; the design is what failed, not the code.
   it needs an explicit top-level status FIELD as a handoff convention. That convention does
   not exist today, and inventing it is a docs-format change, not a parser change.
 
-### #783 — the spool defect's ROOT CAUSE is untouched
+### ✅ #783 — the spool defect's ROOT CAUSE was CLOSED, but NOT the way this entry proposed
 - **Symptom + exact repro:** a test reads `_wait_events(spool_dir, 1)[0]` and gets a
   neighbour's row. Seen in CI as `assert 'getHtml' == 'frames'` (#773, a change to
   `scripts/run-tests.sh`) and `assert 'getHtml' == 'type'` (#770, a change to one `.md`).
@@ -177,10 +177,34 @@ read the root cause first; the design is what failed, not the code.
   grep the spool for that string.
 - **Leading hypothesis:** confirmed, not hypothesis — emitter threads outlive their test
   while the env var is re-pointed under them.
-- **Next probe:** close it at the source by joining emitter threads at teardown (or scoping
-  the spool dir per-server rather than per-process). `#807` only made the ASSERTIONS robust.
-  **39 `_wait_events` call sites still take a count and index by position** (AST-derived, in
-  `_wait_events`' docstring: `53 total = 39 n=1 + 5 until= + 9 n>=2`, + 7 op-selected).
+- 🔴 **THE "NEXT PROBE" THIS ENTRY USED TO GIVE IS NOW A REJECTED DESIGN — do not follow it.**
+  It said *"close it at the source by joining emitter threads at teardown"*. That was tried
+  and rejected on the merits; `conftest.py`'s `_session_spool_backstop` docstring now carries
+  the verdict verbatim: **"Do NOT 'fix' the race by joining or quiescing server threads per
+  test: that fights the deliberate off-critical-path design and would have to be repeated at
+  every call site."** Anyone acting on the old wording would implement the rejected option.
+- **What shipped instead (two independent fixes, both on `main`):**
+  - a **session-scoped backstop** that points `ACTIVITY_SPOOL_DIR` at a session tmpdir and
+    🔴 **deliberately never undoes itself** — a `yield` + `mp.undo()` reopens the identical
+    hole one level up, measured with a deterministic probe: without the backstop 1 row
+    reached the ambient dir; with the backstop **and** `undo()` 1 row still did (byte-
+    identical, i.e. inert); without the undo, 0.
+  - #802 (`d09038d8`) fixed the **dropped**-row race in `server.py:_load_spool_emit`
+    (`_spool_emit_lock` + publish ordering).
+- 🔴 **The measured mechanism was NOT the one this entry assumed.** It is not mainly
+  cross-test contamination: an emit landing while another test runs goes to *that* test's
+  `tmp_path` and never reaches production. The real leak is the **tail after the session's
+  last teardown**, where no per-test fixture is active and the ambient fallback is
+  `~/.local/state/activity/spool` — production. Its rarity is just how narrow that window is,
+  which is why repeating the suspect shape was a poor detector (1 leak in 15 runs for one
+  observer, 0 in 20 for another).
+- **Still true, re-derived by AST at `2d4b2980`:** `53 total = 39 n=1 + 5 until= + 9 n>=2`.
+  So **39 call sites still take a count and index by position** — that migration is genuinely
+  outstanding (it is safe until a neighbour is late, and intent must be read per site).
+  ⚠ The op-selected figure differs by counting method: **4** `_wait_ops` call sites by AST,
+  against the 7 this entry used to state. Prefer the AST number, and note grep is wrong here
+  for a documented reason — a line-oriented regex reads the positional form and misses the
+  keyword one.
 
 ### The SECOND flake family — `test_browser_agent.py:558`, unfiled
 - **Symptom + exact repro:** full-suite runs of `scripts/browser-bridge/tests` fail 1–2 tests
