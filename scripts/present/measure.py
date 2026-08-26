@@ -1279,89 +1279,177 @@ _HTTP_IMPORT = re.compile(
 )
 _HTTP_CALL = re.compile(r"\burlopen\s*\(|\brequests\.(?:get|post|put|delete)\s*\(")
 
+#: A client can also arrive WITHOUT an `import` statement. Two shapes are cheap
+#: to see and are what a hand-rolled one actually looks like:
+#:   * the module name as a STRING, fed to importlib/`__import__`;
+#:   * a generic HTTP fetcher shelled out to as a subprocess.
+#: `gh` and `git` are DELIBERATELY not in the fetcher list. Both are network
+#: binaries and both are already invoked by these readers (`subsystem_touch.py`
+#: line ~1893 and `subsystem-audit.py` line ~539 both run `gh pr view`), so
+#: counting them would make this row permanently red while saying nothing about
+#: a hosted index store. That is also why every claim around this row says
+#: "a hosted store client" and not "no network hop" — see `reaches_http_client`.
+_HTTP_DYNAMIC = re.compile(
+    r"(?:import_module|__import__)\s*\(\s*[\"'](?:urllib|requests|httpx|aiohttp|http)\b"
+)
+_HTTP_FETCH_BINARY = re.compile(r"""(?<![\w.])(["'])(?:curl|wget|httpie)\1""")
 
-def imports_http_client(source: str) -> bool:
-    """True when this source actually reaches for an HTTP client.
+
+def reaches_http_client(source: str) -> bool:
+    """True when this source reaches for an HTTP client in a shape we can SEE.
+
+    🔴 THIS PREDICATE IS NARROWER THAN "MAKES A NETWORK CALL", and every claim
+    built on it is worded to match. What it catches:
+
+      * a direct import of an HTTP module (`import requests`, `from urllib …`);
+      * a direct call through one (`urlopen(...)`, `requests.get(...)`);
+      * that module named as a STRING to `import_module`/`__import__`;
+      * a generic HTTP fetcher (`curl`/`wget`/`httpie`) as a string literal,
+        which is how a subprocess client spells itself.
+
+    What it does NOT and cannot catch, stated so nobody reads a zero here as
+    "this file makes no network call":
+
+      * indirection — `from . import _hosted_client` where the helper does the
+        HTTP. One level of local import defeats it completely;
+      * a computed module name (`import_module(name)` with `name` a variable);
+      * an out-of-process helper — a shell script or another binary that fetches
+        on this module's behalf;
+      * `gh` / `git` subprocesses, which ARE network calls and which these
+        readers already make. Excluded on purpose (see `_HTTP_FETCH_BINARY`).
+
+    🔴 MEASURED, and it narrows the gap: each of the first three blind shapes is
+    still caught when it arrives as a NEW module, because `EXPECTED_STORE_READERS`
+    in the suite pins the derived reader set two-way and any new file breaks it —
+    whatever that file contains. Verified against the live guard:
+    `from . import _hosted_client` as a new `subsystem_hosted.py` goes RED on the
+    ledger; the SAME line appended to the existing `subsystem_recall.py` passes.
+    So the residual is one route, not three — **any of those shapes added to a
+    reader that ALREADY EXISTS.** Nothing here sees that.
 
     Exposed (rather than inlined) so `test_present_measure.py` can drive it
     against both a positive and a negative control — the negative one being a
     file whose prose says "pull requests", which is what broke the first cut.
     """
-    return bool(_HTTP_IMPORT.search(source) or _HTTP_CALL.search(source))
+    return bool(
+        _HTTP_IMPORT.search(source)
+        or _HTTP_CALL.search(source)
+        or _HTTP_DYNAMIC.search(source)
+        or _HTTP_FETCH_BINARY.search(source)
+    )
+
+
+#: 🔴 THE READER SET IS DERIVED, NOT LISTED. A four-name hardcode could not see
+#: either shape that matters: a reader RENAMED away silently narrowed the scan
+#: to three while still reporting a clean "0", and a hosted client reintroduced
+#: as a NEW module (`subsystem_hosted.py`, a `--source hosted` shim) — which is
+#: how one would most naturally arrive — was never scanned at all.
+#:
+#: Globbed rather than `git ls-files` on purpose: the pytest tier the merge is
+#: gated on builds from a `cp -r` store copy with NO `.git`, where `git ls-files`
+#: returns nothing and this row would go quietly unmeasured on the only tier
+#: that blocks.
+_READER_GLOBS = ("scripts/lib/subsystem_*.py", "scripts/subsystem-*.py")
+
+
+def store_readers(repo: Path) -> list[str]:
+    """Every local subsystem-index reader under `repo`, repo-relative, sorted."""
+    found: set[str] = set()
+    for pattern in _READER_GLOBS:
+        for path in repo.glob(pattern):
+            if path.is_file():
+                found.add(path.relative_to(repo).as_posix())
+    return sorted(found)
 
 
 def m_store_api_clients(env: Env) -> dict:
-    """Soft seam: the hosted store API — running, with a client set of size N.
+    """Soft seam, now CLOSED: a complete subsystem that never acquired a reader.
 
-    🔴 THIS MEASURES THE HALF THAT IS MEASURABLE FROM THE REPO. Whether the pod
-    has served a request since it was built is a fact about a running service's
-    audit log, not about this tree; that half is a separate row and it renders
-    UNMEASURED, because inventing a number for it is exactly what this page
-    exists not to do.
+    🔴 WHAT THIS ROW MEASURES CHANGED ON 2026-08-25, AND THE CHANGE IS THE
+    POINT. It used to size a hosted HTTP API over the recall store — server plus
+    build tooling plus suite — against a client set that stayed empty. The
+    service was retired on that date (`claudedocs/
+    decision-subsystem-store-api-retired-2026-08-25.md`); what the row measures
+    now is that the server-side artefacts are GONE while the local readers'
+    HTTP-client count is unchanged at whatever it always was.
+
+    Kept rather than deleted because the interesting half was never the server:
+    it is that a reader can stay absent through nine merged PRs with every gate
+    green. A row asserting the count is still zero is what would notice a
+    hosted client being reintroduced without the demand that was missing the
+    first time.
+
+    🔴 SCOPE. "Can speak to a hosted store" is what this row claims, and it is
+    narrower than "makes no network call" — these readers already shell out to
+    `gh pr view`. The predicate's exact reach, and the shapes that walk past it,
+    are enumerated on `reaches_http_client`; do not restate them wider here.
     """
     server_dir = env.repo / "scripts" / "subsystem-store-api"
-    if not server_dir.is_dir():
-        raise Unmeasurable(f"{server_dir} does not exist")
-    server_lines = sum(
-        len(p.read_text(encoding="utf-8", errors="replace").splitlines())
-        for p in sorted(server_dir.rglob("*")) if p.is_file()
-    )
     suite = env.repo / "scripts" / "tests" / "test_subsystem_store_api.py"
-    suite_lines = len(suite.read_text(encoding="utf-8", errors="replace").splitlines()) if suite.is_file() else 0
 
-    # A client would need an HTTP client library. Count the readers that IMPORT one.
+    # A client would need an HTTP client. Count the readers that reach for one.
     #
-    # 🔴 THE PREDICATE IS AN IMPORT STATEMENT, NOT A WORD. The first cut matched
-    # the bare token `requests` anywhere in the file and scored two readers as
+    # 🔴 THE PREDICATE IS A CODE SHAPE, NOT A WORD. The first cut matched the
+    # bare token `requests` anywhere in the file and scored two readers as
     # HTTP-capable off the phrase "pull requests" in their prose — a measured row
     # that directly contradicted the section it sat under. Caught by reading the
     # rendered page, not by any test, which is the whole argument for looking at
     # the artefact.
-    readers = ["scripts/lib/subsystem_recall.py", "scripts/lib/subsystem_resolver.py",
-               "scripts/lib/subsystem_touch.py", "scripts/subsystem-audit.py"]
+    #
+    # 🔴 AND THE READER SET IS DISCOVERED, NOT NAMED — see `_READER_GLOBS`. A
+    # hardcoded list scanned neither a new module nor a renamed-away one.
+    readers = store_readers(env.repo)
     rows = []
     clients = 0
     for rel in readers:
         p = env.repo / rel
-        if not p.is_file():
-            rows.append((rel, "ABSENT"))
-            continue
-        has = imports_http_client(p.read_text(encoding="utf-8", errors="replace"))
+        has = reaches_http_client(p.read_text(encoding="utf-8", errors="replace"))
         clients += 1 if has else 0
         rows.append((rel, "speaks HTTP" if has else "no HTTP client"))
-    rows.append(("server + its build tooling", f"{server_lines:,} lines"))
-    rows.append(("its test suite", f"{suite_lines:,} lines"))
+
+    # 🔴 A ZERO OVER ZERO READERS IS NOT A ZERO. With no reader file matched
+    # nothing was scanned, and `0 clients` would be byte-identical to the real
+    # finding — the silent zero this whole module is built against. It also
+    # keeps an empty tree ALL-unmeasured, which is the condition the generator
+    # exits non-zero on; a row that "measures" against no input would turn that
+    # broken build into a page.
+    if not readers:
+        raise Unmeasurable(
+            f"no local store reader matched {' or '.join(_READER_GLOBS)} under "
+            f"{env.repo} — nothing was scanned, so the client count is an "
+            "absence and not a zero"
+        )
+
+    rows.append(("the hosted server + its build tooling",
+                 "still present" if server_dir.is_dir() else "retired — no longer in this tree"))
+    rows.append(("its test suite",
+                 "still present" if suite.is_file() else "retired — no longer in this tree"))
     return dict(
-        value=f"{clients} local reader(s) can speak to it",
+        value=f"{clients} of {len(readers)} local store readers can speak to a hosted store",
         detail=(
-            "The server is built, tested and hosted. The consuming client was "
+            "The server was built, tested and hosted. The consuming client was "
             "designed and decided — 'hosted is an ENTRY-LEVEL ADVISORY, never the "
             "primary read' — and then never written; the handoff says so in its "
-            "own words. The only things that have ever spoken to it are its own "
-            "seed and byte-identity scripts. 🔴 This is the shape worth "
-            "recognising: a subsystem can be complete, correct, well-tested and "
-            "have no reader, and every gate stays green throughout."
+            "own words. The only things that ever spoke to it were its own seed "
+            "and byte-identity scripts, and the service was retired on that "
+            "evidence. 🔴 The shape worth recognising is not the retirement but "
+            "the interval before it: a subsystem can be complete, correct, "
+            "well-tested and have no reader, with every gate green throughout. "
+            "The readers are DISCOVERED by glob, not listed, so a client "
+            "arriving as a new module is scanned too. 🔴 Read the number at its "
+            "real width: it counts a DIRECT HTTP client — an import, a call, the "
+            "module named as a string, or a curl/wget subprocess. It is not a "
+            "claim that these files make no network call: two of them already run "
+            "`gh pr view`. Indirection through a local helper, a computed module "
+            "name, or an out-of-process fetcher would read as zero here."
         ),
-        source="wc -l over scripts/subsystem-store-api/ + an HTTP-client grep over the local store readers",
+        source=(
+            "presence check on scripts/subsystem-store-api/ and its suite, plus a "
+            "direct-HTTP-client scan over every scripts/lib/subsystem_*.py and "
+            "scripts/subsystem-*.py"
+        ),
         columns=("reader / artefact", "finding"),
         rows=tuple(rows),
-    )
-
-
-def m_store_api_traffic(env: Env) -> dict:
-    """Deliberately UNMEASURABLE from this repo — and rendered as such.
-
-    🔴 THIS ROW IS THE POINT OF THE `UNMEASURED` MACHINERY, kept as a permanent
-    worked example. A request count for the hosted pod was reported to this
-    page's author as "309, all from its own build session". That number appears
-    NOWHERE in this tree. Rendering it would be restating a claim as a
-    measurement, which is the exact failure the page is built against — so the
-    row exists, says UNMEASURED, names the reason, and hands over the check.
-    """
-    raise Unmeasurable(
-        "a request count for the hosted pod is a fact about a running service's "
-        "audit log, not about this tree — no repo file records one, and an "
-        "empty grep is not a zero"
     )
 
 
@@ -1416,10 +1504,16 @@ REGISTRY: tuple[tuple[str, str, str, object, str], ...] = (
      "grep -rn pane_current_command scripts .tmux.conf | grep -v tests/"),
     ("seam.sessions", "soft", "The session-surface constellation", m_session_surfaces,
      "wc -l scripts/session-manager scripts/session-resolve scripts/waiting-windows scripts/session-write"),
-    ("seam.store_api", "soft", "The hosted store API and its client set", m_store_api_clients,
-     "grep -rn 'urllib\\|requests\\|urlopen' scripts/lib/subsystem_*.py"),
-    ("seam.store_traffic", "soft", "Has the hosted store served anyone?", m_store_api_traffic,
-     "read the pod's audit log for any request whose token identity is not the seed/verify credential"),
+    # 🔴 THE SETTLE COMMAND USED TO BE AN UNANCHORED GREP FOR `requests`, and it
+    # returned ten hits on the phrase "pull requests" — the exact false positive
+    # `reaches_http_client` exists to avoid, handed to the reader as the way to
+    # check the row. Anchored now, and it prints the reader set it scanned rather
+    # than assuming one.
+    ("seam.store_api", "soft", "The retired hosted API, and the readers' client set", m_store_api_clients,
+     "ls scripts/subsystem-store-api 2>&1; "
+     "ls scripts/lib/subsystem_*.py scripts/subsystem-*.py; "
+     "grep -rnE '^[[:space:]]*(import|from)[[:space:]]+(urllib|requests|httpx|aiohttp|http)([. ]|$)' "
+     "scripts/lib/subsystem_*.py scripts/subsystem-*.py"),
 )
 
 
