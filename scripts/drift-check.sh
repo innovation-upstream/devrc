@@ -540,6 +540,15 @@ set -uo pipefail
 # --- Host identity: SOURCED, never copied (see header) ------------------------
 # The source path is symlink-resolved: invoked through a symlink, an unresolved
 # ${BASH_SOURCE[0]} would look for lib/ next to the SYMLINK and not find it.
+#
+# 🔴 THIS FILE HAS TWO SOURCING CONVENTIONS AND THEY ARE NOT AN INCONSISTENCY —
+# do not "tidy" one into the other. This one resolves lib/ relative to THE
+# SCRIPT, because host identity must be decided before any repo path is known and
+# by the copy of the checker that is running. The nix-read lib (see NU_LIB in the
+# CHECK payload) resolves relative to `$repo` INSTEAD, because that payload is
+# piped to whichever HOST is being examined and must load that host's own
+# checkout — a script-relative path there would silently reach for a lib beside a
+# copy that does not exist on the far side. Each is wrong in the other's place.
 _drift_self="${BASH_SOURCE[0]}"
 _drift_resolved="$(readlink -f "$_drift_self" 2>/dev/null || true)"
 [ -n "$_drift_resolved" ] && _drift_self="$_drift_resolved"
@@ -583,6 +592,13 @@ DRIFT_UNMEASURED_FETCH_ESCALATE="${DRIFT_UNMEASURED_FETCH_ESCALATE:-12}"
 # The rc 23 ladder — see "UNTRACKED IN A NIX-READ PATH" for why it is longer than
 # the structural-unmeasured one rather than the same number reused.
 DRIFT_NIXDIRT_ESCALATE="${DRIFT_NIXDIRT_ESCALATE:-12}"
+# 🔴 A BOUND, like every sibling listing in this file. rc 23's was the only
+# uncapped per-host listing: untracked caps at DRIFT_UNTRACKED_MAX, dangling at
+# DRIFT_DANGLING_MAX, commits at `head -n 10`, fetch stderr at `head -n 3`.
+# `claude/skills` is a whole-directory STORE source, so an untracked,
+# non-gitignored subtree under it emits one FACT token, journal lines AND a state
+# file per path — unbounded, on a unit whose only output is the journal.
+DRIFT_NIXDIRT_MAX="${DRIFT_NIXDIRT_MAX:-10}"
 DRIFT_STATE_DIR="${DRIFT_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/drift-check}"
 DRIFT_SESSION_MANAGER="${DRIFT_SESSION_MANAGER:-$_drift_dir/session-manager}"
 DRIFT_PHASE2_TIMEOUT="${DRIFT_PHASE2_TIMEOUT:-60}"
@@ -611,6 +627,9 @@ require_int DRIFT_UNMEASURED_FETCH_ESCALATE "$DRIFT_UNMEASURED_FETCH_ESCALATE"
 # `[ "$STK" -ge "$THR" ]` into an error rather than a comparison and the ladder
 # would go quiet — the one direction it may never fail in.
 require_int DRIFT_NIXDIRT_ESCALATE "$DRIFT_NIXDIRT_ESCALATE"
+# Interpolated into the payload that runs on the OTHER host — same reason
+# DRIFT_UNTRACKED_MAX is validated: a non-integer here is remote code execution.
+require_int DRIFT_NIXDIRT_MAX "$DRIFT_NIXDIRT_MAX"
 # Not interpolated into a remote payload — but it IS handed to `timeout`, where a
 # non-integer would make the phase-2 scan fail in a way that reads as "the tool
 # is broken" rather than "you passed nonsense".
@@ -827,6 +846,8 @@ NU_PAIRS=""
 NU_M=0
 NU_HITS=0
 NU_UNREP=0
+NU_EMIT=0
+NU_MAX="${DRIFT_NIXDIRT_MAX:-10}"
 NU_LIB="$repo/scripts/lib/nix_read_paths.sh"
 if [ -r "$NU_LIB" ]; then
   # shellcheck source=lib/nix_read_paths.sh
@@ -842,9 +863,20 @@ fi
 if [ "$NU_REASON" = OK ] && [ "$n" != 0 ]; then
   while IFS= read -r NU_P; do
     [ -n "$NU_P" ] || continue
+    # 🔴 HITS COUNTS ALL OF THEM; only the EMITTED pairs are capped. The count is
+    # the finding and must never be truncated — a cap that silently shrank the
+    # number would be a smaller version of the reassuring-zero this file refuses.
     case "$(nix_read_artifact_reach "$(nix_read_class_of "$NU_P")" 0)" in
-      LIVE)            NU_PAIRS="$NU_PAIRS $NU_P=LIVE";    NU_HITS=$(( NU_HITS + 1 )) ;;
-      DROPPED)         NU_PAIRS="$NU_PAIRS $NU_P=DROPPED"; NU_HITS=$(( NU_HITS + 1 )) ;;
+      LIVE)
+        NU_HITS=$(( NU_HITS + 1 ))
+        if [ "$NU_EMIT" -lt "$NU_MAX" ]; then
+          NU_PAIRS="$NU_PAIRS $NU_P=LIVE"; NU_EMIT=$(( NU_EMIT + 1 ))
+        fi ;;
+      DROPPED)
+        NU_HITS=$(( NU_HITS + 1 ))
+        if [ "$NU_EMIT" -lt "$NU_MAX" ]; then
+          NU_PAIRS="$NU_PAIRS $NU_P=DROPPED"; NU_EMIT=$(( NU_EMIT + 1 ))
+        fi ;;
       UNREPRESENTABLE) NU_UNREP=$(( NU_UNREP + 1 )) ;;
     esac
   done <<NU_EOF
@@ -863,6 +895,9 @@ else
   for NU_X in $NU_PAIRS; do
     say "    - ${NU_X%=*} (${NU_X##*=})"
   done
+  # The same "... and N more" shape every other capped listing in this file uses,
+  # so a truncated list can never be mistaken for the whole set.
+  [ "$NU_HITS" -gt "$NU_EMIT" ] && say "    ... and $(( NU_HITS - NU_EMIT )) more"
 fi
 [ "$NU_UNREP" != 0 ] && say "  ($NU_UNREP untracked path(s) NOT CLASSIFIED — a character the classifier does not model)"
 echo "[$label] FACT nix-untracked untracked=$n nixread=$NU_M reason=$NU_REASON$NU_PAIRS"
@@ -1820,6 +1855,13 @@ u_streak_reset() { # u_streak_reset <role> <scope> — it MEASURED; the run ends
 }
 
 n_streak_reset() { # n_streak_reset <counter-file> — that path is untracked no more
+  # 🔴 REWRITES, NEVER REMOVES, and that is forced rather than preferred. This
+  # ladder is per-PATH, so cleared counters accumulate where rc 18's ~2 scopes do
+  # not — deleting them would be tidier. But `rm` is a DESTRUCTIVE command to the
+  # passivity scanner that guards this file (test_drift_check_source_never_
+  # mutates), and a read-only deadman that starts deleting files is a worse trade
+  # than some small files under $DRIFT_STATE_DIR. Bounded in practice by
+  # DRIFT_NIXDIRT_MAX, which caps how many paths can ever be reported per run.
   # Takes the FILE, not the path: the rc 23 complement is discovered by LISTING
   # the state dir (a path that stopped being untracked is, by construction, not
   # in this run's report), so the caller holds a filename and no scope name to
@@ -1844,6 +1886,7 @@ if [ "$DO_LOCAL" = 1 ]; then
   # exactly as before.
   LOCAL_OUT="$(DRIFT_REPO="$DRIFT_REPO" DRIFT_LABEL="$LOCAL_ROLE" \
     DRIFT_UNTRACKED_MAX="$DRIFT_UNTRACKED_MAX" \
+    DRIFT_NIXDIRT_MAX="$DRIFT_NIXDIRT_MAX" \
     DRIFT_DANGLING_MAX="$DRIFT_DANGLING_MAX" \
     bash -c "$PAYLOAD")"
   note_rc "$?"
@@ -1862,8 +1905,8 @@ if [ "$DO_REMOTE" = 1 ]; then
   # remote host's repo lives at its own $HOME/workspace/devrc.
   # `bash -s` (piped, not inlined) — see the CHECK header re: zsh.
   # %q, not %s — these two values are executed on ANOTHER host (see require_int).
-  REMOTE_OUT="$(printf 'DRIFT_LABEL=%q\nDRIFT_UNTRACKED_MAX=%q\nDRIFT_DANGLING_MAX=%q\n%s\n' \
-    "$REMOTE_ROLE" "$DRIFT_UNTRACKED_MAX" "$DRIFT_DANGLING_MAX" "$PAYLOAD" \
+  REMOTE_OUT="$(printf 'DRIFT_LABEL=%q\nDRIFT_UNTRACKED_MAX=%q\nDRIFT_DANGLING_MAX=%q\nDRIFT_NIXDIRT_MAX=%q\n%s\n' \
+    "$REMOTE_ROLE" "$DRIFT_UNTRACKED_MAX" "$DRIFT_DANGLING_MAX" "$DRIFT_NIXDIRT_MAX" "$PAYLOAD" \
     | ssh -o ConnectTimeout=10 -o BatchMode=yes "$REMOTE_SSH" bash -s)"
   remrc=$?
   [ -n "$REMOTE_OUT" ] && printf '%s\n' "$REMOTE_OUT"

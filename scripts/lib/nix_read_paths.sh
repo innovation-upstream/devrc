@@ -1,8 +1,14 @@
 # shellcheck shell=bash
 # nix_read_paths.sh — "is this repo path READ BY NIX?", derived, never hardcoded.
 #
-# SOURCE THIS, do not execute it. It defines functions and sets nothing at
-# source time (test_nix_read_paths.py pins that), exactly like lib/host-role.sh.
+# SOURCE THIS, do not execute it. Sourcing it defines functions and initialises
+# this file's own NIXREAD_* variables to empty — and does nothing else: no
+# output, no scan, no exit, no shell options left flipped under the caller
+# (test_nix_read_paths.py pins each of those), exactly like lib/host-role.sh.
+#
+# 🔴 REQUIRES BASH. Both consumers therefore invoke it under an explicitly named
+# bash — `bash -c` locally, `bash -s` over ssh — because sshd otherwise runs the
+# account's login shell, which is zsh on both hosts. See the NOTBASH guard.
 #
 # ── WHY IT EXISTS ─────────────────────────────────────────────────────────────
 # Two consumers need the SAME question answered and they are the two safety
@@ -71,7 +77,25 @@
 #     in the test is what makes a shrink loud.
 #   * A path reached only through a nix STRING built at eval time
 #     ("${toString ./.}/x") is invisible. None exist today; the two-way pin
-#     covers the `source =` and mkOutOfStoreSymlink spellings that do.
+#     covers the `source =`, `${../…}` and mkOutOfStoreSymlink spellings that do.
+#   * 🔴 `_nixread_take_live` needs `mkOutOfStoreSymlink` and the
+#     `${workspace}/devrc/…` string ON ONE LINE. Wrapping a call site (nixfmt, a
+#     longer path) drops that target to NONE. The two-way pin's reverse extractor
+#     deliberately matches WHOLE-FILE so it does NOT share this blind spot — two
+#     extractors that fail identically are one extractor — but the DERIVATION
+#     still has it, so the pin goes red rather than the answer going quietly
+#     wrong. All 12 sites are one-liners today.
+#   * It answers about a GIT CHECKOUT. `nix_read_artifact_reach` encodes the
+#     flake's tracked-file filter; a flake evaluated from a plain directory (no
+#     `.git`) copies everything, and nothing here models that.
+#   * 🔴 IT REQUIRES BASH. `shopt` and word-splitting on an unquoted `$var` have
+#     no zsh equivalent, and both hosts' LOGIN SHELL is zsh — see the NOTBASH
+#     guard in nix_read_scan for what that cost and how it now fails loudly.
+#   * A TRACKED-BUT-DELETED file is reported by `git diff --name-only`, so
+#     ship.sh classes it with the index bucket and says "in the artifact". What
+#     nix actually does with a tracked path missing from the working tree is
+#     UNMEASURED here — stated as unmeasured rather than guessed, because the
+#     four states that ARE measured were each measured, not reasoned about.
 #   * It answers "does nix READ it", never "does the deployed artifact still
 #     match" — that is ship.sh's verify_managed_currency, and neither replaces
 #     the other.
@@ -165,6 +189,25 @@ nix_read_scan() {
   NIXREAD_LIVE=""; NIXREAD_STORE=""; NIXREAD_MISSING=""
   NIXREAD_FILES=0; NIXREAD_COUNT=0; NIXREAD_REASON=""
 
+  # 🔴 FAIL LOUD UNDER A NON-BASH SHELL, because failing QUIET here is the worst
+  # thing this file can do. This routine needs `shopt` and word-splitting on an
+  # unquoted `$var`; zsh has neither. MEASURED under zsh before this guard
+  # existed: five `command not found: shopt` lines on stderr — which the caller
+  # does not capture — and then a confident `rc=0 REASON=OK files=28 count=1`
+  # with an EMPTY store set, i.e. every nix-read path classified NONE and both
+  # consumers printed the reassuring verdict. The NOT-CLASSIFIED refusal could
+  # not fire, because the scan believed it had SUCCEEDED.
+  #
+  # It was reachable because ship.sh sent CONVERGE over ssh WITHOUT naming an
+  # interpreter, so sshd ran the login shell (zsh on both hosts). That transport
+  # is fixed — both legs now name bash — and this is the belt to that braces: if
+  # anyone ever re-inlines it, the answer degrades to the COULD-NOT-MEASURE path
+  # both consumers already handle honestly, instead of to a silent lie.
+  if [ -z "${BASH_VERSION:-}" ]; then
+    NIXREAD_REASON=NOTBASH
+    return 1
+  fi
+
   if [ -z "$REPO" ] || [ ! -d "$REPO" ]; then
     NIXREAD_REASON=NOREPO
     return 1
@@ -179,7 +222,7 @@ nix_read_scan() {
   shopt -q nullglob || WANT_NG=1
   shopt -s globstar nullglob
 
-  local ROOTS_SEEN=0
+  local ROOTS_SEEN=0 MISSING_DIR=0
   for T in $NIXREAD_ROOT_FILES; do
     [ -f "$REPO/$T" ] || continue
     ROOTS_SEEN=$(( ROOTS_SEEN + 1 ))
@@ -187,7 +230,13 @@ nix_read_scan() {
     case "$T" in *.nix) _nixread_scan_file "$REPO/$T" "" ;; esac
   done
   for D in $NIXREAD_ROOT_DIRS; do
-    [ -d "$REPO/$D" ] || continue
+    # 🔴 A DECLARED ROOT DIRECTORY THAT IS ABSENT IS A BROKEN SCAN, NOT A SMALL
+    # ONE. `> 0` was the only guard here, so a tree where flake.nix survives and
+    # `nix/` has been renamed derived 3 paths from 1 file and reported OK — a
+    # usable-looking verdict off a scan that missed the entire module tree. This
+    # is derived from the declaration rather than a numeric floor, so it cannot
+    # rot the way a hardcoded minimum would.
+    if [ ! -d "$REPO/$D" ]; then MISSING_DIR=1; continue; fi
     ROOTS_SEEN=$(( ROOTS_SEEN + 1 ))
     # 🔴 WALKED IS NOT THE SAME AS READ. Every .nix under here is SCANNED for
     # path literals, but a file only joins the STORE set when something REACHES
@@ -219,6 +268,7 @@ nix_read_scan() {
   NIXREAD_MISSING="${NIXREAD_MISSING# }"
 
   if [ "$ROOTS_SEEN" = 0 ]; then NIXREAD_REASON=NOROOTS; return 1; fi
+  if [ "$MISSING_DIR" = 1 ]; then NIXREAD_REASON=MISSINGROOT; return 1; fi
   if [ "$NIXREAD_FILES" = 0 ] || [ "$NIXREAD_COUNT" = 0 ]; then
     NIXREAD_REASON=NOSCAN; return 1
   fi

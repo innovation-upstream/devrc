@@ -785,20 +785,56 @@ class Repo:
                 f'git --git-dir={self.origin} update-ref refs/heads/main {advance_to} '
                 f'|| exit 97\n'
             )
-        # 🔴 POSIX sh only (mockbin owns the shebang and it is /bin/sh), so no
+        # 🔴 THIS SHIM EMULATES sshd's DISPATCH, and until 2026-08-26 it did not.
+        # It read the payload out of the LAST argv element and ran it under a
+        # HARDCODED `bash -c`, while its docstring claimed to be "a test of the
+        # remote leg rather than of a second local run". It pinned the payload
+        # TEXT and fixed the INTERPRETER — so the entire remote-leg suite was
+        # structurally blind to the one axis on which the two legs can differ,
+        # and a real bug lived there (see
+        # test_the_remote_leg_classifies_identically_to_the_local_leg).
+        #
+        # Real sshd has two modes, and both are reproduced here:
+        #   `ssh host cmd args…`  -> runs THAT command, payload arriving on stdin
+        #   `ssh host "<script>"` -> names no interpreter, so the account's LOGIN
+        #                            SHELL runs the string. On both real hosts
+        #                            that is zsh (`getent passwd zach`).
+        # zsh is in flake.nix's `gateTools` — deliberately, and for exactly this
+        # class of reason (see its comment about run3) — so the login-shell branch
+        # is REAL in both tiers and never skips.
+        login_shell = os.environ.get("SHIP_TEST_LOGIN_SHELL", "zsh")
+        # POSIX sh only (mockbin owns the shebang and it is /bin/sh), so no
         # PIPESTATUS here — the strip variant captures, then filters, then exits
         # with the payload's OWN status.
-        run = 'exec bash -c "$payload"\n'
+        dispatch = (
+            "prev=; last=\n"
+            'for a in "$@"; do prev=$last; last=$a; done\n'
+            'if [ "$prev" = bash ] && [ "$last" = -s ]; then\n'
+            "  payload=$(cat)\n"
+            "  runner=bash\n"
+            "else\n"
+            "  payload=$last\n"
+            f"  runner={login_shell}\n"
+            "fi\n"
+            # 🔴 The forcing knob, and it forces the INTERPRETER ONLY — never the
+            # payload source. Emulating "ssh ran the login shell" by also taking
+            # the payload from argv would hand zsh the literal `-s`, which fails
+            # for a reason that has nothing to do with the bug under test and
+            # would make the regression test green for the wrong cause.
+            'if [ -n "${SHIP_TEST_FORCE_LOGIN_SHELL:-}" ]; then\n'
+            f"  runner={login_shell}\n"
+            "fi\n"
+        )
+        run = 'exec "$runner" -c "$payload"\n'
         if strip_sha:
             run = (
-                'out=$(bash -c "$payload"); rc=$?\n'
+                'out=$("$runner" -c "$payload"); rc=$?\n'
                 'printf "%s\\n" "$out" | grep -v " ship-landed-sha "\n'
                 "exit $rc\n"
             )
         write_exec(
             d / "ssh",
-            "payload=\n"
-            'for a in "$@"; do payload="$a"; done\n'
+            dispatch
             + advance +
             f'export HOME="{self.remote_home}"\n'
             f'export SHIP_REPO="{self.remote_work}"\n'
@@ -1763,9 +1799,9 @@ def test_managed_artifact_check_runs_on_the_remote_leg_too(repo):
 
     The bug existed only on the laptop, so a consumer check that runs only on
     the local host is worthless for it. ship.sh has exactly one CONVERGE body,
-    executed locally via `bash -c` and remotely via `ssh <host> "<body>"` — so
-    this asserts the check lives INSIDE that body rather than in the local-only
-    driver below it, which is the way it could regress to local-only.
+    executed locally via `bash -c` and remotely by PIPING it to `bash -s` over
+    ssh — so this asserts the check lives INSIDE that body rather than in the
+    local-only driver below it, which is the way it could regress to local-only.
     """
     src = SHIP.read_text()
     body = src.split("CONVERGE='", 1)
@@ -1776,9 +1812,40 @@ def test_managed_artifact_check_runs_on_the_remote_leg_too(repo):
         "remote host — which is the only host the original bug affected"
     )
     # ...and CONVERGE really is what gets sent over ssh.
-    assert re.search(r'ssh .*"\$REMOTE_SSH".*\$CONVERGE', src), (
-        "CONVERGE is no longer the body executed over ssh"
+    assert re.search(r"\$CONVERGE\"?\s*\\?\s*\n?\s*\|\s*ssh ", src), (
+        "CONVERGE is no longer the body piped over ssh"
     )
+
+
+def test_the_remote_leg_names_bash_rather_than_letting_sshd_pick_a_shell():
+    """🔴 THE STRUCTURAL PIN behind the zsh bug. `ssh host "<script>"` names NO
+    interpreter, so sshd runs the account's LOGIN SHELL — zsh on both of these
+    hosts. CONVERGE was interpreter-agnostic by ACCIDENT until it began sourcing
+    scripts/lib/nix_read_paths.sh, which needs `shopt` and word-splitting on an
+    unquoted `$var`.
+
+    Structural because it holds in every tier with no host, no ssh and no
+    fixture; the behavioural half is
+    test_the_remote_leg_classifies_identically_to_the_local_leg. drift-check.sh
+    reached this conclusion first — one rule, second place it applies.
+    """
+    src = SHIP.read_text()
+    code = [ln for ln in src.splitlines() if not ln.strip().startswith("#")]
+    ssh_lines = [ln for ln in code if re.search(r"(^|\|\s*|\s)ssh ", ln)]
+    assert ssh_lines, "no ssh invocation found — ship.sh was restructured"
+    real = [ln for ln in ssh_lines if "$REMOTE_SSH" in ln]
+    assert real, f"no ssh line targets $REMOTE_SSH: {ssh_lines!r}"
+    for ln in real:
+        assert re.search(r'"\$REMOTE_SSH"\s+bash\s+-s', ln), (
+            "the remote leg does not name an interpreter, so sshd will run the "
+            "LOGIN SHELL (zsh on both hosts) and every bashism in CONVERGE — "
+            "including the whole shared nix-read lib — changes meaning "
+            "silently: %r" % ln
+        )
+        assert "$CONVERGE" not in ln, (
+            "the payload is inlined into the ssh command string again; it must "
+            "be piped to `bash -s`: %r" % ln
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -3252,3 +3319,207 @@ def test_the_population_line_splits_tracked_from_untracked(nixrepo):
     total, tracked, untracked = (int(g) for g in m.groups())
     assert (tracked, untracked) == (1, 1), out
     assert total == tracked + untracked
+
+
+# --------------------------------------------------------------------------- #
+# THE SEAM: the remote leg must reach the SAME verdict as the local one
+#
+# 🔴 "VERIFIED IN ISOLATION" IS THE VACUOUS GREEN, AND THIS IS THE SHAPE OF IT.
+# The nix-read classifier had its own hermetic suite. The remote leg had its own
+# hermetic suite. Both were green, and TOGETHER they were broken: `ssh host
+# "<script>"` names no interpreter, so sshd ran the login shell — zsh — and the
+# classifier's `shopt` and unquoted-`$var` word-splitting silently produced an
+# EMPTY nix-read set with `REASON=OK`. Neither suite could see it, because the
+# ssh shim hardcoded `bash -c` and so tested a second LOCAL run.
+#
+# MEASURED under zsh, on the real repo, before the fix:
+#     rc=0 REASON=OK files=28 count=1   with STORE empty
+# i.e. the scan believed it had SUCCEEDED, so the NOT-CLASSIFIED refusal could
+# not fire, and the remote host printed the reassuring verdict for a file the
+# local host had just called "in the artifact".
+#
+# These pin the RELATIONSHIP, not either component: same repo state, both legs,
+# one run, and the classification lines must agree.
+# --------------------------------------------------------------------------- #
+def _verdict_lines(out, leg):
+    """The classification sentences ONE LEG printed, normalised.
+
+    Split on the `=== local (…) ===` / `=== remote (…) ===` banners, NOT on the
+    `[host]` prefix: that prefix is `hostname`, which is the same string on both
+    fabricated hosts, so a prefix filter would silently merge the two legs and
+    make any comparison between them vacuous.
+    """
+    keys = ("DIRTY AND LIVE", "DIRTY AND IN THE ARTIFACT",
+            "UNTRACKED IN A NIX-READ PATH", "NO dirty path is read by nix",
+            "nothing dirty REACHED the build", "NOT CLASSIFIED")
+    parts = re.split(r"^=== (local|remote) [^\n]*===$", out, flags=re.M)
+    # parts alternates: [pre, "local", body, "remote", body, ...]
+    body = ""
+    for i in range(1, len(parts) - 1, 2):
+        if parts[i] == leg:
+            body = parts[i + 1]
+            break
+    assert body, f"no `=== {leg} …===` section in the output:\n{out}"
+    return [k for ln in body.splitlines() for k in keys if k in ln]
+
+
+def test_the_remote_leg_classifies_identically_to_the_local_leg(tmp_path):
+    """🔴 RED ON HEAD BEFORE THE FIX. With the payload inlined into the ssh
+    command string, the shim runs it under the LOGIN SHELL (zsh) exactly as sshd
+    does, the lib mis-parses, and the remote host prints "NO dirty path is read
+    by nix" while the local host prints "DIRTY AND IN THE ARTIFACT" for the SAME
+    tracked-modified STORE-class file.
+
+    Both hosts carry the same fixture flake and the same dirty file, so any
+    difference in the verdict is a difference in the INTERPRETER, which is the
+    only thing that varies between the two legs.
+    """
+    r = Repo(tmp_path, second_host=True, nixread=True)
+    for tree in (r.work, r.remote_work):
+        (tree / "copied-alpha.txt").write_text("copied-alpha.txt wip\n")
+
+    shim = r.ssh_shim(tmp_path)
+    rc, out = r.ship_both_hosts(shim)
+
+    local = _verdict_lines(out, "local")
+    remote = _verdict_lines(out, "remote")
+    assert local, f"the local leg printed no classification at all\n{out}"
+    assert remote, f"the remote leg printed no classification at all\n{out}"
+    assert local == remote, (
+        "the two legs disagree about the SAME dirty file — local=%r remote=%r. "
+        "That is the interpreter, not the repo: sshd runs the login shell unless "
+        "the ssh invocation names one.\n%s" % (local, remote, out)
+    )
+    assert "DIRTY AND IN THE ARTIFACT" in remote, (
+        "the remote leg did not classify a tracked-modified STORE path as being "
+        "in the artifact\n%s" % out
+    )
+
+
+def test_the_remote_leg_refuses_rather_than_lying_under_a_non_bash_shell(tmp_path):
+    """🔴 BELT AND BRACES, and the half that survives a future re-inlining.
+
+    The transport fix is what removes the variable. This pins the OTHER outcome:
+    if the payload is ever run under something that is not bash again, the lib
+    must degrade to the COULD-NOT-MEASURE path both consumers already handle
+    honestly — never to a confident empty set.
+
+    Driven by forcing the shim's login-shell branch, which is what sshd does with
+    an interpreter-less invocation. zsh is in flake.nix's `gateTools`, so this is
+    REAL in both tiers and never skips.
+    """
+    r = Repo(tmp_path, second_host=True, nixread=True)
+    for tree in (r.work, r.remote_work):
+        (tree / "copied-alpha.txt").write_text("copied-alpha.txt wip\n")
+
+    shim = r.ssh_shim(tmp_path)
+    # Force the shim to run the payload under the LOGIN SHELL, i.e. reproduce
+    # what sshd does for an ssh invocation that names no interpreter — the
+    # pre-fix transport, with everything else held constant.
+    rc, out = r.ship_both_hosts(shim, SHIP_TEST_FORCE_LOGIN_SHELL="1")
+    remote = _verdict_lines(out, "remote")
+    assert "NOT CLASSIFIED" in remote, (
+        "under a non-bash shell the remote leg did not refuse — it must never "
+        "print a clean nix-read verdict off a scan that could not run\n%s" % out
+    )
+    assert "NO dirty path is read by nix" not in remote, (
+        "the remote leg printed the reassuring verdict off a broken scan — this "
+        "is the exact silent-wrong-answer the guard exists to prevent\n%s" % out
+    )
+    assert "NOTBASH" in out, f"the refusal does not name its reason\n{out}"
+
+
+def test_the_shim_really_can_take_the_login_shell_branch(tmp_path):
+    """🔴 POSITIVE CONTROL for the two tests above. If the shim's dispatch never
+    reached its login-shell arm, both would pass while proving nothing about the
+    axis they exist to cover — which is precisely how the old `exec bash -c`
+    shim hid a real bug behind a green suite."""
+    r = Repo(tmp_path, second_host=True, nixread=True)
+    shim = r.ssh_shim(tmp_path)
+    body = (shim / "ssh").read_text()
+    assert 'if [ "$prev" = bash ] && [ "$last" = -s ]; then' in body, body
+    assert "runner=zsh" in body, (
+        "the shim does not model the login shell, so the remote-leg suite is "
+        "blind to the interpreter axis again:\n%s" % body
+    )
+    # ...and the branch is genuinely selectable: the SAME shim must dispatch to
+    # bash when an interpreter is named and to zsh when one is not. Asserted as a
+    # PAIR — either half alone is satisfied by a shim wired to one shell.
+    probe = tmp_path / "probe.sh"
+    probe.write_text(
+        'set -u\n'
+        'payload=\'echo IS_BASH=${BASH_VERSION:+yes} IS_ZSH=${ZSH_VERSION:+yes}\'\n'
+        'printf "%s\\n" "$payload" | ssh host bash -s\n'
+        'ssh host "$payload"\n'
+    )
+    got = subprocess.run(["bash", str(probe)], capture_output=True, text=True,
+                         env=r.env(shims=[shim]))
+    lines = [ln for ln in got.stdout.splitlines() if ln.startswith("IS_BASH=")]
+    assert len(lines) == 2, (got.stdout, got.stderr)
+    assert lines[0] == "IS_BASH=yes IS_ZSH=", (
+        "a NAMED `bash -s` did not run under bash: %r" % lines[0])
+    assert lines[1] == "IS_BASH= IS_ZSH=yes", (
+        "an interpreter-less invocation did not run under the login shell, so "
+        "the shim cannot reproduce what sshd does: %r" % lines[1])
+
+
+def test_an_UNCLASSIFIABLE_dirty_path_suppresses_the_clean_verdict(nixrepo):
+    """🔴 THE `[ "$nr_nu" = 0 ]` ARM, which was reachable and unpinned — deleting
+    it SURVIVED the whole suite.
+
+    A dirty path the classifier cannot model (a character outside its alphabet)
+    is reported as NOT CLASSIFIED, and the run must NOT also print "what was
+    built/deployed IS origin/main". Printing both says, in one breath, "there is
+    a path I could not judge" and "I have judged them all". `test_drift_check.py`
+    already has the equivalent on its side.
+    """
+    (nixrepo.work / "has space.txt").write_text("unclassifiable\n")
+    rc, out = nixrepo.ship()
+    assert rc == 0, out
+    assert "NOT CLASSIFIED" in out, out
+    assert "built/deployed IS origin/main" not in out, (
+        "the run printed a clean verdict alongside a path it could not classify "
+        "— those are contradictory claims\n%s" % out
+    )
+
+
+def test_an_unclassifiable_path_is_named_not_just_counted(nixrepo):
+    """A count with no name leaves the operator nothing to act on, and this is
+    the one bucket where they cannot find the file by re-reading the classifier."""
+    (nixrepo.work / "has space.txt").write_text("unclassifiable\n")
+    rc, out = nixrepo.ship()
+    assert rc == 0, out
+    assert "has space.txt" in out, out
+
+
+def test_the_remote_leg_reports_the_ssh_status_not_the_printf_status(tmp_path):
+    """🔴 THE INDEX MOVED WHEN THE PAYLOAD BECAME A PIPE, and a comment claimed
+    this test existed before it did.
+
+    The remote leg used to be `ssh … | tee`, so `PIPESTATUS[0]` was ssh. Piping
+    the payload in makes it `printf | ssh | tee`, where [0] is printf — which
+    essentially always succeeds. Left at [0], EVERY remote converge would report
+    rc 0, including a host skipped for un-pushed commits (rc 8), which is the
+    single most important thing this script says.
+
+    The remote host here is genuinely diverged, so its converge exits 8; the run
+    must surface that rather than a zero.
+    """
+    r = Repo(tmp_path, second_host=True)
+    # Un-pushed commit on the REMOTE host only -> that leg exits 8.
+    (r.remote_work / "local-only.txt").write_text("un-pushed\n")
+    r._git(r.remote_work, "add", "local-only.txt")
+    r._git(r.remote_work, "commit", "-q", "-m", "un-pushed on the remote host")
+
+    shim = r.ssh_shim(tmp_path)
+    rc, out = r.ship_both_hosts(shim)
+
+    assert "SKIPPED — local main has diverged" in out, (
+        "the remote leg did not actually fail, so this proves nothing about the "
+        "status it reports\n%s" % out
+    )
+    assert rc == 8, (
+        "the run reported rc=%s for a remote host that exited 8 — the pipeline "
+        "status is being read from the wrong stage (printf, not ssh)\n%s" % (rc, out)
+    )
+    assert "converge exited 8" in out, out

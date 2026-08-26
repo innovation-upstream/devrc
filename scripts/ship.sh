@@ -661,8 +661,22 @@ ship_self_check() {
   exit 20
 }
 
-# Self-contained converge routine, run identically on each host (local via
-# bash -c, remote via ssh). Single source of truth for the sequence.
+# Self-contained converge routine, run identically on each host: locally via
+# `bash -c`, remotely by PIPING it to `bash -s` over ssh. Single source of truth
+# for the sequence.
+#
+# 🔴 BOTH LEGS NAME bash EXPLICITLY, and that is load-bearing, not stylistic.
+# `ssh host "<script>"` names no interpreter, so sshd runs the account's LOGIN
+# SHELL — zsh on both of these hosts. This payload was interpreter-agnostic only
+# by ACCIDENT until it began sourcing scripts/lib/nix_read_paths.sh, which needs
+# `shopt` and word-splitting on an unquoted `$var`; under zsh that returned a
+# confident, WRONG "nothing is nix-read". drift-check.sh reached the same
+# conclusion first and says so at its own CHECK header — this is the same rule in
+# the second place it applies, not a second rule.
+#
+# So: anything added here may assume bash, but ONLY because the transport says
+# bash. If a future edit inlines this into an ssh command string again, every
+# bashism in it — including the whole shared lib — silently changes meaning.
 CONVERGE='
 set -uo pipefail
 if [ "${SHIP_REPO+set}" = set ] && [ -z "$SHIP_REPO" ]; then
@@ -671,6 +685,16 @@ if [ "${SHIP_REPO+set}" = set ] && [ -z "$SHIP_REPO" ]; then
 fi
 repo="${SHIP_REPO:-$HOME/workspace/devrc}"
 no_switch="${SHIP_NO_SWITCH:-0}"
+# Max paths enumerated per dirty-classification bucket — see nr_list. Mirrors
+# drift-check.sh DRIFT_UNTRACKED_MAX/DRIFT_NIXDIRT_MAX; the counts beside each
+# heading are never capped.
+# 🔴 NO `''` LITERAL ANYWHERE IN THIS PAYLOAD. CONVERGE is a single-quoted shell
+# string, so an empty-string literal closes it and re-opens it — the file still
+# parses, and the payload silently becomes a different script. That is what a
+# first draft of this validation did, and it broke 76 tests at once.
+SHIP_LIST_MAX="${SHIP_LIST_MAX:-10}"
+[ -n "$SHIP_LIST_MAX" ] || SHIP_LIST_MAX=10
+case "$SHIP_LIST_MAX" in *[!0-9]*) SHIP_LIST_MAX=10 ;; esac
 host=$(hostname 2>/dev/null || echo local)
 [ -n "$host" ] || host=local
 cd "$repo" || { echo "[$host] no repo at $repo"; exit 3; }
@@ -1240,6 +1264,17 @@ if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
   nr_nt=$(wc -l < "$nr_unt" | tr -d " ")
   nr_n=$(( nr_ni + nr_nt ))
 
+  # 🔴 BOUNDED, like every other listing either script prints. A whole-directory
+  # STORE source (claude/skills, scripts/dl-router) means one untracked subtree
+  # can put an unbounded number of paths in a bucket, and this output is tee-d
+  # into a capture an operator reads. The COUNT above is never truncated — only
+  # the enumeration — and a truncated list always says how much it hid.
+  nr_list() { # nr_list <file> <total>
+    sed -n "1,${SHIP_LIST_MAX}p" "$1" | sed "s|^|[$host]     - |"
+    [ "$2" -gt "$SHIP_LIST_MAX" ] && echo "[$host]     ... and $(( $2 - SHIP_LIST_MAX )) more"
+    return 0
+  }
+
   nr_reason=""
   nr_lib="$repo/scripts/lib/nix_read_paths.sh"
   if [ ! -r "$nr_lib" ]; then
@@ -1283,13 +1318,13 @@ if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
       echo "[$host]   🔴 DIRTY AND LIVE — $nr_nl path(s) are mkOutOfStoreSymlink targets, so the"
       echo "[$host]   deployed copy is a link INTO this working tree. This WIP is running on"
       echo "[$host]   this host right now, and it did not need the switch to get there:"
-      sed "s|^|[$host]     - |" "$nr_live"
+      nr_list "$nr_live" "$nr_nl"
     fi
     if [ "$nr_ns" != 0 ]; then
       echo "[$host]   🔴 DIRTY AND IN THE ARTIFACT — nix reads $nr_ns path(s) at eval/build time"
       echo "[$host]   and git has them, so the generation this run just built is origin/main"
       echo "[$host]   PLUS them:"
-      sed "s|^|[$host]     - |" "$nr_store"
+      nr_list "$nr_store" "$nr_ns"
     fi
     # 🔴 NOT "in the artifact", and that distinction is the whole point of this
     # branch. Nix filters a git checkout to the files git knows about, so an
@@ -1302,7 +1337,7 @@ if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
       echo "[$host]   UNTRACKED IN A NIX-READ PATH — $nr_nd path(s). The flake source is filtered"
       echo "[$host]   to the files git knows about, so these did NOT reach the artifact. They are"
       echo "[$host]   unsaved work in no commit and no backup, one git-add from being deployed:"
-      sed "s|^|[$host]     - |" "$nr_drop"
+      nr_list "$nr_drop" "$nr_nd"
     fi
     if [ "$nr_nl" = 0 ] && [ "$nr_ns" = 0 ] && [ "$nr_nu" = 0 ]; then
       if [ "$nr_nd" = 0 ]; then
@@ -1316,7 +1351,7 @@ if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
     if [ "$nr_nu" != 0 ]; then
       echo "[$host]   NOT CLASSIFIED — $nr_nu dirty path(s) carry a character the classifier does"
       echo "[$host]   not model, so no verdict is offered about them:"
-      sed "s|^|[$host]     - |" "$nr_unrep"
+      nr_list "$nr_unrep" "$nr_nu"
     fi
     echo "[$host]   classified $nr_n dirty path(s) ($nr_ni tracked, $nr_nt untracked) against $NIXREAD_COUNT nix-read path(s) derived from $NIXREAD_FILES nix file(s)."
   fi
@@ -1377,9 +1412,40 @@ echo
 if [ "$DO_REMOTE" = 1 ]; then
   echo "=== remote ($REMOTE_ROLE — $REMOTE_SSH) ==="
   # Pass the switch toggle remotely; SHIP_REPO stays host-default ($HOME/workspace/devrc).
+  #
+  # 🔴 PIPED TO `bash -s`, NEVER INLINED IN THE ssh COMMAND STRING. `ssh host
+  # "<script>"` names NO interpreter, so sshd runs the account's LOGIN SHELL —
+  # and both hosts' login shell is zsh (`getent passwd zach` ->
+  # /run/current-system/sw/bin/zsh). `bash -s` takes the interpreter out of the
+  # equation, which is exactly what drift-check.sh does and says at its CHECK
+  # header; this script had no such note and was interpreter-agnostic only by
+  # accident — every line of CONVERGE happened to be portable.
+  #
+  # That accident ENDED when CONVERGE started sourcing
+  # scripts/lib/nix_read_paths.sh, which needs `shopt` and word-splitting on an
+  # unquoted `$var`. MEASURED under zsh before this was fixed: the lib emitted
+  # five `command not found: shopt` lines to stderr (NOT tee'd into the capture,
+  # so invisible in the log), then returned `rc=0 REASON=OK files=28 count=1`
+  # with an EMPTY store set — so every dirty nix-read path classified NONE and
+  # the remote host printed "NO dirty path is read by nix" while the local leg
+  # printed "DIRTY AND IN THE ARTIFACT" for the same file. The NOT-CLASSIFIED
+  # refusal could not fire, because the scan believed it had succeeded. A silent
+  # wrong answer in the reassuring direction is the worst outcome this file can
+  # produce, and it was reachable only on the host nobody is watching.
+  #
+  # %q, not %s, on the value interpolated ahead of the payload — the same
+  # belt-and-braces drift-check.sh applies to everything it sends across this hop.
   cap_remote=$(mktemp "${TMPDIR:-/tmp}/ship-remote.XXXXXX")
-  ssh -o ConnectTimeout=10 "$REMOTE_SSH" "SHIP_NO_SWITCH=$SHIP_NO_SWITCH; $CONVERGE" | tee "$cap_remote"
-  remrc=${PIPESTATUS[0]}
+  printf 'SHIP_NO_SWITCH=%q\n%s\n' "$SHIP_NO_SWITCH" "$CONVERGE" \
+    | ssh -o ConnectTimeout=10 "$REMOTE_SSH" bash -s | tee "$cap_remote"
+  # 🔴 INDEX 1, NOT 0 — and the index moved BECAUSE the payload is now piped in.
+  # This read `PIPESTATUS[0]` while the pipeline was `ssh | tee`; it is now
+  # `printf | ssh | tee`, so [0] is printf, which essentially always succeeds.
+  # Left at [0] this would have reported EVERY remote converge as rc 0 —
+  # including a host skipped for un-pushed commits (rc 8), which is the finding
+  # this whole script exists to surface. Pinned by
+  # test_the_remote_leg_reports_the_ssh_status_not_the_printf_status.
+  remrc=${PIPESTATUS[1]}
   REMOTE_SHA=$(ship_landed_sha "$cap_remote")
   rm -f "$cap_remote"
   if [ "$remrc" != 0 ]; then

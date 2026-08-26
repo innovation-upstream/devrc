@@ -153,17 +153,35 @@ def test_the_scan_of_the_real_repo_produces_a_non_zero_set():
     assert int(facts["COUNT"]) == len(facts["LIVE"]) + len(facts["STORE"])
 
 
-def test_the_positive_control_can_move():
+def test_the_positive_control_can_move(tmp_path):
     """The floors above prove a number is large; this proves the number RESPONDS.
 
-    A scan of a tree with ONE nix file naming ONE path must produce exactly that
-    one — so the derivation is reading the tree it was given, not reciting a
-    constant. Same instrument, a different input, a different answer.
+    🔴 THIS TEST USED TO PERFORM NO CONTROL. Its docstring said "same instrument,
+    a different input, a different answer" while the body scanned REPO_ROOT once,
+    bound the count to a local, and asserted it was `> 1` — never scanning a
+    second tree and never using the value again. It read as coverage and provided
+    none. It now actually does what it claims: two DIFFERENT trees through the
+    same instrument must give two different answers, and the small one must be
+    exactly what its fixture spells.
     """
-    rc, facts, _ = scan(REPO_ROOT)
-    assert rc == 0
-    big = int(facts["COUNT"])
-    assert big > 1
+    rc_big, big_facts, _ = scan(REPO_ROOT)
+    assert rc_big == 0, big_facts
+    big = int(big_facts["COUNT"])
+
+    small = _fixture(tmp_path)
+    rc_small, small_facts, _ = scan(small)
+    assert rc_small == 0, small_facts
+    little = int(small_facts["COUNT"])
+
+    assert little == 5, (
+        "the fixture tree spells 4 store paths + 1 live one; the scan derived "
+        "%d: %r / %r" % (little, small_facts["STORE"], small_facts["LIVE"])
+    )
+    assert big > little, (
+        "the real repo (%d) and a 5-path fixture (%d) produced the same or an "
+        "inverted count — the instrument is not reading its input" % (big, little)
+    )
+    assert int(big_facts["FILES"]) > int(small_facts["FILES"])
 
 
 # --------------------------------------------------------------------------- #
@@ -189,8 +207,21 @@ def test_every_derived_path_exists_in_the_repo():
 # `./`-prefixed word on a line; this reads the two SPELLINGS a reviewer would
 # grep for — `source = <path>` and `mkOutOfStoreSymlink "${workspace}/devrc/…"`.
 # Two extractors agreeing is evidence; one extractor agreeing with itself is not.
-_SRC_RE = re.compile(r"source\s*=\s*(\.\.[A-Za-z0-9._/-]*)")
-_OOS_RE = re.compile(r"mkOutOfStoreSymlink\s+\"\$\{workspace\}/devrc/([A-Za-z0-9._/-]+)\"")
+#
+# 🔴 IT READS EACH FILE AS ONE STRING, NOT LINE BY LINE, AND THAT IS THE POINT.
+# The derivation's `_nixread_take_live` needs `mkOutOfStoreSymlink` and
+# `${workspace}/devrc/…` on the SAME line. A line-oriented reverse extractor
+# would SHARE that assumption — so wrapping a call site (nixfmt, a longer path)
+# would drop the target to NONE and the pin would stay GREEN because both
+# extractors missed it together. Two extractors that fail identically are one
+# extractor. Whole-file matching makes the pin go RED in exactly that case, which
+# is the only reason it is worth having. All 12 sites are one-liners today.
+_SRC_RE = re.compile(r"source\s*=\s*(\.{1,2}/[A-Za-z0-9._/-]*)", re.S)
+# The `${../scripts/dl-router}` interpolation — the spelling this whole change
+# was built around, and one a `source =` regex never sees.
+_INTERP_RE = re.compile(r"\$\{(\.{1,2}/[A-Za-z0-9._/-]+)\}")
+_OOS_RE = re.compile(
+    r"mkOutOfStoreSymlink\s*\"\$\{workspace\}/devrc/([A-Za-z0-9._/-]+)\"", re.S)
 
 
 def _nix_files():
@@ -206,16 +237,18 @@ def _spelled_sources():
     store, live = set(), set()
     for f in _nix_files():
         rel_dir = f.parent.relative_to(REPO_ROOT)
-        for ln in f.read_text().splitlines():
-            ln = ln.split("#", 1)[0]
-            for m in _SRC_RE.finditer(ln):
+        # Comments are stripped per line, but MATCHING is whole-file — see the
+        # regexes above for why that difference is load-bearing.
+        body = "\n".join(ln.split("#", 1)[0] for ln in f.read_text().splitlines())
+        for rx in (_SRC_RE, _INTERP_RE):
+            for m in rx.finditer(body):
                 tok = m.group(1)
                 resolved = os.path.normpath(str(rel_dir / tok))
-                if resolved.startswith(".."):
+                if resolved.startswith("..") or resolved == ".":
                     continue
                 store.add(resolved)
-            for m in _OOS_RE.finditer(ln):
-                live.add(m.group(1))
+        for m in _OOS_RE.finditer(body):
+            live.add(m.group(1))
     return store, live
 
 
@@ -226,9 +259,15 @@ def test_the_reverse_extractor_can_actually_see_something():
     store, live = _spelled_sources()
     assert len(live) >= 5, "the mkOutOfStoreSymlink extractor found %r" % sorted(live)
     assert len(store) >= 20, "the `source =` extractor found %d entries" % len(store)
-    # ...and it must find the two the consumers were built around.
+    # ...and it must find the three spellings the consumers were built around,
+    # INCLUDING the `${../scripts/dl-router}` interpolation that a `source =`
+    # regex alone never sees — the exact spelling that motivated this change.
     assert "scripts/browser-bridge/browser" in live
     assert "claude/RULES.md" in store
+    assert "scripts/dl-router" in store, (
+        "the reverse extractor misses the ${../…} interpolation, so the pin "
+        "cannot see a regression in the one spelling this change exists for"
+    )
 
 
 def test_the_derived_set_is_pinned_two_way_against_nix():
@@ -583,17 +622,17 @@ def test_each_consumer_sources_the_lib_rather_than_re_deriving(consumer):
     )
 
 
-def test_the_scan_roots_exist():
+def test_the_scan_roots_are_declared_at_all():
     """The ONE literal in the library is its scan roots, and they are its INPUT.
-    A root that stops existing turns the whole derivation into a scanner wired to
-    nothing — which returns an empty set, which reads as clean."""
+
+    Presence of each root is asserted by test_the_scan_roots_all_exist_in_this
+    _repo, with `all` — this one only pins that the declarations exist and are
+    non-empty, which is what makes the regexes above meaningful.
+    """
     text = LIB.read_text()
     files = re.search(r'^NIXREAD_ROOT_FILES="([^"]*)"', text, re.M).group(1).split()
     dirs = re.search(r'^NIXREAD_ROOT_DIRS="([^"]*)"', text, re.M).group(1).split()
-    assert files and dirs
-    assert any((REPO_ROOT / f).is_file() for f in files), files
-    for d in dirs:
-        assert (REPO_ROOT / d).is_dir(), d
+    assert files and dirs, (files, dirs)
 
 
 # --------------------------------------------------------------------------- #
@@ -705,3 +744,82 @@ def test_the_reach_function_has_exactly_one_definition():
         if "nix_read_artifact_reach()" in p.read_text():
             definers.add(str(p.relative_to(REPO_ROOT)))
     assert definers == {"scripts/lib/nix_read_paths.sh"}, definers
+
+
+def test_LIVE_outranks_STORE_at_the_SAME_specificity():
+    """🔴 THE DOCUMENTED TIE-BREAK, pinned. The header promises "at one level LIVE
+    outranks STORE", but the two derived sets are DISJOINT on the real repo, so
+    swapping the two `case` arms is an EQUIVALENT mutant against every other test
+    in this file — it can never be observed from a real scan.
+
+    So the state is built by hand: one path in BOTH sets, which is the only way
+    the tie-break is reachable at all. Without this the claim is prose.
+    """
+    body = (
+        ". %s\n"
+        'NIXREAD_LIVE="alpha/bravo"\n'
+        'NIXREAD_STORE="alpha/bravo"\n'
+        "nix_read_class_of alpha/bravo\n" % _q(LIB)
+    )
+    out = subprocess.run(["bash", "-c", body], capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.strip() == "LIVE", (
+        "a path in BOTH sets resolved to %r — the documented tie-break says LIVE, "
+        "because 'already deployed, no switch needed' is the stronger claim"
+        % out.stdout.strip()
+    )
+
+
+def test_the_ancestor_walk_prefers_the_NEAREST_match_over_the_class():
+    """The other half of the ordering rule, and the one the real repo exercises:
+    specificity beats class, so a STORE directory containing a LIVE file gives
+    LIVE for the file and STORE for a sibling under the same directory."""
+    body = (
+        ". %s\n"
+        'NIXREAD_LIVE="alpha/bravo/charlie"\n'
+        'NIXREAD_STORE="alpha/bravo"\n'
+        "nix_read_class_of alpha/bravo/charlie\n"
+        "nix_read_class_of alpha/bravo/delta\n" % _q(LIB)
+    )
+    out = subprocess.run(["bash", "-c", body], capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.split() == ["LIVE", "STORE"], out.stdout
+
+
+def test_a_missing_root_directory_is_MISSINGROOT_not_a_small_scan(tmp_path):
+    """🔴 `> 0` IS NOT A FLOOR. A tree where flake.nix survives but `nix/` has
+    been renamed derived 3 paths from 1 file and reported OK — a usable-looking
+    verdict off a scan that missed the entire module tree, with no code firing.
+
+    The guard is derived from the DECLARATION (a declared root dir that is not
+    there), never a numeric minimum, so it cannot rot the way a hardcoded floor
+    would. Both consumers already handle a non-OK reason honestly.
+    """
+    r = _fixture(tmp_path)
+    (r / "nix").rename(r / "nix-renamed")
+    rc, facts, classes = scan(r, classify=["copied-alpha.txt"])
+    assert (rc, facts["REASON"]) == (1, "MISSINGROOT"), (
+        "a tree with no nix/ reported (%s, %s) over %s path(s) from %s file(s)"
+        % (rc, facts["REASON"], facts["COUNT"], facts["FILES"])
+    )
+    # ...and it is NOT a clean zero: paths WERE derived, which is exactly what
+    # made the old `> 0` guard pass.
+    assert int(facts["COUNT"]) > 0, facts
+
+
+def test_the_scan_roots_all_exist_in_this_repo():
+    """Every DECLARED root must be present here — asserted with `all`, not `any`.
+
+    With `any`, deleting flake.lock left this green while the derivation quietly
+    lost a root: the test that exists to prove the scanner's own input is intact
+    would have been satisfied by one surviving entry.
+    """
+    text = LIB.read_text()
+    files = re.search(r'^NIXREAD_ROOT_FILES="([^"]*)"', text, re.M).group(1).split()
+    dirs = re.search(r'^NIXREAD_ROOT_DIRS="([^"]*)"', text, re.M).group(1).split()
+    assert files and dirs
+    missing_f = [f for f in files if not (REPO_ROOT / f).is_file()]
+    missing_d = [d for d in dirs if not (REPO_ROOT / d).is_dir()]
+    assert missing_f == [] and missing_d == [], (
+        "declared scan roots absent from the repo: files=%r dirs=%r" % (missing_f, missing_d)
+    )
