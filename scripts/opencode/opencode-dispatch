@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """opencode-dispatch — hand a task to opencode without spending this session's
-context on it, and without the four measured ways a dispatch quietly does
-nothing.
+context on it, and without the five measured ways a dispatch quietly does
+nothing — or does the wrong thing confidently.
 
-    opencode-dispatch preflight --dir DIR [--brief FILE|-] [--json]
+    opencode-dispatch preflight --dir DIR [--brief FILE|-] [--json]   # rc 3 / rc 6
     opencode-dispatch run       --dir DIR [--brief FILE|-] [--title T]
                                 [-m flash|mimo|pro|<full/model/id>]
                                 [--auto] [-c] [--file F]...
 
 WHY A WRAPPER AND NOT JUST `opencode run`
 -----------------------------------------
-Four failure modes, all measured over 17 days of real dispatches, and THREE of
-them success-shaped — the dispatch exits 0 and nothing happened:
+Five failure modes, all measured, and FOUR of them success-shaped — the dispatch
+exits 0 and the result looks fine:
 
   1. 🔴 `external_directory: "ask"` -> headless AUTO-REJECT -> exit 0, no work.
      The brief named a path outside `--dir`. `opencode run` auto-rejects an
@@ -37,6 +37,21 @@ them success-shaped — the dispatch exits 0 and nothing happened:
      `Exit code 143`. So this tool NEVER runs opencode in the foreground and
      offers no flag to. It detaches into its own session, tees to a log file
      inside `--dir`, and returns immediately.
+
+  5. 🔴 A WRONG PREMISE, STATED AS FACT, PROPAGATING INTO THE BRIEF — and this
+     one is success-shaped in the worst way: the dispatch runs, produces work,
+     and the work is built on a belief nobody sourced.
+     A 14-day audit of 443 sessions found this in FOUR OF SIX slices — the
+     highest-cost error class found — and the adversarial audit ladder is
+     structurally blind to it (four rounds read past one instance). See
+     `lib/brief_claims.py` for the four measured cases.
+     NARROWED, NOT CLOSED, and the distinction is the point. `preflight` refuses
+     — rc 6 — an opencode brief that declares no citations, and `run` refuses
+     BEFORE installing the brief so nothing is written either. But an opencode
+     dispatch is ~1.2/day against ~137/day of Claude `Agent`-tool briefs, which
+     have NO committed chokepoint: **~0.9% of the surface, and all four measured
+     instances came from the 99% this does not reach.** Read the scope block at
+     the top of `lib/brief_claims.py` before citing this as handled.
 
 🔴 WHY THE PATH CHECK BLOCKS AND THE GLOB CHECK ONLY WARNS.
 The path check is EXACT — a path is under `--dir` or it is not — and the failure
@@ -68,6 +83,7 @@ for _p in (_HERE / "lib", _HERE.parent / "collector"):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
+import brief_claims  # noqa: E402
 import brief_scan  # noqa: E402
 import oc_permissions  # noqa: E402
 
@@ -77,7 +93,8 @@ TOOL = "opencode-dispatch"
 # tests/test_dispatch.py: against the literals at the `emit(` call sites,
 # against adoption-scan's REGISTRY row, and against a check that no call site
 # passes a COMPUTED outcome (which the call-site grep could not see).
-OUTCOMES = ("dispatched", "preflight-ok", "preflight-blocked", "error")
+OUTCOMES = ("dispatched", "preflight-ok", "preflight-blocked",
+            "preflight-uncited", "error")
 
 # --------------------------------------------------------------------------- #
 # Exit codes. Each failure gets its OWN code so a caller can branch, and rc 3 in
@@ -89,6 +106,21 @@ RC_USAGE = 2
 RC_PATH_ESCAPE = 3      # 🔴 failure 1: the brief names a path outside --dir
 RC_DIR = 4              # --dir missing / not a directory
 RC_LAUNCH = 5           # opencode could not be started
+RC_UNCITED = 6          # 🔴 failure 5: a load-bearing claim with no citation
+
+# 🔴 rc 6 IS ITS OWN CODE, not a second meaning for rc 3.
+#
+# rc 3 means "the brief points somewhere I cannot reach"; rc 6 means "the brief
+# asserts something and will not say where it came from". A caller that retries
+# rc 3 by widening --dir would do exactly the wrong thing with rc 6, and the two
+# are fixed by different edits. Same reasoning that gave RC_DIR and RC_LAUNCH
+# their own codes rather than folding them into a generic failure.
+#
+# 🔴 AND THE ORDER MATTERS. The path check runs FIRST and returns FIRST, so a
+# brief that trips both reports rc 3. That is deliberate — a path escape makes
+# the dispatch a silent no-op regardless of its citations — but it means any test
+# of the citation guard MUST use a brief with NO external path, or the guard
+# never executes and the test passes for the wrong reason.
 
 # --------------------------------------------------------------------------- #
 # Model aliases — ONLY the three that actually get retyped. No router, no
@@ -285,9 +317,34 @@ def preflight(text: str, directory: Path, attachments=()) -> dict:
                  + brief_scan.scan_attachments(attachments, directory))
     warnings = brief_scan.scan_commands(text, directory)
     unresolved = brief_scan.extract_unresolved_paths(text)
+
+    # 🔴 failure 5 — a load-bearing claim with no citation. Parse errors and
+    # schema errors are the SAME tier (both refuse) but are kept as one list so
+    # the report prints whichever actually happened rather than a generic
+    # "citations invalid". `claims` is None on a parse failure, and every
+    # downstream reader below is written to tolerate that rather than assume a
+    # list — an unparseable block must not read as an empty one.
+    claims, claim_errs = brief_claims.parse_claims(text)
+    if claims is not None:
+        claim_errs = brief_claims.validate(claims)
+    claim_warns = brief_claims.key_warnings(claims)
+
     return {
         "dir": str(directory),
         "blocked": bool(offenders),
+        "uncited": bool(claim_errs),
+        "citation_errors": claim_errs,
+        "citation_warnings": claim_warns,
+        # 🔴 Always present, both bases, even when the block is absent — a
+        # missing key and a zero are different facts and the JSON consumer must
+        # not have to guess which it got.
+        "claims_declared": len(claims) if isinstance(claims, list) else None,
+        "claims_by_basis": brief_claims.basis_counts(claims),
+        "inference_claims": [
+            {"claim": c.get("claim", ""), "source": c.get("source", ""),
+             "read_at": c.get("read_at", "")}
+            for c in brief_claims.inference_claims(claims)
+        ],
         "external_paths": [
             {"as_written": o.text, "resolved": o.resolved, "kind": o.kind}
             for o in offenders
@@ -370,6 +427,59 @@ def skill_reference_verdict(config: dict | None = None) -> str:
     return VERDICT_SKILL_REFS_BLOCKED.format(action=action, dir=SKILLS_DIR)
 
 
+# 🔴 THE CITATION VERDICT SENTENCES, AS WHOLE NORMALISED STRINGS — same
+# treatment, for the same reason, as VERDICT_CLEAN above. These are the tool's
+# central claim about what a brief's premises are backed by; the tests pin them
+# entire so a cosmetic reword cannot quietly widen what they appear to promise.
+VERDICT_CITED = ("  claim citations   : {n} claim(s) cited — "
+                 "{measurement} measurement, {inference} inference")
+
+
+def _print_citation_section(rep: dict) -> None:
+    """The citation half of the report.
+
+    🔴 It prints the INFERENCE claims individually rather than only counting
+    them. The measured failure was an inference reported as established fact and
+    propagated into a downstream brief — a count of "1 inference" folded into a
+    summary line reproduces exactly the erasure this check exists to prevent.
+    """
+    if rep["citation_errors"]:
+        print()
+        print("🔴 BLOCKED — the brief does not carry its sources.")
+        print("   Wrong premises propagated into subagent briefs in FOUR OF SIX")
+        print("   audit slices over 443 sessions; four adversarial audit rounds")
+        print("   read past one of them. A brief is where a bad premise gets")
+        print("   laundered into a fact, so this is checked here and refused.")
+        for e in rep["citation_errors"]:
+            print(f"     {e}")
+        return
+
+    declared = rep["claims_declared"]
+    if declared == 0:
+        print(brief_claims.NO_CLAIMS_DECLARED)
+    else:
+        print(VERDICT_CITED.format(n=declared, **rep["claims_by_basis"]))
+
+    # UNVERIFIED is its own category — never folded into the cited count, the
+    # same discipline the UNMEASURED-paths block above applies.
+    if rep["inference_claims"]:
+        print()
+        print(f"  ⚠ {len(rep['inference_claims'])} claim(s) are INFERENCES, not "
+              "measurements. The receiving")
+        print("    agent must RE-VERIFY these before acting on them, not treat "
+              "them as facts:")
+        for c in rep["inference_claims"]:
+            print(f"     [inference] {c['claim']}")
+            print(f"                 read {c['read_at']} from {c['source']}")
+
+    if rep["citation_warnings"]:
+        print()
+        print("  ⚠ citation warnings  : not blocking — the citation vocabulary "
+              "is allowed to grow")
+        for w in rep["citation_warnings"]:
+            print(f"     {w}")
+
+
 def print_report(rep: dict) -> None:
     # 🔴 Always print what was EXAMINED beside what was found. A bare "0
     # external paths" from a scan that walked nothing is the failure, not the
@@ -411,6 +521,8 @@ def print_report(rep: dict) -> None:
               "these yourself:")
         for tok in rep["unresolved_paths"]:
             print(f"     {tok}")
+
+    _print_citation_section(rep)
 
     if rep["command_warnings"]:
         rows = rep["command_warnings"]
@@ -465,14 +577,19 @@ def cmd_preflight(args) -> int:
             "command_warnings": len(rep["command_warnings"]),
             "paths_examined": rep["paths_examined"],
             "attachments_examined": rep["attachments_examined"],
-            "commands_examined": rep["commands_examined"]}
-    # 🔴 Two literal call sites, not one ternary. The outcome ledger in
+            "commands_examined": rep["commands_examined"],
+            "citation_errors": len(rep["citation_errors"]),
+            "inference_claims": len(rep["inference_claims"])}
+    # 🔴 Three literal call sites, not one ternary. The outcome ledger in
     # tests/test_dispatch.py is a GREP over these call sites — a computed
     # argument is invisible to it, and an outcome the ledger cannot see is one
     # adoption-scan silently buckets as "unknown".
     if rep["blocked"]:
         emit("preflight-blocked", dims, exit_code=RC_PATH_ESCAPE)
         return RC_PATH_ESCAPE
+    if rep["uncited"]:
+        emit("preflight-uncited", dims, exit_code=RC_UNCITED)
+        return RC_UNCITED
     emit("preflight-ok", dims, exit_code=RC_OK)
     return RC_OK
 
@@ -513,6 +630,22 @@ def cmd_run(args) -> int:
               "model_alias": args.model or "default"},
              exit_code=RC_PATH_ESCAPE)
         return RC_PATH_ESCAPE
+
+    # 🔴 REFUSED BEFORE `install_brief`, exactly like the path check above: an
+    # uncited brief must not be left sitting in the target directory where a
+    # later `-c` continuation could pick it up. "Not dispatched" has to mean
+    # nothing was written, not merely that opencode was not started.
+    if rep["uncited"]:
+        print()
+        print("NOT DISPATCHED.")
+        emit("preflight-uncited",
+             {"stage": "run", "citation_errors": len(rep["citation_errors"]),
+              "inference_claims": len(rep["inference_claims"]),
+              "external_paths": len(rep["external_paths"]),
+              "command_warnings": len(rep["command_warnings"]),
+              "model_alias": args.model or "default"},
+             exit_code=RC_UNCITED)
+        return RC_UNCITED
 
     brief_path, log_path = install_brief(
         directory, text, slugify(args.title or "", "brief"))

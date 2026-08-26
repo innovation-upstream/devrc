@@ -147,10 +147,14 @@ REGISTRY = [
         "id": "opencode-dispatch",
         "label": "opencode-dispatch — preflighted, detached opencode dispatch",
         "via": "tool", "tool": "opencode-dispatch", "opt_in": True,
-        "outcomes": ["dispatched", "preflight-ok", "preflight-blocked", "error"],
-        "impact_outcomes": ["preflight-blocked"],
-        "impact_label": ("silent no-op dispatches prevented (brief named a path "
-                         "outside --dir; `opencode run` auto-rejects and exits 0)"),
+        "outcomes": ["dispatched", "preflight-ok", "preflight-blocked",
+                     "preflight-uncited", "error"],
+        "impact_outcomes": ["preflight-blocked", "preflight-uncited"],
+        "impact_label": ("bad dispatches prevented — a brief naming a path "
+                         "outside --dir (`opencode run` auto-rejects and exits "
+                         "0), or a brief asserting a load-bearing claim with no "
+                         "citation (wrong premises propagated into subagent "
+                         "briefs in 4 of 6 audit slices over 443 sessions)"),
     },
     {
         "id": "browser-bridge",

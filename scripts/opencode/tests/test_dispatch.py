@@ -337,6 +337,20 @@ def test_tmp_is_deliberately_not_allowlisted(tmp_path):
     assert brief_scan.scan_paths("see /tmp/claude-1000/scratchpad/brief.md", d)
 
 
+# 🔴 THE CITATION DECLARATION every brief below carries.
+#
+# Since the citation guard landed (`brief_claims`), a brief with NO `claims`
+# fence is REFUSED with rc 6 — so every fixture here that expects to reach a
+# LATER verdict has to declare one, or it would never get there and the test
+# would pass or fail for a reason that has nothing to do with what it names.
+#
+# It declares `[]` — "this fixture asserts no load-bearing claim" — which is the
+# honest declaration for a synthetic path-scanner fixture and is exactly the
+# explicit-empty case `brief_claims` accepts. The citation tests that DO care
+# about claim content live in tests/test_brief_claims.py and build their own.
+NO_CLAIMS = "\n```claims\n[]\n```\n"
+
+
 def _run_cli(args, stdin_text):
     """Drive the real CLI end to end, as a subprocess, over stdin."""
     return subprocess.run(
@@ -359,7 +373,7 @@ def test_preflight_accepts_the_in_dir_control(tmp_path):
     d.mkdir()
     (d / "spec.md").write_text("x")
     p = _run_cli(["preflight", "--dir", str(d)],
-                 f"Implement what {d / 'spec.md'} says.")
+                 f"Implement what {d / 'spec.md'} says." + NO_CLAIMS)
     assert p.returncode == D.RC_OK, p.stdout + p.stderr
 
 
@@ -473,7 +487,8 @@ def test_an_empty_scan_says_NOT_EXAMINED_not_an_all_clear(tmp_path):
     find" are different claims."""
     d = tmp_path / "proj"
     d.mkdir()
-    p = _run_cli(["preflight", "--dir", str(d)], "Just tidy the code up.")
+    p = _run_cli(["preflight", "--dir", str(d)],
+                 "Just tidy the code up." + NO_CLAIMS)
     lines = _lines(p.stdout)
     assert LINE_NOT_EXAMINED in lines, p.stdout
     assert "  paths examined       : 0" in lines
@@ -488,7 +503,7 @@ def test_a_real_clean_scan_says_how_many_it_examined(tmp_path):
     d.mkdir()
     (d / "a.md").write_text("x")
     p = _run_cli(["preflight", "--dir", str(d), "--file", str(d / "a.md")],
-                 f"Edit {d / 'src.py'} please.")
+                 f"Edit {d / 'src.py'} please." + NO_CLAIMS)
     lines = _lines(p.stdout)
     assert LINE_CLEAN_2 in lines, p.stdout
     assert LINE_NOT_EXAMINED not in lines
@@ -515,7 +530,8 @@ def test_the_report_never_claims_containment_for_an_unchecked_attachment(tmp_pat
 def test_unresolved_paths_are_reported_separately_from_both_verdicts(tmp_path):
     d = tmp_path / "proj"
     d.mkdir()
-    p = _run_cli(["preflight", "--dir", str(d)], "run ${DEVRC}/scripts/tests now")
+    p = _run_cli(["preflight", "--dir", str(d)],
+                 "run ${DEVRC}/scripts/tests now" + NO_CLAIMS)
     lines = _lines(p.stdout)
     assert p.returncode == D.RC_OK
     # Not blocked, not counted as clean, and named.
@@ -689,7 +705,7 @@ def test_the_dispatch_is_detached_into_its_own_session(tmp_path, monkeypatch):
         return FakeProc()
 
     monkeypatch.setattr(D.subprocess, "Popen", fake_popen)
-    monkeypatch.setattr(D.sys, "stdin", _Stdin("do the thing"))
+    monkeypatch.setattr(D.sys, "stdin", _Stdin("do the thing" + NO_CLAIMS))
     rc = D.main(["run", "--dir", str(d), "--title", "T", "-m", "flash"])
     assert rc == D.RC_OK
     assert seen["kw"]["start_new_session"] is True, (
@@ -726,12 +742,12 @@ def test_the_brief_is_written_inside_dir_and_self_ignores(tmp_path, monkeypatch)
     d.mkdir()
     monkeypatch.setattr(D.subprocess, "Popen",
                         lambda *a, **k: type("P", (), {"pid": 1})())
-    monkeypatch.setattr(D.sys, "stdin", _Stdin("a clean brief"))
+    monkeypatch.setattr(D.sys, "stdin", _Stdin("a clean brief" + NO_CLAIMS))
     assert D.main(["run", "--dir", str(d)]) == D.RC_OK
     sub = d / D.BRIEF_SUBDIR
     briefs = list(sub.glob("*.md"))
     assert len(briefs) == 1
-    assert briefs[0].read_text() == "a clean brief"
+    assert briefs[0].read_text() == "a clean brief" + NO_CLAIMS
     # 🔴 Never the scratchpad, and never stageable in whatever repo it lands in.
     assert (sub / ".gitignore").read_text().rstrip().endswith("*")
 
@@ -834,7 +850,7 @@ def test_telemetry_never_changes_the_exit_code(monkeypatch, tmp_path):
                         type("M", (), {"emit_invocation": staticmethod(boom)}))
     d = tmp_path / "proj"
     d.mkdir()
-    monkeypatch.setattr(D.sys, "stdin", _Stdin("clean"))
+    monkeypatch.setattr(D.sys, "stdin", _Stdin("clean" + NO_CLAIMS))
     assert D.main(["preflight", "--dir", str(d)]) == D.RC_OK
 
 
@@ -846,7 +862,9 @@ SHIPPED_FILES = [
     "scripts/opencode/opencode-dispatch",
     "scripts/opencode/lib/oc_permissions.py",
     "scripts/opencode/lib/brief_scan.py",
+    "scripts/opencode/lib/brief_claims.py",
     "scripts/opencode/tests/test_dispatch.py",
+    "scripts/opencode/tests/test_brief_claims.py",
 ]
 
 # 🔴 THE TWO TIERS RUN THIS FILE IN DIFFERENT TREES, AND ONLY ONE HAS A `.git`.

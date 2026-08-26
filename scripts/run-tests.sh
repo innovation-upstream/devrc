@@ -1778,7 +1778,25 @@ TARGET_FLOORS=(
   #   run-tests: ERROR — scripts/opencode/tests collected 90 tests but its floor
   #   is only 14. Raise the TARGET_FLOORS entry to "scripts/opencode/tests|86"
   # (which is `_suggested_floor 90` = 90 - min(50, max(1, 90/20 = 4)) = 86.)
-  "scripts/opencode/tests|86"
+  #
+  # 2026-08-25, the brief-citation guard: 90 -> 151 collected. +61 for
+  # scripts/opencode/tests/test_brief_claims.py, a NEW FILE in an existing
+  # directory target — so HERMETIC_TARGETS needs no entry and this line is the
+  # only evidence the gate runs it at all. ZERO new skips, so EXPECTED_SKIPS is
+  # untouched.
+  #
+  # 🔴 THE GATE DID NOT FORCE THIS. 151 is over the old ceiling
+  # (86 + max(60, 86/4) = 146) by 5 — but the run that PASSED read 141, before
+  # the fence-grammar cases landed. Re-pinning is right either way, for the
+  # reason every line above gives: a floor of 86 under a 151-test target carries
+  # **65 tests of SLACK**, which is more than the entire pre-#583 suite.
+  #
+  # The number is the gate's own count put through the gate's own function, NOT
+  # arithmetic across a conflict:
+  #   _suggested_floor 151 = 151 - min(50, max(1, 151/20 = 7)) = 151 - 7 = 144.
+  # If this line conflicts with another branch, re-run the gate on the MERGED
+  # tree and copy what it prints rather than reconciling the two sides.
+  "scripts/opencode/tests|144"
 )
 
 # The allowance rule, in one place, used by BOTH the drift message and anyone

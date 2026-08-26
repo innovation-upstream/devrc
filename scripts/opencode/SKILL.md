@@ -11,11 +11,19 @@ context window. The point is *your* context budget: seven weeks of opencode cost
 
 ## The whole invocation
 
-```bash
+````bash
 opencode-dispatch run --dir <PROJECT-DIR> --title "<short title>" -m flash <<'BRIEF'
 <the complete task specification>
-BRIEF
+
+```claims
+[]
 ```
+BRIEF
+````
+
+🔴 **The `claims` block is REQUIRED — a brief without one is refused (rc 6).**
+See "Every brief carries its sources" below; `[]` is the honest declaration when
+the brief genuinely asserts no premise the agent would act on.
 
 That is it. Do **not** re-derive the CLI — `opencode --version`, `--help`,
 `run --help` and `models` were re-run from scratch in **nine** separate sessions
@@ -56,7 +64,76 @@ as well, so you can check them without dispatching.
 opencode-dispatch preflight --dir <PROJECT-DIR> --brief <FILE>   # or stdin
 ```
 
-`--json` for a machine-readable report. Exit **3** means the brief was refused.
+`--json` for a machine-readable report. Exit **3** (a path escape) or **6** (an
+uncited claim) means the brief was refused — see "When preflight refuses".
+
+## Every brief carries its sources
+
+🔴 **A brief with no `claims` block is REFUSED — rc 6, nothing written, nothing
+dispatched.** Declare each load-bearing claim: a fact the brief states that the
+agent will *act on*, and that would change the work if it were wrong.
+
+````markdown
+```claims
+[
+  {"claim":   "the preview DB is a clone, not production",
+   "source":  "https://pr-4260.example.com/api/health",
+   "read_at": "2026-08-21",
+   "basis":   "measurement"},
+  {"claim":   "the avatar refresh is driven by the localStorage roster",
+   "source":  "src/components/AccountSwitcher.tsx:42",
+   "read_at": "2026-08-21",
+   "basis":   "inference"}
+]
+```
+````
+
+All four fields are required on every entry. `basis` is a **closed enum** —
+`measurement` (you ran it, read it, saw the output) or `inference` (you concluded
+it). Nothing else; a misspelling is refused rather than read as a measurement.
+Extra fields are kept and warned about, never rejected.
+
+**`[]` is a valid, honest declaration** — "this brief asserts no load-bearing
+claim". It is an assertion on the record rather than a silence, and the report
+prints it as `NONE DECLARED`.
+
+### 🔴 What this covers — ~0.9% of the briefs this machine produces
+
+| surface | rate | covered? |
+|---|---|---|
+| opencode dispatch (this tool) | ~1.2/day | ✅ |
+| Claude `Agent`-tool subagent brief | ~137/day | ❌ no chokepoint exists |
+| clawgate `build_task_body()` | uncounted | ❌ |
+
+Basis: 6 briefs on disk across 3 project dirs over Aug 21–25 (a **floor** — the
+dirs are deleted with their projects) vs 1,921 `Agent` calls in the audit's
+14-day window. Different windows; treat it as an order of magnitude.
+
+🔴 **Every measured instance below came from the UNCOVERED surface** — the wrong
+root cause reached three *subagent* briefs; the three subagents correcting a
+stale brief were Agent-tool subagents. **Do not cite this guard as evidence that
+premise-propagation is handled.** It is a bridgehead on a real dispatch path, and
+the schema a wider guard would reuse.
+
+### Why it refuses instead of reminding
+
+A 14-day audit of 443 sessions found **wrong premises propagating into subagent
+briefs in four of six audit slices** — the highest-cost error class found, and
+one the adversarial audit ladder is structurally blind to. A session built an
+entire storage layer on a belief lifted from a stale comment and a stale README;
+**four audit rounds read past it**. A wrong root-cause diagnosis was pushed into
+**three** subagent briefs before being retracted. A homelab session *inferred* an
+auth constraint from a token prefix, reported it as fact, and it propagated into
+a downstream session's opening brief — "my inference presented as fact".
+
+A prose instruction is the mechanism that already failed there four times. So
+this is a schema, checked in code, that refuses.
+
+🔴 **What it cannot see, stated plainly:** it checks that *declared* claims carry
+sources. It cannot know your prose asserts a fifth premise you never declared —
+detecting a claim in free text needs a heuristic, a heuristic over-matches, and a
+permanently-red gate is worse than no gate. What the mandatory block buys is
+narrower and real: you cannot dispatch without having been asked the question.
 
 ## Reading the result
 
@@ -68,7 +145,7 @@ dependency is worth taking only once this skill is proven to get used. For now:
 tail -n 60 <the log path printed on dispatch>
 ```
 
-## Why this exists — four measured failure modes, three success-shaped
+## Why this exists — five measured failure modes, three success-shaped
 
 1. 🔴 **`external_directory: "ask"` → headless auto-reject → exit 0, no work.**
    The brief named a path outside `--dir`. `opencode run` **auto-rejects** an
@@ -86,12 +163,25 @@ tail -n 60 <the log path printed on dispatch>
 4. **20% of opencode sessions exceed the Bash tool's hard 600,000 ms ceiling**
    (p90 2508s, p95 9119s); one died at exactly 600s with `Exit code 143`. Hence
    detached-always.
+5. 🔴 **A wrong premise, stated as fact, propagating into the brief.** Found in
+   **four of six** slices of a 14-day audit over 443 sessions — the highest-cost
+   error class, and the one the adversarial audit ladder is blind to. Preflight
+   **refuses (rc 6)** a brief that declares no citations. See "Every brief
+   carries its sources".
 
 ## When preflight refuses
 
-It refused because a path — in the brief, or a `--file` attachment — does not
-resolve under `--dir`. The offender is printed as written *and* resolved, tagged
-`[brief]` or `[attachment]`. Fix the **brief or the `--dir`**, never the check —
+**Read the exit code — the two refusals are fixed by different edits.**
+
+| rc | meaning | fix |
+|---|---|---|
+| 3 | a path in the brief or a `--file` resolves outside `--dir` | move/widen/inline (below) |
+| 6 | a load-bearing claim carries no citation | add or complete the `claims` block |
+
+### rc 3 — a path escape
+
+The offender is printed as written *and* resolved, tagged `[brief]` or
+`[attachment]`. Fix the **brief or the `--dir`**, never the check —
 three options, in order of preference:
 
 1. move the file under `--dir`;
@@ -108,6 +198,15 @@ Read the three verdict lines literally — they are different claims:
   attachments` — **not** an all-clear. Nothing was there to check.
 - `UNMEASURED paths : N` — variable-built paths that cannot be decided
   statically. Neither blocked nor cleared; check them yourself.
+- `claim citations : N claim(s) cited — X measurement, Y inference` — the brief
+  declared them and every one is well-formed.
+- `claim citations : NONE DECLARED — …` — the brief **asserts** it carries no
+  load-bearing claim. That is a claim about the brief, not an all-clear about
+  its prose.
+
+The report then lists each **inference** individually with its source and date.
+🔴 Those are the ones to **re-verify before acting on**, not to treat as facts —
+an inference reported as established fact is the measured failure.
 
 A `⚠ WARN` line is different — it is advisory and the dispatch proceeds. It goes
 through a parser that deliberately over-matches, so blocking on it would build a
