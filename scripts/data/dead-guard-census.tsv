@@ -36,31 +36,31 @@ innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:66	except	return ""
 innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:78	if-body	raise SystemExit(f"registry: malformed row (want 4 tab-separated "	0	-
 innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:89	if-body	continue	0	-
 innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:92	if-body	out.append(p)	0	-
-innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:230	if-body	return ({"executed": {}, "clobbered": False}, (0, 0),	0	-
-innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:258	except	return None, (-1, 0), f"traced run timed out after 3600s: {e}"	0	-
-innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:266	if-body	return None, (proc.returncode, nfail), "\n".join(tails)	0	-
-innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:291	except	v = "?"	0	-
-innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:293	if-body	return f"Python {v or '?'}"	0	-
-innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:303	if-body	print(f"could not read origin for {repo} -- cannot key the registry",	0	-
-innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:308	if-body	print(f"{slug} is not in {REGISTRY.name}. Add rows for it -- including "	0	-
-innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:326	if-body	print(f"{slug}: {len(empty)} `instrument` selector(s) matched NO python "	0	-
-innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:338	if-body	print(f"{slug}: 0 instrumentable guards present in this clone; "	0	-
-innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:341	if-body	write_census(census_path, slug, [], oo, [],	0	-
-innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:358	if-body	print(f"{slug}: a test cleared or replaced sys.settrace during the run, "	0	-
-innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:399	except	undecidable.append(f"{rel}: cannot be analysed ({type(e).__name__}: {e})")	0	-
-innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:415	if-body	why = ("no registered test file drives it -- the registry lists "	0	-
-innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:431	if-body	_report(slug, targets, all_flags, unres, oo, undecidable, rc, interp)	0	-
-innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:433	if-body	write_census(census_path, slug, all_flags, oo, undecidable,	0	-
-innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:438	if-body	return EXIT_UNDECIDABLE	0	-
-innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:451	if-body	print(f"   🔴 RED RUN   : {nfail} test(s) FAILED. Branches downstream of "	0	-
-innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:507	if-body	for line in p.read_text(encoding="utf-8").splitlines():	0	-
-innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:509	if-body	continue	0	-
-innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:511	if-body	continue                       # header is re-emitted below	0	-
-innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:530	if-body	note += (f" -- 🔴 RED RUN, {nfail} test(s) FAILED: branches downstream of "	0	-
-innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:589	if-body	if event == "line":	0	-
-innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:590	if-body	executed.add(frame.f_lineno)	0	-
-innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:681	if-body	return self_test()	0	-
-innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:683	if-body	ap.error("give --repo <path>, or --self-test")	0	-
+innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:236	if-body	return ({"executed": {}, "clobbered": False}, (0, 0),	0	-
+innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:264	except	return None, (-1, 0), f"traced run timed out after 3600s: {e}"	0	-
+innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:272	if-body	return None, (proc.returncode, nfail), "\n".join(tails)	0	-
+innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:297	except	v = "?"	0	-
+innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:299	if-body	return f"Python {v or '?'}"	0	-
+innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:309	if-body	print(f"could not read origin for {repo} -- cannot key the registry",	0	-
+innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:314	if-body	print(f"{slug} is not in {REGISTRY.name}. Add rows for it -- including "	0	-
+innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:332	if-body	print(f"{slug}: {len(empty)} `instrument` selector(s) matched NO python "	0	-
+innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:344	if-body	print(f"{slug}: 0 instrumentable guards present in this clone; "	0	-
+innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:347	if-body	write_census(census_path, slug, [], oo, [],	0	-
+innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:364	if-body	print(f"{slug}: a test cleared or replaced sys.settrace during the run, "	0	-
+innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:406	except	undecidable.append(f"{rel}: cannot be analysed ({type(e).__name__}: {e})")	0	-
+innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:422	if-body	why = ("no registered test file drives it -- the registry lists "	0	-
+innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:438	if-body	_report(slug, targets, all_flags, unres, oo, undecidable, rc, interp)	0	-
+innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:440	if-body	write_census(census_path, slug, all_flags, oo, undecidable,	0	-
+innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:445	if-body	return EXIT_UNDECIDABLE	0	-
+innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:458	if-body	print(f"   🔴 RED RUN   : {nfail} test(s) FAILED. Branches downstream of "	0	-
+innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:514	if-body	for line in p.read_text(encoding="utf-8").splitlines():	0	-
+innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:516	if-body	continue	0	-
+innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:518	if-body	continue                       # header is re-emitted below	0	-
+innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:537	if-body	note += (f" -- 🔴 RED RUN, {nfail} test(s) FAILED: branches downstream of "	0	-
+innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:596	if-body	if event == "line":	0	-
+innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:597	if-body	executed.add(frame.f_lineno)	0	-
+innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:688	if-body	return self_test()	0	-
+innovation-upstream/devrc	flagged	scripts/dead-guard-scan.py:690	if-body	ap.error("give --repo <path>, or --self-test")	0	-
 innovation-upstream/devrc	flagged	scripts/testlib/captured_text_scan.py:143	if-body	sys.path.insert(0, str(_HERE.parent))	0	-
 innovation-upstream/devrc	flagged	scripts/testlib/captured_text_scan.py:451	if-body	esc = False	0	-
 innovation-upstream/devrc	flagged	scripts/testlib/captured_text_scan.py:453	if-body	esc = True	0	-

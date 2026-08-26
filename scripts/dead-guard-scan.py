@@ -168,17 +168,23 @@ def unregistered_test_dirs(repo, rows, slug):
             # `scripts/collector/tests` would silently accept a later
             # `scripts/collector/`, which is a different directory needing its
             # own decision.
-            # 🔴 ...AND ONLY FOR `instrument` ROWS. The out-of-instrument
-            # column is PROSE, and prose is full of dotted words: the bash row
-            # naming `scripts/drift-check.sh` registered the bare directory
-            # `scripts` in three repos, so a future `scripts/test_x.py` would
-            # have been silently accepted -- the exact "everything is
-            # registered" this function exists to prevent, re-admitted through
-            # the sentence rather than the path.
-            if r["status"] != "instrument":
-                continue
+            # An `instrument`-only restriction used to sit here too, to stop
+            # PROSE ("scripts/drift-check.sh") registering `scripts`. The
+            # test-file rule below subsumes it -- prose rarely names a
+            # `test_*.py`, and when it does, naming that directory is correct.
+            # Deleted rather than kept: a mutation sweep showed it changed
+            # nothing, which is this tool's own subject.
+            # 🔴 ...AND ONLY FOR A SELECTOR NAMING A **TEST FILE**. This ledger's
+            # unit is TEST DIRECTORIES, so only a `test_*.py` selector says
+            # anything about one. Registering the parent of any file selector
+            # re-opened the hole from the other side: `scripts/dead-guard-scan.py`
+            # is a library module, and registering its parent put the bare
+            # top-level `scripts` on the list -- so a future `scripts/test_x.py`
+            # was silently accepted, exactly the forward guarantee the registry
+            # header promises. Measured: planting `scripts/test_planted_guard.py`
+            # went from CAUGHT to silently accepted when that row was added.
             last = tok.rsplit("/", 1)[-1]
-            if "/" in tok and ("." in last or "*" in last or "?" in last):
+            if "/" in tok and last.startswith("test_"):
                 named.add(tok.rsplit("/", 1)[0])
     # EXACT membership only. An earlier attempt also accepted a directory when
     # some registered path sat BELOW it, which re-admitted the permissive
@@ -374,7 +380,8 @@ def scan(repo, census_path=None, verbose=True, python=None, registry=None):
             src = t.read_text(encoding="utf-8")
             dg.branch_bodies(src, rel)
         except (SyntaxError, ValueError, OSError) as e:
-            # TWO names, not five. An audit found that only SyntaxError and
+            # THREE names, not five (it was two before OSError was added
+            # for the mode-000 case). An audit found that only SyntaxError and
             # IndentationError were caught, so a file this tool could not
             # analyse escaped as a traceback and exit 1 -- indistinguishable
             # from "found dead branches" -- and no census was written at all.

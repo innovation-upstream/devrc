@@ -744,6 +744,113 @@ def test_tokenize_TokenError_is_deliberately_NOT_in_the_catch_list():
         "the catch was re-added without a reachable input to justify it"
 
 
+def _clobber_repo(tmp_path, clobber_body):
+    """A two-test synthetic repo whose LAST test disarms the tracer somehow."""
+    guard = ('import sys\n'
+             'import pytest\n'
+             '\n'
+             'def scan(ls):\n'
+             '    hits = []\n'
+             '    for l in ls:\n'
+             '        if "REAL" in l:\n'
+             '            hits.append("real")\n'
+             '    return hits\n'
+             '\n'
+             '\n'
+             'def test_aaa_first():\n'
+             '    assert scan(["a REAL line"]) == ["real"]\n'
+             '\n'
+             '\n' + clobber_body)
+    return _synthetic_repo(tmp_path, guard)
+
+
+def test_a_clobber_in_a_FIXTURE_FINALIZER_of_the_last_test_is_caught(tmp_path):
+    """🔴 PINS `pytest_sessionfinish` ON ITS OWN.
+
+    A `-p`-loaded hookimpl runs BEFORE pytest's teardown machinery, so a
+    fixture finalizer runs AFTER `pytest_runtest_teardown` has looked. For
+    every test but the last, the next `setup` still catches it; for the last
+    test nothing did — and the round that introduced the teardown hook claimed
+    "blind spot unchanged" when it had changed. Without this case, deleting
+    `pytest_sessionfinish` leaves the whole suite green.
+    """
+    reg = _clobber_repo(tmp_path,
+                        '@pytest.fixture\n'
+                        'def clobberer():\n'
+                        '    yield\n'
+                        '    sys.settrace(None)\n'
+                        '\n'
+                        '\n'
+                        'def test_zzz_last(clobberer):\n'
+                        '    assert scan(["a REAL line"]) == ["real"]\n')
+    rc, out = _cli(tmp_path, reg)
+    assert rc == 2, (rc, out)
+    assert "sys.settrace" in out, out
+
+
+def test_a_clobber_in_a_NON_LAST_test_is_caught_at_the_next_setup(tmp_path):
+    """🔴 PINS the `pytest_runtest_setup` check ON ITS OWN. All three
+    detection sites used to be exercised only by one in-body last-test case,
+    which every site catches — so each was individually deletable with the
+    suite still green. That is the redundant-guard trap this repo's rules name:
+    "each died for its own reason" is a much stronger claim than "each died".
+    """
+    guard = ('import sys\n'
+             '\n'
+             'def scan(ls):\n'
+             '    hits = []\n'
+             '    for l in ls:\n'
+             '        if "REAL" in l:\n'
+             '            hits.append("real")\n'
+             '    return hits\n'
+             '\n'
+             '\n'
+             'def test_aaa_clobbers_early():\n'
+             '    sys.settrace(None)\n'
+             '    assert scan(["a REAL line"]) == ["real"]\n'
+             '\n'
+             '\n'
+             'def test_zzz_runs_after():\n'
+             '    assert scan(["a REAL line"]) == ["real"]\n')
+    reg = _synthetic_repo(tmp_path, guard)
+    rc, out = _cli(tmp_path, reg)
+    assert rc == 2, (rc, out)
+    assert "sys.settrace" in out, out
+
+
+def test_an_ordinary_atexit_cleanup_is_NOT_reported_as_a_clobber(tmp_path):
+    """🔴 THE FALSE POSITIVE THAT WOULD MAKE A REPO PERMANENTLY UNSCANNABLE.
+
+    `atexit` is LIFO, so a target module's own
+    `atexit.register(lambda: sys.settrace(None))` — an ordinary library
+    cleanup — runs BEFORE the plugin's dump. Checking there reported
+    UNDECIDABLE, blaming "a test cleared sys.settrace", on a run whose trace
+    was complete and correct.
+    """
+    guard = ('import atexit, sys\n'
+             '\n'
+             'atexit.register(lambda: sys.settrace(None))\n'
+             '\n'
+             '\n'
+             'def scan(ls):\n'
+             '    hits = []\n'
+             '    for l in ls:\n'
+             '        if "REAL" in l:\n'
+             '            hits.append("real")\n'
+             '        if "NEVER_WRITTEN" in l:\n'
+             '            hits.append("dead")\n'
+             '    return hits\n'
+             '\n'
+             '\n'
+             'def test_it():\n'
+             '    assert scan(["a REAL line"]) == ["real"]\n')
+    reg = _synthetic_repo(tmp_path, guard)
+    rc, out = _cli(tmp_path, reg)
+    assert rc == 1, (rc, out)          # flags, NOT undecidable
+    assert "sys.settrace" not in out, out
+    assert 'hits.append("dead")' in out, out
+
+
 def test_an_unparseable_guard_is_undecidable_not_a_findings_exit(tmp_path):
     """The parse arm, driven: a syntactically broken guard exits 2."""
     reg = _synthetic_repo(tmp_path, _E2E_GUARD)
@@ -1020,6 +1127,28 @@ def test_ledger_membership_is_path_segments_not_substrings(tmp_path):
     assert "scripts" in missing, (
         "a dotted word inside a PROSE row registered the bare `scripts` "
         f"directory; got {missing}")
+
+    # 🔴 AND THE SAME HOLE FROM THE OTHER SIDE. Registering the parent of ANY
+    # file selector let an `instrument` row for a LIBRARY module
+    # (`scripts/dead-guard-scan.py`) put the bare top-level `scripts` on the
+    # list — so a future `scripts/test_x.py` was silently accepted. This ledger
+    # is about TEST DIRECTORIES, so only a `test_*.py` selector says anything
+    # about one.
+    lib_rows = [{"slug": "probe/p", "lang": "python", "status": "instrument",
+                 "selector": "scripts/some-tool.py"},
+                {"slug": "probe/p", "lang": "python", "status": "instrument",
+                 "selector": "scripts/collector/tests/test_a.py"},
+                {"slug": "probe/p", "lang": "bash", "status": "out-of-instrument",
+                 "selector": "scripts/mailer -- a reason long enough to satisfy "
+                             "the registry's own contract about saying why"}]
+    (tmp_path / "scripts" / "some-tool.py").write_text("x = 1\n", encoding="utf-8")
+    missing = dgs.unregistered_test_dirs(tmp_path, lib_rows, "probe/p")
+    assert "scripts" in missing, (
+        "an `instrument` row for a LIBRARY module registered its top-level "
+        f"parent directory, voiding the ledger's forward guarantee; got {missing}")
+    assert "scripts/collector/tests" not in missing, (
+        "a test-file selector must still register its own directory; "
+        f"got {missing}")
 
 
 def test_registry_is_keyed_on_the_remote_slug_not_the_clone_directory():

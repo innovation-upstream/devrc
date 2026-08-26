@@ -10,34 +10,16 @@ repo, so this uses stdlib `sys.settrace`. `threading.settrace` is set too --
 without it a guard that scans in a worker thread reads as entirely dead, which
 is the exact false positive that would discredit the tool on first contact.
 
-🔴 THE TRACER IS RE-ARMED BEFORE EVERY TEST, AND ITS REMOVAL IS DETECTED.
+🔴 THE TRACER IS ARMED ONCE AND ITS REMOVAL IS DETECTED AT SESSION END.
 `sys.settrace` is a single global slot: ANY test that installs its own tracer
 and then clears it -- `sys.settrace(None)` in a `finally`, a debugger, a
-profiler -- disarms this one for the whole REST of the session. Every guard
-file collected after that point then reports its live branches as DEAD, on a
-GREEN run, with nothing indicating it. That is the tool's worst failure mode
-(condemning working code) arriving in its most believable disguise.
+profiler -- disarms this one for the rest of the session. Every guard file
+collected after that point then reports its live branches as DEAD, on a GREEN
+run, with nothing indicating it. That is the tool's worst failure mode
+(condemning working code) in its most believable disguise, so a run in which it
+happened is REFUSED rather than published. See `pytest_sessionfinish` for why
+that is one check and not four.
 
-Arming once in `pytest_configure` was exactly that bug: this repo's own
-`scripts/tests/test_dead_guard_scan.py` clears the tracer, and the census
-escaped corruption only because that file happened to sort LAST -- an unpinned
-invariant that one registry row would have broken. So:
-  * re-arm in `pytest_runtest_setup`, before each test's call phase;
-  * ALSO record whether the slot was found empty or foreign at that moment,
-    at each teardown, and at session end, and surface it as `clobbered` so the
-    caller can refuse
-    to publish rather than publish a false census. Re-arming alone is not
-    enough -- a tracer cleared part-way THROUGH a test still loses that test's
-    lines.
-
-🔴 STATED BLIND SPOT: a test that SAVES AND RESTORES the tracer around its own
-is invisible to this. The slot holds our tracer at every boundary we can
-inspect, yet target lines executed inside that window were never recorded. That
-is not hypothetical -- save-and-restore is the well-behaved pattern, and it is
-what this repo's own suite does. The consequence is under-recording, i.e. a
-FALSE POSITIVE against live code, and nothing here detects it. If a guard's
-tests install a tracer, scan them separately or expect flags you must
-adjudicate by hand.
 
 🔴 THE TRACE IS WRITTEN FROM `atexit`, NOT FROM A pytest HOOK. A session that
 dies on a collection error never reaches `pytest_sessionfinish`, and an absent
@@ -60,7 +42,7 @@ _TARGETS = {str(pathlib.Path(p).resolve())
             for p in os.environ.get("DGS_TARGETS", "").split(os.pathsep) if p}
 _OUT = os.environ.get("DGS_OUT", "")
 _executed: dict[str, set[int]] = {}
-_state = {"clobbered": False, "tests": 0}
+_state = {"clobbered": False}
 
 
 def _tracer(frame, event, arg):
@@ -85,52 +67,37 @@ def pytest_configure(config):
         _arm()
 
 
-def pytest_runtest_setup(item):
-    """Re-arm per test, and remember if someone had taken the slot."""
-    if not (_TARGETS and _OUT):
-        return
-    _state["tests"] += 1
-    if sys.gettrace() is not _tracer:
-        # Someone cleared or replaced our tracer during a previous test. Any
-        # target executed in the interim was not recorded, so the whole trace
-        # is now a LOWER BOUND and must not be published as a measurement.
-        _state["clobbered"] = True
-    _arm()
-
-
-def pytest_runtest_teardown(item):
-    """🔴 CHECK AFTER EACH TEST TOO, NOT AT INTERPRETER EXIT.
-
-    Detection at `pytest_runtest_setup` alone can never see a clobber in the
-    LAST test -- there is no next setup -- which is exactly the "it only
-    survived because that file sorted last" shape this detector exists for.
-
-    🔴 BUT THE CHECK MUST NOT LIVE IN `atexit`. `atexit` is LIFO, so any
-    cleanup the TARGET REPO registered after this module was imported runs
-    BEFORE the dump -- and an ordinary `atexit.register(lambda:
-    sys.settrace(None))` in a library then trips the detector on a run whose
-    trace was complete and correct. Measured: identical executed-line set to a
-    clean baseline, yet `clobbered=true`, so the scan returned UNDECIDABLE and
-    blamed "a test cleared sys.settrace" for something no test did. A
-    permanently-red gate with a false cause. Teardown fires inside the run,
-    before any of that.
-    """
-    if _TARGETS and _OUT and sys.gettrace() is not _tracer:
-        _state["clobbered"] = True
-
-
 def pytest_sessionfinish(session, exitstatus):
-    """🔴 AND ONCE MORE AT SESSION END, because teardown is not last either.
+    """🔴 ONE DETECTION SITE, BECAUSE THE OTHER THREE WERE REDUNDANT.
 
-    A `-p`-loaded hookimpl runs BEFORE pytest's own teardown machinery, so a
-    FIXTURE FINALIZER that clears the tracer runs after `pytest_runtest_teardown`
-    has already looked. For every test but the last, the next `setup` still
-    catches it; for the last test nothing did. Measured: a last-test fixture
-    finalizer clearing the slot went from `clobbered=true` (round 2, via the
-    atexit check) to `false` (round 3, teardown only) -- the round-3 commit
-    claimed "blind spot unchanged", and it had changed. This closes it without
-    reintroducing the atexit false positive, because `sessionfinish` still runs
-    inside the run, before any target module's `atexit` cleanup.
+    An earlier revision armed the tracer again before EVERY test and checked
+    the slot at `pytest_runtest_setup`, at `pytest_runtest_teardown` AND at
+    interpreter exit. A mutation sweep showed each of those individually
+    deletable with the whole suite still green -- they were catching the same
+    cases as one another, which is the redundant-guard trap: "each died" is a
+    much weaker claim than "each died for its own reason".
+
+    The reasoning that collapses them: a clobber this instrument can DETECT is
+    one that is never put back, and such a clobber persists to session end. So
+    checking once here catches every detectable case -- a clobber in a test
+    body, in a fixture finalizer, in the last test (where teardown-only
+    checking was blind), and one left by a plugin. Per-test re-arming bought
+    nothing, because a clobbered run is REFUSED, never repaired: this reports,
+    it does not recover.
+
+    🔴 NOT AT `atexit`. `atexit` is LIFO, so a target module's own
+    `atexit.register(lambda: sys.settrace(None))` -- ordinary library cleanup
+    -- runs BEFORE the dump and tripped the detector on a run whose trace was
+    complete and correct, returning UNDECIDABLE with a false cause. Session end
+    is inside the run, before any of that.
+
+    🔴 STATED BLIND SPOT: a test that SAVES AND RESTORES the tracer around its
+    own is invisible here and to any slot inspection -- the slot holds our
+    tracer at every boundary, while target lines executed inside that window
+    went unrecorded. That is the well-behaved pattern, and it is what this
+    repo's own suite does. The consequence is under-recording, i.e. a FALSE
+    POSITIVE against live code. If a guard's tests install a tracer, scan them
+    separately or adjudicate their flags by hand.
     """
     if _TARGETS and _OUT and sys.gettrace() is not _tracer:
         _state["clobbered"] = True
@@ -144,6 +111,5 @@ def _dump():
     threading.settrace(None)
     pathlib.Path(_OUT).write_text(
         json.dumps({"executed": {k: sorted(v) for k, v in _executed.items()},
-                    "clobbered": _state["clobbered"],
-                    "tests": _state["tests"]}),
+                    "clobbered": _state["clobbered"]}),
         encoding="utf-8")

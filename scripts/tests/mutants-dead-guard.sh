@@ -67,9 +67,11 @@ git -C "$SRC" ls-files \
 LIB="$ROOT/scripts/lib/dead_guard.py"
 CLI="$ROOT/scripts/dead-guard-scan.py"
 REG="$ROOT/scripts/data/dead-guard-registry.tsv"
+PLUG="$ROOT/scripts/testlib/dead_guard_plugin.py"
 SUITE="$ROOT/scripts/tests/test_dead_guard_scan.py"
 cp "$LIB" "$T/lib.orig"; cp "$CLI" "$T/cli.orig"; cp "$REG" "$T/reg.orig"
-restore() { cp "$T/lib.orig" "$LIB"; cp "$T/cli.orig" "$CLI"; cp "$T/reg.orig" "$REG"; }
+cp "$PLUG" "$T/plug.orig"
+restore() { cp "$T/lib.orig" "$LIB"; cp "$T/cli.orig" "$CLI"; cp "$T/reg.orig" "$REG"; cp "$T/plug.orig" "$PLUG"; }
 
 FAILURES=0
 
@@ -200,8 +202,8 @@ run 'empty-instrument-selector-scored-clean' "$CLI" \
 # 🔴 SECOND attempt: mutating `UnicodeDecodeError` out ALSO survived, because
 # it is a ValueError SUBCLASS and ValueError was still listed. Three of the
 # five names in the original catch list were redundant spellings that read as
-# coverage while adding nothing. The list is now two names, and each of these
-# mutants removes real behaviour.
+# coverage while adding nothing. The list is now three (OSError joined for the
+# mode-000 case), and each of these mutants removes real behaviour.
 run 'valueerror-not-caught-so-latin1-escapes' "$CLI" \
   test_a_guard_that_cannot_be_DECODED_is_undecidable_not_a_findings_exit \
   's|^        except (SyntaxError, ValueError, OSError) as e:$|        except (SyntaxError, OSError) as e:|'
@@ -281,9 +283,6 @@ run 'except-header-pragma-stops-resolving' "$LIB" \
 run 'body-read-widened-to-the-whole-span' "$LIB" \
   test_a_NESTED_branchs_pragma_does_not_resolve_its_PARENT \
   's|^            reason = just.get(b.first_line)|            reason = next((just[l] for l in b.lines() if just.get(l)), None)|'
-run 'prose-rows-register-their-parent-dir' "$CLI" \
-  test_ledger_membership_is_path_segments_not_substrings \
-  's|^            if r\["status"\] != "instrument":|            if False:|'
 run 'census-blocks-no-longer-sorted' "$CLI" \
   test_the_census_is_ORDER_STABLE_across_repos \
   's|^    for key in sorted(blocks):|    for key in blocks:|'
@@ -300,6 +299,22 @@ run 'no-test-file-blamed-on-subprocesses' "$CLI" \
 run 'bare-pytest-runs-the-target-repos-whole-suite' "$CLI" \
   test_a_registry_with_NO_test_file_says_so_instead_of_blaming_subprocesses \
   's|^        return ({"executed": {}, "clobbered": False}, (0, 0),|        groups = {None: []}\n    if False:\n        return ({"executed": {}, "clobbered": False}, (0, 0),|'
+
+printf '\n== the tracer plugin — THREE detection sites, each pinned ALONE ==\n'
+# 🔴 The plugin was not a mutation target at all until now, and all three
+# clobber checks were exercised by ONE in-body last-test case that every site
+# catches -- so each was individually deletable with the suite still green.
+# The redundant-guard trap: "each died for its own reason" is a much stronger
+# claim than "each died".
+run 'drop-sessionfinish-hook' "$PLUG" \
+  test_a_clobber_in_a_FIXTURE_FINALIZER_of_the_last_test_is_caught \
+  's|^def pytest_sessionfinish(session, exitstatus):|def _disabled_sessionfinish(session, exitstatus):|'
+run 'library-file-selector-registers-its-parent-dir' "$CLI" \
+  test_ledger_membership_is_path_segments_not_substrings \
+  's|^            if "/" in tok and last.startswith("test_"):|            if "/" in tok and ("." in last or "*" in last):|'
+run 'clobber-check-back-in-atexit' "$PLUG" \
+  test_an_ordinary_atexit_cleanup_is_NOT_reported_as_a_clobber \
+  's|^    if not _OUT:|    if _TARGETS and sys.gettrace() is not _tracer:\n        _state["clobbered"] = True\n    if not _OUT:|'
 
 printf '\n== POSITIVE CONTROL — a mutant that MUST survive ==\n'
 run 'comment-only-edit-must-survive' "$LIB" \
