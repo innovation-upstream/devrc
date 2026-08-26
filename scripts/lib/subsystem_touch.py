@@ -69,11 +69,21 @@ working pattern, so the source that cannot see it is the one that has to change.
     the 40 most recent transcripts), files written by a Bash command rather than
     a file tool, and paths outside the session cwd (counted, never dropped).
     🔴 THIS ENVIRONMENT'S TWO STANDING DEFAULTS — delegate to a subagent, isolate
-    that subagent in a worktree — hit two of those three AT ONCE, so the
-    preferred window is blind to the MANDATED workflow rather than to an
-    occasional one. When the outside count dominates, the report says so with the
-    run's own numbers and names the flags to run instead; see
-    `wrong_window_dominance` for the rule, the measurement and its cost.
+    that subagent in a worktree — used to hit two of those three AT ONCE. THE
+    WORKTREE HALF IS NOW COVERED: the window is read against the session cwd AND
+    against every worktree `git worktree list` records for the repo (see
+    `worktree_roots`), because a worktree shares this repo's tracked layout by
+    construction and its paths ARE repo-relative paths. The SUBAGENT half is
+    unchanged and is still the dominant one.
+    ⚠ THE RECOVERY IS REAL AND SMALL — do not read the widening as making this
+    window whole. Measured over the 100 most recent transcripts on the dev host:
+    1,434 paths outside the session cwd, of which 1,245 (87%) were /tmp or
+    scratchpad files (correctly not repo paths), 131 under an already-pruned
+    worktree, 86 under ~/.claude, 14 under other non-repo directories, and 18
+    recoverable here. When the REMAINING outside count dominates, the report says
+    so with the run's own numbers and names the flags to run instead; see
+    `wrong_window_dominance` for the rule, the netting, the measurement and its
+    cost.
   * PULL REQUESTS (`--pr <n>[,<n>...]`) — the only source that sees a SUBAGENT's
     work. The standing default in this environment is to DELEGATE non-trivial
     work to a subagent, and a subagent's turns are a separate transcript the
@@ -1040,6 +1050,31 @@ class PathSource:
     rather than counted.
     """
 
+    worktree_recovered: int | None = None
+    """How many of `outside_cwd` were RECOVERED from a worktree of this repo and
+    ARE in `paths`, for `window == "session"`.
+
+    🔴 A THIRD NUMBER, NOT A CORRECTION TO THE OTHER TWO. `under_cwd` and
+    `outside_cwd` are the extractor's counts in the SESSION CWD frame and keep
+    meaning exactly that; this one is measured in a different frame (the repo's
+    worktree namespace) and the two do not net exactly — see
+    `changed_paths.absolute_under_any` on why the dedup makes it a floor on the
+    outside-cwd entries explained, never a figure to subtract term by term.
+
+    `None` for every source and window that cannot produce it; `0` is a
+    MEASUREMENT ("the worktree roots were checked and recovered nothing") and
+    must not be spelled the same way as the absence.
+    """
+
+    session_worktree: str | None = None
+    """The worktree the session RAN IN, when it was not the base clone.
+
+    Set only when the session cwd is one of the repo's recorded worktree roots.
+    In the notes rather than the caveat because it does not narrow the claim —
+    it is the reason a window that would otherwise have degraded to
+    `session-absolute` is the full one.
+    """
+
     prs: tuple[int, ...] = ()
     """The pull requests read, when `kind == "pr"`. Part of the caveat."""
 
@@ -1136,15 +1171,24 @@ class PathSource:
                 f"SESSION but read the count as a lower bound"
             )
         if self.kind == "session":
+            # 🔴 (c) IS NARROWED, NOT DROPPED. The window now also covers paths
+            # this session named absolutely under a WORKTREE of this repo, so the
+            # old blanket "paths outside the session cwd" would overstate the
+            # blind spot — and an overstated caveat is read as boilerplate and
+            # then ignored on the run where it is exact. What it does NOT cover
+            # is named, because that is the part a reader has to act on.
             return (
                 f"session transcript {self.session}: the files THIS SESSION's own turns "
-                f"edited (Edit/Write/NotebookEdit/MultiEdit), relative to the session cwd "
-                f"— independent of git, so work already merged or committed still counts. "
-                f"NOT represented: (a) anything a SUBAGENT edited — its turns are excluded "
+                f"edited (Edit/Write/NotebookEdit/MultiEdit), read against the session cwd "
+                f"AND against every WORKTREE git records for this repo — independent of "
+                f"git history, so work already merged or committed still counts. NOT "
+                f"represented: (a) anything a SUBAGENT edited — its turns are excluded "
                 f"as a separate session, and 196 of 733 file-tool calls across the 40 most "
                 f"recent transcripts were a subagent's (measured 2026-08-12); (b) files "
-                f"written by a Bash command rather than a file tool; (c) paths outside the "
-                f"session cwd, counted in the note above"
+                f"written by a Bash command rather than a file tool; (c) the remaining "
+                f"paths outside the session cwd, counted in the note above — a scratchpad "
+                f"or /tmp file, an edit in another repo, or a worktree already "
+                f"`git worktree remove`d, whose record git no longer holds"
             )
         if self.window == "branch":
             return (
@@ -1536,6 +1580,70 @@ def _same_dir(a: str, b: str) -> bool:
     return os.path.realpath(na) == os.path.realpath(nb)
 
 
+def worktree_roots(repo: str | Path) -> tuple[str, ...]:
+    """Every working directory that shares this repo's git COMMON dir, absolute.
+
+    🔴 STRUCTURAL, NEVER LEXICAL. The tempting version of this function looks at
+    sibling directories whose name starts with the repo's own basename
+    (`devrc-*`) — and it is wrong in both directions at once: it invents an
+    association for a genuinely separate project that happens to share a prefix,
+    and it misses every worktree parked outside the repo's parent directory,
+    which on this host is the MANDATED shape (`/tmp/wt-<topic>`). `git worktree
+    list` is git's own answer to the same question and needs no naming
+    convention, so it is the one used.
+
+    🔴 PRUNABLE ENTRIES ARE INCLUDED DELIBERATELY, AND THEY ARE MOST OF THE
+    VALUE. A worktree whose DIRECTORY has been deleted but which has not been
+    `git worktree prune`d is still listed, with its original path and a
+    `prunable` line (verified against git on this host). That is exactly the
+    throwaway-worktree case this window exists for: the agent worked in
+    `/tmp/wt-topic`, the directory went away, and the transcript still names
+    paths under it. Filtering on `prunable` would discard the recoverable half of
+    the population to no benefit — nothing here touches the filesystem, and a
+    path that resolves under a recorded root is attributable whether or not the
+    directory still exists.
+
+    ⚠ WHAT IT STILL CANNOT SEE, stated rather than left to be discovered: a
+    worktree removed with `git worktree remove` (which prunes the metadata) is
+    GONE from git's records, so paths under it stay unattributable. Measured on
+    the 100 most recent transcripts on this host: 131 of 1,434 outside-cwd paths
+    were under a directory of exactly that shape. There is no structural signal
+    left for them, and a lexical guess is the fix this function's first paragraph
+    refuses.
+
+    The repo's OWN toplevel is included — callers subtract it when they want only
+    the siblings — because "the roots of this repo's namespace" is the honest set
+    and a caller that needs the narrower one can say so.
+    """
+    out = _git(Path(repo), ["worktree", "list", "--porcelain"])
+    roots: list[str] = []
+    for line in out.splitlines():
+        if line.startswith("worktree "):
+            root = line[len("worktree "):].strip()
+            if root:
+                roots.append(os.path.normpath(root))
+    return tuple(dict.fromkeys(roots))
+
+
+def _sibling_worktree_roots(repo: str | Path, toplevel: str) -> tuple[str, ...]:
+    """`worktree_roots` minus the repo's own toplevel. Never raises.
+
+    🔴 A FAILURE HERE DEGRADES, IT DOES NOT REFUSE. Every other guard in this
+    module is fatal because a wrong answer would be believed; this one is
+    additive — it can only ever WIDEN a window that is already honest about being
+    narrow. A repo with no worktrees, an ancient git without
+    `worktree list --porcelain`, or a `--repo` that is somehow not a work tree
+    all mean "no extra roots", and turning any of them into a refusal would take
+    the session source down for a case it used to survive.
+    """
+    try:
+        roots = worktree_roots(repo)
+    except (GitError, OSError):  # pragma: no cover - defensive; see docstring
+        return ()
+    top = os.path.normpath(toplevel)
+    return tuple(r for r in roots if r != top)
+
+
 def collect_session_paths(
     repo: str | Path,
     *,
@@ -1640,7 +1748,14 @@ def collect_session_paths(
     # guards 3–4 and nothing else — the CWD COMPARISON, which is what the guard
     # order is about, still happens below, after the readability verdict.
     toplevel = str(_toplevel(repo))
-    rollup = tailer.summarize_transcript(str(path), absolute_root=toplevel)
+    # 🔴 THE WORKTREE ROOTS ARE RESOLVED BEFORE THE READ, for the same reason the
+    # toplevel is: the extractor needs every root up front, and the raw path set
+    # never leaves it. See `worktree_roots` for why this list is git's answer and
+    # not a naming convention, and for the case it still cannot reach.
+    sibling_roots = _sibling_worktree_roots(repo, toplevel)
+    rollup = tailer.summarize_transcript(
+        str(path), absolute_root=toplevel, absolute_extra_roots=sibling_roots
+    )
     observed = rollup.get("changed_paths")
     if rollup.get("unreadable") or observed is None:
         raise TranscriptUnreadableError(
@@ -1694,8 +1809,28 @@ def collect_session_paths(
     # So a cwd mismatch now falls through to the absolute window instead of
     # refusing outright, and refuses only when that window is EMPTY, which is the
     # case the original message actually described.
+    #
+    # 🔴 A WORKTREE OF THIS REPO IS THIS REPO'S FRAME, AND THAT IS STRUCTURAL,
+    # NOT A CONCESSION. The frame check above asks whether a RELATIVE entry can
+    # be read against `--repo`, and for a worktree the answer is provably yes:
+    # every worktree of one repository has the same tracked layout by
+    # construction, so `scripts/a.py` in worktree A and `scripts/a.py` in the
+    # base clone are the same repo-relative path — not two strings that happen to
+    # spell alike, which is the hazard the check exists for. Without this, a
+    # session that FOLLOWED the standing worktree rule got the narrow
+    # `session-absolute` FLOOR (its relative entries excluded outright) while a
+    # session that ignored the rule and edited the base clone got the full
+    # window. The better the workflow, the worse the window.
+    #
+    # The membership test reads git's recorded roots rather than asking the
+    # session's cwd about itself, so it still answers for a worktree whose
+    # DIRECTORY has since been deleted — the ordinary end-state of a throwaway
+    # worktree, and the case a `git -C <cwd> rev-parse` probe would fail on.
     session_cwd = rollup.get("cwd") or ""
-    if not _same_dir(session_cwd, toplevel):
+    cwd_worktree = next(
+        (r for r in sibling_roots if _same_dir(session_cwd, r)), None
+    )
+    if not _same_dir(session_cwd, toplevel) and cwd_worktree is None:
         absolute = rollup.get("changed_paths_absolute") or []
         # 🔴 ONE ACCOUNTING, QUOTED BY BOTH EXITS. This guard leaves two ways —
         # a refusal and a window — and they owed the reader different numbers:
@@ -1734,7 +1869,8 @@ def collect_session_paths(
         paths, dropped = _filter_excluded(absolute, exclude)
         notes = [
             f"{abs_total} path(s) named ABSOLUTELY by this session and resolving under "
-            f"{toplevel} — that is the window below. The session itself ran in "
+            f"{toplevel} or one of the {len(sibling_roots)} worktree(s) git records for "
+            f"it — that is the window below. The session itself ran in "
             f"{session_cwd or '(no cwd recorded)'}: {accounting}. The first group is "
             f"EXCLUDED here, because a relative path names no tree. 🔴 The two groups "
             f"partition the {distinct}; the {abs_total} above OVERLAPS them — it re-reads "
@@ -1754,13 +1890,31 @@ def collect_session_paths(
             kind="session",
             window="session-absolute",
             paths=tuple(paths),
-            commands=(("git", "rev-parse", "--show-toplevel"),),
+            # 🔴 BOTH, because both RAN. `commands` is the argv actually executed,
+            # not a description of it — a reader asking "what did you ask?" of a
+            # window that now spans several roots is owed the command that found
+            # them, and listing only the first would be the false provenance line
+            # this field's docstring exists to forbid.
+            commands=(
+                ("git", "rev-parse", "--show-toplevel"),
+                ("git", "worktree", "list", "--porcelain"),
+            ),
             notes=tuple(notes),
             session=label,
             session_cwd=session_cwd,
         )
 
-    paths, dropped = _filter_excluded(observed, exclude)
+    # 🔴 THE WORKTREE WINDOW, UNIONED IN. `observed` is read against the session
+    # cwd and therefore stops at that directory; `changed_paths_absolute` is the
+    # same session's ABSOLUTE entries resolved against this repo's toplevel AND
+    # every worktree git records for it, which is the same repo-relative
+    # namespace. The subtraction is what makes `recovered` a count of paths this
+    # window would otherwise have DROPPED rather than a restatement of the ones
+    # it already had.
+    recovered = tuple(
+        sorted(set(rollup.get("changed_paths_absolute") or []) - set(observed or []))
+    )
+    paths, dropped = _filter_excluded(tuple(observed) + recovered, exclude)
     notes: list[str] = []
     total = rollup.get("changed_paths_total")
     outside = rollup.get("changed_paths_outside_cwd")
@@ -1769,15 +1923,37 @@ def collect_session_paths(
     # reading, while an absent line is indistinguishable from a counter wired to
     # nothing (`claude/RULES.md` → "report the pair").
     notes.append(
-        f"{total} distinct path(s) under the session cwd; {outside} outside it — the "
-        f"latter are COUNTED here and not represented below (a scratchpad file, a "
-        f"temp worktree, or an edit in another repo has no repo-relative form here)"
+        f"{total} distinct path(s) under the session cwd; {outside} outside it — of "
+        f"those, {len(recovered)} were recovered from {len(sibling_roots)} worktree(s) "
+        f"of this repo and ARE represented below; the rest are COUNTED here and not "
+        f"(a scratchpad file, a pruned worktree, or an edit in another repo has no "
+        f"repo-relative form here)"
     )
+    if recovered:
+        # 🔴 NAMED, NOT JUST COUNTED. These paths are attributed to the session on
+        # the strength of a root the reader cannot see, and a bare count would
+        # leave them indistinguishable from paths the cwd window found itself.
+        shown = ", ".join(sibling_roots[:3])
+        more = f" (+{len(sibling_roots) - 3} more)" if len(sibling_roots) > 3 else ""
+        notes.append(
+            f"worktree window: {len(recovered)} path(s) below were named ABSOLUTELY "
+            f"under a worktree of this repo rather than under the session cwd — "
+            f"{shown}{more}. A worktree shares this repo's tracked layout by "
+            f"construction, so those are the same repo-relative paths; nothing was "
+            f"re-anchored and no RELATIVE path was reinterpreted"
+        )
     if rollup.get("changed_paths_truncated"):
         notes.append(
             f"🔴 TRUNCATED at the extractor's cap of {rollup.get('changed_paths_cap')} — "
             f"the list is a lexicographic PREFIX of {total} paths, so a late-sorting "
             f"subtree may be missing entirely"
+        )
+    if cwd_worktree is not None:
+        notes.append(
+            f"session cwd {cwd_worktree} is a WORKTREE of this repo, not the base "
+            f"clone — the window below is the full session window, read against that "
+            f"worktree. Its tracked layout is this repo's by construction, so the "
+            f"paths are repo-relative as they stand"
         )
     if dropped:
         notes.append(_exclusion_note(dropped))
@@ -1787,7 +1963,10 @@ def collect_session_paths(
         kind="session",
         window="session",
         paths=tuple(paths),
-        commands=(("git", "rev-parse", "--show-toplevel"),),
+        commands=(
+            ("git", "rev-parse", "--show-toplevel"),
+            ("git", "worktree", "list", "--porcelain"),
+        ),
         notes=tuple(notes),
         session=label,
         # 🔴 THE SAME TWO NUMBERS THE NOTE ABOVE PRINTS, carried as numbers so
@@ -1796,8 +1975,20 @@ def collect_session_paths(
         # extractor that stops emitting a counter disables the dominance warning
         # rather than firing it off a `None` coerced to 0 — which would read as
         # "0 outside", i.e. the reassuring answer.
+        #
+        # 🔴 `under_cwd`/`outside_cwd` STAY THE EXTRACTOR'S RAW CWD-FRAME NUMBERS
+        # even though the window below is now wider than the cwd. Folding the
+        # recovery into them would make two fields whose docstrings say "under
+        # the session cwd" mean something else, and the reconciliation is not a
+        # clean subtraction anyway: two worktrees holding the same repo-relative
+        # path consume two outside-cwd entries and yield ONE recovered path
+        # (`changed_paths.absolute_under_any` states this). So the recovery is a
+        # THIRD number, and `wrong_window_dominance` is the one place that nets
+        # them.
         under_cwd=_as_count(total),
         outside_cwd=_as_count(outside),
+        worktree_recovered=len(recovered),
+        session_worktree=cwd_worktree,
     )
 
 
@@ -3869,6 +4060,18 @@ def wrong_window_dominance(source: PathSource) -> tuple[int, int, int] | None:
     named by `looked-at-nothing` and routed by `ROUTE OUT`; adding a second
     voice there would only make the block fire on runs it cannot inform.
 
+    🔴 THE WORKTREE RECOVERY IS NETTED OUT HERE, AND ONLY HERE. `outside_cwd` is
+    the extractor's cwd-frame count and still includes every path this run
+    recovered from a worktree of this repo — paths that ARE below, in the window,
+    reported. Warning off the raw figure would tell a reader that work is
+    invisible while it is on the screen underneath, which is the same class of
+    defect as the silence this block exists to break, pointed the other way. So
+    the escalation reads the REMAINDER, and the counters it returns are the ones
+    it judged: `under` gains the recovered paths (they are in the window) and
+    `outside` loses them. See `PathSource.worktree_recovered` for why the netting
+    is a floor rather than an exact reconciliation — it can leave `outside` a
+    little high, which points at warning rather than at silence.
+
     Returns None for every source that carries no counters — see
     `PathSource.outside_cwd` for why `session-absolute` is one of them.
     """
@@ -3876,6 +4079,9 @@ def wrong_window_dominance(source: PathSource) -> tuple[int, int, int] | None:
     outside = source.outside_cwd
     if under is None or outside is None:
         return None
+    recovered = source.worktree_recovered or 0
+    under += recovered
+    outside -= recovered
     if outside <= under:
         return None
     # `outside > under >= 0` ⇒ `outside >= 1` ⇒ the denominator is never 0.
@@ -3899,12 +4105,16 @@ def render_wrong_window(source: PathSource) -> list[str]:
         f"({percent}%) are OUTSIDE the session cwd,",
         f"  so they are NOT among the {under} this window reports. MOST of what this "
         f"session named is not below.",
-        "  The two standing defaults here land on this window's two blind spots at "
-        "once: non-trivial work is DELEGATED to a",
-        "  subagent (whose turns are a SEPARATE transcript), and a file-modifying "
-        "subagent gets its own WORKTREE (which is",
-        "  a directory OUTSIDE the session cwd). So a well-run session is exactly the "
-        "one this window sees least of.",
+        "  The standing default here lands on this window's biggest blind spot: "
+        "non-trivial work is DELEGATED to a subagent,",
+        "  whose turns are a SEPARATE transcript. 🔴 The WORKTREE half of that is "
+        "already handled and must not be re-derived —",
+        "  this window reads every worktree `git worktree list` records for the repo, "
+        "so those paths ARE below. What is",
+        "  still outside is a /tmp or scratchpad file, an edit in another repo, and a "
+        "worktree already `git worktree remove`d",
+        "  (git keeps no record of one). Measured on 100 recent transcripts: 87% of "
+        "outside-cwd paths were /tmp or scratchpad.",
         "  ⚠ THIS RUN IS THIN, NOT PROOF THE WINDOW IS DEAD — and the difference has "
         "been measured, so do not re-derive it",
         "  from this one reading. Over 14 devrc sessions only 1 had an empty in-cwd "
@@ -4533,6 +4743,13 @@ def report_json(report: TouchReport) -> dict:
             "paths": list(src.paths),
             "under_cwd": src.under_cwd,
             "outside_cwd": src.outside_cwd,
+            # 🔴 CARRIED SEPARATELY, in the SAME frame as the two above it: these
+            # three are the extractor's cwd-frame accounting, and `wrong_window`
+            # below is the NETTED reading. A JSON consumer that saw only the
+            # netted pair could not tell a run that recovered nothing from one
+            # that recovered everything.
+            "worktree_recovered": src.worktree_recovered,
+            "session_worktree": src.session_worktree,
             "wrong_window": (
                 None
                 if dominance is None

@@ -135,6 +135,7 @@ __all__ = [
     "summarize",
     "unobservable",
     "absolute_under",
+    "absolute_under_any",
     "absolute_unobservable",
 ]
 
@@ -388,6 +389,62 @@ def absolute_under(paths: Iterable[str], root: str, *, cap: int = CHANGED_PATHS_
         r = to_repo_relative(raw, root)
         if r is not None:
             rel.add(r)
+
+    ordered = sorted(rel)
+    total = len(ordered)
+    return {
+        "changed_paths_absolute": ordered[:cap],
+        "changed_paths_absolute_total": total,
+        "changed_paths_absolute_truncated": total > cap,
+    }
+
+
+def absolute_under_any(
+    paths: Iterable[str], roots: Iterable[str], *, cap: int = CHANGED_PATHS_CAP
+) -> dict:
+    """`absolute_under` over SEVERAL roots at once, unioned on the relative form.
+
+    🔴 THE ONLY LEGITIMATE CALLER IS A SET OF ROOTS THAT SHARE ONE PATH
+    NAMESPACE — in practice, a git repository and its WORKTREES. That is what
+    makes the union sound rather than a merge of unrelated answers: every
+    worktree of one repo has the same tracked layout by construction, so
+    `scripts/a.py` under worktree A and `scripts/a.py` under the base clone are
+    the SAME repo-relative path, and deduplicating them is correct. Handed two
+    roots that are genuinely different projects this would silently conflate
+    them, which is why the docstring names the constraint instead of leaving the
+    caller to infer it. `scripts/lib/subsystem_touch.py` derives the root list
+    from `git worktree list --porcelain`, never by guessing at directory names.
+
+    🔴 THE DEDUP IS WHY THE COUNT IS NOT ADDITIVE, and a caller reconciling this
+    against `changed_paths_outside_cwd` must know it: two roots that each hold
+    `scripts/a.py` consume TWO entries from the outside-cwd population and
+    produce ONE path here. So this total is a floor on how many outside-cwd
+    entries were explained, never a figure to subtract exactly.
+
+    An empty `roots` yields the same empty-but-measured block `absolute_under`
+    returns for an unusable root: `[]`/`0`/`False`, never None. None is reserved
+    for "the file set was never observed" (`absolute_unobservable`), and the two
+    must not be spelled the same way — see that function.
+
+    Validation of `paths` is `absolute_under`'s, reused: a malformed entry raises
+    from the first root it is checked against, so a bad corpus fails the same way
+    whether one root or ten were passed.
+    """
+    _check_cap(cap)
+    rel: set[str] = set()
+    for root in roots:
+        block = absolute_under(paths, root, cap=cap)
+        # 🔴 `..._total`, NOT the capped list: taking the list would let a root
+        # whose own subtree overflows the cap silently truncate the union, and
+        # the union's own `truncated` flag would then read False while paths were
+        # already lost. Re-derive the members from the full set instead.
+        if block["changed_paths_absolute_total"] > cap:
+            # The capped list is a lexicographic PREFIX; recompute uncapped so the
+            # union is complete before ITS cap is applied. `absolute_under` has no
+            # uncapped mode, so the widest legal cap is used and the union's own
+            # truncation flag below carries the loss honestly.
+            block = absolute_under(paths, root, cap=block["changed_paths_absolute_total"])
+        rel.update(block["changed_paths_absolute"])
 
     ordered = sorted(rel)
     total = len(ordered)

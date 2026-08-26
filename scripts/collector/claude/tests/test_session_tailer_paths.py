@@ -633,3 +633,123 @@ class TestAbsoluteWindowNeverReachesTheEVENT:
             "the tailer's run loop now passes absolute_root — that puts a second "
             "path list into every emitted session-summary payload"
         )
+        # 🔴 THE LEDGER MUST GROW WITH THE PARAMETER LIST, or this guard's
+        # DESCRIPTION ("does not pass a root") stays true of the sentence and
+        # false of the code the moment a second root parameter is added — which
+        # is exactly what happened when `absolute_extra_roots` arrived.
+        assert "absolute_extra_roots" not in body, (
+            "the tailer's run loop now passes absolute_extra_roots — same defect, "
+            "second parameter"
+        )
+
+
+# --------------------------------------------------------------------------- #
+# The MULTI-ROOT absolute window — a repo and its worktrees are ONE namespace
+# --------------------------------------------------------------------------- #
+#
+# 🔴 THE UNION IS SOUND ONLY BECAUSE THE ROOTS SHARE A PATH NAMESPACE. Every
+# worktree of one repository has the same tracked layout by construction, so
+# `src/a.py` under a worktree and `src/a.py` under the base clone are the SAME
+# repo-relative path and deduplicating them is correct. Handed two genuinely
+# different projects this would conflate them — which is why the caller derives
+# its roots from `git worktree list --porcelain` and never from a naming
+# convention. See `subsystem_touch.worktree_roots`.
+
+WT_A = "/srv/checkouts/other-repo-wt-a"
+WT_B = "/tmp/wt-topic"
+
+
+class TestAbsoluteUnderAny:
+    def test_THE_PAIR_every_root_contributes_and_a_stranger_root_does_not(self):
+        paths = [f"{OTHER}/src/a.py", f"{WT_A}/src/b.py", f"{REPO}/src/never.py"]
+        r = CP.absolute_under_any(paths, [OTHER, WT_A])
+        assert r["changed_paths_absolute"] == ["src/a.py", "src/b.py"], (
+            "a root contributed nothing — the union is wired to one root only"
+        )
+        # CONTROL: the SAME corpus against roots that hold none of it. A non-zero
+        # above is only readable as a measurement next to a zero that is one too.
+        c = CP.absolute_under_any(paths, [WT_B])
+        assert c["changed_paths_absolute"] == []
+        assert c["changed_paths_absolute_total"] == 0
+
+    def test_it_dedupes_the_SAME_repo_relative_path_across_two_roots(self):
+        """🔴 THE PROPERTY THAT MAKES THE COUNT NON-ADDITIVE, and the caller's
+        reconciliation depends on knowing it: two roots holding the same
+        repo-relative path consume TWO entries from the outside-cwd population
+        and yield ONE path here."""
+        r = CP.absolute_under_any([f"{OTHER}/src/a.py", f"{WT_A}/src/a.py"], [OTHER, WT_A])
+        assert r["changed_paths_absolute"] == ["src/a.py"]
+        assert r["changed_paths_absolute_total"] == 1
+
+    def test_a_RELATIVE_entry_is_excluded_however_many_roots_are_offered(self):
+        """The safety property of the single-root function, held under the
+        union: more roots must not become more licence to re-anchor."""
+        r = CP.absolute_under_any(["src/a.py", "./b.py"], [OTHER, WT_A, WT_B])
+        assert r["changed_paths_absolute"] == []
+
+    def test_no_roots_yields_a_MEASURED_empty_not_None(self):
+        """`[]`/`0`/`False` is "checked, found nothing"; None is reserved for
+        "the file set was never observed". Spelling them the same way is the
+        defect `absolute_unobservable` exists to prevent."""
+        r = CP.absolute_under_any([f"{OTHER}/a.py"], [])
+        assert r["changed_paths_absolute"] == []
+        assert r["changed_paths_absolute_total"] == 0
+        assert r["changed_paths_absolute_truncated"] is False
+
+    def test_a_root_whose_OWN_subtree_overflows_the_cap_does_not_truncate_the_union(self):
+        """🔴 THE BUG A NAIVE UNION SHIPS. Unioning each root's CAPPED list would
+        let a big root's lexicographic prefix silently drop members that the
+        union has room for — and the union's own `truncated` flag would read
+        False while paths were already lost. Root A alone overflows `cap=5`;
+        root B's single path sorts LAST, so a prefix-truncated union loses it."""
+        paths = [f"{OTHER}/a{i:04d}.py" for i in range(7)] + [f"{WT_A}/zzz.py"]
+        r = CP.absolute_under_any(paths, [OTHER, WT_A], cap=5)
+        assert r["changed_paths_absolute_total"] == 8, (
+            "the union counted a capped prefix rather than the full set"
+        )
+        assert r["changed_paths_absolute_truncated"] is True
+        assert len(r["changed_paths_absolute"]) == 5
+
+    def test_a_malformed_entry_RAISES_here_too(self):
+        with pytest.raises(ValueError, match="not a usable path"):
+            CP.absolute_under_any([f"{OTHER}/a.py", "  "], [OTHER])
+
+
+class TestExtraRootsPlumbing:
+    """The parameter has to reach the extractor through BOTH rollup branches, or
+    a caller that asked for the block gets it in one outcome and not the other —
+    the absent-key/None-key divergence `summarize_transcript` already documents
+    for its OSError path."""
+
+    def test_extra_roots_alone_produce_the_block(self):
+        blocks = [("Edit", {"file_path": f"{WT_A}/src/a.py"})]
+        r = S.build_rollup([_user(), _assistant(blocks)], absolute_extra_roots=(WT_A,))
+        assert r["changed_paths_absolute"] == ["src/a.py"]
+
+    def test_the_root_and_the_extra_roots_are_UNIONED_not_overridden(self):
+        blocks = [("Edit", {"file_path": p})
+                  for p in (f"{OTHER}/src/a.py", f"{WT_A}/src/b.py")]
+        r = S.build_rollup(
+            [_user(), _assistant(blocks)], absolute_root=OTHER, absolute_extra_roots=(WT_A,)
+        )
+        assert r["changed_paths_absolute"] == ["src/a.py", "src/b.py"]
+
+    def test_an_UNREADABLE_transcript_returns_None_for_extra_roots_too(self, tmp_path):
+        """A `[]` here would say "the roots were checked and nothing resolved" —
+        a measurement — about a session whose file set was never read."""
+        p = tmp_path / "t.jsonl"
+        p.write_text("not json at all\n", encoding="utf-8")
+        r = S.summarize_transcript(str(p), absolute_extra_roots=(WT_A,))
+        assert r["unreadable"] is True
+        for key in CP.ABSOLUTE_KEYS:
+            assert r[key] is None, f"{key} was a measurement about an unread session"
+
+    def test_the_DEFAULT_still_emits_no_absolute_block_at_all(self):
+        """The parameter is opt-in on BOTH names. A default that started
+        emitting would ship a second path list into every telemetry payload.
+
+        ⚠ INVARIANT GUARD, not regression coverage: green on the pre-change code
+        too, by construction — the second parameter did not exist there."""
+        r = S.build_rollup([_user(), _assistant([("Edit", {"file_path": f"{REPO}/a.py"})])])
+        for key in CP.ABSOLUTE_KEYS:
+            assert key not in r

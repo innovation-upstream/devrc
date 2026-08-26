@@ -51,6 +51,7 @@ import io
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -1769,8 +1770,20 @@ class TestSkillDocsArePinned:
             "🔴 the misreading named as the failure it is",
         ),
         (
-            "The better the session followed the rules, the less of it `--session` can see",
+            # 🔴 NARROWED WITH THE CODE, IN THE SAME COMMIT. The pinned sentence
+            # used to read "The better the session followed the rules, the less
+            # of it `--session` can see", which named BOTH standing defaults —
+            # subagent and worktree — as blind spots. The worktree half is no
+            # longer true (see `worktree_roots`), and a pin that kept demanding
+            # the wider sentence would enforce a claim the code refutes. What
+            # still has to be on the page is the SUBAGENT half, which is the
+            # dominant one and unchanged.
+            "a subagent's turns are a *separate transcript* this window excludes",
             "🔴 the preferred window is blind to the MANDATED workflow, not an odd one",
+        ),
+        (
+            "The worktree half of that claim is no longer true",
+            "🔴 the retraction is on the page, so the old claim is not re-derived",
         ),
         (
             "`WRONG WINDOW?`",
@@ -2832,6 +2845,299 @@ class TestCrossRepoAbsoluteWindow:
         rep = st.build_report(_session_source(b, t), store, SCOPE, today=TODAY)
         assert "session-absolute" in st.render_text(rep)
         assert st.report_json(rep)["source"]["window"] == "session-absolute"
+
+
+def _add_worktree(repo: Path, path: Path, branch: str, home: Path) -> Path:
+    """A real git worktree of `repo` at `path`. Not a directory that looks like one."""
+    _run_git(repo, "worktree", "add", "-b", branch, str(path), "HEAD", home=home)
+    return path
+
+
+class TestTheWorktreeWindow:
+    """🔴 THE WINDOW WAS BLIND TO THE MANDATED WORKFLOW, AND THE COST IS MEASURED.
+
+    The standing default here is to delegate file-modifying work to a subagent in
+    its own WORKTREE. A worktree is a directory outside the session cwd, so every
+    path the session named inside one was COUNTED as `outside_cwd` and dropped —
+    the better a session followed the rule, the less of it this window reported.
+
+    🔴 THE ATTRIBUTION IS STRUCTURAL, NOT A GUESS AT DIRECTORY NAMES. Every
+    worktree of one repository has the same tracked layout by construction, so a
+    path under one IS a repo-relative path of that repo. The root list comes from
+    `git worktree list --porcelain` — git's own record — never from a `<repo>-*`
+    sibling-name convention, which would invent an association for an unrelated
+    project sharing a prefix AND miss every `/tmp/wt-*` worktree, which is the
+    shape this host actually mandates.
+
+    🔴 THE SCOPE OF THE FIX, STATED HERE BECAUSE THE HEADLINE OVERSELLS IT.
+    Measured over the 100 most recent transcripts on the development host: 1,434
+    paths outside the session cwd, of which 1,245 (87%) were `/tmp` or scratchpad
+    files that are correctly not repo paths at all, 86 were under `~/.claude`,
+    131 were under a worktree already `git worktree remove`d (git holds no record
+    of those — see `worktree_roots`), and 18 were recoverable by this window.
+    So this recovers a REAL defect and a SMALL fraction of the dropped paths; the
+    dominant cause of a thin session window on this host is scratch files, not
+    worktree blindness. Do not re-derive the larger claim from the headline.
+    """
+
+    UNDER_WT = ["src/collector/wt_one.py", "src/collector/wt_two.py"]
+
+    def _repo_and_worktree(self, tmp_path: Path):
+        repo = _init_repo(tmp_path, SCOPE)
+        wt = _add_worktree(repo, tmp_path / "some-repo-topic", "topic", tmp_path)
+        return repo, wt
+
+    # --- the regression, and its negative control ------------------------------
+
+    def test_THE_PAIR_a_worktree_path_is_attributed_a_stranger_directory_is_not(
+        self, tmp_path: Path, tailer_cache
+    ) -> None:
+        """🔴 BOTH ARMS ARE THE SAME SESSION SHAPE AT THE SAME DEPTH WITH THE SAME
+        FILENAMES. The single difference is whether the directory the paths sit in
+        is a WORKTREE of this repo. Without the negative arm the positive one is
+        indistinguishable from a window that re-anchors any absolute path it can
+        make relative to something — which would file another project's work here,
+        silently, because the manufactured path resolves perfectly.
+        """
+        repo, wt = self._repo_and_worktree(tmp_path)
+
+        # UNDER TEST — a subagent's worktree of THIS repo.
+        pos = _write_transcript(
+            tmp_path / "pos.jsonl", str(repo), [f"{wt}/{p}" for p in self.UNDER_WT]
+        )
+        got = _session_source(repo, transcript=pos)
+        assert got.paths == tuple(self.UNDER_WT), (
+            "the worktree paths were not attributed — this is the regression"
+        )
+        assert got.window == "session"
+        assert got.worktree_recovered == 2
+
+        # CONTROL — a plain directory beside the repo, same name shape, NOT a
+        # worktree. `some-repo-stranger` even shares the repo's basename prefix,
+        # so a lexical sibling-name rule would wrongly claim it.
+        stranger = tmp_path / "some-repo-stranger"
+        stranger.mkdir()
+        neg = _write_transcript(
+            tmp_path / "neg.jsonl", str(repo), [f"{stranger}/{p}" for p in self.UNDER_WT]
+        )
+        blind = _session_source(repo, transcript=neg)
+        assert blind.paths == (), (
+            "a directory that is not a worktree was claimed — the window is "
+            "re-anchoring, not attributing"
+        )
+        assert blind.worktree_recovered == 0
+
+    def test_a_REMOVED_but_unpruned_worktree_is_still_attributed(
+        self, tmp_path: Path, tailer_cache
+    ) -> None:
+        """🔴 THE ORDINARY END STATE OF A THROWAWAY WORKTREE, and the reason the
+        root list is read from git rather than from the filesystem. `git worktree
+        list --porcelain` still reports a worktree whose DIRECTORY is gone, marked
+        `prunable` — so the paths stay attributable after the agent cleaned up.
+        A probe that asked the cwd about itself (`git -C <cwd> rev-parse`) would
+        fail here, which is why none is used.
+        """
+        repo, wt = self._repo_and_worktree(tmp_path)
+        t = _write_transcript(
+            tmp_path / "t.jsonl", str(repo), [f"{wt}/{p}" for p in self.UNDER_WT]
+        )
+        shutil.rmtree(wt)
+        assert not wt.exists()
+        listing = _run_git(repo, "worktree", "list", "--porcelain", home=tmp_path)
+        assert "prunable" in listing, "fixture no longer models the case under test"
+
+        got = _session_source(repo, transcript=t)
+        assert got.paths == tuple(self.UNDER_WT)
+        assert got.worktree_recovered == 2
+
+    def test_a_PRUNED_worktree_is_NOT_attributed_and_the_caveat_says_so(
+        self, tmp_path: Path, tailer_cache
+    ) -> None:
+        """The boundary the fix does NOT cross, pinned so nobody reads the class
+        docstring as a promise it covers everything. Once git's record is gone
+        there is no structural signal left, and the alternative — guessing from
+        the directory name — is the thing the design refuses."""
+        repo, wt = self._repo_and_worktree(tmp_path)
+        t = _write_transcript(
+            tmp_path / "t.jsonl", str(repo), [f"{wt}/{p}" for p in self.UNDER_WT]
+        )
+        shutil.rmtree(wt)
+        _run_git(repo, "worktree", "prune", home=tmp_path)
+
+        got = _session_source(repo, transcript=t)
+        assert got.paths == ()
+        assert got.worktree_recovered == 0
+        assert "git worktree remove" in got.caveat, (
+            "the blind spot is real; the caveat has to name it"
+        )
+
+    # --- the session that RAN in a worktree ------------------------------------
+
+    def test_a_session_that_RAN_in_a_worktree_gets_the_FULL_window(
+        self, tmp_path: Path, tailer_cache
+    ) -> None:
+        """🔴 THE WORKFLOW-PUNISHING CASE. A session whose cwd is a worktree of
+        this repo used to fail the frame check and degrade to the
+        `session-absolute` FLOOR, which EXCLUDES every relative path it named. A
+        session that ignored the worktree rule and edited the base clone got the
+        full window. Relative paths are safe to read here for a reason that is
+        structural rather than statistical: the two trees have the same tracked
+        layout by construction."""
+        repo, wt = self._repo_and_worktree(tmp_path)
+        t = _write_transcript(
+            tmp_path / "t.jsonl", str(wt), list(self.UNDER_WT)  # RELATIVE, as typed
+        )
+        got = _session_source(repo, transcript=t)
+        assert got.window == "session", (
+            "a session inside a worktree still degrades to the absolute floor"
+        )
+        assert got.paths == tuple(self.UNDER_WT)
+        assert got.session_worktree == str(wt)
+
+    def test_a_session_in_ANOTHER_repo_still_refuses_the_relative_paths(
+        self, tmp_path: Path, tailer_cache
+    ) -> None:
+        """⚠ AN INVARIANT GUARD, NOT REGRESSION COVERAGE — labelled because it is
+        the ONE test in this class that is GREEN on pre-change code, and counting
+        it as part of the regression matrix would overstate what was proven. It
+        pins the safety property the widening must not break: widening the frame
+        to WORKTREES must not widen it to any directory at all.
+        `src/collector/a.py` in another checkout and `src/collector/a.py` here are
+        unrelated strings that spell alike, and re-anchoring one as the other
+        files another repo's work here — silently, because it resolves."""
+        repo, _wt = self._repo_and_worktree(tmp_path)
+        other = tmp_path / "the-other-checkout"
+        other.mkdir()
+        t = _write_transcript(tmp_path / "t.jsonl", str(other), list(self.UNDER_WT))
+        with pytest.raises(st.TranscriptCwdMismatchError):
+            _session_source(repo, transcript=t)
+
+    # --- the counters -----------------------------------------------------------
+
+    def test_the_cwd_counters_KEEP_their_frame_and_the_recovery_is_a_THIRD_number(
+        self, tmp_path: Path, tailer_cache
+    ) -> None:
+        """🔴 `under_cwd` and `outside_cwd` are the extractor's counts in the
+        SESSION CWD frame. Folding the recovery into them would make two fields
+        whose docstrings say "under the session cwd" mean something else — and a
+        JSON consumer could then no longer tell a run that recovered nothing from
+        one that recovered everything."""
+        repo, wt = self._repo_and_worktree(tmp_path)
+        t = _write_transcript(
+            tmp_path / "t.jsonl",
+            str(repo),
+            [f"{repo}/src/collector/here.py", *[f"{wt}/{p}" for p in self.UNDER_WT]],
+        )
+        got = _session_source(repo, transcript=t)
+        # The BEHAVIOURAL assert first, deliberately: it is the one that goes red
+        # on pre-change code for the right reason. Reading a new attribute first
+        # would make this test fail with an `AttributeError` at base, which is a
+        # red about the API surface rather than about the window.
+        assert len(got.paths) == 3, "the window is the union of both frames"
+        assert got.under_cwd == 1, "the cwd frame gained a path it should not have"
+        assert got.outside_cwd == 2, "the cwd frame lost a path it should still count"
+        assert got.worktree_recovered == 2
+
+    def test_zero_recovered_is_a_MEASUREMENT_not_an_absence(
+        self, tmp_path: Path, tailer_cache
+    ) -> None:
+        """🔴 `claude/RULES.md` — "report the pair". A run with worktree roots
+        that recovered nothing must be distinguishable from a source that has no
+        such window at all, or a reassuring 0 is indistinguishable from a counter
+        wired to nothing."""
+        repo, _wt = self._repo_and_worktree(tmp_path)
+        t = _write_transcript(
+            tmp_path / "t.jsonl", str(repo), [f"{repo}/src/collector/a.py"]
+        )
+        got = _session_source(repo, transcript=t)
+        assert got.worktree_recovered == 0
+        assert st.collect_git_paths(repo).worktree_recovered is None, (
+            "a source with no worktree window must say None, not 0"
+        )
+
+    def test_the_note_and_the_json_both_carry_the_recovery(
+        self, tmp_path: Path, tailer_cache
+    ) -> None:
+        """A number only a human eye can reach is not actionable, and a note that
+        never printed the recovery would leave the reader adding the two cwd
+        counters and reaching a SMALLER session than the window shows."""
+        repo, wt = self._repo_and_worktree(tmp_path)
+        t = _write_transcript(
+            tmp_path / "t.jsonl", str(repo), [f"{wt}/{p}" for p in self.UNDER_WT]
+        )
+        store = _make_store(tmp_path / "s")
+        rep = st.build_report(_session_source(repo, transcript=t), store, SCOPE, today=TODAY)
+        text = st.render_text(rep)
+        assert "worktree window" in text
+        blob = st.report_json(rep)["source"]
+        assert blob["worktree_recovered"] == 2
+        assert blob["session_worktree"] is None
+
+    # --- the netting, which is the whole point of carrying a third number -------
+
+    def test_the_WRONG_WINDOW_warning_is_SILENCED_by_what_it_recovered(
+        self, tmp_path: Path, tailer_cache
+    ) -> None:
+        """🔴 THE DEFECT THIS PREVENTS IS THE MIRROR OF THE ONE THE WARNING EXISTS
+        FOR. `outside_cwd` still counts every recovered path, so warning off the
+        raw figure would tell the reader that most of the session is invisible
+        while those exact paths are on the screen underneath it. One path under
+        cwd and two in a worktree is 2 > 1 on the raw counters — and 3 vs 0 once
+        netted, which is silence."""
+        repo, wt = self._repo_and_worktree(tmp_path)
+        t = _write_transcript(
+            tmp_path / "t.jsonl",
+            str(repo),
+            [f"{repo}/src/collector/here.py", *[f"{wt}/{p}" for p in self.UNDER_WT]],
+        )
+        got = _session_source(repo, transcript=t)
+        assert got.outside_cwd > got.under_cwd, "fixture no longer models the case"
+        assert st.wrong_window_dominance(got) is None, (
+            "warned that the work is invisible while reporting it"
+        )
+
+    def test_the_WRONG_WINDOW_warning_STILL_FIRES_on_what_was_not_recovered(
+        self, tmp_path: Path, tailer_cache
+    ) -> None:
+        """The positive control for the test above. Netting must not disable the
+        warning — a guard that can only ever go quiet is not a guard."""
+        repo, wt = self._repo_and_worktree(tmp_path)
+        stranger = tmp_path / "elsewhere"
+        stranger.mkdir()
+        t = _write_transcript(
+            tmp_path / "t.jsonl",
+            str(repo),
+            [
+                f"{repo}/src/collector/here.py",
+                f"{wt}/{self.UNDER_WT[0]}",
+                *[f"{stranger}/src/x{i}.py" for i in range(6)],
+            ],
+        )
+        got = _session_source(repo, transcript=t)
+        hit = st.wrong_window_dominance(got)
+        assert hit is not None, "the warning went silent on genuinely lost work"
+        under, outside, _pct = hit
+        assert (under, outside) == (2, 6), (
+            "the warning reported the RAW counters instead of the netted ones"
+        )
+
+    # --- the root list itself ---------------------------------------------------
+
+    def test_worktree_roots_excludes_the_repos_own_toplevel(
+        self, tmp_path: Path
+    ) -> None:
+        """`_sibling_worktree_roots` is what the extra-roots list is built from,
+        and including the toplevel there would make every in-cwd path look
+        'recovered' — inflating a number the report presents as a finding."""
+        repo, wt = self._repo_and_worktree(tmp_path)
+        assert str(repo) in st.worktree_roots(repo)
+        assert st._sibling_worktree_roots(repo, str(repo)) == (str(wt),)
+
+    def test_a_repo_with_no_worktrees_yields_no_extra_roots(
+        self, tmp_path: Path
+    ) -> None:
+        repo = _init_repo(tmp_path, SCOPE)
+        assert st._sibling_worktree_roots(repo, str(repo)) == ()
 
 
 class TestTranscriptIsBeingAppendedTo:
@@ -4335,8 +4641,17 @@ class TestSessionMutationKillMatrix:
             """The extractor's own 'we could not observe this' shape."""
 
             @staticmethod
-            def summarize_transcript(path, *, absolute_root=""):
-                r = tailer.summarize_transcript(path, absolute_root=absolute_root)
+            def summarize_transcript(path, *, absolute_root="", absolute_extra_roots=()):
+                # 🔴 THE SIGNATURE IS MIRRORED, NOT `**kw`-SWALLOWED. This stub
+                # stands in for the real extractor, and a `**kw` here would keep
+                # the mutant alive if the module ever stopped passing a root at
+                # all — the fixture would absorb the difference instead of the
+                # code being caught by it.
+                r = tailer.summarize_transcript(
+                    path,
+                    absolute_root=absolute_root,
+                    absolute_extra_roots=absolute_extra_roots,
+                )
                 # 🔴 The ABSOLUTE block is nulled with the rest. Leaving it
                 # populated would let the mutant fall through to the
                 # session-absolute window and survive on a DIFFERENT window's
@@ -4386,7 +4701,19 @@ class TestSessionMutationKillMatrix:
         mod = _session_mutant(
             tmp_path,
             "ms_cwd",
-            [("    if not _same_dir(session_cwd, toplevel):", "    if False:")],
+            # 🔴 THE ANCHOR IS THE NARROWEST EXPRESSION THAT CAN BE WRONG. The
+            # frame check now has a second disjunct (the cwd-is-a-worktree case),
+            # and mutating the WHOLE `if` would kill both at once — a mutant that
+            # dies for the wrong reason proves nothing about either. This removes
+            # the cwd half only; the worktree half has its own mutant below, and
+            # the fixture's `other` repo is not a worktree of `repo`, so that
+            # disjunct is False here and cannot rescue this mutant.
+            [
+                (
+                    "    if not _same_dir(session_cwd, toplevel) and cwd_worktree is None:",
+                    "    if False and cwd_worktree is None:",
+                )
+            ],
             tailer,
         )
         repo = _init_repo(tmp_path, SCOPE)
@@ -4461,8 +4788,8 @@ class TestSessionMutationKillMatrix:
         mod = _session_mutant(
             tmp_path,
             "ms_excl",
-            [("    paths, dropped = _filter_excluded(observed, exclude)",
-              "    paths, dropped = list(observed), []")],
+            [("    paths, dropped = _filter_excluded(tuple(observed) + recovered, exclude)",
+              "    paths, dropped = list(observed) + list(recovered), []")],
             tailer,
         )
         repo = _init_repo(tmp_path, SCOPE)

@@ -332,7 +332,12 @@ def _mark_unobservable(r: dict) -> dict:
     return r
 
 
-def build_rollup(objects: list[dict], *, absolute_root: str = "") -> dict:
+def build_rollup(
+    objects: list[dict],
+    *,
+    absolute_root: str = "",
+    absolute_extra_roots: "tuple[str, ...] | list[str]" = (),
+) -> dict:
     """Deterministic per-session rollup from parsed transcript JSON objects.
 
     Mirrors the built-in `/insights` session-meta fields so insights.py is a
@@ -350,8 +355,17 @@ def build_rollup(objects: list[dict], *, absolute_root: str = "") -> dict:
     which reproduces the 14.3% in `changed_paths`'s own header), and handing it
     to a caller is how one of them ends up persisted somewhere.
 
-    🔴 `run()` never passes it, so the emitted payload — which is `json.dumps` of
-    this whole dict — is byte-for-byte what it was. Pinned by a test."""
+    `absolute_extra_roots` WIDENS that same block to a set of roots that share one
+    path namespace — a repo and its WORKTREES — via
+    `changed_paths.absolute_under_any`. It is a peer of `absolute_root`, not a
+    replacement: the union is reported under the SAME `ABSOLUTE_KEYS`, because
+    every member is a repo-relative path in the one namespace and a second key set
+    would ask the caller to merge two answers this function already merged
+    correctly. Passing extra roots WITHOUT `absolute_root` is legal and means
+    exactly what it says (report against those roots only).
+
+    🔴 `run()` never passes either, so the emitted payload — which is `json.dumps`
+    of this whole dict — is byte-for-byte what it was. Pinned by a test."""
     r = _empty_rollup()
     tool_counts: dict = r["tool_counts"]
     languages: dict = r["languages"]
@@ -496,22 +510,33 @@ def build_rollup(objects: list[dict], *, absolute_root: str = "") -> dict:
     # come back None rather than []. Emitting [] here would recreate the exact
     # defect this PR fixes one source over: a manufactured empty list that a
     # downstream associator reads as "this session touched nothing".
+    # 🔴 ONE ROOT LIST, BUILT ONCE, READ BY BOTH BRANCHES. The two used to test
+    # `absolute_root` independently, and a second flag tested separately is how
+    # the unreadable branch ends up emitting a block the readable branch does not
+    # (or the reverse) — the exact absent-key/None-key divergence
+    # `summarize_transcript` already documents for its OSError path.
+    roots = [x for x in (absolute_root, *absolute_extra_roots) if x]
     if r["unreadable"]:
         _mark_unobservable(r)
-        if absolute_root:
+        if roots:
             # All-None, not []. An empty list would say "the root was checked and
             # nothing resolved under it" — a measurement — about a session whose
             # file set we never read at all.
             r.update(CP.absolute_unobservable())
     else:
         r.update(CP.summarize(files, cwd))
-        if absolute_root:
-            r.update(CP.absolute_under(files, absolute_root))
+        if roots:
+            r.update(CP.absolute_under_any(files, roots))
         r["stats_unavailable"] = []
     return r
 
 
-def summarize_transcript(path: str, *, absolute_root: str = "") -> dict:
+def summarize_transcript(
+    path: str,
+    *,
+    absolute_root: str = "",
+    absolute_extra_roots: "tuple[str, ...] | list[str]" = (),
+) -> dict:
     """Read a transcript fully and return its rollup. A file that can't be opened
     or contains no parseable JSON is flagged `unreadable` (never fabricated).
 
@@ -535,17 +560,26 @@ def summarize_transcript(path: str, *, absolute_root: str = "") -> dict:
                 parsed_any = True
                 objects.append(obj)
     except OSError:
-        return _unreadable_rollup(absolute_root)
+        return _unreadable_rollup(absolute_root, absolute_extra_roots)
     if not parsed_any:
-        return _unreadable_rollup(absolute_root)
-    return build_rollup(objects, absolute_root=absolute_root)
+        return _unreadable_rollup(absolute_root, absolute_extra_roots)
+    return build_rollup(
+        objects, absolute_root=absolute_root, absolute_extra_roots=absolute_extra_roots
+    )
 
 
-def _unreadable_rollup(absolute_root: str) -> dict:
-    """The zero rollup, flagged unreadable, carrying the absolute block if asked."""
+def _unreadable_rollup(
+    absolute_root: str, absolute_extra_roots: "tuple[str, ...] | list[str]" = ()
+) -> dict:
+    """The zero rollup, flagged unreadable, carrying the absolute block if asked.
+
+    "If asked" means EITHER root argument: a caller that passed only extra roots
+    asked for the block just as much as one that passed `absolute_root`, and
+    returning it in one case but not the other is the absent-key/None-key
+    divergence this function exists to prevent."""
     r = _empty_rollup()
     r["unreadable"] = True
-    if absolute_root:
+    if absolute_root or any(absolute_extra_roots):
         r.update(CP.absolute_unobservable())
     return r
 
