@@ -51,11 +51,10 @@ and close the one failure mode in it that is unrecoverable (no off-machine backu
    escrowed key still there, still byte-identical, and does it still *work*". Byte equality
    and working are different claims: `--decrypt-check` writes the **escrowed** bytes to a
    throwaway 0600 identity and decrypts a real artifact with them.
-   🔴 **Its unlocked path ran once (2026-08-25) and did NOT settle the question** — it
-   compared against a client key an env var had redirected it to. The escrow's agreement
-   with the real `age.key` is **still unconfirmed since the 08-23 `cmp`**, and that older
-   claim is neither confirmed nor refuted by the 08-25 run. See "The one link still
-   untested" — and do not re-escrow on that run's advice.
+   🔴 **CLOSED 2026-08-25: rc=0, byte-IDENTICAL and DECRYPT-CHECKED.** The escrowed
+   bytes opened a real timer-produced artifact and restored 40 commits. An earlier attempt
+   that day did NOT settle it — it compared against a client key an env var had redirected
+   it to — so the run that counts is the one with `--identity` pinned. See "The one link".
 
 ### Verified live, end to end
 10 scopes, 201 commits compared, restored from the bucket → `age -d` → `git clone` →
@@ -303,10 +302,56 @@ pgrep -f 'run-tests.sh|gate.sh' | while read -r p; do
 done   # none may equal ~/workspace/devrc/.git
 ```
 
-## The one link still untested — 🔴 STILL THE ONLY THING BLOCKED ON A HUMAN
+## The one link — 🔴 CLOSED 2026-08-25, rc=0
 
-**`escrow-verify.py`'s unlocked path has RUN ONCE, on 2026-08-25, and it did not settle
-the question** — it compared the escrow against the wrong file. Details in "The env
+**MEASURED, rc=0.** The escrow is intact AND it works:
+
+```
+escrow OK — the Secure Note matches ~/workspace/homelab-talos/.secrets/age.key
+IDENTICAL (189 escrowed bytes vs 189 on disk); session cross-check RAN;
+DECRYPT-CHECKED: the ESCROWED bytes decrypted
+<host>/civitai/20260825T094001Z.bundle.age (scope civitai) and restored
+40 commit(s) over 1 ref(s)
+```
+
+🔴 **Two separate claims, and the second is the one that matters.** Byte equality says the
+two copies agree; the decrypt says the copy *in the vault* — not the one on disk — opens a
+real artifact. The artifact was the TIMER's own output from that morning, not a hand-made
+fixture. Disk loss no longer takes the key with the store, and that is now measured rather
+than assumed.
+
+It also settled the two assumptions **never previously measured against the real vault
+item**: the note is `type == 2`, and `notes` is present in `bw list items` output. A wrong
+guess on either exits 19 or 20 long before the decrypt, so reaching rc=0 proves both.
+
+⚠ **Still soft:** `server NOT PINNED` — `--expect-server` / `ASIB_ESCROW_SERVER` were
+unset, so the run trusted whatever `bw config server` said. The session cross-check DID
+run and matched, which is a weaker but real check. Pin the server to close it.
+
+⚠ **Still untested, and unchanged:** the disaster path that actually matters — reading the
+note from the **web vault on another device** and pasting it into a file. That path can
+mangle whitespace and no run here exercises it. And the laptop's `bw` is still not logged
+in (`rc=13` when measured), so recovering from that host needs a fresh `bw login` first.
+
+**How it was run — use this, not a hand-typed one-liner:**
+
+```bash
+scripts/analyze-service-index/check-escrow.sh          # locked dry pass, then unlock
+scripts/analyze-service-index/check-escrow.sh --plan   # no bw, no network, no key
+```
+
+🔴 **The one-liner form is retired because it failed three times in a row, each time
+costing a master-password entry** — once by omitting the `python3.withPackages(...)`
+argument, once by losing the script-path token (which lands the operator in a Python
+REPL), and once by losing the identity-path token (`--identity: expected one argument`).
+All three are quoting/paste failures, not mistakes about the task. A ~300-character line
+carrying a nix expression, a `--run` string and three nested command substitutions is not
+something to hand a person to paste; the quoting now lives in a file.
+
+### The earlier run, kept because its lesson is durable
+
+**An earlier attempt on 2026-08-25 did NOT settle the question** — it compared the escrow
+against the wrong file. Details in "The env
 redirect" below. So the claim below is unchanged: everything above the vault boundary is
 still synthetic — the real note fetch, the real byte comparison against the real `age.key`,
 and `--decrypt-check` against MinIO are covered only by an injected fake.
@@ -371,6 +416,25 @@ nix-shell is derived from a package ledger pinned against what the decrypt path 
 a mismatch now names *what chose* the on-disk path — refusing to call the mismatch diagnosed
 when an env var did. `--print-plan` discloses a redirect before any password is spent.
 Matrix: both red at `a8089a51`, green at HEAD, demonstrated by execution.
+
+🔴 **A run from the WRONG SHELL now refuses BEFORE the vault, exit 34.** Measured
+2026-08-25, twice: `--decrypt-check` unlocked the vault and *then* died on a missing
+`minio` — after the master password had been typed. The first fix corrected which shell is
+advertised; it did not change *when* the run discovers it is in the wrong one, so it
+happened again. `preflight_decrypt_imports()` now runs before any `bw` call and names the
+interpreter that came up short:
+
+```
+DECRYPT-DEPS-MISSING: --decrypt-check needs minio, which <the profile python3>
+cannot import. NOTHING HAS BEEN CHECKED and the vault was NOT contacted ...
+```
+
+Only the `python3.withPackages(p:[p.minio])` shape resolves a `python3` that has it — the
+bare shell and `-p bitwarden-cli jq` both resolve the ambient profile's, which does not.
+The old failure surfaced as `scripts/mail-actions/_minio.py`'s own `SystemExit`, which
+names a different program (`extract.py archive-invoices`) and a different package set;
+accurate for its original caller, misleading here. That shim is unchanged — escrow-verify
+simply no longer reaches it.
 
 It also settles two assumptions **never measured against the real vault item**: that a
 Secure Note has `type == 2`, and that `notes` is present in `bw list items` output. A wrong
