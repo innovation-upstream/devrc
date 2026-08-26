@@ -15,7 +15,7 @@ Version-controlled, global git hooks. Two features, in order on every push:
 | `pre-push` | Global dispatcher. Chains to any repo-local pre-push first (never clobbers it), runs the **blocking test gate**, then fires the audit **backgrounded** so the push is never delayed. |
 | `tests-on-push.sh` | SYNCHRONOUS worker: self-detects devrc, filters on changed files, runs `scripts/run-tests.sh --set all` in the repo's **own devShell** (`nix develop`, so a venv owned by the caller's cwd cannot shadow the interpreter), and (mode `on`) **blocks on a test failure (exit 1) or a repo-content guard (exit 2)**. An ENVIRONMENT precondition (exit 3) → warn + allow. No-op for non-devrc repos. |
 | `audit-on-push.sh` | The backgrounded worker: fixture-tree + branch + synthetic-ref + diff-size + flag gates, then headless `claude -p "/audit-pr current"`, then routes 🔴/🟡 to clawgate. |
-| `install.sh` | Sets `git config --global core.hooksPath` to this dir. `--uninstall` reverts. |
+| `install.sh` | Sets `git config --global core.hooksPath` to this dir, and `core.sshCommand` to an `ServerAliveInterval=30` keepalive (see **Why the keepalive**). `--uninstall` reverts both — but only removes an `sshCommand` it wrote itself. |
 | `audit-on-push.env.example` | Config template → copy to `~/.claude/audit-on-push.env`. |
 
 ## Test gate (`tests-on-push.sh`)
@@ -95,7 +95,35 @@ Behaviour, all failing in the **safe direction**:
 ~/workspace/devrc/githooks/install.sh
 ```
 
-This sets the **global** `core.hooksPath` and seeds `~/.claude/audit-on-push.env`.
+This sets the **global** `core.hooksPath`, sets a **global `core.sshCommand`**
+carrying an SSH keepalive (see below), and seeds `~/.claude/audit-on-push.env`.
+
+### Why the keepalive (#782)
+
+**Measured 2026-08-26, twice.** github.com closes an **idle `git-receive-pack`
+session after ~360 s** (361 s in both runs). git opens *and negotiates* the
+connection **before** it runs `pre-push`, so the connection sits idle for the
+whole time the test gate is running. Once the suite passes ~360 s the connection
+is already gone when git tries to send the pack, and the push dies with
+**SIGPIPE (exit 141), creating no branch**:
+
+| pre-push duration | keepalive | push rc | branch on remote |
+|---|---|---|---|
+| 420 s | none | **141** | **absent** |
+| 420 s | `ServerAliveInterval=30` | **0** | created |
+
+🔴 **It reads as a network flake, and that is the trap.** The hook prints its own
+`✅ devrc test suite passed.` *after* the connection has already died, so the
+screen says success — and a wrapper's trailing command swallows the 141. **Verify
+a push with `git ls-remote`, never with the wrapper's exit code.**
+
+This is **not** flaky: it is a hard threshold, and it fires more often the longer
+the suite grows.
+
+The keepalive is installed here rather than in `~/.ssh/config` because that file
+is a per-host, unmanaged plain file — a fix placed there protects one machine and
+never ships. If you already have a `core.sshCommand`, the installer **leaves it
+alone** and prints the exact option to add.
 Two independent knobs, seeded from the example:
 
 - **Audit** (`AUDIT_ON_PUSH=shadow`) — logs what it *would* send, sends nothing;

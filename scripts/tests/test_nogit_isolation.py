@@ -4,8 +4,8 @@ variable was set once.
 
 WHY THIS FILE EXISTS
 --------------------
-MEASURED 2026-08-21. A test ran `githooks/install.sh` for real; line 39 of that
-script is `git config --global core.hooksPath "$DIR"`, so it rewrote the
+MEASURED 2026-08-21. A test ran `githooks/install.sh` for real; that script runs
+`git config --global core.hooksPath "$DIR"`, so it rewrote the
 operator's global git config to point at a pytest tmpdir. In the same window ~63
 fixture commits were pushed to the REAL `origin/main`, whose tree became a single
 file named `f`, and the base clone ended up `core.bare = true` on a populated
@@ -386,9 +386,13 @@ def test_every_target_kind_feeds_the_accounting():
 def test_the_real_installer_cannot_reach_the_operators_git_config(tmp_path):
     """🔴 RUN `githooks/install.sh` FOR REAL AND FOLLOW THE WRITE.
 
-    This is the command that did the damage: line 39 is
+    This is the command that did the damage:
     `git config --global core.hooksPath "$DIR"`. Under the guard it lands in this
     session's isolated file and the operator's real config is byte-identical.
+
+    (Both references here named a LINE NUMBER until 2026-08-26, when #782's fix
+    added lines above it and silently made them wrong. A line number is a claim
+    with no owner — name the command instead, which cannot drift.)
 
     HOME is redirected for the CHILD ONLY, because install.sh also seeds
     `$HOME/.claude/audit-on-push.env` — a separate surface, owned by
