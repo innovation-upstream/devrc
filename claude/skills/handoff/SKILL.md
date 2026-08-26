@@ -90,12 +90,15 @@ Topic argument (optional): `$ARGUMENTS`. If empty, infer a short kebab-case topi
    ## Next steps (ranked)
    1. ...
    2. ...
-   🔴 **This list is a WORK QUEUE WITH NO LOCK** — every `/resume` session draws
-   from it, so a *better* ranked list produces *more* duplicate work, not less.
-   Make each item cheap to check: name the repo and the files it will touch, and
-   **mark anything in flight `IN FLIGHT: <repo>#<pr>`** rather than leaving it
-   looking unclaimed. Worktrees do NOT prevent this. 📖 the measurements and the
-   refutation: `~/.claude/skills/handoff/reference/shared-queue.md`.
+   🔴 **This list is a WORK QUEUE, and `claim-work` is its LOCK** — every
+   `/resume` session draws from it, so a *better* ranked list produces *more*
+   duplicate work, not less. **NUMBER the items and keep the numbering stable:
+   the rank is half a claim's identity** (`claim-work --slug-for <this doc>
+   <rank>`), and re-ranking silently re-points every live claim. Make each item
+   cheap to check — name the repo and the files it will touch, and mark anything
+   in flight `IN FLIGHT: <repo>#<pr>`; that marker is the SOFT half, the lock is
+   the command `/resume` step 6 runs before touching an item. Worktrees do NOT
+   prevent this. 📖 `~/.claude/skills/handoff/reference/shared-queue.md`.
 
    ## Gotchas / decisions / dead-ends
    - Things already tried that didn't work; constraints; why X over Y.

@@ -67,6 +67,7 @@ the last revision before the core/archive split.
 - [cross-repo-worktree](#cross-repo-worktree)
 - [worktree-copy-git](#worktree-copy-git)
 - [sibling-agent-kill](#sibling-agent-kill)
+- [shared-queue-lock](#shared-queue-lock)
 
 **Shell & Tooling**
 - [grep-gitignore-blind](#grep-gitignore-blind)
@@ -960,6 +961,59 @@ inference "confirming `cmdline` is not sufficient" was never itself measured: th
 ran the resolve-then-confirm procedure, it pattern-matched system-wide. The widening is sound
 (identical cmdlines cannot discriminate) but it is reasoning, not an observation.
 
+## shared-queue-lock
+
+*Supports: A ranked next-step list is a SHARED QUEUE WITH NO LOCK.*
+
+**What was measured — 2026-08-24.** Three sessions collided on the same work in
+one day, across four items. One collision cost an entire PR: homelab-infra
+**#388**, closed after two adversarial audit rounds of work had already gone into
+it. The duplication mapped onto one handoff's ranked list almost 1:1 — next-step 1
+became `#386`, and next-step 4 (*"right-size requests — gitops-validate alone asks
+4.65 CPU / 4.688Gi"*) became **both `#388` and `#389`**.
+
+🔴 **A BETTER ranked list produces MORE of this, not less.** Making the next
+action obvious, specific and actionable is exactly what makes two sessions pick
+the same one. The list was never the problem; the absence of a claim step was.
+
+**🔴 Worktree isolation is REFUTED as the explanation, twice over.** Every
+colliding session WAS in its own worktree (`hi-finally-fix` #385,
+`homelab-renderdiff` #390, `tekton-devrc`) and no file was ever clobbered — each
+PR was internally clean and independently passed its own review. Worktrees
+prevent a FILESYSTEM collision; this is a TASK-ALLOCATION collision, and
+isolation is what HIDES it: a shared tree would have shown the other branch.
+
+**🔴 A pre-flight check alone cannot work, and this is why the claim happens at
+DRAW time.** Each collision had a window where the other PR was already public —
+`#774` by 22 minutes, `#388` by 18 — and both were visible to `gh pr list`.
+Neither was checked. But in the `#388`/`#389` pair no check on the FIRST mover's
+side could have helped at all: at branch-creation time the other session did not
+exist. A design that only warns the later session leaves half the failure open.
+
+**🔴 The colliding party was an `opencode` run, not a Claude session.** That is
+why the command is named in `claude/RULES.md` — the one file both runtimes load
+(Claude Code imports it; `nix/home.nix` concatenates it into
+`~/.config/opencode/AGENTS.md`) — and deployed as a bare `~/.local/bin/claim-work`
+rather than reached through a Claude skill.
+
+**Why not more prose.** The prose version of this rule was live in
+`handoff/SKILL.md` and `resume/SKILL.md` **six minutes** before the next
+collision. `claude/RULES.md` → *"Prefer deterministic/structural fixes over
+prompt-tuning, prose instructions, or suffix/keyword heuristics."*
+
+**Alternatives rejected, and why.** (a) a pre-flight `gh pr list` alone —
+structurally cannot cover the first mover, above; (b) moving items into clawgate
+— a stronger state model, but it adds a workbench-cluster dependency to every
+`/resume` and inverts the assumption that the ranked list stays the primary
+hand-off surface; (c) more prose — see above.
+
+**The honest limitation.** The hard lock is an EXACT slug match, so
+`--slug-for <doc> <rank>` is what makes two independent sessions derive the same
+ref. It cannot catch a semantically identical item that two sessions word
+differently, or two handoff docs covering one piece of work. `--list` prints
+every claim's human SUBJECT as a SOFT signal for exactly that gap. Full design
+argument: `claudedocs/design-claim-by-push.md`.
+
 ## retired-professional-honesty
 *Retired from the core 2026-08-10, verdict **NOW-NATIVE**.*
 
@@ -1266,6 +1320,14 @@ prohibition explicitly rather than relying on the general principle.
 
 **The axis that actually got taken was the WORKSPACE, not focus.** Every
 pre-existing hint in the setup said "restore focus"; none mentioned workspaces.
+
+**So: prose alone has already failed to stop this twice** — a prohibitions list
+that omits the operator's screen reads as permission, and absence next to
+present siblings is not neutral. (That sentence used to sit in `RULES.md` as its
+own bullet; it is a statement ABOUT the rule rather than an instruction, so it
+lives here now. The rules it justifies — never as a side effect, never more than
+once per run, never alternately, restore BOTH focus and workspace — are all
+still in the core, unnarrowed.)
 
 ## guards-narrower
 

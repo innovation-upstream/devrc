@@ -54,6 +54,11 @@ HELPER_NAMES = {"tree_hash", "_tree_hash", "_manifest", "_fingerprint"}
 # it and forgetting this list fails it too.
 EXPECTED_MEMBERS = {
     "test_analyze_service_index_backup.py",
+    # Added 2026-08-25 with `claim-work`. Its `_fingerprint` hashes a caller
+    # repository before and after a claim, to pin that the tool never touches the
+    # tree it is claiming work in — so a transient maintenance.lock would read as
+    # "the claim mutated your repo". Caught by this ledger, not by a red CI run.
+    "test_claim_work.py",
     "test_analyze_service_index_commit.py",
     "test_analyze_service_index_restore_verify.py",
     "test_handoff_doc.py",
