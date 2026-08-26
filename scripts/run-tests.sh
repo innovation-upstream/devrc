@@ -2807,9 +2807,9 @@ EXPECTED_SKIPS=(
   "scripts/signal/tests|needs a real Postgres|unset:SIGNAL_PG_DSN"
   # GUARD 9's positive control for `_own_xdist_run_id()`
   # (test_gitenv_sibling_exclusion.py::test_a_real_worker_reports_a_run_id).
-  # 🔴 IT CANNOT BE MADE TO RUN SERIALLY, and the alternative was checked before
-  # pinning — the skill_audit note below is the standing reminder that
-  # re-pointing beats pinning whenever the test can be made to RUN.
+  # 🔴 IT CANNOT BE FAKED INTO RUNNING IN-PROCESS, and the alternative was
+  # checked before pinning — the skill_audit note below is the standing reminder
+  # that re-pointing beats pinning whenever the test can be made to RUN.
   # `_own_xdist_run_id()` answers non-None only when the run id is in
   # `os.environ` and ABSENT from `/proc/self/environ`, i.e. assigned at RUNTIME
   # by xdist inside an already-exec'd worker. Exporting PYTEST_XDIST_WORKER by
@@ -2817,21 +2817,36 @@ EXPECTED_SKIPS=(
   # no run id; and exporting PYTEST_XDIST_TESTRUNUID too puts it in
   # `/proc/self/environ`, which the function correctly reads as INHERITED and
   # rejects (that is `test_an_INHERITED_run_id_does_not_make_us_a_worker`, in
-  # the same file). A serial arrangement that made this control pass would be
-  # asserting against a faked condition — a vacuous positive control, which is
-  # strictly worse than a pinned skip.
+  # the same file). Any env-forged arrangement asserts against a faked
+  # condition — a vacuous positive control, strictly worse than a pinned skip.
+  # ⚠ NARROWER THAN IT FIRST READ, and MEASURED: `-n 1 --dist loadfile` DOES
+  # spawn a real `gw0`, so the control runs and passes there (6 passed). What
+  # that arrangement is not is SERIAL — it is one worker, in a separate process.
+  # Adopting it would delete the in-process mode `DEVRC_TEST_JOBS=1` exists to
+  # provide (a bisect, a flake hunt, a debugger), which is the mode this entry
+  # is unbreaking. So the judgment stands on the trade, not on impossibility.
   # CONDITIONAL on DEVRC_XDIST_ACTIVE, NOT on PYTEST_XDIST_WORKER: this ledger
   # is evaluated in the RUNNER's shell, where xdist's variable is never set.
   # See the flag's definition next to PYTEST_PARALLEL_ARGS for why. (It is set
   # far below this array; only the evaluation order matters, and that happens in
   # GUARD 2 long after both.)
   # 🔴 CONSEQUENCE, stated so it is not a surprise: in the DEFAULT parallel mode
-  # — which is what both gate tiers run — this test RUNS, so the pin costs no
-  # coverage where merges are gated. It forgives the skip only in the explicitly
-  # serial mode (`DEVRC_TEST_JOBS=1`, or a nested run), which is the mode this
-  # file itself recommends for a bisect or a flake hunt. Before this entry that
-  # mode exited 1 on GUARD 2 alone: #841 introduced both the test and the
-  # parallelism, so it shipped a race whose documented workaround it had broken.
+  # this test RUNS, so the pin costs no coverage in the mode the gate tiers
+  # normally take. It forgives the skip only where the run is serial —
+  # `DEVRC_TEST_JOBS=1`, or a nested run — which is the mode this file itself
+  # recommends for a bisect or a flake hunt. Before this entry that mode exited
+  # 1 on GUARD 2 alone: #841 introduced both the test and the parallelism, so it
+  # shipped a race whose documented workaround it had broken.
+  # ⚠ "the gate tiers run parallel" is NPROC-DERIVED, NOT structural, so say the
+  # conditional part out loud: `_devrc_default_jobs` is `min(nproc, 4)`, and the
+  # comment beside it anticipates 1–2-core CI nodes. Measured 2026-08-26 on
+  # THIS host: `nix build .#checks.x86_64-linux.pytests` logged
+  # `parallelism =4 (-n 4 --dist loadfile)`, so the sandbox saw >= 4 cores and
+  # the control ran. On a genuinely 1-core builder the gating tier is SERIAL, this
+  # pin applies, and GUARD 9's positive control does not run behind a green
+  # gate. That trade is accepted; it must not be silent. If a builder ever
+  # lands on one core, the fix is to make the CONTROL independent of the
+  # runner's mode, not to delete this entry.
   "scripts/tests|only meaningful inside a real xdist worker|unset:DEVRC_XDIST_ACTIVE"
 )
 # ⚠ REMOVED, deliberately — do not re-add. `scripts/tests/test_skill_audit.py`
@@ -3007,11 +3022,24 @@ PYTEST_PARALLEL_ARGS=()
 # while PYTEST_XDIST_WORKER is INHERITED and set, i.e. exactly inverted.
 # This flag is the same fact read at the end that owns it — we are the process
 # that decides whether xdist workers exist at all — so it tracks the `-n` in
-# `PYTEST_PARALLEL_ARGS` by construction. Assigned unconditionally first, so an
-# exported value from the ambient environment cannot forge it.
-# Deliberately a plain shell variable, NOT exported: nothing downstream of
-# pytest may branch on it, and `${!_v-}` reads shell variables just fine.
+# `PYTEST_PARALLEL_ARGS` by construction.
+#
+# 🔴 THE `=""` RESET IS LOAD-BEARING, NOT TIDINESS. Without it an ambient
+# `DEVRC_XDIST_ACTIVE=1` in the caller's environment forges "we are parallel",
+# the pin stops applying, and a SERIAL run goes `fail=1 unexpected=1` — the
+# exact permanently-red gate this ledger entry exists to remove. Pinned by
+# `test_an_ambient_value_cannot_forge_the_flag`; deleting this line used to
+# survive the whole suite, because every other case drives the variable through
+# an environment the harness has already scrubbed.
+#
+# 🔴 `export -n` because the attribute SURVIVES re-assignment. A plain
+# assignment does not un-export a name the ambient environment already
+# exported, so without this the flag would reach pytest and its workers on some
+# invocations and not others — an inconsistently-exported flag is worse than an
+# exported one. Nothing downstream may branch on it; `${!_v-}` reads a plain
+# shell variable just fine.
 DEVRC_XDIST_ACTIVE=""
+export -n DEVRC_XDIST_ACTIVE
 if [ "$PYTEST_JOBS" -gt 1 ]; then
   PYTEST_PARALLEL_ARGS=(-n "$PYTEST_JOBS" --dist loadfile)
   DEVRC_XDIST_ACTIVE=1

@@ -482,3 +482,45 @@ def test_the_runner_SETS_that_flag_exactly_when_it_passes_dash_n():
         f"parallel: {var} must be set alongside the -n argv, got "
         f"{parallel.stdout!r}. If the argv moved but the flag did not, the "
         f"pin's condition no longer tracks the mode it names.")
+
+
+def test_an_ambient_value_cannot_forge_the_flag():
+    """🔴 THE `=""` RESET, WHICH NOTHING ELSE HERE CAN SEE.
+
+    Every other case drives the condition variable through `_bash`, and `_bash`
+    POPS every ledger condition var from the environment before each run — so
+    no other case can ever observe an ambient value, and deleting the reset
+    line survived the entire suite. Measured consequence of that deletion: a
+    SERIAL run with the flag exported gave `fail=1 pin_expected=2
+    unexpected=1`, i.e. precisely the permanently-red gate this ledger entry
+    exists to remove, reached from a caller's environment rather than a code
+    change.
+
+    So this case deliberately puts the value BACK, via `env_extra` (applied
+    after the pop), and requires the block to clear it.
+
+    It also pins the second half of that line's promise — the flag must not be
+    EXPORTED. Bash keeps the export attribute across re-assignment, so a name
+    the ambient environment already exported stays exported through a plain
+    `VAR=""`; without `export -n` the flag would reach pytest and its workers
+    on exactly the invocations where a caller happens to export it, and not
+    otherwise. Nothing branches on it today, which is the whole reason to fix
+    it now rather than after something does.
+    """
+    _, var = _xdist_pin()
+    block = _extract("PYTEST_PARALLEL_ARGS=()", "\n# Every other lever")
+    probe = (f'\nprintf "flag=[%s] exported=%s\\n" "${{{var}-}}" '
+             f'"$(env | grep -c \'^{var}=\' || true)"\n')
+
+    forged = _bash(f"PYTEST_JOBS=1\n{block}{probe}", {var: "1"})
+    assert forged.returncode == 0, forged.stderr
+    flag, exported = forged.stdout.strip().split()
+    assert flag == "flag=[]", (
+        f"an ambient {var}=1 survived into a SERIAL run ({flag}): the pin then "
+        f"does not apply, the skip is unforgiven, and the gate is red again — "
+        f"the `{var}=\"\"` reset is gone or no longer unconditional")
+    assert exported == "exported=0", (
+        f"{var} is EXPORTED ({exported}) — bash keeps the export attribute "
+        f"across re-assignment, so `export -n` is what makes the "
+        f"'plain shell variable, NOT exported' comment true when a caller "
+        f"already exported the name")
