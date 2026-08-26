@@ -148,8 +148,8 @@ ACKNOWLEDGED_UNSTUBBED = {
         "justification cannot rot into a claim about a file that has changed"),
     "home-manager": (
         {"bar-status-poll", "drift-check.sh", "keylog-spin-capture.sh",
-         "notify-failure.sh", "playwright-nixos", "session-manager",
-         "session-resolve", "ship.sh", "tmux-post-save.sh",
+         "notify-failure.sh", "playwright-nixos", "resume-state.sh",
+         "session-manager", "session-resolve", "ship.sh", "tmux-post-save.sh",
          "tmux-scratch-slots.sh"},
         "MEASURED unreachable: a whole-tier run under a recording interceptor "
         "logged ZERO calls. TWO of these are executed by scripts/tests and "
@@ -190,7 +190,21 @@ ACKNOWLEDGED_UNSTUBBED = {
         "sentence was added to correct a comment which had documented the "
         "hotkey as a `$mod+Shift+<key>` i3 chord bound to nothing; the "
         "correction is what put the file in this scanner's sights, and it is "
-        "re-justified here rather than reworded to dodge the scanner"),
+        "re-justified here rather than reworded to dodge the scanner. "
+        "resume-state.sh (added 2026-08-25 with the SKILL-freshness block) is "
+        "the FIFTH of this shape and the one that most needed checking, "
+        "because unlike the four above it IS executed by scripts/tests — three "
+        "suites run it end to end. Its three occurrences of the name were "
+        "grepped and are all PROSE: one comment above skill_block, and two "
+        "inside strings the block PRINTS (the `store copy at … — only a "
+        "home-manager switch replaces it` provenance label, and the DRIFT line "
+        "telling the reader that a switch, not a `git pull`, is what replaces "
+        "a stale deployed skill). Naming the fix is the whole point of those "
+        "sentences, so they are re-justified here rather than reworded to "
+        "dodge the scanner. The set of binaries the script can spawn is "
+        "`git`, `readlink`, `timeout`, `ssh` (only as git's transport, via "
+        "GIT_SSH_COMMAND), `mktemp`, `stat`, `date`, `jq`, `awk`/`sed`/`grep` "
+        "and `clawgatectl`; the SKILL block adds only `git` and `readlink`"),
     "nixos-rebuild": (
         {"airvpn-sudo", "ship.sh"},
         "MEASURED unreachable in the same whole-tier run; both call sites are "

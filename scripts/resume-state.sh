@@ -2,7 +2,9 @@
 # resume-state.sh — INITIATIVE-scoped, on-demand live-state reconciler for /resume.
 #
 # Given one handoff doc (an initiative), it reconciles the doc's claims against
-# FRESH live state and emits a compact digest: GIT/PR, WORKLOAD, ALERTS, DRIFT.
+# FRESH live state and emits a compact digest: SKILL, GIT/PR, WORKLOAD, ALERTS,
+# DRIFT. (SKILL answers a different question from the rest — "are the
+# INSTRUCTIONS I am executing current?" — see skill_block.)
 # On-demand (never cached — resume must see reality, not a stale snapshot),
 # scoped to just this initiative's slice (standup.sh already covers the fleet).
 #
@@ -532,6 +534,60 @@ UNRECONCILED=()  # sources that did NOT answer — an empty DRIFT means less whe
 # edits, it is this session's work-in-progress and stays authoritative — but
 # loudly, because reconciling against unpushed text is its own trap.
 HANDOFF_TEXT="" HANDOFF_NOTE="" HANDOFF_ALT="" HANDOFF_REF="" HANDOFF_REL=""
+
+# --- shared with skill_block: ONE fetch policy, ONE default-branch rule -----
+#
+# 🔴 ONE RULE, ONE PLACE. Two consumers now need "bring origin up to date,
+# bounded, never interactive" and "which ref is origin's default branch" — and a
+# predicate open-coded at two sites is wrong at one of them sooner or later. The
+# fetch is additionally MEMOISED per directory: `handoff_freshness` and
+# `skill_block` usually name the same checkout, and a resume must not pay two
+# network round-trips to answer one question. The memo stores the RESULT, not
+# merely "attempted", because a second caller reading a cached 0 over a fetch
+# that FAILED would print "compared against fresh refs" about refs that are
+# whatever was already on disk.
+#
+#   rc 0  fetched (or already fetched this run)
+#   rc 1  fetch attempted and failed
+#   rc 2  fetch deliberately skipped ($RESUME_STATE_SKIP_FETCH)
+declare -A FETCH_RC=()
+bounded_fetch(){
+  local d="$1"
+  # 🔴 AN EMPTY DIRECTORY IS AN EMPTY ARRAY SUBSCRIPT, AND BASH TREATS THAT AS
+  # AN ERROR — `FETCH_RC[]: bad array subscript`, twice, and the run exits 1.
+  # A digest must NEVER fail a resume over its own bookkeeping. Not reachable
+  # today (every caller guards `$d` first), which is exactly why it needs to be
+  # here: found by a mutant that removed one of those guards, where the whole
+  # script died instead of falling through to the next check.
+  [ -n "$d" ] || return 1
+  [ -n "${FETCH_RC[$d]:-}" ] && return "${FETCH_RC[$d]}"
+  local rc=0
+  if [ -n "${RESUME_STATE_SKIP_FETCH:-}" ]; then
+    rc=2
+  else
+    # Bounded, non-interactive, and never a prompt. A fetch that cannot complete
+    # must cost seconds, not a hung resume.
+    GIT_TERMINAL_PROMPT=0 \
+    GIT_SSH_COMMAND='ssh -oBatchMode=yes -oConnectTimeout=5 -oStrictHostKeyChecking=accept-new' \
+      timeout 25 git -C "$d" fetch --quiet origin >/dev/null 2>&1 || rc=1
+  fi
+  FETCH_RC[$d]=$rc
+  return "$rc"
+}
+
+# origin's default branch for $1, or "" when it cannot be determined.
+default_branch(){
+  local d="$1" db c
+  db=$(git -C "$d" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null)
+  db=${db#origin/}
+  if [ -z "$db" ]; then
+    for c in trunk main master; do
+      git -C "$d" rev-parse --verify -q "origin/$c" >/dev/null 2>&1 && { db="$c"; break; }
+    done
+  fi
+  printf '%s' "$db"
+}
+
 handoff_freshness(){
   [ -n "$HANDOFF" ] || return 0
   HANDOFF_TEXT=$(cat "$HANDOFF")
@@ -541,25 +597,14 @@ handoff_freshness(){
   git -C "$d" remote get-url origin >/dev/null 2>&1 || {
     HANDOFF_NOTE="working-tree copy — origin freshness UNCHECKED (no origin remote)"; return 0; }
 
-  # Bounded, non-interactive, and never a prompt. A fetch that cannot complete
-  # must cost seconds, not a hung resume.
-  if [ -z "${RESUME_STATE_SKIP_FETCH:-}" ]; then
-    GIT_TERMINAL_PROMPT=0 \
-    GIT_SSH_COMMAND='ssh -oBatchMode=yes -oConnectTimeout=5 -oStrictHostKeyChecking=accept-new' \
-      timeout 25 git -C "$d" fetch --quiet origin >/dev/null 2>&1 \
-      || HANDOFF_NOTE="[fetch failed; compared against refs already on disk] "
-  else
-    HANDOFF_NOTE="[fetch skipped; compared against refs already on disk] "
-  fi
+  bounded_fetch "$d"
+  case $? in
+    1) HANDOFF_NOTE="[fetch failed; compared against refs already on disk] " ;;
+    2) HANDOFF_NOTE="[fetch skipped; compared against refs already on disk] " ;;
+  esac
 
-  local db c
-  db=$(git -C "$d" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null)
-  db=${db#origin/}
-  if [ -z "$db" ]; then
-    for c in trunk main master; do
-      git -C "$d" rev-parse --verify -q "origin/$c" >/dev/null 2>&1 && { db="$c"; break; }
-    done
-  fi
+  local db
+  db=$(default_branch "$d")
   [ -n "$db" ] || { HANDOFF_NOTE="${HANDOFF_NOTE}working-tree copy — origin freshness UNCHECKED (no origin/<default-branch> ref)"; return 0; }
 
   local rel
@@ -606,6 +651,215 @@ handoff_freshness(){
   else
     HANDOFF_NOTE="${HANDOFF_NOTE}⚠ working-tree copy, which has UNCOMMITTED edits and differs from $ref (${ln_local} lines local vs ${ln_remote} on $ref)"
     UNRECONCILED+=("handoff doc has uncommitted local edits and differs from $ref (${ln_local} vs ${ln_remote} lines) — reconciled the LOCAL copy; the $ref text is at $alt")
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# SKILL FRESHNESS — are the INSTRUCTIONS this session is executing current?
+#
+# 🔴 A SKILL IS LOADED ONCE, FROM THE DEPLOYED COPY, AND NEVER RE-READ.
+# `/resume` reads `~/.claude/skills/resume/SKILL.md`, which nix manages: it is a
+# symlink into either the working tree (`mkOutOfStoreSymlink`) or a /nix/store
+# copy written by the last `home-manager switch`. Neither tracks `origin/main`,
+# and `git pull` moves NEITHER. So an agent can execute a superseded procedure
+# for a whole session with nothing able to say so.
+#
+# Measured 2026-08-25: a session invoked `/resume` at 17:19 and carried out its
+# step 6 — claim a work item with `gh pr list`, push the branch early. That step
+# had been replaced by `scripts/claim-work.sh` in #847 ("claim-work is the lock.
+# This is a COMMAND, not a habit."). The session followed the old text and never
+# noticed, because nothing in the system compares the loaded copy to origin.
+#
+# 🔴 THE OPERAND IS THE DEPLOYED FILE, NOT THE WORKING TREE. The working-tree
+# copy is not what Claude read; comparing it would answer a question nobody
+# asked. And WHICH of the two the deployed path is must be settled by
+# `readlink -f` — the repo's own rule — never by a diff: byte-identical files
+# prove nothing there, because identity can simply mean they are ONE file.
+#
+# 🔴 SCOPE, STATED HONESTLY: this runs at resume START. It catches "the copy you
+# loaded was ALREADY behind". It cannot catch a skill change that lands MID-
+# session — which is exactly what happened above (#847 landed 2h20m after that
+# session began). That case remains open.
+#
+# Every way this can fail to measure emits a `!` GAP and prints COULD NOT
+# MEASURE. It must never print a reassuring all-clear it did not earn: the
+# defect being closed here IS a silent pass.
+skill_block(){
+  echo "SKILL"
+  local name
+  # 🔴 `${x-default}`, NOT `${x:-default}`. UNSET means "nobody overrode it, so
+  # check /resume" — the default that makes this fire without being asked. SET
+  # BUT EMPTY means "check none", an explicit act with an explicit line printed
+  # for it. Collapsing those two with `:-` would make "check nothing" impossible
+  # to express, and every hermetic caller would have to fake a ~/.claude.
+  #
+  # ONE site, deliberately. Spelling `${RESUME_STATE_SKILL-resume}` twice made
+  # the second copy's `-`-vs-`:-` UNOBSERVABLE — the guard below always
+  # returned first — so a mutant of it survived the whole suite. A predicate
+  # that cannot disagree with itself is a predicate nobody has to keep right.
+  local want="${RESUME_STATE_SKILL-resume}"
+  if [ -z "$want" ]; then
+    echo "  skill-read: (RESUME_STATE_SKILL is empty — NO skill was checked; the instructions this session is executing were not compared against origin)"
+    return
+  fi
+  # Unquoted on purpose: the override is a space-separated list of skill names,
+  # so other skills can borrow this check. bash word-splits it; there is no
+  # glob-shaped skill name, and `set -f` is not in force here.
+  for name in $want; do skill_freshness "$name"; done
+}
+
+skill_freshness(){
+  local name="$1"
+  local cdir="${RESUME_STATE_CLAUDE_DIR:-$HOME/.claude}"
+  local dep="$cdir/skills/$name/SKILL.md"
+  local rel="claude/skills/$name/SKILL.md"
+
+  # 🔴 `-e` FOLLOWS SYMLINKS, so it is FALSE for a DANGLING one — and a dangling
+  # managed link is a live failure mode here (2026-08-11: 46 of 139 on the
+  # laptop, all into a garbage-collected /nix/store path, over a clean
+  # checkout). Left as `[ ! -e ]` alone, that case reported "no deployed copy",
+  # which reads as "this skill was never deployed" and sends the reader to
+  # entirely the wrong fix. `-L` separates them.
+  if [ ! -e "$dep" ] && [ ! -L "$dep" ]; then
+    printf '  skill-read: %s — COULD NOT MEASURE (no deployed copy at %s)\n' "$name" "$dep"
+    UNRECONCILED+=("the /$name skill has no deployed copy at $dep, so the instructions this session is executing were NOT compared against origin — their age is UNKNOWN")
+    return
+  fi
+
+  # 🔴 `readlink -f` IS THE ARBITER, and it answers two questions at once: does
+  # the path resolve at all (a dangling link into a GC'd store path is a live
+  # failure mode on these hosts), and does it terminate in a checkout (live) or
+  # in /nix/store (a copy, updated only by a switch).
+  local real
+  real=$(readlink -f "$dep" 2>/dev/null)
+  if [ -z "$real" ] || [ ! -f "$real" ]; then
+    printf '  skill-read: %s — COULD NOT MEASURE (%s resolves nowhere)\n' "$name" "$dep"
+    UNRECONCILED+=("the /$name skill's deployed path $dep resolves nowhere — a dangling symlink into a garbage-collected /nix/store path? Whatever this session loaded, its age could not be measured")
+    return
+  fi
+
+  local d="" live=0 cand
+  d=$(git -C "$(dirname "$real")" rev-parse --show-toplevel 2>/dev/null) || d=""
+  if [ -n "$d" ]; then
+    live=1                                   # mkOutOfStoreSymlink into a checkout
+  else
+    # A store copy carries no history of its own, so the comparison needs a
+    # checkout of the source. Named explicitly, then the canonical handle, then
+    # the conventional path — and if none of them is a git repo, that is a GAP,
+    # not a default.
+    for cand in "${RESUME_STATE_SKILL_REPO:-}" "${DEVRC:-}" "$HOME/workspace/devrc"; do
+      [ -n "$cand" ] || continue
+      d=$(git -C "$cand" rev-parse --show-toplevel 2>/dev/null) && break
+      d=""
+    done
+  fi
+  local prov
+  if [ "$live" -eq 1 ]; then
+    prov="live working-tree copy at $real"
+  else
+    prov="store copy at $real — only a home-manager switch replaces it"
+  fi
+  if [ -z "$d" ]; then
+    printf '  skill-read: %s — COULD NOT MEASURE (no git checkout of the skill source found; %s)\n' "$name" "$prov"
+    UNRECONCILED+=("the /$name skill's deployed copy is a $prov and no git checkout of its source could be found (tried \$RESUME_STATE_SKILL_REPO, \$DEVRC, ~/workspace/devrc) — its age against origin is UNKNOWN")
+    return
+  fi
+
+  if ! git -C "$d" remote get-url origin >/dev/null 2>&1; then
+    printf '  skill-read: %s — COULD NOT MEASURE (%s has no origin remote; %s)\n' "$name" "$d" "$prov"
+    UNRECONCILED+=("the /$name skill could not be compared: $d has no origin remote — the deployed instructions' age is UNKNOWN")
+    return
+  fi
+
+  local pre=""
+  bounded_fetch "$d"
+  case $? in
+    1) pre="[fetch failed; compared against refs already on disk] " ;;
+    2) pre="[fetch skipped; compared against refs already on disk] " ;;
+  esac
+
+  local db
+  db=$(default_branch "$d")
+  if [ -z "$db" ]; then
+    printf '  skill-read: %s%s — COULD NOT MEASURE (no origin/<default-branch> ref in %s; %s)\n' "$pre" "$name" "$d" "$prov"
+    UNRECONCILED+=("the /$name skill could not be compared: $d has no origin/<default-branch> ref — the deployed instructions' age is UNKNOWN")
+    return
+  fi
+  local ref="origin/$db"
+
+  # On the live path the tracked name is asked of git rather than assumed: a
+  # checkout may hold the skill somewhere this constant does not name.
+  if [ "$live" -eq 1 ]; then
+    local tracked
+    tracked=$(git -C "$d" ls-files --full-name --error-unmatch -- "$real" 2>/dev/null) \
+      && rel="$tracked"
+  fi
+
+  # 🔴 PROVE THE PATH EXISTS AT THE REF FIRST — a comparison against an absent
+  # operand reports SAME, not MISSING.
+  if ! git -C "$d" cat-file -e "$(printf '%s:%s' "$ref" "$rel")" 2>/dev/null; then
+    printf '  skill-read: %s%s — COULD NOT MEASURE (%s is not on %s; %s)\n' "$pre" "$name" "$rel" "$ref" "$prov"
+    UNRECONCILED+=("the /$name skill could not be compared: $rel does not exist on $ref — the deployed instructions' age is UNKNOWN")
+    return
+  fi
+
+  local dep_hash tip_hash
+  dep_hash=$(git -C "$d" hash-object -- "$real" 2>/dev/null)
+  tip_hash=$(git -C "$d" rev-parse "$(printf '%s:%s' "$ref" "$rel")" 2>/dev/null)
+  if [ -z "$dep_hash" ] || [ -z "$tip_hash" ]; then
+    printf '  skill-read: %s%s — COULD NOT MEASURE (could not hash the deployed copy or the %s blob)\n' "$pre" "$name" "$ref"
+    UNRECONCILED+=("the /$name skill could not be compared: git could not hash the deployed copy or the $ref blob for $rel — the deployed instructions' age is UNKNOWN")
+    return
+  fi
+  if [ "$dep_hash" = "$tip_hash" ]; then
+    printf '  skill-read: %s%s — deployed copy is CURRENT with %s (%s)\n' "$pre" "$name" "$ref" "$prov"
+    return
+  fi
+
+  # The deployed copy differs. On the LIVE path that can mean this session's own
+  # uncommitted edits, which is not staleness — same fork the handoff check
+  # makes, and it must not be called STALE.
+  if [ "$live" -eq 1 ] && ! git -C "$d" diff --quiet -- "$rel" 2>/dev/null; then
+    printf '  skill-read: %s⚠ %s — deployed copy is the working tree, which has UNCOMMITTED edits and differs from %s\n' "$pre" "$name" "$ref"
+    UNRECONCILED+=("the /$name skill you are executing has UNCOMMITTED local edits and differs from $ref — these instructions are unpushed, so nobody else is running them")
+    return
+  fi
+
+  # DIRECTION AND SIZE, not merely "differs": walk the commits that touched this
+  # path on $ref and find the one whose blob the deployed copy IS. Its index is
+  # how many commits the deployed copy is behind FOR THIS PATH.
+  #
+  # The walk is CAPPED so a long-lived path cannot turn a resume into a
+  # thousand `rev-parse` calls. Hitting the cap is NOT a clean answer — it means
+  # "older than the newest N", printed as such. The cap is env-overridable
+  # purely so the capped branch is reachable from a test with a 3-commit
+  # fixture; a guard no test can reach is a guard nobody has watched work.
+  local cap="${RESUME_STATE_SKILL_SCAN_CAP:-200}"
+  local behind=0 found="" capped="" c h scanned=0
+  while read -r c; do
+    scanned=$((scanned+1))
+    if [ "$scanned" -gt "$cap" ]; then capped=1; break; fi
+    h=$(git -C "$d" rev-parse -q --verify "$(printf '%s:%s' "$c" "$rel")" 2>/dev/null) || h=""
+    if [ "$h" = "$dep_hash" ]; then found="$c"; break; fi
+    behind=$((behind+1))
+  done < <(git -C "$d" log --format=%H "$ref" -- "$rel" 2>/dev/null)
+
+  local newest
+  newest=$(git -C "$d" log -1 --format='%h %s' "$ref" -- "$rel" 2>/dev/null)
+  local howto="read it with: git -C $d show $ref:$rel"
+
+  if [ -n "$found" ]; then
+    printf '  skill-read: %s🔴 %s — deployed copy is %s commit(s) BEHIND %s for %s (newest it lacks: %s) [%s]\n' \
+      "$pre" "$name" "$behind" "$ref" "$rel" "$newest" "$prov"
+    DRIFT+=("the /$name skill THIS SESSION IS EXECUTING is STALE: the deployed copy at $dep is $behind commit(s) behind $ref for $rel (newest it lacks: $newest) — $howto and follow THAT text, not the loaded one; only a home-manager switch replaces the deployed copy")
+  else
+    # Content that matches no commit of this path is not a clean pass either —
+    # it means the deployed artefact was built from a tree nobody pushed.
+    local how="matches NO commit of $rel on $ref"
+    [ -n "$capped" ] && how="is older than the newest $cap commit(s) touching $rel on $ref (scan capped)"
+    printf '  skill-read: %s🔴 %s — deployed copy %s (built from an uncommitted tree?); newest on %s: %s [%s]\n' \
+      "$pre" "$name" "$how" "$ref" "$newest" "$prov"
+    DRIFT+=("the /$name skill THIS SESSION IS EXECUTING $how — the deployed copy at $dep was built from a tree that was never pushed, so its instructions are not anyone else's; $howto to see what $ref says")
   fi
 }
 
@@ -1083,6 +1337,9 @@ main(){
   echo "## resume-state $(date -u +%FT%TZ)"
   echo "# repo: ${REPO:-?}  slug: ${SLUG:-?}"
   handoff_freshness
+  # FIRST, deliberately: this is a claim about the INSTRUCTIONS being executed,
+  # and it has to be read before the findings those instructions produce.
+  skill_block
   git_pr_block
   workload_block
   alerts_block
