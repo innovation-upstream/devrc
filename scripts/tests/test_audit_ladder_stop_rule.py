@@ -5,28 +5,48 @@ WHAT THE RULE IS
 ----------------
 `claude/RULES.md` mandates SEVERAL delta re-audit rounds after a review fix, and
 for a measured reason: "every delta audit found something the previous round's
-fix had introduced". Nothing bounded that, so the ladder ran past its own stop
-condition. Measured over 443 Claude Code sessions in 14 days, audit-round
-escalation was the largest single token sink in this repo:
+fix had introduced". Nothing said when to STOP, and the obvious stop signal --
+the auditor's "safe to merge" verdict -- is the wrong one.
 
-    PR #804   8 numbered delta rounds; rounds 5, 6, 7 and 8 ALL returned
-              "safe to merge" -- the stop condition was met at 5 and four
-              rounds ran anyway
-    PR #482   6 rounds
-    PR #505   5 rounds
-    PR #390   5 rounds
-    PR #393   5 rounds
+Verified against devrc #804's own commit bodies (`gh pr view 804 --json commits`,
+then the message bodies): **rounds 5, 6 and 7 each returned "safe to merge" AND
+each reported real defects that were then fixed.** Round 7's was a `didDrag`
+latch pinned on its SET but not its RELEASE -- deleting the reset, deleting the
+clear, and deleting BOTH were all green. A ladder keyed to the VERDICT stops at
+round 5 and ships a guard that reads as pinned and is vacuous in both directions.
 
-The rule that closes it is one sentence: **a clean round ends the ladder; never
-run another round to confirm a clean round.**
+The rule that closes it is one sentence, keyed to findings rather than to the
+verdict or to a count: **a clean round ends the ladder; never run another round
+to confirm a clean round.**
+
+🔴 A RETRACTION, KEPT BECAUSE THE RETRACTED VERSION SOUNDS RIGHT
+----------------------------------------------------------------
+This module first justified the rule as a fix for measured WASTE -- "#804's
+rounds 5-8 all returned safe to merge, so four rounds ran after the stop
+condition was met", plus round counts for #482/#505/#390/#393. **Every
+load-bearing part of that is false.** #390 has ONE commit and no ladder; #393's
+five commits are independent follow-on fixes, not numbered rounds; #482's rounds
+are unnumbered; and critically, **no cited PR contains a single round that ran
+and found nothing** -- so none of them evidences a wasted round at all. Even
+#804's round 8, whose auditor called the clean state the stop condition, still
+carried three 🟢 (two were shipped features that could be unwired with the suite
+green). The ladder ran to 8 legitimately and this stop rule was never exercised
+on it.
+
+So the rule is FORWARD-LOOKING with a demonstrated near-miss. It is not a remedy
+for observed waste, and must not be cited as one.
 
 🔴 WHY THIS MODULE ALSO GUARDS THE COUNTER-EVIDENCE
 ---------------------------------------------------
 The obvious fix -- cap the rounds at N -- was written first and REJECTED, on this
-repo's own evidence. Session `f23b37ec` legitimately needed round 4 because BOTH
-of round 3's blockers were introduced by round 2's own fixes; a cap at 2 would
-have shipped a corrupted census artifact. So the count is set by FINDINGS, never
-by a number.
+repo's own verifiable evidence. devrc #505's round 2 opens "Round 1 fixed six
+findings and introduced two of its own", and its round 4 caught a ReDoS that
+round 3's OWN fix introduced -- `{7,40}` inside a `*` loop, three 40-char shas
+not returning in 30 s, hanging `scan_open_actions` and so `/handoff` with no
+output -- plus a terminator requirement round 3 added that silently dropped ten
+marker shapes, "the failure this detector exists to prevent, reintroduced by the
+fix for the previous one". A cap at 2 or 3 ships both. So the count is set by
+FINDINGS, never by a number.
 
 That makes the "not a cap" clause load-bearing, not decoration: without it the
 next person reading "stop earlier" reaches for the cap again, and the rule that
@@ -142,9 +162,31 @@ SKILL_STOP_BODY = (
 )
 SKILL_NOT_A_CAP = (
     "🔴 **This is NOT a round cap, and a cap was rejected.** The count is set by "
-    "FINDINGS, never by a number: session `f23b37ec` legitimately needed round 4 "
-    "because **both** of round 3's blockers were introduced by round 2's own "
-    "fixes, and a cap at 2 would have shipped a corrupted artifact."
+    "FINDINGS, never by a number, and #505 is why: its round 2 opens *\"Round 1 "
+    "fixed six findings and introduced two of its own\"*, and its round 4 caught "
+    "a **ReDoS that round 3's own fix introduced** — three 40-char shas did not "
+    "return in 30 s, hanging `/handoff` with no output — plus a terminator "
+    "requirement that round 3 had added and that silently dropped ten marker "
+    "shapes, *\"the failure this detector exists to prevent, reintroduced by the "
+    "fix for the previous one\"*. A cap at 2 or 3 ships both."
+)
+
+# 🔴 The load-bearing EVIDENCE sentence: verdict != findings. This is what makes
+# the rule findings-keyed rather than verdict-keyed, and it is the half that
+# survived verification when the original "measured waste" justification did not.
+SKILL_VERDICT_NOT_STOP = (
+    "🔴 **A \"safe to merge\" VERDICT is not the stop signal — the FINDINGS are.** "
+    "#804's rounds **5, 6 and 7 each returned \"safe to merge\" and each still "
+    "reported real defects** that were then fixed"
+)
+
+# 🔴 The RETRACTION itself is pinned. Without this, deleting the retraction is a
+# silent edit that leaves the false "four wasted rounds" story free to be
+# rewritten from memory by the next author -- which is exactly how it got into
+# five files the first time.
+SKILL_NOT_WASTE = (
+    "⚠ **#804 is NOT an example of a wasted round, and neither is any other PR "
+    "cited here.**"
 )
 
 # `claude/RULES-ARCHIVE.md`, anchor `audit-fix-resets-gate` -- the evidence the
@@ -153,10 +195,20 @@ SKILL_NOT_A_CAP = (
 # where a future editor is TOLD to move detail, and an eviction that loses the
 # rejection loses the only record of why the narrow rule was chosen.
 ARCHIVE_REJECTED_CAP = (
-    "A numeric CAP was the first version of this fix and was **rejected**. "
-    "Session `f23b37ec` legitimately needed round 4 because **both** of round "
-    "3's blockers were introduced by round 2's own fixes; a cap at 2 would have "
-    "shipped a corrupted census artifact."
+    "A numeric CAP was the first version of this fix and was **rejected**, on "
+    "evidence that IS verifiable: #505's round 2 opens *\"Round 1 fixed six "
+    "findings and introduced two of its own\"*, and its round 4 caught a ReDoS "
+    "that **round 3's own fix** introduced"
+)
+
+# The archive's copy of the retraction. Same reasoning as SKILL_NOT_WASTE, and
+# more important here: the archive is where a future editor is sent to LOOK UP
+# why this rule exists, so a retraction that rots out of it is worse than one
+# that rots out of the skill.
+ARCHIVE_RETRACTION = (
+    "**Every load-bearing part of that is false**, and it was checked against "
+    "`gh pr view <n> --json commits` only after it had been written into five "
+    "places."
 )
 
 
@@ -181,14 +233,15 @@ def _assert_pinned_once(path: Path, claim: str, what: str) -> None:
         "spelled-guards).\n"
         "  If you reworded it deliberately, update the constant in "
         "scripts/tests/test_audit_ladder_stop_rule.py in the SAME commit.\n"
-        "  If you DELETED it: the ladder loses its stop condition. Measured "
-        "cost of not having one -- devrc #804 ran eight rounds, of which 5, 6, "
-        "7 and 8 all returned 'safe to merge'.\n"
+        "  If you DELETED it: the ladder loses its stop condition, and the only "
+        "signal left is the auditor's VERDICT -- which devrc #804 proves is the "
+        "wrong one (its rounds 5, 6 and 7 each returned 'safe to merge' while "
+        "still reporting real defects).\n"
         "  If you replaced it with a round CAP: a cap was written first and "
-        "rejected. Session f23b37ec legitimately needed round 4 because BOTH of "
-        "round 3's blockers came from round 2's own fixes. Read the "
-        "`audit-fix-resets-gate` section of claude/RULES-ARCHIVE.md before "
-        "re-deriving that."
+        "rejected. devrc #505's round 1 introduced two of its own findings and "
+        "round 3's fix introduced a ReDoS, both caught by later rounds -- a cap "
+        "at 2 or 3 ships them. Read the `audit-fix-resets-gate` section of "
+        "claude/RULES-ARCHIVE.md before re-deriving that."
     )
 
 
@@ -248,12 +301,34 @@ def test_the_rejected_cap_is_recorded_where_the_rule_lives():
     )
 
 
+def test_the_rule_is_justified_by_the_verdict_gap_not_by_claimed_waste():
+    """🔴 The justification is guarded because it was WRONG once already.
+
+    The first version of this work justified the rule as a fix for measured
+    waste ("#804's rounds 5-8 all returned safe to merge, four ran anyway"). It
+    was false, and by the time it was checked it sat in five files. What is true
+    and verifiable is narrower: a "safe to merge" VERDICT is not the stop signal,
+    because #804's rounds 5, 6 and 7 each returned one while still reporting real
+    defects.
+
+    Both halves are pinned: the surviving evidence, and the retraction. Pinning
+    only the evidence would let the retraction be deleted, and a deleted
+    retraction is how the false story gets rewritten from memory.
+    """
+    _assert_pinned_once(
+        SKILL_MD, SKILL_VERDICT_NOT_STOP, "the verdict-is-not-the-stop-signal claim"
+    )
+    _assert_pinned_once(SKILL_MD, SKILL_NOT_WASTE, "the not-a-wasted-round retraction")
+    _assert_pinned_once(ARCHIVE_MD, ARCHIVE_RETRACTION, "the archive's retraction")
+
+
 def test_the_stop_rule_shares_a_bullet_with_the_rule_it_bounds():
     """A RELATIONSHIP pin, not a component pin.
 
     The stop clause and "Budget for SEVERAL rounds" are counterweights: read
-    apart, each is wrong. The several-rounds mandate alone produced the eight-
-    round ladder; the stop condition alone reads as "one audit is enough", which
+    apart, each is wrong. The several-rounds mandate alone leaves the ladder with
+    no stop signal but the verdict; the stop condition alone reads as "one audit
+    is enough", which
     is the failure `audit-fix-resets-gate` exists to prevent (a fix that shipped
     a completely inert feature past 428 green tests and a second clean audit).
 
@@ -271,10 +346,10 @@ def test_the_stop_rule_shares_a_bullet_with_the_rule_it_bounds():
         "\n\nclaude/RULES.md: the audit-ladder stop clause and the "
         "'Budget for SEVERAL rounds' mandate are no longer in the same bullet "
         f"(found {len(holding_both)} lines holding both).\n"
-        "  They are counterweights. Several-rounds alone is what produced the "
-        "eight-round ladder on #804; the stop condition alone reads as 'one "
-        "audit is enough', which is the exact failure the bullet exists to "
-        "prevent.\n"
+        "  They are counterweights. Several-rounds alone leaves the ladder with "
+        "no stop signal but the auditor's verdict, which devrc #804 shows is the "
+        "wrong one; the stop condition alone reads as 'one audit is enough', "
+        "which is the exact failure the bullet exists to prevent.\n"
         "  Restore them to one bullet, or re-point this test deliberately and "
         "explain in the commit how a reader still meets both claims together."
     )

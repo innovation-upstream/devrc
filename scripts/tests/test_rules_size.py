@@ -466,14 +466,31 @@ ARCHIVE_MD = REPO_ROOT / "claude" / "RULES-ARCHIVE.md"
 # rounds continue. It reuses that bullet's frame, trigger and the
 # `audit-fix-resets-gate` anchor, so it adds no `-> archive:` tag.
 #
-# The measurement it rests on: across 443 sessions in 14 days, audit-round
-# escalation was the largest single token sink, and on devrc #804 rounds 5, 6, 7
-# and 8 ALL returned "safe to merge" -- four rounds run purely to re-confirm a
-# clean one. 🔴 Do NOT restate this rule as a CAP. A cap was the first version of
-# the fix and was rejected on this file's own evidence: session f23b37ec
-# legitimately needed round 4 because BOTH of round 3's blockers were introduced
-# by round 2's fixes, so a cap at 2 would have shipped a corrupted artifact. The
-# clause therefore says "the count is set by FINDINGS, never by a number".
+# 🔴 THE JUSTIFICATION THIS BUMP SHIPPED WITH WAS WRONG, AND THE CORRECTION IS
+# PART OF THE LEDGER. The bump was first argued as buying a rule against measured
+# WASTE: "#804 rounds 5, 6, 7 and 8 all returned 'safe to merge' -- four rounds
+# run purely to re-confirm a clean one", plus round counts for #482/#505/#390/
+# #393. Checked afterwards against `gh pr view <n> --json commits`, that is false
+# in every load-bearing part: #390 has ONE commit, #393's are unnumbered
+# follow-on fixes, and NO cited PR contains a round that ran and found nothing.
+# The figures had already been written into five files by then -- which is the
+# reusable lesson: an unverified number propagates at the speed of the edit that
+# quotes it, so verify a citation BEFORE it is restated, not after.
+#
+# What survives verification, and what the clause actually rests on: on #804,
+# rounds 5, 6 and 7 each returned a "safe to merge" VERDICT while still reporting
+# real defects -- including a `didDrag` latch pinned on its SET but not its
+# RELEASE, where deleting the reset, the clear, or BOTH were all green. So a stop
+# rule keyed to the VERDICT would have shipped a vacuous guard, and the clause is
+# keyed to FINDINGS instead. That is a forward rule with a near-miss, NOT a
+# remedy for observed waste; the rule is unchanged, only its justification is.
+#
+# 🔴 Do NOT restate this rule as a CAP. A cap was the first version of the fix and
+# was rejected on evidence that IS verifiable: #505's round 2 opens "Round 1 fixed
+# six findings and introduced two of its own", and its round 4 caught a ReDoS that
+# round 3's OWN fix introduced (three 40-char shas not returning in 30 s, hanging
+# /handoff). A cap at 2 or 3 ships both. The clause therefore says "the count is
+# set by FINDINGS, never by a number".
 #
 # 🔴 EVICTION WAS RE-RUN, NOT ASSUMED EXHAUSTED. The 2026-08-21 entry declared the
 # duplication vein exhausted but scoped that claim honestly ("re-running will not

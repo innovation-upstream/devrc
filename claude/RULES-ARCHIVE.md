@@ -140,19 +140,46 @@ Measured twice in one session: an adversarial audit correctly identified a missi
 inert** feature that still passed 428 green tests and a second clean audit. The audit was right
 about the gap and the fix was wrong about reality.
 
-**The stop condition, and why it is not a cap.** A 14-day audit of 443 Claude Code sessions found
-audit-round escalation to be the largest single token sink in devrc. Measured from transcripts: PR
-#804 ran **eight** numbered delta re-audit rounds, and rounds **5, 6, 7 and 8 all returned "safe to
-merge"** — the stop condition was met at round 5 and four rounds ran anyway, much of each fix round
-spent correcting the round count in Claude's own prose (*"I did it again — appended the eighth
-clause without moving the count"*). #482 took six rounds, #505 five, #390 and #393 five each.
+**The stop condition, and why it keys on FINDINGS rather than on the verdict or a count.**
 
-A numeric CAP was the first version of this fix and was **rejected**. Session `f23b37ec`
-legitimately needed round 4 because **both** of round 3's blockers were introduced by round 2's own
-fixes; a cap at 2 would have shipped a corrupted census artifact. The rule that survives is
-narrower and costs nothing when rounds are still productive: rounds continue while the previous one
-produced a finding that needed fixing, and the FIRST round that returns none is the last — it is
-never re-confirmed.
+🔴 **A RETRACTION FIRST, because the retracted version is the one that sounds right.** This rule was
+first justified as a fix for measured waste: "#804 ran eight rounds; rounds 5, 6, 7 and 8 all
+returned *safe to merge*, so the stop condition was met at round 5 and four rounds ran anyway",
+alongside "#482 took six rounds, #505 five, #390 and #393 five each". **Every load-bearing part of
+that is false**, and it was checked against `gh pr view <n> --json commits` only after it had been
+written into five places. #390 has **one** commit and no ladder at all; #393's five commits are
+independent follow-on fixes, not numbered rounds; #482's rounds are unnumbered. Most importantly,
+**no cited PR contains a single round that ran and found nothing** — so not one of them is evidence
+of a wasted round, which is what the whole argument claimed. Do not re-derive it.
+
+What #804 **does** prove, verified in its own commit bodies, is sharper and survives:
+**a "safe to merge" VERDICT is not the stop signal.** Rounds 5, 6 and 7 each returned "safe to
+merge" *and* each reported real defects that were then fixed — a module-scope `installAutoStart`
+whose deletion left the entire lightbox inert in Brave at 99/99 green; four checked-in numbers
+disagreeing about one measurement; and a `didDrag` latch pinned on its SET but not its RELEASE,
+where deleting the reset, deleting the clear, and deleting BOTH were all green. A ladder keyed to
+the verdict stops at round 5 and ships a guard that reads as pinned and is vacuous in both
+directions. Round 8 returned no 🔴 and no 🟡 — its auditor called that the stop condition — but it
+still carried three 🟢, two of them shipped features that could be unwired with the suite green. So
+the ladder ran to 8 legitimately and the stop rule was never exercised on #804. It is a forward rule
+with a demonstrated near-miss, not a remedy for observed waste.
+
+A numeric CAP was the first version of this fix and was **rejected**, on evidence that IS verifiable:
+#505's round 2 opens *"Round 1 fixed six findings and introduced two of its own"*, and its round 4
+caught a ReDoS that **round 3's own fix** introduced — `{7,40}` inside a `*` loop, measured at 48 hex
+0.0007 s, 64 hex 0.028 s, three 40-char shas not returning in 30 s, hanging `scan_open_actions` and
+so `/handoff` with no output — together with a terminator requirement round 3 had added that silently
+dropped ten attempted-marker shapes, *"the failure this detector exists to prevent, reintroduced by
+the fix for the previous one"*. A cap at 2 or 3 ships both defects.
+
+The rule that survives is narrower than a cap and costs nothing while rounds are still productive:
+rounds continue while the previous one produced a finding that needed fixing, and the FIRST round
+that returns none is the last — it is never re-confirmed.
+
+**A maintained count drifts from the thing it counts.** #804 hit this three times: round 5 found
+"four `.toLowerCase()` guards" was seven, round 6 found four checked-in numbers for one measurement,
+and round 8 recorded the count regrowing wrong *twice in the paragraph about counts*. Number the list
+and tell the reader to count it rather than maintaining a total beside it.
 
 ## unreachable-guards
 *Supports: 🔴 "Mutation-test a guard before certifying it — and prove it REACHABLE, not just breakable." (the reachability half).*
