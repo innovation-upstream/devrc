@@ -232,6 +232,20 @@ debugging, changing or copying a specific pipeline.
    🔴 `enforce_admins: true` there means a wedged
    Tekton blocks everyone with no override; the escape hatch is
    `gh api -X DELETE /repos/innovation-upstream/devrc/branches/main/protection/required_status_checks`.
+10. 🔴 **RENAMING A REPO SILENTLY KILLS ITS TRIGGER.** Every trigger CEL-matches
+    `body.repository.full_name`, so a renamed repo's webhooks stop matching and post-merge CI
+    just… stops — no error, no red check, and a repo with no pushes looks identical. Measured
+    2026-08-26 renaming `ZacxDev/auditloop` → `auditloop-private`. Grep the triggers dir for the
+    OLD name and update the literal **and** the comments. 🔴 **If the freed name is re-used by
+    another repo, "restoring" the old literal points the trigger at THAT repo** — which has no
+    webhook into this EventListener, so it re-breaks CI the same silent way. Say so in a comment
+    at the filter.
+    ⚠ **`ci.zacx.dev/repo` labels are derived from the repo name, so they change at the rename
+    too**: runs before and after carry DIFFERENT labels (measured `{auditloop: 16,
+    auditloop-private: 1}`). A `kubectl get pipelinerun -l ci.zacx.dev/repo=<old>` therefore
+    returns a confident **wrong zero** — which reads exactly like "the trigger is broken". The
+    EventListener log is what discriminates: `kubectl -n tekton-ci logs -l eventlistener --since=15m`
+    shows `"/trigger":"<name>"` and `ResolvedParams` for an event that DID match.
 
 ## What / where
 
