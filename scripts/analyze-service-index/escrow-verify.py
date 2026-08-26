@@ -1291,7 +1291,36 @@ def decrypt_check(*, escrow_bytes: bytes, work_dir: Path, bucket: str,
 NON_DEFAULT_NOTE = "  <- NOT the default identity"
 
 
-def preflight_decrypt_imports(*, modules: tuple[str, ...] = None,
+def preflight_decrypt_tools(*, which=None) -> None:
+    """Refuse a `--decrypt-check` whose TOOLS are absent — before the vault.
+
+    🔴 `age` is needed by EVERY decrypt path, including `--from-dir` and an
+    injected downloader, so its scope is wider than the `minio` check below.
+    It was already checked — but deep inside `decrypt_check`, i.e. AFTER the
+    vault round-trip. That is the same "right check, wrong moment" shape this
+    module is being repaired for: on the documented workflow the operator has
+    already typed a master password by then.
+
+    🔴 THIS DOES NOT CLOSE THE CLASS. `kubectl`, `git`, a route to the tenant
+    and a readable `--store` can all still fail late, and the advertised
+    nix-shell provisions none of them — they resolve only because `nix-shell
+    -p` is impure. `age` is fixed here because it is the one precondition
+    testable with a single PATH lookup and no network.
+    """
+    which = shutil.which if which is None else which
+    if which("age") is not None:
+        return
+    raise EscrowError(
+        "AGE-MISSING",
+        "`age` is not on PATH, so the escrowed key cannot be tested against "
+        "anything. NOTHING HAS BEEN CHECKED and the vault was NOT contacted — "
+        "this refusal is raised before any `bw` call. It is an ENVIRONMENT "
+        "fault and says NOTHING about the escrow: do not read it as a verdict "
+        "on the key or on the artifacts. age is declared in "
+        "nix/pkgs/default.nix and in flake.nix `gateTools`.")
+
+
+def preflight_decrypt_imports(*, modules: tuple[str, ...] | None = None,
                               find_spec=None) -> None:
     """Refuse a `--decrypt-check` the interpreter CANNOT complete — BEFORE the
     vault is touched.
@@ -1450,13 +1479,22 @@ def run(*, bw: BitwardenCLI, identity: Path, item_name: str,
     # an absent or empty on-disk identity makes the comparison meaningless — so
     # the run should end there rather than after unlocking, listing and reading
     # a note it then has nothing to compare against.
-    disk = read_identity(identity)
+    # 🔴 FIRST, BEFORE EVEN THE LOCAL IDENTITY READ. Two orderings are pinned
+    # here as decisions, both by tests:
+    #   * ahead of `read_identity`, because IDENTITY-MISSING's remedy (point
+    #     ASIB_AGE_IDENTITY / SOPS_AGE_KEY_FILE somewhere real) is DISJOINT
+    #     from the shell fix, so reporting it first buys the operator a second
+    #     trip — the exact thing this preflight exists to prevent;
+    #   * ahead of `require_available`, because DECRYPT-DEPS-MISSING's remedy
+    #     is one nix-shell that provides `bw` too.
+    # Tools are checked before modules: `age` is needed by every decrypt path,
+    # `minio` only by the one that reaches the real bucket.
+    if decrypt:
+        preflight_decrypt_tools()
+        if downloader_factory is None and from_dir is None:
+            preflight_decrypt_imports()
 
-    # 🔴 BEFORE THE VAULT. Only when this run will build the REAL downloader:
-    # an injected factory needs none of these modules, and refusing it would
-    # make the seam untestable without the package installed.
-    if decrypt and downloader_factory is None and from_dir is None:
-        preflight_decrypt_imports()
+    disk = read_identity(identity)
 
     bw.require_available()
     status = check_vault_state(bw)
@@ -1709,6 +1747,15 @@ def main(argv: list[str] | None = None) -> int:
         if not args.decrypt:
             verdict = _go(None)
         elif args.work_dir is not None:
+            # 🔴 PREFLIGHT BEFORE THE DIRECTORY IS TOUCHED. `_private_dir`
+            # creates the whole parent chain and chmods an EXISTING directory
+            # to 0700; doing that and then refusing left a filesystem change
+            # behind a message that says nothing happened. The refusal must be
+            # the first thing that acts, not merely the first thing reported.
+            if args.decrypt:
+                preflight_decrypt_tools()
+                if args.from_dir is None:
+                    preflight_decrypt_imports()
             verdict = _go(B._private_dir(args.work_dir))
         else:
             with tempfile.TemporaryDirectory(prefix="asi-escrow-verify.") as td:
