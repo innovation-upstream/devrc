@@ -934,15 +934,27 @@ skill_freshness(){
     # pushed" sentence below — a cause it had not measured and mostly does not
     # hold. Not stale-vs-current either way: it is NOT current, and by an
     # amount this run declined to compute.
-    local how="is older than the newest $cap commit(s) touching $rel on $ref"
-    printf '  skill-read: %s🔴 %s — deployed copy %s; the scan stopped at its cap, so the DISTANCE was not measured; newest on %s: %s [%s]\n' \
+    #
+    # 🔴 "OLDER THAN" AND "RAISE THE CAP FOR THE NUMBER" WERE BOTH FALSE, in the
+    # same reachable case. MEASURED: 5 commits touch the path, the deployed
+    # content was never committed anywhere, cap=2 → this branch. The copy is not
+    # "older than" those commits — it is not in that path's history AT ALL — and
+    # raising the cap to 500 does not yield a distance, it yields
+    # "matches NO commit", i.e. no number, ever. A hedge that promises nothing
+    # is fine; one that promises something unobtainable sends the reader to run
+    # a command that cannot answer.
+    #
+    # So both halves now state only the measurement: this run looked at the
+    # newest $cap commit(s) and did not find it there.
+    local how="was NOT among the newest $cap commit(s) touching $rel on $ref"
+    printf '  skill-read: %s🔴 %s — deployed copy %s; the scan stopped at its cap, so its DISTANCE was not measured; newest on %s: %s [%s]\n' \
       "$pre" "$name" "$how" "$ref" "$newest" "$prov_full"
     # ⚠ NAMES THE EFFECTIVE CAP, NOT THE ENV VAR. Printing
     # `RESUME_STATE_SKILL_SCAN_CAP=$cap` here read `=200` on a run where the
     # variable was UNSET, and `=200` again on a run where it was `abc` — while
     # the gap line two lines away correctly quoted `=abc`. One run, two numbers,
     # both presented as the setting. And it names $dep, like its two siblings.
-    DRIFT+=("the /$name skill THIS SESSION IS EXECUTING $how — the deployed copy at $dep is NOT current, and this run stopped after $cap commit(s) without measuring by how much (raise RESUME_STATE_SKILL_SCAN_CAP for the number); $howto and follow THAT text, not the loaded one")
+    DRIFT+=("the /$name skill THIS SESSION IS EXECUTING $how — the deployed copy at $dep is NOT current, and this run stopped at its cap without searching further; raising RESUME_STATE_SKILL_SCAN_CAP widens the search, which may yield a distance or may report that no commit matches at all; $howto and follow THAT text, not the loaded one")
   else
     # The walk went all the way back and found nothing: the deployed content is
     # not any commit of this path on $ref.

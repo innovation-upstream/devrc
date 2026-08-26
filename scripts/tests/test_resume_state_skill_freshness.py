@@ -390,10 +390,10 @@ def test_the_history_walk_is_capped_and_says_what_it_did_NOT_measure(tmp_path, s
         extra_env={"RESUME_STATE_SKILL_SCAN_CAP": "2"},
     )
     line = skill_line(out)
-    assert "older than the newest 2 commit(s)" in line, (
+    assert "NOT among the newest 2 commit(s)" in line, (
         f"expected the capped sentence; got: {line}"
     )
-    assert "the DISTANCE was not measured" in line, (
+    assert "its DISTANCE was not measured" in line, (
         f"expected the capped sentence to say the distance was not measured; got: {line}"
     )
     assert "CURRENT" not in line, line
@@ -402,14 +402,23 @@ def test_the_history_walk_is_capped_and_says_what_it_did_NOT_measure(tmp_path, s
     assert len(found) == 1, found
     normalised = _norm(found[0], checkout).replace(str(tmp_path), "<TMP>")
     assert normalised == (
-        "the /resume skill THIS SESSION IS EXECUTING is older than the newest 2 "
+        "the /resume skill THIS SESSION IS EXECUTING was NOT among the newest 2 "
         "commit(s) touching claude/skills/resume/SKILL.md on origin/main — the "
         "deployed copy at <TMP>/claude/skills/resume/SKILL.md is NOT current, and "
-        "this run stopped after 2 commit(s) without measuring by how much (raise "
-        "RESUME_STATE_SKILL_SCAN_CAP for the number); read it with: git -C <REPO> "
-        "show origin/main:claude/skills/resume/SKILL.md and follow THAT text, not "
-        "the loaded one"
+        "this run stopped at its cap without searching further; raising "
+        "RESUME_STATE_SKILL_SCAN_CAP widens the search, which may yield a "
+        "distance or may report that no commit matches at all; read it with: "
+        "git -C <REPO> show origin/main:claude/skills/resume/SKILL.md and follow "
+        "THAT text, not the loaded one"
     ), normalised
+    # 🔴 AND IT MUST NOT PROMISE A NUMBER. MEASURED: 5 commits touch the path,
+    # deployed content committed nowhere, cap=2 lands here — and raising the cap
+    # to 500 yields "matches NO commit", never a distance. "(raise
+    # RESUME_STATE_SKILL_SCAN_CAP for the number)" sent the reader to a command
+    # that cannot answer. Nor may it say "older than", which is equally false of
+    # content that is not in that path's history at all.
+    assert "for the number" not in normalised, normalised
+    assert "older than" not in normalised, normalised
     # ⚠ it names the EFFECTIVE cap, never `RESUME_STATE_SKILL_SCAN_CAP=<n>` —
     # that spelling read `=200` on an UNSET run and `=200` on an `abc` run,
     # while the gap line beside it correctly quoted `=abc`.
@@ -910,16 +919,21 @@ def test_every_COULD_NOT_MEASURE_reason_the_script_can_print_is_documented():
     doc = RESUME_SKILL.read_text(encoding="utf-8")
     word = _COUNT_WORDS.get(len(reasons))
     assert word, f"add {len(reasons)} to _COUNT_WORDS"
+    # 🔴 BOTH ARMS CARRY THE SAME DISTINCTIVE MARKER, so the mutation battery can
+    # attribute a kill to THIS guard. Keyed on the filename instead, the row
+    # matched a literal that appears in half this module's assertion messages —
+    # benign, but the row then carried none of the discrimination the battery
+    # advertises, which is the failure mode the battery exists to prevent.
     assert f"**{word}** reasons" in doc, (
-        f"the script can print {len(reasons)} COULD NOT MEASURE reasons, and "
-        f"claude/skills/resume/SKILL.md does not say '**{word}** reasons'. A "
+        f"SKILL.md VOCABULARY DRIFT: the script can print {len(reasons)} COULD "
+        f"NOT MEASURE reasons and the doc does not say '**{word}** reasons'. A "
         "spelled-out count in prose is drift waiting to happen — that is why it "
         "is derived here instead of trusted."
     )
     for reason in sorted(reasons):
         assert reason in doc, (
-            f"resume-state.sh can print COULD NOT MEASURE ({reason!r}…) and "
-            "claude/skills/resume/SKILL.md never mentions it. A reader told "
+            f"SKILL.md VOCABULARY DRIFT: resume-state.sh can print COULD NOT "
+            f"MEASURE ({reason!r}…) and the doc never mentions it. A reader told "
             "there are five reasons, shown a sixth, has to guess what it means."
         )
 
@@ -1075,6 +1089,29 @@ def test_the_fetch_scanner_does_not_mistake_PROSE_for_a_command():
     )
 
 
+def test_the_script_has_no_eval_to_smuggle_a_fetch_past_the_scanner():
+    """🔴 THE KNOWN BLIND SPOT OF THE SCANNER ABOVE, CLOSED STRUCTURALLY.
+
+    Stripping quoted spans is what stops a gap MESSAGE being read as a command —
+    but it also means a fetch hidden INSIDE a quoted span (`eval "git … fetch
+    …"`, `bash -c "…"`) would go unseen and unbounded. There is no such call
+    today; this asserts that stays true, which is cheaper and more honest than
+    teaching the scanner to parse shell.
+    """
+    src = SCRIPT.read_text(encoding="utf-8")
+    code = "\n".join(
+        ln for ln in src.splitlines() if not ln.lstrip().startswith("#")
+    )
+    for smuggler in (r"\beval\b", r"\bbash -c\b", r"\bsh -c\b"):
+        assert not re.search(smuggler, code), (
+            f"{smuggler} appears in resume-state.sh — a command built inside a "
+            "quoted string is invisible to "
+            "test_every_git_fetch_in_the_script_is_wrapped_in_a_timeout, so an "
+            "unbounded fetch could hide there. Either drop it, or teach that "
+            "scanner about this construct."
+        )
+
+
 def test_a_SKIPPED_fetch_is_declared_on_the_line(tmp_path, stub_bin):
     """`RESUME_STATE_SKIP_FETCH` makes the comparison run against whatever refs
     are already on disk. That is a materially weaker claim and the line has to
@@ -1164,8 +1201,12 @@ def test_the_provenance_noun_phrase_does_not_carry_its_own_remedy(tmp_path, stub
         "the provenance must not carry its remedy into the parenthetical — "
         f"nested parens in: {line}"
     )
-    assert "remove it and re-switch" not in line, (
-        f"the provenance must not carry its remedy here; got: {line}"
+    # ⚠ SCOPED TO THE PARENTHETICAL, not the whole line. A line-wide assertion
+    # here pins more than the property: it would also forbid appending the
+    # remedy AFTER the closing paren, which is the obvious better fix if this
+    # line ever needs to carry it. Pin the property, not one implementation.
+    assert "remove it and re-switch" not in body, (
+        f"the provenance must not carry its remedy into the parenthetical; got: {line}"
     )
     gap = " ".join(gap_lines(out))
     assert "is an UNMANAGED file at" in gap, (
@@ -1300,10 +1341,22 @@ def test_a_renamed_skill_path_truncates_the_walk_never_to_CURRENT(tmp_path, stub
 
     # FIXTURE PRECONDITION, asserted rather than assumed: the walk this test is
     # about must really be truncated at the rename.
-    seen = subprocess.run(
+    #
+    # 🔴 TWO-SIDED, because the `not in` half alone is satisfied by FAILURE. A
+    # `git log` that exits 128 gives `stdout == ""`, so `seen == ['']`, so the
+    # absence assertion passes having measured nothing — the same shape as any
+    # reassuring zero from a command that never ran. The positive half (a commit
+    # the walk MUST see) and the returncode are what make the negative half mean
+    # something.
+    probe = subprocess.run(
         ["git", "-C", str(pusher), "log", "--format=%s", "origin/main", "--", REL],
         capture_output=True, text=True, env=_git_env(pusher),
-    ).stdout.split("\n")
+    )
+    assert probe.returncode == 0, f"fixture: git log failed: {probe.stderr}"
+    seen = probe.stdout.split("\n")
+    assert "skill v2" in seen, (
+        f"fixture: the walk sees nothing at all, so 'truncated' is unproven: {seen}"
+    )
     assert "skill v0 at the old path" not in seen, (
         f"fixture: the walk was not truncated by the rename — it sees {seen}"
     )

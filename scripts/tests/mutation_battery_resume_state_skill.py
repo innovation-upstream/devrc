@@ -58,7 +58,14 @@ SUITE = "scripts/tests/test_resume_state_skill_freshness.py"
 # `expected` is the phrase THIS guard is responsible for. It must show up in the
 # failure output — pytest prints the asserted line and its message with
 # --tb=short — or the kill does not count.
-MUTANTS: list[tuple[str, str, str, str, str, str]] = [
+#
+# 🔴 `old`/`new` MAY BE TUPLES OF EQUAL LENGTH, applied in order, each required
+# to occur exactly once. That exists because a faithful mutation is not always
+# one edit: restoring a pre-fix shape can mean REMOVING code in one place and
+# ADDING it in another, dozens of lines apart. Expressing only half of it and
+# calling it "the pre-fix shape" is a false label on the one instrument whose
+# entire purpose is producing quotable evidence — see R1.
+MUTANTS: list[tuple[str, str, str, str | tuple, str | tuple, str]] = [
     # ---- the block exists and is wired into main -------------------------
     ("S1", "wiring", "the SKILL block is never called",
      "  skill_block\n", "  :\n",
@@ -191,17 +198,26 @@ MUTANTS: list[tuple[str, str, str, str, str, str]] = [
     # 🔴 AN AUDIT FIX RESETS THE VERIFICATION GATE. Every one of these is a
     # change made in response to a review, so each gets a mutant of its own and
     # the WHOLE battery is re-run — not just the row for what moved.
-    # ⚠ R1 RESTORES THE ORIGINAL DEFECT rather than deleting the notice. An
-    # earlier revision deleted it outright while the description said "goes back
-    # under the findings branch" — a STRONGER mutation than the bug, described
-    # as the bug. The pre-fix shape is: no unconditional print, and the notice
-    # living in the `elif [ -z "$HANDOFF" ]` arm, where any finding shadows it.
+    # ⚠ R1 RESTORES THE ORIGINAL DEFECT, IN BOTH HALVES — and it took two
+    # attempts to make that true. The pre-fix shape (still readable at
+    # `origin/main:scripts/resume-state.sh`, the DRIFT block of `main`) is: NO
+    # unconditional print, AND the `echo` living inside the
+    # `elif [ -z "$HANDOFF" ]` arm, where any finding shadows it. Two earlier
+    # revisions did only the first half — a pure deletion, so the mutant never
+    # printed the notice at all, which is STRICTLY STRONGER than the bug — while
+    # the description claimed the pre-fix shape had been restored. The result on
+    # the sheet was right both times; the LABEL was false, on the one instrument
+    # whose stated purpose is making mutation results quotable as evidence.
     ("R1", "no-handoff", "the notice goes back under the findings branch, so any "
-     "finding suppresses it — the exact pre-fix shape, restored",
-     '  if [ -z "$HANDOFF" ]; then\n'
-     '    echo "  (no handoff loaded — nothing to reconcile; this is NOT a clean bill of health)"\n'
-     '  fi\n',
-     '',
+     "finding suppresses it — the exact pre-fix shape, both halves",
+     ('  if [ -z "$HANDOFF" ]; then\n'
+      '    echo "  (no handoff loaded — nothing to reconcile; this is NOT a clean bill of health)"\n'
+      '  fi\n',
+      "    # still print the gaps.\n    print_gaps"),
+     ('',
+      "    # still print the gaps.\n"
+      '    echo "  (no handoff loaded — nothing to reconcile; this is NOT a clean bill of health)"\n'
+      "    print_gaps"),
      "a finding suppressed the notice"),
     ("R1b", "no-handoff", "the notice is ALSO printed from the elif arm, so a "
      "no-handoff run with no finding prints it TWICE",
@@ -282,10 +298,12 @@ MUTANTS: list[tuple[str, str, str, str, str, str]] = [
      "    printf '  skill-read: %s — COULD NOT MEASURE (the moon was in the wrong phase)\\n' \"$name\"\n"
      "    return\n"
      "  fi\n",
-     # keyed on the FILE both assertions name, not on either one's wording: the
-     # doc guard has two arms (the spelled count, and the per-reason sweep) and
-     # which fires first depends on how many reasons the scrape found.
-     "claude/skills/resume/SKILL.md"),
+     # keyed on a marker BOTH arms of the doc guard carry and nothing else in
+     # the suite does. The guard has two arms (the spelled count, and the
+     # per-reason sweep) and which fires first depends on how many reasons the
+     # scrape found — but neither can be confused with another test now.
+     # Keyed on the filename it matched half the module's messages instead.
+     "SKILL.md VOCABULARY DRIFT"),
 
     # ---- POSITIVE CONTROL -------------------------------------------------
     # A mutant nobody doubts, kept in the batch so a run that scores everything
@@ -350,12 +368,20 @@ def main() -> int:
             return 1
 
         for mid, guard, desc, old, new, expected in MUTANTS:
-            n = orig.count(old)
-            if n != 1:
-                print(f"{mid:4} {guard:14} !! PATTERN OCCURS {n}x — NOT APPLIED — {desc}")
+            # One edit or several: a tuple means every pair is applied in order,
+            # and EACH is still required to occur exactly once. A multi-site
+            # mutant whose second half silently did not apply would be scored on
+            # the first half alone, which is the failure this loop reports.
+            pairs = list(zip(old, new)) if isinstance(old, tuple) else [(old, new)]
+            counts = [orig.count(o) for o, _ in pairs]
+            if any(c != 1 for c in counts):
+                print(f"{mid:4} {guard:14} !! PATTERN OCCURS {counts} — NOT APPLIED — {desc}")
                 bad.append(f"{mid}(not-applied)")
                 continue
-            SCRIPT.write_text(orig.replace(old, new), encoding="utf-8")
+            mutated = orig
+            for o, nw in pairs:
+                mutated = mutated.replace(o, nw)
+            SCRIPT.write_text(mutated, encoding="utf-8")
             nf, _np, out = run_suite()
             if not nf:
                 verdict = "SURVIVED"
