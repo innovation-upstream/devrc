@@ -361,6 +361,62 @@ def _registry_block(body: str) -> str:
     return body[start:] if end == -1 else body[start:end]
 
 
+def figure_problems_in(src: str, checks) -> list[str]:
+    """Cross-check every `(label, pattern, expected)` figure against `src`.
+
+    Extracted from the test body so each of the three FIRING arms -- no match,
+    more than one match, and a captured value that differs from the measured one
+    -- can be driven by a planted positive control instead of waiting for the
+    live corpus to go dirty. The live gate below calls this with the module's own
+    source; the controls call it with synthetic text. Pure: no filesystem, no
+    globals, so a control's input is exactly what the caller passes.
+    """
+    problems = []
+    for label, pattern, expected in checks:
+        found = re.findall(pattern, src)
+        if not found:
+            problems.append(f"{label}: PATTERN DID NOT MATCH ({pattern!r}) — the "
+                            f"sentence was reworded, so this figure is now unchecked")
+        elif len(found) > 1:
+            problems.append(f"{label}: pattern matched {len(found)}x ({found}) — an "
+                            "added sentence can shadow the live figure; make the "
+                            "pattern name exactly one sentence")
+        elif found[0] != expected:
+            problems.append(f"{label}: prose says {found[0]}, measured {expected}")
+    return problems
+
+
+def bb_claim_problems_in(src: str, bb: int, target: int, bb_claim: str) -> list[str]:
+    """The browser-bridge pair: the sentence is present verbatim, and it is TRUE.
+
+    Two separate guards, deliberately kept together because they are two halves
+    of one claim -- the wording pin cannot see a false sentence, and the
+    `bb > target` measurement cannot see a reworded one. Extracted for the same
+    reason as `figure_problems_in`: both arms are otherwise only reachable by
+    dirtying the real corpus.
+    """
+    problems = []
+    if " ".join(src.split()).count(bb_claim) != 1:
+        problems.append(
+            "browser-bridge claim: the sentence asserting that browser-bridge "
+            f"meets the target is not present exactly once as written.\n    "
+            f"Expected verbatim (whitespace-normalised):\n      {bb_claim}\n    "
+            "A reword makes this figure unchecked, so restore the wording or "
+            "re-point this pin deliberately."
+        )
+    if bb > target:
+        problems.append(
+            f"browser-bridge claim: prose says browser-bridge MEETS the "
+            f"{target:,} B target, but it measures {bb:,} B -- over by "
+            f"{bb - target:,} B. The sentence is now FALSE, and this module's "
+            "whole 'the target is achievable and is not in dispute' argument "
+            "rests on it. Fix browser-bridge or rewrite the argument -- do NOT "
+            "restate the new number, which is how the literal form of this "
+            "check certified the same falsehood."
+        )
+    return problems
+
+
 def test_this_modules_own_stated_figures_are_re_measured():
     """🔴 THE DOCSTRING IS A CLAIM, AND PROSE COULD NOT HOLD IT.
 
@@ -472,18 +528,7 @@ def test_this_modules_own_stated_figures_are_re_measured():
         ("routing mean, restated",   r"at the real ([\d,]+) B/row",               f"{row_bytes // len(rows):,}"),
         ("two mean routing rows",    r"two rows are ([\d,]+) B > ",               f"{2 * (row_bytes // len(rows)):,}"),
     ]
-    problems = []
-    for label, pattern, expected in checks:
-        found = re.findall(pattern, src)
-        if not found:
-            problems.append(f"{label}: PATTERN DID NOT MATCH ({pattern!r}) — the "  # pragma: no cover - the guard's own FIRING path: it fires only when the corpus is dirty, and no planted positive control drives it. Adding one is the real remedy
-                            f"sentence was reworded, so this figure is now unchecked")
-        elif len(found) > 1:
-            problems.append(f"{label}: pattern matched {len(found)}x ({found}) — an "  # pragma: no cover - the guard's own FIRING path: it fires only when the corpus is dirty, and no planted positive control drives it. Adding one is the real remedy
-                            "added sentence can shadow the live figure; make the "
-                            "pattern name exactly one sentence")
-        elif found[0] != expected:
-            problems.append(f"{label}: prose says {found[0]}, measured {expected}")  # pragma: no cover - the guard's own FIRING path: it fires only when the corpus is dirty, and no planted positive control drives it. Adding one is the real remedy
+    problems = figure_problems_in(src, checks)
 
     # ── The one figure this module does NOT own ──────────────────────────────
     # Every other gated figure derives from something this module's own change
@@ -517,24 +562,7 @@ def test_this_modules_own_stated_figures_are_re_measured():
         "while routing ~11x its own weight, so the target is achievable and is "
         "not in dispute."
     )
-    if " ".join(src.split()).count(BB_CLAIM) != 1:
-        problems.append(  # pragma: no cover - the guard's own FIRING path: it fires only when the corpus is dirty, and no planted positive control drives it. Adding one is the real remedy
-            "browser-bridge claim: the sentence asserting that browser-bridge "
-            f"meets the target is not present exactly once as written.\n    "
-            f"Expected verbatim (whitespace-normalised):\n      {BB_CLAIM}\n    "
-            "A reword makes this figure unchecked, so restore the wording or "
-            "re-point this pin deliberately."
-        )
-    if bb > target:
-        problems.append(  # pragma: no cover - the guard's own FIRING path: it fires only when the corpus is dirty, and no planted positive control drives it. Adding one is the real remedy
-            f"browser-bridge claim: prose says browser-bridge MEETS the "
-            f"{target:,} B target, but it measures {bb:,} B -- over by "
-            f"{bb - target:,} B. The sentence is now FALSE, and this module's "
-            "whole 'the target is achievable and is not in dispute' argument "
-            "rests on it. Fix browser-bridge or rewrite the argument -- do NOT "
-            "restate the new number, which is how the literal form of this "
-            "check certified the same falsehood."
-        )
+    problems += bb_claim_problems_in(src, bb, target, BB_CLAIM)
 
     assert not problems, (
         "this module's own figures no longer describe what they measure:\n  "
@@ -547,6 +575,128 @@ def test_this_modules_own_stated_figures_are_re_measured():
         f"Deliberately ungated: {list(UNGATED)}\n"
         "Re-measure and update the prose; do NOT relax this test."
     )
+
+
+# ── Positive controls for the five guard arms above ─────────────────────────
+#
+# The gate above only ever runs against a CLEAN corpus, so every one of its
+# `problems.append` branches was recorded by `scripts/dead-guard-scan.py` as
+# never executed: the guards were asserted to work, never watched to. These
+# controls feed synthetic inputs that MUST make one specific arm fire, and each
+# asserts that arm's WHOLE message, so a mutant cannot be scored dead by a
+# neighbouring arm's wording.
+#
+# The three `figure_problems_in` arms are mutually exclusive branches of one
+# loop, so each fixture is built to leave the other two silent:
+#   * no-match   -- the pattern is absent, so neither count nor value is reached;
+#   * multi-match -- `expected` EQUALS the first capture, so disabling this arm
+#     falls through to a value comparison that is TRUE and yields nothing, never
+#     a second message that could be mistaken for this one;
+#   * value-mismatch -- exactly one capture, so only the value arm can fire.
+# Fixture figures are pairwise distinct and share no value with any figure the
+# live corpus measures, so a mutant hardcoding a real constant survives none of
+# them. They are deliberately NOT restated from the gated docstring either --
+# this module's own rule is that a second hand-copy of a live number is how the
+# drift regrows, and these controls must not become such a copy.
+
+
+def test_control_figure_pattern_that_matches_nothing_reports_it_unchecked():
+    """Arm 1: a reworded sentence means the figure is silently unchecked."""
+    src = "the ledger sits at 4,441 B today"
+    pattern = r"no sentence in this fixture says ([\d,]+) B"
+    problems = figure_problems_in(src, [("absent figure", pattern, "9,173")])
+    assert problems == [
+        f"absent figure: PATTERN DID NOT MATCH ({pattern!r}) — the "
+        "sentence was reworded, so this figure is now unchecked"
+    ]
+
+
+def test_control_figure_pattern_that_matches_twice_reports_the_shadowing():
+    """Arm 2: a second sentence can shadow the live figure.
+
+    `expected` is the FIRST capture on purpose: with this arm neutered the loop
+    falls through to a value comparison that passes, so the control goes empty
+    rather than red-for-the-wrong-arm.
+    """
+    src = "row A is 2,207 B and row B is 6,619 B"
+    problems = figure_problems_in(src, [("doubled figure", r"is ([\d,]+) B", "2,207")])
+    assert problems == [
+        "doubled figure: pattern matched 2x (['2,207', '6,619']) — an "
+        "added sentence can shadow the live figure; make the "
+        "pattern name exactly one sentence"
+    ]
+
+
+def test_control_figure_whose_prose_value_drifted_reports_both_numbers():
+    """Arm 3: one clean match whose captured value is no longer the measurement."""
+    src = "the tally reads 5,003 B in prose"
+    problems = figure_problems_in(
+        src, [("stale figure", r"tally reads ([\d,]+) B", "8,761")])
+    assert problems == ["stale figure: prose says 5,003, measured 8,761"]
+
+
+def test_control_all_three_figure_arms_fire_together_with_distinct_wording():
+    """The three arms are distinguishable, not one message wearing three hats."""
+    src = "row A is 2,207 B and row B is 6,619 B. the tally reads 5,003 B in prose"
+    absent = r"no sentence in this fixture says ([\d,]+) B"
+    problems = figure_problems_in(src, [
+        ("absent figure", absent, "9,173"),
+        ("doubled figure", r"is ([\d,]+) B", "2,207"),
+        ("stale figure", r"tally reads ([\d,]+) B", "8,761"),
+    ])
+    assert problems == [
+        f"absent figure: PATTERN DID NOT MATCH ({absent!r}) — the "
+        "sentence was reworded, so this figure is now unchecked",
+        "doubled figure: pattern matched 2x (['2,207', '6,619']) — an "
+        "added sentence can shadow the live figure; make the "
+        "pattern name exactly one sentence",
+        "stale figure: prose says 5,003, measured 8,761",
+    ]
+
+
+_CONTROL_CLAIM = "PINNED FIXTURE SENTENCE about a target being met."
+
+
+@pytest.mark.parametrize("occurrences", [0, 2])
+def test_control_bb_claim_not_present_exactly_once_is_reported(occurrences):
+    """BB arm 1: the wording pin. `bb <= target`, so the value arm stays silent."""
+    src = "prelude\n" + "\n".join([_CONTROL_CLAIM] * occurrences) + "\ncoda"
+    problems = bb_claim_problems_in(src, 7_331, 10_247, _CONTROL_CLAIM)
+    assert problems == [
+        "browser-bridge claim: the sentence asserting that browser-bridge "
+        "meets the target is not present exactly once as written.\n    "
+        f"Expected verbatim (whitespace-normalised):\n      {_CONTROL_CLAIM}\n    "
+        "A reword makes this figure unchecked, so restore the wording or "
+        "re-point this pin deliberately."
+    ]
+
+
+def test_control_bb_over_target_reports_the_sentence_as_false():
+    """BB arm 2: the sentence is present verbatim and is nonetheless FALSE.
+
+    This is the walk the module's own comment describes -- the prose still says
+    browser-bridge MEETS the target while the file measures over it. The claim
+    is planted exactly once so the wording arm cannot fire and steal the kill.
+    """
+    src = f"prelude\n{_CONTROL_CLAIM}\ncoda"
+    problems = bb_claim_problems_in(src, 13_701, 11_453, _CONTROL_CLAIM)
+    assert problems == [
+        "browser-bridge claim: prose says browser-bridge MEETS the "
+        "11,453 B target, but it measures 13,701 B -- over by "
+        "2,248 B. The sentence is now FALSE, and this module's "
+        "whole 'the target is achievable and is not in dispute' argument "
+        "rests on it. Fix browser-bridge or rewrite the argument -- do NOT "
+        "restate the new number, which is how the literal form of this "
+        "check certified the same falsehood."
+    ]
+
+
+def test_control_clean_input_produces_no_problems_at_all():
+    """Negative control: neither helper invents a problem on a clean corpus."""
+    src = f"the tally reads 8,761 B in prose\n{_CONTROL_CLAIM}"
+    assert figure_problems_in(
+        src, [("stale figure", r"tally reads ([\d,]+) B", "8,761")]) == []
+    assert bb_claim_problems_in(src, 7_331, 10_247, _CONTROL_CLAIM) == []
 
 
 def test_every_reference_topic_is_routed_from_the_core():
