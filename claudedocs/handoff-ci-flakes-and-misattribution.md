@@ -1,4 +1,4 @@
-# Handoff: ci-flakes-and-misattribution — 2026-08-25
+# Handoff: ci-flakes-and-misattribution — 2026-08-25 → 2026-08-26
 
 ## Run this first — the index, one read-only command
 ```bash
@@ -22,10 +22,47 @@ session's git write, and browser-bridge tests blaming their own subject for a ne
 spool row. Both are now fixed; the flake family underneath is only half closed.
 
 ## State now
-- Branch `main`. **Nothing in flight.** Base clone `behind 1` — benign; the untracked
-  `scripts/discord-embed-ext/` WIP that was blocking `merge --ff-only` landed as **#838**
-  (all four previously local-only files verified on `origin/main`), so a plain
-  `git merge --ff-only origin/trunk`/`origin/main` clears it now.
+- Branch `main`, **nothing in flight**, base clone level with `origin/main` (0 behind).
+- 🔴 **SESSION OF 2026-08-25→26 — READ THIS BLOCK BEFORE THE OLDER ONES BELOW.**
+  Four things closed. Every one of them had already been *recorded as closed* somewhere, or
+  was closed by a claim nobody had re-derived — which is the thread's own subject arriving in
+  the thread's own notes.
+
+  | what | outcome |
+  |---|---|
+  | next-step 1 — post-#396 kill rate | **`0/65`, p=9e-9.** Preemption arm CLOSED. **#850** (`2d4348ec`) |
+  | next-step 2 — "two flaky tests" | **Neither was EVER a flake.** Both already fixed. **#850** |
+  | #841's xdist race on `launches.log` | **CLOSED** — per-worker tag, runner's ledger untouched. **#868** (`1a4eb70a`) |
+  | #841 left `DEVRC_TEST_JOBS=1` permanently RED | **CLOSED** — conditional pin. **#884** (`53b5ebce`) |
+
+  🔴 **#841 (`955603f4`, "run each pytest target 4-way under xdist") shipped a race AND broke
+  the workaround its own comment prescribed.** Both halves are fixed above. When reading
+  anything in this doc dated before 2026-08-26, remember the suite is now `-n 4 --dist
+  loadfile` by default — `loadfile` pins a FILE's tests to one worker, so intra-file
+  adjacency is unchanged, but anything sharing state ACROSS files now races.
+  ⚠ **A claim I made about that and had to withdraw, recorded so it is not re-derived:** I
+  said xdist would amplify **#783's** spool defect. It does not, by that mechanism —
+  `loadfile` preserves #783's intra-file adjacency rather than widening it. The real new
+  hazard was the cross-file `launches.log`, a different defect. The residual defensible
+  claim — 4 workers add CPU contention, which plausibly widens a thread's outlive window —
+  is **unmeasured**; do not repeat it as fact.
+- 🔴 **`broken-gate-tail` CANNOT name a failing test.** Measured over every
+  `devrc-ci-*-report` TaskRun: **24 of 139 populated, but only 1 of the 24 genuine
+  failures** — it is the *broken-gate* (kill) instrument, and its content is the last 1200B
+  of a log captured mid-suite. **The commit status is what names the test**
+  (`FAILING: <test> | TOTAL collected=…`), and that naming only begins at `a9337827`
+  (2026-08-24T20:34Z) — every failure before it carries counts and no name.
+- 🔴 **A gate run can be `FAILED` with `failed=0`, and that is BY DESIGN — not a
+  misattribution bug.** `run-tests.sh` ends `_emit_verdict "$fail"; exit "$fail"`, and every
+  GUARD sets `fail=1` independently of test results (GUARD 7 `:3522`, GUARD 8, GUARD 10
+  `:3937`, plus the floor and skip-accounting checks). So a **guard** failure reds the run
+  with zero failed tests. Seen live twice from opposite directions: commit `1ca46a80`
+  (`collected=16062 passed=16060 skipped=2 failed=0`, guard unrecoverable — pods GC'd,
+  `broken-gate-tail` empty) and #884's own red-at-base (`skipped=3 failed=0`, GUARD 2).
+  🔴 **The real defect is one level up and still OPEN: the commit-status description carries
+  only test counts**, so a guard-caused failure reads as a contradiction and sends the reader
+  hunting a flaky test that does not exist. Fix is one line in the Tekton report task —
+  name the guard when `fail=1` with `failed=0` — and it lives in **`homelab-infra`**, not here.
 - **Seven PRs merged 2026-08-25, each verified by CONTENT (a squash is never an ancestor):**
 
 | PR | squash | what |
@@ -273,25 +310,62 @@ read the root cause first; the design is what failed, not the code.
    carries counts and no name, which is why the two tests above were unattributable rather
    than unexplained. 17 of the window's 24 genuine failures are named; all 17 are read and
    **neither test above appears**.
-4. 🔴 **UNEXPLAINED, found while doing the above: a leg reported `FAILED` with `failed=0`.**
-   Commit `1ca46a80` (`devrc-ci-jqx65`, 2026-08-25T20:44Z):
-   `FAILED: pytests — TOTAL collected=16062 passed=16060 skipped=2 failed=0`. The arithmetic
-   closes (16060+2=16062), so no test failed and the leg still failed the PR. Either a target
-   died without producing a test failure (collection error, non-pytest target, non-zero exit)
-   or the verdict logic mis-attributes. **This is a misattribution of exactly this thread's
-   kind and it is LIVE** — it was not chased here.
-5. **Re-check `test_an_absent_origin_header_is_not_the_same_as_an_empty_one`** —
+4. ✅ **RESOLVED 2026-08-26 — the `failed=0` leg is NOT a verdict bug.** A guard fired, not a
+   test; mechanism and evidence under `State now`. Of the two possibilities this entry
+   originally offered, the FIRST was right. **What remains open is one level up and belongs to
+   `homelab-infra`:** the commit-status description carries only test counts, so a
+   guard-caused failure reads as a contradiction. Which guard fired on `1ca46a80` is
+   **unrecoverable** (pods GC'd, `broken-gate-tail` empty for it — see 3).
+5. ✅ **DONE 2026-08-26 — #841's xdist race on `launches.log`, closed as #868 (`1a4eb70a`).**
+   `loadfile` pins a FILE's tests to one worker, but ~8 sibling files in the same target also
+   invoke launchers, run on sibling workers, and append to the same run-wide log that
+   `before`/`after` assertions sample. Measured: **15 foreign lines out of 72 at `-n 4`.**
+   Fix: every recorded line carries the writing worker id as its **SECOND** field
+   (`systemctl(blocked) [gw2] …`), readers filter on it, **`run-tests.sh`'s ledger unchanged**
+   — the comment's "needs the runner's ledger model changed too" is true of per-worker log
+   FILES and false of a tag, because `NOLAUNCH_SEEN` brackets a WHOLE pytest invocation and
+   all workers run inside that bracket for the SAME target.
+   🔴 **The tag may NOT go at line start** — the runner classifies that log with three
+   `^`-anchored greps; a tag in front reclassifies the session marker and every
+   `systemctl(read)` as a real launcher reach.
+   🔴 **Three audit rounds, and each found something the green gate did not**, on a PR that
+   passed both required checks throughout. The two most transferable:
+   *(a)* the delta round killed two **widening / constant-substitution** mutants — the class a
+   deletion-only battery structurally cannot see; *(b)* one of them was the fixture trap:
+   the assertion compared against `worker_tag()`, which **in a serial run collapses to the
+   same constant `main`** the shell stub falls back to, so the fixture could never detect a
+   mutant hardcoding that literal — on the one branch the change existed to pin.
+6. ✅ **DONE 2026-08-26 — `DEVRC_TEST_JOBS=1` was permanently RED; closed as #884 (`53b5ebce`).**
+   #841 added `test_gitenv_sibling_exclusion.py::test_a_real_worker_reports_a_run_id`, which
+   `skipif`s outside a real worker — i.e. every serial run — with no `EXPECTED_SKIPS` entry, so
+   GUARD 2 alone exited 1. **So #841 shipped the race AND broke the workaround its own comment
+   prescribed.**
+   🔴 **The obvious condition is WRONG and would have been a flat pin in disguise.**
+   `_skip_entry_applies` evaluates `${!VAR-}` in the **runner's own shell**, where xdist's
+   `PYTEST_XDIST_WORKER` is never set — so `unset:PYTEST_XDIST_WORKER` applies in BOTH modes
+   and reds the PARALLEL arm. (In a nested run it inverts.) `run-tests.sh` now publishes
+   `DEVRC_XDIST_ACTIVE` from the **same `if` that adds `-n`** — reset unconditionally and
+   `export -n`'d first so an ambient value cannot forge it — and the entry is
+   `scripts/tests|only meaningful inside a real xdist worker|unset:DEVRC_XDIST_ACTIVE`.
+   **The pin cannot absorb a real skip** (measured both ways): a *different* skip in
+   `scripts/tests` still trips `UNPINNED skip group(s)` — entries are identity-matched on dir
+   **and** reason regex — and a *same-reason copycat* is caught by the count.
+   ⚠ **Residual exposure, stated because it is silent:** `_devrc_default_jobs = min(nproc, 4)`,
+   so on a genuinely 1-core builder the gating tier runs SERIAL, the pin applies, and GUARD 9's
+   positive control does not run behind a green gate. Fix direction if it ever matters: make
+   the CONTROL independent of the runner's mode — do not delete the entry.
+7. **Re-check `test_an_absent_origin_header_is_not_the_same_as_an_empty_one`** —
    `scripts/browser-bridge/tests/`. It shares #802's dropped-emit mechanism and **#802 has
    merged (`d09038d8`)**; the prior agent said verify rather than assume it is covered.
    **Now the top open flake item**, since 1 and 2 are closed.
-6. **A ninth flake, UNCONFIRMED:** `test_live_cotenants_does_not_count_this_process`
+8. **A ninth flake, UNCONFIRMED:** `test_live_cotenants_does_not_count_this_process`
    (`scripts/tests/test_git_repo_isolation.py:1479`). Leading suspect `git commit`'s detached
    `run_auto_maintenance`. 0/25 reproductions across three load conditions, **and the /proc
    watcher used failed its own positive control — so those zeros are not evidence.**
-7. **#810's two remaining cosmetic nits:** `scripts/lib/agent_ledger.py:261` still says "a 2s
+9. **#810's two remaining cosmetic nits:** `scripts/lib/agent_ledger.py:261` still says "a 2s
    timeout under load" (a second spelling of the budget), and the narrow arm's failure message
    in `test_agent_ledger.py` names the wrong cause. Neither merits its own PR.
-8. **Housekeeping, none urgent:** `homelab-talos` has **53 stash entries** and a repo-local
+10. **Housekeeping, none urgent:** `homelab-talos` has **53 stash entries** and a repo-local
    `core.hooksPath` nobody set deliberately; `devrc` has **46 worktrees**, many on merged
    branches. And `ecc4332e` references the capacity question as `#1205`, which is **not** a
    homelab-infra number (issues stop at #316, PRs at #394) — tracker unknown.
