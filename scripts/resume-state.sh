@@ -568,7 +568,7 @@ bounded_fetch(){
     # Bounded, non-interactive, and never a prompt. A fetch that cannot complete
     # must cost seconds, not a hung resume.
     GIT_TERMINAL_PROMPT=0 \
-    GIT_SSH_COMMAND='ssh -oBatchMode=yes -oConnectTimeout=5 -oStrictHostKeyChecking=accept-new' \
+    GIT_SSH_COMMAND='ssh -oBatchMode=yes -oConnectTimeout=5 -oStrictHostKeyChecking=accept-new -oServerAliveInterval=30 -oServerAliveCountMax=6' \
       timeout 25 git -C "$d" fetch --quiet origin >/dev/null 2>&1 || rc=1
   fi
   FETCH_RC[$d]=$rc
