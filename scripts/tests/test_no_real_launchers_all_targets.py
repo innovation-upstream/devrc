@@ -236,7 +236,16 @@ def test_a_target_that_reaches_a_launcher_is_named_and_red(tmp_path):
     assert "GUARD 7 problem" in out, (
         f"the run failed, but not for the launcher reason:\n{out}")
     assert str(target) in out, f"the failure did not NAME the target:\n{out}"
-    assert "notify-send NOLAUNCH-PROBE planted reach" in out, (
+    # 🔴 The `[<worker>]` tag is matched as a PATTERN, not a literal, and that is
+    # not laziness: it is whatever `PYTEST_XDIST_WORKER` the nested runner
+    # inherited from THIS session's worker, so it is `gw2` under the gate and
+    # `main` under a bare serial `pytest` — a literal would pin the harness's
+    # own parallelism rather than the guard's report. What IS pinned is that the
+    # tag is present and sits between the launcher name and the argv, because
+    # that placement is what keeps `run-tests.sh`'s ^-anchored classifiers from
+    # reading the line as something else entirely.
+    assert re.search(
+        r"notify-send \[[^\]\s]+\] NOLAUNCH-PROBE planted reach", out), (
         f"the guard reported a reach it never actually recorded:\n{out}")
 
 
@@ -386,6 +395,46 @@ def test_the_absolute_path_reach_is_intercepted_in_process(tmp_path,
     lines = nolaunch.recorded(no_real_launchers)[before:]
     assert any(ln.startswith("i3-msg(abs)") for ln in lines), (
         f"nothing was recorded for the absolute-path reach: {lines}")
+
+
+def test_the_in_process_layer_tags_the_line_with_THIS_worker(tmp_path,
+                                                             no_real_launchers,
+                                                             monkeypatch):
+    """🔴 The L2 tag must come from the ENVIRONMENT, not from a constant.
+
+    The test above already fails if L2 writes NO tag — its `recorded()` is
+    filtered, so an untagged line vanishes. What it cannot see is L2 writing the
+    WRONG tag: hardcode `nolaunch.SERIAL_WORKER` there and a serial run
+    (`DEVRC_TEST_JOBS=1`, or any bare `pytest`) agrees with it by coincidence,
+    because `worker_tag()` is `main` too. The whole point of this PR is the
+    xdist case, and that is the case a serial gate is structurally blind to.
+
+    So this forces the dimension instead of waiting for the harness to supply
+    it: a worker id no serial fallback can produce, set for the duration of one
+    in-process launch. Under `-n 4` the ambient value would be `gw<N>`; under
+    `DEVRC_TEST_JOBS=1` there is none. Either way the assertion is the same, so
+    the guard is not a hostage to how the suite happens to be invoked.
+    """
+    probe_tag = "gwABSPROBE"
+    monkeypatch.setenv("PYTEST_XDIST_WORKER", probe_tag)
+    assert nolaunch.worker_tag() == probe_tag
+
+    fake_dir = tmp_path / "elsewhere"
+    fake_dir.mkdir()
+    witness = tmp_path / "IT-RAN-TAGGED"
+    write_exec(fake_dir / "i3-msg", f'printf ran > "{witness}"\nexit 0\n')
+
+    before = len(nolaunch.recorded(no_real_launchers, worker=probe_tag))
+    subprocess.run([str(fake_dir / "i3-msg"), "workspace", "8"], check=False,
+                   capture_output=True)
+    assert not witness.exists(), "the absolute-path launcher RAN"
+
+    mine = nolaunch.recorded(no_real_launchers, worker=probe_tag)[before:]
+    assert [ln for ln in mine if ln.startswith("i3-msg(abs)")] == [
+        f"i3-msg(abs) [{probe_tag}] workspace 8"], (
+        "the in-process layer did not stamp THIS process's worker id on the "
+        f"line it wrote — a hardcoded tag reads as correct in a serial run "
+        f"and mis-attributes every launch under xdist: {mine}")
 
 
 def test_the_absolute_path_sites_are_pinned():
