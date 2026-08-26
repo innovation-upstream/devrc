@@ -473,7 +473,7 @@ WS="$(mktemp -d -t claim-work.XXXXXXXX)"
 cleanup() { rm -rf "$WS"; }
 # 🔴 EXIT ONLY, AND THAT IS A MEASUREMENT, NOT AN OVERSIGHT. An audit asked for
 # `INT TERM HUP` here on the theory that a killed run leaks its `mktemp -d`.
-# Measured 2026-08-26 on bash 5.3.3: it does NOT. bash's own terminating-signal
+# Measured 2026-08-26 on bash 5.3.15: it does NOT. bash's own terminating-signal
 # handler runs the EXIT trap, so a run SIGTERMed mid-push while parked in a
 # hanging `git push` cleaned up with `trap cleanup EXIT` alone (rc -15, zero
 # `claim-work.*` left in TMPDIR).
