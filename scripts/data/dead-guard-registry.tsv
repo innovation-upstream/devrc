@@ -19,6 +19,22 @@
 # status:
 #   instrument         -- traced; branch bodies with no executed line are flagged
 #   out-of-instrument  -- NOT measured; the selector column states why
+#   exclude            -- subtracted from an `instrument` glob before tracing
+#
+# 🔴 `exclude` IS THE ONLY STATUS WHOSE SELECTOR IS PARSED. Its shape is
+# `<path-glob> -- <reason>`, the glob half is validated at LOAD time against a
+# narrow character class (no spaces, commas, colons, absolute or `..` segments)
+# and a malformed row is a hard SystemExit, not a warning. The
+# `out-of-instrument` column stays ENGLISH -- `scripts/check-*.sh,
+# kustomize-validate.sh: same bash line-granularity limit` is a sentence, and
+# retroactively reading those rows as path patterns would silently change what
+# four repos measure with nothing in the diff to show it. That is why exclusion
+# got a new status instead of a new reading of an old one.
+#
+# 🔴 AN `exclude` ROW IS NOT AN ERASURE. Every file it removes is written into
+# the census as an `excluded` row carrying this reason, because an exclusion
+# makes the flag list shorter and a shorter list is indistinguishable from a
+# cleaner repo unless the subtraction is in the artifact too.
 #
 # repo_slug<TAB>lang<TAB>status<TAB>selector_or_reason
 
@@ -73,5 +89,15 @@ civitai/civitai	ts	out-of-instrument	~63 corpus-scanning *.test.ts guards plus e
 civitai/civitai	mjs	out-of-instrument	scripts/ci/*.mjs and .claude/hooks/*.mjs: no node coverage backend built
 
 ZacxDev/homelab-infra	python	instrument	scripts/tests/test_*.py
+# 🔴 FOUR FILES THE GLOB ABOVE SWEEPS UP THAT PYTEST CANNOT COLLECT. They are
+# named test_*.py and live in scripts/tests/, and they are not pytest modules:
+# they are standalone procedural harnesses that shell out to docker and need
+# network, they define no test functions, and they end in sys.exit(...). Their
+# real callers are direct invocation (VETR_API_DIR=... python3 <file>) and
+# scripts/tests/run-ci-suite.sh, which drives .py files one at a time through
+# `python3 -m unittest discover`; for BOTH of those a module-level sys.exit(0)
+# on "no target configured" is the correct do-nothing guard. Those files are
+# CORRECT -- the defect was here, in a glob that assumed pytest-collectability.
+ZacxDev/homelab-infra	python	exclude	scripts/tests/test_vetr_ci_*.py -- standalone docker/network integration harnesses, not pytest modules: no test functions, they sys.exit() when done, and test_vetr_ci_bootstrap_guard.py calls sys.exit(0) at MODULE level when VETR_API_DIR is unset. Under pytest that SystemExit during collection is an INTERNALERROR which aborts the entire session (`no tests ran`, rc=3), so including them traced NOTHING and published 44 flags off a run that never executed a line. Driven instead by scripts/tests/run-ci-suite.sh via `python3 -m unittest discover`, one file at a time
 ZacxDev/homelab-infra	go	out-of-instrument	~10 *_test.go guards under containers/clawgate: `go test -cover` reports per-package percentages only; no -coverprofile pipeline exists to resolve a single branch
 ZacxDev/homelab-infra	bash	out-of-instrument	scripts/check-*.sh, kustomize-validate.sh: same bash line-granularity limit
