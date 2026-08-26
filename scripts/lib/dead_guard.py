@@ -160,35 +160,57 @@ def justifications(src):
     full of string literals containing the very patterns they scan for.
     """
     out = {}
-    try:
-        toks = tokenize.generate_tokens(io.StringIO(src).readline)
-        for tok in toks:
-            if tok.type != tokenize.COMMENT:
-                continue
-            m = _JUSTIFY_RE.search(tok.string)
-            if m:
-                out[tok.start[0]] = m.group("reason").strip()
-    except (tokenize.TokenError, IndentationError, SyntaxError):
-        # A file that will not tokenize cannot be judged. The caller reports it
-        # as undecidable; returning {} here would silently mean "unjustified".
-        raise
+    toks = tokenize.generate_tokens(io.StringIO(src).readline)
+    for tok in toks:
+        if tok.type != tokenize.COMMENT:
+            continue
+        m = _JUSTIFY_RE.search(tok.string)
+        if m:
+            out[tok.start[0]] = m.group("reason").strip()
+    # A file that will not tokenize cannot be judged -- the exception is left to
+    # propagate and the caller reports it as undecidable. There is deliberately
+    # no `except: raise` here: it was a no-op that existed only to hold this
+    # comment, which is a branch that reads as handling and handles nothing.
     return out
 
 
 def evaluate(path, src, executed):
     """Flags for one file: branch bodies with no executed line.
 
-    `executed` is the set of line numbers reached during the run. A branch
-    counts as TAKEN if ANY line in its body span ran -- not merely its first
-    line -- because CPython's line attribution for a multi-line statement is
-    not guaranteed to be the statement's first line.
+    `executed` is the set of line numbers reached during the run.
+
+    🔴 A BRANCH IS TAKEN IF **ANY** LINE IN ITS BODY SPAN RAN, NOT MERELY ITS
+    FIRST. This is pinned behaviour, not defensive width: a statement that
+    emits NO BYTECODE -- `global x`, `nonlocal x` -- never produces a line
+    event, so a body whose first statement is one of those has an untraceable
+    first line while the rest of it plainly runs. Narrowing the span to the
+    first line reports such a branch DEAD while it is executing.
+    (An earlier revision claimed no reachable input distinguished the two and
+    recorded the mutant as an expected survivor. That claim was wrong, and a
+    `global` declaration is the counterexample; it is now a fixture.)
+
+    🔴 WHERE A JUSTIFICATION MAY SIT, and why it is not "anywhere near":
+    an `if` and its `else` share a condition line, so reading the hatch from
+    `cond_line` for BOTH meant one comment written about one branch silenced
+    two -- a silent false negative with no workaround. The condition line is
+    now consulted only for the branch it actually introduces (`if-body`);
+    every other kind reads the hatch from its own body span. An `else:`,
+    `case X:` or loop-`else:` LINE ITSELF still resolves nothing: put the
+    comment on the first line of the body instead.
     """
     just = justifications(src)
     flags = []
     for b in branch_bodies(src, path):
         if any(ln in executed for ln in b.lines()):
             continue
-        reason = just.get(b.cond_line) or just.get(b.first_line)
+        reason = None
+        if b.kind == "if-body":
+            reason = just.get(b.cond_line)
+        if not reason:
+            for ln in b.lines():
+                if just.get(ln):
+                    reason = just[ln]
+                    break
         flags.append(Flag(path, b, reason or None))
     return flags
 

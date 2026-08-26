@@ -74,9 +74,27 @@ restore() { cp "$T/lib.orig" "$LIB"; cp "$T/cli.orig" "$CLI"; cp "$T/reg.orig" "
 FAILURES=0
 
 # failed test names, one per line. Read the CONTENT -- never an exit code.
+# 🔴 A SUITE THAT NEVER RAN YIELDS ZERO `FAILED` LINES, i.e. "clean". Reading
+# only FAILED lines could not tell "no test failed" from "pytest died at
+# collection" -- and the two SURVIVES controls would then report `ok` over a
+# harness that ran nothing. So COUNT the collected tests and refuse below a
+# floor. The floor is deliberately far under the real count: it catches
+# collapse, not growth.
+MIN_TESTS=30
 failing() {
-  PYTHONDONTWRITEBYTECODE=1 python3 -m pytest "$SUITE" -q --no-header --tb=no \
-    -p no:cacheprovider 2>/dev/null | sed -n 's/^FAILED [^:]*::\([A-Za-z0-9_]*\).*/\1/p'
+  local out
+  out="$(PYTHONDONTWRITEBYTECODE=1 python3 -m pytest "$SUITE" -q --no-header --tb=no \
+    -p no:cacheprovider 2>/dev/null)"
+  local n
+  n="$(sed -n 's/^\([0-9]*\) passed.*/\1/p;s/^[0-9]* failed, \([0-9]*\) passed.*/\1/p' <<<"$out" | tail -1)"
+  local f
+  f="$(sed -n 's/^\([0-9]*\) failed.*/\1/p' <<<"$out" | tail -1)"
+  local total=$(( ${n:-0} + ${f:-0} ))
+  if [ "$total" -lt "$MIN_TESTS" ]; then
+    echo "__HARNESS_BROKE__ only $total test(s) ran (floor $MIN_TESTS)"
+    return
+  fi
+  sed -n 's/^FAILED [^:]*::\([A-Za-z0-9_]*\).*/\1/p' <<<"$out"
 }
 
 run() { # run <name> <target-file> <expect: a test node name | SURVIVES> <sed-expr>
@@ -89,6 +107,10 @@ run() { # run <name> <target-file> <expect: a test node name | SURVIVES> <sed-ex
   cp "$T/m" "$file"
   local killers; killers="$(failing)"
   restore
+  if grep -q __HARNESS_BROKE__ <<<"$killers"; then
+    printf '  🔴 %-40s HARNESS BROKE — %s\n' "$name" "$killers"
+    FAILURES=$((FAILURES+1)); return
+  fi
   if [ "$want" = SURVIVES ]; then
     # The control. A behaviour-free edit MUST survive; if it kills something,
     # the harness is keying on the file's text rather than on the code, and
@@ -146,16 +168,16 @@ run 'except-handlers-dropped' "$LIB" \
 printf '\n== the justification hatch (must be KILLED) ==\n'
 run 'bare-marker-now-resolves' "$LIB" \
   test_a_justification_needs_a_reason \
-  's|reason = just.get(b.cond_line) or just.get(b.first_line)|reason = just.get(b.cond_line, "x") or just.get(b.first_line, "x")|'
+  's|^        flags.append(Flag(path, b, reason or None))|        flags.append(Flag(path, b, "x" if reason is not None else None))|'
 run 'reason-no-longer-required' "$LIB" \
   test_a_justification_needs_a_reason \
   's|^    return \[f for f in flags if not f.justified_reason\]|    return []|'
 run 'hatch-read-by-regex-not-tokenize' "$LIB" \
   test_a_pragma_inside_a_STRING_is_not_a_justification \
-  's|            if tok.type != tokenize.COMMENT:|            if tok.type == tokenize.COMMENT and False:|'
+  's|^        if tok.type != tokenize.COMMENT:|        if tok.type == tokenize.COMMENT and False:|'
 run 'body-line-placement-ignored' "$LIB" \
   test_justification_is_read_from_the_condition_line_or_the_body_line \
-  's|reason = just.get(b.cond_line) or just.get(b.first_line)|reason = just.get(b.cond_line)|'
+  's|^            for ln in b.lines():|            for ln in []:|'
 
 printf '\n== the zeros that must be UNDECIDABLE, not clean (must be KILLED) ==\n'
 run 'missing-trace-scored-clean' "$CLI" \
@@ -182,10 +204,10 @@ run 'empty-instrument-selector-scored-clean' "$CLI" \
 # mutants removes real behaviour.
 run 'valueerror-not-caught-so-latin1-escapes' "$CLI" \
   test_a_guard_that_cannot_be_DECODED_is_undecidable_not_a_findings_exit \
-  's|^        except (SyntaxError, ValueError) as e:$|        except (SyntaxError,) as e:|'
+  's|^        except (SyntaxError, ValueError, OSError) as e:$|        except (SyntaxError, OSError) as e:|'
 run 'syntaxerror-not-caught' "$CLI" \
   test_an_unparseable_guard_is_undecidable_not_a_findings_exit \
-  's|^        except (SyntaxError, ValueError) as e:$|        except (ValueError,) as e:|'
+  's|^        except (SyntaxError, ValueError, OSError) as e:$|        except (ValueError, OSError) as e:|'
 run 'undecidable-arm-removed' "$CLI" \
   test_an_unparseable_guard_is_undecidable_not_a_findings_exit \
   's|^    if undecidable:$|    if False:|'
@@ -210,7 +232,7 @@ run 'census-drops-the-out-of-instrument-rows' "$CLI" \
   's|^    for r in oo:|    for r in []:|'
 run 'census-goes-back-to-append-only' "$CLI" \
   test_the_census_is_IDEMPOTENT \
-  's|^            if line.startswith(f"{slug}\\t") or line.startswith(f"# {slug} "):|            if False:|'
+  's|^            if line.startswith(f"{slug}\\t"):|            if False:|'
 run 'census-writes-the-absolute-interpreter-path' "$CLI" \
   test_the_census_never_carries_an_absolute_path \
   's|^                     interpreter_id(python, redact=True), rc)|                     interpreter_id(python, redact=False), rc)|'
@@ -236,19 +258,26 @@ run 'drop-a-ledger-row-for-unlisted-dirs' "$REG" \
   test_registry_names_every_test_directory_in_devrc \
   '/^innovation-upstream\/devrc\tpython\tout-of-instrument\tscripts\/dl-router\/tests/d'
 
-printf '\n== EXPECTED SURVIVORS — not gaps, and not left silent ==\n'
-# `_span`'s `last = max(...)` is DEFENSIVE WIDTH, not pinned behaviour. I could
-# not construct a reachable input where a branch body's FIRST line goes
-# unexecuted while a later one runs: for straight-line bodies the first
-# statement always executes when the branch is taken, and a multi-line first
-# statement still emits a line event on its own first line (measured on 3.12).
-# So `last = first` is an EQUIVALENT mutant here, and the honest report is to
-# say so rather than invent a fixture that only appears to kill it. The width
-# still earns its place -- it is what makes `any` vs `all` distinguishable at
-# all, and that mutant IS killed above.
+# 🔴 RETRACTION. This mutant was recorded here as an EXPECTED SURVIVOR, on the
+# claim that no reachable input distinguishes `last = max(...)` from
+# `last = first`. THE CLAIM WAS FALSE. `global`/`nonlocal` are compile-time
+# declarations that emit no bytecode, so a body starting with one has an
+# untraceable first line while the rest of it runs -- and the narrowed span
+# then condemns a live branch. A committed "expected survivor" is a claim like
+# any other, and this one went unchecked for exactly one round.
 run 'span-truncated-to-first-line' "$LIB" \
-  SURVIVES \
+  test_a_body_whose_FIRST_STATEMENT_EMITS_NO_BYTECODE_is_still_TAKEN \
   's|^    last = max((getattr(s, "end_lineno", None) or s.lineno) for s in body)|    last = first|'
+
+run 'census-drops-other-repos-provenance' "$CLI" \
+  test_scanning_one_repo_KEEPS_another_repos_provenance_line \
+  's|^            if line.startswith(f"# {slug} measured under"):|            if line.startswith("#"):|'
+run 'pragma-on-if-also-silences-the-else' "$LIB" \
+  test_one_pragma_on_an_IF_line_does_not_silence_its_ELSE_too \
+  's|^        if b.kind == "if-body":|        if True:|'
+run 'ledger-membership-back-to-substring' "$CLI" \
+  test_ledger_membership_is_path_segments_not_substrings \
+  's|^    return \[d for d in test_dirs(repo) if d not in named\]|    return [d for d in test_dirs(repo) if d not in " ".join(named)]|'
 
 printf '\n== POSITIVE CONTROL — a mutant that MUST survive ==\n'
 run 'comment-only-edit-must-survive' "$LIB" \

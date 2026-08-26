@@ -6,6 +6,7 @@
 #    reporting branch, or a branch driven through a subprocess. See
 #    scripts/lib/dead_guard.py. Adjudicating them is a human's job.
 repo_slug	status	location	kind	case_handled	corpus_instances	justification
+# innovation-upstream/devrc measured under Python 3.12.14 -- 🔴 RED RUN, 5 test(s) FAILED: branches downstream of a failure did not execute for a reason that is NOT deadness (pytest rc=1)
 innovation-upstream/devrc	flagged	scripts/claude-hooks/tests/test_guard_core.py:2492	if-body	execs.append(argv)	0	-
 innovation-upstream/devrc	flagged	scripts/testlib/captured_text_scan.py:143	if-body	sys.path.insert(0, str(_HERE.parent))	0	-
 innovation-upstream/devrc	flagged	scripts/testlib/captured_text_scan.py:451	if-body	esc = False	0	-
@@ -15,10 +16,10 @@ innovation-upstream/devrc	flagged	scripts/testlib/captured_text_scan.py:495	exce
 innovation-upstream/devrc	flagged	scripts/testlib/captured_text_scan.py:523	if-body	return []	0	-
 innovation-upstream/devrc	flagged	scripts/testlib/client_host_scan.py:206	except	pass	0	-
 innovation-upstream/devrc	flagged	scripts/testlib/client_host_scan.py:216	if-body	continue	0	-
-innovation-upstream/devrc	flagged	scripts/testlib/launcher_scan.py:73	except	continue	0	— unreadable file
+innovation-upstream/devrc	flagged	scripts/testlib/launcher_scan.py:73	except	continue	0	-
 innovation-upstream/devrc	flagged	scripts/testlib/launcher_scan.py:101	if-body	return True	0	-
-innovation-upstream/devrc	flagged	scripts/testlib/launcher_scan.py:218	except	continue	0	— a broken test file fails elsewhere
-innovation-upstream/devrc	flagged	scripts/testlib/launcher_scan.py:251	except	continue	0	— a broken test file fails elsewhere
+innovation-upstream/devrc	flagged	scripts/testlib/launcher_scan.py:218	except	continue	0	-
+innovation-upstream/devrc	flagged	scripts/testlib/launcher_scan.py:251	except	continue	0	-
 innovation-upstream/devrc	flagged	scripts/testlib/launcher_scan.py:258	if-body	continue	0	-
 innovation-upstream/devrc	flagged	scripts/testlib/launcher_scan.py:289	if-body	continue	0	-
 innovation-upstream/devrc	flagged	scripts/testlib/launcher_scan.py:293	except	continue	0	-
@@ -67,13 +68,14 @@ innovation-upstream/devrc	out-of-instrument	-	python	scripts/dl-router/tests, sc
 innovation-upstream/devrc	out-of-instrument	-	python	scripts/session-analysis/tests, scripts/session-analysis/session_insight/tests -- NOT SURVEYED for guard content in this pass	unmeasured	-
 innovation-upstream/devrc	out-of-instrument	-	bash	scripts/drift-check.sh, run-tests.sh, run-node-tests.sh: bash PS4/BASH_XTRACEFD line tracing works but cannot discriminate a single-line `if ...; then X; fi`, so a flag there is not decidable at line granularity	unmeasured	-
 innovation-upstream/devrc	out-of-instrument	-	mjs	skill .mjs guards: no node coverage backend built	unmeasured	-
+# ZacxDev/homelab-infra measured under Python 3.12.14 (pytest rc=0)
 ZacxDev/homelab-infra	flagged	scripts/tests/test_catch_ci_preemption.py:26	if-body	raise AssertionError(f"cannot load {_SRC} — the script moved or was renamed")	0	-
 ZacxDev/homelab-infra	flagged	scripts/tests/test_devrc_ci_names_the_failing_test.py:97	if-body	raise AssertionError(	0	-
 ZacxDev/homelab-infra	flagged	scripts/tests/test_devrc_ci_names_the_failing_test.py:114	if-body	raise AssertionError(	0	-
 ZacxDev/homelab-infra	flagged	scripts/tests/test_devrc_ci_names_the_failing_test.py:211	if-body	raise AssertionError(	0	-
 ZacxDev/homelab-infra	flagged	scripts/tests/test_devrc_ci_names_the_failing_test.py:218	if-body	raise AssertionError(	0	-
 ZacxDev/homelab-infra	flagged	scripts/tests/test_devrc_ci_names_the_failing_test.py:632	if-body	raise AssertionError(	0	-
-ZacxDev/homelab-infra	flagged	scripts/tests/test_finally_reporter_timeout_invariant.py:175	except	raise AssertionError(f"{path.name} is not parseable YAML: {exc}") from exc	0	a broken tree
+ZacxDev/homelab-infra	flagged	scripts/tests/test_finally_reporter_timeout_invariant.py:175	except	raise AssertionError(f"{path.name} is not parseable YAML: {exc}") from exc	0	-
 ZacxDev/homelab-infra	flagged	scripts/tests/test_finally_reporter_timeout_invariant.py:187	if-body	problems.append(	0	-
 ZacxDev/homelab-infra	flagged	scripts/tests/test_finally_reporter_timeout_invariant.py:202	if-body	problems.append(	0	-
 ZacxDev/homelab-infra	flagged	scripts/tests/test_finally_reporter_timeout_invariant.py:218	if-body	continue	0	-
@@ -83,6 +85,7 @@ ZacxDev/homelab-infra	flagged	scripts/tests/test_finally_reporter_timeout_invari
 ZacxDev/homelab-infra	flagged	scripts/tests/test_finally_reporter_timeout_invariant.py:475	if-body	continue  # reported by its own assertion above	0	-
 ZacxDev/homelab-infra	out-of-instrument	-	go	~10 *_test.go guards under containers/clawgate: `go test -cover` reports per-package percentages only; no -coverprofile pipeline exists to resolve a single branch	unmeasured	-
 ZacxDev/homelab-infra	out-of-instrument	-	bash	scripts/check-*.sh, kustomize-validate.sh: same bash line-granularity limit	unmeasured	-
+# civitai/talos-infra measured under Python 3.12.14 (pytest rc=0)
 civitai/talos-infra	out-of-instrument	-	python	scripts/validate-alert-nodata-state.py, validate-dashboard-metric-seam.py, validate-tekton-build-pool.py, lint-grafana-dashboards.py: these ARE python, but no pytest suite invokes them -- they are called from bash gates. This tool needs a pytest entry point to drive a guard against the corpus, so they are undecidable here, not clean	unmeasured	-
 civitai/talos-infra	out-of-instrument	-	bash	~21 scripts/validate-*.sh plus the 3,576-line scripts/gitops-delta-gate.sh: same bash line-granularity limit as above. These carry 53 tests/mutants-*.sh batteries, which already answer "does this guard fire" by a different and stronger method	unmeasured	-
 civitai/talos-infra	out-of-instrument	-	bash	.githooks/* and .claude/hooks/*.sh: same limit	unmeasured	-

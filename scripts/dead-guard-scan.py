@@ -136,9 +136,46 @@ def unregistered_test_dirs(repo, rows, slug):
     Mechanical, not heuristic: it does not try to decide what a "guard" is. It
     requires a DECISION to have been recorded for every directory that holds
     tests -- which is the homelab-infra `ci-manifest.txt` pattern.
+
+    🔴 FORWARD DIRECTION ONLY, and the docs used to claim otherwise. A NEW test
+    directory with no row fails, so the surface cannot silently GROW. A row
+    naming a directory that no longer exists does NOT fail: the out-of-
+    instrument column is prose, so there is no reliable way to tell a stale
+    path from an explanatory sentence. Saying "bidirectional" here was the
+    description-wider-than-implementation defect recurring inside its own fix.
+    (`instrument` rows ARE checked in the other direction -- a selector that
+    matches no file makes the whole scan UNDECIDABLE.)
+
+    🔴 MATCHED ON PATH SEGMENTS, NOT SUBSTRINGS. A plain `d in text` test
+    accepted `scripts/mail`, `scripts/collector`, `scripts/dl-router/test` and
+    even `"s"` as "registered", because each is a substring of some row -- so a
+    future directory that happens to be a path PREFIX of a registered one would
+    be silently accepted, which is the silent "everything is registered" this
+    function exists to prevent.
     """
     mine = [r for r in rows if r["slug"] == slug]
-    named = " ".join(r["selector"] for r in mine)
+    named = set()
+    for r in mine:
+        for tok in re.split(r"[,\s]+", r["selector"]):
+            tok = tok.strip().rstrip(",;")
+            if not tok or tok.startswith("-"):
+                continue
+            named.add(tok)
+            # A selector naming a FILE or glob (`.../test_*.py`) also registers
+            # the directory holding it -- that is the directory the ledger is
+            # about. A selector naming a DIRECTORY registers only itself: it
+            # must NOT register its parent, or listing
+            # `scripts/collector/tests` would silently accept a later
+            # `scripts/collector/`, which is a different directory needing its
+            # own decision.
+            last = tok.rsplit("/", 1)[-1]
+            if "/" in tok and ("." in last or "*" in last or "?" in last):
+                named.add(tok.rsplit("/", 1)[0])
+    # EXACT membership only. An earlier attempt also accepted a directory when
+    # some registered path sat BELOW it, which re-admitted the permissive
+    # failure: registering `scripts/collector/tests` made a later
+    # `scripts/collector/` -- a different directory, needing its own decision --
+    # read as already registered.
     return [d for d in test_dirs(repo) if d not in named]
 
 
@@ -174,8 +211,15 @@ def run_traced(repo, targets, python=None, extra_args=()):
     groups = {}
     for t in tests:
         groups.setdefault(t.parent, []).append(t)
-    if not groups:                      # only library modules registered
-        groups = {None: []}
+    if not groups:
+        # 🔴 NEVER INVOKE pytest WITH NO PATH ARGUMENTS. It would collect the
+        # TARGET REPO'S ENTIRE SUITE from cwd -- running arbitrary tests, with
+        # their side effects, in a repo we were asked only to read. With no
+        # registered test file there is nothing to drive the guards with, so
+        # the honest result is an empty trace: every library module then has
+        # zero traced lines and is reported UNDECIDABLE, which is true.
+        return ({"executed": {}, "clobbered": False}, (0, 0),
+                "no registered test file to drive the guards with")
 
     merged, code, nfail, tails = {}, 0, 0, []
     clobbered = False
@@ -319,7 +363,7 @@ def scan(repo, census_path=None, verbose=True, python=None, registry=None):
         try:
             src = t.read_text(encoding="utf-8")
             dg.branch_bodies(src, rel)
-        except (SyntaxError, ValueError) as e:
+        except (SyntaxError, ValueError, OSError) as e:
             # TWO names, not five. An audit found that only SyntaxError and
             # IndentationError were caught, so a file this tool could not
             # analyse escaped as a traceback and exit 1 -- indistinguishable
@@ -360,7 +404,7 @@ def scan(repo, census_path=None, verbose=True, python=None, registry=None):
             continue
         try:
             flags = dg.evaluate(rel, src, set(executed.get(str(t), [])))
-        except (SyntaxError, ValueError) as e:  # see the note above
+        except (SyntaxError, ValueError, OSError) as e:  # see the note above
             undecidable.append(f"{rel}: cannot be analysed ({type(e).__name__}: {e})")
             continue
         all_flags.extend(flags)
@@ -436,15 +480,24 @@ def write_census(path, slug, flags, oo, undecidable, interp="?", rc=(0, 0)):
     p.parent.mkdir(parents=True, exist_ok=True)
     code, nfail = rc if isinstance(rc, tuple) else (rc, 0)
 
+    # 🔴 KEEP OTHER REPOS' PROVENANCE LINES. Dropping every `#` line deleted the
+    # `# <slug> measured under ...` note for every OTHER repo on every scan, so
+    # the committed census ended up carrying ONE note (the last repo scanned)
+    # for four repos -- and the missing ones included the RED-RUN warning this
+    # same fix round had just added. A per-repo idempotent rewrite must replace
+    # only THIS repo's lines, not everything that starts with a hash.
     kept = []
     if p.exists():
         for line in p.read_text(encoding="utf-8").splitlines():
-            if line.startswith("#") or line.startswith("repo_slug\t"):
+            if not line.strip():
+                continue
+            if line in _CENSUS_HEADER or line.startswith("repo_slug\t"):
                 continue                       # header is re-emitted below
-            if line.startswith(f"{slug}\t") or line.startswith(f"# {slug} "):
+            if line.startswith(f"# {slug} measured under"):
+                continue                       # this repo's old note: replaced
+            if line.startswith(f"{slug}\t"):
                 continue                       # this repo's old rows: replaced
-            if line.strip():
-                kept.append(line)
+            kept.append(line)
 
     out = list(_CENSUS_HEADER)
     out.extend(kept)

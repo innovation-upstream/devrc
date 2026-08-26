@@ -23,10 +23,20 @@ Arming once in `pytest_configure` was exactly that bug: this repo's own
 escaped corruption only because that file happened to sort LAST -- an unpinned
 invariant that one registry row would have broken. So:
   * re-arm in `pytest_runtest_setup`, before each test's call phase;
-  * ALSO record whether the slot was found empty or foreign at that moment, and
-    surface it as `clobbered` so the caller can refuse to publish rather than
-    publish a false census. Re-arming alone is not enough -- a tracer cleared
-    part-way THROUGH a test still loses that test's lines.
+  * ALSO record whether the slot was found empty or foreign at that moment,
+    and again at exit, and surface it as `clobbered` so the caller can refuse
+    to publish rather than publish a false census. Re-arming alone is not
+    enough -- a tracer cleared part-way THROUGH a test still loses that test's
+    lines.
+
+🔴 STATED BLIND SPOT: a test that SAVES AND RESTORES the tracer around its own
+is invisible to this. The slot holds our tracer at every boundary we can
+inspect, yet target lines executed inside that window were never recorded. That
+is not hypothetical -- save-and-restore is the well-behaved pattern, and it is
+what this repo's own suite does. The consequence is under-recording, i.e. a
+FALSE POSITIVE against live code, and nothing here detects it. If a guard's
+tests install a tracer, scan them separately or expect flags you must
+adjudicate by hand.
 
 🔴 THE TRACE IS WRITTEN FROM `atexit`, NOT FROM A pytest HOOK. A session that
 dies on a collection error never reaches `pytest_sessionfinish`, and an absent
@@ -91,6 +101,12 @@ def pytest_runtest_setup(item):
 def _dump():
     if not _OUT:
         return
+    # 🔴 CHECK ONE LAST TIME. Detection at `pytest_runtest_setup` alone can
+    # never see a clobber in the LAST test -- there is no next setup -- which is
+    # exactly the "it only survived because that file sorted last" shape this
+    # detector exists for.
+    if _TARGETS and sys.gettrace() is not _tracer:
+        _state["clobbered"] = True
     sys.settrace(None)
     threading.settrace(None)
     pathlib.Path(_OUT).write_text(

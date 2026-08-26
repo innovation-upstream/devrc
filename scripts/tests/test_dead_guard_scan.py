@@ -196,6 +196,41 @@ def test_a_pragma_inside_a_STRING_is_not_a_justification():
     assert dg.unresolved(flags) == flags
 
 
+def test_one_pragma_on_an_IF_line_does_not_silence_its_ELSE_too():
+    """🔴 A SILENT FALSE NEGATIVE WITH NO WORKAROUND. An `if` and its `else`
+    share a condition line, so reading the hatch from `cond_line` for BOTH
+    meant one comment, written about one branch, resolved two. The condition
+    line is now consulted only for the branch it introduces."""
+    src = ('def scan(ls):\n'
+           '    for l in ls:\n'
+           '        if "ZZZ" in l:  # pragma: no cover - about the IF only\n'
+           '            return 1\n'
+           '        else:\n'
+           '            return 2\n'
+           '    return 0\n')
+    flags = _run(src, [])                  # neither branch runs
+    kinds = {f.branch.kind: f.justified_reason for f in flags}
+    assert set(kinds) == {"if-body", "else-body"}, kinds
+    assert kinds["if-body"] == "about the IF only"
+    assert kinds["else-body"] is None, \
+        "the else was silenced by a comment written about the if"
+
+
+def test_a_pragma_on_the_body_line_resolves_an_else_or_case():
+    """The documented placement for the kinds whose own header line resolves
+    nothing: put it on the first line of the body."""
+    src = ('def scan(ls):\n'
+           '    for l in ls:\n'
+           '        if "A" in l:\n'
+           '            return 1\n'
+           '        else:\n'
+           '            return 2  # pragma: no cover - unreachable in practice\n'
+           '    return 0\n')
+    flags = _run(src, ["has A"])
+    assert len(flags) == 1 and flags[0].branch.kind == "else-body", flags
+    assert dg.unresolved(flags) == []
+
+
 def test_justification_is_read_from_the_condition_line_or_the_body_line():
     for placement in (
         'if "ZZZ" in l:  # pragma: no cover - on the condition\n            return 2',
@@ -426,6 +461,29 @@ def test_a_multiline_body_is_TAKEN_when_only_SOME_of_its_lines_ran():
     assert lines == [6], lines
 
 
+def test_a_body_whose_FIRST_STATEMENT_EMITS_NO_BYTECODE_is_still_TAKEN():
+    """🔴 THE FIXTURE THAT REFUTES A CLAIM I COMMITTED.
+
+    An earlier revision declared `last = max(...)` -> `last = first` an
+    EXPECTED SURVIVOR on the grounds that no reachable input distinguishes
+    them. That was wrong. `global`/`nonlocal` are compile-time declarations
+    that emit NO BYTECODE, so their line never produces a trace event — and a
+    branch body starting with one has an untraceable first line while the rest
+    of it plainly runs. Narrowing the span to the first line condemns a live
+    branch. Measured: `global` on line 5 is absent from the trace, line 6 is
+    present.
+    """
+    src = ('G = 0\n'
+           'def scan(ls):\n'
+           '    for l in ls:\n'
+           '        if "A" in l:\n'
+           '            global G\n'
+           '            G = 1\n'
+           '    return G\n')
+    assert _run(src, ["has A"]) == [], \
+        "a branch whose first statement is a `global` declaration RAN"
+
+
 def test_the_body_span_reaches_its_LAST_line_not_just_its_first():
     """Kills `last = max(...)` -> `last = first`. Only the last line of the
     body runs, so a span truncated to the first line reports it dead."""
@@ -613,6 +671,46 @@ def test_the_census_is_IDEMPOTENT(tmp_path):
     assert len(set(rows)) == 2, rows
 
 
+def test_scanning_one_repo_KEEPS_another_repos_provenance_line(tmp_path):
+    """🔴 THE FIX FOR ONE FINDING DESTROYED THE FIX FOR ANOTHER.
+
+    Making the census idempotent by dropping every line starting with `#` also
+    dropped the `# <slug> measured under ...` note for every OTHER repo, on
+    every scan. The committed census ended up with ONE note for FOUR repos —
+    and the ones deleted included the RED-RUN warning that same round added, so
+    the artifact silently lost the caveat on 44 unresolved flags.
+    """
+    a = tmp_path / "a"
+    a.mkdir()
+    reg = _synthetic_repo(a, _E2E_GUARD)   # creates a/scripts/tests itself
+    b = tmp_path / "b"
+    (b / "scripts" / "tests").mkdir(parents=True)
+    (b / "scripts" / "tests" / "test_guard.py").write_text(_E2E_GUARD, encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(b)], check=True, timeout=60)
+    subprocess.run(["git", "-C", str(b), "remote", "add", "origin",
+                    "git@github.com:test/second.git"], check=True, timeout=60)
+    reg.write_text(reg.read_text(encoding="utf-8") +
+                   "test/second\tpython\tinstrument\tscripts/tests/test_guard.py\n"
+                   "test/second\tbash\tout-of-instrument\t"
+                   "a reason long enough to satisfy the registry's own contract "
+                   "that a row must say why it is not measured\n",
+                   encoding="utf-8")
+    census = tmp_path / "c.tsv"
+    for repo in (a, b, a):        # A, then B, then A again
+        subprocess.run([sys.executable, str(SCAN), "--repo", str(repo),
+                        "--registry", str(reg), "--census", str(census)],
+                       capture_output=True, text=True, timeout=900)
+    text = census.read_text(encoding="utf-8")
+    notes = [l for l in text.splitlines() if "measured under" in l]
+    assert len(notes) == 2, f"one note per repo, got {notes}"
+    assert any("test/synthetic" in n for n in notes), notes
+    assert any("test/second" in n for n in notes), notes
+    # ...and no repo's ROWS were duplicated by the re-scan either.
+    for s in ("test/synthetic", "test/second"):
+        rows = [l for l in text.splitlines() if l.startswith(f"{s}\t")]
+        assert len(rows) == len(set(rows)) == 2, (s, rows)
+
+
 def test_the_census_never_carries_an_absolute_path(tmp_path):
     """🔴 The committed census recorded
     `/home/<user>/workspace/.../.venv/bin/python3` — the operator's home dir
@@ -712,6 +810,33 @@ def test_registry_names_every_test_directory_in_devrc():
         "these directories hold test_*.py and appear in NO registry row, in "
         "either status — so this tool reports clean over them while never "
         "having looked:\n  " + "\n  ".join(missing))
+
+
+def test_ledger_membership_is_path_segments_not_substrings(tmp_path):
+    """🔴 A plain `d in " ".join(selectors)` accepted `scripts/mail`,
+    `scripts/collector`, `scripts/dl-router/test` and even `"s"` as registered,
+    because each is a substring of some row. So a NEW test directory that is a
+    path PREFIX of a registered one would be silently accepted — the silent
+    "everything is registered" this function exists to prevent.
+
+    devrc's own 20 directories cannot see this: they are exact members either
+    way. Driven here against a repo built to have the ambiguity.
+    """
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("dgs_seg", SCAN)
+    dgs = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(dgs)
+
+    for d in ("scripts/collector/tests", "scripts/collector", "scripts/mailer"):
+        (tmp_path / d).mkdir(parents=True, exist_ok=True)
+        (tmp_path / d / "test_x.py").write_text("def test_x():\n    pass\n",
+                                                encoding="utf-8")
+    rows = [{"slug": "probe/p", "lang": "python", "status": "out-of-instrument",
+             "selector": "scripts/collector/tests, scripts/mailer -- registered"}]
+    missing = dgs.unregistered_test_dirs(tmp_path, rows, "probe/p")
+    assert missing == ["scripts/collector"], (
+        "`scripts/collector` is a DIFFERENT directory from "
+        "`scripts/collector/tests` and needs its own decision; got " + repr(missing))
 
 
 def test_registry_is_keyed_on_the_remote_slug_not_the_clone_directory():

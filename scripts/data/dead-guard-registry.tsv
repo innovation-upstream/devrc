@@ -38,8 +38,16 @@ innovation-upstream/devrc	python	instrument	scripts/claude-hooks/tests/test_guar
 innovation-upstream/devrc	python	out-of-instrument	scripts/claude-hooks/tests/test_bash_guard.py -- NOT a pytest suite by design; its own docstring says so ("hand-rolled asserts, not pytest-collectable -- the guard calls main() at import time, so it is only ever driven via subprocess"). Registering it as instrumentable produced zero traced lines, which the scan reported UNDECIDABLE rather than publishing 400 lines of false flags against the PreToolUse deny-guard
 # Every OTHER directory in this repo holding test_*.py, listed so its absence
 # cannot read as coverage. `test_registry_names_every_test_directory_in_devrc`
-# enforces this list bidirectionally: a new test directory with no row here
-# fails, and a row naming a directory that no longer exists fails.
+# enforces this list in ONE direction: a new test directory with no row here
+# FAILS, so the surface cannot silently grow.
+# 🔴 It does NOT fail on a row naming a directory that no longer exists -- the
+# out-of-instrument column is prose, so a stale path cannot be told from an
+# explanatory sentence. An earlier version of this comment claimed the check
+# was "bidirectional"; it was not, and a planted
+# `scripts/THIS-WAS-DELETED/tests` row passed. That was the
+# description-wider-than-implementation defect this whole file is about,
+# recurring inside its own fix. `instrument` rows ARE checked the other way:
+# a selector matching no file makes the entire scan UNDECIDABLE.
 innovation-upstream/devrc	python	out-of-instrument	scripts/browser-bridge/tests -- the exemplar guard (_cli_timeout_violations) lives here, but the suite spawns the real browser CLI with a 300s budget per site, so a traced run is far too slow to be re-derivable; measure it on demand with a narrowed selector
 innovation-upstream/devrc	python	out-of-instrument	scripts/claude-hooks/tests -- the rest of it: ordinary unit suites for the notify/nudge/capture hooks rather than corpus-scanning guards; the two real guards there ARE instrumented above
 innovation-upstream/devrc	python	out-of-instrument	scripts/check-clickup-addressed/tests, scripts/collector/tests, scripts/collector/browser-ext/tests, scripts/collector/claude/tests, scripts/collector/i3/tests, scripts/collector/keylog/tests, scripts/collector/opencode/tests -- NOT SURVEYED for guard content in this pass. Recorded as unlooked-at rather than omitted; saying so is the point of this row
