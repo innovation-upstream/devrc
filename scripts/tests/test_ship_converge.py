@@ -32,6 +32,12 @@ import pytest
 SCRIPTS = Path(__file__).resolve().parents[1]
 SHIP = SCRIPTS / "ship.sh"
 HOST_ROLE_LIB = SCRIPTS / "lib" / "host-role.sh"
+# The DERIVED nix-read predicate the dirty-tree verdict is classified through.
+# Its own suite is scripts/tests/test_nix_read_paths.py; here it is copied into
+# the throwaway repo verbatim, because CONVERGE sources it out of `$repo` — the
+# post-fast-forward copy, deliberately, so a run classifies against the nix/ it
+# just landed on.
+NIXREAD_LIB = SCRIPTS / "lib" / "nix_read_paths.sh"
 
 sys.path.insert(0, str(SCRIPTS))
 
@@ -197,9 +203,64 @@ class Repo:
     # kill, so _assert_foreign_store_is_absent() pins it.
     FOREIGN_STORE = "/nix/store/zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz-home-manager-files"
 
+    # -- the nix-read fixture tree ------------------------------------------ #
+    #
+    # A minimal but REAL flake shape: flake.nix names nix/home.nix, which names
+    # one file source, one DIRECTORY source and one mkOutOfStoreSymlink. All
+    # three spellings matter — the directory one is the shape that made the
+    # measured 2026-08-25 workbench file nix-read when nobody expected it
+    # (home.nix says ${../scripts/dl-router}, copying that whole tree into the
+    # store).
+    #
+    # 🔴 The names are pairwise distinct AND distinct from every constant the
+    # assertions name (LIVE, STORE, origin/main, DIRTY). A fixture that can only
+    # produce a constant's own value cannot detect a mutant that hardcodes it.
+    NIXREAD_FLAKE = (
+        "{\n"
+        "  outputs = { self, ... }: {\n"
+        "    homeConfigurations.someone.modules = [ ./nix/home.nix ];\n"
+        "  };\n"
+        "}\n"
+    )
+    NIXREAD_HOME_NIX = (
+        "{ config, ... }:\n"
+        'let workspace = "${config.home.homeDirectory}/workspace";\n'
+        "in {\n"
+        '  home.file.".alpha".source = ../copied-alpha.txt;\n'
+        '  home.file.".bravo".source = ../charlie-dir;\n'
+        '  home.file.".delta".source =\n'
+        '    config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/echo-live.txt";\n'
+        "}\n"
+    )
+    # repo-relative -> its expected class, used by the tests AND by the writer so
+    # the two cannot drift apart.
+    NIXREAD_PATHS = {
+        "copied-alpha.txt": "STORE",
+        "charlie-dir/nested/foxtrot.txt": "STORE",   # via the DIRECTORY source
+        "echo-live.txt": "LIVE",
+    }
+
+    def _write_nixread_into(self, tree):
+        """Seed the flake shape + the real predicate lib. Returns pathspecs."""
+        (tree / "nix").mkdir(parents=True, exist_ok=True)
+        (tree / "flake.nix").write_text(self.NIXREAD_FLAKE)
+        (tree / "nix" / "home.nix").write_text(self.NIXREAD_HOME_NIX)
+        for rel in self.NIXREAD_PATHS:
+            f = tree / rel
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text(rel + " base\n")
+        lib = tree / "scripts" / "lib" / "nix_read_paths.sh"
+        lib.parent.mkdir(parents=True, exist_ok=True)
+        lib.write_text(NIXREAD_LIB.read_text())
+        return [
+            "flake.nix", "nix/home.nix", "scripts/lib/nix_read_paths.sh",
+            *self.NIXREAD_PATHS,
+        ]
+
     def __init__(self, tmp_path, gitconfig_extra="", stale_managed=(), phantom_managed=False,
                  second_host=False, ship_in_repo=False, ship_changes=True,
-                 ship_pad_lines=0, ship_broken=False, lib_broken=None):
+                 ship_pad_lines=0, ship_broken=False, lib_broken=None,
+                 nixread=False):
         """`stale_managed` seeds those entries from the BASE commit's bytes.
 
         That is the real staleness shape, not a synthetic one: the deployed
@@ -265,6 +326,8 @@ class Repo:
         extra = []
         if ship_in_repo:
             extra = self._write_ship_into(builder, 1, pad_lines=ship_pad_lines)
+        if nixread:
+            extra = [*extra, *self._write_nixread_into(builder)]
         self._git(builder, "checkout", "-q", "-B", "main")
         self._git(builder, "add", "f", "stable.txt", *self.SOURCE_PATHS, *extra)
         self._git(builder, "commit", "-q", "-m", "base")
@@ -722,26 +785,73 @@ class Repo:
                 f'git --git-dir={self.origin} update-ref refs/heads/main {advance_to} '
                 f'|| exit 97\n'
             )
-        # 🔴 POSIX sh only (mockbin owns the shebang and it is /bin/sh), so no
+        # 🔴 THIS SHIM EMULATES sshd's DISPATCH, and until 2026-08-26 it did not.
+        # It read the payload out of the LAST argv element and ran it under a
+        # HARDCODED `bash -c`, while its docstring claimed to be "a test of the
+        # remote leg rather than of a second local run". It pinned the payload
+        # TEXT and fixed the INTERPRETER — so the entire remote-leg suite was
+        # structurally blind to the one axis on which the two legs can differ,
+        # and a real bug lived there (see
+        # test_the_remote_leg_classifies_identically_to_the_local_leg).
+        #
+        # Real sshd has two modes, and both are reproduced here:
+        #   `ssh host cmd args…`  -> runs THAT command, payload arriving on stdin
+        #   `ssh host "<script>"` -> names no interpreter, so the account's LOGIN
+        #                            SHELL runs the string. On both real hosts
+        #                            that is zsh (`getent passwd zach`).
+        # zsh is in flake.nix's `gateTools` — deliberately, and for exactly this
+        # class of reason (see its comment about run3) — so the login-shell branch
+        # is REAL in both tiers and never skips.
+        login_shell = os.environ.get("SHIP_TEST_LOGIN_SHELL", "zsh")
+        # POSIX sh only (mockbin owns the shebang and it is /bin/sh), so no
         # PIPESTATUS here — the strip variant captures, then filters, then exits
         # with the payload's OWN status.
-        run = 'exec bash -c "$payload"\n'
+        dispatch = (
+            "prev=; last=\n"
+            'for a in "$@"; do prev=$last; last=$a; done\n'
+            'if [ "$prev" = bash ] && [ "$last" = -s ]; then\n'
+            "  payload=$(cat)\n"
+            "  runner=bash\n"
+            "else\n"
+            "  payload=$last\n"
+            f"  runner={login_shell}\n"
+            "fi\n"
+            # 🔴 The forcing knob, and it forces the INTERPRETER ONLY — never the
+            # payload source. Emulating "ssh ran the login shell" by also taking
+            # the payload from argv would hand zsh the literal `-s`, which fails
+            # for a reason that has nothing to do with the bug under test and
+            # would make the regression test green for the wrong cause.
+            'if [ -n "${SHIP_TEST_FORCE_LOGIN_SHELL:-}" ]; then\n'
+            f"  runner={login_shell}\n"
+            "fi\n"
+        )
+        run = 'exec "$runner" -c "$payload"\n'
         if strip_sha:
             run = (
-                'out=$(bash -c "$payload"); rc=$?\n'
+                'out=$("$runner" -c "$payload"); rc=$?\n'
                 'printf "%s\\n" "$out" | grep -v " ship-landed-sha "\n'
                 "exit $rc\n"
             )
         write_exec(
             d / "ssh",
-            "payload=\n"
-            'for a in "$@"; do payload="$a"; done\n'
+            dispatch
             + advance +
             f'export HOME="{self.remote_home}"\n'
             f'export SHIP_REPO="{self.remote_work}"\n'
             f'export GIT_CONFIG_GLOBAL="{self.gitconfig}"\n'
             "export GIT_CONFIG_SYSTEM=/dev/null\n"
             "unset XDG_STATE_HOME\n"
+            # 🔴 REAL ssh DOES NOT CARRY THE CALLER'S ENVIRONMENT, AND THIS SHIM
+            # USED TO. Every SHIP_* variable ship.sh had in its own environment
+            # reached the payload here by plain inheritance, so the forwarding
+            # this file tests was supplied by the fixture rather than by the
+            # code: a mutant deleting `SHIP_LIST_MAX=%q` from the ssh printf
+            # SURVIVED a green suite, because the shim leaked the value anyway.
+            # The payload's own prefix lines are the only legitimate way these
+            # cross the hop, so the shim scrubs them first and the printf has to
+            # do its job. Everything the far "host" legitimately owns —
+            # HOME/SHIP_REPO/the git config — is exported explicitly above.
+            "unset SHIP_NO_SWITCH SHIP_LIST_MAX\n"
             + run,
         )
         return d
@@ -1034,12 +1144,376 @@ def test_reports_missing_origin_main_as_config_error_not_divergence(repo):
 
 
 def test_verify_line_names_a_dirty_tree(repo):
-    """Dirty convergence is the normal path now — the verifier must say so."""
+    """Dirty convergence is the normal path now — the verifier must say so.
+
+    This repo carries no flake, so the classifier cannot measure and the verdict
+    falls back to the flat sentence — WITH the reason attached, which is the
+    difference between "no dirty path is nix-read" and "we did not look".
+    """
     (repo.work / "stable.txt").write_text("stable\nwip\n")
     rc, out = repo.ship()
     assert rc == 0, out
     assert "DIRTY" in out, f"verify line hides the dirty state\n{out}"
     assert "origin/main + local WIP" in out
+    assert "NOT CLASSIFIED" in out, f"the fallback does not say it could not look\n{out}"
+
+
+# --------------------------------------------------------------------------- #
+# THE CLASSIFIED DIRTY VERDICT
+#
+# 🔴 WHY THIS EXISTS. "what was built/deployed is origin/main + local WIP" was
+# true of every dirty tree and actionable for none of them. Measured on the
+# workbench 2026-08-25: the two dirty paths were a staged sudo script under
+# nix/system/ (nix opens nothing there) and a test under scripts/dl-router/
+# (which nix/home.nix copies into the store WHOLE). One of those was in the
+# artifact; nothing in the output told them apart.
+#
+# The three verdicts are three different FACTS, and each gets its own test:
+# LIVE (already deployed, no switch involved), STORE (in the generation this run
+# built), and NEITHER — which is a real verdict about the deploy, not a softened
+# warning, and is asserted to NOT print the hedged sentence.
+#
+# 🔴 The instrument controls come first: nixrepo_can_classify is the positive
+# control (the classifier reports a NON-ZERO derived population), and
+# test_verify_line_names_a_dirty_tree above is the negative one (a repo it
+# cannot measure says so instead of printing a clean verdict).
+# --------------------------------------------------------------------------- #
+@pytest.fixture
+def nixrepo(tmp_path):
+    """A throwaway repo carrying a real flake shape and the real predicate lib."""
+    return Repo(tmp_path, nixread=True)
+
+
+def test_the_classifier_reports_a_non_zero_population(nixrepo):
+    """🔴 POSITIVE CONTROL, and the reason every branch below prints its
+    denominator. A run whose derived set is EMPTY classifies every dirty path as
+    clean and prints the friendliest line in the file. So watch the number: it
+    must be non-zero, and it must be stated in the output where an operator
+    reading a verdict can see what it was measured against."""
+    (nixrepo.work / "stable.txt").write_text("stable\nwip\n")
+    rc, out = nixrepo.ship()
+    assert rc == 0, out
+    m = re.search(r"classified (\d+) dirty path\(s\) \(\d+ tracked, \d+ untracked\) "
+                  r"against (\d+) nix-read path\(s\) derived from (\d+) nix file\(s\)", out)
+    assert m, f"the verdict carries no population line\n{out}"
+    dirty, nixread, files = (int(g) for g in m.groups())
+    assert dirty >= 1, out
+    assert nixread >= 4, f"derived only {nixread} nix-read path(s)\n{out}"
+    assert files == 2, f"read {files} nix file(s), expected flake.nix + nix/home.nix\n{out}"
+
+
+def test_a_dirty_mkOutOfStoreSymlink_target_is_reported_as_LIVE(nixrepo):
+    """The strongest case: the deployed path is a link back into this working
+    tree, so the WIP is being served with no switch and no generation boundary."""
+    (nixrepo.work / "echo-live.txt").write_text("echo-live.txt wip\n")
+    rc, out = nixrepo.ship()
+    assert rc == 0, out
+    assert "DIRTY AND LIVE" in out, out
+    assert "echo-live.txt" in out
+    assert "DIRTY AND IN THE ARTIFACT" not in out, (
+        f"a live target was also reported as a store copy\n{out}"
+    )
+    assert "NO dirty path is read by nix" not in out, out
+
+
+def test_a_dirty_nix_path_literal_is_reported_as_IN_THE_ARTIFACT(nixrepo):
+    (nixrepo.work / "copied-alpha.txt").write_text("copied-alpha.txt wip\n")
+    rc, out = nixrepo.ship()
+    assert rc == 0, out
+    assert "DIRTY AND IN THE ARTIFACT" in out, out
+    assert "copied-alpha.txt" in out
+    assert "DIRTY AND LIVE" not in out, out
+    assert "NO dirty path is read by nix" not in out, out
+
+
+def test_a_dirty_file_UNDER_a_directory_source_is_still_in_the_artifact(nixrepo):
+    """🔴 THE MEASURED CASE. Nothing names this file; its ANCESTOR is the source,
+    and the whole directory is copied into the store. A predicate that matched
+    only exact spellings would call it clean — which is what a hand-written list
+    did to scripts/dl-router/tests/load_test_store.sh."""
+    p = nixrepo.work / "charlie-dir" / "nested" / "foxtrot.txt"
+    p.write_text("foxtrot wip\n")
+    rc, out = nixrepo.ship()
+    assert rc == 0, out
+    assert "DIRTY AND IN THE ARTIFACT" in out, out
+    assert "charlie-dir/nested/foxtrot.txt" in out, out
+
+
+def test_an_UNTRACKED_file_in_a_nix_read_path_is_classified_too(nixrepo):
+    """The dirty set is modified + staged + UNTRACKED, and the untracked ones are
+    CLASSIFIED rather than ignored — a file inside a directory source is found by
+    the ancestor walk whether or not git knows it.
+
+    🔴 This test asserted "in the artifact just as surely as a modified one" and
+    that was WRONG — the flake filters untracked files out. What it pins now is
+    the part that was right: the path is still found and still reported. Which
+    verdict it gets is
+    test_an_UNTRACKED_store_path_is_NOT_reported_as_in_the_artifact.
+    """
+    (nixrepo.work / "charlie-dir" / "nested" / "hotel-new.txt").write_text("new\n")
+    rc, out = nixrepo.ship()
+    assert rc == 0, out
+    assert "charlie-dir/nested/hotel-new.txt" in out, out
+    assert "UNTRACKED IN A NIX-READ PATH" in out, out
+    assert "0 tracked, 1 untracked" in out, out
+
+
+def test_a_dirty_tree_with_no_nix_read_path_says_the_deploy_IS_origin_main(nixrepo):
+    """🔴 A REAL VERDICT, and it must not be collapsed into the warning. This is
+    the case the workbench was actually in, and the old note implied otherwise."""
+    (nixrepo.work / "stable.txt").write_text("stable\nwip\n")
+    (nixrepo.work / "untracked-golf.txt").write_text("golf\n")
+    rc, out = nixrepo.ship()
+    assert rc == 0, out
+    assert "NO dirty path is read by nix" in out, out
+    assert "built/deployed IS origin/main" in out, out
+    assert "DIRTY AND LIVE" not in out, out
+    assert "DIRTY AND IN THE ARTIFACT" not in out, out
+    # 🔴 and NOT the hedged sentence: saying both would be saying nothing.
+    assert "origin/main + local WIP" not in out, (
+        f"the nix-read-free verdict still hedges\n{out}"
+    )
+
+
+def test_a_clean_tree_gets_no_classification_block_at_all(nixrepo):
+    """INVARIANT GUARD, not regression coverage — GREEN at origin/main
+    (200e6383) too, because there was no block to print. It pins that the
+    classification stays scoped to the dirty branch and never becomes noise on
+    the run an operator sees most often."""
+    rc, out = nixrepo.ship()
+    assert rc == 0, out
+    assert "clean tree" in out, out
+    assert "classified" not in out, out
+    assert "DIRTY" not in out, out
+
+
+def test_the_classification_never_blocks_the_ship(nixrepo):
+    """It is the honesty of the verdict, not a gate. A tree dirty in the LIVE
+    class — the loudest finding this can make — still converges and still
+    exits 0.
+
+    INVARIANT GUARD, not regression coverage — GREEN at origin/main (200e6383),
+    where a dirty converge already exited 0. Kept because the whole change is a
+    new finding printed on a path an operator relies on completing: the way this
+    goes wrong later is someone deciding it SHOULD block."""
+    (nixrepo.work / "echo-live.txt").write_text("echo-live.txt wip\n")
+    rc, out = nixrepo.ship()
+    assert rc == 0, out
+    assert_converged(nixrepo, out)
+    assert "✅ VERIFIED" in out, out
+
+
+def test_both_classes_at_once_are_reported_separately(nixrepo):
+    """They are different facts with different consequences (one is already
+    running, one arrives with the generation), so one must not swallow the
+    other."""
+    (nixrepo.work / "echo-live.txt").write_text("echo-live.txt wip\n")
+    (nixrepo.work / "copied-alpha.txt").write_text("copied-alpha.txt wip\n")
+    rc, out = nixrepo.ship()
+    assert rc == 0, out
+    assert "DIRTY AND LIVE" in out and "echo-live.txt" in out, out
+    assert "DIRTY AND IN THE ARTIFACT" in out and "copied-alpha.txt" in out, out
+
+
+def test_a_repo_whose_predicate_lib_is_missing_says_so_rather_than_clean(nixrepo):
+    """🔴 NEGATIVE CONTROL on the instrument. With the lib gone the run must fall
+    back to the hedged sentence AND name the reason — never print the
+    "no dirty path is read by nix" verdict off a classifier that never ran."""
+    (nixrepo.work / "echo-live.txt").write_text("echo-live.txt wip\n")
+    (nixrepo.work / "scripts" / "lib" / "nix_read_paths.sh").unlink()
+    rc, out = nixrepo.ship()
+    assert rc == 0, out
+    assert "NOT CLASSIFIED (NOLIB)" in out, out
+    assert "origin/main + local WIP" in out, out
+    assert "NO dirty path is read by nix" not in out, out
+    assert "DIRTY AND LIVE" not in out, out
+
+
+def test_a_repo_with_no_flake_at_all_says_it_could_not_look(nixrepo):
+    """The derivation reporting NOROOTS is not "nothing is nix-read"."""
+    (nixrepo.work / "echo-live.txt").write_text("echo-live.txt wip\n")
+    (nixrepo.work / "flake.nix").unlink()
+    shutil.rmtree(nixrepo.work / "nix")
+    rc, out = nixrepo.ship()
+    assert rc == 0, out
+    assert "NOT CLASSIFIED (NOROOTS)" in out, out
+    assert "NO dirty path is read by nix" not in out, out
+
+
+# --------------------------------------------------------------------------- #
+# SHIP_LIST_MAX — the bound on the classified listing
+#
+# 🔴 THE CAP SHIPPED WITH NO TEST AT ALL. It exists because a whole-directory
+# STORE source (`claude/skills`, `scripts/dl-router`) lets ONE untracked subtree
+# put an unbounded number of paths into a bucket, and this output is tee-d into
+# a capture an operator reads. Two things were wrong with the untested version,
+# and neither is visible from the code at a glance:
+#
+#   * `sed -n "1,0p"` is NOT an empty range to GNU sed — it prints line 1 — so
+#     SHIP_LIST_MAX=0 enumerated exactly one path and then announced "... and N
+#     more". A cap of zero that lists something.
+#   * only SHIP_NO_SWITCH crossed the ssh hop, so the remote leg always used the
+#     default while the local leg used whatever the operator asked for: one run,
+#     two different truncation depths, both wearing the same shape.
+#
+# The COUNT beside each heading is never capped, which is what makes 0 a
+# coherent request ("count them, name none") rather than something to sanitise
+# away — so it is honoured rather than silently replaced.
+# --------------------------------------------------------------------------- #
+# 🔴 SCOPED TO THE FIXTURE'S OWN SUBTREE, NOT TO THE PREFIX. `[host]     - ` is
+# emitted by EIGHT producers in ship.sh (blockers, managed-artifact rows, the
+# gcroots pair, the manifest and conflicted lists, …) and `nr_list` is only one
+# of them. Counting the prefix binds today purely because the other seven are
+# silent in these fixtures — so a mutant that silenced `nr_list` while any other
+# listing happened to emit exactly N rows would SURVIVE. `charlie-dir/` is
+# written only by _seed_dropped, so matching it makes the count structural
+# instead of positional.
+_LISTED = re.compile(r"^\[[^\]]*\]     - (charlie-dir/\S+)$", re.M)
+
+
+def _seed_dropped(tree, n, prefix="lima"):
+    """`n` untracked files under the DIRECTORY store source — one bucket
+    (DROPPED), names pairwise distinct, and `n` deliberately not a multiple of
+    any cap this file passes in.
+
+    Everything lands under `charlie-dir/`, which is what lets `_LISTED` tell
+    `nr_list`'s output from the seven other producers of the same prefix.
+    """
+    d = tree / "charlie-dir" / "nested"
+    d.mkdir(parents=True, exist_ok=True)
+    for i in range(n):
+        (d / ("%s-%02d.txt" % (prefix, i))).write_text("%s %d\n" % (prefix, i))
+
+
+def test_the_dirty_classification_listing_is_bounded_by_SHIP_LIST_MAX(nixrepo):
+    """The cap does what it says, and the untruncated COUNT stays beside it.
+
+    Eight paths and a cap of three: eight is not a multiple of three, so a
+    mutant that used the wrong end of the range (or truncated on a block
+    boundary) cannot land on the right answer by arithmetic accident.
+    """
+    _seed_dropped(nixrepo.work, 8)
+    rc, out = nixrepo.ship(SHIP_LIST_MAX="3")
+    assert rc == 0, out
+    assert "UNTRACKED IN A NIX-READ PATH — 8 path(s)" in out, (
+        "the heading's count was truncated too — only the enumeration may be\n%s"
+        % out)
+    listed = _LISTED.findall(out)
+    assert len(listed) == 3, f"enumerated {listed} under a cap of 3\n{out}"
+    assert "... and 5 more (SHIP_LIST_MAX=3)" in out, (
+        "a truncated list did not say how much it hid, or which knob hid it\n%s"
+        % out)
+
+
+def test_SHIP_LIST_MAX_of_zero_enumerates_NOTHING(nixrepo):
+    """🔴 RED AT 41e92a1f, where this printed ONE path and then claimed to have
+    hidden the rest.
+
+    `sed -n "1,0p"` prints line 1 under GNU sed, so the cap's own zero leaked a
+    path into an output an operator reads as bounded. The count is still
+    complete, so 0 remains a legal, meaningful setting — it just has to mean
+    what it says.
+    """
+    _seed_dropped(nixrepo.work, 4, prefix="mike")
+    rc, out = nixrepo.ship(SHIP_LIST_MAX="0")
+    assert rc == 0, out
+    assert "UNTRACKED IN A NIX-READ PATH — 4 path(s)" in out, out
+    listed = _LISTED.findall(out)
+    assert listed == [], f"a cap of 0 enumerated {listed}\n{out}"
+    assert "... and 4 more (SHIP_LIST_MAX=0)" in out, out
+
+
+def test_a_non_integer_SHIP_LIST_MAX_falls_back_to_the_default(nixrepo):
+    """The sanitiser at the top of CONVERGE, which had no test either.
+
+    A bad value must not reach `sed -n "1,<junk>p"` — and the fallback is the
+    DEFAULT, not zero: silently listing nothing because a value was mistyped
+    would hide paths for a reason nobody could see in the output.
+    """
+    _seed_dropped(nixrepo.work, 13, prefix="november")
+    rc, out = nixrepo.ship(SHIP_LIST_MAX="lots")
+    assert rc == 0, out
+    listed = _LISTED.findall(out)
+    assert len(listed) == 10, f"the fallback enumerated {len(listed)}\n{out}"
+    assert "... and 3 more" in out, out
+
+
+def test_both_legs_of_ONE_run_truncate_with_the_SAME_bound(tmp_path):
+    """🔴 RED AT 41e92a1f: only SHIP_NO_SWITCH crossed the hop.
+
+    The remote leg took the default while the local leg took the operator's
+    value, so one run produced two different truncation depths under one shape.
+    That is not cosmetic — the two legs' outputs are read side by side to decide
+    whether the fleet agrees, and a listing that is short on one host for a
+    reason invisible in the output is the wrong kind of difference to introduce.
+
+    Both hosts carry the SAME six untracked paths, so any difference in what is
+    enumerated is a difference in the bound, which is the only thing that varies.
+    """
+    r = Repo(tmp_path, second_host=True, nixread=True)
+    for tree in (r.work, r.remote_work):
+        _seed_dropped(tree, 6, prefix="oscar")
+
+    shim = r.ssh_shim(tmp_path)
+    rc, out = r.ship_both_hosts(shim, SHIP_LIST_MAX="2")
+
+    def listed(leg):
+        parts = re.split(r"^=== (local|remote) [^\n]*===$", out, flags=re.M)
+        for i in range(1, len(parts) - 1, 2):
+            if parts[i] == leg:
+                return _LISTED.findall(parts[i + 1])
+        raise AssertionError(f"no `=== {leg} …===` section:\n{out}")
+
+    local, remote = listed("local"), listed("remote")
+    assert len(local) == 2, f"the local leg ignored the bound: {local}\n{out}"
+    assert len(remote) == 2, (
+        "the remote leg enumerated %d path(s) under SHIP_LIST_MAX=2 — the bound "
+        "did not cross the ssh hop\n%s" % (len(remote), out))
+    assert out.count("... and 4 more (SHIP_LIST_MAX=2)") == 2, (
+        "the two legs do not agree on what they hid\n%s" % out)
+
+
+def _ship_forwarded():
+    """[(name, conversion)…] for every value interpolated ahead of the payload
+    ship.sh sends over ssh, read off the printf format itself.
+
+    🔴 DERIVED, NEVER HAND-LISTED — the sibling ledger in test_drift_check.py
+    exists because a hand-list went stale the moment a third value started
+    crossing that hop, and the mutant which downgraded its quoting survived a
+    green suite. This printf carried ONE value for its whole life and now
+    carries two, which is exactly the moment such a list starts to rot.
+    """
+    src = SHIP.read_text()
+    m = re.search(r"printf '([^']*)' \\\n\s*\"\$SHIP_NO_SWITCH\"", src)
+    assert m, (
+        "could not find the remote payload's printf format in ship.sh — this "
+        "ledger is now wired to nothing, which is worse than a stale list"
+    )
+    pairs = re.findall(r"([A-Z][A-Z0-9_]*)=%(\w)", m.group(1))
+    assert len(pairs) >= 2, (
+        "the ledger derived %r; a short result is what a broken regex looks "
+        "like, not a small payload" % (pairs,)
+    )
+    return pairs
+
+
+def test_the_ship_remote_payload_ledger_can_see_the_real_variables():
+    """🔴 POSITIVE CONTROL for the derivation the guard below stands on. A regex
+    that matched nothing would make it vacuously green."""
+    names = [n for n, _c in _ship_forwarded()]
+    assert "SHIP_NO_SWITCH" in names and "SHIP_LIST_MAX" in names, names
+
+
+def test_every_value_ship_sends_over_ssh_is_shell_quoted():
+    """These are interpolated ahead of a script that EXECUTES on the other host.
+    Neither is validated by ship.sh — SHIP_LIST_MAX is sanitised on arrival,
+    inside CONVERGE — so unlike drift-check.sh there is no first layer here and
+    %q is the ONLY thing standing between an operator typo and a command run on
+    a machine this script is otherwise careful with.
+    """
+    bad = [(n, c) for n, c in _ship_forwarded() if c != "q"]
+    assert bad == [], (
+        "these values cross the ssh hop unquoted: %r" % (bad,))
 
 
 def test_skips_when_local_main_diverged(repo):
@@ -1512,9 +1986,9 @@ def test_managed_artifact_check_runs_on_the_remote_leg_too(repo):
 
     The bug existed only on the laptop, so a consumer check that runs only on
     the local host is worthless for it. ship.sh has exactly one CONVERGE body,
-    executed locally via `bash -c` and remotely via `ssh <host> "<body>"` — so
-    this asserts the check lives INSIDE that body rather than in the local-only
-    driver below it, which is the way it could regress to local-only.
+    executed locally via `bash -c` and remotely by PIPING it to `bash -s` over
+    ssh — so this asserts the check lives INSIDE that body rather than in the
+    local-only driver below it, which is the way it could regress to local-only.
     """
     src = SHIP.read_text()
     body = src.split("CONVERGE='", 1)
@@ -1525,9 +1999,40 @@ def test_managed_artifact_check_runs_on_the_remote_leg_too(repo):
         "remote host — which is the only host the original bug affected"
     )
     # ...and CONVERGE really is what gets sent over ssh.
-    assert re.search(r'ssh .*"\$REMOTE_SSH".*\$CONVERGE', src), (
-        "CONVERGE is no longer the body executed over ssh"
+    assert re.search(r"\$CONVERGE\"?\s*\\?\s*\n?\s*\|\s*ssh ", src), (
+        "CONVERGE is no longer the body piped over ssh"
     )
+
+
+def test_the_remote_leg_names_bash_rather_than_letting_sshd_pick_a_shell():
+    """🔴 THE STRUCTURAL PIN behind the zsh bug. `ssh host "<script>"` names NO
+    interpreter, so sshd runs the account's LOGIN SHELL — zsh on both of these
+    hosts. CONVERGE was interpreter-agnostic by ACCIDENT until it began sourcing
+    scripts/lib/nix_read_paths.sh, which needs `shopt` and word-splitting on an
+    unquoted `$var`.
+
+    Structural because it holds in every tier with no host, no ssh and no
+    fixture; the behavioural half is
+    test_the_remote_leg_classifies_identically_to_the_local_leg. drift-check.sh
+    reached this conclusion first — one rule, second place it applies.
+    """
+    src = SHIP.read_text()
+    code = [ln for ln in src.splitlines() if not ln.strip().startswith("#")]
+    ssh_lines = [ln for ln in code if re.search(r"(^|\|\s*|\s)ssh ", ln)]
+    assert ssh_lines, "no ssh invocation found — ship.sh was restructured"
+    real = [ln for ln in ssh_lines if "$REMOTE_SSH" in ln]
+    assert real, f"no ssh line targets $REMOTE_SSH: {ssh_lines!r}"
+    for ln in real:
+        assert re.search(r'"\$REMOTE_SSH"\s+bash\s+-s', ln), (
+            "the remote leg does not name an interpreter, so sshd will run the "
+            "LOGIN SHELL (zsh on both hosts) and every bashism in CONVERGE — "
+            "including the whole shared nix-read lib — changes meaning "
+            "silently: %r" % ln
+        )
+        assert "$CONVERGE" not in ln, (
+            "the payload is inlined into the ssh command string again; it must "
+            "be piped to `bash -s`: %r" % ln
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -2884,3 +3389,324 @@ def test_the_switch_log_lives_under_tmpdir_and_is_removed(tmp_path):
         f"ship left temp files behind: {leftovers} — twice over, because a "
         f"superseding run runs the local leg twice\n{out}"
     )
+
+
+# --------------------------------------------------------------------------- #
+# THE TRACKED/UNTRACKED SPLIT WITHIN THE STORE CLASS
+#
+# 🔴 A CORRECTION, and the reason it matters more than it looks. The first
+# version of this block reported every STORE-class dirty path as "in the artifact
+# just built". For a MODIFIED TRACKED file that is true — nix takes the
+# working-tree content. For an UNTRACKED file it is FALSE: nix's flake source for
+# a git checkout is filtered to the files git knows about, so the file reached
+# nothing.
+#
+# MEASURED 2026-08-25 on the live host: all six `-dl-router` store generations
+# carry `tests/` (37 files) and NONE carries the untracked
+# `tests/load_test_store.sh` — the very file that motivated this whole change.
+# A controlled four-state flake build confirms the rule and separates it from
+# "the switch predates the file": committed, modified-tracked and `git add`ed all
+# land (with the WORKING-TREE content); untracked never does, at any depth.
+#
+# The finding is KEPT — unsaved work in no commit and no backup, one `git add`
+# from the artifact — but it no longer claims to be deployed. Overstating is the
+# exact failure this block exists to remove.
+# --------------------------------------------------------------------------- #
+def test_an_UNTRACKED_store_path_is_NOT_reported_as_in_the_artifact(nixrepo):
+    """🔴 THE CORRECTION. Same path, same STORE class, untracked — and the
+    verdict must not be the one that says it is deployed."""
+    (nixrepo.work / "charlie-dir" / "nested" / "hotel-new.txt").write_text("new\n")
+    rc, out = nixrepo.ship()
+    assert rc == 0, out
+    assert "charlie-dir/nested/hotel-new.txt" in out, out
+    # 🔴 ONE assertion for BOTH directions, with ONE message. Split across two,
+    # a mutant that flips the classification dies on whichever line happens to
+    # come first — and the failure then names the wrong guard, which is
+    # indistinguishable from dying for an unrelated reason.
+    assert ("UNTRACKED IN A NIX-READ PATH" in out
+            and "did NOT reach the artifact" in out
+            and "DIRTY AND IN THE ARTIFACT" not in out), (
+        "an untracked file was reported as being in the artifact — the flake "
+        "filters it out, so it reached nothing\n%s" % out
+    )
+
+
+def test_a_TRACKED_modified_store_path_IS_in_the_artifact(nixrepo):
+    """The other half of the same distinction, asserted in the SAME class so a
+    mutant that hardcodes either verdict is caught. Nix takes the WORKING-TREE
+    content of a file git knows about, so this WIP really is in the generation."""
+    (nixrepo.work / "copied-alpha.txt").write_text("copied-alpha.txt wip\n")
+    rc, out = nixrepo.ship()
+    assert rc == 0, out
+    assert "DIRTY AND IN THE ARTIFACT" in out, out
+    assert "copied-alpha.txt" in out, out
+    assert "UNTRACKED IN A NIX-READ PATH" not in out, out
+
+
+def test_a_STAGED_never_committed_store_path_IS_in_the_artifact(nixrepo):
+    """🔴 THE BOUNDARY IS THE INDEX, NOT A COMMIT — measured, not assumed. A file
+    `git add`ed ten seconds ago and never committed is in the flake source. If
+    the split were keyed on "is it in a commit" this would be reported as
+    dropped, and it would be wrong."""
+    p = nixrepo.work / "charlie-dir" / "nested" / "india-staged.txt"
+    p.write_text("staged\n")
+    nixrepo._git(nixrepo.work, "add", "charlie-dir/nested/india-staged.txt")
+    rc, out = nixrepo.ship()
+    assert rc == 0, out
+    # One assertion, one message — see the untracked case above for why.
+    assert ("DIRTY AND IN THE ARTIFACT" in out
+            and "charlie-dir/nested/india-staged.txt" in out
+            and "UNTRACKED IN A NIX-READ PATH" not in out), (
+        "a `git add`ed file was not reported as reaching the artifact — the "
+        "discriminator has slipped from index membership to commitment\n%s" % out
+    )
+
+
+def test_an_untracked_LIVE_target_is_still_LIVE(nixrepo):
+    """🔴 LIVE IS NOT SPLIT, and that is not an oversight. mkOutOfStoreSymlink
+    bakes a runtime path string into the store, so the deployed link resolves
+    into the working tree at USE time and never through the flake source — an
+    untracked file there IS being served. Verified on the live host:
+    ~/.claude/skills/browser/browser resolves to the repo working tree."""
+    (nixrepo.work / "echo-live.txt").unlink()
+    nixrepo._git(nixrepo.work, "rm", "-q", "--cached", "echo-live.txt")
+    (nixrepo.work / "echo-live.txt").write_text("untracked but LIVE\n")
+    rc, out = nixrepo.ship()
+    assert rc == 0, out
+    assert "DIRTY AND LIVE" in out, out
+    assert "echo-live.txt" in out, out
+    assert "UNTRACKED IN A NIX-READ PATH" not in out, (
+        "a mkOutOfStoreSymlink target was reported as dropped by the flake "
+        "filter — it never goes through the flake source at all\n%s" % out
+    )
+
+
+def test_only_untracked_nix_read_paths_still_says_the_deploy_IS_origin_main(nixrepo):
+    """The consequence of the correction, and it is a REAL verdict: if the only
+    dirty nix-read paths are untracked, the flake dropped all of them, so what
+    was built IS origin/main. Both facts are printed — the artifact is clean AND
+    there is unsaved work — because they are independent claims."""
+    (nixrepo.work / "charlie-dir" / "nested" / "hotel-new.txt").write_text("new\n")
+    rc, out = nixrepo.ship()
+    assert rc == 0, out
+    assert "UNTRACKED IN A NIX-READ PATH" in out, out
+    assert "built/deployed IS origin/main" in out, out
+    assert "nothing dirty REACHED the build" in out, out
+
+
+def test_the_population_line_splits_tracked_from_untracked(nixrepo):
+    """The denominator must carry the bit the verdict now turns on — otherwise a
+    reader cannot tell which of the two rules produced the answer."""
+    (nixrepo.work / "copied-alpha.txt").write_text("wip\n")
+    (nixrepo.work / "charlie-dir" / "nested" / "hotel-new.txt").write_text("new\n")
+    rc, out = nixrepo.ship()
+    assert rc == 0, out
+    m = re.search(r"classified (\d+) dirty path\(s\) \((\d+) tracked, (\d+) untracked\)", out)
+    assert m, f"the population line does not split tracked from untracked\n{out}"
+    total, tracked, untracked = (int(g) for g in m.groups())
+    assert (tracked, untracked) == (1, 1), out
+    assert total == tracked + untracked
+
+
+# --------------------------------------------------------------------------- #
+# THE SEAM: the remote leg must reach the SAME verdict as the local one
+#
+# 🔴 "VERIFIED IN ISOLATION" IS THE VACUOUS GREEN, AND THIS IS THE SHAPE OF IT.
+# The nix-read classifier had its own hermetic suite. The remote leg had its own
+# hermetic suite. Both were green, and TOGETHER they were broken: `ssh host
+# "<script>"` names no interpreter, so sshd ran the login shell — zsh — and the
+# classifier's `shopt` and unquoted-`$var` word-splitting silently produced an
+# EMPTY nix-read set with `REASON=OK`. Neither suite could see it, because the
+# ssh shim hardcoded `bash -c` and so tested a second LOCAL run.
+#
+# MEASURED under zsh, on the real repo, before the fix:
+#     rc=0 REASON=OK files=28 count=1   with STORE empty
+# i.e. the scan believed it had SUCCEEDED, so the NOT-CLASSIFIED refusal could
+# not fire, and the remote host printed the reassuring verdict for a file the
+# local host had just called "in the artifact".
+#
+# These pin the RELATIONSHIP, not either component: same repo state, both legs,
+# one run, and the classification lines must agree.
+# --------------------------------------------------------------------------- #
+def _verdict_lines(out, leg):
+    """The classification sentences ONE LEG printed, normalised.
+
+    Split on the `=== local (…) ===` / `=== remote (…) ===` banners, NOT on the
+    `[host]` prefix: that prefix is `hostname`, which is the same string on both
+    fabricated hosts, so a prefix filter would silently merge the two legs and
+    make any comparison between them vacuous.
+    """
+    keys = ("DIRTY AND LIVE", "DIRTY AND IN THE ARTIFACT",
+            "UNTRACKED IN A NIX-READ PATH", "NO dirty path is read by nix",
+            "nothing dirty REACHED the build", "NOT CLASSIFIED")
+    parts = re.split(r"^=== (local|remote) [^\n]*===$", out, flags=re.M)
+    # parts alternates: [pre, "local", body, "remote", body, ...]
+    body = ""
+    for i in range(1, len(parts) - 1, 2):
+        if parts[i] == leg:
+            body = parts[i + 1]
+            break
+    assert body, f"no `=== {leg} …===` section in the output:\n{out}"
+    return [k for ln in body.splitlines() for k in keys if k in ln]
+
+
+def test_the_remote_leg_classifies_identically_to_the_local_leg(tmp_path):
+    """🔴 RED ON HEAD BEFORE THE FIX. With the payload inlined into the ssh
+    command string, the shim runs it under the LOGIN SHELL (zsh) exactly as sshd
+    does, the lib mis-parses, and the remote host prints "NO dirty path is read
+    by nix" while the local host prints "DIRTY AND IN THE ARTIFACT" for the SAME
+    tracked-modified STORE-class file.
+
+    Both hosts carry the same fixture flake and the same dirty file, so any
+    difference in the verdict is a difference in the INTERPRETER, which is the
+    only thing that varies between the two legs.
+    """
+    r = Repo(tmp_path, second_host=True, nixread=True)
+    for tree in (r.work, r.remote_work):
+        (tree / "copied-alpha.txt").write_text("copied-alpha.txt wip\n")
+
+    shim = r.ssh_shim(tmp_path)
+    rc, out = r.ship_both_hosts(shim)
+
+    local = _verdict_lines(out, "local")
+    remote = _verdict_lines(out, "remote")
+    assert local, f"the local leg printed no classification at all\n{out}"
+    assert remote, f"the remote leg printed no classification at all\n{out}"
+    assert local == remote, (
+        "the two legs disagree about the SAME dirty file — local=%r remote=%r. "
+        "That is the interpreter, not the repo: sshd runs the login shell unless "
+        "the ssh invocation names one.\n%s" % (local, remote, out)
+    )
+    assert "DIRTY AND IN THE ARTIFACT" in remote, (
+        "the remote leg did not classify a tracked-modified STORE path as being "
+        "in the artifact\n%s" % out
+    )
+
+
+def test_the_remote_leg_refuses_rather_than_lying_under_a_non_bash_shell(tmp_path):
+    """🔴 BELT AND BRACES, and the half that survives a future re-inlining.
+
+    The transport fix is what removes the variable. This pins the OTHER outcome:
+    if the payload is ever run under something that is not bash again, the lib
+    must degrade to the COULD-NOT-MEASURE path both consumers already handle
+    honestly — never to a confident empty set.
+
+    Driven by forcing the shim's login-shell branch, which is what sshd does with
+    an interpreter-less invocation. zsh is in flake.nix's `gateTools`, so this is
+    REAL in both tiers and never skips.
+    """
+    r = Repo(tmp_path, second_host=True, nixread=True)
+    for tree in (r.work, r.remote_work):
+        (tree / "copied-alpha.txt").write_text("copied-alpha.txt wip\n")
+
+    shim = r.ssh_shim(tmp_path)
+    # Force the shim to run the payload under the LOGIN SHELL, i.e. reproduce
+    # what sshd does for an ssh invocation that names no interpreter — the
+    # pre-fix transport, with everything else held constant.
+    rc, out = r.ship_both_hosts(shim, SHIP_TEST_FORCE_LOGIN_SHELL="1")
+    remote = _verdict_lines(out, "remote")
+    assert "NOT CLASSIFIED" in remote, (
+        "under a non-bash shell the remote leg did not refuse — it must never "
+        "print a clean nix-read verdict off a scan that could not run\n%s" % out
+    )
+    assert "NO dirty path is read by nix" not in remote, (
+        "the remote leg printed the reassuring verdict off a broken scan — this "
+        "is the exact silent-wrong-answer the guard exists to prevent\n%s" % out
+    )
+    assert "NOTBASH" in out, f"the refusal does not name its reason\n{out}"
+
+
+def test_the_shim_really_can_take_the_login_shell_branch(tmp_path):
+    """🔴 POSITIVE CONTROL for the two tests above. If the shim's dispatch never
+    reached its login-shell arm, both would pass while proving nothing about the
+    axis they exist to cover — which is precisely how the old `exec bash -c`
+    shim hid a real bug behind a green suite."""
+    r = Repo(tmp_path, second_host=True, nixread=True)
+    shim = r.ssh_shim(tmp_path)
+    body = (shim / "ssh").read_text()
+    assert 'if [ "$prev" = bash ] && [ "$last" = -s ]; then' in body, body
+    assert "runner=zsh" in body, (
+        "the shim does not model the login shell, so the remote-leg suite is "
+        "blind to the interpreter axis again:\n%s" % body
+    )
+    # ...and the branch is genuinely selectable: the SAME shim must dispatch to
+    # bash when an interpreter is named and to zsh when one is not. Asserted as a
+    # PAIR — either half alone is satisfied by a shim wired to one shell.
+    probe = tmp_path / "probe.sh"
+    probe.write_text(
+        'set -u\n'
+        'payload=\'echo IS_BASH=${BASH_VERSION:+yes} IS_ZSH=${ZSH_VERSION:+yes}\'\n'
+        'printf "%s\\n" "$payload" | ssh host bash -s\n'
+        'ssh host "$payload"\n'
+    )
+    got = subprocess.run(["bash", str(probe)], capture_output=True, text=True,
+                         env=r.env(shims=[shim]))
+    lines = [ln for ln in got.stdout.splitlines() if ln.startswith("IS_BASH=")]
+    assert len(lines) == 2, (got.stdout, got.stderr)
+    assert lines[0] == "IS_BASH=yes IS_ZSH=", (
+        "a NAMED `bash -s` did not run under bash: %r" % lines[0])
+    assert lines[1] == "IS_BASH= IS_ZSH=yes", (
+        "an interpreter-less invocation did not run under the login shell, so "
+        "the shim cannot reproduce what sshd does: %r" % lines[1])
+
+
+def test_an_UNCLASSIFIABLE_dirty_path_suppresses_the_clean_verdict(nixrepo):
+    """🔴 THE `[ "$nr_nu" = 0 ]` ARM, which was reachable and unpinned — deleting
+    it SURVIVED the whole suite.
+
+    A dirty path the classifier cannot model (a character outside its alphabet)
+    is reported as NOT CLASSIFIED, and the run must NOT also print "what was
+    built/deployed IS origin/main". Printing both says, in one breath, "there is
+    a path I could not judge" and "I have judged them all". `test_drift_check.py`
+    already has the equivalent on its side.
+    """
+    (nixrepo.work / "has space.txt").write_text("unclassifiable\n")
+    rc, out = nixrepo.ship()
+    assert rc == 0, out
+    assert "NOT CLASSIFIED" in out, out
+    assert "built/deployed IS origin/main" not in out, (
+        "the run printed a clean verdict alongside a path it could not classify "
+        "— those are contradictory claims\n%s" % out
+    )
+
+
+def test_an_unclassifiable_path_is_named_not_just_counted(nixrepo):
+    """A count with no name leaves the operator nothing to act on, and this is
+    the one bucket where they cannot find the file by re-reading the classifier."""
+    (nixrepo.work / "has space.txt").write_text("unclassifiable\n")
+    rc, out = nixrepo.ship()
+    assert rc == 0, out
+    assert "has space.txt" in out, out
+
+
+def test_the_remote_leg_reports_the_ssh_status_not_the_printf_status(tmp_path):
+    """🔴 THE INDEX MOVED WHEN THE PAYLOAD BECAME A PIPE, and a comment claimed
+    this test existed before it did.
+
+    The remote leg used to be `ssh … | tee`, so `PIPESTATUS[0]` was ssh. Piping
+    the payload in makes it `printf | ssh | tee`, where [0] is printf — which
+    essentially always succeeds. Left at [0], EVERY remote converge would report
+    rc 0, including a host skipped for un-pushed commits (rc 8), which is the
+    single most important thing this script says.
+
+    The remote host here is genuinely diverged, so its converge exits 8; the run
+    must surface that rather than a zero.
+    """
+    r = Repo(tmp_path, second_host=True)
+    # Un-pushed commit on the REMOTE host only -> that leg exits 8.
+    (r.remote_work / "local-only.txt").write_text("un-pushed\n")
+    r._git(r.remote_work, "add", "local-only.txt")
+    r._git(r.remote_work, "commit", "-q", "-m", "un-pushed on the remote host")
+
+    shim = r.ssh_shim(tmp_path)
+    rc, out = r.ship_both_hosts(shim)
+
+    assert "SKIPPED — local main has diverged" in out, (
+        "the remote leg did not actually fail, so this proves nothing about the "
+        "status it reports\n%s" % out
+    )
+    assert rc == 8, (
+        "the run reported rc=%s for a remote host that exited 8 — the pipeline "
+        "status is being read from the wrong stage (printf, not ssh)\n%s" % (rc, out)
+    )
+    assert "converge exited 8" in out, out
