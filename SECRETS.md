@@ -240,6 +240,41 @@ nix-shell -p bitwarden-cli jq 'python3.withPackages(p:[p.minio])' --run '
                                   # which file the comparison will actually use
 ```
 
+#### The path this all exists for: no CLI, no on-disk key
+
+Everything above runs `bw` **on a machine that already holds the key**. In the
+disaster you are on another device, reading the note out of the **web vault** and
+pasting it into a file — a path that can silently mangle whitespace.
+
+✅ **Rehearsed for real on 2026-08-27 from the laptop** — the host you would
+actually be standing at if the workbench is the one you lost. The note was
+fetched over the network on that host and its **public** half matched:
+`pubkey sha 288c4d24cfdb5aa1 == expected`. So *retrieval and correctness* from a
+second machine are proven; what remains unexercised is only a **browser's own
+clipboard**, checked identically below.
+
+🔴 **Do NOT verify that paste by its size.** *Every* age identity file is exactly
+**189 bytes / 3 lines** — the `# created:` and `# public key:` lines are
+fixed-width — so a completely unrelated key passes a byte/line check. Measured
+2026-08-27: a freshly generated throwaway key is byte-for-byte the same size as
+the real one. Verify the **public half** instead, which prints no secret material:
+
+```sh
+# after pasting the Secure Note into /tmp/paste.key on the recovery machine
+nix-shell -p age --run 'age-keygen -y /tmp/paste.key' | sha256sum | cut -c1-16
+# MUST print:  288c4d24cfdb5aa1
+shred -u /tmp/paste.key
+```
+
+It catches both mangling modes: altered key material moves the hash, and broken
+framing makes `age-keygen` fail outright rather than print a wrong answer.
+
+⚠ **Pipe it exactly as written.** `printf '%s' "$out" | sha256sum` strips the
+trailing newline and yields `be0206821107ea94` — a **false mismatch on a good
+key** (measured, and briefly believed). And `e3b0c442…` is the sha256 of *empty
+input*: it means the command never ran, which is not the same as a failed check.
+Run a known-good control through the same pipeline before trusting a mismatch.
+
 Two levels, and they are **different claims**. The default compares the note to
 the on-disk identity **byte for byte** — which proves the two copies agree, and
 proves nothing about either one opening anything. `--decrypt-check` writes the
