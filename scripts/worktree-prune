@@ -1030,8 +1030,8 @@ def scan_repo(repo: Path, gh_cmd: str, use_gh: bool, pr_limit: int, jobs: int,
 # ── reporting ─────────────────────────────────────────────────────────────────
 
 def summarize(rows: "list[dict]", exclude_globs: "list[str] | None" = None,
-              typed_globs: "list[str] | None" = None,
-              agent_worktrees_included: bool = False,
+              typed_globs: "list[str] | None" = None, *,
+              agent_worktrees_included: bool,
               allow_unmatched_globs: bool = False) -> "dict":
     """The report's numbers, INCLUDING a per-glob match count.
 
@@ -1051,6 +1051,17 @@ def summarize(rows: "list[dict]", exclude_globs: "list[str] | None" = None,
     the argument treats every glob as typed — the conservative default, since it
     can only produce MORE refusals, and `--allow-unmatched-globs` now exists to
     get past one.
+
+    🔴 `agent_worktrees_included` IS REQUIRED AND KEYWORD-ONLY. It used to default
+    to False, and the default was a lie a caller could not see: the glob list is
+    resolved by `resolve_exclude_globs(patterns, include_agent_worktrees)`, so a
+    caller that opted the flag ON there and then omitted it here got
+    `agent_worktree_glob_in_force=False` alongside `agent_glob_applied_by_default
+    =True` — a summary asserting the tool applies a constant that is not in the
+    list, which is the exact conflation this PR's rounds 4-6 are about.
+    `main()` always passed it, so nothing reachable from a command line could
+    produce that shape; the README publishes this JSON for consumers, and a
+    default that can only ever be wrong when it is used is not a convenience.
     """
     counts = {v: 0 for v in VERDICTS}
     for r in rows:
@@ -1204,15 +1215,47 @@ def render_text(rows: "list[dict]", summary: dict, verbose: bool) -> str:
         # "--allow-unmatched-globs IS IN FORCE: … it does not refuse --execute".
         # An operator who reads "REFUSES" treats the run as inert and stops
         # re-reading `--confirm N`.
-        differs = ("REFUSES where the default would have proceeded"
-                   if not summary.get("allow_unmatched_globs") else
-                   "WARNS where the default would have said nothing — "
-                   "--allow-unmatched-globs is in force, so it does NOT refuse and this run "
-                   "removes exactly what the default would have removed")
+        # 🔴 THREE-WAY, BECAUSE THE REFUSAL HAS THREE SCOPINGS AND NOT TWO.
+        # Round 6 made this conditional on `--allow-unmatched-globs` and stopped
+        # there — but `main()` declines to refuse on a THIRD condition too (the
+        # scan produced NO ROWS), and on that command line this note still said
+        # "this run REFUSES" over a run that returned RC_OK. Same defect as
+        # round 5's, third exemption. MEASURED, hermetic tmpdir:
+        # `--repo <nonexistent> --include-agent-worktrees --exclude-path
+        # '*/.claude/worktrees/*' --execute --confirm 0` -> rc 0, stderr
+        # "…this scan produced NO rows at all … Not refusing.", stdout
+        # "this run REFUSES". Bounded (zero rows ⇒ zero removals) but it is the
+        # exact class this round exists to close.
+        #
+        # 🟡 AND THE WORDING IS SCOPED TO THE REFUSAL, NEVER TO WHAT IS REMOVED.
+        # The round-6 text ended "…it does NOT refuse and this run removes
+        # exactly what the default would have removed"; ONE extra --exclude-path
+        # falsifies it. MEASURED on a one-repo/one-dead-worktree fixture:
+        # `--include-agent-worktrees --exclude-path <agent glob> --exclude-path
+        # '*/wts/*' --allow-unmatched-globs --execute --confirm 0` removed 0
+        # while the bare default `--execute --confirm 1` removed 1 — and the
+        # parity claim printed on the first run's stdout. The flag decides
+        # REFUSAL ELIGIBILITY; the glob list decides removals. Under-deleting, so
+        # nothing was at risk, but a newly written false sentence about the run
+        # printing it is the whole subject of this PR.
+        if not summary.get("worktrees"):
+            differs = ("does NEITHER: this scan produced no rows at all, so nothing could "
+                       "have matched, the zero says nothing about the glob, and --execute "
+                       "refuses on neither command line")
+        elif summary.get("allow_unmatched_globs"):
+            differs = ("WARNS where the default would have said nothing — "
+                       "--allow-unmatched-globs is in force, so it does NOT refuse. That is a "
+                       "claim about the REFUSAL and nothing else: what gets removed is decided "
+                       "by the globs in force, so any other --exclude-path you typed can still "
+                       "spare rows the bare default would have removed")
+        else:
+            differs = ("can REFUSE --execute on that glob, which the tool's own implied copy "
+                       "never could — though whether the same command line WITHOUT the flag "
+                       "also refuses depends on the other globs you typed")
         lines.append(
             f"note: --include-agent-worktrees was passed, but {AGENT_WORKTREE_GLOB!r} is in "
             f"force anyway as a --exclude-path you typed — so agent worktrees are STILL "
-            f"spared and this run can remove no more than the default would. It is NOT "
+            f"spared and this run can remove no more than the bare default would. It is NOT "
             f"identical to the default, though: a glob YOU typed is an --execute refusal "
             f"candidate, so on a scan holding no agent worktrees this run "
             f"{differs}.")
@@ -1266,12 +1309,25 @@ def render_text(rows: "list[dict]", summary: dict, verbose: bool) -> str:
             # ALREADY in force and `--execute` therefore does not refuse. Same
             # false-claim-about-this-very-run shape as the note above; fixed in
             # the same round rather than left as the next round's finding.
-            remedy = ("--execute REFUSES while a typed glob is in this state — pass "
-                      "--allow-unmatched-globs if the glob is correct but out of this scan's "
-                      "scope."
-                      if not summary.get("allow_unmatched_globs") else
-                      "--allow-unmatched-globs IS ALREADY IN FORCE, so --execute does NOT "
-                      "refuse on this — it proceeds with this glob filtering nothing.")
+            #
+            # 🔴 …AND IT IS THREE-WAY, matching `main()`'s three scopings rather
+            # than two of them. Round 6 closed the `--allow-unmatched-globs`
+            # exemption and left the NO-ROWS one open, so a scan that produced
+            # no rows printed "--execute REFUSES while a typed glob is in this
+            # state" on the stdout of a run that PROCEEDED (rc 0) while its own
+            # stderr said "Not refusing." Order matches `main()`: no rows wins
+            # over the override, because that is the branch `main()` takes first.
+            if not summary.get("worktrees"):
+                remedy = ("This scan produced NO rows at all, so the zero says nothing about "
+                          "the glob and --execute does NOT refuse on it here — re-run against "
+                          "a scope that actually holds worktrees before trusting this filter.")
+            elif summary.get("allow_unmatched_globs"):
+                remedy = ("--allow-unmatched-globs IS ALREADY IN FORCE, so --execute does NOT "
+                          "refuse on this — it proceeds with this glob filtering nothing.")
+            else:
+                remedy = ("--execute REFUSES while a typed glob is in this state — pass "
+                          "--allow-unmatched-globs if the glob is correct but out of this "
+                          "scan's scope.")
             lines.append(
                 f"🔴 --exclude-path {g!r} matched ZERO rows. A glob that matches nothing is "
                 f"BYTE-IDENTICAL to passing no filter at all, and --confirm N cannot catch it "

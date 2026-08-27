@@ -1365,7 +1365,8 @@ def test_the_shout_is_gated_on_the_GLOB_not_on_the_flag(two_dead, capsys):
     # this is NOT the same command line as the default.
     assert "agent worktrees are STILL spared" in out, out
     assert "It is NOT identical to the default" in out, out
-    assert "REFUSES where the default would have proceeded" in out, out
+    assert ("can REFUSE --execute on that glob, which the tool's own implied copy never "
+            "could") in out, out
     # …and NOT the two claims round 4 printed, both of which were false here.
     assert "The flag is doing nothing here." not in out, out
     assert "behaves exactly like the default" not in out, out
@@ -1459,7 +1460,7 @@ def test_excluded_dead_counts_only_the_DEAD_excluded_rows(two_dead, capsys):
         "the fixture's second agent tree is dead too, so this test is back to "
         "comparing a number against itself")
 
-    s = wp.summarize(list(rows.values()), [AGENT_GLOB])
+    s = wp.summarize(list(rows.values()), [AGENT_GLOB], agent_worktrees_included=False)
     assert s["excluded"] == 2, s
     assert s["excluded_dead"] == 1, s
     assert s["excluded_dead"] != s["excluded"], (
@@ -1771,7 +1772,7 @@ def test_a_symlink_loop_does_not_kill_summarize(symlink_loop):
     `path_excluded` per glob for the match counts, so fixing only `scan_repo`
     would have moved the traceback rather than removed it."""
     rows = [{"path": symlink_loop, "verdict": wp.DEAD, "repo": "/r", "excluded_by": None}]
-    s = wp.summarize(rows, ["*/nope/*"])
+    s = wp.summarize(rows, ["*/nope/*"], agent_worktrees_included=False)
     assert s["exclude_globs"] == [
         {"glob": "*/nope/*", "typed": True, "matched": 0, "matched_dead": 0}]
 
@@ -1817,7 +1818,8 @@ def test_a_looped_worktree_does_not_abort_the_whole_scan(tmp_path, capsys):
     assert str(looped) in by_path, "the looped row disappeared instead of being classified"
     assert by_path[str(plain)]["verdict"] == "dead", (
         "the ORDINARY row was lost too — which is the actual cost of the crash")
-    assert wp.summarize(rows, ["*/nope/*"])["worktrees"] == len(rows)
+    assert wp.summarize(rows, ["*/nope/*"],
+                        agent_worktrees_included=False)["worktrees"] == len(rows)
 
 
 def test_a_looped_repo_path_on_the_command_line_does_not_crash_the_run(symlink_loop,
@@ -2259,8 +2261,9 @@ def test_the_refusal_says_a_retyped_default_glob_is_free_to_drop(no_agent_worktr
     assert "lose nothing" not in cap.out, cap.out
     assert plain.is_dir(), "a refused run removed something"
     # …and this is the run whose note claims exactly this: typed, therefore a
-    # refusal candidate, where the true default would have proceeded.
-    assert "REFUSES where the default would have proceeded" in cap.out, cap.out
+    # refusal candidate, which the tool's own implied copy never is.
+    assert ("can REFUSE --execute on that glob, which the tool's own implied copy never "
+            "could") in cap.out, cap.out
 
 
 def test_the_free_to_drop_note_is_scoped_to_the_ONE_glob_it_is_true_of(
@@ -2379,6 +2382,19 @@ def test_the_note_does_not_claim_a_run_REFUSES_when_that_run_REMOVES(
     The failure is not cosmetic: an operator who reads "REFUSES" treats the run
     as inert, stops re-reading `--confirm N`, and the run removes.
 
+    🟡 AND THE REPLACEMENT SENTENCE CLAIMED REMOVAL PARITY IT DOES NOT HAVE.
+    Round 6 wrote "…it does NOT refuse and this run removes exactly what the
+    default would have removed". MEASURED on a one-repo/one-dead-worktree
+    fixture, adding ONE more typed glob: `--include-agent-worktrees
+    --exclude-path <agent glob> --exclude-path '*/wts/*' --allow-unmatched-globs
+    --execute --confirm 0` -> rc 0, the dead worktree STILL PRESENT (removed 0),
+    while the bare default `--execute --confirm 1` -> rc 0, worktree GONE
+    (removed 1). The parity claim printed on the first run. The flag decides
+    REFUSAL ELIGIBILITY; the glob list decides removals, so the sentence is now
+    scoped to the refusal and says so. Under-deleting, so nothing was at risk —
+    but it is a newly written false sentence about the run printing it, which is
+    the entire subject of this PR. The parity case is exercised below.
+
     ORDERED control-then-live: the control must remove nothing, which is also
     what leaves the fixture intact for the live run to consume.
     """
@@ -2387,24 +2403,39 @@ def test_the_note_does_not_claim_a_run_REFUSES_when_that_run_REMOVES(
             "--include-agent-worktrees", "--exclude-path", AGENT_GLOB]
 
     # POSITIVE CONTROL: the same command line WITHOUT the override really does
-    # refuse — so "REFUSES" is a claim the tool can legitimately make, and its
+    # refuse — so "REFUSE" is a claim the tool can legitimately make, and its
     # absence below is about the override and not about the sentence vanishing.
     rc = wp.main([*base, "--execute", "--confirm", "1"])
     cap = capsys.readouterr()
     assert rc == wp.RC_EXECUTE_REFUSED, cap.err
     assert plain.is_dir(), "the control removed something"
-    assert "REFUSES where the default would have proceeded" in cap.out, cap.out
+    assert ("can REFUSE --execute on that glob, which the tool's own implied copy never "
+            "could — though whether the same command line WITHOUT the flag also refuses "
+            "depends on the other globs you typed.") in cap.out, cap.out
     assert "WARNS where the default would have said nothing" not in cap.out, cap.out
+
+    # 🟡 THE PARITY-BREAKING RUN, FIRST, because it is the one whose sentence was
+    # false: one MORE typed glob, matching the live row, so this command line
+    # removes ZERO where the bare default removes ONE. It must not claim parity.
+    rc = wp.main([*base, "--exclude-path", "*/wts/*", "--allow-unmatched-globs",
+                  "--execute", "--confirm", "0"])
+    cap = capsys.readouterr()
+    assert rc == wp.RC_OK, cap.err
+    assert plain.is_dir(), "the extra glob did not spare the row, so the contrast is vacuous"
+    assert "removes exactly what the default would have removed" not in cap.out, cap.out
+    assert ("That is a claim about the REFUSAL and nothing else") in cap.out, cap.out
 
     # …and with the override, on a run that REALLY REMOVES.
     rc = wp.main([*base, "--allow-unmatched-globs", "--execute", "--confirm", "1"])
     cap = capsys.readouterr()
     assert rc == wp.RC_OK, cap.err
     assert not plain.exists(), "nothing was removed, so the note is not on a removing run"
-    assert "REFUSES where the default would have proceeded" not in cap.out, cap.out
+    assert "can REFUSE --execute on that glob" not in cap.out, cap.out
     assert ("WARNS where the default would have said nothing — --allow-unmatched-globs is "
-            "in force, so it does NOT refuse and this run removes exactly what the default "
-            "would have removed.") in cap.out, cap.out
+            "in force, so it does NOT refuse. That is a claim about the REFUSAL and nothing "
+            "else: what gets removed is decided by the globs in force, so any other "
+            "--exclude-path you typed can still spare rows the bare default would have "
+            "removed.") in cap.out, cap.out
     # …and the line it used to contradict is still there, saying the same thing.
     assert "it does not refuse --execute" in cap.out, cap.out
 
@@ -2475,6 +2506,15 @@ def test_a_messy_hand_typed_copy_of_the_default_still_gets_the_free_note(
     assert ("is applied by DEFAULT to every run, so dropping your hand-typed copy of it "
             "leaves it in force: the tool puts it back.") in cap.err, cap.err
     assert "simply drop it and lose nothing" in cap.out, cap.out
+    # 🟡 …AND THE SOLO MESSAGE ENDS THERE. Every assertion on this sentence used
+    # `in`, so appended text passed them all: mutating `if others:` to `if True:`
+    # ran 183 passed while printing "…the tool puts it back. Dropping  really
+    # removes it, from every future run too — though none of the globs named…" —
+    # two contradicting sentences with an EMPTY glob list, on the stderr of an
+    # --execute refusal. Pinning the JOIN (free note straight into "Nothing
+    # removed.") is what makes the `others` clause's absence assertable.
+    assert "the tool puts it back. Nothing removed." in cap.err, cap.err
+    assert "really removes it" not in cap.err, cap.err
 
 
 def test_summarize_separates_the_flag_from_the_two_facts_it_does_not_equal(two_dead):
@@ -2557,30 +2597,102 @@ def _owner_map(tree: ast.AST) -> dict:
     return owner
 
 
-def _rederivations(tree: ast.AST, src: str, owner: dict) -> list:
-    """Every place that turns one of the flag spellings into a boolean FACT.
+#: 🔴 THE SECOND LEDGER, and the one that catches what round 6's guard could not.
+#: Every `if`/`while` in the tool whose TEST mentions a flag spelling, counted per
+#: enclosing function and asserted EXACTLY.
+#:
+#: A statement-level branch on the flag is LEGITIMATE — `render_text` has two and
+#: `resolve_exclude_globs` has one, all correct — so it cannot be banned the way
+#: an expression conversion can. But a NEW one is a surface whose wording nobody
+#: reviewed, and that is precisely the shape that walked past round 6's guard
+#: fully green:
+#:
+#:     if summary.get("agent_worktrees_included"):
+#:         free_to_drop = False
+#:     else:
+#:         free_to_drop = g == AGENT_WORKTREE_GLOB
+#:
+#: The reader ledger cannot see it either (the now-dead line above still reads
+#: the key, so `render_text` stays at 1). Counting the branches does: 2 -> 3.
+_FLAG_BRANCHES = {
+    # `if agent_glob_applied_by_default(include_agent_worktrees) and …` — the
+    # site that appends the constant. Reads the predicate; does not restate it.
+    "resolve_exclude_globs": 1,
+    # The loud opt-in shout (flag AND not-in-force) and the quiet retyped-glob
+    # `note:` (flag, in force). Two branches, one `if`/`elif` chain.
+    "render_text": 2,
+}
 
-    🔴 STRUCTURAL, NOT SPELLED. `grep 'not args.include_agent_worktrees'` misses
-    `is False`, `== False`, and `A if flag else B` — the last of which is exactly
-    how `main` spelled it in round 5. So this walks the AST for the three node
-    kinds that can convert the flag into the fact and reports the enclosing
-    function, whatever the wording.
+
+def _flag_derivations(tree: ast.AST, src: str, owner: dict) -> list:
+    """Nodes of five NAMED kinds whose operands mention a flag spelling.
+
+    Returns `(node class name, enclosing function, source segment)`. The caller
+    splits them by class:
+
+      * `UnaryOp(Not)`, `Compare` against a bool `Constant` on EITHER side, and
+        `IfExp` are EXPRESSION conversions of the flag into the boolean fact.
+        Forbidden outside `agent_glob_applied_by_default`.
+      * `If` and `While` are STATEMENT branches on the flag. Legitimate, so they
+        are ledgered by count (`_FLAG_BRANCHES`) rather than banned.
+
+    🔴 WHAT THIS WALKER CANNOT DO — stated because a stronger sentence stood here
+    for a round and a re-derivation walked straight past it, fully green, guard
+    and reader ledger included. RE-MEASURED here: delete the `If`/`While` arm
+    below and the same insertion goes green again (185 passed), which is what
+    makes that arm the killer and not something else. THE SET OF WAYS TO SPELL "INVERT
+    THIS FLAG" IS OPEN AND THIS KNOWS FIVE NODE KINDS. MEASURED against this
+    walker, one spelling per line, all INVISIBLE to it: `operator.not_(flag)`,
+    `flag ^ True`, `{True: False, False: True}[flag]`, `bool(1 - flag)`,
+    `flag.__eq__(False)` — and so is any helper that takes the flag and returns
+    the fact. (`next(iter([]) if flag else …)` is NOT in that list: it was, and
+    the same measurement showed the walker SEES it, via the `IfExp`. A docstring
+    claiming a blind spot the code does not have is the same defect as one
+    claiming coverage it does not have.)
+
+    So: this is a TRIPWIRE FOR THE LIKELY SPELLINGS — the ones rounds 4 and 5
+    actually used, plus the statement form that beat round 6 — and NOT a proof
+    that the predicate has exactly one definition. Nothing here licenses skipping
+    review of a diff that touches the flag. The narrower claim is deliberate: the
+    docstring is written from what the code below does, not from what the guard
+    was hoped to be.
     """
     hits = []
     for node in ast.walk(tree):
         if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
-            probe = node.operand
-        elif isinstance(node, ast.Compare) and any(
-                isinstance(c, ast.Constant) and isinstance(c.value, bool)
-                for c in node.comparators):
-            probe = node.left
+            probes = [node.operand]
+        elif isinstance(node, ast.Compare):
+            # 🔴 BOTH SIDES. Round 6 probed `node.left` only, so the mirror
+            # spelling `False == flag` — same meaning, same hazard — was invisible.
+            operands = [node.left, *node.comparators]
+            def _is_bool(c):
+                return isinstance(c, ast.Constant) and isinstance(c.value, bool)
+            if not any(_is_bool(c) for c in operands):
+                continue
+            probes = [c for c in operands if not _is_bool(c)]
         elif isinstance(node, ast.IfExp):
-            probe = node.test
+            probes = [node.test]
+        elif isinstance(node, (ast.If, ast.While)):
+            probes = [node.test]
         else:
             continue
-        if any(f in ast.dump(probe) for f in _FLAG_SPELLINGS):
-            hits.append((owner.get(id(node), "?"), ast.get_source_segment(src, node)))
+        if any(f in ast.dump(p) for p in probes for f in _FLAG_SPELLINGS):
+            hits.append((type(node).__name__, owner.get(id(node), "?"),
+                         ast.get_source_segment(src, node)))
     return hits
+
+
+#: The exact per-node-class tally the positive control below MUST produce.
+#:
+#: 🟢 EXACT, NOT `>= n`. Round 6's control built three lines yielding FOUR hits
+#: and asserted `>= 3`. RE-MEASURED on that exact control, detector by detector:
+#: none dropped -> 4 (pass); `Compare` dropped -> 3 (pass); `IfExp` dropped -> 3
+#: (pass); `Not` dropped -> 2 (fail). So a control advertising three kinds
+#: actually proved one, and it had a full hit of slack. That is the
+#: same "description wider than body" defect as the docstring above, in the
+#: instrument meant to validate it. Per-class and exact: removing ANY ONE of the
+#: five detectors now moves a number in this dict.
+_CONTROL_HITS = {"UnaryOp": 3, "Compare": 2, "IfExp": 1, "If": 1, "While": 1}
 
 
 def test_the_agent_default_predicate_has_exactly_one_definition():
@@ -2595,10 +2707,22 @@ def test_the_agent_default_predicate_has_exactly_one_definition():
     that keeps N at 1 is a test that fails when it becomes 2. Consolidating
     without pinning it just resets the clock for round 7.
 
-    Two halves, and the second is the seam:
+    Three halves — the second and third are the seam, and the third exists
+    because the second was not enough:
       * NO function other than `agent_glob_applied_by_default` may derive the
-        fact from the flag — checked structurally, so a reworded derivation
-        cannot walk past it;
+        fact from the flag AS AN EXPRESSION — checked structurally over five
+        named node kinds, so a rewording WITHIN those kinds cannot walk past it.
+        🔴 A spelling OUTSIDE them still can: see `_flag_derivations` for the
+        list. This is a tripwire for the likely spellings, NOT a proof.
+      * every `if`/`while` branching on the flag is LEDGERED BY COUNT per
+        function. A branch is legitimate, so it cannot be banned — but a NEW one
+        is a surface nobody reviewed, and the statement form
+        `if flag: free = False else: free = g == CONST` inserted into
+        `render_text` ran GREEN against round 6's guard, reader ledger included
+        (the dead line above it still reads the key, so that count never moves).
+        MEASURED here: with the branch ledger in place the insertion is RED and
+        the failure names `render_text: 3 != 2`; with the `If`/`While` arm of
+        `_flag_derivations` removed it is green again.
       * the READER LEDGER is asserted in BOTH directions, so a new consumer or a
         vanished one both fail.
     """
@@ -2607,28 +2731,52 @@ def test_the_agent_default_predicate_has_exactly_one_definition():
     owner = _owner_map(tree)
 
     # 🔴 POSITIVE CONTROL FIRST. A walker wired to nothing reports a reassuring
-    # empty list, indistinguishable from a clean tree. Round 5's own spelling,
-    # fed through this exact walker, MUST be seen.
+    # empty list, indistinguishable from a clean tree. Every kind it advertises
+    # is exercised, and the tally is asserted PER KIND — see `_CONTROL_HITS`.
     control_src = (
         "def render_text(summary):\n"
         "    a = (1 if not summary.get('agent_worktrees_included') else 2)\n"
         "    b = not args.include_agent_worktrees\n"
-        "    c = args.include_agent_worktrees is False\n")
+        "    c = args.include_agent_worktrees is False\n"
+        "    d = False == args.include_agent_worktrees\n"
+        "    if summary.get('agent_worktrees_included'):\n"
+        "        e = 1\n"
+        "    else:\n"
+        "        e = 2\n"
+        "    while not args.include_agent_worktrees:\n"
+        "        break\n")
     control_tree = ast.parse(control_src)
-    control_hits = _rederivations(control_tree, control_src, _owner_map(control_tree))
-    assert len(control_hits) >= 3, (
-        f"the walker cannot see a re-derivation, so every zero it reports is "
-        f"meaningless: {control_hits}")
+    control_hits = _flag_derivations(control_tree, control_src, _owner_map(control_tree))
+    by_kind: dict = {}
+    for kind, _, _ in control_hits:
+        by_kind[kind] = by_kind.get(kind, 0) + 1
+    assert by_kind == _CONTROL_HITS, (
+        f"the walker does not see every kind it claims to, so its zeros are "
+        f"meaningless for the kinds it missed: {by_kind} != {_CONTROL_HITS} "
+        f"({control_hits})")
 
-    offenders = [(fn, seg) for fn, seg in _rederivations(tree, src, owner)
-                 if fn != _PREDICATE]
+    hits = _flag_derivations(tree, src, owner)
+    exprs = [(fn, seg) for kind, fn, seg in hits
+             if kind in ("UnaryOp", "Compare", "IfExp")]
+    offenders = [(fn, seg) for fn, seg in exprs if fn != _PREDICATE]
     assert not offenders, (
         "the agent-default predicate is being re-derived outside "
         f"`{_PREDICATE}`: {offenders}. Read summary['{_PREDICATE}'] instead — a "
         "second copy is how rounds 4 and 5 happened.")
     # …and the one definition really is there. Without this the assertion above
     # passes just as well on a tree where the predicate was deleted outright.
-    assert [fn for fn, _ in _rederivations(tree, src, owner)] == [_PREDICATE]
+    assert [fn for fn, _ in exprs] == [_PREDICATE]
+
+    branches: dict = {}
+    for kind, fn, _ in hits:
+        if kind in ("If", "While"):
+            branches[fn] = branches.get(fn, 0) + 1
+    assert branches == _FLAG_BRANCHES, (
+        f"the flag-branch ledger moved: {branches} != {_FLAG_BRANCHES}. A NEW "
+        "if/while on the flag is a message surface whose wording nobody "
+        "reviewed — round 6's guard was green against exactly that shape. A "
+        "vanished one means a branch that used to exist was reworded into "
+        "something this walker cannot see. Either way, read the diff.")
 
     readers: dict = {}
     for node in ast.walk(tree):
@@ -2687,6 +2835,90 @@ def test_an_empty_scan_without_any_glob_was_and_stays_a_no_op(tmp_path, capsys):
     assert rc == wp.RC_OK, capsys.readouterr().err
 
 
+def test_a_zero_row_scan_does_not_print_that_execute_refuses(tmp_path, capsys):
+    """🟡 THE THIRD SCOPING, MISSED BY THE ROUND-6 REMEDY.
+
+    `main()` declines to refuse on a typed dud for THREE reasons — typed-globs
+    only, `--allow-unmatched-globs`, and NOT WHEN THE SCAN PRODUCED NO ROWS — and
+    round 6 made the report's remedy and its retyped-glob `note:` conditional on
+    the SECOND of those, not the third. MEASURED before this fix, hermetic
+    tmpdir:
+
+        --repo <nonexistent> --exclude-path '*/civitai/*' --execute --confirm 0
+          rc = 0                                        (the run PROCEEDED)
+          stderr: "…matched zero rows, but this scan produced NO rows at all
+                   … Not refusing."
+          stdout: "--execute REFUSES while a typed glob is in this state — pass
+                   --allow-unmatched-globs …"
+
+    …and the same shape in the `note:` with `--include-agent-worktrees
+    --exclude-path '*/.claude/worktrees/*'`: "…this run REFUSES" on the stdout of
+    a run that returned RC_OK. Bounded — zero rows means zero removals are
+    possible — but it is the exact class rounds 4-6 exist to close, and
+    `scripts/README.md` stated the pair of conditionals as if it were closed.
+
+    Both message sites, one test, asserted as whole normalised strings.
+    """
+    empty_repo = str(tmp_path / "no-such-repo")
+
+    # (a) the per-glob zero-match remedy, on an ORDINARY typed dud.
+    gh = gh_stub(tmp_path, [], name="gh-zero-remedy")
+    rc = wp.main(["--repo", empty_repo, "--gh-cmd", gh, "--jobs", "1",
+                  "--exclude-path", "*/civitai/*", "--execute", "--confirm", "0"])
+    cap = capsys.readouterr()
+    assert rc == wp.RC_OK, cap.err
+    assert "Not refusing." in cap.err, cap.err
+    assert "REFUSE" not in cap.out, cap.out
+    assert ("This scan produced NO rows at all, so the zero says nothing about the glob and "
+            "--execute does NOT refuse on it here — re-run against a scope that actually "
+            "holds worktrees before trusting this filter.") in cap.out, cap.out
+
+    # (b) the retyped-glob `note:`, which has the identical hole.
+    gh = gh_stub(tmp_path, [], name="gh-zero-note")
+    rc = wp.main(["--repo", empty_repo, "--gh-cmd", gh, "--jobs", "1",
+                  "--include-agent-worktrees", "--exclude-path", AGENT_GLOB,
+                  "--execute", "--confirm", "0"])
+    cap = capsys.readouterr()
+    assert rc == wp.RC_OK, cap.err
+    assert "Not refusing." in cap.err, cap.err
+    assert "REFUSE" not in cap.out, cap.out
+    assert ("this run does NEITHER: this scan produced no rows at all, so nothing could have "
+            "matched, the zero says nothing about the glob, and --execute refuses on neither "
+            "command line.") in cap.out, cap.out
+
+
+def test_summarize_will_not_guess_whether_the_flag_was_passed():
+    """🟢 A DEFAULT THAT CAN ONLY EVER BE WRONG WHEN IT IS USED.
+
+    `agent_worktrees_included` used to default to False while the glob list came
+    from `resolve_exclude_globs(patterns, include_agent_worktrees)` — two places
+    to say the same thing, one of them silent. Omitting it after opting the flag
+    ON produced:
+
+        wp.summarize([], wp.resolve_exclude_globs([], True), [])
+          agent_worktree_glob_in_force   = False
+          agent_glob_applied_by_default  = True
+
+    …a summary asserting the tool applies a constant that is not in the list.
+    Unreachable from a command line (`main()` always passed it), but the README
+    publishes this JSON for consumers, and the whole subject of rounds 4-6 is
+    these three keys disagreeing. It is now required and keyword-only.
+    """
+    with pytest.raises(TypeError):
+        wp.summarize([], wp.resolve_exclude_globs([], True), [])
+    # …and the consistent shape, when the caller says what it did.
+    s = wp.summarize([], wp.resolve_exclude_globs([], True), [],
+                     agent_worktrees_included=True)
+    assert s["agent_worktree_glob_in_force"] is False
+    assert s["agent_glob_applied_by_default"] is False
+    # NEGATIVE CONTROL on the pair: with the flag OFF both are True, so the
+    # assertion above is about the flag and not about `[]` making everything False.
+    s = wp.summarize([], wp.resolve_exclude_globs([], False), [],
+                     agent_worktrees_included=False)
+    assert s["agent_worktree_glob_in_force"] is True
+    assert s["agent_glob_applied_by_default"] is True
+
+
 def test_per_glob_counts_are_independent_of_shadowing(two_dead):
     """A working glob listed AFTER a broader one still reports its own matches.
     Tallying `excluded_by` (which records only the FIRST match) would report zero
@@ -2694,7 +2926,7 @@ def test_per_glob_counts_are_independent_of_shadowing(two_dead):
     repo, agent, plain, gh = two_dead
     rows = wp.scan_repo(repo, gh, True, 2000, jobs=1,
                         exclude_globs=[AGENT_GLOB, "*/agent-7f3a91"])
-    s = wp.summarize(rows, [AGENT_GLOB, "*/agent-7f3a91"])
+    s = wp.summarize(rows, [AGENT_GLOB, "*/agent-7f3a91"], agent_worktrees_included=False)
     assert [d["glob"] for d in s["exclude_globs"]] == [AGENT_GLOB, "*/agent-7f3a91"]
     assert s["exclude_globs"][0]["matched"] == 1
     assert s["exclude_globs"][1]["matched"] == 1, (
@@ -2707,11 +2939,11 @@ def test_per_glob_counts_are_independent_of_shadowing(two_dead):
 def test_the_summary_shape_does_not_depend_on_the_caller():
     """`exclude_globs` used to be bolted on by main() after summarize(), so a
     direct caller got a dict with a different shape."""
-    keys_none = set(wp.summarize([]))
-    keys_globs = set(wp.summarize([], ["*/x/*"]))
+    keys_none = set(wp.summarize([], agent_worktrees_included=False))
+    keys_globs = set(wp.summarize([], ["*/x/*"], agent_worktrees_included=False))
     assert keys_none == keys_globs
     assert {"exclude_globs", "exclude_globs_matching_nothing"} <= keys_none
-    assert wp.summarize([])["exclude_globs"] == []
+    assert wp.summarize([], agent_worktrees_included=False)["exclude_globs"] == []
 
 
 def test_the_first_matching_glob_is_the_one_reported():
@@ -2749,7 +2981,9 @@ def test_the_credited_glob_is_glob_major_not_candidate_major():
     # move with the ordering.
     rows = [{"path": "/a/b/c", "verdict": wp.DEAD, "repo": "/a", "excluded_by": "/a/b"}]
     for order in (["/a/b", "*/c"], ["*/c", "/a/b"]):
-        counts = {d["glob"]: d["matched"] for d in wp.summarize(rows, order)["exclude_globs"]}
+        counts = {d["glob"]: d["matched"]
+                  for d in wp.summarize(
+                      rows, order, agent_worktrees_included=False)["exclude_globs"]}
         assert counts == {"/a/b": 1, "*/c": 1}, order
 
 

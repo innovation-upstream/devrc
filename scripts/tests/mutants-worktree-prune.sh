@@ -250,6 +250,20 @@ run 'report-free-note-deleted-entirely' \
 run 'free-note-used-as-a-boolean-again' \
   test_the_free_to_drop_note_is_scoped_to_the_ONE_glob_it_is_true_of \
   's|^            if others:$|            if False:|'
+# 🟡 ROUND 7 — AND THE OTHER DIRECTION, which SURVIVED round 6's fully green
+# suite (found by the round-7 delta audit). With
+# `if True:` a SOLO dud gets the mixed-list contrast appended to the solo
+# sentence: "…the tool puts it back. Dropping  really removes it, from every
+# future run too — though none of the globs named…" — two contradicting
+# sentences and an EMPTY glob list, on the stderr of an --execute refusal.
+# It survived because every assertion on that sentence used `in`, so appended
+# text passed them all; the killer now pins the JOIN (free note straight into
+# "Nothing removed."). MEASURED here: killer set = exactly that one test.
+# "Every new conditional is mutated in both directions" was not true of this
+# one, and this is what made it true.
+run 'free-note-others-clause-always-appended' \
+  test_a_messy_hand_typed_copy_of_the_default_still_gets_the_free_note \
+  's|^            if others:$|            if True:|'
 # 🟢 …and the "— and ONLY that one —" infix, separately: without it the sentence
 # names the constant but no longer says the other duds are excluded from the
 # claim, while the contrast clause below still prints.
@@ -260,7 +274,7 @@ run 'free-note-drops-the-ONLY-that-one-scoping' \
 printf '\n== ROUND 5 FIX 2 — the note may not claim the flag is a no-op ==\n'
 run 'note-claims-the-run-is-identical-to-the-default' \
   test_the_shout_is_gated_on_the_GLOB_not_on_the_flag \
-  's|f"spared and this run can remove no more than the default would. It is NOT "|f"spared and this run behaves exactly like the default. The flag is doing "|'
+  's|f"spared and this run can remove no more than the bare default would. It is NOT "|f"spared and this run behaves exactly like the default. The flag is doing "|'
 
 printf '\n== ROUND 6 — ONE PREDICATE, ONE PLACE ==\n'
 # 🔴 The consolidated fact, mutated at its ONE definition, in BOTH directions.
@@ -293,31 +307,84 @@ run 'render-text-rederives-the-predicate-again' \
 run 'main-rederives-the-predicate-again' \
   test_the_agent_default_predicate_has_exactly_one_definition \
   's|^                     if summary\["agent_glob_applied_by_default"\] else \[\])|                     if not args.include_agent_worktrees else [])|'
+# 🔴 ROUND 7 — THE STATEMENT FORM, WHICH WALKED PAST THE ROUND-6 GUARD GREEN.
+# The guard inspected `UnaryOp(Not)` / `Compare` / `IfExp` only, so an `if/else`
+# re-derivation was invisible to it AND to the reader ledger (the now-dead line
+# above still reads the key, so `render_text` stays at 1). Behaviourally inert —
+# identical output on every input — so ONLY the widened walker can kill it. If
+# this is ever scored SURVIVED, the `ast.If` half of `_flag_derivations` is gone
+# and the guard is back to the coverage it advertised but did not have.
+run 'render-text-rederives-the-predicate-as-an-if-statement' \
+  test_the_agent_default_predicate_has_exactly_one_definition \
+  's|^                            and bool(summary.get("agent_glob_applied_by_default")))$|&\n            if summary.get("agent_worktrees_included"):\n                free_to_drop = False\n            else:\n                free_to_drop = g == AGENT_WORKTREE_GLOB|'
+# 🟢 …and the REVERSED compare, which round 6 also could not see: it probed
+# `node.left` only, so `False == flag` — same meaning, same hazard — was
+# invisible. Inert too; only the widened walker kills it.
+run 'main-rederives-the-predicate-with-a-reversed-compare' \
+  test_the_agent_default_predicate_has_exactly_one_definition \
+  's|^                     if summary\["agent_glob_applied_by_default"\] else \[\])|                     if False == args.include_agent_worktrees else [])|'
+# 🟢 …and the summary kwarg that used to default to False. A caller that opted
+# the flag ON in `resolve_exclude_globs` and omitted it here got a summary
+# claiming the tool applies a constant that is not in the list.
+run 'summarize-guesses-the-flag-again' \
+  test_summarize_will_not_guess_whether_the_flag_was_passed \
+  's|^              agent_worktrees_included: bool,$|              agent_worktrees_included: bool = False,|'
 
-printf '\n== ROUND 6 — a claim about THIS run that THIS run contradicts ==\n'
-# 🔴 Each of these makes the conditional unconditional in the direction round 5
-# shipped: the sentence that is true without `--allow-unmatched-globs`, printed
-# on a run where that flag is in force and the run therefore REMOVES.
+printf '\n== ROUND 6/7 — a claim about THIS run that THIS run contradicts ==\n'
+# 🔴 Both message sites are now THREE-WAY, matching `main()`'s three scopings
+# (no rows / --allow-unmatched-globs / refuse) rather than two of them. Round 6
+# closed the override exemption and left the NO-ROWS one open, so a scan that
+# produced no rows printed "--execute REFUSES …" and "this run REFUSES" on the
+# stdout of a run that returned RC_OK while its own stderr said "Not refusing."
+# Every branch of both chains is mutated, in both directions.
+run 'note-ignores-the-zero-row-exemption' \
+  test_a_zero_row_scan_does_not_print_that_execute_refuses \
+  's|^        if not summary.get("worktrees"):$|        if False:|'
+run 'note-claims-every-run-is-a-zero-row-run' \
+  test_the_shout_is_gated_on_the_GLOB_not_on_the_flag \
+  's|^        if not summary.get("worktrees"):$|        if True:|'
 run 'note-says-REFUSES-under-allow-unmatched-globs' \
   test_the_note_does_not_claim_a_run_REFUSES_when_that_run_REMOVES \
-  's|^                   if not summary.get("allow_unmatched_globs") else$|                   if True else|'
+  's|^        elif summary.get("allow_unmatched_globs"):$|        elif False:|'
+run 'note-says-WARNS-even-when-it-refuses' \
+  test_the_shout_is_gated_on_the_GLOB_not_on_the_flag \
+  's|^        elif summary.get("allow_unmatched_globs"):$|        elif True:|'
+run 'remedy-ignores-the-zero-row-exemption' \
+  test_a_zero_row_scan_does_not_print_that_execute_refuses \
+  's|^            if not summary.get("worktrees"):$|            if False:|'
+run 'remedy-claims-every-run-is-a-zero-row-run' \
+  test_the_zero_match_remedy_does_not_offer_a_flag_already_in_force \
+  's|^            if not summary.get("worktrees"):$|            if True:|'
 run 'remedy-offers-a-flag-already-in-force' \
   test_the_zero_match_remedy_does_not_offer_a_flag_already_in_force \
-  's|^                      if not summary.get("allow_unmatched_globs") else$|                      if True else|'
-# …and the OTHER direction for each, so neither test is passing on an assertion
-# that a constant string happens to satisfy.
-run 'note-says-WARNS-even-when-it-refuses' \
-  test_the_note_does_not_claim_a_run_REFUSES_when_that_run_REMOVES \
-  's|^                   if not summary.get("allow_unmatched_globs") else$|                   if False else|'
+  's|^            elif summary.get("allow_unmatched_globs"):$|            elif False:|'
 run 'remedy-says-it-does-not-refuse-when-it-does' \
   test_the_zero_match_remedy_does_not_offer_a_flag_already_in_force \
-  's|^                      if not summary.get("allow_unmatched_globs") else$|                      if False else|'
+  's|^            elif summary.get("allow_unmatched_globs"):$|            elif True:|'
+# 🟡 ROUND 7 — the removal-parity claim, put back. "…it does NOT refuse and this
+# run removes exactly what the default would have removed" is false the moment
+# ONE more --exclude-path spares a row: measured 0 removed vs the bare default's
+# 1, with the parity claim on that run's stdout.
+run 'note-claims-removal-parity-with-the-default' \
+  test_the_note_does_not_claim_a_run_REFUSES_when_that_run_REMOVES \
+  's|^                       "--allow-unmatched-globs is in force, so it does NOT refuse. That is a "$|                       "--allow-unmatched-globs is in force, so it does NOT refuse and this run removes exactly what the default would have removed. That is a "|'
 
 printf '\n== ROUND 6 — the normalisation the dropped `normalize_glob(g)` relied on ==\n'
 # 🟢 Both message sites now compare `g` to the constant WITHOUT re-normalising,
 # because `resolve_exclude_globs` -> `normalize_globs` already did. The existing
 # `trailing-slash-not-stripped` mutant covers the `rstrip`; this covers the
-# `strip`, which nothing did — and which is the half a shell paste produces.
+# `strip` — the half a shell paste produces.
+#
+# 🟢 DISAMBIGUATED (round 7). "…which nothing did" stood here and reads two ways:
+# TRUE as "no MUTANT covered the `strip`", FALSE as "no TEST did". MEASURED on
+# this mutant in a hermetic copy: 9 `FAILED` lines across 6 DISTINCT tests
+# (`test_whitespace_around_a_glob_is_stripped_before_the_slash` is parametrized
+# ×4), and `test_a_messy_hand_typed_copy_of_the_default_still_gets_the_free_note`
+# is only ONE of the 6. So this mutant does NOT certify that test — it certifies
+# the `strip` was UNDER-MUTATED, which is a claim about this battery and not
+# about the suite. That test's own sensitivity is carried by
+# `free-note-others-clause-always-appended` above, measured the same way: killer
+# set = exactly {that test}, nothing else.
 run 'leading-whitespace-not-stripped' \
   test_a_messy_hand_typed_copy_of_the_default_still_gets_the_free_note \
   's|^    return raw.strip().rstrip("/")|    return raw.rstrip("/")|'
