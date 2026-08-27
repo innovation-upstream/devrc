@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -213,20 +214,66 @@ class TestCommitsBehind:
         assert gm.commits_behind(repo, "refs/nope/does-not-exist") is None
 
 
+#: A real import of `git_mainline`, in every spelling this repo actually uses:
+#: `import git_mainline`, `from git_mainline import …`, and the by-path
+#: `spec_from_file_location("git_mainline", …)` that `subsystem_touch`'s own
+#: suite loads it with. 🔴 STATED SCOPE, so nobody quotes it wider than it is:
+#: it does NOT see a `__import__("git_mainline")`, an importlib call built from
+#: a variable, or a name reached through a re-export. Those would be a fourth
+#: spelling to add here — not a reason to go back to matching the bare word.
+_MAINLINE_IMPORT = re.compile(
+    r"^\s*(?:import\s+git_mainline\b|from\s+git_mainline\s+import\b)"
+    r"|spec_from_file_location\(\s*[\"']git_mainline[\"']",
+    re.M,
+)
+
+
+def _imports_mainline(path: Path) -> bool:
+    if path.name == "git_mainline.py":
+        return False
+    return bool(_MAINLINE_IMPORT.search(path.read_text(encoding="utf-8")))
+
+
 class TestTheSeamIsOwned:
     def test_the_LEDGER_of_importers_is_pinned_both_ways(self) -> None:
         """🔴 A SEAM GUARD PINS A RELATIONSHIP, and fails when the set GROWS or
         SHRINKS. Two modules must agree about this repo's mainline; a third
         arriving without being enumerated here is a third opinion nobody
-        compared, and one leaving means a site went back to open-coding it."""
+        compared, and one leaving means a site went back to open-coding it.
+
+        🔴 IT MATCHES AN IMPORT, NOT THE WORD. This used to be
+        `"git_mainline" in p.read_text()`, which is a SPELLED guard: it fires on
+        any module that so much as NAMES the module in a comment. Measured
+        2026-08-25 — `shared_clone_sync.py` landed with a docstring paragraph
+        explaining why it deliberately does NOT take its ref from here, and the
+        ledger reported it as a third opinion. The docstring said "importers";
+        the implementation counted mentions, so the guard was WIDER than its own
+        sentence and its failure named the wrong thing. The mention set is still
+        pinned — below, separately — so nothing about this got weaker: both sets
+        fail when they grow or shrink, and they cannot be confused for each
+        other."""
         lib = REPO_ROOT / "scripts" / "lib"
-        importers = {
+        importers = {p.name for p in sorted(lib.glob("*.py")) if _imports_mainline(p)}
+        assert importers == {"subsystem_touch.py", "handoff_doc.py"}, importers
+
+    def test_the_ledger_of_modules_that_merely_MENTION_it_is_pinned_too(self) -> None:
+        """The other half of the split above. A module that discusses this seam
+        without importing it is making a CLAIM about the seam — that it went a
+        different way on purpose — and that claim is worth enumerating for the
+        same reason the importer set is: so it cannot grow silently.
+
+        🔴 If a name moves from here into the importer set, BOTH assertions go
+        red, which is the point — a prose "we deliberately don't use it" quietly
+        becoming a real import is exactly the drift a single set would hide."""
+        lib = REPO_ROOT / "scripts" / "lib"
+        mentions = {
             p.name
             for p in sorted(lib.glob("*.py"))
             if p.name != "git_mainline.py"
+            and not _imports_mainline(p)
             and "git_mainline" in p.read_text(encoding="utf-8")
         }
-        assert importers == {"subsystem_touch.py", "handoff_doc.py"}, importers
+        assert mentions == {"shared_clone_sync.py"}, mentions
 
     def test_subsystem_touch_takes_its_FALLBACK_from_here(self) -> None:
         """Not merely an equal tuple — the SAME OBJECT as the `git_mainline` that

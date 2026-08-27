@@ -25,6 +25,15 @@ TypeScript, Go -- is listed there as out-of-instrument WITH ITS REASON. Exit 0
 means "no unresolved flag among the guards this tool can see", never "the
 repo's guards are alive".
 
+🔴 AND A THIRD STATUS, `exclude`, SUBTRACTS FILES AN `instrument` GLOB SWEEPS UP
+BUT PYTEST CANNOT COLLECT. Its selector is `<path-glob> -- <reason>` and the
+glob half is PARSED (see `parse_exclude`), unlike the `out-of-instrument`
+column, which is English and must never be reinterpreted as a path. Excluded
+files are removed from BOTH the traced target set and the pytest command line,
+and every one of them is written into the census with its reason -- an
+exclusion that vanished from the artifact would be exactly the silent hole this
+registry exists to close.
+
 🔴 AND THE DENOMINATOR IS NOT DERIVABLE FROM THIS TOOL. An earlier revision of
 this docstring claimed "the census prints that ratio on every run so the number
 is not quotable without its denominator". It did not: what is printed is a
@@ -68,6 +77,60 @@ def repo_slug(repo):
     return m.group(1) if m else ""
 
 
+_EXCLUDE_SEP = " -- "
+# Deliberately NARROW: the characters a relative path glob is made of, and
+# nothing else. Whitespace, commas, colons and parentheses -- i.e. every way an
+# English sentence announces itself -- are rejected.
+_GLOB_CHARS = re.compile(r"^[A-Za-z0-9_.*?/\[\]-]+$")
+
+_MIN_REASON = 40
+
+
+def parse_exclude(selector, line=""):
+    """`<path-glob> -- <reason>` for an `exclude` row. Both halves required.
+
+    🔴 THE WHOLE POINT IS THAT THIS PARSES AND `out-of-instrument` DOES NOT.
+    Those selectors are PROSE -- `scripts/check-*.sh, kustomize-validate.sh:
+    same bash line-granularity limit` is a sentence, not a glob -- and four
+    repos' measured surfaces depend on them staying prose. Retroactively
+    reading them as path patterns would silently change what is measured
+    everywhere, with nothing in the diff to show it. So exclusion got its own
+    status with its own, checkable, spelling instead.
+
+    🔴 VALIDATED AT LOAD TIME AND LOUDLY. An `exclude` row REMOVES files from
+    the measurement, so a row that does not mean what its author thought is the
+    one kind of registry typo that makes the report smaller and quieter. The
+    failure mode this whole tool is about is a comforting zero; a silently
+    mis-parsed exclusion manufactures one. A malformed row is a `SystemExit`,
+    the same contract `load_registry` already holds for a row with the wrong
+    field count -- not a warning, and never a skip.
+
+    The reason is required and must be substantive: an exclusion is a claim
+    that something CANNOT be measured, and that claim is what a reader of the
+    census is being asked to accept.
+    """
+    where = f" in row {line!r}" if line else ""
+    glob, sep, reason = selector.partition(_EXCLUDE_SEP)
+    glob, reason = glob.strip(), reason.strip()
+    if not sep:
+        raise SystemExit(
+            f"registry: an `exclude` selector must be `<path-glob>{_EXCLUDE_SEP}"
+            f"<reason>`; found no {_EXCLUDE_SEP!r} separator{where}")
+    if not glob or not _GLOB_CHARS.match(glob) or "" in glob.split("/") \
+            or ".." in glob.split("/"):
+        raise SystemExit(
+            f"registry: an `exclude` selector's first half must be a clean "
+            f"relative path glob (no spaces, commas, colons, absolute or `..` "
+            f"segments) -- `out-of-instrument` prose is NOT accepted here. "
+            f"Got {glob!r}{where}")
+    if len(reason) < _MIN_REASON:
+        raise SystemExit(
+            f"registry: an `exclude` row must say WHY the files cannot be "
+            f"measured, in at least {_MIN_REASON} characters. Got "
+            f"{reason!r}{where}")
+    return glob, reason
+
+
 def load_registry(path=REGISTRY):
     rows = []
     for line in pathlib.Path(path).read_text(encoding="utf-8").splitlines():
@@ -77,18 +140,56 @@ def load_registry(path=REGISTRY):
         if len(parts) != 4:
             raise SystemExit(f"registry: malformed row (want 4 tab-separated "
                              f"fields, got {len(parts)}): {line!r}")
-        rows.append(dict(zip(("slug", "lang", "status", "selector"), parts)))
+        row = dict(zip(("slug", "lang", "status", "selector"), parts))
+        if row["status"] == "exclude":
+            row["glob"], row["reason"] = parse_exclude(row["selector"], line)
+        rows.append(row)
     return rows
 
 
-def guard_files(repo, rows, slug):
-    """Absolute paths of the `instrument` guards present in this clone."""
+def excluded_files(repo, rows, slug):
+    """What every `exclude` row removes, one record per FILE.
+
+    A record with `rel` of `-` is a row whose glob matched NOTHING in this
+    clone. It excludes nothing, so it is harmless -- but it is also a stale
+    registry entry, and the census is where a stale entry has to be visible or
+    nobody will ever find it.
+    """
+    out = []
+    for r in rows:
+        if r["slug"] != slug or r["status"] != "exclude":
+            continue
+        hits = [p for p in sorted(pathlib.Path(repo).glob(r["glob"]))
+                if p.is_file()]
+        base = {"glob": r["glob"], "reason": r["reason"], "lang": r["lang"]}
+        if not hits:
+            out.append(dict(base, path=None, rel="-"))
+            continue
+        for p in hits:
+            out.append(dict(base, path=p, rel=str(p.relative_to(repo))))
+    return out
+
+
+def guard_files(repo, rows, slug, excluded=()):
+    """Absolute paths of the `instrument` guards present in this clone.
+
+    🔴 THIS ONE SET IS BOTH THE TRACED TARGET SET AND THE PYTEST COMMAND LINE
+    (`run_traced` derives the invocation's path arguments from it), so
+    subtracting here subtracts from both -- which is the requirement, not a
+    convenience. A file that pytest cannot collect must not be handed to
+    pytest: `ZacxDev/homelab-infra`'s four `test_vetr_ci_*.py` harnesses are
+    standalone `sys.exit()` scripts, and ONE of them exiting at module level
+    raised `SystemExit` during collection, which pytest reports as
+    `INTERNALERROR` and which aborts the WHOLE session -- `no tests ran`,
+    rc=3, and a census of 44 flags derived from a run that traced nothing.
+    """
+    drop = {p for p in excluded if p is not None}
     out = []
     for r in rows:
         if r["slug"] != slug or r["status"] != "instrument":
             continue
         for p in sorted(pathlib.Path(repo).glob(r["selector"])):
-            if p.is_file() and p.suffix == ".py" and p not in out:
+            if p.is_file() and p.suffix == ".py" and p not in out and p not in drop:
                 out.append(p)
     return out
 
@@ -316,7 +417,9 @@ def scan(repo, census_path=None, verbose=True, python=None, registry=None):
               f"rather than reading this silence as coverage.", file=sys.stderr)
         return EXIT_UNDECIDABLE
 
-    targets = guard_files(repo, rows, slug)
+    excl = excluded_files(repo, rows, slug)
+    targets = guard_files(repo, rows, slug,
+                          excluded=[e["path"] for e in excl])
     oo = [r for r in rows if r["slug"] == slug and r["status"] == "out-of-instrument"]
     inst = [r for r in rows if r["slug"] == slug and r["status"] == "instrument"]
 
@@ -342,10 +445,11 @@ def scan(repo, census_path=None, verbose=True, python=None, registry=None):
         # hold ~170 of the ~270 guards. Recording their out-of-instrument rows
         # is the only thing that keeps the census honest about its own reach.
         print(f"{slug}: 0 instrumentable guards present in this clone; "
-              f"{len(oo)} out-of-instrument row(s) registered.")
+              f"{len(oo)} out-of-instrument row(s) registered; "
+              f"{len(excl)} excluded file(s).")
         if census_path:
             write_census(census_path, slug, [], oo, [],
-                         interpreter_id(python, redact=True))
+                         interpreter_id(python, redact=True), excluded=excl)
         return EXIT_CLEAN
 
     trace, rc, tail = run_traced(repo, targets, python=python)
@@ -435,10 +539,11 @@ def scan(repo, census_path=None, verbose=True, python=None, registry=None):
     unres = dg.unresolved(all_flags)
     interp = interpreter_id(python)
     if verbose:
-        _report(slug, targets, all_flags, unres, oo, undecidable, rc, interp)
+        _report(slug, targets, all_flags, unres, oo, undecidable, rc, interp,
+                excl)
     if census_path:
         write_census(census_path, slug, all_flags, oo, undecidable,
-                     interpreter_id(python, redact=True), rc)
+                     interpreter_id(python, redact=True), rc, excluded=excl)
     # Undecidable outranks flags: "I could not measure part of this" must not
     # be reported as "here is the measurement".
     if undecidable:
@@ -446,7 +551,8 @@ def scan(repo, census_path=None, verbose=True, python=None, registry=None):
     return EXIT_FLAGS if unres else EXIT_CLEAN
 
 
-def _report(slug, targets, flags, unres, oo, undecidable, rc, interp):
+def _report(slug, targets, flags, unres, oo, undecidable, rc, interp,
+            excluded=()):
     code, nfail = rc if isinstance(rc, tuple) else (rc, 0)
     print(f"== {slug}")
     print(f"   interpreter  : {interp}")
@@ -465,6 +571,17 @@ def _report(slug, targets, flags, unres, oo, undecidable, rc, interp):
     print(f"   NOT measured : {len(oo)} registered out-of-instrument ROW(s) "
           f"(registry entries, NOT a guard count -- no denominator is derivable "
           f"here)")
+    # Printed unconditionally, zero included. An exclusion shrinks the report,
+    # so the count has to be visible on the same screen as the result it shrank.
+    print(f"   excluded     : {len(excluded)} file(s) removed by `exclude` "
+          f"row(s) before tracing")
+    for e in excluded:
+        print(f"   EXCLUDED {e['rel']}   [{e['glob']}]")
+    # The reason ONCE PER GLOB, not once per file: these reasons run to several
+    # lines and one glob routinely removes a handful of files, so repeating it
+    # per file buries the flag list it is printed above.
+    for g, why in sorted({(e["glob"], e["reason"]) for e in excluded}):
+        print(f"   EXCLUDED-WHY [{g}] -- {why}")
     print(f"   flagged      : {len(flags)} branch bodies never executed "
           f"({len(flags) - len(unres)} justified, {len(unres)} unresolved)")
     for f in sorted(unres, key=lambda x: (x.path, x.branch.first_line)):
@@ -482,8 +599,24 @@ _CENSUS_HEADER = [
     "# 🔴 A flag has THREE readings and only two are defects: dead code, an untested",
     "#    reporting branch, or a branch driven through a subprocess. See",
     "#    scripts/lib/dead_guard.py. Adjudicating them is a human's job.",
+    "# 🔴 `excluded` rows name files an `instrument` glob swept up that pytest cannot",
+    "#    collect. They were removed from the run BEFORE tracing; the justification",
+    "#    column is the registry's recorded reason, and it is a claim to check.",
     "repo_slug\tstatus\tlocation\tkind\tcase_handled\tcorpus_instances\tjustification",
 ]
+
+# A provenance line: `# <slug> measured under ...`. Everything else starting
+# with `#` is header text.
+#
+# 🔴 THIS EXISTS BECAUSE THE OLD TEST WAS `line in _CENSUS_HEADER`, WHICH MADE
+# THE HEADER UNEDITABLE. Any header line from an EARLIER revision fails that
+# membership test, so it was kept as a data line, grouped under a nonsense key
+# ("Measured", "🔴") and re-emitted BELOW the new header -- a stale, duplicated
+# preamble in the middle of the artifact, produced by the very command the
+# artifact's own header tells you to run. Recognising provenance positively,
+# and treating every other `#` line as replaceable header, is what lets the
+# header say something new without corrupting the file.
+_PROVENANCE = re.compile(r"^# (\S+/\S+) measured under ")
 
 
 def _tsv(s):
@@ -491,7 +624,8 @@ def _tsv(s):
     return str(s).replace("\t", "\\t").replace("\n", " ").replace("\r", " ")
 
 
-def write_census(path, slug, flags, oo, undecidable, interp="?", rc=(0, 0)):
+def write_census(path, slug, flags, oo, undecidable, interp="?", rc=(0, 0),
+                 excluded=()):
     """Rewrite THIS repo's rows, leaving other repos' rows intact.
 
     🔴 IDEMPOTENT, because the regeneration command is printed in the file's own
@@ -514,8 +648,10 @@ def write_census(path, slug, flags, oo, undecidable, interp="?", rc=(0, 0)):
         for line in p.read_text(encoding="utf-8").splitlines():
             if not line.strip():
                 continue
-            if line in _CENSUS_HEADER or line.startswith("repo_slug\t"):
+            if line.startswith("repo_slug\t"):
                 continue                       # header is re-emitted below
+            if line.startswith("#") and not _PROVENANCE.match(line):
+                continue                       # header text, this rev or older
             # NOTE: this repo's own old lines are NOT skipped here. They are
             # grouped like everyone else's and then REPLACED wholesale by
             # `blocks[slug] = mine` below. Two `continue`s used to do it here
@@ -527,8 +663,8 @@ def write_census(path, slug, flags, oo, undecidable, interp="?", rc=(0, 0)):
     out = []
     blocks = {}
     for line in kept:
-        key = line.split("\t", 1)[0] if not line.startswith("#") else \
-            line.split(" ", 2)[1] if line.startswith("# ") else ""
+        m = _PROVENANCE.match(line)
+        key = m.group(1) if m else line.split("\t", 1)[0]
         blocks.setdefault(key, []).append(line)
     # The interpreter VERSION is part of the measurement (a different one takes
     # different branches). The PATH is not written -- see `interpreter_id`.
@@ -544,6 +680,14 @@ def write_census(path, slug, flags, oo, undecidable, interp="?", rc=(0, 0)):
     for r in oo:
         out.append(f"{slug}\tout-of-instrument\t-\t{r['lang']}\t"
                    f"{_tsv(r['selector'])}\tunmeasured\t-")
+    # 🔴 ONE ROW PER EXCLUDED FILE, CARRYING ITS REASON. An `exclude` row makes
+    # the flag list SHORTER, which is indistinguishable from the repo getting
+    # cleaner unless the subtraction is itself in the artifact. Dropping a file
+    # from the measurement and from the record is how a registry stops being a
+    # ledger and starts being a filter.
+    for e in sorted(excluded, key=lambda e: (e["rel"], e["glob"])):
+        out.append(f"{slug}\texcluded\t{_tsv(e['rel'])}\t{e['lang']}\t"
+                   f"{_tsv(e['glob'])}\texcluded\t{_tsv(e['reason'])}")
     for u in undecidable:
         out.append(f"{slug}\tundecidable\t{_tsv(u)}\t-\t-\t-\t-")
     # 🔴 ORDER-STABLE, SORTED BY SLUG. Appending this repo's block after the

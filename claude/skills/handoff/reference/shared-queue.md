@@ -11,15 +11,84 @@ a command, not any of the prose below:
 ```bash
 claim-work --list                                            # every live claim, with age + subject
 SLUG=$(claim-work --slug-for <handoff-doc> <rank>)            # the canonical id both sessions must derive
-claim-work "$SLUG" --subject "<the item, in your own words>"  # 0 = yours · 10 = taken · 11 = stale
+claim-work "$SLUG" --subject "<the item, in generic words>"   # 0 = yours · 10 = taken · 11 = stale
 claim-work --release "$SLUG"                                  # when you finish or abandon it
 ```
 
-It publishes an ORPHAN commit to `refs/heads/claim/<slug>` on origin. Because
-each claim is an unrelated root, a push to an already-claimed ref is rejected
-NON-FAST-FORWARD — git's own atomic ref compare-and-swap, decided on the server,
-with no check-then-act window. It **FAILS OPEN**: no origin/network/auth ⇒ a
-loud stderr warning and exit 0, so it can never block a `/resume`.
+🔴 **The namespace is GLOBAL — ONE canonical remote, resolved from the script's
+own location, never from the cwd's `origin`.** That is not a detail: the queue is
+global (handoff docs live in devrc while the work happens in other repos), and it
+was `$PWD` until 2026-08-26, which made the whole mechanism **inert cross-repo** —
+measured, the same slug claimed from two repos returned rc 0 CLAIMED twice, one
+ref per origin, no warning. Run the bare command from wherever you are; `--repo`
+changes the namespace and is for tests, not routine use. If the canonical remote
+cannot be resolved it DEGRADES rather than falling back — a fallback reinstates
+the bug behind a confident CLAIMED.
+
+It publishes an ORPHAN commit to `refs/heads/claim/<slug>` on that remote. 🔴 **A
+second claimant is refused, but name the mechanism correctly — there are two, and
+neither is spelled "non-fast-forward".** Measured 2026-08-26:
+
+| case | who refuses | the actual message |
+|---|---|---|
+| two TRUE concurrent first movers | the SERVER's ref transaction: both sent `old=0000…`, and a create is a compare-and-swap on that value | `cannot lock ref '<ref>': reference already exists` |
+| a SERIALIZED second mover | the CLIENT: its fresh scratch repo does not hold the winner's object, so git cannot prove a fast-forward | `! [rejected] <sha> -> claim/<slug> (fetch first)` |
+
+The first row is the atomicity, and it is the half that covers the FIRST mover.
+🔴 **The orphan-root property plays no part in it** — it is the second line of
+defence in the serialized row, where an unrelated root can never be a descendant.
+
+It **FAILS OPEN**: no canonical remote/network/auth ⇒ a loud stderr warning and
+exit 0, so it can never block a `/resume`.
+
+⚠ **What you publish is PUBLIC.** A claim commit is pushed to the canonical
+origin and this repo is PUBLIC: keep the subject generic — no client names, real
+hostnames, paths or captured text. A newline or any control character in
+`--subject` is rc 2: free text sits ABOVE the ownership trailers in the commit
+body, and until 2026-08-26+1 a newline in the subject let the caller write
+trailers of their own — a claim then reported `host attacker-host` and **the real
+holder was refused `--release` on their own live claim**. Both halves are closed
+now (the subject is validated, and the trailers are read via `git
+interpret-trailers --parse` rather than by scanning for the first `^key:` line).
+
+⚠ **`--release` and `--steal` are gated.** A LIVE claim that is not yours is
+refused (rc 10); `--force` overrides. **rc 12 means it is YOURS — carry on**, not
+a refusal. Ownership keys off an `owner-id` in the claim commit, NOT the git
+author — one identity covers both hosts and every agent on them, so the author can
+never tell two sessions apart.
+
+🔴 **The owner token is per HOST and per WORKTREE, and cwd-independent**:
+`/etc/machine-id` + the realpath of `git rev-parse --git-dir`. Any subdirectory of
+the worktree you claimed from counts as the same owner, at any depth; a SIBLING
+worktree, a different clone, and the other host do not.
+
+⚠ **That describes NEW-format refs. LEGACY `cwd:` refs (pre-2026-08-26+1) carry a
+SECOND predicate that differs BY VERB**: strict per-worktree for the claim/check
+verdict (so a subdirectory of the claiming clone reads **rc 10**, not rc 12, even
+though you hold it), but the old clone-wide accept for `--release`/`--steal` (so a
+sibling worktree can release one without `--force`). Deliberate: narrowing the
+destructive side would have made already-published refs unreleasable by anyone. It
+ages out as those refs are released. Do not trust a count of affected refs written
+here — re-derive it with `git ls-remote --heads origin 'refs/heads/claim/*'`.
+
+It was `uname -n` +
+`hash($PWD)` until 2026-08-26+1 and was wrong in both directions: both hosts answer
+`nixos` to `uname -n` (so each read the other's claims as its own, and could
+release them at rc 0), and hashing the literal `$PWD` meant `cd scripts/` locked
+the legitimate owner out of their own claim for the whole TTL.
+
+🔴 **And the first fix for that used `--git-common-dir`, which EVERY linked
+worktree of a clone shares** — so for one day all 40+ agent worktrees under this
+clone were one owner, and an unrelated sibling claiming a peer's live slug was
+told **rc 12, "carry on"** rather than rc 10, STOP. Measured: one clone + five
+worktrees, concurrent, 1 CLAIMED and 5 × rc 12. **Never widen this token without
+checking `report_existing`** — `claim_is_mine` decides the CLAIM verdict too, not
+just `--release`/`--steal`, and a note claiming otherwise is what licensed that
+widening. The residual, accepted deliberately: two sessions in the SAME directory
+are still one owner, which the rules already forbid.
+
+`owner-id` is a DISCRIMINATOR, not a secret — `--force` bypasses the gate by
+design.
 
 Source: `scripts/claim-work.sh` (deployed on PATH as `claim-work`), named in
 `claude/RULES.md` so **both** runtimes get it — Claude Code imports that file and
@@ -88,13 +157,19 @@ it still had not. The duplication was created entirely by the later session.
 
 **That is the whole reason `claim-work` claims at DRAW time rather than checking
 at start time.** The claim exists before any work does, so the first mover is
-covered by construction. A `gh pr list` sweep remains useful — it is the fallback
-when the claim degrades, and it is the only thing that can see a duplicate that
-was *never claimed* — but it is a second-best signal, not the lock.
+covered by construction.
 
-Manual fallback, for a degraded run only: check `gh pr list --state open` before
-starting and again immediately before `gh pr create`, and push the branch the
-moment you create it (an empty commit is enough).
+🔴 **But the sweep is NOT a degraded-run fallback, and calling it one was a
+regression.** The lock only ever sees work somebody CLAIMED; a duplicate that was
+never claimed is invisible to it and visible to `gh pr list` — a class the design
+doc itself lists under "What is NOT covered". So both run, every time, and
+neither substitutes for the other:
+
+- **`gh pr list --state open` before you start, and AGAIN immediately before
+  `gh pr create`.** Two moments, because the window is ~20 minutes and the second
+  is where the sunk cost is highest.
+- **Push the branch the moment you create it**, before doing the work (an empty
+  commit is enough) — it is visible to `git ls-remote` the instant it lands.
 
 ## Producing side
 
@@ -112,7 +187,9 @@ the affected claims first.
 
 A claim ref nobody deletes would block an item forever, which is why the age is
 part of the verdict: past `DEVRC_CLAIM_TTL_DAYS` (default 7) a claim reports
-**rc 11 / STALE** instead of rc 10, and `--list` flags it. Taking one over is a
+**rc 11 / STALE** instead of rc 10, and `--list` flags it. (A stale claim of your
+OWN still reports **rc 12** — it is yours either way — with the STALE advisory
+printed alongside.) Taking one over is a
 deliberate, separate verb (`--steal`) — never automatic, because "the holder went
 quiet for a week" and "the holder is on a long piece of work" are the same
 observable. Release your own claims when the work lands.

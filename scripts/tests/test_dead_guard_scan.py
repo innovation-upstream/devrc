@@ -1038,7 +1038,13 @@ def test_registry_parses_and_every_repo_declares_what_is_NOT_measured():
             assert len(r["selector"]) > 40, \
                 f"{s}: an out-of-instrument row must say WHY, not just that: {r}"
     for r in rows:
-        assert r["status"] in ("instrument", "out-of-instrument"), r
+        assert r["status"] in ("instrument", "out-of-instrument", "exclude"), r
+    # An `exclude` row's selector is PARSED, so the committed registry's own
+    # rows must round-trip through the parser and carry their two halves.
+    for r in [r for r in rows if r["status"] == "exclude"]:
+        assert r["glob"] and r["reason"], r
+        assert " " not in r["glob"], r
+        assert len(r["reason"]) >= 40, r
 
 
 def test_registry_names_every_test_directory_in_devrc():
@@ -1158,6 +1164,293 @@ def test_registry_is_keyed_on_the_remote_slug_not_the_clone_directory():
                         ("homelab-talos", "ZacxDev/homelab-infra")):
         assert local not in REGISTRY.read_text(encoding="utf-8").split("\n\n")[-1], \
             f"{local} appears as a key; it is not the repo name for {slug}"
+
+
+# --------------------------------------------------------------------------
+# `exclude`: subtracting a file an `instrument` glob swept up but pytest cannot
+# collect.
+#
+# 🔴 THE DEFECT THAT MADE THIS NECESSARY WAS IN THE SCAN, NOT IN THE REPO IT
+# SCANNED. `ZacxDev/homelab-infra`'s one instrument selector is
+# `scripts/tests/test_*.py`; four files matching it are standalone docker
+# harnesses, and ONE of them calls `sys.exit(0)` at module level when its
+# target env var is unset. Under pytest that `SystemExit` during collection is
+# an INTERNALERROR that aborts the WHOLE session -- `no tests ran`, rc=3 -- so
+# the scan traced NOTHING and published 44 flags derived from a run in which
+# not one guard line executed. The homelab file is correct for its two real
+# callers; the registry needed a way to say "not collectable", and prose could
+# not be it.
+
+def _abort_repo(tmp_path):
+    """A repo whose test dir holds a module-level `sys.exit(0)` file next to an
+    ordinary pytest file carrying one live and one dead branch."""
+    (tmp_path / "scripts" / "tests").mkdir(parents=True)
+    (tmp_path / "scripts" / "tests" / "test_guard.py").write_text(
+        _E2E_GUARD, encoding="utf-8")
+    (tmp_path / "scripts" / "tests" / "test_abort_at_import.py").write_text(
+        "import os\n"
+        "import sys\n"
+        "\n"
+        "if not os.environ.get('NEVER_SET_TARGET_DIR'):\n"
+        "    print('no target configured, nothing to do')\n"
+        "    sys.exit(0)\n"
+        "\n"
+        "print('would shell out to docker here')\n"
+        "sys.exit(0)\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, timeout=60)
+    subprocess.run(["git", "-C", str(tmp_path), "remote", "add", "origin",
+                    "git@github.com:test/synthetic.git"], check=True, timeout=60)
+    _OO = ("test/synthetic\tbash\tout-of-instrument\ta reason long enough to "
+           "satisfy the registry's own contract that a row must say why it is "
+           "not measured\n")
+    plain = tmp_path / "reg-plain.tsv"
+    plain.write_text(
+        "test/synthetic\tpython\tinstrument\tscripts/tests/test_*.py\n" + _OO,
+        encoding="utf-8")
+    excl = tmp_path / "reg-exclude.tsv"
+    excl.write_text(
+        "test/synthetic\tpython\tinstrument\tscripts/tests/test_*.py\n"
+        "test/synthetic\tpython\texclude\tscripts/tests/test_abort_at_import.py"
+        " -- a standalone harness that exits at module level, which aborts "
+        "pytest collection for the whole directory\n" + _OO,
+        encoding="utf-8")
+    return plain, excl
+
+
+def test_WITHOUT_an_exclude_row_a_module_level_exit_aborts_the_whole_run(tmp_path):
+    """🔴 THE CONTROL ARM. Asserted so the next test's success cannot be a
+    property of the fixture rather than of the exclusion.
+
+    The observable is not "it crashed": it is that `test_guard.py`, an ordinary
+    collectable file in the same directory, was NEVER TRACED, and its planted
+    dead branch is therefore absent from a report that still prints a flag
+    count. A run that measured nothing looks exactly like a clean one apart
+    from the pytest rc buried in the header line.
+    """
+    plain, _ = _abort_repo(tmp_path)
+    rc, out = _cli(tmp_path, plain)
+    assert "pytest rc=3" in out, out
+    assert "flagged      : 0 branch bodies" in out, out
+    assert 'hits.append("dead")' not in out, \
+        "the planted dead branch was found despite the aborted collection"
+    assert "test_guard.py: NO line of this file was traced" in out, out
+    assert rc == 2, (rc, out)          # UNDECIDABLE, not clean and not findings
+
+
+def test_WITH_an_exclude_row_the_surviving_file_is_collected_and_MEASURED(tmp_path):
+    """🔴 THE POSITIVE CONTROL, ASSERTED AS A DIFFERENCE. Same tree, same
+    interpreter, one registry row apart: the run goes green, the ordinary file
+    is collected, and the branch that was invisible above is flagged."""
+    _, excl = _abort_repo(tmp_path)
+    rc, out = _cli(tmp_path, excl)
+    assert "pytest rc=0" in out, out
+    assert "instrumented : 1 guard file(s)" in out, out
+    assert 'FLAG scripts/tests/test_guard.py' in out, out
+    assert 'hits.append("dead")' in out, out
+    # ...and the LIVE branch of that same file is not condemned alongside it,
+    # which is what proves the file was really executed rather than merely
+    # parsed.
+    assert 'hits.append("real")' not in out, out
+    assert rc == 1, (rc, out)
+
+
+def test_an_excluded_file_is_NOT_handed_to_pytest_at_all(tmp_path):
+    """The exclusion subtracts from the pytest COMMAND LINE, not just from the
+    set of files whose branches are reported. If it only did the latter, the
+    aborting file would still be collected and the session would still die --
+    so the rc above is the load-bearing assertion, and this pins the mechanism
+    that produces it."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("dgs_excl", SCAN)
+    dgs = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(dgs)
+    _, excl = _abort_repo(tmp_path)
+    rows = dgs.load_registry(excl)
+    ex = dgs.excluded_files(tmp_path, rows, "test/synthetic")
+    assert [e["rel"] for e in ex] == ["scripts/tests/test_abort_at_import.py"], ex
+    targets = dgs.guard_files(tmp_path, rows, "test/synthetic",
+                              excluded=[e["path"] for e in ex])
+    assert [p.name for p in targets] == ["test_guard.py"], targets
+    # Without the subtraction the same call returns BOTH -- so the filter is
+    # doing the work, not the glob.
+    assert len(dgs.guard_files(tmp_path, rows, "test/synthetic")) == 2
+
+
+def test_an_excluded_file_is_recorded_in_the_census_WITH_ITS_REASON(tmp_path):
+    """🔴 AN EXCLUSION MAKES THE FLAG LIST SHORTER, AND A SHORTER LIST IS
+    INDISTINGUISHABLE FROM A CLEANER REPO. If the subtraction is not in the
+    artifact, the registry has stopped being a ledger and become a filter --
+    which is the exact failure the `out-of-instrument` rows exist to prevent
+    for whole languages, arriving one file at a time."""
+    _, excl = _abort_repo(tmp_path)
+    census = tmp_path / "c.tsv"
+    subprocess.run([sys.executable, str(SCAN), "--repo", str(tmp_path),
+                    "--registry", str(excl), "--census", str(census)],
+                   capture_output=True, text=True, timeout=900)
+    rows = [r for r in census.read_text(encoding="utf-8").splitlines()
+            if r.startswith("test/synthetic\texcluded\t")]
+    assert len(rows) == 1, census.read_text(encoding="utf-8")
+    cells = rows[0].split("\t")
+    assert cells[2] == "scripts/tests/test_abort_at_import.py", cells
+    assert cells[4] == "scripts/tests/test_abort_at_import.py", cells
+    assert cells[5] == "excluded", cells
+    assert cells[6].startswith("a standalone harness that exits at module "
+                               "level"), cells
+
+
+def test_an_exclude_glob_matching_NOTHING_still_lands_in_the_census(tmp_path):
+    """A stale exclusion excludes nothing, so it is harmless -- and invisible,
+    which is the problem. It names a path that no longer exists, and the census
+    is the only place anyone would ever notice."""
+    _, excl = _abort_repo(tmp_path)
+    excl.write_text(excl.read_text(encoding="utf-8").replace(
+        "scripts/tests/test_abort_at_import.py -- a standalone",
+        "scripts/tests/test_LONG_DELETED_*.py -- a standalone"), encoding="utf-8")
+    census = tmp_path / "c.tsv"
+    subprocess.run([sys.executable, str(SCAN), "--repo", str(tmp_path),
+                    "--registry", str(excl), "--census", str(census)],
+                   capture_output=True, text=True, timeout=900)
+    rows = [r.split("\t") for r in census.read_text(encoding="utf-8").splitlines()
+            if r.startswith("test/synthetic\texcluded\t")]
+    assert len(rows) == 1, rows
+    assert rows[0][2] == "-", rows
+    assert rows[0][4] == "scripts/tests/test_LONG_DELETED_*.py", rows
+
+
+# --- the NEGATIVE control on the parser itself -----------------------------
+
+# 🔴 EACH CASE CARRIES THE MESSAGE ITS OWN CLAUSE MUST PRODUCE, NOT JUST
+# "raises". Three clauses guard this parser and they OVERLAP: a prose selector
+# with no ` -- ` also fails the character class, and a selector with no reason
+# also has an empty reason. Asserting only `SystemExit` lets a mutant that
+# deletes one clause die to a NEIGHBOUR's error and be scored killed -- green
+# for the wrong reason, and still green with the clause deleted. Measured: the
+# separator clause SURVIVED its mutant under a raises-only assertion, because
+# every fixture that reached it was also caught by the character class.
+_BAD_SELECTORS = [
+    # a clean glob and NO separator -- the case that reaches the separator
+    # clause and NOTHING else, so it is the only fixture that can kill it
+    ("scripts/tests/test_x.py", "separator"),
+    # an `out-of-instrument`-style prose row pasted in verbatim
+    ("scripts/check-*.sh, kustomize-validate.sh: same bash line-granularity limit",
+     "separator"),
+    # a comma-and-space list, i.e. prose, in the glob half
+    ("scripts/a.py, scripts/b.py -- two files, and a reason long enough to pass "
+     "the length rule this parser also applies", "clean relative path glob"),
+    # an English sentence in the glob half
+    ("the four vetr harnesses -- they are not pytest modules and cannot be "
+     "collected, so they must not be handed to pytest", "clean relative path glob"),
+    # absolute path
+    ("/etc/passwd -- a reason long enough to satisfy the length rule that the "
+     "parser applies to every exclude row", "clean relative path glob"),
+    # escapes the repo
+    ("../elsewhere/test_x.py -- a reason long enough to satisfy the length rule "
+     "that the parser applies to every exclude row", "clean relative path glob"),
+    # a bare directory, which names no files
+    ("scripts/tests/ -- a reason long enough to satisfy the length rule that "
+     "the parser applies to every exclude row", "clean relative path glob"),
+    # empty glob half
+    (" -- a reason long enough to satisfy the length rule that the parser "
+     "applies to every exclude row", "clean relative path glob"),
+    # a real glob but no reason worth the name
+    ("scripts/tests/test_x.py -- because", "must say WHY"),
+]
+
+
+@pytest.mark.parametrize("selector,want", _BAD_SELECTORS)
+def test_a_malformed_exclude_selector_FAILS_LOUDLY_AT_LOAD_TIME(selector, want,
+                                                                tmp_path):
+    """🔴 NOT A WARNING, AND NEVER A SKIP.
+
+    An `exclude` row REMOVES files from the measurement, so a row that does not
+    mean what its author thought is the one registry typo that makes the report
+    smaller and quieter -- it manufactures the comforting zero this whole tool
+    exists to find. `load_registry` already raises `SystemExit` on a row with
+    the wrong field count; this holds the same contract.
+
+    🔴 AND IT IS WHAT KEEPS `out-of-instrument` PROSE. The second entry here is
+    a verbatim committed `out-of-instrument` selector: if the two statuses
+    shared a parser, four repos' measured surfaces would quietly change meaning.
+    """
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("dgs_bad", SCAN)
+    dgs = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(dgs)
+    reg = tmp_path / "reg.tsv"
+    reg.write_text(f"test/synthetic\tpython\texclude\t{selector}\n",
+                   encoding="utf-8")
+    with pytest.raises(SystemExit) as e:
+        dgs.load_registry(reg)
+    assert "exclude" in str(e.value), e.value
+    assert want in str(e.value), \
+        f"the wrong clause rejected it: wanted {want!r}, got {str(e.value)!r}"
+
+
+def test_a_WELL_FORMED_exclude_selector_is_accepted(tmp_path):
+    """The other arm: without this, the parametrized case above would pass with
+    a parser that rejects everything."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("dgs_good", SCAN)
+    dgs = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(dgs)
+    reg = tmp_path / "reg.tsv"
+    reg.write_text(
+        "test/synthetic\tpython\texclude\tscripts/tests/test_vetr_ci_*.py -- "
+        "standalone docker harnesses, not pytest modules, and one exits at "
+        "import\n", encoding="utf-8")
+    rows = dgs.load_registry(reg)
+    assert rows[0]["glob"] == "scripts/tests/test_vetr_ci_*.py", rows
+    assert rows[0]["reason"].startswith("standalone docker harnesses"), rows
+
+
+def test_the_malformed_exclude_row_reaches_the_OPERATOR_through_the_CLI(tmp_path):
+    """The parser raising in a library is not the guarantee -- the guarantee is
+    that the shipped command stops and says so, rather than scanning a subset
+    and printing a number."""
+    _abort_repo(tmp_path)
+    reg = tmp_path / "bad.tsv"
+    reg.write_text("test/synthetic\tpython\tinstrument\tscripts/tests/test_*.py\n"
+                   "test/synthetic\tpython\texclude\tthe vetr harnesses, which "
+                   "are not pytest modules and abort collection\n",
+                   encoding="utf-8")
+    rc, out = _cli(tmp_path, reg)
+    assert rc != 0, (rc, out)
+    assert "exclude" in out and "separator" in out, out
+    assert "flagged" not in out, "it scanned anyway after a malformed row"
+
+
+def test_an_OLD_census_header_revision_does_not_survive_as_a_DATA_line(tmp_path):
+    """🔴 THE LATENT BUG THE `excluded` HEADER LINE WOULD HAVE TRIPPED.
+
+    The kept-line filter used to be `line in _CENSUS_HEADER` -- exact
+    membership against the CURRENT revision. Any header line from an EARLIER
+    revision fails that test, so it was carried through as a data line, grouped
+    under a nonsense key taken from its second word, and re-emitted BELOW the
+    new header: a stale duplicated preamble in the middle of the artifact,
+    produced by the very command the artifact's own header tells you to run.
+    Provenance is now recognised POSITIVELY and every other `#` line is
+    replaceable header.
+    """
+    reg = _synthetic_repo(tmp_path, _E2E_GUARD)
+    census = tmp_path / "c.tsv"
+    census.write_text(
+        "# Measured census of guard branches with zero corpus instances.\n"
+        "# 🔴 A HEADER LINE FROM SOME EARLIER REVISION OF THIS TOOL\n"
+        "repo_slug\tstatus\tlocation\tkind\tcase_handled\tcorpus_instances\tjustification\n"
+        "# other/repo measured under Python 3.11.0 (pytest rc=0)\n"
+        "other/repo\tout-of-instrument\t-\tbash\twhy not\tunmeasured\t-\n",
+        encoding="utf-8")
+    subprocess.run([sys.executable, str(SCAN), "--repo", str(tmp_path),
+                    "--registry", str(reg), "--census", str(census)],
+                   capture_output=True, text=True, timeout=900)
+    lines = census.read_text(encoding="utf-8").splitlines()
+    assert "# 🔴 A HEADER LINE FROM SOME EARLIER REVISION OF THIS TOOL" not in lines, \
+        lines
+    assert lines.count("# Measured census of guard branches with zero corpus "
+                       "instances.") == 1, lines
+    # ...while the OTHER repo's provenance line and rows are untouched.
+    assert "# other/repo measured under Python 3.11.0 (pytest rc=0)" in lines, lines
+    assert any(l.startswith("other/repo\tout-of-instrument\t") for l in lines), lines
 
 
 @pytest.mark.parametrize("url,want", [
