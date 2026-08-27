@@ -90,6 +90,41 @@ def _load_budget(path=_BUDGET_SOURCE):
 # BUDGET and TARGET is inside the ceiling and still fails the gate.
 TARGET, MIN_HEADROOM = _load_budget()
 BUDGET = TARGET - MIN_HEADROOM
+# 🔴 THE BUDGET ABOVE IS devrc's, AND devrc's GATE IS THE ONLY THING IT BINDS.
+# This tool is routinely pointed at ANOTHER repo's skills (talos-infra's
+# .claude/skills/, a client checkout), and it used to print devrc's number as
+# "ENFORCED" for those too. It is not enforced there: talos-infra's gate 11 is a
+# RATCHET at its own target with a per-push allowance, so a body this tool calls
+# RED can be perfectly legal there, and one it calls fine can be blocked. The
+# prune-skill skill's own first instruction is "check what governs THIS file
+# first" — and this tool contradicted it on every run.
+#
+# The fix is deliberately NOT a table of per-repo budgets (that is the duplicated
+# constant _load_budget exists to prevent, one directory further out). It is to
+# stop ASSERTING: when the audited file is outside devrc, the budget is labelled
+# as devrc's default and the reader is pointed at the file's own repo gate.
+_DEVRC_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _foreign_repo(paths):
+    """The audited tree's repo root, when it is NOT devrc — else None.
+
+    Walks up for a .git; no subprocess, so it works on a bare path that is not a
+    checkout at all (returns None, i.e. 'assume devrc's budget', which is the
+    pre-existing behaviour).
+    """
+    roots = set()
+    for raw in paths:
+        cur = Path(raw).resolve()
+        cur = cur if cur.is_dir() else cur.parent
+        for cand in [cur, *cur.parents]:
+            if (cand / ".git").exists():
+                if cand != _DEVRC_ROOT:
+                    roots.add(cand)
+                break
+    return sorted(roots)[0] if len(roots) == 1 else (sorted(roots)[0] if roots else None)
+
+
 # HARD is where a skill stops being a skill. ~40 KB is ~10k tokens — already a
 # 5% bite out of a 200k context before any work starts. Past this the body
 # routinely displaces the task it was loaded for.
@@ -596,17 +631,25 @@ def _overage(a):
     return "enforced budget", a["size"] - BUDGET
 
 
-def render(audits, show_all, n_sections, n_detail, out=sys.stdout):
+def render(audits, show_all, n_sections, n_detail, out=sys.stdout, foreign=None):
     p = lambda *a: print(*a, file=out)
     audits = sorted(audits, key=lambda a: -a["size"])
     over = [a for a in audits if a["status"] != "OK"]
     p(f"# SKILL.md audit — {len(audits)} skill(s)")
-    p(f"\nbudget {BUDGET:,} B ENFORCED   = ceiling {TARGET:,} B − {MIN_HEADROOM:,} B "
+    enforced = "ENFORCED" if foreign is None else "devrc's DEFAULT (not enforced here)"
+    p(f"\nbudget {BUDGET:,} B {enforced}   = ceiling {TARGET:,} B − {MIN_HEADROOM:,} B "
       f"working margin   ·   hard cap {HARD:,} B")
     p(f"  ({BUDGET:,} is the number the gate rejects at — a body between it and the "
       f"{TARGET:,} B\n   ceiling is 'under the ceiling' and still RED. Both constants are read "
-      f"from\n   {_BUDGET_SOURCE.relative_to(Path(__file__).resolve().parent.parent)}, "
+      f"from\n   {_BUDGET_SOURCE.relative_to(_DEVRC_ROOT)}, "
       f"which owns them.)")
+    if foreign is not None:
+        p(f"\n🔴 THESE SKILLS ARE IN {foreign}, NOT devrc — the budget above is devrc's and")
+        p( "   binds NOTHING here. Read that repo's own gate before treating a number below")
+        p( "   as a verdict: a ratchet with a per-push allowance (talos-infra's gate 11) can")
+        p( "   pass a body this tool calls RED, and block one it calls fine. The section")
+        p( "   weights, fat lines, reference integrity and corpus checks are repo-independent")
+        p( "   and stand as they are printed.")
 
     p("\n## sizes (worst first)")
     listed = audits if show_all else over
@@ -804,7 +847,8 @@ def main(argv=None):
     if not targets:
         sys.exit(f"no SKILL.md found under: {', '.join(paths)}\n"
                  "(pass a SKILL.md, a skills dir, or a repo root explicitly)")
-    render([audit_one(t) for t in targets], args.all, args.sections, args.detail)
+    render([audit_one(t) for t in targets], args.all, args.sections, args.detail,
+           foreign=_foreign_repo(paths))
 
 
 if __name__ == "__main__":
