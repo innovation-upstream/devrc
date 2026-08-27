@@ -491,6 +491,172 @@ run 'force-passed-to-worktree-remove' \
   test_the_tool_never_passes_force_to_worktree_remove \
   's|"worktree", "remove", str(path)|"worktree", "remove", "--force", str(path)|'
 
+printf '\n== #931 — `removable` may not include a worktree git will REFUSE to remove ==\n'
+# 🔴 THE TWO ARMS ARE MUTATED SEPARATELY, and each names the ONE fixture where
+# it is the only arm that can fire. Mutating them together would prove nothing
+# about either: the initialised fixture trips BOTH, so a mutant that removed one
+# arm would still be caught by the other and be scored covered while its own
+# code was never the thing under test.
+#
+#   modules-store arm  -> only arm that fires on the DEINITIALISED fixture
+#                         (no populated gitlink left after `submodule deinit`)
+#   index arm          -> only arm that fires on the EMBEDDED fixture
+#                         (old-style `.git` directory creates no modules/ store)
+run 'submodule-not-a-blocker-in-classify' \
+  test_an_INITIALISED_submodule_makes_the_row_dead_but_not_removable \
+  's|^    elif subs:$|    elif False:|'
+run 'unknown-submodule-answer-treated-as-permission' \
+  test_an_unknowable_submodule_answer_blocks_rather_than_permits \
+  's|^    if subs is None:$|    if False:|'
+run 'modules-store-arm-blinded' \
+  test_a_DEINITIALISED_submodule_still_blocks_because_the_modules_store_remains \
+  's|^    if modules.is_dir():$|    if False:|'
+# 🔴 The "be cleverer than git" mutant. Requiring the store to be NON-EMPTY is
+# the reasonable-looking refinement, and it survives every fixture whose store
+# has contents — only the empty-store case can see it. git refuses on the
+# directory's existence alone, so this would hand back `failed=1`.
+run 'modules-store-required-to-be-non-empty' \
+  test_an_EMPTY_modules_store_blocks_because_git_blocks_on_it_too \
+  's|^    if modules.is_dir():$|    if modules.is_dir() and any(modules.iterdir()):|'
+run 'index-arm-blinded' \
+  test_an_EMBEDDED_submodule_git_dir_blocks_even_with_no_modules_store \
+  's|^        if rel and (path / os.fsdecode(rel) / ".git").exists():$|        if False:|'
+run 'gitlink-mode-misspelled-so-no-gitlink-is-ever-seen' \
+  test_an_EMBEDDED_submodule_git_dir_blocks_even_with_no_modules_store \
+  's|^        if not entry.startswith(b"160000 "):$|        if not entry.startswith(b"160001 "):|'
+# 🔴 THE OVER-BLOCK MUTANT — the one that keeps the fix honest in the other
+# direction. Every mutant above makes the tool remove MORE; this makes it remove
+# NOTHING, which every "is it blocked?" assertion would happily score green.
+# Only the uninitialised CONTROL fixture can kill it, and that is the whole
+# reason that fixture exists: `.gitmodules` is tracked and a gitlink is in the
+# index, yet git removes the worktree fine.
+#
+# 🔴 SCOPED BY AN ADDRESS RANGE, because `^    if not is_dir(path):$` alone
+# matches TWICE — `worktree_dirty` has the identical line. Anchoring on the bare
+# line injected the over-block return into `worktree_dirty` as well, whose
+# caller unpacks a 3-tuple, so the mutant died on a `ValueError` far from the
+# thing under test. MEASURED: the unscoped sed fails 112 tests, this scoped one
+# fails 41, so the collateral was ~71 — an earlier version of this comment said
+# ~40, which was a guess, not a measurement. The named killer died either way,
+# so it was never a false green — but a mutant that detonates most of the suite
+# is not isolated, and "isolate the mutation" is this harness's own premise.
+# The 41 that remain are genuine consequences of over-blocking every worktree.
+run 'submodules-reported-for-every-worktree' \
+  test_a_worktree_with_an_UNINITIALISED_submodule_is_still_removable \
+  '/^def worktree_submodules/,/^def _paths_differ/ s|^    if not is_dir(path):$|    if True:\n        return True, ["over-block"]\n    if not is_dir(path):|'
+run 'executor-skips-its-own-submodule-recheck' \
+  test_a_submodule_appearing_after_the_scan_skips_rather_than_fails \
+  's|^        if subs is not False:$|        if False:|'
+# 🔴 `is not False` vs `is True` — the mutant that only an UNKNOWN answer can
+# see. Both spellings behave identically on True and on False, so every fixture
+# above stays green; only the monkeypatched `None` re-check tells them apart.
+run 'executor-recheck-treats-unknown-as-permission' \
+  test_the_executor_skips_when_the_submodule_recheck_cannot_answer \
+  's|^        if subs is not False:$|        if subs is True:|'
+run 'blocked-rows-vanish-from-the-report' \
+  test_the_report_names_the_blocked_rows_instead_of_silently_dropping_them \
+  's|^        "submodule_blocked_dead": sum($|        "submodule_blocked_dead": 0 * sum(|'
+
+printf '\n== #935 ROUND 2 — the blind audit'"'"'s findings ==\n'
+# 🔴 FINDING 1: `-z` is the whole fix. Without it `core.quotePath` renders a
+# non-ASCII submodule path as a quoted literal, the stat misses, and the arm
+# answers False over a worktree git REFUSES on — `failed=` back in the output.
+#
+# 🔴 REVERTS THE WHOLE RECORD FORMAT, not just the flag. Dropping `-z` alone
+# leaves the NUL split in place, so the output collapses into one record and
+# the arm fails at SPLITTING rather than at QUOTING — it dies, but for a reason
+# this mutant's name does not describe, which is the WRONG-KILLER trap one
+# level down. Flag and parser are one logical unit, so both move together and
+# the mutant is exactly the round-1 shape.
+run 'quotepath-blinds-the-index-arm' \
+  test_a_submodule_path_git_QUOTES_is_still_seen \
+  's|^    ls = _git_raw(path, "ls-files", "-s", "-z")$|    ls = _git_raw(path, "ls-files", "-s")|; s|^    for entry in ls.stdout.split(b"\\\\0"):$|    for entry in ls.stdout.splitlines():|'
+# 🔴 FINDING 4: this exact mutant SURVIVED the full suite when the auditor ran
+# it — the line had no test at all. It is here so that can never recur.
+run 'blocked-count-drops-the-unanswered-rows' \
+  test_summarize_counts_an_unanswered_row_as_blocked \
+  's|^            1 for r in rows if r\["verdict"\] == DEAD and r.get("submodules") is not False),$|            1 for r in rows if r["verdict"] == DEAD and r.get("submodules") is True),|'
+run 'unknown-subset-count-collapsed-to-zero' \
+  test_summarize_counts_an_unanswered_row_as_blocked \
+  's|^        "submodule_unknown_dead": sum($|        "submodule_unknown_dead": 0 * sum(|'
+run 'union-count-collapsed-to-zero' \
+  test_the_two_further_lines_do_not_read_as_additive \
+  's|^        "dead_not_removable": sum($|        "dead_not_removable": 0 * sum(|'
+# 🔴 FINDING 2: collapsing the split puts the PERMANENT sentence back over an
+# UNKNOWN row — four false claims about the very run printing them.
+run 'permanence-claimed-for-unanswered-rows' \
+  test_an_unanswered_row_is_not_described_as_carrying_submodules \
+  's|^        if carrying:$|        if True:|'
+run 'unanswered-rows-get-no-sentence-of-their-own' \
+  test_an_unanswered_row_is_not_described_as_carrying_submodules \
+  's|^        if unknown:$|        if False:|'
+# 🔴 FINDING 3: without the union line the two "further" counts read additive.
+run 'overlap-caveat-suppressed' \
+  test_the_two_further_lines_do_not_read_as_additive \
+  's|^    if summary.get("excluded_dead") and summary.get("submodule_blocked_dead"):$|    if False:|'
+# 🔴 FINDING 6: the summary sends the operator to --verbose; the marker is what
+# makes the row findable once they get there.
+run 'verbose-marker-dropped' \
+  test_verbose_marks_submodule_rows_without_widening_the_verdict_label \
+  's|^            mark = ("  \[SUBMODULES — git will refuse to remove this\]" if subs$|            mark = ("" if subs|'
+
+printf '\n== #935 ROUND 3 — the delta re-audit'"'"'s findings ==\n'
+# 🔴 FINDING 1 (the round-2 fix'"'"'s OWN regression): strict utf-8 on `-z` output
+# aborts the ENTIRE scan on any undecodable tracked filename, in any worktree,
+# submodules or not. Wider than the bug `-z` fixed.
+run 'strict-decode-aborts-the-whole-scan' \
+  test_an_undecodable_tracked_path_does_not_abort_the_scan \
+  's|^    ls = _git_raw(path, "ls-files", "-s", "-z")$|    ls = _git(path, "ls-files", "-s", "-z")|'
+# 🔴 The two decodings are NOT interchangeable, and each mutant swaps exactly
+# one of them. `os.fsdecode` must REACH the path (fsdecode->_printable makes
+# U+FFFD hit the filesystem, so the submodule goes undetected); `_printable`
+# must SHOW it (_printable->fsdecode puts a lone surrogate into the report,
+# which raises UnicodeEncodeError at print()).
+run 'display-decoding-used-for-the-filesystem-stat' \
+  test_an_undecodable_SUBMODULE_path_is_still_detected_and_printable \
+  's|^        if rel and (path / os.fsdecode(rel) / ".git").exists():$|        if rel and (path / _printable(rel) / ".git").exists():|'
+run 'filesystem-decoding-used-for-display' \
+  test_an_undecodable_SUBMODULE_path_is_still_detected_and_printable \
+  's|^            populated.append(_printable(rel))$|            populated.append(os.fsdecode(rel))|'
+# 🔴 FINDING 2: asserting an overlap instead of measuring one is false whenever
+# the two sets are disjoint — this round'"'"'s own defect class.
+#
+# 🔴 `1 * (…)` WAS A SEMANTIC NO-OP and this mutant reported SURVIVED — it
+# changed the file'"'"'s bytes, so it cleared the `cmp` gate, and changed no
+# behaviour, so nothing could kill it. A `run` line asserting coverage it did
+# not have is worse than none. `99 + 0 * (…)` pins the value to a constant the
+# fixture can never produce, which is the mechanical control: feed a value the
+# constant CANNOT equal and watch the output move.
+run 'overlap-asserted-rather-than-measured' \
+  test_the_overlap_line_states_the_measured_overlap_not_an_asserted_one \
+  's|^        overlap = (summary\["excluded_dead"\] + summary\["submodule_blocked_dead"\]$|        overlap = 99 + 0 * (summary["excluded_dead"] + summary["submodule_blocked_dead"]|'
+# 🔴 FINDING 3: crediting the exclusion with a sparing it did not do.
+run 'exclusion-credited-for-rows-it-did-not-free' \
+  test_an_excluded_row_with_another_blocker_is_not_credited_to_the_filter \
+  "s|{summary\\['excluded_dead_only_blocker'\\]} of which|{summary['excluded_dead']} of which|"
+# 🔴 FINDING 8: a vanished directory answers (None, []) — nothing was asked, so
+# claiming it is held back for submodules invents a problem.
+run 'vanished-worktree-marked-submodule-unknown' \
+  test_a_vanished_worktree_is_not_marked_as_a_submodule_unknown \
+  's|^                    if subs is None and r.get("path_exists") else "")$|                    if subs is None else "")|'
+# 🔴 THE OTHER DIRECTION. The mutant above pins only that the marker STAYS OFF
+# for a vanished row; with it alone, deleting the marker entirely SURVIVED all
+# 207 tests — the positive side was unguarded, so `[submodules UNKNOWN]` could
+# never print and the suite stayed green. A gate needs a mutant per direction.
+run 'unknown-marker-never-prints' \
+  test_an_unanswered_row_is_not_described_as_carrying_submodules \
+  's|^                    else "  \[submodules UNKNOWN — held back\]"$|                    else ""|'
+# 🔴 THE GATE ITSELF — the round-3 -> round-4 change. Round 5 shipped this with
+# NO mutant, on the reasoning that the two gates are equivalent outside a TOCTOU
+# race and were therefore untestable. The reachability half was right and the
+# conclusion was wrong: `render_text` is a pure function of the row dict, so a
+# monkeypatched producer forces the state in one line. PRODUCTION-UNREACHABLE
+# IS NOT UNTESTABLE — and the omission was justified in a code comment that
+# asserted the stronger claim, which is how a gap gets sealed shut.
+run 'unknown-marker-gate-reverted-to-reasons' \
+  test_the_marker_gate_is_path_exists_not_reasons \
+  's|^                    if subs is None and r.get("path_exists") else "")$|                    if subs is None and r.get("submodule_reasons") else "")|'
+
 printf '\n== POSITIVE CONTROLS — mutants whose fate is KNOWN ==\n'
 # 🔴 A comment-only edit MUST survive. If it kills something, the harness is
 # keying on the file's text and every `ok` above is worthless.
