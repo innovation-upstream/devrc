@@ -44,9 +44,9 @@ whatever the next editor writes.**
 
 ⚠ Count them by eye — the bold red label opening each correction. A text search for
 the label word over-counts by one, because the 🔴 paragraph at the top of this section
-names the convention while describing it. That is not a defect to fix: a document cannot describe its own marker
-without matching a search for it. It is the third-order version of the same lesson, and
-the reason the instruction is "count", not "grep".
+names the convention while describing it. That is not a defect to fix: a document
+cannot describe its own marker without matching a search for it. It is the third-order
+version of the same lesson, and the reason the instruction is "count", not "grep".
 
 Every line number below is against `nix/home.nix` at `origin/main` as of 2026-08-27
 (3,873 lines). Line numbers rot — treat them as a starting offset for a grep, not an
@@ -200,7 +200,8 @@ Applied to:
   must not be store symlinks
 - 🔴 **CORRECTED — `claim-work` is not a skill and is not deployed to either skills
   directory.** It is a single `mkOutOfStoreSymlink` to `~/.local/bin/claim-work`
-  (the `mkOutOfStoreSymlink` is at 1207; 1206 is its `home.file` key), i.e. on PATH. The tier is right; the deploy target in the original doc
+  (the `mkOutOfStoreSymlink` is at 1207; 1206 is its `home.file` key), i.e. on PATH.
+  The tier is right; the deploy target in the original doc
   was wrong.
 
 ## The browser-bridge extension specifically
@@ -256,14 +257,15 @@ Brave tab
     `[ -e ]`, which *follows* a symlink, an all-digit suffix test, `!= $$`, and a dead
     `/proc/<pid>` — a symlink named `…ext.old.<dead-pid>` passes all four), **628**
     (clears a *pre-existing* `$bbTmp`; `cp -rL` does not create it until 629, and the
-    sweep skips `$$` at 622, so a pid-reused leftover routes here by construction), and
+    sweep skips `$$` at 620, so a pid-reused leftover routes here by construction), and
     **677** (`rm -rf "$bbBak"` runs at 677; the `mv` that would produce `$bbBak` from a
     directory is at **678**, i.e. after). Only **686** (post-`mv`, source verified by
     `[ -d ] && [ ! -L ]`), **745** (block-owned `$bbTmp`) and **791** (`deeScrub`
     diverts symlinks to `rm -f` at 789) are actually guarded.
-    **What makes those three safe today is the absence of a trailing slash, not the
-    absence of a symlink** — which is exactly why the next paragraph's warning is about
-    the slash, and why "no site uses one" is a property nobody is enforcing.
+    **What keeps the UNGUARDED three — 624, 628 and 677 — safe today is the absence of
+    a trailing slash, not the absence of a symlink.** That is exactly why the next
+    paragraph's warning is about the slash, and why "no site uses one" is a property
+    nobody is enforcing.
   - 🔴 `rm -rf <symlink-to-dir>/` — **with a trailing slash** — DOES follow the link.
     Measured: rc=0, the link survives, and the target directory is **emptied**
     (a 2-file tree went to 0). Silent.
@@ -297,8 +299,15 @@ Brave tab
   (786): *"A symlink has no tree to make writable, so it is simply unlinked."*
 - 🔴 `chmod -R` follows a symlink-to-directory and rewrites the modes of the **target**
   tree. Measured in a sandbox: a symlinked destination left the repo directory 555→755
-  and its file 444→644. Guarded by `[ ! -L ]` in browser-bridge and by `deeScrub()` in
-  discord-embed-ext.
+  and its file 444→644.
+  🔴 **This is guarded in browser-bridge at ONE site only — do not read it as a
+  property of the block.** The destination swap tests `[ -d "$bbDst" ] && [ ! -L
+  "$bbDst" ]` at 662, and `deeScrub` (787-792) covers every discord site. But
+  browser-bridge's **623** (`chmod -R u+rwX "$bbOld"`, in the sweep) and **627**
+  (`chmod -R u+rwX "$bbTmp"`, before the `rm -rf` at 628) have **no `-L` test at
+  all**. See `## Open` — an earlier revision of this bullet said "guarded by
+  `[ ! -L ]` in browser-bridge" full stop, which is the licence a third extension
+  must not be given.
 - Re-pointing Brave at the deployed path is a **manual operator step**, once per
   profile (brave://extensions → remove the repo-path entry → Load unpacked → the
   `~/.local/share/…` directory). Nix cannot register an unpacked extension with Brave;
@@ -356,19 +365,31 @@ weaker claim than "verified" and is stated as such deliberately.
   is worth keeping past this doc's life, `/analyze-service` is what writes one — that
   is a confirm-gated act at the end of a session, not something to do in passing.
 
-- 🔴 **SOURCE-SIDE, found while auditing this doc and NOT fixed by it:
-  `nix/home.nix:623`'s `chmod -R u+rwX "$bbOld"` has no `[ ! -L ]` guard**, unlike its
-  sibling `deeScrub` (789), and `[ -e "$bbOld" ]` at 614 follows a symlink. So a
-  symlink at `~/.local/share/browser-bridge-ext.old.<dead-pid>` is swept, and the
-  `chmod -R` rewrites the modes of whatever it points at.
+- 🔴 **SOURCE-SIDE, found while auditing this doc and NOT fixed by it: browser-bridge
+  has TWO unguarded `chmod -R` sites**, unlike its sibling `deeScrub` (789), which
+  diverts symlinks before ever chmod-ing.
+  - **623** (`chmod -R u+rwX "$bbOld"`, in the sweep) — `[ -e "$bbOld" ]` at 614
+    follows a symlink, so a symlink at `~/.local/share/browser-bridge-ext.new.<pid>`
+    or `.old.<pid>` (the glob at 613 covers **both**) is swept and its target's modes
+    rewritten.
+  - **627** (`chmod -R u+rwX "$bbTmp"`, immediately before the `rm -rf` at 628) — by
+    the identical argument made for site 628 above: a *pre-existing* `$bbTmp` is
+    skipped by the `$$` test at 620 and routes straight here, and 627 runs **before**
+    628, so the chmod-through-symlink fires first.
+  In both cases the `rm -rf` that follows takes the LINK, not the target — the mode
+  rewrite is the whole of the damage, and it is silent (`2>/dev/null || true`).
   **Measured 2026-08-27** by running the loop body verbatim against a fixture: target
   directory `555 → 755`, its file `444 → 644` — byte-for-byte the signature
   `home.nix:780-786` documents 🔴 for the *discord* block, which guards against it.
-  Requires an operator artefact at that path, so this is a latent gap, not a live bug,
-  and the `rm -rf` that follows at 624 takes the link rather than the target.
-  **Closing condition:** either `home.nix:623` gains the same `[ -L ]` diversion
-  `deeScrub` has, or the sweep's commentary (601-612, which enumerates its accepted
-  limits) gains this one explicitly as a third. Mechanically checkable — the guard is
-  present or it is not. Whoever picks it up owns deciding which of the two it is; this
+  Requires an operator artefact at one of those paths, so this is a latent gap, not a
+  live bug: no ordinary run puts a symlink there (662's `[ -d ] && [ ! -L ]` means the
+  `mv` at 678 only ever produces a directory, and `cp -rL` at 629 produces one too).
+  🔴 **Closing condition — it must cover BOTH sites.** Either 623 **and** 627 gain the
+  `[ -L ]` diversion `deeScrub` has, or the commentary gains this limit explicitly for
+  each. Note that 601-612 documents the *sweep* only, so a comment added there does not
+  reach 627: fixing one site and closing this item is the failure mode to avoid, and is
+  why both line numbers are named here. Mechanically checkable — for each of 623 and
+  627, the guard is present or it is not. Whoever picks it up owns deciding which of
+  the two it is; this
   session did not, because it is a change to a live hardened deploy path and does not
   belong in a docs PR.
