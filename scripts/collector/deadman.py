@@ -51,14 +51,21 @@ cashes out to: `tool` is allowed ~31 active hours of silence on the workbench an
 EXPECTED-PRESENT IS ALSO MEASURED, NOT DECLARED
 -----------------------------------------------
 A pair is evaluated iff it cleared MIN_BASELINE_BUCKETS in the window. A source
-that legitimately does not exist on a host (measured 2026-08-03: `browser` has
-0 rows on the workbench — the Brave activity extension is laptop-only) is simply
-absent from the evaluated set and can never alarm. A source that WAS emitting and
-stopped keeps its baseline for the whole window and does alarm. No table of
-per-host expectations is maintained anywhere, so no table can go stale — and one
-had: the `activity` SKILL.md claimed keylog/i3/browser were "GUI-only -> laptop
-only; the workbench is headless", while the workbench was in fact emitting 41,001
-`i3` and 37,376 `keys` rows.
+that legitimately does not exist on a host is simply absent from the evaluated
+set and can never alarm. A source that WAS emitting and stopped keeps its
+baseline for the whole window and does alarm. No table of per-host expectations
+is maintained anywhere, so no table can go stale — and one had: the `activity`
+SKILL.md claimed keylog/i3/browser were "GUI-only -> laptop only; the workbench
+is headless", while the workbench was in fact emitting 41,001 `i3` and 37,376
+`keys` rows.
+
+🔴 THIS PARAGRAPH'S OWN EXAMPLE WENT STALE, WHICH IS THE POINT. It used to read
+"measured 2026-08-03: `browser` has 0 rows on the workbench — the Brave activity
+extension is laptop-only". On 2026-08-26 21:46 `workbench/browser` started
+emitting; it cleared the baseline (25 buckets) and joined the evaluated set with
+NO code, config or table change. The prose was wrong for a day and the checker
+was never wrong at all — so do not re-introduce a named host/source pair here as
+a standing fact. Run the tool for the roster.
 
 🔴 SCOPE — THE BLIND SPOT, STATED PLAINLY
 -----------------------------------------
@@ -263,7 +270,12 @@ CAP_BUCKETS = 576
 # and `browser` is the SOLE presence source in exactly ONE. Dropping it changed
 # the 169-point sweep for ZERO pairs and improved one seeded-death latency
 # (laptop/zsh). It bought nothing and carried a contamination path, so it is out.
-# (`browser` is laptop-only -- the workbench has never emitted a `browser` row.)
+# 🔴 The parenthetical here used to read "(`browser` is laptop-only -- the
+# workbench has never emitted a `browser` row.)" That STOPPED BEING TRUE on
+# 2026-08-26 21:46, when the workbench began emitting `browser` too. It does not
+# change the decision -- `browser` stays OUT of PRESENCE_SOURCES, and the reason
+# above is the agent-contamination path, which is host-independent. If anything
+# the exclusion now matters MORE: the contaminating path exists on both hosts.
 #
 # 🔴 ADDING A SOURCE THAT A HUMAN DRIVES DIRECTLY MEANS ADDING IT HERE — and
 # adding an agent-driven one, or one an agent can DRIVE INDIRECTLY, means NOT
