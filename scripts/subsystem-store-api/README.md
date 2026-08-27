@@ -12,8 +12,9 @@ usable is phase 2. Add the pointer when there is something to point at.
 | in | out, until |
 |---|---|
 | the pod, seeded from the local store | — |
-| read-only `GET` API, bearer token **SET** | writes / append endpoints → **phase 3** |
-| per-client rate limit + lockout, `CF-Connecting-IP` keying | separate read/write tokens → **phase 3** |
+| read-only `GET` API, bearer token **SET** | writes / append endpoints → **phase 3, criteria 4-10** |
+| per-client rate limit + lockout, `CF-Connecting-IP` keying | a WRITE-scoped token → **phase 3, criteria 4-10** |
+| per-token identity + **scope allowlist** on every read route (phase 3, criteria 1-3) | — |
 | cluster-internal `ClusterIP` | 🔴 IngressRoute + DNS → **an UNMERGED PR** |
 | byte-identity verified against local | the CLI wrapper + read-through cache → **phase 2** |
 
@@ -85,6 +86,43 @@ all → `503` + `X-Store-Status: store-unreachable`, carrying the reader's own
 "this is NOT 'nothing recorded yet'" sentence. A `200` is a claim the store was
 read, and only the first of those can make it.
 
+🔴 **One hostile FILE no longer costs the whole store.** The index loader
+classifies each `*.md` candidate BEFORE opening it, and REFUSES these kinds —
+the list is `subsystem_resolver._LOADER_ENTRY_ACTIONS`, and a test asserts this
+table against it in both directions, so neither can drift ahead of the other:
+
+| kind | on disk | why it is refused |
+|---|---|---|
+| `broken-link` | a dangling symlink — e.g. an Emacs lock file `.#entry.md`, which `glob("*.md")` really does match | opening it raised, and an `OSError` fails closed, so `/recall` and `/search` answered **503** for EVERY caller and named the file and its scope in the body |
+| `other` | a fifo / socket / device named `*.md` | `read_text` on a fifo blocks until somebody writes; on `replicas: 1` the request thread never returned |
+| `link-to-other` | a symlink pointing *at* a fifo / socket / device | the same hang in a different shape — `open()` does not care which path shape reached the fifo. Measured wedging an unrestricted `/recall` for **25s** while `/healthz` stayed 200 |
+| `directory` | a directory named `*.md` — one stray `mkdir <scope>/<slug>.md`, an rsync or a restore artefact | `read_text` raises `IsADirectoryError`, and that `OSError` fails closed: **503** on `/recall` and `/search` for every caller. Measured, with a dangling-lock-file control returning 200 on the same shape |
+| `link-to-dir` | a symlink pointing at a directory | identical, through a link |
+
+A refused entry becomes an ordinary **malformed** row — counted, named, and
+rendered like every other unusable entry — so the scope's good entries still
+serve. It is refused, never silently skipped: a dropped entry is
+indistinguishable from one nobody ever wrote.
+
+⚠ **THE RESIDUAL LEDGER — what still 503s, deliberately.** This is exactly the
+set of kinds the loader still `TAKE`s, and the same test pins it, because this
+paragraph has twice gone stale while the table moved underneath it:
+
+| kind | the shape | why it is still read |
+|---|---|---|
+| `regular-file` | an unreadable entry (`chmod 000`) | "the store was not fully READ" is a different fact from "this entry is malformed", and only the second has an honest degraded form |
+| `link-to-file` | a symlink whose TARGET is unreadable | the same shape through a link — measured, and listed on its own so the ledger does not read shorter than it is |
+| `indeterminate` | the `lstat` itself failed (EACCES on the parent, ESTALE, EIO) | "I could not look" is a different premise from "this kind can never be an entry", which is the criterion every REFUSE row above rests on |
+| `absent` | the candidate vanished between `glob()` and the classify | a TOCTOU race. Reasoned from the table, not reproduced |
+
+Everything else this loader has ever successfully read — regular files and
+symlinks to regular files — is still read, so no legitimate caller changed
+behaviour. **END OF RESIDUAL LEDGER.**
+
+⚠ `subsystem_touch.census()` is a THIRD `glob("*.md")` + `read_text` site and has
+**no** kind check, so it still hangs on a fifo. Unguarded by ruling, not by
+oversight: it is CLI-only and nothing in `server.py` imports `subsystem_touch`.
+
 ## Operating it
 
 ```bash
@@ -129,17 +167,80 @@ are the store-root line — `2` and `2` for pod-vs-workbench.
 
 ## The token is a SET, and rotation is by overlap
 
-The token file holds **one token per line, current first**. Whitespace-separated
-is also accepted; blank lines are ignored; duplicates collapse. Up to
-`MAX_TOKENS` (4) — every line is a live credential, so an uncapped set is an
-accumulation nobody has retired, and the server refuses to start rather than
-serve one.
+The token file holds **one ROW per line, current first**. Blank lines are
+ignored. Up to `MAX_TOKENS` (4) **distinct tokens** — every distinct token is a
+live credential, so an uncapped set is an accumulation nobody has retired, and
+the server refuses to start rather than serve one. The cap counts CREDENTIALS,
+not lines: a row written twice is one credential (see the collapse below), and
+counting it twice would have refused a four-credential file.
 
-Generate one:
+Every guard that names a position names the **physical line number**, so it is
+countable in an editor — `token on line 6 of 6`, `duplicate token on lines 2
+and 6` — including across a collapse and across blank lines.
+
+🔴 **Two rows holding the same token collapse only if they grant the SAME
+THING** — same identity and the same folded scope SET. Case, `_` vs `-`, a
+repeated scope and the ORDER of the list are all spellings of one grant, so
+`zach alpha,beta` and `zach beta,alpha` collapse. If they genuinely disagree the
+server refuses to start with `duplicate token on lines N and M`, naming both
+authorities. This is not pedantry: dropping the second row before parsing it
+made `<tok>` followed by `<tok> zach kelp-forest` — "scope a credential its
+holder already has", the migration's own first step — load as ONE unrestricted
+`legacy` row, with no error and a banner that said `1 of 1 token rows are bare`
+over a two-line file. **To scope an existing token, EDIT its bare row**; adding
+a second row below it is refused.
+
+A row is one of two shapes:
+
+```
+<token>                                    # LEGACY: identity `legacy`, ALL scopes
+<token>   <identity>   <scope>,<scope>     # MAPPED: named holder, scoped
+```
+
+🔴 **Whitespace now separates the three FIELDS of one row, not two tokens.**
+Before phase 3 the file was split on any whitespace, so `<tokenA> <tokenB>` on
+one line was two credentials. It is now a row with a token in the identity
+field — refused at startup with `malformed token row on line N of M`, never
+reinterpreted. Put one row per line.
+
+Generate a token:
 
 ```bash
 python3 -c 'import secrets; print(secrets.token_urlsafe(43))'   # 58 chars
 ```
+
+### Identities and scope allowlists (phase 3, criteria 1-3)
+
+A **mapped** row names who holds the token and which scopes it may read. The
+identity is lowercase `[a-z0-9-]`, at most 32 characters — deliberately BELOW
+the 43-character token floor, so a token can never be misread as an identity.
+Scopes are comma-separated, each matching `[A-Za-z0-9_-]+`, folded by the
+reader's own `normalize_ref` so `Kelp_Forest` and `kelp-forest` are one scope.
+
+A scope outside the allowlist answers **exactly what a scope that never existed
+answers** — `200`, `X-Store-Status: scope-absent`, and a body byte-identical to
+the genuinely-absent one. There is no "forbidden" response, because a response
+that discriminates is an enumeration API. What the caller sees narrows with it:
+`known_scopes`, the cross-scope malformed block, `?all_scopes=1` search results,
+the `/snapshot` tar members and `X-Store-Revision` are all the caller's own.
+
+⚠ **`X-Store-Snapshot` (and the freshness prose) stays STORE-WIDE.** It carries
+a total `entry-files=` count across scopes the caller cannot name. That is
+deliberate — it is the staleness guarantee the snapshot design rests on, and
+scoping it would make "how old is this copy" a function of your allowlist — but
+it is a residual count leak, recorded here rather than left to be discovered.
+
+`identity=<name>` is an **additional** audit field; `token=<fingerprint>` is
+unchanged and is still the only thing that can tell one holder's current
+credential from its previous one.
+
+🔴 **A bare legacy row is still valid, and any file containing one makes the
+process shout on stderr at startup**, naming the count and the legacy
+fingerprints. That is the migration (mapped rows land beside the old shared
+token) and the rollback (put the one line back — no code change). Rotating a
+MAPPED credential uses a second identity (`zach-prev`), not a second row naming
+the same one: two rows claiming one identity with disagreeing allowlists have no
+defined precedence, so they are refused.
 
 ### Rotating, and how you know it is safe to finish
 
@@ -154,8 +255,8 @@ store-api audit ts=… ip=203.0.113.7 peer=trusted method=GET path=/api/v1/recal
 
 1. `sops clusters/homelab/apps/subsystem-store/secrets.enc.yaml` — put the NEW
    token on the first line, keep the old one below it. Commit; Flux applies.
-2. Restart the pod. Its startup line prints every fingerprint in file order:
-   `token-ids=<new>,<old>`.
+2. Restart the pod. Its startup line prints every fingerprint in file order,
+   each with its identity: `token-ids=<new>:legacy,<old>:legacy`.
 3. Roll clients onto the new token. Watch the audit stream until the OLD
    fingerprint stops appearing:
    `kubectl -n subsystem-store logs deploy/subsystem-store-api | grep 'token=<old>'`
@@ -340,8 +441,11 @@ layers' job; this layer is the only one that can see a wrong credential.
 
 ## Deferred, and why (not oversights)
 
-- **Separate read/write tokens** — there is no write path until phase 3, so a
-  write-scoped token today is a label on a capability that does not exist.
+- **Separate read/write tokens** — the READ half landed with phase 3 criteria
+  1-3 (identity + scope allowlist above). A WRITE-scoped token is still deferred
+  for the original reason: criteria 4-10 add no verb yet, so it would be a label
+  on a capability that does not exist. `do_POST = do_PUT = do_PATCH = do_DELETE
+  = _reject_write` is untouched and every write verb is still a 405.
 - **Backup CronJob, daily-commit CronJob** — the workbench copy is authoritative
   until phase 3, so the PVC is a second copy, not the only one.
 - **A `rotate-token` script** — the procedure above is four steps across a SOPS

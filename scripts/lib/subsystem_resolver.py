@@ -59,8 +59,19 @@ CONTRACT SUMMARY
                                          loader would build; the shared step a
                                          validator and the loader must not spell
                                          twice)
-    load_index(root, *, on_malformed=RAISE)
-                                      -> SubsystemIndex (the thin disk loader)
+    load_index(root, *, on_malformed=RAISE, visible_scopes=None)
+                                      -> SubsystemIndex (the thin disk loader;
+                                         `visible_scopes=None` is UNRESTRICTED and
+                                         an EMPTY sequence is its opposite — see
+                                         `visible_scope_set`)
+    visible_scope_set(visible_scopes) -> set[str]|None (the one allowlist folding,
+                                         shared with `subsystem_recall.load_store`
+                                         and the API's `/snapshot`)
+    classify_path(path)               -> str  (one of `ALL_KINDS`; the ONE answer
+                                         to "what IS this path", shared with
+                                         `subsystem-store-api/server.py`)
+    action_for(kind, actions)         -> SKIP|TAKE|REFUSE (raises AssertionError on
+                                         an unmapped kind — never a default)
 
 Every raise carries a distinct sentinel phrase so a caller — or a mutation test —
 can tell WHICH guard fired, not merely that something did:
@@ -81,7 +92,9 @@ wrong reason and stays green with the guard deleted (`claude/RULES.md` →
 
 from __future__ import annotations
 
+import errno
 import re
+import stat
 from collections.abc import Sequence as _AbcSequence
 from dataclasses import dataclass
 from datetime import date as _date
@@ -128,6 +141,22 @@ __all__ = [
     "parse_front_matter",
     "entry_mapping",
     "load_index",
+    "visible_scope_set",
+    "KIND_BROKEN_LINK",
+    "KIND_LINK_TO_DIR",
+    "KIND_LINK_TO_FILE",
+    "KIND_LINK_TO_OTHER",
+    "KIND_DIRECTORY",
+    "KIND_REGULAR_FILE",
+    "KIND_OTHER",
+    "KIND_INDETERMINATE",
+    "KIND_ABSENT",
+    "ALL_KINDS",
+    "SKIP",
+    "TAKE",
+    "REFUSE",
+    "classify_path",
+    "action_for",
 ]
 
 # The kind enum from `analyze-service.md`: "kind ∈ `service` | `process` | `org`
@@ -601,6 +630,22 @@ def _rejection(
     )
 
 
+def _check_on_malformed(on_malformed: str) -> str:
+    """Validate the policy name and return it. ONE place, TWO callers.
+
+    `load_index` has to branch on this policy BEFORE `build_index` ever sees it
+    (its entry-kind guard decides raise-vs-collect for itself), so without this
+    the predicate would be spelled at two sites — and the site that got it wrong
+    would answer a bogus policy string with a `MalformedEntryError` about the
+    first hostile file instead of "you passed a policy that does not exist".
+    """
+    if on_malformed not in ON_MALFORMED:
+        raise ValueError(
+            f"on_malformed must be one of {ON_MALFORMED}, got {on_malformed!r}"
+        )
+    return on_malformed
+
+
 def build_index(
     mappings: Iterable[Mapping[str, object]],
     *,
@@ -631,11 +676,7 @@ def build_index(
     first site would have left `COLLECT` able to raise, which is the shape a
     caller cannot defend against because it looks handled.
     """
-    if on_malformed not in ON_MALFORMED:
-        raise ValueError(
-            f"on_malformed must be one of {ON_MALFORMED}, got {on_malformed!r}"
-        )
-    collecting = on_malformed == ON_MALFORMED_COLLECT
+    collecting = _check_on_malformed(on_malformed) == ON_MALFORMED_COLLECT
     by_scope: dict[str, list[SubsystemEntry]] = {}
     malformed: list[MalformedEntry] = []
     seen: dict[tuple[str, str, str | None], str] = {}
@@ -1696,7 +1737,350 @@ def entry_mapping(text: str, *, filename: str, scope: str) -> dict[str, object]:
     return fm
 
 
-def load_index(root: Path, *, on_malformed: str = ON_MALFORMED_RAISE) -> SubsystemIndex:
+# =============================================================================
+# 🔴 THE TOTAL CLASSIFIER — why this exists instead of a fourth `if` arm.
+#
+# ⚠ IT LIVED IN `subsystem-store-api/server.py` UNTIL `load_index` NEEDED IT.
+# It moved here rather than being copied: "what IS this path" open-coded at N
+# sites is wrong at N-1 of them, and disagreeing about a FIFO named `*.md` is
+# exactly what costs a request thread. What did NOT move is the ACTION TABLES:
+# each context maps every kind explicitly, and the loader's table
+# (`_LOADER_ENTRY_ACTIONS`, below) is deliberately NARROWER than the server's
+# `_ENTRY_ACTIONS`. `server.py` imports these names.
+#
+# 🔴 THE TWO GUARDED SITES ARE `/snapshot` AND THIS INDEX LOADER — AND THEY ARE
+# NOT ALL THE SITES. An earlier wording here said they were, and that claim was
+# false: `subsystem_touch.census()` (`glob("*.md")` then `read_text`) is a THIRD
+# glob-and-read site with NO kind check at all, so it still hangs on a fifo and
+# still 503-equivalents on a directory. It is left that way ON PURPOSE, by
+# ruling: `census()` is CLI-only, no server path imports `subsystem_touch`, and
+# the operator declined to widen the guard to it. `validate_scope` also globs,
+# but only for NAMES — it reads nothing itself and defers to `load_index`, so it
+# inherits this guard rather than needing one. Said here so the next reader does
+# not have to rediscover it, and so "two sites" stops reading as "all of them".
+#
+# Four consecutive audit rounds found the same shape of defect in `_snapshot`,
+# and every fix added one more predicate to a sequence:
+#
+#   r1  entry symlinks followed          -> refuse symlinked ENTRIES
+#   r2  symlinked SCOPE dirs filtered    -> silently omitted, read as scope-empty
+#   r3  `is_symlink()` before `is_dir()` -> a symlinked README 503'd everything
+#   r4  `is_dir()` first                 -> a DANGLING scope link vanished,
+#                                           read as scope-empty at exit 0
+#
+# Each round the stated predicate ("refuse a thing that IS a scope but cannot be
+# served safely; skip a thing that is not one") failed to DECIDE the next input
+# class, because a broken pointer is neither. Adding an arm fixes the instance;
+# it does not make the rule total, so the next class falls through the same gap.
+#
+# So: classify the path's TYPE exhaustively, in one place, and have each context
+# map EVERY kind to an action explicitly. `_ROOT_ACTIONS`, `_ENTRY_ACTIONS` and
+# `_LOADER_ENTRY_ACTIONS` are asserted complete by `TestClassifierIsTotal`, and
+# an unmapped kind raises rather than defaulting — a fallthrough is a test
+# failure, not a silent skip. Name-based rules (dotfiles, the `.md` suffix) stay
+# SEPARATE from type, because conflating them is what made the dotfile and
+# symlink rules interfere.
+# =============================================================================
+
+KIND_BROKEN_LINK = "broken-link"      # dangling target, or a symlink loop
+KIND_LINK_TO_DIR = "link-to-dir"
+KIND_LINK_TO_FILE = "link-to-file"
+KIND_LINK_TO_OTHER = "link-to-other"  # link to a fifo/socket/device
+KIND_DIRECTORY = "directory"
+KIND_REGULAR_FILE = "regular-file"
+KIND_OTHER = "other"                  # fifo, socket, device, door…
+# 🔴 THE LAST CELL OF THE LOOP: the first version of this classifier was total
+# over KIND STRINGS but not over KNOWLEDGE. "I could not determine what this is"
+# is its own answer and must never share a bucket with "I know exactly what this
+# is".
+#
+# ⚠ CORRECTED — AND THE CORRECTION IS THE INTERESTING PART. This comment used to
+# say "every pathlib predicate returns False when the stat itself fails, so an
+# EACCES fell into KIND_OTHER and was skipped", and cited a measurement of
+# `/snapshot` answering 200 / exit 0 / entries=0. BOTH WERE WRONG, and the
+# second was inherited from an audit report and written up here as first-hand.
+# ⚠ And the raise did NOT come from `classify_path` — that function is INTRODUCED
+# by this fix. In the failing version it came from `candidate.is_dir()` in
+# `_snapshot`, which this commit deletes. Corrected after an audit caught the
+# anachronism; the docstring below was already accurate.
+# Measured on the pinned interpreter:
+#     pathlib._IGNORED_ERRNOS == (ENOENT, ENOTDIR, EBADF, ELOOP)
+#     child of a 0o600 dir: is_symlink/is_dir/is_file/exists each RAISE
+#                           PermissionError — none returns False
+# So the old failure was not a silent empty store; it was an UNCAUGHT
+# PermissionError out of `classify_path`, crashing the handler with no response
+# and no audit line. Loud, not quiet.
+#
+# The fix stands — a crashed handler becoming a typed 503 is strictly better —
+# but the reasoning had to be corrected, because "pathlib returns False on stat
+# failure" is exactly the kind of false premise that gets a guard deleted
+# somewhere else in this file on the strength of a comment.
+KIND_INDETERMINATE = "indeterminate"
+# Vanished between `readdir` and the stat — a benign race, not a hazard, and
+# distinct from INDETERMINATE because the right action differs.
+KIND_ABSENT = "absent"
+
+ALL_KINDS: frozenset[str] = frozenset(
+    {
+        KIND_BROKEN_LINK,
+        KIND_LINK_TO_DIR,
+        KIND_LINK_TO_FILE,
+        KIND_LINK_TO_OTHER,
+        KIND_DIRECTORY,
+        KIND_REGULAR_FILE,
+        KIND_OTHER,
+        KIND_INDETERMINATE,
+        KIND_ABSENT,
+    }
+)
+
+# What a context does with each kind. `SKIP` = not the thing we are looking for,
+# so its absence is not a fact worth reporting. `TAKE` = use it. `REFUSE` = it
+# IS (or claims to be) the thing, and we cannot serve it — which must be
+# REPORTED, never skipped, because a skip renders as "nothing recorded".
+SKIP, TAKE, REFUSE = "skip", "take", "refuse"
+
+
+def classify_path(path: Path) -> str:
+    """The path's type, as exactly one of `ALL_KINDS`. Total by construction.
+
+    🔴 ONE `lstat`, THEN THE MODE BITS — not a sequence of pathlib predicates.
+    Those predicates fail in TWO different ways and neither is usable here:
+    they return False for the errnos in `pathlib._IGNORED_ERRNOS` (ENOENT,
+    ENOTDIR, EBADF, ELOOP), so "not a directory" and "no such path" are
+    indistinguishable; and they RAISE for every other errno (EACCES, ESTALE,
+    EIO), so a sequence built from them can abort mid-classification and take
+    the handler with it. The previous version did exactly that on an
+    unstat-able child.
+
+    Reading the mode bits from one explicit `lstat` makes both cases answerable:
+    a failure is an exception we must classify, not a False we might miss or a
+    raise we did not expect. It also halves the syscalls, which narrows the
+    TOCTOU window between them.
+    """
+    try:
+        st = path.lstat()
+    except FileNotFoundError:
+        return KIND_ABSENT
+    except OSError:
+        # EACCES on the parent, ESTALE, EIO… We do not know what this is, and
+        # saying so is the point — see KIND_INDETERMINATE.
+        return KIND_INDETERMINATE
+
+    if not stat.S_ISLNK(st.st_mode):
+        if stat.S_ISDIR(st.st_mode):
+            return KIND_DIRECTORY
+        if stat.S_ISREG(st.st_mode):
+            return KIND_REGULAR_FILE
+        return KIND_OTHER
+
+    try:
+        target = path.stat()  # follows the link
+    except OSError as exc:
+        # ENOENT = dangling, ELOOP = a cycle (measured: self-loop, mutual loop
+        # and a 45-link chain all give ELOOP). Both are broken POINTERS, which
+        # is a fact we know; anything else means the stat failed for a reason we
+        # cannot interpret, which is not.
+        #
+        # ⚠ NO ACTION DEPENDS ON THIS BRANCH IN THE SERVER'S TWO TABLES, and
+        # saying so is honest rather than leaving it to read as coverage:
+        # BROKEN_LINK and INDETERMINATE map to the SAME action in both of them,
+        # so there the split only changes the word in the 503 body. ⚠ THAT IS NO
+        # LONGER TRUE OF EVERY TABLE: `_LOADER_ENTRY_ACTIONS` REFUSES
+        # `broken-link` and TAKES `indeterminate`, so a mutant collapsing this
+        # branch is now killable through the loader (it turns the Emacs lock file
+        # back into a store-wide `EntryUnreadableError`). Errnos measured to land
+        # in `indeterminate` rather than `broken-link`: ENOTDIR (`/etc/hosts/x`),
+        # ENAMETOOLONG (300-char target), EACCES (link into an unsearchable dir).
+        if exc.errno in (errno.ENOENT, errno.ELOOP):
+            return KIND_BROKEN_LINK
+        return KIND_INDETERMINATE
+    if stat.S_ISDIR(target.st_mode):
+        return KIND_LINK_TO_DIR
+    if stat.S_ISREG(target.st_mode):
+        return KIND_LINK_TO_FILE
+    return KIND_LINK_TO_OTHER
+
+
+def action_for(kind: str, actions: Mapping[str, str]) -> str:
+    """Look up the action, refusing to guess. An unmapped kind is a BUG."""
+    try:
+        return actions[kind]
+    except KeyError:  # pragma: no cover - pinned by TestClassifierIsTotal
+        raise AssertionError(
+            f"unclassified path kind {kind!r}: every kind must be mapped "
+            f"explicitly, because a default is how the last four rounds of this "
+            f"defect happened"
+        ) from None
+
+
+def visible_scope_set(visible_scopes: Sequence[str] | None) -> set[str] | None:
+    """One allowlist -> the normalized set every narrowing site compares against.
+
+    🔴 ONE PLACE, because this predicate is now spelled at three of them — the
+    index loader below, `subsystem_recall.load_store`, and the API's `/snapshot`
+    candidate list, which walks the store root directly and so cannot use the
+    index at all. Open-coded at three sites it would be wrong at two of them in
+    the same direction, and the direction that matters here is "wider than the
+    caller's allowlist".
+
+    🔴 `None` IN, `None` OUT — UNRESTRICTED. An EMPTY sequence returns an EMPTY
+    SET, which is its opposite: nothing is visible. Both are falsy, so every
+    caller must test `is None`, never truthiness; that asymmetry is the whole
+    fail-closed direction of the scoped-token design.
+    """
+    if visible_scopes is None:
+        return None
+    return {normalize_ref(s) for s in visible_scopes}
+
+
+# 🔴 THE LOADER'S OWN TABLE, AND IT IS DELIBERATELY NARROWER THAN THE SERVER'S.
+#
+# The broad form — mirroring `server.py`'s `_ENTRY_ACTIONS` wholesale — was
+# written, reviewed and REJECTED, because it also refuses `link-to-file` and
+# `indeterminate`, which this loader READS (or honestly fails on) today: that is
+# a behaviour change for every local CLI caller and for the writer's probe, and
+# those two cells are still `TAKE` for exactly that reason. The cells that HAVE
+# been decided, one ruling at a time, each on the same criterion — "this loader
+# has never successfully read one, so refusing it changes no legitimate caller"
+# — are the five below. The first ruling decided two:
+#
+#   `broken-link`  a dangling symlink. `Path.glob("*.md")` MATCHES A LEADING
+#                  DOT — measured, not assumed — so an Emacs lock file
+#                  (`.#entry.md`, a dangling link to `user@host.pid:boot`) is a
+#                  candidate entry. Opening it raised, and because an OSError
+#                  fails closed in BOTH policies that took `/recall` down for
+#                  EVERY caller, naming the file and its scope in the 503.
+#   `other`        fifo, socket, device. `read_text` on a FIFO BLOCKS until
+#                  somebody writes to it: on a `replicas: 1` Deployment the
+#                  request thread never returns. This is the cell that is not a
+#                  degradation but a hang.
+#
+# 🔴 AND NOW A THIRD, WHICH IS THE SECOND ONE IN A DIFFERENT SHAPE:
+#
+#   `link-to-other`  a symlink POINTING AT a fifo/socket/device. It shipped
+#                  `TAKE` for one round and was written up here as a NAMED
+#                  RESIDUAL — the decision that created this table named `other`
+#                  and `broken-link` and nothing else. It was then MEASURED
+#                  rather than argued about, on the tip that carried it:
+#
+#                      store/bravo/link-to-fifo.md -> /tmp/thefifo (a real fifo)
+#                      GET /api/v1/recall/alpha, UNRESTRICTED legacy token
+#                      -> no response at 25s, request thread WEDGED (curl 124)
+#                      -> /healthz 200 throughout, so the process was UP and the
+#                         worker was gone — the positive control for the probe
+#
+#                  `open()` does not care which path shape reached the fifo, so
+#                  this was never a lesser defect than `other`; it was the same
+#                  one, and on a `replicas: 1` / `strategy: Recreate` service a
+#                  wedged thread is the worst outcome in this file. Refused.
+#
+# 🔴 AND NOW A FOURTH AND FIFTH, ON THE SAME CRITERION THE NARROW RULING USED:
+#
+#   `directory`    a DIRECTORY named `*.md`. `read_text` on one raises
+#   `link-to-dir`  `IsADirectoryError`, and because an OSError fails closed in
+#                  BOTH policies that was a store-wide `503 index entry
+#                  unreadable` for EVERY caller — `/recall` AND `/search` — off
+#                  one stray `mkdir <scope>/<slug>.md` or an rsync/restore
+#                  artefact. Measured on the tip that carried them, with a
+#                  paired control:
+#
+#                      store/beta/notes.md created as a DIRECTORY
+#                      GET /api/v1/recall/alpha, UNRESTRICTED legacy token
+#                      -> 503 "index entry unreadable: … (IsADirectoryError:
+#                         … /beta/notes.md)"
+#                      CONTROL, same shape but a dangling `.#lock.md` -> 200
+#
+#                  A symlink to a directory measured identically. 🔴 THE
+#                  CRITERION IS UNCHANGED, WHICH IS WHY THIS IS NOT A WIDENING
+#                  OF THE RULING: this loader has NEVER successfully read a
+#                  directory — it has only ever raised on one — so refusing it
+#                  changes no legitimate caller's behaviour, exactly as with
+#                  `broken-link`, `other` and `link-to-other`. It also makes the
+#                  loader AGREE with `/snapshot`'s `_ENTRY_ACTIONS`, which
+#                  already refused both kinds; two readers of one store
+#                  disagreeing about what a directory named `*.md` is was the
+#                  divergence, not the fix.
+#
+# None of the five is ever a legitimate entry, so no legitimate caller changes
+# behaviour.
+#
+# 🔴 `link-to-file` IS `TAKE`, AND THAT IS THE POINT OF THE NARROW FORM — it is
+# the cell the narrow-vs-broad ruling was actually about, and closing
+# `link-to-other`, `directory` and `link-to-dir` did not touch it. A symlink to
+# a regular `*.md` is read today and keeps being read. A mutant that flips this
+# cell to REFUSE is the exact over-broad regression the narrow ruling exists to
+# prevent, and `test_a_SYMLINKED_entry_is_STILL_READ_the_guard_is_NOT_the_broad_one`
+# kills it.
+#
+# ⚠ `indeterminate` and `absent` are `TAKE`, and for a DIFFERENT reason from the
+# two cells that just left this list — one this round was told explicitly not to
+# fold in. `indeterminate` means "the `lstat` failed and I could not look",
+# which is not "this kind can never be an entry"; `absent` is a file that
+# vanished between `glob()` and `classify_path`. `read_text` raises on each
+# (EACCES, FileNotFoundError) and that raise is the four-state rule's "the store
+# was not fully READ" — a DIFFERENT fact from "this entry is malformed", which
+# must not be quietly folded into it. `regular-file` and `link-to-file` are
+# `TAKE` because they are what an entry IS; the residuals they carry are
+# enumerated in `load_index`'s RESIDUAL LEDGER and pinned by
+# `test_the_LOADER_RESIDUAL_SET_is_pinned`.
+_LOADER_ENTRY_ACTIONS: dict[str, str] = {
+    KIND_BROKEN_LINK: REFUSE,
+    KIND_OTHER: REFUSE,
+    KIND_LINK_TO_OTHER: REFUSE,
+    KIND_DIRECTORY: REFUSE,
+    KIND_LINK_TO_DIR: REFUSE,
+    KIND_REGULAR_FILE: TAKE,
+    KIND_LINK_TO_FILE: TAKE,
+    KIND_INDETERMINATE: TAKE,
+    KIND_ABSENT: TAKE,
+}
+
+# The `why` clause each refused kind carries — the sentence after the sentinel,
+# so a refused entry reads exactly like every other unusable one. It names the
+# SHAPE and never invents a fix, because the operator's fix differs per shape
+# (delete the lock file; delete the fifo).
+_LOADER_REFUSAL_REASON: dict[str, str] = {
+    KIND_BROKEN_LINK: (
+        "broken symlink (a dangling target, or a link loop) — not an entry, and "
+        "refused before `open()`. `glob('*.md')` matches a leading dot, so an "
+        "editor lock file such as `.#<entry>.md` lands here; reading it raised "
+        "`index entry unreadable`, which took the whole store down for every "
+        "caller and named this file in the error"
+    ),
+    KIND_OTHER: (
+        "not a regular file (a fifo, socket or device) — refused before "
+        "`open()`, which on a fifo blocks until somebody writes to it and never "
+        "returns, wedging the reader"
+    ),
+    KIND_LINK_TO_OTHER: (
+        "a symlink to something that is not a regular file (a fifo, socket or "
+        "device) — refused before `open()`, which blocks on a fifo whether it "
+        "is named directly or reached through a link. Measured wedging a "
+        "`/recall` request thread for 25s while the process stayed healthy"
+    ),
+    KIND_DIRECTORY: (
+        "a directory named `*.md` — refused before `open()`, which on a "
+        "directory raises `IsADirectoryError`; that OSError fails closed, so "
+        "one stray `mkdir <scope>/<slug>.md` (or an rsync/restore artefact) "
+        "answered `/recall` and `/search` with a store-wide 503 for every "
+        "caller. Delete the directory, or move its contents into a `*.md` file"
+    ),
+    KIND_LINK_TO_DIR: (
+        "a symlink to a directory — refused before `open()`, which raises "
+        "`IsADirectoryError` whether the directory is named directly or "
+        "reached through a link, and that OSError fails closed into the same "
+        "store-wide 503"
+    ),
+}
+
+
+def load_index(
+    root: Path,
+    *,
+    on_malformed: str = ON_MALFORMED_RAISE,
+    visible_scopes: Sequence[str] | None = None,
+) -> SubsystemIndex:
     """Read `<root>/<scope>/*.md` into a `SubsystemIndex`. READ-ONLY.
 
     `README.md` is skipped in every scope — each scope dir carries one as its
@@ -1730,18 +2114,169 @@ def load_index(root: Path, *, on_malformed: str = ON_MALFORMED_RAISE) -> Subsyst
     interpret, while an unreadable one means the store was not fully READ — the
     set of entries is then unknown, so there is nothing honest to degrade to.
     `load_store`/`build_report` name it `index entry unreadable`.
+
+    🔴 `visible_scopes` IS APPLIED BEFORE ANY FILE IS OPENED, AND THAT IS THE
+    POINT OF IT BEING HERE RATHER THAN ON THE RESULT. Narrowing the index
+    afterwards still WALKS and READS every scope, which with a scoped API caller
+    in front of it is three separate defects, all measured:
+
+      * DISCLOSURE. One unreadable entry made `/recall` and `/search` answer
+        `503 index entry unreadable: under <store> (PermissionError: …
+        '<store>/<denied-scope>/locked-entry.md')` — the full path of a file in
+        a scope that caller is not allowed to know exists. A scoped reader had
+        no other way to learn that name.
+      * DENIAL OF SERVICE. One unreadable file anywhere in the store broke
+        recall for EVERY caller, including the ones whose own scopes were fine.
+      * A HUNG THREAD. `read_text` on a FIFO named `*.md` blocks until somebody
+        writes to it. On a `replicas: 1` service that is worse than the 503: the
+        request never returns and the worker is gone. `/snapshot` already
+        refuses non-regular files by kind; this path had no such guard, and now
+        does not need one for a scope the caller cannot name.
+
+    An unreadable file in a scope the caller CAN see still raises — that is the
+    four-state rule and it is unchanged. The local CLI passes no allowlist at
+    all (`None`), so its behaviour is byte-identical to before.
+
+    🔴 AND THE ALLOWLIST ALONE WAS NOT THE WHOLE FIX — `visible_scopes=None`
+    SKIPS NOTHING. For an UNRESTRICTED caller the narrowing above does exactly
+    nothing, and a bare legacy row is unrestricted, which is what the pod is
+    deployed with today. Measured on this tree BEFORE the entry-kind guard
+    below, `load_store` over a store whose `quartz-mine` scope holds one hostile
+    file:
+
+        visible_scopes=None        FIFO `hang.md`     -> HUNG (>6s, killed)
+        visible_scopes=None        `.#locked.md`      -> EntryUnreadableError
+        visible_scopes=('kelp-forest',)  both         -> loads, scopes=(kelp-forest,)
+        visible_scopes=('quartz-mine',)  FIFO         -> HUNG (its own scope)
+
+    🔴 SO THE CANDIDATE'S KIND IS NOW CHECKED BEFORE `open()`, FOR EVERY CALLER
+    — `_LOADER_ENTRY_ACTIONS`, above, which reuses `classify_path` rather than
+    asking the question a second way. It is NARROW on purpose. THE REFUSED SET,
+    named by KIND so this sentence is machine-readable and cannot drift the way
+    the ledger below twice did: a dangling symlink (`broken-link`), a
+    fifo/socket/device (`other`), a symlink POINTING AT one (`link-to-other`), a
+    directory named `*.md` (`directory`) and a symlink pointing at a directory
+    (`link-to-dir`) are refused. (END OF REFUSED SET.) Everything this loader has
+    ever successfully READ — regular files AND symlinks to regular files — is
+    still read, so no legitimate caller changes behaviour.
+    `test_the_DOCSTRING_REFUSED_SET_names_every_REFUSE_kind_and_no_other` pins
+    the marked span above against the table in both directions — it was PROSE
+    for a round, naming none of the kinds, and nothing read it: dropping three
+    of the five refusals from it left the whole suite green.
+    (Cells 3-5 shipped in later rounds than the first two, each after the shape
+    was measured: `link-to-other` wedging an unrestricted `/recall` thread for
+    25s, and `directory`/`link-to-dir` 503ing the whole store on an
+    `IsADirectoryError` off one stray `mkdir`.) A refusal is reported the way
+    every other unusable entry is, through `on_malformed`: a `MalformedEntry` on
+    the index under `COLLECT`, a `MalformedEntryError` under `RAISE`. One
+    hostile file therefore costs that ONE entry, and is NAMED, instead of
+    costing the whole store.
+
+    ⚠ THE RESIDUAL LEDGER — what this guard does **NOT** cover, enumerated
+    rather than left to be found, and machine-checked so it cannot silently go
+    stale the way it twice did. It is exactly the kinds `_LOADER_ENTRY_ACTIONS`
+    still maps to `TAKE`, because `TAKE` means `read_text` runs and any `OSError`
+    it raises fails closed into a store-wide `EntryUnreadableError` — a 503, and
+    for an unrestricted caller one that names the path:
+
+      * `regular-file` — a `chmod 000` entry. `PermissionError`. This is the
+        four-state rule working as designed: "the store was not fully READ" is
+        a different fact from "this entry is malformed", and only the second has
+        an honest degraded form.
+      * `link-to-file` — the SAME shape reached through a symlink, when the
+        TARGET is unreadable. Measured, not assumed: a link to a `chmod 000`
+        regular file 503s identically. Listed separately because the kind is
+        separate and the ledger must not read shorter than it is.
+      * `indeterminate` — the `lstat` itself failed (EACCES on the parent,
+        ESTALE, EIO…). Deliberately NOT refused: "I could not look" is a
+        different premise from "this kind can never be an entry", which is the
+        criterion every REFUSE cell above rests on.
+      * `absent` — the candidate vanished between `glob()` and `classify_path`.
+        A TOCTOU race, `FileNotFoundError`, unreproduced here rather than
+        measured.
+
+    `test_the_LOADER_RESIDUAL_SET_is_pinned` pins that set, and
+    `test_the_RESIDUAL_LEDGER_names_every_TAKE_kind_and_no_REFUSE_one` pins THIS
+    PARAGRAPH against the table in both directions — so a cell that becomes
+    REFUSE cannot stay listed here (the drift that left a closed hang recorded
+    as open for a whole round), and a new `TAKE` cell cannot go unlisted.
+    (END OF RESIDUAL LEDGER)
+
+    ⚠ `Path.glob("*.md")` DOES match a leading dot — measured, not assumed — so
+    an Emacs lock file (`.#entry.md`, a dangling symlink) is a candidate and had
+    been observed 503ing `/api/v1/recall/<scope>` in practice. That is the
+    `broken-link` cell's whole reason for existing, and the `.md` half of the
+    shape needs no separate check because the glob has already applied it.
+
+    ⚠ NOT A SUBSTITUTE FOR THE RESULT NARROWING in `load_store`. That one is
+    still authoritative for the shape of the answer; this one exists so the
+    denied scope is never TOUCHED. Both call `visible_scope_set`, so they cannot
+    come to disagree about what an allowlist means.
     """
+    collecting = _check_on_malformed(on_malformed) == ON_MALFORMED_COLLECT
+    allowed = visible_scope_set(visible_scopes)
     mappings: list[Mapping[str, object]] = []
     scopes: list[str] = []
+    # Entries REFUSED by kind before `open()`. Kept separate from `mappings`
+    # because they never become one — `build_index` never sees them, so nothing
+    # downstream has to learn a second rejection shape.
+    refused: list[MalformedEntry] = []
     # Both `sorted()` calls here are DETERMINISM guards: they fix which entry a
     # malformed-index error names, so the same store always produces the same
     # message. ⚠ The scope-level one is not observable from a test — no test can
     # control `iterdir()` order — so it is the one guard in this module a
     # mutation sweep cannot kill. Stated rather than left to look covered.
     for scope_dir in sorted(p for p in Path(root).iterdir() if p.is_dir()):
+        if allowed is not None and normalize_ref(scope_dir.name) not in allowed:
+            # 🔴 `continue` BEFORE `scopes.append`, not after. Appending first
+            # still skips the READ, so it looks equivalent — and THROUGH
+            # `load_store` it is, because that function's result narrowing drops
+            # the key again on the way out. Measured: the swap survives a sweep
+            # driven entirely through `load_store`. It is NOT equivalent for a
+            # caller that uses this function directly (`subsystem_touch`, and
+            # `TestTheLoaderItselfTakesTheAllowlist`), which gets a denied
+            # scope's NAME on `index.scopes` — the `known_scopes` enumeration
+            # channel — for a directory nothing ever opened.
+            #
+            # 🔴 `is not None`, NEVER truthiness: an EMPTY allowlist means
+            # nothing is visible, and `if allowed and …` would read it as
+            # unrestricted. Same asymmetry, same fail-closed direction, same
+            # invisibility through `load_store`.
+            #
+            # 🔴 The DIRECTORY NAME is folded before comparing, because the index
+            # key `build_index` derives from it is folded (`extra_scopes` →
+            # `normalize_ref`). A raw comparison drops a scope dir spelled
+            # `Kelp_Forest` out of an allowlist that names `kelp-forest` — the
+            # caller's OWN scope, silently emptied.
+            continue
         scopes.append(scope_dir.name)
         for md in sorted(scope_dir.glob("*.md")):
             if md.name == "README.md":
+                continue
+            # 🔴 WHAT IS THIS PATH — ASKED BEFORE IT IS OPENED, AND ASKED ONCE.
+            # `classify_path` is the same function `/snapshot` uses; only the
+            # action table differs, because the action is a property of the
+            # context. The narrow-vs-broad argument is on the table itself.
+            kind = classify_path(md)
+            if action_for(kind, _LOADER_ENTRY_ACTIONS) == REFUSE:
+                reason = _LOADER_REFUSAL_REASON[kind]
+                if not collecting:
+                    # 🔴 THE SAME POLICY, NOT A NEW ONE. Under `RAISE` this is
+                    # indistinguishable from any other rejection — the writer's
+                    # probe must not act on a store it read only part of, and
+                    # that is as true of a fifo as of a bad `aliases:` line.
+                    raise MalformedEntryError(
+                        f"malformed index entry {md.name!r}: {reason}",
+                        source=md.name,
+                        why=reason,
+                    )
+                refused.append(
+                    MalformedEntry(
+                        scope=normalize_ref(scope_dir.name),
+                        filename=md.name,
+                        reason=reason,
+                    )
+                )
                 continue
             mappings.append(
                 entry_mapping(
@@ -1750,4 +2285,15 @@ def load_index(root: Path, *, on_malformed: str = ON_MALFORMED_RAISE) -> Subsyst
                     scope=scope_dir.name,
                 )
             )
-    return build_index(mappings, extra_scopes=scopes, on_malformed=on_malformed)
+    index = build_index(mappings, extra_scopes=scopes, on_malformed=on_malformed)
+    if not refused:
+        return index
+    # 🔴 MERGED HERE RATHER THAN PASSED INTO `build_index`. These rows have
+    # ALREADY been through the `on_malformed` policy above (a non-collecting
+    # caller never reaches this line), so handing them to a function whose whole
+    # job is to APPLY that policy would be a second, silent policy site. The
+    # scope is already registered by `extra_scopes`, so the empty-scope rule
+    # `build_index` implements for its own rejects needs nothing here.
+    return SubsystemIndex(
+        by_scope=index.by_scope, malformed=index.malformed + tuple(refused)
+    )

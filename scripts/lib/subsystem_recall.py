@@ -278,6 +278,7 @@ from subsystem_resolver import (  # noqa: E402
     parse_front_matter,
     parse_journal_bullets,
     resolve_ref_tiered,
+    visible_scope_set,
 )
 from subsystem_resolver import extract_sections as _extract_sections  # noqa: E402
 from subsystem_touch import (  # noqa: E402
@@ -329,6 +330,7 @@ __all__ = [
     "discarded_sensitivity",
     "sensitivity_label",
     "load_store",
+    "visible_scope_set",
     "listing_order",
     "listing_page",
     "tokenize",
@@ -1297,7 +1299,12 @@ class RecallReport:
         return caveat_text(f"{self.scope}/", badges_present(self.listing))
 
 
-def load_store(store_root: str | Path, *, verb: str) -> tuple[Path, SubsystemIndex]:
+def load_store(
+    store_root: str | Path,
+    *,
+    verb: str,
+    visible_scopes: Sequence[str] | None = None,
+) -> tuple[Path, SubsystemIndex]:
     """Resolve the store root and load its index, or raise with a sentinel.
 
     🔴 ONE PLACE, because `recall` and `search` open the SAME store for the same
@@ -1306,6 +1313,29 @@ def load_store(store_root: str | Path, *, verb: str) -> tuple[Path, SubsystemInd
     did NOT happen ("nothing was recalled" / "nothing was searched") or it reads
     as the ordinary nothing-recorded-yet case, which is the confident zero this
     module exists to prevent.
+
+    🔴 `visible_scopes` IS A NARROWING OF THE WHOLE INDEX, AND IT IS APPLIED HERE
+    FOR EXACTLY THE REASON ABOVE — this is the single site both readers get their
+    index from, so a caller that may only see some scopes cannot be given a wider
+    one by a route that forgot to filter. `None` means UNRESTRICTED (every local
+    CLI caller); a sequence means "these normalized scopes and nothing else".
+
+    Filtering the INDEX rather than each answer is what closes four leaks at
+    once, and every one of them was measured on the deployed API before this
+    change:
+
+      * `known_scopes` — a `scope-absent` report ends with "scopes the store does
+        hold: …", so asking for a scope you do not have enumerated every scope
+        you do not have either.
+      * `malformed_elsewhere` — the "(+N further malformed entries in OTHER
+        scopes …)" block names those scopes on EVERY status, not only on a miss.
+      * `search?all_scopes=1` — it names no scope at all, so a per-scope refusal
+        check cannot see it; it searched the CONTENT of every scope in the store.
+      * the entries themselves.
+
+    An empty sequence therefore means "no scope is visible", NOT "unrestricted".
+    That direction is deliberate: a caller that forgot to resolve an allowlist
+    gets an empty store, not the whole one.
 
     🔴 IT LOADS WITH `ON_MALFORMED_COLLECT`, AND THAT IS THIS MODULE'S POLICY
     DECISION, NOT THE LOADER'S. A malformed entry no longer raises here: it comes
@@ -1328,12 +1358,46 @@ def load_store(store_root: str | Path, *, verb: str) -> tuple[Path, SubsystemInd
             f"store. Nothing was {verb}; this is NOT 'nothing recorded yet'"
         )
     try:
-        return store, load_index(store, on_malformed=ON_MALFORMED_COLLECT)
+        # 🔴 THE ALLOWLIST GOES DOWN INTO THE LOADER, NOT ONLY ONTO ITS RESULT.
+        # Narrowing afterwards still opened every file in every scope, so one
+        # unreadable entry in a scope the caller may NOT see put that file's full
+        # path into a 503 body, broke recall for everyone, and — for a FIFO named
+        # `*.md` — hung the request thread outright. See `load_index`.
+        index = load_index(
+            store,
+            on_malformed=ON_MALFORMED_COLLECT,
+            visible_scopes=visible_scopes,
+        )
     except OSError as exc:
         raise EntryUnreadableError(
             f"index entry unreadable: under {store} ({type(exc).__name__}: {exc}) — the "
             f"store was not fully read, so this report would be INCOMPLETE"
         ) from exc
+    if visible_scopes is None:
+        return store, index
+    # 🔴 REBUILT FROM THE TWO PUBLIC FIELDS, not by mutating a frozen dataclass
+    # and not by adding a third field. `scopes`, `malformed_in`,
+    # `malformed_outside`, `entries` and `__len__` are ALL derived from
+    # `by_scope` + `malformed`, so narrowing exactly those two narrows every
+    # derived answer at once — including the ones a future accessor adds. A
+    # per-answer filter would have to be repeated at every one of them, which is
+    # the shape that is wrong at all but one site.
+    #
+    # ⚠ REDUNDANT WITH THE LOADER'S OWN FILTER TODAY, AND KEPT DELIBERATELY.
+    # `load_index` now skips a denied scope dir entirely, so this rebuild has
+    # nothing left to drop — a mutation sweep will score it as an equivalent
+    # mutant. It stays because the two filters answer different questions: the
+    # loader's decides what is OPENED, this one decides what the RESULT SHAPE is,
+    # and a future caller that hands this function an already-loaded index, or a
+    # loader that learns a reason to register a scope it did not read, must not
+    # silently widen the answer. Both derive the set from `visible_scope_set`, so
+    # they cannot come to disagree about what an allowlist means.
+    allowed = visible_scope_set(visible_scopes)
+    assert allowed is not None  # `visible_scopes is None` returned above
+    return store, SubsystemIndex(
+        by_scope={k: v for k, v in index.by_scope.items() if k in allowed},
+        malformed=tuple(m for m in index.malformed if m.scope in allowed),
+    )
 
 
 def recall(
@@ -1346,6 +1410,7 @@ def recall(
     page: int = 1,
     focus_paths: Sequence[str] = (),
     focus_source: str | None = None,
+    visible_scopes: Sequence[str] | None = None,
 ) -> RecallReport:
     """Surface an entry's `## What it is` + `## Pointers` + `## Nuance / work-history`.
 
@@ -1386,7 +1451,14 @@ def recall(
     if mode not in RECALL_MODES:
         raise ValueError(f"mode must be one of {RECALL_MODES}, got {mode!r}")
 
-    store, index = load_store(store_root, verb="recalled")
+    # 🔴 `visible_scopes` IS PASSED, NEVER RE-DERIVED. A scope the caller may not
+    # see must be absent from the INDEX, not filtered out of each answer — see
+    # `load_store`. Once it is absent, `scope-absent` (and its `known_scopes`
+    # list) is what a refused scope produces, which is byte-for-byte what a scope
+    # that never existed produces.
+    store, index = load_store(
+        store_root, verb="recalled", visible_scopes=visible_scopes
+    )
     # Computed ONCE, before any status branch, and passed to every one of them —
     # the block renders on all of them (`render_malformed`), so deriving it per
     # branch would be the same predicate at six sites, wrong at five.
@@ -2538,6 +2610,7 @@ def search(
     threshold: float = DEFAULT_SEARCH_THRESHOLD,
     max_hits: int = DEFAULT_MAX_HITS,
     all_scopes: bool = False,
+    visible_scopes: Sequence[str] | None = None,
 ) -> SearchReport:
     """Find HUNKS matching `query`. READ-ONLY, stdlib only, nothing is spawned.
 
@@ -2564,7 +2637,16 @@ def search(
     if not isinstance(context, int) or isinstance(context, bool) or context < CONTEXT_BULLET:
         raise ValueError(f"context must be an int >= 0, got {context!r}")
 
-    store, index = load_store(store_root, verb="searched")
+    # 🔴 THE `all_scopes` PATH IS THE REASON THIS IS AN INDEX FILTER AND NOT A
+    # PER-SCOPE REFUSAL CHECK. `?all_scopes=1` names NO scope, so there is
+    # nothing for such a check to refuse — it would search the CONTENT of every
+    # scope in the store and report hits from scopes the caller cannot name.
+    # Narrowing the index instead makes `index.scopes` below already the
+    # caller's own set, so the store-wide search is store-wide over what the
+    # caller may see and nothing else.
+    store, index = load_store(
+        store_root, verb="searched", visible_scopes=visible_scopes
+    )
     bad = index.malformed_in(scope)
     bad_elsewhere = index.malformed_outside((scope,))
 

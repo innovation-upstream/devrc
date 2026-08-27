@@ -52,6 +52,7 @@ from testlib import hermetic_git  # noqa: E402
 import io
 import os
 import re
+import shutil
 import tarfile
 import secrets
 import subprocess
@@ -85,6 +86,17 @@ def _load_server():
 
 
 api = _load_server()
+
+# 🔴 THE SAME MODULE OBJECT THE SERVER IMPORTED FROM, not a second load.
+# `server.py` puts `scripts/lib` on `sys.path` and imports `subsystem_resolver`,
+# so by the line above it is in `sys.modules`; re-loading it by path would give a
+# SECOND module whose `_LOADER_ENTRY_ACTIONS` is a different dict, and a mutation
+# aimed at the one the loader actually reads would survive against it.
+resolver = sys.modules["subsystem_resolver"]
+assert resolver.classify_path is api.classify_path, (
+    "the server no longer shares the resolver's classifier — two copies of "
+    "'what IS this path' is the defect the move was made to prevent"
+)
 
 
 # =============================================================================
@@ -480,6 +492,35 @@ def tree_hash(root: Path) -> str:
 # =============================================================================
 
 
+def loaded(token_file, env, **kwargs) -> list[tuple]:
+    """`load_tokens` as PLAIN TUPLES — `(token, identity, scopes)` per row.
+
+    🔴 A tuple, not the `TokenRecord` itself, and deliberately: importing the
+    dataclass and asserting `== TokenRecord(...)` would re-derive the expected
+    value from the implementation under test, and a field renamed on both sides
+    would stay green. Spelling the three facts out here means the assertion
+    breaks when the SHAPE changes, which is when someone should look.
+
+    `warn=` is swallowed by default so the legacy-mode banner does not spray
+    stderr across every guard test; the tests that are ABOUT that banner pass
+    their own sink and read it.
+    """
+    kwargs.setdefault("warn", lambda _line: None)
+    return [(r.token, r.identity, r.scopes) for r in api.load_tokens(token_file, env, **kwargs)]
+
+
+def exc_of(call) -> ValueError:
+    """The `ValueError` `call()` raises, so a MESSAGE assertion is one line.
+
+    Only for tests whose subject is the wording; `pytest.raises` stays inline
+    wherever the fact under test is that it raised AT ALL, because that is a
+    different claim and reads better spelled out.
+    """
+    with pytest.raises(ValueError) as exc:
+        call()
+    return exc.value
+
+
 class TestTokenLoadingGuards:
     """`load_tokens` refuses to serve on a token that is absent, empty or weak.
 
@@ -521,7 +562,7 @@ class TestTokenLoadingGuards:
         assert "is too short" in str(exc.value)
         # The position is named even when there is only one — a message that
         # said "the token" would have to change shape the day a second appears.
-        assert "token 1 of 1" in str(exc.value)
+        assert "token on line 1 of 1" in str(exc.value)
         # 43 chars = 256 bits base64url, pinned LITERALLY (§2b).
         assert "43" in str(exc.value)
 
@@ -532,7 +573,11 @@ class TestTokenLoadingGuards:
     def test_a_token_of_exactly_the_floor_is_accepted(self, tmp_path: Path):
         path = tmp_path / "tok"
         path.write_text("z" * 43 + "\n")
-        assert api.load_tokens(str(path), {}) == ["z" * 43]
+        # 🔴 A BARE ROW IS THE LEGACY RECORD: identity `legacy`, `scopes=None`
+        # meaning UNRESTRICTED. Pinned here rather than only in the phase-3
+        # section, because this is the shape criterion 10's rollback re-adds and
+        # the whole migration rests on it still loading.
+        assert loaded(str(path), {}) == [("z" * 43, "legacy", None)]
 
     def test_env_is_the_FALLBACK_not_the_primary(self, tmp_path: Path):
         # Both sources present: the FILE wins. The agent exec sandbox strips env
@@ -540,12 +585,14 @@ class TestTokenLoadingGuards:
         # mounted secret would make the deployed token unknowable.
         path = tmp_path / "tok"
         path.write_text("f" * 50)
-        assert api.load_tokens(str(path), {"SUBSYSTEM_STORE_TOKEN": "e" * 50}) == [
-            "f" * 50
+        assert loaded(str(path), {"SUBSYSTEM_STORE_TOKEN": "e" * 50}) == [
+            ("f" * 50, "legacy", None)
         ]
 
     def test_env_is_used_when_no_file_is_named(self):
-        assert api.load_tokens(None, {"SUBSYSTEM_STORE_TOKEN": "e" * 50}) == ["e" * 50]
+        assert loaded(None, {"SUBSYSTEM_STORE_TOKEN": "e" * 50}) == [
+            ("e" * 50, "legacy", None)
+        ]
 
 
 # =============================================================================
@@ -957,17 +1004,93 @@ class TestReadOnlyPhase1:
 # 🔴 THE PINNED DECISION TABLE, as a named constant so the completeness guard
 # and the per-cell guard read the SAME list. Introspecting the parametrize mark
 # to get it was clever and wrong; two literals would drift.
+#
+# THREE contexts now: the `/snapshot` scope-root scan, the `/snapshot` entry
+# scan, and — since the entry-kind guard landed — `subsystem_resolver`'s INDEX
+# LOADER, which is a different context and therefore a different column.
+#
+# 🔴 THE LOADER COLUMN IS THE NARROW RULING, CELL BY CELL. Every REFUSE in it
+# rests on ONE criterion, applied over three rulings and never widened: this
+# loader has never successfully READ that kind — it has only ever raised or
+# blocked on one — so refusing it changes no legitimate caller. That covers
+# `broken-link` (the Emacs `.#entry.md` lock file, which 503'd the whole store),
+# the two shapes of "an `open()` on this never returns" — `other` (the fifo) and
+# `link-to-other` (a symlink pointing at one), each measured HANGING the request
+# thread — and the two shapes of `IsADirectoryError`, `directory` and
+# `link-to-dir`, measured 503ing the whole store off one stray `mkdir`.
+#
+# It TAKES everything else — most pointedly `link-to-file`, which the loader has
+# always read. Copying the `_ENTRY_ACTIONS` column wholesale is the over-broad
+# form that was explicitly rejected, and flipping any remaining TAKE here to
+# REFUSE is a behaviour change for ordinary callers; every one of those flips is
+# a mutant this column kills.
 DECISION_TABLE = [
-    ("KIND_BROKEN_LINK", "REFUSE", "REFUSE"),
-    ("KIND_LINK_TO_DIR", "REFUSE", "REFUSE"),
-    ("KIND_LINK_TO_FILE", "SKIP", "REFUSE"),
-    ("KIND_LINK_TO_OTHER", "SKIP", "REFUSE"),
-    ("KIND_DIRECTORY", "TAKE", "REFUSE"),
-    ("KIND_REGULAR_FILE", "SKIP", "TAKE"),
-    ("KIND_OTHER", "SKIP", "REFUSE"),
+    ("KIND_BROKEN_LINK", "REFUSE", "REFUSE", "REFUSE"),
+    # 🔴 CLOSED IN THE SAME ROUND AS `KIND_DIRECTORY`, AND FOR ITS REASON —
+    # `read_text` raises `IsADirectoryError` whether the directory is named
+    # directly or reached through a link, and that OSError fails closed into a
+    # store-wide 503 for every caller.
+    ("KIND_LINK_TO_DIR", "REFUSE", "REFUSE", "REFUSE"),
+    ("KIND_LINK_TO_FILE", "SKIP", "REFUSE", "TAKE"),
+    # 🔴 CLOSED, AND IT WAS THE SAME DEFECT — NOT A LESSER ONE. This cell was
+    # `TAKE` for one round, pinned as a named residual because the ruling that
+    # created the loader column named `other` and `broken-link` and nothing
+    # else. Then it was MEASURED on that tip: a `link-to-fifo.md` symlink in a
+    # scope the caller never asked for wedged `GET /api/v1/recall/<other-scope>`
+    # for 25s under an UNRESTRICTED legacy token — the request thread gone, on a
+    # `replicas: 1` / `strategy: Recreate` service. `open()` blocks identically
+    # whether the fifo is reached directly or through a link, so the loader
+    # column now refuses BOTH shapes of it. `link-to-file` stays `TAKE` — that
+    # is still the upper bound, and still the point of the narrow form.
+    ("KIND_LINK_TO_OTHER", "SKIP", "REFUSE", "REFUSE"),
+    # 🔴 CLOSED, AND IT WAS NEVER A LESSER DEFECT EITHER. The loader TOOK this
+    # cell for three rounds while its own ledger called `chmod 000` "the only
+    # residual left" — which was measured false: `store/beta/notes.md` created
+    # as a DIRECTORY answered `GET /api/v1/recall/alpha` (a scope the caller
+    # never asked about, unrestricted legacy token) with `503 index entry
+    # unreadable … IsADirectoryError`, while the same store carrying a dangling
+    # `.#lock.md` instead answered 200. One accidental `mkdir <scope>/notes.md`
+    # or one rsync/restore artefact took `/recall` and `/search` down for EVERY
+    # caller. `read_text` has never once succeeded on a directory, so refusing
+    # it changes no legitimate caller — the criterion the narrow ruling itself
+    # used — and it makes the loader agree with `/snapshot`, which already
+    # refused it.
+    ("KIND_DIRECTORY", "TAKE", "REFUSE", "REFUSE"),
+    ("KIND_REGULAR_FILE", "SKIP", "TAKE", "TAKE"),
+    ("KIND_OTHER", "SKIP", "REFUSE", "REFUSE"),
     # 🔴 "I could not look" must never share a cell with "nothing is there".
-    ("KIND_INDETERMINATE", "REFUSE", "REFUSE"),
-    ("KIND_ABSENT", "SKIP", "SKIP"),
+    # In the LOADER it is TAKE, so `read_text` raises and the four-state rule's
+    # "the store was not fully READ" is preserved — a DIFFERENT fact from "this
+    # entry is malformed", which is what REFUSE would report it as. ⚠ This is
+    # the cell the `directory` ruling deliberately did NOT sweep up with it:
+    # "the lstat failed" is a different premise from "this kind can never be an
+    # entry", and only the second justifies a REFUSE.
+    ("KIND_INDETERMINATE", "REFUSE", "REFUSE", "TAKE"),
+    ("KIND_ABSENT", "SKIP", "SKIP", "TAKE"),
+]
+
+# 🔴 THE LOADER'S RESIDUAL SET, PINNED AS A LITERAL — the set of kinds
+# `_LOADER_ENTRY_ACTIONS` still maps to TAKE, which is exactly the set of shapes
+# whose `read_text` can still fail closed into a store-wide 503.
+#
+# It is spelled here, by hand, and NOT derived from the table, because the whole
+# defect this pins is a LEDGER that drifted: two documents claimed `chmod 000`
+# was "the only residual" while the table had four TAKE cells that could raise,
+# one of which (`directory`) took the store down for every caller. A derived set
+# would have agreed with the table forever and said nothing.
+LOADER_RESIDUAL_KINDS = {
+    "regular-file",   # chmod 000 -> PermissionError
+    "link-to-file",   # a link whose TARGET is chmod 000 -> PermissionError
+    "indeterminate",  # the lstat itself failed -> OSError on read
+    "absent",         # vanished between glob() and classify -> FileNotFoundError
+}
+
+# The LEDGER of every action table that exists, so "all three contexts" is a
+# claim something checks rather than a number in a test name.
+ALL_ACTION_TABLES = [
+    ("subsystem_store_server._ROOT_ACTIONS", api._ROOT_ACTIONS),
+    ("subsystem_store_server._ENTRY_ACTIONS", api._ENTRY_ACTIONS),
+    ("subsystem_resolver._LOADER_ENTRY_ACTIONS", resolver._LOADER_ENTRY_ACTIONS),
 ]
 
 
@@ -991,15 +1114,255 @@ class TestClassifierIsTotal:
     rounds each made implicitly, by omission, and got wrong.
     """
 
-    def test_every_kind_is_mapped_in_BOTH_contexts(self):
-        for name, actions in (
-            ("_ROOT_ACTIONS", api._ROOT_ACTIONS),
-            ("_ENTRY_ACTIONS", api._ENTRY_ACTIONS),
-        ):
+    def test_every_kind_is_mapped_in_ALL_THREE_contexts(self):
+        for name, actions in ALL_ACTION_TABLES:
             missing = api.ALL_KINDS - set(actions)
             extra = set(actions) - api.ALL_KINDS
             assert not missing, f"{name} does not decide: {sorted(missing)}"
             assert not extra, f"{name} maps unknown kinds: {sorted(extra)}"
+
+    def test_the_TABLE_LEDGER_names_every_action_table_that_exists(self):
+        """🔴 A SEAM GUARD, NOT A TOTALITY ONE — the test above is only as wide
+        as the list it iterates.
+
+        A fourth context that maps kinds would be structurally invisible to
+        every assertion in this class: nothing here reads the modules, so a new
+        table simply would not be checked, and "every kind is mapped in all
+        three contexts" would keep passing while the fourth defaulted. This
+        asserts the LEDGER against what the two modules actually define, so the
+        set GROWING or SHRINKING is a failure either way.
+
+        🔴 SELECTED BY WHAT THE DICT CONTAINS, NEVER BY WHAT IT IS CALLED. This
+        guard used to match `name.endswith("_ACTIONS")`, which made it a SPELLED
+        guard while its docstring claimed a structural one — and the difference
+        was measured with paired controls: a fourth table named
+        `_FOURTH_TABLE_ACTIONS` was KILLED, the byte-identical table renamed
+        `_SNAPSHOT_KIND_POLICY` SURVIVED (19 passed, 0 failed). A new context
+        does not have to adopt the old suffix, and the one that does not is
+        exactly the one nobody notices.
+
+        So the question asked is what the dict IS, not what it is called: KEYS
+        that are kinds, VALUES that are actions. Both halves are load-bearing —
+        keys alone also matches `_LOADER_REFUSAL_REASON`, which is kind-keyed
+        but maps to English sentences and decides nothing. Naming is then free.
+        """
+        found = {
+            f"{mod.__name__}.{name}"
+            for mod in (api, resolver)
+            for name, value in vars(mod).items()
+            if isinstance(value, dict)
+            and set(value) & api.ALL_KINDS
+            and set(value.values()) <= {api.SKIP, api.TAKE, api.REFUSE}
+        }
+        assert found == {name for name, _t in ALL_ACTION_TABLES}, (
+            f"the action-table ledger is out of date: {sorted(found)}"
+        )
+
+    def test_the_LOADER_RESIDUAL_SET_is_pinned(self):
+        """🔴 THE LEDGER THAT KEPT GOING STALE, MADE MACHINE-READABLE.
+
+        `load_index`'s docstring and the API README each asserted, for three
+        rounds, that a `chmod 000` regular file was "the only residual left" —
+        while the table held FOUR `TAKE` cells whose `read_text` fails closed
+        into a store-wide 503, one of them (`directory`) reachable from a single
+        accidental `mkdir <scope>/notes.md` and measured taking `/recall` down
+        for every caller.
+
+        ⚠ AN INVARIANT GUARD, NOT A REGRESSION TEST — nothing was ever
+        structurally wrong with the TABLE this asserts; the defect was in the
+        two documents describing it, and the two guards below are the ones that
+        pin those. This exists so that whatever is ruled next about a cell has
+        to move a literal a reviewer can see, in the same diff.
+        """
+        taken = {
+            k for k, a in resolver._LOADER_ENTRY_ACTIONS.items() if a == api.TAKE
+        }
+        assert taken == LOADER_RESIDUAL_KINDS, (
+            "the loader's TAKE set moved. Every kind here is a shape whose "
+            "`read_text` can still 503 the whole store, so this set IS the "
+            "residual ledger — update `load_index`'s docstring and "
+            f"subsystem-store-api/README.md in the same diff. now={sorted(taken)}"
+        )
+
+    @staticmethod
+    def _marked_region(
+        text: str, label: str, start: str, end: str, min_len: int
+    ) -> str:
+        """A document region delimited by two literal markers.
+
+        An absent or unterminated marker ASSERTS rather than returning an empty
+        slice — an empty region would satisfy every "is not in" below and turn
+        the guard using it into the reassuring zero it exists to prevent. So
+        does a region that came back implausibly short.
+        """
+        lo = text.find(start)
+        assert lo > 0, f"{label}: no {start} section at all"
+        hi = text.find(end, lo + len(start))
+        assert hi > lo, f"{label}: the {start} region is not terminated by {end!r}"
+        region = text[lo:hi]
+        assert len(region) > min_len, (
+            f"{label}: the {start} region is suspiciously short ({len(region)}b)"
+        )
+        return region
+
+    @classmethod
+    def _residual_ledger(cls, label: str) -> str:
+        """The document's RESIDUAL LEDGER region, by its literal markers."""
+        text = (
+            resolver.load_index.__doc__
+            if "load_index" in label
+            else (API_DIR / label).read_text(encoding="utf-8")
+        )
+        return cls._marked_region(
+            text, label, "RESIDUAL LEDGER", "END OF RESIDUAL LEDGER", min_len=200
+        )
+
+    @pytest.mark.parametrize(
+        "label", ["subsystem_resolver.load_index", "README.md"]
+    )
+    def test_the_RESIDUAL_LEDGER_names_every_TAKE_kind_and_no_REFUSE_one(
+        self, label
+    ):
+        """🔴 THE GUARD THAT WOULD HAVE CAUGHT THE STALE LEDGER, IN BOTH
+        DIRECTIONS AND IN BOTH DOCUMENTS.
+
+        The previous round flipped `link-to-other` to REFUSE and its commit
+        message claimed "comments and docstrings updated wherever they still
+        recorded the hang as open". The docstring and two test docstrings were;
+        the README was NOT, and went on telling operators the hang was "left
+        open" for a whole round after it was closed. Nothing could see that,
+        because no test read the README.
+
+        So both directions are asserted, and a document that fails either is
+        wrong in a way a reader would act on:
+          * a kind the table still `TAKE`s and the ledger omits -> the ledger
+            reads SHORTER than the hazard actually is;
+          * a kind the table now REFUSEs and the ledger still lists -> a closed
+            hazard recorded as open, which is what happened.
+        And symmetrically for the REFUSED table above the ledger.
+
+        ⚠ THIS PINS TOKENS, NOT PROSE. A backticked kind name is a
+        machine-readable claim; the sentences around it are free to be
+        rewritten. That is the deliberate trade — pinning the whole normalised
+        string would fail on every cosmetic edit and get deleted.
+        """
+        ledger = self._residual_ledger(label)
+        taken = {
+            k for k, a in resolver._LOADER_ENTRY_ACTIONS.items() if a == api.TAKE
+        }
+        refused = {
+            k for k, a in resolver._LOADER_ENTRY_ACTIONS.items() if a == api.REFUSE
+        }
+        assert taken and refused, "the loader table is degenerate"
+
+        for kind in sorted(taken):
+            assert f"`{kind}`" in ledger, (
+                f"{label}: the residual ledger does not name `{kind}`, which "
+                f"the loader still TAKEs — the ledger reads SHORTER than the "
+                f"hazard is"
+            )
+        for kind in sorted(refused):
+            assert f"`{kind}`" not in ledger, (
+                f"{label}: `{kind}` is still described as a residual, but the "
+                f"loader now REFUSEs it — a closed hazard recorded as open is "
+                f"the exact drift this guard exists for"
+            )
+
+    def test_the_DOCSTRING_REFUSED_SET_names_every_REFUSE_kind_and_no_other(self):
+        """🔴 THE HALF THE GUARD BELOW CLAIMED AND DID NOT COVER — a docstring
+        whose SENTENCE promised more coverage than its BODY delivered.
+
+        `test_the_README_REFUSED_TABLE_…` used to say "`load_index`'s docstring
+        prose is covered by the ledger half above". It was not. The ledger guard
+        reads only the span between `RESIDUAL LEDGER` and its END marker, and
+        the docstring's REFUSAL sentence lives well above that span — so nothing
+        in the tree read it. `resolver.load_index.__doc__` appeared exactly once
+        in the whole test suite, inside `_residual_ledger`.
+
+        Measured, on the state this fix replaced: dropping `link-to-other`,
+        `directory` and `link-to-dir` from that sentence — leaving the docstring
+        asserting a TWO-cell guard against a FIVE-cell table, verbatim the shape
+        of the README drift the ledger guard exists for — left the suite at
+        **407 passed**.
+
+        So the sentence now names its kinds as backticked TOKENS inside literal
+        markers, and this pins the marked span against the table in both
+        directions, exactly as the two guards around it do:
+          * a kind the loader REFUSEs and the sentence omits -> the docstring
+            claims a NARROWER guard than the code has, which is what a reader
+            deletes a "redundant" cell on the strength of;
+          * a kind the sentence names that the loader TAKEs -> a guard claimed
+            where none exists, which is the README failure one document over.
+
+        ⚠ TOKENS, NOT PROSE — same trade as the ledger guard. The explanatory
+        clause beside each kind is free to be rewritten; the backticked name is
+        the machine-readable claim. And the span is delimited tightly on
+        purpose: the paragraph BELOW it names `link-to-other`, `directory` and
+        `link-to-dir` while recounting which round each shipped in, so a guard
+        scoped to the whole docstring would have passed on all three while the
+        refusal sentence itself said nothing about them.
+        """
+        refused = {
+            k for k, a in resolver._LOADER_ENTRY_ACTIONS.items() if a == api.REFUSE
+        }
+        assert refused, "the loader refuses nothing — the table is degenerate"
+        region = self._marked_region(
+            resolver.load_index.__doc__ or "",
+            "subsystem_resolver.load_index",
+            "REFUSED SET",
+            "END OF REFUSED SET",
+            min_len=120,
+        )
+        for kind, action in sorted(resolver._LOADER_ENTRY_ACTIONS.items()):
+            present = f"`{kind}`" in region
+            if action == api.REFUSE:
+                assert present, (
+                    f"`load_index`'s REFUSED SET does not name `{kind}`, which "
+                    f"the loader refuses — the docstring claims a narrower "
+                    f"guard than the code has"
+                )
+            else:
+                assert not present, (
+                    f"`load_index`'s REFUSED SET names `{kind}`, which the "
+                    f"loader does not REFUSE (it is {action!r}) — it claims a "
+                    f"guard that is not there"
+                )
+
+    def test_the_README_REFUSED_TABLE_names_every_REFUSE_kind_and_no_other(self):
+        """The other half of the same seam, and the half an operator reads
+        first: the README's refusal table is what tells them which shapes are
+        already handled. A kind missing from it reads as an open hazard that is
+        closed; a kind listed in it that the loader actually TAKEs reads as a
+        guard that does not exist.
+
+        Scoped to the README's refusal TABLE — not to everything above the
+        ledger marker, which is what it used to be. `text[:cut]` swept in every
+        line of the document before the ledger, so an unrelated future table
+        with a `regular-file` row would have failed here with a message
+        pointing at the refusal table, which is not where the edit is. The
+        docstring's own refusal sentence is pinned by the guard ABOVE, not by
+        this one — it is a different document and it says it differently.
+        """
+        text = (API_DIR / "README.md").read_text(encoding="utf-8")
+        # The table's own header line is the anchor, and a blank line ends it —
+        # the narrowest span that can be wrong. An absent header ASSERTS rather
+        # than yielding a slice: `find` returns -1 on a miss, and `text[-1:]`
+        # is a one-character region that satisfies every "is not in" below.
+        head = self._marked_region(
+            text, "README.md", "| kind | on disk | why it is refused |", "\n\n", min_len=200
+        )
+        for kind, action in sorted(resolver._LOADER_ENTRY_ACTIONS.items()):
+            present = f"| `{kind}` |" in head
+            if action == api.REFUSE:
+                assert present, (
+                    f"README refusal table does not list `{kind}`, which the "
+                    f"loader refuses"
+                )
+            else:
+                assert not present, (
+                    f"README refusal table lists `{kind}`, which the loader "
+                    f"TAKEs — it claims a guard that is not there"
+                )
 
     def test_the_pinned_table_covers_EVERY_kind(self):
         """🔴 Two-way pin on the parametrize list itself.
@@ -1010,7 +1373,7 @@ class TestClassifierIsTotal:
         would have an UNPINNED cell while the docstring claimed otherwise. Same
         idiom as `test_waiting_windows.py`'s `set(KIND_BAND) == set(ALL_KINDS)`.
         """
-        pinned = {getattr(api, name) for name, _r, _e in DECISION_TABLE}
+        pinned = {getattr(api, name) for name, _r, _e, _l in DECISION_TABLE}
         assert pinned == api.ALL_KINDS, (
             f"unpinned cells: {sorted(api.ALL_KINDS - pinned)}"
         )
@@ -1043,9 +1406,9 @@ class TestClassifierIsTotal:
         assert b"indeterminate refused" in body, body[:300]
 
     def test_every_mapped_action_is_a_known_action(self):
-        for actions in (api._ROOT_ACTIONS, api._ENTRY_ACTIONS):
+        for name, actions in ALL_ACTION_TABLES:
             for kind, action in actions.items():
-                assert action in (api.SKIP, api.TAKE, api.REFUSE), (kind, action)
+                assert action in (api.SKIP, api.TAKE, api.REFUSE), (name, kind, action)
 
     def test_an_unmapped_kind_RAISES_rather_than_defaulting(self):
         """🔴 The fallthrough is the whole mechanism. If `action_for` returned a
@@ -1054,17 +1417,58 @@ class TestClassifierIsTotal:
         with pytest.raises(AssertionError, match="unclassified path kind"):
             api.action_for("a-kind-nobody-mapped", api._ROOT_ACTIONS)
 
-    @pytest.mark.parametrize("kind,expected_root,expected_entry", DECISION_TABLE)
-    def test_the_decision_table_is_pinned(self, kind, expected_root, expected_entry):
+    @pytest.mark.parametrize(
+        "kind,expected_root,expected_entry,expected_loader", DECISION_TABLE
+    )
+    def test_the_decision_table_is_pinned(
+        self, kind, expected_root, expected_entry, expected_loader
+    ):
         """Pins the table itself, so a silent flip of any single cell fails.
 
         Every previous round's bug was one cell of this table being wrong or
         absent; asserting the table makes each cell a named, reviewable decision
         instead of an emergent property of statement order.
+
+        ⚠ A CONSTANTS PIN IS NOT A BEHAVIOUR TEST, and this class's own history
+        says so — three ENTRY cells needed behavioural tests before they were
+        believed. The two loader cells that DO something have them below
+        (`TestTheLoaderRefusesHostileEntriesByKind`); this asserts the decision
+        is written down, not that it fires.
         """
         k = getattr(api, kind)
         assert api._ROOT_ACTIONS[k] == getattr(api, expected_root)
         assert api._ENTRY_ACTIONS[k] == getattr(api, expected_entry)
+        assert resolver._LOADER_ENTRY_ACTIONS[k] == getattr(api, expected_loader)
+
+    def test_every_REFUSED_loader_kind_HAS_a_reason_and_no_other_kind_does(self):
+        """🔴 THE SEAM BETWEEN THE TWO DICTS, which nothing else reads together.
+
+        `load_index` looks the reason up by `_LOADER_REFUSAL_REASON[kind]` —
+        an unguarded subscript — so flipping a cell to REFUSE without writing
+        its sentence turns a hostile entry into a `KeyError` out of the loader:
+        a 500 with no `X-Store-Status`, for a shape whose whole fix was to make
+        it a NAMED malformed row. That is how the `link-to-other` cell would
+        have landed, and reviewing the table alone cannot see it.
+
+        Asserted as SET EQUALITY, not containment, so it fails when the ledger
+        GROWS as well as when it shrinks — a reason left behind for a kind that
+        went back to TAKE is dead prose claiming a guard that is gone.
+        """
+        refused = {
+            k
+            for k, action in resolver._LOADER_ENTRY_ACTIONS.items()
+            if action == api.REFUSE
+        }
+        assert refused == set(resolver._LOADER_REFUSAL_REASON), (
+            "the loader's REFUSE cells and its refusal sentences have drifted"
+        )
+        assert refused == {
+            api.KIND_BROKEN_LINK,
+            api.KIND_OTHER,
+            api.KIND_LINK_TO_OTHER,
+            api.KIND_DIRECTORY,
+            api.KIND_LINK_TO_DIR,
+        }
 
     def test_classify_returns_the_right_kind_for_each_REAL_path(self, tmp_path: Path):
         """🔴 The table above is only meaningful if `classify_path` actually
@@ -2423,11 +2827,27 @@ class TestTokenSetAndOverlapRotation:
 
     def test_two_tokens_load_as_a_set_IN_FILE_ORDER(self, tmp_path: Path):
         path = self._write(tmp_path, GOOD_TOKEN, SECOND_TOKEN)
-        assert api.load_tokens(path, {}) == [GOOD_TOKEN, SECOND_TOKEN]
+        assert [r[0] for r in loaded(path, {})] == [GOOD_TOKEN, SECOND_TOKEN]
 
     def test_a_duplicated_line_collapses_and_order_is_kept(self, tmp_path: Path):
         path = self._write(tmp_path, SECOND_TOKEN, GOOD_TOKEN, SECOND_TOKEN)
-        assert api.load_tokens(path, {}) == [SECOND_TOKEN, GOOD_TOKEN]
+        assert [r[0] for r in loaded(path, {})] == [SECOND_TOKEN, GOOD_TOKEN]
+
+    def test_TWO_LEGACY_ROWS_do_NOT_trip_the_duplicate_identity_guard(
+        self, tmp_path: Path
+    ):
+        """🔴 THE EXEMPTION, EXERCISED — it is what keeps rotation working.
+
+        Both bare rows carry identity `legacy`, so a duplicate-identity check
+        written without the exemption refuses the ordinary current+previous
+        overlap file: the very shape guards 1-5 exist to support, and the shape
+        criterion 10's rollback restores. Distinct tokens, one identity, and it
+        must LOAD.
+        """
+        path = self._write(tmp_path, GOOD_TOKEN, SECOND_TOKEN)
+        rows = loaded(path, {})
+        assert [r[1] for r in rows] == ["legacy", "legacy"]
+        assert [r[2] for r in rows] == [None, None]
 
     def test_the_cap_is_FOUR(self):
         # Literal, not `api.MAX_TOKENS` — importing it would assert x == x.
@@ -2449,7 +2869,58 @@ class TestTokenSetAndOverlapRotation:
     ):
         four = [chr(ord("a") + i) * 48 for i in range(4)]
         path = self._write(tmp_path, *four)
-        assert api.load_tokens(path, {}) == four
+        assert [r[0] for r in loaded(path, {})] == four
+
+    def test_the_CAP_counts_CREDENTIALS_not_ROWS(self, tmp_path: Path):
+        """🔴 A REGRESSION THIS BRANCH INTRODUCED, MEASURED. Removing the
+        pre-parse dedup left guard 4 counting physical rows, so four distinct
+        tokens plus ONE verbatim duplicate line answered `too many tokens: 5,
+        max 4` — for a file holding four credentials that loaded fine before.
+
+        It also contradicted guard 11, whose own comment calls a duplicated row
+        "the rotation shape, and it is legitimate": the file guard 11 accepts is
+        the file guard 4 was refusing.
+
+        FIVE rows, FOUR credentials. It must load, and the collapse must leave
+        exactly the four.
+        """
+        four = [chr(ord("a") + i) * 48 for i in range(4)]
+        path = self._write(tmp_path, *four, four[0])
+        assert [r[0] for r in loaded(path, {})] == four
+
+    def test_FIVE_COPIES_of_ONE_token_is_ONE_credential(self, tmp_path: Path):
+        """The far end of the same claim, and the one that made the old wording
+        plainly wrong: five identical lines are one credential, and "too many
+        tokens: 5" was a sentence about a file with one token in it.
+        """
+        path = self._write(tmp_path, *([GOOD_TOKEN] * 5))
+        assert [r[0] for r in loaded(path, {})] == [GOOD_TOKEN]
+
+    def test_the_CAP_still_counts_the_DISTINCT_ones_and_says_so(
+        self, tmp_path: Path
+    ):
+        """🔴 THE UPPER BOUND: counting credentials must not become counting
+        nothing. SEVEN distinct tokens with one of them repeated is still seven
+        credentials, and the number in the message is the credential count — not
+        the row count (8) it would have been, and not a constant.
+
+        🔴 SEVEN, NOT FIVE, AND THAT IS THE WHOLE POINT OF THE FIXTURE. This
+        test used to build five tokens and assert `too many tokens: 5, max 4` —
+        five being one past a cap of four, so the printed number could only ever
+        BE five, and the other test that reaches this message uses five too. It
+        was a fixture that can only produce the constant's own value:
+        `claude/RULES.md` calls that shape out by name, and it was measured — a
+        mutant hardcoding `5` in place of the credential count SURVIVED the full
+        93-test subset with 0 failures.
+
+        Seven separates every number in the sentence: 7 credentials, 8 rows,
+        cap 4. A hardcoded 5, a row count, or the cap itself each print
+        something this assertion rejects.
+        """
+        seven = [chr(ord("a") + i) * 48 for i in range(7)]
+        path = self._write(tmp_path, *seven, seven[2])
+        message = str(exc_of(lambda: api.load_tokens(path, {})))
+        assert "too many tokens: 7, max 4" in message, message
 
     def test_a_SHORT_SECOND_token_names_its_POSITION_and_never_the_token(
         self, tmp_path: Path
@@ -2461,7 +2932,7 @@ class TestTokenSetAndOverlapRotation:
         with pytest.raises(ValueError) as exc:
             api.load_tokens(path, {})
         message = str(exc.value)
-        assert "token 2 of 2 is too short" in message
+        assert "token on line 2 of 2 is too short" in message
         assert "hunter2" not in message, "the secret was echoed into the error"
         assert "43" in message
 
@@ -2518,7 +2989,11 @@ class TestTokenSetAndOverlapRotation:
         got = api.authorize(
             f"Bearer {GOOD_TOKEN}", (GOOD_TOKEN, SECOND_TOKEN, THIRD_TOKEN)
         )
-        assert got == api.token_id(GOOD_TOKEN)
+        # 🔴 The RECORD, and the fingerprint is read off it — `authorize`
+        # returns identity and allowlist alongside the match now, so the audit
+        # line and the scope filter come from one decision.
+        assert got.fingerprint == api.token_id(GOOD_TOKEN)
+        assert got.token == GOOD_TOKEN
         assert len(seen) == 3, f"short-circuited after {len(seen)} comparisons"
 
     def test_authorize_REFUSES_a_bare_string_rather_than_iterating_CHARACTERS(self):
@@ -2599,7 +3074,7 @@ class TestTokenSetAndOverlapRotation:
         assert api.token_id(GOOD_TOKEN) in out
         assert api.token_id(SECOND_TOKEN) in out
         assert GOOD_TOKEN not in out and SECOND_TOKEN not in out
-        assert started["tokens"] == [GOOD_TOKEN, SECOND_TOKEN]
+        assert [r.token for r in started["tokens"]] == [GOOD_TOKEN, SECOND_TOKEN]
 
 
 class TestClientIpIsCloudflareOnly:
@@ -5619,3 +6094,2215 @@ class TestResolveClientIsTheWholeRule:
         )
         assert key == "2001:db8:1:2::/64"
         assert trusted is False
+
+
+# =============================================================================
+# 16. PHASE 3, CRITERIA 1-3 — two-token authorization on the READ path.
+#
+# 🔴 WHICH OF THESE ARE REGRESSION TESTS, HONESTLY. `server.py` and the absent
+# path both EXIST at the base ref, and the leak is real there, so the tests in
+# `TestEnumerationChannelsAreClosed` and `TestRefusedIsIndistinguishableFromAbsent`
+# are genuine regressions: they go red at base for the RIGHT reason (the body
+# names scopes the caller may not see) rather than by API error. The GUARD tests
+# in `TestScopedTokenRowGuards` are NOT: they call a parser that does not accept
+# a three-field row at base, so their red is a shape error and proves nothing —
+# the mutation matrix in the PR body is their evidence.
+#
+# 🔴 AND THE WRITE PATH IS NOT HERE. Criteria 4-10 add no verb in this branch;
+# `TestPhaseOneScope.test_the_server_declares_no_write_handler` is untouched and
+# still the thing that has to be broken on purpose when the write path lands.
+# =============================================================================
+
+
+# Pairwise-distinct, and distinct from every scope constant already in this
+# file AND from every literal any assertion below names. Invented for this
+# section so a renderer that surfaced the wrong scope cannot pass by
+# coincidence.
+ALLOW_SCOPE = "kelp-forest"     # zach may read it
+DENY_SCOPE = "quartz-mine"      # dana may read it; zach may not
+THIRD_SCOPE = "lantern-bay"     # nobody in these tests may read it
+PHANTOM_SCOPE = "never-quarried"  # never exists on disk, at any point
+
+# One distinctive sentence per scope, sharing no substring, so "did content from
+# a scope I cannot see reach me" is answerable by a single `in` on the body.
+KELP_NUANCE = "- 2026-03-04: the tide gauge drifts 3cm after a spring flood."
+QUARTZ_NUANCE = "- 2026-03-05: the drill head overheats past 900 revolutions."
+LANTERN_NUANCE = "- 2026-03-06: the beacon lamp browns out on a westerly gale."
+
+ZACH_TOKEN = "k" * 20 + "L" * 20 + "m" * 8   # 48 chars
+DANA_TOKEN = "p" * 20 + "Q" * 20 + "r" * 8   # 48 chars, disjoint
+# 🔴 TOKEN-LENGTH AND ALL-LOWERCASE, so it PASSES the identity charset check and
+# can be rejected ONLY by the length cap. That is what lets the "a token can
+# never be an identity" test measure the arithmetic it claims to measure rather
+# than an incidental uppercase letter. `secrets.token_urlsafe` really can emit
+# an all-lowercase string, so this is a shape, not a contrivance.
+LOWER_TOKEN = "s" * 24 + "t" * 24            # 48 chars, [a-z] only
+
+# The identity class, spelled again here BY HAND. Importing
+# `api.IDENTITY_COMPONENT` would make the fixture's precondition and the code
+# under test the same expression, so a wrong class would satisfy both.
+IDENTITY_CHARSET = re.compile(r"[a-z0-9][a-z0-9-]*")
+
+# A fixed instant, applied to every entry file, so two stores built from
+# different scope NAMES still date identically. `snapshot_freshness` reports the
+# newest entry mtime and the entry-file COUNT store-wide, and both are shared
+# across an allowlist — see the module docstring's residual-leak note. Holding
+# them constant is what lets the byte-identity claim below be about scope
+# EXISTENCE and nothing else.
+FIXED_MTIME = 1_767_225_600.0  # 2026-01-01T00:00:00Z, an arbitrary round instant
+
+
+def _scoped_record(token: str, identity: str, *scopes: str):
+    return api.TokenRecord(token=token, identity=identity, scopes=tuple(scopes))
+
+
+ZACH = _scoped_record(ZACH_TOKEN, "zach", ALLOW_SCOPE)
+DANA = _scoped_record(DANA_TOKEN, "dana", DENY_SCOPE)
+
+
+def _build_store(root: Path, scopes: "dict[str, str]", *, malformed: str = "") -> Path:
+    """A store holding one entry per named scope, every mtime pinned.
+
+    `scopes` maps scope name -> the nuance line that scope's single entry
+    carries. `malformed` optionally names a scope that also gets a front-matter-
+    less file, which is what puts a row on `index.malformed`.
+    """
+    root.mkdir(parents=True, exist_ok=True)
+    for scope, nuance in scopes.items():
+        (root / scope).mkdir(parents=True, exist_ok=True)
+        entry = root / scope / f"{scope}-entry.md"
+        entry.write_text(_entry(f"{scope}-entry", scope, nuance=nuance))
+    if malformed:
+        (root / malformed / "broken-shard.md").write_text("no front matter here\n")
+    for path in sorted(root.rglob("*.md")):
+        os.utime(path, (FIXED_MTIME, FIXED_MTIME))
+    return root
+
+
+@pytest.fixture
+def scoped_store(tmp_path: Path) -> Path:
+    """Three populated scopes, and the malformed row lives in a DENIED one.
+
+    The malformed placement is the point: `malformed_elsewhere` is rendered on
+    EVERY status, so a reject sitting in a scope the caller cannot name is the
+    channel that leaks without any miss ever happening.
+    """
+    return _build_store(
+        tmp_path / "store",
+        {
+            ALLOW_SCOPE: KELP_NUANCE,
+            DENY_SCOPE: QUARTZ_NUANCE,
+            THIRD_SCOPE: LANTERN_NUANCE,
+        },
+        malformed=DENY_SCOPE,
+    )
+
+
+class TestScopedTokenRowGuards:
+    """🔴 SIX NEW GUARDS, AND EACH INPUT PASSES EVERY EARLIER ONE.
+
+    Guards 1-5 (no source / unreadable / empty / too many / too short) are
+    unchanged and covered by `TestTokenLoadingGuards` and
+    `TestTokenSetAndOverlapRotation` above. Every file below therefore uses
+    tokens of 48 characters and at most four rows, so the only guard that can
+    reject it is the one the test names — a test that went red because a
+    DIFFERENT guard fired would be green with the guard it names deleted, which
+    is the failure mode this class is shaped against.
+
+    Each assertion pins the guard's OWN sentence, not merely `ValueError`.
+    """
+
+    def _write(self, tmp_path: Path, *rows: str) -> str:
+        path = tmp_path / "tokens"
+        path.write_text("\n".join(rows) + "\n")
+        return str(path)
+
+    def test_GUARD_6_a_row_with_two_fields_is_MALFORMED_not_two_tokens(
+        self, tmp_path: Path
+    ):
+        """🔴 THE FORMAT CHANGE, MADE LOUD. Under the old whole-file `.split()`
+        this line was TWO credentials. Under the row format it is one row with a
+        field count that means nothing, and the process refuses to start rather
+        than pick a reading.
+        """
+        path = self._write(tmp_path, f"{ZACH_TOKEN} zach")
+        with pytest.raises(ValueError) as exc:
+            api.load_tokens(path, {}, warn=lambda _l: None)
+        assert "malformed token row on line 1 of 1" in str(exc.value)
+        assert "2 fields" in str(exc.value)
+        # And never the credential itself, on the one file whose whole content
+        # is credentials.
+        assert ZACH_TOKEN not in str(exc.value)
+
+    def test_GUARD_6_is_reached_by_a_FOUR_field_row_too(self, tmp_path: Path):
+        # The other side of the `not in (1, 3)` boundary. A guard tested only
+        # from below is a guard tested on one side of its condition.
+        path = self._write(tmp_path, f"{ZACH_TOKEN} zach {ALLOW_SCOPE} extra")
+        with pytest.raises(ValueError) as exc:
+            api.load_tokens(path, {}, warn=lambda _l: None)
+        assert "malformed token row on line 1 of 1" in str(exc.value)
+        assert "4 fields" in str(exc.value)
+        # 🔴 THE NEGATIVE HALF OF THE TYPO HINT, and it is what stops the hint
+        # becoming noise. There is no comma anywhere in this row, so a
+        # comma-spacing explanation would be a wrong guess printed with the same
+        # confidence as the count. A hint that fires unconditionally is a hint
+        # nobody reads.
+        assert "NO SPACES" not in str(exc.value)
+
+    def test_GUARD_6_a_SPACE_AFTER_A_COMMA_is_told_what_it_actually_did(
+        self, tmp_path: Path
+    ):
+        """🔴 FAIL-CLOSED IS NOT THE SAME AS DIAGNOSTIC. `<tok> zach a, b` is a
+        four-field row because the space after the comma split the scope list,
+        and the row is correctly refused — but "4 fields, expected 1 or 3" sends
+        the operator to count fields on a line that looks like it has three.
+
+        The refusal is unchanged: same guard, same prefix, same count. Only the
+        sentence after it is new, and it is conditional on a comma actually
+        being present past the identity, so it cannot be printed as a guess.
+        """
+        path = self._write(
+            tmp_path, f"{ZACH_TOKEN} zach {ALLOW_SCOPE}, {DENY_SCOPE}"
+        )
+        with pytest.raises(ValueError) as exc:
+            api.load_tokens(path, {}, warn=lambda _l: None)
+        message = str(exc.value)
+        # The guard is NOT weakened — it still refuses, still by field count.
+        assert "malformed token row on line 1 of 1" in message
+        assert "4 fields" in message
+        # …and now says what to do about it.
+        assert "NO SPACES" in message
+        assert "`alpha,beta`, not `alpha, beta`" in message
+        assert ZACH_TOKEN not in message
+
+    def test_GUARD_7_an_identity_outside_the_charset_is_refused(self, tmp_path: Path):
+        # Passes guard 6: three fields. Fails only on the identity's spelling.
+        path = self._write(tmp_path, f"{ZACH_TOKEN} Za_ch {ALLOW_SCOPE}")
+        with pytest.raises(ValueError) as exc:
+            api.load_tokens(path, {}, warn=lambda _l: None)
+        assert "invalid identity in token row on line 1 of 1" in str(exc.value)
+        assert "Za_ch" in str(exc.value)
+
+    def test_GUARD_7_a_TOKEN_can_never_be_read_as_an_identity(self, tmp_path: Path):
+        """🔴 THE STRUCTURAL HALF OF THE FORMAT CHANGE, AND THE FIXTURE HAS TO
+        REACH IT. Three tokens on one line used to be three credentials; now it
+        is a three-field row, and what stops the second one being read as an
+        identity is ARITHMETIC — the cap is below the token floor, 48 > 32.
+
+        So the identity here is `LOWER_TOKEN`, which is token-SHAPED and passes
+        the charset check outright: only the LENGTH cap can reject it. An
+        earlier version used a token containing uppercase, which meant the
+        charset half did all the work and the length cap — the half the
+        docstring is about — was never exercised at all.
+        """
+        path = self._write(tmp_path, f"{ZACH_TOKEN} {LOWER_TOKEN} {ALLOW_SCOPE}")
+        assert IDENTITY_CHARSET.fullmatch(LOWER_TOKEN), (
+            "the fixture must pass the CHARSET check, or this test measures the "
+            "charset half and not the length cap it claims to"
+        )
+        with pytest.raises(ValueError) as exc:
+            api.load_tokens(path, {}, warn=lambda _l: None)
+        assert "invalid identity in token row on line 1 of 1" in str(exc.value)
+        # 32 and 43, pinned LITERALLY — the cap must stay under the floor or
+        # this whole property evaporates silently.
+        assert api.MAX_IDENTITY_CHARS == 32
+        assert api.MIN_TOKEN_CHARS == 43
+        assert api.MAX_IDENTITY_CHARS < api.MIN_TOKEN_CHARS
+        assert len(LOWER_TOKEN) > api.MAX_IDENTITY_CHARS
+
+    def test_GUARD_8_a_mapped_row_may_not_claim_the_legacy_identity(
+        self, tmp_path: Path
+    ):
+        # Passes 6 (three fields) and 7 (`legacy` is a well-formed identity).
+        # Only the reservation can reject it.
+        path = self._write(tmp_path, f"{ZACH_TOKEN} legacy {ALLOW_SCOPE}")
+        with pytest.raises(ValueError) as exc:
+            api.load_tokens(path, {}, warn=lambda _l: None)
+        assert "reserved identity in token row on line 1 of 1" in str(exc.value)
+        assert "'legacy'" in str(exc.value)
+
+    def test_GUARD_9_an_explicitly_empty_allowlist_is_refused(self, tmp_path: Path):
+        # Three fields, a valid non-reserved identity, and a third field holding
+        # no scope name at all. Every earlier guard passes.
+        path = self._write(tmp_path, f"{ZACH_TOKEN} zach ,")
+        with pytest.raises(ValueError) as exc:
+            api.load_tokens(path, {}, warn=lambda _l: None)
+        assert "empty scope allowlist in token row on line 1 of 1" in str(exc.value)
+        assert "'zach'" in str(exc.value)
+
+    def test_GUARD_10_a_scope_no_URL_could_name_is_refused(self, tmp_path: Path):
+        # A dot is outside the path-component class, so `kelp.forest` could
+        # never be requested — an allowlist entry that would sit inert forever.
+        # Passes 9: the list is non-empty.
+        path = self._write(tmp_path, f"{ZACH_TOKEN} zach kelp.forest")
+        with pytest.raises(ValueError) as exc:
+            api.load_tokens(path, {}, warn=lambda _l: None)
+        assert "invalid scope in token row on line 1 of 1" in str(exc.value)
+        assert "kelp.forest" in str(exc.value)
+
+    def test_GUARD_10_also_catches_an_EMPTY_entry_inside_a_real_list(
+        self, tmp_path: Path
+    ):
+        """The reachable case guard 9 cannot see: the list is not empty, so
+        `any(...)` is satisfied, and one entry still names nothing.
+        """
+        path = self._write(
+            tmp_path, f"{ZACH_TOKEN} zach {ALLOW_SCOPE},,{DENY_SCOPE}"
+        )
+        with pytest.raises(ValueError) as exc:
+            api.load_tokens(path, {}, warn=lambda _l: None)
+        assert "invalid scope in token row on line 1 of 1" in str(exc.value)
+
+    def test_GUARD_10_also_catches_an_entry_that_FOLDS_AWAY_to_nothing(
+        self, tmp_path: Path
+    ):
+        """🔴 THE HALF THE CHARACTER CLASS CANNOT SEE, and the reason the guard
+        checks the FOLDED value rather than the typed one.
+
+        `-` and `___` are inside `[A-Za-z0-9_-]+`, so they are perfectly namable
+        in a URL — and `normalize_ref` folds both to the EMPTY STRING, which
+        matches no index key. Such an entry is a grant that reads as working and
+        does nothing, which is exactly what this guard's sentence promises to
+        prevent. A guard narrower than its own description is worse than none,
+        because it stops anyone looking.
+        """
+        for typo in ("-", "___", "--"):
+            path = self._write(tmp_path, f"{ZACH_TOKEN} zach {typo}")
+            with pytest.raises(ValueError) as exc:
+                api.load_tokens(path, {}, warn=lambda _l: None)
+            assert "invalid scope in token row on line 1 of 1" in str(exc.value), typo
+            assert "folds away" in str(exc.value), typo
+
+    def test_GUARD_11_the_MIGRATION_SHAPE_is_refused_not_silently_collapsed(
+        self, tmp_path: Path
+    ):
+        """🔴 THE FAIL-OPEN THIS GUARD EXISTS FOR, AND IT WAS LIVE.
+
+        "Scope a credential its holder already has" is the migration's own first
+        step, and the natural way to write it is to leave the bare line and add a
+        mapped one below. The loader used to drop the second row BEFORE parsing
+        it — keyed on the token, order preserved — so this file loaded as ONE
+        record, `identity='legacy' scopes=None`: UNRESTRICTED. No error. The
+        mapped row did not exist, and the only signal was a banner reading
+        "1 of 1 token rows are bare" over a two-line file.
+
+        The two authorities are named in the message because the whole content
+        of the complaint is that they DISAGREE — and neither an identity nor a
+        scope name is a credential, so naming them keeps guard 5's property.
+        """
+        path = self._write(
+            tmp_path, ZACH_TOKEN, f"{ZACH_TOKEN} zach {ALLOW_SCOPE}"
+        )
+        with pytest.raises(ValueError) as exc:
+            api.load_tokens(path, {}, warn=lambda _l: None)
+        message = str(exc.value)
+        assert "duplicate token on lines 1 and 2" in message
+        # Both authorities, spelled out — the unrestricted one by name, so an
+        # operator reading the pod log can see WHICH reading they nearly got.
+        assert "legacy (UNRESTRICTED)" in message
+        assert f"zach ({ALLOW_SCOPE})" in message
+        # …and never the credential itself, on the one file whose whole content
+        # is credentials.
+        assert ZACH_TOKEN not in message
+
+    def test_GUARD_11_a_DUPLICATE_TOKEN_ROW_no_longer_bypasses_guards_6_to_10(
+        self, tmp_path: Path
+    ):
+        """🔴 THE SECOND HALF OF THE SAME DEFECT: a dropped row was never
+        VALIDATED either.
+
+        This second row carries an invalid identity AND an invalid scope. Under
+        the pre-fix loader the whole row vanished before guard 6 ran and the file
+        loaded clean as `zach/{ALLOW_SCOPE}`. Every row must reach the ladder, so
+        the row's OWN first failure — guard 7 — is what must fire, and the
+        assertion names guard 7's sentence rather than merely `ValueError`: a
+        test satisfied by any raise would be green with guard 7 deleted.
+        """
+        path = self._write(
+            tmp_path,
+            f"{ZACH_TOKEN} zach {ALLOW_SCOPE}",
+            f"{ZACH_TOKEN} Za_CH_BAD !!!!",
+        )
+        with pytest.raises(ValueError) as exc:
+            api.load_tokens(path, {}, warn=lambda _l: None)
+        message = str(exc.value)
+        assert "invalid identity in token row on line 2 of 2" in message
+        assert "Za_CH_BAD" in message
+
+    def test_GUARD_11_collapses_ONE_GRANT_SPELLED_TWO_WAYS(self, tmp_path: Path):
+        """🔴 THE OTHER DIRECTION — OVER-REFUSING IS ALSO A FAILURE, and this is
+        the case a purely TEXTUAL collapse gets wrong.
+
+        `Kelp_Forest` and `kelp-forest` are the same grant: the parser folds both
+        to one scope. The rows are not identical as text and ARE identical as
+        records, and it is the record that decides. A guard comparing raw lines
+        would refuse a file that says one unambiguous thing.
+        """
+        path = self._write(
+            tmp_path,
+            f"{ZACH_TOKEN} zach Kelp_Forest",
+            f"{ZACH_TOKEN} zach {ALLOW_SCOPE}",
+        )
+        assert loaded(path, {}) == [(ZACH_TOKEN, "zach", (ALLOW_SCOPE,))]
+
+    def test_GUARD_11_fires_even_when_the_IDENTITY_agrees(self, tmp_path: Path):
+        """One token, one identity, two DIFFERENT allowlists. Guard 12 would also
+        see this pair — and would tell the operator to invent `zach-prev`, which
+        is the wrong advice for what is one credential written twice. Guard 11
+        runs first precisely so the more specific complaint wins.
+        """
+        path = self._write(
+            tmp_path,
+            f"{ZACH_TOKEN} zach {ALLOW_SCOPE}",
+            f"{ZACH_TOKEN} zach {DENY_SCOPE}",
+        )
+        with pytest.raises(ValueError) as exc:
+            api.load_tokens(path, {}, warn=lambda _l: None)
+        assert "duplicate token on lines 1 and 2" in str(exc.value)
+        assert "duplicate identity" not in str(exc.value)
+
+    def test_GUARD_11_runs_BEFORE_12_so_an_IDENTICAL_MAPPED_ROW_still_loads(
+        self, tmp_path: Path
+    ):
+        """🔴 THE ORDER IS LOAD-BEARING, AND THIS IS WHAT BREAKS IF IT INVERTS.
+
+        One mapped row pasted twice, verbatim. Guard 11 collapses it to a single
+        record; if guard 12 ran first it would see two rows claiming `zach` and
+        refuse the file. Nothing about this input is ambiguous, so it must load.
+        """
+        path = self._write(
+            tmp_path,
+            f"{ZACH_TOKEN} zach {ALLOW_SCOPE}",
+            f"{ZACH_TOKEN} zach {ALLOW_SCOPE}",
+        )
+        assert loaded(path, {}) == [(ZACH_TOKEN, "zach", (ALLOW_SCOPE,))]
+
+    def test_GUARD_12_two_rows_naming_ONE_identity_are_refused(self, tmp_path: Path):
+        # Two rows, both well-formed, both with real allowlists, and two DISTINCT
+        # tokens so guard 11 cannot be what fires — every earlier guard passes on
+        # every row. Only the cross-row identity check can see this.
+        path = self._write(
+            tmp_path,
+            f"{ZACH_TOKEN} zach {ALLOW_SCOPE}",
+            f"{DANA_TOKEN} zach {DENY_SCOPE}",
+        )
+        with pytest.raises(ValueError) as exc:
+            api.load_tokens(path, {}, warn=lambda _l: None)
+        assert "duplicate identity 'zach'" in str(exc.value)
+        assert "on lines 1 and 2" in str(exc.value)
+
+    def test_GUARD_12_names_the_PHYSICAL_rows_across_a_collapse(
+        self, tmp_path: Path
+    ):
+        """The index an operator is told to look at must be the LINE they can
+        see. Row 2 collapses into row 1, so the clash is between rows 1 and 3 —
+        a position in the post-collapse list would call it "rows 1 and 2" and
+        send them to the wrong line.
+        """
+        path = self._write(
+            tmp_path,
+            f"{ZACH_TOKEN} zach {ALLOW_SCOPE}",
+            f"{ZACH_TOKEN} zach {ALLOW_SCOPE}",
+            f"{DANA_TOKEN} zach {DENY_SCOPE}",
+        )
+        with pytest.raises(ValueError) as exc:
+            api.load_tokens(path, {}, warn=lambda _l: None)
+        assert "token rows on lines 1 and 3 both claim it" in str(exc.value)
+
+    def test_GUARD_12_names_the_PHYSICAL_LINE_when_A_BLANK_LINE_SHIFTS_IT(
+        self, tmp_path: Path
+    ):
+        """🔴 THE FIXTURE ABOVE HAS NO BLANK LINE, SO IT PINS THE COLLAPSE
+        DIMENSION AND NOTHING ELSE — while its name and the comment beside the
+        code both claim PHYSICAL LINES. On a file with no blank line the ordinal
+        over non-blank rows and the line number are the same number, so it reads
+        as coverage for a claim it cannot see.
+
+        This is that claim, reproduced: rows on lines 2, 4 and 6. Lines 2 and 4
+        are identical and collapse; the identity clash is between lines 2 and 6.
+        Counting non-blank rows says "1 and 3" — a real message this code emitted
+        — and sends the operator to two lines that hold nothing.
+        """
+        path = self._write(
+            tmp_path,
+            "",
+            f"{ZACH_TOKEN} zach {ALLOW_SCOPE}",
+            "",
+            f"{ZACH_TOKEN} zach {ALLOW_SCOPE}",
+            "",
+            f"{DANA_TOKEN} zach {DENY_SCOPE}",
+        )
+        message = str(exc_of(lambda: api.load_tokens(path, {}, warn=lambda _l: None)))
+        assert "token rows on lines 2 and 6 both claim it" in message
+        assert "1 and 3" not in message, (
+            "the ordinal over non-blank rows leaked into the message"
+        )
+
+    def test_GUARD_11_names_the_PHYSICAL_LINE_when_A_BLANK_LINE_SHIFTS_IT(
+        self, tmp_path: Path
+    ):
+        """The same claim for guard 11 — "every guard's message must use them
+        consistently" is only true if every guard is measured. Rows on lines 2
+        and 4, disagreeing, so guard 11 fires rather than 12.
+        """
+        path = self._write(
+            tmp_path,
+            "",
+            f"{ZACH_TOKEN} zach {ALLOW_SCOPE}",
+            "",
+            f"{ZACH_TOKEN} zach {DENY_SCOPE}",
+        )
+        message = str(exc_of(lambda: api.load_tokens(path, {}, warn=lambda _l: None)))
+        assert "duplicate token on lines 2 and 4" in message
+        assert "1 and 2" not in message
+
+    @pytest.mark.parametrize(
+        "row,sentence",
+        [
+            ("hunter2", "token on line 4 of 4 is too short"),
+            # Two TOKEN-LENGTH fields, so guard 5 passes and guard 6 is what
+            # fires — `aaa bbb` would have been caught by the length floor first
+            # and this row would have measured guard 5 twice.
+            (f"{ZACH_TOKEN} {LOWER_TOKEN}", "malformed token row on line 4 of 4"),
+            (f"{ZACH_TOKEN} Za_ch {ALLOW_SCOPE}", "invalid identity in token row on line 4 of 4"),
+            (f"{ZACH_TOKEN} legacy {ALLOW_SCOPE}", "reserved identity in token row on line 4 of 4"),
+            (f"{ZACH_TOKEN} zach ,", "empty scope allowlist in token row on line 4 of 4"),
+            (f"{ZACH_TOKEN} zach ___", "invalid scope in token row on line 4 of 4"),
+        ],
+    )
+    def test_GUARDS_5_to_10_ALL_name_the_PHYSICAL_LINE(
+        self, tmp_path: Path, row: str, sentence: str
+    ):
+        """🔴 EVERY GUARD IN THE LADDER, NOT THE ONE THAT WAS CONVENIENT. The
+        index was wrong in ALL of them — it is one loop — so a fix measured at
+        one site is a fix that can be half-applied at the others and still look
+        green. The bad row sits on physical line 4 behind two blank lines and a
+        good row, so an ordinal over non-blank rows would say "2".
+        """
+        path = self._write(tmp_path, "", f"{DANA_TOKEN} dana {DENY_SCOPE}", "", row)
+        message = str(exc_of(lambda: api.load_tokens(path, {}, warn=lambda _l: None)))
+        assert sentence in message, message
+        assert "of 2" not in message, (
+            "`total` is still a count of non-blank rows, so 'line 4 of 2' or "
+            f"'line 2 of 2' can be printed for a 4-line file: {message}"
+        )
+
+    def test_GUARD_11_collapses_a_scope_list_written_in_A_DIFFERENT_ORDER(
+        self, tmp_path: Path
+    ):
+        """🔴 ORDER IS A SPELLING, NOT A DISAGREEMENT, and it was measured being
+        refused: `<tok> zach alpha,beta` and `<tok> zach beta,alpha` answered
+        "two different authorities — zach (alpha,beta) and zach (beta,alpha)".
+        Both grant the same SET, so there IS a defined answer and guard 11 may
+        not claim there is none. Guard 11's own comment already promised this
+        ("rows that merely SPELL one grant differently ... are recognised as the
+        same grant") while the code delivered it for case-folding only.
+
+        The FIRST row's spelling is what survives, which is the same rule the
+        rest of the collapse follows.
+        """
+        path = self._write(
+            tmp_path,
+            f"{ZACH_TOKEN} zach {ALLOW_SCOPE},{DENY_SCOPE}",
+            f"{ZACH_TOKEN} zach {DENY_SCOPE},{ALLOW_SCOPE}",
+        )
+        assert loaded(path, {}) == [
+            (ZACH_TOKEN, "zach", (ALLOW_SCOPE, DENY_SCOPE))
+        ]
+
+    def test_GUARD_11_a_GENUINE_disagreement_is_STILL_refused(
+        self, tmp_path: Path
+    ):
+        """🔴 THE UPPER BOUND ON THE FIX ABOVE. Comparing SETS must not become
+        comparing nothing: `alpha,beta` and `alpha` are two different grants and
+        one is strictly wider, which is the fail-open direction. Same shape as
+        the collapse above — one token, one identity, two scope lists — so a
+        mutant that returned a constant key, or dropped `scopes` from the key
+        entirely, passes the test above and dies here.
+        """
+        path = self._write(
+            tmp_path,
+            f"{ZACH_TOKEN} zach {ALLOW_SCOPE},{DENY_SCOPE}",
+            f"{ZACH_TOKEN} zach {ALLOW_SCOPE}",
+        )
+        message = str(exc_of(lambda: api.load_tokens(path, {}, warn=lambda _l: None)))
+        assert "duplicate token on lines 1 and 2" in message
+        assert f"zach ({ALLOW_SCOPE},{DENY_SCOPE})" in message
+        assert f"zach ({ALLOW_SCOPE})" in message
+
+    def test_GUARD_11_a_BARE_row_never_collapses_into_a_MAPPED_one(
+        self, tmp_path: Path
+    ):
+        """A bare row and a mapped row on ONE token are two authorities, and the
+        refusal names the unrestricted one so the operator can see which reading
+        they nearly got.
+
+        ⚠ WHAT THIS DOES **NOT** PIN, said because the obvious reading of the
+        name is wrong: it is not a test of `_authority_key`'s `None`-vs-empty
+        asymmetry. The two rows differ in IDENTITY (`legacy` vs `zach`), so the
+        identity component alone decides, and a mutant folding `None` into the
+        empty frozenset SURVIVES this — measured. See `_authority_key`'s own
+        note for why that mutant is unreachable rather than uncaught.
+        """
+        path = self._write(
+            tmp_path, ZACH_TOKEN, f"{ZACH_TOKEN} zach {ALLOW_SCOPE}"
+        )
+        message = str(exc_of(lambda: api.load_tokens(path, {}, warn=lambda _l: None)))
+        assert "duplicate token on lines 1 and 2" in message
+        assert "legacy (UNRESTRICTED)" in message
+
+    def test_a_WELL_FORMED_mapped_file_loads_with_its_allowlist(self, tmp_path: Path):
+        """The positive control for all six guards above. Without it, a parser
+        that rejected EVERYTHING would pass every test in this class.
+        """
+        path = self._write(
+            tmp_path,
+            f"{ZACH_TOKEN} zach {ALLOW_SCOPE},{DENY_SCOPE}",
+            f"{DANA_TOKEN} dana {DENY_SCOPE}",
+        )
+        assert loaded(path, {}) == [
+            (ZACH_TOKEN, "zach", (ALLOW_SCOPE, DENY_SCOPE)),
+            (DANA_TOKEN, "dana", (DENY_SCOPE,)),
+        ]
+
+    def test_an_allowlist_entry_is_FOLDED_the_way_the_reader_folds_a_scope(
+        self, tmp_path: Path
+    ):
+        """🔴 An allowlist entry and the index key it must match cannot be
+        allowed to disagree about case or `_` vs `-`: an entry that never
+        matched would be a silently inert grant, which reads as a working one.
+        """
+        path = self._write(tmp_path, f"{ZACH_TOKEN} zach Kelp_Forest")
+        assert loaded(path, {}) == [(ZACH_TOKEN, "zach", (ALLOW_SCOPE,))]
+
+
+class TestLegacyRowsSurviveTheMigration:
+    """🔴 CRITERION 10's REQUIREMENT, WHICH IS WHY THIS IS NOT A PREFERENCE.
+
+    The old shared token has to keep working while clients move onto mapped
+    rows, and the rollback is putting that one line back — a rollback that
+    needed a code change would not be one.
+    """
+
+    def _write(self, tmp_path: Path, *rows: str) -> str:
+        path = tmp_path / "tokens"
+        path.write_text("\n".join(rows) + "\n")
+        return str(path)
+
+    def test_a_MIXED_file_of_legacy_and_mapped_rows_loads(self, tmp_path: Path):
+        path = self._write(
+            tmp_path,
+            GOOD_TOKEN,                            # legacy, unrestricted
+            f"{ZACH_TOKEN} zach {ALLOW_SCOPE}",    # mapped
+        )
+        assert loaded(path, {}) == [
+            (GOOD_TOKEN, "legacy", None),
+            (ZACH_TOKEN, "zach", (ALLOW_SCOPE,)),
+        ]
+
+    def test_a_LEGACY_row_reads_EVERY_scope_over_HTTP(self, scoped_store: Path):
+        """The unrestricted half, exercised rather than asserted from the shape:
+        a bare token is served content from a scope no mapped row names.
+        """
+        with running(scoped_store, tokens=(GOOD_TOKEN,)) as (base, _):
+            for scope, nuance in (
+                (ALLOW_SCOPE, KELP_NUANCE),
+                (DENY_SCOPE, QUARTZ_NUANCE),
+                (THIRD_SCOPE, LANTERN_NUANCE),
+            ):
+                code, _h, body = fetch(f"{base}/api/v1/recall/{scope}", token=GOOD_TOKEN)
+                assert code == 200, scope
+                assert nuance.encode() in body, scope
+
+    def test_the_startup_warning_NAMES_legacy_mode_and_its_fingerprints(
+        self, tmp_path: Path
+    ):
+        """🔴 A one-line, loud, greppable statement that the store is running
+        with an unrestricted credential. Without it "the migration is finished"
+        is a guess, which is the same failure the `token=` fingerprint exists to
+        stop for rotation.
+        """
+        path = self._write(
+            tmp_path, GOOD_TOKEN, f"{ZACH_TOKEN} zach {ALLOW_SCOPE}"
+        )
+        warnings: list[str] = []
+        api.load_tokens(path, {}, warn=warnings.append)
+        assert len(warnings) == 1, warnings
+        line = warnings[0]
+        assert "LEGACY MODE" in line
+        assert "1 of 2" in line
+        assert api.token_id(GOOD_TOKEN) in line
+        # NEGATIVE CONTROL on the same line: the mapped row is not legacy, so
+        # its fingerprint must NOT be named as unrestricted.
+        assert api.token_id(ZACH_TOKEN) not in line
+        # …and never a credential.
+        assert GOOD_TOKEN not in line and ZACH_TOKEN not in line
+
+    def test_NO_warning_when_EVERY_row_is_mapped(self, tmp_path: Path):
+        """🔴 THE POSITIVE CONTROL'S PARTNER. A warner that fires unconditionally
+        would pass the test above and teach the operator to ignore the line.
+        """
+        path = self._write(
+            tmp_path,
+            f"{ZACH_TOKEN} zach {ALLOW_SCOPE}",
+            f"{DANA_TOKEN} dana {DENY_SCOPE}",
+        )
+        warnings: list[str] = []
+        api.load_tokens(path, {}, warn=warnings.append)
+        assert warnings == []
+
+
+class TestEnumerationChannelsAreClosed:
+    """🔴 FOUR CHANNELS, MEASURED ON THE DEPLOYED POD, EACH WITH ITS OWN TEST.
+
+    A per-route "is this scope yours" check would close NONE of the first three:
+    they all fire on requests for a scope the caller IS allowed, or on a request
+    that names no scope at all. Every test here drives `zach`, whose allowlist
+    is `ALLOW_SCOPE` alone, and asserts on the names and CONTENT of the two
+    scopes he may not see.
+    """
+
+    def test_CHANNEL_1_known_scopes_names_only_the_callers_own(
+        self, scoped_store: Path
+    ):
+        """`scope-absent` renders "scopes the store does hold: …". At base that
+        sentence enumerated the whole store to anybody holding any token.
+        """
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, body = fetch(
+                f"{base}/api/v1/recall/{PHANTOM_SCOPE}", token=ZACH_TOKEN
+            )
+        assert code == 200
+        assert headers["X-Store-Status"] == "scope-absent"
+        text = body.decode()
+        assert ALLOW_SCOPE in text, "the caller's own scope vanished — over-filtered"
+        assert DENY_SCOPE not in text
+        assert THIRD_SCOPE not in text
+
+    def test_CHANNEL_2_malformed_elsewhere_names_no_denied_scope(
+        self, scoped_store: Path
+    ):
+        """🔴 THE CHANNEL THAT FIRES ON A SUCCESSFUL READ. The "(+N further
+        malformed entries in OTHER scopes …)" block is rendered on EVERY status,
+        so this leaks on a perfectly ordinary 200 for a scope the caller owns —
+        no miss, nothing refused, nothing to notice.
+        """
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, body = fetch(
+                f"{base}/api/v1/recall/{ALLOW_SCOPE}", token=ZACH_TOKEN
+            )
+        assert code == 200
+        assert headers["X-Store-Status"] == "recalled"
+        text = body.decode()
+        assert KELP_NUANCE in text, "the caller's own content vanished"
+        assert DENY_SCOPE not in text
+        # ⚠ `assert "broken-shard" not in text` WAS HERE AND HAS BEEN DELETED AS
+        # VACUOUS, not moved. `render_malformed` emits `elsewhere` as a COUNT
+        # with its scopes named and DELIBERATELY never a filename ("naming the
+        # scopes makes it actionable without putting another scope's filenames,
+        # which are client-identifying, on this screen"). So no filename from
+        # another scope is rendered at base OR at HEAD, for ANY token — the
+        # assertion could not have failed and was reading as coverage while
+        # providing none. The line above is the real guard for this channel; the
+        # filename half is pinned where it CAN fail, in the positive control
+        # below, which drives the reading that does render the block.
+    def test_CHANNEL_2_POSITIVE_CONTROL_a_legacy_token_DOES_see_it(
+        self, scoped_store: Path
+    ):
+        """🔴 WITHOUT THIS THE TEST ABOVE IS A ZERO FROM A CHECK THAT MIGHT SEE
+        NOTHING. The fixture must actually PRODUCE a `malformed_elsewhere` block
+        naming the denied scope, or "the name is absent" is satisfied by a
+        renderer that never emits the block at all.
+        """
+        with running(scoped_store, tokens=(GOOD_TOKEN,)) as (base, _):
+            _c, _h, body = fetch(
+                f"{base}/api/v1/recall/{ALLOW_SCOPE}", token=GOOD_TOKEN
+            )
+        text = body.decode()
+        assert DENY_SCOPE in text, (
+            "the fixture produced no cross-scope malformed block, so the "
+            "negative assertion above proves nothing"
+        )
+        # 🔴 AND THE BLOCK IS A COUNT, NOT A ROW — pinned HERE because this is
+        # the only reading in which the block is rendered at all, so it is the
+        # only place the claim can fail. `render_malformed`'s contract is that a
+        # scope OUTSIDE the one being recalled contributes its name and a number
+        # and never a filename, because filenames are client-identifying. An
+        # unrestricted caller is the widest reading there is: if `broken-shard`
+        # is absent from THIS body, no narrower caller can see it either.
+        assert "broken-shard" not in text
+        assert "1 further malformed entry in OTHER scopes" in text
+
+    def test_CHANNEL_3_all_scopes_search_narrows_to_the_callers_own(
+        self, scoped_store: Path
+    ):
+        """🔴 THE ONE A PER-SCOPE CHECK STRUCTURALLY CANNOT COVER. `?all_scopes=1`
+        NAMES NO SCOPE, so there is nothing for such a check to refuse — it
+        searches the CONTENT of every scope in the store.
+        """
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, _h, body = fetch(
+                f"{base}/api/v1/search/{ALLOW_SCOPE}?q=drill+head+overheats"
+                f"&all_scopes=1",
+                token=ZACH_TOKEN,
+            )
+        assert code == 200
+        text = body.decode()
+        assert QUARTZ_NUANCE not in text
+        assert DENY_SCOPE not in text
+        assert THIRD_SCOPE not in text
+        # 🔴 NARROWED IS NOT EMPTIED, AND WITHOUT THESE THREE THE TEST ABOVE IS
+        # SATISFIED BY A SEARCH THAT LOOKED AT NOTHING. Measured: with
+        # `scopes_searched` forced to `()` the body renders "searched 0 entries
+        # in (none)" — which contains no denied scope name and no denied content,
+        # so every assertion above passes while the feature is entirely inert.
+        #
+        # The caller's OWN scope must be named, the placeholder must be absent,
+        # and the COUNT must have moved off zero. Three independent facts,
+        # because a renderer could satisfy any one of them by accident.
+        assert ALLOW_SCOPE in text, "the caller's own scope was not searched"
+        assert "(none)" not in text
+        assert "searched 1 entry" in text
+
+    def test_CHANNEL_3_POSITIVE_CONTROL_a_legacy_token_DOES_find_it(
+        self, scoped_store: Path
+    ):
+        """The query has to be one that HITS, or the narrowed search is
+        indistinguishable from a query nothing matches.
+        """
+        with running(scoped_store, tokens=(GOOD_TOKEN,)) as (base, _):
+            code, headers, body = fetch(
+                f"{base}/api/v1/search/{ALLOW_SCOPE}?q=drill+head+overheats"
+                f"&all_scopes=1",
+                token=GOOD_TOKEN,
+            )
+        assert code == 200
+        assert headers["X-Store-Status"] == "search-hit"
+        assert QUARTZ_NUANCE in body.decode()
+
+    def test_CHANNEL_4_the_snapshot_tar_carries_only_allowed_members(
+        self, scoped_store: Path
+    ):
+        """🔴 ASSERTED OVER EXTRACTED MEMBER NAMES, NOT A STATUS CODE. This route
+        never builds an index, so the filter that closes channels 1-3 does not
+        reach it; a 200 here says nothing about what is inside the archive.
+        """
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, body = fetch(f"{base}/api/v1/snapshot", token=ZACH_TOKEN)
+        assert code == 200
+        with tarfile.open(fileobj=io.BytesIO(body), mode="r") as tar:
+            names = sorted(tar.getnames())
+        assert names == [f"{ALLOW_SCOPE}/{ALLOW_SCOPE}-entry.md"], names
+        # The server's own count must describe the same filtered set, or
+        # `cairn::install_snapshot`'s mismatch check refuses every scoped pull.
+        assert headers["X-Store-Entries"] == "1"
+
+    def test_CHANNEL_4_POSITIVE_CONTROL_a_legacy_token_gets_every_member(
+        self, scoped_store: Path
+    ):
+        with running(scoped_store, tokens=(GOOD_TOKEN,)) as (base, _):
+            code, headers, body = fetch(f"{base}/api/v1/snapshot", token=GOOD_TOKEN)
+        assert code == 200
+        with tarfile.open(fileobj=io.BytesIO(body), mode="r") as tar:
+            names = sorted(tar.getnames())
+        assert names == sorted(
+            [f"{s}/{s}-entry.md" for s in (ALLOW_SCOPE, DENY_SCOPE, THIRD_SCOPE)]
+            + [f"{DENY_SCOPE}/broken-shard.md"]
+        ), names
+        assert headers["X-Store-Entries"] == "4"
+
+    def test_a_scope_FILTERED_snapshot_of_a_denied_scope_ships_nothing(
+        self, scoped_store: Path
+    ):
+        """`?scope=` reaches the filesystem directly, so it is its own door into
+        the same store — and it must answer for a denied scope exactly what it
+        answers for one that never existed.
+
+        🔴 COMPARED AS BYTES AND AS A HEADER SET, the way
+        `TestRefusedIsIndistinguishableFromAbsent` compares its pair. This test
+        used to check three NAMED facts — the code, one header and the member
+        list — which is a claim about the three things somebody thought of. The
+        docstring promises "exactly what it answers", and exactly is a byte
+        comparison: a fourth `X-Store-*` header, or a differing tar footer, would
+        discriminate a refused scope from an absent one while every named
+        assertion stayed green.
+        """
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            denied = fetch(
+                f"{base}/api/v1/snapshot?scope={DENY_SCOPE}", token=ZACH_TOKEN
+            )
+            phantom = fetch(
+                f"{base}/api/v1/snapshot?scope={PHANTOM_SCOPE}", token=ZACH_TOKEN
+            )
+
+        def store_headers(headers: dict) -> tuple:
+            return tuple(
+                sorted(
+                    (k, v) for k, v in headers.items() if k.lower().startswith("x-store")
+                )
+            )
+
+        assert denied[0] == phantom[0] == 200
+        assert store_headers(denied[1]) == store_headers(phantom[1]), (
+            f"X-Store-* headers differ:\n denied ={store_headers(denied[1])}\n"
+            f" phantom={store_headers(phantom[1])}"
+        )
+        assert denied[2] == phantom[2], (
+            "the tar BYTES differ — a refused scope is distinguishable from an "
+            f"absent one:\n denied ={denied[2]!r}\n phantom={phantom[2]!r}"
+        )
+        # 🔴 AND THE SHARED ANSWER IS THE EMPTY ARCHIVE, not two identical
+        # errors: byte-identity between two 503s would satisfy everything above
+        # while serving nothing. Same reasoning as the recall/search pair.
+        assert denied[1]["X-Store-Entries"] == "0"
+        for body in (denied[2], phantom[2]):
+            with tarfile.open(fileobj=io.BytesIO(body), mode="r") as tar:
+                assert tar.getnames() == []
+
+    def test_TWO_TOKENS_ON_ONE_SERVER_each_see_only_their_own(
+        self, scoped_store: Path
+    ):
+        """🔴 THE SEAM, NOT THE COMPONENT. Both records are configured on ONE
+        server, so this fails if the allowlist is resolved from anything other
+        than the record that authenticated THIS request — a module-level cache,
+        the first configured row, or a value left on the handler by the previous
+        request on a keep-alive connection.
+        """
+        with running(scoped_store, tokens=(ZACH, DANA)) as (base, audit):
+            zach_own = fetch(f"{base}/api/v1/recall/{ALLOW_SCOPE}", token=ZACH_TOKEN)
+            zach_other = fetch(f"{base}/api/v1/recall/{DENY_SCOPE}", token=ZACH_TOKEN)
+            dana_own = fetch(f"{base}/api/v1/recall/{DENY_SCOPE}", token=DANA_TOKEN)
+            dana_other = fetch(f"{base}/api/v1/recall/{ALLOW_SCOPE}", token=DANA_TOKEN)
+
+        assert zach_own[1]["X-Store-Status"] == "recalled"
+        assert KELP_NUANCE.encode() in zach_own[2]
+        assert dana_own[1]["X-Store-Status"] == "recalled"
+        assert QUARTZ_NUANCE.encode() in dana_own[2]
+        # …and each is told the OTHER's scope does not exist.
+        assert zach_other[1]["X-Store-Status"] == "scope-absent"
+        assert dana_other[1]["X-Store-Status"] == "scope-absent"
+        assert QUARTZ_NUANCE.encode() not in zach_other[2]
+        assert KELP_NUANCE.encode() not in dana_other[2]
+        # The audit line says WHOSE request each was, which is the only record
+        # that can answer "who read what" after the fact.
+        assert "identity=zach" in audit[0] and "identity=zach" in audit[1]
+        assert "identity=dana" in audit[2] and "identity=dana" in audit[3]
+
+    def test_the_audit_line_still_carries_the_FINGERPRINT_not_only_the_identity(
+        self, scoped_store: Path
+    ):
+        """🔴 `identity=` is ADDITIVE. Overlap rotation is checkable only through
+        `token=`: two rows can hold one holder's current and previous credential,
+        and the identity cannot tell them apart.
+        """
+        with running(scoped_store, tokens=(ZACH,)) as (base, audit):
+            fetch(f"{base}/api/v1/recall/{ALLOW_SCOPE}", token=ZACH_TOKEN)
+        assert f"token={api.token_id(ZACH_TOKEN)}" in audit[0]
+        assert "identity=zach" in audit[0]
+        assert "auth=ok" in audit[0]
+        assert ZACH_TOKEN not in audit[0]
+
+    def test_a_REJECTED_request_names_no_identity(self, scoped_store: Path):
+        with running(scoped_store, tokens=(ZACH,)) as (base, audit):
+            fetch(f"{base}/api/v1/recall/{ALLOW_SCOPE}", token="w" * 48)
+        assert "identity=-" in audit[0]
+        assert "auth=fail" in audit[0]
+
+
+class TestRefusedIsIndistinguishableFromAbsent:
+    """🔴 CRITERION 3, PROVEN RATHER THAN ASSUMED — and the comparison is built
+    so that scope EXISTENCE is the only thing that varies.
+
+    Two responses to `recall/<DENY_SCOPE>` from the SAME token at the SAME store
+    path: once when that scope holds an entry, once when it never existed. The
+    entry-file COUNT and the newest mtime are held constant across the two (the
+    scope is rebuilt under a different name), because `X-Store-Snapshot` is
+    store-wide and would otherwise differ for a reason that is not the one under
+    test. See the module docstring's residual-leak note.
+    """
+
+    def _phases(self, tmp_path: Path):
+        """Yields a builder for phase A (denied scope present) and phase B (it
+        never existed), both at ONE path so `  store: <root>` cannot differ."""
+        root = tmp_path / "store"
+
+        def present():
+            if root.exists():
+                shutil.rmtree(root)
+            return _build_store(
+                root, {ALLOW_SCOPE: KELP_NUANCE, DENY_SCOPE: QUARTZ_NUANCE}
+            )
+
+        def absent():
+            shutil.rmtree(root)
+            # Same file COUNT, same mtimes, different scope name — so the only
+            # fact that moved is whether DENY_SCOPE is on disk.
+            return _build_store(
+                root, {ALLOW_SCOPE: KELP_NUANCE, THIRD_SCOPE: LANTERN_NUANCE}
+            )
+
+        return root, present, absent
+
+    def _ask(self, root: Path, token, path: str):
+        with running(root, tokens=(token,)) as (base, _):
+            code, headers, body = fetch(
+                f"{base}{path}",
+                token=token.token if hasattr(token, "token") else token,
+            )
+        store_headers = tuple(
+            sorted((k, v) for k, v in headers.items() if k.lower().startswith("x-store"))
+        )
+        return code, store_headers, body
+
+    def test_RECALL_a_refused_scope_is_BYTE_IDENTICAL_to_one_that_never_existed(
+        self, tmp_path: Path
+    ):
+        root, present, absent = self._phases(tmp_path)
+        present()
+        refused = self._ask(root, ZACH, f"/api/v1/recall/{DENY_SCOPE}")
+        absent()
+        never = self._ask(root, ZACH, f"/api/v1/recall/{DENY_SCOPE}")
+
+        assert refused[0] == never[0] == 200
+        assert refused[1] == never[1], (
+            f"X-Store-* headers differ:\n refused={refused[1]}\n absent ={never[1]}"
+        )
+        assert refused[2] == never[2], (
+            "response bodies differ — a refused scope is distinguishable from an "
+            "absent one:\n"
+            f"refused: {refused[2]!r}\nabsent : {never[2]!r}"
+        )
+        # 🔴 And the shared answer is the ABSENT report, not two identical
+        # errors: byte-identity between two 401s or two 503s would satisfy
+        # everything above while serving nothing.
+        assert dict(refused[1])["X-Store-Status"] == "scope-absent"
+        assert b"NOTHING RECORDED YET" in refused[2].upper()
+        assert QUARTZ_NUANCE.encode() not in refused[2]
+
+    SEARCH_QUERY = f"/api/v1/search/{DENY_SCOPE}?q=drill+head+overheats"
+
+    def test_SEARCH_a_refused_scope_is_BYTE_IDENTICAL_to_one_that_never_existed(
+        self, tmp_path: Path
+    ):
+        root, present, absent = self._phases(tmp_path)
+        present()
+        refused = self._ask(root, ZACH, self.SEARCH_QUERY)
+        absent()
+        never = self._ask(root, ZACH, self.SEARCH_QUERY)
+
+        assert refused[0] == never[0] == 200
+        assert refused[1] == never[1], f"{refused[1]} != {never[1]}"
+        assert refused[2] == never[2]
+        assert dict(refused[1])["X-Store-Status"] == "scope-absent"
+
+    def test_POSITIVE_CONTROL_the_RECALL_comparison_CAN_see_the_difference(
+        self, tmp_path: Path
+    ):
+        """🔴 WITHOUT THIS, THE RECALL TEST ABOVE IS SATISFIED BY A SERVER THAT
+        ANSWERS THE SAME BYTES TO EVERYTHING.
+
+        The same two phases, driven by an UNRESTRICTED legacy token: present ->
+        `recalled` with the entry's content, absent -> `scope-absent`. If this
+        pair did not differ, the equality above would be measuring the harness
+        rather than the fix.
+        """
+        root, present, absent = self._phases(tmp_path)
+        present()
+        seen = self._ask(root, GOOD_TOKEN, f"/api/v1/recall/{DENY_SCOPE}")
+        absent()
+        gone = self._ask(root, GOOD_TOKEN, f"/api/v1/recall/{DENY_SCOPE}")
+
+        assert dict(seen[1])["X-Store-Status"] == "recalled"
+        assert dict(gone[1])["X-Store-Status"] == "scope-absent"
+        assert seen[2] != gone[2]
+        assert QUARTZ_NUANCE.encode() in seen[2]
+
+    def test_POSITIVE_CONTROL_the_SEARCH_comparison_CAN_see_the_difference(
+        self, tmp_path: Path
+    ):
+        """🔴 THE SEARCH PATH HAD NO POSITIVE CONTROL AT ALL, and the recall one
+        does not cover it: they are different routes, different renderers and
+        different statuses.
+
+        An equality between two responses is only evidence if the pair CAN
+        differ. This server fail-closes to an EMPTY body without
+        `SUBSYSTEM_STORE_TRUSTED_PROXIES` and a `CF-Connecting-IP` header, and
+        two empty bodies compare identical — so "byte-identical" is exactly the
+        assertion a broken harness satisfies best. Same two phases, same query,
+        an UNRESTRICTED token: present -> `search-hit` carrying the matched
+        nuance, absent -> `scope-absent`. Both non-empty, and different.
+        """
+        root, present, absent = self._phases(tmp_path)
+        present()
+        found = self._ask(root, GOOD_TOKEN, self.SEARCH_QUERY)
+        absent()
+        gone = self._ask(root, GOOD_TOKEN, self.SEARCH_QUERY)
+
+        assert found[0] == gone[0] == 200
+        assert dict(found[1])["X-Store-Status"] == "search-hit"
+        assert dict(gone[1])["X-Store-Status"] == "scope-absent"
+        assert found[2] != gone[2]
+        assert QUARTZ_NUANCE.encode() in found[2]
+        # …and neither body is the empty string, which is what a fail-closed
+        # server returns and what would make the equality above vacuous.
+        assert found[2] and gone[2]
+
+
+class TestScopeRevisionIsGatedByConstruction:
+    """🔴 THE ONE HEADER THE INDEX FILTER CANNOT REACH.
+
+    `X-Store-Revision` is read off `<store>/<scope>/.git/HEAD`, a path the index
+    knows nothing about. Today no scope in the served copy is a git repo, so it
+    answers "unknown" for everything and the leak is LATENT — which is exactly
+    the state in which a guard gets skipped. So the fixture MAKES a denied scope
+    a real repo and asserts the header still cannot tell it from an absent one.
+    """
+
+    def _git(self, path: Path, *args: str):
+        subprocess.run(
+            ["git", "-C", str(path), *args],
+            check=True,
+            capture_output=True,
+            env={**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null", "HOME": str(path),
+                 **hermetic_git.MAINTENANCE_OFF},
+        )
+
+    def _repo(self, store: Path, scope: str) -> str:
+        scope_dir = store / scope
+        self._git(scope_dir, "init", "-q", "-b", "main")
+        self._git(scope_dir, "config", "user.email", "t@example.invalid")
+        self._git(scope_dir, "config", "user.name", "T")
+        self._git(scope_dir, "add", f"{scope}-entry.md")
+        self._git(scope_dir, "commit", "-qm", "seed")
+        return subprocess.run(
+            ["git", "-C", str(scope_dir), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+    def test_POSITIVE_CONTROL_the_fixture_really_is_a_repo_and_the_header_shows_it(
+        self, scoped_store: Path
+    ):
+        """A "the header said unknown" assertion is worthless against a fixture
+        that could never have produced a sha. This proves it could.
+        """
+        head = self._repo(scoped_store, DENY_SCOPE)
+        assert len(head) == 40
+        assert api.scope_revision(scoped_store, DENY_SCOPE) == head
+        with running(scoped_store, tokens=(GOOD_TOKEN,)) as (base, _):
+            _c, headers, _b = fetch(
+                f"{base}/api/v1/recall/{DENY_SCOPE}", token=GOOD_TOKEN
+            )
+        assert headers["X-Store-Revision"] == head
+
+    def test_a_DENIED_scopes_revision_is_unknown_even_though_it_HAS_one(
+        self, scoped_store: Path
+    ):
+        head = self._repo(scoped_store, DENY_SCOPE)
+        assert api.scope_revision(
+            scoped_store, DENY_SCOPE, visible_scopes=(ALLOW_SCOPE,)
+        ) == "unknown"
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            _c, denied, _b = fetch(
+                f"{base}/api/v1/recall/{DENY_SCOPE}", token=ZACH_TOKEN
+            )
+            _c2, phantom, _b2 = fetch(
+                f"{base}/api/v1/recall/{PHANTOM_SCOPE}", token=ZACH_TOKEN
+            )
+        assert denied["X-Store-Revision"] == "unknown"
+        assert denied["X-Store-Revision"] == phantom["X-Store-Revision"]
+        assert head not in denied["X-Store-Revision"]
+
+    def test_the_callers_OWN_scope_still_reports_its_sha(self, scoped_store: Path):
+        """🔴 OVER-FILTERING IS ALSO A FAILURE. A gate that answered "unknown"
+        for everything would pass the test above and silently delete the
+        determinism guarantee `scope@sha` exists for.
+        """
+        head = self._repo(scoped_store, ALLOW_SCOPE)
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            _c, headers, _b = fetch(
+                f"{base}/api/v1/recall/{ALLOW_SCOPE}", token=ZACH_TOKEN
+            )
+        assert headers["X-Store-Revision"] == head
+
+    def test_visible_scopes_None_is_UNRESTRICTED_matching_every_other_seam(
+        self, scoped_store: Path
+    ):
+        head = self._repo(scoped_store, DENY_SCOPE)
+        assert api.scope_revision(scoped_store, DENY_SCOPE, visible_scopes=None) == head
+        # …and an EMPTY sequence is the opposite, not a synonym for None.
+        assert api.scope_revision(
+            scoped_store, DENY_SCOPE, visible_scopes=()
+        ) == "unknown"
+
+
+class TestTheReaderNarrowingItself:
+    """`load_store`'s `visible_scopes`, unit-level — the one site both readers
+    take their index from, so this is where over- and under-filtering show up
+    without an HTTP layer in the way.
+    """
+
+    def test_None_is_unrestricted_and_an_EMPTY_SEQUENCE_is_the_opposite(
+        self, scoped_store: Path
+    ):
+        """🔴 THE ASYMMETRY, PINNED. `None` and `()` are both falsy, so a guard
+        written `if visible_scopes:` would treat an empty allowlist as
+        unrestricted — a total bypass that every functional test with a
+        populated allowlist would pass.
+        """
+        _s, wide = api.rc.load_store(scoped_store, verb="recalled")
+        assert set(wide.scopes) == {ALLOW_SCOPE, DENY_SCOPE, THIRD_SCOPE}
+        _s, none_visible = api.rc.load_store(
+            scoped_store, verb="recalled", visible_scopes=()
+        )
+        assert none_visible.scopes == ()
+        assert len(none_visible) == 0
+        assert none_visible.malformed == ()
+
+    def test_the_MALFORMED_tuple_is_narrowed_beside_by_scope(
+        self, scoped_store: Path
+    ):
+        """Both public fields, or `malformed_outside` still names a denied scope
+        while `scopes` does not — the half-fix that reads as a whole one.
+        """
+        _s, wide = api.rc.load_store(scoped_store, verb="recalled")
+        assert [m.scope for m in wide.malformed] == [DENY_SCOPE]
+        _s, narrow = api.rc.load_store(
+            scoped_store, verb="recalled", visible_scopes=(ALLOW_SCOPE,)
+        )
+        assert narrow.scopes == (ALLOW_SCOPE,)
+        assert narrow.malformed == ()
+        assert narrow.malformed_outside((ALLOW_SCOPE,)) == ()
+
+    def test_an_allowlist_entry_is_normalised_against_the_index_key(
+        self, scoped_store: Path
+    ):
+        _s, narrow = api.rc.load_store(
+            scoped_store, verb="recalled", visible_scopes=("Kelp_Forest",)
+        )
+        assert narrow.scopes == (ALLOW_SCOPE,)
+
+    def test_a_MISSING_store_still_RAISES_rather_than_narrowing_to_empty(
+        self, tmp_path: Path
+    ):
+        """🔴 THE FOUR-STATE RULE SURVIVES THE FILTER. `store-unreachable` and
+        "you may see nothing" both produce an empty index; only the first may be
+        a raise, and collapsing them is the exact conflation this whole module
+        exists to prevent. A filter applied BEFORE the load would have done it.
+
+        ⚠ RENAMED. This used to be called `test_an_UNREADABLE_store_still_RAISES…`
+        and passes a store root that does not EXIST — a different condition, a
+        different error type and a different line of `load_store`. The
+        genuinely-unreadable path is `TestUnreadableEntriesInDeniedScopes` below,
+        which is where the interesting behaviour is.
+        """
+        with pytest.raises(api.rc.StoreMissingError):
+            api.rc.load_store(
+                tmp_path / "absent", verb="recalled", visible_scopes=(ALLOW_SCOPE,)
+            )
+
+    def test_recall_and_search_BOTH_take_the_narrowing(self, scoped_store: Path):
+        """One kwarg, two callers — and a threading bug that reached only one of
+        them would leave `/search` wide open while `/recall` looked fixed.
+        """
+        rep = api.rc.recall(
+            scoped_store, DENY_SCOPE, visible_scopes=(ALLOW_SCOPE,)
+        )
+        assert rep.status == "scope-absent"
+        assert rep.known_scopes == (ALLOW_SCOPE,)
+        sea = api.rc.search(
+            scoped_store, ALLOW_SCOPE, "drill head overheats",
+            all_scopes=True, visible_scopes=(ALLOW_SCOPE,),
+        )
+        assert sea.scopes_searched == (ALLOW_SCOPE,)
+        assert sea.known_scopes == (ALLOW_SCOPE,)
+        assert sea.total_hits == 0
+
+    def test_the_CLI_DEFAULT_is_still_unrestricted(self, scoped_store: Path):
+        """The local reader must not have acquired an allowlist by accident:
+        `cairn` and `/resume` call these with no such argument and read the whole
+        store, and a default of `()` here would empty every local recall.
+        """
+        assert api.rc.recall(scoped_store, DENY_SCOPE).status == "recalled"
+        assert set(api.rc.recall(scoped_store, ALLOW_SCOPE).known_scopes) == {
+            ALLOW_SCOPE, DENY_SCOPE, THIRD_SCOPE
+        }
+
+
+# The name in the 503 body an unreadable entry used to produce. Distinct from
+# every other literal in this file, so "did this filename reach the caller" is a
+# single `in` and cannot be satisfied by coincidence.
+LOCKED_ENTRY = "sealed-adit.md"
+# An Emacs lock file: a DANGLING symlink whose name starts with a dot and ends
+# `.md`. `Path.glob("*.md")` matches a leading dot — measured, not assumed, and
+# pinned by a test below — so it IS a candidate entry, and this exact shape has
+# been observed 503ing `/api/v1/recall/<scope>` in practice.
+EMACS_LOCK = ".#sealed-adit.md"
+
+
+def _make_unreadable(
+    store: Path, scope: str, kind: str, *, outside: Path | None = None
+) -> Path:
+    """Put ONE hostile candidate entry into `<store>/<scope>/`.
+
+    `kind` is `perm` (a mode-000 regular file), `emacs` (the dangling lock-file
+    symlink), `fifo` (a named pipe, which blocks `open()` until somebody
+    writes), `dir` (a DIRECTORY named `*.md` — one stray `mkdir`, or an
+    rsync/restore artefact) or `linkdir` (a symlink pointing at one, which needs
+    `outside` to hold the real directory). All five are real shapes seen on a
+    real store, not contrivances.
+    """
+    target = store / scope / (EMACS_LOCK if kind == "emacs" else LOCKED_ENTRY)
+    if kind == "perm":
+        target.write_text(_entry("sealed-adit", scope, nuance="- sealed."))
+        os.chmod(target, 0o000)
+    elif kind == "emacs":
+        os.symlink("zach@host.4242:1767225600", target)
+    elif kind == "fifo":
+        os.mkfifo(target)
+    elif kind == "dir":
+        target.mkdir()
+    elif kind == "linkdir":
+        assert outside is not None, "`linkdir` needs somewhere to put the target"
+        real = outside / "a-real-directory"
+        real.mkdir(parents=True, exist_ok=True)
+        os.symlink(real, target)
+    else:  # pragma: no cover - a typo in a test argument is a test bug
+        raise AssertionError(kind)
+    return target
+
+
+def under_deadline(source: str, seconds: float, *args: str):
+    """Run `source` in a CHILD process. The completed process, or `None` meaning
+    it blew the wall-clock deadline.
+
+    🔴 EVERY TEST THAT READS A STORE HOLDING A FIFO MUST GO THROUGH HERE, AND
+    THE REASON IS THAT THE ALTERNATIVE HAS NO FAILURE MODE. `read_text` on a
+    fifo blocks forever: in-process there is no exception and no value to assert
+    on, so the test does not fail — the RUNNER wedges. Measured on this file
+    with `_LOADER_ENTRY_ACTIONS[KIND_OTHER]` reverted to `TAKE`:
+    `test_the_REFUSED_entries_are_SURFACED_not_silently_dropped` ran **>600s**
+    with no error and no failure (isolated, `rc=124` at 60s). No
+    `pytest-timeout` plugin is installed — only `xdist` — so nothing above the
+    test would have cut it off either.
+
+    A test that hangs instead of failing is worse than no test: CI stops, and
+    nobody gets a red to act on. `claude/RULES.md`: "a permanently-red gate is
+    worse than no gate" — a permanently-HUNG one is worse still, because it does
+    not even report.
+
+    ⚠ ONE SPELLING, DELIBERATELY. This was a nested closure in two separate
+    tests before, and a third test simply did without; the predicate-at-N-sites
+    shape is how the third one came to be missing.
+    """
+    try:
+        return subprocess.run(
+            [sys.executable, "-c", source, *args],
+            capture_output=True,
+            text=True,
+            timeout=seconds,
+        )
+    except subprocess.TimeoutExpired:
+        return None
+
+
+def _load_store_probe(store: Path, *, expr: str = "None") -> str:
+    """A child-process program that loads `store` and prints what it found.
+
+    `expr` is evaluated in the child to produce `visible_scopes`, so the scoped
+    and unrestricted arms share one program instead of two that could drift.
+    """
+    return (
+        "import sys;"
+        f"sys.path.insert(0, {str(RECALL_PATH.parent)!r});"
+        "import subsystem_recall as rc;"
+        f"vs = {expr};"
+        f"_s, i = rc.load_store({str(store)!r}, verb='recalled', visible_scopes=vs);"
+        "print('SCOPES=' + ','.join(i.scopes));"
+        "print('MALFORMED=' + ','.join(m.label for m in i.malformed));"
+        "print('REASONS=' + '|'.join(m.reason for m in i.malformed));"
+        "print('PERSCOPE=' + ','.join("
+        "    '%s:%d' % (s, len(i.entries(s))) for s in i.scopes))"
+    )
+
+
+def _load_index_raise_probe(store: Path) -> str:
+    """A child-process program that loads `store` under `RAISE` and prints the
+    exception class, its `source` and its message — the facts the in-process
+    `pytest.raises` used to assert, in a form a wall-clock deadline can bound.
+    """
+    return (
+        "import sys;"
+        f"sys.path.insert(0, {str(RECALL_PATH.parent)!r});"
+        "import subsystem_recall as rc;"
+        "\ntry:\n"
+        f"    rc.load_index({str(store)!r})\n"
+        "except BaseException as exc:\n"
+        "    print('CLASS=' + type(exc).__name__)\n"
+        "    print('SOURCE=' + str(getattr(exc, 'source', None)))\n"
+        "    print('MESSAGE=' + str(exc).replace(chr(10), ' '))\n"
+        "else:\n"
+        "    print('CLASS=NOTHING-RAISED')\n"
+    )
+
+
+def _probe_field(stdout: str, key: str) -> str:
+    """The one `KEY=value` line a probe printed, or an assertion naming what it
+    printed instead — never a silent empty string, which would satisfy most of
+    the comparisons it feeds.
+    """
+    for line in stdout.splitlines():
+        if line.startswith(f"{key}="):
+            return line[len(key) + 1 :]
+    raise AssertionError(f"the probe printed no {key}= line: {stdout[:600]!r}")
+
+
+class TestTheLoaderItselfTakesTheAllowlist:
+    """🔴 `load_index` DIRECTLY — the surface `load_store` hides.
+
+    `load_store` narrows its RESULT as well, so through that door three separate
+    mutations of the loader's own filter are invisible: an empty allowlist read
+    as unrestricted, a denied scope's NAME registered before the skip, and a
+    directory name compared unfolded. Each was measured SURVIVING a sweep that
+    only drove `load_store`, and each is a real defect for the OTHER callers of
+    this function — `subsystem_touch`, and anything that hands the result
+    somewhere the post-filter is not.
+
+    The seam guard is the pair: these tests plus the `load_store` ones above.
+    Neither half alone pins the loader.
+    """
+
+    def _store(self, tmp_path: Path, *scope_dirs: str) -> Path:
+        """A store whose scope DIRECTORY NAMES are exactly as given.
+
+        Spelled by hand rather than through `_build_store`, because one test
+        below needs a directory whose name does NOT equal its own folded form
+        and that fixture is the whole point of it.
+        """
+        root = tmp_path / "store"
+        for name in scope_dirs:
+            (root / name).mkdir(parents=True)
+            (root / name / f"{name}-entry.md").write_text(
+                _entry(f"{name}-entry", name, nuance=f"- 2026-03-04: {name} drifts.")
+            )
+        return root
+
+    def test_POSITIVE_CONTROL_no_allowlist_loads_every_scope(self, tmp_path: Path):
+        """Without this the three tests below are satisfied by a loader that
+        returns an empty index for everything.
+        """
+        root = self._store(tmp_path, ALLOW_SCOPE, DENY_SCOPE)
+        index = api.rc.load_index(root, on_malformed="collect")
+        assert set(index.scopes) == {ALLOW_SCOPE, DENY_SCOPE}
+
+    def test_an_EMPTY_allowlist_registers_NO_scope_not_EVERY_scope(
+        self, tmp_path: Path
+    ):
+        """🔴 THE ASYMMETRY, PINNED AT THE LOADER TOO. `None` and `()` are both
+        falsy, so a filter written `if allowed and …` treats "you may see
+        nothing" as "you may see everything" — a total bypass, and one that every
+        test with a POPULATED allowlist passes.
+
+        `load_store` re-narrows its result, which is why this mutation survives
+        entirely when measured through that door. Here there is nothing in the
+        way.
+        """
+        root = self._store(tmp_path, ALLOW_SCOPE, DENY_SCOPE)
+        index = api.rc.load_index(root, on_malformed="collect", visible_scopes=())
+        assert index.scopes == ()
+        assert len(index) == 0
+
+    def test_a_denied_scopes_NAME_is_not_registered_either(self, tmp_path: Path):
+        """🔴 SKIPPING THE READ IS NOT SKIPPING THE SCOPE. A filter placed one
+        line too late still appends the directory name to `extra_scopes`, so the
+        denied scope arrives on `index.scopes` — the `known_scopes` enumeration
+        channel — having never been opened. It reads as fixed and leaks the one
+        fact the channel was about: that the scope EXISTS.
+
+        Invisible through `load_store`, which drops the key again on the way out.
+        """
+        root = self._store(tmp_path, ALLOW_SCOPE, DENY_SCOPE)
+        index = api.rc.load_index(
+            root, on_malformed="collect", visible_scopes=(ALLOW_SCOPE,)
+        )
+        assert index.scopes == (ALLOW_SCOPE,)
+
+    def test_the_DIRECTORY_NAME_is_FOLDED_before_it_is_compared(
+        self, tmp_path: Path
+    ):
+        """🔴 OVER-FILTERING, AND THE FIXTURE HAS TO REACH IT. Every other store
+        in this file has directory names that are already their own folded form,
+        so a filter comparing the RAW `scope_dir.name` behaves identically and
+        the mutation survives. Here the directory really is spelled
+        `Kelp_Forest`: the index key it produces is `kelp-forest`, so an
+        allowlist naming `kelp-forest` must still match it, and an unfolded
+        comparison silently empties the caller's OWN scope.
+        """
+        raw_dir = "Kelp_Forest"
+        assert api.rc.normalize_ref(raw_dir) == ALLOW_SCOPE != raw_dir, (
+            "the fixture directory must NOT already equal its folded form, or "
+            "this test measures nothing"
+        )
+        root = self._store(tmp_path, raw_dir, DENY_SCOPE)
+        index = api.rc.load_index(
+            root, on_malformed="collect", visible_scopes=(ALLOW_SCOPE,)
+        )
+        assert index.scopes == (ALLOW_SCOPE,)
+        assert len(index) == 1
+
+
+class TestUnreadableEntriesInDeniedScopes:
+    """🔴 THE INDEX LOADER USED TO OPEN EVERY FILE IN THE STORE BEFORE THE
+    ALLOWLIST WAS APPLIED, AND SCOPED CALLERS MADE THAT THREE DEFECTS AT ONCE.
+
+    `load_store` narrowed the index it got BACK; `load_index` had already walked
+    and read the whole store to build it. So one unreadable entry in a scope a
+    caller may not see:
+
+      * put that file's FULL PATH — and therefore the denied scope's name — into
+        a 503 body that caller could read. A scoped reader had no other way to
+        learn the name existed, which is the exact enumeration surface the rest
+        of this section closes;
+      * broke `/recall` and `/search` for EVERY caller, including the ones whose
+        own scopes were perfectly readable;
+      * and for a FIFO named `*.md`, blocked the request thread on `open()`
+        indefinitely. `/snapshot` already refused that by kind
+        (`_ENTRY_ACTIONS[KIND_OTHER] == REFUSE`); the index path did not.
+
+    Fixed in TWO steps, and the split matters because they cover different
+    callers:
+
+      1. `visible_scopes` pushed DOWN into `load_index`, so a denied scope dir
+         is never descended into at all. Protects a SCOPED caller only.
+      2. an entry-KIND check before `open()`
+         (`subsystem_resolver._LOADER_ENTRY_ACTIONS`), which protects EVERY
+         caller including the unrestricted bare legacy token the pod runs.
+
+    🔴 AND THE LIMIT OF (2) IS TESTED TOO, not just stated: it is NARROW. A
+    `chmod 000` regular file still raises for an unrestricted caller —
+    `test_an_UNREADABLE_REGULAR_FILE_still_RAISES_and_THAT_is_the_residual` is
+    the honest record of ONE thing that did not close. ⚠ It is not the only one
+    and must not be read as such: the full list is the module-level
+    `LOADER_RESIDUAL_KINDS`, pinned against the table by
+    `test_the_LOADER_RESIDUAL_SET_is_pinned` and against both documents that
+    describe it by the two `RESIDUAL LEDGER` guards beside it.
+    """
+
+    def _store(self, tmp_path: Path, kind: str) -> Path:
+        store = _build_store(
+            tmp_path / "store",
+            {ALLOW_SCOPE: KELP_NUANCE, DENY_SCOPE: QUARTZ_NUANCE},
+        )
+        _make_unreadable(store, DENY_SCOPE, kind)
+        return store
+
+    def test_the_FIXTURE_really_is_a_candidate_entry_glob_matches_a_dotfile(
+        self, tmp_path: Path
+    ):
+        """🔴 THE POSITIVE CONTROL FOR THE EMACS SHAPE. If `glob("*.md")` did not
+        match a leading dot, `.#sealed-adit.md` would never be opened, every
+        assertion about it would be vacuous, and the whole case would be a story
+        about a file the loader never sees.
+        """
+        d = tmp_path / "scope"
+        d.mkdir()
+        os.symlink("dangling", d / EMACS_LOCK)
+        assert [p.name for p in d.glob("*.md")] == [EMACS_LOCK]
+
+    @pytest.mark.parametrize("kind", ["perm", "emacs"])
+    def test_a_SCOPED_caller_is_unaffected_by_an_unreadable_DENIED_entry(
+        self, tmp_path: Path, kind: str
+    ):
+        store = self._store(tmp_path, kind)
+        _s, index = api.rc.load_store(
+            store, verb="recalled", visible_scopes=(ALLOW_SCOPE,)
+        )
+        assert index.scopes == (ALLOW_SCOPE,)
+        assert index.malformed == ()
+
+    def test_POSITIVE_CONTROL_the_same_file_in_the_CALLERS_OWN_scope_still_RAISES(
+        self, tmp_path: Path
+    ):
+        """🔴 WITHOUT THIS THE TEST ABOVE IS SATISFIED BY A FIXTURE THAT CREATED
+        NOTHING UNREADABLE. It also pins the half that must NOT change: the
+        four-state rule. "I could not read your store" and "you may see nothing"
+        both produce an empty index, and only the first may raise.
+
+        ⚠ `perm` ONLY, and the parametrize over `emacs` that used to be here was
+        DELETED rather than left to fail: the entry-kind guard now refuses a
+        broken link before `open()`, so that shape no longer raises for ANY
+        caller. Its own-scope behaviour is asserted below, as a collected
+        malformed row.
+        """
+        store = self._store(tmp_path, "perm")
+        with pytest.raises(api.rc.EntryUnreadableError):
+            api.rc.load_store(store, verb="recalled", visible_scopes=(DENY_SCOPE,))
+
+    def test_the_BROKEN_LINK_in_the_CALLERS_OWN_scope_is_REPORTED_not_fatal(
+        self, tmp_path: Path
+    ):
+        """The other side of the guard: refusing an entry must not silently
+        empty the scope that holds it. The caller who OWNS the hostile file
+        still gets their good entry, and still gets told about the bad one.
+        """
+        store = self._store(tmp_path, "emacs")
+        _s, index = api.rc.load_store(
+            store, verb="recalled", visible_scopes=(DENY_SCOPE,)
+        )
+        assert index.scopes == (DENY_SCOPE,)
+        assert len(index) == 1
+        assert [m.label for m in index.malformed] == [f"{DENY_SCOPE}/{EMACS_LOCK}"]
+
+    def test_the_UNRESTRICTED_reading_of_a_BROKEN_LINK_no_longer_DIES(
+        self, tmp_path: Path
+    ):
+        """🔴 THE INVERSION. This test used to be
+        `test_the_UNRESTRICTED_reading_is_UNCHANGED_and_that_is_the_residual`
+        and asserted `pytest.raises(EntryUnreadableError)` — the honest record
+        of a residual the allowlist pushdown could not reach. The residual was
+        CLOSED by the entry-kind guard, so the same input must now assert the
+        opposite, and the name has to say which.
+
+        `visible_scopes=None` still skips no SCOPE — that half is unchanged and
+        is why this matters: the pod runs a bare legacy token, which is
+        unrestricted. What changed is that the candidate's KIND is decided
+        before `open()`, so the Emacs lock file costs its own entry and nothing
+        else.
+        """
+        store = self._store(tmp_path, "emacs")
+        _s, index = api.rc.load_store(store, verb="recalled")
+        # The OTHER scope's content survived, which is the DoS half.
+        assert set(index.scopes) == {ALLOW_SCOPE, DENY_SCOPE}
+        assert len(index) == 2, "a good entry was dropped along with the bad one"
+        # …and the bad entry is REPORTED, not silently skipped: a dropped entry
+        # is indistinguishable from one nobody ever wrote, which is the exact
+        # conflation this store guards against everywhere else.
+        assert [m.label for m in index.malformed] == [f"{DENY_SCOPE}/{EMACS_LOCK}"]
+        assert "broken symlink" in index.malformed[0].reason
+
+    def test_an_UNREADABLE_REGULAR_FILE_still_RAISES_and_THAT_is_the_residual(
+        self, tmp_path: Path
+    ):
+        """🔴 THE HALF THAT IS **NOT** CLOSED, kept as its own named test rather
+        than left implied by the parametrize list this used to share.
+
+        A `chmod 000` regular file classifies as `regular-file`, which the
+        loader TAKES — deliberately. `read_text` then raises, and an OSError
+        fails closed in both policies: "the store was not fully READ" is a
+        different fact from "this entry is malformed", and only the second has
+        an honest degraded form. So for THIS shape an unrestricted caller is
+        exactly as exposed as before: 503, and the path in the body
+        (`test_POSITIVE_CONTROL_a_LEGACY_token_DOES_still_get_the_503`).
+
+        It is also the negative control for the test above: if the kind guard
+        were quietly widened to refuse everything it could not read, this would
+        go green-by-collapse and the four-state rule would be gone.
+        """
+        store = self._store(tmp_path, "perm")
+        with pytest.raises(api.rc.EntryUnreadableError):
+            api.rc.load_store(store, verb="recalled")
+
+    def test_the_503_body_NAMED_the_denied_scope_and_its_PATH_over_HTTP(
+        self, tmp_path: Path
+    ):
+        """🔴 THE DISCLOSURE ITSELF, DRIVEN THROUGH THE SERVER — the layer where
+        it was a leak rather than an exception type.
+
+        `zach` may see `ALLOW_SCOPE` only. He asks for his OWN scope, which is
+        readable, and used to be answered `503 index entry unreadable: under …
+        (PermissionError: … '<store>/quartz-mine/sealed-adit.md')`. Both halves
+        matter: the status is a denial of service he did not cause, and the body
+        names a scope and a filename he is not allowed to know exist.
+        """
+        store = self._store(tmp_path, "perm")
+        with running(store, tokens=(ZACH,)) as (base, _):
+            code, headers, body = fetch(
+                f"{base}/api/v1/recall/{ALLOW_SCOPE}", token=ZACH_TOKEN
+            )
+        text = body.decode()
+        assert code == 200, f"{code}: {text[:400]}"
+        assert headers["X-Store-Status"] == "recalled"
+        assert KELP_NUANCE in text, "the caller's own content vanished"
+        assert DENY_SCOPE not in text
+        assert LOCKED_ENTRY not in text
+        # …and therefore not the hostile file's path either. Spelled out because
+        # the PATH is what the 503 carried and the two assertions above are only
+        # its components.
+        #
+        # 🔴 NEITHER `"unreadable" not in text` NOR `str(store) not in text` WOULD
+        # DO, and both were tried: the caveat block explains what
+        # `unstamped/unreadable/none` mean on EVERY report, and the store ROOT is
+        # printed on every report as `  store: <root>`. Both are present on a
+        # perfectly healthy 200, so both would be red for a reason that has
+        # nothing to do with this defect. What leaked was the scope name and the
+        # filename UNDER the root, which is what is asserted.
+        assert str(store / DENY_SCOPE / LOCKED_ENTRY) not in text
+
+    def test_POSITIVE_CONTROL_a_LEGACY_token_DOES_still_get_the_503(
+        self, tmp_path: Path
+    ):
+        """🔴 THE FIXTURE MUST ACTUALLY PRODUCE AN UNREADABLE ENTRY. Without this
+        the assertions above are a zero from a check that might see nothing — a
+        `chmod 000` that silently failed (running as root, an exotic filesystem)
+        would leave every one of them green against a perfectly healthy store.
+
+        It is also the honest record of the residual: unrestricted callers still
+        get the 503, and still get the path in it.
+        """
+        store = self._store(tmp_path, "perm")
+        with running(store, tokens=(GOOD_TOKEN,)) as (base, _):
+            code, headers, body = fetch(
+                f"{base}/api/v1/recall/{ALLOW_SCOPE}", token=GOOD_TOKEN
+            )
+        assert code == 503, f"the fixture is readable after all: {code}"
+        assert headers["X-Store-Status"] == "store-unreachable"
+        text = body.decode()
+        assert LOCKED_ENTRY in text and DENY_SCOPE in text
+
+    def test_a_FIFO_named_md_in_a_DENIED_scope_no_longer_HANGS_the_reader(
+        self, tmp_path: Path
+    ):
+        """🔴 THE MOST SERIOUS OF THE THREE, AND THE ONE A NORMAL TEST CANNOT
+        ASSERT: a wedged thread produces no exception and no value, so there is
+        nothing to `pytest.raises` on. It is measured in a CHILD PROCESS under a
+        wall-clock deadline, because a test that can hang is a suite that can
+        hang.
+
+        On a `replicas: 1` Deployment an `open()` that never returns is worse
+        than the 503: the worker is gone and the next request queues behind it.
+
+        🔴 THE UNRESTRICTED ARM IS AN INVERSION. It used to be the NEGATIVE
+        CONTROL — "the unrestricted load of the SAME store must still hang", the
+        residual the allowlist pushdown could not reach. The entry-kind guard
+        closed it, so the same probe must now COMPLETE, load both scopes, and
+        report the FIFO as a malformed entry. A control that asserts a hazard is
+        still live cannot survive the hazard being fixed; it has to be re-aimed
+        or it becomes a test pinning the bug.
+
+        What keeps the timeout meaningful instead is
+        `test_a_SYMLINK_to_a_FIFO_no_longer_HANGS_and_the_DEADLINE_still_SEES_one`
+        below. ⚠ That test's control had to be re-aimed too: it used to point at
+        `link-to-other`, a kind the loader still TAKES — and it does not any
+        more, because that shape was measured wedging a live request thread for
+        25s. No remaining TAKE cell blocks, so the control is now a bare
+        `open()` of the fifo itself, which is the syscall in question rather
+        than a proxy for it.
+        """
+        store = self._store(tmp_path, "fifo")
+        probe = _load_store_probe(
+            store, expr=f"None if sys.argv[1] == 'unrestricted' else ({ALLOW_SCOPE!r},)"
+        )
+
+        def run(arg: str, deadline: float):
+            return under_deadline(probe, deadline, arg)
+
+        scoped = run("scoped", 30.0)
+        assert scoped is not None, (
+            "the scoped reader HUNG on a FIFO in a scope it may not see — the "
+            "allowlist is not reaching `load_index`"
+        )
+        assert scoped.returncode == 0, scoped.stderr[-600:]
+        assert f"SCOPES={ALLOW_SCOPE}\n" in scoped.stdout, scoped.stdout
+        # The denied scope was never descended into, so its FIFO is not even
+        # reported — step 1 still does its own job.
+        assert "MALFORMED=\n" in scoped.stdout, scoped.stdout
+
+        unrestricted = run("unrestricted", 15.0)
+        assert unrestricted is not None, (
+            "the UNRESTRICTED reader HUNG on the FIFO — the entry-kind guard is "
+            "not reaching `load_index`, and on a `replicas: 1` Deployment that "
+            "is a worker that never comes back"
+        )
+        assert unrestricted.returncode == 0, unrestricted.stderr[-600:]
+        assert f"SCOPES={ALLOW_SCOPE},{DENY_SCOPE}\n" in unrestricted.stdout
+        assert f"MALFORMED={DENY_SCOPE}/{LOCKED_ENTRY}\n" in unrestricted.stdout
+
+    def test_a_SYMLINK_to_a_FIFO_no_longer_HANGS_and_the_DEADLINE_still_SEES_one(
+        self, tmp_path: Path
+    ):
+        """🔴 THE SECOND INVERSION, AND THE PROBE'S OWN POSITIVE CONTROL, in one
+        test — because the two have to move together.
+
+        This test used to be
+        `test_a_TAKEN_kind_still_HANGS_which_is_why_the_REFUSE_cells_exist`, and
+        asserted that a symlink POINTING AT a fifo blocks the reader forever. It
+        was the honest record of the `link-to-other` residual the narrow ruling
+        left open, and simultaneously the positive control proving the deadline
+        machinery can observe a hang at all.
+
+        The residual was then MEASURED rather than reasoned about: on the tip
+        that carried it, an unrestricted (bare legacy) `GET
+        /api/v1/recall/<scope>` against a store holding one `link-to-fifo.md` in
+        a DIFFERENT scope wedged for 25s and the request thread never came back,
+        while `/healthz` answered 200 throughout — so the process was up and the
+        worker was gone. `open()` blocks the same whether the fifo is reached
+        directly or through a link. The cell is now REFUSE, so the same input
+        must assert the opposite: complete, load both scopes, and REPORT the
+        link as a malformed entry.
+
+        🔴 AND THAT LEAVES A HOLE THIS TEST MUST FILL ITSELF. Every timing
+        assertion in the class is now "it did NOT hang", which is the reassuring
+        zero `claude/RULES.md` calls indistinguishable from a harness wired to
+        nothing — and no kind the loader still TAKES blocks, so the old control
+        cannot simply be re-aimed at another cell. The control below therefore
+        drives the SAME deadline machinery at a bare `open()` of the SAME fifo,
+        which must blow it. A fixture that made no real fifo, or a subprocess
+        runner that never blocks, fails there and takes the vacuous green with
+        it.
+        """
+        store = _build_store(
+            tmp_path / "store",
+            {ALLOW_SCOPE: KELP_NUANCE, DENY_SCOPE: QUARTZ_NUANCE},
+        )
+        real_fifo = tmp_path / "a-real-fifo"
+        os.mkfifo(real_fifo)
+        link = store / DENY_SCOPE / LOCKED_ENTRY
+        os.symlink(real_fifo, link)
+        assert api.classify_path(link) == api.KIND_LINK_TO_OTHER, (
+            "the fixture is not the kind this test is about"
+        )
+
+        # 🔴 THE POSITIVE CONTROL FIRST, so a runner that cannot observe a block
+        # fails before the assertion that depends on it means anything. A bare
+        # `open()` of the fifo — no store, no loader — is the syscall the guard
+        # exists to keep the request thread out of.
+        blocked = under_deadline(
+            f"open({str(real_fifo)!r}); print('OPENED')", 10.0
+        )
+        assert blocked is None, (
+            "a bare `open()` of the fifo RETURNED, so this fixture is not a "
+            "blocking fifo and the deadline below measures nothing — every "
+            "'it did not hang' assertion in this class would be vacuous. "
+            f"stdout={None if blocked is None else blocked.stdout!r}"
+        )
+
+        probe = (
+            "import sys;"
+            f"sys.path.insert(0, {str(RECALL_PATH.parent)!r});"
+            "import subsystem_recall as rc;"
+            f"_s, i = rc.load_store({str(store)!r}, verb='recalled');"
+            "print('SCOPES=' + ','.join(i.scopes));"
+            "print('MALFORMED=' + ','.join(m.label for m in i.malformed))"
+        )
+        done = under_deadline(probe, 30.0)
+        assert done is not None, (
+            "an UNRESTRICTED read of a store holding a SYMLINK-to-FIFO entry "
+            "HUNG — `_LOADER_ENTRY_ACTIONS[KIND_LINK_TO_OTHER]` is not REFUSE, "
+            "or the guard is not reaching `load_index`. On a `replicas: 1` "
+            "Deployment that is a worker that never comes back"
+        )
+        assert done.returncode == 0, done.stderr[-600:]
+        assert f"SCOPES={ALLOW_SCOPE},{DENY_SCOPE}\n" in done.stdout, done.stdout
+        # REPORTED, not skipped — a dropped entry is indistinguishable from one
+        # nobody ever wrote, which is the conflation this store exists to avoid.
+        assert f"MALFORMED={DENY_SCOPE}/{LOCKED_ENTRY}\n" in done.stdout, done.stdout
+
+
+class TestTheLoaderRefusesHostileEntriesByKind:
+    """🔴 THE NARROW ENTRY-KIND GUARD — what it closes, and what it must not.
+
+    The allowlist pushdown protects a SCOPED caller. `visible_scopes=None` skips
+    nothing, and the live pod runs a BARE LEGACY token, which is unrestricted —
+    so on the deployed configuration a single `.#entry.md` lock file 503'd every
+    recall and a single FIFO wedged the worker. That is the configuration these
+    tests drive.
+
+    🔴 AND THE GUARD IS NARROW BY DECISION, NOT BY ACCIDENT. Mirroring
+    `/snapshot`'s `_ENTRY_ACTIONS` wholesale also refuses a symlink to a regular
+    file and an unstat-able path — which this loader READS and honestly fails on
+    respectively, so the broad form is still a behaviour change for every local
+    CLI caller. `test_a_SYMLINKED_entry_is_STILL_READ…` is the test that kills
+    the broad form; without it "refuse hostile kinds" has no upper bound.
+
+    ⚠ NARROW IS NOT FROZEN. The guard has FIVE cells, not the two it shipped
+    with, added over three rulings and each on the SAME criterion — this loader
+    has never successfully read that kind, so refusing it changes no legitimate
+    caller. `link-to-other` (a symlink pointing at a fifo/socket/device) was
+    left TAKE for one round as a named residual, then measured wedging an
+    unrestricted `/recall` for 25s. `directory` and `link-to-dir` were TAKE for
+    three, while the ledger called `chmod 000` "the only residual left" — then
+    measured 503ing the whole store on an `IsADirectoryError`, off one stray
+    `mkdir <scope>/notes.md`. Every one of those widenings is still inside the
+    upper bound, and `link-to-file`, the cell the narrow ruling was actually
+    about, is untouched.
+
+    🔴 THE UPPER BOUND IS NOW ALSO A LEDGER SOMETHING READS.
+    `TestClassifierIsTotal.test_the_LOADER_RESIDUAL_SET_is_pinned` and the two
+    `RESIDUAL LEDGER` guards beside it assert the surviving TAKE set against
+    both documents that describe it, in both directions — because the drift that
+    let `directory` sit open for three rounds was a DOCUMENT going stale, not a
+    table being wrong, and no test read the documents.
+    """
+
+    def _hostile(self, tmp_path: Path) -> Path:
+        """One store, BOTH refused shapes, in a scope that is not the one asked
+        for — the arrangement the operator reproduced: unrestricted token, a
+        dangling `.#lock.md` in `bravo`, and a recall for `alpha`.
+
+        🔴 THIS FIXTURE PLANTS A REAL FIFO, SO NOTHING MAY READ IT IN-PROCESS.
+        Three tests in this class used to: `load_store` / `load_index` directly,
+        and an in-process server. With `_LOADER_ENTRY_ACTIONS[KIND_OTHER]`
+        reverted to `TAKE` the first of them ran >600s with no error and no
+        failure — the guard's own regression test WEDGED the suite instead of
+        failing it, and with no `pytest-timeout` plugin loaded nothing would have
+        cut it off. Every read of this store now goes through `under_deadline`,
+        which turns that hang back into a red.
+        """
+        store = _build_store(
+            tmp_path / "store",
+            {ALLOW_SCOPE: KELP_NUANCE, DENY_SCOPE: QUARTZ_NUANCE},
+        )
+        _make_unreadable(store, DENY_SCOPE, "emacs")
+        _make_unreadable(store, DENY_SCOPE, "fifo")
+        return store
+
+    def test_an_UNRESTRICTED_recall_of_ANOTHER_scope_is_200_not_503(
+        self, tmp_path: Path
+    ):
+        """🔴 THE MEASURED SYMPTOM, DRIVEN THROUGH THE SERVER ON THE LIVE
+        CREDENTIAL SHAPE. Before the guard this exact request answered `503
+        index entry unreadable … '<store>/quartz-mine/.#sealed-adit.md'`.
+
+        `GOOD_TOKEN` is a BARE row, so the record is `legacy`/unrestricted —
+        the pod's own configuration, not a scoped token that would be protected
+        by the allowlist pushdown instead.
+
+        🔴 THE SERVER IS A REAL SPAWNED PROCESS, NOT AN IN-PROCESS ONE, AND
+        THAT IS A TEST-SAFETY REQUIREMENT RATHER THAN A FIDELITY PREFERENCE.
+        This fixture plants a FIFO; a wedged handler thread inside the pytest
+        process cannot be reclaimed, and `running()`'s teardown would leave it
+        parked for the rest of the run. `running_subprocess` puts the load in a
+        child that is `terminate()`d in its own `finally`, and turns a wedge into
+        a socket timeout — which this test converts into a NAMED failure below,
+        because "the worker never came back" is the whole claim.
+        """
+        store = self._hostile(tmp_path)
+        token_file = tmp_path / "token"
+        token_file.write_text(GOOD_TOKEN + "\n")
+        with running_subprocess(store, token_file) as (base, _proc):
+            try:
+                code, headers, body = fetch(
+                    f"{base}/api/v1/recall/{ALLOW_SCOPE}", token=GOOD_TOKEN
+                )
+            except (urllib.error.URLError, TimeoutError) as exc:  # no response
+                raise AssertionError(
+                    "the request thread WEDGED on the hostile store — a REFUSE "
+                    "cell is not reaching `load_index`. On a `replicas: 1` "
+                    f"Deployment that is a worker that never comes back ({exc})"
+                ) from None
+        text = body.decode()
+        assert code == 200, f"{code}: {text[:400]}"
+        assert headers["X-Store-Status"] == "recalled"
+        assert KELP_NUANCE in text, "the caller's own content vanished"
+
+    def test_the_REFUSED_entries_are_SURFACED_not_silently_dropped(
+        self, tmp_path: Path
+    ):
+        """🔴 A SKIP RENDERS AS "NOTHING RECORDED", which is the conflation this
+        whole store exists to avoid — so the 200 above is only correct if the
+        two refused files are still ACCOUNTED FOR.
+
+        Asserted on the index rather than on the rendered body, because the body
+        deliberately reports cross-scope defects as a COUNT with scopes named and
+        never a filename; the per-file facts live here.
+
+        🔴 IN A CHILD PROCESS, BECAUSE THIS IS THE TEST THAT WEDGED. Measured:
+        reverting `_LOADER_ENTRY_ACTIONS[KIND_OTHER]` to `TAKE` made this exact
+        test run >600s with no error and no failure — it called `load_store` on a
+        store holding a real fifo, in-process, and `read_text` never returned.
+        The deadline is what converts that back into a `None`, i.e. a red.
+        """
+        store = self._hostile(tmp_path)
+        done = under_deadline(_load_store_probe(store), 30.0)
+        assert done is not None, (
+            "an UNRESTRICTED `load_store` of the hostile store HUNG — a "
+            "REFUSE cell is not reaching `load_index`"
+        )
+        assert done.returncode == 0, done.stderr[-800:]
+        labels = sorted(
+            _probe_field(done.stdout, "MALFORMED").split(",")
+        )
+        assert labels == sorted(
+            [f"{DENY_SCOPE}/{EMACS_LOCK}", f"{DENY_SCOPE}/{LOCKED_ENTRY}"]
+        ), done.stdout
+        reasons = _probe_field(done.stdout, "REASONS")
+        assert "broken symlink" in reasons, reasons
+        assert "not a regular file" in reasons, reasons
+        # …and the good entry in that same scope is still served.
+        assert f"{DENY_SCOPE}:1" in _probe_field(done.stdout, "PERSCOPE"), done.stdout
+
+    def _recall_over_http(self, tmp_path: Path, name: str, kind: str):
+        """Build a store carrying ONE hostile `kind`, then recall a DIFFERENT
+        scope over the wire on the pod's own credential shape (a bare legacy
+        row, i.e. unrestricted). Returns `(code, headers, text)`.
+        """
+        root = tmp_path / name
+        store = _build_store(
+            root / "store",
+            {ALLOW_SCOPE: KELP_NUANCE, DENY_SCOPE: QUARTZ_NUANCE},
+        )
+        _make_unreadable(store, DENY_SCOPE, kind, outside=root / "outside")
+        with running(store, tokens=(GOOD_TOKEN,)) as (base, _):
+            code, headers, body = fetch(
+                f"{base}/api/v1/recall/{ALLOW_SCOPE}", token=GOOD_TOKEN
+            )
+        return code, headers, body.decode()
+
+    @pytest.mark.parametrize("kind", ["dir", "linkdir"])
+    def test_a_DIRECTORY_named_md_no_longer_503s_the_WHOLE_store(
+        self, tmp_path: Path, kind: str
+    ):
+        """🔴 THE MEASURED SYMPTOM, AND THE ONE THE LEDGER DENIED EXISTED.
+
+        For three rounds `load_index`'s docstring and the API README both said a
+        `chmod 000` regular file was "the only residual left". Measured on that
+        tip, with a paired control:
+
+            store/beta/notes.md created as a DIRECTORY
+              GET /api/v1/recall/alpha, unrestricted legacy token
+              -> 503 "index entry unreadable: … (IsADirectoryError: …)"
+            CONTROL, same shape but a dangling `.#lock.md`
+              -> 200
+
+        So one accidental `mkdir <scope>/notes.md`, or one rsync or restore
+        artefact, took `/recall` AND `/search` down for EVERY caller — including
+        callers whose own scopes were untouched, and for a scope this request
+        never even asked about. A symlink to a directory behaved identically,
+        which is why both are parametrized here rather than one standing in for
+        the other.
+
+        🔴 THE POSITIVE CONTROL IS IN THIS TEST, NOT NEXT TO IT. Every assertion
+        here is "it did NOT 503", which is the reassuring zero that a harness
+        wired to nothing also produces. The `chmod 000` arm at the end drives the
+        SAME helper at the one shape that is still, deliberately, a residual —
+        so a fixture that plants nothing, or a `running()` that never reaches the
+        loader, fails there before the 200 above means anything.
+        """
+        code, headers, text = self._recall_over_http(tmp_path, f"probe-{kind}", kind)
+        assert code == 200, f"{code}: {text[:400]}"
+        assert headers["X-Store-Status"] == "recalled"
+        assert KELP_NUANCE in text, "the caller's own content vanished"
+
+        code, headers, text = self._recall_over_http(
+            tmp_path, f"control-{kind}", "perm"
+        )
+        assert code == 503, (
+            "an unreadable REGULAR file did NOT 503 — this harness cannot "
+            f"observe the failure the assertions above deny, so they are "
+            f"vacuous. got {code}: {text[:300]}"
+        )
+        assert headers["X-Store-Status"] == "store-unreachable"
+
+    @pytest.mark.parametrize("kind", ["dir", "linkdir"])
+    def test_the_REFUSED_DIRECTORY_is_a_NAMED_row_not_a_silent_skip(
+        self, tmp_path: Path, kind: str
+    ):
+        """A 200 is only correct if the refused path is still ACCOUNTED FOR — a
+        dropped entry is indistinguishable from one nobody ever wrote, which is
+        the conflation this whole store exists to avoid.
+
+        The REASON is asserted too, and the two kinds carry DIFFERENT sentences,
+        so a refusal filed under the wrong cell's reason fails here rather than
+        passing on the word "directory" appearing anywhere at all.
+        """
+        root = tmp_path / kind
+        store = _build_store(
+            root / "store",
+            {ALLOW_SCOPE: KELP_NUANCE, DENY_SCOPE: QUARTZ_NUANCE},
+        )
+        planted = _make_unreadable(
+            store, DENY_SCOPE, kind, outside=root / "outside"
+        )
+        expected_kind = api.KIND_DIRECTORY if kind == "dir" else api.KIND_LINK_TO_DIR
+        assert api.classify_path(planted) == expected_kind, (
+            "the fixture is not the kind this test is about"
+        )
+
+        _s, index = api.rc.load_store(store, verb="recalled")
+        assert [m.label for m in index.malformed] == [f"{DENY_SCOPE}/{LOCKED_ENTRY}"]
+        assert index.malformed[0].reason == resolver._LOADER_REFUSAL_REASON[
+            expected_kind
+        ], "the refusal was filed under another cell's sentence"
+        # …and the good entry in that same scope is still served.
+        assert len(index.entries(DENY_SCOPE)) == 1
+
+    def test_a_SYMLINKED_entry_is_STILL_READ_the_guard_is_NOT_the_broad_one(
+        self, tmp_path: Path
+    ):
+        """🔴 THE UPPER BOUND ON THE GUARD, AND THE MUTANT IT EXISTS TO KILL.
+
+        `_ENTRY_ACTIONS[KIND_LINK_TO_FILE]` is REFUSE, because `/snapshot` will
+        not follow a link out of the store. The LOADER has always read one, and
+        a `<scope>/<slug>.md -> ../shared/<slug>.md` symlink is an ordinary way
+        to keep one entry in two places. Copying `/snapshot`'s column here is the
+        over-broad form that was rejected on this PR; flipping that one cell to
+        REFUSE turns this entry into a malformed row and fails here.
+
+        The entry's CONTENT is asserted, not merely its presence: a guard that
+        refused it would still leave the scope registered.
+        """
+        store = _build_store(tmp_path / "store", {ALLOW_SCOPE: KELP_NUANCE})
+        real = tmp_path / "outside" / "linked-entry.md"
+        real.parent.mkdir()
+        real.write_text(
+            _entry("linked-entry", ALLOW_SCOPE, nuance="- 2026-03-06: via a link.")
+        )
+        link = store / ALLOW_SCOPE / "linked-entry.md"
+        os.symlink(real, link)
+        assert api.classify_path(link) == api.KIND_LINK_TO_FILE, (
+            "the fixture is not a symlink-to-regular-file, so this measures "
+            "nothing about the cell it names"
+        )
+
+        _s, index = api.rc.load_store(store, verb="recalled")
+        assert index.malformed == (), (
+            "a symlinked entry was refused — the guard has been widened to the "
+            "broad `_ENTRY_ACTIONS` form the narrow ruling rejected"
+        )
+        assert sorted(e.slug for e in index.entries(ALLOW_SCOPE)) == sorted(
+            ["linked-entry", f"{ALLOW_SCOPE}-entry"]
+        )
+
+    def test_under_RAISE_a_refused_entry_RAISES_the_same_class_as_any_other(
+        self, tmp_path: Path
+    ):
+        """🔴 THE POLICY IS `on_malformed`'s, NOT THE GUARD'S. The WRITER's probe
+        loads with `RAISE` precisely because it must not modify a store it read
+        only part of, and that is as true of a fifo as of a wrapped `aliases:`
+        line. A guard that collected unconditionally would silently hand the
+        writer a partial index.
+
+        🔴 UNDER THE DEADLINE TOO. Whether the fifo is even REACHED here depends
+        on `sorted()` order inside the scope directory — so "it raised before the
+        fifo, therefore it cannot hang" is a property of two filenames, not of
+        the code. That is not a guarantee worth resting the suite's liveness on.
+        """
+        store = self._hostile(tmp_path)
+        done = under_deadline(_load_index_raise_probe(store), 30.0)
+        assert done is not None, (
+            "`load_index` under RAISE HUNG on the hostile store — a REFUSE cell "
+            "is not reaching the loader"
+        )
+        assert done.returncode == 0, done.stderr[-800:]
+        assert _probe_field(done.stdout, "CLASS") == "MalformedEntryError", done.stdout
+        assert "malformed index entry" in _probe_field(done.stdout, "MESSAGE")
+        assert _probe_field(done.stdout, "SOURCE") in (EMACS_LOCK, LOCKED_ENTRY)
+
+    def test_a_BOGUS_policy_is_still_a_ValueError_not_a_refusal(
+        self, tmp_path: Path
+    ):
+        """The guard branches on `on_malformed` BEFORE `build_index` validates
+        it, so the predicate is shared (`_check_on_malformed`) rather than
+        spelled twice. Spelled twice, a bogus policy on a hostile store would be
+        answered with a complaint about the first fifo instead of about the
+        policy — a message that sends the operator to the wrong file.
+
+        ⚠ THE ONE TEST IN THIS CLASS THAT STAYS IN-PROCESS ON THE HOSTILE STORE,
+        and it is safe for a STRUCTURAL reason, not a lucky one:
+        `_check_on_malformed` is the FIRST statement of `load_index`, so this
+        call raises before `iterdir()` — no candidate is ever classified, let
+        alone opened. If that ordering ever changes, this test becomes a hang and
+        must move to `under_deadline` with the others.
+        """
+        store = self._hostile(tmp_path)
+        with pytest.raises(ValueError, match="on_malformed must be one of"):
+            api.rc.load_index(store, on_malformed="collct")
+
+    def test_the_REFUSED_row_is_filed_under_the_FOLDED_scope(self, tmp_path: Path):
+        """🔴 THE SCOPE ON A `MalformedEntry` IS THE NORMALIZED ONE — that is
+        `MalformedEntry`'s own contract, and `malformed_in` compares against
+        `normalize_ref(scope)`. A refusal filed under the RAW directory name
+        matches no scope, so it vanishes from `malformed_in` and surfaces only
+        through the store-wide count: reported, but not against the scope that
+        holds it, which is where the operator will look.
+
+        The fixture directory really is spelled `Kelp_Forest`. Every other store
+        in this file is already its own folded form, so an unfolded mutant
+        survives them all.
+        """
+        raw_dir = "Kelp_Forest"
+        assert api.rc.normalize_ref(raw_dir) == ALLOW_SCOPE != raw_dir
+        store = _build_store(tmp_path / "store", {raw_dir: KELP_NUANCE})
+        _make_unreadable(store, raw_dir, "emacs")
+
+        _s, index = api.rc.load_store(store, verb="recalled")
+        assert [m.label for m in index.malformed_in(ALLOW_SCOPE)] == [
+            f"{ALLOW_SCOPE}/{EMACS_LOCK}"
+        ]
+        assert index.malformed_outside([ALLOW_SCOPE]) == ()
+
+    def test_a_CLEAN_store_is_UNCHANGED_by_the_guard(self, tmp_path: Path):
+        """The positive control. Every assertion above is about a hostile store;
+        without this, a loader that refused EVERY candidate would satisfy the
+        `.malformed` ones and only fail on content nobody asserted.
+        """
+        store = _build_store(
+            tmp_path / "store",
+            {ALLOW_SCOPE: KELP_NUANCE, DENY_SCOPE: QUARTZ_NUANCE},
+        )
+        _s, index = api.rc.load_store(store, verb="recalled")
+        assert index.malformed == ()
+        assert len(index) == 2
+        assert set(index.scopes) == {ALLOW_SCOPE, DENY_SCOPE}
+
+
+class TestScopeFilteringIsNotAWriteVerb:
+    """🔴 CRITERIA 4-10 ARE NOT IN THIS BRANCH, AND THAT IS ASSERTED, NOT SAID.
+
+    `TestPhaseOneScope` already pins the write guard and the route ledger; this
+    is the same claim restated for the change that landed here, so a future
+    branch that adds a verb "while it is touching auth anyway" fails a test in
+    the section that added scoping.
+    """
+
+    def test_the_route_set_did_NOT_grow(self):
+        assert set(api.API_ROUTES) == {"recall", "search", "snapshot"}
+
+    def test_every_write_verb_is_STILL_405_on_EVERY_ROUTE_with_a_SCOPED_token(
+        self, scoped_store: Path
+    ):
+        """🔴 EVERY ROUTE, ENUMERATED FROM `API_ROUTES` ITSELF — not `/recall`
+        alone, which is what this used to probe.
+
+        The two guards in this class were jointly walkable. A `do_POST` added on
+        `/snapshot` passed BOTH: the route SET is unchanged, so
+        `test_the_route_set_did_NOT_grow` is green, and the only path this test
+        exercised was `/recall`. Driving the table means a route added to
+        `API_ROUTES` is automatically probed, and a verb added to one existing
+        route is caught by the route it was added to.
+        """
+        # A path per route, so the request reaches the route rather than the
+        # `bad request: invalid path component` branch. Keyed on the ledger, and
+        # asserted TOTAL below, so a new route cannot be silently unprobed.
+        paths = {
+            "recall": f"/api/v1/recall/{ALLOW_SCOPE}",
+            "search": f"/api/v1/search/{ALLOW_SCOPE}?q=tide",
+            "snapshot": "/api/v1/snapshot",
+        }
+        assert set(paths) == set(api.API_ROUTES), (
+            "a route exists that this test has no path for, so it would go "
+            f"unprobed: {sorted(set(api.API_ROUTES) ^ set(paths))}"
+        )
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            for route, path in sorted(paths.items()):
+                for method in ("POST", "PUT", "PATCH", "DELETE"):
+                    code, _h, body = fetch(
+                        f"{base}{path}", token=ZACH_TOKEN, method=method
+                    )
+                    assert code == 405, f"{method} {route} answered {code}"
+                    assert body == b"read-only\n", f"{method} {route}: {body!r}"
+
+    def test_a_full_scoped_read_workload_leaves_the_store_BYTE_IDENTICAL(
+        self, scoped_store: Path
+    ):
+        before = tree_hash(scoped_store)
+        with running(scoped_store, tokens=(ZACH, DANA)) as (base, _):
+            for token in (ZACH_TOKEN, DANA_TOKEN):
+                for path in (
+                    f"/api/v1/recall/{ALLOW_SCOPE}",
+                    f"/api/v1/recall/{DENY_SCOPE}",
+                    f"/api/v1/recall/{PHANTOM_SCOPE}",
+                    f"/api/v1/search/{ALLOW_SCOPE}?q=tide&all_scopes=1",
+                    "/api/v1/snapshot",
+                ):
+                    fetch(f"{base}{path}", token=token)
+        assert tree_hash(scoped_store) == before
