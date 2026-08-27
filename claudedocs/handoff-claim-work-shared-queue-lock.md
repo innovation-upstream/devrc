@@ -152,6 +152,29 @@ prevent this. 📖 `~/.claude/skills/handoff/reference/shared-queue.md`.
   time: `scripts/discord-embed-ext/extension/embed_enlarge.js` is tracked, modified, and read
   by nix at build time, so that host's generation is `origin/main` **plus** it. Not this
   session's change. The two hosts agree on `main` but not on what they built.
+- 🔴 **`error` is not `failure` on a Tekton check, and the difference cost three wrong
+  theories in a row while landing THIS doc.** The PR's `tekton/devrc-pytests` went red
+  twice, and the two reds had nothing in common:
+  1. **`failure`** on the first push — a real leg verdict naming
+     `test_a_scope_FILTERED_snapshot_of_a_denied_scope_ships_nothing`. Controls: that
+     test alone passed on the dev host, and `nix build .#checks.x86_64-linux.pytests`
+     — the *same derivation Tekton builds* — passed with `collected=17788 failed=0`.
+     A real-process test in a file carrying twelve flake/race notes.
+  2. **`error` / `COULD NOT RUN`** on the retrigger — the gate leg **never executed**.
+     `PipelineRun was stopping`, `gate task build-status was: None`, both logs "killed
+     before it wrote any", whole run dead in **53s**.
+  🔴 The `error` verdict carries **zero information about the diff** — do not debug a
+  change against it. Root cause found only by reading the TaskRuns:
+  `notify TaskRunTimeout: failed to finish within "2m0s"`, which stopped the pipeline
+  before `gate` ran. **Two refuted theories on the way there, both plausible:** *load*
+  (5 concurrent runs — but 11 of the 12 runs in that window Succeeded, so contention was
+  not the discriminator) and *the empty `--allow-empty` retrigger commit* (the skip
+  reason was `PipelineRun was stopping`, not a changed-paths `when`). The command that
+  actually answers it:
+  ```bash
+  kubectl -n tekton-ci get taskrun -l tekton.dev/pipelineRun=<run> \
+    -o json | jq -r '.items[] | "\(.metadata.labels["tekton.dev/pipelineTask"]) \(.status.conditions[0].reason)"'
+  ```
 
 ## How to verify
 
