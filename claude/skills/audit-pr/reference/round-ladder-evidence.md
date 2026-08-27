@@ -163,13 +163,9 @@ that delete nothing all passed a suite its author had just "mutation-verified":
 - **swap the operands** of a merge/concat — inverts which side wins;
 - **invert the branches** of a CASE/ternary — here it turned a merge into an unconditional WIPE,
   strictly worse than the bug being fixed;
-- **comment the guard out** — the clause is dead but the TEXT is still present, so every regex
-  looking for it still matches;
+- **comment the guard out** — the clause is dead but the TEXT is still present (`--`, `/* */`), so
+  every regex looking for it still matches;
 - **re-bind a stale value** — literally the original defect, reintroduced.
-
-Why a text assertion needs the WHOLE statement: `--` and `/* */` make "the token is present" and
-"the clause is live" different facts, so a guard commented out still satisfies every regex looking
-for it.
 
 What would have caught all four: enumerating mutants from the expression's own semantic failure
 modes — operand order, branch order, comment-out, wrong bind, off-by-one — rather than from "delete

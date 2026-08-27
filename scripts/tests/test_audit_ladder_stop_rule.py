@@ -301,6 +301,15 @@ recorded as SURVIVED off an 11-passed run.
   T2   the B/C lesson's TAIL inverted ......... 1 failed  <- green until the
                                                 lesson was pinned WHOLE
 
+  added after the eighth audit -- the first two are the CHECKLIST, unpinned for
+  eight rounds while every round shaved words out of it to stay under budget:
+  S1   "rollback" shaved out of the Gaps item  1 failed  <- the actual regression
+  S2   the whole 9-item checklist replaced
+       with "whatever seems off" ............. 1 failed
+  S3   stderr-capture rule INVERTED ("fold it
+       into the sum so nothing escapes") ..... 1 failed
+  S4   reworded-rule regression shape deleted   1 failed
+
   the round-1 set, re-run against current strings:
   X3   gate command -> `echo 0` ............... 1 failed
   X4   ledger instruction deleted ............. 1 failed
@@ -551,6 +560,45 @@ SKILL_GATE_NO_PATHSPEC = (
 
 # The other two operator instructions this rule ships. Both survived a mutant
 # that deleted them outright before these pins existed.
+# 🔴 THE CHECKLIST ITSELF. Nine numbered items, pinned as one whole string --
+# this is the operational core of the skill and it was UNPINNED through eight
+# rounds. Measured: replacing the entire block with "**Audit for:** whatever
+# seems off." left the suite green.
+#
+# It is also the MECHANISM behind the worst regression of this PR. Every round
+# paid for new rules by shaving words out of exactly this region to stay under
+# the byte budget, and one of those shaves deleted "rollback" from item 4 while
+# the commit message claimed to have RESTORED it -- a multi-edit script whose
+# later assertion failed before its write, so the restore never landed and the
+# claim was written from intent rather than from the diff. Nothing observed it.
+# A reader of that message would believe the word was there and not look.
+#
+# Pinning the block whole means the next shave fails loudly, in the same commit.
+SKILL_AUDIT_CHECKLIST = (
+    "**Audit for:** 1. **Risks** — what breaks in production. 2. "
+    "**Regressions** — behaviour this silently alters or removes. 3. "
+    "**Assumptions** — unstated preconditions that may not hold. 4. **Gaps** — "
+    "error handling, edge cases, tests, migrations, rollback. 5. **Bugs** — "
+    "logic/correctness defects, with file:line. 6. **Issues** — quality, "
+    "maintainability, conventions. 7. **Behaviour changes** — observable "
+    "changes in output/API/UX, intended or not. If the PR claims to revert "
+    "behaviour, confirm it restores the pre-change state. 8. **Leaks** — "
+    "secrets, PII, resource/handle/memory, over-broad permissions. 9. "
+    "**Second-order consequences** — ripple effects on services, callers, data, "
+    "cost."
+)
+# The stderr-capture rule: deleting it, AND inverting it to "fold stderr into the
+# sum with 2>&1 so a failure cannot escape the count" (which reads plausible and
+# defeats the silent-stderr third of the rule beside it), were both green.
+SKILL_STDERR_CAPTURE = (
+    "Keep stderr on the terminal — folding it into the sum with `2>&1` makes "
+    "the one loud failure invisible."
+)
+# The regression shape this PR itself produced twice, added to the re-auditor's
+# checklist and unpinned until now.
+SKILL_REWORD_REGRESSION = (
+    "**the rule reworded wider on one axis and narrower on another**"
+)
 SKILL_LEDGER = (
     "**Carry the ledger in every round's summary**: `round N · payload lines "
     "changed THIS round: X (since round 1: Y) · elapsed: Z`."
@@ -960,6 +1008,15 @@ def test_the_two_operator_instructions_the_gate_depends_on_are_pinned():
     """
     _assert_pinned_once(SKILL_MD, SKILL_LEDGER, "the per-round ledger")
     _assert_pinned_once(SKILL_MD, SKILL_FINDING_LABELS, "the finding labels")
+    _assert_pinned_once(
+        SKILL_MD, SKILL_AUDIT_CHECKLIST, "the nine-item audit checklist"
+    )
+    _assert_pinned_once(
+        SKILL_MD, SKILL_STDERR_CAPTURE, "the stderr-capture rule"
+    )
+    _assert_pinned_once(
+        SKILL_MD, SKILL_REWORD_REGRESSION, "the reworded-rule regression shape"
+    )
 
 
 def test_the_stop_rule_shares_a_bullet_with_the_rule_it_bounds():

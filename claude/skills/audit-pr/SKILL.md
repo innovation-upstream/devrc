@@ -27,13 +27,13 @@ not a working checkout, and an auditor hitting this cold blames the PR. Whicheve
 **monorepo `node_modules`** may need linking per package, not just at the root; **whether the base
 branch is already red** and *at which file*; and that **zsh does not word-split unquoted
 parameters**, so `eslint $FILES` checks **zero** files and prints a confident PASS. Have it mutate
-only in a `cp -a` copy and leave your worktree clean.
+only in a `cp -a` copy, and verify your worktree clean yourself at the end.
 
 **Audit for:**
 1. **Risks** — what breaks in production.
 2. **Regressions** — behaviour this silently alters or removes.
 3. **Assumptions** — unstated preconditions that may not hold.
-4. **Gaps** — error handling, edge cases, tests, migrations.
+4. **Gaps** — error handling, edge cases, tests, migrations, rollback.
 5. **Bugs** — logic/correctness defects, with file:line.
 6. **Issues** — quality, maintainability, conventions.
 7. **Behaviour changes** — observable changes in output/API/UX, intended or not. If the PR claims to revert behaviour, confirm it restores the pre-change state.
