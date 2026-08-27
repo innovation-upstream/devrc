@@ -370,8 +370,13 @@ def do_notify(event, cwd, session):
 
     d = notify_desktop(title, body)
     # clawgate (phone push) is a FALLBACK: only when there's no local desktop
-    # toast (i.e. the headless workbench / away-from-laptop). Firing both would
-    # push a redundant phone card while the user is sitting at the laptop.
+    # toast — i.e. whenever notify_desktop() did not deliver one. Firing both
+    # would push a redundant phone card while the user is sitting at the machine.
+    # 🔴 This comment used to name "the headless workbench" as the example case.
+    # The workbench is NOT headless — it runs a real X/i3 session and does get
+    # desktop toasts. The branch is on the RESULT of notify_desktop(), never on
+    # which host this is, so the code was always right; only the example was
+    # wrong, and it would have taught a maintainer to expect no toast there.
     c = notify_clawgate(title, body, host, project, cwd, session) if not d else False
     # `coalesced=` is part of the log CONTRACT: it distinguishes a toast that
     # correctly merged N held turns from one that fired because the gate crashed
