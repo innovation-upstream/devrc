@@ -1,5 +1,18 @@
 # Handoff: devrc push keepalive (#782) — 2026-08-27
 
+> **STATUS — updated 2026-08-27 18:50Z (second session).** #782 closed and live. **#908 MERGED**
+> (`648f08c2`), #905 closed. **The only item left is step 2: arming the gate** — deliberately
+> deferred by Zach with its cost measured, not forgotten.
+>
+> 🔴 **If you read an earlier revision of this doc, two of its claims were wrong.** It said #908 was
+> *"awaiting the required approving review"* (no review is required — only two Tekton checks), and it
+> named **generation 572** as the keepalive's rollback target (generations have since churned to
+> **584**; roll back by content, not by number). Both corrected below.
+>
+> 🔴 **And step 2, as this doc originally wrote it, was DANGEROUS until `648f08c2` landed** — a
+> relative `githooks/install.sh` would have corrupted `~/.gitconfig` and broken git in every repo on
+> the box. See the CDPATH gotcha. It is safe now; invoke by absolute path.
+
 _No `clawgate-task:` front matter, deliberately._ The resolver returned **exit 6** with one link —
 **#306, role=`read`** — which is the *previous* session's clawgate task-threads card, fetched by
 `/resume`'s reconciler, not worked here. This session's work was **devrc issue #782**, a GitHub
@@ -36,13 +49,24 @@ the `pre-push` test gate runs. Reproduce it, fix it, ship it, and make it live.
   ServerAliveCountMax=6"` in `nix/programs/git/default.nix`, plus the two `GIT_SSH_COMMAND` exports
   that would otherwise bypass it (`scripts/claim-work.sh`, `scripts/resume-state.sh`), plus a
   ledger test over every such export.
-- **DEPLOYED AND LIVE** — `home-manager switch` run 2026-08-27, generation **573**.
-  `git config --global --get core.sshCommand` returns the value. Rollback: generation **572**.
+- **DEPLOYED AND LIVE** — first switched 2026-08-27 at generation **573**.
+  `git config --global --get core.sshCommand` returns the value.
+  🔴 **DO NOT use the rollback target this line used to name (generation 572).** Generations churn
+  fast here — 573 when this doc was written, **575** four hours later, **584** by 18:50Z the same
+  day, all from other sessions. Rolling back to a hardcoded number now discards unrelated deploys.
+  **Re-verify by CONTENT instead**, which is stable and was re-confirmed at gen 584:
+  `readlink -f ~/.config/git/config` → `…1yxm38gq0fnbp87d54438mmksgc3jsg3-hm_gitconfig`.
 - **Follow-on defect found and filed: issue #905** — `githooks/install.sh` cannot install the hooks
-  **at all** on a home-manager host. **Fix in review: PR #908, CI green, MERGEABLE, awaiting the
-  required approving review.** Not merged.
-- ⚠ **#908 merged ≠ the gate armed.** It fixes the installer; it does not run it. `core.hooksPath`
-  is still **empty** on this host and the blocking pre-push gate has never actually run here.
+  **at all** on a home-manager host. ✅ **CLOSED. Fix MERGED as `648f08c2` (PR #908), 2026-08-27
+  18:41Z**, after a blind pre-merge audit found a deploy-blocking defect in it (see the CDPATH
+  gotcha below). CI at the merged tip: nodetests 1292/1292, pytests 17250 passed / 0 failed.
+  ⚠ **This doc previously said #908 was "awaiting the required approving review". There is no such
+  requirement** — `main`'s protection requires only `tekton/devrc-nodetests` and
+  `tekton/devrc-pytests` (`required_pull_request_reviews` is **null**). An empty `reviewDecision`
+  means no review *exists*, not that one is *demanded*; reading it as a blocker cost a cycle.
+- ⚠ **#908 merged ≠ the gate armed. STILL TRUE, and it is now the only thing left.** It fixes the
+  installer; it does not run it. Re-verified 2026-08-27 18:50Z: `core.hooksPath` **unset**,
+  `~/.gitconfig` **absent**, the blocking pre-push gate has never run on this host.
 
 ### Verified vs merely deployed
 | claim | evidence |
@@ -83,19 +107,45 @@ the `pre-push` test gate runs. Reproduce it, fix it, ship it, and make it live.
 - **Next probe:** decide whether `measure.py` should read effective config
   (`git config --get core.hooksPath`, no `--global`) instead of scope-qualified. One-line change;
   the question is whether the measure *wants* scope or effect.
+- ✅ **RE-CHECKED against `origin/main` 2026-08-27 18:50Z — still live, still unfixed, and the
+  question above is ANSWERED.** The reader is now at **`scripts/present/measure.py:1284`** (the
+  `:1089` above had drifted; two commits touched the file on 2026-08-26, `e9c2adad` and `30acd174`,
+  both *before* this doc, so nothing landed under this item). The answer: **the function's own
+  docstring at `:1264` already says `git config --get core.hooksPath` "is what answers this"** —
+  i.e. the unqualified form — while the body at `:1284` runs `--local`/`--global`. That is a
+  docstring claiming something the code does not do, so the intended semantics are *effect*, not
+  scope, and the one-line change is simply making the body match the sentence above it.
+  ⚠ **#908 merging did NOT close this** — the merged installer still writes `core.hooksPath` into
+  `~/.gitconfig`, which is exactly the file `--global` still reads, so the "ruled out for today"
+  line remains true and the latent break remains latent.
 
 ## Next steps (ranked)
 🔴 Numbering is stable — `claim-work --slug-for <this doc> <rank>` is the lock; re-ranking
 re-points every live claim.
 
-1. **Review and merge devrc #908.** `IN FLIGHT: innovation-upstream/devrc#908` — CI green,
-   MERGEABLE, blocked only on the required approving review. Touches `githooks/install.sh`,
-   `githooks/README.md`, `scripts/tests/test_githooks_install_readonly_global.py`,
-   `scripts/tests/mutants-install-sh.sh`.
-2. **Run `githooks/install.sh` for the first time on this host** — *after* #908 merges. 🔴 This is
-   the real threshold, not the merge: success arms a **blocking** pre-push gate
-   (`TESTS_ON_PUSH=on` inside devrc) that has never run here. #782's keepalive is deployed, so the
-   pairing is right. Watch that first push; verify with `git ls-remote`, never the wrapper's rc.
+🔴 **Ranks are NOT renumbered when an item completes** — a claim slug is `<doc>-<rank>`, so
+renumbering silently re-points every live claim at a different item. A finished item is struck
+through in place and the number is retired with it.
+
+1. ~~**Review and merge devrc #908.**~~ ✅ **DONE 2026-08-27 18:41Z — merged as `648f08c2`,
+   branch deleted, #905 auto-closed.** Verified by CONTENT (`git show origin/main:githooks/install.sh`
+   carries `CDPATH= cd -P` and `_reject_bad_dir`), never by ancestry — **a squash merge is never an
+   ancestor of its base**. Shipped with two extra commits from the audit ladder; see the CDPATH
+   gotcha. Rank retired; do not reuse `782-keepalive-1`.
+2. 🔴 **NOW THE TOP ITEM. Run `githooks/install.sh` for the first time on this host.** The installer
+   is finally both *installable* (#908) and *safe to invoke* (the CDPATH fix). This is the real
+   threshold, not the merge: success arms a **blocking** pre-push gate (`TESTS_ON_PUSH=on` inside
+   devrc) that has never run here. #782's keepalive is deployed, so the pairing is right.
+   Watch that first push; verify with `git ls-remote`, never the wrapper's rc.
+   ⚠ **PRICE IT BEFORE ARMING — this reaches other people's sessions, not just yours.**
+   `core.hooksPath` is set **GLOBALLY**, for every repo and every concurrent session on the box.
+   Measured 2026-08-27: the devrc suite takes **10m37s** (8798 tests), **~20 devrc worktrees** on
+   this host satisfy `tests-on-push.sh`'s applicability gate, and ~15 agent sessions run
+   concurrently. Repos carrying a **repo-local** `core.hooksPath` are unaffected (measured:
+   `homelab-talos` + 17 of its worktrees, `kubeclaw{,-cloud,-embed}`, `promptver`) — a local value
+   overrides the global one entirely. **Zach deferred this deliberately on 2026-08-27 with those
+   numbers in view; it is a decision awaiting him, not an oversight.**
+   🔴 Invoke by **absolute** path (`$HOME/workspace/devrc/githooks/install.sh`).
 3. **Fix or close the `measure.py` latent misreport** (see Open investigations). Repo `devrc`,
    file `scripts/present/measure.py`.
 4. **Deploy to the laptop** — `home-manager switch` there picks up the keepalive. Unverified;
@@ -103,6 +153,39 @@ re-points every live claim.
 
 ## Gotchas / decisions / dead-ends
 
+- 🔴 **RUNNING STEP 2 AS THIS DOC ORIGINALLY WROTE IT WOULD HAVE BRICKED GIT ON THE WHOLE BOX.**
+  Found 2026-08-27 by a **blind** pre-merge audit of #908 (the diff and a checklist, deliberately
+  *not* the prior round's conclusions — a framed audit verifies the frame). `CDPATH` is **exported**
+  on this host (`.:/home/zach/workspace:/home/zach/workspace/civit`), and bash `cd` **echoes** the
+  directory whenever it resolves one via CDPATH. So a **relative** invocation — `githooks/install.sh`,
+  the shape the installer's own header documented and the shape step 2 invited — made the command
+  substitution capture cd's echo *and* `pwd`, and `$DIR` became a **two-line string**. `$DIR` is
+  interpolated into the provenance stamp, so line 2 landed in `~/.gitconfig` **as config**:
+  every later git command in every repo died `fatal: bad config line 4`, including the `--uninstall`
+  that would repair it. Recovery was manual only. At `origin/main` this was inert (the installer died
+  at its first `--global` write); **#908 is what made it reachable**, so the ladder caught it in the
+  exact window where it existed. Fixed in `648f08c2` on two independent axes — `CDPATH= cd -P --`,
+  plus a `_reject_bad_dir` refusal of any `$DIR` that is not a single-line path to a real directory.
+  **A relative invocation is safe now; the absolute form is still the documented one.**
+  ⚠ **21 other tracked `.sh` files still carry the unhardened idiom** (`scripts/gate.sh:136`,
+  `scripts/run-tests.sh:282`, `scripts/initiatives/run-viewer.sh:23`, …). None writes global git
+  config, so none carries this blast radius — the fix was scoped to #908's two files on purpose.
+- 🔴 **THE SUITE WAS STRUCTURALLY BLIND TO IT, AND THAT IS THE REUSABLE LESSON.** `_install()`
+  always invoked the installer by **absolute** path — the one invocation shape that cannot exhibit
+  the bug — so `CDPATH` passed through the fixture's env *inert*. Every test passed, the mutation
+  battery was "well-validated", and the defect sat in the dimension the harness **pinned**. Ask what
+  dimension your fixture holds constant; widening the harness IS the fix, not extra work.
+- 🔴 **Three guards written during that fix were wrong in ways that read as correct — each caught
+  only by a control, never by re-reading.** (1) The refusal's first spelling used
+  `*"$(printf '\n')"*`; command substitution **strips trailing newlines**, so the pattern was the
+  empty string, degraded to `**`, and refused every well-formed `$DIR` — 14 failures. (2) Two
+  mutants **SURVIVED** and were nearly filed as a coverage gap; they survived *correctly*, because
+  three independent defences meant no single-line mutation could defeat them all (the fix: consolidate
+  to one refusal path, then a two-substitution mutant). (3) A regression test's skip was retied to the
+  installer's `rc`, which **silently disarmed it** at the pre-fix tip — the installer creates the
+  corrupt file and *then* exits non-zero downstream, so the test skipped over the very corruption it
+  existed to catch. Only re-running the red control showed it. **Re-run the red control after every
+  edit to a test, not just after edits to the code it guards.**
 - 🔴 **`githooks/install.sh` cannot write global git config on a home-manager host.** `git config
   --global` resolves to `~/.config/git/config`, a **symlink into the read-only nix store**;
   `~/.gitconfig` does not exist. The installer dies `could not lock config file … Read-only file
@@ -195,9 +278,12 @@ git -C ~/workspace/devrc show origin/main:nix/programs/git/default.nix | grep -n
 #   Arm the hook with a REPO-LOCAL core.hooksPath in a throwaway clone — never `githooks/install.sh`,
 #   which sets it GLOBALLY for every session on the box.
 
-# #908's state
-gh pr view 908 --repo innovation-upstream/devrc --json state,mergeable,statusCheckRollup
+# #908 landed — by CONTENT, never by ancestry (it was SQUASH-merged, so
+# `merge-base --is-ancestor` returns FALSE forever and that is NOT "unmerged").
+gh pr view 908 --repo innovation-upstream/devrc --json state,mergedAt,mergeCommit
+git -C ~/workspace/devrc show origin/main:githooks/install.sh | grep -n 'CDPATH= cd -P\|_reject_bad_dir'
 
-# the gate is NOT armed until someone runs the installer
+# the gate is NOT armed until someone runs the installer — re-checked 18:50Z, still unset
 git config --global --get core.hooksPath       # -> empty, expected, until step 2 above
+ls ~/.gitconfig                                # -> absent, expected, until step 2 above
 ```
