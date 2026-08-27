@@ -165,7 +165,14 @@ On the workbench a `switch` + an extension reload is the whole procedure.
 
 ## status
 ```bash
-# services (run per host; laptop via ssh zach@10.42.0.100). i3-source+keylog laptop-only.
+# services (run per host; laptop via ssh zach@10.42.0.100). All five are LOADED on BOTH
+# hosts — measured 2026-08-27. Four read `active`; `claude-activity-source` reads
+# `inactive` on both because it is a timer-driven oneshot, which is correct, not a fault.
+# 🔴 This line read "i3-source+keylog laptop-only" until 2026-08-27. That was the SAME
+# retracted claim the source table above already corrects (`keys`/`i3` are ✅ on both —
+# the workbench runs a real X/i3 session). It survived every earlier retraction because
+# it lives in a COMMAND COMMENT, and a prose sweep does not read those. Believing it
+# means not checking half the fleet: run this on both hosts, always.
 systemctl --user is-active activity-collector keylog browser-activity-receiver claude-activity-source i3-source
 journalctl --user -u activity-collector -n 20 --no-pager        # ship failures / drops
 ls -la ~/.local/state/activity/spool/                            # backlog = unsent segments (offline buffer)
@@ -182,7 +189,11 @@ curl -s --user "activity_reader:$RPW" --data-binary "SELECT dateDiff('second', m
 ```bash
 # invariants + cross-source reconciliation (always); --replay adds the controlled-replay assertions
 CLICKHOUSE_URL=$CH CLICKHOUSE_USER=activity_reader CLICKHOUSE_PASSWORD=$RPW python3 ~/workspace/devrc/scripts/validation/validate.py
-# keystroke-replay assertions REQUIRE the laptop's X session — run there, not on the headless workbench
+# keystroke-replay assertions need a live X session. Historically this said "run there, not on
+# the headless workbench" — 🔴 the WORKBENCH IS NOT HEADLESS (it runs a real X/i3 session; keylog
+# and i3-source are active on it). That reason was false. Whether the replay actually PASSES on
+# the workbench is UNMEASURED — nobody has run it there. Until someone does, the laptop stays the
+# known-good host; do not read this as "the workbench cannot run it".
 ```
 Current invariant set: `active_ms_capped` + `per_host_hour_active_cap` are **retired**
 (extension `active_ms` no longer emitted), replaced by **`derived_attention_consistent`**
