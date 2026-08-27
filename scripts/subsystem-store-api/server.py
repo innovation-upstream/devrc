@@ -451,11 +451,28 @@ def _parse_token_row(fields: list[str], index: int, total: int) -> TokenRecord:
         # impossible, so it would land here — and landing here is the point: a
         # line this parser cannot read is a startup failure, never a guess about
         # which of two readings the operator meant.
+        #
+        # ⚠ AND THE MESSAGE NAMES THE LIKELY TYPO WITHOUT ADMITTING IT. `<tok>
+        # zach a, b` is FOUR fields, because the space after the comma splits
+        # the scope list in two — a diagnostic of "4 fields, expected 1 or 3"
+        # is correct and useless, and the operator's next move is to stare at a
+        # line that looks like it has three of them. The hint is appended, never
+        # substituted for the refusal, and it is CONDITIONAL on evidence in the
+        # row (a comma past the identity field) rather than being guessed: the
+        # `<tokenA> <tokenB>` case has no comma and still gets the sentence
+        # about two tokens, which is ITS likely cause.
+        hint = ""
+        if len(fields) > 3 and any("," in f for f in fields[2:]):
+            hint = (
+                ". Field 3 is a comma-separated list with NO SPACES — write "
+                "`alpha,beta`, not `alpha, beta`: a space is what separates the "
+                "three fields, so `alpha, beta` is two of them"
+            )
         raise ValueError(
             f"malformed token row {index} of {total}: {len(fields)} fields, "
             f"expected 1 (a bare legacy token) or 3 (token, identity, "
             f"comma-separated scopes). Whitespace separates the three FIELDS, "
-            f"so two tokens on one line is no longer two tokens"
+            f"so two tokens on one line is no longer two tokens{hint}"
         )
     token = fields[0]
     if len(fields) == 1:
@@ -1764,6 +1781,32 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
     # would then see the whole store. An empty tuple is the fail-closed
     # direction: nothing is visible until a matched record says otherwise, and a
     # legacy record is the ONLY thing that can put `None` here.
+    #
+    # ⚠ ALL FIVE `= ()` SITES ARE EQUIVALENT MUTANTS TODAY, RECORDED RATHER THAN
+    # LEFT AS UNEXPLAINED SURVIVORS — the same treatment `send_error`'s
+    # `close_connection` and its reset already get, and for the same reason: an
+    # unexplained survivor reads either as a missing test or as a guard somebody
+    # may delete. MEASURED, one site at a time, each against the FULL
+    # `test_subsystem_store_api.py` suite: substituting `= None` at this
+    # declaration or at any of the four resets (`_reject_write`, `send_error`,
+    # `_request_path`'s `ValueError` branch, `_handle`) leaves 375/375 passing.
+    #
+    # WHY, precisely — and it is a REACHABILITY fact, not a coverage gap: every
+    # entry point into this handler assigns this field before any route can read
+    # it. `_handle` and `_reject_write` reset then either `authorize` (which
+    # overwrites it from the matched record) or refuse and return; `send_error`
+    # and the `_request_path` branch answer 401 and never reach a read route.
+    # There is no path on which the RESET VALUE is what a route observes, so no
+    # test can distinguish the two — writing one would mean inventing a caller
+    # that does not exist.
+    #
+    # 🔴 SO THE COMMENTS BELOW DESCRIBE A DIRECTION, NOT A LIVE GUARD. They are
+    # kept because the direction is the whole design — the day a refactor adds a
+    # route that runs before `authorize`, `()` serves nothing and `None` serves
+    # the entire store — but nobody should read them as "this is pinned by a
+    # test". It is not, it cannot be while the resets are unreachable, and
+    # saying so here is cheaper than a future reader re-deriving it from a
+    # green sweep.
     _visible_scopes: "tuple[str, ...] | None" = ()
     # The matched credential's name, for the audit line. `-` until one matches.
     _identity: str | None = None
@@ -1986,7 +2029,9 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
         # 🔴 RESET TO `()` — nothing visible — NOT to the unrestricted `None`.
         # See the class-level declaration: this is the fail-closed direction,
         # and it is the reset value precisely because a reset runs on paths
-        # that never reach `authorize`.
+        # that never reach `authorize`. ⚠ EQUIVALENT MUTANT — `= None` here
+        # passes the full suite, because nothing reads the field before it is
+        # reassigned. Recorded at the declaration; not pinned by any test.
         self._visible_scopes = ()
         self._identity = None
         path = self._request_path()
@@ -2052,7 +2097,9 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
         # 🔴 RESET TO `()` — nothing visible — NOT to the unrestricted `None`.
         # See the class-level declaration: this is the fail-closed direction,
         # and it is the reset value precisely because a reset runs on paths
-        # that never reach `authorize`.
+        # that never reach `authorize`. ⚠ EQUIVALENT MUTANT — `= None` here
+        # passes the full suite, because nothing reads the field before it is
+        # reassigned. Recorded at the declaration; not pinned by any test.
         self._visible_scopes = ()
         self._identity = None
         # ⚠ THAT RESET IS AN EQUIVALENT MUTANT ON THIS PATH, RECORDED RATHER
@@ -2155,7 +2202,9 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
             # 🔴 RESET TO `()` — nothing visible — NOT to the unrestricted `None`.
             # See the class-level declaration: this is the fail-closed direction,
             # and it is the reset value precisely because a reset runs on paths
-            # that never reach `authorize`.
+            # that never reach `authorize`. ⚠ EQUIVALENT MUTANT — `= None` here
+            # passes the full suite, because nothing reads the field before it is
+            # reassigned. Recorded at the declaration; not pinned by any test.
             self._visible_scopes = ()
             self._identity = None
             self._unauthorized()
@@ -2198,7 +2247,9 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
         # 🔴 RESET TO `()` — nothing visible — NOT to the unrestricted `None`.
         # See the class-level declaration: this is the fail-closed direction,
         # and it is the reset value precisely because a reset runs on paths
-        # that never reach `authorize`.
+        # that never reach `authorize`. ⚠ EQUIVALENT MUTANT — `= None` here
+        # passes the full suite, because nothing reads the field before it is
+        # reassigned. Recorded at the declaration; not pinned by any test.
         self._visible_scopes = ()
         self._identity = None
         path = self._request_path()

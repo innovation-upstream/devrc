@@ -5811,6 +5811,38 @@ class TestScopedTokenRowGuards:
             api.load_tokens(path, {}, warn=lambda _l: None)
         assert "malformed token row 1 of 1" in str(exc.value)
         assert "4 fields" in str(exc.value)
+        # 🔴 THE NEGATIVE HALF OF THE TYPO HINT, and it is what stops the hint
+        # becoming noise. There is no comma anywhere in this row, so a
+        # comma-spacing explanation would be a wrong guess printed with the same
+        # confidence as the count. A hint that fires unconditionally is a hint
+        # nobody reads.
+        assert "NO SPACES" not in str(exc.value)
+
+    def test_GUARD_6_a_SPACE_AFTER_A_COMMA_is_told_what_it_actually_did(
+        self, tmp_path: Path
+    ):
+        """🔴 FAIL-CLOSED IS NOT THE SAME AS DIAGNOSTIC. `<tok> zach a, b` is a
+        four-field row because the space after the comma split the scope list,
+        and the row is correctly refused — but "4 fields, expected 1 or 3" sends
+        the operator to count fields on a line that looks like it has three.
+
+        The refusal is unchanged: same guard, same prefix, same count. Only the
+        sentence after it is new, and it is conditional on a comma actually
+        being present past the identity, so it cannot be printed as a guess.
+        """
+        path = self._write(
+            tmp_path, f"{ZACH_TOKEN} zach {ALLOW_SCOPE}, {DENY_SCOPE}"
+        )
+        with pytest.raises(ValueError) as exc:
+            api.load_tokens(path, {}, warn=lambda _l: None)
+        message = str(exc.value)
+        # The guard is NOT weakened — it still refuses, still by field count.
+        assert "malformed token row 1 of 1" in message
+        assert "4 fields" in message
+        # …and now says what to do about it.
+        assert "NO SPACES" in message
+        assert "`alpha,beta`, not `alpha, beta`" in message
+        assert ZACH_TOKEN not in message
 
     def test_GUARD_7_an_identity_outside_the_charset_is_refused(self, tmp_path: Path):
         # Passes guard 6: three fields. Fails only on the identity's spelling.
@@ -6191,8 +6223,16 @@ class TestEnumerationChannelsAreClosed:
         text = body.decode()
         assert KELP_NUANCE in text, "the caller's own content vanished"
         assert DENY_SCOPE not in text
-        assert "broken-shard" not in text
-
+        # ⚠ `assert "broken-shard" not in text` WAS HERE AND HAS BEEN DELETED AS
+        # VACUOUS, not moved. `render_malformed` emits `elsewhere` as a COUNT
+        # with its scopes named and DELIBERATELY never a filename ("naming the
+        # scopes makes it actionable without putting another scope's filenames,
+        # which are client-identifying, on this screen"). So no filename from
+        # another scope is rendered at base OR at HEAD, for ANY token — the
+        # assertion could not have failed and was reading as coverage while
+        # providing none. The line above is the real guard for this channel; the
+        # filename half is pinned where it CAN fail, in the positive control
+        # below, which drives the reading that does render the block.
     def test_CHANNEL_2_POSITIVE_CONTROL_a_legacy_token_DOES_see_it(
         self, scoped_store: Path
     ):
@@ -6205,10 +6245,20 @@ class TestEnumerationChannelsAreClosed:
             _c, _h, body = fetch(
                 f"{base}/api/v1/recall/{ALLOW_SCOPE}", token=GOOD_TOKEN
             )
-        assert DENY_SCOPE in body.decode(), (
+        text = body.decode()
+        assert DENY_SCOPE in text, (
             "the fixture produced no cross-scope malformed block, so the "
             "negative assertion above proves nothing"
         )
+        # 🔴 AND THE BLOCK IS A COUNT, NOT A ROW — pinned HERE because this is
+        # the only reading in which the block is rendered at all, so it is the
+        # only place the claim can fail. `render_malformed`'s contract is that a
+        # scope OUTSIDE the one being recalled contributes its name and a number
+        # and never a filename, because filenames are client-identifying. An
+        # unrestricted caller is the widest reading there is: if `broken-shard`
+        # is absent from THIS body, no narrower caller can see it either.
+        assert "broken-shard" not in text
+        assert "1 further malformed entry in OTHER scopes" in text
 
     def test_CHANNEL_3_all_scopes_search_narrows_to_the_callers_own(
         self, scoped_store: Path
@@ -6228,6 +6278,18 @@ class TestEnumerationChannelsAreClosed:
         assert QUARTZ_NUANCE not in text
         assert DENY_SCOPE not in text
         assert THIRD_SCOPE not in text
+        # 🔴 NARROWED IS NOT EMPTIED, AND WITHOUT THESE THREE THE TEST ABOVE IS
+        # SATISFIED BY A SEARCH THAT LOOKED AT NOTHING. Measured: with
+        # `scopes_searched` forced to `()` the body renders "searched 0 entries
+        # in (none)" — which contains no denied scope name and no denied content,
+        # so every assertion above passes while the feature is entirely inert.
+        #
+        # The caller's OWN scope must be named, the placeholder must be absent,
+        # and the COUNT must have moved off zero. Three independent facts,
+        # because a renderer could satisfy any one of them by accident.
+        assert ALLOW_SCOPE in text, "the caller's own scope was not searched"
+        assert "(none)" not in text
+        assert "searched 1 entry" in text
 
     def test_CHANNEL_3_POSITIVE_CONTROL_a_legacy_token_DOES_find_it(
         self, scoped_store: Path
@@ -6282,6 +6344,15 @@ class TestEnumerationChannelsAreClosed:
         """`?scope=` reaches the filesystem directly, so it is its own door into
         the same store — and it must answer for a denied scope exactly what it
         answers for one that never existed.
+
+        🔴 COMPARED AS BYTES AND AS A HEADER SET, the way
+        `TestRefusedIsIndistinguishableFromAbsent` compares its pair. This test
+        used to check three NAMED facts — the code, one header and the member
+        list — which is a claim about the three things somebody thought of. The
+        docstring promises "exactly what it answers", and exactly is a byte
+        comparison: a fourth `X-Store-*` header, or a differing tar footer, would
+        discriminate a refused scope from an absent one while every named
+        assertion stayed green.
         """
         with running(scoped_store, tokens=(ZACH,)) as (base, _):
             denied = fetch(
@@ -6290,8 +6361,27 @@ class TestEnumerationChannelsAreClosed:
             phantom = fetch(
                 f"{base}/api/v1/snapshot?scope={PHANTOM_SCOPE}", token=ZACH_TOKEN
             )
+
+        def store_headers(headers: dict) -> tuple:
+            return tuple(
+                sorted(
+                    (k, v) for k, v in headers.items() if k.lower().startswith("x-store")
+                )
+            )
+
         assert denied[0] == phantom[0] == 200
-        assert denied[1]["X-Store-Entries"] == phantom[1]["X-Store-Entries"] == "0"
+        assert store_headers(denied[1]) == store_headers(phantom[1]), (
+            f"X-Store-* headers differ:\n denied ={store_headers(denied[1])}\n"
+            f" phantom={store_headers(phantom[1])}"
+        )
+        assert denied[2] == phantom[2], (
+            "the tar BYTES differ — a refused scope is distinguishable from an "
+            f"absent one:\n denied ={denied[2]!r}\n phantom={phantom[2]!r}"
+        )
+        # 🔴 AND THE SHARED ANSWER IS THE EMPTY ARCHIVE, not two identical
+        # errors: byte-identity between two 503s would satisfy everything above
+        # while serving nothing. Same reasoning as the recall/search pair.
+        assert denied[1]["X-Store-Entries"] == "0"
         for body in (denied[2], phantom[2]):
             with tarfile.open(fileobj=io.BytesIO(body), mode="r") as tar:
                 assert tar.getnames() == []
@@ -6416,25 +6506,26 @@ class TestRefusedIsIndistinguishableFromAbsent:
         assert b"NOTHING RECORDED YET" in refused[2].upper()
         assert QUARTZ_NUANCE.encode() not in refused[2]
 
+    SEARCH_QUERY = f"/api/v1/search/{DENY_SCOPE}?q=drill+head+overheats"
+
     def test_SEARCH_a_refused_scope_is_BYTE_IDENTICAL_to_one_that_never_existed(
         self, tmp_path: Path
     ):
         root, present, absent = self._phases(tmp_path)
-        query = f"/api/v1/search/{DENY_SCOPE}?q=drill+head+overheats"
         present()
-        refused = self._ask(root, ZACH, query)
+        refused = self._ask(root, ZACH, self.SEARCH_QUERY)
         absent()
-        never = self._ask(root, ZACH, query)
+        never = self._ask(root, ZACH, self.SEARCH_QUERY)
 
         assert refused[0] == never[0] == 200
         assert refused[1] == never[1], f"{refused[1]} != {never[1]}"
         assert refused[2] == never[2]
         assert dict(refused[1])["X-Store-Status"] == "scope-absent"
 
-    def test_POSITIVE_CONTROL_the_comparison_CAN_see_the_difference(
+    def test_POSITIVE_CONTROL_the_RECALL_comparison_CAN_see_the_difference(
         self, tmp_path: Path
     ):
-        """🔴 WITHOUT THIS, BOTH TESTS ABOVE ARE SATISFIED BY A SERVER THAT
+        """🔴 WITHOUT THIS, THE RECALL TEST ABOVE IS SATISFIED BY A SERVER THAT
         ANSWERS THE SAME BYTES TO EVERYTHING.
 
         The same two phases, driven by an UNRESTRICTED legacy token: present ->
@@ -6452,6 +6543,36 @@ class TestRefusedIsIndistinguishableFromAbsent:
         assert dict(gone[1])["X-Store-Status"] == "scope-absent"
         assert seen[2] != gone[2]
         assert QUARTZ_NUANCE.encode() in seen[2]
+
+    def test_POSITIVE_CONTROL_the_SEARCH_comparison_CAN_see_the_difference(
+        self, tmp_path: Path
+    ):
+        """🔴 THE SEARCH PATH HAD NO POSITIVE CONTROL AT ALL, and the recall one
+        does not cover it: they are different routes, different renderers and
+        different statuses.
+
+        An equality between two responses is only evidence if the pair CAN
+        differ. This server fail-closes to an EMPTY body without
+        `SUBSYSTEM_STORE_TRUSTED_PROXIES` and a `CF-Connecting-IP` header, and
+        two empty bodies compare identical — so "byte-identical" is exactly the
+        assertion a broken harness satisfies best. Same two phases, same query,
+        an UNRESTRICTED token: present -> `search-hit` carrying the matched
+        nuance, absent -> `scope-absent`. Both non-empty, and different.
+        """
+        root, present, absent = self._phases(tmp_path)
+        present()
+        found = self._ask(root, GOOD_TOKEN, self.SEARCH_QUERY)
+        absent()
+        gone = self._ask(root, GOOD_TOKEN, self.SEARCH_QUERY)
+
+        assert found[0] == gone[0] == 200
+        assert dict(found[1])["X-Store-Status"] == "search-hit"
+        assert dict(gone[1])["X-Store-Status"] == "scope-absent"
+        assert found[2] != gone[2]
+        assert QUARTZ_NUANCE.encode() in found[2]
+        # …and neither body is the empty string, which is what a fail-closed
+        # server returns and what would make the equality above vacuous.
+        assert found[2] and gone[2]
 
 
 class TestScopeRevisionIsGatedByConstruction:
@@ -6663,6 +6784,100 @@ def _make_unreadable(store: Path, scope: str, kind: str) -> Path:
     else:  # pragma: no cover - a typo in a test argument is a test bug
         raise AssertionError(kind)
     return target
+
+
+class TestTheLoaderItselfTakesTheAllowlist:
+    """🔴 `load_index` DIRECTLY — the surface `load_store` hides.
+
+    `load_store` narrows its RESULT as well, so through that door three separate
+    mutations of the loader's own filter are invisible: an empty allowlist read
+    as unrestricted, a denied scope's NAME registered before the skip, and a
+    directory name compared unfolded. Each was measured SURVIVING a sweep that
+    only drove `load_store`, and each is a real defect for the OTHER callers of
+    this function — `subsystem_touch`, and anything that hands the result
+    somewhere the post-filter is not.
+
+    The seam guard is the pair: these tests plus the `load_store` ones above.
+    Neither half alone pins the loader.
+    """
+
+    def _store(self, tmp_path: Path, *scope_dirs: str) -> Path:
+        """A store whose scope DIRECTORY NAMES are exactly as given.
+
+        Spelled by hand rather than through `_build_store`, because one test
+        below needs a directory whose name does NOT equal its own folded form
+        and that fixture is the whole point of it.
+        """
+        root = tmp_path / "store"
+        for name in scope_dirs:
+            (root / name).mkdir(parents=True)
+            (root / name / f"{name}-entry.md").write_text(
+                _entry(f"{name}-entry", name, nuance=f"- 2026-03-04: {name} drifts.")
+            )
+        return root
+
+    def test_POSITIVE_CONTROL_no_allowlist_loads_every_scope(self, tmp_path: Path):
+        """Without this the three tests below are satisfied by a loader that
+        returns an empty index for everything.
+        """
+        root = self._store(tmp_path, ALLOW_SCOPE, DENY_SCOPE)
+        index = api.rc.load_index(root, on_malformed="collect")
+        assert set(index.scopes) == {ALLOW_SCOPE, DENY_SCOPE}
+
+    def test_an_EMPTY_allowlist_registers_NO_scope_not_EVERY_scope(
+        self, tmp_path: Path
+    ):
+        """🔴 THE ASYMMETRY, PINNED AT THE LOADER TOO. `None` and `()` are both
+        falsy, so a filter written `if allowed and …` treats "you may see
+        nothing" as "you may see everything" — a total bypass, and one that every
+        test with a POPULATED allowlist passes.
+
+        `load_store` re-narrows its result, which is why this mutation survives
+        entirely when measured through that door. Here there is nothing in the
+        way.
+        """
+        root = self._store(tmp_path, ALLOW_SCOPE, DENY_SCOPE)
+        index = api.rc.load_index(root, on_malformed="collect", visible_scopes=())
+        assert index.scopes == ()
+        assert len(index) == 0
+
+    def test_a_denied_scopes_NAME_is_not_registered_either(self, tmp_path: Path):
+        """🔴 SKIPPING THE READ IS NOT SKIPPING THE SCOPE. A filter placed one
+        line too late still appends the directory name to `extra_scopes`, so the
+        denied scope arrives on `index.scopes` — the `known_scopes` enumeration
+        channel — having never been opened. It reads as fixed and leaks the one
+        fact the channel was about: that the scope EXISTS.
+
+        Invisible through `load_store`, which drops the key again on the way out.
+        """
+        root = self._store(tmp_path, ALLOW_SCOPE, DENY_SCOPE)
+        index = api.rc.load_index(
+            root, on_malformed="collect", visible_scopes=(ALLOW_SCOPE,)
+        )
+        assert index.scopes == (ALLOW_SCOPE,)
+
+    def test_the_DIRECTORY_NAME_is_FOLDED_before_it_is_compared(
+        self, tmp_path: Path
+    ):
+        """🔴 OVER-FILTERING, AND THE FIXTURE HAS TO REACH IT. Every other store
+        in this file has directory names that are already their own folded form,
+        so a filter comparing the RAW `scope_dir.name` behaves identically and
+        the mutation survives. Here the directory really is spelled
+        `Kelp_Forest`: the index key it produces is `kelp-forest`, so an
+        allowlist naming `kelp-forest` must still match it, and an unfolded
+        comparison silently empties the caller's OWN scope.
+        """
+        raw_dir = "Kelp_Forest"
+        assert api.rc.normalize_ref(raw_dir) == ALLOW_SCOPE != raw_dir, (
+            "the fixture directory must NOT already equal its folded form, or "
+            "this test measures nothing"
+        )
+        root = self._store(tmp_path, raw_dir, DENY_SCOPE)
+        index = api.rc.load_index(
+            root, on_malformed="collect", visible_scopes=(ALLOW_SCOPE,)
+        )
+        assert index.scopes == (ALLOW_SCOPE,)
+        assert len(index) == 1
 
 
 class TestUnreadableEntriesInDeniedScopes:
@@ -6881,18 +7096,39 @@ class TestScopeFilteringIsNotAWriteVerb:
     def test_the_route_set_did_NOT_grow(self):
         assert set(api.API_ROUTES) == {"recall", "search", "snapshot"}
 
-    def test_every_write_verb_is_STILL_405_with_a_valid_SCOPED_token(
+    def test_every_write_verb_is_STILL_405_on_EVERY_ROUTE_with_a_SCOPED_token(
         self, scoped_store: Path
     ):
+        """🔴 EVERY ROUTE, ENUMERATED FROM `API_ROUTES` ITSELF — not `/recall`
+        alone, which is what this used to probe.
+
+        The two guards in this class were jointly walkable. A `do_POST` added on
+        `/snapshot` passed BOTH: the route SET is unchanged, so
+        `test_the_route_set_did_NOT_grow` is green, and the only path this test
+        exercised was `/recall`. Driving the table means a route added to
+        `API_ROUTES` is automatically probed, and a verb added to one existing
+        route is caught by the route it was added to.
+        """
+        # A path per route, so the request reaches the route rather than the
+        # `bad request: invalid path component` branch. Keyed on the ledger, and
+        # asserted TOTAL below, so a new route cannot be silently unprobed.
+        paths = {
+            "recall": f"/api/v1/recall/{ALLOW_SCOPE}",
+            "search": f"/api/v1/search/{ALLOW_SCOPE}?q=tide",
+            "snapshot": "/api/v1/snapshot",
+        }
+        assert set(paths) == set(api.API_ROUTES), (
+            "a route exists that this test has no path for, so it would go "
+            f"unprobed: {sorted(set(api.API_ROUTES) ^ set(paths))}"
+        )
         with running(scoped_store, tokens=(ZACH,)) as (base, _):
-            for method in ("POST", "PUT", "PATCH", "DELETE"):
-                code, _h, body = fetch(
-                    f"{base}/api/v1/recall/{ALLOW_SCOPE}",
-                    token=ZACH_TOKEN,
-                    method=method,
-                )
-                assert code == 405, f"{method} answered {code}"
-                assert body == b"read-only\n"
+            for route, path in sorted(paths.items()):
+                for method in ("POST", "PUT", "PATCH", "DELETE"):
+                    code, _h, body = fetch(
+                        f"{base}{path}", token=ZACH_TOKEN, method=method
+                    )
+                    assert code == 405, f"{method} {route} answered {code}"
+                    assert body == b"read-only\n", f"{method} {route}: {body!r}"
 
     def test_a_full_scoped_read_workload_leaves_the_store_BYTE_IDENTICAL(
         self, scoped_store: Path

@@ -5172,14 +5172,22 @@ class TestDegradationMutationKills:
             tmp_path,
             "m_collect",
             [
-                # The anchor moved when `load_store` grew its `visible_scopes`
-                # narrowing: the load is now bound to a name so the index can be
-                # filtered before it is returned. The MUTATION is unchanged —
-                # drop `on_malformed=ON_MALFORMED_COLLECT` and nothing else — and
-                # it is still the narrowest expression that can be wrong.
+                # The anchor has moved TWICE now. First when `load_store` grew
+                # its `visible_scopes` narrowing (the load became a bound name so
+                # the index could be filtered before being returned), and again
+                # when that allowlist was pushed DOWN into `load_index` so a
+                # denied scope is never opened — which wrapped the call across
+                # four lines.
+                #
+                # 🔴 THE MUTATION IS STILL THE SAME ONE, AND STILL THE NARROWEST
+                # EXPRESSION THAT CAN BE WRONG: drop `on_malformed=` and NOTHING
+                # else. `visible_scopes=` is deliberately KEPT in the mutant, so
+                # this test measures the COLLECT policy and cannot be satisfied
+                # (or broken) by the scope filter — a mutant that removed both
+                # would die for whichever reason fired first.
                 (
-                    "        index = load_index(store, on_malformed=ON_MALFORMED_COLLECT)",
-                    "        index = load_index(store)",
+                    "            on_malformed=ON_MALFORMED_COLLECT,\n",
+                    "",
                 )
             ],
         )

@@ -1821,11 +1821,26 @@ def load_index(
     # mutation sweep cannot kill. Stated rather than left to look covered.
     for scope_dir in sorted(p for p in Path(root).iterdir() if p.is_dir()):
         if allowed is not None and normalize_ref(scope_dir.name) not in allowed:
-            # 🔴 `continue` BEFORE `scopes.append`, not after: registering the
-            # name here would put a denied scope on `index.scopes` — the
-            # `known_scopes` enumeration channel, reopened one line above the
-            # filter that closes it. Nothing about this directory is read,
-            # listed, classified or named.
+            # 🔴 `continue` BEFORE `scopes.append`, not after. Appending first
+            # still skips the READ, so it looks equivalent — and THROUGH
+            # `load_store` it is, because that function's result narrowing drops
+            # the key again on the way out. Measured: the swap survives a sweep
+            # driven entirely through `load_store`. It is NOT equivalent for a
+            # caller that uses this function directly (`subsystem_touch`, and
+            # `TestTheLoaderItselfTakesTheAllowlist`), which gets a denied
+            # scope's NAME on `index.scopes` — the `known_scopes` enumeration
+            # channel — for a directory nothing ever opened.
+            #
+            # 🔴 `is not None`, NEVER truthiness: an EMPTY allowlist means
+            # nothing is visible, and `if allowed and …` would read it as
+            # unrestricted. Same asymmetry, same fail-closed direction, same
+            # invisibility through `load_store`.
+            #
+            # 🔴 The DIRECTORY NAME is folded before comparing, because the index
+            # key `build_index` derives from it is folded (`extra_scopes` →
+            # `normalize_ref`). A raw comparison drops a scope dir spelled
+            # `Kelp_Forest` out of an allowlist that names `kelp-forest` — the
+            # caller's OWN scope, silently emptied.
             continue
         scopes.append(scope_dir.name)
         for md in sorted(scope_dir.glob("*.md")):
