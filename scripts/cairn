@@ -721,6 +721,16 @@ def cmd_validate(args: argparse.Namespace) -> int:
     return worst
 
 
+def _who_default_timeout() -> int:
+    """Read `who`'s own default rather than restating it in help text."""
+    lib = str(Path(__file__).resolve().parent / "lib")
+    if lib not in sys.path:
+        sys.path.insert(0, lib)
+    import cairn_who  # noqa: PLC0415
+
+    return int(cairn_who.DEFAULT_TIMEOUT)
+
+
 def cmd_who(args: argparse.Namespace) -> int:
     """Task -> sessions -> windows + transcripts. See `lib/cairn_who.py`."""
     lib = str(Path(__file__).resolve().parent / "lib")
@@ -729,8 +739,10 @@ def cmd_who(args: argparse.Namespace) -> int:
     import cairn_who  # noqa: PLC0415
 
     report = cairn_who.resolve(
-        args.task, timeout=args.timeout, host=args.host,
-        skip_windows=args.no_windows,
+        args.task,
+        # `None` means "the subcommand's own default", never cairn's store bound.
+        timeout=args.timeout if args.timeout is not None else cairn_who.DEFAULT_TIMEOUT,
+        host=args.host, skip_windows=args.no_windows,
     )
     if args.json:
         print(json.dumps(report.to_dict(), indent=2))
@@ -793,6 +805,14 @@ def build_parser() -> argparse.ArgumentParser:
     w.add_argument("--host", default=None, choices=["workbench", "laptop"])
     w.add_argument("--no-windows", action="store_true",
                    help="skip the tmux scan; report only the durable transcripts")
+    # 🔴 ITS OWN `--timeout`, AND ITS OWN DEFAULT. cairn's top-level `--timeout`
+    # is 20s, chosen for an HTTP snapshot fetch; `who` shells into tmux on two
+    # hosts, and `cairn_who.DEFAULT_TIMEOUT` carries a docstring reasoning
+    # specifically about a sleeping laptop. Inheriting the store's bound meant
+    # the documented rationale was not what shipped, and `cairn who --timeout N`
+    # was rejected outright because the flag only existed BEFORE the subcommand.
+    w.add_argument("--timeout", type=int, default=None,
+                   help=f"seconds per external tool (default {_who_default_timeout()})")
     w.set_defaults(func=cmd_who)
     return p
 

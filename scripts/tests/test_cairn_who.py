@@ -60,16 +60,26 @@ def _session_row(sid, **kw):
 def _window(sid, **kw):
     w = {"claude_session_id": sid, "host": "workbench", "session": "scratch9",
          "window_index": "3", "window_id": "@903", "pane_id": "%903",
-         "codename": "Onyx", "hotkey": "Alt+o", "path": "/tmp/proj-one"}
+         "codename": "Onyx", "hotkey": "o", "path": "/tmp/proj-one"}
     w.update(kw)
     return w
 
 
-def _scan(windows, host="workbench"):
-    return {"hosts": {host: {"windows": list(windows)}}}
+def _scan(windows, host="workbench", **hostkw):
+    """A host block shaped like the real one — INCLUDING the honesty fields.
+
+    🔴 `reachable`, `windows_measured` and `windows_error` are published per
+    host by `session-manager` and were the fields the first version of this
+    module ignored. A fixture that omits them cannot see that class of bug.
+    """
+    block = {"windows": list(windows), "reachable": True,
+             "windows_measured": True, "windows_error": None}
+    block.update(hostkw)
+    return {"hosts": {host: block}}
 
 
-def _resolve(task_obj, windows=None, transcripts=None, window_exc=None, **kw):
+def _resolve(task_obj, windows=None, transcripts=None, window_exc=None,
+             scan_kw=None, **kw):
     """Drive `resolve` with every hop injected — no network, no tmux, no disk."""
     def fetch(task, timeout=0):
         return task_obj
@@ -77,7 +87,7 @@ def _resolve(task_obj, windows=None, transcripts=None, window_exc=None, **kw):
     def wins(timeout=0, host=None):
         if window_exc:
             raise window_exc
-        return W._index_windows(_scan(windows or []))
+        return W._index_windows(_scan(windows or [], **(scan_kw or {})))
 
     def find(sid, root=None):
         got = (transcripts or {}).get(sid)
@@ -183,6 +193,135 @@ def test_a_MEASURED_scan_with_no_match_DOES_claim_none_live():
 # --------------------------------------------------------------------------- #
 
 
+def test_ONE_unreachable_host_makes_an_ABSENT_window_unmeasured():
+    """🔴 REGRESSION GUARD — the defect this command's own docstring forbade.
+
+    `session-manager` leaves an unreachable host's `windows` as an empty list
+    and still exits 0 when the OTHER host answered, so indexing only `windows`
+    turned "the laptop is asleep" into a confident "this session is running
+    nowhere". Demonstrated on the same fixture, laptop down vs up: `none live`
+    became a real window. `ConnectTimeout=4` makes a sleeping laptop fail FAST,
+    so this is the everyday case, not an edge.
+    """
+    payload = {"hosts": {
+        "laptop": {"reachable": False, "windows": []},
+        "workbench": {"reachable": True, "windows": [_window(FAKE_UUID_2)]},
+    }}
+
+    def wins(timeout=0, host=None):
+        return W._index_windows(payload)
+
+    r = W.resolve("42", task_fetcher=lambda t, timeout=0: _task([_session_row(FAKE_UUID)]),
+                  window_fetcher=wins, transcript_finder=lambda s, root=None: None)
+    assert r.sessions[0].windows_measured is False, (
+        "an absent window was claimed as measured while a host was unreachable")
+    out = W.render(r)
+    assert "UNMEASURED" in out and "none live" not in out
+    assert "laptop" in (r.windows_reason or ""), r.windows_reason
+
+
+def test_a_MATCHED_window_stays_a_positive_finding_even_with_a_host_down():
+    """CONTROL. Partial-scan honesty must not erase findings it DID make.
+
+    Without this, the fix for the guard above could degrade every window to
+    UNMEASURED whenever any host is down — throwing away real answers to avoid
+    claiming a false absence.
+    """
+    payload = {"hosts": {
+        "laptop": {"reachable": False, "windows": []},
+        "workbench": {"reachable": True, "windows": [_window(FAKE_UUID)]},
+    }}
+    r = W.resolve("42", task_fetcher=lambda t, timeout=0: _task([_session_row(FAKE_UUID)]),
+                  window_fetcher=lambda timeout=0, host=None: W._index_windows(payload),
+                  transcript_finder=lambda s, root=None: None)
+    s = r.sessions[0]
+    assert s.window is not None and s.windows_measured is True
+    assert "scratch9:3" in W.render(r)
+
+
+def test_UNLOCATED_does_not_fire_when_the_live_half_was_never_measured():
+    """🔴 Exit 6 documents a GENUINE gap, so it requires having looked.
+
+    With the live half unmeasured, "nothing located" means "no transcript, and
+    the window is unknown" — indeterminate. Firing exit 6 made the
+    machine-readable surface assert what the human-readable one disclaimed.
+    """
+    r = _resolve(_task([_session_row(FAKE_UUID)]), transcripts={},
+                 skip_windows=True)
+    assert not r.sessions[0].located
+    assert r.state != W.WHO_UNLOCATED
+    assert r.exit_code == W.EXIT_OK
+    assert "UNMEASURED" in W.render(r)
+
+
+def test_session_manager_EXIT_UNAVAILABLE_is_not_read_as_a_measured_zero():
+    """🔴 rc 4 arrives WITH a full JSON report of zero windows.
+
+    `session-manager` documents 4 as "NO requested host could be reached — the
+    0 is unmeasured", and its header says a caller must never read success off
+    a truncated run. The old guard (`rc != 0 and not out.strip()`) let it
+    through because the output was present and well-formed.
+    """
+    def runner(cmd, timeout):
+        return W.SM_EXIT_UNAVAILABLE, json.dumps(_scan([])), "all hosts down"
+
+    with pytest.raises(W.WhoError) as exc:
+        W.live_windows(runner=runner, script=Path(__file__))
+    assert "UNMEASURED" in str(exc.value)
+
+
+def test_session_manager_EXIT_EMPTY_IS_a_measured_zero():
+    """CONTROL, and the opposite code. 3 means every host answered and the
+    answer is genuinely none — raising on it would make a quiet fleet look
+    like an outage."""
+    def runner(cmd, timeout):
+        return W.SM_EXIT_EMPTY, json.dumps(_scan([])), ""
+
+    idx, unmeasured = W.live_windows(runner=runner, script=Path(__file__))
+    assert idx == {} and unmeasured == []
+
+
+def test_a_nonzero_scan_WITH_output_is_still_refused():
+    """The `and`/`or` seam. An unrecognised non-zero code carrying output must
+    not be waved through just because JSON happened to be printed."""
+    def runner(cmd, timeout):
+        return 99, "", "something broke"
+
+    with pytest.raises(W.WhoError):
+        W.live_windows(runner=runner, script=Path(__file__))
+
+
+def test_a_BAD_task_id_is_not_reported_as_an_outage():
+    """🔴 rc 2 is clawgate ANSWERING with a 400. A typo is the likeliest
+    failure of all, and calling it `clawgate-unreachable` printed "nothing was
+    asked" directly above clawgate's own 400."""
+    def runner(cmd, timeout):
+        return 2, "", "400 Bad Request — bad id"
+
+    with pytest.raises(W.BadTaskId):
+        W.fetch_task("not-a-number", runner=runner)
+
+    r = W.resolve("x", task_fetcher=lambda t, timeout=0: (_ for _ in ()).throw(
+        W.BadTaskId("clawgatectl refused the id")))
+    assert r.state == W.WHO_BAD_TASK_ID
+    assert r.exit_code == W.EXIT_USAGE
+    assert r.exit_code not in (W.EXIT_NO_CLAWGATE, W.EXIT_NO_TASK)
+    assert "not the network" in W.render(r)
+
+
+def test_find_transcript_forwards_its_ROOT(tmp_path):
+    """The real locator, exercised directly — every other test injects a fake.
+
+    Dropping the `root=` passthrough survived the suite, which means claim
+    "reuses transcript_search" was verified only by reading the source.
+    """
+    proj = tmp_path / "-tmp-proj"
+    proj.mkdir()
+    (proj / f"{FAKE_UUID}.jsonl").write_text("{}\n")
+    assert W.find_transcript(FAKE_UUID, root=tmp_path) == proj / f"{FAKE_UUID}.jsonl"
+    assert W.find_transcript(FAKE_UUID_2, root=tmp_path) is None
+
+
 def test_task_not_found_and_clawgate_unreachable_are_DIFFERENT_states_and_codes():
     """🔴 Both print an empty result; one of them is a lie.
 
@@ -191,10 +330,10 @@ def test_task_not_found_and_clawgate_unreachable_are_DIFFERENT_states_and_codes(
     turn "unreachable" into "no such task".
     """
     def missing(task, timeout=0):
-        raise W.WhoError("clawgate has no task 42")
+        raise W.TaskNotFound("clawgate has no task 42")
 
     def down(task, timeout=0):
-        raise W.WhoError("clawgatectl exited 6 — dial tcp: i/o timeout")
+        raise W.ClawgateUnreachable("clawgatectl exited 6 — dial tcp: i/o timeout")
 
     a = W.resolve("42", task_fetcher=missing)
     b = W.resolve("42", task_fetcher=down)
@@ -215,14 +354,26 @@ def test_a_task_with_no_sessions_is_a_REAL_state_not_a_failure():
 
 
 def test_every_state_has_an_exit_code_and_the_success_ones_are_distinct():
-    """LEDGER. A state added without a code would silently map to 0."""
-    states = {W.WHO_RESOLVED, W.WHO_NO_SESSIONS, W.WHO_UNLOCATED,
-              W.WHO_NO_TASK, W.WHO_NO_CLAWGATE}
+    """LEDGER, discovered by INTROSPECTION rather than re-listed.
+
+    🔴 The first version enumerated a literal 5-element set, so its own
+    docstring claim — "a state added without a code would silently map to 0" —
+    was false twice over: it could not see a new `WHO_*` constant, and the
+    mapping had a `.get(..., EXIT_OK)` default that swallowed one. Mutating the
+    default to 99 survived. The map is now total (a `KeyError` on an unmapped
+    state) and the states come from the module.
+    """
+    states = {v for n, v in vars(W).items()
+              if n.startswith("WHO_") and isinstance(v, str)}
+    assert len(states) >= 6, f"state discovery broke: {states}"
     codes = {s: W.WhoReport(task="t", state=s).exit_code for s in states}
     assert codes[W.WHO_RESOLVED] == 0 and codes[W.WHO_NO_SESSIONS] == 0
     failing = {s: c for s, c in codes.items() if c != 0}
     assert len(set(failing.values())) == len(failing), (
         f"two failure states share an exit code: {failing}")
+    # 🔴 No silent default: an unmapped state must RAISE, not report success.
+    with pytest.raises(KeyError):
+        W.WhoReport(task="t", state="a-state-nobody-mapped").exit_code
 
 
 # --------------------------------------------------------------------------- #
@@ -262,7 +413,7 @@ def test_a_session_row_with_a_BLANK_id_is_dropped_not_carried():
 
 
 def test_a_window_with_no_session_id_never_enters_the_index():
-    idx = W._index_windows(_scan([
+    idx, _ = W._index_windows(_scan([
         _window(None), _window(""), _window(FAKE_UUID)]))
     assert set(idx) == {FAKE_UUID}
 
@@ -277,25 +428,36 @@ def test_two_windows_sharing_a_session_id_resolve_DETERMINISTICALLY():
     first = _window(FAKE_UUID, session="scratch1", window_index="1")
     second = _window(FAKE_UUID, session="scratch2", window_index="2")
     for _ in range(5):
-        idx = W._index_windows(_scan([first, second]))
+        idx, _ = W._index_windows(_scan([first, second]))
         assert idx[FAKE_UUID].address == "scratch1:1"
 
 
 def test_windows_are_indexed_across_ALL_hosts_not_just_the_first():
     payload = {"hosts": {
-        "workbench": {"windows": [_window(FAKE_UUID)]},
-        "laptop": {"windows": [_window(FAKE_UUID_2, host="laptop")]},
+        "workbench": {"windows": [_window(FAKE_UUID)], "reachable": True},
+        "laptop": {"windows": [_window(FAKE_UUID_2, host="laptop")],
+                   "reachable": True},
     }}
-    idx = W._index_windows(payload)
+    idx, _ = W._index_windows(payload)
     assert set(idx) == {FAKE_UUID, FAKE_UUID_2}
     assert idx[FAKE_UUID_2].host == "laptop"
+    # 🔴 The row's OWN `host` wins over the `hosts` key. Every fixture used to
+    # set them equal, so swapping the operands was indistinguishable.
+    odd = {"hosts": {"workbench": {"reachable": True,
+                                   "windows": [_window(FAKE_UUID, host="elsewhere")]}}}
+    only, _ = W._index_windows(odd)
+    assert only[FAKE_UUID].host == "elsewhere"
 
 
 def test_a_host_block_with_no_windows_key_does_not_crash_the_index():
     """A host that failed to scan reports no `windows`; that is a state."""
     payload = {"hosts": {"laptop": {"reachable": False},
-                         "workbench": {"windows": [_window(FAKE_UUID)]}}}
-    assert set(W._index_windows(payload)) == {FAKE_UUID}
+                         "workbench": {"windows": [_window(FAKE_UUID)],
+                                       "reachable": True}}}
+    idx, unmeasured = W._index_windows(payload)
+    assert set(idx) == {FAKE_UUID}
+    assert unmeasured == ["laptop"], (
+        f"an unreachable host was not reported as unmeasured: {unmeasured}")
 
 
 # --------------------------------------------------------------------------- #
@@ -320,7 +482,7 @@ def test_render_carries_BOTH_the_window_index_and_the_stable_ids():
     out = W.render(r)
     assert "scratch9:3" in out
     assert "@903" in out and "%903" in out
-    assert "Onyx" in out and "Alt+o" in out
+    assert "Onyx" in out and "(Onyx, o)" in out
 
 
 def test_the_json_surface_round_trips_and_marks_the_unmeasured_half():
@@ -345,7 +507,7 @@ def test_a_transcript_lookup_failure_degrades_ONE_session_not_the_report():
         return _task([_session_row(FAKE_UUID), _session_row(FAKE_UUID_2)])
 
     r = W.resolve("42", task_fetcher=fetch,
-                  window_fetcher=lambda timeout=0, host=None: {},
+                  window_fetcher=lambda timeout=0, host=None: ({}, []),
                   transcript_finder=boom)
     assert r.sessions[0].transcript is None
     assert r.sessions[1].transcript == Path("/tmp/t/b.jsonl")
@@ -367,8 +529,12 @@ def test_a_transcript_lookup_failure_degrades_ONE_session_not_the_report():
 ])
 def test_fetch_task_reads_clawgatectl_EXIT_CODES_not_its_prose(rc, expect):
     """The codes are documented; the message wording is not a contract."""
+    # 🔴 STDOUT IS NON-EMPTY ON PURPOSE. The first version fed `out=""` for
+    # every code, so the `not out.strip()` fallback produced an identical
+    # message and deleting the whole exit-code table SURVIVED — the test named
+    # for "reads exit codes, not prose" did not pin the table at all.
     def runner(cmd, timeout):
-        return rc, "", "some diagnostic"
+        return rc, '{"id": 42}', "some diagnostic"
 
     with pytest.raises(W.WhoError) as exc:
         W.fetch_task("42", runner=runner)
@@ -506,3 +672,22 @@ def test_who_never_raises_or_focuses_a_window():
     for verb in ("switch-client", "select-window", "windowactivate",
                  "i3-msg", "wmctrl", "attach-session"):
         assert verb not in code, f"who reaches for {verb!r} — that is screen theft"
+
+
+def test_who_owns_its_own_timeout_default_and_accepts_the_flag_AFTER_the_subcommand():
+    """🔴 `cairn`'s top-level `--timeout` is 20s, tuned for an HTTP fetch.
+
+    `who` shells into tmux on two hosts, and `DEFAULT_TIMEOUT` here carries a
+    docstring reasoning specifically about a sleeping laptop. Inheriting the
+    store's bound meant the documented rationale was not what shipped — and
+    `cairn who --timeout N` was rejected outright, because the flag only existed
+    BEFORE the subcommand where nobody would type it.
+    """
+    import subprocess as sp
+
+    cairn = REPO_ROOT / "scripts" / "cairn"
+    help_out = sp.run([sys.executable, str(cairn), "who", "--help"],
+                      capture_output=True, text=True, timeout=60).stdout
+    assert "--timeout" in help_out, "who does not accept --timeout after the subcommand"
+    assert f"default {W.DEFAULT_TIMEOUT}" in help_out, (
+        f"the help advertises a default that is not who's own:\n{help_out}")

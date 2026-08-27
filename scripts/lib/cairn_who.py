@@ -68,6 +68,10 @@ WHO_NO_CLAWGATE = "clawgate-unreachable"
 #: and no transcript. That is a genuine gap worth reporting loudly, and it is
 #: not the same as the task having no sessions.
 WHO_UNLOCATED = "sessions-recorded-but-none-located"
+#: clawgate refused the id itself (400). A typo is the likeliest failure of all,
+#: and reporting it as `clawgate-unreachable` sent the operator to debug the
+#: network while clawgate's own 400 was printed directly above.
+WHO_BAD_TASK_ID = "bad-task-id"
 
 EXIT_OK = 0
 EXIT_USAGE = 2
@@ -82,6 +86,31 @@ EXIT_NO_CLAWGATE = 8
 
 class WhoError(RuntimeError):
     """A failure that names which HOP could not be taken."""
+
+
+class TaskNotFound(WhoError):
+    """clawgate answered, and the answer is "no such task"."""
+
+
+class BadTaskId(WhoError):
+    """clawgate refused the id itself (400). A typo, not an outage."""
+
+
+class ClawgateUnreachable(WhoError):
+    """clawgate could not be asked at all."""
+
+
+#: `session-manager`'s own exit codes, which it documents and which this module
+#: must honour rather than re-derive.
+#:
+#: 🔴 3 AND 4 ARE THE WHOLE POINT AND THEY BOTH RETURN AN EMPTY SCAN. 3 is
+#: `EXIT_EMPTY` — every requested host answered and the answer is a real zero.
+#: 4 is `EXIT_UNAVAILABLE` — NO host could be reached, so the zero is
+#: unmeasured. Its source says a caller "must never read success off a truncated
+#: run". Treating 4 as success is exactly that, and it renders as a confident
+#: "this session is running nowhere".
+SM_EXIT_EMPTY = 3
+SM_EXIT_UNAVAILABLE = 4
 
 
 @dataclass
@@ -181,7 +210,8 @@ class WhoReport:
             WHO_UNLOCATED: EXIT_UNLOCATED,
             WHO_NO_TASK: EXIT_NO_TASK,
             WHO_NO_CLAWGATE: EXIT_NO_CLAWGATE,
-        }.get(self.state, EXIT_OK)
+            WHO_BAD_TASK_ID: EXIT_USAGE,
+        }[self.state]
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -228,15 +258,30 @@ def fetch_task(task: str, *, timeout: int = DEFAULT_TIMEOUT,
     if not str(task).strip():
         raise WhoError("empty task id")
     rc, out, err = runner(["clawgatectl", "task", "get", str(task)], timeout)
+    # One line. A tool's stderr is often several (a version-skew notice above
+    # the real error), and interpolating it raw breaks the render's
+    # indentation so the follow-up sentence reads as unrelated output.
+    detail = " ".join(err.split()) or "no diagnostic"
+    # 🔴 CLASSIFY BY EXCEPTION TYPE, NOT BY THE MESSAGE TEXT. The first version
+    # raised one error class and had the caller substring-match `"has no task"`
+    # to decide between "no such task" and "could not ask" — while interpolating
+    # clawgate's raw stderr into the other message, so any diagnostic containing
+    # that phrase would have flipped the verdict. Deciding a state by grepping a
+    # string you just built is the defect this module exists to avoid, one layer
+    # up from the exit code that already answers it.
     if rc == 4:
-        raise WhoError(f"clawgate has no task {task}")
-    if rc in (3, 6, 7, 8) or (rc != 0 and not out.strip()):
-        raise WhoError(
-            f"clawgatectl exited {rc} — {err.strip() or 'no diagnostic'}")
+        raise TaskNotFound(f"clawgate has no task {task}")
+    if rc == 2:
+        # 400 — the id itself was refused. An operator typo, and the LIKELIEST
+        # failure of all; reporting it as "unreachable" sends them to debug the
+        # network while clawgate's own 400 is printed directly above.
+        raise BadTaskId(f"clawgatectl refused the id {task!r} — {detail}")
+    if rc != 0:
+        raise ClawgateUnreachable(f"clawgatectl exited {rc} — {detail}")
     try:
         return json.loads(out)
     except json.JSONDecodeError as exc:
-        raise WhoError(f"clawgatectl returned non-JSON: {exc}")
+        raise ClawgateUnreachable(f"clawgatectl returned non-JSON: {exc}")
 
 
 def sessions_of(task_obj: dict[str, Any]) -> list[SessionHit]:
@@ -262,16 +307,34 @@ def sessions_of(task_obj: dict[str, Any]) -> list[SessionHit]:
     return out
 
 
-def _index_windows(payload: dict[str, Any]) -> dict[str, WindowHit]:
-    """`claude_session_id` -> the window holding it.
+def _index_windows(payload: dict[str, Any]) -> tuple[dict[str, WindowHit], list[str]]:
+    """`claude_session_id` -> window, PLUS the hosts that were not measured.
+
+    🔴 THE SECOND RETURN VALUE IS THE HONEST HALF, AND OMITTING IT SHIPPED A
+    SILENT ZERO. `session-manager` publishes `reachable`, `windows_measured` and
+    `windows_error` PER HOST, and leaves an unreachable host's `windows` as an
+    empty list while still exiting 0 because the other host answered.
+    Indexing only `windows` therefore turns "the laptop is asleep" into a
+    confident "this session is running nowhere" — demonstrated with the same
+    session rendering `none live` with the laptop down and a real window with it
+    up. `ConnectTimeout=4` means a sleeping laptop fails FAST, so this is the
+    everyday case rather than an edge.
 
     🔴 LAST WRITER WINS IS WRONG HERE, SO IT IS NOT DONE. Two windows can carry
     the same session id (a split pane, a re-attached session). The first is kept
-    and the collision is not silently overwritten, because overwriting makes the
-    answer depend on host iteration order — which is a dict order, not a fact.
+    rather than the last, so the answer cannot depend on iteration order.
+    `session-manager` dumps with `sort_keys=True`, which is what makes the host
+    order stable run to run — a property of ITS writer, not of dicts, so it is
+    named here rather than assumed.
     """
     idx: dict[str, WindowHit] = {}
-    for host, block in (payload.get("hosts") or {}).items():
+    unmeasured: list[str] = []
+    for host, block in sorted((payload.get("hosts") or {}).items()):
+        if (block.get("reachable") is False
+                or block.get("windows_measured") is False
+                or block.get("windows_error")):
+            unmeasured.append(host)
+            continue
         for w in block.get("windows") or []:
             sid = w.get("claude_session_id")
             if not sid or sid in idx:
@@ -287,11 +350,12 @@ def _index_windows(payload: dict[str, Any]) -> dict[str, WindowHit]:
                 hotkey=w.get("hotkey"),
                 path=w.get("path"),
             )
-    return idx
+    return idx, unmeasured
 
 
 def live_windows(*, timeout: int = DEFAULT_TIMEOUT, host: str | None = None,
-                 runner=_run, script: Path | None = None) -> dict[str, WindowHit]:
+                 runner=_run, script: Path | None = None
+                 ) -> tuple[dict[str, WindowHit], list[str]]:
     """Scan tmux across hosts and index by session id.
 
     🔴 `--lean` IS NOT USABLE HERE and that is measured, not assumed: its
@@ -304,9 +368,19 @@ def live_windows(*, timeout: int = DEFAULT_TIMEOUT, host: str | None = None,
     if host:
         cmd += ["--host", host]
     rc, out, err = runner(cmd, timeout)
-    if rc != 0 and not out.strip():
-        raise WhoError(f"session-manager exited {rc} — "
-                       f"{err.strip() or 'no diagnostic'}")
+    detail = err.strip() or "no diagnostic"
+    # 🔴 rc 4 ARRIVES WITH A FULL, WELL-FORMED JSON REPORT OF ZERO WINDOWS, so
+    # the old `rc != 0 and not out.strip()` guard let it through as a measured
+    # scan. `session-manager` documents 4 as "NO requested host could be
+    # reached — the 0 is unmeasured", and its own header says a caller must
+    # never read success off a truncated run. 3 is the opposite code and is a
+    # genuine measured zero, so it deliberately does NOT raise.
+    if rc == SM_EXIT_UNAVAILABLE:
+        raise WhoError(
+            f"session-manager exited {rc} — no host could be reached, so its "
+            f"empty scan is UNMEASURED, not a zero ({detail})")
+    if rc not in (0, SM_EXIT_EMPTY) and not out.strip():
+        raise WhoError(f"session-manager exited {rc} — {detail}")
     try:
         payload = json.loads(out)
     except json.JSONDecodeError as exc:
@@ -356,10 +430,12 @@ def resolve(task: str, *, timeout: int = DEFAULT_TIMEOUT,
     """Task -> sessions -> (window, transcript). Every hop's failure is NAMED."""
     try:
         obj = task_fetcher(task, timeout=timeout)
+    except TaskNotFound as exc:
+        return WhoReport(task=task, state=WHO_NO_TASK, notes=[str(exc)])
+    except BadTaskId as exc:
+        return WhoReport(task=task, state=WHO_BAD_TASK_ID, notes=[str(exc)])
     except WhoError as exc:
-        msg = str(exc)
-        state = WHO_NO_TASK if "has no task" in msg else WHO_NO_CLAWGATE
-        return WhoReport(task=task, state=state, notes=[msg])
+        return WhoReport(task=task, state=WHO_NO_CLAWGATE, notes=[str(exc)])
 
     report = WhoReport(
         task=task, state=WHO_RESOLVED,
@@ -376,8 +452,17 @@ def resolve(task: str, *, timeout: int = DEFAULT_TIMEOUT,
         report.windows_reason = "--no-windows: the live half was not looked at"
     else:
         try:
-            windows = window_fetcher(timeout=timeout, host=host)
-            measured = True
+            windows, unmeasured_hosts = window_fetcher(timeout=timeout, host=host)
+            # 🔴 A PARTIAL SCAN IS NOT A MEASURED SCAN. If ANY host went
+            # unmeasured, a session with no match might simply have been on
+            # that host, so "none live" is unproven for every session that did
+            # not match. A session that DID match is a positive finding and is
+            # unaffected — an absence is what needs the caveat.
+            measured = not unmeasured_hosts
+            if unmeasured_hosts:
+                report.windows_reason = (
+                    "host(s) not measured by session-manager: "
+                    + ", ".join(unmeasured_hosts))
         except WhoError as exc:
             # 🔴 NOT fatal, and NOT an empty window column. The durable half is
             # independent of tmux being reachable, and it is usually the half
@@ -385,9 +470,9 @@ def resolve(task: str, *, timeout: int = DEFAULT_TIMEOUT,
             report.windows_reason = str(exc)
 
     for s in report.sessions:
-        s.windows_measured = measured
-        if measured:
-            s.window = windows.get(s.session_id)
+        # A hit is a hit regardless of whether some OTHER host was measured.
+        s.window = windows.get(s.session_id)
+        s.windows_measured = measured or s.window is not None
         try:
             s.transcript = transcript_finder(s.session_id, root=transcript_root)
         except Exception as exc:  # noqa: BLE001 — a bad transcript root must
@@ -395,7 +480,12 @@ def resolve(task: str, *, timeout: int = DEFAULT_TIMEOUT,
             report.notes.append(
                 f"transcript lookup failed for {s.session_id[:8]}…: {exc}")
 
-    if not any(s.located for s in report.sessions):
+    # 🔴 `UNLOCATED` IS A CLAIM ABOUT A GAP, SO IT REQUIRES HAVING LOOKED. When
+    # the live half is unmeasured, "nothing located" means "no transcript, and
+    # the window is unknown" — indeterminate, not a proven gap. Firing exit 6
+    # there made the machine-readable surface assert what the human-readable
+    # one had just disclaimed, which is the worse half to get wrong.
+    if measured and not any(s.located for s in report.sessions):
         report.state = WHO_UNLOCATED
     return report
 
@@ -415,6 +505,11 @@ def render(report: WhoReport) -> str:
         head += f"  [{report.status}]"
     lines.append(head)
 
+    if report.state == WHO_BAD_TASK_ID:
+        lines.append(f"  🔴 {WHO_BAD_TASK_ID} — {'; '.join(report.notes)}")
+        lines.append("     clawgate answered; it refused the id. Check the id, "
+                     "not the network.")
+        return "\n".join(lines)
     if report.state == WHO_NO_TASK:
         lines.append(f"  🔴 {WHO_NO_TASK} — {'; '.join(report.notes)}")
         return "\n".join(lines)
