@@ -378,6 +378,50 @@ def test_the_index_is_parsed_once_per_directory(tmp_path, monkeypatch):
     assert S._site_notes_path("cached.test") == "reference/sites/cached.test.md"
 
 
+def test_a_CHANGED_index_is_re_read_in_the_SAME_process(tmp_path, monkeypatch):
+    """🔴 THE REGRESSION TEST. A NEW ENTRY MUST NOT NEED A RESTART.
+
+    Cached on the directory ALONE, this answered from a mapping parsed once for
+    the life of the process — so a registry entry that was added, merged and
+    present on disk stayed INVISIBLE to a running bridge, and silently. Measured
+    2026-08-27: `civit.ai` was registered while a bridge started two days earlier
+    kept resolving the OLD key set. The entries already cached keep working, so
+    the feature looks alive while the new half is dead, and the failure presents
+    as "my new entry is broken" — a false negative about your own change.
+
+    🔴 THE TEST MUST MUTATE THE FILE BETWEEN TWO LOOKUPS IN ONE PROCESS. Nothing
+    weaker can see this: re-running with an UNCHANGED file is a no-op either way,
+    and clearing the cache via `_point_at` tests the parser rather than the
+    invalidation. This is the same shape as the base-clone refresh hook that
+    "worked exactly once per file" — an idempotence test cannot detect a cache
+    that never invalidates, because the second run has nothing new to miss.
+
+    The two payloads differ in LENGTH as well as content, so the (mtime_ns, size)
+    stamp changes even on a filesystem whose mtime granularity is coarse enough
+    to place both writes in the same tick. That is deliberate: a same-length edit
+    inside one timestamp tick is exactly how a coarse-stamped cache goes on
+    serving stale bytes, and the test must not be the thing that depends on luck.
+    """
+    d = _write_index(tmp_path / "mutating", json.dumps(
+        {"sites": {"before.test": "before.test.md"}}))
+    _point_at(monkeypatch, d)
+    assert S._site_notes_path("before.test") == "reference/sites/before.test.md"
+
+    # Rewrite in place — NO cache clear, NO repoint. This is the running bridge.
+    (d / "_index.json").write_text(json.dumps(
+        {"sites": {"after.test": "a-considerably-longer-name.after.test.md"}}),
+        encoding="utf-8")
+
+    assert S._site_notes_path("after.test") == (
+        "reference/sites/a-considerably-longer-name.after.test.md"), (
+        "a registry entry added while the process was running stayed invisible — "
+        "the index cache did not notice the file had changed")
+    assert S._site_notes_path("before.test") == "", (
+        "the re-read merged into the old mapping instead of replacing it; a key "
+        "REMOVED from the registry must stop resolving too"
+    )
+
+
 # --------------------------------------------------------------------------- #
 # THE LEDGER — the registry's key set and the directory's *.md set are identical
 # --------------------------------------------------------------------------- #
