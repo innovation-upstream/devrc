@@ -808,23 +808,6 @@ def test_the_stderr_collapse_happens_at_the_REAL_boundary():
     assert err == "line one line two line three"
 
 
-def test_a_discarded_TOP_LEVEL_timeout_is_named_not_swallowed():
-    """argparse drops it silently, and it was the only spelling that used to work."""
-    import importlib.util
-
-    spec = importlib.util.spec_from_loader(
-        "cairn_cli", loader=None, origin=str(REPO_ROOT / "scripts" / "cairn"))
-    mod = importlib.util.module_from_spec(spec)
-    mod.__file__ = str(REPO_ROOT / "scripts" / "cairn")
-    exec(compile((REPO_ROOT / "scripts" / "cairn").read_text(), "cairn", "exec"),
-         mod.__dict__)
-    f = mod._top_level_timeout_was_given
-    assert f(["--timeout", "5", "who", "42"]) is True
-    assert f(["--timeout=5", "who", "42"]) is True
-    assert f(["who", "42", "--timeout", "5"]) is False
-    assert f(["who", "42"]) is False
-
-
 def _load_cairn_cli():
     """Exec `scripts/cairn` as a module — it has no .py extension."""
     import importlib.util
@@ -866,3 +849,134 @@ def test_the_CLI_resolves_a_missing_timeout_to_WHOs_own_default(monkeypatch):
     args = cli.build_parser().parse_args(["who", "42", "--timeout", "7"])
     args.func(args)
     assert seen["timeout"] == 7, "an explicit --timeout was not honoured"
+
+
+@pytest.mark.parametrize("argv,expected", [
+    # who's own flag wins
+    (["who", "42", "--timeout", "7"], 7),
+    # a TOP-LEVEL --timeout is honoured, not discarded
+    (["--timeout", "5", "who", "42"], 5),
+    # …including after another value-taking global, the spelling the old
+    # hand-rolled argv scanner got WRONG (it stopped at --cache's value)
+    (["--cache", "/tmp/c", "--timeout", "5", "who", "42"], 5),
+    # …and via argparse's long-option abbreviation, which a literal
+    # `== "--timeout"` comparison could never see
+    (["--time", "5", "who", "42"], 5),
+    # neither given -> who's OWN default, never the store's shorter one
+    (["who", "42"], None),
+    # who's own flag beats a top-level one
+    (["--timeout", "5", "who", "42", "--timeout", "9"], 9),
+])
+def test_the_timeout_precedence_is_who_then_TOP_LEVEL_then_whos_own_default(
+        argv, expected, monkeypatch):
+    """🔴 REGRESSION GUARD over every spelling, driven through `cmd_who` itself.
+
+    The first fix here printed a notice saying a top-level `--timeout` was being
+    discarded, driven by hand-parsing `sys.argv`. That scanner returned the
+    WRONG answer for two reachable spellings — after another value-taking global
+    option, and via argparse's long-option abbreviation — so those silently
+    discarded exactly as before, which is what the notice existed to prevent.
+    Re-implementing argparse's parsing in order to describe argparse's behaviour
+    was the mistake; distinct dests remove the clobber and there is nothing to
+    announce.
+
+    Only the helper was tested before, never `cmd_who`, so deleting the whole
+    block left the suite green — the seam nobody owns.
+    """
+    cli = _load_cairn_cli()
+    seen = {}
+
+    def fake_resolve(task, *, timeout, host, skip_windows):
+        seen["timeout"] = timeout
+        return W.WhoReport(task=task, state=W.WHO_NO_SESSIONS)
+
+    monkeypatch.setattr(W, "resolve", fake_resolve)
+    monkeypatch.setitem(sys.modules, "cairn_who", W)
+    args = cli.build_parser().parse_args(argv)
+    args.func(args)
+    want = W.DEFAULT_TIMEOUT if expected is None else expected
+    assert seen["timeout"] == want, (
+        f"{' '.join(argv)} resolved to {seen['timeout']}, expected {want}")
+
+
+def test_who_never_writes_a_warning_to_STDOUT(capsys, monkeypatch):
+    """`cairn who --json` writes JSON to stdout; anything else breaks a parse.
+
+    The previous design printed a notice, and its stream was unpinned — dropping
+    `file=sys.stderr` survived the suite.
+    """
+    cli = _load_cairn_cli()
+    monkeypatch.setattr(W, "resolve", lambda task, *, timeout, host, skip_windows:
+                        W.WhoReport(task=task, state=W.WHO_NO_SESSIONS))
+    monkeypatch.setitem(sys.modules, "cairn_who", W)
+    args = cli.build_parser().parse_args(["--timeout", "5", "who", "42", "--json"])
+    args.func(args)
+    out = capsys.readouterr().out
+    json.loads(out)  # raises if anything non-JSON was printed alongside it
+
+
+def test_the_store_commands_still_get_the_STORE_default_when_no_flag_is_given():
+    """CONTROL for the sentinel. Making the parent default `None` must not
+    silently hand the store commands a `None` bound — the unbounded wait."""
+    cli = _load_cairn_cli()
+    args = cli.build_parser().parse_args(["recall"])
+    assert args.timeout is None, "the sentinel is not in place"
+    assert cli.DEFAULT_TIMEOUT > 0
+    who = cli.build_parser().parse_args(["who", "42"])
+    assert cli._who_timeout(who, W.DEFAULT_TIMEOUT) == W.DEFAULT_TIMEOUT
+
+
+def test_every_store_call_site_resolves_the_timeout_sentinel():
+    """🔴 SEAM GUARD: no call site may pass the raw sentinel to the network.
+
+    Making the top-level `--timeout` default `None` — so `who` can tell "not
+    given" from an explicit value — gave every store command a chance to forget.
+    Mutating all four sites to pass `args.timeout` through kept the suite green,
+    and a `None` reaches `urllib` as NO timeout: the unbounded wait `_run`
+    already refuses on the other side of this same file.
+
+    Asserts the RELATIONSHIP (every `timeout=` argument in the store paths goes
+    through the resolver) rather than a count, so a fifth caller fails here.
+    """
+    import ast
+
+    src = (REPO_ROOT / "scripts" / "cairn").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    # The hazard is precisely `args.timeout` — the namespace attribute that may
+    # hold the sentinel. A local `timeout=timeout` inside a helper is forwarding
+    # an ALREADY-resolved value and is not a bypass; flagging it too made this
+    # guard fire on two innocent sites, which is how a guard gets loosened until
+    # it means nothing.
+    offenders = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        for kw in node.keywords:
+            if kw.arg != "timeout":
+                continue
+            v = kw.value
+            if (isinstance(v, ast.Attribute) and v.attr == "timeout"
+                    and isinstance(v.value, ast.Name) and v.value.id == "args"):
+                offenders.append(ast.unparse(kw))
+    assert not offenders, (
+        "a `timeout=` argument passes `args.timeout` raw, so it may carry the "
+        f"None sentinel to the network — resolve it first: {offenders}")
+
+    # CONTROL: the guard must be able to FIRE. Without this, narrowing it to
+    # `args.timeout` could have narrowed it to nothing.
+    bad = ast.parse("f(timeout=args.timeout)")
+    hits = [ast.unparse(kw) for n in ast.walk(bad) if isinstance(n, ast.Call)
+            for kw in n.keywords
+            if kw.arg == "timeout" and isinstance(kw.value, ast.Attribute)
+            and kw.value.attr == "timeout"
+            and isinstance(kw.value.value, ast.Name) and kw.value.value.id == "args"]
+    assert hits == ["timeout=args.timeout"], "the detector cannot see a real bypass"
+
+
+def test_the_store_resolver_turns_the_sentinel_into_a_POSITIVE_bound():
+    cli = _load_cairn_cli()
+    args = cli.build_parser().parse_args(["recall"])
+    assert args.timeout is None
+    assert cli._store_timeout(args) == cli.DEFAULT_TIMEOUT > 0
+    explicit = cli.build_parser().parse_args(["--timeout", "9", "recall"])
+    assert cli._store_timeout(explicit) == 9
