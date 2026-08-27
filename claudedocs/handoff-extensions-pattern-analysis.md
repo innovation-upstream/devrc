@@ -391,7 +391,11 @@ weaker claim than "verified" and is stated as such deliberately.
   satisfy it: add the `[ -L ]` diversion `deeScrub` has, or document the limit
   explicitly. Note that 601-612 documents the *sweep* only, so a comment added there
   does not reach 627 — fixing one site and closing this item is the failure mode to
-  avoid, and is why both line numbers are named. Mechanically checkable: for each of
-  623 and 627, the guard is present or it is not. Whoever picks this up owns choosing
+  avoid, and is why both line numbers are named. Each remedy has its own mechanical
+  check, and they are different: for remedy 1, the `[ -L ]` guard is present at 623 and
+  627 or it is not; for remedy 2, a comment naming the symlink limit sits at each of
+  those two sites, or it does not. **Checking for a guard after remedy 2 was taken
+  finds none and reads as still-open** — apply the check that matches the remedy.
+  Whoever picks this up owns choosing
   between those two remedies; this session did not, because it is a change to a live
   hardened deploy path and does not belong in a docs PR.
