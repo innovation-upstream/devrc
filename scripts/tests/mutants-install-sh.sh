@@ -33,8 +33,16 @@
 #                       ever says yes certifies everything; this one did, once.
 set -uo pipefail
 
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT="$(cd "$HERE/../.." && pwd)"
+# 🔴 `CDPATH=` is load-bearing here too — see githooks/install.sh's $DIR comment.
+# Without it, an exported CDPATH made this battery unrunnable rather than wrong:
+# HERE became two lines and the file check below died `FATAL: /githooks/install.sh
+# missing`. A harness that cannot start reports nothing, so the failure is loud —
+# but a harness whose paths are half-resolved is exactly how a sweep scores
+# SURVIVED for a mutant it never executed.
+# shellcheck disable=SC1007  # `CDPATH= cd` is a deliberate prefix assignment, not a typo
+HERE="$(CDPATH= cd -P -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1007
+ROOT="$(CDPATH= cd -P -- "$HERE/../.." && pwd)"
 SRC_DIR="$ROOT/githooks"
 TESTFILE="$ROOT/scripts/tests/test_githooks_install_readonly_global.py"
 
@@ -66,6 +74,44 @@ run_tests() {
 run_one() {
   DEVRC_TEST_INSTALLER="$1/install.sh" \
     python -m pytest "$TESTFILE::$2" -vv --tb=long -p no:randomly --no-header 2>&1
+}
+
+# case2 <label> <killer> <msg> <n1> <from1> <to1> <n2> <from2> <to2>
+#
+# 🔴 WHY A TWO-SUBSTITUTION MUTANT EXISTS AT ALL. Every other mutant here
+# removes a single defence and dies. The CDPATH hazard is guarded TWICE and
+# INDEPENDENTLY — `CDPATH= cd -P --` stops $DIR going multi-line, and the
+# `case` refusal stops a multi-line $DIR reaching the config write — so each
+# single-line mutant SURVIVES because the other defence still holds the
+# property. MEASURED, both directions: reverting only the hardening → the guard
+# refuses (rc=1, "MULTI-LINE"); neutering only the guard → $DIR is single-line
+# and it never fires. Scoring either as a coverage gap would be wrong, and
+# shipping them as permanent 🔴 would train everyone to ignore this battery.
+# What IS worth pinning is that the test notices the state where NEITHER holds
+# — the exact shape that shipped. That needs both edits at once.
+case_mutant2() {
+  local label="$1" killer="$2" msg="$3"
+  local n1="$4" from1="$5" to1="$6" n2="$7" from2="$8" to2="$9"
+  echo "── $label"
+  local dir; dir="$(fresh_copy)"
+  if ! mutate "$dir" "$n1" "$from1" "$to1"; then fail=$((fail+1)); return; fi
+  if ! mutate "$dir" "$n2" "$from2" "$to2"; then fail=$((fail+1)); return; fi
+
+  local out="$WORK/out2.$$"; run_tests "$dir" > "$out" 2>&1
+  if ! grep -q "FAILED.*::$killer" "$out"; then
+    echo "    🔴 SURVIVED: '$killer' did not fail"
+    tail -6 "$out" | sed 's/^/       /'
+    fail=$((fail+1)); return
+  fi
+  local one="$WORK/one2.$$"; run_one "$dir" "$killer" > "$one" 2>&1
+  if ! _died_with "$one" "$msg"; then
+    echo "    🔴 WRONG-KILLER: '$killer' failed, but NOT with its own message"
+    echo "       expected to see: $msg"
+    tail -12 "$one" | sed 's/^/       /'
+    fail=$((fail+1)); return
+  fi
+  echo "    ok — killed by $killer, with its own message"
+  pass=$((pass+1))
 }
 
 fresh_copy() {  # -> path of a pristine githooks copy
@@ -322,6 +368,19 @@ case_mutant "M11 unset-HOME diagnostic removed" \
   1 \
   'if [ -z "${HOME:-}" ]; then' \
   'if false; then'
+
+# M12 — BOTH CDPATH defences removed at once, reproducing the pre-fix shape that
+# corrupted ~/.gitconfig host-wide. See case_mutant2's header for why this one
+# mutant takes two edits while every other mutant here takes one.
+case_mutant2 "M12 both CDPATH defences removed (the shape that shipped)" \
+  "test_an_exported_CDPATH_cannot_corrupt_the_global_config" \
+  "corrupted the global git config" \
+  1 \
+  'DIR="$(CDPATH= cd -P -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"' \
+  'DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"' \
+  1 \
+  '_reject_bad_dir "$DIR"' \
+  ':'
 
 echo
 echo "=== RESULT: ok=$pass  problems=$fail ==="

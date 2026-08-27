@@ -97,6 +97,15 @@ Behaviour, all failing in the **safe direction**:
 
 This sets the **global** `core.hooksPath` and seeds `~/.claude/audit-on-push.env`.
 
+> 🔴 **Invoke it by ABSOLUTE path, as written above — not `githooks/install.sh`.**
+> With `CDPATH` exported (it is, on the workbench host) bash `cd` echoes the
+> directory it resolves, so a *relative* invocation used to make the installer's
+> `$DIR` a two-line string, which landed in `~/.gitconfig` as config and broke
+> **every** git command in **every** repo on the box with `fatal: bad config
+> line 4` — including the `--uninstall` that would have repaired it. The
+> installer now hardens `$DIR` and refuses a multi-line value outright, so a
+> relative invocation is safe; the absolute form remains the documented one.
+
 > **On a home-manager host** (#905) `~/.config/git/config` is a symlink into the
 > read-only nix store, so a `--global` write there is impossible — the installer
 > used to die `could not lock config file … Read-only file system` (rc=255) and

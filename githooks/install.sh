@@ -12,11 +12,78 @@
 # defaults to ON *in the devrc repo only* — devrc pushes will run the Python
 # suite and block on a genuine failure (TESTS_ON_PUSH; DEVRC_SKIP_TESTS=1 to
 # override a single push). It is a no-op in every other repo.
-# Disable everything with: githooks/install.sh --uninstall
+# Disable everything with: $HOME/workspace/devrc/githooks/install.sh --uninstall
+# (Invoke by ABSOLUTE path. A relative invocation is a documented hazard when
+#  CDPATH is exported — see the $DIR guard below.)
 #
 set -euo pipefail
 
-DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# 🔴 `CDPATH= cd -P --` IS LOAD-BEARING, NOT BOILERPLATE. When CDPATH is exported
+# (it is, on the workbench host: `.:/home/zach/workspace:…`) bash `cd` ECHOES the
+# resolved directory to stdout whenever it finds the target via CDPATH — and a
+# RELATIVE invocation (`githooks/install.sh`, the shape this file's own header
+# used to document) makes `dirname` return a relative path, so `.` in CDPATH
+# hits. The command substitution then captures cd's echo AND pwd, and $DIR
+# becomes a TWO-LINE string.
+#
+# MEASURED, and this is why it is a correctness fix rather than hygiene: $DIR is
+# interpolated into the stamp below, so the second line lands in ~/.gitconfig as
+# config rather than as a comment. Every subsequent git command in EVERY repo on
+# the box then dies `fatal: bad config line 4 in file ~/.gitconfig` — including
+# `--uninstall`, which cannot parse the file it would repair. Only a manual
+# `rm ~/.gitconfig` recovers. `-P` also resolves symlinks; `--` stops an
+# argument beginning with `-` being read as an option.
+# shellcheck disable=SC1007  # `CDPATH= cd` is a deliberate prefix assignment, not a typo
+DIR="$(CDPATH= cd -P -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# 🔴 STRUCTURAL REFUSAL, because the line above is one edit away from silently
+# regressing and the damage is host-wide. Validate the VALUE, do not trust the
+# construct that produced it: anything that is not a single-line path to a real
+# directory must never reach the stamp or the config write.
+#
+# 🔴 THE NEWLINE IS A LITERAL IN A SINGLE-QUOTED ASSIGNMENT, AND IT HAS TO BE.
+# `$(printf '\n')` looks like the obvious spelling and is WRONG: command
+# substitution strips trailing newlines, so it expands to the EMPTY string, the
+# case pattern degrades to `**`, and the guard fires on every well-formed $DIR.
+# Measured — it took the whole suite from green to 14 failures, refusing a
+# perfectly good single-line path. A guard that always fires is not fail-safe;
+# it is just broken in the other direction.
+#
+# 🔴 ONE PREDICATE, ONE MESSAGE. The two rejections below were separate `case` and
+# `[ ! -d ]` blocks with different diagnostics, and that split was itself a defect:
+# a multi-line $DIR is also not a directory, so which of the two spoke depended on
+# which mutation you were running, and a caller could not assert on either without
+# being wrong half the time. Consolidated so there is exactly one refusal path to
+# assert on — and one narrow anchor to mutate.
+_NL='
+'
+_reject_bad_dir() {  # $1 = the resolved installer directory
+  local d="$1" ok=1
+  case "$d" in *"$_NL"*) ok=0 ;; esac
+  [ -d "$d" ] || ok=0
+  # An explicit `if`, not `[ "$ok" -eq 1 ] && return 0`. The && form is correct
+  # under `set -e` (a non-final command in an AND-list is exempt) but relies on a
+  # rule most readers have to look up, in the one function whose job is to abort
+  # safely. Say it plainly instead.
+  if [ "$ok" -eq 1 ]; then
+    return 0
+  fi
+
+  # 🔴 NOT `$*` — inside a function that is the FUNCTION's arguments, i.e. $DIR,
+  # so the "re-run with" line would echo the directory back instead of the flags
+  # the operator actually passed. The script's own argv is captured at top level.
+  echo "ERROR: refusing to continue — the installer's own directory did not resolve" >&2
+  echo "       to a single-line path to a real directory, which would corrupt the" >&2
+  echo "       global git config:" >&2
+  printf '%s\n' "$d" | sed 's/^/       | /' >&2
+  echo "       This is the CDPATH hazard described above: with CDPATH exported, bash" >&2
+  echo "       'cd' echoes the directory it resolved, so a RELATIVE invocation yields" >&2
+  echo "       a two-line \$DIR. Re-run with an absolute path:" >&2
+  echo "         \$HOME/workspace/devrc/githooks/install.sh${_ARGV:+ $_ARGV}" >&2
+  exit 1
+}
+_ARGV="$*"
+_reject_bad_dir "$DIR"
 
 # Every path below is anchored on $HOME. Under `set -u` an unset HOME aborts with
 # a bare `HOME: unbound variable` from whichever line happens to touch it first,

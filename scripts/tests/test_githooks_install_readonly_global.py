@@ -293,6 +293,102 @@ def test_the_hooks_path_is_actually_in_effect_not_merely_written(hm_home):
         "core.hooksPath is not what git resolves after a successful install")
 
 
+# --------------------------------------------------------------------------- #
+# CDPATH — the dimension every other test in this file PINS
+# --------------------------------------------------------------------------- #
+# 🔴 `_install()` runs the installer by ABSOLUTE path, which is the one
+# invocation shape that CANNOT exhibit this defect, so the whole suite was
+# structurally blind to it. `_env()` passes CDPATH through untouched but it is
+# inert against an absolute path. These two tests widen the harness onto the
+# invocation-path dimension; that widening IS the fix, not extra work.
+def _install_relative(home: Path, *args: str, cdpath: str = "."):
+    """Invoke the installer the way its own header used to document: relatively.
+
+    Derived from INSTALLER rather than spelled, so that pointing
+    DEVRC_TEST_INSTALLER at a mutated copy still exercises the real seam.
+    """
+    env = _env(home)
+    env["CDPATH"] = cdpath
+    rel = f"{INSTALLER.parent.name}/{INSTALLER.name}"
+    return subprocess.run(
+        ["bash", rel, *args],
+        capture_output=True, text=True, timeout=120,
+        cwd=str(INSTALLER.parent.parent), env=env,
+    )
+
+
+def test_an_exported_CDPATH_cannot_corrupt_the_global_config(hm_home):
+    """🔴 THE regression test for the CDPATH hazard. Watched RED at 1b0c57c6.
+
+    With CDPATH exported, bash `cd` echoes the directory it resolved via CDPATH,
+    so a RELATIVE invocation made the installer's `$DIR` a two-line string. $DIR
+    is interpolated into the provenance stamp, so line 2 landed in ~/.gitconfig
+    as CONFIG rather than as a comment.
+
+    The symptom this pins is the real one and it is host-wide: EVERY later git
+    command in EVERY repo dies `fatal: bad config line 4`. So the assertion is
+    not "the installer exited 0" — a corrupt install can exit 0 (measured, in
+    the pre-existing-gitconfig arm). It is that git still WORKS afterwards.
+    """
+    proc = _install_relative(hm_home)
+
+    # The real symptom, asserted first and independently of the installer's rc:
+    # a plain read that any later `git push` performs.
+    readback = subprocess.run(
+        ["git", "config", "--get", "core.hooksPath"],
+        capture_output=True, text=True, timeout=60,
+        cwd=str(hm_home), env=_env(hm_home),
+    )
+    assert "bad config line" not in readback.stderr, (
+        "an exported CDPATH corrupted the global git config — git is now broken "
+        f"in every repo on the host:\n{readback.stderr}\n"
+        f"installer rc={proc.returncode}\n{proc.stdout}\n{proc.stderr}")
+
+    # And the install is either cleanly refused or cleanly correct — never a
+    # success report over a two-line value (the arm that exits 0 while the hook
+    # never runs).
+    if proc.returncode == 0:
+        assert readback.stdout.strip() == str(GITHOOKS), (
+            "installer reported success but core.hooksPath is not the hooks dir; "
+            f"got {readback.stdout.strip()!r}")
+    else:
+        # Refusing is a correct outcome, but only if it says WHY — an operator
+        # who cannot tell this apart from an unrelated failure will reach for
+        # the relative invocation again. Pinned on the whole normalised claim,
+        # not a lone keyword: `CDPATH` alone also appears in the file's comments
+        # and would keep matching if the message were reworded into nonsense.
+        normalised = " ".join(proc.stderr.split())
+        assert ("refusing to continue" in normalised
+                and "single-line path to a real directory" in normalised
+                and "CDPATH hazard" in normalised), (
+            "installer refused but did not name the CDPATH hazard:\n" + proc.stderr)
+
+
+def test_an_exported_CDPATH_leaves_a_parseable_gitconfig(hm_home):
+    """The stamp must not smuggle a newline into the file it authorises removal of.
+
+    Separate from the test above because that one can be satisfied by refusing
+    to run at all, while this one pins the FILE's shape whenever one was created
+    — the property `--uninstall` and the failed-install rollback both depend on.
+    """
+    _install_relative(hm_home)
+    gitconfig = hm_home / ".gitconfig"
+    if not gitconfig.exists():
+        pytest.skip("no fallback file was created; nothing to parse")
+
+    # git's own parser is the arbiter — not a regex of ours.
+    proc = subprocess.run(
+        ["git", "config", "--file", str(gitconfig), "--list"],
+        capture_output=True, text=True, timeout=60, env=_env(hm_home),
+    )
+    assert proc.returncode == 0, (
+        f"the file the installer created is not parseable by git:\n{proc.stderr}\n"
+        f"--- {gitconfig} ---\n{gitconfig.read_text()}")
+    for key, value in (line.split("=", 1) for line in
+                       proc.stdout.splitlines() if "=" in line):
+        assert "\n" not in value, f"multi-line value for {key}"
+
+
 def test_the_audit_env_file_is_seeded_on_a_read_only_host(hm_home):
     """The SECOND consequence of #905: the script exited before this block.
 
