@@ -196,19 +196,25 @@ From the analyze-service index (**recall — verify before relying on**):
 
 ## Next steps (ranked)
 
-🔴 **Renumbered this session** — the previous 1–7 list is superseded and its ranks no longer point
-at the same items. Both prior claims (`tmux-webapp-1`, `clawgate-version-pin-0.8.2`) are released.
+🔴 **Ranks are STABLE from here** — they are half a claim's identity
+(`claim-work --slug-for claudedocs/handoff-tmux-webapp.md <rank>`), so re-ranking silently
+re-points every live claim. The 2026-08-26 renumbering superseded an earlier 1–7 list; do not
+renumber again without releasing the claims first.
 
 1. **Watch the 4h idle reaper fire.** `homelab-talos`, `containers/clawgate/internal/api/server.go`
    (`attentionIdleReapAfter`). It has **never run against production data** — the one behaviour in
    this feature nobody has observed. 37+ idle entries accumulate within ~90 min. Tell:
    `retention: resolved N idle attention entry(ies) not seen for 4h` in the server log. If the rate
    outpaces it, that constant is the single knob.
-2. **Detach the synchronous suggest POST.** `homelab-talos`,
-   `containers/clawgate/hook/clawgate-stop-hook.sh`. Still costs ~8s per turn-end on a black-holed
-   route (`--max-time 8`) — the remaining half of the latency fix. The detach pattern now exists
-   next door in `raise_attention_idle`: rename the payload to a **sibling of `WORKDIR`** (escaping
-   the `EXIT` trap), fork, child deletes it. That rename is the load-bearing part.
+2. 🔴 **IN FLIGHT — claimed as `tmux-webapp-2`, dispatched 2026-08-27. Do NOT start this.**
+   **Detach the synchronous suggest POST.** `homelab-talos`,
+   `containers/clawgate/hook/clawgate-stop-hook.sh`. Costs ~8s per turn-end on a **black-holed**
+   route (`--max-time 8`); connection-*refused* is free (~0.06s), so only the off-network case is
+   the problem. The detach pattern is next door in `raise_attention_idle`: rename the payload to a
+   **sibling of `WORKDIR`** (escaping the `EXIT` trap), fork, child deletes it before it logs. That
+   rename is the load-bearing part. **Check `claim-work --list` before touching it** — if the claim
+   is gone and no PR landed, the dispatch died and this is free to take; if a PR exists, review it
+   instead. Nothing had merged when this doc was written.
 3. **Decide the terminal widget (audit finding A4 — still open).** clawgate vendors only two
    hand-written JS files (~3.7 KB) and no third-party bundle, so xterm.js would be the first.
    Recommendation on record: ship read-only `capture-pane` rendering first; if adopted, vendor and
@@ -227,6 +233,11 @@ at the same items. Both prior claims (`tmux-webapp-1`, `clawgate-version-pin-0.8
    `containers/clawgate/internal/api/{push_task,task_comment}_test.go` (pre-existing; mechanical now
    the `awaitPushesSettled` barrier exists); and a scanner test for in-body `! grep` — closing
    condition: a test in both bats suites that reds on a planted `! grep` assertion.
+9. **Two portable lessons are NOT in `MEMORY.md`** — offered twice, never answered, so recorded here
+   rather than lost: `! grep -q X f` is inert under bats errexit unless it is the last line of a
+   test, and busybox `date +%s%N` silently DROPS `%N`. Both are cross-cutting shell/testing
+   tripwires that map to no skill, which is what that index is for. They live in the clawgate index
+   entries today, which is the wrong scope for a lesson about bash and bats.
 
 **Parked with the operator (not work items until answered):**
 - Seam tests **skip in `clawgate-ci`** — the Go image has no `jq`. Closing it edits a pipeline every
