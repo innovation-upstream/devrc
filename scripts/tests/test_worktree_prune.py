@@ -1344,6 +1344,15 @@ def test_the_shout_is_gated_on_the_GLOB_not_on_the_flag(two_dead, capsys):
 
     That is how a real warning gets tuned out, so it is gated on whether the glob
     is out of force, not on whether the flag was passed.
+
+    🔴 The note that replaces the shout may only claim what is TRUE. It used to
+    say "this run behaves exactly like the default. The flag is doing nothing
+    here." — measurably false, and false in the direction that matters: typing
+    the glob converts the constant from an IMPLIED glob into a TYPED one, and
+    only typed globs are `--execute` refusal candidates. Pinned in
+    `test_a_retyped_glob_with_the_flag_is_NOT_the_default_it_refuses`; here the
+    note's own wording is pinned, and the run is taken past dry-run so the claim
+    is asserted on a report whose `--execute` really did fire.
     """
     repo, agent, plain, gh = two_dead
     wp.main(["--repo", str(repo), "--gh-cmd", gh, "--jobs", "1",
@@ -1351,10 +1360,29 @@ def test_the_shout_is_gated_on_the_GLOB_not_on_the_flag(two_dead, capsys):
     out = capsys.readouterr().out
     assert "IS IN FORCE" not in out, out
     assert "ordinary removal candidates" not in out, out
-    # …and the report says what IS true: the flag is a no-op here.
-    assert "The flag is doing nothing here." in out, out
+    # …and the report says what IS true: agent worktrees are still spared, and
+    # this is NOT the same command line as the default.
+    assert "agent worktrees are STILL spared" in out, out
+    assert "It is NOT identical to the default" in out, out
+    assert "REFUSES where the default would have proceeded" in out, out
+    # …and NOT the two claims round 4 printed, both of which were false here.
+    assert "The flag is doing nothing here." not in out, out
+    assert "behaves exactly like the default" not in out, out
     # The contradiction it used to sit above, still present and still correct.
     assert f"{AGENT_GLOB!r}  ->  matched 1 row(s), 1 of them dead" in out, out
+
+    # 🔴 PAST DRY-RUN. The old assertion only ever ran with `--execute` absent,
+    # so it structurally could not see that the note's claim is about what
+    # `--execute` does. Same report, same note, on a run that actually removed.
+    rc = wp.main(["--repo", str(repo), "--gh-cmd", gh, "--jobs", "1",
+                  "--include-agent-worktrees", "--exclude-path", AGENT_GLOB,
+                  "--execute", "--confirm", "1"])
+    live = capsys.readouterr()
+    assert rc == wp.RC_OK, live.err
+    assert "agent worktrees are STILL spared" in live.out, live.out
+    assert "IS IN FORCE" not in live.out, live.out
+    assert agent.is_dir(), "the retyped glob did not spare the agent worktree"
+    assert not plain.exists(), "nothing was removed, so this is still a dry run"
 
     # 🔴 BOTH DIRECTIONS. Same flag, glob genuinely out of force -> still shouts.
     wp.main(["--repo", str(repo), "--gh-cmd", gh, "--jobs", "1",
@@ -1362,7 +1390,7 @@ def test_the_shout_is_gated_on_the_GLOB_not_on_the_flag(two_dead, capsys):
     loud = capsys.readouterr().out
     assert "--include-agent-worktrees IS IN FORCE" in loud, loud
     assert "ordinary removal candidates" in loud, loud
-    assert "The flag is doing nothing here." not in loud, loud
+    assert "agent worktrees are STILL spared" not in loud, loud
 
 
 def test_the_retyped_glob_really_does_spare_the_agent_worktree(two_dead, capsys):
@@ -2170,23 +2198,119 @@ def test_the_refusal_says_a_retyped_default_glob_is_free_to_drop(no_agent_worktr
     constant is applied to every run anyway. Unqualified, "drop it" reads as
     "drop your protection", which is the remedy phrasing that trained the
     click-through round 2 had to undo.
+
+    🔴 …AND ONLY WHILE THE CONSTANT IS ACTUALLY APPLIED. With
+    `--include-agent-worktrees` it is not, so the hand-typed copy is the only
+    thing sparing agent worktrees on that command line and "drop it and lose
+    nothing" advises the DELETING-MORE direction. Flag vs FACT, in a sentence
+    that offers a remedy.
+
+    🔴 BOTH SPELLINGS. The reassurance exists twice — once on stderr in the
+    refusal, once in `render_text` on stdout — and round 4 shipped it with only
+    the stderr copy asserted. Mutating the report copy's condition to `if False`
+    gave a fully green suite: no test and no battery mutant could see it. It is
+    the vehicle for the flag-in-force case below, so both are pinned here.
     """
     repo, plain, gh = no_agent_worktrees
     rc = wp.main(["--repo", str(repo), "--gh-cmd", gh, "--jobs", "1",
                   "--exclude-path", AGENT_GLOB, "--execute", "--confirm", "1"])
-    err = capsys.readouterr().err
-    assert rc == wp.RC_EXECUTE_REFUSED, err
-    assert "applied by DEFAULT" in err, err
-    assert "dropping a hand-typed copy of it changes nothing" in err, err
+    cap = capsys.readouterr()
+    assert rc == wp.RC_EXECUTE_REFUSED, cap.err
+    assert "is applied by DEFAULT to every run" in cap.err, cap.err
+    assert "dropping your hand-typed copy of it changes nothing" in cap.err, cap.err
+    # …and the SECOND spelling, on stdout, which had zero coverage.
+    assert "is applied by DEFAULT, so if this is a hand-typed copy of it you can " \
+           "simply drop it and lose nothing" in cap.out, cap.out
     assert plain.is_dir(), "a refused run removed something"
 
     # NEGATIVE CONTROL: an ORDINARY dud glob gets no such reassurance — dropping
     # THAT one really does change what is spared.
     rc = wp.main(["--repo", str(repo), "--gh-cmd", gh, "--jobs", "1",
                   "--exclude-path", "*/civitai/*", "--execute", "--confirm", "1"])
+    cap = capsys.readouterr()
+    assert rc == wp.RC_EXECUTE_REFUSED, cap.err
+    assert "applied by DEFAULT" not in cap.err, cap.err
+    assert "lose nothing" not in cap.out, cap.out
+
+    # 🔴 THE CASE THAT MAKES THE REASSURANCE FALSE, AND IN THE DELETING-MORE
+    # DIRECTION. With `--include-agent-worktrees` the constant is NOT applied
+    # (`resolve_exclude_globs`), so this hand-typed copy is the ONLY thing
+    # sparing agent worktrees on this command line. Telling the operator it is
+    # free to drop — twice, in a refusal they must get past — is advice that
+    # turns 137 live sessions' working directories into removable rows.
+    #
+    # BEHAVIOURAL half first, so "the sentence is gone" cannot be confused with
+    # "the sentence was always vacuous": with the glob, the agent tree is spared;
+    # without it, it is removable. Measured on the resolver, which is the one
+    # place that decides.
+    assert wp.path_excluded("/x/.claude/worktrees/agent-1/y",
+                            wp.resolve_exclude_globs([AGENT_GLOB], True)) == AGENT_GLOB
+    assert wp.path_excluded("/x/.claude/worktrees/agent-1/y",
+                            wp.resolve_exclude_globs([], True)) is None
+
+    rc = wp.main(["--repo", str(repo), "--gh-cmd", gh, "--jobs", "1",
+                  "--include-agent-worktrees", "--exclude-path", AGENT_GLOB,
+                  "--execute", "--confirm", "1"])
+    cap = capsys.readouterr()
+    assert rc == wp.RC_EXECUTE_REFUSED, cap.err
+    assert "matched ZERO" in cap.err, cap.err
+    assert "applied by DEFAULT" not in cap.err, cap.err
+    assert "lose nothing" not in cap.out, cap.out
+    assert plain.is_dir(), "a refused run removed something"
+    # …and this is the run whose note claims exactly this: typed, therefore a
+    # refusal candidate, where the true default would have proceeded.
+    assert "REFUSES where the default would have proceeded" in cap.out, cap.out
+
+
+def test_the_free_to_drop_note_is_scoped_to_the_ONE_glob_it_is_true_of(
+        no_agent_worktrees, capsys):
+    """🔴 THE REFUSAL NAMES EVERY DUD, SO AN UNQUALIFIED PARENTHETICAL COVERS
+    THEM ALL. "Drop it" is offered as a remedy for the whole list; saying "that
+    one is applied by DEFAULT, dropping it costs nothing" without scoping reads
+    as "dropping any of these costs nothing" — and for the ordinary dud it is
+    false, in the direction that widens what gets removed.
+
+    Pinned on a MIXED list, which is the only shape that can tell a per-glob
+    note from a boolean one.
+    """
+    repo, plain, gh = no_agent_worktrees
+    rc = wp.main(["--repo", str(repo), "--gh-cmd", gh, "--jobs", "1",
+                  "--exclude-path", AGENT_GLOB, "--exclude-path", "*/civitai/*",
+                  "--execute", "--confirm", "1"])
     err = capsys.readouterr().err
     assert rc == wp.RC_EXECUTE_REFUSED, err
-    assert "applied by DEFAULT" not in err, err
+    assert f"{AGENT_GLOB!r} — and ONLY that one — is applied by DEFAULT" in err, err
+    assert "dropping '*/civitai/*' really would" in err, err
+    assert plain.is_dir(), "a refused run removed something"
+
+
+def test_a_retyped_glob_with_the_flag_is_NOT_the_default_it_refuses(no_agent_worktrees, capsys):
+    """🔴 THE MATRIX BEHIND THE `note:` LINE. Round 4's note claimed the run
+    "behaves exactly like the default. The flag is doing nothing here." — printed
+    on the stdout of a run whose stderr said REFUSED.
+
+    Typing the glob converts the constant from an IMPLIED glob into a TYPED one,
+    and only typed globs are `--execute` refusal candidates
+    (`exclude_globs_blocking_execute`). Same scan, same spared set, opposite exit
+    code — so the two command lines are NOT interchangeable, and the note may not
+    say they are.
+
+    Ordered refuse-then-default: the refusal must remove nothing, which is also
+    what leaves the fixture intact for the default run to consume.
+    """
+    repo, plain, gh = no_agent_worktrees
+    flagged = wp.main(["--repo", str(repo), "--gh-cmd", gh, "--jobs", "1",
+                       "--include-agent-worktrees", "--exclude-path", AGENT_GLOB,
+                       "--execute", "--confirm", "1"])
+    assert flagged == wp.RC_EXECUTE_REFUSED, capsys.readouterr().err
+    assert plain.is_dir(), "the refusal removed something"
+
+    default = wp.main(["--repo", str(repo), "--gh-cmd", gh, "--jobs", "1",
+                       "--execute", "--confirm", "1"])
+    err = capsys.readouterr().err
+    assert default == wp.RC_OK, err
+    assert not plain.exists(), "the default run removed nothing, so the contrast is vacuous"
+    assert flagged != default
 
 
 def test_the_override_does_not_change_which_rows_are_removable(no_agent_worktrees, capsys):

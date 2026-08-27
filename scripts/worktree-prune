@@ -1141,11 +1141,23 @@ def render_text(rows: "list[dict]", summary: dict, verbose: bool) -> str:
             f"working directory that is in use RIGHT NOW. Drop the flag unless you have "
             f"checked every path by hand.")
     elif summary.get("agent_worktrees_included"):
+        # 🔴 "STILL spared" is the whole claim, and it is the only one this note
+        # is entitled to make. An earlier wording went further — "behaves exactly
+        # like the default … the flag is doing nothing here" — and that was
+        # MEASURABLY false in the direction that matters: typing the glob turns
+        # the constant from an IMPLIED glob into a TYPED one, and only typed
+        # globs are `--execute` refusal candidates
+        # (`exclude_globs_blocking_execute`). So on a scan holding no agent
+        # worktrees the true default proceeds (RC_OK, rows removed) and this
+        # command line REFUSES — a difference the note was printing on the stdout
+        # of the very run whose stderr said REFUSED.
         lines.append(
             f"note: --include-agent-worktrees was passed, but {AGENT_WORKTREE_GLOB!r} is in "
             f"force anyway as a --exclude-path you typed — so agent worktrees are STILL "
-            f"spared and this run behaves exactly like the default. The flag is doing "
-            f"nothing here.")
+            f"spared and this run can remove no more than the default would. It is NOT "
+            f"identical to the default, though: a glob YOU typed is an --execute refusal "
+            f"candidate, so on a scan holding no agent worktrees this run REFUSES where the "
+            f"default would have proceeded.")
     # 🔴 Printed whenever a glob is in force — never gated on whether anything
     # matched. Gating it on the match count is precisely the bug: a mistyped glob
     # then produced output identical to an unfiltered run, and the operator read
@@ -1168,6 +1180,18 @@ def render_text(rows: "list[dict]", summary: dict, verbose: bool) -> str:
         # shouting about that is how a real warning gets tuned out, and refusing
         # on it made the safety default block itself.
         for g in summary.get("exclude_globs_blocking_execute") or []:
+            # 🔴 FLAG vs FACT, in the sentence that offers a REMEDY — and the
+            # remedy points the DELETING-MORE way when it is wrong. "Drop it and
+            # lose nothing" is true only while the constant is ACTUALLY applied,
+            # i.e. while `--include-agent-worktrees` was NOT passed. With the
+            # flag in force `resolve_exclude_globs` does not append the constant,
+            # so this hand-typed copy is the ONLY thing sparing agent worktrees
+            # on that command line; advising the operator to drop it while they
+            # keep the flag is how 137 live sessions' working directories become
+            # removable rows. Gated on the same key the round-4 shout fix
+            # introduced, because it is the same distinction.
+            free_to_drop = (normalize_glob(g) == AGENT_WORKTREE_GLOB
+                            and not summary.get("agent_worktrees_included"))
             lines.append(
                 f"🔴 --exclude-path {g!r} matched ZERO rows. A glob that matches nothing is "
                 f"BYTE-IDENTICAL to passing no filter at all, and --confirm N cannot catch it "
@@ -1178,7 +1202,7 @@ def render_text(rows: "list[dict]", summary: dict, verbose: bool) -> str:
                 f"but out of this scan's scope."
                 + (f" (Note that {AGENT_WORKTREE_GLOB!r} is applied by DEFAULT, so if this is a "
                    f"hand-typed copy of it you can simply drop it and lose nothing.)"
-                   if normalize_glob(g) == AGENT_WORKTREE_GLOB else ""))
+                   if free_to_drop else ""))
     # 🔴 OUTSIDE the `exclude_globs` block, because the flag can be in force with
     # NO globs of its own to print under: `--include-agent-worktrees
     # --allow-unmatched-globs` leaves the glob list empty, and the echo — which
@@ -1322,8 +1346,11 @@ def build_parser() -> argparse.ArgumentParser:
                         "the scan this default was measured from (2026-08-27), 137 of 236 `dead` rows "
                         "were such trees. The exclusion covers EVERY entry under that directory, not "
                         "just the `agent-` prefixed ones (2 of 246 such entries on this box have "
-                        "no `agent-` prefix and are live sessions' trees). When this flag is in "
-                        "force the report says so, loudly.")
+                        "no `agent-` prefix and are live sessions' trees). When this flag "
+                        "actually turns the exclusion OFF the report says so, loudly. Re-type "
+                        "the same glob as --exclude-path and the exclusion stays in force; the "
+                        "report then prints a quiet `note:` saying so instead, because the loud "
+                        "warning would be false.")
     p.add_argument("--jobs", type=int, default=8, help="parallel worktree probes (default 8)")
     p.add_argument("--no-gh", action="store_true",
                    help="do not consult gh. Every unlanded row then becomes cannot-tell, "
@@ -1447,15 +1474,41 @@ def main(argv: "list[str] | None" = None) -> int:
         # every run anyway. Saying so makes every remedy this message offers
         # visibly safe; without it "drop it" reads as "drop your protection",
         # which is the remedy phrasing that trained a click-through in round 2.
-        redundant = [g for g in dud if normalize_glob(g) == AGENT_WORKTREE_GLOB]
+        # 🔴 …and ONLY while the constant is ACTUALLY applied. `--execute` with
+        # `--include-agent-worktrees` does NOT get the constant appended
+        # (`resolve_exclude_globs`), so the hand-typed copy is the only thing
+        # sparing agent worktrees on that command line. Telling the operator it
+        # is free to drop, in a refusal they must get past, advises the
+        # DELETING-MORE direction — and the number behind it is 137 live
+        # sessions' working directories. Gated on the FACT, not on the glob's
+        # spelling, which is the same mistake the round-4 shout fix closed.
+        #
+        # 🟢 …and scoped PER-GLOB rather than used as a boolean: the sentence
+        # above names EVERY dud, so an unqualified parenthetical reads as
+        # "dropping any of them is free". At most one dud can equal the constant
+        # (the typed list is normalised and deduped), but the message must say
+        # which one, and must say the others are NOT free.
+        redundant = ([g for g in dud if normalize_glob(g) == AGENT_WORKTREE_GLOB]
+                     if not args.include_agent_worktrees else [])
+        others = [g for g in dud if g not in redundant]
+        if redundant and others:
+            free_note = (", ".join(repr(g) for g in redundant) + " — and ONLY that one — is "
+                         "applied by DEFAULT to every run, so dropping your hand-typed copy of "
+                         "it changes nothing about what is spared; dropping "
+                         + ", ".join(repr(g) for g in others) + " really would. ")
+        elif redundant:
+            free_note = (", ".join(repr(g) for g in redundant) + " is applied by DEFAULT to "
+                         "every run, so dropping your hand-typed copy of it changes nothing "
+                         "about what is spared. ")
+        else:
+            free_note = ""
         _log("REFUSED: " + ", ".join(repr(g) for g in dud) +
              f" matched ZERO of the {len(rows)} scanned row(s). A filter that matches nothing "
              "is indistinguishable from no filter, and --confirm cannot catch that because it "
              "is derived from the same count. Fix the glob (`*` crosses `/`; a trailing `/` is "
              "stripped; a literal path containing `* ? [` needs glob.escape), drop it, or pass "
              "--allow-unmatched-globs if it is correct but out of this scan's scope. "
-             + (f"({AGENT_WORKTREE_GLOB!r} is applied by DEFAULT — dropping a hand-typed copy "
-                f"of it changes nothing about what is spared.) " if redundant else "")
+             + free_note
              + "Nothing removed.")
         return RC_EXECUTE_REFUSED
     return execute_removals(rows, args.confirm)

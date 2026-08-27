@@ -69,6 +69,17 @@ ORIG_SHA="$(sha256sum "$T/tool.orig" | cut -d' ' -f1)"
 restore() { cp "$T/tool.orig" "$TOOL"; }
 
 FAILURES=0
+# 🔴 A mutant this interpreter CANNOT reach is neither killed nor survived — it
+# is UNSCORED, and the verdict line has to say so. The inline skip notice below
+# is loud, but the last line is what gets pasted into a report, and
+# "ALL MUTANTS ACCOUNTED FOR" over a silently-narrower battery is exactly the
+# green-that-cannot-see-it this file exists to prevent.
+SKIPPED=0
+SKIPPED_NAMES=""
+skip() { # skip <name> <why>
+  SKIPPED=$((SKIPPED+1)); SKIPPED_NAMES="${SKIPPED_NAMES:+$SKIPPED_NAMES, }$1"
+  printf '  -- %-46s UNSCORED HERE: %s\n' "$1" "$2"
+}
 
 # 🔴 A SUITE THAT NEVER RAN YIELDS ZERO `FAILED` LINES, i.e. "clean". Reading
 # only FAILED lines could not tell "no test failed" from "pytest died at
@@ -171,8 +182,8 @@ if python3 -c 'import sys; sys.exit(0 if sys.version_info < (3,13) else 1)'; the
     test_a_looped_repo_path_on_the_command_line_does_not_crash_the_run \
     's|^    except (OSError, RuntimeError, ValueError):|    except (OSError, ValueError):|'
 else
-  echo "  -- skipped on CPython >= 3.13: resolve() does not raise, so this"
-  echo "     mutant is unreachable HERE. Run the battery on 3.12 to score it."
+  skip 'resolve-or-none-does-not-swallow-the-loop' \
+    "CPython >= 3.13 — resolve() does not raise, so the mutant is unreachable; run on 3.12"
 fi
 run 'resolve-or-none-always-returns-none' \
   test_a_glob_on_the_resolved_path_matches_a_symlinked_repo \
@@ -212,10 +223,47 @@ run 'override-echo-deleted-entirely' \
 printf '\n== ROUND 4 FIX 5 — the refusal names the free remedy ==\n'
 run 'refusal-drops-the-default-is-free-note' \
   test_the_refusal_says_a_retyped_default_glob_is_free_to_drop \
-  's|^        redundant = \[g for g in dud if normalize_glob(g) == AGENT_WORKTREE_GLOB\]|        redundant = []|'
+  's|^        redundant = (\[g for g in dud if normalize_glob(g) == AGENT_WORKTREE_GLOB\]|        redundant = ([]|'
 run 'refusal-note-fires-for-every-glob' \
   test_the_refusal_says_a_retyped_default_glob_is_free_to_drop \
-  's|^        redundant = \[g for g in dud if normalize_glob(g) == AGENT_WORKTREE_GLOB\]|        redundant = list(dud)|'
+  's|^        redundant = (\[g for g in dud if normalize_glob(g) == AGENT_WORKTREE_GLOB\]|        redundant = (list(dud)|'
+
+printf '\n== ROUND 5 FIX 1 — "free to drop" is FALSE under --include-agent-worktrees ==\n'
+# 🔴 The reassurance advises the DELETING-MORE direction when it is wrong, so
+# BOTH spellings of it are scored — and ISOLATED. Each mutant leaves the
+# glob-identity half intact so the flag-vs-fact half has to be doing the work.
+run 'stderr-free-note-ignores-the-flag-again' \
+  test_the_refusal_says_a_retyped_default_glob_is_free_to_drop \
+  's|^                     if not args.include_agent_worktrees else \[\])|                     if True else [])|'
+run 'report-free-note-ignores-the-flag-again' \
+  test_the_refusal_says_a_retyped_default_glob_is_free_to_drop \
+  's|^                            and not summary.get("agent_worktrees_included"))|                            and True)|'
+# 🔴 …and the REPORT copy's existence, which had ZERO coverage before this round:
+# `if False` here gave 176 passed. It is one of only two spellings of the rule.
+# 🟢 …and the per-glob scoping: collapsing the mixed-list branch makes the note
+# read as covering every dud the sentence above names.
+run 'free-note-used-as-a-boolean-again' \
+  test_the_free_to_drop_note_is_scoped_to_the_ONE_glob_it_is_true_of \
+  's|^        if redundant and others:|        if False:|'
+run 'report-free-note-deleted-entirely' \
+  test_the_refusal_says_a_retyped_default_glob_is_free_to_drop \
+  's|^            free_to_drop = (normalize_glob(g) == AGENT_WORKTREE_GLOB|            free_to_drop = (False|'
+
+printf '\n== ROUND 5 FIX 2 — the note may not claim the flag is a no-op ==\n'
+run 'note-claims-the-run-is-identical-to-the-default' \
+  test_the_shout_is_gated_on_the_GLOB_not_on_the_flag \
+  's|f"spared and this run can remove no more than the default would. It is NOT "|f"spared and this run behaves exactly like the default. The flag is doing "|'
+
+printf '\n== ROUND 5 FIX 7 — two sensitive guards the battery could not see ==\n'
+# 🔴 Both were hand-mutated by an auditor and each test was the SOLE killer; the
+# guards were sensitive and the battery simply would not have noticed their
+# removal. That is a blind spot in the INSTRUMENT, not in the code.
+run 'parallel-scan-drops-rows' \
+  test_the_production_default_job_count_scans_identically_to_serial \
+  's|^            return list(pool.map(build, wts))|            return list(pool.map(build, wts))[:1]|'
+run 'unwalkable-path-reports-as-existing' \
+  test_a_row_whose_resolve_fails_is_cannot_tell_not_removable \
+  's|^            "path_exists": is_dir(path),|            "path_exists": True,|'
 
 printf '\n== ROUND 4 FIX 8 — prefix abbreviation ==\n'
 run 'allow-abbrev-back-on' \
@@ -307,8 +355,15 @@ else
 fi
 
 printf '\n'
-if [ "$FAILURES" -eq 0 ]; then
+if [ "$FAILURES" -eq 0 ] && [ "$SKIPPED" -eq 0 ]; then
   echo "ALL MUTANTS ACCOUNTED FOR"
+elif [ "$FAILURES" -eq 0 ]; then
+  # 🔴 The verdict line carries the caveat, because the verdict line is what
+  # gets quoted. Not a failure — the skip is correct on this interpreter — but
+  # "ALL … ACCOUNTED FOR" would be a claim about a battery one mutant narrower
+  # than the one this file describes.
+  echo "ALL SCORED MUTANTS ACCOUNTED FOR — but $SKIPPED UNSCORED on $(python3 -V 2>&1): $SKIPPED_NAMES"
+  echo "   (not a failure; re-run on the other interpreter for a complete sweep)"
 else
   # 🔴 An aggregate, because a script whose status is the LAST run's exits 0 when
   # the last run is the must-SURVIVE control — the exact defect this file's
