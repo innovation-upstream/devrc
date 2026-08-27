@@ -517,6 +517,16 @@
 #                        has been SITTING there. Deliberately NOT forwarded over
 #                        ssh — the ladder is kept by the host running the driver,
 #                        for both hosts' paths.
+#   DRIFT_NIXDIRT_MAX    max nix-read untracked paths ENUMERATED per host
+#                        (default 10, integer >= 1). 🔴 A LISTING BOUND ONLY —
+#                        `hits=` on the FACT line is the finding and is never
+#                        capped, and the driver refuses a report whose `listed=`
+#                        disagrees with the pairs it can see. Floored at 1 rather
+#                        than merely non-negative: 0 emitted no pairs, so the
+#                        ladder walked nothing and rc 23 was disabled with the
+#                        summary still printing a clean-looking `hits=0` over a
+#                        real denominator. IS forwarded over ssh (the enumeration
+#                        happens on each host), hence require_positive_int + %q.
 #   DRIFT_STATE_DIR  where the unreachable, unmeasured and nix-dirt streaks are
 #                    persisted
 #                    (default ${XDG_STATE_HOME:-$HOME/.local/state}/drift-check)
@@ -598,6 +608,17 @@ DRIFT_NIXDIRT_ESCALATE="${DRIFT_NIXDIRT_ESCALATE:-12}"
 # `claude/skills` is a whole-directory STORE source, so an untracked,
 # non-gitignored subtree under it emits one FACT token, journal lines AND a state
 # file per path — unbounded, on a unit whose only output is the journal.
+#
+# 🔴 IT BOUNDS ONE RUN'S ENUMERATION, NOT THE STATE DIR OVER TIME. A counter is
+# created per (host, path) that gets emitted, so ten new paths per run still
+# accrete ten new files per run — the cap stops one run from creating a thousand,
+# it does not stop a host's state dir growing monotonically over its lifetime.
+# Nothing prunes DRIFT_STATE_DIR today; the files are a few bytes each and
+# n_streak_reset unlinks one the moment its path stops being reported, which is
+# the only reclamation there is.
+#
+# 🔴 AND IT IS THE ONLY CAP IN THIS FILE THAT COULD CHANGE A VERDICT, which is
+# why it alone is floored at 1. See the require_positive_int call below.
 DRIFT_NIXDIRT_MAX="${DRIFT_NIXDIRT_MAX:-10}"
 DRIFT_STATE_DIR="${DRIFT_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/drift-check}"
 DRIFT_SESSION_MANAGER="${DRIFT_SESSION_MANAGER:-$_drift_dir/session-manager}"
@@ -615,6 +636,26 @@ require_int() { # require_int <name> <value>
     ''|*[!0-9]*) echo "drift-check: $1 must be a non-negative integer, got: $2" >&2; exit 2 ;;
   esac
 }
+# 🔴 ZERO IS NOT A HARMLESS BOUND WHEN THE BOUND FEEDS A VERDICT. require_int
+# accepts 0, which is right for every pure LISTING cap here — DRIFT_UNTRACKED_MAX
+# and DRIFT_DANGLING_MAX print their counts separately and 0 there honestly means
+# "count them, name none of them". It is wrong for the one cap whose output the
+# DRIVER walks: with DRIFT_NIXDIRT_MAX=0 the payload emitted no pairs, so no
+# streak was bumped, nothing escalated, and four consecutive runs over three
+# genuinely untracked nix-read files returned [0,0,0,0] instead of [0,0,23,23] —
+# rc 23 silently switched off from an env var, with the summary still printing a
+# clean-looking `hits=0` beside a real non-zero denominator. So this one has a
+# FLOOR, and the floor is stated in the message rather than left to be inferred.
+require_positive_int() { # require_positive_int <name> <value>
+  case "$2" in
+    ''|*[!0-9]*) echo "drift-check: $1 must be an integer >= 1, got: $2" >&2; exit 2 ;;
+    0) echo "drift-check: $1 must be an integer >= 1, got: 0" >&2
+       echo "  0 emits no paths at all, which leaves the rc 23 ladder nothing to walk:" >&2
+       echo "  no streak is bumped and nothing escalates, while the summary still prints" >&2
+       echo "  hits=<n> over a real denominator. That is a verdict turned off by a cap." >&2
+       exit 2 ;;
+  esac
+}
 require_int DRIFT_UNTRACKED_MAX "$DRIFT_UNTRACKED_MAX"
 require_int DRIFT_DANGLING_MAX "$DRIFT_DANGLING_MAX"
 require_int DRIFT_UNREACHABLE_ESCALATE "$DRIFT_UNREACHABLE_ESCALATE"
@@ -629,7 +670,9 @@ require_int DRIFT_UNMEASURED_FETCH_ESCALATE "$DRIFT_UNMEASURED_FETCH_ESCALATE"
 require_int DRIFT_NIXDIRT_ESCALATE "$DRIFT_NIXDIRT_ESCALATE"
 # Interpolated into the payload that runs on the OTHER host — same reason
 # DRIFT_UNTRACKED_MAX is validated: a non-integer here is remote code execution.
-require_int DRIFT_NIXDIRT_MAX "$DRIFT_NIXDIRT_MAX"
+# require_positive_int, not require_int: see its header for the measured
+# [0,0,0,0] this floor exists to refuse.
+require_positive_int DRIFT_NIXDIRT_MAX "$DRIFT_NIXDIRT_MAX"
 # Not interpolated into a remote payload — but it IS handed to `timeout`, where a
 # non-integer would make the phase-2 scan fail in a way that reads as "the tool
 # is broken" rather than "you passed nonsense".
@@ -825,13 +868,28 @@ fi
 # record — the same reason the rc 13 and rc 18 ladders are there.
 #
 # The FACT line is the contract with the driver and its shape is deliberate:
-#   FACT nix-untracked untracked=<N> nixread=<M> reason=<TOKEN> [<path>=<REACH>]…
-# The two counts are emitted UNCONDITIONALLY, including as zeros, because a
+#   FACT nix-untracked untracked=<N> nixread=<M> hits=<H> listed=<L> reason=<TOKEN> [<path>=<REACH>]…
+# The counts are emitted UNCONDITIONALLY, including as zeros, because a
 # driver that sees no pairs must be able to tell "this host has no untracked
 # nix-read files" from "the nix-read set came out empty and every file on every
 # host is therefore clean". Pairs are told apart from the header fields by their
 # VALUE — LIVE or DROPPED, the whole reach vocabulary — so a repo-root file
 # called `reason` cannot be read as a header field.
+#
+# 🔴 `hits=` EXISTS BECAUSE THE PAIR LIST IS CAPPED AND THE FINDING IS NOT. The
+# driver used to COUNT the pairs to get its hit total, so DRIFT_NIXDIRT_MAX
+# truncated the machine-readable contract as well as the human listing: measured
+# with 15 untracked nix-read files, the human line correctly said `15 of 15`
+# while the FACT line carried 10 pairs with no marker at all (the `... and N
+# more` note goes to `say`, which the driver does not parse) and the summary
+# printed `hits=10`. A count derived from a truncated list is a smaller version
+# of the reassuring-zero this whole block refuses, so the count now travels as
+# its own field and the list is only ever evidence.
+#
+# `listed=` is what makes `hits=` checkable rather than merely asserted: the
+# driver cross-checks it against the pairs it can actually see and refuses the
+# whole report if they disagree, which is the only way a stream truncated in
+# transit is distinguishable from a host that had nothing more to say.
 #
 # 🔴 THE PAIR CARRIES THE REACH, NOT THE CLASS, and that is a correction. A STORE
 # class says nix READS the path; it does NOT say the file got into the artifact,
@@ -866,16 +924,25 @@ if [ "$NU_REASON" = OK ] && [ "$n" != 0 ]; then
     # 🔴 HITS COUNTS ALL OF THEM; only the EMITTED pairs are capped. The count is
     # the finding and must never be truncated — a cap that silently shrank the
     # number would be a smaller version of the reassuring-zero this file refuses.
-    case "$(nix_read_artifact_reach "$(nix_read_class_of "$NU_P")" 0)" in
-      LIVE)
+    #
+    # 🔴 ONE CAP PREDICATE, NOT ONE PER CLASS. LIVE and DROPPED used to carry
+    # their own copy of `hit++ ; emit if under the cap`, and a mutation sweep
+    # showed why that is not merely repetition: mutating the cap in the LIVE arm
+    # SURVIVED the full suite, because reaching it needs more untracked
+    # mkOutOfStoreSymlink targets than any fixture has, so no test of the
+    # DROPPED arm could ever see it. Two copies is two things to cover; one is
+    # one.
+    #
+    # 🔴 NO APOSTROPHE ANYWHERE IN THIS PAYLOAD, comments included. CONVERGE-like
+    # single-quoted strings end at the first quote: the first draft of this very
+    # comment wrote "the DROPPED arm-apostrophe-s test" and broke 173 tests at
+    # once, exactly as ship.sh warns about its own empty-string literal.
+    NU_R="$(nix_read_artifact_reach "$(nix_read_class_of "$NU_P")" 0)"
+    case "$NU_R" in
+      LIVE|DROPPED)
         NU_HITS=$(( NU_HITS + 1 ))
         if [ "$NU_EMIT" -lt "$NU_MAX" ]; then
-          NU_PAIRS="$NU_PAIRS $NU_P=LIVE"; NU_EMIT=$(( NU_EMIT + 1 ))
-        fi ;;
-      DROPPED)
-        NU_HITS=$(( NU_HITS + 1 ))
-        if [ "$NU_EMIT" -lt "$NU_MAX" ]; then
-          NU_PAIRS="$NU_PAIRS $NU_P=DROPPED"; NU_EMIT=$(( NU_EMIT + 1 ))
+          NU_PAIRS="$NU_PAIRS $NU_P=$NU_R"; NU_EMIT=$(( NU_EMIT + 1 ))
         fi ;;
       UNREPRESENTABLE) NU_UNREP=$(( NU_UNREP + 1 )) ;;
     esac
@@ -897,10 +964,10 @@ else
   done
   # The same "... and N more" shape every other capped listing in this file uses,
   # so a truncated list can never be mistaken for the whole set.
-  [ "$NU_HITS" -gt "$NU_EMIT" ] && say "    ... and $(( NU_HITS - NU_EMIT )) more"
+  [ "$NU_HITS" -gt "$NU_EMIT" ] && say "    ... and $(( NU_HITS - NU_EMIT )) more (DRIFT_NIXDIRT_MAX=$NU_MAX)"
 fi
 [ "$NU_UNREP" != 0 ] && say "  ($NU_UNREP untracked path(s) NOT CLASSIFIED — a character the classifier does not model)"
-echo "[$label] FACT nix-untracked untracked=$n nixread=$NU_M reason=$NU_REASON$NU_PAIRS"
+echo "[$label] FACT nix-untracked untracked=$n nixread=$NU_M hits=$NU_HITS listed=$NU_EMIT reason=$NU_REASON$NU_PAIRS"
 
 # --- Which branch is checked out? ---------------------------------------------
 branch=$(git symbolic-ref --quiet --short HEAD 2>/dev/null || echo DETACHED)
@@ -2318,6 +2385,7 @@ N_REPORTING=0
 N_UNTRACKED=0
 N_NIXREAD=0
 N_HITS=0
+N_LISTED=0
 N_ESCALATED=0
 N_BLIND=0
 for HROLE in "$LOCAL_ROLE" "$REMOTE_ROLE"; do
@@ -2338,34 +2406,60 @@ for HROLE in "$LOCAL_ROLE" "$REMOTE_ROLE"; do
   # was dropped, silently, in the direction of "nothing to see". LIVE and DROPPED
   # are the whole reach vocabulary and no header field can take either value, so
   # matching the pairs first cannot swallow a header key.
-  N_UNT=-1; N_MM=-1; N_RSN=""; N_PAIRS=""
+  N_UNT=-1; N_MM=-1; N_HIT=-1; N_LST=-1; N_RSN=""; N_PAIRS=""; N_SEEN=0
   for X in $N_LINE; do
     case "$X" in
-      *=LIVE|*=DROPPED) N_PAIRS="$N_PAIRS $X" ;;
+      *=LIVE|*=DROPPED) N_PAIRS="$N_PAIRS $X"; N_SEEN=$(( N_SEEN + 1 )) ;;
       untracked=*)      N_UNT="${X#untracked=}" ;;
       nixread=*)        N_MM="${X#nixread=}" ;;
+      hits=*)           N_HIT="${X#hits=}" ;;
+      listed=*)         N_LST="${X#listed=}" ;;
       reason=*)         N_RSN="${X#reason=}" ;;
     esac
   done
   case "$N_UNT" in ''|*[!0-9]*) N_UNT=-1 ;; esac
   case "$N_MM" in ''|*[!0-9]*) N_MM=-1 ;; esac
+  # 🔴 NOT DEFAULTED, and never derived from the pairs. A missing or unparseable
+  # `hits=` is a report this driver cannot read, and the one thing it must not do
+  # is fall back to counting the list — that IS the bug this field was added to
+  # remove. -1 here lands on the refusal below.
+  case "$N_HIT" in ''|*[!0-9]*) N_HIT=-1 ;; esac
+  case "$N_LST" in ''|*[!0-9]*) N_LST=-1 ;; esac
 
-  if [ "$N_RSN" != OK ] || [ "$N_UNT" -lt 0 ] || [ "$N_MM" -le 0 ]; then
-    echo "[nixdirt] $HROLE: COULD NOT MEASURE — reason=${N_RSN:-ABSENT} untracked=$N_UNT nix-read-paths=$N_MM."
+  if [ "$N_RSN" != OK ] || [ "$N_UNT" -lt 0 ] || [ "$N_MM" -le 0 ] \
+     || [ "$N_HIT" -lt 0 ] || [ "$N_LST" -lt 0 ]; then
+    echo "[nixdirt] $HROLE: COULD NOT MEASURE — reason=${N_RSN:-ABSENT} untracked=$N_UNT nix-read-paths=$N_MM hits=$N_HIT listed=$N_LST."
     echo "[nixdirt]   With no derived nix-read set every untracked file on that host classifies"
     echo "[nixdirt]   as harmless. That is not a finding of none: nothing was bumped, nothing"
     echo "[nixdirt]   was reset, and NO code is set for it."
     N_BLIND=$(( N_BLIND + 1 ))
     continue
   fi
+  # 🔴 THE INTEGRITY CHECK THAT MAKES `listed=` LOAD-BEARING. The emitter says how
+  # many pairs it put on the line; this counts how many arrived. They disagree
+  # only if the line was mangled or truncated in transit (the remote leg's stdout
+  # crosses an ssh hop), and a partial pair list read as a complete one would end
+  # every missing path's streak in the complement loop below — silently, in the
+  # direction of "nothing to see". So a disagreement is refused, not repaired.
+  if [ "$N_SEEN" != "$N_LST" ]; then
+    echo "[nixdirt] $HROLE: COULD NOT MEASURE — the report claims listed=$N_LST path(s) but $N_SEEN arrived."
+    echo "[nixdirt]   The pair list does not match its own declared length, so this line was"
+    echo "[nixdirt]   mangled or truncated between that host and here. Nothing was bumped,"
+    echo "[nixdirt]   nothing was reset, and NO code is set for it."
+    N_BLIND=$(( N_BLIND + 1 ))
+    continue
+  fi
   N_UNTRACKED=$(( N_UNTRACKED + N_UNT ))
   N_NIXREAD=$(( N_NIXREAD + N_MM ))
+  # 🔴 THE REPORTED TOTAL, never the length of the list. See the FACT-line header
+  # in the payload for the measured 15-vs-10.
+  N_HITS=$(( N_HITS + N_HIT ))
+  N_LISTED=$(( N_LISTED + N_LST ))
 
   N_KEEP=""
   for X in $N_PAIRS; do
     N_P="${X%=*}"
     N_C="${X##*=}"
-    N_HITS=$(( N_HITS + 1 ))
     N_F="$(_n_streak_file "$HROLE" "$N_P")"
     N_KEEP="$N_KEEP ${N_F##*/}"
     STK="$(n_streak_bump "$HROLE" "$N_P" "$N_C")"
@@ -2406,18 +2500,40 @@ for HROLE in "$LOCAL_ROLE" "$REMOTE_ROLE"; do
     fi
   done
 
-  # The complement — every counter this host kept that this run did NOT report —
-  # ends its run. A path that was committed, deleted or gitignored is simply
-  # absent from the report, so the state dir is the only place it can be seen.
-  # 🔴 Reached only past the denominator guard above: a host that could not
-  # measure leaves its ladders exactly as they were.
-  for N_F in "$DRIFT_STATE_DIR"/nixdirt-"$HROLE"-*; do
-    [ -f "$N_F" ] || continue
-    case " $N_KEEP " in
-      *" ${N_F##*/} "*) ;;
-      *) n_streak_reset "$N_F" ;;
-    esac
-  done
+  # 🔴 A TRUNCATED LIST CANNOT CLEAR A LADDER. The complement loop below reads
+  # "absent from the report" as "this path is untracked no more" — true only when
+  # the report is COMPLETE. Once DRIFT_NIXDIRT_MAX has cut the enumeration,
+  # absence also means "it was pushed out of the window", and a path that has
+  # been sitting there for eleven runs would have its streak reset by a busy run
+  # that listed ten other paths ahead of it. The two causes are indistinguishable
+  # from here, so the ladders are LEFT ALONE and the run says why. Same rule as
+  # the COULD-NOT-MEASURE arm above: a ladder cleared by evidence that cannot
+  # support the claim is worse than a ladder that stands still.
+  if [ "$N_HIT" -gt "$N_LST" ]; then
+    # Hoisted, not inlined: `$((` inside a quoted message ends the printer
+    # segment for the command-word scanner in test_drift_check.py, and the rest
+    # of the sentence then reads as a command line. See _PROSE_NOT_COMMANDS —
+    # keeping the arithmetic out of the string is cheaper than declaring six
+    # more English words to be prose.
+    N_MISS=$(( N_HIT - N_LST ))
+    echo "[nixdirt] $HROLE: LISTING TRUNCATED — $N_HIT hit(s), $N_LST enumerated, $N_MISS not named (DRIFT_NIXDIRT_MAX=$DRIFT_NIXDIRT_MAX)."
+    echo "[nixdirt]   The COUNT is complete; the paths are not. No streak was reset on this"
+    echo "[nixdirt]   host this run — absence from a truncated list is not evidence that a"
+    echo "[nixdirt]   path stopped being untracked. Raise DRIFT_NIXDIRT_MAX to see them all."
+  else
+    # The complement — every counter this host kept that this run did NOT report —
+    # ends its run. A path that was committed, deleted or gitignored is simply
+    # absent from the report, so the state dir is the only place it can be seen.
+    # 🔴 Reached only past the denominator guard above: a host that could not
+    # measure leaves its ladders exactly as they were.
+    for N_F in "$DRIFT_STATE_DIR"/nixdirt-"$HROLE"-*; do
+      [ -f "$N_F" ] || continue
+      case " $N_KEEP " in
+        *" ${N_F##*/} "*) ;;
+        *) n_streak_reset "$N_F" ;;
+      esac
+    done
+  fi
 done
 
 # 🔴 REPORTING BESIDE THE DENOMINATOR BESIDE THE HITS. `hits=0` is the identical
@@ -2431,7 +2547,18 @@ elif [ "$N_NIXREAD" = 0 ]; then
   echo "[nixdirt] NOT EVALUATED — $N_REPORTING host(s) answered and between them derived ZERO"
   echo "[nixdirt]   nix-read paths. A classifier with an empty set calls everything clean."
 else
-  echo "[nixdirt] hosts-reporting=$N_REPORTING untracked=$N_UNTRACKED nix-read-paths=$N_NIXREAD hits=$N_HITS escalated=$N_ESCALATED blind=$N_BLIND"
+  # 🔴 `listed=` BESIDE `hits=`, for the reason the denominator sits beside them
+  # both: they are equal on almost every run, and the run where they are NOT is
+  # the run whose per-path lines are incomplete. Printing `hits=` alone would put
+  # a complete-looking number over a list that names fewer paths, which is the
+  # shape an operator reads as "here is everything".
+  echo "[nixdirt] hosts-reporting=$N_REPORTING untracked=$N_UNTRACKED nix-read-paths=$N_NIXREAD hits=$N_HITS listed=$N_LISTED escalated=$N_ESCALATED blind=$N_BLIND"
+  # Hoisted out of the message: `$((` inside a quoted string ends the printer
+  # segment for test_drift_check.py's command-word scanner, and the rest of the
+  # sentence then reads as a command line (see _PROSE_NOT_COMMANDS there).
+  N_UNNAMED=$(( N_HITS - N_LISTED ))
+  [ "$N_UNNAMED" -gt 0 ] && \
+    echo "[nixdirt]   $N_UNNAMED hit(s) counted but NOT named above — raise DRIFT_NIXDIRT_MAX (now $DRIFT_NIXDIRT_MAX) to enumerate them."
 fi
 echo
 

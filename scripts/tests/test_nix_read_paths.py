@@ -645,11 +645,20 @@ def test_the_scan_roots_are_declared_at_all():
 # reaches nothing. Saying otherwise is false in the ALARMING direction, which is
 # the failure this whole change exists to remove.
 #
-# MEASURED 2026-08-25 with a controlled four-state build (see
-# test_the_flake_source_really_is_filtered_to_what_git_knows below, which is the
-# same experiment as an executable test) and corroborated on the live host: all
+# MEASURED 2026-08-25 with a controlled four-state build (one committed, one
+# modified, one `git add`ed and one untracked file; `nix flake metadata <repo>
+# --json` reports the FILTERED source) and corroborated on the live host: all
 # six `-dl-router` store generations carry `tests/` (37 files) and none carries
 # the untracked `tests/load_test_store.sh`.
+#
+# 🔴 THERE IS NO EXECUTABLE TEST OF THAT EXPERIMENT, AND THERE IS NOT MEANT TO
+# BE. An earlier revision of this paragraph cited one by name — a test that has
+# never existed in this tree — which is a comment claiming coverage it does not
+# have: it reads as "this is pinned", and it stops the next person looking. The
+# reason no such test exists is 40 lines below, at "WHY THE FLAKE MEASUREMENT
+# ITSELF IS NOT A TEST HERE": it needs `nix` on PATH, which one of the two gate
+# tiers does not have. What IS executable is the reach table immediately below
+# and the consumer seam under it.
 # --------------------------------------------------------------------------- #
 REACH = [
     # class,  git knows it,  reach

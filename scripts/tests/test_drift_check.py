@@ -795,19 +795,128 @@ def test_the_unreachable_streak_is_kept_PER_REMOTE_HOST(fleet):
     )
 
 
-def test_the_remote_payload_is_shell_quoted():
+# --------------------------------------------------------------------------- #
+# THE REMOTE-PAYLOAD LEDGER
+#
+# 🔴 DERIVED FROM THE printf, NEVER HAND-LISTED. Both guards below used to name
+# their variables literally, and both went stale the moment a fourth value
+# started crossing the ssh hop: DRIFT_NIXDIRT_MAX was interpolated into the
+# payload that EXECUTES on the other host while the %q assertion still listed
+# DRIFT_LABEL/DRIFT_UNTRACKED_MAX and the injection parametrize still listed
+# DRIFT_UNTRACKED_MAX/DRIFT_UNREACHABLE_ESCALATE. A mutant that deleted
+# `require_int DRIFT_NIXDIRT_MAX` **and** downgraded its %q to %s SURVIVED
+# 304/304. DRIFT_DANGLING_MAX had been uncovered by both for longer.
+#
+# So the set is read out of the printf format string itself. Adding a fifth
+# forwarded value cannot be invisible to this suite, and REMOVING one cannot
+# leave a guard pointing at nothing: `_forwarded()` fails loudly if it cannot
+# find the format at all, which is the positive control for its own regex.
+# --------------------------------------------------------------------------- #
+#
+# The one forwarded value that is NOT an integer, enumerated with its reason
+# rather than pattern-matched. It is a ROLE NAME chosen by this script from
+# `resolve_local_role`, never by the operator, so there is nothing for
+# require_int to check; it still crosses the hop, so it still needs %q.
+_FORWARDED_NON_INT = {"DRIFT_LABEL"}
+
+
+def _forwarded():
+    """[(name, conversion)…] for every value interpolated ahead of the REMOTE
+    payload, read off the `printf` format string in drift-check.sh."""
+    src = DRIFT.read_text()
+    m = re.search(r"REMOTE_OUT=\"\$\(printf '([^']*)'", src)
+    assert m, (
+        "could not find the remote payload's printf format at all — this "
+        "ledger is now wired to nothing, which is worse than a stale list"
+    )
+    fmt = m.group(1)
+    pairs = re.findall(r"([A-Z][A-Z0-9_]*)=%(\w)", fmt)
+    assert len(pairs) >= 2, (
+        "the ledger derived %r from %r; a one-element result is what a broken "
+        "regex looks like" % (pairs, fmt)
+    )
+    return pairs
+
+
+def test_the_remote_payload_ledger_can_see_the_real_variables():
+    """🔴 POSITIVE CONTROL for the derivation the two guards below stand on.
+
+    A regex that matched nothing would make both of them vacuously green, which
+    is precisely the failure they exist to end. So: it must find the payload's
+    own DRIFT_LABEL, and it must find at least one of the *_MAX values that make
+    this a ledger rather than a single-variable check.
+    """
+    names = [n for n, _c in _forwarded()]
+    assert "DRIFT_LABEL" in names, names
+    assert [n for n in names if n.endswith("_MAX")], (
+        "the derived set names no capped tunable, so a cap could be forwarded "
+        "unnoticed again: %r" % names
+    )
+
+
+def test_every_variable_forwarded_to_the_remote_host_is_shell_quoted():
     """STRUCTURAL, and labelled as such.
 
     `require_int` already rejects every value that could inject, so swapping %q
     back to %s is behaviourally invisible to this suite — a mutant that survives
     every behavioural test. %q is the second layer, and the only way to hold a
     second layer whose first layer never lets anything through is to assert it
-    is there.
+    is there. Asserted over the DERIVED set, so it covers the next one too.
+    """
+    bad = [(n, c) for n, c in _forwarded() if c != "q"]
+    assert bad == [], (
+        "these values are interpolated into a script that EXECUTES on the other "
+        "host without %%q-quoting: %r" % (bad,)
+    )
+
+
+def test_every_INTEGER_forwarded_to_the_remote_host_is_range_validated():
+    """The FIRST layer of the same pair, over the same derived set.
+
+    %q makes an injected value inert; require_int/require_positive_int stops it
+    before it is ever sent. Each is asserted separately because each can be
+    deleted separately, and a mutant that removed only the validation left the
+    payload well-formed and every behavioural test green.
     """
     src = DRIFT.read_text()
-    assert "DRIFT_LABEL=%q" in src and "DRIFT_UNTRACKED_MAX=%q" in src, (
-        "the values interpolated into the REMOTE payload are no longer %q-quoted"
+    missing = []
+    for name, _conv in _forwarded():
+        if name in _FORWARDED_NON_INT:
+            continue
+        if not re.search(r"^require(_positive)?_int %s " % name, src, re.M):
+            missing.append(name)
+    assert missing == [], (
+        "forwarded to the other host with no integer validation, so a "
+        "non-integer reaches an ssh payload: %r" % missing
     )
+
+
+@pytest.mark.parametrize(
+    "var", sorted({n for n, _c in _forwarded()} - _FORWARDED_NON_INT))
+def test_no_forwarded_tunable_can_inject_a_command_into_the_remote_payload(fleet, var):
+    """🔴 THE BEHAVIOURAL HALF, derived from the same ledger.
+
+    Each of these is INTERPOLATED INTO A SCRIPT THAT RUNS ON THE OTHER HOST.
+    `<VAR>='10; echo INJECTED-COMMAND-RAN'` used to be executed remotely — a
+    passivity hole on the far side of the ssh hop, which the static scanner
+    structurally cannot see (it only reads this file). Operator-supplied, so low
+    exploitability, but a deadman forbidden from touching a host must not
+    contain a path that runs arbitrary commands on it.
+    """
+    fleet.stub_ssh(0, stdout="[laptop] clean")
+    rc, out = fleet.check(
+        "--no-local",
+        REMOTE_SSH="stub@example.invalid",
+        **{var: "10; echo INJECTED-COMMAND-RAN"},
+    )
+    # The marker may legitimately appear INSIDE the rejection message (it quotes
+    # the offending value back). What must never appear is the marker as the
+    # OUTPUT OF A COMMAND — i.e. on a line of its own.
+    ran = [ln for ln in out.splitlines() if ln.strip() == "INJECTED-COMMAND-RAN"]
+    assert not ran, f"remote command injection via {var}: the payload executed\n{out}"
+    assert rc == 2, f"a non-integer {var} must be a usage error, got {rc}\n{out}"
+    assert var in out, out
+    assert "must be an integer" in out or "must be a non-negative integer" in out, out
 
 
 def test_clean_local_plus_clean_remote_is_green(fleet):
@@ -819,28 +928,10 @@ def test_clean_local_plus_clean_remote_is_green(fleet):
     assert "no drift" in out
 
 
-def test_untracked_max_cannot_inject_a_command_into_the_remote_payload(fleet):
-    """🔴 The tunables are INTERPOLATED INTO A SCRIPT THAT RUNS ON THE OTHER HOST.
-
-    `DRIFT_UNTRACKED_MAX='10; echo INJECTED-COMMAND-RAN'` used to be executed
-    remotely — a passivity hole on the far side of the ssh hop, which the static
-    scanner structurally cannot see (it only reads this file). Operator-supplied,
-    so low exploitability, but a deadman forbidden from touching a host must not
-    contain a path that runs arbitrary commands on it.
-    """
-    fleet.stub_ssh(0, stdout="[laptop] clean")
-    rc, out = fleet.check(
-        "--no-local",
-        REMOTE_SSH="stub@example.invalid",
-        DRIFT_UNTRACKED_MAX="10; echo INJECTED-COMMAND-RAN",
-    )
-    # The marker may legitimately appear INSIDE the rejection message (it quotes
-    # the offending value back). What must never appear is the marker as the
-    # OUTPUT OF A COMMAND — i.e. on a line of its own.
-    ran = [ln for ln in out.splitlines() if ln.strip() == "INJECTED-COMMAND-RAN"]
-    assert not ran, f"remote command injection: the payload executed\n{out}"
-    assert rc == 2, f"a non-integer tunable must be a usage error, got {rc}\n{out}"
-    assert "must be a non-negative integer" in out, out
+# NOTE: the DRIFT_UNTRACKED_MAX injection case that used to live here is now the
+# `test_no_forwarded_tunable_can_inject_a_command_into_the_remote_payload`
+# parametrize above, driven off the payload's own printf. Keeping a hand-named
+# copy beside a derived ledger is how the derived one stops being read.
 
 
 @pytest.mark.parametrize(
@@ -5125,11 +5216,16 @@ def test_the_extractor_reports_only_the_enum_values_it_finds(tmp_path):
 #     committing it an hour later is the normal working shape here.
 # --------------------------------------------------------------------------- #
 def _nixdirt(out):
-    """(hosts-reporting, untracked, nix-read-paths, hits, escalated, blind) off
-    the summary line, or None when the block withheld it."""
+    """(hosts-reporting, untracked, nix-read-paths, hits, listed, escalated,
+    blind) off the summary line, or None when the block withheld it.
+
+    `listed` sits beside `hits` because the two are NOT the same number once
+    DRIFT_NIXDIRT_MAX has cut the enumeration, and every test that reads a hit
+    count out of this tuple would otherwise be reading a capped one.
+    """
     m = re.search(
         r"\[nixdirt\] hosts-reporting=(\d+) untracked=(\d+) nix-read-paths=(\d+) "
-        r"hits=(\d+) escalated=(\d+) blind=(\d+)", out)
+        r"hits=(\d+) listed=(\d+) escalated=(\d+) blind=(\d+)", out)
     return tuple(int(g) for g in m.groups()) if m else None
 
 
@@ -5149,7 +5245,7 @@ def test_an_untracked_nix_read_file_is_reported_but_does_not_fail_the_unit(fleet
     assert "charlie-dir/nested/november.txt: UNTRACKED in a NIX-READ path (DROPPED)" in out, out
     assert "1/3 consecutive; NOT escalated" in out, out
     assert _nixdirt(out)[:1] == (1,), out
-    assert _nixdirt(out)[3:] == (1, 0, 0), out
+    assert _nixdirt(out)[3:] == (1, 1, 0, 0), out   # hits, listed, escalated, blind
 
 
 def test_an_untracked_nix_read_file_escalates_after_n_consecutive_runs(fleet):
@@ -5172,7 +5268,7 @@ def test_an_untracked_nix_read_file_escalates_after_n_consecutive_runs(fleet):
     # threshold. Split across two it is walkable by rewording the other half.
     assert ("DRIFT — workbench charlie-dir/nested/november.txt: UNTRACKED in a "
             "NIX-READ path (DROPPED) for 4 CONSECUTIVE runs (threshold 3)." in out), out
-    assert _nixdirt(out)[4] == 1, out
+    assert _nixdirt(out)[5] == 1, out            # escalated
 
 
 def test_an_untracked_mkOutOfStoreSymlink_target_escalates_as_LIVE(fleet):
@@ -5241,8 +5337,8 @@ def test_a_measured_fleet_reports_a_zero_over_a_REAL_nixread_denominator(fleet):
 
     rc, out = fleet.check("--no-remote")
     assert rc == 0, out
-    hosts, untracked, nixread, hits, escalated, blind = _nixdirt(out)
-    assert (hosts, untracked, hits, escalated, blind) == (1, 1, 0, 0, 0), out
+    hosts, untracked, nixread, hits, listed, escalated, blind = _nixdirt(out)
+    assert (hosts, untracked, hits, listed, escalated, blind) == (1, 1, 0, 0, 0, 0), out
     assert nixread >= 4, f"the denominator is {nixread}; a zero there is no scan\n{out}"
 
 
@@ -5406,12 +5502,19 @@ def test_a_fact_line_claiming_OK_over_a_ZERO_denominator_is_still_refused(fleet)
 
     Reported COULD NOT MEASURE and NOT escalated: with a zero denominator the
     pair on that line is a classification nothing was measured against.
+
+    🔴 The stub line carries a WELL-FORMED hits=/listed= pair on purpose. Those
+    fields have their own refusal arms, and a fixture missing them would take
+    THAT branch instead — the denominator guard would never execute and this
+    test would be green for a neighbour's reason.
     """
     fleet.seed_nix_read()
     fleet.stub_ssh(0, stdout=(
-        "[laptop] FACT nix-untracked untracked=1 nixread=0 reason=OK papa-x.txt=DROPPED"))
+        "[laptop] FACT nix-untracked untracked=1 nixread=0 hits=1 listed=1 "
+        "reason=OK papa-x.txt=DROPPED"))
     rc, out = fleet.check("--no-local", DRIFT_NIXDIRT_ESCALATE="1")
-    assert "[nixdirt] laptop: COULD NOT MEASURE — reason=OK untracked=1 nix-read-paths=0." in out, out
+    assert ("[nixdirt] laptop: COULD NOT MEASURE — reason=OK untracked=1 "
+            "nix-read-paths=0 hits=1 listed=1." in out), out
     assert rc != 23, f"escalated off a zero denominator\n{out}"
     assert "papa-x.txt" not in out.split("[nixdirt]", 1)[1].split("===", 1)[0], out
 
@@ -5498,3 +5601,317 @@ def test_the_escalation_itself_is_unchanged_for_a_DROPPED_path(fleet):
         rc, out = fleet.check("--no-remote", DRIFT_NIXDIRT_ESCALATE="2")
         codes.append(rc)
     assert codes == [0, 23, 23], f"the DROPPED ladder stopped escalating: {codes}\n{out}"
+
+
+# --------------------------------------------------------------------------- #
+# THE ENUMERATION CAP (DRIFT_NIXDIRT_MAX)
+#
+# 🔴 WHY THIS SECTION EXISTS. The cap was added to bound a listing — `claude/
+# skills` is a whole-directory STORE source, so one untracked subtree can put an
+# unbounded number of paths into the journal and the state dir. It shipped with
+# NO test of any kind, and it did not bound a listing: it truncated `NU_PAIRS`,
+# which is ALSO the machine-readable FACT line the driver parses. Measured on
+# 41e92a1f with 15 untracked nix-read files — the human line said `15 of 15`, the
+# FACT line carried 10 pairs and no marker (the `... and N more` note goes to the
+# `say` stream, which the driver does not read), and the summary printed
+# `hits=10`. The code's own comment two lines above the cap said "HITS COUNTS ALL
+# OF THEM… The count is the finding and must never be truncated."
+#
+# The three properties pinned here, each of which the cap broke or could break:
+#   * the COUNT survives the cap (`hits=` is its own field, never the list's
+#     length) and the driver says how many it did not name;
+#   * a TRUNCATED report resets no ladder — absence from a capped list is not
+#     evidence a path stopped being untracked, and the complement loop cannot
+#     tell the two apart;
+#   * the cap can never reach ZERO, because at 0 the payload emits no pairs, the
+#     ladder walks nothing, and rc 23 is switched off by an env var while the
+#     summary still prints a clean-looking `hits=0` over a real denominator.
+# --------------------------------------------------------------------------- #
+def _nu_fact(out):
+    """The `FACT nix-untracked` line, as (header dict, [(path, reach)…])."""
+    line = [ln for ln in out.splitlines() if "FACT nix-untracked" in ln]
+    assert line, f"no nix-untracked FACT line at all\n{out}"
+    toks = line[0].split("FACT nix-untracked", 1)[1].split()
+    head, pairs = {}, []
+    for t in toks:
+        if t.endswith("=LIVE") or t.endswith("=DROPPED"):
+            pairs.append(tuple(t.rsplit("=", 1)))
+        elif "=" in t:
+            k, v = t.split("=", 1)
+            head[k] = v
+    return head, pairs
+
+
+def _seed_many(fleet, n, prefix="delta"):
+    """`n` untracked files under the DIRECTORY store source, names pairwise
+    distinct and sorting deterministically. Bounds deliberately overshoot the
+    default cap of 10 rather than sitting on a multiple of it."""
+    d = fleet.work / "charlie-dir" / "nested"
+    made = []
+    for i in range(n):
+        p = d / ("%s-%02d.txt" % (prefix, i))
+        p.write_text("%s %d\n" % (prefix, i))
+        made.append("charlie-dir/nested/%s" % p.name)
+    return made
+
+
+def test_the_FACT_line_carries_the_FULL_hit_count_not_the_length_of_a_capped_list(fleet):
+    """🔴 THE CONTRACT IS THE COUNT, AND THE COUNT IS NEVER TRUNCATED.
+
+    RED AT 41e92a1f: the FACT line has no `hits=` field at all, so this parse
+    KeyErrors; before that, with the driver counting pairs, the summary read
+    `hits=10` over 15 real hits. Fifteen and ten are pairwise distinct and
+    neither equals the cap's default in the other's place, so a mutant that
+    hardcodes either number cannot pass both assertions.
+    """
+    fleet.seed_nix_read()
+    _seed_many(fleet, 15)
+
+    rc, out = fleet.check("--no-remote", DRIFT_NIXDIRT_ESCALATE="3")
+    head, pairs = _nu_fact(out)
+    assert head["hits"] == "15", (
+        "the FACT line's hit count is %r — the driver's only machine-readable "
+        "number is the truncated one again\n%s" % (head.get("hits"), out))
+    assert head["listed"] == "10", (head, out)
+    assert len(pairs) == 10, (
+        "the enumeration is not bounded at DRIFT_NIXDIRT_MAX: %d pairs\n%s"
+        % (len(pairs), out))
+    # ...and the driver's summary reports the total, not the list.
+    hosts, untracked, nixread, hits, listed, escalated, blind = _nixdirt(out)
+    assert (hits, listed) == (15, 10), out
+    assert "5 hit(s) counted but NOT named above" in out, (
+        "the summary hides the difference between what it counted and what it "
+        "named\n%s" % out)
+
+
+def test_the_human_listing_and_the_FACT_line_agree_on_the_TOTAL(fleet):
+    """🔴 THE SEAM. The two outputs are produced by different code — `say` for the
+    operator, `echo … FACT` for the driver — and they diverged: `15 of 15` beside
+    a ten-pair contract. Neither surface's own test could see that, because each
+    was only ever read on its own.
+
+    RED AT 41e92a1f for the FACT half (no `hits=` field).
+    """
+    fleet.seed_nix_read()
+    _seed_many(fleet, 13, prefix="echo")
+
+    rc, out = fleet.check("--no-remote", DRIFT_NIXDIRT_ESCALATE="3")
+    human = [ln for ln in out.splitlines()
+             if "untracked-in-nix-read-paths:" in ln]
+    assert human, out
+    m = re.search(r"untracked-in-nix-read-paths: (\d+) of (\d+) untracked", human[0])
+    assert m, human
+    head, _ = _nu_fact(out)
+    assert m.group(1) == head["hits"], (
+        "the operator is told %s hits and the driver is told %s\n%s"
+        % (m.group(1), head["hits"], out))
+    assert _nixdirt(out)[3] == 13, out
+
+
+def test_a_capped_run_still_escalates_every_path_it_DID_name(fleet):
+    """🔴 REACHABILITY for the ladder under a cap. A fix that made the COUNT
+    honest while quietly dropping the escalation would satisfy every count
+    assertion above. Three named paths, all three on the ladder, rc 23."""
+    fleet.seed_nix_read()
+    _seed_many(fleet, 7, prefix="foxtrot")
+
+    codes = []
+    for _ in range(2):
+        rc, out = fleet.check("--no-remote", DRIFT_NIXDIRT_ESCALATE="2",
+                              DRIFT_NIXDIRT_MAX="3")
+        codes.append(rc)
+    assert codes == [0, 23], f"a capped run stopped escalating: {codes}\n{out}"
+    head, pairs = _nu_fact(out)
+    assert (head["hits"], head["listed"]) == ("7", "3"), (head, out)
+    assert _nixdirt(out)[5] == 3, (
+        "only some of the NAMED paths escalated\n%s" % out)
+
+
+def test_a_TRUNCATED_report_resets_no_streak_it_could_not_name(fleet):
+    """🔴 THE SECOND-ORDER DEFECT, and the one a count-only fix leaves behind.
+
+    The complement loop reads "absent from this run's pairs" as "this path is
+    untracked no more" and ends its streak. Under a cap, absence ALSO means
+    "pushed out of the enumeration window" — so a path that has been sitting
+    there for eleven runs has its ladder cleared by a busy run that happened to
+    name ten others ahead of it, and the escalation can never arrive.
+
+    RED AT 41e92a1f: `zulu.txt` reaches 2/3, twelve alphabetically-earlier paths
+    appear, and the run after that reports it at 1/3 — the reset — instead of
+    escalating at 3/3.
+    """
+    fleet.seed_nix_read()
+    z = fleet.work / "charlie-dir" / "nested" / "zulu.txt"
+    z.write_text("zulu\n")
+    for _ in range(2):
+        rc, out = fleet.check("--no-remote", DRIFT_NIXDIRT_ESCALATE="3")
+        assert rc == 0, out
+    assert "zulu.txt: UNTRACKED in a NIX-READ path (DROPPED) — 2/3" in out, out
+
+    # Twelve paths that sort BEFORE zulu.txt fill the whole ten-wide window.
+    _seed_many(fleet, 12, prefix="alfa")
+    rc, out = fleet.check("--no-remote", DRIFT_NIXDIRT_ESCALATE="3")
+    _, pairs = _nu_fact(out)
+    assert "zulu.txt" not in [p for p, _c in pairs], (
+        "the fixture did not push zulu.txt out of the window; the reset this "
+        "test exists for is unreachable\n%s" % out)
+    assert "LISTING TRUNCATED" in out, (
+        "a truncated report did not say so to the driver\n%s" % out)
+    assert "No streak was reset on this" in out, out
+
+    # The window clears; zulu must RESUME at 3, not restart at 1. Three, not
+    # four: the truncated run neither reset the streak nor bumped it — it could
+    # not see the path, so it is evidence about nothing, in either direction.
+    for p in fleet.work.glob("charlie-dir/nested/alfa-*.txt"):
+        p.unlink()
+    rc, out = fleet.check("--no-remote", DRIFT_NIXDIRT_ESCALATE="3")
+    assert rc == 23, (
+        "zulu.txt's ladder was cleared by a run that could not name it\n%s" % out)
+    assert ("DRIFT — workbench charlie-dir/nested/zulu.txt: UNTRACKED in a "
+            "NIX-READ path (DROPPED) for 3 CONSECUTIVE runs (threshold 3)."
+            in out), out
+
+
+def test_an_UNtruncated_run_still_resets_a_streak_that_ended(fleet):
+    """🔴 THE PARTNER, and the control on the test above. Suppressing the reset
+    whenever a report is truncated must not suppress it when the report is
+    COMPLETE — that would be the rc-18 only-ever-increments bug, reintroduced
+    through the other door. Same fixture shape, no truncation."""
+    fleet.seed_nix_read()
+    z = fleet.work / "charlie-dir" / "nested" / "zulu.txt"
+    z.write_text("zulu\n")
+    for _ in range(2):
+        rc, out = fleet.check("--no-remote", DRIFT_NIXDIRT_ESCALATE="3")
+    assert "zulu.txt: UNTRACKED in a NIX-READ path (DROPPED) — 2/3" in out, out
+
+    z.unlink()
+    rc, out = fleet.check("--no-remote", DRIFT_NIXDIRT_ESCALATE="3")
+    assert "LISTING TRUNCATED" not in out, out
+    assert _nixdirt(out)[3] == 0, out
+
+    z.write_text("zulu\n")
+    rc, out = fleet.check("--no-remote", DRIFT_NIXDIRT_ESCALATE="3")
+    assert rc == 0, f"the streak did not reset on a COMPLETE report\n{out}"
+    assert "zulu.txt: UNTRACKED in a NIX-READ path (DROPPED) — 1/3" in out, out
+
+
+def test_DRIFT_NIXDIRT_MAX_of_ZERO_is_refused_rather_than_disabling_rc23(fleet):
+    """🔴 THE VERDICT-KILLING VALUE. Measured on 41e92a1f: three untracked
+    nix-read files, DRIFT_NIXDIRT_ESCALATE=3, four consecutive runs returned
+    [0,0,0,0] where the default returns [0,0,23,23], and the summary read
+    `untracked=3 nix-read-paths=6 hits=0 escalated=0` — a clean-looking zero over
+    a real denominator, which is the exact shape the block two lines below
+    withholds its summary to avoid.
+
+    Every other cap in this file bounds a LISTING whose count is printed
+    separately, so 0 is honest there. This one feeds the ladder, so it has a
+    floor, and the floor is a usage error rather than a silent substitution: a
+    value that would turn a verdict off must not be quietly reinterpreted.
+    """
+    fleet.seed_nix_read()
+    _seed_many(fleet, 3, prefix="golf")
+    rc, out = fleet.check("--no-remote", DRIFT_NIXDIRT_ESCALATE="3",
+                          DRIFT_NIXDIRT_MAX="0")
+    assert rc == 2, f"a cap of 0 was accepted, so rc 23 is off: {rc}\n{out}"
+    assert "DRIFT_NIXDIRT_MAX must be an integer >= 1, got: 0" in out, out
+    assert _nixdirt(out) is None, f"a summary was printed at all\n{out}"
+
+
+def test_a_non_integer_DRIFT_NIXDIRT_MAX_is_still_refused(fleet):
+    """The floor must not have replaced the type check — both arms, distinct
+    messages, so a mutant that keeps one and drops the other is caught."""
+    rc, out = fleet.check("--no-remote", DRIFT_NIXDIRT_MAX="ten")
+    assert rc == 2, out
+    assert "DRIFT_NIXDIRT_MAX must be an integer >= 1, got: ten" in out, out
+
+
+def test_a_cap_of_ONE_is_accepted_and_enumerates_exactly_one(fleet):
+    """🔴 THE BOUNDARY ON THE LEGAL SIDE, so the floor is pinned as `>= 1` and
+    not as some larger number nobody stated. Without this the guard could reject
+    1 as well and every other test here would still pass."""
+    fleet.seed_nix_read()
+    _seed_many(fleet, 4, prefix="hotel")
+    rc, out = fleet.check("--no-remote", DRIFT_NIXDIRT_ESCALATE="9",
+                          DRIFT_NIXDIRT_MAX="1")
+    assert rc == 0, out
+    head, pairs = _nu_fact(out)
+    assert (head["hits"], head["listed"]) == ("4", "1"), (head, out)
+    assert len(pairs) == 1, (pairs, out)
+
+
+def test_the_driver_refuses_a_report_with_NO_hit_count(fleet):
+    """🔴 REACHABILITY for the `hits=` refusal, which no real payload can produce
+    — the emitter always writes the field. What it defends against is an OLDER
+    drift-check.sh on the far side of the ssh hop, whose FACT line has no `hits=`
+    at all: derived from the pairs, that host's truncated list would become its
+    hit count and read as a smaller finding than it is.
+
+    Stubbed remote, because that is the only way a malformed contract arrives.
+
+    🔴 ISOLATED: `listed=` is present and correct, so the sibling arm beside it
+    CANNOT be what fails. A first version of this test dropped both fields and
+    was killed by the `listed=` arm — a mutant deleting the `hits=` check alone
+    then survived, green for a neighbour's reason.
+    """
+    fleet.seed_nix_read()
+    fleet.stub_ssh(0, stdout=(
+        "[laptop] FACT nix-untracked untracked=2 nixread=6 listed=1 reason=OK "
+        "india-x.txt=DROPPED"))
+    rc, out = fleet.check("--no-local", DRIFT_NIXDIRT_ESCALATE="1")
+    assert "[nixdirt] laptop: COULD NOT MEASURE" in out, out
+    assert "hits=-1 listed=1." in out, (
+        "the refusal does not name the missing field, or fired on the wrong "
+        "one\n%s" % out)
+    assert rc != 23, f"escalated off a report with no hit count\n{out}"
+
+
+def test_the_driver_refuses_a_report_with_NO_listed_count(fleet):
+    """The other arm of the same pair, isolated the same way — `hits=` present
+    and correct — so the two guards are proved to exist SEPARATELY rather than
+    as one check wearing two names."""
+    fleet.seed_nix_read()
+    fleet.stub_ssh(0, stdout=(
+        "[laptop] FACT nix-untracked untracked=2 nixread=6 hits=1 reason=OK "
+        "india-x.txt=DROPPED"))
+    rc, out = fleet.check("--no-local", DRIFT_NIXDIRT_ESCALATE="1")
+    assert "[nixdirt] laptop: COULD NOT MEASURE" in out, out
+    assert "hits=1 listed=-1." in out, out
+    assert rc != 23, f"escalated off a report with no listed count\n{out}"
+
+
+def test_the_driver_refuses_a_report_whose_listed_count_disagrees_with_its_pairs(fleet):
+    """🔴 THE INTEGRITY CHECK THAT MAKES `listed=` LOAD-BEARING rather than
+    decorative — without it the driver could simply count the pairs and the field
+    would be an unchecked assertion.
+
+    A report claiming three enumerated paths while carrying one is a line
+    mangled or truncated between the hosts. Read as complete, the two missing
+    paths' streaks would be ended by the complement loop, silently, in the
+    direction of "nothing to see". So the whole report is refused.
+    """
+    fleet.seed_nix_read()
+    fleet.stub_ssh(0, stdout=(
+        "[laptop] FACT nix-untracked untracked=4 nixread=6 hits=4 listed=3 "
+        "reason=OK juliett-x.txt=DROPPED"))
+    rc, out = fleet.check("--no-local", DRIFT_NIXDIRT_ESCALATE="1")
+    assert ("[nixdirt] laptop: COULD NOT MEASURE — the report claims listed=3 "
+            "path(s) but 1 arrived." in out), out
+    assert rc != 23, f"escalated off a self-inconsistent report\n{out}"
+    assert _nixdirt(out) is None, (
+        "a summary was printed over a report the driver refused\n%s" % out)
+
+
+def test_a_CONSISTENT_report_is_accepted(fleet):
+    """🔴 POSITIVE CONTROL for the integrity check. A guard that refused every
+    stubbed report would satisfy the test above while proving nothing — the same
+    fixture shape, with `listed=` telling the truth, must go all the way to an
+    escalation."""
+    fleet.seed_nix_read()
+    fleet.stub_ssh(0, stdout=(
+        "[laptop] FACT nix-untracked untracked=4 nixread=6 hits=4 listed=1 "
+        "reason=OK juliett-x.txt=DROPPED"))
+    rc, out = fleet.check("--no-local", DRIFT_NIXDIRT_ESCALATE="1")
+    assert "[nixdirt] laptop: COULD NOT MEASURE" not in out, out
+    assert rc == 23, f"a well-formed report did not escalate\n{out}"
+    assert "juliett-x.txt" in out, out
+    assert _nixdirt(out)[3:5] == (4, 1), out

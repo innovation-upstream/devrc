@@ -841,6 +841,17 @@ class Repo:
             f'export GIT_CONFIG_GLOBAL="{self.gitconfig}"\n'
             "export GIT_CONFIG_SYSTEM=/dev/null\n"
             "unset XDG_STATE_HOME\n"
+            # 🔴 REAL ssh DOES NOT CARRY THE CALLER'S ENVIRONMENT, AND THIS SHIM
+            # USED TO. Every SHIP_* variable ship.sh had in its own environment
+            # reached the payload here by plain inheritance, so the forwarding
+            # this file tests was supplied by the fixture rather than by the
+            # code: a mutant deleting `SHIP_LIST_MAX=%q` from the ssh printf
+            # SURVIVED a green suite, because the shim leaked the value anyway.
+            # The payload's own prefix lines are the only legitimate way these
+            # cross the hop, so the shim scrubs them first and the printf has to
+            # do its job. Everything the far "host" legitimately owns —
+            # HOME/SHIP_REPO/the git config — is exported explicitly above.
+            "unset SHIP_NO_SWITCH SHIP_LIST_MAX\n"
             + run,
         )
         return d
@@ -1327,6 +1338,170 @@ def test_a_repo_with_no_flake_at_all_says_it_could_not_look(nixrepo):
     assert rc == 0, out
     assert "NOT CLASSIFIED (NOROOTS)" in out, out
     assert "NO dirty path is read by nix" not in out, out
+
+
+# --------------------------------------------------------------------------- #
+# SHIP_LIST_MAX — the bound on the classified listing
+#
+# 🔴 THE CAP SHIPPED WITH NO TEST AT ALL. It exists because a whole-directory
+# STORE source (`claude/skills`, `scripts/dl-router`) lets ONE untracked subtree
+# put an unbounded number of paths into a bucket, and this output is tee-d into
+# a capture an operator reads. Two things were wrong with the untested version,
+# and neither is visible from the code at a glance:
+#
+#   * `sed -n "1,0p"` is NOT an empty range to GNU sed — it prints line 1 — so
+#     SHIP_LIST_MAX=0 enumerated exactly one path and then announced "... and N
+#     more". A cap of zero that lists something.
+#   * only SHIP_NO_SWITCH crossed the ssh hop, so the remote leg always used the
+#     default while the local leg used whatever the operator asked for: one run,
+#     two different truncation depths, both wearing the same shape.
+#
+# The COUNT beside each heading is never capped, which is what makes 0 a
+# coherent request ("count them, name none") rather than something to sanitise
+# away — so it is honoured rather than silently replaced.
+# --------------------------------------------------------------------------- #
+_LISTED = re.compile(r"^\[[^\]]*\]     - (\S+)$", re.M)
+
+
+def _seed_dropped(tree, n, prefix="lima"):
+    """`n` untracked files under the DIRECTORY store source — one bucket
+    (DROPPED), names pairwise distinct, and `n` deliberately not a multiple of
+    any cap this file passes in."""
+    d = tree / "charlie-dir" / "nested"
+    d.mkdir(parents=True, exist_ok=True)
+    for i in range(n):
+        (d / ("%s-%02d.txt" % (prefix, i))).write_text("%s %d\n" % (prefix, i))
+
+
+def test_the_dirty_classification_listing_is_bounded_by_SHIP_LIST_MAX(nixrepo):
+    """The cap does what it says, and the untruncated COUNT stays beside it.
+
+    Eight paths and a cap of three: eight is not a multiple of three, so a
+    mutant that used the wrong end of the range (or truncated on a block
+    boundary) cannot land on the right answer by arithmetic accident.
+    """
+    _seed_dropped(nixrepo.work, 8)
+    rc, out = nixrepo.ship(SHIP_LIST_MAX="3")
+    assert rc == 0, out
+    assert "UNTRACKED IN A NIX-READ PATH — 8 path(s)" in out, (
+        "the heading's count was truncated too — only the enumeration may be\n%s"
+        % out)
+    listed = _LISTED.findall(out)
+    assert len(listed) == 3, f"enumerated {listed} under a cap of 3\n{out}"
+    assert "... and 5 more (SHIP_LIST_MAX=3)" in out, (
+        "a truncated list did not say how much it hid, or which knob hid it\n%s"
+        % out)
+
+
+def test_SHIP_LIST_MAX_of_zero_enumerates_NOTHING(nixrepo):
+    """🔴 RED AT 41e92a1f, where this printed ONE path and then claimed to have
+    hidden the rest.
+
+    `sed -n "1,0p"` prints line 1 under GNU sed, so the cap's own zero leaked a
+    path into an output an operator reads as bounded. The count is still
+    complete, so 0 remains a legal, meaningful setting — it just has to mean
+    what it says.
+    """
+    _seed_dropped(nixrepo.work, 4, prefix="mike")
+    rc, out = nixrepo.ship(SHIP_LIST_MAX="0")
+    assert rc == 0, out
+    assert "UNTRACKED IN A NIX-READ PATH — 4 path(s)" in out, out
+    listed = _LISTED.findall(out)
+    assert listed == [], f"a cap of 0 enumerated {listed}\n{out}"
+    assert "... and 4 more (SHIP_LIST_MAX=0)" in out, out
+
+
+def test_a_non_integer_SHIP_LIST_MAX_falls_back_to_the_default(nixrepo):
+    """The sanitiser at the top of CONVERGE, which had no test either.
+
+    A bad value must not reach `sed -n "1,<junk>p"` — and the fallback is the
+    DEFAULT, not zero: silently listing nothing because a value was mistyped
+    would hide paths for a reason nobody could see in the output.
+    """
+    _seed_dropped(nixrepo.work, 13, prefix="november")
+    rc, out = nixrepo.ship(SHIP_LIST_MAX="lots")
+    assert rc == 0, out
+    listed = _LISTED.findall(out)
+    assert len(listed) == 10, f"the fallback enumerated {len(listed)}\n{out}"
+    assert "... and 3 more" in out, out
+
+
+def test_both_legs_of_ONE_run_truncate_with_the_SAME_bound(tmp_path):
+    """🔴 RED AT 41e92a1f: only SHIP_NO_SWITCH crossed the hop.
+
+    The remote leg took the default while the local leg took the operator's
+    value, so one run produced two different truncation depths under one shape.
+    That is not cosmetic — the two legs' outputs are read side by side to decide
+    whether the fleet agrees, and a listing that is short on one host for a
+    reason invisible in the output is the wrong kind of difference to introduce.
+
+    Both hosts carry the SAME six untracked paths, so any difference in what is
+    enumerated is a difference in the bound, which is the only thing that varies.
+    """
+    r = Repo(tmp_path, second_host=True, nixread=True)
+    for tree in (r.work, r.remote_work):
+        _seed_dropped(tree, 6, prefix="oscar")
+
+    shim = r.ssh_shim(tmp_path)
+    rc, out = r.ship_both_hosts(shim, SHIP_LIST_MAX="2")
+
+    def listed(leg):
+        parts = re.split(r"^=== (local|remote) [^\n]*===$", out, flags=re.M)
+        for i in range(1, len(parts) - 1, 2):
+            if parts[i] == leg:
+                return _LISTED.findall(parts[i + 1])
+        raise AssertionError(f"no `=== {leg} …===` section:\n{out}")
+
+    local, remote = listed("local"), listed("remote")
+    assert len(local) == 2, f"the local leg ignored the bound: {local}\n{out}"
+    assert len(remote) == 2, (
+        "the remote leg enumerated %d path(s) under SHIP_LIST_MAX=2 — the bound "
+        "did not cross the ssh hop\n%s" % (len(remote), out))
+    assert out.count("... and 4 more (SHIP_LIST_MAX=2)") == 2, (
+        "the two legs do not agree on what they hid\n%s" % out)
+
+
+def _ship_forwarded():
+    """[(name, conversion)…] for every value interpolated ahead of the payload
+    ship.sh sends over ssh, read off the printf format itself.
+
+    🔴 DERIVED, NEVER HAND-LISTED — the sibling ledger in test_drift_check.py
+    exists because a hand-list went stale the moment a third value started
+    crossing that hop, and the mutant which downgraded its quoting survived a
+    green suite. This printf carried ONE value for its whole life and now
+    carries two, which is exactly the moment such a list starts to rot.
+    """
+    src = SHIP.read_text()
+    m = re.search(r"printf '([^']*)' \\\n\s*\"\$SHIP_NO_SWITCH\"", src)
+    assert m, (
+        "could not find the remote payload's printf format in ship.sh — this "
+        "ledger is now wired to nothing, which is worse than a stale list"
+    )
+    pairs = re.findall(r"([A-Z][A-Z0-9_]*)=%(\w)", m.group(1))
+    assert len(pairs) >= 2, (
+        "the ledger derived %r; a short result is what a broken regex looks "
+        "like, not a small payload" % (pairs,)
+    )
+    return pairs
+
+
+def test_the_ship_remote_payload_ledger_can_see_the_real_variables():
+    """🔴 POSITIVE CONTROL for the derivation the guard below stands on. A regex
+    that matched nothing would make it vacuously green."""
+    names = [n for n, _c in _ship_forwarded()]
+    assert "SHIP_NO_SWITCH" in names and "SHIP_LIST_MAX" in names, names
+
+
+def test_every_value_ship_sends_over_ssh_is_shell_quoted():
+    """These are interpolated ahead of a script that EXECUTES on the other host.
+    Neither is validated by ship.sh — SHIP_LIST_MAX is sanitised on arrival,
+    inside CONVERGE — so unlike drift-check.sh there is no first layer here and
+    %q is the ONLY thing standing between an operator typo and a command run on
+    a machine this script is otherwise careful with.
+    """
+    bad = [(n, c) for n, c in _ship_forwarded() if c != "q"]
+    assert bad == [], (
+        "these values cross the ssh hop unquoted: %r" % (bad,))
 
 
 def test_skips_when_local_main_diverged(repo):

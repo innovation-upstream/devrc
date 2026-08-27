@@ -296,6 +296,15 @@
 #   LAPTOP_SSH    back-compat: ssh target used ONLY when the remote host is the laptop
 #   SHIP_REPO     repo path the CONVERGE routine operates on (default $HOME/workspace/devrc)
 #   SHIP_NO_SWITCH=1  same as --no-switch: run full git-landing logic, skip home-manager switch
+#   SHIP_LIST_MAX  max paths ENUMERATED per dirty-classification bucket
+#                  (default 10, non-negative integer). The COUNT beside each
+#                  heading is never capped, so 0 honestly means "count them, name
+#                  none" — and is honoured as that rather than silently reset,
+#                  which is why nr_list guards its `sed` instead of relying on a
+#                  `1,0p` range (GNU sed prints line 1 for that, so 0 used to
+#                  yield ONE path plus "... and N more"). A non-integer falls back
+#                  to the default. Forwarded to the remote leg so both legs of one
+#                  run truncate identically.
 #   SHIP_SELF_GEN     re-exec generation counter — set BY this script when it
 #                     re-execs a copy of itself that its own run installed. Never
 #                     set it by hand: a value >= SHIP_SELF_MAX_GEN tells the run
@@ -389,6 +398,15 @@ if [ "${SHIP_REPO+set}" = set ] && [ -z "$SHIP_REPO" ]; then
 fi
 SHIP_REPO="${SHIP_REPO:-$HOME/workspace/devrc}"
 SHIP_NO_SWITCH="${SHIP_NO_SWITCH:-0}"
+# 🔴 RESOLVED HERE ONLY SO BOTH LEGS GET THE SAME STRING — never VALIDATED here.
+# SHIP_LIST_MAX used to reach the local leg by plain inheritance and the remote
+# leg not at all, so one run could enumerate ten paths on this host and three on
+# the other while both printed the same "... and N more" shape. It is the same
+# knob; it must mean the same thing on both sides of the hop. The sanitiser stays
+# where it was, inside CONVERGE, because that is the copy that RUNS on each host
+# — a second one out here would be the duplicated-predicate shape RULES.md says
+# is wrong at N-1 sites.
+SHIP_LIST_MAX="${SHIP_LIST_MAX:-10}"
 DO_LOCAL=1
 DO_REMOTE=1
 for a in "$@"; do
@@ -1269,9 +1287,17 @@ if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
   # can put an unbounded number of paths in a bucket, and this output is tee-d
   # into a capture an operator reads. The COUNT above is never truncated — only
   # the enumeration — and a truncated list always says how much it hid.
+  # 🔴 THE `-gt 0` GUARD IS NOT DEFENSIVE, IT IS THE FIX. `sed -n "1,0p"` is not
+  # an empty range to GNU sed — it prints line 1 — so SHIP_LIST_MAX=0 enumerated
+  # ONE path and then claimed "... and N more", i.e. a cap of zero listed
+  # something. 0 is a legitimate setting here (every heading carries its own
+  # untruncated count, so "count them, name none" is a coherent thing to ask
+  # for), so it is honoured rather than sanitised away.
   nr_list() { # nr_list <file> <total>
-    sed -n "1,${SHIP_LIST_MAX}p" "$1" | sed "s|^|[$host]     - |"
-    [ "$2" -gt "$SHIP_LIST_MAX" ] && echo "[$host]     ... and $(( $2 - SHIP_LIST_MAX )) more"
+    if [ "$SHIP_LIST_MAX" -gt 0 ]; then
+      sed -n "1,${SHIP_LIST_MAX}p" "$1" | sed "s|^|[$host]     - |"
+    fi
+    [ "$2" -gt "$SHIP_LIST_MAX" ] && echo "[$host]     ... and $(( $2 - SHIP_LIST_MAX )) more (SHIP_LIST_MAX=$SHIP_LIST_MAX)"
     return 0
   }
 
@@ -1394,7 +1420,8 @@ if [ "$DO_LOCAL" = 1 ]; then
   # 0 over any per-host skip. Same lesson as scripts/run-tests.sh GUARD 6, from
   # the other side of the pipe.
   cap_local=$(mktemp "${TMPDIR:-/tmp}/ship-local.XXXXXX")
-  SHIP_REPO="$SHIP_REPO" SHIP_NO_SWITCH="$SHIP_NO_SWITCH" bash -c "$CONVERGE" | tee "$cap_local"
+  SHIP_REPO="$SHIP_REPO" SHIP_NO_SWITCH="$SHIP_NO_SWITCH" \
+    SHIP_LIST_MAX="$SHIP_LIST_MAX" bash -c "$CONVERGE" | tee "$cap_local"
   lrc=${PIPESTATUS[0]}
   [ "$lrc" = 0 ] || rc=$lrc
   LOCAL_SHA=$(ship_landed_sha "$cap_local")
@@ -1433,10 +1460,15 @@ if [ "$DO_REMOTE" = 1 ]; then
   # wrong answer in the reassuring direction is the worst outcome this file can
   # produce, and it was reachable only on the host nobody is watching.
   #
-  # %q, not %s, on the value interpolated ahead of the payload — the same
+  # %q, not %s, on EVERY value interpolated ahead of the payload — the same
   # belt-and-braces drift-check.sh applies to everything it sends across this hop.
+  # SHIP_LIST_MAX travels for the reason given where it is resolved: unforwarded,
+  # the two legs of ONE run could truncate their listings differently. It is
+  # sanitised on arrival by CONVERGE's own `case`, which is why %q here is the
+  # belt rather than the braces.
   cap_remote=$(mktemp "${TMPDIR:-/tmp}/ship-remote.XXXXXX")
-  printf 'SHIP_NO_SWITCH=%q\n%s\n' "$SHIP_NO_SWITCH" "$CONVERGE" \
+  printf 'SHIP_NO_SWITCH=%q\nSHIP_LIST_MAX=%q\n%s\n' \
+    "$SHIP_NO_SWITCH" "$SHIP_LIST_MAX" "$CONVERGE" \
     | ssh -o ConnectTimeout=10 "$REMOTE_SSH" bash -s | tee "$cap_remote"
   # 🔴 INDEX 1, NOT 0 — and the index moved BECAUSE the payload is now piped in.
   # This read `PIPESTATUS[0]` while the pipeline was `ssh | tee`; it is now
