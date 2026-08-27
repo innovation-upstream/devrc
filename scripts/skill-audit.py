@@ -684,7 +684,8 @@ def render(audits, show_all, n_sections, n_detail, out=sys.stdout, foreign=(), m
     over = [a for a in audits if a["status"] != "OK"]
     p(f"# SKILL.md audit — {len(audits)} skill(s)")
     enforced = ("ENFORCED" if not (foreign or unknown)
-                else "devrc's DEFAULT (not enforced on every tree here)")
+                else "devrc's DEFAULT (not enforced on every tree here)" if mixed
+                else "devrc's DEFAULT (not enforced here)")
     p(f"\nbudget {BUDGET:,} B {enforced}   = ceiling {TARGET:,} B − {MIN_HEADROOM:,} B "
       f"working margin   ·   hard cap {HARD:,} B")
     if not (foreign or unknown):
@@ -693,16 +694,34 @@ def render(audits, show_all, n_sections, n_detail, out=sys.stdout, foreign=(), m
           f"from\n   {_BUDGET_SOURCE.relative_to(Path(__file__).resolve().parent.parent)}, "
           f"which owns them.)")
     else:
-        names = ", ".join(r.name for r in foreign) or "trees outside any repo"
-        p(f"\n🔴 {'SOME OF THESE' if mixed else 'THESE'} SKILLS ARE IN {names} — NOT a tree governed by")
-        p( "   the gate this budget comes from, so the number above binds nothing there. Read")
-        p( "   that repo's own gate before treating any verdict below as one: a ratchet with a")
-        p( "   per-push allowance (talos-infra's gate 11) can pass a body called RED here and")
-        p( "   block one called fine. Lines that WOULD assert this gate are marked [ungoverned].")
+        # 🔴 COMPOSED FROM THE STATES PRESENT, not one banner reused for both. The
+        # foreign wording was printed verbatim over unknown trees, where all three
+        # of its claims break: "NOT a tree governed by the gate" and "binds nothing
+        # there" are flat assertions about the unknowable case (which this file's
+        # own comment says ARE devrc's); "marked [ungoverned]" named a string the
+        # run never emits, because those rows read [governance unknown]; and the
+        # MIXES sub-line said "ungoverned" on a governed+no-repo run containing no
+        # ungoverned tree. Round-9 finding 3 — the same header/row contradiction
+        # the previous round moved rather than removed.
+        if foreign:
+            names = ", ".join(r.name for r in foreign)
+            p(f"\n🔴 {'SOME OF THESE' if mixed else 'THESE'} SKILLS ARE IN {names} — NOT governed by the")
+            p( "   gate this budget comes from, so the number above binds nothing for them.")
+            p( "   Those rows are marked [ungoverned].")
+        if unknown:
+            p(f"\n🔴 {'SOME OF THESE' if (mixed or foreign) else 'THESE'} SKILLS ARE IN NO REPO, so whether this")
+            p( "   budget governs them cannot be determined — it is not a claim either way.")
+            p( "   Those rows are marked [governance unknown]. (Skills installed out of tree,")
+            p( "   e.g. under /nix/store, land here and may well BE devrc's.)")
+        p( "\n   Read the owning repo's own gate before treating any verdict below as one:")
+        p( "   a ratchet with a per-push allowance (talos-infra's gate 11) can pass a body")
+        p( "   called RED here and block one called fine.")
         if mixed:
-            p("   ⚠️  This run MIXES governed and ungoverned trees, so the mark is per-line and")
-            p("      the header cannot be read as a verdict about the whole run. Audit them")
-            p("      separately if you want an unambiguous answer.")
+            kinds = " and ".join(k for k, on in
+                                 (("ungoverned", bool(foreign)), ("unknowable", unknown)) if on)
+            p(f"   ⚠️  This run MIXES governed and {kinds} trees, so the mark is per-line and")
+            p( "      the header cannot be read as a verdict about the whole run. Audit them")
+            p( "      separately if you want an unambiguous answer.")
 
     p("\n## sizes (worst first)")
     listed = audits if show_all else over
@@ -894,8 +913,10 @@ def render(audits, show_all, n_sections, n_detail, out=sys.stdout, foreign=(), m
         # (12,038 B enforced)" directly under the banner saying nothing is enforced
         # there. Round-5 finding 5.
         gov_states = {a.get("governed") for a in audits}
+        # Same three-way precision as the header: "on every tree" implies some are.
         qual = ("enforced" if gov_states == {True}
-                else "devrc's, not enforced on every tree here")
+                else "devrc's, not enforced on every tree here" if True in gov_states
+                else "devrc's, not enforced here")
         p(f"  ✓ all {len(audits)} skill(s) within budget ({BUDGET:,} B — {qual}), "
           f"references intact — no prune needed (stop; do not churn the files)")
     else:
@@ -928,9 +949,16 @@ def render(audits, show_all, n_sections, n_detail, out=sys.stdout, foreign=(), m
         if excess > 0:
             # Same per-skill rule: on an ungoverned tree this is advice against
             # devrc's number, not a requirement (round-3 finding 2).
-            any_ung = any(a.get("governed") is not True for a in over)   # False OR unknown
+            # 🔴 Neither bool. `is False` under-covered (unknown trees got a bare
+            # total); `is not True` over-claimed, attaching "not enforced there" to a
+            # sum that included genuinely governed devrc skills in real breach. The
+            # qualifier now says the total is measured against devrc's budget and
+            # that not every tree here is governed by it — true in both states, and
+            # asserting nothing about any individual tree. Round-9 finding 2.
+            all_gov = all(a.get("governed") is True for a in over)
             need.append(f"cut ~{excess:,} B total"
-                        + (" against devrc's budget (not enforced there)" if any_ung else ""))
+                        + ("" if all_gov else " measured against devrc's budget,"
+                                             " which does not govern every tree here"))
         if any_ref_issue:
             need.append("broken/orphaned reference routing")
         if broken_fence:

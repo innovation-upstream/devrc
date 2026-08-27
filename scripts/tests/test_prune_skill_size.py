@@ -522,10 +522,13 @@ def test_this_modules_own_stated_figures_are_re_measured():
     # that turned the suite red. A guard enforcing a false claim is the failure
     # this module exists to prevent. Round-7 finding 5.
     slack = min(MAX_BYTES, shared_budget) - size
-    # The floor the headroom test actually enforces: binding limit minus the
-    # working margin. Keyed to MAX_BYTES it was 12,096, ABOVE the 12,038 the
-    # relationship guard fires at, so it could never fire first (round-5 F8).
-    eff_floor = min(MAX_BYTES, shared_budget)   # the binding limit; there is no second floor
+    # 🔴 The BINDING LIMIT — not "binding minus the working margin", which is what
+    # this comment said until round 9 while the statement below already computed
+    # the limit itself. There is no second floor: devrc's budget is already ceiling
+    # minus a 250 B margin, so subtracting another would warn before the warning
+    # (round-5 F8). Two comments on one statement disagreeing is a stale figure by
+    # another name.
+    eff_floor = min(MAX_BYTES, shared_budget)
     rows = [ln for ln in SKILL_MD.read_text().splitlines()
             if ln.startswith("| ") and "reference/" in ln and "Load it when" not in ln]
     row_bytes = sum(len(ln.encode()) + 1 for ln in rows)
@@ -587,6 +590,12 @@ def test_this_modules_own_stated_figures_are_re_measured():
         # the same room restated in prose two paragraphs up — a second copy of a
         # gated figure is the shape this list already calls out, so it is gated too.
         ("room restated in prose", r"so there are ([\d,]+) B of real room",       f"{slack:,}"),
+        # 🔴 Two more the round-9 audit caught, BOTH added by the prose of the round
+        # that wrote the spec above — "the round that added prose also added the gap",
+        # for the second time. Each derives from a value already in scope, so there
+        # was never a reason to declare them in UNGATED instead.
+        ("shared margin in prose",  r"ceiling\s*#?\s*minus a ([\d,]+) B margin",  f"{_sa.MIN_HEADROOM:,}"),
+        ("shared budget restated",  r"shared budget \(([\d,]+)\) is smaller",     f"{shared_budget:,}"),
         ("target in the ceiling note", r"now equal to the ([\d,]+) B target",     f"{target:,}"),
         ("routing-table bytes",      r"routing table \(5 rows, ([\d,]+) B",       f"{row_bytes:,}"),
         ("routing-table mean",       r"routing table \(5 rows, [\d,]+ B -> mean ([\d,]+) B/row", f"{row_bytes // len(rows):,}"),
