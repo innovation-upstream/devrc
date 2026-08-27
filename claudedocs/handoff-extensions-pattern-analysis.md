@@ -302,7 +302,8 @@ Brave tab
   and its file 444→644.
   🔴 **This is guarded in browser-bridge at ONE site only — do not read it as a
   property of the block.** The destination swap tests `[ -d "$bbDst" ] && [ ! -L
-  "$bbDst" ]` at 662, and `deeScrub` (787-792) covers every discord site. But
+  "$bbDst" ]` at 662, and `deeScrub` (787-792) covers every discord site a symlink
+  can reach. But
   browser-bridge's **623** (`chmod -R u+rwX "$bbOld"`, in the sweep) and **627**
   (`chmod -R u+rwX "$bbTmp"`, before the `rm -rf` at 628) have **no `-L` test at
   all**. See `## Open` — an earlier revision of this bullet said "guarded by
@@ -376,6 +377,7 @@ weaker claim than "verified" and is stated as such deliberately.
     the identical argument made for site 628 above: a *pre-existing* `$bbTmp` is
     skipped by the `$$` test at 620 and routes straight here, and 627 runs **before**
     628, so the chmod-through-symlink fires first.
+
   In both cases the `rm -rf` that follows takes the LINK, not the target — the mode
   rewrite is the whole of the damage, and it is silent (`2>/dev/null || true`).
   **Measured 2026-08-27** by running the loop body verbatim against a fixture: target
@@ -384,12 +386,12 @@ weaker claim than "verified" and is stated as such deliberately.
   Requires an operator artefact at one of those paths, so this is a latent gap, not a
   live bug: no ordinary run puts a symlink there (662's `[ -d ] && [ ! -L ]` means the
   `mv` at 678 only ever produces a directory, and `cp -rL` at 629 produces one too).
-  🔴 **Closing condition — it must cover BOTH sites.** Either 623 **and** 627 gain the
-  `[ -L ]` diversion `deeScrub` has, or the commentary gains this limit explicitly for
-  each. Note that 601-612 documents the *sweep* only, so a comment added there does not
-  reach 627: fixing one site and closing this item is the failure mode to avoid, and is
-  why both line numbers are named here. Mechanically checkable — for each of 623 and
-  627, the guard is present or it is not. Whoever picks it up owns deciding which of
-  the two it is; this
-  session did not, because it is a change to a live hardened deploy path and does not
-  belong in a docs PR.
+
+  🔴 **Closing condition — it must cover BOTH sites, 623 AND 627.** Two ways to
+  satisfy it: add the `[ -L ]` diversion `deeScrub` has, or document the limit
+  explicitly. Note that 601-612 documents the *sweep* only, so a comment added there
+  does not reach 627 — fixing one site and closing this item is the failure mode to
+  avoid, and is why both line numbers are named. Mechanically checkable: for each of
+  623 and 627, the guard is present or it is not. Whoever picks this up owns choosing
+  between those two remedies; this session did not, because it is a change to a live
+  hardened deploy path and does not belong in a docs PR.
