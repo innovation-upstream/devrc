@@ -57,12 +57,19 @@
 # 🔴 PYTHONDONTWRITEBYTECODE=1: a stale `.pyc` keyed on mtime-in-whole-seconds
 # plus size is how a same-length edit gets scored SURVIVED without executing.
 #
-# COVERAGE IS DELIBERATELY PARTIAL, AND HERE IS WHAT IS NOT COVERED. The rows
-# below are the ones whose SURVIVAL was measured during #900 — i.e. each was
-# green until a pin was added for it. Rows that only ever confirmed an existing
-# pin (the M-series against `claude/RULES.md`, the evidence-file truncation
-# ladder) are not repeated here; run them from the module's docstring matrix if
-# you are changing those guards.
+# COVERAGE IS DELIBERATELY PARTIAL, AND HERE IS WHAT IS NOT COVERED. Two kinds
+# of row are here: the ones whose SURVIVAL was measured during #900 — each green
+# until a pin was added for it — and the two RELOCATIONS at the end, which never
+# survived anything and are here for the opposite reason: they are the only rows
+# that can show the RELATIONSHIP assertions execute at all, since a relocation
+# leaves every whole-string pin byte-identical. (An earlier version of this
+# paragraph excluded "the M-series against `claude/RULES.md`" by name while the
+# harness ran M4 two hundred lines below. Fixed; the rows are the authority.)
+#
+# NOT here: rows that only ever CONFIRMED an existing pin, and the evidence-file
+# truncation ladder. Run those from the module's docstring matrix if you are
+# changing those guards. This list is the executable one — count it here rather
+# than trusting a total written anywhere else, including in that docstring.
 set -uo pipefail
 CDPATH=
 D="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
@@ -105,8 +112,9 @@ ROWS=0
 # 🔴 Read the CONTENT, never an exit code. A suite that never ran yields zero
 # FAILED lines — i.e. "clean" — so a harness wired to nothing would score every
 # mutant SURVIVED and every control ok. The floor catches COLLAPSE, not growth.
-# `run-tests.sh`'s convention for a floor is `m - min(50, max(1, m/20))`; at
-# m=11 that is 10. Catches COLLAPSE, not growth.
+# `run-tests.sh`'s own floor formula is `m - min(50, max(1, m/20))`; at m=11
+# that is 10. It catches COLLAPSE, not growth — losing one test still clears it,
+# losing two reports HARNESS BROKE.
 MIN_TESTS=10
 failing() {
   local out n f total
@@ -117,8 +125,9 @@ failing() {
   out="$(cd "$ROOT" && PYTHONDONTWRITEBYTECODE=1 python3 -m pytest "$SUITE" \
     -q --no-header --tb=no -p no:cacheprovider 2>&1)"
   if grep -q "No module named pytest" <<<"$out"; then
-    echo "__HARNESS_BROKE__ pytest is not on PATH — run this under" \
-         "\`nix develop ~/workspace/devrc -c bash \$0\`, not a bare shell"
+    echo "__HARNESS_BROKE__ pytest is not on PATH — run it as" \
+         "\`nix develop ~/workspace/devrc -c bash" \
+         "scripts/tests/mutants-audit-ladder.sh\`, not in a bare shell"
     return
   fi
   n="$(sed -n 's/^\([0-9]*\) passed.*/\1/p;s/^[0-9]* failed, \([0-9]*\) passed.*/\1/p' <<<"$out" | tail -1)"
@@ -176,15 +185,23 @@ run_move() { # run_move <name> <expect> <file> <python-expr>
     printf '  🔴 %-46s SURVIVED — no test failed\n' "$name"
     FAILURES=$((FAILURES+1)); return
   fi
-  if grep -qx "$want" <<<"$killers"; then
-    printf '  ok %-46s killed by %s\n' "$name" "$want"; return
+  # 🔴 EXCLUSIVE, not "among". These rows exist to show that ONE assertion --
+  # the relationship one -- executes; the docstring quotes them as "relationship
+  # pin ONLY". `grep -qx` would print ok for a mutant killed by the named test
+  # AND a neighbour, which is precisely the day the claim stops being true.
+  # Measured: with a co-failing test added to the module, the `among` form
+  # printed ok and the sweep still said "all as expected".
+  if [ "$killers" = "$want" ]; then
+    printf '  ok %-46s killed by %s ALONE\n' "$name" "$want"; return
   fi
-  printf '  🔴 %-46s WRONG-KILLER: %s (wanted %s)\n' \
+  printf '  🔴 %-46s NOT EXCLUSIVE: %s (wanted %s alone)\n' \
     "$name" "$(tr '\n' ',' <<<"$killers")" "$want"
   FAILURES=$((FAILURES+1))
 }
 
 run() { # run <name> <expect: test node name | SURVIVES> <file> <old> <new>
+        # scores on "the named test is AMONG the killers" and PRINTS any extras,
+        # because these rows do not claim exclusivity -- only `run_move` does.
   local name="$1" want="$2" file="$3" old="$4" new="$5"
   ROWS=$((ROWS+1))
   if ! apply "$file" "$old" "$new"; then
@@ -209,7 +226,13 @@ run() { # run <name> <expect: test node name | SURVIVES> <file> <old> <new>
     FAILURES=$((FAILURES+1)); return
   fi
   if grep -qx "$want" <<<"$killers"; then
-    printf '  ok %-46s killed by %s\n' "$name" "$want"; return
+    local extra; extra="$(grep -vx "$want" <<<"$killers" | tr '\n' ',' | sed 's/,$//')"
+    if [ -n "$extra" ]; then
+      printf '  ok %-46s killed by %s (also: %s)\n' "$name" "$want" "$extra"
+    else
+      printf '  ok %-46s killed by %s\n' "$name" "$want"
+    fi
+    return
   fi
   printf '  🔴 %-46s WRONG-KILLER: %s (wanted %s)\n' \
     "$name" "$(tr '\n' ',' <<<"$killers")" "$want"

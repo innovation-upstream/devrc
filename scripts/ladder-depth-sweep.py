@@ -47,9 +47,16 @@ Blind spots, so the number is not read wider than it is:
 * A ladder whose rounds were never NUMBERED is invisible, and so is one run by a
   different runtime. Both make this an UNDER-count of ladder work.
 * IMPLIED is an UPPER BOUND. It assumes a ladder that reached round N ran N
-  rounds; where numbering skips (measured: 3 sessions, 8 round-numbers, ~2% of
-  the corpus-wide gap) it over-counts. The rest of that gap is the unnumbered
-  first audit, which is by design.
+  rounds; where numbering skips it over-counts — measured 2026-08-27: 3 sessions,
+  8 round-numbers, 3.3% of the corpus-wide OBSERVED/IMPLIED gap.
+* 🔴 THE OTHER 97% OF THAT GAP IS NOT THE UNNUMBERED FIRST AUDIT, and an earlier
+  version of this comment said it was. Measured: 231 of 239 missing round-numbers
+  are LEADING absences — 1.79 per session across 129 sessions, and exactly ONE
+  session in the corpus ever dispatched a "round 1". A single unnumbered first
+  audit can account for at most one per session, so most of them are UNNUMBERED
+  DELTA ROUNDS: a real round that was dispatched without a number in its label.
+  That is blind spot #1 above, and it means the true ladder depth is HIGHER than
+  IMPLIED, not lower. Do not read "depth 3" as "exactly four audits ran".
 * 🔴 COMPARING TWO WINDOWS OF DIFFERENT LENGTH IS BIASED. Depth is computed from
   in-window rounds only, so a narrower window truncates ladders that started
   before it and mechanically RAISES mean depth. Measured on one unchanged
@@ -106,19 +113,27 @@ def dispatch_texts(row: dict) -> list[str]:
     return out
 
 
-def sweep(since: str | None) -> tuple[dict, int]:
-    """-> ({(project, session): {rounds, last_date}}, dispatches_seen)"""
+def sweep(since: str | None) -> tuple[dict, int, int]:
+    """-> (sessions, dispatches_corpus_wide, dispatches_in_window)
+
+    The two counts are separate because the first is the POSITIVE CONTROL and
+    must not be narrowed by `--since` (a filtered zero is a measurement, not a
+    broken filter), while the second is what a reader comparing two windows
+    actually wants. Printing only the first under a window label was off by 21x
+    on one measured pair.
+    """
     sessions: dict[tuple[str, str], dict] = defaultdict(
         lambda: {"rounds": set(), "date": ""}
     )
     dispatches = 0
+    in_window = 0
     for path in ts.iter_transcripts():
         key = (path.parent.name, path.stem)
         for row in ts.load_records(path):
             stamp = (row.get("timestamp") or "")[:10]
             texts = dispatch_texts(row)
             # 🔴 The positive control counts dispatches BEFORE the window filter.
-            # Counting after it made an legitimately EMPTY window exit 2 with
+            # Counting after it made a legitimately EMPTY window exit 2 with
             # "indistinguishable from a wrong tool-name filter" -- naming a cause
             # that was not the real one, and making the honest "this zero is a
             # measurement" branch unreachable for the commonest way to get a
@@ -126,6 +141,7 @@ def sweep(since: str | None) -> tuple[dict, int]:
             dispatches += len(texts)
             if since and stamp and stamp < since:
                 continue
+            in_window += len(texts)
             for text in texts:
                 hit = ROUND.search(text)
                 if not hit:
@@ -133,7 +149,7 @@ def sweep(since: str | None) -> tuple[dict, int]:
                 rec = sessions[key]
                 rec["rounds"].add(int(hit.group(1) or hit.group(2)))
                 rec["date"] = max(rec["date"], stamp)
-    return sessions, dispatches
+    return sessions, dispatches, in_window
 
 
 def main() -> int:
@@ -142,7 +158,7 @@ def main() -> int:
     ap.add_argument("--detail", action="store_true", help="one line per session")
     args = ap.parse_args()
 
-    sessions, dispatches = sweep(args.since)
+    sessions, dispatches, in_window = sweep(args.since)
 
     # 🔴 The positive control. `dispatches` counts EVERY subagent dispatch the
     # walk saw, matched or not: if that is zero the walk itself found nothing,
@@ -161,7 +177,8 @@ def main() -> int:
     ladders = {k: v for k, v in sessions.items() if v["rounds"]}
     print(f"# ladder-depth sweep — run {date.today().isoformat()}"
           + (f", window from {args.since}" if args.since else ", all sessions"))
-    print(f"# {dispatches:,} subagent dispatch(es) walked (the positive control)")
+    print(f"# {dispatches:,} dispatch(es) walked corpus-wide (the positive "
+          f"control) · {in_window:,} inside the window")
     if not ladders:
         print("\n0 sessions ran a NUMBERED re-audit ladder in this window.")
         print("(The walk found dispatches, so this zero is a measurement, not a "

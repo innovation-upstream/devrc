@@ -146,13 +146,17 @@ rule rather than reformatting a paragraph.
    ladder that stopped. The behavioural claim needs transcript measurement over
    future ladders -- `scripts/ladder-depth-sweep.py` is that instrument, and it
    prints both round counts with the date because the two differ -- and is NOT
-   made here. The SURVIVOR rows quoted in this module -- the ones that were green
-   until a pin was added for them -- plus both reachability controls (M4, M10)
-   are re-derivable with `nix develop ~/workspace/devrc -c bash
-   scripts/tests/mutants-audit-ladder.sh`: 15 of the 45 rows quoted across the
-   two matrices below. The rest only ever CONFIRMED an existing pin and are not
-   repeated there. Before that harness was checked in, every matrix here was a
-   claim nobody else could re-run at all.
+   made here. SOME of the rows quoted below are re-derivable with `nix develop
+   ~/workspace/devrc -c bash scripts/tests/mutants-audit-ladder.sh` -- and that
+   harness, not this sentence, is the authority on WHICH: it names every row it
+   runs, and it runs some rows (the worktree hazards from #922) that appear in
+   no matrix here at all. 🔴 NO COUNT IS QUOTED HERE ON PURPOSE. Two independent
+   counts of these same two matrices disagreed -- 44 and 48 -- because "a row"
+   is ambiguous between labelled lines, distinct labels, and mutants-excluding-
+   controls. A total kept beside what it counts drifts, which is this file's own
+   rule; count them in the harness, where they are the executable list.
+   Before that harness was checked in, every matrix here was a claim nobody else
+   could re-run at all.
 6. **The CLASSIFIER is a human judgement, deliberately -- and only its WORDING
    is pinned.** The rule tells the reader to name each changed file payload or
    scaffolding rather than run a pathspec, because a pathspec is wrong in both
