@@ -1569,16 +1569,32 @@ def test_a_foreign_plus_unknown_run_over_claims_about_neither(tmp_path):
     non-governance over the half that is undetermined."""
     out = _states_out(tmp_path, foreign=1, unknown=1)
     assert "not enforced, or not determinable, for anything here" in out, out
+    # 🔴 And the MIXES line must name only the states actually present. Pinning
+    # `states` to always include governed rendered "MIXES governed, ungoverned and
+    # unknowable trees" on this run and survived the suite — the harm its sibling
+    # test was written to prevent, in the one regime that test does not cover.
+    assert "MIXES ungoverned and unknowable trees" in out, out
+    assert "MIXES governed" not in out, (
+        f"no governed tree is present, so the banner must not name one:\n{out}")
     assert "devrc's DEFAULT (not enforced here)" not in out, (
         f"this run contains an undetermined tree, so a flat non-governance claim "
         f"over 'anything here' is an over-claim:\n{out}")
 
 
-def test_the_scope_phrase_is_the_same_string_everywhere_it_appears(tmp_path):
-    """🔴 The header, the within-budget verdict and the cut-total each answered
-    "who does this budget govern?" independently and drifted apart across three
-    rounds, each round fixing a subset. They now come from one helper; this pins
-    that they cannot diverge again."""
+def test_the_header_and_the_budget_verdict_carry_the_same_scope_phrase(tmp_path):
+    """The header and the within-budget/over-budget verdict both read the RUN-level
+    `scope_phrase`, so they cannot diverge — that is what this pins.
+
+    🔴 IT DOES NOT COVER THE CUT-TOTAL, and its previous name and docstring said it
+    did. Since round 14 the cut-total is deliberately scoped to the OVER-BUDGET
+    population, so on a mixed-regime run it legitimately carries a DIFFERENT phrase
+    from the header — e.g. header "(not enforced on every tree here)" beside
+    "cut ~116 B … (not enforced here)", each true of its own set. The body was
+    narrowed to single-regime fixtures where agreement is forced, so the old name
+    claimed an invariant the shipped code intentionally violates. Renamed rather
+    than re-scoped: the cut-total has its own two tests above. Round-15 finding 2 —
+    the "description wider than the body" class, left standing in the test that
+    round-13 finding 1 had just edited."""
     for over in (True, False):
         for kwargs in ({"foreign": 1}, {"unknown": 1}, {"gov": 1, "foreign": 1},
                        {"foreign": 1, "unknown": 1}):
@@ -1620,6 +1636,37 @@ def test_the_cut_total_is_scoped_to_the_skills_it_tells_you_to_cut(tmp_path):
         f"be hedged:\n{verdict}")
     # …and the run-level banner must STILL warn, because the foreign skill is real
     assert "NOT governed by the" in r.stdout, r.stdout
+
+
+def test_the_cut_total_scope_covers_the_unknown_flag_too(tmp_path):
+    """🔴 THE SIBLING DERIVATION, WHICH HAD NO FIXTURE. The cut-total derives TWO
+    flags from `over` — is-any-foreign and is-any-unknown — and only the first was
+    covered, because the test above pairs a governed skill with a FOREIGN one.
+    Changing the second's `for a in over` to `for a in audits` survived the whole
+    suite, rendering character-for-character the sentence round 13 removed:
+    "cut ~116 B total measured against devrc's budget (not enforced on every tree
+    here)" one clause after "the gate REJECTS these", about bytes that are 100%
+    governed.
+
+    `_states_out` is structurally blind to this: it builds every skill in one
+    budget regime, so `over == audits` and the two scopes coincide by construction.
+    It needs a MIXED-regime fixture, which is what this is.
+    """
+    g = _governed_repo(tmp_path / "govover2", governed=True, skill_bytes=sa.BUDGET + 116)
+    u = tmp_path / "unkunder" / ".claude" / "skills" / "s"
+    u.mkdir(parents=True)
+    (u / "SKILL.md").write_bytes(b"# s\n" + b"y" * 2_000)
+    r = subprocess.run([sys.executable, str(AUDIT_PY), str(g),
+                        str(tmp_path / "unkunder" / ".claude" / "skills"), "--all"],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    verdict = r.stdout[r.stdout.index("## verdict"):]
+    assert "cut ~116 B total" in verdict, verdict
+    assert "measured against devrc's budget" not in verdict, (
+        f"the only over-budget skill is governed, so the cut instruction must not "
+        f"be hedged by an UNDER-budget unknowable sibling:\n{verdict}")
+    # the run-level banner must still report the unknowable tree
+    assert "IN NO REPO" in r.stdout, r.stdout
 
 
 def test_the_cut_total_IS_hedged_when_the_over_budget_set_is_not_governed(tmp_path):
