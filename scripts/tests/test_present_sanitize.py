@@ -1091,8 +1091,12 @@ def test_the_exit_code_legend_stops_at_the_BLOCK_and_sorts_NUMERICALLY(tmp_path)
     # No `flake.nix` stub: `m_gate_exit_codes` reads ONLY `scripts/gate.sh`.
     # The sibling `m_gate_tiers` is the one that reads the flake, and a stub
     # here would imply a dependency this measurer does not have.
+    # 🔴 NO SHEBANG LINE. `test_runtime_shebangs.py` forbids a test writing one
+    # at runtime (use `testlib.mockbin.write_exec` for a file that will be
+    # EXECUTED). This fixture is only ever READ as text by the measurer, so the
+    # shebang was decoration — and it failed the full pytest tier while the six
+    # `test_present_*` files I had been running stayed green.
     (repo / "scripts" / "gate.sh").write_text(
-        "#!/usr/bin/env bash\n"
         "#   5 = a tunable, ABOVE the legend and not part of it\n"
         "\n"
         "# Exit: 0 = everything passed.\n"
