@@ -118,7 +118,8 @@ not belong in a rule** — only in a dated measurement beside it.
 
 Either selection supports the point: **well over half** of what this repo merges ships no source
 file, so a gate keyed to "docs are not production" reads zero payload for every round of those PRs
-and stops a ladder that is working.
+and stops a ladder that is working. **Re-derive before quoting** — the selection is one `gh pr list`
+plus the classifier above, and the answer changes with the window.
 
 ---
 
@@ -127,12 +128,19 @@ and stops a ladder that is working.
 The measurement behind the gate's command. Each shape is a throwaway repo (git 2.55.0); the numbers
 are `additions + deletions` summed over the numstat output.
 
-| shape | truth | `git diff A..HEAD` | `--no-merges --first-parent` | `--remerge-diff … --not <base>` |
+| shape | what the round actually wrote | `git diff A..HEAD` | `--no-merges --first-parent` | `--remerge-diff … --not <base>` |
 |---|---|---|---|---|
-| A. clean `merge main` brings 200 upstream lines; the round's own fix is 1 test line | 0 payload | **201** | 1 | 1 |
-| B. payload hand-written into a merge-CONFLICT resolution | >0 | 30 | **1** | 37 |
+| A. clean `merge main` brings 200 upstream lines; the round's own fix is 1 test line | 1 line, and it is a TEST ⇒ 0 payload | **201** | 1 | 1 |
+| B. one branch-side commit (1 line), then 30 payload lines hand-written into the merge-CONFLICT resolution | 31 | 30 | **1** ⇐ the branch commit only; the resolution is invisible | 37 |
 | C. the round's fix is 50 payload lines on a side branch, merged `--no-ff` | ~50 | 51 | **0** | 51 |
 | D. control: 12 payload lines, linear, no merges | 13 | 13 | 13 | 13 |
+
+Fixtures: four throwaway repos, each `main` + a `feat` branch off one base commit, built by
+`scratchpad/ranges.sh` in the authoring session — A merges 200 upstream lines into a branch whose
+only commit edits `app_test.go`; B makes both sides edit `app.go` and hand-writes 30 lines while
+resolving; C commits the fix on a `side` branch and merges `--no-ff`; D commits 12 lines directly.
+Re-derive rather than quote: the numbers are small enough to rebuild in a minute, and B's `1` is
+only legible next to what the branch-side commit contributed.
 
 Bold is wrong. Three lessons, and every one of them was shipped as a rule before it was measured:
 

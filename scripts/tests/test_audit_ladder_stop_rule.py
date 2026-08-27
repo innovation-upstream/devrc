@@ -256,9 +256,10 @@ recorded as SURVIVED off an 11-passed run.
                                                   so the pin held the
                                                   contradiction in place
   W2   dated measurement -> vague "many" ....... 1 failed
-  W3   "`--no-merges` has one cost" -> "has no
-       cost" .................................. 1 failed  <- SURVIVED until the
-                                                  blind spot was pinned
+  W3   the wrong-flag prohibition inverted
+       ("do reach for --no-merges
+       --first-parent") ....................... 1 failed  <- SURVIVED until the
+                                                  trap was pinned
   W4   evidence truncated to 1,520 B ......... 1 failed  <- the FLOOR passes;
                                                   the pin's message names the
                                                   file size, which is what
@@ -270,6 +271,14 @@ recorded as SURVIVED off an 11-passed run.
                                                   UnicodeDecodeError traceback,
                                                   which is what `errors=
                                                   "replace"` in `_read` buys
+
+  added after the fifth audit -- every one of these was a rule the previous
+  round shipped UNPINNED, and each mutant below was green before it:
+  V1   `<base>` redefined as the fork point ... 1 failed
+  V2   "a failed command is not zero" inverted  1 failed
+  V3   shape-C row rewritten to erase the
+       argument for the current command ....... 1 failed
+  V4   PR-population row rewritten to 2 of 40 . 1 failed
 
   the round-1 set, re-run against current strings:
   X3   gate command -> `echo 0` ............... 1 failed
@@ -453,22 +462,41 @@ SKILL_PAYLOAD_DEFINITION = (
     "round wrote to guard it. For a code change the payload is source and a "
     "`.md` is not — but **for a docs or skill PR the payload IS the `.md`**"
 )
-# 🔴 The measurement the payload definition rests on, pinned WITH its date --
-# the PR list moves as PRs merge, so this is a timestamped measurement and not a
-# constant. It was `24` for one commit, carried over from a subagent's report
-# without being re-derived; re-measured here at 25/40 on 2026-08-26. Method in
-# the reference file.
-# 🔴 The flag's OWN blind spot, pinned because disclaiming it is the cheap edit.
-# `--no-merges` is what keeps a `merge main` from being counted as this round's
-# payload -- and it also makes payload hand-written INTO a merge conflict
-# resolution invisible (measured: 0, where the two-dot form read 340). That is
-# the UNSAFE direction: the gate reads zero on a round that did change payload.
-# Measured: rewriting "has one cost" to "has no cost" left the suite green.
+# 🔴 The WRONG-FLAG trap, pinned because reaching for it is the natural edit: a
+# reader who wants to exclude a `merge main` reaches for `--no-merges
+# --first-parent`, which looks equivalent and reads ZERO for a fix committed on
+# a side branch and merged `--no-ff` -- the shape agent worktrees produce -- so
+# the gate fires on a ladder whose payload is still moving. It also misses
+# payload hand-written into a merge-conflict resolution. Both measured; the
+# four-shape table is in the reference file. This constant shipped TWICE with
+# wording that credited `--no-merges` with the job `--not <base>` actually does,
+# which is why the sentence pinned here is the prohibition and not a rationale.
 SKILL_WRONG_FLAGS_TRAP = (
     "Do **not** reach for `--no-merges --first-parent`: it looks equivalent and "
-    "hides payload in BOTH of those shapes — **0** for a fix committed on a "
-    "side branch and merged `--no-ff`, which is the shape agent worktrees "
-    "produce."
+    "reads **0** for a fix committed on a side branch and merged `--no-ff` — "
+    "the shape agent worktrees produce."
+)
+# 🔴 QUALITATIVE on purpose. This claim carried a number through two rounds and
+# the number was wrong both times -- first `24` copied from a subagent's report
+# without re-derivation, then a correctly-measured `25` that read `24` again two
+# hours later because PRs kept merging. The dated measurement, both selection
+# commands and the classifier live in the reference file; what is pinned here is
+# the part that does not decay.
+# 🔴 `<base>` and the failed-command rule. Both are new because both were found
+# by measurement, not reasoning: a base ref ONE COMMIT stale re-reports the whole
+# upstream bring-in (201 where the truth was 1), and every way the command can
+# fail -- a missing ref (rc 128, empty stdout), an unwritable object store
+# (`--remerge-diff` under-counts and still exits 0) -- produces a number that
+# sums to ZERO, which is indistinguishable from the gate's own stop verdict.
+SKILL_BASE_DEFINITION = (
+    "🔴 **`<base>` is the CURRENT tip you would merge into** (`origin/main`), "
+    "never the fork point: one commit stale and the whole bring-in is "
+    "re-reported as this round's payload (201 where the truth was 1, measured)."
+)
+SKILL_FAILED_IS_NOT_ZERO = (
+    "And **a failed command is not zero** — a missing ref exits 128 with empty "
+    "output, and `--remerge-diff` under-counts and still exits 0 when the object "
+    "store is unwritable. Confirm it printed something before believing a zero."
 )
 SKILL_PAYLOAD_MEASUREMENT = (
     "**most of this repo's merged PRs ship no source file at all** (measured; "
@@ -522,6 +550,19 @@ EVIDENCE_CHURN_ROW = (
 # 🔴 The row the corrections were ABOUT, pinned too. Without it the numbers can
 # drift back while the correction sentence below still narrates having fixed
 # them -- measured: rewriting this row to 9999s left the suite green.
+# 🔴 The two rows that ARE the argument for the current command. Measured: with
+# only the #498 pins in place, rewriting shape C's `0` to `51` -- which deletes
+# the entire reason the command changed -- left the suite green, as did blanking
+# the four-shape table's first row and rewriting the PR-population count. The
+# body delegates both numbers to this file, so the file has to be pinned too.
+EVIDENCE_SHAPE_C_ROW = (
+    "| C. the round's fix is 50 payload lines on a side branch, merged "
+    "`--no-ff` | ~50 | 51 | **0** | 51 |"
+)
+EVIDENCE_PR_POPULATION_ROW = (
+    "| `gh pr list --state merged --limit 40` (sorts by CREATED) | 24 | 16 | 7 "
+    "| 1 |"
+)
 EVIDENCE_BASELINE_ROW = (
     "| feature + rounds 1–3 (`bce0c0c`…`d2ec92d`) | 961 | 110 | 222 |"
 )
@@ -784,6 +825,12 @@ def test_the_attribution_measurement_survives_where_the_skill_routes_to_it():
         EVIDENCE_MD, EVIDENCE_BASELINE_ROW, "the #498 baseline churn row"
     )
     _assert_pinned_once(
+        EVIDENCE_MD, EVIDENCE_SHAPE_C_ROW, "the shape-C range measurement"
+    )
+    _assert_pinned_once(
+        EVIDENCE_MD, EVIDENCE_PR_POPULATION_ROW, "the PR-population measurement"
+    )
+    _assert_pinned_once(
         EVIDENCE_MD, EVIDENCE_TABLE_CORRECTION, "the churn-table correction"
     )
     _assert_pinned_once(
@@ -802,9 +849,12 @@ def test_the_gate_pins_its_MECHANISM_not_only_its_decision():
 
     That is not a hypothetical. The first version of this gate shipped a
     CUMULATIVE range, which a per-round condition cannot consume -- on #498 it
-    prints the same non-zero number for rounds 4 through 10. Three pins, because
-    the mechanism has three parts that can each be wrong on their own: WHICH
-    RANGE, HOW LINES ARE CLASSIFIED, and the DECISION over the result.
+    prints the same non-zero number for rounds 4 through 10, and the second
+    shipped `--no-merges --first-parent`, which reads ZERO for a fix merged from
+    a side branch. SEVEN pins, because that many parts of the mechanism have
+    each been found wrong on their own: WHICH RANGE, WHAT `<base>` IS, WHAT
+    COUNTS AS PAYLOAD, HOW THE LINES ARE CLASSIFIED, WHICH FLAGS ARE THE TRAP,
+    the measurement under it, and the DECISION over the result.
     """
     _assert_pinned_once(SKILL_MD, SKILL_GATE_COMMAND, "the gate's command")
     _assert_pinned_once(SKILL_MD, SKILL_GATE_PER_ROUND, "the per-round rule")
@@ -822,6 +872,10 @@ def test_the_gate_pins_its_MECHANISM_not_only_its_decision():
     )
     _assert_pinned_once(
         SKILL_MD, SKILL_GATE_NO_PATHSPEC, "the pathspec counter-evidence"
+    )
+    _assert_pinned_once(SKILL_MD, SKILL_BASE_DEFINITION, "what `<base>` is")
+    _assert_pinned_once(
+        SKILL_MD, SKILL_FAILED_IS_NOT_ZERO, "the failed-command-is-not-zero rule"
     )
 
 
