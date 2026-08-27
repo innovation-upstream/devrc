@@ -1083,6 +1083,11 @@ def test_default_branch_resolution_records_how_it_was_resolved(tmp_path):
 #     137 of the 236 dead rows are under a `.claude/worktrees/` directory, so the
 #     default leaves 99 removable and --include-agent-worktrees leaves 236.
 #
+# 🔴 A RE-RUN THAT DISAGREES SLIGHTLY IS NOT A BUG. Two runs the same day gave
+# `236 dead / 137 agent-dead / 99 removable` IDENTICALLY and moved
+# orphan/cannot-tell 44/52 -> 43/53. The figures the design rests on are the
+# stable ones; the soft two are ±1 on a box with live sessions working in it.
+#
 # 🔴 The numbers this comment used to carry — "870 worktrees / 128 repos -> 250
 # dead … 131 agent … safe set of 106" — are RETIRED, not restated: 250 - 131 is
 # 119, not 106, so at most two of the three could ever have been right, and the

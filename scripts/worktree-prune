@@ -75,7 +75,14 @@ the box:
     860 worktrees / 129 repos -> 236 dead, 44 orphan, 528 live, 52 cannot-tell,
     every one of the 236 dead rows removable with the exclusion off.
     137 of those 236 sit under a `.claude/worktrees/` directory belonging to
-    OTHER LIVE Claude sessions.
+    OTHER LIVE Claude sessions, so the default leaves 99 removable.
+
+    🔴 MEASURED DRIFT, so a re-run that disagrees is not a bug. Two runs the
+    same day returned `236 dead / 137 agent-dead / 99 removable` IDENTICALLY,
+    while `orphan`/`cannot-tell` moved 44/52 -> 43/53 — one row's PR state or
+    dirtiness changed between them. The numbers this design rests on are the
+    stable ones; the two soft ones are ±1 on a machine with live sessions
+    working in it.
 
 🔴 EARLIER NUMBERS IN THIS FILE'S HISTORY ARE RETIRED, NOT RESTATED. A previous
 revision cited "870 worktrees / 128 repos -> 250 dead … 106 removable" beside a
