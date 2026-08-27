@@ -526,7 +526,19 @@ gitnet() {
 # Never sit waiting for a human to type a password into an agent's session.
 export GIT_TERMINAL_PROMPT=0
 unset GIT_ASKPASS SSH_ASKPASS 2>/dev/null || true
-export GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -o BatchMode=yes -o ConnectTimeout=10}"
+# 🔴 The keepalive options are NOT optional decoration. GIT_SSH_COMMAND BEATS
+# core.sshCommand, so exporting one here silently discards the keepalive
+# nix/programs/git installs — and github.com closes an idle receive-pack session
+# after ~360s (#782, measured). Nothing here holds a connection that long today,
+# but "claim by push" is shipped and the next long-running remote op under this
+# export would resurrect #782 with no test able to see it.
+# scripts/tests/test_push_keepalive.py asserts every GIT_SSH_COMMAND export in
+# this repo carries it.
+# ⚠ The `:-` means an INHERITED value wins and then carries no keepalive, and
+# that ledger cannot see it — it reads this literal default. Left as-is (an
+# operator who sets the variable owns it), but it is a blind spot, not a
+# guarantee.
+export GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=30 -o ServerAliveCountMax=6}"
 
 # ── 🔴 the CANONICAL remote ───────────────────────────────────────────────────
 #
