@@ -520,7 +520,7 @@ run 'modules-store-required-to-be-non-empty' \
   's|^    if modules.is_dir():$|    if modules.is_dir() and any(modules.iterdir()):|'
 run 'index-arm-blinded' \
   test_an_EMBEDDED_submodule_git_dir_blocks_even_with_no_modules_store \
-  's|^        if rel and (path / rel / ".git").exists():$|        if False:|'
+  's|^        if rel and (path / os.fsdecode(rel) / ".git").exists():$|        if False:|'
 run 'gitlink-mode-misspelled-so-no-gitlink-is-ever-seen' \
   test_an_EMBEDDED_submodule_git_dir_blocks_even_with_no_modules_store \
   's|^        if not entry.startswith(b"160000 "):$|        if not entry.startswith(b"160001 "):|'
@@ -609,9 +609,16 @@ run 'filesystem-decoding-used-for-display' \
   's|^            populated.append(_printable(rel))$|            populated.append(os.fsdecode(rel))|'
 # 🔴 FINDING 2: asserting an overlap instead of measuring one is false whenever
 # the two sets are disjoint — this round'"'"'s own defect class.
+#
+# 🔴 `1 * (…)` WAS A SEMANTIC NO-OP and this mutant reported SURVIVED — it
+# changed the file'"'"'s bytes, so it cleared the `cmp` gate, and changed no
+# behaviour, so nothing could kill it. A `run` line asserting coverage it did
+# not have is worse than none. `99 + 0 * (…)` pins the value to a constant the
+# fixture can never produce, which is the mechanical control: feed a value the
+# constant CANNOT equal and watch the output move.
 run 'overlap-asserted-rather-than-measured' \
   test_the_overlap_line_states_the_measured_overlap_not_an_asserted_one \
-  's|^        overlap = (summary\["excluded_dead"\] + summary\["submodule_blocked_dead"\]$|        overlap = 1 * (summary["excluded_dead"] + summary["submodule_blocked_dead"]|'
+  's|^        overlap = (summary\["excluded_dead"\] + summary\["submodule_blocked_dead"\]$|        overlap = 99 + 0 * (summary["excluded_dead"] + summary["submodule_blocked_dead"]|'
 # 🔴 FINDING 3: crediting the exclusion with a sparing it did not do.
 run 'exclusion-credited-for-rows-it-did-not-free' \
   test_an_excluded_row_with_another_blocker_is_not_credited_to_the_filter \
@@ -620,7 +627,7 @@ run 'exclusion-credited-for-rows-it-did-not-free' \
 # claiming it is held back for submodules invents a problem.
 run 'vanished-worktree-marked-submodule-unknown' \
   test_a_vanished_worktree_is_not_marked_as_a_submodule_unknown \
-  's|^                    if subs is None and r.get("submodule_reasons") else "")$|                    if subs is None else "")|'
+  's|^                    if subs is None and r.get("path_exists") else "")$|                    if subs is None else "")|'
 
 printf '\n== POSITIVE CONTROLS — mutants whose fate is KNOWN ==\n'
 # 🔴 A comment-only edit MUST survive. If it kills something, the harness is

@@ -307,6 +307,16 @@ def _git_raw(cwd: Path, *args: str, timeout: int = GIT_TIMEOUT) -> subprocess.Co
     and zero classified rows. That is the failure `is_dir`'s docstring
     legislates against — one unreadable row is not a reason to abandon the
     other 750.
+
+    🔴 THIS FIXES ONE CALL, NOT THE CLASS — and the class is NOT confined to
+    `-z` callers, which an earlier wording of this docstring implied. MEASURED:
+    `git worktree list --porcelain` emits the worktree PATH raw and unquoted
+    regardless, so a worktree whose DIRECTORY NAME holds an undecodable byte
+    still takes the whole scan down through `list_worktrees` — identically on
+    `origin/main`, so it is pre-existing here and not this change's doing.
+    Tracked separately rather than widened into this PR; converting the
+    porcelain parser to bytes touches the core scan path and wants its own
+    tests. Do not read this helper as evidence the abort class is closed.
     """
     return subprocess.run(
         ["git", "--no-optional-locks", "-C", str(cwd), *args],
@@ -1674,15 +1684,20 @@ def render_text(rows: "list[dict]", summary: dict, verbose: bool) -> str:
             # the summary sends them to --verbose — so the marker is appended
             # to the listing line only.
             subs = r.get("submodules")
-            # 🔴 The UNKNOWN marker is gated on there being a REASON, not on
-            # `subs is None` alone. A worktree whose directory has vanished
+            # 🔴 Gated on `path_exists`, which is the ACTUAL discriminator, not
+            # on there being a reason. A worktree whose directory has vanished
             # returns `(None, [])` from the `is_dir` guard — nothing was asked
-            # and no git call failed — so marking it "held back" would invent a
+            # and no git call failed — so marking it "held back" invents a
             # submodule problem for a row that is `cannot-tell` for an entirely
-            # different reason.
+            # different reason. Gating on `submodule_reasons` also suppressed
+            # the marker for a row that IS counted by
+            # `submodule_unknown_dead`, so the summary said "N could NOT be
+            # answered … --verbose gives the git error" over a --verbose
+            # showing neither. `path_exists` separates "not asked" from
+            # "asked and unanswered", which is the distinction both sites need.
             mark = ("  [SUBMODULES — git will refuse to remove this]" if subs
                     else "  [submodules UNKNOWN — held back]"
-                    if subs is None and r.get("submodule_reasons") else "")
+                    if subs is None and r.get("path_exists") else "")
             lines.append(f"[{verdict_label(r)}] {r['path']}  branch={r['branch']}{mark}")
             lines.append(f"    {r['verdict_reason']}")
             for e in r["evidence"]:
