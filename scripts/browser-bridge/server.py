@@ -1101,11 +1101,37 @@ _SITES_DIR = Path(
 # The doc path a consumer is told to read is REPO-RELATIVE, matching how every
 # other reference file is named in SKILL.md's table.
 _SITES_REL_PREFIX = "reference/sites"
-# (resolved_dir, {host_suffix: filename}) — parsed at most once per directory.
-# Keyed on the directory so a test that repoints BROWSER_BRIDGE_SITES_DIR gets a
-# fresh load without needing a reset hook, while a normal run reads the file once
-# for the life of the process.
+# (resolved_dir, stamp, {host_suffix: filename}) — re-parsed only when the file
+# CHANGES. Keyed on the directory so a test that repoints BROWSER_BRIDGE_SITES_DIR
+# gets a fresh load without needing a reset hook.
+#
+# 🔴 THE STAMP IS THE WHOLE POINT — keyed on the directory ALONE, this cache made
+# every registry addition INVISIBLE to a running bridge until it restarted, and
+# invisible SILENTLY. Measured 2026-08-27: `civit.ai` was registered, merged, and
+# present on disk, while a bridge started two days earlier kept answering from a
+# mapping that predated it. Nothing reports this. The failure reads as "my new
+# entry does not work", so the natural response is to go looking for a bug in the
+# entry — a false negative about your OWN change, which is what makes it
+# expensive rather than merely stale. A registry that is only ever added to is
+# exactly the shape that hides it: the entries already cached keep resolving, so
+# the feature looks alive while the new half is dead.
 _site_index_cache = None
+
+
+def _site_index_stamp():
+    """A cheap change-stamp for `_index.json`: (mtime_ns, size), or None.
+
+    One `stat` per lookup — not a re-parse, and not a re-read. None means the
+    stat itself failed (absent/unreadable), and the caller deliberately KEEPS
+    whatever it already had rather than discarding it: this whole path is
+    best-effort, and a registry that momentarily cannot be stat'd is not a
+    reason to start answering "no site notes" to every command.
+    """
+    try:
+        st = (_SITES_DIR / "_index.json").stat()
+        return (st.st_mtime_ns, st.st_size)
+    except Exception:  # noqa: BLE001 — an unreadable registry is not an error.
+        return None
 
 
 def _load_site_index() -> dict:
@@ -1125,8 +1151,13 @@ def _load_site_index() -> dict:
     """
     global _site_index_cache
     cached = _site_index_cache
+    stamp = _site_index_stamp()
     if cached is not None and cached[0] == _SITES_DIR:
-        return cached[1]
+        # A None stamp (the file cannot be stat'd right now) REUSES the cache
+        # rather than re-reading — see _site_index_stamp. Only an observed,
+        # DIFFERENT stamp forces the re-parse.
+        if stamp is None or cached[1] == stamp:
+            return cached[2]
     mapping = {}
     try:
         raw = json.loads((_SITES_DIR / "_index.json").read_text("utf-8"))
@@ -1146,7 +1177,7 @@ def _load_site_index() -> dict:
                 mapping[host] = name
     except Exception:  # noqa: BLE001 — an absent/broken registry is not an error.
         mapping = {}
-    _site_index_cache = (_SITES_DIR, mapping)
+    _site_index_cache = (_SITES_DIR, stamp, mapping)
     return mapping
 
 
