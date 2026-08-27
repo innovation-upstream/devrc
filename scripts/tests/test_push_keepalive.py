@@ -66,6 +66,16 @@ WHAT IS REGRESSION COVERAGE HERE AND WHAT IS NOT (RULES.md asks for the label):
     failing, and the tests above would then describe the wrong region of the
     file while still passing.
 
+  * `test_blanking_neutralises_EACH_string_form_separately` is an INVARIANT
+    GUARD, per-form on purpose: an AGGREGATE brace assertion could not see
+    either blanking path being switched off individually, and with half the
+    protection gone the false GREEN below came straight back.
+  * `test_a_brace_inside_a_string_value_cannot_move_the_settings_boundary` is
+    REGRESSION coverage for a measured FALSE GREEN — a `core.sshCommand`
+    declared OUTSIDE `settings` was accepted because a brace inside a string
+    value steered the boundary — and it pins BOTH halves of the fix (the depth
+    counter and the locator), each of which was independently unguarded.
+
 (The list above has one entry per test. Count it rather than trusting a total
 maintained in parallel with the thing it counts — this parenthetical said FIVE
 and went stale within one commit of being written, which is the whole point.)
@@ -154,6 +164,25 @@ def _searchable_files() -> list[Path]:
 MEASURED_IDLE_CLOSE_S = 360
 
 
+def _blank_span(chunk: str) -> str:
+    """A string span replaced by spaces, newlines preserved, LENGTH EXACT.
+
+    EXACT LENGTH IS THE WHOLE CONTRACT, because `_top_level_of_settings` counts
+    braces in the blanked text and takes characters from the keeping one at the
+    SAME offsets. The previous spelling computed the blank arithmetically and
+    floored at zero, so it ran LONGER than the original on five EOF-degenerate
+    shapes (a lone double-quote at EOF; a string ending in a backslash; a bare,
+    a tripled, and a one-char-short indented-string opener). Three of those then
+    raised IndexError downstream.
+
+    Building the blank FROM the chunk makes the lengths equal by construction,
+    rather than by arithmetic that has to be got right — and
+    `test_the_two_parser_passes_stay_offset_aligned` measures it anyway,
+    including those degenerate shapes.
+    """
+    return "".join(ch if ch == "\n" else " " for ch in chunk)
+
+
 def _nix_code(path: Path, keep_strings: bool = True) -> str:
     r"""Nix source with ALL comment forms removed, in ONE string-aware pass.
 
@@ -197,7 +226,7 @@ def _nix_code(path: Path, keep_strings: bool = True) -> str:
                     j += 1
                     break
                 j += 1
-            out.append(src[i:j] if keep_strings else '"' + " " * max(0, j - i - 2) + '"')
+            out.append(src[i:j] if keep_strings else _blank_span(src[i:j]))
             i = j
             continue
         if src.startswith("''", i):
@@ -229,9 +258,7 @@ def _nix_code(path: Path, keep_strings: bool = True) -> str:
             else:
                 j = n
             chunk = src[i:j]
-            out.append(chunk if keep_strings
-                       else "''" + "".join(ch if ch == "\n" else " "
-                                           for ch in chunk[2:-2]) + "''")
+            out.append(chunk if keep_strings else _blank_span(chunk))
             i = j
             continue
         if src.startswith("/*", i):
@@ -249,7 +276,7 @@ def _nix_code(path: Path, keep_strings: bool = True) -> str:
     return "".join(out)
 
 
-def _top_level_of_settings() -> str:
+def _top_level_of_settings(path: Path | None = None) -> str:
     r"""Only the entries at the TOP level of the git module's `settings` attrset.
 
     🔴 WHY DEPTH MATTERS, AND WHY AN ANCHOR WAS NOT ENOUGH. `^\s*core\.sshCommand`
@@ -271,8 +298,9 @@ def _top_level_of_settings() -> str:
     # satisfied `\bsettings` and an earlier unrelated attrset could hijack the
     # locator. That is the SAME `\b` trap this file already fixed for
     # `import ./git` — one rule, wrong at the site nobody updated.
-    code = _nix_code(GIT_MODULE, keep_strings=True)
-    located = _nix_code(GIT_MODULE, keep_strings=False)
+    path = path or GIT_MODULE
+    code = _nix_code(path, keep_strings=True)
+    located = _nix_code(path, keep_strings=False)
     m = re.search(r"(?<![.\w])settings\s*=\s*\{", located)
     if not m:
         return ""
@@ -314,14 +342,14 @@ def _top_level_of_settings() -> str:
     return "".join(out)
 
 
-def _ssh_command() -> str:
+def _ssh_command(path: Path | None = None) -> str:
     """The `core.sshCommand` declared as a DIRECT member of `settings`, or "".
 
     Anchored (so `notcore.sshCommand` cannot satisfy it) AND depth-constrained
     (so a value scoped to a subtree cannot) — see `_top_level_of_settings`.
     """
     m = re.search(r'(?:^|\s)core\.sshCommand\s*=\s*"([^"]*)"\s*;',
-                  _top_level_of_settings())
+                  _top_level_of_settings(path))
     return m.group(1) if m else ""
 
 
@@ -489,20 +517,18 @@ def test_the_setting_is_reachable_from_the_home_manager_entry_point():
 # --------------------------------------------------------------------------- #
 # INVARIANT GUARD — the assumption the depth-counting rests on
 # --------------------------------------------------------------------------- #
-def test_the_two_parser_passes_stay_offset_aligned():
+def test_the_two_parser_passes_stay_offset_aligned(tmp_path):
     """🔴 `_top_level_of_settings` counts braces in the string-BLANKED text and
     takes characters from the string-KEEPING one at the SAME offsets. That is
-    only sound while the two passes are the same length.
+    sound only while the two passes are the same length.
 
-    It holds by construction — a blanked `"…"` emits `"` + N spaces + `"`, and a
-    blanked `''…''` preserves newlines and spaces the rest, both exactly as long
-    as the original — but "by construction" is what every silently-broken
-    invariant was, so it is measured here instead. If a future edit to
-    `_nix_code` blanks a string to a different LENGTH, every slice downstream
-    shifts and the tests above start describing the wrong region of the file
-    without failing.
+    It holds by construction — `_blank_span` builds the blank FROM the chunk —
+    but "by construction" is what every silently-broken invariant was, so it is
+    measured. Including the EOF-degenerate shapes, because the PREVIOUS spelling
+    computed the length arithmetically and diverged on exactly those, three of
+    them raising IndexError downstream.
 
-    INVARIANT GUARD, not regression coverage: no bug ever violated it.
+    INVARIANT GUARD, not regression coverage.
     """
     for path in (GIT_MODULE, PROGRAMS_INDEX, HOME_NIX):
         keep = _nix_code(path, keep_strings=True)
@@ -512,32 +538,120 @@ def test_the_two_parser_passes_stay_offset_aligned():
             f"({len(keep)} vs {len(blank)}), so every offset-based slice in "
             "this file now reads the wrong region")
 
-    # A constructed case, because the three real files may not contain the
-    # shapes that break alignment. Braces and a newline INSIDE strings are
-    # exactly what the blanking must neutralise without changing length.
-    probe = REPO_ROOT / "nix" / "programs" / "git" / "default.nix"
-    synthetic = (
-        'x = { a = "brace { inside} a string";\n'
-        "     b = ''line1 { \n line2 }'';\n"
-        '     c = "esc \\" still in string { ";  # trailing comment\n'
-        "   };\n")
-    tmp = probe.parent / ".__alignment_probe.nix"
-    try:
-        tmp.write_text(synthetic, encoding="utf-8")
-        keep = _nix_code(tmp, keep_strings=True)
-        blank = _nix_code(tmp, keep_strings=False)
+    # Truncated / degenerate inputs. Invalid nix, but the parser must not
+    # produce misaligned output for them — it previously ran 1-2 chars long.
+    for label, text in (
+            ("lone quote at EOF", 'a = "unterminated'),
+            ("backslash at EOF", 'a = "x\\'),
+            ("bare '' at EOF", "a = ''"),
+            ("tripled quote at EOF", "a = " + chr(39) * 3),
+            ("'' plus one char", "a = ''x"),
+            ("unclosed block comment", "a = 1; /* never closed"),
+    ):
+        f = tmp_path / "degenerate.nix"
+        f.write_text(text, encoding="utf-8")
+        keep = _nix_code(f, keep_strings=True)
+        blank = _nix_code(f, keep_strings=False)
         assert len(keep) == len(blank), (
-            f"alignment breaks on braces/newlines inside strings: "
-            f"{len(keep)} vs {len(blank)}")
-        # And the point of blanking: the braces inside strings are GONE from the
-        # text depth is counted on, while still present in the text values come
-        # from. Without this the two passes could be equal-length and still
-        # useless.
-        assert blank.count("{") < keep.count("{"), (
-            "keep_strings=False did not remove any brace, so blanking is not "
-            "protecting the depth count from braces inside string values")
-    finally:
-        tmp.unlink(missing_ok=True)
+            f"{label}: passes diverge ({len(keep)} vs {len(blank)})")
+        # and the downstream consumer must not raise on it
+        _top_level_of_settings(f)
+
+
+def test_blanking_neutralises_EACH_string_form_separately(tmp_path):
+    """🔴 PER-FORM, because an AGGREGATE assertion cannot see half the
+    protection being switched off.
+
+    A previous version asserted only `blank.count("{") < keep.count("{")` over a
+    fixture carrying a brace in BOTH string forms. Measured: disabling the
+    double-quoted blanking alone still satisfied it (3 < 4), and disabling the
+    indented-string blanking alone also satisfied it (2 < 4) — while the
+    false-GREEN this whole area exists to close came straight back. The one
+    assertion whose stated purpose was "the point of blanking" was blind to the
+    blanking being turned off.
+
+    So each form is measured on a fixture where it is the ONLY source of braces.
+    """
+    cases = {
+        "double-quoted": 'a = { b = "brace { and } inside a string"; };\n',
+        "indented": "a = { b = ''brace { and } inside a string''; };\n",
+    }
+    for label, text in cases.items():
+        f = tmp_path / f"{label}.nix"
+        f.write_text(text, encoding="utf-8")
+        keep = _nix_code(f, keep_strings=True)
+        blank = _nix_code(f, keep_strings=False)
+        assert len(keep) == len(blank), f"{label}: lengths diverged"
+        assert keep.count("{") == 2, (
+            f"{label}: fixture is not exercising what it claims — the "
+            f"string-keeping pass sees {keep.count('{')} braces, expected 2 "
+            "(one structural, one inside the string)")
+        assert blank.count("{") == 1, (
+            f"{label}: blanking did not neutralise the brace INSIDE the "
+            f"string — {blank.count('{')} braces survive, expected 1 "
+            "(the structural one only). Depth counting downstream would then "
+            "be steered by a string value.")
+
+
+def test_a_brace_inside_a_string_value_cannot_move_the_settings_boundary(tmp_path):
+    """🔴 REGRESSION COVERAGE for a measured FALSE GREEN, and for the change
+    that closed it — which was itself unguarded until now.
+
+    `_top_level_of_settings` located on the blanked text while still COUNTING
+    braces on the keeping one. A brace inside a string value therefore steered
+    the boundary, and a `core.sshCommand` sitting OUTSIDE `settings` entirely
+    was accepted:
+
+        settings = { alias.brace = "log --format=OPEN{"; };
+        core.sshCommand = "ssh -o ServerAliveInterval=30 …";   # OUTSIDE
+
+    Reverting either half of that fix left the whole file green, so the fix was
+    invisible to its own suite. Both directions are pinned here.
+    """
+    outside = tmp_path / "outside.nix"
+    outside.write_text(
+        '{\n'
+        '  settings = { alias.brace = "log --format=OPEN{"; };\n'
+        '  core.sshCommand = "ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=6";\n'
+        '}\n', encoding="utf-8")
+    assert _ssh_command(outside) == "", (
+        "a core.sshCommand declared OUTSIDE the settings attrset was accepted. "
+        "A brace inside a string value moved the boundary — the exact false "
+        "GREEN this guard exists to prevent.")
+
+    # 🔴 THE LOCATOR half, pinned separately. `_top_level_of_settings` searches
+    # for `settings = {` in the BLANKED text precisely so a decoy spelled inside
+    # a string cannot hijack it. Measured: with the search moved back to the
+    # keeping text, every other test in this file still passed — the locator's
+    # use of the blanked text was the one part of this design nothing covered.
+    decoy = tmp_path / "decoy.nix"
+    decoy.write_text(
+        '{\n'
+        '  note = "settings = { core.sshCommand = \\"ssh -o ServerAliveInterval=1\\"; }";\n'
+        '  settings = {\n'
+        '    core.sshCommand = "ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=6";\n'
+        '  };\n'
+        '}\n', encoding="utf-8")
+    assert _opt(_ssh_command(decoy), "ServerAliveInterval") == 30, (
+        "a `settings = {` spelled inside a STRING hijacked the locator, so the "
+        "real settings attrset was never reached. Expected the genuine 30, got "
+        f"{_ssh_command(decoy)!r}")
+
+    # Positive control: the SAME brace-in-a-string, with the setting genuinely
+    # inside, must still be read. Without this, the assertion above is equally
+    # satisfied by an extractor that can never find anything.
+    inside = tmp_path / "inside.nix"
+    inside.write_text(
+        '{\n'
+        '  settings = {\n'
+        '    alias.brace = "log --format=OPEN{";\n'
+        '    core.sshCommand = "ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=6";\n'
+        '  };\n'
+        '}\n', encoding="utf-8")
+    assert _opt(_ssh_command(inside), "ServerAliveInterval") == 30, (
+        "the extractor cannot read a legitimate setting that shares its "
+        "attrset with a brace-bearing string value — the assertion above would "
+        "then be passing for the wrong reason")
 
 
 # --------------------------------------------------------------------------- #
