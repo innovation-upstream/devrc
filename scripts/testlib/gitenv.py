@@ -66,13 +66,14 @@ written into the clone's config are the tests' OWN correct values. The tests
 computed the right thing and git wrote it into the wrong repository.
 
 WHAT THIS MODULE OWNS. `REPO_POINTER_VARS` below is the ONE owner of the set.
-It is re-spelled as a bash array at the top of FIVE shell files:
+It is re-spelled as a bash array at the top of SIX shell files:
 `run-tests.sh`, `run-node-tests.sh`, `gate.sh` and `githooks/tests-on-push.sh` —
-each BEFORE that script resolves its own ROOT — and
-`analyze-service-index/commit.sh`, which resolves no ROOT at all (see FIFTH
-SPELLING below). `scripts/tests/test_git_repo_isolation.py` pins every spelling
-against this tuple in both directions, and pins the ORDERING for the four that
-resolve a ROOT. Copies rather than one sourced file because
+each BEFORE that script resolves its own ROOT — plus
+`analyze-service-index/commit.sh` and `claim-work.sh`, neither of which resolves a
+ROOT at all (see FIFTH SPELLING below, and the SIXTH beside it in
+`test_git_repo_isolation.py`). `scripts/tests/test_git_repo_isolation.py` pins
+every spelling against this tuple in both directions, and pins the ORDERING for
+the four that resolve a ROOT. Copies rather than one sourced file because
 `testlib/runner_patch.py` writes a patched COPY of `run-tests.sh` into a tmp dir
 that ~15 tests drive, and a copy cannot source a sibling `lib/` that was never
 copied with it (measured: the sourced version turned all fifteen into a FATAL):
@@ -183,6 +184,14 @@ skipping both the bootstrap and the nested-repo refusal and putting
 `autocommit: N change(s) in the some-scope analyze-service index` on a foreign
 branch. `test_git_repo_isolation.py::POINTER_CLEARERS` pins it like the rest.
 
+🔴 SIXTH SPELLING, 2026-08-26. `scripts/claim-work.sh` carries the array too. Also
+not a runner — it does everything in a throwaway bare repo under `mktemp -d` — but
+an exported `GIT_DIR` BEATS `-C`, so `git init --bare "$WS"` and
+`git -C "$WS" remote add` both acted on the CALLER's repository. Measured on the
+pre-fix tree: `GIT_DIR=<other>/.git claim-work --check <slug>` printed
+`DEGRADED — could not attach remote` and exited 0, i.e. any agent with `GIT_DIR`
+exported got SILENT ZERO LOCKING from a tool reporting success. Same pin.
+
 """
 from __future__ import annotations
 
@@ -193,16 +202,21 @@ from pathlib import Path
 # --------------------------------------------------------------------------- #
 # 1. THE LEDGER: what redirects git at a repository
 # --------------------------------------------------------------------------- #
-# 🔴 ORDERED and EXACT. Each of the FIVE shell files above spells the same names
+# 🔴 ORDERED and EXACT. Each of the SIX shell files above spells the same names
 # in a `DEVRC_GIT_REPO_POINTERS` array — the four runners have to, because the
 # non-pytest targets (HOOK_TESTS, SHELL_TESTS, the node tier) never load a pytest
 # plugin, and because an inherited GIT_DIR corrupts each runner's ROOT resolution
 # before any Python runs; `commit.sh` has to because no test tier reaches it at
-# all. `test_git_repo_isolation.py::test_the_shell_and_python_pointer_ledgers_
-# agree` is parametrised over all FIVE (`POINTER_CLEARERS`) and fails if any
-# diverges from this tuple in EITHER direction. Adding a name here without adding
-# it there would leave those targets unprotected while this docstring claimed
-# otherwise.
+# all, and `claim-work.sh` because an exported GIT_DIR BEATS `-C` and would send
+# its throwaway-repo setup at the operator's repository instead.
+# `test_git_repo_isolation.py::test_the_shell_and_python_pointer_ledgers_agree` is
+# parametrised over all SIX (`POINTER_CLEARERS`) and fails if any diverges from
+# this tuple in EITHER direction. Adding a name here without adding it there would
+# leave those targets unprotected while this docstring claimed otherwise.
+#
+# ⚠ THE COUNT IS PROSE AND THE PIN IS NOT — this said FIVE and enumerated five for
+# the whole life of the sixth. The two-way pin catches a divergent SET; it cannot
+# catch a stale NUMBER in the file that declares itself the set's one owner.
 REPO_POINTER_VARS: tuple[str, ...] = (
     "GIT_DIR",                            # the repository itself; beats -C
     "GIT_WORK_TREE",                      # the working tree

@@ -134,9 +134,23 @@ RUNNERS = (SCRIPTS / "run-tests.sh",
 # none, so a single list would have to weaken that assertion to accommodate it.
 COMMIT_SH = SCRIPTS / "analyze-service-index" / "commit.sh"
 
+# 🔴 THE SIXTH, added 2026-08-26. `claim-work.sh` is not a runner and not a
+# writer of the operator's repo — it does everything in a throwaway bare repo
+# under `mktemp -d`. It needs the same `unset` for a THIRD reason: an exported
+# `GIT_DIR` BEATS `-C`, so `git init --bare "$WS"` and `git -C "$WS" remote add`
+# both act on the CALLER's repository instead. MEASURED on the pre-fix tree,
+# `GIT_DIR=<other>/.git claim-work --check <slug>` printed
+# `DEGRADED — could not attach remote` and exited **0**: any agent with GIT_DIR
+# exported got SILENT ZERO LOCKING out of a tool reporting success, on the one
+# path whose whole contract is "never block a resume".
+#
+# Like `COMMIT_SH` it stays OUT of `RUNNERS`: it resolves no ROOT, so the
+# ordering pin below has nothing to assert about it.
+CLAIM_WORK = SCRIPTS / "claim-work.sh"
+
 # Every file that carries a `DEVRC_GIT_REPO_POINTERS` spelling. The ledger pins
 # below run over ALL of them; only the ROOT-ordering pin is runner-specific.
-POINTER_CLEARERS = (*RUNNERS, COMMIT_SH)
+POINTER_CLEARERS = (*RUNNERS, COMMIT_SH, CLAIM_WORK)
 
 sys.path.insert(0, str(SCRIPTS))
 

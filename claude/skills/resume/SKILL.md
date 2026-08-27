@@ -109,31 +109,93 @@ Topic argument (optional): `$ARGUMENTS`.
    - Any drift you found between the handoff and live state.
    - Anything the index recalled that bears on the next steps — labelled `from index`, kept separate from what step 2 measured.
 
-6. 🔴 **BEFORE ACTING ON A NEXT-STEP, CLAIM IT — the ranked list is a SHARED
-   QUEUE, and `claim-work` is the lock. This is a COMMAND, not a habit.**
+6. 🔴 **BEFORE ACTING ON A NEXT-STEP, DO BOTH OF THESE — the ranked list is a
+   SHARED QUEUE, and neither half covers what the other one does.**
 
    ```bash
+   # (a) THE LOCK — a COMMAND, not a habit.
    claim-work --list                                            # what is already taken
    SLUG=$(claim-work --slug-for <handoff-doc> <rank>)            # the canonical id — both sessions derive the SAME one
-   claim-work "$SLUG" --subject "<the item, in your own words>"  # 0 = yours · 10 = taken · 11 = taken but stale
+   claim-work "$SLUG" --subject "<the item, in generic words>"   # 0 = yours · 10 = taken, STOP · 11 = taken but stale · 12 = ALREADY yours, carry on
+
+   # (b) THE SWEEP — UNCONDITIONAL, not a fallback. Before you start…
+   gh pr list --repo <r> --state open --json number,title,headRefName,files
    ```
 
-   **rc 10 ⇒ STOP** — it prints who holds it, since when, and what they called
-   it. Pick another item, or coordinate. **rc 11 ⇒ the claim is past its TTL and
-   may be abandoned**: decide explicitly, then `claim-work --steal "$SLUG"` or
-   `--release "$SLUG"`. **`claim-work --release "$SLUG"` when you finish or
-   abandon the item** — an unreleased ref is the one way this blocks work.
+   🔴 **(b) IS NOT A DEGRADED-RUN FALLBACK AND MUST NOT BE TREATED AS ONE.** The
+   lock only ever sees work somebody CLAIMED; a duplicate that was never claimed
+   is invisible to it and visible to `gh pr list`. That class is explicitly listed
+   as NOT covered in `claudedocs/design-claim-by-push.md` → "What is NOT covered".
+   **Run the sweep again immediately before `gh pr create`** — two moments,
+   because the window is ~20 minutes and the second one is where the sunk cost is
+   highest (measured: `#774` public **22 min** before its duplicate, `#388`
+   **18 min** before the other side's first commit; each visible, neither
+   checked). **And push the branch the moment you create it**, before doing the
+   work — an empty commit is enough; a branch is visible to `git ls-remote` the
+   instant it lands.
 
-   🔴 **It FAILS OPEN.** No origin, no network, no auth ⇒ a loud stderr warning
-   and exit 0. A degraded run means you are UNCLAIMED, not that you hold it —
-   fall back to the manual half (`gh pr list --state open` before you start and
-   again before `gh pr create`, and push the branch the moment you create it).
+   **rc 10 ⇒ STOP.** Usually somebody else holds it — but see the LEGACY note
+   below: on a pre-2026-08-26 `cwd:`-format ref it can also mean *you* hold it
+   from a different directory. Either way STOP is the safe reading; check the
+   printed `where:` against your own before assuming a peer. It prints who, since when,
+   **where** (host + owner-id, because one git identity covers both hosts and
+   every agent on them), and what they called it. Pick another item, or
+   coordinate. **rc 11 ⇒ the claim is past its TTL and may be abandoned**: decide
+   explicitly, then `claim-work --steal "$SLUG"` or `--release "$SLUG"`.
+   🔴 **rc 12 ⇒ YOU already hold it — CARRY ON.** Not a refusal: it is what a
+   re-run of `/resume`, or a session resuming after a context reset, gets for its
+   own item. It used to be rc 10, so the same output said "you already hold it"
+   and "DO NOT start this item" three lines apart and the honest reading was
+   *stop*. **`claim-work --release "$SLUG"` when you finish or abandon the item**
+   — an unreleased ref is the one way this blocks work. ⚠ `--release`/`--steal` of
+   a LIVE claim that is not yours is **refused** (rc 10); `--force` overrides,
+   deliberately.
 
-   **Why a claim and not a check:** whoever moves FIRST cannot see the second
+   🔴 **Ownership is per HOST and per WORKTREE, and it does NOT depend on your cwd.**
+   The token is `/etc/machine-id` + `git rev-parse --git-dir`, so any
+   subdirectory of the worktree you claimed from can release it, at any depth. A
+   SIBLING WORKTREE of the same clone cannot — it is a different agent, and for
+   one day it was told rc 12 "carry on" about a peer's live claim because the
+   token used `--git-common-dir`, which every linked worktree of a clone shares.
+   A different clone, or the other host, cannot either.
+
+   ⚠ **LEGACY refs (`cwd:` format, created before 2026-08-26+1) use a SECOND
+   predicate, and it differs BY VERB.** For the claim/check verdict they are
+   strict per-worktree — so a subdirectory of the claiming clone reads **rc 10**,
+   not rc 12, even though you hold it. For `--release`/`--steal` the old
+   clone-wide accept still applies, so a sibling worktree CAN release one without
+   `--force`. That asymmetry is deliberate: narrowing the destructive side would
+   have made already-published refs unreleasable by anyone. It ages out as those
+   refs are released. Re-derive which refs are affected rather than trusting a
+   count here: `git ls-remote --heads origin 'refs/heads/claim/*'`, then
+   `claim-work --check <slug>` — a legacy one says so in its output.
+   It was `uname -n` + a hash of `$PWD` until 2026-08-26+1, which was wrong in
+   BOTH directions at once: both hosts are called `nixos` (so each read the
+   other's claims as its own), and `cd scripts/` made you a stranger to your own
+   claim for the rest of the TTL.
+
+   🔴 **The claim namespace is GLOBAL.** Every claim lands on ONE canonical
+   remote, taken from `claim-work`'s own location — **not** from the repo you are
+   standing in. That is the point: handoff docs live in devrc while the work
+   happens in other repos, so a per-repo namespace would let the same item be
+   claimed once per remote. It was `$PWD` until 2026-08-26 and did exactly that.
+   Run the bare command from wherever you are; do **not** pass `--repo`.
+
+   🔴 **What you claim is PUBLIC.** A claim commit is pushed to the canonical
+   origin and this repo is PUBLIC: keep the subject generic — no client names,
+   real hostnames, paths or captured text. A newline or control character in
+   `--subject` is rc 2, because free text sits above the ownership trailers in the
+   commit body.
+
+   🔴 **It FAILS OPEN.** No canonical remote, no network, no auth ⇒ a loud stderr
+   warning and exit 0. A degraded run means you are UNCLAIMED, not that you hold
+   it — say so, and lean on (b), which you were running anyway.
+
+   **Why a claim and not only a check:** whoever moves FIRST cannot see the second
    session at all — it does not exist yet — so no pre-flight check can protect
-   them. The claim happens at DRAW time, before any work, and the push to
-   `claim/<slug>` is git's own atomic ref compare-and-swap, so two simultaneous
-   first movers resolve to exactly one winner.
+   them. The claim happens at DRAW time, before any work; two true concurrent
+   first movers both send `old=0000…` and git's ref transaction is a
+   compare-and-swap on that value, so exactly one create lands.
    🔴 **Worktree isolation does NOT prevent this and is not the answer.** Every
    colliding session isolated correctly and no file was ever clobbered — this is
    a TASK-ALLOCATION collision, and isolation is what HIDES it.

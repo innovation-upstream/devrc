@@ -1048,6 +1048,48 @@ structurally cannot cover the first mover, above; (b) moving items into clawgate
 `/resume` and inverts the assumption that the ranked list stays the primary
 hand-off surface; (c) more prose — see above.
 
+**🔴 THE MECHANISM WAS INERT CROSS-REPO FOR TWO DAYS, AND NOTHING SAID SO.**
+Measured 2026-08-26: the remote came from `$PWD`, so the claim namespace was
+PER-ORIGIN. The same canonical slug claimed from `~/workspace/devrc` and from
+`~/workspace/homelab-talos` BOTH returned **rc 0 CLAIMED**, one ref on each
+origin, no warning — and the two claims carried *different git identities*
+(`zacxdev@gmail.com` vs `zachlowden1@gmail.com`), so even the refusal text could
+not have disambiguated them. Natural usage is exactly that: derive the slug from
+the devrc handoff doc, run the command in the repo you are actually working in.
+It is also the incident's own shape — the handoff doc was a **devrc** artifact
+while the colliding PRs were **homelab-infra** `#386`/`#388`/`#389`. Fixed by
+resolving ONE canonical remote from the script's own realpath (`readlink -f` →
+repo root → its `origin`), with `--remote` / `--repo` / `DEVRC_CLAIM_REMOTE` as
+explicit overrides and **no cwd fallback**: falling back reinstates the bug and
+hides it behind a confident CLAIMED.
+
+**🔴 "NON-FAST-FORWARD" WAS THE WRONG NAME, IN SIX PLACES.** Measured 2026-08-26
+with real git. A **true concurrent create** — both clients saw no ref, so both
+sent `old=0000…0` — is refused by the ref transaction's compare-and-swap on that
+expected value: `cannot lock ref '<ref>': reference already exists`. A
+**serialized** second mover is refused *client-side* instead, because its fresh
+scratch repo does not hold the winner's object and git cannot prove a
+fast-forward: `! [rejected] <sha> -> claim/<slug> (fetch first)`. Neither says
+"non-fast-forward" in the shape the script uses, and **the orphan-root property
+is not what refuses the create-vs-create case** — it is the second line of
+defence in the serialized case only. The test that claimed to cover the CAS was
+asserting `"non-fast-forward" or "fetch first"`; it was green because it
+exercised the *other* mechanism, and would have gone red in the case it named.
+
+**Three more measured 2026-08-26, all silent.** (a) A push that LANDED and then
+failed client-side was reported "Proceeding UNCLAIMED" — a live claim whose
+holder believed it held nothing, blocking the item for the whole TTL with nobody
+to release it. (b) `--release` / `--steal` had no ownership or staleness gate at
+all: session B released *and* stole session A's zero-second-old live claim, rc 0,
+silently — and rc 10 prints "DO NOT start this item" with `--steal` one flag
+away. Ownership cannot key off the git author (one identity across both hosts),
+so it keys off the host + an opaque `cwd-id` the claim commit records. (c) Every
+claim push ran the OPERATOR's global hooks — the scratch repo is `git init`ed, so
+it inherits `core.hooksPath` from `~/.gitconfig`, and a global `pre-push` that
+blocks makes the lock silently inert (push fails ⇒ degrade ⇒ exit 0). The whole
+test suite was structurally blind to it because `testlib/hermetic_git.py` pins
+`GIT_CONFIG_GLOBAL=/dev/null` — the exact surface that carries the hazard.
+
 **The honest limitation.** The hard lock is an EXACT slug match, so
 `--slug-for <doc> <rank>` is what makes two independent sessions derive the same
 ref. It cannot catch a semantically identical item that two sessions word

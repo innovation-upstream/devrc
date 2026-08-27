@@ -10,25 +10,77 @@
 # `claude/skills/handoff/reference/shared-queue.md`; the design argument lives in
 # `claudedocs/design-claim-by-push.md`. Read those before changing the mechanism.
 #
-# ── THE MECHANISM, IN ONE SENTENCE ────────────────────────────────────────────
-# Publishing an ORPHAN commit to `refs/heads/claim/<slug>` on `origin` IS the
-# claim, and because every claim commit is an unrelated orphan root, a push to an
-# ALREADY-CLAIMED ref is rejected NON-FAST-FORWARD by the receiving git.
+# ── 🔴 THE CLAIM NAMESPACE IS GLOBAL, NOT PER-REPO ────────────────────────────
+# The queue it locks is GLOBAL: handoff docs live in `devrc/claudedocs/` while the
+# work they rank happens in homelab-infra, datapacket-talos, civitai, … The very
+# incident this tool exists for is exactly that shape — a devrc handoff doc
+# (`claudedocs/handoff-devrc-ci-gate.md`) whose colliding PRs were homelab-infra
+# `#386`/`#388`/`#389`.
 #
-# 🔴 THAT IS THE WHOLE POINT, AND IT IS NOT A CHECK-THEN-ACT. The lock is git's
-# own ref compare-and-swap, performed under the ref transaction lock on the
-# server at update time — not a read we take and then act on. Two simultaneous
-# first movers therefore resolve to EXACTLY ONE winner with no TOCTOU window.
-# `scripts/tests/test_claim_work.py::test_the_lock_is_gits_own_ref_compare_and_
-# swap_not_a_check_then_act` verifies that empirically against a real git server
-# process rather than asserting it, and a mutation control in the same file
-# proves the assertion is load-bearing by defeating the lock with `--force`.
+# So every claim lands on ONE canonical remote, resolved from THE LOCATION OF
+# THIS SCRIPT — never from the caller's cwd. `readlink -f` this file, walk to its
+# repository root, read THAT repo's `origin`. It works from any cwd, in any repo,
+# with no configuration, because the deployed `claim-work` is a symlink onto
+# `devrc/scripts/claim-work.sh`.
+#
+# 🔴 IT WAS `$PWD` UNTIL 2026-08-26 AND THE WHOLE MECHANISM WAS INERT CROSS-REPO.
+# Measured: the same canonical slug claimed from `~/workspace/devrc` and from
+# `~/workspace/homelab-talos` BOTH returned rc 0 CLAIMED, one ref on each origin,
+# no warning — and the two claims carried different git identities, so even the
+# refusal text could not have disambiguated them. Natural usage (derive the slug
+# from the devrc handoff doc, run the command in the repo you are working in) put
+# two sessions in two namespaces and both won.
+#
+# 🔴 IF THE CANONICAL REMOTE CANNOT BE RESOLVED, DEGRADE — NEVER FALL BACK TO THE
+# CWD'S ORIGIN. A cwd fallback reinstates exactly the bug above and hides it: the
+# tool would report CLAIMED, on the wrong remote, with no warning. Resolution
+# order, all documented in `usage()`:
+#   1. `--remote <url>`                (explicit, wins)
+#   2. `--repo <path>`'s origin        (explicit; CHANGES THE NAMESPACE, tests/CI)
+#   3. `$DEVRC_CLAIM_REMOTE`           (explicit, environment)
+#   4. this script's own repo's origin (THE DEFAULT — global, cwd-independent)
+#   5. degrade
+#
+# ── THE MECHANISM, AND THE TWO REFUSALS IT ACTUALLY GETS ──────────────────────
+# Publishing an ORPHAN commit to `refs/heads/claim/<slug>` on the canonical remote
+# IS the claim. A second claim on the same slug is refused — but by which of two
+# different mechanisms, and NEITHER is spelled "non-fast-forward" in the shape
+# this script uses. Measured 2026-08-26 with real git against a real repo:
+#
+#   (a) TWO TRUE CONCURRENT FIRST MOVERS. Both clients saw NO ref, so both send
+#       the update with old = 0000…0 — a CREATE. The receiving git's REF
+#       TRANSACTION is a compare-and-swap on that expected value, so exactly one
+#       create can land; the loser gets
+#           cannot lock ref '<ref>': reference already exists
+#       🔴 THIS is the atomicity, it is server-side, and it is the half that
+#       covers the FIRST mover. The orphan-root property plays NO part in it.
+#
+#   (b) SERIALIZED — the second session starts after the first ref exists. The
+#       connection advertises the ref at a sha this scratch repo does not have,
+#       so git's own fast-forward check refuses CLIENT-SIDE before anything is
+#       sent:
+#           ! [rejected] <sha> -> claim/<slug> (fetch first)
+#       (a repo that DID hold the winner's object would print `non-fast-forward`
+#       instead — that is where the orphan root earns its keep, since an
+#       unrelated root can never be a descendant.)
+#
+# Either way the winner's ref is untouched, and the script does not trust the
+# MESSAGE: after a failed push it re-reads the remote and reports what it finds.
+# `scripts/tests/test_claim_work.py` pins both mechanisms separately, and a
+# mutation control defeats the lock with `--force` to prove the assertions are
+# load-bearing.
+#
+# 🔴 IT IS NOT A CHECK-THEN-ACT. The claim path never asks "is it free?" before
+# pushing; it pushes, and reads the remote only to explain a failure. There is no
+# TOCTOU window.
 #
 # 🔴 IT PROTECTS THE **FIRST** MOVER, which is the half a pre-flight check
 # structurally cannot. `gh pr list` only ever tells the LATER session that
 # somebody else started; whoever moves first cannot see the second session
 # because it does not exist yet at branch-creation time. The claim happens at
 # DRAW time, before any work, so the first mover is the one it covers.
+# ⚠ It does NOT replace that sweep. A duplicate that was never claimed is
+# invisible to this tool and visible to `gh pr list` — run both.
 #
 # 🔴 WORKTREE ISOLATION IS NOT AN ALTERNATIVE TO THIS AND NEVER WAS. Every
 # colliding session was already in its own worktree. A worktree prevents a
@@ -36,20 +88,54 @@
 # what HIDES it. Do not "fix" a collision by adding more isolation.
 #
 # ── 🔴 IT FAILS OPEN, ON PURPOSE ──────────────────────────────────────────────
-# No origin, no network, no auth, not a git repo, git missing, remote hung ⇒
-# WARN ON STDERR AND EXIT 0, degrading to the behaviour we had before this
-# script existed. A bug in here is felt by EVERY `/resume`, so it must never be
-# able to block one. Every network call is wrapped in a bounded `timeout` so a
-# hung remote cannot hang a resume either. `--strict` turns a degraded run into
-# rc 20 instead; it exists for tests and CI, and must never be the default.
+# No canonical remote, no network, no auth, git missing, remote hung ⇒ WARN ON
+# STDERR AND EXIT 0, degrading to the behaviour we had before this script
+# existed. A bug in here is felt by EVERY `/resume`, so it must never be able to
+# block one. Every network call is wrapped in a bounded `timeout` so a hung
+# remote cannot hang a resume either. `--strict` turns a degraded run into rc 20
+# instead; it exists for tests and CI, and must never be the default.
 #
 # ── THIS SCRIPT NEVER TOUCHES THE CALLER'S REPOSITORY ─────────────────────────
-# It READS one thing from it — `remote.origin.url` — and does everything else in
-# a throwaway BARE repo under a mktemp dir that is removed on exit. No index, no
+# It READS from it — `user.name` / `user.email` — and does everything else in a
+# throwaway BARE repo under a mktemp dir that is removed on exit. No index, no
 # working tree, no local branch, no FETCH_HEAD, no stash, no objects written into
 # the caller's object database. That is deliberate: this runs at the start of
 # every resumed session, frequently in a shared checkout, and a claim tool that
 # can perturb the tree it is claiming work in would be worse than the collision.
+#
+# 🔴 AND IT NEVER RUNS THE OPERATOR'S HOOKS. The scratch repo is `git init`ed, so
+# it inherits `core.hooksPath` from `~/.gitconfig` — measured 2026-08-26: a global
+# `pre-push` fires on a claim push, and a global hook that BLOCKS makes this lock
+# silently INERT (push fails ⇒ degrade ⇒ exit 0 ⇒ "unclaimed"). Every git call
+# below therefore goes through `git_`/`gitnet`, which pin
+# `-c core.hooksPath=/dev/null`, and every push adds `--no-verify`.
+#
+# ── 🔴 WHAT A CLAIM PUBLISHES, AND THIS REPO IS PUBLIC ────────────────────────
+# A claim commit is pushed to the canonical origin, where anyone with read access
+# to that remote can see it. It carries: the claimant's git name/email, the
+# HOSTNAME, an `owner-id` (a hash — see the ownership section), a nonce, and the
+# `--subject` TEXT YOU TYPED.
+#
+# 🔴 A claim commit is pushed to the canonical origin and this repo is PUBLIC:
+# keep the subject generic — no client names, real hostnames, paths or captured
+# text.
+#
+# See `CLAUDE.md` → "This repo is PUBLIC".
+#
+# ⚠ `owner-id` IS A DISCRIMINATOR, NOT A SECRET, and the earlier wording claiming
+# it was "opaque" was wrong. Its predecessor `cwd-id` was `git hash-object` over a
+# short, guessable absolute path, so anyone could recompute a target's token in
+# ONE command and forge it (`printf %s <path> | git hash-object --stdin`). The
+# current token mixes in `/etc/machine-id`, which is not readable from off-host,
+# so it is no longer trivially recomputable — but it is still NOT an authorisation
+# boundary: `--force` bypasses the whole gate on purpose, and anyone who can run
+# this command can pass it. The gate exists to stop an ACCIDENT, not an attacker.
+#
+# ⚠ AND THE HONEST LIMIT, since the fix below is described as closing a forgery:
+# what is closed is FREE TEXT THIS TOOL INTERPOLATES being read as a trailer. A
+# commit crafted by hand can still put any `owner-id:` it likes in its trailer
+# block, and nothing here can tell that apart from the real thing — the token is
+# a discriminator, not a signature. That is inherent, not a gap to close later.
 #
 # ── EXIT CODES ────────────────────────────────────────────────────────────────
 # Aligned with the rc-vocabulary style of scripts/ship.sh and scripts/drift-check.sh.
@@ -63,18 +149,72 @@
 #    2  USAGE — bad flag, missing/malformed slug. NOT failed open: a typo'd slug
 #         would otherwise claim nothing while the caller believes it claimed
 #         something, which is the exact failure this tool exists to remove.
-#   10  ALREADY CLAIMED, and the claim is LIVE. WHO/WHEN/WHAT are printed. Do
-#         NOT start this item; pick another, or talk to the claimer.
+#   10  ALREADY CLAIMED BY SOMEBODY ELSE, and the claim is LIVE. WHO/WHEN/WHERE/
+#         WHAT are printed. Do NOT start this item; pick another, or talk to the
+#         claimer. ALSO: a `--release` / `--steal` REFUSED because the claim is
+#         not yours and not stale, or because its owner could not be read.
+#         `--force` overrides — deliberately, and only when you mean it.
 #   11  ALREADY CLAIMED but the claim is STALE (older than DEVRC_CLAIM_TTL_DAYS,
 #         default 7). A stale ref would otherwise block an item forever. Decide:
 #         `--steal <slug>` to take it over, or `--release <slug>` to drop it.
+#   12  ALREADY CLAIMED **BY YOU** — this session already holds it. CARRY ON.
+#         🔴 THIS USED TO BE rc 10 AND THAT WAS A BUG. `claim_is_mine` was
+#         computed, PRINTED ("— THIS SESSION (you already hold it)") and then not
+#         branched on, so the same run said "you already hold it" and "DO NOT
+#         start this item" three lines apart and exited 10 — and `/resume` step 6
+#         says rc 10 ⇒ STOP. A session re-claiming its own item after a context
+#         reset, or a second `/resume` over the same handoff doc, was told to
+#         abandon work it legitimately held. `claude/RULES.md`: a field that
+#         exists is not a guard — only a BRANCH on it is.
+#         rc 12 outranks rc 11: a stale claim of YOUR OWN is still yours, and
+#         "carry on" is the actionable answer either way. The STALE advisory is
+#         still printed.
 #   20  DEGRADED **and** `--strict` was passed. Never emitted without --strict.
 #
+# ── CLEANUP ───────────────────────────────────────────────────────────────────
+# Nothing prunes `refs/heads/claim/*` automatically and nothing ever will
+# implicitly: deleting somebody's claim is a decision, not maintenance. The
+# supported story is manual and two commands — `claim-work --list` flags every
+# claim past the TTL with `[STALE]`, and `claim-work --release <slug>` drops one
+# (your own, or a stale one; anything else needs `--force`). Release your own
+# claims when the work lands; that is what keeps the namespace small.
+#
 # ── ENVIRONMENT ───────────────────────────────────────────────────────────────
-#   DEVRC_CLAIM_REMOTE      override the remote URL (else: origin of --repo)
+#   DEVRC_CLAIM_REMOTE      canonical remote URL (else: this script's repo's origin)
 #   DEVRC_CLAIM_TTL_DAYS    staleness threshold in days (default 7)
 #   DEVRC_CLAIM_TIMEOUT     per-network-call timeout, `timeout` syntax (default 20s)
+#   DEVRC_CLAIM_MACHINE_ID_FILE
+#                           where the per-HOST half of the owner token is read
+#                           from (default /etc/machine-id). It names a FILE, not
+#                           a value, so a test can simulate two hosts by writing
+#                           two files — which is the only way to test the
+#                           cross-host half on one machine.
 set -euo pipefail
+
+# 🔴 GUARD 9's shell half — the SAME ledger as scripts/run-tests.sh et al, owned
+# by `scripts/testlib/gitenv.py` and pinned two-way by
+# `scripts/tests/test_git_repo_isolation.py`. It is here for a reason specific to
+# this script: an exported `GIT_DIR` BEATS `-C`, so with one set in the
+# environment `git init --bare "$WS"` and `git -C "$WS" remote add` both act on
+# the CALLER's repository instead of the throwaway one. MEASURED 2026-08-26:
+# `GIT_DIR=<other>/.git claim-work --check <slug>` printed
+# `DEGRADED — could not attach remote` and exited 0 — i.e. any agent with GIT_DIR
+# exported got SILENT ZERO LOCKING from a tool that reports success. The
+# `unset GIT_ASKPASS SSH_ASKPASS` below was deliberate; this was simply missing.
+DEVRC_GIT_REPO_POINTERS=(
+  GIT_DIR
+  GIT_WORK_TREE
+  GIT_COMMON_DIR
+  GIT_INDEX_FILE
+  GIT_OBJECT_DIRECTORY
+  GIT_ALTERNATE_OBJECT_DIRECTORIES
+  GIT_NAMESPACE
+  GIT_PREFIX
+  GIT_GRAFT_FILE
+  GIT_SHALLOW_FILE
+  GIT_CONFIG
+)
+unset "${DEVRC_GIT_REPO_POINTERS[@]}"
 
 PROG=claim-work
 
@@ -84,22 +224,29 @@ PROG=claim-work
 # refs/claims/* namespace would need server-side rules we do not control.
 CLAIM_NS="refs/heads/claim/"
 
-TTL_DAYS="${DEVRC_CLAIM_TTL_DAYS:-7}"
-NET_TIMEOUT="${DEVRC_CLAIM_TIMEOUT:-20s}"
-
+# 🔴 ONE literal per default. `7` used to be spelled twice (the `:-7` fallback
+# and DEFAULT_TTL_DAYS) and a mutation sweep found the pair: changing one of them
+# left the other to keep the tests green.
 DEFAULT_TTL_DAYS=7
+DEFAULT_NET_TIMEOUT=20s
+
+TTL_DAYS="${DEVRC_CLAIM_TTL_DAYS:-$DEFAULT_TTL_DAYS}"
+NET_TIMEOUT="${DEVRC_CLAIM_TIMEOUT:-$DEFAULT_NET_TIMEOUT}"
 
 RC_USAGE=2
 RC_TAKEN=10
 RC_TAKEN_STALE=11
+RC_MINE=12
 RC_DEGRADED_STRICT=20
 
 MODE=claim
 SLUG=""
 SUBJECT=""
-REPO="$PWD"
-REMOTE_OVERRIDE="${DEVRC_CLAIM_REMOTE:-}"
+REPO=""                 # --repo: explicit ident repo AND explicit remote source
+REMOTE_FLAG=""          # --remote
+REMOTE_ENV="${DEVRC_CLAIM_REMOTE:-}"
 STRICT=0
+FORCE=0
 SLUG_DOC=""
 SLUG_RANK=""
 
@@ -123,24 +270,52 @@ case "$TTL_DAYS" in
     ;;
 esac
 
+# 🔴 AND THE TIMEOUT GETS THE SAME TREATMENT, because garbage here is WORSE than
+# garbage in the TTL: `timeout <junk> git …` exits **125** without running git at
+# all, so every network call reads as a failure and the tool silently degrades to
+# "proceeding UNCLAIMED" on every single call. That is a lock that has stopped
+# locking while reporting exit 0. `timeout`'s DURATION is a number with an
+# optional s/m/h/d suffix.
+if ! [[ $NET_TIMEOUT =~ ^[0-9]+(\.[0-9]+)?[smhd]?$ ]] || [[ $NET_TIMEOUT =~ ^0+(\.0+)?[smhd]?$ ]]; then
+  warn "DEVRC_CLAIM_TIMEOUT='$NET_TIMEOUT' is not a \`timeout\` duration — using $DEFAULT_NET_TIMEOUT"
+  NET_TIMEOUT="$DEFAULT_NET_TIMEOUT"
+fi
+
 usage() {
   cat >&2 <<'EOF'
 claim-work — claim one ranked next-step item so a second session cannot start it.
 
-  claim-work <slug> [--subject "<human text>"]   claim it        (0 won / 10 taken / 11 stale)
-  claim-work --check <slug>                      is it taken?    (0 free / 10 taken / 11 stale)
+  claim-work <slug> [--subject "<human text>"]   claim it   (0 won / 10 taken / 11 stale / 12 already YOURS)
+  claim-work --check <slug>                      is it taken?    (0 free / 10 taken / 11 stale / 12 yours)
   claim-work --list                              every live claim, with age + subject
-  claim-work --release <slug>                    drop the claim
+  claim-work --release <slug>                    drop the claim  (yours, or a stale one)
   claim-work --steal <slug> [--subject "..."]    take over a stale/abandoned claim
   claim-work --slug-for <handoff-doc> [<rank>]   print the CANONICAL slug for an item
 
 Options:
-  --repo <path>     repository whose `origin` to use (default: cwd)
-  --remote <url>    use this remote instead of resolving one
+  --remote <url>    claim on THIS remote instead of the canonical one
+  --repo <path>     take the remote from this repo's `origin`, and read the git
+                    identity from it. 🔴 THIS CHANGES THE CLAIM NAMESPACE — it is
+                    for tests and one-off cross-remote work, never routine use.
+  --force           allow --release/--steal of a live claim that is not yours
   --strict          exit 20 instead of 0 when it cannot reach origin (tests/CI)
 
-It FAILS OPEN: no origin / no network / no auth ⇒ warning on stderr, exit 0.
-Exit codes and the design argument are documented at the top of this file.
+🔴 THE CLAIM NAMESPACE IS GLOBAL, NOT PER-REPO. The queue is global — handoff
+docs live in devrc while the work happens in other repos — so by default every
+claim lands on ONE canonical remote: the `origin` of the repository containing
+THIS SCRIPT, resolved from its own path. The cwd is NOT consulted, and a cwd
+fallback is deliberately absent: if the canonical remote cannot be resolved this
+degrades, because falling back per-repo is how the same slug got claimed twice.
+
+🔴 WHAT YOU PUBLISH IS PUBLIC. A claim commit is pushed to the canonical origin
+and this repo is PUBLIC: keep the subject generic — no client names, real
+hostnames, paths or captured text.
+
+🔴 rc 12 IS NOT rc 10. rc 10 means SOMEBODY ELSE holds it — stop. rc 12 means
+THIS SESSION already holds it — carry on with the work you already claimed.
+
+It FAILS OPEN: no canonical remote / no network / no auth ⇒ warning on stderr,
+exit 0. Exit codes and the design argument are documented at the top of this file.
 EOF
 }
 
@@ -179,13 +354,21 @@ while [ "$#" -gt 0 ]; do
       shift 2 || die_usage "--slug-for needs a handoff-doc path"
       # An optional trailing rank, only if it is a bare number — otherwise it is
       # the next flag and must not be swallowed.
-      if [ "$#" -gt 0 ] && printf '%s' "$1" | grep -Eq '^[0-9]+$'; then
+      if [ "$#" -gt 0 ] && [[ ${1} =~ ^[0-9]+$ ]]; then
         SLUG_RANK="$1"; shift
       fi
       ;;
-    --subject)   SUBJECT="${2:-}"; shift 2 || die_usage "--subject needs text" ;;
+    --subject)
+      # A flag swallowed as the subject would otherwise be recorded as the human
+      # description AND silently dropped as a flag: `--subject --force` claimed
+      # with `what: --force` and did NOT force. Same treatment as `--slug-for`.
+      case "${2:-}" in
+        -*) die_usage "--subject needs text, got the flag '${2:-}' — quote it if you really meant it as the text" ;;
+      esac
+      SUBJECT="${2:-}"; shift 2 || die_usage "--subject needs text" ;;
     --repo)      REPO="${2:-}";    shift 2 || die_usage "--repo needs a path" ;;
-    --remote)    REMOTE_OVERRIDE="${2:-}"; shift 2 || die_usage "--remote needs a url" ;;
+    --remote)    REMOTE_FLAG="${2:-}"; shift 2 || die_usage "--remote needs a url" ;;
+    --force)     FORCE=1; shift ;;
     --strict)    STRICT=1; shift ;;
     -h|--help)   usage; exit 0 ;;
     --*)         die_usage "unknown option: $1" ;;
@@ -207,7 +390,7 @@ done
 # describe differently, or two different handoff docs covering one piece of work.
 # `--list` prints every claim's human SUBJECT for exactly that reason — the
 # exact-slug match is the HARD lock, the subject list is a SOFT signal a human
-# (or an agent) reads. Do not claim it catches reworded duplicates. It does not.
+# (or an agent) reads. Do not claim it catches reworded duplicates.
 derive_slug() {
   local doc="$1" rank="$2" base
   base="$(basename -- "$doc")"
@@ -231,20 +414,54 @@ derive_slug() {
 # 🔴 A slug becomes a REF NAME, so this is a safety check, not tidiness. An
 # unvalidated slug could inject `../`, a leading `-`, or whitespace into the
 # refspec on both the local and the remote side.
+#
+# 🔴 THE MATCH IS WHOLE-STRING, NOT PER-LINE, AND THAT IS THE BUG THIS ONCE HAD.
+# It used `printf … | grep -Eq`, and grep is LINE-based: `$'good\nBAD SLUG'`
+# matched on line 1, so a slug git would never accept sailed through validation
+# and the run exited 0 DEGRADED instead of rc 2. bash's own `[[ =~ ]]` has no
+# line semantics — `^`/`$` anchor the whole string — so it rejects it. Verified
+# both ways 2026-08-26.
+#
+# 🔴 AND THE PATTERN ALONE IS NOT THE WHOLE CONTRACT: `foo.lock` matches it and is
+# ILLEGAL as a git ref — the same failure in a different shape. So `..`, a
+# trailing `.` and a `.lock` suffix are spelled out below (they must be rc 2 even
+# when git is missing, since validation deliberately runs before the
+# `command -v git` check), and the real ref name is then handed to
+# `git check-ref-format`, the only authority on what git will accept.
+#
+# ⚠ HOW MUCH `check-ref-format` ACTUALLY ADDS, MEASURED rather than assumed:
+# over all 157,120 strings of length ≤ 6 in `{a,b,0,1,9,._-}`, there is NOT ONE
+# that the pattern plus the three cases accept and `check-ref-format` rejects. So
+# for a single-line slug it is pure belt-and-braces. Its one measured unique
+# catch is the MULTI-LINE shape — i.e. it is the backstop for exactly the bug
+# above, which is why both stay. Consequence for the test suite: mutating either
+# guard alone SURVIVES, because the other one covers it; only mutating BOTH goes
+# red. That is recorded in `test_claim_work.py` so nobody reads the survivor as a
+# coverage gap.
 validate_slug() {
   local s="$1"
   [ -n "$s" ] || die_usage "no slug given"
-  printf '%s' "$s" | grep -Eq '^[a-z0-9][a-z0-9._-]*$' \
-    || die_usage "malformed slug '$s' — lowercase a-z 0-9 . _ - only, must start alphanumeric"
+  [[ $s =~ ^[a-z0-9][a-z0-9._-]*$ ]] \
+    || die_usage "malformed slug '$s' — lowercase a-z 0-9 . _ - only, must start alphanumeric, single line"
   case "$s" in
-    *..*) die_usage "malformed slug '$s' — '..' is not allowed in a ref name" ;;
-    *.)   die_usage "malformed slug '$s' — a ref component may not end in '.'" ;;
+    *..*)    die_usage "malformed slug '$s' — '..' is not allowed in a ref name" ;;
+    *.)      die_usage "malformed slug '$s' — a ref component may not end in '.'" ;;
+    *.lock)  die_usage "malformed slug '$s' — git reserves the '.lock' suffix on a ref component" ;;
   esac
   [ "${#s}" -le 100 ] || die_usage "slug too long (${#s} > 100)"
+  if command -v git >/dev/null 2>&1; then
+    git check-ref-format "${CLAIM_NS}${s}" 2>/dev/null \
+      || die_usage "malformed slug '$s' — git rejects '${CLAIM_NS}${s}' as a ref name"
+  fi
 }
 
 if [ "$MODE" = "slug-for" ]; then
   [ -n "$SLUG_DOC" ] || die_usage "--slug-for needs a handoff-doc path"
+  # A flag swallowed as the doc path would otherwise derive a slug from it:
+  # `--slug-for --strict` printed `strict` and exited 0.
+  case "$SLUG_DOC" in
+    -*) die_usage "--slug-for needs a handoff-doc path, got the flag '$SLUG_DOC'" ;;
+  esac
   out="$(derive_slug "$SLUG_DOC" "$SLUG_RANK")" \
     || die_usage "cannot derive a slug from '$SLUG_DOC'"
   validate_slug "$out"
@@ -254,8 +471,44 @@ fi
 
 [ "$MODE" = "list" ] || validate_slug "$SLUG"
 
+# 🔴 THE SUBJECT IS FREE TEXT THAT LANDS IN A COMMIT MESSAGE ABOVE THE TRAILERS,
+# so a NEWLINE in it used to let the caller write trailers of their own.
+# MEASURED 2026-08-26 on the pre-fix tree:
+#
+#   claim-work slug --subject $'legit work\nhost: attacker-host\ncwd-id: dead…'
+#
+# produced a claim whose `where:` read `host attacker-host, cwd-id deadbeefcafe`
+# — and THE REAL HOLDER WAS THEN REFUSED `--release` ON THEIR OWN CLAIM at rc 10.
+# `claude/RULES.md`: "a guard can be SPELLED rather than STRUCTURAL — ask: can it
+# pass while the hazard exists in a different shape?" The ownership gate asserted
+# a WORD in a commit body that another feature could spell.
+#
+# 🔴 BOTH HALVES ARE FIXED, and this one is the SPELLING half on purpose. Alone
+# it would be a spelling fix for a spelling bug; the structural half is
+# `claim_field`, which now reads the trailer BLOCK via `git interpret-trailers
+# --parse` instead of the first `^<key>:` line anywhere in the message. Either
+# alone closes the measured attack; both are kept because they fail differently.
+#
+# rc 2 (USAGE), per the documented contract — a subject the tool refuses to
+# publish must be LOUD, never silently mangled into something else.
+case "$SUBJECT" in
+  '') : ;;
+  *)
+    if [[ $SUBJECT =~ [[:cntrl:]] ]]; then
+      die_usage "--subject may not contain newlines or control characters — they would land in the claim commit body where the ownership trailers live"
+    fi
+    ;;
+esac
+
 # ── plumbing ──────────────────────────────────────────────────────────────────
 command -v git >/dev/null 2>&1 || degrade "git is not on PATH"
+
+# 🔴 EVERY GIT CALL GOES THROUGH ONE OF THESE TWO. `-c core.hooksPath=/dev/null`
+# is the load-bearing part: the scratch repo below is `git init`ed and therefore
+# inherits the OPERATOR's global `core.hooksPath`, and a global `pre-push` that
+# blocks turns this lock silently inert (push fails ⇒ degrade ⇒ exit 0). Measured
+# 2026-08-26 with a real global hook. Do not call bare `git` below.
+git_() { git -c core.hooksPath=/dev/null "$@"; }
 
 # Bounded network calls. A hung remote must never hang a resume. `timeout` is
 # coreutils and is present on both hosts and in the nix sandbox; if it somehow
@@ -264,9 +517,9 @@ command -v git >/dev/null 2>&1 || degrade "git is not on PATH"
 TIMEOUT_BIN="$(command -v timeout || true)"
 gitnet() {
   if [ -n "$TIMEOUT_BIN" ]; then
-    "$TIMEOUT_BIN" "$NET_TIMEOUT" git "$@"
+    "$TIMEOUT_BIN" "$NET_TIMEOUT" git -c core.hooksPath=/dev/null "$@"
   else
-    git "$@"
+    git_ "$@"
   fi
 }
 
@@ -275,38 +528,341 @@ export GIT_TERMINAL_PROMPT=0
 unset GIT_ASKPASS SSH_ASKPASS 2>/dev/null || true
 export GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -o BatchMode=yes -o ConnectTimeout=10}"
 
+# ── 🔴 the CANONICAL remote ───────────────────────────────────────────────────
+#
 # 🔴 NOT a function whose output is captured. `degrade` EXITS, and an `exit`
 # inside a `$(command substitution)` only leaves the subshell — the script would
 # sail on with an empty remote and a warning nobody acted on. So the resolution
 # assigns a global in the CURRENT shell instead.
+#
+# The DEFAULT is resolved from THIS SCRIPT's own path, so it is the same remote
+# from every cwd and every repo. There is deliberately NO cwd fallback: see the
+# header. `readlink -f` follows the `~/.local/bin/claim-work` symlink chain to
+# `devrc/scripts/claim-work.sh`.
+script_repo_origin() {
+  local src dir root
+  src="${BASH_SOURCE[0]}"
+  src="$(readlink -f -- "$src" 2>/dev/null || printf '%s' "$src")"
+  dir="$(dirname -- "$src")"
+  root="$(git_ -C "$dir" rev-parse --show-toplevel 2>/dev/null || true)"
+  [ -n "$root" ] || return 1
+  git_ -C "$root" remote get-url origin 2>/dev/null
+}
+
 REMOTE_URL=""
-if [ -n "$REMOTE_OVERRIDE" ]; then
-  REMOTE_URL="$REMOTE_OVERRIDE"
+REMOTE_SOURCE=""
+if [ -n "$REMOTE_FLAG" ]; then
+  REMOTE_URL="$REMOTE_FLAG"; REMOTE_SOURCE="--remote"
+elif [ -n "$REPO" ]; then
+  # Explicit, and it CHANGES THE NAMESPACE — announced, never silent.
+  git_ -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 \
+    || degrade "--repo '$REPO' is not a git repository"
+  REMOTE_URL="$(git_ -C "$REPO" remote get-url origin 2>/dev/null || true)"
+  [ -n "$REMOTE_URL" ] || degrade "--repo '$REPO' has no 'origin' remote"
+  REMOTE_SOURCE="--repo $REPO"
+elif [ -n "$REMOTE_ENV" ]; then
+  REMOTE_URL="$REMOTE_ENV"; REMOTE_SOURCE="DEVRC_CLAIM_REMOTE"
 else
-  git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 \
-    || degrade "'$REPO' is not a git repository (and no --remote/DEVRC_CLAIM_REMOTE given)"
-  REMOTE_URL="$(git -C "$REPO" remote get-url origin 2>/dev/null || true)"
-  [ -n "$REMOTE_URL" ] \
-    || degrade "'$REPO' has no 'origin' remote (and no --remote/DEVRC_CLAIM_REMOTE given)"
+  REMOTE_URL="$(script_repo_origin || true)"
+  [ -n "$REMOTE_URL" ] || degrade \
+    "could not resolve the CANONICAL claim remote from this script's own location ($(readlink -f -- "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]}")). Not falling back to the cwd's origin — that is a per-repo namespace and the same slug would be claimable once per remote. Pass --remote <url> or set DEVRC_CLAIM_REMOTE"
+  REMOTE_SOURCE="canonical (this script's repo)"
 fi
 
-# The throwaway bare repo. Everything below happens HERE, never in $REPO.
+# The throwaway bare repo. Everything below happens HERE, never in the caller's.
 WS="$(mktemp -d -t claim-work.XXXXXXXX)"
 cleanup() { rm -rf "$WS"; }
+# 🔴 EXIT ONLY, AND THAT IS A MEASUREMENT, NOT AN OVERSIGHT. An audit asked for
+# `INT TERM HUP` here on the theory that a killed run leaks its `mktemp -d`.
+# Measured 2026-08-26 on bash 5.3.15: it does NOT. bash's own terminating-signal
+# handler runs the EXIT trap, so a run SIGTERMed mid-push while parked in a
+# hanging `git push` cleaned up with `trap cleanup EXIT` alone (rc -15, zero
+# `claim-work.*` left in TMPDIR).
+#
+# 🔴 And adding them would have been WORSE than useless: a `trap cleanup TERM`
+# handler RETURNS, it does not exit — so the script would delete $WS and then
+# carry on using it (`$WS/push.err`), turning a clean kill into an exit 0 over a
+# deleted scratch repo. Measured too: with the signal traps added the same run
+# exited **0**, i.e. a killed resume reported success. If this ever needs
+# widening, the trap must re-raise (`trap - TERM; cleanup; kill -s TERM $$`).
 trap cleanup EXIT
 
-git init -q --bare "$WS" >/dev/null 2>&1 || degrade "could not create a scratch repository under $WS"
-git -C "$WS" remote add origin "$REMOTE_URL" >/dev/null 2>&1 \
+git_ init -q --bare "$WS" >/dev/null 2>&1 || degrade "could not create a scratch repository under $WS"
+git_ -C "$WS" remote add origin "$REMOTE_URL" >/dev/null 2>&1 \
   || degrade "could not attach remote '$REMOTE_URL'"
 
-# ── identity: WHO the claim names ─────────────────────────────────────────────
-# Read from the CALLER's git config so the claim carries a real person/agent,
-# not the scratch repo's (absent) identity. Falls back to $USER@<host> so a
-# hermetic environment with no git config can still claim.
-ident_name="$(git -C "$REPO" config --get user.name 2>/dev/null || true)"
-ident_mail="$(git -C "$REPO" config --get user.email 2>/dev/null || true)"
+# ── identity: WHO the claim names, and WHICH SESSION owns it ──────────────────
+# The identity is read from the CALLER's git config so the claim carries a real
+# person/agent rather than the scratch repo's (absent) one. Falls back to
+# $USER@<host> so a hermetic environment with no git config can still claim.
+IDENT_REPO="${REPO:-$PWD}"
+ident_name="$(git_ -C "$IDENT_REPO" config --get user.name 2>/dev/null || true)"
+ident_mail="$(git_ -C "$IDENT_REPO" config --get user.email 2>/dev/null || true)"
 [ -n "$ident_name" ] || ident_name="${USER:-unknown}"
 [ -n "$ident_mail" ] || ident_mail="${USER:-unknown}@$(uname -n 2>/dev/null || echo localhost)"
+
+# 🔴 IDENTITY CANNOT IDENTIFY A SESSION, so it cannot decide ownership. Both
+# hosts run as the same git identity, and two agents in two worktrees on one host
+# are the same person to git. So the claim carries an OWNER TOKEN, compared on
+# --release/--steal.
+#
+# ── 🔴 THE TOKEN WAS `(uname -n, hash($PWD))` AND IT WAS WRONG IN BOTH ─────────
+#    DIRECTIONS. Both halves measured 2026-08-26, on this fleet, not theorised:
+#
+#  TOO LOOSE — it failed the exact case it exists for. `uname -n` is `nixos` on
+#    BOTH the workbench and the laptop, and `/home/zach/workspace/devrc` exists on
+#    both, so the two hosts computed the IDENTICAL token
+#    `host nixos, cwd-id bff868bde328`. A session on the laptop was told
+#    "— THIS SESSION (you already hold it)" about a WORKBENCH claim and could
+#    release it at rc 0 with no `--force`. The gate's own header said host + cwd
+#    is what tells the two hosts apart. It could not.
+#
+#  TOO STRICT — it created the stuck lock it exists to prevent. The cwd half
+#    hashed the LITERAL `$PWD` string, so claiming from `~/workspace/devrc` and
+#    then `--release`ing from `~/workspace/devrc/scripts` was rc 10, "NOT yours".
+#    Same for a worktree — which is this repo's MANDATED default for agent work,
+#    and `/resume` step 6 says to run the bare command "from wherever you are".
+#    The legitimate owner was locked out of their own claim for the whole TTL.
+#
+# ── AND ROUND 3'S FIX WAS TOO LOOSE AGAIN, IN THE WORST DIRECTION ─────────────
+# Round 3 keyed the second half off `git rev-parse --git-common-dir` and wrote
+# down, as a deliberate decision, that two linked WORKTREES of one clone are the
+# SAME owner. Measured 2026-08-26 on this very clone: EVERY linked worktree of
+# one clone reports the SAME `--git-common-dir`, so the token could not tell them
+# apart at all — and because `claim_is_mine` also decides `report_existing`'s exit
+# code, an UNRELATED sibling agent claiming a slug a peer already held was handed
+#     rc 12  "✅ THIS IS YOURS — carry on with it. Nothing to do."
+# One clone + five linked worktrees, concurrent claim of one slug: 1 CLAIMED and
+# 5 × rc 12 CARRY ON. That is the flagship guarantee delivering its exact
+# opposite, in the fan-out shape this repo MANDATES (40+ agent worktrees are
+# registered under this clone today), and `/resume` step 6 runs `claim-work
+# "$SLUG"` directly and reads rc 12 as "carry on".
+#
+# 🔴 THE PREMISE THAT LICENSED THE WIDENING WAS ALSO FALSE, IN THE SAME COMMIT.
+# Round 3's own note said "the token only gates the two DESTRUCTIVE verbs — a
+# second worktree claiming the same slug is still refused, whatever the token
+# says." It is not. `claim_is_mine` is read by `report_existing`, i.e. by the
+# CLAIM and `--check` verdicts, not only by `--release`/`--steal`. The push CAS
+# does refuse the second PUSH, but the second session is then told the existing
+# ref is its own and to carry on. Do not re-derive that premise; it is retracted.
+#
+# ── THE TOKEN NOW ─────────────────────────────────────────────────────────────
+#   owner-id = hash( machine-id  ||  realpath(git-DIR of the ident dir) )
+#
+#   HOST HALF — `/etc/machine-id`, which is genuinely per-host (measured: the two
+#     hosts' ids differ; their `uname -n` does not). The FILE is overridable via
+#     DEVRC_CLAIM_MACHINE_ID_FILE so a test can simulate two hosts; the VALUE is
+#     not, because a value override reads as a supported forgery knob. Absent or
+#     unreadable ⇒ fall back to `uname -n`, tagged so the two cannot collide.
+#
+#   WORKTREE HALF — `git rev-parse --path-format=absolute --git-dir`, realpath'd.
+#     NOT `--git-common-dir`. Measured on this host:
+#       --git-common-dir   clone, wt1..wt5  → <clone>/.git            (all five equal)
+#       --git-dir          clone            → <clone>/.git
+#                          wt1              → <clone>/.git/worktrees/wt1
+#                          wt5              → <clone>/.git/worktrees/wt5
+#     and, the property round 3 actually needed, `--git-dir` is IDENTICAL from a
+#     worktree's root and from any subdirectory of it, at every depth measured
+#     (root, one level, two). So this keeps round 3's real fix — release from
+#     `<root>/scripts` used to be rc 10 — while making siblings distinct owners.
+#     A different CLONE has a different git dir too, so two clones stay two owners.
+#
+# 🔴 THE RESIDUALS, STATED RATHER THAN HIDDEN. This is an OPEN list of known
+# consequences of keying ownership on a git dir, not a closed set of four: an
+# earlier round enumerated two and read as complete, and the two added below were
+# found by an audit afterwards. Add to it rather than assuming it is finished.
+#
+#   R1 — TWO SESSIONS IN THE SAME DIRECTORY compute the same token and can
+#     release each other's claims without `--force`. There is nothing in a path
+#     or a machine-id that can separate them. Accepted, not overlooked:
+#     `claude/RULES.md` already forbids two file-modifying agents in one
+#     checkout, and the isolation this repo mandates for agent work — a worktree
+#     per agent — is exactly the case the token now splits. Run two agents in one
+#     directory anyway and the push CAS is the only thing left protecting you.
+#
+#   R2 — A SUBMODULE working directory is a DIFFERENT owner from its
+#     superproject, because its git dir is `<super>/.git/modules/<name>`
+#     (measured). Correct — a submodule is a different repository — but NOT what
+#     "any subdirectory is the same owner" would lead you to expect. devrc has no
+#     submodules, so nothing here exercises it in anger.
+#
+#   R3 — A CLAIM MADE IN A WORKTREE THAT IS LATER `git worktree remove`d CANNOT
+#     BE RELEASED BY ANYONE WITHOUT `--force`, for the whole TTL. The token is
+#     `<clone>/.git/worktrees/<name>`, and removing the worktree deletes that
+#     admin directory, so no live directory computes it any more: measured rc 10
+#     from the clone root AND from a sibling worktree, and the refusal says the
+#     claim "is NOT yours" about the owner's own lock. 🔴 THIS SHAPE IS PRODUCED
+#     ROUTINELY, not hypothetically — this repo mandates a worktree per
+#     file-modifying agent and the harness AUTO-REMOVES one that ends unchanged.
+#     NOT FIXED, and deliberately so: making the token survive its own worktree's
+#     deletion means widening it back towards the clone, which is round 3's bug.
+#     The escape hatches are `--force`, the TTL, or recreating a worktree at the
+#     same path with the same admin name (measured: ownership is restored, since
+#     the token is the PATH of the admin dir and not its inode). `git worktree
+#     move` is safe — it rewrites the working tree's location, not the admin dir.
+#
+#   R4 — A `cp -a` COPY OF A WORKTREE IS THE SAME OWNER as the original, because
+#     the copy's `.git` is a FILE holding `gitdir: <original admin dir>`, so
+#     `rev-parse --git-dir` from the copy resolves to the ORIGINAL's admin
+#     directory. Correct per git's own semantics, and worth writing down because
+#     `claude/RULES.md` explicitly tells agents to make such copies (the
+#     restore-from-`cp -a` recipe in the worktree-isolation rules) — so two
+#     "different" trees on disk are one owner here, by design and not by accident.
+#
+# `test_two_worktrees_of_one_clone_are_DIFFERENT_owners` and
+# `test_a_concurrent_fanout_of_worktrees_gets_exactly_one_winner` pin this; the
+# former is round 3's `…_are_the_same_owner` inverted, which round 3's own design
+# doc named as the test to flip if the call were reversed.
+MY_HOST="$(uname -n 2>/dev/null || echo unknown)"
+
+MACHINE_ID_FILE="${DEVRC_CLAIM_MACHINE_ID_FILE:-/etc/machine-id}"
+machine_id="$(head -n1 -- "$MACHINE_ID_FILE" 2>/dev/null | tr -d '[:space:]' || true)"
+if [ -n "$machine_id" ]; then
+  OWNER_HOST_PART="machine-id:$machine_id"
+else
+  # No machine-id (a container, a minimal sandbox). Degrade to the hostname —
+  # no WORSE than the token this replaced, and tagged so a hostname can never
+  # collide with a machine-id that happens to spell the same thing.
+  OWNER_HOST_PART="hostname:$MY_HOST"
+fi
+
+# `--path-format=absolute` (git >= 2.31) so the answer does not depend on where
+# git was invoked from; `readlink -f` so a symlinked clone path cannot produce
+# two tokens for one git dir. `|| true` on BOTH, then an explicit emptiness
+# check — see the fallback note below.
+OWNER_TOKEN_DEGRADED=0
+owner_worktree_part="$(git_ -C "$IDENT_REPO" rev-parse --path-format=absolute --git-dir 2>/dev/null || true)"
+owner_worktree_part="$(readlink -f -- "$owner_worktree_part" 2>/dev/null || printf '%s' "$owner_worktree_part")"
+if [ -z "$owner_worktree_part" ]; then
+  OWNER_TOKEN_DEGRADED=1
+  # 🔴 THE FALLBACK IS NOW LOUD, AND IT USED TO BE SILENT. Its comment blamed
+  # only "not a git repository at all", which reads as unreachable in practice
+  # and is why nobody looked at it. The probe fails for OTHER reasons too — most
+  # concretely a `safe.directory` refusal (git ≥2.35.2 on a directory owned by
+  # another uid), and any future git that renames the flag. Whatever the cause,
+  # falling through here silently reinstates the round-2 CWD-KEYED token:
+  # measured with a git shim, claim at the repo root then `--release` from
+  # `scripts/` ⇒ rc 10 "NOT yours", no warning, owner locked out for the TTL.
+  # Degrading is still the right call for a tool whose contract is "never block a
+  # resume" — but it must SAY it degraded, because the symptom it produces looks
+  # exactly like somebody else holding your slug.
+  warn "could not read this directory's git dir (not a git repository, a safe.directory refusal, or an unsupported git) — the owner token falls back to the DIRECTORY PATH. A --release/--steal from a DIFFERENT directory of the same repo will be refused as 'not yours'; use --force if that happens."
+  owner_worktree_part="$(readlink -f -- "$IDENT_REPO" 2>/dev/null || printf '%s' "$IDENT_REPO")"
+fi
+
+# 🔴 THE FALLBACK IS REACHABLE, AND THE ONE IT REPLACED WAS NOT. The old line was
+#     MY_CWD_ID="$(… | git_ hash-object --stdin … | cut -c1-12)"
+#     [ -n "$MY_CWD_ID" ] || MY_CWD_ID="unknown"
+# and under this file's own `set -euo pipefail` a failing `hash-object` aborts
+# the SCRIPT at the assignment — the guard line could never run. A safety net
+# that cannot fire is worse than none, because it reads as one. Hence `|| true`
+# on the substitution, and the emptiness test after it.
+# `-v2` because the second component's MEANING changed (clone → worktree), and a
+# label that names a derivation it no longer uses is the kind of comment this
+# repo's rules call a claim. Bumping it costs NOTHING here, measured rather than
+# assumed: `git ls-remote origin 'refs/heads/claim/*'` on the canonical remote
+# returns only refs carrying the legacy `cwd:` trailer — not a single `owner-id:`
+# ref exists to orphan. Round 3 never shipped past this PR branch.
+# 🔴 RE-MEASURE, DO NOT QUOTE A COUNT. This comment used to say "exactly three
+# refs". The number moved twice inside one day — three when round 4 wrote it,
+# two when round 5's brief was written, three again ten minutes later when round 5
+# measured it, because other sessions claim and release while you read. Any count
+# written here is stale within hours; the FORMAT is what is durable, and the
+# command that re-derives both is on the line above.
+owner_material="claim-work-owner-v2
+$OWNER_HOST_PART
+$owner_worktree_part"
+MY_OWNER_ID="$(printf '%s' "$owner_material" | git_ hash-object --stdin 2>/dev/null | cut -c1-12 || true)"
+[ -n "$MY_OWNER_ID" ] || MY_OWNER_ID="unknown"
+
+# 🔴 THE OLD TOKEN, KEPT ONLY TO READ OLD REFS. Refs OUTLIVE a format change, so
+# `claim_is_mine` still recognises a `cwd-id:` claim written before this change.
+# It is NEVER written any more, and it inherits the too-loose host problem
+# described above — which is unfixable for an already-published ref, and is why
+# the legacy tiers are TRANSITIONAL: nothing new is written in them, so once the
+# last legacy ref is released or stolen the tiers are dead code to delete.
+# ⚠ NOT "they age out with the TTL" — an earlier round said that and it was
+# false. Nothing expires a ref. What the TTL does is make a legacy claim
+# RELEASABLE by anyone past it (`require_ownership_or_force` returns 0 on stale);
+# the ref itself sits on origin until somebody runs `--release`/`--steal`.
+MY_CWD_ID="$(printf '%s' "$IDENT_REPO" | git_ hash-object --stdin 2>/dev/null | cut -c1-12 || true)"
+[ -n "$MY_CWD_ID" ] || MY_CWD_ID="unknown"
+
+# 🔴 AND THE OLDEST TIER GETS A CWD ACCOMMODATION TOO, because it is the one that
+# is ACTUALLY LIVE. Measured 2026-08-26: every claim on the real origin is in the
+# `cwd:` format, each recorded against `/home/zach/workspace/devrc` (the count
+# moves; re-derive it, see the note above). A legacy comparison against `$PWD`
+# alone would leave their holder unable to release them from a worktree or a
+# subdirectory — the same stuck lock, on the refs that exist today rather than on
+# hypothetical future ones.
+#
+# So a legacy `cwd:` ALSO matches the CLONE ROOT: the parent of the realpath'd
+# git-common-dir, which is the main worktree's toplevel for any subdirectory and
+# for any linked worktree.
+#
+# 🔴 BUT ONLY FOR THE DESTRUCTIVE VERBS, AND THAT SCOPE IS THE WHOLE POINT.
+# `claim_is_mine` has two callers and they want different answers here:
+#
+#   `require_ownership_or_force`  (--release / --steal)  ⇒ scope `clone`
+#       "may I delete or overwrite this ref?" The holder of a legacy claim taken
+#       at `<clone>` must be able to answer YES from a worktree or a subdirectory
+#       of that clone, or their own lock is stuck for the whole TTL. This is the
+#       ONLY reason the widening exists.
+#
+#   `report_existing`  (the claim / --check verdict, rc 10 vs rc 12)  ⇒ strict
+#       "should I start work on this item?" A DIFFERENT session in a sibling
+#       worktree of the same clone is not the holder, and telling it
+#       "✅ THIS IS YOURS — carry on with it" is round 3's flagship bug verbatim.
+#       Measured 2026-08-26 from a linked worktree against the REAL origin: every
+#       live claim returned rc 12 CARRY ON, in a clone with 61 registered
+#       worktrees, and `/resume` step 6 runs `claim-work "$SLUG"` directly and
+#       documents rc 12 as CARRY ON.
+#
+# The asymmetry is deliberate and it is not symmetric in cost: a wrong YES on
+# "may I delete it" costs one `--force` and an unnecessary `--force` is visible;
+# a wrong YES on "should I start" costs two sessions building the same thing,
+# silently, which is the entire reason this tool exists. So the destructive verbs
+# get the WIDE, forgiving answer and the verdict gets the NARROW, conservative
+# one — never the reverse.
+#
+# ⚠ THE PRICE, STATED: a genuine legacy holder standing in a SUBDIRECTORY of, or
+# a worktree of, their own clone now reads rc 10 STOP rather than rc 12 CARRY ON.
+# Nothing distinguishes them from a sibling at that point — the legacy ref
+# records a path and nothing else. rc 10 is the safe side of that coin (STOP, not
+# START) and `--release` still works for them without `--force`. New (`owner-id:`)
+# claims are unaffected: they carry a per-worktree token and answer exactly.
+#
+# 🔴 THIS IS THE ONE PLACE THAT STILL READS `--git-common-dir`, ON PURPOSE, AND
+# IT IS A SEPARATE READ FROM THE TOKEN ABOVE. The token narrowed to `--git-dir`
+# so that two linked worktrees are two owners; this accept must stay WIDE, because
+# the live `cwd:` claims on the real origin were all made at `<clone>` and their
+# holder has to be able to release them from a worktree. Deriving it from
+# `--git-dir` would give a linked worktree `<clone>/.git/worktrees/<name>`, no
+# `*/.git` match, an EMPTY MY_CLONE_ROOT and exactly that stuck lock back. Pinned
+# by `test_a_legacy_cwd_claim_is_releasable_from_a_worktree_of_that_clone`.
+#
+# It widens the LEGACY tier only, on the destructive verbs only. It does NOT
+# widen `owner-id:`, and it no longer widens rc 12.
+owner_common_part="$(git_ -C "$IDENT_REPO" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+owner_common_part="$(readlink -f -- "$owner_common_part" 2>/dev/null || printf '%s' "$owner_common_part")"
+MY_CLONE_ROOT=""
+case "$owner_common_part" in
+  */.git) MY_CLONE_ROOT="$(dirname -- "$owner_common_part")" ;;
+esac
+# 🔴 AND THIS PROBE IS LOUD TOO. Its twin 50 lines up got a dedicated warning
+# after a round-4 audit found the silent fallback; this one shipped in the same
+# delta and was still silent. Measured with a `git` shim failing ONLY
+# `rev-parse --path-format=absolute --git-common-dir`: a legacy claim taken at the
+# clone root, `--release` from a worktree of that clone ⇒ rc 10 "is NOT yours",
+# no warning, holder locked out for the whole TTL. Same symptom, same class,
+# same fix.
+#
+# Gated on `$OWNER_TOKEN_DEGRADED` so it fires only when we ARE in a git
+# repository: with no repo at all the git-dir probe above has already warned, and
+# a second line saying the same thing trains the reader to skip both.
+if [ -z "$MY_CLONE_ROOT" ] && [ "$OWNER_TOKEN_DEGRADED" -eq 0 ]; then
+  warn "could not resolve this clone's root (an unreadable --git-common-dir, or a git dir that is not named .git) — a pre-2026-08-26 'cwd:' claim taken at the clone root cannot be recognised as yours from a worktree or a subdirectory. --release/--steal will be refused as 'not yours'; use --force if that happens."
+fi
 
 remote_ref_sha() {
   # Prints the sha of the claim ref on origin, or nothing. Returns non-zero ONLY
@@ -315,6 +871,9 @@ remote_ref_sha() {
   # how a claim tool starts silently reporting FREE for everything.
   local s="$1" out
   out="$(gitnet -C "$WS" ls-remote origin "${CLAIM_NS}${s}" 2>/dev/null)" || return 1
+  # Field 1 is the OBJECT NAME; field 2 is the ref name. The sha is what every
+  # caller compares against, including the "did my push actually land?" branch
+  # in the claim path, where a ref name would never equal our commit's sha.
   printf '%s' "$out" | awk 'NR==1{print $1}'
 }
 
@@ -334,61 +893,379 @@ human_age() {
   fi
 }
 
-# Prints WHO / WHEN / WHAT for an existing claim and returns the right rc:
+# The machine prefix `claim(<slug>): ` is for the ref, not for a reader. Strip it
+# so the human field shows what the claimant actually typed — and say so plainly
+# when they typed nothing, rather than printing the bare machine string.
+human_subject() {
+  local s="$1" subj="$2"
+  subj="${subj#claim($s): }"
+  if [ "$subj" = "claim($s)" ] || [ -z "$subj" ]; then
+    printf '(no --subject was given)'
+  else
+    printf '%s' "$subj"
+  fi
+}
+
+# One trailer out of a claim commit's body, or nothing.
+#
+# 🔴 STRUCTURAL, NOT A LINE SCAN — and that is the fix for a MEASURED forgery.
+# This used to be `log -1 --format='%B' | awk '$1==k {…; exit}'`, i.e. the FIRST
+# `^<key>:` line ANYWHERE in the message. The subject is interpolated ABOVE the
+# trailer block, so `--subject $'legit\nhost: attacker-host\ncwd-id: dead…'` put
+# attacker-controlled lines first and the ownership gate read THOSE: the claim
+# reported `where: host attacker-host, cwd-id deadbeefcafe`, and the real holder
+# was refused `--release` on their own live claim at rc 10.
+#
+# `git interpret-trailers --parse` reads the message's TRAILER BLOCK — the last
+# paragraph, when every line of it is `key: value` — and nothing else. The claim
+# commit always ends with such a block (`make_claim_commit`), so free text in the
+# subject can no longer be read as a trailer no matter what it spells. Verified
+# both ways 2026-08-26: with the forged lines present, `--parse` emits only the
+# real block; with NO trailer paragraph at all it emits nothing.
+#
+# The LAST match wins rather than the first: `make_claim_commit` writes each key
+# once, so this only ever matters if a future writer duplicates one, and taking
+# the last is the direction that cannot be shadowed by something prepended.
+#
+# 🔴 AND IT RUNS UNDER PINNED `trailer.*` CONFIG, BECAUSE THE STRUCTURAL READ
+# INHERITED THE CALLER'S. The awk line scan it replaced was config-immune;
+# `interpret-trailers` is not, and it was being run with NO `-C`, i.e. inside
+# whatever repository the agent happened to be standing in. Two keys were
+# measured to corrupt the output on 2026-08-26, both of them ordinary user
+# config rather than an attack:
+#   * `trailer.separators = '='`  ⇒ `key: value` stops being a trailer at all and
+#     EVERY ownership read returns empty. Measured end to end: `--release` of your
+#     OWN 0-second-old claim ⇒ rc 10 "NOT yours", locked out for the whole TTL.
+#   * `trailer.owner-id.key = 'OWNER='` ⇒ the token is RENAMED on output
+#     (`owner-id: abc` printed as `OWNER=: abc`), same empty read, same lockout.
+#     `--parse` implies `--only-input`, so a configured trailer is never ADDED —
+#     verified with an `ifmissing=add` + `command` entry, which did not leak — but
+#     `.key` still rewrites what IS there.
+# Both fail CLOSED (a refusal, not a false grant), which is the right direction
+# and still a stuck lock.
+#
+# 🔴 SO THE FIX NEUTRALISES THE WHOLE `trailer.*` CLASS AT THE CONFIG LAYERS
+# ENUMERATED BELOW, rather than pinning the two keys that were measured.
+# ⚠ IT USED TO SAY "AT EVERY CONFIG LAYER" AND THAT WAS FALSE — git has five
+# layers and only four were dropped. The missing one was the ENVIRONMENT, and it
+# is not exotic: `GIT_CONFIG_PARAMETERS` is set BY GIT ITSELF to propagate a
+# parent process's `-c`, so it arrives from a hook, an alias or `rebase -x`
+# without anyone typing it. Measured 2026-08-26 (round 5), both spellings:
+# `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=trailer.owner-id.key
+# GIT_CONFIG_VALUE_0='OWNER='` and `GIT_CONFIG_PARAMETERS="'trailer.separators'='='"`
+# each reproduce the full lockout — own 0-second-old claim reads
+# `owner-id unknown`, `--release` rc 10. A prose claim wider than the code is what
+# stops anyone looking, so the list is now enumerated and each entry says what it
+# covers:
+# `-c trailer.cwd-id.key='cwd-id: '` makes `interpret-trailers` match input tokens
+# against that configured key BY PREFIX, so a legacy `cwd: <path>` trailer came
+# back RENAMED to `cwd-id: <path>` — the ownership read then took an absolute path
+# as a hashed id and the legacy tier went rc 10 on its own live claim. Three tests
+# caught it. A per-key allowlist in this API is a booby trap; drop the layers.
+#   `-C "$WS"`               REPO-LOCAL: the throwaway bare repo this script made,
+#                            so the CALLER's repo-local `trailer.*` is out of the
+#                            stack. ⚠ It replaces the caller's local layer with
+#                            `$WS`'s OWN — see the residual at the end of this
+#                            note;
+#   `GIT_CONFIG_GLOBAL=/dev/null`
+#                            GLOBAL: the user's `~/.gitconfig`, which `-C` cannot
+#                            displace;
+#   `GIT_CONFIG_NOSYSTEM=1`  SYSTEM: `/etc/gitconfig`, likewise;
+#   `unset GIT_CONFIG_COUNT GIT_CONFIG_PARAMETERS`
+#                            ENVIRONMENT, added in round 5. `GIT_CONFIG_COUNT`
+#                            GATES the whole `GIT_CONFIG_KEY_<n>`/`_VALUE_<n>`
+#                            family — measured: with COUNT unset, an exported
+#                            `GIT_CONFIG_KEY_0=trailer.separators` is ignored
+#                            entirely — so unsetting the counter is the complete
+#                            fix for that spelling, and `GIT_CONFIG_PARAMETERS`
+#                            is the second, independent one. The deprecated
+#                            `GIT_CONFIG` is already unset process-wide (see
+#                            DEVRC_GIT_REPO_POINTERS at the top of this file);
+#   `-c trailer.separators=:` COMMAND LINE: an explicit positive pin, and it is
+#                            NOT redundant. It is the only thing left covering the
+#                            one layer above that is NOT dropped — `$WS`'s own
+#                            repo-local config, which `git init --bare "$WS"`
+#                            creates while the caller's global config IS still in
+#                            effect. Measured 2026-08-26 (round 5): a global
+#                            `init.templateDir` pointing at a directory whose
+#                            `config` sets `trailer.separators = "="` plants that
+#                            key straight into `$WS/config`. Pinned by
+#                            `test_a_hostile_init_template_cannot_lock_the_owner_out`
+#                            and by the `separators-pin-removed` mutant.
+# In a subshell, not as an env prefix on the `git_` FUNCTION: an assignment
+# prefixing a function call leaks into the caller's scope in bash.
+# Verified 2026-08-26: with both hostile keys set repo-locally, globally and in
+# the environment, the real trailer block comes back unchanged.
+#
+# 🔴 THE RESIDUAL, NOT FIXED IN ROUND 5: the `$WS`-local layer is closed for
+# `trailer.separators` (by the `-c` pin) and OPEN for `trailer.<key>.key` — a
+# global `init.templateDir` whose template `config` sets
+# `trailer.owner-id.key = 'OWNER='` still lands in `$WS/config` and still
+# produces the lockout. Enumerating keys in the `-c` list is NOT the fix (it was
+# tried, it is the booby trap described above). The one-token fix is
+# `git init --bare --template= "$WS"`, which stops a template from planting
+# anything; it is left for a later round because it changes how the scratch repo
+# is created, and the vector needs the operator's own global config to be hostile.
+claim_field() {
+  local ref="$1" key="$2"
+  git_ -C "$WS" log -1 --format='%B' "$ref" 2>/dev/null \
+    | ( export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1; unset GIT_CONFIG_COUNT GIT_CONFIG_PARAMETERS; git_ -C "$WS" -c trailer.separators=: interpret-trailers --parse 2>/dev/null ) \
+    | awk -v k="${key}:" '$1==k { sub(/^[^ ]+[ ]*/, ""); v=$0 } END { if (v != "") print v }'
+}
+
+# 🔴 OWNERSHIP, AND WHY IT IS NOT THE AUTHOR. See MY_OWNER_ID above: the git
+# identity is identical across both hosts and across every agent on one host, so
+# `%an <%ae>` cannot tell two sessions apart.
+#
+# THREE TIERS, NEWEST FIRST, because refs OUTLIVE a format change — twice now:
+#   1. `owner-id:`  the current token (machine-id + WORKTREE git-dir). The ONE that
+#                   is written. It does not consult `host:` at all: the host is
+#                   already inside the hash, and `host:` is a HUMAN field.
+#   2. `cwd-id:`    written between 2026-08-26 and this change. host + hash($PWD).
+#   3. `cwd:`       pre-2026-08-26. host + the absolute path. Measured: EVERY
+#                   claim live on the real origin was in this format at the moment
+#                   the ownership gate first landed — and still is — so a gate
+#                   reading only the new field would have locked their own holder
+#                   out of `--release` without `--force` for the rest of the TTL.
+#                   (How many there are changes hourly; do not write it down.)
+# We READ 2 and 3; we never write them. Both inherit the too-loose `uname -n`
+# host comparison — unfixable for an already-published ref, and the reason they
+# are transitional rather than permanent.
+#
+# 🔴 THE SECOND ARGUMENT IS THE LEGACY SCOPE, AND IT IS NOT A CONVENIENCE KNOB.
+# The two callers ask two different questions of the same function and one of
+# them must NOT get the widened answer — see the MY_CLONE_ROOT block above for
+# the full argument:
+#   claim_is_mine "$ref"          strict  — "should I start work on this?"
+#                                 (`report_existing`: rc 12 CARRY ON vs rc 10 STOP)
+#   claim_is_mine "$ref" clone    wide    — "may I delete/overwrite this ref?"
+#                                 (`require_ownership_or_force`: --release/--steal)
+# The default is STRICT on purpose: a new caller that forgets the argument gets
+# the conservative answer, and a widening has to be typed out deliberately.
+# Tiers 1 and 2 (`owner-id:`, `cwd-id:`) ignore the scope entirely — it exists
+# only for the oldest tier, which records a bare path and can be nothing better
+# than a guess about who is standing in it.
+claim_is_mine() {
+  local ref="$1" legacy_scope="${2:-strict}" owner h c legacy
+  owner="$(claim_field "$ref" owner-id)"
+  if [ -n "$owner" ]; then
+    [ "$owner" = "$MY_OWNER_ID" ] && [ "$MY_OWNER_ID" != "unknown" ]
+    return
+  fi
+  h="$(claim_field "$ref" host)"
+  [ -n "$h" ] && [ "$h" = "$MY_HOST" ] || return 1
+  c="$(claim_field "$ref" cwd-id)"
+  if [ -n "$c" ]; then
+    [ "$c" = "$MY_CWD_ID" ]
+    return
+  fi
+  legacy="$(claim_field "$ref" cwd)"
+  [ -n "$legacy" ] || return 1
+  [ "$legacy" = "$IDENT_REPO" ] && return 0
+  [ "$legacy_scope" = clone ] || return 1
+  [ -n "$MY_CLONE_ROOT" ] && [ "$legacy" = "$MY_CLONE_ROOT" ]
+}
+
+# WHERE a claim came from, for a human. Newest format first; each older one SAYS
+# which format it is, so a reader of a transitional claim is not told "unknown".
+claim_where() {
+  local ref="$1" owner c legacy
+  owner="$(claim_field "$ref" owner-id)"
+  if [ -n "$owner" ]; then printf 'owner-id %s' "$owner"; return 0; fi
+  c="$(claim_field "$ref" cwd-id)"
+  if [ -n "$c" ]; then
+    printf 'cwd-id %s  (2026-08-26 claim format — no owner-id)' "$c"
+    return 0
+  fi
+  legacy="$(claim_field "$ref" cwd)"
+  if [ -n "$legacy" ]; then
+    printf 'cwd %s  (pre-2026-08-26 claim format — no owner-id)' "$legacy"
+    return 0
+  fi
+  printf 'owner-id unknown'
+}
+
+claim_age_secs() {
+  # Always exits 0 and always prints a number: it is read through a command
+  # substitution in an ASSIGNMENT, and under `set -e` a non-zero there aborts the
+  # script. An unreadable date prints 0 — i.e. "fresh" — which is the SAFE
+  # default for the ownership gate below (fresh ⇒ refuse), not the convenient one.
+  local ref="$1" epoch now age
+  epoch="$(git_ -C "$WS" log -1 --format='%at' "$ref" 2>/dev/null || true)"
+  [ -n "$epoch" ] || { printf '0'; return 0; }
+  now="$(date +%s)"
+  age=$(( now - epoch ))
+  # A future-dated claim (clock skew between the two hosts) clamps to 0 rather
+  # than going negative and reading as freshly-made-in-the-future.
+  [ "$age" -ge 0 ] || age=0
+  printf '%s' "$age"
+}
+
+is_stale() { [ "$1" -gt $(( TTL_DAYS * 86400 )) ]; }
+
+# Prints WHO / WHEN / WHERE / WHAT for an existing claim and returns the right rc:
 # RC_TAKEN while live, RC_TAKEN_STALE once past the TTL.
 report_existing() {
-  local s="$1" who when subject epoch now age
+  local s="$1" who when subject age host mine=0
   if ! fetch_claim "$s"; then
     # The ref exists (ls-remote saw it) but we could not read the commit. Still
     # a claim — report TAKEN with what we know rather than pretending it is free.
     printf '%s: ALREADY CLAIMED — %s%s (details unreadable)\n' "$PROG" "$CLAIM_NS" "$s"
+    printf '  DO NOT start this item. Pick another, or coordinate with the claimer.\n'
     return "$RC_TAKEN"
   fi
-  who="$(git -C "$WS" log -1 --format='%an <%ae>' "refs/claims/$s")"
-  when="$(git -C "$WS" log -1 --format='%aI' "refs/claims/$s")"
-  epoch="$(git -C "$WS" log -1 --format='%at' "refs/claims/$s")"
-  subject="$(git -C "$WS" log -1 --format='%s' "refs/claims/$s")"
-  now="$(date +%s)"
-  age=$(( now - epoch ))
-  [ "$age" -ge 0 ] || age=0
+  who="$(git_ -C "$WS" log -1 --format='%an <%ae>' "refs/claims/$s")"
+  when="$(git_ -C "$WS" log -1 --format='%aI' "refs/claims/$s")"
+  subject="$(git_ -C "$WS" log -1 --format='%s' "refs/claims/$s")"
+  age="$(claim_age_secs "refs/claims/$s")"
+  host="$(claim_field "refs/claims/$s" host)"
+  # `if`, not `&& mine=1`: under `set -e` an AND-list whose first command fails
+  # is a status nobody should have to reason about at a glance.
+  #
+  # 🔴 STRICT — NO SECOND ARGUMENT, AND THAT OMISSION IS THE GUARD. This decides
+  # rc 12 "carry on" vs rc 10 "STOP", which is a verdict about STARTING WORK, not
+  # about deleting a ref. Passing `clone` here hands every sibling worktree of the
+  # clone a legacy claim's "✅ THIS IS YOURS", which is exactly what was measured
+  # against the real origin before round 5.
+  if claim_is_mine "refs/claims/$s"; then mine=1; fi
 
   printf '%s: ALREADY CLAIMED — %s%s\n' "$PROG" "$CLAIM_NS" "$s"
   printf '  who:   %s\n' "$who"
   printf '  when:  %s  (%s ago)\n' "$when" "$(human_age "$age")"
-  printf '  what:  %s\n' "$subject"
+  # 🔴 WHERE, not just WHO. `%an <%ae>` is the SAME identity for every session on
+  # both hosts, so a refusal naming only the author names a party that cannot
+  # discriminate — the reader cannot tell somebody else's claim from their own.
+  printf '  where: host %s, %s%s\n' "${host:-unknown}" "$(claim_where "refs/claims/$s")" \
+    "$([ "$mine" -eq 1 ] && printf ' — THIS SESSION (you already hold it)' || true)"
+  printf '  what:  %s\n' "$(human_subject "$s" "$subject")"
 
-  if [ "$age" -gt $(( TTL_DAYS * 86400 )) ]; then
+  if is_stale "$age"; then
     printf '  STALE: older than %s day(s) — it may be abandoned.\n' "$TTL_DAYS"
     printf '         %s --steal %s   (take it over)\n' "$PROG" "$s"
     printf '         %s --release %s (drop it)\n' "$PROG" "$s"
+  fi
+
+  # 🔴 BRANCH ON IT. `mine` was computed and PRINTED here and then thrown away:
+  # the same run said "you already hold it" and "DO NOT start this item" three
+  # lines apart, and returned rc 10 — which `/resume` step 6 reads as STOP. A
+  # session re-claiming its own item after a context reset was told to abandon
+  # work it legitimately held. `claude/RULES.md`: a field that exists is not a
+  # guard, only a BRANCH on it is. Deliberately ABOVE the stale return: a stale
+  # claim of your own is still yours, and the advisory above already printed.
+  if [ "$mine" -eq 1 ]; then
+    printf '  ✅ THIS IS YOURS — carry on with it. Nothing to do.\n'
+    printf '     (release it when the work lands:  %s --release %s)\n' "$PROG" "$s"
+    return "$RC_MINE"
+  fi
+  if is_stale "$age"; then
     return "$RC_TAKEN_STALE"
   fi
   printf '  DO NOT start this item. Pick another, or coordinate with the claimer.\n'
   return "$RC_TAKEN"
 }
 
+# 🔴 THE OWNERSHIP GATE ON THE TWO DESTRUCTIVE VERBS. `--release` deletes and
+# `--steal` overwrites somebody else's ref; rc 10 prints "DO NOT start this item"
+# with `--steal` one flag away, so without this gate the refusal is advice, not a
+# lock. Measured 2026-08-26 before the gate existed: session B released session
+# A's 0-second-old live claim, rc 0, silently — and stole it, rc 0.
+#
+# Allowed without --force: a claim that is MINE (`owner-id` match — see
+# `claim_is_mine` for the token and for the ONE case it deliberately does not
+# split, two sessions in the SAME directory), or one past the TTL (that is exactly
+# what the stale escape hatch is for), or a slug nobody holds. Refused: a live
+# claim belonging to another session, and a claim whose owner could not be READ —
+# "could not find out" must not authorise a destructive write on somebody's lock.
+#
+# ⚠ THIS IS NOT THE ONLY READER OF `claim_is_mine`, AND A COMMENT HERE ONCE SAID
+# IT WAS. `report_existing` reads it too, so the token also decides the CLAIM and
+# `--check` verdicts (rc 12 vs rc 10) — not just these two destructive verbs. That
+# is precisely how round 3's too-wide token turned into "carry on with a peer's
+# live claim". Widen the token and you widen rc 12 with it.
+#
+# 🔴 WHICH IS WHY THE LEGACY WIDENING IS SCOPED TO THIS CALLER, via the second
+# argument below. Round 4 narrowed the `owner-id:` token to per-worktree and left
+# the legacy `cwd:` tier accepting the whole clone for BOTH readers — so on the
+# only refs that actually exist (all legacy, all recorded at `<clone>`) every
+# sibling worktree was still told rc 12 CARRY ON. Measured against the real
+# origin. The token is shared; the ANSWER is not.
+require_ownership_or_force() {
+  local s="$1" verb="$2" age readable=1
+  fetch_claim "$s" || readable=0
+  if [ "$FORCE" -eq 1 ]; then
+    warn "--force: skipping the ownership and staleness check on ${CLAIM_NS}${s} (--$verb)"
+    return 0
+  fi
+  if [ "$readable" -eq 0 ]; then
+    printf '%s: REFUSED — cannot read %s%s to check whose it is\n' "$PROG" "$CLAIM_NS" "$s"
+    printf '  A claim whose owner is unknown is not yours by default.\n'
+    printf '  If you mean it:  %s --%s %s --force\n' "$PROG" "$verb" "$s"
+    return "$RC_TAKEN"
+  fi
+  age="$(claim_age_secs "refs/claims/$s")"
+  # 🔴 `clone` — the WIDE legacy scope, and the ONLY caller that gets it. A
+  # pre-2026-08-26 `cwd:` claim taken at the clone root must stay releasable by
+  # its holder from a worktree or a subdirectory of that clone, or the live refs
+  # on the real origin are stuck for the whole TTL. See `claim_is_mine`.
+  if claim_is_mine "refs/claims/$s" clone; then
+    return 0
+  fi
+  if is_stale "$age"; then
+    return 0
+  fi
+  printf '%s: REFUSED — %s%s is NOT yours and is NOT stale (%s old, TTL %s day(s))\n' \
+    "$PROG" "$CLAIM_NS" "$s" "$(human_age "$age")" "$TTL_DAYS"
+  printf '  held by:  %s\n' "$(git_ -C "$WS" log -1 --format='%an <%ae>' "refs/claims/$s")"
+  printf '  where:    host %s, %s\n' \
+    "$(claim_field "refs/claims/$s" host)" "$(claim_where "refs/claims/$s")"
+  printf '  you are:  host %s, owner-id %s\n' "$MY_HOST" "$MY_OWNER_ID"
+  printf '  what:     %s\n' \
+    "$(human_subject "$s" "$(git_ -C "$WS" log -1 --format='%s' "refs/claims/$s")")"
+  printf '  Coordinate with the claimer, or wait for the TTL. If you mean to override:\n'
+  printf '            %s --%s %s --force\n' "$PROG" "$verb" "$s"
+  return "$RC_TAKEN"
+}
+
 make_claim_commit() {
   # An ORPHAN commit: `commit-tree` with NO `-p`, over the empty tree. Every
-  # claim is therefore an unrelated root, which is precisely what makes a second
-  # push to the same ref a NON-FAST-FORWARD and hence rejected. Do not give this
-  # a parent, and do not build it from an existing branch.
+  # claim is an unrelated root, which is a second line of defence in the
+  # SERIALIZED case (an unrelated root can never fast-forward over the winner).
+  # It is NOT what refuses two true concurrent first movers — that is the
+  # server's ref-transaction CAS on `old = 0000…`; see the header. Do not give
+  # this a parent, and do not build it from an existing branch.
   local s="$1" subj="$2" tree msg
-  tree="$(git -C "$WS" mktree </dev/null)"
+  tree="$(git_ -C "$WS" mktree </dev/null)"
   if [ -n "$subj" ]; then
     msg="claim($s): $subj"
   else
     msg="claim($s)"
   fi
-  # The nonce guarantees two concurrent claimants produce DIFFERENT shas, so a
-  # rejected push can never be misread as "I already had it".
+  # 🔴 THE NONCE IS LOAD-BEARING, NOT DECORATION. Without it two claims that
+  # agree on identity, message, cwd and second are BYTE-IDENTICAL, hence the same
+  # sha — and pushing the sha a ref already holds is "Everything up-to-date",
+  # exit 0, so a SECOND session would print CLAIMED for an item it does not hold.
+  # A mutation sweep found a constant here surviving the whole suite;
+  # `test_two_claims_that_would_be_byte_identical_still_collide` is the cover.
+  #
+  # 🔴 A HASH, NOT A PATH. This commit is pushed to a remote and this repo is
+  # public — an absolute path leaks a client repo's name.
+  #
+  # 🔴 THE TRAILER BLOCK IS THE LAST PARAGRAPH AND THAT IS LOAD-BEARING.
+  # `$msg` carries the caller's `--subject` text and sits ABOVE this block, so
+  # `claim_field` must read the block STRUCTURALLY (it uses `git
+  # interpret-trailers --parse`) — and `--subject` is refused if it contains a
+  # newline or any control character. Anything added here must stay `key: value`
+  # on its own line, or the whole block stops being a trailer block and every
+  # ownership read returns nothing (which reads as "not yours", i.e. it fails
+  # closed, but it fails).
   GIT_AUTHOR_NAME="$ident_name" GIT_AUTHOR_EMAIL="$ident_mail" \
   GIT_COMMITTER_NAME="$ident_name" GIT_COMMITTER_EMAIL="$ident_mail" \
-    git -C "$WS" commit-tree "$tree" <<EOF
+    git_ -C "$WS" commit-tree "$tree" <<EOF
 $msg
 
 claimed-by: $ident_name <$ident_mail>
-host: $(uname -n 2>/dev/null || echo unknown)
-cwd: $REPO
+host: $MY_HOST
+owner-id: $MY_OWNER_ID
 nonce: $$-$(date +%s%N 2>/dev/null || date +%s)
 EOF
 }
@@ -424,18 +1301,20 @@ case "$MODE" in
       age=$(( now - epoch ))
       [ "$age" -ge 0 ] || age=0
       flag=""
-      [ "$age" -gt $(( TTL_DAYS * 86400 )) ] && flag="  [STALE]"
-      printf '%-40s %6s ago  %-24s %s%s\n' "$ref" "$(human_age "$age")" "$who" "$subject" "$flag"
+      is_stale "$age" && flag="  [STALE]"
+      printf '%-40s %6s ago  %-24s %s%s\n' "$ref" "$(human_age "$age")" "$who" \
+        "$(human_subject "$ref" "$subject")" "$flag"
     done <<EOF
-$(git -C "$WS" for-each-ref --sort=-authordate \
+$(git_ -C "$WS" for-each-ref --sort=-authordate \
     --format='%(refname:lstrip=2)|%(authordate:unix)|%(authorname)|%(contents:subject)' \
     refs/claims 2>/dev/null)
 EOF
     if [ "$n" -eq 0 ]; then
       printf '%s: no live claims on %s\n' "$PROG" "$REMOTE_URL"
     else
-      printf '\n%s: %d live claim(s). 🔴 The SUBJECT column is a SOFT signal — scan it for a\n' "$PROG" "$n"
-      printf '  near-duplicate of your item whose SLUG differs. Only an exact slug match locks.\n'
+      printf '\n%s: %d live claim(s) on %s [%s]\n' "$PROG" "$n" "$REMOTE_URL" "$REMOTE_SOURCE"
+      printf '  🔴 The SUBJECT column is a SOFT signal — scan it for a near-duplicate of\n'
+      printf '  your item whose SLUG differs. Only an exact slug match locks.\n'
     fi
     exit 0
     ;;
@@ -446,11 +1325,12 @@ EOF
       printf '%s: nothing to release — %s%s does not exist\n' "$PROG" "$CLAIM_NS" "$SLUG"
       exit 0
     fi
-    if fetch_claim "$SLUG"; then
-      printf '%s: releasing %s%s (was: %s)\n' "$PROG" "$CLAIM_NS" "$SLUG" \
-        "$(git -C "$WS" log -1 --format='%s — %an, %aI' "refs/claims/$SLUG")"
-    fi
-    gitnet -C "$WS" push -q origin ":${CLAIM_NS}${SLUG}" \
+    rc=0; require_ownership_or_force "$SLUG" release || rc=$?
+    [ "$rc" -eq 0 ] || exit "$rc"
+    printf '%s: releasing %s%s (was: %s — %s)\n' "$PROG" "$CLAIM_NS" "$SLUG" \
+      "$(human_subject "$SLUG" "$(git_ -C "$WS" log -1 --format='%s' "refs/claims/$SLUG" 2>/dev/null || true)")" \
+      "$(git_ -C "$WS" log -1 --format='%an, %aI' "refs/claims/$SLUG" 2>/dev/null || printf 'details unreadable')"
+    gitnet -C "$WS" push -q --no-verify origin ":${CLAIM_NS}${SLUG}" \
       || degrade "could not delete ${CLAIM_NS}${SLUG} on '$REMOTE_URL'"
     printf '%s: RELEASED %s%s\n' "$PROG" "$CLAIM_NS" "$SLUG"
     exit 0
@@ -459,13 +1339,19 @@ EOF
   steal)
     # The escape hatch for a STALE claim, and the reason a stale ref cannot block
     # an item forever. Deliberately a SEPARATE, EXPLICIT verb — the claim path
-    # below must never force, or the lock stops being a lock.
-    sha="$(make_claim_commit "$SLUG" "$SUBJECT")" || degrade "could not build the claim commit"
-    if fetch_claim "$SLUG"; then
+    # below must never force, or the lock stops being a lock. And it is gated:
+    # `--steal` of a LIVE claim that is not yours is refused, because otherwise
+    # rc 10's "DO NOT start this item" is one flag away from being ignored.
+    sha_existing="$(remote_ref_sha "$SLUG")" \
+      || degrade "could not reach '$REMOTE_URL' to steal '$SLUG'"
+    if [ -n "$sha_existing" ]; then
+      rc=0; require_ownership_or_force "$SLUG" steal || rc=$?
+      [ "$rc" -eq 0 ] || exit "$rc"
       printf '%s: stealing %s%s from %s\n' "$PROG" "$CLAIM_NS" "$SLUG" \
-        "$(git -C "$WS" log -1 --format='%an, %aI' "refs/claims/$SLUG")"
+        "$(git_ -C "$WS" log -1 --format='%an, %aI' "refs/claims/$SLUG" 2>/dev/null || printf 'an unreadable claim')"
     fi
-    gitnet -C "$WS" push -q --force origin "${sha}:${CLAIM_NS}${SLUG}" \
+    sha="$(make_claim_commit "$SLUG" "$SUBJECT")" || degrade "could not build the claim commit"
+    gitnet -C "$WS" push -q --no-verify --force origin "${sha}:${CLAIM_NS}${SLUG}" \
       || degrade "could not steal ${CLAIM_NS}${SLUG} on '$REMOTE_URL'"
     printf '%s: STOLEN — %s%s is now yours\n' "$PROG" "$CLAIM_NS" "$SLUG"
     exit 0
@@ -475,27 +1361,52 @@ EOF
     sha="$(make_claim_commit "$SLUG" "$SUBJECT")" || degrade "could not build the claim commit"
 
     # 🔴🔴 THIS LINE IS THE LOCK. No `--force`, no `--force-with-lease`, no
-    # preceding "does it exist?" read that we then act on. The orphan commit is
-    # unrelated to whatever is already there, so the receiving git rejects it
-    # NON-FAST-FORWARD under its own ref transaction lock — an atomic
-    # compare-and-swap, decided on the server at update time. Adding a force
-    # flag here does not make the tool more robust; it deletes the entire
-    # guarantee. There is a mutation control in the test suite that proves it.
+    # preceding "does it exist?" read that we then act on. Two true concurrent
+    # first movers both send `old = 0000…`, and the receiving git's ref
+    # transaction is a compare-and-swap on that value — so exactly one create
+    # lands, decided on the server at update time. A serialized second mover is
+    # refused client-side instead, because it cannot fast-forward onto a sha it
+    # does not have. Adding a force flag here does not make the tool more robust;
+    # it deletes the entire guarantee. There is a mutation control in the test
+    # suite that proves it. (`--no-verify` is NOT a force: it only stops the
+    # OPERATOR's global pre-push hook from making this push fail — see git_.)
     push_err="$WS/push.err"
-    if gitnet -C "$WS" push -q origin "${sha}:${CLAIM_NS}${SLUG}" 2>"$push_err"; then
+    if gitnet -C "$WS" push -q --no-verify origin "${sha}:${CLAIM_NS}${SLUG}" 2>"$push_err"; then
       printf '%s: CLAIMED %s%s\n' "$PROG" "$CLAIM_NS" "$SLUG"
       [ -n "$SUBJECT" ] && printf '  what:  %s\n' "$SUBJECT"
       printf '  who:   %s <%s>\n' "$ident_name" "$ident_mail"
+      printf '  where: host %s, owner-id %s\n' "$MY_HOST" "$MY_OWNER_ID"
+      printf '  on:    %s [%s]\n' "$REMOTE_URL" "$REMOTE_SOURCE"
       printf '  release it when done or abandoned:  %s --release %s\n' "$PROG" "$SLUG"
       exit 0
     fi
 
     # The push failed. WHY it failed decides everything, and "nothing happened"
-    # cannot distinguish the two mechanisms — so go and ask the remote which one
-    # it was instead of assuming the one we expect.
+    # cannot distinguish the mechanisms — so go and ask the remote which one it
+    # was instead of assuming the one we expect.
     existing="$(remote_ref_sha "$SLUG")" \
       || degrade "push to '$REMOTE_URL' failed and the remote could not be re-read: $(tr '\n' ' ' <"$push_err")"
-    if [ -n "$existing" ] && [ "$existing" != "$sha" ]; then
+
+    # 🔴 OUR OWN COMMIT IS ON THE REF: THE PUSH LANDED AND THE CLIENT FAILED
+    # AFTERWARDS. This case used to fall through to "does not exist there — not a
+    # collision" and exit 0 "Proceeding UNCLAIMED" — so the holder of a live
+    # claim believed it held nothing, and the ref sat there blocking the item for
+    # the whole TTL with nobody to release it. Reproduced deterministically by
+    # injecting a post-push client failure, and organically once in ~100 tries
+    # under a tight DEVRC_CLAIM_TIMEOUT. WE WON: say so.
+    if [ -n "$existing" ] && [ "$existing" = "$sha" ]; then
+      warn "the push reported failure but ${CLAIM_NS}${SLUG} on '$REMOTE_URL' carries OUR commit — the claim landed and the client failed afterwards: $(tr '\n' ' ' <"$push_err")"
+      printf '%s: CLAIMED %s%s (the push errored AFTER the ref landed)\n' "$PROG" "$CLAIM_NS" "$SLUG"
+      [ -n "$SUBJECT" ] && printf '  what:  %s\n' "$SUBJECT"
+      printf '  who:   %s <%s>\n' "$ident_name" "$ident_mail"
+      printf '  where: host %s, owner-id %s\n' "$MY_HOST" "$MY_OWNER_ID"
+      printf '  on:    %s [%s]\n' "$REMOTE_URL" "$REMOTE_SOURCE"
+      printf '  sha:   %s\n' "$existing"
+      printf '  release it when done or abandoned:  %s --release %s\n' "$PROG" "$SLUG"
+      exit 0
+    fi
+
+    if [ -n "$existing" ]; then
       rc=0; report_existing "$SLUG" || rc=$?
       exit "$rc"
     fi
