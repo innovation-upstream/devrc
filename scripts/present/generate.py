@@ -96,7 +96,9 @@ def main(argv=None) -> int:
                     help="output HTML path (default: present.html)")
     ap.add_argument("--repo", default=None, help="repo root to measure (default: this checkout)")
     ap.add_argument("--sanitize", action="store_true",
-                    help="swap real identifiers for synthetic stand-ins, for a shareable copy")
+                    help="shareable copy: swap real identifiers for synthetic "
+                         "stand-ins, and WITHHOLD harvested prose (which no "
+                         "substitution can redact) rather than pretend to clean it")
     ap.add_argument("--no-systemd", action="store_true",
                     help="skip systemd probing (that row then renders UNMEASURED, with the reason)")
     ap.add_argument("--no-network", action="store_true",

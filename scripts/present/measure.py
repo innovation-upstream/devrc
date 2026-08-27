@@ -84,10 +84,83 @@ class Measurement:
     settle: str | None = None        # the command that would settle it
     columns: tuple[str, ...] = ()
     rows: tuple[tuple[str, ...], ...] = ()
+    #: What KIND of text each column holds, parallel to `columns`. Empty means
+    #: "every column is ordinary", which is the pre-existing behaviour.
+    #:
+    #: 🔴 THIS EXISTS BECAUSE SUBSTITUTION CANNOT REDACT PROSE, AND THE PAGE
+    #: SHIPPED CLAIMING OTHERWISE. `--sanitize` rewrites identifier CLASSES it
+    #: has been shown; a measurer that harvests a human-written sentence out of
+    #: a file hands it text with no class at all. Measured 2026-08-26: three
+    #: third-party project names rode out of `claude/skills/*/SKILL.md`
+    #: descriptions into a page stamped SANITIZED, while the same run took four
+    #: other identifier classes to zero — so the banner looked clean.
+    #:
+    #: Widening the name list was tried and REJECTED ON MEASUREMENT: sourcing
+    #: names from the index store, the skill directories AND every directory
+    #: under the operator's workspace (149 names) still left one project name
+    #: untouched — its directory is `<name>-ai` and the leak was a bare `<name>`
+    #: in a sentence — while rewriting `test`, `fast` and `scratch` wherever
+    #: they appeared as English words. A name list is fail-OPEN by construction:
+    #: it closes exactly the names something happened to be called after.
+    #:
+    #: So the kinds split the problem where it actually splits:
+    #:
+    #:   `""`      ordinary — sanitized by the identifier classes, as before.
+    #:   `"name"`  a LOCAL IDENTIFIER in a structured cell. Known local names
+    #:             are substituted inside it. Confined to the cell, so a skill
+    #:             called `bar` cannot rewrite the word "bar" in prose — the
+    #:             corruption that forced the length ladder in the first place.
+    #:   `"prose"` HUMAN-AUTHORED PROSE harvested from a file. WITHHELD in a
+    #:             sanitized build, never scrubbed, because no rule can
+    #:             enumerate what a sentence might name.
+    #:
+    #: `PROSE_LEDGER` in `scripts/tests/test_present_sanitize.py` pins the
+    #: declarations two-way — a registry key that gains, loses or CHANGES one
+    #: fails the suite.
+    #:
+    #: 🔴 READ WHAT THAT DOES AND DOES NOT COVER, because the first version of
+    #: this comment claimed more than the test delivers. The ledger compares
+    #: DECLARATIONS against declarations. A brand-new column that harvests prose
+    #: and declares NOTHING produces no ledger entry, so the comparison still
+    #: holds and the suite stays green — the ledger cannot catch a declaration
+    #: that was never written. It catches one that is deleted, truncated,
+    #: mistyped or demoted, which is the likelier regression once the field
+    #: exists. The never-declared case is caught by a human asking the question
+    #: below, and by nothing else.
+    #:
+    #: So, when adding a measurer: can a cell in that column contain a sentence
+    #: somebody WROTE, in a file this module does not own? If yes it is `prose`.
+    column_kinds: tuple[str, ...] = ()
 
     @property
     def measured(self) -> bool:
         return self.status == MEASURED
+
+    def kind_of(self, index: int) -> str:
+        """The declared kind of column `index`.
+
+        Two different absences, and they must not answer the same way:
+
+          * NOTHING is declared on this measurement (`column_kinds` empty) —
+            every column is ordinary, which is the pre-existing behaviour for
+            the twenty-one rows that declare nothing.
+          * SOMETHING is declared but this index is past the end — the row is
+            RAGGED, i.e. it has more cells than the declaration covers.
+
+        🔴 THE RAGGED CASE FAILS CLOSED, and returning `""` for it was a hole.
+        Demonstrated: a measurement declaring `("name", "prose")` with a
+        three-cell row emitted the third cell VERBATIM into a sanitized page,
+        because the position past the end read as "ordinary". A declaration
+        that does not reach a cell is exactly the state where this module knows
+        least about that cell, so it withholds rather than publishes. Raising
+        instead would take down a whole build over one ragged row — a page with
+        one withheld cell is the better failure.
+        """
+        if not self.column_kinds:
+            return ""
+        if index < len(self.column_kinds):
+            return self.column_kinds[index]
+        return "prose"
 
 
 @dataclass
@@ -422,6 +495,15 @@ def m_skill_listing(env: Env) -> dict:
         ),
         source="scripts/lib/skill_tiers.py (the ledger's own parser), ratchet from scripts/tests/test_skill_tiers.py",
         columns=("what", "measured"),
+        #: 🔴 THE `what` COLUMN IS `name` FOR THREE ROWS OUT OF TEN, AND WHICH
+        #: THREE IS NOT FIXED. `costliest tier-A entry: <skill>` interpolates a
+        #: skill name into an otherwise-static label, so this column leaks
+        #: whenever the costliest entries happen to be the client-named skills.
+        #: Today they are not — measured `clickup`, `session-manager`,
+        #: `window-triage` — which is exactly why declaring it only when the
+        #: leak is visible would be wrong: the cell contents are a ranking that
+        #: moves on its own, with no commit to notice it.
+        column_kinds=("name", ""),
         rows=tuple(rows),
     )
 
@@ -465,6 +547,19 @@ def m_skill_inventory(env: Env) -> dict:
         ),
         source="claude/skills/*/SKILL.md front-matter + claude/skill-tiers.json",
         columns=("skill", "tier", "what it is (its own words)", "path"),
+        #: The description is the skill AUTHOR's sentence, not this module's, so
+        #: it can name anything — a client, a product, a hostname this module has
+        #: never been shown. It is `prose`, and a sanitized build withholds it.
+        #: The skill name is a local identifier and appears twice (bare, and
+        #: inside the path), so both of those cells are `name`.
+        #:
+        #: 🔴 EVERY name IS SUBSTITUTED, NOT JUST THE ONES THAT LOOK LIKE
+        #: CLIENTS — and that is the entitlement argument, not over-caution.
+        #: Redacting only the names judged sensitive would publish the judgement:
+        #: a reader seeing 35 real names and 2 stand-ins learns exactly which
+        #: two are the clients. Uniform substitution leaks neither the names nor
+        #: the boundary.
+        column_kinds=("name", "", "prose", "name"),
         rows=tuple(rows),
     )
 
@@ -633,8 +728,6 @@ def m_gate_tiers(env: Env) -> dict:
     # The derivation NAME is the reliable token: `checks.${system} = { … }` is
     # an interpolated attrset, so the attribute path is not literally in the file.
     checks = sorted(set(re.findall(r'runCommandLocal\s+"devrc-([a-z0-9-]+)"', ftext)))
-    gtext = gate.read_text(encoding="utf-8", errors="replace")
-    exits = sorted(set(re.findall(r"^#\s+(\d+)\s*=\s*(.+)$", gtext, re.M)))
     #: 🔴 THE TIERS ARE A STRUCTURE, SO THE COUNT IS DERIVED FROM IT. This layer's
     #: charter is that no quantity is TYPED — a literal `2` here would be the
     #: first hand-maintained number on a page built to have none, and it would
@@ -647,7 +740,6 @@ def m_gate_tiers(env: Env) -> dict:
         ("sandbox source", "a `cp -r ${./.}` store copy with NO .git — repo-local git facts evaluate differently"),
         ("gate.sh could-not-vouch code", "90 — status/content disagreement or a truncated run; NOT 'the tests failed'"),
     ]
-    rows += [(f"gate.sh exit {code}", desc.strip()) for code, desc in exits if code in {"0", "1", "2", "90"}]
     return dict(
         value=(f"{len(tiers)} tiers, {len(checks)} flake checks" if checks
                else f"{len(tiers)} tiers"),
@@ -660,8 +752,103 @@ def m_gate_tiers(env: Env) -> dict:
             "#773. Name the tier AND the base sha in any claim that a merge is safe."
             + (f" flake checks discovered: {', '.join(checks)}." if checks else "")
         ),
-        source="scripts/gate.sh header + flake.nix checks",
+        #: 🔴 THIS USED TO SAY "scripts/gate.sh header + flake.nix checks" AND
+        #: WAS STALE THE MOMENT THE HARVEST MOVED OUT. This measurer no longer
+        #: reads a byte of `gate.sh`'s text — it only checks the file EXISTS —
+        #: so the old provenance contradicted the note below it inside one
+        #: function. Provenance is this page's core promise; a `source` that
+        #: names a file the code stopped reading is the page lying about itself.
+        source="flake.nix `checks` + literals in scripts/present/measure.py "
+               "(scripts/gate.sh is checked for existence only)",
         columns=("tier / fact", "what it is"),
+        #: 🔴 NO DECLARATION, AND THE SPLIT BELOW IS WHY. Every cell here is a
+        #: literal written in THIS module and reviewed with it, so none of it is
+        #: harvested prose. The harvested half — `gate.sh`'s exit-code comments —
+        #: used to share this column, which forced the whole column to be
+        #: declared `prose`; that withheld the two tier COMMANDS as well, and
+        #: those commands are the entire argument of the section this table sits
+        #: in. Withholding was correct and the granularity was not: `column_kinds`
+        #: is per COLUMN, so mixing authored and harvested text in one column
+        #: makes the safe half pay for the unsafe half. Separated into
+        #: `m_gate_exit_codes` instead.
+        rows=tuple(rows),
+    )
+
+
+def m_gate_exit_codes(env: Env) -> dict:
+    """`gate.sh`'s exit-code legend, parsed out of its `# Exit:` comment block.
+
+    Split out of `m_gate_tiers` deliberately — see the note there. This is the
+    HARVESTED half: whoever edits `scripts/gate.sh` writes these sentences, so
+    the column is `prose` and a sanitized build withholds it. The CODES stay
+    visible, which is the part a reader needs to look one up.
+    """
+    gate = env.repo / "scripts" / "gate.sh"
+    if not gate.is_file():
+        raise Unmeasurable(f"{gate} does not exist")
+    gtext = gate.read_text(encoding="utf-8", errors="replace")
+    #: 🔴 THE `Exit:` PREFIX IS PART OF THE GRAMMAR, AND MISSING IT DROPPED THE
+    #: SUCCESS CODE. `gate.sh` writes its legend as a hanging indent —
+    #: `# Exit: 0 = …` on the first line, `#       1 = …` after it — so a
+    #: pattern anchored on `^#\s+(\d+)` matches every code EXCEPT 0, and the row
+    #: rendered "3 exit codes documented in gate.sh's header" while the header
+    #: documents four. A reader looking up a code would have found the legend
+    #: missing the one that means everything passed.
+    #:
+    #: This is the SAME defect `m_drift_ladder` already carries a 🔴 note about
+    #: ("a count of one thing wearing the name of another"), reintroduced 370
+    #: lines away by a new parser. Pinned now by
+    #: `test_the_gate_exit_code_legend_matches_gate_sh`, because the count is a
+    #: `value` string and NOTHING in this suite pinned any `value` string —
+    #: hardcoding it to the right number was measured to pass.
+    #: 🔴 THE BLOCK IS THE UNIT, NOT THE LINE — AND WIDENING THE PATTERN WITHOUT
+    #: RE-BOUNDING IT PUBLISHED FICTION. The previous round dropped a
+    #: `{"0","1","2","90"}` allowlist as "dead code". It was dead as a
+    #: REACHABILITY matter and load-bearing as a VALUE bound: it was the only
+    #: thing confining the harvest to real exit codes. With it gone and the
+    #: pattern anchored on nothing but `^#`, ANY comment line in `gate.sh` that
+    #: happens to read `# N = …` became an exit code on the page. Measured:
+    #: one ordinary body comment (`#   7 = the number of retries …`) rendered a
+    #: fifth code, with the suite green.
+    #:
+    #: Restoring a literal allowlist would only re-freeze the answer this page
+    #: exists to MEASURE. So the bound is structural instead: the legend is the
+    #: CONTIGUOUS run of comment lines beginning at the `# Exit:` anchor, and it
+    #: ends at the first line that is not a continuation. A code documented
+    #: outside that block is not in the legend, which is exactly what `source`
+    #: and the row label claim.
+    exits: list[tuple[str, str]] = []
+    started = False
+    for line in gtext.splitlines():
+        head = re.match(r"^#\s*Exit:\s*(\d+)\s*=\s*(.+)$", line)
+        cont = re.match(r"^#\s*(\d+)\s*=\s*(.+)$", line)
+        if head:
+            started = True
+            exits.append((head.group(1), head.group(2)))
+        elif started and cont:
+            exits.append((cont.group(1), cont.group(2)))
+        elif started:
+            break
+    #: Numeric, not lexical: a two-digit code must not sort before a one-digit
+    #: one, and `sorted()` on the string puts `10` ahead of `2`.
+    rows = [(code, desc.strip())
+            for code, desc in sorted(set(exits), key=lambda kv: int(kv[0]))]
+    if not rows:
+        raise Unmeasurable(
+            "no `# Exit: N = …` legend block was found in scripts/gate.sh — an "
+            "empty parse is a broken read, not a script without exit codes")
+    return dict(
+        value=f"{len(rows)} exit codes in gate.sh's Exit: legend block",
+        detail=(
+            "🔴 90 is the one to understand: it means the runner's own verdict "
+            "and its exit status DISAGREED, or a run was truncated. That is "
+            "'this gate cannot vouch for the run', which is not the same claim "
+            "as 'the tests failed' — read the log rather than debugging a diff "
+            "against it."
+        ),
+        source="scripts/gate.sh — the contiguous `# Exit:` legend block only",
+        columns=("exit", "meaning"),
+        column_kinds=("", "prose"),
         rows=tuple(rows),
     )
 
@@ -1040,6 +1227,13 @@ def m_drift_ladder(env: Env) -> dict:
         ),
         source="the EXIT CODES block in scripts/drift-check.sh (pinned against ship.sh by test_drift_check.py)",
         columns=("rc", "meaning"),
+        #: `meaning` is parsed straight out of `drift-check.sh`'s EXIT CODES
+        #: banner — up to ~420 chars of free prose per cell, authored by whoever
+        #: last edited that script. Declared `prose` for the same reason as the
+        #: skill descriptions: this module cannot enumerate what a sentence in
+        #: another file might name, and "it looks fine today" is the reasoning
+        #: this whole field exists to stop being load-bearing.
+        column_kinds=("", "prose"),
         rows=tuple(rows),
     )
 
@@ -1470,6 +1664,8 @@ REGISTRY: tuple[tuple[str, str, str, object, str], ...] = (
      "python -c \"import sys;sys.path.insert(0,'scripts');from present.measure import WORK_INTAKE;print(*WORK_INTAKE,sep=chr(10))\""),
     ("gate.tiers", "constraints", "The two gate tiers", m_gate_tiers,
      "nix develop --impure --command bash scripts/gate.sh --tier both"),
+    ("gate.exit_codes", "constraints", "gate.sh's exit-code legend", m_gate_exit_codes,
+     "grep -E '^#[[:space:]]*(Exit:)?[[:space:]]*[0-9]+[[:space:]]*=' scripts/gate.sh"),
     ("gate.protection", "constraints", "What actually BLOCKS a merge", m_branch_protection,
      "gh api /repos/<owner>/<repo>/branches/main/protection --jq .required_status_checks"),
     ("tests.pytest", "constraints", "Per-target collected-test floors", m_pytest_floors,
