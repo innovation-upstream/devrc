@@ -1209,9 +1209,37 @@ def has_live_agent(task):
     return agent.get("status") in LIVE_AGENT_STATUSES
 
 
+def session_role(task, session_id):
+    """This session's ROLE on the card — "worked" | "created" | "read" — or None.
+
+    Costs nothing extra, exactly like `has_live_agent`: `sessions` already rides along
+    in the `/api/tasks/{id}` payload `live_task` fetches, so this reads a field that
+    was paid for either way. Measured on the live board 2026-08-27: each entry carries
+    `sessionId`, `role`, `project`, `cwd`, `host`, `firstSeenAt`, `lastSeenAt`.
+
+    🔴 None is the LOUD direction. An absent `sessions` array, a shape this hook does
+    not recognise, an empty session id, or simply no row for this session all resolve
+    to None, which leaves the verdict wherever it already was — a guard that went
+    QUIET on a payload it could not parse would be walkable by any board change.
+    """
+    if not isinstance(task, dict) or not session_id:
+        return None
+    rows = task.get("sessions")
+    if not isinstance(rows, list):
+        return None
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        if r.get("sessionId") != session_id:
+            continue
+        role = r.get("role")
+        return role if isinstance(role, str) else None
+    return None
+
+
 def writeback_state(task, first_read_ts, skew=CLOCK_SKEW_ALLOWANCE_SECS,
-                    work_ts=None):
-    """"closed" | "written" | "delegated" | "missing" | "unknown" for one live task.
+                    work_ts=None, session_id=None):
+    """"closed" | "written" | "delegated" | "authored" | "missing" | "unknown".
 
     🔴 "delegated" is checked LAST, after the comment scan — never before it. A card
     can have both a live agent AND a real write-back, and that is "written"; ordering
@@ -1256,6 +1284,26 @@ def writeback_state(task, first_read_ts, skew=CLOCK_SKEW_ALLOWANCE_SECS,
             return "written"
     if has_live_agent(task):
         return "delegated"
+    # 🔴 CHECKED LAST, and additively — every branch above keeps its exact prior
+    # meaning. A card this session FILED is not a card this session WORKED: the body
+    # describes work to be done later, so there is nothing to write back yet.
+    #
+    # Measured 2026-08-27, and it is the reason this exists: authoring a task makes
+    # the guard fire on it TWICE OVER. `flows/task-authoring.md` Phase 0 mandates
+    # checking the board for an existing task, so reading the hits arms the guard on
+    # each; then `task create` returns only `{"id":N}` with no echo, so verifying the
+    # create means reading the new card, which arms it again. The session then does
+    # unrelated work and Stop blocks on a card nobody has started. The block asked for
+    # `ready_for_review`, which on task #390 would have pushed the operator a
+    # notification claiming a CONTROL-PLANE REBOOT task was ready for review.
+    #
+    # 🔴 ONLY "created" — never "read". A genuine pickup is a `read` too (read the
+    # card, work, then owe the comment), so suppressing `read` would disable the
+    # guard's entire purpose rather than narrow it. The duplicate-check read of an
+    # OTHER task during authoring therefore still fires, and that is deliberate: no
+    # field distinguishes it from a pickup that has not written back yet.
+    if session_role(task, session_id) == "created":
+        return "authored"
     return "missing"
 
 
@@ -1314,6 +1362,36 @@ def missing_text(task_id, first_read_ts, session_id=""):
            "dismiss": dismiss_cmd(task_id, session_id),
            "flow": FLOW_DEPLOYED, "flow_repo": FLOW_REPO}
     )
+
+
+def authored_text(task_id, session_id=""):
+    """A NOTICE, never a block: this session FILED task N rather than working it.
+
+    🔴 It is not silent, and that is the whole design of this rung. Upstream, `created`
+    is TERMINAL and outranks `worked` — so a session that files a card and then goes on
+    to DO it keeps the `created` role, and going silent here would lose exactly the
+    write-back this hook exists to protect. A notice ends the turn (it cannot force a
+    continuation) while still putting the one case that needs a human decision on
+    screen. Nothing here is owed unless that second sentence applies.
+    """
+    lines = [
+        "clawgate: task %d was FILED by this session, not worked — no write-back is "
+        "owed." % task_id,
+        "This is a NOTICE and nothing is blocked; the turn may end.",
+        "",
+        "🔴 UNLESS this session also DID the work on %d. Upstream, the `created` role "
+        "is terminal and outranks `worked`, so a file-then-work session still reads as "
+        "`created` and this hook cannot tell the two apart. If you worked it, write it "
+        "back yourself:" % task_id,
+        '  clawgatectl task comment %d --body "<what shipped, evidence per acceptance '
+        'criterion, and an explicit NOT-verified list>"' % task_id,
+        "",
+        "Do NOT flip the status just to quiet this line — `ready_for_review` pushes a "
+        "notification to Zach, and on a task nobody has started that is a false claim.",
+    ]
+    if session_id:
+        lines.append("session: %s" % session_id)
+    return "\n".join(lines)
 
 
 def unknown_text(task_id, first_read_ts, error, session_id=""):
@@ -1485,7 +1563,8 @@ def stop_decision(data, reader=None, budget=STOP_BUDGET_SECS,
         err = "the board returned a task payload this hook could not read"
         try:
             task = reader(tid, timeout=min(PER_TASK_TIMEOUT_SECS, remaining))
-            state = writeback_state(task, first_read_ts, work_ts=worked_at)
+            state = writeback_state(task, first_read_ts, work_ts=worked_at,
+                                    session_id=session_id)
         except LiveReadError as e:
             state, err = "unknown", e
         except Exception as e:            # noqa: BLE001 — a reader that raises anything
@@ -1494,6 +1573,16 @@ def stop_decision(data, reader=None, budget=STOP_BUDGET_SECS,
         # Burning a fire here would let a long agent run climb the ladder and then
         # block on a genuinely missing write-back with its budget already gone.
         if state in ("closed", "written", "delegated"):
+            continue
+        if state == "authored":
+            # 🔴 Appended to `notices`, NEVER to `blocks` — regardless of which rung
+            # `escalate` returns. Same clamp as "unknown" below and for the same
+            # reason: only a MEASURED missing write-back may spend the block budget,
+            # and a card this session merely filed is not one. Its own counter kind
+            # keeps it off the "missing" ladder entirely, so an authoring session
+            # cannot climb toward a block it can never legitimately reach.
+            if escalate(bump_fires(state_dir, tid, "authored")) != "silent":
+                notices.append(authored_text(tid, session_id))
             continue
         if state == "unknown":
             # 🔴 NEVER blocks, and spends its OWN counter. Cannot-measure is reported,
