@@ -1696,7 +1696,32 @@ def entry_mapping(text: str, *, filename: str, scope: str) -> dict[str, object]:
     return fm
 
 
-def load_index(root: Path, *, on_malformed: str = ON_MALFORMED_RAISE) -> SubsystemIndex:
+def visible_scope_set(visible_scopes: Sequence[str] | None) -> set[str] | None:
+    """One allowlist -> the normalized set every narrowing site compares against.
+
+    🔴 ONE PLACE, because this predicate is now spelled at three of them — the
+    index loader below, `subsystem_recall.load_store`, and the API's `/snapshot`
+    candidate list, which walks the store root directly and so cannot use the
+    index at all. Open-coded at three sites it would be wrong at two of them in
+    the same direction, and the direction that matters here is "wider than the
+    caller's allowlist".
+
+    🔴 `None` IN, `None` OUT — UNRESTRICTED. An EMPTY sequence returns an EMPTY
+    SET, which is its opposite: nothing is visible. Both are falsy, so every
+    caller must test `is None`, never truthiness; that asymmetry is the whole
+    fail-closed direction of the scoped-token design.
+    """
+    if visible_scopes is None:
+        return None
+    return {normalize_ref(s) for s in visible_scopes}
+
+
+def load_index(
+    root: Path,
+    *,
+    on_malformed: str = ON_MALFORMED_RAISE,
+    visible_scopes: Sequence[str] | None = None,
+) -> SubsystemIndex:
     """Read `<root>/<scope>/*.md` into a `SubsystemIndex`. READ-ONLY.
 
     `README.md` is skipped in every scope — each scope dir carries one as its
@@ -1730,7 +1755,63 @@ def load_index(root: Path, *, on_malformed: str = ON_MALFORMED_RAISE) -> Subsyst
     interpret, while an unreadable one means the store was not fully READ — the
     set of entries is then unknown, so there is nothing honest to degrade to.
     `load_store`/`build_report` name it `index entry unreadable`.
+
+    🔴 `visible_scopes` IS APPLIED BEFORE ANY FILE IS OPENED, AND THAT IS THE
+    POINT OF IT BEING HERE RATHER THAN ON THE RESULT. Narrowing the index
+    afterwards still WALKS and READS every scope, which with a scoped API caller
+    in front of it is three separate defects, all measured:
+
+      * DISCLOSURE. One unreadable entry made `/recall` and `/search` answer
+        `503 index entry unreadable: under <store> (PermissionError: …
+        '<store>/<denied-scope>/locked-entry.md')` — the full path of a file in
+        a scope that caller is not allowed to know exists. A scoped reader had
+        no other way to learn that name.
+      * DENIAL OF SERVICE. One unreadable file anywhere in the store broke
+        recall for EVERY caller, including the ones whose own scopes were fine.
+      * A HUNG THREAD. `read_text` on a FIFO named `*.md` blocks until somebody
+        writes to it. On a `replicas: 1` service that is worse than the 503: the
+        request never returns and the worker is gone. `/snapshot` already
+        refuses non-regular files by kind; this path had no such guard, and now
+        does not need one for a scope the caller cannot name.
+
+    An unreadable file in a scope the caller CAN see still raises — that is the
+    four-state rule and it is unchanged. The local CLI passes no allowlist at
+    all (`None`), so its behaviour is byte-identical to before.
+
+    🔴 AND THAT LAST SENTENCE IS ALSO THE LIMIT OF THIS FIX — SAID HERE RATHER
+    THAN LEFT TO BE DISCOVERED. `visible_scopes=None` skips nothing, so for an
+    UNRESTRICTED caller all three failures above are exactly as open as they
+    were. That includes the credential the pod is deployed with today: a bare
+    legacy row is unrestricted, so **the live API is not protected by this
+    change**; only a scoped token whose allowlist excludes the bad scope is.
+    Measured on this tree, `load_store` over a store whose `quartz-mine` scope
+    holds one hostile file:
+
+        visible_scopes=None        FIFO `hang.md`     -> HUNG (>6s, killed)
+        visible_scopes=None        `.#locked.md`      -> EntryUnreadableError
+        visible_scopes=('kelp-forest',)  both         -> loads, scopes=(kelp-forest,)
+        visible_scopes=('quartz-mine',)  FIFO         -> HUNG (its own scope)
+
+    Closing it for everybody needs a KIND check on the candidate before `open()`
+    — `server.py`'s `_ENTRY_ACTIONS` already classifies exactly these cases
+    (`KIND_OTHER: REFUSE`, "a FIFO named `*.md` blocked `open()` forever") for
+    `/snapshot`, and that classifier lives in the API rather than here. Left
+    OUT OF THIS CHANGE on purpose: it also refuses a symlink-to-regular-file
+    entry, which this loader accepts today, so it is a behaviour change for
+    every local CLI caller and wants its own review. **Closing condition: an
+    entry-kind guard in this module, or a decision on this PR that the residual
+    is accepted.**
+
+    ⚠ `Path.glob("*.md")` DOES match a leading dot — measured, not assumed — so
+    an Emacs lock file (`.#entry.md`, a dangling symlink) is a candidate and has
+    been observed 503ing `/api/v1/recall/<scope>` in practice.
+
+    ⚠ NOT A SUBSTITUTE FOR THE RESULT NARROWING in `load_store`. That one is
+    still authoritative for the shape of the answer; this one exists so the
+    denied scope is never TOUCHED. Both call `visible_scope_set`, so they cannot
+    come to disagree about what an allowlist means.
     """
+    allowed = visible_scope_set(visible_scopes)
     mappings: list[Mapping[str, object]] = []
     scopes: list[str] = []
     # Both `sorted()` calls here are DETERMINISM guards: they fix which entry a
@@ -1739,6 +1820,13 @@ def load_index(root: Path, *, on_malformed: str = ON_MALFORMED_RAISE) -> Subsyst
     # control `iterdir()` order — so it is the one guard in this module a
     # mutation sweep cannot kill. Stated rather than left to look covered.
     for scope_dir in sorted(p for p in Path(root).iterdir() if p.is_dir()):
+        if allowed is not None and normalize_ref(scope_dir.name) not in allowed:
+            # 🔴 `continue` BEFORE `scopes.append`, not after: registering the
+            # name here would put a denied scope on `index.scopes` — the
+            # `known_scopes` enumeration channel, reopened one line above the
+            # filter that closes it. Nothing about this directory is read,
+            # listed, classified or named.
+            continue
         scopes.append(scope_dir.name)
         for md in sorted(scope_dir.glob("*.md")):
             if md.name == "README.md":

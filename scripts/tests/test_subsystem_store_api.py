@@ -5910,9 +5910,114 @@ class TestScopedTokenRowGuards:
             assert "invalid scope in token row 1 of 1" in str(exc.value), typo
             assert "folds away" in str(exc.value), typo
 
-    def test_GUARD_11_two_rows_naming_ONE_identity_are_refused(self, tmp_path: Path):
-        # Two rows, both well-formed, both with real allowlists — every earlier
-        # guard passes on every row. Only the cross-row check can see this.
+    def test_GUARD_11_the_MIGRATION_SHAPE_is_refused_not_silently_collapsed(
+        self, tmp_path: Path
+    ):
+        """🔴 THE FAIL-OPEN THIS GUARD EXISTS FOR, AND IT WAS LIVE.
+
+        "Scope a credential its holder already has" is the migration's own first
+        step, and the natural way to write it is to leave the bare line and add a
+        mapped one below. The loader used to drop the second row BEFORE parsing
+        it — keyed on the token, order preserved — so this file loaded as ONE
+        record, `identity='legacy' scopes=None`: UNRESTRICTED. No error. The
+        mapped row did not exist, and the only signal was a banner reading
+        "1 of 1 token rows are bare" over a two-line file.
+
+        The two authorities are named in the message because the whole content
+        of the complaint is that they DISAGREE — and neither an identity nor a
+        scope name is a credential, so naming them keeps guard 5's property.
+        """
+        path = self._write(
+            tmp_path, ZACH_TOKEN, f"{ZACH_TOKEN} zach {ALLOW_SCOPE}"
+        )
+        with pytest.raises(ValueError) as exc:
+            api.load_tokens(path, {}, warn=lambda _l: None)
+        message = str(exc.value)
+        assert "duplicate token in rows 1 and 2" in message
+        # Both authorities, spelled out — the unrestricted one by name, so an
+        # operator reading the pod log can see WHICH reading they nearly got.
+        assert "legacy (UNRESTRICTED)" in message
+        assert f"zach ({ALLOW_SCOPE})" in message
+        # …and never the credential itself, on the one file whose whole content
+        # is credentials.
+        assert ZACH_TOKEN not in message
+
+    def test_GUARD_11_a_DUPLICATE_TOKEN_ROW_no_longer_bypasses_guards_6_to_10(
+        self, tmp_path: Path
+    ):
+        """🔴 THE SECOND HALF OF THE SAME DEFECT: a dropped row was never
+        VALIDATED either.
+
+        This second row carries an invalid identity AND an invalid scope. Under
+        the pre-fix loader the whole row vanished before guard 6 ran and the file
+        loaded clean as `zach/{ALLOW_SCOPE}`. Every row must reach the ladder, so
+        the row's OWN first failure — guard 7 — is what must fire, and the
+        assertion names guard 7's sentence rather than merely `ValueError`: a
+        test satisfied by any raise would be green with guard 7 deleted.
+        """
+        path = self._write(
+            tmp_path,
+            f"{ZACH_TOKEN} zach {ALLOW_SCOPE}",
+            f"{ZACH_TOKEN} Za_CH_BAD !!!!",
+        )
+        with pytest.raises(ValueError) as exc:
+            api.load_tokens(path, {}, warn=lambda _l: None)
+        message = str(exc.value)
+        assert "invalid identity in token row 2 of 2" in message
+        assert "Za_CH_BAD" in message
+
+    def test_GUARD_11_collapses_ONE_GRANT_SPELLED_TWO_WAYS(self, tmp_path: Path):
+        """🔴 THE OTHER DIRECTION — OVER-REFUSING IS ALSO A FAILURE, and this is
+        the case a purely TEXTUAL collapse gets wrong.
+
+        `Kelp_Forest` and `kelp-forest` are the same grant: the parser folds both
+        to one scope. The rows are not identical as text and ARE identical as
+        records, and it is the record that decides. A guard comparing raw lines
+        would refuse a file that says one unambiguous thing.
+        """
+        path = self._write(
+            tmp_path,
+            f"{ZACH_TOKEN} zach Kelp_Forest",
+            f"{ZACH_TOKEN} zach {ALLOW_SCOPE}",
+        )
+        assert loaded(path, {}) == [(ZACH_TOKEN, "zach", (ALLOW_SCOPE,))]
+
+    def test_GUARD_11_fires_even_when_the_IDENTITY_agrees(self, tmp_path: Path):
+        """One token, one identity, two DIFFERENT allowlists. Guard 12 would also
+        see this pair — and would tell the operator to invent `zach-prev`, which
+        is the wrong advice for what is one credential written twice. Guard 11
+        runs first precisely so the more specific complaint wins.
+        """
+        path = self._write(
+            tmp_path,
+            f"{ZACH_TOKEN} zach {ALLOW_SCOPE}",
+            f"{ZACH_TOKEN} zach {DENY_SCOPE}",
+        )
+        with pytest.raises(ValueError) as exc:
+            api.load_tokens(path, {}, warn=lambda _l: None)
+        assert "duplicate token in rows 1 and 2" in str(exc.value)
+        assert "duplicate identity" not in str(exc.value)
+
+    def test_GUARD_11_runs_BEFORE_12_so_an_IDENTICAL_MAPPED_ROW_still_loads(
+        self, tmp_path: Path
+    ):
+        """🔴 THE ORDER IS LOAD-BEARING, AND THIS IS WHAT BREAKS IF IT INVERTS.
+
+        One mapped row pasted twice, verbatim. Guard 11 collapses it to a single
+        record; if guard 12 ran first it would see two rows claiming `zach` and
+        refuse the file. Nothing about this input is ambiguous, so it must load.
+        """
+        path = self._write(
+            tmp_path,
+            f"{ZACH_TOKEN} zach {ALLOW_SCOPE}",
+            f"{ZACH_TOKEN} zach {ALLOW_SCOPE}",
+        )
+        assert loaded(path, {}) == [(ZACH_TOKEN, "zach", (ALLOW_SCOPE,))]
+
+    def test_GUARD_12_two_rows_naming_ONE_identity_are_refused(self, tmp_path: Path):
+        # Two rows, both well-formed, both with real allowlists, and two DISTINCT
+        # tokens so guard 11 cannot be what fires — every earlier guard passes on
+        # every row. Only the cross-row identity check can see this.
         path = self._write(
             tmp_path,
             f"{ZACH_TOKEN} zach {ALLOW_SCOPE}",
@@ -5922,6 +6027,24 @@ class TestScopedTokenRowGuards:
             api.load_tokens(path, {}, warn=lambda _l: None)
         assert "duplicate identity 'zach'" in str(exc.value)
         assert "rows 1 and 2" in str(exc.value)
+
+    def test_GUARD_12_names_the_PHYSICAL_rows_across_a_collapse(
+        self, tmp_path: Path
+    ):
+        """The index an operator is told to look at must be the LINE they can
+        see. Row 2 collapses into row 1, so the clash is between rows 1 and 3 —
+        a position in the post-collapse list would call it "rows 1 and 2" and
+        send them to the wrong line.
+        """
+        path = self._write(
+            tmp_path,
+            f"{ZACH_TOKEN} zach {ALLOW_SCOPE}",
+            f"{ZACH_TOKEN} zach {ALLOW_SCOPE}",
+            f"{DANA_TOKEN} zach {DENY_SCOPE}",
+        )
+        with pytest.raises(ValueError) as exc:
+            api.load_tokens(path, {}, warn=lambda _l: None)
+        assert "token rows 1 and 3 both claim it" in str(exc.value)
 
     def test_a_WELL_FORMED_mapped_file_loads_with_its_allowlist(self, tmp_path: Path):
         """The positive control for all six guards above. Without it, a parser
@@ -6464,13 +6587,19 @@ class TestTheReaderNarrowingItself:
         )
         assert narrow.scopes == (ALLOW_SCOPE,)
 
-    def test_an_UNREADABLE_store_still_RAISES_rather_than_narrowing_to_empty(
+    def test_a_MISSING_store_still_RAISES_rather_than_narrowing_to_empty(
         self, tmp_path: Path
     ):
         """🔴 THE FOUR-STATE RULE SURVIVES THE FILTER. `store-unreachable` and
         "you may see nothing" both produce an empty index; only the first may be
         a raise, and collapsing them is the exact conflation this whole module
         exists to prevent. A filter applied BEFORE the load would have done it.
+
+        ⚠ RENAMED. This used to be called `test_an_UNREADABLE_store_still_RAISES…`
+        and passes a store root that does not EXIST — a different condition, a
+        different error type and a different line of `load_store`. The
+        genuinely-unreadable path is `TestUnreadableEntriesInDeniedScopes` below,
+        which is where the interesting behaviour is.
         """
         with pytest.raises(api.rc.StoreMissingError):
             api.rc.load_store(
@@ -6503,6 +6632,241 @@ class TestTheReaderNarrowingItself:
         assert set(api.rc.recall(scoped_store, ALLOW_SCOPE).known_scopes) == {
             ALLOW_SCOPE, DENY_SCOPE, THIRD_SCOPE
         }
+
+
+# The name in the 503 body an unreadable entry used to produce. Distinct from
+# every other literal in this file, so "did this filename reach the caller" is a
+# single `in` and cannot be satisfied by coincidence.
+LOCKED_ENTRY = "sealed-adit.md"
+# An Emacs lock file: a DANGLING symlink whose name starts with a dot and ends
+# `.md`. `Path.glob("*.md")` matches a leading dot — measured, not assumed, and
+# pinned by a test below — so it IS a candidate entry, and this exact shape has
+# been observed 503ing `/api/v1/recall/<scope>` in practice.
+EMACS_LOCK = ".#sealed-adit.md"
+
+
+def _make_unreadable(store: Path, scope: str, kind: str) -> Path:
+    """Put ONE hostile candidate entry into `<store>/<scope>/`.
+
+    `kind` is `perm` (a mode-000 regular file), `emacs` (the dangling lock-file
+    symlink) or `fifo` (a named pipe, which blocks `open()` until somebody
+    writes). All three are real shapes seen on a real store, not contrivances.
+    """
+    target = store / scope / (EMACS_LOCK if kind == "emacs" else LOCKED_ENTRY)
+    if kind == "perm":
+        target.write_text(_entry("sealed-adit", scope, nuance="- sealed."))
+        os.chmod(target, 0o000)
+    elif kind == "emacs":
+        os.symlink("zach@host.4242:1767225600", target)
+    elif kind == "fifo":
+        os.mkfifo(target)
+    else:  # pragma: no cover - a typo in a test argument is a test bug
+        raise AssertionError(kind)
+    return target
+
+
+class TestUnreadableEntriesInDeniedScopes:
+    """🔴 THE INDEX LOADER USED TO OPEN EVERY FILE IN THE STORE BEFORE THE
+    ALLOWLIST WAS APPLIED, AND SCOPED CALLERS MADE THAT THREE DEFECTS AT ONCE.
+
+    `load_store` narrowed the index it got BACK; `load_index` had already walked
+    and read the whole store to build it. So one unreadable entry in a scope a
+    caller may not see:
+
+      * put that file's FULL PATH — and therefore the denied scope's name — into
+        a 503 body that caller could read. A scoped reader had no other way to
+        learn the name existed, which is the exact enumeration surface the rest
+        of this section closes;
+      * broke `/recall` and `/search` for EVERY caller, including the ones whose
+        own scopes were perfectly readable;
+      * and for a FIFO named `*.md`, blocked the request thread on `open()`
+        indefinitely. `/snapshot` already refuses that by kind
+        (`_ENTRY_ACTIONS[KIND_OTHER] == REFUSE`); the index path did not.
+
+    Fixed by pushing `visible_scopes` DOWN into `load_index`, so a denied scope
+    dir is never descended into at all.
+
+    🔴 AND THE LIMIT IS TESTED TOO, not just stated: an UNRESTRICTED caller —
+    which is what a bare legacy token is, and what the pod is deployed with
+    today — is exactly as exposed as before. `test_the_UNRESTRICTED_reading_is_
+    UNCHANGED_and_that_is_the_residual` is the honest record of that.
+    """
+
+    def _store(self, tmp_path: Path, kind: str) -> Path:
+        store = _build_store(
+            tmp_path / "store",
+            {ALLOW_SCOPE: KELP_NUANCE, DENY_SCOPE: QUARTZ_NUANCE},
+        )
+        _make_unreadable(store, DENY_SCOPE, kind)
+        return store
+
+    def test_the_FIXTURE_really_is_a_candidate_entry_glob_matches_a_dotfile(
+        self, tmp_path: Path
+    ):
+        """🔴 THE POSITIVE CONTROL FOR THE EMACS SHAPE. If `glob("*.md")` did not
+        match a leading dot, `.#sealed-adit.md` would never be opened, every
+        assertion about it would be vacuous, and the whole case would be a story
+        about a file the loader never sees.
+        """
+        d = tmp_path / "scope"
+        d.mkdir()
+        os.symlink("dangling", d / EMACS_LOCK)
+        assert [p.name for p in d.glob("*.md")] == [EMACS_LOCK]
+
+    @pytest.mark.parametrize("kind", ["perm", "emacs"])
+    def test_a_SCOPED_caller_is_unaffected_by_an_unreadable_DENIED_entry(
+        self, tmp_path: Path, kind: str
+    ):
+        store = self._store(tmp_path, kind)
+        _s, index = api.rc.load_store(
+            store, verb="recalled", visible_scopes=(ALLOW_SCOPE,)
+        )
+        assert index.scopes == (ALLOW_SCOPE,)
+        assert index.malformed == ()
+
+    @pytest.mark.parametrize("kind", ["perm", "emacs"])
+    def test_POSITIVE_CONTROL_the_same_file_in_the_CALLERS_OWN_scope_still_RAISES(
+        self, tmp_path: Path, kind: str
+    ):
+        """🔴 WITHOUT THIS THE TEST ABOVE IS SATISFIED BY A FIXTURE THAT CREATED
+        NOTHING UNREADABLE. It also pins the half that must NOT change: the
+        four-state rule. "I could not read your store" and "you may see nothing"
+        both produce an empty index, and only the first may raise.
+        """
+        store = self._store(tmp_path, kind)
+        with pytest.raises(api.rc.EntryUnreadableError):
+            api.rc.load_store(store, verb="recalled", visible_scopes=(DENY_SCOPE,))
+
+    @pytest.mark.parametrize("kind", ["perm", "emacs"])
+    def test_the_UNRESTRICTED_reading_is_UNCHANGED_and_that_is_the_residual(
+        self, tmp_path: Path, kind: str
+    ):
+        """🔴 THE LIMIT OF THE FIX, ASSERTED RATHER THAN LEFT TO BE DISCOVERED.
+
+        `visible_scopes=None` skips nothing, so an unreadable entry anywhere
+        still takes the whole store down for a local CLI caller — and for a BARE
+        LEGACY TOKEN, which is unrestricted and is what the pod is deployed with
+        today. This test exists so nobody reads the class docstring above and
+        concludes the live API is protected by it. Closing it needs an entry-KIND
+        guard in `load_index`; see that function's own note.
+        """
+        store = self._store(tmp_path, kind)
+        with pytest.raises(api.rc.EntryUnreadableError):
+            api.rc.load_store(store, verb="recalled")
+
+    def test_the_503_body_NAMED_the_denied_scope_and_its_PATH_over_HTTP(
+        self, tmp_path: Path
+    ):
+        """🔴 THE DISCLOSURE ITSELF, DRIVEN THROUGH THE SERVER — the layer where
+        it was a leak rather than an exception type.
+
+        `zach` may see `ALLOW_SCOPE` only. He asks for his OWN scope, which is
+        readable, and used to be answered `503 index entry unreadable: under …
+        (PermissionError: … '<store>/quartz-mine/sealed-adit.md')`. Both halves
+        matter: the status is a denial of service he did not cause, and the body
+        names a scope and a filename he is not allowed to know exist.
+        """
+        store = self._store(tmp_path, "perm")
+        with running(store, tokens=(ZACH,)) as (base, _):
+            code, headers, body = fetch(
+                f"{base}/api/v1/recall/{ALLOW_SCOPE}", token=ZACH_TOKEN
+            )
+        text = body.decode()
+        assert code == 200, f"{code}: {text[:400]}"
+        assert headers["X-Store-Status"] == "recalled"
+        assert KELP_NUANCE in text, "the caller's own content vanished"
+        assert DENY_SCOPE not in text
+        assert LOCKED_ENTRY not in text
+        # …and therefore not the hostile file's path either. Spelled out because
+        # the PATH is what the 503 carried and the two assertions above are only
+        # its components.
+        #
+        # 🔴 NEITHER `"unreadable" not in text` NOR `str(store) not in text` WOULD
+        # DO, and both were tried: the caveat block explains what
+        # `unstamped/unreadable/none` mean on EVERY report, and the store ROOT is
+        # printed on every report as `  store: <root>`. Both are present on a
+        # perfectly healthy 200, so both would be red for a reason that has
+        # nothing to do with this defect. What leaked was the scope name and the
+        # filename UNDER the root, which is what is asserted.
+        assert str(store / DENY_SCOPE / LOCKED_ENTRY) not in text
+
+    def test_POSITIVE_CONTROL_a_LEGACY_token_DOES_still_get_the_503(
+        self, tmp_path: Path
+    ):
+        """🔴 THE FIXTURE MUST ACTUALLY PRODUCE AN UNREADABLE ENTRY. Without this
+        the assertions above are a zero from a check that might see nothing — a
+        `chmod 000` that silently failed (running as root, an exotic filesystem)
+        would leave every one of them green against a perfectly healthy store.
+
+        It is also the honest record of the residual: unrestricted callers still
+        get the 503, and still get the path in it.
+        """
+        store = self._store(tmp_path, "perm")
+        with running(store, tokens=(GOOD_TOKEN,)) as (base, _):
+            code, headers, body = fetch(
+                f"{base}/api/v1/recall/{ALLOW_SCOPE}", token=GOOD_TOKEN
+            )
+        assert code == 503, f"the fixture is readable after all: {code}"
+        assert headers["X-Store-Status"] == "store-unreachable"
+        text = body.decode()
+        assert LOCKED_ENTRY in text and DENY_SCOPE in text
+
+    def test_a_FIFO_named_md_in_a_DENIED_scope_no_longer_HANGS_the_reader(
+        self, tmp_path: Path
+    ):
+        """🔴 THE MOST SERIOUS OF THE THREE, AND THE ONE A NORMAL TEST CANNOT
+        ASSERT: a wedged thread produces no exception and no value, so there is
+        nothing to `pytest.raises` on. It is measured in a CHILD PROCESS under a
+        wall-clock deadline, because a test that can hang is a suite that can
+        hang.
+
+        On a `replicas: 1` Deployment an `open()` that never returns is worse
+        than the 503: the worker is gone and the next request queues behind it.
+
+        The NEGATIVE CONTROL is in the same run and is what makes the timeout
+        meaningful — the unrestricted load of the SAME store must still hang, or
+        this test is measuring a FIFO that somehow opens.
+        """
+        store = self._store(tmp_path, "fifo")
+        probe = (
+            "import sys;"
+            f"sys.path.insert(0, {str(RECALL_PATH.parent)!r});"
+            "import subsystem_recall as rc;"
+            f"vs = None if sys.argv[1] == 'unrestricted' else ({ALLOW_SCOPE!r},);"
+            f"_s, i = rc.load_store({str(store)!r}, verb='recalled', visible_scopes=vs);"
+            "print('SCOPES=' + ','.join(i.scopes))"
+        )
+
+        def run(arg: str, deadline: float):
+            """The completed process, or `None` meaning it blew the deadline."""
+            try:
+                return subprocess.run(
+                    [sys.executable, "-c", probe, arg],
+                    capture_output=True, text=True, timeout=deadline,
+                )
+            except subprocess.TimeoutExpired:
+                return None
+
+        scoped = run("scoped", 30.0)
+        assert scoped is not None, (
+            "the scoped reader HUNG on a FIFO in a scope it may not see — the "
+            "allowlist is not reaching `load_index`"
+        )
+        assert scoped.returncode == 0, scoped.stderr[-600:]
+        assert scoped.stdout.strip() == f"SCOPES={ALLOW_SCOPE}"
+
+        # 🔴 NEGATIVE CONTROL, SAME STORE, SAME PROBE, ONE ARGUMENT DIFFERENT. A
+        # FIFO that opened would make the assertion above pass for the wrong
+        # reason; this proves the hazard is real and still live for the
+        # unrestricted reading, which is the residual documented above. Its
+        # deadline is DELIBERATELY the shorter of the two: the scoped run has
+        # already shown a healthy load of this store finishes well inside it, so
+        # a timeout here is a block, not a slow interpreter.
+        assert run("unrestricted", 15.0) is None, (
+            "the UNRESTRICTED reader did NOT hang on the FIFO — either the "
+            "fixture is not a FIFO, or the residual this suite documents has "
+            "silently been fixed and these comments are now wrong"
+        )
 
 
 class TestScopeFilteringIsNotAWriteVerb:

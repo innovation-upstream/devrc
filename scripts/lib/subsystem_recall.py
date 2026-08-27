@@ -278,6 +278,7 @@ from subsystem_resolver import (  # noqa: E402
     parse_front_matter,
     parse_journal_bullets,
     resolve_ref_tiered,
+    visible_scope_set,
 )
 from subsystem_resolver import extract_sections as _extract_sections  # noqa: E402
 from subsystem_touch import (  # noqa: E402
@@ -329,6 +330,7 @@ __all__ = [
     "discarded_sensitivity",
     "sensitivity_label",
     "load_store",
+    "visible_scope_set",
     "listing_order",
     "listing_page",
     "tokenize",
@@ -1356,7 +1358,16 @@ def load_store(
             f"store. Nothing was {verb}; this is NOT 'nothing recorded yet'"
         )
     try:
-        index = load_index(store, on_malformed=ON_MALFORMED_COLLECT)
+        # 🔴 THE ALLOWLIST GOES DOWN INTO THE LOADER, NOT ONLY ONTO ITS RESULT.
+        # Narrowing afterwards still opened every file in every scope, so one
+        # unreadable entry in a scope the caller may NOT see put that file's full
+        # path into a 503 body, broke recall for everyone, and — for a FIFO named
+        # `*.md` — hung the request thread outright. See `load_index`.
+        index = load_index(
+            store,
+            on_malformed=ON_MALFORMED_COLLECT,
+            visible_scopes=visible_scopes,
+        )
     except OSError as exc:
         raise EntryUnreadableError(
             f"index entry unreadable: under {store} ({type(exc).__name__}: {exc}) — the "
@@ -1371,7 +1382,18 @@ def load_store(
     # derived answer at once — including the ones a future accessor adds. A
     # per-answer filter would have to be repeated at every one of them, which is
     # the shape that is wrong at all but one site.
-    allowed = {normalize_ref(s) for s in visible_scopes}
+    #
+    # ⚠ REDUNDANT WITH THE LOADER'S OWN FILTER TODAY, AND KEPT DELIBERATELY.
+    # `load_index` now skips a denied scope dir entirely, so this rebuild has
+    # nothing left to drop — a mutation sweep will score it as an equivalent
+    # mutant. It stays because the two filters answer different questions: the
+    # loader's decides what is OPENED, this one decides what the RESULT SHAPE is,
+    # and a future caller that hands this function an already-loaded index, or a
+    # loader that learns a reason to register a scope it did not read, must not
+    # silently widen the answer. Both derive the set from `visible_scope_set`, so
+    # they cannot come to disagree about what an allowlist means.
+    allowed = visible_scope_set(visible_scopes)
+    assert allowed is not None  # `visible_scopes is None` returned above
     return store, SubsystemIndex(
         by_scope={k: v for k, v in index.by_scope.items() if k in allowed},
         malformed=tuple(m for m in index.malformed if m.scope in allowed),

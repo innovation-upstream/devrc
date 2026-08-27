@@ -423,11 +423,24 @@ def as_token_record(item: "str | TokenRecord") -> TokenRecord:
     return TokenRecord(token=item, identity=LEGACY_IDENTITY, scopes=None)
 
 
+def _authority_of(record: TokenRecord) -> str:
+    """How a record's AUTHORITY reads in an error message. Never the token.
+
+    Used only by the duplicate-token guard, whose whole job is to say that two
+    rows disagree — so it has to be able to say what they disagree ABOUT, and
+    the identity and the scope list are the two facts that are not secrets.
+    """
+    if record.scopes is None:
+        return f"{record.identity} (UNRESTRICTED)"
+    return f"{record.identity} ({','.join(record.scopes)})"
+
+
 def _parse_token_row(fields: list[str], index: int, total: int) -> TokenRecord:
     """One non-empty line of the token file -> one record, or raise naming why.
 
-    Guards 6-11 of `load_tokens`' ladder live here; the numbering and the
-    reachability argument are in that function's docstring.
+    Guards 6-10 of `load_tokens`' ladder live here; the numbering and the
+    reachability argument are in that function's docstring. Guards 11 and 12 are
+    cross-row and cannot live here — see `load_tokens`.
     """
     if len(fields) not in (1, 3):
         # 🔴 REFUSED, NOT REINTERPRETED, and this is where the format changed.
@@ -552,15 +565,41 @@ def load_tokens(
       8.  identity is not taken   -> "reserved identity in token row N of M"
       9.  the allowlist is real   -> "empty scope allowlist in token row N of M"
       10. every scope is namable  -> "invalid scope in token row N of M"
-      11. one row per identity    -> "duplicate identity"
+      11. one authority per token -> "duplicate token in rows N and M"
+      12. one row per identity    -> "duplicate identity"
 
     Guards 1-5 are UNCHANGED in wording and in order, deliberately: they are the
     ones an operator has already met, and 5 in particular is reached by a file
     whose second line an editor truncated. Guard 5 names the POSITION, never the
     token — saying "one of them is short" would leave the operator grepping a
-    secret by hand — and 6-10 keep that property for the same reason.
+    secret by hand — and 6-12 keep that property for the same reason.
 
-    🔴 GUARD 11 EXEMPTS `legacy`, AND THAT IS NOT AN OVERSIGHT. Two legacy rows
+    🔴 EVERY ROW REACHES THE LADDER, AND THAT IS A FIX, NOT A STYLE CHOICE.
+    This loop used to drop a line whose FIRST FIELD had already been seen —
+    before parsing it, before validating it, silently. Two failures were
+    measured, and both are fail-OPEN:
+
+      * `<tok>` on one line and `<tok> zach alpha` on the next — the exact
+        migration this format exists for, "scope a credential its holder
+        already has" — loaded as ONE row, `identity=legacy scopes=None`, i.e.
+        UNRESTRICTED. The mapped row simply did not exist. The only signal was
+        a banner saying "1 of 1 token rows are bare" over a two-line file.
+      * `<tok> zach alpha` then `<tok> Za_CH_BAD !!!!` loaded clean. The second
+        row carried an invalid identity AND an invalid scope and was never
+        validated, because it was dropped before guards 6-10 ran.
+
+    That is guard 10's own defect class — a grant that reads as working and does
+    nothing — one level up and in the unsafe direction, and it contradicted
+    guard 12, which refuses two rows claiming one IDENTITY for having "no
+    defined precedence" while two rows claiming one TOKEN silently picked one.
+    So: parse first, collapse after, and only rows that are IDENTICAL collapse.
+
+    🔴 GUARD 11 RUNS BEFORE GUARD 12, AND THE ORDER IS LOAD-BEARING. A file
+    holding one row twice, verbatim, must collapse to one record — otherwise
+    guard 12 would see two rows claiming one identity and refuse the ordinary
+    "I pasted the line twice" file. Collapse first, then count identities.
+
+    🔴 GUARD 12 EXEMPTS `legacy`, AND THAT IS NOT AN OVERSIGHT. Two legacy rows
     are an overlap rotation of the old shared token, which is the exact thing
     guards 1-5 were built to support. Two rows naming ONE mapped identity are
     different: if their allowlists disagree there is no defined answer, and if
@@ -588,15 +627,16 @@ def load_tokens(
     # Line-based now, because a row has internal structure. `.split()` per line
     # still absorbs a trailing newline, CRLF and any run of spaces or tabs
     # BETWEEN fields; a blank line is skipped rather than being an empty row.
+    #
+    # 🔴 NOTHING IS DROPPED HERE. See the docstring: a de-duplication that ran
+    # before the parse made two fail-open readings possible. Rows 4, 5 and every
+    # index in guards 6-12 therefore count PHYSICAL LINES, which is also what the
+    # operator is looking at when they read the message.
     rows: list[list[str]] = []
-    seen_tokens: set[str] = set()
     for line in raw.splitlines():
         fields = line.split()
         if not fields:
             continue
-        if fields[0] in seen_tokens:  # de-duplicated BY TOKEN, ORDER PRESERVED
-            continue
-        seen_tokens.add(fields[0])
         rows.append(fields)
 
     if not rows:
@@ -619,8 +659,48 @@ def load_tokens(
         for index, fields in enumerate(rows, start=1)
     ]
 
-    by_identity: dict[str, int] = {}
+    # GUARD 11 — one token, one authority. Runs on PARSED records, so a row that
+    # would be collapsed has already been through guards 6-10, and two rows that
+    # merely SPELL one grant differently (`Kelp_Forest` vs `kelp-forest`) are
+    # recognised as the same grant rather than as a disagreement.
+    #
+    # 🔴 COLLAPSE ONLY WHAT IS IDENTICAL. `TokenRecord` is a frozen dataclass, so
+    # `==` compares the token, the identity AND the scope tuple — all three facts
+    # the rest of this file resolves off one match. Anything less than all three
+    # agreeing is two authorities for one credential, and picking one of them is
+    # what made the migration path fail open.
+    first_seen: dict[str, tuple[int, TokenRecord]] = {}
+    collapsed: list[tuple[int, TokenRecord]] = []
     for index, record in enumerate(records, start=1):
+        seen = first_seen.get(record.token)
+        if seen is None:
+            first_seen[record.token] = (index, record)
+            collapsed.append((index, record))
+            continue
+        first_index, first_record = seen
+        if record == first_record:
+            # The rotation shape, and it is legitimate: one row written twice.
+            # Order is kept because the FIRST occurrence is the one retained.
+            continue
+        raise ValueError(
+            f"duplicate token in rows {first_index} and {index}: one credential "
+            f"is given two different authorities — {_authority_of(first_record)} "
+            f"and {_authority_of(record)} — and there is no defined precedence "
+            f"between them. Scoping a token its holder already has means EDITING "
+            f"the bare row, not adding a second one below it; a second holder "
+            f"needs a second token"
+        )
+    # 🔴 REBOUND HERE, ONCE, so everything below — guard 12, the legacy banner's
+    # "N of M", and the returned SET — reads the collapsed list. A second name
+    # kept alongside `records` is how a later edit ends up counting one list and
+    # returning the other.
+    records = [record for _row, record in collapsed]
+
+    # GUARD 12 — one row per mapped identity. Indexed by PHYSICAL row, carried
+    # through the collapse above, so "rows 1 and 3" names the lines the operator
+    # can see rather than positions in a list they cannot.
+    by_identity: dict[str, int] = {}
+    for index, record in collapsed:
         if record.is_legacy:
             continue
         first = by_identity.get(record.identity)
@@ -2404,10 +2484,11 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
         # opened, and can never reach the `unreadable` list either — a refused
         # scope must not be able to 503 somebody else's snapshot, which is both
         # a leak and a denial of service.
-        visible = self._visible_scopes
-        allowed = (
-            None if visible is None else {rc.normalize_ref(s) for s in visible}
-        )
+        # 🔴 THE SAME PREDICATE THE INDEX LOADER USES, from the same function.
+        # Three sites now narrow by allowlist — here, `load_index` (what is
+        # OPENED) and `load_store` (the result shape) — and open-coding the fold
+        # at each of them is how they come to disagree about `Kelp_Forest`.
+        allowed = rc.visible_scope_set(self._visible_scopes)
         try:
             candidates = sorted(
                 p

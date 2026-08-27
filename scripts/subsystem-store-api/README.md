@@ -131,9 +131,19 @@ are the store-root line — `2` and `2` for pod-vs-workbench.
 ## The token is a SET, and rotation is by overlap
 
 The token file holds **one ROW per line, current first**. Blank lines are
-ignored; duplicate tokens collapse, order preserved. Up to `MAX_TOKENS` (4) —
-every line is a live credential, so an uncapped set is an accumulation nobody
-has retired, and the server refuses to start rather than serve one.
+ignored. Up to `MAX_TOKENS` (4) — every line is a live credential, so an
+uncapped set is an accumulation nobody has retired, and the server refuses to
+start rather than serve one.
+
+🔴 **Two rows holding the same token collapse only if they are IDENTICAL** —
+same token, same identity, same folded scope list. If they disagree the server
+refuses to start with `duplicate token in rows N and M`, naming both
+authorities. This is not pedantry: dropping the second row before parsing it
+made `<tok>` followed by `<tok> zach kelp-forest` — "scope a credential its
+holder already has", the migration's own first step — load as ONE unrestricted
+`legacy` row, with no error and a banner that said `1 of 1 token rows are bare`
+over a two-line file. **To scope an existing token, EDIT its bare row**; adding
+a second row below it is refused.
 
 A row is one of two shapes:
 
