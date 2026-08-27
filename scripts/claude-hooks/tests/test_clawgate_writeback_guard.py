@@ -3213,3 +3213,107 @@ def test_positive_control_the_seam_assertions_can_actually_fail():
     # ...and one INSIDE it that names no file resolves to a path that is not there
     assert not _repo_path_for(
         DEPLOYED_SKILLS_PREFIX + "clawgate/flows/no-such-flow.md").is_file()
+
+
+# --------------------------------------------------------------------------- #
+# ROLE — a card this session FILED is not a card this session WORKED
+#
+# Authoring a task arms this guard TWICE: `flows/task-authoring.md` Phase 0 mandates
+# a duplicate check (reading the hits), and `task create` returns only `{"id":N}` so
+# verifying it means reading the new card. Measured 2026-08-27 on tasks #327 and #390.
+# --------------------------------------------------------------------------- #
+def sessioned(role, session=SESSION, **kw):
+    """A live task payload carrying the `sessions` array the board really returns.
+
+    Field set transcribed from `GET /api/tasks/390` on 2026-08-27, not invented: a
+    shape change at the far end surfaces here rather than passing on a fixture built
+    to fit the assertion.
+    """
+    rows = [{"sessionId": session, "role": role, "project": "datapacket-talos",
+             "cwd": "/home/zach/workspace/civit/datapacket-talos", "host": "nixos",
+             "firstSeenAt": READ_TS, "lastSeenAt": READ_TS, "detailAvailable": True}]
+    return dict(task(**kw), sessions=rows)
+
+
+def test_session_role_matches_on_ID_not_on_position():
+    """A second row FIRST, so a fixture cannot pass by reading `sessions[0]`."""
+    t = dict(task(), sessions=[
+        {"sessionId": SESSION_B, "role": "worked"},
+        {"sessionId": SESSION, "role": "created"},
+    ])
+    assert guard.session_role(t, SESSION) == "created"
+    assert guard.session_role(t, SESSION_B) == "worked"
+
+
+@pytest.mark.parametrize("payload_task,sid", [
+    (task(), SESSION),                                    # no `sessions` key at all
+    (dict(task(), sessions=None), SESSION),               # present but null
+    (dict(task(), sessions="created"), SESSION),          # not a list
+    (dict(task(), sessions=[{"sessionId": SESSION}]), SESSION),        # row, no role
+    (dict(task(), sessions=[{"sessionId": SESSION, "role": 7}]), SESSION),  # role not a str
+    (dict(task(), sessions=["created"]), SESSION),        # row not a dict
+    (sessioned("created"), SESSION_B),                    # no row for THIS session
+    (sessioned("created"), ""),                           # empty session id
+])
+def test_session_role_is_None_on_every_unreadable_shape(payload_task, sid):
+    """🔴 None is the LOUD direction — it leaves the verdict at `missing`. A guard that
+    went QUIET on a payload it could not parse would be walkable by any board change."""
+    assert guard.session_role(payload_task, sid) is None
+
+
+def test_a_card_this_session_FILED_reads_as_authored():
+    assert guard.writeback_state(sessioned("created"), READ_TS, work_ts=WORK_TS,
+                                 session_id=SESSION) == "authored"
+
+
+def test_a_REAL_write_back_still_wins_over_authored():
+    """🔴 Ordering. `authored` is checked LAST, so a session that filed a card AND
+    wrote it back reads as `written` — the informative verdict, not the excusing one."""
+    c = [{"author": guard.AGENT_AUTHOR, "createdAt": "2026-08-15T13:00:00.000000Z"}]
+    assert guard.writeback_state(sessioned("created", comments=c), READ_TS,
+                                 work_ts=WORK_TS, session_id=SESSION) == "written"
+
+
+@pytest.mark.parametrize("role", ["read", "worked"])
+def test_only_created_is_excused_never_read(role):
+    """🔴 THE CONTROL THAT MAKES THE FIX NARROW. A genuine pickup is a `read` too —
+    read the card, work, then owe the comment — so excusing `read` would disable the
+    guard's whole purpose instead of narrowing it. Same for a `worked` role with no
+    comment newer than the work."""
+    assert guard.writeback_state(sessioned(role), READ_TS, work_ts=WORK_TS,
+                                 session_id=SESSION) == "missing"
+
+
+def test_an_authored_card_NEVER_BLOCKS_end_to_end(home):
+    """The false positive itself, driven through `stop_decision`.
+
+    🔴 The board IS read, and that is asserted: a mutation reaching non-block by
+    skipping the live read instead of by classifying the role would pass a
+    verdict-only check."""
+    seed()
+    r = Reader(result=sessioned("created"))
+    kind, text = guard.stop_decision(payload("Stop"), reader=r)
+    assert kind == "notice"
+    assert [c[0] for c in r.calls] == [193]
+    assert "FILED by this session" in text
+
+
+def test_the_same_card_read_NOT_created_still_blocks(home):
+    """The positive control for the test above: identical fixture, one field changed,
+    and the guard must still block. Without this, `notice` above could mean the Stop
+    gate stopped working rather than that the role was honoured."""
+    seed()
+    kind, _ = guard.stop_decision(payload("Stop"), reader=Reader(result=sessioned("read")))
+    assert kind == "block"
+
+
+def test_authored_NEVER_climbs_to_a_block_however_many_stops(home):
+    """🔴 Through the LADDER, like the delegated-counter test. Four is strictly more
+    than MAX_BLOCKS (2) and MAX_FIRES (3), and equals neither, so this cannot pass by
+    construction. `authored` rides its own counter kind, so it can neither reach a
+    block nor spend the budget a genuinely missing write-back would need."""
+    seed()
+    kinds = [guard.stop_decision(payload("Stop"),
+                                 reader=Reader(result=sessioned("created")))[0]
+             for _ in range(4)]
+    assert "block" not in kinds
