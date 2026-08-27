@@ -238,16 +238,16 @@ run 'stderr-free-note-ignores-the-flag-again' \
 run 'report-free-note-ignores-the-flag-again' \
   test_the_refusal_says_a_retyped_default_glob_is_free_to_drop \
   's|^                            and not summary.get("agent_worktrees_included"))|                            and True)|'
-# 🔴 …and the REPORT copy's existence, which had ZERO coverage before this round:
+# 🔴 …and the REPORT copy's EXISTENCE, which had ZERO coverage before this round:
 # `if False` here gave 176 passed. It is one of only two spellings of the rule.
+run 'report-free-note-deleted-entirely' \
+  test_the_refusal_says_a_retyped_default_glob_is_free_to_drop \
+  's|^            free_to_drop = (normalize_glob(g) == AGENT_WORKTREE_GLOB|            free_to_drop = (False|'
 # 🟢 …and the per-glob scoping: collapsing the mixed-list branch makes the note
 # read as covering every dud the sentence above names.
 run 'free-note-used-as-a-boolean-again' \
   test_the_free_to_drop_note_is_scoped_to_the_ONE_glob_it_is_true_of \
   's|^        if redundant and others:|        if False:|'
-run 'report-free-note-deleted-entirely' \
-  test_the_refusal_says_a_retyped_default_glob_is_free_to_drop \
-  's|^            free_to_drop = (normalize_glob(g) == AGENT_WORKTREE_GLOB|            free_to_drop = (False|'
 
 printf '\n== ROUND 5 FIX 2 — the note may not claim the flag is a no-op ==\n'
 run 'note-claims-the-run-is-identical-to-the-default' \
