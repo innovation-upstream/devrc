@@ -138,9 +138,52 @@ it is the second layer, not this one.
     all three are tunable by env. Cloudflare's WAF and the Traefik middleware
     are the outer two layers, not the only ones.
 
-Still NOT here, and still tracked forward: separate read/write tokens (there is
-no write path until phase 3, so a write-scoped token would today be a label on
-a capability that does not exist).
+PHASE 3, CRITERIA 1-3 — TWO-TOKEN AUTHORIZATION ON THE **READ** PATH
+---------------------------------------------------------------------
+🔴 THE READ PATH ONLY. There is still NO write verb, no append endpoint and no
+`PUT`; `do_POST = do_PUT = do_PATCH = do_DELETE = _reject_write` is untouched
+and `TestPhaseOneScope`'s write guard is still the thing that has to be broken
+on purpose when the write path lands. What changed is WHO a token is and WHAT
+it may see.
+
+  * **A token file row maps token -> identity -> scope allowlist**
+    (`load_tokens`, `TokenRecord`). A BARE token line is still valid and means
+    identity `legacy` with UNRESTRICTED scope — that is the migration and the
+    rollback, not a courtesy — and any legacy row makes the process shout on
+    stderr at startup.
+  * **Every read route refuses a scope outside the caller's allowlist**, and it
+    does so by narrowing the INDEX at `subsystem_recall.load_store`, the one
+    site both readers load from.
+  * **A refused scope is byte-identical to a nonexistent one.**
+
+🔴 THE ABSENT PATH WAS ALREADY AN ENUMERATION ORACLE, WHICH IS WHY A PER-ROUTE
+"is this scope yours" CHECK WOULD NOT HAVE BEEN ENOUGH. Measured on the
+deployed pod: `GET /api/v1/recall/<never-existed>` answers **200**, status
+`scope-absent`, and the body ends `scopes the store does hold: <every scope>`.
+Four distinct channels carried it:
+
+    1. `known_scopes`        rendered on every `scope-absent` report
+    2. `malformed_elsewhere` names OTHER scopes on EVERY status, not just a miss
+    3. `search?all_scopes=1` searches the CONTENT of every scope and NAMES NONE,
+                             so a per-scope refusal check has nothing to refuse
+    4. the `/snapshot` tar   ships the entry files themselves
+
+1-3 all derive from the single `SubsystemIndex` that `load_store` returns, so
+filtering THAT closes all three at once and cannot be forgotten by a route.
+4 does not go through the index at all — `_snapshot` walks the store root — so
+it is filtered separately, at the candidate list.
+
+⚠ WHAT IS STILL SHARED, STATED RATHER THAN LEFT TO BE FOUND: `X-Store-Snapshot`
+(and the freshness prose that opens every body) is STORE-WIDE. It carries a
+total `entry-files=` count over scopes the caller cannot name. That is a
+deliberate carry-over — it is the freshness guarantee the whole snapshot design
+rests on, and scoping it would make a caller's view of staleness a function of
+its own allowlist — but it IS a residual count leak, and it is the reason the
+byte-identity claim below is about a REFUSED scope versus an ABSENT one, never
+about two different stores.
+
+Still NOT here, and still tracked forward: the write path itself (§2c) —
+criteria 4-10.
 """
 
 from __future__ import annotations
@@ -159,6 +202,7 @@ import sys
 import tarfile
 import threading
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -200,6 +244,33 @@ MIN_TOKEN_CHARS = 43
 # and every one of them is a live credential — so the file is refused rather
 # than served, at STARTUP, for the same reason a short token is.
 MAX_TOKENS = 4
+
+# 🔴 THE IDENTITY OF A LEGACY ROW, AND IT MEANS UNRESTRICTED SCOPE.
+#
+# A bare token line — no identity, no allowlist — is the shape the file had
+# before this change, and it MUST keep loading: the migration puts the mapped
+# rows in beside the old shared token, and the rollback is re-adding that one
+# line. A format that refused it would make the rollback a code change.
+#
+# It is spelled here as a constant because three different things have to agree
+# on it: the parser that assigns it, the guard that refuses a MAPPED row from
+# claiming it, and the startup warning that names it.
+LEGACY_IDENTITY = "legacy"
+
+# 🔴 32, AND THE NUMBER IS LOAD-BEARING RATHER THAN TIDY: it is BELOW
+# `MIN_TOKEN_CHARS`, so a token can never be a well-formed identity. That makes
+# "the operator put three tokens on one line" structurally impossible to read as
+# "token, identity, scopes" — the second field would be at least 43 characters
+# and this cap refuses it. A cap ABOVE the token floor would have made that
+# misreading silent, and a silent misreading of a credential file is exactly the
+# failure the guard ladder below exists for.
+MAX_IDENTITY_CHARS = 32
+
+# Lowercase, digits and dashes, starting on an alphanumeric. Deliberately
+# NARROWER than the scope class below (no `_`, no uppercase): an identity is
+# quoted into the audit log and compared for duplicates, so two spellings of one
+# name would be two identities to the parser and one to the operator.
+IDENTITY_COMPONENT = re.compile(r"[a-z0-9][a-z0-9-]*")
 
 # 🔴 THE ONLY HEADER THIS SERVER WILL ACCEPT AS A CLIENT IDENTITY, and it is
 # trustworthy for exactly one reason: Cloudflare is the sole public ingress and
@@ -307,26 +378,195 @@ def token_id(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()[:12]
 
 
-def load_tokens(token_file: str | None, env: dict[str, str]) -> list[str]:
+@dataclass(frozen=True)
+class TokenRecord:
+    """One credential, and what it is allowed to SEE. Phase 3, criterion 1.
+
+    🔴 THE TOKEN AND ITS AUTHORITY ARE ONE OBJECT ON PURPOSE. The alternative —
+    a token list beside a `dict[token, scopes]` — is two structures that a route
+    can consult one of. Every consumer here is handed the record `authorize`
+    matched, so "which token was this" and "what may it see" cannot be answered
+    from different places and disagree.
+
+    `scopes is None` means UNRESTRICTED, and it is reachable ONLY from a legacy
+    bare-token row. An EMPTY tuple is its opposite — nothing is visible — and
+    that asymmetry is why the handler's per-request default is `()` rather than
+    `None`: a route that failed to set the field must see nothing, not
+    everything.
+    """
+
+    token: str
+    identity: str
+    scopes: tuple[str, ...] | None
+
+    @property
+    def fingerprint(self) -> str:
+        """What the audit log carries. Never the token — see `token_id`."""
+        return token_id(self.token)
+
+    @property
+    def is_legacy(self) -> bool:
+        return self.scopes is None
+
+
+def as_token_record(item: "str | TokenRecord") -> TokenRecord:
+    """Normalize one configured credential. ONE PLACE, and it is the same rule.
+
+    A bare `str` becomes the legacy record — identity `legacy`, unrestricted —
+    because that IS what a bare token line means (see `LEGACY_IDENTITY`). It is
+    not a compatibility shim bolted onto the callers: `load_tokens`,
+    `build_server` and `authorize` all route through here, so the meaning of a
+    bare token cannot come to differ between the parser and the checker.
+    """
+    if isinstance(item, TokenRecord):
+        return item
+    return TokenRecord(token=item, identity=LEGACY_IDENTITY, scopes=None)
+
+
+def _parse_token_row(fields: list[str], index: int, total: int) -> TokenRecord:
+    """One non-empty line of the token file -> one record, or raise naming why.
+
+    Guards 6-11 of `load_tokens`' ladder live here; the numbering and the
+    reachability argument are in that function's docstring.
+    """
+    if len(fields) not in (1, 3):
+        # 🔴 REFUSED, NOT REINTERPRETED, and this is where the format changed.
+        # The previous parser was `raw.split()` over the WHOLE file, so two
+        # tokens separated by a space were two credentials. Under the row format
+        # that same line would read as `token identity scopes` with a token in
+        # the identity field. `MAX_IDENTITY_CHARS` already makes that
+        # impossible, so it would land here — and landing here is the point: a
+        # line this parser cannot read is a startup failure, never a guess about
+        # which of two readings the operator meant.
+        raise ValueError(
+            f"malformed token row {index} of {total}: {len(fields)} fields, "
+            f"expected 1 (a bare legacy token) or 3 (token, identity, "
+            f"comma-separated scopes). Whitespace separates the three FIELDS, "
+            f"so two tokens on one line is no longer two tokens"
+        )
+    token = fields[0]
+    if len(fields) == 1:
+        return as_token_record(token)
+
+    identity = fields[1]
+    if (
+        len(identity) > MAX_IDENTITY_CHARS
+        or not IDENTITY_COMPONENT.fullmatch(identity)
+    ):
+        raise ValueError(
+            f"invalid identity in token row {index} of {total}: {identity!r} — "
+            f"expected lowercase letters, digits and dashes, starting on an "
+            f"alphanumeric, at most {MAX_IDENTITY_CHARS} characters. The "
+            f"identity is quoted into the audit log, so it must be one spelling"
+        )
+    if identity == LEGACY_IDENTITY:
+        # 🔴 A MAPPED ROW MAY NOT CLAIM THE UNRESTRICTED NAME. `legacy` in the
+        # audit log has to mean exactly one thing — "this request came in on the
+        # old shared credential, which can see everything" — or the one line the
+        # operator greps to know the migration is finished is ambiguous.
+        raise ValueError(
+            f"reserved identity in token row {index} of {total}: "
+            f"{LEGACY_IDENTITY!r} is what a BARE token line is given, and it "
+            f"means unrestricted scope. Name this row's holder instead"
+        )
+
+    raw_scopes = [part.strip() for part in fields[2].split(",")]
+    if not any(raw_scopes):
+        # Reachable with a bare `,`: three fields, a valid identity, and no
+        # scope name anywhere in the third.
+        raise ValueError(
+            f"empty scope allowlist in token row {index} of {total} "
+            f"({identity!r}): a credential that may see NO scope can never be "
+            f"used. Remove the row, or name the scopes it may read"
+        )
+    # Normalized with the reader's OWN folding rule, so an allowlist entry and
+    # the index key it must match cannot disagree about case or `_` vs `-`.
+    scopes: list[str] = []
+    for raw in raw_scopes:
+        # 🔴 BOTH HALVES, AND THE SECOND IS NOT REDUNDANT — the guard has to be
+        # as wide as its own sentence. The class alone accepts `-` and `___`,
+        # which `normalize_ref` folds to the EMPTY STRING: an entry that is
+        # perfectly namable in a URL and yet matches no index key, i.e. a grant
+        # that reads as working and does nothing. That is the precise failure
+        # this message claims to prevent, so it is checked on the value that
+        # actually reaches the comparison, not on the text the operator typed.
+        #
+        # (The class alone DOES cover the empty string — `[A-Za-z0-9_-]+` needs
+        # one character, so `fullmatch("")` is None. A `not raw or` in front was
+        # provably redundant and was removed; this second clause is a different
+        # claim and is reachable by an input the first accepts.)
+        folded = rc.normalize_ref(raw)
+        if not SAFE_PATH_COMPONENT.fullmatch(raw) or not folded:
+            raise ValueError(
+                f"invalid scope in token row {index} of {total} ({identity!r}): "
+                f"{raw!r} — a scope must match {SAFE_PATH_COMPONENT.pattern} AND "
+                f"still name something once folded the way the reader folds a "
+                f"scope. An entry that no request could name, or that folds away "
+                f"to nothing, is refused here rather than sitting inert"
+            )
+        scopes.append(folded)
+    return TokenRecord(
+        token=token,
+        identity=identity,
+        scopes=tuple(dict.fromkeys(scopes)),
+    )
+
+
+def load_tokens(
+    token_file: str | None,
+    env: dict[str, str],
+    *,
+    warn: Callable[[str], None] | None = None,
+) -> list[TokenRecord]:
     """Resolve the bearer token SET. FILE FIRST, env only as a fallback.
 
     🔴 A SET, NOT A TOKEN, and that is the whole of rotation (§2b: "token
-    rotation must be a one-command operation"). One token per line — the CURRENT
-    one first, the PREVIOUS one below it. Rotation is then: add the new line,
-    watch the audit log until every client's `token=` fingerprint has moved,
-    then delete the old line. There is no window in which a client is broken,
-    which is the reason single-token rotations never actually get performed.
+    rotation must be a one-command operation"). ONE ROW PER LINE — the CURRENT
+    credential first, the PREVIOUS one below it. Rotation is then: add the new
+    line, watch the audit log until every client's `token=` fingerprint has
+    moved, then delete the old line. There is no window in which a client is
+    broken, which is the reason single-token rotations never actually get
+    performed.
+
+    THE ROW FORMAT (phase 3, criterion 1)::
+
+        <token>                                   # legacy: identity `legacy`,
+                                                  # UNRESTRICTED scope
+        <token>   <identity>   <scope>,<scope>    # mapped: named, scoped
+
+    Both shapes may appear in one file, and that is not a concession — it is the
+    migration and the rollback. The old shared token stays on its bare line
+    while clients move onto mapped rows, and putting that line back is how the
+    change is undone without a deploy. A file holding any legacy row emits a
+    LOUD startup warning, because "unrestricted" is a state somebody has to be
+    able to see from the pod log.
 
     Guard order — each reachable by an input no earlier guard rejects:
-      1. some source at all      -> "no token source"
-      2. the file is readable    -> "token file unreadable"
-      3. at least one token      -> "token is empty"
-      4. not an accumulation     -> "too many tokens"
-      5. every token long enough -> "token N of M is too short"
+      1.  some source at all      -> "no token source"
+      2.  the file is readable    -> "token file unreadable"
+      3.  at least one token      -> "token is empty"
+      4.  not an accumulation     -> "too many tokens"
+      5.  every token long enough -> "token N of M is too short"
+      6.  every row parses        -> "malformed token row N of M"
+      7.  identity is well-formed -> "invalid identity in token row N of M"
+      8.  identity is not taken   -> "reserved identity in token row N of M"
+      9.  the allowlist is real   -> "empty scope allowlist in token row N of M"
+      10. every scope is namable  -> "invalid scope in token row N of M"
+      11. one row per identity    -> "duplicate identity"
 
-    Guard 5 names the POSITION, never the token. A file whose second line was
-    truncated by an editor passes 1-4 and is exactly what 5 is for; saying
-    "one of them is short" would leave the operator grepping a secret by hand.
+    Guards 1-5 are UNCHANGED in wording and in order, deliberately: they are the
+    ones an operator has already met, and 5 in particular is reached by a file
+    whose second line an editor truncated. Guard 5 names the POSITION, never the
+    token — saying "one of them is short" would leave the operator grepping a
+    secret by hand — and 6-10 keep that property for the same reason.
+
+    🔴 GUARD 11 EXEMPTS `legacy`, AND THAT IS NOT AN OVERSIGHT. Two legacy rows
+    are an overlap rotation of the old shared token, which is the exact thing
+    guards 1-5 were built to support. Two rows naming ONE mapped identity are
+    different: if their allowlists disagree there is no defined answer, and if
+    they agree the operator wanted `<identity>-prev`. Rotating a mapped
+    credential therefore uses a second identity, which is also what makes the
+    audit log able to say which of the two a client is still on.
     """
     raw: str | None = None
     if token_file:
@@ -345,29 +585,70 @@ def load_tokens(token_file: str | None, env: dict[str, str]) -> list[str]:
             "The API is not served without one"
         )
 
-    # `.split()` on any whitespace: a base64url token contains none, so this
-    # accepts one-per-line (the documented shape) and survives a trailing
-    # newline, CRLF, or an operator who used spaces.
-    tokens: list[str] = []
-    for candidate in raw.split():
-        if candidate not in tokens:  # de-duplicated, ORDER PRESERVED
-            tokens.append(candidate)
+    # Line-based now, because a row has internal structure. `.split()` per line
+    # still absorbs a trailing newline, CRLF and any run of spaces or tabs
+    # BETWEEN fields; a blank line is skipped rather than being an empty row.
+    rows: list[list[str]] = []
+    seen_tokens: set[str] = set()
+    for line in raw.splitlines():
+        fields = line.split()
+        if not fields:
+            continue
+        if fields[0] in seen_tokens:  # de-duplicated BY TOKEN, ORDER PRESERVED
+            continue
+        seen_tokens.add(fields[0])
+        rows.append(fields)
 
-    if not tokens:
+    if not rows:
         raise ValueError("token is empty: the source resolved to whitespace only")
-    if len(tokens) > MAX_TOKENS:
+    if len(rows) > MAX_TOKENS:
         raise ValueError(
-            f"too many tokens: {len(tokens)}, max {MAX_TOKENS}. Every line is a "
+            f"too many tokens: {len(rows)}, max {MAX_TOKENS}. Every line is a "
             f"live credential; retire the old ones instead of accumulating them"
         )
-    for index, token in enumerate(tokens, start=1):
-        if len(token) < MIN_TOKEN_CHARS:
+    for index, fields in enumerate(rows, start=1):
+        if len(fields[0]) < MIN_TOKEN_CHARS:
             raise ValueError(
-                f"token {index} of {len(tokens)} is too short: {len(token)} chars, "
+                f"token {index} of {len(rows)} is too short: {len(fields[0])} chars, "
                 f"need >= {MIN_TOKEN_CHARS} (256 bits base64url). A short token is "
                 f"a guessable one"
             )
-    return tokens
+
+    records = [
+        _parse_token_row(fields, index, len(rows))
+        for index, fields in enumerate(rows, start=1)
+    ]
+
+    by_identity: dict[str, int] = {}
+    for index, record in enumerate(records, start=1):
+        if record.is_legacy:
+            continue
+        first = by_identity.get(record.identity)
+        if first is not None:
+            raise ValueError(
+                f"duplicate identity {record.identity!r}: token rows {first} and "
+                f"{index} both claim it, and their scope allowlists have no "
+                f"defined precedence. Rotate a mapped credential under a second "
+                f"identity ({record.identity}-prev), not a second row"
+            )
+        by_identity[record.identity] = index
+
+    legacy = [r for r in records if r.is_legacy]
+    if legacy:
+        # 🔴 ONE LOUD LINE, EMITTED HERE RATHER THAN BY `main`. This is the only
+        # place that knows a row was bare, and a caller obliged to re-derive it
+        # is a caller that can forget to. Printed to stderr so it lands in the
+        # pod log beside the startup banner.
+        emit = warn if warn is not None else (lambda line: print(line, file=sys.stderr))
+        emit(
+            f"subsystem-store-api: 🔴 UNRESTRICTED-SCOPE LEGACY MODE — "
+            f"{len(legacy)} of {len(records)} token rows are bare tokens with no "
+            f"identity and NO scope allowlist (identity={LEGACY_IDENTITY!r}); "
+            f"they can read EVERY scope in the store. Fingerprints: "
+            f"{','.join(r.fingerprint for r in legacy)}. Give each holder its own "
+            f"`<token> <identity> <scopes>` row and delete these lines"
+        )
+    return records
 
 
 def presented_token(header: str | None) -> str:
@@ -384,9 +665,18 @@ def presented_token(header: str | None) -> str:
     return parts[1].strip()
 
 
-def authorize(header: str | None, expected: Sequence[str]) -> str:
-    """Constant-time bearer check against a token SET. Returns the fingerprint
-    of the token that matched; raises `_Rejected` and never returns a reason.
+def authorize(
+    header: str | None, expected: "Sequence[str | TokenRecord]"
+) -> TokenRecord:
+    """Constant-time bearer check against a token SET. Returns the RECORD that
+    matched; raises `_Rejected` and never returns a reason.
+
+    🔴 THE RECORD, NOT THE FINGERPRINT, and the change is the point of phase 3.
+    The caller needs two facts about a request — who it is, for the audit line,
+    and what it may SEE, for every read route — and they must come out of the
+    SAME match. Returning only a fingerprint forced the scope lookup to be a
+    second search keyed on something else, which is the shape that ends up
+    consulting a stale or wider table than the one that authenticated.
 
     🔴 `hmac.compare_digest`, NOT `==`. A public endpoint makes a byte-at-a-time
     timing oracle practically exploitable, and the difference is invisible in
@@ -410,13 +700,17 @@ def authorize(header: str | None, expected: Sequence[str]) -> str:
             "str yields characters, and a one-character token would authorize"
         )
     got = presented_token(header).encode("utf-8")
-    matched: str | None = None
-    for token in expected:
-        if hmac.compare_digest(got, token.encode("utf-8")):
-            matched = token
+    matched: TokenRecord | None = None
+    for item in expected:
+        # Normalized INSIDE the loop rather than in a comprehension above it, so
+        # the loop still performs exactly one `compare_digest` per configured
+        # credential and the no-early-exit property below is unchanged.
+        record = as_token_record(item)
+        if hmac.compare_digest(got, record.token.encode("utf-8")):
+            matched = record
     if matched is None:
         raise _Rejected()
-    return token_id(matched)
+    return matched
 
 
 def sole_header(headers: Any, name: str) -> str | None:
@@ -929,7 +1223,12 @@ class RateLimiter:
             del self._failures[key]
 
 
-def scope_revision(store_root: str | Path, scope: str) -> str:
+def scope_revision(
+    store_root: str | Path,
+    scope: str,
+    *,
+    visible_scopes: Sequence[str] | None = None,
+) -> str:
     """The scope's git HEAD, read from the filesystem — `git` is never spawned.
 
     §3 (Determinism): "have every response carry a `store-revision:` line (the
@@ -941,7 +1240,21 @@ def scope_revision(store_root: str | Path, scope: str) -> str:
     Returns "unknown" for every failure — an absent repo, a detached or
     unresolvable ref, an unreadable file. 🔴 "unknown" is honest; a fabricated
     sha would be quoted into a report and believed.
+
+    🔴 IT IS ALSO A HEADER-LEVEL DISCRIMINATOR, SO IT IS GATED — and it is gated
+    BY CONSTRUCTION rather than by the fact that it currently cannot leak.
+    `X-Store-Revision` is computed from `<store>/<scope>/.git/HEAD`, a path
+    outside the index entirely, so narrowing the INDEX (`load_store`'s
+    `visible_scopes`) does not reach it. Today no scope in the served copy is a
+    git repo, so it answers "unknown" for everything and the leak is LATENT —
+    which is exactly the state in which a guard gets left out and the day a
+    scope becomes a repo the header starts telling a caller which refused scopes
+    exist. `visible_scopes=None` is unrestricted, matching every other seam here.
     """
+    if visible_scopes is not None and rc.normalize_ref(scope) not in {
+        rc.normalize_ref(s) for s in visible_scopes
+    }:
+        return "unknown"
     git = Path(store_root) / scope / ".git"
     try:
         head = (git / "HEAD").read_text(encoding="utf-8").strip()
@@ -1343,7 +1656,7 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
 
     # Injected by `build_server`.
     store_root: str = DEFAULT_STORE
-    expected_tokens: tuple[str, ...] = ()
+    expected_tokens: "tuple[TokenRecord, ...]" = ()
     # 🔴 EMPTY MEANS BELIEVE NOBODY'S HEADER, not "believe everybody's". A
     # subclass that never reaches `build_server` (and `build_server` refuses an
     # empty set) inherits a server that ignores `CF-Connecting-IP` from every
@@ -1362,6 +1675,18 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
     # `None` = not established yet (a request line too malformed to get that
     # far). Rendered as `peer=-`, never silently as "trusted".
     _peer_trusted: bool | None = None
+    # 🔴 THE PER-REQUEST SCOPE ALLOWLIST, AND ITS RESET VALUE IS `()`, NOT `None`.
+    #
+    # `None` is the UNRESTRICTED sentinel everywhere else in this file
+    # (`load_store`, `scope_revision`, `TokenRecord.scopes`), which makes it the
+    # one value this field must never default to: a route reached without a
+    # successful `authorize` — today impossible, tomorrow one refactor away —
+    # would then see the whole store. An empty tuple is the fail-closed
+    # direction: nothing is visible until a matched record says otherwise, and a
+    # legacy record is the ONLY thing that can put `None` here.
+    _visible_scopes: "tuple[str, ...] | None" = ()
+    # The matched credential's name, for the audit line. `-` until one matches.
+    _identity: str | None = None
 
     # --- plumbing ---------------------------------------------------------------
 
@@ -1450,6 +1775,13 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
             f"method={audit_field(self.command, limit=16)} "
             f"path={audit_field(path)} "
             f"token={audit_field(self._token_fp or '-', limit=16)} "
+            # 🔴 ADDITIVE, AND `token=` IS UNTOUCHED. The fingerprint is what
+            # makes an overlap rotation checkable and nothing may be derived
+            # from the identity instead: two rows can hold one identity's
+            # current and previous credential, and only `token=` tells them
+            # apart. `identity=` answers the different question phase 3 adds —
+            # WHOSE request this was, and therefore which allowlist applied.
+            f"identity={audit_field(self._identity or '-', limit=MAX_IDENTITY_CHARS)} "
             f"auth={'ok' if self._token_fp else 'fail'} "
             f"result={int(result)} status={audit_field(status, limit=32)}"
         )
@@ -1571,6 +1903,12 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
         self._client_ip = None
         self._token_fp = None
         self._peer_trusted = None
+        # 🔴 RESET TO `()` — nothing visible — NOT to the unrestricted `None`.
+        # See the class-level declaration: this is the fail-closed direction,
+        # and it is the reset value precisely because a reset runs on paths
+        # that never reach `authorize`.
+        self._visible_scopes = ()
+        self._identity = None
         path = self._request_path()
         if path is None:
             return
@@ -1583,9 +1921,16 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
             # counted — 405 after 405 with nothing charged. A write attempt
             # with no valid credential is not a "wrong method", it is an
             # unauthorised request, and it is answered and charged as one.
-            self._token_fp = authorize(
+            # 🔴 ONE MATCH, THREE FACTS. The fingerprint, the identity and the
+            # scope allowlist all come off the SAME record `authorize` returned,
+            # so no route can be authenticated against one credential and
+            # authorised against another.
+            record = authorize(
                 self.headers.get("Authorization"), self.expected_tokens
             )
+            self._token_fp = record.fingerprint
+            self._identity = record.identity
+            self._visible_scopes = record.scopes
         except _Rejected:
             self._refuse(path, self._count_failure(self.limiter, self._client_ip))
             return
@@ -1624,6 +1969,12 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
         self._client_ip = None
         self._token_fp = None
         self._peer_trusted = None
+        # 🔴 RESET TO `()` — nothing visible — NOT to the unrestricted `None`.
+        # See the class-level declaration: this is the fail-closed direction,
+        # and it is the reset value precisely because a reset runs on paths
+        # that never reach `authorize`.
+        self._visible_scopes = ()
+        self._identity = None
         # ⚠ THAT RESET IS AN EQUIVALENT MUTANT ON THIS PATH, RECORDED RATHER
         # THAN LEFT AS AN UNEXPLAINED SURVIVOR. A no-selector sweep showed
         # deleting it changes nothing observable, and the reason is worth
@@ -1721,6 +2072,12 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
             self._client_ip = None
             self._token_fp = None
             self._peer_trusted = None
+            # 🔴 RESET TO `()` — nothing visible — NOT to the unrestricted `None`.
+            # See the class-level declaration: this is the fail-closed direction,
+            # and it is the reset value precisely because a reset runs on paths
+            # that never reach `authorize`.
+            self._visible_scopes = ()
+            self._identity = None
             self._unauthorized()
             self._audit(self._raw_path(), 401, "malformed-target")
             return None
@@ -1758,6 +2115,12 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
         self._client_ip = None
         self._token_fp = None
         self._peer_trusted = None
+        # 🔴 RESET TO `()` — nothing visible — NOT to the unrestricted `None`.
+        # See the class-level declaration: this is the fail-closed direction,
+        # and it is the reset value precisely because a reset runs on paths
+        # that never reach `authorize`.
+        self._visible_scopes = ()
+        self._identity = None
         path = self._request_path()
         if path is None:
             return
@@ -1800,9 +2163,16 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
             return
 
         try:
-            self._token_fp = authorize(
+            # 🔴 ONE MATCH, THREE FACTS. The fingerprint, the identity and the
+            # scope allowlist all come off the SAME record `authorize` returned,
+            # so no route can be authenticated against one credential and
+            # authorised against another.
+            record = authorize(
                 self.headers.get("Authorization"), self.expected_tokens
             )
+            self._token_fp = record.fingerprint
+            self._identity = record.identity
+            self._visible_scopes = record.scopes
         except _Rejected:
             self._refuse(path, self._count_failure(limiter, ip))
             return
@@ -1906,7 +2276,14 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
             headers={
                 "X-Store-Status": status,
                 "X-Store-Exit": str(code),
-                "X-Store-Revision": scope_revision(self.store_root, scope),
+                # 🔴 GATED ON THE CALLER'S ALLOWLIST. This one header does NOT
+                # come from the narrowed index — it is read off
+                # `<store>/<scope>/.git/HEAD` — so it is the one place a refused
+                # scope could still be told apart from an absent one. See
+                # `scope_revision`.
+                "X-Store-Revision": scope_revision(
+                    self.store_root, scope, visible_scopes=self._visible_scopes
+                ),
                 "X-Store-Snapshot": fresh_header,
             },
         )
@@ -1925,6 +2302,7 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
             limit=limit if limit is not None else rc.DEFAULT_ENTRY_LIMIT,
             mode=mode,
             page=page if page is not None else 1,
+            visible_scopes=self._visible_scopes,
         )
         self._serve_report(
             urlsplit(self.path).path,
@@ -1952,6 +2330,11 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
             ),
             max_hits=max_hits if max_hits is not None else rc.DEFAULT_MAX_HITS,
             all_scopes=params.get("all_scopes", ["0"])[-1] not in ("0", "", "false"),
+            # 🔴 AND THIS IS WHAT MAKES `?all_scopes=1` SAFE. That flag names no
+            # scope, so a per-scope refusal check has nothing to refuse — it
+            # would search the CONTENT of every scope in the store. Narrowing
+            # the index makes "all scopes" mean "all the caller's scopes".
+            visible_scopes=self._visible_scopes,
         )
         self._serve_report(
             urlsplit(self.path).path,
@@ -2009,12 +2392,29 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
             self._audit(urlsplit(self.path).path, 400, "bad-request")
             return
 
+        # 🔴 THE FOURTH ENUMERATION CHANNEL, AND THE ONLY ONE `load_store` CANNOT
+        # CLOSE. This route never builds an index — it walks the store root
+        # directly — so the narrowing that covers `/recall` and `/search` does
+        # not reach here at all. Without this line a caller allowed one scope
+        # could download every scope's entry FILES, which is a wider leak than
+        # any of the three channels the index filter closes.
+        #
+        # Applied as a filter on the CANDIDATE list rather than on the tar
+        # members, so an out-of-allowlist scope is never classified, never
+        # opened, and can never reach the `unreadable` list either — a refused
+        # scope must not be able to 503 somebody else's snapshot, which is both
+        # a leak and a denial of service.
+        visible = self._visible_scopes
+        allowed = (
+            None if visible is None else {rc.normalize_ref(s) for s in visible}
+        )
         try:
             candidates = sorted(
                 p
                 for p in root.iterdir()
                 if not p.name.startswith(".")
                 and (scope_filter is None or p.name == scope_filter)
+                and (allowed is None or rc.normalize_ref(p.name) in allowed)
             )
         except OSError as exc:
             # 🔴 The store was NOT read. Same state, same code and the same
@@ -2169,7 +2569,7 @@ def build_server(
     host: str,
     port: int,
     store_root: str,
-    tokens: Sequence[str],
+    tokens: "Sequence[str | TokenRecord]",
     trusted_proxies: Sequence[Any],
     limiter: RateLimiter | None = None,
     audit: Callable[[str], None] | None = None,
@@ -2181,6 +2581,12 @@ def build_server(
     still passing the old name now fails loudly at the call, instead of silently
     configuring the empty default set and rejecting every request — or, worse,
     being iterated character-by-character somewhere downstream.
+
+    An item may be a `TokenRecord` or a bare `str`; a bare one is the LEGACY
+    record (unrestricted scope) by the same rule the token file uses, resolved
+    through the one `as_token_record`. Normalizing here rather than in the
+    handler means `expected_tokens` is a homogeneous tuple of records, so no
+    request-path code has to ask what shape it was configured with.
     """
     if isinstance(tokens, (str, bytes)):
         raise TypeError("tokens must be a SEQUENCE of tokens, not one string")
@@ -2213,7 +2619,7 @@ def build_server(
         pass
 
     _Handler.store_root = store_root
-    _Handler.expected_tokens = tuple(tokens)
+    _Handler.expected_tokens = tuple(as_token_record(t) for t in tokens)
     _Handler.trusted_proxies = networks
     _Handler.limiter = limiter if limiter is not None else RateLimiter()
     if audit is not None:
@@ -2237,9 +2643,10 @@ def main(argv: list[str] | None = None) -> int:
         "--token-file",
         default=os.environ.get("SUBSYSTEM_STORE_TOKEN_FILE", DEFAULT_TOKEN_FILE),
         help=(
-            "file holding the bearer token SET, ONE PER LINE, current first "
-            "(mode 0600). FILE FIRST: the agent exec sandbox strips env vars, so "
-            "$SUBSYSTEM_STORE_TOKEN is the fallback"
+            "file holding the bearer token SET, ONE ROW PER LINE, current first "
+            "(mode 0600). A row is `<token>` (legacy: unrestricted scope) or "
+            "`<token> <identity> <scope>,<scope>`. FILE FIRST: the agent exec "
+            "sandbox strips env vars, so $SUBSYSTEM_STORE_TOKEN is the fallback"
         ),
     )
     args = p.parse_args(argv)
@@ -2283,7 +2690,13 @@ def main(argv: list[str] | None = None) -> int:
     # should have stopped appearing before deleting its line from the secret.
     print(
         f"subsystem-store-api: listening on {args.host}:{args.port} "
-        f"store={args.store} token-ids={','.join(token_id(t) for t in tokens)} "
+        # 🔴 `<fingerprint>:<identity>` — the fingerprint FIRST and unchanged in
+        # form, because the rotation procedure in the README greps for it. The
+        # identity is appended, not substituted: two rows can hold one holder's
+        # current and previous credential, so the identity alone cannot tell an
+        # operator which line to delete.
+        f"store={args.store} "
+        f"token-ids={','.join(f'{t.fingerprint}:{t.identity}' for t in tokens)} "
         f"lockout={max_failures}/{window_s:g}s->{lockout_s:g}s "
         # 🔴 PRINTED, so "which peers may set CF-Connecting-IP" is a fact in the
         # pod log rather than a value nobody can read back out of a running

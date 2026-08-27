@@ -12,8 +12,9 @@ usable is phase 2. Add the pointer when there is something to point at.
 | in | out, until |
 |---|---|
 | the pod, seeded from the local store | — |
-| read-only `GET` API, bearer token **SET** | writes / append endpoints → **phase 3** |
-| per-client rate limit + lockout, `CF-Connecting-IP` keying | separate read/write tokens → **phase 3** |
+| read-only `GET` API, bearer token **SET** | writes / append endpoints → **phase 3, criteria 4-10** |
+| per-client rate limit + lockout, `CF-Connecting-IP` keying | a WRITE-scoped token → **phase 3, criteria 4-10** |
+| per-token identity + **scope allowlist** on every read route (phase 3, criteria 1-3) | — |
 | cluster-internal `ClusterIP` | 🔴 IngressRoute + DNS → **an UNMERGED PR** |
 | byte-identity verified against local | the CLI wrapper + read-through cache → **phase 2** |
 
@@ -129,17 +130,62 @@ are the store-root line — `2` and `2` for pod-vs-workbench.
 
 ## The token is a SET, and rotation is by overlap
 
-The token file holds **one token per line, current first**. Whitespace-separated
-is also accepted; blank lines are ignored; duplicates collapse. Up to
-`MAX_TOKENS` (4) — every line is a live credential, so an uncapped set is an
-accumulation nobody has retired, and the server refuses to start rather than
-serve one.
+The token file holds **one ROW per line, current first**. Blank lines are
+ignored; duplicate tokens collapse, order preserved. Up to `MAX_TOKENS` (4) —
+every line is a live credential, so an uncapped set is an accumulation nobody
+has retired, and the server refuses to start rather than serve one.
 
-Generate one:
+A row is one of two shapes:
+
+```
+<token>                                    # LEGACY: identity `legacy`, ALL scopes
+<token>   <identity>   <scope>,<scope>     # MAPPED: named holder, scoped
+```
+
+🔴 **Whitespace now separates the three FIELDS of one row, not two tokens.**
+Before phase 3 the file was split on any whitespace, so `<tokenA> <tokenB>` on
+one line was two credentials. It is now a row with a token in the identity
+field — refused at startup with `malformed token row N of M`, never
+reinterpreted. Put one row per line.
+
+Generate a token:
 
 ```bash
 python3 -c 'import secrets; print(secrets.token_urlsafe(43))'   # 58 chars
 ```
+
+### Identities and scope allowlists (phase 3, criteria 1-3)
+
+A **mapped** row names who holds the token and which scopes it may read. The
+identity is lowercase `[a-z0-9-]`, at most 32 characters — deliberately BELOW
+the 43-character token floor, so a token can never be misread as an identity.
+Scopes are comma-separated, each matching `[A-Za-z0-9_-]+`, folded by the
+reader's own `normalize_ref` so `Kelp_Forest` and `kelp-forest` are one scope.
+
+A scope outside the allowlist answers **exactly what a scope that never existed
+answers** — `200`, `X-Store-Status: scope-absent`, and a body byte-identical to
+the genuinely-absent one. There is no "forbidden" response, because a response
+that discriminates is an enumeration API. What the caller sees narrows with it:
+`known_scopes`, the cross-scope malformed block, `?all_scopes=1` search results,
+the `/snapshot` tar members and `X-Store-Revision` are all the caller's own.
+
+⚠ **`X-Store-Snapshot` (and the freshness prose) stays STORE-WIDE.** It carries
+a total `entry-files=` count across scopes the caller cannot name. That is
+deliberate — it is the staleness guarantee the snapshot design rests on, and
+scoping it would make "how old is this copy" a function of your allowlist — but
+it is a residual count leak, recorded here rather than left to be discovered.
+
+`identity=<name>` is an **additional** audit field; `token=<fingerprint>` is
+unchanged and is still the only thing that can tell one holder's current
+credential from its previous one.
+
+🔴 **A bare legacy row is still valid, and any file containing one makes the
+process shout on stderr at startup**, naming the count and the legacy
+fingerprints. That is the migration (mapped rows land beside the old shared
+token) and the rollback (put the one line back — no code change). Rotating a
+MAPPED credential uses a second identity (`zach-prev`), not a second row naming
+the same one: two rows claiming one identity with disagreeing allowlists have no
+defined precedence, so they are refused.
 
 ### Rotating, and how you know it is safe to finish
 
@@ -154,8 +200,8 @@ store-api audit ts=… ip=203.0.113.7 peer=trusted method=GET path=/api/v1/recal
 
 1. `sops clusters/homelab/apps/subsystem-store/secrets.enc.yaml` — put the NEW
    token on the first line, keep the old one below it. Commit; Flux applies.
-2. Restart the pod. Its startup line prints every fingerprint in file order:
-   `token-ids=<new>,<old>`.
+2. Restart the pod. Its startup line prints every fingerprint in file order,
+   each with its identity: `token-ids=<new>:legacy,<old>:legacy`.
 3. Roll clients onto the new token. Watch the audit stream until the OLD
    fingerprint stops appearing:
    `kubectl -n subsystem-store logs deploy/subsystem-store-api | grep 'token=<old>'`
@@ -340,8 +386,11 @@ layers' job; this layer is the only one that can see a wrong credential.
 
 ## Deferred, and why (not oversights)
 
-- **Separate read/write tokens** — there is no write path until phase 3, so a
-  write-scoped token today is a label on a capability that does not exist.
+- **Separate read/write tokens** — the READ half landed with phase 3 criteria
+  1-3 (identity + scope allowlist above). A WRITE-scoped token is still deferred
+  for the original reason: criteria 4-10 add no verb yet, so it would be a label
+  on a capability that does not exist. `do_POST = do_PUT = do_PATCH = do_DELETE
+  = _reject_write` is untouched and every write verb is still a 405.
 - **Backup CronJob, daily-commit CronJob** — the workbench copy is authoritative
   until phase 3, so the PVC is a second copy, not the only one.
 - **A `rotate-token` script** — the procedure above is four steps across a SOPS

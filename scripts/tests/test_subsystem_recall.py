@@ -5172,9 +5172,14 @@ class TestDegradationMutationKills:
             tmp_path,
             "m_collect",
             [
+                # The anchor moved when `load_store` grew its `visible_scopes`
+                # narrowing: the load is now bound to a name so the index can be
+                # filtered before it is returned. The MUTATION is unchanged —
+                # drop `on_malformed=ON_MALFORMED_COLLECT` and nothing else — and
+                # it is still the narrowest expression that can be wrong.
                 (
-                    "        return store, load_index(store, on_malformed=ON_MALFORMED_COLLECT)",
-                    "        return store, load_index(store)",
+                    "        index = load_index(store, on_malformed=ON_MALFORMED_COLLECT)",
+                    "        index = load_index(store)",
                 )
             ],
         )

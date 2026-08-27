@@ -44,10 +44,28 @@ LOOPBACK = ipaddress.ip_network("127.0.0.1/32")
 
 
 def _load_api():
+    """Import `server.py` by path — its directory name has a hyphen in it.
+
+    🔴 `sys.modules[spec.name] = module` BEFORE `exec_module`, and it is not
+    bookkeeping. A module executed while absent from `sys.modules` is only
+    MOSTLY imported, and CPython dereferences that entry without a `None` guard
+    in places you do not go looking: `dataclasses._is_type` does
+    `sys.modules.get(cls.__module__).__dict__` to decide whether a STRING
+    annotation names `ClassVar`/`KW_ONLY`, so under `from __future__ import
+    annotations` the first `@dataclass` in the file raised
+
+        AttributeError: 'NoneType' object has no attribute '__dict__'
+
+    at import — 43 collection errors in this file, none of them near the change
+    that triggered them. `test_subsystem_store_api._load_server` has always
+    registered; this loader is the second copy of that predicate and was the
+    one that was wrong, which is the shape a duplicated predicate always takes.
+    """
     sys.path.insert(0, str(REPO / "scripts" / "lib"))
     spec = importlib.util.spec_from_file_location("srv", SERVER_PY)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 

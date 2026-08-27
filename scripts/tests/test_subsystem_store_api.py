@@ -52,6 +52,7 @@ from testlib import hermetic_git  # noqa: E402
 import io
 import os
 import re
+import shutil
 import tarfile
 import secrets
 import subprocess
@@ -480,6 +481,23 @@ def tree_hash(root: Path) -> str:
 # =============================================================================
 
 
+def loaded(token_file, env, **kwargs) -> list[tuple]:
+    """`load_tokens` as PLAIN TUPLES — `(token, identity, scopes)` per row.
+
+    🔴 A tuple, not the `TokenRecord` itself, and deliberately: importing the
+    dataclass and asserting `== TokenRecord(...)` would re-derive the expected
+    value from the implementation under test, and a field renamed on both sides
+    would stay green. Spelling the three facts out here means the assertion
+    breaks when the SHAPE changes, which is when someone should look.
+
+    `warn=` is swallowed by default so the legacy-mode banner does not spray
+    stderr across every guard test; the tests that are ABOUT that banner pass
+    their own sink and read it.
+    """
+    kwargs.setdefault("warn", lambda _line: None)
+    return [(r.token, r.identity, r.scopes) for r in api.load_tokens(token_file, env, **kwargs)]
+
+
 class TestTokenLoadingGuards:
     """`load_tokens` refuses to serve on a token that is absent, empty or weak.
 
@@ -532,7 +550,11 @@ class TestTokenLoadingGuards:
     def test_a_token_of_exactly_the_floor_is_accepted(self, tmp_path: Path):
         path = tmp_path / "tok"
         path.write_text("z" * 43 + "\n")
-        assert api.load_tokens(str(path), {}) == ["z" * 43]
+        # 🔴 A BARE ROW IS THE LEGACY RECORD: identity `legacy`, `scopes=None`
+        # meaning UNRESTRICTED. Pinned here rather than only in the phase-3
+        # section, because this is the shape criterion 10's rollback re-adds and
+        # the whole migration rests on it still loading.
+        assert loaded(str(path), {}) == [("z" * 43, "legacy", None)]
 
     def test_env_is_the_FALLBACK_not_the_primary(self, tmp_path: Path):
         # Both sources present: the FILE wins. The agent exec sandbox strips env
@@ -540,12 +562,14 @@ class TestTokenLoadingGuards:
         # mounted secret would make the deployed token unknowable.
         path = tmp_path / "tok"
         path.write_text("f" * 50)
-        assert api.load_tokens(str(path), {"SUBSYSTEM_STORE_TOKEN": "e" * 50}) == [
-            "f" * 50
+        assert loaded(str(path), {"SUBSYSTEM_STORE_TOKEN": "e" * 50}) == [
+            ("f" * 50, "legacy", None)
         ]
 
     def test_env_is_used_when_no_file_is_named(self):
-        assert api.load_tokens(None, {"SUBSYSTEM_STORE_TOKEN": "e" * 50}) == ["e" * 50]
+        assert loaded(None, {"SUBSYSTEM_STORE_TOKEN": "e" * 50}) == [
+            ("e" * 50, "legacy", None)
+        ]
 
 
 # =============================================================================
@@ -2423,11 +2447,27 @@ class TestTokenSetAndOverlapRotation:
 
     def test_two_tokens_load_as_a_set_IN_FILE_ORDER(self, tmp_path: Path):
         path = self._write(tmp_path, GOOD_TOKEN, SECOND_TOKEN)
-        assert api.load_tokens(path, {}) == [GOOD_TOKEN, SECOND_TOKEN]
+        assert [r[0] for r in loaded(path, {})] == [GOOD_TOKEN, SECOND_TOKEN]
 
     def test_a_duplicated_line_collapses_and_order_is_kept(self, tmp_path: Path):
         path = self._write(tmp_path, SECOND_TOKEN, GOOD_TOKEN, SECOND_TOKEN)
-        assert api.load_tokens(path, {}) == [SECOND_TOKEN, GOOD_TOKEN]
+        assert [r[0] for r in loaded(path, {})] == [SECOND_TOKEN, GOOD_TOKEN]
+
+    def test_TWO_LEGACY_ROWS_do_NOT_trip_the_duplicate_identity_guard(
+        self, tmp_path: Path
+    ):
+        """🔴 THE EXEMPTION, EXERCISED — it is what keeps rotation working.
+
+        Both bare rows carry identity `legacy`, so a duplicate-identity check
+        written without the exemption refuses the ordinary current+previous
+        overlap file: the very shape guards 1-5 exist to support, and the shape
+        criterion 10's rollback restores. Distinct tokens, one identity, and it
+        must LOAD.
+        """
+        path = self._write(tmp_path, GOOD_TOKEN, SECOND_TOKEN)
+        rows = loaded(path, {})
+        assert [r[1] for r in rows] == ["legacy", "legacy"]
+        assert [r[2] for r in rows] == [None, None]
 
     def test_the_cap_is_FOUR(self):
         # Literal, not `api.MAX_TOKENS` — importing it would assert x == x.
@@ -2449,7 +2489,7 @@ class TestTokenSetAndOverlapRotation:
     ):
         four = [chr(ord("a") + i) * 48 for i in range(4)]
         path = self._write(tmp_path, *four)
-        assert api.load_tokens(path, {}) == four
+        assert [r[0] for r in loaded(path, {})] == four
 
     def test_a_SHORT_SECOND_token_names_its_POSITION_and_never_the_token(
         self, tmp_path: Path
@@ -2518,7 +2558,11 @@ class TestTokenSetAndOverlapRotation:
         got = api.authorize(
             f"Bearer {GOOD_TOKEN}", (GOOD_TOKEN, SECOND_TOKEN, THIRD_TOKEN)
         )
-        assert got == api.token_id(GOOD_TOKEN)
+        # 🔴 The RECORD, and the fingerprint is read off it — `authorize`
+        # returns identity and allowlist alongside the match now, so the audit
+        # line and the scope filter come from one decision.
+        assert got.fingerprint == api.token_id(GOOD_TOKEN)
+        assert got.token == GOOD_TOKEN
         assert len(seen) == 3, f"short-circuited after {len(seen)} comparisons"
 
     def test_authorize_REFUSES_a_bare_string_rather_than_iterating_CHARACTERS(self):
@@ -2599,7 +2643,7 @@ class TestTokenSetAndOverlapRotation:
         assert api.token_id(GOOD_TOKEN) in out
         assert api.token_id(SECOND_TOKEN) in out
         assert GOOD_TOKEN not in out and SECOND_TOKEN not in out
-        assert started["tokens"] == [GOOD_TOKEN, SECOND_TOKEN]
+        assert [r.token for r in started["tokens"]] == [GOOD_TOKEN, SECOND_TOKEN]
 
 
 class TestClientIpIsCloudflareOnly:
@@ -5619,3 +5663,885 @@ class TestResolveClientIsTheWholeRule:
         )
         assert key == "2001:db8:1:2::/64"
         assert trusted is False
+
+
+# =============================================================================
+# 16. PHASE 3, CRITERIA 1-3 — two-token authorization on the READ path.
+#
+# 🔴 WHICH OF THESE ARE REGRESSION TESTS, HONESTLY. `server.py` and the absent
+# path both EXIST at the base ref, and the leak is real there, so the tests in
+# `TestEnumerationChannelsAreClosed` and `TestRefusedIsIndistinguishableFromAbsent`
+# are genuine regressions: they go red at base for the RIGHT reason (the body
+# names scopes the caller may not see) rather than by API error. The GUARD tests
+# in `TestScopedTokenRowGuards` are NOT: they call a parser that does not accept
+# a three-field row at base, so their red is a shape error and proves nothing —
+# the mutation matrix in the PR body is their evidence.
+#
+# 🔴 AND THE WRITE PATH IS NOT HERE. Criteria 4-10 add no verb in this branch;
+# `TestPhaseOneScope.test_the_server_declares_no_write_handler` is untouched and
+# still the thing that has to be broken on purpose when the write path lands.
+# =============================================================================
+
+
+# Pairwise-distinct, and distinct from every scope constant already in this
+# file AND from every literal any assertion below names. Invented for this
+# section so a renderer that surfaced the wrong scope cannot pass by
+# coincidence.
+ALLOW_SCOPE = "kelp-forest"     # zach may read it
+DENY_SCOPE = "quartz-mine"      # dana may read it; zach may not
+THIRD_SCOPE = "lantern-bay"     # nobody in these tests may read it
+PHANTOM_SCOPE = "never-quarried"  # never exists on disk, at any point
+
+# One distinctive sentence per scope, sharing no substring, so "did content from
+# a scope I cannot see reach me" is answerable by a single `in` on the body.
+KELP_NUANCE = "- 2026-03-04: the tide gauge drifts 3cm after a spring flood."
+QUARTZ_NUANCE = "- 2026-03-05: the drill head overheats past 900 revolutions."
+LANTERN_NUANCE = "- 2026-03-06: the beacon lamp browns out on a westerly gale."
+
+ZACH_TOKEN = "k" * 20 + "L" * 20 + "m" * 8   # 48 chars
+DANA_TOKEN = "p" * 20 + "Q" * 20 + "r" * 8   # 48 chars, disjoint
+# 🔴 TOKEN-LENGTH AND ALL-LOWERCASE, so it PASSES the identity charset check and
+# can be rejected ONLY by the length cap. That is what lets the "a token can
+# never be an identity" test measure the arithmetic it claims to measure rather
+# than an incidental uppercase letter. `secrets.token_urlsafe` really can emit
+# an all-lowercase string, so this is a shape, not a contrivance.
+LOWER_TOKEN = "s" * 24 + "t" * 24            # 48 chars, [a-z] only
+
+# The identity class, spelled again here BY HAND. Importing
+# `api.IDENTITY_COMPONENT` would make the fixture's precondition and the code
+# under test the same expression, so a wrong class would satisfy both.
+IDENTITY_CHARSET = re.compile(r"[a-z0-9][a-z0-9-]*")
+
+# A fixed instant, applied to every entry file, so two stores built from
+# different scope NAMES still date identically. `snapshot_freshness` reports the
+# newest entry mtime and the entry-file COUNT store-wide, and both are shared
+# across an allowlist — see the module docstring's residual-leak note. Holding
+# them constant is what lets the byte-identity claim below be about scope
+# EXISTENCE and nothing else.
+FIXED_MTIME = 1_767_225_600.0  # 2026-01-01T00:00:00Z, an arbitrary round instant
+
+
+def _scoped_record(token: str, identity: str, *scopes: str):
+    return api.TokenRecord(token=token, identity=identity, scopes=tuple(scopes))
+
+
+ZACH = _scoped_record(ZACH_TOKEN, "zach", ALLOW_SCOPE)
+DANA = _scoped_record(DANA_TOKEN, "dana", DENY_SCOPE)
+
+
+def _build_store(root: Path, scopes: "dict[str, str]", *, malformed: str = "") -> Path:
+    """A store holding one entry per named scope, every mtime pinned.
+
+    `scopes` maps scope name -> the nuance line that scope's single entry
+    carries. `malformed` optionally names a scope that also gets a front-matter-
+    less file, which is what puts a row on `index.malformed`.
+    """
+    root.mkdir(parents=True, exist_ok=True)
+    for scope, nuance in scopes.items():
+        (root / scope).mkdir(parents=True, exist_ok=True)
+        entry = root / scope / f"{scope}-entry.md"
+        entry.write_text(_entry(f"{scope}-entry", scope, nuance=nuance))
+    if malformed:
+        (root / malformed / "broken-shard.md").write_text("no front matter here\n")
+    for path in sorted(root.rglob("*.md")):
+        os.utime(path, (FIXED_MTIME, FIXED_MTIME))
+    return root
+
+
+@pytest.fixture
+def scoped_store(tmp_path: Path) -> Path:
+    """Three populated scopes, and the malformed row lives in a DENIED one.
+
+    The malformed placement is the point: `malformed_elsewhere` is rendered on
+    EVERY status, so a reject sitting in a scope the caller cannot name is the
+    channel that leaks without any miss ever happening.
+    """
+    return _build_store(
+        tmp_path / "store",
+        {
+            ALLOW_SCOPE: KELP_NUANCE,
+            DENY_SCOPE: QUARTZ_NUANCE,
+            THIRD_SCOPE: LANTERN_NUANCE,
+        },
+        malformed=DENY_SCOPE,
+    )
+
+
+class TestScopedTokenRowGuards:
+    """🔴 SIX NEW GUARDS, AND EACH INPUT PASSES EVERY EARLIER ONE.
+
+    Guards 1-5 (no source / unreadable / empty / too many / too short) are
+    unchanged and covered by `TestTokenLoadingGuards` and
+    `TestTokenSetAndOverlapRotation` above. Every file below therefore uses
+    tokens of 48 characters and at most four rows, so the only guard that can
+    reject it is the one the test names — a test that went red because a
+    DIFFERENT guard fired would be green with the guard it names deleted, which
+    is the failure mode this class is shaped against.
+
+    Each assertion pins the guard's OWN sentence, not merely `ValueError`.
+    """
+
+    def _write(self, tmp_path: Path, *rows: str) -> str:
+        path = tmp_path / "tokens"
+        path.write_text("\n".join(rows) + "\n")
+        return str(path)
+
+    def test_GUARD_6_a_row_with_two_fields_is_MALFORMED_not_two_tokens(
+        self, tmp_path: Path
+    ):
+        """🔴 THE FORMAT CHANGE, MADE LOUD. Under the old whole-file `.split()`
+        this line was TWO credentials. Under the row format it is one row with a
+        field count that means nothing, and the process refuses to start rather
+        than pick a reading.
+        """
+        path = self._write(tmp_path, f"{ZACH_TOKEN} zach")
+        with pytest.raises(ValueError) as exc:
+            api.load_tokens(path, {}, warn=lambda _l: None)
+        assert "malformed token row 1 of 1" in str(exc.value)
+        assert "2 fields" in str(exc.value)
+        # And never the credential itself, on the one file whose whole content
+        # is credentials.
+        assert ZACH_TOKEN not in str(exc.value)
+
+    def test_GUARD_6_is_reached_by_a_FOUR_field_row_too(self, tmp_path: Path):
+        # The other side of the `not in (1, 3)` boundary. A guard tested only
+        # from below is a guard tested on one side of its condition.
+        path = self._write(tmp_path, f"{ZACH_TOKEN} zach {ALLOW_SCOPE} extra")
+        with pytest.raises(ValueError) as exc:
+            api.load_tokens(path, {}, warn=lambda _l: None)
+        assert "malformed token row 1 of 1" in str(exc.value)
+        assert "4 fields" in str(exc.value)
+
+    def test_GUARD_7_an_identity_outside_the_charset_is_refused(self, tmp_path: Path):
+        # Passes guard 6: three fields. Fails only on the identity's spelling.
+        path = self._write(tmp_path, f"{ZACH_TOKEN} Za_ch {ALLOW_SCOPE}")
+        with pytest.raises(ValueError) as exc:
+            api.load_tokens(path, {}, warn=lambda _l: None)
+        assert "invalid identity in token row 1 of 1" in str(exc.value)
+        assert "Za_ch" in str(exc.value)
+
+    def test_GUARD_7_a_TOKEN_can_never_be_read_as_an_identity(self, tmp_path: Path):
+        """🔴 THE STRUCTURAL HALF OF THE FORMAT CHANGE, AND THE FIXTURE HAS TO
+        REACH IT. Three tokens on one line used to be three credentials; now it
+        is a three-field row, and what stops the second one being read as an
+        identity is ARITHMETIC — the cap is below the token floor, 48 > 32.
+
+        So the identity here is `LOWER_TOKEN`, which is token-SHAPED and passes
+        the charset check outright: only the LENGTH cap can reject it. An
+        earlier version used a token containing uppercase, which meant the
+        charset half did all the work and the length cap — the half the
+        docstring is about — was never exercised at all.
+        """
+        path = self._write(tmp_path, f"{ZACH_TOKEN} {LOWER_TOKEN} {ALLOW_SCOPE}")
+        assert IDENTITY_CHARSET.fullmatch(LOWER_TOKEN), (
+            "the fixture must pass the CHARSET check, or this test measures the "
+            "charset half and not the length cap it claims to"
+        )
+        with pytest.raises(ValueError) as exc:
+            api.load_tokens(path, {}, warn=lambda _l: None)
+        assert "invalid identity in token row 1 of 1" in str(exc.value)
+        # 32 and 43, pinned LITERALLY — the cap must stay under the floor or
+        # this whole property evaporates silently.
+        assert api.MAX_IDENTITY_CHARS == 32
+        assert api.MIN_TOKEN_CHARS == 43
+        assert api.MAX_IDENTITY_CHARS < api.MIN_TOKEN_CHARS
+        assert len(LOWER_TOKEN) > api.MAX_IDENTITY_CHARS
+
+    def test_GUARD_8_a_mapped_row_may_not_claim_the_legacy_identity(
+        self, tmp_path: Path
+    ):
+        # Passes 6 (three fields) and 7 (`legacy` is a well-formed identity).
+        # Only the reservation can reject it.
+        path = self._write(tmp_path, f"{ZACH_TOKEN} legacy {ALLOW_SCOPE}")
+        with pytest.raises(ValueError) as exc:
+            api.load_tokens(path, {}, warn=lambda _l: None)
+        assert "reserved identity in token row 1 of 1" in str(exc.value)
+        assert "'legacy'" in str(exc.value)
+
+    def test_GUARD_9_an_explicitly_empty_allowlist_is_refused(self, tmp_path: Path):
+        # Three fields, a valid non-reserved identity, and a third field holding
+        # no scope name at all. Every earlier guard passes.
+        path = self._write(tmp_path, f"{ZACH_TOKEN} zach ,")
+        with pytest.raises(ValueError) as exc:
+            api.load_tokens(path, {}, warn=lambda _l: None)
+        assert "empty scope allowlist in token row 1 of 1" in str(exc.value)
+        assert "'zach'" in str(exc.value)
+
+    def test_GUARD_10_a_scope_no_URL_could_name_is_refused(self, tmp_path: Path):
+        # A dot is outside the path-component class, so `kelp.forest` could
+        # never be requested — an allowlist entry that would sit inert forever.
+        # Passes 9: the list is non-empty.
+        path = self._write(tmp_path, f"{ZACH_TOKEN} zach kelp.forest")
+        with pytest.raises(ValueError) as exc:
+            api.load_tokens(path, {}, warn=lambda _l: None)
+        assert "invalid scope in token row 1 of 1" in str(exc.value)
+        assert "kelp.forest" in str(exc.value)
+
+    def test_GUARD_10_also_catches_an_EMPTY_entry_inside_a_real_list(
+        self, tmp_path: Path
+    ):
+        """The reachable case guard 9 cannot see: the list is not empty, so
+        `any(...)` is satisfied, and one entry still names nothing.
+        """
+        path = self._write(
+            tmp_path, f"{ZACH_TOKEN} zach {ALLOW_SCOPE},,{DENY_SCOPE}"
+        )
+        with pytest.raises(ValueError) as exc:
+            api.load_tokens(path, {}, warn=lambda _l: None)
+        assert "invalid scope in token row 1 of 1" in str(exc.value)
+
+    def test_GUARD_10_also_catches_an_entry_that_FOLDS_AWAY_to_nothing(
+        self, tmp_path: Path
+    ):
+        """🔴 THE HALF THE CHARACTER CLASS CANNOT SEE, and the reason the guard
+        checks the FOLDED value rather than the typed one.
+
+        `-` and `___` are inside `[A-Za-z0-9_-]+`, so they are perfectly namable
+        in a URL — and `normalize_ref` folds both to the EMPTY STRING, which
+        matches no index key. Such an entry is a grant that reads as working and
+        does nothing, which is exactly what this guard's sentence promises to
+        prevent. A guard narrower than its own description is worse than none,
+        because it stops anyone looking.
+        """
+        for typo in ("-", "___", "--"):
+            path = self._write(tmp_path, f"{ZACH_TOKEN} zach {typo}")
+            with pytest.raises(ValueError) as exc:
+                api.load_tokens(path, {}, warn=lambda _l: None)
+            assert "invalid scope in token row 1 of 1" in str(exc.value), typo
+            assert "folds away" in str(exc.value), typo
+
+    def test_GUARD_11_two_rows_naming_ONE_identity_are_refused(self, tmp_path: Path):
+        # Two rows, both well-formed, both with real allowlists — every earlier
+        # guard passes on every row. Only the cross-row check can see this.
+        path = self._write(
+            tmp_path,
+            f"{ZACH_TOKEN} zach {ALLOW_SCOPE}",
+            f"{DANA_TOKEN} zach {DENY_SCOPE}",
+        )
+        with pytest.raises(ValueError) as exc:
+            api.load_tokens(path, {}, warn=lambda _l: None)
+        assert "duplicate identity 'zach'" in str(exc.value)
+        assert "rows 1 and 2" in str(exc.value)
+
+    def test_a_WELL_FORMED_mapped_file_loads_with_its_allowlist(self, tmp_path: Path):
+        """The positive control for all six guards above. Without it, a parser
+        that rejected EVERYTHING would pass every test in this class.
+        """
+        path = self._write(
+            tmp_path,
+            f"{ZACH_TOKEN} zach {ALLOW_SCOPE},{DENY_SCOPE}",
+            f"{DANA_TOKEN} dana {DENY_SCOPE}",
+        )
+        assert loaded(path, {}) == [
+            (ZACH_TOKEN, "zach", (ALLOW_SCOPE, DENY_SCOPE)),
+            (DANA_TOKEN, "dana", (DENY_SCOPE,)),
+        ]
+
+    def test_an_allowlist_entry_is_FOLDED_the_way_the_reader_folds_a_scope(
+        self, tmp_path: Path
+    ):
+        """🔴 An allowlist entry and the index key it must match cannot be
+        allowed to disagree about case or `_` vs `-`: an entry that never
+        matched would be a silently inert grant, which reads as a working one.
+        """
+        path = self._write(tmp_path, f"{ZACH_TOKEN} zach Kelp_Forest")
+        assert loaded(path, {}) == [(ZACH_TOKEN, "zach", (ALLOW_SCOPE,))]
+
+
+class TestLegacyRowsSurviveTheMigration:
+    """🔴 CRITERION 10's REQUIREMENT, WHICH IS WHY THIS IS NOT A PREFERENCE.
+
+    The old shared token has to keep working while clients move onto mapped
+    rows, and the rollback is putting that one line back — a rollback that
+    needed a code change would not be one.
+    """
+
+    def _write(self, tmp_path: Path, *rows: str) -> str:
+        path = tmp_path / "tokens"
+        path.write_text("\n".join(rows) + "\n")
+        return str(path)
+
+    def test_a_MIXED_file_of_legacy_and_mapped_rows_loads(self, tmp_path: Path):
+        path = self._write(
+            tmp_path,
+            GOOD_TOKEN,                            # legacy, unrestricted
+            f"{ZACH_TOKEN} zach {ALLOW_SCOPE}",    # mapped
+        )
+        assert loaded(path, {}) == [
+            (GOOD_TOKEN, "legacy", None),
+            (ZACH_TOKEN, "zach", (ALLOW_SCOPE,)),
+        ]
+
+    def test_a_LEGACY_row_reads_EVERY_scope_over_HTTP(self, scoped_store: Path):
+        """The unrestricted half, exercised rather than asserted from the shape:
+        a bare token is served content from a scope no mapped row names.
+        """
+        with running(scoped_store, tokens=(GOOD_TOKEN,)) as (base, _):
+            for scope, nuance in (
+                (ALLOW_SCOPE, KELP_NUANCE),
+                (DENY_SCOPE, QUARTZ_NUANCE),
+                (THIRD_SCOPE, LANTERN_NUANCE),
+            ):
+                code, _h, body = fetch(f"{base}/api/v1/recall/{scope}", token=GOOD_TOKEN)
+                assert code == 200, scope
+                assert nuance.encode() in body, scope
+
+    def test_the_startup_warning_NAMES_legacy_mode_and_its_fingerprints(
+        self, tmp_path: Path
+    ):
+        """🔴 A one-line, loud, greppable statement that the store is running
+        with an unrestricted credential. Without it "the migration is finished"
+        is a guess, which is the same failure the `token=` fingerprint exists to
+        stop for rotation.
+        """
+        path = self._write(
+            tmp_path, GOOD_TOKEN, f"{ZACH_TOKEN} zach {ALLOW_SCOPE}"
+        )
+        warnings: list[str] = []
+        api.load_tokens(path, {}, warn=warnings.append)
+        assert len(warnings) == 1, warnings
+        line = warnings[0]
+        assert "LEGACY MODE" in line
+        assert "1 of 2" in line
+        assert api.token_id(GOOD_TOKEN) in line
+        # NEGATIVE CONTROL on the same line: the mapped row is not legacy, so
+        # its fingerprint must NOT be named as unrestricted.
+        assert api.token_id(ZACH_TOKEN) not in line
+        # …and never a credential.
+        assert GOOD_TOKEN not in line and ZACH_TOKEN not in line
+
+    def test_NO_warning_when_EVERY_row_is_mapped(self, tmp_path: Path):
+        """🔴 THE POSITIVE CONTROL'S PARTNER. A warner that fires unconditionally
+        would pass the test above and teach the operator to ignore the line.
+        """
+        path = self._write(
+            tmp_path,
+            f"{ZACH_TOKEN} zach {ALLOW_SCOPE}",
+            f"{DANA_TOKEN} dana {DENY_SCOPE}",
+        )
+        warnings: list[str] = []
+        api.load_tokens(path, {}, warn=warnings.append)
+        assert warnings == []
+
+
+class TestEnumerationChannelsAreClosed:
+    """🔴 FOUR CHANNELS, MEASURED ON THE DEPLOYED POD, EACH WITH ITS OWN TEST.
+
+    A per-route "is this scope yours" check would close NONE of the first three:
+    they all fire on requests for a scope the caller IS allowed, or on a request
+    that names no scope at all. Every test here drives `zach`, whose allowlist
+    is `ALLOW_SCOPE` alone, and asserts on the names and CONTENT of the two
+    scopes he may not see.
+    """
+
+    def test_CHANNEL_1_known_scopes_names_only_the_callers_own(
+        self, scoped_store: Path
+    ):
+        """`scope-absent` renders "scopes the store does hold: …". At base that
+        sentence enumerated the whole store to anybody holding any token.
+        """
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, body = fetch(
+                f"{base}/api/v1/recall/{PHANTOM_SCOPE}", token=ZACH_TOKEN
+            )
+        assert code == 200
+        assert headers["X-Store-Status"] == "scope-absent"
+        text = body.decode()
+        assert ALLOW_SCOPE in text, "the caller's own scope vanished — over-filtered"
+        assert DENY_SCOPE not in text
+        assert THIRD_SCOPE not in text
+
+    def test_CHANNEL_2_malformed_elsewhere_names_no_denied_scope(
+        self, scoped_store: Path
+    ):
+        """🔴 THE CHANNEL THAT FIRES ON A SUCCESSFUL READ. The "(+N further
+        malformed entries in OTHER scopes …)" block is rendered on EVERY status,
+        so this leaks on a perfectly ordinary 200 for a scope the caller owns —
+        no miss, nothing refused, nothing to notice.
+        """
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, body = fetch(
+                f"{base}/api/v1/recall/{ALLOW_SCOPE}", token=ZACH_TOKEN
+            )
+        assert code == 200
+        assert headers["X-Store-Status"] == "recalled"
+        text = body.decode()
+        assert KELP_NUANCE in text, "the caller's own content vanished"
+        assert DENY_SCOPE not in text
+        assert "broken-shard" not in text
+
+    def test_CHANNEL_2_POSITIVE_CONTROL_a_legacy_token_DOES_see_it(
+        self, scoped_store: Path
+    ):
+        """🔴 WITHOUT THIS THE TEST ABOVE IS A ZERO FROM A CHECK THAT MIGHT SEE
+        NOTHING. The fixture must actually PRODUCE a `malformed_elsewhere` block
+        naming the denied scope, or "the name is absent" is satisfied by a
+        renderer that never emits the block at all.
+        """
+        with running(scoped_store, tokens=(GOOD_TOKEN,)) as (base, _):
+            _c, _h, body = fetch(
+                f"{base}/api/v1/recall/{ALLOW_SCOPE}", token=GOOD_TOKEN
+            )
+        assert DENY_SCOPE in body.decode(), (
+            "the fixture produced no cross-scope malformed block, so the "
+            "negative assertion above proves nothing"
+        )
+
+    def test_CHANNEL_3_all_scopes_search_narrows_to_the_callers_own(
+        self, scoped_store: Path
+    ):
+        """🔴 THE ONE A PER-SCOPE CHECK STRUCTURALLY CANNOT COVER. `?all_scopes=1`
+        NAMES NO SCOPE, so there is nothing for such a check to refuse — it
+        searches the CONTENT of every scope in the store.
+        """
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, _h, body = fetch(
+                f"{base}/api/v1/search/{ALLOW_SCOPE}?q=drill+head+overheats"
+                f"&all_scopes=1",
+                token=ZACH_TOKEN,
+            )
+        assert code == 200
+        text = body.decode()
+        assert QUARTZ_NUANCE not in text
+        assert DENY_SCOPE not in text
+        assert THIRD_SCOPE not in text
+
+    def test_CHANNEL_3_POSITIVE_CONTROL_a_legacy_token_DOES_find_it(
+        self, scoped_store: Path
+    ):
+        """The query has to be one that HITS, or the narrowed search is
+        indistinguishable from a query nothing matches.
+        """
+        with running(scoped_store, tokens=(GOOD_TOKEN,)) as (base, _):
+            code, headers, body = fetch(
+                f"{base}/api/v1/search/{ALLOW_SCOPE}?q=drill+head+overheats"
+                f"&all_scopes=1",
+                token=GOOD_TOKEN,
+            )
+        assert code == 200
+        assert headers["X-Store-Status"] == "search-hit"
+        assert QUARTZ_NUANCE in body.decode()
+
+    def test_CHANNEL_4_the_snapshot_tar_carries_only_allowed_members(
+        self, scoped_store: Path
+    ):
+        """🔴 ASSERTED OVER EXTRACTED MEMBER NAMES, NOT A STATUS CODE. This route
+        never builds an index, so the filter that closes channels 1-3 does not
+        reach it; a 200 here says nothing about what is inside the archive.
+        """
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            code, headers, body = fetch(f"{base}/api/v1/snapshot", token=ZACH_TOKEN)
+        assert code == 200
+        with tarfile.open(fileobj=io.BytesIO(body), mode="r") as tar:
+            names = sorted(tar.getnames())
+        assert names == [f"{ALLOW_SCOPE}/{ALLOW_SCOPE}-entry.md"], names
+        # The server's own count must describe the same filtered set, or
+        # `cairn::install_snapshot`'s mismatch check refuses every scoped pull.
+        assert headers["X-Store-Entries"] == "1"
+
+    def test_CHANNEL_4_POSITIVE_CONTROL_a_legacy_token_gets_every_member(
+        self, scoped_store: Path
+    ):
+        with running(scoped_store, tokens=(GOOD_TOKEN,)) as (base, _):
+            code, headers, body = fetch(f"{base}/api/v1/snapshot", token=GOOD_TOKEN)
+        assert code == 200
+        with tarfile.open(fileobj=io.BytesIO(body), mode="r") as tar:
+            names = sorted(tar.getnames())
+        assert names == sorted(
+            [f"{s}/{s}-entry.md" for s in (ALLOW_SCOPE, DENY_SCOPE, THIRD_SCOPE)]
+            + [f"{DENY_SCOPE}/broken-shard.md"]
+        ), names
+        assert headers["X-Store-Entries"] == "4"
+
+    def test_a_scope_FILTERED_snapshot_of_a_denied_scope_ships_nothing(
+        self, scoped_store: Path
+    ):
+        """`?scope=` reaches the filesystem directly, so it is its own door into
+        the same store — and it must answer for a denied scope exactly what it
+        answers for one that never existed.
+        """
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            denied = fetch(
+                f"{base}/api/v1/snapshot?scope={DENY_SCOPE}", token=ZACH_TOKEN
+            )
+            phantom = fetch(
+                f"{base}/api/v1/snapshot?scope={PHANTOM_SCOPE}", token=ZACH_TOKEN
+            )
+        assert denied[0] == phantom[0] == 200
+        assert denied[1]["X-Store-Entries"] == phantom[1]["X-Store-Entries"] == "0"
+        for body in (denied[2], phantom[2]):
+            with tarfile.open(fileobj=io.BytesIO(body), mode="r") as tar:
+                assert tar.getnames() == []
+
+    def test_TWO_TOKENS_ON_ONE_SERVER_each_see_only_their_own(
+        self, scoped_store: Path
+    ):
+        """🔴 THE SEAM, NOT THE COMPONENT. Both records are configured on ONE
+        server, so this fails if the allowlist is resolved from anything other
+        than the record that authenticated THIS request — a module-level cache,
+        the first configured row, or a value left on the handler by the previous
+        request on a keep-alive connection.
+        """
+        with running(scoped_store, tokens=(ZACH, DANA)) as (base, audit):
+            zach_own = fetch(f"{base}/api/v1/recall/{ALLOW_SCOPE}", token=ZACH_TOKEN)
+            zach_other = fetch(f"{base}/api/v1/recall/{DENY_SCOPE}", token=ZACH_TOKEN)
+            dana_own = fetch(f"{base}/api/v1/recall/{DENY_SCOPE}", token=DANA_TOKEN)
+            dana_other = fetch(f"{base}/api/v1/recall/{ALLOW_SCOPE}", token=DANA_TOKEN)
+
+        assert zach_own[1]["X-Store-Status"] == "recalled"
+        assert KELP_NUANCE.encode() in zach_own[2]
+        assert dana_own[1]["X-Store-Status"] == "recalled"
+        assert QUARTZ_NUANCE.encode() in dana_own[2]
+        # …and each is told the OTHER's scope does not exist.
+        assert zach_other[1]["X-Store-Status"] == "scope-absent"
+        assert dana_other[1]["X-Store-Status"] == "scope-absent"
+        assert QUARTZ_NUANCE.encode() not in zach_other[2]
+        assert KELP_NUANCE.encode() not in dana_other[2]
+        # The audit line says WHOSE request each was, which is the only record
+        # that can answer "who read what" after the fact.
+        assert "identity=zach" in audit[0] and "identity=zach" in audit[1]
+        assert "identity=dana" in audit[2] and "identity=dana" in audit[3]
+
+    def test_the_audit_line_still_carries_the_FINGERPRINT_not_only_the_identity(
+        self, scoped_store: Path
+    ):
+        """🔴 `identity=` is ADDITIVE. Overlap rotation is checkable only through
+        `token=`: two rows can hold one holder's current and previous credential,
+        and the identity cannot tell them apart.
+        """
+        with running(scoped_store, tokens=(ZACH,)) as (base, audit):
+            fetch(f"{base}/api/v1/recall/{ALLOW_SCOPE}", token=ZACH_TOKEN)
+        assert f"token={api.token_id(ZACH_TOKEN)}" in audit[0]
+        assert "identity=zach" in audit[0]
+        assert "auth=ok" in audit[0]
+        assert ZACH_TOKEN not in audit[0]
+
+    def test_a_REJECTED_request_names_no_identity(self, scoped_store: Path):
+        with running(scoped_store, tokens=(ZACH,)) as (base, audit):
+            fetch(f"{base}/api/v1/recall/{ALLOW_SCOPE}", token="w" * 48)
+        assert "identity=-" in audit[0]
+        assert "auth=fail" in audit[0]
+
+
+class TestRefusedIsIndistinguishableFromAbsent:
+    """🔴 CRITERION 3, PROVEN RATHER THAN ASSUMED — and the comparison is built
+    so that scope EXISTENCE is the only thing that varies.
+
+    Two responses to `recall/<DENY_SCOPE>` from the SAME token at the SAME store
+    path: once when that scope holds an entry, once when it never existed. The
+    entry-file COUNT and the newest mtime are held constant across the two (the
+    scope is rebuilt under a different name), because `X-Store-Snapshot` is
+    store-wide and would otherwise differ for a reason that is not the one under
+    test. See the module docstring's residual-leak note.
+    """
+
+    def _phases(self, tmp_path: Path):
+        """Yields a builder for phase A (denied scope present) and phase B (it
+        never existed), both at ONE path so `  store: <root>` cannot differ."""
+        root = tmp_path / "store"
+
+        def present():
+            if root.exists():
+                shutil.rmtree(root)
+            return _build_store(
+                root, {ALLOW_SCOPE: KELP_NUANCE, DENY_SCOPE: QUARTZ_NUANCE}
+            )
+
+        def absent():
+            shutil.rmtree(root)
+            # Same file COUNT, same mtimes, different scope name — so the only
+            # fact that moved is whether DENY_SCOPE is on disk.
+            return _build_store(
+                root, {ALLOW_SCOPE: KELP_NUANCE, THIRD_SCOPE: LANTERN_NUANCE}
+            )
+
+        return root, present, absent
+
+    def _ask(self, root: Path, token, path: str):
+        with running(root, tokens=(token,)) as (base, _):
+            code, headers, body = fetch(
+                f"{base}{path}",
+                token=token.token if hasattr(token, "token") else token,
+            )
+        store_headers = tuple(
+            sorted((k, v) for k, v in headers.items() if k.lower().startswith("x-store"))
+        )
+        return code, store_headers, body
+
+    def test_RECALL_a_refused_scope_is_BYTE_IDENTICAL_to_one_that_never_existed(
+        self, tmp_path: Path
+    ):
+        root, present, absent = self._phases(tmp_path)
+        present()
+        refused = self._ask(root, ZACH, f"/api/v1/recall/{DENY_SCOPE}")
+        absent()
+        never = self._ask(root, ZACH, f"/api/v1/recall/{DENY_SCOPE}")
+
+        assert refused[0] == never[0] == 200
+        assert refused[1] == never[1], (
+            f"X-Store-* headers differ:\n refused={refused[1]}\n absent ={never[1]}"
+        )
+        assert refused[2] == never[2], (
+            "response bodies differ — a refused scope is distinguishable from an "
+            "absent one:\n"
+            f"refused: {refused[2]!r}\nabsent : {never[2]!r}"
+        )
+        # 🔴 And the shared answer is the ABSENT report, not two identical
+        # errors: byte-identity between two 401s or two 503s would satisfy
+        # everything above while serving nothing.
+        assert dict(refused[1])["X-Store-Status"] == "scope-absent"
+        assert b"NOTHING RECORDED YET" in refused[2].upper()
+        assert QUARTZ_NUANCE.encode() not in refused[2]
+
+    def test_SEARCH_a_refused_scope_is_BYTE_IDENTICAL_to_one_that_never_existed(
+        self, tmp_path: Path
+    ):
+        root, present, absent = self._phases(tmp_path)
+        query = f"/api/v1/search/{DENY_SCOPE}?q=drill+head+overheats"
+        present()
+        refused = self._ask(root, ZACH, query)
+        absent()
+        never = self._ask(root, ZACH, query)
+
+        assert refused[0] == never[0] == 200
+        assert refused[1] == never[1], f"{refused[1]} != {never[1]}"
+        assert refused[2] == never[2]
+        assert dict(refused[1])["X-Store-Status"] == "scope-absent"
+
+    def test_POSITIVE_CONTROL_the_comparison_CAN_see_the_difference(
+        self, tmp_path: Path
+    ):
+        """🔴 WITHOUT THIS, BOTH TESTS ABOVE ARE SATISFIED BY A SERVER THAT
+        ANSWERS THE SAME BYTES TO EVERYTHING.
+
+        The same two phases, driven by an UNRESTRICTED legacy token: present ->
+        `recalled` with the entry's content, absent -> `scope-absent`. If this
+        pair did not differ, the equality above would be measuring the harness
+        rather than the fix.
+        """
+        root, present, absent = self._phases(tmp_path)
+        present()
+        seen = self._ask(root, GOOD_TOKEN, f"/api/v1/recall/{DENY_SCOPE}")
+        absent()
+        gone = self._ask(root, GOOD_TOKEN, f"/api/v1/recall/{DENY_SCOPE}")
+
+        assert dict(seen[1])["X-Store-Status"] == "recalled"
+        assert dict(gone[1])["X-Store-Status"] == "scope-absent"
+        assert seen[2] != gone[2]
+        assert QUARTZ_NUANCE.encode() in seen[2]
+
+
+class TestScopeRevisionIsGatedByConstruction:
+    """🔴 THE ONE HEADER THE INDEX FILTER CANNOT REACH.
+
+    `X-Store-Revision` is read off `<store>/<scope>/.git/HEAD`, a path the index
+    knows nothing about. Today no scope in the served copy is a git repo, so it
+    answers "unknown" for everything and the leak is LATENT — which is exactly
+    the state in which a guard gets skipped. So the fixture MAKES a denied scope
+    a real repo and asserts the header still cannot tell it from an absent one.
+    """
+
+    def _git(self, path: Path, *args: str):
+        subprocess.run(
+            ["git", "-C", str(path), *args],
+            check=True,
+            capture_output=True,
+            env={**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null", "HOME": str(path),
+                 **hermetic_git.MAINTENANCE_OFF},
+        )
+
+    def _repo(self, store: Path, scope: str) -> str:
+        scope_dir = store / scope
+        self._git(scope_dir, "init", "-q", "-b", "main")
+        self._git(scope_dir, "config", "user.email", "t@example.invalid")
+        self._git(scope_dir, "config", "user.name", "T")
+        self._git(scope_dir, "add", f"{scope}-entry.md")
+        self._git(scope_dir, "commit", "-qm", "seed")
+        return subprocess.run(
+            ["git", "-C", str(scope_dir), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+    def test_POSITIVE_CONTROL_the_fixture_really_is_a_repo_and_the_header_shows_it(
+        self, scoped_store: Path
+    ):
+        """A "the header said unknown" assertion is worthless against a fixture
+        that could never have produced a sha. This proves it could.
+        """
+        head = self._repo(scoped_store, DENY_SCOPE)
+        assert len(head) == 40
+        assert api.scope_revision(scoped_store, DENY_SCOPE) == head
+        with running(scoped_store, tokens=(GOOD_TOKEN,)) as (base, _):
+            _c, headers, _b = fetch(
+                f"{base}/api/v1/recall/{DENY_SCOPE}", token=GOOD_TOKEN
+            )
+        assert headers["X-Store-Revision"] == head
+
+    def test_a_DENIED_scopes_revision_is_unknown_even_though_it_HAS_one(
+        self, scoped_store: Path
+    ):
+        head = self._repo(scoped_store, DENY_SCOPE)
+        assert api.scope_revision(
+            scoped_store, DENY_SCOPE, visible_scopes=(ALLOW_SCOPE,)
+        ) == "unknown"
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            _c, denied, _b = fetch(
+                f"{base}/api/v1/recall/{DENY_SCOPE}", token=ZACH_TOKEN
+            )
+            _c2, phantom, _b2 = fetch(
+                f"{base}/api/v1/recall/{PHANTOM_SCOPE}", token=ZACH_TOKEN
+            )
+        assert denied["X-Store-Revision"] == "unknown"
+        assert denied["X-Store-Revision"] == phantom["X-Store-Revision"]
+        assert head not in denied["X-Store-Revision"]
+
+    def test_the_callers_OWN_scope_still_reports_its_sha(self, scoped_store: Path):
+        """🔴 OVER-FILTERING IS ALSO A FAILURE. A gate that answered "unknown"
+        for everything would pass the test above and silently delete the
+        determinism guarantee `scope@sha` exists for.
+        """
+        head = self._repo(scoped_store, ALLOW_SCOPE)
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            _c, headers, _b = fetch(
+                f"{base}/api/v1/recall/{ALLOW_SCOPE}", token=ZACH_TOKEN
+            )
+        assert headers["X-Store-Revision"] == head
+
+    def test_visible_scopes_None_is_UNRESTRICTED_matching_every_other_seam(
+        self, scoped_store: Path
+    ):
+        head = self._repo(scoped_store, DENY_SCOPE)
+        assert api.scope_revision(scoped_store, DENY_SCOPE, visible_scopes=None) == head
+        # …and an EMPTY sequence is the opposite, not a synonym for None.
+        assert api.scope_revision(
+            scoped_store, DENY_SCOPE, visible_scopes=()
+        ) == "unknown"
+
+
+class TestTheReaderNarrowingItself:
+    """`load_store`'s `visible_scopes`, unit-level — the one site both readers
+    take their index from, so this is where over- and under-filtering show up
+    without an HTTP layer in the way.
+    """
+
+    def test_None_is_unrestricted_and_an_EMPTY_SEQUENCE_is_the_opposite(
+        self, scoped_store: Path
+    ):
+        """🔴 THE ASYMMETRY, PINNED. `None` and `()` are both falsy, so a guard
+        written `if visible_scopes:` would treat an empty allowlist as
+        unrestricted — a total bypass that every functional test with a
+        populated allowlist would pass.
+        """
+        _s, wide = api.rc.load_store(scoped_store, verb="recalled")
+        assert set(wide.scopes) == {ALLOW_SCOPE, DENY_SCOPE, THIRD_SCOPE}
+        _s, none_visible = api.rc.load_store(
+            scoped_store, verb="recalled", visible_scopes=()
+        )
+        assert none_visible.scopes == ()
+        assert len(none_visible) == 0
+        assert none_visible.malformed == ()
+
+    def test_the_MALFORMED_tuple_is_narrowed_beside_by_scope(
+        self, scoped_store: Path
+    ):
+        """Both public fields, or `malformed_outside` still names a denied scope
+        while `scopes` does not — the half-fix that reads as a whole one.
+        """
+        _s, wide = api.rc.load_store(scoped_store, verb="recalled")
+        assert [m.scope for m in wide.malformed] == [DENY_SCOPE]
+        _s, narrow = api.rc.load_store(
+            scoped_store, verb="recalled", visible_scopes=(ALLOW_SCOPE,)
+        )
+        assert narrow.scopes == (ALLOW_SCOPE,)
+        assert narrow.malformed == ()
+        assert narrow.malformed_outside((ALLOW_SCOPE,)) == ()
+
+    def test_an_allowlist_entry_is_normalised_against_the_index_key(
+        self, scoped_store: Path
+    ):
+        _s, narrow = api.rc.load_store(
+            scoped_store, verb="recalled", visible_scopes=("Kelp_Forest",)
+        )
+        assert narrow.scopes == (ALLOW_SCOPE,)
+
+    def test_an_UNREADABLE_store_still_RAISES_rather_than_narrowing_to_empty(
+        self, tmp_path: Path
+    ):
+        """🔴 THE FOUR-STATE RULE SURVIVES THE FILTER. `store-unreachable` and
+        "you may see nothing" both produce an empty index; only the first may be
+        a raise, and collapsing them is the exact conflation this whole module
+        exists to prevent. A filter applied BEFORE the load would have done it.
+        """
+        with pytest.raises(api.rc.StoreMissingError):
+            api.rc.load_store(
+                tmp_path / "absent", verb="recalled", visible_scopes=(ALLOW_SCOPE,)
+            )
+
+    def test_recall_and_search_BOTH_take_the_narrowing(self, scoped_store: Path):
+        """One kwarg, two callers — and a threading bug that reached only one of
+        them would leave `/search` wide open while `/recall` looked fixed.
+        """
+        rep = api.rc.recall(
+            scoped_store, DENY_SCOPE, visible_scopes=(ALLOW_SCOPE,)
+        )
+        assert rep.status == "scope-absent"
+        assert rep.known_scopes == (ALLOW_SCOPE,)
+        sea = api.rc.search(
+            scoped_store, ALLOW_SCOPE, "drill head overheats",
+            all_scopes=True, visible_scopes=(ALLOW_SCOPE,),
+        )
+        assert sea.scopes_searched == (ALLOW_SCOPE,)
+        assert sea.known_scopes == (ALLOW_SCOPE,)
+        assert sea.total_hits == 0
+
+    def test_the_CLI_DEFAULT_is_still_unrestricted(self, scoped_store: Path):
+        """The local reader must not have acquired an allowlist by accident:
+        `cairn` and `/resume` call these with no such argument and read the whole
+        store, and a default of `()` here would empty every local recall.
+        """
+        assert api.rc.recall(scoped_store, DENY_SCOPE).status == "recalled"
+        assert set(api.rc.recall(scoped_store, ALLOW_SCOPE).known_scopes) == {
+            ALLOW_SCOPE, DENY_SCOPE, THIRD_SCOPE
+        }
+
+
+class TestScopeFilteringIsNotAWriteVerb:
+    """🔴 CRITERIA 4-10 ARE NOT IN THIS BRANCH, AND THAT IS ASSERTED, NOT SAID.
+
+    `TestPhaseOneScope` already pins the write guard and the route ledger; this
+    is the same claim restated for the change that landed here, so a future
+    branch that adds a verb "while it is touching auth anyway" fails a test in
+    the section that added scoping.
+    """
+
+    def test_the_route_set_did_NOT_grow(self):
+        assert set(api.API_ROUTES) == {"recall", "search", "snapshot"}
+
+    def test_every_write_verb_is_STILL_405_with_a_valid_SCOPED_token(
+        self, scoped_store: Path
+    ):
+        with running(scoped_store, tokens=(ZACH,)) as (base, _):
+            for method in ("POST", "PUT", "PATCH", "DELETE"):
+                code, _h, body = fetch(
+                    f"{base}/api/v1/recall/{ALLOW_SCOPE}",
+                    token=ZACH_TOKEN,
+                    method=method,
+                )
+                assert code == 405, f"{method} answered {code}"
+                assert body == b"read-only\n"
+
+    def test_a_full_scoped_read_workload_leaves_the_store_BYTE_IDENTICAL(
+        self, scoped_store: Path
+    ):
+        before = tree_hash(scoped_store)
+        with running(scoped_store, tokens=(ZACH, DANA)) as (base, _):
+            for token in (ZACH_TOKEN, DANA_TOKEN):
+                for path in (
+                    f"/api/v1/recall/{ALLOW_SCOPE}",
+                    f"/api/v1/recall/{DENY_SCOPE}",
+                    f"/api/v1/recall/{PHANTOM_SCOPE}",
+                    f"/api/v1/search/{ALLOW_SCOPE}?q=tide&all_scopes=1",
+                    "/api/v1/snapshot",
+                ):
+                    fetch(f"{base}{path}", token=token)
+        assert tree_hash(scoped_store) == before
