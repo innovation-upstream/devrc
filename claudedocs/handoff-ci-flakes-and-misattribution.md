@@ -235,9 +235,37 @@ read the root cause first; the design is what failed, not the code.
   `~/.local/state/activity/spool` — production. Its rarity is just how narrow that window is,
   which is why repeating the suspect shape was a poor detector (1 leak in 15 runs for one
   observer, 0 in 20 for another).
-- **Still true, re-derived by AST at `2d4b2980`:** `53 total = 39 n=1 + 5 until= + 9 n>=2`.
-  So **39 call sites still take a count and index by position** — that migration is genuinely
-  outstanding (it is safe until a neighbour is late, and intent must be read per site).
+- ✅ **DECIDED 2026-08-26 — the residual is NOT worth a global fix. Do not re-open it as one.**
+  Re-measured on `main` at `6068ac51` (AST over `scripts/browser-bridge/tests`):
+
+  | readers | count | | emitters |
+  |---|---|---|---|
+  | `_wait_events` count-based, positional | **48** | | tests starting **unjoined** `daemon=True` threads: **11** |
+  | `_wait_events until=` (safe) | 5 | | |
+  | `_wait_ops where=` (discriminated, new in #891) | 2 | | |
+  | `_wait_ops` op-only / `_wait_payload` | 4 / 3 | | |
+
+  🔴 **The positional count GREW, 39 → 48.** The migration is not merely outstanding, it is
+  running backwards — new positional sites are still being written. If anything here deserves
+  work it is a **ratchet** on that number, not a redesign.
+  🔴 **And "just fix the leaking test" is not available: there are ELEVEN unjoined-thread
+  tests**, not one. `test_cmd_queue_full_returns_429` is simply the one caught in the act.
+  **Realized rate is low, not zero, and cannot be proven zero:** across the observable CI
+  window **0 of the 17 NAMED genuine failures** carried the `assert 'getHtml' == …` signature
+  (the one browser-bridge name present, `test_browser_cli_backs_off_on_429`, is itself on the
+  unjoined-thread list, and its log is gone). ⚠ Only **17 of 24** genuine failures were named
+  at all — the `FAILING:` naming began mid-window — so this is *low*, never *proven zero*.
+  **The posture:** leave the rows; convert a reader to `until=`/`where=` **when a site is
+  actually bitten**. That is incremental, per-site, independently verifiable, and paid only
+  where needed — a global teardown change is none of those, and is the rejected design above.
+  🔴 **How this decision nearly went the other way, recorded because it is the doc's own
+  lesson biting:** this session read the PRE-#852 version of this entry, took its old "next
+  probe" wording at face value, and proposed *joining emitter threads at teardown* — the
+  rejected design — to the operator. **#852 landed mid-session from a concurrent worker**
+  (between `2d4348ec` and `0716fede`). Check for a parallel worker before acting on any
+  entry here, and re-read the entry itself rather than a memory of it.
+- **Superseded count, kept for provenance — re-derived by AST at `2d4b2980`:**
+  `53 total = 39 n=1 + 5 until= + 9 n>=2`. Use the `6068ac51` table above instead.
   ⚠ The op-selected figure differs by counting method: **4** `_wait_ops` call sites by AST,
   against the 7 this entry used to state. Prefer the AST number, and note grep is wrong here
   for a documented reason — a line-oriented regex reads the positional form and misses the
