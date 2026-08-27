@@ -132,16 +132,28 @@ sites are added). Two ways, both cheap:
 # the registry itself — the authoritative list, one file
 cat ~/workspace/devrc/scripts/browser-bridge/reference/sites/_index.json
 
-# or drive ONE cheap op yourself first and read the envelope.
-# 🔴 `nav`, NOT a second `open`: if this session ALREADY owns a live tab, a
-# re-`open` returns that same tabId and DISCARDS your url (reference/
-# tabs-instances.md), so `context` would report the OLD host — and a
-# host with no notes is indistinguishable from a host you never visited.
-# That failure points the wrong way: it says "not registered", which is
-# the answer that makes you dispatch blind.
-browser --instance <key> open                                  # once, if you own no tab
-browser --instance <key> nav <url> && browser --instance <key> context   # → .result.site_notes
+# or drive ONE op yourself and read `.result.site_notes` off ITS OWN envelope
+browser --instance <key> open && browser --instance <key> nav <url>
 ```
+
+🔴 **Both halves of that line are load-bearing. Do not "simplify" either.**
+
+* **`open` runs UNCONDITIONALLY** — not "if you own no tab". `nav` is tab-scoped
+  but NOT owned-tab-only (`server.py` `OWNED_TAB_ONLY_OPS`), so with no owned tab
+  and no `--tab` it resolves to `None` and the extension drives the **ACTIVE tab —
+  the one the human is looking at**. A condition you cannot evaluate is a condition
+  you will sometimes skip, and skipping this one navigates the operator's live tab
+  out from under them. `open` is idempotent by reuse (it returns your existing
+  tabId, `reused: true`, and navigates nothing), so running it always is free.
+* **Read `site_notes` off the `nav` result, NOT a following `context`.** `nav`
+  returns `url: cmd.url` — the url you ASKED for — and the server derives the
+  annotated host from that (`_domain_from_result` → `_annotate_site_notes`), so the
+  answer is deterministic. `context` reports `tab.url`, the **committed** url, which
+  is still the OLD host until the new document commits: on a slow DNS/TLS/redirect
+  it answers for the previous page. Both stale directions are wrong and neither is
+  loud — an unregistered previous host says "not registered" (→ you dispatch blind,
+  the failure this section exists to prevent) and a registered one says "site-noted"
+  for a site that is not your target (→ you go read the wrong flows).
 
 Matching is host-suffix on **label boundaries**, longest key wins: a key matches
 that host and any subdomain of it, never `notexample.test` and never
