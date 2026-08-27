@@ -132,8 +132,15 @@ sites are added). Two ways, both cheap:
 # the registry itself — the authoritative list, one file
 cat ~/workspace/devrc/scripts/browser-bridge/reference/sites/_index.json
 
-# or drive ONE cheap op yourself first and read the envelope
-browser --instance <key> open <url> && browser --instance <key> context   # → .result.site_notes
+# or drive ONE cheap op yourself first and read the envelope.
+# 🔴 `nav`, NOT a second `open`: if this session ALREADY owns a live tab, a
+# re-`open` returns that same tabId and DISCARDS your url (reference/
+# tabs-instances.md), so `context` would report the OLD host — and a
+# host with no notes is indistinguishable from a host you never visited.
+# That failure points the wrong way: it says "not registered", which is
+# the answer that makes you dispatch blind.
+browser --instance <key> open                                  # once, if you own no tab
+browser --instance <key> nav <url> && browser --instance <key> context   # → .result.site_notes
 ```
 
 Matching is host-suffix on **label boundaries**, longest key wins: a key matches

@@ -906,7 +906,8 @@ function _withHiddenNotice(data, body, autoWake) {
 // every op it can reach.
 //
 // TWO PRECISIONS, because a comment is a claim and both were wrong once:
-//  * the reachable set is the 14 values of OP_TO_SERVER, NOT the 13 of
+//  * the reachable set is the 14 KEYS of OP_TO_SERVER (the tool-facing names —
+//    its VALUES are wire names like `getHtml`), NOT the 13 of
 //    ALLOWED_OPS_DEFAULT — `upload` is off by default but re-enablable via
 //    BROWSER_AGENT_ALLOWED_OPS (see line ~159), so it is reachable and is covered.
 //  * "every branch reads envelope.data" is the mechanism for all of them EXCEPT

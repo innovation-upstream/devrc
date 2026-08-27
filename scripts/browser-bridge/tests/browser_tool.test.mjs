@@ -1587,13 +1587,28 @@ test("SITE NOTES positive control: the same harness DOES observe a forwarded fie
 const SKILL_SITE_NOTED_CLAUSE =
   "It also never sees `site_notes` — brief those flows in yourself.";
 
-test("SITE NOTES: SKILL.md's FIRST DECISION still warns the caller", () => {
+// 🔴 SCOPED TO THE SECTION THE TEST NAMES, not the whole file. A whole-file
+// substring stays green when the sentence is MOVED — right words, wrong place,
+// which is a near neighbour of the placement defect this PR's round 1 already
+// hit once. The warning only does its job where the agent/direct call is made.
+function skillFirstDecisionSection() {
   const skill = readBB("SKILL.md");
-  const normalised = skill.replace(/\s+/g, " ");
+  const start = skill.indexOf("## FIRST DECISION");
+  assert.ok(start !== -1,
+    "SKILL.md has no `## FIRST DECISION` heading — this guard cannot locate the " +
+    "section it exists to check, so it must fail rather than pass vacuously.");
+  const after = skill.indexOf("\n## ", start + 1);
+  return skill.slice(start, after === -1 ? undefined : after);
+}
+
+test("SITE NOTES: SKILL.md's FIRST DECISION still warns the caller", () => {
+  const normalised = skillFirstDecisionSection().replace(/\s+/g, " ");
   assert.ok(normalised.includes(SKILL_SITE_NOTED_CLAUSE),
     `SKILL.md no longer carries the site-noted clause verbatim. The agent is ` +
     `STILL blind to \`site_notes\` (the test above proves it), so a caller reading ` +
     `only SKILL.md would now dispatch the agent at a registered host and lose that ` +
-    `site's flows. Restore the clause, or — if the gap was actually closed — change ` +
+    `site's flows. NOTE this is scoped to the \`## FIRST DECISION\` section — if the ` +
+    `sentence still exists but MOVED, that is this failure, and moving it back is ` +
+    `the fix. Restore the clause, or — if the gap was actually closed — change ` +
     `both tests together. Expected: ${JSON.stringify(SKILL_SITE_NOTED_CLAUSE)}`);
 });
