@@ -523,7 +523,7 @@ run 'index-arm-blinded' \
   's|^        if rel and (path / rel / ".git").exists():$|        if False:|'
 run 'gitlink-mode-misspelled-so-no-gitlink-is-ever-seen' \
   test_an_EMBEDDED_submodule_git_dir_blocks_even_with_no_modules_store \
-  's|^        if not line.startswith("160000 "):$|        if not line.startswith("160001 "):|'
+  's|^        if not entry.startswith(b"160000 "):$|        if not entry.startswith(b"160001 "):|'
 # 🔴 THE OVER-BLOCK MUTANT — the one that keeps the fix honest in the other
 # direction. Every mutant above makes the tool remove MORE; this makes it remove
 # NOTHING, which every "is it blocked?" assertion would happily score green.
@@ -550,9 +550,16 @@ printf '\n== #935 ROUND 2 — the blind audit'"'"'s findings ==\n'
 # 🔴 FINDING 1: `-z` is the whole fix. Without it `core.quotePath` renders a
 # non-ASCII submodule path as a quoted literal, the stat misses, and the arm
 # answers False over a worktree git REFUSES on — `failed=` back in the output.
+#
+# 🔴 REVERTS THE WHOLE RECORD FORMAT, not just the flag. Dropping `-z` alone
+# leaves the NUL split in place, so the output collapses into one record and
+# the arm fails at SPLITTING rather than at QUOTING — it dies, but for a reason
+# this mutant's name does not describe, which is the WRONG-KILLER trap one
+# level down. Flag and parser are one logical unit, so both move together and
+# the mutant is exactly the round-1 shape.
 run 'quotepath-blinds-the-index-arm' \
   test_a_submodule_path_git_QUOTES_is_still_seen \
-  's|^    ls = _git(path, "ls-files", "-s", "-z")$|    ls = _git(path, "ls-files", "-s")|'
+  's|^    ls = _git_raw(path, "ls-files", "-s", "-z")$|    ls = _git_raw(path, "ls-files", "-s")|; s|^    for entry in ls.stdout.split(b"\\\\0"):$|    for entry in ls.stdout.splitlines():|'
 # 🔴 FINDING 4: this exact mutant SURVIVED the full suite when the auditor ran
 # it — the line had no test at all. It is here so that can never recur.
 run 'blocked-count-drops-the-unanswered-rows' \
@@ -581,6 +588,39 @@ run 'overlap-caveat-suppressed' \
 run 'verbose-marker-dropped' \
   test_verbose_marks_submodule_rows_without_widening_the_verdict_label \
   's|^            mark = ("  \[SUBMODULES — git will refuse to remove this\]" if subs$|            mark = ("" if subs|'
+
+printf '\n== #935 ROUND 3 — the delta re-audit'"'"'s findings ==\n'
+# 🔴 FINDING 1 (the round-2 fix'"'"'s OWN regression): strict utf-8 on `-z` output
+# aborts the ENTIRE scan on any undecodable tracked filename, in any worktree,
+# submodules or not. Wider than the bug `-z` fixed.
+run 'strict-decode-aborts-the-whole-scan' \
+  test_an_undecodable_tracked_path_does_not_abort_the_scan \
+  's|^    ls = _git_raw(path, "ls-files", "-s", "-z")$|    ls = _git(path, "ls-files", "-s", "-z")|'
+# 🔴 The two decodings are NOT interchangeable, and each mutant swaps exactly
+# one of them. `os.fsdecode` must REACH the path (fsdecode->_printable makes
+# U+FFFD hit the filesystem, so the submodule goes undetected); `_printable`
+# must SHOW it (_printable->fsdecode puts a lone surrogate into the report,
+# which raises UnicodeEncodeError at print()).
+run 'display-decoding-used-for-the-filesystem-stat' \
+  test_an_undecodable_SUBMODULE_path_is_still_detected_and_printable \
+  's|^        if rel and (path / os.fsdecode(rel) / ".git").exists():$|        if rel and (path / _printable(rel) / ".git").exists():|'
+run 'filesystem-decoding-used-for-display' \
+  test_an_undecodable_SUBMODULE_path_is_still_detected_and_printable \
+  's|^            populated.append(_printable(rel))$|            populated.append(os.fsdecode(rel))|'
+# 🔴 FINDING 2: asserting an overlap instead of measuring one is false whenever
+# the two sets are disjoint — this round'"'"'s own defect class.
+run 'overlap-asserted-rather-than-measured' \
+  test_the_overlap_line_states_the_measured_overlap_not_an_asserted_one \
+  's|^        overlap = (summary\["excluded_dead"\] + summary\["submodule_blocked_dead"\]$|        overlap = 1 * (summary["excluded_dead"] + summary["submodule_blocked_dead"]|'
+# 🔴 FINDING 3: crediting the exclusion with a sparing it did not do.
+run 'exclusion-credited-for-rows-it-did-not-free' \
+  test_an_excluded_row_with_another_blocker_is_not_credited_to_the_filter \
+  "s|{summary\\['excluded_dead_only_blocker'\\]} of which|{summary['excluded_dead']} of which|"
+# 🔴 FINDING 8: a vanished directory answers (None, []) — nothing was asked, so
+# claiming it is held back for submodules invents a problem.
+run 'vanished-worktree-marked-submodule-unknown' \
+  test_a_vanished_worktree_is_not_marked_as_a_submodule_unknown \
+  's|^                    if subs is None and r.get("submodule_reasons") else "")$|                    if subs is None else "")|'
 
 printf '\n== POSITIVE CONTROLS — mutants whose fate is KNOWN ==\n'
 # 🔴 A comment-only edit MUST survive. If it kills something, the harness is

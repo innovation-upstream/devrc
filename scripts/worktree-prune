@@ -293,6 +293,41 @@ def _git(cwd: Path, *args: str, timeout: int = GIT_TIMEOUT) -> subprocess.Comple
     )
 
 
+def _git_raw(cwd: Path, *args: str, timeout: int = GIT_TIMEOUT) -> subprocess.CompletedProcess:
+    """`_git` WITHOUT decoding — stdout/stderr come back as `bytes`.
+
+    🔴 EXISTS BECAUSE A PATH IS BYTES, NOT TEXT. `_git` uses `text=True`, i.e.
+    STRICT utf-8, which is safe only while git is quoting non-ASCII for us.
+    The moment a caller passes `-z` (or a host sets `core.quotePath=false`)
+    git emits raw path bytes, and one undecodable filename ANYWHERE in a
+    scanned worktree raises `UnicodeDecodeError` inside `subprocess.run` —
+    before the caller can see it, and with no `try:` between there and
+    `sys.exit(main())`. MEASURED: a single tracked `caf\\xe9.txt`, in a repo
+    with no submodules at all, aborted the ENTIRE scan with a bare traceback
+    and zero classified rows. That is the failure `is_dir`'s docstring
+    legislates against — one unreadable row is not a reason to abandon the
+    other 750.
+    """
+    return subprocess.run(
+        ["git", "--no-optional-locks", "-C", str(cwd), *args],
+        capture_output=True, timeout=timeout, check=False,
+    )
+
+
+def _printable(raw: bytes) -> str:
+    """Path bytes rendered for a HUMAN — lossy on purpose, and never for I/O.
+
+    🔴 Display and filesystem access need DIFFERENT decodings, and using one
+    for both is how the crash comes back. `os.fsdecode` (surrogateescape)
+    round-trips to the filesystem but produces LONE SURROGATES, which raise
+    `UnicodeEncodeError` the moment they reach `print()` — moving the abort
+    from git's output to the report instead of removing it. This replaces the
+    undecodable bytes with U+FFFD, which is printable and JSON-safe; the stat
+    uses `os.fsdecode` on the same bytes.
+    """
+    return raw.decode("utf-8", "replace")
+
+
 def _git_ok(cwd: Path, *args: str) -> "str | None":
     r = _git(cwd, *args)
     return r.stdout.strip() if r.returncode == 0 else None
@@ -553,17 +588,24 @@ def worktree_submodules(path: Path) -> "tuple[bool | None, list[str]]":
     # this line changed: tool said `(False, [])`, git refused. `-z` emits the
     # path RAW and NUL-terminates the record, so no unquoting is needed and a
     # path containing a newline cannot split a record either.
-    ls = _git(path, "ls-files", "-s", "-z")
+    # 🔴 BYTES, not text — see `_git_raw`. `-z` makes git emit the path RAW, so
+    # strict utf-8 decoding here would abort the whole scan on any undecodable
+    # tracked filename in any worktree, which is a WIDER failure than the
+    # quoting bug `-z` is here to fix.
+    ls = _git_raw(path, "ls-files", "-s", "-z")
     if ls.returncode != 0:
-        return None, [f"git ls-files failed rc={ls.returncode}: {ls.stderr.strip()[:200]}"]
+        return None, [f"git ls-files failed rc={ls.returncode}: "
+                      f"{_printable(ls.stderr).strip()[:200]}"]
     populated: list[str] = []
-    for entry in ls.stdout.split("\0"):
+    for entry in ls.stdout.split(b"\0"):
         # `<mode> <oid> <stage>\t<path>`; 160000 is the gitlink mode.
-        if not entry.startswith("160000 "):
+        if not entry.startswith(b"160000 "):
             continue
-        _, _, rel = entry.partition("\t")
-        if rel and (path / rel / ".git").exists():
-            populated.append(rel)
+        _, _, rel = entry.partition(b"\t")
+        # `os.fsdecode` to REACH the path (surrogateescape round-trips), and
+        # `_printable` to SHOW it. Two decodings on purpose.
+        if rel and (path / os.fsdecode(rel) / ".git").exists():
+            populated.append(_printable(rel))
     if populated:
         return True, [f"populated submodule(s) in the working tree: "
                       f"{', '.join(sorted(populated)[:10])} — "
@@ -1235,6 +1277,15 @@ def summarize(rows: "list[dict]", exclude_globs: "list[str] | None" = None,
         # removed without it. That is the number that says whether the filter did
         # anything, and it is not the same as `excluded`.
         "excluded_dead": sum(1 for r in excluded if r["verdict"] == DEAD),
+        # 🔴 The subset the report may honestly call "would otherwise have been
+        # removed" — i.e. rows whose ONLY blocker is the exclusion. An excluded
+        # row that ALSO carries submodules would still not be removable with
+        # the filter dropped, so counting it there credits the exclusion with a
+        # sparing it did not do. Sound for the same reason as
+        # `dead_not_removable`: a DEAD row can carry only these two blockers.
+        "excluded_dead_only_blocker": sum(
+            1 for r in excluded
+            if r["verdict"] == DEAD and r.get("submodules") is False),
         # 🔴 #931. `dead` rows `git worktree remove` will REFUSE on, so they can
         # never be removable and re-running never converges. Counted so the gap
         # between `dead` and `removable` has a name in the report instead of
@@ -1390,10 +1441,23 @@ def render_text(rows: "list[dict]", summary: dict, verbose: bool) -> str:
     # measured, one row that was both printed 1 + 1 against 1 dead row. Printing
     # the union is the only way that stops reading as a third number to add.
     if summary.get("excluded_dead") and summary.get("submodule_blocked_dead"):
+        # 🔴 STATE THE MEASURED OVERLAP, never ASSERT one. Gating on "both
+        # causes are non-zero" and then declaring that they OVERLAP is false
+        # whenever the two sets are disjoint — measured: one excluded dead row
+        # and one DIFFERENT submodule-bearing dead row printed
+        # "The two lines above OVERLAP and do NOT sum" over 1 + 1 = 2, which
+        # sums exactly. That is this round's own defect class, one line below
+        # the fix for it. The count is computed, so the sentence is true at
+        # every overlap including zero, and needs no branch to stay true.
+        #
+        # Sound because a DEAD row can carry ONLY these two blockers: every
+        # other blocker in `classify` returns a non-DEAD verdict.
+        overlap = (summary["excluded_dead"] + summary["submodule_blocked_dead"]
+                   - summary["dead_not_removable"])
         lines.append(
-            f"🔴 The two lines above OVERLAP and do NOT sum: a row can be both excluded and "
-            f"submodule-bearing. {summary.get('dead_not_removable', 0)} `dead` row(s) are "
-            f"not removable in total.")
+            f"🔴 The two causes above are counted INDEPENDENTLY and {overlap} row(s) are in "
+            f"BOTH, so those numbers do not necessarily sum. "
+            f"{summary['dead_not_removable']} `dead` row(s) are not removable in total.")
     # 🔴 The dangerous choice is the one you have to type — so say, loudly, when
     # it was typed. Printed before the filter list because it is the reason the
     # list is one line shorter than it usually is.
@@ -1518,8 +1582,10 @@ def render_text(rows: "list[dict]", summary: dict, verbose: bool) -> str:
         lines.append(
             f"{summary['excluded']} row(s) matched at least one glob — still classified and "
             f"counted above, NEVER removed, and NOT counted toward --confirm. "
-            f"{summary['excluded_dead']} of them are `dead` and would otherwise have been "
-            f"removed. Re-run with --verbose to list them by path.")
+            f"{summary['excluded_dead']} of them are `dead`, "
+            f"{summary['excluded_dead_only_blocker']} of which would otherwise have been "
+            f"removed — the rest are held back by something else as well, so dropping the "
+            f"filter would not free them. Re-run with --verbose to list them by path.")
         # 🔴 Only the TYPED zero-matchers get the shout. The default constant
         # matching zero rows just means this scan holds no agent worktrees —
         # shouting about that is how a real warning gets tuned out, and refusing
@@ -1608,8 +1674,15 @@ def render_text(rows: "list[dict]", summary: dict, verbose: bool) -> str:
             # the summary sends them to --verbose — so the marker is appended
             # to the listing line only.
             subs = r.get("submodules")
+            # 🔴 The UNKNOWN marker is gated on there being a REASON, not on
+            # `subs is None` alone. A worktree whose directory has vanished
+            # returns `(None, [])` from the `is_dir` guard — nothing was asked
+            # and no git call failed — so marking it "held back" would invent a
+            # submodule problem for a row that is `cannot-tell` for an entirely
+            # different reason.
             mark = ("  [SUBMODULES — git will refuse to remove this]" if subs
-                    else "  [submodules UNKNOWN — held back]" if subs is None else "")
+                    else "  [submodules UNKNOWN — held back]"
+                    if subs is None and r.get("submodule_reasons") else "")
             lines.append(f"[{verdict_label(r)}] {r['path']}  branch={r['branch']}{mark}")
             lines.append(f"    {r['verdict_reason']}")
             for e in r["evidence"]:

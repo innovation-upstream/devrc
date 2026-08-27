@@ -71,6 +71,7 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -3846,7 +3847,10 @@ def test_the_two_further_lines_do_not_read_as_additive(tmp_path, capsys):
     assert s["excluded_dead"] == 1 and s["submodule_blocked_dead"] == 1, s
     # …and yet only ONE dead row is actually held back.
     assert s["dead_not_removable"] == 1, s
-    assert "OVERLAP and do NOT sum" in out, out
+    # 🔴 Round 3 corrected this wording: the line now STATES the measured
+    # overlap rather than asserting one, because asserting it was false
+    # whenever the two sets were disjoint. Here they genuinely do overlap.
+    assert "1 row(s) are in BOTH" in out, out
     assert "1 `dead` row(s) are not removable in total" in out, out
 
 
@@ -3888,3 +3892,144 @@ def test_verbose_marks_submodule_rows_without_widening_the_verdict_label(tmp_pat
     # …and the verdict label itself is untouched.
     assert "[dead (submodules)]" not in out, out
     assert wp.verdict_label({"verdict": "dead", "submodules": True}) == "dead"
+
+
+# ── #935 round 3: findings from the delta re-audit ───────────────────────────
+
+def test_an_undecodable_tracked_path_does_not_abort_the_scan(tmp_path):
+    """DELTA FINDING 1 (🔴) — round 2's `-z` fix traded a wrong answer for a
+    WHOLE-SCAN CRASH.
+
+    `core.quotePath` was not only hiding non-ASCII gitlinks, it was also
+    guaranteeing git's output was ASCII. With `-z` git emits raw bytes, so
+    strict utf-8 decoding raised `UnicodeDecodeError` inside `subprocess.run`
+    — and there is no `try:` between there and `sys.exit(main())`, so the
+    operator got a bare traceback and ZERO classified rows.
+
+    🔴 The trigger is ANY tracked file, not a submodule: this repo has no
+    submodules at all. That is why the regression was WIDER than the bug it
+    fixed, and why the fixture deliberately contains none.
+    """
+    repo = new_repo(tmp_path, "undecodable")
+    bad = os.fsdecode(b"caf\xe9.txt")            # not valid utf-8
+    (repo / bad).write_bytes(b"data\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "add an undecodable filename")
+    publish(repo)
+    commit_on_branch(repo, "topic", "feature.txt", "feature\n", "feature")
+    wt = add_worktree(repo, tmp_path / "undecodable-wt", "topic")
+    squash_merge(repo, "topic", "feature.txt", "squash: feature")
+
+    # The control: prove the fixture really does produce undecodable bytes,
+    # so a green here cannot mean "the condition never occurred".
+    raw = subprocess.run(["git", "-C", str(wt), "ls-files", "-s", "-z"],
+                         capture_output=True, check=True).stdout
+    with pytest.raises(UnicodeDecodeError):
+        raw.decode("utf-8")
+
+    blocked, reasons = wp.worktree_submodules(wt)
+    assert blocked is False, reasons          # no submodules here, and no crash
+
+    gh = gh_stub(tmp_path, [], name="gh-undecodable")
+    rows = wp.scan_repo(repo, gh, True, 2000, jobs=1)   # must not raise
+    assert len(rows) == 2, [r["path"] for r in rows]
+    assert any(r["removable"] for r in rows), [r["verdict_reason"] for r in rows]
+
+
+def test_an_undecodable_SUBMODULE_path_is_still_detected_and_printable(tmp_path, capsys):
+    """The two decodings, both needed. `os.fsdecode` must REACH the path or the
+    submodule goes undetected; `_printable` must render it or the report raises
+    `UnicodeEncodeError` at `print()` and the abort simply moves."""
+    subpath = os.fsdecode(b"vend\xe9r")          # undecodable, not merely non-ASCII
+    sub = new_repo(tmp_path, "raw-subsrc")
+    repo = new_repo(tmp_path, "raw")
+    # `submodule add` will not take this byte sequence, so the gitlink is
+    # written into the index directly — the index is what the arm reads.
+    sha = git(sub, "rev-parse", "HEAD")
+    git(repo, "update-index", "--add", "--cacheinfo", f"160000,{sha},{subpath}")
+    git(repo, "commit", "-qm", "add raw-named gitlink")
+    publish(repo)
+    commit_on_branch(repo, "topic", "feature.txt", "feature\n", "feature")
+    wt = add_worktree(repo, tmp_path / "raw-wt", "topic")
+    squash_merge(repo, "topic", "feature.txt", "squash: feature")
+    subprocess.run(["git", "clone", "-q", str(sub), str(wt / subpath)],
+                   capture_output=True, check=True,
+                   env={**os.environ, "GIT_CONFIG_COUNT": "1",
+                        "GIT_CONFIG_KEY_0": "protocol.file.allow",
+                        "GIT_CONFIG_VALUE_0": "always"})
+    assert (wt / subpath / ".git").is_dir()
+
+    blocked, reasons = wp.worktree_submodules(wt)
+    assert blocked is True, reasons
+    # …and the reason survives printing, which a lone surrogate would not.
+    gh = gh_stub(tmp_path, [], name="gh-raw")
+    wp.main(["--repo", str(repo), "--gh-cmd", gh, "--jobs", "1", "--verbose"])
+    out = capsys.readouterr().out
+    assert "�" in out, "the undecodable byte should render as U+FFFD"
+    assert "[SUBMODULES" in out, out
+
+
+def test_the_overlap_line_states_the_measured_overlap_not_an_asserted_one(tmp_path, capsys):
+    """DELTA FINDING 2 — the line was gated on both causes being non-zero and
+    then DECLARED they overlap. With two DIFFERENT rows they are disjoint and
+    the numbers sum exactly, so the sentence was false about the very run
+    printing it — this round's own defect class, one line below its fix.
+
+    Round 2's test only ever built the overlapping case, so nothing saw it.
+    """
+    repo, wt, _sub, gh = submodule_universe(tmp_path, "disjoint")
+    git_allowing_file_submodules(wt, "submodule", "update", "--init", "-q")
+    # a SECOND dead worktree, excluded, with no submodules of its own
+    commit_on_branch(repo, "other", "other.txt", "other\n", "other")
+    wt2 = add_worktree(repo, tmp_path / "disjoint-wt2", "other")
+    squash_merge(repo, "other", "other.txt", "squash: other")
+
+    globs = [wp.normalize_glob(str(wt2))]
+    rows = wp.scan_repo(repo, gh, True, 2000, jobs=1, exclude_globs=globs)
+    s = wp.summarize(rows, exclude_globs=globs, agent_worktrees_included=False)
+    assert s["excluded_dead"] == 1 and s["submodule_blocked_dead"] == 1, s
+    assert s["dead_not_removable"] == 2, s     # DISJOINT — they sum exactly
+
+    wp.main(["--repo", str(repo), "--gh-cmd", gh, "--jobs", "1",
+             "--exclude-path", str(wt2)])
+    out = capsys.readouterr().out
+    assert "0 row(s) are in BOTH" in out, out
+    assert "2 `dead` row(s) are not removable in total" in out, out
+    assert "OVERLAP and do NOT sum" not in out, out
+
+
+def test_an_excluded_row_with_another_blocker_is_not_credited_to_the_filter(tmp_path, capsys):
+    """DELTA FINDING 3 — "N of them are `dead` and would otherwise have been
+    removed" is false for an excluded row that ALSO carries submodules: drop
+    the exclusion and it is still not removable, so the filter is credited
+    with a sparing it did not do."""
+    repo, wt, _sub, gh = submodule_universe(tmp_path, "credit")
+    git_allowing_file_submodules(wt, "submodule", "update", "--init", "-q")
+
+    globs = [wp.normalize_glob(str(wt))]
+    rows = wp.scan_repo(repo, gh, True, 2000, jobs=1, exclude_globs=globs)
+    s = wp.summarize(rows, exclude_globs=globs, agent_worktrees_included=False)
+    assert s["excluded_dead"] == 1, s
+    assert s["excluded_dead_only_blocker"] == 0, s   # the filter freed nothing
+
+    wp.main(["--repo", str(repo), "--gh-cmd", gh, "--jobs", "1",
+             "--exclude-path", str(wt)])
+    out = capsys.readouterr().out
+    assert "0 of which would otherwise have been removed" in out, out
+
+
+def test_a_vanished_worktree_is_not_marked_as_a_submodule_unknown(tmp_path, capsys):
+    """DELTA FINDING 8 — a worktree whose directory is gone returns `(None, [])`
+    from the `is_dir` guard: nothing was asked and no git call failed, so
+    marking it "submodules UNKNOWN — held back" invents a submodule problem for
+    a row that is `cannot-tell` for a different reason entirely."""
+    repo = new_repo(tmp_path, "vanished")
+    commit_on_branch(repo, "topic", "feature.txt", "feature\n", "feature")
+    wt = add_worktree(repo, tmp_path / "vanished-wt", "topic")
+    shutil.rmtree(wt)
+    gh = gh_stub(tmp_path, [], name="gh-vanished")
+
+    wp.main(["--repo", str(repo), "--gh-cmd", gh, "--jobs", "1", "--verbose"])
+    out = capsys.readouterr().out
+    assert "cannot-tell" in out
+    assert "submodules UNKNOWN — held back" not in out, out
