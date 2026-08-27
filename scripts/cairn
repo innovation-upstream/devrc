@@ -178,7 +178,26 @@ def fetch_snapshot(
     req.add_header("User-Agent", "subsystem-store-client/1")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.read(), dict(resp.headers)
+            # 🔴 LOWERCASED, because `dict(resp.headers)` THROWS AWAY the
+            # case-insensitivity that makes header lookup work. `resp.headers`
+            # is an `email.message.Message` whose `.get()` ignores case; a plain
+            # dict's does not. HTTP/2 sends header names lowercased, and this
+            # host is behind Cloudflare, so in PRODUCTION every key arrives as
+            # `x-store-entries` while the code asked for `X-Store-Entries`.
+            #
+            # MEASURED against the live pod, first real call after deploy:
+            #   dict(resp.headers).get("X-Store-Entries") -> None
+            #   dict(resp.headers).get("x-store-entries") -> 75
+            # Consequences, all silent: the freshness stamp recorded as
+            # `snapshot=UNSTAMPED`, `revision=unknown` on every cached banner,
+            # and — worst — the count cross-check against `X-Store-Entries`
+            # NEVER FIRED, so the guard against a truncated transfer was inert
+            # in the only environment that matters.
+            #
+            # 358 tests and seven audit rounds missed it: the test shim forwards
+            # headers in whatever case the in-process server sent, so it
+            # reproduced the production TOPOLOGY but not its NORMALISATION.
+            return resp.read(), {k.lower(): v for k, v in resp.headers.items()}
     except urllib.error.HTTPError as exc:
         # 🔴 CARRY THE BODY. The server's 503 names WHICH scope it could not
         # read; reporting only "answered HTTP 503" throws that away and leaves
@@ -339,7 +358,7 @@ def install_snapshot(body: bytes, cache: Path, headers: dict[str, str]) -> int:
         # 🔴 The server's own count, checked. The header comment on the server
         # side claims a truncated transfer is "visible as a disagreement"; it is
         # only visible if somebody compares, so this is that comparison.
-        declared = headers.get("X-Store-Entries")
+        declared = headers.get("x-store-entries")
         if declared is not None and declared.isdigit() and int(declared) != count:
             raise StoreCorrupt(
                 f"server declared {declared} entries, archive held {count}"
@@ -349,8 +368,8 @@ def install_snapshot(body: bytes, cache: Path, headers: dict[str, str]) -> int:
             "\n".join(
                 [
                     f"synced={int(time.time())}",
-                    f"revision={headers.get('X-Store-Revision', 'unknown')}",
-                    f"snapshot={headers.get('X-Store-Snapshot', 'UNSTAMPED')}",
+                    f"revision={headers.get('x-store-revision', 'unknown')}",
+                    f"snapshot={headers.get('x-store-snapshot', 'UNSTAMPED')}",
                     f"entries={count}",
                     # Recorded so a filtered cache can never be mistaken for a
                     # complete one. Today the CLI only ever writes ALL.
@@ -473,7 +492,7 @@ def resolve_state(
         return (
             STATE_LIVE,
             f"fetched from {url} just now — {count} entries, "
-            f"snapshot {headers.get('X-Store-Snapshot', 'UNSTAMPED')}",
+            f"snapshot {headers.get('x-store-snapshot', 'UNSTAMPED')}",
             None,
         )
     except StoreUnreachable as exc:

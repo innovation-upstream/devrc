@@ -117,7 +117,17 @@ class _CloudflareShim(http.server.BaseHTTPRequestHandler):
         self.send_response(code)
         for key, value in headers.items():
             if key.lower() not in ("transfer-encoding", "connection", "content-length"):
-                self.send_header(key, value)
+                # 🔴 LOWERCASED, LIKE THE REAL EDGE. This shim used to forward
+                # header names in whatever case the in-process server sent, so
+                # it reproduced production's TOPOLOGY but not its
+                # NORMALISATION — and HTTP/2 (which Cloudflare speaks) sends
+                # every header name lowercased. That gap let a real defect ship:
+                # the client did `dict(resp.headers).get("X-Store-Entries")`,
+                # which returns None against a lowercase wire, so the freshness
+                # stamp, the revision and — worst — the truncated-transfer count
+                # check were all silently inert in production while 358 tests
+                # passed. Found by the first live call after deploy, not here.
+                self.send_header(key.lower(), value)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -323,10 +333,14 @@ class TestHostileOrBrokenArchives:
         class _H(http.server.BaseHTTPRequestHandler):
             def do_GET(self):  # noqa: N802
                 self.send_response(200)
-                self.send_header("Content-Type", content_type)
-                self.send_header("Content-Length", str(len(body)))
+                self.send_header("content-type", content_type)
+                self.send_header("content-length", str(len(body)))
                 for k, v in (headers or {}).items():
-                    self.send_header(k, v)
+                    # Lowercased like the real edge — see `_CloudflareShim`.
+                    # Without this, a test can pass against a client whose
+                    # header lookup only works for the case the FIXTURE happens
+                    # to send, which is exactly how the production defect hid.
+                    self.send_header(k.lower(), v)
                 self.end_headers()
                 self.wfile.write(body)
 
@@ -1125,6 +1139,64 @@ class TestSearchOverTheClient:
         # discriminates. Third time this file has had to move an assertion off a
         # string that two different code paths can produce.
         assert report.label in proc.stderr, (report.label, proc.stderr)
+
+
+class TestHeaderCaseInsensitivity:
+    """🔴 THE DEFECT THAT SHIPPED. Found by the first live call after deploy,
+    not by 358 tests and seven audit rounds.
+
+    `dict(resp.headers)` discards the case-insensitivity of
+    `email.message.Message`. HTTP/2 — which Cloudflare speaks — lowercases every
+    header name, so in production `headers.get("X-Store-Entries")` returned
+    None while the wire carried `x-store-entries: 75`. Measured against the live
+    pod. Three things went silently wrong, and the third is the serious one:
+
+        snapshot=UNSTAMPED      the provenance stamp the whole design rests on
+        revision=unknown        on every cached banner
+        the COUNT CROSS-CHECK NEVER FIRED — the guard against a truncated
+        transfer was inert in the only environment that matters
+
+    The shim now lowercases, so every header-dependent test exercises the
+    production shape. These pin the property directly, so a future refactor back
+    to `dict(...)` fails here rather than in six months on a live call.
+    """
+
+    def test_the_stamp_records_the_servers_headers_not_placeholders(
+        self, live_store, tmp_path: Path
+    ):
+        cache = tmp_path / "cache"
+        assert run_cairn("sync", url=live_store.base, cache=cache).returncode == 0
+        stamp = (cache / ".sync-stamp").read_text()
+        # The freshness stamp is the header that was silently lost. It must now
+        # carry the server's own value, not the placeholder.
+        assert "snapshot=UNSTAMPED" not in stamp, stamp
+        assert "snapshot=seeded=" in stamp, stamp
+        assert "entries=" in stamp, stamp
+        # ⚠ `revision=unknown` is CORRECT here and is pinned as such rather than
+        # left ambiguous: `/snapshot` deliberately sets no `X-Store-Revision`,
+        # because a full snapshot spans every scope and a revision is per-scope
+        # (`scope_revision(root, scope)`). My first version of this test asserted
+        # the opposite and failed — the assertion was wrong, not the code. A
+        # scoped snapshot could carry one; a whole-store snapshot cannot.
+        assert "revision=unknown" in stamp, stamp
+
+    def test_the_count_cross_check_actually_FIRES(self, live_store, tmp_path: Path):
+        """🔴 The guard that was inert in production. It can only fire if the
+        client READS `x-store-entries` — with the old lookup it saw None and
+        skipped the comparison entirely, so a truncated transfer sailed through.
+        """
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz", format=tarfile.PAX_FORMAT) as tar:
+            info = tarfile.TarInfo("widget-cfg/one.md")
+            tar.addfile(info, io.BytesIO(b""))
+        proc = TestHostileOrBrokenArchives()._run_against(
+            buf.getvalue(),
+            "application/gzip",
+            tmp_path / "cache",
+            headers={"X-Store-Entries": "99"},
+        )
+        assert proc.returncode != 0, proc.stdout
+        assert "99" in proc.stderr and "REFUSED" in proc.stderr, proc.stderr
 
 
 class TestTheHarnessItself:
