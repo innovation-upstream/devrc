@@ -24,11 +24,21 @@ read this page, and not before.
 ⚠ The export is the thing that argument leans on, so check it rather than
 assume it: `generate.py --sanitize` prints a `SANITIZE DEGRADED` line per value
 it could NOT substitute, and the page's own mode chip carries the same counts.
-A 2026-08-26 build left two client-ish names in the sanitized copy (one
-hostname "indistinguishable from a word", one scope matched in its exact form
-only). That is `scripts/present/sanitize.py`'s business, not this server's, but
-it is the reason "the portable export serves the off-workbench reader" is a
-claim to verify per build and not a standing fact.
+🔴 THAT LINE USED TO NAME THE WRONG CAUSE, AND THE WRONG CAUSE WAS THE
+REASSURING ONE. It read: a 2026-08-26 build left two client-ish names in the
+sanitized copy, one hostname "indistinguishable from a word" and one scope
+"matched in its exact form only" — i.e. the two DEGRADED lines were the leak.
+They were not, and never had been. Both are deliberate declines (a nodename,
+and the three-character scope `cli`), they are counted in the legend, and they
+leaked nothing. The actual leak was human prose harvested out of another file,
+which no identifier rule can enumerate and which printed no warning at all.
+Fixed by withholding declared prose rather than substituting it — see
+`sanitize.py`'s header. Kept here because "the page warned me" was exactly the
+wrong lesson: the warnings that DID print were unrelated to the failure, so the
+banner count is not a leak count and never was.
+
+"The portable export serves the off-workbench reader" therefore remains a claim
+to verify per build, not a standing fact.
 
 WHAT THIS IS NOT. It runs no subprocess, holds no credential, has no refresh
 button and no form. It answers exactly two artefact routes out of an explicit

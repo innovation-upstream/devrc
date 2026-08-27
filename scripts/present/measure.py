@@ -115,10 +115,21 @@ class Measurement:
     #:             enumerate what a sentence might name.
     #:
     #: `PROSE_LEDGER` in `scripts/tests/test_present_sanitize.py` pins the
-    #: declarations two-way — a registry key that gains or loses one fails the
-    #: suite — because a measurer that starts harvesting prose without saying so
-    #: is precisely the leak this field was added to stop, and it is invisible
-    #: in a diff that only adds a `rows.append`.
+    #: declarations two-way — a registry key that gains, loses or CHANGES one
+    #: fails the suite.
+    #:
+    #: 🔴 READ WHAT THAT DOES AND DOES NOT COVER, because the first version of
+    #: this comment claimed more than the test delivers. The ledger compares
+    #: DECLARATIONS against declarations. A brand-new column that harvests prose
+    #: and declares NOTHING produces no ledger entry, so the comparison still
+    #: holds and the suite stays green — the ledger cannot catch a declaration
+    #: that was never written. It catches one that is deleted, truncated,
+    #: mistyped or demoted, which is the likelier regression once the field
+    #: exists. The never-declared case is caught by a human asking the question
+    #: below, and by nothing else.
+    #:
+    #: So, when adding a measurer: can a cell in that column contain a sentence
+    #: somebody WROTE, in a file this module does not own? If yes it is `prose`.
     column_kinds: tuple[str, ...] = ()
 
     @property
@@ -126,15 +137,30 @@ class Measurement:
         return self.status == MEASURED
 
     def kind_of(self, index: int) -> str:
-        """The declared kind of column `index` — `""` when nothing is declared.
+        """The declared kind of column `index`.
 
-        Out-of-range is `""` and not an error on purpose: a row that is shorter
-        or longer than `columns` is a measurer bug, and turning it into an
-        exception here would take down a whole build over one ragged row.
+        Two different absences, and they must not answer the same way:
+
+          * NOTHING is declared on this measurement (`column_kinds` empty) —
+            every column is ordinary, which is the pre-existing behaviour for
+            the twenty-one rows that declare nothing.
+          * SOMETHING is declared but this index is past the end — the row is
+            RAGGED, i.e. it has more cells than the declaration covers.
+
+        🔴 THE RAGGED CASE FAILS CLOSED, and returning `""` for it was a hole.
+        Demonstrated: a measurement declaring `("name", "prose")` with a
+        three-cell row emitted the third cell VERBATIM into a sanitized page,
+        because the position past the end read as "ordinary". A declaration
+        that does not reach a cell is exactly the state where this module knows
+        least about that cell, so it withholds rather than publishes. Raising
+        instead would take down a whole build over one ragged row — a page with
+        one withheld cell is the better failure.
         """
+        if not self.column_kinds:
+            return ""
         if index < len(self.column_kinds):
             return self.column_kinds[index]
-        return ""
+        return "prose"
 
 
 @dataclass
@@ -731,6 +757,13 @@ def m_gate_tiers(env: Env) -> dict:
         ),
         source="scripts/gate.sh header + flake.nix checks",
         columns=("tier / fact", "what it is"),
+        #: The tail of this column is `desc.strip()` lifted out of `gate.sh`'s
+        #: exit-code comments — a sentence a human edits freely, in a file this
+        #: module does not own. Same class as the skill descriptions, so it gets
+        #: the same treatment. It names no third party TODAY; that is a property
+        #: of the current contents, not of the column, and the contents change
+        #: without a commit here.
+        column_kinds=("", "prose"),
         rows=tuple(rows),
     )
 
@@ -1109,6 +1142,13 @@ def m_drift_ladder(env: Env) -> dict:
         ),
         source="the EXIT CODES block in scripts/drift-check.sh (pinned against ship.sh by test_drift_check.py)",
         columns=("rc", "meaning"),
+        #: `meaning` is parsed straight out of `drift-check.sh`'s EXIT CODES
+        #: banner — up to ~420 chars of free prose per cell, authored by whoever
+        #: last edited that script. Declared `prose` for the same reason as the
+        #: skill descriptions: this module cannot enumerate what a sentence in
+        #: another file might name, and "it looks fine today" is the reasoning
+        #: this whole field exists to stop being load-bearing.
+        column_kinds=("", "prose"),
         rows=tuple(rows),
     )
 

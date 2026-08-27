@@ -78,7 +78,12 @@ FAKE_NODE = "workbench-prod"
 #:   * `bar` and `resume` are shaped like the CORRUPTION risk — ordinary English
 #:     words that are also real local identifiers. They are what proves the
 #:     substitution stays inside the cell it was declared on.
-FAKE_NAMES = ("quartzsight", "pelagic-mail", "bar", "resume")
+#:   * `mailbox` and `pelagic-mailbox` are a PREFIX PAIR reachable through
+#:     `_word`'s hyphen boundary. Without a pair like this in the fixture, the
+#:     longest-first ordering in `_names` is untestable — and reversing it was
+#:     measured to keep the whole suite green while publishing a real client
+#:     name in cleartext.
+FAKE_NAMES = ("quartzsight", "pelagic-mailbox", "mailbox", "bar", "resume")
 #: A sentence of the kind a measurer HARVESTS rather than authors. It names a
 #: third party that appears in NO name list — which is the whole point: this is
 #: the value substitution structurally cannot reach.
@@ -616,6 +621,113 @@ def test_the_same_name_gets_the_same_stand_in_in_both_of_its_cells():
         f"name and path disagree: {name_cell!r} vs {path_cell!r}"
 
 
+def test_a_local_name_that_PREFIXES_another_is_not_eaten():
+    """🔴 REGRESSION GUARD on `_names`' longest-first ordering.
+
+    `_word` treats a hyphen as a boundary, so a short name is reachable INSIDE a
+    longer hyphenated one. Shortest-first therefore rewrites the inner name and
+    leaves the outer one HALF-REAL — which reads as sanitized and is not.
+
+    Measured before this test existed: flipping `reverse=True` to `reverse=False`
+    kept all 75 tests green and published a real client name in cleartext on a
+    page stamped SANITIZED. The sibling guard for `_scopes` (see
+    `test_a_scope_name_that_prefixes_another_is_not_eaten`) had existed all
+    along; the parallel one for `_names` had not, and the fixture carried no
+    pair that could have seen it.
+    """
+    ms = measure.MeasurementSet()
+    ms.items.append(_row("k", columns=("skill",), column_kinds=("name",),
+                         rows=(("/pelagic-mailbox",), ("/mailbox",))))
+    rows = sanitize.apply(ms, _san()).by_key("k").rows
+    blob = repr(rows)
+    assert "mailbox" not in blob, f"a name survived, whole or in part: {blob!r}"
+    stand_ins = re.findall(r"name-\d+", blob)
+    assert len(set(stand_ins)) == 2, f"the two distinct names collapsed: {blob!r}"
+
+
+def test_a_STATIC_LABEL_in_a_name_cell_is_not_corrupted():
+    """The `name` kind drops the length ladder, so prove it cannot eat prose.
+
+    🔴 A `name` cell is NOT a pure identifier slot — `skills.listing`'s `what`
+    column is declared `name` and holds static English labels beside
+    `costliest tier-A entry: <skill>`. The licence for dropping the ladder is
+    CONFINEMENT plus `_word`'s boundaries, not purity, so the labels that
+    actually ship are the thing to assert on.
+    """
+    labels = ("skills shipped (in-tree + mkOutOfStoreSymlink)",
+              "tier A — full description in the always-on listing",
+              "tier B — `name-only`, still /name-invocable",
+              "per-entry cap (upstream, not devrc's)")
+    ms = measure.MeasurementSet()
+    ms.items.append(_row("k", columns=("what",), column_kinds=("name",),
+                         rows=tuple((label,) for label in labels)))
+    out = sanitize.apply(ms, _san()).by_key("k").rows
+    for label, (got,) in zip(labels, out):
+        assert got == label, f"a static label was corrupted: {label!r} -> {got!r}"
+
+
+def test_the_NAME_column_is_found_by_its_KIND_not_by_its_POSITION(tmp_path):
+    """🔴 REGRESSION GUARD. `build()` used to read `row[0]` and assume.
+
+    Measured: swapping the first two cells of the inventory row, WITHOUT
+    touching `column_kinds`, kept 102 tests green, kept both DEGRADED lines
+    byte-identical, kept the masthead reading SANITIZED — and republished every
+    real skill name, because the name list had become the tier letters.
+
+    A column reorder is a one-line refactor nobody would think to re-audit, so
+    the declaration has to be what selects the column.
+    """
+    env = measure.Env(repo=tmp_path, home=tmp_path / "h", claude_dir=tmp_path / "c",
+                      index_store=tmp_path / "s", allow_systemd=False,
+                      allow_network=False)
+    ms = measure.MeasurementSet()
+    ms.items.append(_row("index.store", columns=("scope",), rows=(("borealis",),)))
+    # the name column is SECOND here, exactly as a reorder would leave it
+    ms.items.append(_row("skills.inventory", columns=("tier", "skill"),
+                         column_kinds=("", "name"),
+                         rows=(("A", "/quartzsight"), ("B", "/bar"))))
+    san = sanitize.build(True, env, ms)
+    assert san.local_names == ("bar", "quartzsight"), (
+        f"the name column was read positionally: {san.local_names!r}")
+    assert not san.degraded, f"a well-formed build degraded: {san.degraded!r}"
+
+
+def test_an_inventory_with_NO_name_column_degrades_LOUDLY(tmp_path):
+    """CONTROL for the above: the selector must be able to come back empty.
+
+    Without this, `test_..._by_its_KIND_not_by_its_POSITION` cannot tell a
+    working selector from one that silently falls back to position 0.
+    """
+    env = measure.Env(repo=tmp_path, home=tmp_path / "h", claude_dir=tmp_path / "c",
+                      index_store=tmp_path / "s", allow_systemd=False,
+                      allow_network=False)
+    ms = measure.MeasurementSet()
+    ms.items.append(_row("index.store", columns=("scope",), rows=(("borealis",),)))
+    ms.items.append(_row("skills.inventory", columns=("tier", "skill"),
+                         rows=(("A", "/quartzsight"),)))
+    san = sanitize.build(True, env, ms)
+    assert san.local_names == ()
+    assert any("no `name` column" in r.lower() or "NO `name` column" in r
+               for r in san.degraded), (
+        f"an inventory with no name column degraded silently: {san.degraded!r}")
+
+
+def test_a_RAGGED_row_withholds_the_cells_past_its_DECLARATION():
+    """🔴 FAIL-CLOSED GUARD. A position past the end used to read as ordinary.
+
+    Demonstrated: a measurement declaring `("name", "prose")` with a three-cell
+    row emitted the third cell VERBATIM into a sanitized page. A declaration
+    that does not reach a cell is where this module knows LEAST about it.
+    """
+    ms = measure.MeasurementSet()
+    ms.items.append(_row("k", columns=("skill", "what it is"),
+                         column_kinds=("name", "prose"),
+                         rows=(("/quartzsight", FAKE_PROSE, FAKE_PROSE),)))
+    row = sanitize.apply(ms, _san()).by_key("k").rows[0]
+    assert "Northwind" not in repr(row), f"a ragged cell was published: {row!r}"
+    assert row[2] == sanitize.WITHHELD
+
+
 def test_a_local_name_that_is_an_ENGLISH_WORD_is_not_rewritten_OUTSIDE_its_cell():
     """CORRUPTION CONTROL — the failure that killed the name-list approach.
 
@@ -689,9 +801,18 @@ def test_the_disabled_sanitizer_withholds_NOTHING():
 #: Adding a key here is not a formality. Ask: can a cell in that column contain
 #: a sentence somebody WROTE? If yes it is `prose` — no matter how safe today's
 #: contents look, because the contents change without a commit here.
+#: 🔴 WHAT THIS LEDGER CANNOT SEE. It compares DECLARATIONS to declarations. A
+#: brand-new column that harvests prose and declares NOTHING produces no entry
+#: here, so the comparison still holds and the suite stays green. It catches a
+#: declaration that is deleted, truncated, mistyped or demoted — the likelier
+#: regression now the field exists — and nothing more. An audit found two
+#: undeclared prose columns (`gate.tiers`, `drift.ladder`) while this test was
+#: green, which is the worked proof of that limit.
 PROSE_LEDGER = {
     "skills.listing": ("name", ""),
     "skills.inventory": ("name", "", "prose", "name"),
+    "gate.tiers": ("", "prose"),
+    "drift.ladder": ("", "prose"),
 }
 
 
@@ -734,6 +855,52 @@ def test_the_column_kind_ledger_is_pinned_two_way(tmp_path):
         "If a measurer now harvests human-written text out of a file, declare "
         "that column `prose` and add it here. If a column stopped being "
         "harvested, remove it here in the same commit."
+    )
+
+
+def test_the_inventory_NAME_COLUMN_really_holds_the_skill_names(tmp_path):
+    """🔴 SEAM GUARD pinning a RELATIONSHIP: rows vs the columns describing them.
+
+    `sanitize.build()` sources every local identifier from the column
+    `skills.inventory` declares `name`. Selecting that column BY ITS KIND (which
+    it now does) is necessary and not sufficient: if the measurer's row tuple is
+    reordered while `columns`/`column_kinds` stay put, the declaration points at
+    the wrong cell and the data itself lies. No declaration can catch that —
+    only checking the cells against the source can.
+
+    Measured: reordering the row tuple alone kept 102 tests green, kept both
+    DEGRADED lines byte-identical, kept the masthead reading SANITIZED, and
+    republished every real skill name — because the name list had silently
+    become the set of tier letters {"A", "B", "?"}.
+
+    Read through `skill_tiers`, the measurer's OWN source, so this compares the
+    rendered table against the thing it claims to render rather than against
+    itself.
+    """
+    env = _ledger_env(tmp_path)
+    inv = measure.take(env).by_key("skills.inventory")
+    assert inv is not None and inv.measured, (
+        f"the inventory did not measure, so this guard checked NOTHING: "
+        f"{inv.reason if inv else 'row absent'}")
+
+    idx = next((i for i in range(len(inv.columns)) if inv.kind_of(i) == "name"), None)
+    assert idx is not None, "skills.inventory declares no `name` column"
+
+    sys.path.insert(0, str(SCRIPTS / "lib"))
+    try:
+        import skill_tiers  # noqa: PLC0415
+        expected = {f"/{name}" for name in skill_tiers.shipped_skills()}
+    finally:
+        if sys.path and sys.path[0] == str(SCRIPTS / "lib"):
+            sys.path.pop(0)
+
+    got = {row[idx] for row in inv.rows}
+    assert got == expected, (
+        "the cells in the declared `name` column are not the skill names.\n"
+        f"  column index {idx} holds: {sorted(got)[:5]}...\n"
+        f"  shipped skills are:      {sorted(expected)[:5]}...\n"
+        "If the row tuple was reordered, move `column_kinds` with it — otherwise "
+        "sanitize.build() harvests the wrong cell and every real name ships."
     )
 
 

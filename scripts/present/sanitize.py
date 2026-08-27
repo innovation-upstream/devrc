@@ -425,11 +425,22 @@ class Sanitizer:
     def _names(self, text: str) -> str:
         """Substitute LOCAL IDENTIFIERS — only ever called on a `name` cell.
 
-        No length ladder and no exact-form fallback: a `name` cell is a
-        structured identifier slot, so a short name there is a name, not an
-        English word that happens to collide. That is precisely the assumption
-        `text()` may NOT make, which is why this is a separate method rather
-        than another class inside it.
+        No length ladder and no exact-form fallback. The licence for that is
+        CONFINEMENT, not purity: a `name` cell is not guaranteed to be nothing
+        but an identifier — `skills.listing`'s `what` column is declared `name`
+        and holds static English labels alongside `costliest tier-A entry:
+        <skill>`. What makes dropping the ladder safe is that the class never
+        runs over the page at large, plus `_word`'s boundaries. `test_a_static_
+        label_in_a_name_cell_is_not_corrupted` is the guard on that, because the
+        premise "a name cell is a pure identifier slot" is FALSE in one of this
+        module's two uses and should not be relied on again.
+
+        🔴 LONGEST-FIRST IS LOAD-BEARING, NOT TIDINESS. `_word` treats a hyphen
+        as a boundary, so a short name is reachable INSIDE a longer hyphenated
+        one. Substituting shortest-first rewrites the inner name and leaves the
+        outer one half-real: measured on the live set, `reverse=False` published
+        a client name in cleartext as `/<client>-name-10` on a page stamped
+        SANITIZED, with the whole suite green.
         """
         for real in sorted(self.local_names, key=len, reverse=True):
             if not real or real.lower() in self.keep:
@@ -549,11 +560,29 @@ def build(enabled: bool, env, measurements=None) -> Sanitizer:
                 f"({inv.reason or 'no reason given'}), so NO local identifier is "
                 "renamed in a `name` cell — the prose is still withheld")
         else:
-            local_names = [row[0].lstrip("/") for row in inv.rows if row and row[0]]
-            if not local_names:
+            # 🔴 PICK THE COLUMN BY ITS DECLARED KIND, NEVER BY POSITION. Reading
+            # `row[0]` assumed column 0 is the name column — an assumption no
+            # test could see and that a one-line column reorder in the measurer
+            # breaks silently. MEASURED: swapping the first two cells of the
+            # inventory row, without touching `column_kinds`, kept 102 tests
+            # green, kept both DEGRADED lines identical, kept the masthead
+            # reading SANITIZED — and republished all 37 real names in
+            # cleartext, because `local_names` had become {"A","B","?"}.
+            # `kind_of` already knows which column is which; ask it.
+            idx = next((i for i in range(len(inv.columns))
+                        if inv.kind_of(i) == "name"), None)
+            if idx is None:
                 degraded.append(
-                    "the skill inventory measured ZERO skills, so no local "
-                    "identifier is renamed — an empty name list is not a clean one")
+                    "the skill inventory declares NO `name` column, so this "
+                    "build cannot tell which cell holds the identifier and NO "
+                    "local identifier is renamed — the prose is still withheld")
+            else:
+                local_names = [row[idx].lstrip("/") for row in inv.rows
+                               if len(row) > idx and row[idx]]
+                if not local_names:
+                    degraded.append(
+                        "the skill inventory measured ZERO skills, so no local "
+                        "identifier is renamed — an empty name list is not a clean one")
     home = str(env.home).rstrip("/")
     try:
         node = socket.gethostname()

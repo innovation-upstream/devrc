@@ -234,10 +234,18 @@ ssh zach@10.42.0.100 '(echo >/dev/tcp/192.168.50.250/8900) 2>/dev/null && echo O
 
 # the sanitizer, with BOTH controls — a bare zero cannot tell a working
 # sanitizer from one wired to nothing, so check the page still has content
+# 🔴 `grep -o | wc -l`, NEVER `grep -oc`. With GNU grep, `-c` counts matching
+# LINES and overrides `-o`, so the positive controls below return 1 instead of
+# 37/77 and the fix reads as failed. This host's `grep` is a ugrep WRAPPER where
+# `-oc` does count occurrences — which is exactly why the wrong form looked fine
+# when it was written. The piped form is right under both.
 python3 -m scripts.present.generate --sanitize -o /tmp/san.html   # 2 DEGRADED lines, both honest
-grep -oic naida /tmp/san.html        # expect 0  — was 2 before the fix
-grep -oic civitai /tmp/san.html      # expect 0  — control: substitution works
-grep -oc 'WITHHELD' /tmp/san.html    # expect 37 — positive control: the page is NOT empty
-grep -oc 'name-[0-9][0-9]' /tmp/san.html   # expect 77 — identifiers renamed, not dropped
-grep -oic ' test ' /tmp/san.html     # expect 23 — control: ordinary prose NOT corrupted
+grep -o -i naida /tmp/san.html   | wc -l   # expect 0  — was 2 before the fix
+grep -o -i civitai /tmp/san.html | wc -l   # expect 0  — control: substitution works
+grep -o WITHHELD /tmp/san.html   | wc -l   # >0 — positive control: the page is NOT empty
+grep -o 'name-[0-9][0-9]' /tmp/san.html | wc -l   # >0 — identifiers renamed, not dropped
+grep -o -i ' test ' /tmp/san.html | wc -l  # equal in BOTH builds — prose NOT corrupted
 ```
+🔴 **Do not pin the last four to a literal count here.** They move whenever a skill or an rc
+code is added, and a stale number in a doc reads as a failed fix. Compare the sanitized build
+against the full one from the same commit instead.
