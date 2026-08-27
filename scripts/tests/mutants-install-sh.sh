@@ -84,7 +84,8 @@ run_one() {
 # `case` refusal stops a multi-line $DIR reaching the config write — so each
 # single-line mutant SURVIVES because the other defence still holds the
 # property. MEASURED, both directions: reverting only the hardening → the guard
-# refuses (rc=1, "MULTI-LINE"); neutering only the guard → $DIR is single-line
+# refuses (rc=1, "single-line path to a real directory"); neutering only the
+# guard → $DIR is single-line
 # and it never fires. Scoring either as a coverage gap would be wrong, and
 # shipping them as permanent 🔴 would train everyone to ignore this battery.
 # What IS worth pinning is that the test notices the state where NEITHER holds

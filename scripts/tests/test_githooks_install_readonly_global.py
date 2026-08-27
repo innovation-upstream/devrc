@@ -371,22 +371,53 @@ def test_an_exported_CDPATH_leaves_a_parseable_gitconfig(hm_home):
     to run at all, while this one pins the FILE's shape whenever one was created
     — the property `--uninstall` and the failed-install rollback both depend on.
     """
-    _install_relative(hm_home)
+    install = _install_relative(hm_home)
     gitconfig = hm_home / ".gitconfig"
+
+    # 🔴 THE FILE'S EXISTENCE DECIDES, NOT THE INSTALLER'S rc — and getting that
+    # ordering wrong costs the whole regression. Two failure modes, measured:
+    #
+    #   - `if not exists(): skip` (first cut) tolerated an ALWAYS-REFUSING
+    #     installer: every mutant breaking the happy path reported `1 skipped`
+    #     instead of a failure, and the sibling test passes such a build via its
+    #     own `else` branch.
+    #   - `if rc != 0: skip` (second cut) was WORSE — at the pre-fix tip the
+    #     installer DOES create the corrupt file and THEN exits non-zero for a
+    #     downstream reason, so this test skipped over the exact corruption it
+    #     exists to catch. The red control dropped from 2 failed to 1 failed
+    #     + 1 skipped, which is how a regression test quietly stops regressing.
+    #
+    # So: if a file was created it gets parsed, whatever the rc. Only a refusal
+    # that created nothing is skippable, and a SUCCESS that created nothing is a
+    # failure — that is the state which would otherwise be silent.
     if not gitconfig.exists():
-        pytest.skip("no fallback file was created; nothing to parse")
+        if install.returncode != 0:
+            pytest.skip("installer refused and created no file (the refusal "
+                        "itself is asserted by the sibling test)")
+        pytest.fail("installer reported success but created no fallback file:\n"
+                    f"{install.stdout}\n{install.stderr}")
 
     # git's own parser is the arbiter — not a regex of ours.
+    #
+    # 🔴 `-z`, NOT `--list`. git escapes a newline inside a VALUE as a literal
+    # `\n` on write, but `--list` prints it back RAW — so the record spans two
+    # output lines, `splitlines()` separates them, the orphan half carries no
+    # `=` and is filtered out, and `"\n" not in value` could NEVER fire. It read
+    # as a guard against exactly this PR's defect and was vacuous in both
+    # directions (measured against a config carrying `hooksPath = a\nb`). NUL is
+    # the only separator that cannot occur inside a value.
     proc = subprocess.run(
-        ["git", "config", "--file", str(gitconfig), "--list"],
+        ["git", "config", "--file", str(gitconfig), "--list", "-z"],
         capture_output=True, text=True, timeout=60, env=_env(hm_home),
     )
     assert proc.returncode == 0, (
         f"the file the installer created is not parseable by git:\n{proc.stderr}\n"
         f"--- {gitconfig} ---\n{gitconfig.read_text()}")
-    for key, value in (line.split("=", 1) for line in
-                       proc.stdout.splitlines() if "=" in line):
-        assert "\n" not in value, f"multi-line value for {key}"
+    # With -z each record is `key\nvalue` terminated by NUL: the FIRST newline
+    # separates them, so any newline after that one is inside the value itself.
+    for record in filter(None, proc.stdout.split("\0")):
+        key, _, value = record.partition("\n")
+        assert "\n" not in value, f"multi-line value for {key}: {value!r}"
 
 
 def test_the_audit_env_file_is_seeded_on_a_read_only_host(hm_home):

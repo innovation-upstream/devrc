@@ -30,8 +30,9 @@ set -euo pipefail
 # interpolated into the stamp below, so the second line lands in ~/.gitconfig as
 # config rather than as a comment. Every subsequent git command in EVERY repo on
 # the box then dies `fatal: bad config line 4 in file ~/.gitconfig` — including
-# `--uninstall`, which cannot parse the file it would repair. Only a manual
-# `rm ~/.gitconfig` recovers. `-P` also resolves symlinks; `--` stops an
+# `--uninstall`, which cannot parse the file it would repair — so recovery is
+# manual, by hand-editing the orphan line out or `rm ~/.gitconfig`, and no
+# devrc tooling can do it for you. `-P` also resolves symlinks; `--` stops an
 # argument beginning with `-` being read as an option.
 # shellcheck disable=SC1007  # `CDPATH= cd` is a deliberate prefix assignment, not a typo
 DIR="$(CDPATH= cd -P -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
