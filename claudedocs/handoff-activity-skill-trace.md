@@ -15,34 +15,31 @@ Trace the `activity` telemetry skill end to end, fix what the trace found, and a
 whether a token-efficient "find my recent activity on X" search tool is worth building.
 
 ## State now
-- Branch: `main`, clean (one pre-existing untracked file, `nix/system/apply-nebula-443.sh.LOCAL-preserved-2026-08-02`, not this session's).
-- **All work MERGED AND SHIPPED. Nothing in flight. No open PR from this thread.**
+- Branch: `main`, clean of this thread's work. The tree carries **another session's**
+  uncommitted discord-embed-ext work (` D claudedocs/handoff-discord-embed-ext-rescue.md`,
+  ` M scripts/discord-embed-ext/extension/embed_enlarge.js`, ` M .../embed_enlarge.test.mjs`)
+  plus the long-standing untracked `nix/system/apply-nebula-443.sh.LOCAL-preserved-2026-08-02`.
+  **None of that is this thread's — do not commit or discard it here.**
+- **All this thread's work MERGED, SHIPPED and VERIFIED BY ARTIFACT on BOTH hosts.**
+  No open PR, no claim held. `ship.sh` rc 0 with **cross-host agreement COMPARED**
+  (2 hosts at `d3875d64`), 0 dangling / 0 stale on each.
 
-Three PRs, each merged, shipped via `ship.sh`, and verified by artifact on BOTH hosts:
+Five PRs across this thread, each merged, shipped and verified by artifact on BOTH hosts:
 
 | PR | commit | what |
 |---|---|---|
 | #878 | `5426fe54` | `claude/skills/activity/reference/queries.md` — i3 queries hardcoded `host='laptop'` |
 | #892 | `1c9c040a` | `claudedocs/close-the-loop/STATE.md` + `the-algorithm-applied-2026-06-17.md` — repoint `AGENTIC_LEVERAGE.md`, restore a measured count |
 | #897 | `6509702b` | `CLAUDE.md` — document the test-subset runner that already existed |
+| #913 | `8e42c5e6` | `browser` is no longer laptop-only — 5 stale claims across `activity/SKILL.md`, `activity/reference/queries.md`, `scripts/collector/deadman.py` |
+| #916 | — | the retracted "workbench is headless" claim survived in COMMENTS — 3 sites incl. `scripts/claude-hooks/claude-notify.py` |
 
-Deploy state: `ship.sh` rc 0 after each; both hosts converged, 0 dangling / 0 stale managed
-artifacts on each; `drift-check.sh` reports **no drift** on either host.
+Earlier in the session the laptop was 6 commits behind and was converged (`ship.sh --no-local`).
 
-### The trace itself (what was verified live, not read)
-- Source `~/workspace/devrc/claude/skills/activity/` → `claudeSkills` derivation (`nix/home.nix:108`) → `home.file.".claude/skills"` (`:1095`). Deployed copy is a **/nix/store symlink** — needs a `switch`, never just a pull.
-- Five systemd user units confirmed on **both** hosts (`activity-collector`, `keylog`, `browser-activity-receiver`, `i3-source` active; `claude-activity-source` is a timer-driven oneshot, so `inactive`/`activating` is correct, not a fault).
-- `deadman.py` → `state: ok  rows=13897  evaluated=17  dead=0`, rc 0. All 17 (host, source) pairs fresh — matches SKILL.md's "9 laptop, 8 workbench" exactly.
-
-### `activity/SKILL.md` audit — 14 claims verified, 1 unmeasurable, 0 stale
-Verified against live state: 13 schema columns (exact names/order), 180d TTL + `toYYYYMM(ts)`
-partitions, budget `clamp(2 × p99, 2h, 48h)` (`BUDGET_K=2.0`, `FLOOR_BUCKETS=24`,
-`CAP_BUCKETS=576`), `PRESENCE_SOURCES={keys,i3,tmux,zsh}`, `PRESENCE_STALL_HOURS=72`, the two
-retired invariants genuinely retired, extension manifest `1.4.0`, extension absent on
-workbench, `ch-regrowth-check` `OnCalendar=*-*-11 09:00:00` + `Persistent=true` and absent on
-the laptop, browser-bridge `HEARTBEAT_INTERVAL_S=900`, both per-host endpoints + `ACTIVITY_HOST`,
-NodePort 30123, SOPS secret and dashboard manifests present on `homelab-talos` `origin/trunk`,
-all 8 tool paths.
+### What changed in the world, not just the docs
+`workbench/browser` began emitting **2026-08-26 21:46** — the activity extension was loaded
+into the workbench's Brave. The roster is now **18 pairs (9 laptop / 9 workbench)**, not 17.
+`deadman.py` picked the new pair up with **no edit anywhere**; only the prose had to change.
 
 ## Open investigations — live diagnosis state
 
@@ -71,23 +68,55 @@ all 8 tool paths.
   curl -s --user "default:$APW" --data-binary "SHOW GRANTS FOR activity_writer, activity_reader FORMAT TSV" http://192.168.50.94:30123/
   ```
 
+### 🔴 UNRESOLVED — a live ClickHouse credential was disclosed to a third party
+- **Symptom + exact repro:** dispatch an opencode run whose task needs the collector creds.
+  The agent ran `head -90 ~/.config/activity-collector/env` and it was **ALLOWED**; seconds
+  later `cat ~/.config/activity-collector/env | head -5` was **auto-rejected** with
+  `permission requested: external_directory (/home/zach/.config/activity-collector/*)`.
+  Same file, same dir, opposite outcomes — the guard is inconsistent **by command shape**.
+- **Observed (with values):** the `activity_writer` password was printed in full into the run
+  log. Copies found by `grep -al`: the dispatch log (deleted), `~/.local/share/opencode/log/opencode.log`
+  (**16 occurrences**), `~/.local/share/opencode/opencode-stable.db` (**37 occurrences**).
+  `~/.local/share/opencode/storage` — none.
+- **Ruled out — it never reached git.** `.opencode-dispatch/` is gitignored (`.gitignore:59`,
+  git reports it `!!`) and the string is absent from `origin/main`. Verified, not assumed.
+- **🔴 The part that cannot be undone:** the agent read the file INTO ITS CONTEXT, so the
+  credential was transmitted to the model provider — **OpenRouter → DeepSeek**
+  (`openrouter/deepseek/deepseek-v4-flash`). Either party may retain or log it. **This, not the
+  local files, is why rotation is required**; scrubbing disk copies alone fixes nothing.
+- **Status: NOT ROTATED.** Re-verified at handoff time: the original value is still live in
+  `~/.config/activity-collector/env`.
+- **Next probe / action:** rotate `activity_writer` in ClickHouse, update
+  `~/.config/activity-collector/env` on **both** hosts (chmod 600), restart
+  `activity-collector` on each, then confirm writes resume with
+  `python3 ~/workspace/devrc/scripts/collector/deadman.py` (expect rc 0, `dead=0`).
+  Do the two hosts together — a half-done rotation stops the pipeline writing.
+
 ## Next steps (ranked)
-1. **Verify the CH user/grant roster** (devrc — no file change expected; touches only
-   `claude/skills/activity/SKILL.md` if the claim turns out wrong). Runs the probe above.
-   Low value on its own; do it only if touching that table anyway.
-2. **Decide whether `reference/queries.md` deserves a machine-checked guard** (devrc —
-   `claude/skills/activity/reference/queries.md`, a new `scripts/tests/test_*.py`). Today
-   NOTHING checks its host-scope claims: the `host='laptop'` defect survived from whenever
-   SKILL.md retracted it until 2026-08-26, and only a human reading the two files against each
-   other found it. A guard could assert each host claim against a live count, or at minimum that
-   SKILL.md and its reference do not contradict each other. **Weigh against**: this is the same
-   "build more harness" reflex `close-the-loop/STATE.md` warns about — the defect was found
-   once, in a doc, and cost one PR.
+🔴 **Ranks were REASSIGNED this session.** Verified `claim-work --list` held **0** claims
+against this doc first, so no live claim was re-pointed. Old 1/2/3 are now 2/–/3.
+
+1. **Rotate the leaked ClickHouse credential + scrub the two local copies** (see the
+   investigation block above). Touches no repo file; `~/.config/activity-collector/env` on
+   both hosts, ClickHouse, and the two `~/.local/share/opencode/` stores.
+2. **Verify the CH user/grant roster** (devrc — `claude/skills/activity/SKILL.md` only if the
+   claim is wrong). Was rank 1. Still the single unmeasured SKILL.md claim; the admin-password
+   probe is in the "Gotchas" of the original doc. **Do it DURING step 1** — rotation
+   authenticates as admin anyway, which is exactly what this probe needs.
 3. **The `AGENTIC_LEVERAGE.md` cross-repo reference is UNGUARDED** (devrc —
-   `claudedocs/close-the-loop/STATE.md`). `test_doc_path_rot` skips it: its first segment is
-   `datapacket-talos`, outside `ROOTS`, so the tool classifies it "not a claim this repo can
-   settle". If that file moves, nothing tells us. Accept, or extend the test to a known set of
-   sibling repos.
+   `claudedocs/close-the-loop/STATE.md`). Unchanged from the original rank 3: `test_doc_path_rot`
+   skips it because its first segment is outside `ROOTS`. Accept, or extend to sibling repos.
+4. **Record the CI-trigger trap in the `resume` skill** (devrc — `claude/skills/resume/SKILL.md`,
+   step 6). One line: push the branch early for visibility **but open the PR in the same breath**.
+   See the Gotcha below — this is a trap the skill's own instructions currently lead you into.
+5. **DECLINED, and re-confirmed this session: do NOT build a machine-checked guard for
+   `reference/queries.md`.** Was rank 2. Carried forward because it is measured, not opinion:
+   nothing checks that file's host-scope claims, and the `host='laptop'` defect survived from
+   whenever `SKILL.md` retracted it until **2026-08-26** — only a human reading the two files
+   against each other found it. Weighed against the "build more harness" reflex
+   `close-the-loop/STATE.md` warns about: the defect was found, in a doc, and cost one PR.
+   This session found a *second* instance of the class (#916), which strengthens the case
+   slightly — a THIRD would change the answer.
 
 ## Gotchas / decisions / dead-ends
 
@@ -103,18 +132,63 @@ all 8 tool paths.
 - **`ship.sh` `merge --ff-only` will REFUSE and skip a host** when a tracked file it must update is dirty. Hit this on `claudedocs/close-the-loop/STATE.md` — a live `mkOutOfStoreSymlink` deploy target. Sequence that works: commit the content → merge → re-verify the local blob hash → `git checkout -- <path>` → `merge --ff-only`.
 - **Dated measurement docs are not scratch.** `the-algorithm-applied-2026-06-17.md` had `/next-lever (8)` deleted from a top-openers list because the skill was later retired. That falsifies a measurement of 147 sessions. Annotate as since-retired; never delete the count.
 
+- 🔴 **A CI trigger needs the PR to EXIST — confirmed by controlled comparison, not theory.**
+  #913: pushed the commit, opened the PR ~1 min later → **0 check-runs for 27 minutes** while
+  `tekton/devrc-pytests`/`-nodetests` sat unreported and the PR read `BLOCKED`. #916: pushed and
+  opened the PR immediately → both checks present within ~1 min. Same repo, same day, same
+  protection. Sibling PRs #907/#908/#909 were green throughout, which is the control that
+  ruled out an outage. **The `/resume` skill's own "push the branch the moment you create it"
+  step causes this** if you then do the work before opening the PR. Fixed by an empty commit;
+  do NOT reach for the branch-protection escape hatch for this.
+- 🔴 **BLIND DOGFOODING FOUND A DEFECT THAT THREE PROSE SWEEPS AND A GREP MISSED — repeat it.**
+  An opencode run was given tasks whose correct answers depended on the docs being right, told
+  nothing about what had changed, and forbidden from reading git history. It reported unprompted
+  that `SKILL.md`'s `## status` block said `i3-source+keylog laptop-only` while the source table
+  100 lines above marked both ✅ on both hosts. **The claim had been retracted in PROSE three
+  times and left standing in every COMMENT-borne copy**, because a prose sweep does not read
+  inside a fenced command block or a code comment. I ran a `laptop-only` grep in the same session,
+  saw the line in my own output, and walked past it. → PR #916.
+- 🔴 **`grep -c` on a retraction matches the retraction — PREDICT the count before reading it.**
+  After #916 the laptop still greps `1` for `i3-source+keylog laptop-only`; line 171 is the
+  retraction note quoting the old text. Predicting the number first is what stops it reading as
+  "the fix did not land".
+- **The budget on a NEW telemetry pair is deliberately NOT hand-tuned.** `workbench/browser`
+  arrived with a `2.0h` budget sized off ~1 day of history; the p99 gap grows and the budget
+  widens on its own. Nothing in `deadman.py` is hand-listed and an exception table is what it
+  exists to avoid. ⚠ Budget is burned in **ACTIVE buckets** (`keys`/`i3`/`tmux`/`zsh` on that
+  host), so an operator asleep with Brave shut costs it nothing — **an overnight false-DEAD was
+  predicted in this session and was WRONG**; read the mechanism before predicting an alarm.
+- **`ship.sh` reports DIRTY-AND-IN-THE-ARTIFACT, and it is not cosmetic.** The workbench's
+  current generation is `origin/main` **PLUS** an uncommitted
+  `scripts/discord-embed-ext/extension/embed_enlarge.js` — nix reads that path at build time.
+  It will silently revert on the next clean-tree switch. Read the per-host lines, never the
+  final verdict.
+- **`resume-state.sh` falls back to the NEWEST handoff when the named one is absent**, and says
+  so as a `!` gap. This session's checkout was on an older branch, so the named doc was missing
+  and the digest reconciled a *different* initiative. Fix: read the doc from `origin/main`
+  (`git show origin/main:<path>`) or point the reconciler at a worktree that has it.
+
 ## How to verify
 ```bash
-# the fix that started this — both hosts, deployed artifact not repo source
-grep -c '^- 🔴 \*\*i3 is on BOTH hosts' ~/.claude/skills/activity/reference/queries.md   # 1
-ssh zach@192.168.50.155 'grep -c "i3 is on BOTH hosts" ~/.claude/skills/activity/reference/queries.md'  # 1
+# both this thread's PRs live in the DEPLOYED artifact (a /nix/store path, not the repo source)
+grep -c '9 on the workbench, 18 total'   ~/.claude/skills/activity/SKILL.md   # 1
+grep -c 'All five are LOADED on BOTH'    ~/.claude/skills/activity/SKILL.md   # 1
+ssh zach@192.168.50.155 'grep -c "All five are LOADED on BOTH" ~/.claude/skills/activity/SKILL.md'  # 1
 
-# the pipeline is alive and no source has silently died
-python3 ~/workspace/devrc/scripts/collector/deadman.py    # exit 0, evaluated=17, dead=0
+# the roster really is 18 pairs and nothing has died
+python3 ~/workspace/devrc/scripts/collector/deadman.py    # rc 0, evaluated=18, dead=0
 
-# both hosts converged, nothing stale or dangling
-~/workspace/devrc/scripts/drift-check.sh                  # "no drift on the host(s) CHECKED"
+# both hosts converged AND compared (not "NOT COMPARED")
+~/workspace/devrc/scripts/drift-check.sh
 
-# the documented subset runner actually runs
-nix develop ~/workspace/devrc -c python3 -m pytest ~/workspace/devrc/scripts/tests/test_doc_path_rot.py -q
+# 🔴 has the credential been rotated yet?
+# The pre-rotation value is NOT written here on purpose — this repo is PUBLIC, and a
+# verify step that embeds the secret is how a contained leak becomes a committed one.
+# (Drafting this doc reached for exactly that and it was caught before any write.)
+# Compare the live value against the one quoted in the opencode log instead:
+sed -n 's/^CLICKHOUSE_PASSWORD=\(....\).*/live prefix: \1…/p' ~/.config/activity-collector/env
+grep -aom1 'CLICKHOUSE_PASSWORD=....' ~/.local/share/opencode/log/opencode.log
+# same 4-char prefix  => NOT rotated, still exposed.
+# differs, or the log has been scrubbed => rotated; then delete the two local copies:
+#   ~/.local/share/opencode/log/opencode.log  and  ~/.local/share/opencode/opencode-stable.db
 ```
