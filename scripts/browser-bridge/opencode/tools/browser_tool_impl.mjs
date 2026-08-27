@@ -903,7 +903,18 @@ function _withHiddenNotice(data, body, autoWake) {
 // to be rediscovered. server.py sets `site_notes` on the ENVELOPE ROOT
 // (_annotate_site_notes: `result["site_notes"] = path`), while every branch below
 // reads `envelope.data` — so the field is structurally invisible to the model on
-// ALL 13 agent-reachable ops, not merely unmentioned in one of them.
+// every op it can reach.
+//
+// TWO PRECISIONS, because a comment is a claim and both were wrong once:
+//  * the reachable set is the 14 values of OP_TO_SERVER, NOT the 13 of
+//    ALLOWED_OPS_DEFAULT — `upload` is off by default but re-enablable via
+//    BROWSER_AGENT_ALLOWED_OPS (see line ~159), so it is reachable and is covered.
+//  * "every branch reads envelope.data" is the mechanism for all of them EXCEPT
+//    `whoami`, which reads the ROOT (`const w = envelope || {}`). It is safe for a
+//    DIFFERENT reason — it answers GET /whoami, which _annotate_site_notes never
+//    touches, and its output is field-pinned regardless. Do not generalise the
+//    `.data` mechanism to it; the guard in tests/browser_tool.test.mjs covers both
+//    by asserting the OUTPUT, which is why it does not care which is which.
 //
 // WHY IT STAYS DROPPED: the value is a repo-relative PATH to a reference doc, and
 // the agent def denies every built-in tool including `read`. Forwarding it would
@@ -914,9 +925,12 @@ function _withHiddenNotice(data, body, autoWake) {
 // 🔴 THE CONSEQUENCE, which belongs to the CALLER and not to this file: on a
 // registered host the agent runs WITHOUT the site's flow notes — the sign-in,
 // account-switch, picker and wizard sequences, and the reads that lie there. So
-// "agent-first when ambiguous" is wrong for exactly those hosts. SKILL.md's FIRST
-// DECISION section names this (`· **site-noted**`) and tests/browser_tool.test.mjs
-// pins both halves: that no op forwards the field, and that SKILL.md still says so.
+// "agent-first when ambiguous" is wrong for exactly those hosts. SKILL.md says so
+// in one sentence (it has a hard byte ceiling); the ACTIONABLE half — how to tell
+// a site-noted host, and how to brief its flows into a goal — is
+// reference/agent.md § "The agent never sees `site_notes`", which has no ceiling.
+// tests/browser_tool.test.mjs pins both halves: that no reachable op forwards the
+// field, and that SKILL.md still warns about it.
 export function summarizeResult(op, envelope, env = {}, autoWake = null) {
   const data = (envelope && envelope.data) || {};
   if (op === "text") {
