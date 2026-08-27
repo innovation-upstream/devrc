@@ -678,21 +678,22 @@ def _overage(a):
     return label, a["size"] - BUDGET
 
 
-def render(audits, show_all, n_sections, n_detail, out=sys.stdout, foreign=(), mixed=False):
+def render(audits, show_all, n_sections, n_detail, out=sys.stdout, foreign=(), mixed=False, unknown=False):
     p = lambda *a: print(*a, file=out)
     audits = sorted(audits, key=lambda a: -a["size"])
     over = [a for a in audits if a["status"] != "OK"]
     p(f"# SKILL.md audit — {len(audits)} skill(s)")
-    enforced = "ENFORCED" if not foreign else "devrc's DEFAULT (not enforced here)"
+    enforced = ("ENFORCED" if not (foreign or unknown)
+                else "devrc's DEFAULT (not enforced on every tree here)")
     p(f"\nbudget {BUDGET:,} B {enforced}   = ceiling {TARGET:,} B − {MIN_HEADROOM:,} B "
       f"working margin   ·   hard cap {HARD:,} B")
-    if not foreign:
+    if not (foreign or unknown):
         p(f"  ({BUDGET:,} is the number the gate rejects at — a body between it and the "
           f"{TARGET:,} B\n   ceiling is 'under the ceiling' and still RED. Both constants are read "
           f"from\n   {_BUDGET_SOURCE.relative_to(Path(__file__).resolve().parent.parent)}, "
           f"which owns them.)")
     else:
-        names = ", ".join(r.name for r in foreign)
+        names = ", ".join(r.name for r in foreign) or "trees outside any repo"
         p(f"\n🔴 {'SOME OF THESE' if mixed else 'THESE'} SKILLS ARE IN {names} — NOT a tree governed by")
         p( "   the gate this budget comes from, so the number above binds nothing there. Read")
         p( "   that repo's own gate before treating any verdict below as one: a ratchet with a")
@@ -927,7 +928,7 @@ def render(audits, show_all, n_sections, n_detail, out=sys.stdout, foreign=(), m
         if excess > 0:
             # Same per-skill rule: on an ungoverned tree this is advice against
             # devrc's number, not a requirement (round-3 finding 2).
-            any_ung = any(a.get("governed") is False for a in over)
+            any_ung = any(a.get("governed") is not True for a in over)   # False OR unknown
             need.append(f"cut ~{excess:,} B total"
                         + (" against devrc's budget (not enforced there)" if any_ung else ""))
         if any_ref_issue:
@@ -960,12 +961,19 @@ def main(argv=None):
     # inside exactly one repo or none.
     audits = [audit_one(t) for t in targets]
     foreign = _foreign_repos(targets)
+    # 🔴 UNKNOWN IS ITS OWN RUN STATE. `foreign` keeps only `is False`, so a run
+    # over trees in NO repo left every header keyed on it saying ENFORCED while
+    # the rows underneath said [governance unknown] — the two lines contradicting
+    # each other three apart. That is the dominant real shape, not a corner:
+    # ~/.claude/skills is in no repo and 34 of its 37 skills resolve into
+    # /nix/store. Round-7 finding 1.
+    unknown = any(a.get('governed') is None for a in audits)
     # `mixed` needs a GOVERNED target, not merely a non-foreign one: an unknowable
     # target (no enclosing repo) is neither, and counting it as governed would
     # print the mixed warning over a run that has nothing to disambiguate.
-    mixed = bool(foreign) and any(a.get("governed") is True for a in audits)
+    mixed = (bool(foreign) or unknown) and any(a.get("governed") is True for a in audits)
     render(audits, args.all, args.sections, args.detail,
-           foreign=foreign, mixed=mixed)
+           foreign=foreign, mixed=mixed, unknown=unknown)
 
 
 if __name__ == "__main__":

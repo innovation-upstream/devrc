@@ -26,9 +26,9 @@ skills the core names:
 | skill | core | `reference/**/*.md` | ratio |
 |---|---|---|---|
 | `browser-bridge` | 11,961 B | 162,076 B | **13.55x** |
-| `prune-skill` | 11,953 B | *self-referential* | *run the command* |
+| `prune-skill` | *run the command* | *self-referential* | *run the command* |
 
-🔴 **The second row deliberately carries neither a reference byte-count nor a ratio.** THIS FILE lives
+🔴 **The second row deliberately carries no numbers at all.** The core count went with them for the plainest reason: the round that removed the other two left `11,953 B` in place and its own trimming made that 112 B stale in the same commit. The core is perfectly stateable — it was simply stated in a file nothing gates, beside two figures that had just been removed for being unstateable. THIS FILE lives
 inside `prune-skill/reference/`, so any total stated here changes the moment the
 sentence stating it is edited — it was 51 B stale within one round, and stale again
 by the next. A self-referential measurement is not a number you can pin; it is a

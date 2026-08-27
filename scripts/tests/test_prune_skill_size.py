@@ -38,10 +38,13 @@ sub-rules into two more sidecars (`budgets-and-scope.md`,
 TARGET itself (11,841 against 12,288; the margin is 447 B), which is the direction
 of travel this docstring already named as intended.
 
-The slack is genuinely thin (11,841 against an 11,846 B effective floor), and that
-is the honest position rather than a comfortable one: the next addition here has
-to evict something. That is the same contract this skill imposes on every file it
-prunes, and it no longer imposes it from above the line.
+The binding limit is devrc's shared enforced budget, not this ceiling: 11,841
+against a 12,038 B effective floor, so there are 197 B of real room. This module
+keeps no second floor of its own — devrc's budget is already ceiling minus a 250 B
+margin, so a further margin beneath it would warn before the warning, and every
+value tried for one was wrong in one direction or the other. That is the same
+contract this skill imposes on every file it prunes, and it no longer imposes it
+from above the line.
 
 (The browser-bridge sentence states no byte count on purpose. That count belongs
 to ANOTHER skill's file: restating it here made this gate red for someone else's
@@ -75,10 +78,11 @@ import pytest
 #
 # NOT a derivation -- a measured position, now equal to the 12,288 B target
 # rather than above it. SKILL.md is 11,841 B (`stat -c %s` and `git cat-file -s`
-# agree), so 12,288 leaves 447 B of headroom, of which MIN_HEADROOM_BYTES (192)
-# is the floor that must remain: 255 B of true working room before the headroom
-# test fires -- barely any; the next edit here will have to evict something. That
-# is deliberate and is the same contract the skill imposes on its subjects.
+# agree), so 12,288 leaves 447 B of headroom -- but the CEILING is not what binds.
+# devrc's shared budget (12,038) is smaller, so the room that matters is 197 B of
+# true working room. MIN_HEADROOM_BYTES (192) no longer defines a second floor
+# below that (see test_this_modules_floor_is_no_weaker_than_the_shared_one); it
+# survives only as the sizing rationale below.
 # Re-measure before touching this number, and lower it as the file gets leaner --
 # never raise it. (Was 13,056 while the body was 12,812 B and over target.)
 MAX_BYTES = 12_288
@@ -510,11 +514,18 @@ def test_this_modules_own_stated_figures_are_re_measured():
 
     over = size - target
     headroom = MAX_BYTES - size
-    slack = headroom - MIN_HEADROOM_BYTES
+    # 🔴 The room that actually remains, measured to the BINDING limit. This was
+    # `headroom - MIN_HEADROOM_BYTES`, i.e. room below the retired second floor,
+    # and it read 255 against a true 197 — a 58 B gap, character-for-character the
+    # window this module says it closed. Worse, the 'true working room' spec PINNED
+    # that figure, so writing the correct number into the docstring was the edit
+    # that turned the suite red. A guard enforcing a false claim is the failure
+    # this module exists to prevent. Round-7 finding 5.
+    slack = min(MAX_BYTES, shared_budget) - size
     # The floor the headroom test actually enforces: binding limit minus the
     # working margin. Keyed to MAX_BYTES it was 12,096, ABOVE the 12,038 the
     # relationship guard fires at, so it could never fire first (round-5 F8).
-    eff_floor = min(MAX_BYTES, shared_budget) - MIN_HEADROOM_BYTES
+    eff_floor = min(MAX_BYTES, shared_budget)   # the binding limit; there is no second floor
     rows = [ln for ln in SKILL_MD.read_text().splitlines()
             if ln.startswith("| ") and "reference/" in ln and "Load it when" not in ln]
     row_bytes = sum(len(ln.encode()) + 1 for ln in rows)
@@ -557,7 +568,7 @@ def test_this_modules_own_stated_figures_are_re_measured():
         ("the target it cites",      r"\([\d,]+ against ([\d,]+); the margin", f"{target:,}"),
         ("margin in the accounting", r"the margin is ([\d,]+) B\)",             f"{headroom:,}"),
         ("headroom",                 r"leaves ([\d,]+) B of headroom",            f"{headroom:,}"),
-        ("true working room",        r"must remain: ([\d,]+) B of true working",  f"{slack:,}"),
+        ("true working room",        r"matters is ([\d,]+) B of\s*#?\s*true working room", f"{slack:,}"),
         # 🔴 FOUR FIGURES THE #924 PRE-MERGE AUDIT CORRUPTED WITH THE SUITE GREEN.
         # Three were text this same PR introduced, so the round that added prose
         # also added the gap — which is why UNGATED is a contract and not a note.
@@ -568,8 +579,14 @@ def test_this_modules_own_stated_figures_are_re_measured():
         # those two words, so a pattern spanning the break silently never matches
         # and reports itself as "reworded". The harness said so; it was not guessed.
         ("shared budget in the docstring", r"([\d,]+) B enforced budget", f"{shared_budget:,}"),
-        ("size, restated at the floor", r"\(([\d,]+) against an? [\d,]+ B effective floor\)", f"{size:,}"),
-        ("effective floor",          r"against an? ([\d,]+) B effective floor\)",   f"{eff_floor:,}"),
+        # 🔴 \s+ not a literal space: the sentence WRAPS between the figure and
+        # "against", and a pattern spanning the break silently never matches and
+        # reports itself as "reworded" — the third time that has bitten this list.
+        ("size, restated at the floor", r"([\d,]+)\s+against an? [\d,]+ B effective floor,", f"{size:,}"),
+        ("effective floor",          r"against an? ([\d,]+) B effective floor,",    f"{eff_floor:,}"),
+        # the same room restated in prose two paragraphs up — a second copy of a
+        # gated figure is the shape this list already calls out, so it is gated too.
+        ("room restated in prose", r"so there are ([\d,]+) B of real room",       f"{slack:,}"),
         ("target in the ceiling note", r"now equal to the ([\d,]+) B target",     f"{target:,}"),
         ("routing-table bytes",      r"routing table \(5 rows, ([\d,]+) B",       f"{row_bytes:,}"),
         ("routing-table mean",       r"routing table \(5 rows, [\d,]+ B -> mean ([\d,]+) B/row", f"{row_bytes // len(rows):,}"),

@@ -1278,11 +1278,22 @@ def _size_rows(out):
     return rows
 
 
-def _mixed_out(tmp_path):
-    """A run over one governed and one ungoverned repo, both genuinely in breach."""
-    g = _governed_repo(tmp_path / "govrepo", governed=True, skill_bytes=sa.BUDGET + 116)
-    u = _governed_repo(tmp_path / "ungovrepo", governed=False, skill_bytes=sa.BUDGET + 116)
-    r = subprocess.run([sys.executable, str(AUDIT_PY), str(g), str(u), "--all"],
+def _mixed_out(tmp_path, n_gov=2):
+    """A run over n_gov governed repos and one ungoverned, all genuinely in breach.
+
+    🔴 n_gov DEFAULTS TO 2, NOT 1, and that is load-bearing. With one of each, the
+    verdict's two counts are equal, so swapping them in the f-string produces a
+    byte-identical string and the guard cannot see the inversion — the same
+    pairwise-identical-fixture trap this file fixed at the sizes row and then
+    re-created in the verdict guard. Round-7 finding 2.
+    """
+    args = []
+    for i in range(n_gov):
+        args.append(str(_governed_repo(tmp_path / f"govrepo{i}", governed=True,
+                                       skill_bytes=sa.BUDGET + 116)))
+    args.append(str(_governed_repo(tmp_path / "ungovrepo", governed=False,
+                                   skill_bytes=sa.BUDGET + 116)))
+    r = subprocess.run([sys.executable, str(AUDIT_PY), *args, "--all"],
                        capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
     return r.stdout
@@ -1297,7 +1308,7 @@ def test_mixed_run_marks_ungoverned_per_line_not_per_run(tmp_path):
     # failed against correct behaviour.
     rows = _size_rows(out)
     marked = [l for l in rows if "[ungoverned]" in l]
-    assert len(rows) == 2, f"expected two skill rows, got {len(rows)}:\n{out}"
+    assert len(rows) == 3, f"expected three skill rows, got {len(rows)}:\n{out}"
     assert len(marked) == 1, f"expected exactly one marked row, got {len(marked)}:\n{out}"
     # 🔴 WHICH row, not just how many. The mark and the budget label come from one
     # expression, so inverting it (`is False` -> `is True`) swaps them TOGETHER and
@@ -1305,10 +1316,11 @@ def test_mixed_run_marks_ungoverned_per_line_not_per_run(tmp_path):
     # green, i.e. round-3's headline defect could come back and pass.
     assert "ungovrepo" in marked[0], f"the UNGOVERNED skill must be the marked one:\n{out}"
     assert "devrc reference budget" in marked[0], out
-    gov_row = [l for l in rows if "govrepo" in l and "ungovrepo" not in l]
-    assert len(gov_row) == 1 and "[ungoverned]" not in gov_row[0], (
-        f"the governed skill must be unmarked:\n{out}")
-    assert "over the enforced budget" in gov_row[0], out
+    gov_rows = [l for l in rows if "govrepo" in l and "ungovrepo" not in l]
+    assert len(gov_rows) == 2, f"expected two governed rows:\n{out}"
+    assert all("[ungoverned]" not in l for l in gov_rows), (
+        f"the governed skills must be unmarked:\n{out}")
+    assert all("over the enforced budget" in l for l in gov_rows), out
 
 
 def test_mixed_run_still_calls_the_governed_skill_ENFORCED(tmp_path):
@@ -1329,7 +1341,7 @@ def test_a_purely_foreign_run_is_not_called_mixed(tmp_path):
     so the extra warning must stay off or it becomes noise on every foreign run."""
     u = _governed_repo(tmp_path / "onlyforeign", governed=False, skill_bytes=sa.BUDGET + 50)
     out = _run(u, "--all")
-    assert "devrc's DEFAULT (not enforced here)" in out, out
+    assert "devrc's DEFAULT (not enforced on every tree here)" in out, out
     assert "This run MIXES" not in out, out
 
 
@@ -1354,7 +1366,7 @@ def test_governance_comes_from_the_targets_not_the_cli_argument(tmp_path):
     """
     _governed_repo(tmp_path / "parent" / "repoA", governed=False, skill_bytes=sa.BUDGET + 20)
     out = _run(tmp_path / "parent", "--all")
-    assert "devrc's DEFAULT (not enforced here)" in out, out
+    assert "devrc's DEFAULT (not enforced on every tree here)" in out, out
     assert f"budget {sa.BUDGET:,} B ENFORCED" not in out, (
         "an argument above the repo roots must not launder foreign skills as enforced")
 
@@ -1393,5 +1405,35 @@ def test_mixed_verdict_tells_the_governed_skill_the_gate_rejects_it(tmp_path):
     circular, since it IS devrc — and never told the gate rejects it."""
     out = _mixed_out(tmp_path)
     verdict = out[out.index("## verdict"):]
-    assert "the gate REJECTS 1 of them" in verdict, verdict
+    # 🔴 The counts must be DISTINCT (2 and 1), or swapping them in the f-string
+    # is a no-op and this assertion cannot see the inversion.
+    assert "the gate REJECTS 2 of them" in verdict, verdict
+    assert "the other 1" in verdict, verdict
     assert "check that repo's own gate" in verdict, verdict
+
+
+def test_the_within_budget_verdict_does_not_claim_enforcement_on_a_foreign_tree(tmp_path):
+    """🔴 F3: the "all N skill(s) within budget (N B enforced)" line — the most-read
+    line for the common "point it at another repo, it's fine" case — shipped with no
+    test, so reverting it outright left the suite fully green."""
+    u = _governed_repo(tmp_path / "smallforeign", governed=False, skill_bytes=2_000)
+    out = _run(u, "--all")
+    assert "within budget" in out, out
+    assert f"({sa.BUDGET:,} B — enforced)" not in out, (
+        f"an ungoverned tree must not be told the budget is enforced:\n{out}")
+    assert "not enforced on every tree here" in out, out
+
+
+def test_the_detail_header_says_unknown_for_a_skill_in_no_repo(tmp_path):
+    """🔴 F4: the None arm of `_overage` was unguarded — the sizes-row test scopes
+    to `_size_rows(out)[0]` and never reads the detail header, so reverting only
+    that default to "enforced budget" left the suite green. Its False-arm sibling
+    pins exactly this; the None arm had no equivalent."""
+    loose = tmp_path / "norepo2" / ".claude" / "skills" / "s"
+    loose.mkdir(parents=True)
+    (loose / "SKILL.md").write_bytes(b"# s\n" + b"y" * (sa.BUDGET + 112))
+    out = _run(tmp_path / "norepo2" / ".claude" / "skills", "--all")
+    detail = out[out.index("## s —"):] if "## s —" in out else out
+    assert "over enforced budget by" not in detail, (
+        f"an unknowable tree must not get an enforced-budget detail header:\n{out}")
+    assert "governance unknown" in detail, out
