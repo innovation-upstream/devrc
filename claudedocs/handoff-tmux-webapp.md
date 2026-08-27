@@ -196,25 +196,29 @@ From the analyze-service index (**recall — verify before relying on**):
 
 ## Next steps (ranked)
 
-🔴 **Ranks are STABLE from here** — they are half a claim's identity
-(`claim-work --slug-for claudedocs/handoff-tmux-webapp.md <rank>`), so re-ranking silently
-re-points every live claim. The 2026-08-26 renumbering superseded an earlier 1–7 list; do not
-renumber again without releasing the claims first.
+🔴 **Ranks are STABLE and are NOT renumbered when an item completes** — the rank is half a claim's
+identity (`claim-work --slug-for claudedocs/handoff-tmux-webapp.md <rank>`), so re-ranking silently
+re-points every live claim. A finished item stays in place marked ✅ DONE; take the lowest-numbered
+open one, not "the first in the list". *History, carried forward:* the 2026-08-26 renumbering
+superseded an earlier 1–7 list, so a claim slug minted before that date may name a different item —
+do not renumber again without releasing the live claims first.
 
 1. **Watch the 4h idle reaper fire.** `homelab-talos`, `containers/clawgate/internal/api/server.go`
    (`attentionIdleReapAfter`). It has **never run against production data** — the one behaviour in
-   this feature nobody has observed. 37+ idle entries accumulate within ~90 min. Tell:
+   this feature nobody has observed. Idle entries accumulate fast (53 open seen within ~2h). Tell:
    `retention: resolved N idle attention entry(ies) not seen for 4h` in the server log. If the rate
    outpaces it, that constant is the single knob.
-2. 🔴 **IN FLIGHT — claimed as `tmux-webapp-2`, dispatched 2026-08-27. Do NOT start this.**
-   **Detach the synchronous suggest POST.** `homelab-talos`,
-   `containers/clawgate/hook/clawgate-stop-hook.sh`. Costs ~8s per turn-end on a **black-holed**
-   route (`--max-time 8`); connection-*refused* is free (~0.06s), so only the off-network case is
-   the problem. The detach pattern is next door in `raise_attention_idle`: rename the payload to a
-   **sibling of `WORKDIR`** (escaping the `EXIT` trap), fork, child deletes it before it logs. That
-   rename is the load-bearing part. **Check `claim-work --list` before touching it** — if the claim
-   is gone and no PR landed, the dispatch died and this is free to take; if a PR exists, review it
-   instead. Nothing had merged when this doc was written.
+2. ✅ **DONE 2026-08-27 — `ZacxDev/homelab-infra#451`, merged as `a38360a5`.** The suggest POST is
+   detached (payload renamed to a **sibling of `WORKDIR`**, fork, child `rm`s before it logs).
+   Claim `tmux-webapp-2` released.
+   **Measured independently on the workbench, old hook vs new, against a server that accepts and
+   never replies: 8030/8031/8037 ms → 22/21/21 ms.** Verified live after deploy: `exit 0`, empty
+   stdout, **28 ms**, and the detached child still logged `suggest sent ok`. No scratch leaked.
+   🔴 **DEPLOYED TO THE WORKBENCH ONLY.** The hooks are read from `~/workspace/homelab-talos`'s
+   working tree, so the laptop keeps the OLD synchronous hook until that checkout is pulled —
+   `git -C ~/workspace/homelab-talos merge --ff-only origin/trunk` there. Pre-flight it exactly as
+   the workbench was: confirm **0 local-only commits** and that no incoming commit collides with a
+   dirty path.
 3. **Decide the terminal widget (audit finding A4 — still open).** clawgate vendors only two
    hand-written JS files (~3.7 KB) and no third-party bundle, so xterm.js would be the first.
    Recommendation on record: ship read-only `capture-pane` rendering first; if adopted, vendor and
@@ -233,16 +237,16 @@ renumber again without releasing the claims first.
    `containers/clawgate/internal/api/{push_task,task_comment}_test.go` (pre-existing; mechanical now
    the `awaitPushesSettled` barrier exists); and a scanner test for in-body `! grep` — closing
    condition: a test in both bats suites that reds on a planted `! grep` assertion.
-9. **Two portable lessons are NOT in `MEMORY.md`** — offered twice, never answered, so recorded here
-   rather than lost: `! grep -q X f` is inert under bats errexit unless it is the last line of a
-   test, and busybox `date +%s%N` silently DROPS `%N`. Both are cross-cutting shell/testing
-   tripwires that map to no skill, which is what that index is for. They live in the clawgate index
-   entries today, which is the wrong scope for a lesson about bash and bats.
+9. **Three portable lessons are NOT in `MEMORY.md`** — offered repeatedly, never answered, so
+   recorded here rather than lost: `! grep -q X f` is inert under bats errexit unless it is the last
+   line of a test; busybox `date +%s%N` silently DROPS `%N`; and the Bash tool's shell is **zsh**,
+   which has no `EPOCHREALTIME` (see Gotchas). All three are cross-cutting shell/testing tripwires
+   that map to no skill, which is what that index is for.
 
 **Parked with the operator (not work items until answered):**
 - Seam tests **skip in `clawgate-ci`** — the Go image has no `jq`. Closing it edits a pipeline every
-  PR in the repo runs. These are the tests that caught a constant-rename the bats tier stayed green
-  through.
+  PR in the repo runs. `TestSeamASlowSuggestPostCostsTheHookNothing` — the only test driving *real*
+  curl at a *real* server — is therefore ungated.
 - `ZacxDev/homelab-infra` has **no branch protection at all** (the API 403s — needs GitHub Pro or a
   public repo). Nothing there is mechanically required; every merge rests on the reader.
 - The **passive backstop was declined**: all three raisers need an agent to cooperate or a hook to
@@ -304,6 +308,29 @@ renumber again without releasing the claims first.
 - **Rejected:** WebSocket-on-Python-stdlib, a homelab-cluster deploy, and a new cross-host collector
   — see this doc's audit findings A1/A2/A7. The re-platform onto clawgate resolved A1 and A2
   outright (clawgate already terminates WebSockets and already does SSE).
+
+- 🔴 **The Bash tool's shell is ZSH, which has no `EPOCHREALTIME`** — so `${EPOCHREALTIME/./}`
+  expands to EMPTY and every arithmetic timing built on it silently reports **0 ms for everything**,
+  including cases that genuinely take 8 seconds. Measured 2026-08-27 while verifying #451: three
+  successive "measurements" read 0 ms and only the POSITIVE CONTROL (the old hook, which *must* be
+  slow) exposed it. Use `date +%s%N` (GNU date is present on the NixOS hosts; it is **busybox** date
+  in the bats CI image that drops `%N`) and validate the timer itself — `sleep 2` must measure
+  ~2000 ms — before quoting any number.
+- 🔴 **`clawgate-stop-hook.sh` sources `~/.claude/clawgate.env` with `set -a`, so THE FILE BEATS THE
+  ENVIRONMENT** (`:82`) — the opposite of `clawgatectl`'s documented precedence (file → env →
+  flag). Exporting `CLAWGATE_API_URL` to point a probe somewhere harmless therefore does nothing,
+  and the probe silently hits **production**. Override `CLAWGATE_CONF_FILE` instead. Measured: a
+  latency probe meant for an unroutable address POSTed to the live server and left a stray `idle`
+  entry in the real queue.
+- ⚠ **`192.0.2.1` (RFC 5737 TEST-NET-1) does NOT reliably black-hole** — on the workbench `curl`
+  fails it instantly with rc 28 rather than waiting out `--max-time`. For a reproducible "server
+  never answers" instrument, run a local listener that accepts and never replies, and validate it
+  (a plain `curl --max-time 8` against it must take ~8000 ms) before trusting a hook measurement.
+- **Re-verify a repo's branch/divergence state at the MOMENT you act on it, not from an earlier
+  survey.** Measured 2026-08-27: a `git reset --keep origin/main` recovery was proposed for a
+  diverged devrc `main`, and by the time it was approved another session had switched that checkout
+  to a feature branch — the command would have reset *that branch* and destroyed its pointer. The
+  divergence had also already been fixed by its owner. One `git branch --show-current` caught it.
 
 ## How to verify
 
