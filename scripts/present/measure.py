@@ -838,7 +838,7 @@ def m_gate_exit_codes(env: Env) -> dict:
             "no `# Exit: N = …` legend block was found in scripts/gate.sh — an "
             "empty parse is a broken read, not a script without exit codes")
     return dict(
-        value=f"{len(rows)} exit codes in gate.sh's `# Exit:` legend block",
+        value=f"{len(rows)} exit codes in gate.sh's Exit: legend block",
         detail=(
             "🔴 90 is the one to understand: it means the runner's own verdict "
             "and its exit status DISAGREED, or a run was truncated. That is "
@@ -1665,7 +1665,7 @@ REGISTRY: tuple[tuple[str, str, str, object, str], ...] = (
     ("gate.tiers", "constraints", "The two gate tiers", m_gate_tiers,
      "nix develop --impure --command bash scripts/gate.sh --tier both"),
     ("gate.exit_codes", "constraints", "gate.sh's exit-code legend", m_gate_exit_codes,
-     "grep -E '^#\\s+[0-9]+\\s*=' scripts/gate.sh"),
+     "grep -E '^#[[:space:]]*(Exit:)?[[:space:]]*[0-9]+[[:space:]]*=' scripts/gate.sh"),
     ("gate.protection", "constraints", "What actually BLOCKS a merge", m_branch_protection,
      "gh api /repos/<owner>/<repo>/branches/main/protection --jq .required_status_checks"),
     ("tests.pytest", "constraints", "Per-target collected-test floors", m_pytest_floors,

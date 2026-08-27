@@ -1083,8 +1083,9 @@ def test_the_exit_code_legend_stops_at_the_BLOCK_and_sorts_NUMERICALLY(tmp_path)
     the `Exit:` anchor optional. The second is the worse one: with a `# N = …`
     line anywhere ABOVE the legend it makes that line the anchor, so the real
     legend is never reached and the page renders ONE FABRICATED CODE AND NO
-    REAL ONES, labelled "1 exit codes documented in …". So the fixture brackets
-    the legend — a decoy on each side.
+    REAL ONES, under a label asserting that is the whole legend. So the fixture
+    brackets the legend — a decoy on each side, and BOTH are load-bearing:
+    deleting either one lets a different mutant back through.
     """
     repo = tmp_path / "repo"
     (repo / "scripts").mkdir(parents=True)
@@ -1109,7 +1110,15 @@ def test_the_exit_code_legend_stops_at_the_BLOCK_and_sorts_NUMERICALLY(tmp_path)
     env = measure.Env(repo=repo, home=tmp_path / "h", claude_dir=tmp_path / "c",
                       index_store=tmp_path / "s", allow_systemd=False,
                       allow_network=False)
-    got = [code for code, _ in measure.m_gate_exit_codes(env)["rows"]]
+    fields = measure.m_gate_exit_codes(env)
+    got = [code for code, _ in fields["rows"]]
+
+    # The count in the headline, read off a legend whose size differs from the
+    # real file's. Without this a hardcoded `value` survives: the sibling guard
+    # checks the count against the REAL gate.sh, where the literal happens to be
+    # right, and nothing else reads `value` at all.
+    assert fields["value"].startswith("3 "), (
+        f"the headline count does not match this 3-code legend: {fields['value']!r}")
 
     assert "7" not in got, (
         f"a comment BELOW the legend block was published as an exit code: {got}")
