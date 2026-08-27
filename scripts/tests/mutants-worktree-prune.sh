@@ -369,6 +369,27 @@ run 'note-claims-removal-parity-with-the-default' \
   test_the_note_does_not_claim_a_run_REFUSES_when_that_run_REMOVES \
   's|^                       "--allow-unmatched-globs is in force, so it does NOT refuse. That is a "$|                       "--allow-unmatched-globs is in force, so it does NOT refuse and this run removes exactly what the default would have removed. That is a "|'
 
+printf '\n== ROUND 8 — the refusal cannot depend on the flag, so the note may not say it might ==\n'
+# 🟡 Round 7 replaced the `else` arm with "…though whether the same command line
+# WITHOUT the flag also refuses depends on the other globs you typed". False, and
+# structurally impossible: this arm only prints when the flag was passed AND the
+# constant is a TYPED glob, so `resolve_exclude_globs`' `… and
+# AGENT_WORKTREE_GLOB not in globs` conjunct is already False and dropping the
+# flag skips an append that would have been a no-op. This mutant puts the false
+# clause back, verbatim, in both of its lines.
+run 'note-says-dropping-the-flag-might-change-the-refusal' \
+  test_the_note_does_not_claim_a_run_REFUSES_when_that_run_REMOVES \
+  's|^                       "never could — dropping the flag does not change that, because the glob "$|                       "never could — though whether the same command line WITHOUT the flag "|; s|^                       "is already in the list either way")$|                       "also refuses depends on the other globs you typed")|'
+# 🔴 …and the MECHANISM under that sentence, not just the sentence. A prose pin
+# keeps asserting the words after the behaviour they describe has changed, so the
+# `not in globs` conjunct is mutated away: without the flag the constant is then
+# appended a SECOND time next to the operator's typed copy, the two command lines
+# stop producing identical summaries, and the note's claim becomes false while
+# every string assertion on it still passes.
+run 'resolver-appends-the-constant-even-when-already-typed' \
+  test_dropping_the_flag_cannot_change_whether_the_run_refuses \
+  's|^    if agent_glob_applied_by_default(include_agent_worktrees) and AGENT_WORKTREE_GLOB not in globs:|    if agent_glob_applied_by_default(include_agent_worktrees):|'
+
 printf '\n== ROUND 6 — the normalisation the dropped `normalize_glob(g)` relied on ==\n'
 # 🟢 Both message sites now compare `g` to the constant WITHOUT re-normalising,
 # because `resolve_exclude_globs` -> `normalize_globs` already did. The existing

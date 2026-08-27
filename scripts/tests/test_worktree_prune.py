@@ -1365,8 +1365,13 @@ def test_the_shout_is_gated_on_the_GLOB_not_on_the_flag(two_dead, capsys):
     # this is NOT the same command line as the default.
     assert "agent worktrees are STILL spared" in out, out
     assert "It is NOT identical to the default" in out, out
+    # 🔴 THE WHOLE NORMALISED CLAUSE, not its first half. The artifact under test
+    # is prose: a guard on the opening words is walkable by rewording the tail,
+    # and round 7 rewrote exactly that tail into a false sentence while this
+    # assertion stayed green.
     assert ("can REFUSE --execute on that glob, which the tool's own implied copy never "
-            "could") in out, out
+            "could — dropping the flag does not change that, because the glob is already "
+            "in the list either way.") in out, out
     # …and NOT the two claims round 4 printed, both of which were false here.
     assert "The flag is doing nothing here." not in out, out
     assert "behaves exactly like the default" not in out, out
@@ -2263,7 +2268,8 @@ def test_the_refusal_says_a_retyped_default_glob_is_free_to_drop(no_agent_worktr
     # …and this is the run whose note claims exactly this: typed, therefore a
     # refusal candidate, which the tool's own implied copy never is.
     assert ("can REFUSE --execute on that glob, which the tool's own implied copy never "
-            "could") in cap.out, cap.out
+            "could — dropping the flag does not change that, because the glob is already "
+            "in the list either way.") in cap.out, cap.out
 
 
 def test_the_free_to_drop_note_is_scoped_to_the_ONE_glob_it_is_true_of(
@@ -2410,8 +2416,11 @@ def test_the_note_does_not_claim_a_run_REFUSES_when_that_run_REMOVES(
     assert rc == wp.RC_EXECUTE_REFUSED, cap.err
     assert plain.is_dir(), "the control removed something"
     assert ("can REFUSE --execute on that glob, which the tool's own implied copy never "
-            "could — though whether the same command line WITHOUT the flag also refuses "
-            "depends on the other globs you typed.") in cap.out, cap.out
+            "could — dropping the flag does not change that, because the glob is already "
+            "in the list either way.") in cap.out, cap.out
+    # …and NOT round 7's replacement, which was false and structurally could not
+    # be true — see `test_dropping_the_flag_cannot_change_whether_the_run_refuses`.
+    assert "depends on the other globs you typed" not in cap.out, cap.out
     assert "WARNS where the default would have said nothing" not in cap.out, cap.out
 
     # 🟡 THE PARITY-BREAKING RUN, FIRST, because it is the one whose sentence was
@@ -2421,7 +2430,14 @@ def test_the_note_does_not_claim_a_run_REFUSES_when_that_run_REMOVES(
                   "--execute", "--confirm", "0"])
     cap = capsys.readouterr()
     assert rc == wp.RC_OK, cap.err
-    assert plain.is_dir(), "the extra glob did not spare the row, so the contrast is vacuous"
+    # 🟢 THE MESSAGE MAY NOT CLAIM MORE THAN THE ASSERTION CHECKS. This used to
+    # read "the extra glob did not spare the row, so the contrast is vacuous" —
+    # wider than `is_dir()` can see: a `--confirm N` mismatch also returns
+    # RC_EXECUTE_REFUSED and leaves the directory, so the directory surviving
+    # cannot on its own tell "the glob spared it" from "confirm refused". What
+    # rules that out is the `rc == RC_OK` above, asserted first; this one only
+    # says the run did not remove.
+    assert plain.is_dir(), "an RC_OK run removed the row, so the extra glob spared nothing"
     assert "removes exactly what the default would have removed" not in cap.out, cap.out
     assert ("That is a claim about the REFUSAL and nothing else") in cap.out, cap.out
 
@@ -2438,6 +2454,108 @@ def test_the_note_does_not_claim_a_run_REFUSES_when_that_run_REMOVES(
             "removed.") in cap.out, cap.out
     # …and the line it used to contradict is still there, saying the same thing.
     assert "it does not refuse --execute" in cap.out, cap.out
+
+
+#: Everything in the stderr refusal up to and including this substring is the
+#: REASON — the dud list, the count, and the three remedies. Whatever follows is
+#: the per-glob free-to-drop sentence, which is the only part the flag can move.
+_REFUSAL_REASON_END = "--allow-unmatched-globs if it is correct but out of this scan's scope. "
+
+
+def _refusal_reason(err: str) -> str:
+    """The refusal's reason, sliced off the free-to-drop tail. Raises if absent,
+    so a run that did not refuse cannot be compared as though it had."""
+    i = err.index(_REFUSAL_REASON_END)
+    return err[:i + len(_REFUSAL_REASON_END)]
+
+
+def test_dropping_the_flag_cannot_change_whether_the_run_refuses(
+        no_agent_worktrees, capsys, tmp_path):
+    """🟡 ROUND 8 — THE MECHANISM UNDER THE `note:`, PINNED AS A RELATIONSHIP.
+
+    Round 7 rewrote the note's `else` arm to "…though whether the same command
+    line WITHOUT the flag also refuses depends on the other globs you typed".
+    That is false, and structurally could not be true: the note only prints when
+    `--include-agent-worktrees` was passed AND `AGENT_WORKTREE_GLOB` is a TYPED
+    glob, and `resolve_exclude_globs` appends the constant only
+
+        if agent_glob_applied_by_default(...) and AGENT_WORKTREE_GLOB not in globs
+
+    — the second conjunct is already False on that command line, so dropping the
+    flag skips an append that would have been a no-op. Nothing downstream can
+    move.
+
+    🟢 THIS IS AN INVARIANT GUARD, NOT A REGRESSION TEST, and is labelled as one:
+    the code always behaved this way, the SENTENCE was the defect, and the
+    sentence is pinned as a whole normalised string in the three tests that read
+    it. What this adds is that the sentence's claim cannot become false without a
+    test going red — a prose pin alone would keep asserting the words after the
+    mechanism they describe had changed.
+
+    Three shapes of "the other globs you typed" × {flag, no flag} = six command
+    lines, each `--execute --confirm 1`. Asserted per shape:
+
+      * the same exit code,
+      * the same refusal REASON (dud list, count, remedies),
+      * `--out` payloads BYTE-IDENTICAL once the only two keys the flag is
+        allowed to move are removed — which covers the effective glob list, the
+        rows, the per-glob counts, the `typed` set and
+        `exclude_globs_blocking_execute` in one comparison,
+      * and the one thing that DOES change, asserted rather than ignored: the
+        free-to-drop sentence appears only WITHOUT the flag, where the constant
+        really is auto-restored.
+
+    The failure this closes is an operator's: hit the refusal, read that dropping
+    the flag might clear it, drop it, refuse identically.
+    """
+    repo, plain, gh = no_agent_worktrees
+    shapes = {
+        "no second glob": [],
+        # 🔴 Both kinds of "other glob", because the false sentence named them:
+        # one that MATCHES a row (and so changes what would be removed) and one
+        # that is a second DUD (and so changes the refusal's own dud list).
+        # Neither can move the answer, and a single shape could not show that.
+        "a second glob that MATCHES a row": ["--exclude-path", "*/wts/*"],
+        "a second glob that is a DUD": ["--exclude-path", "*/civitai/*"],
+    }
+    for n, (label, extra) in enumerate(shapes.items()):
+        sides = {}
+        for side, flag in (("flag", ["--include-agent-worktrees"]), ("no-flag", [])):
+            out = tmp_path / f"probe-{n}-{side}.json"
+            rc = wp.main([*flag, "--repo", str(repo), "--gh-cmd", gh, "--jobs", "1",
+                          "--exclude-path", AGENT_GLOB, *extra,
+                          "--out", str(out), "--execute", "--confirm", "1"])
+            cap = capsys.readouterr()
+            payload = json.loads(out.read_text(encoding="utf-8"))
+            # The ONLY two keys the flag may move: the flag itself, and the fact
+            # derived from it. Popped (so the comparison below covers everything
+            # else) and asserted (so popping cannot hide a wrong value).
+            assert payload["summary"].pop("agent_worktrees_included") is (side == "flag"), label
+            assert payload["summary"].pop("agent_glob_applied_by_default") is (side != "flag"), \
+                label
+            sides[side] = (rc, cap.err, json.dumps(payload, sort_keys=True))
+
+        assert sides["flag"][0] == sides["no-flag"][0] == wp.RC_EXECUTE_REFUSED, \
+            f"{label}: {sides['flag'][0]} vs {sides['no-flag'][0]}"
+        assert _refusal_reason(sides["flag"][1]) == _refusal_reason(sides["no-flag"][1]), label
+        assert sides["flag"][2] == sides["no-flag"][2], label
+        # …and the ONE thing the flag does move, named rather than left implicit:
+        # without the flag the constant is auto-restored, so the refusal adds the
+        # free-to-drop sentence. It changes the ADVICE, never the refusal.
+        assert "is applied by DEFAULT to every run" not in sides["flag"][1], label
+        assert "is applied by DEFAULT to every run" in sides["no-flag"][1], label
+        assert plain.is_dir(), f"{label}: a refused run removed something"
+
+    # 🔴 POSITIVE CONTROL on the comparison itself: a run that does NOT refuse
+    # must be visibly different on every axis above, so "identical" is a finding
+    # and not what this test says about any two runs. Same fixture, the typed
+    # dud dropped — which is the remedy the refusal actually offers.
+    rc = wp.main(["--repo", str(repo), "--gh-cmd", gh, "--jobs", "1",
+                  "--execute", "--confirm", "1"])
+    cap = capsys.readouterr()
+    assert rc == wp.RC_OK, cap.err
+    assert _REFUSAL_REASON_END not in cap.err, cap.err
+    assert not plain.exists(), "the control removed nothing, so the contrast is vacuous"
 
 
 def test_the_zero_match_remedy_does_not_offer_a_flag_already_in_force(
@@ -2638,17 +2756,63 @@ def _flag_derivations(tree: ast.AST, src: str, owner: dict) -> list:
 
     🔴 WHAT THIS WALKER CANNOT DO — stated because a stronger sentence stood here
     for a round and a re-derivation walked straight past it, fully green, guard
-    and reader ledger included. RE-MEASURED here: delete the `If`/`While` arm
-    below and the same insertion goes green again (185 passed), which is what
-    makes that arm the killer and not something else. THE SET OF WAYS TO SPELL "INVERT
-    THIS FLAG" IS OPEN AND THIS KNOWS FIVE NODE KINDS. MEASURED against this
-    walker, one spelling per line, all INVISIBLE to it: `operator.not_(flag)`,
-    `flag ^ True`, `{True: False, False: True}[flag]`, `bool(1 - flag)`,
-    `flag.__eq__(False)` — and so is any helper that takes the flag and returns
-    the fact. (`next(iter([]) if flag else …)` is NOT in that list: it was, and
-    the same measurement showed the walker SEES it, via the `IfExp`. A docstring
-    claiming a blind spot the code does not have is the same defect as one
-    claiming coverage it does not have.)
+    and reader ledger included.
+
+    WHICH ARM IS THE KILLER, WITH THE RECIPE THAT ACTUALLY REPRODUCES. Round 7
+    wrote "delete the `If`/`While` arm below and the same insertion goes green
+    again (185 passed)" — which does NOT reproduce as written, because
+    `_CONTROL_HITS` still names `If` and `While` and the control then fails on
+    itself. A recipe that does not reproduce is a claim like any other, so all
+    four runs are given. Measured on a hermetic copy of tool + suite at 3.12.14,
+    with this file's own test count as N (186 at the time of writing; re-derive
+    it, do not trust the number):
+
+      * the statement-form insertion alone .... 1 failed, N-1 passed, and the
+        failure IS the branch ledger: `render_text: 3 != 2`. That is the killer.
+      * the `If`/`While` arm deleted alone .... 1 failed, N-1 passed — but in the
+        CONTROL's own assertion, `{'IfExp': 1, 'UnaryOp': 3, 'Compare': 2} !=
+        {…'If': 1, 'While': 1}`. Not the ledger.
+      * both together ......................... 1 failed, N-1 passed, still the
+        control. So "delete the arm and it goes green" is two steps short.
+      * both, PLUS `_CONTROL_HITS` reduced to the three expression kinds and
+        `_FLAG_BRANCHES` emptied ............... N passed. Only here is the
+        insertion invisible, which is what makes the arm the killer.
+
+    THE SET OF WAYS TO SPELL "INVERT THIS FLAG" IS OPEN AND THIS KNOWS FIVE NODE
+    KINDS. MEASURED against this walker, one spelling per line, all INVISIBLE to
+    it: `operator.not_(flag)`, `flag ^ True`, `{True: False, False: True}[flag]`,
+    `bool(1 - flag)`, `flag.__eq__(False)` — and so is any helper that takes the
+    flag and returns the fact. (`next(iter([]) if flag else …)` is NOT in that
+    list: it was, and the same measurement showed the walker SEES it, via the
+    `IfExp`. A docstring claiming a blind spot the code does not have is the same
+    defect as one claiming coverage it does not have.)
+
+    🔴 AND THE CHEAPEST WALK-PAST IS NOT A HELPER AND NOT AN EXOTIC OPERATOR — it
+    is a ONE-LINE LOCAL ALIAS, which is far likelier than any of the five above.
+    Three more, each measured the same way — appended after the real assignment
+    (so the reader ledger stays at 1, exactly like the round-7 statement-form
+    mutant), each recomputing the SAME value, so each is behaviourally inert:
+
+        included = summary.get("agent_worktrees_included")     # N passed
+        if included:                    # the `If` test is `Name`, not the flag,
+            free_to_drop = False        # so the branch ledger cannot see it
+        else:
+            free_to_drop = g == AGENT_WORKTREE_GLOB
+
+        match summary.get("agent_worktrees_included"):         # N passed
+            case True: ...                # `ast.Match` is not one of the five
+
+        free_to_drop = (g == AGENT_WORKTREE_GLOB               # N passed
+                        and summary.get("agent_worktrees_included") != 1)
+                        # `Compare` against a NON-bool constant: `isinstance(1,
+                        # bool)` is False, so the `Compare` arm `continue`s
+
+    POSITIVE CONTROL on that measurement, run identically: the `IfExp` spelling
+    `False if summary.get("agent_worktrees_included") else g == AGENT_WORKTREE_GLOB`
+    is 1 failed, N-1 passed, killed by
+    `test_the_agent_default_predicate_has_exactly_one_definition`. So the three
+    N-passed results are about the walker's blindness, not about a measurement
+    wired to nothing.
 
     So: this is a TRIPWIRE FOR THE LIKELY SPELLINGS — the ones rounds 4 and 5
     actually used, plus the statement form that beat round 6 — and NOT a proof
@@ -2722,7 +2886,12 @@ def test_the_agent_default_predicate_has_exactly_one_definition():
         (the dead line above it still reads the key, so that count never moves).
         MEASURED here: with the branch ledger in place the insertion is RED and
         the failure names `render_text: 3 != 2`; with the `If`/`While` arm of
-        `_flag_derivations` removed it is green again.
+        `_flag_derivations` removed AND both ledgers adjusted to match
+        (`_CONTROL_HITS` down to the three expression kinds, `_FLAG_BRANCHES`
+        emptied) it is green again. Removing the arm alone is red in the
+        CONTROL's own assertion, not in the ledger — the four runs are tabulated
+        in `_flag_derivations`, because the two-step version of this recipe does
+        not reproduce.
       * the READER LEDGER is asserted in BOTH directions, so a new consumer or a
         vanished one both fail.
     """

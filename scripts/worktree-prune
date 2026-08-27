@@ -1238,6 +1238,35 @@ def render_text(rows: "list[dict]", summary: dict, verbose: bool) -> str:
         # REFUSAL ELIGIBILITY; the glob list decides removals. Under-deleting, so
         # nothing was at risk, but a newly written false sentence about the run
         # printing it is the whole subject of this PR.
+        #
+        # 🟡 ROUND 8 — AND THE REFUSAL CANNOT DEPEND ON THE FLAG AT ALL, so the
+        # sentence that said it MIGHT was false and structurally could not be
+        # true. Round 7 replaced the `else` arm with "…though whether the same
+        # command line WITHOUT the flag also refuses depends on the other globs
+        # you typed". It does not. This branch is only reached when the flag was
+        # passed AND `AGENT_WORKTREE_GLOB` is a TYPED glob, and
+        # `resolve_exclude_globs` appends the constant only
+        # `if agent_glob_applied_by_default(...) and AGENT_WORKTREE_GLOB not in
+        # globs` — the second conjunct is already False here, so dropping the
+        # flag skips an append that would have been a no-op. Effective glob list,
+        # rows, per-glob counts, the `typed` set and
+        # `exclude_globs_blocking_execute` are all BIT-IDENTICAL.
+        #
+        # MEASURED, six command lines on a one-repo/one-dead-worktree fixture —
+        # {no second glob, a second glob that MATCHES, a second glob that is a
+        # DUD} x {flag, no flag}, each with `--execute --confirm 1`: rc 3 on all
+        # six, the `REFUSED: … matched ZERO of the 2 scanned row(s) …` reason
+        # byte-identical, the `--out` payload byte-identical once the two
+        # flag-derived summary keys are dropped, and the worktree still on disk
+        # on all six. The ONLY difference is the free-to-drop sentence, which
+        # appears without the flag because the constant really is auto-restored
+        # there. Pinned behaviourally by
+        # `test_dropping_the_flag_cannot_change_whether_the_run_refuses`, so this
+        # clause cannot silently become false again.
+        #
+        # The failure it caused: an operator hits the refusal, reads that
+        # dropping the flag MIGHT clear it, drops it, and refuses identically —
+        # while the sentence points at the one lever that does nothing.
         if not summary.get("worktrees"):
             differs = ("does NEITHER: this scan produced no rows at all, so nothing could "
                        "have matched, the zero says nothing about the glob, and --execute "
@@ -1250,8 +1279,8 @@ def render_text(rows: "list[dict]", summary: dict, verbose: bool) -> str:
                        "spare rows the bare default would have removed")
         else:
             differs = ("can REFUSE --execute on that glob, which the tool's own implied copy "
-                       "never could — though whether the same command line WITHOUT the flag "
-                       "also refuses depends on the other globs you typed")
+                       "never could — dropping the flag does not change that, because the glob "
+                       "is already in the list either way")
         lines.append(
             f"note: --include-agent-worktrees was passed, but {AGENT_WORKTREE_GLOB!r} is in "
             f"force anyway as a --exclude-path you typed — so agent worktrees are STILL "
