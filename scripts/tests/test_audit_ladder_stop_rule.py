@@ -48,8 +48,9 @@ Measured on `civitai/cli` #498 (session 4719a2f0, 2026-08-26): **10 rounds over
 output tokens**. The fix commits for **rounds 4-10 changed 1,051 lines of test
 code and ZERO lines of what the PR SHIPPED** -- the last such change was round
 3's `d2ec92d` (18 lines of `internal/appapi/appblocks.go`). **No round was ever
-clean**, so the stop rule was never once eligible to fire, and the session escalated to the operator at round 9 with its
-own diagnosis ("rounds 3-10 have all been about the guards, not the feature").
+clean**, so the stop rule was never once eligible to fire, and the session
+escalated to the operator at round 9 with its own diagnosis ("rounds 3-10 have
+all been about the guards, not the feature").
 
 Scale, measured the same day over `~/.claude/projects/**/*.jsonl` (numbered delta
 re-audit dispatches, `subagents/` excluded): **110 sessions, 440 rounds, 84 of
@@ -58,20 +59,29 @@ them in the preceding 14 days**; mean deepest round 4.0; 34% ran >= 5 rounds.
 So the gate is: two consecutive rounds whose FIXES changed zero PAYLOAD lines
 => the ladder has left the PR, stop. Payload = what the PR exists to ship, never
 a file type: keyed to "docs are not production" the gate reads zero for every
-round of a docs or skill PR and stops a working ladder (measured: 24 of devrc's
-last 40 merged PRs, this one included).
+round of a docs or skill PR and stops a working ladder. Measured 2026-08-26: of
+the 40 most recently merged devrc PRs, **25 shipped no source file at all** (17
+of those docs-only) -- this PR among them. That figure is dated because the list
+moves; an earlier `24` here came from a subagent's report and was written in
+without being re-derived.
 
 **Per-round, and the round's OWN commits** -- anchored at round 1 the count is
 non-zero forever once an early round touched payload (the first version of this
 rule shipped exactly that: on #498 it prints the same number for rounds 4-10 and
 never fires), while a plain two-dot `git diff` sweeps in whatever a `merge main`
 or a rebase brought with it and reads 200 upstream lines as this round's payload.
-Hence `git log --numstat --format= --no-merges --first-parent <sha>..HEAD`:
-measured, 1 line where the two-dot form reported 201.
+Hence `git log --numstat --format= --no-merges --first-parent <sha>..HEAD`.
+Measured on a purpose-built scratch repo -- one round whose only fix was a single
+line of `app_test.go`, then `git merge main` bringing 200 upstream lines of
+`other.go`: the two-dot form reports `1 + 200`, this form reports `1`. The flag
+has a cost of its own, stated in the skill: payload written INTO a merge conflict
+resolution is invisible to `--no-merges` (measured 0 where the two-dot form read
+340), so a round whose fix landed that way must count that merge explicitly.
 
 It is not a cap (it counts payload lines, never rounds; a round that touches
-payload never trips it however deep the ladder is) and it does not retract the retraction below -- #498 contains no
-round that ran and found nothing, which is the waste that retraction denies.
+payload never trips it however deep the ladder is) and it does not retract the
+retraction below -- #498 contains no round that ran and found nothing, which is
+the waste that retraction denies.
 Different axis: real findings about scaffolding the ladder itself had written.
 
 🔴 WHY THIS MODULE ALSO GUARDS THE COUNTER-EVIDENCE
@@ -133,9 +143,12 @@ rule rather than reformatting a paragraph.
    directions on ordinary names (`':!*test*'` excludes `pkg/attestation/` and
    `api/latest/`, `':!*spec*'` excludes `internal/inspector/`; both keep
    `FooTest.java` and `login.cy.ts` -- measured). Three constants now pin the
-   definition, the method and that counter-evidence, after five mutants that
+   definition, the method and that counter-evidence, after FOUR mutants that
    rewrote the method -- including one flipping "Ambiguous is not zero" to its
-   opposite -- passed a green 11-test suite with only the prohibition pinned.
+   opposite, and one reinstating the pathspec as the method with the 🔴 warning
+   left intact -- passed a green 11-test suite with only the prohibition pinned.
+   (A fifth survivor of that same run, Z8, belongs to the evidence family and is
+   caught by `EVIDENCE_BASELINE_ROW`, not by these three.)
    What remains unenforceable: whether a given round's files were named
    CORRECTLY. Nothing mechanical can answer that, which is why the residual
    error is aimed at the safe side (ambiguous => the gate does not fire).
@@ -205,7 +218,7 @@ recorded as SURVIVED off an 11-passed run.
   POS  unmutated copy ......................... 11 passed  <- harness control
   BASE origin/main's SKILL.md, reference file
        absent (i.e. pre-change) ............... 6 failed, 5 passed
-  PREV the round-1 tip `ed38490b` ............. 4 failed, 7 passed  <- the tree
+  PREV the round-1 tip `ed38490b` ............. 5 failed, 6 passed  <- the tree
                                                 the second audit read; these are
                                                 the pins added after it
 
@@ -225,6 +238,23 @@ recorded as SURVIVED off an 11-passed run.
   Y4   evidence truncated to 1,400 B (passed
        under the old 1,000 B floor) ........... 2 failed
   Z9   churn row reverted to the stale 1,002 .. 1 failed
+
+  added after the third audit:
+  W1   heading reverted to "no PRODUCTION code" .. 2 failed  <- the heading was
+                                                  the one sentence the payload
+                                                  fix missed, and it was PINNED,
+                                                  so the pin held the
+                                                  contradiction in place
+  W2   dated measurement -> vague "many" ....... 1 failed
+  W3   "`--no-merges` has one cost" -> "has no
+       cost" .................................. 1 failed  <- SURVIVED until the
+                                                  blind spot was pinned
+  W4   evidence truncated to exactly the
+       1,500 B floor .......................... 1 failed  <- the FLOOR passes;
+                                                  the pin's message now names
+                                                  the file size, which is what
+                                                  separates truncated from
+                                                  reworded at any size
 
   the round-1 set, re-run against current strings:
   X3   gate command -> `echo 0` ............... 1 failed
@@ -343,13 +373,13 @@ ARCHIVE_RETRACTION = (
 # --------------------------------------------------------------------------- #
 
 SKILL_ATTRIBUTION_HEADING = (
-    "### 🔴 ATTRIBUTION: a round that changes no PRODUCTION code is auditing "
-    "the LADDER, not the PR"
+    "### 🔴 ATTRIBUTION: a round that changes no PAYLOAD is auditing the "
+    "LADDER, not the PR"
 )
 
 # The gate itself. Pinned whole because every number in it is load-bearing: TWO
 # consecutive rounds (one is noise -- a round can legitimately fix only a guard),
-# ZERO production lines (not "few"), and the action is STOP rather than "consider
+# ZERO payload lines (not "few"), and the action is STOP rather than "consider
 # stopping".
 SKILL_ATTRIBUTION_GATE = (
     "**Two consecutive rounds whose fixes changed zero payload lines ⇒ the "
@@ -402,6 +432,27 @@ SKILL_PAYLOAD_DEFINITION = (
     "what the PR exists to ship; scaffolding = the tests, fixtures and notes a "
     "round wrote to guard it. For a code change the payload is source and a "
     "`.md` is not — but **for a docs or skill PR the payload IS the `.md`**"
+)
+# 🔴 The measurement the payload definition rests on, pinned WITH its date --
+# the PR list moves as PRs merge, so this is a timestamped measurement and not a
+# constant. It was `24` for one commit, carried over from a subagent's report
+# without being re-derived; re-measured here at 25/40 on 2026-08-26. Method in
+# the reference file.
+# 🔴 The flag's OWN blind spot, pinned because disclaiming it is the cheap edit.
+# `--no-merges` is what keeps a `merge main` from being counted as this round's
+# payload -- and it also makes payload hand-written INTO a merge conflict
+# resolution invisible (measured: 0, where the two-dot form read 340). That is
+# the UNSAFE direction: the gate reads zero on a round that did change payload.
+# Measured: rewriting "has one cost" to "has no cost" left the suite green.
+SKILL_NO_MERGES_COST = (
+    "**`--no-merges` has one cost**: payload hand-written into a merge "
+    "*conflict resolution* is invisible to it (measured: 0 where the old form "
+    "read 340), so if a round's fix landed that way, count that merge "
+    "explicitly with `git show --numstat <merge>`."
+)
+SKILL_PAYLOAD_MEASUREMENT = (
+    "on 2026-08-26 **25 of devrc's 40 most recently merged PRs shipped no "
+    "source at all**"
 )
 SKILL_CLASSIFIER_METHOD = (
     "A round's fix touches a handful of files — read the list and name each one "
@@ -489,9 +540,17 @@ def _read(path: Path) -> str:
 def _assert_pinned_once(path: Path, claim: str, what: str) -> None:
     body = _norm(_read(path))
     count = body.count(_norm(claim))
+    # 🔴 The size goes in the MESSAGE, not only in a floor. A byte floor can
+    # only ever sit below the LAST string it guards -- measured: a 1,500 B floor
+    # passed a truncation that had already eaten the first pinned row at byte
+    # 1,433, and any floor under 3,532 leaves a hole -- so the floor cannot be
+    # the thing that distinguishes "reworded" from "truncated". Reporting the
+    # file's actual size here does distinguish them, at every size, forever.
+    size = len(path.read_bytes())
     assert count == 1, (
         f"\n\n{path.relative_to(REPO_ROOT)}: {what} is not present exactly once "
-        f"as written (found {count}).\n"
+        f"as written (found {count}). The file is {size:,} B -- if that is far "
+        "short of what it should hold, this is a TRUNCATION, not a reword.\n"
         f"  Expected verbatim (whitespace-normalised):\n    {_norm(claim)}\n\n"
         "  This is a WHOLE-STRING pin because the artifact is prose and a "
         "keyword guard is walkable by rewording (claude/RULES.md, "
@@ -533,11 +592,15 @@ def test_the_guarded_files_exist_and_are_substantial():
         # exactly once as written (found 0)" and told the reader they had
         # REWORDED a sentence in a file that was empty.
         #
-        # 🔴 1,500, not 1,000: the first pinned string in this file starts at
-        # byte ~1,400, so a 1,000 B floor PASSES on a truncation that already
-        # ate it -- the misleading message the floor exists to prevent, from
-        # the guard meant to prevent it. A floor below the first thing it
-        # guards is not a floor.
+        # 🔴 The floor is a SANITY check, not the truncation guard. Measured:
+        # this file's first pinned string spans bytes 1,433-1,501 and its last
+        # ends at 3,532, so a 1,500 B floor still passes a truncation that ate
+        # the first one, and every floor under 3,532 leaves some hole -- chasing
+        # the number is the wrong fix, because the floor can never sit above a
+        # string that has not been written yet. `_assert_pinned_once` now
+        # reports the file's size in its own failure message, which separates
+        # "reworded" from "truncated" at any size. This floor only has to
+        # separate "the document" from "a stub".
         (EVIDENCE_MD, 1_500),
     ):
         assert path.is_file(), (
@@ -634,7 +697,7 @@ def test_the_attribution_gate_comes_after_the_rule_it_bounds():
 
     Order carries meaning here: the attribution gate BOUNDS the findings-keyed
     stop rule, it does not replace it. A reader who meets it first meets "stop
-    when the fixes stop touching production code" with no "keep going while
+    when the fixes stop touching payload" with no "keep going while
     rounds keep finding things" in view -- which is the one-audit-is-enough
     failure `audit-fix-resets-gate` exists to prevent.
 
@@ -654,7 +717,7 @@ def test_the_attribution_gate_comes_after_the_rule_it_bounds():
         "\n\nclaude/skills/audit-pr/SKILL.md: the ATTRIBUTION gate now precedes "
         "the clean-round stop rule.\n"
         "  The gate bounds that rule; it does not replace it. Read first, it "
-        "says 'stop when the fixes stop touching production code' with no "
+        "says 'stop when the fixes stop touching payload' with no "
         "'keep going while rounds keep finding things' in view -- and a single "
         "audit round is how a completely inert feature shipped past 428 green "
         "tests (claude/RULES-ARCHIVE.md, audit-fix-resets-gate).\n"
@@ -726,6 +789,12 @@ def test_the_gate_pins_its_MECHANISM_not_only_its_decision():
         SKILL_MD, SKILL_CLASSIFIER_METHOD, "the classifier METHOD"
     )
     _assert_pinned_once(
+        SKILL_MD, SKILL_PAYLOAD_MEASUREMENT, "the dated payload measurement"
+    )
+    _assert_pinned_once(
+        SKILL_MD, SKILL_NO_MERGES_COST, "the --no-merges blind spot"
+    )
+    _assert_pinned_once(
         SKILL_MD, SKILL_GATE_NO_PATHSPEC, "the pathspec counter-evidence"
     )
 
@@ -733,11 +802,14 @@ def test_the_gate_pins_its_MECHANISM_not_only_its_decision():
 def test_the_two_operator_instructions_the_gate_depends_on_are_pinned():
     """The ledger and the finding labels, each of which survived deletion.
 
-    Neither is decorative. The ledger is what makes the gate's answer VISIBLE in
-    a summary (its cumulative X unchanged across two rounds is the same
-    condition the gate tests); the `behaviour`/`guard` labels are what let a
-    reader see that a round's findings were all about scaffolding. Measured:
-    deleting either left all 9 tests green before these pins.
+    Neither is decorative. The ledger's X IS the number the gate reads -- it
+    carries the per-round count into the summary a human actually sees, which is
+    what turns the gate from a command someone must remember to run into a field
+    they would notice missing. (An earlier format carried only the cumulative
+    figure; that is the quantity the gate cannot consume.) The `behaviour`/
+    `guard` labels are what let a reader see that a round's findings were all
+    about scaffolding. Measured: deleting either left all 9 tests green before
+    these pins.
     """
     _assert_pinned_once(SKILL_MD, SKILL_LEDGER, "the per-round ledger")
     _assert_pinned_once(SKILL_MD, SKILL_FINDING_LABELS, "the finding labels")

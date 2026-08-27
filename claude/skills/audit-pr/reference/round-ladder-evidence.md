@@ -8,8 +8,8 @@ and nothing here decides whether one applies. Dated, because each is a measureme
 
 ## 2026-08-26 · `civitai/cli` #498 — ten rounds, and the axis the stop rule cannot see
 
-The measurement behind **ATTRIBUTION: a round that changes no PRODUCTION code is auditing the
-LADDER, not the PR**. Session `4719a2f0`, `feat/whoami-json-profile-fields`.
+The measurement behind **ATTRIBUTION: a round that changes no PAYLOAD is auditing the LADDER, not
+the PR**. Session `4719a2f0`, `feat/whoami-json-profile-fields`.
 
 | | |
 |---|---|
@@ -17,14 +17,14 @@ LADDER, not the PR**. Session `4719a2f0`, `feat/whoami-json-profile-fields`.
 | elapsed | 5 h 32 m |
 | share of session | 1,312 of 1,756 transcript rows (75%) |
 | main-thread output tokens | 321k of 419k (77%); 100M of 115M cache reads |
-| after the last production change | 171k output tokens, 4 h 10 m |
+| after the last source change | 171k output tokens, 4 h 10 m |
 | rounds that returned CLEAN | **zero** |
 
 Churn attribution, from the branch's own fix commits. **Method, because the classifier decides the
 answer**: `git show --numstat <sha>`, summing `additions + deletions`, each path classed by an
 explicit rule — TEST if a path component is `test(s)`/`spec(s)`/`e2e`/`testdata`/`__tests__`/
 `cypress` or the filename matches `*_test.*` / `*.{test,spec,cy}.*` / `*Test.*`; DOC if `*.md`/
-`*.txt`/`*.rst` or under `doc(s)/`; PRODUCTION otherwise.
+`*.txt`/`*.rst` or under `doc(s)/`; SOURCE otherwise.
 
 | rounds | test | doc | source |
 |---|---|---|---|
@@ -39,7 +39,7 @@ test lines) landed after the first snapshot and was never re-counted. **The less
 a number re-derived from a moving branch is a measurement with a timestamp, not a constant, and
 "which column does a `.md` belong in" is the same question the gate itself turns on.
 
-The last production change was round 3's `d2ec92d` — **18 lines of `internal/appapi/appblocks.go`**
+The last source change was round 3's `d2ec92d` — **18 lines of `internal/appapi/appblocks.go`**
 (a fifth render path, structurally unreachable from the golden table: a real find). Rounds 4–10 each
 found something real too; all of it concerned guards that an earlier round of the same ladder had
 written.
@@ -98,6 +98,22 @@ counts*.
 
 ---
 
+## 2026-08-26 · what a devrc PR actually ships — why the unit is PAYLOAD, not file type
+
+The measurement behind **"the unit is THIS PR's PAYLOAD, never a file extension"**. Same classifier
+as the table above, applied to each PR's file list from `gh pr view <n> --json files`:
+
+> Of the **40 most recently merged** `innovation-upstream/devrc` PRs, **25 shipped no SOURCE file at
+> all** — 17 of those were docs-only, the rest docs plus tests.
+
+So a gate keyed to "docs are not production" reads zero payload for every round of well over half
+this repo's PRs and stops a ladder that is working. 🔴 **The list moves as PRs merge** — this figure
+is dated for that reason, and an earlier version of it (`24`) was carried over from a subagent's
+report without being re-derived, which is the same mistake the churn table above records three
+times. Re-derive before quoting; the script is six lines of `gh` plus the classifier.
+
+---
+
 ## Mutation variants that delete NOTHING
 
 Behind **"deletion-mutants are the EASY half"**. Across one PR, four semantically broken variants
@@ -110,10 +126,10 @@ that delete nothing all passed a suite its author had just "mutation-verified":
   looking for it still matches;
 - **re-bind a stale value** — literally the original defect, reintroduced.
 
-**Enumerate mutants from the expression's semantic failure modes** — operand order, branch order,
-comment-out, wrong bind, off-by-one — not from "delete the thing I was already thinking about". The
-`{}` fixture that hid one of these made "bind just the patch" and "rebind the whole stale snapshot"
-byte-identical.
+What would have caught all four: enumerating mutants from the expression's own semantic failure
+modes — operand order, branch order, comment-out, wrong bind, off-by-one — rather than from "delete
+the thing I was already thinking about". The `{}` fixture that hid one of them made "bind just the
+patch" and "rebind the whole stale snapshot" byte-identical.
 
 ---
 

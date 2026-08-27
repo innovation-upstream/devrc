@@ -7,7 +7,7 @@ allowed-tools: Bash, Read, Grep, Glob, Agent
 
 # /audit-pr — adversarial PR audit
 
-Every case history and number below is sourced in
+Every measurement below is dated and sourced in
 `~/.claude/skills/audit-pr/reference/round-ladder-evidence.md`.
 
 Target: `$ARGUMENTS`. Resolve it:
@@ -43,8 +43,8 @@ mutate code, leave your worktree untouched, and verify it clean at the end.
 
 ## After the fixes: RE-AUDIT THE DELTA (don't assume closure)
 
-**A fix round frequently introduces the next finding.** One `civitai-manager` feature took **five
-rounds**, each caused by the previous fix, and **none of them caught by the mechanical gate**.
+**A fix round frequently introduces the next finding** — one feature took **five rounds**, each
+caused by the previous fix, none caught by the mechanical gate.
 
 So once an audit's findings are fixed, dispatch a **delta re-audit** — diff the fix commits against
 the **previously-audited tip** (`git diff <audited-sha>..HEAD`), not the whole PR again. Especially
@@ -56,8 +56,8 @@ Ask the re-auditor to:
   strict, the new branch that's unreachable, the narrowed type check that now rejects a legitimate
   case);
 - **label every finding `behaviour` or `guard`, and separate shipped behaviour from scaffolding.**
-  Tests an earlier round of this same ladder wrote are in its diff *by construction*; report on them
-  only where the defect would let a real behaviour regression through;
+  Tests an earlier round wrote are in its diff *by construction*; report on them only where the
+  defect would let a real regression through;
 - treat "the author says it's fixed" as a claim to verify against the diff.
 
 **Carry the ledger in every round's summary**: `round N · payload lines changed THIS round: X (since
@@ -89,11 +89,10 @@ both. Keep going while rounds keep finding things — `claude/RULES.md` still sa
 several — and stop the moment one does not.
 
 **When a round's fix is mostly renumbering your own prose, fix the FORM, not the number.** Number
-the list and tell the reader to count it; a total maintained in parallel with the thing it counts
-will drift.
+the list and tell the reader to count it; a total kept in parallel with what it counts will drift.
 
 **Say the stop rule to the re-auditor explicitly** ("a clean round is the stop condition; do not
-invent findings to justify the round") — otherwise late rounds manufacture nits to look productive.
+invent findings to justify the round") — otherwise late rounds manufacture nits.
 
 🔴 **A FRAMED AUDIT VERIFIES THE FRAME. When a PR has already been audited, dispatch the next one
 BLIND** — give it the diff and the checklist, *not* your conclusions or the prior findings' answers.
@@ -101,13 +100,12 @@ Three successive framed audits **confirmed** a claim; one blind audit refuted it
 For a delta re-audit you must name the prior findings (that is the point), so keep the framing to
 *what was claimed fixed* — never *why it is correct*.
 
-### 🔴 ATTRIBUTION: a round that changes no PRODUCTION code is auditing the LADDER, not the PR
+### 🔴 ATTRIBUTION: a round that changes no PAYLOAD is auditing the LADDER, not the PR
 
 A fix round writes new guards and the next delta round diffs them, so **the ladder manufactures its
 own next round's findings** and the stop rule above, keyed to findings, can never fire. Measured on
-`civitai/cli` #498 (2026-08-26): **ten rounds, 5 h 32 m, 77% of the session's output tokens; rounds
-4–10 changed 1,051 lines of test code and ZERO lines of the thing the PR shipped.** No round was
-ever clean.
+`civitai/cli` #498: **ten rounds, 5 h 32 m, 77% of the session's output tokens; rounds 4–10 changed
+1,051 test lines and ZERO payload lines.** No round was ever clean.
 
 So gate on what each round CHANGES, not on what it finds. After a round's fixes land, count the
 payload lines **that round** changed:
@@ -118,9 +116,9 @@ git log --numstat --format= --no-merges --first-parent <the sha you audited THAT
 
 🔴 **The unit is THIS PR's PAYLOAD, never a file extension.** Payload = what the PR exists to ship;
 scaffolding = the tests, fixtures and notes a round wrote to guard it. For a code change the payload
-is source and a `.md` is not — but **for a docs or skill PR the payload IS the `.md`**, and 24 of
-devrc's last 40 merged PRs ship no source at all, so a rule keyed to file type reads every round of
-those as zero and stops a ladder that is working. Nor will a pathspec do it: `':!*test*'` swallows
+is source and a `.md` is not — but **for a docs or skill PR the payload IS the `.md`**, and on 2026-08-26 **25 of
+devrc's 40 most recently merged PRs shipped no source at all**, so a rule keyed to file type reads
+every round of those as zero and stops a ladder that is working. Nor will a pathspec do it: `':!*test*'` swallows
 `attestation/` and `latest/`, `':!*spec*'` swallows `inspector/`, and both keep `FooTest.java` and
 `*.cy.ts` (measured). A round's fix touches a handful of files — read the list and name each one
 payload or scaffolding. **Ambiguous is not zero**: the gate does not fire, and the ladder continues.
@@ -129,8 +127,10 @@ payload or scaffolding. **Ambiguous is not zero**: the gate does not fire, and t
 once an early round touched payload — on #498 that prints the same number for rounds 4 through 10
 and never fires. A plain two-dot `git diff` breaks the other way: after a `merge main` or a rebase
 it sweeps upstream lines in as payload, so a scaffolding-only round scores non-zero and the counter
-resets. Hence `--first-parent --no-merges` above; if the branch was rebased mid-round, re-anchor on
-the new sha rather than trusting the old one.
+resets. Hence `--first-parent --no-merges` above; if the branch was rebased mid-round, re-anchor on the
+new sha. **`--no-merges` has one cost**: payload hand-written into a merge *conflict resolution* is
+invisible to it (measured: 0 where the old form read 340), so if a round's fix landed that way,
+count that merge explicitly with `git show --numstat <merge>`.
 
 **Two consecutive rounds whose fixes changed zero payload lines ⇒ the ladder has left the PR.
 Stop.** File the remaining scaffolding findings as one follow-up task naming the file, closed when
@@ -156,10 +156,9 @@ RESETS the gate** (`claude/RULES.md`): re-run the FULL battery after every round
 
 ## Price a defect from the CONSUMING code, not the producing site
 
-**Verifying that a value is USED is not verifying what its ABSENCE costs.** Read the code that
-consumes it before repeating any consequence an audit asserts, especially a costed one (worked
-example in the reference file). Sanity-check the frequency side too — "routine" and "rare" are
-asserted far more often than measured.
+**Verifying that a value is USED is not verifying what its ABSENCE costs.** Read the consuming
+code before repeating any costed consequence an audit asserts. Sanity-check the frequency side too —
+"routine" and "rare" are asserted far more often than measured.
 
 **A finding about the PR *description* gets corrected PUBLICLY.** If the audit shows the PR body
 misstates what the change does, post a **PR comment** saying so rather than silently editing the
@@ -167,7 +166,7 @@ body — a reviewer may already have read (and believed) the wrong version.
 
 ## Output
 
-Findings grouped by severity (🔴 deploy-blocking / 🟡 should-fix / 🟢 nit), each with file:line, a
-`behaviour`/`guard` label, and a one-line "why it matters". Then the round ledger, then a clear
+Findings by severity (🔴 deploy-blocking / 🟡 should-fix / 🟢 nit), each with file:line, a
+`behaviour`/`guard` label and a one-line "why it matters". Then the round ledger, then a clear
 **verdict**: safe to merge / merge after fixing 🔴 / needs rework — advisory for the human, never
-the ladder's stop signal. No marketing language; flag uncertainty. Do not merge — report only.
+the ladder's stop signal. Flag uncertainty. Do not merge — report only.
