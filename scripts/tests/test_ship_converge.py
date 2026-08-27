@@ -1360,13 +1360,25 @@ def test_a_repo_with_no_flake_at_all_says_it_could_not_look(nixrepo):
 # coherent request ("count them, name none") rather than something to sanitise
 # away — so it is honoured rather than silently replaced.
 # --------------------------------------------------------------------------- #
-_LISTED = re.compile(r"^\[[^\]]*\]     - (\S+)$", re.M)
+# 🔴 SCOPED TO THE FIXTURE'S OWN SUBTREE, NOT TO THE PREFIX. `[host]     - ` is
+# emitted by EIGHT producers in ship.sh (blockers, managed-artifact rows, the
+# gcroots pair, the manifest and conflicted lists, …) and `nr_list` is only one
+# of them. Counting the prefix binds today purely because the other seven are
+# silent in these fixtures — so a mutant that silenced `nr_list` while any other
+# listing happened to emit exactly N rows would SURVIVE. `charlie-dir/` is
+# written only by _seed_dropped, so matching it makes the count structural
+# instead of positional.
+_LISTED = re.compile(r"^\[[^\]]*\]     - (charlie-dir/\S+)$", re.M)
 
 
 def _seed_dropped(tree, n, prefix="lima"):
     """`n` untracked files under the DIRECTORY store source — one bucket
     (DROPPED), names pairwise distinct, and `n` deliberately not a multiple of
-    any cap this file passes in."""
+    any cap this file passes in.
+
+    Everything lands under `charlie-dir/`, which is what lets `_LISTED` tell
+    `nr_list`'s output from the seven other producers of the same prefix.
+    """
     d = tree / "charlie-dir" / "nested"
     d.mkdir(parents=True, exist_ok=True)
     for i in range(n):

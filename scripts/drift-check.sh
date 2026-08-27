@@ -613,9 +613,14 @@ DRIFT_NIXDIRT_ESCALATE="${DRIFT_NIXDIRT_ESCALATE:-12}"
 # created per (host, path) that gets emitted, so ten new paths per run still
 # accrete ten new files per run — the cap stops one run from creating a thousand,
 # it does not stop a host's state dir growing monotonically over its lifetime.
-# Nothing prunes DRIFT_STATE_DIR today; the files are a few bytes each and
-# n_streak_reset unlinks one the moment its path stops being reported, which is
-# the only reclamation there is.
+# 🔴 NOTHING RECLAIMS THEM, AND n_streak_reset IS NOT AN EXCEPTION: it REWRITES
+# the counter to `CLEARED 0` and never unlinks it — see its own header, which
+# explains that `rm` is a destructive command to the passivity scanner guarding
+# this file, so a read-only deadman may not delete. So the file count only ever
+# grows; the files are a few bytes each and that was judged the better trade.
+# An earlier revision of this very comment claimed the unlink happens. It does
+# not, and acting on that claim means adding the one command this file is
+# designed to refuse.
 #
 # 🔴 AND IT IS THE ONLY CAP IN THIS FILE THAT COULD CHANGE A VERDICT, which is
 # why it alone is floored at 1. See the require_positive_int call below.
@@ -631,10 +636,57 @@ DRIFT_SRC_FETCH_TIMEOUT="${DRIFT_SRC_FETCH_TIMEOUT:-30}"
 # hence low exploitability — but it is a passivity hole on the far side of the
 # ssh hop, which the static scanner structurally cannot see. Validate here; the
 # printf below ALSO uses %q, deliberately belt-and-braces.
-require_int() { # require_int <name> <value>
+#
+# 🔴 ASSERT THE VALUE, NEVER ITS SPELLING — and PROVE the range rather than
+# testing for its complement. Three measured traps, each of which produced a
+# guard that READ as watertight and was not:
+#
+#   * `case "$2" in 0) reject ;; esac` is a SPELLING check. `00`, `000` and
+#     `007` are all-digits and NONE of them matches the glob `0`, so they walked
+#     straight past a floor whose entire purpose was to be unwalkable. Measured
+#     here: DRIFT_NIXDIRT_MAX=00 over three untracked nix-read files gave
+#     [0,0,0,0] where the default gives [0,0,23,23] — rc 23 switched off by an
+#     env var, with the journal still honestly printing `hits=3 listed=0`, so
+#     only the exit code lied. Second instance of this exact defect in one
+#     night; PR #854 had it too.
+#   * `[ "$2" -gt "$CEILING" ]` does NOT answer "no" for a value bash cannot
+#     parse — it ERRORS and the `if` then takes the FALSE branch. So a guard
+#     written as "reject when too big" waves the too-big value through.
+#     Measured: `[ 99999999999999999999 -gt 100000 ]` prints "integer expected"
+#     and is FALSE. Requiring the POSITIVE assertion inverts that: a value this
+#     shell cannot compare cannot prove itself in range, so it is refused.
+#   * the same unparseable value reaching a LADDER disables a verdict rather
+#     than merely mis-formatting a list, which is why require_int is bounded too
+#     and not only require_positive_int: `[ "$STK" -ge "$THR" ]` with a >2^63
+#     THR errors, evaluates FALSE, and the ladder goes quiet forever while the
+#     run reports no drift. Measured with STK=5, THR=99999999999999999999.
+#
+# The ceiling sits far above any real fleet — two hosts, a handful of untracked
+# paths, ladders measured in runs per day. Above it a tunable has stopped
+# bounding anything and the value is far likelier a typo than an intent.
+DRIFT_INT_CEILING=100000
+
+require_int() { # require_int <name> <value> — 0..DRIFT_INT_CEILING inclusive
   case "$2" in
     ''|*[!0-9]*) echo "drift-check: $1 must be a non-negative integer, got: $2" >&2; exit 2 ;;
+    # The ONE legal spelling of zero. No-op, so it falls through to the range
+    # proof below. (Its own line, not a trailing comment: a `;` inside a trailing
+    # comment starts a new segment for the command-word scanner in
+    # test_drift_check.py, and the next word reads as a command.)
+    0) ;;
+    0*) echo "drift-check: $1 must not have a leading zero, got: $2" >&2
+        echo "  A leading zero makes the SPELLING and the VALUE disagree, which is exactly" >&2
+        echo "  how a guard written against the spelling gets walked past. Write it plain." >&2
+        exit 2 ;;
   esac
+  if [ "$2" -ge 0 ] 2>/dev/null && [ "$2" -le "$DRIFT_INT_CEILING" ] 2>/dev/null; then
+    return 0
+  fi
+  echo "drift-check: $1 must be between 0 and $DRIFT_INT_CEILING, got: $2" >&2
+  echo "  A value this shell cannot COMPARE is refused, never accepted: a >2^63 operand" >&2
+  echo "  turns '[ x -ge y ]' into an error that evaluates FALSE, so every ladder and cap" >&2
+  echo "  it feeds goes quiet and the run reports no drift." >&2
+  exit 2
 }
 # 🔴 ZERO IS NOT A HARMLESS BOUND WHEN THE BOUND FEEDS A VERDICT. require_int
 # accepts 0, which is right for every pure LISTING cap here — DRIFT_UNTRACKED_MAX
@@ -646,7 +698,7 @@ require_int() { # require_int <name> <value>
 # rc 23 silently switched off from an env var, with the summary still printing a
 # clean-looking `hits=0` beside a real non-zero denominator. So this one has a
 # FLOOR, and the floor is stated in the message rather than left to be inferred.
-require_positive_int() { # require_positive_int <name> <value>
+require_positive_int() { # require_positive_int <name> <value> — 1..DRIFT_INT_CEILING
   case "$2" in
     ''|*[!0-9]*) echo "drift-check: $1 must be an integer >= 1, got: $2" >&2; exit 2 ;;
     0) echo "drift-check: $1 must be an integer >= 1, got: 0" >&2
@@ -654,7 +706,20 @@ require_positive_int() { # require_positive_int <name> <value>
        echo "  no streak is bumped and nothing escalates, while the summary still prints" >&2
        echo "  hits=<n> over a real denominator. That is a verdict turned off by a cap." >&2
        exit 2 ;;
+    0*) echo "drift-check: $1 must not have a leading zero, got: $2" >&2
+        echo "  The SPELLING and the VALUE disagree: '00' is zero, which this tunable" >&2
+        echo "  refuses outright, and '007' is seven. Measured — '00' walked past the '0'" >&2
+        echo "  arm and disabled rc 23. Write it plain." >&2
+        exit 2 ;;
   esac
+  if [ "$2" -ge 1 ] 2>/dev/null && [ "$2" -le "$DRIFT_INT_CEILING" ] 2>/dev/null; then
+    return 0
+  fi
+  echo "drift-check: $1 must be between 1 and $DRIFT_INT_CEILING, got: $2" >&2
+  echo "  A value this shell cannot COMPARE is refused, never accepted: with a >2^63" >&2
+  echo "  operand '[ \$NU_EMIT -lt \$NU_MAX ]' errors and evaluates FALSE, so NO path is" >&2
+  echo "  ever enumerated and rc 23 is switched off exactly as a cap of 0 would." >&2
+  exit 2
 }
 require_int DRIFT_UNTRACKED_MAX "$DRIFT_UNTRACKED_MAX"
 require_int DRIFT_DANGLING_MAX "$DRIFT_DANGLING_MAX"

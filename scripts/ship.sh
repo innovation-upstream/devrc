@@ -406,6 +406,16 @@ SHIP_NO_SWITCH="${SHIP_NO_SWITCH:-0}"
 # where it was, inside CONVERGE, because that is the copy that RUNS on each host
 # — a second one out here would be the duplicated-predicate shape RULES.md says
 # is wrong at N-1 sites.
+#
+# ⚠ THIS LINE AND THE LOCAL LEG'S `SHIP_LIST_MAX=` PREFIX ARE CURRENTLY
+# REDUNDANT, and a mutation sweep proved it: deleting either one changes nothing
+# a test can see. An operator-set value is already exported and reaches
+# `bash -c "$CONVERGE"` by inheritance; an unset one lands on CONVERGE's own
+# `${SHIP_LIST_MAX:-10}`. They are kept because they make the value EXPLICIT at
+# both legs rather than inherited at one and forwarded at the other — but do not
+# read them as load-bearing, and do not "prove" them with a test that cannot
+# fail. The REMOTE printf below is the one that carries real weight: ssh does
+# not forward the environment, so without it the two legs genuinely diverge.
 SHIP_LIST_MAX="${SHIP_LIST_MAX:-10}"
 DO_LOCAL=1
 DO_REMOTE=1

@@ -5825,6 +5825,216 @@ def test_a_non_integer_DRIFT_NIXDIRT_MAX_is_still_refused(fleet):
     assert "DRIFT_NIXDIRT_MAX must be an integer >= 1, got: ten" in out, out
 
 
+# --------------------------------------------------------------------------- #
+# THE FLOOR MUST BE A VALUE GUARD, NOT A SPELLING GUARD
+#
+# 🔴 THE FIRST VERSION OF THIS FLOOR WAS WALKABLE, and this is the SECOND
+# instance of the identical defect in one night (PR #854 had `''|*[!0-9]*|0)`
+# accepting `00`/`007`). `case "$2" in 0) reject ;; esac` matches the glob `0`
+# and nothing else, so `00` and `000` are all-digits, miss both arms, and sail
+# through — after which `[ "$NU_EMIT" -lt 00 ]` is false and NO path is ever
+# enumerated. MEASURED on the pre-fix head, 3 untracked nix-read files,
+# DRIFT_NIXDIRT_ESCALATE=3, four consecutive runs:
+#
+#     DRIFT_NIXDIRT_MAX=10 (default)      -> [0, 0, 23, 23]   <- control
+#     DRIFT_NIXDIRT_MAX=00                -> [0, 0,  0,  0]
+#     DRIFT_NIXDIRT_MAX=000               -> [0, 0,  0,  0]
+#     DRIFT_NIXDIRT_MAX=99999999999999999999 -> [0, 0, 0, 0]
+#
+# 🔴 The oversized case is NOT caught by an upper-bound test, and that is the
+# subtle half. `[ 99999999999999999999 -gt 100000 ]` does not answer "yes" — it
+# ERRORS and evaluates FALSE, so a guard written as "reject when too big" waves
+# the too-big value through. The guard therefore PROVES the value is in range
+# (`-ge 1` AND `-le CEILING`, both required to succeed) instead of testing for
+# the complement: a value the shell cannot compare cannot prove itself, and is
+# refused. These tests pin the VALUE behaviour, so a future rewrite that goes
+# back to matching spellings fails here rather than in production.
+#
+# Reachable by following the tool's OWN advice ("raise DRIFT_NIXDIRT_MAX to see
+# them all") to an absurd degree, which is why the huge value is a real case and
+# not a hypothetical.
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("spelling", ["00", "000", "0000000"])
+def test_a_PADDED_zero_is_refused_like_a_bare_zero(fleet, spelling):
+    """RED AT 12d4c01d: all-digits, matches neither arm, accepted — and rc 23
+    goes silent. The message names the leading zero rather than pretending the
+    value was not a number, because it WAS a number: it was zero."""
+    fleet.seed_nix_read()
+    _seed_many(fleet, 3, prefix="papa")
+    rc, out = fleet.check("--no-remote", DRIFT_NIXDIRT_ESCALATE="3",
+                          DRIFT_NIXDIRT_MAX=spelling)
+    assert rc == 2, (
+        "DRIFT_NIXDIRT_MAX=%s was accepted; rc 23 is switched off by spelling\n%s"
+        % (spelling, out))
+    assert "DRIFT_NIXDIRT_MAX must not have a leading zero" in out, out
+
+
+def test_a_padded_zero_does_not_reach_the_LADDER_at_all(fleet):
+    """🔴 THE CONSEQUENCE, asserted as behaviour beside the message above.
+
+    A test that only checked the wording would pass against a guard that printed
+    a warning and carried on. This is the ladder itself: four consecutive runs
+    over three genuinely untracked nix-read files must NOT be the all-zero shape
+    the default refuses. Both sequences are named so neither can be hardcoded.
+    """
+    fleet.seed_nix_read()
+    _seed_many(fleet, 3, prefix="quebec")
+
+    control = []
+    for _ in range(4):
+        rc, out = fleet.check("--no-remote", DRIFT_NIXDIRT_ESCALATE="3")
+        control.append(rc)
+    assert control == [0, 0, 23, 23], f"the control ladder is wrong: {control}\n{out}"
+
+    walked = []
+    for _ in range(4):
+        rc, out = fleet.check("--no-remote", DRIFT_NIXDIRT_ESCALATE="3",
+                              DRIFT_NIXDIRT_MAX="00")
+        walked.append(rc)
+    assert walked == [2, 2, 2, 2], (
+        "a padded zero produced %r; [0,0,0,0] is rc 23 disabled by an env var, "
+        "which is the exact shape this floor exists to refuse\n%s" % (walked, out))
+
+
+@pytest.mark.parametrize("huge", ["99999999999999999999", "9223372036854775808"])
+def test_a_value_this_shell_cannot_COMPARE_is_refused(fleet, huge):
+    """RED AT 12d4c01d: digits pass the type check, then `[ 0 -lt <huge> ]`
+    errors and evaluates FALSE, so nothing is enumerated and rc 23 goes silent —
+    the same [0,0,0,0] as a cap of zero, reached by taking the tool's own
+    "raise DRIFT_NIXDIRT_MAX" advice too far.
+
+    Both operands are above 2^63-1 and are pairwise distinct; the second is
+    exactly one past the maximum, so a guard that only rejects absurd LENGTHS
+    rather than uncomparable VALUES is caught too.
+    """
+    fleet.seed_nix_read()
+    _seed_many(fleet, 3, prefix="romeo")
+    rc, out = fleet.check("--no-remote", DRIFT_NIXDIRT_ESCALATE="3",
+                          DRIFT_NIXDIRT_MAX=huge)
+    assert rc == 2, (
+        "DRIFT_NIXDIRT_MAX=%s was accepted; the cap it produces enumerates "
+        "NOTHING\n%s" % (huge, out))
+    assert "DRIFT_NIXDIRT_MAX must be between 1 and" in out, out
+
+
+def test_the_CEILING_is_a_real_boundary_measured_from_both_sides(fleet):
+    """🔴 THE BOUNDARY ITSELF, both sides, so the ceiling is pinned as a VALUE
+    and not as "some large number". Read out of the script rather than restated
+    here: a constant duplicated into the test is a constant that can drift.
+    """
+    m = re.search(r"^DRIFT_INT_CEILING=(\d+)", DRIFT.read_text(), re.M)
+    assert m, "the ceiling is no longer a named constant"
+    ceiling = int(m.group(1))
+    fleet.seed_nix_read()
+    _seed_many(fleet, 3, prefix="sierra")
+
+    rc, out = fleet.check("--no-remote", DRIFT_NIXDIRT_MAX=str(ceiling))
+    assert rc == 0, f"the ceiling itself was rejected\n{out}"
+
+    rc, out = fleet.check("--no-remote", DRIFT_NIXDIRT_MAX=str(ceiling + 1))
+    assert rc == 2, f"one past the ceiling was accepted\n{out}"
+    assert "must be between 1 and %d" % ceiling in out, out
+
+
+def test_the_same_spelling_hazard_is_closed_for_every_LADDER_threshold(fleet):
+    """🔴 THE WIDEST READING, and it is not hypothetical.
+
+    `require_int`'s callers include four consecutive-run ladders, and a
+    threshold the shell cannot compare makes `[ "$STK" -ge "$THR" ]` an error
+    that evaluates FALSE — so the ladder never escalates and the run reports no
+    drift. Measured directly: STK=5, THR=99999999999999999999 -> QUIET. That is
+    the same verdict-disabling class as the cap, reached through a different
+    tunable, so require_int is bounded too rather than only the floor.
+
+    DRIFT_NIXDIRT_ESCALATE is the one this PR introduced, so it is the one
+    asserted; `0` stays LEGAL there (escalate immediately is a real request),
+    which is exactly why it needed the bound rather than the floor.
+    """
+    fleet.seed_nix_read()
+    _seed_many(fleet, 1, prefix="tango")
+
+    rc, out = fleet.check("--no-remote", DRIFT_NIXDIRT_ESCALATE="99999999999999999999")
+    assert rc == 2, (
+        "an uncomparable ladder threshold was accepted — the ladder it feeds "
+        "can never escalate\n%s" % out)
+    assert "DRIFT_NIXDIRT_ESCALATE must be between 0 and" in out, out
+
+    rc, out = fleet.check("--no-remote", DRIFT_NIXDIRT_ESCALATE="04")
+    assert rc == 2, f"a padded ladder threshold was accepted\n{out}"
+    assert "DRIFT_NIXDIRT_ESCALATE must not have a leading zero" in out, out
+
+    # ...and ZERO is still legal here, which is the whole reason this tunable
+    # takes require_int and not require_positive_int. A guard that rejected it
+    # would satisfy both assertions above and break a documented setting.
+    rc, out = fleet.check("--no-remote", DRIFT_NIXDIRT_ESCALATE="0")
+    assert rc == 23, (
+        "DRIFT_NIXDIRT_ESCALATE=0 must mean 'escalate immediately', not be "
+        "rejected\n%s" % out)
+
+
+def test_the_ceiling_clears_every_DEFAULT_this_script_sets():
+    """🔴 THE ONE CORRECTNESS PROPERTY THE CEILING'S VALUE MUST HAVE, and the
+    reason the boundary test above deliberately does NOT hardcode the number.
+
+    Moving the ceiling is a TUNING decision, not a bug — a mutation sweep
+    confirmed that raising it by one is an equivalent mutant, and pinning the
+    literal in the test would turn a legitimate retune into a red suite (the
+    "constant duplicated into the test" shape this repo has been bitten by).
+    What is NOT a tuning decision is a ceiling BELOW one of this script's own
+    defaults: every run would then reject its own configuration and exit 2, and
+    a permanently-red deadman is worse than no deadman because it trains
+    everyone to click through.
+
+    Derived from the source on both sides — the ceiling and the defaults — so a
+    tenth tunable is covered with no edit here.
+
+    🔴 THE DERIVATION IS PINNED TWO-WAY, and it had to be: the first version of
+    this test matched names with `[A-Z_]+`, which silently dropped the ONE
+    default containing a digit — DRIFT_PHASE2_TIMEOUT, at 60, the LARGEST of
+    them and therefore the only one a ceiling of 50 would have caught. A
+    `len(defaults) >= 5` floor passed happily on the 8 that remained, and the
+    guard scanned clean against a ceiling below a real default. So the ledger
+    is now asserted EQUAL to the set of names require_int/require_positive_int
+    validates: a regex that goes narrow on either side fails loudly instead of
+    quietly measuring less.
+    """
+    src = DRIFT.read_text()
+    m = re.search(r"^DRIFT_INT_CEILING=(\d+)", src, re.M)
+    assert m, "the ceiling is no longer a named constant this test can find"
+    ceiling = int(m.group(1))
+
+    defaults = {
+        name: int(val) for name, val in
+        re.findall(r'^(DRIFT_[A-Z0-9_]+)="\$\{\1:-(\d+)\}"', src, re.M)
+    }
+    validated = set(re.findall(
+        r"^require(?:_positive)?_int (DRIFT_[A-Z0-9_]+) ", src, re.M))
+    assert validated, "no validated tunables found — this ledger is wired to nothing"
+    assert set(defaults) == validated, (
+        "the numeric-default ledger and the validated-tunable ledger disagree: "
+        "defaults-only=%r validated-only=%r. One of the two regexes is measuring "
+        "less than it looks like it measures."
+        % (sorted(set(defaults) - validated), sorted(validated - set(defaults)))
+    )
+    too_big = {n: v for n, v in defaults.items() if v > ceiling}
+    assert too_big == {}, (
+        "these defaults exceed DRIFT_INT_CEILING=%d, so drift-check would reject "
+        "its OWN configuration on every run: %r" % (ceiling, too_big)
+    )
+
+
+def test_a_ZERO_accepting_tunable_still_accepts_its_zero(fleet):
+    """🔴 THE CONTROL ON THE TIGHTENING. Two tunables legitimately take 0 —
+    GNU `timeout 0` means NO timeout — and a blanket swap to the floor would
+    have broken both silently. Asserted so the next person tightening this file
+    sees which ones must stay permissive."""
+    fleet.seed_nix_read()
+    for var in ("DRIFT_PHASE2_TIMEOUT", "DRIFT_SRC_FETCH_TIMEOUT",
+                "DRIFT_UNTRACKED_MAX", "DRIFT_DANGLING_MAX"):
+        rc, out = fleet.check("--no-remote", **{var: "0"})
+        assert rc == 0, f"{var}=0 was rejected, but 0 is meaningful there\n{out}"
+
+
 def test_a_cap_of_ONE_is_accepted_and_enumerates_exactly_one(fleet):
     """🔴 THE BOUNDARY ON THE LEGAL SIDE, so the floor is pinned as `>= 1` and
     not as some larger number nobody stated. Without this the guard could reject
