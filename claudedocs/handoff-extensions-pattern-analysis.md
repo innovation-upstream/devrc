@@ -43,8 +43,8 @@ document rather than trusting any total in prose — including this one, and inc
 whatever the next editor writes.**
 
 ⚠ Count them by eye — the bold red label opening each correction. A text search for
-the label word over-counts by one, because the paragraph above describes the convention
-and names it. That is not a defect to fix: a document cannot describe its own marker
+the label word over-counts by one, because the 🔴 paragraph at the top of this section
+names the convention while describing it. That is not a defect to fix: a document cannot describe its own marker
 without matching a search for it. It is the third-order version of the same lesson, and
 the reason the instruction is "count", not "grep".
 
@@ -249,11 +249,21 @@ Brave tab
   read both halves.** Tested 2026-08-27, GNU coreutils 9.11:
   - `rm -rf <symlink-to-dir>` — **no trailing slash** — removes the **link**. Target
     directory and contents intact. This is the form every `rm -rf` in the source takes,
-    and it is what makes the original claim wrong. ⚠ Read that as a statement about the
-    *form*, not about the operands: none of the six `rm -rf` sites (624, 628, 677, 686,
-    745, 791) can actually receive a symlink. 791 is reached only after `deeScrub`
-    diverts symlinks to `rm -f` at 789; 624/628/745 take block-created temp dirs; 677
-    and 686 take `$bbBak`, which `mv` just produced from a directory.
+    and it is what makes the original claim wrong.
+    🔴 **An earlier revision of this bullet claimed none of the six `rm -rf` sites can
+    receive a symlink. That is false — do not restore it.** Three of them are unguarded:
+    **624** (`$bbOld`, from a glob over a user-writable directory; the guards are
+    `[ -e ]`, which *follows* a symlink, an all-digit suffix test, `!= $$`, and a dead
+    `/proc/<pid>` — a symlink named `…ext.old.<dead-pid>` passes all four), **628**
+    (clears a *pre-existing* `$bbTmp`; `cp -rL` does not create it until 629, and the
+    sweep skips `$$` at 622, so a pid-reused leftover routes here by construction), and
+    **677** (`rm -rf "$bbBak"` runs at 677; the `mv` that would produce `$bbBak` from a
+    directory is at **678**, i.e. after). Only **686** (post-`mv`, source verified by
+    `[ -d ] && [ ! -L ]`), **745** (block-owned `$bbTmp`) and **791** (`deeScrub`
+    diverts symlinks to `rm -f` at 789) are actually guarded.
+    **What makes those three safe today is the absence of a trailing slash, not the
+    absence of a symlink** — which is exactly why the next paragraph's warning is about
+    the slash, and why "no site uses one" is a property nobody is enforcing.
   - 🔴 `rm -rf <symlink-to-dir>/` — **with a trailing slash** — DOES follow the link.
     Measured: rc=0, the link survives, and the target directory is **emptied**
     (a 2-file tree went to 0). Silent.
@@ -345,3 +355,20 @@ weaker claim than "verified" and is stated as such deliberately.
 - The subsystem index has no entry for extensions (measured above). If this analysis
   is worth keeping past this doc's life, `/analyze-service` is what writes one — that
   is a confirm-gated act at the end of a session, not something to do in passing.
+
+- 🔴 **SOURCE-SIDE, found while auditing this doc and NOT fixed by it:
+  `nix/home.nix:623`'s `chmod -R u+rwX "$bbOld"` has no `[ ! -L ]` guard**, unlike its
+  sibling `deeScrub` (789), and `[ -e "$bbOld" ]` at 614 follows a symlink. So a
+  symlink at `~/.local/share/browser-bridge-ext.old.<dead-pid>` is swept, and the
+  `chmod -R` rewrites the modes of whatever it points at.
+  **Measured 2026-08-27** by running the loop body verbatim against a fixture: target
+  directory `555 → 755`, its file `444 → 644` — byte-for-byte the signature
+  `home.nix:780-786` documents 🔴 for the *discord* block, which guards against it.
+  Requires an operator artefact at that path, so this is a latent gap, not a live bug,
+  and the `rm -rf` that follows at 624 takes the link rather than the target.
+  **Closing condition:** either `home.nix:623` gains the same `[ -L ]` diversion
+  `deeScrub` has, or the sweep's commentary (601-612, which enumerates its accepted
+  limits) gains this one explicitly as a third. Mechanically checkable — the guard is
+  present or it is not. Whoever picks it up owns deciding which of the two it is; this
+  session did not, because it is a change to a live hardened deploy path and does not
+  belong in a docs PR.
