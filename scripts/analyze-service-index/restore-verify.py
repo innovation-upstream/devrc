@@ -1028,33 +1028,59 @@ WHY_KINDS = frozenset({WHY_STORE_ABSENT, WHY_STORE_EMPTY, WHY_SCOPE_SYMLINK,
                        WHY_SCOPE_NOT_A_REPO, WHY_SCOPE_NOT_PRESENT})
 
 
+def _why(kind: str, sentence: str) -> tuple[str, str]:
+    """Every `why_no_live_scope` return goes through here. Closes the set.
+
+    🔴 A SIXTH BRANCH RETURNING AN INLINE LITERAL WOULD `KeyError` INSIDE THE
+    REFUSAL AN OPERATOR IS READING DURING A RECOVERY. `_MECHANISMS` is pinned
+    key-for-key against `WHY_KINDS` by the test suite, but that pin says nothing
+    about what this function actually RETURNS — a branch spelling its kind
+    inline satisfies the ledger test and blows up at the worst possible moment,
+    on the disaster path this whole feature exists to serve. The two halves
+    together (ledger pinned to WHY_KINDS, returns pinned to WHY_KINDS) are what
+    make the `_MECHANISMS[kind]` lookup total.
+
+    It raises rather than degrading: an unknown kind is a programming error with
+    no correct operator-facing text, and inventing one would be the confident
+    wrong answer this module exists to refuse.
+    """
+    if kind not in WHY_KINDS:
+        raise RestoreVerifyError(
+            f"{kind!r} is not in WHY_KINDS. Every store state this verifier can "
+            f"observe is an ENUMERATED value with an entry in _MECHANISMS; "
+            f"adding one means adding it to both, in the same commit as the "
+            f"test that pins them.")
+    return kind, sentence
+
+
 def why_no_live_scope(store: Path, scope: str) -> tuple[str, str]:
     """`(kind, sentence)` for WHICH store state blocked `scope`'s cross-check.
 
     Never "no local store": that spelling was three facts in one, and the two
     scope-level ones below are a fourth and fifth that a store-level answer
-    cannot express at all.
+    cannot express at all. Every return goes through `_why`, which closes the
+    kind set — see its docstring.
     """
     state, names = store_state(store)
     if state == STORE_ABSENT:
-        return WHY_STORE_ABSENT, f"the store directory {store} DOES NOT EXIST"
+        return _why(WHY_STORE_ABSENT, f"the store directory {store} DOES NOT EXIST")
     p = store / scope
     if p.is_symlink():
-        return WHY_SCOPE_SYMLINK, (
+        return _why(WHY_SCOPE_SYMLINK, (
             f"{p} is a SYMLINK, and a symlink is never followed here — "
             f"following one would compare against a repository from "
-            f"OUTSIDE the store")
+            f"OUTSIDE the store"))
     if p.is_dir() and not (p / ".git").exists():
-        return WHY_SCOPE_NOT_A_REPO, (
-            f"{p} exists but is not a git repository (it has no .git)")
+        return _why(WHY_SCOPE_NOT_A_REPO, (
+            f"{p} exists but is not a git repository (it has no .git)"))
     if state == STORE_EMPTY:
-        return WHY_STORE_EMPTY, (
+        return _why(WHY_STORE_EMPTY, (
             f"the store directory {store} EXISTS but holds NO scope "
-            f"repositories")
-    return WHY_SCOPE_NOT_PRESENT, (
+            f"repositories"))
+    return _why(WHY_SCOPE_NOT_PRESENT, (
         f"the store {store} holds {len(names)} scope "
         f"repositor{'y' if len(names) == 1 else 'ies'} but none named "
-        f"{scope!r}")
+        f"{scope!r}"))
 
 
 # Where `%m` comes from. A module-level tuple so the test suite can point the
@@ -1375,9 +1401,15 @@ def diagnose_empty_prefix(*, bucket: str, prefix: str, siblings: list[str],
 # 🔴 ONE MECHANISM PER OBSERVED KIND, AND THE LIST IS OPEN. A CLOSED two-way
 # choice is a claim about what CANNOT be true, and it was wrong for two
 # reachable states (see `WHY_KINDS`). Each entry says what is CONSISTENT with
-# the observation; none says it is THE cause. Read by
-# `nothing_cross_checked_message` and pinned two-way against `WHY_KINDS`, so a
-# sixth state cannot be added without deciding what it means for the operator.
+# the observation; none says it is THE cause.
+#
+# Read by `nothing_cross_checked_message`, and the `_MECHANISMS[kind]` lookup is
+# TOTAL — which takes BOTH halves, not the one this comment used to claim. The
+# test suite pins this table key-for-key against `WHY_KINDS`, AND `_why()`
+# refuses at runtime to return a kind outside `WHY_KINDS`. The ledger pin alone
+# said nothing about what `why_no_live_scope` actually RETURNS: a sixth branch
+# spelling its kind inline satisfied it and would have raised `KeyError` inside
+# the refusal an operator reads during a recovery.
 _MECHANISMS: dict[str, tuple[str, ...]] = {
     WHY_STORE_ABSENT: (
         "--store names a path that is not this host's store (a typo, a "
