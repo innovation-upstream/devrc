@@ -1943,19 +1943,35 @@ def visible_scope_set(visible_scopes: Sequence[str] | None) -> set[str] | None:
 #                  request thread never returns. This is the cell that is not a
 #                  degradation but a hang.
 #
-# Neither is ever a legitimate entry, so no legitimate caller changes behaviour.
+# 🔴 AND NOW A THIRD, WHICH IS THE SECOND ONE IN A DIFFERENT SHAPE:
 #
-# 🔴 `link-to-file` IS `TAKE`, AND THAT IS THE POINT OF THE NARROW FORM. A
-# symlink to a regular `*.md` is read today and keeps being read. A mutant that
-# flips this cell to REFUSE is the exact over-broad regression the narrow ruling
-# exists to prevent, and `test_a_SYMLINKED_entry_is_still_READ_the_narrow_guard_
-# is_not_the_broad_one` kills it.
+#   `link-to-other`  a symlink POINTING AT a fifo/socket/device. It shipped
+#                  `TAKE` for one round and was written up here as a NAMED
+#                  RESIDUAL — the decision that created this table named `other`
+#                  and `broken-link` and nothing else. It was then MEASURED
+#                  rather than argued about, on the tip that carried it:
 #
-# ⚠ NAMED RESIDUAL, NOT AN OVERSIGHT: `link-to-other` — a symlink POINTING AT a
-# fifo/socket/device — is the SAME hang in a different shape and is left `TAKE`,
-# because the decision on this PR named `other` and `broken-link` and nothing
-# else. Closing it is this one cell; it is called out here so the next reader
-# does not have to rediscover it from a wedged pod.
+#                      store/bravo/link-to-fifo.md -> /tmp/thefifo (a real fifo)
+#                      GET /api/v1/recall/alpha, UNRESTRICTED legacy token
+#                      -> no response at 25s, request thread WEDGED (curl 124)
+#                      -> /healthz 200 throughout, so the process was UP and the
+#                         worker was gone — the positive control for the probe
+#
+#                  `open()` does not care which path shape reached the fifo, so
+#                  this was never a lesser defect than `other`; it was the same
+#                  one, and on a `replicas: 1` / `strategy: Recreate` service a
+#                  wedged thread is the worst outcome in this file. Refused.
+#
+# None of the three is ever a legitimate entry, so no legitimate caller changes
+# behaviour.
+#
+# 🔴 `link-to-file` IS `TAKE`, AND THAT IS THE POINT OF THE NARROW FORM — it is
+# the cell the narrow-vs-broad ruling was actually about, and closing
+# `link-to-other` did not touch it. A symlink to a regular `*.md` is read today
+# and keeps being read. A mutant that flips this cell to REFUSE is the exact
+# over-broad regression the narrow ruling exists to prevent, and
+# `test_a_SYMLINKED_entry_is_STILL_READ_the_guard_is_NOT_the_broad_one` kills
+# it.
 #
 # ⚠ `indeterminate`, `directory`, `link-to-dir` and `absent` are `TAKE` for the
 # same conservatism: `read_text` raises on each (EACCES, IsADirectoryError,
@@ -1965,9 +1981,9 @@ def visible_scope_set(visible_scopes: Sequence[str] | None) -> set[str] | None:
 _LOADER_ENTRY_ACTIONS: dict[str, str] = {
     KIND_BROKEN_LINK: REFUSE,
     KIND_OTHER: REFUSE,
+    KIND_LINK_TO_OTHER: REFUSE,
     KIND_REGULAR_FILE: TAKE,
     KIND_LINK_TO_FILE: TAKE,
-    KIND_LINK_TO_OTHER: TAKE,
     KIND_DIRECTORY: TAKE,
     KIND_LINK_TO_DIR: TAKE,
     KIND_INDETERMINATE: TAKE,
@@ -1990,6 +2006,12 @@ _LOADER_REFUSAL_REASON: dict[str, str] = {
         "not a regular file (a fifo, socket or device) — refused before "
         "`open()`, which on a fifo blocks until somebody writes to it and never "
         "returns, wedging the reader"
+    ),
+    KIND_LINK_TO_OTHER: (
+        "a symlink to something that is not a regular file (a fifo, socket or "
+        "device) — refused before `open()`, which blocks on a fifo whether it "
+        "is named directly or reached through a link. Measured wedging a "
+        "`/recall` request thread for 25s while the process stayed healthy"
     ),
 }
 
@@ -2071,9 +2093,12 @@ def load_index(
     🔴 SO THE CANDIDATE'S KIND IS NOW CHECKED BEFORE `open()`, FOR EVERY CALLER
     — `_LOADER_ENTRY_ACTIONS`, above, which reuses `classify_path` rather than
     asking the question a second way. It is NARROW on purpose: a dangling
-    symlink and a fifo/socket/device are refused, and everything this loader
-    reads today — regular files AND symlinks to regular files — is still read,
-    so no legitimate caller changes behaviour. A refusal is reported the way
+    symlink, a fifo/socket/device, and a symlink POINTING AT one are refused,
+    and everything this loader reads today — regular files AND symlinks to
+    regular files — is still read, so no legitimate caller changes behaviour.
+    (The `link-to-other` cell shipped one round later than the other two, after
+    the shape was measured wedging an unrestricted `/recall` thread for 25s;
+    `open()` blocks the same through a link as directly.) A refusal is reported the way
     every other unusable entry is, through `on_malformed`: a `MalformedEntry` on
     the index under `COLLECT`, a `MalformedEntryError` under `RAISE`. One
     hostile file therefore costs that ONE entry, and is NAMED, instead of
@@ -2085,8 +2110,10 @@ def load_index(
     deliberate — it is the four-state rule below ("the store was not fully
     READ", which is not "this entry is malformed") — so on a HOSTILE store the
     unrestricted reading is unchanged for that shape and changed for the other
-    two. A symlink pointing AT a fifo (`link-to-other`) is likewise still
-    `TAKE`; see the table's note.
+    three. ⚠ THAT LIST USED TO NAME A SECOND UNCOVERED SHAPE — a symlink
+    pointing AT a fifo — and it no longer does, because that cell is now
+    REFUSE. `chmod 000` is the only residual left here, and it is a 503, not a
+    hang.
 
     ⚠ `Path.glob("*.md")` DOES match a leading dot — measured, not assumed — so
     an Emacs lock file (`.#entry.md`, a dangling symlink) is a candidate and had

@@ -1011,20 +1011,28 @@ class TestReadOnlyPhase1:
 #
 # 🔴 THE LOADER COLUMN IS THE NARROW RULING, CELL BY CELL. It refuses exactly
 # `broken-link` (the Emacs `.#entry.md` lock file, which used to 503 the whole
-# store) and `other` (the fifo, which used to HANG the request thread), and
-# TAKES everything else — most pointedly `link-to-file`, which the loader has
-# always read. Copying the `_ENTRY_ACTIONS` column wholesale is the over-broad
-# form that was explicitly rejected, and flipping any TAKE here to REFUSE is a
-# behaviour change for ordinary callers; every one of those flips is a mutant
-# this column kills.
+# store) and the two shapes of "an `open()` on this never returns" — `other`
+# (the fifo itself) and `link-to-other` (a symlink pointing at one), each of
+# which was measured HANGING the request thread. It TAKES everything else —
+# most pointedly `link-to-file`, which the loader has always read. Copying the
+# `_ENTRY_ACTIONS` column wholesale is the over-broad form that was explicitly
+# rejected, and flipping any remaining TAKE here to REFUSE is a behaviour change
+# for ordinary callers; every one of those flips is a mutant this column kills.
 DECISION_TABLE = [
     ("KIND_BROKEN_LINK", "REFUSE", "REFUSE", "REFUSE"),
     ("KIND_LINK_TO_DIR", "REFUSE", "REFUSE", "TAKE"),
     ("KIND_LINK_TO_FILE", "SKIP", "REFUSE", "TAKE"),
-    # ⚠ A symlink POINTING AT a fifo is the same hang in a different shape, and
-    # is left TAKE by the narrow ruling. Pinned as the residual it is, so a
-    # future decision to close it is a deliberate edit here.
-    ("KIND_LINK_TO_OTHER", "SKIP", "REFUSE", "TAKE"),
+    # 🔴 CLOSED, AND IT WAS THE SAME DEFECT — NOT A LESSER ONE. This cell was
+    # `TAKE` for one round, pinned as a named residual because the ruling that
+    # created the loader column named `other` and `broken-link` and nothing
+    # else. Then it was MEASURED on that tip: a `link-to-fifo.md` symlink in a
+    # scope the caller never asked for wedged `GET /api/v1/recall/<other-scope>`
+    # for 25s under an UNRESTRICTED legacy token — the request thread gone, on a
+    # `replicas: 1` / `strategy: Recreate` service. `open()` blocks identically
+    # whether the fifo is reached directly or through a link, so the loader
+    # column now refuses BOTH shapes of it. `link-to-file` stays `TAKE` — that
+    # is still the upper bound, and still the point of the narrow form.
+    ("KIND_LINK_TO_OTHER", "SKIP", "REFUSE", "REFUSE"),
     ("KIND_DIRECTORY", "TAKE", "REFUSE", "TAKE"),
     ("KIND_REGULAR_FILE", "SKIP", "TAKE", "TAKE"),
     ("KIND_OTHER", "SKIP", "REFUSE", "REFUSE"),
@@ -1168,6 +1176,30 @@ class TestClassifierIsTotal:
         assert api._ROOT_ACTIONS[k] == getattr(api, expected_root)
         assert api._ENTRY_ACTIONS[k] == getattr(api, expected_entry)
         assert resolver._LOADER_ENTRY_ACTIONS[k] == getattr(api, expected_loader)
+
+    def test_every_REFUSED_loader_kind_HAS_a_reason_and_no_other_kind_does(self):
+        """🔴 THE SEAM BETWEEN THE TWO DICTS, which nothing else reads together.
+
+        `load_index` looks the reason up by `_LOADER_REFUSAL_REASON[kind]` —
+        an unguarded subscript — so flipping a cell to REFUSE without writing
+        its sentence turns a hostile entry into a `KeyError` out of the loader:
+        a 500 with no `X-Store-Status`, for a shape whose whole fix was to make
+        it a NAMED malformed row. That is how the `link-to-other` cell would
+        have landed, and reviewing the table alone cannot see it.
+
+        Asserted as SET EQUALITY, not containment, so it fails when the ledger
+        GROWS as well as when it shrinks — a reason left behind for a kind that
+        went back to TAKE is dead prose claiming a guard that is gone.
+        """
+        refused = {
+            k
+            for k, action in resolver._LOADER_ENTRY_ACTIONS.items()
+            if action == api.REFUSE
+        }
+        assert refused == set(resolver._LOADER_REFUSAL_REASON), (
+            "the loader's REFUSE cells and its refusal sentences have drifted"
+        )
+        assert refused == {api.KIND_BROKEN_LINK, api.KIND_OTHER, api.KIND_LINK_TO_OTHER}
 
     def test_classify_returns_the_right_kind_for_each_REAL_path(self, tmp_path: Path):
         """🔴 The table above is only meaningful if `classify_path` actually
@@ -7364,8 +7396,13 @@ class TestUnreadableEntriesInDeniedScopes:
         or it becomes a test pinning the bug.
 
         What keeps the timeout meaningful instead is
-        `test_a_TAKEN_kind_still_HANGS_which_is_why_the_REFUSE_cells_exist`
-        below: the same machinery, aimed at a kind the loader still TAKES.
+        `test_a_SYMLINK_to_a_FIFO_no_longer_HANGS_and_the_DEADLINE_still_SEES_one`
+        below. ⚠ That test's control had to be re-aimed too: it used to point at
+        `link-to-other`, a kind the loader still TAKES — and it does not any
+        more, because that shape was measured wedging a live request thread for
+        25s. No remaining TAKE cell blocks, so the control is now a bare
+        `open()` of the fifo itself, which is the syscall in question rather
+        than a proxy for it.
         """
         store = self._store(tmp_path, "fifo")
         probe = (
@@ -7409,25 +7446,38 @@ class TestUnreadableEntriesInDeniedScopes:
         assert f"SCOPES={ALLOW_SCOPE},{DENY_SCOPE}\n" in unrestricted.stdout
         assert f"MALFORMED={DENY_SCOPE}/{LOCKED_ENTRY}\n" in unrestricted.stdout
 
-    def test_a_TAKEN_kind_still_HANGS_which_is_why_the_REFUSE_cells_exist(
+    def test_a_SYMLINK_to_a_FIFO_no_longer_HANGS_and_the_DEADLINE_still_SEES_one(
         self, tmp_path: Path
     ):
-        """🔴 THE POSITIVE CONTROL FOR THE PROBE ITSELF, and the honest record of
-        the `link-to-other` residual in one test.
+        """🔴 THE SECOND INVERSION, AND THE PROBE'S OWN POSITIVE CONTROL, in one
+        test — because the two have to move together.
 
-        Every assertion in the test above is now "it did NOT hang", which is
-        exactly the reassuring zero `claude/RULES.md` calls indistinguishable
-        from a harness wired to nothing: a probe that crashed on import, or a
-        fixture that made no FIFO, would satisfy all of them. So this drives the
-        SAME probe at a store whose hostile entry is a SYMLINK POINTING AT a
-        fifo — `link-to-other`, which the narrow ruling leaves `TAKE` — and
-        watches it block.
+        This test used to be
+        `test_a_TAKEN_kind_still_HANGS_which_is_why_the_REFUSE_cells_exist`, and
+        asserted that a symlink POINTING AT a fifo blocks the reader forever. It
+        was the honest record of the `link-to-other` residual the narrow ruling
+        left open, and simultaneously the positive control proving the deadline
+        machinery can observe a hang at all.
 
-        It therefore asserts two things at once: the deadline machinery can
-        still observe a hang, and the one shape the narrow guard does not cover
-        is genuinely uncovered. Closing that residual means flipping ONE cell of
-        `_LOADER_ENTRY_ACTIONS`, and this test is what will go red and tell
-        whoever does it to update the table pin.
+        The residual was then MEASURED rather than reasoned about: on the tip
+        that carried it, an unrestricted (bare legacy) `GET
+        /api/v1/recall/<scope>` against a store holding one `link-to-fifo.md` in
+        a DIFFERENT scope wedged for 25s and the request thread never came back,
+        while `/healthz` answered 200 throughout — so the process was up and the
+        worker was gone. `open()` blocks the same whether the fifo is reached
+        directly or through a link. The cell is now REFUSE, so the same input
+        must assert the opposite: complete, load both scopes, and REPORT the
+        link as a malformed entry.
+
+        🔴 AND THAT LEAVES A HOLE THIS TEST MUST FILL ITSELF. Every timing
+        assertion in the class is now "it did NOT hang", which is the reassuring
+        zero `claude/RULES.md` calls indistinguishable from a harness wired to
+        nothing — and no kind the loader still TAKES blocks, so the old control
+        cannot simply be re-aimed at another cell. The control below therefore
+        drives the SAME deadline machinery at a bare `open()` of the SAME fifo,
+        which must blow it. A fixture that made no real fifo, or a subprocess
+        runner that never blocks, fails there and takes the vacuous green with
+        it.
         """
         store = _build_store(
             tmp_path / "store",
@@ -7435,32 +7485,56 @@ class TestUnreadableEntriesInDeniedScopes:
         )
         real_fifo = tmp_path / "a-real-fifo"
         os.mkfifo(real_fifo)
-        os.symlink(real_fifo, store / DENY_SCOPE / LOCKED_ENTRY)
-        assert api.classify_path(store / DENY_SCOPE / LOCKED_ENTRY) == (
-            api.KIND_LINK_TO_OTHER
-        ), "the fixture is not the kind this test is about"
+        link = store / DENY_SCOPE / LOCKED_ENTRY
+        os.symlink(real_fifo, link)
+        assert api.classify_path(link) == api.KIND_LINK_TO_OTHER, (
+            "the fixture is not the kind this test is about"
+        )
+
+        def under_deadline(source: str, seconds: float):
+            """The completed process, or `None` meaning it blew the deadline."""
+            try:
+                return subprocess.run(
+                    [sys.executable, "-c", source],
+                    capture_output=True, text=True, timeout=seconds,
+                )
+            except subprocess.TimeoutExpired:
+                return None
+
+        # 🔴 THE POSITIVE CONTROL FIRST, so a runner that cannot observe a block
+        # fails before the assertion that depends on it means anything. A bare
+        # `open()` of the fifo — no store, no loader — is the syscall the guard
+        # exists to keep the request thread out of.
+        blocked = under_deadline(
+            f"open({str(real_fifo)!r}); print('OPENED')", 10.0
+        )
+        assert blocked is None, (
+            "a bare `open()` of the fifo RETURNED, so this fixture is not a "
+            "blocking fifo and the deadline below measures nothing — every "
+            "'it did not hang' assertion in this class would be vacuous. "
+            f"stdout={None if blocked is None else blocked.stdout!r}"
+        )
 
         probe = (
             "import sys;"
             f"sys.path.insert(0, {str(RECALL_PATH.parent)!r});"
             "import subsystem_recall as rc;"
-            f"rc.load_store({str(store)!r}, verb='recalled');"
-            "print('LOADED')"
+            f"_s, i = rc.load_store({str(store)!r}, verb='recalled');"
+            "print('SCOPES=' + ','.join(i.scopes));"
+            "print('MALFORMED=' + ','.join(m.label for m in i.malformed))"
         )
-        try:
-            done = subprocess.run(
-                [sys.executable, "-c", probe],
-                capture_output=True, text=True, timeout=15.0,
-            )
-        except subprocess.TimeoutExpired:
-            done = None
-        assert done is None, (
-            "a symlink-to-FIFO entry did NOT block the reader. Either the guard "
-            "was widened to cover `link-to-other` — in which case flip that cell "
-            "in DECISION_TABLE and re-aim this test — or this probe is no longer "
-            "measuring anything, which would make every 'it did not hang' "
-            f"assertion above vacuous. stdout={None if done is None else done.stdout!r}"
+        done = under_deadline(probe, 30.0)
+        assert done is not None, (
+            "an UNRESTRICTED read of a store holding a SYMLINK-to-FIFO entry "
+            "HUNG — `_LOADER_ENTRY_ACTIONS[KIND_LINK_TO_OTHER]` is not REFUSE, "
+            "or the guard is not reaching `load_index`. On a `replicas: 1` "
+            "Deployment that is a worker that never comes back"
         )
+        assert done.returncode == 0, done.stderr[-600:]
+        assert f"SCOPES={ALLOW_SCOPE},{DENY_SCOPE}\n" in done.stdout, done.stdout
+        # REPORTED, not skipped — a dropped entry is indistinguishable from one
+        # nobody ever wrote, which is the conflation this store exists to avoid.
+        assert f"MALFORMED={DENY_SCOPE}/{LOCKED_ENTRY}\n" in done.stdout, done.stdout
 
 
 class TestTheLoaderRefusesHostileEntriesByKind:
@@ -7478,6 +7552,13 @@ class TestTheLoaderRefusesHostileEntriesByKind:
     fails on TODAY, so the broad form is a behaviour change for every local CLI
     caller. `test_a_SYMLINKED_entry_is_STILL_READ…` is the test that kills the
     broad form; without it "refuse hostile kinds" has no upper bound.
+
+    ⚠ NARROW IS NOT FROZEN. The guard has THREE cells, not the two it shipped
+    with: `link-to-other` (a symlink pointing at a fifo/socket/device) was left
+    TAKE for one round as a named residual, then measured wedging an
+    unrestricted `/recall` for 25s and closed. That widening is still inside the
+    upper bound — it refuses a shape no legitimate entry has, and
+    `link-to-file`, the cell the narrow ruling was actually about, is untouched.
     """
 
     def _hostile(self, tmp_path: Path) -> Path:
