@@ -161,46 +161,68 @@ the browser-bridge and fixed at the source each time.
   attempt on 2026-08-26 returned `APPFRAME_ABSENT` with **zero** iframes on the page after
   a 12 s wake — an observation about one un-gated load, not a diagnosis.
 
+### 🔴 sensei's live STORE ASSET is still the pre-fix crop
+- **Symptom + exact repro:** #1333 fixed the RECIPE; it attached nothing. The listing on
+  civitai.com still serves the crop taken at `y: 97`, whose top ~44 rows are the rewards
+  banner's tail plus the `Apps / Civitai Sensei` breadcrumb.
+- **Observed (with values):** measured 2026-08-27, iframe top **141**, banner rows
+  **68..104**, breadcrumb **105..138**, app header **141..203** with the operator's buzz
+  chip at **161..181**, header divider **204**. The corrected crop starts at **205**.
+- **Ruled out:** that this is a viewport artefact — the same shell measured 141 on two
+  other apps the day before, and the bands reproduce across two independent captures.
+- **Leading hypothesis:** n/a, this is not a diagnosis — it is a shipped asset that no
+  longer matches its recipe.
+- **Next probe / closing condition:** re-shoot sensei and attach, which is a DELIBERATE
+  act nobody has authorised yet. 🔴 Before doing so, read the height-responsive caveat
+  below — a re-shoot in the banner-ABSENT layout DROPS the model/temp control bar
+  entirely.
+
+### sensei is HEIGHT-RESPONSIVE and the anchored form does not fully model it
+- **Symptom + exact repro:** its layout is header / flex-1 main / **bottom-anchored**
+  control bar (full-width divider at abs **1133**, controls at **1157..1166**), so its
+  bottom furniture tracks the iframe's LOWER edge, not its top.
+- **Observed (with values):** banner-absent puts the iframe top at ~104, so the crop
+  resolves to abs **168..1150** while the control bar sits at 1157..1166 — **wholly
+  outside**. It is DROPPED, not clipped. 🔴 Silently: the iframe-bottom bound does not
+  fire, because ending EARLY is not running past the edge. What IS clipped in that
+  layout is the support widget at 1149..1189.
+- **Ruled out:** using `bannershift.py` to test it — that fixture builds the banner state
+  by DROPPING the rows that fall off the bottom, which slides a bottom-anchored element
+  away: the inverse of what really happens.
+- **Leading hypothesis:** a fixed `h` cannot track both layouts for a bottom-anchored
+  app; the form would need a bottom anchor to do it properly.
+- **Next probe:** shoot sensei with the banner ABSENT and re-measure. If the control bar
+  is gone, either drop it from the shot deliberately or give the form a bottom anchor.
+
 ## Next steps (ranked)
-🔴 **Numbering is STABLE and is half a claim's identity — do not re-rank.** Items 1 and 2
-are DONE and are kept in place rather than renumbered.
+🔴 **Numbering is STABLE and is half a claim's identity — do not re-rank.** Items 1,
+2 and 7 are DONE and are kept in place rather than renumbered.
 
 1. ✅ **DONE (#1316, squash `4379c27cf`, 2026-08-27)** — crops declared for `app-requests`
    and `playable-collections`; #1297 closed.
 2. ✅ **DONE (#1306)** — `plan.py`/`capture.sh` no longer print the two retracted claims.
 3. **Fix the `test_browser_cli_backs_off_on_429` stall at its source** — `devrc`,
-   `scripts/browser-bridge/tests/test_server.py`. UNCHANGED for three sessions; see the
-   investigation block already in this doc. #820 only stopped the test preempting the
-   CLI's own timeout — the stall itself is still UNFIXED and UNMEASURED.
+   `scripts/browser-bridge/tests/test_server.py:5970`. UNCHANGED for four sessions; see
+   the investigation block already in this doc. #820 only stopped the test preempting
+   the CLI's own timeout — the stall itself is still UNFIXED and UNMEASURED. **This is
+   the next item.**
 4. **`open`'s fallthrough shares the suspected failure mode** — `devrc`,
    `scripts/browser-bridge/extension/service_worker.js`. UNCHANGED. `chrome.tabs.create`
    is another unbounded browser-process IPC, so a browser-wide stall leaks one tab per
-   `open` while returning success.
-5. **Removing app-capture's raise** — `civitai/talos-infra`. 🔴 **THIS ITEM'S PREMISE
-   CHANGED: it is no longer "removing an INERT raise".** The raise is not inert (see the
-   open investigation); only its i3 half is withheld. Removing it would change which
-   capture path is taken. Re-scope before working it.
-6. **clawgate #358** — filed earlier, picked up by a different session. Not ours; its live
-   state was NOT re-checked, so treat that as unknown rather than as still-in-flight.
-7. 🔴 **NEW — settle whether `sensei`'s SHIPPED crop is currently wrong** —
-   `civitai/talos-infra`, `.claude/skills/app-capture/scripts/recipes/sensei.json`.
-   Surfaced by #1316 and deliberately not chased there (out of scope). `sensei.json` says
-   its `y: 97` is *below* the iframe's top edge, "because it also clips the app's OWN
-   partially-visible buzz bar". On today's shell that cannot be true — the iframe starts
-   at **141** and the banner occupies rows **68…104**, so 97 lands *inside the banner*,
-   above the app, where there is no app element to clip. If it is above the iframe top,
-   the shipped store crop's top rows are **page chrome, not app**, on a live listing.
-   ⚠ A plain re-shoot does NOT answer it: `capture.sh` only runs the app-frame probe when
-   `crop.fromAppFrame` is set and sensei deliberately does not set it. Run the probe by
-   hand against the loaded tab:
-   `.claude/skills/app-capture/scripts/frame.py frame-rect-js --recipe <sensei.json>`,
-   evaluate it there, then compare 97 against the reported top.
-   **Closing condition:** `97 >= top` (recipe's note right — delete the open block in
-   `.claude/skills/app-capture/reference/cropping-and-attaching.md`) or `97 < top` (fix
-   the crop AND the note together).
-   ⚠ Attempted 2026-08-26 and NOT obtained: the page rendered with **zero** iframes on a
-   12 s wake, so the probe returned `APPFRAME_ABSENT`. That is one un-gated load, not a
-   diagnosis — the app-ready gate exists for this and was not used.
+   `open` while returning success. 🔴 Worth more than its rank: the #797 audit PREDICTED
+   this shape would regenerate and #814 proved it right, so this is the third instance
+   of a class that is 2-for-2.
+5. **Removing app-capture's raise** — `civitai/talos-infra`. 🔴 **PREMISE CHANGED**: the
+   raise is not inert, only its i3 half is withheld. Re-scope before working it.
+6. **clawgate #358** — filed earlier, picked up by a different session. Not ours; live
+   state NOT re-checked, so treat as unknown rather than still-in-flight.
+7. ✅ **DONE (#1333, squash `05e3110ca`, 2026-08-27)** — `sensei`'s shipped crop settled
+   and fixed. The answer was worse than the question: `y: 97` sat **44px ABOVE** the
+   iframe top (141), inside the rewards banner, so the live listing's crop had ~44 rows
+   of host page chrome and had for twelve days. Converted to the anchored form
+   (`y: 64, yFrom: appFrame, h: 982`). **Nothing was attached to any listing** — the live
+   asset is still the old crop; re-shooting it is a separate deliberate act, and is the
+   one thing this item did NOT do.
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **`browser ping` → `buildMarker` is the ONLY field describing RUNNING code.** Both
@@ -340,27 +362,66 @@ are DONE and are kept in place rather than renumbered.
   Re-measured populated 2026-08-26 (2 private collections, one with 0 items) — but it
   photographs the operator's own account, which the shelf-life rules forbid.
 
+- 🔴 **A NOTE THAT RATIONALISES A NUMBER OUTLIVES THE NUMBER, AND THEN GETS INHERITED.**
+  `sensei.json` said `y: 97` is "BELOW the iframe's top on purpose, because it also clips
+  the app's OWN buzz bar". Measured: 97 was 44px ABOVE the iframe, inside the banner, so
+  it clipped nothing of the app's. The INTENT was right — the buzz chip is real and must
+  not be shot — and only the number was wrong. But the note read as a measurement, so
+  #1316 quoted it into `frame.py`, `SKILL.md` and the reference doc as the reason sensei
+  "takes the trade" and "cannot adopt the anchored form". One unverified sentence became
+  four confident ones. **Read a rationale as a hypothesis, especially when it explains a
+  number you did not take.**
+- 🔴 **CHANGING A RECIPE CAN TURN A NEGATIVE TEST VACUOUS — CHECK WHAT BORROWS IT.**
+  Gate F10d built its "rect AND fromAppFrame is refused" case by borrowing `sensei.json`
+  and adding `fromAppFrame`. Once sensei carried `yFrom` that is the LEGAL combination,
+  so the negative no longer built the shape it is named for. (It would have failed loudly
+  rather than passed — I first wrote "vacuous pass" and an audit measured it: the old
+  construction gives `REFUSE[crop_rect_outside]` and `expect_refuse` checks the CODE.
+  The rewrite was still right; the framing was not.) **Grep the suite for a recipe's name
+  before changing its shape.**
+- 🔴 **I ADDED A THIRD ADOPTER WITHOUT RUNNING THE CHECK I HAD JUST WRITTEN.** The doc
+  said "both adopters are plain top-aligned scrolling lists. Check that before adding a
+  third." sensei is bottom-anchored. The check was mine, one screen above the edit, and
+  an auditor had to run it. **A caveat you wrote does not read itself.**
+- 🔴 **THE SHARED `.venv` INTERPRETER VANISHES MID-RUN, in at least THREE shapes**: exit
+  `127` across many gates, `ModuleNotFoundError`, and a truncated subprocess traceback
+  inside one gate (F11). Four occurrences across #1316 and #1333. Every one looked like a
+  code failure and none was; every one was settled by re-running. **Never read a
+  widespread or bizarre gate failure here without re-running it first**, and never run
+  two mutation batteries at once.
+- **The obvious fix for the support widget makes the shot worse.** `w: 1639` (the
+  recipe's own `right: 70` band) drops the floating support widget — and clips the app's
+  own Send button to a bare "S". Measured: Send occupies columns **1609..1690** at
+  y1078..1118, the widget **1643..1690** at y1149..1189. Both right edges are 1690, so no
+  width separates them; and they are in different rows, so the only height that drops the
+  widget (ending 1148) also drops the control bar. Kept at 1694, trade recorded.
+- 🔴 **A BARE `wake` IS NOT A BOOTED APP, and the difference decided this item.** The
+  first attempt to probe sensei (2026-08-26) opened the page, waited 12 s with
+  `--wake`, and got `APPFRAME_ABSENT` with **zero** iframes — which reads exactly like
+  "the app has no iframe" and nearly closed the question the wrong way. It was one
+  un-gated load. Driving the same page through `capture.sh` with the recipe's OWN ready
+  gate produced the iframe and the probe answer immediately. **An absence observed
+  without the ready gate is not evidence of absence.**
+- **A store crop's framing changes when its height does, and it is worth stating.**
+  `render` fits-inside then pads: 1694x1090 gave 1200x772 (3px letterbox); 1694x982 gives
+  1200x696 — 41px top and bottom, 10.5% of the canvas.
+
 ## How to verify
 ```bash
-# 1. #1316 landed, by CONTENT (squash merge — ancestry proves nothing)
+# 1. both PRs landed, by CONTENT (squash merges — ancestry proves nothing)
 git -C $DATAPACKET fetch origin trunk -q
 S=.claude/skills/app-capture/scripts
-git -C $DATAPACKET show origin/trunk:$S/frame.py | grep -c RECT_Y_APP_FRAME          # 8
-git -C $DATAPACKET show origin/trunk:$S/recipes/app-requests.json | grep -c yFrom     # 2
-git -C $DATAPACKET show origin/trunk:tests/mutants-app-capture.sh | grep -c M181      # 2
+git -C $DATAPACKET show origin/trunk:$S/recipes/sensei.json | grep -c yFrom            # 2
+git -C $DATAPACKET show origin/trunk:$S/recipes/app-requests.json | grep -c yFrom       # 2
+git -C $DATAPACKET show origin/trunk:tests/mutants-app-capture.sh | grep -c M182        # 2
+git -C $DATAPACKET show origin/trunk:tests/run-tests-app-capture.sh | grep -c '"sensei": "appFrame"'  # 1
 
-# 2. the suite and the battery, from a clean worktree at trunk
+# 2. suite + doc-rot, from a clean worktree at trunk
 WT=/tmp/wt-verify
 git -C $DATAPACKET worktree add --detach "$WT" origin/trunk
 (cd "$WT" && bash tests/run-tests-app-capture.sh | tail -3)          # 142 PASS / 0 FAIL
-(cd "$WT" && bash scripts/validate-skill-paths.sh --all | tail -2)   # 1498 refs, PASS
-(cd "$WT" && MUTANTS_ONLY="M179 M181" bash tests/mutants-app-capture.sh)  # both KILLED
+(cd "$WT" && bash scripts/validate-skill-paths.sh --all | tail -2)   # 1535 refs, PASS
+(cd "$WT" && MUTANTS_ONLY="M179 M182" bash tests/mutants-app-capture.sh)  # both KILLED
 git -C $DATAPACKET worktree remove --force "$WT"
-# 🔴 at most ~4 mutants per run, and NEVER two batteries at once (see Gotchas)
-
-# 3. the crop form actually resolves — the claim, on the fixtures
-#    (F13 does this and compares the two layouts' PIXELS; this is the eyeball version)
-(cd "$WT" && python3 $S/frame.py measure tests/fixtures/app-capture/5-mb-combinations.png \
-   --recipe $S/recipes/app-requests.json \
-   --app-frame-rect 'APPFRAME_RECT:141,64,-1,1709,1314')   # box.y = 141 + 507 = 648
+# 🔴 ~4 mutants per run MAX, and NEVER two batteries at once — see Gotchas
 ```
