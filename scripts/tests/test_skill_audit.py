@@ -1140,3 +1140,90 @@ def test_the_real_browser_skill_agrees_with_its_own_gate():
     gate_is_red = (gate.MAX_BYTES - size) < gate.MIN_HEADROOM_BYTES
     assert sa.audit_one(browser)["status"] == "OK" and not gate_is_red, (
         f"browser SKILL.md is {size:,} B; the enforced budget is {sa.BUDGET:,} B")
+
+
+# ── _foreign_repos: which trees this tool's budget actually governs ──────────
+# 🔴 ADDED AFTER A PRE-MERGE AUDIT FOUND THIS LOGIC SHIPPED WITH ZERO COVERAGE
+# (devrc #924, finding 8), which is how findings 3 and 4 got in: a dead ternary
+# branch that made a mixed-repo run name only the foreign repo, and a path-equality
+# devrc test that classified every devrc WORKTREE as foreign — on a host with 60+
+# of them, and with SKILL.md telling readers to believe that line over the number.
+# Both are pinned below. Each case is one line of production behaviour.
+
+
+def _fake_repo(root, *, governed):
+    """A directory that looks like a repo to the walker.
+
+    `governed` decides whether the gate marker is present -- that, not the path,
+    is what makes a tree one this tool's budget binds.
+    """
+    root.mkdir(parents=True, exist_ok=True)
+    (root / ".git").write_text("gitdir: /elsewhere\n")   # a WORKTREE's .git is a FILE
+    if governed:
+        marker = root / sa._GATE_MARKER
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("MAX_BYTES = 1\nMIN_HEADROOM_BYTES = 1\n")
+    skills = root / ".claude" / "skills" / "x"
+    skills.mkdir(parents=True, exist_ok=True)
+    (skills / "SKILL.md").write_text("# x\n")
+    return skills / "SKILL.md"
+
+
+def test_foreign_repos_governed_tree_is_not_flagged(tmp_path):
+    """The gate marker is present, so the budget binds and there is nothing to warn about."""
+    f = _fake_repo(tmp_path / "devrc-like", governed=True)
+    assert sa._foreign_repos([str(f)]) == []
+
+
+def test_foreign_repos_a_worktree_of_a_governed_repo_is_governed(tmp_path):
+    """🔴 THE REGRESSION THAT SHIPPED. A worktree's `.git` is a FILE, so a check
+    comparing the repo root to the script's own checkout path classified every
+    devrc worktree as foreign and printed 'THESE SKILLS ARE IN <devrc>, NOT devrc'.
+    Identity is the marker the tree CONTAINS, never where the tree sits."""
+    f = _fake_repo(tmp_path / "some-worktree-path", governed=True)
+    assert sa._foreign_repos([str(f)]) == [], (
+        "a governed tree must stay governed no matter where it is checked out")
+
+
+def test_foreign_repos_ungoverned_tree_is_flagged(tmp_path):
+    f = _fake_repo(tmp_path / "other-repo", governed=False)
+    assert sa._foreign_repos([str(f)]) == [tmp_path / "other-repo"]
+
+
+def test_foreign_repos_returns_every_ungoverned_root_not_just_one(tmp_path):
+    """🔴 The dead-ternary bug: both branches were `sorted(roots)[0]`, so two
+    foreign repos silently collapsed to the alphabetically-first one."""
+    a = _fake_repo(tmp_path / "aaa-repo", governed=False)
+    b = _fake_repo(tmp_path / "zzz-repo", governed=False)
+    assert sa._foreign_repos([str(a), str(b)]) == [tmp_path / "aaa-repo", tmp_path / "zzz-repo"]
+
+
+def test_foreign_repos_mixed_run_still_reports_the_ungoverned_one(tmp_path):
+    """A governed path must not mask an ungoverned one -- and vice versa; the
+    header's `mixed` flag is what stops the banner reading as a whole-run verdict."""
+    g = _fake_repo(tmp_path / "governed", governed=True)
+    u = _fake_repo(tmp_path / "ungoverned", governed=False)
+    assert sa._foreign_repos([str(g), str(u)]) == [tmp_path / "ungoverned"]
+
+
+def test_foreign_repos_path_outside_any_repo_is_not_flagged(tmp_path):
+    """No enclosing `.git` at all -> no claim either way. Flagging it would warn
+    about a tree whose governance is simply unknown."""
+    loose = tmp_path / "loose"
+    loose.mkdir()
+    (loose / "SKILL.md").write_text("# x\n")
+    assert sa._foreign_repos([str(loose / "SKILL.md")]) == []
+
+
+def test_mixed_run_marks_the_header_and_does_not_assert_the_gate(tmp_path):
+    """End-to-end: the four sites that used to assert devrc's gate on a foreign
+    tree (audit finding 5). The banner alone was not the fix -- 'the gate REJECTS
+    these' three lines below it is a verdict, not a label."""
+    u = _fake_repo(tmp_path / "ungoverned", governed=False)
+    big = u.parent.parent / "big"          # a second skill in the SAME ungoverned repo
+    big.mkdir(parents=True, exist_ok=True)
+    (big / "SKILL.md").write_bytes(b"x" * (sa.BUDGET + 200))
+    out = _run(tmp_path / "ungoverned" / ".claude" / "skills")
+    assert "devrc's DEFAULT (not enforced here)" in out, out
+    assert "the gate REJECTS these" not in out, (
+        "an ungoverned tree must not be told devrc's gate rejects it")

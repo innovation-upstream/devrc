@@ -103,26 +103,46 @@ BUDGET = TARGET - MIN_HEADROOM
 # constant _load_budget exists to prevent, one directory further out). It is to
 # stop ASSERTING: when the audited file is outside devrc, the budget is labelled
 # as devrc's default and the reader is pointed at the file's own repo gate.
-_DEVRC_ROOT = Path(__file__).resolve().parent.parent
+# 🔴 devrc IS IDENTIFIED BY THE GATE IT CONTAINS, NOT BY A PATH. The first
+# version of this compared the audited repo root to `Path(__file__)/../..` and
+# was wrong on the repo's most common shape: a WORKTREE's `.git` is a FILE, so
+# the walk stops at the worktree root, which never equals the main checkout's
+# path — every one of the 60+ devrc worktrees open on this host was labelled
+# "THESE SKILLS ARE IN /home/zach/workspace/devrc, NOT devrc", a sentence that
+# contradicts itself. Worse, SKILL.md tells the reader to believe that line over
+# the number, so the false negative was actively harmful.
+#
+# The structural test is: does this tree contain the gate whose constants this
+# tool reads? If yes, those constants govern it, worktree or not. No subprocess,
+# no path equality, and it stays correct if devrc is cloned elsewhere.
+_GATE_MARKER = Path("scripts") / "browser-bridge" / "tests" / "test_skill_size.py"
 
 
-def _foreign_repo(paths):
-    """The audited tree's repo root, when it is NOT devrc — else None.
+def _repo_root(path):
+    """The nearest enclosing repo root for <path>, or None."""
+    cur = Path(path).resolve()
+    cur = cur if cur.is_dir() else cur.parent
+    for cand in [cur, *cur.parents]:
+        if (cand / ".git").exists():          # a worktree's .git is a FILE
+            return cand
+    return None
 
-    Walks up for a .git; no subprocess, so it works on a bare path that is not a
-    checkout at all (returns None, i.e. 'assume devrc's budget', which is the
-    pre-existing behaviour).
+
+def _foreign_repos(paths):
+    """Sorted roots of audited trees that this tool's budget does NOT govern.
+
+    Returns a list, deliberately: the previous version collapsed to
+    `sorted(roots)[0]` in BOTH ternary branches -- the `len(roots) == 1` test was
+    inert -- so auditing a devrc skill and a foreign one together printed a
+    banner naming only the foreign repo, telling the reader that the devrc skill
+    (which IS enforced) is not. That is the inverse of the bug this banner fixes.
     """
     roots = set()
     for raw in paths:
-        cur = Path(raw).resolve()
-        cur = cur if cur.is_dir() else cur.parent
-        for cand in [cur, *cur.parents]:
-            if (cand / ".git").exists():
-                if cand != _DEVRC_ROOT:
-                    roots.add(cand)
-                break
-    return sorted(roots)[0] if len(roots) == 1 else (sorted(roots)[0] if roots else None)
+        root = _repo_root(raw)
+        if root is not None and not (root / _GATE_MARKER).is_file():
+            roots.add(root)
+    return sorted(roots)
 
 
 # HARD is where a skill stops being a skill. ~40 KB is ~10k tokens — already a
@@ -631,25 +651,30 @@ def _overage(a):
     return "enforced budget", a["size"] - BUDGET
 
 
-def render(audits, show_all, n_sections, n_detail, out=sys.stdout, foreign=None):
+def render(audits, show_all, n_sections, n_detail, out=sys.stdout, foreign=(), mixed=False):
     p = lambda *a: print(*a, file=out)
     audits = sorted(audits, key=lambda a: -a["size"])
     over = [a for a in audits if a["status"] != "OK"]
     p(f"# SKILL.md audit — {len(audits)} skill(s)")
-    enforced = "ENFORCED" if foreign is None else "devrc's DEFAULT (not enforced here)"
+    enforced = "ENFORCED" if not foreign else "devrc's DEFAULT (not enforced here)"
     p(f"\nbudget {BUDGET:,} B {enforced}   = ceiling {TARGET:,} B − {MIN_HEADROOM:,} B "
       f"working margin   ·   hard cap {HARD:,} B")
-    p(f"  ({BUDGET:,} is the number the gate rejects at — a body between it and the "
-      f"{TARGET:,} B\n   ceiling is 'under the ceiling' and still RED. Both constants are read "
-      f"from\n   {_BUDGET_SOURCE.relative_to(_DEVRC_ROOT)}, "
-      f"which owns them.)")
-    if foreign is not None:
-        p(f"\n🔴 THESE SKILLS ARE IN {foreign}, NOT devrc — the budget above is devrc's and")
-        p( "   binds NOTHING here. Read that repo's own gate before treating a number below")
-        p( "   as a verdict: a ratchet with a per-push allowance (talos-infra's gate 11) can")
-        p( "   pass a body this tool calls RED, and block one it calls fine. The section")
-        p( "   weights, fat lines, reference integrity and corpus checks are repo-independent")
-        p( "   and stand as they are printed.")
+    if not foreign:
+        p(f"  ({BUDGET:,} is the number the gate rejects at — a body between it and the "
+          f"{TARGET:,} B\n   ceiling is 'under the ceiling' and still RED. Both constants are read "
+          f"from\n   {_BUDGET_SOURCE.relative_to(Path(__file__).resolve().parent.parent)}, "
+          f"which owns them.)")
+    else:
+        names = ", ".join(r.name for r in foreign)
+        p(f"\n🔴 {'SOME OF THESE' if mixed else 'THESE'} SKILLS ARE IN {names} — NOT a tree governed by")
+        p( "   the gate this budget comes from, so the number above binds nothing there. Read")
+        p( "   that repo's own gate before treating any verdict below as one: a ratchet with a")
+        p( "   per-push allowance (talos-infra's gate 11) can pass a body called RED here and")
+        p( "   block one called fine. Lines that WOULD assert this gate are marked [ungoverned].")
+        if mixed:
+            p("   ⚠️  This run MIXES governed and ungoverned trees, so the mark is per-line and")
+            p("      the header cannot be read as a verdict about the whole run. Audit them")
+            p("      separately if you want an unambiguous answer.")
 
     p("\n## sizes (worst first)")
     listed = audits if show_all else over
@@ -657,8 +682,13 @@ def render(audits, show_all, n_sections, n_detail, out=sys.stdout, foreign=None)
         if a["status"] == "OK":
             note = ""
         elif a["status"] == "NO HEADROOM":
-            note = (f"  {a['size'] - BUDGET:,} B over the enforced budget "
-                    f"(only {TARGET - a['size']:,} B of the {MIN_HEADROOM:,} B margin left)")
+            # 🔴 "over the enforced budget" is a VERDICT, not a label. On an
+            # ungoverned tree nothing enforces it, so the banner's disclaimer is
+            # contradicted three lines later unless the mark travels with it.
+            note = (f"  {a['size'] - BUDGET:,} B over the {'devrc ' if foreign else ''}"
+                    f"{'reference' if foreign else 'enforced'} budget "
+                    f"(only {TARGET - a['size']:,} B of the {MIN_HEADROOM:,} B margin left)"
+                    f"{'  [ungoverned]' if foreign else ''}")
         else:
             note = f"  {a['size'] / TARGET:.1f}x target"
         p(f"  {a['size']:>9,} B  {_mark(a['status'])} {a['status']:<13} {a['name']}{note}")
@@ -820,7 +850,9 @@ def render(audits, show_all, n_sections, n_detail, out=sys.stdout, foreign=None)
             need.append(f"{n_over} over the {TARGET:,} B target")
         if n_tight:
             need.append(f"{n_tight} inside the {TARGET:,} B ceiling but past the "
-                        f"{MIN_HEADROOM:,} B working margin — the gate REJECTS these")
+                        f"{MIN_HEADROOM:,} B working margin — "
+                        + ("devrc's gate would REJECT these; check this repo's own"
+                           if foreign else "the gate REJECTS these"))
         # Measured against the ENFORCED budget, not the ceiling: against the
         # ceiling a NO HEADROOM skill contributes a NEGATIVE number, which
         # silently cancelled out real overage elsewhere in the same run.
@@ -847,8 +879,15 @@ def main(argv=None):
     if not targets:
         sys.exit(f"no SKILL.md found under: {', '.join(paths)}\n"
                  "(pass a SKILL.md, a skills dir, or a repo root explicitly)")
+    # 🔴 `mixed` is computed from the PATHS, not from `foreign` being short: a run
+    # over one governed and one ungoverned tree must not print a header that reads
+    # as a verdict about either. Finding 3 of the #924 audit was exactly this
+    # shape reported the other way round.
+    foreign = _foreign_repos(paths)
+    governed = [x for x in paths
+                if (r := _repo_root(x)) is not None and (r / _GATE_MARKER).is_file()]
     render([audit_one(t) for t in targets], args.all, args.sections, args.detail,
-           foreign=_foreign_repo(paths))
+           foreign=foreign, mixed=bool(foreign and governed))
 
 
 if __name__ == "__main__":
