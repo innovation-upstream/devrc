@@ -281,7 +281,13 @@ def test_shell_tests_are_in_the_census(tmp_path):
     d = tmp_path / "t_one"
     write_pytest_suite(d, 3)
     script = tmp_path / "a_shell_test.sh"
-    script.write_text("#!/usr/bin/env bash\nexit 0\n")
+    # 🔴 DELIBERATELY NO SHEBANG. `test_no_test_writes_a_usr_bin_env_shebang_at_runtime`
+    # forbids a test writing its own `#!/usr/bin/env …` line, and the first draft
+    # of this fixture did exactly that and failed the gate. A shebang is not
+    # needed anyway: the runner invokes `bash "$SHELL_TEST"` explicitly, so the
+    # file is never executed on its own. Do not "fix" this by adding one back or
+    # by allowlisting it.
+    script.write_text("exit 0\n")
     proc = _run(_runner(tmp_path, [str(d)], shell_tests=[str(script)]))
     s = _summary(proc)
 
