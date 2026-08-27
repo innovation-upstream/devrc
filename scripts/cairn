@@ -721,6 +721,22 @@ def cmd_validate(args: argparse.Namespace) -> int:
     return worst
 
 
+def _top_level_timeout_was_given(argv: Sequence[str] | None = None) -> bool:
+    """Did `--timeout` appear BEFORE the subcommand name?
+
+    Read off argv because argparse cannot tell us: the subparser's default
+    overwrites the parent's value in the namespace, so by the time `cmd_who`
+    runs, an explicit parent `--timeout` and no flag at all are identical.
+    """
+    args = list(sys.argv[1:] if argv is None else argv)
+    for tok in args:
+        if tok == "who" or not tok.startswith("-"):
+            return False
+        if tok == "--timeout" or tok.startswith("--timeout="):
+            return True
+    return False
+
+
 def _who_default_timeout() -> int:
     """Read `who`'s own default rather than restating it in help text."""
     lib = str(Path(__file__).resolve().parent / "lib")
@@ -738,6 +754,15 @@ def cmd_who(args: argparse.Namespace) -> int:
         sys.path.insert(0, lib)
     import cairn_who  # noqa: PLC0415
 
+    # 🔴 SAY SO WHEN A FLAG IS DISCARDED. argparse copies the subparser's
+    # namespace over the parent's, so a top-level `cairn --timeout N who …` is
+    # silently dropped — and before `who` had its own flag, that spelling was
+    # the ONLY one that worked. Anyone with that habit would have got 60s while
+    # believing they asked for N. Naming a substitution rather than performing
+    # it quietly is this repo's standing rule.
+    if _top_level_timeout_was_given():
+        print("cairn who: ignoring the top-level --timeout (it applies to the "
+              "store commands). Use `cairn who --timeout N`.", file=sys.stderr)
     report = cairn_who.resolve(
         args.task,
         # `None` means "the subcommand's own default", never cairn's store bound.

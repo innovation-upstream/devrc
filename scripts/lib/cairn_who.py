@@ -230,6 +230,18 @@ class WhoReport:
 # --------------------------------------------------------------------------- #
 
 
+def _one_line(text: str) -> str:
+    """Collapse a diagnostic to one line.
+
+    🔴 APPLIED IN `_run`, NOT AT EACH CALL SITE. The first version collapsed
+    stderr inside `fetch_task` only, so `live_windows` still carried multi-line
+    text into `windows_reason`, which `render` prints inside an indented block —
+    the exact breakage the other site's comment described. One rule, two places
+    is how the second copy stays wrong.
+    """
+    return " ".join((text or "").split())
+
+
 def _run(cmd: Sequence[str], timeout: int) -> tuple[int, str, str]:
     """Run a tool, capturing both streams SEPARATELY.
 
@@ -238,13 +250,22 @@ def _run(cmd: Sequence[str], timeout: int) -> tuple[int, str, str]:
     a parse. Merging them here would throw that guarantee away at the one place
     that depends on it.
     """
+    # 🔴 `timeout=None` MEANS NO TIMEOUT AT ALL, so a None here does not
+    # "fall back to a default" — it removes the bound entirely and `cairn who`
+    # waits forever on a host that will never answer. Measured: a None timeout
+    # let a 2s sleep run to completion unbounded. The expiry message would also
+    # have read "within Nones", which is how nobody notices. Refuse it.
+    if not isinstance(timeout, int) or timeout <= 0:
+        raise WhoError(
+            f"refusing to run {cmd[0]} with timeout={timeout!r} — a missing or "
+            "non-positive bound is an UNBOUNDED wait, not a default")
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     except FileNotFoundError:
         raise WhoError(f"{cmd[0]} is not on PATH")
     except subprocess.TimeoutExpired:
         raise WhoError(f"{cmd[0]} did not answer within {timeout}s")
-    return p.returncode, p.stdout, p.stderr
+    return p.returncode, p.stdout, _one_line(p.stderr)
 
 
 def fetch_task(task: str, *, timeout: int = DEFAULT_TIMEOUT,
@@ -261,7 +282,7 @@ def fetch_task(task: str, *, timeout: int = DEFAULT_TIMEOUT,
     # One line. A tool's stderr is often several (a version-skew notice above
     # the real error), and interpolating it raw breaks the render's
     # indentation so the follow-up sentence reads as unrelated output.
-    detail = " ".join(err.split()) or "no diagnostic"
+    detail = err or "no diagnostic"
     # 🔴 CLASSIFY BY EXCEPTION TYPE, NOT BY THE MESSAGE TEXT. The first version
     # raised one error class and had the caller substring-match `"has no task"`
     # to decide between "no such task" and "could not ask" — while interpolating
@@ -368,7 +389,7 @@ def live_windows(*, timeout: int = DEFAULT_TIMEOUT, host: str | None = None,
     if host:
         cmd += ["--host", host]
     rc, out, err = runner(cmd, timeout)
-    detail = err.strip() or "no diagnostic"
+    detail = err or "no diagnostic"
     # 🔴 rc 4 ARRIVES WITH A FULL, WELL-FORMED JSON REPORT OF ZERO WINDOWS, so
     # the old `rc != 0 and not out.strip()` guard let it through as a measured
     # scan. `session-manager` documents 4 as "NO requested host could be

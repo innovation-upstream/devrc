@@ -22,6 +22,7 @@ read at run time and appear in no fixture — the `CLAUDE.md` PUBLIC-repo rule.
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -263,7 +264,7 @@ def test_session_manager_EXIT_UNAVAILABLE_is_not_read_as_a_measured_zero():
     through because the output was present and well-formed.
     """
     def runner(cmd, timeout):
-        return W.SM_EXIT_UNAVAILABLE, json.dumps(_scan([])), "all hosts down"
+        return 4, json.dumps(_scan([])), "all hosts down"   # literal: 4 is session-manager's
 
     with pytest.raises(W.WhoError) as exc:
         W.live_windows(runner=runner, script=Path(__file__))
@@ -275,7 +276,7 @@ def test_session_manager_EXIT_EMPTY_IS_a_measured_zero():
     answer is genuinely none — raising on it would make a quiet fleet look
     like an outage."""
     def runner(cmd, timeout):
-        return W.SM_EXIT_EMPTY, json.dumps(_scan([])), ""
+        return 3, json.dumps(_scan([])), ""   # literal: 3 is session-manager's
 
     idx, unmeasured = W.live_windows(runner=runner, script=Path(__file__))
     assert idx == {} and unmeasured == []
@@ -520,15 +521,25 @@ def test_a_transcript_lookup_failure_degrades_ONE_session_not_the_report():
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.parametrize("rc,expect", [
-    (4, "has no task"),
-    (3, "exited 3"),
-    (6, "exited 6"),
-    (7, "exited 7"),
-    (8, "exited 8"),
+@pytest.mark.parametrize("rc,expect,exc_type", [
+    (4, "has no task", "TaskNotFound"),
+    (2, "refused the id", "BadTaskId"),
+    (3, "exited 3", "ClawgateUnreachable"),
+    (6, "exited 6", "ClawgateUnreachable"),
+    (7, "exited 7", "ClawgateUnreachable"),
+    (8, "exited 8", "ClawgateUnreachable"),
 ])
-def test_fetch_task_reads_clawgatectl_EXIT_CODES_not_its_prose(rc, expect):
-    """The codes are documented; the message wording is not a contract."""
+def test_fetch_task_reads_clawgatectl_EXIT_CODES_not_its_prose(rc, expect, exc_type):
+    """The codes are documented; the message wording is not a contract.
+
+    🔴 THE TYPE COLUMN IS THE POINT, AND ITS ABSENCE LEFT THE HEADLINE PAIR
+    UNPINNED. Asserting only the message let rc 4 raise `ClawgateUnreachable`
+    with the whole suite green — so `cairn who <missing-id>` would exit 8 and
+    print "nothing was asked", which is precisely the confusion this module
+    exists to prevent. The other test covering that pair injects hand-thrown
+    exceptions and never calls `fetch_task`, so neither half built the combined
+    state: the seam nobody owns.
+    """
     # 🔴 STDOUT IS NON-EMPTY ON PURPOSE. The first version fed `out=""` for
     # every code, so the `not out.strip()` fallback produced an identical
     # message and deleting the whole exit-code table SURVIVED — the test named
@@ -539,6 +550,9 @@ def test_fetch_task_reads_clawgatectl_EXIT_CODES_not_its_prose(rc, expect):
     with pytest.raises(W.WhoError) as exc:
         W.fetch_task("42", runner=runner)
     assert expect in str(exc.value)
+    assert type(exc.value).__name__ == exc_type, (
+        f"rc {rc} raised {type(exc.value).__name__}, not {exc_type} — the STATE "
+        "a caller derives from it would be wrong")
 
 
 def test_fetch_task_refuses_an_empty_id_before_shelling_out():
@@ -691,3 +705,164 @@ def test_who_owns_its_own_timeout_default_and_accepts_the_flag_AFTER_the_subcomm
     assert "--timeout" in help_out, "who does not accept --timeout after the subcommand"
     assert f"default {W.DEFAULT_TIMEOUT}" in help_out, (
         f"the help advertises a default that is not who's own:\n{help_out}")
+
+
+def test_the_session_manager_exit_codes_match_SESSION_MANAGERS_OWN_definitions():
+    """🔴 SEAM GUARD. `session-manager` owns these numbers; this module copies them.
+
+    A copy that silently drifts is the whole hazard: if `SM_EXIT_UNAVAILABLE`
+    stopped being 4, real rc 4 would fall through the `rc not in (0,
+    SM_EXIT_EMPTY) and not out.strip()` branch — stdout is non-empty on rc 4 —
+    and the silent zero this PR fixed would be back with the suite green.
+    Read from the source of truth rather than restated here.
+    """
+    src = (REPO_ROOT / "scripts" / "session-manager").read_text(encoding="utf-8")
+    found = dict(re.findall(r"^EXIT_(EMPTY|UNAVAILABLE)\s*=\s*(\d+)", src, re.M))
+    assert set(found) == {"EMPTY", "UNAVAILABLE"}, (
+        f"could not read session-manager's exit codes — the guard checked "
+        f"NOTHING: {found}")
+    assert int(found["EMPTY"]) == W.SM_EXIT_EMPTY
+    assert int(found["UNAVAILABLE"]) == W.SM_EXIT_UNAVAILABLE
+
+
+def test_a_host_that_is_REACHABLE_but_UNMEASURED_is_still_unmeasured():
+    """🔴 The clause a mutant could delete for free, and it is NOT redundant.
+
+    `session-manager` calls list-panes and list-windows independently, so a host
+    can be `reachable: True` with `windows_measured: False` and STILL publish a
+    full `windows` list — every row carrying `claude_session_id: null`. Without
+    this clause the run reports `measured=True` while every session on that host
+    silently reads "none live", which is the exact defect the round before this
+    one fixed, arriving through the other door.
+    """
+    payload = {"hosts": {"workbench": {
+        "reachable": True, "windows_measured": False,
+        "windows": [_window(None), _window(None)],
+    }}}
+    idx, unmeasured = W._index_windows(payload)
+    assert idx == {}
+    assert unmeasured == ["workbench"], (
+        f"a reachable-but-unmeasured host was counted as measured: {unmeasured}")
+
+
+def test_a_host_with_a_WINDOWS_ERROR_is_unmeasured_even_if_reachable():
+    """The third arm of the same predicate."""
+    payload = {"hosts": {"workbench": {
+        "reachable": True, "windows_measured": True,
+        "windows_error": "tmux: server exited",
+        "windows": [_window(FAKE_UUID)],
+    }}}
+    idx, unmeasured = W._index_windows(payload)
+    assert idx == {} and unmeasured == ["workbench"]
+
+
+def test_EXIT_EMPTY_with_EMPTY_stdout_is_still_a_measured_zero():
+    """Separates `rc not in (0, SM_EXIT_EMPTY)` from a bare `rc != 0`.
+
+    The existing rc-3 case carries stdout, so `and not out.strip()`
+    short-circuits and the two spellings are indistinguishable there.
+    """
+    def runner(cmd, timeout):
+        return 3, "", ""
+
+    # rc 3 with no output: not an error, but nothing to parse either.
+    with pytest.raises(W.WhoError) as exc:
+        W.live_windows(runner=runner, script=Path(__file__))
+    assert "non-JSON" in str(exc.value), (
+        f"rc 3 with empty output should fail on the PARSE, naming what was "
+        f"wrong — not be reported as a bad exit code: {exc.value}")
+
+
+@pytest.mark.parametrize("bad", [None, 0, -1, "60"])
+def test_a_MISSING_or_NONPOSITIVE_timeout_is_refused_not_treated_as_a_default(bad):
+    """🔴 `timeout=None` means NO TIMEOUT — measured: an unbounded wait.
+
+    Dropping the CLI's `None -> DEFAULT_TIMEOUT` resolution survived the suite,
+    and under it `cairn who` waits forever on a host that never answers while
+    the expiry message would read "within Nones". So the refusal lives in
+    `_run`, where it cannot be bypassed by a caller that forgets.
+    """
+    with pytest.raises(W.WhoError) as exc:
+        W._run(["true"], bad)
+    assert "UNBOUNDED" in str(exc.value)
+
+
+def test_the_stderr_collapse_happens_at_the_REAL_boundary():
+    """One rule, one place — and the place is `_run`, so it is tested there.
+
+    🔴 THE FIRST VERSION OF THIS TEST INJECTED A FAKE RUNNER AND SO TESTED A
+    PATH PRODUCTION NEVER TAKES. `_run` is the only runner in production; a
+    caller-supplied one bypasses the normalisation by construction, so asserting
+    against a fake would have pinned nothing while looking like coverage. This
+    drives a real subprocess emitting real multi-line stderr.
+
+    It matters because `live_windows`' diagnostic lands in `windows_reason`,
+    which `render` prints inside an indented block — a raw newline there makes
+    the follow-up sentence read as unrelated output.
+    """
+    rc, out, err = W._run(
+        [sys.executable, "-c",
+         "import sys; sys.stderr.write('line one\\nline two\\n  line three\\n')"],
+        timeout=30)
+    assert "\n" not in err, f"multi-line stderr reached a caller: {err!r}"
+    assert err == "line one line two line three"
+
+
+def test_a_discarded_TOP_LEVEL_timeout_is_named_not_swallowed():
+    """argparse drops it silently, and it was the only spelling that used to work."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_loader(
+        "cairn_cli", loader=None, origin=str(REPO_ROOT / "scripts" / "cairn"))
+    mod = importlib.util.module_from_spec(spec)
+    mod.__file__ = str(REPO_ROOT / "scripts" / "cairn")
+    exec(compile((REPO_ROOT / "scripts" / "cairn").read_text(), "cairn", "exec"),
+         mod.__dict__)
+    f = mod._top_level_timeout_was_given
+    assert f(["--timeout", "5", "who", "42"]) is True
+    assert f(["--timeout=5", "who", "42"]) is True
+    assert f(["who", "42", "--timeout", "5"]) is False
+    assert f(["who", "42"]) is False
+
+
+def _load_cairn_cli():
+    """Exec `scripts/cairn` as a module — it has no .py extension."""
+    import importlib.util
+
+    path = REPO_ROOT / "scripts" / "cairn"
+    spec = importlib.util.spec_from_loader("cairn_cli", loader=None, origin=str(path))
+    mod = importlib.util.module_from_spec(spec)
+    mod.__file__ = str(path)
+    exec(compile(path.read_text(encoding="utf-8"), str(path), "exec"), mod.__dict__)
+    return mod
+
+
+def test_the_CLI_resolves_a_missing_timeout_to_WHOs_own_default(monkeypatch):
+    """🔴 Pins the `None -> DEFAULT_TIMEOUT` step in `cmd_who`.
+
+    Dropping it survived every earlier battery. `_run` now REFUSES a `None`
+    bound, so the consequence is a loud error rather than the unbounded wait it
+    used to be — but "fails visibly" is not "is correct", and the resolution
+    itself was still unpinned. Measured under the mutant: every run reported
+    `clawgate-unreachable — refusing to run clawgatectl with timeout=None`.
+    """
+    cli = _load_cairn_cli()
+    seen = {}
+
+    def fake_resolve(task, *, timeout, host, skip_windows):
+        seen["timeout"] = timeout
+        return W.WhoReport(task=task, state=W.WHO_NO_SESSIONS)
+
+    sys.modules.pop("cairn_who", None)
+    monkeypatch.setattr(W, "resolve", fake_resolve)
+    monkeypatch.setitem(sys.modules, "cairn_who", W)
+
+    args = cli.build_parser().parse_args(["who", "42"])
+    monkeypatch.setattr(sys, "argv", ["cairn", "who", "42"])
+    args.func(args)
+    assert seen["timeout"] == W.DEFAULT_TIMEOUT, (
+        f"the CLI passed {seen['timeout']!r} instead of who's own default")
+
+    args = cli.build_parser().parse_args(["who", "42", "--timeout", "7"])
+    args.func(args)
+    assert seen["timeout"] == 7, "an explicit --timeout was not honoured"
