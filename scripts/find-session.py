@@ -32,13 +32,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 from transcript_search import (  # noqa: E402
     DEFAULT_ROOT, SURFACE_ALL, SURFACE_TEXT, search,
 )
+from opencode_search import search_opencode  # noqa: E402
 
 # Reassigned by tests to point at a tmp corpus. Read at CALL time, never captured.
 ROOT = DEFAULT_ROOT
 
 
 def parse_args(argv=None):
-    p = argparse.ArgumentParser(add_help=True, description="Find past Claude Code sessions by keyword.")
+    p = argparse.ArgumentParser(add_help=True, description="Find past Claude Code and opencode sessions by keyword.")
     p.add_argument("terms", nargs="+", help="search terms (ANDed unless --any)")
     p.add_argument("--project", default="", help="only sessions whose cwd/project contains this substring")
     p.add_argument("--since", default="", help="only sessions on/after this date (YYYY-MM-DD)")
@@ -46,13 +47,17 @@ def parse_args(argv=None):
     p.add_argument("--any", action="store_true", help="match ANY term instead of all")
     p.add_argument("--all", action="store_true",
                    help="widen the search surface to tool inputs AND tool output (noisier)")
+    p.add_argument("--claude-only", action="store_true",
+                   help="search only Claude Code transcripts (skip opencode)")
+    p.add_argument("--opencode-only", action="store_true",
+                   help="search only opencode sessions (skip Claude Code)")
     p.add_argument("--json", action="store_true", help="emit JSON instead of human text")
     return p.parse_args(argv)
 
 
 def render(r):
     """The JSON document. Datetimes are dropped; every field here is a string or a number."""
-    return {
+    d = {
         "session_id": r["session_id"],
         "project": os.path.basename(r["cwd"]) or r["project_dir"],
         "cwd": r["cwd"],
@@ -65,6 +70,9 @@ def render(r):
         "snippets": r["snippets"],
         "path": r["path"],
     }
+    if r.get("source"):
+        d["source"] = r["source"]
+    return d
 
 
 def main(argv=None):
@@ -84,8 +92,27 @@ def main(argv=None):
     # It now selects the search surface, which is the only thing it ever meant.
     surface = SURFACE_ALL if a.all else SURFACE_TEXT
 
-    results = search(a.terms, root=ROOT, match_any=a.any, since=since, project=a.project,
-                     surface=surface, limit=None)
+    results = []
+
+    # Search Claude Code transcripts (default)
+    if not a.opencode_only:
+        cc_results = search(a.terms, root=ROOT, match_any=a.any, since=since,
+                            project=a.project, surface=surface, limit=None)
+        results.extend(cc_results)
+
+    # Search opencode sessions (default)
+    if not a.claude_only:
+        try:
+            oc_results = search_opencode(a.terms, match_any=a.any, since=since,
+                                         project=a.project, limit=None)
+            results.extend(oc_results)
+        except Exception as e:
+            print(f"WARN: opencode search failed: {e}", file=sys.stderr)
+
+    # Re-rank the merged set by the same criteria
+    results.sort(key=lambda r: (len(r["matched_terms"]), r["total_hits"], r["last_local"]),
+                 reverse=True)
+
     shown = results[: a.limit]
 
     if a.json:
@@ -101,12 +128,16 @@ def main(argv=None):
     for i, r in enumerate(shown, 1):
         date = (r["last"] or r["first"])[:16].replace("T", " ")
         project = os.path.basename(r["cwd"]) or r["project_dir"]
-        print(f"{i}. [{date}] {project}  ({r['branch'] or 'no-branch'})  ·  {r['total_hits']} hits")
+        source_tag = f"  [{r['source']}]" if r.get("source") else ""
+        print(f"{i}. [{date}] {project}  ({r['branch'] or 'no-branch'}){source_tag}  ·  {r['total_hits']} hits")
         if r["genesis"]:
             print(f"   opened: {r['genesis'][:120]!r}")
         for term, (role, snip) in r["snippets"].items():
             print(f"   {term} → ({role}) …{snip[:120]}…")
-        print(f"   resume: claude --resume {r['session_id']}")
+        if r.get("source") == "opencode":
+            print(f"   resume: opencode --session {r['session_id']}")
+        else:
+            print(f"   resume: claude --resume {r['session_id']}")
         print(f"   file:   {r['path']}")
         print()
     return 0
