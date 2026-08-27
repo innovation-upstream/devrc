@@ -188,6 +188,143 @@ instead, in `reference/css-hit-test.md`. Purpose-built non-`testid` data
 attributes DO survive: civitai added **`data-listing-cover-placeholder`** for
 exactly this, and it is a reliable hook.
 
+🔴 **This is a claim about the civitai.com HOST page only.** An App Block ships its
+own build and can keep its testids — see the App Block section below.
+
+---
+
+## 🔴 Driving an App Block — `/apps/run/<slug>` is a cross-origin iframe
+
+**Load this before the first op on an App Block.** The block is NOT part of the host
+page: `/apps/run/<slug>` embeds `https://<slug>.civit.ai/` as an OOPIF. A read or
+click without `--frame` addresses the civitai shell and finds nothing.
+
+### The recipe (measured 2026-08-26 on `/apps/run/sensei`)
+
+```bash
+BB=~/workspace/devrc/scripts/browser-bridge/browser
+$BB --instance work open https://civitai.com/apps/run/sensei     # lands HIDDEN
+$BB --instance work --tab "$TAB" wake --wait 12000               # tab level, once
+$BB --instance work --tab "$TAB" frames                          # -> the block's frameId
+# every subsequent read AND input op carries --frame:
+$BB --instance work --tab "$TAB" --frame "$FR" text
+```
+
+🔴 **The frameId is per-tab and not stable** — 437 in one run, 484 in the next, same
+URL and same page. Re-run `frames`; never carry one over.
+
+⚠ Two op-level refusals you WILL hit here; both are expected and both are already
+documented in `reference/spa-wake.md` — don't re-diagnose them:
+`open <url> --wake=MS` → `cdp_attach_refused:<no-scheme>` (open succeeded, exit 3;
+re-issue `wake` as its own call), and `wake --frame <id>` →
+`wake_with_frame_unsupported` (un-throttling is tab-level; wake the TAB, then
+re-issue the frame read).
+
+**Harvest selectors with a `js` enumeration, not `text --annotated`.** Annotated
+returned 60–69 element records (~600 log lines) for this one small app; a one-line
+enumeration returns every control with its testid:
+
+```bash
+$BB --instance work --tab "$TAB" --frame "$FR" js '(function(){var s="";document.querySelectorAll("button").forEach(function(b){s+=JSON.stringify({t:(b.innerText||"").trim().slice(0,30),testid:b.getAttribute("data-testid")})+"\n"});return s})()'
+```
+
+### 🔴 `data-testid` SURVIVES in an App Block's own build
+
+The strip is a property of **civitai.com's Next build**, not of the page you are
+looking at. An App Block is a separate Vite bundle, and its testids ship. Measured
+inside the sensei frame: `buzz-balance`, `chat-input`, `send-button`,
+`messages-container`, `session-list`, `session-item-<id>`, `new-session-button`,
+`open-research`/`close-research`, `research-search-input`, `research-search-button`,
+`insert-model-<modelId>`, `model-selector`, `temperature-slider`, `settings-button` —
+21 buttons enumerated, every one carrying a testid, `aria-label` null on all of them.
+
+So: **enumerate testids inside the frame before selector-hunting.** Assuming the
+strip here costs you the one-line selector and pushes you onto DOM-shape paths for
+nothing. (The host page's strip still stands — see `## Selectors on civitai`.)
+
+### 🔴 `js` runs in an ISOLATED world — you cannot observe the network
+
+The DOM is shared; `window` is not. Hooking `window.fetch` to prove a request fired
+**intercepts nothing** and returns an empty list that reads exactly like *"no request
+was made"*. That already produced one false negative on this page. There is no
+network layer available to you inside a block — **every observation must be a DOM
+observation**, and a verdict must be built from controls (below), not from an absence
+of intercepted traffic.
+
+### 🔴 Input inside `--frame` is SYNTHETIC — so it needs its own control
+
+Every `click`/`type`/`key` under `--frame` returns `"trusted": false` (top-frame
+input returns `trusted: true`). That is a permanent, plausible-sounding excuse for
+any null result — *"maybe the app just ignores untrusted input"* — and it will
+neutralise your verdict unless you pre-empt it.
+
+**Never conclude an App Block is broken without a positive control that uses the SAME
+synthetic path and costs nothing.** In sensei that is the Research panel: synthetic
+`click [data-testid="open-research"]` → synthetic `type 'anime'` → synthetic
+`key Enter` → 10 real models with live counts rendered within ~5 s
+(`Anime Lineart / Manga-like … LORA · 👍 21,394 · ↓ 205,853`). With that in hand, a
+null on another path is a fact about **that path**, not about your technique.
+
+Generalise: pick a **no-cost, in-app action that round-trips through the app's own
+token/network** and drive it with exactly the ops you will use on the target.
+
+### The composer assertion — read the value AND the button state before clicking
+
+React owns the composer. Assert both, in one `js`, immediately before the click:
+
+```bash
+$BB --instance work --tab "$TAB" --frame "$FR" js '(function(){var t=document.querySelector("[data-testid=\"chat-input\"]");var s=document.querySelector("[data-testid=\"send-button\"]");return JSON.stringify({value:t?t.value:null,sendDisabled:s?s.disabled:null})})()'
+```
+
+The `disabled` half is the load-bearing one: a click on a disabled control lands and
+does nothing, silently. Measured that the read is a **moving** signal and not a
+constant — `sendDisabled: true` on an empty composer, `false` after `type 'What is
+DreamShaper?'` (value read back verbatim), `true` again after the send. If it is
+still `true`, the input did not take: retry the `type`, do not click.
+
+### 🔴 Three controls that turn a null into a verdict
+
+A "nothing happened" is the observable that the most causes share. Before reporting
+one, run all three — each rules out a different mechanism, and together they cost
+under a minute:
+
+1. **Positive control on the same synthetic path** (above) — separates *"the app is
+   broken"* from *"my input never reached it"*.
+2. **Type-but-do-not-send** — proves the composer does not spontaneously clear, so a
+   clear *on send* is genuinely the handler firing rather than a re-render or
+   throttling artifact. Measured: `type 'persist test'` → read back `persist test`;
+   after `sleep 12`, still `{"value":"persist test","sendDisabled":false}`.
+3. **Whole-DOM string search for what you typed** — a bubble can render outside the
+   container you are watching. `js` →
+   `{hasHello:false, hasDreamShaper:false, bodyLen:9717}` is a much stronger claim
+   than an unchanged `messages-container`.
+
+Pin a **numeric** before/after alongside them (`[data-testid="buzz-balance"]` here —
+constant at `4,169,692 BUZZ` across the whole run) and sweep for error surfaces the
+container would not show:
+
+```bash
+$BB --instance work --tab "$TAB" --frame "$FR" js '(function(){var o=[];document.querySelectorAll("[role=alert], .error, [class*=error], [class*=toast], [class*=notification]").forEach(function(e){o.push((e.innerText||"").trim().slice(0,100))});return JSON.stringify({errors:o})})()'
+```
+
+### What this pattern rules out — and what it does not
+
+Worked example (sensei chat send, 2026-08-26 — a product state, expected to change;
+the method is the durable part): send handler observably fires (composer clears,
+`sendDisabled` returns to `true`), no user bubble, no reply, no error, balance
+unmoved, over ~70 s and two send routes (button and `key Enter`).
+
+- **Ruled out:** "synthetic input doesn't reach the app" (control passed on the same
+  ops) · "the button was dead" (`disabled:false` asserted immediately before, and the
+  composer cleared on click) · "no session was active" (`+ New` created a 4th session,
+  `sessionCount: 4`) · "the reply just hadn't arrived" (`messages-container`
+  `innerHTML.length` constant at 259 across ~70 s) · "it rendered somewhere else"
+  (whole-DOM search).
+- **NOT ruled out:** an `isTrusted`-gated branch on the specific handler under test.
+  Synthetic input reaching *one* path is not proof it reaches *another*. Say so in the
+  report rather than claiming a slam dunk — and note that such a gate would still be a
+  bug the app ships.
+
 ---
 
 ## Proposed helper (NOT implemented): `browser sessions`

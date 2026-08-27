@@ -56,27 +56,54 @@ team instance, each measured rather than assumed.
 
 ## Open investigations — live diagnosis state
 
-### The sanitized export leaks three scope names
-- **Symptom + exact repro:** `python3 -m scripts.present.generate --sanitize -o <path>` prints
-  two `🔴 SANITIZE DEGRADED` lines — *"hostname indistinguishable from a word"* and *"scope
-  matched in its exact form only"* — and the output retains real scope names.
-- **Observed (with values):** counts in sanitized vs full output —
-  `naida 2 vs 2` (**wholly unsanitized**), `vetr 3 vs 4`, `auditloop 3 vs 4`.
-  Positive control on the same run proves the mechanism works: `civitai 0 vs 5`,
-  `datapacket 0 vs 2`, `kubeclaw 0 vs 2`, `zacx.dev 0 vs 3`.
-- **Ruled out:** the sanitizer being broken generally — four identifier classes go to zero.
-  Ruled out an operator-identity leak: username, email and FQDNs all sanitize to 0.
-- **Leading hypothesis:** short, word-like scope names (`naida`, `vetr`, `auditloop`) fall below
-  the length ladder / exact-form rule in `scripts/present/sanitize.py`, which was deliberately
-  narrowed so that rewriting the English acronym `CLI` (a real scope) stopped corrupting prose.
-  The fix is likely a scope allowlist keyed on the store's own scope set rather than a length
-  heuristic.
-- **Why it matters beyond tidiness:** "the portable export serves the off-workbench reader" is
-  the argument that justified deferring LAN/nebula reach. If the export is not clean, that
-  argument is weaker than stated. With a **team instance** it stops being cosmetic entirely and
-  becomes an entitlement boundary.
-- **Next probe:** `sed -n '/def .*scope/,/^def /p' scripts/present/sanitize.py` and read the
-  length ladder; then check whether `measure`'s scope set can drive substitution directly.
+### ~~The sanitized export leaks three scope names~~ — DIAGNOSED AND FIXED
+🔴 **The leading hypothesis in the previous handoff was WRONG, and acting on it would not
+have fixed the leak.** It read: *short, word-like scope names fall below the length ladder;
+the fix is a scope allowlist keyed on the store's own scope set.* Measured 2026-08-26:
+
+- **They were not scopes at all.** The store's scope set is `civitai`, `civitai-*`,
+  `claude-pool`, `cli`, `datapacket-talos`, `devrc`, `flipt-state`, `homelab-infra`,
+  `homelab-talos`, `kubeclaw`, `storage-resolver`. `naida`, `vetr` and `auditloop` are absent,
+  so the scope class removed **zero** of the leaked occurrences — the one that *did* vanish in
+  each pair (`vetr.com`, `auditloop.zacx.dev`) went via the **host** rule.
+- **The length ladder was a red herring.** `auditloop` is 9 chars and would have been matched
+  aggressively *if it had been a scope*.
+- **The store's scope set was already the substitution source** (`sanitize.build()` →
+  `measurements.by_key("index.store")`). It is a curated index, not an inventory of names that
+  must not leak.
+- **The real class:** all three survivors sat in the `skills.inventory` row — human-authored
+  prose harvested out of `claude/skills/*/SKILL.md`. Substitution redacts identifier CLASSES it
+  has been shown; a harvested sentence has no class at all.
+
+🔴 **Widening the name list was tried and REJECTED ON MEASUREMENT, not on taste.** Sourcing
+names from the index store + the skill directories + all 149 directories under `~/workspace`
+still left `naida` **fully intact** — the directory is `naida-ai` and the leak was a bare
+`naida` in a sentence — while corrupting ordinary English: `"run the test suite from a scratch
+dir"` → `"run the scope-108 suite from a scope-104 dir"`. **A name list is fail-OPEN by
+construction**; it closes exactly the names something happened to be called after, and an
+entitlement boundary may not be.
+
+**The fix (this PR):** a measurer DECLARES what each column holds
+(`Measurement.column_kinds`): `""` ordinary, `"name"` a local identifier substituted *inside
+that cell only*, `"prose"` **withheld** in a sanitized build. Withholding is driven by the
+declaration, never by a name list, so it still happens on a host where every name source is
+empty. An unknown kind is withheld too — the fail-closed direction.
+
+- **Verified** — every client name to 0, with the mechanism proven live, not a bare zero:
+  `naida 2→0`, `vetr 4→0`, `auditloop 4→0`; controls `civitai 5→0`, `datapacket 2→0`,
+  `kubeclaw 2→0`, `zacx.dev 3→0`; page still renders **37 rows, 37 withheld cells, 77 name
+  stand-ins**; ordinary prose uncorrupted (`test` 23 in both builds).
+- **Residual, stated honestly:** devrc's *own* subsystem names still appear — in file paths
+  (`scripts/repo-cos/tests`), systemd unit names (`repo-cos.timer`) and `content.py`'s static
+  narrative, none of which pass through a declared column. That is correct: the page is *about*
+  devrc. It would become a leak if a script were ever named after a client.
+- 🔴 **Two `SANITIZE DEGRADED` lines still print, and both are honest.**
+  *"hostname indistinguishable from a word"* is the nodename; *"scope matched in its exact form
+  only"* is the 3-char scope `cli`. Both are deliberate declines, counted in the legend. They
+  are **not** the leak and were never related to it.
+- **Separately worth a decision (not fixed here):** `claude/skills/*/SKILL.md` is tracked in
+  this **public** repo, so those client names are already published in git. The sanitizer is now
+  correct; the repo-level exposure is a different question.
 
 ### Tekton silently did not fire for one push
 - **Symptom + exact repro:** pushed `4b9e692a` to a PR branch; both required checks sat
@@ -108,14 +135,28 @@ team instance, each measured rather than assumed.
   trade.
 
 ## Next steps (ranked)
-1. **Fix the sanitizer leak** — `scripts/present/sanitize.py`. Drive substitution from the
-   store's own scope set (which `measure` already resolves) instead of a length/word heuristic.
-   Verify with the control pair, never a bare zero. Repo: `devrc`. **Do this before the team
-   instance** — the heuristic *becomes* the entitlement boundary the moment someone who is not
-   Zach reads a page.
-2. **Build `cairn who <task>`** — the task→session→window→transcript resolver. Every hop exists;
-   only the join is missing (see the Gotchas block below for the exact chain). Repo: `devrc`.
-   This is the first capability that is *about* Cairn rather than inherited from devrc.
+1. ~~**Fix the sanitizer leak**~~ — **DONE**, see the diagnosis above. The proposed fix was
+   measured not to work and was replaced: declaration-driven **withholding** of harvested
+   prose, plus name substitution confined to declared identifier cells.
+2. ~~**Build `cairn who <task>`**~~ — **DONE**, PR #917 (squash `c39abe31`), shipped to both
+   hosts. Three things the chain description below did NOT carry, each measured and each
+   changing the design:
+   - 🔴 **A tmux window is TRANSIENT; a transcript is DURABLE, and collapsing them is the trap.**
+     The worked example below *no longer resolves* — #360's window is gone while its 6 MB
+     transcript sits where it was written. A window-keyed resolver answers "nobody" for almost
+     every task older than current uptime. So each session yields TWO independent findings.
+   - **The join key is not always a uuid** — 39 of 41 live windows carried uuids, 2 carried
+     `ses_…` tokens. A shape-validating join silently matches nothing and reports a clean
+     "no live window".
+   - **`session-manager --lean` omits `pane_id`/`window_id`/`codename`** — three of the four
+     things the command prints. Pinned by a test, since `--lean` is the obvious "optimisation".
+
+   Five states are kept distinct because they all print near-nothing: `resolved` ·
+   `no-sessions-recorded` (a UI-filed task genuinely has none — exit 0) ·
+   `sessions-recorded-but-none-located` · `task-not-found` (7) · `bad-task-id` (2) ·
+   `clawgate-unreachable` (8). The pair that matters is *"the answer is no"* vs *"there was no
+   answer"*. 🔴 **An unmeasured live half is never rendered as "no window"** — if any host goes
+   unmeasured the absence is UNMEASURED, and transcripts are still reported.
 3. **Convert the six remaining positional audit reads** —
    `scripts/tests/test_subsystem_store_api.py`. One PR covering all 11 sites, each shown red
    under a forced `_audit` delay. Repo: `devrc`. 🔴 **Do this AFTER #360 lands** — that card may
@@ -207,8 +248,28 @@ curl -s http://192.168.50.250:8900/ | grep -c 'Where the three touch'   # expect
 ssh zach@10.42.0.100 '(echo >/dev/tcp/192.168.50.250/8900) 2>/dev/null && echo OPEN || echo CLOSED'
 #   expect: CLOSED   (and 22/443 OPEN, proving the probe works)
 
-# the sanitizer leak, with its positive control
-python3 -m scripts.present.generate --sanitize -o /tmp/san.html   # prints 2 DEGRADED lines
-grep -oic naida /tmp/san.html      # expect 2  — leaked
-grep -oic civitai /tmp/san.html    # expect 0  — control: the mechanism works
+# the sanitizer, with BOTH controls — a bare zero cannot tell a working
+# sanitizer from one wired to nothing, so check the page still has content
+# 🔴 `grep -o | wc -l`, NEVER `grep -oc`. With GNU grep, `-c` counts matching
+# LINES and overrides `-o`, so the positive controls below return 1 instead of
+# 37/77 and the fix reads as failed. This host's `grep` is a ugrep WRAPPER where
+# `-oc` does count occurrences — which is exactly why the wrong form looked fine
+# when it was written. The piped form is right under both.
+python3 -m scripts.present.generate --sanitize -o /tmp/san.html   # 2 DEGRADED lines, both honest
+grep -o -i naida /tmp/san.html   | wc -l   # expect 0  — was 2 before the fix
+grep -o -i civitai /tmp/san.html | wc -l   # expect 0  — control: substitution works
+grep -o WITHHELD /tmp/san.html   | wc -l   # >0 — positive control: the page is NOT empty
+grep -o 'name-[0-9][0-9]' /tmp/san.html | wc -l   # >0 — identifiers renamed, not dropped
+grep -o -i ' test ' /tmp/san.html | wc -l  # equal in BOTH builds — prose NOT corrupted
+
+# cairn who — the task -> session -> window -> transcript join
+cairn who 360            # expect rc 0; each session shows BOTH a window line and a transcript line
+cairn who 99999999       # expect rc 7  — task-not-found
+cairn who not-a-number   # expect rc 2  — bad-task-id (clawgate ANSWERED with a 400)
+#   🔴 rc 7 and rc 8 are the pair that matters: "the answer is no" vs "there was no answer".
+#   A session whose window is gone still resolves via its transcript — that is the design,
+#   not a degraded result.
 ```
+🔴 **Do not pin the last four to a literal count here.** They move whenever a skill or an rc
+code is added, and a stale number in a doc reads as a failed fix. Compare the sanitized build
+against the full one from the same commit instead.

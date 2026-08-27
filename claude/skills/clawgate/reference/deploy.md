@@ -61,8 +61,25 @@ docker push harbor.homelab.lan/library/clawgate:$VER && docker push harbor.homel
 
 # 3. bump the pin, stage explicit paths, commit, rebase (clean tree → no autostash), push
 cd /home/zach/workspace/homelab-trunk
+# 🔴 BUMP BOTH. The version lives in TWO files and `version_pin_test.go` asserts
+# they are equal, so moving the pin alone turns `go test ./...` RED — which is
+# `tekton/clawgate-ci FAILED: go` on EVERY PR that touches containers/clawgate,
+# not just yours. It has shipped twice: #408 ("the deploy pin moved without it")
+# and again at 0.8.2, where the fix had to land as its own PR (#427, "trunk was
+# red for every PR"). The tell you will see FIRST is clawgatectl printing
+# `note: server <new>, clawgatectl built for <old>` on every command — if you
+# see that after a deploy, this step is what you missed.
 sed -i "s#clawgate:[0-9.]\+#clawgate:$VER#" clusters/workbench/apps/clawgate/deployment.yaml
-git add <your changed clawgate paths> clusters/workbench/apps/clawgate/deployment.yaml containers/clawgate/HANDOFF.md
+sed -i "s#^var buildVersion = \".*\"#var buildVersion = \"$VER\"#" containers/clawgate/cmd/clawgatectl/client.go
+# CONFIRM both moved before committing — a sed that matched nothing exits 0.
+grep -m1 -oE "clawgate:[0-9.]+" clusters/workbench/apps/clawgate/deployment.yaml
+grep -nE '^var buildVersion' containers/clawgate/cmd/clawgatectl/client.go
+# The guard that fails the whole fleet if these drift. ⚠ COUNT the result line —
+# a `-run` filter that matches nothing prints "ok ... [no tests to run]" and
+# exits 0, so a typo'd test name reads exactly like a pass.
+go test . -run TestDeployPinMatchesClientBuildVersion -v | grep -E '^(=== RUN|--- (PASS|FAIL)|ok|FAIL)'
+git add <your changed clawgate paths> clusters/workbench/apps/clawgate/deployment.yaml \
+        containers/clawgate/cmd/clawgatectl/client.go containers/clawgate/HANDOFF.md
 git commit -m "..." -m "Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 git fetch origin trunk && git rebase origin/trunk && git push origin HEAD:trunk
 

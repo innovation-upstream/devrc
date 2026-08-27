@@ -45,14 +45,19 @@ stamps `host` from `ACTIVITY_HOST`.
 ### The sources — MEASURED, not declared
 🔴 **Do not re-derive the expected-present set from prose** — run
 `python3 ~/workspace/devrc/scripts/collector/deadman.py`, which derives it from the table.
-Live pairs (measured 2026-08-03): **9 sources on the laptop, 8 on the workbench, 17 total.**
+Live pairs (measured 2026-08-27): **9 sources on the laptop, 9 on the workbench, 18 total.**
+⚠ This line read `8 on the workbench, 17 total` from 2026-08-03 until 2026-08-27, when
+`workbench/browser` began emitting (first row 21:46 on 08-26) and the roster changed under it.
+**That is the number aging, not the check** — `deadman.py` picked the new pair up with no edit
+anywhere, which is the whole point of deriving expected-present from the table. Re-run it
+rather than trusting this count.
 
 | source | what | laptop | workbench |
 |---|---|---|---|
 | `zsh` | preexec/precmd, interactive-only → excludes Claude's Bash tool | ✅ | ✅ |
 | `tmux` | focus hooks | ✅ | ✅ |
 | `keys` | X11 XRecord keylogger, **full content**. Carries `app`=WM_CLASS + `payload.workspace` | ✅ | ✅ **(the doc said laptop-only — wrong)** |
-| `browser` | Brave MV3 ext → loopback receiver :8787 | ✅ | ❌ **0 rows, correctly — the ext is laptop-only. This is the ONLY genuinely laptop-only source.** |
+| `browser` | Brave MV3 ext → loopback receiver :8787 | ✅ | ✅ **since 2026-08-26 21:46 — the doc said laptop-only; it is now on BOTH. There is no longer any laptop-only source.** |
 | `claude` | Claude Code transcript tailer, 5-min timer | ✅ | ✅ |
 | `i3` | i3ipc focus daemon | ✅ | ✅ **(the doc said laptop-only — wrong)** |
 | `opencode` | opencode plugin + tailers (`prompt`/`assistant-turn`/`tool-call`/`session-summary`) | ✅ | ✅ |
@@ -79,14 +84,30 @@ Per-source detail that matters when querying:
   commands only, so its silence was unbounded and it false-alarmed as DEAD whenever Zach
   simply hadn't browsed; do not "fix" a browser-bridge DEAD verdict by raising a budget.
 
-**Browser extension is NOT fully nix-managed.** Hand-loaded unpacked in Brave (the laptop's
-daily browser) from `~/.local/share/activity-browser-ext/` — a real-file copy, since
-Chromium dislikes loading a nix-store symlink dir. It persists across restarts, but a
-`service_worker.js`/content-script change needs: ship →
+**Browser extension is NOT fully nix-managed, and THE TWO HOSTS LOAD IT FROM DIFFERENT
+PATHS** — so the update procedure below is laptop-only. Read Brave's own
+`Preferences` → `extensions.settings[*].path` for the authoritative answer on a host;
+the dir merely existing proves nothing about which one Brave loaded.
+
+| host | loaded from | how it updates | measured 2026-08-27 |
+|---|---|---|---|
+| laptop | `~/.local/share/activity-browser-ext/` — a hand-made real-file copy | the `cp` dance below, BY HAND | manifest 1.4.0 |
+| workbench | `~/.config/activity-collector/browser-ext` — the home-manager-deployed dir itself | on `home-manager switch`, no `cp` | manifest 1.4.0 |
+
+The workbench arrangement is the better one and needs no fixing: that path is a **real
+directory** (`readlink -f` terminates at itself, not in `/nix/store`), so the "Chromium
+dislikes a nix-store symlink dir" reason for the laptop's copy does not apply to it.
+🔴 **But the two can silently reach different manifest versions** — a `switch` moves the
+workbench and leaves the laptop, and only the laptop's `cp` moves the laptop. They agree
+today; that is a measurement, not a guarantee. Compare both before blaming a behaviour
+difference on anything else.
+
+Laptop procedure — a `service_worker.js`/content-script change needs: ship →
 `cp -fL ~/.config/activity-collector/browser-ext/*.js ~/.local/share/activity-browser-ext/`
 → **reload the extension in `brave://extensions`** (+ reload the page — content scripts only
-inject post-reload). Manifest **v1.4.0**. When a file is DELETED upstream (e.g. the old
+inject post-reload). When a file is DELETED upstream (e.g. the old
 `active_time.js`), `rm` it from `~/.local/share/…` by hand — `cp` won't remove it.
+On the workbench a `switch` + an extension reload is the whole procedure.
 
 ## ⚠ Gotchas (each cost real time)
 - **Timezone:** `ts` is the **UTC instant** (tz-less DateTime64). Dashboard buckets
@@ -144,7 +165,14 @@ inject post-reload). Manifest **v1.4.0**. When a file is DELETED upstream (e.g. 
 
 ## status
 ```bash
-# services (run per host; laptop via ssh zach@10.42.0.100). i3-source+keylog laptop-only.
+# services (run per host; laptop via ssh zach@10.42.0.100). All five are LOADED on BOTH
+# hosts — measured 2026-08-27. Four read `active`; `claude-activity-source` reads
+# `inactive` on both because it is a timer-driven oneshot, which is correct, not a fault.
+# 🔴 This line read "i3-source+keylog laptop-only" until 2026-08-27. That was the SAME
+# retracted claim the source table above already corrects (`keys`/`i3` are ✅ on both —
+# the workbench runs a real X/i3 session). It survived every earlier retraction because
+# it lives in a COMMAND COMMENT, and a prose sweep does not read those. Believing it
+# means not checking half the fleet: run this on both hosts, always.
 systemctl --user is-active activity-collector keylog browser-activity-receiver claude-activity-source i3-source
 journalctl --user -u activity-collector -n 20 --no-pager        # ship failures / drops
 ls -la ~/.local/state/activity/spool/                            # backlog = unsent segments (offline buffer)
@@ -161,7 +189,11 @@ curl -s --user "activity_reader:$RPW" --data-binary "SELECT dateDiff('second', m
 ```bash
 # invariants + cross-source reconciliation (always); --replay adds the controlled-replay assertions
 CLICKHOUSE_URL=$CH CLICKHOUSE_USER=activity_reader CLICKHOUSE_PASSWORD=$RPW python3 ~/workspace/devrc/scripts/validation/validate.py
-# keystroke-replay assertions REQUIRE the laptop's X session — run there, not on the headless workbench
+# keystroke-replay assertions need a live X session. Historically this said "run there, not on
+# the headless workbench" — 🔴 the WORKBENCH IS NOT HEADLESS (it runs a real X/i3 session; keylog
+# and i3-source are active on it). That reason was false. Whether the replay actually PASSES on
+# the workbench is UNMEASURED — nobody has run it there. Until someone does, the laptop stays the
+# known-good host; do not read this as "the workbench cannot run it".
 ```
 Current invariant set: `active_ms_capped` + `per_host_hour_active_cap` are **retired**
 (extension `active_ms` no longer emitted), replaced by **`derived_attention_consistent`**
@@ -207,9 +239,19 @@ Creds come from `~/.config/activity-collector/env` (the collector's own file) un
 - **The budget is MEASURED per (host, source)**: `clamp(2 × p99 active-gap, 2h, 48h)`.
   Measured 2026-08-03 — `keys`/`i3`/`tmux` land on the 2h floor; `workbench/opencode` 11.5h;
   `workbench/tool` 31.1h. Nothing is hand-tuned and nothing is hand-listed.
-- **Expected-present is measured too**: a pair is judged only if it cleared a baseline in the
-  14-day window, so `workbench/browser` (0 rows, correctly absent) can never alarm, while a
-  source that *was* emitting and stopped keeps its baseline and does.
+- **Expected-present is measured too**: a pair is judged only if it cleared
+  `MIN_BASELINE_BUCKETS` (20) in the 14-day window; a source that legitimately does not exist
+  on a host is simply absent from the evaluated set and can never alarm, while a source that
+  *was* emitting and stopped keeps its baseline and does.
+  🔴 **`workbench/browser` used to be this bullet's worked example of "correctly absent" — and
+  on 2026-08-26 21:46 it started emitting, which is why the example is gone.** It cleared the
+  baseline on its own (25 buckets) and joined the evaluated set with **no edit to any file**;
+  that is the mechanism working, not breaking. Two consequences worth knowing:
+  it is now a pair that CAN read DEAD (budget `2.0h` of ACTIVE time at first measurement), and
+  its budget is sized off ~1 day of history, so the p99 gap is small and will grow — expect the
+  budget to widen on its own as normal silences accumulate. **Do not hand-tune it**; nothing in
+  this checker is hand-listed, and an exception table is exactly what it exists to avoid.
+  ⚠ `browser` is NOT a presence source, so none of this changes any host's ACTIVE buckets.
 - 🔴 **"Cannot tell" ≠ "healthy".** `not-configured` / `unreachable` / `query-failed` /
   `no-data` / `misconfigured` / `presence-stalled` are each their own state; `ok` is
   unreachable unless rows came back AND at least one pair was actually measured

@@ -15,7 +15,7 @@ Version-controlled, global git hooks. Two features, in order on every push:
 | `pre-push` | Global dispatcher. Chains to any repo-local pre-push first (never clobbers it), runs the **blocking test gate**, then fires the audit **backgrounded** so the push is never delayed. |
 | `tests-on-push.sh` | SYNCHRONOUS worker: self-detects devrc, filters on changed files, runs `scripts/run-tests.sh --set all` in the repo's **own devShell** (`nix develop`, so a venv owned by the caller's cwd cannot shadow the interpreter), and (mode `on`) **blocks on a test failure (exit 1) or a repo-content guard (exit 2)**. An ENVIRONMENT precondition (exit 3) → warn + allow. No-op for non-devrc repos. |
 | `audit-on-push.sh` | The backgrounded worker: fixture-tree + branch + synthetic-ref + diff-size + flag gates, then headless `claude -p "/audit-pr current"`, then routes 🔴/🟡 to clawgate. |
-| `install.sh` | Sets `git config --global core.hooksPath` to this dir. `--uninstall` reverts. |
+| `install.sh` | Points git's **global** `core.hooksPath` at this dir, picking a config file it can actually write. `--uninstall` reverts. |
 | `audit-on-push.env.example` | Config template → copy to `~/.claude/audit-on-push.env`. |
 
 ## Test gate (`tests-on-push.sh`)
@@ -96,6 +96,43 @@ Behaviour, all failing in the **safe direction**:
 ```
 
 This sets the **global** `core.hooksPath` and seeds `~/.claude/audit-on-push.env`.
+
+> 🔴 **Invoke it by ABSOLUTE path, as written above — not `githooks/install.sh`.**
+> With `CDPATH` exported (it is, on the workbench host) bash `cd` echoes the
+> directory it resolves, so a *relative* invocation used to make the installer's
+> `$DIR` a two-line string, which landed in `~/.gitconfig` as config and broke
+> **every** git command in **every** repo on the box with `fatal: bad config
+> line 4` — including the `--uninstall` that would have repaired it. The
+> installer now hardens `$DIR` and refuses a multi-line value outright, so a
+> relative invocation is safe; the absolute form remains the documented one.
+
+> **On a home-manager host** (#905) `~/.config/git/config` is a symlink into the
+> read-only nix store, so a `--global` write there is impossible — the installer
+> used to die `could not lock config file … Read-only file system` (rc=255) and
+> the hooks could not be installed at all. It now detects that and writes to
+> `~/.gitconfig` instead, printing a `NOTE:` when it does. git reads **both**
+> files and `~/.gitconfig` takes precedence, so home-manager's settings stay in
+> force — asserted per key for `rebase.autoStash`, `merge.autoStash`,
+> `core.sshCommand`, `diff.algorithm` and `user.name`, the safety-relevant ones.
+> (`git config --list --show-origin` shows the XDG file still answering; the test
+> pins the five named keys, not literally every key.) The installer then
+> re-reads `core.hooksPath` and **fails loudly if the value did not actually take
+> effect** — writing a setting and installing one are separate claims.
+>
+> ⚠ One real side effect: once `~/.gitconfig` exists it is the only file
+> `git config --global` *reads*, so `git config --global --list` will show less
+> than you expect. Effective config is unchanged — `git config --list` still
+> shows everything. `--uninstall` deletes a `~/.gitconfig` **that the installer
+> itself created** (it stamps one on creation) and leaves any other alone, which
+> puts that back.
+>
+> Three things in this repo do read `git config --global`: `scripts/run-tests.sh`,
+> `scripts/testlib/nogit_plugin.py` and `scripts/present/measure.py`. None breaks
+> today. ⚠ Latent: if `core.hooksPath` ever lands in the XDG file *and* a
+> `~/.gitconfig` later appears, `measure.py` would report "no blocking pre-push
+> gate installed" while one is armed.
+
+
 Two independent knobs, seeded from the example:
 
 - **Audit** (`AUDIT_ON_PUSH=shadow`) — logs what it *would* send, sends nothing;

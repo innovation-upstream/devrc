@@ -29,10 +29,16 @@ attention is the i3∩domain intersection below.
   ~86% of i3 attention. (This bullet said "i3 + scroll exist only for `host=laptop`" until
   2026-08-26 — the same claim `SKILL.md` already retracts in its source table. Do not
   re-derive it.)
-- **`browser` — nav AND scroll — genuinely IS laptop-only**: the extension is hand-loaded
-  in the laptop's Brave. Same window: 867 `browser` rows, **zero** on the workbench; all
-  7,571 scroll-bearing nav rows laptop. So an i3∩browser query must pin **one host on both
-  sides** — what makes it correct is the host-consistency, not the `'laptop'` literal.
+- 🔴 **`browser` is on BOTH hosts as of 2026-08-26 21:46 — it is no longer laptop-only.**
+  This bullet read "genuinely IS laptop-only" until 2026-08-27. The measurement behind it was
+  real and is kept: over the 7d window ending 2026-08-26, 867 `browser` rows with **zero** on
+  the workbench, all 7,571 scroll-bearing nav rows laptop. It went out of date hours later,
+  when the extension was loaded in the workbench's Brave too (from
+  `~/.config/activity-collector/browser-ext`, a different path than the laptop's — see
+  `SKILL.md`). **Scroll-bearing rows may still be laptop-heavy; that is not re-measured here.**
+  An i3∩browser query must still pin **one host on both sides** — host-consistency is what
+  makes it correct, never the `'laptop'` literal — and that now matters far more, because a
+  mismatch no longer returns nothing (see the intersect query below).
 - `app` is empty on **every** `workspace-focus` row, on both hosts, by construction
   (0 of 1,100 laptop / 0 of 4,179 workbench populated) — so filter `kind='window-focus'`
   before grouping by `app`; `app != ''` alone reads as a data-quality filter but is really
@@ -78,9 +84,15 @@ Intersect i3 "Brave-focused" intervals with the active-tab domain timeline.
 🔴 **The `host='laptop'` below is load-bearing on BOTH sides and must stay matched** — this
 is the one query here that should NOT be widened. The `CROSS JOIN` has no host predicate,
 so dropping (or mismatching) either filter intersects **workbench i3 dwell with laptop
-browser navigation** and invents attention that never happened. Today only `laptop`
-returns rows at all, because `browser` is laptop-only; if the extension ever lands on a
-second host, change both filters together to the same `<h>`.
+browser navigation** and invents attention that never happened.
+
+🔴 **THE SAFETY NET UNDER THIS IS GONE — as of 2026-08-26 21:46 both hosts emit `browser`.**
+This note used to end "today only `laptop` returns rows at all, because `browser` is
+laptop-only; if the extension ever lands on a second host, change both filters together."
+That condition has now occurred. Until it did, a mismatched pair failed LOUDLY-ish by
+returning nothing, because workbench `browser` had zero rows. It now returns a **plausible,
+populated, and wrong** result instead. Change both filters together to the same `<h>`, and
+treat any output from this query as suspect unless you have read both host predicates.
 
 ```sql
 WITH brave AS (SELECT bs, be FROM (SELECT toUnixTimestamp64Milli(ts) bs, app,
