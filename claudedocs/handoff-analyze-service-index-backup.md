@@ -37,8 +37,25 @@ and close the one failure mode in it that is unrecoverable (no off-machine backu
   FILE it compared and refuses to call it diagnosed when an env var chose the path.
 - `#851` — **the `--decrypt-check` PREFLIGHT + `check-escrow.sh`** (`a58a261d`,
   2026-08-26). Refuses before any `bw` call when the interpreter cannot finish.
+- `#896` — **F5/F6: a run that cross-checked NOTHING now exits `40`** (`add34a14`,
+  2026-08-27). ⚠ **Merged and on the LAPTOP only — see "Deployment is SPLIT" below.**
 
 **Closed WITHOUT merging:** `#689`, `#676` — superseded, kept as the record.
+
+### 🔴 Deployment is SPLIT — `#896` is NOT on the workbench
+
+The units `ExecStart` straight from `%h/workspace/devrc/scripts/...` (`nix/home.nix:3719`),
+so for these scripts **git currency IS deployment** — there is no store copy to switch to.
+
+- **laptop** — shipped, `add34a14`, 499 managed artifacts resolve / 0 dangling, and
+  **verified by symptom**: `--print-plan` renders `40=NOTHING-CROSS-CHECKED`, zero `FAILS`.
+- **workbench** — 🔴 **still running the PRE-`#896` code.** Measured 2026-08-27:
+  `grep -c "NOTHING_CROSS_CHECKED: 40"` on its working tree returns **0**. Its checkout was
+  on another session's branch (`feat/rig-control-toggle-and-timers`), and `ship.sh` would
+  have fast-forwarded it and *landed the checkout back on main*, taking that branch out from
+  under live work — so it was deliberately **not** shipped. F5 is still live on that host.
+  **Closing condition:** that session's branch lands or is abandoned and the checkout is back
+  on `main`; then `scripts/ship.sh` and confirm the `grep -c` above returns **1**.
 
 🔴 **Both shipped and VERIFIED BY SYMPTOM on each host, not by the deploy reporting
 success.** `ship.sh` → converged + verified, 2 hosts compared, both at `a58a261d`. Then, on
@@ -77,19 +94,65 @@ remotes on all 10 scopes. The artifacts verified were the ones the **TIMER** pro
 run. The commit count and the store's file count both advance hourly; the *byte-identity*
 and *zero-remotes* claims are the durable ones.
 
-### 🔴 OUTSTANDING — measured 2026-08-26, nothing blocked on an agent
+### ✅ THE DR GAPS ARE CLOSED — measured 2026-08-27
 
-**DR gaps (need a human, and one is worse than earlier revisions of this doc said):**
-1. 🔴 **The laptop cannot reach the vault at all.** RE-MEASURED: `bw status` →
-   `{"serverUrl":null,"lastSync":null,"status":"unauthenticated"}`. Earlier revisions said
-   "not logged in"; `serverUrl` is **null**, so it is not even pointed at the server.
-   Recovery from the laptop needs `bw config server <url>` **and** `bw login` (email +
-   master password + 2FA). If the workbench is the machine you lose, the laptop is the
-   machine you are standing at.
-2. **The web-vault paste path is still untested.** Everything verified went through `bw`
-   **on the machine that already holds the key**. The real disaster path — open the note in
-   the web vault on another device, paste into a file — can silently mangle whitespace and
-   nothing here exercises it. Paste to a scratch file, confirm 189 bytes / 3 lines.
+Both gaps that stood open across several sessions are now **measured shut**, from the host
+that matters: if the workbench is the machine you lose, the laptop is the one you are
+standing at, and it has now been proven to recover the key unaided.
+
+1. ✅ **The laptop can reach AND authenticate to the vault.**
+
+   | | `serverUrl` | `lastSync` | `status` |
+   |---|---|---|---|
+   | before | `null` | `null` | `unauthenticated` |
+   | after | set | `2026-08-27T18:12:02Z` | `locked` |
+
+   🔴 **`lastSync` is the load-bearing field, not `status`.** It was `null`; a real timestamp
+   proves the CLI actually reached the server and pulled the vault, rather than merely
+   storing a credential. `locked` ≠ `unauthenticated` — authenticated, just needs unlocking.
+
+2. ✅ **The escrow is RETRIEVABLE AND CORRECT from the laptop** — the disaster rehearsal, run
+   for real 2026-08-27:
+   ```
+   ✅ ESCROW PROVEN FROM THIS HOST
+      pubkey sha 288c4d24cfdb5aa1 == expected
+   ```
+   Fetched the Secure Note over the network on the DR host, wrote it to a `mktemp` file
+   `shred`ed on every exit path, and compared the **public** half. This subsumes the old
+   "web-vault paste" item for everything except a browser's own copy-paste mangling — the
+   *retrieval and correctness* claim is proven; only the clipboard leg is unexercised, and it
+   is checked the same way (paste to a file, run the same `age-keygen -y | sha256sum`).
+
+   🔴 **The run printed `fetched: 189 bytes, 3 lines` AND said in the same breath that this is
+   NOT the check** — deliberately, because that number is what the old, vacuous instruction
+   told an operator to trust.
+
+   ⚠ **The rehearsal script lives at `~/bw-escrow-proof.sh` ON THE LAPTOP ONLY — it is in no
+   commit and no backup**, alongside `~/bw-login-teeup.sh`. Both put the quoting in a file on
+   purpose: hand-typed one-liners for this cost three master-password entries on 2026-08-25/26,
+   every failure a paste/quoting fault rather than a mistake about the task.
+   **Follow-up: upstream the proof script into `scripts/analyze-service-index/` so it is
+   managed, shipped to both hosts, and re-runnable** — see ranked follow-up 13.
+3. 🟢 **Residual: the BROWSER clipboard leg alone.** Item 2 proved retrieval and correctness
+   over the network from the DR host, so what is left is only a browser's own copy-paste
+   mangling. Check it identically when convenient: open the note in the web vault, paste
+   into `/tmp/paste.key`, run the hash below, `shred -u` it.
+   🔴 **Do NOT check it with "189 bytes / 3 lines" — that check is VACUOUS, measured
+   2026-08-27.** A freshly generated, completely unrelated age key is *also* exactly 189
+   bytes / 3 lines (control run: pubkey sha `a3f415beca5861cf` vs the real key's
+   `288c4d24cfdb5aa1`). This is this doc's own "189 vs 189 is not corroboration" lesson,
+   which was applied to the escrow byte-comparison and NOT to these paste instructions —
+   one rule, two places, wrong at one. Use the PUBLIC half instead:
+   ```sh
+   nix-shell -p age --run 'age-keygen -y /tmp/paste.key' | sha256sum | cut -c1-16
+   # MUST print 288c4d24cfdb5aa1 — prints the public half only, no secret material
+   shred -u /tmp/paste.key
+   ```
+   It catches both mangling modes: altered key material moves the sha, and broken framing
+   makes `age-keygen` fail outright. ⚠ Pipe it **exactly** as written — `printf '%s'` strips
+   the trailing newline and yields `be0206821107ea94`, a FALSE mismatch on a good key
+   (measured). And `e3b0c442…` is sha256 of **empty input**: the command did not run, which
+   is not the same as a failed check.
 3. **`server NOT PINNED`** on the successful run — `--expect-server` / `ASIB_ESCROW_SERVER`
    unset, so it trusted whatever `bw config server` said. The session cross-check DID run
    and matched (weaker, but real). Set `ASIB_ESCROW_SERVER` to close it.
@@ -191,18 +254,26 @@ Kept because each cost a round, and none is a logic bug.
    `host: nixos`, so a hand-run of the *backup* would write a phantom second host prefix.
    Deliberately out of scope for #737 — changing labelling affects artifacts already in
    the bucket and retention pruning.
-2. **F5** — a wrong/absent `--store` exits **0** with everything "self-consistency only".
-   Reproduced live: `--store <empty dir>` → rc=0, "10 self-consistency only". **Exit code
-   is all a timer reads, so this MUST land before (3)** — shipping the timer first is
-   exactly the harm F5 describes.
-3. **Nothing runs the verifier on a schedule.** A timer is the obvious follow-up; it needs
+2. ✅ **F5 — CLOSED by `#896` (`add34a14`, 2026-08-27).** A wrong/absent `--store` used to
+   exit **0** with everything "self-consistency only" — reproduced live at **13** scopes,
+   not the 10 an earlier revision recorded. It now exits **`40 NOTHING-CROSS-CHECKED`**, its
+   own code, distinct from the generic `1`. **F6 closed in the same PR.** ⚠ Live on the
+   laptop only — see "Deployment is SPLIT".
+3. **Nothing runs the verifier on a schedule.** **UNBLOCKED** — (2) has landed. It needs
    network *and* the age key, and the backup unit's containment took several measured
-   `systemd-run --user` rounds. Not attempted rather than claimed. **Blocked on (2).**
+   `systemd-run --user` rounds. Not attempted rather than claimed.
+   🔴 **When it lands, wire `40` as an alert DISTINCT from `1`, or the whole point of
+   `#896` is discarded at the consumer.** `1` means "a check FAILED — your backups may be
+   broken"; `40` means "the artifacts restored fine, nothing was compared". Collapsing them
+   back into "non-zero = bad" re-creates exactly the conflation `#896` spent five audit
+   rounds separating. A timer that pages on `1` and merely records `40` is the shape.
 4. **F4** — a structurally truncated artifact (1 of 40 commits) verifies green;
    `--max-lag-days` reads the key stamp, never the content.
 5. **F9** — no SIGTERM handling around the plaintext window (Python runs no `finally` on
    SIGTERM). Matters precisely because (2) is a timer.
-6. **F6** — "no local store" is printed for a store that exists but has no scope repos.
+6. ✅ **F6 — CLOSED by `#896`.** "no local store" was three facts in one; `why_no_live_scope`
+   now returns one of **five** distinct `WHY_*` kinds with its own sentence, and the refusal
+   names the mechanisms each is *consistent with* while declaring the list **NOT closed**.
 7. **F7** — `MinioDownloader` inherits `put()`/`remove()` from the producer, unrefused.
 8. **F8** — `kubectl port-forward` leaks if `MinioArchive.__enter__` itself times out
    (pre-existing; `backup.py:646` is identical).
@@ -220,6 +291,90 @@ Kept because each cost a round, and none is a logic bug.
     its numbers — never quote these.
 12. Second A/B against a doc-poor repo (tests whether "selection, not knowledge"
     generalises past n=1).
+13. 🟡 **Upstream the DR rehearsal.** `~/bw-escrow-proof.sh` exists on the **laptop only**,
+    in no commit and no backup — the exact "stranded work" shape, and `drift-check.sh`
+    cannot see it because it lives in `$HOME`, not the repo. It proved a real property on
+    2026-08-27 and deserves to be an artifact: move it to
+    `scripts/analyze-service-index/escrow-retrieval-proof.sh`, reference it from
+    `SECRETS.md`, and it ships to both hosts like everything else.
+    Worth keeping when it moves: the four distinct verdicts (proven / did-not-parse /
+    empty-input / mismatch), the explicit `bw unlock --raw` emptiness check, the
+    `shred`-on-every-path handling, and the "189/3 is NOT the check" line.
+    *Closes when:* the script is in `scripts/`, deployed to both hosts, and the
+    `~/`-only copies are gone.
+
+## `#896` filed, NOT fixed — each with its closing condition
+
+Recorded so nobody re-derives them, and so none becomes an object nobody can close.
+
+1. 🔴 **A mode-`000` scope directory exits `1` with a TRACEBACK instead of `40`** —
+   `live_scope_path` (`restore-verify.py:974`) raises `PermissionError` *before*
+   `why_no_live_scope` runs. Pre-existing, and it is on the disaster path.
+   *Closes when:* the probe is permission-safe and a mode-`000` scope reaches the `40`
+   message with its own observation, pinned by a test that `chmod`s a fixture scope.
+2. 🟢 **`--store` pointing at a regular FILE** reports "the store directory DOES NOT EXIST".
+   *Closes when:* `store_state` distinguishes "exists but is not a directory", pinned like
+   the other five states.
+3. 🟢 **A scope path that is a regular file** classifies as `scope-not-present`.
+   **Deliberately left** — literally true, and inoculated by the "AT LEAST … NOT closed"
+   wording. Recorded only so it is not re-derived as a bug.
+4. 🔴 **`test_git_repo_isolation.py` is a LOAD-SENSITIVE flake** — its `_GIT_ENV` omits
+   `hermetic_git.MAINTENANCE_OFF` (five other modules here merge it), so a background
+   `git gc --auto` outlives `_mkrepo`'s commit and the co-tenant probe sees it. It went red
+   once in the sandbox tier under load 13–18 while a gate run and a 32-mutant sweep
+   saturated the box; controls at both `origin/main` and the branch alone were rc=0.
+   ⚠ **It can bite Tekton, which runs on shared hardware.** Not fixed here: unrelated to the
+   diff, and in a file another session may own.
+   *Closes when:* that merge lands and the test passes in the sandbox tier while a second
+   gate run loads the box.
+5. 🟢 **The AST bypass guard is narrower than its message** — `return _why(a) if c else
+   _why(b)` (an `IfExp`) and a nested helper's `return` are rejected though legitimate. All
+   failures are **fail-closed** and self-diagnosing (`ast.unparse` prints the offender), so
+   the direction is safe. *Closes when:* the message gains "…or does not do so as a direct
+   `_why(...)` call", or the guard accepts the wider shape.
+
+## `#896` — what five audit rounds actually cost, and why the ladder is not theatre
+
+The PR shipped after **five rounds plus a clean sixth**. Every round found something real,
+and **four found a defect the PREVIOUS round's fix had introduced**:
+
+- **R1→R2**: the first fix made a wrong `--store` exit `1` — the same code as "your backups
+  are broken". Correct direction, wrong instrument: `escrow-verify.py` sits in the same
+  directory with **nine** distinct codes precisely so a timer can act on the number.
+- **R2→R3**: the round-2 commit message asserted *"🔴 THE #851 CONTROL RAN"*. It ran against
+  ONE surface; the `--print-plan` prose added **in the same commit** carried the same claim
+  unpinned, and an auditor flipped it to *"40 IS a verdict against the backups"* with **342
+  tests green**. 🔴 **The #851 trap, reproduced inside the fix written to close it.** A pin
+  that covers one instance of a class reads as covering the class.
+- **R3→R4**: the "both mechanisms" list was a CLOSED disjunction excluding two reachable
+  states (symlinked scope, `.git`-less dir), and its tail then asserted *"the live side is
+  gone"* — false for both. Round 1's vaguer *"or fix it"* had been **correct**; the fix made
+  it worse. A remedy also pointed at `--print-plan` "the store path this run used", which
+  prints the **default** — manufacturing the diagnosis the message refuses to assert.
+- **R4→R5**: the ordering guard added in R4 was **vacuous on the dimension its own docstring
+  named** — reverting to sentence-sorting survived all 349 tests, because that fixture's two
+  scopes sorted identically under both keys. The code comment even recorded the coincidence.
+- **R5→R6**: the "no branch bypasses `_why`" assert was **SPELLED, not structural** (it
+  matched lines starting `return `), and two lint-clean bypassing spellings survived a green
+  165-test suite. There is **no Python linter anywhere in the gate** — verified zero hits for
+  ruff/flake8/pylint/pycodestyle across `gate.sh`, `run-tests.sh` and `flake.nix` — so
+  nothing else refused them either.
+
+🔴 **Three instrument failures were caught by controls, not by reasoning**, and each would
+have produced a confident wrong number:
+- a mutation sweep reported **29/31** where both survivors were HARNESS defects — one mutant
+  aimed at `len(by_scope)`, already narrowed by `--scope`, so it was blind for the very
+  reason the finding it tested described;
+- a mutant whose anchor was a **guessed line wrap** matched 0 times and scored SURVIVED
+  silently. **Assert every replacement count == 1**, and dry-run anchors before the sweep;
+- `nix build --rebuild`, used to attribute a red test, needs a valid prior output and
+  **errored before testing anything** — rc=1 twice, which reads as "confirms pre-existing".
+  Reading the log rather than the exit code caught it.
+
+**The stop rule that matters:** a *verdict* of "safe to merge" is not the signal — the
+FINDINGS are. Round 4's audit said safe-to-merge **and** reported a real vacuous guard in the
+same breath. The ladder ended on the first round that found nothing, and no round was run to
+confirm it.
 
 ## The A/B result — what the index is actually worth
 Controlled A/B on `datapacket-talos/storage-resolver`, pre-registered 10-question answer
@@ -377,10 +532,14 @@ guess on either exits 19 or 20 long before the decrypt, so reaching rc=0 proves 
 unset, so the run trusted whatever `bw config server` said. The session cross-check DID
 run and matched, which is a weaker but real check. Pin the server to close it.
 
-⚠ **Still untested, and unchanged:** the disaster path that actually matters — reading the
-note from the **web vault on another device** and pasting it into a file. That path can
-mangle whitespace and no run here exercises it. And the laptop's `bw` is still not logged
-in (`rc=13` when measured), so recovering from that host needs a fresh `bw login` first.
+✅ **BOTH of the caveats this paragraph used to carry are now CLOSED — measured 2026-08-27;
+see "THE DR GAPS ARE CLOSED" above.** The laptop is authenticated (`lastSync` non-null, so it
+genuinely reached the server), and the escrow was **retrieved and verified from that host** —
+`pubkey sha 288c4d24cfdb5aa1 == expected`. Only a browser's own clipboard mangling remains
+unexercised, and it is checked the same way.
+🔴 This paragraph read "still untested, and unchanged" for three revisions. Re-measure before
+quoting any "still open" line in this doc; that phrasing survives long after it stops
+being true.
 
 **How it was run — use this, not a hand-typed one-liner:**
 
@@ -495,16 +654,18 @@ prompt. `SECRETS.md` carries the full exit-code table with per-code "do not rota
 **Measured on BOTH hosts 2026-08-24, and they differ — correctly.** Workbench → `rc=12
 VAULT-LOCKED`; laptop → **`rc=13 VAULT-UNAUTH`**. Two points, two distinct codes, each
 accurate: this is the first *live* exercise of the unauthenticated branch, which had only
-ever been synthetic. 🔴 **The DR fact hiding in that second reading: the laptop's `bw` is
-not logged in at all.** If the workbench is the machine you lose, recovering the escrow from
-the laptop needs a fresh `bw login` there first — email plus master password plus 2FA, not
-just the master password. Worth doing before you need it.
+ever been synthetic. The DR fact hiding in that second reading was that the laptop's `bw` was
+not logged in at all — ✅ **since FIXED and PROVEN, 2026-08-27**: it is authenticated and the
+escrow was retrieved and verified from that host. The `rc=13` reading above is kept as the
+historical measurement that *found* the gap, not as current state.
 
 **And the retrieval path that actually matters in a disaster.** The escrow was verified
 through the `bw` CLI **on this machine**. If this machine is gone you would read that note
 from the **web vault on another device** and paste it into a file — a path that can silently
 mangle whitespace. Worth doing once at leisure: open the note in the web vault, paste it
-into a scratch file, confirm 189 bytes / 3 lines.
+into a scratch file, then verify it with the **public-key** check in "OUTSTANDING" item 2 —
+`age-keygen -y <file> | sha256sum` must begin `288c4d24cfdb5aa1`. 🔴 **Not a byte count:
+every age identity file is 189 bytes / 3 lines, so an unrelated key passes that.**
 
 ⚠ `bw` is **not installed** — run it as `nix-shell -p bitwarden-cli jq --run '…'`, and add
 `'python3.withPackages(p:[p.minio])'` for `--decrypt-check`, which reaches MinIO through a
