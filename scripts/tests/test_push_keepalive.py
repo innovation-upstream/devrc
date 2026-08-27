@@ -73,8 +73,14 @@ WHAT IS REGRESSION COVERAGE HERE AND WHAT IS NOT (RULES.md asks for the label):
   * `test_a_brace_inside_a_string_value_cannot_move_the_settings_boundary` is
     REGRESSION coverage for a measured FALSE GREEN — a `core.sshCommand`
     declared OUTSIDE `settings` was accepted because a brace inside a string
-    value steered the boundary — and it pins BOTH halves of the fix (the depth
-    counter and the locator), each of which was independently unguarded.
+    value steered the boundary. It pins the locator and BOTH halves of the
+    depth fix (the scan loop and the emit loop), each of which was
+    independently unguarded, and each of which can produce a WRONG NON-EMPTY
+    value rather than merely an empty one.
+    🔴 An earlier version of this bullet claimed the scan half "fails safe".
+    That was FALSE and was recorded here as measured fact — derived from a
+    fixture with nothing after the closing brace, which is the one shape that
+    cannot expose it. See the comment on the `outside.nix` fixture.
 
 (The list above has one entry per test. Count it rather than trusting a total
 maintained in parallel with the thing it counts — this parenthetical said FIVE
@@ -172,8 +178,16 @@ def _blank_span(chunk: str) -> str:
     SAME offsets. The previous spelling computed the blank arithmetically and
     floored at zero, so it ran LONGER than the original on five EOF-degenerate
     shapes (a lone double-quote at EOF; a string ending in a backslash; a bare,
-    a tripled, and a one-char-short indented-string opener). Three of those then
-    raised IndexError downstream.
+    a tripled, and a one-char-short indented-string opener).
+
+    MEASURED SCOPE, because an inherited figure was wider than the measurement:
+    with the degenerate tail placed inside a `settings = {` block, exactly ONE
+    of those five (the bare double-quote) went on to raise IndexError in
+    `_top_level_of_settings`; the other four returned cleanly. An earlier note
+    here said "three of those". How many reach IndexError depends on WHERE the
+    degenerate tail sits, so the count is not a property of the shapes alone —
+    which is why the guard below asserts LENGTH EQUALITY (a property of the
+    parser) rather than counting exceptions.
 
     Building the blank FROM the chunk makes the lengths equal by construction,
     rather than by arithmetic that has to be got right — and
@@ -540,8 +554,23 @@ def test_the_two_parser_passes_stay_offset_aligned(tmp_path):
 
     # Truncated / degenerate inputs. Invalid nix, but the parser must not
     # produce misaligned output for them — it previously ran 1-2 chars long.
+    # 🔴 EACH FIXTURE IS WRAPPED IN A REAL `settings = {` BLOCK, because without
+    # one the `_top_level_of_settings(f)` call below is INERT — the locator
+    # misses, the function returns "" before reaching any offset arithmetic, and
+    # the offset arithmetic is never exercised. The previous version asserted it
+    # drove the consumer over each shape; it did not.
+    # 🔴 WHAT THE WRAPPER ACTUALLY BUYS, measured rather than assumed: under the
+    # pre-delta arithmetic blanking the length assertion below fires FIRST
+    # (`bare quote at EOF: passes diverge (37 vs 38)`), so the IndexError is
+    # PREVENTED, not observed. Driving `_top_level_of_settings` directly with
+    # that blanking, exactly ONE of these shapes raises IndexError and the other
+    # four return cleanly. The consumer call is kept because it is what makes
+    # the non-diverging shapes exercise the arithmetic at all — not because it
+    # is expected to raise.
+    tail = '{\n  settings = {\n    x = 1;\n    '
     for label, text in (
-            ("lone quote at EOF", 'a = "unterminated'),
+            ("bare quote at EOF", 'a = "'),
+            ("unterminated quoted string", 'a = "unterminated'),
             ("backslash at EOF", 'a = "x\\'),
             ("bare '' at EOF", "a = ''"),
             ("tripled quote at EOF", "a = " + chr(39) * 3),
@@ -549,7 +578,7 @@ def test_the_two_parser_passes_stay_offset_aligned(tmp_path):
             ("unclosed block comment", "a = 1; /* never closed"),
     ):
         f = tmp_path / "degenerate.nix"
-        f.write_text(text, encoding="utf-8")
+        f.write_text(tail + text, encoding="utf-8")
         keep = _nix_code(f, keep_strings=True)
         blank = _nix_code(f, keep_strings=False)
         assert len(keep) == len(blank), (
@@ -608,11 +637,24 @@ def test_a_brace_inside_a_string_value_cannot_move_the_settings_boundary(tmp_pat
     Reverting either half of that fix left the whole file green, so the fix was
     invisible to its own suite. Both directions are pinned here.
     """
+    # 🔴 THE SIBLING ATTRSET IS THE WHOLE POINT OF THIS FIXTURE, and its absence
+    # is how I previously concluded — and recorded as measured fact — that
+    # reverting the scan half "fails safe". It does not. Without a sibling the
+    # over-extended span just runs to negative depth and everything is blanked,
+    # so the extractor returns "" and the mutant looks harmless. WITH a sibling,
+    # that next `{` brings depth back to 0 and every following entry is emitted
+    # as top-level:
+    #     narrow scan-half revert, no sibling  -> ''            (looks safe)
+    #     narrow scan-half revert, sibling     -> 'ssh -o …'    (FALSE GREEN)
+    # One measurement on a dimension that changes the answer, written up as a
+    # general claim. Do not remove `other = { … }` from this fixture.
     outside = tmp_path / "outside.nix"
     outside.write_text(
         '{\n'
         '  settings = { alias.brace = "log --format=OPEN{"; };\n'
-        '  core.sshCommand = "ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=6";\n'
+        '  other = {\n'
+        '    core.sshCommand = "ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=6";\n'
+        '  };\n'
         '}\n', encoding="utf-8")
     assert _ssh_command(outside) == "", (
         "a core.sshCommand declared OUTSIDE the settings attrset was accepted. "
