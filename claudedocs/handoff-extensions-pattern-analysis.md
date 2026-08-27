@@ -33,11 +33,12 @@ working-tree copy was authoritative — and then adversarially re-audited. Each
 correction is marked `CORRECTED` inline with what the source actually says. The
 architecture was substantially right; the errors were in the details a reader acts on.
 
-The corrections are marked inline rather than counted here **on purpose**. The first
-version of this correction said "six", and the audit then found a seventh and an
-eighth (`rm -df`, and a false claim about `rm -rf` following symlinks) — a total
-maintained in parallel with the thing it counts will drift, so count the `CORRECTED`
-markers rather than trusting a number in this paragraph.
+The corrections are marked inline rather than counted here **on purpose**, and this
+paragraph is itself worked evidence for why. The first version said "six"; an audit
+then found a further wrong claim, so it became seven; the sentence recording *that*
+miscounted which ones were new. Three attempts, three wrong totals, in the paragraph
+whose subject is miscounting. **Count the `CORRECTED` markers in this document; do not
+trust any total written in prose, including one written by whoever edits this next.**
 
 Every line number below is against `nix/home.nix` at `origin/main` as of 2026-08-27
 (3,873 lines). Line numbers rot — treat them as a starting offset for a grep, not an
@@ -61,8 +62,8 @@ git-tracked source → cp -rL → temp dir ($$-suffixed) → move into place →
 - `cp -rL` resolves `/nix/store` symlinks to real files
 - PID-suffixed temp names (`.new.$$` / `.old.$$`) plus a sweep of leftover temp dirs,
   which spares a dir whose owning PID is still **live** so a concurrent activation's
-  in-flight temp survives — but see the third divergence below: the two extensions
-  treat their OWN pid oppositely, on purpose
+  in-flight temp survives — but the two extensions treat their OWN pid oppositely;
+  see the sweep section below, and the table, for every way they diverge
 - `chmod -R u+rwX` before removing a store-derived tree, because a `cp -rL` from the
   read-only store yields a 0555 tree that `rm -rf` cannot unlink — which under
   activation's `set -eu` would abort the whole switch
@@ -101,14 +102,25 @@ connection to a running service worker; an absent directory mid-switch is a torn
 handoff. discord-embed-ext serves nothing during a switch, so a brief absence is
 acceptable and the simpler code is the deliberate choice.
 
-🔴 **Why the sweep differs — the third divergence, and the one most likely to be
-"unified" by mistake.** browser-bridge's sweep skips `$$` (line 620). discord's
-carries a 🔴 comment forbidding exactly that (806-812):
+🔴 **Why the sweep differs — and it is documented on ONE side only.**
+browser-bridge's sweep skips `$$` (line 620). discord's carries a 🔴 comment
+forbidding exactly that (806-812):
 
 > 🔴 DO NOT skip our OWN pid here. A `.old.$$`/`.new.$$` can be the wreckage of an
 > EARLIER interrupted run that happened to get this pid, and sparing it means
 > `mv -T "$deeDst" "$deeStash"` later fails with `Directory not empty` -> `false` ->
 > the whole switch aborts.
+
+⚠ **Only discord's side is justified in the source.** browser-bridge's `[ "$bbPid" =
+"$$" ] && continue` at 620 carries no comment explaining it; the commentary at 601-612
+covers sweeping dead PIDs and enumerates two accepted limits (a reused pid, a
+non-numeric suffix), neither of which is the own-pid skip. And discord's stated
+reason — *"We create ours further down, after this sweep, so there is nothing of ours
+to protect at this point"* — applies verbatim to browser-bridge, whose `bbTmp` is
+likewise created at 629, after the sweep at 613-625. **So do not record this asymmetry
+as two deliberate choices.** One side is deliberate and explained; the other is
+unexplained and is the same shape as the possible gap flagged under Tier 1 above.
+Someone should establish which it is before any shared helper is extracted.
 
 Both blocks also sweep an EMPTY pid suffix on purpose, because `[ -d "/proc/" ]` is
 TRUE and such a dir would otherwise be spared forever (616-617, 802-803).
@@ -224,11 +236,23 @@ Brave tab
   764-768) and for `claude/skills/` in CLAUDE.md. `git add` before switching.
 - 🔴 **`rm -f` vs `rm -rf` at line 714 — and the original doc got the REASON wrong.**
   It said *"`rm -rf` on a symlink follows and deletes the target — must use `rm -f` for
-  symlink removal."* **That is false.** Tested 2026-08-27 on GNU coreutils 9.11:
-  `rm -rf <symlink-to-dir>` removes the **link** and leaves the target directory and
-  its contents intact. `rm` does not follow symlinks for deletion, with or without
-  `-r`. The claim appears nowhere in `home.nix` — it is the `chmod -R` hazard below,
-  misapplied to `rm`.
+  symlink removal."* **As stated that is false, but the true rule has a sharp edge —
+  read both halves.** Tested 2026-08-27, GNU coreutils 9.11:
+  - `rm -rf <symlink-to-dir>` — **no trailing slash** — removes the **link**. Target
+    directory and contents intact. This is the case the source's call sites are in, and
+    it is what makes the original claim wrong.
+  - 🔴 `rm -rf <symlink-to-dir>/` — **with a trailing slash** — DOES follow the link.
+    Measured: rc=0, the link survives, and the target directory is **emptied**
+    (a 2-file tree went to 0). Silent.
+
+  So `rm` does not follow a symlink *operand*, but a trailing slash makes the operand a
+  *directory reference* rather than the link, and then it does. 🔴 **Do not read the
+  first bullet as licence to drop a `[ ! -L ]` guard from around an `rm` in a new
+  deploy block** — a single trailing slash on a `$dst` that happens to be symlinked at
+  a repo checkout empties the checkout, silently, with a success exit code. No site in
+  `home.nix` uses a trailing slash today; that is not a property anyone is enforcing.
+  Neither half of this appears anywhere in `home.nix` — the original claim was the
+  `chmod -R` hazard below, misapplied to `rm`.
   The source's actual reason (705-713) is a **TOCTOU**: the `elif` at 700 tested the
   path, so by the time line 714 runs a concurrent activation may have installed a
   **directory** there. `rm -rf` would delete it silently with rc=0 — *"measured, 5/5"*
@@ -252,16 +276,18 @@ Brave tab
   There is no third extension today, so the trigger has **not** fired — and note that
   the two copies have already diverged in behaviour. 🔴 **The table above lists the
   divergences; count them there, do not trust a number in this sentence.** At least the
-  swap and the own-pid sweep policy differ, each deliberately and each with a source
-  comment saying why, so an extraction that unifies them reintroduces a hazard the
-  source explicitly closed. Read every row before extracting anything.
+  swap and the own-pid sweep policy differ. The swap difference is deliberate and
+  explained on both sides; the own-pid difference is explained on discord's side only
+  (see above), so unifying them may reintroduce a hazard the source explicitly closed —
+  or may be fixing an oversight. Establish which before extracting, and read every row
+  of the table first.
 - The **clawgate** extension is a different model entirely — it lives in
   `homelab-talos`, is deployed via worktree, and is not managed by nix.
 
 ## How to verify
 
 The 2026-08-26 session claimed "no verification needed — analysis only". That framing
-is what let six wrong claims stand for a day: an analysis doc makes checkable claims,
+is what let its wrong claims stand for a day: an analysis doc makes checkable claims,
 and "read the source files at the paths cited" is not a check anyone ran.
 
 Re-verify with these, cheapest first:
@@ -273,10 +299,13 @@ ls $R/scripts/browser-bridge/reference/*.md | wc -l        # 12
 grep -n -- '--exchange' $R/nix/home.nix                    # browser-bridge only
 grep -n 'mkOutOfStoreSymlink' $R/nix/home.nix              # tier-3 census
 
-# the rm-on-a-symlink claim, which the ORIGINAL doc got backwards — run it, don't
-# reason about it. Expect: link gone, target dir and its contents intact.
-T=$(mktemp -d); mkdir "$T/real"; : > "$T/real/f"; ln -s "$T/real" "$T/link"
-rm -rf "$T/link"; ls -d "$T/real" "$T/real/f"; rm -rf "$T"
+# the rm-on-a-symlink rule — run it, don't reason about it. BOTH cases, because the
+# trailing slash is the whole hazard and only one of them is safe.
+T=$(mktemp -d); mkdir -p "$T/a/real" "$T/b/real"; : > "$T/a/real/f"; : > "$T/b/real/f"
+ln -s "$T/a/real" "$T/a/link"; ln -s "$T/b/real" "$T/b/link"
+rm -rf "$T/a/link"    # no slash  → link gone, target + f INTACT
+rm -rf "$T/b/link/"   # slash     → link SURVIVES, target EMPTIED (f destroyed, rc=0)
+find "$T" | sort; rm -rf "$T"
 ```
 
 🔴 Nothing here was verified by running a `home-manager switch`. Every claim above is
