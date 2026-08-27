@@ -302,13 +302,25 @@ recorded as SURVIVED off an 11-passed run.
                                                 lesson was pinned WHOLE
 
   added after the eighth audit -- the first two are the CHECKLIST, unpinned for
-  eight rounds while every round shaved words out of it to stay under budget:
+  eight rounds while every round FROM THE FIFTH ON shaved words out of it to
+  stay under budget (measured: 4 of the 8 pre-fix commits touched the block):
   S1   "rollback" shaved out of the Gaps item  1 failed  <- the actual regression
   S2   the whole 9-item checklist replaced
        with "whatever seems off" ............. 1 failed
   S3   stderr-capture rule INVERTED ("fold it
        into the sum so nothing escapes") ..... 1 failed
   S4   reworded-rule regression shape deleted   1 failed
+
+  added after the ninth audit -- two pins that certified PRESENCE without
+  certifying the instruction around them:
+  N1   delta-bullet HEAD inverted to "do NOT
+       hunt", pinned phrase byte-identical ... 1 failed
+  N2   the other regression shapes deleted,
+       phrase intact ......................... 1 failed
+  P1   worktree duty shifted back to the
+       auditee (round 8's regression, exactly)  1 failed
+  P2   environment-brief lead gutted ......... 1 failed
+  P3   zsh word-split warning deleted ........ 1 failed
 
   the round-1 set, re-run against current strings:
   X3   gate command -> `echo 0` ............... 1 failed
@@ -558,8 +570,9 @@ SKILL_GATE_NO_PATHSPEC = (
     "`FooTest.java` and `*.cy.ts` (measured)."
 )
 
-# The other two operator instructions this rule ships. Both survived a mutant
-# that deleted them outright before these pins existed.
+# The operator instructions this rule ships -- count them below rather than
+# trusting a number here. Every one was added after a mutant deleted or inverted
+# it with the suite green.
 # 🔴 THE CHECKLIST ITSELF. Nine numbered items, pinned as one whole string --
 # this is the operational core of the skill and it was UNPINNED through eight
 # rounds. Measured: replacing the entire block with "**Audit for:** whatever
@@ -594,10 +607,36 @@ SKILL_STDERR_CAPTURE = (
     "Keep stderr on the terminal — folding it into the sum with `2>&1` makes "
     "the one loud failure invisible."
 )
-# The regression shape this PR itself produced twice, added to the re-auditor's
-# checklist and unpinned until now.
+# The regression shape this PR itself produced twice. 🔴 Pinned as the WHOLE
+# bullet, not the phrase: a mid-sentence pin certifies the phrase is PRESENT,
+# not that the instruction around it still tells the re-auditor to hunt.
+# Measured with only the phrase pinned -- inverting the bullet head to "do NOT
+# spend the round hunting regressions the fix round itself introduced", and
+# deleting the other two regression shapes, were both GREEN with the phrase
+# byte-identical. Same lesson as EVIDENCE_LESSON_BC, one file over.
 SKILL_REWORD_REGRESSION = (
-    "**the rule reworded wider on one axis and narrower on another**"
+    "- hunt for **regressions the fix round itself introduced** — the guard "
+    "that's too strict, the branch that's unreachable, the narrowed check that "
+    "now rejects a legitimate case, **the rule reworded wider on one axis and "
+    "narrower on another**;"
+)
+# 🔴 THE ENVIRONMENT BRIEF, pinned whole. It is payload -- what the operator is
+# told to put in front of the auditor -- and it was reworded in FOUR of this
+# PR's nine commits, every time under byte pressure. Measured unpinned: gutting
+# its lead to "do not bother briefing the auditor", deleting the zsh word-split
+# warning, and re-applying the exact worktree-duty regression round 8 diagnosed
+# (shifting "verify your worktree clean YOURSELF" back to "leave your worktree
+# clean", i.e. from the operator to the auditee) were ALL green.
+SKILL_ENVIRONMENT_BRIEF = (
+    "**Brief the auditor on the environment, or it will report false findings** "
+    "— a fresh worktree is not a working checkout, and an auditor hitting this "
+    "cold blames the PR. Whichever apply: **submodules are unpopulated** in a "
+    "new worktree (one made 4 test files \"fail to collect\"); **monorepo "
+    "`node_modules`** may need linking per package, not just at the root; "
+    "**whether the base branch is already red** and *at which file*; and that "
+    "**zsh does not word-split unquoted parameters**, so `eslint $FILES` checks "
+    "**zero** files and prints a confident PASS. Have it mutate only in a `cp "
+    "-a` copy, and verify your worktree clean yourself at the end."
 )
 SKILL_LEDGER = (
     "**Carry the ledger in every round's summary**: `round N · payload lines "
@@ -994,8 +1033,8 @@ def test_the_gate_pins_its_MECHANISM_not_only_its_decision():
     )
 
 
-def test_the_two_operator_instructions_the_gate_depends_on_are_pinned():
-    """The ledger and the finding labels, each of which survived deletion.
+def test_the_operator_instructions_the_gate_depends_on_are_pinned():
+    """The instructions a reader ACTS on, each of which survived deletion.
 
     Neither is decorative. The ledger's X IS the number the gate reads -- it
     carries the per-round count into the summary a human actually sees, which is
@@ -1016,6 +1055,9 @@ def test_the_two_operator_instructions_the_gate_depends_on_are_pinned():
     )
     _assert_pinned_once(
         SKILL_MD, SKILL_REWORD_REGRESSION, "the reworded-rule regression shape"
+    )
+    _assert_pinned_once(
+        SKILL_MD, SKILL_ENVIRONMENT_BRIEF, "the environment brief"
     )
 
 
